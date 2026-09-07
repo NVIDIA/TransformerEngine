@@ -68,11 +68,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   const float scale = (scale_ptr != nullptr) ? *scale_ptr : 1;
 
   extern __shared__ char dynamic_shmem[];
-  uintptr_t base_shmem_ptr = reinterpret_cast<uintptr_t>(dynamic_shmem);
   // Manually align dynamic SHMEM per TMA requirements using padding
   // __align__(128) Does not guarantee the pointer to be aligned!
-  uintptr_t dshmem = (base_shmem_ptr + TMA_SHMEM_ALIGNMENT - 1) &
-                     ~(static_cast<uintptr_t>(TMA_SHMEM_ALIGNMENT - 1));
+  char *dshmem = align_up(dynamic_shmem, TMA_SHMEM_ALIGNMENT);
 
   constexpr size_t buff_elems = SHMEM_DIM_Y * SHMEM_DIM_X;
   constexpr size_t buff_elems_total = BUFFERS_NUM * buff_elems;
@@ -167,10 +165,15 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
       float act_elt = static_cast<float>(in_act_sh_curr[shmem_idx]);
       float gate_elt = static_cast<float>(in_gate_sh_curr[shmem_idx]);
-      bool dgate_elt = true;  // gating is ideally an identity function
+      float dgate_elt = 1.0f;  // gating is ideally an identity function
       if constexpr (std::is_same<ParamOP, ClampedSwiGLUParam>::value) {
-        dgate_elt = gate_elt <= p.limit && gate_elt >= -p.limit;
+        if (gate_elt > p.limit || gate_elt < -p.limit) {
+          dgate_elt = 0.f;
+        }
         gate_elt = min(max(-p.limit, gate_elt), p.limit) + p.glu_linear_offset;
+      } else if constexpr (std::is_same<ParamOP, SiTUGLUParam>::value) {
+        dgate_elt = dsitu_up<float, float>(gate_elt, p);
+        gate_elt = situ_up<float, float>(gate_elt, p);
       }
 
       if constexpr (IS_BWD) {
@@ -188,6 +191,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           } else {
             dact_x = 0.0f;
           }
+        } else if constexpr (std::is_same<ParamOP, SiTUGLUParam>::value) {
+          act_x = ActOP(x, p);
+          dact_x = DActOP(x, p);
         } else {
           if constexpr ((ActOP == &silu<fp32, fp32>) && (DActOP == &dsilu<fp32, fp32>)) {
             const float s = sigmoidf(x);
@@ -199,7 +205,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           }
         }
         float after_dact = dact_x * grad_elt * gate_elt;
-        float after_dgate = dgate_elt ? act_x * grad_elt : 0.0f;
+        float after_dgate = dgate_elt * act_x * grad_elt;
 
         out_act_sh_curr[shmem_idx] = static_cast<OType>(scale * after_dact);
         out_gate_sh_curr[shmem_idx] = static_cast<OType>(scale * after_dgate);

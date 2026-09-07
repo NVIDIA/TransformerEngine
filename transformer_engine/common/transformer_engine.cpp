@@ -1104,6 +1104,9 @@ void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
     case kNVTEQuantizationConfigNVFP44Over6ErrUseFastMath:
       bool_to_uint8(config_.nvfp4_4over6_err_use_fast_math, buf);
       break;
+    case kNVTEQuantizationConfigMXFP82DQuantization:
+      bool_to_uint8(config_.mxfp8_2d_quantization, buf);
+      break;
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
   }
@@ -1170,6 +1173,9 @@ void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
     }
     case kNVTEQuantizationConfigNVFP44Over6ErrUseFastMath:
       uint8_to_bool(buf, config_.nvfp4_4over6_err_use_fast_math);
+      break;
+    case kNVTEQuantizationConfigMXFP82DQuantization:
+      uint8_to_bool(buf, config_.mxfp8_2d_quantization);
       break;
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");

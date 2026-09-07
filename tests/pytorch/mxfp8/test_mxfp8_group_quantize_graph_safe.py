@@ -60,6 +60,13 @@ def generate_split_sections(M: int, N: int, edge_cases: str) -> list[int]:
         split_sections = [avg_split] * (num_chunks - 2) + [0] + [avg_split * 2]
     elif edge_cases == "random_uneven_split":
         split_sections = generate_random_multiples_sum(M, num_chunks, least_multiple)
+    elif edge_cases == "imbalanced_avg_misaligned":
+        # Three groups whose 128-aligned sizes average to a non-128-aligned value, so any
+        # buffer sized from num_groups * round_up(M // num_groups, 128) diverges from the
+        # per-group padded sum. "random_uneven_split" cannot catch that: with 4 chunks the
+        # average only depends on M, which is always 128 * num_chunks aligned here.
+        assert M >= 3 * least_multiple, "M too small for the imbalanced case"
+        split_sections = [least_multiple, least_multiple, M - 2 * least_multiple]
     else:
         raise ValueError(f"Invalid edge case: {edge_cases}")
 
@@ -137,6 +144,7 @@ def check_grouped_tensor_mxfp8_versus_reference(
     return_transpose: bool,
     split_sections: list[int],
     optimize_for_gemm: bool = False,
+    with_2d_quantization: bool = False,
 ) -> None:
 
     te_dtype = te.DType.kFloat8E4M3
@@ -159,6 +167,7 @@ def check_grouped_tensor_mxfp8_versus_reference(
             fp8_dtype=te_dtype,
             rowwise=return_rowwise,
             columnwise=return_transpose,
+            with_2d_quantization=with_2d_quantization,
         )
         for _ in range(len(split_sections))
     ]
@@ -328,6 +337,30 @@ def check_grouped_tensor_mxfp8_with_paged_stashing(
                         split_sections[i], N, x_sx_t_ref_i, columnwise=True
                     )
                 torch.testing.assert_close(x_sx_t_i, x_sx_t_ref_i, atol=0.0, rtol=0.0)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("quantize_mode", ["rowwise_only", "both_directions", "columnwise_only"])
+@pytest.mark.parametrize(
+    "optimize_for_gemm", [True, False], ids=["optimize_for_gemm", "no_optimize_for_gemm"]
+)
+def test_grouped_tensor_mxfp8_2d_quantization_versus_reference(
+    quantize_mode: str,
+    optimize_for_gemm: bool,
+) -> None:
+    """Grouped MXFP8 should match independent 2D quantization of each tensor."""
+    return_rowwise = quantize_mode != "columnwise_only"
+    return_transpose = quantize_mode != "rowwise_only"
+    check_grouped_tensor_mxfp8_versus_reference(
+        x_dtype=torch.bfloat16,
+        M=1024,
+        N=256,
+        return_rowwise=return_rowwise,
+        return_transpose=return_transpose,
+        split_sections=[256, 256, 256, 256],
+        optimize_for_gemm=optimize_for_gemm,
+        with_2d_quantization=True,
+    )
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
@@ -545,6 +578,7 @@ def check_prequantized_requantize_versus_reference(
     wire = make_prequantized_wire_tensor(x, split_section_tensor)
 
     # Snapshot what must survive verbatim, plus the compact scales the reference swizzles.
+    rowwise_scale_shape_before = wire.scale_inv.shape
     rowwise_data_before = wire.rowwise_data.clone()
     wire_splits_before = [
         (t._rowwise_data.view(dtype=torch.uint8).clone(), t._rowwise_scale_inv.clone())
@@ -586,6 +620,13 @@ def check_prequantized_requantize_versus_reference(
 
     assert wire.columnwise_data is not None, "columnwise data must be built"
     assert wire.columnwise_scale_inv is not None, "columnwise scales must survive the swizzle"
+
+    # The rowwise swizzle is size-preserving; the per-group content checks below cannot catch a
+    # wrongly sized buffer because they read through offsets derived from the splits, so the
+    # capacity must be checked explicitly.
+    assert (
+        wire.scale_inv.shape == rowwise_scale_shape_before
+    ), "the swizzled rowwise scale buffer must keep the compact buffer's capacity"
 
     # The returned dequantized tensor is what bias gradients are reduced from. Compare only the
     # live rows: both this and the reference allocate M rows but write only the covered ones, and
@@ -662,6 +703,7 @@ def check_prequantized_requantize_versus_reference(
         "zero_tokens_end",
         "zero_tokens_middle",
         "random_uneven_split",
+        "imbalanced_avg_misaligned",
     ],
 )
 def test_prequantized_requantize_versus_reference(
@@ -699,6 +741,7 @@ def test_prequantized_requantize_versus_reference(
         "zero_tokens_end",
         "zero_tokens_middle",
         "random_uneven_split",
+        "imbalanced_avg_misaligned",
     ],
 )
 def test_prequantized_requantize_with_paged_stashing(
@@ -805,3 +848,73 @@ def test_prequantized_requantize_rejects_dtype_mismatch():
 
     with pytest.raises(RuntimeError, match="dtype"):
         tex.group_requantize_inplace(wire, mismatched, num_groups, splits, te.DType.kBFloat16)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("columnwise", [False, True], ids=["rowwise", "columnwise"])
+@pytest.mark.parametrize(
+    "split_sections",
+    [
+        # Imbalanced groups whose mean is not 128-aligned: sizing the swizzled output from
+        # num_tensors * round_up(mean, 128) would give 3 * 512 = 1536 rows instead of the
+        # input's 1280.
+        [128, 128, 1024],
+        # Same property with a zero-token group in the mix.
+        [0, 256, 128, 1152],
+    ],
+    ids=["imbalanced", "imbalanced_with_empty"],
+)
+def test_grouped_swizzle_variable_shape_preserves_scale_capacity(
+    columnwise: bool, split_sections: list[int]
+):
+    """Swizzling a variable-shape grouped tensor must keep the scale buffer's exact capacity.
+
+    The swizzle kernel walks input and output with identical per-group padded strides, so the
+    operation is size-preserving. Sizing the output from the per-tensor average instead breaks
+    any consumer that derives per-group offsets from the split sizes, because the average of
+    128-aligned group sizes is generally not 128-aligned. The content checks alone cannot catch
+    a wrong allocation (per-group offsets are derived from the splits, not the buffer), so the
+    shape assertion is the actual regression check.
+    """
+    torch.manual_seed(0)
+    N = 256
+    M = sum(split_sections)
+    x = torch.randn((M, N), dtype=torch.bfloat16, device="cuda")
+    splits = torch.tensor(split_sections, dtype=torch.int64, device="cuda")
+
+    quantizer = MXFP8Quantizer(
+        fp8_dtype=te.DType.kFloat8E4M3, rowwise=not columnwise, columnwise=columnwise
+    )
+    # Compact (unswizzled) scales, as they arrive over the wire.
+    quantizer.optimize_for_gemm = False
+    tensor = fused_grouped_quantize(x, splits, quantizer)
+    assert not tensor._with_gemm_swizzled_scales
+
+    scale_attr = "columnwise_scale_inv" if columnwise else "scale_inv"
+    compact_shape = getattr(tensor, scale_attr).shape
+    compact_groups = [
+        (t._columnwise_scale_inv if columnwise else t._rowwise_scale_inv).clone()
+        for t in tensor.split_into_quantized_tensors()
+    ]
+
+    tex.grouped_swizzle_for_gemm(tensor, not columnwise, columnwise)
+
+    assert tensor._with_gemm_swizzled_scales
+    assert (
+        getattr(tensor, scale_attr).shape == compact_shape
+    ), "grouped swizzle must preserve the scale buffer's shape for variable-shape tensors"
+
+    # The swizzled content of each group must match a per-group dense swizzle of the compact
+    # scales it arrived with.
+    for rows_i, group_before, out in zip(
+        split_sections, compact_groups, tensor.split_into_quantized_tensors()
+    ):
+        if rows_i == 0:
+            continue
+        out_scale = out._columnwise_scale_inv if columnwise else out._rowwise_scale_inv
+        torch.testing.assert_close(
+            out_scale,
+            swizzle_mxfp8_scale(rows_i, N, group_before, columnwise=columnwise),
+            atol=0.0,
+            rtol=0.0,
+        )

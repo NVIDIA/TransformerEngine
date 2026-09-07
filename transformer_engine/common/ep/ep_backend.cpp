@@ -23,6 +23,7 @@
 #include "../common.h"
 #include "../util/cuda_runtime.h"
 #include "../util/logging.h"
+#include "nccl_ep_provider.h"
 
 namespace transformer_engine {
 namespace ep {
@@ -47,26 +48,50 @@ ncclDataType_t te_dtype_to_nccl_dtype(NVTEDType dtype) {
       return ncclFloat8e4m3;
     case kNVTEFloat8E5M2:
       return ncclFloat8e5m2;
+    case kNVTEFloat8E8M0:
+      return ncclUint8;
     default:
       NVTE_ERROR("Unsupported NVTEDType for NCCL dtype conversion: ", static_cast<int>(dtype));
   }
   return ncclFloat32;  // unreachable
 }
 
-// shape_out is caller-owned; desc.sizes aliases shape_out.data and must
-// outlive the NCCL EP call.
+// Which part of a TE tensor an NCCL descriptor points at: the data payload, or
+// (for block-scaled tensors) the rowwise scale-inverse that rides alongside it.
+enum class DescSource { kData, kScaleInv };
+
+// Build an NCCL descriptor for a TE tensor's data (kData) or its rowwise
+// scale-inverse (kScaleInv). shape_out is caller-owned; desc.sizes aliases
+// shape_out.data and must outlive the NCCL EP call. Uses the matching window
+// field (win.window / win.scale_window) when set, else the raw pointer.
 inline ncclEpTensor_t make_nccl_ep_tensor(const NVTETensor t, NVTEShape& shape_out,
-                                          const NVTECommWindow& win = {}) {
-  shape_out = nvte_tensor_shape(t);
+                                          const NVTECommWindow& win = {},
+                                          DescSource source = DescSource::kData) {
   ncclEpTensor_t desc = NCCL_EP_TENSOR_INIT;
+  void* raw_ptr = nullptr;
+  ncclWindow_t win_hdl = nullptr;
+  uint64_t win_offset = 0;
+  if (source == DescSource::kData) {
+    shape_out = nvte_tensor_shape(t);
+    desc.datatype = te_dtype_to_nccl_dtype(nvte_tensor_type(t));
+    raw_ptr = nvte_tensor_data(t);
+    win_hdl = win.window;
+    win_offset = win.offset;
+  } else {
+    const SimpleTensor& si = convertNVTETensorCheck(t)->scale_inv;
+    shape_out = nvte_make_shape(si.shape.data(), si.shape.size());
+    desc.datatype = te_dtype_to_nccl_dtype(static_cast<NVTEDType>(si.dtype));
+    raw_ptr = si.dptr;
+    win_hdl = win.scale_window;
+    win_offset = win.scale_offset;
+  }
   desc.ndim = shape_out.ndim;
   desc.sizes = shape_out.data;
-  desc.datatype = te_dtype_to_nccl_dtype(nvte_tensor_type(t));
-  if (win.window != nullptr) {
-    desc.win_hdl = win.window;
-    desc.win_offset = win.offset;
+  if (win_hdl != nullptr) {
+    desc.win_hdl = win_hdl;
+    desc.win_offset = win_offset;
   } else {
-    desc.data = nvte_tensor_data(t);
+    desc.data = raw_ptr;
     NVTE_CHECK(desc.data != nullptr || nvte_tensor_numel(t) == 0,
                "non-empty tensor data must not be null");
   }
@@ -139,6 +164,9 @@ void EPBackend::initialize(ncclComm_t ep_comm, NVTEEpGroupConfig config) {
              nccl_version / 10000, ".", (nccl_version / 100) % 100, ".", nccl_version % 100,
              " at runtime.");
 
+  // Load libnccl_ep only after the runtime NCCL version has been validated.
+  nccl_ep::initialize();
+
   validate_config(config);
 
   int comm_size = 0;
@@ -154,14 +182,14 @@ void EPBackend::shutdown() {
   std::lock_guard<std::mutex> lock(inst.mutex_);
   if (!inst.initialized_) return;
   for (auto& e : inst.lru_) {
-    if (e.handle != nullptr) ncclEpHandleDestroy(e.handle);
+    if (e.handle != nullptr) nccl_ep::handle_destroy(e.handle);
   }
   inst.lru_.clear();
   inst.index_.clear();
   inst.fallback_layer_cfg_.reset();
   // ncclEpGroupDestroy reads from ep_comm_; destroy group while comm is still alive.
   if (inst.ep_group_ != nullptr) {
-    ncclEpGroupDestroy(inst.ep_group_);
+    nccl_ep::group_destroy(inst.ep_group_);
     inst.ep_group_ = nullptr;
   }
   inst.ep_comm_ = nullptr;  // borrowed; caller destroys
@@ -179,8 +207,8 @@ ncclEpHandle_t EPBackend::open_handle(void* handle_mem, size_t handle_mem_size, 
   ncclEpHandleConfig_t hcfg = NCCL_EP_HANDLE_CONFIG_INIT;
   hcfg.dispatch_output_per_expert_alignment = dispatch_output_per_expert_alignment;
   ncclEpHandle_t handle;
-  NVTE_CHECK_NCCL(ncclEpInitHandle(&handle, ep_group_, NCCL_EP_LAYOUT_EXPERT_MAJOR, &hcfg, num_topk,
-                                   &routing_desc));
+  NVTE_CHECK_NCCL(nccl_ep::init_handle(&handle, ep_group_, NCCL_EP_LAYOUT_EXPERT_MAJOR, &hcfg,
+                                       num_topk, &routing_desc));
   return handle;
 }
 
@@ -215,9 +243,12 @@ void EPBackend::init(ncclComm_t ep_comm, NVTEEpGroupConfig group_config) {
   cfg.rdma_buffer_size = NCCL_EP_AUTO;
   cfg.num_qp_per_rank = NCCL_EP_AUTO;
   cfg.num_channels = NCCL_EP_AUTO;
+  // Default the dispatch/combine (comm) kernels to 32 SMs, clamped to the device SM count.
+  constexpr int kDefaultCommSms = 32;
+  const int device_sms = cuda::sm_count();
   cfg.max_num_sms = group_config.num_comm_sms > 0
                         ? static_cast<unsigned int>(group_config.num_comm_sms)
-                        : NCCL_EP_AUTO;
+                        : static_cast<unsigned int>(std::min(kDefaultCommSms, device_sms));
   // 0 = NCCL_EP_AUTO, which enables eager mode (recv buffers sized per routing).
   cfg.max_recv_tokens_per_rank = static_cast<unsigned int>(group_config.max_recv_tokens_per_rank);
   cfg.zero_copy = group_config.zero_copy ? NCCL_EP_ZERO_COPY_ON : NCCL_EP_ZERO_COPY_OFF;
@@ -226,7 +257,15 @@ void EPBackend::init(ncclComm_t ep_comm, NVTEEpGroupConfig group_config) {
   cfg.overflow_policy =
       group_config.drop_on_overflow ? NCCL_EP_OVERFLOW_DROP : NCCL_EP_OVERFLOW_AUTO;
 
-  NVTE_CHECK_NCCL(ncclEpCreateGroup(&ep_group_, ep_comm, &cfg));
+  // Keep the local shuffle/preprocess kernels on all SMs by default (their cost scales inversely
+  // with SM count) so the comm-SM cap above does not throttle them. overwrite=0 respects a
+  // user-set value and only fills in the default when unset.
+  char sm_buf[16];
+  std::snprintf(sm_buf, sizeof(sm_buf), "%d", device_sms);
+  setenv("NCCL_EP_SHUFFLE_SMS", sm_buf, /*overwrite=*/0);
+  setenv("NCCL_EP_PREPROCESS_NUM_SMS", sm_buf, /*overwrite=*/0);
+
+  NVTE_CHECK_NCCL(nccl_ep::create_group(&ep_group_, ep_comm, &cfg));
 
   ep_comm_ = ep_comm;
 
@@ -284,15 +323,15 @@ ncclEpHandle_t EPBackend::prepare_handle_locked(void* handle_mem, NVTEEpLayerCon
   ncclEpHandleConfig_t hcfg = NCCL_EP_HANDLE_CONFIG_INIT;
   hcfg.dispatch_output_per_expert_alignment = layer_cfg.dispatch_output_per_expert_alignment;
   size_t hm_size = 0;
-  NVTE_CHECK_NCCL(ncclEpHandleMemSize(ep_group_, NCCL_EP_LAYOUT_EXPERT_MAJOR, &hcfg, &hm_size,
-                                      layer_cfg.top_k));
+  NVTE_CHECK_NCCL(nccl_ep::handle_mem_size(ep_group_, NCCL_EP_LAYOUT_EXPERT_MAJOR, &hcfg, &hm_size,
+                                           layer_cfg.top_k));
   ncclEpHandle_t h = open_handle(handle_mem, hm_size, layer_cfg.top_k,
                                  layer_cfg.dispatch_output_per_expert_alignment);
   lru_.push_front(HandleEntry{handle_mem, h, layer_cfg, hm_size});
   index_.emplace(handle_mem, lru_.begin());
   while (lru_.size() > cache_cap_locked()) {
     HandleEntry& victim = lru_.back();
-    if (victim.handle != nullptr) ncclEpHandleDestroy(victim.handle);
+    if (victim.handle != nullptr) nccl_ep::handle_destroy(victim.handle);
     index_.erase(victim.handle_mem);
     lru_.pop_back();
   }
@@ -326,8 +365,8 @@ size_t EPBackend::handle_mem_size(NVTEEpLayerConfig layer_cfg) {
   ncclEpHandleConfig_t hcfg = NCCL_EP_HANDLE_CONFIG_INIT;
   hcfg.dispatch_output_per_expert_alignment = layer_cfg.dispatch_output_per_expert_alignment;
   size_t hm_size = 0;
-  NVTE_CHECK_NCCL(ncclEpHandleMemSize(ep_group_, NCCL_EP_LAYOUT_EXPERT_MAJOR, &hcfg, &hm_size,
-                                      layer_cfg.top_k));
+  NVTE_CHECK_NCCL(nccl_ep::handle_mem_size(ep_group_, NCCL_EP_LAYOUT_EXPERT_MAJOR, &hcfg, &hm_size,
+                                           layer_cfg.top_k));
   return hm_size;
 }
 
@@ -363,7 +402,7 @@ void EPBackend::prepare(void* handle_mem, const NVTETensor topk_idx,
   std::lock_guard<std::mutex> lock(mutex_);
   NVTE_CHECK(initialized_, "EPBackend not initialized");
   ncclEpHandle_t h = prepare_handle_locked(handle_mem, layer_cfg);
-  NVTE_CHECK_NCCL(ncclEpUpdateHandle(h, &nccl_topk_idx, &layout_info, stream));
+  NVTE_CHECK_NCCL(nccl_ep::update_handle(h, &nccl_topk_idx, &layout_info, stream));
 }
 
 void EPBackend::dispatch(void* handle_mem, const NVTETensor topk_idx, const NVTETensor tokens,
@@ -412,22 +451,50 @@ void EPBackend::dispatch(void* handle_mem, const NVTETensor topk_idx, const NVTE
         make_nccl_ep_tensor(recv_topk_weights, recv_topk_weights_shape, recv_topk_weights_win);
   }
 
+  // Block-scaled (e.g. MXFP8): route the per-token scale-inverse alongside the
+  // data. High-precision (bf16/fp16/fp32) and per-tensor FP8 payloads carry the
+  // default delayed scaling mode and skip this. Keys on is_block_scaling so
+  // NVFP4 can reuse this path later.
+  const NVTEScalingMode tokens_scaling_mode = nvte_tensor_scaling_mode(tokens);
+  const bool is_scaled = is_block_scaling(tokens_scaling_mode);
+  NVTEShape scales_in_shape, scales_out_shape;
+  ncclEpTensor_t nccl_scales_in = NCCL_EP_TENSOR_INIT, nccl_scales_out = NCCL_EP_TENSOR_INIT;
+  if (is_scaled) {
+    NVTE_CHECK(is_mxfp8_scaling(tokens_scaling_mode),
+               "EP dispatch supports MXFP8 block scaling only; got scaling mode ",
+               static_cast<int>(tokens_scaling_mode));
+    NVTE_CHECK(nvte_tensor_scaling_mode(recv_tokens) == tokens_scaling_mode,
+               "recv_tokens scaling mode must match tokens scaling mode");
+    nccl_scales_in =
+        make_nccl_ep_tensor(tokens, scales_in_shape, tokens_win, DescSource::kScaleInv);
+    nccl_scales_out =
+        make_nccl_ep_tensor(recv_tokens, scales_out_shape, recv_tokens_win, DescSource::kScaleInv);
+  } else {
+    NVTE_CHECK(!is_fp8_dtype(static_cast<DType>(tok_dtype)),
+               "EP dispatch of FP8 tokens requires a block scaling mode (e.g. MXFP8); "
+               "per-tensor (delayed) FP8 scaling is not supported");
+  }
+
   ncclEpDispatchInputs_t in_struct = NCCL_EP_DISPATCH_INPUTS_INIT;
   in_struct.tokens = &nccl_tokens_in;
   in_struct.topk_weights = is_forward ? &nccl_topk_weights_in : nullptr;
+  in_struct.scales = is_scaled ? &nccl_scales_in : nullptr;
 
   ncclEpDispatchOutputs_t out_struct = NCCL_EP_DISPATCH_OUTPUTS_INIT;
   out_struct.tokens = &nccl_tokens_out;
   out_struct.topk_weights = is_forward ? &nccl_topk_weights_out : nullptr;
+  out_struct.scales = is_scaled ? &nccl_scales_out : nullptr;
 
   ncclEpDispatchConfig_t dispatch_cfg = NCCL_EP_DISPATCH_CONFIG_INIT;
   dispatch_cfg.pass_direction = is_forward ? NCCL_EP_FWD_PASS : NCCL_EP_BWD_PASS;
+  // Block-scaled payloads forward the per-token scale-inverse; select the matching recipe.
+  dispatch_cfg.quant_recipe = is_scaled ? NCCL_EP_DISP_QUANT_FWD : NCCL_EP_DISP_QUANT_NONE;
 
   std::lock_guard<std::mutex> lock(mutex_);
   NVTE_CHECK(initialized_, "EPBackend not initialized");
   ncclEpHandle_t h = lookup_handle_locked(handle_mem);
-  NVTE_CHECK_NCCL(ncclEpDispatch(h, &in_struct, &out_struct,
-                                 /*layout_info=*/nullptr, &dispatch_cfg, stream));
+  NVTE_CHECK_NCCL(nccl_ep::dispatch(h, &in_struct, &out_struct,
+                                    /*layout_info=*/nullptr, &dispatch_cfg, stream));
 }
 
 void EPBackend::combine(void* handle_mem, const NVTETensor expert_out,
@@ -450,7 +517,7 @@ void EPBackend::combine(void* handle_mem, const NVTETensor expert_out,
   std::lock_guard<std::mutex> lock(mutex_);
   NVTE_CHECK(initialized_, "EPBackend not initialized");
   ncclEpHandle_t h = lookup_handle_locked(handle_mem);
-  NVTE_CHECK_NCCL(ncclEpCombine(h, &in_struct, &out_struct, /*config=*/nullptr, stream));
+  NVTE_CHECK_NCCL(nccl_ep::combine(h, &in_struct, &out_struct, /*config=*/nullptr, stream));
 }
 
 void EPBackend::dispatch_bwd(void* handle_mem, const NVTETensor grad,
@@ -488,7 +555,7 @@ void EPBackend::dispatch_bwd(void* handle_mem, const NVTETensor grad,
   std::lock_guard<std::mutex> lock(mutex_);
   NVTE_CHECK(initialized_, "EPBackend not initialized");
   ncclEpHandle_t h = lookup_handle_locked(handle_mem);
-  NVTE_CHECK_NCCL(ncclEpCombine(h, &in_struct, &out_struct, &cfg, stream));
+  NVTE_CHECK_NCCL(nccl_ep::combine(h, &in_struct, &out_struct, &cfg, stream));
 }
 
 void EPBackend::combine_bwd(void* handle_mem, const NVTETensor grad, const NVTECommWindow& grad_win,

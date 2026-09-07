@@ -563,6 +563,86 @@ class TestQuantizedTensor:
         torch.manual_seed(seed)
         torch.cuda.manual_seed(seed)
 
+    @pytest.mark.parametrize(
+        "quantization",
+        [
+            pytest.param(
+                "fp8",
+                marks=pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8),
+            ),
+            pytest.param(
+                "fp8_blockwise",
+                marks=pytest.mark.skipif(
+                    not fp8_block_scaling_available,
+                    reason=reason_for_no_fp8_block_scaling,
+                ),
+            ),
+            pytest.param(
+                "mxfp8",
+                marks=pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8),
+            ),
+            pytest.param(
+                "nvfp4",
+                marks=pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4),
+            ),
+        ],
+    )
+    def test_detach_preserves_subclass(self, quantization: str) -> None:
+        """Detaching a quantized tensor preserves its runtime subclass."""
+        quantizer = make_quantizer(quantization)
+        tensor = quantizer(torch.randn(128, 128, dtype=torch.bfloat16, device="cuda"))
+        derived_type = type(f"Derived{type(tensor).__name__}", (type(tensor),), {})
+        tensor.__class__ = derived_type
+
+        detached = tensor.detach()
+
+        assert type(detached) is derived_type
+        for detached_data, source_data in zip(
+            detached.get_data_tensors(), tensor.get_data_tensors()
+        ):
+            assert detached_data is source_data
+        assert not detached.requires_grad
+
+        parameter = torch.nn.Parameter(tensor)
+        assert type(parameter) is derived_type
+
+    @pytest.mark.parametrize(
+        "quantization",
+        [
+            pytest.param(
+                "fp8",
+                marks=pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8),
+            ),
+            pytest.param(
+                "fp8_blockwise",
+                marks=pytest.mark.skipif(
+                    not fp8_block_scaling_available,
+                    reason=reason_for_no_fp8_block_scaling,
+                ),
+            ),
+            pytest.param(
+                "mxfp8",
+                marks=pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8),
+            ),
+            pytest.param(
+                "nvfp4",
+                marks=pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4),
+            ),
+        ],
+    )
+    def test_update_quantized_supports_subclass(self, quantization: str) -> None:
+        """Quantizers update derived quantized tensor wrappers in-place."""
+        quantizer = make_quantizer(quantization)
+        source = torch.randn(128, 128, dtype=torch.bfloat16, device="cuda")
+        tensor = quantizer(source)
+        derived_type = type(f"Derived{type(tensor).__name__}", (type(tensor),), {})
+        tensor.__class__ = derived_type
+
+        quantizer.update_quantized(torch.zeros_like(source), tensor)
+
+        assert type(tensor) is derived_type
+        torch.testing.assert_close(tensor.dequantize(), torch.zeros_like(source))
+
     @pytest.mark.parametrize("op", ("clone", "view", "reshape", "contiguous"))
     @pytest.mark.parametrize("quantization", _quantization_list)
     def test_identity_op(
@@ -1014,3 +1094,96 @@ class TestMXFP8Tensor:
         # Make sure we are not trivially passing the test
         with pytest.raises(AssertionError):
             torch.testing.assert_close(x_deq, -x_ref, **_tols[fp8_dtype])
+
+
+@pytest.mark.parametrize("quantization", _quantization_list)
+@pytest.mark.parametrize("usage", ["rowwise", "columnwise", "both"])
+@pytest.mark.parametrize("shape", [(256, 512), (128, 320)], ids=lambda s: f"{s[0]}x{s[1]}")
+def test_skip_quantization_with_noop_flag(
+    quantization: str, usage: str, shape: Tuple[int, int]
+) -> None:
+    """
+    Test if the quantization honors the noop flag and skips quantization.
+    This test only verifies that the kernel skips quantization where it's expected to do so.
+    It doesn't verify otherwise (kernel correctly quantizes when noop is false) since that is already covered by other tests.
+    """
+    if usage == "columnwise" and quantization in ("fp8", "fp8_delayed_scaling"):
+        pytest.skip("Delayed scaling does not support columnwise-only quantization")
+    if usage != "rowwise" and quantization == "nvfp4_row_scaled":
+        pytest.skip("Row-scaled NVFP4 does not produce columnwise output")
+
+    quantizer = make_quantizer(quantization)
+    quantizer.set_usage(
+        rowwise=usage in ("rowwise", "both"),
+        columnwise=usage in ("columnwise", "both"),
+    )
+
+    first_batch = torch.rand(shape, dtype=torch.bfloat16, device="cuda")
+    # Make the input range much larger, even under delayed scaling, so amax will differ for sure
+    # if the noop flag doesn't take effect
+    second_batch = torch.rand_like(first_batch) * 2.0
+    x = first_batch.clone()
+
+    noop = torch.zeros(1, dtype=torch.float32, device="cuda")
+
+    # Allocate and populate the destination outside the graph
+    quantized = quantizer(x)
+
+    # CUDA graph capture requires the work to be warmed up on a side stream first.
+    side_stream = torch.cuda.Stream()
+    side_stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(side_stream):
+        for _ in range(3):
+            quantized.quantize_(x, noop_flag=noop)
+    torch.cuda.current_stream().wait_stream(side_stream)
+
+    # Capture the CUDA graph
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        quantized.quantize_(x, noop_flag=noop)
+
+    # Clone the underlying buffers of the quantized tensor's output so we can compare them later.
+    # Note that we can't clone the quantized tensor, but its underlying buffers are torch tensors and can be cloned.
+    def clone_quantized_output():
+        output_buffers = {}
+        for attr in (
+            "_data",
+            "_transpose",
+            "_rowwise_data",
+            "_columnwise_data",
+            "_scale_inv",
+            "_rowwise_scale_inv",
+            "_columnwise_scale_inv",
+            "_amax_rowwise",
+            "_amax_columnwise",
+        ):
+            buf = getattr(quantized, attr, None)
+            if buf is not None:
+                output_buffers[attr] = buf.clone()
+        # Delayed scaling keeps its global amax on the quantizer rather than on the tensor.
+        quantizer_amax = getattr(quantizer, "amax", None)
+        if quantizer_amax is not None:
+            output_buffers["quantizer.amax"] = quantizer_amax.clone()
+        assert output_buffers, f"{quantization}: quantized tensor exposes no data buffer"
+        return output_buffers
+
+    # Obtain the quantized x by setting the noop flag to false (zero)
+    noop.zero_()
+    graph.replay()
+    torch.cuda.synchronize()
+    quantized_without_noop = clone_quantized_output()
+
+    # Reset x to different values and set the noop flag to true (one).
+    # The quantization should be skipped so the output should not be different.
+    x.copy_(second_batch)
+    noop.fill_(1.0)
+    graph.replay()
+    torch.cuda.synchronize()
+    quantized_with_noop = clone_quantized_output()
+
+    for attr in quantized_without_noop:
+        buf_without_noop = quantized_without_noop[attr]
+        buf_with_noop = quantized_with_noop[attr]
+        assert torch.equal(
+            buf_without_noop, buf_with_noop
+        ), f"{quantization}/{usage}: noop flag fails to take effect because {attr} changed."
