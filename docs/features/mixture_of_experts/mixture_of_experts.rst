@@ -503,41 +503,30 @@ Dispatch can quantize the tokens before sending them:
    .. tab:: PyTorch
 
       ``transformer_engine.pytorch.ep`` exposes the primitives with autograd
-      support:
+      support. In call order:
 
       * ``ep_bootstrap(ep_group, ...)`` initializes EP once per process on an
         existing process group and fixes the group-wide sizes (number of experts,
         maximum tokens per rank, hidden size, top-k, receive capacity).
-      * ``EpBuffer`` holds the routing state of one dispatch/combine pair,
-        written by dispatch and read by combine and backward. Use one per MoE
-        layer, and one per in-flight microbatch under pipeline parallelism.
+      * ``EpBuffer`` holds the routing state of one dispatch/combine pair (a
+        small ``handle_mem`` buffer and the per-expert token counts), written by
+        dispatch and read by combine and backward. Use one per MoE layer, and one
+        per in-flight microbatch under pipeline parallelism.
         ``dispatch_fwd_quant_recipe=MXFP8BlockScaling()`` enables the quantized
         dispatch (see
         `tests/pytorch/distributed/run_ep.py <https://github.com/NVIDIA/TransformerEngine/blob/main/tests/pytorch/distributed/run_ep.py>`_).
-      * ``ep_dispatch(buffer, tokens, topk_idx, topk_weights)`` returns the
-        receive buffer with one fixed slot range per local expert, the routing
-        weights of the received tokens, and the number of valid tokens per local
-        expert.
-      * ``ep_combine(buffer, expert_out)`` returns the summed expert outputs in
-        the original token order. The routing weights are applied by the caller
-        before the combine.
-
-      Data flow between the calls:
-
-      * ``EpBuffer`` itself allocates only the routing state (a small
-        ``handle_mem`` byte buffer and the per-expert token counts).
-      * ``ep_dispatch`` allocates the receive buffer
-        ``[recv_capacity_per_rank, hidden_size]`` and the received weights on
-        every call, or writes into caller-owned buffers passed as
-        ``recv_tokens`` / ``recv_topk_weights`` (needed for CUDA graphs and
-        zero-copy). The tokens land directly in their expert's slot range.
-      * The local experts read the receive buffer as their input and produce a
-        new ``expert_out`` tensor of the same shape; padded slots must be zero.
-      * ``ep_combine`` reads ``expert_out`` in place and writes the result into a
-        newly allocated ``[num_tokens, hidden_size]`` tensor. In zero-copy mode
-        ``expert_out`` is transferred straight from that tensor when it is
-        symmetric-memory backed; otherwise it goes through the library's
-        staging buffers.
+      * ``ep_dispatch(buffer, tokens, topk_idx, topk_weights)`` allocates the
+        receive buffer ``[recv_capacity_per_rank, hidden_size]`` (or writes into
+        caller-owned ``recv_tokens`` / ``recv_topk_weights``, needed for CUDA
+        graphs) and returns it together with the routing weights of the received
+        tokens and the number of valid tokens per local expert. Each local
+        expert owns a fixed slot range in the buffer.
+      * The local experts read the receive buffer as their input and produce
+        ``expert_out`` of the same shape; the caller multiplies it by the
+        received routing weights and zeroes the padded slots.
+      * ``ep_combine(buffer, expert_out)`` reads ``expert_out`` in place and
+        returns the summed expert outputs ``[num_tokens, hidden_size]`` in the
+        original token order.
 
       .. raw:: html
 
