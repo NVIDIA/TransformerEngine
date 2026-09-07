@@ -458,9 +458,10 @@ dense MLP on the local tokens on every rank.
 experts run on the receive buffer, and combine returns the outputs to the source
 rank.*
 
-Dispatch and combine are built on the NCCL EP library (``libnccl_ep``, loaded
-at runtime), not on generic all-to-all collectives. Both operations are
-differentiable.
+Transformer Engine provides optimized implementations of both operations,
+including their backward passes, so the layer does not have to assemble them
+from generic collectives and permutation kernels. They are built on the NCCL EP
+library (``libnccl_ep``, loaded at runtime) and are differentiable.
 
 * **Communication.** The NCCL EP kernels move each token straight to the slot
   of its expert on the owning rank, so the routing and the communication happen
@@ -472,15 +473,18 @@ differentiable.
   library copies through its own staging buffers.
 
 * **Receive buffer size.** ``recv_capacity_per_rank`` is the maximum number of
-  tokens (rows of ``hidden_size``) a rank receives per step; the dropless worst
-  case is ``ep_size * max_tokens_per_rank * top_k``. With a fixed capacity the
-  step is allocation-free and CUDA-graph capturable. Without it the buffer is
-  sized from the actual receive count each step, at the cost of a host
-  synchronization.
+  tokens (rows of ``hidden_size``) a rank receives per step. Every rank sends at
+  most ``max_tokens_per_rank`` tokens to ``top_k`` experts each, and in the
+  worst case all of them are routed to experts on the same rank, so
+  ``ep_size * max_tokens_per_rank * top_k`` never drops a token; a smaller
+  capacity saves memory but can overflow when the routing is skewed (see
+  ``drop_on_overflow``). With a fixed capacity the step is allocation-free and
+  CUDA-graph capturable. Without it the buffer is sized from the actual receive
+  count each step, at the cost of a host synchronization.
 * **Quantized dispatch.** Dispatch can quantize the tokens before the
   all-to-all, so the communication moves the low-precision payload and the local
-  grouped GEMM consumes it directly. Currently only the MXFP8 recipe is
-  supported there.
+  grouped GEMM consumes it directly. MXFP8 is supported today; support for
+  further recipes is in progress.
 * **Examples.** Complete runnable examples:
   `examples/pytorch/ep <https://github.com/NVIDIA/TransformerEngine/tree/main/examples/pytorch/ep>`_
   and `examples/jax/ep <https://github.com/NVIDIA/TransformerEngine/tree/main/examples/jax/ep>`_.
