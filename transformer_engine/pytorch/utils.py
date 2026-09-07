@@ -319,6 +319,7 @@ def mark_grouped_tensor(
     Marks plain tensors and their corresponding scale-inverse tensors.
     ``transposed`` describes whether tokens are physically on axis 1.
     """
+
     def _mark(tensor: torch.Tensor, is_scale_inv: bool) -> None:
         setattr(tensor, "grouped_tensor_scale_inv", is_scale_inv)
         setattr(tensor, "grouped_tensor_token_axis", 1 if transposed else 0)
