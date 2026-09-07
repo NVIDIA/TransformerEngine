@@ -57,8 +57,9 @@ dropped into an existing implementation one piece at a time:
 * :ref:`Expert parallelism <moe-expert-parallelism>`: all-to-all dispatch and
   combine for experts sharded across devices.
 
-The :ref:`example at the end <moe-putting-it-together>` wires the blocks into a
-complete MoE layer.
+The :ref:`single-device example <moe-putting-it-together>` wires the blocks
+into a complete MoE layer; :ref:`Expert parallelism <moe-expert-parallelism>`
+covers the sharded case.
 
 .. _moe-router:
 
@@ -417,6 +418,34 @@ The fusion is enabled with ``NVTE_CUTEDSL_FUSED_GROUPED_MLP=1`` and requires
 Blackwell and a block-scaled recipe (MXFP8 or NVFP4). When the configuration is
 not supported, the three operations run separately with identical results.
 
+.. _moe-putting-it-together:
+
+Example: MoE layer on a single device
+-------------------------------------
+
+The example below wires the blocks together for top-k routing on a single
+device: route, dispatch, run the experts, combine.
+
+.. tabs::
+
+   .. tab:: PyTorch
+
+      .. literalinclude:: moe_layer_pytorch.py
+         :language: python
+         :start-after: # START_MOE_LAYER_PYTORCH
+         :end-before: # END_MOE_LAYER_PYTORCH
+
+   .. tab:: JAX
+
+      .. literalinclude:: moe_layer_jax.py
+         :language: python
+         :start-after: # START_MOE_LAYER_JAX
+         :end-before: # END_MOE_LAYER_JAX
+
+The example uses dropless routing (``num_out_tokens = num_tokens * top_k``), so
+the dispatch buffer is sized statically rather than from a device-to-host sync.
+Every stage is differentiable, so the assembled layer trains end to end.
+
 .. _moe-expert-parallelism:
 
 Expert parallelism
@@ -606,40 +635,3 @@ Complete runnable examples:
 `examples/pytorch/ep <https://github.com/NVIDIA/TransformerEngine/tree/main/examples/pytorch/ep>`_
 and `examples/jax/ep <https://github.com/NVIDIA/TransformerEngine/tree/main/examples/jax/ep>`_.
 
-.. _moe-putting-it-together:
-
-Example: putting it all together
---------------------------------
-
-The example below wires the blocks together for top-k routing on a single
-device: route, dispatch, run the experts, combine.
-
-.. tabs::
-
-   .. tab:: PyTorch
-
-      .. literalinclude:: moe_layer_pytorch.py
-         :language: python
-         :start-after: # START_MOE_LAYER_PYTORCH
-         :end-before: # END_MOE_LAYER_PYTORCH
-
-   .. tab:: JAX
-
-      .. literalinclude:: moe_layer_jax.py
-         :language: python
-         :start-after: # START_MOE_LAYER_JAX
-         :end-before: # END_MOE_LAYER_JAX
-
-The example uses dropless routing (``num_out_tokens = num_tokens * top_k``), so
-the dispatch buffer is sized statically rather than from a device-to-host sync.
-Every stage is differentiable, so the assembled layer trains end to end.
-
-With experts sharded across devices there are two options. With a generic
-all-to-all, the routing kernels do the reordering on both sides of the
-communication: tokens are sorted by destination rank before the all-to-all and
-regrouped by local expert after it (see :ref:`Reordering expert chunks
-<moe-token-permutation>`). With the NCCL-based :ref:`expert parallelism
-<moe-expert-parallelism>` primitives the permutation is folded into the
-communication: the dispatch delivers an expert-contiguous receive buffer and the
-combine writes the results straight back into the original token order, so no
-separate token dispatch or combine is needed.
