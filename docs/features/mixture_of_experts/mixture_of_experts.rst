@@ -12,8 +12,7 @@ Mixture of Experts
 
     The MoE building blocks are designed to work with Transformer Engine's
     low-precision recipes. This support is still being extended, so not every
-    block works with every recipe yet; see the API reference of each function
-    for details.
+    block works with every recipe yet.
 
 Mixture of Experts (MoE) layers replace a dense feed-forward network with a set
 of expert networks and a router that sends each token to one or more experts.
