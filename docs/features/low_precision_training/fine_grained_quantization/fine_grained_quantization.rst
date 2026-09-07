@@ -181,13 +181,12 @@ It does not call the factory on every unchanged forward.
       function for the factory itself, so that launchers and checkpointing
       setups can import or pickle it.
 
-      TE ships ready-made base factories for its native quantizers in
+      TE provides factories for its native quantizers in
       ``transformer_engine.pytorch.custom_recipes.quantizer_factories``
-      (``mxfp8_factory``, ``nvfp4_factory``, ...) — the examples on this page
-      use them as fallbacks and as ``HybridQuantizer`` children. More
-      specialized factories live in
-      ``transformer_engine.pytorch.custom_recipes.quantizer_factory_zoo``;
-      they are illustrative examples rather than validated defaults.
+      (``mxfp8_factory``, ``nvfp4_factory``, ...). They can be used as
+      defaults or to construct ``HybridQuantizer`` children. Additional
+      specialized recipes are available in
+      ``transformer_engine.pytorch.custom_recipes.quantizer_factory_zoo``.
 
       The factory is not limited to TE-native quantizers: it may return your
       own :class:`~transformer_engine.pytorch.Quantizer` subclass, and custom
