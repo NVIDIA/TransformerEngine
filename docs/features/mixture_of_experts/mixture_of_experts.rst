@@ -506,9 +506,10 @@ library (``libnccl_ep``, loaded at runtime) and are differentiable.
         must not be reused until the backward of that call has run. Use one
         buffer per MoE layer, and one per microbatch when several microbatches
         are in flight (pipeline parallelism). ``dispatch_fwd_quant_recipe``
-        selects the quantization applied by dispatch; with
-        ``MXFP8BlockScaling()`` the receive buffer is returned as an MXFP8
-        grouped tensor that the grouped GEMM consumes directly (see
+        makes dispatch quantize the tokens before sending them; with
+        ``MXFP8BlockScaling()`` the receive buffer comes back as an MXFP8
+        ``GroupedTensor`` (FP8 rows with per-block scales, one group per local
+        expert, ``alignment=128`` required) instead of BF16 rows (see
         `tests/pytorch/distributed/run_ep.py <https://github.com/NVIDIA/TransformerEngine/blob/main/tests/pytorch/distributed/run_ep.py>`_).
       * ``ep_dispatch(buffer, tokens, topk_idx, topk_weights)`` returns the
         receive buffer with one fixed slot range per local expert, the routing
