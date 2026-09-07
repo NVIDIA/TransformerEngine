@@ -22,21 +22,20 @@ of expert networks and a router that sends each token to one or more experts.
 This keeps the activated parameter count per token small while allowing the
 model to scale to many more total parameters.
 
-A token passes through an MoE layer in four stages:
+A token passes through an MoE layer in the following stages:
 
 #. The **router** scores the experts for each token and selects the top-k of
    them.
 #. **Token dispatch** gathers the tokens into expert-contiguous order.
+#. With **expert parallelism** - experts sharded across devices - an
+   **all-to-all dispatch** sends each token to the rank that owns its expert.
 #. The **grouped MLP** (the experts) runs a single batched computation over all
-   expert blocks.
+   expert blocks local to the device.
+#. With expert parallelism, an **all-to-all combine** returns the expert outputs
+   to the rank the token came from.
 #. **Token combine** scatters the expert outputs back into the original token
    order, merging the contributions when a token was sent to more than one
    expert.
-
-When the experts do not fit on one device, they are sharded across devices
-(**expert parallelism**). The layer then gains two all-to-all collectives: a
-dispatch that sends each token to the rank owning its expert, and a combine that
-returns the results to the source rank. The experts themselves stay local.
 
 .. raw:: html
    :file: img/moe_layer_ep.svg
@@ -51,9 +50,11 @@ exposed as standalone functions, so they can be assembled into a complete MoE
 layer or dropped into an existing implementation one piece at a time:
 
 * :ref:`Routing kernels <moe-routing-kernels>`: the router fuses the score
-  function with the top-k selection, and token dispatch and combine move tokens
-  between their original order and the expert-contiguous layout with optimized
-  kernels instead of Python-level gather / sort / concatenate chains.
+  function with the top-k selection, a fused :ref:`load-balancing loss
+  <moe-load-balancing>` keeps the routing spread evenly across experts, and token
+  dispatch and combine move tokens between their original order and the
+  expert-contiguous layout with optimized kernels instead of Python-level
+  gather / sort / concatenate chains.
 * :ref:`Grouped GEMM <moe-grouped-gemm>` primitives execute the expert linear
   layers efficiently once the tokens are laid out in expert-contiguous blocks,
   and the :ref:`grouped MLP <moe-grouped-mlp>` fuses the whole expert MLP into
@@ -125,6 +126,8 @@ architectures:
          :start-after: # START_ROUTER_JAX
          :end-before: # END_ROUTER_JAX
 
+.. _moe-load-balancing:
+
 Load balancing
 ~~~~~~~~~~~~~~
 
@@ -136,6 +139,11 @@ expert rather than only the selected top-k - so the loss has a gradient with
 respect to every expert's logit. Those dense scores come from
 ``fused_compute_score_for_moe_aux_loss`` in PyTorch, or from
 ``fused_topk_with_score_function(..., compute_aux_scores=True)`` in JAX.
+
+An alternative that needs no auxiliary loss is to bias the selection directly:
+with the sigmoid score function, the router's ``expert_bias`` shifts which experts
+are selected without changing the returned weights, so it can be adjusted between
+steps to steer load towards under-used experts.
 
 .. tabs::
 
