@@ -508,17 +508,11 @@ Dispatch can quantize the tokens before sending them:
       * ``ep_bootstrap(ep_group, ...)`` initializes EP once per process on an
         existing process group and fixes the group-wide sizes (number of experts,
         maximum tokens per rank, hidden size, top-k, receive capacity).
-      * ``EpBuffer`` holds the routing state of one dispatch/combine pair: where
-        each token was sent, how many tokens each local expert received, and the
-        metadata the combine and both backward passes need to undo the dispatch.
-        Dispatch writes this state and combine and backward read it, so a buffer
-        must not be reused until the backward of that call has run. Use one
-        buffer per MoE layer, and one per microbatch when several microbatches
-        are in flight (pipeline parallelism). ``dispatch_fwd_quant_recipe``
-        makes dispatch quantize the tokens before sending them; with
-        ``MXFP8BlockScaling()`` the receive buffer comes back as an MXFP8
-        ``GroupedTensor`` (FP8 rows with per-block scales, one group per local
-        expert, ``alignment=128`` required) instead of BF16 rows (see
+      * ``EpBuffer`` holds the routing state of one dispatch/combine pair,
+        written by dispatch and read by combine and backward. Use one per MoE
+        layer, and one per in-flight microbatch under pipeline parallelism.
+        ``dispatch_fwd_quant_recipe=MXFP8BlockScaling()`` enables the quantized
+        dispatch (see
         `tests/pytorch/distributed/run_ep.py <https://github.com/NVIDIA/TransformerEngine/blob/main/tests/pytorch/distributed/run_ep.py>`_).
       * ``ep_dispatch(buffer, tokens, topk_idx, topk_weights)`` returns the
         receive buffer with one fixed slot range per local expert, the routing
