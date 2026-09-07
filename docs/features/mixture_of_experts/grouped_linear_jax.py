@@ -20,7 +20,10 @@ loop_out = jnp.concatenate(
     axis=0,
 )
 
-# Transformer Engine: one grouped dense call.
+# Transformer Engine: one grouped dense call. group_sizes is a device array.
+# On Blackwell, BF16 and MXFP8 inputs without bias run as a single grouped GEMM
+# with the group sizes kept on the device; other cases launch one GEMM per
+# expert and copy group_sizes to the host first.
 grouped_out = te_dense.grouped_dense(
     x,
     kernel,

@@ -339,17 +339,25 @@ expert-contiguous order.
          :start-after: # START_GROUPED_LINEAR_JAX
          :end-before: # END_GROUPED_LINEAR_JAX
 
-* **Backends:** the grouped GEMM backend is selected based on datatype and GPU
-  architecture, for example cuBLAS GEMMs on multiple CUDA streams or a single
-  grouped GEMM kernel.
-* **Low-precision recipes:** the grouped GEMM works with the
-  :doc:`low-precision training recipes </features/low_precision_training/index>`
-  available to ``Linear``. The supported set depends on the GPU architecture and
-  cuBLAS version; see the API reference for the current constraints.
-* **Fused quantization:** in low-precision paths the scale computation, casting
-  and cast/transpose steps are fused across experts.
-* **Fused expert MLP:** the two expert GEMMs and the activation between them can
-  be fused into one operation, see :ref:`Grouped MLP <moe-grouped-mlp>`.
+The grouped GEMM works with the :doc:`low-precision training recipes
+</features/low_precision_training/index>` available to ``Linear``: the inputs
+are quantized per expert and the expert GEMMs run in the recipe's precision.
+
+There are two execution paths:
+
+* **Per-expert GEMMs.** The per-expert token counts are read on the host, the
+  input is split and quantized per expert, and one cuBLAS GEMM per expert is
+  launched on a pool of CUDA streams (on Hopper, ``NVTE_USE_CUTLASS_GROUPED_GEMM=1``
+  switches BF16/FP16 to a CUTLASS grouped GEMM kernel). This path supports all
+  recipes, but reading the token counts is a device-to-host synchronization, so
+  it cannot be captured in a CUDA graph.
+* **Single grouped GEMM.** The token counts stay on the device and all experts
+  run as one cuBLASLt grouped GEMM (cuBLAS 13.3 or newer), with the
+  quantization fused across experts. There is no host synchronization, so the
+  step is CUDA-graph capturable. Supported for BF16/FP16, and for MXFP8 and NVFP4
+  on Blackwell; FP8 current scaling and FP8 block scaling on Hopper need cuBLAS
+  13.5 / 13.6. FP8 delayed scaling and custom recipes are not supported on this
+  path. The snippets show how it is selected.
 
 .. _moe-grouped-mlp:
 
@@ -387,15 +395,9 @@ in sequence are replaced with one fused grouped-MLP operation.
          :start-after: # START_GROUPED_MLP_PYTORCH
          :end-before: # END_GROUPED_MLP_PYTORCH
 
-The fused path is taken when all of the following hold; otherwise the three
-operations run separately with identical results:
-
-* **Architecture:** Blackwell (SM100) with cuDNN frontend 1.23 or newer.
-* **Recipe:** a block-scaled low-precision recipe - MXFP8, or NVFP4 with the
-  randomized Hadamard transform enabled.
-* **Opt-in:** the environment variable ``NVTE_CUTEDSL_FUSED_GROUPED_MLP=1``.
-* **Activation:** a scaled ``SwiGLU`` / ``GeGLU`` (gated) or ``SReLU`` (unary),
-  with feature dimensions aligned to 64 and the token count to 128.
+The fusion is enabled with ``NVTE_CUTEDSL_FUSED_GROUPED_MLP=1`` and requires
+Blackwell and a block-scaled recipe (MXFP8 or NVFP4). When the configuration is
+not supported, the three operations run separately with identical results.
 
 .. _moe-expert-parallelism:
 
