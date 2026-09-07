@@ -458,36 +458,51 @@ dense MLP on the local tokens on every rank.
 experts run on the receive buffer, and combine returns the outputs to the source
 rank.*
 
-Transformer Engine provides optimized implementations of both operations,
-including their backward passes, so the layer does not have to assemble them
-from generic collectives and permutation kernels. They are built on the NCCL EP
-library (``libnccl_ep``, loaded at runtime) and are differentiable.
+Transformer Engine provides dispatch and combine as ready, differentiable
+operations built on the NCCL EP library (``libnccl_ep``, loaded at runtime), so
+an MoE layer with expert parallelism is just router, dispatch, local experts and
+combine.
 
-* **Communication.** The NCCL EP kernels move each token straight to the slot
-  of its expert on the owning rank, so the routing and the communication happen
-  in one step.
-* **Zero-copy mode.** Optionally, the token and receive buffers are allocated as
-  NCCL symmetric memory (``symm_mem_alloc``): the same buffer is registered on
-  every rank as a window, so the kernels write directly into the peer's buffer
-  instead of staging the payload in internal NCCL buffers. Without it the
-  library copies through its own staging buffers.
+**One step.** Dispatch reads the top-k expert indices of the local tokens and
+moves the tokens in a single pass:
 
-* **Receive buffer size.** ``recv_capacity_per_rank`` is the maximum number of
-  tokens (rows of ``hidden_size``) a rank receives per step. Every rank sends at
-  most ``max_tokens_per_rank`` tokens to ``top_k`` experts each, and in the
-  worst case all of them are routed to experts on the same rank, so
-  ``ep_size * max_tokens_per_rank * top_k`` never drops a token; a smaller
-  capacity saves memory but can overflow when the routing is skewed (see
-  ``drop_on_overflow``). With a fixed capacity the step is allocation-free and
-  CUDA-graph capturable. Without it the buffer is sized from the actual receive
+* it counts how many tokens every rank and every local expert will receive;
+* it writes each token straight into the slot range of its expert in the
+  receive buffer on the owning rank, so the receive buffer is already grouped by
+  local expert;
+* combine reverses this: it returns each expert output to the source rank and
+  sums the contributions into the original token order.
+
+**Receive buffer.** Because every expert owns a fixed slot range, the receive
+buffer has a fixed layout and has to be sized up front:
+
+* ``recv_capacity_per_rank`` is the maximum number of tokens (rows of
+  ``hidden_size``) a rank receives per step. Every rank sends at most
+  ``max_tokens_per_rank`` tokens to ``top_k`` experts each, and in the worst
+  case all of them go to one rank, so ``ep_size * max_tokens_per_rank * top_k``
+  never drops a token. A smaller capacity saves memory but can overflow when the
+  routing is skewed (see ``drop_on_overflow``).
+* With a fixed capacity the step allocates nothing and needs no host
+  synchronization, so it can be captured in a CUDA graph.
+* Without a capacity (eager mode) the buffer is sized from the actual receive
   count each step, at the cost of a host synchronization.
-* **Quantized dispatch.** Dispatch can quantize the tokens before the
-  all-to-all, so the communication moves the low-precision payload and the local
-  grouped GEMM consumes it directly. MXFP8 is supported today; support for
-  further recipes is in progress.
-* **Examples.** Complete runnable examples:
-  `examples/pytorch/ep <https://github.com/NVIDIA/TransformerEngine/tree/main/examples/pytorch/ep>`_
-  and `examples/jax/ep <https://github.com/NVIDIA/TransformerEngine/tree/main/examples/jax/ep>`_.
+
+**Payload.** By default the tokens travel as BF16 rows. Dispatch can quantize
+them first:
+
+* the communication then moves the low-precision payload, and the receive
+  buffer comes back as a quantized ``GroupedTensor`` (one group per local
+  expert) that the fused grouped MLP accepts without quantizing it again;
+* MXFP8 is supported today; support for further recipes is in progress.
+
+**Transfer path.** By default the library copies the payload through its own
+staging buffers. Zero-copy mode removes these copies:
+
+* the token and receive buffers are allocated as NCCL symmetric memory
+  (``symm_mem_alloc``), so the same buffer is registered on every rank as a
+  window and the kernels write directly into the peer's buffer;
+* the buffers have to be persistent, which also makes them the buffers to pass
+  in when capturing a CUDA graph.
 
 .. tabs::
 
@@ -591,6 +606,10 @@ library (``libnccl_ep``, loaded at runtime) and are differentiable.
          :language: python
          :start-after: # START_MOE_EXPERT_PARALLEL_JAX
          :end-before: # END_MOE_EXPERT_PARALLEL_JAX
+
+Complete runnable examples:
+`examples/pytorch/ep <https://github.com/NVIDIA/TransformerEngine/tree/main/examples/pytorch/ep>`_
+and `examples/jax/ep <https://github.com/NVIDIA/TransformerEngine/tree/main/examples/jax/ep>`_.
 
 .. _moe-putting-it-together:
 
