@@ -64,7 +64,7 @@ Modules
 Mixture of Experts
 ------------------
 Router, routing kernels, and grouped dense for MoE layers. See
-:doc:`Mixture of Experts <../features/mixture_of_experts/index>` for an overview.
+:doc:`Mixture of Experts <../features/mixture_of_experts/mixture_of_experts>` for an overview.
 
 .. autoapifunction:: transformer_engine.jax.router.fused_topk_with_score_function
 

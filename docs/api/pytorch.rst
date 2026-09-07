@@ -90,7 +90,7 @@ Recipe availability
 Mixture of Experts (MoE) functions
 ----------------------------------
 
-See :doc:`Mixture of Experts <../features/mixture_of_experts/index>` for an overview of
+See :doc:`Mixture of Experts <../features/mixture_of_experts/mixture_of_experts>` for an overview of
 how these functions fit together. ``GroupedLinear`` (the grouped GEMM used for the
 expert layers) is documented above with the other modules.
 
@@ -116,7 +116,7 @@ Expert parallelism
 ~~~~~~~~~~~~~~~~~~
 
 NCCL-based dispatch and combine for experts sharded across ranks. See
-:doc:`Expert parallelism <../features/mixture_of_experts/expert_parallelism/expert_parallelism>`.
+:doc:`Expert parallelism <../features/mixture_of_experts/mixture_of_experts>`.
 
 .. autoapifunction:: transformer_engine.pytorch.ep.ep_bootstrap
 
