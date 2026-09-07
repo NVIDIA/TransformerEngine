@@ -14,6 +14,9 @@ Mixture of Experts
     low-precision recipes. This support is still being extended, so not every
     block works with every recipe yet.
 
+Introduction
+------------
+
 Mixture of Experts (MoE) layers replace a dense feed-forward network with a set
 of expert networks and a router that sends each token to one or more experts.
 This keeps the activated parameter count per token small while allowing the
@@ -41,24 +44,61 @@ Transformer Engine provides an optimized building block for each stage. They are
 exposed as standalone functions, so they can be assembled into a complete MoE
 layer or dropped into an existing implementation one piece at a time:
 
-* The :ref:`router <moe-router>` fuses the score function with the top-k
-  selection, and provides a fused load-balancing loss.
-* :ref:`Token dispatch and combine <moe-routing-kernels>` move
-  tokens between their original order and the expert-contiguous layout using
-  optimized kernels instead of Python-level gather / sort / concatenate chains.
-* :ref:`Grouped GEMM <moe-grouped-gemm>` primitives execute the
-  expert linear layers efficiently once the tokens are laid out in
-  expert-contiguous blocks.
+* :ref:`Routing kernels <moe-routing-kernels>`: the router fuses the score
+  function with the top-k selection, and token dispatch and combine move tokens
+  between their original order and the expert-contiguous layout with optimized
+  kernels instead of Python-level gather / sort / concatenate chains.
+* :ref:`Grouped GEMM <moe-grouped-gemm>` primitives execute the expert linear
+  layers efficiently once the tokens are laid out in expert-contiguous blocks,
+  and the :ref:`grouped MLP <moe-grouped-mlp>` fuses the whole expert MLP into
+  one kernel.
+* :ref:`Expert parallelism <moe-expert-parallelism>` shards the experts across
+  devices with all-to-all dispatch and combine.
 
-:ref:`Building an MoE layer <moe-putting-it-together>` wires the four stages
-together into a complete layer, and :ref:`Expert parallelism
-<moe-expert-parallelism>` covers sharding the experts across
-devices.
+.. _moe-putting-it-together:
+
+Putting it together
+~~~~~~~~~~~~~~~~~~~
+
+The building blocks assemble into the four stages above: route, dispatch, run
+the experts, and combine. The example below wires them together for top-k
+routing; the sections that follow describe each block on its own.
+
+.. tabs::
+
+   .. tab:: PyTorch
+
+      .. literalinclude:: moe_layer_pytorch.py
+         :language: python
+         :start-after: # START_MOE_LAYER_PYTORCH
+         :end-before: # END_MOE_LAYER_PYTORCH
+
+   .. tab:: JAX
+
+      .. literalinclude:: moe_layer_jax.py
+         :language: python
+         :start-after: # START_MOE_LAYER_JAX
+         :end-before: # END_MOE_LAYER_JAX
+
+This uses dropless routing (``num_out_tokens = num_tokens * top_k``), so the
+dispatch buffer is sized statically rather than from a device-to-host sync. The
+expert step is built from the :ref:`grouped GEMM <moe-grouped-gemm>`; a full
+expert MLP stacks two grouped GEMMs around an activation. Every stage is differentiable, so the assembled layer
+trains end to end.
+
+When the experts are sharded across devices, the dispatch and combine steps
+become collectives; see :ref:`Expert parallelism
+<moe-expert-parallelism>`.
+
+.. _moe-routing-kernels:
+
+Routing kernels
+---------------
 
 .. _moe-router:
 
 Router
-------
+~~~~~~
 
 The router decides which experts each token is sent to. It applies a score
 function to the gating logits, selects the top-k experts per token, and produces
@@ -138,11 +178,6 @@ respect to every expert's logit. Those dense scores come from
          :language: python
          :start-after: # START_ROUTER_AUX_JAX
          :end-before: # END_ROUTER_AUX_JAX
-
-.. _moe-routing-kernels:
-
-Routing kernels
----------------
 
 Once the router has produced a routing map, the tokens must be moved into the
 expert-contiguous layout expected by the grouped GEMM (``GroupedLinear`` in
@@ -397,7 +432,7 @@ The grouped GEMM uses implementations tuned for grouped expert execution:
 * **Fused expert MLP:** Through the :doc:`operation-based API
   </examples/op_fuser/op_fuser>`, the two expert GEMMs and the activation
   between them can be fused into a single grouped operation on recent
-  architectures; see :ref:`moe-fused-grouped-mlp` below.
+  architectures; see :ref:`Grouped MLP <moe-grouped-mlp>`.
 
 The PyTorch ``GroupedLinear`` module also supports the features expected of a
 Transformer Engine linear layer - tensor and sequence parallelism, gradient
@@ -405,10 +440,10 @@ accumulation fusion, and FP8 weight caching - so it can serve as a drop-in exper
 layer. See the :doc:`PyTorch API reference </api/pytorch>` for the full
 signature.
 
-.. _moe-fused-grouped-mlp:
+.. _moe-grouped-mlp:
 
-Fused grouped MLP
-~~~~~~~~~~~~~~~~~
+Grouped MLP
+-----------
 
 An expert MLP is two grouped GEMMs with an activation between them: the first
 projects into the (gated) feed-forward dimension, the activation is applied, and
@@ -458,42 +493,6 @@ run separately and produce identical results:
 * **Opt-in:** the environment variable ``NVTE_CUTEDSL_FUSED_GROUPED_MLP=1``.
 * **Activation:** a scaled ``SwiGLU`` / ``GeGLU`` (gated) or ``SReLU`` (unary),
   with feature dimensions aligned to 64 and the token count to 128.
-
-.. _moe-putting-it-together:
-
-Building an MoE layer
----------------------
-
-The building blocks assemble into the four-stage MoE layer from the
-:ref:`introduction <moe-overview>`: route, dispatch, run the
-experts, and combine. The example below wires them together for top-k routing.
-
-.. tabs::
-
-   .. tab:: PyTorch
-
-      .. literalinclude:: moe_layer_pytorch.py
-         :language: python
-         :start-after: # START_MOE_LAYER_PYTORCH
-         :end-before: # END_MOE_LAYER_PYTORCH
-
-   .. tab:: JAX
-
-      .. literalinclude:: moe_layer_jax.py
-         :language: python
-         :start-after: # START_MOE_LAYER_JAX
-         :end-before: # END_MOE_LAYER_JAX
-
-This uses dropless routing (``num_out_tokens = num_tokens * top_k``), so the
-dispatch buffer is sized statically rather than from a device-to-host sync. The
-expert step is the grouped MLP from :ref:`Grouped GEMM
-<moe-grouped-gemm>`; a full expert MLP stacks two grouped GEMMs
-around an activation. Every stage is differentiable, so the assembled layer
-trains end to end.
-
-When the experts are sharded across devices, the dispatch and combine steps
-become collectives; see :ref:`Expert parallelism
-<moe-expert-parallelism>`.
 
 .. _moe-expert-parallelism:
 
