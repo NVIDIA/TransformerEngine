@@ -14,6 +14,7 @@
       .box { fill: #ffffff; stroke: #bdbdbd; stroke-width: 1.3; }
       .panel { fill: #f5f5f5; stroke: #9e9e9e; stroke-width: 1.2; stroke-dasharray: 5 4; }
       .arrow { stroke: #424242; stroke-width: 1.6; fill: none; marker-end: url(#ah); }
+      .chip { stroke-width: 1.6; }
     </style>
     <marker id="ah" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#424242"/></marker>
   </defs>
@@ -27,58 +28,68 @@
   <text x="670" y="56" class="small-label">combine all-to-all</text>
   <text x="805" y="56" class="small-label">output</text>
 
-  <!-- rank bands -->
   <rect x="50" y="70" width="810" height="120" rx="4" class="panel"/>
   <text x="58" y="84" class="rank-label">Rank 0</text>
   <rect x="50" y="200" width="810" height="120" rx="4" class="panel"/>
   <text x="58" y="214" class="rank-label">Rank 1</text>
 
   <!-- tokens, colored by the expert they are routed to -->
-  <rect x="60" y="92"  width="90" height="26" class="expert-e0"/><text x="105" y="109" class="tiny-label">t0 → E0</text>
+  <rect x="60" y="92" width="90" height="26" class="expert-e0"/><text x="105" y="109" class="tiny-label">t0 → E0</text>
   <rect x="60" y="124" width="90" height="26" class="expert-e2"/><text x="105" y="141" class="tiny-label">t1 → E2</text>
   <rect x="60" y="156" width="90" height="26" class="expert-e0"/><text x="105" y="173" class="tiny-label">t2 → E0</text>
   <rect x="60" y="222" width="90" height="26" class="expert-e1"/><text x="105" y="239" class="tiny-label">t3 → E1</text>
   <rect x="60" y="254" width="90" height="26" class="expert-e3"/><text x="105" y="271" class="tiny-label">t4 → E3</text>
   <rect x="60" y="286" width="90" height="26" class="expert-e2"/><text x="105" y="303" class="tiny-label">t5 → E2</text>
-
-  <!-- dispatch: each token goes to the rank owning its expert -->
+  <!-- dispatch: each token goes to the slot of its expert on the owning rank -->
   <path d="M 150 105 L 330 105" class="arrow"/>
   <path d="M 150 137 L 330 235" class="arrow"/>
-  <path d="M 150 169 L 330 169" class="arrow"/>
-  <path d="M 150 235 L 330 137" class="arrow"/>
+  <path d="M 150 169 L 330 137" class="arrow"/>
+  <path d="M 150 235 L 330 169" class="arrow"/>
   <path d="M 150 267 L 330 299" class="arrow"/>
   <path d="M 150 299 L 330 267" class="arrow"/>
-
   <!-- receive buffers: expert-contiguous -->
-  <rect x="330" y="92"  width="110" height="26" class="expert-e0"/><text x="385" y="109" class="tiny-label">E0: t0</text>
+  <rect x="330" y="92" width="110" height="26" class="expert-e0"/><text x="385" y="109" class="tiny-label">E0: t0</text>
   <rect x="330" y="124" width="110" height="26" class="expert-e0"/><text x="385" y="141" class="tiny-label">E0: t2</text>
   <rect x="330" y="156" width="110" height="26" class="expert-e1"/><text x="385" y="173" class="tiny-label">E1: t3</text>
   <rect x="330" y="222" width="110" height="26" class="expert-e2"/><text x="385" y="239" class="tiny-label">E2: t1</text>
   <rect x="330" y="254" width="110" height="26" class="expert-e2"/><text x="385" y="271" class="tiny-label">E2: t5</text>
   <rect x="330" y="286" width="110" height="26" class="expert-e3"/><text x="385" y="303" class="tiny-label">E3: t4</text>
-
   <path d="M 440 137 L 470 137" class="arrow"/>
   <path d="M 440 267 L 470 267" class="arrow"/>
-
-  <!-- local grouped MLP -->
-  <rect x="470" y="92"  width="110" height="90" class="stage"/>
+  <rect x="470" y="92"  width="110" height="90" class="stage">
+    <animate attributeName="stroke-width" dur="8s" repeatCount="indefinite" values="2.2;2.2;4;4;2.2;2.2" keyTimes="0;0.33;0.36;0.5;0.53;1"/>
+  </rect>
   <text x="525" y="132" class="label">Grouped MLP</text><text x="525" y="149" class="small-label">E0, E1</text>
-  <rect x="470" y="222" width="110" height="90" class="stage"/>
+  <rect x="470" y="222" width="110" height="90" class="stage">
+    <animate attributeName="stroke-width" dur="8s" repeatCount="indefinite" values="2.2;2.2;4;4;2.2;2.2" keyTimes="0;0.33;0.36;0.5;0.53;1"/>
+  </rect>
   <text x="525" y="262" class="label">Grouped MLP</text><text x="525" y="279" class="small-label">E2, E3</text>
-
-  <!-- combine: results return to the source rank -->
+  <!-- combine: each slot result returns to its source token position -->
   <path d="M 580 105 L 760 105" class="arrow"/>
   <path d="M 580 137 L 760 169" class="arrow"/>
   <path d="M 580 169 L 760 235" class="arrow"/>
   <path d="M 580 235 L 760 137" class="arrow"/>
   <path d="M 580 267 L 760 299" class="arrow"/>
   <path d="M 580 299 L 760 267" class="arrow"/>
-
   <!-- outputs in original token order -->
-  <rect x="760" y="92"  width="90" height="26" class="box"/><text x="805" y="109" class="tiny-label">y0</text>
+  <rect x="760" y="92" width="90" height="26" class="box"/><text x="805" y="109" class="tiny-label">y0</text>
   <rect x="760" y="124" width="90" height="26" class="box"/><text x="805" y="141" class="tiny-label">y1</text>
   <rect x="760" y="156" width="90" height="26" class="box"/><text x="805" y="173" class="tiny-label">y2</text>
   <rect x="760" y="222" width="90" height="26" class="box"/><text x="805" y="239" class="tiny-label">y3</text>
   <rect x="760" y="254" width="90" height="26" class="box"/><text x="805" y="271" class="tiny-label">y4</text>
   <rect x="760" y="286" width="90" height="26" class="box"/><text x="805" y="303" class="tiny-label">y5</text>
+  <!-- animation: dispatch chips -->
+  <g opacity="0"><rect x="-13" y="-7" width="26" height="14" rx="3" class="expert-e0 chip"/><animateMotion dur="8.0s" repeatCount="indefinite" path="M 150 105 L 330 105" keyTimes="0;0.0625;0.3125;1" keyPoints="0;0;1;1" calcMode="linear"/><animate attributeName="opacity" dur="8.0s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;0.0615;0.0625;0.3250;0.3260;1"/></g>
+  <g opacity="0"><rect x="-13" y="-7" width="26" height="14" rx="3" class="expert-e2 chip"/><animateMotion dur="8.0s" repeatCount="indefinite" path="M 150 137 L 330 235" keyTimes="0;0.0625;0.3125;1" keyPoints="0;0;1;1" calcMode="linear"/><animate attributeName="opacity" dur="8.0s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;0.0615;0.0625;0.3250;0.3260;1"/></g>
+  <g opacity="0"><rect x="-13" y="-7" width="26" height="14" rx="3" class="expert-e0 chip"/><animateMotion dur="8.0s" repeatCount="indefinite" path="M 150 169 L 330 137" keyTimes="0;0.0625;0.3125;1" keyPoints="0;0;1;1" calcMode="linear"/><animate attributeName="opacity" dur="8.0s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;0.0615;0.0625;0.3250;0.3260;1"/></g>
+  <g opacity="0"><rect x="-13" y="-7" width="26" height="14" rx="3" class="expert-e1 chip"/><animateMotion dur="8.0s" repeatCount="indefinite" path="M 150 235 L 330 169" keyTimes="0;0.0625;0.3125;1" keyPoints="0;0;1;1" calcMode="linear"/><animate attributeName="opacity" dur="8.0s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;0.0615;0.0625;0.3250;0.3260;1"/></g>
+  <g opacity="0"><rect x="-13" y="-7" width="26" height="14" rx="3" class="expert-e3 chip"/><animateMotion dur="8.0s" repeatCount="indefinite" path="M 150 267 L 330 299" keyTimes="0;0.0625;0.3125;1" keyPoints="0;0;1;1" calcMode="linear"/><animate attributeName="opacity" dur="8.0s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;0.0615;0.0625;0.3250;0.3260;1"/></g>
+  <g opacity="0"><rect x="-13" y="-7" width="26" height="14" rx="3" class="expert-e2 chip"/><animateMotion dur="8.0s" repeatCount="indefinite" path="M 150 299 L 330 267" keyTimes="0;0.0625;0.3125;1" keyPoints="0;0;1;1" calcMode="linear"/><animate attributeName="opacity" dur="8.0s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;0.0615;0.0625;0.3250;0.3260;1"/></g>
+  <!-- animation: combine chips -->
+  <g opacity="0"><rect x="-13" y="-7" width="26" height="14" rx="3" class="expert-e0 chip"/><animateMotion dur="8.0s" repeatCount="indefinite" path="M 580 105 L 760 105" keyTimes="0;0.5625;0.8125;1" keyPoints="0;0;1;1" calcMode="linear"/><animate attributeName="opacity" dur="8.0s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;0.5615;0.5625;0.8250;0.8260;1"/></g>
+  <g opacity="0"><rect x="-13" y="-7" width="26" height="14" rx="3" class="expert-e0 chip"/><animateMotion dur="8.0s" repeatCount="indefinite" path="M 580 137 L 760 169" keyTimes="0;0.5625;0.8125;1" keyPoints="0;0;1;1" calcMode="linear"/><animate attributeName="opacity" dur="8.0s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;0.5615;0.5625;0.8250;0.8260;1"/></g>
+  <g opacity="0"><rect x="-13" y="-7" width="26" height="14" rx="3" class="expert-e1 chip"/><animateMotion dur="8.0s" repeatCount="indefinite" path="M 580 169 L 760 235" keyTimes="0;0.5625;0.8125;1" keyPoints="0;0;1;1" calcMode="linear"/><animate attributeName="opacity" dur="8.0s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;0.5615;0.5625;0.8250;0.8260;1"/></g>
+  <g opacity="0"><rect x="-13" y="-7" width="26" height="14" rx="3" class="expert-e2 chip"/><animateMotion dur="8.0s" repeatCount="indefinite" path="M 580 235 L 760 137" keyTimes="0;0.5625;0.8125;1" keyPoints="0;0;1;1" calcMode="linear"/><animate attributeName="opacity" dur="8.0s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;0.5615;0.5625;0.8250;0.8260;1"/></g>
+  <g opacity="0"><rect x="-13" y="-7" width="26" height="14" rx="3" class="expert-e2 chip"/><animateMotion dur="8.0s" repeatCount="indefinite" path="M 580 267 L 760 299" keyTimes="0;0.5625;0.8125;1" keyPoints="0;0;1;1" calcMode="linear"/><animate attributeName="opacity" dur="8.0s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;0.5615;0.5625;0.8250;0.8260;1"/></g>
+  <g opacity="0"><rect x="-13" y="-7" width="26" height="14" rx="3" class="expert-e3 chip"/><animateMotion dur="8.0s" repeatCount="indefinite" path="M 580 299 L 760 267" keyTimes="0;0.5625;0.8125;1" keyPoints="0;0;1;1" calcMode="linear"/><animate attributeName="opacity" dur="8.0s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;0.5615;0.5625;0.8250;0.8260;1"/></g>
 </svg>
