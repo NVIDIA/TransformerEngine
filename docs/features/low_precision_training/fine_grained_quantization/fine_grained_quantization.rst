@@ -5,27 +5,28 @@
 
 .. _fine-grained-quantization-recipes:
 .. _heterogeneous-quantization-recipes:
-.. _mixed-format-quantization-recipes:
 
-Mixed-format quantization recipes
-==================================
+Fine-grained quantization recipes
+=================================
 
 Standard TE recipes quantize the whole model the same way. That is often too
 coarse: one sensitive layer may need BF16 while the rest runs in MXFP8, or a
-gradient GEMM may tolerate a cheaper format than the forward pass. Mixed-format
+gradient GEMM may tolerate a cheaper format than the forward pass. Fine-grained
 recipes lift this restriction: you write a small factory function that picks a
 quantizer for each slot TE asks about, and pass it via
 :class:`~transformer_engine.common.recipe.CustomRecipe` to the usual
 :class:`~transformer_engine.pytorch.autocast`.
+"Fine-grained" refers to the granularity of that choice (per module, tensor
+role, and GEMM direction), not to the block size of the scaling factors.
 
 .. warning::
 
-   Mixed-format recipes are currently available only in the PyTorch API of
+   Fine-grained recipes are currently available only in the PyTorch API of
    TE.
 
 .. warning::
 
-   Mixed-format recipes and their construction APIs are experimental: API,
+   Fine-grained recipes and their construction APIs are experimental: API,
    validation, and kernel coverage may change without notice. This guide does
    not define a supported recipe or an expected accuracy/performance ordering.
 
@@ -33,11 +34,11 @@ quantizer for each slot TE asks about, and pass it via
 Example: mixing MXFP8, NVFP4, and BF16
 --------------------------------------
 
-The `runnable example <https://github.com/NVIDIA/TransformerEngine/blob/main/docs/examples/mixed_format_quantization/pytorch_mixed_format_quantization_example.py>`__
+The `runnable example <https://github.com/NVIDIA/TransformerEngine/blob/main/docs/examples/fine_grained_quantization/pytorch_fine_grained_quantization_example.py>`__
 makes the following assignments:
 
 .. raw:: html
-   :file: img/mixed_format_assignments.svg
+   :file: img/fine_grained_assignments.svg
 
 *Figure 1. Precision assignments per module and GEMM used throughout this
 guide.*
@@ -93,13 +94,13 @@ TE autocast path:
              output = model(inputs)
 
 The complete, runnable version is available
-`on GitHub <https://github.com/NVIDIA/TransformerEngine/blob/main/docs/examples/mixed_format_quantization/pytorch_mixed_format_quantization_example.py>`__
+`on GitHub <https://github.com/NVIDIA/TransformerEngine/blob/main/docs/examples/fine_grained_quantization/pytorch_fine_grained_quantization_example.py>`__
 (requires Blackwell or later); run it from the repository root after
 installing TE:
 
 .. code-block:: bash
 
-   python docs/examples/mixed_format_quantization/pytorch_mixed_format_quantization_example.py
+   python docs/examples/fine_grained_quantization/pytorch_fine_grained_quantization_example.py
 
 CustomRecipe and quantizer factory
 ----------------------------------
@@ -309,7 +310,7 @@ For the example assignments (fprop in MXFP8, dgrad in NVFP4, wgrad in BF16):
    grad_output = HybridQuantizer(rowwise=NVFP4,  columnwise=BF16)    # dgrad | wgrad
 
 .. raw:: html
-   :file: img/mixed_format_linear_mapping.svg
+   :file: img/fine_grained_linear_mapping.svg
 
 *Figure 4. Each GEMM consumes one representation of each of its two operand
 tensors; giving both operands the same format sets that GEMM's precision.*

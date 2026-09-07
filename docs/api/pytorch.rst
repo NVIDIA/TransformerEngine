@@ -112,8 +112,8 @@ Communication-computation overlap
   :members: FP8, NONE
 
 
-Mixed-format quantization recipes
-----------------------------------
+Fine-grained quantization recipes
+---------------------------------
 
 .. autoapiclass:: transformer_engine.pytorch.QuantizerRole(module_type="", tensor_type="", name="")
 
