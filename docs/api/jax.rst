@@ -77,3 +77,5 @@ Router, routing kernels, and grouped dense for MoE layers. See
 .. autoapifunction:: transformer_engine.jax.permutation.sort_chunks_by_index
 
 .. autoapifunction:: transformer_engine.jax.dense.grouped_dense
+
+.. autoapifunction:: transformer_engine.jax.moe.moe

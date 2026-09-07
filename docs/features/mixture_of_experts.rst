@@ -425,3 +425,92 @@ dispatch buffer is sized statically rather than from a device-to-host sync. The
 expert step is the grouped MLP from the previous section; a full expert MLP
 stacks two grouped GEMMs around an activation. Every stage is differentiable, so
 the assembled layer trains end to end.
+
+Fused grouped MLP
+-----------------
+
+An expert MLP is two grouped GEMMs with an activation between them: the first
+projects into the (gated) feed-forward dimension, the activation is applied, and
+the second projects back. Running these as separate kernels writes the large
+intermediate activation out to HBM and reads it back for the second GEMM, and
+re-quantizes it in a separate pass.
+
+On Blackwell (SM100) GPUs, Transformer Engine can fuse the whole expert MLP -
+both grouped GEMMs and the activation - into a single CuTe DSL kernel. The
+intermediate stays on chip and the cross-expert quantization is folded into the
+GEMMs, removing the HBM round-trip and the extra kernel launches.
+
+.. figure:: img/moe_grouped_mlp.svg
+   :align: center
+   :alt: The two expert grouped GEMMs and the activation between them fused into one kernel
+
+   Figure 7: The operation fuser replaces the first grouped GEMM, the activation,
+   and the second grouped GEMM with a single fused grouped-MLP kernel that keeps
+   the intermediate on chip.
+
+The fusion is exposed through the operation-based API and applied automatically
+by the :doc:`operation fuser <../examples/op_fuser/op_fuser>`: when it sees a
+grouped linear, a scaled GLU (or SReLU) activation, and another grouped linear in
+sequence, it replaces them with one fused grouped-MLP operation. No change to the
+forward code is needed to opt in.
+
+.. literalinclude:: grouped_mlp_pytorch.py
+   :language: python
+   :start-after: # START_GROUPED_MLP_PYTORCH
+   :end-before: # END_GROUPED_MLP_PYTORCH
+
+The fused path is taken when all of the following hold; otherwise the three ops
+run separately and produce identical results:
+
+* **Architecture:** Blackwell (SM100) with cuDNN frontend 1.23 or newer.
+* **Recipe:** a block-scaled low-precision recipe - MXFP8, or NVFP4 with the
+  randomized Hadamard transform enabled.
+* **Opt-in:** the environment variable ``NVTE_CUTEDSL_FUSED_GROUPED_MLP=1``.
+* **Activation:** a scaled ``SwiGLU`` / ``GeGLU`` (gated) or ``SReLU`` (unary),
+  with feature dimensions aligned to 64 and the token count to 128.
+
+Expert parallelism
+------------------
+
+The grouped GEMM keeps all experts on a single device. When the experts no longer
+fit there - or to add another dimension of parallelism - they are sharded across
+devices, a scheme called expert parallelism (EP). Each device then owns only a
+slice of the experts, so a token routed to a non-local expert has to travel to
+the device that owns it.
+
+That data movement is two all-to-all collectives wrapped around the local expert
+computation: a **dispatch** all-to-all sends each token to the rank that owns its
+expert, the local grouped GEMM runs, and a **combine** all-to-all returns the
+results to the source rank. It is the distributed counterpart of the token
+dispatch and token combine kernels described above.
+
+.. figure:: img/moe_expert_parallel.svg
+   :align: center
+   :alt: Tokens are exchanged across ranks by all-to-all so each is processed by the rank owning its expert
+
+   Figure 8: With experts sharded across ranks, a dispatch all-to-all routes each
+   token to the rank owning its expert and a combine all-to-all returns the
+   outputs to the source rank.
+
+Transformer Engine provides expert parallelism at two levels:
+
+* **JAX MoE layer.** ``transformer_engine.jax.moe.moe`` runs the entire layer -
+  router, dispatch, grouped expert GEMMs, and combine - as a single
+  differentiable call. Naming a mesh axis with ``ep_axis`` turns the dispatch and
+  combine steps into ``jax.lax.ragged_all_to_all`` collectives over that axis.
+  This API is currently experimental.
+* **NCCL EP backend.** A common C API (``nvte_ep_dispatch`` / ``nvte_ep_combine``
+  and their backward passes, declared in
+  ``transformer_engine/common/include/transformer_engine/ep.h``) implements the
+  dispatch and combine all-to-alls directly on NCCL, using NCCL symmetric-memory
+  windows for zero-copy transfers. It is compiled in with ``NVTE_WITH_NCCL_EP``
+  (Hopper or newer, NCCL 2.30.4+) and provides the high-performance communication
+  path that the framework layers build on.
+
+A minimal call to the JAX layer, with experts sharded over the ``"ep"`` mesh
+axis:
+
+.. literalinclude:: moe_expert_parallel_jax.py
+   :language: python
+   :start-after: # START_MOE_EXPERT_PARALLEL_JAX
+   :end-before: # END_MOE_EXPERT_PARALLEL_JAX
