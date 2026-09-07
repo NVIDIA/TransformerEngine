@@ -514,6 +514,23 @@ library (``libnccl_ep``, loaded at runtime) and are differentiable.
         the original token order. The routing weights are applied by the caller
         before the combine.
 
+      Data flow between the calls:
+
+      * ``EpBuffer`` itself allocates only the routing state (a small
+        ``handle_mem`` byte buffer and the per-expert token counts).
+      * ``ep_dispatch`` allocates the receive buffer
+        ``[recv_capacity_per_rank, hidden_size]`` and the received weights on
+        every call, or writes into caller-owned buffers passed as
+        ``recv_tokens`` / ``recv_topk_weights`` (needed for CUDA graphs and
+        zero-copy). The tokens land directly in their expert's slot range.
+      * The local experts read the receive buffer as their input and produce a
+        new ``expert_out`` tensor of the same shape; padded slots must be zero.
+      * ``ep_combine`` reads ``expert_out`` in place and writes the result into a
+        newly allocated ``[num_tokens, hidden_size]`` tensor. In zero-copy mode
+        ``expert_out`` is transferred straight from that tensor when it is
+        symmetric-memory backed; otherwise it goes through the library's
+        staging buffers.
+
       .. raw:: html
 
          <div class="code-block-header">
