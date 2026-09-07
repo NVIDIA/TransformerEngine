@@ -125,11 +125,13 @@ the loss has a gradient with respect to every expert's logit. The dense scores
 are returned by the router functions shown below; add the scaled loss to the
 training loss.
 
-``expert_bias`` balances the load without an extra loss term. With the sigmoid
-score function it is added to the scores only for the top-k selection, so it
-changes which experts are picked but not the returned routing weights. Update
-it between steps: lower it for overloaded experts and raise it for under-used
-ones.
+``expert_bias`` balances the load without an extra loss term:
+
+* with the sigmoid score function it is added to the scores only for the top-k
+  selection, so it changes which experts are picked but not the returned
+  routing weights;
+* update it between steps: lower it for overloaded experts, raise it for
+  under-used ones.
 
 .. tabs::
 
@@ -153,11 +155,12 @@ Token permutation
 -----------------
 
 Token dispatch moves the tokens into the expert-contiguous layout expected by
-the grouped GEMM, and token combine moves the expert outputs back. All of these
-kernels are differentiable. The snippets below use the mask-map routing variant;
-other variants (for example index-map routing) follow the same pattern, see the
-:doc:`PyTorch API reference </api/pytorch>` and :doc:`JAX API reference
-</api/jax>`.
+the grouped GEMM, and token combine moves the expert outputs back.
+
+* All of these kernels are differentiable.
+* The snippets below use the mask-map routing variant. Other variants (for
+  example index-map routing) follow the same pattern, see the :doc:`PyTorch API
+  reference </api/pytorch>` and :doc:`JAX API reference </api/jax>`.
 
 Token dispatch
 ~~~~~~~~~~~~~~
@@ -283,21 +286,27 @@ that token combine needs to remove the padding.
 Reordering expert chunks
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-``sort_chunks_by_index`` reorders whole blocks of rows. The input
-``[num_tokens, hidden_size]`` is split along the first dimension into chunks
-of the given ``split_sizes``, and the chunks are concatenated again in the order
-given by ``sorted_indices``: output chunk ``i`` is input chunk
-``sorted_indices[i]``. The rows inside a chunk keep their order. The operation is
-differentiable, and a ``_with_probs`` variant moves a per-row probability tensor
-along with the rows.
+``sort_chunks_by_index`` reorders whole blocks of rows:
 
-The typical use is expert parallelism over a generic all-to-all. The buffer a
-rank receives is ordered by source rank and then by expert, while the grouped
+* the input ``[num_tokens, hidden_size]`` is split along the first dimension
+  into chunks of the given ``split_sizes``;
+* the chunks are concatenated again in the order given by ``sorted_indices``:
+  output chunk ``i`` is input chunk ``sorted_indices[i]``, rows inside a chunk
+  keep their order;
+* the operation is differentiable, and a ``_with_probs`` variant moves a
+  per-row probability tensor along with the rows.
+
+The typical use is expert parallelism over a generic all-to-all, where the
+received buffer is ordered by source rank and then by expert, while the grouped
 GEMM needs all rows of one expert together. With two source ranks and two local
-experts the received chunks are ``(rank 0, E4)``, ``(rank 0, E5)``,
-``(rank 1, E4)``, ``(rank 1, E5)``; ``sorted_indices = [0, 2, 1, 3]`` regroups
-them into ``E4, E4, E5, E5``. After the experts have run, the inverse
-permutation restores the rank-major order for the combine all-to-all.
+experts:
+
+* received chunks: ``(rank 0, E4)``, ``(rank 0, E5)``, ``(rank 1, E4)``,
+  ``(rank 1, E5)``;
+* ``sorted_indices = [0, 2, 1, 3]`` regroups them into ``E4, E4, E5, E5`` for
+  the grouped GEMM;
+* after the experts have run, the inverse permutation restores the rank-major
+  order for the combine all-to-all.
 
 .. _moe-grouped-gemm:
 
@@ -429,14 +438,18 @@ keeps its own shard of the tokens and holds only a slice of the experts.
 experts. Tokens t1, t3 and t5 are routed to experts on the other rank.*
 
 A token routed to an expert on another rank has to travel there and back. Two
-all-to-all collectives wrap the local expert computation: a **dispatch**
-all-to-all sends each token to the rank that owns its expert, the local grouped
-GEMM runs, and a **combine** all-to-all returns the results to the source rank.
-Dispatch takes the router output (expert indices and weights) directly and
-delivers a receive buffer grouped by local expert, and combine writes the results
-back in the original token order, so no separate token dispatch or token combine
-is needed. Shared experts, which every token passes through, are not part of the
-dispatch: they run as a regular dense MLP on the local tokens on every rank.
+all-to-all collectives wrap the local expert computation:
+
+* **Dispatch** sends each token to the rank that owns its expert. It takes the
+  router output (expert indices and weights) directly and delivers a receive
+  buffer grouped by local expert.
+* The local grouped GEMM runs on the receive buffer.
+* **Combine** returns the results to the source rank and writes them back in the
+  original token order.
+
+No separate token dispatch or token combine is needed. Shared experts, which
+every token passes through, are not part of the dispatch: they run as a regular
+dense MLP on the local tokens on every rank.
 
 .. raw:: html
    :file: img/moe_expert_parallel.svg
@@ -447,16 +460,20 @@ rank.*
 
 Transformer Engine implements dispatch and combine directly on NCCL, using
 symmetric-memory windows for zero-copy transfers. Both operations are
-differentiable. They are allocation-free and CUDA-graph capturable when the
-receive buffer has a fixed size: ``recv_capacity_per_rank`` is the maximum
-number of tokens (rows of ``hidden_size``) a rank receives per step, with
-``ep_size * max_tokens_per_rank * top_k`` as the dropless worst case. Without it
-the buffer is sized from the actual receive count each step, at the cost of a
-host synchronization. Dispatch can also quantize the tokens before the
-all-to-all, so the communication moves the low-precision payload and the local
-grouped GEMM consumes it directly; currently only the MXFP8 recipe is supported
-there. Complete runnable examples live in ``examples/pytorch/ep/`` and
-``examples/jax/ep/`` in the repository.
+differentiable.
+
+* **Receive buffer size.** ``recv_capacity_per_rank`` is the maximum number of
+  tokens (rows of ``hidden_size``) a rank receives per step; the dropless worst
+  case is ``ep_size * max_tokens_per_rank * top_k``. With a fixed capacity the
+  step is allocation-free and CUDA-graph capturable. Without it the buffer is
+  sized from the actual receive count each step, at the cost of a host
+  synchronization.
+* **Quantized dispatch.** Dispatch can quantize the tokens before the
+  all-to-all, so the communication moves the low-precision payload and the local
+  grouped GEMM consumes it directly. Currently only the MXFP8 recipe is
+  supported there.
+* **Examples.** Complete runnable examples live in ``examples/pytorch/ep/`` and
+  ``examples/jax/ep/`` in the repository.
 
 .. tabs::
 
