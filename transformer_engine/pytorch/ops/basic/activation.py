@@ -8,6 +8,7 @@ from __future__ import annotations
 import abc
 from collections.abc import Iterable
 from typing import Any, Optional
+import warnings
 
 import torch
 
@@ -394,7 +395,7 @@ class ScaledSReLU(BasicOperation):
         basic_op_kwargs: list[dict[str, Any]],  # pylint: disable=unused-argument
     ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
         if self.activation_recompute_in_mlp:
-            raise RuntimeError(
+            warnings.warn(
                 f"{self.__class__.__name__}(activation_recompute_in_mlp=True) requires the "
                 "fused grouped MLP path."
             )
@@ -437,7 +438,7 @@ class ScaledSReLU(BasicOperation):
         del basic_op_grad_extra_outputs
 
         if self.activation_recompute_in_mlp:
-            raise RuntimeError(
+            warnings.warn(
                 f"{self.__class__.__name__}(activation_recompute_in_mlp=True) requires the "
                 "fused grouped MLP path."
             )
