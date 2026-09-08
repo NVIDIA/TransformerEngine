@@ -885,6 +885,12 @@ def _layernorm_linear_setup_ctx(
         saved_ln_weight = ln_weight
     if ln_out_alias == "ln_out":
         saved_ln_out = fwd_outputs[1].view((-1, in_features))
+    if fwd_args.cpu_offloading:
+        # Rebuilt views don't carry the offload marks set on the forward tensors
+        mark_activation_offload(
+            saved_inputmat if inputmat_alias == "inp" else None,
+            saved_ln_out if ln_out_alias == "ln_out" else None,
+        )
     return (
         saved_inputmat,
         wt_save,

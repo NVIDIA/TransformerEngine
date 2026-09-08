@@ -1246,6 +1246,11 @@ def _layernorm_mlp_setup_ctx(
             saved[i] = fwd_outputs[3]
         else:
             saved[i] = getattr(fwd_args, alias)
+    if fwd_args.cpu_offloading:
+        # Rebuilt views don't carry the offload marks set on the forward tensors
+        mark_activation_offload(
+            *(saved[i] for i, alias in enumerate(aliases) if alias in ("inp", "ln_out"))
+        )
     return tuple(saved)
 
 
