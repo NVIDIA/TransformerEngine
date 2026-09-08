@@ -834,3 +834,7 @@ def test_nvfp4_ue5m3_gemm_leaves_operands_unswizzled(M: int, K: int, N: int):
         assert torch.equal(t._rowwise_scale_inv, rowwise), "GEMM changed rowwise scales"
         assert torch.equal(t._columnwise_scale_inv, columnwise), "GEMM changed columnwise scales"
     assert torch.equal(y1, y2), "repeated GEMM on the same operands differs"
+    # The GEMM must still consume correctly swizzled scales.
+    ref = x_q.dequantize(dtype=torch.float32) @ w_q.dequantize(dtype=torch.float32).t()
+    rel_err = (y1.float() - ref).norm() / ref.norm()
+    assert rel_err < 5e-3, f"relative error {rel_err:.2e} is too large"
