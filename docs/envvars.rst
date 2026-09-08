@@ -362,7 +362,7 @@ Torch Compilation and Fusion
 
    :Type: ``int`` (0 or 1)
    :Default: ``1``
-   :Description: Enable PyTorch 2.x ``torch.compile`` support for compatible Transformer Engine operations. When set to ``0``, disables compilation support and uses regular PyTorch eager mode.
+   :Description: Enable Transformer Engine's internal ``torch.compile``-based kernel fusions (e.g. bias+GeLU, bias+dropout). When set to ``0``, these fusions run as separate eager operations. Does not affect compiling TE modules with ``torch.compile``.
 
 .. envvar:: NVTE_BIAS_GELU_NVFUSION
 

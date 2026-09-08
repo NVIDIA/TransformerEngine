@@ -19,6 +19,7 @@ from build_tools.build_ext import CMakeExtension, get_build_ext
 from build_tools.te_version import te_version
 from build_tools.utils import (
     cuda_archs,
+    cuda_home_path,
     cuda_version,
     cudnn_frontend_include_path,
     get_frameworks,
@@ -26,6 +27,7 @@ from build_tools.utils import (
     min_python_version_str,
     nccl_ep_enabled,
     get_max_jobs_for_parallel_build,
+    nvcc_path,
 )
 
 frameworks = get_frameworks()
@@ -208,7 +210,7 @@ def _discover_nccl_home() -> str:
 
 
 def build_nccl_ep_submodule() -> str:
-    """Build libnccl_ep.a from the 3rdparty/nccl-extensions submodule and return NCCL_HOME."""
+    """Build NCCL EP libraries from 3rdparty/nccl-extensions and return NCCL_HOME."""
     nccl_root = current_file_path / "3rdparty" / "nccl-extensions"
     if not (nccl_root / "nccl_ep" / "Makefile").exists():
         raise RuntimeError(
@@ -217,7 +219,7 @@ def build_nccl_ep_submodule() -> str:
         )
 
     build_dir = nccl_root / "build"
-    nccl_ep_lib = build_dir / "lib" / "libnccl_ep.a"
+    nccl_ep_shared_lib = build_dir / "lib" / "libnccl_ep.so"
     gencode_stamp = build_dir / "lib" / "libnccl_ep.gencode"
 
     # Caller gates on arch >= 90 or "native"; expand "native" to the host's
@@ -253,6 +255,10 @@ def build_nccl_ep_submodule() -> str:
 
     nproc = get_max_jobs_for_parallel_build()
     env = os.environ.copy()
+    if (cuda_home := cuda_home_path()) is not None:
+        env.setdefault("CUDA_HOME", str(cuda_home))
+    if (nvcc_bin := nvcc_path()) is not None:
+        env.setdefault("NVCC", str(nvcc_bin))
     env["NVCC_GENCODE"] = gencode
     # NCCL EP needs the core NCCL headers + libnccl.so; write NCCL EP build
     # outputs to the submodule's local build/ tree.
@@ -261,18 +267,18 @@ def build_nccl_ep_submodule() -> str:
     env["NCCL_EP_BUILDDIR"] = str(build_dir)
 
     prev_gencode = gencode_stamp.read_text().strip() if gencode_stamp.exists() else None
-    if not nccl_ep_lib.exists() or prev_gencode != gencode:
-        if nccl_ep_lib.exists() and prev_gencode != gencode:
+    if not nccl_ep_shared_lib.exists() or prev_gencode != gencode:
+        if nccl_ep_shared_lib.exists() and prev_gencode != gencode:
             print(
                 f"[NCCL EP] gencode changed ('{prev_gencode}' -> '{gencode}'); "
-                "rebuilding libnccl_ep.a"
+                "rebuilding NCCL EP libraries"
             )
             subprocess.check_call(
                 ["make", "-C", "nccl_ep", "clean"],
                 cwd=str(nccl_root),
                 env=env,
             )
-        print(f"[NCCL EP] Building libnccl_ep.a (gencode='{gencode}')")
+        print(f"[NCCL EP] Building static and shared libraries (gencode='{gencode}')")
         make_jobs = f"-j{nproc}" if nproc else "-j"
         subprocess.check_call(
             ["make", make_jobs, "-C", "nccl_ep", "lib"],

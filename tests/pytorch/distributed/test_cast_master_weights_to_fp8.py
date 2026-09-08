@@ -37,6 +37,7 @@ from transformer_engine.pytorch import (
     Float8BlockwiseQTensor,
     NVFP4Tensor,
     is_mxfp8_available,
+    MXFP8Quantizer,
     MXFP8Tensor,
 )
 from transformer_engine.pytorch.tensor.utils import (
@@ -914,6 +915,49 @@ def _test_cast_master_weights_to_nvfp4(dp_group, manual_post_all_gather_processi
         torch.testing.assert_close(loss_nvfp4, loss, atol=0, rtol=0)
 
 
+def _test_mxfp8_empty_master_shard(dp_group):
+    """One rank owns the whole master shard, every other rank passes None.
+
+    Wide FSDP sharding pads the parameter bucket, so a tail rank can own an empty shard of
+    every weight in it. Those ranks still join the amax all-reduce, so the packed amax
+    buffer they allocate has to match the dtype used by the ranks that do own data. This
+    used to raise UnboundLocalError before reaching the all-reduce.
+    """
+    rank = dist.get_rank(dp_group)
+    world_size = dist.get_world_size(dp_group)
+
+    for owner_rank in range(world_size):
+        # Same seed on every rank, so the model weight is identical to start with.
+        torch.manual_seed(1234)
+        torch.cuda.manual_seed(1234)
+        high_precision = torch.randn(128, 128, dtype=torch.bfloat16, device="cuda")
+        quantizer = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3, rowwise=True, columnwise=True)
+        model_weight = quantizer.make_empty((128, 128), dtype=torch.bfloat16, device="cuda")
+        quantizer.update_quantized(high_precision, model_weight)
+
+        if rank == owner_rank:
+            # Optimizers hold fp32 master weights; the cast to the model dtype happens inside.
+            master_weight = high_precision.to(torch.float32).reshape(-1)
+            start_offset = 0
+        else:
+            master_weight = None
+            start_offset = None
+
+        quantize_master_weights([model_weight], [master_weight], [start_offset], dp_group)
+
+        # The amax is reduced with MAX over the group and every rank computes its scales from
+        # the result, so the scales must agree even on the ranks that contributed nothing. A
+        # dtype disagreement in that collective shows up here (or hangs the reduction).
+        for scale_inv in (model_weight._rowwise_scale_inv, model_weight._columnwise_scale_inv):
+            gathered = [torch.empty_like(scale_inv) for _ in range(world_size)]
+            dist.all_gather(gathered, scale_inv, group=dp_group)
+            for other_rank, other in enumerate(gathered):
+                assert torch.equal(gathered[owner_rank], other), (
+                    f"MXFP8 scale_inv mismatch between rank {owner_rank} (owns the shard) and "
+                    f"rank {other_rank} (empty shard)"
+                )
+
+
 def run_parallel_tests() -> None:
     """Run parallel tests"""
 
@@ -953,6 +997,9 @@ def run_parallel_tests() -> None:
         for post_ag_processing in manual_post_all_gather_processings:
             _test_cast_master_weights_to_fp8(quantization, dp_group, post_ag_processing)
             _test_fsdp_cast_master_weights_to_fp8(quantization, dp_group, post_ag_processing)
+    if is_mxfp8_available():
+        print("starting mxfp8 empty master shard test")
+        _test_mxfp8_empty_master_shard(dp_group)
     nvfp4_available, _ = is_nvfp4_available(return_reason=True)
     if nvfp4_available:
         print("starting cast master weights to nvfp4 test")

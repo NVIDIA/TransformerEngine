@@ -19,6 +19,10 @@ aten = torch.ops.aten
 class HybridQuantizer(Quantizer):
     """Quantizer that composes rowwise and columnwise representations.
 
+    .. warning::
+        **EXPERIMENTAL**: ``HybridQuantizer`` is under active development and
+        its API is subject to change without notice.
+
     When both representations are requested, applies ``rowwise_quantizer`` to
     produce the rowwise representation and ``columnwise_quantizer`` to produce
     the columnwise representation. The results are wrapped in a
@@ -469,7 +473,7 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
                     "HybridQuantizedTensor.detach() does not support storage-only "
                     f"columnwise sub-storage {col_cls.__name__}"
                 )
-        return HybridQuantizedTensor(
+        return self.__class__(
             shape=self.shape,
             dtype=self.dtype,
             rowwise_storage=row,
