@@ -22,7 +22,7 @@ from ..quantization import (
     autocast,
 )
 from ..tensor import Quantizer
-from ..dynamo import ForwardResult, is_value_opaque_quantizer, register_custom_op
+from ..dynamo import is_value_opaque_quantizer, register_custom_op
 
 
 @dataclasses.dataclass
@@ -324,7 +324,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
     # ------------------------------------------------------------------ #
 
     @classmethod
-    def forward_compute(cls, args: Any) -> ForwardResult:
+    def forward_compute(cls, args: Any) -> tuple[Any, tuple]:
         """Forward computation over explicit arguments.
 
         Takes everything through ``args``; must not read ``self`` or global
@@ -333,7 +333,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @classmethod
-    def forward_fake(cls, args: Any) -> ForwardResult:
+    def forward_fake(cls, args: Any) -> tuple[Any, tuple]:
         """Allocation-free twin of :meth:`forward_compute` over ``TensorSpec``.
 
         Runs as a meta kernel, outside the traced frame, and more than once per
@@ -684,10 +684,10 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             next_op_input_quantizer=next_op_input_quantizer,
             **kwargs,
         )
-        result = self.forward_compute(args)
+        output, aux = self.forward_compute(args)
         if ctx.requires_grad:
-            self.setup_context(ctx, args, result.aux)
-        return result.output
+            self.setup_context(ctx, args, aux)
+        return output
 
     def compiled_op_forward(
         self,

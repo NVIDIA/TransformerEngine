@@ -7,7 +7,6 @@
 from .quantizer_opaque import register_value_opaque_quantizer, is_value_opaque_quantizer
 from .tensor_spec import TensorSpec, to_tensor_spec
 from .custom_op import (
-    ForwardResult,
     register_custom_op,
     register_custom_op_with_autograd,
     TensorOrQuantized,
@@ -18,7 +17,6 @@ __all__ = [
     "is_value_opaque_quantizer",
     "TensorSpec",
     "to_tensor_spec",
-    "ForwardResult",
     "register_custom_op",
     "register_custom_op_with_autograd",
     "TensorOrQuantized",

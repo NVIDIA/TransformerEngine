@@ -50,7 +50,7 @@ from transformer_engine.pytorch.quantized_tensor import (
     QuantizedTensorStorage,
     Quantizer,
 )
-from transformer_engine.pytorch.dynamo import ForwardResult, TensorSpec, to_tensor_spec
+from transformer_engine.pytorch.dynamo import TensorSpec, to_tensor_spec
 from transformer_engine.pytorch import (
     is_fp8_available,
     is_mxfp8_available,
@@ -2389,12 +2389,12 @@ class _ScaleOp(BasicOperation):
 
     @classmethod
     def forward_compute(cls, args):
-        return ForwardResult(args.input_ * args.scale)
+        return args.input_ * args.scale, ()
 
     @classmethod
     def forward_fake(cls, args):
         x = args.input_
-        return ForwardResult(TensorSpec(shape=tuple(x.shape), dtype=x.dtype, device=x.device))
+        return TensorSpec(shape=tuple(x.shape), dtype=x.dtype, device=x.device), ()
 
     @classmethod
     def backward_compute(cls, args):
@@ -2487,12 +2487,12 @@ class _ScaleWithKwargsOp(BasicOperation):
         if isinstance(offset, QuantizedTensor):
             offset = offset.dequantize()
         out = args.input_ * args.scale * args.extra_scale + offset
-        return ForwardResult(out)
+        return out, ()
 
     @classmethod
     def forward_fake(cls, args):
         x = args.input_
-        return ForwardResult(TensorSpec(shape=tuple(x.shape), dtype=x.dtype, device=x.device))
+        return TensorSpec(shape=tuple(x.shape), dtype=x.dtype, device=x.device), ()
 
     @classmethod
     def backward_compute(cls, args):
