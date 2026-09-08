@@ -1013,7 +1013,7 @@ class LayerNormMLP(TransformerEngineBase):
     bias_axes_2: Tuple[str, ...] = ("embed",)
     return_layernorm_output: bool = False
     activations: Sequence[Union[str, Callable]] = ("gelu",)
-    activation_params: dict = None
+    activation_params: Optional[dict] = None
     intermediate_dropout_rng_name: str = "dropout"
     intermediate_dropout_rate: float = 0.0
     intermediate_hidden_dropout_dims: Sequence[int] = ()
@@ -1299,7 +1299,7 @@ class LayerNormMLP(TransformerEngineBase):
                     x,
                     normalized_acts,
                     act_params=(
-                        ActivationParams.create(normalized_acts, **self.activation_params)
+                        ActivationParams.create(normalized_acts, **dict(self.activation_params))
                         if self.activation_params
                         else None
                     ),
