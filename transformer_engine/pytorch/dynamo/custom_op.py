@@ -180,7 +180,7 @@ class OpaqueValueBundle:
             return True
         if isinstance(value, type):
             return True
-        if _is_opaque_value_type is not None and _is_opaque_value_type(type(value)):
+        if _is_opaque_constant_type is not None and _is_opaque_constant_type(type(value)):
             return True
         if isinstance(value, dict):
             return all(isinstance(k, str) and cls.is_simple_value(v) for k, v in value.items())
@@ -223,7 +223,7 @@ class OpaqueValueBundle:
         if isinstance(value, tuple):
             body = ", ".join(cls._fmt_simple(v) for v in value)
             return f"({body},)" if len(value) == 1 else f"({body})"
-        if _is_opaque_value_type(type(value)):
+        if _is_opaque_constant_type(type(value)):
             return value.__fx_repr__()[0]
         # repr(float('inf')) is 'inf', which is not an evaluable literal.
         if isinstance(value, float) and not math.isfinite(value):
@@ -285,7 +285,7 @@ class OpaqueValueBundle:
                 return
             if isinstance(value, OpaqueValueBundle.PRIMITIVE_TYPES):
                 return
-            if _is_opaque_value_type(type(value)):
+            if _is_opaque_constant_type(type(value)):
                 _, extra = value.__fx_repr__()
                 globals_.update(extra)
 
@@ -297,18 +297,18 @@ class OpaqueValueBundle:
 try:
     from torch._library.opaque_object import (
         get_opaque_type_name,
-        is_opaque_value_type as _is_opaque_value_type,
-        register_opaque_type,
+        is_opaque_constant_type as _is_opaque_constant_type,
+        register_custom_class,
     )
 
-    register_opaque_type(OpaqueValueBundle, typ="value")
+    register_custom_class(OpaqueValueBundle, typ="constant")
     _OPAQUE_VALUE_BUNDLE_TYPE_NAME: Optional[str] = get_opaque_type_name(OpaqueValueBundle)
 # Older torch without opaque_object support.
 except Exception as e:  # pylint: disable=broad-exception-caught  # pragma: no cover
     record_compile_disabled(
         f"could not register OpaqueValueBundle as an opaque type ({e}); use a newer PyTorch build"
     )
-    _is_opaque_value_type = None
+    _is_opaque_constant_type = None
     _OPAQUE_VALUE_BUNDLE_TYPE_NAME = None
 
 try:
@@ -461,8 +461,8 @@ def _is_simple_annot(annot: Any) -> bool:
         return True
     if (
         isinstance(annot, type)
-        and _is_opaque_value_type is not None
-        and _is_opaque_value_type(annot)
+        and _is_opaque_constant_type is not None
+        and _is_opaque_constant_type(annot)
     ):
         return True
     if get_origin(annot) in (tuple, list):
