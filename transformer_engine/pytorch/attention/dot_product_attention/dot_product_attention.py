@@ -241,11 +241,13 @@ class _IdentityWithMaskedGradient(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, tensor: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """Return the input unchanged and save the mask for the backward pass."""
         ctx.save_for_backward(mask)
         return tensor
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> Tuple[torch.Tensor, None]:
+        """Zero gradients for positions excluded by the saved mask."""
         (mask,) = ctx.saved_tensors
         return torch.where(mask, grad_output, 0.0), None
 
@@ -2738,40 +2740,40 @@ class DotProductAttention(TransformerEngineBaseModule):
                     ), "score_mod_bprop_tensors must map string names to torch.Tensor instances!"
 
             # gather attention params for get_attention_backend
-            attention_params_kwargs = dict(
-                qkv_type=type(query_layer),
-                qkv_dtype=query_layer.dtype,
-                qkv_layout=qkv_layout,
-                num_heads=num_attention_heads,
-                num_gqa_groups=num_gqa_groups,
-                max_seqlen_q=max_seqlen_q,
-                max_seqlen_kv=max_seqlen_kv,
-                head_dim_qk=head_dim_qk,
-                head_dim_v=head_dim_v,
-                alibi_slopes_shape=alibi_slopes.shape if alibi_slopes is not None else None,
-                core_attention_bias_type=core_attention_bias_type,
-                core_attention_bias_shape=core_attention_bias_shape,
-                core_attention_bias_requires_grad=(
+            attention_params_kwargs = {
+                "qkv_type": type(query_layer),
+                "qkv_dtype": query_layer.dtype,
+                "qkv_layout": qkv_layout,
+                "num_heads": num_attention_heads,
+                "num_gqa_groups": num_gqa_groups,
+                "max_seqlen_q": max_seqlen_q,
+                "max_seqlen_kv": max_seqlen_kv,
+                "head_dim_qk": head_dim_qk,
+                "head_dim_v": head_dim_v,
+                "alibi_slopes_shape": alibi_slopes.shape if alibi_slopes is not None else None,
+                "core_attention_bias_type": core_attention_bias_type,
+                "core_attention_bias_shape": core_attention_bias_shape,
+                "core_attention_bias_requires_grad": (
                     core_attention_bias.requires_grad if core_attention_bias is not None else False
                 ),
-                attention_dropout=self.attention_dropout,
-                context_parallel=context_parallel,
-                cp_comm_type=self.cp_comm_type,
-                cp_size=cp_size,
-                deterministic=self.deterministic,
-                is_training=self.training,
-                fp8=self.fp8,
-                fp8_meta=self.fp8_meta,
-                inference_params=inference_params,
-                softmax_type=self.softmax_type,
-                return_max_logit=self.return_max_logit,
-                cuda_graph=is_graph_capturing(),
-                num_splits=num_splits,
-                fp8_output=fp8_output,
-                checkpoint_core_attention=checkpoint_core_attention,
-                has_score_mod=score_mod is not None,
-                has_score_mod_bprop=score_mod_bprop is not None,
-            )
+                "attention_dropout": self.attention_dropout,
+                "context_parallel": context_parallel,
+                "cp_comm_type": self.cp_comm_type,
+                "cp_size": cp_size,
+                "deterministic": self.deterministic,
+                "is_training": self.training,
+                "fp8": self.fp8,
+                "fp8_meta": self.fp8_meta,
+                "inference_params": inference_params,
+                "softmax_type": self.softmax_type,
+                "return_max_logit": self.return_max_logit,
+                "cuda_graph": is_graph_capturing(),
+                "num_splits": num_splits,
+                "fp8_output": fp8_output,
+                "checkpoint_core_attention": checkpoint_core_attention,
+                "has_score_mod": score_mod is not None,
+                "has_score_mod_bprop": score_mod_bprop is not None,
+            }
             if thd_mask_policies is not None:
                 if _attention_backends["backend_selection_requires_update"]:
                     _thd_policy_backend_cache.clear()
