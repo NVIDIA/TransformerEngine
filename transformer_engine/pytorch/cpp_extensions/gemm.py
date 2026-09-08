@@ -461,7 +461,9 @@ def _gemm_swizzled_scales(
     compact_rowwise = tensor._rowwise_scale_inv
     compact_columnwise = tensor._columnwise_scale_inv
     tensor._rowwise_scale_inv = None if compact_rowwise is None else compact_rowwise.clone()
-    tensor._columnwise_scale_inv = None if compact_columnwise is None else compact_columnwise.clone()
+    tensor._columnwise_scale_inv = (
+        None if compact_columnwise is None else compact_columnwise.clone()
+    )
     tex.swizzle_scales_for_gemm_(tensor)
     # The swizzle may assign new tensors to the attributes rather than writing
     # into the clones, so read the results back before restoring.
