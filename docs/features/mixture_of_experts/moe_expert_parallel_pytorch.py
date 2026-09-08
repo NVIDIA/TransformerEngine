@@ -38,9 +38,15 @@ buffer = EpBuffer(
 # local expert; tokens_per_expert holds the number of valid rows in each.
 recv_tokens, recv_w, tokens_per_expert = ep_dispatch(buffer, tokens, topk_idx, topk_w)
 
-# Local experts run on the receive buffer; apply the routing weights before combine.
+# Local experts run on the receive buffer. Before combine, apply the routing
+# weights and zero the unused slots of each expert's range (combine sums
+# unweighted rows, and the padded slots hold undefined data).
 expert_out = experts(recv_tokens, tokens_per_expert)
-expert_out = expert_out * recv_w.unsqueeze(-1).to(expert_out.dtype)
+slots_per_expert = recv_capacity // num_local_experts
+valid = (
+    torch.arange(slots_per_expert, device=tokens.device)[None, :] < tokens_per_expert[:, None]
+).reshape(-1, 1)
+expert_out = expert_out * (recv_w.unsqueeze(-1) * valid).to(expert_out.dtype)
 
 # Combine: all-to-all returns the weighted outputs to the source rank and sums them.
 output = ep_combine(buffer, expert_out)  # [num_tokens, hidden_size]
