@@ -676,6 +676,14 @@ endforeach()
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3")
 
+# Compress every embedded cubin. CUDA 13 supports size-optimized compression
+# without imposing an additional driver requirement. Keep CUDA 12 on its
+# legacy/default compression mode to preserve compatibility with pre-12.4 drivers.
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xfatbin -compress-all")
+if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 13.0)
+  set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --compress-mode=size")
+endif()
+
 # Number of parallel build jobs
 if($ENV{MAX_JOBS})
   set(BUILD_JOBS_STR $ENV{MAX_JOBS})
