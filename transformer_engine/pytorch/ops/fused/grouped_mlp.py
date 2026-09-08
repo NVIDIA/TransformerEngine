@@ -17,7 +17,7 @@ import torch
 from packaging.version import Version as PkgVersion
 
 import transformer_engine_torch as tex
-from ...constants import MXFP8_BLOCK_SCALING_SIZE, NVFP4_BLOCK_SCALING_SIZE, TE_DType
+from ...constants import DType, MXFP8_BLOCK_SCALING_SIZE, NVFP4_BLOCK_SCALING_SIZE, TE_DType
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload, start_offload
 from ...cpp_extensions import general_gemm, general_grouped_gemm_for_grouped_tensor
 from ...distributed_weight import (
@@ -27,7 +27,7 @@ from ...distributed_weight import (
     finalize_weight_grads,
 )
 from ...module.base import _2X_ACC_WGRAD
-from ...quantization import Recipe
+from ...quantization import Recipe, get_fp8_torch_dtype
 from ...tensor import NVFP4Quantizer, NVFP4Tensor, NVFP4TensorStorage, Quantizer
 from ...tensor.grouped_tensor import GroupedTensor
 from ...tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
@@ -168,6 +168,17 @@ def _cudnn_frontend_supports_single_group_runtime_offsets(
     return not issubclass(
         activation_type, (ScaledSReLU, ScaledTanhSReLU)
     ) and _cudnn_frontend_version_at_least("1.27.0")
+
+
+def _deterministic_algorithms_required() -> bool:
+    """Whether bit-exact reproducibility was asked for. Same union as ``DotProductAttention``.
+
+    Uncached: both knobs can change during the process.
+    """
+    return (
+        not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
+        or torch.are_deterministic_algorithms_enabled()
+    )
 
 
 def _wrap_single_quantized_as_grouped(
@@ -877,6 +888,12 @@ def fuse_grouped_mlp_ops(
     # NVFP4 fused grouped MLP uses graph-safe grouped quantize, which currently requires RHT.
     if recipe.nvfp4() and recipe.disable_rht:
         return ops
+    # The fused MXFP8 backward reinterprets the grad output's storage as E4M3, so an E5M2
+    # backward format would have its gradients misread rather than converted. This declines
+    # MXFP8 with Format.HYBRID. fp8_format does not describe NVFP4 gradients, so NVFP4 is
+    # excluded from the check rather than relying on its value.
+    if recipe.mxfp8() and get_fp8_torch_dtype(recipe, fprop_tensor=False) != torch.float8_e4m3fn:
+        return ops
     if activation_op_types is None:
         activation_op_types = [ScaledSwiGLU, ScaledClampedQGeGLU]
         if _cudnn_frontend_supports_grouped_gemm_situglu():
@@ -949,6 +966,11 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
     def grouped_gemm_dactivation_kernel(cls) -> Callable:
         """Fused kernel for grouped GEMM, activation backward, and scale grad."""
         raise NotImplementedError
+
+    @classmethod
+    def grouped_gemm_dactivation_is_deterministic(cls) -> bool:
+        """Whether this op's dactivation kernel can produce a bit-exact ``dprob``."""
+        return False
 
     @classmethod
     @functools.lru_cache(maxsize=None)
@@ -1398,7 +1420,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
 
         alpha_tensor = get_cached_ones_tensor(num_groups, dtype, device)
         norm_const_tensor = get_cached_ones_tensor(1, torch.float32, device)
-        current_stream = torch.cuda.current_stream().cuda_stream
+        current_stream = torch.cuda.current_stream(device.index).cuda_stream
 
         fc1_bias_packed = _pack_grouped_linear_bias_for_cudnn(fc1_op)
         fc2_bias_packed = _pack_grouped_linear_bias_for_cudnn(fc2_op)
@@ -2026,6 +2048,13 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             or isinstance(fc1_weight_param, NVFP4Tensor)
             or isinstance(fc2_weight_param, NVFP4Tensor)
         )
+        if not use_nvfp4 and fc2_grad_output_quantizer.dtype != DType.kFloat8E4M3:
+            # The pack below reinterprets the grad output's storage as E4M3 rather than
+            # converting it, so anything else would be read as the wrong format.
+            raise RuntimeError(
+                "Fused grouped MLP backward requires an E4M3 grad output, but the recipe "
+                f"produced {fc2_grad_output_quantizer.dtype}."
+            )
         data_dtype = torch.float4_e2m1fn_x2 if use_nvfp4 else torch.float8_e4m3fn
         scale_view_dtype = torch.float8_e4m3fn if use_nvfp4 else torch.float8_e8m0fnu
         sf_vec_size = NVFP4_BLOCK_SCALING_SIZE if use_nvfp4 else MXFP8_BLOCK_SCALING_SIZE
@@ -2082,9 +2111,31 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         # Kernel scaling factors
         alpha_tensor = get_cached_ones_tensor(num_groups, dtype, device)
         norm_const_tensor = get_cached_ones_tensor(1, torch.float32, device)
-        current_stream = torch.cuda.current_stream().cuda_stream
+        current_stream = torch.cuda.current_stream(device.index).cuda_stream
 
         unit_activation_scale = bool(getattr(fc1_ctx, "unit_activation_scale", False))
+        # A unit activation scale produces no dprob, so there is nothing to make deterministic.
+        deterministic_dactivation = (
+            not unit_activation_scale and _deterministic_algorithms_required()
+        )
+        if deterministic_dactivation:
+            # Two kernels write dprob and both have to be exact. The cuDNN dactivation
+            # epilogue produces it below; then, when scale_bias is set, it is passed to
+            # compute_grouped_dbias_dscales as the ``dscales`` accumulator and atomically
+            # added into (see triton/grouped_dbias_dscales.py). That Triton kernel is never
+            # deterministic, so scale_bias rules out a bit-exact dprob on its own.
+            dprob_is_deterministic = (
+                self.grouped_gemm_dactivation_is_deterministic() and not scale_bias
+            )
+            if not dprob_is_deterministic:
+                raise RuntimeError(
+                    "Deterministic execution was requested"
+                    " (NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 or"
+                    " torch.use_deterministic_algorithms), but the scale gradient (dprob) is"
+                    " accumulated with nondeterministic atomics on this configuration."
+                    " A bit-exact dprob requires the scaled-SReLU activation,"
+                    " nvidia-cudnn-frontend 1.28.0 or later, and an FC2 without scale_bias."
+                )
         scales_f32 = None
         scales_tensor = None
         dscales_tensor = None
@@ -2139,6 +2190,9 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             "use_dynamic_sched": True,
         }
         dactivation_kernel = self.grouped_gemm_dactivation_kernel()
+        if deterministic_dactivation:
+            # Never passed to a wrapper that would reject it -- the check above raises first.
+            fc2_dactivation_kwargs["deterministic"] = True
         if _cudnn_frontend_supports_single_group_runtime_offsets(type(activation_op)):
             fc2_dactivation_kwargs["use_single_group_runtime_offsets"] = num_groups == 1
         if self._cudnn_dact_func is not None:
@@ -2668,6 +2722,19 @@ class GroupedMLP_CuTeGEMMUnary(_GroupedMLP_CuTeGEMMBase):
         from cudnn import grouped_gemm_dsrelu_wrapper_sm100  # pylint: disable=no-name-in-module
 
         return grouped_gemm_dsrelu_wrapper_sm100
+
+    @classmethod
+    @functools.lru_cache(maxsize=None)
+    def grouped_gemm_dactivation_is_deterministic(cls) -> bool:
+        """Feature-detect the dSReLU wrapper's ``deterministic`` argument (cuDNN FE 1.28.0+)."""
+        try:
+            kernel = cls.grouped_gemm_dactivation_kernel()
+        except ImportError:
+            return False
+        try:
+            return "deterministic" in inspect.signature(kernel).parameters
+        except (TypeError, ValueError):
+            return False
 
 
 def fuse_ops(

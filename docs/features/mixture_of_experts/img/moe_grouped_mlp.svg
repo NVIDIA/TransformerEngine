@@ -3,7 +3,7 @@
     <style>
       .label { font: 15px sans-serif; fill: #333; text-anchor: middle; }
       .small-label { font: 13px sans-serif; fill: #555; text-anchor: middle; }
-      .op { fill: #e3f2fd; stroke: #1976d2; stroke-width: 1.8; }
+      .moe-op { fill: #e3f2fd; stroke: #1976d2; stroke-width: 1.8; }
       .act { fill: #e8f5e9; stroke: #388e3c; stroke-width: 1.8; }
       .fused-mlp { fill: #f3e5f5; stroke: #7b1fa2; stroke-width: 2.5; }
       .arrow { stroke: #424242; stroke-width: 2; fill: none; marker-end: url(#ah); }
@@ -13,7 +13,7 @@
     <marker id="ahp" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto"><polygon points="0 0, 9 3.5, 0 7" fill="#7b1fa2"/></marker>
   </defs>
 
-  <rect x="110" y="30" width="160" height="54" class="op" rx="6"/>
+  <rect x="110" y="30" width="160" height="54" class="moe-op" rx="6"/>
   <text x="190" y="62" class="label">FC1 grouped GEMM</text>
   <path d="M 270 57 L 330 57" class="arrow"/>
 
@@ -21,7 +21,7 @@
   <text x="410" y="62" class="label">activation</text>
   <path d="M 490 57 L 550 57" class="arrow"/>
 
-  <rect x="550" y="30" width="160" height="54" class="op" rx="6"/>
+  <rect x="550" y="30" width="160" height="54" class="moe-op" rx="6"/>
   <text x="630" y="62" class="label">FC2 grouped GEMM</text>
 
   <path d="M 410 90 L 410 140" class="farrow"/>
