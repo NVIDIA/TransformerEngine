@@ -6,12 +6,6 @@
 PyTorch
 =======
 
-.. warning::
-
-   Optional constructor arguments are not positionally compatible with
-   ``torch.nn.Linear``. Pass ``bias`` by keyword, for example
-   ``Linear(in_features, out_features, bias=False)``.
-
 .. autoapiclass:: transformer_engine.pytorch.Linear(in_features, out_features, **kwargs)
   :members: forward, set_tensor_parallel_group
 
