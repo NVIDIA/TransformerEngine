@@ -206,7 +206,7 @@ def load_framework_extension(framework: str) -> None:
             sys.modules[module_name + "_nv"] = solib
             _plugin = importlib.import_module(_nvte_plugin)
             _plugin.load_plugins()
-        except Exception as e:
+        except Exception as e:  # pylint: disable=broad-exception-caught
             # Rollback to pre-plugin state if plugin failed to fully initialize
             sys.modules.pop(module_name + "_nv", None)
             if _original_module is not None:
