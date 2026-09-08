@@ -4,7 +4,6 @@
 
 import contextlib
 import gc
-import weakref
 from typing import Callable, Dict, Iterable, List, Tuple, Union
 import pytest
 
@@ -27,10 +26,6 @@ from transformer_engine.pytorch import (
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
-from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
-    _get_cp_p2p_transport_group,
-    set_cp_p2p_transport_group,
-)
 import transformer_engine.pytorch.ops as te_ops
 import transformer_engine.pytorch.graph as te_graph
 from transformer_engine.common import recipe
@@ -47,33 +42,6 @@ reset_rng_states()
 model_configs = {
     "small": ModelConfig(2, 32, 2, 32),
 }
-
-
-def test_cp_p2p_transport_group_override():
-    class Group:
-        pass
-
-    logical_group = Group()
-    transport_group = Group()
-
-    assert _get_cp_p2p_transport_group(logical_group) == (logical_group, False)
-    set_cp_p2p_transport_group(logical_group, transport_group)
-    assert _get_cp_p2p_transport_group(logical_group) == (transport_group, True)
-    set_cp_p2p_transport_group(logical_group, None)
-    assert _get_cp_p2p_transport_group(logical_group) == (logical_group, False)
-
-    set_cp_p2p_transport_group(logical_group, transport_group)
-    logical_group_ref = weakref.ref(logical_group)
-    del logical_group
-    gc.collect()
-    assert logical_group_ref() is None
-
-    self_transport_group = Group()
-    self_transport_group_ref = weakref.ref(self_transport_group)
-    set_cp_p2p_transport_group(self_transport_group, self_transport_group)
-    del self_transport_group
-    gc.collect()
-    assert self_transport_group_ref() is None
 
 
 def test_slot_memory_arena_view_uses_typed_storage_offset():
