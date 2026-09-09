@@ -146,14 +146,6 @@ General
                  CUDA C++ kernels. CuTeDSL kernels will be registered when
                  ``import transformer_engine`` so this env var should be set before that.
 
-.. envvar:: NVTE_WARN_IF_CUTEDSL_BACKEND_NOT_CHOSEN
-
-   :Type: ``int`` (0 or 1)
-   :Default: ``0``
-   :Description: Warn TE falls back to the CUDA C++ kernels instead of dispatching to 
-                 available CuTeDSL kernels. Useful to check if CuTeDSL path is taken,
-                 since a silent fallback is otherwise indistinguishable from success.
-
 .. envvar:: NVTE_GROUPED_TENSOR_HANDLE_POOL_SIZE_MB
 
    :Type: ``int`` (positive integer)

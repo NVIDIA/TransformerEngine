@@ -285,8 +285,7 @@ class TVMFFICentral {
       static std::once_flag warned;
       std::call_once(warned, [this] {
         maybe_warn_not_chosen(
-            "libtvm_ffi.so is not successfully loaded. Will fall back to the default CUDA C++ "
-            "kernels.");
+            "Failed to load tvm-ffi function because libtvm_ffi.so is not successfully loaded.");
       });
       return std::nullopt;
     }
@@ -316,7 +315,7 @@ class TVMFFICentral {
   template <typename... Args>
   void maybe_warn_not_chosen(Args &&...reason) const {
     if (warn_cutedsl_backend_not_chosen_) {
-      NVTE_WARN("CuTeDSL quantization backend not chosen because ", reason...);
+      NVTE_WARN("Could not load CuTe DSL kernel because ", reason...);
     }
   }
 
@@ -343,7 +342,7 @@ class TVMFFICentral {
   }
 
   static bool warn_if_cutedsl_backend_not_chosen() {
-    return transformer_engine::getenv<bool>("NVTE_WARN_IF_CUTEDSL_BACKEND_NOT_CHOSEN");
+    return transformer_engine::getenv<bool>("NVTE_DEBUG");
   }
 
   const bool tvm_ffi_available_;  // libtvm_ffi.so loaded; false disables the backend
