@@ -2,10 +2,14 @@
 #
 # See LICENSE for license information.
 
-"""NCCL Device API transport for context-parallel rings."""
+"""NCCL Device API transport for context-parallel rings.
+
+Building with ``NVTE_WITH_NCCL_DEVICE_CP=1`` requires NCCL 2.29.7 or newer
+and matching compile/runtime versions. Process-wide GIN settings are left
+to the application; this transport does not change NCCL environment variables.
+"""
 
 import math
-import os
 import weakref
 from typing import Iterable, Optional
 
@@ -37,11 +41,6 @@ class NativeCPTransport:
     def __init__(self, parent_group, payload_bytes: int) -> None:
         if not hasattr(tex, "cp_native_transport_create"):
             raise RuntimeError("Transformer Engine was not built with native CP transport")
-        # This transport uses one shared context and VA-based signals.  NCCL's
-        # larger GIN defaults only reserve unused device state.
-        os.environ.setdefault("NCCL_GIN_NCONTEXTS", "1")
-        os.environ.setdefault("NCCL_GIN_SIGNAL_POOL_SIZE", "64")
-        os.environ.setdefault("NCCL_GIN_COUNTER_POOL_SIZE", "64")
         torch.distributed.barrier(group=parent_group, device_ids=[torch.cuda.current_device()])
         backend = parent_group._get_backend(torch.device("cuda"))
         if not hasattr(backend, "_comm_ptr"):

@@ -484,10 +484,17 @@ def run_dpa_with_cp(
     if native_cp_transport:
         kv_bytes = (k_.numel() + v_.numel()) * k_.element_size()
         pair_bytes = 2 * kv_bytes
+        gin_env_names = (
+            "NCCL_GIN_NCONTEXTS",
+            "NCCL_GIN_SIGNAL_POOL_SIZE",
+            "NCCL_GIN_COUNTER_POOL_SIZE",
+        )
+        gin_env_before = {name: os.environ.get(name) for name in gin_env_names}
         initialize_native_cp_transport(
             cp_comm_group,
             ((pair_bytes + 255) // 256) * 256 + pair_bytes,
         )
+        assert {name: os.environ.get(name) for name in gin_env_names} == gin_env_before
         if logical_cp_ring:
             set_native_cp_parent_group(cp_group, cp_comm_group)
     # set up environment

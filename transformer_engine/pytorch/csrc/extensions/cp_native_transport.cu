@@ -9,6 +9,11 @@
 #ifdef NVTE_WITH_NCCL_DEVICE_CP
 
 #include <nccl.h>
+
+#if NCCL_VERSION_CODE < NCCL_VERSION(2, 29, 7)
+#error "Native CP transport requires NCCL 2.29.7 or newer"
+#endif
+
 #include <nccl_device.h>
 
 #include <algorithm>
@@ -265,9 +270,6 @@ std::tuple<int64_t, at::Tensor> cp_native_transport_create(int64_t nccl_comm_ptr
 
   int runtime_version = 0;
   NVTE_CP_NCCL_CHECK(ncclGetVersion(&runtime_version));
-#if NCCL_VERSION_CODE < NCCL_VERSION(2, 28, 7)
-  TORCH_CHECK(false, "Native CP transport requires NCCL 2.28.7 or newer");
-#endif
   TORCH_CHECK(runtime_version == NCCL_VERSION_CODE,
               "NCCL Device API GIN requires matching compile/runtime versions; ", "compiled with ",
               NCCL_VERSION_CODE, ", loaded ", runtime_version);
@@ -303,13 +305,9 @@ std::tuple<int64_t, at::Tensor> cp_native_transport_create(int64_t nccl_comm_ptr
 
   ncclDevCommRequirements_t requirements = NCCL_DEV_COMM_REQUIREMENTS_INITIALIZER;
   if (needs_gin) {
-#if NCCL_VERSION_CODE >= NCCL_VERSION(2, 29, 7)
     requirements.ginContextCount = kGinContexts;
     requirements.ginQueueDepth = kGinQueueDepth;
     requirements.ginConnectionType = NCCL_GIN_CONNECTION_FULL;
-#else
-    TORCH_CHECK(false, "Multi-node native CP transport requires NCCL 2.29.7 or newer");
-#endif
   }
   NVTE_CP_NCCL_CHECK(ncclDevCommCreate(transport->comm, &requirements, &transport->dev_comm));
   transport->dev_comm_created = true;
