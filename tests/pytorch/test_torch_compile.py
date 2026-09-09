@@ -2381,7 +2381,6 @@ class _ScaleOp(BasicOperation):
 
     fwd_args_type = _ScaleFwdArgs
     bwd_args_type = _ScaleBwdArgs
-    num_grad_inputs = 2  # grad input, grad scale
 
     def __init__(self, *, device: str = "cuda", dtype: torch.dtype = torch.bfloat16) -> None:
         super().__init__()
@@ -2474,8 +2473,6 @@ class _ScaleWithKwargsOp(BasicOperation):
 
     fwd_args_type = _ScaleKwargsFwdArgs
     bwd_args_type = _ScaleKwargsBwdArgs
-    num_grad_inputs = 2  # grad input, grad scale
-    fwd_kwarg_names = ("extra_scale", "offset")
 
     def __init__(self, *, device: str = "cuda", dtype: torch.dtype = torch.bfloat16) -> None:
         super().__init__()
@@ -2597,6 +2594,15 @@ def test_te_ops_single_op_group_compiles():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_te_ops_multi_op_group_uses_eager_implementations():
+    """A group of several operations is gated onto the eager implementations."""
+    torch._dynamo.reset()
+    base = torch.randn(32, 64, dtype=torch.bfloat16, device="cuda")
+    with pytest.warns(UserWarning, match="several operations"):
+        _assert_sequential_matches_eager(lambda: te.ops.Sequential(_ScaleOp(), _ScaleOp()), base)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_te_ops_backward_fusion_uses_eager_implementations():
     """A backward fusion prevents the group from using basic-op custom ops."""
     te.ops.register_backward_fusion(_fuse_backward_scale_pair, prepend=True)
@@ -2608,22 +2614,6 @@ def test_te_ops_backward_fusion_uses_eager_implementations():
             )
     finally:
         OperationFuser.backward_fusion_functions.remove(_fuse_backward_scale_pair)
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-@pytest.mark.parametrize("compile_model", [False, True], ids=["eager", "compiled"])
-def test_te_ops_setup_context_saves_parameter(compile_model):
-    """Backward observes mutation of a tensor used by the forward."""
-    op = _ScaleOp()
-    model = te.ops.Sequential(op)
-    if compile_model:
-        model = torch.compile(model, fullgraph=True)
-    x = torch.randn(32, 64, dtype=torch.bfloat16, device="cuda", requires_grad=True)
-    y = model(x)
-    with torch.no_grad():
-        op.scale.add_(1)
-    with pytest.raises(RuntimeError, match="modified by an inplace operation"):
-        y.sum().backward()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")

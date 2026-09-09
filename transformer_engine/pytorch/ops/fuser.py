@@ -374,10 +374,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                 )
             for idx, dparams in zip(basic_op_idxs, fused_op_grad_params):
                 grad_params[idx] = dparams
-                # Dropping the reference frees the activation early; on the
-                # compiled path the graph owns that lifetime instead.
-                if not torch.compiler.is_compiling():
-                    basic_op_ctxs[idx].saved_tensors = None
+                basic_op_ctxs[idx].saved_tensors = None
             for idx, dxs in zip(basic_op_idxs, fused_op_grad_extra_inputs):
                 grad_extra_inputs[idx] = dxs
                 for input_idx, grad in enumerate(dxs):
@@ -745,6 +742,8 @@ class OperationFuser:
                 for idx, (op, basic_op_idxs) in enumerate(ops)
             ):
                 return f"a {mode} fusion"
+        if self._num_basic_ops != 1:
+            return "a group of several operations"
         for op, kwargs in zip(self._basic_ops, basic_op_kwargs, strict=True):
             # A kwarg an operation declares is resolved into its args container
             # like any other config. Anything else -- notably the preallocated

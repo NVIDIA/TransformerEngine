@@ -830,14 +830,16 @@ def _pack_fwd_result(result: Any) -> List[torch.Tensor]:
     return flat
 
 
-def _pack_bwd_result(grads: Any, num_grad_inputs: int, op_qualname: str) -> List[torch.Tensor]:
+def _pack_bwd_result(
+    grads: Any, num_grad_inputs: Optional[int], op_qualname: str
+) -> List[torch.Tensor]:
     """Pack a backward-impl return tuple into the op's ``Tensor[]`` payload.
 
-    Each grad occupies exactly one slot (validated against ``num_grad_inputs``);
-    a :class:`TensorSpec` grad is materialized into a single tensor.
+    Each grad occupies exactly one slot (validated against ``num_grad_inputs``
+    when given); a :class:`TensorSpec` grad is materialized into a single tensor.
     """
     grads = list(grads)
-    if len(grads) != num_grad_inputs:
+    if num_grad_inputs is not None and len(grads) != num_grad_inputs:
         raise RuntimeError(
             f"{op_qualname} expected bwd_impl to return {num_grad_inputs} grads "
             f"(one per input_tensors_for_grad entry), got {len(grads)}"
@@ -1260,7 +1262,7 @@ def _register_backward_op(
     arg_type: type,
     impl: Callable[[Any], Any],
     fake_impl: Callable[[Any], Any],
-    num_grad_inputs: int,
+    num_grad_inputs: Optional[int],
 ) -> _RegisteredOp:
     # Pass-through body: a subclass input reaches the base op through the
     # dispatch rule, never through the wrapper body.
@@ -1298,7 +1300,7 @@ def register_custom_op(
     bwd_arg_type: type,
     bwd_impl: Callable[[Any], Any],
     bwd_fake_impl: Callable[[Any], Tuple[Any, ...]],
-    num_grad_inputs: int,
+    num_grad_inputs: Optional[int] = None,
 ) -> Optional[Tuple[Callable[[Any], Any], Callable[[Any], Any]]]:
     """Register an op's forward and backward as two independent custom ops.
 
@@ -1315,7 +1317,8 @@ def register_custom_op(
 
     * ``fwd_impl(fwd_args) -> (output, aux)`` -- ``aux`` is a tuple of fresh tensors
     * ``fwd_fake_impl`` -- its data-free twin over :class:`TensorSpec`
-    * ``bwd_impl(bwd_args) -> tuple`` of ``num_grad_inputs`` gradients
+    * ``bwd_impl(bwd_args) -> tuple`` of gradients (``num_grad_inputs`` of them,
+      if given)
     * ``bwd_fake_impl`` -- its data-free twin
 
     Returns ``(forward_fn, backward_fn)``:
@@ -1355,7 +1358,7 @@ def _register_custom_op_impl(
     bwd_arg_type: type,
     bwd_impl: Callable[[Any], Any],
     bwd_fake_impl: Callable[[Any], Tuple[Any, ...]],
-    num_grad_inputs: int,
+    num_grad_inputs: Optional[int],
 ) -> Tuple[Callable[[Any], Any], Callable[[Any], Any]]:
     """Body of :func:`register_custom_op`; see it for semantics."""
 

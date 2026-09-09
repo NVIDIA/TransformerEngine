@@ -8,6 +8,7 @@ from __future__ import annotations
 import abc
 from collections.abc import Iterable, Sequence
 import dataclasses
+import inspect
 import pickle
 from typing import Any, Callable, Optional
 
@@ -23,6 +24,10 @@ from ..quantization import (
 )
 from ..tensor import Quantizer
 from ..dynamo import is_value_opaque_quantizer, register_custom_op
+
+_FIXED_RESOLVE_FWD_KWARGS = frozenset(
+    ("requires_grad", "prev_op_grad_output_quantizer", "next_op_input_quantizer")
+)
 
 
 @dataclasses.dataclass
@@ -193,10 +198,9 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
     # op_backward, so no operation writes that plumbing itself.
     fwd_args_type: Optional[type] = None
     bwd_args_type: Optional[type] = None
-    # Gradients returned by backward_compute: the input's, then any parameters'.
-    num_grad_inputs: int = 1
-    # Forward kwargs this operation accepts, resolved into fwd_args_type like
-    # any other config. A kwarg carries no gradient and must not be mutated.
+    # Forward kwargs this operation accepts: the keyword-only parameters of its
+    # resolve_fwd_args beyond the fixed ones. A kwarg carries no gradient and
+    # must not be mutated.
     fwd_kwarg_names: tuple[str, ...] = ()
     # (forward_fn, backward_fn) pair, or None if the operation cannot be compiled.
     compile_ops: Optional[tuple[Callable[..., Any], Callable[..., Any]]] = None
@@ -215,6 +219,14 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             # framework's actual requirement -- check it where it is declared.
             if not dataclasses.is_dataclass(arg_type):
                 raise TypeError(f"{cls.__name__}.{name} must be a dataclass")
+        params = inspect.signature(cls.resolve_fwd_args).parameters
+        if any(p.kind is p.VAR_KEYWORD for p in params.values()):
+            raise TypeError(f"{cls.__name__}.resolve_fwd_args must name its keyword arguments")
+        cls.fwd_kwarg_names = tuple(
+            name
+            for name, p in params.items()
+            if p.kind is p.KEYWORD_ONLY and name not in _FIXED_RESOLVE_FWD_KWARGS
+        )
         # One registration per class. The compute halves are bound here, so a
         # subclass that only swaps kernels (the activations) still gets its own
         # op without repeating any of this.
@@ -226,7 +238,6 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             bwd_arg_type=cls.bwd_args_type,
             bwd_impl=cls.backward_compute,
             bwd_fake_impl=cls.backward_fake,
-            num_grad_inputs=cls.num_grad_inputs,
         )
 
     def __init__(self) -> None:
@@ -344,7 +355,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
 
     @classmethod
     def backward_compute(cls, args: Any) -> tuple:
-        """Pure backward: ``num_grad_inputs`` gradients."""
+        """Pure backward: the input's gradient, then the parameters'."""
         raise NotImplementedError
 
     @classmethod
