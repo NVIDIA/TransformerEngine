@@ -933,6 +933,26 @@ def test_dpa_softcap_vs_reference(dtype, model_configs, model, softcap, backend,
         torch.testing.assert_close(v.grad.float(), v_ref.grad.float(), **tols)
 
 
+@pytest.mark.parametrize("softcap", (-1.0, float("inf"), float("nan")))
+def test_dpa_softcap_rejects_invalid(softcap):
+    """A cap that is negative or non-finite must raise rather than diverge by backend.
+
+    The backends disagree about these values: unfused applies a negative cap as its
+    absolute value and returns NaN for a non-finite one, while flash caps only when
+    softcap > 0 and so drops both silently.
+    """
+    block = DotProductAttention(4, 64, qkv_format="bshd", softcap=softcap).to(device="cuda")
+    q, k, v = (torch.randn(2, 32, 4, 64, dtype=torch.float16, device="cuda") for _ in range(3))
+
+    with pytest.raises(ValueError, match="softcap"):
+        block(q, k, v)
+
+    # A forward override is validated on the same path as the constructor value.
+    ok = DotProductAttention(4, 64, qkv_format="bshd").to(device="cuda")
+    with pytest.raises(ValueError, match="softcap"):
+        ok(q, k, v, softcap=softcap)
+
+
 @pytest.mark.parametrize("dtype", param_types)
 def test_transformer_layer_softcap_plumbing(dtype):
     """Test that TransformerLayer forwards softcap to both of its attention modules.
