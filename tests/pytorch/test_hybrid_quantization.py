@@ -755,7 +755,7 @@ class TestHybridQuantizerConstruction:
         ``gather_along_first_dim`` cannot operate on a columnwise-only
         NVFP4 hybrid sub-storage. ``HybridQuantizer.supports_only_rowwise_all_gather``
         must return True in this case so ``_linear_forward_impl`` /
-        ``_linear_backward`` preserve rowwise data (which NVFP4 can
+        ``_linear_backward_impl`` preserve rowwise data (which NVFP4 can
         dequantize) instead.
         """
         hq = HybridQuantizer(
@@ -2043,6 +2043,25 @@ class TestHybridTorchDispatch:
         detached = hybrid_tensor.detach()
         assert isinstance(detached, HybridQuantizedTensor)
         assert not detached.requires_grad
+
+    def test_detach_preserves_subclass(self, hybrid_tensor):
+        """HybridQuantizedTensor detach preserves its runtime subclass."""
+
+        class DerivedHybridQuantizedTensor(HybridQuantizedTensor):
+            pass
+
+        hybrid_tensor.__class__ = DerivedHybridQuantizedTensor
+        source_data = hybrid_tensor.get_data_tensors()
+
+        detached = hybrid_tensor.detach()
+
+        assert type(detached) is DerivedHybridQuantizedTensor
+        for detached_data, source_data_tensor in zip(detached.get_data_tensors(), source_data):
+            assert detached_data is source_data_tensor
+        assert not detached.requires_grad
+
+        parameter = torch.nn.Parameter(hybrid_tensor)
+        assert type(parameter) is DerivedHybridQuantizedTensor
 
     def test_repr(self, hybrid_tensor):
         r = repr(hybrid_tensor)
@@ -5260,6 +5279,21 @@ class TestHybridGroupedLinearValidation:
             model(tensor, m_splits)
         assert len(validation_calls) == first_call_count
         assert model._validated_quantizer_generations["scaling_fwd"] is first_generation
+
+        # Backward quantizers are validated the first time quantizers are selected
+        # with gradients enabled. Do not run a full forward here: this validation
+        # test intentionally uses a columnwise-only configuration that is not
+        # supported by the split-quantization kernel.
+        with torch.enable_grad(), autocast(enabled=True, recipe=original_recipe):
+            model._get_quantizers()
+        assert len(validation_calls) == first_call_count + 1
+
+        def unexpected_grad_mode_query():
+            pytest.fail("cached validation must not query grad mode")
+
+        with monkeypatch.context() as context:
+            context.setattr(torch, "is_grad_enabled", unexpected_grad_mode_query)
+            model._validate_quantizer_generation(False)
 
         rebuilt_recipe = recipe.CustomRecipe(qfactory=make_qfactory("rowwise_dequantized"))
         with torch.no_grad(), autocast(enabled=True, recipe=rebuilt_recipe):

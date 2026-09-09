@@ -66,7 +66,10 @@ def is_triton_autotuned_alias_safe() -> bool:
 
 # XLA gained the ``gpu_stream:collective`` stream annotation in openxla/xla#39604,
 # first shipping in JAX 0.10.1. Older XLA fatally fails on it.
-_COLLECTIVE_STREAM_MIN_JAX_VERSION = "0.10.1"
+# However, JAX 0.10.1 renamed this API to compute_on2 and slightly changed the
+# signature, then 0.11.1 renamed it back to compute_on. For simplicity,
+# we will support 0.11.1+
+_COLLECTIVE_STREAM_MIN_JAX_VERSION = "0.11.1"
 
 
 @lru_cache(maxsize=None)
