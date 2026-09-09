@@ -10,7 +10,7 @@ import torch
 import torch.distributed as dist
 
 from transformer_engine.pytorch.ep import ep_bootstrap, ep_finalize, release_symm_mem_pool
-from transformer_engine.pytorch.models import DeepSeekV3Layer
+from transformer_engine.pytorch.models import DeepSeekV3Layer, DeepSeekV3MoE
 
 HIDDEN = 256
 MOE_FFN = 128
@@ -36,8 +36,7 @@ def _device_sm() -> int:
 
 
 def _recv_capacity(ep_size: int) -> int:
-    cap = ep_size * TOKENS_PER_RANK * TOP_K + NUM_LOCAL_EXPERTS * 128
-    return -(-cap // 128) * 128
+    return DeepSeekV3MoE.ep_recv_capacity(ep_size, TOKENS_PER_RANK, TOP_K, NUM_LOCAL_EXPERTS)
 
 
 def _broadcast_params(module: torch.nn.Module) -> None:
