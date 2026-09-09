@@ -2393,11 +2393,13 @@ class DotProductAttention(TransformerEngineBaseModule):
             # packed-THD policy path gets the constructor value too, rather than a bare None.
             if softcap is None:
                 softcap = self.softcap
-            # A negative cap is silently inconsistent rather than harmless: tanh is odd, so
-            # UnfusedDotProductAttention's `cap * tanh(x / cap)` treats it as its absolute value,
-            # while FlashAttention only caps when `softcap > 0` and so applies none at all.
-            if softcap < 0.0:
-                raise ValueError(f"softcap must be non-negative, got {softcap}.")
+            # A cap that is negative or non-finite is silently inconsistent rather than
+            # harmless, because the backends disagree about it. tanh is odd, so
+            # UnfusedDotProductAttention's `cap * tanh(x / cap)` applies a negative cap as its
+            # absolute value and yields NaN for a non-finite one, while FlashAttention caps only
+            # when `softcap > 0` and so drops both without a word.
+            if not math.isfinite(softcap) or softcap < 0.0:
+                raise ValueError(f"softcap must be finite and non-negative, got {softcap}.")
 
             # checks for qkv_format
             if qkv_format is None:
