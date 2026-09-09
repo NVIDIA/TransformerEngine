@@ -13,26 +13,25 @@ See [benchmark configuration](#c-benchmark-configuration) for the full setup.
 
 Same layer and dimensions, BF16 unless noted.
 
-The naive measurements predate the router-backward fix and omit probability-gradient
-communication; updated timings are pending. They do not yet establish training speedups.
+All variants run the router backward and clear parameter gradients before each step.
 
 | MoE implementation | 4 GPUs (32 experts) | 8 GPUs (64 experts) |
 |---|---:|---:|
-| `naive`: all_to_all + loop over experts | 26.83 ms | 27.34 ms |
-| `naive_grouped`: all_to_all + TE grouped GEMM | 16.84 ms | 17.20 ms |
-| `te`: NCCL EP + grouped GEMM | 13.09 ms | 15.06 ms |
-| `te`, mxfp8 (unfused grouped GEMM) | 11.02 ms | 12.88 ms |
-| `te`, mxfp8 fused | 10.19 ms | 11.32 ms |
+| `naive`: all_to_all + loop over experts | 27.27 ms | 27.55 ms |
+| `naive_grouped`: all_to_all + TE grouped GEMM | 16.48 ms | 16.91 ms |
+| `te`: NCCL EP + grouped GEMM | 12.39 ms | 14.03 ms |
+| `te`, mxfp8 (unfused grouped GEMM) | 10.33 ms | 12.33 ms |
+| `te`, mxfp8 fused | 9.51 ms | 11.94 ms |
 
-At the small default dims (4 GPUs): `naive` 10.08 ms, `naive_grouped` 6.80 ms, `te` 6.17 ms.
+At the small default dims (4 GPUs): `naive` 11.09 ms, `naive_grouped` 7.15 ms, `te` 6.27 ms.
 
 ### TE precision and throughput (`--dsv3`)
 
 | Precision | 4 GPUs · ms/iter | 4 GPUs · Mtok/s | 8 GPUs · ms/iter | 8 GPUs · Mtok/s |
 |---|---:|---:|---:|---:|
-| BF16 | 13.09 | 1.25 | 15.06 | 2.18 |
-| MXFP8 | 11.02 | 1.49 | 12.88 | 2.54 |
-| MXFP8 fused | 10.19 | 1.61 | 11.32 | 2.89 |
+| BF16 | 12.39 | 1.32 | 14.03 | 2.34 |
+| MXFP8 | 10.33 | 1.59 | 12.33 | 2.66 |
+| MXFP8 fused | 9.51 | 1.72 | 11.94 | 2.74 |
 
 4 GPUs = 1 node / 32 experts; 8 GPUs = 2 nodes / 64 experts.
 Both nodes share one NVLink domain (MNNVL).
@@ -43,8 +42,9 @@ Both nodes share one NVLink domain (MNNVL).
 
 | Precision | ms/iter | Mtok/s |
 |---|---:|---:|
-| BF16 | 6.17 | 2.65 |
-| MXFP8 fused | 8.4 | 1.95 |
+| BF16 | 6.27 | 2.61 |
+| MXFP8 | 8.12 | 2.02 |
+| MXFP8 fused | 8.48 | 1.93 |
 
 “Fused” enables `NVTE_CUTEDSL_FUSED_GROUPED_MLP=1`.
 At the small dimensions, MXFP8 fused is slower than BF16.
@@ -158,17 +158,17 @@ about 1.5 ms per iteration to these numbers.
 ### E. TE kernel breakdown
 
 8 GPUs, `--dsv3`, MXFP8 fused. Per GPU and iteration, from `nsys stats --report cuda_gpu_kern_sum` on one node
-(kernel time 11.7 ms of an 11.3 ms iteration: the GPU is busy back to back):
+(kernel time 12.9 ms of a 13.6 ms iteration under nsys, 11.9 ms without it):
 
 | Group | ms | Kernels |
 |---|---:|---|
-| NCCL EP all-to-all | 2.3 | `nccl_ep_jit_ht_dispatch_kernel` (0.99), `nccl_ep_jit_ht_combine_kernel` (1.31), each twice per iteration (fwd + bwd) |
-| NCCL EP local permute + routing all-gather | 1.3 | `local_permute_dup/reduce` (0.62), `ncclDevKernel_AllGather_RING_LL` (0.65, includes waiting for slower ranks) |
-| fused grouped MLP (cuDNN, MXFP8) | 2.7 | fc1+SwiGLU fwd (0.58), fc2 fwd (0.9), dGLU bwd (0.35), wgrad (0.85) |
+| NCCL EP all-to-all | 2.7 | `nccl_ep_jit_ht_dispatch_kernel` (1.36), `nccl_ep_jit_ht_combine_kernel` (1.32), each twice per iteration (fwd + bwd) |
+| NCCL EP local permute + routing all-gather | 2.8 | `local_permute_dup/reduce` (0.62), `ncclDevKernel_AllGather_RING_LL` (2.16, mostly waiting for slower ranks) |
+| fused grouped MLP (cuDNN, MXFP8) | 2.5 | fc1+SwiGLU fwd (0.55), fc2 fwd (0.84), dGLU bwd (0.32), wgrad (0.80) |
 | MXFP8 quantization | 1.1 | `group_quantize_mxfp8` on the recv buffer (0.4), `quantize_mxfp8_kernel_cast_only` for dense GEMM inputs (0.7) |
-| dense MXFP8 GEMMs (MLA projections, shared expert) | 1.3 | `nvjet_sm103_qqtst_*` |
-| attention (cuDNN SDPA) | 0.7 | flash fprop (0.19) + bprop (0.51) |
-| elementwise | 1.1 | residual/shared-expert adds (0.73), RMSNorm fwd+bwd (0.39) |
+| dense MXFP8 GEMMs (MLA projections, shared expert) | 1.4 | `nvjet_sm103_qqtst_*` |
+| attention (cuDNN SDPA) | 0.9 | flash fprop (0.18) + bprop (0.51) + dq / dO helpers |
+| RMSNorm, RoPE, adds | 0.8 | `rmsnorm_fwd/bwd` (0.39), `rotary_*_kv` (0.18), residual adds (0.2) |
 
 Both nodes sit in one NVLink domain, so dispatch and combine move roughly 470 MB per GPU per
 call over NVLink at close to link bandwidth; on an InfiniBand-connected pair of nodes the
@@ -176,25 +176,21 @@ all-to-all share would be much larger.
 
 ### F. Naive kernel profiles
 
-The naive timings and profiles below predate the routing-probability autograd fix:
-they omit router backward and probability-gradient communication. They are historical
-measurements and must be rerun before drawing training-speedup conclusions. The current
-benchmark also clears parameter gradients before each step.
-
-Per GPU and iteration, the `naive` MoE spends (8 GPUs, kernel time 25.9 ms of a 28.5 ms
-iteration):
+Per GPU and iteration, the `naive` MoE spends (8 GPUs, kernel time 24.0 ms of a 27.5 ms
+iteration; the rest is host syncs and launch gaps):
 
 | Group | ms | Details |
 |---|---:|---|
-| `ncclDevKernel_SendRecv` | 5.2 | 7 all_to_all launches per iteration (tokens fwd/bwd, results fwd/bwd, counts, indices, probs) |
-| expert and dense GEMMs (`nvjet_*`) | 6.4 | 8 separate GEMM pairs per rank instead of one grouped GEMM, plus the MLA projections |
-| elementwise adds | 4.1 | `index_add` and its backward, residuals |
+| expert and dense GEMMs (`nvjet_*`) | 6.5 | 8 separate GEMM pairs per rank instead of one grouped GEMM, plus the MLA projections |
+| elementwise adds | 3.6 | `index_add` and its backward, residuals |
+| `ncclDevKernel_SendRecv` | 3.4 | 8 all_to_all launches per iteration (tokens and probs fwd/bwd, results fwd/bwd, counts, indices) |
+| indexing kernels | 3.3 | `x[tok]`, `nonzero` masks, `index_copy`, `index_fill`, `indexing_backward`, sorts |
 | `FillFunctor` (zeros) | 2.5 | `zeros_like` for the per-expert output buffer and `index_add` targets |
 | device-to-device copies | 2.3 | `index_copy` and gathers materialising per-expert slices |
-| indexing kernels | 3.0 | `x[tok]`, `nonzero` masks, `index_copy`, `indexing_backward` |
 | attention, norms | 1.1 | same as in the TE variant |
 
-`naive_grouped` (8 GPUs, kernel time 17.1 ms of a 17.2 ms iteration):
+`naive_grouped` (8 GPUs, kernel time 17.1 ms of a 17.2 ms iteration; profile taken before the
+router-gradient fix, timings since then moved by less than 0.3 ms):
 
 | Group | ms | Details |
 |---|---:|---|
