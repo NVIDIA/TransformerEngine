@@ -3,9 +3,12 @@
 # See LICENSE for license information.
 
 import math
+import runpy
+from pathlib import Path
 
 import pytest
 import torch
+import torch.distributed as dist
 
 from transformer_engine.pytorch.utils import deinterleave_glu_tensor
 from transformer_engine.pytorch.models import DeepSeekV3MoE, MultiLatentAttention
@@ -32,13 +35,13 @@ def _input(requires_grad=True):
     )
 
 
-def test_mla_rope_triton_matches_pytorch():
+@pytest.mark.parametrize("nope,rope,vdim", [(64, 32, 64), (48, 32, 64), (64, 48, 64), (64, 32, 48)])
+def test_mla_rope_matches_pytorch(nope, rope, vdim):
     from transformer_engine.pytorch.models.deepseek_v3 import mla_rope
 
     if not mla_rope.HAVE_TRITON:
         pytest.skip("Triton unavailable")
     s, b, h = 64, 2, 4
-    nope, rope, vdim = 64, 32, 64
     cos, sin = mla_rope.build_rope_tables(s, rope, device="cuda")
 
     torch.manual_seed(0)
@@ -174,3 +177,64 @@ def test_moe_matches_dense_reference(shared, grouped, topk):
     assert torch.isfinite(moe.expert_bias).all()
     if topk < num_experts:
         assert not torch.equal(bias_before, moe.expert_bias)
+
+
+@pytest.fixture(scope="module")
+def deepseek_example():
+    path = (
+        Path(__file__).resolve().parents[2] / "examples/pytorch/deepseek_v3/deepseek_v3_layer_ep.py"
+    )
+    return runpy.run_path(str(path))
+
+
+@pytest.fixture
+def single_rank_group(tmp_path):
+    if dist.is_initialized():
+        pytest.skip("Requires an isolated process group")
+    dist.init_process_group("nccl", init_method=(tmp_path / "store").as_uri(), rank=0, world_size=1)
+    try:
+        yield dist.group.WORLD
+    finally:
+        dist.destroy_process_group()
+
+
+@pytest.mark.parametrize("grouped", [False, True])
+def test_naive_moe_gradients(deepseek_example, single_rank_group, grouped):
+    torch.manual_seed(123)
+    moe = deepseek_example["NaiveMoE"](
+        HIDDEN, 128, 4, 2, single_rank_group, 128, torch.float32, grouped
+    )
+    x = torch.randn(64, HIDDEN, device="cuda", requires_grad=True)
+    x_ref = x.detach().clone().requires_grad_()
+    out = moe(x)
+
+    scores = torch.sigmoid(moe.gate(x_ref))
+    idx = torch.topk(scores + moe.expert_bias, moe.topk, dim=-1).indices
+    selected = scores.gather(1, idx)
+    selected = selected / selected.sum(-1, keepdim=True) * 2.5
+    probs = torch.zeros_like(scores).scatter(1, idx, selected)
+    ref = torch.zeros_like(x_ref)
+    for e in range(moe.local):
+        if grouped:
+            fc1, _, fc2 = moe.experts
+            w1 = deinterleave_glu_tensor(getattr(fc1, f"weight{e}"), 32)
+            w2 = getattr(fc2, f"weight{e}")
+        else:
+            w1, w2 = moe.w1[e], moe.w2[e]
+        act = moe._swiglu(torch.nn.functional.linear(x_ref, w1))
+        ref = ref + torch.nn.functional.linear(act * probs[:, e : e + 1], w2)
+    ref = ref + moe.shared_w2(moe._swiglu(moe.shared_w1(x_ref)))
+
+    grad = torch.randn_like(out)
+    actual_grads = torch.autograd.grad(out, (x, moe.gate.weight), grad)
+    ref_grads = torch.autograd.grad(ref, (x_ref, moe.gate.weight), grad)
+    torch.testing.assert_close(out, ref, rtol=1e-3, atol=1e-3)
+    for actual, expected in zip(actual_grads, ref_grads):
+        torch.testing.assert_close(actual, expected, rtol=1e-3, atol=1e-3)
+    assert actual_grads[1].abs().max() > 0
+
+
+@pytest.mark.parametrize("value", [1.0, float("nan"), float("inf"), None])
+def test_example_finite_check(deepseek_example, single_rank_group, value):
+    tensor = None if value is None else torch.tensor(value, device="cuda")
+    assert deepseek_example["_check_finite"]([tensor], torch.device("cuda")) == (value == 1.0)

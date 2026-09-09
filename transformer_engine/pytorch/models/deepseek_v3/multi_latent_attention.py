@@ -11,6 +11,7 @@ import torch
 
 from transformer_engine.pytorch.module import Linear, LayerNormLinear
 from transformer_engine.pytorch.attention import DotProductAttention
+from transformer_engine.pytorch.distributed import allreduce, get_distributed_world_size
 from transformer_engine.pytorch.models.deepseek_v3.mla_rope import (
     apply_mla_rope_kv,
     apply_mla_rope_q,
@@ -19,6 +20,23 @@ from transformer_engine.pytorch.models.deepseek_v3.mla_rope import (
 )
 
 __all__ = ["MultiLatentAttention"]
+
+
+class _ReduceGrad(torch.autograd.Function):
+    """Replicate an input across TP ranks and sum its gradients."""
+
+    @staticmethod
+    def forward(ctx, inp, tp_group):
+        """Return the replicated input unchanged."""
+        ctx.tp_group = tp_group
+        return inp
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        """Sum gradients from each rank's attention heads."""
+        grad_input = grad_output.clone(memory_format=torch.contiguous_format)
+        grad_input, _ = allreduce(grad_input, ctx.tp_group)
+        return grad_input, None
 
 
 class MultiLatentAttention(torch.nn.Module):
@@ -117,6 +135,8 @@ class MultiLatentAttention(torch.nn.Module):
     ) -> None:
         super().__init__()
 
+        if tp_group is not None:
+            tp_size = get_distributed_world_size(tp_group)
         assert qkv_format in ("sbhd", "bshd"), "MultiLatentAttention supports sbhd/bshd formats."
         assert num_attention_heads % tp_size == 0
 
@@ -188,7 +208,11 @@ class MultiLatentAttention(torch.nn.Module):
         )
 
     def _rope_tables_for(self, seq_len: int, device: torch.device):
-        if self._rope_tables is None or self._rope_tables[0].shape[0] < seq_len:
+        if (
+            self._rope_tables is None
+            or self._rope_tables[0].shape[0] < seq_len
+            or self._rope_tables[0].device != device
+        ):
             self._rope_tables = build_rope_tables(
                 seq_len,
                 self.qk_rope_head_dim,
@@ -227,6 +251,8 @@ class MultiLatentAttention(torch.nn.Module):
 
         kv_down = self.kv_down_proj(hidden_states)
         kv_latent, k_pos = torch.split(kv_down, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        if self.kv_up_proj.tp_size > 1:
+            k_pos = _ReduceGrad.apply(k_pos, self.kv_up_proj.tp_group)
         kv = self.kv_up_proj(kv_latent)
         kv = kv.view(*kv.shape[:-1], heads, self.qk_nope_head_dim + self.v_head_dim)
 

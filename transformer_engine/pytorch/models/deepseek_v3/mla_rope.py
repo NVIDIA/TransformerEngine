@@ -537,7 +537,12 @@ def apply_mla_rope_q(
     tensor_format: str = "sbhd",
 ) -> torch.Tensor:
     """RoPE on the trailing ``head_dim_rope`` slice of q; in place on the Triton path."""
-    if HAVE_TRITON and tensor_format == "sbhd":
+    if (
+        HAVE_TRITON
+        and tensor_format == "sbhd"
+        and head_dim_rope >= 2
+        and _is_power_of_two(head_dim_rope)
+    ):
         return _MLARoPEQTriton.apply(q, cos_table, sin_table, head_dim_nope, head_dim_rope)
     seq_dim = 0 if tensor_format == "sbhd" else 1
     q_rope = _rotate_interleaved_to_neox(q[..., head_dim_nope:], cos_table, sin_table, seq_dim)
@@ -555,7 +560,12 @@ def apply_mla_rope_kv(
     tensor_format: str = "sbhd",
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Build (k, v) from kv ``[.., h, nope+v]`` and the shared rope head ``[.., 1, rope]``."""
-    if HAVE_TRITON and tensor_format == "sbhd":
+    if (
+        HAVE_TRITON
+        and tensor_format == "sbhd"
+        and head_dim_rope >= 2
+        and all(_is_power_of_two(dim) for dim in (head_dim_nope, head_dim_rope, head_dim_v))
+    ):
         return _MLARoPEKVTriton.apply(
             kv, k_pos_emb, cos_table, sin_table, head_dim_nope, head_dim_rope, head_dim_v
         )
@@ -565,3 +575,7 @@ def apply_mla_rope_kv(
     k_rope = _rotate_interleaved_to_neox(k_pos_emb, cos_table, sin_table, seq_dim)
     k_rope = k_rope.expand(*k_nope.shape[:-1], -1)
     return torch.cat((k_nope, k_rope), dim=-1), v.contiguous()
+
+
+def _is_power_of_two(value: int) -> bool:
+    return value > 0 and value & (value - 1) == 0

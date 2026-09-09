@@ -113,6 +113,7 @@ class DeepSeekV3Layer(torch.nn.Module):
         self.self_attention = MultiLatentAttention(
             hidden_size,
             num_attention_heads,
+            layernorm_epsilon=layernorm_epsilon,
             params_dtype=params_dtype,
             device=device,
             **mla_kwargs,

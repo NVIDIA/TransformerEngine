@@ -148,23 +148,20 @@ class DeepSeekV3MoE(torch.nn.Module):
                 hidden_size, shared_expert_ffn_hidden_size, dtype, device
             )
 
-        self.ep_buffer = None
+        self._ep_buffer_kwargs = None
         if ep_group is not None:
-            from transformer_engine.pytorch.ep import EpBuffer
-
             assert ep_max_tokens_per_rank is not None, "EP requires ep_max_tokens_per_rank."
             cap = self.ep_recv_capacity(
                 self.ep_size, ep_max_tokens_per_rank, topk, num_local_experts
             )
-            self.ep_buffer = EpBuffer(
-                top_k=topk,
-                max_tokens_per_rank=ep_max_tokens_per_rank,
-                hidden_dim=hidden_size,
-                num_local_experts=num_local_experts,
-                recv_capacity_per_rank=cap,
-                alignment=_EP_ALIGNMENT,
-                device=device,
-            )
+            self._ep_buffer_kwargs = {
+                "top_k": topk,
+                "max_tokens_per_rank": ep_max_tokens_per_rank,
+                "hidden_dim": hidden_size,
+                "num_local_experts": num_local_experts,
+                "recv_capacity_per_rank": cap,
+                "alignment": _EP_ALIGNMENT,
+            }
 
     @staticmethod
     def ep_recv_capacity(
@@ -224,9 +221,10 @@ class DeepSeekV3MoE(torch.nn.Module):
         )
 
     def _forward_ep(self, tokens: torch.Tensor) -> torch.Tensor:
-        from transformer_engine.pytorch.ep import ep_dispatch, ep_combine
+        from transformer_engine.pytorch.ep import EpBuffer, ep_dispatch, ep_combine
 
         assert tokens.dtype == torch.bfloat16, "The EP path requires bfloat16 inputs."
+        buffer = EpBuffer(**self._ep_buffer_kwargs, device=tokens.device)
         topk_idx = torch.empty(
             (tokens.shape[0], self.topk), dtype=torch.int64, device=tokens.device
         )
@@ -241,9 +239,9 @@ class DeepSeekV3MoE(torch.nn.Module):
         # the recv/grad buffers can stay uninitialized. The fused grouped MLP
         # reads up to a tile past the last expert, so zero a margin there
         # (offsets stay on device: no host sync).
-        cap = self.ep_buffer.recv_capacity_per_rank
+        cap = buffer.recv_capacity_per_rank
         recv_tokens, recv_weights, tokens_per_expert = ep_dispatch(
-            self.ep_buffer,
+            buffer,
             tokens,
             topk_idx,
             topk_weights,
@@ -262,9 +260,7 @@ class DeepSeekV3MoE(torch.nn.Module):
         expert_out = self.experts(
             recv_tokens, tokens_per_expert, recv_weights.to(tokens.dtype), tokens_per_expert
         )
-        return ep_combine(
-            self.ep_buffer, expert_out, num_local_tokens=tokens.shape[0], grad_out=grad_out
-        )
+        return ep_combine(buffer, expert_out, num_local_tokens=tokens.shape[0], grad_out=grad_out)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """

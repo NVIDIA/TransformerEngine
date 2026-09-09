@@ -10,7 +10,7 @@ import torch
 import torch.distributed as dist
 
 from transformer_engine.pytorch.ep import ep_bootstrap, ep_finalize, release_symm_mem_pool
-from transformer_engine.pytorch.models import DeepSeekV3Layer, DeepSeekV3MoE
+from transformer_engine.pytorch.models import DeepSeekV3Layer, DeepSeekV3MoE, MultiLatentAttention
 
 HIDDEN = 256
 MOE_FFN = 128
@@ -78,7 +78,9 @@ def _copy_weights(ep_layer: DeepSeekV3Layer, ref: DeepSeekV3Layer, rank: int) ->
             getattr(ep_fc2, f"weight{local_e}").copy_(getattr(ref_fc2, f"weight{global_e}"))
 
 
-def test_layer_ep_matches_local(rank: int, ep_size: int, ep_group) -> None:
+def test_layer_ep_matches_local(
+    rank: int, ep_size: int, ep_group, num_microbatches: int = 1
+) -> None:
     """Full DeepSeekV3Layer with EP must match the all-experts-local layer numerically."""
     num_experts = NUM_LOCAL_EXPERTS * ep_size
     torch.manual_seed(0)
@@ -88,19 +90,24 @@ def test_layer_ep_matches_local(rank: int, ep_size: int, ep_group) -> None:
     _copy_weights(ep_layer, ref, rank)
 
     torch.manual_seed(1234 + rank)
-    x = torch.randn(TOKENS_PER_RANK // 2, 2, HIDDEN, dtype=DTYPE, device="cuda")
-    x_ep = x.clone().requires_grad_(True)
-    x_ref = x.clone().requires_grad_(True)
+    microbatches = []
+    for mb in range(num_microbatches):
+        seq_len = TOKENS_PER_RANK // 2 - 8 * mb
+        x = torch.randn(seq_len, 2, HIDDEN, dtype=DTYPE, device="cuda")
+        x_ep = x.clone().requires_grad_(True)
+        x_ref = x.clone().requires_grad_(True)
+        out_ep = ep_layer(x_ep)
+        out_ref = ref(x_ref)
+        assert out_ep.shape == x.shape
+        torch.testing.assert_close(out_ep, out_ref, rtol=0.05, atol=0.05)
+        microbatches.append((x_ep, x_ref, out_ep, out_ref))
 
-    out_ep = ep_layer(x_ep)
-    out_ref = ref(x_ref)
-    assert out_ep.shape == x.shape
-    torch.testing.assert_close(out_ep, out_ref, rtol=0.05, atol=0.05)
-
-    grad_out = torch.randn_like(out_ep)
-    out_ep.backward(grad_out)
-    out_ref.backward(grad_out)
-    torch.testing.assert_close(x_ep.grad, x_ref.grad, rtol=0.05, atol=0.05)
+    # All microbatches must retain their routing until their own backward.
+    for x_ep, x_ref, out_ep, out_ref in microbatches:
+        grad_out = torch.randn_like(out_ep)
+        out_ep.backward(grad_out.clone())
+        out_ref.backward(grad_out.clone())
+        torch.testing.assert_close(x_ep.grad, x_ref.grad, rtol=0.05, atol=0.05)
 
     ref_params = dict(ref.named_parameters())
     for name, p in ep_layer.named_parameters():
@@ -124,15 +131,71 @@ def test_layer_ep_matches_local(rank: int, ep_size: int, ep_group) -> None:
 
     counts = ep_layer.mlp._last_tokens_per_expert.clone()
     dist.all_reduce(counts)
-    assert counts.sum().item() == ep_size * TOKENS_PER_RANK * TOP_K
+    last_num_tokens = microbatches[-1][0].numel() // HIDDEN
+    assert counts.sum().item() == ep_size * last_num_tokens * TOP_K
 
     ep_layer.mlp.update_expert_bias()
     assert torch.isfinite(ep_layer.mlp.expert_bias).all()
 
 
+def test_mla_tp_matches_local(rank: int, tp_size: int, tp_group) -> None:
+    """Compare sharded MLA outputs and gradients with an unsharded reference."""
+    torch.backends.cuda.matmul.allow_tf32 = False
+    for fmt in ("sbhd", "bshd"):
+        for explicit_size in (False, True):
+            torch.manual_seed(0)
+            common = dict(params_dtype=torch.float32, qkv_format=fmt, **MLA_KWARGS)
+            ref = MultiLatentAttention(HIDDEN, 2 * tp_size, **common)
+            _broadcast_params(ref)
+            tp = MultiLatentAttention(
+                HIDDEN,
+                2 * tp_size,
+                tp_group=tp_group,
+                **({"tp_size": tp_size} if explicit_size else {}),
+                **common,
+            )
+            ref_params = dict(ref.named_parameters())
+
+            def shard(name, tensor):
+                if name in ("q_up_proj.weight", "kv_up_proj.weight"):
+                    return tensor.chunk(tp_size, dim=0)[rank]
+                if name == "out_proj.weight":
+                    return tensor.chunk(tp_size, dim=1)[rank]
+                return tensor
+
+            with torch.no_grad():
+                for name, param in tp.named_parameters():
+                    param.copy_(shard(name, ref_params[name]))
+
+            torch.manual_seed(1234)
+            shape = (16, 2, HIDDEN) if fmt == "sbhd" else (2, 16, HIDDEN)
+            x = torch.randn(shape, device="cuda", requires_grad=True)
+            x_ref = x.detach().clone().requires_grad_()
+            out = tp(x)
+            out_ref = ref(x_ref)
+            torch.testing.assert_close(out, out_ref, rtol=1e-3, atol=1e-3)
+            grad = torch.randn_like(out)
+            out.backward(grad.clone())
+            out_ref.backward(grad.clone())
+            torch.testing.assert_close(x.grad, x_ref.grad, rtol=1e-3, atol=1e-3)
+            for name, param in tp.named_parameters():
+                torch.testing.assert_close(
+                    param.grad,
+                    shard(name, ref_params[name].grad),
+                    rtol=1e-3,
+                    atol=1e-3,
+                    msg=name,
+                )
+
+
 def main() -> int:
     dist.init_process_group(backend="nccl")
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+    if "--tp" in sys.argv:
+        test_mla_tp_matches_local(dist.get_rank(), dist.get_world_size(), dist.group.WORLD)
+        print(f"[rank {dist.get_rank()}] TP PASSED")
+        dist.destroy_process_group()
+        return 0
     from torch.distributed import _symmetric_memory as _symm_mem
 
     _symm_mem.set_backend("NCCL")
@@ -154,7 +217,8 @@ def main() -> int:
         num_topk=TOP_K,
         recv_capacity_per_rank=_recv_capacity(ep_size),
     )
-    test_layer_ep_matches_local(rank, ep_size, ep_group)
+    for num_microbatches in (1, 3):
+        test_layer_ep_matches_local(rank, ep_size, ep_group, num_microbatches)
     print(f"[rank {rank}] PASSED")
 
     dist.barrier()

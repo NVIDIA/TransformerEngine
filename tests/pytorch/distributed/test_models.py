@@ -29,3 +29,14 @@ def test_deepseek_layer_ep():
         LAUNCH_CMD + [str(TEST_ROOT / "run_models.py")], env=os.environ, check=False, timeout=300
     )
     assert result.returncode == 0
+
+
+@pytest.mark.skipif(NUM_PROCS < 2, reason="TP requires >= 2 GPUs")
+def test_mla_tp():
+    result = subprocess.run(
+        LAUNCH_CMD + [str(TEST_ROOT / "run_models.py"), "--tp"],
+        env=os.environ,
+        check=False,
+        timeout=300,
+    )
+    assert result.returncode == 0
