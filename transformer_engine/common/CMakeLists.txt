@@ -51,8 +51,10 @@ if(NVTE_ENABLE_BOLT_COMPATIBLE)
   endif()
 
   include(CheckCXXCompilerFlag)
-  check_cxx_compiler_flag("-fno-reorder-blocks-and-partition"
-                          NVTE_CXX_SUPPORTS_FNO_REORDER_BLOCKS_AND_PARTITION)
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    check_cxx_compiler_flag("-fno-reorder-blocks-and-partition"
+                            NVTE_CXX_SUPPORTS_FNO_REORDER_BLOCKS_AND_PARTITION)
+  endif()
   check_cxx_compiler_flag("-fno-jump-tables"
                           NVTE_CXX_SUPPORTS_FNO_JUMP_TABLES)
   if(NVTE_TARGET_IS_ARM64)
@@ -61,7 +63,8 @@ if(NVTE_ENABLE_BOLT_COMPATIBLE)
     check_cxx_compiler_flag("-mno-fix-cortex-a53-843419"
                             NVTE_CXX_SUPPORTS_MNO_FIX_CORTEX_A53_843419)
   endif()
-  if(NOT NVTE_CXX_SUPPORTS_FNO_REORDER_BLOCKS_AND_PARTITION
+  if((CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
+      AND NOT NVTE_CXX_SUPPORTS_FNO_REORDER_BLOCKS_AND_PARTITION)
      OR NOT NVTE_CXX_SUPPORTS_FNO_JUMP_TABLES
      OR (NVTE_TARGET_IS_ARM64
          AND (NOT NVTE_CXX_SUPPORTS_MNO_FIX_CORTEX_A53_835769
@@ -84,11 +87,18 @@ function(nvte_enable_bolt_compatible_compile_options TARGET_NAME)
   target_compile_options(
     ${TARGET_NAME}
     PRIVATE
-    $<$<COMPILE_LANGUAGE:CXX>:-fno-reorder-blocks-and-partition>
     $<$<COMPILE_LANGUAGE:CXX>:-fno-jump-tables>
-    $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fno-reorder-blocks-and-partition>
     $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fno-jump-tables>
   )
+
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(
+      ${TARGET_NAME}
+      PRIVATE
+      $<$<COMPILE_LANGUAGE:CXX>:-fno-reorder-blocks-and-partition>
+      $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fno-reorder-blocks-and-partition>
+    )
+  endif()
 
   if(NVTE_TARGET_IS_ARM64)
     target_compile_options(

@@ -76,6 +76,26 @@ def target_is_arm64() -> bool:
 
 
 @functools.lru_cache(maxsize=None)
+def cxx_compiler_is_gcc() -> bool:
+    """Whether the configured C++ compiler is GCC."""
+    cxx = shlex.split(os.getenv("CXX", "c++"))
+    try:
+        result = subprocess.run(
+            [*cxx, "-v"],
+            capture_output=True,
+            check=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as e:
+        raise RuntimeError(
+            f"Could not identify the C++ compiler with `{' '.join(cxx)} -v`"
+        ) from e
+
+    output = f"{result.stdout}\n{result.stderr}"
+    return re.search(r"^gcc version\b", output, flags=re.IGNORECASE | re.MULTILINE) is not None
+
+
+@functools.lru_cache(maxsize=None)
 def bolt_compatible_build_enabled() -> bool:
     """Whether to build host ELF libraries with BOLT-compatible options."""
     configured = os.getenv("NVTE_ENABLE_BOLT_COMPATIBLE")
@@ -94,7 +114,9 @@ def get_bolt_build_flags() -> Tuple[List[str], List[str]]:
     if not bolt_compatible_build_enabled():
         return [], []
 
-    compiler_flags = ["-fno-reorder-blocks-and-partition", "-fno-jump-tables"]
+    compiler_flags = ["-fno-jump-tables"]
+    if cxx_compiler_is_gcc():
+        compiler_flags.append("-fno-reorder-blocks-and-partition")
     linker_flags = ["-Wl,--emit-relocs", "-Wl,-z,now"]
     if target_is_arm64():
         compiler_flags.extend(
