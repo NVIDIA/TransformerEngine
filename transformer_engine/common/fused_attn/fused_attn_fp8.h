@@ -16,7 +16,6 @@
 #include <string>
 
 #include "config_and_params.h"
-#include "transformer_engine/fused_attn.h"
 #include "transformer_engine/transformer_engine.h"
 
 namespace transformer_engine {

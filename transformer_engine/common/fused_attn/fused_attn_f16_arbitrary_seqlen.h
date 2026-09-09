@@ -17,7 +17,7 @@
 
 #include "common/common.h"
 #include "config_and_params.h"
-#include "transformer_engine/fused_attn.h"
+#include "transformer_engine/transformer_engine.h"
 
 namespace transformer_engine {
 void fused_attn_arbitrary_seqlen_fwd(const fused_attn::FusedAttnConfig &cfg, const Tensor *input_Q,
