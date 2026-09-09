@@ -7,6 +7,7 @@ and MoE with a shared expert. Routed experts are sharded across GPUs using NCCL 
 
 GB300 GPUs, 4096 tokens per rank, top-k 8, 8 local experts per GPU.
 Times cover one layer's forward + backward; throughput is global, in millions of tokens/s.
+Every number is the median of three runs (spread within 0.3 ms).
 See [benchmark configuration](#c-benchmark-configuration) for the full setup.
 
 ### TE vs. plain PyTorch (`--dsv3`)
@@ -17,21 +18,21 @@ All variants run the router backward and clear parameter gradients before each s
 
 | MoE implementation | 4 GPUs (32 experts) | 8 GPUs (64 experts) |
 |---|---:|---:|
-| `naive`: all_to_all + loop over experts | 27.27 ms | 27.55 ms |
-| `naive_grouped`: all_to_all + TE grouped GEMM | 16.48 ms | 16.91 ms |
-| `te`: NCCL EP + grouped GEMM | 12.39 ms | 14.03 ms |
-| `te`, mxfp8 (unfused grouped GEMM) | 10.33 ms | 12.33 ms |
-| `te`, mxfp8 fused | 9.51 ms | 11.94 ms |
+| `naive`: all_to_all + loop over experts | 26.97 ms | 27.44 ms |
+| `naive_grouped`: all_to_all + TE grouped GEMM | 16.48 ms | 16.89 ms |
+| `te`: NCCL EP + grouped GEMM | 12.36 ms | 13.99 ms |
+| `te`, mxfp8 (unfused grouped GEMM) | 10.28 ms | 12.10 ms |
+| `te`, mxfp8 fused | 9.52 ms | 10.47 ms |
 
-At the small default dims (4 GPUs): `naive` 11.09 ms, `naive_grouped` 7.15 ms, `te` 6.27 ms.
+At the small default dims (4 GPUs): `naive` 11.13 ms, `naive_grouped` 7.04 ms, `te` 6.29 ms.
 
-### TE precision and throughput (`--dsv3`)
+### TE throughput (`--dsv3`)
 
-| Precision | 4 GPUs · ms/iter | 4 GPUs · Mtok/s | 8 GPUs · ms/iter | 8 GPUs · Mtok/s |
-|---|---:|---:|---:|---:|
-| BF16 | 12.39 | 1.32 | 14.03 | 2.34 |
-| MXFP8 | 10.33 | 1.59 | 12.33 | 2.66 |
-| MXFP8 fused | 9.51 | 1.72 | 11.94 | 2.74 |
+| Precision | 4 GPUs · Mtok/s | 8 GPUs · Mtok/s |
+|---|---:|---:|
+| BF16 | 1.33 | 2.34 |
+| MXFP8 | 1.59 | 2.71 |
+| MXFP8 fused | 1.72 | 3.13 |
 
 4 GPUs = 1 node / 32 experts; 8 GPUs = 2 nodes / 64 experts.
 Both nodes share one NVLink domain (MNNVL).
@@ -42,9 +43,9 @@ Both nodes share one NVLink domain (MNNVL).
 
 | Precision | ms/iter | Mtok/s |
 |---|---:|---:|
-| BF16 | 6.27 | 2.61 |
-| MXFP8 | 8.12 | 2.02 |
-| MXFP8 fused | 8.48 | 1.93 |
+| BF16 | 6.29 | 2.61 |
+| MXFP8 | 8.13 | 2.02 |
+| MXFP8 fused | 8.62 | 1.90 |
 
 “Fused” enables `NVTE_CUTEDSL_FUSED_GROUPED_MLP=1`.
 At the small dimensions, MXFP8 fused is slower than BF16.
@@ -157,15 +158,16 @@ about 1.5 ms per iteration to these numbers.
 
 ### E. TE kernel breakdown
 
-8 GPUs, `--dsv3`, MXFP8 fused. Per GPU and iteration, from `nsys stats --report cuda_gpu_kern_sum` on one node
-(kernel time 12.9 ms of a 13.6 ms iteration under nsys, 11.9 ms without it):
+8 GPUs, `--dsv3`, MXFP8 fused. Per GPU and iteration, from `nsys stats --report cuda_gpu_kern_sum`
+on one node (kernel time 10.8 ms; the iteration takes 10.5 ms without the profiler). Profiling adds
+skew between nodes, so the wait row is taken from the node that was not slowed down by nsys.
 
 | Group | ms | Kernels |
 |---|---:|---|
-| NCCL EP all-to-all | 2.7 | `nccl_ep_jit_ht_dispatch_kernel` (1.36), `nccl_ep_jit_ht_combine_kernel` (1.32), each twice per iteration (fwd + bwd) |
+| NCCL EP all-to-all | 2.3 | `nccl_ep_jit_ht_dispatch_kernel` (1.05), `nccl_ep_jit_ht_combine_kernel` (1.29), each twice per iteration (fwd + bwd) |
 | NCCL EP local permute | 0.6 | `local_permute_dup/reduce`: staging buffer to expert-major layout, zero-filled padding |
-| rank desync wait | 2.2 | `ncclDevKernel_AllGather_RING_LL` (routing-map all-gather in prepare, ~0.06 ms of transfer); the first collective of the layer absorbs the skew between ranks |
-| fused grouped MLP (cuDNN, MXFP8) | 2.5 | fc1+SwiGLU fwd (0.55), fc2 fwd (0.84), dGLU bwd (0.32), wgrad (0.80) |
+| rank skew wait | 0.5 | `ncclDevKernel_AllGather_RING_LL` (routing-map all-gather in prepare, ~0.06 ms of transfer); the first collective of the layer absorbs load imbalance between ranks |
+| fused grouped MLP (cuDNN, MXFP8) | 2.4 | fc1+SwiGLU fwd (0.53), fc2 fwd (0.82), dGLU bwd (0.31), wgrad (0.78) |
 | MXFP8 quantization | 1.1 | `group_quantize_mxfp8` on the recv buffer (0.4), `quantize_mxfp8_kernel_cast_only` for dense GEMM inputs (0.7) |
 | dense MXFP8 GEMMs (MLA projections, shared expert) | 1.4 | `nvjet_sm103_qqtst_*` |
 | attention (cuDNN SDPA) | 0.9 | flash fprop (0.18) + bprop (0.51) + dq / dO helpers |
@@ -190,26 +192,32 @@ iteration; the rest is host syncs and launch gaps):
 | device-to-device copies | 2.3 | `index_copy` and gathers materialising per-expert slices |
 | attention, norms | 1.1 | same as in the TE variant |
 
-`naive_grouped` (8 GPUs, kernel time 17.1 ms of a 17.2 ms iteration; profile taken before the
-router-gradient fix, timings since then moved by less than 0.3 ms):
+#### Historical `naive_grouped` profile
+
+8 GPUs, kernel time 17.1 ms of a 17.2 ms iteration. This profile predates the
+router-gradient fix and omits probability-gradient communication. It is retained for
+reference, not for direct comparison with the current profiles or headline timings.
 
 | Group | ms | Details |
 |---|---:|---|
-| `ncclDevKernel_SendRecv` | 3.8 | the same 7 all_to_all launches, less time because the GPU is no longer stalled between them |
+| `ncclDevKernel_SendRecv` | 3.8 | 7 all_to_all launches in this historical run; the current implementation has 8 |
 | grouped GEMMs (`nvjet_*_ptrGroup_*`) | 4.1 | fc1 / fc2 forward, dgrad, wgrad as grouped GEMMs, same as in `te` |
 | sorting rows by expert and back | 2.6 | `argsort`, gathers (`x[tok]`, `x_recv[by_expert]`), `index_copy`, `indexing_backward` |
 | dense GEMMs (MLA projections, shared expert) | 2.4 | same as in `te` |
 | elementwise adds | 0.7 | `index_add`, residuals |
 | attention, norms | 1.1 | same as in `te` |
 
-Reading the three rows of the table together: the Python loop over experts costs about
-10 ms per iteration (`naive` -> `naive_grouped`, 8 separate GEMM pairs, `nonzero` masks,
-zero-filled buffers, copies); replacing torch `all_to_all` plus the surrounding sort / gather /
-scatter with NCCL EP dispatch and combine, which write straight into the expert-major layout
-and zero-fill the padding, saves another 2 ms (`naive_grouped` -> `te`). Both `naive`
-variants also synchronise with the host twice per layer to learn the all_to_all split sizes;
-`te` does not. `--recipe mxfp8` is only supported by `te`: the naive variants would need the
-per-expert row counts padded to the MXFP8 block size.
+#### Interpreting the current results
+
+In the headline BF16 timings, `naive` -> `naive_grouped` reduces iteration time by
+10.5 ms on 4 GPUs and 10.6 ms on 8 GPUs. `naive_grouped` -> `te` saves another
+4.1 ms and 2.9 ms, respectively. These are end-to-end differences between
+implementations, not isolated measurements of Python-loop or communication overhead.
+
+NCCL EP dispatch and combine write directly into the expert-major layout and zero-fill
+the padding. Both naive variants synchronise with the host to obtain the all_to_all
+split sizes; TE avoids those synchronizations. MXFP8 is only supported by `te`: the naive
+variants would need per-expert row counts padded to the MXFP8 block size.
 
 ### G. EP implementation notes
 
