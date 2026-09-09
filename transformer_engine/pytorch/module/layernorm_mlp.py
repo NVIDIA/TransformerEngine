@@ -2601,7 +2601,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
                     setattr(self.fc2_bias, "sequence_parallel", self.sequence_parallel)
 
     @no_torch_dynamo()
-    @no_torch_dynamo()
     def forward(
         self,
         inp: torch.Tensor,
