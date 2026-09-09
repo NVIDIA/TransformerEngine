@@ -24,11 +24,11 @@ bash run_deepseek_v3_layer_ep.sh                         # small dims, bf16
 bash run_deepseek_v3_layer_ep.sh --dsv3                  # DeepSeek-V3 layer dims, bf16
 bash run_deepseek_v3_layer_ep.sh --dsv3 --recipe mxfp8   # MXFP8 experts (unfused grouped GEMM)
 NVTE_CUTEDSL_FUSED_GROUPED_MLP=1 bash run_deepseek_v3_layer_ep.sh --dsv3 --recipe mxfp8
-bash run_deepseek_v3_layer_ep.sh --dsv3 --impl naive     # plain PyTorch MoE baseline
-bash run_deepseek_v3_layer_ep.sh --dsv3 --impl dense     # dense SwiGLU MLP instead of MoE
+bash run_deepseek_v3_layer_ep.sh --dsv3 --impl naive          # all_to_all + loop over experts
+bash run_deepseek_v3_layer_ep.sh --dsv3 --impl naive_grouped  # all_to_all + TE grouped GEMM
 ```
 
-`--impl` selects the MLP block inside the same layer (attention and norms are identical):
+`--impl` selects the MoE block inside the same layer (attention and norms are identical):
 
 - `te` (default): `DeepSeekV3MoE`, NCCL EP dispatch/combine, experts as one grouped GEMM.
 - `naive`: MoE written with plain PyTorch, no TE MoE code: sigmoid top-k router with expert
@@ -36,8 +36,9 @@ bash run_deepseek_v3_layer_ep.sh --dsv3 --impl dense     # dense SwiGLU MLP inst
   a Python loop over the local experts with dense `F.linear` SwiGLU MLPs, `index_copy` /
   `index_add` to place results, and a shared expert. This is what an EP MoE looks like before
   any fused kernels.
-- `dense`: no MoE, the dense SwiGLU MLP used in DeepSeek-V3's first three layers (`--dense-ffn`,
-  default 18432). Gives the cost of a non-MoE layer of the same model for reference.
+- `naive_grouped`: the same all_to_all dispatch and combine, but the received rows are sorted by
+  local expert and run through one `te.ops.GroupedLinear` / `ScaledSwiGLU` / `GroupedLinear`
+  stack. Isolates the cost of the Python loop from the cost of the communication path.
 
 Multi-node: launch `torchrun` yourself, EP spans every rank:
 
@@ -108,21 +109,21 @@ At the small default dims MXFP8 is slower than bf16: the fused path launches man
 quantization kernels and the layer becomes CPU-launch-bound. Running under `nsys` adds
 about 1.5 ms per iteration to these numbers.
 
-## TE MoE vs. plain PyTorch MoE vs. dense layer
+## TE MoE vs. plain PyTorch MoE
 
 Same layer, same dims (`--dsv3`), bf16 unless noted:
 
 | | 4 GPUs (32 experts) | 8 GPUs (64 experts) |
 |---|---|---|
-| `--impl te`, bf16 | 13.09 ms | 15.06 ms |
-| `--impl te`, mxfp8 fused | 10.19 ms | 11.32 ms |
-| `--impl naive`, bf16 | 26.83 ms | 27.34 ms |
-| `--impl dense`, bf16 (ffn 18432) | 9.99 ms | 10.04 ms |
-| `--impl dense`, mxfp8 | 7.49 ms | 7.58 ms |
+| `naive`: all_to_all + loop over experts | 26.83 ms | 27.34 ms |
+| `naive_grouped`: all_to_all + TE grouped GEMM | 16.84 ms | 17.20 ms |
+| `te`: NCCL EP + grouped GEMM | 13.09 ms | 15.06 ms |
+| `te`, mxfp8 (unfused grouped GEMM) | 11.02 ms | 12.88 ms |
+| `te`, mxfp8 fused | 10.19 ms | 11.32 ms |
 
-At the small default dims the gap is similar: `naive` 10.08 ms vs `te` 6.17 ms on 4 GPUs.
+At the small default dims (4 GPUs): `naive` 10.08 ms, `naive_grouped` 6.80 ms, `te` 6.17 ms.
 
-Per GPU and iteration, the naive MoE spends (8 GPUs, kernel time 25.9 ms of a 28.5 ms
+Per GPU and iteration, the `naive` MoE spends (8 GPUs, kernel time 25.9 ms of a 28.5 ms
 iteration):
 
 | group | ms | what |
@@ -135,13 +136,25 @@ iteration):
 | indexing kernels | 3.0 | `x[tok]`, `nonzero` masks, `index_copy`, `indexing_backward` |
 | attention, norms | 1.1 | same as in the TE variant |
 
-The TE variant replaces all of the communication and indexing rows with two NCCL EP kernels
-per direction (dispatch, combine) writing directly into the expert-major layout, and the
-per-expert GEMMs with one grouped GEMM, which is where the roughly 2x comes from. The dense
-layer is faster than either MoE variant here because with 8 experts per rank and top-k 8 the
-MoE moves 8 activations per token across ranks while the dense MLP does the equivalent FLOPs
-locally; the MoE wins only once the expert count grows past what a dense layer of equal
-per-token FLOPs can hold.
+`naive_grouped` (8 GPUs, kernel time 17.1 ms of a 17.2 ms iteration):
+
+| group | ms | what |
+|---|---|---|
+| `ncclDevKernel_SendRecv` | 3.8 | the same 7 all_to_all launches, less time because the GPU is no longer stalled between them |
+| grouped GEMMs (`nvjet_*_ptrGroup_*`) | 4.1 | fc1 / fc2 forward, dgrad, wgrad as grouped GEMMs, same as in `te` |
+| sorting rows by expert and back | 2.6 | `argsort`, gathers (`x[tok]`, `x_recv[by_expert]`), `index_copy`, `indexing_backward` |
+| dense GEMMs (MLA projections, shared expert) | 2.4 | same as in `te` |
+| elementwise adds | 0.7 | `index_add`, residuals |
+| attention, norms | 1.1 | same as in `te` |
+
+Reading the three rows of the table together: the Python loop over experts costs about
+10 ms per iteration (`naive` -> `naive_grouped`, 8 separate GEMM pairs, `nonzero` masks,
+zero-filled buffers, copies); replacing torch `all_to_all` plus the surrounding sort / gather /
+scatter with NCCL EP dispatch and combine, which write straight into the expert-major layout
+and zero-fill the padding, saves another 2 ms (`naive_grouped` -> `te`). Both `naive`
+variants also synchronise with the host twice per layer to learn the all_to_all split sizes;
+`te` does not. `--recipe mxfp8` is only supported by `te`: the naive variants would need the
+per-expert row counts padded to the MXFP8 block size.
 
 ## Where the time goes (8 GPUs, `--dsv3`, mxfp8 fused)
 

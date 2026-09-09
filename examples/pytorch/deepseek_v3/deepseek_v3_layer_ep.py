@@ -7,7 +7,7 @@ One process per GPU, launched via run_deepseek_v3_layer_ep.sh (torchrun). Every 
 holds ``--num-local-experts`` routed experts. ``--impl te`` exchanges tokens with NCCL EP
 and runs the experts as one grouped GEMM (DeepSeekV3MoE); ``--impl naive`` is a plain
 PyTorch MoE (all_to_all_single + a Python loop over experts) dropped into the same layer;
-``--impl dense`` replaces the MoE with the dense SwiGLU MLP of DeepSeek-V3's first layers.
+``--impl naive_grouped`` keeps the all_to_all but runs the experts as one TE grouped GEMM.
 Timed iterations run inside a ``torch.cuda.profiler`` window, so
 ``nsys profile -c cudaProfilerApi --capture-range-end=stop torchrun ...`` records
 only them.
@@ -51,8 +51,7 @@ def _parse_args():
             " 2048)."
         ),
     )
-    p.add_argument("--impl", choices=["te", "naive", "dense"], default="te")
-    p.add_argument("--dense-ffn", type=int, default=18432, help="ffn size for --impl dense")
+    p.add_argument("--impl", choices=["te", "naive", "naive_grouped"], default="te")
     p.add_argument("--recipe", choices=["none", "mxfp8"], default="none")
     p.add_argument("--warmup", type=int, default=5)
     p.add_argument("--iters", type=int, default=10)
@@ -71,23 +70,32 @@ def _autocast(name):
 
 
 class NaiveMoE(torch.nn.Module):
-    """DeepSeek-style MoE without TE: sigmoid top-k router with expert bias, torch all_to_all
-    dispatch/combine, a Python loop of dense SwiGLU experts, and a shared expert."""
+    """DeepSeek-style MoE with torch all_to_all dispatch/combine: sigmoid top-k router with
+    expert bias, a shared expert, and experts either as a Python loop of dense SwiGLU MLPs or
+    (``grouped=True``) as one TE grouped GEMM stack."""
 
-    def __init__(self, hidden, ffn, num_experts, topk, ep_group, shared_ffn, dtype):
+    def __init__(self, hidden, ffn, num_experts, topk, ep_group, shared_ffn, dtype, grouped=False):
         super().__init__()
+        self.grouped = grouped
         self.hidden, self.topk, self.group = hidden, topk, ep_group
         self.ws, self.rank = dist.get_world_size(ep_group), dist.get_rank(ep_group)
         self.num_experts, self.local = num_experts, num_experts // self.ws
         self.gate = torch.nn.Linear(hidden, num_experts, bias=False, dtype=dtype, device="cuda")
         self.register_buffer("expert_bias", torch.zeros(num_experts, device="cuda"))
         std = hidden**-0.5
-        self.w1 = torch.nn.Parameter(
-            torch.randn(self.local, 2 * ffn, hidden, dtype=dtype, device="cuda") * std
-        )
-        self.w2 = torch.nn.Parameter(
-            torch.randn(self.local, hidden, ffn, dtype=dtype, device="cuda") * ffn**-0.5
-        )
+        if grouped:
+            self.experts = te.ops.Sequential(
+                te.ops.GroupedLinear(self.local, hidden, 2 * ffn, bias=False, dtype=dtype),
+                te.ops.ScaledSwiGLU(glu_interleave_size=32),
+                te.ops.GroupedLinear(self.local, ffn, hidden, bias=False, dtype=dtype),
+            )
+        else:
+            self.w1 = torch.nn.Parameter(
+                torch.randn(self.local, 2 * ffn, hidden, dtype=dtype, device="cuda") * std
+            )
+            self.w2 = torch.nn.Parameter(
+                torch.randn(self.local, hidden, ffn, dtype=dtype, device="cuda") * ffn**-0.5
+            )
         self.shared_w1 = torch.nn.Linear(
             hidden, 2 * shared_ffn, bias=False, dtype=dtype, device="cuda"
         )
@@ -125,15 +133,24 @@ class NaiveMoE(torch.nn.Module):
         p_recv = torch.empty(n_recv, dtype=flat_p.dtype, device=x.device)
         dist.all_to_all_single(e_recv, flat_e.contiguous(), recv, send, group=self.group)
         dist.all_to_all_single(p_recv, flat_p.contiguous(), recv, send, group=self.group)
-        # Experts: one dense SwiGLU MLP per local expert.
         local_e = e_recv - self.rank * self.local
-        y_recv = torch.zeros_like(x_recv)
-        for e in range(self.local):
-            sel = (local_e == e).nonzero().squeeze(1)
-            if sel.numel() == 0:
-                continue
-            h = self._swiglu(F.linear(x_recv[sel], self.w1[e])) * p_recv[sel, None].to(x.dtype)
-            y_recv = y_recv.index_copy(0, sel, F.linear(h, self.w2[e]))
+        if self.grouped:
+            # Experts: sort received rows by local expert, one grouped GEMM stack.
+            by_expert = torch.argsort(local_e, stable=True)
+            counts = torch.bincount(local_e, minlength=self.local)
+            y_sorted = self.experts(
+                x_recv[by_expert], counts, p_recv[by_expert].to(x.dtype), counts
+            )
+            y_recv = torch.empty_like(x_recv).index_copy(0, by_expert, y_sorted)
+        else:
+            # Experts: one dense SwiGLU MLP per local expert.
+            y_recv = torch.zeros_like(x_recv)
+            for e in range(self.local):
+                sel = (local_e == e).nonzero().squeeze(1)
+                if sel.numel() == 0:
+                    continue
+                h = self._swiglu(F.linear(x_recv[sel], self.w1[e])) * p_recv[sel, None].to(x.dtype)
+                y_recv = y_recv.index_copy(0, sel, F.linear(h, self.w2[e]))
         # Combine: reverse all_to_all, sum the top-k contributions per token.
         y = all_to_all_single(torch.empty_like(x[tok]), y_recv, send, recv, group=self.group)
         out = torch.zeros_like(x).index_add(0, tok, y)
@@ -180,9 +197,7 @@ def main():
         ep_group=ep_group,
         ep_max_tokens_per_rank=args.tokens_per_rank,
     )
-    if args.impl == "dense":
-        mlp_kwargs = dict(ffn_hidden_size=args.dense_ffn)
-    elif args.impl == "naive":
+    if args.impl != "te":
         # Build the TE MoE without EP (replaced below); keeps the pre-MLP RMSNorm.
         mlp_kwargs.pop("ep_group"), mlp_kwargs.pop("ep_max_tokens_per_rank")
     layer = DeepSeekV3Layer(
@@ -196,7 +211,7 @@ def main():
         qk_rope_head_dim=args.qk_rope_head_dim,
         v_head_dim=args.v_head_dim,
     )
-    if args.impl == "naive":
+    if args.impl != "te":
         layer.mlp = NaiveMoE(
             args.hidden,
             args.moe_ffn,
@@ -205,6 +220,7 @@ def main():
             ep_group,
             args.moe_ffn,
             torch.bfloat16,
+            grouped=args.impl == "naive_grouped",
         )
     seq = args.tokens_per_rank // 4
     x = torch.randn(seq, 4, args.hidden, dtype=torch.bfloat16, device="cuda", requires_grad=True)
