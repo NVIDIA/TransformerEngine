@@ -404,7 +404,7 @@ static void FusedAttnForwardImpl(
   /* Prepare RNG state */
   auto rng_state_tensor = TensorWrapper(rng_state, std::vector<size_t>{2}, DType::kInt64);
 
-  auto [backend, _fwd_msg] = GetFusedAttnBackendImpl(
+  auto [backend, fwd_msg] = GetFusedAttnBackendImpl(
       is_training, deterministic, false, return_max_logit, mask_type, bias_type, window_size_left,
       window_size_right, bottom_right_diagonal, softmax_type, JAXX_Scaling_Mode::NO_SCALING,
       dropout_probability, scaling_factor, dtype, dtype, dtype, dtype, qkv_layout,
@@ -414,6 +414,8 @@ static void FusedAttnForwardImpl(
       kv_max_seqlen, is_ragged ? input_batch * q_max_seqlen : 0,
       is_ragged ? input_batch * kv_max_seqlen : 0, bias_batch, bias_heads, bias_seqlen_q,
       bias_seqlen_kv);
+  NVTE_CHECK(backend != NVTE_Fused_Attn_Backend::NVTE_No_Backend,
+             "Fused attention is not supported for this configuration: ", fwd_msg);
   nvte_populate_rng_state_async(rng_state, seed, q_max_seqlen, kv_max_seqlen, backend, stream);
 
   /* Auxiliary tensors (to be propagated to the backward pass later) */
@@ -742,7 +744,7 @@ static void FusedAttnBackwardImpl(
   /* Auxiliary tensors (propagated from the forward pass) */
   NVTETensorPack aux_input_tensors;
   nvte_tensor_pack_create(&aux_input_tensors);
-  auto [backend, _bwd_msg] = GetFusedAttnBackendImpl(
+  auto [backend, bwd_msg] = GetFusedAttnBackendImpl(
       is_training, deterministic, false, false, mask_type, bias_type, window_size_left,
       window_size_right, bottom_right_diagonal, softmax_type, JAXX_Scaling_Mode::NO_SCALING,
       dropout_probability, scaling_factor, dtype, dtype, dtype, dtype, qkv_layout,
@@ -752,6 +754,8 @@ static void FusedAttnBackwardImpl(
       kv_max_seqlen, is_ragged ? input_batch * q_max_seqlen : 0,
       is_ragged ? input_batch * kv_max_seqlen : 0, bias_batch, bias_heads, bias_seqlen_q,
       bias_seqlen_kv);
+  NVTE_CHECK(backend != NVTE_Fused_Attn_Backend::NVTE_No_Backend,
+             "Fused attention is not supported for this configuration: ", bwd_msg);
   PrepareFusedAttnBackwardAuxTensors(&aux_input_tensors, input_batch, bias_batch, attn_heads,
                                      bias_heads, q_max_seqlen, kv_max_seqlen, dtype, backend,
                                      softmax_aux, rng_state, bias, softmax_offset);
