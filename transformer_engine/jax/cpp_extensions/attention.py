@@ -202,7 +202,7 @@ class FusedAttnParams:
     bias_seqlen_kv: int = 0
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class FusedAttnHelper:
     """
     Helper for the fused attention backend
@@ -505,22 +505,22 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             *bias_batch_shape, bias_heads, bias_seqlen_q, bias_seqlen_kv = bias_aval.shape
             bias_batch = reduce(operator.mul, bias_batch_shape)
         backend, message = FusedAttnHelper(
-            config.is_training,
-            input_batch,
-            q_dtype,
-            k_dtype,
-            config.qkv_layout,
-            config.attn_bias_type,
-            config.attn_mask_type,
-            config.softmax_type,
-            config.dropout_probability,
-            attn_heads,
-            num_gqa_groups,
-            q_max_seqlen,
-            kv_max_seqlen,
-            q_head_dim,
-            v_head_dim,
-            config.window_size,
+            is_training=config.is_training,
+            batch_size=input_batch,
+            q_dtype=q_dtype,
+            kv_dtype=k_dtype,
+            qkv_layout=config.qkv_layout,
+            attn_bias_type=config.attn_bias_type,
+            attn_mask_type=config.attn_mask_type,
+            softmax_type=config.softmax_type,
+            dropout_probability=config.dropout_probability,
+            q_num_heads=attn_heads,
+            kv_num_heads=num_gqa_groups,
+            q_max_seqlen=q_max_seqlen,
+            kv_max_seqlen=kv_max_seqlen,
+            head_dim_qk=q_head_dim,
+            head_dim_v=v_head_dim,
+            window_size=config.window_size,
             return_max_logit=config.return_max_logit,
             bottom_right_diagonal=config.bottom_right_diagonal,
             attn_scale=float(config.scaling_factor),
