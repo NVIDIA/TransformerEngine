@@ -12,7 +12,7 @@ from typing import Any, Optional, TypeAlias
 
 import torch
 
-from ..quantization import FP8GlobalStateManager, Recipe
+from ..quantization import FP8GlobalStateManager, Recipe, _has_delayed_scaling_state
 from ..quantized_tensor import prepare_for_saving, restore_from_func_ctx
 from ..utils import warn_compile_eager_fallback
 from .op import (
@@ -834,6 +834,15 @@ class OperationFuser:
 
         # Initialization before forward
         for idx, op in enumerate(self._basic_ops):
+            if torch.compiler.is_compiling() and op._fp8_metas is not None:
+                if any(
+                    meta is not None and _has_delayed_scaling_state(meta)
+                    for meta in op._fp8_metas.values()
+                ):
+                    raise RuntimeError(
+                        "Delayed scaling is not supported under torch.compile in OperationFuser, "
+                        "including CustomRecipe with DelayedScalingRequest."
+                    )
             op.pre_fuser_forward(requires_grad=idx >= self.first_op_requiring_backward)
 
         # Fuser forward pass

@@ -37,7 +37,12 @@ import transformer_engine_torch as tex
 from transformer_engine.common import recipe
 from transformer_engine.pytorch.constants import FP8FwdTensorIdx, FP8BwdTensorIdx
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
-from transformer_engine.pytorch.quantization import FP8GlobalStateManager, QuantizerRole
+from transformer_engine.pytorch.quantization import (
+    FP8GlobalStateManager,
+    QuantizerRole,
+    DelayedScalingRequest,
+)
+from transformer_engine.pytorch.utils import clear_tensor_data
 from transformer_engine.pytorch.ops.basic.basic_linear import BasicLinear
 from transformer_engine.pytorch.ops.fuser import OperationFuser
 from transformer_engine.pytorch.ops.op import BasicOperation
@@ -2630,6 +2635,76 @@ def test_te_ops_unsupported_group_still_compiles_eagerly():
 
     base = torch.randn(32, 64, dtype=torch.bfloat16, device="cuda")
     _assert_sequential_matches_eager(lambda: te.ops.Sequential(te.ops.Identity()), base)
+
+
+class _CleanupOp(BasicOperation):
+    def op_forward(self, ctx, input_, **kwargs):
+        ctx.save_for_backward(input_)
+        return input_ * 2
+
+    def op_backward(self, ctx, grad_output):
+        dx = grad_output * 2
+        clear_tensor_data(ctx.saved_tensors[0])
+        return dx, ()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("backend", ["eager", "inductor"])
+def test_te_ops_eager_implementation_preserves_saved_input(backend):
+    torch._dynamo.reset()
+    model = te.ops.Sequential(_CleanupOp())
+    compiled = torch.compile(model, backend=backend, fullgraph=True)
+    base = torch.randn(16, 64, device="cuda")
+    for fn in (model, compiled):
+        inp = base.clone().requires_grad_(True)
+        out = fn(inp)
+        out.sum().backward()
+        torch.testing.assert_close(out, base * 2)
+        torch.testing.assert_close(inp, base)
+        torch.testing.assert_close(inp.grad, torch.full_like(base, 2))
+
+
+class _DelayedScalingOp(BasicOperation):
+    def num_quantizers(self, mode):
+        return 1
+
+    def get_quantizer_roles(self, mode):
+        tensor_type = "input" if mode == "forward" else "grad_output"
+        return [QuantizerRole(module_type="test", tensor_type=tensor_type)]
+
+    def op_forward(self, ctx, input_, **kwargs):
+        ctx.amax = self.get_quantizer("backward", 0).amax
+        return input_ * 2
+
+    def op_backward(self, ctx, grad_output):
+        ctx.amax.copy_(grad_output.abs().max())
+        return grad_output * 2, ()
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.parametrize("custom_recipe", [False, True])
+def test_te_ops_delayed_scaling_state_rejected(custom_recipe):
+    torch._dynamo.reset()
+    fp8_recipe = (
+        recipe.CustomRecipe(
+            qfactory=lambda role: DelayedScalingRequest(amax_history_len=4, reduce_amax=False)
+        )
+        if custom_recipe
+        else recipe.DelayedScaling(amax_history_len=4, reduce_amax=False)
+    )
+    op = _DelayedScalingOp()
+    model = te.ops.Sequential(op)
+    inp = torch.randn(16, 64, device="cuda", requires_grad=True)
+    with te.autocast(recipe=fp8_recipe):
+        out = model(inp)
+    out.sum().backward()
+
+    state = op._fp8_metas["backward"]["scaling_bwd"]
+    torch.testing.assert_close(state.amax_history[-1], torch.ones_like(state.scale))
+    compiled = torch.compile(model, fullgraph=True)
+    with te.autocast(recipe=fp8_recipe):
+        with pytest.raises(Exception, match="Delayed scaling is not supported under torch.compile"):
+            compiled(inp)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
