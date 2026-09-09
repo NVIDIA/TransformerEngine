@@ -379,13 +379,18 @@ class TVMFFIConfigCache {
         return it->second;
       }
     }
-    std::optional<tvm::ffi::Function> fn = central.load_tvm_ffi_function(cfg);
-    {
-      std::unique_lock<std::shared_mutex> write_lock(mutex_);
-      // emplace is a no-op if another thread resolved this id meanwhile; the
-      // resolved value is identical given the same cfg, so either copy is fine.
-      map_.emplace(id, fn);
+
+    std::unique_lock<std::shared_mutex> write_lock(mutex_);
+    // After I grab the write lock, check again in case another thread already loaded it.
+    auto it = map_.find(id);
+    if (it != map_.end()) {
+      // Another thread must have loaded it before I obtained the write lock, so just return it.
+      return it->second;
     }
+
+    // No other thread has loaded it, and none can load it now while I hold the write lock.
+    std::optional<tvm::ffi::Function> fn = central.load_tvm_ffi_function(cfg);
+    map_.emplace(id, fn);
     return fn;
   }
 
