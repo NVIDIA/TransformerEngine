@@ -69,6 +69,11 @@ def setup_common_extension() -> CMakeExtension:
     # framework-agnostic C++ build cannot exercise this backend.
     if not frameworks:
         cmake_flags.append("-DNVTE_WITH_CUTEDSL=OFF")
+    else:
+        tvm_ffi_include_dir = metadata.distribution("apache-tvm-ffi").locate_file(
+            "tvm_ffi/include"
+        )
+        cmake_flags.append(f"-DTVM_FFI_INCLUDE_DIR={tvm_ffi_include_dir}")
 
     if bool(int(os.getenv("NVTE_UB_WITH_MPI", "0"))):
         assert (

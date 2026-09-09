@@ -105,17 +105,11 @@ find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 option(NVTE_WITH_CUTEDSL
        "Build the CuTeDSL quantize backend bridge (requires the apache-tvm-ffi Python package)" ON)
 if(NVTE_WITH_CUTEDSL)
-  execute_process(
-    COMMAND ${Python_EXECUTABLE} -c "import tvm_ffi.libinfo as li; print(li.find_include_path())"
-    OUTPUT_VARIABLE TVM_FFI_INCLUDE_DIR
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    RESULT_VARIABLE TVM_FFI_INCLUDE_QUERY)
-  if(NOT TVM_FFI_INCLUDE_QUERY EQUAL 0)
+  if(NOT EXISTS "${TVM_FFI_INCLUDE_DIR}/tvm/ffi/any.h")
     message(FATAL_ERROR
-            "Could not import the tvm_ffi Python package (with '${Python_EXECUTABLE}'), "
-            "whose headers Transformer Engine needs to compile the CuTeDSL quantize "
-            "backend bridge (common/tvm_ffi_bridge.h). Install it into this Python "
-            "environment: `pip install apache-tvm-ffi`, or configure with "
+            "Could not find the TVM-FFI headers in '${TVM_FFI_INCLUDE_DIR}'. "
+            "Install apache-tvm-ffi and set TVM_FFI_INCLUDE_DIR to its include directory, "
+            "or configure with "
             "-DNVTE_WITH_CUTEDSL=OFF to build the C++ library without the backend.")
   endif()
 endif()
