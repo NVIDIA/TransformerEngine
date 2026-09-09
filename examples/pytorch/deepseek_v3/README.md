@@ -24,7 +24,20 @@ bash run_deepseek_v3_layer_ep.sh                         # small dims, bf16
 bash run_deepseek_v3_layer_ep.sh --dsv3                  # DeepSeek-V3 layer dims, bf16
 bash run_deepseek_v3_layer_ep.sh --dsv3 --recipe mxfp8   # MXFP8 experts (unfused grouped GEMM)
 NVTE_CUTEDSL_FUSED_GROUPED_MLP=1 bash run_deepseek_v3_layer_ep.sh --dsv3 --recipe mxfp8
+bash run_deepseek_v3_layer_ep.sh --dsv3 --impl naive     # plain PyTorch MoE baseline
+bash run_deepseek_v3_layer_ep.sh --dsv3 --impl dense     # dense SwiGLU MLP instead of MoE
 ```
+
+`--impl` selects the MLP block inside the same layer (attention and norms are identical):
+
+- `te` (default): `DeepSeekV3MoE`, NCCL EP dispatch/combine, experts as one grouped GEMM.
+- `naive`: MoE written with plain PyTorch, no TE MoE code: sigmoid top-k router with expert
+  bias, `all_to_all_single` dispatch and combine (two host syncs per layer for the split sizes),
+  a Python loop over the local experts with dense `F.linear` SwiGLU MLPs, `index_copy` /
+  `index_add` to place results, and a shared expert. This is what an EP MoE looks like before
+  any fused kernels.
+- `dense`: no MoE, the dense SwiGLU MLP used in DeepSeek-V3's first three layers (`--dense-ffn`,
+  default 18432). Gives the cost of a non-MoE layer of the same model for reference.
 
 Multi-node: launch `torchrun` yourself, EP spans every rank:
 
@@ -94,6 +107,41 @@ counts tokens over all ranks. `fused` means `NVTE_CUTEDSL_FUSED_GROUPED_MLP=1`.
 At the small default dims MXFP8 is slower than bf16: the fused path launches many small
 quantization kernels and the layer becomes CPU-launch-bound. Running under `nsys` adds
 about 1.5 ms per iteration to these numbers.
+
+## TE MoE vs. plain PyTorch MoE vs. dense layer
+
+Same layer, same dims (`--dsv3`), bf16 unless noted:
+
+| | 4 GPUs (32 experts) | 8 GPUs (64 experts) |
+|---|---|---|
+| `--impl te`, bf16 | 13.09 ms | 15.06 ms |
+| `--impl te`, mxfp8 fused | 10.19 ms | 11.32 ms |
+| `--impl naive`, bf16 | 26.83 ms | 27.34 ms |
+| `--impl dense`, bf16 (ffn 18432) | 9.99 ms | 10.04 ms |
+| `--impl dense`, mxfp8 | 7.49 ms | 7.58 ms |
+
+At the small default dims the gap is similar: `naive` 10.08 ms vs `te` 6.17 ms on 4 GPUs.
+
+Per GPU and iteration, the naive MoE spends (8 GPUs, kernel time 25.9 ms of a 28.5 ms
+iteration):
+
+| group | ms | what |
+|---|---|---|
+| `ncclDevKernel_SendRecv` | 5.2 | 7 all_to_all launches per iteration (tokens fwd/bwd, results fwd/bwd, counts, indices, probs) |
+| expert and dense GEMMs (`nvjet_*`) | 6.4 | 8 separate GEMM pairs per rank instead of one grouped GEMM, plus the MLA projections |
+| elementwise adds | 4.1 | `index_add` and its backward, residuals |
+| `FillFunctor` (zeros) | 2.5 | `zeros_like` for the per-expert output buffer and `index_add` targets |
+| device-to-device copies | 2.3 | `index_copy` and gathers materialising per-expert slices |
+| indexing kernels | 3.0 | `x[tok]`, `nonzero` masks, `index_copy`, `indexing_backward` |
+| attention, norms | 1.1 | same as in the TE variant |
+
+The TE variant replaces all of the communication and indexing rows with two NCCL EP kernels
+per direction (dispatch, combine) writing directly into the expert-major layout, and the
+per-expert GEMMs with one grouped GEMM, which is where the roughly 2x comes from. The dense
+layer is faster than either MoE variant here because with 8 experts per rank and top-k 8 the
+MoE moves 8 activations per token across ranks while the dense MLP does the equivalent FLOPs
+locally; the MoE wins only once the expert count grows past what a dense layer of equal
+per-token FLOPs can hold.
 
 ## Where the time goes (8 GPUs, `--dsv3`, mxfp8 fused)
 

@@ -4,7 +4,10 @@
 """DeepSeekV3Layer with expert parallelism over all ranks: forward + backward timing.
 
 One process per GPU, launched via run_deepseek_v3_layer_ep.sh (torchrun). Every rank
-holds ``--num-local-experts`` routed experts; tokens are exchanged with NCCL EP.
+holds ``--num-local-experts`` routed experts. ``--impl te`` exchanges tokens with NCCL EP
+and runs the experts as one grouped GEMM (DeepSeekV3MoE); ``--impl naive`` is a plain
+PyTorch MoE (all_to_all_single + a Python loop over experts) dropped into the same layer;
+``--impl dense`` replaces the MoE with the dense SwiGLU MLP of DeepSeek-V3's first layers.
 Timed iterations run inside a ``torch.cuda.profiler`` window, so
 ``nsys profile -c cudaProfilerApi --capture-range-end=stop torchrun ...`` records
 only them.
@@ -18,6 +21,8 @@ from contextlib import nullcontext
 
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F
+from torch.distributed.nn.functional import all_to_all_single
 
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe as te_recipe
@@ -46,6 +51,8 @@ def _parse_args():
             " 2048)."
         ),
     )
+    p.add_argument("--impl", choices=["te", "naive", "dense"], default="te")
+    p.add_argument("--dense-ffn", type=int, default=18432, help="ffn size for --impl dense")
     p.add_argument("--recipe", choices=["none", "mxfp8"], default="none")
     p.add_argument("--warmup", type=int, default=5)
     p.add_argument("--iters", type=int, default=10)
@@ -61,6 +68,77 @@ def _autocast(name):
     if name == "none":
         return nullcontext()
     return te.autocast(enabled=True, recipe=te_recipe.MXFP8BlockScaling())
+
+
+class NaiveMoE(torch.nn.Module):
+    """DeepSeek-style MoE without TE: sigmoid top-k router with expert bias, torch all_to_all
+    dispatch/combine, a Python loop of dense SwiGLU experts, and a shared expert."""
+
+    def __init__(self, hidden, ffn, num_experts, topk, ep_group, shared_ffn, dtype):
+        super().__init__()
+        self.hidden, self.topk, self.group = hidden, topk, ep_group
+        self.ws, self.rank = dist.get_world_size(ep_group), dist.get_rank(ep_group)
+        self.num_experts, self.local = num_experts, num_experts // self.ws
+        self.gate = torch.nn.Linear(hidden, num_experts, bias=False, dtype=dtype, device="cuda")
+        self.register_buffer("expert_bias", torch.zeros(num_experts, device="cuda"))
+        std = hidden**-0.5
+        self.w1 = torch.nn.Parameter(
+            torch.randn(self.local, 2 * ffn, hidden, dtype=dtype, device="cuda") * std
+        )
+        self.w2 = torch.nn.Parameter(
+            torch.randn(self.local, hidden, ffn, dtype=dtype, device="cuda") * ffn**-0.5
+        )
+        self.shared_w1 = torch.nn.Linear(
+            hidden, 2 * shared_ffn, bias=False, dtype=dtype, device="cuda"
+        )
+        self.shared_w2 = torch.nn.Linear(shared_ffn, hidden, bias=False, dtype=dtype, device="cuda")
+
+    @staticmethod
+    def _swiglu(h):
+        a, g = h.chunk(2, dim=-1)
+        return F.silu(a) * g
+
+    def forward(self, hidden_states):
+        x = hidden_states.reshape(-1, self.hidden)
+        scores = torch.sigmoid(self.gate(x).float())
+        _, idx = torch.topk(scores + self.expert_bias, self.topk, dim=-1)
+        probs = scores.gather(1, idx)
+        probs = probs / probs.sum(-1, keepdim=True) * 2.5
+        # Dispatch: sort (token, expert) pairs by destination rank, exchange counts, all_to_all.
+        flat_e, flat_p = idx.reshape(-1), probs.reshape(-1)
+        tok = torch.arange(x.shape[0], device=x.device).repeat_interleave(self.topk)
+        order = torch.argsort(flat_e // self.local, stable=True)
+        flat_e, flat_p, tok = flat_e[order], flat_p[order], tok[order]
+        send = torch.bincount(flat_e // self.local, minlength=self.ws)
+        recv = torch.empty_like(send)
+        dist.all_to_all_single(recv, send, group=self.group)
+        send, recv = send.tolist(), recv.tolist()
+        n_recv = sum(recv)
+        x_recv = all_to_all_single(
+            torch.empty(n_recv, self.hidden, dtype=x.dtype, device=x.device),
+            x[tok],
+            recv,
+            send,
+            group=self.group,
+        )
+        e_recv = torch.empty(n_recv, dtype=flat_e.dtype, device=x.device)
+        p_recv = torch.empty(n_recv, dtype=flat_p.dtype, device=x.device)
+        dist.all_to_all_single(e_recv, flat_e.contiguous(), recv, send, group=self.group)
+        dist.all_to_all_single(p_recv, flat_p.contiguous(), recv, send, group=self.group)
+        # Experts: one dense SwiGLU MLP per local expert.
+        local_e = e_recv - self.rank * self.local
+        y_recv = torch.zeros_like(x_recv)
+        for e in range(self.local):
+            sel = (local_e == e).nonzero().squeeze(1)
+            if sel.numel() == 0:
+                continue
+            h = self._swiglu(F.linear(x_recv[sel], self.w1[e])) * p_recv[sel, None].to(x.dtype)
+            y_recv = y_recv.index_copy(0, sel, F.linear(h, self.w2[e]))
+        # Combine: reverse all_to_all, sum the top-k contributions per token.
+        y = all_to_all_single(torch.empty_like(x[tok]), y_recv, send, recv, group=self.group)
+        out = torch.zeros_like(x).index_add(0, tok, y)
+        out = out + self.shared_w2(self._swiglu(self.shared_w1(x)))
+        return out.view_as(hidden_states)
 
 
 def main():
@@ -79,35 +157,55 @@ def main():
         return 0
 
     ep_group = dist.new_group(ranks=list(range(world_size)), backend="nccl")
+    dist.all_reduce(torch.zeros(1, device="cuda"), group=ep_group)
     num_experts = args.num_local_experts * world_size
-    ep_bootstrap(
-        ep_group,
-        num_experts=num_experts,
-        max_tokens_per_rank=args.tokens_per_rank,
-        hidden_dim=args.hidden,
-        num_topk=args.topk,
-        recv_capacity_per_rank=DeepSeekV3MoE.ep_recv_capacity(
-            world_size, args.tokens_per_rank, args.topk, args.num_local_experts
-        ),
-    )
+    if args.impl == "te":
+        ep_bootstrap(
+            ep_group,
+            num_experts=num_experts,
+            max_tokens_per_rank=args.tokens_per_rank,
+            hidden_dim=args.hidden,
+            num_topk=args.topk,
+            recv_capacity_per_rank=DeepSeekV3MoE.ep_recv_capacity(
+                world_size, args.tokens_per_rank, args.topk, args.num_local_experts
+            ),
+        )
 
     torch.manual_seed(0)
-    layer = DeepSeekV3Layer(
-        args.hidden,
-        args.num_heads,
+    mlp_kwargs = dict(
         num_experts=num_experts,
         moe_ffn_hidden_size=args.moe_ffn,
         shared_expert_ffn_hidden_size=args.moe_ffn,
         topk=args.topk,
-        params_dtype=torch.bfloat16,
         ep_group=ep_group,
         ep_max_tokens_per_rank=args.tokens_per_rank,
+    )
+    if args.impl == "dense":
+        mlp_kwargs = dict(ffn_hidden_size=args.dense_ffn)
+    elif args.impl == "naive":
+        # Build the TE MoE without EP (replaced below); keeps the pre-MLP RMSNorm.
+        mlp_kwargs.pop("ep_group"), mlp_kwargs.pop("ep_max_tokens_per_rank")
+    layer = DeepSeekV3Layer(
+        args.hidden,
+        args.num_heads,
+        params_dtype=torch.bfloat16,
+        **mlp_kwargs,
         q_lora_rank=args.q_lora_rank,
         kv_lora_rank=args.kv_lora_rank,
         qk_nope_head_dim=args.qk_nope_head_dim,
         qk_rope_head_dim=args.qk_rope_head_dim,
         v_head_dim=args.v_head_dim,
     )
+    if args.impl == "naive":
+        layer.mlp = NaiveMoE(
+            args.hidden,
+            args.moe_ffn,
+            num_experts,
+            args.topk,
+            ep_group,
+            args.moe_ffn,
+            torch.bfloat16,
+        )
     seq = args.tokens_per_rank // 4
     x = torch.randn(seq, 4, args.hidden, dtype=torch.bfloat16, device="cuda", requires_grad=True)
 
@@ -137,14 +235,14 @@ def main():
     if rank == 0:
         tok_s = args.tokens_per_rank * world_size / (ms / 1e3)
         print(
-            f"DeepSeekV3Layer EP: ranks={world_size} experts={num_experts} topk={args.topk} "
-            f"tokens/rank={args.tokens_per_rank} hidden={args.hidden} recipe={args.recipe} "
-            f"fused_mlp={os.environ.get('NVTE_CUTEDSL_FUSED_GROUPED_MLP', '0')} "
-            f"fwd+bwd {ms:.3f} ms/iter ({tok_s / 1e6:.2f} Mtok/s) finite={finite}",
+            f"DeepSeekV3Layer impl={args.impl}:"
+            f" ranks={world_size} experts={num_experts} topk={args.topk} tokens/rank={args.tokens_per_rank} hidden={args.hidden} recipe={args.recipe} fused_mlp={os.environ.get('NVTE_CUTEDSL_FUSED_GROUPED_MLP', '0')} fwd+bwd"
+            f" {ms:.3f} ms/iter ({tok_s / 1e6:.2f} Mtok/s) finite={finite}",
             flush=True,
         )
-    ep_finalize()
-    release_symm_mem_pool()
+    if args.impl == "te":
+        ep_finalize()
+        release_symm_mem_pool()
     dist.destroy_process_group()
     return 0 if finite else 1
 
