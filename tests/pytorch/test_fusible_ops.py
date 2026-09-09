@@ -146,6 +146,173 @@ def maybe_skip_quantization(
             pytest.skip("NVFP4 quantization is only supported with BF16 data")
 
 
+def test_operation_fuser_caches_plans_by_grad_requirement(monkeypatch) -> None:
+    """Cache and restore fusion plans for checkpoint forward and recompute."""
+
+    # Count fusion-plan construction without depending on any particular real
+    # fusion implementation. Each distinct fusion configuration invokes this
+    # hook once, while a cache hit must bypass it entirely.
+    fusion_calls = 0
+
+    def track_fusion(ops, *, recipe):  # pylint: disable=unused-argument
+        nonlocal fusion_calls
+        fusion_calls += 1
+        # Preserve the operation list so this hook observes plan construction
+        # without changing the topology under test.
+        return ops
+
+    # The fusion registries are class attributes shared by every OperationFuser.
+    # pytest's monkeypatch fixture restores all three after the test, preventing
+    # this synthetic fusion function from leaking into other tests. Keep only a
+    # joint forward-backward fusion hook so each plan build has one countable
+    # callback and no registered TE fusion can affect the result.
+    monkeypatch.setattr(OperationFuser, "forward_backward_fusion_functions", [track_fusion])
+    monkeypatch.setattr(OperationFuser, "forward_fusion_functions", [])
+    monkeypatch.setattr(OperationFuser, "backward_fusion_functions", [])
+
+    # One Identity op is enough to exercise the cache. With one basic op,
+    # first_op_requiring_backward has an intentionally simple interpretation:
+    #   0: backward starts at the Identity op;
+    #   1: the boundary is past the only op, so no backward work is required.
+    fuser = OperationFuser([te_ops.Identity()])
+    x = torch.ones(1, requires_grad=True)
+    # maybe_fuse_ops expects one extra-input collection per basic op. Identity
+    # has no extra inputs, so its collection is an empty tuple.
+    extra_inputs = [()]
+
+    # Phase 1: the original checkpointed forward runs with grad disabled. This
+    # is the first invocation, so the fuser must construct and cache the no-grad
+    # configuration. The runtime backward boundary is past the only op.
+    fuser.maybe_fuse_ops(False, None, x, extra_inputs)
+    assert fusion_calls == 1
+    assert fuser.first_op_requiring_backward == 1
+    no_grad_forward_ops = fuser._forward_ops
+    no_grad_backward_ops = fuser._backward_ops
+
+    # Phase 2: backward replays the checkpointed region with grad enabled. The
+    # backward boundary is part of the fusion key, allowing future fusion rules
+    # to choose a training-specific topology. The first grad-enabled invocation
+    # therefore constructs and caches a second configuration.
+    fuser.maybe_fuse_ops(True, None, x, extra_inputs)
+    assert fusion_calls == 2
+    assert fuser.first_op_requiring_backward == 0
+    grad_forward_ops = fuser._forward_ops
+    grad_backward_ops = fuser._backward_ops
+    assert grad_forward_ops is not no_grad_forward_ops
+    assert grad_backward_ops is not no_grad_backward_ops
+
+    # Phase 3: the next checkpointed forward must select the exact no-grad lists
+    # cached in phase 1. Before the cache was added, every boundary transition
+    # rebuilt the fused operations and called track_fusion again.
+    fuser.maybe_fuse_ops(False, None, x, extra_inputs)
+    assert fusion_calls == 2
+    assert fuser.first_op_requiring_backward == 1
+    assert fuser._forward_ops is no_grad_forward_ops
+    assert fuser._backward_ops is no_grad_backward_ops
+
+    # Phase 4: another recomputation must likewise restore the grad-enabled
+    # lists from phase 2. The full alternating sequence has built only the two
+    # configurations represented by its two fusion keys.
+    fuser.maybe_fuse_ops(True, None, x, extra_inputs)
+    assert fusion_calls == 2
+    assert fuser.first_op_requiring_backward == 0
+    assert fuser._forward_ops is grad_forward_ops
+    assert fuser._backward_ops is grad_backward_ops
+
+
+def test_operation_fuser_resets_recipe_state_independently_from_plan_cache(monkeypatch) -> None:
+    """Track recipe-state resets independently from fusion-plan construction."""
+
+    fusion_calls = 0
+
+    def track_fusion(ops, *, recipe):  # pylint: disable=unused-argument
+        nonlocal fusion_calls
+        fusion_calls += 1
+        return ops
+
+    # Replace the process-wide fusion registries so one callback corresponds to
+    # one plan construction. monkeypatch restores the registries after the test.
+    monkeypatch.setattr(OperationFuser, "forward_backward_fusion_functions", [track_fusion])
+    monkeypatch.setattr(OperationFuser, "forward_fusion_functions", [])
+    monkeypatch.setattr(OperationFuser, "backward_fusion_functions", [])
+
+    op = te_ops.Identity()
+    reset_recipes = []
+    first_forward_calls = 0
+
+    def track_recipe_reset(*, recipe):
+        reset_recipes.append(recipe)
+
+    def track_first_forward():
+        nonlocal first_forward_calls
+        first_forward_calls += 1
+
+    # Identity has no quantizers, so replace its state hooks with counters. This
+    # keeps the test CPU-only and isolates OperationFuser's reset decisions.
+    monkeypatch.setattr(op, "reset_recipe_state", track_recipe_reset)
+    monkeypatch.setattr(op, "pre_first_fuser_forward", track_first_forward)
+
+    fuser = OperationFuser([op])
+    x = torch.ones(1)
+    extra_inputs = [()]
+
+    current_scaling = transformer_engine.common.recipe.Float8CurrentScaling(backward_override=None)
+    fuser.maybe_fuse_ops(False, current_scaling, x, extra_inputs)
+    assert reset_recipes == [current_scaling]
+    assert first_forward_calls == 1
+    assert fusion_calls == 1
+
+    # A fresh but equivalent recipe does not invalidate state or the plan.
+    equivalent_current_scaling = transformer_engine.common.recipe.Float8CurrentScaling(
+        backward_override=None
+    )
+    fuser.maybe_fuse_ops(False, equivalent_current_scaling, x, extra_inputs)
+    assert reset_recipes == [current_scaling]
+    assert first_forward_calls == 1
+    assert fusion_calls == 1
+
+    # Backward override affects both recipe state and fusion topology, so it
+    # triggers one reset and constructs a distinct cached plan.
+    overridden_current_scaling = transformer_engine.common.recipe.Float8CurrentScaling(
+        backward_override="high_precision"
+    )
+    fuser.maybe_fuse_ops(False, overridden_current_scaling, x, extra_inputs)
+    assert reset_recipes == [current_scaling, overridden_current_scaling]
+    assert first_forward_calls == 1
+    assert fusion_calls == 2
+
+    delayed_scaling = transformer_engine.common.recipe.DelayedScaling(
+        amax_history_len=8,
+        backward_override=None,
+    )
+    fuser.maybe_fuse_ops(False, delayed_scaling, x, extra_inputs)
+    assert reset_recipes == [current_scaling, overridden_current_scaling, delayed_scaling]
+    assert first_forward_calls == 1
+    assert fusion_calls == 3
+
+    # Amax history length only affects delayed-scaling recipe state. Reset that
+    # state, but restore the existing DelayedScaling fusion plan from the cache.
+    resized_delayed_scaling = transformer_engine.common.recipe.DelayedScaling(
+        amax_history_len=16,
+        backward_override=None,
+    )
+    fuser.maybe_fuse_ops(False, resized_delayed_scaling, x, extra_inputs)
+    assert reset_recipes == [
+        current_scaling,
+        overridden_current_scaling,
+        delayed_scaling,
+        resized_delayed_scaling,
+    ]
+    assert first_forward_calls == 1
+    assert fusion_calls == 3
+
+    # Repeating the exact recipe parameters performs neither operation again.
+    fuser.maybe_fuse_ops(False, resized_delayed_scaling, x, extra_inputs)
+    assert len(reset_recipes) == 4
+    assert first_forward_calls == 1
+    assert fusion_calls == 3
+
+
 @torch.no_grad()
 def make_reference_and_test_tensors(
     shape: int | Iterable[int],
