@@ -163,7 +163,8 @@ about 1.5 ms per iteration to these numbers.
 | Group | ms | Kernels |
 |---|---:|---|
 | NCCL EP all-to-all | 2.7 | `nccl_ep_jit_ht_dispatch_kernel` (1.36), `nccl_ep_jit_ht_combine_kernel` (1.32), each twice per iteration (fwd + bwd) |
-| NCCL EP local permute + routing all-gather | 2.8 | `local_permute_dup/reduce` (0.62), `ncclDevKernel_AllGather_RING_LL` (2.16, mostly waiting for slower ranks) |
+| NCCL EP local permute | 0.6 | `local_permute_dup/reduce`: staging buffer to expert-major layout, zero-filled padding |
+| rank desync wait | 2.2 | `ncclDevKernel_AllGather_RING_LL` (routing-map all-gather in prepare, ~0.06 ms of transfer); the first collective of the layer absorbs the skew between ranks |
 | fused grouped MLP (cuDNN, MXFP8) | 2.5 | fc1+SwiGLU fwd (0.55), fc2 fwd (0.84), dGLU bwd (0.32), wgrad (0.80) |
 | MXFP8 quantization | 1.1 | `group_quantize_mxfp8` on the recv buffer (0.4), `quantize_mxfp8_kernel_cast_only` for dense GEMM inputs (0.7) |
 | dense MXFP8 GEMMs (MLA projections, shared expert) | 1.4 | `nvjet_sm103_qqtst_*` |
