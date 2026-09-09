@@ -87,9 +87,7 @@ def cxx_compiler_is_gcc() -> bool:
             text=True,
         )
     except (OSError, subprocess.CalledProcessError) as e:
-        raise RuntimeError(
-            f"Could not identify the C++ compiler with `{' '.join(cxx)} -v`"
-        ) from e
+        raise RuntimeError(f"Could not identify the C++ compiler with `{' '.join(cxx)} -v`") from e
 
     output = f"{result.stdout}\n{result.stderr}"
     return re.search(r"^gcc version\b", output, flags=re.IGNORECASE | re.MULTILINE) is not None
