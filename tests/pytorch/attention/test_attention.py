@@ -32,6 +32,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     FlashAttentionUtils,
     _get_supported_versions,
     check_set_window_size,
+    get_thd_padding_mask,
 )
 from transformer_engine.pytorch.attention import RotaryPositionEmbedding
 import transformer_engine.pytorch.cpp_extensions as ext
@@ -127,6 +128,124 @@ def test_flash_attention_supported_version_message():
         )
         == ">= 2.1.1, < 2.8.4"
     )
+
+
+@pytest.mark.parametrize(
+    "cu_seqlens,cu_seqlens_padded,expected",
+    [
+        ([0, 3, 8], [0, 4, 12], [False] * 3 + [True] + [False] * 5 + [True] * 3),
+        ([0, 3, 8], [0, 4, 12], [False] * 3 + [True] + [False] * 5 + [True] * 7),
+        ([0, 3, 8], [0, 3, 8], [False] * 8 + [True] * 4),
+        ([0, 0, 3, 3, 5], [0, 0, 4, 4, 8], [False] * 3 + [True] + [False] * 2 + [True] * 4),
+    ],
+)
+def test_thd_padding_mask_capacity(cu_seqlens, cu_seqlens_padded, expected):
+    """Cover sequence gaps, reserved buffer tails, and zero-length sequences."""
+    actual = get_thd_padding_mask(
+        len(expected),
+        torch.tensor(cu_seqlens, dtype=torch.int32, device="cuda"),
+        torch.tensor(cu_seqlens_padded, dtype=torch.int32, device="cuda"),
+    )
+    torch.testing.assert_close(actual, torch.tensor(expected, dtype=torch.bool, device="cuda"))
+
+
+@pytest.mark.parametrize("fa_version", [3, 4])
+def test_dpa_flash_thd_padding_capacity_cuda_graph(fa_version, monkeypatch):
+    """Check padded outputs and gradients, including buffer tails, in eager and raw graphs."""
+    if fa_version == 3 and (
+        device_compute_capability != (9, 0) or not FlashAttentionUtils.v3_is_installed
+    ):
+        pytest.skip("FlashAttention 3 on Hopper is required.")
+    if fa_version == 4 and (
+        not (10, 0) <= device_compute_capability < (12, 0)
+        or not FlashAttentionUtils.v4_is_installed
+    ):
+        pytest.skip("FlashAttention 4 on SM100/SM110 is required.")
+    for key, value in {
+        "NVTE_FLASH_ATTN": "1",
+        "NVTE_FUSED_ATTN": "0",
+        "NVTE_UNFUSED_ATTN": "0",
+        "NVTE_FLASH_ATTN_V2": "0",
+        "NVTE_FLASH_ATTN_V3": str(int(fa_version == 3)),
+        "NVTE_FLASH_ATTN_V4": str(int(fa_version == 4)),
+    }.items():
+        monkeypatch.setenv(key, value)
+    # Restore the complete backend cache along with the environment at test teardown.
+    for key, value in _attention_backends.items():
+        monkeypatch.setitem(_attention_backends, key, value)
+    _attention_backends["backend_selection_requires_update"] = True
+    reset_rng_states()
+    cu_q, cu_kv, padded_q, padded_kv = [
+        torch.tensor(offsets, dtype=torch.int32, device="cuda")
+        for offsets in ([0, 61, 96], [0, 45, 118], [0, 64, 112], [0, 64, 160])
+    ]
+    # Expected valid rows are independent of get_thd_padding_mask.
+    q_rows = torch.tensor(list(range(61)) + list(range(64, 99)), device="cuda")
+    kv_rows = torch.tensor(list(range(45)) + list(range(64, 137)), device="cuda")
+    qkv = [
+        torch.randn(tokens, 4, 64, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+        for tokens in (128, 192, 192)
+    ]
+    grad_output = torch.randn(128, 256, dtype=torch.bfloat16, device="cuda")
+    block = DotProductAttention(
+        4,
+        64,
+        qkv_format="thd",
+        attn_mask_type="padding",
+        attention_type="cross",
+        attention_dropout=0.0,
+    ).cuda()
+
+    def run(inputs, grad, padded):
+        """Run the selected FlashAttention backend and differentiate Q/K/V."""
+        output = block(
+            *inputs,
+            cu_seqlens_q=cu_q,
+            cu_seqlens_kv=cu_kv,
+            cu_seqlens_q_padded=padded_q if padded else None,
+            cu_seqlens_kv_padded=padded_kv if padded else None,
+            max_seqlen_q=128,
+            max_seqlen_kv=128,
+            pad_between_seqs=padded,
+        )
+        assert _attention_backends["use_flash_attention"]
+        assert _attention_backends["flash_attention_backend"].major == fa_version
+        assert not _attention_backends["use_fused_attention"]
+        assert not _attention_backends["use_unfused_attention"]
+        return (output, *torch.autograd.grad(output, inputs, grad))
+
+    def check(actual):
+        """Compare valid rows with compact attention and require exact-zero padding."""
+        compact_qkv = [
+            tensor.detach()[rows].requires_grad_()
+            for tensor, rows in zip(qkv, (q_rows, kv_rows, kv_rows))
+        ]
+        expected = run(compact_qkv, grad_output[q_rows], False)
+        for tensor, reference, rows in zip(actual, expected, (q_rows, q_rows, kv_rows, kv_rows)):
+            assert tensor.shape[0] == (128 if rows is q_rows else 192)
+            torch.testing.assert_close(tensor[rows], reference, atol=1.5e-2, rtol=1.5e-2)
+            padding = torch.ones(tensor.shape[0], dtype=torch.bool, device="cuda")
+            padding[rows] = False
+            assert torch.count_nonzero(tensor[padding]).item() == 0
+
+    check(run(qkv, grad_output, True))
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        for _ in range(3):
+            run(qkv, grad_output, True)
+    torch.cuda.current_stream().wait_stream(stream)
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        captured = run(qkv, grad_output, True)
+    for _ in range(2):
+        # Replays must consume fresh inputs and upstream gradients at the same addresses.
+        with torch.no_grad():
+            for tensor in (*qkv, grad_output):
+                tensor.normal_()
+        graph.replay()
+        check(captured)
 
 
 # Define F16 data types to test
@@ -1560,6 +1679,22 @@ def run_dot_product_attention(
 
     if backend in ["UnfusedDotProductAttention"]:
         return out, max_logit, (q_grad, k_grad, v_grad, d_softmax_offset)
+    if backend == "FlashAttention" and qkv_format == "thd" and pad_between_seqs:
+        tensors_and_boundaries = [("out", out, cu_seqlens_q, cu_seqlens_q_after_pad)]
+        if is_training:
+            tensors_and_boundaries.extend(
+                [
+                    ("dq", q_grad, cu_seqlens_q, cu_seqlens_q_after_pad),
+                    ("dk", k_grad, cu_seqlens_kv, cu_seqlens_kv_after_pad),
+                    ("dv", v_grad, cu_seqlens_kv, cu_seqlens_kv_after_pad),
+                ]
+            )
+        for tensor_name, tensor, cu_seqlens, cu_seqlens_padded in tensors_and_boundaries:
+            padding_mask = get_thd_padding_mask(tensor.shape[0], cu_seqlens, cu_seqlens_padded)
+            assert (
+                torch.count_nonzero(tensor[padding_mask]).item() == 0
+            ), f"{backend} left nonzero values in {tensor_name} padding"
+
     if backend in ["FusedAttention", "FlashAttention"]:
         if qkv_format == "thd" and pad_between_seqs:
             out_orig = torch.Tensor([]).to(device="cuda", dtype=dtype)

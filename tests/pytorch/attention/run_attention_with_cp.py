@@ -13,7 +13,10 @@ from transformer_engine.pytorch.attention.dot_product_attention.context_parallel
     get_cu_seqlens_on_cp_rank,
     get_thd_partitioned_indices,
 )
-from transformer_engine.pytorch.attention.dot_product_attention.utils import combine_and_quantize
+from transformer_engine.pytorch.attention.dot_product_attention.utils import (
+    combine_and_quantize,
+    get_thd_padding_mask,
+)
 from transformer_engine.pytorch import DType
 from test_attention_with_cp import (
     model_configs_flash_attn,
@@ -696,11 +699,18 @@ def run_dpa_with_cp(
             num_pads_kv = (cu_seqlens_kv_padded - cu_seqlens_kv)[1:] - (
                 cu_seqlens_kv_padded - cu_seqlens_kv
             )[:-1]
-            # FA3 leaves garbage at padding positions despite seqused_q/k (tile spillover).
-            # Forward out_ can't be pre-zeroed because FA3's custom op returns out_ as an
-            # output rather than mutating it in-place, triggering PyTorch's aliasing constraint.
-            # Backward dq/dk/dv CAN be pre-zeroed because FA3 marks them as mutated inputs.
+            # FA3/FA4 kernels may leave physically padded rows unwritten. The CP
+            # implementation must clean them after partial-output/gradient merges.
             if fa_pad_between_seqs == "True":
+                out_padding_mask = get_thd_padding_mask(
+                    out_.shape[0], cu_seqlens_q, cu_seqlens_q_padded
+                )
+                nnz = torch.count_nonzero(out_[out_padding_mask]).item()
+                assert nnz == 0, (
+                    f"out_ has {nnz} nonzero values in THD padding — "
+                    "context_parallel.py should zero padding positions"
+                )
+
                 # out_ is a view inside the CP custom autograd Function, so in-place
                 # zeroing is blocked by PyTorch. Clone to break the view relationship.
                 out_ = out_.clone()
