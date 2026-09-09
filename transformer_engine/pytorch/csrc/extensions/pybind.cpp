@@ -135,6 +135,18 @@ void init_extension() {
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   NVTE_DECLARE_COMMON_PYBIND11_HANDLES(m)
+#ifdef NVTE_WITH_NCCL_DEVICE_CP
+  m.def("cp_native_transport_create", &transformer_engine::pytorch::cp_native_transport_create,
+        py::arg("nccl_comm_ptr"), py::arg("payload_bytes"));
+  m.def("cp_native_transport_destroy", &transformer_engine::pytorch::cp_native_transport_destroy,
+        py::arg("handle"));
+  m.def("cp_native_transport_send_recv",
+        &transformer_engine::pytorch::cp_native_transport_send_recv, py::arg("handle"),
+        py::arg("send_tensor"), py::arg("recv_tensor"), py::arg("send_peer"), py::arg("recv_peer"),
+        py::arg("channel") = 0);
+  m.def("cp_native_transport_wait", &transformer_engine::pytorch::cp_native_transport_wait,
+        py::arg("handle"), py::arg("channel") = 0);
+#endif
   m.def("quantize", transformer_engine::pytorch::quantize, py::arg("tensor"), py::arg("quantizer"),
         py::arg("output") = py::none(), py::arg("noop") = py::none());
   m.def("dequantize", &transformer_engine::pytorch::dequantize, "Dequantize", py::arg("input"),
