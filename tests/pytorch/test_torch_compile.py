@@ -22,7 +22,7 @@ try:
     from torch._opaque_base import OpaqueBaseMeta
     from torch._library.opaque_object import (
         get_opaque_type_name,
-        register_opaque_type,
+        register_custom_class,
         MemberType,
     )
 
@@ -215,9 +215,9 @@ if _opaque_available:
                 {"ToyQuantizer": ToyQuantizer},
             )
 
-    register_opaque_type(
+    register_custom_class(
         ToyQuantizer,
-        typ="value",
+        typ="constant",
         members={
             "__setattr__": MemberType.USE_REAL,
             "set_usage": MemberType.USE_REAL,
