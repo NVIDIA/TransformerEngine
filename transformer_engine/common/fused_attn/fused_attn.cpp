@@ -337,6 +337,12 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(NVTEFusedAttnConfig confi
         (cfg.max_seqlen_kv % 128 != 0) && cfg.cuda_graph && !cfg.is_padding) {
       return reject(message, "Known cuDNN <= 9.15 issue with CUDA graph. Please upgrade cuDNN.");
     }
+    if (cfg.is_training && cfg.check_for_backward_support && cfg.uses_ragged_stats &&
+        cfg.softmax_type == NVTE_Softmax_Type::NVTE_LEARNABLE_SOFTMAX &&
+        cudnn_runtime_version < 92600) {
+      return reject(message,
+                    "Known cuDNN < 9.26.0 issue with THD learnable softmax backward. Please upgrade cuDNN.");
+    }
 
     // Run cuDNN support checks
     std::string cudnn_reason =
