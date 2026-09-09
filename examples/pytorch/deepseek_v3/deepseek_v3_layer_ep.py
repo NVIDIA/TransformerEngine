@@ -53,6 +53,11 @@ def _parse_args(argv=None):
     )
     p.add_argument("--impl", choices=["te", "naive", "naive_grouped"], default="te")
     p.add_argument("--recipe", choices=["none", "mxfp8"], default="none")
+    p.add_argument(
+        "--ep-buffer-per-call",
+        action="store_true",
+        help="Let the layer create a new EpBuffer per forward instead of reusing one.",
+    )
     p.add_argument("--warmup", type=int, default=5)
     p.add_argument("--iters", type=int, default=10)
     args = p.parse_args(argv)
@@ -244,11 +249,15 @@ def main():
     seq = args.tokens_per_rank // 4
     x = torch.randn(seq, 4, args.hidden, dtype=torch.bfloat16, device="cuda", requires_grad=True)
 
+    ep_buffer = None
+    if args.impl == "te" and not args.ep_buffer_per_call:
+        ep_buffer = layer.mlp.make_ep_buffer()
+
     def step():
         layer.zero_grad(set_to_none=True)
         x.grad = None
         with _autocast(args.recipe):
-            out = layer(x)
+            out = layer(x, ep_buffer=ep_buffer)
         out.backward(torch.ones_like(out))
         return out
 
@@ -276,7 +285,7 @@ def main():
         tok_s = args.tokens_per_rank * world_size / (ms / 1e3)
         print(
             f"DeepSeekV3Layer impl={args.impl}:"
-            f" ranks={world_size} experts={num_experts} topk={args.topk} tokens/rank={args.tokens_per_rank} hidden={args.hidden} recipe={args.recipe} fused_mlp={os.environ.get('NVTE_CUTEDSL_FUSED_GROUPED_MLP', '0')} fwd+bwd"
+            f" ranks={world_size} experts={num_experts} topk={args.topk} tokens/rank={args.tokens_per_rank} hidden={args.hidden} recipe={args.recipe} fused_mlp={os.environ.get('NVTE_CUTEDSL_FUSED_GROUPED_MLP', '0')} ep_buffer={'per_call' if ep_buffer is None else 'reused'} fwd+bwd"
             f" {ms:.3f} ms/iter ({tok_s / 1e6:.2f} Mtok/s) finite={finite}",
             flush=True,
         )

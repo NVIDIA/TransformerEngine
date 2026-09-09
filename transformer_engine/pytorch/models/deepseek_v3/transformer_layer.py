@@ -155,6 +155,7 @@ class DeepSeekV3Layer(torch.nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         checkpoint_core_attention: bool = False,
+        ep_buffer=None,
     ) -> torch.Tensor:
         """
         Parameters
@@ -165,6 +166,8 @@ class DeepSeekV3Layer(torch.nn.Module):
                         boolean attention mask.
         checkpoint_core_attention : bool, default = False
                                    checkpoint the core attention computation.
+        ep_buffer : EpBuffer, optional
+                   forwarded to :meth:`DeepSeekV3MoE.forward` (MoE layers with EP).
         """
         attention_out = self.self_attention(
             self.input_layernorm(hidden_states),
@@ -173,8 +176,9 @@ class DeepSeekV3Layer(torch.nn.Module):
         )
         hidden_states = self._residual_add(attention_out, hidden_states)
 
+        mlp_kwargs = {"ep_buffer": ep_buffer} if ep_buffer is not None else {}
         if self.pre_mlp_layernorm is not None:
-            mlp_out = self.mlp(self.pre_mlp_layernorm(hidden_states))
+            mlp_out = self.mlp(self.pre_mlp_layernorm(hidden_states), **mlp_kwargs)
         else:
             mlp_out = self.mlp(hidden_states)
         return self._residual_add(mlp_out, hidden_states)

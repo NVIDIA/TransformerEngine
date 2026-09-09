@@ -220,11 +220,22 @@ class DeepSeekV3MoE(torch.nn.Module):
             out[:num_rows], row_id_map, restore_shape=tokens.shape, pad_offsets=pad_offsets
         )
 
-    def _forward_ep(self, tokens: torch.Tensor) -> torch.Tensor:
-        from transformer_engine.pytorch.ep import EpBuffer, ep_dispatch, ep_combine
+    def make_ep_buffer(self, device: Optional[torch.device] = None):
+        """EP buffer for this module's routing config. ``forward`` creates one per call unless
+        given one; a buffer holds one call's routing state until its backward runs, so reuse
+        it only across calls whose backward has completed."""
+        from transformer_engine.pytorch.ep import EpBuffer
+
+        assert self._ep_buffer_kwargs is not None, "make_ep_buffer requires ep_group."
+        if device is None:
+            device = torch.device("cuda", torch.cuda.current_device())
+        return EpBuffer(**self._ep_buffer_kwargs, device=device)
+
+    def _forward_ep(self, tokens: torch.Tensor, ep_buffer=None) -> torch.Tensor:
+        from transformer_engine.pytorch.ep import ep_dispatch, ep_combine
 
         assert tokens.dtype == torch.bfloat16, "The EP path requires bfloat16 inputs."
-        buffer = EpBuffer(**self._ep_buffer_kwargs, device=tokens.device)
+        buffer = ep_buffer if ep_buffer is not None else self.make_ep_buffer(tokens.device)
         topk_idx = torch.empty(
             (tokens.shape[0], self.topk), dtype=torch.int64, device=tokens.device
         )
@@ -262,16 +273,19 @@ class DeepSeekV3MoE(torch.nn.Module):
         )
         return ep_combine(buffer, expert_out, num_local_tokens=tokens.shape[0], grad_out=grad_out)
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor, ep_buffer=None) -> torch.Tensor:
         """
         Parameters
         ----------
         hidden_states : torch.Tensor
                        input of shape ``[..., hidden_size]``.
+        ep_buffer : EpBuffer, optional
+                   buffer from :meth:`make_ep_buffer` to reuse instead of creating one
+                   per call (EP only).
         """
         tokens = hidden_states.reshape(-1, self.hidden_size)
         if self.ep_group is not None:
-            out = self._forward_ep(tokens)
+            out = self._forward_ep(tokens, ep_buffer)
         else:
             out = self._forward_local(tokens)
         if self.shared_expert is not None:
