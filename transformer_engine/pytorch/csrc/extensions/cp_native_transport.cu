@@ -41,7 +41,7 @@ namespace {
 constexpr size_t kArenaAlignment = 256;
 constexpr int kThreads = 256;
 constexpr int kMaxCopyBlocks = 16;
-constexpr int kNumChannels = 3;  // forward, backward, aux-loss
+constexpr int kNumChannels = 4;  // forward, backward, aux-loss, MTP halos
 constexpr int kGinContexts = 1;
 constexpr int kGinQueueDepth = 8;
 using Counter = unsigned long long;  // NOLINT(runtime/int)
@@ -131,7 +131,7 @@ __device__ __forceinline__ void copy_to_lsa_peer(void *dst_void, const void *src
 
 __global__ void cp_native_prepare_kernel(ncclDevComm dev_comm, ncclWindow_t window, int rank,
                                          int recv_peer, unsigned int channel, size_t ready_offset) {
-  if (threadIdx.x != 0 || blockIdx.x != 0) return;
+  if (recv_peer < 0 || threadIdx.x != 0 || blockIdx.x != 0) return;
 
   const ncclTeam world = ncclTeamWorld(dev_comm);
   const ncclTeam lsa = ncclTeamLsa(dev_comm);
@@ -162,8 +162,8 @@ __global__ void cp_native_send_recv_kernel(ncclDevComm dev_comm, ncclWindow_t wi
                                            size_t ready_offset) {
   const ncclTeam world = ncclTeamWorld(dev_comm);
   const ncclTeam lsa = ncclTeamLsa(dev_comm);
-  const bool send_is_lsa = ncclTeamRankIsMember(lsa, world, send_peer);
-  const bool recv_is_lsa = ncclTeamRankIsMember(lsa, world, recv_peer);
+  const bool send_is_lsa = send_peer >= 0 && ncclTeamRankIsMember(lsa, world, send_peer);
+  const bool recv_is_lsa = recv_peer >= 0 && ncclTeamRankIsMember(lsa, world, recv_peer);
 
   if (send_is_lsa) {
     const size_t ready_index =
@@ -192,7 +192,7 @@ __global__ void cp_native_send_recv_kernel(ncclDevComm dev_comm, ncclWindow_t wi
       atomicAdd_system(remote_signal, 1ULL);
     }
     __syncthreads();
-  } else if (blockIdx.x == 0) {
+  } else if (send_peer >= 0 && blockIdx.x == 0) {
     ncclGin gin{dev_comm, 0};
     const size_t ready_index =
         (static_cast<size_t>(send_peer) * kNumChannels + channel) * sizeof(Counter);
@@ -224,7 +224,7 @@ __global__ void cp_native_send_recv_kernel(ncclDevComm dev_comm, ncclWindow_t wi
       __threadfence_system();
     }
     __syncthreads();
-  } else if (blockIdx.x == 0) {
+  } else if (recv_peer >= 0 && blockIdx.x == 0) {
     ncclGin gin{dev_comm, 0};
     const size_t completion_index =
         (static_cast<size_t>(recv_peer) * kNumChannels + channel) * sizeof(Counter);
@@ -342,12 +342,13 @@ int64_t cp_native_transport_send_recv(int64_t handle, at::Tensor send_tensor,
   at::cuda::CUDAGuard device_guard(at::Device(at::kCUDA, transport->device));
   TORCH_CHECK(channel >= 0 && channel < kNumChannels,
               "channel is outside the transport channel range");
-  TORCH_CHECK(send_peer >= 0 && send_peer < transport->nranks,
+  TORCH_CHECK(send_peer >= -1 && send_peer < transport->nranks,
               "send_peer is outside the parent communicator");
-  TORCH_CHECK(recv_peer >= 0 && recv_peer < transport->nranks,
+  TORCH_CHECK(recv_peer >= -1 && recv_peer < transport->nranks,
               "recv_peer is outside the parent communicator");
-  TORCH_CHECK(send_peer != transport->rank || recv_peer != transport->rank,
-              "Native CP send/recv is unnecessary when both peers are self");
+  TORCH_CHECK(send_peer >= 0 || recv_peer >= 0, "Native CP exchange needs at least one peer");
+  TORCH_CHECK(send_peer != transport->rank && recv_peer != transport->rank,
+              "Native CP send/recv does not support self peers");
   validate_tensor(*transport, send_tensor, "send_tensor");
   validate_tensor(*transport, recv_tensor, "recv_tensor");
   TORCH_CHECK(send_tensor.nbytes() == recv_tensor.nbytes(),
@@ -366,9 +367,11 @@ int64_t cp_native_transport_send_recv(int64_t handle, at::Tensor send_tensor,
 
   const cudaStream_t caller_stream = at::cuda::getCurrentCUDAStream().stream();
   const int channel_index = static_cast<int>(channel);
-  Counter &ready_expected =
-      transport->ready_expected[static_cast<size_t>(send_peer) * kNumChannels + channel_index];
-  ++ready_expected;
+  Counter ready_expected = 0;
+  if (send_peer >= 0) {
+    ready_expected =
+        ++transport->ready_expected[static_cast<size_t>(send_peer) * kNumChannels + channel_index];
+  }
   NVTE_CP_CUDA_CHECK(cudaEventRecord(transport->ready_events[channel_index], caller_stream));
   NVTE_CP_CUDA_CHECK(cudaStreamWaitEvent(transport->streams[channel_index],
                                          transport->ready_events[channel_index], 0));

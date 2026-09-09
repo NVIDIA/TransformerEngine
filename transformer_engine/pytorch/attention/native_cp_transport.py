@@ -83,21 +83,51 @@ class NativeCPTransport:
     def send_recv(
         self,
         send_tensor: torch.Tensor,
-        send_global_rank: int,
+        send_global_rank: Optional[int],
         recv_tensor: torch.Tensor,
-        recv_global_rank: int,
+        recv_global_rank: Optional[int],
         channel: int = 0,
     ) -> _Work:
-        """Launch one native send and receive through the parent communicator."""
+        """Launch an arena exchange; a ``None`` peer disables that direction."""
         try:
-            send_peer = self._parent_rank[int(send_global_rank)]
-            recv_peer = self._parent_rank[int(recv_global_rank)]
+            send_peer = -1 if send_global_rank is None else self._parent_rank[int(send_global_rank)]
+            recv_peer = -1 if recv_global_rank is None else self._parent_rank[int(recv_global_rank)]
         except KeyError as error:
             raise ValueError(f"Peer {error.args[0]} is outside the parent group") from error
         channel = tex.cp_native_transport_send_recv(
             self.handle, send_tensor, recv_tensor, send_peer, recv_peer, int(channel)
         )
         return _Work(self.handle, int(channel))
+
+    def exchange(
+        self,
+        send_tensor: torch.Tensor,
+        send_global_rank: Optional[int],
+        recv_tensor: torch.Tensor,
+        recv_global_rank: Optional[int],
+        channel: int = 3,
+    ) -> None:
+        """Exchange small halos using the existing arena, ordered on the caller stream.
+
+        Input and output may be ordinary, noncontiguous tensors. Calls must be
+        serialized with other arena users, just like ``all_reduce``. No additional
+        persistent payload storage is allocated. A missing receive leaves its
+        output unchanged, allowing callers to retain physical-boundary fills.
+        """
+        if send_tensor.shape != recv_tensor.shape or send_tensor.dtype != recv_tensor.dtype:
+            raise ValueError("Native CP halo tensors must have matching shapes and dtypes")
+        if send_tensor.device != self.arena.device or recv_tensor.device != self.arena.device:
+            raise ValueError("Native CP halo tensors must be on the arena device")
+        if send_tensor.numel() == 0 or (send_global_rank is None and recv_global_rank is None):
+            return
+        size = send_tensor.nbytes
+        send = self._view(0, send_tensor.shape, send_tensor.dtype)
+        recv = self._view((size + 255) // 256 * 256, recv_tensor.shape, recv_tensor.dtype)
+        if send_global_rank is not None:
+            send.copy_(send_tensor)
+        self.send_recv(send, send_global_rank, recv, recv_global_rank, channel).wait()
+        if recv_global_rank is not None:
+            recv_tensor.copy_(recv)
 
     def all_reduce(self, tensor: torch.Tensor, group, channel: int = 2) -> torch.Tensor:
         """Ring sum over a dynamic-CP subgroup."""
