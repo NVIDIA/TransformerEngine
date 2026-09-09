@@ -340,8 +340,9 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(NVTEFusedAttnConfig confi
     if (cfg.is_training && cfg.check_for_backward_support && cfg.uses_ragged_stats &&
         cfg.softmax_type == NVTE_Softmax_Type::NVTE_LEARNABLE_SOFTMAX &&
         cudnn_runtime_version < 92600) {
-      return reject(message,
-                    "Known cuDNN < 9.26.0 issue with THD learnable softmax backward. Please upgrade cuDNN.");
+      return reject(
+          message,
+          "Known cuDNN < 9.26.0 issue with THD learnable softmax backward. Please upgrade cuDNN.");
     }
 
     // Run cuDNN support checks
