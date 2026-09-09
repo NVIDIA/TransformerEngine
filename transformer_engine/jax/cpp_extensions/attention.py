@@ -143,6 +143,13 @@ class _FusedAttnConfig:
     )  # Only for CP + Striped. For Ring P2P, stripe_size=1 only.For AG, stripe_size>=1.
     return_max_logit: bool = False
 
+    @property
+    def effective_window_size(self) -> Tuple[int, int]:
+        """Derive the effective window size that the kernel runs in CP + Ring + THD + SWA case."""
+        if self.cp_striped_window_size is not None:
+            return self.cp_striped_window_size
+        return self.window_size
+
 
 @dataclass
 class FusedAttnParams:
@@ -520,7 +527,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             kv_max_seqlen=kv_max_seqlen,
             head_dim_qk=q_head_dim,
             head_dim_v=v_head_dim,
-            window_size=config.window_size,
+            window_size=config.effective_window_size,
             return_max_logit=config.return_max_logit,
             bottom_right_diagonal=config.bottom_right_diagonal,
             attn_scale=float(config.scaling_factor),
@@ -599,8 +606,8 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             jax_dtype_to_te_dtype(q_aval.dtype),
             config.is_training,
             config.max_segments_per_seq,
-            config.window_size[0],
-            config.window_size[1],
+            config.effective_window_size[0],
+            config.effective_window_size[1],
             config.return_max_logit,
             config.bottom_right_diagonal,
         )
@@ -679,12 +686,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
             bias_batch = reduce(operator.mul, bias_batch_shape)
 
-        if config.cp_striped_window_size is not None:
-            window_size_left = config.cp_striped_window_size[0]
-            window_size_right = config.cp_striped_window_size[1]
-        else:
-            window_size_left = config.window_size[0]
-            window_size_right = config.window_size[1]
+        window_size_left, window_size_right = config.effective_window_size
 
         return ffi.ffi_lowering(FusedAttnFwdPrimitive.name)(
             ctx,
@@ -1153,8 +1155,8 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             config.is_training,
             deterministic,
             config.max_segments_per_seq,
-            config.window_size[0],
-            config.window_size[1],
+            config.effective_window_size[0],
+            config.effective_window_size[1],
             config.bottom_right_diagonal,
         )
 
@@ -1246,12 +1248,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
             bias_batch = reduce(operator.mul, bias_batch_shape)
 
-        if config.cp_striped_window_size is not None:
-            window_size_left = config.cp_striped_window_size[0]
-            window_size_right = config.cp_striped_window_size[1]
-        else:
-            window_size_left = config.window_size[0]
-            window_size_right = config.window_size[1]
+        window_size_left, window_size_right = config.effective_window_size
 
         return ffi.ffi_lowering(FusedAttnBwdPrimitive.name)(
             ctx,
