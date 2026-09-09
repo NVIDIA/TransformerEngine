@@ -16,7 +16,7 @@ from cutlass.cutlass_dsl import dsl_user_op
 
 from transformer_engine.common.CuTeDSL.utils import fma_f32
 
-USE_FAST_MATH = os.environ.get("NVTE_BUILD_ACTIVATION_WITH_FAST_MATH", "0") == "1"
+USE_FAST_MATH = os.environ.get("NVTE_USE_FAST_MATH", "0") == "1"
 
 
 def act_relu(x: Float32) -> Float32:
