@@ -30,7 +30,7 @@ from transformer_engine.pytorch.ep import ep_bootstrap, ep_finalize, release_sym
 from transformer_engine.pytorch.models import DeepSeekV3Layer, DeepSeekV3MoE
 
 
-def _parse_args():
+def _parse_args(argv=None):
     p = argparse.ArgumentParser(description="DeepSeekV3Layer EP example (fwd + bwd)")
     p.add_argument("--tokens-per-rank", type=int, default=4096)
     p.add_argument("--hidden", type=int, default=2048)
@@ -55,7 +55,15 @@ def _parse_args():
     p.add_argument("--recipe", choices=["none", "mxfp8"], default="none")
     p.add_argument("--warmup", type=int, default=5)
     p.add_argument("--iters", type=int, default=10)
-    args = p.parse_args()
+    args = p.parse_args(argv)
+    if args.warmup < 0:
+        p.error("--warmup must be non-negative")
+    if args.iters <= 0:
+        p.error("--iters must be positive")
+    if args.tokens_per_rank <= 0 or args.tokens_per_rank % 4:
+        p.error("--tokens-per-rank must be a positive multiple of 4")
+    if args.impl != "te" and args.recipe != "none":
+        p.error("--recipe mxfp8 is only supported with --impl te")
     if args.dsv3:
         args.hidden, args.num_heads, args.moe_ffn = 7168, 128, 2048
         args.q_lora_rank, args.kv_lora_rank = 1536, 512
@@ -67,6 +75,17 @@ def _autocast(name):
     if name == "none":
         return nullcontext()
     return te.autocast(enabled=True, recipe=te_recipe.MXFP8BlockScaling())
+
+
+def _check_finite(tensors, device):
+    finite = torch.ones((), dtype=torch.int32, device=device)
+    for tensor in tensors:
+        if tensor is None:
+            finite.zero_()
+        else:
+            finite.mul_(torch.isfinite(tensor).all())
+    dist.all_reduce(finite, op=dist.ReduceOp.MIN)
+    return bool(finite.item())
 
 
 class NaiveMoE(torch.nn.Module):
@@ -132,7 +151,7 @@ class NaiveMoE(torch.nn.Module):
         e_recv = torch.empty(n_recv, dtype=flat_e.dtype, device=x.device)
         p_recv = torch.empty(n_recv, dtype=flat_p.dtype, device=x.device)
         dist.all_to_all_single(e_recv, flat_e.contiguous(), recv, send, group=self.group)
-        dist.all_to_all_single(p_recv, flat_p.contiguous(), recv, send, group=self.group)
+        p_recv = all_to_all_single(p_recv, flat_p.contiguous(), recv, send, group=self.group)
         local_e = e_recv - self.rank * self.local
         if self.grouped:
             # Experts: sort received rows by local expert, one grouped GEMM stack.
@@ -167,7 +186,7 @@ def main():
     rank, world_size = dist.get_rank(), dist.get_world_size()
 
     major, minor = torch.cuda.get_device_capability()
-    if major * 10 + minor < 90:
+    if args.impl == "te" and major * 10 + minor < 90:
         if rank == 0:
             print(f"SKIPPED: NCCL EP requires SM>=90 (got SM{major}{minor})")
         dist.destroy_process_group()
@@ -226,15 +245,15 @@ def main():
     x = torch.randn(seq, 4, args.hidden, dtype=torch.bfloat16, device="cuda", requires_grad=True)
 
     def step():
+        layer.zero_grad(set_to_none=True)
+        x.grad = None
         with _autocast(args.recipe):
             out = layer(x)
         out.backward(torch.ones_like(out))
-        x.grad = None
         return out
 
     for _ in range(args.warmup):
-        out = step()
-    finite = bool(torch.isfinite(out).all())
+        step()
     torch.cuda.synchronize()
     dist.barrier()
 
@@ -242,10 +261,15 @@ def main():
     start = time.perf_counter()
     for i in range(args.iters):
         with torch.cuda.nvtx.range(f"iter{i}"):
-            step()
+            out = step()
     torch.cuda.synchronize()
     ms = (time.perf_counter() - start) / args.iters * 1e3
     torch.cuda.profiler.stop()
+    finite = _check_finite(
+        [out, x.grad, layer.mlp.gate.weight.grad]
+        + [p.grad for p in layer.parameters() if p.grad is not None],
+        x.device,
+    )
     dist.barrier()
 
     if rank == 0:

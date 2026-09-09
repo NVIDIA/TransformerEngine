@@ -4,9 +4,13 @@
 (RMSNorm, multi-latent attention, DeepSeek MoE with a shared expert) with the routed experts
 sharded over all ranks. Tokens are exchanged with NCCL EP (`transformer_engine.pytorch.ep`).
 Each iteration is a forward and a backward pass on random data; the script reports the time
-per iteration and tokens per second and checks that the output is finite.
+per iteration and tokens per second. After timing, it checks the final output and gradients
+on every rank, including the presence of input and router gradients.
 
 ## Requirements
+
+The following NCCL EP requirements apply to `--impl te`. The naive variants use
+ordinary NCCL collectives and can also run on older GPUs without NVLink.
 
 - SM90 or newer GPUs connected with NVLink (NCCL EP falls back to the network transport and
   deadlocks on PCIe-only nodes).
@@ -51,6 +55,8 @@ Every rank owns `--num-local-experts` experts (default 8), so the expert count i
 `8 * world_size`. Other knobs: `--tokens-per-rank`, `--topk`, `--hidden`, `--num-heads`,
 `--moe-ffn`, the MLA dims (`--q-lora-rank`, `--kv-lora-rank`, `--qk-nope-head-dim`,
 `--qk-rope-head-dim`, `--v-head-dim`), `--warmup`, `--iters`.
+`--warmup 0` is supported; `--iters` must be positive and `--tokens-per-rank` must be a
+positive multiple of four. MXFP8 requires `--impl te`.
 
 ## Profiling with nsys
 
@@ -110,6 +116,11 @@ quantization kernels and the layer becomes CPU-launch-bound. Running under `nsys
 about 1.5 ms per iteration to these numbers.
 
 ## TE MoE vs. plain PyTorch MoE
+
+The naive timings and profiles below predate the routing-probability autograd fix:
+they omit router backward and probability-gradient communication. They are historical
+measurements and must be rerun before drawing training-speedup conclusions. The current
+benchmark also clears parameter gradients before each step.
 
 Same layer, same dims (`--dsv3`), bf16 unless noted:
 
