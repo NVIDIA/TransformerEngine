@@ -7,10 +7,26 @@ and MoE with a shared expert. Routed experts are sharded across GPUs using NCCL 
 
 GB300 GPUs, 4096 tokens per rank, top-k 8, 8 local experts per GPU.
 Times cover one layer's forward + backward; throughput is global, in millions of tokens/s.
-All rows below use `--impl te`. See [benchmark configuration](#c-benchmark-configuration)
-for the full setup.
+See [benchmark configuration](#c-benchmark-configuration) for the full setup.
 
-### DeepSeek-V3 dimensions (`--dsv3`)
+### TE vs. plain PyTorch (`--dsv3`)
+
+Same layer and dimensions, BF16 unless noted.
+
+The naive measurements predate the router-backward fix and omit probability-gradient
+communication; updated timings are pending. They do not yet establish training speedups.
+
+| MoE implementation | 4 GPUs (32 experts) | 8 GPUs (64 experts) |
+|---|---:|---:|
+| `naive`: all_to_all + loop over experts | 26.83 ms | 27.34 ms |
+| `naive_grouped`: all_to_all + TE grouped GEMM | 16.84 ms | 17.20 ms |
+| `te`: NCCL EP + grouped GEMM | 13.09 ms | 15.06 ms |
+| `te`, mxfp8 (unfused grouped GEMM) | 11.02 ms | 12.88 ms |
+| `te`, mxfp8 fused | 10.19 ms | 11.32 ms |
+
+At the small default dims (4 GPUs): `naive` 10.08 ms, `naive_grouped` 6.80 ms, `te` 6.17 ms.
+
+### TE precision and throughput (`--dsv3`)
 
 | Precision | 4 GPUs · ms/iter | 4 GPUs · Mtok/s | 8 GPUs · ms/iter | 8 GPUs · Mtok/s |
 |---|---:|---:|---:|---:|
@@ -21,7 +37,7 @@ for the full setup.
 4 GPUs = 1 node / 32 experts; 8 GPUs = 2 nodes / 64 experts.
 Both nodes share one NVLink domain (MNNVL).
 
-### Small default dimensions
+### TE at small default dimensions
 
 1 node, 4 GPUs, hidden 2048, 16 heads, expert FFN 1024, 32 experts.
 
@@ -32,9 +48,6 @@ Both nodes share one NVLink domain (MNNVL).
 
 “Fused” enables `NVTE_CUTEDSL_FUSED_GROUPED_MLP=1`.
 At the small dimensions, MXFP8 fused is slower than BF16.
-
-The [historical naive comparison](#f-historical-comparison-with-plain-pytorch) is in the
-appendix; those measurements predate the router-backward fix.
 
 ## Quick start
 
@@ -56,7 +69,7 @@ NVTE_CUTEDSL_FUSED_GROUPED_MLP=1 bash run_deepseek_v3_layer_ep.sh --dsv3 --recip
 [Requirements](#a-requirements) · [Running](#b-running) ·
 [Configuration](#c-benchmark-configuration) · [Profiling](#d-profiling-with-nsys) ·
 [TE kernels](#e-te-kernel-breakdown) ·
-[Historical naive comparison](#f-historical-comparison-with-plain-pytorch) ·
+[Naive kernel profiles](#f-naive-kernel-profiles) ·
 [EP internals](#g-ep-implementation-notes)
 
 ### A. Requirements
@@ -161,24 +174,12 @@ Both nodes sit in one NVLink domain, so dispatch and combine move roughly 470 MB
 call over NVLink at close to link bandwidth; on an InfiniBand-connected pair of nodes the
 all-to-all share would be much larger.
 
-### F. Historical comparison with plain PyTorch
+### F. Naive kernel profiles
 
 The naive timings and profiles below predate the routing-probability autograd fix:
 they omit router backward and probability-gradient communication. They are historical
 measurements and must be rerun before drawing training-speedup conclusions. The current
 benchmark also clears parameter gradients before each step.
-
-Same layer, same dims (`--dsv3`), bf16 unless noted:
-
-| MoE implementation | 4 GPUs (32 experts) | 8 GPUs (64 experts) |
-|---|---:|---:|
-| `naive`: all_to_all + loop over experts | 26.83 ms | 27.34 ms |
-| `naive_grouped`: all_to_all + TE grouped GEMM | 16.84 ms | 17.20 ms |
-| `te`: NCCL EP + grouped GEMM | 13.09 ms | 15.06 ms |
-| `te`, mxfp8 (unfused grouped GEMM) | 11.02 ms | 12.88 ms |
-| `te`, mxfp8 fused | 10.19 ms | 11.32 ms |
-
-At the small default dims (4 GPUs): `naive` 10.08 ms, `naive_grouped` 6.80 ms, `te` 6.17 ms.
 
 Per GPU and iteration, the `naive` MoE spends (8 GPUs, kernel time 25.9 ms of a 28.5 ms
 iteration):
