@@ -64,6 +64,12 @@ def setup_common_extension() -> CMakeExtension:
         "-DCMAKE_CUDA_ARCHITECTURES={}".format(archs),
         f"-DCUDNN_FRONTEND_INCLUDE_DIR={cudnn_frontend_include_path()}",
     ]
+
+    # CuTeDSL kernels are compiled and registered through Python, so the
+    # framework-agnostic C++ build cannot exercise this backend.
+    if not frameworks:
+        cmake_flags.append("-DNVTE_WITH_CUTEDSL=OFF")
+
     if bool(int(os.getenv("NVTE_UB_WITH_MPI", "0"))):
         assert (
             os.getenv("MPI_HOME") is not None
