@@ -29,6 +29,12 @@ WHL_BASE="transformer_engine-${VERSION}"
 # Core wheel.
 NVTE_RELEASE_BUILD=1 pip3 wheel --no-build-isolation -vvv --wheel-dir ./dist . || error_exit "Failed to setup bdist_wheel"
 python3 -m wheel unpack dist/${WHL_BASE}-* || error_exit "Failed to unpack dist/${WHL_BASE}-*.whl"
+if python3 -c "from build_tools.utils import nccl_ep_enabled; raise SystemExit(not nccl_ep_enabled())"; then
+    test -f "${WHL_BASE}/transformer_engine/wheel_lib/libnccl_ep.so" || error_exit "Core wheel is missing libnccl_ep.so"
+    test -f "${WHL_BASE}/transformer_engine/wheel_lib/nccl_ep/include/nccl_ep.h" || error_exit "Core wheel is missing nccl_ep.h"
+    test -d "${WHL_BASE}/transformer_engine/wheel_lib/nccl_ep/include/nccl_ep" || error_exit "Core wheel is missing NCCL EP JIT headers"
+    python3 "$TE_PATH/qa/check_nccl_ep_headers.py" "${WHL_BASE}/transformer_engine/wheel_lib/nccl_ep/include" || error_exit "Core wheel has incomplete NCCL EP JIT headers"
+fi
 sed -i "s/Name: transformer-engine/Name: transformer-engine-cu12/g" "transformer_engine-${VERSION}/transformer_engine-${VERSION}.dist-info/METADATA"
 sed -i "s/Name: transformer_engine/Name: transformer_engine_cu12/g" "transformer_engine-${VERSION}/transformer_engine-${VERSION}.dist-info/METADATA"
 mv "${WHL_BASE}/${WHL_BASE}.dist-info" "${WHL_BASE}/transformer_engine_cu12-${VERSION}.dist-info" || error_exit "Failed to move ${WHL_BASE}.dist-info to transformer_engine_cu12-${VERSION}.dist-info"

@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 import random
+import pytest
 import torch
 from transformer_engine.pytorch import parallel_cross_entropy
 
@@ -205,8 +206,11 @@ def test_bfloat16_unreduced_external_grad():
     with torch.autograd.graph.saved_tensors_hooks(pack_hook, lambda tensor: tensor):
         loss = parallel_cross_entropy(logits, target, 0.0, False, None)
 
-    assert len(saved_tensors) == 1
-    assert saved_tensors[0].dtype == torch.float32
+    assert [tensor.dtype for tensor in saved_tensors] == [
+        torch.bfloat16,
+        torch.float32,
+        torch.int64,
+    ]
     torch.testing.assert_close(logits, logits_before, rtol=0.0, atol=0.0)
     loss.backward(external_grad)
 
@@ -233,3 +237,196 @@ def test_bfloat16_loss_matches_float32_input():
     # differ by a small number of FP32 rounding steps.
     fp32_eps = torch.finfo(torch.float32).eps
     torch.testing.assert_close(bf16_loss, fp32_loss, rtol=2 * fp32_eps, atol=2 * fp32_eps)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
+@pytest.mark.parametrize("reduce_loss", [False, True], ids=["none", "mean"])
+@pytest.mark.parametrize("label_smoothing", [0.0, 0.1], ids=["plain", "smoothed"])
+@pytest.mark.parametrize("overwrite_input", [False, True], ids=["safe", "destructive"])
+def test_parallel_cross_entropy_matches_pytorch(
+    dtype,
+    reduce_loss,
+    label_smoothing,
+    overwrite_input,
+):
+    """Check loss and externally-scaled gradients against PyTorch."""
+
+    torch.manual_seed(1234)
+    shape = (2, 5, 37)
+    target = torch.randint(0, shape[-1], shape[:-1], device="cuda")
+    target[0, 1] = -100
+    # Use the same BF16-representable inputs for both dtypes so that the FP32
+    # loss comparison measures only the implementation's arithmetic.
+    values = torch.randn(shape, dtype=torch.bfloat16, device="cuda").to(dtype)
+
+    logits = values.clone().requires_grad_()
+    ref_logits = values.float().clone().requires_grad_()
+
+    loss = parallel_cross_entropy(
+        logits,
+        target,
+        label_smoothing,
+        reduce_loss,
+        overwrite_input=overwrite_input,
+    )
+    ref_loss = torch.nn.functional.cross_entropy(
+        ref_logits.reshape(-1, shape[-1]),
+        target.reshape(-1),
+        label_smoothing=label_smoothing,
+        reduction="mean" if reduce_loss else "none",
+    )
+    if reduce_loss:
+        ref_loss = ref_loss.reshape_as(loss)
+    else:
+        ref_loss = ref_loss.reshape_as(target)
+
+    external_grad = (
+        torch.full_like(loss, 0.37) if reduce_loss else torch.randn_like(loss, dtype=torch.float32)
+    )
+    loss.backward(external_grad)
+    ref_loss.backward(external_grad)
+
+    assert loss.dtype == ref_loss.dtype == torch.float32
+    torch.testing.assert_close(loss, ref_loss, **dtype_tols(torch.float32))
+    expected_grad = ref_logits.grad.to(dtype)
+    torch.testing.assert_close(logits.grad, expected_grad, **dtype_tols(dtype))
+
+
+@pytest.mark.parametrize("reduce_loss", [False, True], ids=["none", "mean"])
+@pytest.mark.parametrize("overwrite_input", [False, True], ids=["safe", "destructive"])
+def test_parallel_cross_entropy_saved_state_and_buffer_reuse(reduce_loss, overwrite_input):
+    """The saved input buffer is input-typed and becomes the returned derivative."""
+
+    torch.manual_seed(42)
+    logits = torch.randn(2, 3, 11, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+    target = torch.tensor([[0, -100, 4], [7, 2, 10]], device="cuda")
+    before = logits.detach().clone()
+    version_before = logits._version
+    other_consumer = logits.square().sum()
+    saved_tensors = []
+
+    def pack_hook(tensor):
+        saved_tensors.append(tensor)
+        return tensor
+
+    with torch.autograd.graph.saved_tensors_hooks(pack_hook, lambda tensor: tensor):
+        loss = parallel_cross_entropy(
+            logits,
+            target,
+            label_smoothing=0.1,
+            reduce_loss=reduce_loss,
+            overwrite_input=overwrite_input,
+        )
+
+    assert len(saved_tensors) == 3 + int(reduce_loss)
+    saved_input, stats, saved_target, *optional_tensors = saved_tensors
+    assert saved_input.shape == logits.shape
+    assert saved_input.dtype == logits.dtype
+    assert stats.shape == (target.numel(), 2)
+    assert stats.dtype == torch.float32
+    assert saved_target.numel() == target.numel()
+    assert saved_target.dtype == torch.int64
+    if reduce_loss:
+        n_non_ignore = optional_tensors[0]
+        assert n_non_ignore.shape == (1,)
+        assert n_non_ignore.dtype == torch.int64
+        assert n_non_ignore.item() == target.numel() - 1
+    else:
+        assert not optional_tensors
+
+    if overwrite_input:
+        assert saved_input.data_ptr() == logits.data_ptr()
+    else:
+        assert saved_input.data_ptr() != logits.data_ptr()
+    torch.testing.assert_close(logits, before, rtol=0.0, atol=0.0)
+    assert logits._version == version_before
+
+    expected_max = before.float().amax(dim=-1).reshape(-1)
+    expected_denominator = (
+        torch.exp(before.float() - expected_max.reshape(logits.shape[0], logits.shape[1], 1))
+        .sum(dim=-1)
+        .reshape(-1)
+    )
+    torch.testing.assert_close(stats[:, 0], expected_max, rtol=1e-6, atol=1e-6)
+    torch.testing.assert_close(stats[:, 1], expected_denominator, rtol=1e-6, atol=1e-6)
+
+    external_grad = torch.randn_like(loss)
+    loss.backward(external_grad)
+    assert logits._version == version_before + int(overwrite_input)
+
+    # Backward writes directly into the tensor saved by forward.
+    torch.testing.assert_close(saved_input, logits.grad, rtol=0.0, atol=0.0)
+    if overwrite_input:
+        assert not torch.equal(logits, before)
+    else:
+        torch.testing.assert_close(logits, before, rtol=0.0, atol=0.0)
+
+    if overwrite_input:
+        with pytest.raises(RuntimeError, match="modified by an inplace operation"):
+            other_consumer.backward()
+    else:
+        other_consumer.backward()
+
+
+@pytest.mark.parametrize("layout", ["transpose", "strided_vocab"])
+def test_parallel_cross_entropy_safe_mode_supported_layouts(layout):
+    """Safe mode copies non-contiguous logical layouts directly into its work buffer."""
+
+    torch.manual_seed(17)
+    if layout == "transpose":
+        values = torch.randn(3, 2, 13, device="cuda").transpose(0, 1)
+    else:
+        values = torch.randn(2, 3, 26, device="cuda")[..., ::2]
+    logits = values.detach().requires_grad_()
+    reference = values.detach().clone().requires_grad_()
+    target = torch.randint(0, values.shape[-1], values.shape[:-1], device="cuda")
+    external_grad = torch.randn(values.shape[:-1], device="cuda")
+
+    loss = parallel_cross_entropy(logits, target)
+    ref_loss = torch.nn.functional.cross_entropy(
+        reference.reshape(-1, reference.shape[-1]),
+        target.reshape(-1),
+        reduction="none",
+    ).reshape_as(target)
+    loss.backward(external_grad)
+    ref_loss.backward(external_grad)
+
+    torch.testing.assert_close(loss, ref_loss, **dtype_tols(torch.float32))
+    torch.testing.assert_close(logits.grad, reference.grad, **dtype_tols(torch.float32))
+
+
+def test_parallel_cross_entropy_validation_errors():
+    """Reject inputs that violate dtype, shape, device, or overwrite assumptions."""
+
+    target = torch.zeros((2, 3), dtype=torch.int64, device="cuda")
+    logits = torch.randn(2, 3, 5, device="cuda")
+
+    with pytest.raises(ValueError, match="3D"):
+        parallel_cross_entropy(logits.reshape(6, 5), target)
+    with pytest.raises(TypeError, match="BF16 or FP32"):
+        parallel_cross_entropy(logits.half(), target)
+    with pytest.raises(TypeError, match="int64"):
+        parallel_cross_entropy(logits, target.int())
+    with pytest.raises(ValueError, match="one target"):
+        parallel_cross_entropy(logits, target[:, :2])
+    with pytest.raises(ValueError, match="\\[0, 1\\]"):
+        parallel_cross_entropy(logits, target, label_smoothing=1.1)
+    with pytest.raises(ValueError, match="contiguous"):
+        parallel_cross_entropy(
+            logits.transpose(0, 1),
+            target.transpose(0, 1),
+            overwrite_input=True,
+        )
+    with pytest.raises(ValueError, match="CUDA"):
+        parallel_cross_entropy(logits.cpu(), target.cpu())
+
+
+def test_parallel_cross_entropy_deprecated_input_alias():
+    """The deprecated _input keyword remains compatible with the replaced path."""
+
+    logits = torch.randn(2, 3, 5, device="cuda")
+    target = torch.zeros((2, 3), dtype=torch.int64, device="cuda")
+    with pytest.warns(FutureWarning, match="_input"):
+        alias_loss = parallel_cross_entropy(logits, target, _input=logits)
+    direct_loss = parallel_cross_entropy(logits, target)
+    torch.testing.assert_close(alias_loss, direct_loss)

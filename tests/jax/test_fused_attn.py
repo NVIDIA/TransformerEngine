@@ -222,7 +222,7 @@ def make_mask(
             segment_pos_q,
             segment_pos_kv,
             window_size,
-            dtype=jnp.bool,
+            dtype=jnp.bool_,
             segment_ids_q=segment_ids_q,
             segment_ids_kv=segment_ids_kv,
         )
@@ -611,11 +611,6 @@ class FusedAttnRunner:
             if self.attn_mask_type.is_padding():
                 pytest.skip(
                     "B1SS, BHSS and 11SS bias shapes are only supported for non-padding mask"
-                )
-            elif self.backend != NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
-                pytest.skip(
-                    "B1SS, BHSS and 11SS bias shapes are only supported for "
-                    "the F16_arbitrary_seqlen backend."
                 )
 
     def _setup_inputs(self):

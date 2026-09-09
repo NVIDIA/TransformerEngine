@@ -209,8 +209,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_scaled_swiglu_mxfp8_k
         DIVUP_TO_MULTIPLE(CHUNK_DIM_Y * sizeof(float), TMA_SHMEM_ALIGNMENT);
 
     // shmem layout: [act input][gate input][colwise output][prob]
-    extern __shared__ unsigned char dynamic_shmem[];
-    unsigned char *dshmem = align_smem_ptr_per_TMA_requirements(dynamic_shmem);
+    extern __shared__ char dynamic_shmem[];
+    char *dshmem = align_up(dynamic_shmem, TMA_SHMEM_ALIGNMENT);
 
     IType *sInAct_ptr = reinterpret_cast<IType *>(dshmem);
     IType *sInGate_ptr = reinterpret_cast<IType *>(dshmem + buff_size_aligned_in);

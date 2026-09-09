@@ -564,7 +564,7 @@ def run_dpa_with_cp(
         cp_comm_type,
         load_balancing_strategy,
     )
-    if config.softmax_type != "vanilla":
+    if is_training and config.softmax_type != "vanilla":
         core_attn.softmax_offset.grad.zero_()
     if dtype == "fp8":
         core_attn.fp8_initialized = False
