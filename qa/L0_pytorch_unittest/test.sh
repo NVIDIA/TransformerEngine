@@ -99,7 +99,7 @@ CUTEDSL_BACKEND_TESTS=(
 )
 for cutedsl_test in "${CUTEDSL_BACKEND_TESTS[@]}"; do
     cutedsl_tag=$(echo "$cutedsl_test" | tr '/.' '__')
-    NVTE_ENABLE_CUTEDSL_QUANT_BACKEND=1 NVTE_WARN_IF_CUTEDSL_BACKEND_NOT_CHOSEN=1 python3 -m pytest -s --tb=auto --junitxml=$XML_LOG_DIR/pytest_cutedsl_${cutedsl_tag}.xml $TE_PATH/$cutedsl_test || test_fail "cutedsl backend: $cutedsl_test"
+    NVTE_ENABLE_CUTEDSL_QUANT_BACKEND=1 NVTE_DEBUG=1 python3 -m pytest -s --tb=auto --junitxml=$XML_LOG_DIR/pytest_cutedsl_${cutedsl_tag}.xml $TE_PATH/$cutedsl_test || test_fail "cutedsl backend: $cutedsl_test"
 done
 
 if [ "$RET" -ne 0 ]; then
