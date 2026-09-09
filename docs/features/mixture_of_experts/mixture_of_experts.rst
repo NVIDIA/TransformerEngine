@@ -53,7 +53,7 @@ dropped into an existing implementation one piece at a time:
   expert-contiguous layout.
 * :ref:`Grouped GEMM <moe-grouped-gemm>`: the expert linear layers as one call
   over expert-contiguous blocks; the :ref:`grouped MLP <moe-grouped-mlp>` fuses
-  the whole expert MLP into one kernel.
+  activation and supported quantization steps into the expert GEMMs.
 * :ref:`Expert parallelism <moe-expert-parallelism>`: all-to-all dispatch and
   combine for experts sharded across devices.
 
@@ -393,15 +393,17 @@ Grouped MLP
 -----------
 
 An expert MLP is two grouped GEMMs with an activation between them. On
-Blackwell (SM100) GPUs the whole expert MLP can run as a single CuTe DSL kernel:
-the intermediate activation stays on chip and its quantization is folded into
-the GEMMs.
+Blackwell (SM100) GPUs, Transformer Engine fuses the activation into the FC1
+grouped GEMM using CuTe DSL kernels. Quantization is also fused where the
+recipe supports it. FC2 runs as a separate grouped GEMM, reading the
+intermediate tensor from device memory.
 
 .. raw:: html
    :file: img/moe_grouped_mlp.svg
 
 *Figure 7. The operation fuser replaces the two grouped GEMMs and the activation
-between them with a single fused grouped-MLP kernel.*
+between them with one grouped-MLP operation that launches separate FC1 and FC2
+kernels.*
 
 The fusion is applied by the :doc:`operation fuser </examples/op_fuser/op_fuser>`:
 a grouped linear, a scaled GLU (or SReLU) activation and another grouped linear
@@ -414,7 +416,7 @@ in sequence are replaced with one fused grouped-MLP operation.
       .. raw:: html
 
          <div class="code-block-header">
-            Requires SM100 (Blackwell) or later
+            Requires SM100 (Blackwell)
          </div>
 
       .. literalinclude:: grouped_mlp_pytorch.py
@@ -422,9 +424,10 @@ in sequence are replaced with one fused grouped-MLP operation.
          :start-after: # START_GROUPED_MLP_PYTORCH
          :end-before: # END_GROUPED_MLP_PYTORCH
 
-The fusion is enabled with ``NVTE_CUTEDSL_FUSED_GROUPED_MLP=1`` and requires
-Blackwell and a block-scaled recipe (MXFP8 or NVFP4). When the configuration is
-not supported, the three operations run separately with identical results.
+Set ``NVTE_CUTEDSL_FUSED_GROUPED_MLP=1`` before importing
+``transformer_engine.pytorch`` to enable fusion. It requires Blackwell and a
+supported block-scaled recipe (MXFP8 or NVFP4). When the configuration is not
+supported, the three operations run separately.
 
 .. _moe-putting-it-together:
 
@@ -524,24 +527,31 @@ the NCCL EP dispatch writes every token straight into its expert slot.*
 **Receive buffer**
 
 The number of tokens a rank receives depends on the routing, so the buffer is
-sized in one of two ways.
+sized in one of two ways. Local expert blocks are packed consecutively, with
+each block optionally padded to the configured alignment. Their offsets are
+the cumulative per-expert counts; any remaining capacity forms an unused tail.
 
-* **Fixed capacity**, ``recv_capacity_per_rank`` (an integer): every local
-  expert gets a fixed slot range and the buffer is allocated once.
+* **Fixed capacity**, ``recv_capacity_per_rank`` (an integer): the total buffer
+  size is fixed, while the expert block sizes and offsets depend on the routing.
 
-  * The step allocates nothing, needs no host synchronization and is
-    CUDA-graph capturable.
-  * ``ep_size * max_tokens_per_rank * top_k`` can never overflow. With balanced
-    routing a rank receives only about ``max_tokens_per_rank * top_k``, so a
-    small multiple of that is the usual choice and saves ``ep_size`` times the
-    memory.
+  * Sizing needs no host synchronization. Reuse caller-owned buffers for
+    CUDA graph capture.
+  * Without per-expert padding, ``ep_size * max_tokens_per_rank * top_k`` is a
+    dropless upper bound. With alignment enabled, capacity must also include
+    padding for every local expert. For example, counts of 129 and 127 need
+    384 rows at alignment 128, even though only 256 tokens arrive. JAX provides
+    ``get_moe_recv_capacity_per_rank`` to compute an aligned bound.
+  * With balanced routing, a rank receives about
+    ``max_tokens_per_rank * top_k`` assignments. A smaller capacity based on
+    this estimate saves memory but can overflow; include alignment padding
+    when sizing it.
   * On overflow the dispatch fails with a device-side error. With
     ``drop_on_overflow=True`` it instead drops the tokens that do not fit; they
     are not sent, so their experts contribute nothing to the output, like
     token dropping in capacity-limited MoE.
-  * ``total_recv_tokens`` counts the tokens that wanted to arrive, dropped
-    ones included; compare it with the capacity after the step to detect an
-    overflow.
+  * ``total_recv_tokens`` reports the required receive rows before dropping,
+    including alignment padding; compare it with capacity after the step to
+    detect an overflow.
 
 * **Eager**, no capacity given: the buffer is sized from the actual receive
   count each step.
@@ -578,11 +588,14 @@ Dispatch can quantize the tokens before sending them:
         receive buffer ``[recv_capacity_per_rank, hidden_size]`` (or writes into
         caller-owned ``recv_tokens`` / ``recv_topk_weights``, needed for CUDA
         graphs) and returns it together with the routing weights of the received
-        tokens and the number of valid tokens per local expert. Each local
-        expert owns a fixed slot range in the buffer.
+        tokens and the per-expert row counts, including alignment padding when
+        enabled. The counts determine the consecutive expert block offsets.
       * The local experts read the receive buffer as their input and produce
         ``expert_out`` of the same shape; the caller multiplies it by the
-        received routing weights and zeroes the padded slots.
+        received routing weights. The snippet clears unused tail rows and
+        weights before multiplication so uninitialized values cannot produce
+        NaNs. NCCL EP zeroes padding between aligned expert blocks, and combine
+        ignores slots without a routed token.
       * ``ep_combine(buffer, expert_out)`` reads ``expert_out`` in place and
         returns the summed expert outputs ``[num_tokens, hidden_size]`` in the
         original token order.
@@ -632,7 +645,8 @@ Dispatch can quantize the tokens before sending them:
         * ``ep_combine(cfg, handle_mem, token_counts, expert_out,
           num_local_tokens)`` sums the expert outputs back on the source ranks in
           the original token order. It is unweighted: multiply ``expert_out`` by
-          ``recv_topk_weights`` (and zero the padded slots) before calling it.
+          ``recv_topk_weights`` before calling it. NCCL EP zeroes alignment
+          padding; combine ignores slots without a routed token.
           ``num_local_tokens`` must be static because it fixes the output shape.
 
       .. raw:: html
