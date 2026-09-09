@@ -25,11 +25,6 @@ from ..quantization import (
 from ..tensor import Quantizer
 from ..dynamo import is_value_opaque_quantizer, register_custom_op
 
-# Keyword-only parameters every resolve_fwd_args takes; the rest are forward kwargs.
-_RESOLVE_FWD_ARGS_PARAMS = frozenset(
-    ("requires_grad", "prev_op_grad_output_quantizer", "next_op_input_quantizer")
-)
-
 
 @dataclasses.dataclass
 class OperationContext:
@@ -194,8 +189,8 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
     num_extra_outputs: int = 0
 
     # torch.compile support: an operation declares its argument containers and
-    # implements the compute halves (see op_forward); custom ops are registered
-    # once per class.
+    # implements forward_impl / backward_impl and their fakes (see op_forward);
+    # its custom op is registered once per class.
     fwd_args_type: Optional[type] = None
     bwd_args_type: Optional[type] = None
     # Forward kwargs accepted by resolve_fwd_args. Read-only, no gradient.
@@ -216,18 +211,19 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         params = inspect.signature(cls.resolve_fwd_args).parameters
         if any(p.kind is p.VAR_KEYWORD for p in params.values()):
             raise TypeError(f"{cls.__name__}.resolve_fwd_args must name its keyword arguments")
+        base_params = inspect.signature(BasicOperation.resolve_fwd_args).parameters
         cls.fwd_kwarg_names = tuple(
             name
             for name, p in params.items()
-            if p.kind is p.KEYWORD_ONLY and name not in _RESOLVE_FWD_ARGS_PARAMS
+            if p.kind is p.KEYWORD_ONLY and name not in base_params
         )
         cls.compile_ops = register_custom_op(
             op_name=cls.__name__.lower(),
             fwd_arg_type=cls.fwd_args_type,
-            fwd_impl=cls.forward_compute,
+            fwd_impl=cls.forward_impl,
             fwd_fake_impl=cls.forward_fake,
             bwd_arg_type=cls.bwd_args_type,
-            bwd_impl=cls.backward_compute,
+            bwd_impl=cls.backward_impl,
             bwd_fake_impl=cls.backward_fake,
         )
 
@@ -564,8 +560,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
     ) -> torch.Tensor:
         """Forward pass
 
-        Operations that implement the compute halves inherit this;
-        the rest override it.
+        Operations with a custom op inherit this; the rest override it.
 
         Parameters
         ----------
@@ -585,7 +580,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
 
         """
         return self._forward(
-            self.forward_compute,
+            self.forward_impl,
             ctx,
             input_,
             prev_op_grad_output_quantizer=prev_op_grad_output_quantizer,
@@ -600,8 +595,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
     ) -> tuple[torch.Tensor, Iterable[Optional[torch.Tensor]]]:
         """Backward pass
 
-        Operations that implement the compute halves inherit this;
-        the rest override it.
+        Operations with a custom op inherit this; the rest override it.
 
         Parameters
         ----------
@@ -618,7 +612,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             Loss gradients w.r.t. parameters
 
         """
-        return self._backward(self.backward_compute, ctx, grad_output)
+        return self._backward(self.backward_impl, ctx, grad_output)
 
     def compiled_op_forward(
         self,
@@ -670,29 +664,28 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         grad_input = grad_output if grads[0] is None else grads[0]
         return grad_input, tuple(grads[1:])
 
-    # Compute halves: forward_compute / backward_compute are the eager kernels
-    # and the custom-op bodies; the *_fake twins run on TensorSpec. Neither may
-    # read self, global state, or mutate its arguments. A None grad_input
-    # means "grad_output, unchanged".
+    # Custom op implementation: *_impl runs eagerly and as the op body, *_fake
+    # on TensorSpec. Neither may read self, global state, or mutate its
+    # arguments. A None grad_input means "grad_output, unchanged".
 
     @classmethod
-    def forward_compute(cls, args: Any) -> tuple[torch.Tensor, tuple]:
+    def forward_impl(cls, args: Any) -> tuple[torch.Tensor, tuple]:
         """Forward over ``args``; returns ``(output, aux)``, aux being fresh tensors."""
         raise NotImplementedError
 
     @classmethod
     def forward_fake(cls, args: Any) -> tuple[Any, tuple]:
-        """Shape-only twin of :meth:`forward_compute`."""
+        """Shape-only twin of :meth:`forward_impl`."""
         raise NotImplementedError
 
     @classmethod
-    def backward_compute(cls, args: Any) -> tuple:
+    def backward_impl(cls, args: Any) -> tuple:
         """Backward over ``args``; returns grad_input, then parameter grads."""
         raise NotImplementedError
 
     @classmethod
     def backward_fake(cls, args: Any) -> tuple:
-        """Shape-only twin of :meth:`backward_compute`."""
+        """Shape-only twin of :meth:`backward_impl`."""
         raise NotImplementedError
 
     def resolve_fwd_args(
@@ -722,7 +715,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
     def compile_unsupported_reason(self) -> Optional[str]:
         """Why this operation cannot run through its custom op, or ``None``."""
         if self.compile_ops is None:
-            return f"{self.__class__.__name__} without compute halves"
+            return f"{self.__class__.__name__} without a custom op"
         for mode in ("forward", "backward"):
             for index in range(self.num_quantizers(mode)):
                 quantizer = self.get_quantizer(mode, index)

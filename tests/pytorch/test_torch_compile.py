@@ -2375,7 +2375,7 @@ class _ScaleOp(BasicOperation):
     """Test-only operation: multiply by a learnable scalar.
 
     Exists so the fuser's compiled path can be exercised without depending on
-    which real operations happen to declare their compute halves. It is the
+    which real operations happen to have a custom op. It is the
     smallest operation that still has a parameter gradient and a saved tensor.
     """
 
@@ -2387,7 +2387,7 @@ class _ScaleOp(BasicOperation):
         self.scale = torch.nn.Parameter(torch.full((), 2.0, device=device, dtype=dtype))
 
     @classmethod
-    def forward_compute(cls, args):
+    def forward_impl(cls, args):
         return args.input_ * args.scale, ()
 
     @classmethod
@@ -2396,7 +2396,7 @@ class _ScaleOp(BasicOperation):
         return TensorSpec(shape=tuple(x.shape), dtype=x.dtype, device=x.device), ()
 
     @classmethod
-    def backward_compute(cls, args):
+    def backward_impl(cls, args):
         dy = args.grad_output
         return dy * args.scale, (dy * args.saved_input).sum()
 
@@ -2479,7 +2479,7 @@ class _ScaleWithKwargsOp(BasicOperation):
         self.scale = torch.nn.Parameter(torch.full((), 2.0, device=device, dtype=dtype))
 
     @classmethod
-    def forward_compute(cls, args):
+    def forward_impl(cls, args):
         offset = args.offset
         if isinstance(offset, QuantizedTensor):
             offset = offset.dequantize()
@@ -2492,7 +2492,7 @@ class _ScaleWithKwargsOp(BasicOperation):
         return TensorSpec(shape=tuple(x.shape), dtype=x.dtype, device=x.device), ()
 
     @classmethod
-    def backward_compute(cls, args):
+    def backward_impl(cls, args):
         dy = args.grad_output
         return (
             dy * args.scale * args.extra_scale,
@@ -2618,7 +2618,7 @@ def test_te_ops_backward_fusion_uses_eager_implementations():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_te_ops_unsupported_group_still_compiles_eagerly():
-    """An operation without the compute halves runs its eager implementation.
+    """An operation without a custom op runs its eager implementation.
 
     Note that this is not a fallback: under ``fullgraph=True`` there is no
     leaving the graph, so the pipeline is traced either way and only the choice
