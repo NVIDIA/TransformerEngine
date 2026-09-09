@@ -2742,8 +2742,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
             fc2_bias_tensor = (
                 fc2_bias if self.apply_bias and not self.gemm_bias_unfused_add else None
             )
-            wgrad_store = self.wgrad_store if self.wgrad_store.delay_wgrad_compute() else None
-
             fwd_args = LayerNormMLPFwdArgs(
                 # tensors
                 inp=inp,
@@ -2827,7 +2825,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 is_fsdp2=self.is_fsdp2,
                 # weight-grad scheduling
                 fuse_wgrad_accumulation=self.fuse_wgrad_accumulation,
-                wgrad_store=wgrad_store,
+                wgrad_store=self.wgrad_store,
                 # activation checkpointing
                 checkpoint=self.checkpoint,
                 fp8_meta=self.fp8_meta if self.checkpoint else None,

@@ -2140,8 +2140,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
             linear_bias_tensor = (
                 bias_tensor if (self.apply_bias and not self.gemm_bias_unfused_add) else None
             )
-            wgrad_store = self.wgrad_store if self.wgrad_store.delay_wgrad_compute() else None
-
             fwd_args = LayerNormLinearFwdArgs(
                 # tensors
                 inp=inp,
@@ -2211,7 +2209,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 is_fsdp2=self.is_fsdp2,
                 # weight-grad scheduling
                 fuse_wgrad_accumulation=self.fuse_wgrad_accumulation,
-                wgrad_store=wgrad_store,
+                wgrad_store=self.wgrad_store,
                 # misc
                 cpu_offloading=is_cpu_offload_enabled(),
                 is_grad_enabled=is_grad_enabled,

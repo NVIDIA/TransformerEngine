@@ -2045,6 +2045,49 @@ def test_layernorm_linear_accuracy_delay_wgrad_compute(
         torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
 
 
+@pytest.mark.parametrize(
+    "module,kwargs",
+    [
+        pytest.param(LayerNormLinear, {}, id="layernorm_linear"),
+        pytest.param(LayerNormMLP, {}, id="layernorm_mlp"),
+        pytest.param(LayerNormMLP, {"checkpoint": True}, id="layernorm_mlp_checkpoint"),
+    ],
+)
+@pytest.mark.parametrize("delay_in_backward", [False, True])
+def test_layernorm_delay_wgrad_toggle(module, kwargs, delay_in_backward):
+    if NVTE_TEST_NVINSPECT_ENABLED:
+        pytest.skip("Delayed wgrad compute is not supported in debug mode.")
+
+    model = module(128, 256, params_dtype=torch.bfloat16, delay_wgrad_compute=True, **kwargs)
+    reference = module(128, 256, params_dtype=torch.bfloat16, **kwargs)
+    reference.load_state_dict(model.state_dict())
+    inp = torch.randn(16, 2, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    ref_inp = inp.detach().clone().requires_grad_()
+
+    if delay_in_backward:
+        model.wgrad_store.disable_delay_wgrad_compute()
+    out = model(inp)
+    ref_out = reference(ref_inp)
+    grad_output = torch.randn_like(out)
+    if delay_in_backward:
+        model.wgrad_store.enable_delay_wgrad_compute()
+    else:
+        model.wgrad_store.disable_delay_wgrad_compute()
+
+    out.backward(grad_output)
+    ref_out.backward(grad_output)
+    if delay_in_backward:
+        for weight in model._get_weight_tensors():
+            assert weight.grad is None
+    model.backward_dw()
+
+    torch.testing.assert_close(out, ref_out, rtol=0, atol=0)
+    torch.testing.assert_close(inp.grad, ref_inp.grad, rtol=0, atol=0)
+    for param, ref_param in zip(model.parameters(), reference.parameters()):
+        assert param.grad is not None
+        torch.testing.assert_close(param.grad, ref_param.grad, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["small"])
