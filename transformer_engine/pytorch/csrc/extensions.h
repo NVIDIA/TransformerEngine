@@ -59,15 +59,17 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_score_for_moe_aux_loss_fwd(
 void fused_score_for_moe_aux_loss_bwd(at::Tensor intermediate_output, at::Tensor grad_scores,
                                       at::Tensor grad_logits, int topk, std::string score_function);
 
-std::tuple<at::Tensor, at::Tensor> fused_moe_aux_loss_fwd(at::Tensor probs,
-                                                          at::Tensor tokens_per_expert,
-                                                          int total_num_tokens, int num_experts,
-                                                          int num_rows, int num_cols, int topk,
-                                                          float coeff);
+size_t get_moe_aux_loss_workspace_size();
+
+std::tuple<at::Tensor, at::Tensor> fused_moe_aux_loss_fwd(
+    at::Tensor probs, at::Tensor tokens_per_expert, int total_num_tokens, int num_experts,
+    int num_rows, int num_cols, int topk, float coeff, bool deterministic = false,
+    std::optional<at::Tensor> workspace = std::nullopt);
 
 std::tuple<at::Tensor, at::Tensor> fused_moe_aux_loss_fwd_graph_safe(
     at::Tensor probs, at::Tensor tokens_per_expert, at::Tensor total_num_tokens, int num_experts,
-    int num_rows, int num_cols, int topk, float coeff);
+    int num_rows, int num_cols, int topk, float coeff, bool deterministic = false,
+    std::optional<at::Tensor> workspace = std::nullopt);
 
 at::Tensor fused_moe_aux_loss_bwd(at::Tensor Const_buf, at::Tensor tokens_per_expert, int num_rows,
                                   int num_cols, at::Tensor grad_aux_loss);
