@@ -412,13 +412,13 @@ class _ScaledUnary(BasicOperation, metaclass=abc.ABCMeta):
 
         if torch.is_autocast_enabled():
             dtype = torch.get_autocast_dtype("cuda")
-        elif isinstance(input_, torch.Tensor):
-            dtype = input_.dtype
+            scale_dtype = dtype
         else:
-            dtype = extra_input.dtype
+            dtype = input_.dtype
+            scale_dtype = extra_input.dtype
 
         x = maybe_dequantize(input_.contiguous(), dtype)
-        scales = extra_input
+        scales = maybe_dequantize(extra_input.contiguous(), scale_dtype)
         y = self._scaled_unary_forward(x, scales)
 
         ctx = basic_op_ctxs[0]
