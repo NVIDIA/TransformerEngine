@@ -32,8 +32,8 @@
       <rect x="105" y="140" width="240" height="120" class="fp8-tensor"/>
       
       <!-- White backgrounds for dots areas - cross pattern -->
-      <rect x="225.0" y="140.0" width="40" height="120" fill="#FFFFFF" stroke="none"/>
-      <rect x="105.0" y="190.0" width="240" height="30" fill="#FFFFFF" stroke="none"/>
+      <rect x="225.0" y="140.0" width="40" height="120" class="diagram-bg" fill="#FFFFFF" stroke="none"/>
+      <rect x="105.0" y="190.0" width="240" height="30" class="diagram-bg" fill="#FFFFFF" stroke="none"/>
       
       <!-- Three dots in VERTICAL white bar -->
       <text x="245" y="167.5" class="dots-text">…</text>
@@ -47,7 +47,7 @@
       <text x="245" y="205" class="dots-text" transform="rotate(45 245 205)">…</text>
       
       <!-- Main outline -->
-      <rect x="105.0" y="140.0" width="240" height="120" fill="none" stroke="#444" stroke-width="2"/>
+      <rect x="105.0" y="140.0" width="240" height="120" class="tensor-outline" fill="none" stroke="#444" stroke-width="2"/>
     </g>
     
     <!-- Single scaling factor - one 10x10 square -->
@@ -64,8 +64,8 @@
     <!-- FP8 Tensor split into many small blocks (40×10) - EXACT coordinates from Python script -->
     <g id="tensor-blocks">
       <!-- White backgrounds for dots areas - cross pattern -->
-      <rect x="675.0" y="140.0" width="40" height="120" fill="#FFFFFF" stroke="none"/>
-      <rect x="555.0" y="190.0" width="240" height="30" fill="#FFFFFF" stroke="none"/>
+      <rect x="675.0" y="140.0" width="40" height="120" class="diagram-bg" fill="#FFFFFF" stroke="none"/>
+      <rect x="555.0" y="190.0" width="240" height="30" class="diagram-bg" fill="#FFFFFF" stroke="none"/>
       
       <!-- Blocks ONLY where they don't overlap with white cross (from Python script) -->
       <rect x="555" y="140" width="40" height="10" class="fp8-block"/>
@@ -135,7 +135,7 @@
       <rect x="755" y="250" width="40" height="10" class="fp8-block"/>
       
       <!-- Main outline -->
-      <rect x="555.0" y="140.0" width="240" height="120" fill="none" stroke="#444" stroke-width="2"/>
+      <rect x="555.0" y="140.0" width="240" height="120" class="tensor-outline" fill="none" stroke="#444" stroke-width="2"/>
     </g>
     
     <!-- Scaling factors tensor - 3+2 columns of 10px squares -->
@@ -144,8 +144,8 @@
       <rect x="640" y="285" width="70" height="120" fill="#FFA500"/>
       
       <!-- White backgrounds for dots areas - cross pattern -->
-      <rect x="670" y="285" width="20" height="120" fill="#FFFFFF" stroke="none"/>
-      <rect x="640" y="335" width="70" height="30" fill="#FFFFFF" stroke="none"/>
+      <rect x="670" y="285" width="20" height="120" class="diagram-bg" fill="#FFFFFF" stroke="none"/>
+      <rect x="640" y="335" width="70" height="30" class="diagram-bg" fill="#FFFFFF" stroke="none"/>
       
       <!-- Grid lines showing 10x10 squares (3 left + 2 right columns) -->
       <!-- Vertical lines every 10px (skipping white space) -->
@@ -196,7 +196,7 @@
       <line x1="690" y1="405" x2="710" y2="405" class="grid-line" stroke-width="1"/>
       
       <!-- Main outline -->
-      <rect x="640" y="285" width="70" height="120" fill="none" stroke="#444" stroke-width="2"/>
+      <rect x="640" y="285" width="70" height="120" class="tensor-outline" fill="none" stroke="#444" stroke-width="2"/>
       
       <!-- Three dots -->
       <text x="680" y="312.5" class="dots-text" style="font-size: 14px;">…</text>
@@ -221,8 +221,8 @@
     <rect x="390" y="525" width="180" height="120" class="fp8-tensor"/>
     
     <!-- White space for gaps (cross pattern) -->
-    <rect x="450" y="525" width="20" height="120" fill="#FFFFFF" stroke="none"/>
-    <rect x="390" y="585" width="180" height="20" fill="#FFFFFF" stroke="none"/>
+    <rect x="450" y="525" width="20" height="120" class="diagram-bg" fill="#FFFFFF" stroke="none"/>
+    <rect x="390" y="585" width="180" height="20" class="diagram-bg" fill="#FFFFFF" stroke="none"/>
 
     <!-- Grid Lines (every 20px) -->
     <!-- Vertical Lines Left (x=410, 430) -->
@@ -276,7 +276,7 @@
     <line x1="470" y1="605" x2="570" y2="605" class="boundary-line"/>
 
     <!-- Main outline -->
-    <rect x="390" y="525" width="180" height="120" fill="none" stroke="#444" stroke-width="2"/>
+    <rect x="390" y="525" width="180" height="120" class="tensor-outline" fill="none" stroke="#444" stroke-width="2"/>
   </g>
 
   <!-- BOTTOM: SCALING FACTORS (10x10 blocks, with 3 extra columns on right) -->
@@ -285,8 +285,8 @@
     <rect x="420" y="675" width="90" height="60" class="scale-factor"/>
     
     <!-- White space for gaps (cross pattern) -->
-    <rect x="450" y="675" width="10" height="60" fill="#FFFFFF" stroke="none"/>
-    <rect x="420" y="705" width="90" height="10" fill="#FFFFFF" stroke="none"/>
+    <rect x="450" y="675" width="10" height="60" class="diagram-bg" fill="#FFFFFF" stroke="none"/>
+    <rect x="420" y="705" width="90" height="10" class="diagram-bg" fill="#FFFFFF" stroke="none"/>
 
     <!-- Grid Lines (every 10px) -->
     <!-- Vertical Left -->
@@ -335,7 +335,7 @@
     <line x1="460" y1="715" x2="510" y2="715" class="boundary-line"/>
 
     <!-- Main outline -->
-    <rect x="420" y="675" width="90" height="60" fill="none" stroke="#444" stroke-width="2"/>
+    <rect x="420" y="675" width="90" height="60" class="tensor-outline" fill="none" stroke="#444" stroke-width="2"/>
 
     <text x="465" y="755" class="small-text" text-anchor="middle">Scaling factors (1 per 2D block)</text>
   </g>

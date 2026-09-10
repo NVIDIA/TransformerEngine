@@ -18,7 +18,7 @@
   </defs>
   
   <!-- OPTION 1: Both usages in forward -->
-  <text x="425" y="35" class="section-title" style="fill: #212121; font-weight: 600;">Option 1: Quantize both usages in forward</text>
+  <text x="425" y="35" class="section-title">Option 1: Quantize both usages in forward</text>
   
   <!-- Forward phase label -->
   <text x="20" y="113" class="text phase-forward" style="text-anchor: start;">FORWARD:</text>
@@ -58,7 +58,7 @@
   <line x1="30" y1="220" x2="820" y2="220" stroke="#bdbdbd" stroke-width="3"/>
   
   <!-- OPTION 2: Separate approach -->
-  <text x="425" y="250" class="section-title" style="fill: #212121; font-weight: 600;">Option 2: Separate Quantizations (quantize when needed)</text>
+  <text x="425" y="250" class="section-title">Option 2: Separate Quantizations (quantize when needed)</text>
   
   <!-- Forward phase -->
   <text x="20" y="293" class="text phase-forward" style="text-anchor: start;">FORWARD:</text>
@@ -113,7 +113,7 @@
   <line x1="30" y1="430" x2="820" y2="430" stroke="#bdbdbd" stroke-width="3"/>
   
   <!-- OPTION 3: Convert from rowwise to columnwise -->
-  <text x="425" y="460" class="section-title" style="fill: #212121; font-weight: 600;">Option 3: Convert Rowwise to Columnwise in Backward (reuse saved tensor)</text>
+  <text x="425" y="460" class="section-title">Option 3: Convert Rowwise to Columnwise in Backward (reuse saved tensor)</text>
   
   <!-- Forward phase -->
   <text x="20" y="503" class="text phase-forward" style="text-anchor: start;">FORWARD:</text>

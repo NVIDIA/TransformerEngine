@@ -12,6 +12,9 @@ import transformer_engine.pytorch as te
 from transformer_engine.common.recipe import DelayedScaling, MXFP8BlockScaling, Float8BlockScaling
 from transformer_engine.pytorch import MultiheadAttention, quantized_model_init, is_bf16_available
 from transformer_engine.pytorch import QuantizedTensor
+from transformer_engine.pytorch.optimizers.fused_adam import (
+    _MAX_TENSORS_PER_MULTI_TENSOR_ADAM_CALL,
+)
 from transformer_engine.pytorch.utils import gpu_autocast_ctx
 
 # Check if FP8 is supported
@@ -173,6 +176,76 @@ class TestFusedAdam(TestFusedOptimizer):
             tst_optim.step()
 
             torch.testing.assert_close(ref_param, tst_param)
+
+    @pytest.mark.parametrize(
+        "param_dtype,master_weights,capturable",
+        [
+            (torch.float32, False, False),
+            (torch.bfloat16, True, True),
+        ],
+    )
+    def test_many_small_parameters(self, param_dtype, master_weights, capturable):
+        """FusedAdam chunks large parameter groups without changing optimizer semantics."""
+        if param_dtype == torch.bfloat16 and not is_bf16_available():
+            pytest.skip("BF16 is not supported")
+
+        # Keep this above the default 20 MiB handle-pool capacity so the test
+        # fails without FusedAdam's per-call bound, not just at the slice boundary.
+        num_params = 8 * _MAX_TENSORS_PER_MULTI_TENSOR_ADAM_CALL + 1
+        values = torch.linspace(-1, 1, num_params, dtype=param_dtype, device="cuda")
+        coefficients = torch.linspace(-0.5, 0.5, num_params, dtype=param_dtype, device="cuda")
+        ref_param = torch.nn.Parameter(values.float())
+        tst_params = [torch.nn.Parameter(value.reshape(1).clone()) for value in values]
+        ref_optim = torch.optim.Adam([ref_param], **self.options)
+        tst_optim = te.optimizers.FusedAdam(
+            tst_params,
+            capturable=capturable,
+            master_weights=master_weights,
+            **self.options,
+        )
+
+        def backward():
+            ref_optim.zero_grad()
+            tst_optim.zero_grad()
+            ref_loss = (ref_param.to(param_dtype).float() * coefficients.float()).sum()
+            tst_loss = (torch.cat(tst_params).float() * coefficients.float()).sum()
+            torch.testing.assert_close(tst_loss, ref_loss)
+            ref_loss.backward()
+            tst_loss.backward()
+            torch.testing.assert_close(
+                torch.cat([param.grad.float() for param in tst_params]), ref_param.grad
+            )
+
+        backward()
+        ref_optim.step()
+        tst_optim.step()
+
+        backward()
+        if capturable:
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                tst_optim.step()
+            graph.replay()
+        else:
+            tst_optim.step()
+        ref_optim.step()
+
+        torch.testing.assert_close(
+            torch.cat([param.detach() for param in tst_params]), ref_param.detach().to(param_dtype)
+        )
+        torch.testing.assert_close(
+            torch.cat([tst_optim.state[param]["exp_avg"] for param in tst_params]),
+            ref_optim.state[ref_param]["exp_avg"],
+        )
+        torch.testing.assert_close(
+            torch.cat([tst_optim.state[param]["exp_avg_sq"] for param in tst_params]),
+            ref_optim.state[ref_param]["exp_avg_sq"],
+        )
+        if master_weights:
+            torch.testing.assert_close(
+                torch.cat([tst_optim.state[param]["master_param"] for param in tst_params]),
+                ref_param,
+            )
 
     def test_adam_option(self):
         nelem = 1
