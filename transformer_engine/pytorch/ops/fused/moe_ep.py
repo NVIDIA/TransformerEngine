@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import os
 from typing import Any, Optional
 
+from cudnn_frontend.benchmark.linear_attention.benchmark_single_linear_attention import grad_outputs
 import torch
 import transformer_engine_torch as tex
 
@@ -298,17 +299,16 @@ def _launch_grouped_wgrad_from_operands(
     del unused
     from cudnn import grouped_gemm_wgrad_wrapper_sm100
 
-    x_transpose, x_scale, dy, dy_scale = layer_operands
+    x, x_scale, dy, dy_scale = layer_operands
     output_data = (
         output.rowwise_data.view(output.shape) if isinstance(output, GroupedTensor) else output
     )
-    # MegaMoE exports X^T and dY. Present the same dY^T @ X convention used by
-    # grouped MLP. The transposes are views, and cuDNN writes directly to TE's
-    # contiguous (expert, out, in) gradient buffer.
+    # Present the same dY^T @ X convention used by grouped MLP. MegaMoE exports
+    # both layers' activations directly in contiguous token-major form.
     # The public wrapper selects the Rubin specialization on SM107.
     grouped_gemm_wgrad_wrapper_sm100(
         a_tensor=dy.transpose(0, 1),
-        b_tensor=x_transpose.transpose(0, 1),
+        b_tensor=x,
         sfa_tensor=dy_scale,
         sfb_tensor=x_scale,
         offsets_tensor=offsets,
@@ -357,6 +357,33 @@ def _compute_grouped_weight_grad(
             dtype=weight.dtype,
             device=weight.device,
         )
+
+
+    in --> (B, in)
+    grad_out -->(B, out)
+
+    (B, out)
+    (in, B)
+
+    w  --> (out, in)
+    grad_outputs -- (B, out)
+
+
+
+  (S, in) --> (S, out) (out, in)
+
+
+    in  -->(B, in)
+    w --> (out, in)
+
+    (in, out)
+    (B, in)
+
+
+
+
+
+    CT = BTAT
 
     layer_operands = [
         getattr(operands, f"{prefix}_a"),
@@ -720,7 +747,6 @@ class FusedMoeEp(FusedOperation):
             mark_grouped_tensor(
                 [forward_out.fc1_a],
                 scale_invs=[forward_out.fc1_sfa],
-                transposed=True,
                 num_tokens=active_pool_tokens,
             )
             basic_op_ctxs[0].save_for_backward(
