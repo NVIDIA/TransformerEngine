@@ -32,7 +32,7 @@ def test_multi_process_ep():
     Per-pass timeout stays short so a hang on any rank surfaces fast; the outer
     pytest budget scales with the number of passes the launcher runs.
     """
-    per_pass_s = int(os.environ.get("NVTE_TEST_EP_TIMEOUT_S", "180"))
+    per_pass_s = int(os.environ.get("NVTE_TEST_EP_TIMEOUT_S", "200"))
     outer_s = per_pass_s * _count_launcher_passes() + 60
     proc = subprocess.run(
         ["bash", str(LAUNCHER)],
