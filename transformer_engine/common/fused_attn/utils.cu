@@ -8,7 +8,7 @@
 #include <cmath>
 
 #include "../common.h"
-#include "../cudnn_utils.h"
+#include "../util/cuda_runtime.h"
 #include "transformer_engine/fused_attn.h"
 #include "utils.h"
 
@@ -324,93 +324,6 @@ void generateMatrixStrides(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int6
   }
 }
 
-bool allowAllConfig(cudnnBackendDescriptor_t engine_config) {
-  (void)engine_config;
-  return false;
-}
-
-cudnn_frontend::Tensor tensor_create(cudnnDataType_t type, int64_t id, int64_t const *dim,
-                                     int64_t const *stride, bool is_virtual, bool is_value) {
-  int nbDims = 4;
-  auto tensor_created =
-      cudnn_frontend::TensorBuilder()
-          .setDim(nbDims, dim)
-          .setStride(nbDims, stride)
-          .setId(id)
-          .setAlignment(16)  // 16B alignment is needed to run a tensor core engine
-          .setDataType(type)
-          .setVirtual(is_virtual)
-          .setByValue(is_value)
-          .build();
-  return tensor_created;
-}
-
-cudnn_frontend::Tensor tensor_create_with_offset(
-    cudnnDataType_t type, int64_t id, int64_t const *dim, int64_t const *stride, bool is_virtual,
-    bool is_value, std::shared_ptr<cudnn_frontend::Tensor> raggedOffset) {
-  int nbDims = 4;
-  auto tensor_created =
-      cudnn_frontend::TensorBuilder()
-          .setDim(nbDims, dim)
-          .setStride(nbDims, stride)
-          .setId(id)
-          .setAlignment(16)  // 16B alignment is needed to run a tensor core engine
-          .setDataType(type)
-          .setVirtual(is_virtual)
-          .setByValue(is_value)
-          .setRaggedOffset(raggedOffset)
-          .build();
-  return tensor_created;
-}
-
-cudnn_frontend::PointWiseDesc pw_desc_create(cudnnDataType_t type, cudnnPointwiseMode_t mode) {
-  auto pw_desc_created =
-      cudnn_frontend::PointWiseDescBuilder().setMode(mode).setComputeType(type).build();
-  return pw_desc_created;
-}
-
-cudnn_frontend::Operation unary_pw_op_create(cudnn_frontend::Tensor const &xDesc,
-                                             cudnn_frontend::Tensor const &yDesc,
-                                             cudnn_frontend::PointWiseDesc const &pwDesc) {
-  auto pw_op_created =
-      cudnn_frontend::OperationBuilder(CUDNN_BACKEND_OPERATION_POINTWISE_DESCRIPTOR)
-          .setxDesc(xDesc)
-          .setyDesc(yDesc)
-          .setpwDesc(pwDesc)
-          .build();
-  return pw_op_created;
-}
-
-cudnn_frontend::Operation binary_pw_op_create(cudnn_frontend::Tensor const &xDesc,
-                                              cudnn_frontend::Tensor const &bDesc,
-                                              cudnn_frontend::Tensor const &yDesc,
-                                              cudnn_frontend::PointWiseDesc const &pwDesc) {
-  auto pw_op_created =
-      cudnn_frontend::OperationBuilder(CUDNN_BACKEND_OPERATION_POINTWISE_DESCRIPTOR)
-          .setxDesc(xDesc)
-          .setbDesc(bDesc)
-          .setyDesc(yDesc)
-          .setpwDesc(pwDesc)
-          .build();
-  return pw_op_created;
-}
-
-cudnn_frontend::Operation ternary_pw_op_create(cudnn_frontend::Tensor const &xDesc,
-                                               cudnn_frontend::Tensor const &bDesc,
-                                               cudnn_frontend::Tensor const &tDesc,
-                                               cudnn_frontend::Tensor const &yDesc,
-                                               cudnn_frontend::PointWiseDesc const &pwDesc) {
-  auto pw_op_created =
-      cudnn_frontend::OperationBuilder(CUDNN_BACKEND_OPERATION_POINTWISE_DESCRIPTOR)
-          .setxDesc(xDesc)
-          .setbDesc(bDesc)
-          .settDesc(tDesc)
-          .setyDesc(yDesc)
-          .setpwDesc(pwDesc)
-          .build();
-  return pw_op_created;
-}
-
 // convert cu_seqlens to actual_seqlens
 __global__ void cu_seqlens_to_actual_seqlens(int64_t actual_b, int64_t max_b,
                                              int32_t const *const q_cu_seqlens,
@@ -509,6 +422,7 @@ DType get_ragged_offset_dtype(NVTE_QKV_Layout_Group layout_group, int64_t num_at
 
 // quantize batch size
 size_t get_max_batch_size(size_t batch_size) {
+  if (batch_size == 0) return 0;  // guard: log2(0) = -inf, casting to size_t is UB
   size_t max_b = batch_size;
   size_t log2_b = ceil(log2(batch_size));
   // batch size is expected to be 10s-100s
@@ -527,6 +441,7 @@ size_t get_max_batch_size(size_t batch_size) {
 
 // quantize token count
 size_t get_max_tokens(size_t num_tokens) {
+  if (num_tokens == 0) return 0;  // guard: log2(0) = -inf, casting to size_t is UB
   // token count is expected to be 1k's-100k's
   // t = 0, ..., 1024   -> max_t = 1024
   // t = 1025, ..., 32k -> max_t = next power of 2
