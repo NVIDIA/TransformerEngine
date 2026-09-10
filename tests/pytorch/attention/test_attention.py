@@ -29,9 +29,11 @@ from transformer_engine.pytorch.attention.dot_product_attention import (
     _attention_backends,
 )
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
+    AttentionParams,
     FlashAttentionUtils,
     _get_supported_versions,
     check_set_window_size,
+    get_attention_backend,
 )
 from transformer_engine.pytorch.attention import RotaryPositionEmbedding
 import transformer_engine.pytorch.cpp_extensions as ext
@@ -127,6 +129,49 @@ def test_flash_attention_supported_version_message():
         )
         == ">= 2.1.1, < 2.8.4"
     )
+
+
+@pytest.mark.parametrize("head_dim_qk,head_dim_v", [(192, 128), (64, 512)])
+@pytest.mark.parametrize("is_training,expected_fa3", [(True, False), (False, True)])
+def test_fa3_mismatched_head_dims_mode_selection(
+    monkeypatch, head_dim_qk, head_dim_v, is_training, expected_fa3
+):
+    """FA3 supports mismatched head dimensions only for forward-only execution."""
+    monkeypatch.setattr(
+        "transformer_engine.pytorch.attention.dot_product_attention.utils.get_device_compute_capability",
+        lambda: (9, 0),
+    )
+    monkeypatch.setattr(FlashAttentionUtils, "v3_is_installed", True)
+    monkeypatch.setattr(FlashAttentionUtils, "fa3_version", PkgVersion("3.0.0b1"))
+    monkeypatch.setenv("NVTE_FLASH_ATTN", "1")
+    monkeypatch.setenv("NVTE_FLASH_ATTN_V2", "0")
+    monkeypatch.setenv("NVTE_FLASH_ATTN_V3", "1")
+    monkeypatch.setenv("NVTE_FLASH_ATTN_V4", "0")
+    monkeypatch.setenv("NVTE_FUSED_ATTN", "0")
+    monkeypatch.setenv("NVTE_UNFUSED_ATTN", "1")
+
+    (
+        use_flash_attention,
+        flash_attention_backend,
+        use_fused_attention,
+        _,
+        use_unfused_attention,
+        available_backends,
+    ) = get_attention_backend(
+        AttentionParams(
+            qkv_dtype=torch.bfloat16,
+            qkv_layout="bshd_bshd_bshd",
+            head_dim_qk=head_dim_qk,
+            head_dim_v=head_dim_v,
+            is_training=is_training,
+        )
+    )
+
+    assert bool(use_flash_attention) == expected_fa3
+    assert bool(available_backends[0]) == expected_fa3
+    assert not use_fused_attention
+    assert bool(use_unfused_attention) != expected_fa3
+    assert flash_attention_backend == (FlashAttentionUtils.fa3_version if expected_fa3 else None)
 
 
 # Define F16 data types to test

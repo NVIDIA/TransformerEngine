@@ -983,6 +983,17 @@ def get_attention_backend(
             )
             use_flash_attention_3 = False
 
+        if use_flash_attention_3 and is_training and head_dim_qk != head_dim_v:
+            logger.debug(
+                "Disabling FlashAttention 3 for training with head_dim_qk != head_dim_v, "
+                "as its backward pass does not support it "
+                "(Dao-AILab/flash-attention#1487). "
+                "Found: head_dim_qk = %s, head_dim_v = %s.",
+                head_dim_qk,
+                head_dim_v,
+            )
+            use_flash_attention_3 = False
+
     if (
         use_flash_attention_4
         and FlashAttentionUtils.v4_is_installed
