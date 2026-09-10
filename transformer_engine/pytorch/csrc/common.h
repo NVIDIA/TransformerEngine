@@ -56,6 +56,8 @@
 #include "c10/util/ArrayRef.h"
 #include "common/util/logging.h"
 #include "extensions/pybind_dtype_caster.h"
+#include "extensions/stable_tensor_caster.h"
+#include "torch_stable.h"
 
 namespace transformer_engine::pytorch {
 
@@ -546,6 +548,10 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(void* data_ptr,
 
 transformer_engine::TensorWrapper makeTransformerEngineTensor(at::Tensor tensor);
 
+#ifdef NVTE_WITH_TORCH_STABLE
+transformer_engine::TensorWrapper makeTransformerEngineTensor(const torch_stable::Tensor& tensor);
+#endif
+
 std::tuple<std::vector<transformer_engine::TensorWrapper>, std::vector<std::vector<NVTETensor>>,
            std::vector<NVTETensor*>, size_t, size_t>
 makeTransformerEngineTensorList(std::vector<std::vector<at::Tensor>> at_tensor_lists);
@@ -582,6 +588,10 @@ size_t roundup(size_t value, size_t multiple);
 size_t ceildiv(size_t numer, size_t denom);
 
 NVTEShape convertTorchShape(const c10::IntArrayRef torch_shape);
+
+#ifdef NVTE_WITH_TORCH_STABLE
+NVTEShape convertTorchShape(const torch::headeronly::IntHeaderOnlyArrayRef torch_shape);
+#endif
 
 std::vector<size_t> convert_shape_back_from_fp4(const std::vector<size_t>& shape, bool transpose);
 
