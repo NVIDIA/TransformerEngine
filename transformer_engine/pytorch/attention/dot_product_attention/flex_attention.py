@@ -5,10 +5,14 @@
 """cuDNN-backed Flex Attention helpers."""
 
 from dataclasses import dataclass
-import inspect
 from typing import Any, Callable, Dict, Optional, Tuple
 
 import torch
+
+from transformer_engine.common.attention.score_mod import (
+    UNCACHEABLE_SCORE_MOD,
+    score_mod_callback_cache_key,
+)
 
 from ._cudnn_graph import (
     current_stream_handle,
@@ -19,7 +23,7 @@ from ._cudnn_graph import (
 )
 
 _cudnn_score_mod_graph_cache: Dict[Tuple[Any, ...], Any] = {}
-_SCORE_MOD_UNCACHEABLE = object()
+_SCORE_MOD_UNCACHEABLE = UNCACHEABLE_SCORE_MOD
 
 
 def _import_cudnn_frontend():
@@ -53,91 +57,13 @@ def _bhsd_graph_tensor(graph, tensor: torch.Tensor, tensor_format: str):
 
 
 # score_mod graph cache helpers.
-def _freeze_score_mod_cache_key(value: Any) -> Any:
-    """Convert a user-provided score_mod graph key into a hashable structure."""
-    if isinstance(value, torch.Tensor):
-        raise TypeError(
-            "score_mod_graph_cache_key() must not include tensors. Pass runtime tensors "
-            "through score_mod_tensors or score_mod_bprop_tensors instead."
-        )
-    if isinstance(value, dict):
-        items = (
-            (
-                _freeze_score_mod_cache_key(key),
-                _freeze_score_mod_cache_key(val),
-            )
-            for key, val in value.items()
-        )
-        return tuple(sorted(items, key=repr))
-    if isinstance(value, (list, tuple)):
-        return tuple(_freeze_score_mod_cache_key(item) for item in value)
-    if isinstance(value, (set, frozenset)):
-        items = (_freeze_score_mod_cache_key(item) for item in value)
-        return tuple(sorted(items, key=repr))
-    try:
-        hash(value)
-    except TypeError as exc:
-        raise TypeError(
-            "score_mod_graph_cache_key() must return a hashable value or a nested "
-            "combination of dict/list/tuple/set values."
-        ) from exc
-    return value
-
-
-def _score_mod_explicit_cache_key(callback_owner: Any) -> Optional[Any]:
-    """Return a user-provided structural graph key for a score_mod callback."""
-    explicit_key = getattr(callback_owner, "score_mod_graph_cache_key", None)
-    if explicit_key is None:
-        return None
-    explicit_key = explicit_key() if callable(explicit_key) else explicit_key
-    return _freeze_score_mod_cache_key(explicit_key)
-
-
 def _score_mod_callback_cache_key(callback: Optional[Callable]) -> Any:
-    """Create a stable graph cache key for a score_mod callable.
+    """Compatibility wrapper around the shared score-modification key policy."""
 
-    Module-level named functions are assumed to have stable topology. Anonymous functions
-    are keyed by code object because lambdas in the same module can share the same
-    qualname. Stateful bound methods and callable instances need an explicit
-    score_mod_graph_cache_key(); otherwise their graphs are left uncached to avoid reusing
-    stale graphs after Python object address reuse.
-    """
-    if callback is None:
-        return None
-    self_obj = getattr(callback, "__self__", None)
-    func_obj = getattr(callback, "__func__", None)
-    if self_obj is not None and func_obj is not None:
-        explicit_key = _score_mod_explicit_cache_key(self_obj)
-        if explicit_key is None:
-            return _SCORE_MOD_UNCACHEABLE
-        return (
-            "bound_method",
-            type(self_obj),
-            func_obj.__module__,
-            func_obj.__qualname__,
-            explicit_key,
-        )
-
-    explicit_key = _score_mod_explicit_cache_key(callback)
-    if explicit_key is not None:
-        return (
-            "callable",
-            type(callback),
-            getattr(callback, "__module__", None),
-            getattr(callback, "__qualname__", None),
-            explicit_key,
-        )
-
-    if (
-        inspect.isfunction(callback)
-        and callback.__closure__ is None
-        and "<locals>" not in callback.__qualname__
-    ):
-        if callback.__name__ == "<lambda>" or not callback.__qualname__:
-            return ("function", callback.__module__, callback.__code__)
-        return ("function", callback.__module__, callback.__qualname__)
-
-    return _SCORE_MOD_UNCACHEABLE
+    return score_mod_callback_cache_key(
+        callback,
+        is_array=lambda item: isinstance(item, torch.Tensor),
+    )
 
 
 def _score_mod_device_key(device: torch.device) -> Tuple[Any, ...]:
@@ -289,8 +215,8 @@ def _cudnn_score_mod_fwd_cache_key(
 ) -> Optional[Tuple[Any, ...]]:
     """Pre-build cache key for score_mod fprop execution plans.
 
-    cuDNN exposes graph.key(), but only after graph construction has run the user callback.
-    This key avoids rebuilding the Python graph on cache hits.
+    cuDNN exposes graph.key(), but only after graph construction has run the user
+    callback. This key avoids rebuilding the Python graph on cache hits.
     """
     score_mod_key = _score_mod_callback_cache_key(score_mod)
     if score_mod_key is _SCORE_MOD_UNCACHEABLE:
@@ -668,7 +594,8 @@ class FusedAttentionWithScoreModFunc(torch.autograd.Function):
         # pylint: disable=missing-function-docstring
         if not ctx.is_training:
             raise RuntimeError(
-                "score_mod backward requires DotProductAttention to be in training mode."
+                "score_mod backward requires DotProductAttention to be in "
+                "training mode."
             )
 
         saved_tensors = ctx.saved_tensors

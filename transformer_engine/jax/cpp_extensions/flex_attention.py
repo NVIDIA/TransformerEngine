@@ -3,7 +3,6 @@
 # See LICENSE for license information.
 """cuDNN frontend score_mod fused attention helpers."""
 
-import inspect
 import os
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
@@ -13,11 +12,18 @@ import jax.numpy as jnp
 import numpy as np
 from jax import ffi
 
+from transformer_engine.common.attention.score_mod import (
+    UncacheableScoreModKey,
+    is_uncacheable_score_mod_key,
+    score_mod_callback_cache_key,
+)
+
 from .cudnn_graph import (
     GraphBinding,
     SerializedGraph,
     finalize_graph,
     import_cudnn,
+    make_graph,
 )
 from .cudnn_graph import (
     bshd_as_bhsd_dim_stride as _bshd_as_bhsd_dim_stride,
@@ -137,103 +143,6 @@ class _ScoreModScalarSpec:
     stride: Tuple[int, ...] = (1, 1, 1, 1)
 
 
-class _UncacheableScoreModKey:
-    """Unique static key for callbacks that must not share compiled score_mod graphs."""
-
-    def __hash__(self):
-        return id(self)
-
-    def __eq__(self, other):
-        return self is other
-
-
-def _score_mod_key_is_uncacheable(key: Any) -> bool:
-    return isinstance(key, _UncacheableScoreModKey)
-
-
-def _freeze_score_mod_cache_key(value: Any) -> Any:
-    """Convert a user-provided score_mod graph key into a hashable structure."""
-    if _is_array_operand(value):
-        raise TypeError(
-            "score_mod_graph_cache_key() must not include tensors. Pass runtime tensors "
-            "through score_mod_tensors or score_mod_bprop_tensors instead."
-        )
-    if isinstance(value, Mapping):
-        items = (
-            (
-                _freeze_score_mod_cache_key(key),
-                _freeze_score_mod_cache_key(val),
-            )
-            for key, val in value.items()
-        )
-        return tuple(sorted(items, key=repr))
-    if isinstance(value, (list, tuple)):
-        return tuple(_freeze_score_mod_cache_key(item) for item in value)
-    if isinstance(value, (set, frozenset)):
-        items = (_freeze_score_mod_cache_key(item) for item in value)
-        return tuple(sorted(items, key=repr))
-    try:
-        hash(value)
-    except TypeError as exc:
-        raise TypeError(
-            "score_mod_graph_cache_key() must return a hashable value or a nested "
-            "combination of mapping/list/tuple/set values."
-        ) from exc
-    return value
-
-
-def _score_mod_explicit_cache_key(callback_owner: Any) -> Optional[Any]:
-    """Return a user-provided structural graph key for a score_mod callback."""
-    explicit_key = getattr(callback_owner, "score_mod_graph_cache_key", None)
-    if explicit_key is None:
-        return None
-    explicit_key = explicit_key() if callable(explicit_key) else explicit_key
-    return _freeze_score_mod_cache_key(explicit_key)
-
-
-def _score_mod_callback_cache_key(callback: Optional[Callable]) -> Any:
-    """Create a stable graph cache key for a score_mod callable.
-
-    Module-level functions are assumed to have stable topology. Stateful bound methods and
-    callable instances need an explicit score_mod_graph_cache_key(); otherwise their graphs
-    are left uncached to avoid reusing stale graphs after Python object address reuse.
-    """
-    if callback is None:
-        return None
-    self_obj = getattr(callback, "__self__", None)
-    func_obj = getattr(callback, "__func__", None)
-    if self_obj is not None and func_obj is not None:
-        explicit_key = _score_mod_explicit_cache_key(self_obj)
-        if explicit_key is None:
-            return _UncacheableScoreModKey()
-        return (
-            "bound_method",
-            type(self_obj),
-            func_obj.__module__,
-            func_obj.__qualname__,
-            explicit_key,
-        )
-
-    explicit_key = _score_mod_explicit_cache_key(callback)
-    if explicit_key is not None:
-        return (
-            "callable",
-            type(callback),
-            getattr(callback, "__module__", None),
-            getattr(callback, "__qualname__", None),
-            explicit_key,
-        )
-
-    if (
-        inspect.isfunction(callback)
-        and callback.__closure__ is None
-        and "<locals>" not in callback.__qualname__
-    ):
-        return ("function", callback.__module__, callback.__qualname__)
-
-    return _UncacheableScoreModKey()
-
-
 @dataclass(frozen=True)
 class _FusedAttnScoreModConfig:
     """Static configuration for cuDNN frontend score_mod SDPA graphs."""
@@ -309,6 +218,20 @@ def _is_array_operand(value: Any) -> bool:
         and hasattr(value, "dtype")
         and not isinstance(value, (bool, int, float, complex, np.generic))
     )
+
+
+def _score_mod_callback_cache_key(callback: Optional[Callable]) -> Any:
+    """Compatibility wrapper around the shared score-modification key policy."""
+
+    return score_mod_callback_cache_key(
+        callback,
+        is_array=_is_array_operand,
+        uncacheable_key_factory=UncacheableScoreModKey,
+    )
+
+
+def _score_mod_key_is_uncacheable(key: Any) -> bool:
+    return is_uncacheable_score_mod_key(key)
 
 
 def _scalar_to_spec(name: str, value: Any) -> _ScoreModScalarSpec:
@@ -496,11 +419,7 @@ def _build_score_mod_fwd_graph(q_aval, k_aval, v_aval, score_mod_avals, config):
     cudnn = _import_cudnn_for_score_mod()
 
     io_data_type = _cudnn_data_type(cudnn, q_aval.dtype)
-    graph = cudnn.pygraph(
-        io_data_type=io_data_type,
-        intermediate_data_type=cudnn.data_type.FLOAT,
-        compute_data_type=cudnn.data_type.FLOAT,
-    )
+    graph = make_graph(cudnn, io_data_type)
 
     q_dim, q_stride = _bshd_as_bhsd_dim_stride(q_aval.shape)
     k_dim, k_stride = _bshd_as_bhsd_dim_stride(k_aval.shape)
@@ -577,11 +496,7 @@ def _build_score_mod_bwd_graph(
     cudnn = _import_cudnn_for_score_mod()
 
     io_data_type = _cudnn_data_type(cudnn, q_aval.dtype)
-    graph = cudnn.pygraph(
-        io_data_type=io_data_type,
-        intermediate_data_type=cudnn.data_type.FLOAT,
-        compute_data_type=cudnn.data_type.FLOAT,
-    )
+    graph = make_graph(cudnn, io_data_type)
 
     q_dim, q_stride = _bshd_as_bhsd_dim_stride(q_aval.shape)
     k_dim, k_stride = _bshd_as_bhsd_dim_stride(k_aval.shape)

@@ -13,7 +13,6 @@ share one JAX buffer.
 from __future__ import annotations
 
 import hashlib
-import importlib
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -22,6 +21,12 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import transformer_engine_jax
+
+from transformer_engine.common.cudnn_frontend import (
+    build_cudnn_graph,
+    import_cudnn_frontend,
+    make_cudnn_graph,
+)
 
 
 @dataclass(frozen=True)
@@ -170,14 +175,18 @@ def check_cudnn_frontend_version_match(cudnn) -> int:
 
 def import_cudnn():
     """Import and validate the cuDNN frontend Python binding."""
-    try:
-        cudnn = importlib.import_module("cudnn")
-    except ImportError as exc:
-        raise ImportError(
-            "JAX fused_attn requires the cuDNN frontend Python package (`cudnn`)."
-        ) from exc
+    cudnn = import_cudnn_frontend(
+        feature="JAX fused attention",
+        requirement="nvidia-cudnn-frontend",
+    )
     check_cudnn_frontend_version_match(cudnn)
     return cudnn
+
+
+def make_graph(cudnn, io_dtype):
+    """Create a JAX cuDNN graph with TE's standard compute types."""
+
+    return make_cudnn_graph(cudnn, io_dtype)
 
 
 def graph_hash(serialized_graph: bytes) -> tuple[int, int]:
@@ -237,18 +246,9 @@ def serialized_graph(
 
 def finalize_graph(cudnn, graph, *, description: str) -> tuple[int, bytes, int]:
     """Validate, plan and serialize a cuDNN frontend graph."""
-    graph.validate()
-    graph.build_operation_graph()
-    try:
-        graph.create_execution_plans([cudnn.heur_mode.A, cudnn.heur_mode.FALLBACK])
-        graph.check_support()
-    except cudnn.cudnnGraphNotSupportedError as exc:
-        raise RuntimeError(
-            f"cuDNN {description} graph is not supported: {exc}"
-        ) from exc
-    graph.build_plans(cudnn.build_plan_policy.HEURISTICS_CHOICE)
+    workspace_size = build_cudnn_graph(cudnn, graph, description=description)
     return (
-        max(int(graph.get_workspace_size()), 1),
+        workspace_size,
         bytes(graph.serialize()),
         check_cudnn_frontend_version_match(cudnn),
     )

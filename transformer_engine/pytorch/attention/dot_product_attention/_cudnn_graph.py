@@ -6,12 +6,19 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-import importlib
 import threading
+from dataclasses import dataclass, field
 from typing import Any, Dict, Hashable, Optional, Tuple
 
 import torch
+
+from transformer_engine.common.cudnn_frontend import (
+    build_cudnn_graph,
+    make_cudnn_graph,
+)
+from transformer_engine.common.cudnn_frontend import (
+    import_cudnn_frontend as _import_cudnn_frontend,
+)
 
 _thread_state = threading.local()
 
@@ -23,13 +30,10 @@ def import_cudnn_frontend():
     Engine must not eagerly initialize cuDNN or fail on CPU-only processes.
     """
 
-    try:
-        return importlib.import_module("cudnn")
-    except ImportError as exc:
-        raise ImportError(
-            "cuDNN Frontend Python package not found. Install "
-            "nvidia-cudnn-frontend>=1.27.0."
-        ) from exc
+    return _import_cudnn_frontend(
+        feature="PyTorch fused attention",
+        requirement="nvidia-cudnn-frontend>=1.28.0",
+    )
 
 
 def _device_key(device: torch.device) -> Tuple[str, Optional[int]]:
@@ -88,11 +92,10 @@ def make_graph(io_dtype: Any, device: torch.device, *, name: str):
     """Create an SDPA graph using FP32 intermediate and compute types."""
 
     cudnn = import_cudnn_frontend()
-    return cudnn.pygraph(
+    return make_cudnn_graph(
+        cudnn,
+        io_dtype,
         name=name,
-        io_data_type=io_dtype,
-        intermediate_data_type=cudnn.data_type.FLOAT,
-        compute_data_type=cudnn.data_type.FLOAT,
         handle=current_stream_handle(device),
     )
 
@@ -101,15 +104,7 @@ def finalize_graph(graph) -> int:
     """Build a cuDNN graph and return its required workspace size."""
 
     cudnn = import_cudnn_frontend()
-    graph.validate()
-    graph.build_operation_graph()
-    try:
-        graph.create_execution_plans([cudnn.heur_mode.A, cudnn.heur_mode.FALLBACK])
-        graph.check_support()
-    except cudnn.cudnnGraphNotSupportedError as exc:
-        raise RuntimeError(f"cuDNN attention graph is not supported: {exc}") from exc
-    graph.build_plans(cudnn.build_plan_policy.HEURISTICS_CHOICE)
-    return max(int(graph.get_workspace_size()), 1)
+    return build_cudnn_graph(cudnn, graph, description="attention")
 
 
 @dataclass

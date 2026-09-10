@@ -11,15 +11,24 @@ implementation.
 
 from __future__ import annotations
 
-from enum import IntEnum
 import math
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from enum import IntEnum
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import torch
+
 # The extension is used only to reserve PyTorch's graph-safe Philox state;
 # graph construction, backend selection, and execution do not call TE common.
 import transformer_engine_torch as tex
 
+from transformer_engine.common.attention.cudnn import normalize_attention_mask
+from transformer_engine.common.attention.cudnn import (
+    ragged_batch_bucket as _max_ragged_batch,
+)
+from transformer_engine.common.attention.cudnn import (
+    ragged_token_bucket as _max_ragged_tokens,
+)
+from transformer_engine.common.attention.cudnn import round_up as _round_up
 from transformer_engine.pytorch.constants import (
     DType,
     FP8BwdTensorIdx,
@@ -155,30 +164,6 @@ def _format_stride(batch: int, heads: int, seqlen: int, dim: int, tensor_format:
     if tensor_format == "bhsd":
         return (heads * seqlen * dim, seqlen * dim, dim, 1)
     raise ValueError(f"Unsupported FP8 tensor format {tensor_format!r}.")
-
-
-def _round_up(value: int, multiple: int) -> int:
-    return (value + multiple - 1) // multiple * multiple
-
-
-def _max_ragged_tokens(num_tokens: int) -> int:
-    """Quantize THD token counts to the buckets used by TE's cuDNN path."""
-
-    if num_tokens <= 1024:
-        return 1024
-    if num_tokens <= 32768:
-        return 1 << (num_tokens - 1).bit_length()
-    return _round_up(num_tokens, 32768)
-
-
-def _max_ragged_batch(batch: int) -> int:
-    """Quantize THD batch sizes to the buckets used by TE's cuDNN path."""
-
-    if batch <= 32:
-        return 32
-    if batch <= 512:
-        return 1 << (batch - 1).bit_length()
-    return _round_up(batch, 512)
 
 
 def _padded_sequence_lengths(cu_seqlens: torch.Tensor, batch: int) -> torch.Tensor:
@@ -455,38 +440,36 @@ def _mask_options(
     max_seqlen_q: int,
     max_seqlen_kv: int,
 ) -> Dict[str, Any]:
-    is_causal = attn_mask_type in ("causal", "padding_causal")
-    is_bottom_right = attn_mask_type in (
-        "causal_bottom_right",
-        "padding_causal_bottom_right",
+    mask = normalize_attention_mask(
+        causal=attn_mask_type in ("causal", "padding_causal"),
+        bottom_right=attn_mask_type
+        in ("causal_bottom_right", "padding_causal_bottom_right"),
+        padding=attn_mask_type
+        in ("padding", "padding_causal", "padding_causal_bottom_right"),
+        bottom_right_diagonal=bottom_right_diagonal,
+        window_size=window_size,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_kv=max_seqlen_kv,
     )
-    is_padding = attn_mask_type in (
-        "padding",
-        "padding_causal",
-        "padding_causal_bottom_right",
-    )
-    if is_bottom_right and max_seqlen_q == max_seqlen_kv and not is_padding:
-        is_causal = True
-        is_bottom_right = False
-        bottom_right_diagonal = False
 
     options: Dict[str, Any] = {
-        "use_causal_mask": is_causal,
-        "use_causal_mask_bottom_right": is_bottom_right,
+        "use_causal_mask": mask.causal,
+        "use_causal_mask_bottom_right": mask.bottom_right,
         "diagonal_alignment": (
             cudnn.diagonal_alignment.BOTTOM_RIGHT
-            if bottom_right_diagonal
+            if mask.bottom_right_diagonal
             else cudnn.diagonal_alignment.TOP_LEFT
         ),
     }
-    left, right = window_size
-    if left != -1:
-        options["diagonal_band_left_bound"] = left + 1
+    if mask.window_left != -1:
+        options["diagonal_band_left_bound"] = mask.window_left + 1
     # ``use_causal_mask`` already imposes a right bound of zero. The Python
     # frontend rejects specifying that same bound through both attributes.
-    if right != -1 and not ((is_causal or is_bottom_right) and right == 0):
-        options["diagonal_band_right_bound"] = right
-    options["is_padding"] = is_padding
+    if mask.window_right != -1 and not (
+        (mask.causal or mask.bottom_right) and mask.window_right == 0
+    ):
+        options["diagonal_band_right_bound"] = mask.window_right
+    options["is_padding"] = mask.padding
     return options
 
 

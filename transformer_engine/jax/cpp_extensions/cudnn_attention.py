@@ -14,6 +14,15 @@ from typing import Any
 import jax.numpy as jnp
 import numpy as np
 
+from transformer_engine.common.attention.cudnn import (
+    AttentionLayout,
+    FusedAttentionConfig,
+    check_f16_fused_attention_support,
+    normalize_attention_mask,
+    ragged_batch_bucket,
+    ragged_token_bucket,
+)
+
 from .cudnn_graph import (
     GraphBinding,
     SerializedGraph,
@@ -21,6 +30,7 @@ from .cudnn_graph import (
     dtype_name,
     finalize_graph,
     import_cudnn,
+    make_graph,
     serialized_graph,
 )
 from .misc import get_all_device_compute_capability, get_cudnn_version
@@ -217,21 +227,12 @@ def ragged_graph_batch_size(input_batch: int, max_segments_per_seq: int) -> int:
     # Older versions use dense stats and require the physical metadata extent.
     if get_cudnn_version() < (9, 6, 0) or _device_arch() == 120:
         return batch
-    if batch <= 32:
-        return 32
-    if batch <= 512:
-        return 1 << (batch - 1).bit_length()
-    return ((batch + 511) // 512) * 512
+    return ragged_batch_bucket(batch)
 
 
 def _ragged_graph_token_count(tokens: int) -> int:
     """Preserve the legacy cuDNN graph token-count bucket for ragged attention."""
-    tokens = int(tokens)
-    if tokens <= 1024:
-        return 1024
-    if tokens <= 32768:
-        return 1 << (tokens - 1).bit_length()
-    return ((tokens + 32767) // 32768) * 32768
+    return ragged_token_bucket(tokens)
 
 
 def _graph_dimensions(info: _LayoutInfo, config):
@@ -310,38 +311,39 @@ def _ragged_offset_spec(cudnn):
 
 
 def _mask_options(cudnn, info: _LayoutInfo, config):
-    is_padding = _is_padding(config)
-    causal = _is_causal(config)
-    bottom_right = _is_bottom_right(config)
-    bottom_right_diagonal = bool(config.bottom_right_diagonal)
-    if bottom_right and info.q_max_seqlen == info.kv_max_seqlen and not is_padding:
-        causal = True
-        bottom_right = False
-        bottom_right_diagonal = False
     window_left, window_right = (
         config.cp_striped_window_size
         if config.cp_striped_window_size is not None
         else config.window_size
     )
+    mask = normalize_attention_mask(
+        causal=_is_causal(config),
+        bottom_right=_is_bottom_right(config),
+        padding=_is_padding(config),
+        bottom_right_diagonal=bool(config.bottom_right_diagonal),
+        window_size=(window_left, window_right),
+        max_seqlen_q=info.q_max_seqlen,
+        max_seqlen_kv=info.kv_max_seqlen,
+    )
     cudnn_version = get_cudnn_version()
     options = {
         "diagonal_alignment": (
             cudnn.diagonal_alignment.BOTTOM_RIGHT
-            if bottom_right_diagonal or bottom_right
+            if mask.bottom_right_diagonal or mask.bottom_right
             else cudnn.diagonal_alignment.TOP_LEFT
         ),
     }
     # Before cuDNN 9.6 the preferred right-band API was unavailable, so preserve
     # the legacy causal flags used by the C++ frontend graph.
     if cudnn_version < (9, 6, 0):
-        options["use_causal_mask"] = causal
-        options["use_causal_mask_bottom_right"] = bottom_right
-    if cudnn_version >= (9, 2, 0) and window_left != -1:
-        options["diagonal_band_left_bound"] = int(window_left) + 1
+        options["use_causal_mask"] = mask.causal
+        options["use_causal_mask_bottom_right"] = mask.bottom_right
+    if cudnn_version >= (9, 2, 0) and mask.window_left != -1:
+        options["diagonal_band_left_bound"] = mask.window_left + 1
     if cudnn_version >= (9, 6, 0):
-        if window_right != -1:
-            options["diagonal_band_right_bound"] = int(window_right)
-        elif causal or bottom_right:
+        if mask.window_right != -1:
+            options["diagonal_band_right_bound"] = mask.window_right
+        elif mask.causal or mask.bottom_right:
             options["diagonal_band_right_bound"] = 0
     return options
 
@@ -383,11 +385,7 @@ def _build_fwd_graph(q_aval, k_aval, v_aval, bias_aval, config) -> AttentionGrap
         _graph_dimensions(info, config)
     )
     io_dtype = cudnn_data_type(cudnn, q_aval.dtype)
-    graph = cudnn.pygraph(
-        io_data_type=io_dtype,
-        intermediate_data_type=cudnn.data_type.FLOAT,
-        compute_data_type=cudnn.data_type.FLOAT,
-    )
+    graph = make_graph(cudnn, io_dtype)
 
     q = _tensor(
         graph,
@@ -667,11 +665,7 @@ def _build_bwd_graph(
         _graph_dimensions(info, config)
     )
     io_dtype = cudnn_data_type(cudnn, q_aval.dtype)
-    graph = cudnn.pygraph(
-        io_data_type=io_dtype,
-        intermediate_data_type=cudnn.data_type.FLOAT,
-        compute_data_type=cudnn.data_type.FLOAT,
-    )
+    graph = make_graph(cudnn, io_dtype)
 
     def io_tensor(name, dim, stride, uid, dtype=io_dtype):
         return _tensor(
@@ -925,273 +919,64 @@ def clear_graph_cache():
     _graph_cache.clear()
 
 
-def _encoded_cudnn_version() -> int:
-    major, minor, patch = get_cudnn_version()
-    magnitude = 1000 if major < 9 else 10000
-    return major * magnitude + minor * 100 + patch
+def _policy_layout(layout) -> AttentionLayout:
+    qkv_format = layout.get_qkv_format().name.lower()
+    if layout.is_qkvpacked():
+        layout_group = "qkv_packed"
+    elif layout.is_kvpacked():
+        layout_group = "kv_packed"
+    else:
+        layout_group = "separate"
+    return AttentionLayout(
+        qkv_format=qkv_format,
+        q_format=qkv_format,
+        kv_format=qkv_format,
+        layout_group=layout_group,
+        is_qkvpacked=layout.is_qkvpacked(),
+    )
+
+
+def _policy_mask_name(mask) -> str:
+    return {
+        "NO_MASK": "no_mask",
+        "CAUSAL_MASK": "causal",
+        "PADDING_MASK": "padding",
+        "PADDING_CAUSAL_MASK": "padding_causal",
+        "CAUSAL_BOTTOM_RIGHT_MASK": "causal_bottom_right",
+        "PADDING_CAUSAL_BOTTOM_RIGHT_MASK": "padding_causal_bottom_right",
+    }[mask.name]
 
 
 def is_fused_attn_supported(helper) -> bool:
-    """JAX-local port of the F16/BF16 cuDNN attention compatibility policy.
+    """Apply the shared F16/BF16 cuDNN attention compatibility policy."""
 
-    cuDNN frontend ``check_support`` remains authoritative when a concrete graph is
-    built.  This early policy preserves the public fallback behavior for callers that
-    ask about availability before Q/K/V abstract values exist.
-    """
-    if jnp.dtype(helper.q_dtype) not in (
-        jnp.dtype(jnp.float16),
-        jnp.dtype(jnp.bfloat16),
-    ):
-        return False
-    if jnp.dtype(helper.q_dtype) != jnp.dtype(helper.kv_dtype):
-        return False
-
-    version = _encoded_cudnn_version()
-    arch = _device_arch()
-    is_thd = helper.qkv_layout.is_thd()
-    is_training = bool(helper.is_training)
-    sq, skv = int(helper.q_max_seqlen), int(helper.kv_max_seqlen)
-    h, hg = int(helper.q_num_heads), int(helper.kv_num_heads)
-    dqk, dv = int(helper.head_dim_qk), int(helper.head_dim_v)
-    dropout = float(helper.dropout_probability)
-    bias_name = helper.attn_bias_type.name
-    mask_name = helper.attn_mask_type.name
-    softmax_name = helper.softmax_type.name
-    left, right = helper.window_size
-    deterministic = not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
-
-    architecture_ok = (
-        (version < 8903 and arch in (80, 90))
-        or (version >= 8903 and 80 <= arch < 100)
-        or (version >= 90700 and arch >= 100)
-    )
-    if version < 8900 or not architecture_ok:
-        return False
-    if version < 90000 and (sq % 64 or skv % 64):
-        return False
-    if version < 8907 and h != hg:
-        return False
-    if dqk % 8 or dv % 8:
-        return False
-
-    standard_dim = dqk <= 128 and dv <= 128
-    hopper_large_dim = (
-        dqk <= 256
-        and dv <= 256
-        and (
-            (not is_training and arch == 90 and version >= 90100)
-            or (is_training and arch == 90 and version >= 90500)
+    support = check_f16_fused_attention_support(
+        FusedAttentionConfig(
+            is_training=bool(helper.is_training),
+            q_dtype=str(jnp.dtype(helper.q_dtype)),
+            kv_dtype=str(jnp.dtype(helper.kv_dtype)),
+            layout=_policy_layout(helper.qkv_layout),
+            bias_type=helper.attn_bias_type.name.lower(),
+            mask_type=_policy_mask_name(helper.attn_mask_type),
+            softmax_type=helper.softmax_type.name.lower().removesuffix("_softmax"),
+            dropout=float(helper.dropout_probability),
+            num_attn_heads=int(helper.q_num_heads),
+            num_gqa_groups=int(helper.kv_num_heads),
+            max_seqlen_q=int(helper.q_max_seqlen),
+            max_seqlen_kv=int(helper.kv_max_seqlen),
+            head_dim_qk=int(helper.head_dim_qk),
+            head_dim_v=int(helper.head_dim_v),
+            window_size=tuple(int(value) for value in helper.window_size),
+            return_max_logit=bool(helper.return_max_logit),
+            cuda_graph=False,
+            deterministic=not bool(
+                int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1"))
+            ),
+            cudnn_version=get_cudnn_version(),
+            sm_arch=_device_arch(),
+            allow_alibi=False,
+            allow_extended_causal_window=True,
+            modern_mask_rules_override=True,
         )
     )
-    blackwell_fwd_any_dim = (
-        not is_training and arch >= 100 and version >= 90900 and sq > 1
-    )
-    generic_fwd_any_dim = (
-        not is_training
-        and version >= 91002
-        and (
-            sq > 1
-            or (sq == 1 and mask_name not in ("CAUSAL_MASK", "PADDING_CAUSAL_MASK"))
-        )
-    )
-    blackwell_mla_bwd = (
-        dqk == 192 and dv == 128 and is_training and arch >= 100 and version >= 91100
-    )
-    blackwell_d256_bwd = (
-        dqk == 256
-        and dv == 256
-        and is_training
-        and 100 <= arch < 110
-        and version >= (92500 if is_thd else 92300)
-        and bias_name == "NO_BIAS"
-        and dropout == 0.0
-        and softmax_name == "VANILLA_SOFTMAX"
-        and (
-            (left == -1 and right == -1)
-            or (
-                mask_name
-                in (
-                    "CAUSAL_MASK",
-                    "PADDING_CAUSAL_MASK",
-                    "CAUSAL_BOTTOM_RIGHT_MASK",
-                    "PADDING_CAUSAL_BOTTOM_RIGHT_MASK",
-                )
-                and right in (-1, 0)
-            )
-        )
-    )
-    if not (
-        standard_dim
-        or hopper_large_dim
-        or blackwell_fwd_any_dim
-        or generic_fwd_any_dim
-        or blackwell_mla_bwd
-        or blackwell_d256_bwd
-    ):
-        return False
-    if (
-        version >= 91100
-        and is_training
-        and arch == 90
-        and dqk >= 128
-        and dv >= 128
-        and (dqk, dv) != (192, 128)
-        and dqk != dv
-    ):
-        return False
-
-    post_scale_bias_supported = bias_name == "POST_SCALE_BIAS" and (
-        (version >= 8906 and arch >= 90) or (version >= 90000 and arch >= 80)
-    )
-    if bias_name != "NO_BIAS" and not post_scale_bias_supported:
-        return False
-
-    dense_basic_masks = mask_name in (
-        "NO_MASK",
-        "CAUSAL_MASK",
-        "PADDING_MASK",
-        "PADDING_CAUSAL_MASK",
-    )
-    thd_basic_masks = mask_name in ("PADDING_MASK", "PADDING_CAUSAL_MASK")
-    br_mask = mask_name == "CAUSAL_BOTTOM_RIGHT_MASK"
-    padding_br_mask = mask_name == "PADDING_CAUSAL_BOTTOM_RIGHT_MASK"
-    mask_ok = False
-    if version < 8906:
-        mask_ok = mask_name == "CAUSAL_MASK" and not is_thd
-    elif not is_thd and dense_basic_masks:
-        mask_ok = True
-    if version >= 90100 and is_thd and thd_basic_masks:
-        mask_ok = True
-    if (
-        version >= 90300
-        and not is_thd
-        and br_mask
-        and sq % 64 == 0
-        and skv % 64 == 0
-        and sq <= skv
-        and bias_name == "NO_BIAS"
-        and dropout == 0.0
-    ):
-        mask_ok = True
-    if (
-        version >= 90600
-        and padding_br_mask
-        and sq % 64 == 0
-        and skv % 64 == 0
-        and sq <= skv
-        and bias_name == "NO_BIAS"
-        and dropout == 0.0
-    ):
-        mask_ok = True
-    if version >= 90700:
-        mask_ok = (
-            mask_name in ("NO_MASK", "CAUSAL_MASK")
-            or (
-                mask_name
-                in (
-                    "PADDING_MASK",
-                    "PADDING_CAUSAL_MASK",
-                    "PADDING_CAUSAL_BOTTOM_RIGHT_MASK",
-                )
-                and bias_name == "NO_BIAS"
-                and dropout == 0.0
-            )
-            or (
-                mask_name
-                in ("CAUSAL_BOTTOM_RIGHT_MASK", "PADDING_CAUSAL_BOTTOM_RIGHT_MASK")
-                and sq <= skv
-            )
-        )
-    if not mask_ok:
-        return False
-    if (
-        mask_name in ("PADDING_MASK", "PADDING_CAUSAL_MASK")
-        and bias_name == "POST_SCALE_BIAS"
-    ):
-        return False
-
-    if is_thd and not (
-        arch >= 90 and ((version >= 90100 and h == hg) or version >= 90600)
-    ):
-        return False
-
-    full_window = left == -1 and right == -1
-    if version < 90200:
-        window_ok = left == -1 and right in (-1, 0)
-    elif version < 90600:
-        window_ok = (full_window and mask_name == "NO_MASK") or (
-            left >= -1
-            and right == 0
-            and mask_name in ("NO_MASK", "CAUSAL_MASK", "CAUSAL_BOTTOM_RIGHT_MASK")
-            and (mask_name != "CAUSAL_BOTTOM_RIGHT_MASK" or sq == skv)
-            and sq <= skv
-            and dropout == 0.0
-            and bias_name == "NO_BIAS"
-            and not is_thd
-        )
-    else:
-        bottom_right_swa_supported = (
-            mask_name
-            not in ("CAUSAL_BOTTOM_RIGHT_MASK", "PADDING_CAUSAL_BOTTOM_RIGHT_MASK")
-            or arch < 100
-            or sq == skv
-            or version > 90700
-        )
-        window_ok = (
-            left == -1
-            and right in (-1, 0)
-            or (
-                left >= -1
-                and right >= -1
-                and mask_name
-                in (
-                    "NO_MASK",
-                    "CAUSAL_MASK",
-                    "PADDING_MASK",
-                    "PADDING_CAUSAL_MASK",
-                    "CAUSAL_BOTTOM_RIGHT_MASK",
-                    "PADDING_CAUSAL_BOTTOM_RIGHT_MASK",
-                )
-                and sq <= skv
-                and bias_name == "NO_BIAS"
-                and dropout == 0.0
-                and bottom_right_swa_supported
-            )
-        )
-    if not window_ok:
-        return False
-
-    if is_thd:
-        if helper.qkv_layout.is_qkvpacked():
-            max_offset = 3 * h * dqk * sq
-        elif helper.qkv_layout.is_kvpacked():
-            max_offset = max(h * dqk * sq, 2 * hg * dqk * skv)
-        else:
-            max_offset = max(h * dqk * sq, hg * dqk * skv, hg * dv * skv)
-        if max_offset > np.iinfo(np.int32).max and version < 90500:
-            return False
-
-    if version in (91000, 91001):
-        return False
-    if version < 91301 and softmax_name != "VANILLA_SOFTMAX":
-        return False
-    if helper.return_max_logit and version < 92100:
-        return False
-    if arch >= 100 and is_training:
-        if deterministic:
-            if version < 91801 or dropout != 0.0 or bias_name != "NO_BIAS":
-                return False
-        elif dropout != 0.0 and bias_name != "NO_BIAS":
-            return False
-    if arch == 120 and (
-        version < 91801
-        or (deterministic and is_training)
-        or (is_thd and helper.qkv_layout.is_qkvpacked())
-    ):
-        return False
-    return not (
-        version == 91400
-        and skv > 1024
-        and left != -1
-        and mask_name not in ("CAUSAL_MASK", "CAUSAL_BOTTOM_RIGHT_MASK")
-    )
+    return support.supported

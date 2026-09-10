@@ -731,6 +731,27 @@ def test_fused_attn_score_mod_config_leaves_unkeyed_bound_methods_uncached():
     assert tex_attention._graph_cache_key("fwd", config_1, ()) is None
 
 
+def test_fused_attn_score_mod_module_lambda_cache_keys_do_not_collide():
+    """Different module-level lambdas must not reuse the same cuDNN graph."""
+    score_mod_1 = lambda _graph, score, _tensors: score
+    score_mod_2 = lambda _graph, score, _tensors: score
+    score_mod_1.__module__ = __name__
+    score_mod_2.__module__ = __name__
+    score_mod_1.__qualname__ = "<lambda>"
+    score_mod_2.__qualname__ = "<lambda>"
+
+    config_1, _, _ = make_fused_attn_score_mod_config(
+        score_mod_1, None, None, None, _CONFIG_TEST_SCALING_FACTOR, True
+    )
+    config_2, _, _ = make_fused_attn_score_mod_config(
+        score_mod_2, None, None, None, _CONFIG_TEST_SCALING_FACTOR, True
+    )
+
+    assert config_1 != config_2
+    assert tex_attention._graph_cache_key("fwd", config_1, ()) is not None
+    assert tex_attention._graph_cache_key("fwd", config_2, ()) is not None
+
+
 @pytest.mark.skipif(not _has_cudnn_frontend_python(), reason="cuDNN Python frontend is required")
 def test_fused_attn_score_mod_post_scale_bias_optional_bprop():
     """Post-scale-bias score_mod matches the JAX reference without explicit bprop."""
