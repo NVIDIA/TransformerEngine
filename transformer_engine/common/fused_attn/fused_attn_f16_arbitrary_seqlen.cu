@@ -86,7 +86,10 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
   const auto cudnn_runtime_version = cudnnGetVersion();
   const int device_id = cuda::current_device();
   const int sm_arch_ = cuda::sm_arch(device_id);
-  bool use_ragged_stats = is_ragged_q && cudnn_runtime_version >= 90600 && sm_arch_ != 120;
+  // cuDNN gates these behaviours on the compute capability family, so sm_121 etc. behave
+  // like sm_120 and must take the same workarounds.
+  const bool is_sm12x = (sm_arch_ >= 120 && sm_arch_ < 130);
+  bool use_ragged_stats = is_ragged_q && cudnn_runtime_version >= 90600 && !is_sm12x;
 
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
   bool is_paged_kv = (layout_group == NVTE_QKV_Layout_Group::NVTE_Paged_KV_HD_HD_HD);
@@ -112,10 +115,10 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
   int64_t actual_b = b;
   if ((is_ragged_q || is_ragged_kv) && cudnn_runtime_version >= 90600) {
     NVTE_CHECK(is_padding, "Ragged QKV input requires padding or padding_causal mask!");
-    // On SM 120, cuDNN support check treats layouts with stride[0] > dim[1]*dim[2]*dim[3]
+    // On SM 12x, cuDNN support check treats layouts with stride[0] > dim[1]*dim[2]*dim[3]
     // as interleaved and rejects them. Use BHSD-like dimensions/strides with max_seqlen at plan build
     // so the check passes; ragged offset still provides variable-length boundaries.
-    if (sm_arch_ != 120) {
+    if (!is_sm12x) {
       // replace batch size and maximum sequence lengths with maximum token counts
       // for query and key/value so the graph is static within each quantization bucket.
       // When passing cu_seqlens* directly to cuDNN SDPA, keep the true batch size:
@@ -179,6 +182,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
         cudnn_frontend::DataType_t::NOT_SET,
         cudnn_frontend::DataType_t::NOT_SET,
         return_max_logit,
+        device_id,
     };
 
     namespace fe = cudnn_frontend;
@@ -678,7 +682,8 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
   const auto cudnn_runtime_version = cudnnGetVersion();
   const int device_id = cuda::current_device();
   const int sm_arch_ = cuda::sm_arch(device_id);
-  bool use_ragged_stats = is_ragged_q && cudnn_runtime_version >= 90600 && sm_arch_ != 120;
+  const bool is_sm12x = (sm_arch_ >= 120 && sm_arch_ < 130);
+  bool use_ragged_stats = is_ragged_q && cudnn_runtime_version >= 90600 && !is_sm12x;
 
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
   bool is_paged_kv = (layout_group == NVTE_QKV_Layout_Group::NVTE_Paged_KV_HD_HD_HD);
@@ -690,8 +695,8 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
   int64_t actual_b = b;
   if ((is_ragged_q || is_ragged_kv) && cudnn_runtime_version >= 90600) {
     NVTE_CHECK(is_padding, "Ragged QKV input requires padding or padding_causal mask!");
-    // On SM 120, cuDNN support check requires BHSD-like strides with max_seqlen (see fwd).
-    if (sm_arch_ != 120) {
+    // On SM 12x, cuDNN support check requires BHSD-like strides with max_seqlen (see fwd).
+    if (!is_sm12x) {
       // replace batch size and maximum sequence lengths with maximum token counts
       // for query and key/value so the graph is static within each quantization bucket
       b = max_b;
@@ -743,6 +748,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
         cudnn_frontend::DataType_t::NOT_SET,
         cudnn_frontend::DataType_t::NOT_SET,
         false,
+        device_id,
     };
 
     namespace fe = cudnn_frontend;
@@ -893,7 +899,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
       if (use_ragged_stats) {
         sdpa_backward_options.set_max_total_seq_len_q(s_q);
       }
-      if (is_ragged_kv && cudnn_runtime_version >= 90600 && sm_arch_ != 120) {
+      if (is_ragged_kv && cudnn_runtime_version >= 90600 && !is_sm12x) {
         sdpa_backward_options.set_max_total_seq_len_kv(s_kv);
       }
 
@@ -1204,6 +1210,7 @@ void fused_attn_arbitrary_seqlen_fwd(
 
   const int device_id = cuda::current_device();
   const int sm_arch_ = cuda::sm_arch(device_id);
+  const bool is_sm12x = (sm_arch_ >= 120 && sm_arch_ < 130);
 
   void *devPtrCuSeqlensQ = cu_seqlens_q->data.dptr;
   void *devPtrCuSeqlensKV = cu_seqlens_kv->data.dptr;
@@ -1231,10 +1238,9 @@ void fused_attn_arbitrary_seqlen_fwd(
 
     Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     output_S->data.dptr = nullptr;
-    // sm120 does not use ragged stats: the graph declares a dense
+    // sm12x does not use ragged stats: the graph declares a dense
     // [b, h, s_q, 1] stats tensor, so allocate to match (same as Max below).
-    if ((q_format == NVTE_QKV_Format::NVTE_THD && cudnn_runtime_version >= 90600) &&
-        (sm_arch_ != 120)) {
+    if ((q_format == NVTE_QKV_Format::NVTE_THD && cudnn_runtime_version >= 90600) && !is_sm12x) {
       output_S->data.shape = {num_tokens_q, num_attn_heads, 1};
     } else {
       output_S->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
@@ -1244,8 +1250,7 @@ void fused_attn_arbitrary_seqlen_fwd(
     if (return_max_logit) {
       Tensor *output_Max = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
       output_Max->data.dptr = nullptr;
-      if ((q_format == NVTE_QKV_Format::NVTE_THD && cudnn_runtime_version >= 90600) &&
-          (sm_arch_ != 120)) {
+      if ((q_format == NVTE_QKV_Format::NVTE_THD && cudnn_runtime_version >= 90600) && !is_sm12x) {
         output_Max->data.shape = {num_tokens_q, num_attn_heads, 1};
       } else {
         output_Max->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};

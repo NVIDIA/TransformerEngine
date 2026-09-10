@@ -202,7 +202,27 @@ def _score_mod_callback_cache_key(callback: Optional[Callable]) -> Any:
         and callback.__closure__ is None
         and "<locals>" not in callback.__qualname__
     ):
-        return ("function", callback.__module__, callback.__qualname__)
+        # __qualname__ is "<lambda>" for every module-level lambda, so it does not identify
+        # the body; include the code object so distinct score_mods get distinct graphs.
+        # Defaults live outside the code object and must be keyed separately: baking a
+        # scalar in via a default argument is the usual way to write a soft-cap score_mod.
+        code = callback.__code__
+        kwdefaults = callback.__kwdefaults__
+        key = (
+            "function",
+            callback.__module__,
+            callback.__qualname__,
+            code.co_code,
+            code.co_consts,
+            code.co_names,
+            callback.__defaults__,
+            tuple(sorted(kwdefaults.items())) if kwdefaults else None,
+        )
+        try:
+            hash(key)
+        except TypeError:
+            return _UncacheableScoreModKey()
+        return key
 
     return _UncacheableScoreModKey()
 
