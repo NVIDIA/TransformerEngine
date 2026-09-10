@@ -3,15 +3,15 @@
 # See LICENSE for license information.
 
 """This module provides predefined FP8 recipes."""
+
 from __future__ import annotations
 import abc
 import os
 from collections.abc import Hashable
 from enum import Enum
-from typing import Any, Callable, Literal, NamedTuple, Optional, Union
-from dataclasses import field, replace
+from typing import Any, Callable, ClassVar, Dict, Literal, NamedTuple, Optional, Tuple, Union
+from dataclasses import MISSING, field, fields, replace
 from pydantic.dataclasses import dataclass
-
 
 _BACKWARD_OVERRIDES = (None, "high_precision", "dequantized")
 _NVFP4_4OVER6_SCOPES = ("none", "weights", "activations", "all")
@@ -137,6 +137,144 @@ def _algorithm_config(
     return (("callable",), semantic_key)
 
 
+# Sentinel for "this attribute has no stored value yet", so that assigning ``None``
+# to a field for the first time is not mistaken for an unchanged value.
+_UNSET = object()
+
+# Cached values derived from a recipe's fields; never part of its semantic state.
+_CACHE_ATTRIBUTES = ("_cached_repr", "_cached_quantizer_config", "_has_cached_quantizer_config")
+
+
+# Rows of a derived-``QParams`` table: {recipe option: ((bundle, field, transform), ...)}.
+_DerivedQParams = Dict[str, Tuple[Tuple[str, str, Callable[[Any], Any]], ...]]
+
+
+def _unchanged(value: Any) -> Any:
+    """Derived ``QParams`` field takes the recipe option's value unchanged."""
+    return value
+
+
+def _negated(value: Any) -> bool:
+    """Derived ``QParams`` field takes the negation of the recipe option's value."""
+    return not value
+
+
+def _attached_qfactory_key(qfactory: Any) -> Optional[Hashable]:
+    """Return the semantic key ``@quantizer_factory`` attached to a factory, if any."""
+    attached_key = getattr(qfactory, "qfactory_key", None)
+    if attached_key is None:
+        return None
+    return _validate_qfactory_key(attached_key, source="qfactory.qfactory_key")
+
+
+def _config_factory_key(recipe: Any, value: Any) -> Hashable:
+    """Configuration entry for the quantizer factory: its semantic key alone."""
+    if value is None:
+        qfactory = getattr(recipe, "qfactory", None)
+        name = getattr(qfactory, "__qualname__", None) or repr(qfactory)
+        raise ValueError(
+            f"CustomRecipe requires a semantic qfactory key for {name}. The key stands in for"
+            " the factory's behavior, because callable identity is not stable across processes,"
+            " ranks or checkpoints. Attach one where the factory is defined:\n"
+            '    @quantizer_factory(key=("my_factory", 1))\n'
+            "    def my_factory(role): ...\n"
+            "or pass it with the recipe: CustomRecipe(qfactory=my_factory,"
+            ' qfactory_key=("my_factory", 1)).\n'
+            "Bump the revision whenever the factory's behavior changes, so quantizers built from"
+            " the previous behavior are rebuilt instead of silently reused."
+        )
+    return value
+
+
+def _config_algorithm(field_name: str, *, half: int) -> Callable[[Any, Any], Any]:
+    """Converter for one half of a literal-or-callable algorithm field.
+
+    ``half=0`` is the algorithm entry, ``half=1`` its semantic key; each keeps its
+    own declaration position in the configuration.
+    """
+    key_name = f"{field_name}_key"
+
+    def convert(recipe: Any, value: Any) -> Any:
+        algorithm = value if half == 0 else getattr(recipe, field_name)
+        return _algorithm_config(algorithm, getattr(recipe, key_name), field_name=field_name)[half]
+
+    return convert
+
+
+# Semantic-configuration fields per recipe class, populated on first use. Kept in a
+# module dict rather than on the class: writing to a class ``__dict__`` is not
+# traceable by torch.compile, and a first activation can happen inside a compiled
+# region.
+_QUANTIZER_CONFIG_FIELDS: Dict[type, tuple] = {}
+
+
+# Converters for field values that are not their own configuration, by value type.
+_VALUE_CONFIG_CONVERTERS = (
+    (Enum, lambda recipe, value: value.name),
+    (QParams, lambda recipe, value: _qparams_config(value)),
+    (MMParams, lambda recipe, value: _mmparams_config(value)),
+)
+
+
+def _build_quantizer_config_fields(recipe: Any) -> tuple:
+    """Resolve how each dataclass field contributes to the semantic configuration.
+
+    The result depends only on the recipe class, so it is computed once per class:
+    per instance the work is then one attribute read and one ``is None`` test per
+    field. Entries are ``(entry_name, source_field, converter)`` in declaration
+    order; a ``None`` converter means the value is already its own configuration.
+    """
+    # ``fields`` is given the instance, not the class: torch.compile can trace the
+    # instance form, and a recipe's first activation may happen inside a compiled
+    # region.
+    recipe_fields = fields(recipe)
+    field_names = {f.name for f in recipe_fields}
+    config_fields = []
+    for recipe_field in recipe_fields:
+        name = recipe_field.name
+
+        # The quantizer factory is represented by its semantic key alone: the
+        # callable itself is deliberately not part of the configuration.
+        if name == "qfactory":
+            config_fields.append(("qfactory_key", "qfactory_key", _config_factory_key))
+            continue
+        if name == "qfactory_key":
+            continue
+
+        # A field with a sibling ``<field>_key`` is a literal-or-callable algorithm.
+        if f"{name}_key" in field_names:
+            config_fields.append((name, name, _config_algorithm(name, half=0)))
+            continue
+        if name.endswith("_key") and name[: -len("_key")] in field_names:
+            config_fields.append((name, name, _config_algorithm(name[: -len("_key")], half=1)))
+            continue
+
+        value = getattr(recipe, name)
+        converter = next(
+            (
+                convert
+                for value_type, convert in _VALUE_CONFIG_CONVERTERS
+                if isinstance(value, value_type)
+            ),
+            None,
+        )
+        config_fields.append((name, name, converter))
+    return tuple(config_fields)
+
+
+def _recipe_type_entry(cls: type) -> tuple:
+    """Semantic recipe-type name: the nearest recipe class defined by this module.
+
+    A framework subclass (e.g. Megatron's ``TEDelayedScaling``) keeps the semantic
+    identity of the recipe it specializes, so it neither invalidates quantizers nor
+    rejects updates against an equivalent stock recipe.
+    """
+    for klass in cls.__mro__:
+        if klass.__module__ == __name__:
+            return ("recipe_type", klass.__name__)
+    return ("recipe_type", cls.__name__)
+
+
 def _validate_qfactory_key(key: Any, *, source: str) -> Hashable:
     """Validate and return an immutable semantic quantizer-factory key."""
     if key is None:
@@ -190,31 +328,50 @@ class Recipe:
     _has_cached_quantizer_config: bool = False
 
     def __setattr__(self, name: str, value: Any) -> None:
-        # FP8 MHA requires FP8 DPA; keep both flags canonical across mutations.
-        if name == "fp8_dpa" and not value and self.__dict__.get("fp8_mha", False):
-            value = True
-
         # Invalidate derived caches on any recipe mutation. Updating either
         # cache itself must not invalidate the other cache.
-        cache_attribute = name in (
-            "_cached_repr",
-            "_cached_quantizer_config",
-            "_has_cached_quantizer_config",
-        )
+        cache_attribute = name in _CACHE_ATTRIBUTES
         if not cache_attribute:
+            # Re-assigning the stored value is not a mutation: keep the caches, so
+            # a framework that rewrites its recipe fields every step does not force
+            # a rebuild of the semantic configuration.
+            current = self.__dict__.get(name, _UNSET)
+            if current is not _UNSET and (current is value or current == value):
+                return
             object.__setattr__(self, "_cached_repr", None)
             object.__setattr__(self, "_cached_quantizer_config", None)
             object.__setattr__(self, "_has_cached_quantizer_config", False)
         object.__setattr__(self, name, value)
-        if name == "fp8_mha" and value:
-            object.__setattr__(self, "fp8_dpa", True)
         if not cache_attribute:
             self._synchronize_derived_qparams(name)
 
     def __post_init__(self) -> None:
-        """Canonicalize fields after Pydantic dataclass construction."""
+        """Canonicalize and validate after Pydantic dataclass construction.
+
+        Subclasses that materialize derived bundles call this last, once their own
+        fields are final, so validation always sees the finished recipe.
+        """
         if getattr(self, "fp8_mha", False):
             self.fp8_dpa = True
+        self.validate()
+
+    def validate(self) -> None:
+        """Check that the recipe's field values are a supported combination.
+
+        Called at construction and again at every activation whose semantic
+        configuration is not already cached, so a field assigned after construction
+        is checked before it can reach quantizer construction. Subclasses add their
+        own rules and call ``super().validate()``.
+        """
+        if getattr(self, "fp8_mha", False) and not getattr(self, "fp8_dpa", False):
+            raise ValueError(
+                "fp8_mha=True requires fp8_dpa=True. Disable fp8_mha before disabling fp8_dpa."
+            )
+
+    # Shorthand recipe options that own one field in derived ``QParams`` bundles,
+    # as ``{option: ((bundle, qparams_field, transform), ...)}``. Subclasses with
+    # such options declare their rows here instead of overriding the hook below.
+    _DERIVED_QPARAMS: ClassVar[_DerivedQParams] = {}
 
     def _synchronize_derived_qparams(self, name: str) -> None:
         """Propagate a changed recipe option into per-tensor ``QParams``.
@@ -222,15 +379,76 @@ class Recipe:
         Some public recipe options are shorthand for one field in several
         derived ``QParams`` bundles. For example, ``use_power_2_scales`` sets
         ``power_2_scale`` for the input, weight, and gradient bundles. A recipe
-        with such an option overrides this hook and updates only that owned
-        ``QParams`` field, preserving unrelated fields such as
+        with such an option declares it in ``_DERIVED_QPARAMS`` and only that
+        owned ``QParams`` field is updated, preserving unrelated fields such as
         ``amax_epsilon``.
 
         Assigning a complete ``QParams`` bundle directly is still supported.
         That assignment controls every field until a later assignment to a
         shorthand recipe option updates the specific field it owns.
         """
-        del name
+        rows = self._DERIVED_QPARAMS.get(name)
+        if rows is None:
+            return
+        value = getattr(self, name)
+        for bundle, qparams_field, transform in rows:
+            self._replace_derived_qparams(bundle, **{qparams_field: transform(value)})
+
+    def __getstate__(self) -> Dict[str, Any]:
+        """Serialize the recipe's fields only.
+
+        Derived caches are rebuilt on demand, so keeping them out of the payload
+        makes checkpoint bytes independent of whether ``repr`` or a semantic
+        configuration was requested before saving.
+        """
+        state = self.__dict__.copy()
+        for cache_attribute in _CACHE_ATTRIBUTES:
+            state.pop(cache_attribute, None)
+        return state
+
+    def __setstate__(self, state: Dict[str, Any]) -> None:
+        """Restore a recipe, including payloads written by earlier versions.
+
+        A payload can predate fields added since it was written, so missing fields
+        take their declared defaults and missing derived bundles are rebuilt from
+        the shorthand options that own them. ``__post_init__`` is deliberately not
+        re-run: it would overwrite bundles the saved recipe customized.
+        """
+        self.__dict__.update(state)
+
+        for recipe_field in fields(self):
+            if recipe_field.name in self.__dict__:
+                continue
+            if recipe_field.default is not MISSING:
+                self.__dict__[recipe_field.name] = recipe_field.default
+            elif recipe_field.default_factory is not MISSING:
+                self.__dict__[recipe_field.name] = recipe_field.default_factory()
+
+        rebuilt: Dict[str, Dict[str, Any]] = {}
+        for option, rows in self._DERIVED_QPARAMS.items():
+            value = self.__dict__.get(option)
+            for bundle, qparams_field, transform in rows:
+                if bundle not in self.__dict__:
+                    rebuilt.setdefault(bundle, {})[qparams_field] = transform(value)
+        for bundle, qparams_fields in rebuilt.items():
+            self.__dict__[bundle] = QParams(**qparams_fields)
+
+        # Construction canonicalizes this pair, so a payload saved before the rule
+        # was enforced loads as the recipe it would be constructed as today.
+        if self.__dict__.get("fp8_mha", False):
+            self.__dict__["fp8_dpa"] = True
+        self.validate()
+
+    def __copy__(self) -> "Recipe":
+        """Shallow copy that keeps the derived caches, unlike pickling.
+
+        Runtime owners snapshot the caller's recipe on every commit, and the
+        snapshot is compared against later configurations; dropping its cached
+        configuration would make each comparison rebuild one.
+        """
+        clone = object.__new__(type(self))
+        clone.__dict__.update(self.__dict__)
+        return clone
 
     def _replace_derived_qparams(self, name: str, **changes: Any) -> None:
         """Replace fields in an initialized derived ``QParams`` bundle."""
@@ -247,6 +465,7 @@ class Recipe:
         :meth:`_make_quantizer_config` rather than overriding this cached accessor.
         """
         if not self._has_cached_quantizer_config:
+            self.validate()
             config = self._make_quantizer_config()
             try:
                 hash(config)
@@ -260,10 +479,29 @@ class Recipe:
         return self._cached_quantizer_config
 
     def _make_quantizer_config(self) -> Hashable:
-        """Build the immutable semantic configuration returned by :meth:`quantizer_config`."""
-        raise NotImplementedError(
-            f"{self.__class__.__name__} must implement Recipe.quantizer_config()"
-        )
+        """Build the immutable semantic configuration returned by :meth:`quantizer_config`.
+
+        One entry per dataclass field, in declaration order, behind a leading
+        ``("recipe_type", ...)`` entry. ``Enum`` fields contribute their name,
+        ``QParams``/``MMParams`` bundles their own configuration, and a
+        literal-or-callable algorithm its identity-independent form. Subclasses
+        get this for free; adding a field to a recipe therefore cannot leave it
+        out of the semantic configuration.
+        """
+        cls = type(self)
+        cached_fields = _QUANTIZER_CONFIG_FIELDS.get(cls)
+        if cached_fields is None:
+            cached_fields = (_recipe_type_entry(cls), _build_quantizer_config_fields(self))
+            _QUANTIZER_CONFIG_FIELDS[cls] = cached_fields
+        recipe_type_entry, config_fields = cached_fields
+
+        values = self.__dict__
+        items = [recipe_type_entry]
+        append = items.append
+        for entry_name, source, convert in config_fields:
+            value = values[source]
+            append((entry_name, value if convert is None else convert(self, value)))
+        return tuple(items)
 
     @abc.abstractmethod
     def _make_repr(self) -> str:
@@ -415,8 +653,8 @@ class DelayedScaling(Recipe):
     amax_compute_algo_key: Optional[Hashable] = None
     scaling_factor_compute_algo_key: Optional[Hashable] = None
 
-    def __post_init__(self) -> None:
-        super().__post_init__()
+    def validate(self) -> None:
+        super().validate()
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
         assert (
             self.backward_override in _BACKWARD_OVERRIDES
@@ -424,32 +662,6 @@ class DelayedScaling(Recipe):
         assert (
             self.backward_override is None
         ), "Delayed scaling only supports backward_override=None."
-
-    def _make_quantizer_config(self) -> Hashable:
-        amax_compute_algo, amax_compute_algo_key = _algorithm_config(
-            self.amax_compute_algo,
-            self.amax_compute_algo_key,
-            field_name="amax_compute_algo",
-        )
-        scaling_factor_compute_algo, scaling_factor_compute_algo_key = _algorithm_config(
-            self.scaling_factor_compute_algo,
-            self.scaling_factor_compute_algo_key,
-            field_name="scaling_factor_compute_algo",
-        )
-        return (
-            ("recipe_type", "DelayedScaling"),
-            ("margin", self.margin),
-            ("fp8_format", self.fp8_format.name),
-            ("amax_history_len", self.amax_history_len),
-            ("amax_compute_algo", amax_compute_algo),
-            ("scaling_factor_compute_algo", scaling_factor_compute_algo),
-            ("reduce_amax", self.reduce_amax),
-            ("fp8_dpa", self.fp8_dpa),
-            ("fp8_mha", self.fp8_mha),
-            ("backward_override", self.backward_override),
-            ("amax_compute_algo_key", amax_compute_algo_key),
-            ("scaling_factor_compute_algo_key", scaling_factor_compute_algo_key),
-        )
 
     def _make_repr(self) -> str:
         return (
@@ -493,12 +705,22 @@ class Float8CurrentScaling(Recipe):
     fp8_mha: bool = False
     backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
 
-    def __post_init__(self) -> None:
-        super().__post_init__()
+    _DERIVED_QPARAMS: ClassVar[_DerivedQParams] = {
+        "use_power_2_scales": (
+            ("fp8_quant_fwd_inp", "power_2_scale", _unchanged),
+            ("fp8_quant_fwd_weight", "power_2_scale", _unchanged),
+            ("fp8_quant_bwd_grad", "power_2_scale", _unchanged),
+        ),
+    }
+
+    def validate(self) -> None:
+        super().validate()
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
         assert (
             self.backward_override in _BACKWARD_OVERRIDES
         ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
+
+    def __post_init__(self) -> None:
         self.fp8_quant_fwd_inp = QParams(
             power_2_scale=self.use_power_2_scales,
             amax_epsilon=0.0,
@@ -511,35 +733,7 @@ class Float8CurrentScaling(Recipe):
             power_2_scale=self.use_power_2_scales,
             amax_epsilon=0.0,
         )
-
-    def _synchronize_derived_qparams(self, name: str) -> None:
-        if name != "use_power_2_scales":
-            return
-        for qparams_name in (
-            "fp8_quant_fwd_inp",
-            "fp8_quant_fwd_weight",
-            "fp8_quant_bwd_grad",
-        ):
-            self._replace_derived_qparams(
-                qparams_name,
-                power_2_scale=self.use_power_2_scales,
-            )
-
-    def _make_quantizer_config(self) -> Hashable:
-        return (
-            ("recipe_type", "Float8CurrentScaling"),
-            ("use_power_2_scales", self.use_power_2_scales),
-            ("fp8_format", self.fp8_format.name),
-            ("fp8_quant_fwd_inp", _qparams_config(self.fp8_quant_fwd_inp)),
-            ("fp8_quant_fwd_weight", _qparams_config(self.fp8_quant_fwd_weight)),
-            ("fp8_quant_bwd_grad", _qparams_config(self.fp8_quant_bwd_grad)),
-            ("fp8_gemm_fprop", _mmparams_config(self.fp8_gemm_fprop)),
-            ("fp8_gemm_dgrad", _mmparams_config(self.fp8_gemm_dgrad)),
-            ("fp8_gemm_wgrad", _mmparams_config(self.fp8_gemm_wgrad)),
-            ("fp8_dpa", self.fp8_dpa),
-            ("fp8_mha", self.fp8_mha),
-            ("backward_override", self.backward_override),
-        )
+        super().__post_init__()
 
     def _make_repr(self) -> str:
         return (
@@ -596,23 +790,12 @@ class MXFP8BlockScaling(Recipe):
     backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
     enable_2d_quantization: bool = False
 
-    def __post_init__(self) -> None:
-        super().__post_init__()
+    def validate(self) -> None:
+        super().validate()
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
         assert (
             self.backward_override in _BACKWARD_OVERRIDES
         ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
-
-    def _make_quantizer_config(self) -> Hashable:
-        return (
-            ("recipe_type", "MXFP8BlockScaling"),
-            ("margin", self.margin),
-            ("fp8_format", self.fp8_format.name),
-            ("fp8_dpa", self.fp8_dpa),
-            ("fp8_mha", self.fp8_mha),
-            ("backward_override", self.backward_override),
-            ("enable_2d_quantization", self.enable_2d_quantization),
-        )
 
     def _make_repr(self) -> str:
         return (
@@ -678,8 +861,16 @@ class Float8BlockScaling(Recipe):
     fp8_mha: bool = False
     backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
 
-    def __post_init__(self) -> None:
-        super().__post_init__()
+    _DERIVED_QPARAMS: ClassVar[_DerivedQParams] = {
+        "use_f32_scales": (
+            ("fp8_quant_fwd_inp", "power_2_scale", _negated),
+            ("fp8_quant_fwd_weight", "power_2_scale", _negated),
+            ("fp8_quant_bwd_grad", "power_2_scale", _negated),
+        ),
+    }
+
+    def validate(self) -> None:
+        super().validate()
         assert self.x_block_scaling_dim in [1, 2], "Only 1D or 2D blocks supported for x"
         assert self.w_block_scaling_dim in [1, 2], "Only 1D or 2D blocks supported for w"
         assert self.grad_block_scaling_dim in [1, 2], "Only 1D or 2D blocks supported for grad"
@@ -702,6 +893,8 @@ class Float8BlockScaling(Recipe):
         assert (
             self.backward_override in _BACKWARD_OVERRIDES
         ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
+
+    def __post_init__(self) -> None:
         power_2_scale = not self.use_f32_scales
         self.fp8_quant_fwd_inp = QParams(
             power_2_scale=power_2_scale,
@@ -715,39 +908,7 @@ class Float8BlockScaling(Recipe):
             power_2_scale=power_2_scale,
             amax_epsilon=0.0,
         )
-
-    def _synchronize_derived_qparams(self, name: str) -> None:
-        if name != "use_f32_scales":
-            return
-        power_2_scale = not self.use_f32_scales
-        for qparams_name in (
-            "fp8_quant_fwd_inp",
-            "fp8_quant_fwd_weight",
-            "fp8_quant_bwd_grad",
-        ):
-            self._replace_derived_qparams(
-                qparams_name,
-                power_2_scale=power_2_scale,
-            )
-
-    def _make_quantizer_config(self) -> Hashable:
-        return (
-            ("recipe_type", "Float8BlockScaling"),
-            ("use_f32_scales", self.use_f32_scales),
-            ("fp8_format", self.fp8_format.name),
-            ("fp8_quant_fwd_inp", _qparams_config(self.fp8_quant_fwd_inp)),
-            ("fp8_quant_fwd_weight", _qparams_config(self.fp8_quant_fwd_weight)),
-            ("fp8_quant_bwd_grad", _qparams_config(self.fp8_quant_bwd_grad)),
-            ("x_block_scaling_dim", self.x_block_scaling_dim),
-            ("w_block_scaling_dim", self.w_block_scaling_dim),
-            ("grad_block_scaling_dim", self.grad_block_scaling_dim),
-            ("fp8_gemm_fprop", _mmparams_config(self.fp8_gemm_fprop)),
-            ("fp8_gemm_dgrad", _mmparams_config(self.fp8_gemm_dgrad)),
-            ("fp8_gemm_wgrad", _mmparams_config(self.fp8_gemm_wgrad)),
-            ("fp8_dpa", self.fp8_dpa),
-            ("fp8_mha", self.fp8_mha),
-            ("backward_override", self.backward_override),
-        )
+        super().__post_init__()
 
     def _make_repr(self) -> str:
         return (
@@ -859,8 +1020,17 @@ class NVFP4BlockScaling(Recipe):
     fp8_mha: bool = False
     backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
 
-    def __post_init__(self) -> None:
-        super().__post_init__()
+    _DERIVED_QPARAMS: ClassVar[_DerivedQParams] = {
+        "disable_rht": (
+            ("fp4_quant_fwd_inp", "random_hadamard_transform", _negated),
+            ("fp4_quant_bwd_grad", "random_hadamard_transform", _negated),
+        ),
+        "disable_stochastic_rounding": (("fp4_quant_bwd_grad", "stochastic_rounding", _negated),),
+        "disable_2d_quantization": (("fp4_quant_fwd_weight", "fp4_2d_quantization", _negated),),
+    }
+
+    def validate(self) -> None:
+        super().validate()
         assert self.fp4_format == Format.E2M1, "Only E2M1 is supported for NVFP4 scaling"
         assert self.fp8_format == Format.E4M3, "Only E4M3 is supported for NVFP4 scaling"
         assert (
@@ -876,6 +1046,7 @@ class NVFP4BlockScaling(Recipe):
             self.nvfp4_4over6_err_mode in _NVFP4_4OVER6_ERR_MODES
         ), "NVTE_NVFP4_4OVER6_ERR_MODE must be one of: 'MAE', 'MSE'."
 
+    def __post_init__(self) -> None:
         # Quantization params
         # Note: RHT is currently only applied to column-wise usage so that
         # it can be used for wgrad GEMM.
@@ -894,48 +1065,7 @@ class NVFP4BlockScaling(Recipe):
             stochastic_rounding=not self.disable_stochastic_rounding,
             fp4_2d_quantization=False,
         )
-
-    def _synchronize_derived_qparams(self, name: str) -> None:
-        updates = ()
-        if name == "disable_rht":
-            updates = (
-                ("fp4_quant_fwd_inp", "random_hadamard_transform", not self.disable_rht),
-                ("fp4_quant_bwd_grad", "random_hadamard_transform", not self.disable_rht),
-            )
-        elif name == "disable_stochastic_rounding":
-            updates = (
-                (
-                    "fp4_quant_bwd_grad",
-                    "stochastic_rounding",
-                    not self.disable_stochastic_rounding,
-                ),
-            )
-        elif name == "disable_2d_quantization":
-            updates = (
-                ("fp4_quant_fwd_weight", "fp4_2d_quantization", not self.disable_2d_quantization),
-            )
-        for qparams_name, field_name, value in updates:
-            self._replace_derived_qparams(qparams_name, **{field_name: value})
-
-    def _make_quantizer_config(self) -> Hashable:
-        return (
-            ("recipe_type", "NVFP4BlockScaling"),
-            ("disable_rht", self.disable_rht),
-            ("disable_stochastic_rounding", self.disable_stochastic_rounding),
-            ("disable_2d_quantization", self.disable_2d_quantization),
-            ("row_scaled_activation", self.row_scaled_activation),
-            ("nvfp4_4over6", self.nvfp4_4over6),
-            ("nvfp4_4over6_e4m3_use_256", self.nvfp4_4over6_e4m3_use_256),
-            ("nvfp4_4over6_err_mode", self.nvfp4_4over6_err_mode),
-            ("fp4_format", self.fp4_format.name),
-            ("fp8_format", self.fp8_format.name),
-            ("fp4_quant_fwd_inp", _qparams_config(self.fp4_quant_fwd_inp)),
-            ("fp4_quant_fwd_weight", _qparams_config(self.fp4_quant_fwd_weight)),
-            ("fp4_quant_bwd_grad", _qparams_config(self.fp4_quant_bwd_grad)),
-            ("fp8_dpa", self.fp8_dpa),
-            ("fp8_mha", self.fp8_mha),
-            ("backward_override", self.backward_override),
-        )
+        super().__post_init__()
 
     def _make_repr(self) -> str:
         return (
@@ -1033,41 +1163,32 @@ class CustomRecipe(Recipe):
     quantization_alignment: int = 128
     qfactory_key: Optional[Hashable] = None
 
-    def __post_init__(self) -> None:
-        super().__post_init__()
+    def validate(self) -> None:
+        super().validate()
         assert (
             self.backward_override in _BACKWARD_OVERRIDES
         ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
         if self.quantization_alignment <= 0:
             raise ValueError("CustomRecipe quantization_alignment must be positive.")
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        super().__setattr__(name, value)
+        # A key stands in for one factory's behavior, so it must not outlive the
+        # factory it came from: replacing the factory re-derives it, and a
+        # replacement without a key is reported at the next activation. During
+        # construction the key is resolved by ``__post_init__`` instead.
+        if name == "qfactory" and "qfactory_key" in self.__dict__:
+            object.__setattr__(self, "qfactory_key", _attached_qfactory_key(value))
+
+    def __post_init__(self) -> None:
         if self.qfactory_key is None:
-            attached_key = getattr(self.qfactory, "qfactory_key", None)
-            if attached_key is not None:
-                self.qfactory_key = _validate_qfactory_key(
-                    attached_key,
-                    source="qfactory.qfactory_key",
-                )
+            self.qfactory_key = _attached_qfactory_key(self.qfactory)
         else:
             self.qfactory_key = _validate_qfactory_key(
                 self.qfactory_key,
                 source="CustomRecipe qfactory_key",
             )
-
-    def _make_quantizer_config(self) -> Hashable:
-        if self.qfactory_key is None:
-            raise ValueError(
-                "CustomRecipe requires a semantic qfactory key. Pass qfactory_key=... or decorate "
-                "qfactory with @quantizer_factory(key=...)."
-            )
-        return (
-            ("recipe_type", "CustomRecipe"),
-            ("qfactory_key", self.qfactory_key),
-            ("fp8_format", self.fp8_format.name),
-            ("fp8_dpa", self.fp8_dpa),
-            ("fp8_mha", self.fp8_mha),
-            ("backward_override", self.backward_override),
-            ("quantization_alignment", self.quantization_alignment),
-        )
+        super().__post_init__()
 
     def _make_repr(self) -> str:
         return (

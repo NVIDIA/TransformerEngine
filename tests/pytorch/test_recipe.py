@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 
+import copy
 from dataclasses import fields, replace
 from types import SimpleNamespace
 from typing import Optional
@@ -44,8 +45,10 @@ from transformer_engine.common.recipe import (
     DelayedScaling,
     Float8CurrentScaling,
     Float8BlockScaling,
+    Format,
     MXFP8BlockScaling,
     NVFP4BlockScaling,
+    QParams,
     Recipe,
     quantizer_factory,
 )
@@ -113,16 +116,20 @@ def test_recipe_quantizer_config_must_be_hashable():
         UnhashableConfigRecipe().quantizer_config()
 
 
-def test_quantization_runtime_key_is_semantic_and_normalizes_slot_roles():
-    """Runtime-key equality includes recipe config and each ordered role slot."""
+def test_quantization_runtime_key_is_semantic_over_ordered_slot_roles():
+    """Runtime-key equality includes recipe config and each ordered role slot.
+
+    Role containers are tuples by construction (``_resolve_quantizer_roles``
+    builds them), so the key normalizes nothing and stays a plain frozen record.
+    """
     input_role = QuantizerRole(module_type="linear", tensor_type="input", name="qkv")
     weight_role = QuantizerRole(module_type="linear", tensor_type="weight", name="qkv")
     grad_role = QuantizerRole(module_type="linear", tensor_type="grad_output", name="qkv")
 
     key = _QuantizationRuntimeKey(
         recipe_config=("recipe", "fp8"),
-        forward_roles=[input_role, None, weight_role],
-        backward_roles=[grad_role],
+        forward_roles=(input_role, None, weight_role),
+        backward_roles=(grad_role,),
     )
     same_request = _QuantizationRuntimeKey(
         recipe_config=("recipe", "fp8"),
@@ -295,31 +302,85 @@ def test_same_recipe_mutation_invalidates_config_for_direct_and_nested_parameter
         ),
     ),
 )
-def test_fp8_mha_canonicalizes_fp8_dpa_during_construction_and_mutation(make_recipe):
+def test_fp8_mha_requires_fp8_dpa_at_construction_and_after_mutation(make_recipe):
     """FP8 MHA must never produce a semantic configuration with DPA disabled."""
     constructed = make_recipe(fp8_mha=True)
     assert constructed.fp8_mha is True
     assert constructed.fp8_dpa is True
     assert dict(constructed.quantizer_config())["fp8_dpa"] is True
 
+    # Construction canonicalizes; a later assignment does not. Enabling MHA alone
+    # is rejected at the next activation instead of silently enabling DPA.
     mutated = make_recipe()
     inactive_config = mutated.quantizer_config()
     mutated.fp8_mha = True
+    assert mutated.fp8_dpa is False
+    with pytest.raises(ValueError, match="fp8_mha=True requires fp8_dpa=True"):
+        mutated.quantizer_config()
+
+    mutated.fp8_dpa = True
     canonical_config = mutated.quantizer_config()
-    assert mutated.fp8_dpa is True
     assert canonical_config != inactive_config
     assert dict(canonical_config)["fp8_dpa"] is True
     assert dict(canonical_config)["fp8_mha"] is True
 
-    # DPA cannot be disabled while MHA still depends on it.
+    # DPA cannot be disabled while MHA still depends on it: the assignment is
+    # kept as written and rejected when the recipe is next activated.
     mutated.fp8_dpa = False
-    assert mutated.fp8_dpa is True
-    assert mutated.quantizer_config() == canonical_config
+    assert mutated.fp8_dpa is False
+    with pytest.raises(ValueError, match="fp8_mha=True requires fp8_dpa=True"):
+        mutated.quantizer_config()
 
     # Disable MHA first when disabling both attention modes.
     mutated.fp8_mha = False
-    mutated.fp8_dpa = False
     assert mutated.quantizer_config() == inactive_config
+
+
+@pytest.mark.parametrize(
+    ("make_recipe", "field_name", "invalid_value", "match"),
+    (
+        pytest.param(
+            DelayedScaling,
+            "fp8_format",
+            transformer_engine.common.recipe.Format.E5M2,
+            "Pure E5M2",
+            id="delayed-format",
+        ),
+        pytest.param(
+            Float8BlockScaling,
+            "w_block_scaling_dim",
+            99,
+            "Only 1D or 2D blocks supported for w",
+            id="block-scaling-dim",
+        ),
+        pytest.param(
+            NVFP4BlockScaling,
+            "nvfp4_4over6_err_mode",
+            "BOGUS",
+            "NVTE_NVFP4_4OVER6_ERR_MODE",
+            id="nvfp4-err-mode",
+        ),
+    ),
+)
+def test_invalid_field_assignment_rejected_before_config(
+    make_recipe, field_name, invalid_value, match
+):
+    """A field assigned after construction is validated at the next activation.
+
+    The constructor's own message is reused, and the recipe never produces a
+    semantic configuration built from the invalid value.
+    """
+    recipe_instance = make_recipe()
+    valid_config = recipe_instance.quantizer_config()
+    valid_value = getattr(recipe_instance, field_name)
+
+    setattr(recipe_instance, field_name, invalid_value)
+    with pytest.raises((AssertionError, ValueError), match=match):
+        recipe_instance.quantizer_config()
+
+    # Restoring the field makes the recipe usable again with its original config.
+    setattr(recipe_instance, field_name, valid_value)
+    assert recipe_instance.quantizer_config() == valid_config
 
 
 def test_high_level_recipe_flags_configure_concrete_quantizers_at_construction():
@@ -795,10 +856,140 @@ def test_custom_recipe_qfactory_key_contract():
 
     with pytest.raises(
         ValueError,
-        match=r"Pass qfactory_key=.*@quantizer_factory",
+        match=r"(?s)requires a semantic qfactory key.*@quantizer_factory",
     ):
         CustomRecipe(qfactory=unkeyed_factory).quantizer_config()
     assert calls == []
+
+
+def test_recipe_pickle_round_trip_drops_caches_and_restores_fields():
+    """Checkpoint bytes must not depend on whether caches were populated."""
+    warm = Float8CurrentScaling(use_power_2_scales=True)
+    warm.quantizer_config()
+    repr(warm)
+    cold = Float8CurrentScaling(use_power_2_scales=True)
+
+    assert pickle.dumps(warm) == pickle.dumps(cold)
+
+    restored = pickle.loads(pickle.dumps(warm))
+    assert "_cached_quantizer_config" not in pickle.loads(pickle.dumps(warm)).__dict__
+    assert restored.quantizer_config() == warm.quantizer_config()
+    assert restored.fp8_quant_fwd_inp == warm.fp8_quant_fwd_inp
+
+
+def test_legacy_pickled_recipe_gains_defaults_and_canonical_attention_flags():
+    """A payload written before a field existed still loads and validates."""
+    current = Float8CurrentScaling()
+
+    # A payload that predates ``backward_override`` and the derived bundles, and
+    # that stores the pre-canonicalization (fp8_dpa=False, fp8_mha=True) pair.
+    legacy_state = {
+        name: value
+        for name, value in current.__dict__.items()
+        if name
+        not in (
+            "backward_override",
+            "fp8_quant_fwd_inp",
+            "fp8_quant_fwd_weight",
+            "fp8_quant_bwd_grad",
+        )
+    }
+    legacy_state["use_power_2_scales"] = True
+    legacy_state["fp8_dpa"] = False
+    legacy_state["fp8_mha"] = True
+
+    restored = object.__new__(Float8CurrentScaling)
+    restored.__setstate__(legacy_state)
+
+    assert restored.backward_override is None
+    assert restored.fp8_dpa is True
+    assert restored.fp8_quant_fwd_inp == QParams(power_2_scale=True, amax_epsilon=0.0)
+    assert (
+        restored.quantizer_config()
+        == Float8CurrentScaling(use_power_2_scales=True, fp8_mha=True).quantizer_config()
+    )
+
+
+def test_setstate_preserves_customized_qparams():
+    """Restoring must not re-run construction, which would reset customized bundles."""
+    customized = Float8CurrentScaling()
+    customized.fp8_quant_fwd_inp = QParams(power_2_scale=False, amax_epsilon=1e-5)
+
+    restored = pickle.loads(pickle.dumps(customized))
+
+    assert restored.fp8_quant_fwd_inp == QParams(power_2_scale=False, amax_epsilon=1e-5)
+    assert restored.quantizer_config() == customized.quantizer_config()
+
+
+def test_copy_keeps_cached_configuration_for_committed_snapshots():
+    """Runtime owners snapshot recipes per commit; the copy keeps the cached config."""
+    original = Float8CurrentScaling()
+    config = original.quantizer_config()
+
+    snapshot = copy.copy(original)
+
+    assert snapshot.quantizer_config() is config
+    assert snapshot is not original
+
+
+def test_reassigning_an_unchanged_value_keeps_the_cached_configuration():
+    """A framework that rewrites its recipe fields every step must not force rebuilds."""
+    recipe_instance = Float8CurrentScaling()
+    config = recipe_instance.quantizer_config()
+
+    recipe_instance.fp8_dpa = recipe_instance.fp8_dpa
+    recipe_instance.fp8_format = Format.HYBRID
+    recipe_instance.fp8_quant_fwd_inp = QParams(power_2_scale=False, amax_epsilon=0.0)
+
+    assert recipe_instance.quantizer_config() is config
+
+
+def test_qfactory_replacement_does_not_inherit_the_previous_key():
+    """A key describes one factory, so replacing the factory re-derives it."""
+
+    @quantizer_factory(key=("first_factory", 1))
+    def first_factory(role):
+        raise AssertionError("factory must not be called during key resolution")
+
+    @quantizer_factory(key=("second_factory", 1))
+    def second_factory(role):
+        raise AssertionError("factory must not be called during key resolution")
+
+    def unkeyed_factory(role):
+        raise AssertionError("factory must not be called during key resolution")
+
+    # An attached key is picked up at construction and re-derived on replacement.
+    recipe_instance = CustomRecipe(qfactory=first_factory)
+    assert recipe_instance.qfactory_key == ("first_factory", 1)
+    first_config = recipe_instance.quantizer_config()
+
+    recipe_instance.qfactory = second_factory
+    assert recipe_instance.qfactory_key == ("second_factory", 1)
+    assert recipe_instance.quantizer_config() != first_config
+
+    # An explicit key describes the factory it was passed with, so it does not
+    # survive a replacement either: the new factory must bring its own.
+    explicit = CustomRecipe(qfactory=first_factory, qfactory_key=("explicit", 7))
+    assert explicit.qfactory_key == ("explicit", 7)
+    explicit.qfactory = unkeyed_factory
+    assert explicit.qfactory_key is None
+    with pytest.raises(ValueError, match="requires a semantic qfactory key"):
+        explicit.quantizer_config()
+
+
+def test_unkeyed_qfactory_error_names_both_ways_to_supply_a_key():
+    """The rejection is the whole migration path, so it must be actionable."""
+
+    def unkeyed_factory(role):
+        raise AssertionError("factory must not be called during key resolution")
+
+    with pytest.raises(ValueError) as excinfo:
+        CustomRecipe(qfactory=unkeyed_factory).quantizer_config()
+
+    message = str(excinfo.value)
+    assert "unkeyed_factory" in message
+    assert "@quantizer_factory(key=" in message
+    assert "qfactory_key=" in message
 
 
 def test_custom_recipe_qfactory_key_mutation_changes_semantic_configuration():

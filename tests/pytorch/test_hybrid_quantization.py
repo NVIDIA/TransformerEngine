@@ -2364,6 +2364,9 @@ class TestCustomDPALocalRecipeCache:
 
         # Native labels also copy these mutable fields from CustomRecipe, so a
         # semantic recipe update must refresh them with the candidate runtime.
+        # Enabling FP8 MHA after construction requires enabling FP8 DPA with it:
+        # only construction canonicalizes the pair.
+        custom_recipe.fp8_dpa = True
         custom_recipe.fp8_mha = True
         with autocast(enabled=True, recipe=custom_recipe):
             dpa.init_fp8_metadata(num_gemms=3)

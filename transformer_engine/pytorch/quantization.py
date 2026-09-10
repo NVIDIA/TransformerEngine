@@ -122,21 +122,6 @@ class _QuantizationRuntimeKey:
     forward_roles: Tuple[Optional[QuantizerRole], ...]
     backward_roles: Tuple[Optional[QuantizerRole], ...]
 
-    def __post_init__(self) -> None:
-        """Canonicalize role containers and reject non-semantic slot values."""
-        try:
-            hash(self.recipe_config)
-        except TypeError as exc:
-            raise TypeError("_QuantizationRuntimeKey.recipe_config must be hashable") from exc
-
-        for attribute in ("forward_roles", "backward_roles"):
-            roles = tuple(getattr(self, attribute))
-            if any(role is not None and not isinstance(role, QuantizerRole) for role in roles):
-                raise TypeError(
-                    f"_QuantizationRuntimeKey.{attribute} entries must be QuantizerRole or None"
-                )
-            object.__setattr__(self, attribute, roles)
-
 
 @dataclass
 class _QuantizationRuntime:
@@ -850,14 +835,13 @@ class FP8GlobalStateManager:
     ):
         """
         For FP8, each autocast can be uniquely identified by the recipe and fp8 group.
-        Object identity is sufficient since autocast contexts never outlive a single
-        training session.
+        Two recipes that build the same quantizers share a key, so the semantic
+        configuration identifies the recipe rather than its ``repr``, which carries
+        fields that do not affect quantization.
         """
-        recipe_repr = recipe.__dict__.get("_cached_repr") if recipe is not None else None
-        if recipe_repr is None:
-            recipe_repr = str(recipe)
+        recipe_config = recipe.quantizer_config() if recipe is not None else None
         group_id = id(group) if group is not None else None
-        return f"recipe={recipe_repr},group={group_id}"
+        return f"recipe={recipe_config!r},group={group_id}"
 
     @classmethod
     def _prepare_autocast_enter(

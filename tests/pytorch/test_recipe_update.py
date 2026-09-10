@@ -615,16 +615,28 @@ def test_candidate_update_is_not_published_during_planning():
     assert not module._fp8_workspaces  # pylint: disable=protected-access
 
 
-def test_runtime_snapshot_does_not_copy_caller_repr_cache():
-    """Caller display history must not affect a runtime snapshot or its checkpoint bytes."""
+def test_runtime_snapshot_keeps_caches_but_not_in_checkpoint_bytes():
+    """Caller display history must not affect a snapshot's checkpoint bytes.
+
+    The snapshot keeps the caller's derived caches, because comparing a committed
+    runtime against later configurations must not rebuild one every time. Cache
+    state is excluded where it would actually matter: the serialized payload.
+    """
     recipe = _make_counting_recipe(("runtime-repr-cache", 1), [])
     str(recipe)
     module = Linear(16, 16, bias=False, device="cuda", name="linear")
 
     update = _prepare_runtime_update(module, recipe, revision=1)
+    snapshot = update.candidate.recipe
 
     assert recipe.__dict__["_cached_repr"] is not None
-    assert update.candidate.recipe.__dict__["_cached_repr"] is None
+    assert snapshot is not recipe
+    assert snapshot.quantizer_config() is recipe.quantizer_config()
+
+    # The serialized payload is where display history would otherwise leak.
+    payload = snapshot.__getstate__()
+    assert "_cached_repr" not in payload
+    assert "_cached_quantizer_config" not in payload
 
 
 def test_uninitialized_runtime_can_be_prepared_without_publication():

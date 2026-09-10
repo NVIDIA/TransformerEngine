@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Base modules and utilities for TransformerEngine PyTorch API"""
+
 import copy
 import io
 import math
@@ -1239,10 +1240,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         # reduction buckets must retain the exact configuration that this
         # candidate validated, even if the caller later mutates and reuses the
         # same recipe instance.
+        # ``Recipe.__copy__`` keeps the derived caches, and ``__getstate__`` keeps
+        # them out of the checkpoint, so the snapshot needs no cache surgery here.
         runtime_recipe = copy.copy(recipe)
-        # Do not snapshot a caller-populated display cache. Whether ``repr`` was
-        # requested before runtime construction must not change checkpoint bytes.
-        object.__setattr__(runtime_recipe, "_cached_repr", None)
 
         forward_state = RecipeState.create(  # pylint: disable=assignment-from-none
             runtime_recipe,

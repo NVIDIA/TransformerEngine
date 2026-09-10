@@ -668,12 +668,15 @@ class DotProductAttention(TransformerEngineBaseModule):
     tensor remains in BF16. For MXFP8 attention, the fused kernel handles the S/dP slots
     internally, so their factory-provided quantizers are not consumed::
 
-        from transformer_engine.common.recipe import CustomRecipe
+        from transformer_engine.common.recipe import CustomRecipe, quantizer_factory
         from transformer_engine.pytorch.constants import DType
         from transformer_engine.pytorch.custom_recipes.quantizer_factories import nvfp4_factory
         from transformer_engine.pytorch.quantization import autocast
         from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 
+        # The key stands in for the factory's behavior; bump its revision whenever
+        # the body changes, so quantizers built from the old behavior are rebuilt.
+        @quantizer_factory(key=("nvfp4_linear_mxfp8_dpa", 1))
         def nvfp4_linear_mxfp8_dpa_factory(role):
             # NVFP4 for Linear roles and MXFP8 for supported DPA roles.
             is_dpa = role is not None and role.module_type == "dpa"
