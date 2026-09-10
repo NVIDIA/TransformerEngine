@@ -8,6 +8,8 @@
 #include <cuda_runtime.h>
 #include <transformer_engine/fused_router.h>
 
+#include <algorithm>
+
 #include "../common.h"
 #include "../util/logging.h"
 #include "../utils.cuh"
@@ -17,11 +19,34 @@
 namespace transformer_engine {
 namespace fused_router {
 
-template <typename DataType, typename IndexType>
+// Fixed launch geometry for each input shape bounds scratch to at most 1 KiB.
+// Each CTA contributes one FP32 partial sum.
+constexpr int kAuxLossMaxReductionBlocks = 256;
+
+int aux_loss_reduction_blocks(int num_rows) {
+  NVTE_CHECK(num_rows >= 0, "num_rows must be nonnegative, got ", num_rows);
+  return std::max(1, std::min(num_rows, kAuxLossMaxReductionBlocks));
+}
+
+void check_aux_loss_workspace(const Tensor& workspace, int num_rows) {
+  const size_t num_partials = aux_loss_reduction_blocks(num_rows);
+  NVTE_CHECK(workspace.data.dptr != nullptr, "Aux-loss workspace must be preallocated.");
+  NVTE_CHECK(workspace.data.dtype == DType::kFloat32, "Aux-loss workspace must have FP32 dtype.");
+  NVTE_CHECK(workspace.numel() >= num_partials, "Aux-loss workspace needs at least ", num_partials,
+             " FP32 elements, got ", workspace.numel());
+}
+
+void check_aux_loss_const_buffer(const Tensor& const_buf) {
+  NVTE_CHECK(const_buf.data.dtype == DType::kFloat32 && const_buf.numel() >= 2,
+             "Aux-loss constant buffer must contain at least two FP32 elements.");
+}
+
+template <typename DataType, typename IndexType, bool kDeterministic>
 __global__ void fused_moe_aux_loss_forward_kernel(const DataType* probs,
                                                   const IndexType* tokens_per_expert,
                                                   int total_num_tokens, int num_rows, int num_cols,
-                                                  int topk, float coeff, float* Coeff_buf) {
+                                                  int topk, float coeff, float* Coeff_buf,
+                                                  float* partial_sums) {
   // -----------------------------------------------------------------------
   // 1) Write the CPU-computed coefficient into a device buffer to re-use in BWD
   // -----------------------------------------------------------------------
@@ -66,7 +91,13 @@ __global__ void fused_moe_aux_loss_forward_kernel(const DataType* probs,
     CompType block_sum = warp_reduce_on_shmem<CompType, ReduceFuncType::SUM>(
         shmem_block, static_cast<int>(blockDim.x), lane_id);
     if (lane_id == 0) {
-      atomicAdd(&Coeff_buf[1], static_cast<float>(block_sum * coeff));
+      if constexpr (kDeterministic) {
+        // Every CTA writes its own slot, including empty row partitions.
+        partial_sums[blockIdx.x] = static_cast<float>(block_sum * coeff);
+      } else {
+        // Retained only for callers of the original C API.
+        atomicAdd(&Coeff_buf[1], static_cast<float>(block_sum * coeff));
+      }
     }
   }
 }
@@ -77,16 +108,34 @@ __global__ void convert_accum_to_output(const float* Coeff_buf, DataType* aux_lo
   aux_loss[0] = static_cast<DataType>(Coeff_buf[1]);
 }
 
+// One full warp reads fixed, strided slices and combines them with a fixed tree.
+// This replaces the legacy cast kernel, so deterministic forward still uses two
+// launches. The final FP32 sum remains in Coeff_buf[1] for compatibility.
+template <typename DataType>
+__global__ void reduce_aux_loss_partials(const float* partial_sums, int num_partials,
+                                         float* Coeff_buf, DataType* aux_loss) {
+  const int lane_id = threadIdx.x;
+  float sum = 0.0f;
+  for (int i = lane_id; i < num_partials; i += kThreadsPerWarp) {
+    sum += partial_sums[i];
+  }
+  for (int offset = kThreadsPerWarp / 2; offset > 0; offset /= 2) {
+    sum += __shfl_down_sync(0xffffffff, sum, offset);
+  }
+  if (lane_id == 0) {
+    Coeff_buf[1] = sum;
+    aux_loss[0] = static_cast<DataType>(sum);
+  }
+}
+
 /* -------------------------------------------------------------------------
  *  Kernel launcher -- simplified (no cluster launch).
  * ------------------------------------------------------------------------- */
-template <typename DataType, typename IndexType>
-void fused_moe_aux_loss_forward_kernel_launcher(const DataType* probs,
-                                                const IndexType* tokens_per_expert,
-                                                int total_num_tokens, int num_experts, int num_rows,
-                                                int num_cols, int topk, float coeff,
-                                                DataType* aux_loss, float* Coeff_buf,
-                                                cudaStream_t stream) {
+template <typename DataType, typename IndexType, bool kDeterministic = false>
+void fused_moe_aux_loss_forward_kernel_launcher(
+    const DataType* probs, const IndexType* tokens_per_expert, int total_num_tokens,
+    int num_experts, int num_rows, int num_cols, int topk, float coeff, DataType* aux_loss,
+    float* Coeff_buf, cudaStream_t stream, float* partial_sums = nullptr) {
   NVTE_CHECK(num_cols > 0, "num_cols must be positive, got ", num_cols);
   NVTE_CHECK(num_experts > 0, "num_experts must be positive, got ", num_experts);
   // Sequence aux loss batches independent sequences along the expert dimension.
@@ -97,39 +146,47 @@ void fused_moe_aux_loss_forward_kernel_launcher(const DataType* probs,
   const int block_size = ((std::min(1024, num_cols) + static_cast<int>(kThreadsPerWarp) - 1) /
                           static_cast<int>(kThreadsPerWarp)) *
                          static_cast<int>(kThreadsPerWarp);
-  const int grid_size = cuda::sm_count() * 2;
+  const int grid_size = kDeterministic ? aux_loss_reduction_blocks(num_rows) : cuda::sm_count() * 2;
 
   // One CompType per thread in shared memory.
   const size_t smem_size = block_size * sizeof(CompType);
   check_shared_memory_capacity_num_experts(smem_size, num_cols);
 
-  // Compute final coefficient and zero the float accumulator (Coeff_buf[1]) before launch.
+  // Keep coefficient placement unchanged: scale each partial before summing.
   const float C_coeff = (num_experts * coeff) / topk / total_num_tokens / total_num_tokens;
-  NVTE_CHECK_CUDA(cudaMemsetAsync(Coeff_buf + 1, 0, sizeof(float), stream));
-  fused_moe_aux_loss_forward_kernel<DataType, IndexType>
+  if constexpr (!kDeterministic) {
+    NVTE_CHECK_CUDA(cudaMemsetAsync(Coeff_buf + 1, 0, sizeof(float), stream));
+  }
+  fused_moe_aux_loss_forward_kernel<DataType, IndexType, kDeterministic>
       <<<grid_size, block_size, smem_size, stream>>>(probs, tokens_per_expert, total_num_tokens,
-                                                     num_rows, num_cols, topk, C_coeff, Coeff_buf);
+                                                     num_rows, num_cols, topk, C_coeff, Coeff_buf,
+                                                     partial_sums);
   NVTE_CHECK_CUDA(cudaGetLastError());
 
-  // Convert the float accumulator to the output DataType.
-  convert_accum_to_output<DataType><<<1, 1, 0, stream>>>(Coeff_buf, aux_loss);
+  if constexpr (kDeterministic) {
+    reduce_aux_loss_partials<DataType>
+        <<<1, kThreadsPerWarp, 0, stream>>>(partial_sums, grid_size, Coeff_buf, aux_loss);
+  } else {
+    convert_accum_to_output<DataType><<<1, 1, 0, stream>>>(Coeff_buf, aux_loss);
+  }
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
+template <bool kDeterministic = false>
 void fused_moe_aux_loss_forward(const Tensor& probs, const Tensor& tokens_per_expert,
                                 int total_num_tokens, int num_experts, int num_rows, int num_cols,
                                 int topk, float coeff, Tensor& aux_loss, Tensor& Coeff_buf,
-                                cudaStream_t stream) {
+                                cudaStream_t stream, float* partial_sums = nullptr) {
   TE_ROUTER_PROBS_TYPE_SWITCH_ALL(
       probs.data.dtype, DataType,
       TE_ROUTER_INDEX_TYPE_SWITCH_ALL(
           tokens_per_expert.data.dtype, IndexType,
-          fused_moe_aux_loss_forward_kernel_launcher<DataType, IndexType>(
+          fused_moe_aux_loss_forward_kernel_launcher<DataType, IndexType, kDeterministic>(
               reinterpret_cast<DataType*>(probs.data.dptr),
               reinterpret_cast<IndexType*>(tokens_per_expert.data.dptr), total_num_tokens,
               num_experts, num_rows, num_cols, topk, coeff,
               reinterpret_cast<DataType*>(aux_loss.data.dptr),
-              reinterpret_cast<float*>(Coeff_buf.data.dptr), stream);););
+              reinterpret_cast<float*>(Coeff_buf.data.dptr), stream, partial_sums);););
 }
 
 /* -------------------------------------------------------------------------
@@ -138,10 +195,11 @@ void fused_moe_aux_loss_forward(const Tensor& probs, const Tensor& tokens_per_ex
  *  lane computes C_coeff directly from the device value. The first CTA also
  *  writes C_coeff into Coeff_buf[0] for backward.
  * ------------------------------------------------------------------------- */
-template <typename DataType, typename IndexType>
+template <typename DataType, typename IndexType, bool kDeterministic>
 __global__ void fused_moe_aux_loss_forward_kernel_graph_safe(
     const DataType* probs, const IndexType* tokens_per_expert, const int64_t* total_num_tokens_ptr,
-    int num_experts, int num_rows, int num_cols, int topk, float coeff, float* Coeff_buf) {
+    int num_experts, int num_rows, int num_cols, int topk, float coeff, float* Coeff_buf,
+    float* partial_sums) {
   // Reduction body matches the scalar-input kernel above.
   CompType thread_sum = CompType(0);
   for (int col = threadIdx.x; col < num_cols; col += blockDim.x) {
@@ -170,16 +228,20 @@ __global__ void fused_moe_aux_loss_forward_kernel_graph_safe(
       if (blockIdx.x == 0) {
         Coeff_buf[0] = C_coeff;
       }
-      atomicAdd(&Coeff_buf[1], static_cast<float>(block_sum * C_coeff));
+      if constexpr (kDeterministic) {
+        partial_sums[blockIdx.x] = static_cast<float>(block_sum * C_coeff);
+      } else {
+        atomicAdd(&Coeff_buf[1], static_cast<float>(block_sum * C_coeff));
+      }
     }
   }
 }
 
-template <typename DataType, typename IndexType>
+template <typename DataType, typename IndexType, bool kDeterministic = false>
 void fused_moe_aux_loss_forward_kernel_launcher_graph_safe(
     const DataType* probs, const IndexType* tokens_per_expert, const int64_t* total_num_tokens_dev,
     int num_experts, int num_rows, int num_cols, int topk, float coeff, DataType* aux_loss,
-    float* Coeff_buf, cudaStream_t stream) {
+    float* Coeff_buf, cudaStream_t stream, float* partial_sums = nullptr) {
   NVTE_CHECK(num_cols > 0, "num_cols must be positive, got ", num_cols);
   NVTE_CHECK(num_experts > 0, "num_experts must be positive, got ", num_experts);
   NVTE_CHECK(num_cols % num_experts == 0, "Number of input columns (", num_cols,
@@ -188,27 +250,35 @@ void fused_moe_aux_loss_forward_kernel_launcher_graph_safe(
   const int block_size = ((std::min(1024, num_cols) + static_cast<int>(kThreadsPerWarp) - 1) /
                           static_cast<int>(kThreadsPerWarp)) *
                          static_cast<int>(kThreadsPerWarp);
-  const int grid_size = cuda::sm_count() * 2;
+  const int grid_size = kDeterministic ? aux_loss_reduction_blocks(num_rows) : cuda::sm_count() * 2;
   const size_t smem_size = block_size * sizeof(CompType);
   check_shared_memory_capacity_num_experts(smem_size, num_cols);
 
-  // Zero the float accumulator. The main kernel writes Coeff_buf[0] for backward.
-  NVTE_CHECK_CUDA(cudaMemsetAsync(Coeff_buf + 1, 0, sizeof(float), stream));
-  fused_moe_aux_loss_forward_kernel_graph_safe<DataType, IndexType>
+  // The main kernel refreshes Coeff_buf[0] for backward on every graph replay.
+  if constexpr (!kDeterministic) {
+    NVTE_CHECK_CUDA(cudaMemsetAsync(Coeff_buf + 1, 0, sizeof(float), stream));
+  }
+  fused_moe_aux_loss_forward_kernel_graph_safe<DataType, IndexType, kDeterministic>
       <<<grid_size, block_size, smem_size, stream>>>(probs, tokens_per_expert, total_num_tokens_dev,
                                                      num_experts, num_rows, num_cols, topk, coeff,
-                                                     Coeff_buf);
+                                                     Coeff_buf, partial_sums);
   NVTE_CHECK_CUDA(cudaGetLastError());
 
-  convert_accum_to_output<DataType><<<1, 1, 0, stream>>>(Coeff_buf, aux_loss);
+  if constexpr (kDeterministic) {
+    reduce_aux_loss_partials<DataType>
+        <<<1, kThreadsPerWarp, 0, stream>>>(partial_sums, grid_size, Coeff_buf, aux_loss);
+  } else {
+    convert_accum_to_output<DataType><<<1, 1, 0, stream>>>(Coeff_buf, aux_loss);
+  }
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
+template <bool kDeterministic = false>
 void fused_moe_aux_loss_forward_graph_safe(const Tensor& probs, const Tensor& tokens_per_expert,
                                            const Tensor& total_num_tokens, int num_experts,
                                            int num_rows, int num_cols, int topk, float coeff,
-                                           Tensor& aux_loss, Tensor& Coeff_buf,
-                                           cudaStream_t stream) {
+                                           Tensor& aux_loss, Tensor& Coeff_buf, cudaStream_t stream,
+                                           float* partial_sums = nullptr) {
   NVTE_CHECK(total_num_tokens.data.dtype == DType::kInt64,
              "total_num_tokens must be a 0-dim int64 tensor; got dtype ",
              static_cast<int>(total_num_tokens.data.dtype));
@@ -218,12 +288,13 @@ void fused_moe_aux_loss_forward_graph_safe(const Tensor& probs, const Tensor& to
       probs.data.dtype, DataType,
       TE_ROUTER_INDEX_TYPE_SWITCH_ALL(
           tokens_per_expert.data.dtype, IndexType,
-          fused_moe_aux_loss_forward_kernel_launcher_graph_safe<DataType, IndexType>(
+          fused_moe_aux_loss_forward_kernel_launcher_graph_safe<DataType, IndexType,
+                                                                kDeterministic>(
               reinterpret_cast<DataType*>(probs.data.dptr),
               reinterpret_cast<IndexType*>(tokens_per_expert.data.dptr),
               reinterpret_cast<const int64_t*>(total_num_tokens.data.dptr), num_experts, num_rows,
               num_cols, topk, coeff, reinterpret_cast<DataType*>(aux_loss.data.dptr),
-              reinterpret_cast<float*>(Coeff_buf.data.dptr), stream);););
+              reinterpret_cast<float*>(Coeff_buf.data.dptr), stream, partial_sums);););
 }
 
 template <typename DataType, typename IndexType>
@@ -301,6 +372,45 @@ void nvte_fused_moe_aux_loss_forward_graph_safe(const NVTETensor probs,
       *convertNVTETensorCheck(probs), *convertNVTETensorCheck(tokens_per_expert),
       *convertNVTETensorCheck(total_num_tokens), num_experts, num_rows, num_cols, topk, coeff,
       *convertNVTETensorCheck(aux_loss), *convertNVTETensorCheck(Coeff_buf), stream);
+}
+
+size_t nvte_get_moe_aux_loss_workspace_size() {
+  NVTE_API_CALL(nvte_get_moe_aux_loss_workspace_size);
+  return transformer_engine::fused_router::kAuxLossMaxReductionBlocks * sizeof(float);
+}
+
+void nvte_fused_moe_aux_loss_forward_v2(const NVTETensor probs, const NVTETensor tokens_per_expert,
+                                        int total_num_tokens, int num_experts, int num_rows,
+                                        int num_cols, int topk, float coeff, NVTETensor aux_loss,
+                                        NVTETensor Const_buf, NVTETensor workspace,
+                                        cudaStream_t stream) {
+  NVTE_API_CALL(nvte_fused_moe_aux_loss_forward_v2);
+  using namespace transformer_engine;
+  auto& scratch = *convertNVTETensorCheck(workspace);
+  fused_router::check_aux_loss_workspace(scratch, num_rows);
+  auto& constants = *convertNVTETensorCheck(Const_buf);
+  fused_router::check_aux_loss_const_buffer(constants);
+  fused_router::fused_moe_aux_loss_forward<true>(
+      *convertNVTETensorCheck(probs), *convertNVTETensorCheck(tokens_per_expert), total_num_tokens,
+      num_experts, num_rows, num_cols, topk, coeff, *convertNVTETensorCheck(aux_loss), constants,
+      stream, reinterpret_cast<float*>(scratch.data.dptr));
+}
+
+void nvte_fused_moe_aux_loss_forward_graph_safe_v2(
+    const NVTETensor probs, const NVTETensor tokens_per_expert, const NVTETensor total_num_tokens,
+    int num_experts, int num_rows, int num_cols, int topk, float coeff, NVTETensor aux_loss,
+    NVTETensor Const_buf, NVTETensor workspace, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_fused_moe_aux_loss_forward_graph_safe_v2);
+  using namespace transformer_engine;
+  auto& scratch = *convertNVTETensorCheck(workspace);
+  fused_router::check_aux_loss_workspace(scratch, num_rows);
+  auto& constants = *convertNVTETensorCheck(Const_buf);
+  fused_router::check_aux_loss_const_buffer(constants);
+  fused_router::fused_moe_aux_loss_forward_graph_safe<true>(
+      *convertNVTETensorCheck(probs), *convertNVTETensorCheck(tokens_per_expert),
+      *convertNVTETensorCheck(total_num_tokens), num_experts, num_rows, num_cols, topk, coeff,
+      *convertNVTETensorCheck(aux_loss), constants, stream,
+      reinterpret_cast<float*>(scratch.data.dptr));
 }
 
 void nvte_fused_moe_aux_loss_backward(const NVTETensor Const_buf,
