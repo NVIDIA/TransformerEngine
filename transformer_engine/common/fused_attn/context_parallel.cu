@@ -273,10 +273,10 @@ __global__ void thd_lse_kernel(float *lse, float *half_lse, int *cu_seqlens, int
  **************************************************************************************************/
 
 template <typename dtype, int only_second_half, int tile_size, bool lse_packed>
-__global__ void thd_out_correction_kernel(dtype *out, dtype *out_per_step, float *lse,
-                                          float *lse_per_step, int *cu_seqlens, int batch,
-                                          int num_heads, int dim_per_head, int lse_seqlen,
-                                          int lse_per_step_seqlen) {
+__global__ void thd_out_correction_kernel(dtype *out, dtype *out_per_step, float *old_lse,
+                                          float *lse, float *lse_per_step, int *cu_seqlens,
+                                          int batch, int num_heads, int dim_per_head,
+                                          int lse_seqlen, int lse_per_step_seqlen) {
   extern __shared__ int cu_seqlens_s[];
   for (int i = threadIdx.x; i <= batch; i += blockDim.x) {
     cu_seqlens_s[i] = cu_seqlens[i] / (only_second_half + 1);
@@ -304,6 +304,7 @@ __global__ void thd_out_correction_kernel(dtype *out, dtype *out_per_step, float
         idx = row * lse_seqlen + col + seq_len * only_second_half;
         idx_per_step = row * lse_per_step_seqlen + col;
       }
+      float old_lse_corrected_exp = expf(old_lse[idx] - lse[idx]);
       float lse_corrected_exp = expf(lse_per_step[idx_per_step] - lse[idx]);
 
       idx = token_id + cu_seqlens_s[seq_id + 1] * only_second_half;
@@ -318,10 +319,13 @@ __global__ void thd_out_correction_kernel(dtype *out, dtype *out_per_step, float
         dtype *p_per_step = reinterpret_cast<dtype *>(&data_per_step);
         dtype *p = reinterpret_cast<dtype *>(&data);
         for (int k = 0; k < sizeof(float4) / sizeof(dtype); k++) {
-          p[k] = p[k] +
-                 (p_per_step[k] == static_cast<dtype>(0.f)
-                      ? static_cast<dtype>(0.f)
-                      : static_cast<dtype>(static_cast<float>(p_per_step[k]) * lse_corrected_exp));
+          float old_out = p[k] == static_cast<dtype>(0.f)
+                              ? 0.f
+                              : static_cast<float>(p[k]) * old_lse_corrected_exp;
+          float out_per_step = p_per_step[k] == static_cast<dtype>(0.f)
+                                   ? 0.f
+                                   : static_cast<float>(p_per_step[k]) * lse_corrected_exp;
+          p[k] = static_cast<dtype>(old_out + out_per_step);
         }
         reinterpret_cast<float4 *>(cur_out)[j] = data;
       }
@@ -551,20 +555,25 @@ void thd_read_second_half_lse(const Tensor &lse, const Tensor &cu_seqlens, Tenso
  **************************************************************************************************/
 
 template <typename dtype, int only_second_half>
-static void thd_out_correction_helper(Tensor out, const Tensor &out_per_step, const Tensor &lse,
-                                      const Tensor &lse_per_step, const Tensor &cu_seqlens,
-                                      bool lse_packed, cudaStream_t stream) {
+static void thd_out_correction_helper(Tensor out, const Tensor &out_per_step, const Tensor &old_lse,
+                                      const Tensor &lse, const Tensor &lse_per_step,
+                                      const Tensor &cu_seqlens, bool lse_packed,
+                                      cudaStream_t stream) {
   using namespace transformer_engine;
   NVTE_CHECK(out.dtype() == out_per_step.dtype());
+  NVTE_CHECK(old_lse.dtype() == DType::kFloat32);
   NVTE_CHECK(lse.dtype() == DType::kFloat32);
   NVTE_CHECK(lse_per_step.dtype() == DType::kFloat32);
   NVTE_CHECK(cu_seqlens.dtype() == DType::kInt32);
 
   auto out_shape = out.shape();
+  auto old_lse_shape = old_lse.shape();
   auto lse_shape = lse.shape();
   auto out_per_step_shape = out_per_step.shape();
   auto lse_per_step_shape = lse_per_step.shape();
   auto cu_seqlens_shape = cu_seqlens.shape();
+
+  NVTE_CHECK(old_lse_shape == lse_shape);
 
   int total_tokens = out_shape[0];
   int num_heads = out_shape[1];
@@ -607,7 +616,7 @@ static void thd_out_correction_helper(Tensor out, const Tensor &out_per_step, co
         <<<grid, block, sizeof(int) * (batch + 1), stream>>>(
             reinterpret_cast<dtype *>(out.data.dptr),
             reinterpret_cast<dtype *>(out_per_step.data.dptr),
-            reinterpret_cast<float *>(lse.data.dptr),
+            reinterpret_cast<float *>(old_lse.data.dptr), reinterpret_cast<float *>(lse.data.dptr),
             reinterpret_cast<float *>(lse_per_step.data.dptr),
             reinterpret_cast<int *>(cu_seqlens.data.dptr), batch, num_heads, dim_per_head,
             lse_seqlen, lse_per_step_seqlen);
@@ -617,7 +626,7 @@ static void thd_out_correction_helper(Tensor out, const Tensor &out_per_step, co
         <<<grid, block, sizeof(int) * (batch + 1), stream>>>(
             reinterpret_cast<dtype *>(out.data.dptr),
             reinterpret_cast<dtype *>(out_per_step.data.dptr),
-            reinterpret_cast<float *>(lse.data.dptr),
+            reinterpret_cast<float *>(old_lse.data.dptr), reinterpret_cast<float *>(lse.data.dptr),
             reinterpret_cast<float *>(lse_per_step.data.dptr),
             reinterpret_cast<int *>(cu_seqlens.data.dptr), batch, num_heads, dim_per_head,
             lse_seqlen, lse_per_step_seqlen);
@@ -625,20 +634,20 @@ static void thd_out_correction_helper(Tensor out, const Tensor &out_per_step, co
   }
 }
 
-void thd_out_correction(Tensor out, const Tensor &out_per_step, const Tensor &lse,
-                        const Tensor &lse_per_step, const Tensor &cu_seqlens, bool only_second_half,
-                        bool lse_packed, cudaStream_t stream) {
+void thd_out_correction(Tensor out, const Tensor &out_per_step, const Tensor &old_lse,
+                        const Tensor &lse, const Tensor &lse_per_step, const Tensor &cu_seqlens,
+                        bool only_second_half, bool lse_packed, cudaStream_t stream) {
   using namespace transformer_engine;
   if (only_second_half) {
     TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
         out.dtype(), dtype,
-        thd_out_correction_helper<dtype, 1>(out, out_per_step, lse, lse_per_step, cu_seqlens,
-                                            lse_packed, stream););
+        thd_out_correction_helper<dtype, 1>(out, out_per_step, old_lse, lse, lse_per_step,
+                                            cu_seqlens, lse_packed, stream););
   } else {
     TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
         out.dtype(), dtype,
-        thd_out_correction_helper<dtype, 0>(out, out_per_step, lse, lse_per_step, cu_seqlens,
-                                            lse_packed, stream););
+        thd_out_correction_helper<dtype, 0>(out, out_per_step, old_lse, lse, lse_per_step,
+                                            cu_seqlens, lse_packed, stream););
   }
 }
 
@@ -877,16 +886,17 @@ void nvte_cp_thd_read_second_half_lse(const NVTETensor &lse, const NVTETensor &c
 }
 
 void nvte_cp_thd_out_correction(NVTETensor out, const NVTETensor &out_per_step,
-                                const NVTETensor &lse, const NVTETensor &lse_per_step,
-                                const NVTETensor &cu_seqlens, int only_second_half, int lse_packed,
-                                cudaStream_t stream) {
+                                const NVTETensor &old_lse, const NVTETensor &lse,
+                                const NVTETensor &lse_per_step, const NVTETensor &cu_seqlens,
+                                int only_second_half, int lse_packed, cudaStream_t stream) {
   NVTE_API_CALL(nvte_thd_out_correction);
   using namespace transformer_engine;
 
   context_parallel::thd_out_correction(
       *convertNVTETensorCheck(out), *convertNVTETensorCheck(out_per_step),
-      *convertNVTETensorCheck(lse), *convertNVTETensorCheck(lse_per_step),
-      *convertNVTETensorCheck(cu_seqlens), only_second_half, lse_packed, stream);
+      *convertNVTETensorCheck(old_lse), *convertNVTETensorCheck(lse),
+      *convertNVTETensorCheck(lse_per_step), *convertNVTETensorCheck(cu_seqlens), only_second_half,
+      lse_packed, stream);
 }
 
 void nvte_cp_thd_grad_correction(NVTETensor grad, const NVTETensor &grad_per_step,
