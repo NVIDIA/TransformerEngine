@@ -343,7 +343,7 @@ class FusedMLAQUpProjRopeQuant:
         blk = MXFP8_BLOCK_SCALING_SIZE
         # Both rowwise and columnwise Q are required:
         # - Forward QK^T uses rowwise
-        # - cuDNN backward (fused_attn_fp8_bwd_impl) requires columnwise for dK gradient
+        # - The cuDNN backward graph requires columnwise for the dK gradient
         quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True)
         return MXFP8Tensor(
             shape=(s, b, nh, d),

@@ -5,8 +5,8 @@
 """PyTorch implementation of cuDNN-backed scaled dot-product attention.
 
 All cuDNN graph construction and execution in this module goes through the
-``nvidia-cudnn-frontend`` Python API.  TE common retains its C++ implementation
-for other framework frontends, but PyTorch does not call it.
+``nvidia-cudnn-frontend`` Python API rather than a TE-common attention
+implementation.
 """
 
 from __future__ import annotations

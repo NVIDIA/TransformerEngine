@@ -12,29 +12,6 @@
 namespace transformer_engine {
 
 // get cuDNN data type
-cudnnDataType_t get_cudnn_dtype(const transformer_engine::DType t) {
-  using namespace transformer_engine;
-  switch (t) {
-    case DType::kInt32:
-      return CUDNN_DATA_INT32;
-    case DType::kInt64:
-      return CUDNN_DATA_INT64;
-    case DType::kFloat16:
-      return CUDNN_DATA_HALF;
-    case DType::kFloat32:
-      return CUDNN_DATA_FLOAT;
-    case DType::kBFloat16:
-      return CUDNN_DATA_BFLOAT16;
-    case DType::kFloat8E4M3:
-      return CUDNN_DATA_FP8_E4M3;
-    case DType::kFloat8E5M2:
-      return CUDNN_DATA_FP8_E5M2;
-    default:
-      NVTE_ERROR("Invalid cuDNN data type. \n");
-  }
-}
-
-// get cuDNN data type
 cudnn_frontend::DataType_t get_cudnn_fe_dtype(const transformer_engine::DType t) {
   using namespace transformer_engine;
   switch (t) {

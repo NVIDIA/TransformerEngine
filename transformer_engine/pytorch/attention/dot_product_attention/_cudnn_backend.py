@@ -5,8 +5,8 @@
 """cuDNN SDPA capability selection for the PyTorch frontend.
 
 This is intentionally kept in Python alongside the Python cuDNN graph builder.
-The conditions mirror ``nvte_get_fused_attn_backend`` in TE common, which is
-still used by the other framework frontends.
+The conditions preserve the compatibility policy of the removed TE-common
+attention backend selector.
 """
 
 from __future__ import annotations

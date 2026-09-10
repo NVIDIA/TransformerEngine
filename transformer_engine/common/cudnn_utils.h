@@ -23,8 +23,6 @@ void CreateCuDNNHandle(cudnnHandle_t* handle);
 
 }  // namespace detail
 
-cudnnDataType_t get_cudnn_dtype(const transformer_engine::DType t);
-
 cudnn_frontend::DataType_t get_cudnn_fe_dtype(const transformer_engine::DType t);
 
 using cudnnExecutionPlanManager = detail::HandleManager<cudnnHandle_t, detail::CreateCuDNNHandle>;

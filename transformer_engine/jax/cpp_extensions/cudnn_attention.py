@@ -211,7 +211,7 @@ def _device_arch() -> int:
 
 
 def ragged_graph_batch_size(input_batch: int, max_segments_per_seq: int) -> int:
-    """Match TE common's cuDNN graph batch-size bucket for ragged attention."""
+    """Preserve the legacy cuDNN graph batch-size bucket for ragged attention."""
     batch = int(input_batch) * int(max_segments_per_seq)
     # Bucketing is part of cuDNN's ragged-stats layout, introduced in 9.6.
     # Older versions use dense stats and require the physical metadata extent.
@@ -225,7 +225,7 @@ def ragged_graph_batch_size(input_batch: int, max_segments_per_seq: int) -> int:
 
 
 def _ragged_graph_token_count(tokens: int) -> int:
-    """Match TE common's cuDNN graph token-count bucket for ragged attention."""
+    """Preserve the legacy cuDNN graph token-count bucket for ragged attention."""
     tokens = int(tokens)
     if tokens <= 1024:
         return 1024
