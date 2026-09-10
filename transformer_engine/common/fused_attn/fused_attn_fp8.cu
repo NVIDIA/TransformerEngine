@@ -701,9 +701,8 @@ void fused_attn_fp8_bwd_impl(
   if ((is_ragged_q || is_ragged_kv) && cudnn_runtime_version >= kFP8THDRaggedCudnnVersion) {
     NVTE_CHECK(is_padding, "Ragged QKV input requires padding or padding_causal mask!");
     if (sm_arch_ != 120) {
+      // Ragged offsets address packed storage; sequence axes stay per-sequence maxima.
       b = max_b;
-      s_q = is_ragged_q ? max_t_q : s_q;
-      s_kv = is_ragged_kv ? max_t_kv : s_kv;
     }
   }
 
