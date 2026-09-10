@@ -164,13 +164,16 @@ void init_router_bindings(pybind11::module &m) {
   m.def("fused_score_for_moe_aux_loss_bwd", &fused_score_for_moe_aux_loss_bwd,
         py::arg("intermediate_output"), py::arg("grad_scores"), py::arg("grad_logits"),
         py::arg("topk"), py::arg("score_function"), "Fused aux loss with score function bwd");
+  m.def("get_moe_aux_loss_workspace_size", &get_moe_aux_loss_workspace_size);
   m.def("fused_moe_aux_loss_fwd", &fused_moe_aux_loss_fwd, py::arg("probs"),
         py::arg("tokens_per_expert"), py::arg("total_num_tokens"), py::arg("num_experts"),
         py::arg("num_rows"), py::arg("num_cols"), py::arg("topk"), py::arg("coeff"),
+        py::arg("deterministic") = false, py::arg("workspace") = py::none(),
         "Fused aux loss fwd (host-int total_num_tokens, host-folded C_coeff)");
   m.def("fused_moe_aux_loss_fwd_graph_safe", &fused_moe_aux_loss_fwd_graph_safe, py::arg("probs"),
         py::arg("tokens_per_expert"), py::arg("total_num_tokens"), py::arg("num_experts"),
         py::arg("num_rows"), py::arg("num_cols"), py::arg("topk"), py::arg("coeff"),
+        py::arg("deterministic") = false, py::arg("workspace") = py::none(),
         "Fused aux loss fwd (device-tensor total_num_tokens, CUDA-graph-safe)");
   m.def("fused_moe_aux_loss_bwd", &fused_moe_aux_loss_bwd, py::arg("Const_buf"),
         py::arg("tokens_per_expert"), py::arg("num_rows"), py::arg("num_cols"),
