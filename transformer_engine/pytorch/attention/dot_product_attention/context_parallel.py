@@ -2270,6 +2270,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         softmax_lse_in_packed_format,
                     )
         out = out.view(post_a2a_o_shape)
+        if qkv_format == "thd" and pad_between_seqs and not use_fused_attention:
+            # Partial-output correction can write FA3/FA4 padding rows.
+            _zero_thd_padding((out,), cu_seqlens_q_per_step[0], cu_seqlens_q_padded)
         out_part = out.to(fwd_nominal_dtype)
 
         if cp_size_a2a > 1:
@@ -4918,6 +4921,10 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             aux_ctx_tensors = [softmax_lse, rng_state]
             out_part = out_
 
+            # Clean FA3/FA4 padding before inverse A2A changes sequence order.
+            if qkv_format == "thd" and pad_between_seqs:
+                _zero_thd_padding((out_,), cu_seqlens_q, cu_seqlens_q_padded)
+
         # a2a: split s and gather h
         # [b, s, h//cp, d] -> [b*s//cp, h, d]
         # [s, b, h//cp, d] -> [s//cp*b, h, d]
@@ -5314,6 +5321,11 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                     *fa_backward_args_thd,
                     **fa_backward_kwargs,
                 )
+
+            # Clean FA3/FA4 padding before inverse A2A changes sequence order.
+            if ctx.dqkv_format == "thd" and ctx.pad_between_seqs:
+                _zero_thd_padding((dq,), cu_seqlens_q, cu_seqlens_q_padded)
+                _zero_thd_padding((dk, dv), cu_seqlens_kv, cu_seqlens_kv_padded)
 
         # dq, dk, dv:
         # FP8DS: torch.uint8
