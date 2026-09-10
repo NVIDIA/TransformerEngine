@@ -48,13 +48,7 @@
      id="g23"
      clip-path="url(#clipPath23)"
      transform="translate(0,-41.702408)">
-    <rect
-       x="0"
-       y="0"
-       width="960"
-       height="480"
-       fill="#ffffff"
-       id="rect1" />
+    
     <text
        font-family="'NVIDIA Sans', 'NVIDIA Sans_MSFontService', sans-serif"
        font-weight="700"
