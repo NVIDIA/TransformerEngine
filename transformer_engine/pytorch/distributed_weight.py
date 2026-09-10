@@ -9,7 +9,7 @@ protocol on the weight and injects it at construction. Dispatchers are list-shap
 GroupedLinear -> N; leader is ``weights[0]``) and no-op on plain tensors.
 """
 
-from typing import Any, List, Protocol, runtime_checkable
+from typing import Any, List, Protocol, Sequence, runtime_checkable
 
 import torch
 
@@ -19,6 +19,8 @@ __all__ = [
     "materialize_weight_for_forward",
     "materialize_weight_for_backward",
     "finalize_weight_grads",
+    "weight_grad_buffers",
+    "weight_grad_dtype",
 ]
 
 
@@ -50,7 +52,12 @@ class DistributedWeight(Protocol):
         """
 
     def grad_buffer(self) -> torch.Tensor:
-        """The gradient accumulation buffer for this weight."""
+        """Where the wgrad GEMM writes this weight's gradient.
+
+        The GEMM overwrites it and :meth:`finalize_group_grads` then reduces it, so it needs the
+        full unsharded weight shape and the dtype that reduction should use. Called on every
+        member of a group, unlike the group hooks above.
+        """
 
 
 def is_distributed_weight(weight: Any) -> bool:
@@ -99,6 +106,47 @@ def materialize_weight_for_backward(weights: Any) -> List[Any]:
         out = leader.materialize_group_for_backward()
         return list(out) if isinstance(out, (list, tuple)) else [out]
     return list(weights)
+
+
+def weight_grad_buffers(
+    weights: Any, weight_shape: Sequence[int], compute_dtype: torch.dtype, device: torch.device
+) -> List[torch.Tensor]:
+    """Per-weight buffers for the wgrad GEMM to write into.
+
+    A distributed weight brings its own, which skips this allocation and carries ``main_grad``'s
+    dtype by construction; anything else gets fresh scratch in the compute dtype.
+    """
+    if not isinstance(weights, (list, tuple)):
+        weights = [weights]
+    if is_distributed_weight(weights[0]):
+        buffers = [w.grad_buffer() for w in weights]
+        # Spot-check the leader: a shard-shaped buffer would let the GEMM write past the end.
+        if tuple(buffers[0].shape) != tuple(weight_shape):
+            raise RuntimeError(
+                f"grad_buffer() returned shape {tuple(buffers[0].shape)}; "
+                f"the wgrad GEMM needs {tuple(weight_shape)}."
+            )
+        return buffers
+    packed = torch.empty((len(weights), *weight_shape), dtype=compute_dtype, device=device)
+    return list(packed)
+
+
+def weight_grad_dtype(weights: Any, compute_dtype: torch.dtype) -> torch.dtype:
+    """Dtype for a wgrad buffer the caller allocates itself.
+
+    A distributed weight reduces its wgrad before accumulating, so the GEMM must already emit
+    ``main_grad``'s dtype -- otherwise the reduction rounds on every rank. Falls back to
+    ``compute_dtype`` for plain weights, and for an implementer whose ``main_grad`` the framework
+    has not attached yet.
+    """
+    if not isinstance(weights, (list, tuple)):
+        weights = [weights]
+    leader = weights[0]
+    if is_distributed_weight(leader):
+        main_grad = getattr(leader, "main_grad", None)
+        if main_grad is not None:
+            return main_grad.dtype
+    return compute_dtype
 
 
 def finalize_weight_grads(weights: Any, wgrads: List[Any]) -> List[Any]:
