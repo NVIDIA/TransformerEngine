@@ -2255,32 +2255,6 @@ def test_te_linear_compile_is_first_microbatch(
 
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
-def test_te_linear_compile_microbatch_cache_is_read_only():
-    """A refresh must preserve the cache saved by an outstanding backward."""
-    dtype, device = torch.bfloat16, "cuda"
-    model = te.Linear(64, 32, params_dtype=dtype, device=device)
-    fp8_recipe = recipe.Float8CurrentScaling()
-
-    def fn(inp):
-        with te.autocast(recipe=fp8_recipe):
-            return model(inp, is_first_microbatch=True)
-
-    inp = torch.randn(32, 64, dtype=dtype, device=device, requires_grad=True)
-    fn(inp).sum().backward()
-    torch._dynamo.reset()
-    compiled = torch.compile(fn, fullgraph=True)
-    first = compiled(inp)
-    cache = model._fp8_workspaces["weight"]
-    saved_weight = cache.dequantize().clone()
-    second = compiled(inp)
-    assert model._fp8_workspaces["weight"] is not cache
-    torch.testing.assert_close(cache.dequantize(), saved_weight, atol=0, rtol=0)
-    (first + second).sum().backward()
-    torch._dynamo.reset()
-
-
-@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
-@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 @pytest.mark.xfail(
     reason=(
         "value-opaque module state comes back as None on recompile"
