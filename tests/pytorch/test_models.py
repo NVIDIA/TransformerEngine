@@ -129,6 +129,31 @@ def test_mla_yarn_softmax_scale(mscale_all_dim):
     assert mla.softmax_scale == pytest.approx(m * m / math.sqrt(qk_head_dim))
 
 
+@pytest.mark.parametrize(
+    "kwargs,match",
+    [
+        ({"num_experts": 0}, "num_experts must be positive"),
+        ({"topk": 0}, "topk must be in"),
+        ({"topk": 9}, "topk must be in"),
+        ({"num_groups": 2}, "must be provided together"),
+        ({"group_topk": 1}, "must be provided together"),
+        ({"num_groups": 0, "group_topk": 1}, "num_groups must be positive"),
+        ({"num_groups": -2, "group_topk": 1}, "num_groups must be positive"),
+        ({"num_groups": 3, "group_topk": 1}, "divide num_experts"),
+        ({"num_groups": 2, "group_topk": 0}, "group_topk must be in"),
+        ({"num_groups": 2, "group_topk": -1}, "group_topk must be in"),
+        ({"num_groups": 2, "group_topk": 3}, "group_topk must be in"),
+        ({"num_groups": 2, "group_topk": 2, "topk": 3}, "topk must be divisible"),
+        ({"num_groups": 4, "group_topk": 1, "topk": 4}, "topk per group must not exceed"),
+    ],
+)
+def test_moe_rejects_invalid_routing_config(kwargs, match):
+    config = dict(num_experts=8, topk=2)
+    config.update(kwargs)
+    with pytest.raises(ValueError, match=match):
+        DeepSeekV3MoE(HIDDEN, moe_ffn_hidden_size=128, device="cpu", **config)
+
+
 @pytest.mark.parametrize("shared", [False, True], ids=["no_shared", "shared"])
 @pytest.mark.parametrize("grouped", [False, True], ids=["ungrouped", "grouped"])
 @pytest.mark.parametrize("topk", [2, 4])

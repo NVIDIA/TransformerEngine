@@ -79,9 +79,9 @@ class DeepSeekV3MoE(torch.nn.Module):
     topk : int, default = 8
           number of experts per token.
     num_groups : int, optional
-                number of expert groups for node-limited routing.
+                number of expert groups for node-limited routing; requires ``group_topk``.
     group_topk : int, optional
-                number of groups each token is limited to.
+                number of groups each token is limited to; requires ``num_groups``.
     routed_scaling_factor : float, default = 2.5
                            scaling applied to the routing probabilities.
     shared_expert_ffn_hidden_size : int, optional
@@ -115,6 +115,22 @@ class DeepSeekV3MoE(torch.nn.Module):
         ep_max_tokens_per_rank: Optional[int] = None,
     ) -> None:
         super().__init__()
+
+        if num_experts <= 0:
+            raise ValueError("num_experts must be positive.")
+        if not 1 <= topk <= num_experts:
+            raise ValueError("topk must be in [1, num_experts].")
+        if (num_groups is None) != (group_topk is None):
+            raise ValueError("num_groups and group_topk must be provided together.")
+        if num_groups is not None:
+            if num_groups <= 0 or num_experts % num_groups != 0:
+                raise ValueError("num_groups must be positive and divide num_experts.")
+            if not 1 <= group_topk <= num_groups:
+                raise ValueError("group_topk must be in [1, num_groups].")
+            if topk % group_topk != 0:
+                raise ValueError("topk must be divisible by group_topk.")
+            if topk // group_topk > num_experts // num_groups:
+                raise ValueError("topk per group must not exceed the number of experts per group.")
 
         dtype = params_dtype if params_dtype is not None else torch.get_default_dtype()
         self.hidden_size = hidden_size

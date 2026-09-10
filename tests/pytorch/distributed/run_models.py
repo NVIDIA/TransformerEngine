@@ -130,12 +130,21 @@ def test_layer_ep_matches_local(
             torch.testing.assert_close(ep_grad, ref_grads[global_e], rtol=0.1, atol=0.1)
 
     counts = ep_layer.mlp._last_tokens_per_expert.clone()
-    dist.all_reduce(counts)
+    dist.all_reduce(counts, group=ep_group)
     last_num_tokens = microbatches[-1][0].numel() // HIDDEN
     assert counts.sum().item() == ep_size * last_num_tokens * TOP_K
 
+    expected_bias = ep_layer.mlp.expert_bias.clone()
+    expected_bias += ep_layer.mlp.expert_bias_update_rate * torch.sign(
+        counts.float().mean() - counts.float()
+    )
+    ep_layer.mlp._last_tokens_per_expert = counts
     ep_layer.mlp.update_expert_bias()
-    assert torch.isfinite(ep_layer.mlp.expert_bias).all()
+    torch.testing.assert_close(ep_layer.mlp.expert_bias, expected_bias, rtol=0, atol=0)
+    biases = [torch.empty_like(expected_bias) for _ in range(ep_size)]
+    dist.all_gather(biases, ep_layer.mlp.expert_bias, group=ep_group)
+    for bias in biases:
+        torch.testing.assert_close(bias, expected_bias, rtol=0, atol=0)
 
 
 def test_mla_tp_matches_local(rank: int, tp_size: int, tp_group) -> None:
