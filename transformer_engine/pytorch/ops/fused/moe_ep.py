@@ -114,6 +114,7 @@ class _MoeEpResourceManager:
             sf_padding_size=128,
             combine_format=combine_format,
             output_format="bf16",
+            validation_mode="trusted",
             forward_tuning=MoeEpTuningConfig(
                 token_back_mode="standalone_warps",
                 epi_flag_batch=(2, 2),
