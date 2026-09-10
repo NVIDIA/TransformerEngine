@@ -737,7 +737,6 @@ def run_dpa_with_cp(
                             )
         else:
             out = out.index_select(0, seq_idx_q).contiguous()
-            out_ = out_
 
     atol, rtol, rmse_tol = get_tols(config, dtype)
     tensors_cp = [out_, dq_, dk_, dv_, dbias_, d_softmax_offset_, max_logit_]
