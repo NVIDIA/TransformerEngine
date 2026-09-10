@@ -3,8 +3,6 @@
 # See LICENSE for license information.
 """cuDNN frontend score_mod fused attention helpers."""
 
-import hashlib
-import importlib
 import inspect
 import os
 from dataclasses import dataclass
@@ -15,7 +13,36 @@ import jax.numpy as jnp
 import numpy as np
 from jax import ffi
 
-import transformer_engine_jax
+from .cudnn_graph import (
+    GraphBinding,
+    SerializedGraph,
+    finalize_graph,
+    import_cudnn,
+)
+from .cudnn_graph import (
+    bshd_as_bhsd_dim_stride as _bshd_as_bhsd_dim_stride,
+)
+from .cudnn_graph import (
+    cudnn_data_type as _cudnn_data_type,
+)
+from .cudnn_graph import (
+    cudnn_data_type_from_name as _cudnn_data_type_from_name,
+)
+from .cudnn_graph import (
+    dtype_name as _dtype_name,
+)
+from .cudnn_graph import (
+    graph_tensor_from_aval as _graph_tensor_from_aval,
+)
+from .cudnn_graph import (
+    row_major_stride as _row_major_stride,
+)
+from .cudnn_graph import (
+    serialized_graph as make_serialized_graph,
+)
+from .cudnn_graph import (
+    shape_dtype as _shape_dtype,
+)
 
 __all__ = [
     "FusedAttnScoreModHelper",
@@ -254,19 +281,7 @@ class _FusedAttnScoreModConfig:
         )
 
 
-@dataclass(frozen=True)
-class _SerializedScoreModGraph:
-    """Serialized cuDNN frontend graph and static metadata for C++ execution."""
-
-    serialized_graph: bytes
-    graph_hash: Tuple[int, int]
-    cudnn_frontend_version: int
-    workspace_size: int
-    input_uids: np.ndarray
-    output_uids: np.ndarray
-    scalar_uids: np.ndarray
-    scalar_sizes: np.ndarray
-    scalar_values: np.ndarray
+_SerializedScoreModGraph = SerializedGraph
 
 
 # cuDNN frontend tensor UIDs are arbitrary, but assigning stable values makes serialized
@@ -286,29 +301,6 @@ _SCORE_MOD_FWD_SCALAR_UID_BASE = 3000
 _SCORE_MOD_BPROP_SCALAR_UID_BASE = 4000
 
 _score_mod_graph_cache: Dict[Tuple[Any, ...], _SerializedScoreModGraph] = {}
-
-
-def _row_major_stride(shape: Sequence[int]) -> Tuple[int, ...]:
-    stride = []
-    running = 1
-    for dim in reversed(tuple(shape)):
-        stride.append(running)
-        running *= dim
-    return tuple(reversed(stride))
-
-
-def _bshd_as_bhsd_dim_stride(shape: Sequence[int]) -> Tuple[Tuple[int, ...], Tuple[int, ...]]:
-    if len(shape) != 4:
-        raise ValueError(f"score_mod requires rank-4 BSHD tensors, got shape={shape}.")
-    batch, seqlen, heads, head_dim = tuple(shape)
-    return (
-        (batch, heads, seqlen, head_dim),
-        (seqlen * heads * head_dim, head_dim, heads * head_dim, 1),
-    )
-
-
-def _dtype_name(dtype) -> str:
-    return str(jnp.dtype(dtype))
 
 
 def _is_array_operand(value: Any) -> bool:
@@ -405,44 +397,6 @@ def _make_fused_attn_score_mod_config(
     return config, tensor_operands, bprop_tensor_operands
 
 
-def _cudnn_data_type(cudnn, dtype):
-    dtype = jnp.dtype(dtype)
-    if dtype == jnp.float16:
-        return cudnn.data_type.HALF
-    if dtype == jnp.bfloat16:
-        return cudnn.data_type.BFLOAT16
-    if dtype == jnp.float32:
-        return cudnn.data_type.FLOAT
-    if dtype == jnp.float64:
-        return cudnn.data_type.DOUBLE
-    if dtype == jnp.int32:
-        return cudnn.data_type.INT32
-    if dtype == jnp.int64:
-        return cudnn.data_type.INT64
-    if dtype == jnp.uint8:
-        return cudnn.data_type.UINT8
-    if dtype == jnp.bool_:
-        return cudnn.data_type.BOOLEAN
-    raise ValueError(f"Unsupported score_mod tensor dtype: {dtype}.")
-
-
-def _cudnn_data_type_from_name(cudnn, dtype_name: str):
-    if dtype_name == "bfloat16":
-        return cudnn.data_type.BFLOAT16
-    return _cudnn_data_type(cudnn, np.dtype(dtype_name))
-
-
-def _graph_tensor_from_aval(cudnn, graph, name: str, aval, uid: int):
-    shape = tuple(int(dim) for dim in aval.shape)
-    return graph.tensor(
-        name=name,
-        dim=shape,
-        stride=_row_major_stride(shape),
-        data_type=_cudnn_data_type(cudnn, aval.dtype),
-        uid=uid,
-    )
-
-
 def _score_mod_graph_tensors(
     cudnn,
     graph,
@@ -477,51 +431,6 @@ def _score_mod_graph_tensors(
     return graph_tensors, tuple(tensor_uids), tuple(scalar_uids), tuple(scalar_values)
 
 
-def _encode_cudnn_frontend_version(version: str) -> int:
-    public_version = version.split("+", 1)[0].split("-", 1)[0]
-    parts = public_version.split(".")
-    if len(parts) < 3:
-        raise RuntimeError(f"Could not parse cuDNN frontend Python version: {version!r}.")
-    major, minor, patch = (int(part) for part in parts[:3])
-    return major * 10000 + minor * 100 + patch
-
-
-def _check_cudnn_frontend_version_match(cudnn) -> int:
-    python_version_string = getattr(cudnn, "__version__", None)
-    if python_version_string is None:
-        raise RuntimeError("cuDNN frontend Python package does not expose __version__.")
-    python_version = _encode_cudnn_frontend_version(python_version_string)
-    cpp_version = int(transformer_engine_jax.get_cudnn_frontend_version())
-    if python_version != cpp_version:
-        raise RuntimeError(
-            "cuDNN frontend Python/C++ version mismatch for score_mod graph serialization: "
-            f"Python cudnn.__version__={python_version_string!r} encodes to {python_version}, "
-            f"but Transformer Engine C++ was built with CUDNN_FRONTEND_VERSION={cpp_version}. "
-            "Use matching cuDNN frontend Python package and C++ headers."
-        )
-    return python_version
-
-
-def _score_mod_graph_hash(serialized_graph: bytes) -> Tuple[int, int]:
-    digest = hashlib.sha256(serialized_graph).digest()
-    return (
-        int.from_bytes(digest[0:8], byteorder="little", signed=True),
-        int.from_bytes(digest[8:16], byteorder="little", signed=True),
-    )
-
-
-def _pack_score_mod_scalar_values(
-    scalar_values: Sequence[bytes],
-) -> Tuple[np.ndarray, np.ndarray]:
-    scalar_sizes = np.asarray([len(value) for value in scalar_values], dtype=np.int64)
-    packed_values = np.zeros((len(scalar_values), 16), dtype=np.uint8)
-    for index, value in enumerate(scalar_values):
-        if len(value) > 16:
-            raise ValueError("score_mod pass-by-value scalars must be at most 16 bytes.")
-        packed_values[index, : len(value)] = np.frombuffer(value, dtype=np.uint8)
-    return scalar_sizes, packed_values.reshape(-1)
-
-
 def _serialized_score_mod_graph(
     *,
     serialized_graph: bytes,
@@ -532,17 +441,20 @@ def _serialized_score_mod_graph(
     scalar_uids: Sequence[int],
     scalar_values: Sequence[bytes],
 ) -> _SerializedScoreModGraph:
-    scalar_sizes, packed_scalar_values = _pack_score_mod_scalar_values(scalar_values)
-    return _SerializedScoreModGraph(
-        serialized_graph=serialized_graph,
-        graph_hash=_score_mod_graph_hash(serialized_graph),
+    return make_serialized_graph(
+        serialized_graph_data=serialized_graph,
         cudnn_frontend_version=int(cudnn_frontend_version),
         workspace_size=int(workspace_size),
-        input_uids=np.asarray(input_uids, dtype=np.int64),
-        output_uids=np.asarray(output_uids, dtype=np.int64),
+        input_bindings=[
+            GraphBinding(uid=int(uid), buffer_index=index)
+            for index, uid in enumerate(input_uids)
+        ],
+        output_bindings=[
+            GraphBinding(uid=int(uid), buffer_index=index)
+            for index, uid in enumerate(output_uids)
+        ],
         scalar_uids=np.asarray(scalar_uids, dtype=np.int64),
-        scalar_sizes=scalar_sizes,
-        scalar_values=packed_scalar_values,
+        scalar_values=scalar_values,
     )
 
 
@@ -557,20 +469,7 @@ def _wrap_score_mod(score_mod: Optional[Callable], graph_tensors: Dict[str, Any]
 
 
 def _finalize_score_mod_graph(cudnn, graph) -> Tuple[int, bytes, int]:
-    graph.validate()
-    graph.build_operation_graph()
-    try:
-        graph.create_execution_plans([cudnn.heur_mode.A, cudnn.heur_mode.FALLBACK])
-        graph.check_support()
-    except cudnn.cudnnGraphNotSupportedError as exc:
-        raise RuntimeError(f"cuDNN score_mod SDPA graph is not supported: {exc}") from exc
-    graph.build_plans(cudnn.build_plan_policy.HEURISTICS_CHOICE)
-    serialized_graph = bytes(graph.serialize())
-    return (
-        max(int(graph.get_workspace_size()), 1),
-        serialized_graph,
-        _check_cudnn_frontend_version_match(cudnn),
-    )
+    return finalize_graph(cudnn, graph, description="score_mod SDPA")
 
 
 def _graph_cache_key(
@@ -589,19 +488,8 @@ def _graph_cache_key(
     )
 
 
-def _shape_dtype(value) -> jax.ShapeDtypeStruct:
-    return jax.ShapeDtypeStruct(tuple(value.shape), value.dtype)
-
-
 def _import_cudnn_for_score_mod():
-    try:
-        cudnn = importlib.import_module("cudnn")
-    except ImportError as exc:
-        raise ImportError(
-            "score_mod fused_attn requires the cuDNN frontend Python package (`cudnn`)."
-        ) from exc
-    _check_cudnn_frontend_version_match(cudnn)
-    return cudnn
+    return import_cudnn()
 
 
 def _build_score_mod_fwd_graph(q_aval, k_aval, v_aval, score_mod_avals, config):
@@ -820,15 +708,7 @@ def _fused_attn_score_mod_fwd(
         k,
         v,
         *score_mod_tensors,
-        serialized_graph=graph.serialized_graph,
-        graph_hash0=graph.graph_hash[0],
-        graph_hash1=graph.graph_hash[1],
-        cudnn_frontend_version=graph.cudnn_frontend_version,
-        input_uids=graph.input_uids,
-        output_uids=graph.output_uids,
-        scalar_uids=graph.scalar_uids,
-        scalar_sizes=graph.scalar_sizes,
-        scalar_values=graph.scalar_values,
+        **graph.ffi_attrs(),
     )
     return output, softmax_stats
 
@@ -884,15 +764,7 @@ def _fused_attn_score_mod_bwd(
         softmax_stats,
         *score_mod_tensors,
         *score_mod_bprop_tensors,
-        serialized_graph=graph.serialized_graph,
-        graph_hash0=graph.graph_hash[0],
-        graph_hash1=graph.graph_hash[1],
-        cudnn_frontend_version=graph.cudnn_frontend_version,
-        input_uids=graph.input_uids,
-        output_uids=graph.output_uids,
-        scalar_uids=graph.scalar_uids,
-        scalar_sizes=graph.scalar_sizes,
-        scalar_values=graph.scalar_values,
+        **graph.ffi_attrs(),
     )
     return dq, dk, dv
 

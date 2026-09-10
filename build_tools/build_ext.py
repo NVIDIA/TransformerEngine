@@ -213,8 +213,9 @@ def get_build_ext(
                     shutil.rmtree(nccl_ep_dir)
 
         def build_extensions(self):
-            # For core lib + JAX install, fix build_ext from pybind11.setup_helpers
-            # to handle CUDA files correctly.
+            # For JAX builds, fix build_ext from pybind11.setup_helpers to handle
+            # CUDA files correctly. This is also required by the standalone JAX
+            # wheel, where framework_extension_only is true.
             if "pytorch" not in get_frameworks():
                 # Ensure at least an empty list of flags for 'cxx' and 'nvcc' when
                 # extra_compile_args is a dict.
@@ -226,8 +227,7 @@ def get_build_ext(
 
                 # Define new _compile method that redirects to NVCC for .cu and .cuh files.
                 original_compile_fn = self.compiler._compile
-                if not framework_extension_only:
-                    self.compiler.src_extensions += [".cu", ".cuh"]
+                self.compiler.src_extensions += [".cu", ".cuh"]
 
                 def _compile_fn(obj, src, ext, cc_args, extra_postargs, pp_opts) -> None:
                     # Copy before we make any modifications.
@@ -236,10 +236,7 @@ def get_build_ext(
                     try:
                         original_compiler = self.compiler.compiler_so
 
-                        if (
-                            os.path.splitext(src)[1] in [".cu", ".cuh"]
-                            and not framework_extension_only
-                        ):
+                        if os.path.splitext(src)[1] in [".cu", ".cuh"]:
                             nvcc_bin = nvcc_path()
                             if nvcc_bin is None:
                                 raise RuntimeError(

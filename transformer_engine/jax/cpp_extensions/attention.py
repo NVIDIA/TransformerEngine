@@ -2,53 +2,56 @@
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for attention"""
-import operator
 import os
 import warnings
 from dataclasses import dataclass, replace
-from functools import partial, reduce
+from functools import partial
 from typing import Optional, Tuple
 
 import jax
 import jax.numpy as jnp
-from jax import dtypes, lax, ffi
-from jax.sharding import PartitionSpec, NamedSharding
+from jax import dtypes, ffi, lax
 from jax.experimental.custom_partitioning import SdyShardingRule
-
-import transformer_engine_jax
+from jax.sharding import NamedSharding, PartitionSpec
 from transformer_engine_jax import NVTE_Fused_Attn_Backend
+
 from transformer_engine.jax.attention import (
     AttnBiasType,
     AttnMaskType,
     AttnSoftmaxType,
-    QKVLayout,
-    QKVFormat,
     CPStrategy,
+    QKVFormat,
+    QKVLayout,
     SequenceDescriptor,
 )
-from ..sharding import with_sharding_constraint_by_logical_axes, HEAD_AXES, is_mesh_available
 
-from .base import BasePrimitive, register_primitive
-from .misc import (
-    check_valid_batch_dims,
-    jax_dtype_to_te_dtype,
-    te_dtype_to_jax_dtype,
-    get_padded_spec,
-    get_cudnn_version,
-    get_all_device_compute_capability,
-)
 from ..sharding import (
-    global_mesh_resource,
-    lax_paral_op,
+    HEAD_AXES,
     all_reduce_sum_along_dp_fsdp,
-    get_mesh_axis_size,
+    get_all_mesh_axes,
     get_mesh_axis_rank,
     get_mesh_axis_rank_host,
-    get_all_mesh_axes,
+    get_mesh_axis_size,
+    global_mesh_resource,
+    is_mesh_available,
+    lax_paral_op,
     num_of_devices,
     with_sharding_constraint,
+    with_sharding_constraint_by_logical_axes,
 )
-
+from .base import BasePrimitive, register_primitive
+from .cudnn_attention import (
+    build_bwd_graph,
+    build_fwd_graph,
+    is_fused_attn_supported,
+    ragged_graph_batch_size,
+)
+from .misc import (
+    check_valid_batch_dims,
+    get_all_device_compute_capability,
+    get_cudnn_version,
+    get_padded_spec,
+)
 
 __all__ = [
     "FusedAttnHelper",
@@ -132,25 +135,10 @@ class FusedAttnHelper:
 
     def get_fused_attn_backend(self):
         """Get the fused attention kernel backend"""
-        return transformer_engine_jax.get_fused_attn_backend(
-            self.is_training,
-            jax_dtype_to_te_dtype(self.q_dtype),
-            jax_dtype_to_te_dtype(self.kv_dtype),
-            self.qkv_layout.value,
-            self.attn_bias_type.value,
-            self.attn_mask_type.value,
-            self.softmax_type.value,
-            self.dropout_probability,
-            self.q_num_heads,
-            self.kv_num_heads,
-            self.q_max_seqlen,
-            self.kv_max_seqlen,
-            self.head_dim_qk,
-            self.head_dim_v,
-            self.window_size[0],
-            self.window_size[1],
-            self.return_max_logit,
-            not self.is_non_deterministic_allowed(),
+        return (
+            NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
+            if is_fused_attn_supported(self)
+            else NVTE_Fused_Attn_Backend.NVTE_No_Backend
         )
 
     @staticmethod
@@ -271,13 +259,75 @@ class _FusedAttnRNGStateChecker:
         return seed
 
 
-def generate_cu_seqlen(actual_seqlen):
-    """
-    Generating cumsum seqlen for a batch
-    """
-    actual_seqlen = jnp.where(actual_seqlen < 0, 0, actual_seqlen)
-    cu_seqlen = jnp.cumulative_sum(actual_seqlen, include_initial=True)
-    return cu_seqlen
+def _multiply_offsets_as_uint64_words(offsets, multiplier):
+    """Return unsigned 64-bit products as interleaved low/high uint32 words."""
+    values = offsets.astype(jnp.uint32)
+    scale = jnp.asarray(multiplier, dtype=jnp.uint32)
+    mask = jnp.asarray(0xFFFF, dtype=jnp.uint32)
+
+    value_lo = values & mask
+    value_hi = values >> 16
+    scale_lo = scale & mask
+    scale_hi = scale >> 16
+
+    product_lo = value_lo * scale_lo
+    product_mid_lo = value_lo * scale_hi
+    product_mid_hi = value_hi * scale_lo
+    product_hi = value_hi * scale_hi
+    carry = (product_lo >> 16) + (product_mid_lo & mask) + (product_mid_hi & mask)
+
+    low_word = (product_lo & mask) | ((carry & mask) << 16)
+    high_word = (
+        product_hi + (product_mid_lo >> 16) + (product_mid_hi >> 16) + (carry >> 16)
+    )
+    return jnp.stack((low_word, high_word), axis=-1)
+
+
+def _pack_ragged_offsets(
+    q_seq_offsets,
+    k_seq_offsets,
+    qkv_layout,
+    attn_heads,
+    num_gqa_groups,
+    q_head_dim,
+    v_head_dim,
+):
+    """Pack Q/K/V/O/Stats element offsets into one JAX buffer."""
+    q_multiplier = attn_heads * q_head_dim
+    if qkv_layout.is_qkvpacked():
+        q_multiplier *= 3
+        k_multiplier = v_multiplier = q_multiplier
+    elif qkv_layout.is_kvpacked():
+        k_multiplier = v_multiplier = 2 * num_gqa_groups * q_head_dim
+    else:
+        k_multiplier = num_gqa_groups * q_head_dim
+        v_multiplier = num_gqa_groups * v_head_dim
+    offsets_and_multipliers = (
+        (q_seq_offsets, q_multiplier),
+        (k_seq_offsets, k_multiplier),
+        (k_seq_offsets, v_multiplier),
+        (q_seq_offsets, attn_heads * v_head_dim),
+        (q_seq_offsets, attn_heads),
+    )
+    if get_cudnn_version() < (9, 5, 0):
+        return jnp.stack(
+            tuple(
+                offsets.astype(jnp.int32) * jnp.asarray(multiplier, dtype=jnp.int32)
+                for offsets, multiplier in offsets_and_multipliers
+            )
+        )
+    return jnp.stack(
+        tuple(
+            _multiply_offsets_as_uint64_words(offsets, multiplier)
+            for offsets, multiplier in offsets_and_multipliers
+        )
+    )
+
+
+def _pad_ragged_metadata(values, size, fill_value):
+    """Pad compact sequence metadata to the bucketed cuDNN graph extent."""
+    values = values.flatten()[:size]
+    return jnp.pad(values, (0, size - values.size), constant_values=fill_value)
 
 
 class FusedAttnFwdPrimitive(BasePrimitive):
@@ -338,7 +388,6 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         output_shape = (*batch_shape, q_max_seqlen, attn_heads, v_head_dim)
         out_aval = q_aval.update(shape=output_shape, dtype=q_dtype)
 
-        # backend determines the softmax buffer shape/dtype
         backend = FusedAttnHelper(
             config.is_training,
             q_dtype,
@@ -357,35 +406,13 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             config.window_size,
             config.return_max_logit,
         ).get_fused_attn_backend()
-
-        if backend == NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
-            # cuDNN 9.6 reduces the required softmax shape
-            if get_cudnn_version() >= (9, 6, 0):
-                if config.qkv_layout.is_thd():
-                    softmax_shape = (*batch_shape, q_max_seqlen, attn_heads, 1)
-                else:
-                    softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, 1)
-            else:
-                softmax_shape = (
-                    *batch_shape,
-                    attn_heads,
-                    q_max_seqlen,
-                    config.max_segments_per_seq,
-                )
-            softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
-        else:
+        if backend != NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
             raise ValueError(f"Unsupported {backend=}")
-        softmax_aux_aval = q_aval.update(shape=softmax_shape, dtype=softmax_dtype)
-        if config.return_max_logit:
-            # cuDNN Max is row-wise over S_kv. Dense and SM120 THD use
-            # [..., H, S_q, 1]; cuDNN >= 9.6 non-SM120 THD uses [..., S_q, H, 1].
-            # Both raw layouts are reduced to the public per-head [H] result below.
-            if FusedAttnFwdPrimitive._uses_thd_ragged_max_tensor(config):
-                max_tensor_shape = (*batch_shape, q_max_seqlen, attn_heads, 1)
-            else:
-                max_tensor_shape = (*batch_shape, attn_heads, q_max_seqlen, 1)
-        else:
-            max_tensor_shape = (0,)
+
+        graph_info = build_fwd_graph(q_aval, k_aval, v_aval, bias_aval, config)
+        softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
+        softmax_aux_aval = q_aval.update(shape=graph_info.stats_shape, dtype=softmax_dtype)
+        max_tensor_shape = graph_info.max_shape
         max_tensor_aval = q_aval.update(shape=max_tensor_shape, dtype=softmax_dtype)
 
         # JAX does not enable 64-bit int by default so we get XLA to allocate x8 memory with
@@ -398,46 +425,8 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         rng_state_shape = (seed_aval.shape[0], checker.rng_state_size)
         rng_state_aval = seed_aval.update(shape=rng_state_shape, dtype=checker.rng_state_dtype)
 
-        if config.attn_bias_type == AttnBiasType.NO_BIAS:
-            bias_batch = bias_heads = 0
-        else:
-            *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
-            bias_batch = reduce(operator.mul, bias_batch_shape)
-
-        bottom_right_diagonal = config.attn_mask_type in [
-            AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK,
-            AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK,
-        ]
-
-        # do a dummy kernel call here to get workspace buffer shapes/dtypes that XLA needs to
-        # prepare for the active fused-attn backend
-        input_batch = reduce(operator.mul, batch_shape)
-        wkspace_info = transformer_engine_jax.get_fused_attn_fwd_workspace_sizes(
-            input_batch,
-            bias_batch,
-            q_max_seqlen,
-            kv_max_seqlen,
-            attn_heads,
-            num_gqa_groups,
-            bias_heads,
-            q_head_dim,
-            v_head_dim,
-            config.scaling_factor,
-            config.dropout_probability,
-            config.attn_bias_type.value,
-            config.attn_mask_type.value,
-            config.softmax_type.value,
-            config.qkv_layout.value,
-            jax_dtype_to_te_dtype(q_aval.dtype),
-            config.is_training,
-            config.max_segments_per_seq,
-            config.window_size[0],
-            config.window_size[1],
-            config.return_max_logit,
-            bottom_right_diagonal,
-        )
         wkspace_aval = q_aval.update(
-            shape=wkspace_info[0], dtype=te_dtype_to_jax_dtype(wkspace_info[1])
+            shape=(graph_info.graph.workspace_size,), dtype=jnp.uint8
         )
 
         assert (
@@ -493,30 +482,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         """
         q_aval, k_aval, v_aval, bias_aval, *_ = ctx.avals_in
 
-        (
-            batch_shape,
-            q_max_seqlen,
-            kv_max_seqlen,
-            attn_heads,
-            num_gqa_groups,
-            q_head_dim,
-            v_head_dim,
-        ) = FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, config.qkv_layout)
-
-        input_batch = reduce(operator.mul, batch_shape)
-
-        if config.attn_bias_type == AttnBiasType.NO_BIAS:
-            bias_batch = bias_heads = 0
-        else:
-            *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
-            bias_batch = reduce(operator.mul, bias_batch_shape)
-
-        if config.cp_striped_window_size is not None:
-            window_size_left = config.cp_striped_window_size[0]
-            window_size_right = config.cp_striped_window_size[1]
-        else:
-            window_size_left = config.window_size[0]
-            window_size_right = config.window_size[1]
+        graph = build_fwd_graph(q_aval, k_aval, v_aval, bias_aval, config).graph
 
         return ffi.ffi_lowering(FusedAttnFwdPrimitive.name)(
             ctx,
@@ -534,28 +500,9 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             _kv_segment_ids,
             _q_segment_pos,
             _kv_segment_pos,  # ffi_lowering needs number of parameters meets primitive.lowering
-            input_batch=input_batch,
-            bias_batch=bias_batch,
-            q_max_seqlen=q_max_seqlen,
-            kv_max_seqlen=kv_max_seqlen,
-            attn_heads=attn_heads,
-            num_gqa_groups=num_gqa_groups,
-            bias_heads=bias_heads,
-            qk_head_dim=q_head_dim,
-            v_head_dim=v_head_dim,
-            max_segments_per_seq=config.max_segments_per_seq,
-            scaling_factor=float(config.scaling_factor),
-            dropout_probability=float(config.dropout_probability),
-            bias_type=int(config.attn_bias_type.value),
-            mask_type=int(config.attn_mask_type.value),
-            qkv_layout=int(config.qkv_layout.value),
-            is_training=config.is_training,
-            return_max_logit=config.return_max_logit,
-            deterministic=not FusedAttnHelper.is_non_deterministic_allowed(),
-            window_size_left=window_size_left,
-            window_size_right=window_size_right,
-            bottom_right_diagonal=config.bottom_right_diagonal,
-            softmax_type=int(config.softmax_type.value),
+            is_ragged=config.qkv_layout.is_thd(),
+            rng_offset_increment=16,
+            **graph.ffi_attrs(),
         )
 
     @staticmethod
@@ -615,9 +562,15 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                 )
                 return offsets_2d
 
-            batch, q_max_seqlen, kv_max_seqlen, *_ = FusedAttnHelper.parse_qkv_aval(
-                q, k, v, config.qkv_layout
-            )
+            (
+                batch,
+                q_max_seqlen,
+                kv_max_seqlen,
+                attn_heads,
+                num_gqa_groups,
+                q_head_dim,
+                v_head_dim,
+            ) = FusedAttnHelper.parse_qkv_aval(q, k, v, config.qkv_layout)
             assert len(batch) == 1, f"Expected len(batch) == 1, but got {len(batch)=}"
             kv_batch = q_batch = batch[0]
 
@@ -650,8 +603,28 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                 k_seq_offsets, k_seq_offsets >= 0, fill_value=kv_batch * kv_max_seqlen
             )
 
-        q_cu_seqlen = generate_cu_seqlen(q_seqlen.flatten())
-        kv_cu_seqlen = generate_cu_seqlen(kv_seqlen.flatten())
+            graph_batch = ragged_graph_batch_size(q_batch, config.max_segments_per_seq)
+            q_seqlen = _pad_ragged_metadata(q_seqlen, graph_batch, fill_value)
+            kv_seqlen = _pad_ragged_metadata(kv_seqlen, graph_batch, fill_value)
+            q_seq_offsets = _pad_ragged_metadata(
+                q_seq_offsets, graph_batch + 1, q_batch * q_max_seqlen
+            )
+            k_seq_offsets = _pad_ragged_metadata(
+                k_seq_offsets, graph_batch + 1, kv_batch * kv_max_seqlen
+            )
+
+            # Supported cuDNN ragged graphs require external element offsets. JAX disables
+            # x64 by default, so represent INT64 offsets as pairs of uint32 words and pack
+            # all five graph offsets into one otherwise-unused inner operand.
+            _q_segment_ids = _pack_ragged_offsets(
+                q_seq_offsets,
+                k_seq_offsets,
+                config.qkv_layout,
+                attn_heads,
+                num_gqa_groups,
+                q_head_dim,
+                v_head_dim,
+            )
 
         output, softmax_aux, max_tensor, rng_state, _ = FusedAttnFwdPrimitive.inner_primitive.bind(
             q,
@@ -660,8 +633,8 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             bias,
             softmax_offset,
             seed,
-            q_cu_seqlen,
-            kv_cu_seqlen,
+            q_seqlen.flatten(),
+            kv_seqlen.flatten(),
             q_seq_offsets,
             k_seq_offsets,
             _q_segment_ids,
@@ -929,7 +902,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         """
         Fused attention bwd abstract
         """
-        del softmax_aux_aval, rng_state_aval, output_aval
+        del rng_state_aval
 
         q_dtype = dtypes.canonicalize_dtype(q_aval.dtype)
         k_dtype = dtypes.canonicalize_dtype(k_aval.dtype)
@@ -956,38 +929,36 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             v_head_dim,
         ) = FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, config.qkv_layout)
 
-        if config.attn_bias_type == AttnBiasType.NO_BIAS:
-            bias_batch = bias_heads = 0
-        else:
-            *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
-            bias_batch = reduce(operator.mul, bias_batch_shape)
-
-        deterministic = not FusedAttnHelper.is_non_deterministic_allowed()
-
-        input_batch = reduce(operator.mul, batch_shape)
-        wkspace_shape, wkspace_dtype = transformer_engine_jax.get_fused_attn_bwd_workspace_sizes(
-            input_batch,
-            bias_batch,
-            q_max_seqlen,
-            kv_max_seqlen,
+        backend = FusedAttnHelper(
+            config.is_training,
+            q_dtype,
+            k_dtype,
+            config.qkv_layout,
+            config.attn_bias_type,
+            config.attn_mask_type,
+            config.softmax_type,
+            config.dropout_probability,
             attn_heads,
             num_gqa_groups,
-            bias_heads,
+            q_max_seqlen,
+            kv_max_seqlen,
             qk_head_dim,
             v_head_dim,
-            config.scaling_factor,
-            config.dropout_probability,
-            config.attn_bias_type.value,
-            config.attn_mask_type.value,
-            config.softmax_type.value,
-            config.qkv_layout.value,
-            jax_dtype_to_te_dtype(q_aval.dtype),
-            config.is_training,
-            deterministic,
-            config.max_segments_per_seq,
-            config.window_size[0],
-            config.window_size[1],
-            config.bottom_right_diagonal,
+            config.window_size,
+            False,
+        ).get_fused_attn_backend()
+        if backend != NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
+            raise ValueError(f"Unsupported {backend=}")
+
+        graph_info = build_bwd_graph(
+            q_aval,
+            k_aval,
+            v_aval,
+            bias_aval,
+            softmax_aux_aval,
+            output_aval,
+            doutput_aval,
+            config,
         )
 
         dq_aval = q_aval.update(shape=q_aval.shape, dtype=q_dtype)
@@ -995,7 +966,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         dv_aval = v_aval.update(shape=v_aval.shape, dtype=v_dtype)
         dbias_aval = bias_aval.update(shape=bias_aval.shape, dtype=bias_dtype)
         wkspace_aval = q_aval.update(
-            shape=wkspace_shape, dtype=te_dtype_to_jax_dtype(wkspace_dtype)
+            shape=(graph_info.graph.workspace_size,), dtype=jnp.uint8
         )
 
         # Validate incoming softmax_offset shape and dtype
@@ -1060,30 +1031,16 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         """
         q_aval, k_aval, v_aval, bias_aval, *_ = ctx.avals_in
 
-        (
-            batch_shape,
-            q_max_seqlen,
-            kv_max_seqlen,
-            attn_heads,
-            num_gqa_groups,
-            qk_head_dim,
-            v_head_dim,
-        ) = FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, config.qkv_layout)
-
-        input_batch = reduce(operator.mul, batch_shape)
-
-        if config.attn_bias_type == AttnBiasType.NO_BIAS:
-            bias_batch = bias_heads = 0
-        else:
-            *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
-            bias_batch = reduce(operator.mul, bias_batch_shape)
-
-        if config.cp_striped_window_size is not None:
-            window_size_left = config.cp_striped_window_size[0]
-            window_size_right = config.cp_striped_window_size[1]
-        else:
-            window_size_left = config.window_size[0]
-            window_size_right = config.window_size[1]
+        graph = build_bwd_graph(
+            q_aval,
+            k_aval,
+            v_aval,
+            bias_aval,
+            ctx.avals_in[5],
+            ctx.avals_in[7],
+            ctx.avals_in[8],
+            config,
+        ).graph
 
         return ffi.ffi_lowering(FusedAttnBwdPrimitive.name)(
             ctx,
@@ -1104,27 +1061,8 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             kv_segment_ids,
             q_segment_pos,
             kv_segment_pos,  # ffi_lowering needs number of parameters meets primitive.lowering
-            input_batch=input_batch,
-            bias_batch=bias_batch,
-            q_max_seqlen=q_max_seqlen,
-            kv_max_seqlen=kv_max_seqlen,
-            attn_heads=attn_heads,
-            num_gqa_groups=num_gqa_groups,
-            bias_heads=bias_heads,
-            qk_head_dim=qk_head_dim,
-            v_head_dim=v_head_dim,
-            max_segments_per_seq=config.max_segments_per_seq,
-            scaling_factor=float(config.scaling_factor),
-            dropout_probability=float(config.dropout_probability),
-            bias_type=int(config.attn_bias_type.value),
-            mask_type=int(config.attn_mask_type.value),
-            qkv_layout=int(config.qkv_layout.value),
-            is_training=config.is_training,
-            deterministic=not FusedAttnHelper.is_non_deterministic_allowed(),
-            window_size_left=window_size_left,
-            window_size_right=window_size_right,
-            bottom_right_diagonal=config.bottom_right_diagonal,
-            softmax_type=int(config.softmax_type.value),
+            is_ragged=config.qkv_layout.is_thd(),
+            **graph.ffi_attrs(),
         )
 
     @staticmethod
@@ -1187,9 +1125,15 @@ class FusedAttnBwdPrimitive(BasePrimitive):
                 )
                 return offsets_2d
 
-            batch, q_max_seqlen, kv_max_seqlen, *_ = FusedAttnHelper.parse_qkv_aval(
-                q, k, v, config.qkv_layout
-            )
+            (
+                batch,
+                q_max_seqlen,
+                kv_max_seqlen,
+                attn_heads,
+                num_gqa_groups,
+                q_head_dim,
+                v_head_dim,
+            ) = FusedAttnHelper.parse_qkv_aval(q, k, v, config.qkv_layout)
             assert (
                 len(batch) == 1
             ), f"Expected len(batch) == 1, but got len(batch)={len(batch)}, batch={batch}"
@@ -1223,8 +1167,24 @@ class FusedAttnBwdPrimitive(BasePrimitive):
                 k_seq_offsets, k_seq_offsets >= 0, fill_value=kv_batch * kv_max_seqlen
             )
 
-        q_cu_seqlen = generate_cu_seqlen(q_seqlen.flatten())
-        kv_cu_seqlen = generate_cu_seqlen(kv_seqlen.flatten())
+            graph_batch = ragged_graph_batch_size(q_batch, config.max_segments_per_seq)
+            q_seqlen = _pad_ragged_metadata(q_seqlen, graph_batch, fill_value)
+            kv_seqlen = _pad_ragged_metadata(kv_seqlen, graph_batch, fill_value)
+            q_seq_offsets = _pad_ragged_metadata(
+                q_seq_offsets, graph_batch + 1, q_batch * q_max_seqlen
+            )
+            k_seq_offsets = _pad_ragged_metadata(
+                k_seq_offsets, graph_batch + 1, kv_batch * kv_max_seqlen
+            )
+            _q_segment_ids = _pack_ragged_offsets(
+                q_seq_offsets,
+                k_seq_offsets,
+                config.qkv_layout,
+                attn_heads,
+                num_gqa_groups,
+                q_head_dim,
+                v_head_dim,
+            )
 
         dq, dk, dv, dbias, dsoftmax_offset, _ = FusedAttnBwdPrimitive.inner_primitive.bind(
             q,
@@ -1236,8 +1196,8 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             rng_state,
             output,
             doutput,
-            q_cu_seqlen,
-            kv_cu_seqlen,
+            q_seqlen.flatten(),
+            kv_seqlen.flatten(),
             q_seq_offsets,
             k_seq_offsets,
             _q_segment_ids,
