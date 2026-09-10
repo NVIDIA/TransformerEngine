@@ -2364,6 +2364,9 @@ class Linear(TransformerEngineBaseModule):
                              Under ``torch.compile``, the FP8 weight cache is replaced on
                              the first microbatch and reused on subsequent microbatches.
                              ``fuse_wgrad_accumulation=True`` remains unsupported.
+                             With ``mode="reduce-overhead"``, call
+                             ``torch.compiler.cudagraph_mark_step_begin()`` once before
+                             each minibatch to keep the cache live across its microbatches.
         """
         is_grad_enabled = torch.is_grad_enabled()
 

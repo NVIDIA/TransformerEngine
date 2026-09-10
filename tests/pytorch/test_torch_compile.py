@@ -2204,6 +2204,8 @@ def test_te_linear_compile_is_first_microbatch(
 
     with _assert_no_cudagraph_skips(compile_mode == "reduce-overhead"):
         for step in range(5):
+            if compile_mode == "reduce-overhead":
+                torch.compiler.cudagraph_mark_step_begin()
             model.zero_grad(set_to_none=True)
             ref_model.zero_grad(set_to_none=True)
             pending = []
