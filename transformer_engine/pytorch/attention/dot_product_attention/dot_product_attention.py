@@ -124,6 +124,7 @@ def _pad_between_seqs_cache_key(
         if t is None:
             return (0, 0, 0)
         return (t.data_ptr(), tuple(t.shape), t.dtype)
+
     return (
         _key(cu_seqlens_q),
         _key(cu_seqlens_kv),
@@ -2760,10 +2761,11 @@ class DotProductAttention(TransformerEngineBaseModule):
                         )
                         _pad_between_seqs_eager_cache[cache_key] = pad_between_seqs
                         while (
-                            len(_pad_between_seqs_eager_cache)
-                            > _PAD_BETWEEN_SEQS_EAGER_CACHE_LIMIT
+                            len(_pad_between_seqs_eager_cache) > _PAD_BETWEEN_SEQS_EAGER_CACHE_LIMIT
                         ):
-                            _pad_between_seqs_eager_cache.pop(next(iter(_pad_between_seqs_eager_cache)))
+                            _pad_between_seqs_eager_cache.pop(
+                                next(iter(_pad_between_seqs_eager_cache))
+                            )
                 else:
                     pad_between_seqs = False
 
