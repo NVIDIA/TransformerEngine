@@ -9,6 +9,8 @@
 # Due to the structure of NVFP4Quantizer, we need to test the RHT functionality
 # together with the quantization functionality.
 
+import os
+
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 from transformer_engine.pytorch import NVFP4Quantizer
@@ -127,6 +129,34 @@ def check_quantization_nvfp4_versus_reference(
             ref_quantizer._apply_rht(x.t().contiguous()) if with_rht else x.t().contiguous()
         )
         ref_amax_colwise_t = torch.max(torch.abs(x_t_for_amax)).to(torch.float32).view(1)
+
+        # SM120/121 uses TE's native single-K=16 MMA Hadamard arithmetic. cuBLAS may
+        # choose a different reduction order (and applies the random-sign matrix in
+        # the ATen reference orientation), so use the unfused TE kernel as the exact
+        # reference for the fused TE kernel on these architectures.
+        if torch.cuda.get_device_capability() in ((12, 0), (12, 1)):
+            env_name = "NVTE_NVFP4_DISABLE_RHT_CAST_FUSION"
+            old_value = os.environ.get(env_name)
+            os.environ[env_name] = "1"
+            try:
+                native_quantizer = NVFP4Quantizer(
+                    fp4_dtype=te_dtype,
+                    rowwise=False,
+                    columnwise=True,
+                    with_amax_reduction=False,
+                    with_rht=True,
+                    with_post_rht_amax=True,
+                    with_random_sign_mask=with_random_sign_mask,
+                )
+                native = native_quantizer(x)
+            finally:
+                if old_value is None:
+                    os.environ.pop(env_name)
+                else:
+                    os.environ[env_name] = old_value
+            qx_t_ref = unpack_fp4(native._columnwise_data.view(dtype=torch.uint8))
+            sx_t_ref = native._columnwise_scale_inv.view(dtype=torch.uint8)
+            ref_amax_colwise_t = native._amax_columnwise
     else:
         qx_t_ref = None
         sx_t_ref = None
