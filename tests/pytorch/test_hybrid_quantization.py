@@ -5274,19 +5274,26 @@ class TestHybridGroupedLinearValidation:
         first_call_count = len(validation_calls)
         first_generation = model._validated_quantizer_generations["scaling_fwd"]
         assert first_call_count > 0
+        # Candidate validation covers both directions before the commit, so the
+        # first forward validates the backward operand too, whatever the grad mode.
+        assert {name for name, _ in validation_calls} == {"input", "weight", "grad_output"}
 
         with torch.no_grad(), autocast(enabled=True, recipe=original_recipe):
             model(tensor, m_splits)
         assert len(validation_calls) == first_call_count
         assert model._validated_quantizer_generations["scaling_fwd"] is first_generation
 
-        # Backward quantizers are validated the first time quantizers are selected
-        # with gradients enabled. Do not run a full forward here: this validation
+        # Selecting quantizers with gradients enabled hits the O(1) generation
+        # guard: the committed runtime already recorded both generations, so
+        # nothing is revalidated. Do not run a full forward here: this validation
         # test intentionally uses a columnwise-only configuration that is not
         # supported by the split-quantization kernel.
         with torch.enable_grad(), autocast(enabled=True, recipe=original_recipe):
             model._get_quantizers()
-        assert len(validation_calls) == first_call_count + 1
+        assert len(validation_calls) == first_call_count
+        assert (
+            model._validated_quantizer_generations["scaling_bwd"] is model.quantizers["scaling_bwd"]
+        )
 
         def unexpected_grad_mode_query():
             pytest.fail("cached validation must not query grad mode")

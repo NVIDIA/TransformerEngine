@@ -414,6 +414,65 @@ def test_operation_fuser_resets_recipe_state_independently_from_plan_cache(monke
     assert fusion_calls == 3
 
 
+def test_operation_fuser_tracks_recipe_config_and_caches_plans(monkeypatch) -> None:
+    """The cached recipe config follows the active recipe and plans are built once.
+
+    ``recipe_config`` must be published whenever the fuser resets recipe state,
+    so a cache hit is decided on recipe semantics rather than recipe identity,
+    and the plan cache must stop growing once the no-grad and grad-enabled plans
+    exist for a stable recipe.
+    """
+
+    op = te_ops.Identity()
+
+    # Identity has no quantizers; neutralize its state hooks to keep the test
+    # CPU-only and isolate the fuser's own bookkeeping.
+    monkeypatch.setattr(op, "reset_recipe_state", lambda *, recipe: None)
+    monkeypatch.setattr(op, "pre_first_fuser_forward", lambda: None)
+
+    fuser = OperationFuser([op])
+    plan_cache = fuser._fused_ops_cache  # pylint: disable=protected-access
+    x = torch.ones(1)
+    x_requiring_grad = torch.ones(1, requires_grad=True)
+    extra_inputs = [()]
+
+    assert fuser.recipe_config is None
+    assert not plan_cache
+
+    recipe = transformer_engine.common.recipe.Float8CurrentScaling(backward_override=None)
+    fuser.maybe_fuse_ops(False, recipe, x, extra_inputs)
+    assert fuser.recipe_config == recipe.quantizer_config()
+    assert len(plan_cache) == 1
+
+    # A fresh but equal recipe object hits both the config and the plan cache.
+    equivalent_recipe = transformer_engine.common.recipe.Float8CurrentScaling(
+        backward_override=None
+    )
+    fuser.maybe_fuse_ops(False, equivalent_recipe, x, extra_inputs)
+    assert fuser.recipe_config == equivalent_recipe.quantizer_config()
+    assert len(plan_cache) == 1
+
+    # Training needs a distinct backward boundary, so it builds the second plan.
+    fuser.maybe_fuse_ops(True, equivalent_recipe, x_requiring_grad, extra_inputs)
+    assert fuser.recipe_config == equivalent_recipe.quantizer_config()
+    assert len(plan_cache) == 2
+
+    # With both configurations built, the registry stops growing.
+    for is_grad_enabled, tensor in (
+        (False, x),
+        (True, x_requiring_grad),
+        (False, x),
+        (True, x_requiring_grad),
+    ):
+        fuser.maybe_fuse_ops(is_grad_enabled, equivalent_recipe, tensor, extra_inputs)
+        assert fuser.recipe_config == equivalent_recipe.quantizer_config()
+        assert len(plan_cache) == 2
+
+    # An unquantized region is its own configuration and publishes no config.
+    fuser.maybe_fuse_ops(False, None, x, extra_inputs)
+    assert fuser.recipe_config is None
+
+
 @torch.no_grad()
 def make_reference_and_test_tensors(
     shape: int | Iterable[int],

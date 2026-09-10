@@ -1664,6 +1664,106 @@ def test_apply_recipe_rejects_e2e_mha_reproducer_during_planning():
 
 @pytest.mark.parametrize("attention_type", ("self", "cross"))
 @pytest.mark.parametrize("input_layernorm", (False, True))
+@pytest.mark.parametrize(
+    "name",
+    (pytest.param(None, id="unnamed"), pytest.param("mha", id="named")),
+)
+def test_mha_constructor_declares_literal_dpa_qkv_role(attention_type, input_layernorm, name):
+    """Every MHA variant constructs and declares the QKV boundary role by literal name.
+
+    Construction alone is the regression guard: ``dpa_name`` used to be
+    referenced before assignment, so every one of these variants raised
+    ``NameError`` from ``__init__``.
+    """
+    module = MultiheadAttention(
+        hidden_size=32,
+        num_attention_heads=2,
+        attention_dropout=0.0,
+        attn_mask_type="no_mask",
+        attention_type=attention_type,
+        input_layernorm=input_layernorm,
+        bias=False,
+        device="cuda",
+        name=name,
+    )
+
+    # Literal, not derived from the DPA child: an unnamed MHA declares "" like
+    # qkv_name/proj_name do, a named one declares the child's composed name.
+    expected_qkv = QuantizerRole(
+        module_type="dpa",
+        tensor_type="qkv",
+        name="mha.core_attention" if name is not None else "",
+    )
+    if attention_type == "self":
+        qkv_producers = [module.layernorm_qkv if input_layernorm else module.qkv]
+    else:
+        qkv_producers = [
+            module.layernorm_query if input_layernorm else module.query_layer,
+            module.key_value,
+        ]
+    for producer in qkv_producers:
+        assert (
+            producer._declared_output_quantizer_role  # pylint: disable=protected-access
+            == expected_qkv
+        )
+
+    dpa_own_qkv_role = module.core_attention.get_quantizer_roles(
+        fwd=True,
+        num_quantizers=9,
+        boundary_role=None,
+    )[0]
+    if name is not None:
+        # Producer-declared and DPA own-slot roles agree on both sides.
+        assert dpa_own_qkv_role == expected_qkv
+    else:
+        # WP9(b) will give unnamed modules "" on both sides. Today the DPA child
+        # still auto-names itself in __init__, so the two sides disagree; pin that
+        # so the equality above can be extended deliberately.
+        assert module.core_attention.name.startswith("Layer_")
+        assert dpa_own_qkv_role.name == module.core_attention.name
+        assert dpa_own_qkv_role != expected_qkv
+
+
+@pytest.mark.parametrize(
+    "name",
+    (pytest.param(None, id="unnamed"), pytest.param("layer", id="named")),
+)
+def test_transformer_layer_constructor_declares_dpa_qkv_role(name):
+    """TransformerLayer builds its MHA and both boundary sides agree.
+
+    A TransformerLayer always has a name (its own auto name when unnamed) and
+    passes it down, so the unnamed case composes a name here rather than "".
+    """
+    layer = TransformerLayer(
+        hidden_size=32,
+        ffn_hidden_size=64,
+        num_attention_heads=2,
+        hidden_dropout=0.0,
+        attention_dropout=0.0,
+        self_attn_mask_type="no_mask",
+        bias=False,
+        device="cuda",
+        name=name,
+    )
+
+    mha = layer.self_attention
+    dpa = mha.core_attention
+    assert dpa.name == f"{mha.name}.core_attention"
+    if name is not None:
+        assert dpa.name == "layer.self_attention.core_attention"
+
+    expected_qkv = QuantizerRole(module_type="dpa", tensor_type="qkv", name=dpa.name)
+    assert (
+        mha.layernorm_qkv._declared_output_quantizer_role  # pylint: disable=protected-access
+        == expected_qkv
+    )
+    assert (
+        dpa.get_quantizer_roles(fwd=True, num_quantizers=9, boundary_role=None)[0] == expected_qkv
+    )
+
+
+@pytest.mark.parametrize("attention_type", ("self", "cross"))
+@pytest.mark.parametrize("input_layernorm", (False, True))
 def test_mha_declares_all_boundary_topology_variants(attention_type, input_layernorm):
     """Self/cross-attention QKV producers expose stable recipe-resolved roles."""
     module = MultiheadAttention(

@@ -365,6 +365,7 @@ class MultiheadAttention(torch.nn.Module):
         # quantized_model_init eagerly creates runtimes for weight-owning children.
         # Pass the final composed topology into their constructors so each initial
         # runtime is created with the same roles it will use during execution.
+        dpa_name = name + ".core_attention" if name is not None else ""
         qkv_output_role = QuantizerRole(
             module_type="dpa",
             tensor_type="qkv",
