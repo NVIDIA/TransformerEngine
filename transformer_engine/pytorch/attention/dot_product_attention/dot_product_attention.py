@@ -122,9 +122,12 @@ def _pad_between_seqs_cache_key(
 ):
     def _key(t):
         if t is None:
-            return (0, 0, 0)
-        return (t.data_ptr(), tuple(t.shape), t.dtype)
-
+            return (0, 0, 0, 0)
+        try:
+            version = t._version
+        except AttributeError:
+            version = 0
+        return (t.data_ptr(), tuple(t.shape), t.dtype, version)
     return (
         _key(cu_seqlens_q),
         _key(cu_seqlens_kv),
