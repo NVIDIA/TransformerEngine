@@ -315,7 +315,7 @@ class TVMFFICentral {
   template <typename... Args>
   void maybe_warn_not_chosen(Args &&...reason) const {
     if (warn_cutedsl_backend_not_chosen_) {
-      NVTE_WARN("Could not load CuTe DSL kernel because ", reason...);
+      NVTE_WARN("The CuTe DSL kernel is not chosen because ", reason...);
     }
   }
 
