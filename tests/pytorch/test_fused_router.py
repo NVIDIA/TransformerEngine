@@ -15,6 +15,7 @@ from transformer_engine.pytorch.router import (
     fused_moe_aux_loss,
     mark_qb_bin_bounds_validated,
 )
+import transformer_engine.pytorch.router as te_router
 import transformer_engine_torch as tex
 
 seed = 42
@@ -1183,23 +1184,246 @@ def test_fused_moe_aux_loss(dtype, num_tokens, num_experts, topk, expert_multipl
     torch.testing.assert_close(probs.grad, probs_clone.grad, atol=atol, rtol=rtol)
 
 
-def test_fused_moe_aux_loss_cuda_graph_capture():
+def _moe_aux_loss_determinism_inputs(
+    dtype, num_tokens, num_experts, expert_multiplier, token_count_dtype
+):
+    """Asymmetric positive scores spanning several orders of magnitude."""
+    generator = torch.Generator(device="cuda").manual_seed(1234)
+    scores = torch.rand(
+        (num_tokens, expert_multiplier, num_experts), device="cuda", generator=generator
+    ).pow(4)
+    scores *= torch.logspace(-4, 0, num_experts, device="cuda")
+    scores /= scores.sum(dim=-1, keepdim=True)
+    probs = scores.reshape(num_tokens, -1).to(dtype).requires_grad_(True)
+    tokens_per_expert = torch.randint(
+        1, num_tokens + 1, (num_experts * expert_multiplier,), device="cuda", generator=generator
+    ).to(token_count_dtype)
+    if tokens_per_expert.is_floating_point():
+        # Global aux loss may use averaged, non-integral expert counts.
+        tokens_per_expert /= 3
+    return probs, tokens_per_expert
+
+
+def _assert_bitwise_equal(actual, expected):
+    # Compare storage bits, including for the scalar output and low-precision dtypes.
+    assert actual.dtype == expected.dtype
+    assert actual.shape == expected.shape
+    assert torch.equal(actual.reshape(-1).view(torch.uint8), expected.reshape(-1).view(torch.uint8))
+
+
+@pytest.mark.parametrize("tensor_total", [False, True], ids=["host_total", "tensor_total"])
+@pytest.mark.parametrize("deterministic", [None, False, True], ids=["default", "atomic", "fixed"])
+def test_fused_moe_aux_loss_deterministic_dispatch(monkeypatch, tensor_total, deterministic):
+    """Check Python dispatch and autograd argument count without launching CUDA."""
+    probs = torch.ones(3, 2, requires_grad=True)
+    tokens_per_expert = torch.tensor([1, 2], dtype=torch.int32)
+    total_num_tokens = torch.tensor(3, dtype=torch.int64) if tensor_total else 3
+    constants = torch.tensor([3.0, 4.0])
+    workspace = torch.empty(256, dtype=torch.float32)
+    calls = []
+    workspace_requests = []
+
+    def fake_workspace(device):
+        workspace_requests.append(device)
+        return workspace
+
+    def fake_forward(path, **kwargs):
+        calls.append((path, kwargs["deterministic"]))
+        assert kwargs["probs"] is probs
+        assert kwargs["num_rows"] == 3 and kwargs["num_cols"] == 2
+        assert kwargs["workspace"] is (workspace if deterministic is True else None)
+        return torch.tensor(2.0), constants
+
+    def fake_scalar_forward(**kwargs):
+        return fake_forward("host", **kwargs)
+
+    def fake_tensor_forward(**kwargs):
+        return fake_forward("tensor", **kwargs)
+
+    def fake_backward(**kwargs):
+        assert kwargs["Const_buf"] is constants
+        assert kwargs["tokens_per_expert"] is tokens_per_expert
+        return torch.full_like(probs, 7.0) * kwargs["grad_aux_loss"]
+
+    monkeypatch.setattr(tex, "fused_moe_aux_loss_fwd", fake_scalar_forward)
+    monkeypatch.setattr(tex, "fused_moe_aux_loss_fwd_graph_safe", fake_tensor_forward)
+    monkeypatch.setattr(tex, "fused_moe_aux_loss_bwd", fake_backward)
+    monkeypatch.setattr(te_router, "_get_moe_aux_loss_workspace", fake_workspace)
+    kwargs = {} if deterministic is None else {"deterministic": deterministic}
+    out = fused_moe_aux_loss(probs, tokens_per_expert, total_num_tokens, 2, 1, 0.01, **kwargs)
+    out.backward(torch.tensor(0.5))
+
+    assert calls == [("tensor" if tensor_total else "host", deterministic is True)]
+    assert workspace_requests == ([probs.device] if deterministic is True else [])
+    torch.testing.assert_close(probs.grad, torch.full_like(probs, 3.5))
+
+
+def test_fused_moe_aux_loss_workspace_reuse():
+    """Eager calls share scratch only when ordered on the same device/stream."""
+    device = torch.device("cuda", torch.cuda.current_device())
+    workspaces = []
+    streams = [torch.cuda.Stream(), torch.cuda.Stream()]
+    for stream in streams:
+        with torch.cuda.stream(stream):
+            workspace = te_router._get_moe_aux_loss_workspace(device)
+            again = te_router._get_moe_aux_loss_workspace(device)
+        assert workspace.data_ptr() == again.data_ptr()
+        assert workspace.device == device and workspace.dtype == torch.float32
+        workspaces.append(workspace)
+    assert workspaces[0].data_ptr() != workspaces[1].data_ptr()
+
+
+def test_fused_moe_aux_loss_cuda_graph_workspace_isolation(monkeypatch):
+    """Graphs captured on one stream need private scratch for concurrent replay."""
+    num_tokens, num_experts, topk, coeff = 1025, 128, 4, 0.01
+    probs_a, counts_a = _moe_aux_loss_determinism_inputs(
+        torch.float32, num_tokens, num_experts, 1, torch.int32
+    )
+    inputs = [
+        (probs_a, counts_a, torch.tensor(num_tokens, dtype=torch.int64, device="cuda")),
+        (
+            probs_a.detach().flip((1,)).requires_grad_(True),
+            counts_a.roll(3) + 1,
+            torch.tensor(num_tokens * 2 + 1, dtype=torch.int64, device="cuda"),
+        ),
+    ]
+
+    def run(probs, counts, total):
+        out = fused_moe_aux_loss(probs, counts, total, num_experts, topk, coeff, deterministic=True)
+        (grad,) = torch.autograd.grad(out, probs)
+        return out, grad
+
+    capture_stream = torch.cuda.Stream()
+    capture_stream.wait_stream(torch.cuda.current_stream())
+    expected = []
+    with torch.cuda.stream(capture_stream):
+        eager_workspace = te_router._get_moe_aux_loss_workspace(probs_a.device)
+        for args in inputs:
+            for _ in range(3):
+                warmup_out, warmup_grad = run(*args)
+            expected.append((warmup_out.detach().clone(), warmup_grad.clone()))
+        del warmup_out, warmup_grad
+    torch.cuda.current_stream().wait_stream(capture_stream)
+
+    # Record addresses only, so the test does not extend scratch tensor lifetimes.
+    captured_workspace_ptrs = []
+    get_workspace = te_router._get_moe_aux_loss_workspace
+
+    def trace_workspace(device):
+        workspace = get_workspace(device)
+        if torch.cuda.is_current_stream_capturing():
+            captured_workspace_ptrs.append(workspace.data_ptr())
+        return workspace
+
+    monkeypatch.setattr(te_router, "_get_moe_aux_loss_workspace", trace_workspace)
+    graphs, captured_outputs = [], []
+    for args in inputs:
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=capture_stream):
+            outputs = run(*args)
+        graphs.append(graph)
+        captured_outputs.append(outputs)
+    assert len(captured_workspace_ptrs) == 2
+    assert captured_workspace_ptrs[0] != captured_workspace_ptrs[1]
+    assert eager_workspace.data_ptr() not in captured_workspace_ptrs
+    with torch.cuda.stream(capture_stream):
+        assert get_workspace(probs_a.device).data_ptr() == eager_workspace.data_ptr()
+
+    replay_streams = [torch.cuda.Stream(), torch.cuda.Stream()]
+    for stream in replay_streams:
+        stream.wait_stream(torch.cuda.current_stream())
+    for _ in range(8):
+        for stream, graph in zip(replay_streams, graphs):
+            with torch.cuda.stream(stream):
+                graph.replay()
+    for stream in replay_streams:
+        torch.cuda.current_stream().wait_stream(stream)
+
+    for (out, grad), (expected_out, expected_grad), (probs, counts, total) in zip(
+        captured_outputs, expected, inputs
+    ):
+        _assert_bitwise_equal(out, expected_out)
+        _assert_bitwise_equal(grad, expected_grad)
+        ref_probs = probs.detach().clone().requires_grad_(True)
+        ref = aux_loss_pytorch(ref_probs, counts, int(total.item()), topk, num_experts, coeff)
+        (ref_grad,) = torch.autograd.grad(ref, ref_probs)
+        torch.testing.assert_close(out, ref, atol=1e-6, rtol=2e-5)
+        torch.testing.assert_close(grad, ref_grad, atol=1e-6, rtol=2e-5)
+
+
+@pytest.mark.parametrize("device_total", [False, True], ids=["host_total", "device_total"])
+@pytest.mark.parametrize(
+    "dtype,num_tokens,num_experts,expert_multiplier,token_count_dtype",
+    [
+        pytest.param(torch.float32, 4097, 128, 1, torch.int32, id="multi_cta"),
+        pytest.param(torch.float32, 257, 128, 3, torch.float32, id="sequence_global"),
+        pytest.param(torch.float32, 3, 7, 1, torch.int64, id="small_partial_count"),
+        pytest.param(torch.float32, 129, 1025, 1, torch.int32, id="wide"),
+        pytest.param(torch.float16, 4097, 128, 1, torch.int32, id="fp16"),
+        pytest.param(torch.bfloat16, 257, 128, 1, torch.bfloat16, id="bf16"),
+    ],
+)
+def test_fused_moe_aux_loss_deterministic(
+    dtype, num_tokens, num_experts, expert_multiplier, token_count_dtype, device_total
+):
+    """Each launch must produce identical loss/gradient bits on the same GPU."""
+    probs, tokens_per_expert = _moe_aux_loss_determinism_inputs(
+        dtype, num_tokens, num_experts, expert_multiplier, token_count_dtype
+    )
+    total_num_tokens = (
+        torch.tensor(num_tokens, dtype=torch.int64, device="cuda") if device_total else num_tokens
+    )
+    topk, coeff = 4, 0.01
+    grad_output = torch.tensor(0.37, dtype=dtype, device="cuda")
+
+    # Accumulate the reference in FP32, then compare in the public output dtype.
+    ref_probs = probs.detach().float().requires_grad_(True)
+    ref = aux_loss_pytorch(
+        ref_probs, tokens_per_expert.float(), num_tokens, topk, num_experts, coeff
+    )
+    (ref_grad,) = torch.autograd.grad(ref, ref_probs, grad_outputs=grad_output.float())
+    finfo = torch.finfo(dtype)
+    rtol = max(2e-5, 2 * finfo.eps)
+    atol = finfo.tiny * finfo.eps
+    expected_out = expected_grad = None
+    for _ in range(32):
+        out = fused_moe_aux_loss(
+            probs, tokens_per_expert, total_num_tokens, num_experts, topk, coeff, deterministic=True
+        )
+        (grad,) = torch.autograd.grad(out, probs, grad_outputs=grad_output)
+        if expected_out is None:
+            torch.testing.assert_close(out, ref.to(dtype), atol=atol, rtol=rtol)
+            torch.testing.assert_close(grad, ref_grad.to(dtype), atol=atol, rtol=rtol)
+            expected_out, expected_grad = out.detach().clone(), grad.clone()
+        else:
+            _assert_bitwise_equal(out, expected_out)
+            _assert_bitwise_equal(grad, expected_grad)
+
+
+@pytest.mark.parametrize("deterministic", [False, True], ids=["atomic", "fixed"])
+@pytest.mark.parametrize(
+    "num_tokens,num_experts,expert_multiplier,token_count_dtype",
+    [
+        pytest.param(4096, 128, 1, torch.int32, id="multi_cta"),
+        pytest.param(3, 7, 2, torch.float32, id="small_sequence_global"),
+    ],
+)
+def test_fused_moe_aux_loss_cuda_graph_capture(
+    num_tokens, num_experts, expert_multiplier, token_count_dtype, deterministic
+):
     """CUDA-graph-safe path: total_num_tokens is a device tensor whose value
     changes between replays. Forward and backward must both observe the new
     value via the device-side coefficient computation."""
     dtype = torch.float32
-    num_tokens = 4096
-    num_experts = 128
     topk = 4
-    num_cols = num_experts
+    num_cols = num_experts * expert_multiplier
     coeff = 0.01
 
-    offset = torch.arange(-num_tokens // 2, num_tokens // 2, dtype=dtype, device="cuda") * 1e-4
-    probs = (
-        torch.arange(-num_cols // 2, num_cols // 2, device="cuda", dtype=dtype) * 1e-2
-    ).unsqueeze(0).repeat(num_tokens, 1) + offset.unsqueeze(1)
-    probs = probs.contiguous().requires_grad_(True)
-    tokens_per_expert = torch.randint(1, 1000, (num_cols,), device="cuda", dtype=torch.int32)
+    probs, tokens_per_expert = _moe_aux_loss_determinism_inputs(
+        dtype, num_tokens, num_experts, expert_multiplier, token_count_dtype
+    )
+    original_probs = probs.detach().clone()
+    original_counts = tokens_per_expert.clone()
 
     total_num_tokens_dev = torch.tensor(num_tokens, dtype=torch.int64, device="cuda")
 
@@ -1215,6 +1439,7 @@ def test_fused_moe_aux_loss_cuda_graph_capture():
                 num_experts=num_experts,
                 topk=topk,
                 coeff=coeff,
+                deterministic=deterministic,
             )
             torch.autograd.grad(warmup_out, probs)
         del warmup_out
@@ -1229,16 +1454,25 @@ def test_fused_moe_aux_loss_cuda_graph_capture():
             num_experts=num_experts,
             topk=topk,
             coeff=coeff,
+            deterministic=deterministic,
         )
         (grad_probs,) = torch.autograd.grad(out, probs)
 
     atol, rtol = _get_tolerances(dtype, num_cols)
-    # Replay with several distinct token counts; the captured graph must pick
-    # up each new value through total_num_tokens_dev.
-    for new_total in (num_tokens, num_tokens // 2, num_tokens * 2 - 17):
+    # Replay A -> B -> A in the same graph. Restore both inputs and the device
+    # token count so stale partial sums or coefficients cannot pass unnoticed.
+    original_out = original_grad = None
+    for changed_inputs, new_total in (
+        (False, num_tokens),
+        (True, num_tokens * 2 + 1),
+        (False, num_tokens),
+    ):
+        with torch.no_grad():
+            probs.copy_(original_probs.flip((1,)) if changed_inputs else original_probs)
+            tokens_per_expert.copy_(
+                original_counts.roll(3) + 1 if changed_inputs else original_counts
+            )
         total_num_tokens_dev.fill_(new_total)
-        g.replay()
-        torch.cuda.synchronize()
         ref_probs = probs.detach().clone().requires_grad_(True)
         ref = aux_loss_pytorch(
             probs=ref_probs,
@@ -1249,8 +1483,22 @@ def test_fused_moe_aux_loss_cuda_graph_capture():
             moe_aux_loss_coeff=coeff,
         )
         (ref_grad_probs,) = torch.autograd.grad(ref, ref_probs)
-        torch.testing.assert_close(out, ref, atol=atol, rtol=rtol)
-        torch.testing.assert_close(grad_probs, ref_grad_probs, atol=atol, rtol=rtol)
+        expected_out = expected_grad = None
+        for _ in range(16):
+            g.replay()
+            if expected_out is None or not deterministic:
+                torch.testing.assert_close(out, ref, atol=atol, rtol=rtol)
+                torch.testing.assert_close(grad_probs, ref_grad_probs, atol=atol, rtol=rtol)
+                expected_out, expected_grad = out.detach().clone(), grad_probs.clone()
+            else:
+                _assert_bitwise_equal(out, expected_out)
+                _assert_bitwise_equal(grad_probs, expected_grad)
+        if deterministic and not changed_inputs:
+            if original_out is None:
+                original_out, original_grad = expected_out, expected_grad
+            else:
+                _assert_bitwise_equal(expected_out, original_out)
+                _assert_bitwise_equal(expected_grad, original_grad)
 
 
 def _bytemap_to_bitmap_u8(bytemap: torch.Tensor) -> torch.Tensor:
