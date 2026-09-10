@@ -18,6 +18,8 @@ from .utils import (
     debug_build_enabled,
     get_cuda_include_dirs,
     nccl_ep_enabled,
+    nccl_include_path,
+    nccl_lib_path,
     setup_mpi_flags,
 )
 
@@ -99,6 +101,8 @@ def setup_jax_extension(
 
     # Header files
     include_dirs = get_cuda_include_dirs()
+    if (discovered_nccl_include_path := nccl_include_path()) is not None:
+        include_dirs.append(discovered_nccl_include_path)
     include_dirs.append(cudnn_frontend_include_path())
     include_dirs.extend(
         [
@@ -126,6 +130,12 @@ def setup_jax_extension(
     if nccl_ep_enabled():
         cxx_flags.append("-DNVTE_WITH_NCCL_EP")
 
+    kwargs = {}
+    if (discovered_nccl_lib_path := nccl_lib_path()) is not None:
+        kwargs["extra_objects"] = [str(discovered_nccl_lib_path)]
+    else:
+        kwargs["libraries"] = ["nccl"]
+
     # Define TE/JAX as a Pybind11Extension
     from pybind11.setup_helpers import Pybind11Extension
 
@@ -134,5 +144,5 @@ def setup_jax_extension(
         sources=[str(path) for path in sources],
         include_dirs=[str(path) for path in include_dirs],
         extra_compile_args=cxx_flags,
-        libraries=["nccl"],
+        **kwargs,
     )
