@@ -898,11 +898,8 @@ def _skip_unsupported(
 ) -> None:
     """Skip what the backend under test cannot run, or -- for a test that
     compiles it -- cannot be compiled."""
-    if compiled and backend == "fused":
-        # FusedAttention's forward carries @no_torch_dynamo, so there is nothing
-        # to compile: it runs as an eager island. Drop this skip once it traces,
-        # and the tests below cover it as they do the others.
-        pytest.skip("FusedAttention is an eager island and does not compile")
+    if compiled and backend == "fused" and inference_params is not None:
+        pytest.skip("KV caching with FusedAttention falls back to eager under torch.compile")
     available, _, _ = get_available_attention_backends(
         spec["model_config"],
         dtype,
@@ -1046,32 +1043,39 @@ def test_dpa_torch_compile(monkeypatch, backend, config):
 
 
 def test_dpa_torch_compile_around_fused(monkeypatch):
-    """FusedAttention itself is an eager island, but everything around it is
-    compiled: DotProductAttention traces up to the backend call, breaks the
-    graph there and resumes afterwards. What crosses that break has to survive
-    it -- the sub-backend enum did not, and reached cuDNN as the function that
-    produced it."""
+    """Without the fused attention custom op, FusedAttention is an eager island
+    and everything around it is compiled: DotProductAttention traces up to the
+    backend call, breaks the graph there and resumes afterwards. What crosses
+    that break has to survive it -- the sub-backend enum did not, and reached
+    cuDNN as the function that produced it."""
+    from transformer_engine.pytorch.attention.dot_product_attention import backends
+
     dtype = torch.bfloat16
     spec = _DPA_COMPILE_CONFIGS["self_bshd_causal"]
     _skip_unsupported(spec, "fused", dtype, compiled=False)
     _force_dpa_backend(monkeypatch, "fused")
+    monkeypatch.setattr(backends, "_fused_attn_op", None)
 
     module = _make_dpa(spec, dtype)
     args, kwargs, grads = _make_dpa_inputs(spec, dtype)
     # No fullgraph: the graph break at the eager island is the point here.
-    _compare_compiled_to_eager(module, args, kwargs, grads, monkeypatch, "fused", dtype)
+    with pytest.warns(UserWarning, match="Falling back to eager execution"):
+        _compare_compiled_to_eager(module, args, kwargs, grads, monkeypatch, "fused", dtype)
 
 
-@pytest.mark.parametrize("backend", ["flash", "unfused"])
+@pytest.mark.parametrize("backend", ["flash", "fused", "unfused"])
 @pytest.mark.parametrize("config", ["self_bshd_causal", "kv_cache_bshd"])
 def test_dpa_torch_compile_cudagraphs(monkeypatch, backend, config):
     """`mode="reduce-overhead"`: forward and backward of DotProductAttention
     are captured into CUDA graphs and replayed on subsequent iterations."""
     dtype = torch.bfloat16
     spec = _DPA_COMPILE_CONFIGS[config]
-    _force_dpa_backend(monkeypatch, backend)
-
     module = _make_dpa(spec, dtype)
+    _, kwargs, _ = _make_dpa_inputs(spec, dtype)
+    # Before forcing the backend: probing the available backends re-runs the
+    # selection and would otherwise be cached over the forced one.
+    _skip_unsupported(spec, backend, dtype, inference_params=kwargs.get("inference_params"))
+    _force_dpa_backend(monkeypatch, backend)
 
     torch._dynamo.reset()
     counters.clear()
@@ -1230,7 +1234,7 @@ _EAGER_FALLBACK_CASES = {
 }
 
 
-@pytest.mark.parametrize("backend", ["flash", "unfused"])
+@pytest.mark.parametrize("backend", ["flash", "fused", "unfused"])
 @pytest.mark.parametrize("case", _EAGER_FALLBACK_CASES.keys())
 def test_dpa_torch_compile_eager_fallback(monkeypatch, backend, case):
     """Calls that cannot be traced run as an eager island instead, with a
@@ -1241,6 +1245,7 @@ def test_dpa_torch_compile_eager_fallback(monkeypatch, backend, case):
     dtype = torch.bfloat16
     config_name, make_inputs = _EAGER_FALLBACK_CASES[case]
     spec = _DPA_COMPILE_CONFIGS[config_name]
+    _skip_unsupported(spec, backend, dtype, compiled=False)
     _force_dpa_backend(monkeypatch, backend)
 
     module = _make_dpa(spec, dtype)
