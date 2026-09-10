@@ -50,3 +50,6 @@
 - [PyTorch] Deprecated selecting `GroupedLinear`'s grouped-tensor path with `NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM`; pass `use_grouped_tensor=True` or `False` to `GroupedLinear` instead. ([#3224](https://github.com/NVIDIA/TransformerEngine/pull/3224))
 - [PyTorch] Deprecated implicit pointer-based layout detection when `DotProductAttention` receives Q/K/V views of packed buffers; pass the packed buffer through `qkv_layer` or `kv_layer` and set `qkv_interleave_dim` instead. ([#3200](https://github.com/NVIDIA/TransformerEngine/pull/3200))
 
+## Known Issues in This Release
+
+- [PyTorch] GDN attention may generate a `NaN` in the backward pass when used with `head_dim==32`. The [fix](https://github.com/NVIDIA/cudnn-frontend/pull/994) has been merged into `nvidia-cudnn-frontend` and will be resolved by the next release.
