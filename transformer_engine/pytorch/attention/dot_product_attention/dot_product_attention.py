@@ -113,6 +113,24 @@ _alibi_cache = {
 _THD_POLICY_VALIDATION_CACHE_LIMIT = 64
 _thd_policy_validation_cache = []
 
+_PAD_BETWEEN_SEQS_EAGER_CACHE_LIMIT = 64
+_pad_between_seqs_eager_cache = {}
+
+
+def _pad_between_seqs_cache_key(
+    cu_seqlens_q, cu_seqlens_kv, cu_seqlens_q_padded, cu_seqlens_kv_padded
+):
+    def _key(t):
+        if t is None:
+            return (0, 0, 0)
+        return (t.data_ptr(), tuple(t.shape), t.dtype)
+    return (
+        _key(cu_seqlens_q),
+        _key(cu_seqlens_kv),
+        _key(cu_seqlens_q_padded),
+        _key(cu_seqlens_kv_padded),
+    )
+
 
 def _get_thd_policy_attention_backend(
     policy: Dict[str, Any],
@@ -2709,7 +2727,15 @@ class DotProductAttention(TransformerEngineBaseModule):
             if pad_between_seqs is None:
                 if qkv_format == "thd":
                     if is_graph_capturing():
-                        if (
+                        cache_key = _pad_between_seqs_cache_key(
+                            cu_seqlens_q,
+                            cu_seqlens_kv,
+                            cu_seqlens_q_padded,
+                            cu_seqlens_kv_padded,
+                        )
+                        if cache_key in _pad_between_seqs_eager_cache:
+                            pad_between_seqs = _pad_between_seqs_eager_cache[cache_key]
+                        elif (
                             cu_seqlens_q_padded is cu_seqlens_q
                             and cu_seqlens_kv_padded is cu_seqlens_kv
                         ):
@@ -2726,6 +2752,18 @@ class DotProductAttention(TransformerEngineBaseModule):
                             cu_seqlens_kv_padded is not None
                             and not torch.equal(cu_seqlens_kv_padded[:-1], cu_seqlens_kv[:-1])
                         )
+                        cache_key = _pad_between_seqs_cache_key(
+                            cu_seqlens_q,
+                            cu_seqlens_kv,
+                            cu_seqlens_q_padded,
+                            cu_seqlens_kv_padded,
+                        )
+                        _pad_between_seqs_eager_cache[cache_key] = pad_between_seqs
+                        while (
+                            len(_pad_between_seqs_eager_cache)
+                            > _PAD_BETWEEN_SEQS_EAGER_CACHE_LIMIT
+                        ):
+                            _pad_between_seqs_eager_cache.pop(next(iter(_pad_between_seqs_eager_cache)))
                 else:
                     pad_between_seqs = False
 
