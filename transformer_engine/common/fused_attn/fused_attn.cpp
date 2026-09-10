@@ -79,6 +79,8 @@ std::string to_string(NVTE_QKV_Format format) {
       return "NVTE_SBHD";
     case NVTE_BSHD:
       return "NVTE_BSHD";
+    case NVTE_BHSD:
+      return "NVTE_BHSD";
     case NVTE_THD:
       return "NVTE_THD";
     case NVTE_BSHD_2SBHD:
