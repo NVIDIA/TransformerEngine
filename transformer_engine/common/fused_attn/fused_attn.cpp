@@ -253,6 +253,12 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
                                      max_seqlen_kv, head_dim_qk, head_dim_v) == DType::kInt64);
   const bool supported_ragged_offset_size =
       (!requires_64bit_ragged_offset || cudnn_runtime_version >= 90500);
+  // Before cuDNN 9.26, the generic F16/BF16 sink backward kernel indexes ragged Stats as
+  // dense. The specialized kernels for these value head dimensions are not affected.
+  const bool has_f16_ragged_dsink_bug = is_training && qkv_format == NVTE_QKV_Format::NVTE_THD &&
+                                        softmax_type == NVTE_Softmax_Type::NVTE_LEARNABLE_SOFTMAX &&
+                                        cudnn_runtime_version < 92600 && head_dim_v != 64 &&
+                                        head_dim_v != 128 && head_dim_v != 256;
 
   if ((q_dtype == NVTEDType::kNVTEFloat8E4M3 || q_dtype == NVTEDType::kNVTEFloat8E5M2) &&
       sm_arch_ >= 90 && bias_type == NVTE_Bias_Type::NVTE_NO_BIAS &&
@@ -475,6 +481,8 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
             dropout == 0.0)))) &&
         // check 64-bit ragged offset support
         (supported_ragged_offset_size) &&
+        // check for incorrect dSink or an out-of-bounds Stats read in cuDNN before 9.26
+        (!has_f16_ragged_dsink_bug) &&
         // 9.10.0/9.10.1: known bugs with SDPA F16
         (cudnn_runtime_version != 91000) && (cudnn_runtime_version != 91001) &&
         // softmax type
