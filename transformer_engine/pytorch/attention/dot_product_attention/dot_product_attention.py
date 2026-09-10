@@ -2692,8 +2692,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                             pad_between_seqs = False
                         else:
                             pad_between_seqs = (
-                                cu_seqlens_q_padded is not None
-                                or cu_seqlens_kv_padded is not None
+                                cu_seqlens_q_padded is not None or cu_seqlens_kv_padded is not None
                             )
                     else:
                         pad_between_seqs = (

@@ -1834,8 +1834,7 @@ class FusedAttnFunc(torch.autograd.Function):
                         and dq.shape[0] > 0
                     ):
                         q_pad_mask = (
-                            torch.arange(dq.shape[0], device=dq.device)
-                            >= cu_seqlens_q_padded[-1]
+                            torch.arange(dq.shape[0], device=dq.device) >= cu_seqlens_q_padded[-1]
                         )
                         dq[q_pad_mask] = 0
                     if cu_seqlens_kv_padded is not None:
