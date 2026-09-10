@@ -3107,8 +3107,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             and cu_seqlens_kv_padded is not None
         ):
             if is_graph_capturing():
-                # arange+mask under capture: `tensor[scalar_tensor:]` slicing would
-                # force a GPU->CPU sync that is forbidden during CUDA graph capture.
                 q_pad_mask = torch.arange(dq.shape[0], device=dq.device) >= cu_seqlens_q_padded[-1]
                 kv_pad_mask = (
                     torch.arange(dk.shape[0], device=dk.device) >= cu_seqlens_kv_padded[-1]
@@ -3117,10 +3115,14 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 dk[kv_pad_mask] = 0
                 dv[kv_pad_mask] = 0
             else:
-                # Pre-existing TE eager-mode behaviour.
-                dq[cu_seqlens_q_padded[-1] :].fill_(0)
-                dk[cu_seqlens_kv_padded[-1] :].fill_(0)
-                dv[cu_seqlens_kv_padded[-1] :].fill_(0)
+                q_end = int(cu_seqlens_q_padded[-1])
+                kv_end = int(cu_seqlens_kv_padded[-1])
+                if q_end < dq.shape[0]:
+                    dq[q_end:].fill_(0)
+                if kv_end < dk.shape[0]:
+                    dk[kv_end:].fill_(0)
+                if kv_end < dv.shape[0]:
+                    dv[kv_end:].fill_(0)
 
         if ctx.fp8 and ctx.is_input_fp8:
             dq, dk, dv, _, _ = combine_and_quantize(ctx.qkv_layout, dq, dk, dv, ctx.dQKV_quantizer)
@@ -3138,9 +3140,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 ctx.dP_quantizer,
             )
 
-        # Partial-gradient reduction can write THD inter-sequence padding.
-        # Clean it while gradients and per-step sequence metadata share sequence order.
-        if ctx.qkv_format == "thd":
+        if ctx.qkv_format == "thd" and ctx.pad_between_seqs:
             _zero_thd_padding((dq,), cu_seqlens_q_per_step[0], cu_seqlens_q_padded)
             _zero_thd_padding((dk, dv), cu_seqlens_kv_per_step[0], cu_seqlens_kv_padded)
 
