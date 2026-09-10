@@ -757,6 +757,11 @@ class DotProductAttention(TransformerEngineBaseModule):
                 or bottom right (`True`) corner of the softmax matrix in the encoder.
                 If `None`, it will be set to `False` for `attn_mask_type` =
                 {'causal', 'padding_causal'} and `True` for other mask types.
+    softcap : float, default = 0.0
+                tanh logit softcapping value applied to the attention scores as
+                ``softcap * tanh(scores / softcap)``. A value of ``0.0`` disables
+                softcapping. Similar to :attr:`window_size`, ``softcap`` can be
+                overridden by :attr:`softcap` in ``forward`` as well.
     attention_type : str, default = "self"
                    type of attention, either ``"self"`` and ``"cross"``.
     layer_number : int, default = None
@@ -856,6 +861,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         attn_mask_type: str = "causal",
         window_size: Optional[Tuple[int, int]] = None,
         bottom_right_diagonal: Optional[bool] = None,
+        softcap: float = 0.0,
         sequence_parallel: bool = False,
         tp_size: int = 1,
         get_rng_state_tracker: Optional[Callable] = None,
@@ -892,6 +898,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         self.attn_mask_type = attn_mask_type
         self.window_size = dpa_utils.check_set_window_size(attn_mask_type, window_size)
         self.bottom_right_diagonal = bottom_right_diagonal
+        self.softcap = softcap
         if tp_group is None:
             self.tp_size = tp_size
             if tp_size == 1:
@@ -1941,6 +1948,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         attn_mask_type: Optional[str] = None,
         window_size: Optional[Tuple[int, int]] = None,
         bottom_right_diagonal: Optional[bool] = None,
+        softcap: Optional[float] = None,
         checkpoint_core_attention: bool = False,
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
@@ -2112,6 +2120,10 @@ class DotProductAttention(TransformerEngineBaseModule):
                        causal masks are aligned to the bottom right corner.
         window_size: Optional[Tuple[int, int]], default = None
                     Sliding window size for local attention.
+        softcap: Optional[float], default = None
+                    tanh logit softcapping value applied to the attention scores as
+                    ``softcap * tanh(scores / softcap)``. A value of ``0.0`` disables
+                    softcapping. When `None`, the value passed to the constructor is used.
         bottom_right_diagonal: Optional[bool], default = None
                     Align sliding window and ALiBi diagonal to the top left (`False`)
                     or bottom right (`True`) corner of the softmax matrix in the encoder.
@@ -2392,6 +2404,18 @@ class DotProductAttention(TransformerEngineBaseModule):
                     "padding_causal_bottom_right",
                 }:
                     bottom_right_diagonal = True
+
+            # softcap is not mask-specific: resolve it outside the thd_mask_policies branch so the
+            # packed-THD policy path gets the constructor value too, rather than a bare None.
+            if softcap is None:
+                softcap = self.softcap
+            # A cap that is negative or non-finite is silently inconsistent rather than
+            # harmless, because the backends disagree about it. tanh is odd, so
+            # UnfusedDotProductAttention's `cap * tanh(x / cap)` applies a negative cap as its
+            # absolute value and yields NaN for a non-finite one, while FlashAttention caps only
+            # when `softcap > 0` and so drops both without a word.
+            if not math.isfinite(softcap) or softcap < 0.0:
+                raise ValueError(f"softcap must be finite and non-negative, got {softcap}.")
 
             # checks for qkv_format
             if qkv_format is None:
@@ -2750,6 +2774,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 "num_tokens_kv": (key_layer.shape[0] if kv_format == "thd" else 0),
                 "head_dim_qk": head_dim_qk,
                 "head_dim_v": head_dim_v,
+                "softcap": softcap,
                 "alibi_slopes_shape": (
                     alibi_slopes.shape
                     if core_attention_bias_type == "alibi" and alibi_slopes is not None
@@ -2918,6 +2943,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     cu_seqlens_kv=cu_seqlens_kv,
                     attn_mask_type=attn_mask_type,
                     window_size=window_size,
+                    softcap=softcap,
                     alibi_slopes=alibi_slopes,
                     cp_group=self.cp_group,
                     cp_global_ranks=self.cp_global_ranks,
@@ -3052,6 +3078,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         attention_mask=attention_mask,
                         window_size=window_size,
                         bottom_right_diagonal=bottom_right_diagonal,
+                        softcap=softcap,
                         core_attention_bias_type=core_attention_bias_type,
                         core_attention_bias=core_attention_bias,
                         alibi_slopes=alibi_slopes,
@@ -3076,6 +3103,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     attention_mask=attention_mask,
                     window_size=window_size,
                     bottom_right_diagonal=bottom_right_diagonal,
+                    softcap=softcap,
                     core_attention_bias_type=core_attention_bias_type,
                     core_attention_bias=core_attention_bias,
                     alibi_slopes=alibi_slopes,

@@ -283,6 +283,7 @@ class ModelConfig:
         alibi_type: str = "none",
         bias_shape: str = "1hss",
         window_size: Tuple[int, int] = (-1, -1),
+        softcap: float = 0.0,
         context_parallel: bool = False,
         cp_comm_type: str = "p2p",
         return_max_logit=False,
@@ -317,6 +318,7 @@ class ModelConfig:
             "causal",
             "padding_causal",
         }
+        self.softcap = softcap
         self.context_parallel = context_parallel
         self.cp_comm_type = cp_comm_type
         self.return_max_logit = return_max_logit
@@ -420,6 +422,7 @@ def get_available_attention_backends(
             attn_mask_type=config.attn_mask_type,
             window_size=config.window_size,
             bottom_right_diagonal=config.bottom_right_diagonal,
+            softcap=config.softcap,
             alibi_slopes_shape=alibi_slopes_shape,
             core_attention_bias_type=config.attn_bias_type,
             core_attention_bias_shape=core_attention_bias_shape,
