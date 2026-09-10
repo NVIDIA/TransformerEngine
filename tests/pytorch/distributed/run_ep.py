@@ -33,13 +33,6 @@ from transformer_engine.pytorch.ep import (
     _ep_combine_raw,
     _ep_dispatch_raw,
 )
-from transformer_engine.pytorch.ops.fused.moe_ep import (
-    FusedMoeEp,
-    _cudnn_megamoe_supported,
-    _get_megamoe_combine_format,
-    finalize_moe_ep_resources,
-    is_moe_fusion_supported,
-)
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
 
 ZERO_COPY = os.environ.get("NVTE_EP_ZERO_COPY", "0") == "1"
@@ -1013,19 +1006,6 @@ class TestMoeEpSequential(_EpTestCase):
             finally:
                 buffer.hidden_dim = original
 
-    def test_megamoe_combine_format_env(self):
-        old_value = os.environ.get("NVTE_MEGAMOE_MXFP8_COMBINE")
-        try:
-            os.environ["NVTE_MEGAMOE_MXFP8_COMBINE"] = "0"
-            self.assertEqual(_get_megamoe_combine_format(), "bf16")
-            os.environ["NVTE_MEGAMOE_MXFP8_COMBINE"] = "1"
-            self.assertEqual(_get_megamoe_combine_format(), "mxfp8")
-        finally:
-            if old_value is None:
-                os.environ.pop("NVTE_MEGAMOE_MXFP8_COMBINE", None)
-            else:
-                os.environ["NVTE_MEGAMOE_MXFP8_COMBINE"] = old_value
-
     @_mxfp8_align_test
     def test_role_quantizer_requires_matching_buffer_recipe(self):
         self._require_mxfp8_shapes()
@@ -1179,42 +1159,16 @@ class TestMoeEpSequential(_EpTestCase):
 
     @_mxfp8_align_test
     def test_megamoe_mxfp8_cuda_graph_matches_eager(self):
-        """Fused Sequential forward/backward graph replay matches eager execution."""
-        if torch.cuda.get_device_capability() != (10, 7):
-            self.skipTest("FusedMoeEp CUDA graph test requires SM107")
-        if not _cudnn_megamoe_supported():
-            self.skipTest("installed cuDNN frontend does not provide stateless training")
-        self._run_megamoe_mxfp8_cuda_graph_matches_eager(
-            glu_interleave_size=32,
-            expect_fused=True,
-        )
-
-    @_mxfp8_align_test
-    def test_unfused_megamoe_mxfp8_cuda_graph_matches_eager(self):
         """Unfused Sequential forward/backward graph replay matches eager execution."""
-        self._run_megamoe_mxfp8_cuda_graph_matches_eager(
-            glu_interleave_size=None,
-            expect_fused=False,
-        )
+        self._run_megamoe_mxfp8_cuda_graph_matches_eager()
 
-    def _run_megamoe_mxfp8_cuda_graph_matches_eager(
-        self,
-        *,
-        glu_interleave_size,
-        expect_fused,
-    ):
+    def _run_megamoe_mxfp8_cuda_graph_matches_eager(self):
         recipe = MXFP8BlockScaling()
         graph_model, graph_fc1, graph_fc2, _ = self._make_megamoe_model(
             recipe=recipe,
-            glu_interleave_size=glu_interleave_size,
         )
-        fusion_supported = is_moe_fusion_supported(tuple(graph_model), recipe)
-        if expect_fused and not fusion_supported:
-            self.skipTest("current configuration does not support FusedMoeEp")
-        self.assertEqual(fusion_supported, expect_fused)
         eager_model, eager_fc1, eager_fc2, _ = self._make_megamoe_model(
             recipe=recipe,
-            glu_interleave_size=glu_interleave_size,
         )
         eager_model.load_state_dict(graph_model.state_dict())
 
@@ -1235,17 +1189,6 @@ class TestMoeEpSequential(_EpTestCase):
             enabled=True,
             recipe=recipe,
         )
-
-        forward_ops = graph_model._module_groups[0]._forward_ops
-        backward_ops = graph_model._module_groups[0]._backward_ops
-        fused_ops = [op for op, _ in forward_ops if isinstance(op, FusedMoeEp)]
-        if expect_fused:
-            self.assertEqual(len(forward_ops), 1)
-            self.assertEqual(len(backward_ops), 1)
-            self.assertEqual(len(fused_ops), 1)
-            self.assertIs(backward_ops[0][0], fused_ops[0])
-        else:
-            self.assertFalse(fused_ops)
 
         # Replace the capture-time contents while retaining captured addresses.
         with torch.no_grad():
@@ -1285,14 +1228,6 @@ class TestMoeEpSequential(_EpTestCase):
                 static_topk_idx,
                 eager_topk_weights,
             )
-        if expect_fused:
-            eager_fused_ops = [
-                op
-                for op, _ in eager_model._module_groups[0]._forward_ops
-                if isinstance(op, FusedMoeEp)
-            ]
-            self.assertEqual(len(eager_fused_ops), 1)
-            self.assertIs(fused_ops[0]._resource, eager_fused_ops[0]._resource)
         tolerances = {"rtol": 0.125, "atol": 0.25}
         torch.testing.assert_close(graph_out_snapshot, eager_out, **tolerances)
 
@@ -1445,17 +1380,11 @@ class TestMoeEpSequential(_EpTestCase):
                 seq_topk_weights,
             )
 
-        forward_ops = model._module_groups[0]._forward_ops
-        fused = len(forward_ops) == 1 and isinstance(forward_ops[0][0], FusedMoeEp)
-        if fused:
-            self.assertTrue(_cudnn_megamoe_supported())
-        else:
-            self.assertFalse(any(isinstance(op, FusedMoeEp) for op, _ in forward_ops))
         self.assertEqual(seq_out.dtype, torch.bfloat16)
 
         fc1_weight = _reference_weights(fc1)
         fc2_weight = _reference_weights(fc2)
-        emulate_mxfp8 = fused or quantization == "mxfp8"
+        emulate_mxfp8 = quantization == "mxfp8"
         reference = MoeEpReference(
             num_experts=self.cfg.num_experts,
             hidden_size=HIDDEN_DIM,
@@ -1464,20 +1393,16 @@ class TestMoeEpSequential(_EpTestCase):
             ep_group=self.ep_group,
             max_tokens_per_rank=TOKENS_PER_RANK,
             output_format=MoeFormat.BF16,
-            combine_format=(
-                MoeFormat.MXFP8
-                if fused and os.environ.get("NVTE_MEGAMOE_MXFP8_COMBINE", "0") == "1"
-                else MoeFormat.BF16
-            ),
+            combine_format=MoeFormat.BF16,
             apply_topk_in_fc1=True,
             generate_c=True,
             intermediate_format=MoeFormat.MXFP8 if emulate_mxfp8 else None,
-            backward_operand_format=MoeFormat.MXFP8 if emulate_mxfp8 and not fused else None,
-            backward_wgrad_mode="operands" if fused else "none",
+            backward_operand_format=MoeFormat.MXFP8 if emulate_mxfp8 else None,
+            backward_wgrad_mode="operands",
             token_padding_size=256,
             weight_interleave_size=32 if quantization == "mxfp8" else None,
         )
-        if emulate_mxfp8 and not fused:
+        if emulate_mxfp8:
             reference_activation = quantize_blockwise(
                 tokens.detach(),
                 MoeFormat.MXFP8,
@@ -1496,11 +1421,7 @@ class TestMoeEpSequential(_EpTestCase):
             topk_idx,
             topk_weights.detach(),
         )
-        if fused:
-            ref_out, fc1_c, route_metadata, wgrad_forward_stash = reference_outputs
-        else:
-            ref_out, fc1_c, route_metadata = reference_outputs
-            wgrad_forward_stash = None
+        ref_out, fc1_c, route_metadata, wgrad_forward_stash = reference_outputs
 
         tolerances = {"rtol": 0.125, "atol": 0.25}
         torch.testing.assert_close(seq_out, ref_out, **tolerances)
@@ -1518,7 +1439,7 @@ class TestMoeEpSequential(_EpTestCase):
         if delay_wgrad_compute:
             fc1.backward_dw()
             fc2.backward_dw()
-        reference_grads = reference.backward(
+        grad_tokens, grad_topk_weights, wgrad_operands = reference.backward(
             dy,
             fc1_weight,
             fc2_weight,
@@ -1528,13 +1449,8 @@ class TestMoeEpSequential(_EpTestCase):
             route_metadata,
             wgrad_forward_stash=wgrad_forward_stash,
         )
-        if fused:
-            grad_tokens, grad_topk_weights, wgrad_operands = reference_grads
-            grad_fc1, grad_fc2 = wgrad_operands.dense_wgrads()
-            reference_wgrads = (grad_fc1, grad_fc2)
-        else:
-            grad_tokens, grad_topk_weights = reference_grads
-            reference_wgrads = (None, None)
+        grad_fc1, grad_fc2 = wgrad_operands.dense_wgrads()
+        reference_wgrads = (grad_fc1, grad_fc2)
 
         torch.cuda.synchronize()
         torch.testing.assert_close(
@@ -1544,19 +1460,15 @@ class TestMoeEpSequential(_EpTestCase):
         )
         torch.testing.assert_close(seq_topk_weights.grad, grad_topk_weights.float(), **tolerances)
         for op, ref_grad in zip((fc1, fc2), reference_wgrads):
-            expected_grad = None if ref_grad is None else ref_grad.transpose(1, 2)
+            expected_grad = ref_grad.transpose(1, 2)
             if accumulate_into_main_grad:
-                if expected_grad is not None and not overwrite_main_grad:
+                if not overwrite_main_grad:
                     expected_grad = expected_grad + main_grad_sentinel
-                if expected_grad is not None:
-                    torch.testing.assert_close(
-                        op.weight.main_grad,
-                        expected_grad.to(dtype=op.weight.main_grad.dtype),
-                        **tolerances,
-                    )
-                else:
-                    self.assertTrue(torch.isfinite(op.weight.main_grad).all())
-                    self.assertFalse(torch.all(op.weight.main_grad == main_grad_sentinel).item())
+                torch.testing.assert_close(
+                    op.weight.main_grad,
+                    expected_grad.to(dtype=op.weight.main_grad.dtype),
+                    **tolerances,
+                )
                 self.assertTrue(op.weight.grad_added_to_main_grad)
                 self.assertIsNotNone(op.weight.grad)
                 continue
@@ -1567,13 +1479,11 @@ class TestMoeEpSequential(_EpTestCase):
                 (NUM_LOCAL_EXPERTS, op.out_features, op.in_features),
             )
             self.assertTrue(seq_grad.is_contiguous())
-            self.assertTrue(torch.isfinite(seq_grad).all())
-            if expected_grad is not None:
-                torch.testing.assert_close(
-                    seq_grad,
-                    expected_grad.to(dtype=seq_grad.dtype),
-                    **tolerances,
-                )
+            torch.testing.assert_close(
+                seq_grad,
+                expected_grad.to(dtype=seq_grad.dtype),
+                **tolerances,
+            )
 
 
 def _init_distributed():
@@ -1602,7 +1512,6 @@ if __name__ == "__main__":
     runner = unittest.TextTestRunner(stream=sys.stdout, verbosity=2)
     result = runner.run(suite)
     dist.barrier()
-    finalize_moe_ep_resources()
     ep_finalize()
     dist.destroy_process_group()
     sys.exit(0 if result.wasSuccessful() else 1)
