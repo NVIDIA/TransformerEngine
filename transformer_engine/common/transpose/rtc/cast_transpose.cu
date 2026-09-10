@@ -116,6 +116,8 @@ __global__ void __launch_bounds__(block_size) cast_transpose_optimized_kernel(
 
   // Reduce amax over block
   if (amax_ptr != nullptr) {
+    // Order the global output stores before publishing the amax update.
+    __threadfence();
     amax = reduce_max<warps_per_tile>(amax, tidy);
     if (threadIdx.x == 0) {
       atomicMaxFloat(amax_ptr, amax);
