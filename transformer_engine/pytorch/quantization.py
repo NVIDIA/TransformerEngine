@@ -138,10 +138,9 @@ class _QuantizationRuntime:
     key: _QuantizationRuntimeKey
     recipe: Recipe
     num_gemms: int
-    recipe_config_revision: int
     role_revision: int
-    forward_states: Tuple["RecipeState", ...]
-    backward_states: Tuple["RecipeState", ...]
+    forward_state: "RecipeState"
+    backward_state: "RecipeState"
     forward_quantizers: List["Quantizer"]
     backward_quantizers: List["Quantizer"]
 
@@ -446,8 +445,6 @@ class FP8GlobalState:
     fp8_enabled: bool = False
     fp8_calibration: bool = False
     fp8_recipe: Optional[Recipe] = None
-    quantizer_config: Optional[Hashable] = None
-    quantizer_config_revision: int = 0
     fp8_distributed_group: Optional[dist_group_type] = None
     fp8_parameters: bool = False
     high_precision_init_val: bool = False
@@ -685,38 +682,16 @@ class FP8GlobalStateManager:
         return get_default_fp8_recipe()
 
     @classmethod
-    def _set_recipe_config(
-        cls,
-        recipe: Optional[Recipe],
-        quantizer_config: Optional[Hashable],
-    ) -> None:
-        """Publish a recipe/configuration pair and advance its monotonic revision."""
-        qstate = cls.quantization_state
-        config_changed = quantizer_config != qstate.quantizer_config
-        if config_changed:
-            qstate.quantizer_config_revision += 1
-            qstate.quantizer_config = quantizer_config
-        qstate.fp8_recipe = recipe
-
-    @classmethod
     def activate_recipe(cls, recipe: Recipe) -> Hashable:
-        """Make a recipe and its semantic quantizer configuration active together."""
+        """Make a recipe active and return its semantic quantizer configuration."""
         quantizer_config = recipe.quantizer_config()
-        cls._set_recipe_config(recipe, quantizer_config)
+        cls.quantization_state.fp8_recipe = recipe
         return quantizer_config
 
     @classmethod
     def get_quantizer_config(cls) -> Hashable:
         """Return the active recipe's cached semantic quantizer configuration."""
-        quantizer_config = cls.quantization_state.quantizer_config
-        if quantizer_config is None:
-            return cls.activate_recipe(cls.get_fp8_recipe())
-        return quantizer_config
-
-    @classmethod
-    def get_quantizer_config_revision(cls) -> int:
-        """Return the manager-owned active recipe-configuration revision."""
-        return cls.quantization_state.quantizer_config_revision
+        return cls.get_fp8_recipe().quantizer_config()
 
     @classmethod
     def get_fp8_group(cls) -> Union[dist_group_type, None]:
@@ -729,9 +704,8 @@ class FP8GlobalStateManager:
         qstate = cls.quantization_state
         return (
             qstate.fp8_enabled,
-            qstate.fp8_calibration,
             qstate.fp8_recipe,
-            qstate.quantizer_config,
+            qstate.fp8_calibration,
             qstate.fp8_distributed_group,
             qstate.is_first_fp8_module,
             qstate.fp8_graph_capturing,
@@ -739,18 +713,17 @@ class FP8GlobalStateManager:
 
     @classmethod
     def set_autocast_state(cls, state: tuple) -> None:
-        """Restore an autocast snapshot without restoring its old configuration revision."""
+        """Restore an autocast snapshot."""
         qstate = cls.quantization_state
         (
             fp8_enabled,
-            fp8_calibration,
             fp8_recipe,
-            quantizer_config,
+            fp8_calibration,
             fp8_distributed_group,
             is_first_fp8_module,
             fp8_graph_capturing,
         ) = state
-        cls._set_recipe_config(fp8_recipe, quantizer_config)
+        qstate.fp8_recipe = fp8_recipe
         qstate.fp8_enabled = fp8_enabled
         qstate.fp8_calibration = fp8_calibration
         qstate.fp8_distributed_group = fp8_distributed_group
@@ -884,7 +857,7 @@ class FP8GlobalStateManager:
     ) -> None:
         """Prepare and publish state for entry into an FP8 region."""
 
-        fp8_recipe, quantizer_config, autocast_key = cls._prepare_autocast_enter(
+        fp8_recipe, _, autocast_key = cls._prepare_autocast_enter(
             enabled,
             fp8_recipe,
             fp8_group,
@@ -893,7 +866,7 @@ class FP8GlobalStateManager:
 
         # Preparation above contains every operation that can fail due to the
         # requested recipe or platform. Publish only after it has succeeded.
-        cls._set_recipe_config(fp8_recipe, quantizer_config)
+        qstate.fp8_recipe = fp8_recipe
         # Once a delayed bucket is registered, its committed recipe snapshot
         # owns the reduction semantics for this key. Do not replace it with a
         # caller-owned recipe object merely by entering another autocast.
@@ -1051,10 +1024,7 @@ def apply_recipe(model: torch.nn.Module, recipe: Recipe) -> None:
         raise RuntimeError("te.apply_recipe() must be called outside CUDA graph capture.")
 
     check_recipe_support(recipe)
-    recipe_config = recipe.quantizer_config()
-    recipe_config_revision = qstate.quantizer_config_revision + int(
-        recipe_config != qstate.quantizer_config
-    )
+    recipe.quantizer_config()
 
     # Import locally to keep quantization.py independent from module/base.py
     # during package initialization.
@@ -1103,8 +1073,6 @@ def apply_recipe(model: torch.nn.Module, recipe: Recipe) -> None:
             num_gemms = module._get_quantization_runtime_num_gemms()
             update = module._plan_quantization_update(  # pylint: disable=protected-access
                 recipe=recipe,
-                recipe_config=recipe_config,
-                recipe_config_revision=recipe_config_revision,
                 num_gemms=num_gemms,
             )
         except Exception as exc:
@@ -1118,7 +1086,7 @@ def apply_recipe(model: torch.nn.Module, recipe: Recipe) -> None:
     # cannot expose a requested recipe globally.
     for module, update in updates:
         module._apply_quantization_update(update)  # pylint: disable=protected-access
-    FP8GlobalStateManager._set_recipe_config(recipe, recipe_config)
+    FP8GlobalStateManager.quantization_state.fp8_recipe = recipe
 
 
 @contextmanager
@@ -1204,7 +1172,6 @@ def quantized_model_init(
     qstate = FP8GlobalStateManager.quantization_state
     _fp8_parameters = qstate.fp8_parameters
     _fp8_recipe = qstate.fp8_recipe
-    _quantizer_config = qstate.quantizer_config
     _high_precision_init_val = qstate.high_precision_init_val
     qstate.fp8_parameters = enabled
     FP8GlobalStateManager.activate_recipe(get_default_fp8_recipe() if recipe is None else recipe)
@@ -1213,7 +1180,7 @@ def quantized_model_init(
         yield
     finally:
         qstate.fp8_parameters = _fp8_parameters
-        FP8GlobalStateManager._set_recipe_config(_fp8_recipe, _quantizer_config)
+        qstate.fp8_recipe = _fp8_recipe
         qstate.high_precision_init_val = _high_precision_init_val
 
 

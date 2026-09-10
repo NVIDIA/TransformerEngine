@@ -166,10 +166,9 @@ def test_quantization_runtime_bundles_both_quantization_directions():
         key=runtime_key,
         recipe=runtime_recipe,
         num_gemms=1,
-        recipe_config_revision=3,
         role_revision=2,
-        forward_states=(),
-        backward_states=(),
+        forward_state=None,
+        backward_state=None,
         forward_quantizers=forward_quantizers,
         backward_quantizers=backward_quantizers,
     )
@@ -667,7 +666,9 @@ def test_current_scaling_owner_configuration_paths_preserve_numerics_and_traits(
     def make_module_owner(module_type, num_gemms):
         owner = object.__new__(module_type)
         owner.__dict__.update(
-            name="test",
+            # ``name`` is a property backed by ``_name``: writing the public name
+            # into ``__dict__`` would be shadowed by the descriptor.
+            _name="test",
             num_gemms=num_gemms,
             fp8_meta={"num_gemms": num_gemms},
             fp8_meta_tensors_initialized=False,
@@ -1008,34 +1009,26 @@ def test_custom_recipe_qfactory_key_mutation_changes_semantic_configuration():
     assert calls == []
 
 
-def test_global_state_caches_active_quantizer_config_and_revision():
-    """Recipe activation publishes semantic configuration with a manager-owned revision."""
+def test_global_state_publishes_the_active_recipe_and_its_configuration():
+    """Activation publishes one value: the recipe, which owns its configuration."""
     FP8GlobalStateManager.reset()
     active_recipe = Float8CurrentScaling()
-    assert FP8GlobalStateManager.get_quantizer_config_revision() == 0
 
     FP8GlobalStateManager.activate_recipe(active_recipe)
     original_config = active_recipe.quantizer_config()
     assert FP8GlobalStateManager.get_fp8_recipe() is active_recipe
     assert FP8GlobalStateManager.get_quantizer_config() is original_config
-    assert FP8GlobalStateManager.get_quantizer_config_revision() == 1
 
-    # Equivalent recipe objects update the requested recipe without advancing the revision.
+    # An equivalent recipe object replaces the active recipe and compares equal.
     equivalent_recipe = Float8CurrentScaling()
     FP8GlobalStateManager.activate_recipe(equivalent_recipe)
     assert FP8GlobalStateManager.get_fp8_recipe() is equivalent_recipe
-    assert FP8GlobalStateManager.get_quantizer_config() is original_config
-    assert FP8GlobalStateManager.get_quantizer_config_revision() == 1
+    assert FP8GlobalStateManager.get_quantizer_config() == original_config
 
-    # Recipe mutation is requested state until the recipe is activated again.
-    active_recipe.fp8_dpa = True
-    assert FP8GlobalStateManager.get_quantizer_config() is original_config
-    assert FP8GlobalStateManager.get_quantizer_config_revision() == 1
-
-    FP8GlobalStateManager.activate_recipe(active_recipe)
-    assert FP8GlobalStateManager.get_quantizer_config() == active_recipe.quantizer_config()
+    # Mutating the active recipe is visible immediately.
+    equivalent_recipe.fp8_dpa = True
     assert FP8GlobalStateManager.get_quantizer_config() != original_config
-    assert FP8GlobalStateManager.get_quantizer_config_revision() == 2
+    assert FP8GlobalStateManager.get_quantizer_config() == equivalent_recipe.quantizer_config()
     FP8GlobalStateManager.reset()
 
 
@@ -1051,7 +1044,6 @@ def test_recipe_activation_does_not_call_qfactory_and_is_atomic_on_config_error(
     keyed_recipe = CustomRecipe(qfactory=keyed_factory)
     FP8GlobalStateManager.activate_recipe(keyed_recipe)
     keyed_config = keyed_recipe.quantizer_config()
-    keyed_revision = FP8GlobalStateManager.get_quantizer_config_revision()
     assert FP8GlobalStateManager.get_fp8_recipe() is keyed_recipe
     assert FP8GlobalStateManager.get_quantizer_config() is keyed_config
     assert calls == []
@@ -1063,7 +1055,6 @@ def test_recipe_activation_does_not_call_qfactory_and_is_atomic_on_config_error(
         FP8GlobalStateManager.activate_recipe(CustomRecipe(qfactory=unkeyed_factory))
     assert FP8GlobalStateManager.get_fp8_recipe() is keyed_recipe
     assert FP8GlobalStateManager.get_quantizer_config() is keyed_config
-    assert FP8GlobalStateManager.get_quantizer_config_revision() == keyed_revision
     assert calls == []
     FP8GlobalStateManager.reset()
 
@@ -1075,8 +1066,6 @@ def _autocast_activation_state():
         qstate.fp8_enabled,
         qstate.fp8_calibration,
         id(qstate.fp8_recipe),
-        id(qstate.quantizer_config),
-        qstate.quantizer_config_revision,
         id(qstate.fp8_distributed_group),
         qstate.is_first_fp8_module,
         qstate.fp8_graph_capturing,
@@ -1162,47 +1151,43 @@ def test_failed_nested_autocast_activation_preserves_outer_state():
     FP8GlobalStateManager.reset()
 
 
-def test_autocast_restores_recipe_and_quantizer_config_together():
-    """Leaving autocast restores the previously active recipe/configuration pair."""
+def test_autocast_restores_the_outer_recipe_pointer():
+    """Leaving autocast restores the recipe object that was active on entry."""
     FP8GlobalStateManager.reset()
     outer_recipe = Float8CurrentScaling()
     inner_recipe = MXFP8BlockScaling()
     FP8GlobalStateManager.activate_recipe(outer_recipe)
     outer_config = FP8GlobalStateManager.get_quantizer_config()
-    outer_revision = FP8GlobalStateManager.get_quantizer_config_revision()
 
-    # Equal independent configurations do not advance the revision on entry or restoration.
+    # An equal but independent recipe leaves the same configuration active.
     with te.autocast(enabled=False, recipe=Float8CurrentScaling()):
-        assert FP8GlobalStateManager.get_quantizer_config_revision() == outer_revision
-    assert FP8GlobalStateManager.get_quantizer_config_revision() == outer_revision
+        assert FP8GlobalStateManager.get_quantizer_config() == outer_config
+    assert FP8GlobalStateManager.get_fp8_recipe() is outer_recipe
 
     with te.autocast(enabled=False, recipe=inner_recipe):
         assert FP8GlobalStateManager.get_fp8_recipe() is inner_recipe
         assert FP8GlobalStateManager.get_quantizer_config() == inner_recipe.quantizer_config()
-        assert FP8GlobalStateManager.get_quantizer_config_revision() == outer_revision + 1
 
+    # Restoration republishes the recipe object, so its cached config comes back.
     assert FP8GlobalStateManager.get_fp8_recipe() is outer_recipe
     assert FP8GlobalStateManager.get_quantizer_config() is outer_config
-    assert FP8GlobalStateManager.get_quantizer_config_revision() == outer_revision + 2
     FP8GlobalStateManager.reset()
 
 
-def test_quantized_model_init_restores_recipe_config_with_monotonic_revision():
-    """Model-init recipe restoration republishes config rather than reusing an old revision."""
+def test_quantized_model_init_restores_the_outer_recipe_pointer():
+    """Model-init restores the recipe object that was active on entry."""
     FP8GlobalStateManager.reset()
     outer_recipe = Float8CurrentScaling()
     inner_recipe = MXFP8BlockScaling()
     FP8GlobalStateManager.activate_recipe(outer_recipe)
     outer_config = FP8GlobalStateManager.get_quantizer_config()
-    outer_revision = FP8GlobalStateManager.get_quantizer_config_revision()
 
     with te.quantized_model_init(enabled=False, recipe=inner_recipe):
         assert FP8GlobalStateManager.get_fp8_recipe() is inner_recipe
-        assert FP8GlobalStateManager.get_quantizer_config_revision() == outer_revision + 1
+        assert FP8GlobalStateManager.get_quantizer_config() == inner_recipe.quantizer_config()
 
     assert FP8GlobalStateManager.get_fp8_recipe() is outer_recipe
     assert FP8GlobalStateManager.get_quantizer_config() is outer_config
-    assert FP8GlobalStateManager.get_quantizer_config_revision() == outer_revision + 2
     FP8GlobalStateManager.reset()
 
 

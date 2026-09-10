@@ -754,8 +754,8 @@ def test_make_graphed_callables_with_kwargs(
 
 
 @pytest.mark.skipif(not fp8_available, reason="FP8 is not available")
-def test_graphed_callable_rejects_changed_quantization_recipe(monkeypatch) -> None:
-    """Validate the capture recipe once per revision and reject mismatches."""
+def test_graphed_callable_rejects_changed_quantization_recipe() -> None:
+    """Accept replays under an equal configuration and reject changed ones."""
     model_config = model_configs["small"]
     dtype = torch.bfloat16
     captured_recipe = recipe.Float8CurrentScaling()
@@ -775,47 +775,30 @@ def test_graphed_callable_rejects_changed_quantization_recipe(monkeypatch) -> No
         recipe=captured_recipe,
     )
 
-    get_config_calls = 0
-    get_quantizer_config = FP8GlobalStateManager.get_quantizer_config
-
-    def counted_get_quantizer_config(cls):
-        nonlocal get_config_calls
-        get_config_calls += 1
-        return get_quantizer_config()
-
-    monkeypatch.setattr(
-        FP8GlobalStateManager,
-        "get_quantizer_config",
-        classmethod(counted_get_quantizer_config),
-    )
+    def replay():
+        output = model(generate_data(model_config, dtype))
+        output.backward(generate_data(model_config, dtype, requires_grad=False))
 
     try:
-        with autocast(enabled=True, recipe=equal_recipe):
-            for _ in range(2):
-                output = model(generate_data(model_config, dtype))
-                output.backward(generate_data(model_config, dtype, requires_grad=False))
-        assert get_config_calls == 1
-
-        # Re-entering after autocast restores the previous recipe advances the
-        # revision. Validate the equal semantic configuration once again, then
-        # stay on the integer-only fast path.
-        with autocast(enabled=True, recipe=equal_recipe):
-            for _ in range(2):
-                output = model(generate_data(model_config, dtype))
-                output.backward(generate_data(model_config, dtype, requires_grad=False))
-        assert get_config_calls == 2
+        # An equal but independent recipe replays, in this scope and a later one.
+        for _ in range(2):
+            with autocast(enabled=True, recipe=equal_recipe):
+                for _ in range(2):
+                    replay()
 
         # Mutating and reusing the caller-owned recipe must not mutate the
         # immutable semantic configuration saved at capture time.
         captured_recipe.fp8_quant_fwd_inp = recipe.QParams(amax_epsilon=0.25)
         with autocast(enabled=True, recipe=captured_recipe):
-            for _ in range(2):
-                with pytest.raises(
-                    RuntimeError,
-                    match="Recapture the graph with the new recipe",
-                ):
-                    model(generate_data(model_config, dtype))
-        assert get_config_calls == 3
+            with pytest.raises(RuntimeError, match="Recapture the graph with the new recipe"):
+                model(generate_data(model_config, dtype))
+
+        # A manager reset cannot make a different recipe look like the captured
+        # one: the check compares configurations, not a recyclable counter.
+        FP8GlobalStateManager.reset()
+        with autocast(enabled=True, recipe=recipe.Float8CurrentScaling(use_power_2_scales=True)):
+            with pytest.raises(RuntimeError, match="Recapture the graph with the new recipe"):
+                model(generate_data(model_config, dtype))
     finally:
         reset_graphs(model)
 

@@ -56,20 +56,16 @@ def _make_counting_recipe(key, calls, *, fail_on_grad_output=False):
     return CustomRecipe(qfactory=qfactory, qfactory_key=key)
 
 
-def _ensure_runtime(module, recipe, revision, *, num_gemms=1):
+def _ensure_runtime(module, recipe, *, num_gemms=1):
     return module._ensure_quantization_runtime(  # pylint: disable=protected-access
         recipe=recipe,
-        recipe_config=recipe.quantizer_config(),
-        recipe_config_revision=revision,
         num_gemms=num_gemms,
     )
 
 
-def _prepare_runtime_update(module, recipe, revision, *, num_gemms=1):
+def _prepare_runtime_update(module, recipe, *, num_gemms=1):
     return module._plan_quantization_update(  # pylint: disable=protected-access
         recipe=recipe,
-        recipe_config=recipe.quantizer_config(),
-        recipe_config_revision=revision,
         num_gemms=num_gemms,
     )
 
@@ -337,11 +333,7 @@ def _active_runtime_owners(module):
 def _global_recipe_state():
     """Return the identity-bearing global recipe state."""
     state = FP8GlobalStateManager.quantization_state
-    return (
-        state.fp8_recipe,
-        state.quantizer_config,
-        state.quantizer_config_revision,
-    )
+    return (state.fp8_recipe,)
 
 
 def _make_compatible_fp8_mha_recipe(key):
@@ -387,24 +379,23 @@ def test_delayed_runtime_rejects_effective_recipe_updates_atomically(replacement
     """Delayed state is frozen once a module runtime has been initialized."""
     module = Linear(16, 16, bias=False, device="cuda", name="linear")
     recipe = DelayedScaling(amax_history_len=4)
-    assert _ensure_runtime(module, recipe, revision=1)
+    assert _ensure_runtime(module, recipe)
     old_views = _runtime_views(module)
 
     with pytest.raises(
         RuntimeError,
         match="Mid-training recipe updates do not support delayed scaling",
     ):
-        _ensure_runtime(module, replacement, revision=2)
+        _ensure_runtime(module, replacement)
 
     assert all(current is old for current, old in zip(_runtime_views(module), old_views))
-    assert old_views[0].recipe_config_revision == 1
 
 
 def test_delayed_runtime_rejects_role_and_slot_layout_updates():
     """Role and GEMM-layout changes cannot rebuild a delayed runtime."""
     module = Linear(16, 16, bias=False, device="cuda", name="linear")
     recipe = DelayedScaling(amax_history_len=4)
-    assert _ensure_runtime(module, recipe, revision=1)
+    assert _ensure_runtime(module, recipe)
     old_views = _runtime_views(module)
 
     module.output_quantizer_role = QuantizerRole(
@@ -413,20 +404,20 @@ def test_delayed_runtime_rejects_role_and_slot_layout_updates():
         name="consumer",
     )
     with pytest.raises(RuntimeError, match="do not support delayed scaling"):
-        _ensure_runtime(module, recipe, revision=1)
+        _ensure_runtime(module, recipe)
     assert all(current is old for current, old in zip(_runtime_views(module), old_views))
 
     with pytest.raises(RuntimeError, match="do not support delayed scaling"):
-        _ensure_runtime(module, recipe, revision=1, num_gemms=2)
+        _ensure_runtime(module, recipe, num_gemms=2)
     assert all(current is old for current, old in zip(_runtime_views(module), old_views))
 
     """An active stateless runtime cannot acquire delayed state mid-training."""
     module = Linear(16, 16, bias=False, device="cuda", name="linear")
-    assert _ensure_runtime(module, Float8CurrentScaling(), revision=1)
+    assert _ensure_runtime(module, Float8CurrentScaling())
     old_views = _runtime_views(module)
 
     with pytest.raises(RuntimeError, match="do not support delayed scaling"):
-        _ensure_runtime(module, DelayedScaling(amax_history_len=4), revision=2)
+        _ensure_runtime(module, DelayedScaling(amax_history_len=4))
     assert all(current is old for current, old in zip(_runtime_views(module), old_views))
 
 
@@ -439,11 +430,11 @@ def test_custom_recipe_cannot_introduce_delayed_state():
         qfactory_key=("custom-enter-delayed", 2),
     )
     module = Linear(16, 16, bias=False, device="cuda", name="linear")
-    assert _ensure_runtime(module, active_recipe, revision=1)
+    assert _ensure_runtime(module, active_recipe)
     old_views = _runtime_views(module)
 
     with pytest.raises(RuntimeError, match="do not support delayed scaling"):
-        _ensure_runtime(module, replacement, revision=2)
+        _ensure_runtime(module, replacement)
     assert all(current is old for current, old in zip(_runtime_views(module), old_views))
 
 
@@ -459,7 +450,7 @@ def test_asymmetric_custom_delayed_scaling_is_rejected_clearly():
         RuntimeError,
         match="This hybrid quantization configuration with delayed scaling is not supported",
     ):
-        _ensure_runtime(module, recipe, revision=1)
+        _ensure_runtime(module, recipe)
     assert module._quantization_runtime is None  # pylint: disable=protected-access
 
 
@@ -473,7 +464,7 @@ def test_mixed_custom_recipe_is_frozen_when_it_contains_delayed_state():
 
     active_recipe = CustomRecipe(qfactory=active_factory, qfactory_key=("mixed", 1))
     module = Linear(16, 16, bias=False, device="cuda", name="linear")
-    assert _ensure_runtime(module, active_recipe, revision=1)
+    assert _ensure_runtime(module, active_recipe)
     old_views = _runtime_views(module)
     active_call_count = len(calls)
 
@@ -482,7 +473,7 @@ def test_mixed_custom_recipe_is_frozen_when_it_contains_delayed_state():
 
     replacement = CustomRecipe(qfactory=replacement_factory, qfactory_key=("mixed", 2))
     with pytest.raises(RuntimeError, match="do not support delayed scaling"):
-        _ensure_runtime(module, replacement, revision=2)
+        _ensure_runtime(module, replacement)
 
     assert len(calls) == active_call_count
     assert all(current is old for current, old in zip(_runtime_views(module), old_views))
@@ -492,13 +483,13 @@ def test_same_delayed_recipe_object_mutation_keeps_committed_snapshot():
     """Rejecting caller mutation must not mutate the active reduction recipe."""
     module = Linear(16, 16, bias=False, device="cuda", name="linear")
     recipe = DelayedScaling(amax_history_len=4, margin=0)
-    assert _ensure_runtime(module, recipe, revision=1)
+    assert _ensure_runtime(module, recipe)
     committed_recipe = module.fp8_meta["recipe"]
     assert committed_recipe is not recipe
 
     recipe.margin = 1
     with pytest.raises(RuntimeError, match="do not support delayed scaling"):
-        _ensure_runtime(module, recipe, revision=2)
+        _ensure_runtime(module, recipe)
 
     assert module.fp8_meta["recipe"] is committed_recipe
     assert committed_recipe.margin == 0
@@ -543,52 +534,63 @@ def test_rejected_delayed_update_aborts_autocast_reduction():
     equal_recipe = _make_counting_recipe(("runtime-reuse", 1), calls)
     module = Linear(16, 16, bias=False, device="cuda", name="linear")
 
-    assert _ensure_runtime(module, first_recipe, revision=1)
+    assert _ensure_runtime(module, first_recipe)
     active = module._quantization_runtime  # pylint: disable=protected-access
     assert active is not None
     assert len(calls) == 5
 
-    # Revision 3 models a module that did not run while revision 2 was active.
-    assert not _ensure_runtime(module, equal_recipe, revision=3)
+    # A module that missed an intervening region still recognizes an equal recipe.
+    assert not _ensure_runtime(module, equal_recipe)
     assert module._quantization_runtime is active  # pylint: disable=protected-access
-    assert active.recipe_config_revision == 3
     assert len(calls) == 5
 
 
-def test_unchanged_runtime_uses_revision_hot_path(monkeypatch):
-    """The steady-state check does not resolve roles or invoke the factory."""
+@pytest.mark.parametrize("reuse_recipe_object", (True, False), ids=("same-object", "equal-object"))
+def test_unchanged_runtime_uses_the_steady_state_path(monkeypatch, reuse_recipe_object):
+    """The steady-state check resolves no roles and invokes no factory.
+
+    A reused recipe object hits on identity; an equivalent one built per region
+    falls through to the configuration comparison and must agree.
+    """
     calls = []
     recipe = _make_counting_recipe(("runtime-hot-path", 1), calls)
     module = Linear(16, 16, bias=False, device="cuda", name="linear")
-    _ensure_runtime(module, recipe, revision=1)
+    _ensure_runtime(module, recipe)
+    active = module._quantization_runtime  # pylint: disable=protected-access
+    factory_call_count = len(calls)
 
     def unexpected_role_resolution(**_kwargs):
         raise AssertionError("unchanged runtime resolved quantizer roles")
 
     monkeypatch.setattr(module, "get_quantizer_roles", unexpected_role_resolution)
-    assert not _ensure_runtime(module, recipe, revision=1)
-    assert len(calls) == 5
+
+    for _ in range(3):
+        requested = (
+            recipe if reuse_recipe_object else _make_counting_recipe(("runtime-hot-path", 1), calls)
+        )
+        assert not _ensure_runtime(module, requested)
+        assert module._quantization_runtime is active  # pylint: disable=protected-access
+        assert len(calls) == factory_call_count
 
 
-def test_revision_only_update_is_not_published_during_planning():
-    """An equal semantic update synchronizes revisions only when committed."""
+def test_equal_semantic_update_is_not_published_during_planning():
+    """An equal semantic update commits nothing and calls no factory."""
     calls = []
-    recipe = _make_counting_recipe(("revision-plan", 1), calls)
-    equal_recipe = _make_counting_recipe(("revision-plan", 1), calls)
+    recipe = _make_counting_recipe(("equal-plan", 1), calls)
+    equal_recipe = _make_counting_recipe(("equal-plan", 1), calls)
     module = Linear(16, 16, bias=False, device="cuda", name="linear")
-    _ensure_runtime(module, recipe, revision=1)
+    _ensure_runtime(module, recipe)
     active = module._quantization_runtime  # pylint: disable=protected-access
     factory_call_count = len(calls)
 
-    update = _prepare_runtime_update(module, equal_recipe, revision=3)
+    update = _prepare_runtime_update(module, equal_recipe)
 
     assert update.candidate is None
     assert module._quantization_runtime is active  # pylint: disable=protected-access
-    assert active.recipe_config_revision == 1
     assert len(calls) == factory_call_count
 
     assert not module._apply_quantization_update(update)  # pylint: disable=protected-access
-    assert active.recipe_config_revision == 3
+    assert module._quantization_runtime is active  # pylint: disable=protected-access
     assert len(calls) == factory_call_count
 
 
@@ -598,16 +600,15 @@ def test_candidate_update_is_not_published_during_planning():
     active_recipe = _make_counting_recipe(("candidate-plan", 1), calls)
     replacement_recipe = _make_counting_recipe(("candidate-plan", 2), calls)
     module = Linear(16, 16, bias=False, device="cuda", name="linear")
-    _ensure_runtime(module, active_recipe, revision=1)
+    _ensure_runtime(module, active_recipe)
     old_views = _runtime_views(module)
     workspace = object()
     module._fp8_workspaces["weight"] = workspace  # pylint: disable=protected-access
 
-    update = _prepare_runtime_update(module, replacement_recipe, revision=2)
+    update = _prepare_runtime_update(module, replacement_recipe)
 
     assert update.candidate is not None
     assert all(current is old for current, old in zip(_runtime_views(module), old_views))
-    assert old_views[0].recipe_config_revision == 1
     assert module._fp8_workspaces["weight"] is workspace  # pylint: disable=protected-access
 
     assert module._apply_quantization_update(update)  # pylint: disable=protected-access
@@ -616,17 +617,12 @@ def test_candidate_update_is_not_published_during_planning():
 
 
 def test_runtime_snapshot_keeps_caches_but_not_in_checkpoint_bytes():
-    """Caller display history must not affect a snapshot's checkpoint bytes.
-
-    The snapshot keeps the caller's derived caches, because comparing a committed
-    runtime against later configurations must not rebuild one every time. Cache
-    state is excluded where it would actually matter: the serialized payload.
-    """
+    """A snapshot keeps the caller's caches; only its payload excludes them."""
     recipe = _make_counting_recipe(("runtime-repr-cache", 1), [])
     str(recipe)
     module = Linear(16, 16, bias=False, device="cuda", name="linear")
 
-    update = _prepare_runtime_update(module, recipe, revision=1)
+    update = _prepare_runtime_update(module, recipe)
     snapshot = update.candidate.recipe
 
     assert recipe.__dict__["_cached_repr"] is not None
@@ -645,7 +641,7 @@ def test_uninitialized_runtime_can_be_prepared_without_publication():
     recipe = _make_counting_recipe(("initial-plan", 1), calls)
     module = Linear(16, 16, bias=False, device="cuda", name="linear")
 
-    update = _prepare_runtime_update(module, recipe, revision=1)
+    update = _prepare_runtime_update(module, recipe)
 
     assert update.candidate is not None
     assert module._quantization_runtime is None  # pylint: disable=protected-access
@@ -664,12 +660,12 @@ def test_later_planning_failure_leaves_earlier_module_unchanged(monkeypatch):
     replacement_recipe = _make_counting_recipe(("multi-plan", 2), calls)
     first = Linear(16, 16, bias=False, device="cuda", name="first")
     second = Linear(16, 16, bias=False, device="cuda", name="second")
-    _ensure_runtime(first, active_recipe, revision=1)
-    _ensure_runtime(second, active_recipe, revision=1)
+    _ensure_runtime(first, active_recipe)
+    _ensure_runtime(second, active_recipe)
     old_first_views = _runtime_views(first)
     old_second_views = _runtime_views(second)
 
-    first_update = _prepare_runtime_update(first, replacement_recipe, revision=2)
+    first_update = _prepare_runtime_update(first, replacement_recipe)
     assert first_update.candidate is not None
 
     def reject_candidate(_candidate):
@@ -677,12 +673,10 @@ def test_later_planning_failure_leaves_earlier_module_unchanged(monkeypatch):
 
     monkeypatch.setattr(second, "_validate_quantization_runtime", reject_candidate)
     with pytest.raises(RuntimeError, match="later module validation failure"):
-        _prepare_runtime_update(second, replacement_recipe, revision=2)
+        _prepare_runtime_update(second, replacement_recipe)
 
     assert all(current is old for current, old in zip(_runtime_views(first), old_first_views))
     assert all(current is old for current, old in zip(_runtime_views(second), old_second_views))
-    assert old_first_views[0].recipe_config_revision == 1
-    assert old_second_views[0].recipe_config_revision == 1
 
 
 @pytest.mark.parametrize(
@@ -759,11 +753,11 @@ def test_same_recipe_object_semantic_mutation_rebuilds_runtime():
     calls = []
     recipe = _make_counting_recipe(("same-object-update", 1), calls)
     module = Linear(16, 16, bias=False, device="cuda", name="linear")
-    _ensure_runtime(module, recipe, revision=1)
+    _ensure_runtime(module, recipe)
     old_runtime = module._quantization_runtime  # pylint: disable=protected-access
 
     recipe.qfactory_key = ("same-object-update", 2)
-    assert _ensure_runtime(module, recipe, revision=2)
+    assert _ensure_runtime(module, recipe)
     assert module._quantization_runtime is not old_runtime  # pylint: disable=protected-access
     assert len(calls) == 10
 
@@ -1012,7 +1006,7 @@ def test_role_revision_is_requested_until_atomic_runtime_commit():
     calls = []
     recipe = _make_counting_recipe(("role-update", 1), calls)
     module = Linear(16, 16, bias=False, device="cuda", name="linear")
-    _ensure_runtime(module, recipe, revision=1)
+    _ensure_runtime(module, recipe)
 
     old_runtime = module._quantization_runtime  # pylint: disable=protected-access
     old_forward_state = module.fp8_meta["scaling_fwd"]
@@ -1026,11 +1020,11 @@ def test_role_revision_is_requested_until_atomic_runtime_commit():
     assert module.fp8_meta["scaling_fwd"] is old_forward_state
     assert module.quantizers["scaling_fwd"] is old_forward_quantizers
 
-    assert _ensure_runtime(module, recipe, revision=1)
+    assert _ensure_runtime(module, recipe)
     new_runtime = module._quantization_runtime  # pylint: disable=protected-access
     assert new_runtime is not old_runtime
     assert new_runtime.key.forward_roles[-1] == role
-    assert module.fp8_meta["scaling_fwd"] is new_runtime.forward_states[0]
+    assert module.fp8_meta["scaling_fwd"] is new_runtime.forward_state
     assert module.quantizers["scaling_fwd"] is new_runtime.forward_quantizers
     assert len(calls) == 10
 
@@ -1039,7 +1033,7 @@ def test_role_revision_is_requested_until_atomic_runtime_commit():
         module_type="linear", tensor_type="input", name="consumer"
     )
     assert module._role_revision == old_role_revision + 1  # pylint: disable=protected-access
-    assert not _ensure_runtime(module, recipe, revision=1)
+    assert not _ensure_runtime(module, recipe)
     assert len(calls) == 10
 
 
@@ -1053,7 +1047,7 @@ def test_backward_factory_failure_keeps_complete_active_runtime():
         fail_on_grad_output=True,
     )
     module = Linear(16, 16, bias=False, device="cuda", name="linear")
-    _ensure_runtime(module, active_recipe, revision=1)
+    _ensure_runtime(module, active_recipe)
 
     old_runtime = module._quantization_runtime  # pylint: disable=protected-access
     old_recipe = module.fp8_meta["recipe"]
@@ -1063,7 +1057,7 @@ def test_backward_factory_failure_keeps_complete_active_runtime():
     old_backward_quantizers = module.quantizers["scaling_bwd"]
 
     with pytest.raises(RuntimeError, match="backward factory failure"):
-        _ensure_runtime(module, failing_recipe, revision=2)
+        _ensure_runtime(module, failing_recipe)
 
     assert module._quantization_runtime is old_runtime  # pylint: disable=protected-access
     assert module.fp8_meta["recipe"] is old_recipe
@@ -1071,7 +1065,6 @@ def test_backward_factory_failure_keeps_complete_active_runtime():
     assert module.fp8_meta["scaling_bwd"] is old_backward_state
     assert module.quantizers["scaling_fwd"] is old_forward_quantizers
     assert module.quantizers["scaling_bwd"] is old_backward_quantizers
-    assert old_runtime.recipe_config_revision == 1
 
 
 @pytest.mark.parametrize(
@@ -1138,7 +1131,7 @@ def test_runtime_update_workspace_lifecycle(
     )
     replacement_recipe = _make_counting_recipe(("workspace-update", 3), calls)
     module = module_factory()
-    assert _ensure_runtime(module, active_recipe, revision=1, num_gemms=num_gemms)
+    assert _ensure_runtime(module, active_recipe, num_gemms=num_gemms)
 
     active_runtime = module._quantization_runtime  # pylint: disable=protected-access
     active_views = (
@@ -1153,14 +1146,14 @@ def test_runtime_update_workspace_lifecycle(
         module._fp8_workspaces[cache_name] = workspace  # pylint: disable=protected-access
 
     # A global revision change with an equal semantic runtime preserves caches.
-    assert not _ensure_runtime(module, equal_recipe, revision=2, num_gemms=num_gemms)
+    assert not _ensure_runtime(module, equal_recipe, num_gemms=num_gemms)
     assert module._quantization_runtime is active_runtime  # pylint: disable=protected-access
     for cache_name, workspace in workspaces.items():
         assert module._fp8_workspaces[cache_name] is workspace  # pylint: disable=protected-access
 
     # Candidate construction failure preserves both compatibility views and caches.
     with pytest.raises(RuntimeError, match="backward factory failure"):
-        _ensure_runtime(module, failing_recipe, revision=3, num_gemms=num_gemms)
+        _ensure_runtime(module, failing_recipe, num_gemms=num_gemms)
     assert module._quantization_runtime is active_runtime  # pylint: disable=protected-access
     current_views = (
         module.fp8_meta["recipe"],
@@ -1174,7 +1167,7 @@ def test_runtime_update_workspace_lifecycle(
         assert module._fp8_workspaces[cache_name] is workspace  # pylint: disable=protected-access
 
     # Only a fully committed replacement clears cached workspaces.
-    assert _ensure_runtime(module, replacement_recipe, revision=4, num_gemms=num_gemms)
+    assert _ensure_runtime(module, replacement_recipe, num_gemms=num_gemms)
     replacement_runtime = module._quantization_runtime  # pylint: disable=protected-access
     assert replacement_runtime is not active_runtime
     assert not module._fp8_workspaces  # pylint: disable=protected-access
@@ -1859,8 +1852,8 @@ def test_delayed_qmi_mha_first_forward_preserves_initialized_runtimes(
     def runtime_object_ids(owner):
         runtime = owner._quantization_runtime  # pylint: disable=protected-access
         assert runtime is not None
-        forward_state = runtime.forward_states[0]
-        backward_state = runtime.backward_states[0]
+        forward_state = runtime.forward_state
+        backward_state = runtime.backward_state
         return tuple(
             id(obj)
             for obj in (
@@ -2112,35 +2105,35 @@ def test_apply_recipe_success_noop_mutation_and_forward_fast_path():
     try:
         apply_recipe(model, first_recipe)
         first_runtimes = [module._quantization_runtime for module in model]
-        first_revision = FP8GlobalStateManager.get_quantizer_config_revision()
+        first_config = FP8GlobalStateManager.get_quantizer_config()
         first_factory_calls = len(calls)
         assert first_factory_calls == 10
         assert FP8GlobalStateManager.get_fp8_recipe() is first_recipe
 
         # An independent equal recipe updates only the manager's requested
-        # recipe object. Runtime identity, revision, and factories stay fixed.
+        # recipe object. Runtime identity, configuration, and factories stay fixed.
         apply_recipe(model, equal_recipe)
         assert [module._quantization_runtime for module in model] == first_runtimes
-        assert FP8GlobalStateManager.get_quantizer_config_revision() == first_revision
+        assert FP8GlobalStateManager.get_quantizer_config() == first_config
         assert FP8GlobalStateManager.get_fp8_recipe() is equal_recipe
         assert len(calls) == first_factory_calls
 
         # The first matching autocast forward after explicit application uses
-        # each module's revision fast path and performs no factory work.
+        # each module's steady-state path and performs no factory work.
         inp = torch.randn(8, 16, device="cuda", requires_grad=True)
         _run_update_step(model, equal_recipe, inp)
         assert [module._quantization_runtime for module in model] == first_runtimes
         assert len(calls) == first_factory_calls
 
         # Mutating and reusing the same recipe object produces a real model-wide
-        # replacement and one new global revision.
+        # replacement and a different active configuration.
         equal_recipe.qfactory_key = ("apply-success", 2)
         apply_recipe(model, equal_recipe)
         assert all(
             module._quantization_runtime is not old_runtime
             for module, old_runtime in zip(model, first_runtimes)
         )
-        assert FP8GlobalStateManager.get_quantizer_config_revision() == first_revision + 1
+        assert FP8GlobalStateManager.get_quantizer_config() != first_config
         assert len(calls) == first_factory_calls + 10
     finally:
         FP8GlobalStateManager.reset()
@@ -2450,7 +2443,7 @@ def test_candidate_validation_failure_keeps_complete_active_runtime(monkeypatch)
     active_recipe = _make_counting_recipe(("validation-update", 1), calls)
     candidate_recipe = _make_counting_recipe(("validation-update", 2), calls)
     module = Linear(16, 16, bias=False, device="cuda", name="linear")
-    _ensure_runtime(module, active_recipe, revision=1)
+    _ensure_runtime(module, active_recipe)
 
     old_runtime = module._quantization_runtime  # pylint: disable=protected-access
     old_forward_state = module.fp8_meta["scaling_fwd"]
@@ -2464,7 +2457,7 @@ def test_candidate_validation_failure_keeps_complete_active_runtime(monkeypatch)
 
     monkeypatch.setattr(module, "_validate_quantization_runtime", reject_candidate)
     with pytest.raises(RuntimeError, match="candidate validation failure"):
-        _ensure_runtime(module, candidate_recipe, revision=2)
+        _ensure_runtime(module, candidate_recipe)
 
     assert module._quantization_runtime is old_runtime  # pylint: disable=protected-access
     assert module.fp8_meta["scaling_fwd"] is old_forward_state
@@ -2507,7 +2500,7 @@ def test_grouped_candidate_validation_is_atomic(mismatched_tensor_type):
 
     module = GroupedLinear(2, 16, 16, bias=False, device="cuda", name="grouped")
     active_recipe = make_recipe(("grouped-atomic", "active", mismatched_tensor_type))
-    _ensure_runtime(module, active_recipe, revision=1, num_gemms=2)
+    _ensure_runtime(module, active_recipe, num_gemms=2)
 
     old_runtime = module._quantization_runtime  # pylint: disable=protected-access
     old_forward_state = module.fp8_meta["scaling_fwd"]
@@ -2523,7 +2516,7 @@ def test_grouped_candidate_validation_is_atomic(mismatched_tensor_type):
         mismatched_role=mismatched_tensor_type,
     )
     with pytest.raises(ValueError, match="incompatible plain backend configurations"):
-        _ensure_runtime(module, invalid_recipe, revision=2, num_gemms=2)
+        _ensure_runtime(module, invalid_recipe, num_gemms=2)
 
     assert module._quantization_runtime is old_runtime  # pylint: disable=protected-access
     assert module.fp8_meta["scaling_fwd"] is old_forward_state
@@ -2539,7 +2532,7 @@ def test_grouped_candidate_validation_is_atomic(mismatched_tensor_type):
         dtype=torch.float16,
         unsafe_inputs=True,
     )
-    update = _prepare_runtime_update(module, replacement_recipe, revision=3, num_gemms=2)
+    update = _prepare_runtime_update(module, replacement_recipe, num_gemms=2)
     assert module._validated_quantizer_generations is old_validated_generations
     assert module._delayed_scaling_input_quantizer is old_delayed_quantizer
     assert module._unsafe_requantization_input_quantizer is old_unsafe_quantizer

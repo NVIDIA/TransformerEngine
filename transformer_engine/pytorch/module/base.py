@@ -10,7 +10,6 @@ import math
 import os
 import pickle
 import warnings
-from collections.abc import Hashable
 from dataclasses import dataclass
 from enum import Enum
 from abc import ABC, abstractmethod
@@ -88,7 +87,6 @@ class _QuantizationUpdate:
 
     candidate: Optional[_QuantizationRuntime]
     validation_result: Any
-    recipe_config_revision: int
     role_revision: int
 
 
@@ -941,7 +939,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         ):
             if role is not None and not isinstance(role, QuantizerRole):
                 raise TypeError(f"{attribute} must be a QuantizerRole or None")
-        self.name = name
+        self._name = name
         self.next_iter_when_debug_should_be_run = 0
         self.fp8_initialized = False
         self.fp8 = False
@@ -974,6 +972,24 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if not TEDebugState.debug_enabled:
             TEDebugState.initialize()
         self._validate_name()
+
+    @property
+    def name(self) -> Optional[str]:
+        """Semantic name of this module, used to key its quantizer roles."""
+        return self._name
+
+    @name.setter
+    def name(self, value: Optional[str]) -> None:
+        """Rename the module, invalidating a committed runtime's role-keyed key.
+
+        Never route a name through ``fast_setattr``: it writes ``__dict__`` and
+        bypasses this setter.
+        """
+        if getattr(self, "_name", None) == value:
+            return
+        self._name = value
+        if getattr(self, "_quantization_runtime", None) is not None:
+            self.fast_setattr("_role_revision", self._role_revision + 1)
 
     def fast_setattr(self, name: str, value: Any) -> None:
         """
@@ -1227,7 +1243,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         recipe: Recipe,
         key: _QuantizationRuntimeKey,
         num_gemms: int,
-        recipe_config_revision: int,
         role_revision: int,
         forward_state_roles: Optional[List[Optional[QuantizerRole]]],
         backward_state_roles: Optional[List[Optional[QuantizerRole]]],
@@ -1259,8 +1274,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         active = getattr(self, "_quantization_runtime", None)
         if active is not None:
-            old_forward_state = active.forward_states[0]
-            old_backward_state = active.backward_states[0]
+            old_forward_state = active.forward_state
+            old_backward_state = active.backward_state
         else:
             # Checkpoint loading and legacy direct initialization can populate
             # compatibility metadata before the first runtime is active.
@@ -1285,10 +1300,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             key=key,
             recipe=runtime_recipe,
             num_gemms=num_gemms,
-            recipe_config_revision=recipe_config_revision,
             role_revision=role_revision,
-            forward_states=(forward_state,),
-            backward_states=(backward_state,),
+            forward_state=forward_state,
+            backward_state=backward_state,
             forward_quantizers=forward_quantizers,
             backward_quantizers=backward_quantizers,
         )
@@ -1306,8 +1320,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         """Publish a validated replacement runtime and its compatibility views."""
         del validation_result
         recipe = candidate.recipe
-        forward_state = candidate.forward_states[0]
-        backward_state = candidate.backward_states[0]
+        forward_state = candidate.forward_state
+        backward_state = candidate.backward_state
 
         # ``fp8_meta`` and ``quantizers`` remain compatibility views. Only
         # update them after both directions have been built and validated.
@@ -1336,9 +1350,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     @staticmethod
     def _runtime_has_delayed_scaling(runtime: _QuantizationRuntime) -> bool:
         """Whether either direction of a runtime owns delayed-scaling state."""
-        return any(
-            _is_delayed_scaling_state(state)
-            for state in runtime.forward_states + runtime.backward_states
+        return _is_delayed_scaling_state(runtime.forward_state) or _is_delayed_scaling_state(
+            runtime.backward_state
         )
 
     @staticmethod
@@ -1390,11 +1403,14 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self,
         *,
         recipe: Recipe,
-        recipe_config: Hashable,
-        recipe_config_revision: int,
         num_gemms: int,
     ) -> _QuantizationUpdate:
-        """Plan and validate a complete cold-path update without publishing it."""
+        """Plan and validate a complete cold-path update without publishing it.
+
+        The configuration is read once here, so the key and the quantizers below
+        are derived from the same value.
+        """
+        recipe_config = recipe.quantizer_config()
         active = getattr(self, "_quantization_runtime", None)
         role_revision = getattr(self, "_role_revision", 0)
 
@@ -1422,7 +1438,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             return _QuantizationUpdate(
                 candidate=None,
                 validation_result=None,
-                recipe_config_revision=recipe_config_revision,
                 role_revision=role_revision,
             )
 
@@ -1436,7 +1451,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             recipe=recipe,
             key=requested_key,
             num_gemms=num_gemms,
-            recipe_config_revision=recipe_config_revision,
             role_revision=role_revision,
             forward_state_roles=forward_state_roles,
             backward_state_roles=backward_state_roles,
@@ -1450,7 +1464,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         return _QuantizationUpdate(
             candidate=candidate,
             validation_result=validation_result,
-            recipe_config_revision=recipe_config_revision,
             role_revision=role_revision,
         )
 
@@ -1463,7 +1476,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if candidate is None:
             active = self._quantization_runtime
             assert active is not None
-            active.recipe_config_revision = update.recipe_config_revision
             active.role_revision = update.role_revision
             return False
 
@@ -1477,33 +1489,30 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self,
         *,
         recipe: Recipe,
-        recipe_config: Hashable,
-        recipe_config_revision: int,
         num_gemms: int,
     ) -> bool:
-        """Use the revision hot path or plan and immediately apply a module-local update.
+        """Reuse the committed runtime, or plan and immediately apply a module-local update.
 
         Return whether a new runtime was committed.
         """
         active = getattr(self, "_quantization_runtime", None)
         role_revision = getattr(self, "_role_revision", 0)
 
-        # Constant-time steady-state path: no role construction, factory
-        # calls, recipe traversal, or candidate validation.
-        if (
-            active is not None
-            and active.recipe_config_revision == recipe_config_revision
-            and active.role_revision == role_revision
-            and active.num_gemms == num_gemms
-        ):
-            return False
+        # Constant-time steady-state path: no role construction, factory calls,
+        # recipe traversal, or candidate validation. Identity settles a reused
+        # recipe object; equality covers an equivalent recipe built per region.
+        if active is not None and active.role_revision == role_revision:
+            recipe_config = recipe.quantizer_config()
+            active_config = active.key.recipe_config
+            if (
+                active_config is recipe_config or active_config == recipe_config
+            ) and active.num_gemms == num_gemms:
+                # Frameworks write this compatibility view from outside TE.
+                if self.fp8_meta.get("recipe") is not active.recipe:
+                    self.fp8_meta["recipe"] = active.recipe
+                return False
 
-        update = self._plan_quantization_update(
-            recipe=recipe,
-            recipe_config=recipe_config,
-            recipe_config_revision=recipe_config_revision,
-            num_gemms=num_gemms,
-        )
+        update = self._plan_quantization_update(recipe=recipe, num_gemms=num_gemms)
         return self._apply_quantization_update(update)
 
     def set_meta_tensor(self, fwd: bool, recipe: Recipe) -> None:
@@ -1514,12 +1523,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         """
         # TODO(negvet): Remove set_meta_tensor after checkpoint, GroupedLinear, and DPA migration.
         del fwd
-        num_gemms = self.fp8_meta.get("num_gemms", 1)
-        self._ensure_quantization_runtime(
-            recipe=recipe,
-            recipe_config=recipe.quantizer_config(),
-            recipe_config_revision=-1,
-            num_gemms=num_gemms,
+        num_gemms = self._get_quantization_runtime_num_gemms()
+        self._apply_quantization_update(
+            self._plan_quantization_update(recipe=recipe, num_gemms=num_gemms)
         )
 
     def get_quantizer_roles(
@@ -1890,17 +1896,13 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         original_recipe = meta.get("recipe")
         recipe = FP8GlobalStateManager.get_fp8_recipe()
-        recipe_config = FP8GlobalStateManager.get_quantizer_config()
-        recipe_config_revision = FP8GlobalStateManager.get_quantizer_config_revision()
-        if fp8_enabled:
-            meta["fp8_group"] = FP8GlobalStateManager.get_fp8_group()
 
         runtime_changed = self._ensure_quantization_runtime(
             recipe=recipe,
-            recipe_config=recipe_config,
-            recipe_config_revision=recipe_config_revision,
             num_gemms=num_gemms,
         )
+        if fp8_enabled:
+            meta["fp8_group"] = FP8GlobalStateManager.get_fp8_group()
         if fp8_enabled:
             self.fast_setattr("fp8_initialized", True)
 
@@ -2371,6 +2373,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if self.name is not None:
             return
 
+        # MultiheadAttention and TransformerLayer borrow this helper without
+        # inheriting the name property, so assign the public attribute.
         self.name = f"Layer_{TEDebugState.get_layer_count()}"
 
     def _check_weight_tensor_recipe_correspondence(self) -> None:

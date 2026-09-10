@@ -195,8 +195,8 @@ class TestDPARuntimeRecipeUpdate:
 
         second_runtime = dpa._quantization_runtime
         assert second_runtime is not first_runtime
-        assert dpa.fp8_meta["scaling_fwd"] is second_runtime.forward_states[0]
-        assert dpa.fp8_meta["scaling_bwd"] is second_runtime.backward_states[0]
+        assert dpa.fp8_meta["scaling_fwd"] is second_runtime.forward_state
+        assert dpa.fp8_meta["scaling_bwd"] is second_runtime.backward_state
         assert dpa.quantizers["scaling_fwd"] is second_runtime.forward_quantizers
         assert dpa.quantizers["scaling_bwd"] is second_runtime.backward_quantizers
         assert second_capabilities == first_capabilities == (False, True)
@@ -234,8 +234,6 @@ class TestDPARuntimeRecipeUpdate:
         )
         update = dpa._plan_quantization_update(
             recipe=second_recipe,
-            recipe_config=second_recipe.quantizer_config(),
-            recipe_config_revision=old_runtime.recipe_config_revision + 1,
             num_gemms=dpa._get_quantization_runtime_num_gemms(),
         )
 

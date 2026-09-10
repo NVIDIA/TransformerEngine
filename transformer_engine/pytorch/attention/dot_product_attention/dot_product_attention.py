@@ -1422,7 +1422,7 @@ class DotProductAttention(TransformerEngineBaseModule):
 
         return _infer_custom_dpa_local_recipes(
             candidate.recipe,
-            {"scaling_fwd": candidate.forward_states[0]},
+            {"scaling_fwd": candidate.forward_state},
             {
                 "scaling_fwd": candidate.forward_quantizers,
                 "scaling_bwd": candidate.backward_quantizers,

@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Functions for CUDA Graphs support in FP8"""
+
 from collections.abc import Iterable
 import contextlib
 import gc
@@ -1267,22 +1268,10 @@ def _make_graphed_callables(
 
         return backward_dw, reset
 
-    # Cache CUDA-graph recipe validation by the manager-owned configuration
-    # revision. Semantic configuration equality is only evaluated when recipe
-    # activation advances the revision, while unchanged replays only compare
-    # integers.
-    checked_recipe_config_revision = None
-    checked_recipe_config_matches = False
-
     def active_recipe_config_matches_capture() -> bool:
-        nonlocal checked_recipe_config_revision, checked_recipe_config_matches
-        recipe_config_revision = FP8GlobalStateManager.get_quantizer_config_revision()
-        if recipe_config_revision != checked_recipe_config_revision:
-            checked_recipe_config_matches = (
-                FP8GlobalStateManager.get_quantizer_config() == captured_recipe_config
-            )
-            checked_recipe_config_revision = recipe_config_revision
-        return checked_recipe_config_matches
+        """Whether the active recipe still builds the quantizers this graph captured."""
+        recipe_config = FP8GlobalStateManager.get_quantizer_config()
+        return recipe_config is captured_recipe_config or recipe_config == captured_recipe_config
 
     # Put together the final graphed callables
     ret = []

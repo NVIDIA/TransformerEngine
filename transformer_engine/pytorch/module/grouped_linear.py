@@ -1877,7 +1877,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         """Validate both grouped directions without changing live module state."""
         super()._validate_quantization_runtime(candidate)
         if (
-            isinstance(candidate.forward_states[0], Float8CurrentScalingRecipeState)
+            isinstance(candidate.forward_state, Float8CurrentScalingRecipeState)
             and self.tp_size > 1
         ):
             raise ValueError(
