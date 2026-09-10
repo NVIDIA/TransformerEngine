@@ -2142,81 +2142,141 @@ def test_te_linear_compile_delayed_scaling_raises():
 
 
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
-@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
-def test_te_linear_compile_is_first_microbatch():
-    """te.Linear with ``is_first_microbatch`` under torch.compile: FP8 weight
-    caching updates the cached workspace in place, which the functional custom
-    op can't express, so the schedule must fall back to eager -- warning +
-    numerics identical to eager, cache reused in place across steps. The eager
-    reference runs on a separate module so it cannot mask a corrupted or
-    rebuilt cache."""
-    dtype = torch.bfloat16
-    device = "cuda"
-    fp8_recipe = recipe.Float8CurrentScaling()
-    model = te.Linear(64, 32, params_dtype=dtype, device=device)
-    ref_model = te.Linear(64, 32, params_dtype=dtype, device=device)
-    with torch.no_grad():
-        ref_model.weight.copy_(model.weight)
-        ref_model.bias.copy_(model.bias)
+@pytest.mark.parametrize("compile_mode", _compile_modes)
+@pytest.mark.parametrize("deferred_backward", [False, True])
+@pytest.mark.parametrize(
+    "fp8_recipe",
+    [
+        pytest.param(
+            recipe.Float8CurrentScaling(),
+            marks=pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8),
+        ),
+        pytest.param(
+            recipe.Float8BlockScaling(),
+            marks=pytest.mark.skipif(
+                not fp8_block_scaling_available, reason=reason_for_no_fp8_block_scaling
+            ),
+        ),
+        pytest.param(
+            recipe.MXFP8BlockScaling(),
+            marks=pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8),
+        ),
+        pytest.param(
+            recipe.NVFP4BlockScaling(disable_stochastic_rounding=True),
+            marks=pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4),
+        ),
+    ],
+    ids=recipe_id,
+)
+def test_te_linear_compile_is_first_microbatch(
+    fp8_recipe, compile_mode, deferred_backward, monkeypatch
+):
+    """Reuse cached weights across microbatches and refresh after optimizer updates."""
+    dtype, device = torch.bfloat16, "cuda"
+    model = te.Linear(128, 128, params_dtype=dtype, device=device)
+    ref_model = te.Linear(128, 128, params_dtype=dtype, device=device)
+    ref_model.load_state_dict(model.state_dict())
 
-    schedule = [True, False, False]
-    is_first = schedule[0]  # rebound each step; closed over by the fns.
-
-    def fn(inp):
+    def fn(inp, is_first):
         with te.autocast(recipe=fp8_recipe):
             return model(inp, is_first_microbatch=is_first)
 
-    def ref_fn(inp):
+    def ref_fn(inp, is_first):
         with te.autocast(recipe=fp8_recipe):
             return ref_model(inp, is_first_microbatch=is_first)
 
-    # Eager priming: FP8 state must exist before tracing (creating quantizers
-    # in-graph breaks later recompiles; upstream Dynamo bug).
-    is_first = None
-    fn(torch.randn(32, 64, dtype=dtype, device=device, requires_grad=True))
-    is_first = schedule[0]
+    for forward in (fn, ref_fn):
+        inp = torch.randn(128, 128, dtype=dtype, device=device, requires_grad=True)
+        forward(inp, None).sum().backward()
+
+    replay_count = 0
+    original_replay = torch.cuda.CUDAGraph.replay
+
+    def replay(graph):
+        nonlocal replay_count
+        replay_count += 1
+        return original_replay(graph)
+
+    if compile_mode == "reduce-overhead":
+        monkeypatch.setattr(torch.cuda.CUDAGraph, "replay", replay)
+    torch._dynamo.reset()
+    compiled = torch.compile(fn, fullgraph=True, mode=compile_mode)
+
+    with _assert_no_cudagraph_skips(compile_mode == "reduce-overhead"):
+        for step in range(5):
+            model.zero_grad(set_to_none=True)
+            ref_model.zero_grad(set_to_none=True)
+            pending = []
+            replays_before = replay_count
+            for microbatch in range(3):
+                base = torch.randn(128, 128, dtype=dtype, device=device)
+                inp_ref = base.detach().clone().requires_grad_(True)
+                inp = base.detach().clone().requires_grad_(True)
+                is_first = microbatch == 0
+                out_ref = ref_fn(inp_ref, is_first)
+                out = compiled(inp, is_first).clone()
+                torch.testing.assert_close(out, out_ref, atol=_EAGER_ATOL, rtol=_EAGER_RTOL)
+
+                workspace = model._fp8_workspaces["weight"]
+                if is_first:
+                    cached_workspace = workspace
+                else:
+                    assert workspace is cached_workspace
+                torch.testing.assert_close(
+                    workspace.dequantize(),
+                    ref_model._fp8_workspaces["weight"].dequantize(),
+                    atol=_EAGER_ATOL,
+                    rtol=_EAGER_RTOL,
+                )
+
+                pending.append((out, out_ref, inp, inp_ref))
+                if not deferred_backward or microbatch == 2:
+                    for result, ref_result, input_tensor, ref_input in pending:
+                        ref_result.sum().backward()
+                        result.sum().backward()
+                        torch.testing.assert_close(
+                            input_tensor.grad, ref_input.grad, atol=_EAGER_ATOL, rtol=_EAGER_RTOL
+                        )
+                        for param, ref_param in zip(model.parameters(), ref_model.parameters()):
+                            torch.testing.assert_close(
+                                param.grad, ref_param.grad, atol=_EAGER_ATOL, rtol=_EAGER_RTOL
+                            )
+                    pending.clear()
+            if step == 4 and compile_mode == "reduce-overhead":
+                assert replay_count > replays_before, "CUDA graphs were recorded but never replayed"
+            with torch.no_grad():
+                for param, ref_param in zip(model.parameters(), ref_model.parameters()):
+                    param.add_(param.grad, alpha=-0.001)
+                    ref_param.add_(ref_param.grad, alpha=-0.001)
+            del cached_workspace, workspace, out, out_ref, result, ref_result
 
     torch._dynamo.reset()
-    compiled = torch.compile(fn)
 
-    cached_workspace = None
-    for step, is_first in enumerate(schedule):
-        base = torch.randn(32, 64, dtype=dtype, device=device)
 
-        inp_ref = base.detach().clone().requires_grad_(True)
-        ref_model.zero_grad(set_to_none=True)
-        out_ref = ref_fn(inp_ref)
-        out_ref.sum().backward()
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+def test_te_linear_compile_microbatch_cache_is_read_only():
+    """A refresh must preserve the cache saved by an outstanding backward."""
+    dtype, device = torch.bfloat16, "cuda"
+    model = te.Linear(64, 32, params_dtype=dtype, device=device)
+    fp8_recipe = recipe.Float8CurrentScaling()
 
-        inp = base.detach().clone().requires_grad_(True)
-        model.zero_grad(set_to_none=True)
-        if step == 0:
-            with pytest.warns(
-                UserWarning, match="Falling back to eager execution under torch.compile"
-            ):
-                out = compiled(inp).clone()
-        else:
-            out = compiled(inp).clone()
-        out.sum().backward()
+    def fn(inp):
+        with te.autocast(recipe=fp8_recipe):
+            return model(inp, is_first_microbatch=True)
 
-        torch.testing.assert_close(out, out_ref.detach(), atol=_EAGER_ATOL, rtol=_EAGER_RTOL)
-        torch.testing.assert_close(inp.grad, inp_ref.grad, atol=_EAGER_ATOL, rtol=_EAGER_RTOL)
-        torch.testing.assert_close(
-            model.weight.grad, ref_model.weight.grad, atol=_EAGER_ATOL, rtol=_EAGER_RTOL
-        )
-
-        workspace = model._fp8_workspaces.get("weight")
-        assert workspace is not None, f"no cached FP8 weight after step {step}"
-        if step == 0:
-            cached_workspace = workspace
-        else:
-            assert workspace is cached_workspace, f"cache rebuilt at step {step}"
-
+    inp = torch.randn(32, 64, dtype=dtype, device=device, requires_grad=True)
+    fn(inp).sum().backward()
     torch._dynamo.reset()
-    compiled_fg = torch.compile(fn, fullgraph=True)
-    is_first = True
-    with pytest.raises(Exception, match=re.escape("FP8 weight caching")):
-        compiled_fg(torch.randn(32, 64, dtype=dtype, device=device, requires_grad=True))
+    compiled = torch.compile(fn, fullgraph=True)
+    first = compiled(inp)
+    cache = model._fp8_workspaces["weight"]
+    saved_weight = cache.dequantize().clone()
+    second = compiled(inp)
+    assert model._fp8_workspaces["weight"] is not cache
+    torch.testing.assert_close(cache.dequantize(), saved_weight, atol=0, rtol=0)
+    (first + second).sum().backward()
+    torch._dynamo.reset()
 
 
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
