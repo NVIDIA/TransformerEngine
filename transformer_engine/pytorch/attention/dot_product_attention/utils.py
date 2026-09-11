@@ -147,6 +147,8 @@ class FlashAttentionUtils:
     v4_is_installed = False
     fa4_version = PkgVersion("0")
     use_v4 = False
+    # Set by a signature probe in backends.py; fail-closed default.
+    fa3_supports_softcap = False
     v4_installation_steps = """\
 pip install flash-attn-4==4.0.0b11 nvidia-cutlass-dsl[cu13]"""
     v4_warning_printed = False
@@ -228,6 +230,9 @@ class AttentionParams:
     bottom_right_diagonal: bool, default = `None`
         Whether to align sliding window and ALiBi diagonal to the bottom right corner
         of the softmax matrix.
+    softcap : float, default = 0.0
+        Tanh logit softcapping value applied to the attention scores, as
+        ``softcap * tanh(scores / softcap)``. A value of ``0.0`` disables softcapping.
     alibi_slopes_shape : Optional[Union[torch.Size, List]], default = None
         Tensor shape of :attr:`alibi_slopes` in `DotProductAttention`.
     core_attention_bias_type : str, default = no_bias
@@ -288,6 +293,7 @@ class AttentionParams:
     attn_mask_type: str = "no_mask"
     window_size: Union[Tuple[int, int], None] = None
     bottom_right_diagonal: bool = True
+    softcap: float = 0.0
     alibi_slopes_shape: Union[torch.Size, List, None] = None
     core_attention_bias_type: str = "no_bias"
     core_attention_bias_shape: str = "1hss"
@@ -432,6 +438,7 @@ def get_attention_backend(
     attn_mask_type = attention_params.attn_mask_type
     window_size = attention_params.window_size
     bottom_right_diagonal = attention_params.bottom_right_diagonal
+    softcap = attention_params.softcap
     alibi_slopes_shape = attention_params.alibi_slopes_shape
     core_attention_bias_type = attention_params.core_attention_bias_type
     core_attention_bias_shape = attention_params.core_attention_bias_shape
@@ -762,6 +769,36 @@ def get_attention_backend(
             use_fused_attention = False
             use_unfused_attention = False
             logger.debug("Disabling all backends for max_logit with FP8 attention")
+
+    # Filter: softcap
+    # Disable any backend that would not honour a nonzero cap, rather than silently dropping it.
+    if softcap != 0.0:
+        if use_fused_attention:
+            logger.debug("Disabling FusedAttention as it does not support softcap")
+            use_fused_attention = False
+        if use_flash_attention_4:
+            if FlashAttentionUtils.v4_is_installed:
+                # FA4 implements softcap; TE does not plumb it to the FA4 call path yet.
+                logger.debug("Disabling FlashAttention 4 as TE does not pass it softcap")
+            use_flash_attention_4 = False
+        if use_flash_attention_3 and not (
+            FlashAttentionUtils.fa3_supports_softcap
+            and max(head_dim_qk, head_dim_v) <= 256
+            and not context_parallel
+        ):
+            logger.debug(
+                "Disabling FlashAttention 3 for softcap (requires softcap-capable FA3 build, "
+                "head_dim <= 256, and no context parallelism)"
+            )
+            use_flash_attention_3 = False
+        if use_flash_attention_2 and not FlashAttentionUtils.v2_6_0_plus:
+            logger.debug("Disabling FlashAttention 2 for softcap (requires flash-attn >= 2.6.0)")
+            use_flash_attention_2 = False
+        if use_flash_attention_2 and attention_dropout != 0.0 and is_training:
+            # FA2 rejects softcap with dropout at dispatch (flash_api.cpp). Dropout only
+            # reaches the kernel while training, hence the is_training guard.
+            logger.debug("Disabling FlashAttention 2 for softcap with dropout")
+            use_flash_attention_2 = False
 
     # Filter: score_mod
     if has_score_mod_bprop and not has_score_mod:
