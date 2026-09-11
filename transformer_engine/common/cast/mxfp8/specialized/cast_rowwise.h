@@ -34,6 +34,8 @@ namespace specialized {
  * in the rest of TE.
  *
  *  \tparam     OType         FP8 output type.
+ *  \tparam     SWIZZLED_SCALES  Write scales in the GEMM-swizzled layout rather
+ *                            than one packed byte per MX block.
  *  \param[in]  input         BF16 input, [rows, cols], row-major.
  *  \param[out] output        FP8 output, [rows, cols], row-major.
  *  \param[out] scales        E8M0 scales, one byte per MX block.
@@ -43,7 +45,7 @@ namespace specialized {
  *                            packed scale array, or more when it is padded.
  *  \param[in]  stream        CUDA stream.
  */
-template <typename OType>
+template <typename OType, bool SWIZZLED_SCALES = false>
 void launch_cast_rowwise(const void *input, void *output, void *scales, int rows, int cols,
                          int scale_stride, cudaStream_t stream);
 
