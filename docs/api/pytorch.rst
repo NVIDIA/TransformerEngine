@@ -100,6 +100,10 @@ Mixture of Experts (MoE) functions
 
 .. autoapifunction:: transformer_engine.pytorch.moe_sort_chunks_by_index_with_probs
 
+.. autoapifunction:: transformer_engine.pytorch.moe_sort_chunks_and_pad
+
+.. autoapifunction:: transformer_engine.pytorch.moe_unpad_and_restore_chunks
+
 
 Communication-computation overlap
 ---------------------------------
