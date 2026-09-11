@@ -2708,6 +2708,8 @@ class Linear(TransformerEngineBaseModule):
         prepare_forward. Quantizer checks stay in compile_unsupported_reason."""
         if debug:
             return "debug instrumentation (nvidia-dlfw-inspect)"
+        if self.buffer_quantized_scaling_factors:
+            return "quantized scaling-factor buffering"
         weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
         if is_distributed_weight(weight_tensor):
             return "a DistributedWeight (custom weight parallelism, e.g. GTP)"
