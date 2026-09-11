@@ -22,6 +22,7 @@ struct MatmulConfig {
   NVTETensor epilogue_aux_tensor = nullptr;
   bool use_split_accumulator = false;
   int sm_count = 0;
+  bool alpha_beta_on_device = false;
 
   static constexpr size_t attr_sizes[] = {
       sizeof(NVTETensor),  // bias_tensor
@@ -30,7 +31,8 @@ struct MatmulConfig {
       sizeof(uint8_t),     // with_dgelu_epilogue
       sizeof(NVTETensor),  // epilogue_aux_tensor
       sizeof(uint8_t),     // use_split_accumulator
-      sizeof(int32_t)      // sm_count
+      sizeof(int32_t),     // sm_count
+      sizeof(uint8_t)      // alpha_beta_on_device
   };
 };
 

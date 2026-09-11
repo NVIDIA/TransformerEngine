@@ -2061,6 +2061,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             return
 
         recipe = self.fp8_meta["recipe"]
+        if recipe.custom():
+            # Custom quantization recipes are compatible with all quantizers
+            return
+
         weight_tensors = [getattr(self, name) for name in self.weight_names]
         for i, tensor in enumerate(weight_tensors):
             if isinstance(tensor, QuantizedTensorStorage):

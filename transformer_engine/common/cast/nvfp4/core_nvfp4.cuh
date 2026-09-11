@@ -31,58 +31,57 @@ namespace transformer_engine {
 namespace dispatch {
 namespace nvfp4 {
 
-using nvfp4_scale_t = fp8e4m3;
-
-namespace quantization_and_transposition_SF {
-#if FP4_TYPE_SUPPORTED
-// Used in transpose variant
-// Compute per-block E4M3 encoding/decoding scaling factor
-__device__ __forceinline__ nvfp4_scale_t compute_decoding_scaling_factor(const float block_amax,
-                                                                         const float S_enc) {
-  // constexpr float rcp_6f = 1.0f / 6.0f;
-  // const float S_dec_b = block_amax * rcp_6f;
-  // const nvfp4_scale_t S_dec_b_fp8 = static_cast<nvfp4_scale_t>(S_dec_b * S_enc);
-  // return S_dec_b_fp8;
-  // NOTE: Divide by 6.0f is not elegant and not efficient.
-  // However, this is part of the emulation code to ensure exact match.
-  using namespace detail;
-  constexpr float fp4_max = TypeExtrema<fp4e2m1>::max;  // 6.0f;
-  constexpr float fp4_max_inv = 1.0f / fp4_max;
-  const float S_dec_b = block_amax * (S_enc * fp4_max_inv);
-  return static_cast<nvfp4_scale_t>(fminf(S_dec_b, TypeExtrema<float>::max));
-}
-#endif  // FP4_TYPE_SUPPORTED
-}  // namespace quantization_and_transposition_SF
-
-namespace quantization_SF {
-#if FP4_TYPE_SUPPORTED
-// Used in non-transpose variant
-// Compute per-block E4M3 encoding/decoding scaling factor
-__device__ __forceinline__ fp8e4m3 compute_decoding_scaling_factor(const float block_amax,
-                                                                   const float S_enc) {
-  using namespace detail;
-  constexpr float fp4_max_inv = 1.0f / TypeExtrema<fp4e2m1>::max;  // 1 / 6.0f
-  // const float S_dec_b = block_amax * rcp_6f;
-  // const fp8e4m3 S_dec_b_fp8 = static_cast<fp8e4m3>(S_dec_b * S_enc);
-  // return S_dec_b_fp8;
-  return static_cast<fp8e4m3>(block_amax * (S_enc * fp4_max_inv));
-}
-#endif  // FP4_TYPE_SUPPORTED
-}  // namespace quantization_SF
+// Central runtime-to-compile-time dispatch for NVFP4 scale storage types.
+// SWITCH_FP8UE5M3_TYPE_HANDLE adds UE5M3 when the CUDA toolkit supports it.
+#define TRANSFORMER_ENGINE_NVFP4_SCALE_TYPE_SWITCH(SCALE_DTYPE, SCALE_TYPE, ...)          \
+  switch (SCALE_DTYPE) {                                                                  \
+    case DType::kFloat8E4M3: {                                                            \
+      using SCALE_TYPE = fp8e4m3;                                                         \
+      { __VA_ARGS__ }                                                                     \
+    } break;                                                                              \
+      SWITCH_FP8UE5M3_TYPE_HANDLE(SCALE_TYPE, __VA_ARGS__)                                \
+    default: {                                                                            \
+      NVTE_ERROR("Unsupported NVFP4 scale dtype ", to_string(SCALE_DTYPE),                \
+                 ". Expected Float8E4M3, or Float8UE5M3 when compiled with CUDA 13.4+."); \
+    }                                                                                     \
+  }
 
 namespace core {
 
 #if FP4_TYPE_SUPPORTED
 using namespace ptx;
 
+template <typename ScaleType>
+__device__ __forceinline__ ScaleType
+compute_decoding_scaling_factor(const float block_amax, const float global_encode_scale) {
+  // Compute the per-block decode scale in the selected scale storage type:
+  //
+  //   block_decode_scale = block_amax / fp4_max
+  //   stored_decode_scale = block_decode_scale * global_encode_scale
+  //
+  // An equivalent, more literal implementation is:
+  //
+  //   constexpr float rcp_6f = 1.0f / 6.0f;
+  //   const float block_decode_scale = block_amax * rcp_6f;
+  //   return static_cast<ScaleType>(block_decode_scale * global_encode_scale);
+  //
+  // Keep the multiplication order below to match the emulation code exactly,
+  // while avoiding a direct division by the FP4 maximum.
+  using namespace detail;
+  constexpr float fp4_max = TypeExtrema<fp4e2m1>::max;  // 6.0f
+  constexpr float fp4_max_inv = 1.0f / fp4_max;
+  const float decode_scale = block_amax * (global_encode_scale * fp4_max_inv);
+  return static_cast<ScaleType>(fminf(decode_scale, TypeExtrema<float>::max));
+}
+
 // Compute the global encode scale factor for a given global amax.
-// NVFP4 uses the full E4M3 range by default. Some 4over6 tensors dispatch
-// E4M3_MAX=256 to leave room for map-to-4 scale expansion.
-template <int E4M3_MAX = 448>
+// NVFP4 uses the full scale-type range by default. The explicit SCALE_MAX
+// template argument lets recipes such as 4over6 reserve encoding headroom.
+template <typename ScaleType, int SCALE_MAX = static_cast<int>(detail::TypeExtrema<ScaleType>::max)>
 __device__ __forceinline__ float compute_global_encode_scaling_factor_FP4(const float global_amax) {
   using namespace detail;
-  static_assert(E4M3_MAX == 448 || E4M3_MAX == 256, "Unsupported NVFP4 E4M3 max.");
-  constexpr float fp8_max = static_cast<float>(E4M3_MAX);
+  static_assert(SCALE_MAX > 0, "NVFP4 scale maximum must be positive.");
+  constexpr float fp8_max = static_cast<float>(SCALE_MAX);
   constexpr float fp4_max = TypeExtrema<fp4e2m1>::max;  // 6.0f;
   float global_encode_scale = fp8_max * fp4_max / global_amax;
   // If scale is infinity, return max value of float32
