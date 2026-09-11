@@ -427,6 +427,7 @@ def _install_fake_flax_fused_attn(monkeypatch, *, kernel_available=True):
         score_mod_tensors=None,
         score_mod_bprop_tensors=None,
         return_max_logit=False,
+        bottom_right_diagonal=None,
     ):
         captured.update(
             qkv=qkv,
@@ -452,6 +453,7 @@ def _install_fake_flax_fused_attn(monkeypatch, *, kernel_available=True):
             score_mod_bprop=score_mod_bprop,
             score_mod_tensors=score_mod_tensors,
             score_mod_bprop_tensors=score_mod_bprop_tensors,
+            bottom_right_diagonal=bottom_right_diagonal,
         )
         return qkv[0]
 

@@ -412,7 +412,9 @@ def build_fp8_fwd_graph(
             ).set_dim((1, 1, 1, 1)).set_stride((1, 1, 1, 1))
             output_bindings.append(GraphBinding(uid, 2, offset))
     else:
-        op["amax_o"].set_output(False)
+        op["amax_o"].set_output(False).set_data_type(cudnn.data_type.FLOAT).set_dim(
+            (1, 1, 1, 1)
+        ).set_stride((1, 1, 1, 1))
 
     workspace, data, version = finalize_graph(
         cudnn, graph, description=f"JAX {mode} FP8 attention forward"
@@ -722,7 +724,9 @@ def build_fp8_bwd_graph(
             output_bindings.append(GraphBinding(uid, 3, offset))
     else:
         for amax in op["amax"]:
-            amax.set_output(False)
+            amax.set_output(False).set_data_type(cudnn.data_type.FLOAT).set_dim(
+                (1, 1, 1, 1)
+            ).set_stride((1, 1, 1, 1))
 
     workspace, data, version = finalize_graph(
         cudnn, graph, description=f"JAX {mode} FP8 attention backward"
