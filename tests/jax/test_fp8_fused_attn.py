@@ -26,6 +26,7 @@ from transformer_engine.jax.cpp_extensions import FusedAttnHelper
 from transformer_engine.jax.cpp_extensions.fp8_attention import (
     _mx_scale,
     _mxfp8_scale_inv,
+    _validate_mxfp8_runtime,
 )
 from transformer_engine.jax.flax import DotProductAttention
 from transformer_engine.jax.quantize import (
@@ -115,6 +116,8 @@ def test_fp8_dpa_forward_backward(fp8_recipe, min_arch, min_cudnn, input_dtype):
     """Each supported recipe executes FP8 DPA behind FP16/BF16 module boundaries."""
 
     _require_gpu(min_arch, min_cudnn)
+    if fp8_recipe.mxfp8() and get_cudnn_version() in (92300, 92301):
+        pytest.skip("cuDNN 9.23.0 and 9.23.1 have known MXFP8 SDPA correctness issues.")
     batch, seqlen, heads, dim = 2, 128, 8, 128
     q_key, k_key, v_key, do_key = jax.random.split(jax.random.PRNGKey(1234), 4)
     shape = (batch, seqlen, heads, dim)
@@ -209,6 +212,21 @@ def test_mxfp8_attention_scale_graph_stride():
     assert graph.kwargs["dim"] == (2, 8, 128, 4)
     assert graph.kwargs["stride"] == (4096, 512, 4, 1)
     assert tensor.reordering == FakeCudnn.tensor_reordering.F8_128x4
+
+
+@pytest.mark.parametrize("cudnn_version", ((9, 23, 0), (9, 23, 1)))
+def test_mxfp8_attention_rejects_affected_cudnn(cudnn_version):
+    """Known-bad cuDNN 9.23 patch releases are rejected before graph execution."""
+
+    with pytest.raises(ValueError, match="known SDPA correctness issues"):
+        _validate_mxfp8_runtime(cudnn_version, 100)
+
+
+@pytest.mark.parametrize("cudnn_version", ((9, 22, 9), (9, 23, 2)))
+def test_mxfp8_attention_accepts_neighboring_cudnn(cudnn_version):
+    """The cuDNN exclusion remains limited to the affected patch releases."""
+
+    _validate_mxfp8_runtime(cudnn_version, 100)
 
 
 @pytest.mark.parametrize("feature", ("alibi", "bottom_right"))

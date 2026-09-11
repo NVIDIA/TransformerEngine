@@ -1008,6 +1008,18 @@ def _sequence_lengths(sequence_descriptor, config):
     return q_seqlen.flatten(), kv_seqlen.flatten()
 
 
+def _validate_mxfp8_runtime(cudnn_version, device_arch):
+    """Reject runtimes that cannot safely execute MXFP8 attention."""
+
+    if cudnn_version < (9, 21, 0) or device_arch < 100:
+        raise ValueError("MXFP8 attention requires cuDNN 9.21 and SM100 or newer.")
+    if cudnn_version in ((9, 23, 0), (9, 23, 1)):
+        raise ValueError(
+            "MXFP8 attention is disabled with cuDNN 9.23.0 and 9.23.1 due to known "
+            "SDPA correctness issues."
+        )
+
+
 def _validate_fp8_support(qkv, quantizers, config, mode):
     if config.qkv_layout.is_qkvpacked():
         q = k = v = qkv[0]
@@ -1022,6 +1034,8 @@ def _validate_fp8_support(qkv, quantizers, config, mode):
         jnp.dtype(jnp.float8_e4m3fn): "float8_e4m3",
         jnp.dtype(jnp.float8_e5m2): "float8_e5m2",
     }.get(q_dtype, str(q_dtype))
+    cudnn_version = get_cudnn_version()
+    device_arch = _device_arch()
     support = check_fp8_fused_attention_support(
         FusedAttentionConfig(
             is_training=bool(config.is_training),
@@ -1042,14 +1056,14 @@ def _validate_fp8_support(qkv, quantizers, config, mode):
             return_max_logit=False,
             cuda_graph=False,
             deterministic=not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1"))),
-            cudnn_version=get_cudnn_version(),
-            sm_arch=_device_arch(),
+            cudnn_version=cudnn_version,
+            sm_arch=device_arch,
         )
     )
     if not support.supported:
         raise ValueError(f"Unsupported JAX FP8 attention configuration: {support.reason}.")
-    if mode == "mxfp8" and (get_cudnn_version() < (9, 21, 0) or _device_arch() < 100):
-        raise ValueError("MXFP8 attention requires cuDNN 9.21 and SM100 or newer.")
+    if mode == "mxfp8":
+        _validate_mxfp8_runtime(cudnn_version, device_arch)
 
 
 def fused_attn_fp8_fwd(qkv, sequence_descriptor, seed, quantizers, config):
