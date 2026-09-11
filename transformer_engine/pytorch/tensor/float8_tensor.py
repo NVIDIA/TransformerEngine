@@ -125,8 +125,9 @@ class Float8Quantizer(Quantizer):
         """Quantize tensor implementation"""
         return tex.quantize(tensor, self)
 
-    def calibrate(self, tensor: torch.Tensor, *, decay: float = 0.0) -> None:
+    def calibrate(self, tensor: torch.Tensor, *, calibration_decay: float = 0.0) -> None:
         if isinstance(tensor, (QuantizedTensor, QuantizedTensorStorage)):
+            # Retrieve the quantization metadata from quantized storage.
             observed_amax = self.amax
         else:
             # If quantized amax metadata does not yet exist or calibrate() is called directly,
@@ -135,7 +136,9 @@ class Float8Quantizer(Quantizer):
             amin, amax = tensor.aminmax()
             observed_amax = torch.max(-amin, amax).reshape(1)
             self.amax.copy_(observed_amax)
-        self._update_calibration_value("amax", observed_amax, decay=decay)
+        self._update_calibration_value(
+            "amax", observed_amax, calibration_decay=calibration_decay
+        )
 
     def get_quantization_recipe_name(self) -> str:
         """Get the stable name of the quantization recipe."""
@@ -329,13 +332,14 @@ class Float8CurrentScalingQuantizer(Quantizer):
         """Quantize tensor implementation"""
         return tex.quantize(tensor, self)
 
-    def calibrate(self, tensor: torch.Tensor, *, decay: float = 0.0) -> None:
-        """Compute and calibrate (decaying amax) quantization metadata."""
-        scale_inv = getattr(tensor, "_scale_inv", None)
-        if scale_inv is None:
-            # If the scale_inv does not yet exist or calibrate() is called directly,
-            # then recompute the absmax / scale without quantization. This path is
-            # not performant and SHOULD NOT be called within training or inference.
+    def calibrate(self, tensor: torch.Tensor, *, calibration_decay: float = 0.0) -> None:
+        """Compute and calibrate quantization metadata."""
+        if isinstance(tensor, (QuantizedTensor, QuantizedTensorStorage)):
+            # Retrieve the quantization metadata from quantized storage.
+            scale_inv = tensor._scale_inv
+        else:
+            # Direct calibration of a non-quantized tensor must reconstruct the metadata.
+            # This path is not performant and SHOULD NOT be called within training or inference.
             amin, amax = tensor.aminmax()
             amax = torch.maximum(-amin, amax).float().reshape(1)
             if self.with_amax_reduction and torch.distributed.is_initialized():
@@ -355,7 +359,9 @@ class Float8CurrentScalingQuantizer(Quantizer):
                 scale = torch.ldexp(torch.ones_like(scale), exponent - 1)
             scale.masked_fill_(torch.isinf(amax) | (amax == 0), 1.0)
             scale_inv = torch.reciprocal(scale)
-        self._update_calibration_value("scale_inv", scale_inv, decay=decay)
+        self._update_calibration_value(
+            "scale_inv", scale_inv, calibration_decay=calibration_decay
+        )
 
     def get_quantization_recipe_name(self) -> str:
         """Get the stable name of the quantization recipe."""

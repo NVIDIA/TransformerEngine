@@ -243,7 +243,7 @@ class Float8BlockQuantizer(Quantizer):
             return False
         return True
 
-    def calibrate(self, tensor: torch.Tensor, *, decay: float = 0.0) -> None:
+    def calibrate(self, tensor: torch.Tensor, *, calibration_decay: float = 0.0) -> None:
         # NOTE: This interface is specific to requirements like delayed scaling
         # where state from an estimator influences distribution parameters.
         # NOTE(@cspades): Currently, PTQ calibration requirements don't need
