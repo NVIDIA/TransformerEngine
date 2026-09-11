@@ -17,7 +17,7 @@ import transformer_engine_torch as tex
 from ...constants import MXFP8_BLOCK_SCALING_SIZE
 from ...ep import EpConfig
 from ...quantization import Recipe
-from ...tensor import GroupedTensor, Quantizer
+from ...tensor import GroupedTensor, GroupedTensorStorage, Quantizer
 from ...utils import mark_grouped_tensor
 from .._common import (
     get_accumulate_flag_in_param,
@@ -709,10 +709,21 @@ class FusedMoeEp(FusedOperation):
         )
 
         if any(ctx.requires_grad for ctx in basic_op_ctxs):
-            mark_grouped_tensor(forward_out.fc1_preact, forward_out.fc1_a)
+            fc1_a = GroupedTensorStorage(
+                shape=(
+                    forward_out.fc1_a.numel() // self.fc1.in_features,
+                    self.fc1.in_features,
+                ),
+                dtype=forward_out.fc1_a.dtype,
+                num_tensors=self.fc1.num_groups,
+                columnwise_data=forward_out.fc1_a,
+                columnwise_scale_inv=forward_out.fc1_sfa,
+            )
+            mark_grouped_tensor(forward_out.fc1_preact, fc1_a)
             active_rows = forward_out.expert_offsets[-1:]
             forward_out.fc1_preact.grouped_tensor_num_tokens = active_rows
             forward_out.fc1_a.grouped_tensor_num_tokens = active_rows
+            forward_out.fc1_sfa.grouped_tensor_num_tokens = active_rows
             basic_op_ctxs[0].save_for_backward(
                 topk_idx,
                 topk_weights,
