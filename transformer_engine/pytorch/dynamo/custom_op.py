@@ -1198,13 +1198,9 @@ def _register_op(
     impl: Callable[[Any], Any],
     fake_impl: Callable[[Any], Any],
     pack_result: Callable[[Any], List[torch.Tensor]],
-    flatten_in_body: bool,
 ) -> _RegisteredOp:
     """Define one two-tier custom op: the base kernel, the wrapper op that lets
     ``QuantizedTensor`` subclasses be inputs, and the passthrough registrations.
-
-    ``flatten_in_body`` also flattens subclass inputs inside the wrapper body,
-    not only through the ``register_torch_dispatch`` rules.
     """
     plan = _parse_arg_type(arg_type)
     schema = f"{plan.schema_str} -> Tensor[]"
@@ -1225,8 +1221,8 @@ def _register_op(
         wrapper_op_name=name,
         schema_str=schema,
         base_op=base_op,
-        slot_offsets=slot_offsets if flatten_in_body else (),
-        subclasses=subclasses if flatten_in_body else (),
+        slot_offsets=slot_offsets,
+        subclasses=subclasses,
     )
     wrapper_op = getattr(namespace, name)
 
@@ -1275,7 +1271,6 @@ def register_custom_op(
             impl=impl,
             fake_impl=fake_impl,
             pack_result=pack_result,
-            flatten_in_body=True,
         )
     except (ImportError, AttributeError, RuntimeError, TypeError) as e:
         record_compile_disabled(
@@ -1403,7 +1398,6 @@ def _register_custom_op_with_autograd_impl(
         impl=fwd_impl,
         fake_impl=fwd_fake_impl,
         pack_result=_pack_fwd_result,
-        flatten_in_body=True,
     )
     bwd_qualname = f"{_TE_OP_NAMESPACE}::{op_name}_backward_base"
     num_grad_inputs = len(input_tensors_for_grad)
@@ -1413,7 +1407,6 @@ def _register_custom_op_with_autograd_impl(
         impl=bwd_impl,
         fake_impl=bwd_fake_impl,
         pack_result=lambda grads: _pack_bwd_result(grads, num_grad_inputs, bwd_qualname),
-        flatten_in_body=False,
     )
 
     autograd_common = {
