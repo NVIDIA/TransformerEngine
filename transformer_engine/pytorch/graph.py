@@ -1238,6 +1238,12 @@ def _make_graphed_callables(
         need_bwd_dw = need_bwd_dw_graph.get(graph_idx, False)
         te_modules = visited_te_modules.get(graph_idx, set())
 
+        # A captured module executes replayed kernels, so a later recipe update
+        # would be accepted and then silently ignored. Hold a lease for as long
+        # as this graph is live; the planner refuses to update a leased module.
+        for module in te_modules:
+            module._graph_lease_count = getattr(module, "_graph_lease_count", 0) + 1
+
         # Attach backward_dw as an attribute to the graphed callable.
         def backward_dw():
             helpers.ensure_not_reset()
@@ -1255,6 +1261,9 @@ def _make_graphed_callables(
         # Attach reset as an attribute to the graphed callable.
         def reset():
             nonlocal fwd_graph, bwd_graph, bwd_dw_graph, te_modules
+
+            for module in te_modules:
+                module._graph_lease_count = max(0, getattr(module, "_graph_lease_count", 0) - 1)
 
             for graph in (fwd_graph, bwd_graph, bwd_dw_graph):
                 if graph is not None:

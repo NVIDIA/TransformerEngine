@@ -2653,6 +2653,52 @@ def test_graph_capture_resizes_amax_history_and_leaves_a_consistent_runtime():
         FP8GlobalStateManager.reset()
 
 
+def test_live_cuda_graph_rejects_a_recipe_update_instead_of_ignoring_it():
+    """A captured module replays captured kernels, so an update must not be accepted."""
+    available, reason = is_fp8_available(return_reason=True)
+    if not available:
+        pytest.skip(reason)
+
+    import transformer_engine.pytorch as te
+
+    FP8GlobalStateManager.reset()
+    try:
+        module = Linear(
+            64, 64, bias=False, params_dtype=torch.bfloat16, device="cuda", name="linear"
+        )
+        inp = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
+        captured = Float8CurrentScaling()
+        graphed = te.make_graphed_callables(module, (inp,), fp8_enabled=True, fp8_recipe=captured)
+        assert module._graph_lease_count == 1  # pylint: disable=protected-access
+        runtime = module._quantization_runtime  # pylint: disable=protected-access
+
+        changed = Float8CurrentScaling()
+        changed.fp8_quant_fwd_inp = QParams(power_2_scale=True)
+
+        # apply_recipe used to be accepted and then silently ignored by replay.
+        with pytest.raises(RuntimeError, match="captured by a live CUDA graph"):
+            apply_recipe(module, changed)
+        # Replaying under a different recipe was already refused by the graph's own
+        # capture check; that path is unchanged.
+        with pytest.raises(RuntimeError, match="differs from the CUDA graph capture recipe"):
+            with autocast(enabled=True, recipe=changed):
+                module(inp)
+        assert module._quantization_runtime is runtime  # pylint: disable=protected-access
+
+        # Re-entering the captured recipe is not a change and stays allowed.
+        with autocast(enabled=True, recipe=captured):
+            graphed(inp)
+
+        # Releasing the graph releases the lease.
+        graphed.reset()
+        assert module._graph_lease_count == 0  # pylint: disable=protected-access
+        apply_recipe(module, changed)
+        # pylint: disable-next=protected-access
+        assert module._quantization_runtime is not runtime
+    finally:
+        FP8GlobalStateManager.reset()
+
+
 @pytest.mark.parametrize(
     "live_recipe",
     [

@@ -1453,6 +1453,16 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 role_revision=role_revision,
             )
 
+        # An unchanged recipe is fine above; anything past this point would
+        # replace state a live CUDA graph has already captured, which replay
+        # would then ignore. Reject instead of accepting a silent no-op.
+        if getattr(self, "_graph_lease_count", 0):
+            raise RuntimeError(
+                "This module's state is captured by a live CUDA graph, so a recipe, "
+                "quantizer role or GEMM layout change cannot take effect. Call reset() "
+                "on the graphed callable and recapture before changing it."
+            )
+
         self._check_quantization_update_supported(
             recipe=recipe,
             requested_key=requested_key,
