@@ -171,7 +171,7 @@ class TestDPARuntimeRecipeUpdate:
             first_runtime = dpa._quantization_runtime
             first_forward_quantizers = dpa.quantizers["scaling_fwd"]
             first_backward_quantizers = dpa.quantizers["scaling_bwd"]
-            first_capabilities_quantizer = dpa._qkv_capabilities_quantizer
+            first_qkv_quantizer = _canonical_qkv_quantizer(dpa)
             assert dpa.get_qkv_quantization_capabilities() == first_capabilities
 
         assert dpa._quantization_runtime is first_runtime
@@ -200,12 +200,254 @@ class TestDPARuntimeRecipeUpdate:
         assert dpa.quantizers["scaling_fwd"] is second_runtime.forward_quantizers
         assert dpa.quantizers["scaling_bwd"] is second_runtime.backward_quantizers
         assert second_capabilities == first_capabilities == (False, True)
-        assert dpa._qkv_capabilities_quantizer is not first_capabilities_quantizer
+        assert _canonical_qkv_quantizer(dpa) is not first_qkv_quantizer
         assert any(
-            dpa._qkv_capabilities_quantizer is quantizer
+            _canonical_qkv_quantizer(dpa) is quantizer
             for quantizer in second_runtime.forward_quantizers
         )
         assert not dpa._fp8_workspaces
+
+    def test_custom_to_builtin_crossing_is_rejected(self):
+        """The built-in path never takes over a module a CustomRecipe runtime owns."""
+        if not mxfp8_available:
+            pytest.skip(f"MXFP8: {reason_for_no_mxfp8}")
+
+        for builtin in (
+            recipe.MXFP8BlockScaling(fp8_dpa=True),  # stateless
+            recipe.DelayedScaling(fp8_dpa=True),  # owns reduction buckets
+        ):
+            dpa = self._make_dpa()
+            custom = recipe.CustomRecipe(
+                qfactory=mxfp8_factory,
+                qfactory_key=("dpa-crossing", 1),
+                fp8_dpa=True,
+            )
+            with autocast(enabled=True, recipe=custom):
+                dpa.get_qkv_quantization_capabilities()
+            runtime = dpa._quantization_runtime
+            assert runtime is not None
+            old_views = (
+                dpa.fp8_meta["recipe"],
+                dpa.fp8_meta["scaling_fwd"],
+                dpa.quantizers["scaling_fwd"],
+            )
+
+            with autocast(enabled=True, recipe=builtin):
+                with pytest.raises(
+                    RuntimeError, match="built-in DotProductAttention recipe path is frozen"
+                ):
+                    dpa.init_fp8_metadata(num_gemms=3)
+
+            assert dpa._quantization_runtime is runtime
+            assert (
+                dpa.fp8_meta["recipe"],
+                dpa.fp8_meta["scaling_fwd"],
+                dpa.quantizers["scaling_fwd"],
+            ) == old_views
+
+    def test_unlabelled_custom_runtime_still_blocks_the_builtin_path(self):
+        """A factory TE cannot label leaves no local recipes for the change guard."""
+
+        def prebuilt_factory(role):
+            del role
+            return Float8Quantizer(
+                scale=torch.ones(1, dtype=torch.float32, device="cuda"),
+                amax=torch.zeros(1, dtype=torch.float32, device="cuda"),
+                fp8_dtype=tex.DType.kFloat8E4M3,
+                rowwise=True,
+                columnwise=False,
+            )
+
+        dpa = self._make_dpa()
+        custom = recipe.CustomRecipe(
+            qfactory=prebuilt_factory,
+            qfactory_key=("dpa-unlabelled-crossing", 1),
+            fp8_dpa=True,
+        )
+        with autocast(enabled=True, recipe=custom):
+            dpa.get_qkv_quantization_capabilities()
+        runtime = dpa._quantization_runtime
+        assert runtime is not None
+        assert "local_recipes" not in dpa.fp8_meta
+
+        with autocast(enabled=True, recipe=recipe.DelayedScaling(fp8_dpa=True)):
+            with pytest.raises(
+                RuntimeError, match="built-in DotProductAttention recipe path is frozen"
+            ):
+                dpa.init_fp8_metadata(num_gemms=3)
+        assert dpa._quantization_runtime is runtime
+
+    def test_builtin_to_custom_crossing_is_rejected_before_mutation(self):
+        """An initialized built-in DPA cannot be retargeted by a CustomRecipe."""
+        if not mxfp8_available:
+            pytest.skip(f"MXFP8: {reason_for_no_mxfp8}")
+
+        for builtin in (
+            recipe.MXFP8BlockScaling(fp8_dpa=True),  # stateless
+            recipe.Float8CurrentScaling(fp8_dpa=True),  # delayed S/dP half
+            recipe.DelayedScaling(fp8_dpa=True),
+        ):
+            dpa = self._make_dpa()
+            with autocast(enabled=True, recipe=builtin):
+                dpa.init_fp8_metadata(num_gemms=3)
+            assert dpa._quantization_runtime is None
+            old_state = dpa.fp8_meta["scaling_fwd"]
+
+            calls = []
+
+            def counting_factory(role):
+                calls.append(role)
+                return mxfp8_factory(role)
+
+            custom = recipe.CustomRecipe(
+                qfactory=counting_factory,
+                qfactory_key=("dpa-builtin-crossing", 1),
+                fp8_dpa=True,
+            )
+
+            # Both the lazy forward and the model-wide planner reject before the
+            # factory is invoked or a candidate is built.
+            with autocast(enabled=True, recipe=custom):
+                with pytest.raises(
+                    RuntimeError, match="built-in DotProductAttention recipe path is frozen"
+                ):
+                    dpa.get_qkv_quantization_capabilities()
+            with pytest.raises(
+                RuntimeError, match="built-in DotProductAttention recipe path is frozen"
+            ):
+                te.apply_recipe(dpa, custom)
+
+            assert not calls
+            assert dpa._quantization_runtime is None
+            assert dpa.fp8_meta["scaling_fwd"] is old_state
+
+    def test_builtin_dpa_recipe_change_is_rejected(self):
+        """Any built-in recipe change is rejected instead of silently ignored."""
+        # CurrentScaling: the recipe object compared on re-entry is the fake
+        # DelayedScaling rebuilt from env values, so this flip is invisible to it.
+        changed = recipe.Float8CurrentScaling(fp8_dpa=True)
+        changed.fp8_quant_fwd_inp = recipe.QParams(power_2_scale=True)
+        cases = [
+            (recipe.Float8CurrentScaling(fp8_dpa=True), changed),
+            # DelayedScaling reaches set_meta_tensor, whose RecipeState-type early
+            # return dropped the change.
+            (
+                recipe.DelayedScaling(fp8_dpa=True, margin=0),
+                recipe.DelayedScaling(fp8_dpa=True, margin=1),
+            ),
+            (
+                recipe.DelayedScaling(fp8_dpa=True, amax_history_len=4),
+                recipe.DelayedScaling(fp8_dpa=True, amax_history_len=8),
+            ),
+        ]
+        for initial, updated in cases:
+            dpa = self._make_dpa()
+            with autocast(enabled=True, recipe=initial):
+                dpa.init_fp8_metadata(num_gemms=3)
+            committed = dpa.fp8_meta["scaling_fwd"]
+
+            with autocast(enabled=True, recipe=updated):
+                with pytest.raises(
+                    RuntimeError, match="built-in DotProductAttention recipe path is frozen"
+                ):
+                    dpa.init_fp8_metadata(num_gemms=3)
+            assert dpa.fp8_meta["scaling_fwd"] is committed
+
+        # An unchanged recipe still re-enters freely.
+        dpa = self._make_dpa()
+        for _ in range(3):
+            with autocast(enabled=True, recipe=recipe.DelayedScaling(fp8_dpa=True)):
+                dpa.init_fp8_metadata(num_gemms=3)
+
+    def test_failed_dpa_candidate_does_not_mutate_shared_quantizer(self):
+        """Validating a rejected candidate must not write to an aliased live quantizer."""
+        if not mxfp8_available:
+            pytest.skip(f"MXFP8: {reason_for_no_mxfp8}")
+
+        dpa = self._make_dpa()
+        active = recipe.CustomRecipe(
+            qfactory=mxfp8_factory,
+            qfactory_key=("dpa-aliased-active", 1),
+            fp8_dpa=True,
+        )
+        with autocast(enabled=True, recipe=active):
+            dpa.get_qkv_quantization_capabilities()
+
+        live = _canonical_qkv_quantizer(dpa)
+        # Give the live quantizer a state the preparing wrapper would overwrite:
+        # it sets internal=False on the QKV slot before any slot is type-checked.
+        live.internal = True
+        before = (live.internal, live.rowwise_usage, live.columnwise_usage)
+
+        # A factory that hands back the live quantizer for the QKV slot while
+        # making the O slot invalid, so validation rejects the candidate.
+        def aliasing_factory(role):
+            if role is not None and role.name.endswith("dpa_output"):
+                return IdentityQuantizer()
+            return live
+
+        invalid = recipe.CustomRecipe(
+            qfactory=aliasing_factory,
+            qfactory_key=("dpa-aliased-invalid", 1),
+            fp8_dpa=True,
+        )
+        with autocast(enabled=True, recipe=invalid):
+            with pytest.raises((TypeError, RuntimeError)):
+                dpa.get_qkv_quantization_capabilities()
+
+        assert (live.internal, live.rowwise_usage, live.columnwise_usage) == before
+        assert _canonical_qkv_quantizer(dpa) is live
+
+    def test_builtin_dpa_same_class_change_is_rejected(self):
+        """A built-in recipe change that would otherwise be silently ignored must raise."""
+        # CurrentScaling: the recipe object compared on re-entry is the fake
+        # DelayedScaling rebuilt from env values, so this flip is invisible to it.
+        dpa = self._make_dpa()
+        with autocast(enabled=True, recipe=recipe.Float8CurrentScaling(fp8_dpa=True)):
+            dpa.init_fp8_metadata(num_gemms=3)
+        changed = recipe.Float8CurrentScaling(fp8_dpa=True)
+        changed.fp8_quant_fwd_inp = recipe.QParams(power_2_scale=True)
+        with autocast(enabled=True, recipe=changed):
+            with pytest.raises(
+                RuntimeError, match="built-in DotProductAttention recipe path is frozen"
+            ):
+                dpa.init_fp8_metadata(num_gemms=3)
+
+        # DelayedScaling: reaches set_meta_tensor, whose RecipeState-type early
+        # return dropped the change.
+        delayed_dpa = self._make_dpa()
+        with autocast(enabled=True, recipe=recipe.DelayedScaling(fp8_dpa=True, margin=0)):
+            delayed_dpa.init_fp8_metadata(num_gemms=3)
+        with autocast(enabled=True, recipe=recipe.DelayedScaling(fp8_dpa=True, margin=1)):
+            with pytest.raises(
+                RuntimeError, match="built-in DotProductAttention recipe path is frozen"
+            ):
+                delayed_dpa.init_fp8_metadata(num_gemms=3)
+
+    def test_qkv_capabilities_fall_back_to_the_quantizer_when_unlabelled(self):
+        """A factory returning pre-built quantizers leaves no local recipes to read."""
+
+        def prebuilt_factory(role):
+            del role
+            return Float8Quantizer(
+                scale=torch.ones(1, dtype=torch.float32, device="cuda"),
+                amax=torch.zeros(1, dtype=torch.float32, device="cuda"),
+                fp8_dtype=tex.DType.kFloat8E4M3,
+                rowwise=True,
+                columnwise=False,
+            )
+
+        dpa = self._make_dpa()
+        custom = recipe.CustomRecipe(
+            qfactory=prebuilt_factory,
+            qfactory_key=("dpa-prebuilt-float8", 1),
+            fp8_dpa=True,
+        )
+        with autocast(enabled=True, recipe=custom):
+            capabilities = dpa.get_qkv_quantization_capabilities()
+
+        assert "local_recipes" not in dpa.fp8_meta
+        assert capabilities == (False, False)
 
     def test_direct_runtime_commit_updates_dpa_derived_state(self):
         """DPA cache and recipe labels are part of its runtime commit hook."""
@@ -224,8 +466,7 @@ class TestDPARuntimeRecipeUpdate:
         old_runtime = dpa._quantization_runtime
         old_local_recipes = object()
         dpa.fp8_meta["local_recipes"] = old_local_recipes
-        old_cache_key = dpa._custom_dpa_local_recipes_cache_key
-        old_capabilities_quantizer = dpa._qkv_capabilities_quantizer
+        old_qkv_quantizer = _canonical_qkv_quantizer(dpa)
 
         second_recipe = recipe.CustomRecipe(
             qfactory=mxfp8_factory,
@@ -239,17 +480,13 @@ class TestDPARuntimeRecipeUpdate:
 
         assert dpa._quantization_runtime is old_runtime
         assert dpa.fp8_meta["local_recipes"] is old_local_recipes
-        assert dpa._custom_dpa_local_recipes_cache_key is old_cache_key
-        assert dpa._qkv_capabilities_quantizer is old_capabilities_quantizer
+        assert _canonical_qkv_quantizer(dpa) is old_qkv_quantizer
 
         assert dpa._apply_quantization_update(update)
         assert dpa._quantization_runtime is update.candidate
         assert dpa.fp8_meta["local_recipes"] is update.validation_result
-        assert dpa._custom_dpa_local_recipes_cache is update.validation_result
         assert [type(item).__name__ for item in update.validation_result] == ["MXFP8BlockScaling"]
-        assert dpa._custom_dpa_local_recipes_cache_key != old_cache_key
-        assert dpa._qkv_capabilities_quantizer is None
-        assert dpa._qkv_capabilities_cache is None
+        assert _canonical_qkv_quantizer(dpa) is not old_qkv_quantizer
 
     def test_candidate_failure_preserves_active_runtime_and_caches(self):
         """A failed candidate validation does not partially update DPA."""
@@ -272,8 +509,7 @@ class TestDPARuntimeRecipeUpdate:
             dpa.fp8_meta["scaling_bwd"],
             dpa.quantizers["scaling_fwd"],
             dpa.quantizers["scaling_bwd"],
-            dpa._qkv_capabilities_quantizer,
-            dpa._qkv_capabilities_cache,
+            _canonical_qkv_quantizer(dpa),
         )
         workspace = object()
         dpa._fp8_workspaces["old"] = workspace
@@ -300,8 +536,7 @@ class TestDPARuntimeRecipeUpdate:
                     dpa.fp8_meta["scaling_bwd"],
                     dpa.quantizers["scaling_fwd"],
                     dpa.quantizers["scaling_bwd"],
-                    dpa._qkv_capabilities_quantizer,
-                    dpa._qkv_capabilities_cache,
+                    _canonical_qkv_quantizer(dpa),
                 ),
                 old_views,
             )
@@ -354,9 +589,8 @@ class TestDPARuntimeRecipeUpdate:
             dpa.fp8_meta["scaling_bwd"],
             dpa.quantizers["scaling_fwd"],
             dpa.quantizers["scaling_bwd"],
-            dpa._custom_dpa_local_recipes_cache,
-            dpa._qkv_capabilities_quantizer,
-            dpa._qkv_capabilities_cache,
+            dpa.fp8_meta.get("local_recipes"),
+            _canonical_qkv_quantizer(dpa),
         )
         invalid_recipe = recipe.CustomRecipe(
             qfactory=current_scaling_factory,
@@ -380,9 +614,8 @@ class TestDPARuntimeRecipeUpdate:
                     dpa.fp8_meta["scaling_bwd"],
                     dpa.quantizers["scaling_fwd"],
                     dpa.quantizers["scaling_bwd"],
-                    dpa._custom_dpa_local_recipes_cache,
-                    dpa._qkv_capabilities_quantizer,
-                    dpa._qkv_capabilities_cache,
+                    dpa.fp8_meta.get("local_recipes"),
+                    _canonical_qkv_quantizer(dpa),
                 ),
                 old_views,
             )
@@ -390,6 +623,34 @@ class TestDPARuntimeRecipeUpdate:
         with autocast(enabled=True, recipe=active_recipe):
             assert dpa.get_qkv_quantization_capabilities() == (False, True)
         assert dpa._quantization_runtime is old_runtime
+
+
+def test_attention_params_distinguish_local_recipe_families():
+    """Backend selection keys on the DPA-local families, not only fp8_meta['recipe']."""
+    from transformer_engine.pytorch.attention.dot_product_attention.utils import AttentionParams
+
+    shared = recipe.DelayedScaling()
+
+    def params(local_recipes):
+        return AttentionParams(
+            fp8=True,
+            fp8_meta={"recipe": shared, "local_recipes": local_recipes},
+        )
+
+    current_scaling = params([recipe.Float8CurrentScaling()])
+    mxfp8 = params([recipe.MXFP8BlockScaling()])
+    equivalent = params([recipe.Float8CurrentScaling()])
+
+    assert current_scaling != mxfp8
+    assert current_scaling == equivalent
+    assert current_scaling != params(None)
+
+
+def _canonical_qkv_quantizer(dpa):
+    """The slot the capability query reads, formerly mirrored in a private cache."""
+    from transformer_engine.pytorch.attention.dot_product_attention.utils import META_QKV
+
+    return dpa.quantizers["scaling_fwd"][META_QKV]
 
 
 def test_hybrid_storage_snapshots_parent_quantizer():
@@ -2439,13 +2700,13 @@ class TestCustomDPALocalRecipeCache:
 
         with autocast(enabled=True, recipe=custom_recipe):
             first = dpa.get_qkv_quantization_capabilities()
-            canonical_qkv = dpa._qkv_capabilities_quantizer
+            canonical_qkv = _canonical_qkv_quantizer(dpa)
             calls_after_first = len(calls)
             second = dpa.get_qkv_quantization_capabilities()
 
         assert first == expected
         assert second == first
-        assert dpa._qkv_capabilities_quantizer is canonical_qkv
+        assert _canonical_qkv_quantizer(dpa) is canonical_qkv
         assert len(calls) == calls_after_first
 
         # A supported recipe-state rebuild creates a new canonical slot and
@@ -2464,13 +2725,13 @@ class TestCustomDPALocalRecipeCache:
             with autocast(enabled=True, recipe=rebuilt_recipe):
                 with pytest.raises(RuntimeError, match="do not support delayed scaling"):
                     dpa.get_qkv_quantization_capabilities()
-            assert dpa._qkv_capabilities_quantizer is canonical_qkv
+            assert _canonical_qkv_quantizer(dpa) is canonical_qkv
             assert len(calls) == calls_after_first
             return
 
         with autocast(enabled=True, recipe=rebuilt_recipe):
             rebuilt = dpa.get_qkv_quantization_capabilities()
-        rebuilt_qkv = dpa._qkv_capabilities_quantizer
+        rebuilt_qkv = _canonical_qkv_quantizer(dpa)
 
         assert rebuilt == first
         assert rebuilt_qkv is not canonical_qkv

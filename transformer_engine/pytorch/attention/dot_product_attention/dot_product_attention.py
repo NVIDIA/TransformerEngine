@@ -32,6 +32,7 @@ from transformer_engine.pytorch.quantization import (
     Float8CurrentScalingRecipeState,
     Float8BlockScalingRecipeState,
     _QuantizationRuntime,
+    _QuantizationRuntimeKey,
 )
 from transformer_engine.pytorch.tensor.storage.float8_tensor_storage import Float8TensorStorage
 from transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
@@ -890,14 +891,6 @@ class DotProductAttention(TransformerEngineBaseModule):
             _declared_grad_input_quantizer_role=_declared_grad_input_quantizer_role,
         )
 
-        # Cache the native recipe labels inferred from custom DPA quantizers.
-        # ``init_fp8_metadata`` runs on every forward, while the quantizers only
-        # change when their recipe state is rebuilt.
-        self._custom_dpa_local_recipes_cache_key: Optional[Tuple[Any, ...]] = None
-        self._custom_dpa_local_recipes_cache: Optional[List[Recipe]] = None
-        self._qkv_capabilities_quantizer: Optional[Any] = None
-        self._qkv_capabilities_cache: Optional[Tuple[bool, bool]] = None
-
         self.logger = logging.getLogger("DotProductAttention")
         self.logger.setLevel(attn_log._log_level)
         if not self.logger.hasHandlers():
@@ -1141,6 +1134,22 @@ class DotProductAttention(TransformerEngineBaseModule):
             super().init_fp8_metadata(num_gemms=num_gemms)
             return
 
+        try:
+            self._init_builtin_fp8_metadata(num_gemms, fp8_recipe, _original_recipe)
+        except BaseException:
+            # The built-in path bypasses the base init_fp8_metadata abort wrapper,
+            # so its rejections must still protect a reduction this region may
+            # complete with delayed tensors this module can no longer update.
+            FP8GlobalStateManager.abort_current_amax_reduction()
+            raise
+
+    def _init_builtin_fp8_metadata(
+        self,
+        num_gemms: int,
+        fp8_recipe: Recipe,
+        _original_recipe: Optional[Recipe],
+    ) -> None:
+        """Resolve and initialize metadata for the built-in ``NVTE_DPA_*`` path."""
         # switch/append recipe: fp8_recipe stays unchanged, but DPA.fp8_meta["recipe"] may be set to
         # a different recipe than fp8_recipe. DPA.quantizers may be a mix of different quantizers as well.
         #
@@ -1152,7 +1161,10 @@ class DotProductAttention(TransformerEngineBaseModule):
         fp8_recipe_dpa = fp8_recipe
         fp8_recipes = fp8_recipe
         if _dpa_fp8_recipe == "F16":
-            # ignore the recipe from autocast, set fp8_dpa = False, fp8_mha = False
+            # ignore the recipe from autocast, set fp8_dpa = False, fp8_mha = False.
+            # Keep these two assignments adjacent and in this order: the recipe is
+            # invalid in between (fp8_mha=True requires fp8_dpa=True), so anything
+            # that reads its quantizer configuration here would raise.
             fp8_recipe.fp8_dpa = False
             fp8_recipe.fp8_mha = False
         elif (
@@ -1279,26 +1291,32 @@ class DotProductAttention(TransformerEngineBaseModule):
         self.fast_setattr("fp8_calibration", FP8GlobalStateManager.is_fp8_calibration())
         fp8_enabled = self.fp8 or self.fp8_calibration
         self.fp8_meta["fp8_checkpoint"] = self.fp8 or self.fp8_calibration
+        local_recipes = fp8_recipes if isinstance(fp8_recipes, List) else [fp8_recipes]
+        previous_local_recipes = self.fp8_meta.get("local_recipes")
         if self.fp8_parameters or fp8_enabled:
             self.fp8_meta["global_recipe"] = fp8_recipe
-            self.fp8_meta["local_recipes"] = (
-                fp8_recipes if isinstance(fp8_recipes, List) else [fp8_recipes]
-            )
+            self.fp8_meta["local_recipes"] = local_recipes
 
         if self.fp8_parameters or fp8_enabled:
+            # Taking ownership here would strand a CustomRecipe runtime still
+            # pointing at this module's state. The two paths do not hand state
+            # back and forth; with quantization off nothing is published, so this
+            # only guards the case where the built-in path would actually write.
+            if getattr(self, "_quantization_runtime", None) is not None:
+                self._reject_builtin_dpa_update()
+            # ``fp8_recipe_dpa`` below is often a fake rebuilt from env values, so it
+            # hides a change in the recipes that actually build the quantizers.
+            if (
+                self.fp8_initialized
+                and previous_local_recipes
+                and previous_local_recipes != local_recipes
+            ):
+                self._reject_builtin_dpa_update()
             if self.fp8_initialized and fp8_recipe_dpa == self.fp8_meta["recipe"]:
                 # FP8 init has already been run and recipe is the same, don't do anything.
                 return
             self.fp8_meta["recipe"] = fp8_recipe_dpa
-            if fp8_recipe != fp8_recipe_dpa:
-                # fp8_recipe has changed, rehash the key.
-                autocast_key = FP8GlobalStateManager.get_unique_autocast_key(
-                    fp8_recipe_dpa, fp8_group
-                )
-                FP8GlobalStateManager.quantization_state.autocast_arguments[autocast_key] = (
-                    fp8_recipe_dpa,
-                    fp8_group,
-                )
+            self._rehash_autocast_arguments(fp8_recipe, fp8_recipe_dpa, fp8_group)
         else:
             # If fp8 isn't enabled, turn off and return.
             self.fast_setattr("fp8_initialized", False)
@@ -1322,15 +1340,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             self.fast_setattr("fp8_initialized", True)
 
             self.fp8_meta["recipe"] = fp8_recipe_dpa
-            if fp8_recipe != fp8_recipe_dpa:
-                # fp8_recipe has changed, rehash the key.
-                autocast_key = FP8GlobalStateManager.get_unique_autocast_key(
-                    fp8_recipe_dpa, fp8_group
-                )
-                FP8GlobalStateManager.quantization_state.autocast_arguments[autocast_key] = (
-                    fp8_recipe_dpa,
-                    fp8_group,
-                )
+            self._rehash_autocast_arguments(fp8_recipe, fp8_recipe_dpa, fp8_group)
 
         _current_recipe = self.fp8_meta["recipe"]
         if _original_recipe is not None and not (
@@ -1345,12 +1355,49 @@ class DotProductAttention(TransformerEngineBaseModule):
             # Clear cached workspaces as they were created with the old recipe/quantizer type
             self._fp8_workspaces.clear()
 
-    def _invalidate_dpa_runtime_caches(self) -> None:
-        """Invalidate DPA caches after a committed quantizer replacement."""
-        self._custom_dpa_local_recipes_cache_key = None
-        self._custom_dpa_local_recipes_cache = None
-        self._qkv_capabilities_quantizer = None
-        self._qkv_capabilities_cache = None
+    @staticmethod
+    def _reject_builtin_dpa_update() -> None:
+        """Reject a recipe change involving the built-in ``NVTE_DPA_*`` path."""
+        raise RuntimeError(
+            "The built-in DotProductAttention recipe path is frozen after "
+            "initialization and does not support mid-training recipe updates. "
+            "Recreate the module, or use a CustomRecipe throughout."
+        )
+
+    @staticmethod
+    def _rehash_autocast_arguments(fp8_recipe, fp8_recipe_dpa, fp8_group) -> None:
+        """Re-register reduction arguments when DPA resolved its own recipe."""
+        if fp8_recipe == fp8_recipe_dpa:
+            return
+        autocast_key = FP8GlobalStateManager.get_unique_autocast_key(fp8_recipe_dpa, fp8_group)
+        FP8GlobalStateManager.quantization_state.autocast_arguments[autocast_key] = (
+            fp8_recipe_dpa,
+            fp8_group,
+        )
+
+    def _check_quantization_update_supported(
+        self,
+        *,
+        recipe: Recipe,
+        requested_key: _QuantizationRuntimeKey,
+        num_gemms: int,
+    ) -> None:
+        """Also reject a CustomRecipe update onto an initialized built-in DPA."""
+        if getattr(self, "_quantization_runtime", None) is None and self.fp8_initialized:
+            # The built-in path owns this module's state, and its delayed half is
+            # registered in the global reduction buckets. Running before super()
+            # means both the lazy forward and apply_recipe planning reject here,
+            # before any candidate is built.
+            self._reject_builtin_dpa_update()
+        super()._check_quantization_update_supported(
+            recipe=recipe,
+            requested_key=requested_key,
+            num_gemms=num_gemms,
+        )
+
+    @staticmethod
+    def _invalidate_dpa_runtime_caches() -> None:
+        """Force backend reselection after a committed quantizer replacement."""
         _attention_backends["backend_selection_requires_update"] = True
 
     def _activate_quantization_runtime(
@@ -1366,16 +1413,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         )
         self._invalidate_dpa_runtime_caches()
 
-        cache_key = (
-            id(self.fp8_meta.get("scaling_fwd")),
-            tuple(id(quantizer) for quantizer in candidate.forward_quantizers),
-            candidate.recipe.fp8_format,
-            candidate.recipe.fp8_dpa,
-            candidate.recipe.fp8_mha,
-        )
         local_recipes = validation_result
-        self._custom_dpa_local_recipes_cache_key = cache_key
-        self._custom_dpa_local_recipes_cache = local_recipes
         if local_recipes is None:
             # Do not leave labels from an earlier supported quantizer family
             # attached after a rebuild to an unsupported family.
@@ -1394,8 +1432,16 @@ class DotProductAttention(TransformerEngineBaseModule):
                 raise ValueError(
                     "FP8 DotProductAttention requires 9 forward and 6 backward quantizer slots."
                 )
-            qkv_quantizer, _, s_quantizer, _, _, dp_quantizer = dpa_utils.get_attention_quantizers(
-                True,
+            # Selection only: a qfactory may alias quantizers the active runtime
+            # still uses, so validating a candidate must not write to them.
+            (
+                qkv_quantizer,
+                _,
+                s_quantizer,
+                _,
+                _,
+                dp_quantizer,
+            ) = dpa_utils._select_attention_quantizers(
                 {
                     "scaling_fwd": candidate.forward_quantizers,
                     "scaling_bwd": candidate.backward_quantizers,
@@ -1447,10 +1493,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                 f"DotProductAttention did not materialize the canonical QKV quantizer for {role}."
             ) from exc
 
-        if qkv_quantizer is self._qkv_capabilities_quantizer:
-            assert self._qkv_capabilities_cache is not None
-            return self._qkv_capabilities_cache
-
         from transformer_engine.pytorch.tensor.float8_tensor import (
             Float8CurrentScalingQuantizer,
             Float8Quantizer,
@@ -1458,18 +1500,11 @@ class DotProductAttention(TransformerEngineBaseModule):
         from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 
         if isinstance(qkv_quantizer, Float8CurrentScalingQuantizer):
-            capabilities = (True, False)
-        elif isinstance(qkv_quantizer, MXFP8Quantizer):
-            capabilities = (False, True)
-        elif isinstance(qkv_quantizer, Float8Quantizer):
-            capabilities = (False, False)
-        else:
-            capabilities = None
-
-        if capabilities is not None:
-            self._qkv_capabilities_quantizer = qkv_quantizer
-            self._qkv_capabilities_cache = capabilities
-            return capabilities
+            return (True, False)
+        if isinstance(qkv_quantizer, MXFP8Quantizer):
+            return (False, True)
+        if isinstance(qkv_quantizer, Float8Quantizer):
+            return (False, False)
 
         role = QuantizerRole(
             module_type="dpa",

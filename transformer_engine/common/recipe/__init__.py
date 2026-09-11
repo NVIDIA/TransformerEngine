@@ -1110,6 +1110,12 @@ class CustomRecipe(Recipe):
         ``IdentityQuantizer`` for an intentional high-precision slot instead
         of returning ``None``.
 
+        Prefer returning a fresh quantizer per call. Transformer Engine does
+        not write to a candidate's quantizers before that candidate is
+        validated and committed, so returning shared instances is supported,
+        but a quantizer aliased across roles carries any usage or ``internal``
+        flags a committed runtime sets on it.
+
         ``QuantizerRole`` is a frozen dataclass with the following fields:
 
         - ``module_type`` (str): module type (empty string when not set), e.g.
