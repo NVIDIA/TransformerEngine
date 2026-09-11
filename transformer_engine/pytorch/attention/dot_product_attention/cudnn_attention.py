@@ -21,14 +21,20 @@ import torch
 # graph construction, backend selection, and execution do not call TE common.
 import transformer_engine_torch as tex
 
-from transformer_engine.common.attention.cudnn import normalize_attention_mask
+from transformer_engine.common.attention.cudnn import cudnn_mask_options
 from transformer_engine.common.attention.cudnn import (
     ragged_batch_bucket as _max_ragged_batch,
 )
 from transformer_engine.common.attention.cudnn import (
     ragged_token_bucket as _max_ragged_tokens,
 )
-from transformer_engine.common.attention.cudnn import round_up as _round_up
+from transformer_engine.common.attention.fp8 import (
+    FP8AttentionGraphConfig,
+    attention_format_stride as _format_stride,
+    build_fp8_backward_operation,
+    build_fp8_forward_operation,
+    mxfp8_padded_sizes as _mxfp8_padded_sizes,
+)
 from transformer_engine.pytorch.constants import (
     DType,
     FP8BwdTensorIdx,
@@ -36,6 +42,7 @@ from transformer_engine.pytorch.constants import (
     TE_DType_To_Torch,
 )
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage
+from transformer_engine.pytorch.utils import get_cudnn_version
 from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8CurrentScalingQuantizer,
     Float8Quantizer,
@@ -156,16 +163,6 @@ def _constant_graph_tensor(graph, cudnn, name: str):
     return _scalar_graph_tensor(graph, cudnn, name)
 
 
-def _format_stride(batch: int, heads: int, seqlen: int, dim: int, tensor_format: str):
-    if tensor_format in ("bshd", "thd"):
-        return (seqlen * heads * dim, dim, heads * dim, 1)
-    if tensor_format == "sbhd":
-        return (heads * dim, dim, batch * heads * dim, 1)
-    if tensor_format == "bhsd":
-        return (heads * seqlen * dim, seqlen * dim, dim, 1)
-    raise ValueError(f"Unsupported FP8 tensor format {tensor_format!r}.")
-
-
 def _padded_sequence_lengths(cu_seqlens: torch.Tensor, batch: int) -> torch.Tensor:
     lengths = _sequence_lengths(cu_seqlens)
     if lengths.numel() == batch:
@@ -188,19 +185,6 @@ def _element_ragged_offsets(
         tail = offsets[-1:].expand(batch + 1 - offsets.numel())
         offsets = torch.cat((offsets, tail))
     return offsets * multiplier
-
-
-def _mxfp8_padded_sizes(s_q: int, s_kv: int, d_qk: int, d_v: int) -> Dict[str, int]:
-    return {
-        "s_q_padded": _round_up(s_q, 128),
-        "s_kv_padded": _round_up(s_kv, 128),
-        "s_q_scale_padded": _round_up((s_q + 31) // 32, 4),
-        "s_kv_scale_padded": _round_up((s_kv + 31) // 32, 4),
-        "d_qk_padded": _round_up(d_qk, 128),
-        "d_v_padded": _round_up(d_v, 128),
-        "d_qk_scale_padded": _round_up((d_qk + 31) // 32, 4),
-        "d_v_scale_padded": _round_up((d_v + 31) // 32, 4),
-    }
 
 
 def _make_mxfp8_scale_tensor(
@@ -440,7 +424,7 @@ def _mask_options(
     max_seqlen_q: int,
     max_seqlen_kv: int,
 ) -> Dict[str, Any]:
-    mask = normalize_attention_mask(
+    options = cudnn_mask_options(
         causal=attn_mask_type in ("causal", "padding_causal"),
         bottom_right=attn_mask_type
         in ("causal_bottom_right", "padding_causal_bottom_right"),
@@ -450,26 +434,13 @@ def _mask_options(
         window_size=window_size,
         max_seqlen_q=max_seqlen_q,
         max_seqlen_kv=max_seqlen_kv,
+        cudnn_version=get_cudnn_version(),
     )
-
-    options: Dict[str, Any] = {
-        "use_causal_mask": mask.causal,
-        "use_causal_mask_bottom_right": mask.bottom_right,
-        "diagonal_alignment": (
-            cudnn.diagonal_alignment.BOTTOM_RIGHT
-            if mask.bottom_right_diagonal
-            else cudnn.diagonal_alignment.TOP_LEFT
-        ),
-    }
-    if mask.window_left != -1:
-        options["diagonal_band_left_bound"] = mask.window_left + 1
-    # ``use_causal_mask`` already imposes a right bound of zero. The Python
-    # frontend rejects specifying that same bound through both attributes.
-    if mask.window_right != -1 and not (
-        (mask.causal or mask.bottom_right) and mask.window_right == 0
-    ):
-        options["diagonal_band_right_bound"] = mask.window_right
-    options["is_padding"] = mask.padding
+    options["diagonal_alignment"] = (
+        cudnn.diagonal_alignment.BOTTOM_RIGHT
+        if options["diagonal_alignment"] == "bottom_right"
+        else cudnn.diagonal_alignment.TOP_LEFT
+    )
     return options
 
 
@@ -1285,16 +1256,20 @@ def _build_fp8_fwd_graph(
             tensor_format=scale_format_kv,
         )
         tensors.update(descale_q=descale_q, descale_k=descale_k, descale_v=descale_v)
-        output_t, stats_t, amax_o_t = graph.sdpa_mxfp8(
-            q_t,
-            k_t,
-            v_t,
-            descale_q,
-            descale_k,
-            descale_v,
-            name="te_sdpa_mxfp8",
-            **options,
+        op = build_fp8_forward_operation(
+            graph,
+            {
+                "q": q_t,
+                "k": k_t,
+                "v": v_t,
+                "descale_q": descale_q,
+                "descale_k": descale_k,
+                "descale_v": descale_v,
+            },
+            options,
+            FP8AttentionGraphConfig("mxfp8", "te_sdpa_mxfp8"),
         )
+        output_t, stats_t, amax_o_t = op["output"], op["stats"], op["amax_o"]
         amax_o_t.set_output(False).set_data_type(cudnn.data_type.FLOAT).set_dim(
             (1, 1, 1, 1)
         ).set_stride((1, 1, 1, 1))
@@ -1321,19 +1296,27 @@ def _build_fp8_fwd_graph(
         else:
             scale_o = _constant_graph_tensor(graph, cudnn, "Current_Scale_O")
             tensors["constant_scale_o"] = scale_o
-        output_t, stats_t, amax_s_t, amax_o_t = graph.sdpa_fp8(
-            q_t,
-            k_t,
-            v_t,
-            descale_q,
-            descale_k,
-            descale_v,
-            descale_s,
-            scale_s,
-            scale_o,
-            name="te_sdpa_fp8",
-            **options,
+        op = build_fp8_forward_operation(
+            graph,
+            {
+                "q": q_t,
+                "k": k_t,
+                "v": v_t,
+                "descale_q": descale_q,
+                "descale_k": descale_k,
+                "descale_v": descale_v,
+                "descale_s": descale_s,
+                "scale_s": scale_s,
+                "scale_o": scale_o,
+            },
+            options,
+            FP8AttentionGraphConfig(
+                "delayed" if isinstance(o_quantizer, Float8Quantizer) else "current",
+                "te_sdpa_fp8",
+            ),
         )
+        output_t, stats_t = op["output"], op["stats"]
+        amax_s_t, amax_o_t = op["amax_s"], op["amax_o"]
         amax_s_t.set_output(True).set_data_type(cudnn.data_type.FLOAT).set_dim(
             (1, 1, 1, 1)
         ).set_stride((1, 1, 1, 1))
@@ -2194,28 +2177,31 @@ def _build_fp8_bwd_graph(
         descale_do_t = mx_scale(
             "descale_do_t", heads, "s_q_scale_padded", "d_v_padded", scale_format_do
         )
-        outputs = graph.sdpa_mxfp8_backward(
-            q_t,
-            q_col_t,
-            k_t,
-            k_col_t,
-            v_t,
-            o_t,
-            do_f16_t,
-            do_t,
-            do_col_t,
-            stats_t,
-            descale_q,
-            descale_q_t,
-            descale_k,
-            descale_k_t,
-            descale_v,
-            descale_do,
-            descale_do_t,
-            name="te_sdpa_mxfp8_backward",
-            **options,
+        op = build_fp8_backward_operation(
+            graph,
+            {
+                "q": q_t,
+                "q_t": q_col_t,
+                "k": k_t,
+                "k_t": k_col_t,
+                "v": v_t,
+                "o": o_t,
+                "do_f16": do_f16_t,
+                "do": do_t,
+                "do_t": do_col_t,
+                "stats": stats_t,
+                "descale_q": descale_q,
+                "descale_q_t": descale_q_t,
+                "descale_k": descale_k,
+                "descale_k_t": descale_k_t,
+                "descale_v": descale_v,
+                "descale_do": descale_do,
+                "descale_do_t": descale_do_t,
+            },
+            options,
+            FP8AttentionGraphConfig("mxfp8", "te_sdpa_mxfp8_backward"),
         )
-        dq_t, dk_t, dv_t, *amax_outputs = outputs
+        dq_t, dk_t, dv_t, amax_outputs = op["dq"], op["dk"], op["dv"], op["amax"]
         for amax_t in amax_outputs:
             amax_t.set_output(False).set_data_type(cudnn.data_type.FLOAT).set_dim(
                 (1, 1, 1, 1)
@@ -2283,29 +2269,36 @@ def _build_fp8_bwd_graph(
             if "scale_dv" in tensors
             else tensors["constant_scale_dv"]
         )
-        outputs = graph.sdpa_fp8_backward(
-            q_t,
-            k_t,
-            v_t,
-            o_t,
-            do_t,
-            stats_t,
-            tensors["descale_q"],
-            tensors["descale_k"],
-            tensors["descale_v"],
-            descale_o_arg,
-            tensors["descale_do"],
-            descale_s_arg,
-            descale_dp_arg,
-            scale_s_arg,
-            scale_dq_arg,
-            scale_dk_arg,
-            scale_dv_arg,
-            scale_dp_arg,
-            name="te_sdpa_fp8_backward",
-            **options,
+        op = build_fp8_backward_operation(
+            graph,
+            {
+                "q": q_t,
+                "k": k_t,
+                "v": v_t,
+                "o": o_t,
+                "do": do_t,
+                "stats": stats_t,
+                "descale_q": tensors["descale_q"],
+                "descale_k": tensors["descale_k"],
+                "descale_v": tensors["descale_v"],
+                "descale_o": descale_o_arg,
+                "descale_do": tensors["descale_do"],
+                "descale_s": descale_s_arg,
+                "descale_dp": descale_dp_arg,
+                "scale_s": scale_s_arg,
+                "scale_dq": scale_dq_arg,
+                "scale_dk": scale_dk_arg,
+                "scale_dv": scale_dv_arg,
+                "scale_dp": scale_dp_arg,
+            },
+            options,
+            FP8AttentionGraphConfig(
+                "delayed" if delayed else "current", "te_sdpa_fp8_backward"
+            ),
         )
-        dq_t, dk_t, dv_t, amax_dq_t, amax_dk_t, amax_dv_t, amax_dp_t = outputs
+        dq_t, dk_t, dv_t = op["dq"], op["dk"], op["dv"]
+        amax_dq_t, amax_dk_t = op["amax_dq"], op["amax_dk"]
+        amax_dv_t, amax_dp_t = op["amax_dv"], op["amax_dp"]
         for name, amax_t in (
             ("amax_dq", amax_dq_t),
             ("amax_dk", amax_dk_t),

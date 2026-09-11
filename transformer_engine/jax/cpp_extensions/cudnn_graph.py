@@ -110,6 +110,12 @@ def cudnn_data_type(cudnn, dtype):
         return cudnn.data_type.HALF
     if dtype == jnp.bfloat16:
         return cudnn.data_type.BFLOAT16
+    if dtype == jnp.float8_e4m3fn:
+        return cudnn.data_type.FP8_E4M3
+    if dtype == jnp.float8_e5m2:
+        return cudnn.data_type.FP8_E5M2
+    if hasattr(jnp, "float8_e8m0fnu") and dtype == jnp.float8_e8m0fnu:
+        return cudnn.data_type.FP8_E8M0
     if dtype == jnp.float32:
         return cudnn.data_type.FLOAT
     if dtype == jnp.float64:

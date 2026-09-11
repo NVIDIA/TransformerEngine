@@ -47,6 +47,7 @@ from ..quantize import (
     noop_quantizer_set,
     is_fp8_gemm_with_all_layouts_supported,
     apply_padding_to_scale_inv,
+    swizzle_mxfp8_scale,
     QuantizeLayout,
 )
 from .misc import get_padded_spec, is_all_reduce_in_float32, get_min_device_compute_capability
@@ -398,21 +399,6 @@ class CollectiveOpSet:
 noop_collective_op_set = CollectiveOpSet.create(forward_collective_op=CollectiveOp.NONE)
 
 
-@partial(jax.jit, static_argnums=(1, 2))
-def swizzled_scale(scale_inv, flatten_axis, is_colwise):
-    "Swizzle scale_inv via JAX transpose ops"
-    original_shape = scale_inv.shape
-    shape_2d = (math.prod(original_shape[:flatten_axis]), math.prod(original_shape[flatten_axis:]))
-    if is_colwise:
-        scale_inv = jnp.transpose(scale_inv.reshape(shape_2d))
-        cols, rows = shape_2d
-    else:
-        rows, cols = shape_2d
-    reshape = scale_inv.reshape(rows // 128, 4, 32, cols // 4, 4)
-    swizzled = jnp.transpose(reshape, (0, 3, 2, 1, 4))
-    return swizzled.reshape(original_shape)
-
-
 def get_lhs_axis_boundary(lhs_cdims, is_transposed):
     """Get the axis boundary for the LHS operand."""
     return max(lhs_cdims) + 1 if is_transposed else min(lhs_cdims)
@@ -759,8 +745,12 @@ class GemmPrimitive(BasePrimitive):
 
         # Only perform JAX-based swizzle for MXFP8, NVFP4 swizzle will go though nvte kernel
         if scaling_mode.is_mxfp8_scaling:
-            lhs_scale_inv = swizzled_scale(lhs_scale_inv, lhs_flatten_axis, lhs_transposed)
-            rhs_scale_inv = swizzled_scale(rhs_scale_inv, rhs_flatten_axis, not rhs_transposed)
+            lhs_scale_inv = swizzle_mxfp8_scale(
+                lhs_scale_inv, lhs_flatten_axis, lhs_transposed
+            )
+            rhs_scale_inv = swizzle_mxfp8_scale(
+                rhs_scale_inv, rhs_flatten_axis, not rhs_transposed
+            )
 
         # Determine if we need to reorder the tensor so that the input/output are in the correct layout for the collective operation
         need_reorder = not transpose_batch_sequence and not is_outer and not collective_op.is_none

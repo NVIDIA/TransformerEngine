@@ -50,9 +50,6 @@ class FusedAttentionConfig:
     deterministic: bool
     cudnn_version: tuple[int, int, int]
     sm_arch: int
-    allow_alibi: bool = False
-    allow_extended_causal_window: bool = False
-    modern_mask_rules_override: bool = False
 
 
 @dataclass(frozen=True)
@@ -74,6 +71,38 @@ class AttentionMask:
     bottom_right_diagonal: bool
     window_left: int
     window_right: int
+
+
+def parse_attention_layout(qkv_layout: str) -> AttentionLayout:
+    """Normalize a TE QKV layout string for framework-independent policy checks."""
+
+    paged = qkv_layout.startswith("paged_kv_")
+    layout = qkv_layout.removeprefix("paged_kv_")
+    components = layout.split("_")
+
+    def tensor_format(component: str) -> str:
+        return "".join(char for char in component if char.isalpha())
+
+    q_format = tensor_format(components[0])
+    kv_format = tensor_format(components[-1]) if len(components) > 1 else q_format
+    qkv_format = q_format if q_format == kv_format else f"{q_format}_2{kv_format}"
+    if paged:
+        layout_group = "paged_separate"
+    elif len(components) == 1 and "3" in components[0]:
+        layout_group = "h3d" if "h3d" in components[0] else "3hd"
+    elif len(components) == 2:
+        layout_group = "hd_h2d" if "h2d" in components[1] else "hd_2hd"
+    elif q_format == "bhsd":
+        layout_group = "sd_sd_sd"
+    else:
+        layout_group = "separate"
+    return AttentionLayout(
+        qkv_format=qkv_format,
+        q_format=q_format,
+        kv_format=kv_format,
+        layout_group=layout_group,
+        is_qkvpacked=layout_group in ("3hd", "h3d"),
+    )
 
 
 def encode_cudnn_version(version: tuple[int, int, int]) -> int:
@@ -136,6 +165,48 @@ def normalize_attention_mask(
         window_left=int(window_size[0]),
         window_right=int(window_size[1]),
     )
+
+
+def cudnn_mask_options(
+    *,
+    causal: bool,
+    bottom_right: bool,
+    padding: bool,
+    bottom_right_diagonal: bool,
+    window_size: tuple[int, int],
+    max_seqlen_q: int,
+    max_seqlen_kv: int,
+    cudnn_version: tuple[int, int, int],
+) -> dict[str, bool | int | str]:
+    """Return canonical cuDNN SDPA mask options using framework-neutral values."""
+
+    mask = normalize_attention_mask(
+        causal=causal,
+        bottom_right=bottom_right,
+        padding=padding,
+        bottom_right_diagonal=bottom_right_diagonal,
+        window_size=window_size,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_kv=max_seqlen_kv,
+    )
+    version = encode_cudnn_version(cudnn_version)
+    options: dict[str, bool | int | str] = {
+        "diagonal_alignment": (
+            "bottom_right" if mask.bottom_right_diagonal else "top_left"
+        ),
+        "is_padding": mask.padding,
+    }
+    if version < 90600:
+        options["use_causal_mask"] = mask.causal
+        options["use_causal_mask_bottom_right"] = mask.bottom_right
+    if version >= 90200 and mask.window_left != -1:
+        options["diagonal_band_left_bound"] = mask.window_left + 1
+    if version >= 90600:
+        if mask.window_right != -1:
+            options["diagonal_band_right_bound"] = mask.window_right
+        elif mask.causal or mask.bottom_right:
+            options["diagonal_band_right_bound"] = 0
+    return options
 
 
 def requires_64bit_ragged_offset(
@@ -290,8 +361,7 @@ def check_f16_fused_attention_support(
         )
 
     alibi_supported = (
-        config.allow_alibi
-        and bias == "alibi"
+        bias == "alibi"
         and version >= 8906
         and arch >= 90
         and mask
@@ -373,11 +443,7 @@ def check_f16_fused_attention_support(
                 and sq <= skv
             )
         )
-        mask_ok = (
-            modern_mask_ok
-            if config.modern_mask_rules_override
-            else mask_ok or modern_mask_ok
-        )
+        mask_ok = mask_ok or modern_mask_ok
     if not mask_ok:
         return _unsupported("attention mask is not supported")
     if mask in ("padding", "padding_causal") and bias == "post_scale_bias":
@@ -437,7 +503,7 @@ def check_f16_fused_attention_support(
                     "causal_bottom_right",
                     "padding_causal_bottom_right",
                 )
-                or (config.allow_extended_causal_window and mask == "causal")
+                or mask == "causal"
             )
         )
         and sq <= skv
@@ -460,8 +526,8 @@ def check_f16_fused_attention_support(
     )
     if requires_i64 and version < 90500:
         return _unsupported("ragged offsets require int64 support")
-    if version in (91000, 91001):
-        return _unsupported("cuDNN 9.10.0 and 9.10.1 have known SDPA issues")
+    if version == 91000:
+        return _unsupported("cuDNN 9.10.0 has known SDPA issues")
     if version < 91301 and softmax != "vanilla":
         return _unsupported("this softmax type requires cuDNN 9.13.1 or newer")
     if config.return_max_logit and version < 92100:
@@ -512,4 +578,89 @@ def check_f16_fused_attention_support(
                 "T3HD/TH3D fused attention is not supported on SM120",
             )
 
+    return FusedAttentionSupport(True)
+
+
+def check_fp8_fused_attention_support(
+    config: FusedAttentionConfig,
+) -> FusedAttentionSupport:
+    """Check the shared cuDNN FP8/MXFP8 fused-attention compatibility policy."""
+
+    if config.q_dtype != config.kv_dtype:
+        return _unsupported("Q and KV must have the same data type")
+    if config.q_dtype not in ("float8_e4m3", "float8_e5m2"):
+        return _unsupported("only FP8 E4M3 and E5M2 are supported")
+
+    version = encode_cudnn_version(config.cudnn_version)
+    arch = int(config.sm_arch)
+    layout = config.layout
+    sq = int(config.max_seqlen_q)
+    skv = int(config.max_seqlen_kv)
+    dqk = int(config.head_dim_qk)
+    dv = int(config.head_dim_v)
+    mask = config.mask_type
+
+    if arch < 90:
+        return _unsupported("FP8 attention requires SM90 or newer")
+    if config.bias_type != "no_bias":
+        return _unsupported("FP8 attention does not support attention bias")
+    if config.return_max_logit:
+        return _unsupported("FP8 attention does not support returning max logits")
+    if version == 91000:
+        return _unsupported("cuDNN 9.10.0 has known SDPA issues")
+    if requires_64bit_ragged_offset(
+        layout,
+        config.num_attn_heads,
+        config.num_gqa_groups,
+        sq,
+        skv,
+        dqk,
+        dv,
+    ):
+        return _unsupported("FP8 attention does not support 64-bit ragged offsets")
+
+    shape_mask_ok = (
+        (
+            version >= 90201
+            and arch < 100
+            and sq % 128 == 0
+            and skv % 128 == 0
+            and dqk == 128
+            and dv == 128
+            and mask in ("causal", "no_mask")
+        )
+        or (
+            version >= 90700
+            and (
+                (arch < 100 and not config.is_training and dqk <= 256 and dv <= 256)
+                or (arch < 100 and config.is_training and dqk == 128 and dv == 128)
+                or (arch >= 100 and dqk <= 128 and dv <= 128)
+            )
+            and dqk % 16 == 0
+            and dv % 16 == 0
+            and mask in ("no_mask", "causal", "padding", "padding_causal")
+        )
+        or (
+            version >= 92100
+            and arch >= 100
+            and dqk <= 192
+            and dv <= 128
+            and dqk % 16 == 0
+            and dv % 16 == 0
+            and mask in ("no_mask", "causal", "causal_bottom_right")
+        )
+    )
+    if not shape_mask_ok:
+        return _unsupported("FP8 attention shape or mask is not supported")
+
+    format_softmax_ok = (
+        version < 92100
+        and layout.qkv_format in ("bshd", "sbhd")
+        and config.softmax_type == "vanilla"
+    ) or (
+        version >= 92100
+        and layout.qkv_format in ("bshd", "sbhd", "bhsd")
+    )
+    if not format_softmax_ok:
+        return _unsupported("FP8 attention layout or softmax type is not supported")
     return FusedAttentionSupport(True)

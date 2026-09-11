@@ -3538,6 +3538,7 @@ def fused_attn_fwd(
     context_parallel_axis: str = "",
     stripe_size: int | None = None,
     return_max_logit: bool = False,
+    bottom_right_diagonal: bool | None = None,
 ) -> jnp.ndarray:
     """
     Perform the forward pass of with cuDNN fused attention implementations.
@@ -3578,6 +3579,8 @@ def fused_attn_fwd(
         context_parallel_axis (str): The name of the context parallel axis.
         stripe_size (int | None): Indicates the striping height to be used for ReorderStrategy.Striped Load Balancing
         return_max_logit (bool): Whether to return the per-head maximum attention logit.
+        bottom_right_diagonal (bool | None): Explicit diagonal alignment. When unset, it
+            follows whether ``attn_mask_type`` is a bottom-right mask.
     Returns:
         (jnp.ndarray): The output tensor from the fused attention.
     """
@@ -3601,10 +3604,10 @@ def fused_attn_fwd(
     else:
         raise ValueError(f"Unknown {qkv_layout=}")
 
-    if attn_bias_type == AttnBiasType.NO_BIAS:
+    if attn_bias_type in (AttnBiasType.NO_BIAS, AttnBiasType.ALIBI):
         assert (
             bias is None
-        ), f"bias must be None when attn_bias_type is NO_BIAS, but got bias={bias}"
+        ), f"bias must be None when attn_bias_type is {attn_bias_type}, but got bias={bias}"
         bias = jnp.zeros(0, dtype=qkv[0].dtype)
 
     if softmax_offset is None:
@@ -3648,7 +3651,11 @@ def fused_attn_fwd(
         is_training=is_training,
         max_segments_per_seq=max_segments_per_seq,
         window_size=(-1, -1) if window_size is None else window_size,
-        bottom_right_diagonal=attn_mask_type.is_bottom_right(),
+        bottom_right_diagonal=(
+            attn_mask_type.is_bottom_right()
+            if bottom_right_diagonal is None
+            else bottom_right_diagonal
+        ),
         context_parallel_load_balanced=context_parallel_causal_load_balanced,
         cp_axis=_maybe_context_parallel_axis(context_parallel_axis),
         cp_striped_window_size=None,
@@ -3705,6 +3712,7 @@ def fused_attn_bwd(
     context_parallel_causal_load_balanced: bool = False,
     context_parallel_axis: str = "",
     stripe_size: int | None = None,
+    bottom_right_diagonal: bool | None = None,
 ):
     """
     Perform the backward pass of the cuDNN fused attention implementations.
@@ -3745,6 +3753,8 @@ def fused_attn_bwd(
             Indicates the sequences are ordered for causal mask load balancing when running context parallelism.
         context_parallel_axis (str): The name of the context parallel axis.
         stripe_size (int | None): Indicates the striping height to be used for ReorderStrategy.Striped Load Balancing
+        bottom_right_diagonal (bool | None): Explicit diagonal alignment. When unset, it
+            follows whether ``attn_mask_type`` is a bottom-right mask.
     Returns:
         Tuple[jnp.ndarray, ...], jnp.ndarray:
         - The first tuple contains the gradients with respect to the input `qkv` tensors in the
@@ -3770,10 +3780,10 @@ def fused_attn_bwd(
     else:
         raise ValueError(f"Unknown {qkv_layout=}")
 
-    if attn_bias_type == AttnBiasType.NO_BIAS:
+    if attn_bias_type in (AttnBiasType.NO_BIAS, AttnBiasType.ALIBI):
         assert (
             bias is None
-        ), f"bias must be None when attn_bias_type is NO_BIAS, but got bias with type={type(bias)}"
+        ), f"bias must be None when attn_bias_type is {attn_bias_type}, but got bias with type={type(bias)}"
         bias = jnp.zeros(0, dtype=qkv[0].dtype)
 
     if softmax_offset is None:
@@ -3824,7 +3834,11 @@ def fused_attn_bwd(
         is_training=is_training,
         max_segments_per_seq=max_segments_per_seq,
         window_size=(-1, -1) if window_size is None else window_size,
-        bottom_right_diagonal=attn_mask_type.is_bottom_right(),
+        bottom_right_diagonal=(
+            attn_mask_type.is_bottom_right()
+            if bottom_right_diagonal is None
+            else bottom_right_diagonal
+        ),
         context_parallel_load_balanced=context_parallel_causal_load_balanced,
         cp_axis=_maybe_context_parallel_axis(context_parallel_axis),
         cp_striped_window_size=None,

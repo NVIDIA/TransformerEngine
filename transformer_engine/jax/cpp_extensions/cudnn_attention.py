@@ -18,7 +18,7 @@ from transformer_engine.common.attention.cudnn import (
     AttentionLayout,
     FusedAttentionConfig,
     check_f16_fused_attention_support,
-    normalize_attention_mask,
+    cudnn_mask_options,
     ragged_batch_bucket,
     ragged_token_bucket,
 )
@@ -311,12 +311,13 @@ def _ragged_offset_spec(cudnn):
 
 
 def _mask_options(cudnn, info: _LayoutInfo, config):
+    cp_striped_window_size = getattr(config, "cp_striped_window_size", None)
     window_left, window_right = (
-        config.cp_striped_window_size
-        if config.cp_striped_window_size is not None
+        cp_striped_window_size
+        if cp_striped_window_size is not None
         else config.window_size
     )
-    mask = normalize_attention_mask(
+    options = cudnn_mask_options(
         causal=_is_causal(config),
         bottom_right=_is_bottom_right(config),
         padding=_is_padding(config),
@@ -324,27 +325,14 @@ def _mask_options(cudnn, info: _LayoutInfo, config):
         window_size=(window_left, window_right),
         max_seqlen_q=info.q_max_seqlen,
         max_seqlen_kv=info.kv_max_seqlen,
+        cudnn_version=get_cudnn_version(),
     )
-    cudnn_version = get_cudnn_version()
-    options = {
-        "diagonal_alignment": (
-            cudnn.diagonal_alignment.BOTTOM_RIGHT
-            if mask.bottom_right_diagonal or mask.bottom_right
-            else cudnn.diagonal_alignment.TOP_LEFT
-        ),
-    }
-    # Before cuDNN 9.6 the preferred right-band API was unavailable, so preserve
-    # the legacy causal flags used by the C++ frontend graph.
-    if cudnn_version < (9, 6, 0):
-        options["use_causal_mask"] = mask.causal
-        options["use_causal_mask_bottom_right"] = mask.bottom_right
-    if cudnn_version >= (9, 2, 0) and mask.window_left != -1:
-        options["diagonal_band_left_bound"] = mask.window_left + 1
-    if cudnn_version >= (9, 6, 0):
-        if mask.window_right != -1:
-            options["diagonal_band_right_bound"] = mask.window_right
-        elif mask.causal or mask.bottom_right:
-            options["diagonal_band_right_bound"] = 0
+    options.pop("is_padding")
+    options["diagonal_alignment"] = (
+        cudnn.diagonal_alignment.BOTTOM_RIGHT
+        if options["diagonal_alignment"] == "bottom_right"
+        else cudnn.diagonal_alignment.TOP_LEFT
+    )
     return options
 
 
@@ -434,6 +422,8 @@ def _build_fwd_graph(q_aval, k_aval, v_aval, bias_aval, config) -> AttentionGrap
         "attn_scale": scale,
         **_mask_options(cudnn, info, config),
     }
+    if getattr(config.attn_bias_type, "name", "") == "ALIBI":
+        kwargs["use_alibi_mask"] = True
 
     if _is_bias(config):
         *bias_batch_shape, bias_heads, bias_sq, bias_skv = bias_aval.shape
@@ -743,6 +733,8 @@ def _build_bwd_graph(
         "attn_scale": scale,
         **_mask_options(cudnn, info, config),
     }
+    if getattr(config.attn_bias_type, "name", "") == "ALIBI":
+        kwargs["use_alibi_mask"] = True
     if get_cudnn_version() >= (9, 0, 0):
         kwargs["use_deterministic_algorithm"] = not bool(
             int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1"))
@@ -974,9 +966,6 @@ def is_fused_attn_supported(helper) -> bool:
             ),
             cudnn_version=get_cudnn_version(),
             sm_arch=_device_arch(),
-            allow_alibi=False,
-            allow_extended_causal_window=True,
-            modern_mask_rules_override=True,
         )
     )
     return support.supported

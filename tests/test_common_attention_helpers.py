@@ -13,10 +13,20 @@ from transformer_engine.common.attention.cudnn import (
     AttentionLayout,
     FusedAttentionConfig,
     check_f16_fused_attention_support,
+    check_fp8_fused_attention_support,
+    cudnn_mask_options,
     encode_cudnn_version,
     normalize_attention_mask,
+    parse_attention_layout,
     ragged_batch_bucket,
     ragged_token_bucket,
+)
+from transformer_engine.common.attention.fp8 import (
+    FP8AttentionGraphConfig,
+    attention_format_stride,
+    build_fp8_backward_operation,
+    build_fp8_forward_operation,
+    mxfp8_padded_sizes,
 )
 from transformer_engine.common.attention.score_mod import (
     UNCACHEABLE_SCORE_MOD,
@@ -95,20 +105,16 @@ def test_shared_f16_policy_basic_support_and_rejection():
     assert "architecture" in unsupported.reason
 
 
-def test_shared_f16_policy_explicit_frontend_capabilities():
+def test_shared_f16_policy_framework_parity_features():
     alibi = _attention_config(bias_type="alibi", mask_type="causal")
-    assert not check_f16_fused_attention_support(alibi).supported
-    assert check_f16_fused_attention_support(replace(alibi, allow_alibi=True)).supported
+    assert check_f16_fused_attention_support(alibi).supported
 
     extended_causal = _attention_config(
         mask_type="causal",
         window_size=(128, 64),
         sm_arch=100,
     )
-    assert not check_f16_fused_attention_support(extended_causal).supported
-    assert check_f16_fused_attention_support(
-        replace(extended_causal, allow_extended_causal_window=True)
-    ).supported
+    assert check_f16_fused_attention_support(extended_causal).supported
 
     modern_padding = _attention_config(
         mask_type="padding",
@@ -116,9 +122,150 @@ def test_shared_f16_policy_explicit_frontend_capabilities():
         cudnn_version=(9, 7, 0),
     )
     assert check_f16_fused_attention_support(modern_padding).supported
-    assert not check_f16_fused_attention_support(
-        replace(modern_padding, modern_mask_rules_override=True)
+
+
+def test_shared_fp8_policy():
+    fp8 = _attention_config(q_dtype="float8_e4m3", kv_dtype="float8_e4m3", sm_arch=100)
+    assert check_fp8_fused_attention_support(fp8).supported
+    assert check_fp8_fused_attention_support(
+        replace(fp8, cudnn_version=(9, 10, 1))
     ).supported
+    assert not check_fp8_fused_attention_support(
+        replace(fp8, cudnn_version=(9, 10, 0))
+    ).supported
+    assert not check_fp8_fused_attention_support(
+        replace(fp8, bias_type="alibi")
+    ).supported
+    assert not check_fp8_fused_attention_support(
+        replace(fp8, return_max_logit=True)
+    ).supported
+    assert not check_fp8_fused_attention_support(
+        replace(fp8, head_dim_qk=200)
+    ).supported
+
+
+@pytest.mark.parametrize(
+    "layout, expected",
+    [
+        ("bs3hd", ("bshd", "bshd", "3hd")),
+        ("bshd_bs2hd", ("bshd", "bshd", "hd_2hd")),
+        ("bhsd_bhsd_bhsd", ("bhsd", "bhsd", "sd_sd_sd")),
+        ("paged_kv_bshd_bshd_bshd", ("bshd", "bshd", "paged_separate")),
+    ],
+)
+def test_parse_attention_layout(layout, expected):
+    parsed = parse_attention_layout(layout)
+    assert (parsed.q_format, parsed.kv_format, parsed.layout_group) == expected
+
+
+def test_shared_mask_options_use_modern_band_api():
+    options = cudnn_mask_options(
+        causal=True,
+        bottom_right=False,
+        padding=False,
+        bottom_right_diagonal=True,
+        window_size=(32, -1),
+        max_seqlen_q=64,
+        max_seqlen_kv=128,
+        cudnn_version=(9, 6, 0),
+    )
+    assert options == {
+        "diagonal_alignment": "bottom_right",
+        "is_padding": False,
+        "diagonal_band_left_bound": 33,
+        "diagonal_band_right_bound": 0,
+    }
+
+
+def test_shared_fp8_shape_helpers():
+    assert attention_format_stride(2, 8, 128, 64, "bshd") == (65536, 64, 512, 1)
+    assert attention_format_stride(2, 8, 128, 64, "bhsd") == (65536, 8192, 64, 1)
+    assert mxfp8_padded_sizes(129, 33, 160, 96) == {
+        "s_q_padded": 256,
+        "s_kv_padded": 128,
+        "s_q_scale_padded": 8,
+        "s_kv_scale_padded": 4,
+        "d_qk_padded": 256,
+        "d_v_padded": 128,
+        "d_qk_scale_padded": 8,
+        "d_v_scale_padded": 4,
+    }
+
+
+class _FakeFP8Graph:
+    def __init__(self):
+        self.call = None
+
+    def sdpa_fp8(self, *args, **kwargs):
+        self.call = ("fp8_fwd", args, kwargs)
+        return "o", "stats", "amax_s", "amax_o"
+
+    def sdpa_mxfp8(self, *args, **kwargs):
+        self.call = ("mx_fwd", args, kwargs)
+        return "o", "stats", "amax_o"
+
+    def sdpa_fp8_backward(self, *args, **kwargs):
+        self.call = ("fp8_bwd", args, kwargs)
+        return "dq", "dk", "dv", "aq", "ak", "av", "ap"
+
+    def sdpa_mxfp8_backward(self, *args, **kwargs):
+        self.call = ("mx_bwd", args, kwargs)
+        return "dq", "dk", "dv", "aq", "ak", "av"
+
+
+def test_shared_fp8_graph_operation_dispatch():
+    graph = _FakeFP8Graph()
+    forward = build_fp8_forward_operation(
+        graph,
+        {
+            "q": 1,
+            "k": 2,
+            "v": 3,
+            "descale_q": 4,
+            "descale_k": 5,
+            "descale_v": 6,
+            "descale_s": 7,
+            "scale_s": 8,
+            "scale_o": 9,
+        },
+        {"attn_scale": 0.125},
+        FP8AttentionGraphConfig("delayed", "forward"),
+    )
+    assert forward == {
+        "output": "o",
+        "stats": "stats",
+        "amax_s": "amax_s",
+        "amax_o": "amax_o",
+    }
+    assert graph.call[0] == "fp8_fwd"
+
+    backward = build_fp8_backward_operation(
+        graph,
+        {
+            **{name: name for name in ("q", "k", "v", "o", "do", "stats")},
+            **{
+                name: name
+                for name in (
+                    "descale_q",
+                    "descale_k",
+                    "descale_v",
+                    "descale_o",
+                    "descale_do",
+                    "descale_s",
+                    "descale_dp",
+                    "scale_s",
+                    "scale_dq",
+                    "scale_dk",
+                    "scale_dv",
+                    "scale_dp",
+                )
+            },
+        },
+        {"attn_scale": 0.125},
+        FP8AttentionGraphConfig("current", "backward"),
+    )
+    assert backward["amax_dp"] == "ap"
+    assert graph.call[0] == "fp8_bwd"
 
 
 def _not_an_array(_value):

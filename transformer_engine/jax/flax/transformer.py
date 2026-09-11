@@ -21,7 +21,7 @@ from jax import random as jax_random
 from jax import lax, vmap
 from jax.ad_checkpoint import checkpoint_name
 
-from .module import DenseGeneral, LayerNormDenseGeneral, LayerNormMLP
+from .module import DenseGeneral, LayerNormDenseGeneral, LayerNormMLP, TransformerEngineBase
 from .module import LayerNorm, Softmax
 from ..attention import (
     AttnBiasType,
@@ -33,6 +33,7 @@ from ..attention import (
 from ..attention import is_fused_attn_kernel_available, make_swa_mask, canonicalize_attn_mask_type
 from ..attention import fused_attn
 from ..attention import CPStrategy
+from ..quantize import get_global_quantize_recipe
 from ..softmax import SoftmaxFusionType
 from ..sharding import num_of_devices
 from ..sharding import get_sharding_map_logic_axis_to_mesh_axis
@@ -291,7 +292,7 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
         return jnp.einsum("bhqk,bkhd->bqhd", attn_weights, value)
 
 
-class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
+class _FusedDotProductAttention(TransformerEngineBase):  # pylint: disable=too-few-public-methods
     attention_dropout: float = 0.0
     attn_mask_type: AttnMaskType = AttnMaskType.CAUSAL_MASK
     attn_bias_type: Optional[AttnBiasType] = None
@@ -309,6 +310,7 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
     score_mod_bprop: Optional[Callable] = None
     score_mod_requested: bool = False
     return_max_logit: bool = False
+    bottom_right_diagonal: Optional[bool] = None
 
     @nn.compact
     def __call__(
@@ -365,7 +367,18 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
             "score_mod_tensors": score_mod_tensors,
             "score_mod_bprop_tensors": score_mod_bprop_tensors,
             "return_max_logit": self.return_max_logit,
+            "bottom_right_diagonal": self.bottom_right_diagonal,
         }
+        fp8_recipe = get_global_quantize_recipe()
+        if fp8_recipe is not None and getattr(fp8_recipe, "fp8_dpa", False):
+            if getattr(fp8_recipe, "fp8_mha", False):
+                raise NotImplementedError(
+                    "JAX FP8 attention currently supports FP16/BF16 DPA boundaries only; "
+                    "fp8_mha is not implemented."
+                )
+            fused_attn_kwargs["quantizer_set"] = self.generate_attention_quantizer_set(
+                fp8_recipe
+            )
 
         if self.qkv_layout.is_qkvpacked():
             """qkvpacked format, treat
@@ -629,6 +642,9 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
     return_max_logit: bool, default = False
         If True, return ``(output, max_logit)`` where ``max_logit`` contains the per-head
         maximum attention logits with shape ``[h]``. This path requires fused attention.
+    bottom_right_diagonal: Optional[bool], default = None
+        Explicit diagonal alignment for fused attention. When unset, bottom-right mask types
+        use bottom-right alignment and other masks use top-left alignment.
 
     Optimization parameters
     -----------------------
@@ -658,6 +674,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
     score_mod: Optional[Callable] = None
     score_mod_bprop: Optional[Callable] = None
     return_max_logit: bool = False
+    bottom_right_diagonal: Optional[bool] = None
 
     def __post_init__(self):
         # TODO(KshitijLakhani): Remove warning in TransformerEngine v2.12
@@ -758,10 +775,10 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             or score_mod_bprop_tensors is not None
         )
 
-        if attn_bias_type == AttnBiasType.NO_BIAS:
+        if attn_bias_type in (AttnBiasType.NO_BIAS, AttnBiasType.ALIBI):
             assert (
                 bias is None
-            ), f"bias must be None when attn_bias_type is NO_BIAS, but got bias={bias}"
+            ), f"bias must be None when attn_bias_type is {attn_bias_type}, but got bias={bias}"
         else:
             assert (
                 bias is not None
@@ -936,6 +953,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 score_mod_bprop=self.score_mod_bprop,
                 score_mod_requested=score_mod_requested,
                 return_max_logit=self.return_max_logit,
+                bottom_right_diagonal=self.bottom_right_diagonal,
             )(
                 query,
                 key,

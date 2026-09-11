@@ -37,6 +37,7 @@ from ..cpp_extensions import (
     jax_scaled_upper_triang_masked_softmax,
 )
 from ..quantize import (
+    AttentionQuantizerSet,
     QuantizerFactory,
     get_global_quantize_recipe,
     QuantizeMetaSet,
@@ -416,6 +417,23 @@ class TransformerEngineBase(nn.Module):  # pylint: disable=too-few-public-method
             n_groups=n_groups,
         )
         return quantizer_set
+
+    def generate_attention_quantizer_set(self, fp8_recipe=None):
+        """Generate independent quantizers for all FP8 DPA tensor roles."""
+
+        if fp8_recipe is None:
+            fp8_recipe = get_global_quantize_recipe()
+        first = self.generate_quantizer_set(postfix="_attention_qkv_s_do", fp8_recipe=fp8_recipe)
+        second = self.generate_quantizer_set(postfix="_attention_o_dp", fp8_recipe=fp8_recipe)
+        third = self.generate_quantizer_set(postfix="_attention_dqkv", fp8_recipe=fp8_recipe)
+        return AttentionQuantizerSet(
+            qkv=first.x,
+            s=first.kernel,
+            o=second.x,
+            do=first.dgrad,
+            dp=second.dgrad,
+            dqkv=third.dgrad,
+        )
 
 
 class DenseGeneral(TransformerEngineBase):
