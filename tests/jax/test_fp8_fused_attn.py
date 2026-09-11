@@ -23,7 +23,10 @@ from transformer_engine.jax.attention import (
     fused_attn,
 )
 from transformer_engine.jax.cpp_extensions import FusedAttnHelper
-from transformer_engine.jax.cpp_extensions.fp8_attention import _mxfp8_scale_inv
+from transformer_engine.jax.cpp_extensions.fp8_attention import (
+    _mx_scale,
+    _mxfp8_scale_inv,
+)
 from transformer_engine.jax.flax import DotProductAttention
 from transformer_engine.jax.quantize import (
     BlockScaleQuantizer,
@@ -179,6 +182,43 @@ def test_mxfp8_attention_scale_layout():
     assert tensor.colwise_tensor.scale_inv.shape == (2, 2, 8, 64)
     assert _mxfp8_scale_inv(tensor).shape == (2, 8, 128, 4)
     assert _mxfp8_scale_inv(tensor, colwise=True).shape == (2, 8, 4, 128)
+
+
+def test_mxfp8_attention_scale_graph_stride():
+    """The cuDNN scale descriptor matches the contiguous BHSD swizzle buffer."""
+
+    class FakeTensor:
+        def set_reordering_type(self, reordering):
+            self.reordering = reordering
+            return self
+
+    class FakeGraph:
+        def tensor(self, **kwargs):
+            self.kwargs = kwargs
+            return FakeTensor()
+
+    class FakeCudnn:
+        class data_type:
+            FP8_E8M0 = "fp8_e8m0"
+
+        class tensor_reordering:
+            F8_128x4 = "f8_128x4"
+
+    graph = FakeGraph()
+    tensor = _mx_scale(
+        graph,
+        FakeCudnn,
+        name="descale_q",
+        uid=101,
+        batch=2,
+        heads=8,
+        seqlen=128,
+        dim=4,
+    )
+
+    assert graph.kwargs["dim"] == (2, 8, 128, 4)
+    assert graph.kwargs["stride"] == (4096, 512, 4, 1)
+    assert tensor.reordering == FakeCudnn.tensor_reordering.F8_128x4
 
 
 @pytest.mark.parametrize("feature", ("alibi", "bottom_right"))

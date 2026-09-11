@@ -171,13 +171,14 @@ def _mx_scale(
     heads,
     seqlen,
     dim,
-    tensor_format="bshd",
 ):
+    # _mxfp8_scale_inv transposes every compact scale buffer to contiguous BHSD
+    # before applying cuDNN's F8_128x4 physical reordering.
     return _tensor(
         graph,
         name=name,
         dim=(batch, heads, seqlen, dim),
-        stride=attention_format_stride(batch, heads, seqlen, dim, tensor_format),
+        stride=attention_format_stride(batch, heads, seqlen, dim, "bhsd"),
         dtype=cudnn.data_type.FP8_E8M0,
         uid=uid,
     ).set_reordering_type(cudnn.tensor_reordering.F8_128x4)
