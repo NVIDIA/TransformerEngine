@@ -76,8 +76,9 @@ from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor.hybrid_tensor import HybridQuantizer
 from ..tensor.identity_tensor import IdentityQuantizer
 from ._common import (
-    _get_scale_buffer_info,
+    _get_calibration_metadata_buffers,
     _resolve_calibration_quantizer,
+    _supports_calibration_decay,
     apply_normalization,
     set_quantizer_amax_reduction_group,
     set_quantizer_usage_for_wgrad_all_gather,
@@ -249,8 +250,8 @@ class _LayerNormMLP(torch.autograd.Function):
             checkpoint,
             debug,
             is_fsdp2,
-            quantized_scaling_factor_buffering_decay,
-            scale_buffers,
+            transformer_engine_calibration_decay,
+            calibration_buffers,
             recompute_for_bwd,
         ) = non_tensor_args
         if fp8:
@@ -353,10 +354,8 @@ class _LayerNormMLP(torch.autograd.Function):
                 "checkpoint": checkpoint,
                 "debug": debug,
                 "is_fsdp2": is_fsdp2,
-                "quantized_scaling_factor_buffering_decay": (
-                    quantized_scaling_factor_buffering_decay
-                ),
-                "scale_buffers": scale_buffers,
+                "transformer_engine_calibration_decay": transformer_engine_calibration_decay,
+                "calibration_buffers": calibration_buffers,
                 "recompute_for_bwd": True,  # set this to true for recomputation phase
             }
         # Make sure input dimensions are compatible
@@ -575,24 +574,26 @@ class _LayerNormMLP(torch.autograd.Function):
             fc1_weight_final, fc1_weight_quantizer
         )
 
-        # Calibrate FC1 quantizers if needed.
-        should_calibrate = scale_buffers is not None
+        fc1_input_calibration_buffers = {}
+        fc1_weight_calibration_buffers = {}
+
+        # Calibrate FC1 quantizers and collect their metadata when requested.
+        should_calibrate = calibration_buffers is not None
         if should_calibrate:
             if fc1_input_calibration_quantizer is not None:
-                fc1_input_calibration_quantizer.calibrate(
-                    ln_out_total,
-                    decay=quantized_scaling_factor_buffering_decay,
-                )
+                if _supports_calibration_decay(type(fc1_input_calibration_quantizer)):
+                    fc1_input_calibration_quantizer.calibrate(
+                        ln_out_total,
+                        calibration_decay=transformer_engine_calibration_decay,
+                    )
+                else:
+                    fc1_input_calibration_quantizer.calibrate(ln_out_total)
             if fc1_weight_calibration_quantizer is not None:
                 fc1_weight_calibration_quantizer.calibrate(fc1_weight_final)
-
-        fc1_input_scale_buffer = {}
-        fc1_weight_scale_buffer = {}
-        if scale_buffers is not None:
-            fc1_input_scale_buffer = _get_scale_buffer_info(
+            fc1_input_calibration_buffers = _get_calibration_metadata_buffers(
                 "fc1_input", fc1_input_calibration_quantizer
             )
-            fc1_weight_scale_buffer = _get_scale_buffer_info(
+            fc1_weight_calibration_buffers = _get_calibration_metadata_buffers(
                 "fc1_weight", fc1_weight_calibration_quantizer
             )
 
@@ -690,10 +691,13 @@ class _LayerNormMLP(torch.autograd.Function):
             act_out, fc2_input_quantizer
         )
         if should_calibrate and fc2_input_calibration_quantizer is not None:
-            fc2_input_calibration_quantizer.calibrate(
-                act_out,
-                decay=quantized_scaling_factor_buffering_decay,
-            )
+            if _supports_calibration_decay(type(fc2_input_calibration_quantizer)):
+                fc2_input_calibration_quantizer.calibrate(
+                    act_out,
+                    calibration_decay=transformer_engine_calibration_decay,
+                )
+            else:
+                fc2_input_calibration_quantizer.calibrate(act_out)
 
         # we want to skip fc2 computation if we are checkpointing and recomputing,
         # otherwise we compute fc2
@@ -713,24 +717,21 @@ class _LayerNormMLP(torch.autograd.Function):
             fc2_weight_calibration_quantizer = _resolve_calibration_quantizer(
                 fc2_weight_final, fc2_weight_quantizer
             )
-            if should_calibrate and fc2_weight_calibration_quantizer is not None:
-                fc2_weight_calibration_quantizer.calibrate(fc2_weight_final)
-
-            if scale_buffers is not None:
-                activation_scale_updates = {}
-                weight_scale_updates = {}
-                activation_scale_updates.update(fc1_input_scale_buffer)
-                weight_scale_updates.update(fc1_weight_scale_buffer)
-                fc2_input_scale_buffer = _get_scale_buffer_info(
-                    "fc2_input", fc2_input_calibration_quantizer
+            if should_calibrate:
+                if fc2_weight_calibration_quantizer is not None:
+                    fc2_weight_calibration_quantizer.calibrate(fc2_weight_final)
+                calibration_buffers.update(fc1_input_calibration_buffers)
+                calibration_buffers.update(fc1_weight_calibration_buffers)
+                calibration_buffers.update(
+                    _get_calibration_metadata_buffers(
+                        "fc2_input", fc2_input_calibration_quantizer
+                    )
                 )
-                activation_scale_updates.update(fc2_input_scale_buffer)
-                fc2_weight_scale_buffer = _get_scale_buffer_info(
-                    "fc2_weight", fc2_weight_calibration_quantizer
+                calibration_buffers.update(
+                    _get_calibration_metadata_buffers(
+                        "fc2_weight", fc2_weight_calibration_quantizer
+                    )
                 )
-                weight_scale_updates.update(fc2_weight_scale_buffer)
-                scale_buffers.update(activation_scale_updates)
-                scale_buffers.update(weight_scale_updates)
 
             # Configure Userbuffers reduce-scatter if needed
             ub_obj_fc2out = None
@@ -2435,9 +2436,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
             )
 
             calibration_config = FP8GlobalStateManager.get_calibration_config()
-            scale_buffers = None
+            calibration_buffers = None
             if calibration_config is not None:
-                scale_buffers = {
+                calibration_buffers = {
                     name: value
                     for name, value in self._buffers.items()
                     if name.endswith("_te_ptq_calibrated")
@@ -2494,11 +2495,11 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 debug,
                 self.is_fsdp2,
                 (
-                    calibration_config.activation_scale_decay
+                    calibration_config.transformer_engine_calibration_decay
                     if calibration_config is not None
                     else 0.0
                 ),
-                scale_buffers,
+                calibration_buffers,
             )
             out, ln_out, new_fc1_ws, new_fc2_ws = fwd_fn(
                 *autograd_ctx,
@@ -2514,8 +2515,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 non_tensor_args,
             )
 
-            if scale_buffers is not None:
-                for name, value in scale_buffers.items():
+            if calibration_buffers is not None:
+                for name, value in calibration_buffers.items():
                     if value is not None:
                         if name in self._buffers:
                             setattr(self, name, value)

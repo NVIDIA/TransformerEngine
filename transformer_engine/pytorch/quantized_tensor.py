@@ -565,8 +565,12 @@ class Quantizer(abc.ABC):
             "nontensor_kwargs": meta["nontensor_kwargs"],
         }
 
-    def calibrate(self, tensor: torch.Tensor, *, decay: float = 0.0) -> None:
-        """Observe a tensor and update persistent calibration state."""
+    def calibrate(self, tensor: torch.Tensor, *, calibration_decay: float = 0.0) -> None:
+        """Observe a tensor and update persistent calibration state.
+
+        ``calibration_decay`` decays the historical maximum before incorporating
+        the current observation. A value of zero retains only the current metadata.
+        """
         pass
 
     def get_quantization_recipe_name(self) -> str:
@@ -578,19 +582,16 @@ class Quantizer(abc.ABC):
         metadata_name: str,
         observed_value: Optional[torch.Tensor],
         *,
-        decay: float,
+        calibration_decay: float,
     ) -> None:
         """Merge an observation into quantizer-owned calibration state."""
         if observed_value is None or torch.isnan(observed_value).any():
             # Un-initialized scale. Ignore it.
             return
         observed_value = observed_value.detach()
-        calibration_state = getattr(self, "_calibration_state", None)
-        if calibration_state is None:
-            calibration_state = {}
-            self._calibration_state = calibration_state
+        calibration_state = self._calibration_state
         calibration_value = calibration_state.get(metadata_name)
-        if decay > 0.0:
+        if calibration_decay > 0.0:
             if calibration_value is not None and calibration_value.shape != observed_value.shape:
                 raise RuntimeError(
                     "Quantizer calibration value shape changed from "
@@ -603,7 +604,7 @@ class Quantizer(abc.ABC):
                 calibration_state[metadata_name] = calibration_value
             # Track a decaying maximum so early-training activation
             # outliers do not permanently determine the inference scale.
-            calibration_value.mul_(decay)
+            calibration_value.mul_(calibration_decay)
             torch.maximum(calibration_value, observed_value, out=calibration_value)
         else:
             # Without scale history, keep a reference to the current metadata
@@ -614,11 +615,7 @@ class Quantizer(abc.ABC):
 
     def _share_calibration_state_with(self, quantizer: "Quantizer") -> None:
         """Make a shallow quantizer copy share persistent calibration state."""
-        calibration_state = getattr(self, "_calibration_state", None)
-        if calibration_state is None:
-            calibration_state = {}
-            self._calibration_state = calibration_state
-        quantizer._calibration_state = calibration_state
+        quantizer._calibration_state = self._calibration_state
 
     def set_usage(
         self, *, rowwise: Optional[bool] = None, columnwise: Optional[bool] = None

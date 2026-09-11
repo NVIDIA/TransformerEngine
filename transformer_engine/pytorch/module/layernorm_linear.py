@@ -69,8 +69,9 @@ from ..constants import FP8BwdTensorIdx, FP8FwdTensorIdx, GemmParallelModes, dis
 from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
 from ._common import (
-    _get_scale_buffer_info,
+    _get_calibration_metadata_buffers,
     _resolve_calibration_quantizer,
+    _supports_calibration_decay,
     apply_normalization,
     noop_cat,
     set_quantizer_amax_reduction_group,
@@ -165,8 +166,8 @@ class _LayerNormLinear(torch.autograd.Function):
             symmetric_ar_type,
             debug,
             is_fsdp2,
-            quantized_scaling_factor_buffering_decay,
-            scale_buffers,
+            transformer_engine_calibration_decay,
+            calibration_buffers,
         ) = non_tensor_args
         if fp8:
             backward_override = FP8GlobalStateManager.get_fp8_recipe().backward_override
@@ -386,20 +387,24 @@ class _LayerNormLinear(torch.autograd.Function):
         input_calibration_quantizer = _resolve_calibration_quantizer(ln_out_total, input_quantizer)
         weight_calibration_quantizer = _resolve_calibration_quantizer(weightmat, weight_quantizer)
 
-        # Calibrate quantizers if needed.
-        if scale_buffers is not None:
+        # Calibrate quantizers and buffer their metadata when requested.
+        if calibration_buffers is not None:
             if input_calibration_quantizer is not None:
-                input_calibration_quantizer.calibrate(
-                    ln_out_total,
-                    decay=quantized_scaling_factor_buffering_decay,
-                )
+                if _supports_calibration_decay(type(input_calibration_quantizer)):
+                    input_calibration_quantizer.calibrate(
+                        ln_out_total,
+                        calibration_decay=transformer_engine_calibration_decay,
+                    )
+                else:
+                    input_calibration_quantizer.calibrate(ln_out_total)
             if weight_calibration_quantizer is not None:
                 weight_calibration_quantizer.calibrate(weightmat)
-
-        # Buffer scaling metadata only when requested.
-        if scale_buffers is not None:
-            scale_buffers.update(_get_scale_buffer_info("input", input_calibration_quantizer))
-            scale_buffers.update(_get_scale_buffer_info("weight", weight_calibration_quantizer))
+            calibration_buffers.update(
+                _get_calibration_metadata_buffers("input", input_calibration_quantizer)
+            )
+            calibration_buffers.update(
+                _get_calibration_metadata_buffers("weight", weight_calibration_quantizer)
+            )
 
         # Choose whether to use GEMM kernel with split accumulator
         use_split_accumulator = _2X_ACC_FPROP
@@ -1784,9 +1789,9 @@ class LayerNormLinear(TransformerEngineBaseModule):
             )
 
             calibration_config = FP8GlobalStateManager.get_calibration_config()
-            scale_buffers = None
+            calibration_buffers = None
             if calibration_config is not None:
-                scale_buffers = {
+                calibration_buffers = {
                     name: value
                     for name, value in self._buffers.items()
                     if name.endswith("_te_ptq_calibrated")
@@ -1833,11 +1838,11 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 debug,
                 self.is_fsdp2,
                 (
-                    calibration_config.activation_scale_decay
+                    calibration_config.transformer_engine_calibration_decay
                     if calibration_config is not None
                     else 0.0
                 ),
-                scale_buffers,
+                calibration_buffers,
             )
             out, ln_out, new_weight_workspace = fwd_fn(
                 *autograd_ctx,
@@ -1850,8 +1855,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 non_tensor_args,
             )
 
-            if scale_buffers is not None:
-                for name, value in scale_buffers.items():
+            if calibration_buffers is not None:
+                for name, value in calibration_buffers.items():
                     if value is not None:
                         if name in self._buffers:
                             setattr(self, name, value)

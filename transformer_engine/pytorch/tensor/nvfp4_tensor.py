@@ -22,7 +22,7 @@ from ..utils import (
 )
 
 from .storage.nvfp4_tensor_storage import NVFP4TensorStorage, _FromNVFP4Func
-from ..quantized_tensor import QuantizedTensor, Quantizer
+from ..quantized_tensor import QuantizedTensor, QuantizedTensorStorage, Quantizer
 from ..dynamo import register_value_opaque_quantizer
 from ._quantization_helpers import _IdentityFunc, safe_quantized_repr
 
@@ -340,13 +340,14 @@ class NVFP4Quantizer(Quantizer):
         shape[-1] = shape[-1] // 2
         return tuple(shape)
 
-    def calibrate(self, tensor: torch.Tensor, *, decay: float = 0.0) -> None:
+    def calibrate(self, tensor: torch.Tensor, *, calibration_decay: float = 0.0) -> None:
         metadata_name = "amax_rowwise" if self.row_scaled_nvfp4 else "amax"
-        observed_amax = getattr(tensor, "_amax_rowwise", None)
-        if observed_amax is None:
-            # If quantized amax metadata does not yet exist or calibrate() is called directly,
-            # then recompute the absmax without quantization. This path is
-            # not performant and SHOULD NOT be called within training or inference.
+        if isinstance(tensor, (QuantizedTensor, QuantizedTensorStorage)):
+            # Retrieve the quantization metadata from quantized storage.
+            observed_amax = tensor._amax_rowwise
+        else:
+            # Direct calibration of a non-quantized tensor must reconstruct the metadata.
+            # This path is not performant and SHOULD NOT be called within training or inference.
             calibration_input = tensor
             if self.with_rht and self.with_post_rht_amax:
                 original_shape = calibration_input.shape
@@ -364,7 +365,11 @@ class NVFP4Quantizer(Quantizer):
                     op=torch.distributed.ReduceOp.MAX,
                     group=self._canonicalized_amax_reduction_group(),
                 )
-        self._update_calibration_value(metadata_name, observed_amax, decay=decay)
+        self._update_calibration_value(
+            metadata_name,
+            observed_amax,
+            calibration_decay=calibration_decay,
+        )
 
     def get_quantization_recipe_name(self) -> str:
         """Get the stable name of the quantization recipe."""

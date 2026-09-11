@@ -157,6 +157,10 @@ class HybridQuantizer(Quantizer):
         quantizer.optimize_for_gemm = self.optimize_for_gemm
         return quantizer
 
+    def calibrate(self, tensor: torch.Tensor, *, calibration_decay: float = 0.0) -> None:
+        """Reject calibration until child metadata ownership is supported."""
+        raise NotImplementedError("Calibration is not yet supported for HybridQuantizer")
+
     @property
     def with_amax_reduction(self) -> bool:
         """Whether either sub-quantizer has cross-rank amax reduction enabled."""

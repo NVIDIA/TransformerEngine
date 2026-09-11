@@ -32,8 +32,9 @@ from .base import (
     _2X_ACC_WGRAD,
 )
 from ._common import (
-    _get_scale_buffer_info,
+    _get_calibration_metadata_buffers,
     _resolve_calibration_quantizer,
+    _supports_calibration_decay,
     can_reconstruct_wgrad_input_from_original,
     noop_cat,
     set_quantizer_amax_reduction_group,
@@ -181,9 +182,9 @@ class LinearFwdArgs:
     fuse_wgrad_accumulation: bool
     wgrad_store: Optional[Any]
 
-    # Inference Scaling Factor Calibration Buffering
-    scale_buffers: Optional[Dict[str, Optional[torch.Tensor]]]
-    quantized_scaling_factor_buffering_decay: float
+    # Transformer Engine calibration metadata buffering
+    calibration_buffers: Optional[Dict[str, Optional[torch.Tensor]]]
+    transformer_engine_calibration_decay: float
 
     # --- Misc ---
     cpu_offloading: bool
@@ -379,7 +380,7 @@ def _linear_forward_impl(
     ctx_attrs)``. ``new_weight_workspace`` is the freshly produced FP8 weight
     workspace (returned alongside ``out`` so the caller can refresh its
     cache). The last two are ``None`` when gradients are disabled.
-    Scaling-factor checkpoint buffers are updated through ``args.scale_buffers``.
+    Calibration metadata buffers are updated through ``args.calibration_buffers``.
     """
 
     weight = args.weight
@@ -611,20 +612,24 @@ def _linear_forward_impl(
     input_calibration_quantizer = _resolve_calibration_quantizer(inputmat_total, input_quantizer)
     weight_calibration_quantizer = _resolve_calibration_quantizer(weightmat, weight_quantizer)
 
-    # Calibrate quantizers if needed.
-    if args.scale_buffers is not None:
+    # Calibrate quantizers and buffer their metadata when requested.
+    if args.calibration_buffers is not None:
         if input_calibration_quantizer is not None:
-            input_calibration_quantizer.calibrate(
-                inputmat_total,
-                decay=args.quantized_scaling_factor_buffering_decay,
-            )
+            if _supports_calibration_decay(type(input_calibration_quantizer)):
+                input_calibration_quantizer.calibrate(
+                    inputmat_total,
+                    calibration_decay=args.transformer_engine_calibration_decay,
+                )
+            else:
+                input_calibration_quantizer.calibrate(inputmat_total)
         if weight_calibration_quantizer is not None:
             weight_calibration_quantizer.calibrate(weightmat)
-
-    # Buffer scaling metadata only when requested.
-    if args.scale_buffers is not None:
-        args.scale_buffers.update(_get_scale_buffer_info("input", input_calibration_quantizer))
-        args.scale_buffers.update(_get_scale_buffer_info("weight", weight_calibration_quantizer))
+        args.calibration_buffers.update(
+            _get_calibration_metadata_buffers("input", input_calibration_quantizer)
+        )
+        args.calibration_buffers.update(
+            _get_calibration_metadata_buffers("weight", weight_calibration_quantizer)
+        )
 
     # Choose whether to use GEMM kernel with split accumulator
     use_split_accumulator = _2X_ACC_FPROP
@@ -2497,9 +2502,9 @@ class Linear(TransformerEngineBaseModule):
             )
             wgrad_store = self.wgrad_store if self.wgrad_store.delay_wgrad_compute() else None
             calibration_config = FP8GlobalStateManager.get_calibration_config()
-            scale_buffers = None
+            calibration_buffers = None
             if calibration_config is not None:
-                scale_buffers = {
+                calibration_buffers = {
                     name: value
                     for name, value in self._buffers.items()
                     if name.endswith("_te_ptq_calibrated")
@@ -2560,10 +2565,10 @@ class Linear(TransformerEngineBaseModule):
                 # weight-grad scheduling
                 fuse_wgrad_accumulation=self.fuse_wgrad_accumulation,
                 wgrad_store=wgrad_store,
-                # Inference Scaling Factor Calibration Buffering
-                scale_buffers=scale_buffers,
-                quantized_scaling_factor_buffering_decay=(
-                    calibration_config.activation_scale_decay
+                # Buffering TE calibration metadata, e.g. scaling factors.
+                calibration_buffers=calibration_buffers,
+                transformer_engine_calibration_decay=(
+                    calibration_config.transformer_engine_calibration_decay
                     if calibration_config is not None
                     else 0.0
                 ),
@@ -2590,10 +2595,10 @@ class Linear(TransformerEngineBaseModule):
                     weight_tensor, inp, linear_bias_tensor, fwd_args, is_grad_enabled
                 )
 
-            if scale_buffers is not None:
-                # Assign the scaling factor calibration buffers to model.
+            if calibration_buffers is not None:
+                # Assign Transformer Engine calibration metadata buffers to the model.
                 # Requires CUDA graph warmup step.
-                for name, value in scale_buffers.items():
+                for name, value in calibration_buffers.items():
                     if value is not None:
                         if name in self._buffers:
                             setattr(self, name, value)
@@ -2689,7 +2694,7 @@ class Linear(TransformerEngineBaseModule):
         if debug:
             return "debug instrumentation (nvidia-dlfw-inspect)"
         if FP8GlobalStateManager.get_calibration_config() is not None:
-            return "quantized scaling-factor buffering"
+            return "Transformer Engine calibration metadata buffering"
         weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
         if is_distributed_weight(weight_tensor):
             return "a DistributedWeight (custom weight parallelism, e.g. GTP)"

@@ -5,6 +5,8 @@
 """Internal function used by multiple modules."""
 
 import dataclasses
+import functools
+import inspect
 import queue
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
@@ -17,13 +19,27 @@ from ..tensor.hybrid_tensor import HybridQuantizer
 from ..utils import get_default_init_method
 
 
+@functools.lru_cache(maxsize=None)
+def _supports_calibration_decay(quantizer_type: type) -> bool:
+    """Whether a quantizer's calibrate override accepts calibration_decay."""
+    try:
+        parameters = inspect.signature(quantizer_type.calibrate).parameters
+    except (TypeError, ValueError):
+        return False
+    return "calibration_decay" in parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+    )
+
+
 def _resolve_calibration_quantizer(tensor: Any, quantizer: Any) -> Any:
     """Get the quantizer that owns calibration state for a tensor."""
     quantizer = getattr(tensor, "_quantizer", None) or quantizer
     return getattr(quantizer, "parent_quantizer", quantizer)
 
 
-def _get_scale_buffer_info(tensor_name: str, quantizer: Any) -> Dict[str, torch.Tensor]:
+def _get_calibration_metadata_buffers(
+    tensor_name: str, quantizer: Any
+) -> Dict[str, torch.Tensor]:
     """Get checkpoint-buffer aliases from quantizer calibration state."""
     if quantizer is None:
         return {}
@@ -33,7 +49,7 @@ def _get_scale_buffer_info(tensor_name: str, quantizer: Any) -> Dict[str, torch.
     return {
         # Standard naming for PTQ calibration data.
         f"{tensor_name}_tensor_{metadata_name}_{recipe}_te_ptq_calibrated": value
-        for metadata_name, value in getattr(quantizer, "_calibration_state", {}).items()
+        for metadata_name, value in quantizer._calibration_state.items()
     }
 
 

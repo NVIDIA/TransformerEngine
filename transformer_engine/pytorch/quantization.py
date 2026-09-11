@@ -391,16 +391,16 @@ class QuantizationCalibrationConfig:
 
     Parameters
     ----------
-    activation_scale_decay : float, default = 0.0
+    transformer_engine_calibration_decay : float, default = 0.0
         Decay applied to buffered activation scaling factors before incorporating
         each new observation. With zero decay, only the latest value is retained.
     """
 
-    activation_scale_decay: float = 0.0
+    transformer_engine_calibration_decay: float = 0.0
 
     def __post_init__(self) -> None:
-        if self.activation_scale_decay < 0.0:
-            raise ValueError("activation_scale_decay must be non-negative")
+        if self.transformer_engine_calibration_decay < 0.0:
+            raise ValueError("transformer_engine_calibration_decay must be non-negative")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1050,7 +1050,7 @@ class autocast:
              whether or not to enable low precision quantization (FP8/FP4).
     calibrating : bool, default = False
                  Enables calibration with the default configuration. Calibration
-                 collects and buffers quantized scaling factors even when executing
+                 collects and buffers Transformer Engine calibration metadata even when executing
                  without quantization enabled.
     calibration_config : QuantizationCalibrationConfig, default = None
                   Custom configuration for collecting checkpointable quantization scaling
