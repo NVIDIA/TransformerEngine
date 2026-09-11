@@ -1529,7 +1529,7 @@ __global__ void quantize_mxfp8_kernel_cast_only(
       int2 coords;
       coords.y = block_coords.y + iter_m * CastTraits::blockIterDim::M;
       coords.x = block_coords.x + iter_n * CastTraits::blockIterDim::N;
-      if (coords.x < cols && coords.y < rows) {
+      if (next < CastTraits::iterLayout::num && coords.x < cols && coords.y < rows) {
         if (warpId == 0 && leader) {
           ptx::cp_async_bulk_tensor_2d_global_to_shared(
               reinterpret_cast<uint64_t *>(sInput + next_stage * CastTraits::blockIterDim::num),
