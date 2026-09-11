@@ -60,8 +60,8 @@ def test_grouped_scale_buffers_are_per_gemm(monkeypatch):
         scale_buffers,
         inputs,
         weights,
-        object(),
-        object(),
+        [object(), object()],
+        [object(), object()],
         activation_scale_decay=0.0,
     )
 
@@ -74,6 +74,33 @@ def test_grouped_scale_buffers_are_per_gemm(monkeypatch):
     torch.testing.assert_close(
         scale_buffers["input_gemm1_tensor_scale_inv_fp8_current_scaling_te_ptq_calibrated"],
         torch.tensor([0.5]),
+    )
+
+
+def test_grouped_scale_buffers_use_per_gemm_delayed_scaling_amax(monkeypatch):
+    monkeypatch.setattr(_common, "get_quantization_recipe_name", lambda _: "fp8_delayed_scaling")
+    quantizers = [
+        SimpleNamespace(amax=torch.tensor([1.0])),
+        SimpleNamespace(amax=torch.tensor([2.0])),
+    ]
+    scale_buffers = {}
+
+    grouped_linear._update_grouped_scale_buffers(
+        scale_buffers,
+        [object(), object()],
+        [object(), object()],
+        quantizers,
+        quantizers,
+        activation_scale_decay=0.0,
+    )
+
+    torch.testing.assert_close(
+        scale_buffers["input_gemm0_tensor_amax_fp8_delayed_scaling_te_ptq_calibrated"],
+        torch.tensor([1.0]),
+    )
+    torch.testing.assert_close(
+        scale_buffers["input_gemm1_tensor_amax_fp8_delayed_scaling_te_ptq_calibrated"],
+        torch.tensor([2.0]),
     )
 
 
