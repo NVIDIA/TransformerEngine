@@ -181,7 +181,7 @@ __device__ __forceinline__ void mbarrier_arrive_expect_tx_cta_relaxed_shared_cta
 
 __device__ __forceinline__ void fence_mbarrier_init_release_cluster() {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-  asm volatile("fence.mbarrier_init.release.cluster;");
+  asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
 #else
   NVTE_DEVICE_ERROR("fence_mbarrier_init_release_cluster is only supported on SM 10.0+.");
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
@@ -735,7 +735,7 @@ __device__ __forceinline__ int32_t elect_one_sync(uint32_t mask = 0xFFFFFFFFu) {
 
 __device__ __forceinline__ void numbered_barrier_sync(uint32_t num_threads,
                                                       uint32_t barrier_id = 1u) {
-  asm volatile("bar.sync %0, %1;\n" ::"r"(barrier_id), "r"(num_threads));
+  asm volatile("bar.sync %0, %1;\n" ::"r"(barrier_id), "r"(num_threads) : "memory");
 }
 
 __device__ __forceinline__ void fma_f32_f16(float &out, uint16_t const &a, uint16_t const &b,
