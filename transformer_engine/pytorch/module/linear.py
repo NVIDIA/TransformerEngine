@@ -33,6 +33,7 @@ from .base import (
 )
 from ._common import (
     can_reconstruct_wgrad_input_from_original,
+    check_fp8_reduce_and_update,
     noop_cat,
     set_quantizer_amax_reduction_group,
     set_quantizer_usage_for_wgrad_all_gather,
@@ -315,16 +316,6 @@ class LinearBwdArgs:
         ) = restore_from_func_ctx(
             ctx
         )  # pylint: disable=unbalanced-tuple-unpacking
-
-
-def _check_fp8_reduce_and_update():
-    """Check if this is the first FP8 module (for backward reduce-and-update)."""
-    qstate = FP8GlobalStateManager.quantization_state
-    _first_fp8_module = qstate.is_first_fp8_module
-    result = FP8GlobalStateManager.is_first_fp8_module()
-    if in_fp8_activation_recompute_phase():
-        qstate.is_first_fp8_module = _first_fp8_module
-    return result
 
 
 def _out_leading_from_inp(leading: int, args: Union[LinearFwdArgs, LinearBwdArgs]) -> int:
@@ -1852,7 +1843,7 @@ class _Linear(torch.autograd.Function):
                 or fwd_args.weight_requires_grad
                 or fwd_args.bias_requires_grad
             ):
-                bwd_args.reduce_and_update_bwd_fp8_tensors = _check_fp8_reduce_and_update()
+                bwd_args.reduce_and_update_bwd_fp8_tensors = check_fp8_reduce_and_update()
             if fwd_args.backward_override is not None:
                 bwd_args.reduce_and_update_bwd_fp8_tensors = False
 
