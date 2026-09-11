@@ -822,6 +822,19 @@ def canonicalize_dtype(dtype: Optional[torch.dtype]) -> torch.dtype:
     return dtype
 
 
+def get_module_device(module: torch.nn.Module) -> torch.device:
+    """CUDA device of a module's parameters or buffers, else the current CUDA device.
+
+    Per-module state (e.g. FP8 scales and amax histories) must live on the module's
+    device, which is not necessarily the current device in single-process multi-GPU
+    execution (e.g. accelerate.dispatch_model).
+    """
+    for tensor in (*module.parameters(), *module.buffers()):
+        if tensor.device.type == "cuda":
+            return tensor.device
+    return torch.device("cuda", torch.cuda.current_device())
+
+
 def devices_match(device1: torch.device, device2: torch.device) -> bool:
     """Whether two devices are the same"""
     device1 = torch.device(device1)
