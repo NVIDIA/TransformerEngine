@@ -127,9 +127,7 @@ def test_activation_scale_buffer_uses_decaying_maximum(observed_scale, expected_
 
 @pytest.mark.parametrize("activation_scale_decay", (0.0, 0.5))
 @pytest.mark.parametrize("initial_scale", (None, 4.0))
-def test_nan_activation_scale_does_not_update_buffer(
-    activation_scale_decay, initial_scale
-):
+def test_nan_activation_scale_does_not_update_buffer(activation_scale_decay, initial_scale):
     name = "fc1_input_tensor_scale_inv_fp8_current_scaling_te_ptq_calibrated"
     scale_buffers = {}
     if initial_scale is not None:

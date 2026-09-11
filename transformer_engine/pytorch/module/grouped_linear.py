@@ -168,9 +168,7 @@ def _update_grouped_scale_buffers(
     """Update GroupedLinear PTQ calibration buffers with per-GEMM metadata."""
     activation_scale_updates = {}
     for index, tensor in enumerate(input_tensors):
-        scale_buffer = _get_scale_buffer_info(
-            f"input_gemm{index}", tensor, input_quantizers[index]
-        )
+        scale_buffer = _get_scale_buffer_info(f"input_gemm{index}", tensor, input_quantizers[index])
         if scale_buffer is not None:
             activation_scale_updates[scale_buffer[0]] = scale_buffer[1]
     weight_scale_updates = {}
