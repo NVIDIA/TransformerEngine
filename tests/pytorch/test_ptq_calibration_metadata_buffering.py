@@ -96,3 +96,25 @@ def test_activation_scale_buffer_uses_decaying_maximum(observed_scale, expected_
         activation_scale_decay=0.5,
     )
     torch.testing.assert_close(scale_buffers[name], torch.tensor([expected_scale]))
+
+
+@pytest.mark.parametrize("activation_scale_decay", (0.0, 0.5))
+@pytest.mark.parametrize("initial_scale", (None, 4.0))
+def test_nan_activation_scale_does_not_update_buffer(
+    activation_scale_decay, initial_scale
+):
+    name = "fc1_input_tensor_scale_inv_fp8_current_scaling_te_ptq_calibrated"
+    scale_buffers = {}
+    if initial_scale is not None:
+        scale_buffers[name] = torch.tensor([initial_scale])
+
+    _common._update_scale_buffers(
+        scale_buffers,
+        {name: torch.tensor([float("nan")])},
+        activation_scale_decay=activation_scale_decay,
+    )
+
+    if initial_scale is None:
+        assert name not in scale_buffers
+    else:
+        torch.testing.assert_close(scale_buffers[name], torch.tensor([initial_scale]))
