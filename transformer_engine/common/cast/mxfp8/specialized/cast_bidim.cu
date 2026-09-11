@@ -265,7 +265,6 @@ __device__ __forceinline__ void load_shared_words(uint32_t *dst, const uint32_t 
  *                           them at run time.
  * \tparam MIN_BLOCKS_PER_SM Occupancy target for __launch_bounds__.
  *
- * \param prefetch_distance_ctas  How far ahead, in CTAs, to prefetch input.
  *                                Set to one full resident wave so the next
  *                                wave's tile lands in L2 as this one drains;
  *                                0 disables the prefetch.
@@ -275,7 +274,7 @@ __global__ __launch_bounds__(kThreadsPerCta, MIN_BLOCKS_PER_SM) void quantize_bi
     const uint8_t *__restrict__ input, uint8_t *__restrict__ output_rowwise,
     uint8_t *__restrict__ scales_rowwise, uint8_t *__restrict__ output_colwise,
     uint8_t *__restrict__ scales_colwise, int32_t cols_rt, int32_t scale_stride_rowwise_rt,
-    int32_t scale_stride_colwise_rt, int32_t prefetch_distance_ctas) {
+    int32_t scale_stride_colwise_rt) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   const int32_t cols = K_COMPILE_TIME ? K_COMPILE_TIME : cols_rt;
   const int32_t scale_stride_rowwise =
@@ -449,30 +448,6 @@ __global__ __launch_bounds__(kThreadsPerCta, MIN_BLOCKS_PER_SM) void quantize_bi
                 packed, policy);
   }
 
-  // Software L2 prefetch, issued here so the next wave's input arrives while
-  // this CTA is still writing.  Pulling it earlier -- right after our own loads
-  // -- measured worse: the lines then sit in L2 for the whole CTA lifetime and
-  // crowd out the write bursts.
-  if (prefetch_distance_ctas > 0) {
-    const int32_t grid_x = K_COMPILE_TIME ? (K_COMPILE_TIME / kColsPerTile) : gridDim.x;
-    const int32_t target = blockIdx.y * grid_x + blockIdx.x + prefetch_distance_ctas;
-    if (target < grid_x * static_cast<int32_t>(gridDim.y)) {
-      constexpr int32_t kLinesPerTile =
-          kRowsPerTile * kColsPerTile * sizeof(bf16) / kCacheLineBytes;
-      constexpr int32_t kLinesPerRow = kLinesPerTile / kRowsPerTile;
-      const int32_t target_y = target / grid_x;
-      const int32_t target_x = target - target_y * grid_x;
-      for (int32_t line = tid; line < kLinesPerTile; line += kThreadsPerCta) {
-        const size_t offset =
-            (static_cast<size_t>(target_y * kRowsPerTile + line / kLinesPerRow) * cols +
-             target_x * kColsPerTile) *
-                sizeof(bf16) +
-            (line % kLinesPerRow) * kCacheLineBytes;
-        ptx::prefetch_l2_evict_last(input + offset);
-      }
-    }
-  }
-
   // ---- colwise quantized output -------------------------------------------
   ptx::bf16x2 colwise_scales[kWordsPerLane];
 #pragma unroll
@@ -505,8 +480,6 @@ constexpr int32_t kWideClusterDeep = 4;
 constexpr int32_t kNarrowCluster = 8;
 // Grid size, in CTAs, past which the wide tile switches to the deep cluster.
 constexpr int64_t kWideDeepClusterFrom = 4096;
-// Grid size, in resident waves, past which the narrow tile takes over.
-constexpr int32_t kNarrowFromWaves = 8;
 
 /*! \brief Launch quantize_bidim_kernel, specializing on K where we can.
  *
@@ -517,8 +490,7 @@ constexpr int32_t kNarrowFromWaves = 8;
 template <typename OType, int32_t COLS_PER_LANE, int32_t MIN_BLOCKS_PER_SM>
 void launch_tiled(const void *input, void *output_rowwise, void *scales_rowwise,
                   void *output_colwise, void *scales_colwise, int32_t rows, int32_t cols,
-                  int32_t scale_stride_rowwise, int32_t scale_stride_colwise, int32_t cluster_width,
-                  int32_t prefetch_distance_ctas, cudaStream_t stream) {
+                  int32_t scale_stride_rowwise, int32_t scale_stride_colwise, int32_t cluster_width, cudaStream_t stream) {
   constexpr int32_t kColsPerTile = THREADS_PER_WARP * COLS_PER_LANE;
   const dim3 grid(cols / kColsPerTile, rows / kRowsPerTile);
 
@@ -557,12 +529,10 @@ void launch_tiled(const void *input, void *output_rowwise, void *scales_rowwise,
     auto kernel = quantize_bidim_kernel<OType, COLS_PER_LANE, K_CONST, MIN_BLOCKS_PER_SM>;    \
     if (cluster_x > 1) {                                                                      \
       NVTE_CHECK_CUDA(cudaLaunchKernelEx(&config, kernel, in, qrow, srow, qcol, scol, cols,   \
-                                         scale_stride_rowwise, scale_stride_colwise,          \
-                                         prefetch_distance_ctas));                            \
+                                         scale_stride_rowwise, scale_stride_colwise));        \
     } else {                                                                                  \
       kernel<<<grid, kThreadsPerCta, 0, stream>>>(in, qrow, srow, qcol, scol, cols,           \
-                                                  scale_stride_rowwise, scale_stride_colwise, \
-                                                  prefetch_distance_ctas);                    \
+                                                  scale_stride_rowwise, scale_stride_colwise);\
       NVTE_CHECK_CUDA(cudaGetLastError());                                                    \
     }                                                                                         \
   } while (0)
@@ -612,22 +582,17 @@ void launch_cast_bidim(const void *input, void *output_rowwise, void *scales_row
 
   if (cols % kWideColsPerTile == 0) {
     const int64_t wide_ctas = static_cast<int64_t>(rows / kRowsPerTile) * (cols / kWideColsPerTile);
-    const int64_t wide_resident = static_cast<int64_t>(sm_count) * kWideMinBlocksPerSm;
-    if (wide_ctas < static_cast<int64_t>(kNarrowFromWaves) * wide_resident) {
-      launch_tiled<OType, kWideColsPerLane, kWideMinBlocksPerSm>(
-          input, output_rowwise, scales_rowwise, output_colwise, scales_colwise, rows, cols,
-          scale_stride_rowwise, scale_stride_colwise,
-          wide_ctas >= kWideDeepClusterFrom ? kWideClusterDeep : kWideClusterShallow,
-          static_cast<int32_t>(wide_resident), stream);
-      return;
-    }
+    launch_tiled<OType, kWideColsPerLane, kWideMinBlocksPerSm>(
+        input, output_rowwise, scales_rowwise, output_colwise, scales_colwise, rows, cols,
+        scale_stride_rowwise, scale_stride_colwise,
+        wide_ctas >= kWideDeepClusterFrom ? kWideClusterDeep : kWideClusterShallow, stream);
+    return;
   }
 
   // Deep grid, or a column count that only the narrow tile divides.
   launch_tiled<OType, kNarrowColsPerLane, kNarrowMinBlocksPerSm>(
       input, output_rowwise, scales_rowwise, output_colwise, scales_colwise, rows, cols,
-      scale_stride_rowwise, scale_stride_colwise, kNarrowCluster, sm_count * kNarrowMinBlocksPerSm,
-      stream);
+      scale_stride_rowwise, scale_stride_colwise, kNarrowCluster, stream);
 }
 
 // The MXFP8 output types the specialized dispatch can reach; see hasSpec.
