@@ -4,7 +4,7 @@
 """Tests for fused attention"""
 import os
 from enum import Enum, auto
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from math import sqrt
 from typing import Any, Callable, Mapping, Tuple, Optional, Dict
@@ -419,6 +419,45 @@ def test_thd_graph_bucketing_requires_cudnn_9_6(monkeypatch, cudnn_version, expe
         assert dimensions[4] == (2, 768, 8, 1)
 
 
+def test_fused_attn_backend_message(monkeypatch):
+    """The JAX selector returns the shared policy's rejection reason."""
+    monkeypatch.setattr(cudnn_attention, "get_cudnn_version", lambda: (9, 25, 0))
+    monkeypatch.setattr(cudnn_attention, "_device_arch", lambda: 90)
+    baseline = FusedAttnHelper(
+        is_training=True,
+        q_dtype=jnp.bfloat16,
+        kv_dtype=jnp.bfloat16,
+        qkv_layout=QKVLayout.BSHD_BSHD_BSHD,
+        attn_bias_type=AttnBiasType.NO_BIAS,
+        attn_mask_type=AttnMaskType.NO_MASK,
+        softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+        dropout_probability=0.0,
+        q_num_heads=8,
+        kv_num_heads=8,
+        q_max_seqlen=128,
+        kv_max_seqlen=128,
+        head_dim_qk=64,
+        head_dim_v=64,
+        window_size=(-1, -1),
+    )
+
+    backend, message = baseline.get_fused_attn_backend()
+    assert backend == NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
+    assert message == ""
+
+    backend, message = replace(
+        baseline, attn_bias_type=AttnBiasType.PRE_SCALE_BIAS
+    ).get_fused_attn_backend()
+    assert backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend
+    assert message == "attention bias is not supported"
+
+    backend, message = replace(
+        baseline, head_dim_qk=1024, head_dim_v=1024
+    ).get_fused_attn_backend()
+    assert backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend
+    assert message == "head dimensions are not supported"
+
+
 class BiasShape(Enum):
     """
     Enum class to represent the different bias shapes used in the fused attention.
@@ -620,7 +659,7 @@ class FusedAttnRunner:
                 "is either BSHD_BSHD_BSHD or THD_THD_THD"
             )
 
-        self.backend = FusedAttnHelper(
+        self.backend, _ = FusedAttnHelper(
             self.is_training,
             self.dtype,
             self.dtype,

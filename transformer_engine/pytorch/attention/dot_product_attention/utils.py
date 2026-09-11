@@ -375,24 +375,23 @@ def _get_fused_attn_backend(
     keys and resolved to the pybind enums here, so that every argument is a
     python literal or a python enum.
 
-    Returns a plain int rather than a FusedAttnBackend member: dynamo
-    reconstructs the result of an assume_constant_result call by re-emitting the
-    call, which is only valid inside the frame that made it. An int survives a
-    graph break because it is baked into the graph as a literal, while an enum
-    member comes out of the reconstruction corrupted (see the cast at the call
+    Returns a plain int rather than a FusedAttnBackend member alongside the rejection
+    reason. Dynamo reconstructs the result of an assume_constant_result call by
+    re-emitting the call, which is only valid inside the frame that made it. An int
+    survives a graph break because it is baked into the graph as a literal, while an
+    enum member comes out of the reconstruction corrupted (see the cast at the call
     site, which restores the enum)."""
-    return int(
-        get_cudnn_fused_attn_backend(
-            is_training,
-            q_type,
-            kv_type,
-            qkv_layout,
-            bias_type,
-            attn_mask_type,
-            softmax_type,
-            *args,
-        )
+    backend, reason = get_cudnn_fused_attn_backend(
+        is_training,
+        q_type,
+        kv_type,
+        qkv_layout,
+        bias_type,
+        attn_mask_type,
+        softmax_type,
+        *args,
     )
+    return int(backend), reason
 
 
 def get_attention_backend(
@@ -1505,7 +1504,7 @@ def get_attention_backend(
         # NOTE: under torch.compile the numeric args below must not be symbolic
         # (assume_constant_result requires concrete values); ints/floats made
         # dynamic by automatic dynamic currently graph break here.
-        fused_attention_backend = _get_fused_attn_backend(
+        fused_attention_backend, fused_attention_rejection_reason = _get_fused_attn_backend(
             is_training,
             q_type,
             kv_type,
@@ -1527,7 +1526,10 @@ def get_attention_backend(
             deterministic,
         )
         if fused_attention_backend == FusedAttnBackend.No_Backend.value:
-            logger.debug("Disabling FusedAttention as no backend supports the provided input")
+            logger.debug(
+                "Disabling FusedAttention: %s",
+                fused_attention_rejection_reason or "no backend supports the provided input",
+            )
             use_fused_attention = False
             fused_attention_backend = None
         elif (

@@ -54,16 +54,13 @@ def get_fused_attn_backend(
     cuda_graph,
     deterministic,
 ):
-    """Return the Python cuDNN SDPA backend value for an attention configuration."""
+    """Return the Python cuDNN SDPA backend and rejection reason for a configuration."""
 
     # Import lazily to avoid a circular import through dot_product_attention.utils.
     from .cudnn_attention import FusedAttnBackend
 
     q_dtype = DType.cast(q_dtype)
     kv_dtype = DType.cast(kv_dtype)
-    if q_dtype != kv_dtype:
-        raise ValueError("Q and KV must have the same data type")
-
     major, minor = get_device_compute_capability()
     sm_arch = major * 10 + minor
     cudnn_version_tuple = get_cudnn_version()
@@ -96,7 +93,8 @@ def get_fused_attn_backend(
             )
         )
         if support.supported:
-            return FusedAttnBackend.FP8
+            return FusedAttnBackend.FP8, ""
+        return FusedAttnBackend.No_Backend, support.reason
 
     support = check_f16_fused_attention_support(
         FusedAttentionConfig(
@@ -125,5 +123,5 @@ def get_fused_attn_backend(
     if support.warning is not None:
         warnings.warn(support.warning)
     if support.supported:
-        return FusedAttnBackend.F16_arbitrary_seqlen
-    return FusedAttnBackend.No_Backend
+        return FusedAttnBackend.F16_arbitrary_seqlen, ""
+    return FusedAttnBackend.No_Backend, support.reason

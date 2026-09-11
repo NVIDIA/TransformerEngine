@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for attention"""
+import logging
 import os
 import warnings
 from dataclasses import dataclass, replace
@@ -43,7 +44,7 @@ from .base import BasePrimitive, register_primitive
 from .cudnn_attention import (
     build_bwd_graph,
     build_fwd_graph,
-    is_fused_attn_supported,
+    get_fused_attn_support,
     ragged_graph_batch_size,
 )
 from .misc import (
@@ -58,6 +59,35 @@ __all__ = [
     "fused_attn_fwd",
     "fused_attn_bwd",
 ]
+
+
+# NVTE_DEBUG = 0/1 # disables/enables debug mode, default = 0
+_NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
+# NVTE_DEBUG_LEVEL = 0/1/2 # enables increasingly verbose debug messages, default = 0
+_NVTE_DEBUG_LEVEL = int(os.getenv("NVTE_DEBUG_LEVEL", "0"))
+
+
+class AttentionLogging:
+    """Logging for the JAX attention module."""
+
+    _log_level = _NVTE_DEBUG * _NVTE_DEBUG_LEVEL
+    _formatter = logging.Formatter("[%(levelname)-8s | %(name)-19s]: %(message)s")
+    _stream_handler = logging.StreamHandler()
+    logger = logging.getLogger(__name__)
+    _is_logging_setup = False
+
+    @staticmethod
+    def setup_logging():
+        """Set up log levels, logger, and handlers."""
+        if AttentionLogging._is_logging_setup:
+            return
+        log_levels = {0: logging.WARNING, 1: logging.INFO, 2: logging.DEBUG}
+        level = AttentionLogging._log_level if AttentionLogging._log_level in log_levels else 2
+        AttentionLogging._stream_handler.setFormatter(AttentionLogging._formatter)
+        AttentionLogging.logger.setLevel(log_levels[level])
+        if not AttentionLogging.logger.hasHandlers():
+            AttentionLogging.logger.addHandler(AttentionLogging._stream_handler)
+        AttentionLogging._is_logging_setup = True
 
 
 @partial(
@@ -131,15 +161,28 @@ class FusedAttnHelper:
 
     def is_fused_attn_kernel_available(self):
         """Check if there is available fused attention kernel"""
-        return self.get_fused_attn_backend() != NVTE_Fused_Attn_Backend.NVTE_No_Backend
+        backend, _ = self.get_fused_attn_backend()
+        return backend != NVTE_Fused_Attn_Backend.NVTE_No_Backend
 
     def get_fused_attn_backend(self):
-        """Get the fused attention kernel backend"""
-        return (
+        """Get the fused attention backend and a rejection reason when unavailable."""
+        support = get_fused_attn_support(self)
+        backend = (
             NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
-            if is_fused_attn_supported(self)
+            if support.supported
             else NVTE_Fused_Attn_Backend.NVTE_No_Backend
         )
+        message = "" if support.supported else support.reason
+
+        AttentionLogging.setup_logging()
+        logger = AttentionLogging.logger
+        logger.debug("Running fused attention backend selection with config=%s", self)
+        if backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
+            logger.info("No fused attention backend available; falling back to unfused attention.")
+            logger.debug("Reason fused attention was rejected: %s", message)
+        else:
+            logger.info("Selected fused attention backend: %s", backend)
+        return backend, message
 
     @staticmethod
     def is_non_deterministic_allowed():
@@ -386,7 +429,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         output_shape = (*batch_shape, q_max_seqlen, attn_heads, v_head_dim)
         out_aval = q_aval.update(shape=output_shape, dtype=q_dtype)
 
-        backend = FusedAttnHelper(
+        backend, message = FusedAttnHelper(
             config.is_training,
             q_dtype,
             k_dtype,
@@ -405,7 +448,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             config.return_max_logit,
         ).get_fused_attn_backend()
         if backend != NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
-            raise ValueError(f"Unsupported {backend=}")
+            raise ValueError(f"Unsupported {backend=}: {message}")
 
         graph_info = build_fwd_graph(q_aval, k_aval, v_aval, bias_aval, config)
         softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
@@ -925,7 +968,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             v_head_dim,
         ) = FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, config.qkv_layout)
 
-        backend = FusedAttnHelper(
+        backend, message = FusedAttnHelper(
             config.is_training,
             q_dtype,
             k_dtype,
@@ -944,7 +987,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             False,
         ).get_fused_attn_backend()
         if backend != NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
-            raise ValueError(f"Unsupported {backend=}")
+            raise ValueError(f"Unsupported {backend=}: {message}")
 
         graph_info = build_bwd_graph(
             q_aval,

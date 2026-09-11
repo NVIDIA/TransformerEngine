@@ -17,6 +17,7 @@ import numpy as np
 from transformer_engine.common.attention.cudnn import (
     AttentionLayout,
     FusedAttentionConfig,
+    FusedAttentionSupport,
     check_f16_fused_attention_support,
     cudnn_mask_options,
     ragged_batch_bucket,
@@ -897,10 +898,10 @@ def _policy_mask_name(mask) -> str:
     }[mask.name]
 
 
-def is_fused_attn_supported(helper) -> bool:
-    """Apply the shared F16/BF16 cuDNN attention compatibility policy."""
+def get_fused_attn_support(helper) -> FusedAttentionSupport:
+    """Return the shared F16/BF16 cuDNN attention compatibility result."""
 
-    support = check_f16_fused_attention_support(
+    return check_f16_fused_attention_support(
         FusedAttentionConfig(
             is_training=bool(helper.is_training),
             q_dtype=str(jnp.dtype(helper.q_dtype)),
@@ -924,4 +925,9 @@ def is_fused_attn_supported(helper) -> bool:
             sm_arch=_device_arch(),
         )
     )
-    return support.supported
+
+
+def is_fused_attn_supported(helper) -> bool:
+    """Apply the shared F16/BF16 cuDNN attention compatibility policy."""
+
+    return get_fused_attn_support(helper).supported

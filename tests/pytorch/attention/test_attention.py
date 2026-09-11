@@ -47,7 +47,8 @@ from transformer_engine.pytorch.utils import (
     scaled_init_method_normal,
 )
 from transformer_engine.pytorch.utils import get_cudnn_version
-from transformer_engine.pytorch.constants import FP8BwdTensorIdx, FP8FwdTensorIdx
+from transformer_engine.pytorch.constants import DType, FP8BwdTensorIdx, FP8FwdTensorIdx
+from transformer_engine.pytorch.attention.dot_product_attention import _cudnn_backend
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.quantized_tensor import (
     Quantizer,
@@ -127,6 +128,55 @@ def test_flash_attention_supported_version_message():
         )
         == ">= 2.1.1, < 2.8.4"
     )
+
+
+def test_fused_attn_backend_message(monkeypatch):
+    """The PyTorch selector returns the shared policy's rejection reason."""
+    monkeypatch.setattr(_cudnn_backend, "get_cudnn_version", lambda: (9, 25, 0))
+    monkeypatch.setattr(_cudnn_backend, "get_device_compute_capability", lambda: (9, 0))
+    baseline = dict(
+        is_training=True,
+        q_dtype=DType.kBFloat16,
+        kv_dtype=DType.kBFloat16,
+        qkv_layout="bshd_bshd_bshd",
+        bias_type="no_bias",
+        attn_mask_type="no_mask",
+        softmax_type="vanilla",
+        dropout=0.0,
+        num_attn_heads=8,
+        num_gqa_groups=8,
+        max_seqlen_q=128,
+        max_seqlen_kv=128,
+        head_dim_qk=64,
+        head_dim_v=64,
+        window_size_left=-1,
+        window_size_right=-1,
+        return_max_logit=False,
+        cuda_graph=False,
+        deterministic=False,
+    )
+
+    backend, message = _cudnn_backend.get_fused_attn_backend(**baseline)
+    assert backend == FusedAttnBackend.F16_arbitrary_seqlen
+    assert message == ""
+
+    backend, message = _cudnn_backend.get_fused_attn_backend(
+        **{**baseline, "bias_type": "pre_scale_bias"}
+    )
+    assert backend == FusedAttnBackend.No_Backend
+    assert message == "attention bias is not supported"
+
+    backend, message = _cudnn_backend.get_fused_attn_backend(
+        **{**baseline, "head_dim_qk": 1024, "head_dim_v": 1024}
+    )
+    assert backend == FusedAttnBackend.No_Backend
+    assert message == "head dimensions are not supported"
+
+    backend, message = _cudnn_backend.get_fused_attn_backend(
+        **{**baseline, "q_dtype": DType.kFloat16}
+    )
+    assert backend == FusedAttnBackend.No_Backend
+    assert message == "Q and KV must have the same data type"
 
 
 # Define F16 data types to test
