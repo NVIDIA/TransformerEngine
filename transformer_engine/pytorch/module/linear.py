@@ -33,7 +33,7 @@ from .base import (
 )
 from ._common import (
     _get_scale_buffer_info,
-    _update_scale_buffers,
+    _resolve_calibration_quantizer,
     can_reconstruct_wgrad_input_from_original,
     noop_cat,
     set_quantizer_amax_reduction_group,
@@ -608,29 +608,29 @@ def _linear_forward_impl(
         bias_dtype = torch.bfloat16
     bias = cast_if_needed(bias, bias_dtype) if bias is not None else bias
 
-    # Calibrate quantizers if needed
-    if not fp8 and args.fp8_calibration:
-        if input_quantizer is not None:
-            input_quantizer.calibrate(inputmat_total)
-        if weight_quantizer is not None:
-            weight_quantizer.calibrate(weight)
+    input_calibration_quantizer = _resolve_calibration_quantizer(
+        inputmat_total, input_quantizer
+    )
+    weight_calibration_quantizer = _resolve_calibration_quantizer(weightmat, weight_quantizer)
 
-    # Capture scaling metadata while it is still available.
+    # Calibrate quantizers if needed.
     if args.scale_buffers is not None:
-        input_scale_buffer = _get_scale_buffer_info("input", inputmat_total, input_quantizer)
-        if input_scale_buffer is not None:
-            _update_scale_buffers(
-                args.scale_buffers,
-                {input_scale_buffer[0]: input_scale_buffer[1]},
-                args.quantized_scaling_factor_buffering_decay,
+        if input_calibration_quantizer is not None:
+            input_calibration_quantizer.calibrate(
+                inputmat_total,
+                decay=args.quantized_scaling_factor_buffering_decay,
             )
-        weight_scale_buffer = _get_scale_buffer_info("weight", weightmat, weight_quantizer)
-        if weight_scale_buffer is not None:
-            _update_scale_buffers(
-                args.scale_buffers,
-                {weight_scale_buffer[0]: weight_scale_buffer[1]},
-                activation_scale_decay=0.0,
-            )
+        if weight_calibration_quantizer is not None:
+            weight_calibration_quantizer.calibrate(weightmat)
+
+    # Buffer scaling metadata only when requested.
+    if args.scale_buffers is not None:
+        args.scale_buffers.update(
+            _get_scale_buffer_info("input", input_calibration_quantizer)
+        )
+        args.scale_buffers.update(
+            _get_scale_buffer_info("weight", weight_calibration_quantizer)
+        )
 
     # Choose whether to use GEMM kernel with split accumulator
     use_split_accumulator = _2X_ACC_FPROP
@@ -2017,18 +2017,6 @@ class Linear(TransformerEngineBaseModule):
                        and saving the original input tensor may reduce the memory usage.
                        Requires an input quantizer that can safely reproduce its result from the
                        original input. Cannot work with FP8 DelayedScaling recipe.
-    buffer_quantized_scaling_factors : bool, default = False
-                       If set to ``True``, maintain nonpersistent input and weight quantization
-                       metadata buffers for inference checkpoint export. Per-tensor buffers
-                       store raw global amaxes, except FP8 current scaling buffers, which store
-                       inverse scales directly.
-                       Each buffer is materialized only when its tensor uses a quantizer with a
-                       per-tensor scaling factor. Used to propagate scaling factors from training
-                       into inference.
-    quantized_scaling_factor_buffering_decay : float, default = 0.0
-                       Decay applied to buffered activation scaling factors before incorporating
-                       each new observation. Defaults to 0.0, in which case only the most recent
-                       scaling factor is buffered.
     """
 
     def __init__(
@@ -2058,8 +2046,6 @@ class Linear(TransformerEngineBaseModule):
         symmetric_ar_type: Optional[str] = None,
         save_original_input: bool = False,
         name: Optional[str] = None,
-        buffer_quantized_scaling_factors: bool = False,
-        quantized_scaling_factor_buffering_decay: float = 0.0,
     ) -> None:
         super().__init__(name)
 
@@ -2286,9 +2272,6 @@ class Linear(TransformerEngineBaseModule):
             for name, param in self.named_parameters():
                 if name in self.weight_names or name in self.bias_names:
                     param.skip_backward_post_hook = True
-
-        self.buffer_quantized_scaling_factors = buffer_quantized_scaling_factors
-        self.quantized_scaling_factor_buffering_decay = quantized_scaling_factor_buffering_decay
 
     def get_quantizer_roles(
         self,
@@ -2519,8 +2502,9 @@ class Linear(TransformerEngineBaseModule):
                 bias_tensor if (self.apply_bias and not self.gemm_bias_unfused_add) else None
             )
             wgrad_store = self.wgrad_store if self.wgrad_store.delay_wgrad_compute() else None
+            calibration_config = FP8GlobalStateManager.get_calibration_config()
             scale_buffers = None
-            if self.buffer_quantized_scaling_factors:
+            if calibration_config is not None:
                 scale_buffers = {
                     name: value
                     for name, value in self._buffers.items()
@@ -2585,7 +2569,9 @@ class Linear(TransformerEngineBaseModule):
                 # Inference Scaling Factor Calibration Buffering
                 scale_buffers=scale_buffers,
                 quantized_scaling_factor_buffering_decay=(
-                    self.quantized_scaling_factor_buffering_decay
+                    calibration_config.activation_scale_decay
+                    if calibration_config is not None
+                    else 0.0
                 ),
                 # misc
                 cpu_offloading=is_cpu_offload_enabled(),
@@ -2708,7 +2694,7 @@ class Linear(TransformerEngineBaseModule):
         prepare_forward. Quantizer checks stay in compile_unsupported_reason."""
         if debug:
             return "debug instrumentation (nvidia-dlfw-inspect)"
-        if self.buffer_quantized_scaling_factors:
+        if FP8GlobalStateManager.get_calibration_config() is not None:
             return "quantized scaling-factor buffering"
         weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
         if is_distributed_weight(weight_tensor):

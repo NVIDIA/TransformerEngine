@@ -1121,7 +1121,10 @@ class DotProductAttention(TransformerEngineBaseModule):
         # With quantization off the base class does all that is needed.
         qstate = FP8GlobalStateManager.quantization_state
         if torch.compiler.is_compiling() and not (
-            qstate.fp8_enabled or qstate.fp8_calibration or qstate.fp8_parameters
+            qstate.fp8_enabled
+            or qstate.fp8_calibration
+            or qstate.calibration_config is not None
+            or qstate.fp8_parameters
         ):
             super().init_fp8_metadata(num_gemms=num_gemms)
             return

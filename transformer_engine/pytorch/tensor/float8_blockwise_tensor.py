@@ -243,10 +243,18 @@ class Float8BlockQuantizer(Quantizer):
             return False
         return True
 
-    def calibrate(self, tensor: torch.Tensor) -> None:
+    def calibrate(self, tensor: torch.Tensor, *, decay: float = 0.0) -> None:
         # NOTE: This interface is specific to requirements like delayed scaling
         # where state from an estimator influences distribution parameters.
+        # NOTE(@cspades): Currently, PTQ calibration requirements don't need
+        # non-global / blockwise scaling factors, which are usually computed
+        # on-the-fly during inference. Implement this interface for future
+        # applications of blockwise scaling factor calibration.
         pass
+
+    def get_quantization_recipe_name(self) -> str:
+        """Get the stable name of the quantization recipe."""
+        return "fp8_block_scaling"
 
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
         return Float8BlockScaling

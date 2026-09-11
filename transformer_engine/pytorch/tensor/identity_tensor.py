@@ -162,9 +162,9 @@ class IdentityQuantizer(Quantizer):
         dst._dtype = data.dtype
         return dst
 
-    def calibrate(self, tensor: torch.Tensor) -> None:
+    def calibrate(self, tensor: torch.Tensor, *, decay: float = 0.0) -> None:
         # No state to calibrate.
-        return
+        pass
 
     def _get_compatible_recipe(self):
         # Only reachable via CustomRecipe (qfactory returns IdentityQuantizer).

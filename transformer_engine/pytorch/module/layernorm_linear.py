@@ -70,7 +70,7 @@ from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
 from ._common import (
     _get_scale_buffer_info,
-    _update_scale_buffers,
+    _resolve_calibration_quantizer,
     apply_normalization,
     noop_cat,
     set_quantizer_amax_reduction_group,
@@ -383,28 +383,31 @@ class _LayerNormLinear(torch.autograd.Function):
             bias_dtype = torch.bfloat16
         bias = cast_if_needed(bias, bias_dtype) if bias is not None else bias
 
-        # Calibrate quantizers if needed
-        if not fp8 and fp8_calibration:
-            if input_quantizer is not None:
-                input_quantizer.calibrate(ln_out_total)
-            if weight_quantizer is not None:
-                weight_quantizer.calibrate(weight)
+        input_calibration_quantizer = _resolve_calibration_quantizer(
+            ln_out_total, input_quantizer
+        )
+        weight_calibration_quantizer = _resolve_calibration_quantizer(
+            weightmat, weight_quantizer
+        )
 
+        # Calibrate quantizers if needed.
         if scale_buffers is not None:
-            input_scale_buffer = _get_scale_buffer_info("input", ln_out_total, input_quantizer)
-            if input_scale_buffer is not None:
-                _update_scale_buffers(
-                    scale_buffers,
-                    {input_scale_buffer[0]: input_scale_buffer[1]},
-                    quantized_scaling_factor_buffering_decay,
+            if input_calibration_quantizer is not None:
+                input_calibration_quantizer.calibrate(
+                    ln_out_total,
+                    decay=quantized_scaling_factor_buffering_decay,
                 )
-            weight_scale_buffer = _get_scale_buffer_info("weight", weightmat, weight_quantizer)
-            if weight_scale_buffer is not None:
-                _update_scale_buffers(
-                    scale_buffers,
-                    {weight_scale_buffer[0]: weight_scale_buffer[1]},
-                    activation_scale_decay=0.0,
-                )
+            if weight_calibration_quantizer is not None:
+                weight_calibration_quantizer.calibrate(weightmat)
+
+        # Buffer scaling metadata only when requested.
+        if scale_buffers is not None:
+            scale_buffers.update(
+                _get_scale_buffer_info("input", input_calibration_quantizer)
+            )
+            scale_buffers.update(
+                _get_scale_buffer_info("weight", weight_calibration_quantizer)
+            )
 
         # Choose whether to use GEMM kernel with split accumulator
         use_split_accumulator = _2X_ACC_FPROP
@@ -1324,15 +1327,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
                    This can help in latency bound communication situations.
                    Requires PyTorch version 2.7.0 or higher. When set to ``None``, standard all-reduce
                    is used.
-    buffer_quantized_scaling_factors : bool, default = False
-                       If set to ``True``, maintain nonpersistent input and weight quantization
-                       metadata buffers for inference checkpoint export. Per-tensor buffers
-                       store raw global amaxes, except FP8 current scaling buffers, which store
-                       inverse scales directly.
-    quantized_scaling_factor_buffering_decay : float, default = 0.0
-                       Decay applied to buffered activation scaling factors before incorporating
-                       each new observation. Defaults to 0.0, in which case only the most recent
-                       scaling factor is buffered.
     """
 
     def __init__(
@@ -1365,8 +1359,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
         delay_wgrad_compute: bool = False,
         symmetric_ar_type: Optional[str] = None,
         name: Optional[str] = None,
-        buffer_quantized_scaling_factors: bool = False,
-        quantized_scaling_factor_buffering_decay: float = 0.0,
     ) -> None:
         super().__init__(name)
 
@@ -1629,9 +1621,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 if name in self.weight_names or name in self.bias_names:
                     param.skip_backward_post_hook = True
 
-        self.buffer_quantized_scaling_factors = buffer_quantized_scaling_factors
-        self.quantized_scaling_factor_buffering_decay = quantized_scaling_factor_buffering_decay
-
     def set_meta_tensor(self, fwd: bool, recipe: Recipe) -> None:
         """Init scales and amaxes for fwd | bwd."""
         super().set_meta_tensor(fwd, recipe)
@@ -1802,8 +1791,9 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self._fp8_workspaces.get(cache_name) if cache_name is not None else None
             )
 
+            calibration_config = FP8GlobalStateManager.get_calibration_config()
             scale_buffers = None
-            if self.buffer_quantized_scaling_factors:
+            if calibration_config is not None:
                 scale_buffers = {
                     name: value
                     for name, value in self._buffers.items()
@@ -1850,7 +1840,11 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.symmetric_ar_type,
                 debug,
                 self.is_fsdp2,
-                self.quantized_scaling_factor_buffering_decay,
+                (
+                    calibration_config.activation_scale_decay
+                    if calibration_config is not None
+                    else 0.0
+                ),
                 scale_buffers,
             )
             out, ln_out, new_weight_workspace = fwd_fn(

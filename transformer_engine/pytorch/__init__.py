@@ -55,6 +55,8 @@ from transformer_engine.pytorch.quantization import get_default_recipe
 from transformer_engine.pytorch.quantization import QuantizerRole
 from transformer_engine.pytorch.quantization import QuantizerRequest
 from transformer_engine.pytorch.quantization import DelayedScalingRequest
+from transformer_engine.pytorch.quantization import TEAutocastState
+from transformer_engine.pytorch.quantization import QuantizationCalibrationConfig
 from transformer_engine.pytorch.utils import get_cudnn_version
 from transformer_engine.pytorch.utils import get_device_compute_capability
 from transformer_engine.pytorch.utils import is_bf16_available

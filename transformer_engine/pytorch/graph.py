@@ -20,6 +20,7 @@ from transformer_engine.pytorch.constants import dist_group_type
 from .quantization import (
     autocast,
     FP8GlobalStateManager,
+    QuantizationCalibrationConfig,
     get_default_fp8_recipe,
 )
 from .distributed import get_all_rng_states, graph_safe_rng_available
@@ -1445,6 +1446,7 @@ def make_graphed_callables(
     pre_warmup_hook: Optional[Callable] = None,
     post_warmup_hook: Optional[Callable] = None,
     capture_time_hooks: Optional[List[Optional[Dict[str, Dict]]]] = None,
+    calibration_config: Optional[QuantizationCalibrationConfig] = None,
 ) -> Union[Callable, Tuple[Callable, ...]]:
     """
     Make CUDA graph version of Transformer Engine modules
@@ -1518,10 +1520,10 @@ def make_graphed_callables(
              whether or not to enable low precision quantization (FP8/FP4).
              If tuple, the length must match the number of modules.
     calibrating: bool, default = False
-                 calibration mode allows collecting statistics such as amax and scale
-                 data of quantized tensors even when executing without quantization enabled.
-                 This is useful for saving an inference ready checkpoint while training
-                 using a higher precision.
+                 Enables calibration with the default configuration.
+    calibration_config: QuantizationCalibrationConfig, default = None
+                 Custom configuration for collecting checkpointable quantization scaling
+                 factors. Providing a config also enables calibration.
     recipe: recipe.Recipe, default = None
             recipe used for low precision quantization.
     amax_reduction_group: torch._C._distributed_c10d.ProcessGroup, default = None
@@ -1668,6 +1670,7 @@ def make_graphed_callables(
                 recipe=recipe,
                 amax_reduction_group=amax_reduction_group,
                 _graph=True,
+                calibration_config=calibration_config,
             ):
                 outputs = old_call_funcs[block_cls](self, *args, **kwargs)
             return outputs

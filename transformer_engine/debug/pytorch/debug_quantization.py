@@ -429,8 +429,9 @@ class DebugQuantizer(Quantizer):
                 return True
         return False
 
-    def calibrate(self, tensor: torch.Tensor):
+    def calibrate(self, tensor: torch.Tensor, *, decay: float = 0.0):
         """Calibration override, should not be invoked."""
+        del tensor, decay
         raise RuntimeError("[NVTORCH-INSPECT ERROR] Calibration with debug is not supported")
 
     def update_quantized(

@@ -404,6 +404,7 @@ class Quantizer(abc.ABC):
         self.columnwise_usage = columnwise
         self.internal = False
         self.optimize_for_gemm = False
+        self._calibration_state: Dict[str, torch.Tensor] = {}
 
     def __repr__(self):
         return (
@@ -564,13 +565,60 @@ class Quantizer(abc.ABC):
             "nontensor_kwargs": meta["nontensor_kwargs"],
         }
 
-    def calibrate(self, tensor: torch.Tensor) -> None:
-        """Calibrate quantizer state
+    def calibrate(self, tensor: torch.Tensor, *, decay: float = 0.0) -> None:
+        """Observe a tensor and update persistent calibration state."""
+        pass
 
-        Updates quantization state as if quantizing a tensor, but
-        without actually performing the quantization.
+    def get_quantization_recipe_name(self) -> str:
+        """Get the stable name of the quantization recipe."""
+        return ""
 
-        """
+    def _update_calibration_value(
+        self,
+        metadata_name: str,
+        observed_value: Optional[torch.Tensor],
+        *,
+        decay: float,
+    ) -> None:
+        """Merge an observation into quantizer-owned calibration state."""
+        if observed_value is None or torch.isnan(observed_value).any():
+            # Un-initialized scale. Ignore it.
+            return
+        observed_value = observed_value.detach()
+        calibration_state = getattr(self, "_calibration_state", None)
+        if calibration_state is None:
+            calibration_state = {}
+            self._calibration_state = calibration_state
+        calibration_value = calibration_state.get(metadata_name)
+        if decay > 0.0:
+            if calibration_value is not None and calibration_value.shape != observed_value.shape:
+                raise RuntimeError(
+                    "Quantizer calibration value shape changed from "
+                    f"{tuple(calibration_value.shape)} to {tuple(observed_value.shape)}"
+                )
+            if calibration_value is None:
+                # Initialize the rolling activation scaling factor.
+                # Requires CUDA graph warmup step.
+                calibration_value = torch.zeros_like(observed_value)
+                calibration_state[metadata_name] = calibration_value
+            # Track a decaying maximum so early-training activation
+            # outliers do not permanently determine the inference scale.
+            calibration_value.mul_(decay)
+            torch.maximum(calibration_value, observed_value, out=calibration_value)
+        else:
+            # Without scale history, keep a reference to the current metadata
+            # without allocating or copying a separate buffer.
+            # Requires CUDA graph warmup step, and only access this value
+            # at an appropriate time (e.g. checkpointing) if captured by CG.
+            calibration_state[metadata_name] = observed_value
+
+    def _share_calibration_state_with(self, quantizer: "Quantizer") -> None:
+        """Make a shallow quantizer copy share persistent calibration state."""
+        calibration_state = getattr(self, "_calibration_state", None)
+        if calibration_state is None:
+            calibration_state = {}
+            self._calibration_state = calibration_state
+        quantizer._calibration_state = calibration_state
 
     def set_usage(
         self, *, rowwise: Optional[bool] = None, columnwise: Optional[bool] = None

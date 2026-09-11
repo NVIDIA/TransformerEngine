@@ -33,7 +33,7 @@ from .base import (
 )
 from ._common import (
     _get_scale_buffer_info,
-    _update_scale_buffers,
+    _resolve_calibration_quantizer,
     can_reconstruct_wgrad_input_from_original,
     WeightGradStore,
 )
@@ -163,31 +163,38 @@ def _update_grouped_scale_buffers(
     weight_tensors: List[Union[torch.Tensor, QuantizedTensorStorage]],
     input_quantizers: List[Optional[Quantizer]],
     weight_quantizers: List[Optional[Quantizer]],
-    activation_scale_decay: float,
 ) -> None:
-    """Update GroupedLinear PTQ calibration buffers with per-GEMM metadata."""
+    """Update GroupedLinear PTQ buffers from per-GEMM calibration state."""
     activation_scale_updates = {}
     for index, tensor in enumerate(input_tensors):
-        scale_buffer = _get_scale_buffer_info(f"input_gemm{index}", tensor, input_quantizers[index])
-        if scale_buffer is not None:
-            activation_scale_updates[scale_buffer[0]] = scale_buffer[1]
+        quantizer = _resolve_calibration_quantizer(tensor, input_quantizers[index])
+        activation_scale_updates.update(_get_scale_buffer_info(f"input_gemm{index}", quantizer))
     weight_scale_updates = {}
     for index, tensor in enumerate(weight_tensors):
-        scale_buffer = _get_scale_buffer_info(
-            f"weight_gemm{index}", tensor, weight_quantizers[index]
+        quantizer = _resolve_calibration_quantizer(tensor, weight_quantizers[index])
+        weight_scale_updates.update(
+            _get_scale_buffer_info(f"weight_gemm{index}", quantizer)
         )
-        if scale_buffer is not None:
-            weight_scale_updates[scale_buffer[0]] = scale_buffer[1]
-    _update_scale_buffers(
-        scale_buffers,
-        activation_scale_updates,
-        activation_scale_decay,
-    )
-    _update_scale_buffers(
-        scale_buffers,
-        weight_scale_updates,
-        activation_scale_decay=0.0,
-    )
+    scale_buffers.update(activation_scale_updates)
+    scale_buffers.update(weight_scale_updates)
+
+
+def _calibrate_grouped_tensors(
+    input_tensors: List[Union[torch.Tensor, QuantizedTensorStorage]],
+    weight_tensors: List[Union[torch.Tensor, QuantizedTensorStorage]],
+    input_quantizers: List[Optional[Quantizer]],
+    weight_quantizers: List[Optional[Quantizer]],
+    activation_scale_decay: float,
+) -> None:
+    """Calibrate GroupedLinear input and weight quantizers once per GEMM."""
+    for tensor, quantizer in zip(input_tensors, input_quantizers):
+        quantizer = _resolve_calibration_quantizer(tensor, quantizer)
+        if quantizer is not None:
+            quantizer.calibrate(tensor, decay=activation_scale_decay)
+    for tensor, quantizer in zip(weight_tensors, weight_quantizers):
+        quantizer = _resolve_calibration_quantizer(tensor, quantizer)
+        if quantizer is not None:
+            quantizer.calibrate(tensor)
 
 
 class _GroupedLinear(torch.autograd.Function):
@@ -586,13 +593,19 @@ class _GroupedLinear(torch.autograd.Function):
                     grouped_weights = weights_for_gemm.split_into_quantized_tensors()
             else:
                 grouped_weights = weights_for_gemm
+            _calibrate_grouped_tensors(
+                grouped_inputs,
+                grouped_weights,
+                input_quantizers,
+                weight_quantizers,
+                quantized_scaling_factor_buffering_decay,
+            )
             _update_grouped_scale_buffers(
                 scale_buffers,
                 grouped_inputs,
                 grouped_weights,
                 input_quantizers,
                 weight_quantizers,
-                quantized_scaling_factor_buffering_decay,
             )
 
         if is_grad_enabled:
@@ -919,13 +932,22 @@ class _GroupedLinear(torch.autograd.Function):
             weights_fp8 = [cast_if_needed(weight, activation_dtype) for weight in weights]
 
         if scale_buffers is not None:
+            _calibrate_grouped_tensors(
+                inputmats,
+                weights_fp8,
+                input_quantizers,
+                weight_quantizers,
+                quantized_scaling_factor_buffering_decay,
+            )
+
+        # Buffer scaling metadata only when requested.
+        if scale_buffers is not None:
             _update_grouped_scale_buffers(
                 scale_buffers,
                 inputmats,
                 weights_fp8,
                 input_quantizers,
                 weight_quantizers,
-                quantized_scaling_factor_buffering_decay,
             )
 
         # Initialize biases
@@ -962,11 +984,6 @@ class _GroupedLinear(torch.autograd.Function):
             use_bias=use_bias,
             use_split_accumulator=use_split_accumulator,
         )
-
-        if fp8_calibration:
-            for i in range(num_gemms):
-                input_quantizers[i].calibrate(inputmats[i])
-                weight_quantizers[i].calibrate(weights[i])
 
         if cpu_offloading:
             mark_not_offload(*weights_fp8, *weights)
@@ -1663,10 +1680,6 @@ class GroupedLinear(TransformerEngineBaseModule):
                        and saving the original input tensor may reduce the memory usage.
                        Requires input quantizers that can safely reproduce their results from the
                        original input. Cannot work with FP8 DelayedScaling recipe.
-    buffer_quantized_scaling_factors : bool, default = False
-                       If set to ``True``, maintain nonpersistent input and weight quantization
-                       metadata buffers for inference checkpoint export. Buffers store metadata
-                       per grouped GEMM, using inverse scales directly for FP8 current scaling.
     single_grouped_weight : bool, default = False
                        If set to ``True``, grouped weights are stored as a single grouped parameter
                        instead of one parameter per GEMM.
@@ -1720,8 +1733,6 @@ class GroupedLinear(TransformerEngineBaseModule):
         single_grouped_bias: bool = False,
         name: Optional[str] = None,
         use_grouped_tensor: Optional[bool] = None,
-        buffer_quantized_scaling_factors: bool = False,
-        quantized_scaling_factor_buffering_decay: float = 0.0,
     ) -> None:
         super().__init__(name)
 
@@ -1755,8 +1766,6 @@ class GroupedLinear(TransformerEngineBaseModule):
                 f"use_grouped_tensor must be a bool or None, got {type(use_grouped_tensor)}."
             )
         self.use_grouped_tensor = use_grouped_tensor
-        self.buffer_quantized_scaling_factors = buffer_quantized_scaling_factors
-        self.quantized_scaling_factor_buffering_decay = quantized_scaling_factor_buffering_decay
         single_grouped_weight, single_grouped_bias = resolve_grouped_linear_single_param_flags(
             single_grouped_weight, single_grouped_bias
         )
@@ -2353,8 +2362,9 @@ class GroupedLinear(TransformerEngineBaseModule):
                     if cache_weight
                     else [None] * num_gemms
                 )
+            calibration_config = FP8GlobalStateManager.get_calibration_config()
             scale_buffers = None
-            if self.buffer_quantized_scaling_factors:
+            if calibration_config is not None:
                 scale_buffers = {
                     name: value
                     for name, value in self._buffers.items()
@@ -2387,7 +2397,11 @@ class GroupedLinear(TransformerEngineBaseModule):
                 use_grouped_bias,
                 self.use_grouped_tensor,
                 scale_buffers,
-                self.quantized_scaling_factor_buffering_decay,
+                (
+                    calibration_config.activation_scale_decay
+                    if calibration_config is not None
+                    else 0.0
+                ),
             )
             out, new_workspaces = linear_fn(
                 *autograd_ctx,
