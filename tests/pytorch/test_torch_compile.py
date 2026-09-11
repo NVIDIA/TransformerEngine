@@ -2072,8 +2072,6 @@ def _fallback_case(case, dtype, device):
         model_kwargs["fuse_wgrad_accumulation"] = True
     elif case == "delayed_wgrad":
         model_kwargs["delay_wgrad_compute"] = True
-    elif case == "scale_buffering":
-        model_kwargs["buffer_quantized_scaling_factors"] = True
     model = te.Linear(64, 32, params_dtype=dtype, device=device, **model_kwargs)
 
     if case == "fp8_output_differentiable":
@@ -2101,7 +2099,10 @@ def _fallback_case(case, dtype, device):
         fp8_recipe = recipe.Float8CurrentScaling()
 
         def fn(inp):
-            with te.autocast(recipe=fp8_recipe):
+            with te.autocast(
+                recipe=fp8_recipe,
+                calibration_config=te.QuantizationCalibrationConfig(),
+            ):
                 return model(inp)
 
         return model, fn, "bwd", None, "quantized scaling-factor buffering"

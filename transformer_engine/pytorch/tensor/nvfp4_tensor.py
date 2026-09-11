@@ -247,6 +247,7 @@ class NVFP4Quantizer(Quantizer):
         )
         quantizer.internal = self.internal
         quantizer.optimize_for_gemm = self.optimize_for_gemm
+        self._share_calibration_state_with(quantizer)
 
         return quantizer
 
@@ -339,8 +340,35 @@ class NVFP4Quantizer(Quantizer):
         shape[-1] = shape[-1] // 2
         return tuple(shape)
 
-    def calibrate(self, tensor: torch.Tensor) -> None:
-        pass  # Calibration is no-op
+    def calibrate(self, tensor: torch.Tensor, *, decay: float = 0.0) -> None:
+        metadata_name = "amax_rowwise" if self.row_scaled_nvfp4 else "amax"
+        observed_amax = getattr(tensor, "_amax_rowwise", None)
+        if observed_amax is None:
+            # If quantized amax metadata does not yet exist or calibrate() is called directly,
+            # then recompute the absmax without quantization. This path is
+            # not performant and SHOULD NOT be called within training or inference.
+            calibration_input = tensor
+            if self.with_rht and self.with_post_rht_amax:
+                original_shape = calibration_input.shape
+                calibration_input = (
+                    calibration_input.reshape(-1, 16).to(torch.bfloat16) @ self.rht_matrix
+                ).reshape(original_shape)
+            if self.row_scaled_nvfp4:
+                amin, amax = calibration_input.aminmax(dim=-1)
+            else:
+                amin, amax = calibration_input.aminmax()
+            observed_amax = torch.maximum(-amin, amax).reshape(-1).float()
+            if self.with_amax_reduction and torch.distributed.is_initialized():
+                torch.distributed.all_reduce(
+                    observed_amax,
+                    op=torch.distributed.ReduceOp.MAX,
+                    group=self._canonicalized_amax_reduction_group(),
+                )
+        self._update_calibration_value(metadata_name, observed_amax, decay=decay)
+
+    def get_quantization_recipe_name(self) -> str:
+        """Get the stable name of the quantization recipe."""
+        return "nvfp4_rowwise" if self.row_scaled_nvfp4 else "nvfp4"
 
     def _canonicalized_amax_reduction_group(self) -> dist_group_type:
         """Get process group for amax reduction"""

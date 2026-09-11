@@ -32,21 +32,7 @@ def get_quantization_recipe_name(quantizer: Optional[Quantizer]) -> str:
     quantizer = getattr(quantizer, "parent_quantizer", quantizer)
     if quantizer is None:
         return ""
-    if isinstance(quantizer, Float8Quantizer):
-        return "fp8_delayed_scaling"
-    if isinstance(quantizer, Float8CurrentScalingQuantizer):
-        return "fp8_current_scaling"
-    if isinstance(quantizer, MXFP8Quantizer):
-        return "mxfp8"
-    if isinstance(quantizer, Float8BlockQuantizer):
-        return "fp8_block_scaling"
-    if isinstance(quantizer, NVFP4Quantizer):
-        if quantizer.row_scaled_nvfp4:
-            return "nvfp4_rowwise"
-        return "nvfp4"
-    # Custom recipes may provide arbitrary Quantizer implementations without a
-    # stable recipe name or globally checkpointable scaling metadata.
-    return ""
+    return quantizer.get_quantization_recipe_name()
 
 
 def replace_raw_data(tensor: QuantizedTensor, new_raw_data: torch.Tensor):
