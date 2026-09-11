@@ -63,6 +63,8 @@ from .cudnn_graph import (
     finalize_graph,
     import_cudnn,
     make_graph,
+    record_cache_event,
+    record_cache_lookup,
     serialized_graph,
 )
 from .misc import get_cudnn_version
@@ -251,8 +253,10 @@ def build_fp8_fwd_graph(
 
     avals = (q_aval, k_aval, v_aval, q_scale_aval, k_scale_aval, v_scale_aval)
     key = _cache_key("fwd", mode, avals, config, output_dtype)
-    if key in _graph_cache:
-        return _graph_cache[key]
+    graph_info = _graph_cache.get(key)
+    record_cache_lookup(("fp8", "fwd"), hit=graph_info is not None, key=key)
+    if graph_info is not None:
+        return graph_info
 
     cudnn = import_cudnn()
     graph = make_graph(cudnn, cudnn_data_type(cudnn, q_aval.dtype))
@@ -401,18 +405,24 @@ def build_fp8_fwd_graph(
             (1, 1, 1, 1)
         ).set_stride((1, 1, 1, 1))
 
+    cache_site = ("fp8", "fwd")
     workspace, data, version = finalize_graph(
-        cudnn, graph, description=f"JAX {mode} FP8 attention forward"
+        cudnn,
+        graph,
+        description=f"JAX {mode} FP8 attention forward",
+        cache_site=cache_site,
     )
     result = serialized_graph(
         serialized_graph_data=data,
         cudnn_frontend_version=version,
         workspace_size=workspace,
+        cache_site=cache_site,
         input_bindings=input_bindings,
         output_bindings=output_bindings,
     )
     info_result = FP8AttentionGraphInfo(result, o_shape, q_shape, k_shape, v_shape)
     _graph_cache[key] = info_result
+    record_cache_event(cache_site, "cache_graph")
     return info_result
 
 
@@ -506,8 +516,10 @@ def build_fp8_bwd_graph(
 
     avals = (q_aval, k_aval, v_aval, stats_aval, output_aval, doutput_aval)
     key = _cache_key("bwd", mode, avals, config, grad_dtype)
-    if key in _graph_cache:
-        return _graph_cache[key]
+    graph_info = _graph_cache.get(key)
+    record_cache_lookup(("fp8", "bwd"), hit=graph_info is not None, key=key)
+    if graph_info is not None:
+        return graph_info
 
     cudnn = import_cudnn()
     graph = make_graph(cudnn, cudnn_data_type(cudnn, q_aval.dtype))
@@ -705,18 +717,24 @@ def build_fp8_bwd_graph(
                 (1, 1, 1, 1)
             ).set_stride((1, 1, 1, 1))
 
+    cache_site = ("fp8", "bwd")
     workspace, data, version = finalize_graph(
-        cudnn, graph, description=f"JAX {mode} FP8 attention backward"
+        cudnn,
+        graph,
+        description=f"JAX {mode} FP8 attention backward",
+        cache_site=cache_site,
     )
     result = serialized_graph(
         serialized_graph_data=data,
         cudnn_frontend_version=version,
         workspace_size=workspace,
+        cache_site=cache_site,
         input_bindings=input_bindings,
         output_bindings=output_bindings,
     )
     graph_info = FP8AttentionGraphInfo(result, o_shape, q_shape, k_shape, v_shape)
     _graph_cache[key] = graph_info
+    record_cache_event(cache_site, "cache_graph")
     return graph_info
 
 

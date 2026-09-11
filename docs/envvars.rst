@@ -196,6 +196,12 @@ backend-selection overview.
    :Default: ``0``
    :Description: When using FusedAttention, use FlashAttention-2 implementation for the backward pass instead of the cuDNN implementation. This can be useful due to performance differences between various versions of flash-attn and FusedAttention.
 
+.. envvar:: NVTE_FUSED_ATTN_CACHE_DEBUG
+
+   :Type: ``int`` (0, 1 or 2), optionally followed by ``:<ranks>``
+   :Default: ``0``
+   :Description: Log FusedAttention Python graph-cache activity to stderr, prefixed with ``[FUSED-ATTN-CACHE]``. ``1`` prints an end-of-run summary of cache counters and the mean CPU wall time of each cuDNN graph-build stage. ``2`` additionally traces every cache event, including the cache key on hits and misses. When the launcher exports a rank, only rank 0 logs by default; append ``:<ranks>`` to override this, for example ``1:all`` or ``2:0,3``. Supported by PyTorch and JAX.
+
 .. envvar:: NVTE_ALLOW_NONDETERMINISTIC_ALGO
 
    :Type: ``int`` (0 or 1)

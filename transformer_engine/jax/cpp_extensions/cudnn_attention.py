@@ -32,6 +32,8 @@ from .cudnn_graph import (
     finalize_graph,
     import_cudnn,
     make_graph,
+    record_cache_event,
+    record_cache_lookup,
     serialized_graph,
 )
 from .misc import get_all_device_compute_capability, get_cudnn_version
@@ -342,9 +344,13 @@ def _cache_key(direction: str, q_aval, k_aval, v_aval, bias_aval, config, *extra
 def build_fwd_graph(q_aval, k_aval, v_aval, bias_aval, config) -> AttentionGraphInfo:
     """Build or retrieve the standard fused-attention forward graph."""
     key = _cache_key("fwd", q_aval, k_aval, v_aval, bias_aval, config)
-    if key not in _graph_cache:
+    graph_info = _graph_cache.get(key)
+    record_cache_lookup(("f16", "fwd"), hit=graph_info is not None, key=key)
+    if graph_info is None:
         _graph_cache[key] = _build_fwd_graph(q_aval, k_aval, v_aval, bias_aval, config)
-    return _graph_cache[key]
+        record_cache_event(("f16", "fwd"), "cache_graph")
+        graph_info = _graph_cache[key]
+    return graph_info
 
 
 def _build_fwd_graph(q_aval, k_aval, v_aval, bias_aval, config) -> AttentionGraphInfo:
@@ -563,11 +569,18 @@ def _build_fwd_graph(q_aval, k_aval, v_aval, bias_aval, config) -> AttentionGrap
     else:
         stats.set_stride((info.q_heads * graph_sq, graph_sq, 1, 1))
 
-    workspace, data, version = finalize_graph(cudnn, graph, description="fused-attention forward")
+    cache_site = ("f16", "fwd")
+    workspace, data, version = finalize_graph(
+        cudnn,
+        graph,
+        description="fused-attention forward",
+        cache_site=cache_site,
+    )
     result = serialized_graph(
         serialized_graph_data=data,
         cudnn_frontend_version=version,
         workspace_size=workspace,
+        cache_site=cache_site,
         input_bindings=input_bindings,
         output_bindings=output_bindings,
         scalar_uids=scalar_uids,
@@ -598,7 +611,9 @@ def build_bwd_graph(
         output_aval,
         doutput_aval,
     )
-    if key not in _graph_cache:
+    graph_info = _graph_cache.get(key)
+    record_cache_lookup(("f16", "bwd"), hit=graph_info is not None, key=key)
+    if graph_info is None:
         _graph_cache[key] = _build_bwd_graph(
             q_aval,
             k_aval,
@@ -609,7 +624,9 @@ def build_bwd_graph(
             doutput_aval,
             config,
         )
-    return _graph_cache[key]
+        record_cache_event(("f16", "bwd"), "cache_graph")
+        graph_info = _graph_cache[key]
+    return graph_info
 
 
 def _build_bwd_graph(
@@ -852,11 +869,18 @@ def _build_bwd_graph(
         dk.set_ragged_offset(offset_k)
         dv.set_ragged_offset(offset_v)
 
-    workspace, data, version = finalize_graph(cudnn, graph, description="fused-attention backward")
+    cache_site = ("f16", "bwd")
+    workspace, data, version = finalize_graph(
+        cudnn,
+        graph,
+        description="fused-attention backward",
+        cache_site=cache_site,
+    )
     result = serialized_graph(
         serialized_graph_data=data,
         cudnn_frontend_version=version,
         workspace_size=workspace,
+        cache_site=cache_site,
         input_bindings=input_bindings,
         output_bindings=output_bindings,
         scalar_uids=scalar_uids,

@@ -22,6 +22,7 @@ import jax.numpy as jnp
 import numpy as np
 import transformer_engine_jax
 
+from transformer_engine.common.attention.cache_debug import enabled as cache_debug_enabled
 from transformer_engine.common.cudnn_frontend import (
     build_cudnn_graph,
     import_cudnn_frontend,
@@ -46,6 +47,8 @@ class SerializedGraph:
     graph_hash: tuple[int, int]
     cudnn_frontend_version: int
     workspace_size: int
+    attention_backend: str
+    attention_direction: str
     input_uids: np.ndarray
     input_buffer_indices: np.ndarray
     input_byte_offsets: np.ndarray
@@ -63,6 +66,8 @@ class SerializedGraph:
             "graph_hash0": self.graph_hash[0],
             "graph_hash1": self.graph_hash[1],
             "cudnn_frontend_version": self.cudnn_frontend_version,
+            "attention_backend": self.attention_backend,
+            "attention_direction": self.attention_direction,
             "input_uids": self.input_uids,
             "input_buffer_indices": self.input_buffer_indices,
             "input_byte_offsets": self.input_byte_offsets,
@@ -218,6 +223,7 @@ def serialized_graph(
     serialized_graph_data: bytes,
     cudnn_frontend_version: int,
     workspace_size: int,
+    cache_site: tuple[str, str],
     input_bindings: Sequence[GraphBinding],
     output_bindings: Sequence[GraphBinding],
     scalar_uids: Sequence[int] = (),
@@ -234,6 +240,8 @@ def serialized_graph(
         graph_hash=graph_hash(serialized_graph_data),
         cudnn_frontend_version=int(cudnn_frontend_version),
         workspace_size=max(int(workspace_size), 1),
+        attention_backend=cache_site[0],
+        attention_direction=cache_site[1],
         input_uids=binding_array(input_bindings, "uid"),
         input_buffer_indices=binding_array(input_bindings, "buffer_index"),
         input_byte_offsets=binding_array(input_bindings, "byte_offset"),
@@ -246,9 +254,54 @@ def serialized_graph(
     )
 
 
-def finalize_graph(cudnn, graph, *, description: str) -> tuple[int, bytes, int]:
+def record_cache_event(
+    cache_site: tuple[str, str],
+    event: str,
+    *,
+    key=None,
+    elapsed_ns: int = 0,
+) -> None:
+    """Record an event in the JAX native cache-diagnostic state."""
+
+    if not cache_debug_enabled():
+        return
+    native_event = "plans_built" if event == "BUILD_PLANS" else event.lower()
+    transformer_engine_jax.record_fused_attn_cache_event(
+        *cache_site,
+        native_event,
+        -1,
+        "" if key is None else repr(key),
+        elapsed_ns,
+    )
+
+
+def record_cache_lookup(cache_site: tuple[str, str], *, hit: bool, key=None) -> None:
+    """Record a JAX Python graph-cache lookup."""
+
+    record_cache_event(cache_site, "hit" if hit else "miss", key=key)
+
+
+def _build_recorder(cache_site: tuple[str, str]):
+    def record(event: str, elapsed_ns: int) -> None:
+        record_cache_event(cache_site, event, elapsed_ns=elapsed_ns)
+
+    return record
+
+
+def finalize_graph(
+    cudnn,
+    graph,
+    *,
+    description: str,
+    cache_site: tuple[str, str],
+) -> tuple[int, bytes, int]:
     """Validate, plan and serialize a cuDNN frontend graph."""
-    workspace_size = build_cudnn_graph(cudnn, graph, description=description)
+    workspace_size = build_cudnn_graph(
+        cudnn,
+        graph,
+        description=description,
+        debug_callback=_build_recorder(cache_site),
+    )
     return (
         workspace_size,
         bytes(graph.serialize()),

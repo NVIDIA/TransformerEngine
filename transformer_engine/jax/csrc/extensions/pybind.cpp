@@ -5,6 +5,7 @@
  ************************************************************************/
 
 #include "../extensions.h"
+#include "attention_cache_debug.h"
 #include "cgemm_helper.h"
 #include "common/util/cuda_runtime.h"
 #include "transformer_engine/gemm.h"
@@ -137,6 +138,15 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("get_cuda_version", &GetCudaRuntimeVersion);
   m.def("get_cudnn_version", &GetCudnnRuntimeVersion);
   m.def("get_cudnn_frontend_version", &GetCudnnFrontendVersion);
+  m.def(
+      "record_fused_attn_cache_event",
+      [](const std::string &backend, const std::string &direction, const std::string &event,
+         int device, const std::string &key, uint64_t elapsed_ns) {
+        attention_cache_debug::Record(backend, direction, event, device, key, elapsed_ns);
+      },
+      pybind11::arg("backend"), pybind11::arg("direction"), pybind11::arg("event"),
+      pybind11::arg("device") = -1, pybind11::arg("key") = "",
+      pybind11::arg("elapsed_ns") = 0);
   m.def("get_device_compute_capability", &GetDeviceComputeCapability);
   m.def("get_num_compute_streams", &nvte_get_num_compute_streams);
   m.def("get_cublasLt_version", &cublasLtGetVersion);

@@ -12,6 +12,11 @@ from typing import Any, Dict, Hashable, Optional, Tuple
 
 import torch
 
+from transformer_engine.common.attention.cache_debug import (
+    build_recorder,
+    record_event,
+    record_lookup,
+)
 from transformer_engine.common.cudnn_frontend import (
     build_cudnn_graph,
     make_cudnn_graph,
@@ -100,11 +105,16 @@ def make_graph(io_dtype: Any, device: torch.device, *, name: str):
     )
 
 
-def finalize_graph(graph) -> int:
+def finalize_graph(graph, *, cache_site: Tuple[str, str]) -> int:
     """Build a cuDNN graph and return its required workspace size."""
 
     cudnn = import_cudnn_frontend()
-    return build_cudnn_graph(cudnn, graph, description="attention")
+    return build_cudnn_graph(
+        cudnn,
+        graph,
+        description="attention",
+        debug_callback=build_recorder(*cache_site),
+    )
 
 
 @dataclass
@@ -114,6 +124,7 @@ class GraphEntry:
     graph: Any
     tensors: Dict[str, Any]
     workspace_size: int
+    cache_site: Optional[Tuple[str, str]] = None
     _workspaces: Dict[int, torch.Tensor] = field(default_factory=dict, repr=False)
 
     def workspace(self, device: torch.device) -> torch.Tensor:
@@ -143,6 +154,8 @@ class GraphEntry:
     def execute(self, variant_pack: Dict[Any, Any], device: torch.device) -> None:
         """Execute the graph on PyTorch's current stream."""
 
+        if self.cache_site is not None:
+            record_event(*self.cache_site, "execute", device=_device_key(device)[1])
         self.graph.execute(
             variant_pack,
             self.workspace(device),
@@ -163,14 +176,36 @@ def graph_cache() -> Dict[Hashable, GraphEntry]:
 def get_graph_entry(key: Hashable) -> Optional[GraphEntry]:
     """Look up a graph in this thread's cache."""
 
-    return graph_cache().get(key)
+    entry = graph_cache().get(key)
+    cache_site = _cache_site(key)
+    if cache_site is not None:
+        record_lookup(*cache_site, hit=entry is not None, key=key)
+    return entry
 
 
 def put_graph_entry(key: Hashable, entry: GraphEntry) -> GraphEntry:
     """Insert and return a graph cache entry."""
 
     graph_cache()[key] = entry
+    cache_site = _cache_site(key)
+    if cache_site is not None:
+        entry.cache_site = cache_site
+        record_event(*cache_site, "cache_graph")
     return entry
+
+
+def _cache_site(key: Hashable) -> Optional[Tuple[str, str]]:
+    """Extract a diagnostic build site from an attention graph cache key."""
+
+    if not isinstance(key, tuple) or not key or not isinstance(key[0], str):
+        return None
+    try:
+        backend, direction = key[0].split("_", 1)
+    except ValueError:
+        return None
+    if backend not in ("f16", "fp8") or direction not in ("fwd", "bwd"):
+        return None
+    return backend, direction
 
 
 def clear_graph_cache() -> None:

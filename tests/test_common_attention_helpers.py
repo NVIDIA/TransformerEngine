@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from transformer_engine.common.attention import cache_debug
 from transformer_engine.common.attention.cudnn import (
     AttentionLayout,
     FusedAttentionConfig,
@@ -372,6 +373,87 @@ def test_shared_cudnn_graph_creation_and_finalization():
     ]
 
 
+def test_shared_cudnn_graph_reports_build_diagnostics():
+    events = []
+    graph = _FakeGraph()
+    build_cudnn_graph(
+        _FakeCudnn(),
+        graph,
+        description="attention",
+        debug_callback=lambda event, elapsed_ns: events.append((event, elapsed_ns)),
+    )
+    assert [event for event, _ in events] == [
+        "CREATE_GRAPH",
+        "validate",
+        "build_operation_graph",
+        "create_execution_plans",
+        "check_support",
+        "build_plans",
+        "BUILD_PLANS",
+    ]
+    assert all(elapsed_ns >= 0 for _, elapsed_ns in events)
+
+
 def test_shared_cudnn_graph_support_error_has_context():
     with pytest.raises(RuntimeError, match="cuDNN test graph is not supported"):
         build_cudnn_graph(_FakeCudnn(), _FakeGraph(unsupported=True), description="test")
+
+
+@pytest.fixture
+def cache_debug_environment(monkeypatch):
+    for variable in (
+        "NVTE_FUSED_ATTN_CACHE_DEBUG",
+        "RANK",
+        "LOCAL_RANK",
+        "OMPI_COMM_WORLD_RANK",
+        "SLURM_PROCID",
+    ):
+        monkeypatch.delenv(variable, raising=False)
+    cache_debug._reset_for_tests()
+    yield monkeypatch
+    cache_debug._reset_for_tests()
+
+
+def test_cache_debug_rank_selection(cache_debug_environment):
+    monkeypatch = cache_debug_environment
+    monkeypatch.setenv("NVTE_FUSED_ATTN_CACHE_DEBUG", "2")
+    monkeypatch.setenv("RANK", "1")
+    cache_debug._reset_for_tests()
+    assert not cache_debug.enabled()
+
+    monkeypatch.setenv("NVTE_FUSED_ATTN_CACHE_DEBUG", "2:1,3")
+    cache_debug._reset_for_tests()
+    assert cache_debug.enabled(trace=True)
+
+    monkeypatch.setenv("NVTE_FUSED_ATTN_CACHE_DEBUG", "1:all")
+    cache_debug._reset_for_tests()
+    assert cache_debug.enabled()
+    assert not cache_debug.enabled(trace=True)
+
+
+def test_cache_debug_summary(cache_debug_environment):
+    cache_debug_environment.setenv("NVTE_FUSED_ATTN_CACHE_DEBUG", "1")
+    cache_debug.record_lookup("f16", "fwd", hit=False, key=("graph", 1))
+    cache_debug.record_event("f16", "fwd", "create_graph")
+    cache_debug.record_event("f16", "fwd", "cache_graph")
+    cache_debug.record_event("f16", "fwd", "execute", device=0)
+    cache_debug.record_lookup("f16", "fwd", hit=True, key=("graph", 1))
+    cache_debug.record_build_time("f16", "fwd", "validate", 2_000_000)
+
+    summary = cache_debug.render_summary()
+    assert "summary begin" in summary
+    assert "f16 fwd" in summary
+    assert "hit=   1" in summary
+    assert "miss=   1" in summary
+    assert "execute=   1" in summary
+    assert "validate" in summary
+    assert "2.000 ms/call" in summary
+
+
+def test_cache_debug_level_two_traces_lookup_key(cache_debug_environment, capsys):
+    cache_debug_environment.setenv("NVTE_FUSED_ATTN_CACHE_DEBUG", "2")
+    cache_debug.record_lookup("fp8", "bwd", hit=False, key=("shape", 128))
+    trace = capsys.readouterr().err
+    assert "[FUSED-ATTN-CACHE]" in trace
+    assert "fp8 bwd MISS" in trace
+    assert "('shape', 128)" in trace

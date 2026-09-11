@@ -24,6 +24,8 @@ from .cudnn_graph import (
     finalize_graph,
     import_cudnn,
     make_graph,
+    record_cache_event,
+    record_cache_lookup,
 )
 from .cudnn_graph import (
     bshd_as_bhsd_dim_stride as _bshd_as_bhsd_dim_stride,
@@ -363,11 +365,13 @@ def _serialized_score_mod_graph(
     output_uids: Sequence[int],
     scalar_uids: Sequence[int],
     scalar_values: Sequence[bytes],
+    cache_site: Tuple[str, str],
 ) -> _SerializedScoreModGraph:
     return make_serialized_graph(
         serialized_graph_data=serialized_graph,
         cudnn_frontend_version=int(cudnn_frontend_version),
         workspace_size=int(workspace_size),
+        cache_site=cache_site,
         input_bindings=[
             GraphBinding(uid=int(uid), buffer_index=index) for index, uid in enumerate(input_uids)
         ],
@@ -389,8 +393,15 @@ def _wrap_score_mod(score_mod: Optional[Callable], graph_tensors: Dict[str, Any]
     return wrapped_score_mod
 
 
-def _finalize_score_mod_graph(cudnn, graph) -> Tuple[int, bytes, int]:
-    return finalize_graph(cudnn, graph, description="score_mod SDPA")
+def _finalize_score_mod_graph(
+    cudnn, graph, cache_site: Tuple[str, str]
+) -> Tuple[int, bytes, int]:
+    return finalize_graph(
+        cudnn,
+        graph,
+        description="score_mod SDPA",
+        cache_site=cache_site,
+    )
 
 
 def _graph_cache_key(
@@ -468,11 +479,15 @@ def _build_score_mod_fwd_graph(q_aval, k_aval, v_aval, score_mod_avals, config):
         stats.set_data_type(cudnn.data_type.FLOAT)
         output_uids.append(_SCORE_MOD_UID_STATS)
 
-    workspace_size, serialized_graph, frontend_version = _finalize_score_mod_graph(cudnn, graph)
+    cache_site = ("f16", "fwd")
+    workspace_size, serialized_graph, frontend_version = _finalize_score_mod_graph(
+        cudnn, graph, cache_site
+    )
     return _serialized_score_mod_graph(
         serialized_graph=serialized_graph,
         cudnn_frontend_version=frontend_version,
         workspace_size=workspace_size,
+        cache_site=cache_site,
         input_uids=[_SCORE_MOD_UID_Q, _SCORE_MOD_UID_K, _SCORE_MOD_UID_V, *tensor_uids],
         output_uids=output_uids,
         scalar_uids=scalar_uids,
@@ -567,11 +582,15 @@ def _build_score_mod_bwd_graph(
     dk.set_output(True).set_uid(_SCORE_MOD_UID_DK).set_dim(k_dim).set_stride(k_stride)
     dv.set_output(True).set_uid(_SCORE_MOD_UID_DV).set_dim(v_dim).set_stride(v_stride)
 
-    workspace_size, serialized_graph, frontend_version = _finalize_score_mod_graph(cudnn, graph)
+    cache_site = ("f16", "bwd")
+    workspace_size, serialized_graph, frontend_version = _finalize_score_mod_graph(
+        cudnn, graph, cache_site
+    )
     return _serialized_score_mod_graph(
         serialized_graph=serialized_graph,
         cudnn_frontend_version=frontend_version,
         workspace_size=workspace_size,
+        cache_site=cache_site,
         input_uids=[
             _SCORE_MOD_UID_Q,
             _SCORE_MOD_UID_K,
@@ -599,13 +618,17 @@ def _fused_attn_score_mod_fwd(
     score_mod_avals = tuple(_shape_dtype(arg) for arg in score_mod_tensors)
     key = _graph_cache_key("fwd", config, (q_aval, k_aval, v_aval, *score_mod_avals))
     if key is None:
+        record_cache_lookup(("f16", "fwd"), hit=False, key="uncacheable score_mod")
         graph = _build_score_mod_fwd_graph(q_aval, k_aval, v_aval, score_mod_avals, config)
     else:
-        if key not in _score_mod_graph_cache:
+        graph = _score_mod_graph_cache.get(key)
+        record_cache_lookup(("f16", "fwd"), hit=graph is not None, key=key)
+        if graph is None:
             _score_mod_graph_cache[key] = _build_score_mod_fwd_graph(
                 q_aval, k_aval, v_aval, score_mod_avals, config
             )
-        graph = _score_mod_graph_cache[key]
+            record_cache_event(("f16", "fwd"), "cache_graph")
+            graph = _score_mod_graph_cache[key]
 
     batch, q_seqlen, q_heads, _ = q.shape
     _, _, _, v_head_dim = v.shape
@@ -645,6 +668,7 @@ def _fused_attn_score_mod_bwd(
     avals = tuple(_shape_dtype(arg) for arg in all_inputs)
     key = _graph_cache_key("bwd", config, avals)
     if key is None:
+        record_cache_lookup(("f16", "bwd"), hit=False, key="uncacheable score_mod")
         graph = _build_score_mod_bwd_graph(
             *avals[:6],
             avals[6 : 6 + len(score_mod_tensors)],
@@ -652,14 +676,17 @@ def _fused_attn_score_mod_bwd(
             config,
         )
     else:
-        if key not in _score_mod_graph_cache:
+        graph = _score_mod_graph_cache.get(key)
+        record_cache_lookup(("f16", "bwd"), hit=graph is not None, key=key)
+        if graph is None:
             _score_mod_graph_cache[key] = _build_score_mod_bwd_graph(
                 *avals[:6],
                 avals[6 : 6 + len(score_mod_tensors)],
                 avals[6 + len(score_mod_tensors) :],
                 config,
             )
-        graph = _score_mod_graph_cache[key]
+            record_cache_event(("f16", "bwd"), "cache_graph")
+            graph = _score_mod_graph_cache[key]
 
     dq = jax.ShapeDtypeStruct(q.shape, q.dtype)
     dk = jax.ShapeDtypeStruct(k.shape, k.dtype)

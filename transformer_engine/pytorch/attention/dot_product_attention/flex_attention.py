@@ -9,6 +9,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 import torch
 
+from transformer_engine.common.attention.cache_debug import record_event, record_lookup
 from transformer_engine.common.attention.score_mod import (
     UNCACHEABLE_SCORE_MOD,
     score_mod_callback_cache_key,
@@ -164,9 +165,9 @@ class _CudnnScoreModBwdGraphEntry:
     workspace_size: int
 
 
-def _finalize_cudnn_graph(graph) -> int:
+def _finalize_cudnn_graph(graph, cache_site: Tuple[str, str]) -> int:
     """Compatibility wrapper around shared graph finalization."""
-    return finalize_graph(graph)
+    return finalize_graph(graph, cache_site=cache_site)
 
 
 def _execute_cudnn_graph(
@@ -174,6 +175,7 @@ def _execute_cudnn_graph(
     variant_pack: Dict[Any, torch.Tensor],
     workspace_size: int,
     device: torch.device,
+    cache_site: Tuple[str, str],
 ):
     """Execute a built cuDNN frontend Python graph."""
     cudnn = _import_cudnn_frontend()
@@ -185,6 +187,7 @@ def _execute_cudnn_graph(
         device=device,
         dtype=torch.uint8,
     )
+    record_event(*cache_site, "execute", device=_score_mod_device_key(device)[1])
     graph.execute(
         variant_pack,
         workspace,
@@ -314,7 +317,7 @@ def _build_cudnn_score_mod_fwd_graph(
     else:
         stats_tensor = None
 
-    workspace_size = _finalize_cudnn_graph(graph)
+    workspace_size = _finalize_cudnn_graph(graph, ("f16", "fwd"))
     return _CudnnScoreModFwdGraphEntry(
         graph=graph,
         q=q,
@@ -356,11 +359,14 @@ def _get_cudnn_score_mod_fwd_graph(
     )
     key = _cudnn_score_mod_fwd_cache_key(*build_args)
     if key is None:
+        record_lookup("f16", "fwd", hit=False, key="uncacheable score_mod")
         return _build_cudnn_score_mod_fwd_graph(*build_args)
     entry = _cudnn_score_mod_graph_cache.get(key)
+    record_lookup("f16", "fwd", hit=entry is not None, key=key)
     if entry is None:
         entry = _build_cudnn_score_mod_fwd_graph(*build_args)
         _cudnn_score_mod_graph_cache[key] = entry
+        record_event("f16", "fwd", "cache_graph")
     return entry
 
 
@@ -422,7 +428,7 @@ def _build_cudnn_score_mod_bwd_graph(
     dk.set_output(True).set_dim(dk_dim).set_stride(dk_stride)
     dv.set_output(True).set_dim(dv_dim).set_stride(dv_stride)
 
-    workspace_size = _finalize_cudnn_graph(graph)
+    workspace_size = _finalize_cudnn_graph(graph, ("f16", "bwd"))
     return _CudnnScoreModBwdGraphEntry(
         graph=graph,
         q=q,
@@ -475,11 +481,14 @@ def _get_cudnn_score_mod_bwd_graph(
     )
     key = _cudnn_score_mod_bwd_cache_key(*build_args)
     if key is None:
+        record_lookup("f16", "bwd", hit=False, key="uncacheable score_mod")
         return _build_cudnn_score_mod_bwd_graph(*build_args)
     entry = _cudnn_score_mod_graph_cache.get(key)
+    record_lookup("f16", "bwd", hit=entry is not None, key=key)
     if entry is None:
         entry = _build_cudnn_score_mod_bwd_graph(*build_args)
         _cudnn_score_mod_graph_cache[key] = entry
+        record_event("f16", "bwd", "cache_graph")
     return entry
 
 
@@ -546,6 +555,7 @@ class FusedAttentionWithScoreModFunc(torch.autograd.Function):
             variant_pack,
             entry.workspace_size,
             query_layer.device,
+            ("f16", "fwd"),
         )
 
         ctx.is_training = is_training
@@ -633,6 +643,7 @@ class FusedAttentionWithScoreModFunc(torch.autograd.Function):
             variant_pack,
             entry.workspace_size,
             query_layer.device,
+            ("f16", "bwd"),
         )
 
         return (

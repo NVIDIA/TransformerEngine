@@ -747,7 +747,11 @@ def _build_f16_fwd_graph(
         stats_t.set_ragged_offset(offset_stats).set_ragged_offset_multiplier(stats_mult)
     tensors["Stats"] = stats_t
 
-    return GraphEntry(graph=graph, tensors=tensors, workspace_size=finalize_graph(graph))
+    return GraphEntry(
+        graph=graph,
+        tensors=tensors,
+        workspace_size=finalize_graph(graph, cache_site=("f16", "fwd")),
+    )
 
 
 def _f16_forward(
@@ -1262,7 +1266,11 @@ def _build_fp8_fwd_graph(
         (batch, heads, max_seqlen_q, 1)
     ).set_stride((heads * max_seqlen_q, max_seqlen_q, 1, 1))
     tensors.update(O=output_t, Stats=stats_t)
-    return GraphEntry(graph=graph, tensors=tensors, workspace_size=finalize_graph(graph))
+    return GraphEntry(
+        graph=graph,
+        tensors=tensors,
+        workspace_size=finalize_graph(graph, cache_site=("fp8", "fwd")),
+    )
 
 
 def _fp8_forward(
@@ -1837,7 +1845,11 @@ def _build_f16_bwd_graph(
         dv_t.set_ragged_offset(offset_v).set_ragged_offset_multiplier(1)
     tensors.update(dQ=dq_t, dK=dk_t, dV=dv_t)
 
-    return GraphEntry(graph=graph, tensors=tensors, workspace_size=finalize_graph(graph))
+    return GraphEntry(
+        graph=graph,
+        tensors=tensors,
+        workspace_size=finalize_graph(graph, cache_site=("f16", "bwd")),
+    )
 
 
 def _build_fp8_bwd_graph(
@@ -2199,7 +2211,11 @@ def _build_fp8_bwd_graph(
         _format_stride(batch, kv_heads, max_seqlen_kv, d_value, dkv_format)
     )
     tensors.update(dQ=dq_t, dK=dk_t, dV=dv_t)
-    return GraphEntry(graph=graph, tensors=tensors, workspace_size=finalize_graph(graph))
+    return GraphEntry(
+        graph=graph,
+        tensors=tensors,
+        workspace_size=finalize_graph(graph, cache_site=("fp8", "bwd")),
+    )
 
 
 def _fp8_backward(
