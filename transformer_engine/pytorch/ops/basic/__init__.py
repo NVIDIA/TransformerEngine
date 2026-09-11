@@ -14,6 +14,7 @@ from .activation import (
     ReGLU,
     SReLU,
     ScaledSReLU,
+    ScaledTanhSReLU,
     SReGLU,
     SiLU,
 )

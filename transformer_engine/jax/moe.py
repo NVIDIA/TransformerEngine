@@ -132,7 +132,7 @@ def _with_sharding_constraint_cast_bwd(x: jnp.ndarray, sharding) -> jnp.ndarray:
         ``d_logits_2d`` is produced by
         ``fused_topk_with_score_function_bwd``. That primitive runs at
         fp32 because the fwd promoted ``logits_2d`` to fp32 (the fused
-        topk/softmax/sigmoid kernels are only validated at fp32).
+        topk/softmax/sigmoid/sqrtsoftplus kernels are only validated at fp32).
 
     JAX's type promotion then makes ``d_x_from_gate + d_x_from_dispatch``
     fp32, so the user-visible ``d_x`` ends up wider than ``x``. That
@@ -1249,7 +1249,7 @@ def moe(
     ----------
     expert_bias : Optional[jnp.ndarray]
         ``[num_experts]`` learnable router bias added before the top-k
-        when ``score_function='sigmoid'``. Pass ``None`` to disable.
+        when ``score_function='sigmoid'`` or ``'sqrtsoftplus'``. Pass ``None`` to disable.
         The bias has no gradient through the top-k primitive itself (it
         only steers expert selection); a zero cotangent is returned for
         it.
