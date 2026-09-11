@@ -172,9 +172,7 @@ def _update_grouped_scale_buffers(
     weight_scale_updates = {}
     for index, tensor in enumerate(weight_tensors):
         quantizer = _resolve_calibration_quantizer(tensor, weight_quantizers[index])
-        weight_scale_updates.update(
-            _get_scale_buffer_info(f"weight_gemm{index}", quantizer)
-        )
+        weight_scale_updates.update(_get_scale_buffer_info(f"weight_gemm{index}", quantizer))
     scale_buffers.update(activation_scale_updates)
     scale_buffers.update(weight_scale_updates)
 
