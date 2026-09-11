@@ -1261,7 +1261,8 @@ def register_custom_op(
     arg_type is a dataclass defining the input schema. Results may be nested
     tuples/lists of fresh tensors or None; fake_impl mirrors them with TensorSpec.
     The returned callable takes an args instance and preserves the result structure.
-    Returns None if registration fails, so callers can fall back to eager.
+    Returns None for unsupported registration APIs so callers can fall back to eager.
+    Duplicate operator names raise ValueError.
     """
 
     def pack_result(result):
@@ -1351,9 +1352,9 @@ def register_custom_op_with_autograd(
     ``bwd_arg_type``.
 
     Registration touches experimental ``torch.library`` / opaque-object APIs
-    that may be missing on older PyTorch. If it fails, this warns once and
-    returns ``None`` instead of raising, so callers can fall back to eager under
-    ``torch.compile`` (a graph break) rather than breaking import.
+    that may be missing on older PyTorch. Unavailable or incompatible APIs cause
+    a warning and return ``None``, allowing eager execution under ``torch.compile``
+    (a graph break). Duplicate operator names raise ``ValueError``.
     """
     try:
         return _register_custom_op_with_autograd_impl(
