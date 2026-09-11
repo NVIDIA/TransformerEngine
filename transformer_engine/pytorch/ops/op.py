@@ -98,7 +98,10 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
                 for index in range(op.num_quantizers(mode)):
                     quantizer = op.get_quantizer(mode, index)
                     if quantizer is not None and not is_value_opaque_quantizer(quantizer):
-                        return f"{type(quantizer).__name__} (not a torch.compile value-opaque quantizer)"
+                        return (
+                            f"{type(quantizer).__name__} (not a torch.compile value-opaque"
+                            " quantizer)"
+                        )
         return None
 
     @property
