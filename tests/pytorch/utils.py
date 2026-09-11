@@ -27,7 +27,6 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     AttentionLogging,
     check_set_window_size,
 )
-from transformer_engine.pytorch.cpp_extensions.fused_attn import FusedAttnBackend
 from transformer_engine.pytorch.module.base import get_dummy_wgrad
 
 
@@ -374,11 +373,6 @@ def get_available_attention_backends(
         if core_attention_bias_shape != "111s":
             core_attention_bias_requires_grad = True
 
-    fused_attn_backends = []
-    available_backends = None
-    flash_attention_backend = None
-    fused_attention_backend = None
-
     def test():
         attention_params = AttentionParams(
             qkv_dtype=qkv_dtype,
@@ -436,16 +430,13 @@ def get_available_attention_backends(
         _attention_backends["backend_selection_requires_update"] = False
         return available_backends, flash_attention_backend, fused_attention_backend
 
-    backends = {1: "F16_arbitrary_seqlen", 2: "FP8"}
     if AttentionLogging._is_logging_setup is False:
         AttentionLogging.setup_logging()
 
-    for i in backends:
-        os.environ["NVTE_FUSED_ATTN_BACKEND"] = str(i)
-        _attention_backends["backend_selection_requires_update"] = True
-        available_backends, flash_attention_backend, fused_attention_backend = test()
-        if fused_attention_backend == FusedAttnBackend[backends[i]]:
-            fused_attn_backends.append(fused_attention_backend)
+    available_backends, flash_attention_backend, fused_attention_backend = test()
+    fused_attn_backends = []
+    if fused_attention_backend is not None:
+        fused_attn_backends.append(fused_attention_backend)
     return available_backends, flash_attention_backend, fused_attn_backends
 
 
