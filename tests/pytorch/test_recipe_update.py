@@ -15,6 +15,7 @@ from transformer_engine.common.recipe import (
     Float8CurrentScaling,
     MXFP8BlockScaling,
     NVFP4BlockScaling,
+    QParams,
 )
 from transformer_engine.pytorch import (
     DotProductAttention,
@@ -32,7 +33,10 @@ from transformer_engine.pytorch import (
     is_nvfp4_available,
     quantized_model_init,
 )
-from transformer_engine.pytorch.custom_recipes.quantizer_factories import current_scaling_factory
+from transformer_engine.pytorch.custom_recipes.quantizer_factories import (
+    current_scaling_factory,
+    delayed_scaling_factory,
+)
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.quantization import (
     DelayedScalingRequest,
@@ -1793,7 +1797,8 @@ def test_apply_recipe_rejects_e2e_mha_reproducer_during_planning():
     old_global_state = _global_recipe_state()
 
     try:
-        with pytest.raises(RuntimeError, match="O quantizer is NVFP4Quantizer"):
+        # The owner raises TypeError; apply_recipe annotates but does not rewrite it.
+        with pytest.raises(TypeError, match="O quantizer is NVFP4Quantizer"):
             apply_recipe(module, recipe)
 
         assert _global_recipe_state() == old_global_state
@@ -2451,11 +2456,14 @@ def test_apply_recipe_planning_failure_is_model_wide_atomic(failure_index):
             qfactory=failing_factory,
             qfactory_key=("apply-failure", 2, failure_index),
         )
-        with pytest.raises(
-            RuntimeError,
-            match=rf"planning module '{failure_index}': model-wide factory failure",
-        ):
+        with pytest.raises(RuntimeError, match="model-wide factory failure") as failure:
             apply_recipe(model, replacement_recipe)
+        # The owner's own exception type survives; the module is named in a note.
+        assert type(failure.value) is RuntimeError
+        assert any(
+            f"while planning module '{failure_index}'" in note
+            for note in getattr(failure.value, "__notes__", ())
+        )
 
         assert _global_recipe_state() == old_global_state
         for module, expected_views, workspace in zip(modules, old_views, workspaces):
@@ -2500,15 +2508,23 @@ def test_apply_recipe_deduplicates_shared_runtime_owner():
         FP8GlobalStateManager.reset()
 
 
-def test_apply_recipe_rejects_fusible_owner_before_factory():
-    """Excluded fusible owners are discovered before any participant planning."""
+def test_apply_recipe_rejects_fusible_owner_without_committing_anything():
+    """A fusible owner rejects the model, and nothing is committed on the way there.
+
+    Owners are planned as they are discovered, so a participant ahead of the
+    fusible owner may have its factory invoked. Planning publishes no state, so
+    the documented guarantee -- no module and no global recipe changes -- holds.
+    """
     FP8GlobalStateManager.reset()
 
-    def unexpected_factory(_role):
-        raise AssertionError("excluded model invoked qfactory")
+    calls = []
+
+    def counting_factory(role):
+        calls.append(role)
+        return IdentityQuantizer()
 
     recipe = CustomRecipe(
-        qfactory=unexpected_factory,
+        qfactory=counting_factory,
         qfactory_key=("apply-fusible", 1),
     )
     model = torch.nn.ModuleList(
@@ -2528,6 +2544,41 @@ def test_apply_recipe_rejects_fusible_owner_before_factory():
         FP8GlobalStateManager.reset()
 
 
+def test_apply_recipe_skips_zero_quantizer_fusible_owner():
+    """An operation that builds no quantizers is inert, not an excluded owner."""
+    FP8GlobalStateManager.reset()
+
+    calls = []
+
+    def counting_factory(role):
+        calls.append(role)
+        return IdentityQuantizer()
+
+    recipe = CustomRecipe(
+        qfactory=counting_factory,
+        qfactory_key=("apply-zero-quantizer", 1),
+    )
+    model = torch.nn.ModuleList(
+        [
+            Linear(16, 16, bias=False, device="cuda", name="linear"),
+            te_ops.LayerNorm(16, device="cuda"),
+        ]
+    )
+    try:
+        apply_recipe(model, recipe)
+        assert model[0]._quantization_runtime is not None
+        assert FP8GlobalStateManager.quantization_state.fp8_recipe is recipe
+
+        # A fusible owner that does build quantizers still rejects.
+        with pytest.raises(RuntimeError, match="does not support fusible operations"):
+            apply_recipe(
+                torch.nn.ModuleList([te_ops.Quantize()]),
+                CustomRecipe(qfactory=counting_factory, qfactory_key=("apply-zero-q", 2)),
+            )
+    finally:
+        FP8GlobalStateManager.reset()
+
+
 def test_apply_recipe_rejects_legacy_dpa_path():
     """Model-wide application does not alter the built-in NVTE_DPA_* mechanism."""
     available, reason = is_fp8_available(return_reason=True)
@@ -2541,12 +2592,130 @@ def test_apply_recipe_rejects_legacy_dpa_path():
         attention_dropout=0.0,
         name="dpa",
     ).cuda()
+    linear = Linear(16, 16, bias=False, device="cuda", name="linear")
+    model = torch.nn.ModuleList([linear, dpa])
     old_global_state = _global_recipe_state()
     try:
-        with pytest.raises(RuntimeError, match="only through CustomRecipe"):
-            apply_recipe(dpa, Float8CurrentScaling())
+        # Quantization-inert for attention: the DPA is skipped, not rejected, so a
+        # stock TransformerLayer-shaped model can still be updated model-wide.
+        inert = Float8CurrentScaling()
+        apply_recipe(model, inert)
+        assert linear._quantization_runtime is not None
         assert dpa._quantization_runtime is None
+        assert FP8GlobalStateManager.quantization_state.fp8_recipe is inert
+
+        # Asking the built-in path to quantize attention is still rejected.
+        for attention_recipe in (
+            Float8CurrentScaling(fp8_dpa=True),
+            Float8CurrentScaling(fp8_dpa=True, fp8_mha=True),
+        ):
+            with pytest.raises(RuntimeError, match="only through CustomRecipe"):
+                apply_recipe(model, attention_recipe)
+            assert dpa._quantization_runtime is None
+
+        # A bare inert DPA has nothing to update at all.
+        with pytest.raises(ValueError, match="found no Transformer Engine runtime owners"):
+            apply_recipe(dpa, Float8CurrentScaling())
+    finally:
+        FP8GlobalStateManager.reset()
+
+
+def test_apply_recipe_dispatches_on_the_owner_protocol_not_concrete_classes():
+    """Any owner implementing the private plan/apply pair participates."""
+    FP8GlobalStateManager.reset()
+
+    class _StubOwner(torch.nn.Module):
+        """A non-TE owner that plugs into te.apply_recipe()."""
+
+        def __init__(self):
+            super().__init__()
+            self.planned = None
+            self.applied = None
+
+        def _plan_recipe_update(self, recipe, *, diagnostic_name):
+            self.planned = (recipe, diagnostic_name)
+            return "stub-update"
+
+        def _apply_recipe_update(self, update):
+            # Record the call itself, so a skipped owner is distinguishable from
+            # one committed with a None update.
+            self.applied = ("applied", update)
+
+    class _InertOwner(_StubOwner):
+        def _plan_recipe_update(self, recipe, *, diagnostic_name):
+            super()._plan_recipe_update(recipe, diagnostic_name=diagnostic_name)
+            return None
+
+    stub, inert = _StubOwner(), _InertOwner()
+    model = torch.nn.ModuleList([stub, inert])
+    recipe = _make_counting_recipe(("apply-duck-typing", 1), [])
+    try:
+        apply_recipe(model, recipe)
+        assert stub.planned == (recipe, "0")
+        assert stub.applied == ("applied", "stub-update")
+        assert inert.planned == (recipe, "1")
+        assert inert.applied is None
+        assert FP8GlobalStateManager.quantization_state.fp8_recipe is recipe
+    finally:
+        FP8GlobalStateManager.reset()
+
+
+def test_apply_recipe_rejects_custom_delayed_dpa_crossing_before_commit():
+    """A delayed custom DPA runtime cannot be handed to the built-in path."""
+    available, reason = is_fp8_available(return_reason=True)
+    if not available:
+        pytest.skip(reason)
+
+    FP8GlobalStateManager.reset()
+    dpa = DotProductAttention(
+        num_attention_heads=2,
+        kv_channels=16,
+        attention_dropout=0.0,
+        name="dpa",
+    ).cuda()
+    linear = Linear(16, 16, bias=False, device="cuda", name="linear")
+    model = torch.nn.ModuleList([linear, dpa])
+    try:
+        with autocast(
+            enabled=True,
+            recipe=CustomRecipe(
+                qfactory=delayed_scaling_factory,
+                qfactory_key=("apply-crossing-warm", 1),
+                fp8_dpa=True,
+            ),
+        ):
+            dpa.get_qkv_quantization_capabilities()
+        runtime = dpa._quantization_runtime
+        assert runtime is not None
+
+        if not TransformerEngineBaseModule._runtime_has_delayed_scaling(runtime):
+            pytest.skip("this factory produced no delayed DPA state")
+
+        old_global_state = _global_recipe_state()
+        with pytest.raises(RuntimeError, match="frozen after initialization"):
+            apply_recipe(model, Float8CurrentScaling())
+        assert dpa._quantization_runtime is runtime
         assert _global_recipe_state() == old_global_state
+    finally:
+        FP8GlobalStateManager.reset()
+
+
+def test_zero_quantizer_norm_survives_same_class_change_on_lazy_path():
+    """te.ops norms build no quantizers, so a same-class change cannot invalidate them."""
+    available, reason = is_fp8_available(return_reason=True)
+    if not available:
+        pytest.skip(reason)
+
+    FP8GlobalStateManager.reset()
+    model = te_ops.Sequential(te_ops.RMSNorm(16, device="cuda"))
+    inp = torch.randn(16, 16, device="cuda", dtype=torch.bfloat16)
+    try:
+        first = Float8CurrentScaling()
+        second = Float8CurrentScaling()
+        second.fp8_quant_fwd_inp = QParams(power_2_scale=True)
+        for active in (first, second, first):
+            with torch.no_grad(), autocast(enabled=True, recipe=active):
+                model(inp)
     finally:
         FP8GlobalStateManager.reset()
 

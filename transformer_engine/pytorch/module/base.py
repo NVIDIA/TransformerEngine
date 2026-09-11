@@ -1463,6 +1463,29 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             role_revision=role_revision,
         )
 
+    def _plan_recipe_update(
+        self,
+        recipe: Recipe,
+        *,
+        diagnostic_name: str,
+    ) -> Optional[object]:
+        """Plan a model-wide recipe update for this owner, or ``None`` to skip it.
+
+        One half of the private owner protocol :func:`te.apply_recipe` dispatches
+        on, so it never needs to import concrete owner classes. An owner outside
+        this hierarchy participates by implementing this and
+        :meth:`_apply_recipe_update`.
+        """
+        del diagnostic_name
+        return self._plan_quantization_update(
+            recipe=recipe,
+            num_gemms=self._get_quantization_runtime_num_gemms(),
+        )
+
+    def _apply_recipe_update(self, update: object) -> None:
+        """Commit a plan produced by :meth:`_plan_recipe_update`."""
+        self._apply_quantization_update(update)
+
     def _apply_quantization_update(
         self,
         update: _QuantizationUpdate,

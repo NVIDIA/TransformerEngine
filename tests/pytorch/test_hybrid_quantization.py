@@ -283,7 +283,6 @@ class TestDPARuntimeRecipeUpdate:
             pytest.skip(f"MXFP8: {reason_for_no_mxfp8}")
 
         for builtin in (
-            recipe.MXFP8BlockScaling(fp8_dpa=True),  # stateless
             recipe.Float8CurrentScaling(fp8_dpa=True),  # delayed S/dP half
             recipe.DelayedScaling(fp8_dpa=True),
         ):
@@ -320,6 +319,29 @@ class TestDPARuntimeRecipeUpdate:
             assert not calls
             assert dpa._quantization_runtime is None
             assert dpa.fp8_meta["scaling_fwd"] is old_state
+
+    def test_stateless_builtin_dpa_accepts_a_custom_recipe(self):
+        """D5/H2: an inert or stateless built-in DPA must still accept a recipe."""
+        if not mxfp8_available:
+            pytest.skip(f"MXFP8: {reason_for_no_mxfp8}")
+
+        for builtin in (
+            recipe.Float8CurrentScaling(),  # quantization-inert DPA (fp8_dpa=False)
+            recipe.MXFP8BlockScaling(fp8_dpa=True),  # stateless attention quantizers
+        ):
+            dpa = self._make_dpa()
+            with autocast(enabled=True, recipe=builtin):
+                dpa.init_fp8_metadata(num_gemms=3)
+            assert dpa._quantization_runtime is None
+
+            custom = recipe.CustomRecipe(
+                qfactory=mxfp8_factory,
+                qfactory_key=("dpa-stateless-migration", 1),
+                fp8_dpa=True,
+            )
+            with autocast(enabled=True, recipe=custom):
+                dpa.get_qkv_quantization_capabilities()
+            assert dpa._quantization_runtime is not None
 
     def test_builtin_dpa_recipe_change_is_rejected(self):
         """Any built-in recipe change is rejected instead of silently ignored."""
@@ -598,8 +620,9 @@ class TestDPARuntimeRecipeUpdate:
             fp8_dpa=True,
         )
 
+        # apply_recipe annotates the owner's exception; it does not rewrite its type.
         with pytest.raises(
-            RuntimeError,
+            TypeError,
             match="Float8CurrentScaling DPA requires delayed scaling for S and dP",
         ):
             te.apply_recipe(dpa, invalid_recipe)

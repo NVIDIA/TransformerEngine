@@ -33,6 +33,7 @@ from transformer_engine.pytorch.quantization import (
     Float8BlockScalingRecipeState,
     _QuantizationRuntime,
     _QuantizationRuntimeKey,
+    _is_delayed_scaling_state,
 )
 from transformer_engine.pytorch.tensor.storage.float8_tensor_storage import Float8TensorStorage
 from transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
@@ -1375,6 +1376,29 @@ class DotProductAttention(TransformerEngineBaseModule):
             fp8_group,
         )
 
+    def _plan_recipe_update(
+        self,
+        recipe: Recipe,
+        *,
+        diagnostic_name: str,
+    ) -> Optional[object]:
+        """Leave the built-in path on its lazy route; plan only CustomRecipe here."""
+        if not recipe.custom():
+            if recipe.fp8_dpa or recipe.fp8_mha:
+                raise RuntimeError(
+                    "te.apply_recipe() supports DotProductAttention only through CustomRecipe; "
+                    "the built-in NVTE_DPA_* path remains lazy and unchanged for "
+                    f"{diagnostic_name!r}."
+                )
+            runtime = getattr(self, "_quantization_runtime", None)
+            if runtime is not None and self._runtime_has_delayed_scaling(runtime):
+                # Committing would hand this module to the built-in path while it
+                # owns delayed state registered for reduction.
+                self._reject_builtin_dpa_update()
+            # Quantization-inert for attention: nothing here to update.
+            return None
+        return super()._plan_recipe_update(recipe, diagnostic_name=diagnostic_name)
+
     def _check_quantization_update_supported(
         self,
         *,
@@ -1382,12 +1406,18 @@ class DotProductAttention(TransformerEngineBaseModule):
         requested_key: _QuantizationRuntimeKey,
         num_gemms: int,
     ) -> None:
-        """Also reject a CustomRecipe update onto an initialized built-in DPA."""
-        if getattr(self, "_quantization_runtime", None) is None and self.fp8_initialized:
-            # The built-in path owns this module's state, and its delayed half is
-            # registered in the global reduction buckets. Running before super()
-            # means both the lazy forward and apply_recipe planning reject here,
-            # before any candidate is built.
+        """Also reject a CustomRecipe update onto built-in delayed state."""
+        if getattr(self, "_quantization_runtime", None) is None and any(
+            _is_delayed_scaling_state(self.fp8_meta.get(key))
+            for key in ("scaling_fwd", "scaling_bwd")
+        ):
+            # The built-in path registered this delayed state in the global
+            # reduction buckets, so a CustomRecipe runtime must not retarget it.
+            # Stateless built-in state is rebuilt instead, which is what the lazy
+            # path does for every other module and what D5/H2 needs: an inert
+            # built-in DPA inside a TransformerLayer must still accept a recipe.
+            # Running before super() means both the lazy forward and apply_recipe
+            # planning reject here, before any candidate is built.
             self._reject_builtin_dpa_update()
         super()._check_quantization_update_supported(
             recipe=recipe,

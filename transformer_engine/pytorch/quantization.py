@@ -1005,66 +1005,35 @@ def apply_recipe(model: torch.nn.Module, recipe: Recipe) -> None:
     check_recipe_support(recipe)
     recipe.quantizer_config()
 
-    # Import locally to keep quantization.py independent from module/base.py
-    # during package initialization.
-    from .attention.dot_product_attention.dot_product_attention import DotProductAttention
-    from .module.base import TransformerEngineBaseModule
-    from .ops.op import FusibleOperation
-
-    participants = []
-    fusible_owners = []
-    legacy_dpa_owners = []
-    seen = set()
+    # Dispatch on a private owner protocol rather than concrete classes, so this
+    # function needs no imports from the module/attention/ops packages and any
+    # owner implementing the pair can participate.
+    plans = []
     for fqn, module in model.named_modules():
-        module_id = id(module)
-        if module_id in seen:
+        planner = getattr(module, "_plan_recipe_update", None)
+        if planner is None:
             continue
-        seen.add(module_id)
         diagnostic_name = fqn or "<root>"
-        if isinstance(module, FusibleOperation):
-            fusible_owners.append(diagnostic_name)
-        if isinstance(module, DotProductAttention) and not recipe.custom():
-            legacy_dpa_owners.append(diagnostic_name)
-        if isinstance(module, TransformerEngineBaseModule):
-            participants.append((diagnostic_name, module))
-
-    # Reject excluded owners after one complete discovery pass and before any
-    # qfactory invocation or candidate construction.
-    if fusible_owners:
-        owners = ", ".join(repr(name) for name in fusible_owners)
-        raise RuntimeError(
-            "te.apply_recipe() does not support fusible operations yet; "
-            f"recreate or update these owners separately: {owners}."
-        )
-    if legacy_dpa_owners:
-        owners = ", ".join(repr(name) for name in legacy_dpa_owners)
-        raise RuntimeError(
-            "te.apply_recipe() supports DotProductAttention only through CustomRecipe; "
-            f"the built-in NVTE_DPA_* path remains lazy and unchanged for: {owners}."
-        )
-    if not participants:
-        raise ValueError("te.apply_recipe() found no Transformer Engine runtime owners in model.")
-
-    updates = []
-    for fqn, module in participants:
         try:
-            # pylint: disable-next=protected-access
-            num_gemms = module._get_quantization_runtime_num_gemms()
-            update = module._plan_quantization_update(  # pylint: disable=protected-access
-                recipe=recipe,
-                num_gemms=num_gemms,
-            )
+            update = planner(recipe, diagnostic_name=diagnostic_name)
         except Exception as exc:
-            raise RuntimeError(
-                f"te.apply_recipe() failed while planning module {fqn!r}: {exc}"
-            ) from exc
-        updates.append((module, update))
+            # Preserve the owner's exception type; only annotate it.
+            if hasattr(exc, "add_note"):  # Python 3.11+
+                exc.add_note(f"te.apply_recipe(): while planning module {diagnostic_name!r}")
+            raise
+        if update is None:
+            # The owner has nothing this recipe would change.
+            continue
+        plans.append((module, update))
+
+    if not plans:
+        raise ValueError("te.apply_recipe() found no Transformer Engine runtime owners in model.")
 
     # Applying an update only publishes state that was fully constructed and
     # validated above. Publish the manager state last so planning failures
     # cannot expose a requested recipe globally.
-    for module, update in updates:
-        module._apply_quantization_update(update)  # pylint: disable=protected-access
+    for module, update in plans:
+        module._apply_recipe_update(update)  # pylint: disable=protected-access
     FP8GlobalStateManager.quantization_state.fp8_recipe = recipe
 
 

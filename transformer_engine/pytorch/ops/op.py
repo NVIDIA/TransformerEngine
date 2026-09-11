@@ -113,6 +113,19 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
     def is_fused_op(self) -> bool:
         """Whether this op is the fusion of one or more basic ops"""
 
+    def _plan_recipe_update(
+        self,
+        recipe: Recipe,
+        *,
+        diagnostic_name: str,
+    ) -> Optional[object]:
+        """Reject a model-wide recipe update: fusible ops are recreated, not updated."""
+        del recipe
+        raise RuntimeError(
+            "te.apply_recipe() does not support fusible operations yet; "
+            f"recreate or update this owner separately: {diagnostic_name!r}."
+        )
+
     def pre_first_fuser_forward(self) -> None:
         """Preprocessing before first fuser forward pass"""
 
@@ -234,6 +247,25 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
     num_extra_inputs: int = 0
     # Number of extra tensor outputs
     num_extra_outputs: int = 0
+
+    def _builds_quantizers(self) -> bool:
+        """Whether this operation constructs any quantizers.
+
+        An operation that builds none (e.g. ``te.ops.LayerNorm`` / ``RMSNorm``,
+        Megatron's ``TENorm``) holds no state a recipe change could invalidate.
+        """
+        return bool(self.num_quantizers("forward") or self.num_quantizers("backward"))
+
+    def _plan_recipe_update(
+        self,
+        recipe: Recipe,
+        *,
+        diagnostic_name: str,
+    ) -> Optional[object]:
+        """Skip an operation that builds no quantizers; it holds nothing to update."""
+        if not self._builds_quantizers():
+            return None
+        return super()._plan_recipe_update(recipe, diagnostic_name=diagnostic_name)
 
     def __init__(self) -> None:
         super().__init__()
@@ -387,6 +419,8 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             self._recipe_type is recipe_type
             and self._recipe_config is not None
             and self._recipe_config != recipe_config
+            # Interim form; WP8 moves this into the transition check.
+            and self._builds_quantizers()
             and not _is_preserved_fusible_recipe_transition(
                 recipe,
                 self._recipe_config,

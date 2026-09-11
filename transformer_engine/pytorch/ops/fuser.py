@@ -648,6 +648,10 @@ class OperationFuser:
         if (
             recipe_type is self.recipe_type
             and self.recipe_config != recipe_config
+            # A pipeline whose ops build no quantizers holds nothing a recipe change
+            # could invalidate. Evaluated only on the rare mismatch path. Interim
+            # form; WP8 folds it into the transition check with the op-level guard.
+            and any(op._builds_quantizers() for op in self._basic_ops)
             and not _is_preserved_fusible_recipe_transition(
                 recipe,
                 self.recipe_config,
