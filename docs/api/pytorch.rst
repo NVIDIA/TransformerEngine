@@ -230,6 +230,8 @@ Operation fuser
 
 .. autoapiclass:: transformer_engine.pytorch.ops.L2Normalization
 
+.. autoapiclass:: transformer_engine.pytorch.ops.AdaptiveLayerNorm
+
 .. autoapiclass:: transformer_engine.pytorch.ops.LayerNorm
 
 .. autoapiclass:: transformer_engine.pytorch.ops.MakeExtraOutput

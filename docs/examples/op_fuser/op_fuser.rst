@@ -81,6 +81,51 @@ Thus, using the operation fuser simply involves constructing
    Operations that match ``LayerNormMLP`` module. Note that different
    fusions have been applied in the forward and backward passes.
 
+Adaptive normalization for diffusion transformers
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``AdaptiveLayerNorm`` applies normalization followed by a per-sample
+timestep-conditioned scale and shift. Unlike ``LayerNorm``, it has no
+learnable affine parameters: the caller supplies both conditions, and the
+backward pass returns their gradients. It can be composed with linear and
+activation operations to construct an adaptive LayerNorm MLP:
+
+.. code-block:: python
+
+    import torch
+    import transformer_engine.pytorch as te
+
+    batch, sequence, hidden, ffn = 2, 1024, 1536, 6144
+    mlp = te.ops.Sequential(
+        te.ops.AdaptiveLayerNorm(hidden, eps=1e-6),
+        te.ops.Linear(hidden, ffn, dtype=torch.bfloat16),
+        te.ops.GELU(),
+        te.ops.Linear(ffn, hidden, dtype=torch.bfloat16),
+    )
+    x = torch.randn(
+        batch, sequence, hidden, device="cuda",
+        dtype=torch.bfloat16, requires_grad=True,
+    )
+    # These tensors can also be outputs of a timestep embedding network.
+    scale = torch.randn(batch, 1, hidden, device="cuda", requires_grad=True)
+    shift = torch.randn_like(scale, requires_grad=True)
+    y = mlp(x, scale, shift)
+    y.float().square().mean().backward()
+
+For sequence-first input ``[S, B, H]``, set ``batch_dim=1`` and pass
+conditions with shape ``[1, B, H]`` or ``[B, H]``. Conditions are shared
+across the other dimensions and do not need to be expanded to the activation
+shape. Non-contiguous conditions, such as views returned by ``chunk``, are
+supported.
+
+Normalization and ``1 + scale`` modulation use float32 arithmetic, even when
+the input or conditions use bfloat16 or float16. The output has the input
+dtype. This avoids rounding small scales away by adding one in bfloat16.
+The normalization and modulation run in one Triton kernel; condition gradients
+use deterministic reductions with a bounded workspace. A subsequent linear
+operation retains the operation fuser's matching patterns, but this operation
+does not fuse normalization with GEMM or output quantization.
+
 Quantization
 ^^^^^^^^^^^^
 
