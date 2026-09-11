@@ -11,7 +11,6 @@ from dataclasses import dataclass
 import os
 from typing import Any, Optional
 
-from cudnn_frontend.benchmark.linear_attention.benchmark_single_linear_attention import grad_outputs
 import torch
 import transformer_engine_torch as tex
 
@@ -317,8 +316,6 @@ def _launch_grouped_wgrad_from_operands(
         wgrad_tensor=output_data,
         wgrad_dtype=output_data.dtype,
         acc_dtype=torch.float32,
-        mma_tiler_mn=(128, 128),
-        cluster_shape_mn=(1, 1),
         sf_vec_size=MXFP8_BLOCK_SCALING_SIZE,
         accumulate_on_output=accumulate,
         input_order="tensor2d",
