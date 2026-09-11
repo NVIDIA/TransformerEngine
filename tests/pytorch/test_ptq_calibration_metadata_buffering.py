@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from transformer_engine.common.recipe import Float8CurrentScaling
+from transformer_engine.common.recipe import DelayedScaling, Float8CurrentScaling
 from transformer_engine.pytorch import is_fp8_available, is_nvfp4_available
 from transformer_engine.pytorch.constants import DType
 from transformer_engine.pytorch.graph import make_graphed_callables
@@ -24,12 +24,14 @@ from transformer_engine.pytorch.quantization import (
     autocast,
     fp8_autocast,
 )
-from transformer_engine.pytorch.quantized_tensor import Quantizer
+from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage, Quantizer
 from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8CurrentScalingQuantizer,
     Float8Quantizer,
 )
+from transformer_engine.pytorch.tensor.hybrid_tensor import HybridQuantizer
+from transformer_engine.pytorch.tensor.identity_tensor import IdentityQuantizer
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
 from transformer_engine.pytorch.tensor.utils import get_quantization_recipe_name
@@ -42,6 +44,21 @@ fp8_available, reason_for_no_fp8 = is_fp8_available(return_reason=True)
 def reset_quantization_state():
     yield
     FP8GlobalStateManager.reset()
+
+
+def _make_test_quantizer(quantizer_cls):
+    """Construct a quantizer without allocating recipe-specific CUDA state."""
+    quantizer = object.__new__(quantizer_cls)
+    Quantizer.__init__(quantizer, rowwise=True, columnwise=False)
+    return quantizer
+
+
+def _make_test_quantized_storage(**metadata):
+    """Construct bare quantized storage carrying only the requested metadata."""
+    storage = QuantizedTensorStorage()
+    for name, value in metadata.items():
+        setattr(storage, name, value)
+    return storage
 
 
 def test_calibration_api_additions_preserve_existing_parameter_order():
@@ -101,7 +118,7 @@ def test_calibrating_argument_enables_default_calibration_config():
 
 
 def test_explicit_calibration_config_is_active_in_autocast():
-    config = QuantizationCalibrationConfig(activation_scale_decay=0.5)
+    config = QuantizationCalibrationConfig(transformer_engine_calibration_decay=0.5)
     with autocast(enabled=False, calibration_config=config):
         assert FP8GlobalStateManager.quantization_state.fp8_calibration
         assert FP8GlobalStateManager.get_calibration_config() is config
@@ -109,7 +126,7 @@ def test_explicit_calibration_config_is_active_in_autocast():
 
 
 def test_nested_autocast_restores_custom_calibration_config():
-    config = QuantizationCalibrationConfig(activation_scale_decay=0.5)
+    config = QuantizationCalibrationConfig(transformer_engine_calibration_decay=0.5)
     with autocast(enabled=False, calibration_config=config):
         with autocast(enabled=False):
             assert FP8GlobalStateManager.get_calibration_config() is None
@@ -137,7 +154,7 @@ def test_autocast_enter_preserves_calibrating_boolean_api():
 
 
 def test_calibrating_argument_accepts_explicit_calibration_config():
-    config = QuantizationCalibrationConfig(activation_scale_decay=0.5)
+    config = QuantizationCalibrationConfig(transformer_engine_calibration_decay=0.5)
     with autocast(
         enabled=False,
         calibrating=True,
@@ -147,8 +164,11 @@ def test_calibrating_argument_accepts_explicit_calibration_config():
 
 
 def test_calibration_config_rejects_negative_decay():
-    with pytest.raises(ValueError, match="activation_scale_decay must be non-negative"):
-        QuantizationCalibrationConfig(activation_scale_decay=-0.1)
+    with pytest.raises(
+        ValueError,
+        match="transformer_engine_calibration_decay must be non-negative",
+    ):
+        QuantizationCalibrationConfig(transformer_engine_calibration_decay=-0.1)
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
@@ -198,6 +218,65 @@ def test_calibration_config_registers_module_scaling_factor_buffers(
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+def test_linear_calibration_config_applies_activation_decay_only():
+    module = Linear(32, 32, params_dtype=torch.bfloat16, device="cuda", bias=False)
+    calibration_config = QuantizationCalibrationConfig(
+        transformer_engine_calibration_decay=0.5
+    )
+    buffer_suffix = "_tensor_scale_inv_fp8_current_scaling_te_ptq_calibrated"
+
+    with autocast(
+        enabled=False,
+        recipe=Float8CurrentScaling(),
+        calibration_config=calibration_config,
+    ):
+        module(torch.full((16, 32), 448.0, dtype=torch.bfloat16, device="cuda"))
+
+    torch.testing.assert_close(
+        module.get_buffer(f"input{buffer_suffix}"), torch.ones(1, device="cuda")
+    )
+    weight_scale = module.get_buffer(f"weight{buffer_suffix}").clone()
+
+    with autocast(
+        enabled=False,
+        recipe=Float8CurrentScaling(),
+        calibration_config=calibration_config,
+    ):
+        module(torch.full((16, 32), 112.0, dtype=torch.bfloat16, device="cuda"))
+
+    torch.testing.assert_close(
+        module.get_buffer(f"input{buffer_suffix}"), torch.full((1,), 0.5, device="cuda")
+    )
+    torch.testing.assert_close(module.get_buffer(f"weight{buffer_suffix}"), weight_scale)
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+def test_linear_calibration_config_buffers_delayed_scaling_amax():
+    module = Linear(32, 32, params_dtype=torch.bfloat16, device="cuda", bias=False)
+
+    with autocast(
+        enabled=False,
+        recipe=DelayedScaling(),
+        calibration_config=QuantizationCalibrationConfig(),
+    ):
+        module(torch.full((16, 32), 2.0, dtype=torch.bfloat16, device="cuda"))
+
+    calibration_buffers = {
+        name: value
+        for name, value in module.named_buffers()
+        if name.endswith("_te_ptq_calibrated")
+    }
+    assert set(calibration_buffers) == {
+        "input_tensor_amax_fp8_delayed_scaling_te_ptq_calibrated",
+        "weight_tensor_amax_fp8_delayed_scaling_te_ptq_calibrated",
+    }
+    torch.testing.assert_close(
+        calibration_buffers["input_tensor_amax_fp8_delayed_scaling_te_ptq_calibrated"],
+        torch.full((1,), 2.0, device="cuda"),
+    )
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 def test_calibrating_boolean_registers_scaling_factor_buffers():
     module = Linear(32, 32, params_dtype=torch.bfloat16, device="cuda", bias=False)
     inp = torch.randn((16, 32), dtype=torch.bfloat16, device="cuda")
@@ -225,23 +304,23 @@ def test_calibrating_boolean_registers_scaling_factor_buffers():
     ),
 )
 def test_scale_buffer_info_selects_recipe_metadata(recipe, metadata_name, expected_value):
-    tensor = SimpleNamespace(
+    tensor = _make_test_quantized_storage(
         _scale_inv=torch.tensor([0.25], dtype=torch.float32),
         _amax_rowwise=torch.tensor([2688.0 if recipe == "nvfp4" else 1344.0], dtype=torch.float32),
     )
     if recipe == "fp8_delayed_scaling":
-        quantizer = object.__new__(Float8Quantizer)
+        quantizer = _make_test_quantizer(Float8Quantizer)
         quantizer.amax = torch.tensor([0.0], dtype=torch.float32)
         tensor = torch.tensor([expected_value])
     elif recipe == "fp8_current_scaling":
-        quantizer = object.__new__(Float8CurrentScalingQuantizer)
+        quantizer = _make_test_quantizer(Float8CurrentScalingQuantizer)
     else:
-        quantizer = object.__new__(NVFP4Quantizer)
+        quantizer = _make_test_quantizer(NVFP4Quantizer)
         quantizer.row_scaled_nvfp4 = recipe == "nvfp4_rowwise"
 
     assert get_quantization_recipe_name(quantizer) == recipe
     quantizer.calibrate(tensor)
-    buffers = _common._get_scale_buffer_info("input", quantizer)
+    buffers = _common._get_calibration_metadata_buffers("input", quantizer)
     buffer_name = f"input_tensor_{metadata_name}_{recipe}_te_ptq_calibrated"
     value = buffers[buffer_name]
 
@@ -253,18 +332,28 @@ def test_scale_buffer_info_selects_recipe_metadata(recipe, metadata_name, expect
 def test_scale_buffer_info_skips_non_global_scaling_recipes(recipe):
     tensor = SimpleNamespace(_rowwise_scale_inv=torch.ones(2, 2))
     quantizer_cls = MXFP8Quantizer if recipe == "mxfp8" else Float8BlockQuantizer
-    quantizer = object.__new__(quantizer_cls)
+    quantizer = _make_test_quantizer(quantizer_cls)
 
     assert get_quantization_recipe_name(quantizer) == recipe
     quantizer.calibrate(tensor)
-    assert not _common._get_scale_buffer_info("input", quantizer)
+    assert not _common._get_calibration_metadata_buffers("input", quantizer)
 
 
 def test_custom_quantizer_defaults_to_no_calibration_metadata():
     quantizer = Quantizer(rowwise=True, columnwise=False)
 
     assert get_quantization_recipe_name(quantizer) == ""
-    assert not _common._get_scale_buffer_info("input", quantizer)
+    assert not _common._get_calibration_metadata_buffers("input", quantizer)
+
+
+def test_hybrid_quantizer_rejects_calibration():
+    quantizer = HybridQuantizer(
+        rowwise_quantizer=IdentityQuantizer(),
+        columnwise_quantizer=IdentityQuantizer(),
+    )
+
+    with pytest.raises(NotImplementedError, match="not yet supported for HybridQuantizer"):
+        quantizer.calibrate(torch.ones(1))
 
 
 def test_resolve_calibration_quantizer_prefers_tensor_owner_and_unwraps_parent():
@@ -278,76 +367,80 @@ def test_resolve_calibration_quantizer_prefers_tensor_owner_and_unwraps_parent()
 def test_quantizer_calibration_state_is_keyed_by_quantized_metadata():
     quantizer = Quantizer(rowwise=True, columnwise=False)
 
-    quantizer._update_calibration_value("amax", torch.tensor([2.0]), decay=0.0)
-    quantizer._update_calibration_value("scale_inv", torch.tensor([0.5]), decay=0.0)
+    quantizer._update_calibration_value(
+        "amax", torch.tensor([2.0]), calibration_decay=0.0
+    )
+    quantizer._update_calibration_value(
+        "scale_inv", torch.tensor([0.5]), calibration_decay=0.0
+    )
 
     assert set(quantizer._calibration_state) == {"amax", "scale_inv"}
     torch.testing.assert_close(quantizer._calibration_state["amax"], torch.tensor([2.0]))
     torch.testing.assert_close(quantizer._calibration_state["scale_inv"], torch.tensor([0.5]))
 
 
-def test_grouped_scale_buffers_are_per_gemm():
+def test_grouped_calibration_metadata_buffers_are_per_gemm():
     inputs = [
-        SimpleNamespace(_scale_inv=torch.tensor([0.25])),
-        SimpleNamespace(_scale_inv=torch.tensor([0.5])),
+        _make_test_quantized_storage(_scale_inv=torch.tensor([0.25])),
+        _make_test_quantized_storage(_scale_inv=torch.tensor([0.5])),
     ]
     weights = [
-        SimpleNamespace(_scale_inv=torch.tensor([0.75])),
-        SimpleNamespace(_scale_inv=torch.tensor([1.0])),
+        _make_test_quantized_storage(_scale_inv=torch.tensor([0.75])),
+        _make_test_quantized_storage(_scale_inv=torch.tensor([1.0])),
     ]
     input_quantizers = [
-        object.__new__(Float8CurrentScalingQuantizer),
-        object.__new__(Float8CurrentScalingQuantizer),
+        _make_test_quantizer(Float8CurrentScalingQuantizer),
+        _make_test_quantizer(Float8CurrentScalingQuantizer),
     ]
     weight_quantizers = [
-        object.__new__(Float8CurrentScalingQuantizer),
-        object.__new__(Float8CurrentScalingQuantizer),
+        _make_test_quantizer(Float8CurrentScalingQuantizer),
+        _make_test_quantizer(Float8CurrentScalingQuantizer),
     ]
-    scale_buffers = {}
+    calibration_buffers = {}
 
     grouped_linear._calibrate_grouped_tensors(
         inputs,
         weights,
         input_quantizers,
         weight_quantizers,
-        activation_scale_decay=0.0,
+        transformer_engine_calibration_decay=0.0,
     )
-    grouped_linear._update_grouped_scale_buffers(
-        scale_buffers,
+    grouped_linear._update_grouped_calibration_metadata_buffers(
+        calibration_buffers,
         inputs,
         weights,
         input_quantizers,
         weight_quantizers,
     )
 
-    assert set(scale_buffers) == {
+    assert set(calibration_buffers) == {
         "input_gemm0_tensor_scale_inv_fp8_current_scaling_te_ptq_calibrated",
         "input_gemm1_tensor_scale_inv_fp8_current_scaling_te_ptq_calibrated",
         "weight_gemm0_tensor_scale_inv_fp8_current_scaling_te_ptq_calibrated",
         "weight_gemm1_tensor_scale_inv_fp8_current_scaling_te_ptq_calibrated",
     }
     torch.testing.assert_close(
-        scale_buffers["input_gemm1_tensor_scale_inv_fp8_current_scaling_te_ptq_calibrated"],
+        calibration_buffers["input_gemm1_tensor_scale_inv_fp8_current_scaling_te_ptq_calibrated"],
         torch.tensor([0.5]),
     )
     assert (
-        scale_buffers["input_gemm1_tensor_scale_inv_fp8_current_scaling_te_ptq_calibrated"]
+        calibration_buffers["input_gemm1_tensor_scale_inv_fp8_current_scaling_te_ptq_calibrated"]
         is input_quantizers[1]._calibration_state["scale_inv"]
     )
 
 
 def test_grouped_calibration_applies_decay_only_to_activations():
-    input_quantizer = object.__new__(Float8CurrentScalingQuantizer)
+    input_quantizer = _make_test_quantizer(Float8CurrentScalingQuantizer)
     input_quantizer._calibration_state = {"scale_inv": torch.tensor([4.0])}
-    weight_quantizer = object.__new__(Float8CurrentScalingQuantizer)
+    weight_quantizer = _make_test_quantizer(Float8CurrentScalingQuantizer)
     weight_quantizer._calibration_state = {"scale_inv": torch.tensor([4.0])}
 
     grouped_linear._calibrate_grouped_tensors(
-        [SimpleNamespace(_scale_inv=torch.tensor([1.0]))],
-        [SimpleNamespace(_scale_inv=torch.tensor([1.0]))],
+        [_make_test_quantized_storage(_scale_inv=torch.tensor([1.0]))],
+        [_make_test_quantized_storage(_scale_inv=torch.tensor([1.0]))],
         [input_quantizer],
         [weight_quantizer],
-        activation_scale_decay=0.5,
+        transformer_engine_calibration_decay=0.5,
     )
 
     torch.testing.assert_close(input_quantizer._calibration_state["scale_inv"], torch.tensor([2.0]))
@@ -356,23 +449,41 @@ def test_grouped_calibration_applies_decay_only_to_activations():
     )
 
 
-def test_grouped_scale_buffers_use_per_gemm_delayed_scaling_amax():
+def test_calibration_supports_legacy_custom_quantizer_signature():
+    class LegacyCustomQuantizer:
+        def calibrate(self, tensor):
+            self.observed_tensor = tensor
+
+    tensor = torch.tensor([1.0])
+    quantizer = LegacyCustomQuantizer()
+    grouped_linear._calibrate_grouped_tensors(
+        [tensor],
+        [],
+        [quantizer],
+        [],
+        transformer_engine_calibration_decay=0.5,
+    )
+
+    assert quantizer.observed_tensor is tensor
+
+
+def test_grouped_calibration_metadata_uses_per_gemm_delayed_scaling_amax():
     quantizers = []
     for amax in (1.0, 2.0):
-        quantizer = object.__new__(Float8Quantizer)
+        quantizer = _make_test_quantizer(Float8Quantizer)
         quantizer.amax = torch.tensor([amax])
         quantizers.append(quantizer)
-    scale_buffers = {}
+    calibration_buffers = {}
 
     grouped_linear._calibrate_grouped_tensors(
         [torch.tensor([1.0]), torch.tensor([2.0])],
         [torch.tensor([1.0]), torch.tensor([2.0])],
         quantizers,
         quantizers,
-        activation_scale_decay=0.0,
+        transformer_engine_calibration_decay=0.0,
     )
-    grouped_linear._update_grouped_scale_buffers(
-        scale_buffers,
+    grouped_linear._update_grouped_calibration_metadata_buffers(
+        calibration_buffers,
         [torch.tensor([1.0]), torch.tensor([2.0])],
         [torch.tensor([1.0]), torch.tensor([2.0])],
         quantizers,
@@ -380,11 +491,11 @@ def test_grouped_scale_buffers_use_per_gemm_delayed_scaling_amax():
     )
 
     torch.testing.assert_close(
-        scale_buffers["input_gemm0_tensor_amax_fp8_delayed_scaling_te_ptq_calibrated"],
+        calibration_buffers["input_gemm0_tensor_amax_fp8_delayed_scaling_te_ptq_calibrated"],
         torch.tensor([1.0]),
     )
     torch.testing.assert_close(
-        scale_buffers["input_gemm1_tensor_amax_fp8_delayed_scaling_te_ptq_calibrated"],
+        calibration_buffers["input_gemm1_tensor_amax_fp8_delayed_scaling_te_ptq_calibrated"],
         torch.tensor([2.0]),
     )
 
@@ -400,14 +511,14 @@ def test_grouped_scale_buffers_use_per_gemm_delayed_scaling_amax():
 )
 def test_activation_scale_buffer_uses_decaying_maximum(observed_scale, expected_scale):
     name = "fc1_input_tensor_scale_inv_fp8_current_scaling_te_ptq_calibrated"
-    quantizer = object.__new__(Float8CurrentScalingQuantizer)
+    quantizer = _make_test_quantizer(Float8CurrentScalingQuantizer)
     initial_buffer = torch.tensor([4.0])
     quantizer._calibration_state = {"scale_inv": initial_buffer}
     quantizer.calibrate(
-        SimpleNamespace(_scale_inv=torch.tensor([observed_scale])),
-        decay=0.5,
+        _make_test_quantized_storage(_scale_inv=torch.tensor([observed_scale])),
+        calibration_decay=0.5,
     )
-    buffers = _common._get_scale_buffer_info("fc1_input", quantizer)
+    buffers = _common._get_calibration_metadata_buffers("fc1_input", quantizer)
     value = buffers[name]
 
     torch.testing.assert_close(value, torch.tensor([expected_scale]))
@@ -417,33 +528,41 @@ def test_activation_scale_buffer_uses_decaying_maximum(observed_scale, expected_
 
 def test_zero_decay_keeps_observed_metadata_reference():
     observed_scale = torch.tensor([2.0])
-    quantizer = object.__new__(Float8CurrentScalingQuantizer)
+    quantizer = _make_test_quantizer(Float8CurrentScalingQuantizer)
 
-    quantizer.calibrate(SimpleNamespace(_scale_inv=observed_scale), decay=0.0)
+    quantizer.calibrate(
+        _make_test_quantized_storage(_scale_inv=observed_scale),
+        calibration_decay=0.0,
+    )
 
     assert quantizer._calibration_state["scale_inv"] is observed_scale
 
 
 def test_decaying_calibration_rejects_metadata_shape_change():
-    quantizer = object.__new__(Float8CurrentScalingQuantizer)
+    quantizer = _make_test_quantizer(Float8CurrentScalingQuantizer)
     quantizer._calibration_state = {"scale_inv": torch.ones(1)}
 
     with pytest.raises(RuntimeError, match="calibration value shape changed"):
-        quantizer.calibrate(SimpleNamespace(_scale_inv=torch.ones(2)), decay=0.5)
+        quantizer.calibrate(
+            _make_test_quantized_storage(_scale_inv=torch.ones(2)),
+            calibration_decay=0.5,
+        )
 
 
-@pytest.mark.parametrize("activation_scale_decay", (0.0, 0.5))
+@pytest.mark.parametrize("transformer_engine_calibration_decay", (0.0, 0.5))
 @pytest.mark.parametrize("initial_scale", (None, 4.0))
-def test_nan_activation_scale_does_not_update_buffer(activation_scale_decay, initial_scale):
-    quantizer = object.__new__(Float8CurrentScalingQuantizer)
+def test_nan_activation_scale_does_not_update_buffer(
+    transformer_engine_calibration_decay, initial_scale
+):
+    quantizer = _make_test_quantizer(Float8CurrentScalingQuantizer)
     if initial_scale is not None:
         quantizer._calibration_state = {"scale_inv": torch.tensor([initial_scale])}
 
     quantizer.calibrate(
-        SimpleNamespace(_scale_inv=torch.tensor([float("nan")])),
-        decay=activation_scale_decay,
+        _make_test_quantized_storage(_scale_inv=torch.tensor([float("nan")])),
+        calibration_decay=transformer_engine_calibration_decay,
     )
-    result = _common._get_scale_buffer_info("fc1_input", quantizer)
+    result = _common._get_calibration_metadata_buffers("fc1_input", quantizer)
 
     if initial_scale is None:
         assert not result

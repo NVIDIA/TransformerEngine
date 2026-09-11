@@ -132,7 +132,7 @@ class MXFP8Quantizer(Quantizer):
             return False
         return True
 
-    def calibrate(self, tensor: torch.Tensor, *, decay: float = 0.0) -> None:
+    def calibrate(self, tensor: torch.Tensor, *, calibration_decay: float = 0.0) -> None:
         """Calibrate an MXFP8 tensor."""
         # NOTE(@cspades): Currently, PTQ calibration requirements don't need
         # non-global / blockwise scaling factors, which are usually computed

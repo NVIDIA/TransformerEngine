@@ -162,7 +162,7 @@ class IdentityQuantizer(Quantizer):
         dst._dtype = data.dtype
         return dst
 
-    def calibrate(self, tensor: torch.Tensor, *, decay: float = 0.0) -> None:
+    def calibrate(self, tensor: torch.Tensor, *, calibration_decay: float = 0.0) -> None:
         # No state to calibrate.
         pass
 
