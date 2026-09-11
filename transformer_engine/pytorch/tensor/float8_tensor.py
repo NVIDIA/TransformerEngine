@@ -136,9 +136,7 @@ class Float8Quantizer(Quantizer):
             amin, amax = tensor.aminmax()
             observed_amax = torch.max(-amin, amax).reshape(1)
             self.amax.copy_(observed_amax)
-        self._update_calibration_value(
-            "amax", observed_amax, calibration_decay=calibration_decay
-        )
+        self._update_calibration_value("amax", observed_amax, calibration_decay=calibration_decay)
 
     def get_quantization_recipe_name(self) -> str:
         """Get the stable name of the quantization recipe."""
@@ -359,9 +357,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
                 scale = torch.ldexp(torch.ones_like(scale), exponent - 1)
             scale.masked_fill_(torch.isinf(amax) | (amax == 0), 1.0)
             scale_inv = torch.reciprocal(scale)
-        self._update_calibration_value(
-            "scale_inv", scale_inv, calibration_decay=calibration_decay
-        )
+        self._update_calibration_value("scale_inv", scale_inv, calibration_decay=calibration_decay)
 
     def get_quantization_recipe_name(self) -> str:
         """Get the stable name of the quantization recipe."""

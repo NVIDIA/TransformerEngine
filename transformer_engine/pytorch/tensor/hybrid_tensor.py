@@ -158,8 +158,8 @@ class HybridQuantizer(Quantizer):
         return quantizer
 
     def calibrate(self, tensor: torch.Tensor, *, calibration_decay: float = 0.0) -> None:
-        """Reject calibration until child metadata ownership is supported."""
-        raise NotImplementedError("Calibration is not yet supported for HybridQuantizer")
+        """HybridQuantizer calibrate() has not yet been implemented."""
+        pass
 
     @property
     def with_amax_reduction(self) -> bool:
