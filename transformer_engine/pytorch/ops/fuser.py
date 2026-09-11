@@ -6,13 +6,15 @@
 
 from __future__ import annotations
 from collections.abc import Callable, Iterable, Sequence
+import copy
 import itertools
 from typing import Any, Optional, TypeAlias
 
 import torch
 
-from ..quantization import FP8GlobalStateManager, Recipe
+from ..quantization import FP8GlobalStateManager, Recipe, _has_delayed_scaling_state
 from ..quantized_tensor import prepare_for_saving, restore_from_func_ctx
+from ..utils import warn_compile_eager_fallback
 from .op import (
     BasicOperation,
     FusibleOperation,
@@ -68,6 +70,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         fuser: OperationFuser,
         basic_op_kwargs: list[dict[str, Any]],
         set_output_requires_grad: bool,
+        use_custom_ops: bool,
         *params_and_extra_inputs: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, ...]:
         """Forward pass
@@ -84,6 +87,9 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             Keyword arguments to BasicOperation
         set_output_requires_grad: bool
             Whether to set ``requires_grad`` flags on returned tensors
+        use_custom_ops: bool
+            Whether to call the operations' custom ops instead of tracing their
+            eager implementations. Decided once per group by ``OperationFuser``.
         *params_and_extra_inputs: torch.Tensor
             Other tensor inputs to include in autograd graph. Consists
             of parameter tensors, followed by extra operation inputs.
@@ -100,9 +106,14 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         # Operation autograd contexts
         basic_op_ctxs = [OperationContext() for _ in range(fuser._num_basic_ops)]
 
-        # Mark input tensors as not deletable in backward
-        for tensor in (input_,) + params_and_extra_inputs:
-            tensor._do_not_clear = True
+        # Mark input tensors as not deletable in backward. Skipped whenever this
+        # is being traced -- not merely when the custom ops are used: these
+        # tensors are created outside this function, and a higher-order op may
+        # not mutate anything from an enclosing scope. Under fullgraph there is
+        # no falling back out of the graph, so the constraint holds either way.
+        if not torch.compiler.is_compiling():
+            for tensor in (input_,) + params_and_extra_inputs:
+                tensor._do_not_clear = True
 
         # Place user provided extra inputs into their basic-op slots. Slots bound to
         # internal channels are filled lazily as their producers execute.
@@ -155,6 +166,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             if next_op is not None:
                 next_op_input_quantizer = next_op.get_input_quantizer()
 
+            compile_kwargs = {"use_custom_ops": True} if use_custom_ops else {}
             x, fused_op_extra_outputs = op.fuser_forward(
                 [basic_op_ctxs[idx] for idx in basic_op_idxs],
                 x,
@@ -162,6 +174,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                 prev_op_grad_output_quantizer=prev_op_grad_output_quantizer,
                 next_op_input_quantizer=next_op_input_quantizer,
                 basic_op_kwargs=[basic_op_kwargs[idx] for idx in basic_op_idxs],
+                **compile_kwargs,
             )
             if len(fused_op_extra_outputs) != len(basic_op_idxs):
                 raise RuntimeError(
@@ -229,9 +242,13 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             func_ctx.save_for_backward(*tensors_to_save)
             func_ctx.tensor_objects = tensor_objects
 
-            # Whether to perform recipe update in backward pass
+            # Whether to perform recipe update in backward pass. Skipped under
+            # compile: this reads and flips global FP8 state, and delayed
+            # scaling -- the only recipe it serves -- is gated out anyway.
             is_first_module = False
-            if fuser.first_op_requiring_backward < fuser._num_basic_ops:
+            if not torch.compiler.is_compiling() and (
+                fuser.first_op_requiring_backward < fuser._num_basic_ops
+            ):
                 is_first_module = FP8GlobalStateManager.is_first_fp8_module()
 
             # Other context
@@ -246,15 +263,20 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             func_ctx.basic_op_extra_output_consumers = fuser._basic_op_extra_output_consumers
             func_ctx.basic_op_extra_input_sources = fuser._basic_op_extra_input_sources
             func_ctx.is_first_module = is_first_module
+            func_ctx.use_custom_ops = use_custom_ops
 
-        # Mark output tensors as not deletable in backward
-        for tensor in itertools.chain(
-            (x,),
-            (y for ys in extra_outputs for y in ys if y is not None),
-        ):
-            tensor._do_not_clear = True
+        # Mark output tensors as not deletable in backward (eager only; see above)
+        if not torch.compiler.is_compiling():
+            for tensor in itertools.chain(
+                (x,),
+                (y for ys in extra_outputs for y in ys if y is not None),
+            ):
+                tensor._do_not_clear = True
 
-        if set_output_requires_grad:
+        # Autograd marks the outputs of an ``apply`` itself, so this is only
+        # needed on the eager path -- and AOTAutograd's functionalization drops
+        # a requires_grad_() applied to a graph output anyway.
+        if set_output_requires_grad and not torch.compiler.is_compiling():
             x.requires_grad_(fuser.first_op_requiring_backward < fuser._num_basic_ops)
 
         if extra_outputs_flat:
@@ -279,7 +301,12 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         # Restore saved tensors
         saved_tensors = restore_from_func_ctx(func_ctx)
 
-        # Unflatten list of saved tensors
+        # Unflatten list of saved tensors. Under compile the contexts were
+        # created in the forward, which is a different subgraph, so writing to
+        # them here would be a side effect on an enclosing scope; copy them into
+        # this one instead. The copy carries the attributes the forward set.
+        if torch.compiler.is_compiling():
+            basic_op_ctxs = [copy.copy(ctx) for ctx in basic_op_ctxs]
         for ctx in basic_op_ctxs:
             ctx.saved_tensors = saved_tensors[slice(*ctx._saved_tensors_range)]
             ctx._saved_tensors_range = None
@@ -329,10 +356,12 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                                 channel_grad if output_grad is None else output_grad + channel_grad
                             )
             grad_extra_outputs = [basic_op_grad_extra_outputs[idx] for idx in basic_op_idxs]
+            compile_kwargs = {"use_custom_ops": True} if func_ctx.use_custom_ops else {}
             dx, fused_op_grad_params, fused_op_grad_extra_inputs = op.fuser_backward(
                 [basic_op_ctxs[idx] for idx in basic_op_idxs],
                 dx,
                 basic_op_grad_extra_outputs=grad_extra_outputs,
+                **compile_kwargs,
             )
             for idx, dparams in zip(basic_op_idxs, fused_op_grad_params):
                 grad_params[idx] = dparams
@@ -394,6 +423,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             None,  # fuser
             None,  # basic_op_kwargs
             None,  # set_output_requires_grad
+            None,  # use_custom_ops
             *grad_params_flat,
             *grad_extra_inputs_flat,
         )
@@ -707,6 +737,49 @@ class OperationFuser:
         # state, so the mapped lists can be selected directly on cache hits.
         self._fused_ops_cache[fusion_params] = (self._forward_ops, self._backward_ops)
 
+    def _custom_ops_unsupported_reason(
+        self, basic_op_kwargs: list[dict[str, Any]]
+    ) -> Optional[str]:
+        """Why this group may not run through its operations' custom ops."""
+        for mode, ops in (("forward", self._forward_ops), ("backward", self._backward_ops)):
+            if len(ops) != self._num_basic_ops or any(
+                op is not self._basic_ops[idx] or basic_op_idxs != [idx]
+                for idx, (op, basic_op_idxs) in enumerate(ops)
+            ):
+                return f"a {mode} fusion"
+        if self._num_basic_ops != 1:
+            return "a group of several operations"
+        for op, kwargs in zip(self._basic_ops, basic_op_kwargs, strict=True):
+            # Only tensors. The other fields of an args container are values read
+            # off the module, constant across calls and baked into the graph; a
+            # kwarg changes per call, and on the second value Dynamo hands over a
+            # symbolic scalar, which cannot go into an opaque value bundle. Pass a
+            # 0-d tensor instead -- it is a graph input, so it does not recompile.
+            values = sorted(name for name, v in kwargs.items() if not isinstance(v, torch.Tensor))
+            if values:
+                return f"{type(op).__name__} with non-tensor keyword arguments {values}"
+        for op in self._basic_ops:
+            if op.num_extra_inputs or op.num_extra_outputs:
+                return f"{type(op).__name__} with extra tensor inputs or outputs"
+            reason = op.compile_unsupported_reason()
+            if reason is not None:
+                return reason
+        return None
+
+    def _use_custom_ops(self, basic_op_kwargs: list[dict[str, Any]]) -> bool:
+        """Whether this group runs through its operations' custom ops.
+
+        Decided once for the whole group: a pipeline compiles as a whole, so one
+        unsupported operation sends all of them to eager.
+        """
+        if not torch.compiler.is_compiling():
+            return False
+        reason = self._custom_ops_unsupported_reason(basic_op_kwargs)
+        if reason is None:
+            return True
+        warn_compile_eager_fallback(reason)
+        return False
+
     def __call__(
         self,
         input: torch.Tensor,  # pylint: disable=redefined-builtin
@@ -743,17 +816,29 @@ class OperationFuser:
 
         # Initialization before forward
         for idx, op in enumerate(self._basic_ops):
+            if torch.compiler.is_compiling() and op._fp8_metas is not None:
+                if any(
+                    meta is not None and _has_delayed_scaling_state(meta)
+                    for meta in op._fp8_metas.values()
+                ):
+                    raise RuntimeError(
+                        "Delayed scaling is not supported under torch.compile in OperationFuser, "
+                        "including CustomRecipe with DelayedScalingRequest."
+                    )
             op.pre_fuser_forward(requires_grad=idx >= self.first_op_requiring_backward)
 
         # Fuser forward pass
         # Note: We call forward directly when is_grad_enabled=False,
         # which can expose non-leaf tensors to the inner ops. Avoid
         # problems in this case by passing set_output_requires_grad=False.
+        use_custom_ops = self._use_custom_ops(basic_op_kwargs)
+
         args = (
             input,
             self,
             basic_op_kwargs,
             is_grad_enabled,  # set_output_requires_grad
+            use_custom_ops,
             *self._flat_basic_op_params,
             *extra_inputs,
         )
