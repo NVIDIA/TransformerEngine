@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cassert>
 
 #include "../common.h"
 #include "../util/cuda_runtime.h"
