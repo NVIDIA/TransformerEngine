@@ -24,6 +24,62 @@ namespace {
 constexpr int MXFP8_BLOCK_SIZE = 32;
 constexpr int NVFP4_BLOCK_SIZE = 16;
 
+__device__ __forceinline__ size_t mxfp8_gemm_swizzled_scale_idx(size_t row, size_t col,
+                                                                size_t num_tiles_x) {
+  constexpr size_t tile_dim_x = 4;
+  constexpr size_t tile_dim_y = 128;
+  constexpr size_t tile_size = tile_dim_x * tile_dim_y;
+  const size_t tile_x = col / tile_dim_x;
+  const size_t tile_y = row / tile_dim_y;
+  const size_t in_tile_x = col % tile_dim_x;
+  const size_t in_tile_y = row % tile_dim_y;
+  size_t idx = (tile_y * num_tiles_x + tile_x) * tile_size;
+  idx += (in_tile_y % 32) * 16 + (in_tile_y / 32) * 4 + in_tile_x;
+  return idx;
+}
+
+__global__ void pack_mxfp8_rowwise_scales_for_batched_gemm_kernel(
+    const uint8_t* input, uint8_t* output, int64_t rows_per_batch, int64_t batch_count,
+    int64_t scale_cols, int64_t input_row_stride, int64_t output_batch_stride, int64_t num_tiles_x,
+    bool batch_major, bool batch_in_features) {
+  const int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const int64_t numel = batch_count * rows_per_batch * scale_cols;
+  if (idx >= numel) return;
+
+  const int64_t col = idx % scale_cols;
+  const int64_t row_and_batch = idx / scale_cols;
+  const int64_t row = row_and_batch % rows_per_batch;
+  const int64_t batch = row_and_batch / rows_per_batch;
+  const int64_t input_row =
+      batch_in_features ? row
+                        : (batch_major ? batch * rows_per_batch + row : row * batch_count + batch);
+  const int64_t input_col = batch_in_features ? batch * scale_cols + col : col;
+  const size_t output_idx =
+      static_cast<size_t>(batch) * output_batch_stride +
+      mxfp8_gemm_swizzled_scale_idx(row, col, static_cast<size_t>(num_tiles_x));
+  output[output_idx] = input[input_row * input_row_stride + input_col];
+}
+
+__global__ void pack_mxfp8_columnwise_scales_for_batched_gemm_kernel(
+    const uint8_t* input, uint8_t* output, int64_t scale_rows_per_batch, int64_t batch_count,
+    int64_t features, int64_t input_row_stride, int64_t output_batch_stride, int64_t num_tiles_x,
+    bool batch_major) {
+  const int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const int64_t numel = batch_count * scale_rows_per_batch * features;
+  if (idx >= numel) return;
+
+  const int64_t feature = idx % features;
+  const int64_t scale_row_and_batch = idx / features;
+  const int64_t scale_row = scale_row_and_batch % scale_rows_per_batch;
+  const int64_t batch = scale_row_and_batch / scale_rows_per_batch;
+  const int64_t input_row = batch_major ? batch * scale_rows_per_batch + scale_row : scale_row;
+  const int64_t input_col = batch_major ? feature : batch * features + feature;
+  const size_t output_idx =
+      static_cast<size_t>(batch) * output_batch_stride +
+      mxfp8_gemm_swizzled_scale_idx(feature, scale_row, static_cast<size_t>(num_tiles_x));
+  output[output_idx] = input[input_row * input_row_stride + input_col];
+}
+
 int get_max_dynamic_smem(int device_id = -1) {
   static std::vector<int> cache(cuda::num_devices(), -1);
   static std::vector<std::once_flag> flags(cuda::num_devices());
@@ -1947,6 +2003,153 @@ void multi_tensor_unswizzle_scaling_factors(const std::vector<Tensor*>& input,
         kernel_args, vec_load_size, false, stream);
   }
 }
+
+void pack_mxfp8_scales_for_batched_gemm(const Tensor* input, Tensor* output, int64_t batch_dim,
+                                        bool batch_in_features, cudaStream_t stream) {
+  NVTE_CHECK(
+      input->scaling_mode == NVTE_MXFP8_1D_SCALING && output->scaling_mode == NVTE_MXFP8_1D_SCALING,
+      "Batched scale packing supports only MXFP8 tensors.");
+  NVTE_CHECK(input->has_data(), "Batched scale packing requires row-wise input data.");
+  NVTE_CHECK(input->scale_inv.has_data(),
+             "Batched scale packing requires row-wise input scaling factors.");
+  NVTE_CHECK(output->scale_inv.has_data(),
+             "Batched scale packing requires row-wise output scaling factors.");
+  NVTE_CHECK(!input->with_gemm_swizzled_scales,
+             "Batched scale packing expects compact input scaling factors.");
+  NVTE_CHECK(output->with_gemm_swizzled_scales,
+             "Batched scale packing expects GEMM-swizzled output scaling factors.");
+  NVTE_CHECK(is_fp8_dtype(input->data.dtype), "Batched scale packing expects FP8 input data.");
+  NVTE_CHECK(
+      input->scale_inv.dtype == DType::kFloat8E8M0 && output->scale_inv.dtype == DType::kFloat8E8M0,
+      "Batched scale packing expects E8M0 scaling factors.");
+
+  const auto& data_shape = input->data.shape;
+  const int64_t ndim = static_cast<int64_t>(data_shape.size());
+  NVTE_CHECK(ndim >= 2, "Batched scale packing expects input with at least two dimensions.");
+  if (batch_dim < 0) batch_dim += ndim;
+  NVTE_CHECK(batch_dim == 0 || batch_dim == ndim - 2,
+             "Batched scale packing supports only batch_dim=0 or batch_dim=-2.");
+  NVTE_CHECK(!batch_in_features || batch_dim == ndim - 2,
+             "Feature-batched compact scales require batch_dim=-2.");
+
+  const int64_t batch_count = static_cast<int64_t>(data_shape[batch_dim]);
+  const int64_t features = static_cast<int64_t>(data_shape.back());
+  NVTE_CHECK(batch_count > 0 && features > 0,
+             "Batched scale packing requires non-empty batch and feature dimensions.");
+  NVTE_CHECK(features % MXFP8_BLOCK_SIZE == 0, "MXFP8 feature dimension must be divisible by ",
+             MXFP8_BLOCK_SIZE, ".");
+  const int64_t total_rows = static_cast<int64_t>(input->data.numel()) / features;
+  NVTE_CHECK(total_rows > 0, "Batched scale packing does not support empty matrices.");
+  NVTE_CHECK(total_rows % batch_count == 0,
+             "Input rows must be divisible by the GEMM batch count.");
+  const int64_t rows_per_batch = total_rows / batch_count;
+  const int64_t scale_cols = features / MXFP8_BLOCK_SIZE;
+  const int64_t padded_rows = static_cast<int64_t>(round_up_to_multiple(rows_per_batch, 128));
+  const int64_t padded_scale_cols = static_cast<int64_t>(round_up_to_multiple(scale_cols, 4));
+  const int64_t output_batch_stride = padded_rows * padded_scale_cols;
+  const int64_t output_numel = batch_count * output_batch_stride;
+
+  NVTE_CHECK(input->scale_inv.shape.size() == 2,
+             "Batched scale packing expects 2D compact scaling factors.");
+  const int64_t input_scale_rows = static_cast<int64_t>(input->scale_inv.shape[0]);
+  const int64_t input_row_stride = static_cast<int64_t>(input->scale_inv.shape[1]);
+  if (batch_in_features) {
+    NVTE_CHECK(input_scale_rows >= rows_per_batch && input_row_stride >= batch_count * scale_cols,
+               "Compact scaling factor buffer is too small for feature-batched scales.");
+  } else {
+    NVTE_CHECK(input_scale_rows >= total_rows && input_row_stride >= scale_cols,
+               "Compact scaling factor buffer is too small for the input tensor.");
+  }
+  NVTE_CHECK(static_cast<int64_t>(output->scale_inv.numel()) == output_numel,
+             "Packed scaling factor buffer has invalid size (expected ", output_numel, ", got ",
+             output->scale_inv.numel(), ").");
+
+  auto* output_ptr = static_cast<uint8_t*>(output->scale_inv.dptr);
+  NVTE_CHECK_CUDA(cudaMemsetAsync(output_ptr, 0, output_numel, stream));
+  const int64_t numel = batch_count * rows_per_batch * scale_cols;
+  constexpr int threads = 256;
+  const int blocks = static_cast<int>((numel + threads - 1) / threads);
+  pack_mxfp8_rowwise_scales_for_batched_gemm_kernel<<<blocks, threads, 0, stream>>>(
+      static_cast<const uint8_t*>(input->scale_inv.dptr), output_ptr, rows_per_batch, batch_count,
+      scale_cols, input_row_stride, output_batch_stride, padded_scale_cols / 4, batch_dim == 0,
+      batch_in_features);
+  NVTE_CHECK_CUDA(cudaGetLastError());
+}
+
+void pack_mxfp8_columnwise_scales_for_batched_gemm(const Tensor* input, Tensor* output,
+                                                   int64_t batch_dim, cudaStream_t stream) {
+  NVTE_CHECK(
+      input->scaling_mode == NVTE_MXFP8_1D_SCALING && output->scaling_mode == NVTE_MXFP8_1D_SCALING,
+      "Batched scale packing supports only MXFP8 tensors.");
+  NVTE_CHECK(input->has_columnwise_data(),
+             "Batched scale packing requires column-wise input data.");
+  NVTE_CHECK(input->columnwise_scale_inv.has_data(),
+             "Batched scale packing requires column-wise input scaling factors.");
+  NVTE_CHECK(output->columnwise_scale_inv.has_data(),
+             "Batched scale packing requires column-wise output scaling factors.");
+  NVTE_CHECK(!input->with_gemm_swizzled_scales,
+             "Batched scale packing expects compact input scaling factors.");
+  NVTE_CHECK(output->with_gemm_swizzled_scales,
+             "Batched scale packing expects GEMM-swizzled output scaling factors.");
+  NVTE_CHECK(is_fp8_dtype(input->columnwise_data.dtype),
+             "Batched scale packing expects FP8 input data.");
+  NVTE_CHECK(input->columnwise_scale_inv.dtype == DType::kFloat8E8M0 &&
+                 output->columnwise_scale_inv.dtype == DType::kFloat8E8M0,
+             "Batched scale packing expects E8M0 scaling factors.");
+
+  const auto& data_shape = input->columnwise_data.shape;
+  const int64_t ndim = static_cast<int64_t>(data_shape.size());
+  NVTE_CHECK(ndim >= 2, "Batched scale packing expects input with at least two dimensions.");
+  if (batch_dim < 0) batch_dim += ndim;
+  NVTE_CHECK(batch_dim == 0 || batch_dim == ndim - 2,
+             "Batched scale packing supports only batch_dim=0 or batch_dim=-2.");
+
+  const int64_t batch_count = static_cast<int64_t>(data_shape[batch_dim]);
+  const int64_t features = static_cast<int64_t>(data_shape.back());
+  NVTE_CHECK(batch_count > 0 && features > 0,
+             "Batched scale packing requires non-empty batch and feature dimensions.");
+  const int64_t total_rows = static_cast<int64_t>(input->columnwise_data.numel()) / features;
+  NVTE_CHECK(total_rows > 0, "Batched scale packing does not support empty matrices.");
+  NVTE_CHECK(total_rows % batch_count == 0,
+             "Input rows must be divisible by the GEMM batch count.");
+  const int64_t rows_per_batch = total_rows / batch_count;
+  NVTE_CHECK(rows_per_batch % MXFP8_BLOCK_SIZE == 0, "MXFP8 rows per GEMM must be divisible by ",
+             MXFP8_BLOCK_SIZE, ".");
+  const int64_t scale_rows_per_batch = rows_per_batch / MXFP8_BLOCK_SIZE;
+  const int64_t padded_scale_rows =
+      static_cast<int64_t>(round_up_to_multiple(scale_rows_per_batch, 4));
+  const int64_t padded_features = static_cast<int64_t>(round_up_to_multiple(features, 128));
+  const int64_t output_batch_stride = padded_scale_rows * padded_features;
+  const int64_t output_numel = batch_count * output_batch_stride;
+
+  NVTE_CHECK(input->columnwise_scale_inv.shape.size() == 2,
+             "Batched scale packing expects 2D compact scaling factors.");
+  const int64_t input_scale_rows = static_cast<int64_t>(input->columnwise_scale_inv.shape[0]);
+  const int64_t input_row_stride = static_cast<int64_t>(input->columnwise_scale_inv.shape[1]);
+  if (batch_dim == 0) {
+    NVTE_CHECK(
+        input_scale_rows >= batch_count * scale_rows_per_batch && input_row_stride >= features,
+        "Compact scaling factor buffer is too small for the batch-major input tensor.");
+  } else {
+    NVTE_CHECK(
+        input_scale_rows >= scale_rows_per_batch && input_row_stride >= batch_count * features,
+        "Compact scaling factor buffer is too small for the interleaved input tensor.");
+  }
+  NVTE_CHECK(static_cast<int64_t>(output->columnwise_scale_inv.numel()) == output_numel,
+             "Packed scaling factor buffer has invalid size (expected ", output_numel, ", got ",
+             output->columnwise_scale_inv.numel(), ").");
+
+  auto* output_ptr = static_cast<uint8_t*>(output->columnwise_scale_inv.dptr);
+  NVTE_CHECK_CUDA(cudaMemsetAsync(output_ptr, 0, output_numel, stream));
+  const int64_t numel = batch_count * scale_rows_per_batch * features;
+  constexpr int threads = 256;
+  const int blocks = static_cast<int>((numel + threads - 1) / threads);
+  pack_mxfp8_columnwise_scales_for_batched_gemm_kernel<<<blocks, threads, 0, stream>>>(
+      static_cast<const uint8_t*>(input->columnwise_scale_inv.dptr), output_ptr,
+      scale_rows_per_batch, batch_count, features, input_row_stride, output_batch_stride,
+      padded_scale_rows / 4, batch_dim == 0);
+  NVTE_CHECK_CUDA(cudaGetLastError());
+}
 }  // namespace transformer_engine
 
 /*
@@ -1958,6 +2161,23 @@ void nvte_swizzle_scaling_factors(const NVTETensor input, NVTETensor output, cud
   NVTE_API_CALL(nvte_swizzle_scaling_factors);
   using namespace transformer_engine;
   swizzle_scaling_factors(convertNVTETensorCheck(input), convertNVTETensorCheck(output), stream);
+}
+
+void nvte_pack_mxfp8_scales_for_batched_gemm(const NVTETensor input, NVTETensor output,
+                                             int64_t batch_dim, int batch_in_features,
+                                             cudaStream_t stream) {
+  NVTE_API_CALL(nvte_pack_mxfp8_scales_for_batched_gemm);
+  using namespace transformer_engine;
+  pack_mxfp8_scales_for_batched_gemm(convertNVTETensorCheck(input), convertNVTETensorCheck(output),
+                                     batch_dim, static_cast<bool>(batch_in_features), stream);
+}
+
+void nvte_pack_mxfp8_columnwise_scales_for_batched_gemm(const NVTETensor input, NVTETensor output,
+                                                        int64_t batch_dim, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_pack_mxfp8_columnwise_scales_for_batched_gemm);
+  using namespace transformer_engine;
+  pack_mxfp8_columnwise_scales_for_batched_gemm(convertNVTETensorCheck(input),
+                                                convertNVTETensorCheck(output), batch_dim, stream);
 }
 
 void nvte_multi_tensor_swizzle_scaling_factors(const NVTETensor* inputs, NVTETensor* outputs,
