@@ -1706,6 +1706,25 @@ def test_permutation_index_map(
 
 
 @pytest.mark.parametrize("te_dtype", _te_dtypes)
+@pytest.mark.parametrize("use_torch_compile", [False, True])
+def test_permutation_index_map_empty_input(te_dtype, use_torch_compile):
+    with_probs = True
+    BENCHMARK = False
+
+    _test_permutation_index_map(
+        te_dtype=te_dtype,
+        num_tokens=0,
+        num_expert=8,
+        hidden_size=4096,
+        topK=2,
+        num_out_tokens=0,
+        with_probs=with_probs,
+        BENCHMARK=BENCHMARK,
+        use_torch_compile=use_torch_compile,
+    )
+
+
+@pytest.mark.parametrize("te_dtype", _te_dtypes)
 @pytest.mark.parametrize("num_tokens", [4096])
 @pytest.mark.parametrize("num_expert", [7, 16])
 @pytest.mark.parametrize("hidden_size", [4096])

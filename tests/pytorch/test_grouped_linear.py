@@ -2266,7 +2266,7 @@ def test_grouped_tensor_save_original_input_matches_saved_grouped_input(
         pytest.fail("save_original_input unexpectedly selected the split-quantize path")
 
     monkeypatch.setattr(
-        "transformer_engine.pytorch.module.grouped_linear._split_quantize",
+        "transformer_engine.pytorch.module._split_quantization._split_quantize",
         reject_split_fallback,
     )
     monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
