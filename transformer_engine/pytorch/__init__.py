@@ -42,6 +42,8 @@ from transformer_engine.pytorch.permutation import (
     moe_unpermute,
     moe_sort_chunks_by_index,
     moe_sort_chunks_by_index_with_probs,
+    moe_sort_chunks_and_pad,
+    moe_unpad_and_restore_chunks,
 )
 from transformer_engine.pytorch.quantization import fp8_autocast
 from transformer_engine.pytorch.quantization import fp8_model_init
