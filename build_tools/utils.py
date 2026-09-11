@@ -310,30 +310,37 @@ def cuda_toolkit_include_path() -> Optional[Path]:
 
 
 @functools.lru_cache(maxsize=None)
-def get_cuda_include_dirs() -> Tuple[str, str]:
-    """Returns the CUDA header directory."""
+def get_cuda_include_dirs() -> List[Path]:
+    """Returns the CUDA header directories."""
 
     force_wheels = bool(int(os.getenv("NVTE_BUILD_USE_NVIDIA_WHEELS", "0")))
-    # If cuda is installed via toolkit, all necessary headers
-    # are bundled inside the top level cuda directory.
-    if not force_wheels and cuda_toolkit_include_path() is not None:
-        return [cuda_toolkit_include_path()]
-
-    # Use pip wheels to include all headers.
     try:
         import nvidia
-    except ModuleNotFoundError as e:
-        raise RuntimeError("CUDA not found.")
-
-    if nvidia.__file__ is not None:
-        cuda_root = Path(nvidia.__file__).parent
+    except ModuleNotFoundError:
+        nvidia_roots = []
     else:
-        cuda_root = Path(nvidia.__path__[0])  # namespace
-    return [
+        nvidia_roots = [Path(path).resolve() for path in nvidia.__path__]
+
+    cuda_home = cuda_home_path()
+    cuda_home_from_wheel = cuda_home is not None and any(
+        cuda_home.is_relative_to(root) for root in nvidia_roots
+    )
+
+    # A system toolkit contains all necessary headers under one include
+    # directory. NVIDIA wheels split them across namespace packages.
+    if not force_wheels and not cuda_home_from_wheel:
+        if (include_path := cuda_toolkit_include_path()) is not None:
+            return [include_path]
+
+    include_dirs = [
         subdir / "include"
-        for subdir in cuda_root.iterdir()
+        for root in nvidia_roots
+        for subdir in root.iterdir()
         if subdir.is_dir() and (subdir / "include").is_dir()
     ]
+    if not include_dirs:
+        raise RuntimeError("CUDA not found.")
+    return include_dirs
 
 
 @functools.lru_cache(maxsize=None)
