@@ -145,8 +145,7 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
         attention_cache_debug::Record(backend, direction, event, device, key, elapsed_ns);
       },
       pybind11::arg("backend"), pybind11::arg("direction"), pybind11::arg("event"),
-      pybind11::arg("device") = -1, pybind11::arg("key") = "",
-      pybind11::arg("elapsed_ns") = 0);
+      pybind11::arg("device") = -1, pybind11::arg("key") = "", pybind11::arg("elapsed_ns") = 0);
   m.def("get_device_compute_capability", &GetDeviceComputeCapability);
   m.def("get_num_compute_streams", &nvte_get_num_compute_streams);
   m.def("get_cublasLt_version", &cublasLtGetVersion);

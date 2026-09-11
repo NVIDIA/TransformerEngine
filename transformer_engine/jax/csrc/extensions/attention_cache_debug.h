@@ -27,8 +27,7 @@ namespace detail {
 constexpr size_t kSiteCount = 4;
 constexpr size_t kStageCount = 5;
 inline constexpr std::array<const char *, kStageCount> kStageNames = {
-    "validate", "build_operation_graph", "create_execution_plans", "check_support",
-    "build_plans"};
+    "validate", "build_operation_graph", "create_execution_plans", "check_support", "build_plans"};
 
 inline int DebugLevel() {
   static const int level = [] {
@@ -137,15 +136,14 @@ inline std::string CounterLine(size_t site, const char *event = nullptr, int dev
   const Counters &counters = AllCounters()[site];
   const std::string device_name = all_devices ? "all" : std::to_string(device);
   char line[640];
-  std::snprintf(
-      line, sizeof(line),
-      "[FUSED-ATTN-CACHE] %sdev=%-3s | %s %s %-12s | hit=%4" PRIu64
-      ", miss=%4" PRIu64 ", create_graph=%4" PRIu64 ", cache_graph=%4" PRIu64
-      ", build_plans=%4" PRIu64 ", execute=%4" PRIu64 "\n",
-      RankTag().c_str(), device_name.c_str(), Backend(site), Direction(site),
-      event == nullptr ? "" : event,
-      Load(counters.hit), Load(counters.miss), Load(counters.create_graph),
-      Load(counters.cache_graph), Load(counters.build_plans), Load(counters.execute));
+  std::snprintf(line, sizeof(line),
+                "[FUSED-ATTN-CACHE] %sdev=%-3s | %s %s %-12s | hit=%4" PRIu64 ", miss=%4" PRIu64
+                ", create_graph=%4" PRIu64 ", cache_graph=%4" PRIu64 ", build_plans=%4" PRIu64
+                ", execute=%4" PRIu64 "\n",
+                RankTag().c_str(), device_name.c_str(), Backend(site), Direction(site),
+                event == nullptr ? "" : event, Load(counters.hit), Load(counters.miss),
+                Load(counters.create_graph), Load(counters.cache_graph), Load(counters.build_plans),
+                Load(counters.execute));
   return line;
 }
 
@@ -168,8 +166,7 @@ inline void PrintSummary() {
       const double milliseconds = static_cast<double>(Load(timing.elapsed_ns)) / calls / 1e6;
       char line[320];
       std::snprintf(line, sizeof(line),
-                    "[FUSED-ATTN-CACHE] %s%s %-3s %-22s | calls=%" PRIu64
-                    " | time=%9.3f ms/call\n",
+                    "[FUSED-ATTN-CACHE] %s%s %-3s %-22s | calls=%" PRIu64 " | time=%9.3f ms/call\n",
                     RankTag().c_str(), Backend(site), Direction(site), kStageNames[stage], calls,
                     milliseconds);
       output += line;
@@ -228,10 +225,9 @@ inline void Record(std::string_view backend, std::string_view direction, std::st
   counter->fetch_add(1, std::memory_order_relaxed);
   if (!detail::TraceEnabled()) return;
   if ((event == "hit" || event == "miss") && !key.empty()) {
-    detail::Write("[FUSED-ATTN-CACHE] " + detail::RankTag() + "dev=" +
-                  std::to_string(device) + " | " + std::string(backend) + " " +
-                  std::string(direction) + " " + std::string(event) + " | " + std::string(key) +
-                  "\n");
+    detail::Write("[FUSED-ATTN-CACHE] " + detail::RankTag() + "dev=" + std::to_string(device) +
+                  " | " + std::string(backend) + " " + std::string(direction) + " " +
+                  std::string(event) + " | " + std::string(key) + "\n");
   } else {
     std::string uppercase(event == "plans_built" ? "build_plans" : event);
     for (char &character : uppercase) {

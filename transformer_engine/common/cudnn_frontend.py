@@ -61,9 +61,7 @@ def build_cudnn_graph(
         time_call(
             debug_callback,
             "create_execution_plans",
-            lambda: graph.create_execution_plans(
-                [cudnn.heur_mode.A, cudnn.heur_mode.FALLBACK]
-            ),
+            lambda: graph.create_execution_plans([cudnn.heur_mode.A, cudnn.heur_mode.FALLBACK]),
         )
         time_call(debug_callback, "check_support", graph.check_support)
     except cudnn.cudnnGraphNotSupportedError as exc:

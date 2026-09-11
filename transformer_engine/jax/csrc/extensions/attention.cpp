@@ -202,9 +202,9 @@ Error_Type ExecuteCudnnGraph(cudaStream_t stream, Dictionary &attrs,
   NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
   int device_id = 0;
   NVTE_CHECK_CUDA(cudaGetDevice(&device_id));
-  attention_cache_debug::Record(
-      get_attr_value<std::string_view>(attrs, "attention_backend"),
-      get_attr_value<std::string_view>(attrs, "attention_direction"), "execute", device_id);
+  attention_cache_debug::Record(get_attr_value<std::string_view>(attrs, "attention_backend"),
+                                get_attr_value<std::string_view>(attrs, "attention_direction"),
+                                "execute", device_id);
   auto status = graph->execute(handle, variant_pack, workspace);
   NVTE_CHECK(status.is_good(), "cuDNN frontend graph execution failed: ", status.get_message());
   return ffi_with_cuda_error_check();

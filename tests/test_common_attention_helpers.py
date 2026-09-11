@@ -128,21 +128,11 @@ def test_shared_f16_policy_framework_parity_features():
 def test_shared_fp8_policy():
     fp8 = _attention_config(q_dtype="float8_e4m3", kv_dtype="float8_e4m3", sm_arch=100)
     assert check_fp8_fused_attention_support(fp8).supported
-    assert check_fp8_fused_attention_support(
-        replace(fp8, cudnn_version=(9, 10, 1))
-    ).supported
-    assert not check_fp8_fused_attention_support(
-        replace(fp8, cudnn_version=(9, 10, 0))
-    ).supported
-    assert not check_fp8_fused_attention_support(
-        replace(fp8, bias_type="alibi")
-    ).supported
-    assert not check_fp8_fused_attention_support(
-        replace(fp8, return_max_logit=True)
-    ).supported
-    assert not check_fp8_fused_attention_support(
-        replace(fp8, head_dim_qk=200)
-    ).supported
+    assert check_fp8_fused_attention_support(replace(fp8, cudnn_version=(9, 10, 1))).supported
+    assert not check_fp8_fused_attention_support(replace(fp8, cudnn_version=(9, 10, 0))).supported
+    assert not check_fp8_fused_attention_support(replace(fp8, bias_type="alibi")).supported
+    assert not check_fp8_fused_attention_support(replace(fp8, return_max_logit=True)).supported
+    assert not check_fp8_fused_attention_support(replace(fp8, head_dim_qk=200)).supported
 
 
 def test_shared_fp8_scaling_mode_policy():
@@ -154,9 +144,7 @@ def test_shared_fp8_scaling_mode_policy():
 
     hopper = replace(fp8, sm_arch=90)
     assert check_fp8_fused_attention_support(hopper, scaling_mode="delayed").supported
-    assert not check_fp8_fused_attention_support(
-        hopper, scaling_mode="current"
-    ).supported
+    assert not check_fp8_fused_attention_support(hopper, scaling_mode="current").supported
     assert not check_fp8_fused_attention_support(hopper, scaling_mode="mxfp8").supported
 
     assert not check_fp8_fused_attention_support(
@@ -208,18 +196,12 @@ def test_shared_fp8_thd_policy():
     assert check_fp8_fused_attention_support(
         replace(thd, mask_type="padding_causal_bottom_right")
     ).supported
-    assert not check_fp8_fused_attention_support(
-        replace(thd, cudnn_version=(9, 22, 9))
-    ).supported
-    assert not check_fp8_fused_attention_support(
-        replace(thd, mask_type="no_mask")
-    ).supported
+    assert not check_fp8_fused_attention_support(replace(thd, cudnn_version=(9, 22, 9))).supported
+    assert not check_fp8_fused_attention_support(replace(thd, mask_type="no_mask")).supported
     assert not check_fp8_fused_attention_support(
         replace(thd, is_training=True, sm_arch=90)
     ).supported
-    assert not check_fp8_fused_attention_support(
-        replace(thd, head_dim_qk=144)
-    ).supported
+    assert not check_fp8_fused_attention_support(replace(thd, head_dim_qk=144)).supported
 
     sink_backward = replace(thd, is_training=True, softmax_type="learnable")
     assert not check_fp8_fused_attention_support(
@@ -505,9 +487,7 @@ def test_shared_cudnn_graph_reports_build_diagnostics():
 
 def test_shared_cudnn_graph_support_error_has_context():
     with pytest.raises(RuntimeError, match="cuDNN test graph is not supported"):
-        build_cudnn_graph(
-            _FakeCudnn(), _FakeGraph(unsupported=True), description="test"
-        )
+        build_cudnn_graph(_FakeCudnn(), _FakeGraph(unsupported=True), description="test")
 
 
 @pytest.fixture

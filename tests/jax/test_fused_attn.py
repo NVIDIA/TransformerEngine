@@ -451,9 +451,7 @@ def test_fused_attn_backend_message(monkeypatch):
     assert backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend
     assert message == "attention bias is not supported"
 
-    backend, message = replace(
-        baseline, head_dim_qk=1024, head_dim_v=1024
-    ).get_fused_attn_backend()
+    backend, message = replace(baseline, head_dim_qk=1024, head_dim_v=1024).get_fused_attn_backend()
     assert backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend
     assert message == "head dimensions are not supported"
 

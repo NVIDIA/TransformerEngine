@@ -191,9 +191,7 @@ def cudnn_mask_options(
     )
     version = encode_cudnn_version(cudnn_version)
     options: dict[str, bool | int | str] = {
-        "diagonal_alignment": (
-            "bottom_right" if mask.bottom_right_diagonal else "top_left"
-        ),
+        "diagonal_alignment": ("bottom_right" if mask.bottom_right_diagonal else "top_left"),
         "is_padding": mask.padding,
     }
     if version < 90600:
@@ -356,9 +354,7 @@ def check_f16_fused_attention_support(
         and (dqk, dv) != (192, 128)
         and dqk != dv
     ):
-        return _unsupported(
-            "this Hopper backward head-dimension combination is unsupported"
-        )
+        return _unsupported("this Hopper backward head-dimension combination is unsupported")
 
     alibi_supported = (
         bias == "alibi"
@@ -438,10 +434,7 @@ def check_f16_fused_attention_support(
                 and bias == "no_bias"
                 and dropout == 0.0
             )
-            or (
-                mask in ("causal_bottom_right", "padding_causal_bottom_right")
-                and sq <= skv
-            )
+            or (mask in ("causal_bottom_right", "padding_causal_bottom_right") and sq <= skv)
         )
         mask_ok = mask_ok or modern_mask_ok
     if not mask_ok:
@@ -473,10 +466,7 @@ def check_f16_fused_attention_support(
         or (
             left >= -1
             and right == 0
-            and (
-                mask in ("no_mask", "causal")
-                or (mask == "causal_bottom_right" and sq == skv)
-            )
+            and (mask in ("no_mask", "causal") or (mask == "causal_bottom_right" and sq == skv))
             and sq <= skv
             and dropout == 0.0
             and bias == "no_bias"
@@ -609,16 +599,12 @@ def check_fp8_fused_attention_support(
     if arch >= 120:
         return _unsupported("FP8 attention is not supported on SM120 or newer")
     if config.is_training and config.deterministic and version < 91900:
-        return _unsupported(
-            "deterministic FP8 attention backward requires cuDNN 9.19 or newer"
-        )
+        return _unsupported("deterministic FP8 attention backward requires cuDNN 9.19 or newer")
     if scaling_mode == "current":
         if arch < 100:
             return _unsupported("FP8 current-scaling attention requires SM100 or newer")
         if version < 91400:
-            return _unsupported(
-                "FP8 current-scaling attention requires cuDNN 9.14 or newer"
-            )
+            return _unsupported("FP8 current-scaling attention requires cuDNN 9.14 or newer")
     if scaling_mode == "mxfp8":
         if arch < 100:
             return _unsupported("MXFP8 attention requires SM100 or newer")
@@ -644,9 +630,7 @@ def check_fp8_fused_attention_support(
         )
         and version < 90500
     ):
-        return _unsupported(
-            "FP8 attention requires cuDNN 9.5 for 64-bit ragged offsets"
-        )
+        return _unsupported("FP8 attention requires cuDNN 9.5 for 64-bit ragged offsets")
 
     is_thd = layout.qkv_format == "thd"
     if is_thd:
@@ -657,13 +641,9 @@ def check_fp8_fused_attention_support(
         if config.is_training and arch < 100:
             return _unsupported("FP8 THD attention backward requires SM100 or newer")
         if config.is_training and config.softmax_type != "vanilla" and version < 92600:
-            return _unsupported(
-                "FP8 THD sink-token backward requires cuDNN 9.26 or newer"
-            )
+            return _unsupported("FP8 THD sink-token backward requires cuDNN 9.26 or newer")
         if arch >= 100 and (dqk > 128 or dv > 128):
-            return _unsupported(
-                "FP8 THD attention supports head dimensions up to 128 on SM100+"
-            )
+            return _unsupported("FP8 THD attention supports head dimensions up to 128 on SM100+")
 
     shape_mask_ok = (
         (

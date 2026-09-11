@@ -393,9 +393,7 @@ def _wrap_score_mod(score_mod: Optional[Callable], graph_tensors: Dict[str, Any]
     return wrapped_score_mod
 
 
-def _finalize_score_mod_graph(
-    cudnn, graph, cache_site: Tuple[str, str]
-) -> Tuple[int, bytes, int]:
+def _finalize_score_mod_graph(cudnn, graph, cache_site: Tuple[str, str]) -> Tuple[int, bytes, int]:
     return finalize_graph(
         cudnn,
         graph,

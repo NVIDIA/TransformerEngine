@@ -111,10 +111,7 @@ def _counter_line(
     if event:
         label += f" {event}"
     values = ", ".join(f"{name}={counters.get(name, 0):4d}" for name in _COUNTER_NAMES)
-    return (
-        f"{_PREFIX} {_rank_tag()}{thread_field:<7} {device_field:<9} | "
-        f"{label:<24} | {values}\n"
-    )
+    return f"{_PREFIX} {_rank_tag()}{thread_field:<7} {device_field:<9} | {label:<24} | {values}\n"
 
 
 def _register_summary() -> None:
@@ -231,9 +228,7 @@ def render_summary() -> str:
             device_field = f"dev={next(iter(devices))}"
         else:
             device_field = "dev=mixed"
-        lines.append(
-            _counter_line(f"tid={thread_id}", device_field, backend, direction, values)
-        )
+        lines.append(_counter_line(f"tid={thread_id}", device_field, backend, direction, values))
     for (backend, direction), values in sorted(counters.items()):
         lines.append(_counter_line("tid=all", "dev=all", backend, direction, values))
     for (backend, direction, stage), (calls, elapsed_ns) in sorted(stage_timings.items()):

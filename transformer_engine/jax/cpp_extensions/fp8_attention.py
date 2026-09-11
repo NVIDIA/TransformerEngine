@@ -201,9 +201,7 @@ def _graph_io_tensors(graph, cudnn, q_aval, k_aval, v_aval, config):
         graph,
         name="Q",
         dim=(info.input_batch, info.q_heads, info.q_max_seqlen, info.qk_dim),
-        stride=_matrix_stride(
-            info, config.qkv_layout, "q", info.q_max_seqlen, info.kv_max_seqlen
-        ),
+        stride=_matrix_stride(info, config.qkv_layout, "q", info.q_max_seqlen, info.kv_max_seqlen),
         dtype=io_dtype,
         uid=_UID_Q,
     )
@@ -211,9 +209,7 @@ def _graph_io_tensors(graph, cudnn, q_aval, k_aval, v_aval, config):
         graph,
         name="K",
         dim=(info.input_batch, info.kv_heads, info.kv_max_seqlen, info.qk_dim),
-        stride=_matrix_stride(
-            info, config.qkv_layout, "k", info.q_max_seqlen, info.kv_max_seqlen
-        ),
+        stride=_matrix_stride(info, config.qkv_layout, "k", info.q_max_seqlen, info.kv_max_seqlen),
         dtype=io_dtype,
         uid=_UID_K,
     )
@@ -221,9 +217,7 @@ def _graph_io_tensors(graph, cudnn, q_aval, k_aval, v_aval, config):
         graph,
         name="V",
         dim=(info.input_batch, info.kv_heads, info.kv_max_seqlen, info.v_dim),
-        stride=_matrix_stride(
-            info, config.qkv_layout, "v", info.q_max_seqlen, info.kv_max_seqlen
-        ),
+        stride=_matrix_stride(info, config.qkv_layout, "v", info.q_max_seqlen, info.kv_max_seqlen),
         dtype=io_dtype,
         uid=_UID_V,
     )
@@ -268,9 +262,7 @@ def build_fp8_fwd_graph(
     graph = make_graph(cudnn, cudnn_data_type(cudnn, q_aval.dtype))
     info, _, q, k, v = _graph_io_tensors(graph, cudnn, q_aval, k_aval, v_aval, config)
     q_shape, k_shape, v_shape, o_shape = _logical_shapes(info)
-    input_bindings = list(
-        _qkv_bindings(info, config.qkv_layout, jnp.dtype(q_aval.dtype).itemsize)
-    )
+    input_bindings = list(_qkv_bindings(info, config.qkv_layout, jnp.dtype(q_aval.dtype).itemsize))
     tensors = {"q": q, "k": k, "v": v}
     options, is_padding = _fp8_options(cudnn, info, config)
     options["generate_stats"] = True
@@ -284,9 +276,7 @@ def build_fp8_fwd_graph(
             options["diagonal_band_left_bound"] = options.pop("left_bound")
         if "right_bound" in options:
             options["diagonal_band_right_bound"] = options.pop("right_bound")
-        padded = mxfp8_padded_sizes(
-            info.q_max_seqlen, info.kv_max_seqlen, info.qk_dim, info.v_dim
-        )
+        padded = mxfp8_padded_sizes(info.q_max_seqlen, info.kv_max_seqlen, info.qk_dim, info.v_dim)
         scale_specs = (
             (
                 "descale_q",
@@ -355,9 +345,7 @@ def build_fp8_fwd_graph(
             uid=_UID_SEQ_KV,
         )
         options.update(seq_len_q=seq_q, seq_len_kv=seq_kv)
-        input_bindings.extend(
-            (GraphBinding(_UID_SEQ_Q, 10), GraphBinding(_UID_SEQ_KV, 11))
-        )
+        input_bindings.extend((GraphBinding(_UID_SEQ_Q, 10), GraphBinding(_UID_SEQ_KV, 11)))
 
     output_bindings = [GraphBinding(_UID_O, 0), GraphBinding(_UID_STATS, 1)]
     if _is_dropout(config):
@@ -394,27 +382,23 @@ def build_fp8_fwd_graph(
     output = op["output"]
     output.set_output(True).set_uid(_UID_O).set_data_type(
         cudnn_data_type(cudnn, output_dtype)
-    ).set_dim(
-        (info.input_batch, info.q_heads, info.q_max_seqlen, info.v_dim)
-    ).set_stride(
+    ).set_dim((info.input_batch, info.q_heads, info.q_max_seqlen, info.v_dim)).set_stride(
         attention_format_stride(
             info.input_batch, info.q_heads, info.q_max_seqlen, info.v_dim, "bshd"
         )
     )
     stats = op["stats"]
-    stats.set_output(True).set_uid(_UID_STATS).set_data_type(
-        cudnn.data_type.FLOAT
-    ).set_dim((info.input_batch, info.q_heads, info.q_max_seqlen, 1)).set_stride(
-        (info.q_heads * info.q_max_seqlen, info.q_max_seqlen, 1, 1)
-    )
+    stats.set_output(True).set_uid(_UID_STATS).set_data_type(cudnn.data_type.FLOAT).set_dim(
+        (info.input_batch, info.q_heads, info.q_max_seqlen, 1)
+    ).set_stride((info.q_heads * info.q_max_seqlen, info.q_max_seqlen, 1, 1))
     if mode != "mxfp8":
         for name, uid, offset in (
             ("amax_s", _UID_AMAX_S, 0),
             ("amax_o", _UID_AMAX_O, 4),
         ):
-            op[name].set_output(True).set_uid(uid).set_data_type(
-                cudnn.data_type.FLOAT
-            ).set_dim((1, 1, 1, 1)).set_stride((1, 1, 1, 1))
+            op[name].set_output(True).set_uid(uid).set_data_type(cudnn.data_type.FLOAT).set_dim(
+                (1, 1, 1, 1)
+            ).set_stride((1, 1, 1, 1))
             output_bindings.append(GraphBinding(uid, 2, offset))
     else:
         op["amax_o"].set_output(False).set_data_type(cudnn.data_type.FLOAT).set_dim(
@@ -539,13 +523,9 @@ def build_fp8_bwd_graph(
 
     cudnn = import_cudnn()
     graph = make_graph(cudnn, cudnn_data_type(cudnn, q_aval.dtype))
-    info, io_dtype, q, k, v = _graph_io_tensors(
-        graph, cudnn, q_aval, k_aval, v_aval, config
-    )
+    info, io_dtype, q, k, v = _graph_io_tensors(graph, cudnn, q_aval, k_aval, v_aval, config)
     q_shape, k_shape, v_shape, o_shape = _logical_shapes(info)
-    input_bindings = list(
-        _qkv_bindings(info, config.qkv_layout, jnp.dtype(q_aval.dtype).itemsize)
-    )
+    input_bindings = list(_qkv_bindings(info, config.qkv_layout, jnp.dtype(q_aval.dtype).itemsize))
     o = _tensor(
         graph,
         name="O",
@@ -600,9 +580,7 @@ def build_fp8_bwd_graph(
             uid=_UID_SEQ_KV,
         )
         options.update(seq_len_q=seq_q, seq_len_kv=seq_kv)
-        input_bindings.extend(
-            (GraphBinding(_UID_SEQ_Q, 9), GraphBinding(_UID_SEQ_KV, 10))
-        )
+        input_bindings.extend((GraphBinding(_UID_SEQ_Q, 9), GraphBinding(_UID_SEQ_KV, 10)))
 
     if _is_dropout(config):
         seed = _tensor(
@@ -681,9 +659,7 @@ def build_fp8_bwd_graph(
                 GraphBinding(_UID_DO_F16, 27),
             )
         )
-        padded = mxfp8_padded_sizes(
-            info.q_max_seqlen, info.kv_max_seqlen, info.qk_dim, info.v_dim
-        )
+        padded = mxfp8_padded_sizes(info.q_max_seqlen, info.kv_max_seqlen, info.qk_dim, info.v_dim)
         tensors.update(_mx_bwd_scales(graph, cudnn, info, padded, input_bindings))
     else:
         for name, uid, index in (
@@ -731,9 +707,9 @@ def build_fp8_bwd_graph(
             ("amax_dv", _UID_AMAX_DV, 8),
             ("amax_dp", _UID_AMAX_DP, 12),
         ):
-            op[name].set_output(True).set_uid(uid).set_data_type(
-                cudnn.data_type.FLOAT
-            ).set_dim((1, 1, 1, 1)).set_stride((1, 1, 1, 1))
+            op[name].set_output(True).set_uid(uid).set_data_type(cudnn.data_type.FLOAT).set_dim(
+                (1, 1, 1, 1)
+            ).set_stride((1, 1, 1, 1))
             output_bindings.append(GraphBinding(uid, 3, offset))
     else:
         for amax in op["amax"]:
@@ -951,9 +927,7 @@ def _validate_quantizer_modes(quantizers) -> str:
         if actual[role] != expected[role]
     ]
     if mismatches:
-        raise ValueError(
-            "Unsupported FP8 attention quantizer modes: " + ", ".join(mismatches)
-        )
+        raise ValueError("Unsupported FP8 attention quantizer modes: " + ", ".join(mismatches))
     return mode
 
 
@@ -1097,18 +1071,14 @@ def _validate_fp8_support(qkv, quantizers, config, mode):
             window_size=tuple(int(value) for value in config.window_size),
             return_max_logit=False,
             cuda_graph=False,
-            deterministic=not bool(
-                int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1"))
-            ),
+            deterministic=not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1"))),
             cudnn_version=cudnn_version,
             sm_arch=device_arch,
         ),
         scaling_mode=mode,
     )
     if not support.supported:
-        raise ValueError(
-            f"Unsupported JAX FP8 attention configuration: {support.reason}."
-        )
+        raise ValueError(f"Unsupported JAX FP8 attention configuration: {support.reason}.")
 
 
 def fused_attn_fp8_fwd(qkv, sequence_descriptor, seed, quantizers, config):
@@ -1118,15 +1088,11 @@ def fused_attn_fp8_fwd(qkv, sequence_descriptor, seed, quantizers, config):
     if config.qkv_layout.is_thd():
         raise NotImplementedError("FP8 attention does not support THD layouts in JAX.")
     if mode == "mxfp8" and not config.qkv_layout.is_separate():
-        raise NotImplementedError(
-            "JAX MXFP8 attention currently requires separate BSHD Q/K/V."
-        )
+        raise NotImplementedError("JAX MXFP8 attention currently requires separate BSHD Q/K/V.")
     if getattr(config.attn_bias_type, "name", "") != "NO_BIAS":
         raise NotImplementedError("FP8 attention does not support attention bias.")
     if getattr(config.softmax_type, "name", "") != "VANILLA_SOFTMAX":
-        raise NotImplementedError(
-            "JAX FP8 attention currently supports vanilla softmax only."
-        )
+        raise NotImplementedError("JAX FP8 attention currently supports vanilla softmax only.")
     _validate_fp8_support(qkv, quantizers, config, mode)
     if mode == "mxfp8" and _is_padding(config):
         raise NotImplementedError("JAX MXFP8 attention does not support padding masks.")
@@ -1169,9 +1135,7 @@ def fused_attn_fp8_fwd(qkv, sequence_descriptor, seed, quantizers, config):
         quantizers.s.update(amax[0:1])
     if output_is_delayed:
         quantizers.o.update(amax[1:2])
-        output = (raw_output.astype(qkv[0].dtype) * output_scale_inv).astype(
-            qkv[0].dtype
-        )
+        output = (raw_output.astype(qkv[0].dtype) * output_scale_inv).astype(qkv[0].dtype)
     else:
         output = raw_output
     return output, (

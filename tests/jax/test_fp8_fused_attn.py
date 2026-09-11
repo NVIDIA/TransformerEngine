@@ -49,9 +49,7 @@ def _require_gpu(min_arch=90, min_cudnn=90700, max_arch=None):
     if arch < min_arch:
         pytest.skip(f"This test requires SM{min_arch} or newer, found SM{arch}.")
     if max_arch is not None and arch >= max_arch:
-        pytest.skip(
-            f"This test requires an architecture older than SM{max_arch}, found SM{arch}."
-        )
+        pytest.skip(f"This test requires an architecture older than SM{max_arch}, found SM{arch}.")
     cudnn_version = get_cudnn_version()
     if cudnn_version < min_cudnn:
         pytest.skip(f"This test requires cuDNN {min_cudnn}, found {cudnn_version}.")
@@ -62,9 +60,9 @@ def _require_gpu(min_arch=90, min_cudnn=90700, max_arch=None):
 
 def _reference_attention(q, k, v, *, bottom_right=False, alibi=False):
     q_seqlen, kv_seqlen = q.shape[1], k.shape[1]
-    scores = jnp.einsum(
-        "bqhd,bkhd->bhqk", q.astype(jnp.float32), k.astype(jnp.float32)
-    ) / sqrt(q.shape[-1])
+    scores = jnp.einsum("bqhd,bkhd->bhqk", q.astype(jnp.float32), k.astype(jnp.float32)) / sqrt(
+        q.shape[-1]
+    )
     q_pos = jnp.arange(q_seqlen)[:, None]
     kv_pos = jnp.arange(kv_seqlen)[None, :]
     shift = kv_seqlen - q_seqlen if bottom_right else 0
@@ -84,9 +82,7 @@ def _reference_attention(q, k, v, *, bottom_right=False, alibi=False):
     allowed = kv_pos <= q_pos + shift
     scores = jnp.where(allowed[None, None, :, :], scores, -jnp.inf)
     probabilities = jax.nn.softmax(scores, axis=-1)
-    return jnp.einsum("bhqk,bkhd->bqhd", probabilities, v.astype(jnp.float32)).astype(
-        q.dtype
-    )
+    return jnp.einsum("bhqk,bkhd->bqhd", probabilities, v.astype(jnp.float32)).astype(q.dtype)
 
 
 def _assert_fp8_close(actual, expected):
@@ -143,9 +139,7 @@ def test_fp8_attention_quantizer_mode_assignments():
         ),
     ),
 )
-@pytest.mark.parametrize(
-    "input_dtype", (jnp.float16, jnp.bfloat16), ids=("float16", "bfloat16")
-)
+@pytest.mark.parametrize("input_dtype", (jnp.float16, jnp.bfloat16), ids=("float16", "bfloat16"))
 def test_fp8_dpa_forward_backward(fp8_recipe, min_arch, min_cudnn, input_dtype):
     """Each supported recipe executes FP8 DPA behind FP16/BF16 module boundaries."""
 
@@ -171,9 +165,7 @@ def test_fp8_dpa_forward_backward(fp8_recipe, min_arch, min_cudnn, input_dtype):
     )
 
     def loss_fn(variables, query, key, value):
-        output = module.apply(
-            variables, query, key, value, descriptor, deterministic=False
-        )
+        output = module.apply(variables, query, key, value, descriptor, deterministic=False)
         loss = jnp.sum(output.astype(jnp.float32) * doutput.astype(jnp.float32))
         return loss, output
 
@@ -183,9 +175,7 @@ def test_fp8_dpa_forward_backward(fp8_recipe, min_arch, min_cudnn, input_dtype):
         return loss, output
 
     with autocast(enabled=True, recipe=fp8_recipe, mesh_resource=MeshResource()):
-        variables = module.init(
-            jax.random.PRNGKey(0), q, k, v, descriptor, deterministic=False
-        )
+        variables = module.init(jax.random.PRNGKey(0), q, k, v, descriptor, deterministic=False)
         (_, output), (_, dq, dk, dv) = jax.value_and_grad(
             loss_fn, argnums=(0, 1, 2, 3), has_aux=True
         )(variables, q, k, v)
@@ -208,9 +198,7 @@ def test_mxfp8_attention_scale_layout():
         q_layout=QuantizeLayout.ROWWISE_COLWISE,
         data_layout="NN",
     )
-    tensor = quantizer.quantize(
-        jnp.ones((2, 64, 8, 64), dtype=jnp.bfloat16), flatten_axis=-2
-    )
+    tensor = quantizer.quantize(jnp.ones((2, 64, 8, 64), dtype=jnp.bfloat16), flatten_axis=-2)
     assert tensor.rowwise_tensor.scale_inv.shape == (2, 64, 8, 2)
     assert tensor.colwise_tensor.scale_inv.shape == (2, 2, 8, 64)
     assert _mxfp8_scale_inv(tensor).shape == (2, 8, 128, 4)
@@ -265,9 +253,7 @@ def test_fused_attention_parity_features(feature):
     q = jax.random.normal(q_key, (batch, q_seqlen, heads, dim), jnp.bfloat16) * 0.25
     k = jax.random.normal(k_key, (batch, kv_seqlen, heads, dim), jnp.bfloat16) * 0.25
     v = jax.random.normal(v_key, (batch, kv_seqlen, heads, dim), jnp.bfloat16) * 0.25
-    doutput = (
-        jax.random.normal(do_key, (batch, q_seqlen, heads, dim), jnp.bfloat16) * 0.25
-    )
+    doutput = jax.random.normal(do_key, (batch, q_seqlen, heads, dim), jnp.bfloat16) * 0.25
     q_lengths = jnp.full((batch,), q_seqlen, dtype=jnp.int32)
     kv_lengths = jnp.full((batch,), kv_seqlen, dtype=jnp.int32)
     descriptor = SequenceDescriptor.from_seqlens((q_lengths, kv_lengths))
@@ -319,9 +305,7 @@ def test_fused_attention_parity_features(feature):
         )
         return jnp.sum(output.astype(jnp.float32) * doutput.astype(jnp.float32)), output
 
-    (_, output), grads = jax.value_and_grad(te_loss, argnums=(0, 1, 2), has_aux=True)(
-        q, k, v
-    )
+    (_, output), grads = jax.value_and_grad(te_loss, argnums=(0, 1, 2), has_aux=True)(q, k, v)
     (_, reference), reference_grads = jax.value_and_grad(
         reference_loss, argnums=(0, 1, 2), has_aux=True
     )(q, k, v)

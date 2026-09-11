@@ -1132,14 +1132,10 @@ def _build_fp8_fwd_graph(
     use_legacy_offsets = is_ragged_q or is_ragged_kv
     graph_batch = _max_ragged_batch(batch) if use_legacy_offsets and use_token_buckets else batch
     graph_seqlen_q = (
-        _max_ragged_tokens(q_data.shape[0])
-        if is_ragged_q and use_token_buckets
-        else max_seqlen_q
+        _max_ragged_tokens(q_data.shape[0]) if is_ragged_q and use_token_buckets else max_seqlen_q
     )
     graph_seqlen_kv = (
-        _max_ragged_tokens(k_data.shape[0])
-        if is_ragged_kv and use_token_buckets
-        else max_seqlen_kv
+        _max_ragged_tokens(k_data.shape[0]) if is_ragged_kv and use_token_buckets else max_seqlen_kv
     )
     graph = make_graph(_fp8_cudnn_dtype(q), q.device, name="te_fp8_sdpa_fwd")
     tensors: Dict[str, Any] = {
@@ -1532,9 +1528,7 @@ def _fp8_forward(
     rng_elts = (max_seqlen_q * max_seqlen_q + _FP8_THREADS_PER_CTA - 1) // _FP8_THREADS_PER_CTA
     rng_state = _reserve_philox_state(q.device, rng_gen, rng_elts)
     cu_seqlens_q_padded = cu_seqlens_q if cu_seqlens_q_padded is None else cu_seqlens_q_padded
-    cu_seqlens_kv_padded = (
-        cu_seqlens_kv if cu_seqlens_kv_padded is None else cu_seqlens_kv_padded
-    )
+    cu_seqlens_kv_padded = cu_seqlens_kv if cu_seqlens_kv_padded is None else cu_seqlens_kv_padded
     kv_offsets_source = _kv_ragged_offsets_source(
         qkv_layout,
         cu_seqlens_q_padded,
@@ -2120,14 +2114,10 @@ def _build_fp8_bwd_graph(
     use_legacy_offsets = is_ragged_q or is_ragged_kv
     graph_batch = _max_ragged_batch(batch) if use_legacy_offsets and use_token_buckets else batch
     graph_seqlen_q = (
-        _max_ragged_tokens(q_data.shape[0])
-        if is_ragged_q and use_token_buckets
-        else max_seqlen_q
+        _max_ragged_tokens(q_data.shape[0]) if is_ragged_q and use_token_buckets else max_seqlen_q
     )
     graph_seqlen_kv = (
-        _max_ragged_tokens(k_data.shape[0])
-        if is_ragged_kv and use_token_buckets
-        else max_seqlen_kv
+        _max_ragged_tokens(k_data.shape[0]) if is_ragged_kv and use_token_buckets else max_seqlen_kv
     )
     graph = make_graph(_fp8_cudnn_dtype(q), q.device, name="te_fp8_sdpa_bwd")
     tensors: Dict[str, Any] = {
@@ -2646,9 +2636,7 @@ def _fp8_backward(
     d_softmax_offset = torch.empty_like(softmax_offset) if softmax_offset is not None else None
     hidden_amax = [torch.zeros(1, dtype=torch.float32, device=q.device) for _ in range(4)]
     cu_seqlens_q_padded = cu_seqlens_q if cu_seqlens_q_padded is None else cu_seqlens_q_padded
-    cu_seqlens_kv_padded = (
-        cu_seqlens_kv if cu_seqlens_kv_padded is None else cu_seqlens_kv_padded
-    )
+    cu_seqlens_kv_padded = cu_seqlens_kv if cu_seqlens_kv_padded is None else cu_seqlens_kv_padded
     kv_offsets_source = _kv_ragged_offsets_source(
         qkv_layout,
         cu_seqlens_q_padded,
