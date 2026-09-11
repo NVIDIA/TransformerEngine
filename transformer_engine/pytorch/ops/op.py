@@ -393,7 +393,6 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                 recipe_config,
             )
         ):
-            FP8GlobalStateManager.abort_current_amax_reduction()
             raise RuntimeError(
                 "Mid-training recipe updates are not supported for fusible operations. "
                 "Recreate the fusible operation or operation pipeline with the new recipe."

@@ -1291,7 +1291,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         backward_quantizers = backward_state.make_quantizers()
 
         if _is_delayed_scaling_state(forward_state) != _is_delayed_scaling_state(backward_state):
-            FP8GlobalStateManager.abort_current_amax_reduction()
             raise RuntimeError(
                 "This hybrid quantization configuration with delayed scaling is not supported."
             )
@@ -1356,8 +1355,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
     @staticmethod
     def _reject_delayed_scaling_update() -> None:
-        """Reject a delayed-state transition and protect any active reduction."""
-        FP8GlobalStateManager.abort_current_amax_reduction()
+        """Reject a delayed-state transition."""
         raise RuntimeError(
             "Mid-training recipe updates do not support delayed scaling. "
             "A delayed-scaling runtime is frozen after initialization; only "
@@ -1384,8 +1382,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if getattr(self, "primary_weights_in_fp8", False) and (
             active.key.recipe_config != requested_key.recipe_config or active.num_gemms != num_gemms
         ):
-            if active_has_delayed_scaling or recipe.delayed():
-                FP8GlobalStateManager.abort_current_amax_reduction()
             raise RuntimeError(
                 "Recipe mismatch for quantized primary weights: mid-training recipe "
                 "configuration changes require per-weight semantic compatibility and "
@@ -1897,10 +1893,16 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         original_recipe = meta.get("recipe")
         recipe = FP8GlobalStateManager.get_fp8_recipe()
 
-        runtime_changed = self._ensure_quantization_runtime(
-            recipe=recipe,
-            num_gemms=num_gemms,
-        )
+        try:
+            runtime_changed = self._ensure_quantization_runtime(
+                recipe=recipe,
+                num_gemms=num_gemms,
+            )
+        except BaseException:
+            # Any failure here leaves this module's delayed state unusable for a
+            # reduction the region may still complete.
+            FP8GlobalStateManager.abort_current_amax_reduction()
+            raise
         if fp8_enabled:
             meta["fp8_group"] = FP8GlobalStateManager.get_fp8_group()
         if fp8_enabled:

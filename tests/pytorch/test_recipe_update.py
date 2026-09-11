@@ -528,6 +528,147 @@ def test_rejected_delayed_update_aborts_autocast_reduction():
     assert torch.equal(state.scale, expected_scale)
     assert torch.equal(state.amax_history, expected_history)
 
+
+def test_failed_stateless_activation_aborts_a_registered_delayed_reduction():
+    """A caught failure in one module must not update another module's delayed bucket."""
+    available, reason = is_fp8_available(return_reason=True)
+    if not available:
+        pytest.skip(reason)
+
+    FP8GlobalStateManager.reset()
+    try:
+        inp = torch.randn(16, 16, device="cuda", dtype=torch.bfloat16)
+        delayed_module = Linear(
+            16,
+            16,
+            bias=False,
+            params_dtype=torch.bfloat16,
+            device="cuda",
+            name="delayed",
+        )
+        with autocast(enabled=True, recipe=DelayedScaling(amax_history_len=4, margin=0)):
+            delayed_module(inp)
+
+        state = delayed_module.fp8_meta["scaling_fwd"]
+        state.scale.fill_(3)
+        state.amax_history.fill_(7)
+        expected_scale = state.scale.clone()
+        expected_history = state.amax_history.clone()
+
+        def failing_qfactory(role):
+            del role
+            raise RuntimeError("deliberate qfactory failure")
+
+        stateless_module = Linear(
+            16,
+            16,
+            bias=False,
+            params_dtype=torch.bfloat16,
+            device="cuda",
+            name="stateless",
+        )
+        recipe = CustomRecipe(qfactory=failing_qfactory, qfactory_key=("abort-stateless", 1))
+        with autocast(enabled=True, recipe=recipe):
+            with pytest.raises(RuntimeError, match="deliberate qfactory failure"):
+                stateless_module(inp)
+
+        assert torch.equal(state.scale, expected_scale)
+        assert torch.equal(state.amax_history, expected_history)
+    finally:
+        FP8GlobalStateManager.reset()
+
+
+def test_uncaught_region_failure_aborts_the_autocast_reduction():
+    """An exception that escapes the region leaves its delayed tensors untouched."""
+    available, reason = is_fp8_available(return_reason=True)
+    if not available:
+        pytest.skip(reason)
+
+    FP8GlobalStateManager.reset()
+    try:
+        inp = torch.randn(16, 16, device="cuda", dtype=torch.bfloat16)
+        module = Linear(
+            16,
+            16,
+            bias=False,
+            params_dtype=torch.bfloat16,
+            device="cuda",
+            name="linear",
+        )
+        recipe = DelayedScaling(amax_history_len=4, margin=0)
+        with autocast(enabled=True, recipe=recipe):
+            module(inp)
+
+        state = module.fp8_meta["scaling_fwd"]
+        state.scale.fill_(3)
+        state.amax_history.fill_(7)
+        expected_scale = state.scale.clone()
+        expected_history = state.amax_history.clone()
+
+        with pytest.raises(RuntimeError, match="deliberate region failure"):
+            with autocast(enabled=True, recipe=recipe):
+                raise RuntimeError("deliberate region failure")
+
+        assert torch.equal(state.scale, expected_scale)
+        assert torch.equal(state.amax_history, expected_history)
+    finally:
+        FP8GlobalStateManager.reset()
+
+
+def test_rejected_fusible_update_aborts_autocast_reduction(monkeypatch):
+    """The fusible rejection fires before the op reset loop, so it must still abort."""
+    available, reason = is_fp8_available(return_reason=True)
+    if not available:
+        pytest.skip(reason)
+
+    FP8GlobalStateManager.reset()
+    try:
+        model = te_ops.Sequential(te_ops.Linear(16, 16, bias=False, device="cuda"))
+        inp = torch.randn(16, 16, device="cuda", dtype=torch.bfloat16)
+        with autocast(enabled=True, recipe=DelayedScaling(amax_history_len=4, margin=0)):
+            model(inp)
+
+        reductions = []
+        monkeypatch.setattr(
+            FP8GlobalStateManager,
+            "reduce_and_update_fp8_tensors",
+            classmethod(lambda _cls, forward=True: reductions.append(forward)),
+        )
+        with autocast(enabled=True, recipe=DelayedScaling(amax_history_len=4, margin=1)):
+            with pytest.raises(RuntimeError, match="not supported for fusible operations"):
+                model(inp)
+        assert not reductions
+    finally:
+        FP8GlobalStateManager.reset()
+
+
+def test_apply_recipe_preflight_rejects_unsupported_platform_before_commit(monkeypatch):
+    """A recipe this platform cannot run is rejected before any module is planned."""
+    monkeypatch.setattr(
+        "transformer_engine.pytorch.quantization._NVFP4_SUPPORT",
+        (False, "injected NVFP4 support failure"),
+    )
+    calls = []
+    active_recipe = _make_counting_recipe(("apply-preflight", 1), calls)
+    module = Linear(16, 16, bias=False, device="cuda", name="linear")
+    assert _ensure_runtime(module, active_recipe)
+    active_runtime = module._quantization_runtime  # pylint: disable=protected-access
+    active_recipe_pointer = FP8GlobalStateManager.quantization_state.fp8_recipe
+    call_count = len(calls)
+
+    try:
+        with pytest.raises(RuntimeError, match="injected NVFP4 support failure"):
+            apply_recipe(module, NVFP4BlockScaling())
+
+        # pylint: disable-next=protected-access
+        assert module._quantization_runtime is active_runtime
+        assert FP8GlobalStateManager.quantization_state.fp8_recipe is active_recipe_pointer
+        assert len(calls) == call_count
+    finally:
+        FP8GlobalStateManager.reset()
+
+
+def test_equal_recipe_objects_and_missed_updates_reuse_the_runtime():
     """Equal independent recipes and missed A -> B -> A updates reuse the runtime."""
     calls = []
     first_recipe = _make_counting_recipe(("runtime-reuse", 1), calls)

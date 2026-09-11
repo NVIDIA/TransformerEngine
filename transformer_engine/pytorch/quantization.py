@@ -276,14 +276,16 @@ def check_recipe_support(recipe: Recipe) -> None:
         raise RuntimeError(
             "DelayedScaling is not supported under torch.compile. Please use other recipes instead."
         )
-    recipe_supported = True
-    unsupported_reason = ""
-    if isinstance(recipe, (DelayedScaling, Float8CurrentScaling)):
-        recipe_supported, unsupported_reason = check_fp8_support()
-    elif isinstance(recipe, Float8BlockScaling):
+    if isinstance(recipe, Float8BlockScaling):
         recipe_supported, unsupported_reason = check_fp8_block_scaling_support()
     elif isinstance(recipe, MXFP8BlockScaling):
         recipe_supported, unsupported_reason = check_mxfp8_support()
+    elif isinstance(recipe, NVFP4BlockScaling):
+        recipe_supported, unsupported_reason = check_nvfp4_support()
+    else:
+        # Covers DelayedScaling, Float8CurrentScaling and CustomRecipe, whose
+        # quantizers are chosen by a factory this check cannot inspect.
+        recipe_supported, unsupported_reason = check_fp8_support()
     if not recipe_supported:
         raise RuntimeError(unsupported_reason)
 
@@ -578,7 +580,6 @@ class FP8GlobalStateManager:
             forward_delayed = _is_delayed_scaling_state(fp8_meta[forward_key])
             backward_delayed = _is_delayed_scaling_state(fp8_meta[backward_key])
             if forward_delayed != backward_delayed:
-                cls.abort_current_amax_reduction()
                 raise RuntimeError(
                     "This hybrid quantization configuration with delayed scaling is not supported."
                 )
@@ -590,8 +591,8 @@ class FP8GlobalStateManager:
         if index_in_buffer in fp8_meta:
             return
 
-        fp8_meta[index_in_buffer] = []
         qstate = cls.quantization_state
+        buffer_positions = []
         for forward in (True, False):
             fp8_meta_tensor_key = cls.get_meta_tensor_key(forward=forward)
             if fp8_meta_tensor_key not in fp8_meta:
@@ -632,8 +633,11 @@ class FP8GlobalStateManager:
                     fp8_meta[fp8_meta_tensor_key].amax_history
                 )
                 qstate.global_scale_buffer[key].append(fp8_meta[fp8_meta_tensor_key].scale)
-            fp8_meta[index_in_buffer].append(len(qstate.global_amax_buffer[key]) - 1)
-            fp8_meta[index_in_buffer].append(key)
+            buffer_positions.append(len(qstate.global_amax_buffer[key]) - 1)
+            buffer_positions.append(key)
+
+        # Publish last: a module is registered only once the whole walk succeeded.
+        fp8_meta[index_in_buffer] = buffer_positions
 
     @classmethod
     def is_fp8_enabled(cls) -> bool:
@@ -820,31 +824,18 @@ class FP8GlobalStateManager:
     def _prepare_autocast_enter(
         cls,
         enabled: bool,
+        calibrating: bool,
         fp8_recipe: Optional[Recipe],
-        fp8_group: Optional[dist_group_type],
-    ) -> Tuple[Recipe, Hashable, str]:
+    ) -> Recipe:
         """Resolve and validate an autocast activation without publishing state."""
         fp8_recipe = get_default_fp8_recipe() if fp8_recipe is None else fp8_recipe
-        if enabled:
+        if enabled or calibrating:
             check_recipe_support(fp8_recipe)
-
-        quantizer_config = fp8_recipe.quantizer_config()
-        autocast_key = cls.get_unique_autocast_key(fp8_recipe, fp8_group)
-
-        if enabled:
-            fp8_available, reason_for_no_fp8 = cls.is_fp8_available()
-            assert fp8_available, reason_for_no_fp8
-            if isinstance(fp8_recipe, MXFP8BlockScaling):
-                mxfp8_available, reason_for_no_mxfp8 = cls.is_mxfp8_available()
-                assert mxfp8_available, reason_for_no_mxfp8
-            if isinstance(fp8_recipe, Float8BlockScaling):
-                fp8_block_available, reason_for_no_fp8_block = cls.is_fp8_block_scaling_available()
-                assert fp8_block_available, reason_for_no_fp8_block
-            if isinstance(fp8_recipe, NVFP4BlockScaling):
-                nvfp4_available, reason_for_no_nvfp4 = cls.is_nvfp4_available()
-                assert nvfp4_available, reason_for_no_nvfp4
-
-        return fp8_recipe, quantizer_config, autocast_key
+        if enabled or calibrating or cls.quantization_state.fp8_parameters:
+            # Building the configuration validates the recipe. A region that
+            # quantizes nothing must not reject a recipe it will never use.
+            fp8_recipe.quantizer_config()
+        return fp8_recipe
 
     @classmethod
     def autocast_enter(
@@ -857,24 +848,12 @@ class FP8GlobalStateManager:
     ) -> None:
         """Prepare and publish state for entry into an FP8 region."""
 
-        fp8_recipe, _, autocast_key = cls._prepare_autocast_enter(
-            enabled,
-            fp8_recipe,
-            fp8_group,
-        )
+        fp8_recipe = cls._prepare_autocast_enter(enabled, calibrating, fp8_recipe)
         qstate = cls.quantization_state
 
         # Preparation above contains every operation that can fail due to the
         # requested recipe or platform. Publish only after it has succeeded.
         qstate.fp8_recipe = fp8_recipe
-        # Once a delayed bucket is registered, its committed recipe snapshot
-        # owns the reduction semantics for this key. Do not replace it with a
-        # caller-owned recipe object merely by entering another autocast.
-        qstate.autocast_arguments.setdefault(
-            autocast_key,
-            (fp8_recipe, fp8_group),
-        )
-
         qstate.fp8_enabled = enabled
         qstate.fp8_calibration = calibrating
         qstate.fp8_distributed_group = fp8_group
@@ -1170,13 +1149,21 @@ def quantized_model_init(
     """
 
     qstate = FP8GlobalStateManager.quantization_state
+
+    # Resolve and validate before publishing anything: a recipe this context
+    # cannot use must leave the process as it found it.
+    recipe = get_default_fp8_recipe() if recipe is None else recipe
+    if enabled:
+        check_recipe_support(recipe)
+        recipe.quantizer_config()
+
     _fp8_parameters = qstate.fp8_parameters
     _fp8_recipe = qstate.fp8_recipe
     _high_precision_init_val = qstate.high_precision_init_val
-    qstate.fp8_parameters = enabled
-    FP8GlobalStateManager.activate_recipe(get_default_fp8_recipe() if recipe is None else recipe)
-    qstate.high_precision_init_val = preserve_high_precision_init_val
     try:
+        qstate.fp8_parameters = enabled
+        qstate.fp8_recipe = recipe
+        qstate.high_precision_init_val = preserve_high_precision_init_val
         yield
     finally:
         qstate.fp8_parameters = _fp8_parameters
@@ -1306,6 +1293,8 @@ class autocast:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        if exc_type is not None:
+            FP8GlobalStateManager.abort_current_amax_reduction()
         try:
             FP8GlobalStateManager.set_autocast_state(self._fp8_state)
             FP8GlobalStateManager.autocast_exit(self._enabled, _graph=self._graph)

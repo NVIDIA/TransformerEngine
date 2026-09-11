@@ -1102,6 +1102,135 @@ def test_failed_autocast_recipe_activation_is_atomic_and_context_is_reusable():
     FP8GlobalStateManager.reset()
 
 
+def test_quantized_model_init_failure_restores_fp8_parameters():
+    """A recipe this context cannot use must leave the process as it found it."""
+    FP8GlobalStateManager.reset()
+
+    def unkeyed_factory(role):
+        raise AssertionError("factory must not be called")
+
+    assert not FP8GlobalStateManager.with_fp8_parameters()
+    with pytest.raises(ValueError, match="requires a semantic qfactory key"):
+        with te.quantized_model_init(enabled=True, recipe=CustomRecipe(qfactory=unkeyed_factory)):
+            pass
+
+    assert not FP8GlobalStateManager.with_fp8_parameters()
+    assert FP8GlobalStateManager.get_fp8_recipe() is not None
+    FP8GlobalStateManager.reset()
+
+
+def test_disabled_autocast_does_not_validate_the_recipe():
+    """A region that quantizes nothing must not reject a recipe it never uses."""
+    FP8GlobalStateManager.reset()
+
+    def unkeyed_factory(role):
+        raise AssertionError("factory must not be called")
+
+    unusable = CustomRecipe(qfactory=unkeyed_factory)
+
+    # Disabled: the recipe is published as a pointer and never asked for a config.
+    with te.autocast(enabled=False, recipe=unusable):
+        assert FP8GlobalStateManager.get_fp8_recipe() is unusable
+
+    # Calibration builds quantizers, so it validates like an enabled region.
+    with pytest.raises(ValueError, match="requires a semantic qfactory key"):
+        with te.autocast(enabled=False, calibrating=True, recipe=unusable):
+            pass
+    FP8GlobalStateManager.reset()
+
+
+def test_calibrating_autocast_runs_platform_preflight(monkeypatch):
+    """Calibration builds quantizers, so it needs the platform gate an fp8 region needs."""
+    FP8GlobalStateManager.reset()
+    try:
+        # A plain disabled region publishes a pointer without consulting the platform.
+        monkeypatch.setattr(
+            transformer_engine.pytorch.quantization,
+            "check_fp8_support",
+            lambda: (False, "injected FP8 support failure"),
+        )
+        with te.autocast(enabled=False, recipe=Float8CurrentScaling()):
+            pass
+
+        original_state = _autocast_activation_state()
+        with pytest.raises(RuntimeError, match="injected FP8 support failure"):
+            with te.autocast(enabled=False, calibrating=True, recipe=Float8CurrentScaling()):
+                pass
+        assert _autocast_activation_state() == original_state
+    finally:
+        FP8GlobalStateManager.reset()
+
+
+def test_stateless_regions_do_not_register_autocast_arguments():
+    """Only delayed buckets own reduction arguments, so only they register any."""
+    FP8GlobalStateManager.reset()
+    qstate = FP8GlobalStateManager.quantization_state
+    try:
+        for index in range(25):
+
+            @quantizer_factory(key=("stateless_region", index))
+            def stateless_factory(role):
+                del role
+
+            with te.autocast(enabled=False, recipe=CustomRecipe(qfactory=stateless_factory)):
+                pass
+        assert not qstate.autocast_arguments
+    finally:
+        FP8GlobalStateManager.reset()
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+def test_delayed_bucket_registers_exactly_one_autocast_argument():
+    """Reduction arguments are registered where the bucket is created, once."""
+    FP8GlobalStateManager.reset()
+    qstate = FP8GlobalStateManager.quantization_state
+    try:
+        inp = torch.randn(16, 16, device="cuda", dtype=torch.bfloat16)
+        stateless = Linear(16, 16, bias=False, params_dtype=torch.bfloat16, device="cuda")
+        delayed = Linear(16, 16, bias=False, params_dtype=torch.bfloat16, device="cuda")
+
+        # Stateless regions quantize without a bucket, so they register nothing.
+        for _ in range(25):
+            with te.autocast(enabled=True, recipe=Float8CurrentScaling()):
+                stateless(inp)
+        assert not qstate.autocast_arguments
+
+        # A delayed bucket is created once and owns one set of reduction arguments.
+        for _ in range(3):
+            with te.autocast(enabled=True, recipe=DelayedScaling(amax_history_len=4)):
+                delayed(inp)
+        assert len(qstate.autocast_arguments) == 1
+    finally:
+        FP8GlobalStateManager.reset()
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+def test_failed_buffer_registration_leaves_no_partial_entry(monkeypatch):
+    """A half-registered module would later unpack four buffer positions from two."""
+    FP8GlobalStateManager.reset()
+    try:
+        module = Linear(16, 16, bias=False, params_dtype=torch.bfloat16, device="cuda")
+        inp = torch.randn(16, 16, device="cuda", dtype=torch.bfloat16)
+
+        # The backward direction is registered second, so this fails mid-walk.
+        original_key = FP8GlobalStateManager.get_key_in_buffer.__func__
+
+        def failing_key(cls, forward, fp8_recipe, fp8_group):
+            if not forward:
+                raise RuntimeError("injected buffer registration failure")
+            return original_key(cls, forward, fp8_recipe, fp8_group)
+
+        monkeypatch.setattr(FP8GlobalStateManager, "get_key_in_buffer", classmethod(failing_key))
+
+        with pytest.raises(RuntimeError, match="injected buffer registration failure"):
+            with te.autocast(enabled=True, recipe=DelayedScaling(amax_history_len=4)):
+                module(inp)
+
+        assert FP8GlobalStateManager.get_buffer_info() not in module.fp8_meta
+    finally:
+        FP8GlobalStateManager.reset()
+
+
 def test_failed_autocast_support_check_is_atomic(monkeypatch):
     """Platform validation must complete before autocast state is published."""
     FP8GlobalStateManager.reset()
@@ -1114,12 +1243,12 @@ def test_failed_autocast_support_check_is_atomic(monkeypatch):
         del role
 
     monkeypatch.setattr(
-        FP8GlobalStateManager,
-        "is_fp8_available",
-        classmethod(lambda _cls: (False, "injected FP8 support failure")),
+        transformer_engine.pytorch.quantization,
+        "check_fp8_support",
+        lambda: (False, "injected FP8 support failure"),
     )
     context = te.autocast(enabled=True, recipe=CustomRecipe(qfactory=keyed_factory))
-    with pytest.raises(AssertionError, match="injected FP8 support failure"):
+    with pytest.raises(RuntimeError, match="injected FP8 support failure"):
         context.__enter__()
 
     assert context._fp8_state is None  # pylint: disable=protected-access

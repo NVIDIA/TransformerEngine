@@ -654,7 +654,6 @@ class OperationFuser:
                 recipe_config,
             )
         ):
-            FP8GlobalStateManager.abort_current_amax_reduction()
             raise RuntimeError(
                 "Mid-training recipe updates are not supported for fusible operations. "
                 "Recreate the fusible operation or operation pipeline with the new recipe."
@@ -756,8 +755,13 @@ class OperationFuser:
             recipe = FP8GlobalStateManager.get_fp8_recipe()
         is_grad_enabled = torch.is_grad_enabled()
 
-        # Attempt to fuse operations if neccesary
-        self.maybe_fuse_ops(is_grad_enabled, recipe, input, basic_op_extra_inputs)
+        # Attempt to fuse operations if neccesary. The recipe transition inside
+        # can reject before the op reset loop runs, so guard the whole call.
+        try:
+            self.maybe_fuse_ops(is_grad_enabled, recipe, input, basic_op_extra_inputs)
+        except BaseException:
+            FP8GlobalStateManager.abort_current_amax_reduction()
+            raise
 
         # Initialization before forward
         for idx, op in enumerate(self._basic_ops):
