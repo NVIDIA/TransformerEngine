@@ -1208,6 +1208,10 @@ def _register_op(
     slot_offsets = plan.tensor_or_quantized_offsets()
     namespace = getattr(torch.ops, _TE_OP_NAMESPACE)
 
+    for registered_name in (name, f"{name}_base"):
+        if hasattr(namespace, registered_name):
+            raise ValueError(f"Custom op '{_TE_OP_NAMESPACE}::{registered_name}' already exists")
+
     base_def = _register_base_op(
         op_name=f"{name}_base",
         schema_str=schema,
