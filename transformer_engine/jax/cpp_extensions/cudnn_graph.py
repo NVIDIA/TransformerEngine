@@ -155,9 +155,7 @@ def encode_cudnn_frontend_version(version: str) -> int:
     public_version = version.split("+", 1)[0].split("-", 1)[0]
     parts = public_version.split(".")
     if len(parts) < 3:
-        raise RuntimeError(
-            f"Could not parse cuDNN frontend Python version: {version!r}."
-        )
+        raise RuntimeError(f"Could not parse cuDNN frontend Python version: {version!r}.")
     major, minor, patch = (int(part) for part in parts[:3])
     return major * 10000 + minor * 100 + patch
 
@@ -229,9 +227,7 @@ def serialized_graph(
     scalar_sizes, packed_scalar_values = pack_scalar_values(scalar_values)
 
     def binding_array(bindings, field):
-        return np.asarray(
-            [getattr(binding, field) for binding in bindings], dtype=np.int64
-        )
+        return np.asarray([getattr(binding, field) for binding in bindings], dtype=np.int64)
 
     return SerializedGraph(
         serialized_graph=serialized_graph_data,

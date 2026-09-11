@@ -745,12 +745,8 @@ class GemmPrimitive(BasePrimitive):
 
         # Only perform JAX-based swizzle for MXFP8, NVFP4 swizzle will go though nvte kernel
         if scaling_mode.is_mxfp8_scaling:
-            lhs_scale_inv = swizzle_mxfp8_scale(
-                lhs_scale_inv, lhs_flatten_axis, lhs_transposed
-            )
-            rhs_scale_inv = swizzle_mxfp8_scale(
-                rhs_scale_inv, rhs_flatten_axis, not rhs_transposed
-            )
+            lhs_scale_inv = swizzle_mxfp8_scale(lhs_scale_inv, lhs_flatten_axis, lhs_transposed)
+            rhs_scale_inv = swizzle_mxfp8_scale(rhs_scale_inv, rhs_flatten_axis, not rhs_transposed)
 
         # Determine if we need to reorder the tensor so that the input/output are in the correct layout for the collective operation
         need_reorder = not transpose_batch_sequence and not is_outer and not collective_op.is_none

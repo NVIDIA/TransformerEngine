@@ -390,9 +390,7 @@ def test_fused_attn_score_mod_rejects_masks_before_cudnn_frontend():
         ((9, 6, 0), (32, 2048, 2048, True)),
     ],
 )
-def test_thd_graph_bucketing_requires_cudnn_9_6(
-    monkeypatch, cudnn_version, expected_dimensions
-):
+def test_thd_graph_bucketing_requires_cudnn_9_6(monkeypatch, cudnn_version, expected_dimensions):
     """Pre-9.6 THD graphs retain dense dimensions and metadata extents."""
     monkeypatch.setattr(cudnn_attention, "get_cudnn_version", lambda: cudnn_version)
     monkeypatch.setattr(cudnn_attention, "_device_arch", lambda: 90)
@@ -406,6 +404,7 @@ def test_thd_graph_bucketing_requires_cudnn_9_6(
         qk_dim=128,
         v_dim=128,
     )
+
     class Config:
         qkv_layout = QKVLayout.THD_THD_THD
         max_segments_per_seq = 4

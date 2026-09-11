@@ -1433,16 +1433,12 @@ _fused_attn.defvjp(_fused_attn_fwd_rule, _fused_attn_bwd_rule)
 
 @partial(jax.custom_vjp, nondiff_argnums=(4,))
 def _fused_attn_fp8(qkv, sequence_descriptor, seed, quantizer_set, config):
-    output, _ = tex.fused_attn_fp8_fwd(
-        qkv, sequence_descriptor, seed, quantizer_set, config
-    )
+    output, _ = tex.fused_attn_fp8_fwd(qkv, sequence_descriptor, seed, quantizer_set, config)
     return output
 
 
 def _fused_attn_fp8_fwd_rule(qkv, sequence_descriptor, seed, quantizer_set, config):
-    return tex.fused_attn_fp8_fwd(
-        qkv, sequence_descriptor, seed, quantizer_set, config
-    )
+    return tex.fused_attn_fp8_fwd(qkv, sequence_descriptor, seed, quantizer_set, config)
 
 
 def _fused_attn_fp8_bwd_rule(config, ctx, doutput):

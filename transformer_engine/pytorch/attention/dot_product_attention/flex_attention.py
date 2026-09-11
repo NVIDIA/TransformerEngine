@@ -45,9 +45,7 @@ def _bhsd_dim_stride(
             (tensor.shape[0], tensor.shape[2], tensor.shape[1], tensor.shape[3]),
             (tensor.stride(0), tensor.stride(2), tensor.stride(1), tensor.stride(3)),
         )
-    raise ValueError(
-        f"Flex Attention only supports SBHD/BSHD tensor formats, got {tensor_format}."
-    )
+    raise ValueError(f"Flex Attention only supports SBHD/BSHD tensor formats, got {tensor_format}.")
 
 
 def _bhsd_graph_tensor(graph, tensor: torch.Tensor, tensor_format: str):
@@ -92,14 +90,10 @@ def _score_mod_tensor_dict_metadata(
     """Describe score_mod tensor parameters without including their values."""
     if tensors is None:
         return ()
-    return tuple(
-        (name, _score_mod_tensor_metadata(tensor)) for name, tensor in tensors.items()
-    )
+    return tuple((name, _score_mod_tensor_metadata(tensor)) for name, tensor in tensors.items())
 
 
-def _score_mod_bhsd_tensor_metadata(
-    tensor: torch.Tensor, tensor_format: str
-) -> Tuple[Any, ...]:
+def _score_mod_bhsd_tensor_metadata(tensor: torch.Tensor, tensor_format: str) -> Tuple[Any, ...]:
     """Describe an SBHD/BSHD runtime tensor as a cuDNN BHSD graph tensor."""
     dim, stride = _bhsd_dim_stride(tensor, tensor_format)
     return (dim, stride, tensor.dtype, _score_mod_device_key(tensor.device))
@@ -133,9 +127,7 @@ def _get_cudnn_current_stream_handle(cudnn, device: torch.device):
 def _build_cudnn_pygraph(dtype: torch.dtype, device: torch.device):
     """Create a cuDNN frontend Python graph for F16/BF16 SDPA."""
     if dtype not in (torch.float16, torch.bfloat16):
-        raise ValueError(
-            f"Flex Attention only supports FP16/BF16 tensors, got {dtype}."
-        )
+        raise ValueError(f"Flex Attention only supports FP16/BF16 tensors, got {dtype}.")
     return make_graph(torch_to_cudnn_dtype(dtype), device, name="te_flex_attention")
 
 
@@ -256,10 +248,7 @@ def _cudnn_score_mod_bwd_cache_key(
     """Pre-build cache key for score_mod bprop execution plans."""
     score_mod_key = _score_mod_callback_cache_key(score_mod)
     score_mod_bprop_key = _score_mod_callback_cache_key(score_mod_bprop)
-    if (
-        score_mod_key is _SCORE_MOD_UNCACHEABLE
-        or score_mod_bprop_key is _SCORE_MOD_UNCACHEABLE
-    ):
+    if score_mod_key is _SCORE_MOD_UNCACHEABLE or score_mod_bprop_key is _SCORE_MOD_UNCACHEABLE:
         return None
     return (
         "bwd",
@@ -407,9 +396,7 @@ def _build_cudnn_score_mod_bwd_graph(
         else {}
     )
     wrapped_score_mod = _wrap_score_mod(score_mod, score_mod_graph_tensors)
-    wrapped_score_mod_bprop = _wrap_score_mod(
-        score_mod_bprop, score_mod_bprop_graph_tensors
-    )
+    wrapped_score_mod_bprop = _wrap_score_mod(score_mod_bprop, score_mod_bprop_graph_tensors)
 
     dq_layer = torch.empty_like(query_layer)
     dk_layer = torch.empty_like(key_layer)
@@ -520,9 +507,7 @@ class FusedAttentionWithScoreModFunc(torch.autograd.Function):
         score_mod_tensors = dict(score_mod_tensors or {})
         score_mod_bprop_tensors = dict(score_mod_bprop_tensors or {})
         output_shape = (*query_layer.shape[:-1], value_layer.shape[-1])
-        output_layer = torch.empty(
-            output_shape, device=query_layer.device, dtype=query_layer.dtype
-        )
+        output_layer = torch.empty(output_shape, device=query_layer.device, dtype=query_layer.dtype)
         if is_training:
             stats = torch.empty(
                 (*q_bhsd_dim[:-1], 1),
@@ -594,8 +579,7 @@ class FusedAttentionWithScoreModFunc(torch.autograd.Function):
         # pylint: disable=missing-function-docstring
         if not ctx.is_training:
             raise RuntimeError(
-                "score_mod backward requires DotProductAttention to be in "
-                "training mode."
+                "score_mod backward requires DotProductAttention to be in training mode."
             )
 
         saved_tensors = ctx.saved_tensors

@@ -51,8 +51,6 @@ def build_cudnn_graph(cudnn, graph, *, description: str) -> int:
         graph.create_execution_plans([cudnn.heur_mode.A, cudnn.heur_mode.FALLBACK])
         graph.check_support()
     except cudnn.cudnnGraphNotSupportedError as exc:
-        raise RuntimeError(
-            f"cuDNN {description} graph is not supported: {exc}"
-        ) from exc
+        raise RuntimeError(f"cuDNN {description} graph is not supported: {exc}") from exc
     graph.build_plans(cudnn.build_plan_policy.HEURISTICS_CHOICE)
     return max(int(graph.get_workspace_size()), 1)

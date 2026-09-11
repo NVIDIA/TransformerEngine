@@ -277,9 +277,7 @@ def _multiply_offsets_as_uint64_words(offsets, multiplier):
     carry = (product_lo >> 16) + (product_mid_lo & mask) + (product_mid_hi & mask)
 
     low_word = (product_lo & mask) | ((carry & mask) << 16)
-    high_word = (
-        product_hi + (product_mid_lo >> 16) + (product_mid_hi >> 16) + (carry >> 16)
-    )
+    high_word = product_hi + (product_mid_lo >> 16) + (product_mid_hi >> 16) + (carry >> 16)
     return jnp.stack((low_word, high_word), axis=-1)
 
 
@@ -425,9 +423,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         rng_state_shape = (seed_aval.shape[0], checker.rng_state_size)
         rng_state_aval = seed_aval.update(shape=rng_state_shape, dtype=checker.rng_state_dtype)
 
-        wkspace_aval = q_aval.update(
-            shape=(graph_info.graph.workspace_size,), dtype=jnp.uint8
-        )
+        wkspace_aval = q_aval.update(shape=(graph_info.graph.workspace_size,), dtype=jnp.uint8)
 
         assert (
             softmax_offset_aval.dtype == jnp.float32
@@ -965,9 +961,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         dk_aval = k_aval.update(shape=k_aval.shape, dtype=k_dtype)
         dv_aval = v_aval.update(shape=v_aval.shape, dtype=v_dtype)
         dbias_aval = bias_aval.update(shape=bias_aval.shape, dtype=bias_dtype)
-        wkspace_aval = q_aval.update(
-            shape=(graph_info.graph.workspace_size,), dtype=jnp.uint8
-        )
+        wkspace_aval = q_aval.update(shape=(graph_info.graph.workspace_size,), dtype=jnp.uint8)
 
         # Validate incoming softmax_offset shape and dtype
         assert (
@@ -3781,9 +3775,10 @@ def fused_attn_bwd(
         raise ValueError(f"Unknown {qkv_layout=}")
 
     if attn_bias_type in (AttnBiasType.NO_BIAS, AttnBiasType.ALIBI):
-        assert (
-            bias is None
-        ), f"bias must be None when attn_bias_type is {attn_bias_type}, but got bias with type={type(bias)}"
+        assert bias is None, (
+            f"bias must be None when attn_bias_type is {attn_bias_type}, but got bias with"
+            f" type={type(bias)}"
+        )
         bias = jnp.zeros(0, dtype=qkv[0].dtype)
 
     if softmax_offset is None:

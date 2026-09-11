@@ -369,12 +369,10 @@ def _serialized_score_mod_graph(
         cudnn_frontend_version=int(cudnn_frontend_version),
         workspace_size=int(workspace_size),
         input_bindings=[
-            GraphBinding(uid=int(uid), buffer_index=index)
-            for index, uid in enumerate(input_uids)
+            GraphBinding(uid=int(uid), buffer_index=index) for index, uid in enumerate(input_uids)
         ],
         output_bindings=[
-            GraphBinding(uid=int(uid), buffer_index=index)
-            for index, uid in enumerate(output_uids)
+            GraphBinding(uid=int(uid), buffer_index=index) for index, uid in enumerate(output_uids)
         ],
         scalar_uids=np.asarray(scalar_uids, dtype=np.int64),
         scalar_values=scalar_values,

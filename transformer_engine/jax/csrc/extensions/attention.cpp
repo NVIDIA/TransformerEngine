@@ -128,8 +128,8 @@ CudnnGraphPtr GetCudnnGraph(cudaStream_t stream, Dictionary &attrs) {
 
   auto graph = std::make_shared<cudnn_frontend::graph::Graph>();
   auto status = graph->deserialize(handle, serialized_data);
-  NVTE_CHECK(status.is_good(), "Failed to deserialize cuDNN frontend graph: ",
-             status.get_message());
+  NVTE_CHECK(status.is_good(),
+             "Failed to deserialize cuDNN frontend graph: ", status.get_message());
 
   std::lock_guard<std::mutex> lock(GetCudnnGraphCacheMutex());
   auto &cache = GetCudnnGraphCache();
@@ -176,18 +176,16 @@ Error_Type ExecuteCudnnGraph(cudaStream_t stream, Dictionary &attrs,
                    static_cast<size_t>(input_buffer_indices[i]) < input_ptrs.size(),
                "cuDNN graph input binding index is out of range.");
     NVTE_CHECK(input_byte_offsets[i] >= 0, "cuDNN graph input byte offset must be non-negative.");
-    auto *ptr = static_cast<uint8_t *>(input_ptrs[input_buffer_indices[i]]) +
-                input_byte_offsets[i];
+    auto *ptr = static_cast<uint8_t *>(input_ptrs[input_buffer_indices[i]]) + input_byte_offsets[i];
     variant_pack.emplace(input_uids[i], ptr);
   }
   for (size_t i = 0; i < output_uids.size(); ++i) {
     NVTE_CHECK(output_buffer_indices[i] >= 0 &&
                    static_cast<size_t>(output_buffer_indices[i]) < output_ptrs.size(),
                "cuDNN graph output binding index is out of range.");
-    NVTE_CHECK(output_byte_offsets[i] >= 0,
-               "cuDNN graph output byte offset must be non-negative.");
-    auto *ptr = static_cast<uint8_t *>(output_ptrs[output_buffer_indices[i]]) +
-                output_byte_offsets[i];
+    NVTE_CHECK(output_byte_offsets[i] >= 0, "cuDNN graph output byte offset must be non-negative.");
+    auto *ptr =
+        static_cast<uint8_t *>(output_ptrs[output_buffer_indices[i]]) + output_byte_offsets[i];
     variant_pack.emplace(output_uids[i], ptr);
   }
 
@@ -215,9 +213,7 @@ void AppendRemainingBuffers(Variadic_Buffer_Type args, std::vector<void *> *ptrs
   }
 }
 
-size_t BufferBytes(const Buffer_Type &buffer) {
-  return buffer.size_bytes();
-}
+size_t BufferBytes(const Buffer_Type &buffer) { return buffer.size_bytes(); }
 
 void MemsetResultAsync(cudaStream_t stream, Result_Type result, int value) {
   NVTE_CHECK_CUDA(cudaMemsetAsync(result->untyped_data(), value, BufferBytes(*result), stream));
@@ -251,13 +247,15 @@ void PopulateRngStateAsync(cudaStream_t stream, const Buffer_Type &seed, Result_
 
 }  // namespace
 
-Error_Type FusedAttnForwardFFI(
-    cudaStream_t stream, Buffer_Type q_buf, Buffer_Type k_buf, Buffer_Type v_buf,
-    Buffer_Type bias_buf, Buffer_Type softmax_offset_buf, Buffer_Type seed_buf,
-    Buffer_Type q_seqlens_buf, Buffer_Type kv_seqlens_buf, Buffer_Type q_seq_offsets_buf,
-    Buffer_Type k_seq_offsets_buf, Variadic_Buffer_Type remaining_args, Result_Type output_buf,
-    Result_Type stats_buf, Result_Type max_buf, Result_Type rng_state_buf,
-    Result_Type workspace_buf, Dictionary attrs) {
+Error_Type FusedAttnForwardFFI(cudaStream_t stream, Buffer_Type q_buf, Buffer_Type k_buf,
+                               Buffer_Type v_buf, Buffer_Type bias_buf,
+                               Buffer_Type softmax_offset_buf, Buffer_Type seed_buf,
+                               Buffer_Type q_seqlens_buf, Buffer_Type kv_seqlens_buf,
+                               Buffer_Type q_seq_offsets_buf, Buffer_Type k_seq_offsets_buf,
+                               Variadic_Buffer_Type remaining_args, Result_Type output_buf,
+                               Result_Type stats_buf, Result_Type max_buf,
+                               Result_Type rng_state_buf, Result_Type workspace_buf,
+                               Dictionary attrs) {
   const bool is_ragged = get_attr_value<bool>(attrs, "is_ragged");
   const uint64_t rng_increment =
       static_cast<uint64_t>(get_attr_value<int64_t>(attrs, "rng_offset_increment"));
@@ -271,17 +269,21 @@ Error_Type FusedAttnForwardFFI(
   }
 
   std::vector<void *> input_ptrs = {
-      q_buf.untyped_data(),             k_buf.untyped_data(),
-      v_buf.untyped_data(),             bias_buf.untyped_data(),
-      softmax_offset_buf.untyped_data(), seed_buf.untyped_data(),
-      q_seqlens_buf.untyped_data(),      kv_seqlens_buf.untyped_data(),
-      q_seq_offsets_buf.untyped_data(),  k_seq_offsets_buf.untyped_data(),
+      q_buf.untyped_data(),
+      k_buf.untyped_data(),
+      v_buf.untyped_data(),
+      bias_buf.untyped_data(),
+      softmax_offset_buf.untyped_data(),
+      seed_buf.untyped_data(),
+      q_seqlens_buf.untyped_data(),
+      kv_seqlens_buf.untyped_data(),
+      q_seq_offsets_buf.untyped_data(),
+      k_seq_offsets_buf.untyped_data(),
   };
   AppendRemainingBuffers(remaining_args, &input_ptrs);
   std::vector<void *> output_ptrs = {output_buf->untyped_data(), stats_buf->untyped_data(),
                                      max_buf->untyped_data(), rng_state_buf->untyped_data()};
-  return ExecuteCudnnGraph(stream, attrs, input_ptrs, output_ptrs,
-                           workspace_buf->untyped_data());
+  return ExecuteCudnnGraph(stream, attrs, input_ptrs, output_ptrs, workspace_buf->untyped_data());
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedAttnForwardHandler, FusedAttnForwardFFI,
@@ -306,35 +308,45 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedAttnForwardHandler, FusedAttnForwardFFI,
                                   .Attrs(),
                               FFI_CudaGraph_Traits);
 
-Error_Type FusedAttnBackwardFFI(
-    cudaStream_t stream, Buffer_Type q_buf, Buffer_Type k_buf, Buffer_Type v_buf,
-    Buffer_Type bias_buf, Buffer_Type softmax_offset_buf, Buffer_Type stats_buf,
-    Buffer_Type rng_state_buf, Buffer_Type output_buf, Buffer_Type doutput_buf,
-    Buffer_Type q_seqlens_buf, Buffer_Type kv_seqlens_buf, Buffer_Type q_seq_offsets_buf,
-    Buffer_Type k_seq_offsets_buf, Variadic_Buffer_Type remaining_args, Result_Type dq_buf,
-    Result_Type dk_buf, Result_Type dv_buf, Result_Type dbias_buf,
-    Result_Type dsoftmax_offset_buf, Result_Type workspace_buf, Dictionary attrs) {
+Error_Type FusedAttnBackwardFFI(cudaStream_t stream, Buffer_Type q_buf, Buffer_Type k_buf,
+                                Buffer_Type v_buf, Buffer_Type bias_buf,
+                                Buffer_Type softmax_offset_buf, Buffer_Type stats_buf,
+                                Buffer_Type rng_state_buf, Buffer_Type output_buf,
+                                Buffer_Type doutput_buf, Buffer_Type q_seqlens_buf,
+                                Buffer_Type kv_seqlens_buf, Buffer_Type q_seq_offsets_buf,
+                                Buffer_Type k_seq_offsets_buf, Variadic_Buffer_Type remaining_args,
+                                Result_Type dq_buf, Result_Type dk_buf, Result_Type dv_buf,
+                                Result_Type dbias_buf, Result_Type dsoftmax_offset_buf,
+                                Result_Type workspace_buf, Dictionary attrs) {
   if (get_attr_value<bool>(attrs, "is_ragged")) {
     MemsetResultAsync(stream, dq_buf, 0);
     MemsetResultAsync(stream, dk_buf, 0);
     MemsetResultAsync(stream, dv_buf, 0);
   }
   std::vector<void *> input_ptrs = {
-      q_buf.untyped_data(),             k_buf.untyped_data(),
-      v_buf.untyped_data(),             bias_buf.untyped_data(),
-      softmax_offset_buf.untyped_data(), stats_buf.untyped_data(),
-      rng_state_buf.untyped_data(),      output_buf.untyped_data(),
-      doutput_buf.untyped_data(),        q_seqlens_buf.untyped_data(),
-      kv_seqlens_buf.untyped_data(),     q_seq_offsets_buf.untyped_data(),
+      q_buf.untyped_data(),
+      k_buf.untyped_data(),
+      v_buf.untyped_data(),
+      bias_buf.untyped_data(),
+      softmax_offset_buf.untyped_data(),
+      stats_buf.untyped_data(),
+      rng_state_buf.untyped_data(),
+      output_buf.untyped_data(),
+      doutput_buf.untyped_data(),
+      q_seqlens_buf.untyped_data(),
+      kv_seqlens_buf.untyped_data(),
+      q_seq_offsets_buf.untyped_data(),
       k_seq_offsets_buf.untyped_data(),
   };
   AppendRemainingBuffers(remaining_args, &input_ptrs);
   std::vector<void *> output_ptrs = {
-      dq_buf->untyped_data(), dk_buf->untyped_data(), dv_buf->untyped_data(),
-      dbias_buf->untyped_data(), dsoftmax_offset_buf->untyped_data(),
+      dq_buf->untyped_data(),
+      dk_buf->untyped_data(),
+      dv_buf->untyped_data(),
+      dbias_buf->untyped_data(),
+      dsoftmax_offset_buf->untyped_data(),
   };
-  return ExecuteCudnnGraph(stream, attrs, input_ptrs, output_ptrs,
-                           workspace_buf->untyped_data());
+  return ExecuteCudnnGraph(stream, attrs, input_ptrs, output_ptrs, workspace_buf->untyped_data());
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedAttnBackwardHandler, FusedAttnBackwardFFI,
@@ -371,8 +383,7 @@ Error_Type FusedAttnScoreModForwardFFI(cudaStream_t stream, Buffer_Type q_buf, B
                                     v_buf.untyped_data()};
   AppendRemainingBuffers(score_mod_args, &input_ptrs);
   std::vector<void *> output_ptrs = {output_buf->untyped_data(), stats_buf->untyped_data()};
-  return ExecuteCudnnGraph(stream, attrs, input_ptrs, output_ptrs,
-                           workspace_buf->untyped_data());
+  return ExecuteCudnnGraph(stream, attrs, input_ptrs, output_ptrs, workspace_buf->untyped_data());
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedAttnScoreModForwardHandler, FusedAttnScoreModForwardFFI,
@@ -400,8 +411,7 @@ Error_Type FusedAttnScoreModBackwardFFI(cudaStream_t stream, Buffer_Type q_buf, 
   AppendRemainingBuffers(score_mod_args, &input_ptrs);
   std::vector<void *> output_ptrs = {dq_buf->untyped_data(), dk_buf->untyped_data(),
                                      dv_buf->untyped_data()};
-  return ExecuteCudnnGraph(stream, attrs, input_ptrs, output_ptrs,
-                           workspace_buf->untyped_data());
+  return ExecuteCudnnGraph(stream, attrs, input_ptrs, output_ptrs, workspace_buf->untyped_data());
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedAttnScoreModBackwardHandler, FusedAttnScoreModBackwardFFI,

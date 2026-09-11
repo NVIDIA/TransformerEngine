@@ -17,9 +17,8 @@ namespace transformer_engine {
 namespace extract_seed_and_offset {
 namespace {
 
-__global__ void kernel(int64_t *rng_state_ptr, bool captured, int64_t *seed_ptr,
-                       uint64_t seed_val, int64_t *offset_ptr, uint64_t offset_val,
-                       uint32_t offset_intragraph) {
+__global__ void kernel(int64_t *rng_state_ptr, bool captured, int64_t *seed_ptr, uint64_t seed_val,
+                       int64_t *offset_ptr, uint64_t offset_val, uint32_t offset_intragraph) {
   if (captured) {
     rng_state_ptr[0] = *seed_ptr;
     rng_state_ptr[1] = static_cast<int64_t>(*offset_ptr + static_cast<int64_t>(offset_intragraph));

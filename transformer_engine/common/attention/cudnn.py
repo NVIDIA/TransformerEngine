@@ -191,9 +191,7 @@ def cudnn_mask_options(
     )
     version = encode_cudnn_version(cudnn_version)
     options: dict[str, bool | int | str] = {
-        "diagonal_alignment": (
-            "bottom_right" if mask.bottom_right_diagonal else "top_left"
-        ),
+        "diagonal_alignment": ("bottom_right" if mask.bottom_right_diagonal else "top_left"),
         "is_padding": mask.padding,
     }
     if version < 90600:
@@ -356,9 +354,7 @@ def check_f16_fused_attention_support(
         and (dqk, dv) != (192, 128)
         and dqk != dv
     ):
-        return _unsupported(
-            "this Hopper backward head-dimension combination is unsupported"
-        )
+        return _unsupported("this Hopper backward head-dimension combination is unsupported")
 
     alibi_supported = (
         bias == "alibi"
@@ -438,10 +434,7 @@ def check_f16_fused_attention_support(
                 and bias == "no_bias"
                 and dropout == 0.0
             )
-            or (
-                mask in ("causal_bottom_right", "padding_causal_bottom_right")
-                and sq <= skv
-            )
+            or (mask in ("causal_bottom_right", "padding_causal_bottom_right") and sq <= skv)
         )
         mask_ok = mask_ok or modern_mask_ok
     if not mask_ok:
@@ -473,10 +466,7 @@ def check_f16_fused_attention_support(
         or (
             left >= -1
             and right == 0
-            and (
-                mask in ("no_mask", "causal")
-                or (mask == "causal_bottom_right" and sq == skv)
-            )
+            and (mask in ("no_mask", "causal") or (mask == "causal_bottom_right" and sq == skv))
             and sq <= skv
             and dropout == 0.0
             and bias == "no_bias"
@@ -657,10 +647,7 @@ def check_fp8_fused_attention_support(
         version < 92100
         and layout.qkv_format in ("bshd", "sbhd")
         and config.softmax_type == "vanilla"
-    ) or (
-        version >= 92100
-        and layout.qkv_format in ("bshd", "sbhd", "bhsd")
-    )
+    ) or (version >= 92100 and layout.qkv_format in ("bshd", "sbhd", "bhsd"))
     if not format_softmax_ok:
         return _unsupported("FP8 attention layout or softmax type is not supported")
     return FusedAttentionSupport(True)

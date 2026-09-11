@@ -48,9 +48,7 @@ def freeze_score_mod_cache_key(value: Any, *, is_array: Callable[[Any], bool]) -
         )
         return tuple(sorted(items, key=repr))
     if isinstance(value, (list, tuple)):
-        return tuple(
-            freeze_score_mod_cache_key(item, is_array=is_array) for item in value
-        )
+        return tuple(freeze_score_mod_cache_key(item, is_array=is_array) for item in value)
     if isinstance(value, (set, frozenset)):
         items = (freeze_score_mod_cache_key(item, is_array=is_array) for item in value)
         return tuple(sorted(items, key=repr))
@@ -64,9 +62,7 @@ def freeze_score_mod_cache_key(value: Any, *, is_array: Callable[[Any], bool]) -
     return value
 
 
-def _explicit_cache_key(
-    callback_owner: Any, *, is_array: Callable[[Any], bool]
-) -> Any | None:
+def _explicit_cache_key(callback_owner: Any, *, is_array: Callable[[Any], bool]) -> Any | None:
     explicit_key = getattr(callback_owner, "score_mod_graph_cache_key", None)
     if explicit_key is None:
         return None

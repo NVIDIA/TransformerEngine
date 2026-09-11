@@ -4,9 +4,9 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include <string>
-
 #include "transformer_engine/fused_attn.h"
+
+#include <string>
 
 #include "../common.h"
 

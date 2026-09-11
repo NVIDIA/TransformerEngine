@@ -376,9 +376,7 @@ class _FusedDotProductAttention(TransformerEngineBase):  # pylint: disable=too-f
                     "JAX FP8 attention currently supports FP16/BF16 DPA boundaries only; "
                     "fp8_mha is not implemented."
                 )
-            fused_attn_kwargs["quantizer_set"] = self.generate_attention_quantizer_set(
-                fp8_recipe
-            )
+            fused_attn_kwargs["quantizer_set"] = self.generate_attention_quantizer_set(fp8_recipe)
 
         if self.qkv_layout.is_qkvpacked():
             """qkvpacked format, treat

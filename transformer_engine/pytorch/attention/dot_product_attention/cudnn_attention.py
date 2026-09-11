@@ -133,14 +133,10 @@ def _quantized_scale_inv(tensor: Any, *, columnwise: bool = False) -> torch.Tens
     if _is_float8_tensor(tensor):
         return tensor._scale_inv
     if _is_mxfp8_tensor(tensor):
-        scale = (
-            tensor._columnwise_scale_inv if columnwise else tensor._rowwise_scale_inv
-        )
+        scale = tensor._columnwise_scale_inv if columnwise else tensor._rowwise_scale_inv
         if scale is None:
             orientation = "columnwise" if columnwise else "rowwise"
-            raise ValueError(
-                f"MXFP8 attention input has no {orientation} scale-inverse buffer."
-            )
+            raise ValueError(f"MXFP8 attention input has no {orientation} scale-inverse buffer.")
         return scale
     raise TypeError(f"Expected an FP8 attention tensor, got {type(tensor).__name__}.")
 
@@ -167,9 +163,7 @@ def _padded_sequence_lengths(cu_seqlens: torch.Tensor, batch: int) -> torch.Tens
     lengths = _sequence_lengths(cu_seqlens)
     if lengths.numel() == batch:
         return lengths
-    padding = torch.zeros(
-        batch - lengths.numel(), dtype=lengths.dtype, device=lengths.device
-    )
+    padding = torch.zeros(batch - lengths.numel(), dtype=lengths.dtype, device=lengths.device)
     return torch.cat((lengths, padding))
 
 
@@ -230,9 +224,7 @@ def _allocate_fp8_kernel_output(quantizer, shape, fake_dtype, device):
         )
     if isinstance(quantizer, MXFP8Quantizer):
         return torch.empty(shape, dtype=fake_dtype, device=device), None
-    raise TypeError(
-        f"Unsupported FP8 attention output quantizer {type(quantizer).__name__}."
-    )
+    raise TypeError(f"Unsupported FP8 attention output quantizer {type(quantizer).__name__}.")
 
 
 def _format_from_layout_component(component: str) -> str:
@@ -243,11 +235,7 @@ def _q_kv_formats(qkv_layout: str) -> Tuple[str, str]:
     layout = qkv_layout.removeprefix("paged_kv_")
     components = layout.split("_")
     q_format = _format_from_layout_component(components[0])
-    kv_format = (
-        _format_from_layout_component(components[-1])
-        if len(components) > 1
-        else q_format
-    )
+    kv_format = _format_from_layout_component(components[-1]) if len(components) > 1 else q_format
     return q_format, kv_format
 
 
@@ -343,9 +331,7 @@ def _allocate_output(
 def _storage_span(tensor: torch.Tensor) -> int:
     if tensor.numel() == 0:
         return 0
-    return 1 + sum(
-        (size - 1) * stride for size, stride in zip(tensor.shape, tensor.stride())
-    )
+    return 1 + sum((size - 1) * stride for size, stride in zip(tensor.shape, tensor.stride()))
 
 
 def _allocate_grad_views(
@@ -363,22 +349,17 @@ def _allocate_grad_views(
     for indices in groups.values():
         if len(indices) == 1:
             inp = inputs[indices[0]]
-            out = torch.empty_strided(
-                inp.shape, inp.stride(), dtype=inp.dtype, device=inp.device
-            )
+            out = torch.empty_strided(inp.shape, inp.stride(), dtype=inp.dtype, device=inp.device)
             out.zero_()
             outputs[indices[0]] = out
             continue
 
         min_offset = min(inputs[index].storage_offset() for index in indices)
         max_end = max(
-            inputs[index].storage_offset() + _storage_span(inputs[index])
-            for index in indices
+            inputs[index].storage_offset() + _storage_span(inputs[index]) for index in indices
         )
         exemplar = inputs[indices[0]]
-        base = torch.zeros(
-            max_end - min_offset, dtype=exemplar.dtype, device=exemplar.device
-        )
+        base = torch.zeros(max_end - min_offset, dtype=exemplar.dtype, device=exemplar.device)
         for index in indices:
             inp = inputs[index]
             outputs[index] = torch.as_strided(
@@ -406,9 +387,7 @@ def _reserve_philox_state(
     # Development-tree compatibility before the local extension has been
     # rebuilt. Installed packages always expose the graph-safe helper above.
     if rng_gen is None:
-        index = (
-            device.index if device.index is not None else torch.cuda.current_device()
-        )
+        index = device.index if device.index is not None else torch.cuda.current_device()
         rng_gen = torch.cuda.default_generators[index]
     seed = rng_gen.initial_seed()
     offset = rng_gen.get_offset()
@@ -426,10 +405,8 @@ def _mask_options(
 ) -> Dict[str, Any]:
     options = cudnn_mask_options(
         causal=attn_mask_type in ("causal", "padding_causal"),
-        bottom_right=attn_mask_type
-        in ("causal_bottom_right", "padding_causal_bottom_right"),
-        padding=attn_mask_type
-        in ("padding", "padding_causal", "padding_causal_bottom_right"),
+        bottom_right=attn_mask_type in ("causal_bottom_right", "padding_causal_bottom_right"),
+        padding=attn_mask_type in ("padding", "padding_causal", "padding_causal_bottom_right"),
         bottom_right_diagonal=bottom_right_diagonal,
         window_size=window_size,
         max_seqlen_q=max_seqlen_q,
@@ -522,34 +499,25 @@ def _build_f16_fwd_graph(
     bottom_right_diagonal: bool,
 ) -> GraphEntry:
     cudnn = import_cudnn_frontend()
-    graph = make_graph(
-        torch_to_cudnn_dtype(q.dtype), q.device, name="te_fused_attention_fwd"
-    )
+    graph = make_graph(torch_to_cudnn_dtype(q.dtype), q.device, name="te_fused_attention_fwd")
     q_format, kv_format = _q_kv_formats(qkv_layout)
     batch = cu_seqlens_q.numel() - 1
     is_ragged_q = q_format == "thd"
     is_ragged_kv = kv_format == "thd"
     use_ragged_stats = is_ragged_q and cudnn.backend_version() >= 90600
-    use_token_buckets = (
-        cudnn.backend_version() >= 90600
-        and torch.cuda.get_device_capability(q.device) != (12, 0)
-    )
+    use_token_buckets = cudnn.backend_version() >= 90600 and torch.cuda.get_device_capability(
+        q.device
+    ) != (12, 0)
     use_direct_offsets = cudnn.backend_version() >= 92400 and dropout == 0.0
     use_legacy_offsets = (is_ragged_q or is_ragged_kv) and not use_direct_offsets
-    graph_batch = (
-        _max_ragged_batch(batch) if use_legacy_offsets and use_token_buckets else batch
-    )
+    graph_batch = _max_ragged_batch(batch) if use_legacy_offsets and use_token_buckets else batch
     if not use_token_buckets:
         use_ragged_stats = False
     graph_seqlen_q = (
-        _max_ragged_tokens(q.shape[0])
-        if is_ragged_q and use_token_buckets
-        else max_seqlen_q
+        _max_ragged_tokens(q.shape[0]) if is_ragged_q and use_token_buckets else max_seqlen_q
     )
     graph_seqlen_kv = (
-        _max_ragged_tokens(k.shape[0])
-        if is_ragged_kv and use_token_buckets
-        else max_seqlen_kv
+        _max_ragged_tokens(k.shape[0]) if is_ragged_kv and use_token_buckets else max_seqlen_kv
     )
 
     tensors: Dict[str, Any] = {}
@@ -772,16 +740,14 @@ def _build_f16_fwd_graph(
             data_type=torch.int64 if use_legacy_offsets else None,
         )
         tensors["offset_stats"] = offset_stats
-    stats_t.set_output(True).set_data_type(cudnn.data_type.FLOAT).set_dim(
-        stats_dim
-    ).set_stride(stats_stride)
+    stats_t.set_output(True).set_data_type(cudnn.data_type.FLOAT).set_dim(stats_dim).set_stride(
+        stats_stride
+    )
     if use_ragged_stats:
         stats_t.set_ragged_offset(offset_stats).set_ragged_offset_multiplier(stats_mult)
     tensors["Stats"] = stats_t
 
-    return GraphEntry(
-        graph=graph, tensors=tensors, workspace_size=finalize_graph(graph)
-    )
+    return GraphEntry(graph=graph, tensors=tensors, workspace_size=finalize_graph(graph))
 
 
 def _f16_forward(
@@ -818,17 +784,12 @@ def _f16_forward(
     heads = q.shape[1] if q_format == "bhsd" else q.shape[-2]
     total_tokens_q = q.shape[0] if q_format == "thd" else batch * max_seqlen_q
     cudnn = import_cudnn_frontend()
-    use_token_buckets = (
-        cudnn.backend_version() >= 90600
-        and torch.cuda.get_device_capability(q.device) != (12, 0)
-    )
+    use_token_buckets = cudnn.backend_version() >= 90600 and torch.cuda.get_device_capability(
+        q.device
+    ) != (12, 0)
     use_direct_offsets = cudnn.backend_version() >= 92400 and dropout == 0.0
-    use_legacy_offsets = (
-        q_format == "thd" or kv_format == "thd"
-    ) and not use_direct_offsets
-    graph_batch = (
-        _max_ragged_batch(batch) if use_legacy_offsets and use_token_buckets else batch
-    )
+    use_legacy_offsets = (q_format == "thd" or kv_format == "thd") and not use_direct_offsets
+    graph_batch = _max_ragged_batch(batch) if use_legacy_offsets and use_token_buckets else batch
     ragged_stats = (
         q_format == "thd"
         and cudnn.backend_version() >= 90600
@@ -850,17 +811,11 @@ def _f16_forward(
     )
     stats = torch.empty(stats_shape, dtype=torch.float32, device=q.device)
     max_scores = (
-        torch.empty(stats_shape, dtype=torch.float32, device=q.device)
-        if return_max_logit
-        else None
+        torch.empty(stats_shape, dtype=torch.float32, device=q.device) if return_max_logit else None
     )
     rng_state = _reserve_philox_state(q.device, rng_gen, _F16_RNG_ELTS_PER_THREAD)
-    cu_seqlens_q_padded = (
-        cu_seqlens_q if cu_seqlens_q_padded is None else cu_seqlens_q_padded
-    )
-    cu_seqlens_kv_padded = (
-        cu_seqlens_kv if cu_seqlens_kv_padded is None else cu_seqlens_kv_padded
-    )
+    cu_seqlens_q_padded = cu_seqlens_q if cu_seqlens_q_padded is None else cu_seqlens_q_padded
+    cu_seqlens_kv_padded = cu_seqlens_kv if cu_seqlens_kv_padded is None else cu_seqlens_kv_padded
 
     key = _f16_fwd_key(
         is_training=is_training,
@@ -889,9 +844,7 @@ def _f16_forward(
     entry = get_graph_entry(key)
     if entry is None:
         if torch.cuda.is_current_stream_capturing():
-            raise RuntimeError(
-                "cuDNN attention graph must be built before CUDA graph capture."
-            )
+            raise RuntimeError("cuDNN attention graph must be built before CUDA graph capture.")
         entry = _build_f16_fwd_graph(
             is_training=is_training,
             max_seqlen_q=max_seqlen_q,
@@ -936,12 +889,8 @@ def _f16_forward(
     legacy_offsets = tensors["_legacy_offsets"]
     graph_batch = tensors["_graph_batch"]
     if "seq_len_q" in tensors:
-        variant_pack[tensors["seq_len_q"]] = _padded_sequence_lengths(
-            cu_seqlens_q, graph_batch
-        )
-        variant_pack[tensors["seq_len_kv"]] = _padded_sequence_lengths(
-            cu_seqlens_kv, graph_batch
-        )
+        variant_pack[tensors["seq_len_q"]] = _padded_sequence_lengths(cu_seqlens_q, graph_batch)
+        variant_pack[tensors["seq_len_kv"]] = _padded_sequence_lengths(cu_seqlens_kv, graph_batch)
     if "offset_q" in tensors:
         if legacy_offsets:
             variant_pack[tensors["offset_q"]] = _element_ragged_offsets(
@@ -994,41 +943,29 @@ def _f16_forward(
         max_scores_for_reduce = max_scores
         if q_format == "thd":
             if max_scores.ndim == 4:
-                seqlens_q = _sequence_lengths(cu_seqlens_q).to(
-                    device=max_scores.device
+                seqlens_q = _sequence_lengths(cu_seqlens_q).to(device=max_scores.device)
+                sq_idx = torch.arange(max_scores.shape[2], device=max_scores.device).view(
+                    1, 1, -1, 1
                 )
-                sq_idx = torch.arange(
-                    max_scores.shape[2], device=max_scores.device
-                ).view(1, 1, -1, 1)
                 valid = sq_idx < seqlens_q.view(-1, 1, 1, 1)
-                max_scores_for_reduce = max_scores.masked_fill(
-                    ~valid, float("-inf")
-                )
+                max_scores_for_reduce = max_scores.masked_fill(~valid, float("-inf"))
             elif max_scores.ndim == 3:
-                seqlens_q = _sequence_lengths(cu_seqlens_q).to(
-                    device=max_scores.device
-                )
+                seqlens_q = _sequence_lengths(cu_seqlens_q).to(device=max_scores.device)
                 total_tokens = max_scores.shape[0]
                 starts = cu_seqlens_q_padded[:-1].to(device=max_scores.device)
                 ends = (starts + seqlens_q).clamp(max=total_tokens)
-                delta = torch.zeros(
-                    total_tokens + 1, dtype=torch.int32, device=max_scores.device
-                )
+                delta = torch.zeros(total_tokens + 1, dtype=torch.int32, device=max_scores.device)
                 updates = torch.ones_like(starts, dtype=torch.int32)
                 delta.scatter_add_(0, starts.clamp(max=total_tokens), updates)
                 delta.scatter_add_(0, ends, -updates)
                 valid = delta[:-1].cumsum(0) > 0
-                max_scores_for_reduce = max_scores.masked_fill(
-                    ~valid.view(-1, 1, 1), float("-inf")
-                )
+                max_scores_for_reduce = max_scores.masked_fill(~valid.view(-1, 1, 1), float("-inf"))
         reduce_dims = (0, 2) if max_scores_for_reduce.ndim == 3 else (0, 2, 3)
         max_logit = torch.amax(max_scores_for_reduce, dim=reduce_dims).to(output.dtype)
     return output, aux, max_logit
 
 
-def _fp8_output_shape(
-    batch: int, seqlen: int, heads: int, dim: int, tensor_format: str
-):
+def _fp8_output_shape(batch: int, seqlen: int, heads: int, dim: int, tensor_format: str):
     if tensor_format == "bshd":
         return (batch, seqlen, heads, dim)
     if tensor_format == "sbhd":
@@ -1063,14 +1000,8 @@ def _allocate_attention_grad_data(
     factory = torch.zeros if zero else torch.empty
 
     if len(components) == 1:
-        if (
-            head_dim_qk != head_dim_v
-            or heads != kv_heads
-            or max_seqlen_q != max_seqlen_kv
-        ):
-            raise ValueError(
-                f"Packed QKV gradient layout {layout!r} requires matching Q/K/V."
-            )
+        if head_dim_qk != head_dim_v or heads != kv_heads or max_seqlen_q != max_seqlen_kv:
+            raise ValueError(f"Packed QKV gradient layout {layout!r} requires matching Q/K/V.")
         packed_dim = components[0].index("3")
         packed_shape = list(q_shape)
         packed_shape.insert(packed_dim, 3)
@@ -1078,9 +1009,7 @@ def _allocate_attention_grad_data(
         return tuple(packed.select(packed_dim, index) for index in range(3))
     if len(components) == 2:
         if head_dim_qk != head_dim_v:
-            raise ValueError(
-                f"Packed KV gradient layout {layout!r} requires dQK == dV."
-            )
+            raise ValueError(f"Packed KV gradient layout {layout!r} requires dQK == dV.")
         q_out = factory(q_shape, dtype=dtype, device=device)
         packed_dim = components[1].index("2")
         packed_shape = list(k_shape)
@@ -1088,8 +1017,7 @@ def _allocate_attention_grad_data(
         packed = factory(packed_shape, dtype=dtype, device=device)
         return q_out, packed.select(packed_dim, 0), packed.select(packed_dim, 1)
     return tuple(
-        factory(shape, dtype=dtype, device=device)
-        for shape in (q_shape, k_shape, v_shape)
+        factory(shape, dtype=dtype, device=device) for shape in (q_shape, k_shape, v_shape)
     )
 
 
@@ -1328,17 +1256,13 @@ def _build_fp8_fwd_graph(
     output_t.set_output(True).set_dim((batch, heads, max_seqlen_q, d_v)).set_stride(
         _format_stride(batch, heads, max_seqlen_q, d_v, o_format)
     )
-    output_dtype = (
-        _fp8_cudnn_dtype(output) if _is_float8_tensor(output) else output.dtype
-    )
+    output_dtype = _fp8_cudnn_dtype(output) if _is_float8_tensor(output) else output.dtype
     output_t.set_data_type(output_dtype)
     stats_t.set_output(True).set_data_type(cudnn.data_type.FLOAT).set_dim(
         (batch, heads, max_seqlen_q, 1)
     ).set_stride((heads * max_seqlen_q, max_seqlen_q, 1, 1))
     tensors.update(O=output_t, Stats=stats_t)
-    return GraphEntry(
-        graph=graph, tensors=tensors, workspace_size=finalize_graph(graph)
-    )
+    return GraphEntry(graph=graph, tensors=tensors, workspace_size=finalize_graph(graph))
 
 
 def _fp8_forward(
@@ -1367,9 +1291,7 @@ def _fp8_forward(
     softmax_offset,
 ):
     if not isinstance(q, QuantizedTensorStorage):
-        raise TypeError(
-            "The FP8 cuDNN attention backend requires quantized Q/K/V tensors."
-        )
+        raise TypeError("The FP8 cuDNN attention backend requires quantized Q/K/V tensors.")
     if _is_mxfp8_tensor(q) and "padding" in attn_mask_type:
         # cuDNN Frontend 1.27's Python sdpa_mxfp8 forward binding omits the
         # seq_len inputs that its C++ graph API exposes. Preserve functional
@@ -1414,12 +1336,8 @@ def _fp8_forward(
     heads = q.shape[-2] if q_format != "bhsd" else q.shape[1]
     d_v = v.shape[-1]
     output_shape = _fp8_output_shape(batch, max_seqlen_q, heads, d_v, o_format)
-    output, amax_o = _allocate_fp8_kernel_output(
-        o_quantizer, output_shape, fake_dtype, q.device
-    )
-    stats = torch.empty(
-        (batch, heads, max_seqlen_q, 1), dtype=torch.float32, device=q.device
-    )
+    output, amax_o = _allocate_fp8_kernel_output(o_quantizer, output_shape, fake_dtype, q.device)
+    stats = torch.empty((batch, heads, max_seqlen_q, 1), dtype=torch.float32, device=q.device)
     amax_s = (
         s_quantizer.amax
         if isinstance(s_quantizer, Float8Quantizer)
@@ -1429,9 +1347,7 @@ def _fp8_forward(
             else None
         )
     )
-    rng_elts = (
-        max_seqlen_q * max_seqlen_q + _FP8_THREADS_PER_CTA - 1
-    ) // _FP8_THREADS_PER_CTA
+    rng_elts = (max_seqlen_q * max_seqlen_q + _FP8_THREADS_PER_CTA - 1) // _FP8_THREADS_PER_CTA
     rng_state = _reserve_philox_state(q.device, rng_gen, rng_elts)
 
     q_data = _quantized_data(q)
@@ -1461,9 +1377,7 @@ def _fp8_forward(
     entry = get_graph_entry(key)
     if entry is None:
         if torch.cuda.is_current_stream_capturing():
-            raise RuntimeError(
-                "cuDNN FP8 attention graph must be built before CUDA graph capture."
-            )
+            raise RuntimeError("cuDNN FP8 attention graph must be built before CUDA graph capture.")
         entry = _build_fp8_fwd_graph(
             max_seqlen_q=max_seqlen_q,
             max_seqlen_kv=max_seqlen_kv,
@@ -1570,9 +1484,7 @@ def fused_attn_fwd(
     del cuda_graph
     backend = FusedAttnBackend.cast(fused_attention_backend)
     if backend == FusedAttnBackend.No_Backend:
-        raise ValueError(
-            "No cuDNN fused-attention backend supports this configuration."
-        )
+        raise ValueError("No cuDNN fused-attention backend supports this configuration.")
     if attn_scale is None:
         attn_scale = 1.0 / math.sqrt(q.size(-1))
     if bottom_right_diagonal is None:
@@ -1586,9 +1498,7 @@ def fused_attn_fwd(
         if attn_bias_type != "no_bias" or attn_bias is not None:
             raise ValueError("FP8 fused attention does not support attention bias.")
         if return_max_logit:
-            raise ValueError(
-                "FP8 fused attention does not support returning maximum logits."
-            )
+            raise ValueError("FP8 fused attention does not support returning maximum logits.")
         return _fp8_forward(
             is_training,
             max_seqlen_q,
@@ -1684,34 +1594,25 @@ def _build_f16_bwd_graph(
     deterministic: bool,
 ) -> GraphEntry:
     cudnn = import_cudnn_frontend()
-    graph = make_graph(
-        torch_to_cudnn_dtype(q.dtype), q.device, name="te_fused_attention_bwd"
-    )
+    graph = make_graph(torch_to_cudnn_dtype(q.dtype), q.device, name="te_fused_attention_bwd")
     q_format, kv_format = _q_kv_formats(qkv_layout)
     dq_format, dkv_format = _q_kv_formats(dqkv_layout)
     batch = cu_seqlens_q.numel() - 1
     is_ragged_q = q_format == "thd"
     is_ragged_kv = kv_format == "thd"
     use_ragged_stats = is_ragged_q and cudnn.backend_version() >= 90600
-    use_token_buckets = (
-        cudnn.backend_version() >= 90600
-        and torch.cuda.get_device_capability(q.device) != (12, 0)
-    )
+    use_token_buckets = cudnn.backend_version() >= 90600 and torch.cuda.get_device_capability(
+        q.device
+    ) != (12, 0)
     use_legacy_offsets = is_ragged_q or is_ragged_kv
-    graph_batch = (
-        _max_ragged_batch(batch) if use_legacy_offsets and use_token_buckets else batch
-    )
+    graph_batch = _max_ragged_batch(batch) if use_legacy_offsets and use_token_buckets else batch
     if not use_token_buckets:
         use_ragged_stats = False
     graph_seqlen_q = (
-        _max_ragged_tokens(q.shape[0])
-        if is_ragged_q and use_token_buckets
-        else max_seqlen_q
+        _max_ragged_tokens(q.shape[0]) if is_ragged_q and use_token_buckets else max_seqlen_q
     )
     graph_seqlen_kv = (
-        _max_ragged_tokens(k.shape[0])
-        if is_ragged_kv and use_token_buckets
-        else max_seqlen_kv
+        _max_ragged_tokens(k.shape[0]) if is_ragged_kv and use_token_buckets else max_seqlen_kv
     )
 
     tensors: Dict[str, Any] = {
@@ -1903,9 +1804,7 @@ def _build_f16_bwd_graph(
         if softmax_offset is None or d_softmax_offset is None:
             raise ValueError(f"softmax_type={softmax_type!r} requires sink tensors.")
         sink_t = graph.tensor_like(softmax_offset, name="softmax_offset")
-        dsink_t = graph.tensor_like(
-            d_softmax_offset, name="d_softmax_offset"
-        ).set_output(True)
+        dsink_t = graph.tensor_like(d_softmax_offset, name="d_softmax_offset").set_output(True)
         tensors.update(softmax_offset=sink_t, d_softmax_offset=dsink_t)
         options.update(sink_token=sink_t, dSink_token=dsink_t)
 
@@ -1938,9 +1837,7 @@ def _build_f16_bwd_graph(
         dv_t.set_ragged_offset(offset_v).set_ragged_offset_multiplier(1)
     tensors.update(dQ=dq_t, dK=dk_t, dV=dv_t)
 
-    return GraphEntry(
-        graph=graph, tensors=tensors, workspace_size=finalize_graph(graph)
-    )
+    return GraphEntry(graph=graph, tensors=tensors, workspace_size=finalize_graph(graph))
 
 
 def _build_fp8_bwd_graph(
@@ -2087,17 +1984,13 @@ def _build_fp8_bwd_graph(
         options["dropout"] = (float(dropout), seed_t, offset_t)
     if softmax_type != "vanilla":
         sink_t = graph.tensor_like(softmax_offset, name="softmax_offset")
-        dsink_t = graph.tensor_like(
-            d_softmax_offset, name="d_softmax_offset"
-        ).set_output(True)
+        dsink_t = graph.tensor_like(d_softmax_offset, name="d_softmax_offset").set_output(True)
         tensors.update(softmax_offset=sink_t, d_softmax_offset=dsink_t)
         options.update(sink_token=sink_t, dSink_token=dsink_t)
 
     if _is_mxfp8_tensor(q):
         if d_o_f16 is None:
-            raise ValueError(
-                "MXFP8 attention backward requires the high-precision dO tensor."
-            )
+            raise ValueError("MXFP8 attention backward requires the high-precision dO tensor.")
         q_col = _quantized_data(q, columnwise=True)
         k_col = _quantized_data(k, columnwise=True)
         do_col = _quantized_data(d_o, columnwise=True)
@@ -2156,9 +2049,7 @@ def _build_fp8_bwd_graph(
             tensors[name] = tensor
             return tensor
 
-        descale_q = mx_scale(
-            "descale_q", heads, "s_q_padded", "d_qk_scale_padded", scale_format_q
-        )
+        descale_q = mx_scale("descale_q", heads, "s_q_padded", "d_qk_scale_padded", scale_format_q)
         descale_q_t = mx_scale(
             "descale_q_t", heads, "s_q_scale_padded", "d_qk_padded", scale_format_q
         )
@@ -2215,9 +2106,7 @@ def _build_fp8_bwd_graph(
             "descale_o",
             "descale_do",
         )
-        scalars = {
-            name: _scalar_graph_tensor(graph, cudnn, name) for name in scalar_names
-        }
+        scalars = {name: _scalar_graph_tensor(graph, cudnn, name) for name in scalar_names}
         tensors.update(scalars)
         delayed = isinstance(dqkv_quantizer, Float8Quantizer)
         if isinstance(s_quantizer, Float8Quantizer):
@@ -2237,37 +2126,23 @@ def _build_fp8_bwd_graph(
             tensors[key] = _scalar_graph_tensor(graph, cudnn, name)
         descale_o_arg = tensors["descale_o"]
         descale_s_arg = (
-            tensors["descale_s"]
-            if "descale_s" in tensors
-            else tensors["constant_descale_s"]
+            tensors["descale_s"] if "descale_s" in tensors else tensors["constant_descale_s"]
         )
         descale_dp_arg = (
-            tensors["descale_dp"]
-            if "descale_dp" in tensors
-            else tensors["constant_descale_dp"]
+            tensors["descale_dp"] if "descale_dp" in tensors else tensors["constant_descale_dp"]
         )
-        scale_s_arg = (
-            tensors["scale_s"] if "scale_s" in tensors else tensors["constant_scale_s"]
-        )
+        scale_s_arg = tensors["scale_s"] if "scale_s" in tensors else tensors["constant_scale_s"]
         scale_dp_arg = (
-            tensors["scale_dp"]
-            if "scale_dp" in tensors
-            else tensors["constant_scale_dp"]
+            tensors["scale_dp"] if "scale_dp" in tensors else tensors["constant_scale_dp"]
         )
         scale_dq_arg = (
-            tensors["scale_dq"]
-            if "scale_dq" in tensors
-            else tensors["constant_scale_dq"]
+            tensors["scale_dq"] if "scale_dq" in tensors else tensors["constant_scale_dq"]
         )
         scale_dk_arg = (
-            tensors["scale_dk"]
-            if "scale_dk" in tensors
-            else tensors["constant_scale_dk"]
+            tensors["scale_dk"] if "scale_dk" in tensors else tensors["constant_scale_dk"]
         )
         scale_dv_arg = (
-            tensors["scale_dv"]
-            if "scale_dv" in tensors
-            else tensors["constant_scale_dv"]
+            tensors["scale_dv"] if "scale_dv" in tensors else tensors["constant_scale_dv"]
         )
         op = build_fp8_backward_operation(
             graph,
@@ -2292,9 +2167,7 @@ def _build_fp8_bwd_graph(
                 "scale_dp": scale_dp_arg,
             },
             options,
-            FP8AttentionGraphConfig(
-                "delayed" if delayed else "current", "te_sdpa_fp8_backward"
-            ),
+            FP8AttentionGraphConfig("delayed" if delayed else "current", "te_sdpa_fp8_backward"),
         )
         dq_t, dk_t, dv_t = op["dq"], op["dk"], op["dv"]
         amax_dq_t, amax_dk_t = op["amax_dq"], op["amax_dk"]
@@ -2326,9 +2199,7 @@ def _build_fp8_bwd_graph(
         _format_stride(batch, kv_heads, max_seqlen_kv, d_value, dkv_format)
     )
     tensors.update(dQ=dq_t, dK=dk_t, dV=dv_t)
-    return GraphEntry(
-        graph=graph, tensors=tensors, workspace_size=finalize_graph(graph)
-    )
+    return GraphEntry(graph=graph, tensors=tensors, workspace_size=finalize_graph(graph))
 
 
 def _fp8_backward(
@@ -2399,9 +2270,7 @@ def _fp8_backward(
     batch = cu_seqlens_q.numel() - 1
     heads = q.shape[-2] if q_format != "bhsd" else q.shape[1]
     kv_heads = k.shape[-2] if kv_format != "bhsd" else k.shape[1]
-    output_dtype = (
-        torch.uint8 if isinstance(dqkv_quantizer, Float8Quantizer) else fake_dtype
-    )
+    output_dtype = torch.uint8 if isinstance(dqkv_quantizer, Float8Quantizer) else fake_dtype
     grad_data = _allocate_attention_grad_data(
         batch=batch,
         heads=heads,
@@ -2422,12 +2291,8 @@ def _fp8_backward(
     stats, rng_state = aux_ctx_tensors[:2]
     softmax_offset = aux_ctx_tensors[2] if softmax_type != "vanilla" else None
     d_o_f16 = aux_ctx_tensors[-1] if _is_mxfp8_tensor(q) else None
-    d_softmax_offset = (
-        torch.empty_like(softmax_offset) if softmax_offset is not None else None
-    )
-    hidden_amax = [
-        torch.zeros(1, dtype=torch.float32, device=q.device) for _ in range(4)
-    ]
+    d_softmax_offset = torch.empty_like(softmax_offset) if softmax_offset is not None else None
+    hidden_amax = [torch.zeros(1, dtype=torch.float32, device=q.device) for _ in range(4)]
 
     key = (
         "fp8_bwd",
@@ -2457,9 +2322,7 @@ def _fp8_backward(
     entry = get_graph_entry(key)
     if entry is None:
         if torch.cuda.is_current_stream_capturing():
-            raise RuntimeError(
-                "cuDNN FP8 attention graph must be built before CUDA graph capture."
-            )
+            raise RuntimeError("cuDNN FP8 attention graph must be built before CUDA graph capture.")
         entry = _build_fp8_bwd_graph(
             max_seqlen_q=max_seqlen_q,
             max_seqlen_kv=max_seqlen_kv,
@@ -2561,9 +2424,7 @@ def _fp8_backward(
             if isinstance(dqkv_quantizer, Float8Quantizer)
             else hidden_amax
         )
-        for name, value in zip(
-            ("amax_dq", "amax_dk", "amax_dv", "amax_dp"), amax_values
-        ):
+        for name, value in zip(("amax_dq", "amax_dk", "amax_dv", "amax_dp"), amax_values):
             variant_pack[t[name]] = value
     if "seq_len_q" in t:
         variant_pack[t["seq_len_q"]] = _sequence_lengths(cu_seqlens_q)
@@ -2628,9 +2489,7 @@ def fused_attn_bwd(
         )
     if backend == FusedAttnBackend.FP8:
         if attn_bias_type != "no_bias":
-            raise ValueError(
-                "FP8 fused attention backward does not support attention bias."
-            )
+            raise ValueError("FP8 fused attention backward does not support attention bias.")
         return _fp8_backward(
             max_seqlen_q,
             max_seqlen_kv,
@@ -2662,9 +2521,7 @@ def fused_attn_bwd(
             deterministic,
         )
     if backend != FusedAttnBackend.F16_arbitrary_seqlen:
-        raise ValueError(
-            "No cuDNN fused-attention backend supports this backward configuration."
-        )
+        raise ValueError("No cuDNN fused-attention backend supports this backward configuration.")
 
     stats = aux_ctx_tensors[0]
     rng_state = aux_ctx_tensors[1]
@@ -2702,24 +2559,15 @@ def fused_attn_bwd(
         # cuDNN does not support the [1,1,1,S] reduction form.
         if not tuple(attn_bias.shape[:3]) == (1, 1, 1):
             d_bias = torch.empty_like(attn_bias)
-    d_softmax_offset = (
-        torch.empty_like(softmax_offset) if softmax_type != "vanilla" else None
-    )
-    cu_seqlens_q_padded = (
-        cu_seqlens_q if cu_seqlens_q_padded is None else cu_seqlens_q_padded
-    )
-    cu_seqlens_kv_padded = (
-        cu_seqlens_kv if cu_seqlens_kv_padded is None else cu_seqlens_kv_padded
-    )
+    d_softmax_offset = torch.empty_like(softmax_offset) if softmax_type != "vanilla" else None
+    cu_seqlens_q_padded = cu_seqlens_q if cu_seqlens_q_padded is None else cu_seqlens_q_padded
+    cu_seqlens_kv_padded = cu_seqlens_kv if cu_seqlens_kv_padded is None else cu_seqlens_kv_padded
     cudnn = import_cudnn_frontend()
-    use_token_buckets = (
-        cudnn.backend_version() >= 90600
-        and torch.cuda.get_device_capability(q.device) != (12, 0)
-    )
+    use_token_buckets = cudnn.backend_version() >= 90600 and torch.cuda.get_device_capability(
+        q.device
+    ) != (12, 0)
     use_legacy_offsets = q_format == "thd" or kv_format == "thd"
-    graph_batch = (
-        _max_ragged_batch(batch) if use_legacy_offsets and use_token_buckets else batch
-    )
+    graph_batch = _max_ragged_batch(batch) if use_legacy_offsets and use_token_buckets else batch
 
     key = (
         "f16_bwd",
@@ -2752,9 +2600,7 @@ def fused_attn_bwd(
     entry = get_graph_entry(key)
     if entry is None:
         if torch.cuda.is_current_stream_capturing():
-            raise RuntimeError(
-                "cuDNN attention graph must be built before CUDA graph capture."
-            )
+            raise RuntimeError("cuDNN attention graph must be built before CUDA graph capture.")
         entry = _build_f16_bwd_graph(
             max_seqlen_q=max_seqlen_q,
             max_seqlen_kv=max_seqlen_kv,
@@ -2808,12 +2654,8 @@ def fused_attn_bwd(
         variant_pack[tensors["dBias"]] = d_bias
     graph_batch = tensors["_graph_batch"]
     if "seq_len_q" in tensors:
-        variant_pack[tensors["seq_len_q"]] = _padded_sequence_lengths(
-            cu_seqlens_q, graph_batch
-        )
-        variant_pack[tensors["seq_len_kv"]] = _padded_sequence_lengths(
-            cu_seqlens_kv, graph_batch
-        )
+        variant_pack[tensors["seq_len_q"]] = _padded_sequence_lengths(cu_seqlens_q, graph_batch)
+        variant_pack[tensors["seq_len_kv"]] = _padded_sequence_lengths(cu_seqlens_kv, graph_batch)
     if "offset_q" in tensors:
         variant_pack[tensors["offset_q"]] = _element_ragged_offsets(
             cu_seqlens_q_padded, graph_batch, q.stride(0)

@@ -127,21 +127,11 @@ def test_shared_f16_policy_framework_parity_features():
 def test_shared_fp8_policy():
     fp8 = _attention_config(q_dtype="float8_e4m3", kv_dtype="float8_e4m3", sm_arch=100)
     assert check_fp8_fused_attention_support(fp8).supported
-    assert check_fp8_fused_attention_support(
-        replace(fp8, cudnn_version=(9, 10, 1))
-    ).supported
-    assert not check_fp8_fused_attention_support(
-        replace(fp8, cudnn_version=(9, 10, 0))
-    ).supported
-    assert not check_fp8_fused_attention_support(
-        replace(fp8, bias_type="alibi")
-    ).supported
-    assert not check_fp8_fused_attention_support(
-        replace(fp8, return_max_logit=True)
-    ).supported
-    assert not check_fp8_fused_attention_support(
-        replace(fp8, head_dim_qk=200)
-    ).supported
+    assert check_fp8_fused_attention_support(replace(fp8, cudnn_version=(9, 10, 1))).supported
+    assert not check_fp8_fused_attention_support(replace(fp8, cudnn_version=(9, 10, 0))).supported
+    assert not check_fp8_fused_attention_support(replace(fp8, bias_type="alibi")).supported
+    assert not check_fp8_fused_attention_support(replace(fp8, return_max_logit=True)).supported
+    assert not check_fp8_fused_attention_support(replace(fp8, head_dim_qk=200)).supported
 
 
 @pytest.mark.parametrize(
@@ -384,6 +374,4 @@ def test_shared_cudnn_graph_creation_and_finalization():
 
 def test_shared_cudnn_graph_support_error_has_context():
     with pytest.raises(RuntimeError, match="cuDNN test graph is not supported"):
-        build_cudnn_graph(
-            _FakeCudnn(), _FakeGraph(unsupported=True), description="test"
-        )
+        build_cudnn_graph(_FakeCudnn(), _FakeGraph(unsupported=True), description="test")

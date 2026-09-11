@@ -92,9 +92,7 @@ def _layout_info(q_aval, k_aval, v_aval, layout) -> _LayoutInfo:
     if layout.is_qkvpacked():
         *batch_shape, q_seqlen, packed, q_heads, qk_dim = q_aval.shape
         if packed != 3:
-            raise ValueError(
-                f"QKV-packed fused attention expects dimension 3, got {q_aval.shape}."
-            )
+            raise ValueError(f"QKV-packed fused attention expects dimension 3, got {q_aval.shape}.")
         kv_seqlen = q_seqlen
         kv_heads = q_heads
         v_dim = qk_dim
@@ -102,27 +100,17 @@ def _layout_info(q_aval, k_aval, v_aval, layout) -> _LayoutInfo:
         *batch_shape, q_seqlen, q_heads, qk_dim = q_aval.shape
         *kv_batch_shape, kv_seqlen, packed, kv_heads, v_dim = k_aval.shape
         if tuple(batch_shape) != tuple(kv_batch_shape) or packed != 2:
-            raise ValueError(
-                f"Invalid KV-packed fused-attention shapes: {q_aval}, {k_aval}."
-            )
+            raise ValueError(f"Invalid KV-packed fused-attention shapes: {q_aval}, {k_aval}.")
         if qk_dim != v_dim:
-            raise ValueError(
-                "KV-packed fused attention requires equal QK and V head dimensions."
-            )
+            raise ValueError("KV-packed fused attention requires equal QK and V head dimensions.")
     elif layout.is_separate():
         *batch_shape, q_seqlen, q_heads, qk_dim = q_aval.shape
         *k_batch_shape, kv_seqlen, kv_heads, k_dim = k_aval.shape
         *v_batch_shape, v_seqlen, v_heads, v_dim = v_aval.shape
-        if tuple(batch_shape) != tuple(k_batch_shape) or tuple(batch_shape) != tuple(
-            v_batch_shape
-        ):
-            raise ValueError(
-                "Separate Q, K and V tensors must have matching batch shapes."
-            )
+        if tuple(batch_shape) != tuple(k_batch_shape) or tuple(batch_shape) != tuple(v_batch_shape):
+            raise ValueError("Separate Q, K and V tensors must have matching batch shapes.")
         if qk_dim != k_dim or kv_seqlen != v_seqlen or kv_heads != v_heads:
-            raise ValueError(
-                "Separate fused-attention K and V shapes are inconsistent."
-            )
+            raise ValueError("Separate fused-attention K and V shapes are inconsistent.")
     else:
         raise ValueError(f"Unsupported JAX fused-attention layout: {layout}.")
     return _LayoutInfo(
@@ -137,9 +125,7 @@ def _layout_info(q_aval, k_aval, v_aval, layout) -> _LayoutInfo:
     )
 
 
-def _matrix_stride(
-    info: _LayoutInfo, layout, matrix: str, graph_sq: int, graph_skv: int
-):
+def _matrix_stride(info: _LayoutInfo, layout, matrix: str, graph_sq: int, graph_skv: int):
     """Port generateMatrixStrides for JAX's BSHD/THD layout subset."""
     if matrix in ("q", "o"):
         heads = info.q_heads
@@ -242,17 +228,13 @@ def _graph_dimensions(info: _LayoutInfo, config):
     arch = _device_arch()
     use_ragged_stats = is_ragged and cudnn_version >= (9, 6, 0) and arch != 120
     if is_ragged:
-        graph_batch = ragged_graph_batch_size(
-            info.input_batch, config.max_segments_per_seq
-        )
+        graph_batch = ragged_graph_batch_size(info.input_batch, config.max_segments_per_seq)
         if cudnn_version < (9, 6, 0) or arch == 120:
             graph_sq = info.q_max_seqlen
             graph_skv = info.kv_max_seqlen
         else:
             graph_sq = _ragged_graph_token_count(info.input_batch * info.q_max_seqlen)
-            graph_skv = _ragged_graph_token_count(
-                info.input_batch * info.kv_max_seqlen
-            )
+            graph_skv = _ragged_graph_token_count(info.input_batch * info.kv_max_seqlen)
     else:
         graph_batch = info.input_batch
         graph_sq = info.q_max_seqlen
@@ -313,9 +295,7 @@ def _ragged_offset_spec(cudnn):
 def _mask_options(cudnn, info: _LayoutInfo, config):
     cp_striped_window_size = getattr(config, "cp_striped_window_size", None)
     window_left, window_right = (
-        cp_striped_window_size
-        if cp_striped_window_size is not None
-        else config.window_size
+        cp_striped_window_size if cp_striped_window_size is not None else config.window_size
     )
     options = cudnn_mask_options(
         causal=_is_causal(config),
@@ -369,8 +349,8 @@ def build_fwd_graph(q_aval, k_aval, v_aval, bias_aval, config) -> AttentionGraph
 def _build_fwd_graph(q_aval, k_aval, v_aval, bias_aval, config) -> AttentionGraphInfo:
     cudnn = import_cudnn()
     info = _layout_info(q_aval, k_aval, v_aval, config.qkv_layout)
-    graph_batch, graph_sq, graph_skv, ragged_stats, stats_shape, max_shape = (
-        _graph_dimensions(info, config)
+    graph_batch, graph_sq, graph_skv, ragged_stats, stats_shape, max_shape = _graph_dimensions(
+        info, config
     )
     io_dtype = cudnn_data_type(cudnn, q_aval.dtype)
     graph = make_graph(cudnn, io_dtype)
@@ -403,13 +383,9 @@ def _build_fwd_graph(q_aval, k_aval, v_aval, bias_aval, config) -> AttentionGrap
         uid=_UID_V,
     )
 
-    input_bindings = list(
-        _qkv_bindings(info, config.qkv_layout, jnp.dtype(q_aval.dtype).itemsize)
-    )
+    input_bindings = list(_qkv_bindings(info, config.qkv_layout, jnp.dtype(q_aval.dtype).itemsize))
     output_bindings = [GraphBinding(_UID_O, 0), GraphBinding(_UID_STATS, 1)]
-    scale = _scalar_tensor(
-        graph, cudnn, "attn_scale", _UID_ATTN_SCALE, cudnn.data_type.FLOAT
-    )
+    scale = _scalar_tensor(graph, cudnn, "attn_scale", _UID_ATTN_SCALE, cudnn.data_type.FLOAT)
     scalar_uids = [_UID_ATTN_SCALE]
     scalar_values = [np.asarray(config.scaling_factor, dtype=np.float32).tobytes()]
 
@@ -473,9 +449,7 @@ def _build_fwd_graph(q_aval, k_aval, v_aval, bias_aval, config) -> AttentionGrap
             uid=_UID_SEQ_KV,
         )
         kwargs.update(use_padding_mask=True, seq_len_q=seq_q, seq_len_kv=seq_kv)
-        input_bindings.extend(
-            (GraphBinding(_UID_SEQ_Q, 6), GraphBinding(_UID_SEQ_KV, 7))
-        )
+        input_bindings.extend((GraphBinding(_UID_SEQ_Q, 6), GraphBinding(_UID_SEQ_KV, 7)))
 
     offset_q = offset_k = offset_v = offset_o = offset_stats = None
     if config.qkv_layout.is_thd():
@@ -588,9 +562,7 @@ def _build_fwd_graph(q_aval, k_aval, v_aval, bias_aval, config) -> AttentionGrap
     else:
         stats.set_stride((info.q_heads * graph_sq, graph_sq, 1, 1))
 
-    workspace, data, version = finalize_graph(
-        cudnn, graph, description="fused-attention forward"
-    )
+    workspace, data, version = finalize_graph(cudnn, graph, description="fused-attention forward")
     result = serialized_graph(
         serialized_graph_data=data,
         cudnn_frontend_version=version,
@@ -651,16 +623,14 @@ def _build_bwd_graph(
 ) -> AttentionGraphInfo:
     cudnn = import_cudnn()
     info = _layout_info(q_aval, k_aval, v_aval, config.qkv_layout)
-    graph_batch, graph_sq, graph_skv, ragged_stats, stats_shape, max_shape = (
-        _graph_dimensions(info, config)
+    graph_batch, graph_sq, graph_skv, ragged_stats, stats_shape, max_shape = _graph_dimensions(
+        info, config
     )
     io_dtype = cudnn_data_type(cudnn, q_aval.dtype)
     graph = make_graph(cudnn, io_dtype)
 
     def io_tensor(name, dim, stride, uid, dtype=io_dtype):
-        return _tensor(
-            graph, cudnn, name=name, dim=dim, stride=stride, dtype=dtype, uid=uid
-        )
+        return _tensor(graph, cudnn, name=name, dim=dim, stride=stride, dtype=dtype, uid=uid)
 
     q = io_tensor(
         "q",
@@ -713,12 +683,8 @@ def _build_bwd_graph(
             GraphBinding(_UID_DO, 8),
         )
     )
-    output_bindings = list(
-        _qkv_bindings(info, config.qkv_layout, itemsize, outputs=True)
-    )
-    scale = _scalar_tensor(
-        graph, cudnn, "attn_scale", _UID_ATTN_SCALE, cudnn.data_type.FLOAT
-    )
+    output_bindings = list(_qkv_bindings(info, config.qkv_layout, itemsize, outputs=True))
+    scale = _scalar_tensor(graph, cudnn, "attn_scale", _UID_ATTN_SCALE, cudnn.data_type.FLOAT)
     scalar_uids = [_UID_ATTN_SCALE]
     scalar_values = [np.asarray(config.scaling_factor, dtype=np.float32).tobytes()]
 
@@ -741,11 +707,7 @@ def _build_bwd_graph(
         )
     if ragged_stats:
         kwargs["max_total_seq_len_q"] = graph_sq
-    if (
-        config.qkv_layout.is_thd()
-        and get_cudnn_version() >= (9, 6, 0)
-        and _device_arch() != 120
-    ):
+    if config.qkv_layout.is_thd() and get_cudnn_version() >= (9, 6, 0) and _device_arch() != 120:
         kwargs["max_total_seq_len_kv"] = graph_skv
 
     if _is_bias(config):
@@ -806,9 +768,7 @@ def _build_bwd_graph(
             cudnn.data_type.INT32,
         )
         kwargs.update(use_padding_mask=True, seq_len_q=seq_q, seq_len_kv=seq_kv)
-        input_bindings.extend(
-            (GraphBinding(_UID_SEQ_Q, 9), GraphBinding(_UID_SEQ_KV, 10))
-        )
+        input_bindings.extend((GraphBinding(_UID_SEQ_Q, 9), GraphBinding(_UID_SEQ_KV, 10)))
 
     if config.qkv_layout.is_thd():
         offset_dtype, offset_itemsize = _ragged_offset_spec(cudnn)
@@ -891,9 +851,7 @@ def _build_bwd_graph(
         dk.set_ragged_offset(offset_k)
         dv.set_ragged_offset(offset_v)
 
-    workspace, data, version = finalize_graph(
-        cudnn, graph, description="fused-attention backward"
-    )
+    workspace, data, version = finalize_graph(cudnn, graph, description="fused-attention backward")
     result = serialized_graph(
         serialized_graph_data=data,
         cudnn_frontend_version=version,
@@ -961,9 +919,7 @@ def is_fused_attn_supported(helper) -> bool:
             window_size=tuple(int(value) for value in helper.window_size),
             return_max_logit=bool(helper.return_max_logit),
             cuda_graph=False,
-            deterministic=not bool(
-                int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1"))
-            ),
+            deterministic=not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1"))),
             cudnn_version=get_cudnn_version(),
             sm_arch=_device_arch(),
         )

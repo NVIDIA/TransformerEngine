@@ -11,7 +11,7 @@ namespace jax {
 namespace {
 
 __global__ void PopulateFusedAttnRngStateKernel(int64_t *rng_state, const int64_t *seed,
-                                                 uint64_t offset) {
+                                                uint64_t offset) {
   rng_state[0] = seed[0];
   rng_state[1] = static_cast<int64_t>(offset);
 }
