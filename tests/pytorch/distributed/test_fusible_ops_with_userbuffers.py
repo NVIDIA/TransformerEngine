@@ -37,7 +37,8 @@ from transformer_engine.pytorch import (
 
 # Import utility functions
 _current_file = pathlib.Path(__file__).resolve()
-sys.path.append(str(_current_file.parent.parent))
+# Prepend so installed packages with a top-level utils module cannot shadow the test helpers.
+sys.path = [str(_current_file.parent.parent)] + sys.path
 from utils import dtype_tols, make_recipe, run_distributed, str_to_dtype
 
 # Check if FP8 is supported

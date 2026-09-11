@@ -9,12 +9,12 @@ from typing import Optional, Tuple, Union
 
 import torch
 
-from transformer_engine.pytorch.custom_recipes import quantization
-from transformer_engine.pytorch.custom_recipes import utils
+from transformer_engine.pytorch.custom_recipes import gemm
+from transformer_engine.pytorch.custom_recipes import reference_utils
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage, Quantizer
 
 
-def nvfp4_ref_rht_2d_quantizer_factory(role):
+def nvfp4_ref_rht_2d_factory(role):
     """
     Quantizer factory for NVFP4 recipe reference implementation (RHT and 2D quantization for weights).
 
@@ -22,7 +22,7 @@ def nvfp4_ref_rht_2d_quantizer_factory(role):
 
     Usage with CustomRecipe and autocast::
 
-        custom_recipe = recipe.CustomRecipe(qfactory=nvfp4_ref_rht_2d_quantizer_factory)
+        custom_recipe = recipe.CustomRecipe(qfactory=nvfp4_ref_rht_2d_factory)
         with autocast(recipe=custom_recipe):
             output = model(input)
     """
@@ -33,13 +33,13 @@ def nvfp4_ref_rht_2d_quantizer_factory(role):
     )
     if is_weight_tensor_in_gemm:  # 2D quantization for weights in GEMM-based modules
         return NVFP4QuantizerRef(
-            dtype=utils.Fp4Formats.E2M1,
+            dtype=reference_utils.Fp4Formats.E2M1,
             quant_tile_shape=(16, 16),
             pow_2_scales=False,
             with_rht=False,
         )
     return NVFP4QuantizerRef(
-        dtype=utils.Fp4Formats.E2M1,
+        dtype=reference_utils.Fp4Formats.E2M1,
         quant_tile_shape=(1, 16),
         pow_2_scales=False,
         with_rht=True,
@@ -207,7 +207,7 @@ class NVFP4TensorRef(QuantizedTensorStorage):
         nominal tensor datatype.
     device: torch.device
         device of the tensor.
-    quant_dtype: Union[utils.Fp4Formats, torch.dtype]
+    quant_dtype: Union[reference_utils.Fp4Formats, torch.dtype]
         low precision tensor datatype.
     original_shape: Tuple[int, ...]
         original shape of the tensor.
@@ -226,7 +226,7 @@ class NVFP4TensorRef(QuantizedTensorStorage):
 
     dtype: Optional[torch.dtype] = None
     device: Optional[torch.device] = None
-    quant_dtype: Optional[Union[utils.Fp4Formats, torch.dtype]] = None
+    quant_dtype: Optional[Union[reference_utils.Fp4Formats, torch.dtype]] = None
     original_shape: Optional[Tuple[int, ...]] = None
     _quantizer: Optional[Quantizer] = None
 
@@ -345,7 +345,7 @@ class NVFP4QuantizerRef(Quantizer):
 
     def __init__(
         self,
-        dtype: utils.Fp4Formats,
+        dtype: reference_utils.Fp4Formats,
         rowwise: bool = True,
         columnwise: bool = True,
         pow_2_scales: bool = False,
@@ -363,10 +363,6 @@ class NVFP4QuantizerRef(Quantizer):
         if row_scaled_nvfp4:
             if not rowwise:
                 raise ValueError("Row-scaled NVFP4 reference quantization requires rowwise usage.")
-            if columnwise:
-                raise ValueError(
-                    "Row-scaled NVFP4 reference quantization does not support columnwise usage."
-                )
         if nvfp4_use_4over6:
             if nvfp4_4over6_err_mode not in ("MAE", "MSE"):
                 raise ValueError(f"Unsupported NVFP4 4over6 error mode: {nvfp4_4over6_err_mode}.")
@@ -456,9 +452,9 @@ class NVFP4QuantizerRef(Quantizer):
     ) -> torch.Tensor:
         if not swizzled_scale:
             return scale
-        rounded_m = utils.roundup_div(m, 128) * 128
-        scale_n = utils.roundup_div(n, block_length)
-        rounded_n = utils.roundup_div(scale_n, 4) * 4
+        rounded_m = reference_utils.roundup_div(m, 128) * 128
+        scale_n = reference_utils.roundup_div(n, block_length)
+        rounded_n = reference_utils.roundup_div(scale_n, 4) * 4
         # Recover swizzled scaling factor layout -> linear layout
         tmp = torch.reshape(scale, (rounded_m // 128, rounded_n // 4, 32, 4, 4))
         # after permutation, the layout is [rounded_m // 128, 4, 32, rounded_n // 4, 4]
@@ -883,7 +879,14 @@ class NVFP4QuantizerRef(Quantizer):
                         f"got {self.quant_tile_shape}"
                     )
                 global_amax_row = torch.max(torch.abs(row_input), dim=1).values.to(torch.float32)
-                global_amax_col = global_amax_row
+                # Columnwise (transpose) uses per-row-of-transpose amax, i.e. the
+                # per-column amax of the original input. When columnwise output is
+                # not requested, keep it aliased to the rowwise amax as before.
+                global_amax_col = (
+                    torch.max(torch.abs(col_input), dim=1).values.to(torch.float32)
+                    if self.columnwise_usage
+                    else global_amax_row
+                )
             else:
                 # Compute amax for rowwise and columnwise paths separately
                 global_amax_row = torch.max(torch.abs(row_input)).to(torch.float32).view(1)
@@ -936,6 +939,7 @@ class NVFP4QuantizerRef(Quantizer):
                 self.quant_tile_shape[1],
                 self.quant_tile_shape[0],
                 pow_2_scales=self.pow_2_scales,
+                row_scaled_nvfp4=self.row_scaled_nvfp4,
                 nvfp4_use_4over6=self.nvfp4_use_4over6,
                 nvfp4_e4m3_max=self.nvfp4_e4m3_max,
                 nvfp4_4over6_err_mode=self.nvfp4_4over6_err_mode,
@@ -959,10 +963,10 @@ class NVFP4QuantizerRef(Quantizer):
         **kwargs,  # pylint: disable=unused-argument
     ) -> NVFP4TensorRef:
         # sanity checks
-        if tensor.dtype not in utils.HIGH_PRECISION_FLOAT_DTYPES:
+        if tensor.dtype not in reference_utils.HIGH_PRECISION_FLOAT_DTYPES:
             raise TypeError(
                 f"Unsupported input dtype {tensor.dtype}, expected one of"
-                f" {utils.HIGH_PRECISION_FLOAT_DTYPES}"
+                f" {reference_utils.HIGH_PRECISION_FLOAT_DTYPES}"
             )
 
         # Make it work with 3D tensors
@@ -1072,14 +1076,14 @@ class NVFP4QuantizerRef(Quantizer):
         self,
         qx: torch.Tensor,
         qw: torch.Tensor,
-        m_params: quantization.MMParams,  # pylint: disable=unused-argument
+        m_params: gemm.MMParams,  # pylint: disable=unused-argument
         out_dtype: torch.dtype,
         sx: torch.Tensor,
         sw: torch.Tensor,
         bias: torch.Tensor | None = None,
         out: torch.Tensor | None = None,
         accumulate: bool = False,
-        gemm_type: quantization.GEMMType = quantization.GEMMType.FPROP,
+        gemm_type: gemm.GEMMType = gemm.GEMMType.FPROP,
         qresult_x: QuantizedTensorStorage | None = None,
         qresult_w: QuantizedTensorStorage | None = None,
     ) -> torch.Tensor:
@@ -1165,14 +1169,23 @@ class NVFP4QuantizerRef(Quantizer):
                 fp8_max_w = 448.0
             factor = 6.0 * 6.0 * fp8_max_x * fp8_max_w
 
-            if gemm_type == quantization.GEMMType.WGRAD:
+            if gemm_type == gemm.GEMMType.WGRAD:
                 partial_alpha = qresult_x.global_amax_col * qresult_w.global_amax_col
+                # A row-scaled operand contributes a per-output-column (N) vector
+                # here, so broadcast along the last axis. Selecting the axis from
+                # gemm_type (rather than matching numel against M) avoids the
+                # square-matrix ambiguity where M == N.
+                if partial_alpha.numel() > 1:
+                    partial_alpha = partial_alpha.reshape(1, -1)
+                else:
+                    partial_alpha = partial_alpha.squeeze(-1)
             else:
                 partial_alpha = qresult_x.global_amax_row * qresult_w.global_amax_row
-            if partial_alpha.numel() > 1 and partial_alpha.numel() == high_precision_x.shape[0]:
-                partial_alpha = partial_alpha.view(-1, 1)
-            else:
-                partial_alpha = partial_alpha.squeeze(-1)
+                # A row-scaled operand contributes a per-output-row (M) vector.
+                if partial_alpha.numel() > 1:
+                    partial_alpha = partial_alpha.reshape(-1, 1)
+                else:
+                    partial_alpha = partial_alpha.squeeze(-1)
             alpha = torch.div(partial_alpha, factor)
 
         M, K = high_precision_x.shape

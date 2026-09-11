@@ -17,6 +17,7 @@ from functools import partial
 
 import torch
 import torch.distributed as dist
+from torch.distributed.elastic.multiprocessing.errors import record
 
 import transformer_engine.pytorch as te
 from transformer_engine.common.recipe import (
@@ -348,6 +349,7 @@ def _compare_tensors(name, test, ref, rtol, atol):
     return numerics_failed, numerics_info
 
 
+@record
 def _train(opts):
     if "OMPI_COMM_WORLD_SIZE" in os.environ:
         # Execution with `mpirun -np N`

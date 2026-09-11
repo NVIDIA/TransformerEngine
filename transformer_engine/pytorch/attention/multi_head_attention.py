@@ -9,6 +9,7 @@ from typing import Any, Callable, List, Optional, Tuple, Union
 import torch
 
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager, QuantizerRole
+from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.module import LayerNormLinear, Linear, RMSNorm, LayerNorm
@@ -21,6 +22,7 @@ from transformer_engine.pytorch.utils import (
 from transformer_engine.pytorch.constants import (
     AttnTypes,
     AttnBiasTypes,
+    CPLoadBalancingStrategy,
     dist_group_type,
 )
 from transformer_engine.pytorch.distributed import (
@@ -499,11 +501,11 @@ class MultiheadAttention(torch.nn.Module):
 
         1. ``qkv_fp8_output``  — **QKV linear → DPA (fwd)**: the QKV
            linear's ``output_quantizer_role`` is told its consumer is DPA.
-        2. ``proj_fp8_grad``   — **Proj linear ← DPA (bwd)**: proj's
-           ``grad_input_quantizer_role`` is told its producer is DPA.
+        2. ``proj_fp8_grad``   — **Proj linear → DPA (bwd)**: proj's
+           ``grad_input_quantizer_role`` is told its consumer is DPA.
         3. ``dpa_fp8_output``  — **DPA → Proj linear (fwd)**: DPA's
            ``output_quantizer_role`` is told its consumer is the proj linear.
-        4. ``dpa_fp8_output``  — **DPA ← QKV linear (bwd)**: DPA's
+        4. ``dpa_fp8_output``  — **DPA → QKV linear (bwd)**: DPA's
            ``grad_input_quantizer_role`` is told its consumer is QKV linear.
 
         When a flag is ``False`` the corresponding role is reset to ``None``
@@ -529,7 +531,7 @@ class MultiheadAttention(torch.nn.Module):
                 self.query_layer.output_quantizer_role = qkv_output_role
             self.key_value.output_quantizer_role = qkv_output_role
 
-        # ── Boundary 2 (bwd): Proj grad-input ← produced by DPA ──────────
+        # ── Boundary 2 (bwd): Proj grad-input (dO) → consumed by DPA ─────
         proj_grad_input_role = (
             QuantizerRole(module_type="dpa", tensor_type="do", name=dpa_name)
             if proj_fp8_grad
@@ -658,6 +660,7 @@ class MultiheadAttention(torch.nn.Module):
         cp_global_ranks: List[int],
         cp_stream: torch.cuda.Stream,
         cp_comm_type: str = "p2p",
+        load_balancing_strategy=CPLoadBalancingStrategy.DUAL_CHUNK_SWAP,
     ) -> None:
         """
         Set the context parallel attributes for the given
@@ -687,6 +690,8 @@ class MultiheadAttention(torch.nn.Module):
                       - ``"a2a+p2p"``: hierarchical CP implementation. First applying a2a to QKV
                         across each CP sub-group (e.g., via NVLink), then exchanging KV with
                         p2p between sub-groups (e.g., via IBLink).
+        load_balancing_strategy : CPLoadBalancingStrategy
+                                  token partition strategy for context-parallel attention.
         """
         if isinstance(cp_group, dist_group_type):
             self.cp_size = get_distributed_world_size(cp_group)
@@ -705,12 +710,24 @@ class MultiheadAttention(torch.nn.Module):
             self.cp_size = cp_size_a2a * cp_size_p2p
             self.cp_rank = cp_size_a2a * cp_rank_p2p + cp_rank_a2a
 
+        # Preserve the legacy child-setter call unless an experimental strategy is requested.
+        load_balancing_kwargs = (
+            {}
+            if load_balancing_strategy is CPLoadBalancingStrategy.DUAL_CHUNK_SWAP
+            else {"load_balancing_strategy": load_balancing_strategy}
+        )
         # Deep iterate but skip self to avoid infinite recursion.
         for index, child in enumerate(self.modules()):
             if index == 0:
                 continue
             if hasattr(child, "set_context_parallel_group"):
-                child.set_context_parallel_group(cp_group, cp_global_ranks, cp_stream, cp_comm_type)
+                child.set_context_parallel_group(
+                    cp_group,
+                    cp_global_ranks,
+                    cp_stream,
+                    cp_comm_type,
+                    **load_balancing_kwargs,
+                )
 
     def forward(
         self,
@@ -869,12 +886,27 @@ class MultiheadAttention(torch.nn.Module):
         # ======================
 
         fp8 = FP8GlobalStateManager.is_fp8_enabled()
+        custom_recipe = False
         if _dpa_fp8_recipe == "":
             fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
+            custom_recipe = fp8_recipe.custom()
             fp8_dpa = fp8_recipe.fp8_dpa
             fp8_mha = fp8_recipe.fp8_mha
             float8_current_scaling = fp8_recipe.float8_current_scaling()
             mxfp8_scaling = fp8_recipe.mxfp8()
+            if fp8 and custom_recipe and fp8_mha:
+                # Wire every boundary this CustomRecipe may quantize before
+                # DPA materializes its recipe state. Some quantizer families
+                # disable the corresponding output below, but pre-wiring avoids
+                # rebuilding that state after inspecting its canonical QKV slot.
+                self._update_output_quantizer_roles(
+                    rotary_pos_emb is None,
+                    True,
+                    True,
+                )
+                float8_current_scaling, mxfp8_scaling = (
+                    self.core_attention.get_qkv_quantization_capabilities()
+                )
         else:
             fp8_dpa = _dpa_fp8_recipe_dpa
             fp8_mha = _dpa_fp8_recipe_mha
@@ -896,12 +928,35 @@ class MultiheadAttention(torch.nn.Module):
         # DPA: produce FP8 output to take advantage of O amax from DPA; Projection Gemm can take FP8 or F16 inputs
         # 1. FP8DS/FP8CS recipe: produce FP8 output
         # 2. MXFP8 recipe: produce F16 output; again, due to quantization dimensions mismatch
-        dpa_fp8_output = fp8 and (fp8_dpa or fp8_mha) and not mxfp8_scaling
+        # For CustomRecipe, fp8_dpa only controls DPA-internal quantization.
+        # External MHA boundary tensors become FP8 only when fp8_mha is enabled.
+        dpa_fp8_output_enabled = fp8_mha if custom_recipe else (fp8_dpa or fp8_mha)
+        dpa_fp8_output = fp8 and dpa_fp8_output_enabled and not mxfp8_scaling
         # Projection Gemm: match DPA output except
         # 1. FP8CS recipe: produce F16 grads; again, due to cuBLAS limitation
         proj_fp8_grad = dpa_fp8_output and not float8_current_scaling
 
-        self._update_output_quantizer_roles(qkv_fp8_output, proj_fp8_grad, dpa_fp8_output)
+        # Custom fp8_mha boundaries were wired before DPA recipe-state setup so
+        # querying its canonical QKV quantizer cannot trigger a second build.
+        if not (fp8 and custom_recipe and fp8_mha and _dpa_fp8_recipe == ""):
+            self._update_output_quantizer_roles(qkv_fp8_output, proj_fp8_grad, dpa_fp8_output)
+
+        # Packed pass-through to DotProductAttention: the fused QKV/KV projection
+        # already produces one packed buffer, which DPA accepts directly via its
+        # declarative qkv_layer/kv_layer arguments (deriving q/k/v as zero-copy
+        # views and skipping pointer-based layout detection). Only possible when
+        # no per-tensor operation (RoPE, QK normalization, KV caching, CPU
+        # offloading) needs the individual q/k/v slices.
+        packed_dpa_eligible = (
+            rotary_pos_emb is None
+            and self.q_norm is None
+            and self.k_norm is None
+            and inference_params is None
+            and not is_cpu_offload_enabled()
+        )
+        packed_qkv_layer = None
+        packed_kv_layer = None
+        packed_interleave_dim = -3
 
         layernorm_output = None
         if self.attention_type == "self":
@@ -947,28 +1002,43 @@ class MultiheadAttention(torch.nn.Module):
 
             mixed_x_layer = mixed_x_layer.view(*new_tensor_shape)
 
-            # qkv_weight_interleaved:
-            #  [sq, b, ng, (np/ng + 2), hn]
-            #  --> [sq, b, ng, np/ng, hn], [sq, b, ng, 1, hn], [sq, b, ng, 1, hn]
-            # not qkv_weight_interleaved:
-            #  [sq, b, (np/ng + 2), ng, hn]
-            #  --> [sq, b, np/ng, np, hn], [sq, b, 1, ng, hn], [sq, b, 1, ng, hn]
-            query_layer, key_layer, value_layer = SplitAlongDim.apply(
-                mixed_x_layer, split_dim, (num_queries_per_key_value, 1, 1)
-            )
-
-            if self.qkv_format == "thd":
-                query_layer, key_layer, value_layer = (
-                    x.reshape(x.size(0), -1, self.hidden_size_per_attention_head)
-                    for x in (query_layer, key_layer, value_layer)
-                )
+            if (
+                num_queries_per_key_value == 1
+                and packed_dpa_eligible
+                and not isinstance(mixed_x_layer, QuantizedTensorStorage)
+            ):
+                # np == ng: the projection output is a uniform 3-interleave
+                # ([.., h, 3, d] interleaved / [.., 3, h, d] otherwise), which
+                # DotProductAttention accepts directly as a declared packed
+                # qkv_layer -- no slicing here, no layout detection there.
+                packed_qkv_layer = mixed_x_layer
+                packed_interleave_dim = split_dim
+                query_layer = None
+                key_layer = None
+                value_layer = None
             else:
-                # query: -> [sq, b, np, hn]
-                # key, value: -> [sq, b, ng, hn]
-                query_layer, key_layer, value_layer = (
-                    x.reshape(x.size(0), x.size(1), -1, self.hidden_size_per_attention_head)
-                    for x in (query_layer, key_layer, value_layer)
+                # qkv_weight_interleaved:
+                #  [sq, b, ng, (np/ng + 2), hn]
+                #  --> [sq, b, ng, np/ng, hn], [sq, b, ng, 1, hn], [sq, b, ng, 1, hn]
+                # not qkv_weight_interleaved:
+                #  [sq, b, (np/ng + 2), ng, hn]
+                #  --> [sq, b, np/ng, np, hn], [sq, b, 1, ng, hn], [sq, b, 1, ng, hn]
+                query_layer, key_layer, value_layer = SplitAlongDim.apply(
+                    mixed_x_layer, split_dim, (num_queries_per_key_value, 1, 1)
                 )
+
+                if self.qkv_format == "thd":
+                    query_layer, key_layer, value_layer = (
+                        x.reshape(x.size(0), -1, self.hidden_size_per_attention_head)
+                        for x in (query_layer, key_layer, value_layer)
+                    )
+                else:
+                    # query: -> [sq, b, np, hn]
+                    # key, value: -> [sq, b, ng, hn]
+                    query_layer, key_layer, value_layer = (
+                        x.reshape(x.size(0), x.size(1), -1, self.hidden_size_per_attention_head)
+                        for x in (query_layer, key_layer, value_layer)
+                    )
         elif self.attention_type == "cross":
             # Attention heads [sk, b, h] --> [sk, b, (ng * 2 * hn)]
             mixed_kv_layer = self.key_value(
@@ -996,33 +1066,55 @@ class MultiheadAttention(torch.nn.Module):
 
             mixed_kv_layer = mixed_kv_layer.view(*new_tensor_shape)
 
-            # mixed_kv_layer --> 2 [sk, b, ng, hn]
-            key_layer, value_layer = SplitAlongDim.apply(
-                mixed_kv_layer,
-                split_dim,
-                mixed_kv_layer.shape[split_dim] // 2,
-            )
-            key_layer, value_layer = (
-                x.reshape(
-                    x.size(0),
-                    x.size(1),
-                    -1,
-                    self.hidden_size_per_attention_head,
-                )
-                for x in (key_layer, value_layer)
-            )
-
-            if self.qkv_format == "thd":
-                key_layer, value_layer = (
-                    x.reshape(x.size(0), -1, self.hidden_size_per_attention_head)
-                    for x in (key_layer, value_layer)
-                )
+            if packed_dpa_eligible and not isinstance(mixed_kv_layer, QuantizedTensorStorage):
+                # Declare the packed KV to DotProductAttention instead of
+                # slicing it: expose the 2-interleave as its own dimension.
+                if self.qkv_weight_interleaved:
+                    # [.., ng, 2 * hn] --> [.., ng, 2, hn]
+                    packed_kv_shape = mixed_kv_layer.size()[:-1] + (
+                        2,
+                        self.hidden_size_per_attention_head,
+                    )
+                    packed_interleave_dim = -2
+                else:
+                    # [.., 2 * ng, hn] --> [.., 2, ng, hn]
+                    packed_kv_shape = mixed_kv_layer.size()[:-2] + (
+                        2,
+                        self.num_gqa_groups_per_partition,
+                        self.hidden_size_per_attention_head,
+                    )
+                    packed_interleave_dim = -3
+                packed_kv_layer = mixed_kv_layer.view(*packed_kv_shape)
+                key_layer = None
+                value_layer = None
             else:
-                # key, value: -> [sq, b, ng, hn]
+                # mixed_kv_layer --> 2 [sk, b, ng, hn]
+                key_layer, value_layer = SplitAlongDim.apply(
+                    mixed_kv_layer,
+                    split_dim,
+                    mixed_kv_layer.shape[split_dim] // 2,
+                )
                 key_layer, value_layer = (
-                    x.reshape(x.size(0), x.size(1), -1, self.hidden_size_per_attention_head)
+                    x.reshape(
+                        x.size(0),
+                        x.size(1),
+                        -1,
+                        self.hidden_size_per_attention_head,
+                    )
                     for x in (key_layer, value_layer)
                 )
+
+                if self.qkv_format == "thd":
+                    key_layer, value_layer = (
+                        x.reshape(x.size(0), -1, self.hidden_size_per_attention_head)
+                        for x in (key_layer, value_layer)
+                    )
+                else:
+                    # key, value: -> [sq, b, ng, hn]
+                    key_layer, value_layer = (
+                        x.reshape(x.size(0), x.size(1), -1, self.hidden_size_per_attention_head)
+                        for x in (key_layer, value_layer)
+                    )
 
             # Attention head [sq, b, h] --> [sq, b, hp]
             if self.input_layernorm:
@@ -1143,6 +1235,9 @@ class MultiheadAttention(torch.nn.Module):
             inference_params=inference_params,
             pad_between_seqs=pad_between_seqs,
             fp8_output=dpa_fp8_output,
+            qkv_layer=packed_qkv_layer,
+            kv_layer=packed_kv_layer,
+            qkv_interleave_dim=packed_interleave_dim,
         )
 
         # ===================

@@ -19,6 +19,9 @@ from .float8_tensor import Float8Tensor, Float8Quantizer, Float8CurrentScalingQu
 from .nvfp4_tensor import NVFP4Tensor, NVFP4Quantizer
 from .mxfp8_tensor import MXFP8Tensor, MXFP8Quantizer
 from .float8_blockwise_tensor import Float8BlockwiseQTensor, Float8BlockQuantizer
+from .hybrid_tensor import HybridQuantizedTensor, HybridQuantizer
+from .identity_tensor import IdentityQuantizer
+from .storage.identity_tensor_storage import IdentityTensorStorage
 from ..optimizers.multi_tensor_apply import multi_tensor_applier
 from ..utils import is_non_tn_fp8_gemm_supported
 from ..constants import NVFP4_BLOCK_SCALING_SIZE, DType
@@ -65,10 +68,137 @@ def replace_raw_data(tensor: QuantizedTensor, new_raw_data: torch.Tensor):
         new_raw_data.detach().copy_(old_rowwise)
         tensor._rowwise_data = new_raw_data
         del old_rowwise
+    elif isinstance(tensor, IdentityTensorStorage):
+        old_raw_data = tensor._hp_data
+        if old_raw_data is None:
+            raise RuntimeError("IdentityTensorStorage has no data")
+        if old_raw_data.dtype != new_raw_data.dtype:
+            raise ValueError(
+                "The data types of raw data don't match: "
+                f"old dtype={old_raw_data.dtype}, new dtype={new_raw_data.dtype}"
+            )
+        new_raw_data.detach().copy_(old_raw_data)
+        tensor._hp_data = new_raw_data
+        del old_raw_data
     elif isinstance(tensor, MXFP8Tensor):
         raise NotImplementedError("replace_raw_data for MXFP8Tensor is not supported yet")
+    elif isinstance(tensor, HybridQuantizedTensor):
+        # The distopt all-gather buffer routes at the rowwise sub-storage only;
+        # the columnwise sub-storage is refreshed each iteration via
+        # ``HybridQuantizer.update_quantized``. The underlying call delegates
+        # to the rowwise sub-storage's own ``replace_raw_data`` (which may
+        # raise for sub-storage types that don't implement it).
+        if tensor._rowwise_storage is None:
+            raise NotImplementedError(
+                "replace_raw_data for HybridQuantizedTensor without a rowwise "
+                "sub-storage is not supported."
+            )
+        replace_raw_data(tensor._rowwise_storage, new_raw_data)
     else:
         raise ValueError(f"replace_raw_data for {type(tensor)} is not supported yet")
+
+
+def _is_float8_transpose_only(tensor: QuantizedTensor) -> bool:
+    """Whether a Float8 tensor stores its live payload only in _transpose."""
+    return (
+        isinstance(tensor, Float8Tensor)
+        and tensor._data is None
+        and tensor._transpose is not None
+        and not tensor._transpose_invalid
+    )
+
+
+def _validate_flat_fragment(
+    model_weight: QuantizedTensor, master_weight: torch.Tensor, start_offset
+):
+    """Validate a flat logical shard and return its exclusive end offset."""
+    if start_offset is None:
+        raise ValueError("start_offset must not be None when master_weight is provided")
+    if start_offset < 0:
+        raise ValueError(f"start_offset must be non-negative, got {start_offset}")
+    end_offset = start_offset + master_weight.numel()
+    if end_offset > model_weight.numel():
+        raise ValueError(
+            f"end_offset ({end_offset}) exceeds model_weight numel ({model_weight.numel()}), "
+            f"start_offset={start_offset}, master_weight numel={master_weight.numel()}"
+        )
+    return end_offset
+
+
+def _cast_master_weight_to_rowwise_fp8_bytes(
+    master_weight: torch.Tensor,
+    model_weight: Float8Tensor,
+    quantizer: Float8Quantizer,
+) -> torch.Tensor:
+    """Cast a flat master shard to row-major FP8 bytes using ``quantizer`` scale state."""
+    rowwise_quantizer = Float8Quantizer(
+        scale=quantizer.scale,
+        amax=quantizer.amax,
+        fp8_dtype=quantizer.dtype,
+        rowwise=True,
+        columnwise=False,
+    )
+    raw = torch.empty((1, master_weight.numel()), dtype=torch.uint8, device=model_weight.device)
+    temp = rowwise_quantizer.create_tensor_from_data(raw, model_weight.dtype)
+    rowwise_quantizer.update_quantized(master_weight.reshape(1, -1), temp)
+    if temp._data is None:
+        raise RuntimeError("Expected rowwise Float8 temporary to populate _data")
+    return temp._data.reshape(-1)
+
+
+def _update_transpose_only_float8_flat_fragment(
+    model_weight: QuantizedTensor,
+    master_weight: torch.Tensor,
+    start_offset,
+    quantizer: Float8Quantizer,
+) -> bool:
+    """Update a logical flat shard in a transpose-only Float8 tensor.
+
+    Hopper / L40 columnwise-only Float8 sub-storages keep their live FP8
+    bytes in ``_transpose`` with physical shape ``[K, rows]`` for a logical
+    ``[rows, K]`` tensor. A row-major logical shard is not contiguous in that
+    storage, so cast the shard once and scatter the resulting FP8 bytes by
+    logical row into the transpose buffer.
+    """
+    if not _is_float8_transpose_only(model_weight):
+        return False
+
+    _validate_flat_fragment(model_weight, master_weight, start_offset)
+    numel = master_weight.numel()
+    if numel == 0:
+        return True
+
+    shape = tuple(model_weight.shape)
+    if len(shape) == 0:
+        raise ValueError("Float8 scalar transpose-only flat update is not supported")
+    logical_cols = int(shape[-1])
+    if logical_cols <= 0 or model_weight.numel() % logical_cols != 0:
+        raise ValueError(f"Invalid Float8 logical shape for transpose-only update: {shape}")
+    logical_rows = model_weight.numel() // logical_cols
+
+    transpose = model_weight._transpose
+    if transpose.numel() != model_weight.numel():
+        raise ValueError(
+            "Float8 transpose-only storage has unexpected numel: "
+            f"transpose={transpose.numel()}, logical={model_weight.numel()}"
+        )
+    transpose_2d = transpose.reshape(logical_cols, logical_rows)
+    fp8_bytes = _cast_master_weight_to_rowwise_fp8_bytes(master_weight, model_weight, quantizer)
+
+    remaining = numel
+    logical_offset = start_offset
+    src_offset = 0
+    while remaining > 0:
+        row = logical_offset // logical_cols
+        col = logical_offset % logical_cols
+        n = min(remaining, logical_cols - col)
+        transpose_2d[col : col + n, row].copy_(fp8_bytes[src_offset : src_offset + n])
+        logical_offset += n
+        src_offset += n
+        remaining -= n
+
+    model_weight._transpose_invalid = False
+    return True
 
 
 def quantize_master_weights(
@@ -111,12 +241,29 @@ def quantize_master_weights(
     blockwise_scaling_params = []
     mxfp8_scaling_params = []
     nvfp4_params = []
+    identity_params = []
 
     if fsdp_shard_model_weights is None:
         use_fsdp_shard_model_weights = False
         fsdp_shard_model_weights = [None] * len(model_weights)
     else:
         use_fsdp_shard_model_weights = True
+    # Validate the entire batch before clearing initialization state or
+    # populating any per-format work buckets.
+    for model_weight, master_weight, start_offset, fsdp_shard_model_weight in zip(
+        model_weights, master_weights, start_offsets, fsdp_shard_model_weights
+    ):
+        _validate_per_tensor_fp8_fsdp_hopper_policy(
+            model_weight,
+            fsdp_shard_model_weight,
+        )
+        if isinstance(model_weight, HybridQuantizedTensor):
+            _validate_hybrid_partial_master_policy(
+                model_weight,
+                master_weight,
+                start_offset,
+                fsdp_shard_model_weight,
+            )
 
     for model_weight, master_weight, start_offset, fsdp_shard_model_weight in zip(
         model_weights, master_weights, start_offsets, fsdp_shard_model_weights
@@ -165,6 +312,20 @@ def quantize_master_weights(
             mxfp8_scaling_params.append(
                 (model_weight, master_weight, start_offset, fsdp_shard_model_weight)
             )
+        elif isinstance(quantizer, IdentityQuantizer):
+            identity_params.append(
+                (model_weight, master_weight, start_offset, fsdp_shard_model_weight)
+            )
+        elif isinstance(quantizer, HybridQuantizer):
+            _route_hybrid_to_buckets(
+                model_weight,
+                master_weight,
+                start_offset,
+                fsdp_shard_model_weight,
+                delayed_scaling_params=delayed_scaling_params,
+                current_scaling_params=current_scaling_params,
+                identity_params=identity_params,
+            )
         else:
             raise ValueError(f"quantize_master_weights for {type(quantizer)} is not supported yet")
 
@@ -179,6 +340,8 @@ def quantize_master_weights(
         _cast_master_weights_to_fp8_mxfp8_scaling(mxfp8_scaling_params, *extra_args)
     if len(nvfp4_params) > 0:
         _cast_master_weights_to_nvfp4_2d(nvfp4_params, *extra_args)
+    if len(identity_params) > 0:
+        _cast_master_weights_to_identity(identity_params, *extra_args)
 
 
 def cast_master_weights_to_fp8(
@@ -257,6 +420,10 @@ def _cast_master_weights_to_fp8_delayed_scaling(
         # master_weight may be smaller than model_weight because it could be distributed across
         # multiple ranks. So we need to create a dummy weight using the raw data from model_weight.
         if not use_fsdp_shard_model_weights:
+            if _update_transpose_only_float8_flat_fragment(
+                model_weight, master_weight, start_offset, quantizer
+            ):
+                continue
             shard_model_weight_raw = model_weight._data.view(-1)[start_offset:end_offset]
         shard_model_weight_fp8 = quantizer.create_tensor_from_data(
             shard_model_weight_raw.view(1, -1),
@@ -402,13 +569,17 @@ def _cast_master_weights_to_fp8_current_scaling(
 
         # Cast master weight to FP8
         end_offset = start_offset + master_weight.numel()
-        if not use_fsdp_shard_model_weights:
-            model_weight_fragment = model_weight.reshape(-1)[start_offset:end_offset]
         quantizer = Float8Quantizer(
             scale=scale,
             amax=torch.Tensor(),
             fp8_dtype=model_weight._fp8_dtype,
         )
+        if not use_fsdp_shard_model_weights:
+            if _update_transpose_only_float8_flat_fragment(
+                model_weight, master_weight, start_offset, quantizer
+            ):
+                continue
+            model_weight_fragment = model_weight.reshape(-1)[start_offset:end_offset]
         if use_fsdp_shard_model_weights and not isinstance(model_weight_fragment, Float8Tensor):
             # NOTE: The fsdp shard model weight may be a unit8 tensor instead of
             # a float8 tensor. We should handle this situation properly.
@@ -794,6 +965,53 @@ def _cast_master_weights_to_nvfp4_2d(
         )
 
 
+def _identity_storage_data(tensor):
+    if not isinstance(tensor, IdentityTensorStorage):
+        raise TypeError(f"Expected IdentityTensorStorage, got {type(tensor).__name__}")
+    if tensor._hp_data is None:
+        raise RuntimeError("IdentityTensorStorage has no data")
+    return tensor._hp_data
+
+
+def _cast_master_weights_to_identity(
+    params, group, use_fsdp_shard_model_weights=False, manual_post_all_gather_processing=False
+):
+    del group, manual_post_all_gather_processing
+
+    for model_weight, master_weight, start_offset, model_weight_fragment in params:
+        if master_weight is None:
+            continue
+        if start_offset is None:
+            raise ValueError("start_offset must not be None when master_weight is provided")
+        if start_offset < 0:
+            raise ValueError(f"start_offset must be non-negative, got {start_offset}")
+        end_offset = start_offset + master_weight.numel()
+        if end_offset > model_weight.numel():
+            raise ValueError(
+                f"end_offset ({end_offset}) exceeds model_weight numel ({model_weight.numel()}), "
+                f"start_offset={start_offset}, master_weight numel={master_weight.numel()}"
+            )
+
+        if use_fsdp_shard_model_weights:
+            target = model_weight_fragment
+            if target is None:
+                raise RuntimeError("FSDP shard model weight is required for Identity writeback")
+            if isinstance(target, IdentityTensorStorage):
+                target_flat = _identity_storage_data(target).reshape(-1)
+            else:
+                target_flat = target.reshape(-1)
+            target_slice = target_flat[: master_weight.numel()]
+        else:
+            target_slice = _identity_storage_data(model_weight).reshape(-1)[start_offset:end_offset]
+
+        if target_slice.numel() != master_weight.numel():
+            raise ValueError(
+                f"Identity target slice has {target_slice.numel()} elements, "
+                f"but master_weight has {master_weight.numel()}"
+            )
+        target_slice.copy_(master_weight.reshape(-1))
+
+
 def _cast_master_weights_to_fp8_mxfp8_scaling(
     params, group, use_fsdp_shard_model_weights=False, manual_post_all_gather_processing=False
 ):  # pylint: disable=unused-argument
@@ -933,6 +1151,252 @@ def _cast_master_weights_to_fp8_mxfp8_scaling(
         )
 
 
+# ---------------------------------------------------------------------------------------------
+# HybridQuantizer helpers for `quantize_master_weights` / `post_all_gather_processing`.
+#
+# Dispatch is per-direction: `_route_hybrid_to_buckets` iterates over both sub-storages
+# of a `HybridQuantizedTensor` and routes each one independently into the per-format
+# bucket matching its own sub-quantizer type. Row and col make their own decisions and
+# can mix any pair of currently-supported sub-quantizers.
+#
+#   Supported (per-tensor Float8 or Identity sub-quantizers, any direction):
+#     - Float8Quantizer                  (delayed scaling)
+#     - Float8CurrentScalingQuantizer    (current scaling)
+#     - IdentityQuantizer                (high-precision passthrough)
+#
+#   Per-tensor Float8 works because `_cast_master_weights_to_fp8_{delayed,current}_scaling`
+#   accept any Float8Tensor (single direction is fine — each entry is one Float8Tensor
+#   with its own `_scale_inv` and the helper writes that one entry's `_data`). Each
+#   hybrid sub-storage IS a single-direction Float8Tensor, so we route them as two
+#   independent entries (into the same bucket for same-format, or into different
+#   buckets for cross-format Float8 — e.g. delayed row + current col).
+#   The FSDP-sharded columnwise-only representation on Hopper is the exception:
+#   neither per-tensor cast helper can safely flatten its transpose-only payload,
+#   so `_validate_per_tensor_fp8_fsdp_hopper_policy` rejects it before mutation.
+#
+#   Identity routes to an exact copy bucket. Single-direction hybrid (only one
+#   sub-storage populated) routes the present direction only. Both-None hybrids
+#   raise ValueError. Per-block sub-quantizers still hit their per-direction TODO.
+#
+#   Not supported (raise NotImplementedError per-direction + TODO):
+#
+#     - MXFP8Quantizer as a hybrid sub-quantizer (any direction)
+#         TODO(#3158, hybrid-mxfp8-distopt): the distopt cast kernels
+#         (`tex.mxfp8_scaling_compute_partial_amax`, `tex.mxfp8_scaling_partial_cast`)
+#         are bidirectional — both rowwise and colwise outputs required — so they
+#         cannot ingest a single-direction hybrid sub-storage. (Unrelated to the
+#         regular `tex.quantize` kernel used by forward/backward, which natively
+#         supports single-direction output.) Unblocker: add single-direction
+#         variants of the two distopt kernels, then route hybrid sub-storages
+#         per-direction into `mxfp8_scaling_params` matching the Float8 path above.
+#         Also unlocks cross-format MXFP8 row + <other format> col.
+#
+#     - NVFP4Quantizer as a hybrid sub-quantizer (any direction)
+#         TODO(#3158, hybrid-nvfp4-distopt): load-bearing blocker is the kernel assertion
+#         `return_identity || !use_2d_quantization` in
+#         `quantize_transpose_vector_blockwise_fp4.cu`, which rejects exactly the
+#         columnwise-only 2D configuration that `HybridQuantizer.__init__` produces
+#         for the col sub-quantizer. Blocks hybrid 2D NVFP4 weight construction at
+#         `quantized_model_init` time. 1D NVFP4 is unaffected. The assertion is an
+#         explicitly-marked unwritten code path, not an algorithmic limit (see the
+#         kernel author's note above the early-return guard).
+#
+#         Secondary blocker (gated on the kernel fix): the distopt helper
+#         `_cast_master_weights_to_nvfp4_2d` writes only `_rowwise_data` and relies
+#         on per-tensor post-AG `_create_columnwise()` — for hybrid, the columnwise
+#         data needs to land in a SEPARATE col sub-storage, so the post-AG branch
+#         must be made hybrid-aware (derive `col_sub._columnwise_data` from
+#         `row_sub`'s gathered rowwise).
+#
+#     - Float8BlockQuantizer as a hybrid sub-quantizer
+#         TODO(#3158, hybrid-fp8-blockwise): same shape as the NVFP4 secondary blocker —
+#         `_cast_master_weights_to_fp8_blockwise_scaling` writes only `_rowwise_data`
+#         with per-tensor post-AG `_create_columnwise()` that doesn't reach hybrid's
+#         separate col sub-storage. Unlike NVFP4, there is no kernel-level
+#         construction blocker (the Block FP8 kernel natively supports
+#         columnwise-only mode), so hybrid Block FP8 weights construct fine via the
+#         non-distopt FusedAdam path today; only the sharded-master distopt cast
+#         path is blocked. Unblocker is a Python-side hybrid-aware post-AG branch;
+#         no C++ work needed.
+#
+# ---------------------------------------------------------------------------------------------
+
+
+def _validate_per_tensor_fp8_fsdp_hopper_policy(
+    model_weight,
+    fsdp_shard_model_weight,
+):
+    """Reject unsupported transpose-only per-tensor FP8 FSDP updates on Hopper.
+
+    The FSDP shard path can receive a ``Float8Tensor`` and pass it directly to
+    a per-tensor FP8 cast helper. On Hopper, both delayed and current scaling
+    use a transpose-only representation for columnwise-only tensors that the
+    sharded update path cannot flatten safely. Reject the whole batch before
+    any scale, cache, or storage mutation instead.
+    """
+    if fsdp_shard_model_weight is None or is_non_tn_fp8_gemm_supported():
+        return
+
+    if isinstance(model_weight, HybridQuantizedTensor):
+        quantizer = model_weight._get_quantizer()
+        candidates = (
+            (model_weight._rowwise_storage, quantizer.rowwise_quantizer),
+            (model_weight._columnwise_storage, quantizer.columnwise_quantizer),
+        )
+    else:
+        candidates = ((model_weight, model_weight._get_quantizer()),)
+
+    for storage, quantizer in candidates:
+        if (
+            storage is not None
+            and isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer))
+            and _is_float8_transpose_only(storage)
+        ):
+            raise NotImplementedError(
+                "Columnwise-only per-tensor FP8 quantization is not implemented for "
+                "FSDP updates on this architecture."
+            )
+
+
+def _validate_hybrid_partial_master_policy(
+    model_weight,
+    master_weight,
+    start_offset,
+    fsdp_shard_model_weight,
+):
+    """Reject unsupported Hybrid column-source updates before distopt mutation."""
+    row_sub = model_weight._rowwise_storage
+    col_sub = model_weight._columnwise_storage
+    quantizer = model_weight._get_quantizer()
+
+    if col_sub is not None and quantizer.columnwise_source == "rowwise_dequantized":
+        raise NotImplementedError(
+            "quantize_master_weights does not support HybridQuantizer with a live "
+            "columnwise representation and "
+            "columnwise_source='rowwise_dequantized'. The column must be derived "
+            "after the rowwise update/all-gather. See #3158."
+        )
+
+    if master_weight is None or row_sub is None or col_sub is None:
+        return
+
+    shard_has_both_directions = (
+        isinstance(fsdp_shard_model_weight, HybridQuantizedTensor)
+        and fsdp_shard_model_weight._rowwise_storage is not None
+        and fsdp_shard_model_weight._columnwise_storage is not None
+    )
+    if shard_has_both_directions:
+        return
+
+    end_offset = _validate_flat_fragment(model_weight, master_weight, start_offset)
+    if start_offset == 0 and end_offset == model_weight.numel():
+        return
+
+    raise ValueError(
+        "quantize_master_weights cannot update a two-direction "
+        "HybridQuantizedTensor from a partial master shard when "
+        "columnwise_source='original': the one-payload distributed-optimizer "
+        "path cannot preserve an independently quantized columnwise value. "
+        "Provide full-master data or retain only the rowwise representation."
+    )
+
+
+def _route_hybrid_to_buckets(
+    model_weight,
+    master_weight,
+    start_offset,
+    fsdp_shard_model_weight,
+    *,
+    delayed_scaling_params,
+    current_scaling_params,
+    identity_params,
+):
+    """Decompose a `HybridQuantizedTensor` into per-direction entries and route each
+    into the appropriate per-format bucket used by `quantize_master_weights`.
+
+    Per-direction dispatch: each sub-storage routes independently based on its
+    own sub-quantizer type. Per-tensor Float8 sub-quantizers (delayed and/or
+    current scaling) are supported in any combination per direction; single-
+    direction hybrid (one sub-storage dropped via ``update_usage``) is also
+    supported. See the TODO block above this helper for the per-block-format
+    rejection rationale and unblocker shapes.
+    """
+    row_sub = model_weight._rowwise_storage
+    col_sub = model_weight._columnwise_storage
+    sub_q_row = model_weight._quantizer.rowwise_quantizer
+    sub_q_col = model_weight._quantizer.columnwise_quantizer
+
+    if row_sub is None and col_sub is None:
+        raise ValueError(
+            "quantize_master_weights called on HybridQuantizedTensor with both "
+            "rowwise and columnwise sub-storages dropped (via update_usage). "
+            "Nothing to cast — this is most likely a caller bug."
+        )
+
+    # Per-direction routing: each (sub_storage, sub_quantizer) pair selects its
+    # own bucket based on the sub-quantizer's type. Directions that have been
+    # dropped via ``update_usage`` are silently skipped.
+    for direction, sub_storage, sub_q in (
+        ("rowwise", row_sub, sub_q_row),
+        ("columnwise", col_sub, sub_q_col),
+    ):
+        if sub_storage is None:
+            continue
+        shard_fragment = fsdp_shard_model_weight
+        if shard_fragment is not None and isinstance(shard_fragment, HybridQuantizedTensor):
+            shard_fragment = (
+                shard_fragment._rowwise_storage
+                if direction == "rowwise"
+                else shard_fragment._columnwise_storage
+            )
+        entry = (sub_storage, master_weight, start_offset, shard_fragment)
+        if isinstance(sub_q, Float8Quantizer):
+            # Delayed scaling: the per-format helper iterates entries
+            # independently and does a per-DP amax all-reduce across the bucket.
+            delayed_scaling_params.append(entry)
+        elif isinstance(sub_q, Float8CurrentScalingQuantizer):
+            current_scaling_params.append(entry)
+        elif isinstance(sub_q, IdentityQuantizer):
+            identity_params.append(entry)
+        elif isinstance(sub_q, MXFP8Quantizer):
+            # TODO(#3158, hybrid-mxfp8-distopt): the distopt cast kernels are
+            # bidirectional, so a single-direction hybrid sub-storage cannot be
+            # fed in. See top-of-file TODO block for the unblocker (single-
+            # direction variants of the two distopt kernels).
+            raise NotImplementedError(
+                "quantize_master_weights for HybridQuantizer with MXFP8Quantizer "
+                f"{direction} sub-quantizer is not supported yet. See the TODO "
+                "block above _route_hybrid_to_buckets for the unblocker shape."
+            )
+        elif isinstance(sub_q, NVFP4Quantizer):
+            # TODO(#3158, hybrid-nvfp4-distopt): load-bearing blocker is the kernel
+            # assertion that rejects columnwise-only 2D NVFP4 — which is
+            # exactly what hybrid's col sub-quantizer pin produces. Secondary
+            # blocker (gated on the kernel fix) is the per-tensor post-AG
+            # `_create_columnwise()` not reaching hybrid's separate col
+            # sub-storage. See top-of-file TODO block for details.
+            raise NotImplementedError(
+                "quantize_master_weights for HybridQuantizer with NVFP4Quantizer "
+                f"{direction} sub-quantizer is not supported yet. See the TODO "
+                "block above _route_hybrid_to_buckets for details."
+            )
+        elif isinstance(sub_q, Float8BlockQuantizer):
+            # Pending hybrid-fp8-blockwise work (#3158): same shape as the NVFP4
+            # secondary blocker (and only that one — no kernel-level construction
+            # blocker for Block FP8). Python-side post-AG fix. See the
+            # _route_hybrid_to_buckets design note above for details.
+            raise NotImplementedError(
+                "quantize_master_weights for HybridQuantizer with Float8BlockQuantizer "
+                f"{direction} sub-quantizer is not supported yet. See the TODO "
+                "block above _route_hybrid_to_buckets for details."
+            )
+        else:
+            raise NotImplementedError(
+                "quantize_master_weights for HybridQuantizer with "
+                f"{type(sub_q).__name__} {direction} sub-quantizer is not supported yet."
+            )
+
+
 def post_all_gather_processing(model_weights: Union[torch.Tensor, List[torch.Tensor]]):
     """
     Post-processing after all-gather for weights in distributed optimizer.
@@ -941,6 +1405,9 @@ def post_all_gather_processing(model_weights: Union[torch.Tensor, List[torch.Ten
     - Plain pytorch tensor: noop.
 
     For NVFP4 tensors, uses batched multi-tensor processing to reduce CPU overhead.
+
+    For `HybridQuantizedTensor`, recurses per-direction so each present
+    sub-storage runs its native post-processing. Identity sub-storages are no-op.
     """
     if not isinstance(model_weights, list):
         model_weights = [model_weights]
@@ -963,6 +1430,12 @@ def post_all_gather_processing(model_weights: Union[torch.Tensor, List[torch.Ten
         elif isinstance(model_weight, MXFP8Tensor):
             # MXFP8 scaling: no need to do anything.
             pass
+        elif isinstance(model_weight, IdentityTensorStorage):
+            pass
+        elif isinstance(model_weight, HybridQuantizedTensor):
+            for sub in (model_weight._rowwise_storage, model_weight._columnwise_storage):
+                if sub is not None:
+                    post_all_gather_processing(sub)
         elif isinstance(model_weight, QuantizedTensor):
             raise ValueError(f"post_processing for {type(model_weight)} is not supported")
 

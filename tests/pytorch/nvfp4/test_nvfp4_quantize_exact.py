@@ -11,8 +11,8 @@ import torch
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 from transformer_engine.pytorch import NVFP4Quantizer
-from transformer_engine.pytorch.custom_recipes.quantization_ref_nvfp4 import NVFP4QuantizerRef
-from transformer_engine.pytorch.custom_recipes import utils
+from transformer_engine.pytorch.custom_recipes.reference_nvfp4 import NVFP4QuantizerRef
+from transformer_engine.pytorch.custom_recipes import reference_utils
 from transformer_engine.common.recipe import NVFP4BlockScaling
 
 
@@ -87,7 +87,12 @@ def maybe_skip_row_scaled_unsupported_quantization(
     if not row_scaled_nvfp4:
         return
     if return_transpose:
-        pytest.skip("Row-scaled NVFP4 does not support columnwise usage")
+        if use_4over6:
+            pytest.skip("Row-scaled NVFP4 transpose does not support 4over6 mode")
+        if x_dtype != torch.bfloat16 or M is None or N is None or M % 32 != 0 or N % 32 != 0:
+            pytest.skip(
+                "Row-scaled NVFP4 transpose requires BF16 input and dimensions divisible by 32"
+            )
     if with_2d_quantization:
         pytest.skip("Row-scaled NVFP4 does not support 2D quantization")
 
@@ -180,7 +185,7 @@ def check_quantization_nvfp4_versus_reference(
     # Reference quantization
     quant_tile_shape = (1, 16) if not with_2d_quantization else (16, 16)
     ref_quantizer = NVFP4QuantizerRef(
-        dtype=utils.Fp4Formats.E2M1,
+        dtype=reference_utils.Fp4Formats.E2M1,
         rowwise=True,
         columnwise=return_transpose,
         pow_2_scales=False,
@@ -389,7 +394,7 @@ def test_nvfp4_quantization_extrema_versus_reference(
     qx_amax_t = x_nvfp4_sut._amax_columnwise
 
     ref_quantizer = NVFP4QuantizerRef(
-        dtype=utils.Fp4Formats.E2M1,
+        dtype=reference_utils.Fp4Formats.E2M1,
         rowwise=True,
         columnwise=return_transpose,
         pow_2_scales=False,
@@ -534,7 +539,7 @@ def test_nvfp4_quantization_boundary_values(
     qx_amax_t = x_nvfp4_sut._amax_columnwise
 
     ref_quantizer = NVFP4QuantizerRef(
-        dtype=utils.Fp4Formats.E2M1,
+        dtype=reference_utils.Fp4Formats.E2M1,
         rowwise=True,
         columnwise=return_transpose,
         pow_2_scales=False,
@@ -665,7 +670,7 @@ def test_nvfp4_quantization_noncontiguous_inputs(
     qx_amax_t = x_nvfp4_sut._amax_columnwise
 
     ref_quantizer = NVFP4QuantizerRef(
-        dtype=utils.Fp4Formats.E2M1,
+        dtype=reference_utils.Fp4Formats.E2M1,
         rowwise=True,
         columnwise=return_transpose,
         pow_2_scales=False,

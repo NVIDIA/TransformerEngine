@@ -9,8 +9,6 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TE_REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
-export PYTHONPATH="${TE_REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 
 DETECTED_GPUS=$(nvidia-smi -L 2>/dev/null | wc -l)
 if [ "${DETECTED_GPUS}" -lt 4 ]; then
@@ -47,11 +45,15 @@ RET=0
 run_pass() {
   local label="$1"
   local zc="$2"
+  local eager="${3:-0}"
+  local overflow="${4:-0}"
+  local mxfp8="${5:-0}"
   local log="stdout_ep_${label}.txt"
   echo "=== Running ${SCRIPT} [${label}] on ${NUM_RANKS} GPUs (timeout=${TEST_TIMEOUT_S}s) ==="
   # setsid + kill-after so SIGKILL takes down the whole process group, not just torchrun.
-  NVTE_EP_ZERO_COPY="${zc}" setsid timeout --foreground --kill-after=10 --signal=TERM \
-    "${TEST_TIMEOUT_S}" \
+  NVTE_EP_ZERO_COPY="${zc}" NVTE_EP_EAGER="${eager}" NVTE_EP_OVERFLOW="${overflow}" \
+    NVTE_EP_MXFP8_PASS="${mxfp8}" \
+    setsid timeout --foreground --kill-after=10 --signal=TERM "${TEST_TIMEOUT_S}" \
     torchrun --standalone --nnodes=1 --nproc-per-node="${NUM_RANKS}" \
     "${SCRIPT}" 2>&1 | tee "${log}"
   local rc=${PIPESTATUS[0]}
@@ -70,5 +72,13 @@ run_pass() {
 
 run_pass "default" 0
 run_pass "zero_copy" 1
+run_pass "eager" 0 1
+run_pass "overflow" 0 0 1
+# MXFP8 grouped dispatch pins the per-expert alignment to 128, which the backend caches
+# process-wide, so its tests get their own passes (normal + zero-copy + eager IO). mxfp8 is the
+# 5th arg; eager is the 3rd.
+run_pass "mxfp8" 0 0 0 1
+run_pass "mxfp8_zero_copy" 1 0 0 1
+run_pass "mxfp8_eager" 0 1 0 1
 
 exit $RET

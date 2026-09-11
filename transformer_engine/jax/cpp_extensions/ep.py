@@ -14,6 +14,7 @@ Sharding model:
     compound ``(dp, ep)`` axis on the leading dim.
 """
 
+import functools
 from dataclasses import dataclass
 
 import jax
@@ -24,12 +25,38 @@ from jax.sharding import NamedSharding, PartitionSpec
 import transformer_engine_jax
 from .base import BasePrimitive, register_primitive
 from ..sharding import global_mesh_resource, get_mesh_axis_size
+from ..version_utils import is_collective_stream_supported
+
+
+def _on_collective_stream(func):
+    """Pin ``func``'s ops to XLA's collective stream so the scheduler serializes
+    them with native collectives. No-op on JAX that lacks the annotation."""
+    if not is_collective_stream_supported():
+        return func
+    from jax.experimental.compute_on import compute_on
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        # compute_on traces its callee and abstract-evals every argument, so it
+        # cannot take the static EpLayerConfig/PartitionSpec args directly. Wrap
+        # a nullary thunk that closes over them; the array operands are captured
+        # as consts and lifted to real operands, outputs stay on device. XLA
+        # async-wraps the resulting call onto the collective stream.
+        annotated = compute_on(  # pylint: disable=not-callable
+            compute_type="gpu_stream:collective",
+            out_memory_spaces=jax.memory.Space.Device,
+        )(lambda: func(*args, **kwargs))
+        return annotated()
+
+    return wrapper
+
 
 __all__ = [
     "EpConfig",
     "EpLayerConfig",
     "set_ep_config",
     "get_ep_config",
+    "reset_ep_config",
     "ep_handle_mem_size",
     "ep_prepare",
     "ep_dispatch_fwd",
@@ -75,6 +102,12 @@ def get_ep_config() -> EpConfig:
     if _ep_config is None:
         raise RuntimeError("EpConfig has not been set. Did you call ep_bootstrap()?")
     return _ep_config
+
+
+def reset_ep_config() -> None:
+    """Clear the cached EpConfig so a later ep_bootstrap starts fresh (see ep_finalize)."""
+    global _ep_config
+    _ep_config = None
 
 
 @dataclass(frozen=True)
@@ -203,8 +236,10 @@ class EpPreparePrimitive(BasePrimitive):
         )
         leading = _ep_leading_dims(is_outer)
         token_counts_aval = jax.core.ShapedArray(leading + (num_local_experts,), jnp.int32)
+        # Per-rank pre-drop recv-slot total (includes tokens dropped on overflow).
+        total_recv_tokens_aval = jax.core.ShapedArray(leading + (1,), jnp.int32)
         handle_mem_aval = jax.core.ShapedArray(leading + (handle_mem_size,), jnp.uint8)
-        return token_counts_aval, handle_mem_aval
+        return token_counts_aval, total_recv_tokens_aval, handle_mem_aval
 
     @staticmethod
     def outer_abstract(*args, **kwargs):
@@ -224,13 +259,13 @@ class EpPreparePrimitive(BasePrimitive):
     @staticmethod
     def impl(topk_idx, top_k, dispatch_output_per_expert_alignment, is_outer):
         assert EpPreparePrimitive.inner_primitive is not None
-        token_counts, handle_mem = EpPreparePrimitive.inner_primitive.bind(
+        token_counts, total_recv_tokens, handle_mem = EpPreparePrimitive.inner_primitive.bind(
             topk_idx,
             top_k=top_k,
             dispatch_output_per_expert_alignment=dispatch_output_per_expert_alignment,
             is_outer=is_outer,
         )
-        return token_counts, handle_mem
+        return token_counts, total_recv_tokens, handle_mem
 
     @staticmethod
     def batcher(batched_args, batch_dims, *, top_k, dispatch_output_per_expert_alignment, is_outer):
@@ -250,9 +285,11 @@ class EpPreparePrimitive(BasePrimitive):
                 f" with the topk dim replicated; got spec={idx_spec}."
             )
         arg_shardings = tuple(a.sharding for a in arg_infos)
-        # token_counts / handle_mem inherit the input's leading axis (trailing dims auto-pad to None).
+        # token_counts / total_recv_tokens / handle_mem inherit the input's leading
+        # axis (trailing dims auto-pad to None).
         leading_spec = PartitionSpec(idx_spec[0])
         tc_sharding = NamedSharding(mesh, leading_spec)
+        trt_sharding = NamedSharding(mesh, leading_spec)
         hm_sharding = NamedSharding(mesh, leading_spec)
 
         def sharded_impl(topk_idx):
@@ -260,7 +297,7 @@ class EpPreparePrimitive(BasePrimitive):
                 topk_idx, top_k, dispatch_output_per_expert_alignment, False
             )
 
-        return mesh, sharded_impl, (tc_sharding, hm_sharding), arg_shardings
+        return mesh, sharded_impl, (tc_sharding, trt_sharding, hm_sharding), arg_shardings
 
     @staticmethod
     def shardy_sharding_rule(*args):
@@ -269,7 +306,7 @@ class EpPreparePrimitive(BasePrimitive):
         value_types = args[-2]
         topk_idx_rank = len(value_types[0].shape)
         in_axes = " ".join(f"L{i}" for i in range(topk_idx_rank - 1)) + " topk"
-        return f"{in_axes} -> EPL nle, EPL hm"
+        return f"{in_axes} -> EPL nle, EPL trt, EPL hm"
 
 
 register_primitive(EpPreparePrimitive)
@@ -894,8 +931,11 @@ register_primitive(EpCombineBwdPrimitive)
 # ── Public-ish helpers (used by jax/ep.py) ──────────────────────────────────
 
 
+@_on_collective_stream
 def ep_prepare(cfg: EpLayerConfig, topk_idx):
-    """Exchange routing metadata for ``cfg``; return ``(token_counts, handle_mem)``."""
+    """Exchange routing metadata for ``cfg``; return
+    ``(token_counts, total_recv_tokens, handle_mem)``. ``total_recv_tokens`` is
+    the per-rank pre-drop recv-slot total (includes tokens dropped on overflow)."""
     return EpPreparePrimitive.outer_primitive.bind(
         topk_idx,
         top_k=int(cfg.top_k),
@@ -904,6 +944,7 @@ def ep_prepare(cfg: EpLayerConfig, topk_idx):
     )
 
 
+@_on_collective_stream
 def ep_dispatch_fwd(
     cfg: EpLayerConfig, handle_mem, topk_idx, tokens, topk_weights, recv_capacity_per_rank
 ):
@@ -920,6 +961,7 @@ def ep_dispatch_fwd(
     )
 
 
+@_on_collective_stream
 def ep_combine_fwd(
     cfg: EpLayerConfig, handle_mem, expert_out, num_local_tokens, out_partition_spec=None
 ):
@@ -935,6 +977,7 @@ def ep_combine_fwd(
     )
 
 
+@_on_collective_stream
 def ep_dispatch_bwd(
     cfg: EpLayerConfig,
     handle_mem,
@@ -956,6 +999,7 @@ def ep_dispatch_bwd(
     )
 
 
+@_on_collective_stream
 def ep_combine_bwd(cfg: EpLayerConfig, handle_mem, grad, recv_capacity_per_rank):
     """Backward of combine; returns grad_expert_out [num_procs, recv_capacity_per_rank, H]."""
     return EpCombineBwdPrimitive.outer_primitive.bind(

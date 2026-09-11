@@ -13,9 +13,34 @@ import torch
 from transformer_engine_torch import FP8TensorMeta
 from ..torch_version import torch_version
 from ..quantization import FP8GlobalStateManager
+from ..quantized_tensor import QuantizedTensorStorage, Quantizer
+from ..tensor import (
+    Float8BlockQuantizer,
+    Float8CurrentScalingQuantizer,
+    Float8Quantizer,
+    MXFP8Quantizer,
+    NVFP4Quantizer,
+)
 from ..tensor.float8_tensor import Float8Tensor
-from ..quantized_tensor import QuantizedTensorStorage
 from ..utils import canonicalize_dtype
+
+
+def get_fused_normalization_quantizer(
+    quantizer: Optional[Quantizer],
+) -> Optional[Quantizer]:
+    """Return a quantizer supported by fused normalization kernels."""
+    if isinstance(
+        quantizer,
+        (
+            Float8Quantizer,
+            Float8CurrentScalingQuantizer,
+            MXFP8Quantizer,
+            Float8BlockQuantizer,
+            NVFP4Quantizer,
+        ),
+    ):
+        return quantizer
+    return None
 
 
 def validate_or_alloc_output(

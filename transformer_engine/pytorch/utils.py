@@ -83,6 +83,7 @@ def _get_device_compute_capability(device: torch.device) -> Tuple[int, int]:
     return (props.major, props.minor)
 
 
+@torch.compiler.assume_constant_result
 def get_device_compute_capability() -> Tuple[int, int]:
     """CUDA compute capability of current GPU"""
     return _get_device_compute_capability(torch.cuda.current_device())
@@ -663,7 +664,7 @@ def is_non_tn_fp8_gemm_supported() -> bool:
 
 
 @functools.lru_cache(maxsize=None)
-def get_cudnn_version() -> Tuple[int, int, int]:
+def _get_cudnn_version() -> Tuple[int, int, int]:
     """Runtime cuDNN version (major, minor, patch)"""
     import transformer_engine.pytorch.cpp_extensions as ext
 
@@ -672,6 +673,12 @@ def get_cudnn_version() -> Tuple[int, int, int]:
     major, encoded_version = divmod(encoded_version, major_version_magnitude)
     minor, patch = divmod(encoded_version, 100)
     return (major, minor, patch)
+
+
+@torch.compiler.assume_constant_result
+def get_cudnn_version() -> Tuple[int, int, int]:
+    """Runtime cuDNN version (major, minor, patch)"""
+    return _get_cudnn_version()
 
 
 def canonicalize_device(device: Optional[torch.device | str]) -> torch.device:

@@ -342,5 +342,150 @@ py::object clamped_dswiglu(const at::Tensor& grad, const at::Tensor& input, py::
                                                               glu_linear_offset);
 }
 
+/* Scaled activation helpers (activation + per-row scale via nvte_scaled_*). */
+
+template <auto act_func, typename... Args>
+at::Tensor scaled_activation_compute(const at::Tensor& input, const at::Tensor& act_scales,
+                                     int shape_divisor, Args&&... args) {
+  init_extension();
+  NVTE_CHECK(input.dim() >= 1, "scaled activation input must have at least 1 dimension");
+  NVTE_CHECK(shape_divisor > 0 && input.size(-1) % shape_divisor == 0,
+             "scaled activation input width is not compatible with activation");
+
+  auto input_tensor = input.contiguous();
+  auto scales_tensor = act_scales.contiguous().reshape({-1});
+  const int64_t rows = input_tensor.numel() / input_tensor.size(-1);
+  NVTE_CHECK(scales_tensor.numel() == rows, "scaled activation expects one scale per input row");
+
+  std::vector<int64_t> output_sizes(input_tensor.sizes().begin(), input_tensor.sizes().end());
+  output_sizes.back() /= shape_divisor;
+  auto output = at::empty(output_sizes, input_tensor.options());
+
+  const TensorWrapper& input_nvte = makeTransformerEngineTensor(input_tensor);
+  const TensorWrapper& scales_nvte = makeTransformerEngineTensor(scales_tensor);
+  const TensorWrapper& output_nvte = makeTransformerEngineTensor(output);
+
+  auto stream = at::cuda::getCurrentCUDAStream();
+  NVTE_SCOPED_GIL_RELEASE({
+    act_func(input_nvte.data(), scales_nvte.data(), output_nvte.data(), std::forward<Args>(args)...,
+             stream);
+  });
+  return output;
+}
+
+template <auto dact_func, typename... Args>
+std::tuple<at::Tensor, at::Tensor> scaled_dactivation_compute(const at::Tensor& grad,
+                                                              const at::Tensor& input,
+                                                              const at::Tensor& act_scales,
+                                                              bool compute_scale_grad,
+                                                              Args&&... args) {
+  init_extension();
+  NVTE_CHECK(input.dim() >= 1 && grad.dim() >= 1,
+             "scaled dactivation input and grad must have at least 1 dimension");
+
+  auto grad_tensor = grad.contiguous();
+  auto input_tensor = input.contiguous();
+  auto scales_tensor = act_scales.contiguous();
+  const int64_t rows = input_tensor.numel() / input_tensor.size(-1);
+  NVTE_CHECK(scales_tensor.numel() == rows, "scaled dactivation expects one scale per input row");
+
+  auto scales_flat = scales_tensor.reshape({-1});
+  auto grad_input = at::empty_like(input_tensor);
+  auto grad_scales = compute_scale_grad ? at::empty_like(scales_tensor) : at::Tensor();
+  auto grad_scales_flat = compute_scale_grad ? grad_scales.reshape({-1}) : at::Tensor();
+
+  const TensorWrapper& grad_nvte = makeTransformerEngineTensor(grad_tensor);
+  const TensorWrapper& input_nvte = makeTransformerEngineTensor(input_tensor);
+  const TensorWrapper& scales_nvte = makeTransformerEngineTensor(scales_flat);
+  const TensorWrapper& grad_input_nvte = makeTransformerEngineTensor(grad_input);
+  std::optional<TensorWrapper> grad_scales_nvte;
+  if (compute_scale_grad) {
+    grad_scales_nvte.emplace(makeTransformerEngineTensor(grad_scales_flat));
+  }
+
+  auto stream = at::cuda::getCurrentCUDAStream();
+  NVTE_SCOPED_GIL_RELEASE({
+    dact_func(grad_nvte.data(), input_nvte.data(), scales_nvte.data(), grad_input_nvte.data(),
+              compute_scale_grad ? grad_scales_nvte->data() : nullptr, std::forward<Args>(args)...,
+              stream);
+  });
+  return {grad_input, grad_scales};
+}
+
+py::object maybe_quantize(const at::Tensor& tensor, py::handle quantizer) {
+  if (quantizer.is_none()) {
+    return py::cast(tensor);
+  }
+  auto quantizer_cpp = convert_quantizer(quantizer);
+  const TensorWrapper& tensor_nvte = makeTransformerEngineTensor(tensor);
+  const auto shape_te = tensor_nvte.shape();
+  const std::vector<size_t> shape(shape_te.data, shape_te.data + shape_te.ndim);
+  auto fake_dtype = GetTransformerEngineDType(tensor.scalar_type());
+  auto [out_nvte, out_py] = quantizer_cpp->create_tensor(shape, fake_dtype);
+  quantizer_cpp->quantize(tensor_nvte, out_nvte);
+  return out_py;
+}
+
+template <auto act_func, typename... Args>
+py::object scaled_activation_helper(const at::Tensor& input, const at::Tensor& act_scales,
+                                    py::handle quantizer, int shape_divisor, Args&&... args) {
+  auto output = scaled_activation_compute<act_func>(input, act_scales, shape_divisor,
+                                                    std::forward<Args>(args)...);
+  return maybe_quantize(output, quantizer);
+}
+
+template <auto dact_func, typename... Args>
+py::tuple scaled_dactivation_helper(const at::Tensor& grad, const at::Tensor& input,
+                                    const at::Tensor& act_scales, py::handle quantizer,
+                                    bool compute_scale_grad, Args&&... args) {
+  auto [grad_input, grad_scales] = scaled_dactivation_compute<dact_func>(
+      grad, input, act_scales, compute_scale_grad, std::forward<Args>(args)...);
+  return py::make_tuple(maybe_quantize(grad_input, quantizer),
+                        compute_scale_grad ? py::cast(grad_scales) : py::none());
+}
+
+py::object scaled_swiglu(const at::Tensor& input, const at::Tensor& act_scales,
+                         py::handle quantizer, int64_t glu_interleave_size) {
+  return scaled_activation_helper<nvte_scaled_swiglu>(input, act_scales, quantizer,
+                                                      /*shape_divisor=*/2, glu_interleave_size);
+}
+
+py::object scaled_clamped_swiglu(const at::Tensor& input, const at::Tensor& act_scales,
+                                 py::handle quantizer, float limit, float alpha,
+                                 float glu_linear_offset, int64_t glu_interleave_size) {
+  return scaled_activation_helper<nvte_scaled_clamped_swiglu>(
+      input, act_scales, quantizer, /*shape_divisor=*/2, limit, alpha, glu_linear_offset,
+      glu_interleave_size);
+}
+
+py::object scaled_srelu(const at::Tensor& input, const at::Tensor& act_scales,
+                        py::handle quantizer) {
+  return scaled_activation_helper<nvte_scaled_srelu>(input, act_scales, quantizer,
+                                                     /*shape_divisor=*/1);
+}
+
+py::tuple scaled_dswiglu(const at::Tensor& grad, const at::Tensor& input,
+                         const at::Tensor& act_scales, py::handle quantizer,
+                         int64_t glu_interleave_size, bool compute_scale_grad) {
+  return scaled_dactivation_helper<nvte_scaled_dswiglu>(grad, input, act_scales, quantizer,
+                                                        compute_scale_grad, glu_interleave_size);
+}
+
+py::tuple scaled_clamped_dswiglu(const at::Tensor& grad, const at::Tensor& input,
+                                 const at::Tensor& act_scales, py::handle quantizer, float limit,
+                                 float alpha, float glu_linear_offset, int64_t glu_interleave_size,
+                                 bool compute_scale_grad) {
+  return scaled_dactivation_helper<nvte_scaled_clamped_dswiglu>(
+      grad, input, act_scales, quantizer, compute_scale_grad, limit, alpha, glu_linear_offset,
+      glu_interleave_size);
+}
+
+py::tuple scaled_dsrelu(const at::Tensor& grad, const at::Tensor& input,
+                        const at::Tensor& act_scales, py::handle quantizer,
+                        bool compute_scale_grad) {
+  return scaled_dactivation_helper<nvte_scaled_dsrelu>(grad, input, act_scales, quantizer,
+                                                       compute_scale_grad);
+}
+
 }  // namespace pytorch
 }  // namespace transformer_engine

@@ -251,8 +251,13 @@ template <bool IS_ACT, typename ParamOP, float (*OP)(float, const ParamOP &), ty
           typename OType>
 __global__ void __launch_bounds__(THREADS_PER_BLOCK)
     cast_fp8_1D_kernel(const IType *input_ptr, OType *output_ptr, float *const amax_ptr,
-                       float *const scale_inv_ptr, const float *const scale_ptr, const size_t N) {
+                       float *const scale_inv_ptr, const float *const scale_ptr, const size_t N,
+                       const float *const noop) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+
+  if (noop != nullptr && noop[0] == 1.0f) {
+    return;
+  }
 
   const size_t block_offset = blockIdx.x * ELEMS_PER_BLOCK;
   const IType *input = input_ptr + block_offset;
@@ -353,7 +358,7 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK)
 }  // namespace quantize_1D_kernel
 
 template <bool IS_ACT, typename ParamOP, float (*OP)(float, const ParamOP &)>
-void quantize_1D(const Tensor &input, Tensor *output, cudaStream_t stream) {
+void quantize_1D(const Tensor &input, const Tensor *noop, Tensor *output, cudaStream_t stream) {
   using namespace quantize_1D_kernel;
   const size_t N = product(input.data.shape);
 
@@ -368,6 +373,7 @@ void quantize_1D(const Tensor &input, Tensor *output, cudaStream_t stream) {
   float *const amax_ptr = reinterpret_cast<float *>(output->amax.dptr);
   float *const scale_inv_ptr = reinterpret_cast<float *>(output->scale_inv.dptr);
   const float *const scale_ptr = reinterpret_cast<float *>(output->scale.dptr);
+  const float *noop_ptr = reinterpret_cast<const float *>(noop->data.dptr);
 
   const dim3 block(THREADS_PER_BLOCK);
   const dim3 grid(blocks);
@@ -379,9 +385,10 @@ void quantize_1D(const Tensor &input, Tensor *output, cudaStream_t stream) {
           const IType *input_ptr = reinterpret_cast<const IType *>(input.data.dptr);
           OType *output_ptr = reinterpret_cast<OType *>(output->data.dptr);
 
-          cast_fp8_1D_kernel<IS_ACT, ParamOP, OP, IType, OType><<<grid, block, 0, stream>>>(
-              input_ptr, output_ptr, amax_ptr, scale_inv_ptr, scale_ptr, N););  // NOLINT(*)
-  );                                                                            // NOLINT(*)
+          cast_fp8_1D_kernel<IS_ACT, ParamOP, OP, IType, OType>
+          <<<grid, block, 0, stream>>>(input_ptr, output_ptr, amax_ptr, scale_inv_ptr, scale_ptr, N,
+                                       noop_ptr););  // NOLINT(*)
+  );                                                 // NOLINT(*)
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
@@ -537,7 +544,7 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
           is_aligned_tensor_data(input, TMA_GMEM_ALIGNMENT) &&
           is_aligned_tensor_data(*output, TMA_GMEM_ALIGNMENT)) {
         // Aligned AND FP8
-        quantize_1D<IS_ACT, ParamOP, OP>(input, output, stream);
+        quantize_1D<IS_ACT, ParamOP, OP>(input, noop, output, stream);
       } else {
         // Unaligned
         CastVectorizedUnaryKernelLauncher<ParamOP, OP>(input, noop, output, stream);

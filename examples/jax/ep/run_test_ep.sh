@@ -32,8 +32,8 @@ export PYTHONPATH="${TE_PATH}${PYTHONPATH:+:${PYTHONPATH}}"
 COORD="${COORD:-127.0.0.1:12345}"
 TEST_TIMEOUT_S="${TEST_TIMEOUT_S:-300}"
 
-# Editable installs don't embed rpath; libtransformer_engine.so needs
-# libnccl_ep.so.0 from the TE editable location at dlopen time.
+# Editable installs don't embed rpath; the TE JAX extension needs
+# libtransformer_engine.so from the TE editable location at dlopen time.
 TE_LIB_PATH=$(pip3 show transformer-engine 2>/dev/null \
     | grep -E "Location:|Editable project location:" \
     | tail -n 1 | awk '{print $NF}')

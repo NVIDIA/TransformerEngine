@@ -39,6 +39,24 @@ LAUNCH_CMD = ["torchrun", f"--nproc_per_node={NUM_PROCS}"]
 if tex.ubuf_built_with_mpi():
     LAUNCH_CMD = ["mpirun", "-np", str(NUM_PROCS), "--oversubscribe", "--quiet", "python3"]
 
+OUTPUT_TAIL_CHARS = 4000
+
+
+def _assert_subprocess_succeeded(result):
+    if (
+        result.returncode != 0
+        or "NUMERICAL CHECK FAILED" in result.stderr
+        or "NUMERICAL CHECK PASSED" not in result.stdout
+    ):
+        raise AssertionError(
+            f"Distributed test exited with return code {result.returncode}"
+            f"\n--- stdout (last {OUTPUT_TAIL_CHARS} characters) ---\n"
+            f"{result.stdout[-OUTPUT_TAIL_CHARS:]}"
+            f"\n--- stderr (last {OUTPUT_TAIL_CHARS} characters) ---\n"
+            f"{result.stderr[-OUTPUT_TAIL_CHARS:]}"
+        )
+
+
 # Fall back on CUDA IPC if the platform does not support CUDA multicast
 if not tex.device_supports_multicast():
     os.environ["UB_SKIPMC"] = "1"
@@ -94,13 +112,8 @@ def _run_gemm_with_overlap(
                 )
             test_cmd.append("--use-cublasmp")
 
-    result = subprocess.run(test_cmd, env=os.environ, capture_output=True, check=False)
-    if (
-        result.returncode != 0
-        or "NUMERICAL CHECK FAILED" in result.stderr.decode()
-        or "NUMERICAL CHECK PASSED" not in result.stdout.decode()
-    ):
-        raise AssertionError(result.stderr.decode())
+    result = subprocess.run(test_cmd, env=os.environ, capture_output=True, text=True, check=False)
+    _assert_subprocess_succeeded(result)
 
 
 def _run_layer_with_overlap(
@@ -144,33 +157,23 @@ def _run_layer_with_overlap(
             pytest.skip("cuBLASMp comm+GEMM overlap does not yet support MXFP8 (block scaling).")
         test_cmd.append("--use-cublasmp")
 
-    os.environ["PYTORCH_JIT"] = "0"
-    os.environ["NVTE_TORCH_COMPILE"] = "0"
-    os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "0"
+    test_env = os.environ.copy()
+    test_env["PYTORCH_JIT"] = "0"
+    test_env["NVTE_TORCH_COMPILE"] = "0"
+    test_env["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "0"
     if te.get_device_compute_capability() <= (8, 0):
         # We've experienced numerical discrepancies in Flash Attention
         # backward when running with Userbuffers on A100s. This does
         # not show up in more recent GPUs.
-        os.environ["NVTE_FLASH_ATTN"] = "0"
+        test_env["NVTE_FLASH_ATTN"] = "0"
     elif fp8:
         # Fused attention is causing non-deterministic FP8 failures on H100s even with
         # NVTE_ALLOW_NONDETERMINISTIC_ALGO=0, so disable it entirely for this test.
-        os.environ["NVTE_FUSED_ATTN"] = "0"
+        test_env["NVTE_FUSED_ATTN"] = "0"
 
-    result = subprocess.run(test_cmd, env=os.environ, capture_output=True, check=False)
+    result = subprocess.run(test_cmd, env=test_env, capture_output=True, text=True, check=False)
 
-    os.unsetenv("PYTORCH_JIT")
-    os.unsetenv("NVTE_TORCH_COMPILE")
-    os.unsetenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO")
-    os.unsetenv("NVTE_FLASH_ATTN")
-    os.unsetenv("NVTE_FUSED_ATTN")
-
-    if (
-        result.returncode != 0
-        or "NUMERICAL CHECK FAILED" in result.stderr.decode()
-        or "NUMERICAL CHECK PASSED" not in result.stdout.decode()
-    ):
-        raise AssertionError(result.stderr.decode())
+    _assert_subprocess_succeeded(result)
 
 
 @pytest.mark.parametrize("use_cublasmp", (False, True))

@@ -10,12 +10,12 @@ from typing import Optional, Tuple, Iterable
 
 import torch
 
-from transformer_engine.pytorch.custom_recipes import quantization
-from transformer_engine.pytorch.custom_recipes import utils
+from transformer_engine.pytorch.custom_recipes import gemm
+from transformer_engine.pytorch.custom_recipes import reference_utils
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage, Quantizer
 
 
-def current_scaling_ref_quantizer_factory(role):
+def current_scaling_ref_factory(role):
     """Factory function for current scaling reference quantizer.
 
     Receives a :class:`~transformer_engine.pytorch.quantization.QuantizerRole`.
@@ -24,7 +24,7 @@ def current_scaling_ref_quantizer_factory(role):
 
     Usage with CustomRecipe and autocast::
 
-        custom_recipe = recipe.CustomRecipe(qfactory=current_scaling_ref_quantizer_factory)
+        custom_recipe = recipe.CustomRecipe(qfactory=current_scaling_ref_factory)
         with autocast(recipe=custom_recipe):
             output = model(input)
     """
@@ -340,7 +340,9 @@ class CurrentScalingQuantizerRef(Quantizer):
         **kwargs,  # pylint: disable=unused-argument
     ) -> CurrentScalingTensorRef:
         # sanity checks
-        assert tensor.dtype in utils.HIGH_PRECISION_FLOAT_DTYPES, "Unsupported input dtype."
+        assert (
+            tensor.dtype in reference_utils.HIGH_PRECISION_FLOAT_DTYPES
+        ), "Unsupported input dtype."
 
         # Make it work with 3D tensors
         original_shape = tensor.shape
@@ -374,14 +376,14 @@ class CurrentScalingQuantizerRef(Quantizer):
         self,
         qx: torch.Tensor,
         qw: torch.Tensor,
-        m_params: quantization.MMParams,
+        m_params: gemm.MMParams,
         out_dtype: torch.dtype,
         sx: torch.Tensor,
         sw: torch.Tensor,
         bias: torch.Tensor | None = None,
         out: torch.Tensor | None = None,
         accumulate: bool = False,
-        gemm_type: quantization.GEMMType = quantization.GEMMType.FPROP,  # pylint: disable=unused-argument
+        gemm_type: gemm.GEMMType = gemm.GEMMType.FPROP,  # pylint: disable=unused-argument
         qresult_x: QuantizedTensorStorage | None = None,  # pylint: disable=unused-argument
         qresult_w: QuantizedTensorStorage | None = None,  # pylint: disable=unused-argument
     ) -> torch.Tensor:

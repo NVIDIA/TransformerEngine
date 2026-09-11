@@ -308,6 +308,7 @@ bool use_cudnn_norm_fwd();
 bool use_cudnn_norm_bwd();
 
 bool& use_zero_centered_gamma_in_weight_dtype();
+bool use_cudnn_mxfp8_norm_output_in_input_dtype();
 
 }  // namespace normalization
 }  // namespace transformer_engine

@@ -557,12 +557,11 @@ class FusedAdam(torch.optim.Optimizer):
             loss = closure()
 
         for group in self.param_groups:
-            if len(group["params"]) == 0:
-                continue
-            device = group["params"][0].device
-            bias_correction = 1 if group["bias_correction"] else 0
-            beta1, beta2 = group["betas"]
-
+            # Advance the step counter before skipping empty groups. A param group can be
+            # empty on some data-parallel ranks and populated on others, so incrementing
+            # only for populated groups desynchronizes "step" across the ranks that share
+            # an optimizer state shard. A rank then resumes from a checkpoint written by a
+            # rank where the group was empty and applies a stale bias correction.
             # assume same step across group now to simplify things
             # per parameter step can be easily support by making it tensor, or pass list into kernel
             if "step" in group:
@@ -570,9 +569,24 @@ class FusedAdam(torch.optim.Optimizer):
                     1 if not self.capturable else (self._dummy_overflow_buf != 1).to(torch.int)
                 )
             else:
-                group["step"] = (
-                    1 if not self.capturable else torch.tensor([1], dtype=torch.int, device=device)
+                # Empty groups have no parameter to take the device from, so fall back to
+                # the device of the optimizer's own scratch buffer.
+                step_device = (
+                    group["params"][0].device
+                    if len(group["params"]) > 0
+                    else self._dummy_overflow_buf.device
                 )
+                group["step"] = (
+                    1
+                    if not self.capturable
+                    else torch.tensor([1], dtype=torch.int, device=step_device)
+                )
+
+            if len(group["params"]) == 0:
+                continue
+            device = group["params"][0].device
+            bias_correction = 1 if group["bias_correction"] else 0
+            beta1, beta2 = group["betas"]
 
             # create lists for multi-tensor apply
             p_main_of_fp8_model = []

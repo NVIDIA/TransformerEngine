@@ -148,7 +148,7 @@ def main():
 
         @jax.jit
         def run_prepare(idx):
-            tc, hm = tex_ep.ep_prepare(cfg, idx)
+            tc, _trt, hm = tex_ep.ep_prepare(cfg, idx)
             return tc, hm
 
         @jax.jit
@@ -160,7 +160,7 @@ def main():
 
         @jax.jit
         def run_dispatch_vjp(idx, toks, w):
-            recv_t, recv_w, _hm, _tc = ep_dispatch(cfg, idx, toks, w, recv_capacity_per_rank)
+            recv_t, recv_w, _hm, _tc, _trt = ep_dispatch(cfg, idx, toks, w, recv_capacity_per_rank)
             recv_t = jax.lax.with_sharding_constraint(recv_t, NamedSharding(mesh, ep_spec_3d))
             recv_w = jax.lax.with_sharding_constraint(recv_w, NamedSharding(mesh, ep_spec_2d))
             return recv_t, recv_w

@@ -13,8 +13,6 @@
 #include <transformer_engine/hadamard_transform.h>
 
 #include <cuda/barrier>
-#include <cute/algorithm/gemm.hpp>
-#include <cute/arch/cluster_sm90.hpp>
 #include <cute/tensor.hpp>
 
 #include "common/common.h"
@@ -709,7 +707,7 @@ __global__ static void row_col_rht_gemm_device(
       auto thr_t2r   = tiled_t2r.get_slice(local_thread_idx);
       auto thr_r2g = tiled_r2g.get_slice(local_thread_idx);
 
-      // Aligning with TensorEngine's recipe to generate scale factors // {$nv-internal-release}
+      // Aligning with TensorEngine's recipe to generate scale factors
       static constexpr float fp4_max = 6.0f;
       static constexpr float fp8_max = 448.0f;
       float const fp4_max_inv = 1.0f / fp4_max;
@@ -905,7 +903,7 @@ __global__ static void row_col_rht_gemm_device(
       cute::Tensor tQArSFA = make_tensor_like(tQAgSFA(_, _, _, _0{}, _0{}));
       cute::Tensor tQApSFA = thr_s2r.partition_D(pSFA_mn);
 
-      // Aligning with TensorEngine's recipe to generate scale factors // {$nv-internal-release}
+      // Aligning with TensorEngine's recipe to generate scale factors
       static constexpr float fp4_max = 6.0f;
       static constexpr float fp8_max = 448.0f;
       float const fp4_max_inv = 1.0f / fp4_max;

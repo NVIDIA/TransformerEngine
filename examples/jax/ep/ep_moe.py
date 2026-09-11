@@ -231,7 +231,7 @@ def _moe_layer(args, cfg, mesh, topk_idx, tokens, topk_w, local_kernels):
     local_kernels = jax.lax.with_sharding_constraint(
         local_kernels, NamedSharding(mesh, kernel_spec)
     )
-    recv_tokens, recv_topk_w, handle_mem, _tc = ep_dispatch(
+    recv_tokens, recv_topk_w, handle_mem, _tc, _trt = ep_dispatch(
         cfg, topk_idx, tokens, topk_w, args.recv_capacity_per_rank
     )
     recv_tokens = jax.lax.with_sharding_constraint(recv_tokens, NamedSharding(mesh, ep3))

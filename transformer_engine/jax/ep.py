@@ -17,6 +17,8 @@ import transformer_engine.jax.cpp_extensions as tex
 from transformer_engine.jax.cpp_extensions.ep import _ep_outer_axis
 from transformer_engine.jax.cpp_extensions.misc import jax_dtype_to_te_dtype
 from transformer_engine.jax.sharding import (
+    _get_mesh,
+    get_num_devices_in_mesh,
     global_mesh_resource,
     get_mesh_axis_size,
     with_sharding_constraint,
@@ -29,6 +31,7 @@ ep_handle_mem_size = tex.ep_handle_mem_size
 __all__ = [
     "EpLayerConfig",
     "ep_bootstrap",
+    "ep_finalize",
     "ep_handle_mem_size",
     "ep_prepare",
     "ep_dispatch",
@@ -69,6 +72,34 @@ def _allgather_uid(uid_arr, world_size, uid_size):
 # ── Bootstrap ────────────────────────────────────────────────────────────────
 
 
+def _ep_domain_for_rank(mesh, ep_resource, rank, device_to_rank=None):
+    """Resolve the EP domain (NCCL comm) for ``rank`` from the mesh layout.
+
+    One domain groups ranks sharing all non-ep coordinates, so any orthogonal
+    axis (tp, pp, cp, ...) yields its own domains. Returns
+    ``(root_rank, rank_within_group, num_domains)``; ``root_rank`` (ep
+    coordinate 0) posts the domain's NCCL unique id.
+    """
+    if device_to_rank is None:
+
+        def device_to_rank(d):
+            return d.process_index
+
+    ep_pos = mesh.axis_names.index(ep_resource)
+    ep_size = mesh.shape[ep_resource]
+    ranks = np.vectorize(device_to_rank, otypes=[np.int64])(mesh.devices)
+    # Move ep last and flatten: each row is one domain (all non-ep coords fixed).
+    grid = np.moveaxis(ranks, ep_pos, -1).reshape(-1, ep_size)
+    loc = np.argwhere(grid == rank)
+    if loc.shape[0] != 1:
+        raise ValueError(
+            f"ep_bootstrap: rank {rank} must appear exactly once in the mesh device"
+            f" grid; found {loc.shape[0]} occurrences."
+        )
+    row, col = int(loc[0, 0]), int(loc[0, 1])
+    return int(grid[row, 0]), col, int(grid.shape[0])
+
+
 def ep_bootstrap(
     world_size,
     rank,
@@ -78,15 +109,17 @@ def ep_bootstrap(
     hidden_dim,
     max_token_dtype=jnp.bfloat16,
     max_num_sms=0,
+    drop_on_overflow=False,
 ):
     """Initialize the EP communicator. Call once per process before any EP op.
 
     Must run inside the active JAX Mesh and a global_shard_guard; ep_size and
     num_ep_groups are read from the mesh axes named by MeshResource.ep_resource
-    and MeshResource.dp_resource/fsdp_resource.
+    and MeshResource.dp_resource/fsdp_resource. Axes orthogonal to EP (tp, pp,
+    cp, ...) are supported and replicated across EP tensors.
 
     Args:
-        world_size: Total number of processes (dp_size * ep_size).
+        world_size: Total number of processes (product of all mesh axes).
         rank: Global rank of the calling process.
         num_experts: Total experts across the EP group.
         max_tokens_per_rank: Max tokens one rank dispatches per step (sizes send buffers).
@@ -94,7 +127,10 @@ def ep_bootstrap(
             at least ep_size * max_tokens_per_rank * top_k to avoid drops.
         hidden_dim: Feature dimension of token tensors passed to ep_dispatch.
         max_token_dtype: Widest dtype the group will dispatch (only bfloat16 supported).
-        max_num_sms: SM budget for EP kernels; 0 = auto.
+        max_num_sms: SM budget for the dispatch/combine kernels; 0 = default (32).
+        drop_on_overflow: Drop tokens exceeding recv_capacity_per_rank instead of
+            trapping on overflow. Dropped tokens are still counted in
+            total_recv_tokens, so callers can detect overflow from it.
     """
     if jnp.dtype(max_token_dtype) != jnp.bfloat16:
         raise NotImplementedError(
@@ -120,30 +156,27 @@ def ep_bootstrap(
             "ep_bootstrap requires MeshResource.ep_resource to be set; enter a"
             " global_shard_guard(MeshResource(..., ep_resource=<axis name>)) before bootstrap."
         )
-    ep_size = get_mesh_axis_size(ep_resource)
-    outer_axis = _ep_outer_axis()
-    if outer_axis is None:
-        if world_size != ep_size:
-            raise ValueError(
-                f"ep_bootstrap: world_size ({world_size}) > ep_size ({ep_size}) but neither"
-                " MeshResource.dp_resource nor fsdp_resource is set; name the outer axis so"
-                " EP-output tensors can shard across EP groups."
-            )
-        num_ep_groups = 1
-    else:
-        num_ep_groups = get_mesh_axis_size(outer_axis)
-    if num_ep_groups * ep_size != world_size:
+    mesh = _get_mesh()
+    if mesh.empty:
         raise ValueError(
-            f"ep_bootstrap: num_ep_groups*ep_size ({num_ep_groups}*{ep_size}="
-            f"{num_ep_groups * ep_size}) must equal world_size ({world_size}); check that"
-            f" the '{outer_axis}' and '{ep_resource}' mesh axes cover all ranks."
+            "ep_bootstrap must run inside an active jax.sharding.Mesh; enter"
+            " `with mesh:` (or jax.set_mesh(mesh)) before calling it."
         )
+    if get_num_devices_in_mesh(mesh) != world_size:
+        raise ValueError(
+            f"ep_bootstrap: mesh device count ({get_num_devices_in_mesh(mesh)}) must equal"
+            f" world_size ({world_size})."
+        )
+    ep_size = get_mesh_axis_size(ep_resource)
+    # num_ep_groups counts only the distinct-token (dp/fsdp) axes; replicated
+    # axes (tp, pp, ...) do not create distinct EP-output slabs.
+    outer_axis = _ep_outer_axis()
+    num_ep_groups = 1 if outer_axis is None else get_mesh_axis_size(outer_axis)
     if num_experts % ep_size != 0:
         raise ValueError(f"num_experts ({num_experts}) must be divisible by ep_size ({ep_size}).")
 
     UID_SIZE = 128
-    dp_color = rank // ep_size
-    rank_within_group = rank % ep_size
+    root_rank, rank_within_group, _num_domains = _ep_domain_for_rank(mesh, ep_resource, rank)
     is_color_root = rank_within_group == 0
     if is_color_root:
         libnccl = ctypes.CDLL("libnccl.so.2", use_errno=True)
@@ -156,7 +189,7 @@ def ep_bootstrap(
 
     uid_arr = jnp.frombuffer(uid_bytes, dtype=jnp.uint8)
     all_uids = _allgather_uid(uid_arr, world_size, UID_SIZE)
-    uid_bytes = bytes(np.asarray(all_uids[dp_color * ep_size]).tolist())
+    uid_bytes = bytes(np.asarray(all_uids[root_rank]).tolist())
 
     # Eager NCCL init while ranks are barrier-synced by the UID broadcast above.
     transformer_engine_jax.set_ep_bootstrap_params(
@@ -169,6 +202,7 @@ def ep_bootstrap(
         hidden_dim,
         max_num_sms=int(max_num_sms),
         max_token_dtype=int(jax_dtype_to_te_dtype(max_token_dtype)),
+        drop_on_overflow=bool(drop_on_overflow),
     )
 
     # Release the C++ anchor at interpreter shutdown so RAII can tear down NCCL.
@@ -190,6 +224,20 @@ def ep_bootstrap(
             hidden_dim=hidden_dim,
         )
     )
+
+
+def ep_finalize():
+    """Tear down the EP communicator so ``ep_bootstrap`` can run again.
+
+    Only for killing and re-bootstrapping EP mid-program (e.g. tests sweeping
+    configs); a normal run bootstraps once and lets atexit clean up. Calls the
+    process-global ``jax.clear_caches()`` so every cached executable releases
+    the NCCL comm it pins, then frees the EP resources. Call outside any active
+    EP computation.
+    """
+    jax.clear_caches()
+    transformer_engine_jax.release_ep_resources()
+    tex.ep.reset_ep_config()
 
 
 def _default_out_partition_spec():
@@ -215,8 +263,14 @@ def ep_dispatch(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank):
     ``cfg`` (the pointer-keyed C++ cache keys on handle_mem, not on cfg).
     Inputs are ``[..., H]`` with only the leading dim sharded as ``ep`` or
     ``(dp, ep)``. Returns
-    ``(recv_tokens, recv_topk_weights, handle_mem, token_counts)``; pass
-    ``handle_mem`` and ``token_counts`` to the matching ``ep_combine``.
+    ``(recv_tokens, recv_topk_weights, handle_mem, token_counts, total_recv_tokens)``;
+    pass ``handle_mem`` and ``token_counts`` to the matching ``ep_combine``.
+
+    ``total_recv_tokens`` is the per-rank pre-drop recv-slot count (a
+    ``[num_procs, 1]`` sharded array); it counts dropped tokens too when
+    ``drop_on_overflow`` is set. When ``recv_capacity_per_rank`` is not sized for
+    the worst case, detect overflow by ``process_allgather``-ing it, then
+    ``max(...) > recv_capacity_per_rank`` flags an overflowing step.
     """
     return _dispatch_fwd(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank)[0]
 
@@ -226,12 +280,12 @@ def _dispatch_fwd(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank):
         raise TypeError(
             f"ep_dispatch: topk_weights must be a floating dtype; got {topk_weights.dtype}."
         )
-    token_counts, handle_mem = tex.ep_prepare(cfg, topk_idx)
+    token_counts, total_recv_tokens, handle_mem = tex.ep_prepare(cfg, topk_idx)
     recv_tokens, recv_topk_weights = tex.ep_dispatch_fwd(
         cfg, handle_mem, topk_idx, tokens, topk_weights, recv_capacity_per_rank
     )
     out_leading = tuple(tokens.shape[:-1])
-    primal = (recv_tokens, recv_topk_weights, handle_mem, token_counts)
+    primal = (recv_tokens, recv_topk_weights, handle_mem, token_counts, total_recv_tokens)
     return primal, (handle_mem, out_leading)
 
 
