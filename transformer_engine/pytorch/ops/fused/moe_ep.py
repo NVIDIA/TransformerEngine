@@ -359,33 +359,6 @@ def _compute_grouped_weight_grad(
             device=weight.device,
         )
 
-
-    in --> (B, in)
-    grad_out -->(B, out)
-
-    (B, out)
-    (in, B)
-
-    w  --> (out, in)
-    grad_outputs -- (B, out)
-
-
-
-  (S, in) --> (S, out) (out, in)
-
-
-    in  -->(B, in)
-    w --> (out, in)
-
-    (in, out)
-    (B, in)
-
-
-
-
-
-    CT = BTAT
-
     layer_operands = [
         getattr(operands, f"{prefix}_a"),
         getattr(operands, f"{prefix}_sfa"),
