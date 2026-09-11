@@ -156,6 +156,14 @@ __device__ __forceinline__ float pair_amax_to_float(ptx::bf16x2 pair) {
   return __int_as_float(magnitude << 16);
 }
 
+/*! \brief Blank a lane's input registers so a dead block reduces harmlessly. */
+__device__ __forceinline__ void zero_words(uint32_t (&words)[kInWordsPerLane]) {
+#pragma unroll
+  for (int32_t i = 0; i < kInWordsPerLane; ++i) {
+    words[i] = 0;
+  }
+}
+
 /*! \brief Scale and convert one lane's 16 BF16 values into 16 FP8E4M3 bytes. */
 template <typename OType>
 __device__ __forceinline__ void scale_and_convert(const uint32_t (&in)[kInWordsPerLane],
@@ -170,8 +178,8 @@ __device__ __forceinline__ void scale_and_convert(const uint32_t (&in)[kInWordsP
 
 /*! \brief Quantize one whole MX block held by a single thread.
  *
- * Used by the remainder and strided kernels, which handle far too little data
- * to be worth the two-lane split of the main kernel.
+ * Used by the strided kernel, which handles far too little data per thread to
+ * be worth the two-lane split of the main kernel.
  */
 template <typename OType>
 __device__ __forceinline__ void quantize_one_block(const uint32_t *__restrict__ in,
@@ -218,6 +226,12 @@ __device__ __forceinline__ void quantize_one_block(const uint32_t *__restrict__ 
  *                             so costs no policy register.  When true the
  *                             decision varies per CTA and needs a runtime
  *                             policy token.  See LaunchConfig.
+ * \tparam CHECK_BOUNDS        When true the grid is rounded up rather than
+ *                             truncated, and every access is predicated on the
+ *                             block existing.  Only the shapes whose block
+ *                             count does not divide evenly among CTAs pay for
+ *                             this; the rest instantiate it false and get the
+ *                             same code as before.
  *
  * \param[in]  input                BF16 input, viewed as 32-bit words.
  * \param[out] output               FP8E4M3 output, viewed as 32-bit words.
@@ -225,11 +239,15 @@ __device__ __forceinline__ void quantize_one_block(const uint32_t *__restrict__ 
  * \param[in]  first_streaming_cta  CTAs at or above this index stream their
  *                                  input; earlier ones cache normally.  Only
  *                                  read when PARTIAL_L2_CACHING is true.
+ * \param[in]  num_blocks           Total MX blocks in the tensor.  Only read
+ *                                  when CHECK_BOUNDS is true.
  */
-template <typename OType, int32_t THREADS_PER_CTA, int32_t BLOCKS_PER_LANE, bool PARTIAL_L2_CACHING>
+template <typename OType, int32_t THREADS_PER_CTA, int32_t BLOCKS_PER_LANE, bool PARTIAL_L2_CACHING,
+          bool CHECK_BOUNDS>
 __global__ void __launch_bounds__(THREADS_PER_CTA)
     quantize_contiguous_kernel(const uint32_t *__restrict__ input, uint32_t *__restrict__ output,
-                               e8m0_t *__restrict__ scales, uint32_t first_streaming_cta) {
+                               e8m0_t *__restrict__ scales, uint32_t first_streaming_cta,
+                               int64_t num_blocks) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   constexpr int32_t kWarpsPerCta = THREADS_PER_CTA / THREADS_PER_WARP;
   constexpr int32_t kBlocksPerWarpPass = kBlocksPerWarp * BLOCKS_PER_LANE;
@@ -247,6 +265,15 @@ __global__ void __launch_bounds__(THREADS_PER_CTA)
   const int32_t block_in_warp = lane / kLanesPerBlock;
   const bool owns_scale = (lane % kLanesPerBlock) == 0;
 
+  // Should be inlined by NVCC so there is never an actual function call
+  auto is_live = [&](int64_t group_base) -> bool {
+    if constexpr (CHECK_BOUNDS) {
+      return group_base + block_in_warp < num_blocks;
+    } else {
+      return true;
+    }
+  };
+
   uint32_t in_words[BLOCKS_PER_LANE][kInWordsPerLane];
   if constexpr (PARTIAL_L2_CACHING) {
     const uint64_t input_policy =
@@ -254,6 +281,10 @@ __global__ void __launch_bounds__(THREADS_PER_CTA)
 #pragma unroll
     for (int32_t u = 0; u < BLOCKS_PER_LANE; ++u) {
       const int64_t group_base = first_block + static_cast<int64_t>(u) * kBlocksPerWarp;
+      if (!is_live(group_base)) {
+        zero_words(in_words[u]);
+        continue;
+      }
       ptx::ld_global_nc_b32x8(in_words[u],
                               input + group_base * kInWordsPerBlock + lane * kInWordsPerLane,
                               input_policy);
@@ -262,6 +293,10 @@ __global__ void __launch_bounds__(THREADS_PER_CTA)
 #pragma unroll
     for (int32_t u = 0; u < BLOCKS_PER_LANE; ++u) {
       const int64_t group_base = first_block + static_cast<int64_t>(u) * kBlocksPerWarp;
+      if (!is_live(group_base)) {
+        zero_words(in_words[u]);
+        continue;
+      }
       ptx::ld_global_nc_evict_first_b32x8(
           in_words[u], input + group_base * kInWordsPerBlock + lane * kInWordsPerLane);
     }
@@ -282,32 +317,18 @@ __global__ void __launch_bounds__(THREADS_PER_CTA)
 
     const e8m0_t biased_exponent =
         ptx::float_to_e8m0(pair_amax_to_float(block_amax) * Quantized_Limits<OType>::max_norm_rcp);
-    if (owns_scale) {
+    const bool live = is_live(group_base);
+    if (owns_scale && live) {
       scales[group_base + block_in_warp] = biased_exponent;
     }
 
     uint32_t out_words[kOutWordsPerLane];
     scale_and_convert<OType>(in_words[u], ptx::exp2f_rcp_2x(biased_exponent), out_words);
-    ptx::st_global_b32x4(output + group_base * kOutWordsPerBlock + lane * kOutWordsPerLane,
-                         out_words, output_policy);
+    if (live) {
+      ptx::st_global_b32x4(output + group_base * kOutWordsPerBlock + lane * kOutWordsPerLane,
+                           out_words, output_policy);
+    }
   }
-#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-}
-
-/*! \brief Quantize the MX blocks left over when the block count does not
- *         divide evenly among the main kernel's CTAs.  One block per thread. */
-template <typename OType>
-__global__ void __launch_bounds__(128)
-    quantize_remainder_kernel(const uint32_t *__restrict__ input, uint32_t *__restrict__ output,
-                              e8m0_t *__restrict__ scales, int64_t first_block,
-                              int64_t num_blocks) {
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-  const int64_t block = first_block + static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (block >= num_blocks) {
-    return;
-  }
-  quantize_one_block<OType>(input + block * kInWordsPerBlock, output + block * kOutWordsPerBlock,
-                            scales + block, ptx::create_l2_policy_evict_last());
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
@@ -336,36 +357,51 @@ __global__ void __launch_bounds__(128)
 
 namespace {
 
-//! Threads per CTA for the two block-per-thread helper kernels.
+//! Threads per CTA for the block-per-thread strided kernel.
 constexpr int32_t kHelperThreads = 128;
 
 /*! \brief Launch quantize_contiguous_kernel for a configuration resolved at
  *         run time, instantiating only the combinations the tier table uses. */
-template <typename OType>
-void launch_contiguous(const LaunchConfig &config, int64_t grid, uint32_t first_streaming_cta,
-                       const uint32_t *input, uint32_t *output, e8m0_t *scales,
-                       cudaStream_t stream) {
+template <typename OType, bool CHECK_BOUNDS>
+void launch_contiguous_checked(const LaunchConfig &config, int64_t grid,
+                               uint32_t first_streaming_cta, int64_t num_blocks,
+                               const uint32_t *input, uint32_t *output, e8m0_t *scales,
+                               cudaStream_t stream) {
   const dim3 blocks(static_cast<unsigned>(grid));
   const dim3 threads(static_cast<unsigned>(config.threads_per_cta));
 
   const bool partial = config.l2_cached_cta_percent != 0;
 
   if (config.threads_per_cta == 256 && config.blocks_per_lane == 1 && !partial) {
-    quantize_contiguous_kernel<OType, 256, 1, false>
-        <<<blocks, threads, 0, stream>>>(input, output, scales, first_streaming_cta);
+    quantize_contiguous_kernel<OType, 256, 1, false, CHECK_BOUNDS>
+        <<<blocks, threads, 0, stream>>>(input, output, scales, first_streaming_cta, num_blocks);
   } else if (config.threads_per_cta == 256 && config.blocks_per_lane == 2 && !partial) {
-    quantize_contiguous_kernel<OType, 256, 2, false>
-        <<<blocks, threads, 0, stream>>>(input, output, scales, first_streaming_cta);
+    quantize_contiguous_kernel<OType, 256, 2, false, CHECK_BOUNDS>
+        <<<blocks, threads, 0, stream>>>(input, output, scales, first_streaming_cta, num_blocks);
   } else if (config.threads_per_cta == 128 && config.blocks_per_lane == 2 && partial) {
-    quantize_contiguous_kernel<OType, 128, 2, true>
-        <<<blocks, threads, 0, stream>>>(input, output, scales, first_streaming_cta);
+    quantize_contiguous_kernel<OType, 128, 2, true, CHECK_BOUNDS>
+        <<<blocks, threads, 0, stream>>>(input, output, scales, first_streaming_cta, num_blocks);
   } else if (config.threads_per_cta == 256 && config.blocks_per_lane == 2 && partial) {
-    quantize_contiguous_kernel<OType, 256, 2, true>
-        <<<blocks, threads, 0, stream>>>(input, output, scales, first_streaming_cta);
+    quantize_contiguous_kernel<OType, 256, 2, true, CHECK_BOUNDS>
+        <<<blocks, threads, 0, stream>>>(input, output, scales, first_streaming_cta, num_blocks);
   } else {
     NVTE_ERROR("No quantize_contiguous_kernel instantiation for ", config.threads_per_cta,
                " threads, ", config.blocks_per_lane, " blocks per lane, partial L2 caching ",
                partial, ".");
+  }
+}
+
+/*! \brief Pick the bounds-checked or unchecked instantiation. */
+template <typename OType>
+void launch_contiguous(const LaunchConfig &config, int64_t grid, uint32_t first_streaming_cta,
+                       int64_t num_blocks, bool check_bounds, const uint32_t *input,
+                       uint32_t *output, e8m0_t *scales, cudaStream_t stream) {
+  if (check_bounds) {
+    launch_contiguous_checked<OType, true>(config, grid, first_streaming_cta, num_blocks, input,
+                                           output, scales, stream);
+  } else {
+    launch_contiguous_checked<OType, false>(config, grid, first_streaming_cta, num_blocks, input,
+                                            output, scales, stream);
   }
 }
 
@@ -400,25 +436,19 @@ void launch_cast_rowwise(const void *input, void *output, void *scales, int rows
   }
   const LaunchConfig config = kTierConfigs[tier];
 
-  // Every CTA covers a whole number of MX blocks; the leftovers, if any, go to
-  // the remainder kernel rather than costing the main kernel a bounds check.
+  // Every CTA covers a whole number of MX blocks.  When the count does not
+  // divide evenly the grid is rounded up and the kernel predicates its accesses
+  // instead, so there is always exactly one launch.
   const int64_t blocks_per_cta =
       static_cast<int64_t>(config.threads_per_cta) / kLanesPerBlock * config.blocks_per_lane;
-  const int64_t grid = num_blocks / blocks_per_cta;
+  const bool check_bounds = (num_blocks % blocks_per_cta) != 0;
+  const int64_t grid = DIVUP(num_blocks, blocks_per_cta);
 
   if (grid > 0) {
     const uint32_t first_streaming_cta =
         static_cast<uint32_t>(grid * config.l2_cached_cta_percent / 100);
-    launch_contiguous<OType>(config, grid, first_streaming_cta, in, out, scale_out, stream);
-    NVTE_CHECK_CUDA(cudaGetLastError());
-  }
-
-  const int64_t blocks_done = grid * blocks_per_cta;
-  if (blocks_done < num_blocks) {
-    const int64_t remaining = num_blocks - blocks_done;
-    quantize_remainder_kernel<OType>
-        <<<DIVUP(remaining, static_cast<int64_t>(kHelperThreads)), kHelperThreads, 0, stream>>>(
-            in, out, scale_out, blocks_done, num_blocks);
+    launch_contiguous<OType>(config, grid, first_streaming_cta, num_blocks, check_bounds, in, out,
+                             scale_out, stream);
     NVTE_CHECK_CUDA(cudaGetLastError());
   }
 }
