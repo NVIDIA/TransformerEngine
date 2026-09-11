@@ -36,7 +36,11 @@ from transformer_engine.pytorch.utils import get_cudnn_version
 _current_file = pathlib.Path(__file__).resolve()
 sys.path = [str(_current_file.parent.parent)] + sys.path
 from utils import ModelConfig, compare_and_assert, get_available_attention_backends
-from mla_rope_utils import apply_mla_rope, build_rope_tables
+from transformer_engine.pytorch.models.deepseek_v3.mla_rope import (
+    apply_mla_rope_kv,
+    apply_mla_rope_q,
+    build_rope_tables,
+)
 
 
 try:
@@ -183,6 +187,13 @@ def _run_projections(
     return q_flat, kv_flat, q, kv, k_pos_emb
 
 
+def _apply_rope(q, kv, k_pos_emb, rope_tables):
+    cos, sin = rope_tables
+    q = apply_mla_rope_q(q, cos, sin, HEAD_DIM_NOPE, HEAD_DIM_ROPE)
+    k, v = apply_mla_rope_kv(kv, k_pos_emb, cos, sin, HEAD_DIM_NOPE, HEAD_DIM_ROPE, HEAD_DIM_V)
+    return q, k, v
+
+
 def _run_forward_bf16(
     modules: tuple,
     x: torch.Tensor,
@@ -190,7 +201,7 @@ def _run_forward_bf16(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     q_proj, kv_proj, dpa, out_linear = modules
     _, _, q, kv, k_pos_emb = _run_projections(q_proj, kv_proj, x)
-    q, k, v = apply_mla_rope(q, kv, k_pos_emb, cos_table=rope_tables[0], sin_table=rope_tables[1])
+    q, k, v = _apply_rope(q, kv, k_pos_emb, rope_tables)
     attn_out = dpa(q, k, v, qkv_format="sbhd")
     return q, k, v, out_linear(attn_out.view(x.shape[0], x.shape[1], HIDDEN_SIZE))
 
@@ -212,13 +223,7 @@ def _run_forward_mxfp8(
             x,
             is_first_microbatch,
         )
-        q, k, v = apply_mla_rope(
-            q,
-            kv,
-            k_pos_emb,
-            cos_table=rope_tables[0],
-            sin_table=rope_tables[1],
-        )
+        q, k, v = _apply_rope(q, kv, k_pos_emb, rope_tables)
         attn_out = dpa(q, k, v, qkv_format="sbhd")
         out = out_linear(
             attn_out.view(x.shape[0], x.shape[1], HIDDEN_SIZE),
@@ -292,7 +297,7 @@ class TestLinearMXFP8Attention:
         _set_seed()
         baseline_modules, mxfp8_modules = _build_modules()
         x = torch.randn(seq_len, batch_size, HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda")
-        rope_tables = build_rope_tables(seq_len, device=x.device)
+        rope_tables = build_rope_tables(seq_len, HEAD_DIM_ROPE, device=x.device)
 
         q_bf16, k_bf16, v_bf16, out_bf16 = _run_forward_bf16(baseline_modules, x, rope_tables)
         q_mxfp8, k_mxfp8, v_mxfp8, out_mxfp8 = _run_forward_mxfp8(
@@ -378,7 +383,7 @@ class TestLinearMXFP8Attention:
             device="cuda",
             requires_grad=True,
         )
-        rope_tables = build_rope_tables(seq_len, device=x.device)
+        rope_tables = build_rope_tables(seq_len, HEAD_DIM_ROPE, device=x.device)
 
         *_, out_mxfp8 = _run_forward_mxfp8(mxfp8_modules, x, fp8_recipe, rope_tables)
         out_mxfp8.sum().backward()
@@ -412,7 +417,7 @@ class TestLinearMXFP8Attention:
             device="cuda",
             requires_grad=True,
         )
-        rope_tables = build_rope_tables(seq_len, device=x.device)
+        rope_tables = build_rope_tables(seq_len, HEAD_DIM_ROPE, device=x.device)
 
         mxfp8_fprop_ms, mxfp8_bprop_ms = _benchmark_training_step(
             _run_forward_mxfp8, mxfp8_modules, x, fp8_recipe, rope_tables
