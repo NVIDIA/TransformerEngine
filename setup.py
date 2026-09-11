@@ -64,6 +64,15 @@ def setup_common_extension() -> CMakeExtension:
         "-DCMAKE_CUDA_ARCHITECTURES={}".format(archs),
         f"-DCUDNN_FRONTEND_INCLUDE_DIR={cudnn_frontend_include_path()}",
     ]
+
+    # CuTeDSL kernels are compiled and registered through Python, so the
+    # framework-agnostic C++ build cannot exercise this backend.
+    if not frameworks:
+        cmake_flags.append("-DNVTE_WITH_CUTEDSL=OFF")
+    else:
+        tvm_ffi_include_dir = metadata.distribution("apache-tvm-ffi").locate_file("tvm_ffi/include")
+        cmake_flags.append(f"-DTVM_FFI_INCLUDE_DIR={tvm_ffi_include_dir}")
+
     if bool(int(os.getenv("NVTE_UB_WITH_MPI", "0"))):
         assert (
             os.getenv("MPI_HOME") is not None
@@ -125,6 +134,8 @@ def setup_requirements() -> Tuple[List[str], List[str]]:
         "pydantic",
         "importlib-metadata>=1.0",
         "packaging",
+        "apache-tvm-ffi>=0.1.12",
+        "nvidia-cutlass-dsl>=4.5.0",
     ]
     test_reqs: List[str] = ["pytest>=8.2.1"]
 

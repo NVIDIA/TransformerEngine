@@ -47,6 +47,14 @@ NVTE_JAX_CUSTOM_CALLS="false" python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini
 # single-GPU runners.
 CUDA_VISIBLE_DEVICES=0 python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest_docs_examples_jax.xml $TE_PATH/docs/examples/jax/ || test_fail "docs/examples/jax"
 
+export NVTE_ENABLE_CUTEDSL_QUANT_BACKEND=1
+export NVTE_DEBUG=1
+python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -s -v --junitxml=$XML_LOG_DIR/pytest_jax_cutedsl_test_mxfp8_cutedsl_backend.xml $TE_PATH/tests/jax/test_mxfp8_cutedsl_backend.py -k 'not distributed' || test_fail "CuTeDSL backend: test_mxfp8_cutedsl_backend.py"
+python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -s -v --junitxml=$XML_LOG_DIR/pytest_jax_cutedsl_test_custom_call_compute.xml $TE_PATH/tests/jax/test_custom_call_compute.py -k 'not distributed' || test_fail "CuTeDSL backend: test_custom_call_compute.py"
+python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -s -v --junitxml=$XML_LOG_DIR/pytest_jax_cutedsl_test_recipe_characteristics.xml $TE_PATH/tests/jax/test_recipe_characteristics.py -k 'not distributed' || test_fail "CuTeDSL backend: test_recipe_characteristics.py"
+python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -s -v --junitxml=$XML_LOG_DIR/pytest_jax_cutedsl_test_layer.xml $TE_PATH/tests/jax/test_layer.py -k 'not distributed' || test_fail "CuTeDSL backend: test_layer.py"
+
+
 if [ $RET -ne 0 ]; then
     echo "Error: some sub-tests failed: $FAILED_CASES"
     exit 1
