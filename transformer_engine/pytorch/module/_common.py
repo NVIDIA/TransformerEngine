@@ -37,9 +37,7 @@ def _resolve_calibration_quantizer(tensor: Any, quantizer: Any) -> Any:
     return getattr(quantizer, "parent_quantizer", quantizer)
 
 
-def _get_calibration_metadata_buffers(
-    tensor_name: str, quantizer: Any
-) -> Dict[str, torch.Tensor]:
+def _get_calibration_metadata_buffers(tensor_name: str, quantizer: Any) -> Dict[str, torch.Tensor]:
     """Get checkpoint-buffer aliases from quantizer calibration state."""
     if quantizer is None:
         return {}

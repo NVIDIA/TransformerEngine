@@ -723,9 +723,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 calibration_buffers.update(fc1_input_calibration_buffers)
                 calibration_buffers.update(fc1_weight_calibration_buffers)
                 calibration_buffers.update(
-                    _get_calibration_metadata_buffers(
-                        "fc2_input", fc2_input_calibration_quantizer
-                    )
+                    _get_calibration_metadata_buffers("fc2_input", fc2_input_calibration_quantizer)
                 )
                 calibration_buffers.update(
                     _get_calibration_metadata_buffers(

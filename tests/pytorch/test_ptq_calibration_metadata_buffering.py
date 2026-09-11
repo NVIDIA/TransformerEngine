@@ -220,9 +220,7 @@ def test_calibration_config_registers_module_scaling_factor_buffers(
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 def test_linear_calibration_config_applies_activation_decay_only():
     module = Linear(32, 32, params_dtype=torch.bfloat16, device="cuda", bias=False)
-    calibration_config = QuantizationCalibrationConfig(
-        transformer_engine_calibration_decay=0.5
-    )
+    calibration_config = QuantizationCalibrationConfig(transformer_engine_calibration_decay=0.5)
     buffer_suffix = "_tensor_scale_inv_fp8_current_scaling_te_ptq_calibrated"
 
     with autocast(
@@ -262,9 +260,7 @@ def test_linear_calibration_config_buffers_delayed_scaling_amax():
         module(torch.full((16, 32), 2.0, dtype=torch.bfloat16, device="cuda"))
 
     calibration_buffers = {
-        name: value
-        for name, value in module.named_buffers()
-        if name.endswith("_te_ptq_calibrated")
+        name: value for name, value in module.named_buffers() if name.endswith("_te_ptq_calibrated")
     }
     assert set(calibration_buffers) == {
         "input_tensor_amax_fp8_delayed_scaling_te_ptq_calibrated",
@@ -346,14 +342,15 @@ def test_custom_quantizer_defaults_to_no_calibration_metadata():
     assert not _common._get_calibration_metadata_buffers("input", quantizer)
 
 
-def test_hybrid_quantizer_rejects_calibration():
+def test_hybrid_quantizer_calibration_is_noop():
     quantizer = HybridQuantizer(
         rowwise_quantizer=IdentityQuantizer(),
         columnwise_quantizer=IdentityQuantizer(),
     )
 
-    with pytest.raises(NotImplementedError, match="not yet supported for HybridQuantizer"):
-        quantizer.calibrate(torch.ones(1))
+    quantizer.calibrate(torch.ones(1))
+
+    assert not quantizer._calibration_state
 
 
 def test_resolve_calibration_quantizer_prefers_tensor_owner_and_unwraps_parent():
@@ -367,12 +364,8 @@ def test_resolve_calibration_quantizer_prefers_tensor_owner_and_unwraps_parent()
 def test_quantizer_calibration_state_is_keyed_by_quantized_metadata():
     quantizer = Quantizer(rowwise=True, columnwise=False)
 
-    quantizer._update_calibration_value(
-        "amax", torch.tensor([2.0]), calibration_decay=0.0
-    )
-    quantizer._update_calibration_value(
-        "scale_inv", torch.tensor([0.5]), calibration_decay=0.0
-    )
+    quantizer._update_calibration_value("amax", torch.tensor([2.0]), calibration_decay=0.0)
+    quantizer._update_calibration_value("scale_inv", torch.tensor([0.5]), calibration_decay=0.0)
 
     assert set(quantizer._calibration_state) == {"amax", "scale_inv"}
     torch.testing.assert_close(quantizer._calibration_state["amax"], torch.tensor([2.0]))
