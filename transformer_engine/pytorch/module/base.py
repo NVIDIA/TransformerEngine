@@ -5,6 +5,7 @@
 """Base modules and utilities for TransformerEngine PyTorch API"""
 
 import copy
+import dataclasses
 import io
 import math
 import os
@@ -1183,6 +1184,20 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                             meta_key
                         ].amax_history[0]
 
+        # Callers that resize directly (CUDA graph capture, the built-in DPA
+        # path) bypass the planner, so re-key the runtime to the length that is
+        # now installed. Otherwise the next forward compares against a stale
+        # configuration and rejects a module it has already resized.
+        runtime = getattr(self, "_quantization_runtime", None)
+        if runtime is not None and runtime.recipe.delayed() and not runtime.recipe.custom():
+            recipe = copy.copy(runtime.recipe)
+            recipe.amax_history_len = length
+            runtime.recipe = recipe
+            runtime.key = dataclasses.replace(runtime.key, recipe_config=recipe.quantizer_config())
+            runtime.forward_quantizers = self.quantizers["scaling_fwd"]
+            runtime.backward_quantizers = self.quantizers["scaling_bwd"]
+            self.fp8_meta["recipe"] = recipe
+
     def _resolve_boundary_quantizer_role(
         self,
         *,
@@ -1829,6 +1844,13 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fp8_meta["recipe"] = state["recipe"]
         if "global_fp8_buffer_pos_fwd_recompute" in self.fp8_meta:
             del self.fp8_meta["global_fp8_buffer_pos_fwd_recompute"]
+
+        # A checkpoint replaces this module's quantization state wholesale; it is
+        # not a mid-training update from whatever recipe happens to be active.
+        # Dropping the runtime first makes the load a first activation, so the
+        # checkpoint's recipe is adopted instead of being rejected as a
+        # transition away from the live one.
+        self.fast_setattr("_quantization_runtime", None)
 
         # Initialize before loading
         self.init_fp8_meta_tensors(self.fp8_meta["recipe"])

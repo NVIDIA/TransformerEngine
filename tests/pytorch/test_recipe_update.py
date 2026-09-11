@@ -33,6 +33,7 @@ from transformer_engine.pytorch import (
     is_nvfp4_available,
     quantized_model_init,
 )
+from transformer_engine.pytorch._extra_state import UNSAFE_PICKLE_EXTRA_STATE_ENV
 from transformer_engine.pytorch.custom_recipes.quantizer_factories import (
     current_scaling_factory,
     delayed_scaling_factory,
@@ -2616,6 +2617,82 @@ def test_apply_recipe_rejects_legacy_dpa_path():
         # A bare inert DPA has nothing to update at all.
         with pytest.raises(ValueError, match="found no Transformer Engine runtime owners"):
             apply_recipe(dpa, Float8CurrentScaling())
+    finally:
+        FP8GlobalStateManager.reset()
+
+
+def test_graph_capture_resizes_amax_history_and_leaves_a_consistent_runtime():
+    """A direct resize bypasses the planner, so it must re-key the runtime itself."""
+    available, reason = is_fp8_available(return_reason=True)
+    if not available:
+        pytest.skip(reason)
+
+    FP8GlobalStateManager.reset()
+    try:
+        with quantized_model_init(enabled=True, recipe=DelayedScaling(amax_history_len=1024)):
+            module = Linear(
+                16, 16, bias=False, params_dtype=torch.bfloat16, device="cuda", name="linear"
+            )
+        inp = torch.randn(16, 16, device="cuda", dtype=torch.bfloat16)
+
+        import transformer_engine.pytorch as te
+
+        te.make_graphed_callables(
+            module,
+            (inp,),
+            fp8_enabled=True,
+            fp8_recipe=DelayedScaling(amax_history_len=16),
+        )
+
+        assert module.fp8_meta["scaling_fwd"].amax_history.shape[0] == 16
+        runtime = module._quantization_runtime  # pylint: disable=protected-access
+        assert runtime.recipe.amax_history_len == 16
+        assert runtime.key.recipe_config == runtime.recipe.quantizer_config()
+        assert module.fp8_meta["recipe"] is runtime.recipe
+    finally:
+        FP8GlobalStateManager.reset()
+
+
+@pytest.mark.parametrize(
+    "live_recipe",
+    [
+        pytest.param(DelayedScaling(amax_history_len=8), id="different-history"),
+        pytest.param(DelayedScaling(amax_history_len=4, margin=1), id="different-margin"),
+        pytest.param(MXFP8BlockScaling(), id="different-recipe"),
+    ],
+)
+def test_checkpoint_restore_adopts_the_checkpoints_recipe(monkeypatch, live_recipe):
+    """Loading a checkpoint replaces state; it is not an update from the live recipe."""
+    # Delayed-scaling extra state is pickled, which is gated off by default.
+    monkeypatch.setenv(UNSAFE_PICKLE_EXTRA_STATE_ENV, "1")
+    available, reason = is_fp8_available(return_reason=True)
+    if not available:
+        pytest.skip(reason)
+    if live_recipe.mxfp8() and not is_mxfp8_available():
+        pytest.skip("MXFP8 is required for this variant")
+
+    FP8GlobalStateManager.reset()
+    try:
+
+        def warmed(active):
+            module = Linear(
+                64, 64, bias=False, params_dtype=torch.bfloat16, device="cuda", name="linear"
+            )
+            with autocast(enabled=True, recipe=active):
+                module(torch.randn(64, 64, device="cuda", dtype=torch.bfloat16))
+            return module
+
+        saved = warmed(DelayedScaling(amax_history_len=4))
+        state_dict = saved.state_dict()
+        expected_history = saved.fp8_meta["scaling_fwd"].amax_history.clone()
+
+        destination = warmed(live_recipe)
+        destination.load_state_dict(state_dict)
+
+        state = destination.fp8_meta["scaling_fwd"]
+        assert state.amax_history.shape[0] == 4
+        assert torch.equal(state.amax_history, expected_history)
+        assert destination.fp8_meta["recipe"].delayed()
     finally:
         FP8GlobalStateManager.reset()
 
