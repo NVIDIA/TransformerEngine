@@ -921,14 +921,20 @@ def quantized_model_init(
              users should call `clear_high_precision_init_val()` to release this CPU memory.
 
              This functionality is *EXPERIMENTAL*.
+
+    Recipes with ``backward_override="high_precision"`` or ``"dequantized"``
+    automatically omit columnwise primary-weight storage. Such weights must be
+    reconstructed with columnwise storage before switching to quantized backward
+    or using an external optimizer that requires both storage directions.
     """
 
     qstate = FP8GlobalStateManager.quantization_state
     _fp8_parameters = qstate.fp8_parameters
     _fp8_recipe = qstate.fp8_recipe
     _high_precision_init_val = qstate.high_precision_init_val
+    resolved_recipe = get_default_fp8_recipe() if recipe is None else recipe
     qstate.fp8_parameters = enabled
-    qstate.fp8_recipe = get_default_fp8_recipe() if recipe is None else recipe
+    qstate.fp8_recipe = resolved_recipe
     qstate.high_precision_init_val = preserve_high_precision_init_val
     try:
         yield

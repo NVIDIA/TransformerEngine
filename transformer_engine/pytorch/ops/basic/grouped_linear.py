@@ -463,7 +463,13 @@ class GroupedLinear(BasicOperation):
                 self.get_quantizer("forward", 2 * idx + 1) for idx in range(self.num_groups)
             ]
             with_rowwise_usage = True
-            with_columnwise_usage = torch.is_grad_enabled()
+            self._primary_weights_rowwise_only = (
+                FP8GlobalStateManager.get_fp8_recipe().backward_override
+                in ("high_precision", "dequantized")
+            )
+            with_columnwise_usage = (
+                torch.is_grad_enabled() and not self._primary_weights_rowwise_only
+            )
             for quantizer in quantizers:
                 if quantizer is None:
                     raise RuntimeError(
@@ -756,6 +762,15 @@ class GroupedLinear(BasicOperation):
                         )
 
     def pre_fuser_forward(self, *, requires_grad: bool) -> None:
+        if (
+            FP8GlobalStateManager.is_fp8_enabled()
+            and getattr(self, "_primary_weights_rowwise_only", False)
+            and FP8GlobalStateManager.get_fp8_recipe().backward_override is None
+        ):
+            raise RuntimeError(
+                "Primary weights were initialized without columnwise storage; "
+                "keep backward_override set to 'high_precision' or 'dequantized'."
+            )
         super().pre_fuser_forward(requires_grad=requires_grad)
         if FP8GlobalStateManager.is_fp8_enabled():
             # Assume weights have consistent grad requirement

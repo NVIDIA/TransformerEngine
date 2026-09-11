@@ -328,9 +328,13 @@ class BasicLinear(BasicOperation):
                     "within quantized_model_init, but the forward pass was not "
                     "performed within autocast."
                 )
+            self._primary_weight_rowwise_only = (
+                FP8GlobalStateManager.get_fp8_recipe().backward_override
+                in ("high_precision", "dequantized")
+            )
             quantizer.set_usage(
                 rowwise=True,
-                columnwise=torch.is_grad_enabled(),
+                columnwise=torch.is_grad_enabled() and not self._primary_weight_rowwise_only,
             )
             quantizer.internal = False
             with torch.no_grad():
@@ -347,6 +351,15 @@ class BasicLinear(BasicOperation):
             self.reset_parameters()
 
     def pre_fuser_forward(self, *, requires_grad: bool) -> None:
+        if (
+            FP8GlobalStateManager.is_fp8_enabled()
+            and getattr(self, "_primary_weight_rowwise_only", False)
+            and FP8GlobalStateManager.get_fp8_recipe().backward_override is None
+        ):
+            raise RuntimeError(
+                "Primary weights were initialized without columnwise storage; "
+                "keep backward_override set to 'high_precision' or 'dequantized'."
+            )
         super().pre_fuser_forward(requires_grad=requires_grad)
         if FP8GlobalStateManager.is_fp8_enabled():
             # Configure quantizer usages
