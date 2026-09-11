@@ -15,7 +15,7 @@ def make_padded_chunk_map(
     output_split_sizes,
     row_map,
     num_chunks: tl.constexpr,
-    num_output_rows: tl.constexpr,
+    num_output_rows,
     CHUNKS: tl.constexpr,
     ROWS: tl.constexpr,
 ):
@@ -49,7 +49,7 @@ def copy_padded_chunks(
     stride_row,
     stride_col,
     stride_prob,
-    num_padded_rows: tl.constexpr,
+    num_padded_rows,
     hidden_size: tl.constexpr,
     REVERSE: tl.constexpr,
     WITH_PROBS: tl.constexpr,
