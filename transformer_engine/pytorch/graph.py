@@ -533,8 +533,11 @@ def _make_graphed_callables(
         kwargs = sample_kwargs[func_idx]
 
         def hook_fn(module, inputs, outputs, func_idx=func_idx):  # pylint: disable=unused-argument
+            # Imported here because the attention package imports this module.
+            from .attention.linear_attention.base import LinearAttentionBase
+
             modules = set()
-            if isinstance(module, TransformerEngineBaseModule):
+            if isinstance(module, (TransformerEngineBaseModule, LinearAttentionBase)):
                 modules.add(module)
             # If forward is called on a BasicOperation directly the hook will run
             elif isinstance(module, BasicOperation):
