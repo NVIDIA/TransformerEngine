@@ -473,8 +473,14 @@ constexpr int32_t kNarrowColsPerLane = 8;
 constexpr int32_t kWideMinBlocksPerSm = 4;
 constexpr int32_t kNarrowMinBlocksPerSm = 6;
 
-// Thread-block cluster widths.  Clustering lets neighbouring CTAs, which read
-// adjacent columns of the same rows, share L2 traffic.
+// Thread-block cluster widths.  Clustering does NOT reduce L2 traffic -- L2 is
+// shared by every CTA regardless, and ablating the cluster leaves both the DRAM
+// byte count and the L2 hit rate unchanged.  What it buys is delivery rate: a
+// cluster is co-scheduled on one GPC, so neighbouring CTAs read adjacent columns
+// of the same rows at the same time and their requests reach the memory
+// controller together, which lifts DRAM row-buffer locality.  Measured on
+// CC 10.7 that is worth 3.5-4.5% at large shapes (DRAM throughput +2.6-3.1
+// points) for identical traffic.
 constexpr int32_t kWideClusterShallow = 1;
 constexpr int32_t kWideClusterDeep = 4;
 constexpr int32_t kNarrowCluster = 8;

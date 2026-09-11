@@ -14,6 +14,7 @@
 #include "../../../util/ptx.cuh"
 #include "../../../util/ptx_arch_spec.cuh"
 #include "../../../utils.cuh"
+#include "../swizzle.cuh"  // gemm_swizzled_scale_idx (GEMM scale layout)
 #include "cast_rowwise.h"
 
 namespace transformer_engine {
@@ -23,6 +24,10 @@ namespace quantize_kernel {
 namespace specialized {
 
 namespace ptx = transformer_engine::ptx;
+
+// GEMM-swizzled scale index; see ../swizzle.cuh.  Not to be confused with
+// specialized/swizzle.cuh, which is the TMA input bank-conflict swizzle.
+using transformer_engine::dispatch::mxfp8::swizzle::gemm_swizzled_scale_idx;
 
 // This kernel casts BF16 to rowwise-scaled MXFP8: every run of 32 consecutive
 // elements within a row forms one MX block that shares a single E8M0 scale,
@@ -243,11 +248,12 @@ __device__ __forceinline__ void quantize_one_block(const uint32_t *__restrict__ 
  *                                  when CHECK_BOUNDS is true.
  */
 template <typename OType, int32_t THREADS_PER_CTA, int32_t BLOCKS_PER_LANE, bool PARTIAL_L2_CACHING,
-          bool CHECK_BOUNDS>
+          bool CHECK_BOUNDS, bool SWIZZLED_SCALES>
 __global__ void __launch_bounds__(THREADS_PER_CTA)
     quantize_contiguous_kernel(const uint32_t *__restrict__ input, uint32_t *__restrict__ output,
                                e8m0_t *__restrict__ scales, uint32_t first_streaming_cta,
-                               int64_t num_blocks) {
+                               int64_t num_blocks, int32_t blocks_per_row, int32_t num_tiles_X,
+                               uint32_t magic_mul, uint32_t magic_shift, uint32_t magic_add) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   constexpr int32_t kWarpsPerCta = THREADS_PER_CTA / THREADS_PER_WARP;
   constexpr int32_t kBlocksPerWarpPass = kBlocksPerWarp * BLOCKS_PER_LANE;
@@ -318,7 +324,55 @@ __global__ void __launch_bounds__(THREADS_PER_CTA)
     const e8m0_t biased_exponent =
         ptx::float_to_e8m0(pair_amax_to_float(block_amax) * Quantized_Limits<OType>::max_norm_rcp);
     const bool live = is_live(group_base);
-    if (owns_scale && live) {
+    if constexpr (SWIZZLED_SCALES) {
+      // The GEMM scale layout is a pure function of (row, block-in-row), so the
+      // scale still goes straight to global; only the address changes.  Two things
+      // make that cheap.  Recovering the row from a flat block index needs a
+      // division, and a 64-bit one costs more than everything else this kernel does
+      // -- it more than doubled the instruction count -- so the host passes a magic
+      // reciprocal.  And four blocks whose indices are congruent mod 4 land
+      // contiguously in that layout (j % 4 is the low term), so rather than four
+      // scattered bytes one lane packs and stores them as a single word.
+      // blocks_per_row is a multiple of 4 and group_base is a multiple of 16, so a
+      // 4-aligned group can never straddle a row.
+      const uint32_t my_byte = static_cast<uint32_t>(biased_exponent);
+      const uint32_t b1 = __shfl_down_sync(0xFFFFFFFFu, my_byte, kLanesPerBlock);
+      const uint32_t b2 = __shfl_down_sync(0xFFFFFFFFu, my_byte, 2 * kLanesPerBlock);
+      const uint32_t b3 = __shfl_down_sync(0xFFFFFFFFu, my_byte, 3 * kLanesPerBlock);
+
+      bool group_live = true;
+      if constexpr (CHECK_BOUNDS) {
+        const uint32_t l1 = __shfl_down_sync(0xFFFFFFFFu, static_cast<uint32_t>(live), kLanesPerBlock);
+        const uint32_t l2 = __shfl_down_sync(0xFFFFFFFFu, static_cast<uint32_t>(live), 2 * kLanesPerBlock);
+        const uint32_t l3 = __shfl_down_sync(0xFFFFFFFFu, static_cast<uint32_t>(live), 3 * kLanesPerBlock);
+        const uint32_t leader_lane = (lane / (4 * kLanesPerBlock)) * (4 * kLanesPerBlock);
+        group_live = __shfl_sync(0xFFFFFFFFu, static_cast<uint32_t>(live && l1 && l2 && l3),
+                                 leader_lane) != 0;
+      }
+
+      const uint32_t flat32 = static_cast<uint32_t>(group_base + block_in_warp);
+      uint32_t row;
+      if (magic_mul == 0) {
+        row = flat32 >> magic_shift;  // blocks_per_row is a power of two
+      } else {
+        uint32_t q = __umulhi(flat32, magic_mul);
+        if (magic_add) {
+          q = ((flat32 - q) >> 1) + q;
+        }
+        row = q >> magic_shift;
+      }
+      const uint32_t col = flat32 - row * static_cast<uint32_t>(blocks_per_row);
+
+      if (group_live) {
+        if ((lane % (4 * kLanesPerBlock)) == 0) {
+          const uint32_t packed = my_byte | (b1 << 8) | (b2 << 16) | (b3 << 24);
+          *reinterpret_cast<uint32_t *>(&scales[gemm_swizzled_scale_idx(row, col, num_tiles_X)]) =
+              packed;
+        }
+      } else if (owns_scale && live) {
+        scales[gemm_swizzled_scale_idx(row, col, num_tiles_X)] = biased_exponent;
+      }
+    } else if (owns_scale && live) {
       scales[group_base + block_in_warp] = biased_exponent;
     }
 
@@ -362,28 +416,38 @@ constexpr int32_t kHelperThreads = 128;
 
 /*! \brief Launch quantize_contiguous_kernel for a configuration resolved at
  *         run time, instantiating only the combinations the tier table uses. */
-template <typename OType, bool CHECK_BOUNDS>
+template <typename OType, bool CHECK_BOUNDS, bool SWIZZLED_SCALES>
 void launch_contiguous_checked(const LaunchConfig &config, int64_t grid,
                                uint32_t first_streaming_cta, int64_t num_blocks,
-                               const uint32_t *input, uint32_t *output, e8m0_t *scales,
-                               cudaStream_t stream) {
+                               int32_t blocks_per_row, int32_t num_tiles_X, uint32_t magic_mul,
+                               uint32_t magic_shift, uint32_t magic_add,
+                               const uint32_t *input,
+                               uint32_t *output, e8m0_t *scales, cudaStream_t stream) {
   const dim3 blocks(static_cast<unsigned>(grid));
   const dim3 threads(static_cast<unsigned>(config.threads_per_cta));
 
   const bool partial = config.l2_cached_cta_percent != 0;
 
   if (config.threads_per_cta == 256 && config.blocks_per_lane == 1 && !partial) {
-    quantize_contiguous_kernel<OType, 256, 1, false, CHECK_BOUNDS>
-        <<<blocks, threads, 0, stream>>>(input, output, scales, first_streaming_cta, num_blocks);
+    quantize_contiguous_kernel<OType, 256, 1, false, CHECK_BOUNDS,
+                               SWIZZLED_SCALES><<<blocks, threads, 0, stream>>>(
+        input, output, scales, first_streaming_cta, num_blocks, blocks_per_row, num_tiles_X,
+        magic_mul, magic_shift, magic_add);
   } else if (config.threads_per_cta == 256 && config.blocks_per_lane == 2 && !partial) {
-    quantize_contiguous_kernel<OType, 256, 2, false, CHECK_BOUNDS>
-        <<<blocks, threads, 0, stream>>>(input, output, scales, first_streaming_cta, num_blocks);
+    quantize_contiguous_kernel<OType, 256, 2, false, CHECK_BOUNDS,
+                               SWIZZLED_SCALES><<<blocks, threads, 0, stream>>>(
+        input, output, scales, first_streaming_cta, num_blocks, blocks_per_row, num_tiles_X,
+        magic_mul, magic_shift, magic_add);
   } else if (config.threads_per_cta == 128 && config.blocks_per_lane == 2 && partial) {
-    quantize_contiguous_kernel<OType, 128, 2, true, CHECK_BOUNDS>
-        <<<blocks, threads, 0, stream>>>(input, output, scales, first_streaming_cta, num_blocks);
+    quantize_contiguous_kernel<OType, 128, 2, true, CHECK_BOUNDS,
+                               SWIZZLED_SCALES><<<blocks, threads, 0, stream>>>(
+        input, output, scales, first_streaming_cta, num_blocks, blocks_per_row, num_tiles_X,
+        magic_mul, magic_shift, magic_add);
   } else if (config.threads_per_cta == 256 && config.blocks_per_lane == 2 && partial) {
-    quantize_contiguous_kernel<OType, 256, 2, true, CHECK_BOUNDS>
-        <<<blocks, threads, 0, stream>>>(input, output, scales, first_streaming_cta, num_blocks);
+    quantize_contiguous_kernel<OType, 256, 2, true, CHECK_BOUNDS,
+                               SWIZZLED_SCALES><<<blocks, threads, 0, stream>>>(
+        input, output, scales, first_streaming_cta, num_blocks, blocks_per_row, num_tiles_X,
+        magic_mul, magic_shift, magic_add);
   } else {
     NVTE_ERROR("No quantize_contiguous_kernel instantiation for ", config.threads_per_cta,
                " threads, ", config.blocks_per_lane, " blocks per lane, partial L2 caching ",
@@ -392,22 +456,26 @@ void launch_contiguous_checked(const LaunchConfig &config, int64_t grid,
 }
 
 /*! \brief Pick the bounds-checked or unchecked instantiation. */
-template <typename OType>
+template <typename OType, bool SWIZZLED_SCALES>
 void launch_contiguous(const LaunchConfig &config, int64_t grid, uint32_t first_streaming_cta,
-                       int64_t num_blocks, bool check_bounds, const uint32_t *input,
-                       uint32_t *output, e8m0_t *scales, cudaStream_t stream) {
+                       int64_t num_blocks, int32_t blocks_per_row, int32_t num_tiles_X,
+                       uint32_t magic_mul, uint32_t magic_shift, uint32_t magic_add, bool check_bounds,
+                       const uint32_t *input, uint32_t *output, e8m0_t *scales,
+                       cudaStream_t stream) {
   if (check_bounds) {
-    launch_contiguous_checked<OType, true>(config, grid, first_streaming_cta, num_blocks, input,
-                                           output, scales, stream);
+    launch_contiguous_checked<OType, true, SWIZZLED_SCALES>(
+        config, grid, first_streaming_cta, num_blocks, blocks_per_row, num_tiles_X, magic_mul,
+        magic_shift, magic_add, input, output, scales, stream);
   } else {
-    launch_contiguous_checked<OType, false>(config, grid, first_streaming_cta, num_blocks, input,
-                                            output, scales, stream);
+    launch_contiguous_checked<OType, false, SWIZZLED_SCALES>(
+        config, grid, first_streaming_cta, num_blocks, blocks_per_row, num_tiles_X, magic_mul,
+        magic_shift, magic_add, input, output, scales, stream);
   }
 }
 
 }  // namespace
 
-template <typename OType>
+template <typename OType, bool SWIZZLED_SCALES>
 void launch_cast_rowwise(const void *input, void *output, void *scales, int rows, int cols,
                          int scale_stride, cudaStream_t stream) {
   NVTE_CHECK(cols % kBlockElems == 0, "Rowwise MXFP8 requires the column count (", cols,
@@ -447,17 +515,51 @@ void launch_cast_rowwise(const void *input, void *output, void *scales, int rows
   if (grid > 0) {
     const uint32_t first_streaming_cta =
         static_cast<uint32_t>(grid * config.l2_cached_cta_percent / 100);
-    launch_contiguous<OType>(config, grid, first_streaming_cta, num_blocks, check_bounds, in, out,
-                             scale_out, stream);
+    // Scale tiles across the row axis; only read when SWIZZLED_SCALES.
+    const int32_t num_tiles_X = static_cast<int32_t>(DIVUP(cols, 128));
+
+    // Magic reciprocal of blocks_per_row, so the kernel recovers a row index with
+    // a multiply-high instead of a division.  Powers of two would overflow the
+    // general form, so they take the shift-only case.
+    NVTE_CHECK(num_blocks <= static_cast<int64_t>(UINT32_MAX),
+               "Specialized MXFP8 rowwise kernel indexes MX blocks with 32 bits; got ", num_blocks);
+    const uint32_t d = static_cast<uint32_t>(blocks_per_row);
+    uint32_t magic_shift = 0;
+    while ((1u << (magic_shift + 1)) <= d) {
+      ++magic_shift;  // floor(log2(d))
+    }
+    uint32_t magic_mul = 0;
+    uint32_t magic_add = 0;
+    if ((d & (d - 1)) != 0) {
+      const uint64_t num = 1ull << (32 + magic_shift);
+      uint64_t proposed = num / d;
+      const uint64_t rem = num - proposed * d;
+      if (d - rem < (1ull << magic_shift)) {
+        proposed *= 2;
+        const uint64_t twice = rem * 2;
+        if (twice >= d || twice < rem) {
+          proposed += 1;
+        }
+        magic_add = 1;
+      }
+      magic_mul = static_cast<uint32_t>(proposed + 1);
+    }
+    launch_contiguous<OType, SWIZZLED_SCALES>(config, grid, first_streaming_cta, num_blocks,
+                                              blocks_per_row, num_tiles_X, magic_mul, magic_shift,
+                                              magic_add, check_bounds, in, out, scale_out, stream);
     NVTE_CHECK_CUDA(cudaGetLastError());
   }
 }
 
 // The MXFP8 output types the specialized dispatch can reach; see hasSpec.
-template void launch_cast_rowwise<fp8e4m3>(const void *, void *, void *, int, int, int,
-                                           cudaStream_t);
-template void launch_cast_rowwise<fp8e5m2>(const void *, void *, void *, int, int, int,
-                                           cudaStream_t);
+template void launch_cast_rowwise<fp8e4m3, false>(const void *, void *, void *, int, int, int,
+                                                  cudaStream_t);
+template void launch_cast_rowwise<fp8e5m2, false>(const void *, void *, void *, int, int, int,
+                                                  cudaStream_t);
+template void launch_cast_rowwise<fp8e4m3, true>(const void *, void *, void *, int, int, int,
+                                                 cudaStream_t);
+template void launch_cast_rowwise<fp8e5m2, true>(const void *, void *, void *, int, int, int,
+                                                 cudaStream_t);
 
 }  // namespace specialized
 }  // namespace quantize_kernel
