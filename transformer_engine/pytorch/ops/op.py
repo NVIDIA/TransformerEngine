@@ -63,8 +63,6 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
     # Custom ops are registered once per operation class.
     fwd_args_type: Optional[type] = None
     bwd_args_type: Optional[type] = None
-    # Supported read-only forward kwargs; no gradients.
-    fwd_kwarg_names: tuple[str, ...] = ()
     # (forward_fn, backward_fn), or None if the operation cannot be compiled.
     compile_ops: Optional[tuple[Callable[..., Any], Callable[..., Any]]] = None
 

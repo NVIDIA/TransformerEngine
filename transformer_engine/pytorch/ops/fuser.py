@@ -750,13 +750,6 @@ class OperationFuser:
         if self._num_basic_ops != 1:
             return "a group of several operations"
         for op, kwargs in zip(self._basic_ops, basic_op_kwargs, strict=True):
-            # A kwarg an operation declares is resolved into its args container
-            # like any other config. Anything else -- notably the preallocated
-            # buffers of the grouped operations -- is written to by the op, and a
-            # custom op may not mutate a tensor from an enclosing scope.
-            undeclared = sorted(name for name in kwargs if name not in op.fwd_kwarg_names)
-            if undeclared:
-                return f"{type(op).__name__} with undeclared keyword arguments {undeclared}"
             # Only tensors. The other fields of an args container are values read
             # off the module, constant across calls and baked into the graph; a
             # kwarg changes per call, and on the second value Dynamo hands over a

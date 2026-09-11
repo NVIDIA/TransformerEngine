@@ -2375,7 +2375,6 @@ class _AffineOp(BasicOperation):
 
     fwd_args_type = _AffineFwdArgs
     bwd_args_type = _AffineBwdArgs
-    fwd_kwarg_names = ("gain", "offset")
 
     def __init__(self, weight=2.0, dtype=torch.float32):
         super().__init__()
