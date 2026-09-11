@@ -161,19 +161,23 @@ def _update_grouped_scale_buffers(
     scale_buffers: Dict[str, Optional[torch.Tensor]],
     input_tensors: List[Union[torch.Tensor, QuantizedTensorStorage]],
     weight_tensors: List[Union[torch.Tensor, QuantizedTensorStorage]],
-    input_quantizer: Optional[Quantizer],
-    weight_quantizer: Optional[Quantizer],
+    input_quantizers: List[Optional[Quantizer]],
+    weight_quantizers: List[Optional[Quantizer]],
     activation_scale_decay: float,
 ) -> None:
     """Update GroupedLinear PTQ calibration buffers with per-GEMM metadata."""
     activation_scale_updates = {}
     for index, tensor in enumerate(input_tensors):
-        scale_buffer = _get_scale_buffer_info(f"input_gemm{index}", tensor, input_quantizer)
+        scale_buffer = _get_scale_buffer_info(
+            f"input_gemm{index}", tensor, input_quantizers[index]
+        )
         if scale_buffer is not None:
             activation_scale_updates[scale_buffer[0]] = scale_buffer[1]
     weight_scale_updates = {}
     for index, tensor in enumerate(weight_tensors):
-        scale_buffer = _get_scale_buffer_info(f"weight_gemm{index}", tensor, weight_quantizer)
+        scale_buffer = _get_scale_buffer_info(
+            f"weight_gemm{index}", tensor, weight_quantizers[index]
+        )
         if scale_buffer is not None:
             weight_scale_updates[scale_buffer[0]] = scale_buffer[1]
     _update_scale_buffers(
@@ -578,12 +582,18 @@ class _GroupedLinear(torch.autograd.Function):
             grouped_inputs = grouped_x.quantized_tensors
             if grouped_inputs is None:
                 grouped_inputs = grouped_x.split_into_quantized_tensors()
+            if isinstance(weights_for_gemm, GroupedTensorStorage):
+                grouped_weights = weights_for_gemm.quantized_tensors
+                if grouped_weights is None:
+                    grouped_weights = weights_for_gemm.split_into_quantized_tensors()
+            else:
+                grouped_weights = weights_for_gemm
             _update_grouped_scale_buffers(
                 scale_buffers,
                 grouped_inputs,
-                weights_for_gemm,
-                input_quantizers[0],
-                weight_quantizers[0],
+                grouped_weights,
+                input_quantizers,
+                weight_quantizers,
                 quantized_scaling_factor_buffering_decay,
             )
 
@@ -915,8 +925,8 @@ class _GroupedLinear(torch.autograd.Function):
                 scale_buffers,
                 inputmats,
                 weights_fp8,
-                input_quantizers[0],
-                weight_quantizers[0],
+                input_quantizers,
+                weight_quantizers,
                 quantized_scaling_factor_buffering_decay,
             )
 
