@@ -9,8 +9,9 @@ This module is **experimental** and subject to change.
 
 import importlib
 import math
+from dataclasses import dataclass
 from functools import lru_cache
-from typing import Any, Callable, Dict, Optional, Tuple, Union
+from typing import Any, Callable, Dict, NamedTuple, Optional, Tuple, Union
 
 import torch
 
@@ -19,6 +20,39 @@ from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.constants import dist_group_type
 from transformer_engine.pytorch.distributed import get_distributed_world_size, checkpoint
 from transformer_engine.pytorch.jit import no_torch_dynamo
+
+
+@dataclass(frozen=True)
+class GDNConfig:
+    """Static configuration for Gated DeltaNet linear attention.
+
+    Parameters
+    ----------
+    use_qk_l2norm_in_kernel : bool, default = False
+                             if true, L2-normalize Q and K inside the cuDNN frontend
+                             kernel before applying the recurrence.
+    """
+
+    use_qk_l2norm_in_kernel: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.use_qk_l2norm_in_kernel, bool):
+            raise TypeError("GDNConfig.use_qk_l2norm_in_kernel must be a bool.")
+
+
+class GDNInputs(NamedTuple):
+    """Per-call differentiable tensors for Gated DeltaNet.
+
+    Parameters
+    ----------
+    g : torch.Tensor
+        Per-head log-decay gate with dtype torch.float32.
+    beta : torch.Tensor
+        Per-head write-strength gate with the same shape and dtype requirements as g.
+    """
+
+    g: torch.Tensor
+    beta: torch.Tensor
 
 
 @lru_cache(maxsize=1)
@@ -269,6 +303,82 @@ def _needs_eager_gdn_attention(call: Dict[str, Any]) -> Optional[str]:
     if call.get("checkpoint_core_attention", False):
         return "activation checkpointing of the attention"
     return None
+
+
+class _GDNLinearAttentionBackend(_GDNKernelAdapter):
+    """Adapt the GDN kernel to the variant-dispatch LinearAttention interface."""
+
+    num_gemms = 3
+
+    def __init__(
+        self,
+        variant: GDNConfig,
+        scale: float,
+        num_q_heads: int,
+        qk_head_dim: int,
+        v_head_dim: int,
+        attn_mask_type: str,
+    ) -> None:
+        attn_mask_type = attn_mask_type.replace(",", "_")
+        if attn_mask_type == "causal_padding":
+            attn_mask_type = "padding_causal"
+        if attn_mask_type not in {"causal", "padding_causal"}:
+            raise ValueError(
+                "GDN is inherently causal and only supports "
+                f"attn_mask_type='causal' or 'padding_causal', got {attn_mask_type!r}."
+            )
+        super().__init__(scale, num_q_heads, qk_head_dim, v_head_dim)
+        self.variant = variant
+        self.attn_mask_type = attn_mask_type
+
+    @staticmethod
+    def unpack_variant_inputs(variant_inputs: object) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Validate and unpack GDN's typed per-call tensors."""
+        if not isinstance(variant_inputs, GDNInputs):
+            raise TypeError(
+                "GDN requires variant_inputs to be a GDNInputs instance, got "
+                f"{type(variant_inputs).__name__}."
+            )
+        return variant_inputs.g, variant_inputs.beta
+
+    @staticmethod
+    def validate_runtime_environment() -> None:
+        """Reject Transformer Engine execution modes not supported by GDN."""
+        if FP8GlobalStateManager.is_fp8_enabled() or FP8GlobalStateManager.is_fp8_calibration():
+            raise ValueError("GDN does not support FP8 autocast or FP8 calibration.")
+
+    def forward(
+        self,
+        query_layer: torch.Tensor,
+        key_layer: torch.Tensor,
+        value_layer: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        initial_state: Optional[torch.Tensor] = None,
+        *,
+        qkv_format: str,
+        cu_seqlens_q: Optional[torch.Tensor] = None,
+        cu_seqlens_kv: Optional[torch.Tensor] = None,
+        output_final_state: bool = False,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        """Run GDN through the common LinearAttention call contract."""
+        if cu_seqlens_kv is not None and cu_seqlens_kv is not cu_seqlens_q:
+            raise ValueError(
+                "GDN requires identical Q and KV sequence boundaries. "
+                "Pass cu_seqlens_kv=None or pass the same tensor object as cu_seqlens_q."
+            )
+        return super().forward(
+            query_layer,
+            key_layer,
+            value_layer,
+            g,
+            beta,
+            initial_state,
+            qkv_format=qkv_format,
+            cu_seqlens=cu_seqlens_q,
+            output_final_state=output_final_state,
+            use_qk_l2norm_in_kernel=self.variant.use_qk_l2norm_in_kernel,
+        )
 
 
 class GatedDeltaNetAttention(TransformerEngineBaseModule):
