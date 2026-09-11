@@ -1190,6 +1190,13 @@ class TestMoeEpSequential(_EpTestCase):
             recipe=recipe,
         )
 
+        def reset_graphed_model():
+            # Release captured NCCL work before the process group is destroyed.
+            graphed_model.reset()
+            torch.cuda.synchronize()
+
+        self.addCleanup(reset_graphed_model)
+
         # Replace the capture-time contents while retaining captured addresses.
         with torch.no_grad():
             static_tokens.copy_(torch.randn_like(static_tokens))
