@@ -44,8 +44,12 @@ def _pack_cp_tensors(
     FORWARD: tl.constexpr,
     W: tl.constexpr,
     BLOCK: tl.constexpr,
+    INDEX64: tl.constexpr,
 ):
-    i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    block = tl.program_id(0)
+    if INDEX64:
+        block = block.to(tl.int64)
+    i = block * BLOCK + tl.arange(0, BLOCK)
     valid = i < CP * S * B * H * W
     f = i % W
     h = i // W % H
@@ -110,8 +114,12 @@ def _unpack_cp_tensors(
     FORWARD: tl.constexpr,
     W: tl.constexpr,
     BLOCK: tl.constexpr,
+    INDEX64: tl.constexpr,
 ):
-    i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    block = tl.program_id(0)
+    if INDEX64:
+        block = block.to(tl.int64)
+    i = block * BLOCK + tl.arange(0, BLOCK)
     valid = i < CP * S * B * H * W
     f = i % W
     h = i // W % H

@@ -181,6 +181,22 @@ def test_exchange_bits(batch, head_dim):
         )
 
 
+def test_exchange_large_stride():
+    """Exercise offsets beyond INT_MAX without exchanging a large payload."""
+    torch.manual_seed(78 + dist.get_rank())
+    query = torch.empty_strided(
+        (4, 1, 16, 128), (2**30, 2048, 128, 1), device="cuda", dtype=torch.bfloat16
+    )
+    query.view(torch.int16).copy_(
+        torch.randint(-32768, 32767, query.shape, device="cuda", dtype=torch.int16)
+    )
+    tensors = [query] + [torch.randn_like(query.contiguous()) for _ in range(4)]
+    lse = torch.randn(1, 16, 4, device="cuda", dtype=torch.float32)
+    actual = mixed_cp._to_heads(*tensors, lse, GROUP)
+    expected = gather_reference(query.view(torch.int16))
+    torch.testing.assert_close(actual[0].view(torch.int16), expected, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("batch", [1, 2])
 def test_changed_input_graph_replay(monkeypatch, batch):
     module, inputs, gradient, _, _ = make_case(batch=batch)

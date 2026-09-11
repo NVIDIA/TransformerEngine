@@ -76,10 +76,15 @@ def _exchange(tensors: tuple, group: object, *, forward: bool, lse=None) -> tupl
     if local_s % 2 or (forward and heads % size):
         raise ValueError("Invalid balanced CP partition")
     width = triton.cdiv(2 * dq + 3 * dv + 2, 64) * 64 if forward else 2 * dq + dv
-    # NCCL byte transport and integer kernel loads preserve every FP32 LSE bit.
-    wire = torch.empty(
-        size * local_s * batch * local_h * width * 2, dtype=torch.uint8, device=q.device
+    elements = size * local_s * batch * local_h * width
+    # Strided inputs can require wide offsets even when the payload is small.
+    index64 = elements >= 2**31 or any(
+        sum((dim - 1) * stride for dim, stride in zip(t.shape, t.stride())) >= 2**31
+        for t in (*tensors, lse)
+        if t is not None
     )
+    # NCCL byte transport and integer kernel loads preserve every FP32 LSE bit.
+    wire = torch.empty(elements * 2, dtype=torch.uint8, device=q.device)
     received = torch.empty_like(wire)
     o, do = tensors[3:] if forward else (q, q)
     if forward and (lse.dtype != torch.float32 or lse.shape != (batch, heads, sequence)):
@@ -119,6 +124,7 @@ def _exchange(tensors: tuple, group: object, *, forward: bool, lse=None) -> tupl
         forward,
         width,
         1024,
+        index64,
     )
     dist.all_to_all_single(received, wire, group=group)
     # The sent buffer is dead after the collective and becomes the output slab.
@@ -157,6 +163,7 @@ def _exchange(tensors: tuple, group: object, *, forward: bool, lse=None) -> tupl
         forward,
         width,
         1024,
+        index64,
     )
     return (*outputs, global_lse) if forward else tuple(outputs)
 
