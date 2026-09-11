@@ -135,6 +135,52 @@ def test_shared_fp8_policy():
     assert not check_fp8_fused_attention_support(replace(fp8, head_dim_qk=200)).supported
 
 
+def test_shared_fp8_thd_policy():
+    thd = _attention_config(
+        q_dtype="float8_e4m3",
+        kv_dtype="float8_e4m3",
+        layout=AttentionLayout("thd", "thd", "thd", "separate"),
+        mask_type="padding",
+        cudnn_version=(9, 23, 0),
+        sm_arch=100,
+    )
+    assert check_fp8_fused_attention_support(thd).supported
+    assert check_fp8_fused_attention_support(replace(thd, sm_arch=90)).supported
+    assert check_fp8_fused_attention_support(
+        replace(thd, mask_type="padding_causal_bottom_right")
+    ).supported
+    assert not check_fp8_fused_attention_support(
+        replace(thd, cudnn_version=(9, 22, 9))
+    ).supported
+    assert not check_fp8_fused_attention_support(replace(thd, mask_type="no_mask")).supported
+    assert not check_fp8_fused_attention_support(
+        replace(thd, is_training=True, sm_arch=90)
+    ).supported
+    assert not check_fp8_fused_attention_support(replace(thd, head_dim_qk=144)).supported
+
+    sink_backward = replace(thd, is_training=True, softmax_type="learnable")
+    assert not check_fp8_fused_attention_support(
+        replace(sink_backward, cudnn_version=(9, 25, 1))
+    ).supported
+    assert check_fp8_fused_attention_support(
+        replace(sink_backward, cudnn_version=(9, 26, 0))
+    ).supported
+
+
+def test_shared_fp8_thd_policy_allows_64bit_offsets():
+    thd = _attention_config(
+        q_dtype="float8_e4m3",
+        kv_dtype="float8_e4m3",
+        layout=AttentionLayout("thd", "thd", "thd", "separate"),
+        mask_type="padding",
+        max_seqlen_q=1_048_577,
+        max_seqlen_kv=1_048_577,
+        cudnn_version=(9, 23, 0),
+        sm_arch=100,
+    )
+    assert check_fp8_fused_attention_support(thd).supported
+
+
 @pytest.mark.parametrize(
     "layout, expected",
     [

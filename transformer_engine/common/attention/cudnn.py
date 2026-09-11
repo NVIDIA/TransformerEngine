@@ -606,8 +606,21 @@ def check_fp8_fused_attention_support(
         skv,
         dqk,
         dv,
-    ):
-        return _unsupported("FP8 attention does not support 64-bit ragged offsets")
+    ) and version < 90500:
+        return _unsupported("FP8 attention requires cuDNN 9.5 for 64-bit ragged offsets")
+
+    is_thd = layout.qkv_format == "thd"
+    if is_thd:
+        if version < 92300:
+            return _unsupported("FP8 THD attention requires cuDNN 9.23 or newer")
+        if mask not in ("padding", "padding_causal", "padding_causal_bottom_right"):
+            return _unsupported("FP8 THD attention requires a padding mask")
+        if config.is_training and arch < 100:
+            return _unsupported("FP8 THD attention backward requires SM100 or newer")
+        if config.is_training and config.softmax_type != "vanilla" and version < 92600:
+            return _unsupported("FP8 THD sink-token backward requires cuDNN 9.26 or newer")
+        if arch >= 100 and (dqk > 128 or dv > 128):
+            return _unsupported("FP8 THD attention supports head dimensions up to 128 on SM100+")
 
     shape_mask_ok = (
         (
@@ -628,7 +641,10 @@ def check_fp8_fused_attention_support(
             )
             and dqk % 16 == 0
             and dv % 16 == 0
-            and mask in ("no_mask", "causal", "padding", "padding_causal")
+            and (
+                mask in ("no_mask", "causal", "padding", "padding_causal")
+                or (arch >= 100 and mask == "padding_causal_bottom_right")
+            )
         )
         or (
             version >= 92100
@@ -647,7 +663,9 @@ def check_fp8_fused_attention_support(
         version < 92100
         and layout.qkv_format in ("bshd", "sbhd")
         and config.softmax_type == "vanilla"
-    ) or (version >= 92100 and layout.qkv_format in ("bshd", "sbhd", "bhsd"))
+    ) or (
+        version >= 92100 and layout.qkv_format in ("bshd", "sbhd", "bhsd")
+    ) or is_thd
     if not format_softmax_ok:
         return _unsupported("FP8 attention layout or softmax type is not supported")
     return FusedAttentionSupport(True)
