@@ -1244,49 +1244,6 @@ def _register_op(
     )
 
 
-def _register_forward_op(
-    *, name: str, arg_type: type, impl: Callable[[Any], Any], fake_impl: Callable[[Any], Any]
-) -> _RegisteredOp:
-    return _register_op(
-        name=name,
-        arg_type=arg_type,
-        impl=impl,
-        fake_impl=fake_impl,
-        pack_result=_pack_fwd_result,
-        flatten_in_body=True,
-    )
-
-
-def _register_backward_op(
-    *,
-    name: str,
-    arg_type: type,
-    impl: Callable[[Any], Any],
-    fake_impl: Callable[[Any], Any],
-    num_grad_inputs: Optional[int],
-) -> _RegisteredOp:
-    # Pass-through body: a subclass input reaches the base op through the
-    # dispatch rule, never through the wrapper body.
-    qualname = f"{_TE_OP_NAMESPACE}::{name}_base"
-    return _register_op(
-        name=name,
-        arg_type=arg_type,
-        impl=impl,
-        fake_impl=fake_impl,
-        pack_result=lambda g: _pack_bwd_result(g, num_grad_inputs, qualname),
-        flatten_in_body=False,
-    )
-
-
-def _run_forward(
-    fwd_op: _RegisteredOp, fwd_fake_impl: Callable[[Any], Tuple[Any, ...]], fwd_args: Any
-) -> Tuple[_OutputPlan, List[torch.Tensor]]:
-    """Run the forward op on ``fwd_args``: its output plan and flat payload."""
-    spec_obj = _spec_view(fwd_args, fwd_op.plan.tensor_field_names())
-    out_plan = _OutputPlan.parse(fwd_fake_impl(spec_obj))
-    return out_plan, fwd_op(fwd_args)
-
-
 # --------------------------------------------------------------------------- #
 # Op registration: a single autograd-free op, and the autograd-wired variant
 # --------------------------------------------------------------------------- #
@@ -1440,15 +1397,23 @@ def _register_custom_op_with_autograd_impl(
     if missing:
         raise ValueError(f"input_tensors_for_grad names not in {fwd_arg_type.__name__}: {missing}")
 
-    fwd_op = _register_forward_op(
-        name=op_name, arg_type=fwd_arg_type, impl=fwd_impl, fake_impl=fwd_fake_impl
+    fwd_op = _register_op(
+        name=op_name,
+        arg_type=fwd_arg_type,
+        impl=fwd_impl,
+        fake_impl=fwd_fake_impl,
+        pack_result=_pack_fwd_result,
+        flatten_in_body=True,
     )
-    bwd_op = _register_backward_op(
+    bwd_qualname = f"{_TE_OP_NAMESPACE}::{op_name}_backward_base"
+    num_grad_inputs = len(input_tensors_for_grad)
+    bwd_op = _register_op(
         name=f"{op_name}_backward",
         arg_type=bwd_arg_type,
         impl=bwd_impl,
         fake_impl=bwd_fake_impl,
-        num_grad_inputs=len(input_tensors_for_grad),
+        pack_result=lambda grads: _pack_bwd_result(grads, num_grad_inputs, bwd_qualname),
+        flatten_in_body=False,
     )
 
     autograd_common = {
@@ -1464,8 +1429,9 @@ def _register_custom_op_with_autograd_impl(
     )
 
     def forward_fn(fwd_args):
-        out_plan, payload = _run_forward(fwd_op, fwd_fake_impl, fwd_args)
-        outputs = out_plan.user_outputs(payload)
+        spec_args = _spec_view(fwd_args, fwd_op.plan.tensor_field_names())
+        out_plan = _OutputPlan.parse(fwd_fake_impl(spec_args))
+        outputs = out_plan.user_outputs(fwd_op(fwd_args))
         if len(outputs) == 1:
             return outputs[0]
         return tuple(outputs)
