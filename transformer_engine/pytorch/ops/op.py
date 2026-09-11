@@ -60,7 +60,7 @@ class OperationContext:
 class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
     """Tensor operation supported by the operation fuser"""
 
-    # One custom-op registration per operation class.
+    # Custom ops are registered once per operation class.
     fwd_args_type: Optional[type] = None
     bwd_args_type: Optional[type] = None
     # Supported read-only forward kwargs; no gradients.
@@ -78,14 +78,21 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         for name in ("fwd_args_type", "bwd_args_type"):
             if not dataclasses.is_dataclass(getattr(cls, name)):
                 raise TypeError(f"{cls.__name__}.{name} must be a dataclass")
-        cls.compile_ops = register_custom_op(
-            op_name=cls.__name__.lower(),
-            fwd_arg_type=cls.fwd_args_type,
-            fwd_impl=cls.forward_compute,
-            fwd_fake_impl=cls.forward_fake,
-            bwd_arg_type=cls.bwd_args_type,
-            bwd_impl=cls.backward_compute,
-            bwd_fake_impl=cls.backward_fake,
+        name = cls.__name__.lower()
+        forward = register_custom_op(
+            op_name=name,
+            arg_type=cls.fwd_args_type,
+            impl=cls.forward_compute,
+            fake_impl=cls.forward_fake,
+        )
+        backward = register_custom_op(
+            op_name=f"{name}_backward",
+            arg_type=cls.bwd_args_type,
+            impl=cls.backward_compute,
+            fake_impl=cls.backward_fake,
+        )
+        cls.compile_ops = (
+            (forward, backward) if forward is not None and backward is not None else None
         )
 
     def compile_unsupported_reason(self) -> Optional[str]:

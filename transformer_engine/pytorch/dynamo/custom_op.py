@@ -8,14 +8,14 @@ Registers TE modules' eager forward/backward as ``torch.library`` custom ops so
 ``torch.compile(fullgraph=True)`` traces them as single graph nodes.
 ``register_custom_op_with_autograd`` is the entry point for a module that
 wires autograd on the op itself (``module/linear.py`` is the first user);
-``register_custom_op`` hands back the forward and backward ops separately, for a
-caller that drives autograd at a higher level (``ops/fuser.py``).
+``register_custom_op`` registers one op without autograd; ``ops/fuser.py`` uses
+separate registrations for forward and backward and drives autograd itself.
 
 A TE forward/backward implementation takes one dataclass argument
 (``fwd_arg_type`` / ``bwd_arg_type``, e.g. ``LinearFwdArgs``) whose fields mix
 tensors, quantized tensors, quantizers, process groups and plain Python values.
-The autograd-free forward returns an ``(output, aux)`` tuple; the autograd-wired
-API keeps its saved-tensor and context-metadata contract.
+The autograd-free API preserves nested tensor results; the autograd-wired API
+keeps its saved-tensor and context-metadata contract.
 
 A ``torch.library`` custom op is narrower: it only accepts flat schema slots
 (tensors plus opaque objects) and returns a flat ``Tensor[]``.
@@ -1288,115 +1288,51 @@ def _run_forward(
 
 
 # --------------------------------------------------------------------------- #
-# Op registration: the autograd-free pair, and the autograd-wired variant
+# Op registration: a single autograd-free op, and the autograd-wired variant
 # --------------------------------------------------------------------------- #
 
 
 def register_custom_op(
     *,
     op_name: str,
-    fwd_arg_type: type,
-    fwd_impl: Callable[[Any], Any],
-    fwd_fake_impl: Callable[[Any], Tuple[Any, ...]],
-    bwd_arg_type: type,
-    bwd_impl: Callable[[Any], Any],
-    bwd_fake_impl: Callable[[Any], Tuple[Any, ...]],
-    num_grad_inputs: Optional[int] = None,
-) -> Optional[Tuple[Callable[[Any], Any], Callable[[Any], Any]]]:
-    """Register an op's forward and backward as two independent custom ops.
+    arg_type: type,
+    impl: Callable[[Any], Any],
+    fake_impl: Callable[[Any], Any],
+) -> Optional[Callable[[Any], Any]]:
+    """Register one custom op without autograd wiring.
 
-    Autograd is the caller's: it decides how the two are wired, which is what
-    lets a pipeline-level ``torch.autograd.Function`` -- traced by Dynamo as a
-    higher-order op -- group the forward and backward passes differently, as
-    ``ops.OperationFuser`` does. :func:`register_custom_op_with_autograd` builds
-    on this and wires them the usual way instead.
-
-    Both ops are two-tier, so ``QuantizedTensor`` subclass inputs pass through
-    without dequantization.
-
-    Implementations return nested tuples/lists of tensors or None. Fake
-    implementations return the same structure with TensorSpec leaves. Forward
-    outputs must be fresh tensors; context saving remains the caller's job.
-    num_grad_inputs, if given, counts flattened backward result leaves.
-
-    Returns (forward_fn, backward_fn), preserving each implementation's result
-    structure, including per-basic-op extra outputs and gradients.
-
-    Returns ``None`` if registration fails (recorded once), so callers can fall
-    back to eager rather than breaking import.
+    arg_type is a dataclass defining the input schema. Results may be nested
+    tuples/lists of fresh tensors or None; fake_impl mirrors them with TensorSpec.
+    The returned callable takes an args instance and preserves the result structure.
+    Returns None if registration fails, so callers can fall back to eager.
     """
+
+    def pack_result(result):
+        values, _ = tree_flatten(result)
+        return [tensor for value in values for tensor in _flatten_value(value)]
+
     try:
-        return _register_custom_op_impl(
-            op_name=op_name,
-            fwd_arg_type=fwd_arg_type,
-            fwd_impl=fwd_impl,
-            fwd_fake_impl=fwd_fake_impl,
-            bwd_arg_type=bwd_arg_type,
-            bwd_impl=bwd_impl,
-            bwd_fake_impl=bwd_fake_impl,
-            num_grad_inputs=num_grad_inputs,
+        op = _register_op(
+            name=op_name,
+            arg_type=arg_type,
+            impl=impl,
+            fake_impl=fake_impl,
+            pack_result=pack_result,
+            flatten_in_body=True,
         )
     except (ImportError, AttributeError, RuntimeError, TypeError) as e:
         record_compile_disabled(
-            f"could not register the autograd-free custom ops '{op_name}' ({type(e).__name__}: {e})"
+            f"could not register custom op '{op_name}' ({type(e).__name__}: {e})"
         )
         return None
 
-
-def _register_custom_op_impl(
-    *,
-    op_name: str,
-    fwd_arg_type: type,
-    fwd_impl: Callable[[Any], Any],
-    fwd_fake_impl: Callable[[Any], Tuple[Any, ...]],
-    bwd_arg_type: type,
-    bwd_impl: Callable[[Any], Any],
-    bwd_fake_impl: Callable[[Any], Tuple[Any, ...]],
-    num_grad_inputs: Optional[int],
-) -> Tuple[Callable[[Any], Any], Callable[[Any], Any]]:
-    """Body of :func:`register_custom_op`; see it for semantics."""
-
-    def adapt_forward(impl):
-        def wrapped(args):
-            values, _ = tree_flatten(impl(args))
-            return (*values, (), None)
-
-        return wrapped
-
-    def adapt_backward(impl):
-        def wrapped(args):
-            values, _ = tree_flatten(impl(args))
-            return tuple(values)
-
-        return wrapped
-
-    fwd_op = _register_forward_op(
-        name=op_name,
-        arg_type=fwd_arg_type,
-        impl=adapt_forward(fwd_impl),
-        fake_impl=adapt_forward(fwd_fake_impl),
-    )
-    bwd_op = _register_backward_op(
-        name=f"{op_name}_backward",
-        arg_type=bwd_arg_type,
-        impl=adapt_backward(bwd_impl),
-        fake_impl=adapt_backward(bwd_fake_impl),
-        num_grad_inputs=num_grad_inputs,
-    )
-
-    def forward_fn(fwd_args):
-        spec_args = _spec_view(fwd_args, fwd_op.plan.tensor_field_names())
-        specs, structure = tree_flatten(fwd_fake_impl(spec_args))
+    def call(args):
+        spec_args = _spec_view(args, op.plan.tensor_field_names())
+        specs, structure = tree_flatten(fake_impl(spec_args))
         out_plan = _OutputPlan.parse((*specs, (), None))
-        return tree_unflatten(out_plan.user_outputs(fwd_op(fwd_args)), structure)
+        return tree_unflatten(out_plan.user_outputs(op(args)), structure)
 
-    def backward_fn(bwd_args):
-        spec_args = _spec_view(bwd_args, bwd_op.plan.tensor_field_names())
-        _, structure = tree_flatten(bwd_fake_impl(spec_args))
-        grads = [_decode_none(t) for t in bwd_op(bwd_args)]
-        return tree_unflatten(grads, structure)
-
-    return forward_fn, backward_fn
+    return call
 
 
 def register_custom_op_with_autograd(
