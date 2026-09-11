@@ -383,12 +383,8 @@ class _LayerNormLinear(torch.autograd.Function):
             bias_dtype = torch.bfloat16
         bias = cast_if_needed(bias, bias_dtype) if bias is not None else bias
 
-        input_calibration_quantizer = _resolve_calibration_quantizer(
-            ln_out_total, input_quantizer
-        )
-        weight_calibration_quantizer = _resolve_calibration_quantizer(
-            weightmat, weight_quantizer
-        )
+        input_calibration_quantizer = _resolve_calibration_quantizer(ln_out_total, input_quantizer)
+        weight_calibration_quantizer = _resolve_calibration_quantizer(weightmat, weight_quantizer)
 
         # Calibrate quantizers if needed.
         if scale_buffers is not None:
@@ -402,12 +398,8 @@ class _LayerNormLinear(torch.autograd.Function):
 
         # Buffer scaling metadata only when requested.
         if scale_buffers is not None:
-            scale_buffers.update(
-                _get_scale_buffer_info("input", input_calibration_quantizer)
-            )
-            scale_buffers.update(
-                _get_scale_buffer_info("weight", weight_calibration_quantizer)
-            )
+            scale_buffers.update(_get_scale_buffer_info("input", input_calibration_quantizer))
+            scale_buffers.update(_get_scale_buffer_info("weight", weight_calibration_quantizer))
 
         # Choose whether to use GEMM kernel with split accumulator
         use_split_accumulator = _2X_ACC_FPROP

@@ -191,9 +191,7 @@ def test_calibration_config_registers_module_scaling_factor_buffers(
             module(inp)
 
     buffers = {
-        name: value
-        for name, value in module.named_buffers()
-        if name.endswith("_te_ptq_calibrated")
+        name: value for name, value in module.named_buffers() if name.endswith("_te_ptq_calibrated")
     }
     assert len(buffers) == expected_buffer_count
     assert all(torch.isfinite(value).all() for value in buffers.values())
@@ -211,13 +209,10 @@ def test_calibrating_boolean_registers_scaling_factor_buffers():
     ):
         module(inp)
 
-    assert len(
-        [
-            name
-            for name, _ in module.named_buffers()
-            if name.endswith("_te_ptq_calibrated")
-        ]
-    ) == 2
+    assert (
+        len([name for name, _ in module.named_buffers() if name.endswith("_te_ptq_calibrated")])
+        == 2
+    )
 
 
 @pytest.mark.parametrize(
@@ -229,9 +224,7 @@ def test_calibrating_boolean_registers_scaling_factor_buffers():
         ("nvfp4_rowwise", "amax_rowwise", 1344.0),
     ),
 )
-def test_scale_buffer_info_selects_recipe_metadata(
-    recipe, metadata_name, expected_value
-):
+def test_scale_buffer_info_selects_recipe_metadata(recipe, metadata_name, expected_value):
     tensor = SimpleNamespace(
         _scale_inv=torch.tensor([0.25], dtype=torch.float32),
         _amax_rowwise=torch.tensor([2688.0 if recipe == "nvfp4" else 1344.0], dtype=torch.float32),
@@ -279,10 +272,7 @@ def test_resolve_calibration_quantizer_prefers_tensor_owner_and_unwraps_parent()
     tensor_quantizer = SimpleNamespace(parent_quantizer=parent_quantizer)
     tensor = SimpleNamespace(_quantizer=tensor_quantizer)
 
-    assert (
-        _common._resolve_calibration_quantizer(tensor, object())
-        is parent_quantizer
-    )
+    assert _common._resolve_calibration_quantizer(tensor, object()) is parent_quantizer
 
 
 def test_quantizer_calibration_state_is_keyed_by_quantized_metadata():
@@ -341,9 +331,7 @@ def test_grouped_scale_buffers_are_per_gemm():
         torch.tensor([0.5]),
     )
     assert (
-        scale_buffers[
-            "input_gemm1_tensor_scale_inv_fp8_current_scaling_te_ptq_calibrated"
-        ]
+        scale_buffers["input_gemm1_tensor_scale_inv_fp8_current_scaling_te_ptq_calibrated"]
         is input_quantizers[1]._calibration_state["scale_inv"]
     )
 
@@ -362,9 +350,7 @@ def test_grouped_calibration_applies_decay_only_to_activations():
         activation_scale_decay=0.5,
     )
 
-    torch.testing.assert_close(
-        input_quantizer._calibration_state["scale_inv"], torch.tensor([2.0])
-    )
+    torch.testing.assert_close(input_quantizer._calibration_state["scale_inv"], torch.tensor([2.0]))
     torch.testing.assert_close(
         weight_quantizer._calibration_state["scale_inv"], torch.tensor([1.0])
     )
@@ -463,9 +449,7 @@ def test_nan_activation_scale_does_not_update_buffer(activation_scale_decay, ini
         assert not result
         assert not quantizer._calibration_state
     else:
-        value = result[
-            "fc1_input_tensor_scale_inv_fp8_current_scaling_te_ptq_calibrated"
-        ]
+        value = result["fc1_input_tensor_scale_inv_fp8_current_scaling_te_ptq_calibrated"]
         torch.testing.assert_close(value, torch.tensor([initial_scale]))
 
 
@@ -483,9 +467,7 @@ def test_current_scaling_calibrates_from_high_precision_tensor():
 
 @pytest.mark.parametrize("input_value", (0.0, float("inf")))
 @pytest.mark.parametrize("force_pow_2_scales", (False, True))
-def test_current_scaling_calibration_handles_non_finite_scale(
-    input_value, force_pow_2_scales
-):
+def test_current_scaling_calibration_handles_non_finite_scale(input_value, force_pow_2_scales):
     quantizer = Float8CurrentScalingQuantizer(
         fp8_dtype=DType.kFloat8E4M3,
         device=torch.device("cpu"),
@@ -522,8 +504,7 @@ def test_delayed_scaling_high_precision_calibration_matches_quantization(fp8_dty
     )
     calibration_quantizer.calibrate(tensor)
     assert (
-        calibration_quantizer.copy()._calibration_state
-        is calibration_quantizer._calibration_state
+        calibration_quantizer.copy()._calibration_state is calibration_quantizer._calibration_state
     )
 
     torch.testing.assert_close(
@@ -610,8 +591,7 @@ def test_nvfp4_high_precision_calibration_matches_quantization(
     calibration_quantizer = NVFP4Quantizer(**quantizer_kwargs)
     calibration_quantizer.calibrate(tensor)
     assert (
-        calibration_quantizer.copy()._calibration_state
-        is calibration_quantizer._calibration_state
+        calibration_quantizer.copy()._calibration_state is calibration_quantizer._calibration_state
     )
 
     expected_metadata_name = "amax_rowwise" if row_scaled_nvfp4 else "amax"

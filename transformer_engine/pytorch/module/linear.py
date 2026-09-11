@@ -608,9 +608,7 @@ def _linear_forward_impl(
         bias_dtype = torch.bfloat16
     bias = cast_if_needed(bias, bias_dtype) if bias is not None else bias
 
-    input_calibration_quantizer = _resolve_calibration_quantizer(
-        inputmat_total, input_quantizer
-    )
+    input_calibration_quantizer = _resolve_calibration_quantizer(inputmat_total, input_quantizer)
     weight_calibration_quantizer = _resolve_calibration_quantizer(weightmat, weight_quantizer)
 
     # Calibrate quantizers if needed.
@@ -625,12 +623,8 @@ def _linear_forward_impl(
 
     # Buffer scaling metadata only when requested.
     if args.scale_buffers is not None:
-        args.scale_buffers.update(
-            _get_scale_buffer_info("input", input_calibration_quantizer)
-        )
-        args.scale_buffers.update(
-            _get_scale_buffer_info("weight", weight_calibration_quantizer)
-        )
+        args.scale_buffers.update(_get_scale_buffer_info("input", input_calibration_quantizer))
+        args.scale_buffers.update(_get_scale_buffer_info("weight", weight_calibration_quantizer))
 
     # Choose whether to use GEMM kernel with split accumulator
     use_split_accumulator = _2X_ACC_FPROP
