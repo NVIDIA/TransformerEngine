@@ -927,6 +927,36 @@ def _scaling_mode(quantizer) -> str:
     raise ValueError(f"FP8 attention does not support scaling mode {mode}.")
 
 
+def _validate_quantizer_modes(quantizers) -> str:
+    """Validate the supported scaling-mode assignment for each DPA tensor role."""
+
+    roles = ("qkv", "s", "o", "do", "dp", "dqkv")
+    mode = _scaling_mode(quantizers.qkv)
+    expected = {
+        "delayed": {role: "delayed" for role in roles},
+        "current": {
+            "qkv": "current",
+            "s": "delayed",
+            "o": "current",
+            "do": "current",
+            "dp": "delayed",
+            "dqkv": "current",
+        },
+        "mxfp8": {role: "mxfp8" for role in roles},
+    }[mode]
+    actual = {role: _scaling_mode(getattr(quantizers, role)) for role in roles}
+    mismatches = [
+        f"{role}={actual[role]} (expected {expected[role]})"
+        for role in roles
+        if actual[role] != expected[role]
+    ]
+    if mismatches:
+        raise ValueError(
+            "Unsupported FP8 attention quantizer modes: " + ", ".join(mismatches)
+        )
+    return mode
+
+
 def _rowwise(tensor):
     return tensor.get_tensor(TensorUsage.LHS)
 
@@ -1084,18 +1114,7 @@ def _validate_fp8_support(qkv, quantizers, config, mode):
 def fused_attn_fp8_fwd(qkv, sequence_descriptor, seed, quantizers, config):
     """Quantize high-precision inputs and execute dense FP8 attention forward."""
 
-    mode = _scaling_mode(quantizers.qkv)
-    if any(
-        _scaling_mode(q) != mode
-        for q in (
-            quantizers.s,
-            quantizers.o,
-            quantizers.do,
-            quantizers.dp,
-            quantizers.dqkv,
-        )
-    ):
-        raise ValueError("All FP8 attention quantizers must use the same scaling mode.")
+    mode = _validate_quantizer_modes(quantizers)
     if config.qkv_layout.is_thd():
         raise NotImplementedError("FP8 attention does not support THD layouts in JAX.")
     if mode == "mxfp8" and not config.qkv_layout.is_separate():
@@ -1124,7 +1143,8 @@ def fused_attn_fp8_fwd(qkv, sequence_descriptor, seed, quantizers, config):
     seed = _FusedAttnRNGStateChecker().check_seed(
         seed, config.dropout_probability, config.is_training
     )
-    output_dtype = quantizers.o.q_dtype if mode == "delayed" else qkv[0].dtype
+    output_is_delayed = _scaling_mode(quantizers.o) == "delayed"
+    output_dtype = quantizers.o.q_dtype if output_is_delayed else qkv[0].dtype
     s_scale = _tensor_scale(quantizers.s)
     s_scale_inv = jnp.reciprocal(s_scale)
     output_scale_inv = _tensor_scale_inv(quantizers.o)
@@ -1145,8 +1165,9 @@ def fused_attn_fp8_fwd(qkv, sequence_descriptor, seed, quantizers, config):
         mode=mode,
         output_dtype=output_dtype,
     )
-    if mode == "delayed":
+    if _scaling_mode(quantizers.s) == "delayed":
         quantizers.s.update(amax[0:1])
+    if output_is_delayed:
         quantizers.o.update(amax[1:2])
         output = (raw_output.astype(qkv[0].dtype) * output_scale_inv).astype(
             qkv[0].dtype
@@ -1217,7 +1238,8 @@ def fused_attn_fp8_bwd(ctx, doutput, config):
         q_t = k_t = do_t = empty_data
         q_scale_t = k_scale_t = do_scale_t = empty_scale
 
-    grad_dtype = quantizers.dqkv.q_dtype if mode == "delayed" else input_dtype
+    grad_is_delayed = _scaling_mode(quantizers.dqkv) == "delayed"
+    grad_dtype = quantizers.dqkv.q_dtype if grad_is_delayed else input_dtype
     grad_scale_inv = _tensor_scale_inv(quantizers.dqkv)
     dq, dk, dv, amax, _, _ = execute_fp8_bwd(
         q_data,
@@ -1252,11 +1274,12 @@ def fused_attn_fp8_bwd(ctx, doutput, config):
         mode=mode,
         grad_dtype=grad_dtype,
     )
-    if mode == "delayed":
+    if grad_is_delayed:
         quantizers.dqkv.update(jnp.max(amax[:3]))
-        quantizers.dp.update(amax[3:4])
         dq, dk, dv = (
             (tensor.astype(input_dtype) * grad_scale_inv).astype(input_dtype)
             for tensor in (dq, dk, dv)
         )
+    if _scaling_mode(quantizers.dp) == "delayed":
+        quantizers.dp.update(amax[3:4])
     return _split_gradient_outputs(dq, dk, dv, config.qkv_layout), quantizers

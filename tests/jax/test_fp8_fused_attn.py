@@ -5,6 +5,7 @@
 """Coverage for JAX FP8 DPA and attention features shared with PyTorch."""
 
 from math import sqrt
+from types import SimpleNamespace
 
 import jax
 import jax.numpy as jnp
@@ -26,9 +27,11 @@ from transformer_engine.jax.cpp_extensions import FusedAttnHelper
 from transformer_engine.jax.cpp_extensions.fp8_attention import (
     _mx_scale,
     _mxfp8_scale_inv,
+    _validate_quantizer_modes,
 )
 from transformer_engine.jax.flax import DotProductAttention
 from transformer_engine.jax.quantize import (
+    AttentionQuantizerSet,
     BlockScaleQuantizer,
     QuantizeLayout,
     ScalingMode,
@@ -91,6 +94,30 @@ def _assert_fp8_close(actual, expected):
     expected = np.asarray(expected, dtype=np.float32)
     np.testing.assert_allclose(actual, expected, atol=0.5, rtol=0.05)
     assert np.sqrt(np.mean(np.square(actual - expected))) < 0.11
+
+
+def _mode_quantizer(mode):
+    return SimpleNamespace(scaling_mode=mode)
+
+
+def test_fp8_attention_quantizer_mode_assignments():
+    """Current-scaling DPA uses delayed scaling for its internal S and dP tensors."""
+
+    current = _mode_quantizer(ScalingMode.CURRENT_TENSOR_SCALING)
+    delayed = _mode_quantizer(ScalingMode.DELAYED_TENSOR_SCALING)
+    quantizers = AttentionQuantizerSet(
+        qkv=current,
+        s=delayed,
+        o=current,
+        do=current,
+        dp=delayed,
+        dqkv=current,
+    )
+    assert _validate_quantizer_modes(quantizers) == "current"
+
+    quantizers.s = current
+    with pytest.raises(ValueError, match=r"s=current \(expected delayed\)"):
+        _validate_quantizer_modes(quantizers)
 
 
 @pytest.mark.parametrize(
