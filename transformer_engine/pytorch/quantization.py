@@ -143,6 +143,9 @@ class _QuantizationRuntime:
     backward_state: "RecipeState"
     forward_quantizers: List["Quantizer"]
     backward_quantizers: List["Quantizer"]
+    # Owner-specific state derived during validation, published with the runtime
+    # and discarded with it. Owners that need none leave it ``None``.
+    owner_traits: Any = None
 
 
 @dataclasses.dataclass(frozen=True)

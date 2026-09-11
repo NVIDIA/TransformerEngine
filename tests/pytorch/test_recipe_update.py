@@ -2817,9 +2817,7 @@ def test_grouped_candidate_validation_is_atomic(mismatched_tensor_type):
     old_backward_state = module.fp8_meta["scaling_bwd"]
     old_forward_quantizers = module.quantizers["scaling_fwd"]
     old_backward_quantizers = module.quantizers["scaling_bwd"]
-    old_validated_generations = module._validated_quantizer_generations
-    old_delayed_quantizer = module._delayed_scaling_input_quantizer
-    old_unsafe_quantizer = module._unsafe_requantization_input_quantizer
+    old_traits = old_runtime.owner_traits
 
     invalid_recipe = make_recipe(
         ("grouped-atomic", "invalid", mismatched_tensor_type),
@@ -2833,9 +2831,7 @@ def test_grouped_candidate_validation_is_atomic(mismatched_tensor_type):
     assert module.fp8_meta["scaling_bwd"] is old_backward_state
     assert module.quantizers["scaling_fwd"] is old_forward_quantizers
     assert module.quantizers["scaling_bwd"] is old_backward_quantizers
-    assert module._validated_quantizer_generations is old_validated_generations
-    assert module._delayed_scaling_input_quantizer is old_delayed_quantizer
-    assert module._unsafe_requantization_input_quantizer is old_unsafe_quantizer
+    assert old_runtime.owner_traits is old_traits
 
     replacement_recipe = make_recipe(
         ("grouped-atomic", "replacement", mismatched_tensor_type),
@@ -2843,21 +2839,12 @@ def test_grouped_candidate_validation_is_atomic(mismatched_tensor_type):
         unsafe_inputs=True,
     )
     update = _prepare_runtime_update(module, replacement_recipe, num_gemms=2)
-    assert module._validated_quantizer_generations is old_validated_generations
-    assert module._delayed_scaling_input_quantizer is old_delayed_quantizer
-    assert module._unsafe_requantization_input_quantizer is old_unsafe_quantizer
+    # Planning derives traits for the candidate without touching the active runtime.
+    assert old_runtime.owner_traits is old_traits
     assert module._apply_quantization_update(update)  # pylint: disable=protected-access
     replacement_runtime = module._quantization_runtime  # pylint: disable=protected-access
     assert replacement_runtime is not old_runtime
-    assert (
-        module._validated_quantizer_generations["scaling_fwd"]
-        is replacement_runtime.forward_quantizers
-    )
-    assert (
-        module._validated_quantizer_generations["scaling_bwd"]
-        is replacement_runtime.backward_quantizers
-    )
-    assert module._delayed_scaling_input_quantizer is None
-    assert (
-        module._unsafe_requantization_input_quantizer is replacement_runtime.forward_quantizers[0]
-    )
+    traits = replacement_runtime.owner_traits
+    assert traits is not old_traits
+    assert traits.delayed_scaling_input_quantizer is None
+    assert traits.unsafe_requantization_input_quantizer is replacement_runtime.forward_quantizers[0]

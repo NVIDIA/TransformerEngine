@@ -1317,7 +1317,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         validation_result: Any = None,
     ) -> None:
         """Publish a validated replacement runtime and its compatibility views."""
-        del validation_result
+        # Owner-derived state lives on the runtime, so it cannot outlive it.
+        candidate.owner_traits = validation_result
         recipe = candidate.recipe
         forward_state = candidate.forward_state
         backward_state = candidate.backward_state

@@ -5500,30 +5500,161 @@ class TestHybridGroupedLinearValidation:
                 operand_name="input",
             )
 
-    def test_builtin_recipe_skips_grouped_quantizer_validation(self, monkeypatch):
-        def unexpected_validation(*_args, **_kwargs):
-            pytest.fail("built-in recipes must not run grouped-quantizer validation")
+    def test_bf16_forward_after_quantized_forward_has_no_stale_classification(self):
+        """Grouped traits die with the runtime, so the high-precision path is clean."""
+        torch.manual_seed(1234)
+        common = dict(bias=False, params_dtype=torch.bfloat16, save_original_input=True)
+        model = GroupedLinear(2, 128, 128, **common).cuda()
+        reference = GroupedLinear(2, 128, 128, **common).cuda()
+        with torch.no_grad():
+            for i in range(2):
+                getattr(reference, f"weight{i}").copy_(getattr(model, f"weight{i}"))
 
-        monkeypatch.setattr(
-            split_quantization,
-            "validate_grouped_quantizer_list",
-            unexpected_validation,
-        )
+        m_splits = torch.tensor([64, 64], dtype=torch.int64)
+        warmup = torch.randn(128, 128, dtype=torch.bfloat16, device="cuda")
+        with torch.no_grad(), autocast(enabled=True, recipe=recipe.DelayedScaling()):
+            model(warmup, m_splits)
+        assert model._quantization_runtime.owner_traits is not None
+
+        # A high-precision training step must not read the quantized run's
+        # classification, and must match a module that never saw a recipe.
+        def step(module):
+            inp = torch.randn(128, 128, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+            torch.manual_seed(99)
+            out = module(inp, m_splits)
+            out.backward(torch.ones_like(out))
+            return inp.grad, [getattr(module, f"weight{i}").grad for i in range(2)]
+
+        torch.manual_seed(7)
+        actual_input_grad, actual_weight_grads = step(model)
+        torch.manual_seed(7)
+        expected_input_grad, expected_weight_grads = step(reference)
+
+        torch.testing.assert_close(actual_input_grad, expected_input_grad, rtol=0.0, atol=0.0)
+        for actual, expected in zip(actual_weight_grads, expected_weight_grads):
+            torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
+
+    def test_grouped_tensor_recipe_is_rejected_before_any_state_changes(self):
+        """The device/recipe half of the grouped-tensor check runs at validation."""
+        if not fp8_block_scaling_available:
+            pytest.skip(f"FP8 block scaling: {reason_for_no_fp8_block_scaling}")
+        from transformer_engine.pytorch.utils import get_device_compute_capability
+
+        if not (10, 0) <= get_device_compute_capability() <= (11, 0):
+            pytest.skip("the grouped-tensor block-scaling restriction is Blackwell-only")
+
         model = GroupedLinear(
-            2,
-            128,
-            128,
-            bias=False,
-            params_dtype=torch.bfloat16,
+            2, 128, 128, bias=False, params_dtype=torch.bfloat16, use_grouped_tensor=True
         ).cuda()
         tensor = torch.randn(128, 128, dtype=torch.bfloat16, device="cuda")
+        m_splits = torch.tensor([64, 64], dtype=torch.int64, device="cuda")
+        with torch.no_grad(), autocast(enabled=True, recipe=recipe.MXFP8BlockScaling()):
+            model(tensor, m_splits)
+        active_runtime = model._quantization_runtime
+
+        with pytest.raises(RuntimeError, match="does not support the FP8 block-scaling recipe"):
+            te.apply_recipe(model, recipe.Float8BlockScaling())
+        assert model._quantization_runtime is active_runtime
+
+    def test_packed_grouped_storage_rejects_unsupported_quantizers(self):
+        """One owner of the packed-storage contract, stated as an allowlist."""
+        from transformer_engine.pytorch.tensor.storage.grouped_tensor_storage import (
+            GroupedTensorStorage,
+        )
+
+        for unsupported in (IdentityQuantizer(), _make_hybrid_quantizer_fp8_row_fp4_col()):
+            with pytest.raises(NotImplementedError, match="GroupedTensorStorage does not support"):
+                GroupedTensorStorage.make_grouped_tensor(
+                    2,
+                    None,
+                    None,
+                    64,
+                    64,
+                    quantizer=unsupported,
+                    device="cuda",
+                    dtype=torch.bfloat16,
+                )
+        # A supported quantizer is allowed through the same gate.
+        GroupedTensorStorage.make_grouped_tensor(
+            2,
+            None,
+            None,
+            64,
+            64,
+            quantizer=_make_fp8_quantizer(),
+            device="cuda",
+            dtype=torch.bfloat16,
+        )
+
+    @staticmethod
+    def _track_validation(monkeypatch):
+        """Record every grouped-operand validation call."""
+        real_validate = split_quantization.validate_grouped_quantizer_list
+        calls = []
+
+        def tracked(quantizers, *, operand_name="operand"):
+            calls.append(operand_name)
+            return real_validate(quantizers, operand_name=operand_name)
+
+        monkeypatch.setattr(split_quantization, "validate_grouped_quantizer_list", tracked)
+        return calls
+
+    @pytest.mark.parametrize(
+        "make_recipe,expected",
+        [
+            pytest.param(recipe.DelayedScaling, [], id="builtin-delayed"),
+            pytest.param(recipe.Float8CurrentScaling, [], id="builtin-current"),
+            pytest.param(
+                lambda: recipe.CustomRecipe(
+                    qfactory=delayed_scaling_factory,
+                    qfactory_key=("grouped-validation-count", 1),
+                ),
+                ["grad_output", "input", "weight"],
+                id="custom",
+            ),
+        ],
+    )
+    def test_only_custom_recipes_pay_for_grouped_operand_validation(
+        self, monkeypatch, make_recipe, expected
+    ):
+        """Built-in recipes are homogeneous by construction, so they skip the scan.
+
+        A CustomRecipe checks input, weight and grad_output exactly once per
+        commit; steady state revalidates nothing either way.
+        """
+        calls = self._track_validation(monkeypatch)
+        model = GroupedLinear(2, 128, 128, bias=False, params_dtype=torch.bfloat16).cuda()
+        tensor = torch.randn(128, 128, dtype=torch.bfloat16, device="cuda")
         m_splits = torch.tensor([64, 64], dtype=torch.int64)
+        active = make_recipe()
 
-        with torch.no_grad(), autocast(enabled=True, recipe=recipe.DelayedScaling()):
+        with torch.no_grad(), autocast(enabled=True, recipe=active):
             model(tensor, m_splits)
+        assert sorted(calls) == expected
+
+        for grad_mode in (torch.no_grad, torch.enable_grad):
+            with grad_mode(), autocast(enabled=True, recipe=active):
+                model(tensor, m_splits)
+        assert sorted(calls) == expected
+
+    def test_steady_state_forward_does_not_query_grad_mode_for_validation(self, monkeypatch):
+        """The deleted generation guard was the only steady-state grad-mode query."""
+        model = GroupedLinear(2, 128, 128, bias=False, params_dtype=torch.bfloat16).cuda()
+        tensor = torch.randn(128, 128, dtype=torch.bfloat16, device="cuda")
+        m_splits = torch.tensor([64, 64], dtype=torch.int64)
+        active = recipe.DelayedScaling()
+
+        with torch.no_grad(), autocast(enabled=True, recipe=active):
             model(tensor, m_splits)
 
-    def test_validation_runs_only_with_quantizer_generation(self, monkeypatch):
+        calls = self._track_validation(monkeypatch)
+        with torch.no_grad(), autocast(enabled=True, recipe=active):
+            model._get_quantizers()
+        assert not calls
+
+    def test_runtime_traits_are_replaced_atomically_with_the_runtime(self, monkeypatch):
+        """Traits live on the runtime, so a rejected candidate leaves them alone."""
+
         def make_qfactory(columnwise_source):
             def qfactory(_role):
                 return HybridQuantizer(
@@ -5541,59 +5672,22 @@ class TestHybridGroupedLinearValidation:
         m_splits = torch.tensor([64, 64], dtype=torch.int64)
         original_recipe = recipe.CustomRecipe(qfactory=make_qfactory("original"))
 
-        real_validate = split_quantization.validate_grouped_quantizer_list
-        validation_calls = []
-
-        def tracked_validate(quantizers, *, operand_name="operand"):
-            validation_calls.append((operand_name, id(quantizers[0])))
-            return real_validate(quantizers, operand_name=operand_name)
-
-        monkeypatch.setattr(
-            split_quantization,
-            "validate_grouped_quantizer_list",
-            tracked_validate,
-        )
-
+        calls = self._track_validation(monkeypatch)
         with torch.no_grad(), autocast(enabled=True, recipe=original_recipe):
             model(tensor, m_splits)
-        first_call_count = len(validation_calls)
-        first_generation = model._validated_quantizer_generations["scaling_fwd"]
-        assert first_call_count > 0
-        # Candidate validation covers both directions before the commit, so the
-        # first forward validates the backward operand too, whatever the grad mode.
-        assert {name for name, _ in validation_calls} == {"input", "weight", "grad_output"}
+        assert sorted(calls) == ["grad_output", "input", "weight"]
+        first_runtime = model._quantization_runtime
+        first_traits = first_runtime.owner_traits
+        assert first_traits is not None
 
-        with torch.no_grad(), autocast(enabled=True, recipe=original_recipe):
-            model(tensor, m_splits)
-        assert len(validation_calls) == first_call_count
-        assert model._validated_quantizer_generations["scaling_fwd"] is first_generation
-
-        # Selecting quantizers with gradients enabled hits the O(1) generation
-        # guard: the committed runtime already recorded both generations, so
-        # nothing is revalidated. Do not run a full forward here: this validation
-        # test intentionally uses a columnwise-only configuration that is not
-        # supported by the split-quantization kernel.
-        with torch.enable_grad(), autocast(enabled=True, recipe=original_recipe):
-            model._get_quantizers()
-        assert len(validation_calls) == first_call_count
-        assert (
-            model._validated_quantizer_generations["scaling_bwd"] is model.quantizers["scaling_bwd"]
-        )
-
-        def unexpected_grad_mode_query():
-            pytest.fail("cached validation must not query grad mode")
-
-        with monkeypatch.context() as context:
-            context.setattr(torch, "is_grad_enabled", unexpected_grad_mode_query)
-            model._validate_quantizer_generation(False)
-
+        # A supported rebuild replaces runtime and traits together.
         rebuilt_recipe = recipe.CustomRecipe(qfactory=make_qfactory("rowwise_dequantized"))
         with torch.no_grad(), autocast(enabled=True, recipe=rebuilt_recipe):
             model(tensor, m_splits)
-        rebuilt_generation = model._validated_quantizer_generations["scaling_fwd"]
-        assert len(validation_calls) > first_call_count
-        assert rebuilt_generation is not first_generation
-        assert rebuilt_generation[0].columnwise_source == "rowwise_dequantized"
+        rebuilt_runtime = model._quantization_runtime
+        assert rebuilt_runtime is not first_runtime
+        assert rebuilt_runtime.owner_traits is not first_traits
+        assert model.quantizers["scaling_fwd"][0].columnwise_source == "rowwise_dequantized"
 
         input_count = 0
 
@@ -5613,27 +5707,18 @@ class TestHybridGroupedLinearValidation:
             qfactory=mixed_source_qfactory,
             qfactory_key=("test_mixed_columnwise_sources", 1),
         )
-        # A failed candidate is neither committed nor marked validated. The
-        # active runtime stays behind the requested revision, so each retry
-        # prepares and validates a fresh candidate.
-        rebuilt_runtime = model._quantization_runtime
-        rebuilt_backward_generation = model._validated_quantizer_generations["scaling_bwd"]
-        rebuilt_delayed_quantizer = model._delayed_scaling_input_quantizer
-        rebuilt_unsafe_quantizer = model._unsafe_requantization_input_quantizer
-        failed_validation_call_count = len(validation_calls)
+        # A failed candidate is neither committed nor marked validated, so each
+        # retry prepares and validates a fresh candidate.
+        rebuilt_traits = rebuilt_runtime.owner_traits
+        call_count = len(calls)
         for _ in range(2):
             with pytest.raises(ValueError, match="mixed columnwise source policies"):
                 with torch.no_grad(), autocast(enabled=True, recipe=mixed_recipe):
                     model(tensor, m_splits)
             assert model._quantization_runtime is rebuilt_runtime
-            assert model._validated_quantizer_generations["scaling_fwd"] is rebuilt_generation
-            assert (
-                model._validated_quantizer_generations["scaling_bwd"] is rebuilt_backward_generation
-            )
-            assert model._delayed_scaling_input_quantizer is rebuilt_delayed_quantizer
-            assert model._unsafe_requantization_input_quantizer is rebuilt_unsafe_quantizer
-            assert len(validation_calls) > failed_validation_call_count
-            failed_validation_call_count = len(validation_calls)
+            assert rebuilt_runtime.owner_traits is rebuilt_traits
+            assert len(calls) > call_count
+            call_count = len(calls)
 
         # Stale invalid recipe metadata must not affect the non-quantized path.
         with torch.no_grad():

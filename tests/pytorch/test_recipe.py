@@ -712,9 +712,7 @@ def test_current_scaling_owner_configuration_paths_preserve_numerics_and_traits(
                 "grad_input": 1,
             },
             _num_fp8_tensors_per_gemm={"fwd": 3, "bwd": 2},
-            _validated_quantizer_generations={},
-            _delayed_scaling_input_quantizer=None,
-            _unsafe_requantization_input_quantizer=None,
+            use_grouped_tensor=False,
         )
         GroupedLinear.set_meta_tensor(grouped, True, recipe)
         GroupedLinear.set_meta_tensor(grouped, False, recipe)
