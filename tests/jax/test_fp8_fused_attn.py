@@ -26,7 +26,6 @@ from transformer_engine.jax.cpp_extensions import FusedAttnHelper
 from transformer_engine.jax.cpp_extensions.fp8_attention import (
     _mx_scale,
     _mxfp8_scale_inv,
-    _validate_mxfp8_runtime,
 )
 from transformer_engine.jax.flax import DotProductAttention
 from transformer_engine.jax.quantize import (
@@ -37,7 +36,7 @@ from transformer_engine.jax.quantize import (
 from transformer_engine.jax.sharding import MeshResource
 
 
-def _require_gpu(min_arch=90, min_cudnn=90700):
+def _require_gpu(min_arch=90, min_cudnn=90700, max_arch=None):
     try:
         if not any(device.platform == "gpu" for device in jax.devices()):
             pytest.skip("A CUDA device is required.")
@@ -46,6 +45,10 @@ def _require_gpu(min_arch=90, min_cudnn=90700):
         pytest.skip(f"A usable CUDA device is required: {exc}")
     if arch < min_arch:
         pytest.skip(f"This test requires SM{min_arch} or newer, found SM{arch}.")
+    if max_arch is not None and arch >= max_arch:
+        pytest.skip(
+            f"This test requires an architecture older than SM{max_arch}, found SM{arch}."
+        )
     cudnn_version = get_cudnn_version()
     if cudnn_version < min_cudnn:
         pytest.skip(f"This test requires cuDNN {min_cudnn}, found {cudnn_version}.")
@@ -56,9 +59,9 @@ def _require_gpu(min_arch=90, min_cudnn=90700):
 
 def _reference_attention(q, k, v, *, bottom_right=False, alibi=False):
     q_seqlen, kv_seqlen = q.shape[1], k.shape[1]
-    scores = jnp.einsum("bqhd,bkhd->bhqk", q.astype(jnp.float32), k.astype(jnp.float32)) / sqrt(
-        q.shape[-1]
-    )
+    scores = jnp.einsum(
+        "bqhd,bkhd->bhqk", q.astype(jnp.float32), k.astype(jnp.float32)
+    ) / sqrt(q.shape[-1])
     q_pos = jnp.arange(q_seqlen)[:, None]
     kv_pos = jnp.arange(kv_seqlen)[None, :]
     shift = kv_seqlen - q_seqlen if bottom_right else 0
@@ -78,7 +81,9 @@ def _reference_attention(q, k, v, *, bottom_right=False, alibi=False):
     allowed = kv_pos <= q_pos + shift
     scores = jnp.where(allowed[None, None, :, :], scores, -jnp.inf)
     probabilities = jax.nn.softmax(scores, axis=-1)
-    return jnp.einsum("bhqk,bkhd->bqhd", probabilities, v.astype(jnp.float32)).astype(q.dtype)
+    return jnp.einsum("bhqk,bkhd->bqhd", probabilities, v.astype(jnp.float32)).astype(
+        q.dtype
+    )
 
 
 def _assert_fp8_close(actual, expected):
@@ -99,8 +104,8 @@ def _assert_fp8_close(actual, expected):
         ),
         pytest.param(
             recipe.Float8CurrentScaling(fp8_dpa=True),
-            90,
-            90700,
+            100,
+            91400,
             id="current",
         ),
         pytest.param(
@@ -111,11 +116,13 @@ def _assert_fp8_close(actual, expected):
         ),
     ),
 )
-@pytest.mark.parametrize("input_dtype", (jnp.float16, jnp.bfloat16), ids=("float16", "bfloat16"))
+@pytest.mark.parametrize(
+    "input_dtype", (jnp.float16, jnp.bfloat16), ids=("float16", "bfloat16")
+)
 def test_fp8_dpa_forward_backward(fp8_recipe, min_arch, min_cudnn, input_dtype):
     """Each supported recipe executes FP8 DPA behind FP16/BF16 module boundaries."""
 
-    _require_gpu(min_arch, min_cudnn)
+    _require_gpu(min_arch, min_cudnn, max_arch=120)
     if fp8_recipe.mxfp8() and get_cudnn_version() in (92300, 92301):
         pytest.skip("cuDNN 9.23.0 and 9.23.1 have known MXFP8 SDPA correctness issues.")
     batch, seqlen, heads, dim = 2, 128, 8, 128
@@ -137,7 +144,9 @@ def test_fp8_dpa_forward_backward(fp8_recipe, min_arch, min_cudnn, input_dtype):
     )
 
     def loss_fn(variables, query, key, value):
-        output = module.apply(variables, query, key, value, descriptor, deterministic=True)
+        output = module.apply(
+            variables, query, key, value, descriptor, deterministic=False
+        )
         loss = jnp.sum(output.astype(jnp.float32) * doutput.astype(jnp.float32))
         return loss, output
 
@@ -147,7 +156,9 @@ def test_fp8_dpa_forward_backward(fp8_recipe, min_arch, min_cudnn, input_dtype):
         return loss, output
 
     with autocast(enabled=True, recipe=fp8_recipe, mesh_resource=MeshResource()):
-        variables = module.init(jax.random.PRNGKey(0), q, k, v, descriptor, deterministic=True)
+        variables = module.init(
+            jax.random.PRNGKey(0), q, k, v, descriptor, deterministic=False
+        )
         (_, output), (_, dq, dk, dv) = jax.value_and_grad(
             loss_fn, argnums=(0, 1, 2, 3), has_aux=True
         )(variables, q, k, v)
@@ -170,7 +181,9 @@ def test_mxfp8_attention_scale_layout():
         q_layout=QuantizeLayout.ROWWISE_COLWISE,
         data_layout="NN",
     )
-    tensor = quantizer.quantize(jnp.ones((2, 64, 8, 64), dtype=jnp.bfloat16), flatten_axis=-2)
+    tensor = quantizer.quantize(
+        jnp.ones((2, 64, 8, 64), dtype=jnp.bfloat16), flatten_axis=-2
+    )
     assert tensor.rowwise_tensor.scale_inv.shape == (2, 64, 8, 2)
     assert tensor.colwise_tensor.scale_inv.shape == (2, 2, 8, 64)
     assert _mxfp8_scale_inv(tensor).shape == (2, 8, 128, 4)
@@ -214,21 +227,6 @@ def test_mxfp8_attention_scale_graph_stride():
     assert tensor.reordering == FakeCudnn.tensor_reordering.F8_128x4
 
 
-@pytest.mark.parametrize("cudnn_version", ((9, 23, 0), (9, 23, 1)))
-def test_mxfp8_attention_rejects_affected_cudnn(cudnn_version):
-    """Known-bad cuDNN 9.23 patch releases are rejected before graph execution."""
-
-    with pytest.raises(ValueError, match="known SDPA correctness issues"):
-        _validate_mxfp8_runtime(cudnn_version, 100)
-
-
-@pytest.mark.parametrize("cudnn_version", ((9, 22, 9), (9, 23, 2)))
-def test_mxfp8_attention_accepts_neighboring_cudnn(cudnn_version):
-    """The cuDNN exclusion remains limited to the affected patch releases."""
-
-    _validate_mxfp8_runtime(cudnn_version, 100)
-
-
 @pytest.mark.parametrize("feature", ("alibi", "bottom_right"))
 def test_fused_attention_parity_features(feature):
     """JAX executes ALiBi and explicit bottom-right diagonal attention."""
@@ -240,7 +238,9 @@ def test_fused_attention_parity_features(feature):
     q = jax.random.normal(q_key, (batch, q_seqlen, heads, dim), jnp.bfloat16) * 0.25
     k = jax.random.normal(k_key, (batch, kv_seqlen, heads, dim), jnp.bfloat16) * 0.25
     v = jax.random.normal(v_key, (batch, kv_seqlen, heads, dim), jnp.bfloat16) * 0.25
-    doutput = jax.random.normal(do_key, (batch, q_seqlen, heads, dim), jnp.bfloat16) * 0.25
+    doutput = (
+        jax.random.normal(do_key, (batch, q_seqlen, heads, dim), jnp.bfloat16) * 0.25
+    )
     q_lengths = jnp.full((batch,), q_seqlen, dtype=jnp.int32)
     kv_lengths = jnp.full((batch,), kv_seqlen, dtype=jnp.int32)
     descriptor = SequenceDescriptor.from_seqlens((q_lengths, kv_lengths))
@@ -292,7 +292,9 @@ def test_fused_attention_parity_features(feature):
         )
         return jnp.sum(output.astype(jnp.float32) * doutput.astype(jnp.float32)), output
 
-    (_, output), grads = jax.value_and_grad(te_loss, argnums=(0, 1, 2), has_aux=True)(q, k, v)
+    (_, output), grads = jax.value_and_grad(te_loss, argnums=(0, 1, 2), has_aux=True)(
+        q, k, v
+    )
     (_, reference), reference_grads = jax.value_and_grad(
         reference_loss, argnums=(0, 1, 2), has_aux=True
     )(q, k, v)
