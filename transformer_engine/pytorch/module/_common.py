@@ -62,7 +62,8 @@ def _update_scale_buffers(
 ) -> None:
     """Merge observed scaling factors into checkpoint buffers."""
     for buffer_name, scale in scale_updates.items():
-        if scale is None:
+        if scale is None or torch.isnan(scale).any():
+            # Un-initialized scale. Ignore it.
             continue
         if activation_scale_decay > 0.0:
             observed_scale = scale.detach().float()
