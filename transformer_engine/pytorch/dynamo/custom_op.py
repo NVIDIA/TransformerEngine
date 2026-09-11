@@ -103,6 +103,7 @@ from typing import (
 import torch
 
 from torch._prims_common import make_contiguous_strides_for
+from torch.utils._pytree import tree_flatten, tree_unflatten
 
 from .tensor_spec import TensorSpec, to_tensor_spec
 from ..quantized_tensor import (
@@ -1313,20 +1314,13 @@ def register_custom_op(
     Both ops are two-tier, so ``QuantizedTensor`` subclass inputs pass through
     without dequantization.
 
-    Callable contracts:
+    Implementations return nested tuples/lists of tensors or None. Fake
+    implementations return the same structure with TensorSpec leaves. Forward
+    outputs must be fresh tensors; context saving remains the caller's job.
+    num_grad_inputs, if given, counts flattened backward result leaves.
 
-    * ``fwd_impl(fwd_args) -> (output, aux)`` -- ``aux`` is a tuple of fresh tensors
-    * ``fwd_fake_impl`` -- its data-free twin over :class:`TensorSpec`
-    * ``bwd_impl(bwd_args) -> tuple`` of gradients (``num_grad_inputs`` of them,
-      if given)
-    * ``bwd_fake_impl`` -- its data-free twin
-
-    Returns ``(forward_fn, backward_fn)``:
-
-    * ``forward_fn(fwd_args) -> (output, aux)`` -- ``aux`` contains only fresh
-      tensors produced by the custom op. The caller decides which tensors and
-      metadata to persist for backward.
-    * ``backward_fn(bwd_args) -> tuple`` of gradients.
+    Returns (forward_fn, backward_fn), preserving each implementation's result
+    structure, including per-basic-op extra outputs and gradients.
 
     Returns ``None`` if registration fails (recorded once), so callers can fall
     back to eager rather than breaking import.
@@ -1364,43 +1358,43 @@ def _register_custom_op_impl(
 
     def adapt_forward(impl):
         def wrapped(args):
-            result = impl(args)
-            if not isinstance(result, tuple) or len(result) != 2:
-                raise TypeError(
-                    "autograd-free fwd impl must return an (output, aux) tuple, got"
-                    f" {type(result).__name__}"
-                )
-            output, aux = result
-            return output, tuple(aux), None
+            values, _ = tree_flatten(impl(args))
+            return (*values, (), None)
 
         return wrapped
 
-    adapted_fwd_fake_impl = adapt_forward(fwd_fake_impl)
+    def adapt_backward(impl):
+        def wrapped(args):
+            values, _ = tree_flatten(impl(args))
+            return tuple(values)
+
+        return wrapped
+
     fwd_op = _register_forward_op(
         name=op_name,
         arg_type=fwd_arg_type,
         impl=adapt_forward(fwd_impl),
-        fake_impl=adapted_fwd_fake_impl,
+        fake_impl=adapt_forward(fwd_fake_impl),
     )
     bwd_op = _register_backward_op(
         name=f"{op_name}_backward",
         arg_type=bwd_arg_type,
-        impl=bwd_impl,
-        fake_impl=bwd_fake_impl,
+        impl=adapt_backward(bwd_impl),
+        fake_impl=adapt_backward(bwd_fake_impl),
         num_grad_inputs=num_grad_inputs,
     )
 
     def forward_fn(fwd_args):
-        out_plan, payload = _run_forward(fwd_op, adapted_fwd_fake_impl, fwd_args)
-        outputs = out_plan.user_outputs(payload)
-        aux = out_plan.saved_tensors(payload)
-        return outputs[0], tuple(aux)
+        spec_args = _spec_view(fwd_args, fwd_op.plan.tensor_field_names())
+        specs, structure = tree_flatten(fwd_fake_impl(spec_args))
+        out_plan = _OutputPlan.parse((*specs, (), None))
+        return tree_unflatten(out_plan.user_outputs(fwd_op(fwd_args)), structure)
 
     def backward_fn(bwd_args):
-        # Unlike the forward payload, each grad occupies exactly one slot
-        # (``_pack_bwd_result`` materializes a TensorSpec grad), so there is
-        # nothing to reassemble.
-        return tuple(_decode_none(t) for t in bwd_op(bwd_args))
+        spec_args = _spec_view(bwd_args, bwd_op.plan.tensor_field_names())
+        _, structure = tree_flatten(bwd_fake_impl(spec_args))
+        grads = [_decode_none(t) for t in bwd_op(bwd_args)]
+        return tree_unflatten(grads, structure)
 
     return forward_fn, backward_fn
 

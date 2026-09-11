@@ -166,24 +166,16 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             if next_op is not None:
                 next_op_input_quantizer = next_op.get_input_quantizer()
 
-            if use_custom_ops:
-                x = op.compiled_op_forward(
-                    basic_op_ctxs[basic_op_idxs[0]],
-                    x,
-                    prev_op_grad_output_quantizer=prev_op_grad_output_quantizer,
-                    next_op_input_quantizer=next_op_input_quantizer,
-                    **basic_op_kwargs[basic_op_idxs[0]],
-                )
-                fused_op_extra_outputs = [()]
-            else:
-                x, fused_op_extra_outputs = op.fuser_forward(
-                    [basic_op_ctxs[idx] for idx in basic_op_idxs],
-                    x,
-                    basic_op_extra_inputs=extra_inputs,
-                    prev_op_grad_output_quantizer=prev_op_grad_output_quantizer,
-                    next_op_input_quantizer=next_op_input_quantizer,
-                    basic_op_kwargs=[basic_op_kwargs[idx] for idx in basic_op_idxs],
-                )
+            compile_kwargs = {"use_custom_ops": True} if use_custom_ops else {}
+            x, fused_op_extra_outputs = op.fuser_forward(
+                [basic_op_ctxs[idx] for idx in basic_op_idxs],
+                x,
+                basic_op_extra_inputs=extra_inputs,
+                prev_op_grad_output_quantizer=prev_op_grad_output_quantizer,
+                next_op_input_quantizer=next_op_input_quantizer,
+                basic_op_kwargs=[basic_op_kwargs[idx] for idx in basic_op_idxs],
+                **compile_kwargs,
+            )
             if len(fused_op_extra_outputs) != len(basic_op_idxs):
                 raise RuntimeError(
                     f"Expected {type(op).__name__} to generate extra outputs for "
@@ -364,16 +356,13 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                                 channel_grad if output_grad is None else output_grad + channel_grad
                             )
             grad_extra_outputs = [basic_op_grad_extra_outputs[idx] for idx in basic_op_idxs]
-            if func_ctx.use_custom_ops:
-                dx, grad_params_one = op.compiled_op_backward(basic_op_ctxs[basic_op_idxs[0]], dx)
-                fused_op_grad_params = [grad_params_one]
-                fused_op_grad_extra_inputs = [()]
-            else:
-                dx, fused_op_grad_params, fused_op_grad_extra_inputs = op.fuser_backward(
-                    [basic_op_ctxs[idx] for idx in basic_op_idxs],
-                    dx,
-                    basic_op_grad_extra_outputs=grad_extra_outputs,
-                )
+            compile_kwargs = {"use_custom_ops": True} if func_ctx.use_custom_ops else {}
+            dx, fused_op_grad_params, fused_op_grad_extra_inputs = op.fuser_backward(
+                [basic_op_ctxs[idx] for idx in basic_op_idxs],
+                dx,
+                basic_op_grad_extra_outputs=grad_extra_outputs,
+                **compile_kwargs,
+            )
             for idx, dparams in zip(basic_op_idxs, fused_op_grad_params):
                 grad_params[idx] = dparams
                 basic_op_ctxs[idx].saved_tensors = None
