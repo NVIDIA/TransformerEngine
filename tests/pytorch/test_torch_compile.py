@@ -2355,312 +2355,244 @@ def test_te_linear_dynamic_shapes():
 
 
 @dataclasses.dataclass(slots=True)
-class _ScaleFwdArgs:
-    """Flat, ``self``-free inputs to the test operation's forward."""
-
+class _AffineFwdArgs:
     input_: torch.Tensor
-    scale: torch.Tensor
+    weight: torch.Tensor
+    gain: float = 1.0
+    offset: Union[torch.Tensor, QuantizedTensorStorage] = None
 
 
 @dataclasses.dataclass(slots=True)
-class _ScaleBwdArgs:
-    """Flat inputs to the test operation's backward."""
+class _AffineBwdArgs:
+    grad_output: torch.Tensor
+    input_: torch.Tensor
+    weight: torch.Tensor
+    gain: float
 
-    grad_output: torch.Tensor = None
-    saved_input: torch.Tensor = None
-    scale: torch.Tensor = None
 
+class _AffineOp(BasicOperation):
+    """Learnable scale with read-only gain and offset kwargs."""
 
-class _ScaleOp(BasicOperation):
-    """Test-only operation: multiply by a learnable scalar.
+    fwd_args_type = _AffineFwdArgs
+    bwd_args_type = _AffineBwdArgs
+    fwd_kwarg_names = ("gain", "offset")
 
-    Exists so the fuser's compiled path can be exercised without depending on
-    which real operations happen to have a custom op. It is the
-    smallest operation that still has a parameter gradient and a saved tensor.
-    """
-
-    fwd_args_type = _ScaleFwdArgs
-    bwd_args_type = _ScaleBwdArgs
-
-    def __init__(self, *, device: str = "cuda", dtype: torch.dtype = torch.bfloat16) -> None:
+    def __init__(self, weight=2.0, dtype=torch.float32):
         super().__init__()
-        self.scale = torch.nn.Parameter(torch.full((), 2.0, device=device, dtype=dtype))
+        self.weight = torch.nn.Parameter(torch.tensor(weight, dtype=dtype, device="cuda"))
 
     @classmethod
     def forward_compute(cls, args):
-        return args.input_ * args.scale, [()], ()
-
-    @classmethod
-    def forward_fake(cls, args):
-        x = args.input_
-        return TensorSpec(shape=tuple(x.shape), dtype=x.dtype, device=x.device), [()], ()
-
-    @classmethod
-    def backward_compute(cls, args):
-        dy = args.grad_output
-        return dy * args.scale, [((dy * args.saved_input).sum(),)], [()]
-
-    @classmethod
-    def backward_fake(cls, args):
-        dy = args.grad_output
-        return (
-            TensorSpec(shape=tuple(dy.shape), dtype=dy.dtype, device=dy.device),
-            [(TensorSpec(shape=(), dtype=dy.dtype, device=dy.device),)],
-            [()],
-        )
-
-    def forward_setup_context(self, basic_op_ctxs, args, aux):
-        del aux
-        ctx = basic_op_ctxs[0]
-        ctx.save_for_backward(args.input_, args.scale)
-
-    def pack_forward_args(
-        self,
-        basic_op_ctxs,
-        input_,
-        *,
-        basic_op_extra_inputs,
-        prev_op_grad_output_quantizer,
-        next_op_input_quantizer,
-        basic_op_kwargs,
-    ):
-        return _ScaleFwdArgs(input_=input_, scale=self.scale)
-
-    def pack_backward_args(self, basic_op_ctxs, grad_output, *, basic_op_grad_extra_outputs):
-        x, scale = basic_op_ctxs[0].saved_tensors
-        return _ScaleBwdArgs(grad_output=grad_output, saved_input=x, scale=scale)
-
-
-class _BackwardScalePair(te.ops.FusedOperation):
-    """Backward-only fusion for the compile gate test."""
-
-    def fuser_backward(self, basic_op_ctxs, grad_output, **unused):
-        dx, grad_params_1, _ = self.basic_ops[1].fuser_backward(
-            [basic_op_ctxs[1]], grad_output, basic_op_grad_extra_outputs=[()]
-        )
-        dx, grad_params_0, _ = self.basic_ops[0].fuser_backward(
-            [basic_op_ctxs[0]], dx, basic_op_grad_extra_outputs=[()]
-        )
-        return dx, grad_params_0 + grad_params_1, [(), ()]
-
-
-def _fuse_backward_scale_pair(ops, **unused):
-    if len(ops) == 2 and all(isinstance(op, _ScaleOp) for op in ops):
-        return [_BackwardScalePair(ops)]
-    return ops
-
-
-@dataclasses.dataclass(slots=True)
-class _ScaleKwargsFwdArgs:
-    """Flat inputs to the kwarg-taking test operation's forward."""
-
-    input_: torch.Tensor
-    scale: torch.Tensor
-    extra_scale: float
-    offset: Union[torch.Tensor, QuantizedTensorStorage]
-
-
-@dataclasses.dataclass(slots=True)
-class _ScaleKwargsBwdArgs:
-    """Flat inputs to the kwarg-taking test operation's backward."""
-
-    grad_output: torch.Tensor = None
-    saved_input: torch.Tensor = None
-    scale: torch.Tensor = None
-    extra_scale: float = 1.0
-
-
-class _ScaleWithKwargsOp(BasicOperation):
-    """Test-only operation taking forward kwargs: a value and a tensor.
-
-    ``offset`` is declared as tensor-or-quantized, so a quantized kwarg crosses
-    the op boundary as its inner buffers. Neither kwarg carries a gradient --
-    that is what "read-only" means here.
-    """
-
-    fwd_args_type = _ScaleKwargsFwdArgs
-    bwd_args_type = _ScaleKwargsBwdArgs
-    fwd_kwarg_names = ("extra_scale", "offset")
-
-    def __init__(self, *, device: str = "cuda", dtype: torch.dtype = torch.bfloat16) -> None:
-        super().__init__()
-        self.scale = torch.nn.Parameter(torch.full((), 2.0, device=device, dtype=dtype))
-
-    @classmethod
-    def forward_compute(cls, args):
+        output = args.input_ * args.weight * args.gain
         offset = args.offset
-        if isinstance(offset, QuantizedTensor):
+        if isinstance(offset, QuantizedTensorStorage):
             offset = offset.dequantize()
-        out = args.input_ * args.scale * args.extra_scale + offset
-        return out, [()], ()
+        if offset is not None:
+            output = output + offset
+        return output, [()], ()
 
     @classmethod
     def forward_fake(cls, args):
-        x = args.input_
-        return TensorSpec(shape=tuple(x.shape), dtype=x.dtype, device=x.device), [()], ()
+        return args.input_, [()], ()
 
     @classmethod
     def backward_compute(cls, args):
         dy = args.grad_output
-        return (
-            dy * args.scale * args.extra_scale,
-            [((dy * args.saved_input).sum() * args.extra_scale,)],
-            [()],
-        )
+        return dy * args.weight * args.gain, [((dy * args.input_).sum() * args.gain,)], [()]
 
     @classmethod
     def backward_fake(cls, args):
         dy = args.grad_output
-        return (
-            TensorSpec(shape=tuple(dy.shape), dtype=dy.dtype, device=dy.device),
-            [(TensorSpec(shape=(), dtype=dy.dtype, device=dy.device),)],
-            [()],
-        )
+        return dy, [(TensorSpec(shape=(), dtype=dy.dtype, device=dy.device),)], [()]
+
+    def pack_forward_args(self, basic_op_ctxs, input_, *, basic_op_kwargs, **unused):
+        return _AffineFwdArgs(input_, self.weight, **basic_op_kwargs[0])
 
     def forward_setup_context(self, basic_op_ctxs, args, aux):
-        del aux
         ctx = basic_op_ctxs[0]
-        ctx.save_for_backward(args.input_, args.scale)
-        ctx.extra_scale = args.extra_scale
+        ctx.save_for_backward(args.input_, args.weight)
+        ctx.gain = args.gain
 
-    def pack_forward_args(
-        self,
-        basic_op_ctxs,
-        input_,
-        *,
-        basic_op_extra_inputs,
-        prev_op_grad_output_quantizer,
-        next_op_input_quantizer,
-        basic_op_kwargs,
-    ):
-        kwargs = basic_op_kwargs[0]
-        offset = kwargs.get("offset")
-        if offset is None:
-            offset = torch.zeros((), device=input_.device, dtype=input_.dtype)
-        return _ScaleKwargsFwdArgs(
-            input_=input_,
-            scale=self.scale,
-            extra_scale=kwargs.get("extra_scale", 1.0),
-            offset=offset,
-        )
-
-    def pack_backward_args(self, basic_op_ctxs, grad_output, *, basic_op_grad_extra_outputs):
+    def pack_backward_args(self, basic_op_ctxs, grad_output, **unused):
         ctx = basic_op_ctxs[0]
-        x, scale = ctx.saved_tensors
-        return _ScaleKwargsBwdArgs(
-            grad_output=grad_output,
-            saved_input=x,
-            scale=scale,
-            extra_scale=ctx.extra_scale,
-        )
+        return _AffineBwdArgs(grad_output, *ctx.saved_tensors, ctx.gain)
+
+
+class _BackwardAffinePair(te.ops.FusedOperation):
+    def fuser_backward(self, basic_op_ctxs, grad_output, **unused):
+        grads = []
+        for op, ctx in reversed(list(zip(self.basic_ops, basic_op_ctxs))):
+            grad_output, params, _ = op.fuser_backward(
+                [ctx], grad_output, basic_op_grad_extra_outputs=[()]
+            )
+            grads.insert(0, params[0])
+        return grad_output, grads, [(), ()]
 
 
 @dataclasses.dataclass(slots=True)
-class _ScalePairFwdArgs:
+class _AffinePairFwdArgs:
     input_: torch.Tensor
-    scale0: torch.Tensor
-    scale1: torch.Tensor
-    extra_input: torch.Tensor = None
+    weight0: torch.Tensor
+    weight1: torch.Tensor
+    residual: torch.Tensor
 
 
 @dataclasses.dataclass(slots=True)
-class _ScalePairBwdArgs:
+class _AffinePairBwdArgs:
     grad_output: torch.Tensor
     input_: torch.Tensor
     intermediate: torch.Tensor
-    scale0: torch.Tensor
-    scale1: torch.Tensor
-    grad_extra_output: torch.Tensor = None
+    weight0: torch.Tensor
+    weight1: torch.Tensor
+    grad_extra_output: torch.Tensor
 
 
-class _ScalePair(te.ops.FusedOperation):
-    """Two scales, optionally with a residual input and squared intermediate output."""
+class _AffinePair(te.ops.FusedOperation):
+    """Two scales with a residual input and a squared intermediate output."""
 
-    fwd_args_type = _ScalePairFwdArgs
-    bwd_args_type = _ScalePairBwdArgs
+    fwd_args_type = _AffinePairFwdArgs
+    bwd_args_type = _AffinePairBwdArgs
 
     @classmethod
     def forward_compute(cls, args):
-        intermediate = args.input_ * args.scale0
-        output = intermediate * args.scale1
-        extras = ()
-        if args.extra_input is not None:
-            output = output + args.extra_input
-            extras = (intermediate.square(), None)
-        return output, [(), extras], (intermediate,)
+        intermediate = args.input_ * args.weight0
+        output = intermediate * args.weight1 + args.residual
+        return output, [(), (intermediate.square(), None)], (intermediate,)
 
     @classmethod
     def forward_fake(cls, args):
-        x = args.input_
-        spec = TensorSpec(shape=tuple(x.shape), dtype=x.dtype, device=x.device)
-        extras = (spec, None) if args.extra_input is not None else ()
-        return spec, [(), extras], (spec,)
+        return args.input_, [(), (args.input_, None)], (args.input_,)
 
     @classmethod
     def backward_compute(cls, args):
         dy = args.grad_output
-        du = dy * args.scale1
-        extras = ()
-        if args.grad_extra_output is not None:
-            du = du + 2 * args.intermediate * args.grad_extra_output
-            extras = (dy.clone(),)
+        du = dy * args.weight1 + 2 * args.intermediate * args.grad_extra_output
         return (
-            du * args.scale0,
+            du * args.weight0,
             [((du * args.input_).sum(),), ((dy * args.intermediate).sum(),)],
-            [(), extras],
+            [(), (dy.clone(),)],
         )
 
     @classmethod
     def backward_fake(cls, args):
         dy = args.grad_output
-        spec = TensorSpec(shape=tuple(dy.shape), dtype=dy.dtype, device=dy.device)
         scalar = TensorSpec(shape=(), dtype=dy.dtype, device=dy.device)
-        extras = (spec,) if args.grad_extra_output is not None else ()
-        return spec, [(scalar,), (scalar,)], [(), extras]
+        return dy, [(scalar,), (scalar,)], [(), (dy,)]
 
     def pack_forward_args(self, basic_op_ctxs, input_, *, basic_op_extra_inputs, **unused):
-        extras = basic_op_extra_inputs[1]
-        return _ScalePairFwdArgs(
+        return _AffinePairFwdArgs(
             input_,
-            self.basic_ops[0].scale,
-            self.basic_ops[1].scale,
-            extras[0] if extras else None,
+            self.basic_ops[0].weight,
+            self.basic_ops[1].weight,
+            basic_op_extra_inputs[1][0],
         )
 
     def forward_setup_context(self, basic_op_ctxs, args, aux):
-        basic_op_ctxs[0].save_for_backward(args.input_, args.scale0)
-        basic_op_ctxs[1].save_for_backward(aux[0], args.scale1)
+        basic_op_ctxs[0].save_for_backward(args.input_, args.weight0)
+        basic_op_ctxs[1].save_for_backward(aux[0], args.weight1)
 
     def pack_backward_args(self, basic_op_ctxs, grad_output, *, basic_op_grad_extra_outputs):
-        x, scale0 = basic_op_ctxs[0].saved_tensors
-        intermediate, scale1 = basic_op_ctxs[1].saved_tensors
-        extras = basic_op_grad_extra_outputs[1]
-        return _ScalePairBwdArgs(
-            grad_output, x, intermediate, scale0, scale1, extras[0] if extras else None
+        x, weight0 = basic_op_ctxs[0].saved_tensors
+        intermediate, weight1 = basic_op_ctxs[1].saved_tensors
+        return _AffinePairBwdArgs(
+            grad_output, x, intermediate, weight0, weight1, basic_op_grad_extra_outputs[1][0]
         )
 
 
+def _compile_with_graphs(fn):
+    graphs = []
+
+    def backend(graph, inputs):
+        graphs.append(graph)
+        return torch._dynamo.lookup_backend("inductor")(graph, inputs)
+
+    return torch.compile(fn, fullgraph=True, backend=backend), graphs
+
+
+def _assert_custom_ops(graphs, name, present=True):
+    targets = {
+        str(node.target).removesuffix(".default").removesuffix("_base")
+        for graph in graphs
+        for module in graph.modules()
+        if isinstance(module, torch.fx.GraphModule)
+        for node in module.graph.nodes
+        if node.op == "call_function"
+    }
+    for suffix in ("", "_backward"):
+        assert (f"transformer_engine_compile.{name}{suffix}" in targets) == present, targets
+
+
+def _check_ops(fn, model, x, dy, kwargs=None):
+    """Compare the pipeline with native PyTorch forward and autograd."""
+    params = tuple(model.parameters())
+    kwargs = kwargs or {}
+    offset = kwargs.get("offset", 0)
+    if isinstance(offset, QuantizedTensorStorage):
+        offset = offset.dequantize()
+    reference = x
+    for i, weight in enumerate(params):
+        reference = reference * weight
+        if i == 0:
+            reference = reference * kwargs.get("gain", 1.0) + offset
+    output = fn(x, op_kwargs={0: kwargs})
+    actual = output, torch.autograd.grad(output, (x, *params), dy)
+    expected = reference, torch.autograd.grad(reference, (x, *params), dy)
+    torch.testing.assert_close(actual, expected)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-@pytest.mark.parametrize("with_extras", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize(
+    "case,reason",
+    [
+        ("single", None),
+        ("multi", "several operations"),
+        ("backward_fusion", "backward fusion"),
+        ("legacy", "without a custom op"),
+    ],
+)
+def test_te_ops_pipeline(case, reason, dtype, monkeypatch):
+    torch._dynamo.reset()
+    if case == "backward_fusion":
+
+        def fuse(ops, **unused):
+            if len(ops) == 2 and all(isinstance(op, _AffineOp) for op in ops):
+                return [_BackwardAffinePair(ops)]
+            return ops
+
+        monkeypatch.setattr(OperationFuser, "backward_fusion_functions", [fuse])
+    ops = (
+        [te.ops.Identity()]
+        if case == "legacy"
+        else [_AffineOp(float(i + 2), dtype) for i in range(1 if case == "single" else 2)]
+    )
+    model = te.ops.Sequential(*ops)
+    compiled, graphs = _compile_with_graphs(model)
+    # Keep products exact in BF16 across eager and fused reductions.
+    x = (torch.randint(-8, 9, (8, 16), device="cuda").to(dtype) / 8).requires_grad_()
+    dy = torch.randint_like(x, -8, 9) / 8
+    with pytest.warns(UserWarning, match=reason) if reason else contextlib.nullcontext():
+        _check_ops(compiled, model, x, dy)
+    _check_ops(model, model, x, dy)
+    _assert_custom_ops(graphs, "_affineop", present=reason is None)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("use_custom_ops", [False, True])
-def test_te_ops_fused_compute_contract(with_extras, use_custom_ops):
+def test_te_ops_fused_compute_contract(use_custom_ops):
     """Exercise the shared interface directly; pipeline fusion stays gated under compile."""
     torch._dynamo.reset()
-    ops = [_ScaleOp(dtype=torch.float32), _ScaleOp(dtype=torch.float32)]
-    with torch.no_grad():
-        ops[1].scale.fill_(3.0)
-    fused = _ScalePair(ops)
+    fused = _AffinePair([_AffineOp(2.0), _AffineOp(3.0)])
     x = torch.randn(8, 16, device="cuda", requires_grad=True)
     residual = torch.randn_like(x, requires_grad=True)
-    dy = torch.randn_like(x)
-    dextra = torch.randn_like(x)
+    dy, dextra = torch.randn_like(x), torch.randn_like(x)
 
     def run(input_, extra_input, grad_output, grad_extra_output):
         ctxs = [OperationContext(), OperationContext()]
-        output, extra_outputs = fused.fuser_forward(
+        output, extras = fused.fuser_forward(
             ctxs,
             input_,
-            basic_op_extra_inputs=[(), (extra_input,) if with_extras else ()],
+            basic_op_extra_inputs=[(), (extra_input,)],
             prev_op_grad_output_quantizer=None,
             next_op_input_quantizer=None,
             basic_op_kwargs=[{}, {}],
@@ -2671,179 +2603,47 @@ def test_te_ops_fused_compute_contract(with_extras, use_custom_ops):
         grads = fused.fuser_backward(
             ctxs,
             grad_output,
-            basic_op_grad_extra_outputs=[(), (grad_extra_output, None) if with_extras else ()],
+            basic_op_grad_extra_outputs=[(), (grad_extra_output, None)],
             use_custom_ops=use_custom_ops,
         )
-        return output, extra_outputs, grads
+        return output, extras, grads
 
-    if use_custom_ops:
-        assert fused.compile_ops is not None
-        run = torch.compile(run, fullgraph=True)
-    with torch.no_grad():
-        output, extras, (dx, dparams, dextras) = run(x, residual, dy, dextra)
-
-    intermediate = x * ops[0].scale
-    reference = intermediate * ops[1].scale
-    loss = (reference * dy).sum()
-    if with_extras:
-        reference = reference + residual
-        loss = (reference * dy).sum() + (intermediate.square() * dextra).sum()
-    inputs = [x, ops[0].scale, ops[1].scale] + ([residual] if with_extras else [])
-    expected = torch.autograd.grad(loss, inputs)
-    torch.testing.assert_close(output, reference)
-    torch.testing.assert_close(dx, expected[0])
-    assert len(dparams) == 2 and all(len(group) == 1 for group in dparams)
-    torch.testing.assert_close(dparams[0][0], expected[1])
-    torch.testing.assert_close(dparams[1][0], expected[2])
-    assert extras[0] == () and dextras[0] == ()
-    if with_extras:
-        assert len(extras[1]) == 2 and extras[1][1] is None
-        torch.testing.assert_close(extras[1][0], intermediate.square())
-        torch.testing.assert_close(dextras[1][0], expected[3])
-    else:
-        assert extras[1] == () and dextras[1] == ()
-
-
-def _assert_sequential_matches_eager(make_model, base, op_kwargs_seq=(None,), *, graphs=None):
-    """Run a Sequential eagerly and compiled on identical inputs; compare both
-    the output and every parameter gradient.
-
-    Each pass gets its own freshly built model, so the compiled one is traced on
-    a first run: nothing has built the module groups, resolved the fusions or run
-    ``pre_first_fuser_forward`` on it beforehand. ``make_model`` must therefore
-    build deterministically identical models.
-
-    Several ``op_kwargs`` are run in order on the same pair of models, which is
-    what exercises Dynamo's guards on a kwarg value.
-    """
-    eager_model = make_model()
-    compiled_model = make_model()
-    backend = "inductor"
-    if graphs is not None:
-
-        def backend(graph, inputs):
-            graphs.append(graph)
-            return torch._dynamo.lookup_backend("inductor")(graph, inputs)
-
-    compiled = torch.compile(compiled_model, fullgraph=True, backend=backend)
-
-    for op_kwargs in op_kwargs_seq:
-        call_kwargs = {} if op_kwargs is None else {"op_kwargs": op_kwargs}
-
-        inp_eager = base.detach().clone().requires_grad_(True)
-        eager_model.zero_grad(set_to_none=True)
-        out_eager = eager_model(inp_eager, **call_kwargs)
-        out_eager.sum().backward()
-        ref_out = out_eager.detach().clone()
-        ref_igrad = inp_eager.grad.detach().clone()
-        ref_pgrads = [p.grad.detach().clone() for p in eager_model.parameters()]
-
-        inp_compiled = base.detach().clone().requires_grad_(True)
-        compiled_model.zero_grad(set_to_none=True)
-        out_compiled = compiled(inp_compiled, **call_kwargs).clone()
-        out_compiled.sum().backward()
-
-        torch.testing.assert_close(out_compiled, ref_out)
-        torch.testing.assert_close(inp_compiled.grad, ref_igrad)
-        for got, expected in zip(compiled_model.parameters(), ref_pgrads):
-            torch.testing.assert_close(got.grad, expected)
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_te_ops_single_op_group_compiles():
-    """``fullgraph=True`` over an ``OperationFuser`` group holding one operation.
-
-    The pipeline-level ``autograd.Function`` is traced as a higher-order op and
-    calls the operation's custom ops inside, so forward and backward both end up
-    in the graph.
-    """
-    torch._dynamo.reset()
-    base = torch.randn(32, 64, dtype=torch.bfloat16, device="cuda")
     graphs = []
-    _assert_sequential_matches_eager(lambda: te.ops.Sequential(_ScaleOp()), base, graphs=graphs)
-    targets = {
-        str(node.target).removesuffix(".default")
-        for graph in graphs
-        for module in graph.modules()
-        if isinstance(module, torch.fx.GraphModule)
-        for node in module.graph.nodes
-        if node.op == "call_function"
-    }
-    for name in ("_scaleop", "_scaleop_backward"):
-        assert targets & {
-            f"transformer_engine_compile.{name}",
-            f"transformer_engine_compile.{name}_base",
-        }, targets
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_te_ops_multi_op_group_uses_eager_implementations():
-    """A group of several operations is gated onto the eager implementations."""
-    torch._dynamo.reset()
-    base = torch.randn(32, 64, dtype=torch.bfloat16, device="cuda")
-    with pytest.warns(UserWarning, match="several operations"):
-        _assert_sequential_matches_eager(lambda: te.ops.Sequential(_ScaleOp(), _ScaleOp()), base)
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_te_ops_backward_fusion_uses_eager_implementations():
-    """A backward fusion prevents the group from using basic-op custom ops."""
-    te.ops.register_backward_fusion(_fuse_backward_scale_pair, prepend=True)
-    try:
-        base = torch.randn(32, 64, dtype=torch.bfloat16, device="cuda")
-        with pytest.warns(UserWarning, match="backward fusion"):
-            _assert_sequential_matches_eager(
-                lambda: te.ops.Sequential(_ScaleOp(), _ScaleOp()), base
-            )
-    finally:
-        OperationFuser.backward_fusion_functions.remove(_fuse_backward_scale_pair)
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_te_ops_unsupported_group_still_compiles_eagerly():
-    """An operation without a custom op runs its eager implementation.
-
-    Note that this is not a fallback: under ``fullgraph=True`` there is no
-    leaving the graph, so the pipeline is traced either way and only the choice
-    of implementation changes. That is why the tracing constraints -- no
-    mutation of anything from an enclosing scope -- have to hold on both paths.
-    """
-    torch._dynamo.reset()
-    assert te.ops.Identity().compile_unsupported_reason() is not None
-
-    base = torch.randn(32, 64, dtype=torch.bfloat16, device="cuda")
-    _assert_sequential_matches_eager(lambda: te.ops.Sequential(te.ops.Identity()), base)
+    if use_custom_ops:
+        run, graphs = _compile_with_graphs(run)
+    with torch.no_grad():
+        actual = run(x, residual, dy, dextra)
+    weight0, weight1 = tuple(fused.parameters())
+    intermediate = x * weight0
+    output, extra = intermediate * weight1 + residual, intermediate.square()
+    dx, dw0, dw1, dr = torch.autograd.grad(
+        (output, extra), (x, weight0, weight1, residual), (dy, dextra)
+    )
+    expected = output, [(), (extra, None)], (dx, [(dw0,), (dw1,)], [(), (dr,)])
+    torch.testing.assert_close(actual, expected)
+    _assert_custom_ops(graphs, "_affinepair", present=use_custom_ops)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 def test_te_ops_forward_kwargs_compile():
-    """A tensor forward kwarg reaches the operation through its custom op.
-
-    The tensor is quantized, so it crosses the op boundary as its inner buffers,
-    and it changes between calls, which a graph input absorbs without a
-    recompilation. The last call adds a value kwarg: that one is gated onto the
-    eager implementation, since Dynamo turns a changed scalar into a symbol that
-    cannot be carried as opaque config.
-    """
     torch._dynamo.reset()
+    model = te.ops.Sequential(_AffineOp())
+    compiled, graphs = _compile_with_graphs(model)
     quantizer = Float8CurrentScalingQuantizer(
-        fp8_dtype=tex.DType.kFloat8E4M3,
-        device=torch.device("cuda"),
+        fp8_dtype=tex.DType.kFloat8E4M3, device=torch.device("cuda")
     )
-
-    def offset(value):
-        return quantizer(torch.full((64,), value, dtype=torch.bfloat16, device="cuda"))
-
-    base = torch.randn(32, 64, dtype=torch.bfloat16, device="cuda")
-    _assert_sequential_matches_eager(
-        lambda: te.ops.Sequential(_ScaleWithKwargsOp()),
-        base,
-        op_kwargs_seq=(
-            {0: {"offset": offset(0.5)}},
-            {0: {"offset": offset(1.5)}},
-            # No quantized offset here: this call runs the eager implementation,
-            # which is traced directly, and dequantize() is not traceable.
-            {0: {"extra_scale": 3.0}},
-        ),
-    )
+    x = torch.randn(8, 16, device="cuda", requires_grad=True)
+    dy = torch.randn_like(x)
+    for i, value in enumerate((0.5, 0.5, 1.5, -0.5)):
+        offset = quantizer(torch.full((16,), value, device="cuda"))
+        _check_ops(compiled, model, x, dy, {"offset": offset})
+        if i == 1:
+            warmed_graph_count = len(graphs)
+        elif i > 1:
+            assert len(graphs) == warmed_graph_count, "Tensor kwarg triggered recompilation"
+    _assert_custom_ops(graphs, "_affineop")
+    with pytest.warns(UserWarning, match="non-tensor keyword arguments"):
+        for gain in (3.0, 5.0):
+            _check_ops(compiled, model, x, dy, {"gain": gain})
+    _assert_custom_ops(graphs[-1:], "_affineop", present=False)
