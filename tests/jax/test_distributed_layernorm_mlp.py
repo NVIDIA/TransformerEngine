@@ -337,6 +337,12 @@ class TestDistributedLayernormMLP:
     ):
         batch, seqlen, hidden_in = input_shape
         layernorm_type = "rmsnorm"
+        if activation_type == ("situ", "situ_linear"):
+            activation_params = {"beta1": 2.0, "beta2": 8.0}
+        elif activation_type == ("clamped_silu", "clamped_linear"):
+            activation_params = {"limit": 0.75, "alpha": 1.702, "glu_linear_offset": 0.5}
+        else:
+            activation_params = None
 
         rng = jax.random.PRNGKey(0)
         subkeys = jax.random.split(rng, 3)
@@ -353,6 +359,7 @@ class TestDistributedLayernormMLP:
                     layernorm_type=layernorm_type,
                     intermediate_dim=INTERMEDIATE,
                     activations=activation_type,
+                    activation_params=activation_params,
                     use_bias=use_bias,
                     return_layernorm_output=True,
                 )
@@ -372,6 +379,7 @@ class TestDistributedLayernormMLP:
                     layernorm_type=layernorm_type,
                     intermediate_dim=INTERMEDIATE,
                     activations=activation_type,
+                    activation_params=activation_params,
                     scale_axes=LN_SCALE_AXES,
                     ln_bias_axes=LN_BIAS_AXES,
                     kernel_axes_1=KERNEL_1_AXES,
@@ -431,7 +439,15 @@ class TestDistributedLayernormMLP:
 
     @pytest_parametrize_wrapper("input_shape", INPUT_SHAPE)
     @pytest_parametrize_wrapper("mesh_config", generate_fsdp_and_tpsp_configs())
-    @pytest_parametrize_wrapper("activation_type", [("gelu",), ("silu", "linear")])
+    @pytest_parametrize_wrapper(
+        "activation_type",
+        [
+            ("gelu",),
+            ("silu", "linear"),
+            ("clamped_silu", "clamped_linear"),
+            ("situ", "situ_linear"),
+        ],
+    )
     @pytest_parametrize_wrapper("dtype", DTYPES)
     @pytest_parametrize_wrapper("use_bias", [True, False])
     @pytest_parametrize_wrapper("with_jax_gemm", [False, True])

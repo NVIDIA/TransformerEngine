@@ -43,8 +43,14 @@ struct ClampedSwigluConfig {
   float glu_linear_offset;
 };
 
+struct SiTUGLUConfig {
+  float beta1;
+  float beta2;
+};
+
 struct ActivationConfig {
   ClampedSwigluConfig clamped_swiglu;
+  SiTUGLUConfig situglu;
 };
 
 struct GemmConfig {
@@ -236,9 +242,14 @@ XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(transformer_engine::jax::ClampedSwigluConf
                                       ::xla::ffi::StructMember<float>("alpha"),
                                       ::xla::ffi::StructMember<float>("glu_linear_offset"));
 
+XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(transformer_engine::jax::SiTUGLUConfig,
+                                      ::xla::ffi::StructMember<float>("beta1"),
+                                      ::xla::ffi::StructMember<float>("beta2"));
+
 XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
     transformer_engine::jax::ActivationConfig,
-    ::xla::ffi::StructMember<transformer_engine::jax::ClampedSwigluConfig>("clamped_swiglu"));
+    ::xla::ffi::StructMember<transformer_engine::jax::ClampedSwigluConfig>("clamped_swiglu"),
+    ::xla::ffi::StructMember<transformer_engine::jax::SiTUGLUConfig>("situglu"));
 
 XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
     transformer_engine::jax::GemmConfig,
