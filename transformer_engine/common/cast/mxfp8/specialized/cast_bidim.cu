@@ -496,7 +496,8 @@ constexpr int64_t kWideDeepClusterFrom = 4096;
 template <typename OType, int32_t COLS_PER_LANE, int32_t MIN_BLOCKS_PER_SM>
 void launch_tiled(const void *input, void *output_rowwise, void *scales_rowwise,
                   void *output_colwise, void *scales_colwise, int32_t rows, int32_t cols,
-                  int32_t scale_stride_rowwise, int32_t scale_stride_colwise, int32_t cluster_width, cudaStream_t stream) {
+                  int32_t scale_stride_rowwise, int32_t scale_stride_colwise, int32_t cluster_width,
+                  cudaStream_t stream) {
   constexpr int32_t kColsPerTile = THREADS_PER_WARP * COLS_PER_LANE;
   const dim3 grid(cols / kColsPerTile, rows / kRowsPerTile);
 
@@ -530,17 +531,17 @@ void launch_tiled(const void *input, void *output_rowwise, void *scales_rowwise,
   uint8_t *qcol = reinterpret_cast<uint8_t *>(output_colwise);
   uint8_t *scol = reinterpret_cast<uint8_t *>(scales_colwise);
 
-#define NVTE_LAUNCH_BIDIM(K_CONST)                                                            \
-  do {                                                                                        \
-    auto kernel = quantize_bidim_kernel<OType, COLS_PER_LANE, K_CONST, MIN_BLOCKS_PER_SM>;    \
-    if (cluster_x > 1) {                                                                      \
-      NVTE_CHECK_CUDA(cudaLaunchKernelEx(&config, kernel, in, qrow, srow, qcol, scol, cols,   \
-                                         scale_stride_rowwise, scale_stride_colwise));        \
-    } else {                                                                                  \
-      kernel<<<grid, kThreadsPerCta, 0, stream>>>(in, qrow, srow, qcol, scol, cols,           \
-                                                  scale_stride_rowwise, scale_stride_colwise);\
-      NVTE_CHECK_CUDA(cudaGetLastError());                                                    \
-    }                                                                                         \
+#define NVTE_LAUNCH_BIDIM(K_CONST)                                                             \
+  do {                                                                                         \
+    auto kernel = quantize_bidim_kernel<OType, COLS_PER_LANE, K_CONST, MIN_BLOCKS_PER_SM>;     \
+    if (cluster_x > 1) {                                                                       \
+      NVTE_CHECK_CUDA(cudaLaunchKernelEx(&config, kernel, in, qrow, srow, qcol, scol, cols,    \
+                                         scale_stride_rowwise, scale_stride_colwise));         \
+    } else {                                                                                   \
+      kernel<<<grid, kThreadsPerCta, 0, stream>>>(in, qrow, srow, qcol, scol, cols,            \
+                                                  scale_stride_rowwise, scale_stride_colwise); \
+      NVTE_CHECK_CUDA(cudaGetLastError());                                                     \
+    }                                                                                          \
   } while (0)
 
   switch (cols) {
