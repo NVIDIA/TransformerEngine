@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from enum import Enum
 import hashlib
 from typing import Optional, Tuple, Dict, Union, Sequence, Type, List
-from functools import reduce
+from functools import partial, reduce
 import operator
 import warnings
 
@@ -58,6 +58,7 @@ __all__ = [
     "update_collections",
     "apply_padding_to_scale_inv",
     "remove_padding_from_scale_inv",
+    "swizzle_mxfp8_scale",
     "NVTE_FP8_COLLECTION_NAME",
     "TensorSource",
 ]
@@ -67,6 +68,24 @@ _reason_for_no_scaling_mode = ""
 Collection = Union[Dict, FrozenDict]
 
 NVTE_FP8_COLLECTION_NAME = "fp8_metas"
+
+
+@partial(jax.jit, static_argnums=(1, 2))
+def swizzle_mxfp8_scale(scale_inv, flatten_axis, is_colwise):
+    """Convert a padded MXFP8 scale tensor to the F8_128x4 physical layout."""
+
+    original_shape = scale_inv.shape
+    shape_2d = (
+        reduce(operator.mul, original_shape[:flatten_axis], 1),
+        reduce(operator.mul, original_shape[flatten_axis:], 1),
+    )
+    if is_colwise:
+        scale_inv = jnp.transpose(scale_inv.reshape(shape_2d))
+        cols, rows = shape_2d
+    else:
+        rows, cols = shape_2d
+    reshaped = scale_inv.reshape(rows // 128, 4, 32, cols // 4, 4)
+    return jnp.transpose(reshaped, (0, 3, 2, 1, 4)).reshape(original_shape)
 
 
 def _check_delayed_scaling_fp8_support(gpu_arch) -> Tuple[bool, str]:

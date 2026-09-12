@@ -3,9 +3,6 @@
 # See LICENSE for license information.
 """cuDNN frontend score_mod fused attention helpers."""
 
-import hashlib
-import importlib
-import inspect
 import os
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
@@ -15,7 +12,45 @@ import jax.numpy as jnp
 import numpy as np
 from jax import ffi
 
-import transformer_engine_jax
+from transformer_engine.common.attention.score_mod import (
+    UncacheableScoreModKey,
+    is_uncacheable_score_mod_key,
+    score_mod_callback_cache_key,
+)
+
+from .cudnn_graph import (
+    GraphBinding,
+    SerializedGraph,
+    finalize_graph,
+    import_cudnn,
+    make_graph,
+    record_cache_event,
+    record_cache_lookup,
+)
+from .cudnn_graph import (
+    bshd_as_bhsd_dim_stride as _bshd_as_bhsd_dim_stride,
+)
+from .cudnn_graph import (
+    cudnn_data_type as _cudnn_data_type,
+)
+from .cudnn_graph import (
+    cudnn_data_type_from_name as _cudnn_data_type_from_name,
+)
+from .cudnn_graph import (
+    dtype_name as _dtype_name,
+)
+from .cudnn_graph import (
+    graph_tensor_from_aval as _graph_tensor_from_aval,
+)
+from .cudnn_graph import (
+    row_major_stride as _row_major_stride,
+)
+from .cudnn_graph import (
+    serialized_graph as make_serialized_graph,
+)
+from .cudnn_graph import (
+    shape_dtype as _shape_dtype,
+)
 
 __all__ = [
     "FusedAttnScoreModHelper",
@@ -110,103 +145,6 @@ class _ScoreModScalarSpec:
     stride: Tuple[int, ...] = (1, 1, 1, 1)
 
 
-class _UncacheableScoreModKey:
-    """Unique static key for callbacks that must not share compiled score_mod graphs."""
-
-    def __hash__(self):
-        return id(self)
-
-    def __eq__(self, other):
-        return self is other
-
-
-def _score_mod_key_is_uncacheable(key: Any) -> bool:
-    return isinstance(key, _UncacheableScoreModKey)
-
-
-def _freeze_score_mod_cache_key(value: Any) -> Any:
-    """Convert a user-provided score_mod graph key into a hashable structure."""
-    if _is_array_operand(value):
-        raise TypeError(
-            "score_mod_graph_cache_key() must not include tensors. Pass runtime tensors "
-            "through score_mod_tensors or score_mod_bprop_tensors instead."
-        )
-    if isinstance(value, Mapping):
-        items = (
-            (
-                _freeze_score_mod_cache_key(key),
-                _freeze_score_mod_cache_key(val),
-            )
-            for key, val in value.items()
-        )
-        return tuple(sorted(items, key=repr))
-    if isinstance(value, (list, tuple)):
-        return tuple(_freeze_score_mod_cache_key(item) for item in value)
-    if isinstance(value, (set, frozenset)):
-        items = (_freeze_score_mod_cache_key(item) for item in value)
-        return tuple(sorted(items, key=repr))
-    try:
-        hash(value)
-    except TypeError as exc:
-        raise TypeError(
-            "score_mod_graph_cache_key() must return a hashable value or a nested "
-            "combination of mapping/list/tuple/set values."
-        ) from exc
-    return value
-
-
-def _score_mod_explicit_cache_key(callback_owner: Any) -> Optional[Any]:
-    """Return a user-provided structural graph key for a score_mod callback."""
-    explicit_key = getattr(callback_owner, "score_mod_graph_cache_key", None)
-    if explicit_key is None:
-        return None
-    explicit_key = explicit_key() if callable(explicit_key) else explicit_key
-    return _freeze_score_mod_cache_key(explicit_key)
-
-
-def _score_mod_callback_cache_key(callback: Optional[Callable]) -> Any:
-    """Create a stable graph cache key for a score_mod callable.
-
-    Module-level functions are assumed to have stable topology. Stateful bound methods and
-    callable instances need an explicit score_mod_graph_cache_key(); otherwise their graphs
-    are left uncached to avoid reusing stale graphs after Python object address reuse.
-    """
-    if callback is None:
-        return None
-    self_obj = getattr(callback, "__self__", None)
-    func_obj = getattr(callback, "__func__", None)
-    if self_obj is not None and func_obj is not None:
-        explicit_key = _score_mod_explicit_cache_key(self_obj)
-        if explicit_key is None:
-            return _UncacheableScoreModKey()
-        return (
-            "bound_method",
-            type(self_obj),
-            func_obj.__module__,
-            func_obj.__qualname__,
-            explicit_key,
-        )
-
-    explicit_key = _score_mod_explicit_cache_key(callback)
-    if explicit_key is not None:
-        return (
-            "callable",
-            type(callback),
-            getattr(callback, "__module__", None),
-            getattr(callback, "__qualname__", None),
-            explicit_key,
-        )
-
-    if (
-        inspect.isfunction(callback)
-        and callback.__closure__ is None
-        and "<locals>" not in callback.__qualname__
-    ):
-        return ("function", callback.__module__, callback.__qualname__)
-
-    return _UncacheableScoreModKey()
-
-
 @dataclass(frozen=True)
 class _FusedAttnScoreModConfig:
     """Static configuration for cuDNN frontend score_mod SDPA graphs."""
@@ -254,19 +192,7 @@ class _FusedAttnScoreModConfig:
         )
 
 
-@dataclass(frozen=True)
-class _SerializedScoreModGraph:
-    """Serialized cuDNN frontend graph and static metadata for C++ execution."""
-
-    serialized_graph: bytes
-    graph_hash: Tuple[int, int]
-    cudnn_frontend_version: int
-    workspace_size: int
-    input_uids: np.ndarray
-    output_uids: np.ndarray
-    scalar_uids: np.ndarray
-    scalar_sizes: np.ndarray
-    scalar_values: np.ndarray
+_SerializedScoreModGraph = SerializedGraph
 
 
 # cuDNN frontend tensor UIDs are arbitrary, but assigning stable values makes serialized
@@ -288,35 +214,26 @@ _SCORE_MOD_BPROP_SCALAR_UID_BASE = 4000
 _score_mod_graph_cache: Dict[Tuple[Any, ...], _SerializedScoreModGraph] = {}
 
 
-def _row_major_stride(shape: Sequence[int]) -> Tuple[int, ...]:
-    stride = []
-    running = 1
-    for dim in reversed(tuple(shape)):
-        stride.append(running)
-        running *= dim
-    return tuple(reversed(stride))
-
-
-def _bshd_as_bhsd_dim_stride(shape: Sequence[int]) -> Tuple[Tuple[int, ...], Tuple[int, ...]]:
-    if len(shape) != 4:
-        raise ValueError(f"score_mod requires rank-4 BSHD tensors, got shape={shape}.")
-    batch, seqlen, heads, head_dim = tuple(shape)
-    return (
-        (batch, heads, seqlen, head_dim),
-        (seqlen * heads * head_dim, head_dim, heads * head_dim, 1),
-    )
-
-
-def _dtype_name(dtype) -> str:
-    return str(jnp.dtype(dtype))
-
-
 def _is_array_operand(value: Any) -> bool:
     return (
         hasattr(value, "shape")
         and hasattr(value, "dtype")
         and not isinstance(value, (bool, int, float, complex, np.generic))
     )
+
+
+def _score_mod_callback_cache_key(callback: Optional[Callable]) -> Any:
+    """Compatibility wrapper around the shared score-modification key policy."""
+
+    return score_mod_callback_cache_key(
+        callback,
+        is_array=_is_array_operand,
+        uncacheable_key_factory=UncacheableScoreModKey,
+    )
+
+
+def _score_mod_key_is_uncacheable(key: Any) -> bool:
+    return is_uncacheable_score_mod_key(key)
 
 
 def _scalar_to_spec(name: str, value: Any) -> _ScoreModScalarSpec:
@@ -405,44 +322,6 @@ def _make_fused_attn_score_mod_config(
     return config, tensor_operands, bprop_tensor_operands
 
 
-def _cudnn_data_type(cudnn, dtype):
-    dtype = jnp.dtype(dtype)
-    if dtype == jnp.float16:
-        return cudnn.data_type.HALF
-    if dtype == jnp.bfloat16:
-        return cudnn.data_type.BFLOAT16
-    if dtype == jnp.float32:
-        return cudnn.data_type.FLOAT
-    if dtype == jnp.float64:
-        return cudnn.data_type.DOUBLE
-    if dtype == jnp.int32:
-        return cudnn.data_type.INT32
-    if dtype == jnp.int64:
-        return cudnn.data_type.INT64
-    if dtype == jnp.uint8:
-        return cudnn.data_type.UINT8
-    if dtype == jnp.bool_:
-        return cudnn.data_type.BOOLEAN
-    raise ValueError(f"Unsupported score_mod tensor dtype: {dtype}.")
-
-
-def _cudnn_data_type_from_name(cudnn, dtype_name: str):
-    if dtype_name == "bfloat16":
-        return cudnn.data_type.BFLOAT16
-    return _cudnn_data_type(cudnn, np.dtype(dtype_name))
-
-
-def _graph_tensor_from_aval(cudnn, graph, name: str, aval, uid: int):
-    shape = tuple(int(dim) for dim in aval.shape)
-    return graph.tensor(
-        name=name,
-        dim=shape,
-        stride=_row_major_stride(shape),
-        data_type=_cudnn_data_type(cudnn, aval.dtype),
-        uid=uid,
-    )
-
-
 def _score_mod_graph_tensors(
     cudnn,
     graph,
@@ -477,51 +356,6 @@ def _score_mod_graph_tensors(
     return graph_tensors, tuple(tensor_uids), tuple(scalar_uids), tuple(scalar_values)
 
 
-def _encode_cudnn_frontend_version(version: str) -> int:
-    public_version = version.split("+", 1)[0].split("-", 1)[0]
-    parts = public_version.split(".")
-    if len(parts) < 3:
-        raise RuntimeError(f"Could not parse cuDNN frontend Python version: {version!r}.")
-    major, minor, patch = (int(part) for part in parts[:3])
-    return major * 10000 + minor * 100 + patch
-
-
-def _check_cudnn_frontend_version_match(cudnn) -> int:
-    python_version_string = getattr(cudnn, "__version__", None)
-    if python_version_string is None:
-        raise RuntimeError("cuDNN frontend Python package does not expose __version__.")
-    python_version = _encode_cudnn_frontend_version(python_version_string)
-    cpp_version = int(transformer_engine_jax.get_cudnn_frontend_version())
-    if python_version != cpp_version:
-        raise RuntimeError(
-            "cuDNN frontend Python/C++ version mismatch for score_mod graph serialization: "
-            f"Python cudnn.__version__={python_version_string!r} encodes to {python_version}, "
-            f"but Transformer Engine C++ was built with CUDNN_FRONTEND_VERSION={cpp_version}. "
-            "Use matching cuDNN frontend Python package and C++ headers."
-        )
-    return python_version
-
-
-def _score_mod_graph_hash(serialized_graph: bytes) -> Tuple[int, int]:
-    digest = hashlib.sha256(serialized_graph).digest()
-    return (
-        int.from_bytes(digest[0:8], byteorder="little", signed=True),
-        int.from_bytes(digest[8:16], byteorder="little", signed=True),
-    )
-
-
-def _pack_score_mod_scalar_values(
-    scalar_values: Sequence[bytes],
-) -> Tuple[np.ndarray, np.ndarray]:
-    scalar_sizes = np.asarray([len(value) for value in scalar_values], dtype=np.int64)
-    packed_values = np.zeros((len(scalar_values), 16), dtype=np.uint8)
-    for index, value in enumerate(scalar_values):
-        if len(value) > 16:
-            raise ValueError("score_mod pass-by-value scalars must be at most 16 bytes.")
-        packed_values[index, : len(value)] = np.frombuffer(value, dtype=np.uint8)
-    return scalar_sizes, packed_values.reshape(-1)
-
-
 def _serialized_score_mod_graph(
     *,
     serialized_graph: bytes,
@@ -531,18 +365,21 @@ def _serialized_score_mod_graph(
     output_uids: Sequence[int],
     scalar_uids: Sequence[int],
     scalar_values: Sequence[bytes],
+    cache_site: Tuple[str, str],
 ) -> _SerializedScoreModGraph:
-    scalar_sizes, packed_scalar_values = _pack_score_mod_scalar_values(scalar_values)
-    return _SerializedScoreModGraph(
-        serialized_graph=serialized_graph,
-        graph_hash=_score_mod_graph_hash(serialized_graph),
+    return make_serialized_graph(
+        serialized_graph_data=serialized_graph,
         cudnn_frontend_version=int(cudnn_frontend_version),
         workspace_size=int(workspace_size),
-        input_uids=np.asarray(input_uids, dtype=np.int64),
-        output_uids=np.asarray(output_uids, dtype=np.int64),
+        cache_site=cache_site,
+        input_bindings=[
+            GraphBinding(uid=int(uid), buffer_index=index) for index, uid in enumerate(input_uids)
+        ],
+        output_bindings=[
+            GraphBinding(uid=int(uid), buffer_index=index) for index, uid in enumerate(output_uids)
+        ],
         scalar_uids=np.asarray(scalar_uids, dtype=np.int64),
-        scalar_sizes=scalar_sizes,
-        scalar_values=packed_scalar_values,
+        scalar_values=scalar_values,
     )
 
 
@@ -556,20 +393,12 @@ def _wrap_score_mod(score_mod: Optional[Callable], graph_tensors: Dict[str, Any]
     return wrapped_score_mod
 
 
-def _finalize_score_mod_graph(cudnn, graph) -> Tuple[int, bytes, int]:
-    graph.validate()
-    graph.build_operation_graph()
-    try:
-        graph.create_execution_plans([cudnn.heur_mode.A, cudnn.heur_mode.FALLBACK])
-        graph.check_support()
-    except cudnn.cudnnGraphNotSupportedError as exc:
-        raise RuntimeError(f"cuDNN score_mod SDPA graph is not supported: {exc}") from exc
-    graph.build_plans(cudnn.build_plan_policy.HEURISTICS_CHOICE)
-    serialized_graph = bytes(graph.serialize())
-    return (
-        max(int(graph.get_workspace_size()), 1),
-        serialized_graph,
-        _check_cudnn_frontend_version_match(cudnn),
+def _finalize_score_mod_graph(cudnn, graph, cache_site: Tuple[str, str]) -> Tuple[int, bytes, int]:
+    return finalize_graph(
+        cudnn,
+        graph,
+        description="score_mod SDPA",
+        cache_site=cache_site,
     )
 
 
@@ -589,30 +418,15 @@ def _graph_cache_key(
     )
 
 
-def _shape_dtype(value) -> jax.ShapeDtypeStruct:
-    return jax.ShapeDtypeStruct(tuple(value.shape), value.dtype)
-
-
 def _import_cudnn_for_score_mod():
-    try:
-        cudnn = importlib.import_module("cudnn")
-    except ImportError as exc:
-        raise ImportError(
-            "score_mod fused_attn requires the cuDNN frontend Python package (`cudnn`)."
-        ) from exc
-    _check_cudnn_frontend_version_match(cudnn)
-    return cudnn
+    return import_cudnn()
 
 
 def _build_score_mod_fwd_graph(q_aval, k_aval, v_aval, score_mod_avals, config):
     cudnn = _import_cudnn_for_score_mod()
 
     io_data_type = _cudnn_data_type(cudnn, q_aval.dtype)
-    graph = cudnn.pygraph(
-        io_data_type=io_data_type,
-        intermediate_data_type=cudnn.data_type.FLOAT,
-        compute_data_type=cudnn.data_type.FLOAT,
-    )
+    graph = make_graph(cudnn, io_data_type)
 
     q_dim, q_stride = _bshd_as_bhsd_dim_stride(q_aval.shape)
     k_dim, k_stride = _bshd_as_bhsd_dim_stride(k_aval.shape)
@@ -663,11 +477,15 @@ def _build_score_mod_fwd_graph(q_aval, k_aval, v_aval, score_mod_avals, config):
         stats.set_data_type(cudnn.data_type.FLOAT)
         output_uids.append(_SCORE_MOD_UID_STATS)
 
-    workspace_size, serialized_graph, frontend_version = _finalize_score_mod_graph(cudnn, graph)
+    cache_site = ("f16", "fwd")
+    workspace_size, serialized_graph, frontend_version = _finalize_score_mod_graph(
+        cudnn, graph, cache_site
+    )
     return _serialized_score_mod_graph(
         serialized_graph=serialized_graph,
         cudnn_frontend_version=frontend_version,
         workspace_size=workspace_size,
+        cache_site=cache_site,
         input_uids=[_SCORE_MOD_UID_Q, _SCORE_MOD_UID_K, _SCORE_MOD_UID_V, *tensor_uids],
         output_uids=output_uids,
         scalar_uids=scalar_uids,
@@ -689,11 +507,7 @@ def _build_score_mod_bwd_graph(
     cudnn = _import_cudnn_for_score_mod()
 
     io_data_type = _cudnn_data_type(cudnn, q_aval.dtype)
-    graph = cudnn.pygraph(
-        io_data_type=io_data_type,
-        intermediate_data_type=cudnn.data_type.FLOAT,
-        compute_data_type=cudnn.data_type.FLOAT,
-    )
+    graph = make_graph(cudnn, io_data_type)
 
     q_dim, q_stride = _bshd_as_bhsd_dim_stride(q_aval.shape)
     k_dim, k_stride = _bshd_as_bhsd_dim_stride(k_aval.shape)
@@ -766,11 +580,15 @@ def _build_score_mod_bwd_graph(
     dk.set_output(True).set_uid(_SCORE_MOD_UID_DK).set_dim(k_dim).set_stride(k_stride)
     dv.set_output(True).set_uid(_SCORE_MOD_UID_DV).set_dim(v_dim).set_stride(v_stride)
 
-    workspace_size, serialized_graph, frontend_version = _finalize_score_mod_graph(cudnn, graph)
+    cache_site = ("f16", "bwd")
+    workspace_size, serialized_graph, frontend_version = _finalize_score_mod_graph(
+        cudnn, graph, cache_site
+    )
     return _serialized_score_mod_graph(
         serialized_graph=serialized_graph,
         cudnn_frontend_version=frontend_version,
         workspace_size=workspace_size,
+        cache_site=cache_site,
         input_uids=[
             _SCORE_MOD_UID_Q,
             _SCORE_MOD_UID_K,
@@ -798,13 +616,17 @@ def _fused_attn_score_mod_fwd(
     score_mod_avals = tuple(_shape_dtype(arg) for arg in score_mod_tensors)
     key = _graph_cache_key("fwd", config, (q_aval, k_aval, v_aval, *score_mod_avals))
     if key is None:
+        record_cache_lookup(("f16", "fwd"), hit=False, key="uncacheable score_mod")
         graph = _build_score_mod_fwd_graph(q_aval, k_aval, v_aval, score_mod_avals, config)
     else:
-        if key not in _score_mod_graph_cache:
+        graph = _score_mod_graph_cache.get(key)
+        record_cache_lookup(("f16", "fwd"), hit=graph is not None, key=key)
+        if graph is None:
             _score_mod_graph_cache[key] = _build_score_mod_fwd_graph(
                 q_aval, k_aval, v_aval, score_mod_avals, config
             )
-        graph = _score_mod_graph_cache[key]
+            record_cache_event(("f16", "fwd"), "cache_graph")
+            graph = _score_mod_graph_cache[key]
 
     batch, q_seqlen, q_heads, _ = q.shape
     _, _, _, v_head_dim = v.shape
@@ -820,15 +642,7 @@ def _fused_attn_score_mod_fwd(
         k,
         v,
         *score_mod_tensors,
-        serialized_graph=graph.serialized_graph,
-        graph_hash0=graph.graph_hash[0],
-        graph_hash1=graph.graph_hash[1],
-        cudnn_frontend_version=graph.cudnn_frontend_version,
-        input_uids=graph.input_uids,
-        output_uids=graph.output_uids,
-        scalar_uids=graph.scalar_uids,
-        scalar_sizes=graph.scalar_sizes,
-        scalar_values=graph.scalar_values,
+        **graph.ffi_attrs(),
     )
     return output, softmax_stats
 
@@ -852,6 +666,7 @@ def _fused_attn_score_mod_bwd(
     avals = tuple(_shape_dtype(arg) for arg in all_inputs)
     key = _graph_cache_key("bwd", config, avals)
     if key is None:
+        record_cache_lookup(("f16", "bwd"), hit=False, key="uncacheable score_mod")
         graph = _build_score_mod_bwd_graph(
             *avals[:6],
             avals[6 : 6 + len(score_mod_tensors)],
@@ -859,14 +674,17 @@ def _fused_attn_score_mod_bwd(
             config,
         )
     else:
-        if key not in _score_mod_graph_cache:
+        graph = _score_mod_graph_cache.get(key)
+        record_cache_lookup(("f16", "bwd"), hit=graph is not None, key=key)
+        if graph is None:
             _score_mod_graph_cache[key] = _build_score_mod_bwd_graph(
                 *avals[:6],
                 avals[6 : 6 + len(score_mod_tensors)],
                 avals[6 + len(score_mod_tensors) :],
                 config,
             )
-        graph = _score_mod_graph_cache[key]
+            record_cache_event(("f16", "bwd"), "cache_graph")
+            graph = _score_mod_graph_cache[key]
 
     dq = jax.ShapeDtypeStruct(q.shape, q.dtype)
     dk = jax.ShapeDtypeStruct(k.shape, k.dtype)
@@ -884,15 +702,7 @@ def _fused_attn_score_mod_bwd(
         softmax_stats,
         *score_mod_tensors,
         *score_mod_bprop_tensors,
-        serialized_graph=graph.serialized_graph,
-        graph_hash0=graph.graph_hash[0],
-        graph_hash1=graph.graph_hash[1],
-        cudnn_frontend_version=graph.cudnn_frontend_version,
-        input_uids=graph.input_uids,
-        output_uids=graph.output_uids,
-        scalar_uids=graph.scalar_uids,
-        scalar_sizes=graph.scalar_sizes,
-        scalar_values=graph.scalar_values,
+        **graph.ffi_attrs(),
     )
     return dq, dk, dv
 

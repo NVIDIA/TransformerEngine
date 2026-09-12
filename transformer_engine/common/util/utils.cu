@@ -14,6 +14,22 @@
 #include "../util/logging.h"
 
 namespace transformer_engine {
+namespace extract_seed_and_offset {
+namespace {
+
+__global__ void kernel(int64_t *rng_state_ptr, bool captured, int64_t *seed_ptr, uint64_t seed_val,
+                       int64_t *offset_ptr, uint64_t offset_val, uint32_t offset_intragraph) {
+  if (captured) {
+    rng_state_ptr[0] = *seed_ptr;
+    rng_state_ptr[1] = static_cast<int64_t>(*offset_ptr + static_cast<int64_t>(offset_intragraph));
+  } else {
+    rng_state_ptr[0] = static_cast<int64_t>(seed_val);
+    rng_state_ptr[1] = static_cast<int64_t>(offset_val);
+  }
+}
+
+}  // namespace
+}  // namespace extract_seed_and_offset
 namespace copy_host_to_device_via_kernel {
 namespace {
 
@@ -79,4 +95,13 @@ void nvte_convert_pointers_to_tensor(const uint64_t *host_ptrs, NVTETensor outpu
   Tensor *out_tensor = convertNVTETensorCheck(output);
   nvte_copy_host_to_device_via_kernel(host_ptrs, out_tensor->data.dptr,
                                       static_cast<size_t>(count) * sizeof(uint64_t), stream);
+}
+
+void nvte_extract_seed_and_offset(int64_t *rng_state_ptr, int captured, int64_t *seed_ptr,
+                                  uint64_t seed_val, int64_t *offset_ptr, uint64_t offset_val,
+                                  uint32_t offset_intragraph, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_extract_seed_and_offset);
+  transformer_engine::extract_seed_and_offset::kernel<<<1, 1, 0, stream>>>(
+      rng_state_ptr, captured, seed_ptr, seed_val, offset_ptr, offset_val, offset_intragraph);
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }

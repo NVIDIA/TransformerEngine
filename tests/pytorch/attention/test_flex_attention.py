@@ -446,8 +446,8 @@ def test_score_mod_tensors_are_version_checked_for_backward(monkeypatch):
         score_mod_graph_tensors = {"softcap": object()}
         workspace_size = 1
 
-    def fake_execute(graph, variant_pack, workspace_size, device):
-        del graph, variant_pack, workspace_size, device
+    def fake_execute(graph, variant_pack, workspace_size, device, cache_site):
+        del graph, variant_pack, workspace_size, device, cache_site
 
     q, k, v, _, _ = _score_mod_cache_cpu_inputs()
     q = q.requires_grad_()

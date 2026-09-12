@@ -20,6 +20,7 @@ from transformer_engine_jax import nvte_get_qkv_format
 from transformer_engine_jax import NVTE_Softmax_Type
 
 from . import cpp_extensions as tex
+from .quantize import AttentionQuantizerSet
 
 
 class AttnBiasType(Enum):
@@ -32,6 +33,8 @@ class AttnBiasType(Enum):
     NO_BIAS = NVTE_Bias_Type.NVTE_NO_BIAS
     PRE_SCALE_BIAS = NVTE_Bias_Type.NVTE_PRE_SCALE_BIAS
     POST_SCALE_BIAS = NVTE_Bias_Type.NVTE_POST_SCALE_BIAS
+    # Keep source-tree imports working before the local extension is rebuilt.
+    ALIBI = getattr(NVTE_Bias_Type, "NVTE_ALIBI", 3)
 
 
 class AttnMaskType(Enum):
@@ -325,7 +328,6 @@ def canonicalize_attn_mask_type(attn_mask_type: str):
 
 def is_fused_attn_kernel_available(
     is_training,
-    batch_size,
     q_dtype,
     kv_dtype,
     qkv_layout,
@@ -341,52 +343,33 @@ def is_fused_attn_kernel_available(
     head_dim_v,
     window_size: Optional[Tuple[int, int]] = None,
     return_max_logit: bool = False,
-    bottom_right_diagonal: Optional[bool] = None,
-    bias_batch: Optional[int] = None,
-    bias_heads: Optional[int] = None,
-    bias_seqlen_q: Optional[int] = None,
-    bias_seqlen_kv: Optional[int] = None,
-    max_segments_per_seq: int = 1,
 ):
     """
-    To check whether the fused attention kernel is supported.
+    To check whether the fused attention kernel is supported
     """
     window_size_tuple = (-1, -1) if window_size is None else window_size
 
     def make_helper(attn_mask_type):
-        bottom_right = (
-            attn_mask_type.is_bottom_right()
-            if bottom_right_diagonal is None
-            else bottom_right_diagonal
-        )
         return tex.FusedAttnHelper(
-            is_training=is_training,
-            batch_size=batch_size,
-            q_dtype=q_dtype,
-            kv_dtype=kv_dtype,
-            qkv_layout=qkv_layout,
-            attn_bias_type=attn_bias_type,
-            attn_mask_type=attn_mask_type,
-            softmax_type=softmax_type,
-            dropout_probability=dropout_probability,
-            q_num_heads=q_num_heads,
-            kv_num_heads=kv_num_heads,
-            q_max_seqlen=q_max_seqlen,
-            kv_max_seqlen=kv_max_seqlen,
-            head_dim_qk=head_dim_qk,
-            head_dim_v=head_dim_v,
-            window_size=window_size_tuple,
-            return_max_logit=return_max_logit,
-            bottom_right_diagonal=bottom_right,
-            bias_batch=bias_batch,
-            bias_heads=bias_heads,
-            bias_seqlen_q=bias_seqlen_q,
-            bias_seqlen_kv=bias_seqlen_kv,
-            max_segments_per_seq=max_segments_per_seq,
+            is_training,
+            q_dtype,
+            kv_dtype,
+            qkv_layout,
+            attn_bias_type,
+            attn_mask_type,
+            softmax_type,
+            dropout_probability,
+            q_num_heads,
+            kv_num_heads,
+            q_max_seqlen,
+            kv_max_seqlen,
+            head_dim_qk,
+            head_dim_v,
+            window_size_tuple,
+            return_max_logit,
         )
 
-    helper = make_helper(attn_mask_type)
-    return helper.is_fused_attn_kernel_available()
+    return make_helper(attn_mask_type).is_fused_attn_kernel_available()
 
 
 def _obtain_batch_and_max_seqlen(qkv, qkv_layout):
@@ -1076,6 +1059,7 @@ def _legacy_fused_attn(
     context_parallel_axis: str = "",
     softmax_offset: Optional[jnp.ndarray] = None,
     return_max_logit: bool = False,
+    bottom_right_diagonal: Optional[bool] = None,
 ):
     """
     Perform non-THD (non-packed) cuDNN fused attention.
@@ -1170,6 +1154,11 @@ def _legacy_fused_attn(
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
         context_parallel_axis=context_parallel_axis,
         return_max_logit=return_max_logit,
+        bottom_right_diagonal=(
+            attn_mask_type.is_bottom_right()
+            if bottom_right_diagonal is None
+            else bottom_right_diagonal
+        ),
     )
 
     return output
@@ -1258,7 +1247,7 @@ def fused_attn_thd(
 
 @partial(
     jax.custom_vjp,
-    nondiff_argnums=(5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19),
+    nondiff_argnums=(5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20),
 )
 def _fused_attn(
     qkv: Tuple[jnp.ndarray, ...],
@@ -1281,6 +1270,7 @@ def _fused_attn(
     context_checkpoint_name: str = "context",
     stripe_size: int | None = None,
     return_max_logit: bool = False,
+    bottom_right_diagonal: bool = False,
 ):
     output, _ = _fused_attn_fwd_rule(
         qkv,
@@ -1303,6 +1293,7 @@ def _fused_attn(
         context_checkpoint_name=context_checkpoint_name,
         stripe_size=stripe_size,
         return_max_logit=return_max_logit,
+        bottom_right_diagonal=bottom_right_diagonal,
     )
     return output
 
@@ -1328,6 +1319,7 @@ def _fused_attn_fwd_rule(
     context_checkpoint_name,
     stripe_size,
     return_max_logit,
+    bottom_right_diagonal,
 ):
     output, softmax_aux, rng_state, max_logit = tex.fused_attn_fwd(
         qkv,
@@ -1349,6 +1341,7 @@ def _fused_attn_fwd_rule(
         context_parallel_axis=context_parallel_axis,
         stripe_size=stripe_size,
         return_max_logit=return_max_logit,
+        bottom_right_diagonal=bottom_right_diagonal,
     )
     output = checkpoint_name(output, context_checkpoint_name)
     softmax_aux = checkpoint_name(softmax_aux, context_checkpoint_name)
@@ -1382,6 +1375,7 @@ def _fused_attn_bwd_rule(
     context_checkpoint_name,
     stripe_size,
     return_max_logit,
+    bottom_right_diagonal,
     ctx,
     dz,
 ):
@@ -1419,8 +1413,9 @@ def _fused_attn_bwd_rule(
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
         context_parallel_axis=context_parallel_axis,
         stripe_size=stripe_size,
+        bottom_right_diagonal=bottom_right_diagonal,
     )
-    if attn_bias_type == AttnBiasType.NO_BIAS:
+    if attn_bias_type in (AttnBiasType.NO_BIAS, AttnBiasType.ALIBI):
         grad_bias = None
     if softmax_type != AttnSoftmaxType.LEARNABLE_SOFTMAX:
         grad_softmax_offset = None
@@ -1434,6 +1429,24 @@ def _fused_attn_bwd_rule(
 
 
 _fused_attn.defvjp(_fused_attn_fwd_rule, _fused_attn_bwd_rule)
+
+
+@partial(jax.custom_vjp, nondiff_argnums=(4,))
+def _fused_attn_fp8(qkv, sequence_descriptor, seed, quantizer_set, config):
+    output, _ = tex.fused_attn_fp8_fwd(qkv, sequence_descriptor, seed, quantizer_set, config)
+    return output
+
+
+def _fused_attn_fp8_fwd_rule(qkv, sequence_descriptor, seed, quantizer_set, config):
+    return tex.fused_attn_fp8_fwd(qkv, sequence_descriptor, seed, quantizer_set, config)
+
+
+def _fused_attn_fp8_bwd_rule(config, ctx, doutput):
+    grad_qkv, quantizer_set = tex.fused_attn_fp8_bwd(ctx, doutput, config)
+    return grad_qkv, None, None, quantizer_set
+
+
+_fused_attn_fp8.defvjp(_fused_attn_fp8_fwd_rule, _fused_attn_fp8_bwd_rule)
 
 
 @partial(jax.custom_vjp, nondiff_argnums=(3, 4))
@@ -1514,6 +1527,8 @@ def fused_attn(
     score_mod_tensors: Optional[Mapping[str, Any]] = None,
     score_mod_bprop_tensors: Optional[Mapping[str, Any]] = None,
     return_max_logit: bool = False,
+    bottom_right_diagonal: Optional[bool] = None,
+    quantizer_set: Optional[AttentionQuantizerSet] = None,
 ):
     """
     Perform cuDNN fused attention.
@@ -1572,6 +1587,11 @@ def fused_attn(
             Python/NumPy scalars made available to `score_mod_bprop`.
         return_max_logit (bool): If True, also return per-head maximum attention logits
             with shape ``[h]``.
+        bottom_right_diagonal (Optional[bool]): Explicitly select bottom-right diagonal
+            alignment independently of the mask type. By default it follows bottom-right masks.
+        quantizer_set (Optional[AttentionQuantizerSet]): Quantizers for FP8 DPA. When
+            provided, Q/K/V and dO are quantized internally while public inputs and outputs
+            remain FP16/BF16.
     Returns:
         jnp.ndarray:
             Attention output when ``return_max_logit`` is False.
@@ -1620,6 +1640,8 @@ def fused_attn(
         if score_mod_only_args:
             raise ValueError(f"{', '.join(score_mod_only_args)} require score_mod to be provided.")
     else:
+        if quantizer_set is not None:
+            raise NotImplementedError("JAX FP8 attention does not support score_mod.")
         if return_max_logit:
             raise ValueError("return_max_logit is not supported with score_mod fused_attn.")
         tex.validate_fused_attn_score_mod(
@@ -1657,6 +1679,10 @@ def fused_attn(
         )
 
     if sequence_descriptor is None or isinstance(sequence_descriptor, jnp.ndarray):
+        if quantizer_set is not None:
+            raise NotImplementedError(
+                "JAX FP8 attention requires a SequenceDescriptor instead of a legacy mask."
+            )
         warnings.warn(
             "Pass mask to fused_attn is deprecated, please use SequenceDescriptor instead. "
             + "See help(transformer_engine.jax.attention.SequenceDescriptor) for details.",
@@ -1682,6 +1708,7 @@ def fused_attn(
             context_parallel_axis=context_parallel_axis,
             softmax_offset=softmax_offset,
             return_max_logit=return_max_logit,
+            bottom_right_diagonal=bottom_right_diagonal,
         )
     if max_segments_per_seq > 1 and not qkv_layout.is_thd():
         warnings.warn(
@@ -1692,6 +1719,36 @@ def fused_attn(
             UserWarning,
             stacklevel=2,
         )
+    if quantizer_set is not None:
+        if not isinstance(quantizer_set, AttentionQuantizerSet):
+            raise TypeError("quantizer_set must be an AttentionQuantizerSet.")
+        if qkv_layout.is_thd() or max_segments_per_seq != 1:
+            raise NotImplementedError("JAX FP8 attention does not support THD sequence packing.")
+        if context_parallel_axis or context_parallel_strategy != CPStrategy.DEFAULT:
+            raise NotImplementedError("JAX FP8 attention does not support context parallelism.")
+        if bias is not None or attn_bias_type != AttnBiasType.NO_BIAS:
+            raise NotImplementedError("JAX FP8 attention does not support attention bias.")
+        if return_max_logit:
+            raise NotImplementedError("JAX FP8 attention does not support return_max_logit.")
+        if softmax_offset is not None:
+            raise NotImplementedError("JAX FP8 attention does not support a softmax offset.")
+        diagonal = (
+            attn_mask_type.is_bottom_right()
+            if bottom_right_diagonal is None
+            else bottom_right_diagonal
+        )
+        config = tex.FP8AttentionConfig(
+            attn_bias_type=attn_bias_type,
+            attn_mask_type=attn_mask_type,
+            softmax_type=softmax_type,
+            qkv_layout=qkv_layout,
+            scaling_factor=scaling_factor,
+            dropout_probability=dropout_probability,
+            is_training=is_training,
+            window_size=(-1, -1) if window_size is None else window_size,
+            bottom_right_diagonal=diagonal,
+        )
+        return _fused_attn_fp8(qkv, sequence_descriptor, seed, quantizer_set, config)
     output = _fused_attn(
         qkv,
         bias,
@@ -1713,5 +1770,10 @@ def fused_attn(
         context_checkpoint_name=context_checkpoint_name,
         stripe_size=stripe_size,
         return_max_logit=return_max_logit,
+        bottom_right_diagonal=(
+            attn_mask_type.is_bottom_right()
+            if bottom_right_diagonal is None
+            else bottom_right_diagonal
+        ),
     )
     return output

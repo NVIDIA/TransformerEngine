@@ -31,6 +31,8 @@ def install_requirements() -> List[str]:
         "packaging",
         "pydantic",
         "nvdlfw-inspect",
+        # PyTorch cuDNN attention is built and executed with the Python graph
+        # API; FP8/MXFP8 graph capture requires Frontend 1.28 or newer.
         "nvidia-cudnn-frontend>=1.28.0",
     ]
 

@@ -5,26 +5,31 @@
 """cuDNN-backed Flex Attention helpers."""
 
 from dataclasses import dataclass
-import importlib
-import inspect
 from typing import Any, Callable, Dict, Optional, Tuple
 
 import torch
 
-_cudnn_score_mod_handles: Dict[torch.device, Any] = {}
+from transformer_engine.common.attention.cache_debug import record_event, record_lookup
+from transformer_engine.common.attention.score_mod import (
+    UNCACHEABLE_SCORE_MOD,
+    score_mod_callback_cache_key,
+)
+
+from ._cudnn_graph import (
+    current_stream_handle,
+    finalize_graph,
+    import_cudnn_frontend,
+    make_graph,
+    torch_to_cudnn_dtype,
+)
+
 _cudnn_score_mod_graph_cache: Dict[Tuple[Any, ...], Any] = {}
-_SCORE_MOD_UNCACHEABLE = object()
+_SCORE_MOD_UNCACHEABLE = UNCACHEABLE_SCORE_MOD
 
 
 def _import_cudnn_frontend():
-    """Import the cuDNN frontend Python package."""
-    try:
-        return importlib.import_module("cudnn")
-    except ImportError as exc:
-        raise ImportError(
-            "cuDNN frontend Python package not found. "
-            "Install it with: pip install nvidia-cudnn-frontend"
-        ) from exc
+    """Compatibility wrapper around the shared attention graph runtime."""
+    return import_cudnn_frontend()
 
 
 def _bhsd_dim_stride(
@@ -51,91 +56,13 @@ def _bhsd_graph_tensor(graph, tensor: torch.Tensor, tensor_format: str):
 
 
 # score_mod graph cache helpers.
-def _freeze_score_mod_cache_key(value: Any) -> Any:
-    """Convert a user-provided score_mod graph key into a hashable structure."""
-    if isinstance(value, torch.Tensor):
-        raise TypeError(
-            "score_mod_graph_cache_key() must not include tensors. Pass runtime tensors "
-            "through score_mod_tensors or score_mod_bprop_tensors instead."
-        )
-    if isinstance(value, dict):
-        items = (
-            (
-                _freeze_score_mod_cache_key(key),
-                _freeze_score_mod_cache_key(val),
-            )
-            for key, val in value.items()
-        )
-        return tuple(sorted(items, key=repr))
-    if isinstance(value, (list, tuple)):
-        return tuple(_freeze_score_mod_cache_key(item) for item in value)
-    if isinstance(value, (set, frozenset)):
-        items = (_freeze_score_mod_cache_key(item) for item in value)
-        return tuple(sorted(items, key=repr))
-    try:
-        hash(value)
-    except TypeError as exc:
-        raise TypeError(
-            "score_mod_graph_cache_key() must return a hashable value or a nested "
-            "combination of dict/list/tuple/set values."
-        ) from exc
-    return value
-
-
-def _score_mod_explicit_cache_key(callback_owner: Any) -> Optional[Any]:
-    """Return a user-provided structural graph key for a score_mod callback."""
-    explicit_key = getattr(callback_owner, "score_mod_graph_cache_key", None)
-    if explicit_key is None:
-        return None
-    explicit_key = explicit_key() if callable(explicit_key) else explicit_key
-    return _freeze_score_mod_cache_key(explicit_key)
-
-
 def _score_mod_callback_cache_key(callback: Optional[Callable]) -> Any:
-    """Create a stable graph cache key for a score_mod callable.
+    """Compatibility wrapper around the shared score-modification key policy."""
 
-    Module-level named functions are assumed to have stable topology. Anonymous functions
-    are keyed by code object because lambdas in the same module can share the same
-    qualname. Stateful bound methods and callable instances need an explicit
-    score_mod_graph_cache_key(); otherwise their graphs are left uncached to avoid reusing
-    stale graphs after Python object address reuse.
-    """
-    if callback is None:
-        return None
-    self_obj = getattr(callback, "__self__", None)
-    func_obj = getattr(callback, "__func__", None)
-    if self_obj is not None and func_obj is not None:
-        explicit_key = _score_mod_explicit_cache_key(self_obj)
-        if explicit_key is None:
-            return _SCORE_MOD_UNCACHEABLE
-        return (
-            "bound_method",
-            type(self_obj),
-            func_obj.__module__,
-            func_obj.__qualname__,
-            explicit_key,
-        )
-
-    explicit_key = _score_mod_explicit_cache_key(callback)
-    if explicit_key is not None:
-        return (
-            "callable",
-            type(callback),
-            getattr(callback, "__module__", None),
-            getattr(callback, "__qualname__", None),
-            explicit_key,
-        )
-
-    if (
-        inspect.isfunction(callback)
-        and callback.__closure__ is None
-        and "<locals>" not in callback.__qualname__
-    ):
-        if callback.__name__ == "<lambda>" or not callback.__qualname__:
-            return ("function", callback.__module__, callback.__code__)
-        return ("function", callback.__module__, callback.__qualname__)
-
-    return _SCORE_MOD_UNCACHEABLE
+    return score_mod_callback_cache_key(
+        callback,
+        is_array=lambda item: isinstance(item, torch.Tensor),
+    )
 
 
 def _score_mod_device_key(device: torch.device) -> Tuple[Any, ...]:
@@ -193,41 +120,16 @@ def _wrap_score_mod(score_mod: Optional[Callable], graph_tensors: Dict[str, Any]
 
 
 def _get_cudnn_current_stream_handle(cudnn, device: torch.device):
-    """Return a cuDNN handle for device, bound to PyTorch's current stream."""
-    if device.type != "cuda":
-        raise ValueError(f"Flex Attention only supports CUDA tensors, got device {device}.")
-    if device.index is None:
-        device = torch.device("cuda", torch.cuda.current_device())
-
-    handle = _cudnn_score_mod_handles.get(device)
-    with torch.cuda.device(device):
-        if handle is None:
-            handle = cudnn.create_handle()
-            _cudnn_score_mod_handles[device] = handle
-
-        stream = torch.cuda.current_stream(device).cuda_stream
-        cudnn.set_stream(handle=handle, stream=stream)
-    return handle
+    """Compatibility wrapper around the shared current-stream handle."""
+    del cudnn
+    return current_stream_handle(device)
 
 
 def _build_cudnn_pygraph(dtype: torch.dtype, device: torch.device):
     """Create a cuDNN frontend Python graph for F16/BF16 SDPA."""
-    cudnn = _import_cudnn_frontend()
-
-    if dtype == torch.float16:
-        io_data_type = cudnn.data_type.HALF
-    elif dtype == torch.bfloat16:
-        io_data_type = cudnn.data_type.BFLOAT16
-    else:
+    if dtype not in (torch.float16, torch.bfloat16):
         raise ValueError(f"Flex Attention only supports FP16/BF16 tensors, got {dtype}.")
-
-    graph = cudnn.pygraph(
-        io_data_type=io_data_type,
-        intermediate_data_type=cudnn.data_type.FLOAT,
-        compute_data_type=cudnn.data_type.FLOAT,
-        handle=_get_cudnn_current_stream_handle(cudnn, device),
-    )
-    return graph
+    return make_graph(torch_to_cudnn_dtype(dtype), device, name="te_flex_attention")
 
 
 @dataclass
@@ -263,19 +165,9 @@ class _CudnnScoreModBwdGraphEntry:
     workspace_size: int
 
 
-def _finalize_cudnn_graph(graph) -> int:
-    """Build a cuDNN frontend Python graph and return its workspace size."""
-    cudnn = _import_cudnn_frontend()
-
-    graph.validate()
-    graph.build_operation_graph()
-    try:
-        graph.create_execution_plans([cudnn.heur_mode.A, cudnn.heur_mode.FALLBACK])
-        graph.check_support()
-    except cudnn.cudnnGraphNotSupportedError as exc:
-        raise RuntimeError(f"cuDNN Flex Attention SDPA graph is not supported: {exc}") from exc
-    graph.build_plans(cudnn.build_plan_policy.HEURISTICS_CHOICE)
-    return max(graph.get_workspace_size(), 1)
+def _finalize_cudnn_graph(graph, cache_site: Tuple[str, str]) -> int:
+    """Compatibility wrapper around shared graph finalization."""
+    return finalize_graph(graph, cache_site=cache_site)
 
 
 def _execute_cudnn_graph(
@@ -283,6 +175,7 @@ def _execute_cudnn_graph(
     variant_pack: Dict[Any, torch.Tensor],
     workspace_size: int,
     device: torch.device,
+    cache_site: Tuple[str, str],
 ):
     """Execute a built cuDNN frontend Python graph."""
     cudnn = _import_cudnn_frontend()
@@ -294,6 +187,7 @@ def _execute_cudnn_graph(
         device=device,
         dtype=torch.uint8,
     )
+    record_event(*cache_site, "execute", device=_score_mod_device_key(device)[1])
     graph.execute(
         variant_pack,
         workspace,
@@ -316,8 +210,8 @@ def _cudnn_score_mod_fwd_cache_key(
 ) -> Optional[Tuple[Any, ...]]:
     """Pre-build cache key for score_mod fprop execution plans.
 
-    cuDNN exposes graph.key(), but only after graph construction has run the user callback.
-    This key avoids rebuilding the Python graph on cache hits.
+    cuDNN exposes graph.key(), but only after graph construction has run the user
+    callback. This key avoids rebuilding the Python graph on cache hits.
     """
     score_mod_key = _score_mod_callback_cache_key(score_mod)
     if score_mod_key is _SCORE_MOD_UNCACHEABLE:
@@ -423,7 +317,7 @@ def _build_cudnn_score_mod_fwd_graph(
     else:
         stats_tensor = None
 
-    workspace_size = _finalize_cudnn_graph(graph)
+    workspace_size = _finalize_cudnn_graph(graph, ("f16", "fwd"))
     return _CudnnScoreModFwdGraphEntry(
         graph=graph,
         q=q,
@@ -465,11 +359,14 @@ def _get_cudnn_score_mod_fwd_graph(
     )
     key = _cudnn_score_mod_fwd_cache_key(*build_args)
     if key is None:
+        record_lookup("f16", "fwd", hit=False, key="uncacheable score_mod")
         return _build_cudnn_score_mod_fwd_graph(*build_args)
     entry = _cudnn_score_mod_graph_cache.get(key)
+    record_lookup("f16", "fwd", hit=entry is not None, key=key)
     if entry is None:
         entry = _build_cudnn_score_mod_fwd_graph(*build_args)
         _cudnn_score_mod_graph_cache[key] = entry
+        record_event("f16", "fwd", "cache_graph")
     return entry
 
 
@@ -531,7 +428,7 @@ def _build_cudnn_score_mod_bwd_graph(
     dk.set_output(True).set_dim(dk_dim).set_stride(dk_stride)
     dv.set_output(True).set_dim(dv_dim).set_stride(dv_stride)
 
-    workspace_size = _finalize_cudnn_graph(graph)
+    workspace_size = _finalize_cudnn_graph(graph, ("f16", "bwd"))
     return _CudnnScoreModBwdGraphEntry(
         graph=graph,
         q=q,
@@ -584,11 +481,14 @@ def _get_cudnn_score_mod_bwd_graph(
     )
     key = _cudnn_score_mod_bwd_cache_key(*build_args)
     if key is None:
+        record_lookup("f16", "bwd", hit=False, key="uncacheable score_mod")
         return _build_cudnn_score_mod_bwd_graph(*build_args)
     entry = _cudnn_score_mod_graph_cache.get(key)
+    record_lookup("f16", "bwd", hit=entry is not None, key=key)
     if entry is None:
         entry = _build_cudnn_score_mod_bwd_graph(*build_args)
         _cudnn_score_mod_graph_cache[key] = entry
+        record_event("f16", "bwd", "cache_graph")
     return entry
 
 
@@ -655,6 +555,7 @@ class FusedAttentionWithScoreModFunc(torch.autograd.Function):
             variant_pack,
             entry.workspace_size,
             query_layer.device,
+            ("f16", "fwd"),
         )
 
         ctx.is_training = is_training
@@ -742,6 +643,7 @@ class FusedAttentionWithScoreModFunc(torch.autograd.Function):
             variant_pack,
             entry.workspace_size,
             query_layer.device,
+            ("f16", "bwd"),
         )
 
         return (

@@ -5,6 +5,7 @@
  ************************************************************************/
 
 #include "../extensions.h"
+#include "attention_cache_debug.h"
 #include "cgemm_helper.h"
 #include "common/util/cuda_runtime.h"
 #include "transformer_engine/gemm.h"
@@ -134,11 +135,17 @@ pybind11::dict Registrations() {
 
 PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("registrations", &Registrations);
-  m.def("get_fused_attn_backend", &GetFusedAttnBackend, "Get Fused Attention backend",
-        pybind11::arg("fused_attn_params"));
   m.def("get_cuda_version", &GetCudaRuntimeVersion);
   m.def("get_cudnn_version", &GetCudnnRuntimeVersion);
   m.def("get_cudnn_frontend_version", &GetCudnnFrontendVersion);
+  m.def(
+      "record_fused_attn_cache_event",
+      [](const std::string &backend, const std::string &direction, const std::string &event,
+         int device, const std::string &key, uint64_t elapsed_ns) {
+        attention_cache_debug::Record(backend, direction, event, device, key, elapsed_ns);
+      },
+      pybind11::arg("backend"), pybind11::arg("direction"), pybind11::arg("event"),
+      pybind11::arg("device") = -1, pybind11::arg("key") = "", pybind11::arg("elapsed_ns") = 0);
   m.def("get_device_compute_capability", &GetDeviceComputeCapability);
   m.def("get_num_compute_streams", &nvte_get_num_compute_streams);
   m.def("get_cublasLt_version", &cublasLtGetVersion);
@@ -146,8 +153,6 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("get_dbias_quantize_workspace_sizes", &GetDBiasQuantizeWorkspaceSizes);
   m.def("get_norm_fwd_workspace_sizes", &GetNormForwardWorkspaceSizes);
   m.def("get_norm_bwd_workspace_sizes", &GetNormBackwardWorkspaceSizes);
-  m.def("get_fused_attn_fwd_workspace_sizes", &GetFusedAttnForwardWorkspaceSizes);
-  m.def("get_fused_attn_bwd_workspace_sizes", &GetFusedAttnBackwardWorkspaceSizes);
   m.def("get_topk_workspace_sizes", &GetTopkWorkspaceSizes);
   m.def("nvte_get_qkv_format", &nvte_get_qkv_format);
   m.def("is_non_nt_fp8_gemm_supported", &nvte_is_non_tn_fp8_gemm_supported);
@@ -184,7 +189,8 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   pybind11::enum_<NVTE_Bias_Type>(m, "NVTE_Bias_Type", pybind11::module_local())
       .value("NVTE_NO_BIAS", NVTE_Bias_Type::NVTE_NO_BIAS)
       .value("NVTE_PRE_SCALE_BIAS", NVTE_Bias_Type::NVTE_PRE_SCALE_BIAS)
-      .value("NVTE_POST_SCALE_BIAS", NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
+      .value("NVTE_POST_SCALE_BIAS", NVTE_Bias_Type::NVTE_POST_SCALE_BIAS)
+      .value("NVTE_ALIBI", NVTE_Bias_Type::NVTE_ALIBI);
 
   pybind11::enum_<NVTE_Mask_Type>(m, "NVTE_Mask_Type", pybind11::module_local())
       .value("NVTE_NO_MASK", NVTE_Mask_Type::NVTE_NO_MASK)
@@ -201,14 +207,12 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
       .value("NVTE_BSHD_BSHD_BSHD", NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD)
       .value("NVTE_T3HD", NVTE_QKV_Layout::NVTE_T3HD)
       .value("NVTE_THD_T2HD", NVTE_QKV_Layout::NVTE_THD_T2HD)
-      .value("NVTE_THD_THD_THD", NVTE_QKV_Layout::NVTE_THD_THD_THD)
-      .value("NVTE_QKV_Layout_NOT_SET", NVTE_QKV_Layout::NVTE_QKV_Layout_NOT_SET);
+      .value("NVTE_THD_THD_THD", NVTE_QKV_Layout::NVTE_THD_THD_THD);
 
   pybind11::enum_<NVTE_QKV_Format>(m, "NVTE_QKV_Format", pybind11::module_local())
       .value("NVTE_SBHD", NVTE_QKV_Format::NVTE_SBHD)
       .value("NVTE_BSHD", NVTE_QKV_Format::NVTE_BSHD)
-      .value("NVTE_THD", NVTE_QKV_Format::NVTE_THD)
-      .value("NVTE_QKV_Format_NOT_SET", NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET);
+      .value("NVTE_THD", NVTE_QKV_Format::NVTE_THD);
 
   pybind11::enum_<NVTE_Softmax_Type>(m, "NVTE_Softmax_Type", pybind11::module_local())
       .value("NVTE_VANILLA_SOFTMAX", NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX)

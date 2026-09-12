@@ -5,27 +5,35 @@
 """JAX related extensions."""
 
 import os
+from importlib.metadata import version as get_package_version
 from pathlib import Path
-from packaging import version
+from typing import List
 
 import setuptools
+from packaging import version
 
 from .utils import (
-    get_cuda_include_dirs,
     all_files_in_dir,
     cudnn_frontend_include_path,
     debug_build_enabled,
-    setup_mpi_flags,
+    get_cuda_include_dirs,
+    nccl_ep_enabled,
     nccl_include_path,
     nccl_lib_path,
-    nccl_ep_enabled,
+    setup_mpi_flags,
 )
-from typing import List
 
 
 def install_requirements() -> List[str]:
     """Install dependencies for TE/JAX extensions."""
-    return ["jax", "flax>=0.7.1", "nvidia-cudnn-frontend>=1.25.0"]
+    # Serialized cuDNN graphs use a version-specific wire format, so the Python
+    # frontend used at runtime must match the headers used to build the extension.
+    frontend_version = get_package_version("nvidia-cudnn-frontend")
+    return [
+        "jax",
+        "flax>=0.7.1",
+        f"nvidia-cudnn-frontend=={frontend_version}",
+    ]
 
 
 def test_requirements() -> List[str]:
@@ -89,6 +97,7 @@ def setup_jax_extension(
     csrc_source_files = Path(csrc_source_files)
     extensions_dir = csrc_source_files / "extensions"
     sources = all_files_in_dir(extensions_dir, name_extension="cpp")
+    sources += all_files_in_dir(extensions_dir, name_extension="cu")
 
     # Header files
     include_dirs = get_cuda_include_dirs()

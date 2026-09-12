@@ -200,7 +200,7 @@ backend-selection overview.
 
    :Type: ``int`` (0, 1 or 2), optionally followed by ``:<ranks>``
    :Default: ``0``
-   :Description: Log FusedAttention graph cache activity to stderr, prefixed with ``[FUSED-ATTN-CACHE]``. ``1`` prints an end-of-run summary of the cache counters and the mean time of each cuDNN build stage. ``2`` additionally traces every event as it happens: each graph built, each graph cuDNN accepts and the cache keeps, each lookup and whether it hit or missed, each first execution that compiles kernels, and each execution. When the launcher exports a rank, only rank 0 logs; append ``:<ranks>`` to override, as in ``1:all`` for level 1 on every rank or ``2:0,3`` for level 2 on ranks 0 and 3.
+   :Description: Log FusedAttention Python graph-cache activity to stderr, prefixed with ``[FUSED-ATTN-CACHE]``. ``1`` prints an end-of-run summary of cache counters and the mean CPU wall time of each cuDNN graph-build stage. ``2`` additionally traces every cache event, including the cache key on hits and misses. When the launcher exports a rank, only rank 0 logs by default; append ``:<ranks>`` to override this, for example ``1:all`` or ``2:0,3``. Supported by PyTorch and JAX.
 
 .. envvar:: NVTE_ALLOW_NONDETERMINISTIC_ALGO
 

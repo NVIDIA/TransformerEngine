@@ -184,7 +184,6 @@ list(APPEND transformer_engine_cpp_sources
      cudnn_utils.cpp
      transformer_engine.cpp
      fused_attn/fused_attn.cpp
-     fused_attn/config_and_params.cpp
      gemm/config.cpp
      normalization/common.cpp
      normalization/rtc_dispatch.cpp
@@ -218,9 +217,6 @@ list(APPEND transformer_engine_cuda_sources
      dropout/dropout.cu
      fused_attn/context_parallel.cu
      fused_attn/kv_cache.cu
-     fused_attn/fused_attn_f16_arbitrary_seqlen.cu
-     fused_attn/fused_attn_fp8.cu
-     fused_attn/utils.cu
      gemm/cublaslt_gemm.cu
      gemm/cublaslt_grouped_gemm.cu
      normalization/layernorm/ln_bwd_semi_cuda_kernel.cu

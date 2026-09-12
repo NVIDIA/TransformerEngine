@@ -17,6 +17,7 @@ from jax import random as jax_random
 from jax.ad_checkpoint import checkpoint_name
 
 from transformer_engine.common.recipe import (
+    DelayedScaling,
     MXFP8BlockScaling,
 )
 
@@ -37,6 +38,7 @@ from ..cpp_extensions import (
     jax_scaled_upper_triang_masked_softmax,
 )
 from ..quantize import (
+    AttentionQuantizerSet,
     QuantizerFactory,
     get_global_quantize_recipe,
     QuantizeMetaSet,
@@ -416,6 +418,42 @@ class TransformerEngineBase(nn.Module):  # pylint: disable=too-few-public-method
             n_groups=n_groups,
         )
         return quantizer_set
+
+    def generate_attention_quantizer_set(self, fp8_recipe=None):
+        """Generate independent quantizers for all FP8 DPA tensor roles."""
+
+        if fp8_recipe is None:
+            fp8_recipe = get_global_quantize_recipe()
+        first = self.generate_quantizer_set(postfix="_attention_qkv_s_do", fp8_recipe=fp8_recipe)
+        second = self.generate_quantizer_set(postfix="_attention_o_dp", fp8_recipe=fp8_recipe)
+        third = self.generate_quantizer_set(postfix="_attention_dqkv", fp8_recipe=fp8_recipe)
+        s_quantizer = first.kernel
+        dp_quantizer = second.dgrad
+        if fp8_recipe.float8_current_scaling():
+            # S and dP are internal to the fused attention graph, so their current
+            # amax is not available before they are quantized. Match the PyTorch DPA
+            # recipe by maintaining one-step delayed scales for these two roles.
+            delayed_recipe = DelayedScaling(
+                fp8_format=fp8_recipe.fp8_format,
+                amax_history_len=1,
+                amax_compute_algo="most_recent",
+                fp8_dpa=fp8_recipe.fp8_dpa,
+                fp8_mha=fp8_recipe.fp8_mha,
+            )
+            internal = self.generate_quantizer_set(
+                postfix="_attention_s_dp",
+                fp8_recipe=delayed_recipe,
+            )
+            s_quantizer = internal.kernel
+            dp_quantizer = internal.dgrad
+        return AttentionQuantizerSet(
+            qkv=first.x,
+            s=s_quantizer,
+            o=second.x,
+            do=first.dgrad,
+            dp=dp_quantizer,
+            dqkv=third.dgrad,
+        )
 
 
 class DenseGeneral(TransformerEngineBase):

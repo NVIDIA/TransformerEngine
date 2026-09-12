@@ -39,6 +39,7 @@ from ..sharding import get_num_devices_in_mesh
 __all__ = [
     "Quantizer",
     "QuantizerSet",
+    "AttentionQuantizerSet",
     "CurrentScaleQuantizer",
     "DelayedScaleQuantizer",
     "BlockScaleQuantizer",
@@ -874,6 +875,29 @@ class QuantizerSet:
             A reconstructed QuantizerSet instance
         """
         return cls(*aux_data, *children)
+
+
+@register_pytree_node_class
+@dataclass
+class AttentionQuantizerSet:
+    """Quantizers for the six independent FP8 dot-product-attention roles."""
+
+    qkv: Quantizer
+    s: Quantizer
+    o: Quantizer
+    do: Quantizer
+    dp: Quantizer
+    dqkv: Quantizer
+
+    def tree_flatten(self):
+        """Flatten all quantizers so delayed-scaling state participates in autodiff."""
+
+        return (self.qkv, self.s, self.o, self.do, self.dp, self.dqkv), ()
+
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        del aux_data
+        return cls(*children)
 
 
 @register_pytree_node_class

@@ -23,7 +23,6 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
-#include <tuple>
 #include <vector>
 
 #include "common/common.h"
@@ -152,24 +151,8 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnScoreModForwardHandler);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnScoreModBackwardHandler);
 
-std::tuple<NVTE_Fused_Attn_Backend, std::string> GetFusedAttnBackend(
-    const pybind11::object &params);
-
-pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
-    size_t input_batch, size_t bias_batch, size_t q_max_seqlen, size_t kv_max_seqlen,
-    size_t attn_heads, size_t num_gqa_groups, size_t bias_heads, size_t qk_head_dim,
-    size_t v_head_dim, float scaling_factor, float dropout_probability, NVTE_Bias_Type bias_type,
-    NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type, NVTE_QKV_Layout qkv_layout,
-    DType dtype, bool is_training, size_t max_segments_per_seq, int64_t window_size_left,
-    int64_t window_size_right, bool return_max_logit, bool bottom_right_diagonal);
-
-pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
-    size_t input_batch, size_t bias_batch, size_t q_max_seqlen, size_t kv_max_seqlen,
-    size_t attn_heads, size_t num_gqa_groups, size_t bias_heads, size_t qk_head_dim,
-    size_t v_head_dim, float scaling_factor, float dropout_probability, NVTE_Bias_Type bias_type,
-    NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type, NVTE_QKV_Layout qkv_layout,
-    DType dtype, bool is_training, bool deterministic, size_t max_segments_per_seq,
-    int64_t window_size_left, int64_t window_size_right, bool bottom_right_diagonal);
+void PopulateFusedAttnRngState(void *rng_state, const void *seed, uint64_t offset,
+                               cudaStream_t stream);
 
 // GEMM
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GemmHandler);

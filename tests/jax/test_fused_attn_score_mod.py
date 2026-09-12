@@ -8,7 +8,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from test_fused_attn import FusedAttnRunner, SeqDescFormat
+from transformer_engine_jax import get_device_compute_capability
 
+import transformer_engine.jax.cpp_extensions.cudnn_graph as cudnn_graph
 import transformer_engine.jax.cpp_extensions.flex_attention as tex_attention
 from transformer_engine.jax.attention import (
     AttnBiasType,
@@ -18,9 +21,6 @@ from transformer_engine.jax.attention import (
 )
 from transformer_engine.jax.cpp_extensions import make_fused_attn_score_mod_config
 from transformer_engine.jax.flax import transformer as flax_transformer
-from transformer_engine_jax import get_device_compute_capability, NVTE_Fused_Attn_Backend
-from test_fused_attn import FusedAttnRunner, SeqDescFormat
-
 
 _CONFIG_TEST_HEAD_DIM = 128
 _CONFIG_TEST_SCALING_FACTOR = 1.0 / sqrt(_CONFIG_TEST_HEAD_DIM)
@@ -397,17 +397,9 @@ def _identity_score_mod(_graph, score, _tensors):
 def _install_fake_flax_fused_attn(monkeypatch, *, kernel_available=True):
     captured = {}
 
-    class FakeFusedAttnHelper:
-        def __init__(self, *args, **kwargs):
-            captured.setdefault("kernel_checks", []).append((args, kwargs))
-
-        def get_fused_attn_backend(self):
-            if kernel_available:
-                return NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen, ""
-            return (
-                NVTE_Fused_Attn_Backend.NVTE_No_Backend,
-                "fake FusedAttnHelper: no fused attention backend available for this configuration",
-            )
+    def fake_fused_attn_kernel_check(*args, **kwargs):
+        captured.setdefault("kernel_checks", []).append((args, kwargs))
+        return kernel_available
 
     def fake_fused_attn(
         qkv,
@@ -435,6 +427,7 @@ def _install_fake_flax_fused_attn(monkeypatch, *, kernel_available=True):
         score_mod_tensors=None,
         score_mod_bprop_tensors=None,
         return_max_logit=False,
+        bottom_right_diagonal=None,
     ):
         captured.update(
             qkv=qkv,
@@ -460,10 +453,15 @@ def _install_fake_flax_fused_attn(monkeypatch, *, kernel_available=True):
             score_mod_bprop=score_mod_bprop,
             score_mod_tensors=score_mod_tensors,
             score_mod_bprop_tensors=score_mod_bprop_tensors,
+            bottom_right_diagonal=bottom_right_diagonal,
         )
         return qkv[0]
 
-    monkeypatch.setattr(flax_transformer, "FusedAttnHelper", FakeFusedAttnHelper)
+    monkeypatch.setattr(
+        flax_transformer,
+        "is_fused_attn_kernel_available",
+        fake_fused_attn_kernel_check,
+    )
     monkeypatch.setattr(flax_transformer, "fused_attn", fake_fused_attn)
     return captured
 
@@ -538,7 +536,7 @@ def test_dot_product_attention_plumbs_score_mod_to_fused_attn(monkeypatch):
     assert captured["attn_bias_type"] is AttnBiasType.NO_BIAS
     assert captured["qkv_layout"] is QKVLayout.BSHD_BSHD_BSHD
     assert captured["softmax_type"] is AttnSoftmaxType.VANILLA_SOFTMAX
-    assert captured["kernel_checks"][0][1]["qkv_layout"] is QKVLayout.BSHD_BSHD_BSHD
+    assert captured["kernel_checks"][0][0][3] is QKVLayout.BSHD_BSHD_BSHD
 
 
 def test_dot_product_attention_unpacks_packed_score_mod_to_separate_layout(monkeypatch):
@@ -562,7 +560,7 @@ def test_dot_product_attention_unpacks_packed_score_mod_to_separate_layout(monke
     assert captured["qkv"][0].shape == (1, 8, 1, 16)
     assert captured["qkv_layout"] is QKVLayout.BSHD_BSHD_BSHD
     assert captured["score_mod"] is _identity_score_mod
-    assert captured["kernel_checks"][0][1]["qkv_layout"] is QKVLayout.BSHD_BSHD_BSHD
+    assert captured["kernel_checks"][0][0][3] is QKVLayout.BSHD_BSHD_BSHD
 
 
 def test_multi_head_attention_plumbs_score_mod_to_dot_product_attention(monkeypatch):
@@ -659,19 +657,19 @@ def test_fused_attn_score_mod_cudnn_frontend_version_check(monkeypatch):
         __version__ = "1.22.0"
 
     monkeypatch.setattr(
-        tex_attention.transformer_engine_jax,
+        cudnn_graph.transformer_engine_jax,
         "get_cudnn_frontend_version",
         lambda: 12200,
     )
-    assert tex_attention._check_cudnn_frontend_version_match(FakeCudnn) == 12200
+    assert cudnn_graph.check_cudnn_frontend_version_match(FakeCudnn) == 12200
 
     monkeypatch.setattr(
-        tex_attention.transformer_engine_jax,
+        cudnn_graph.transformer_engine_jax,
         "get_cudnn_frontend_version",
         lambda: 12100,
     )
     with pytest.raises(RuntimeError, match="Python/C\\+\\+ version mismatch"):
-        tex_attention._check_cudnn_frontend_version_match(FakeCudnn)
+        cudnn_graph.check_cudnn_frontend_version_match(FakeCudnn)
 
 
 def test_fused_attn_score_mod_config_stabilizes_bound_method_cache_keys():
@@ -733,6 +731,27 @@ def test_fused_attn_score_mod_config_leaves_unkeyed_bound_methods_uncached():
 
     assert config_1 != config_2
     assert tex_attention._graph_cache_key("fwd", config_1, ()) is None
+
+
+def test_fused_attn_score_mod_module_lambda_cache_keys_do_not_collide():
+    """Different module-level lambdas must not reuse the same cuDNN graph."""
+    score_mod_1 = lambda _graph, score, _tensors: score
+    score_mod_2 = lambda _graph, score, _tensors: score
+    score_mod_1.__module__ = __name__
+    score_mod_2.__module__ = __name__
+    score_mod_1.__qualname__ = "<lambda>"
+    score_mod_2.__qualname__ = "<lambda>"
+
+    config_1, _, _ = make_fused_attn_score_mod_config(
+        score_mod_1, None, None, None, _CONFIG_TEST_SCALING_FACTOR, True
+    )
+    config_2, _, _ = make_fused_attn_score_mod_config(
+        score_mod_2, None, None, None, _CONFIG_TEST_SCALING_FACTOR, True
+    )
+
+    assert config_1 != config_2
+    assert tex_attention._graph_cache_key("fwd", config_1, ()) is not None
+    assert tex_attention._graph_cache_key("fwd", config_2, ()) is not None
 
 
 @pytest.mark.skipif(not _has_cudnn_frontend_python(), reason="cuDNN Python frontend is required")
