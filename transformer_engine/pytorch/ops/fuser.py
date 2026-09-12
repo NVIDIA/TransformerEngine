@@ -713,6 +713,17 @@ class OperationFuser:
         *extra_inputs: torch.Tensor,
         basic_op_kwargs: Optional[list[dict[str, Any]]] = None,
     ) -> torch.Tensor | tuple[torch.Tensor, ...]:
+        # TE kernels resolve their launch device from the current CUDA device, so
+        # run under the input's device (single-process multi-GPU placement).
+        with torch.cuda.device(input.get_device()):
+            return self._call_impl(input, *extra_inputs, basic_op_kwargs=basic_op_kwargs)
+
+    def _call_impl(
+        self,
+        input: torch.Tensor,  # pylint: disable=redefined-builtin
+        *extra_inputs: torch.Tensor,
+        basic_op_kwargs: Optional[list[dict[str, Any]]] = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, ...]:
 
         # Verify extra input count
         if len(extra_inputs) != self.num_extra_inputs:
