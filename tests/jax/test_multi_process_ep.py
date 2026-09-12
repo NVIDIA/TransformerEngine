@@ -47,9 +47,10 @@ from transformer_engine.jax.cpp_extensions.ep import (
     ep_dispatch_fwd,
     ep_combine_fwd,
     get_ep_config,
+    _leading_axis_ok,
+    _ep_spec_ok,
 )
 from transformer_engine.jax.version_utils import is_collective_stream_supported
-
 
 # ── Test config ─────────────────────────────────────────────────────────────
 # NCCL EP requires NUM_LOCAL_EXPERTS*ep % 4 == 0 (TMA alignment in
@@ -959,6 +960,34 @@ class TestEpDomainGrouping(unittest.TestCase):
         domains = {root: [m[c] for c in sorted(m)] for root, m in domains.items()}
 
         self.assertEqual(domains, {0: [0, 2, 4, 6], 1: [1, 3, 5, 7]})
+
+    def test_compound_ep_axis(self):
+        if not is_devices_enough(4):
+            self.skipTest("requires 4 devices")
+        mesh = Mesh(np.asarray(jax.devices()[:4]).reshape(2, 2), ("expert", "tensor"))
+        order = {int(device.id): i for i, device in enumerate(mesh.devices.reshape(-1))}
+
+        domains = {}
+        for rank in range(4):
+            root, col, num_domains = _ep_domain_for_rank(
+                mesh,
+                ("expert", "tensor"),
+                rank,
+                device_to_rank=lambda device: order[int(device.id)],
+            )
+            self.assertEqual(num_domains, 1)
+            domains.setdefault(root, {})[col] = rank
+        self.assertEqual([domains[0][i] for i in range(4)], [0, 1, 2, 3])
+
+        with mesh:
+            ep_axes = ("expert", "tensor")
+            ok, ep_axis, outer_axes = _leading_axis_ok(
+                PartitionSpec(ep_axes, None, None), ep_axes=ep_axes
+            )
+            self.assertTrue(ok)
+            self.assertEqual(ep_axis, ("expert", "tensor"))
+            self.assertEqual(outer_axes, ())
+            self.assertTrue(_ep_spec_ok(PartitionSpec(ep_axes, None, None), 2, ep_axes))
 
 
 # ── Entry point ──────────────────────────────────────────────────────────────
