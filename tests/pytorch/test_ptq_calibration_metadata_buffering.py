@@ -265,9 +265,7 @@ def test_linear_calibration_config_applies_activation_decay_only():
 @pytest.mark.parametrize("use_reentrant", (False, True))
 def test_external_activation_recomputation_does_not_update_calibration(use_reentrant):
     module = Linear(32, 32, params_dtype=torch.bfloat16, device="cuda", bias=False)
-    calibration_config = QuantizationCalibrationConfig(
-        transformer_engine_calibration_decay=0.5
-    )
+    calibration_config = QuantizationCalibrationConfig(transformer_engine_calibration_decay=0.5)
     recipe = Float8CurrentScaling()
     buffer_name = "input_tensor_scale_inv_fp8_current_scaling_te_ptq_calibrated"
 
@@ -320,9 +318,7 @@ def test_layernorm_mlp_recomputation_does_not_update_calibration(monkeypatch):
         bias=False,
         checkpoint=True,
     )
-    calibration_config = QuantizationCalibrationConfig(
-        transformer_engine_calibration_decay=0.5
-    )
+    calibration_config = QuantizationCalibrationConfig(transformer_engine_calibration_decay=0.5)
     torch.manual_seed(123)
     calibration_input = torch.randn((16, 32), dtype=torch.bfloat16, device="cuda")
     with torch.no_grad():
