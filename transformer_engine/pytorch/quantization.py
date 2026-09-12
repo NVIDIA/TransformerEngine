@@ -1073,7 +1073,7 @@ def _update_amax_history(amax_history: torch.Tensor) -> torch.Tensor:
     return amax_history
 
 
-@torch.jit.script
+@jit_fuser
 def _default_get_amax_and_update_history(
     amax_history: torch.Tensor,
     amax_compute_algo: str,
