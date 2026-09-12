@@ -18,7 +18,10 @@ import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch.torch_version import torch_version
-from transformer_engine.pytorch.tensor.utils import clear_columnwise_cache, is_custom
+from transformer_engine.pytorch.tensor.utils import (
+    clear_columnwise_cache,
+    is_custom,
+)
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
     _ub_communicators,
@@ -73,6 +76,10 @@ from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor.hybrid_tensor import HybridQuantizer
 from ..tensor.identity_tensor import IdentityQuantizer
 from ._common import (
+    _get_calibration_metadata_buffers,
+    _is_in_activation_recompute_phase,
+    _resolve_calibration_quantizer,
+    _supports_calibration_decay,
     apply_normalization,
     set_quantizer_amax_reduction_group,
     set_quantizer_usage_for_wgrad_all_gather,
@@ -244,6 +251,8 @@ class _LayerNormMLP(torch.autograd.Function):
             checkpoint,
             debug,
             is_fsdp2,
+            transformer_engine_calibration_decay,
+            calibration_buffers,
             recompute_for_bwd,
         ) = non_tensor_args
         if fp8:
@@ -346,6 +355,8 @@ class _LayerNormMLP(torch.autograd.Function):
                 "checkpoint": checkpoint,
                 "debug": debug,
                 "is_fsdp2": is_fsdp2,
+                "transformer_engine_calibration_decay": transformer_engine_calibration_decay,
+                "calibration_buffers": calibration_buffers,
                 "recompute_for_bwd": True,  # set this to true for recomputation phase
             }
         # Make sure input dimensions are compatible
@@ -557,12 +568,39 @@ class _LayerNormMLP(torch.autograd.Function):
         if fc2_bias is not None:
             fc2_bias = cast_if_needed(fc2_bias, bias_dtype)
 
-        # Calibrate quantizers if needed
-        if not fp8 and fp8_calibration:
-            if fc1_input_quantizer is not None:
-                fc1_input_quantizer.calibrate(ln_out_total)
-            if fc1_weight_quantizer is not None:
-                fc1_weight_quantizer.calibrate(fc1_weight)
+        fc1_input_calibration_quantizer = _resolve_calibration_quantizer(
+            ln_out_total, fc1_input_quantizer
+        )
+        fc1_weight_calibration_quantizer = _resolve_calibration_quantizer(
+            fc1_weight_final, fc1_weight_quantizer
+        )
+
+        fc1_input_calibration_buffers = {}
+        fc1_weight_calibration_buffers = {}
+
+        # Calibrate FC1 quantizers and collect their metadata when requested.
+        should_calibrate = (
+            calibration_buffers is not None
+            and not _is_in_activation_recompute_phase()
+            and not is_recomputation
+        )
+        if should_calibrate:
+            if fc1_input_calibration_quantizer is not None:
+                if _supports_calibration_decay(type(fc1_input_calibration_quantizer)):
+                    fc1_input_calibration_quantizer.calibrate(
+                        ln_out_total,
+                        calibration_decay=transformer_engine_calibration_decay,
+                    )
+                else:
+                    fc1_input_calibration_quantizer.calibrate(ln_out_total)
+            if fc1_weight_calibration_quantizer is not None:
+                fc1_weight_calibration_quantizer.calibrate(fc1_weight_final)
+            fc1_input_calibration_buffers = _get_calibration_metadata_buffers(
+                "fc1_input", fc1_input_calibration_quantizer
+            )
+            fc1_weight_calibration_buffers = _get_calibration_metadata_buffers(
+                "fc1_weight", fc1_weight_calibration_quantizer
+            )
 
         # ------------------------------------------------------
         # FC1 GEMM
@@ -654,9 +692,17 @@ class _LayerNormMLP(torch.autograd.Function):
                 else:
                     act_out = activation_func(fc1_out, fc2_input_quantizer, **act_params)
 
-        if not fp8 and fp8_calibration:
-            if fc2_input_quantizer is not None:
-                fc2_input_quantizer.calibrate(act_out)
+        fc2_input_calibration_quantizer = _resolve_calibration_quantizer(
+            act_out, fc2_input_quantizer
+        )
+        if should_calibrate and fc2_input_calibration_quantizer is not None:
+            if _supports_calibration_decay(type(fc2_input_calibration_quantizer)):
+                fc2_input_calibration_quantizer.calibrate(
+                    act_out,
+                    calibration_decay=transformer_engine_calibration_decay,
+                )
+            else:
+                fc2_input_calibration_quantizer.calibrate(act_out)
 
         # we want to skip fc2 computation if we are checkpointing and recomputing,
         # otherwise we compute fc2
@@ -673,10 +719,22 @@ class _LayerNormMLP(torch.autograd.Function):
             ):  # we can safely get rid of these if this is the case
                 clear_tensor_data(fc1_out)
 
-            if not fp8 and fp8_calibration:
-
-                if fc2_weight_quantizer is not None:
-                    fc2_weight_quantizer.calibrate(fc2_weight)
+            fc2_weight_calibration_quantizer = _resolve_calibration_quantizer(
+                fc2_weight_final, fc2_weight_quantizer
+            )
+            if should_calibrate:
+                if fc2_weight_calibration_quantizer is not None:
+                    fc2_weight_calibration_quantizer.calibrate(fc2_weight_final)
+                calibration_buffers.update(fc1_input_calibration_buffers)
+                calibration_buffers.update(fc1_weight_calibration_buffers)
+                calibration_buffers.update(
+                    _get_calibration_metadata_buffers("fc2_input", fc2_input_calibration_quantizer)
+                )
+                calibration_buffers.update(
+                    _get_calibration_metadata_buffers(
+                        "fc2_weight", fc2_weight_calibration_quantizer
+                    )
+                )
 
             # Configure Userbuffers reduce-scatter if needed
             ub_obj_fc2out = None
@@ -2001,7 +2059,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self.zero_centered_gamma = zero_centered_gamma
         self.symmetric_ar_type = symmetric_ar_type
         self.checkpoint = checkpoint
-
         # GEMM-GELU fusion is currently only supported with split GEMM-AG overlap
         self.gemm_gelu_fusion = (
             bool(int(os.getenv("NVTE_GEMM_GELU_FUSION", "0")))
@@ -2381,6 +2438,15 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self._fp8_workspaces.get(cache_name_fc2) if cache_name_fc2 is not None else None
             )
 
+            calibration_config = FP8GlobalStateManager.get_calibration_config()
+            calibration_buffers = None
+            if calibration_config is not None:
+                calibration_buffers = {
+                    name: value
+                    for name, value in self._buffers.items()
+                    if name.endswith("_te_ptq_calibrated")
+                }
+
             non_tensor_args = (
                 self.eps,
                 is_first_microbatch,
@@ -2431,6 +2497,12 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.checkpoint,
                 debug,
                 self.is_fsdp2,
+                (
+                    calibration_config.transformer_engine_calibration_decay
+                    if calibration_config is not None
+                    else 0.0
+                ),
+                calibration_buffers,
             )
             out, ln_out, new_fc1_ws, new_fc2_ws = fwd_fn(
                 *autograd_ctx,
@@ -2445,6 +2517,14 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 fc2_bias if self.apply_bias and not self.gemm_bias_unfused_add else None,
                 non_tensor_args,
             )
+
+            if calibration_buffers is not None:
+                for name, value in calibration_buffers.items():
+                    if value is not None:
+                        if name in self._buffers:
+                            setattr(self, name, value)
+                        else:
+                            self.register_buffer(name, value, persistent=False)
 
             if new_fc1_ws is not None and cache_name_fc1 is not None:
                 if isinstance(new_fc1_ws, torch.Tensor):

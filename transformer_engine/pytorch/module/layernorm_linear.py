@@ -17,7 +17,10 @@ import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch.torch_version import torch_version
-from transformer_engine.pytorch.tensor.utils import clear_columnwise_cache, is_custom
+from transformer_engine.pytorch.tensor.utils import (
+    clear_columnwise_cache,
+    is_custom,
+)
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
     get_ub,
@@ -66,6 +69,10 @@ from ..constants import FP8BwdTensorIdx, FP8FwdTensorIdx, GemmParallelModes, dis
 from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
 from ._common import (
+    _get_calibration_metadata_buffers,
+    _is_in_activation_recompute_phase,
+    _resolve_calibration_quantizer,
+    _supports_calibration_decay,
     apply_normalization,
     noop_cat,
     set_quantizer_amax_reduction_group,
@@ -124,7 +131,7 @@ class _LayerNormLinear(torch.autograd.Function):
             eps,
             is_first_microbatch,
             fp8,
-            fp8_calibration,
+            _fp8_calibration,
             wgrad_store,
             fuse_wgrad_accumulation,
             input_quantizer,
@@ -160,6 +167,8 @@ class _LayerNormLinear(torch.autograd.Function):
             symmetric_ar_type,
             debug,
             is_fsdp2,
+            transformer_engine_calibration_decay,
+            calibration_buffers,
         ) = non_tensor_args
         if fp8:
             backward_override = FP8GlobalStateManager.get_fp8_recipe().backward_override
@@ -376,12 +385,27 @@ class _LayerNormLinear(torch.autograd.Function):
             bias_dtype = torch.bfloat16
         bias = cast_if_needed(bias, bias_dtype) if bias is not None else bias
 
-        # Calibrate quantizers if needed
-        if not fp8 and fp8_calibration:
-            if input_quantizer is not None:
-                input_quantizer.calibrate(ln_out_total)
-            if weight_quantizer is not None:
-                weight_quantizer.calibrate(weight)
+        input_calibration_quantizer = _resolve_calibration_quantizer(ln_out_total, input_quantizer)
+        weight_calibration_quantizer = _resolve_calibration_quantizer(weightmat, weight_quantizer)
+
+        # Calibrate quantizers and buffer their metadata when requested.
+        if calibration_buffers is not None and not _is_in_activation_recompute_phase():
+            if input_calibration_quantizer is not None:
+                if _supports_calibration_decay(type(input_calibration_quantizer)):
+                    input_calibration_quantizer.calibrate(
+                        ln_out_total,
+                        calibration_decay=transformer_engine_calibration_decay,
+                    )
+                else:
+                    input_calibration_quantizer.calibrate(ln_out_total)
+            if weight_calibration_quantizer is not None:
+                weight_calibration_quantizer.calibrate(weightmat)
+            calibration_buffers.update(
+                _get_calibration_metadata_buffers("input", input_calibration_quantizer)
+            )
+            calibration_buffers.update(
+                _get_calibration_metadata_buffers("weight", weight_calibration_quantizer)
+            )
 
         # Choose whether to use GEMM kernel with split accumulator
         use_split_accumulator = _2X_ACC_FPROP
@@ -1765,6 +1789,15 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self._fp8_workspaces.get(cache_name) if cache_name is not None else None
             )
 
+            calibration_config = FP8GlobalStateManager.get_calibration_config()
+            calibration_buffers = None
+            if calibration_config is not None:
+                calibration_buffers = {
+                    name: value
+                    for name, value in self._buffers.items()
+                    if name.endswith("_te_ptq_calibrated")
+                }
+
             non_tensor_args = (
                 self.eps,
                 is_first_microbatch,
@@ -1805,6 +1838,12 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.symmetric_ar_type,
                 debug,
                 self.is_fsdp2,
+                (
+                    calibration_config.transformer_engine_calibration_decay
+                    if calibration_config is not None
+                    else 0.0
+                ),
+                calibration_buffers,
             )
             out, ln_out, new_weight_workspace = fwd_fn(
                 *autograd_ctx,
@@ -1816,6 +1855,14 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 bias_tensor if self.apply_bias and not self.gemm_bias_unfused_add else None,
                 non_tensor_args,
             )
+
+            if calibration_buffers is not None:
+                for name, value in calibration_buffers.items():
+                    if value is not None:
+                        if name in self._buffers:
+                            setattr(self, name, value)
+                        else:
+                            self.register_buffer(name, value, persistent=False)
 
             if new_weight_workspace is not None and cache_name is not None:
                 if isinstance(new_weight_workspace, torch.Tensor):

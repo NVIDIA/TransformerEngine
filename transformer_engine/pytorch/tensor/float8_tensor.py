@@ -17,14 +17,14 @@ from transformer_engine.common.recipe import (
 )
 from ..utils import canonicalize_process_group, devices_match, is_non_tn_fp8_gemm_supported
 from .storage.float8_tensor_storage import Float8TensorStorage, _FromFloat8Func
-from ..quantized_tensor import QuantizedTensor, Quantizer
+from ..quantized_tensor import QuantizedTensor, QuantizedTensorStorage, Quantizer
 from ..dynamo import register_value_opaque_quantizer
 from ._quantization_helpers import (
     _IdentityFunc,
     _resolve_view_shape,
     safe_quantized_repr,
 )
-from ..constants import dist_group_type, DType
+from ..constants import dist_group_type, DType, TE_DType_To_Torch
 
 aten = torch.ops.aten
 
@@ -93,6 +93,7 @@ class Float8Quantizer(Quantizer):
             columnwise=self.columnwise_usage,
         )
         quantizer.internal = self.internal
+        self._share_calibration_state_with(quantizer)
 
         return quantizer
 
@@ -124,9 +125,22 @@ class Float8Quantizer(Quantizer):
         """Quantize tensor implementation"""
         return tex.quantize(tensor, self)
 
-    def calibrate(self, tensor: torch.Tensor) -> None:
-        amin, amax = tensor.aminmax()
-        self.amax.copy_(torch.max(-amin, amax))
+    def calibrate(self, tensor: torch.Tensor, *, calibration_decay: float = 0.0) -> None:
+        if isinstance(tensor, (QuantizedTensor, QuantizedTensorStorage)):
+            # Retrieve the quantization metadata from quantized storage.
+            observed_amax = self.amax
+        else:
+            # If quantized amax metadata does not yet exist or calibrate() is called directly,
+            # then recompute the absmax without quantization. This path is
+            # not performant and SHOULD NOT be called within training or inference.
+            amin, amax = tensor.aminmax()
+            observed_amax = torch.max(-amin, amax).reshape(1)
+            self.amax.copy_(observed_amax)
+        self._update_calibration_value("amax", observed_amax, calibration_decay=calibration_decay)
+
+    def get_quantization_recipe_name(self) -> str:
+        """Get the stable name of the quantization recipe."""
+        return "fp8_delayed_scaling"
 
     def get_columnwise_shape(self, rowwise_data_shape: Iterable[int]) -> Tuple[int, ...]:
         """Calculate the shape of the columnwise data for Float8 1D blockwise quantization."""
@@ -276,6 +290,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
         )
         quantizer.internal = self.internal
         quantizer.optimize_for_gemm = self.optimize_for_gemm
+        self._share_calibration_state_with(quantizer)
 
         return quantizer
 
@@ -315,9 +330,38 @@ class Float8CurrentScalingQuantizer(Quantizer):
         """Quantize tensor implementation"""
         return tex.quantize(tensor, self)
 
-    def calibrate(self, tensor: torch.Tensor) -> None:
-        # current scaling don't need to calibrate
-        return
+    def calibrate(self, tensor: torch.Tensor, *, calibration_decay: float = 0.0) -> None:
+        """Compute and calibrate quantization metadata."""
+        if isinstance(tensor, (QuantizedTensor, QuantizedTensorStorage)):
+            # Retrieve the quantization metadata from quantized storage.
+            scale_inv = tensor._scale_inv
+        else:
+            # Direct calibration of a non-quantized tensor must reconstruct the metadata.
+            # This path is not performant and SHOULD NOT be called within training or inference.
+            amin, amax = tensor.aminmax()
+            amax = torch.maximum(-amin, amax).float().reshape(1)
+            if self.with_amax_reduction and torch.distributed.is_initialized():
+                torch.distributed.all_reduce(
+                    amax,
+                    op=torch.distributed.ReduceOp.MAX,
+                    group=self._canonicalized_amax_reduction_group(),
+                )
+            if self.amax_epsilon > 0.0:
+                amax.clamp_min_(self.amax_epsilon)
+            fp8_max = torch.finfo(TE_DType_To_Torch[self.dtype]).max
+            scale = fp8_max / amax
+            finite_scale = torch.finfo(tensor.dtype).max
+            scale.nan_to_num_(nan=float("nan"), posinf=finite_scale, neginf=finite_scale)
+            if self.force_pow_2_scales:
+                _, exponent = torch.frexp(scale)
+                scale = torch.ldexp(torch.ones_like(scale), exponent - 1)
+            scale.masked_fill_(torch.isinf(amax) | (amax == 0), 1.0)
+            scale_inv = torch.reciprocal(scale)
+        self._update_calibration_value("scale_inv", scale_inv, calibration_decay=calibration_decay)
+
+    def get_quantization_recipe_name(self) -> str:
+        """Get the stable name of the quantization recipe."""
+        return "fp8_current_scaling"
 
     def create_tensor_from_data(
         self,

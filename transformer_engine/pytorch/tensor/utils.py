@@ -27,6 +27,14 @@ from ..utils import is_non_tn_fp8_gemm_supported
 from ..constants import NVFP4_BLOCK_SCALING_SIZE, DType
 
 
+def get_quantization_recipe_name(quantizer: Optional[Quantizer]) -> str:
+    """Get a stable recipe name from a quantizer."""
+    quantizer = getattr(quantizer, "parent_quantizer", quantizer)
+    if quantizer is None:
+        return ""
+    return quantizer.get_quantization_recipe_name()
+
+
 def replace_raw_data(tensor: QuantizedTensor, new_raw_data: torch.Tensor):
     r"""Change a quantized tensor's data buffer while preserving values
 
