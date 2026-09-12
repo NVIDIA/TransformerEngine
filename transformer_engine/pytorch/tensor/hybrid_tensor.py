@@ -159,7 +159,6 @@ class HybridQuantizer(Quantizer):
 
     def calibrate(self, tensor: torch.Tensor, *, calibration_decay: float = 0.0) -> None:
         """HybridQuantizer calibrate() has not yet been implemented."""
-        pass
 
     @property
     def with_amax_reduction(self) -> bool:
