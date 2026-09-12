@@ -135,6 +135,10 @@ do
     fi
     NVTE_TORCH_COMPILE=0 NVTE_ALLOW_UNSAFE_PICKLE_EXTRA_STATE=1 python3 -m pytest -v -s --junitxml=$XML_ATTN $TE_PATH/tests/pytorch/attention/test_attention.py || test_fail "test_attention.py (FA $fa_version)"
   fi
+  if [ "$sm_arch" -eq 100 ] && [[ "$fa_version" == 4.* ]]; then
+    python3 -m pytest -v -s --junitxml="$XML_LOG_DIR/pytest_test_mixed_cp.xml" \
+      "$TE_PATH/tests/pytorch/attention/test_mixed_cp.py" || test_fail "test_mixed_cp.py"
+  fi
 done
 
 if [ "$RET" -ne 0 ]; then

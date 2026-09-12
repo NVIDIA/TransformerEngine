@@ -1654,6 +1654,44 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             device_compute_capability < (10, 0) and cp_size == 2
         )
 
+        ctx.use_fa4_cp_bwd = False
+        if (
+            os.getenv("NVTE_FUSED_ATTN_CP_USE_FAv4_BWD", "0") == "1"
+            and not torch.compiler.is_compiling()
+            and all(
+                (
+                    is_training,
+                    use_fused_attention,
+                    not fp8,
+                    dropout_p == 0,
+                    softcap == 0,
+                    not return_max_logit,
+                    attn_mask_type == "causal",
+                    attn_bias_type == "no_bias",
+                    attn_bias is None,
+                    qkv_format == "sbhd",
+                    cp_group_a2a is None,
+                    cu_seqlens_q_padded is None,
+                    cu_seqlens_kv_padded is None,
+                )
+            )
+        ):
+            from .mixed_cp import _is_supported
+
+            if _is_supported(q, k, v, cp_size):
+                # FusedAttention slices the cached lengths without copying. Match
+                # that storage without reading device values during graph capture.
+                full_lengths = dpa_utils.get_full_cu_seqlens(
+                    q.shape[1], q.shape[0] * cp_size, q.device
+                )
+                ctx.use_fa4_cp_bwd = all(
+                    lengths is not None
+                    and lengths.shape == full_lengths.shape
+                    and lengths.stride() == full_lengths.stride()
+                    and lengths.data_ptr() == full_lengths.data_ptr()
+                    for lengths in (cu_seqlens_q, cu_seqlens_kv)
+                )
+
         # set up attention args
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
@@ -2492,6 +2530,25 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             cu_seqlens_kv_padded,
             *other_tensors,
         ) = restore_from_func_ctx(ctx)
+        if ctx.use_fa4_cp_bwd:
+            from .mixed_cp import _backward
+
+            # The final ring buffer belongs to the next CP rank. Packing restores
+            # its token order while distributing heads over the same group.
+            dq, dk, dv = _backward(
+                q.reshape(ctx.orig_q_shape),
+                kv[: ctx.k_numel].reshape(ctx.orig_k_shape),
+                kv[ctx.k_numel :].reshape(ctx.orig_v_shape),
+                out.reshape(ctx.orig_o_shape),
+                dout.reshape(ctx.orig_o_shape),
+                softmax_lse,
+                ctx.cp_group,
+                ctx.softmax_scale,
+                ctx.deterministic,
+            )
+            nvtx_range_pop(f"{nvtx_label}")
+            return (None, dq, dk, dv) + (None,) * 27
+
         cu_seqlens_q_per_step = other_tensors[:cp_size]
         cu_seqlens_kv_per_step = other_tensors[cp_size : cp_size * 2]
         rng_states = other_tensors[cp_size * 2 : cp_size * 3]
