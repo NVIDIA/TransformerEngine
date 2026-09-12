@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, Hashable, Optional, Tuple
 
 import torch
@@ -119,46 +119,28 @@ def finalize_graph(graph, *, cache_site: Tuple[str, str]) -> int:
 
 @dataclass
 class GraphEntry:
-    """Built graph plus named graph tensors and stream-local workspaces."""
+    """Built graph plus named graph tensors."""
 
     graph: Any
     tensors: Dict[str, Any]
     workspace_size: int
     cache_site: Optional[Tuple[str, str]] = None
-    _workspaces: Dict[int, torch.Tensor] = field(default_factory=dict, repr=False)
-
-    def workspace(self, device: torch.device) -> torch.Tensor:
-        """Get a stable workspace for the current stream.
-
-        A workspace may be reused by asynchronous launches on one stream, but
-        must not be shared by independent streams. CUDA graph capture also
-        keeps the allocation alive for CUDA graph replay. PyTorch's caching
-        allocator is capture-aware, so a stream-specific workspace may be
-        created on the first captured invocation after the graph itself has
-        been warmed and cached.
-        """
-
-        device = torch.device(device)
-        stream = torch.cuda.current_stream(device)
-        stream_key = int(stream.cuda_stream)
-        workspace = self._workspaces.get(stream_key)
-        if workspace is None:
-            workspace = torch.empty(
-                self.workspace_size,
-                dtype=torch.uint8,
-                device=device,
-            )
-            self._workspaces[stream_key] = workspace
-        return workspace
 
     def execute(self, variant_pack: Dict[Any, Any], device: torch.device) -> None:
         """Execute the graph on PyTorch's current stream."""
 
         if self.cache_site is not None:
             record_event(*self.cache_site, "execute", device=_device_key(device)[1])
+        # Workspaces are execution scratch. Keeping them in graph cache entries
+        # retains one potentially large allocation for every cached configuration.
+        workspace = torch.empty(
+            self.workspace_size,
+            dtype=torch.uint8,
+            device=device,
+        )
         self.graph.execute(
             variant_pack,
-            self.workspace(device),
+            workspace,
             handle=current_stream_handle(device),
         )
 
