@@ -571,7 +571,6 @@ class Quantizer(abc.ABC):
         ``calibration_decay`` decays the historical maximum before incorporating
         the current observation. A value of zero retains only the current metadata.
         """
-        pass
 
     def get_quantization_recipe_name(self) -> str:
         """Get the stable name of the quantization recipe."""

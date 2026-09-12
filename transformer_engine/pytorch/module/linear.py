@@ -33,6 +33,7 @@ from .base import (
 )
 from ._common import (
     _get_calibration_metadata_buffers,
+    _is_in_activation_recompute_phase,
     _resolve_calibration_quantizer,
     _supports_calibration_decay,
     can_reconstruct_wgrad_input_from_original,
@@ -613,7 +614,7 @@ def _linear_forward_impl(
     weight_calibration_quantizer = _resolve_calibration_quantizer(weightmat, weight_quantizer)
 
     # Calibrate quantizers and buffer their metadata when requested.
-    if args.calibration_buffers is not None:
+    if args.calibration_buffers is not None and not _is_in_activation_recompute_phase():
         if input_calibration_quantizer is not None:
             if _supports_calibration_decay(type(input_calibration_quantizer)):
                 input_calibration_quantizer.calibrate(

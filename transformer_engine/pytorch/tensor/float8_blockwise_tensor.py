@@ -244,11 +244,11 @@ class Float8BlockQuantizer(Quantizer):
         return True
 
     def calibrate(self, tensor: torch.Tensor, *, calibration_decay: float = 0.0) -> None:
+        """Float8BlockQuantizer does not yet support calibration."""
         # NOTE(@cspades): Currently, PTQ calibration requirements don't need
         # non-global / blockwise scaling factors, which are usually computed
         # on-the-fly during inference. Implement this interface for future
         # applications of blockwise FP8 calibration.
-        pass
 
     def get_quantization_recipe_name(self) -> str:
         """Get the stable name of the quantization recipe."""

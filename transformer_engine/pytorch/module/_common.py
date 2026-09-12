@@ -31,6 +31,17 @@ def _supports_calibration_decay(quantizer_type: type) -> bool:
     )
 
 
+def _is_in_activation_recompute_phase() -> bool:
+    """Whether a forward is running during activation recomputation."""
+    from ..distributed import in_fp8_activation_recompute_phase
+
+    if in_fp8_activation_recompute_phase():
+        return True
+    # Special hidden PyTorch AutoGrad identifier for activation recompute.
+    current_graph_task_id = getattr(torch._C, "_current_graph_task_id", None)
+    return current_graph_task_id is not None and current_graph_task_id() != -1
+
+
 def _resolve_calibration_quantizer(tensor: Any, quantizer: Any) -> Any:
     """Get the quantizer that owns calibration state for a tensor."""
     quantizer = getattr(tensor, "_quantizer", None) or quantizer

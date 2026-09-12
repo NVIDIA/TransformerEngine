@@ -77,6 +77,7 @@ from ..tensor.hybrid_tensor import HybridQuantizer
 from ..tensor.identity_tensor import IdentityQuantizer
 from ._common import (
     _get_calibration_metadata_buffers,
+    _is_in_activation_recompute_phase,
     _resolve_calibration_quantizer,
     _supports_calibration_decay,
     apply_normalization,
@@ -578,7 +579,11 @@ class _LayerNormMLP(torch.autograd.Function):
         fc1_weight_calibration_buffers = {}
 
         # Calibrate FC1 quantizers and collect their metadata when requested.
-        should_calibrate = calibration_buffers is not None
+        should_calibrate = (
+            calibration_buffers is not None
+            and not _is_in_activation_recompute_phase()
+            and not is_recomputation
+        )
         if should_calibrate:
             if fc1_input_calibration_quantizer is not None:
                 if _supports_calibration_decay(type(fc1_input_calibration_quantizer)):

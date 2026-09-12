@@ -33,6 +33,7 @@ from .base import (
 )
 from ._common import (
     _get_calibration_metadata_buffers,
+    _is_in_activation_recompute_phase,
     _resolve_calibration_quantizer,
     _supports_calibration_decay,
     can_reconstruct_wgrad_input_from_original,
@@ -588,7 +589,7 @@ class _GroupedLinear(torch.autograd.Function):
             use_split_accumulator=use_split_accumulator,
         )
 
-        if calibration_buffers is not None:
+        if calibration_buffers is not None and not _is_in_activation_recompute_phase():
             grouped_inputs = grouped_x.quantized_tensors
             if grouped_inputs is None:
                 grouped_inputs = grouped_x.split_into_quantized_tensors()
@@ -937,7 +938,7 @@ class _GroupedLinear(torch.autograd.Function):
             weights_fp8 = [cast_if_needed(weight, activation_dtype) for weight in weights]
 
         # Calibrate quantizers and buffer their metadata when requested.
-        if calibration_buffers is not None:
+        if calibration_buffers is not None and not _is_in_activation_recompute_phase():
             _calibrate_grouped_tensors(
                 inputmats,
                 weights_fp8,

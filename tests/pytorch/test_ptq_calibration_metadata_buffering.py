@@ -8,14 +8,17 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from torch.utils.checkpoint import checkpoint
 
 from transformer_engine.common.recipe import DelayedScaling, Float8CurrentScaling
 from transformer_engine.pytorch import is_fp8_available, is_nvfp4_available
+from transformer_engine.pytorch import distributed as te_distributed
 from transformer_engine.pytorch.constants import DType
 from transformer_engine.pytorch.graph import make_graphed_callables
 from transformer_engine.pytorch.module import GroupedLinear, LayerNormLinear, LayerNormMLP, Linear
 from transformer_engine.pytorch.module import _common
 from transformer_engine.pytorch.module import grouped_linear
+from transformer_engine.pytorch.module import layernorm_mlp
 from transformer_engine.pytorch.quantization import (
     FP8GlobalStateManager,
     FP8GlobalState,
@@ -107,6 +110,16 @@ def test_calibration_api_additions_preserve_existing_parameter_order():
         "is_first_fp8_module",
         "fp8_graph_capturing",
     ]
+
+
+def test_activation_recompute_detection_uses_te_marker(monkeypatch):
+    monkeypatch.setattr(
+        te_distributed,
+        "in_fp8_activation_recompute_phase",
+        lambda: True,
+    )
+
+    assert _common._is_in_activation_recompute_phase()
 
 
 def test_calibrating_argument_enables_default_calibration_config():
@@ -246,6 +259,113 @@ def test_linear_calibration_config_applies_activation_decay_only():
         module.get_buffer(f"input{buffer_suffix}"), torch.full((1,), 0.5, device="cuda")
     )
     torch.testing.assert_close(module.get_buffer(f"weight{buffer_suffix}"), weight_scale)
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.parametrize("use_reentrant", (False, True))
+def test_external_activation_recomputation_does_not_update_calibration(use_reentrant):
+    module = Linear(32, 32, params_dtype=torch.bfloat16, device="cuda", bias=False)
+    calibration_config = QuantizationCalibrationConfig(
+        transformer_engine_calibration_decay=0.5
+    )
+    recipe = Float8CurrentScaling()
+    buffer_name = "input_tensor_scale_inv_fp8_current_scaling_te_ptq_calibrated"
+
+    with (
+        torch.no_grad(),
+        autocast(enabled=False, recipe=recipe, calibration_config=calibration_config),
+    ):
+        module(torch.full((16, 32), 448.0, dtype=torch.bfloat16, device="cuda"))
+
+    def checkpointed_forward(inp):
+        with autocast(enabled=False, recipe=recipe, calibration_config=calibration_config):
+            return module(inp)
+
+    inp = torch.full(
+        (16, 32),
+        56.0,
+        dtype=torch.bfloat16,
+        device="cuda",
+        requires_grad=True,
+    )
+    out = checkpoint(checkpointed_forward, inp, use_reentrant=use_reentrant)
+    scale_after_forward = module.get_buffer(buffer_name).clone()
+    torch.testing.assert_close(scale_after_forward, torch.full((1,), 0.5, device="cuda"))
+
+    out.sum().backward()
+
+    torch.testing.assert_close(module.get_buffer(buffer_name), scale_after_forward)
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+def test_layernorm_mlp_recomputation_does_not_update_calibration(monkeypatch):
+    recomputation_states = []
+    is_in_recompute = _common._is_in_activation_recompute_phase
+
+    def record_recomputation_state():
+        state = is_in_recompute()
+        recomputation_states.append(state)
+        return state
+
+    monkeypatch.setattr(
+        layernorm_mlp,
+        "_is_in_activation_recompute_phase",
+        record_recomputation_state,
+    )
+    module = LayerNormMLP(
+        32,
+        32,
+        params_dtype=torch.bfloat16,
+        device="cuda",
+        bias=False,
+        checkpoint=True,
+    )
+    calibration_config = QuantizationCalibrationConfig(
+        transformer_engine_calibration_decay=0.5
+    )
+    torch.manual_seed(123)
+    calibration_input = torch.randn((16, 32), dtype=torch.bfloat16, device="cuda")
+    with torch.no_grad():
+        module.layer_norm_weight.fill_(448.0)
+    with (
+        torch.no_grad(),
+        autocast(
+            enabled=False,
+            recipe=Float8CurrentScaling(),
+            calibration_config=calibration_config,
+        ),
+    ):
+        module(calibration_input)
+
+    buffer_name = "fc1_input_tensor_scale_inv_fp8_current_scaling_te_ptq_calibrated"
+    previous_scale = module.get_buffer(buffer_name).clone()
+    with torch.no_grad():
+        module.layer_norm_weight.fill_(56.0)
+    inp = calibration_input.detach().clone().requires_grad_()
+
+    with autocast(
+        enabled=False,
+        recipe=Float8CurrentScaling(),
+        calibration_config=calibration_config,
+    ):
+        out = module(inp)
+
+    calibration_buffers = {
+        name: value.clone()
+        for name, value in module.named_buffers()
+        if name.endswith("_te_ptq_calibrated")
+    }
+    assert calibration_buffers
+    torch.testing.assert_close(
+        calibration_buffers[buffer_name],
+        previous_scale * 0.5,
+    )
+
+    out.sum().backward()
+
+    assert any(recomputation_states)
+    for name, value in calibration_buffers.items():
+        torch.testing.assert_close(module.get_buffer(name), value)
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)

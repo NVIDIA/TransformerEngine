@@ -70,6 +70,7 @@ from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
 from ._common import (
     _get_calibration_metadata_buffers,
+    _is_in_activation_recompute_phase,
     _resolve_calibration_quantizer,
     _supports_calibration_decay,
     apply_normalization,
@@ -130,7 +131,7 @@ class _LayerNormLinear(torch.autograd.Function):
             eps,
             is_first_microbatch,
             fp8,
-            fp8_calibration,
+            _fp8_calibration,
             wgrad_store,
             fuse_wgrad_accumulation,
             input_quantizer,
@@ -388,7 +389,7 @@ class _LayerNormLinear(torch.autograd.Function):
         weight_calibration_quantizer = _resolve_calibration_quantizer(weightmat, weight_quantizer)
 
         # Calibrate quantizers and buffer their metadata when requested.
-        if calibration_buffers is not None:
+        if calibration_buffers is not None and not _is_in_activation_recompute_phase():
             if input_calibration_quantizer is not None:
                 if _supports_calibration_decay(type(input_calibration_quantizer)):
                     input_calibration_quantizer.calibrate(
