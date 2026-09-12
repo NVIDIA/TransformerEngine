@@ -113,6 +113,29 @@ _alibi_cache = {
 _THD_POLICY_VALIDATION_CACHE_LIMIT = 64
 _thd_policy_validation_cache = []
 
+_PAD_BETWEEN_SEQS_EAGER_CACHE_LIMIT = 64
+_pad_between_seqs_eager_cache = {}
+
+
+def _pad_between_seqs_cache_key(
+    cu_seqlens_q, cu_seqlens_kv, cu_seqlens_q_padded, cu_seqlens_kv_padded
+):
+    def _key(t):
+        if t is None:
+            return (0, 0, 0, 0)
+        try:
+            version = t._version
+        except AttributeError:
+            version = 0
+        return (t.data_ptr(), tuple(t.shape), t.dtype, version)
+
+    return (
+        _key(cu_seqlens_q),
+        _key(cu_seqlens_kv),
+        _key(cu_seqlens_q_padded),
+        _key(cu_seqlens_kv_padded),
+    )
+
 
 def _get_thd_policy_attention_backend(
     policy: Dict[str, Any],
@@ -2706,24 +2729,47 @@ class DotProductAttention(TransformerEngineBaseModule):
                 else None
             )
 
-            # Default pad_between_seqs auto-detect. For THD, infer presence of
-            # inter-sequence padding from whether padded cu_seqlens were supplied --
-            # sync-free, and stable across eager and CUDA graph capture (the auto-detect
-            # must return the same value in both modes for backend selection to match).
-            # If padded cu_seqlens are the *same object* as the unpadded ones, no real
-            # inter-sequence padding exists (only THD tail padding) -- treat as False so
-            # FlashAttention v2/v4 remain eligible.
             if pad_between_seqs is None:
                 if qkv_format == "thd":
-                    if (
-                        cu_seqlens_q_padded is cu_seqlens_q
-                        and cu_seqlens_kv_padded is cu_seqlens_kv
-                    ):
-                        pad_between_seqs = False
+                    if is_graph_capturing():
+                        cache_key = _pad_between_seqs_cache_key(
+                            cu_seqlens_q,
+                            cu_seqlens_kv,
+                            cu_seqlens_q_padded,
+                            cu_seqlens_kv_padded,
+                        )
+                        if cache_key in _pad_between_seqs_eager_cache:
+                            pad_between_seqs = _pad_between_seqs_eager_cache[cache_key]
+                        elif (
+                            cu_seqlens_q_padded is cu_seqlens_q
+                            and cu_seqlens_kv_padded is cu_seqlens_kv
+                        ):
+                            pad_between_seqs = False
+                        else:
+                            pad_between_seqs = (
+                                cu_seqlens_q_padded is not None or cu_seqlens_kv_padded is not None
+                            )
                     else:
                         pad_between_seqs = (
-                            cu_seqlens_q_padded is not None or cu_seqlens_kv_padded is not None
+                            cu_seqlens_q_padded is not None
+                            and not torch.equal(cu_seqlens_q_padded[:-1], cu_seqlens_q[:-1])
+                        ) or (
+                            cu_seqlens_kv_padded is not None
+                            and not torch.equal(cu_seqlens_kv_padded[:-1], cu_seqlens_kv[:-1])
                         )
+                        cache_key = _pad_between_seqs_cache_key(
+                            cu_seqlens_q,
+                            cu_seqlens_kv,
+                            cu_seqlens_q_padded,
+                            cu_seqlens_kv_padded,
+                        )
+                        _pad_between_seqs_eager_cache[cache_key] = pad_between_seqs
+                        while (
+                            len(_pad_between_seqs_eager_cache) > _PAD_BETWEEN_SEQS_EAGER_CACHE_LIMIT
+                        ):
+                            _pad_between_seqs_eager_cache.pop(
+                                next(iter(_pad_between_seqs_eager_cache))
+                            )
                 else:
                     pad_between_seqs = False
 
