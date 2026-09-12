@@ -16,6 +16,7 @@ from jax.typing import DTypeLike
 
 from utils import assert_allclose
 
+from transformer_engine.common.testing import Case, benchmark
 from transformer_engine.jax.cpp_extensions import is_softmax_kernel_available
 from transformer_engine.jax.cpp_extensions.attention import AttnSoftmaxType
 from transformer_engine.jax.softmax import SoftmaxFusionType, softmax
@@ -98,15 +99,6 @@ class SoftmaxRunner:
             case _:
                 raise ValueError(f"Unknown {self.softmax_fusion_type=}")
 
-    def test_forward(self):
-        """
-        Test transformer_engine.jax.softmax.softmax fwd rule
-        """
-        self._setup_inputs()
-        primitive_out = softmax(self.logits, self.mask, self.scale_factor, self.softmax_fusion_type)
-        reference_out = __class__.reference_softmax(self.logits, self.mask, self.scale_factor)
-        assert_allclose(primitive_out, reference_out, dtype=self.dtype)
-
     def test_backward(self):
         """
         Test transformer_engine.jax.softmax.softmax bwd rule
@@ -149,10 +141,6 @@ class SoftmaxPrimitivesRunner(SoftmaxRunner):
     """
 
     @catch_unsupported
-    def test_forward(self):
-        return super().test_forward()
-
-    @catch_unsupported
     def test_backward(self):
         return super().test_backward()
 
@@ -187,6 +175,8 @@ class SoftmaxModuleRunner:
 
 
 # Run softmax primitives test
+# The pinned shape must be one the fused kernel supports, or the benchmark times a raise.
+@benchmark("b,s_q,s_kv,h", [(8, 2048, 2048, 16)])
 @pytest.mark.parametrize(
     "b, s_q, s_kv, h",
     [
@@ -222,9 +212,36 @@ class TestSoftmaxPrimitives:
         Test forward with parameterized configs
         """
         runner = SoftmaxPrimitivesRunner(b, s_q, s_kv, h, scale_factor, softmax_fusion_type, dtype)
-        runner.test_forward()
+        # Resolved here, outside the timed callables; depends only on construction-time fields.
+        supported = runner._is_support()
+
+        def setup():
+            runner._setup_inputs()
+            return runner
+
+        def evaluate(state):
+            # Unsupported configs must raise from the primitive rather than compute a result.
+            if not supported:
+                with pytest.raises(AssertionError):
+                    softmax(state.logits, state.mask, state.scale_factor, state.softmax_fusion_type)
+                return None
+            return softmax(state.logits, state.mask, state.scale_factor, state.softmax_fusion_type)
+
+        def reference(state):
+            if not supported:
+                return None
+            return state.reference_softmax(state.logits, state.mask, state.scale_factor)
+
+        def verify(actual, expected):
+            # Unsupported configs are checked by the expected raise in evaluate().
+            if not supported:
+                return
+            assert_allclose(actual, expected, dtype=dtype)
+
+        return Case(setup=setup, evaluate=evaluate, reference=reference, verify=verify)
 
     @staticmethod
+    @benchmark.skip(reason="returns no Case; keeps the class's axes out of collection")
     def test_backward(b, s_q, s_kv, h, scale_factor, softmax_fusion_type, dtype):
         """
         Test forward with parameterized configs
