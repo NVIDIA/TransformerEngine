@@ -521,8 +521,18 @@ void launch_cast_rowwise(const void *input, void *output, void *scales, int rows
     // Magic reciprocal of blocks_per_row, so the kernel recovers a row index with
     // a multiply-high instead of a division.  Powers of two would overflow the
     // general form, so they take the shift-only case.
-    NVTE_CHECK(num_blocks <= static_cast<int64_t>(UINT32_MAX),
-               "Specialized MXFP8 rowwise kernel indexes MX blocks with 32 bits; got ", num_blocks);
+    if constexpr (SWIZZLED_SCALES) {
+      // The packed 32-bit scale store assumes a 4-aligned group of blocks never
+      // straddles a row, which needs blocks_per_row to be a multiple of 4.  The
+      // dispatch only reaches here with cols % 128 == 0, which guarantees it, but
+      // that is the caller's invariant and this kernel would corrupt scales
+      // silently without it rather than fail.
+      NVTE_CHECK(blocks_per_row % 4 == 0,
+                 "GEMM-swizzled MXFP8 scales require the column count (", cols,
+                 ") to be a multiple of 128; blocks per row was ", blocks_per_row, ".");
+      NVTE_CHECK(num_blocks <= static_cast<int64_t>(UINT32_MAX),
+                 "GEMM-swizzled MXFP8 scales index MX blocks with 32 bits; got ", num_blocks);
+    }
     const uint32_t d = static_cast<uint32_t>(blocks_per_row);
     uint32_t magic_shift = 0;
     while ((1u << (magic_shift + 1)) <= d) {
