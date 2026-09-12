@@ -230,8 +230,8 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK)
       // Wait for TMA transfer to have finished reading shared memory.
       // Create a "bulk async-group" out of the previous bulk copy operation.
       ptx::cp_async_bulk_commit_group();
-      // Wait for the group to have completed reading from shared memory.
-      ptx::cp_async_bulk_wait_group_read<0>();
+      // Wait for the group to have completed the shared-to-global transfer.
+      ptx::cp_async_bulk_wait_group();
     }
 #else
     // Step 4 Alternative (when TMA is not available, skip writing to shared memory)

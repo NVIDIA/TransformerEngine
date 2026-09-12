@@ -380,7 +380,7 @@ __global__ void __launch_bounds__(kThreads)
         reinterpret_cast<const uint64_t *>(&output_tensor_map), col_base, row_base,
         reinterpret_cast<uint64_t *>(quantized));
     ptx::cp_async_bulk_commit_group();
-    ptx::cp_async_bulk_wait_group_read<0>();
+    ptx::cp_async_bulk_wait_group();
   }
   __syncthreads();
 #else

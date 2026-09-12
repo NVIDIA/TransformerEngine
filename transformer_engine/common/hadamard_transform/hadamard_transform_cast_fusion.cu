@@ -326,6 +326,8 @@ rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
 
   if (warp_idx == 2 && elect_one_sync()) {
     cute::initialize_barrier(shared_storage.tma_barrier[0], /* num_threads */ 1);
+    // Publish this separately initialized barrier before TMA can complete against it.
+    cutlass::arch::fence_barrier_init();
   }
   __syncthreads();
   using TMEM_LOAD_NEW = cute::SM100::TMEM::LOAD::SM100_TMEM_LOAD_32dp32b64x;
