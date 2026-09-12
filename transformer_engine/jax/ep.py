@@ -100,6 +100,21 @@ def _ep_domain_for_rank(mesh, ep_resource, rank, device_to_rank=None):
     return int(grid[row, 0]), col, int(grid.shape[0])
 
 
+def _ep_flattened_replica_groups(mesh, ep_resource):
+    """FLATTENED_ID replica groups for the EP axis, as a flat int64 array.
+
+    Each group fixes all non-ep mesh coordinates and varies ep. Returns
+    ``(flat_groups, ep_size)``.
+    """
+    shape = tuple(mesh.shape[a] for a in mesh.axis_names)
+    ep_pos = mesh.axis_names.index(ep_resource)
+    ep_size = shape[ep_pos]
+    world = int(np.prod(shape))
+    grid = np.arange(world, dtype=np.int64).reshape(shape)
+    groups = np.moveaxis(grid, ep_pos, -1).reshape(-1, ep_size)
+    return groups.reshape(-1), ep_size
+
+
 def ep_bootstrap(
     world_size,
     rank,
@@ -116,11 +131,14 @@ def ep_bootstrap(
     Must run inside the active JAX Mesh and a global_shard_guard; ep_size and
     num_ep_groups are read from the mesh axes named by MeshResource.ep_resource
     and MeshResource.dp_resource/fsdp_resource. Axes orthogonal to EP (tp, pp,
-    cp, ...) are supported and replicated across EP tensors.
+    cp, ...) are supported and replicated across EP tensors. Auto-selects
+    between self-hosted NCCL and XLA's borrowed comm (see
+    tex.ep.use_nccl_comm_from_xla).
 
     Args:
         world_size: Total number of processes (product of all mesh axes).
-        rank: Global rank of the calling process.
+        rank: Global rank of the calling process. Unused on the borrowed-comm
+            path, where each device's identity comes from its mesh position.
         num_experts: Total experts across the EP group.
         max_tokens_per_rank: Max tokens one rank dispatches per step (sizes send buffers).
         recv_capacity_per_rank: Max tokens one rank receives per step; set to
@@ -175,6 +193,42 @@ def ep_bootstrap(
     if num_experts % ep_size != 0:
         raise ValueError(f"num_experts ({num_experts}) must be divisible by ep_size ({ep_size}).")
 
+    common_cfg = {
+        "world_size": world_size,
+        "rank": rank,
+        "ep_size": ep_size,
+        "num_ep_groups": num_ep_groups,
+        "num_experts": num_experts,
+        "num_local_experts": num_experts // ep_size,
+        "max_tokens_per_rank": max_tokens_per_rank,
+        "recv_capacity_per_rank": recv_capacity_per_rank,
+        "hidden_dim": hidden_dim,
+    }
+
+    # Borrowed-comm path (auto-selected by tex.ep.use_nccl_comm_from_xla): XLA
+    # owns the EP communicator, so a one-shot bootstrap op fetches it and
+    # initializes EPBackend instead of a host-side UID exchange.
+    if tex.ep.use_nccl_comm_from_xla():
+        replica_groups, ep_group_size = _ep_flattened_replica_groups(mesh, ep_resource)
+        communication_id = tex.ep.EP_COMMUNICATION_ID
+        transformer_engine_jax.set_ep_bootstrap_params(
+            bytes(128),
+            ep_size,
+            0,
+            num_experts,
+            max_tokens_per_rank,
+            recv_capacity_per_rank,
+            hidden_dim,
+            max_num_sms=int(max_num_sms),
+            max_token_dtype=int(jax_dtype_to_te_dtype(max_token_dtype)),
+            drop_on_overflow=bool(drop_on_overflow),
+            borrowed_comm=True,
+        )
+        tex.ep.set_ep_config(tex.ep.EpConfig(**common_cfg))
+        # Initialize EPBackend now so trace-time handle_mem_size finds it ready.
+        tex.ep.run_borrowed_comm_bootstrap(mesh, replica_groups, ep_group_size, communication_id)
+        return
+
     UID_SIZE = 128
     root_rank, rank_within_group, _num_domains = _ep_domain_for_rank(mesh, ep_resource, rank)
     is_color_root = rank_within_group == 0
@@ -211,29 +265,19 @@ def ep_bootstrap(
         atexit.register(transformer_engine_jax.release_ep_resources)
         _atexit_registered = True
 
-    tex.ep.set_ep_config(
-        tex.ep.EpConfig(
-            world_size=world_size,
-            rank=rank,
-            ep_size=ep_size,
-            num_ep_groups=num_ep_groups,
-            num_experts=num_experts,
-            num_local_experts=num_experts // ep_size,
-            max_tokens_per_rank=max_tokens_per_rank,
-            recv_capacity_per_rank=recv_capacity_per_rank,
-            hidden_dim=hidden_dim,
-        )
-    )
+    tex.ep.set_ep_config(tex.ep.EpConfig(**common_cfg))
 
 
 def ep_finalize():
     """Tear down the EP communicator so ``ep_bootstrap`` can run again.
 
     Only for killing and re-bootstrapping EP mid-program (e.g. tests sweeping
-    configs); a normal run bootstraps once and lets atexit clean up. Calls the
-    process-global ``jax.clear_caches()`` so every cached executable releases
-    the NCCL comm it pins, then frees the EP resources. Call outside any active
-    EP computation.
+    configs); a normal run just exits without calling this. Self-hosted NCCL
+    also tears down via atexit; the borrowed-comm path has no atexit hook, so
+    use this for mid-process teardown there. Calls the process-global
+    ``jax.clear_caches()`` so every cached executable releases the NCCL comm
+    it pins, then frees the EP resources. Call outside any active EP
+    computation.
     """
     jax.clear_caches()
     transformer_engine_jax.release_ep_resources()
