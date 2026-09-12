@@ -1272,21 +1272,23 @@ def moe(
         the capacity used by ``ep_bootstrap``. Overflow is reported through
         ``total_recv_tokens`` when bootstrap used ``drop_on_overflow=True``.
 
-    Note that the per-expert dispatch-slot alignment is fixed internally
+    Notes
+    -----
+    The per-expert dispatch-slot alignment is fixed internally
     at 128 tokens (``_ALIGN_SIZE``); see that constant's docstring for
     rationale and how to extend if a future recipe needs >128.
 
     Axis-name parameters:
 
-    * ``ep_axis`` and ``data_parallelism_axes`` are *physical mesh
-      axis names* -- they index ``jax.sharding.Mesh.shape`` directly
+    * ``ep_axis`` and ``data_parallelism_axes`` are physical mesh
+      axis names: they index ``jax.sharding.Mesh.shape`` directly
       (to compute ``num_ep`` / ``dp_size`` and to construct
       ``P((dp..., ep), None, None)`` for the physical
       ``jax.lax.with_sharding_constraint`` calls that JAX requires
       to refer to real mesh axes).
     * ``input_axes``, ``gate_kernel_axes``, ``wi_kernel_axes``,
-      ``wo_kernel_axes`` are *logical axis names* (e.g.
-      ``"batch"``, ``"embed"``, ``"mlp"``, ``"exp"``) -- they get
+      ``wo_kernel_axes`` are logical axis names (e.g.
+      ``"batch"``, ``"embed"``, ``"mlp"``, ``"exp"``): they get
       resolved via the active Flax logical-axis rules and consumed
       by ``with_sharding_constraint_by_logical_axes``. They are
       ``Optional[str]`` tuples so a rule of ``None`` means

@@ -259,6 +259,7 @@ def fused_topk_with_score_function(
 ):
     """
     Fused topk with score function router.
+
     Parameters
     ----------
     logits : torch.Tensor in fp32/bf16/fp16
@@ -298,9 +299,10 @@ def fused_topk_with_score_function(
         Same shape as ``logits``.
     routing_map : torch.Tensor
         Same leading dims as ``logits``; trailing dim and dtype depend on
-        routing_map_format, or dense top-k indices when topk_indices is provided:
-        - BYTEMAP:   bool[*logits.shape[:-1], num_experts]
-        - BITMAP_U8: uint8[*logits.shape[:-1], ceil(num_experts/8)]
+        ``routing_map_format``, or dense top-k indices when ``topk_indices`` is provided:
+
+        - BYTEMAP: ``bool[*logits.shape[:-1], num_experts]``
+        - BITMAP_U8: ``uint8[*logits.shape[:-1], ceil(num_experts/8)]``,
           LSB-first bit-packed.
     """
     if logits.dtype == torch.float64:
@@ -498,6 +500,7 @@ def fused_moe_aux_loss(
 ) -> torch.Tensor:
     """
     Fused MoE aux loss.
+
     Parameters
     ----------
     probs : torch.Tensor in fp32/bf16/fp16

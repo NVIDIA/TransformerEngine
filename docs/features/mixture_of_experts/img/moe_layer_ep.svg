@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 300" width="100%" style="max-width: 900px;">
+  <defs>
+    <style>
+      .label { font: 15px sans-serif; fill: #333; text-anchor: middle; }
+      .small-label { font: 13px sans-serif; fill: #555; text-anchor: middle; }
+      .stage { fill: #f3e5f5; stroke: #7b1fa2; stroke-width: 2.5; }
+      .box-blue { fill: #e3f2fd; stroke: #1976d2; stroke-width: 2.5; }
+      .arrow { stroke: #424242; stroke-width: 2; fill: none; marker-end: url(#arrowhead); }
+    </style>
+    <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#424242"/>
+    </marker>
+  </defs>
+
+  <!-- Row 1: single device -->
+  <text x="450" y="30" class="label" style="font-weight: 600;">single device</text>
+  <rect x="60"  y="45" width="150" height="60" class="stage" rx="6"/>
+  <text x="135" y="80" class="label">Router</text>
+  <path d="M 210 75 L 270 75" class="arrow"/>
+  <rect x="270" y="45" width="150" height="60" class="stage" rx="6"/>
+  <text x="345" y="80" class="label">Token dispatch</text>
+  <path d="M 420 75 L 480 75" class="arrow"/>
+  <rect x="480" y="45" width="150" height="60" class="stage" rx="6"/>
+  <text x="555" y="80" class="label">Grouped MLP</text>
+  <path d="M 630 75 L 690 75" class="arrow"/>
+  <rect x="690" y="45" width="150" height="60" class="stage" rx="6"/>
+  <text x="765" y="80" class="label">Token combine</text>
+
+  <!-- Row 2: expert parallelism -->
+  <text x="450" y="170" class="label" style="font-weight: 600;">expert parallelism (experts sharded across ranks)</text>
+  <rect x="60"  y="185" width="150" height="60" class="stage" rx="6"/>
+  <text x="135" y="220" class="label">Router</text>
+  <path d="M 210 215 L 270 215" class="arrow"/>
+  <rect x="270" y="185" width="150" height="60" class="box-blue" rx="6"/>
+  <text x="345" y="211" class="label">All-to-all dispatch</text>
+  <text x="345" y="230" class="small-label">grouped by local expert</text>
+  <path d="M 420 215 L 480 215" class="arrow"/>
+  <rect x="480" y="185" width="150" height="60" class="stage" rx="6"/>
+  <text x="555" y="211" class="label">Grouped MLP</text>
+  <text x="555" y="230" class="small-label">local experts</text>
+  <path d="M 630 215 L 690 215" class="arrow"/>
+  <rect x="690" y="185" width="150" height="60" class="box-blue" rx="6"/>
+  <text x="765" y="211" class="label">All-to-all combine</text>
+  <text x="765" y="230" class="small-label">back in token order</text>
+</svg>

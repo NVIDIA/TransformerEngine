@@ -1,0 +1,103 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 350" width="100%" style="max-width: 720px;">
+  <defs>
+    <style>
+      .section-title { font: bold 17px sans-serif; fill: #333; text-anchor: middle; }
+      .grid-title { font: bold 14px sans-serif; fill: #333; text-anchor: middle; }
+      .label { font: 14px sans-serif; fill: #333; text-anchor: middle; }
+      .small-label { font: 13px sans-serif; fill: #555; text-anchor: middle; }
+      .tiny-label { font: 12px sans-serif; fill: #555; text-anchor: middle; }
+      .row-label { font: 12px sans-serif; fill: #555; text-anchor: end; }
+      .cell { fill: #fafafa; stroke: #9e9e9e; stroke-width: 1.2; }
+      .sel { fill: #e8f5e9; stroke: #388e3c; stroke-width: 1.8; }
+      .unsel { fill: #ffffff; stroke: #cfcfcf; stroke-width: 1; }
+      .stage { fill: #f3e5f5; stroke: #7b1fa2; stroke-width: 2.5; }
+      .arrow { stroke: #424242; stroke-width: 2; fill: none; marker-end: url(#arrowhead); }
+    </style>
+    <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#424242"/>
+    </marker>
+  </defs>
+
+  <text x="360" y="28" class="section-title">Router: scoring and top-k selection</text>
+
+  <!-- logits grid (4 experts x 3 tokens); selected = the top-2 per row -->
+  <text x="131" y="73" class="grid-title">logits</text>
+  <text x="74"  y="88" class="tiny-label">e0</text>
+  <text x="112" y="88" class="tiny-label">e1</text>
+  <text x="150" y="88" class="tiny-label">e2</text>
+  <text x="188" y="88" class="tiny-label">e3</text>
+
+  <text x="48" y="116" class="row-label">t0</text>
+  <rect x="55"  y="95" width="38" height="34" class="cell"/><text x="74"  y="116" class="small-label">1.2</text>
+  <rect x="93"  y="95" width="38" height="34" class="sel"/> <text x="112" y="116" class="small-label">3.1</text>
+  <rect x="131" y="95" width="38" height="34" class="cell"/><text x="150" y="116" class="small-label">0.4</text>
+  <rect x="169" y="95" width="38" height="34" class="sel"/> <text x="188" y="116" class="small-label">2.7</text>
+
+  <text x="48" y="150" class="row-label">t1</text>
+  <rect x="55"  y="129" width="38" height="34" class="sel"/> <text x="74"  y="150" class="small-label">2.9</text>
+  <rect x="93"  y="129" width="38" height="34" class="cell"/><text x="112" y="150" class="small-label">0.8</text>
+  <rect x="131" y="129" width="38" height="34" class="sel"/> <text x="150" y="150" class="small-label">2.2</text>
+  <rect x="169" y="129" width="38" height="34" class="cell"/><text x="188" y="150" class="small-label">1.0</text>
+
+  <text x="48" y="184" class="row-label">t2</text>
+  <rect x="55"  y="163" width="38" height="34" class="cell"/><text x="74"  y="184" class="small-label">0.5</text>
+  <rect x="93"  y="163" width="38" height="34" class="cell"/><text x="112" y="184" class="small-label">1.1</text>
+  <rect x="131" y="163" width="38" height="34" class="sel"/> <text x="150" y="184" class="small-label">3.3</text>
+  <rect x="169" y="163" width="38" height="34" class="sel"/> <text x="188" y="184" class="small-label">2.5</text>
+
+  <!-- arrow into the router op -->
+  <path d="M 210 146 L 298 146" class="arrow"/>
+
+  <!-- router op box -->
+  <rect x="300" y="118" width="150" height="56" class="stage"/>
+  <text x="375" y="141" class="label">score function</text>
+  <text x="375" y="158" class="label">+ top-k</text>
+
+  <!-- split arrows to the two outputs -->
+  <path d="M 450 138 C 505 138, 505 122, 553 122" class="arrow"/>
+  <path d="M 450 156 C 505 156, 505 262, 553 262" class="arrow"/>
+
+  <!-- routing_map grid (top right) -->
+  <text x="628" y="60" class="grid-title">routing_map</text>
+  <text x="577" y="76" class="tiny-label">e0</text>
+  <text x="611" y="76" class="tiny-label">e1</text>
+  <text x="645" y="76" class="tiny-label">e2</text>
+  <text x="679" y="76" class="tiny-label">e3</text>
+
+  <rect x="560" y="82"  width="34" height="28" class="unsel"/><text x="577" y="101" class="small-label">0</text>
+  <rect x="594" y="82"  width="34" height="28" class="sel"/>  <text x="611" y="101" class="small-label">1</text>
+  <rect x="628" y="82"  width="34" height="28" class="unsel"/><text x="645" y="101" class="small-label">0</text>
+  <rect x="662" y="82"  width="34" height="28" class="sel"/>  <text x="679" y="101" class="small-label">1</text>
+
+  <rect x="560" y="110" width="34" height="28" class="sel"/>  <text x="577" y="129" class="small-label">1</text>
+  <rect x="594" y="110" width="34" height="28" class="unsel"/><text x="611" y="129" class="small-label">0</text>
+  <rect x="628" y="110" width="34" height="28" class="sel"/>  <text x="645" y="129" class="small-label">1</text>
+  <rect x="662" y="110" width="34" height="28" class="unsel"/><text x="679" y="129" class="small-label">0</text>
+
+  <rect x="560" y="138" width="34" height="28" class="unsel"/><text x="577" y="157" class="small-label">0</text>
+  <rect x="594" y="138" width="34" height="28" class="unsel"/><text x="611" y="157" class="small-label">0</text>
+  <rect x="628" y="138" width="34" height="28" class="sel"/>  <text x="645" y="157" class="small-label">1</text>
+  <rect x="662" y="138" width="34" height="28" class="sel"/>  <text x="679" y="157" class="small-label">1</text>
+
+  <!-- probs grid (bottom right) -->
+  <text x="628" y="200" class="grid-title">probs</text>
+  <text x="577" y="216" class="tiny-label">e0</text>
+  <text x="611" y="216" class="tiny-label">e1</text>
+  <text x="645" y="216" class="tiny-label">e2</text>
+  <text x="679" y="216" class="tiny-label">e3</text>
+
+  <rect x="560" y="222" width="34" height="28" class="unsel"/><text x="577" y="241" class="tiny-label">0</text>
+  <rect x="594" y="222" width="34" height="28" class="sel"/>  <text x="611" y="241" class="tiny-label">.6</text>
+  <rect x="628" y="222" width="34" height="28" class="unsel"/><text x="645" y="241" class="tiny-label">0</text>
+  <rect x="662" y="222" width="34" height="28" class="sel"/>  <text x="679" y="241" class="tiny-label">.4</text>
+
+  <rect x="560" y="250" width="34" height="28" class="sel"/>  <text x="577" y="269" class="tiny-label">.7</text>
+  <rect x="594" y="250" width="34" height="28" class="unsel"/><text x="611" y="269" class="tiny-label">0</text>
+  <rect x="628" y="250" width="34" height="28" class="sel"/>  <text x="645" y="269" class="tiny-label">.3</text>
+  <rect x="662" y="250" width="34" height="28" class="unsel"/><text x="679" y="269" class="tiny-label">0</text>
+
+  <rect x="560" y="278" width="34" height="28" class="unsel"/><text x="577" y="297" class="tiny-label">0</text>
+  <rect x="594" y="278" width="34" height="28" class="unsel"/><text x="611" y="297" class="tiny-label">0</text>
+  <rect x="628" y="278" width="34" height="28" class="sel"/>  <text x="645" y="297" class="tiny-label">.6</text>
+  <rect x="662" y="278" width="34" height="28" class="sel"/>  <text x="679" y="297" class="tiny-label">.4</text>
+</svg>

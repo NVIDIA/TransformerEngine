@@ -90,15 +90,43 @@ Recipe availability
 Mixture of Experts (MoE) functions
 ----------------------------------
 
+See :doc:`Mixture of Experts <../features/mixture_of_experts/mixture_of_experts>` for an overview of
+how these functions fit together. ``GroupedLinear`` (the grouped GEMM used for the
+expert layers) is documented above with the other modules.
+
 .. autoapifunction:: transformer_engine.pytorch.moe_permute
 
 .. autoapifunction:: transformer_engine.pytorch.moe_permute_with_probs
+
+.. autoapifunction:: transformer_engine.pytorch.moe_permute_and_pad_with_probs
 
 .. autoapifunction:: transformer_engine.pytorch.moe_unpermute
 
 .. autoapifunction:: transformer_engine.pytorch.moe_sort_chunks_by_index
 
 .. autoapifunction:: transformer_engine.pytorch.moe_sort_chunks_by_index_with_probs
+
+.. autoapifunction:: transformer_engine.pytorch.router.fused_topk_with_score_function
+
+.. autoapifunction:: transformer_engine.pytorch.router.fused_compute_score_for_moe_aux_loss
+
+.. autoapifunction:: transformer_engine.pytorch.router.fused_moe_aux_loss
+
+Expert parallelism
+~~~~~~~~~~~~~~~~~~
+
+NCCL-based dispatch and combine for experts sharded across ranks. See
+:doc:`Expert parallelism <../features/mixture_of_experts/mixture_of_experts>`.
+
+.. autoapifunction:: transformer_engine.pytorch.ep.ep_bootstrap
+
+.. autoapifunction:: transformer_engine.pytorch.ep.ep_finalize
+
+.. autoapiclass:: transformer_engine.pytorch.ep.EpBuffer
+
+.. autoapifunction:: transformer_engine.pytorch.ep.ep_dispatch
+
+.. autoapifunction:: transformer_engine.pytorch.ep.ep_combine
 
 
 Communication-computation overlap
