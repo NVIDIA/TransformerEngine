@@ -21,6 +21,8 @@
 #include "../../util/ptx_arch_spec.cuh"
 #include "../../utils.cuh"
 #include "../core/common.cuh"
+#include "specialized/cast_bidim.h"
+#include "specialized/cast_rowwise.h"
 #include "specialized/quantize_mxfp8.cuh"
 #include "swizzle.cuh"
 
@@ -797,6 +799,30 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                   !use_2d_quantization && scaling_type_has_specialized_support) {
                 switch (scaling_type) {
                   case ScalingType::ROWWISE: {
+                    // The register-resident kernel supersedes the staged one below
+                    // wherever it applies: 10-20% faster on the cast-only path.
+                    // hasSpec has already established cast-only, leaving the input
+                    // type and the scale layout.
+                    //
+                    // It can emit GEMM-swizzled scales (and does so bit-exactly),
+                    // but not yet profitably: that layout packs a 512-byte tile as
+                    // 128 rows x 4 scale columns, and this kernel walks a flat,
+                    // row-major block sequence, so a warp's scales land 4 bytes to
+                    // a sector.  Measured 7-12% slower than the staged kernel, with
+                    // L2 read sectors identical and write sectors 8.7% higher --
+                    // the whole gap.  Packing the four columns that are contiguous
+                    // in the layout does not help; the next contiguous run comes
+                    // from rows 32 apart, which needs a two-dimensional traversal.
+                    // Until that exists the swizzled path stays with the kernel
+                    // below.
+                    if constexpr (std::is_same_v<IType, bf16> && !WITH_GEMM_SWIZZLED_SCALES) {
+                      specialized::launch_cast_rowwise<OType, WITH_GEMM_SWIZZLED_SCALES>(
+                          input.data.dptr, output->data.dptr,
+                          reinterpret_cast<void *>(scales_rowwise_ptr), static_cast<int>(rows),
+                          static_cast<int>(cols), static_cast<int>(scale_stride_rowwise), stream);
+                      break;
+                    }
+
                     using traits = specialized::CastTraits<IType, OType, true, false,
                                                            WITH_GEMM_SWIZZLED_SCALES>;
                     auto kernel = specialized::quantize_mxfp8_kernel_cast_only<traits>;
@@ -817,6 +843,27 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                     break;
                   }
                   case ScalingType::BIDIMENSIONAL: {
+                    // The register-resident kernel supersedes the TMA one below
+                    // wherever it applies: it reads its 32-row tile once and drives
+                    // both the rowwise and colwise passes from registers, roughly
+                    // 1.2x faster on shapes that fit its tiling.  hasSpec has
+                    // already established cast-only, leaving the input type, the
+                    // scale layout, and the tile alignment.
+                    // Gated per path: the colwise scale axis is transposed under the
+                    // GEMM swizzle, so this kernel does not handle it yet.
+                    if constexpr (std::is_same_v<IType, bf16> && !WITH_GEMM_SWIZZLED_SCALES) {
+                      if (rows % 32 == 0 && cols % 256 == 0) {
+                        specialized::launch_cast_bidim<OType>(
+                            input.data.dptr, output->data.dptr,
+                            reinterpret_cast<void *>(scales_rowwise_ptr),
+                            output->columnwise_data.dptr,
+                            reinterpret_cast<void *>(scales_colwise_ptr), static_cast<int>(rows),
+                            static_cast<int>(cols), static_cast<int>(scale_stride_rowwise),
+                            static_cast<int>(scale_stride_colwise), stream);
+                        break;
+                      }
+                    }
+
                     using traits =
                         specialized::CastTraitsSwizzle<IType, OType,
                                                        /*NumStages=*/2, /*IterM=*/1, /*IterN=*/4,
