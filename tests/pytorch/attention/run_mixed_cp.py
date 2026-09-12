@@ -5,6 +5,7 @@
 """Distributed worker for mixed context-parallel attention tests."""
 
 import os
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -148,8 +149,17 @@ def gather_reference(tensor, *, owner_shift=0):
     return torch.cat(chunks).chunk(size, dim=2)[rank].contiguous()
 
 
+@pytest.mark.parametrize("index64", [False, True])
 @pytest.mark.parametrize("batch,head_dim", [(1, 128), (2, 192)])
-def test_exchange_bits(batch, head_dim):
+def test_exchange_bits(monkeypatch, batch, head_dim, index64):
+    if index64:
+        # Exercise both wide-index kernels with the same small reference tensors.
+        def run_wide(run, *args, **kwargs):
+            return run(*args[:-1], True, **kwargs)
+
+        for kernel in (mixed_cp._pack_cp_tensors, mixed_cp._unpack_cp_tensors):
+            monkeypatch.setattr(kernel, "run", partial(run_wide, kernel.run))
+
     torch.manual_seed(78 + dist.get_rank())
     sequence, heads = 128, 16
     tensors = [
@@ -181,6 +191,10 @@ def test_exchange_bits(batch, head_dim):
         )
 
 
+@pytest.mark.skipif(
+    os.environ.get("NVTE_TEST_CP_LARGE_STRIDE") != "1",
+    reason="Set NVTE_TEST_CP_LARGE_STRIDE=1 for the 6 GiB-per-rank offset regression",
+)
 def test_exchange_large_stride():
     """Exercise offsets beyond INT_MAX without exchanging a large payload."""
     torch.manual_seed(78 + dist.get_rank())
