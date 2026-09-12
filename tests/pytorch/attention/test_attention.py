@@ -41,6 +41,7 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     fused_attn_fwd,
 )
 from transformer_engine.pytorch.distributed import CudaRNGStatesTracker
+from transformer_engine.pytorch._extra_state import UNSAFE_PICKLE_EXTRA_STATE_ENV
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.utils import (
     init_method_normal,
@@ -2406,7 +2407,7 @@ model_configs_fp8_extra_state = {
 @pytest.mark.skipif(get_cudnn_version() < (9, 3, 0), reason="cuDNN 9.3.0+ is required.")
 @pytest.mark.parametrize("model", ["large"])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_dpa_fp8_extra_state(model, dtype):
+def test_dpa_fp8_extra_state(model, dtype, monkeypatch):
     """Test DotProductAttention module in FP8 with checkpointing"""
     config = model_configs_fp8_extra_state[model]
     # Test backend availability
@@ -2423,6 +2424,8 @@ def test_dpa_fp8_extra_state(model, dtype):
         pytest.skip("No attention backend available.")
 
     outputs = _run_dpa_fp8_extra_state(dtype, config, checkpoint=False)
+    # The checkpoints are generated locally by this test and are therefore trusted.
+    monkeypatch.setenv(UNSAFE_PICKLE_EXTRA_STATE_ENV, "1")
     outputs_checkpoint = _run_dpa_fp8_extra_state(dtype, config, checkpoint=True)
     outputs_checkpoint_v1_6 = _run_dpa_fp8_extra_state(
         dtype, config, mimic_v1_6=True, checkpoint=True
