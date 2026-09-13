@@ -1603,8 +1603,12 @@ def test_slot_memory_snapshots_shared_kwarg_across_alternate_liveness() -> None:
 
 
 @pytest.mark.parametrize("reverse_replay", (False, True), ids=("forward", "reverse"))
-def test_slot_memory_reuses_variant_major_branches(reverse_replay) -> None:
+@pytest.mark.parametrize("debug_slots", (False, True))
+def test_slot_memory_reuses_variant_major_branches(
+    reverse_replay, debug_slots, monkeypatch
+) -> None:
     """Complete CP schedules must reuse one slot backing across variants."""
+    monkeypatch.setenv("NVTE_CUDA_GRAPH_SLOT_DEBUG", str(int(debug_slots)))
 
     class Module(torch.nn.Module):
         def forward(self, inp):
@@ -1640,26 +1644,84 @@ def test_slot_memory_reuses_variant_major_branches(reverse_replay) -> None:
             output = graph(inp)
             output.sum().backward()
             expected = 6.0 * inp.detach()
-            if not torch.allclose(inp.grad, expected):
-                print(
-                    "VARIANT_MAJOR_GRAD_MISMATCH",
-                    {
-                        "reverse_replay": reverse_replay,
-                        "variant": variant,
-                        "input_ptr": inp.data_ptr(),
-                        "output_ptr": output.data_ptr(),
-                        "grad_ptr": inp.grad.data_ptr(),
-                        "grad_head": inp.grad[:4].tolist(),
-                        "expected_head": expected[:4].tolist(),
-                        "grad_head_i64": inp.grad[:4].view(torch.int64).tolist(),
-                    },
-                    flush=True,
-                )
             torch.testing.assert_close(
                 inp.grad,
                 expected,
-                msg=lambda message: f"variant={variant}: {message}",
+                msg=lambda message: f"reverse_replay={reverse_replay}, variant={variant}: {message}",
             )
+    finally:
+        reset_graphs(graphed)
+
+
+@pytest.mark.parametrize("conflict", ("saved", "output"))
+def test_slot_memory_debug_rejects_live_branch_reuse(conflict, monkeypatch) -> None:
+    """An invalid branch forward must fail before corrupting the first branch's backward."""
+    monkeypatch.setenv("NVTE_CUDA_GRAPH_SLOT_DEBUG", "1")
+
+    class Module(torch.nn.Module):
+        def forward(self, inp):
+            return inp.square()
+
+    module = Module().cuda()
+    samples = tuple((torch.ones(32, device="cuda", requires_grad=True),) for _ in range(2))
+    slots = (
+        _slot(0, 0, 0),
+        _slot(0 if conflict == "saved" else 1, 1, 1 if conflict == "saved" else 0),
+    )
+    graphed = make_graphed_callables(
+        (module,) * 2,
+        samples,
+        num_warmup_iters=2,
+        _order=_variant_major_order([1, -1], 2),
+        _num_layers_per_chunk=[1, 1],
+        _reuse_graph_input_output_buffers=True,
+        _graph_memory_slots=slots,
+    )
+    try:
+        first = torch.full_like(samples[0][0], 2.0, requires_grad=True)
+        second = torch.full_like(samples[1][0], 3.0, requires_grad=True)
+        output = graphed[0](first)
+        with pytest.raises(RuntimeError, match="still live"):
+            graphed[1](second)
+        output.sum().backward()
+        torch.testing.assert_close(first.grad, 2 * first.detach())
+        graphed[1](second).sum().backward()
+        torch.testing.assert_close(second.grad, 2 * second.detach())
+        with torch.no_grad():
+            graphed[0](first)
+            graphed[1](second)
+    finally:
+        reset_graphs(graphed)
+
+
+def test_slot_memory_debug_rejects_repeated_backward(monkeypatch) -> None:
+    """The guard must not replay an old backward after a newer forward reuses its arena."""
+    monkeypatch.setenv("NVTE_CUDA_GRAPH_SLOT_DEBUG", "1")
+
+    class Module(torch.nn.Module):
+        def forward(self, inp):
+            return inp.square()
+
+    sample = torch.ones(32, device="cuda", requires_grad=True)
+    graphed = make_graphed_callables(
+        Module().cuda(),
+        (sample,),
+        num_warmup_iters=2,
+        _order=[1, -1],
+        _num_layers_per_chunk=[1],
+        _reuse_graph_input_output_buffers=True,
+        _graph_memory_slots=(_slot(0, 0, 0),),
+    )
+    try:
+        first = torch.full_like(sample, 2.0, requires_grad=True)
+        old_output = graphed(first)
+        old_output.sum().backward(retain_graph=True)
+        second = torch.full_like(sample, 3.0, requires_grad=True)
+        new_output = graphed(second)
+        with pytest.raises(RuntimeError, match="no longer owns"):
+            old_output.sum().backward()
+        new_output.sum().backward()
+        torch.testing.assert_close(second.grad, 2 * second.detach())
     finally:
         reset_graphs(graphed)
 

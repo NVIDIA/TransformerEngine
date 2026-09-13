@@ -9,6 +9,7 @@ import contextlib
 import gc
 import os
 import warnings
+import weakref
 from math import ceil
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, TypeVar, Union
 
@@ -39,6 +40,37 @@ _IS_GRAPH_SLOT_MEMORY_CAPTURING = False
 
 _T = TypeVar("_T")
 SingleOrTuple = Union[_T, Tuple[_T, ...]]
+
+
+class _SlotReplayGuard:
+    """Check logical forward/backward ownership without retaining autograd contexts."""
+
+    def __init__(self, slots):
+        self._keys = [(("saved", slot[0]), ("output", slot[1], slot[3], slot[4])) for slot in slots]
+        self._owners = weakref.WeakValueDictionary()
+
+    def acquire(self, graph_idx, ctx):
+        """Reject a conflicting forward before it overwrites static inputs or arenas."""
+        for key in self._keys[graph_idx]:
+            owner = self._owners.get(key)
+            if owner is not None:
+                raise RuntimeError(
+                    f"CUDA graph slot {key} is still live in graph {owner.slot_graph_idx}; "
+                    f"graph {graph_idx} cannot replay before its backward completes."
+                )
+        ctx.slot_graph_idx = graph_idx
+        for key in self._keys[graph_idx]:
+            self._owners[key] = ctx
+
+    def validate_backward(self, graph_idx, ctx):
+        """Reject a stale or repeated backward before replaying device work."""
+        if any(self._owners.get(key) is not ctx for key in self._keys[graph_idx]):
+            raise RuntimeError(f"CUDA graph {graph_idx} no longer owns its forward slot.")
+
+    def release(self, graph_idx):
+        """Release logical ownership after the backward and its stream waits are queued."""
+        for key in self._keys[graph_idx]:
+            del self._owners[key]
 
 
 class _AllocatorSettingsGuard:
@@ -2277,7 +2309,14 @@ def _make_graphed_callables(
 
     # Now for every per_callable list, per_callable_*[i] holds the stuff for the ith callable.
 
+    slot_replay_guard = (
+        _SlotReplayGuard(_graph_memory_slots)
+        if use_slot_memory and os.getenv("NVTE_CUDA_GRAPH_SLOT_DEBUG", "0") == "1"
+        else None
+    )
+
     def make_graphed_autograd_function(
+        graph_idx,
         fwd_graph,
         bwd_graph,
         module_params,
@@ -2302,6 +2341,9 @@ def _make_graphed_callables(
                 *inputs,
             ):
                 # pylint: disable=missing-function-docstring
+
+                if slot_replay_guard is not None:
+                    slot_replay_guard.acquire(graph_idx, ctx)
 
                 # Set flag for whether to update FP8 weight updates
                 ctx.is_first_module = FP8GlobalStateManager.is_first_fp8_module()
@@ -2339,6 +2381,9 @@ def _make_graphed_callables(
             @torch.autograd.function.once_differentiable
             def backward(ctx, *grads):
                 # pylint: disable=missing-function-docstring
+
+                if slot_replay_guard is not None:
+                    slot_replay_guard.validate_backward(graph_idx, ctx)
 
                 # Replay backward graph
                 if len(grads) != len(static_grad_outputs):
@@ -2382,6 +2427,8 @@ def _make_graphed_callables(
                         grad_inputs.append(grad_input.detach().clone())
                     else:
                         grad_inputs.append(grad_input.detach())
+                if slot_replay_guard is not None:
+                    slot_replay_guard.release(graph_idx)
                 return (None, None, None) + tuple(grad_inputs)
 
         def functionalized(*user_args, **user_kwargs):
@@ -2467,6 +2514,7 @@ def _make_graphed_callables(
     ret = []
     for i in range(len(sample_args)):
         graphed = make_graphed_autograd_function(
+            i,
             fwd_graphs[i],
             bwd_graphs[i],
             per_callable_module_params[i],
@@ -2677,6 +2725,9 @@ def make_graphed_callables(
         to the graph pool. Mutually exclusive variants must appear in ``_order`` as complete PP/VPP
         schedules. When ``sample_args`` is a mutable list, entries whose leading input is rebound to
         a staging surface are updated in place.
+        Set ``NVTE_CUDA_GRAPH_SLOT_DEBUG=1`` before capture to check saved-arena and output-family
+        ownership from forward through backward at replay time. This host-side check does not
+        synchronize devices or validate external consumers of returned outputs/gradients.
     pre_warmup_hook: callable, default = None
                       A hook function that will be called before the warmup iterations.
     post_warmup_hook: callable, default = None
