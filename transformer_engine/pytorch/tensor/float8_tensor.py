@@ -134,7 +134,7 @@ class Float8Quantizer(Quantizer):
             # then recompute the absmax without quantization. This path is
             # not performant and SHOULD NOT be called within training or inference.
             amin, amax = tensor.aminmax()
-            observed_amax = torch.max(-amin, amax).reshape(1)
+            observed_amax = torch.max(-amin, amax).float().reshape(1)
             self.amax.copy_(observed_amax)
         self._update_calibration_value("amax", observed_amax, calibration_decay=calibration_decay)
 

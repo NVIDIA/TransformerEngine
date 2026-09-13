@@ -2896,6 +2896,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
             fc2_grad_output_quantizer,
         ) = [None] * 10
         fc1_weight_quantizer, fc2_weight_quantizer = self._get_weight_quantizers()
+        # Calibration-only mode needs quantizers to observe non-quantized tensors.
         if self.fp8 or self.fp8_calibration:
             fc1_input_quantizer = self.quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM1_INPUT]
             fc1_input_quantizer.internal = True

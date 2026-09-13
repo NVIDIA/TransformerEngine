@@ -2679,7 +2679,8 @@ class GroupedLinear(TransformerEngineBaseModule):
             [None] * self.num_gemms,
             [None] * self.num_gemms,
         )
-        if self.fp8:
+        # Calibration-only mode needs quantizers to observe non-quantized tensors.
+        if self.fp8 or self.fp8_calibration:
             input_quantizers = [
                 self.quantizers["scaling_fwd"][
                     self._offsets["input"] + i * self._num_fp8_tensors_per_gemm["fwd"]

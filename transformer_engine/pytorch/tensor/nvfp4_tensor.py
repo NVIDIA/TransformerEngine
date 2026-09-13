@@ -348,16 +348,10 @@ class NVFP4Quantizer(Quantizer):
         else:
             # Direct calibration of a non-quantized tensor must reconstruct the metadata.
             # This path is not performant and SHOULD NOT be called within training or inference.
-            calibration_input = tensor
-            if self.with_rht and self.with_post_rht_amax:
-                original_shape = calibration_input.shape
-                calibration_input = (
-                    calibration_input.reshape(-1, 16).to(torch.bfloat16) @ self.rht_matrix
-                ).reshape(original_shape)
             if self.row_scaled_nvfp4:
-                amin, amax = calibration_input.aminmax(dim=-1)
+                amin, amax = tensor.aminmax(dim=-1)
             else:
-                amin, amax = calibration_input.aminmax()
+                amin, amax = tensor.aminmax()
             observed_amax = torch.maximum(-amin, amax).reshape(-1).float()
             if self.with_amax_reduction and torch.distributed.is_initialized():
                 torch.distributed.all_reduce(

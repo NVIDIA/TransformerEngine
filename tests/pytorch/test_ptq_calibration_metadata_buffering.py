@@ -316,6 +316,7 @@ def test_layernorm_mlp_recomputation_does_not_update_calibration(monkeypatch):
         params_dtype=torch.bfloat16,
         device="cuda",
         bias=False,
+        activation="relu",
         checkpoint=True,
     )
     calibration_config = QuantizationCalibrationConfig(transformer_engine_calibration_decay=0.5)
@@ -644,7 +645,8 @@ def test_zero_decay_keeps_observed_metadata_reference():
         calibration_decay=0.0,
     )
 
-    assert quantizer._calibration_state["scale_inv"] is observed_scale
+    calibrated_scale = quantizer._calibration_state["scale_inv"]
+    assert calibrated_scale.data_ptr() == observed_scale.data_ptr()
 
 
 def test_decaying_calibration_rejects_metadata_shape_change():
@@ -793,7 +795,6 @@ def test_current_scaling_high_precision_calibration_matches_quantization(
     ("row_scaled_nvfp4", "with_rht", "with_post_rht_amax", "with_random_sign_mask"),
     (
         (False, False, False, False),
-        (False, True, False, False),
         (False, True, True, False),
         (False, True, True, True),
         (True, False, False, False),

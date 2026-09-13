@@ -1450,6 +1450,7 @@ def test_quantizer_value_object(factory):
     rebuilt = eval(repr_str, dict(globals_))  # pylint: disable=eval-used
     assert rebuilt == a and rebuilt is not a
     assert hash(rebuilt) == hash(a)
+    assert rebuilt._calibration_state == {}
     # The deprecated amax-reduction group is never part of the value.
     assert getattr(rebuilt, "amax_reduction_group", None) is None
 

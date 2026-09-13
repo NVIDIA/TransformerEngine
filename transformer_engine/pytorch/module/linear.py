@@ -2621,10 +2621,13 @@ class Linear(TransformerEngineBaseModule):
         return out
 
     def _get_quantizers(self, fp8_output, fp8_grad, is_grad_enabled):
-        if not self.fp8:
+        if not self.fp8 and not self.fp8_calibration:
+            # Calibration-only mode needs quantizers to observe non-quantized tensors,
+            # so return None only when neither FP8 nor calibration is active.
             return [None] * 6
 
-        self._warn_missing_output_quantizer_role(fp8_output, fp8_grad)
+        if self.fp8:
+            self._warn_missing_output_quantizer_role(fp8_output, fp8_grad)
 
         grad_input_quantizer = None
         grad_weight_quantizer = None
