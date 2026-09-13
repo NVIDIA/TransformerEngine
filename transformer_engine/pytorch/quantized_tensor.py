@@ -137,7 +137,20 @@ def prepare_for_saving(
 
     tensor_list, tensor_objects_list = [], []
     for tensor in tensors:
-        if tensor is None or isinstance(tensor, torch.Tensor):
+        decompose_wrapper = False
+        if isinstance(tensor, torch.Tensor) and isinstance(tensor, QuantizedTensorStorage):
+            # Slot-memory capture must place graph-internal saved tensors in its explicit
+            # arena. Save a detached wrapper's physical tensors so the standard arena path
+            # can place them, then rebuild the wrapper for TE backward.
+            from .graph import is_graph_slot_memory_capturing
+
+            decompose_wrapper = is_graph_slot_memory_capturing()
+
+        if decompose_wrapper:
+            t, t_obj = tensor.detach().prepare_for_saving()
+            tensor_list.extend(t)
+            tensor_objects_list.append(t_obj)
+        elif tensor is None or isinstance(tensor, torch.Tensor):
             tensor_list.append(tensor)
             tensor_objects_list.append(None)
         else:
@@ -162,7 +175,10 @@ def restore_from_saved(
     """Recombine the tensor data and metadata during backward pass."""
     tensor_objects = []
     for tensor in tensors:
-        if tensor is None or isinstance(tensor, torch.Tensor):
+        if isinstance(tensor, QuantizedTensorStorage):
+            saved_tensors = tensor.restore_from_saved(saved_tensors)
+            tensor_objects.append(tensor)
+        elif tensor is None or isinstance(tensor, torch.Tensor):
             tensor_objects.append(saved_tensors[0])
             saved_tensors = saved_tensors[1:]
         else:
