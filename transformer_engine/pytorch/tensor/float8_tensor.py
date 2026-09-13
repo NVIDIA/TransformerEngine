@@ -131,8 +131,8 @@ class Float8Quantizer(Quantizer):
             observed_amax = self.amax
         else:
             # If quantized amax metadata does not yet exist or calibrate() is called directly,
-            # then recompute the absmax without quantization. This path is
-            # not performant and SHOULD NOT be called within training or inference.
+            # then recompute the absmax without quantization.
+            # This path is NOT performant and should only be used for non-quantized Tensor calibration.
             amin, amax = tensor.aminmax()
             observed_amax = torch.max(-amin, amax).float().reshape(1)
             self.amax.copy_(observed_amax)
@@ -337,7 +337,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
             scale_inv = tensor._scale_inv
         else:
             # Direct calibration of a non-quantized tensor must reconstruct the metadata.
-            # This path is not performant and SHOULD NOT be called within training or inference.
+            # This path is NOT performant and should only be used for non-quantized Tensor calibration.
             amin, amax = tensor.aminmax()
             amax = torch.maximum(-amin, amax).float().reshape(1)
             if self.with_amax_reduction and torch.distributed.is_initialized():

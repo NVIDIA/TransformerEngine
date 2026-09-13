@@ -347,7 +347,7 @@ class NVFP4Quantizer(Quantizer):
             observed_amax = tensor._amax_rowwise
         else:
             # Direct calibration of a non-quantized tensor must reconstruct the metadata.
-            # This path is not performant and SHOULD NOT be called within training or inference.
+            # This path is NOT performant and should only be used for non-quantized Tensor calibration.
             if self.row_scaled_nvfp4:
                 amin, amax = tensor.aminmax(dim=-1)
             else:
