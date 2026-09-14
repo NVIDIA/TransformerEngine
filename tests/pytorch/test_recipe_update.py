@@ -416,6 +416,8 @@ def test_delayed_runtime_rejects_role_and_slot_layout_updates():
         _ensure_runtime(module, recipe, num_gemms=2)
     assert all(current is old for current, old in zip(_runtime_views(module), old_views))
 
+
+def test_stateless_runtime_cannot_acquire_delayed_state():
     """An active stateless runtime cannot acquire delayed state mid-training."""
     module = Linear(16, 16, bias=False, device="cuda", name="linear")
     assert _ensure_runtime(module, Float8CurrentScaling())

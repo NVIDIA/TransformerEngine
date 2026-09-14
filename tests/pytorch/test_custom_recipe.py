@@ -2,6 +2,8 @@
 #
 # See LICENSE for license information.
 
+from dataclasses import replace
+
 import pytest
 import torch
 
@@ -1642,6 +1644,154 @@ def test_fp8block_recipe_state_unknown_or_none_role_falls_back_positionally():
     assert quantizers[0].block_scaling_dim == fp8_recipe.x_block_scaling_dim
     assert quantizers[1].block_scaling_dim == fp8_recipe.w_block_scaling_dim
     assert quantizers[2].block_scaling_dim == fp8_recipe.x_block_scaling_dim
+
+
+def test_fp8block_recipe_state_per_slot_qparams_are_honoured():
+    """Each slot reads its own qparams, not just its own block-scaling dim.
+
+    The recipe defaults give every slot the same ``amax_epsilon`` /
+    ``power_2_scale``, so the dispatch tests above cannot tell a correct
+    per-slot mapping from a uniform one. Distinct values per slot can.
+    """
+    available, reason = te.is_fp8_block_scaling_available(return_reason=True)
+    if not torch.cuda.is_available() or not available:
+        pytest.skip(f"FP8 block scaling unsupported: {reason}")
+
+    from transformer_engine.pytorch.quantization import Float8BlockScalingRecipeState
+
+    fp8_recipe = recipe.Float8BlockScaling()
+    fp8_recipe.fp8_quant_fwd_inp = replace(
+        fp8_recipe.fp8_quant_fwd_inp, amax_epsilon=0.125, power_2_scale=True
+    )
+    fp8_recipe.fp8_quant_fwd_weight = replace(
+        fp8_recipe.fp8_quant_fwd_weight, amax_epsilon=0.25, power_2_scale=False
+    )
+    fp8_recipe.fp8_quant_bwd_grad = replace(
+        fp8_recipe.fp8_quant_bwd_grad, amax_epsilon=0.5, power_2_scale=True
+    )
+
+    forward = Float8BlockScalingRecipeState(
+        fp8_recipe,
+        mode="forward",
+        num_quantizers=3,
+        roles=[
+            _fp8block_role("input"),
+            _fp8block_role("weight"),
+            _fp8block_role("output"),
+        ],
+    ).make_quantizers()
+    # input, then weight, then the output boundary slot mirroring input.
+    assert [q.amax_epsilon for q in forward] == [0.125, 0.25, 0.125]
+    assert [q.force_pow_2_scales for q in forward] == [True, False, True]
+
+    backward = Float8BlockScalingRecipeState(
+        fp8_recipe,
+        mode="backward",
+        num_quantizers=2,
+        roles=[
+            _fp8block_role("grad_output"),
+            _fp8block_role("grad_input"),
+        ],
+    ).make_quantizers()
+    assert [q.amax_epsilon for q in backward] == [0.5, 0.5]
+    assert [q.force_pow_2_scales for q in backward] == [True, True]
+
+
+# ----------------------------------------------------------------------
+# Role-aware dispatch in the current-scaling recipe state
+# ----------------------------------------------------------------------
+
+
+def _current_scaling_role(tensor_type):
+    """QuantizerRole helper for current-scaling tests."""
+    return QuantizerRole(module_type="linear", tensor_type=tensor_type, name="t")
+
+
+def test_current_scaling_custom_qparams_are_honoured():
+    """Input, weight and grad-output slots each carry their own customized qparams."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+
+    from transformer_engine.pytorch.quantization import Float8CurrentScalingRecipeState
+
+    cs_recipe = recipe.Float8CurrentScaling()
+    # Assigned after any shorthand flag so the per-slot values are what survives.
+    cs_recipe.fp8_quant_fwd_inp = replace(
+        cs_recipe.fp8_quant_fwd_inp, amax_epsilon=0.125, power_2_scale=True
+    )
+    cs_recipe.fp8_quant_fwd_weight = replace(
+        cs_recipe.fp8_quant_fwd_weight, amax_epsilon=0.25, power_2_scale=False
+    )
+    cs_recipe.fp8_quant_bwd_grad = replace(
+        cs_recipe.fp8_quant_bwd_grad, amax_epsilon=0.5, power_2_scale=True
+    )
+
+    forward = Float8CurrentScalingRecipeState(
+        cs_recipe,
+        mode="forward",
+        num_quantizers=2,
+        roles=[
+            _current_scaling_role("input"),
+            _current_scaling_role("weight"),
+        ],
+    ).make_quantizers()
+    assert [q.amax_epsilon for q in forward] == [0.125, 0.25]
+    assert [q.force_pow_2_scales for q in forward] == [True, False]
+
+    backward = Float8CurrentScalingRecipeState(
+        cs_recipe,
+        mode="backward",
+        num_quantizers=1,
+        roles=[_current_scaling_role("grad_output")],
+    ).make_quantizers()
+    assert backward[0].amax_epsilon == 0.5
+    assert backward[0].force_pow_2_scales is True
+
+
+def test_current_scaling_boundary_slots_keep_constructor_defaults():
+    """``output`` / ``grad_input`` do not borrow a neighboring slot's qparams.
+
+    Current scaling differs from the block-scaling states here: a boundary slot
+    falls back to ``use_power_2_scales`` and ``amax_epsilon=0.0`` rather than
+    reusing the input or gradient configuration.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+
+    from transformer_engine.pytorch.quantization import Float8CurrentScalingRecipeState
+
+    cs_recipe = recipe.Float8CurrentScaling(use_power_2_scales=False)
+    cs_recipe.fp8_quant_fwd_inp = replace(
+        cs_recipe.fp8_quant_fwd_inp, amax_epsilon=0.125, power_2_scale=True
+    )
+    cs_recipe.fp8_quant_bwd_grad = replace(
+        cs_recipe.fp8_quant_bwd_grad, amax_epsilon=0.5, power_2_scale=True
+    )
+
+    output_slot = Float8CurrentScalingRecipeState(
+        cs_recipe,
+        mode="forward",
+        num_quantizers=3,
+        roles=[
+            _current_scaling_role("input"),
+            _current_scaling_role("weight"),
+            _current_scaling_role("output"),
+        ],
+    ).make_quantizers()[2]
+    assert output_slot.amax_epsilon == 0.0
+    assert output_slot.force_pow_2_scales is False
+
+    grad_input_slot = Float8CurrentScalingRecipeState(
+        cs_recipe,
+        mode="backward",
+        num_quantizers=2,
+        roles=[
+            _current_scaling_role("grad_output"),
+            _current_scaling_role("grad_input"),
+        ],
+    ).make_quantizers()[1]
+    assert grad_input_slot.amax_epsilon == 0.0
+    assert grad_input_slot.force_pow_2_scales is False
 
 
 def _nvfp4_role(tensor_type):

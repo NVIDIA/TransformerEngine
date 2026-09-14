@@ -20,7 +20,6 @@ import torch
 import transformer_engine_torch as tex
 from transformer_engine.common.recipe import (
     Recipe,
-    QParams,
     DelayedScaling,
     Format,
     MXFP8BlockScaling,
@@ -106,11 +105,11 @@ class QuantizerRole:
 class _QuantizationRuntimeKey:
     """Immutable semantic request for one module or operation's quantizers.
 
-    ``recipe_config`` is the recipe-owned semantic configuration cached by
-    :class:`FP8GlobalStateManager`.  The role tuples preserve the ordered
-    forward and backward quantizer-slot layouts for this particular runtime
-    owner.  ``None`` is a meaningful boundary slot and is therefore retained
-    rather than filtered out.
+    ``recipe_config`` is the semantic configuration the recipe itself owns and
+    caches, so it stays identity-stable until the recipe is mutated.  The role
+    tuples preserve the ordered forward and backward quantizer-slot layouts for
+    this particular runtime owner.  ``None`` is a meaningful boundary slot and
+    is therefore retained rather than filtered out.
 
     This is intentionally private: runtime owners use it to decide whether a
     candidate runtime would construct the same quantizers as the active one.
@@ -1511,27 +1510,6 @@ class RecipeState(abc.ABC):
         return default_tensor_types[idx % len(default_tensor_types)]
 
     @staticmethod
-    def _qparams_for_tensor_type(
-        tensor_type: str,
-        *,
-        input_qparams: QParams,
-        weight_qparams: QParams,
-        grad_qparams: QParams,
-        output_uses_input_qparams: bool = True,
-        grad_input_uses_grad_qparams: bool = True,
-    ) -> Optional[QParams]:
-        """Select a recipe qparam bundle for a canonical tensor type."""
-        if tensor_type == "weight":
-            return weight_qparams
-        if tensor_type == "input" or (tensor_type == "output" and output_uses_input_qparams):
-            return input_qparams
-        if tensor_type == "grad_output" or (
-            tensor_type == "grad_input" and grad_input_uses_grad_qparams
-        ):
-            return grad_qparams
-        return None
-
-    @staticmethod
     def create(
         recipe: Recipe,
         *,
@@ -1737,14 +1715,16 @@ class Float8CurrentScalingRecipeState(RecipeState):
         from .tensor.float8_tensor import Float8CurrentScalingQuantizer
 
         def _make(tensor_type: str) -> Float8CurrentScalingQuantizer:
-            qparams = self._qparams_for_tensor_type(
-                tensor_type,
-                input_qparams=self.recipe.fp8_quant_fwd_inp,
-                weight_qparams=self.recipe.fp8_quant_fwd_weight,
-                grad_qparams=self.recipe.fp8_quant_bwd_grad,
-                output_uses_input_qparams=False,
-                grad_input_uses_grad_qparams=False,
-            )
+            if tensor_type == "input":
+                qparams = self.recipe.fp8_quant_fwd_inp
+            elif tensor_type == "weight":
+                qparams = self.recipe.fp8_quant_fwd_weight
+            elif tensor_type == "grad_output":
+                qparams = self.recipe.fp8_quant_bwd_grad
+            else:
+                # "output" and "grad_input" are boundary slots: they keep the
+                # constructor defaults instead of borrowing a neighbor's qparams.
+                qparams = None
 
             force_pow_2_scales = self.recipe.use_power_2_scales
             amax_epsilon = 0.0
@@ -1877,22 +1857,18 @@ class Float8BlockScalingRecipeState(RecipeState):
         from .tensor.float8_blockwise_tensor import Float8BlockQuantizer
 
         def _make(tensor_type: str) -> Float8BlockQuantizer:
-            qparams = self._qparams_for_tensor_type(
-                tensor_type,
-                input_qparams=self.recipe.fp8_quant_fwd_inp,
-                weight_qparams=self.recipe.fp8_quant_fwd_weight,
-                grad_qparams=self.recipe.fp8_quant_bwd_grad,
-            )
-            assert qparams is not None
             if tensor_type == "weight":
+                qparams = self.recipe.fp8_quant_fwd_weight
                 fp8_dtype = self.qw_dtype
                 block_scaling_dim = self.recipe.w_block_scaling_dim
             elif tensor_type in ("grad_output", "grad_input"):
+                qparams = self.recipe.fp8_quant_bwd_grad
                 fp8_dtype = self.qgrad_dtype
                 block_scaling_dim = self.recipe.grad_block_scaling_dim
             else:
                 # "input", "output", or any unknown forward type fall back to
                 # the input config, matching the legacy positional behavior.
+                qparams = self.recipe.fp8_quant_fwd_inp
                 fp8_dtype = self.qx_dtype
                 block_scaling_dim = self.recipe.x_block_scaling_dim
             return Float8BlockQuantizer(
@@ -1963,13 +1939,14 @@ class NVFP4BlockScalingRecipeState(RecipeState):
         from .tensor.nvfp4_tensor import NVFP4Quantizer
 
         def _make(tensor_type: str) -> NVFP4Quantizer:
-            qparams = self._qparams_for_tensor_type(
-                tensor_type,
-                input_qparams=self.recipe.fp4_quant_fwd_inp,
-                weight_qparams=self.recipe.fp4_quant_fwd_weight,
-                grad_qparams=self.recipe.fp4_quant_bwd_grad,
-            )
-            assert qparams is not None
+            if tensor_type == "weight":
+                qparams = self.recipe.fp4_quant_fwd_weight
+            elif tensor_type in ("grad_output", "grad_input"):
+                qparams = self.recipe.fp4_quant_bwd_grad
+            else:
+                # "input", "output", or any unknown forward type fall back to
+                # the input config, matching the legacy positional behavior.
+                qparams = self.recipe.fp4_quant_fwd_inp
             nvfp4_use_4over6 = False
             if tensor_type not in ("grad_output", "grad_input"):
                 if self.recipe.nvfp4_4over6 == "all":

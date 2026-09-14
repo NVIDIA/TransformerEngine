@@ -904,24 +904,25 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     Private quantization runtime lifecycle
     --------------------------------------
     ``init_fp8_metadata`` calls ``_ensure_quantization_runtime``. An unchanged
-    forward returns from its constant-time revision fast path. A cold-path
-    mismatch follows this staged workflow::
+    forward returns from a constant-time check: the module's role revision, its
+    GEMM count and the recipe's own configuration object (compared by identity,
+    then by equality) all still match the committed runtime. Anything else goes
+    through the cold path::
 
-        _ensure_quantization_runtime
-            -> _plan_quantization_update
-                -> resolve roles and requested runtime key
-                -> recognize an equal semantic runtime
-                -> reject unsupported transitions
-                -> _build_quantization_runtime
-                -> _validate_quantization_runtime
-            -> _apply_quantization_update
-                -> synchronize revisions for an equal runtime, or
-                -> _activate_quantization_runtime for a replacement
+        _plan_quantization_update      # builds and validates, publishes nothing
+            -> resolve roles and the requested runtime key
+            -> return early for a semantically equal runtime
+            -> reject a change a live CUDA graph has already captured
+            -> reject unsupported transitions
+            -> _build_quantization_runtime
+            -> _validate_quantization_runtime
+        _apply_quantization_update     # cannot fail
+            -> _activate_quantization_runtime, or re-mark an equal runtime
 
     Planning constructs and validates both forward and backward state without
-    publishing it. Applying a validated update is limited to revision updates
-    or no-fail publication of precomputed module state. Subclasses customize
-    candidate validation and activation through their corresponding hooks.
+    publishing any of it, so a rejected update leaves the module untouched.
+    Subclasses customize candidate validation and activation through their
+    corresponding hooks.
     """
 
     def __init__(
