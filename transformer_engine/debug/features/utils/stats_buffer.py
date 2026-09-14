@@ -16,6 +16,7 @@ import torch
 from nvdlfw_inspect.utils import gather_along_first_dim
 from nvdlfw_inspect.logging import MetricLogger
 
+from transformer_engine import te_device_type
 from transformer_engine.debug.features.utils.stats_computation import (
     STATS,
     DEPENDENCIES,
@@ -41,14 +42,14 @@ class _Buffer:
         for stat in stats:
             self.stats_to_compute = self.stats_to_compute | DEPENDENCIES[stat]
 
-        self._buffer = torch.zeros(len(STATS), dtype=torch.float32).cuda()
+        self._buffer = torch.zeros(len(STATS), dtype=torch.float32).to(te_device_type())
         self._new_buffer = self._buffer.clone()
         self._tmp_buffer = self._buffer.clone()
 
         # in case of data parallelism it is possible that layer will not be run on one node
         # modified is set to True if node is run
         # we do not take not run nodes into account
-        self.modified = torch.tensor([False], dtype=torch.bool).cuda()
+        self.modified = torch.tensor([False], dtype=torch.bool).to(te_device_type())
         self.iteration = None
         self.skip_reduction = False
 

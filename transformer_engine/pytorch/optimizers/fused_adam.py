@@ -17,6 +17,7 @@ from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensor
 from ..constants import DType
 from .multi_tensor_apply import multi_tensor_applier
+from transformer_engine import te_platform
 
 
 # Bound temporary NVTETensor handles created before the CUDA launcher chunks its metadata.
@@ -190,7 +191,7 @@ class FusedAdam(torch.optim.Optimizer):
             self._step_supports_amp_scaling = True
 
         # Skip buffer
-        self._dummy_overflow_buf = torch.tensor([0], dtype=torch.int, device="cuda")
+        self._dummy_overflow_buf = torch.tensor([0], dtype=torch.int, device=te_device_type())
         self.multi_tensor_adam = tex.multi_tensor_adam
         self.multi_tensor_adam_param_remainder = tex.multi_tensor_adam_param_remainder
         self.multi_tensor_adam_fp8 = tex.multi_tensor_adam_fp8
@@ -553,7 +554,7 @@ class FusedAdam(torch.optim.Optimizer):
         Arguments:
             closure (callable, optional): A closure that reevaluates the model
                 and returns the loss.
-            grad_scaler (torch.cuda.amp.GradScaler, optional):
+            grad_scaler (te_platform().amp.GradScaler, optional):
                 gradient scaler (default: None)
         """
         loss = None

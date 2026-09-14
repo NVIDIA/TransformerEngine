@@ -10,6 +10,7 @@ import torch
 
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.cpp_extensions.fused_attn import QKVFormat
+from transformer_engine import te_platform
 
 
 __all__ = ["RotaryPositionEmbedding", "apply_rotary_pos_emb", "apply_fused_qkv_rotary_pos_emb"]
@@ -54,7 +55,7 @@ class RotaryPositionEmbedding(torch.nn.Module):
         inv_freq = 1.0 / (
             self.rotary_base
             ** (
-                torch.arange(0, dim, 2, dtype=torch.float32, device=torch.cuda.current_device())
+                torch.arange(0, dim, 2, dtype=torch.float32, device=te_platform().current_device())
                 / dim
             )
         )
@@ -76,7 +77,7 @@ class RotaryPositionEmbedding(torch.nn.Module):
         offset: int, default = 0
             Fixed offset for frequencies.
         """
-        with torch.autocast(enabled=False, device_type="cuda"):
+        with torch.autocast(enabled=False, device_type=te_device_type()):
             seq = (
                 torch.arange(max_seq_len, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
                 + offset

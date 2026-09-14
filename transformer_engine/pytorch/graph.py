@@ -18,6 +18,7 @@ from torch._C import _graph_pool_handle
 from transformer_engine.common.recipe import DelayedScaling, Recipe
 from transformer_engine.pytorch.constants import dist_group_type
 from .quantization import (
+from transformer_engine import te_platform
     autocast,
     FP8GlobalStateManager,
     get_default_fp8_recipe,
@@ -103,7 +104,7 @@ def _graph_context_wrapper(*args, **kwargs):
     gc_is_enabled = gc.isenabled()
     if gc_is_enabled:
         gc.disable()
-    with torch.cuda.graph(*args, **kwargs):
+    with te_platform().graph(*args, **kwargs):
         yield
     if gc_is_enabled:
         gc.enable()
@@ -458,9 +459,9 @@ def _make_graphed_callables(
             for i in range(len(flatten_sample_args))
         ]
 
-    fwd_graphs = [torch.cuda.CUDAGraph() for _ in range(len(flatten_sample_args))]
-    bwd_graphs = [torch.cuda.CUDAGraph() for _ in range(len(flatten_sample_args))]
-    bwd_dw_graphs = [torch.cuda.CUDAGraph() for _ in range(len(flatten_sample_args))]
+    fwd_graphs = [te_platform().CUDAGraph() for _ in range(len(flatten_sample_args))]
+    bwd_graphs = [te_platform().CUDAGraph() for _ in range(len(flatten_sample_args))]
+    bwd_dw_graphs = [te_platform().CUDAGraph() for _ in range(len(flatten_sample_args))]
     graph_callables = [None for _ in range(len(flatten_sample_args))]
 
     def _returned_param_grad_clone_slots(static_grad_inputs, module_params):
@@ -494,7 +495,7 @@ def _make_graphed_callables(
     # Warmup
     # Hopefully prevents cudnn benchmarking and other lazy-initialization cuda work
     # from ending up in any captures.
-    torch.cuda.synchronize()
+    te_platform().synchronize()
 
     # Get warmup func and func_idx.
     warmup_func_idx = []
@@ -630,7 +631,7 @@ def _make_graphed_callables(
         need_bwd_dw_graph[func_idx] = need_backward_dw
 
     # Run warmup and do the above filtering.
-    with torch.cuda.stream(torch.cuda.Stream()):
+    with te_platform().stream(te_platform().Stream()):
         if pre_warmup_hook is not None:
             pre_warmup_hook()
 
@@ -688,7 +689,7 @@ def _make_graphed_callables(
 
         if post_warmup_hook is not None:
             post_warmup_hook()
-    torch.cuda.synchronize()
+    te_platform().synchronize()
 
     # All captures here share a mempool. To avoid replays corrupting each other's memory,
     # the safest approach is to capture all passes in the same order they'll run:
@@ -1081,14 +1082,14 @@ def _make_graphed_callables(
                         static_input_surface[i].copy_(inputs[i])
 
                 # Replay forward graph
-                if cuda_graph_stream != torch.cuda.current_stream():
-                    cuda_graph_stream.wait_stream(torch.cuda.current_stream())
+                if cuda_graph_stream != te_platform().current_stream():
+                    cuda_graph_stream.wait_stream(te_platform().current_stream())
                     with cuda_graph_stream:
                         fwd_graph.replay()
                     if cuda_graph_event is not None:
-                        torch.cuda.current_stream().wait_event(cuda_graph_event)
+                        te_platform().current_stream().wait_event(cuda_graph_event)
                     else:
-                        torch.cuda.current_stream().wait_stream(cuda_graph_stream)
+                        te_platform().current_stream().wait_stream(cuda_graph_stream)
                 else:
                     fwd_graph.replay()
                 if not isinstance(static_outputs, tuple):
@@ -1117,14 +1118,14 @@ def _make_graphed_callables(
                         # incoming grad is already in the right place
                         if g.data_ptr() != grad.data_ptr():
                             g.copy_(grad)
-                if ctx.cuda_graph_stream != torch.cuda.current_stream():
-                    ctx.cuda_graph_stream.wait_stream(torch.cuda.current_stream())
+                if ctx.cuda_graph_stream != te_platform().current_stream():
+                    ctx.cuda_graph_stream.wait_stream(te_platform().current_stream())
                     with ctx.cuda_graph_stream:
                         bwd_graph.replay()
                     if ctx.cuda_graph_event is not None:
-                        torch.cuda.current_stream().wait_event(ctx.cuda_graph_event)
+                        te_platform().current_stream().wait_event(ctx.cuda_graph_event)
                     else:
-                        torch.cuda.current_stream().wait_stream(ctx.cuda_graph_stream)
+                        te_platform().current_stream().wait_stream(ctx.cuda_graph_stream)
                 else:
                     bwd_graph.replay()
 
@@ -1177,7 +1178,7 @@ def _make_graphed_callables(
                 cuda_graph_stream = user_kwargs["cuda_graph_stream"]
                 user_kwargs.pop("cuda_graph_stream")
             else:
-                cuda_graph_stream = torch.cuda.current_stream()
+                cuda_graph_stream = te_platform().current_stream()
             if "cuda_graph_event" in user_kwargs:
                 cuda_graph_event = user_kwargs["cuda_graph_event"]
                 user_kwargs.pop("cuda_graph_event")
@@ -1689,12 +1690,12 @@ def make_graphed_callables(
     # Save RNG state.
     if graph_safe_rng_available():
         generators = [
-            torch.cuda.default_generators[torch.cuda.current_device()],
+            torch.cuda.default_generators[te_platform().current_device()],
             *get_all_rng_states().values(),
         ]
         original_rng_states = [state.get_state() for state in generators]
     else:
-        original_rng_states = torch.cuda.get_rng_state()
+        original_rng_states = te_platform().get_rng_state()
 
     graphed_callables = _make_graphed_callables(
         forward_funcs,
@@ -1719,7 +1720,7 @@ def make_graphed_callables(
         for gen, state in zip(generators, original_rng_states):
             gen.set_state(state)
     else:
-        torch.cuda.set_rng_state(original_rng_states)
+        te_platform().set_rng_state(original_rng_states)
 
     # Remove FP8 wrapper.
     for module_cls, old_call in old_call_funcs.items():

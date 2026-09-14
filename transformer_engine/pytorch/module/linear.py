@@ -19,6 +19,7 @@ from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch.torch_version import torch_version
 
 from .base import (
+from transformer_engine import te_platform, te_device_type
     fill_userbuffers_buffer_for_all_gather,
     get_dummy_wgrad,
     get_ub,
@@ -1539,7 +1540,7 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
                 # We use the send stream to copy into the userbuffers.
                 # This is the same stream that we will use to access the data in the AG,
                 # so we dont need to add any syncs yet.
-                with torch.cuda.stream(dgrad_send_stream):
+                with te_platform().stream(dgrad_send_stream):
                     grad_output, _ = fill_userbuffers_buffer_for_all_gather(
                         ub_obj_overlap_wgrad,
                         grad_output_arg,
@@ -1932,7 +1933,7 @@ class Linear(TransformerEngineBaseModule):
                       values as split sizes along dim 0. The resulting parameters will have
                       names that end in ``_weight`` or ``_bias``, so trailing underscores are
                       stripped from any provided names.
-    device : Union[torch.device, str], default = "cuda"
+    device : Union[torch.device, str], default=te_device_type()
           The device on which the parameters of the model will be allocated. It is the user's
           responsibility to ensure all parameters are moved to the GPU before running the
           forward pass.
@@ -2008,7 +2009,7 @@ class Linear(TransformerEngineBaseModule):
         params_dtype: Optional[torch.dtype] = None,
         parallel_mode: Optional[str] = None,
         parameters_split: Optional[Union[Tuple[str, ...], Dict[str, int]]] = None,
-        device: Union[torch.device, str] = "cuda",
+        device: Union[torch.device, str] = te_device_type(),
         ub_overlap_ag: bool = False,
         ub_overlap_rs: bool = False,
         ub_overlap_rs_dgrad: bool = False,
@@ -2319,7 +2320,7 @@ class Linear(TransformerEngineBaseModule):
         from torch._subclasses.fake_tensor import is_fake
 
         weight = getattr(self, self.weight_names[0], None)
-        if weight is None or weight.device.type != "cuda":
+        if weight is None or weight.device.type != te_device_type():
             return
         if is_fake(weight) or detect_fake_mode():
             return

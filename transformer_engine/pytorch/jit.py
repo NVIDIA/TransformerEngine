@@ -13,6 +13,7 @@ import torch
 from .torch_version import torch_version
 from .export import is_in_onnx_export_mode
 from .utils import gpu_autocast_ctx
+from transformer_engine import te_platform
 
 # pylint: disable=unnecessary-lambda-assignment
 
@@ -81,7 +82,8 @@ if torch.__version__ >= "2":
                 # Arguments are matched to names by position, which only holds
                 # without a *args in between.
                 assert not any(
-                    p.kind is inspect.Parameter.VAR_POSITIONAL for p in parameters.values()
+                    p.kind is inspect.Parameter.VAR_POSITIONAL
+                    for p in parameters.values()
                 ), f"no_torch_dynamo(when=...) does not support *args, which {f.__name__} takes"
                 parameter_names = list(parameters)
 
@@ -168,9 +170,9 @@ def bgrad_dgelu_fused_(
     x = inp + bias
     tanh_out = torch.tanh(0.79788456 * x * (1 + 0.044715 * x * x))
     # sqrt(2/pi) * 3 * 0.044715 -> 0.1070322243
-    ff = 0.5 * x * ((1 - tanh_out * tanh_out) * (0.79788456 + 0.1070322243 * x * x)) + 0.5 * (
-        1 + tanh_out
-    )
+    ff = 0.5 * x * (
+        (1 - tanh_out * tanh_out) * (0.79788456 + 0.1070322243 * x * x)
+    ) + 0.5 * (1 + tanh_out)
     dgelu = ff * grad_output
     bgrad = dgelu.sum(dim=0)
     return bgrad, dgelu
@@ -184,9 +186,9 @@ def dgelu_fused_(grad_output: torch.Tensor, inp: torch.Tensor) -> torch.Tensor:
     x = inp
     tanh_out = torch.tanh(0.79788456 * x * (1 + 0.044715 * x * x))
     # sqrt(2/pi) * 3 * 0.044715 -> 0.1070322243
-    ff = 0.5 * x * ((1 - tanh_out * tanh_out) * (0.79788456 + 0.1070322243 * x * x)) + 0.5 * (
-        1 + tanh_out
-    )
+    ff = 0.5 * x * (
+        (1 - tanh_out * tanh_out) * (0.79788456 + 0.1070322243 * x * x)
+    ) + 0.5 * (1 + tanh_out)
     dgelu = ff * grad_output
     return dgelu
 
@@ -203,7 +205,9 @@ def l2normalization_fused_(x: torch.Tensor, eps: float) -> torch.Tensor:
 
 
 @jit_fuser
-def l2normalization_fwd_fused_(x: torch.Tensor, eps: float) -> tuple[torch.Tensor, torch.Tensor]:
+def l2normalization_fwd_fused_(
+    x: torch.Tensor, eps: float
+) -> tuple[torch.Tensor, torch.Tensor]:
     """L2 normalization fused - training version that returns intermediate values"""
     x_fp32 = x.float()
     x_squared = x_fp32.pow(2)
@@ -257,7 +261,9 @@ def l2normalization_fused(x: torch.Tensor, eps: float) -> torch.Tensor:
         return l2normalization_fused_(x, eps)
 
 
-def l2normalization_fwd_fused(x: torch.Tensor, eps: float) -> tuple[torch.Tensor, torch.Tensor]:
+def l2normalization_fwd_fused(
+    x: torch.Tensor, eps: float
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Disable native AMP for l2normalization_fwd_fused_ - training version"""
     with gpu_autocast_ctx(enabled=False):
         return l2normalization_fwd_fused_(x, eps)
@@ -335,15 +341,25 @@ def warmup_jit_bias_dropout_add(
     """Compile BDA JIT function before the main training steps"""
 
     # Save cuda RNG state to ensure warmup does not affect reproducibility.
-    rng_state = torch.cuda.get_rng_state()
+    rng_state = te_platform().get_rng_state()
 
-    inp = torch.rand((seq_length, micro_batch_size, hidden_size), dtype=dtype, device="cuda")
-    residual = torch.rand((seq_length, micro_batch_size, hidden_size), dtype=dtype, device="cuda")
-    bias = torch.rand((hidden_size), dtype=dtype, device="cuda")
+    inp = torch.rand(
+        (seq_length, micro_batch_size, hidden_size),
+        dtype=dtype,
+        device=te_device_type(),
+    )
+    residual = torch.rand(
+        (seq_length, micro_batch_size, hidden_size),
+        dtype=dtype,
+        device=te_device_type(),
+    )
+    bias = torch.rand((hidden_size), dtype=dtype, device=te_device_type())
     dropout_rate = 0.1
     # Warmup JIT fusions with the input grad_enable state of both forward
     # prop and recomputation
-    for input_grad, bias_grad, residual_grad in zip([False, True], [True, True], [True, True]):
+    for input_grad, bias_grad, residual_grad in zip(
+        [False, True], [True, True], [True, True]
+    ):
         inp.requires_grad = input_grad
         bias.requires_grad = bias_grad
         residual.requires_grad = residual_grad
@@ -351,8 +367,8 @@ def warmup_jit_bias_dropout_add(
             output = bias_dropout_add_fused_train(inp, bias, residual, dropout_rate)
     del bias, inp, residual, output
 
-    torch.cuda.empty_cache()
-    torch.cuda.set_rng_state(rng_state)
+    te_platform().empty_cache()
+    te_platform().set_rng_state(rng_state)
 
 
 def warmup_jit_bias_dropout_add_all_dtypes(
@@ -372,13 +388,15 @@ def warmup_jit_bias_gelu(
     """Compile bias-gelu JIT function before the main training steps"""
 
     # Save cuda RNG state to ensure warmup does not affect reproducibility.
-    rng_state = torch.cuda.get_rng_state()
+    rng_state = te_platform().get_rng_state()
 
-    bias = torch.rand(ffn_hidden_size_per_partition, dtype=dtype, device="cuda")
+    bias = torch.rand(
+        ffn_hidden_size_per_partition, dtype=dtype, device=te_device_type()
+    )
     inp = torch.rand(
         (seq_length * micro_batch_size, ffn_hidden_size_per_partition),
         dtype=dtype,
-        device="cuda",
+        device=te_device_type(),
     )
     # Warmup JIT fusions with the input grad_enable state of both forward
     # prop and recomputation
@@ -389,8 +407,8 @@ def warmup_jit_bias_gelu(
             _ = gelu_fused_(inp)
     del bias, inp
 
-    torch.cuda.empty_cache()
-    torch.cuda.set_rng_state(rng_state)
+    te_platform().empty_cache()
+    te_platform().set_rng_state(rng_state)
 
 
 def warmup_jit_bias_gelu_all_dtypes(
@@ -407,12 +425,12 @@ def warmup_jit_l2normalization(
     """Compile L2Normalization JIT function before the main training steps"""
 
     # Save cuda RNG state to ensure warmup does not affect reproducibility.
-    rng_state = torch.cuda.get_rng_state()
+    rng_state = te_platform().get_rng_state()
 
     inp = torch.rand(
         (seq_length * micro_batch_size, hidden_size),
         dtype=dtype,
-        device="cuda",
+        device=te_device_type(),
     )
     eps = 1e-6
     # Warmup JIT fusions with the input grad_enable state of both forward
@@ -431,8 +449,8 @@ def warmup_jit_l2normalization(
                 output = l2normalization_fused_(inp, eps)
     del inp, output
 
-    torch.cuda.empty_cache()
-    torch.cuda.set_rng_state(rng_state)
+    te_platform().empty_cache()
+    te_platform().set_rng_state(rng_state)
 
 
 def warmup_jit_l2normalization_all_dtypes(

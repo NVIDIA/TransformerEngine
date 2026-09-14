@@ -15,6 +15,7 @@ from ...quantization import FP8GlobalStateManager
 from ...tensor import Quantizer
 from ..basic import AddExtraInput, BasicLinear, ConstantScale
 from ..op import (
+from transformer_engine import te_device_type
     FusedOperation,
     FusibleOperation,
     OperationContext,
@@ -75,7 +76,7 @@ class ForwardLinearScaleAdd(FusedOperation):
 
         # Get autocast dtype if needed
         if torch.is_autocast_enabled():
-            dtype = torch.get_autocast_dtype("cuda")
+            dtype = torch.get_autocast_dtype(te_device_type())
         else:
             dtype = linear_op.weight.dtype
 

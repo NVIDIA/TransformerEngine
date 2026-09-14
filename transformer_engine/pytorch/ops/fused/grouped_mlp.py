@@ -21,6 +21,7 @@ from ...constants import DType, MXFP8_BLOCK_SCALING_SIZE, NVFP4_BLOCK_SCALING_SI
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload, start_offload
 from ...cpp_extensions import general_gemm, general_grouped_gemm_for_grouped_tensor
 from ...distributed_weight import (
+from transformer_engine import te_platform
     is_distributed_weight,
     materialize_weight_for_forward,
     materialize_weight_for_backward,
@@ -548,7 +549,7 @@ def _cudnn_compute_wgrad(
           b = X  = (total_tokens, in_features) column-major.
     """
     if current_stream is None:
-        current_stream = torch.cuda.current_stream().cuda_stream
+        current_stream = te_platform().current_stream().cuda_stream
 
     out_features, in_features = weight_shape
     total_tokens = grouped_dy.logical_shape[0]
@@ -1149,7 +1150,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
 
         device = fc1_weight_param.device
         if torch.is_autocast_enabled():
-            dtype = torch.get_autocast_dtype("cuda")
+            dtype = torch.get_autocast_dtype(te_device_type())
         else:
             dtype = fc1_weight_param.dtype
 

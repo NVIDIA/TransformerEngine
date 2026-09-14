@@ -74,6 +74,7 @@ from typing import Optional
 from transformer_engine.pytorch.quantization import QuantizerRole
 from ..constants import DType
 from .quantizer_factories import mxfp8_factory, nvfp4_factory
+from transformer_engine import te_device_type
 
 # -----------------------------------------------------------------------------
 # Pre-training-Oriented Recipes
@@ -426,6 +427,6 @@ def nvfp4_linear_fp8_dpa_factory(
             is_dpa_boundary and "dpa_grad_input" in role.name
         )
         fp8_dtype = DType.kFloat8E5M2 if is_bwd_role else DType.kFloat8E4M3
-        return Float8CurrentScalingQuantizer(fp8_dtype=fp8_dtype, device="cuda")
+        return Float8CurrentScalingQuantizer(fp8_dtype=fp8_dtype, device=te_device_type())
 
     return nvfp4_factory(role)

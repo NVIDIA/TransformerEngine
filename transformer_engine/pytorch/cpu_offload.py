@@ -17,6 +17,7 @@ from transformer_engine.debug.pytorch.debug_state import TEDebugState
 import transformer_engine.pytorch as te
 import transformer_engine.pytorch.cpu_offload_v1 as v1_code_path
 from .quantized_tensor import (
+from transformer_engine import te_platform, te_device_type
     restore_from_saved,
     prepare_for_saving,
     QuantizedTensor,
@@ -73,8 +74,8 @@ def start_offload(*tensors: torch.Tensor, offload_base_tensor: bool = False):
         if t is None:
             return
         # Attach an event to mark when the tensor is ready for reload.
-        t.start_reload_event = torch.cuda.Event()
-        t.start_reload_event.record(torch.cuda.current_stream())
+        t.start_reload_event = te_platform().Event()
+        t.start_reload_event.record(te_platform().current_stream())
         if offload_base_tensor and t._base is not None:
             setattr(t, "offload_base_tensor", True)
 
@@ -286,7 +287,7 @@ class OffloadableLayerState:
             # Wait for the moment the tensor is ready to be offloaded.
             self.offload_stream.wait_event(self.fwd_gpu_tensor_group.events[tensor_id])  # type: ignore[arg-type]
 
-            with torch.cuda.stream(self.offload_stream):
+            with te_platform().stream(self.offload_stream):
                 if allocate_cpu_buffers:
                     offloaded_tensor = torch.empty_like(
                         tensor, device=torch.device("cpu"), pin_memory=True
@@ -308,7 +309,7 @@ class OffloadableLayerState:
         self.aux = aux
 
         if len(self.fwd_gpu_tensor_group.tensor_list) > 0:
-            self.finish_offload_event = torch.cuda.Event()
+            self.finish_offload_event = te_platform().Event()
             self.finish_offload_event.record(self.offload_stream)
 
     def release_activation_forward_gpu_memory(self):
@@ -321,7 +322,7 @@ class OffloadableLayerState:
         )
         self.state = "offload_finished"
         if len(self.fwd_gpu_tensor_group.tensor_list) > 0:
-            torch.cuda.current_stream().wait_event(self.finish_offload_event)  # type: ignore[arg-type]
+            te_platform().current_stream().wait_event(self.finish_offload_event)  # type: ignore[arg-type]
 
             # GPU memory can be released safely after the offload.
             # Notice that the memory needs to be kept alive when GPU->CPU copy is performed.
@@ -347,13 +348,13 @@ class OffloadableLayerState:
             # cannot move tensors from pool of one stream to another without
             # calling cudaFree and cudaMalloc again.
 
-            reloaded_tensor = torch.empty_like(tensor, device=torch.device("cuda"))
-            self.offload_stream.wait_stream(torch.cuda.current_stream())
+            reloaded_tensor = torch.empty_like(tensor, device=torch.device(te_device_type()))
+            self.offload_stream.wait_stream(te_platform().current_stream())
 
-            with torch.cuda.stream(self.offload_stream):
+            with te_platform().stream(self.offload_stream):
                 reloaded_tensor.copy_(tensor, non_blocking=True)
 
-            reload_tensor_event = torch.cuda.Event()
+            reload_tensor_event = te_platform().Event()
             reload_tensor_event.record(self.offload_stream)
             self.bwd_gpu_tensor_group.events.append(reload_tensor_event)
             self.bwd_gpu_tensor_group.tensor_list.append(reloaded_tensor)
@@ -394,8 +395,8 @@ class OffloadableLayerState:
             if hasattr(tensor, "start_reload_event"):
                 self.fwd_gpu_tensor_group.events.append(tensor.start_reload_event)
             else:
-                self.fwd_gpu_tensor_group.events.append(torch.cuda.Event())
-                self.fwd_gpu_tensor_group.events[-1].record(torch.cuda.current_stream())
+                self.fwd_gpu_tensor_group.events.append(te_platform().Event())
+                self.fwd_gpu_tensor_group.events[-1].record(te_platform().current_stream())
             return len(self.fwd_gpu_tensor_group.tensor_list) - 1
         return tensor
 
@@ -438,7 +439,7 @@ class OffloadableLayerState:
                 f"but got state='{self.state}' for tensor={tensor_or_tensor_id}"
             )
         # wait for the tensor to be reloaded
-        torch.cuda.current_stream().wait_event(
+        te_platform().current_stream().wait_event(
             self.bwd_gpu_tensor_group.events[tensor_or_tensor_id]
         )
         return self.bwd_gpu_tensor_group.tensor_list[tensor_or_tensor_id]
@@ -463,7 +464,7 @@ class OffloadableLayerState:
             not isinstance(t, torch.nn.Parameter)
             and not getattr(t, "_TE_do_not_offload", False)
             and not isinstance(t, torch._subclasses.FakeTensor)
-            and t.device.type == "cuda"
+            and t.device.type == te_device_type()
         ):
             if not t.is_contiguous() and not getattr(t, "offload_base_tensor", False):
                 warnings.warn(
@@ -506,7 +507,7 @@ class OffloadSynchronizer:
         offload_stream: Optional[torch.cuda.Stream] = None,
     ):
         self.num_layers = num_layers
-        self.offload_stream = offload_stream if offload_stream is not None else torch.cuda.Stream()
+        self.offload_stream = offload_stream if offload_stream is not None else te_platform().Stream()
 
         self.layer_states = {
             i: OffloadableLayerState(self.offload_stream, retain_pinned_cpu_buffers)
@@ -775,7 +776,7 @@ def get_cpu_offload_context(
 
     .. code-block:: python
 
-        offload_stream = torch.cuda.Stream()
+        offload_stream = te_platform().Stream()
         cpu_offload_context, sync_function, manual_controller = get_cpu_offload_context(
             enabled=True, model_layers=num_layers, manual_synchronization=True, offload_stream=offload_stream)
 

@@ -20,6 +20,7 @@ from torch.utils.checkpoint import detach_variable, noop_context_fn
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp._common_utils import _get_module_fsdp_state
 from torch.distributed.fsdp._traversal_utils import _get_fsdp_states_with_modules
+from transformer_engine import te_platform, te_device_type
 
 try:
     import torch.distributed._symmetric_memory as symm_mem
@@ -96,7 +97,7 @@ def is_graph_safe_rng_state(state: Union[torch.Tensor, torch.Generator]) -> bool
 
 
 def _get_cuda_rng_state(
-    device: Union[int, str, torch.device] = "cuda",
+    device: Union[int, str, torch.device] = te_device_type(),
     clone: bool = False,
     graph_safe: bool = True,
 ) -> torch.Tensor:
@@ -106,10 +107,10 @@ def _get_cuda_rng_state(
     if isinstance(device, str):
         device = torch.device(device)
     elif isinstance(device, int):
-        device = torch.device("cuda", device)
+        device = torch.device(te_device_type(), device)
     idx = device.index
     if idx is None:
-        idx = torch.cuda.current_device()
+        idx = te_platform().current_device()
     default_generator = torch.cuda.default_generators[idx]
     if graph_safe_rng_available() and graph_safe:
         if clone:
@@ -128,16 +129,16 @@ def _set_cuda_rng_state(
     """Sets the random number generator state of the current GPU."""
 
     if device == -1:
-        device = torch.device("cuda")
+        device = torch.device(te_device_type())
     elif isinstance(device, str):
         device = torch.device(device)
     elif isinstance(device, int):
-        device = torch.device("cuda", device)
+        device = torch.device(te_device_type(), device)
 
     def cb() -> None:
         idx = device.index
         if idx is None:
-            idx = torch.cuda.current_device()
+            idx = te_platform().current_device()
         default_generator = torch.cuda.default_generators[idx]
         if graph_safe_rng_available() and graph_safe:
             default_generator.graphsafe_set_state(new_state)
@@ -216,7 +217,7 @@ def split_tensor_into_1d_equal_chunks(
         data = torch.empty(
             partition_size,
             dtype=tensor.dtype,
-            device=torch.cuda.current_device(),
+            device=te_platform().current_device(),
             requires_grad=False,
         )
         data.copy_(tensor.view(-1)[start_index:end_index])
@@ -231,7 +232,7 @@ def gather_split_1d_tensor(tensor: torch.Tensor, tp_group: dist_group_type) -> t
     gathered = torch.empty(
         numel_gathered,
         dtype=tensor.dtype,
-        device=torch.cuda.current_device(),
+        device=te_platform().current_device(),
         requires_grad=False,
     )
     torch.distributed.all_gather_into_tensor(gathered, tensor, group=tp_group)
@@ -294,10 +295,10 @@ def _get_active_autocast_contexts():
     autocast_cached = torch.is_autocast_cache_enabled()
 
     if torch_version() >= (2, 4, 0):
-        gpu_autocast_enabled = torch.is_autocast_enabled("cuda")
-        gpu_autocast_dtype = torch.get_autocast_dtype("cuda")
+        gpu_autocast_enabled = torch.is_autocast_enabled(te_device_type())
+        gpu_autocast_dtype = torch.get_autocast_dtype(te_device_type())
         gpu_autocast_ctx = torch.amp.autocast(
-            "cuda",
+            te_device_type(),
             enabled=gpu_autocast_enabled,
             dtype=gpu_autocast_dtype,
             cache_enabled=autocast_cached,
@@ -314,7 +315,7 @@ def _get_active_autocast_contexts():
     else:
         gpu_autocast_enabled = torch.is_autocast_enabled()
         gpu_autocast_dtype = torch.get_autocast_gpu_dtype()
-        gpu_autocast_ctx = torch.cuda.amp.autocast(
+        gpu_autocast_ctx = te_platform().amp.autocast(
             gpu_autocast_enabled, gpu_autocast_dtype, autocast_cached
         )
 
@@ -963,7 +964,7 @@ def reduce_scatter_along_first_dim(
     dim_size[0] = dim_size[0] // world_size
 
     if output is None:
-        output = torch.empty(dim_size, dtype=inp.dtype, device=torch.cuda.current_device())
+        output = torch.empty(dim_size, dtype=inp.dtype, device=te_platform().current_device())
     handle = torch.distributed.reduce_scatter_tensor(
         output, inp.contiguous(), group=tp_group, async_op=async_op
     )
@@ -1045,7 +1046,7 @@ def _all_gather_fp8(
     out: Float8TensorStorage
     if quantizer is not None:
         dtype = torch.float32
-        device = "cuda"
+        device = te_device_type()
         if isinstance(inp, Float8Tensor):
             dtype = inp.dtype
             device = inp.device
@@ -1964,7 +1965,7 @@ def release_symm_mem_pool() -> None:
                 "release_symm_mem_pool()."
             )
         pools.pop(device, None)
-    torch.cuda.empty_cache()
+    te_platform().empty_cache()
 
 
 def symm_mem_alloc(
@@ -1985,7 +1986,7 @@ def symm_mem_alloc(
     be a shared static buffer. ``backend`` selects the symm-mem backend (default NCCL; for the pool it
     is captured at pool creation)."""
     if device is None:
-        device = torch.device("cuda", torch.cuda.current_device())
+        device = torch.device(te_device_type(), te_platform().current_device())
     if not HAS_TORCH_SYMMETRIC:
         raise RuntimeError(
             "torch.distributed._symmetric_memory is unavailable; symm_mem_alloc "

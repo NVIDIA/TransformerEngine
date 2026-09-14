@@ -15,6 +15,7 @@ from transformer_engine.pytorch.module import LayerNormMLP, LayerNorm, RMSNorm
 from transformer_engine.pytorch.attention.multi_head_attention import MultiheadAttention
 from transformer_engine.pytorch.attention.inference import InferenceParams
 from transformer_engine.pytorch.jit import (
+from transformer_engine import te_device_type
     set_jit_fusion_options,
     warmup_jit_bias_dropout_add_all_dtypes,
     get_bias_dropout_add,
@@ -199,7 +200,7 @@ class TransformerLayer(torch.nn.Module):
                         supports ``'limit'``, ``'alpha'``, and ``'glu_linear_offset'`` parameters.
                         You can set these as
                         ``activation_params={'limit': 7.0, 'alpha': 1.702, 'glu_linear_offset': 1.0}``.
-    device : Union[torch.device, str], default = "cuda"
+    device : Union[torch.device, str], default=te_device_type()
           The device on which the parameters of the model will be allocated. It is the user's
           responsibility to ensure all parameters are moved to the GPU before running the
           forward pass.
@@ -352,7 +353,7 @@ class TransformerLayer(torch.nn.Module):
         activation: str = "gelu",
         activation_params: Optional[dict] = None,
         normalization: str = "LayerNorm",
-        device: Union[torch.device, str] = "cuda",
+        device: Union[torch.device, str] = te_device_type(),
         attn_input_format: str = "sbhd",
         name: str = None,
         qk_norm_type: Optional[str] = None,

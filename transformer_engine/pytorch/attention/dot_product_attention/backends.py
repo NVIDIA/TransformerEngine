@@ -17,6 +17,7 @@ from packaging.version import Version as PkgVersion
 import torch
 import torch.nn.functional as F
 from transformer_engine.pytorch.utils import (
+from transformer_engine import te_platform
     get_device_compute_capability,
     split_tensor_along_dim,
 )
@@ -106,7 +107,7 @@ try:
 except PackageNotFoundError:
     pass  # only print warning if use_flash_attention_2 = True in get_attention_backend
 else:
-    if torch.cuda.is_available() and get_device_compute_capability() >= (10, 0):
+    if te_platform().is_available() and get_device_compute_capability() >= (10, 0):
         if fa_utils.is_version_supported(fa_utils.version, fa_utils.version_required_blackwell):
             fa_utils.is_installed = True
     elif fa_utils.is_version_supported(fa_utils.version, fa_utils.version_required):
@@ -127,7 +128,7 @@ else:
         # Setup Flash attention utils
         fa_utils.set_flash_attention_version()
     elif (
-        torch.cuda.is_available()
+        te_platform().is_available()
         and get_device_compute_capability() >= (8, 0)
         and dpa_utils._NVTE_FLASH_ATTN
     ):
@@ -577,7 +578,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
             output_size[2],
             output_size[3],
             dtype=query_layer.dtype,
-            device=torch.cuda.current_device(),
+            device=te_platform().current_device(),
         )
 
         scale = self.softmax_scale
@@ -596,10 +597,10 @@ class UnfusedDotProductAttention(torch.nn.Module):
             # S/dP are forced to use DS quantizers in DPA.init_fp8_metadata; revert them here for true CS emulation
             if fp8_recipe.float8_current_scaling():
                 S_quantizer = Float8CurrentScalingQuantizer(
-                    fp8_dtype=S_quantizer.dtype, device="cuda"
+                    fp8_dtype=S_quantizer.dtype, device=te_device_type()
                 )
                 dP_quantizer = Float8CurrentScalingQuantizer(
-                    fp8_dtype=dP_quantizer.dtype, device="cuda"
+                    fp8_dtype=dP_quantizer.dtype, device=te_device_type()
                 )
             # disable swizzle for MXFP8Quantizer
             for quantizer in [

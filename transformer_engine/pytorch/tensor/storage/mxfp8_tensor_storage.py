@@ -16,6 +16,7 @@ from ...quantized_tensor import InnerTensor, QuantizedTensorStorage, Quantizer
 from .._quantization_helpers import safe_quantized_repr
 
 from ...constants import (
+from transformer_engine import te_device_type
     TE_DType as torch_to_transformer_engine_dtype,
     MXFP8_BLOCK_SCALING_SIZE,
     DType,
@@ -44,8 +45,8 @@ class _FromMXFP8Func(torch.autograd.Function):
         te_dtype = torch_to_transformer_engine_dtype[dtype]
         # ``tex.dequantize`` requires CUDA-resident buffers.
         src_device = tensor.device
-        if src_device.type != "cuda":
-            cuda_tensor = tensor.to(device=torch.device("cuda"))
+        if src_device.type != te_device_type():
+            cuda_tensor = tensor.to(device=torch.device(te_device_type()))
             result = tex.dequantize(cuda_tensor, te_dtype)
             return result.to(device=src_device)
         return tex.dequantize(tensor, te_dtype)

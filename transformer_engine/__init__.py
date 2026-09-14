@@ -15,6 +15,26 @@ from pathlib import Path
 from typing import Optional, Tuple
 import transformer_engine.common
 
+
+# Plugin system: set NVTE_PLUGIN to the plugin module name to enable.
+# e.g. NVTE_PLUGIN=transformer_engine_plugin_fl
+_nvte_plugin = os.environ.get("NVTE_PLUGIN")
+if _nvte_plugin:
+    try:
+        from importlib import import_module
+
+        _patches = import_module(f"{_nvte_plugin}.patches")
+        _patches.apply_patches()
+    except Exception as e:
+        import warnings
+
+        warnings.warn(
+            f"NVTE_PLUGIN={_nvte_plugin} but plugin patch apply failed: {e}",
+            RuntimeWarning,
+            stacklevel=1,
+        )
+
+
 # Minimum NCCL version for the runtime-loaded NCCL EP backend.
 _NCCL_EP_MIN_VERSION = (2, 30, 4)
 
@@ -83,6 +103,7 @@ def require_nccl_ep() -> None:
 
 try:
     from . import pytorch
+    from .pytorch import te_platform, te_device_type
 except ImportError:
     pass
 except FileNotFoundError as e:

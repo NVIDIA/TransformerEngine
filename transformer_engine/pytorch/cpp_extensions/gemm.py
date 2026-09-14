@@ -17,7 +17,9 @@ from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.nvfp4_tensor import NVFP4Quantizer
-from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
+from ..tensor.storage.float8_blockwise_tensor_storage import (
+    Float8BlockwiseQTensorStorage,
+)
 from ..tensor.storage.float8_tensor_storage import Float8TensorStorage
 from ..tensor.storage.grouped_tensor_storage import GroupedTensorStorage
 from ..tensor.storage.hybrid_tensor_storage import HybridQuantizedTensorStorage
@@ -26,6 +28,7 @@ from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 from ..tensor.utils import is_custom
 from ..custom_recipes.gemm import custom_gemm
 from ...debug.pytorch.debug_quantization import DebugQuantizedTensor, DebugQuantizer
+from transformer_engine import te_platform
 
 __all__ = [
     "general_gemm",
@@ -40,7 +43,7 @@ _NUM_MAX_UB_STREAMS = 3
 
 def get_cublas_workspace_size_bytes() -> None:
     """Return 32 MiB if using hopper, 4 MiB for all other architectures."""
-    if torch.cuda.get_device_properties(torch.cuda.current_device()).major >= 9:
+    if torch.cuda.get_device_properties(te_platform().current_device()).major >= 9:
         # 32 MiB for NVFP4 GEMM, plus additional 1024 B for alignment and misc scales
         return 32 * 1024 * 1024 + 1024
     return 4_194_304
@@ -61,11 +64,15 @@ def get_cublas_workspace(device: int, ub: bool, grouped_gemm: bool) -> torch.Ten
         _multi_stream_cublas_workspace = []
         for _ in range(tex.get_num_cublas_streams()):
             _multi_stream_cublas_workspace.append(
-                torch.empty(get_cublas_workspace_size_bytes(), dtype=torch.uint8, device=device)
+                torch.empty(
+                    get_cublas_workspace_size_bytes(), dtype=torch.uint8, device=device
+                )
             )
         return _multi_stream_cublas_workspace
 
-    return torch.empty(get_cublas_workspace_size_bytes(), dtype=torch.uint8, device=device)
+    return torch.empty(
+        get_cublas_workspace_size_bytes(), dtype=torch.uint8, device=device
+    )
 
 
 def validate_gemm_scale(scale: Optional[float], required: bool) -> float:
@@ -104,7 +111,10 @@ def _nvfp4_row_scaled_gemm_inputs(
     B_metadata[b_amax_key] = output_row_scales.new_ones(1)
     B_metadata["row_scaled_nvfp4"] = False
 
-    assert output_row_scales.dtype == torch.float32 and output_col_scales.dtype == torch.float32
+    assert (
+        output_row_scales.dtype == torch.float32
+        and output_col_scales.dtype == torch.float32
+    )
     return (
         NVFP4TensorStorage(**A_metadata),
         NVFP4TensorStorage(**B_metadata),
@@ -151,7 +161,9 @@ def _unwrap_tensor(
     # Select the direction of a hybrid tensor, then process its sub-storage.
     if isinstance(tensor, HybridQuantizedTensorStorage):
         sub_storage = (
-            tensor.rowwise_sub_storage if usage == "rowwise" else tensor.columnwise_sub_storage
+            tensor.rowwise_sub_storage
+            if usage == "rowwise"
+            else tensor.columnwise_sub_storage
         )
         return _unwrap_tensor(sub_storage, usage)
 
@@ -234,10 +246,14 @@ def general_gemm(
         )
 
     if ub is not None:
-        assert ub_type is not None, "Comm+GEMM overlap requires a valid `comm_type` argument."
+        assert (
+            ub_type is not None
+        ), "Comm+GEMM overlap requires a valid `comm_type` argument."
         if ub_type == tex.CommOverlapType.RS:
             if not (bulk_overlap and not ub.is_fp8_ubuf()):
-                assert extra_output is not None, "GEMM+RS overlap requires extra output tensor."
+                assert (
+                    extra_output is not None
+                ), "GEMM+RS overlap requires extra output tensor."
 
     if out is not None:
         if not out.is_contiguous():
@@ -266,7 +282,9 @@ def general_gemm(
     # Use bfloat16 as default bias_dtype
     bias_dtype = TE_DType[torch.bfloat16 if bias is None else bias.dtype]
 
-    if isinstance(A, Float8BlockwiseQTensorStorage) or isinstance(B, Float8BlockwiseQTensorStorage):
+    if isinstance(A, Float8BlockwiseQTensorStorage) or isinstance(
+        B, Float8BlockwiseQTensorStorage
+    ):
         # FP8 block-scaling requires split accumulator
         use_split_accumulator = True
 
@@ -304,11 +322,15 @@ def general_gemm(
         assert (
             quantization_params is None
         ), "Row-scaled NVFP4 GEMM currently does not support output quantization."
-        assert ub is None, "Row-scaled NVFP4 GEMM currently does not support CommOverlap."
+        assert (
+            ub is None
+        ), "Row-scaled NVFP4 GEMM currently does not support CommOverlap."
         assert (
             extra_output is None
         ), "Row-scaled NVFP4 GEMM currently does not support extra output."
-        assert not bulk_overlap, "Row-scaled NVFP4 GEMM currently does not support bulk overlap."
+        assert (
+            not bulk_overlap
+        ), "Row-scaled NVFP4 GEMM currently does not support bulk overlap."
         assert out is None or (
             isinstance(out, torch.Tensor) and not is_custom(out)
         ), "Row-scaled NVFP4 GEMM currently supports only plain torch.Tensor outputs."
@@ -320,8 +342,8 @@ def general_gemm(
         ), "Row-scaled NVFP4 GEMM currently requires NVFP4 B."
         # Reuse the per-tensor GEMM and apply selected row/column global scales
         # to the FP32 output. This extends #2931 without a dedicated GEMM kernel.
-        gemm_A, gemm_B, output_row_scales, output_col_scales = _nvfp4_row_scaled_gemm_inputs(
-            A, B, transa=transa, transb=transb
+        gemm_A, gemm_B, output_row_scales, output_col_scales = (
+            _nvfp4_row_scaled_gemm_inputs(A, B, transa=transa, transb=transb)
         )
 
         requested_out, requested_out_dtype = out, out_dtype
@@ -340,7 +362,9 @@ def general_gemm(
         gemm_args[14] = False  # accumulate after applying the outer scales
         gemm_kwargs = dict(kwargs)
         gemm_kwargs["beta"] = 0.0
-        out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*gemm_args, **gemm_kwargs)
+        out, bias_grad, gelu_input, extra_output = tex.generic_gemm(
+            *gemm_args, **gemm_kwargs
+        )
         out_2d = out.reshape(-1, out.shape[-1])
 
         assert output_row_scales.numel() in (1, out_2d.shape[0])
@@ -359,7 +383,9 @@ def general_gemm(
             out_2d.mul_(output_row_scales)
             out_2d.mul_(output_col_scales)
         if bias is not None:
-            assert not grad, "Row-scaled NVFP4 backward does not support fused bias gradient."
+            assert (
+                not grad
+            ), "Row-scaled NVFP4 backward does not support fused bias gradient."
             out_2d.add_(bias.to(dtype=torch.float32))
 
         if requested_out is not None:
@@ -417,7 +443,8 @@ def general_grouped_gemm(
 
     if grad and use_bias:
         grad_bias = [
-            torch.empty(B[i].size(1), dtype=out[0].dtype, device="cuda") for i in range(num_gemms)
+            torch.empty(B[i].size(1), dtype=out[0].dtype, device=te_device_type())
+            for i in range(num_gemms)
         ]
     else:
         grad_bias = empty_tensors
@@ -430,7 +457,9 @@ def general_grouped_gemm(
     if any(_is_nvfp4_row_scaled_tensor(tensor) for tensor in A) or any(
         _is_nvfp4_row_scaled_tensor(tensor) for tensor in B
     ):
-        assert D_dtype is None, "Row-scaled NVFP4 grouped GEMM currently does not support D_dtype."
+        assert (
+            D_dtype is None
+        ), "Row-scaled NVFP4 grouped GEMM currently does not support D_dtype."
         if single_output:
             assert (
                 m_splits is not None
@@ -563,7 +592,9 @@ def _get_grouped_cublas_workspace(device: int, layout: str) -> torch.Tensor:
     kernels).
     """
     assert layout in ("TN", "NN", "NT"), f"unexpected grouped GEMM layout {layout}"
-    return torch.empty(get_cublas_workspace_size_bytes(), dtype=torch.uint8, device=device)
+    return torch.empty(
+        get_cublas_workspace_size_bytes(), dtype=torch.uint8, device=device
+    )
 
 
 def general_grouped_gemm_for_grouped_tensor(
@@ -599,11 +630,17 @@ def general_grouped_gemm_for_grouped_tensor(
         raise ValueError("Both A and out are discrete. This is not supported yet.")
 
     if isinstance(A, GroupedTensorStorage) and A.row_scaled_nvfp4:
-        raise NotImplementedError("Row-scaled NVFP4 GroupedTensor GEMM is not supported yet.")
+        raise NotImplementedError(
+            "Row-scaled NVFP4 GroupedTensor GEMM is not supported yet."
+        )
     if isinstance(B, GroupedTensorStorage) and B.row_scaled_nvfp4:
-        raise NotImplementedError("Row-scaled NVFP4 GroupedTensor GEMM is not supported yet.")
+        raise NotImplementedError(
+            "Row-scaled NVFP4 GroupedTensor GEMM is not supported yet."
+        )
     if isinstance(out, GroupedTensorStorage) and out.row_scaled_nvfp4:
-        raise NotImplementedError("Row-scaled NVFP4 GroupedTensor GEMM is not supported yet.")
+        raise NotImplementedError(
+            "Row-scaled NVFP4 GroupedTensor GEMM is not supported yet."
+        )
 
     def _is_fp8_blockwise(operand) -> bool:
         if isinstance(operand, (list, tuple)):
