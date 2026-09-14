@@ -138,11 +138,12 @@ class GraphEntry:
             dtype=torch.uint8,
             device=device,
         )
-        self.graph.execute(
-            variant_pack,
-            workspace,
-            handle=current_stream_handle(device),
-        )
+        with torch.cuda.device(device):
+            self.graph.execute(
+                variant_pack,
+                workspace,
+                handle=current_stream_handle(device),
+            )
 
 
 def graph_cache() -> Dict[Hashable, GraphEntry]:

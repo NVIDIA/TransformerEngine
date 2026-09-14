@@ -38,6 +38,20 @@ def test_page_table_uses_cudnn_logical_layout():
 def test_graph_entry_does_not_retain_execution_workspaces(monkeypatch):
     """Cached graph entries should not own per-execution scratch allocations."""
 
+    active_devices = []
+    entered_devices = []
+
+    class DeviceGuard:
+        def __init__(self, device):
+            self.device = device
+
+        def __enter__(self):
+            active_devices.append(self.device)
+            entered_devices.append(self.device)
+
+        def __exit__(self, *_args):
+            active_devices.pop()
+
     class Workspace:
         pass
 
@@ -48,6 +62,7 @@ def test_graph_entry_does_not_retain_execution_workspaces(monkeypatch):
         def execute(self, variant_pack, workspace, handle):
             assert variant_pack == {"q": "tensor"}
             assert handle == "handle"
+            assert active_devices == [torch.device("cpu")]
             self.workspace_refs.append(weakref.ref(workspace))
 
     allocated_workspace_refs = []
@@ -61,6 +76,7 @@ def test_graph_entry_does_not_retain_execution_workspaces(monkeypatch):
         return workspace
 
     monkeypatch.setattr(_cudnn_graph.torch, "empty", allocate_workspace)
+    monkeypatch.setattr(_cudnn_graph.torch.cuda, "device", DeviceGuard)
     monkeypatch.setattr(_cudnn_graph, "current_stream_handle", lambda _device: "handle")
 
     graph = Graph()
@@ -68,6 +84,8 @@ def test_graph_entry_does_not_retain_execution_workspaces(monkeypatch):
     entry.execute({"q": "tensor"}, torch.device("cpu"))
     entry.execute({"q": "tensor"}, torch.device("cpu"))
 
+    assert entered_devices == [torch.device("cpu"), torch.device("cpu")]
+    assert not active_devices
     assert len(allocated_workspace_refs) == 2
     assert all(ref() is None for ref in allocated_workspace_refs)
     assert all(ref() is None for ref in graph.workspace_refs)
