@@ -9,6 +9,8 @@
 #include <transformer_engine/transpose.h>
 
 #include <algorithm>
+#include <functional>
+#include <numeric>
 
 #include "../common.h"
 #include "../util/rtc.h"
@@ -195,13 +197,21 @@ __global__ void __launch_bounds__(block_size)
 
 void transpose(const Tensor &input, const Tensor &noop, Tensor *output_, cudaStream_t stream) {
   Tensor &output = *output_;
-  NVTE_CHECK(input.data.shape.size() == 2, "Input must have 2 dimensions.");
-  NVTE_CHECK(output.data.shape.size() == 2, "Output must have 2 dimensions.");
-  const size_t row_length = input.data.shape[1];
-  const size_t num_rows = input.data.shape[0];
+  NVTE_CHECK(!input.data.shape.empty(), "Input must have at least one dimension.");
+  NVTE_CHECK(!output.data.shape.empty(), "Output must have at least one dimension.");
+  const auto flat_dims = input.flat_2d_dims();
+  const size_t num_rows = flat_dims[0];
+  const size_t row_length = flat_dims[1];
 
-  NVTE_CHECK(output.data.shape[0] == row_length, "Wrong dimension of output.");
-  NVTE_CHECK(output.data.shape[1] == num_rows, "Wrong dimension of output.");
+  NVTE_CHECK(output.data.shape[0] == row_length,
+             "Output has invalid first dimension (expected ", row_length, ", got ",
+             output.data.shape[0], ").");
+  const size_t output_cols =
+      std::accumulate(output.data.shape.begin() + 1, output.data.shape.end(), size_t{1},
+                      std::multiplies<size_t>());
+  NVTE_CHECK(output_cols == num_rows,
+             "Output has invalid product of dimensions after the first (expected ", num_rows,
+             ", got ", output_cols, ").");
 
   NVTE_CHECK(input.data.dptr != nullptr, "Input is not allocated.");
   NVTE_CHECK(output.data.dptr != nullptr, "Output is not allocated.");
