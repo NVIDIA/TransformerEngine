@@ -439,18 +439,6 @@ inline void compute_fused_amax(const Tensor &input, const Tensor *noop, Tensor *
 
   float *const row_amax_ptr = reinterpret_cast<float *>(output->amax.dptr);
   float *const col_amax_ptr = reinterpret_cast<float *>(output->columnwise_amax.dptr);
-  const bool do_row = row_amax_ptr != nullptr;
-  const bool do_col = col_amax_ptr != nullptr;
-  if (!do_row && !do_col) return;
-
-  if (do_row) {
-    NVTE_CHECK(output->amax.numel() == rows, "Fused rowwise amax must have ", rows,
-               " entries, got ", output->amax.shape, ".");
-  }
-  if (do_col) {
-    NVTE_CHECK(output->columnwise_amax.numel() == cols, "Fused columnwise amax must have ", cols,
-               " entries, got ", output->columnwise_amax.shape, ".");
-  }
 
   const float *noop_ptr = (noop != nullptr && noop->data.dptr != nullptr)
                               ? reinterpret_cast<const float *>(noop->data.dptr)
@@ -460,8 +448,7 @@ inline void compute_fused_amax(const Tensor &input, const Tensor *noop, Tensor *
     const size_t zero_extent = rows > cols ? rows : cols;
     const dim3 zero_grid(static_cast<unsigned>(DIVUP(zero_extent, static_cast<size_t>(256))), 1, 1);
     fused_amax_zero_kernel<<<zero_grid, 256, 0, stream>>>(
-        do_row ? row_amax_ptr : nullptr, static_cast<int>(rows), do_col ? col_amax_ptr : nullptr,
-        static_cast<int>(cols), noop_ptr);
+        row_amax_ptr, static_cast<int>(rows), col_amax_ptr, static_cast<int>(cols), noop_ptr);
     NVTE_CHECK_CUDA(cudaGetLastError());
   }
 
@@ -480,14 +467,10 @@ inline void compute_fused_amax(const Tensor &input, const Tensor *noop, Tensor *
                   static_cast<unsigned>(rows / FA_CHUNK_DIM_Y), 1);
   const dim3 block(FA_THREADS_NUM, 1, 1);
 
-  TRANSFORMER_ENGINE_SWITCH_CONDITION(
-      do_row, DO_ROW, TRANSFORMER_ENGINE_SWITCH_CONDITION(do_col, DO_COL, {
-        auto kernel = compute_fused_amax_kernel<DO_ROW, DO_COL>;
-        cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);
-        kernel<<<grid, block, dshmem_size, stream>>>(
-            tensor_map_input, do_row ? row_amax_ptr : nullptr, do_col ? col_amax_ptr : nullptr,
-            noop_ptr, rows, cols);
-      }));
+  auto kernel = compute_fused_amax_kernel<true, true>;
+  cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);
+  kernel<<<grid, block, dshmem_size, stream>>>(
+      tensor_map_input, row_amax_ptr, col_amax_ptr, noop_ptr, rows, cols);
   NVTE_CHECK_CUDA(cudaGetLastError());
 #else
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
