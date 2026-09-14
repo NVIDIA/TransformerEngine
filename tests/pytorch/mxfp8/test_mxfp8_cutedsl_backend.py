@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Cross-backend bit-exactness tests for the CuTeDSL MXFP8 quantize kernels."""
+"""Cross-backend bit-exactness tests for the CuTeDSL MXFP8 quantize kernels, driven from pytorch."""
 
 import ctypes
 import os

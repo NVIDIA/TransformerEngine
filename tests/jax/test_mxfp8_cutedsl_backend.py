@@ -2,12 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Cross-backend bit-exactness tests for the CuTeDSL MXFP8 quantize kernels, driven from JAX.
-
-JAX companion to tests/pytorch/mxfp8/test_mxfp8_cutedsl_backend.py: the CuTeDSL dispatch
-lives in TE/common, so this checks that the JAX FFI path reaches it and produces the same
-bytes as the CUDA kernels.
-"""
+"""Cross-backend bit-exactness tests for the CuTeDSL MXFP8 quantize kernels, driven from jax."""
 
 import ctypes
 import os
