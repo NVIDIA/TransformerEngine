@@ -355,9 +355,7 @@ def check_f16_fused_attention_support(
         and dqk != dv
     )
     if unsupported_hopper_bwd_dims:
-        return _unsupported(
-            "this Hopper backward head-dimension combination is unsupported"
-        )
+        return _unsupported("this Hopper backward head-dimension combination is unsupported")
 
     alibi_supported = (
         bias == "alibi"
