@@ -17,12 +17,19 @@ from functools import partial
 
 import torch
 import torch.distributed as dist
+from torch.distributed.elastic.multiprocessing.errors import record
+
+try:
+    from torch._dynamo.utils import counters as dynamo_counters
+except ImportError:  # pragma: no cover
+    dynamo_counters = None
 
 import transformer_engine.pytorch as te
 from transformer_engine.common.recipe import (
     DelayedScaling,
     Float8CurrentScaling,
     Format,
+    MMParams,
     MXFP8BlockScaling,
 )
 
@@ -200,6 +207,19 @@ def _parse_args(argv=None, namespace=None):
         "--use-cuda-graphs", action="store_true", default=False, help="Use CUDA Graphs."
     )
     parser.add_argument(
+        "--compile",
+        action="store_true",
+        default=False,
+        help="Wrap each layer in torch.compile (tests Userbuffers on the compiled path).",
+    )
+    parser.add_argument(
+        "--compile-mode",
+        type=str,
+        default="default",
+        choices=["default", "reduce-overhead"],
+        help="torch.compile mode used when --compile is set.",
+    )
+    parser.add_argument(
         "--ub-cfg", type=str, default=None, help="Optional TP config yaml file input."
     )
     parser.add_argument("--ub-name", type=str, default=None, help="Optional TP layer name.")
@@ -258,7 +278,38 @@ def _parse_args(argv=None, namespace=None):
         default=0,
         help="Number of layers at the end to run in bf16.",
     )
+    parser.add_argument(
+        "--use-cublasmp",
+        action="store_true",
+        default=False,
+        help="Use cuBLASMp backend.",
+    )
+    parser.add_argument(
+        "--rtol",
+        type=float,
+        default=None,
+        help=(
+            "Override the relative-error tolerance used in the numerical check. "
+            "When unset, defaults to 0.125 for FP8 and 0.025 otherwise."
+        ),
+    )
+    parser.add_argument(
+        "--atol",
+        type=float,
+        default=None,
+        help=(
+            "Override the absolute-error tolerance used in the numerical check. "
+            "When unset, defaults to 0.0625 for FP8 and 0.00125 otherwise."
+        ),
+    )
     args = parser.parse_args(argv, namespace)
+
+    if args.compile and args.use_cuda_graphs:
+        parser.error(
+            "--compile and --use-cuda-graphs are mutually exclusive; to test"
+            " torch.compile with CUDA graphs use --compile --compile-mode"
+            " reduce-overhead."
+        )
 
     if args.use_cuda_graphs and args.layer_type in [te.MultiheadAttention, te.TransformerLayer]:
         warnings.warn(f"{args.layer_type.__name__} does not support CUDA Graphs!")
@@ -323,6 +374,7 @@ def _compare_tensors(name, test, ref, rtol, atol):
     return numerics_failed, numerics_info
 
 
+@record
 def _train(opts):
     if "OMPI_COMM_WORLD_SIZE" in os.environ:
         # Execution with `mpirun -np N`
@@ -436,6 +488,7 @@ def _train(opts):
         dtype=torch.bfloat16,
         bootstrap_backend=opts.bootstrap_backend,
         ub_cfgs=ub_cfgs if opts.ub_cfg is None else opts.ub_cfg,
+        with_cublasmp=opts.use_cublasmp,
     )
 
     with te.quantized_model_init(enabled=opts.fp8_init):
@@ -471,6 +524,11 @@ def _train(opts):
     elif opts.quantization == "mxfp8":
         fp8_recipe = MXFP8BlockScaling()
 
+    if opts.fp8:
+        fp8_recipe.fp8_gemm_fprop = MMParams(use_split_accumulator=True)
+        fp8_recipe.fp8_gemm_dgrad = MMParams(use_split_accumulator=True)
+        fp8_recipe.fp8_gemm_wgrad = MMParams(use_split_accumulator=True)
+
     layer_contexts = [
         (
             partial(
@@ -504,6 +562,14 @@ def _train(opts):
             loss.backward()
         return out
 
+    if opts.compile:
+        for i, layer in enumerate(test_model.layers):
+            test_model.layers[i] = torch.compile(layer, fullgraph=True, mode=opts.compile_mode)
+        dist_print(
+            f"Compiled test model layers with torch.compile (mode={opts.compile_mode})...",
+            debug=True,
+        )
+
     torch_rng_state = torch.get_rng_state()
     cuda_rng_state = torch.cuda.get_rng_state(torch.device(f"cuda:{LOCAL_RANK}"))
     if opts.use_cuda_graphs:
@@ -514,7 +580,18 @@ def _train(opts):
         if not opts.benchmark:
             del test_graph
     else:
+        if opts.compile and opts.compile_mode == "reduce-overhead":
+            # Warm up so the measured run below replays captured CUDA graphs.
+            for _ in range(2):
+                torch.compiler.cudagraph_mark_step_begin()
+                run_fwd_bwd(test_model, test_x)
+                test_model.zero_grad(set_to_none=True)
+                test_x.grad = None
+            torch.compiler.cudagraph_mark_step_begin()
         test_out = run_fwd_bwd(test_model, test_x)
+        if opts.compile and opts.compile_mode == "reduce-overhead" and dynamo_counters is not None:
+            skips = dynamo_counters["inductor"]["cudagraph_skips"]
+            assert skips == 0, f"reduce-overhead fell back to eager: {skips} cudagraph skip(s)"
     test_grads = [test_out, test_x.grad]
     names = ["output", "input.grad"]
     for test_name, test_param in test_model.named_parameters():
@@ -552,8 +629,8 @@ def _train(opts):
         # Now validate accuracy
         if not bool(numerics_failed.item()):
             for i, (test_g, ref_g) in enumerate(zip(test_grads, ref_grads)):
-                rtol = 0.125 if opts.fp8 else 0.025
-                atol = 0.0625 if opts.fp8 else 0.00125
+                rtol = opts.rtol if opts.rtol is not None else (0.125 if opts.fp8 else 0.025)
+                atol = opts.atol if opts.atol is not None else (0.0625 if opts.fp8 else 0.00125)
                 grad_failed, grad_info = _compare_tensors(names[i], test_g, ref_g, rtol, atol)
                 dist_print(grad_info, src=WORLD_RANK, error=grad_failed)
                 numerics_failed[0] = int(grad_failed)

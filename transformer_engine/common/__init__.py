@@ -16,6 +16,7 @@ import subprocess
 import sys
 import sysconfig
 from typing import Optional, Tuple
+import warnings
 
 
 @functools.lru_cache(maxsize=None)
@@ -107,9 +108,11 @@ def _get_shared_object_file(library: str) -> Path:
     """
 
     # Check provided input and determine the correct prefix for .so.
-    assert library in ("core", "torch", "jax"), f"Unsupported TE library {library}."
+    assert library in ("core", "torch", "jax", "nccl_ep"), f"Unsupported TE library {library}."
     if library == "core":
         so_prefix = "libtransformer_engine"
+    elif library == "nccl_ep":
+        so_prefix = "libnccl_ep"
     else:
         so_prefix = f"transformer_engine_{library}"
 
@@ -191,6 +194,31 @@ def load_framework_extension(framework: str) -> None:
     sys.modules[module_name] = solib
     spec.loader.exec_module(solib)
 
+    # Plugin system: set NVTE_PLUGIN=<module_name> to let plugin stub take over
+    # transformer_engine_torch and register original pybind as _nv for CUDA backend.
+    # Only applies to the PyTorch extension — JAX has no plugin stub.
+    _nvte_plugin = os.environ.get("NVTE_PLUGIN")
+    if _nvte_plugin and framework == "torch":
+        _original_module = sys.modules.get(module_name)
+        try:
+            # Register _nv alias BEFORE importing the plugin, because the
+            # plugin module may import transformer_engine_torch_nv at top level.
+            sys.modules[module_name + "_nv"] = solib
+            _plugin = importlib.import_module(_nvte_plugin)
+            _plugin.load_plugins()
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            # Rollback to pre-plugin state if plugin failed to fully initialize
+            sys.modules.pop(module_name + "_nv", None)
+            if _original_module is not None:
+                sys.modules[module_name] = _original_module
+            else:
+                sys.modules.pop(module_name, None)
+            warnings.warn(
+                f"NVTE_PLUGIN={_nvte_plugin} but plugin loading failed: {e}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
 
 def sanity_checks_for_pypi_installation() -> None:
     """Ensure that package is installed correctly if using PyPI."""
@@ -235,24 +263,49 @@ def _get_sys_extension() -> str:
     raise RuntimeError(f"Unsupported operating system ({system})")
 
 
+def _cuda_runtime_major(cuda_runtime: ctypes.CDLL) -> Optional[int]:
+    """Return the major version of the CUDA runtime loaded with Transformer Engine."""
+
+    runtime_version = ctypes.c_int()
+    get_runtime_version = cuda_runtime.cudaRuntimeGetVersion
+    get_runtime_version.argtypes = [ctypes.POINTER(ctypes.c_int)]
+    get_runtime_version.restype = ctypes.c_int
+    if get_runtime_version(ctypes.byref(runtime_version)) != 0 or runtime_version.value <= 0:
+        return None
+    return runtime_version.value // 1000
+
+
 @functools.lru_cache(maxsize=None)
-def _nvidia_cudart_include_dir() -> str:
+def _nvidia_cudart_include_dir(cuda_major_version: int) -> str:
     """Returns the include directory for cuda_runtime.h if exists in python environment."""
+
+    # This is primarily here to support editable installs. cuda_runtime.cpp handles the
+    # resolution for install via wheel or when using the shared library ABI directly.
 
     try:
         import nvidia
     except ModuleNotFoundError:
         return ""
 
-    # Installing some nvidia-* packages, like nvshmem, create nvidia name, so "import nvidia"
-    # above doesn't throw. However, they don't set "__file__" attribute.
+    # NVIDIA packages may use either a regular package or a namespace package spread
+    # across multiple package roots.
     if nvidia.__file__ is not None:
-        nvidia_root = Path(nvidia.__file__).parent
+        nvidia_roots = (Path(nvidia.__file__).parent,)
     else:
-        nvidia_root = Path(nvidia.__path__[0])  # namespace package
+        nvidia_roots = tuple(Path(path) for path in nvidia.__path__)
 
-    include_dir = nvidia_root / "cuda_runtime"
-    return str(include_dir) if include_dir.exists() else ""
+    layouts = [f"cu{cuda_major_version}"]
+    if cuda_major_version == 12:
+        layouts.append("cuda_runtime")
+
+    for layout in layouts:
+        for nvidia_root in nvidia_roots:
+            cuda_root = nvidia_root / layout
+            if (cuda_root / "cuda_runtime.h").is_file() or (
+                cuda_root / "include" / "cuda_runtime.h"
+            ).is_file():
+                return str(cuda_root)
+    return ""
 
 
 @functools.lru_cache(maxsize=None)
@@ -357,7 +410,7 @@ def _load_cuda_library(lib_name: str):
 @functools.lru_cache(maxsize=None)
 def _load_core_library():
     """Load shared library with Transformer Engine C extensions"""
-    return ctypes.CDLL(_get_shared_object_file("core"), mode=ctypes.RTLD_GLOBAL)
+    return ctypes.CDLL(_get_shared_object_file("core"), mode=ctypes.RTLD_GLOBAL | os.RTLD_LAZY)
 
 
 if "NVTE_PROJECT_BUILDING" not in os.environ or bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
@@ -382,5 +435,8 @@ if "NVTE_PROJECT_BUILDING" not in os.environ or bool(int(os.getenv("NVTE_RELEASE
     _TE_LIB_CTYPES = _load_core_library()
 
     # Needed to find the correct headers for NVRTC kernels.
-    if not os.getenv("NVTE_CUDA_INCLUDE_DIR") and _nvidia_cudart_include_dir():
-        os.environ["NVTE_CUDA_INCLUDE_DIR"] = _nvidia_cudart_include_dir()
+    _cuda_major_version = _cuda_runtime_major(_TE_LIB_CTYPES)
+    if not os.getenv("NVTE_CUDA_INCLUDE_DIR") and _cuda_major_version is not None:
+        cuda_include_dir = _nvidia_cudart_include_dir(_cuda_major_version)
+        if cuda_include_dir:
+            os.environ["NVTE_CUDA_INCLUDE_DIR"] = cuda_include_dir

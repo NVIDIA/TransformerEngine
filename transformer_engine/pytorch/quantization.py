@@ -26,7 +26,7 @@ from transformer_engine.common.recipe import (
     NVFP4BlockScaling,
     CustomRecipe,
 )
-from .constants import dist_group_type
+from .constants import dist_group_type, DType
 
 from .utils import get_device_compute_capability
 from .jit import jit_fuser
@@ -260,7 +260,17 @@ def get_default_recipe() -> Recipe:
 
 
 def get_align_size_for_quantization(recipe: Recipe) -> int:
-    """Get the alignment size for quantization."""
+    """Get the alignment used to pad grouped quantized operations.
+
+    Built-in recipes use their format requirement. Custom recipes use their
+    declarative ``quantization_alignment`` contract rather than invoking
+    ``qfactory``, since a factory may be stateful or role-dependent.
+    """
+    # TODO(#3158): Prefer module/role-specific alignment derived from canonical
+    # cached quantizers when that context is available. Keep the recipe-wide
+    # alignment as the conservative fallback for context-free callers.
+    if recipe.custom():
+        return recipe.quantization_alignment
     if recipe.mxfp8():
         return 32
     if recipe.nvfp4():
@@ -277,23 +287,23 @@ def get_fp8_torch_dtype(fp8_recipe: Recipe, fprop_tensor: bool = True) -> torch.
     return torch.float8_e5m2
 
 
-def get_fp8_te_dtype(fp8_recipe: Recipe, fprop_tensor: bool = True) -> tex.DType:
+def get_fp8_te_dtype(fp8_recipe: Recipe, fprop_tensor: bool = True) -> DType:
     """Get fp8 data type according to recipe and tensor"""
     if fp8_recipe.fp8_format == Format.E4M3 or (
         fp8_recipe.fp8_format == Format.HYBRID and fprop_tensor
     ):
-        return tex.DType.kFloat8E4M3
-    return tex.DType.kFloat8E5M2
+        return DType.kFloat8E4M3
+    return DType.kFloat8E5M2
 
 
-def get_fp4_te_dtype(fp4_recipe: Recipe) -> tex.DType:
+def get_fp4_te_dtype(fp4_recipe: Recipe) -> DType:
     """Get fp4 data type according to recipe and tensor"""
     if fp4_recipe.fp4_format == Format.E2M1:
-        return tex.DType.kFloat4E2M1
+        return DType.kFloat4E2M1
     raise ValueError(f"Unsupported FP4 format: {fp4_recipe.fp4_format}")
 
 
-def get_fp8_max(fp8_recipe: Recipe, fprop_tensor: bool = True) -> tex.DType:
+def get_fp8_max(fp8_recipe: Recipe, fprop_tensor: bool = True) -> DType:
     """Get max representible FP8 value."""
     if fp8_recipe.fp8_format == Format.E4M3 or (
         fp8_recipe.fp8_format == Format.HYBRID and fprop_tensor
@@ -408,6 +418,20 @@ class FP8GlobalStateManager:
     """
 
     quantization_state = FP8GlobalState()
+
+    @classmethod
+    def set_skip_fp8_weight_update_tensor(cls, skip: bool) -> None:
+        """Set the skip fp8 weight update tensor"""
+        if cls.quantization_state.skip_fp8_weight_update_tensor is None:
+            cls.quantization_state.skip_fp8_weight_update_tensor = torch.empty(
+                1, dtype=torch.float32, device="cuda"
+            )
+        cls.quantization_state.skip_fp8_weight_update_tensor.fill_(skip)
+
+    @classmethod
+    def get_skip_fp8_weight_update_tensor(cls) -> Optional[torch.Tensor]:
+        """Get the skip fp8 weight update tensor"""
+        return cls.quantization_state.skip_fp8_weight_update_tensor
 
     @classmethod
     def reset(cls) -> None:
@@ -1049,7 +1073,7 @@ def _update_amax_history(amax_history: torch.Tensor) -> torch.Tensor:
     return amax_history
 
 
-@torch.jit.script
+@jit_fuser
 def _default_get_amax_and_update_history(
     amax_history: torch.Tensor,
     amax_compute_algo: str,
@@ -1382,7 +1406,7 @@ class DelayedScalingRecipeState(RecipeState):
 
     recipe: DelayedScaling
     mode: str
-    dtype: tex.DType
+    dtype: DType
     scale: torch.Tensor
     amax_history: torch.Tensor
 
@@ -1436,7 +1460,7 @@ class Float8CurrentScalingRecipeState(RecipeState):
 
     recipe: Float8CurrentScaling
     mode: str
-    dtype: tex.DType
+    dtype: DType
     device: torch.device
 
     def __init__(
@@ -1480,7 +1504,7 @@ class MXFP8BlockScalingRecipeState(RecipeState):
 
     recipe: MXFP8BlockScaling
     mode: str
-    dtype: tex.DType
+    dtype: DType
 
     def __init__(
         self,
@@ -1506,7 +1530,23 @@ class MXFP8BlockScalingRecipeState(RecipeState):
         # TODO(ksivamani); Find better design for this, adding here to avoid circular import.
         from .tensor.mxfp8_tensor import MXFP8Quantizer
 
-        return [MXFP8Quantizer(self.dtype) for i in range(self.num_quantizers)]
+        if self.mode not in ("forward", "backward"):
+            raise RuntimeError(f"Unexpected recipe mode ({self.mode})")
+
+        if self.mode == "backward" or not self.recipe.enable_2d_quantization:
+            return [MXFP8Quantizer(self.dtype) for i in range(self.num_quantizers)]
+
+        def _use_2d_quantization(idx: int) -> bool:
+            role = self._slot_role(idx)
+            return role.module_type in ("linear", "grouped_linear") and role.tensor_type == "weight"
+
+        return [
+            MXFP8Quantizer(
+                self.dtype,
+                with_2d_quantization=_use_2d_quantization(idx),
+            )
+            for idx in range(self.num_quantizers)
+        ]
 
 
 class Float8BlockScalingRecipeState(RecipeState):
@@ -1518,9 +1558,9 @@ class Float8BlockScalingRecipeState(RecipeState):
 
     recipe: Float8BlockScaling
     mode: str
-    qx_dtype: tex.DType
-    qw_dtype: tex.DType
-    qgrad_dtype: tex.DType
+    qx_dtype: DType
+    qw_dtype: DType
+    qgrad_dtype: DType
 
     def __init__(
         self,
@@ -1605,7 +1645,7 @@ class NVFP4BlockScalingRecipeState(RecipeState):
 
     recipe: NVFP4BlockScaling
     mode: str
-    dtype: tex.DType
+    dtype: DType
 
     def __init__(
         self,
@@ -1880,18 +1920,17 @@ class CustomRecipeState(RecipeState):
             )
             roles = [QuantizerRole() for _ in range(self.num_quantizers)]
 
-        # qfactory must return a Quantizer or QuantizerRequest for every slot.
-        # None is not a valid return value — it would silently disable quantization
-        # for that tensor, risking hard-to-detect performance regressions.
-        # TODO(negvet): Introduce an explicit IdentityQuantizer for intentional no-op
-        # quantization. Until then, None is rejected.
+        # qfactory returns one quantizer-like object per slot; use
+        # ``IdentityQuantizer`` for intentional high-precision passthrough.
         raw = [qfactory(roles[i]) for i in range(self.num_quantizers)]
         for i, q in enumerate(raw):
             if q is None:
                 raise ValueError(
                     f"CustomRecipe qfactory returned None for slot {i} "
                     f"(role={roles[i]}). Every slot must return a Quantizer "
-                    "instance or a QuantizerRequest."
+                    "instance or a QuantizerRequest. For an intentional no-op "
+                    "(high-precision / unquantized) slot, return an "
+                    "IdentityQuantizer instead of None."
                 )
 
         # -- Delayed scaling sub-state --

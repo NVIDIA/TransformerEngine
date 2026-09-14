@@ -5,6 +5,7 @@
 """Utility functions for Transformer Engine modules"""
 from __future__ import annotations
 import functools
+import logging
 import math
 import os
 import warnings
@@ -17,7 +18,83 @@ from .torch_version import torch_version
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
 
 
-__all__ = ["get_device_compute_capability", "get_cudnn_version", "is_bf16_available"]
+__all__ = [
+    "get_device_compute_capability",
+    "get_cudnn_version",
+    "is_bf16_available",
+    "deinterleave_glu_tensor",
+    "interleave_glu_tensor",
+]
+
+
+_compile_disabled_reason: Optional[str] = None
+_compile_disabled_warned = False
+
+try:
+    from torch._dynamo.comptime import comptime as _comptime
+except ImportError:  # pragma: no cover
+    _comptime = None
+
+
+def _compile_safe_warn(msg: str) -> None:
+    """``warnings.warn`` that also works from code being traced by Dynamo.
+
+    Dynamo silently drops a traced ``warnings.warn``, and TE forwards wrap
+    everything in try/finally, so a graph break there makes Dynamo skip the
+    whole frame and re-run it with ``is_compiling() == False`` -- a runtime
+    warning branch is never reached. Under compilation ``comptime`` runs for
+    real inside the compiler instead, so the warning fires once per
+    compilation; the message is read back via ``get_local`` (a traced closure
+    would capture a VariableTracker, not the value). In eager this is a plain
+    ``warnings.warn``.
+    """
+    if torch.compiler.is_compiling() and _comptime is not None:
+        _comptime(lambda ctx: warnings.warn(ctx.get_local("msg").as_python_constant()))
+    else:
+        warnings.warn(msg, stacklevel=3)
+
+
+def record_compile_disabled(reason: str) -> None:
+    """Record why TE's torch.compile custom-op path is off; the warning is
+    emitted only when a compiled TE module actually runs (see
+    :func:`warn_if_compile_disabled`), so a plain import stays silent.
+    The first recorded reason wins. Distinct from
+    :func:`warn_compile_eager_fallback`, which reports a single *configuration*
+    falling back while the path itself is available.
+    """
+    global _compile_disabled_reason  # pylint: disable=global-statement
+    if _compile_disabled_reason is None:
+        _compile_disabled_reason = reason
+        logging.getLogger("TransformerEngine").info(
+            "torch.compile custom-op path disabled: %s", reason
+        )
+
+
+def warn_if_compile_disabled() -> None:
+    """Warn once, at the first compile attempt, that the path is off."""
+    global _compile_disabled_warned  # pylint: disable=global-statement
+    if _compile_disabled_warned:
+        return
+    _compile_disabled_warned = True
+    msg = (
+        "Transformer Engine torch.compile support is disabled: "
+        f"{_compile_disabled_reason or 'custom-op registration unavailable'}. "
+        "Modules will fall back to eager execution under torch.compile, i.e. "
+        "a graph break, which is incompatible with fullgraph=True."
+    )
+    _compile_safe_warn(msg)
+
+
+def warn_compile_eager_fallback(reason: str) -> None:
+    """Warn that a TE module is running eagerly under ``torch.compile``.
+
+    Emitted when ``reason`` is unsupported on the module's compiled custom-op
+    path -- once per compilation (see :func:`_compile_safe_warn`).
+    """
+    _compile_safe_warn(
+        f"Falling back to eager execution under torch.compile: {reason} is "
+        "unsupported on the compiled path (graph-breaks under fullgraph=True)."
+    )
 
 
 @functools.lru_cache(maxsize=None)
@@ -77,9 +154,107 @@ def _get_device_compute_capability(device: torch.device) -> Tuple[int, int]:
     return (props.major, props.minor)
 
 
+@torch.compiler.assume_constant_result
 def get_device_compute_capability() -> Tuple[int, int]:
     """CUDA compute capability of current GPU"""
     return _get_device_compute_capability(torch.cuda.current_device())
+
+
+def deinterleave_glu_tensor(tensor: torch.Tensor, interleave_size: int) -> torch.Tensor:
+    """Convert a block-interleaved GLU fc1 tensor to contiguous gate/linear layout.
+
+    Fused GLU kernels (for example :class:`~transformer_engine.pytorch.ops.SwiGLU`
+    with ``glu_interleave_size`` set) expect fc1 weights in a block-interleaved
+    layout along dimension 0. Checkpoints and frameworks such as Megatron-LM typically
+    store the gate (``W``) and linear (``V``) halves as two contiguous blocks
+    ``[W_all, V_all]``. This helper reorders along dimension 0 without changing
+    the total shape.
+
+    **Layouts along dimension 0** (``k = interleave_size``):
+
+    * **Block-interleaved (input):** ``[W0:k, V0:k, Wk:2k, Vk:2k, ...]``
+    * **Contiguous (output):** ``[W_all, V_all]``
+
+    The same convention applies to ``linear_fc1.weight`` (dimension 0 plus any
+    remaining dimensions) and ``linear_fc1.bias`` (dimension 0 only).
+
+    Parameters
+    ----------
+    tensor : torch.Tensor
+        Tensor in block-interleaved layout. The length of dimension 0 must be
+        divisible by ``2 * interleave_size``.
+    interleave_size : int
+        Number of rows (for weights) or elements (for bias) per gate/linear block.
+        Fused TE GLU paths commonly use ``32``.
+
+    Returns
+    -------
+    torch.Tensor
+        A new tensor with the same shape as ``tensor`` and contiguous
+        ``[W_all, V_all]`` ordering along dimension 0.
+
+    See Also
+    --------
+    :func:`interleave_glu_tensor` : Inverse transformation (contiguous -> block-interleaved).
+    """
+    shape = tensor.shape
+    x = tensor.reshape(
+        shape[0] // (2 * interleave_size),
+        2,
+        interleave_size,
+        *shape[1:],
+    )
+    x = x.transpose(0, 1).contiguous()
+    return x.reshape(shape)
+
+
+def interleave_glu_tensor(tensor: torch.Tensor, interleave_size: int) -> torch.Tensor:
+    """Convert a contiguous SwiGLU fc1 tensor to block-interleaved layout.
+
+    This is the inverse of :func:`deinterleave_glu_tensor`. Use it when loading
+    contiguous ``[W_all, V_all]`` checkpoints into a module that uses fused
+    interleaved SwiGLU (``glu_interleave_size`` on the activation op).
+
+    **Layouts along dimension 0** (``k = interleave_size``):
+
+    * **Contiguous (input):** ``[W_all, V_all]``
+    * **Block-interleaved (output):** ``[W0:k, V0:k, Wk:2k, Vk:2k, ...]``
+
+    Parameters
+    ----------
+    tensor : torch.Tensor
+        Tensor in contiguous gate/linear layout. The length of dimension 0 must be
+        divisible by ``2 * interleave_size``.
+    interleave_size : int
+        Number of rows (for weights) or elements (for bias) per gate/linear block.
+        Must match the ``glu_interleave_size`` used by the fused SwiGLU op.
+
+    Returns
+    -------
+    torch.Tensor
+        A new tensor with the same shape as ``tensor`` and block-interleaved
+        ordering along dimension 0.
+
+    See Also
+    --------
+    :func:`deinterleave_glu_tensor` : Inverse transformation (block-interleaved -> contiguous).
+    """
+    if interleave_size <= 0:
+        raise ValueError(f"interleave_size must be a positive integer, got {interleave_size}")
+    if tensor.shape[0] % (2 * interleave_size) != 0:
+        raise ValueError(
+            f"tensor dimension 0 ({tensor.shape[0]}) must be divisible by "
+            f"2 * interleave_size ({2 * interleave_size})"
+        )
+    shape = tensor.shape
+    x = tensor.reshape(
+        2,
+        shape[0] // (2 * interleave_size),
+        interleave_size,
+        *shape[1:],
+    )
+    x = x.transpose(0, 1).contiguous()
+    return x.reshape(shape)
 
 
 def resolve_grouped_linear_single_param_flags(
@@ -207,21 +382,39 @@ def mark_grouped_tensor(*tensors: List[Any]):
     Megatron-LM to detect which tensors are dynamic (varying shapes)
     and remove the padding before doing the `save_for_backward` to
     save memory.
-    Note: Only columnwise data is saved for backward."""
+
+    Plain tensors are saved directly. Grouped tensors are decomposed by
+    `prepare_for_saving`: unquantized BF16/FP16 activations save their
+    rowwise data, while quantized activations save their columnwise data
+    and scale metadata.
+    """
     for tensor in tensors:
         if tensor is None:
             continue
-        if hasattr(tensor, "columnwise_data"):
-            assert (
-                tensor.columnwise_data is not None
-            ), "Columnwise data is not set for grouped tensor"
-            assert (
-                tensor.columnwise_scale_inv is not None
-            ), "Columnwise scale inverse is not set for grouped tensor"
-            setattr(tensor.columnwise_data, "grouped_tensor_scale_inv", False)
-            setattr(tensor.columnwise_scale_inv, "grouped_tensor_scale_inv", True)
-        else:
+
+        if not hasattr(tensor, "columnwise_data"):
+            # Plain tensor, e.g. a fused-MLP activation input.
             setattr(tensor, "grouped_tensor_scale_inv", False)
+            continue
+
+        # Grouped tensor: mark the underlying tensors that `prepare_for_saving`
+        # will pass to `save_for_backward`, rather than the storage wrapper.
+        if tensor.columnwise_data is None:
+            # Unquantized BF16/FP16 grouped tensor.
+            saved_activation = tensor.rowwise_data
+            saved_scale_inv = None
+        else:
+            # Quantized grouped tensor saved in the representation used by wgrad.
+            saved_activation = tensor.columnwise_data
+            saved_scale_inv = tensor.columnwise_scale_inv
+            assert (
+                saved_scale_inv is not None
+            ), "Columnwise scale inverse is not set for grouped tensor"
+
+        assert saved_activation is not None, "Grouped tensor has no activation data"
+        setattr(saved_activation, "grouped_tensor_scale_inv", False)
+        if saved_scale_inv is not None:
+            setattr(saved_scale_inv, "grouped_tensor_scale_inv", True)
 
 
 def split_tensor_along_dim(
@@ -520,6 +713,28 @@ def assert_dim_for_fp8_exec(*tensors: List[torch.Tensor]) -> None:
             )
 
 
+def check_gemm_dims(inp: torch.Tensor, weight: torch.Tensor, fp8: bool) -> None:
+    """Emit the TN GEMM (``y = x @ w^T``) dim constraints as ``torch._check``
+    guards at trace time. torch.compile path only; eager validation lives in
+    the op impl. Messages are constant: Dynamo forbids tensor closures here.
+    """
+    # pylint: disable=protected-access
+    torch._check(
+        inp.shape[-1] == weight.shape[-1],
+        lambda: "GEMM not possible: input last dim must equal in_features",
+    )
+    if not fp8:
+        return
+    for tensor, name in ((inp, "input"), (weight, "weight")):
+        torch._check(
+            math.prod(tensor.shape[:-1]) % 8 == 0 and tensor.shape[-1] % 16 == 0,
+            lambda n=name: (
+                f"FP8 execution requires the {n}'s product of all dimensions except the"
+                " last to be divisible by 8 and its last dimension to be divisible by 16"
+            ),
+        )
+
+
 def is_bf16_compatible() -> bool:
     """Replaces torch.cuda.is_bf16_compatible() with an explicit
     check on device compute capability to enforce sm_80 or higher.
@@ -560,7 +775,7 @@ def is_non_tn_fp8_gemm_supported() -> bool:
 
 
 @functools.lru_cache(maxsize=None)
-def get_cudnn_version() -> Tuple[int, int, int]:
+def _get_cudnn_version() -> Tuple[int, int, int]:
     """Runtime cuDNN version (major, minor, patch)"""
     import transformer_engine.pytorch.cpp_extensions as ext
 
@@ -569,6 +784,12 @@ def get_cudnn_version() -> Tuple[int, int, int]:
     major, encoded_version = divmod(encoded_version, major_version_magnitude)
     minor, patch = divmod(encoded_version, 100)
     return (major, minor, patch)
+
+
+@torch.compiler.assume_constant_result
+def get_cudnn_version() -> Tuple[int, int, int]:
+    """Runtime cuDNN version (major, minor, patch)"""
+    return _get_cudnn_version()
 
 
 def canonicalize_device(device: Optional[torch.device | str]) -> torch.device:
@@ -761,6 +982,7 @@ _torch_dtype_to_np_typestr_dict = {
     torch.float32: "<f4",
     torch.int64: "<i8",
     torch.int32: "<i4",
+    torch.int16: "<i2",
     torch.int8: "|i1",
     torch.float8_e4m3fn: "|i1",
     torch.qint8: "|u1",

@@ -4,9 +4,11 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#ifdef __CUDACC_RTC__
+#include "utils.cuh"
+#else
 #include <assert.h>
 #include <cuda.h>
-#include <cuda_fp16.h>
 #include <cuda_profiler_api.h>
 #include <cuda_runtime.h>
 #include <stdint.h>
@@ -19,9 +21,22 @@
 
 #include "../common.h"
 #include "../util/logging.h"
+#include "../util/rtc.h"
+#include "../util/string.h"
 #include "../utils.cuh"
+#include "string_code_fused_softmax_scaled_aligned_causal_masked_softmax_cu.h"
+#endif
 
 namespace transformer_engine {
+
+#ifdef __CUDACC_RTC__
+using fp16 = half;
+using bf16 = nv_bfloat16;
+#endif
+
+#ifndef NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX
+#define NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX 0
+#endif
 
 template <typename Datatype, int ELEMENTS_PER_LDG>
 __device__ __inline__ void copy_vector(Datatype *dst, const Datatype *src);
@@ -92,7 +107,7 @@ struct Max {
 template <typename T>
 __device__ __forceinline__ T WARP_SHFL_XOR_NATIVE(T value, int laneMask, int width = warpSize,
                                                   unsigned int mask = 0xffffffff) {
-#if CUDA_VERSION >= 9000
+#if defined(__CUDACC_RTC__) || CUDA_VERSION >= 9000
   return __shfl_xor_sync(mask, value, laneMask, width);
 #else
   return __shfl_xor(value, laneMask, width);
@@ -345,6 +360,42 @@ __global__ void scaled_aligned_causal_masked_softmax_warp_backward(
   }
 }
 
+#ifdef __CUDACC_RTC__
+
+#else
+
+namespace {
+
+constexpr const char *kRtcSourceFile =
+    "transformer_engine/common/fused_softmax/scaled_aligned_causal_masked_softmax.cu";
+
+template <typename Type>
+std::string make_softmax_rtc_code(int log2_elements) {
+  (void)log2_elements;
+  std::string code = string_code_fused_softmax_scaled_aligned_causal_masked_softmax_cu;
+  return code;
+}
+
+template <typename Type>
+std::string make_softmax_rtc_label(const char *direction, int log2_elements) {
+  return concat_strings("fused_softmax,variant=aligned_causal,direction=", direction,
+                        ",type=", TypeInfo<Type>::name, ",log2=", log2_elements, ",fast_math=1");
+}
+
+template <typename Type>
+std::string make_softmax_rtc_kernel_name(const char *kernel_name, int log2_elements) {
+  return concat_strings("&::transformer_engine::", kernel_name, "<", TypeInfo<Type>::name, ",",
+                        TypeInfo<Type>::name, ",float,", log2_elements, ">");
+}
+
+void throw_nvrtc_required(const char *direction) {
+  NVTE_ERROR("Fused aligned causal softmax RTC path is disabled for ", direction,
+             ". Set NVTE_DISABLE_NVRTC=0 or rebuild with "
+             "NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX=ON.");
+}
+
+}  // namespace
+
 template <typename input_t, typename output_t, typename acc_t, int log2_elements>
 void call_kernel_scaled_aligned_causal_masked_softmax_forward(
     dim3 grid_size, dim3 block_size, const int shmem_size, cudaStream_t stream, output_t *dst,
@@ -454,6 +505,24 @@ void dispatch_scaled_aligned_causal_masked_softmax_forward(output_t *dst, const 
   dim3 block_size(warp_width, warps_per_block);
   dim3 grid_size(blocks);
 
+  if (rtc::is_enabled()) {
+    auto &rtc_manager = rtc::KernelManager::instance();
+    const std::string kernel_label = make_softmax_rtc_label<input_t>("forward", log2_elements);
+    if (!rtc_manager.is_compiled(kernel_label)) {
+      rtc_manager.compile(kernel_label,
+                          make_softmax_rtc_kernel_name<input_t>(
+                              "scaled_aligned_causal_masked_softmax_warp_forward", log2_elements),
+                          make_softmax_rtc_code<input_t>(log2_elements), kRtcSourceFile,
+                          {"--use_fast_math"});
+    }
+    const acc_t rtc_scale = static_cast<acc_t>(scale);
+    rtc_manager.launch(kernel_label, grid_size, block_size, 0, stream, dst, src, rtc_scale,
+                       microbatches, query_seq_len, key_seq_len);
+    NVTE_CHECK_CUDA(cudaGetLastError());
+    return;
+  }
+
+#if NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX
   // create an array of pointers to functions
   using ForwardFuncType = typename FunctionWrapper<input_t, output_t, acc_t>::ForwardType;
   static std::array<ForwardFuncType, MAX_POWER> forwardFunctionArray;
@@ -466,6 +535,9 @@ void dispatch_scaled_aligned_causal_masked_softmax_forward(output_t *dst, const 
   // Call the corresponding kernel
   forwardFunctionArray[log2_elements](grid_size, block_size, 0, stream, dst, src, scale,
                                       microbatches, query_seq_len, key_seq_len);
+#else
+  throw_nvrtc_required("forward");
+#endif
 }
 
 template <typename input_t, typename output_t, typename acc_t>
@@ -499,6 +571,23 @@ void dispatch_scaled_aligned_causal_masked_softmax_backward(
   dim3 block_size(warp_width, warps_per_block);
   dim3 grid_size(blocks);
 
+  if (rtc::is_enabled()) {
+    auto &rtc_manager = rtc::KernelManager::instance();
+    const std::string kernel_label = make_softmax_rtc_label<input_t>("backward", log2_elements);
+    if (!rtc_manager.is_compiled(kernel_label)) {
+      rtc_manager.compile(kernel_label,
+                          make_softmax_rtc_kernel_name<input_t>(
+                              "scaled_aligned_causal_masked_softmax_warp_backward", log2_elements),
+                          make_softmax_rtc_code<input_t>(log2_elements), kRtcSourceFile,
+                          {"--use_fast_math"});
+    }
+    rtc_manager.launch(kernel_label, grid_size, block_size, 0, stream, grad_input, grad, output,
+                       scale, microbatches, query_seq_len, key_seq_len);
+    NVTE_CHECK_CUDA(cudaGetLastError());
+    return;
+  }
+
+#if NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX
   // create an array of pointers to functions
   using BackwardFuncType = typename FunctionWrapper<input_t, output_t, acc_t>::BackwardType;
   static std::array<BackwardFuncType, MAX_POWER> backwardFunctionArray;
@@ -511,6 +600,9 @@ void dispatch_scaled_aligned_causal_masked_softmax_backward(
   // Call the corresponding kernel
   backwardFunctionArray[log2_elements](grid_size, block_size, 0, stream, grad_input, grad, output,
                                        scale, microbatches, query_seq_len, key_seq_len);
+#else
+  throw_nvrtc_required("backward");
+#endif
 }
 
 void scaled_aligned_causal_masked_softmax_forward(const Tensor &input, Tensor *softmax_results,
@@ -546,7 +638,12 @@ void scaled_aligned_causal_masked_softmax_backward(Tensor output_grads, const Te
           reinterpret_cast<softmax_type const *>(softmax_results.data.dptr), scale_factor,
           query_seq_len, key_seq_len, batches, attn_heads, stream););
 }
+
+#endif  // __CUDACC_RTC__
+
 }  // end namespace transformer_engine
+
+#ifndef __CUDACC_RTC__
 
 void nvte_scaled_aligned_causal_masked_softmax_forward(const NVTETensor input,
                                                        NVTETensor softmax_results,
@@ -568,3 +665,5 @@ void nvte_scaled_aligned_causal_masked_softmax_backward(const NVTETensor incomin
       *convertNVTETensorCheck(output_grads), *convertNVTETensorCheck(incoming_grads),
       *convertNVTETensorCheck(softmax_results), scale_factor, stream);
 }
+
+#endif  // __CUDACC_RTC__

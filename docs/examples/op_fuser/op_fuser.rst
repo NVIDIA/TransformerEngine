@@ -151,6 +151,159 @@ arguments and the extra outputs will be returned.
    the block has been split into two sections, each with one branching
    operation.
 
+Extra tensor channels
+"""""""""""""""""""""
+
+Branching operations can also route their extra inputs and outputs within
+the same ``Sequential`` via named channels. Extra output tensors with a
+specified channel can be consumed by later operations in the same ``Sequential``
+and may optionally be returned to the caller. Extra input tensors with a specified
+channel are accessed internally instead of being provided as arguments
+to ``Sequential``.
+
+With a channel, the residual block above can be expressed using one
+``Sequential``:
+
+.. code-block:: python
+
+    import torch
+    import transformer_engine.pytorch as te
+
+    make_residual = te.ops.MakeExtraOutput()
+    add_residual = te.ops.AddExtraInput()
+    make_residual.set_extra_output_channel(
+        0, "residual", output_to_caller=False
+    )
+    add_residual.set_extra_input_channel(0, "residual")
+
+    block = te.ops.Sequential(
+        te.ops.LayerNorm(4096),
+        make_residual,
+        te.ops.Linear(4096, 28672),
+        te.ops.SwiGLU(),
+        te.ops.Linear(14336, 4096),
+        add_residual,
+    )
+
+    # The residual is routed internally and omitted from the public outputs.
+    x = torch.randn(16384, 4096, device="cuda")
+    y = block(x)
+
+Channels are also useful for mixture-of-experts blocks. The following
+example assumes custom ``Dispatch`` and ``Combine`` basic operations.
+``Dispatch`` has one public extra input containing router probabilities
+and three extra outputs: split sizes, token probabilities, and a
+routing map. ``Combine`` consumes the routing map.
+
+.. code-block:: python
+
+    import transformer_engine.pytorch as te
+    from my_ops import Dispatch, Combine
+
+    num_experts = 8
+    hidden_size = 4096
+    ffn_size = 14336
+
+    dispatch = Dispatch(num_experts)
+    fc1 = te.ops.GroupedLinear(
+        num_experts, hidden_size, 2 * ffn_size, bias=False
+    )
+    activation = te.ops.ScaledSwiGLU()
+    fc2 = te.ops.GroupedLinear(
+        num_experts, ffn_size, hidden_size, bias=False
+    )
+    combine = Combine(num_experts)
+
+    # Dispatch extra outputs:
+    #   0: split sizes, 1: token probabilities, 2: routing map
+    dispatch.set_extra_output_channel(
+        0, "m_splits", output_to_caller=False
+    )
+    dispatch.set_extra_output_channel(
+        1, "probs", output_to_caller=False
+    )
+    dispatch.set_extra_output_channel(
+        2, "routing_map", output_to_caller=False
+    )
+
+    fc1.set_extra_input_channel(0, "m_splits")
+    activation.set_extra_input_channel(0, "probs")
+    fc2.set_extra_input_channel(0, "m_splits")
+    combine.set_extra_input_channel(0, "routing_map")
+
+    moe = te.ops.Sequential(dispatch, fc1, activation, fc2, combine)
+
+    # Dispatch's extra input has no channel, so the caller passes router_probs.
+    # Channels supply all later extra inputs internally. The channel outputs
+    # are not returned because output_to_caller=False.
+    y = moe(x, router_probs)
+
+Channels cannot connect operations in different ``OperationFuser``
+instances. In particular, an ordinary PyTorch module inside a
+``Sequential`` splits the fusible operations on either side into
+separate fusers. The following channel connection is therefore not
+supported:
+
+.. code-block:: python
+
+    make_residual = te.ops.MakeExtraOutput()
+    add_residual = te.ops.AddExtraInput()
+    make_residual.set_extra_output_channel(0, "residual")
+    add_residual.set_extra_input_channel(0, "residual")
+
+    block = te.ops.Sequential(
+        make_residual,
+        torch.nn.Identity(),  # Splits the operations into separate fusers.
+        add_residual,
+    )
+
+Use the public extra output and extra input interfaces, as in the
+two-``Sequential`` example above, when the producer and consumer cannot
+be placed in the same ``OperationFuser``.
+
+The following conditions apply to extra tensor channels:
+
+- Every named extra input must have a matching producer earlier in the
+  same fuser. Leave an extra input unnamed when the caller should provide it.
+- An output channel name has at most one producer, but its output may
+  fan out to multiple consumers.
+- A named output does not require a consumer. It is returned as a public
+  extra output by default.
+- A channel is scoped to one ``OperationFuser``. In a ``Sequential``,
+  ordinary PyTorch modules split adjacent fusible operations into
+  separate fusers, and channels cannot cross that boundary.
+- The caller passes unnamed extra inputs. Named, channel-connected extra
+  input slots do not appear in the ``Sequential`` arguments.
+- ``set_extra_output_channel`` accepts ``output_to_caller`` (``True`` by
+  default). Public extra outputs are returned in their original
+  basic-operation and slot order. Gradients supplied for a returned output
+  are combined with gradients from its internal channel consumers. An
+  unused extra-output gradient may be ``None`` and is treated as zero.
+- Set ``output_to_caller=False`` for a channel tensor that should remain
+  internal. Removing a channel binding with ``channel=None`` restores that
+  output as public.
+- Channel bindings are captured when an ``OperationFuser`` is
+  constructed, which locks them on every covered basic op. That includes:
+
+  - constructing an ``OperationFuser`` or ``Sequential`` explicitly
+  - calling an op directly (``op(x)``), or a ``FusedOperation``, because
+    those paths build a transient ``OperationFuser([self])``
+
+  Later ``set_extra_input_channel`` / ``set_extra_output_channel`` calls
+  raise an error, so different routing requires constructing new
+  operations. Bind channels before the first forward call if the op will
+  later participate in a multi-op fuser.
+
+Channel-connected basic operations may still be replaced by registered
+``FusedOperation`` implementations. If a fused operation contains both
+the producer and consumer of a channel, its ``fuser_forward`` and
+``fuser_backward`` implementations are responsible for routing the
+tensor and its gradient between those basic operations. For a non-public
+channel fully owned by one forward fusion, ``fuser_forward`` may return
+``None`` in the corresponding basic-operation output slot. A tensor is
+still required when the output is public or when a consumer is outside
+that forward fusion.
+
 Developer guide
 ---------------
 
@@ -317,9 +470,10 @@ of context objects for all the corresponding ``BasicOperation`` s.
 
 .. warning::
 
-   Remember the contract that the fused operation must produce outputs
-   that are interchangeable with the corresponding basic operation
-   outputs.
+   Forward-only and backward-only fused operations must produce outputs
+   that are interchangeable with the corresponding basic operations,
+   since the opposite pass is fused independently. Joint forward-backward
+   fusions (described below) relax this contract.
 
 In order to make these fused operations useful, they should be
 registered with the operation fuser. To do this, first implement a
@@ -351,3 +505,65 @@ and then register it with the ``register_forward_fusion`` or
 
     # Register fusion with operation fuser
     te.ops.register_forward_fusion(fuse_axpy_ops)
+
+Joint forward-backward fusions
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The fusions above replace operations in either the forward or the
+backward pass, and they must remain interchangeable with the unfused
+operations because the opposite pass is fused independently. Some
+optimizations, however, benefit from co-designing the two passes. For
+example, a fused operation's forward pass might skip saving a tensor if
+it knows that its backward pass can recompute it.
+
+A *joint* forward-backward fusion expresses this coupling. It is a single
+``FusedOperation`` that implements both ``fuser_forward`` and
+``fuser_backward``, registered with ``register_forward_backward_fusion``.
+Joint fusions are applied before the forward-only and backward-only
+fusion passes, so the same fused operation is seen by both passes. Unlike
+forward-only or backward-only fusions, the two halves need not be
+individually interchangeable with the unfused operations; only the
+forward/backward pair must be jointly equivalent.
+
+.. code-block:: python
+
+    class LinearSiLU(te.ops.FusedOperation):
+
+        def __init__(self, linear: te.ops.Linear, silu: te.ops.SiLU) -> None:
+            super().__init__((linear, silu))  # Equivalent basic ops
+
+        def fuser_forward(self, basic_op_ctxs, input_, **unused):
+            weight = self.basic_ops[0].weight
+            out = torch.nn.functional.silu(torch.matmul(input_, weight.T))
+            # Save reduced state: the backward recomputes the SiLU input
+            # rather than saving it.
+            basic_op_ctxs[0].save_for_backward(input_, weight)
+            return out, [(), ()]
+
+        def fuser_backward(self, basic_op_ctxs, grad_output, **unused):
+            x, w = basic_op_ctxs[0].saved_tensors
+            y = torch.matmul(x, w.T)  # Recompute SiLU input
+            s = torch.sigmoid(y)
+            dy = grad_output * s * (1 + y * (1 - s))  # SiLU backward
+            return (
+                torch.matmul(dy, w),              # Grad input
+                [(torch.matmul(dy.T, x),), ()],   # Grad params for each basic op
+                [(), ()],                         # Grad extra inputs for each basic op
+            )
+
+    def fuse_linear_silu(ops, **unused):
+        """Sliding window scan to perform LinearSiLU fusion"""
+        out = []
+        window, ops = ops[:2], ops[2:]
+        while len(window) == 2:
+            if isinstance(window[0], te.ops.Linear) and isinstance(window[1], te.ops.SiLU):
+                window = [LinearSiLU(window[0], window[1])]
+            else:
+                out.append(window[0])
+                window = window[1:]
+            window, ops = window + ops[:1], ops[1:]
+        out.extend(window + ops)
+        return out
+
+    # Register joint fusion with operation fuser
+    te.ops.register_forward_backward_fusion(fuse_linear_silu)

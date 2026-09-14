@@ -21,8 +21,6 @@ dtype = torch.bfloat16
 num_iters = 3
 # checkpointing
 ckpt_attn = False
-# workspace optimization path for cuDNN attention
-workspace_opt = True
 # QKV memory layout
 qkv_layout = "bshd_bshd_bshd"
 # sliding window attention
@@ -57,7 +55,6 @@ def example_attention(model, fused_attn_supported, flash_attn_supported):
             "FusedAttention",
             ckpt_attn,
             qkv_layout,
-            workspace_opt,
             pad_between_seqs,
             is_training,
         )
@@ -71,7 +68,6 @@ def example_attention(model, fused_attn_supported, flash_attn_supported):
             "FlashAttention",
             ckpt_attn,
             qkv_layout,
-            workspace_opt,
             pad_between_seqs,
             is_training,
         )

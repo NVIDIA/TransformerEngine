@@ -86,11 +86,19 @@
       .value("NVTE_Paged_KV_SBHD_SBHD_SBHD", NVTE_QKV_Layout::NVTE_Paged_KV_SBHD_SBHD_SBHD)        \
       .value("NVTE_Paged_KV_THD_BSHD_BSHD", NVTE_QKV_Layout::NVTE_Paged_KV_THD_BSHD_BSHD)          \
       .value("NVTE_Paged_KV_THD_SBHD_SBHD", NVTE_QKV_Layout::NVTE_Paged_KV_THD_SBHD_SBHD)          \
-      .value("NVTE_BHSD_BHSD_BHSD", NVTE_QKV_Layout::NVTE_BHSD_BHSD_BHSD);                         \
+      .value("NVTE_BHSD_BHSD_BHSD", NVTE_QKV_Layout::NVTE_BHSD_BHSD_BHSD)                          \
+      .value("NVTE_QKV_Layout_NOT_SET", NVTE_QKV_Layout::NVTE_QKV_Layout_NOT_SET);                 \
   pybind11::enum_<NVTE_Fused_Attn_Backend>(m, "NVTE_Fused_Attn_Backend", pybind11::module_local()) \
       .value("NVTE_F16_arbitrary_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen)      \
       .value("NVTE_FP8", NVTE_Fused_Attn_Backend::NVTE_FP8)                                        \
       .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend);                         \
+  pybind11::enum_<NVTEScalingMode>(m, "NVTEScalingMode", pybind11::module_local())                 \
+      .value("NVTE_DELAYED_TENSOR_SCALING", NVTEScalingMode::NVTE_DELAYED_TENSOR_SCALING)          \
+      .value("NVTE_MXFP8_1D_SCALING", NVTEScalingMode::NVTE_MXFP8_1D_SCALING)                      \
+      .value("NVTE_BLOCK_SCALING_1D", NVTEScalingMode::NVTE_BLOCK_SCALING_1D)                      \
+      .value("NVTE_BLOCK_SCALING_2D", NVTEScalingMode::NVTE_BLOCK_SCALING_2D)                      \
+      .value("NVTE_NVFP4_1D_SCALING", NVTEScalingMode::NVTE_NVFP4_1D_SCALING)                      \
+      .value("NVTE_INVALID_SCALING", NVTEScalingMode::NVTE_INVALID_SCALING);                       \
   pybind11::enum_<transformer_engine::Float8BlockScaleTensorFormat>(                               \
       m, "Float8BlockScaleTensorFormat", pybind11::module_local())                                 \
       .value("GEMM_READY", transformer_engine::Float8BlockScaleTensorFormat::GEMM_READY)           \
@@ -119,11 +127,15 @@
                                                                    pybind11::module_local())       \
       .def(py::init([]() { return new transformer_engine::CommOverlapCore(); }),                   \
            py::call_guard<py::gil_scoped_release>())                                               \
+      .def("get_tp_size", &transformer_engine::CommOverlapCore::get_tp_size,                       \
+           py::call_guard<py::gil_scoped_release>())                                               \
       .def("is_atomic_gemm", &transformer_engine::CommOverlapCore::is_atomic_gemm,                 \
            py::call_guard<py::gil_scoped_release>())                                               \
       .def("is_p2p_overlap", &transformer_engine::CommOverlapCore::is_p2p_overlap,                 \
            py::call_guard<py::gil_scoped_release>())                                               \
       .def("is_fp8_ubuf", &transformer_engine::CommOverlapCore::is_fp8_ubuf,                       \
+           py::call_guard<py::gil_scoped_release>())                                               \
+      .def("with_cublasmp", &transformer_engine::CommOverlapCore::with_cublasmp,                   \
            py::call_guard<py::gil_scoped_release>());                                              \
   py::class_<transformer_engine::CommOverlapBase,                                                  \
              std::shared_ptr<transformer_engine::CommOverlapBase>,                                 \
@@ -147,6 +159,8 @@
       },                                                                                           \
       py::call_guard<py::gil_scoped_release>(), py::arg("device_id") = -1);                        \
   m.def("ubuf_built_with_mpi", &transformer_engine::ubuf_built_with_mpi,                           \
+        py::call_guard<py::gil_scoped_release>());                                                 \
+  m.def("nvte_built_with_cublasmp", &nvte_built_with_cublasmp,                                     \
         py::call_guard<py::gil_scoped_release>());
 
 #endif

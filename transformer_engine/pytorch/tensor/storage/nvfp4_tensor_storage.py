@@ -8,17 +8,17 @@ from __future__ import annotations
 from collections.abc import Iterable
 import functools
 import math
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Annotated, Any, Dict, Optional, Tuple, Union
 import warnings
 
 import torch
 
 import transformer_engine_torch as tex
-from transformer_engine_torch import DType as TE_DType
 
-from ...quantized_tensor import QuantizedTensorStorage, Quantizer
+from ...quantized_tensor import InnerTensor, QuantizedTensorStorage, Quantizer
+from .._quantization_helpers import safe_quantized_repr
 
-from ...constants import TE_DType as torch_to_transformer_engine_dtype
+from ...constants import TE_DType as torch_to_transformer_engine_dtype, DType
 from ...utils import _empty_tensor
 
 
@@ -80,25 +80,20 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
 
     """
 
-    # Row-scaled FP4 data
-    _rowwise_data: Optional[torch.Tensor]
-    # Column-scaled FP4 data
-    _columnwise_data: Optional[torch.Tensor]
-    # Block scaling factors for row-scaled FP4 data
-    _rowwise_scale_inv: torch.Tensor
-    # Block scaling factors for column-scaled FP4 data
-    _columnwise_scale_inv: torch.Tensor
-    # Input absolute maximum value (used to compute tensor scale for
-    # row-scaled FP4 data)
-    _amax_rowwise: torch.Tensor
-    # Input absolute maximum value (used to compute tensor scale for
-    # column-scaled FP4 data)
-    _amax_columnwise: torch.Tensor
+    # Row-scaled FP4 data and its block scaling factors
+    _rowwise_data: Annotated[Optional[torch.Tensor], InnerTensor("rowwise_data")]
+    _rowwise_scale_inv: Annotated[torch.Tensor, InnerTensor("rowwise_scale_inv")]
+    # Column-scaled FP4 data and its block scaling factors
+    _columnwise_data: Annotated[Optional[torch.Tensor], InnerTensor("columnwise_data")]
+    _columnwise_scale_inv: Annotated[torch.Tensor, InnerTensor("columnwise_scale_inv")]
+    # Input absolute maximum values, used to compute the tensor scale
+    _amax_rowwise: Annotated[torch.Tensor, InnerTensor("amax_rowwise")]
+    _amax_columnwise: Annotated[torch.Tensor, InnerTensor("amax_columnwise")]
 
     # Builder class for casting to MXFP8
     _quantizer: Optional[Quantizer]
     # FP4 data type
-    _fp4_dtype: TE_DType
+    _fp4_dtype: DType
     # Whether scaling factors are in the swizzled format expected by
     # GEMM
     _with_gemm_swizzled_scales: bool
@@ -117,7 +112,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         columnwise_scale_inv: torch.Tensor,
         amax_rowwise: torch.Tensor,
         amax_columnwise: torch.Tensor,
-        fp4_dtype: TE_DType,
+        fp4_dtype: Union[DType, tex.DType],
         quantizer: Optional[Quantizer],
         with_gemm_swizzled_scales: bool,
         *args,
@@ -135,7 +130,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
 
         instance._rowwise_data = rowwise_data
         instance._columnwise_data = columnwise_data
-        instance._fp4_dtype = fp4_dtype
+        instance._fp4_dtype = DType.cast(fp4_dtype)
         instance._quantizer = quantizer.copy() if quantizer is not None else None
         instance._rowwise_scale_inv = rowwise_scale_inv
         instance._columnwise_scale_inv = columnwise_scale_inv
@@ -341,16 +336,19 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         )
 
     def __repr__(self):
-        data_rowwise = self.dequantize()
+        try:
+            data_rowwise = self.dequantize()
 
-        return (
-            "NVFP4TensorStorage("
-            f"rowwise_scaled_data={data_rowwise},"
-            f"rowwise_scale_inv={self._rowwise_scale_inv},"
-            f"amax_rowwise={self._amax_rowwise},"
-            f"amax_columnwise={self._amax_columnwise},"
-            ")"
-        )
+            return (
+                "NVFP4TensorStorage("
+                f"rowwise_scaled_data={data_rowwise},"
+                f"rowwise_scale_inv={self._rowwise_scale_inv},"
+                f"amax_rowwise={self._amax_rowwise},"
+                f"amax_columnwise={self._amax_columnwise},"
+                ")"
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            return safe_quantized_repr(self, "NVFP4TensorStorage", error=exc)
 
     def update_usage(
         self,

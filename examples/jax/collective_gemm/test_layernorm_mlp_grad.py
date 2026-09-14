@@ -139,19 +139,26 @@ def run_layernorm_mlp_grad_tests(args, mesh=None):
     rng, x_rng, weight_1_rng, bias_1_rng, weight_2_rng, bias_2_rng, gamma_rng = jax.random.split(
         rng, 7
     )
-    x = jax.random.normal(
+    std = jnp.asarray(args.std, dtype=jnp.bfloat16)
+    x = std * jax.random.normal(
         x_rng, (args.batch_size, args.seq_len, args.hidden_in), dtype=jnp.bfloat16
     )
-    weight_1 = jax.random.normal(
-        weight_1_rng, (args.hidden_in, 1, args.hidden_out), dtype=jnp.bfloat16
-    ) / jnp.sqrt(args.hidden_in)
-    bias_1 = jax.random.normal(bias_1_rng, (1, args.hidden_out), dtype=jnp.bfloat16)
-    weight_2 = jax.random.normal(
-        weight_2_rng, (args.hidden_out, args.hidden_in), dtype=jnp.bfloat16
-    ) / jnp.sqrt(args.hidden_out)
-    bias_2 = jax.random.normal(bias_2_rng, (args.hidden_in,), dtype=jnp.bfloat16)
-    gamma = jax.random.normal(gamma_rng, (args.hidden_in,), dtype=jnp.bfloat16) / jnp.sqrt(
-        args.hidden_in
+    weight_1 = (
+        std
+        * jax.random.normal(weight_1_rng, (args.hidden_in, 1, args.hidden_out), dtype=jnp.bfloat16)
+        / jnp.sqrt(args.hidden_in)
+    )
+    bias_1 = std * jax.random.normal(bias_1_rng, (1, args.hidden_out), dtype=jnp.bfloat16)
+    weight_2 = (
+        std
+        * jax.random.normal(weight_2_rng, (args.hidden_out, args.hidden_in), dtype=jnp.bfloat16)
+        / jnp.sqrt(args.hidden_out)
+    )
+    bias_2 = std * jax.random.normal(bias_2_rng, (args.hidden_in,), dtype=jnp.bfloat16)
+    gamma = (
+        std
+        * jax.random.normal(gamma_rng, (args.hidden_in,), dtype=jnp.bfloat16)
+        / jnp.sqrt(args.hidden_in)
     )
     collective_op_set_1 = CollectiveOpSet.create(forward_collective_op=CollectiveOp.ALL_GATHER)
     collective_op_set_2 = CollectiveOpSet.create(forward_collective_op=CollectiveOp.REDUCE_SCATTER)
@@ -249,6 +256,7 @@ class TestCollectiveLayerNormMLPGradient(unittest.TestCase):
         self.args.process_id = self.process_id
         self.args.local_device_ids = self.local_device_ids
         self.args.num_devices_per_process = self.num_devices_per_process
+        self.args.use_cublasmp = self.use_cublasmp
         self.args.enable_data_parallel = True
         self.args.tensor_parallel_size = _get_dp_and_tp_sizes(self.args)[1]
         _initialize_distributed(self.args)

@@ -4,7 +4,7 @@
     See LICENSE for license information.
 
 Transformer Engine documentation
-=================================
+=================================================
 
 .. ifconfig:: "dev" in release
 
@@ -31,6 +31,7 @@ Transformer Engine documentation
    installation
    getting_started/index
    faq
+   release_notes.md
 
 .. toctree::
    :hidden:

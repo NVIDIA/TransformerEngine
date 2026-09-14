@@ -5,10 +5,11 @@
  ************************************************************************/
 
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 
 #include "../common.h"
-#include "../cudnn_utils.h"
+#include "../util/cuda_runtime.h"
 #include "transformer_engine/fused_attn.h"
 #include "utils.h"
 
@@ -324,93 +325,6 @@ void generateMatrixStrides(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int6
   }
 }
 
-bool allowAllConfig(cudnnBackendDescriptor_t engine_config) {
-  (void)engine_config;
-  return false;
-}
-
-cudnn_frontend::Tensor tensor_create(cudnnDataType_t type, int64_t id, int64_t const *dim,
-                                     int64_t const *stride, bool is_virtual, bool is_value) {
-  int nbDims = 4;
-  auto tensor_created =
-      cudnn_frontend::TensorBuilder()
-          .setDim(nbDims, dim)
-          .setStride(nbDims, stride)
-          .setId(id)
-          .setAlignment(16)  // 16B alignment is needed to run a tensor core engine
-          .setDataType(type)
-          .setVirtual(is_virtual)
-          .setByValue(is_value)
-          .build();
-  return tensor_created;
-}
-
-cudnn_frontend::Tensor tensor_create_with_offset(
-    cudnnDataType_t type, int64_t id, int64_t const *dim, int64_t const *stride, bool is_virtual,
-    bool is_value, std::shared_ptr<cudnn_frontend::Tensor> raggedOffset) {
-  int nbDims = 4;
-  auto tensor_created =
-      cudnn_frontend::TensorBuilder()
-          .setDim(nbDims, dim)
-          .setStride(nbDims, stride)
-          .setId(id)
-          .setAlignment(16)  // 16B alignment is needed to run a tensor core engine
-          .setDataType(type)
-          .setVirtual(is_virtual)
-          .setByValue(is_value)
-          .setRaggedOffset(raggedOffset)
-          .build();
-  return tensor_created;
-}
-
-cudnn_frontend::PointWiseDesc pw_desc_create(cudnnDataType_t type, cudnnPointwiseMode_t mode) {
-  auto pw_desc_created =
-      cudnn_frontend::PointWiseDescBuilder().setMode(mode).setComputeType(type).build();
-  return pw_desc_created;
-}
-
-cudnn_frontend::Operation unary_pw_op_create(cudnn_frontend::Tensor const &xDesc,
-                                             cudnn_frontend::Tensor const &yDesc,
-                                             cudnn_frontend::PointWiseDesc const &pwDesc) {
-  auto pw_op_created =
-      cudnn_frontend::OperationBuilder(CUDNN_BACKEND_OPERATION_POINTWISE_DESCRIPTOR)
-          .setxDesc(xDesc)
-          .setyDesc(yDesc)
-          .setpwDesc(pwDesc)
-          .build();
-  return pw_op_created;
-}
-
-cudnn_frontend::Operation binary_pw_op_create(cudnn_frontend::Tensor const &xDesc,
-                                              cudnn_frontend::Tensor const &bDesc,
-                                              cudnn_frontend::Tensor const &yDesc,
-                                              cudnn_frontend::PointWiseDesc const &pwDesc) {
-  auto pw_op_created =
-      cudnn_frontend::OperationBuilder(CUDNN_BACKEND_OPERATION_POINTWISE_DESCRIPTOR)
-          .setxDesc(xDesc)
-          .setbDesc(bDesc)
-          .setyDesc(yDesc)
-          .setpwDesc(pwDesc)
-          .build();
-  return pw_op_created;
-}
-
-cudnn_frontend::Operation ternary_pw_op_create(cudnn_frontend::Tensor const &xDesc,
-                                               cudnn_frontend::Tensor const &bDesc,
-                                               cudnn_frontend::Tensor const &tDesc,
-                                               cudnn_frontend::Tensor const &yDesc,
-                                               cudnn_frontend::PointWiseDesc const &pwDesc) {
-  auto pw_op_created =
-      cudnn_frontend::OperationBuilder(CUDNN_BACKEND_OPERATION_POINTWISE_DESCRIPTOR)
-          .setxDesc(xDesc)
-          .setbDesc(bDesc)
-          .settDesc(tDesc)
-          .setyDesc(yDesc)
-          .setpwDesc(pwDesc)
-          .build();
-  return pw_op_created;
-}
-
 // convert cu_seqlens to actual_seqlens
 __global__ void cu_seqlens_to_actual_seqlens(int64_t actual_b, int64_t max_b,
                                              int32_t const *const q_cu_seqlens,
@@ -429,71 +343,43 @@ __global__ void cu_seqlens_to_actual_seqlens(int64_t actual_b, int64_t max_b,
 // convert cu_seqlens_padded to offsets
 template <class OFFSETS_T>
 __device__ void cu_seqlens_padded_to_offsets_impl(
-    NVTE_QKV_Layout_Group layout_group, int64_t actual_b, int64_t max_b, int64_t h, int64_t hg,
-    int64_t d_qk, int64_t d_v, const int32_t *cu_seqlens_q_padded,
-    const int32_t *cu_seqlens_kv_padded, OFFSETS_T *offsets_q, OFFSETS_T *offsets_k,
-    OFFSETS_T *offsets_v, OFFSETS_T *offsets_o, OFFSETS_T *offsets_s) {
+    const RaggedOffsetMultipliers &mults, int64_t actual_b, int64_t max_b,
+    const int32_t *cu_seqlens_q_padded, const int32_t *cu_seqlens_kv_padded, OFFSETS_T *offsets_q,
+    OFFSETS_T *offsets_k, OFFSETS_T *offsets_v, OFFSETS_T *offsets_o, OFFSETS_T *offsets_s) {
   size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
   auto cu_seqlens_id = min(tid, actual_b);
   if (tid <= max_b) {
     if (offsets_s != nullptr) {
-      offsets_s[tid] = h * cu_seqlens_q_padded[cu_seqlens_id];
+      offsets_s[tid] = mults.stats * cu_seqlens_q_padded[cu_seqlens_id];
     }
     if (offsets_q != nullptr && offsets_o != nullptr) {
-      offsets_o[tid] = h * d_v * cu_seqlens_q_padded[cu_seqlens_id];
-      switch (layout_group) {
-        case NVTE_QKV_Layout_Group::NVTE_HD_HD_HD:
-        case NVTE_QKV_Layout_Group::NVTE_Paged_KV_HD_HD_HD:
-          offsets_q[tid] = h * d_qk * cu_seqlens_q_padded[cu_seqlens_id];
-          break;
-        case NVTE_QKV_Layout_Group::NVTE_3HD:
-        case NVTE_QKV_Layout_Group::NVTE_H3D:
-          offsets_q[tid] = 3 * h * d_qk * cu_seqlens_q_padded[cu_seqlens_id];
-          break;
-        case NVTE_QKV_Layout_Group::NVTE_HD_2HD:
-        case NVTE_QKV_Layout_Group::NVTE_HD_H2D:
-          offsets_q[tid] = h * d_qk * cu_seqlens_q_padded[cu_seqlens_id];
-          break;
-      }
+      offsets_q[tid] = mults.q * cu_seqlens_q_padded[cu_seqlens_id];
+      offsets_o[tid] = mults.o * cu_seqlens_q_padded[cu_seqlens_id];
     }
     if (offsets_k != nullptr && offsets_v != nullptr) {
-      switch (layout_group) {
-        case NVTE_QKV_Layout_Group::NVTE_HD_HD_HD:
-        case NVTE_QKV_Layout_Group::NVTE_Paged_KV_HD_HD_HD:
-          offsets_k[tid] = hg * d_qk * cu_seqlens_kv_padded[cu_seqlens_id];
-          offsets_v[tid] = hg * d_v * cu_seqlens_kv_padded[cu_seqlens_id];
-          break;
-        case NVTE_QKV_Layout_Group::NVTE_3HD:
-        case NVTE_QKV_Layout_Group::NVTE_H3D:
-          offsets_k[tid] = 3 * h * d_qk * cu_seqlens_q_padded[cu_seqlens_id];
-          offsets_v[tid] = offsets_k[cu_seqlens_id];
-          break;
-        case NVTE_QKV_Layout_Group::NVTE_HD_2HD:
-        case NVTE_QKV_Layout_Group::NVTE_HD_H2D:
-          offsets_k[tid] = 2 * hg * d_qk * cu_seqlens_kv_padded[cu_seqlens_id];
-          offsets_v[tid] = offsets_k[cu_seqlens_id];
-          break;
-      }
+      const int32_t *cu_seqlens_kv_src =
+          mults.kv_from_q ? cu_seqlens_q_padded : cu_seqlens_kv_padded;
+      offsets_k[tid] = mults.k * cu_seqlens_kv_src[cu_seqlens_id];
+      offsets_v[tid] = mults.v * cu_seqlens_kv_src[cu_seqlens_id];
     }
   }
 }
 
-__global__ void cu_seqlens_padded_to_offsets(NVTE_QKV_Layout_Group layout_group, int64_t actual_b,
-                                             int64_t max_b, int64_t h, int64_t hg, int64_t d_qk,
-                                             int64_t d_v, const int32_t *cu_seqlens_q_padded,
+__global__ void cu_seqlens_padded_to_offsets(RaggedOffsetMultipliers mults, int64_t actual_b,
+                                             int64_t max_b, const int32_t *cu_seqlens_q_padded,
                                              const int32_t *cu_seqlens_kv_padded,
                                              DType offset_dtype, void *offsets_q, void *offsets_k,
                                              void *offsets_v, void *offsets_o, void *offsets_s) {
   if (offset_dtype == DType::kInt32) {
     cu_seqlens_padded_to_offsets_impl<int32_t>(
-        layout_group, actual_b, max_b, h, hg, d_qk, d_v, cu_seqlens_q_padded, cu_seqlens_kv_padded,
+        mults, actual_b, max_b, cu_seqlens_q_padded, cu_seqlens_kv_padded,
         reinterpret_cast<int32_t *>(offsets_q), reinterpret_cast<int32_t *>(offsets_k),
         reinterpret_cast<int32_t *>(offsets_v), reinterpret_cast<int32_t *>(offsets_o),
         reinterpret_cast<int32_t *>(offsets_s));
   } else {
     assert(offset_dtype == DType::kInt64 && "expect int64");
     cu_seqlens_padded_to_offsets_impl<int64_t>(
-        layout_group, actual_b, max_b, h, hg, d_qk, d_v, cu_seqlens_q_padded, cu_seqlens_kv_padded,
+        mults, actual_b, max_b, cu_seqlens_q_padded, cu_seqlens_kv_padded,
         reinterpret_cast<int64_t *>(offsets_q), reinterpret_cast<int64_t *>(offsets_k),
         reinterpret_cast<int64_t *>(offsets_v), reinterpret_cast<int64_t *>(offsets_o),
         reinterpret_cast<int64_t *>(offsets_s));
@@ -537,6 +423,7 @@ DType get_ragged_offset_dtype(NVTE_QKV_Layout_Group layout_group, int64_t num_at
 
 // quantize batch size
 size_t get_max_batch_size(size_t batch_size) {
+  if (batch_size == 0) return 0;  // guard: log2(0) = -inf, casting to size_t is UB
   size_t max_b = batch_size;
   size_t log2_b = ceil(log2(batch_size));
   // batch size is expected to be 10s-100s
@@ -555,6 +442,7 @@ size_t get_max_batch_size(size_t batch_size) {
 
 // quantize token count
 size_t get_max_tokens(size_t num_tokens) {
+  if (num_tokens == 0) return 0;  // guard: log2(0) = -inf, casting to size_t is UB
   // token count is expected to be 1k's-100k's
   // t = 0, ..., 1024   -> max_t = 1024
   // t = 1025, ..., 32k -> max_t = next power of 2

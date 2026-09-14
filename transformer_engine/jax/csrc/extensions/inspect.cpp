@@ -5,8 +5,11 @@
  ************************************************************************/
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <fstream>
 #include <iostream>
+#include <string>
+#include <string_view>
 
 #include "../extensions.h"
 #include "xla/ffi/api/c_api.h"
@@ -14,9 +17,28 @@
 namespace transformer_engine {
 namespace jax {
 
+// Replace characters not in [A-Za-z0-9._-] with '_' so probe names are
+// safe to use as filename components.
+static std::string SanitizeProbeName(std::string_view name) {
+  std::string out;
+  out.reserve(name.size());
+  for (char c : name) {
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' ||
+        c == '_' || c == '-') {
+      out.push_back(c);
+    } else {
+      out.push_back('_');
+    }
+  }
+  if (out.empty()) {
+    out = "anon";
+  }
+  return out;
+}
+
 Error_Type InspectFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type min_buf,
                       Buffer_Type max_buf, Buffer_Type mean_buf, Buffer_Type std_buf,
-                      Result_Type output_buf) {
+                      Result_Type output_buf, std::string_view name) {
   NVTE_CHECK(input_buf.untyped_data() != nullptr, "Input must be provided for inspect operation");
   NVTE_CHECK(output_buf->untyped_data() != nullptr,
              "Output must be provided for inspect operation");
@@ -42,18 +64,24 @@ Error_Type InspectFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type mi
   int device;
   NVTE_CHECK_CUDA(cudaGetDevice(&device));
 
-  // Write the tensor data to a file as a binary blob
-  std::string filename = "my_tensor_gpu" + std::to_string(device) + ".bin";
+  // Per-probe filenames: my_tensor_gpu{device}_{sanitized_name}.bin /
+  // ..._meta.json. With distinct names, the on-disk dumps survive across
+  // probes instead of being overwritten on every call
+  std::string safe_name = SanitizeProbeName(name);
+  std::string device_str = std::to_string(device);
+  std::string filename = "my_tensor_gpu" + device_str + "_" + safe_name + ".bin";
   std::ofstream file(filename, std::ios::binary);
   NVTE_CHECK(file.is_open(), "Failed to create file: ", filename);
   file.write(reinterpret_cast<const char *>(input_data.data()), input_data.size());
   file.close();
 
-  // Write out a metadata file
-  std::string meta_filename = "my_tensor_gpu" + std::to_string(device) + "_meta.json";
+  std::string meta_filename = "my_tensor_gpu" + device_str + "_" + safe_name + "_meta.json";
   std::ofstream meta_file(meta_filename);
   NVTE_CHECK(meta_file.is_open(), "Failed to create file: ", meta_filename);
   meta_file << "{";
+  // Echo the original (un-sanitized) probe name so analysis tools can
+  // recover the semantic label even when the filename had to mangle it.
+  meta_file << "\"name\": \"" << name << "\", ";
   meta_file << "\"shape\": [";
   for (size_t i = 0; i < input_buf.dimensions().size(); ++i) {
     meta_file << input_buf.dimensions()[i];
@@ -70,8 +98,8 @@ Error_Type InspectFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type mi
   meta_file << "}";
   meta_file.close();
 
-  // Log the tensor metadata to the console
-  printf("[gpu%d]: Tensor data written to %s (shape: [", device, filename.c_str());
+  printf("[gpu%d %.*s]: written to %s (shape: [", device, static_cast<int>(name.size()),
+         name.data(), filename.c_str());
   for (size_t i = 0; i < input_buf.dimensions().size(); ++i) {
     printf("%zu", static_cast<size_t>(input_buf.dimensions()[i]));
     if (i < input_buf.dimensions().size() - 1) {
@@ -86,13 +114,14 @@ Error_Type InspectFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type mi
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(InspectHandler, InspectFFI,
                               FFI::Bind()
-                                  .Ctx<FFI_Stream_Type>()  // stream
-                                  .Arg<Buffer_Type>()      // input
-                                  .Arg<Buffer_Type>()      // min
-                                  .Arg<Buffer_Type>()      // max
-                                  .Arg<Buffer_Type>()      // mean
-                                  .Arg<Buffer_Type>()      // std
-                                  .Ret<Buffer_Type>()      // output
+                                  .Ctx<FFI_Stream_Type>()          // stream
+                                  .Arg<Buffer_Type>()              // input
+                                  .Arg<Buffer_Type>()              // min
+                                  .Arg<Buffer_Type>()              // max
+                                  .Arg<Buffer_Type>()              // mean
+                                  .Arg<Buffer_Type>()              // std
+                                  .Ret<Buffer_Type>()              // output
+                                  .Attr<std::string_view>("name")  // probe name
 );
 
 }  // namespace jax

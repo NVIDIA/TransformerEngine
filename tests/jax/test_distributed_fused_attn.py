@@ -12,8 +12,17 @@ from distributed_test_base import (
     generate_context_parallel_configs_for_attn,
     generate_collectives_count,
 )
-from test_fused_attn import FusedAttnRunner, BiasShape, SeqDescFormat
+from test_fused_attn import (
+    FusedAttnRunner,
+    BiasShape,
+    SeqDescFormat,
+)
+from test_fused_attn_score_mod import (
+    ScoreModFusedAttnRunner,
+    _has_cudnn_frontend_python,
+)
 from utils import pytest_parametrize_wrapper
+from transformer_engine_jax import get_cudnn_version, get_device_compute_capability
 from transformer_engine.jax.attention import (
     is_fused_attn_kernel_available,
     AttnBiasType,
@@ -72,25 +81,6 @@ class TestDistributedSelfAttn:
         dropout_prob = 0.0
         is_training = True
         batch, seqlen, num_head, hidden = data_shape
-
-        if not is_fused_attn_kernel_available(
-            is_training,
-            dtype,
-            dtype,
-            QKVLayout.BS3HD,
-            attn_bias_type,
-            attn_mask_type,
-            softmax_type,
-            dropout_prob,
-            num_head,
-            num_head,
-            seqlen,
-            seqlen,
-            hidden,
-            hidden,
-            None,  # no window
-        ):
-            pytest.skip("No FusedAttn backend found")
 
         col_ref = self.generate_collectives_count_ref(
             mesh_shape,
@@ -225,25 +215,6 @@ class TestDistributedCrossAttn:
 
         batch, seqlen, num_head, hidden = data_shape
 
-        if not is_fused_attn_kernel_available(
-            is_training,
-            dtype,
-            dtype,
-            QKVLayout.BSHD_BS2HD,
-            attn_bias_type,
-            attn_mask_type,
-            softmax_type,
-            dropout_prob,
-            num_head,
-            num_head,
-            seqlen,
-            seqlen,
-            hidden,
-            hidden,
-            None,  # no window
-        ):
-            pytest.skip("No FusedAttn backend found")
-
         col_ref = self.generate_collectives_count_ref()
         runner = FusedAttnRunner(
             batch,
@@ -272,6 +243,59 @@ class TestDistributedCrossAttn:
         runner.test_backward()
 
 
+DISTRIBUTED_SCORE_MOD_DATA_SHAPES = {
+    "L0": [],
+    "L1": [(4, 16, 4, 64)],
+    "L2": [],
+}
+
+
+@pytest.mark.skipif(not _has_cudnn_frontend_python(), reason="cuDNN Python frontend is required")
+class TestDistributedScoreModSelfAttn:
+    @pytest.mark.parametrize("device_count,mesh_shape,mesh_axes,mesh_resource", generate_configs())
+    @pytest_parametrize_wrapper("data_shape", DISTRIBUTED_SCORE_MOD_DATA_SHAPES)
+    @pytest.mark.parametrize("dtype", DTYPES)
+    @pytest.mark.skipif(
+        get_device_compute_capability(0) < 90,
+        reason="Softcap score_mod tests require sm90+",
+    )
+    def test_softcap_score_mod_with_aux_params_backward(
+        self,
+        device_count,
+        mesh_shape,
+        mesh_axes,
+        mesh_resource,
+        data_shape,
+        dtype,
+    ):
+        ScoreModFusedAttnRunner.require_cudnn_frontend()
+        batch, seqlen, num_heads, head_dim = data_shape
+        dp_axis = mesh_resource.dp_resource
+        tp_axis = mesh_resource.tpsp_resource
+
+        if dp_axis is not None:
+            dp_size = mesh_shape[mesh_axes.index(dp_axis)]
+            if batch % dp_size != 0:
+                pytest.skip(f"{batch=} must be divisible by {dp_size=}")
+        if tp_axis is not None:
+            tp_size = mesh_shape[mesh_axes.index(tp_axis)]
+            if num_heads % tp_size != 0:
+                pytest.skip(f"{num_heads=} must be divisible by {tp_size=}")
+
+        runner = ScoreModFusedAttnRunner.softcap(
+            batch,
+            seqlen,
+            num_heads,
+            head_dim,
+            dtype,
+            number_of_devices=device_count,
+            mesh_shape=mesh_shape,
+            mesh_axes=mesh_axes,
+            mesh_resource=mesh_resource,
+        )
+        runner.test_backward()
+
+
 DISTRIBUTED_CONTEXT_SELF_ATTN_LAYOUTS_MASKS = [
     pytest.param(QKVLayout.BSHD_BS2HD, AttnMaskType.CAUSAL_MASK, id="BSHD_KVPACKED-CAUSAL"),
     pytest.param(QKVLayout.BSHD_BSHD_BSHD, AttnMaskType.CAUSAL_MASK, id="BSHD_SEPARATE-CAUSAL"),
@@ -286,6 +310,65 @@ DISTRIBUTED_CONTEXT_SELF_ATTN_DATA_SHAPES = [
     # Sequence lengths will be scaled by CP*2 so that we don't run with tiny sizes.
     pytest.param([2, 128, 8, 128], id="2-128xCPx2-8-128"),
     pytest.param([4, 256, 16, 64], id="4-256xCPx2-16-64"),
+]
+
+DISTRIBUTED_CONTEXT_SELF_ATTN_D256_DATA_SHAPES = {
+    "L0": [],
+    "L1": [[2, 128, 16, 256]],
+    "L2": [],
+}
+
+# Keep these as explicit tuples instead of independent layout/mask/window as:
+# BSHD CP uses CAUSAL_MASK, THD CP uses PADDING_CAUSAL_MASK, SWA is
+# only valid for THD, and stripe_size behavior is different for
+# BSHD vs THD in these tests. Splitting the axes would mostly add
+# invalid BSHD+SWA and THD+CAUSAL combinations that fail or skip.
+DISTRIBUTED_CONTEXT_SELF_ATTN_D256_LAYOUTS_MASKS_WINDOWS = [
+    # BSHD with different layouts, but same causal mask and no sliding window
+    pytest.param(
+        QKVLayout.BSHD_BS2HD,
+        AttnMaskType.CAUSAL_MASK,
+        (-1, -1),
+        id="BSHD_KVPACKED-CAUSAL-NO_SWA",
+    ),
+    pytest.param(
+        QKVLayout.BSHD_BSHD_BSHD,
+        AttnMaskType.CAUSAL_MASK,
+        (-1, -1),
+        id="BSHD_SEPARATE-CAUSAL-NO_SWA",
+    ),
+    # THD with different sliding window sizes, but same packed layout and padding causal mask
+    pytest.param(
+        QKVLayout.THD_T2HD,
+        AttnMaskType.PADDING_CAUSAL_MASK,
+        (-1, -1),
+        id="THD_KVPACKED-PADDING_CAUSAL-NO_SWA",
+    ),
+    pytest.param(
+        QKVLayout.THD_T2HD,
+        AttnMaskType.PADDING_CAUSAL_MASK,
+        (20, 0),
+        id="THD_KVPACKED-PADDING_CAUSAL-SWA",
+    ),
+    # THD with different sliding window sizes, but same separate layout and padding causal mask
+    pytest.param(
+        QKVLayout.THD_THD_THD,
+        AttnMaskType.PADDING_CAUSAL_MASK,
+        (-1, -1),
+        id="THD_SEPARATE-PADDING_CAUSAL-NO_SWA",
+    ),
+    pytest.param(
+        QKVLayout.THD_THD_THD,
+        AttnMaskType.PADDING_CAUSAL_MASK,
+        (20, 0),
+        id="THD_SEPARATE-PADDING_CAUSAL-SWA",
+    ),
+]
+
+DISTRIBUTED_CONTEXT_SELF_ATTN_MAX_LOGIT_CP_MODES = [
+    pytest.param(CPStrategy.ALL_GATHER, False, id="AG"),
+    pytest.param(CPStrategy.RING, False, id="RING-NO_SCAN"),
+    pytest.param(CPStrategy.RING, True, id="RING-SCAN"),
 ]
 
 
@@ -308,6 +391,8 @@ class TestDistributedContextParallelSelfAttn:
         window_size=None,
         stripe_size=None,
         num_segments_per_seq=None,
+        return_max_logit=False,
+        check_forward_output=True,
     ):
         if qkv_layout.is_thd():
             if not load_balanced and (
@@ -365,9 +450,17 @@ class TestDistributedContextParallelSelfAttn:
             cp_load_balanced=load_balanced,
         )
 
+        # Mirror _FusedAttnCPWithAllGatherHelper.get_adjusted_max_segments_per_seq()
+        runner_segments = runner._get_max_segments_per_sequence()
+        if stripe_size and cp_strategy in (CPStrategy.DEFAULT, CPStrategy.ALL_GATHER):
+            max_segments_per_seq = runner_segments + seqlen // (stripe_size * cp_size)
+        else:
+            max_segments_per_seq = runner_segments
+
         def check_has_backend_for_mask(mask_type):
             return is_fused_attn_kernel_available(
                 is_training,
+                batch,
                 dtype,
                 dtype,
                 qkv_layout,
@@ -381,8 +474,9 @@ class TestDistributedContextParallelSelfAttn:
                 seqlen,
                 hidden,
                 hidden,
-                None,
-            )  # no SWA for CP
+                None,  # no SWA for CP
+                max_segments_per_seq=max_segments_per_seq,
+            )
 
         # For causal masking we depend on having bottom right support also.
         # The API does not check this and instead we rely on lower level checks to raise
@@ -402,8 +496,88 @@ class TestDistributedContextParallelSelfAttn:
         if num_head % kv_groups != 0 or (num_head // kv_groups) % tp_size != 0:
             pytest.skip(f"Skipping {kv_groups=} not multiple of {data_shape=} or {tp_size=}")
 
-        runner.test_backward()
+        if return_max_logit:
+            runner.test_forward(
+                return_max_logit=True,
+                check_output=check_forward_output,
+            )
+        else:
+            runner.test_backward()
         del os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"]
+
+    @pytest_parametrize_wrapper(
+        "device_count,mesh_shape,mesh_axes,mesh_resource",
+        generate_context_parallel_configs_for_attn(),
+    )
+    @pytest.mark.parametrize("data_shape", DISTRIBUTED_CONTEXT_SELF_ATTN_DATA_SHAPES[:1])
+    @pytest.mark.parametrize("kv_groups", [1, 8])
+    @pytest.mark.parametrize("dtype", [pytest.param(jnp.bfloat16, id="BF16")])
+    @pytest.mark.parametrize(
+        "qkv_layout, attn_mask_type",
+        DISTRIBUTED_CONTEXT_SELF_ATTN_LAYOUTS_MASKS,
+    )
+    @pytest.mark.parametrize(
+        "cp_strategy, use_scan_ring",
+        DISTRIBUTED_CONTEXT_SELF_ATTN_MAX_LOGIT_CP_MODES,
+    )
+    @pytest.mark.parametrize(
+        "window_size",
+        [
+            pytest.param((-1, -1), id="NO_SWA"),
+            pytest.param((20, 0), id="SWA"),
+        ],
+    )
+    def test_context_parallel_return_max_logit(
+        self,
+        device_count,
+        mesh_shape,
+        mesh_axes,
+        mesh_resource,
+        data_shape,
+        kv_groups,
+        dtype,
+        qkv_layout,
+        attn_mask_type,
+        cp_strategy,
+        window_size,
+        use_scan_ring,
+    ):
+        """Check CP fused attention returns global per-head max_logit."""
+        is_thd = qkv_layout.is_thd()
+        supports_swa = is_thd and (
+            cp_strategy == CPStrategy.ALL_GATHER
+            or (cp_strategy == CPStrategy.RING and not use_scan_ring)
+        )
+        if window_size != (-1, -1) and not supports_swa:
+            pytest.skip("CP SWA requires THD All-Gather or unrolled THD Ring.")
+        # TODO: Evaluate cuDNN Max mismatches observed for striped multi-segment THD Ring GQA.
+        if is_thd and cp_strategy == CPStrategy.RING and kv_groups > 1:
+            pytest.skip("THD Ring GQA Max mismatches require further evaluation.")
+
+        stripe_size = 64 if is_thd and cp_strategy == CPStrategy.ALL_GATHER else None
+        if is_thd and cp_strategy == CPStrategy.RING:
+            stripe_size = 1
+        num_segments_per_seq = 5 if is_thd else None
+        check_forward_output = not (is_thd and cp_strategy == CPStrategy.RING)
+        self.impl_test_context_parallel_attn(
+            device_count,
+            mesh_shape,
+            mesh_axes,
+            mesh_resource,
+            data_shape,
+            kv_groups,
+            attn_mask_type,
+            dtype,
+            qkv_layout,
+            True,
+            cp_strategy,
+            use_scan_ring=use_scan_ring,
+            window_size=window_size,
+            stripe_size=stripe_size,
+            num_segments_per_seq=num_segments_per_seq,
+            return_max_logit=True,
+            check_forward_output=check_forward_output,
+        )
 
     @pytest_parametrize_wrapper(
         "device_count,mesh_shape,mesh_axes,mesh_resource",
@@ -428,7 +602,7 @@ class TestDistributedContextParallelSelfAttn:
         "window_size",
         [
             pytest.param((-1, -1), id="window_size(-1, -1)"),
-            pytest.param((5, 0), id="window_size(8, 0)"),
+            pytest.param((5, 0), id="window_size(5, 0)"),
         ],
     )
     @pytest.mark.parametrize(
@@ -581,6 +755,119 @@ class TestDistributedContextParallelSelfAttn:
             stripe_size=stripe_size,
         )
 
+    # CP ring and all-gather tests for D=256
+    # TODO(KshitijLakhani): Replace this with common-provided fused-attn disable reasons once
+    # they can be surfaced to framework tests.
+    @staticmethod
+    def skip_if_d256_cp_unsupported(qkv_layout):
+        compute_capability = get_device_compute_capability(0)
+        if not 100 <= compute_capability < 110:
+            pytest.skip("D=256 CP fused attention is only enabled on Blackwell server GPUs.")
+
+        required_cudnn_version = 92500 if qkv_layout.is_thd() else 92300
+        required_cudnn_version_label = "9.25" if qkv_layout.is_thd() else "9.23"
+        if get_cudnn_version() < required_cudnn_version:
+            pytest.skip(
+                f"D=256 CP fused attention with {qkv_layout} requires cuDNN"
+                f" {required_cudnn_version_label} or newer."
+            )
+
+    @pytest_parametrize_wrapper(
+        "device_count,mesh_shape,mesh_axes,mesh_resource",
+        generate_context_parallel_configs_for_attn(),
+    )
+    @pytest_parametrize_wrapper(
+        "data_shape",
+        DISTRIBUTED_CONTEXT_SELF_ATTN_D256_DATA_SHAPES,
+    )
+    @pytest.mark.parametrize(
+        "dtype",
+        [pytest.param(jnp.float16, id="FP16"), pytest.param(jnp.bfloat16, id="BF16")],
+    )
+    @pytest.mark.parametrize(
+        "qkv_layout, attn_mask_type, window_size",
+        DISTRIBUTED_CONTEXT_SELF_ATTN_D256_LAYOUTS_MASKS_WINDOWS,
+    )
+    def test_context_parallel_ring_attn_d256(
+        self,
+        device_count,
+        mesh_shape,
+        mesh_axes,
+        mesh_resource,
+        data_shape,
+        dtype,
+        qkv_layout,
+        attn_mask_type,
+        window_size,
+    ):
+        """D=256 CP ring coverage."""
+        self.skip_if_d256_cp_unsupported(qkv_layout)
+
+        self.impl_test_context_parallel_attn(
+            device_count,
+            mesh_shape,
+            mesh_axes,
+            mesh_resource,
+            data_shape,
+            1,
+            attn_mask_type,
+            dtype,
+            qkv_layout,
+            True,
+            CPStrategy.RING,
+            use_scan_ring=False,
+            window_size=window_size,
+            stripe_size=1 if qkv_layout.is_thd() else None,
+        )
+
+    @pytest_parametrize_wrapper(
+        "device_count,mesh_shape,mesh_axes,mesh_resource",
+        generate_context_parallel_configs_for_attn(),
+    )
+    @pytest_parametrize_wrapper(
+        "data_shape",
+        DISTRIBUTED_CONTEXT_SELF_ATTN_D256_DATA_SHAPES,
+    )
+    @pytest.mark.parametrize(
+        "dtype",
+        [pytest.param(jnp.float16, id="FP16"), pytest.param(jnp.bfloat16, id="BF16")],
+    )
+    @pytest.mark.parametrize(
+        "qkv_layout, attn_mask_type, window_size",
+        DISTRIBUTED_CONTEXT_SELF_ATTN_D256_LAYOUTS_MASKS_WINDOWS,
+    )
+    def test_context_parallel_allgather_attn_d256(
+        self,
+        device_count,
+        mesh_shape,
+        mesh_axes,
+        mesh_resource,
+        data_shape,
+        dtype,
+        qkv_layout,
+        attn_mask_type,
+        window_size,
+    ):
+        """D=256 CP all-gather coverage."""
+        self.skip_if_d256_cp_unsupported(qkv_layout)
+
+        self.impl_test_context_parallel_attn(
+            device_count,
+            mesh_shape,
+            mesh_axes,
+            mesh_resource,
+            data_shape,
+            1,
+            attn_mask_type,
+            dtype,
+            qkv_layout,
+            True,
+            CPStrategy.ALL_GATHER,
+            window_size=window_size,
+            stripe_size=128 if qkv_layout.is_thd() else None,
+            num_segments_per_seq=5 if qkv_layout.is_thd() else None,
+        )
+
 
 REORDER_CAUSAL_LOAD_BALANCING_DATA_SHAPES = {
     "L0": [[]],
@@ -611,7 +898,7 @@ class TestReorderCausalLoadBalancing:
             seq_dim = 0
 
         if reorder_strategy == ReorderStrategy.Striped:
-            seq_lens = shape[seq_dim]
+            seq_lens = tensor.shape[seq_dim]
             if seq_lens < (cp_size * stripe_size):
                 pytest.skip(f"{seq_lens=} must be larger than {cp_size*stripe_size=}")
 

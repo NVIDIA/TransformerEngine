@@ -7,8 +7,13 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_LAYER_NORM_LN_BWD_KERNELS_CUH_
 #define TRANSFORMER_ENGINE_COMMON_LAYER_NORM_LN_BWD_KERNELS_CUH_
 
+#ifdef __CUDACC_RTC__
+#include "kernel_params.h"
+#include "utils.cuh"
+#else
 #include "../../utils.cuh"
 #include "../common.h"
+#endif
 
 namespace transformer_engine {
 namespace normalization {

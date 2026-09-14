@@ -10,13 +10,22 @@ from packaging import version
 
 import setuptools
 
-from .utils import get_cuda_include_dirs, all_files_in_dir, debug_build_enabled, setup_mpi_flags
+from .utils import (
+    get_cuda_include_dirs,
+    all_files_in_dir,
+    cudnn_frontend_include_path,
+    debug_build_enabled,
+    setup_mpi_flags,
+    nccl_include_path,
+    nccl_lib_path,
+    nccl_ep_enabled,
+)
 from typing import List
 
 
 def install_requirements() -> List[str]:
     """Install dependencies for TE/JAX extensions."""
-    return ["jax", "flax>=0.7.1"]
+    return ["jax", "flax>=0.7.1", "nvidia-cudnn-frontend>=1.25.0"]
 
 
 def test_requirements() -> List[str]:
@@ -83,6 +92,9 @@ def setup_jax_extension(
 
     # Header files
     include_dirs = get_cuda_include_dirs()
+    if (discovered_nccl_include_path := nccl_include_path()) is not None:
+        include_dirs.append(discovered_nccl_include_path)
+    include_dirs.append(cudnn_frontend_include_path())
     include_dirs.extend(
         [
             common_header_files,
@@ -103,6 +115,18 @@ def setup_jax_extension(
 
     setup_mpi_flags(include_dirs, cxx_flags)
 
+    if bool(int(os.getenv("NVTE_WITH_CUBLASMP", 0))):
+        cxx_flags.append("-DNVTE_WITH_CUBLASMP")
+
+    if nccl_ep_enabled():
+        cxx_flags.append("-DNVTE_WITH_NCCL_EP")
+
+    kwargs = {}
+    if (discovered_nccl_lib_path := nccl_lib_path()) is not None:
+        kwargs["extra_objects"] = [str(discovered_nccl_lib_path)]
+    else:
+        kwargs["libraries"] = ["nccl"]
+
     # Define TE/JAX as a Pybind11Extension
     from pybind11.setup_helpers import Pybind11Extension
 
@@ -111,5 +135,5 @@ def setup_jax_extension(
         sources=[str(path) for path in sources],
         include_dirs=[str(path) for path in include_dirs],
         extra_compile_args=cxx_flags,
-        libraries=["nccl"],
+        **kwargs,
     )

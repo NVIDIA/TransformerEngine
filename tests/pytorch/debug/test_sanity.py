@@ -7,6 +7,20 @@ import torch
 
 import nvdlfw_inspect.api as debug_api
 import transformer_engine.pytorch as te
+import transformer_engine_torch as tex
+from transformer_engine.debug.pytorch.debug_quantization import (
+    DebugQuantizedTensor,
+    DebugQuantizer,
+    HIGH_PRECISION,
+    STANDARD_QUANTIZE,
+)
+from transformer_engine.pytorch.module._common import (
+    set_quantizer_usage_for_wgrad_all_gather,
+)
+from transformer_engine.pytorch.quantized_tensor import Quantizer
+from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockQuantizer
+from transformer_engine.pytorch.tensor.hybrid_tensor import HybridQuantizer
+from transformer_engine.pytorch.tensor.identity_tensor import IdentityQuantizer
 
 from test_numerics import create_config_file
 
@@ -57,6 +71,113 @@ fake_quant_config:
       quant_format: FP8E5M2
 """,
 }
+
+
+def _make_debug_quantizer_for_usage_test(parent_quantizer):
+    """Construct a DebugQuantizer without initializing the debug API."""
+    quantizer = object.__new__(DebugQuantizer)
+    Quantizer.__init__(quantizer, rowwise=True, columnwise=True)
+    quantizer.parent_quantizer = parent_quantizer
+    quantizer.output_tensor = False
+    if parent_quantizer is None:
+        quantizer.rowwise_tensor_plan = HIGH_PRECISION
+        quantizer.columnwise_tensor_plan = HIGH_PRECISION
+    else:
+        quantizer.rowwise_tensor_plan = STANDARD_QUANTIZE
+        quantizer.columnwise_tensor_plan = STANDARD_QUANTIZE
+    return quantizer
+
+
+def test_wgrad_all_gather_usage_handles_debug_quantizer_without_parent():
+    """High-precision debug mode has no parent quantizer to unwrap."""
+    quantizer = _make_debug_quantizer_for_usage_test(None)
+
+    set_quantizer_usage_for_wgrad_all_gather(quantizer)
+
+    assert quantizer.rowwise_usage is False
+    assert quantizer.columnwise_usage is True
+
+
+def test_wgrad_all_gather_usage_updates_debug_wrapper_and_blockwise_parent():
+    """Usage changes must remain synchronized across the debug wrapper and parent."""
+    parent_quantizer = Float8BlockQuantizer(
+        fp8_dtype=tex.DType.kFloat8E4M3,
+        rowwise=True,
+        columnwise=True,
+        block_scaling_dim=1,
+    )
+    quantizer = _make_debug_quantizer_for_usage_test(parent_quantizer)
+
+    set_quantizer_usage_for_wgrad_all_gather(quantizer)
+
+    assert quantizer.rowwise_usage is False
+    assert quantizer.columnwise_usage is True
+    assert parent_quantizer.rowwise_usage is False
+    assert parent_quantizer.columnwise_usage is True
+
+
+def test_wgrad_all_gather_usage_detects_hybrid_through_debug_wrapper():
+    """Hybrid classification may inspect the parent, but usage mutates the wrapper."""
+    parent_quantizer = HybridQuantizer(
+        rowwise_quantizer=IdentityQuantizer(),
+        columnwise_quantizer=IdentityQuantizer(),
+    )
+    quantizer = _make_debug_quantizer_for_usage_test(parent_quantizer)
+
+    set_quantizer_usage_for_wgrad_all_gather(quantizer)
+
+    assert quantizer.rowwise_usage is False
+    assert quantizer.columnwise_usage is True
+    assert parent_quantizer.rowwise_usage is False
+    assert parent_quantizer.columnwise_usage is True
+
+
+def test_debug_quantized_tensor_routes_usage_to_distinct_representations():
+    """A usage request should only reach the child for that GEMM direction."""
+    rowwise = IdentityQuantizer()(torch.ones(2, 2))
+    columnwise = IdentityQuantizer()(torch.ones(2, 2))
+    rowwise_calls = []
+    columnwise_calls = []
+
+    def record_rowwise(rowwise_usage=None, columnwise_usage=None):
+        rowwise_calls.append((rowwise_usage, columnwise_usage))
+
+    def record_columnwise(rowwise_usage=None, columnwise_usage=None):
+        columnwise_calls.append((rowwise_usage, columnwise_usage))
+
+    rowwise.update_usage = record_rowwise
+    columnwise.update_usage = record_columnwise
+    tensor = DebugQuantizedTensor(rowwise, columnwise, quantizer=None)
+
+    tensor.update_usage(columnwise_usage=True)
+    assert rowwise_calls == []
+    assert columnwise_calls == [(None, True)]
+
+    tensor.update_usage(rowwise_usage=True)
+    assert rowwise_calls == [(True, None)]
+    assert columnwise_calls == [(None, True)]
+
+    tensor.update_usage(rowwise_usage=False)
+    assert tensor.rowwise_gemm_tensor is None
+    with pytest.raises(RuntimeError, match="Cannot recreate rowwise tensor"):
+        tensor.update_usage(rowwise_usage=True, columnwise_usage=False)
+    assert tensor.columnwise_gemm_tensor is columnwise
+
+
+def test_debug_quantized_tensor_updates_shared_representation_once():
+    """A shared child receives one combined usage update."""
+    shared = IdentityQuantizer()(torch.ones(2, 2))
+    calls = []
+
+    def record_usage(rowwise_usage=None, columnwise_usage=None):
+        calls.append((rowwise_usage, columnwise_usage))
+
+    shared.update_usage = record_usage
+    tensor = DebugQuantizedTensor(shared, shared, quantizer=None)
+
+    tensor.update_usage(rowwise_usage=True, columnwise_usage=False)
+    assert calls == [(True, False)]
+
 
 # Configs that require FP8 to be enabled
 fp8_required_configs = {"log_fp8"}

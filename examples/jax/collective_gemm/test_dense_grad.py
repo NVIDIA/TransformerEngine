@@ -95,11 +95,14 @@ def run_dense_grad_tests(args, mesh=None):
     # Create test data
     rng = jax.random.PRNGKey(0)
     rng, x_rng, weight_rng, bias_rng = jax.random.split(rng, 4)
-    x = jax.random.normal(
+    std = jnp.asarray(args.std, dtype=jnp.bfloat16)
+    x = std * jax.random.normal(
         x_rng, (args.batch_size, args.seq_len, args.hidden_in), dtype=jnp.bfloat16
     )
-    weight = jax.random.normal(weight_rng, (args.hidden_in, args.hidden_out), dtype=jnp.bfloat16)
-    bias = jax.random.normal(bias_rng, (args.hidden_out,), dtype=jnp.bfloat16)
+    weight = std * jax.random.normal(
+        weight_rng, (args.hidden_in, args.hidden_out), dtype=jnp.bfloat16
+    )
+    bias = std * jax.random.normal(bias_rng, (args.hidden_out,), dtype=jnp.bfloat16)
 
     collective_op = (
         CollectiveOp.ALL_GATHER
@@ -183,6 +186,7 @@ class TestCollectiveDenseGradient(unittest.TestCase):
         self.args.process_id = self.process_id
         self.args.local_device_ids = self.local_device_ids
         self.args.num_devices_per_process = self.num_devices_per_process
+        self.args.use_cublasmp = self.use_cublasmp
         self.args.enable_data_parallel = True
         self.args.tensor_parallel_size = _get_dp_and_tp_sizes(self.args)[1]
         _initialize_distributed(self.args)

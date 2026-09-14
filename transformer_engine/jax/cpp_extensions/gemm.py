@@ -23,7 +23,9 @@ from transformer_engine_jax import (
     get_num_compute_streams,
     JAXX_Collective_Op,
     get_device_compute_capability,
+    nvte_built_with_cublasmp,
     initialize_cgemm_communicator,
+    is_collective_gemm_with_cublasmp,
     get_cgemm_num_max_streams,
     get_grouped_gemm_setup_workspace_size,
 )
@@ -222,6 +224,7 @@ def collective_gemm_bootstrap(
     num_sm_for_communication=2,
     use_ce=True,
     aggregate_all_gather=False,
+    use_cublasmp=False,
 ):
     """Initialize NCCL communicators for Collective GEMM operations.
 
@@ -260,6 +263,9 @@ def collective_gemm_bootstrap(
             Can improve performance by offloading memory operations. Default: True.
         aggregate_all_gather (bool, optional): Aggregate multiple small all-gather operations
             into larger ones for better efficiency. Default: False.
+        use_cublasmp (bool, optional): Use cuBLASMp backend for Collective GEMM overlap.
+            Requires Transformer Engine to be compiled with NVTE_WITH_CUBLASMP=1.
+            Default: False.
 
     Raises:
         AssertionError: If num_total_devices is not divisible by num_devices_per_process,
@@ -295,6 +301,24 @@ def collective_gemm_bootstrap(
         This function must be called after JAX distributed initialization
         and before any collective GEMM operations. Each process should call
         this function with its own unique process_id.
+
+        With the cuBLASMp backend, XLA command buffer capture must include
+        ``COLLECTIVES`` so that the NCCL calls inside cuBLASMp end up in the
+        same captured buffer as the CollectiveGemm custom call. Otherwise the
+        capture aborts with ``CUDA_ERROR_STREAM_CAPTURE_INVALIDATED``. Set the
+        flag before ``jax.distributed.initialize()``:
+
+            import os
+            os.environ["XLA_FLAGS"] = (
+                os.environ.get("XLA_FLAGS", "")
+                + " --xla_gpu_enable_command_buffer=+COLLECTIVES"
+            )
+
+        This is not required for non-overlapped collective GEMM (when
+        ``collective_op`` is ``CollectiveOp.NONE`` and JAX/XLA handles the
+        collective via its own graph-level optimization), nor for the
+        Userbuffers backend, which uses CUDA multicast APIs and async
+        memcpy on symmetric memory pointers that XLA already captures.
     """
 
     if not (num_devices_per_process == 1 and jax.local_device_count() == 1):
@@ -306,6 +330,12 @@ def collective_gemm_bootstrap(
         )
     if not 0 <= process_id < num_total_devices:
         raise ValueError(f"Invalid process_id={process_id}")
+    if use_cublasmp and not nvte_built_with_cublasmp():
+        raise RuntimeError(
+            "Collective GEMM with cuBLASMp backend was requested, but Transformer Engine "
+            "was not built with cuBLASMp support. Rebuild with NVTE_WITH_CUBLASMP=1 or "
+            "disable use_cublasmp."
+        )
     initialize_cgemm_communicator(
         num_total_devices,
         num_devices_per_process,
@@ -317,6 +347,7 @@ def collective_gemm_bootstrap(
         num_sm_for_communication,
         use_ce,
         aggregate_all_gather,
+        use_cublasmp,
     )
 
 
@@ -606,7 +637,11 @@ class GemmPrimitive(BasePrimitive):
         if scaling_mode.is_nvfp4_scaling:
             workspace_size += lhs_scale_inv.size + rhs_scale_inv.size
         if not collective_op.is_none:
-            workspace_size *= get_cgemm_num_max_streams()
+            if is_collective_gemm_with_cublasmp():
+                # cuBlasMp manages its own cuBlasLt workspaces per stream
+                workspace_size = 0
+            else:
+                workspace_size *= get_cgemm_num_max_streams()
         # cuBLAS workspace ptr must be 256 bytes aligned but JAX buffers are not
         # necessarily 256 bytes aligned, we add some padding to ensure alignment.
         workspace_size += 256
@@ -812,10 +847,10 @@ class GemmPrimitive(BasePrimitive):
         contracting_dims,
         scaling_mode,
         use_split_accumulator,
-        collective_op,
         transpose_batch_sequence,
         sequence_dim,
         is_outer,
+        collective_op,
     ):
         del transpose_batch_sequence, sequence_dim, is_outer
         if GemmPrimitive.outer_primitive is None:
@@ -860,8 +895,8 @@ class GemmPrimitive(BasePrimitive):
         if gsr.tp_resource is not None:
             if gsr.tp_resource in lhs_specs:
                 warnings.warn(
-                    "Tensor sequence parallelism is detected as tp_resource='{gsr.tp_resource}'"
-                    " appears in lhs_specs: {lhs_specs}. Please setting MeshResource.tpsp_resource"
+                    f"Tensor sequence parallelism is detected as tp_resource='{gsr.tp_resource}'"
+                    f" appears in lhs_specs: {lhs_specs}. Please setting MeshResource.tpsp_resource"
                     " for tensor sequence parallelism to avoid potential issues."
                 )
 
@@ -878,13 +913,31 @@ class GemmPrimitive(BasePrimitive):
             (lhs_non_cdims, lhs_cdims, rhs_non_cdims, rhs_cdims),
         )
 
+        # A contracting-dim spec element can be a single mesh axis or a nested tuple of axes
+        # (e.g. ("fsdp", "tp", "expert")). Convert to a list so we can reason per mesh axis.
+        def _convert_axis_spec_to_list(spec):
+            if spec is None:
+                return []
+            return list(spec) if isinstance(spec, tuple) else [spec]
+
+        def _retain_axes(spec, keep):
+            axes = tuple(a for a in _convert_axis_spec_to_list(spec) if a in keep)
+            if len(axes) == 0:
+                return None
+            return axes[0] if len(axes) == 1 else axes
+
+        # The GEMM reduces over the mesh axes that shard the contracting dims of both operands.
+        # Axes sharding the contracting dim of only one operand must be gathered before the GEMM.
+        lhs_c_axes = [a for s in lhs_cspecs for a in _convert_axis_spec_to_list(s)]
+        rhs_c_axes = [a for s in rhs_cspecs for a in _convert_axis_spec_to_list(s)]
+        reduce_axes = tuple(a for a in lhs_c_axes if a in rhs_c_axes)
+        if len(set(reduce_axes)) != len(reduce_axes):
+            raise RuntimeError("Multiple reduce dimension is detected!")
         reduce_spec = None
-        for l in lhs_cspecs:
-            for r in rhs_cspecs:
-                if l is not None and l == r:
-                    if reduce_spec is not None:
-                        raise RuntimeError("Multiple reduce dimension is detected!")
-                    reduce_spec = l
+        if len(reduce_axes) == 1:
+            reduce_spec = reduce_axes[0]
+        elif len(reduce_axes) > 1:
+            reduce_spec = reduce_axes
 
         sequence_dim = None
 
@@ -916,21 +969,25 @@ class GemmPrimitive(BasePrimitive):
             sequence_dim = int(not transpose_batch_sequence)
 
         if reduce_spec is not None:
-            # Other non-reduce cdims (if exists) need to be unsharded
-            lhs_cspecs = tuple(s if s == reduce_spec else None for s in lhs_cspecs)
+            # Non-reduce contracting axes (if any) need to be gathered, i.e. set to unsharded.
+            lhs_cspecs = tuple(_retain_axes(s, reduce_axes) for s in lhs_cspecs)
             # Only do AG Sequence dim if not Overlap
             if collective_op.is_all_gather:
-                rhs_cspecs = tuple(
-                    s if s in (reduce_spec, gsr.tpsp_resource) else None for s in rhs_cspecs
-                )
+                keep = set(reduce_axes) | {gsr.tpsp_resource}
+                rhs_cspecs = tuple(_retain_axes(s, keep) for s in rhs_cspecs)
             else:
-                rhs_cspecs = tuple(s if s == reduce_spec else None for s in rhs_cspecs)
+                rhs_cspecs = tuple(_retain_axes(s, reduce_axes) for s in rhs_cspecs)
 
             # Non-contracting dims of RHS always needs to be gathered, i.e. for TP + activation_hidden
             # No batch-dim check needed as `rhs_non_cspecs` never contains batch-dim.
             # In `rhs_specs`, the batch dim appears only in Wgrad GEMM under `rhs_cspecs`.
+            # Flatten cspecs since a single element can be a tuple of mesh axes (e.g. ("data", "fsdp")).
+            flattened_lhs_non_cspecs = []
+            for spec in lhs_non_cspecs:
+                flattened_lhs_non_cspecs.extend(spec if isinstance(spec, tuple) else [spec])
             rhs_non_cspecs = tuple(
-                None if spec in lhs_non_cspecs else spec for spec in rhs_non_cspecs
+                None if spec in flattened_lhs_non_cspecs or spec in lhs_non_cspecs else spec
+                for spec in rhs_non_cspecs
             )
 
         else:
@@ -957,8 +1014,13 @@ class GemmPrimitive(BasePrimitive):
             # Non-contracting dims of LHS to be gathered along the SP axis.
             # Minor note: This causes MaxText TP (= Megatron TP + activation_hidden sharding) gathering x for
             # dW1 = x^T * dY1 which is unexpected. This is a known issue and no solution has found yet.
+            # Flatten cspecs since a single element can be a tuple of mesh axes (e.g. ("data", "fsdp")).
+            flattened_rhs_non_cspecs = []
+            for spec in rhs_non_cspecs:
+                flattened_rhs_non_cspecs.extend(spec if isinstance(spec, tuple) else [spec])
             lhs_non_cspecs = tuple(
-                None if spec in rhs_non_cspecs else spec for spec in lhs_non_cspecs
+                None if spec in flattened_rhs_non_cspecs or spec in rhs_non_cspecs else spec
+                for spec in lhs_non_cspecs
             )
 
         out_specs = lhs_non_cspecs + rhs_non_cspecs
@@ -998,9 +1060,9 @@ class GemmPrimitive(BasePrimitive):
         lhs_scale_specs = rhs_scale_specs = (None,)
         if scaling_mode.is_1d_block_scaling():
             rhs_scale_specs = rhs_specs
-            # Set the seq spec to None to trigger AG the scales as TE/Common CGEMM does not handle
-            # scale collecting yet
-            if collective_op.is_all_gather:
+            # Set the seq spec to None to trigger AG the scales as TE/Common CGEMM w/ Userbuffers
+            # backend does not handle scale collecting yet (cuBLASMp backend does)
+            if collective_op.is_all_gather and not is_collective_gemm_with_cublasmp():
                 lhs_scale_specs = tuple(
                     None if i == sequence_dim else s for i, s in enumerate(lhs_specs)
                 )
@@ -1484,8 +1546,8 @@ class GroupedGemmPrimitive(BasePrimitive):
             additional_args: Either
                 * group_offsets: 1D array containing offsets for each group (not yet implemented)
                 OR
-                * alpha: 1D array of shape (G,) containing alpha values for each group
-                * beta: 1D array of shape (G,) containing beta values for each group
+                * alpha: 1D array of shape (G,) or (1,) containing alpha values
+                * beta: 1D array of shape (G,) or (1,) containing beta values
             lhs_is_trans: Boolean indicating if the left-hand side matrix is transposed
             rhs_is_trans: Boolean indicating if the right-hand side matrix is transposed
             scaling_mode: Scaling mode for the GEMM operations
@@ -1571,12 +1633,17 @@ class GroupedGemmPrimitive(BasePrimitive):
                     f" GEMM primitive, but got {len(additional_args)} arguments."
                 )
             alpha_aval, beta_aval = additional_args
-            if alpha_aval.shape != (num_groups,):
-                raise ValueError(f"Expected alpha shape {(num_groups,)}, got {alpha_aval.shape}")
+            valid_alpha_beta_shapes = ((num_groups,), (1,))
+            if alpha_aval.shape not in valid_alpha_beta_shapes:
+                raise ValueError(
+                    f"Expected alpha shape {(num_groups,)} or (1,), got {alpha_aval.shape}"
+                )
             if alpha_aval.dtype != jnp.float32:
                 raise ValueError(f"Expected alpha dtype float32, got {alpha_aval.dtype}")
-            if beta_aval.shape != (num_groups,):
-                raise ValueError(f"Expected beta shape {(num_groups,)}, got {beta_aval.shape}")
+            if beta_aval.shape not in valid_alpha_beta_shapes:
+                raise ValueError(
+                    f"Expected beta shape {(num_groups,)} or (1,), got {beta_aval.shape}"
+                )
             if beta_aval.dtype != jnp.float32:
                 raise ValueError(f"Expected beta dtype float32, got {beta_aval.dtype}")
 
@@ -1957,7 +2024,27 @@ def gemm(
     transpose_batch_sequence: bool, default = False
         Transpose the batch and sequence dimensions of the input tensor.
     collective_op: CollectiveOp, default = CollectiveOp.NONE
-        Collective operation type for collective GEMM.
+        Collective operation type for collective GEMM. When set to
+        ``CollectiveOp.ALL_GATHER`` or ``CollectiveOp.REDUCE_SCATTER``, the GEMM
+        is executed with communication overlap via the Userbuffers or cuBLASMp
+        backend (see :func:`collective_gemm_bootstrap`).
+
+        .. note::
+            Collective GEMM with communication overlap is captured into XLA
+            command buffers as a custom call. When executing with the cuBLASMp
+            backend, this captured graph spans NCCL collectives that XLA does not
+            include in command buffers by default, so add ``COLLECTIVES`` to the
+            enabled kinds before JAX initialization::
+
+                os.environ["XLA_FLAGS"] = (
+                    os.environ.get("XLA_FLAGS", "")
+                    + " --xla_gpu_enable_command_buffer=+COLLECTIVES"
+                )
+
+            Without this, capture aborts with
+            ``CUDA_ERROR_STREAM_CAPTURE_INVALIDATED``. Not required when
+            ``collective_op`` is ``CollectiveOp.NONE`` or when using the Userbuffers
+            backend instead of cuBLASMp.
 
     Returns
     -------
@@ -2036,6 +2123,12 @@ def _should_enforce_v2_grouped_gemm() -> bool:
         ) from e
 
 
+@cache
+def _v2_grouped_gemm_supports_per_group_alpha_beta() -> bool:
+    """Whether nvte_grouped_gemm accepts per-group alpha/beta on all visible devices."""
+    return get_min_device_compute_capability() >= 100
+
+
 def _is_v2_grouped_gemm_supported(
     scaling_mode: ScalingMode,
     dtype: jnp.dtype,
@@ -2056,13 +2149,13 @@ def _is_v2_grouped_gemm_supported(
             ),
         )
 
-    # nvte_grouped_gemm (the v2 kernel) requires SM100+ (Blackwell or newer).
-    # Fall back to the v1 path on SM90 (Hopper) and older architectures.
-    if get_min_device_compute_capability() < 100:
+    # nvte_grouped_gemm (the v2 kernel) supports BF16 on SM90+ (Hopper or newer).
+    # MXFP8 remains gated to SM100+.
+    if get_min_device_compute_capability() < 90:
         return (
             False,
             (
-                "The TE V2 grouped GEMM requires SM100+ (Blackwell or newer) but current min device"
+                "The TE V2 grouped GEMM requires SM90+ (Hopper or newer) but current min device"
                 f" compute capability is {get_min_device_compute_capability()}."
             ),
         )
@@ -2074,6 +2167,16 @@ def _is_v2_grouped_gemm_supported(
         return True, ""
 
     if scaling_mode == ScalingMode.MXFP8_1D_SCALING:
+        if get_min_device_compute_capability() < 100:
+            return (
+                False,
+                (
+                    "The TE V2 grouped GEMM for MXFP8 requires SM100+ (Blackwell or newer) but"
+                    " current min device compute capability is"
+                    f" {get_min_device_compute_capability()}."
+                ),
+            )
+
         # V2 MXFP8 requires that the total first dimension of both operands (up to
         # axis_boundary) is divisible by 128, matching the quantize V2 kernel requirement.
         # Individual group sizes must also be 128-aligned (dynamic constraint).
@@ -2133,9 +2236,9 @@ def _is_v2_grouped_gemm_supported(
     return (
         False,
         (
-            "The TE V2 grouped GEMM currently only supports non-quantized BF16 and MXFP8 with 1D"
-            " block scaling, but NVTE_JAX_ENFORCE_V2_GROUPED_GEMM is enabled and the input"
-            f" parameters do not meet these requirements (scaling_mode= {scaling_mode},"
+            "The TE V2 grouped GEMM currently only supports non-quantized BF16 on SM90+, and MXFP8"
+            " with 1D block scaling on SM100+, but NVTE_JAX_ENFORCE_V2_GROUPED_GEMM is enabled and"
+            f" the input parameters do not meet these requirements (scaling_mode= {scaling_mode},"
             f" dtype={dtype}, has_bias={has_bias}, lhs_shape={lhs_shape}, rhs_shape={rhs_shape},"
             f" lhs_axis_boundary={lhs_axis_boundary}, rhs_axis_boundary={rhs_axis_boundary})."
         ),
@@ -2483,8 +2586,9 @@ def grouped_gemm(
             raise ValueError("rhs must be pre-swizzled for MXFP8 1D scaling")
 
     if use_v2_ffi:
-        additional_arg_0 = jnp.ones((num_gemms,), jnp.float32)  # alpha
-        additional_arg_1 = jnp.zeros((num_gemms,), jnp.float32)  # beta
+        alpha_beta_numel = num_gemms if _v2_grouped_gemm_supports_per_group_alpha_beta() else 1
+        additional_arg_0 = jnp.ones((alpha_beta_numel,), jnp.float32)  # alpha
+        additional_arg_1 = jnp.zeros((alpha_beta_numel,), jnp.float32)  # beta
     else:
         additional_arg_0 = jnp.zeros((1,), jnp.int32)  # group_offset
         additional_arg_1 = jnp.zeros((0,), jnp.int32)  # unused placeholder

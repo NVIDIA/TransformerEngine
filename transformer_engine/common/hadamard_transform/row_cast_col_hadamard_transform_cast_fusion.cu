@@ -13,8 +13,6 @@
 #include <transformer_engine/hadamard_transform.h>
 
 #include <cuda/barrier>
-#include <cute/algorithm/gemm.hpp>
-#include <cute/arch/cluster_sm90.hpp>
 #include <cute/tensor.hpp>
 
 #include "common/common.h"
@@ -587,7 +585,8 @@ __global__ static void row_col_rht_gemm_device(
 
       mma.accumulate_ = UMMA::ScaleOut::Zero;
 
-      tmem_allocator.allocate(TmemAllocator::Sm100TmemCapacityColumns, &shared_storage.tmem_base_ptr);
+      tmem_allocator.allocate(cute::TMEM::Sm100TmemCapacityColumns,
+                              &shared_storage.tmem_base_ptr);
       __syncwarp();
       tmem_allocation_result_barrier.arrive();
       uint32_t tmem_base_ptr = shared_storage.tmem_base_ptr;
@@ -635,7 +634,7 @@ __global__ static void row_col_rht_gemm_device(
       } while (scheduler.is_valid());
       tmem_allocator.release_allocation_lock();
       accumulator_pipeline.producer_tail(accumulator_pipe_producer_state);
-      tmem_allocator.free(tmem_base_ptr, TmemAllocator::Sm100TmemCapacityColumns);
+      tmem_allocator.free(tmem_base_ptr, cute::TMEM::Sm100TmemCapacityColumns);
     }
   } else if(is_sched_warp) {
     cutlass::arch::warpgroup_reg_dealloc<32>();
@@ -709,7 +708,7 @@ __global__ static void row_col_rht_gemm_device(
       auto thr_t2r   = tiled_t2r.get_slice(local_thread_idx);
       auto thr_r2g = tiled_r2g.get_slice(local_thread_idx);
 
-      // Aligning with TensorEngine's recipe to generate scale factors // {$nv-internal-release}
+      // Aligning with TensorEngine's recipe to generate scale factors
       static constexpr float fp4_max = 6.0f;
       static constexpr float fp8_max = 448.0f;
       float const fp4_max_inv = 1.0f / fp4_max;
@@ -905,7 +904,7 @@ __global__ static void row_col_rht_gemm_device(
       cute::Tensor tQArSFA = make_tensor_like(tQAgSFA(_, _, _, _0{}, _0{}));
       cute::Tensor tQApSFA = thr_s2r.partition_D(pSFA_mn);
 
-      // Aligning with TensorEngine's recipe to generate scale factors // {$nv-internal-release}
+      // Aligning with TensorEngine's recipe to generate scale factors
       static constexpr float fp4_max = 6.0f;
       static constexpr float fp8_max = 448.0f;
       float const fp4_max_inv = 1.0f / fp4_max;
@@ -1316,8 +1315,11 @@ void hadamard_transform_cast_fusion(const Tensor &input_, Tensor &output_,
 
   int k_tile_size = 1024;
 
-  // TODO: add support for swizzle sf output
-  const bool use_swizzle_sf_output = false;
+  // Honor the output tensor's GEMM-swizzled-scales flag: when set, emit
+  // scale factors directly in the layout that the downstream cuBLAS LT NVFP4
+  // GEMM consumes, eliminating the otherwise-required
+  // nvte_swizzle_scaling_factors pass between quantize and GEMM.
+  const bool use_swizzle_sf_output = output_.with_gemm_swizzled_scales;
 
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
       use_stochastic_rounding, kEnableStochasticRounding,

@@ -15,7 +15,12 @@ from torch.distributed._tensor import DTensor
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8Quantizer
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensor
+from ..constants import DType
 from .multi_tensor_apply import multi_tensor_applier
+
+
+# Bound temporary NVTETensor handles created before the CUDA launcher chunks its metadata.
+_MAX_TENSORS_PER_MULTI_TENSOR_ADAM_CALL = 1024
 
 
 def get_fp8_meta(fp8_tensor):
@@ -422,7 +427,7 @@ class FusedAdam(torch.optim.Optimizer):
             quantizer = Float8Quantizer(
                 scale=torch.ones([1], dtype=torch.float32, device=param.device),
                 amax=torch.zeros([1], dtype=torch.float32, device=param.device),
-                fp8_dtype=tex.DType.kFloat8E4M3,
+                fp8_dtype=DType.kFloat8E4M3,
             )
             self.state[param][state_name] = quantizer.make_empty(data.shape)
             self.state[param][state_name].quantize_(data.float())
@@ -556,12 +561,11 @@ class FusedAdam(torch.optim.Optimizer):
             loss = closure()
 
         for group in self.param_groups:
-            if len(group["params"]) == 0:
-                continue
-            device = group["params"][0].device
-            bias_correction = 1 if group["bias_correction"] else 0
-            beta1, beta2 = group["betas"]
-
+            # Advance the step counter before skipping empty groups. A param group can be
+            # empty on some data-parallel ranks and populated on others, so incrementing
+            # only for populated groups desynchronizes "step" across the ranks that share
+            # an optimizer state shard. A rank then resumes from a checkpoint written by a
+            # rank where the group was empty and applies a stale bias correction.
             # assume same step across group now to simplify things
             # per parameter step can be easily support by making it tensor, or pass list into kernel
             if "step" in group:
@@ -569,9 +573,24 @@ class FusedAdam(torch.optim.Optimizer):
                     1 if not self.capturable else (self._dummy_overflow_buf != 1).to(torch.int)
                 )
             else:
-                group["step"] = (
-                    1 if not self.capturable else torch.tensor([1], dtype=torch.int, device=device)
+                # Empty groups have no parameter to take the device from, so fall back to
+                # the device of the optimizer's own scratch buffer.
+                step_device = (
+                    group["params"][0].device
+                    if len(group["params"]) > 0
+                    else self._dummy_overflow_buf.device
                 )
+                group["step"] = (
+                    1
+                    if not self.capturable
+                    else torch.tensor([1], dtype=torch.int, device=step_device)
+                )
+
+            if len(group["params"]) == 0:
+                continue
+            device = group["params"][0].device
+            bias_correction = 1 if group["bias_correction"] else 0
+            beta1, beta2 = group["betas"]
 
             # create lists for multi-tensor apply
             p_main_of_fp8_model = []
@@ -599,7 +618,7 @@ class FusedAdam(torch.optim.Optimizer):
             state_scales = {"exp_avg": [], "exp_avg_sq": [], "master_param": []}
 
             # Only used when extra params include fp8 tensors. Otherwise, it doesn't matter what the out_dtype is.
-            out_dtype = tex.DType.kFloat32
+            out_dtype = DType.kFloat32
 
             has_fp16 = False
             has_bf16 = False
@@ -740,21 +759,37 @@ class FusedAdam(torch.optim.Optimizer):
                 # pylint: disable=cell-var-from-loop
                 inv_scale_arg = () if inv_scale is None else (inv_scale,)
                 out_dtype_arg = () if out_dtype is None else (out_dtype,)
-                multi_tensor_applier(
-                    adam_func,
-                    self._dummy_overflow_buf,
-                    tensor_lists,
-                    group["lr"],
-                    beta1,
-                    beta2,
-                    group["eps"],
-                    group["step"],
-                    self.adam_w_mode,
-                    bias_correction,
-                    group["weight_decay"],
-                    *inv_scale_arg,
-                    *out_dtype_arg,
-                )
+
+                tensor_list_chunks = (tensor_lists,)
+                if len(tensor_lists[0]) > _MAX_TENSORS_PER_MULTI_TENSOR_ADAM_CALL:
+                    tensor_list_chunks = (
+                        [
+                            tensors[start : start + _MAX_TENSORS_PER_MULTI_TENSOR_ADAM_CALL]
+                            for tensors in tensor_lists
+                        ]
+                        for start in range(
+                            0,
+                            len(tensor_lists[0]),
+                            _MAX_TENSORS_PER_MULTI_TENSOR_ADAM_CALL,
+                        )
+                    )
+
+                for tensor_list_chunk in tensor_list_chunks:
+                    multi_tensor_applier(
+                        adam_func,
+                        self._dummy_overflow_buf,
+                        tensor_list_chunk,
+                        group["lr"],
+                        beta1,
+                        beta2,
+                        group["eps"],
+                        group["step"],
+                        self.adam_w_mode,
+                        bias_correction,
+                        group["weight_decay"],
+                        *inv_scale_arg,
+                        *out_dtype_arg,
+                    )
 
             if self.capturable:
                 # If the optimizer is capturable, then if there's a grad scaler it works

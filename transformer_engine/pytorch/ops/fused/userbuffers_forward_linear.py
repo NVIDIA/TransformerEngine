@@ -5,7 +5,7 @@
 """Linear layer forward with Userbuffers communication."""
 
 from __future__ import annotations
-from collections.abc import Iterable
+from collections.abc import Sequence
 from typing import Any, Optional
 
 import torch
@@ -251,7 +251,9 @@ class UserbuffersForwardLinear(FusedOperation):
             extra_output=reduce_scatter_output,
         )
         if with_ub_reduce_scatter:
-            y_local = reduce_scatter_output
+            # cuBLASMp writes the reduce-scattered output directly into the GEMM
+            # output tensor; Userbuffers writes it into the extra-output buffer.
+            y_local = gemm_output if ub_comm.with_cublasmp() else reduce_scatter_output
         else:
             y_local = gemm_output
 
@@ -284,7 +286,7 @@ class UserbuffersForwardLinear(FusedOperation):
         prev_op_grad_output_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
         basic_op_kwargs: list[dict[str, Any]],
-    ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
+    ) -> tuple[torch.Tensor, Sequence[Sequence[torch.Tensor]]]:
 
         # Get basic operations
         idx = self._op_idxs["linear"]

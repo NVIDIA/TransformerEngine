@@ -78,9 +78,10 @@ class Fp8Unpadding(torch.nn.Module):
     num_gemms : int
                 number of GEMMs to be performed simultaneously.
     align_size : int, optional
-                 The alignment size for the input tensor. If not provided, the alignment size will
-                 be automatically determined based on the FP8/FP4 recipe in the first forward pass:
-                 32 for MXFP8 or NVFP4, otherwise 16.
+                 Alignment size used to pad each grouped input. If not provided,
+                 it is determined from the active recipe on the first forward
+                 pass: 32 for MXFP8, 128 for NVFP4, 16 for other built-in
+                 recipes, and ``CustomRecipe.quantization_alignment`` for custom recipes.
     """
 
     def __init__(

@@ -15,7 +15,6 @@ import transformer_engine.pytorch as te
 import torch
 from torch import nn
 import torch.distributed as dist
-import transformer_engine_torch as tex
 from transformer_engine.common.recipe import (
     MXFP8BlockScaling,
     DelayedScaling,
@@ -293,6 +292,15 @@ def _check_gradients(model_distributed, model_single, main_grad_check=False):
         assert not bool(numerics_failed.item())
 
 
+def _check_input_grads(input_single_node, input_distributed, parallel_mode, sequence_parallel):
+    grad_d = input_distributed.grad
+    if parallel_mode == "row":
+        grad_d = _gather(grad_d, dim=1)
+    elif sequence_parallel:
+        grad_d = _gather(grad_d, dim=0)
+    _check_outputs(input_single_node.grad, grad_d)
+
+
 def _copy_params(model_distributed, model_single):
     for dist_param, single_param in zip(model_distributed.parameters(), model_single.parameters()):
         with torch.no_grad():
@@ -311,22 +319,35 @@ def _copy_params(model_distributed, model_single):
 
 
 def _apply_models(
-    model_single_node, model_distributed, input_single_node, input_distributed, **kwargs
+    model_single_node,
+    model_distributed,
+    input_single_node,
+    input_distributed,
+    use_compile=False,
+    compile_mode="default",
+    **kwargs,
 ):
     _alloc_main_grad(model_single_node, model_distributed)  # for fuse_wgrad_accumulation=True
     input_single_node.requires_grad_()
     input_distributed.requires_grad_()
+    forward_single_node = model_single_node
+    forward_distributed = model_distributed
+    if use_compile:
+        # Reset the compile cache so parametrized cases don't trip recompile_limit.
+        torch._dynamo.reset()
+        forward_single_node = torch.compile(model_single_node, fullgraph=True, mode=compile_mode)
+        forward_distributed = torch.compile(model_distributed, fullgraph=True, mode=compile_mode)
     with te.autocast(
         enabled=QUANTIZATION is not None,
         recipe=quantization_recipe(),
     ):
-        output_single_node = model_single_node(input_single_node, **kwargs)
+        output_single_node = forward_single_node(input_single_node, **kwargs)
     with te.autocast(
         enabled=QUANTIZATION is not None,
         recipe=quantization_recipe(),
         amax_reduction_group=NCCL_WORLD,
     ):
-        output_distributed = model_distributed(input_distributed, **kwargs)
+        output_distributed = forward_distributed(input_distributed, **kwargs)
     return output_single_node, output_distributed
 
 
@@ -399,7 +420,7 @@ def _test_quantizer(input_dtype, fp8_dtype):
 
     Args:
         input_dtype (torch.dtype): The data type of the input.
-        fp8_dtype (tex.DType): The data type of the fp8.
+        fp8_dtype (te.DType): The data type of the fp8.
     """
 
     M, N = WORLD_SIZE * BATCH_SIZE, HIDDEN_SIZE
@@ -443,7 +464,7 @@ def test_quantizer():
         return
 
     input_dtypes = [torch.float32, torch.bfloat16]
-    fp8_dtypes = [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2]
+    fp8_dtypes = [te.DType.kFloat8E4M3, te.DType.kFloat8E5M2]
 
     for input_dtype in input_dtypes:
         for fp8_dtype in fp8_dtypes:
@@ -514,7 +535,7 @@ def _test_quantized_all_gather(input_dtype, low_precision_dtype, quantizer_cls):
 
     Args:
         input_dtype (torch.dtype): The data type of the input.
-        low_precision_dtype (tex.DType): The data type of the low precision, can be fp4 or fp8.
+        low_precision_dtype (te.DType): The data type of the low precision, can be fp4 or fp8.
     """
 
     M, N = WORLD_SIZE * BATCH_SIZE, HIDDEN_SIZE // 2
@@ -623,8 +644,8 @@ def test_quantized_all_gather():
         return
 
     input_dtypes = [torch.bfloat16]
-    fp4_dtype = [tex.DType.kFloat4E2M1]
-    fp8_dtype = [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2]
+    fp4_dtype = [te.DType.kFloat4E2M1]
+    fp8_dtype = [te.DType.kFloat8E4M3, te.DType.kFloat8E5M2]
     quantizer_cls_nvfp4 = [NVFP4Quantizer]
     # add FP8 quantizers if needed
     quantizer_cls_fp8 = []
@@ -642,12 +663,20 @@ def test_quantized_all_gather():
 #                   Linear                 #
 ############################################
 @run_distributed_test()
-def _test_linear(parallel_mode=None, sequence_parallel=False, **kwargs):
+def _test_linear(
+    parallel_mode=None,
+    sequence_parallel=False,
+    use_compile=False,
+    compile_mode="default",
+    **kwargs,
+):
     """Test the linear layer with specified parallel mode and sequence parallelization.
 
     Args:
         parallel_mode (str): 'row' or 'column' parallelism.
         sequence_parallel (bool): Enable sequence parallelism if True.
+        use_compile (bool): Wrap the modules in ``torch.compile`` before running.
+        compile_mode (str): ``torch.compile`` mode ("default" or "reduce-overhead").
         kwargs (dict): Additional arguments for the linear layer.
     """
     # Set parameter data type
@@ -697,7 +726,12 @@ def _test_linear(parallel_mode=None, sequence_parallel=False, **kwargs):
 
     # Apply models
     output_single_node, output_distributed = _apply_models(
-        model_single_node, model_distributed, input_single_node, input_distributed
+        model_single_node,
+        model_distributed,
+        input_single_node,
+        input_distributed,
+        use_compile=use_compile,
+        compile_mode=compile_mode,
     )
 
     if "return_bias" in kwargs:
@@ -729,6 +763,8 @@ def _test_linear(parallel_mode=None, sequence_parallel=False, **kwargs):
             main_grad_check=("fuse_wgrad_accumulation" in kwargs),
         )
 
+    _check_input_grads(input_single_node, input_distributed, parallel_mode, sequence_parallel)
+
 
 def test_linear():
     """Run linear layer tests with various configurations."""
@@ -741,12 +777,20 @@ def test_linear():
         {"params_dtype": torch.float16 if QUANTIZATION != "nvfp4" else torch.bfloat16},
         {"delay_wgrad_compute": True},
         {"save_original_input": True},
+        {"use_compile": True},
+        {"use_compile": True, "compile_mode": "reduce-overhead"},
     ]
 
     for kwargs in kwargs_list:
         if kwargs.get("save_original_input", False) and QUANTIZATION == "fp8":
             continue
-        if kwargs.get("delay_wgrad_compute", False) and NVTE_TEST_NVINSPECT_ENABLED:
+        # use_compile: debug instrumentation forces the eager fallback, so
+        # compile is a no-op there.
+        if NVTE_TEST_NVINSPECT_ENABLED and (
+            kwargs.get("delay_wgrad_compute", False) or kwargs.get("use_compile", False)
+        ):
+            continue
+        if kwargs.get("use_compile", False) and QUANTIZATION == "fp8":
             continue
         for parallel_mode in ["column", "row"]:
             for sequence_parallel in [False, True]:

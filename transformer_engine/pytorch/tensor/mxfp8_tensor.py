@@ -6,20 +6,20 @@
 from __future__ import annotations
 from collections.abc import Iterable
 import math
-from typing import Optional, Tuple, Union, Any
+from typing import Optional, Tuple, Union, Any, Dict
 import warnings
 
 import torch
 from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
 import transformer_engine_torch as tex
-from transformer_engine_torch import DType as TE_DType
 
 from transformer_engine.common.recipe import MXFP8BlockScaling, Recipe
-from ..constants import MXFP8_BLOCK_SCALING_SIZE
+from ..constants import MXFP8_BLOCK_SCALING_SIZE, DType
 from ..utils import devices_match, round_up_to_nearest_multiple
 from .storage.mxfp8_tensor_storage import MXFP8TensorStorage, _FromMXFP8Func
 from ..quantized_tensor import QuantizedTensor, Quantizer
-from ._quantization_helpers import _IdentityFunc
+from ..dynamo import register_value_opaque_quantizer
+from ._quantization_helpers import _IdentityFunc, safe_quantized_repr
 
 aten = torch.ops.aten
 
@@ -33,17 +33,20 @@ class MXFP8Quantizer(Quantizer):
 
     """
 
-    dtype: TE_DType
+    dtype: DType
+    with_2d_quantization: bool
 
     def __init__(
         self,
-        fp8_dtype: TE_DType,
+        fp8_dtype: Union[DType, tex.DType],
         *,
         rowwise: bool = True,
         columnwise: bool = True,
+        with_2d_quantization: bool = False,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
-        self.dtype = fp8_dtype
+        self.dtype = DType.cast(fp8_dtype)
+        self.with_2d_quantization = with_2d_quantization
 
     def copy(self) -> MXFP8Quantizer:
         """Create shallow copy"""
@@ -52,11 +55,44 @@ class MXFP8Quantizer(Quantizer):
             fp8_dtype=self.dtype,
             rowwise=self.rowwise_usage,
             columnwise=self.columnwise_usage,
+            with_2d_quantization=self.with_2d_quantization,
         )
         quantizer.internal = self.internal
         quantizer.optimize_for_gemm = self.optimize_for_gemm
 
         return quantizer
+
+    # ----- TensorSpec / pure-Python allocation -----
+
+    def storage_metadata(self, fake_dtype: torch.dtype) -> Dict[str, Any]:
+        return {
+            "cls": MXFP8TensorStorage if self.internal else MXFP8Tensor,
+            "nontensor_kwargs": {
+                "fp8_dtype": self.dtype,
+                "quantizer": self,
+                "with_gemm_swizzled_scales": self.optimize_for_gemm,
+                "fake_dtype": fake_dtype,
+            },
+        }
+
+    def inner_tensor_specs(
+        self, shape: Tuple[int, ...]
+    ) -> Dict[str, Tuple[Tuple[int, ...], torch.dtype]]:
+        shape = tuple(shape)
+        specs: Dict[str, Tuple[Tuple[int, ...], torch.dtype]] = {}
+        if self.rowwise_usage:
+            specs["_rowwise_data"] = (shape, torch.uint8)
+            specs["_rowwise_scale_inv"] = (
+                tuple(self.get_scale_shape(shape, columnwise=False)),
+                torch.uint8,
+            )
+        if self.columnwise_usage:
+            specs["_columnwise_data"] = (shape, torch.uint8)
+            specs["_columnwise_scale_inv"] = (
+                tuple(self.get_scale_shape(shape, columnwise=True)),
+                torch.uint8,
+            )
+        return specs
 
     def update_quantized(
         self,
@@ -148,7 +184,7 @@ class MXFP8Quantizer(Quantizer):
         data: torch.Tensor,
         scale_inv: torch.Tensor,
         fake_dtype: torch.dtype,
-        fp8_dtype: TE_DType = tex.DType.kFloat8E4M3,
+        fp8_dtype: DType = DType.kFloat8E4M3,
     ) -> MXFP8Tensor:
         """Create a new MXFP8Tensor from data and scale_inv."""
         return MXFP8Tensor(
@@ -180,6 +216,13 @@ class MXFP8Quantizer(Quantizer):
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
         return MXFP8BlockScaling
 
+    def is_requantization_safe(self) -> bool:
+        """MXFP8 block scales are derived deterministically from each input."""
+        return True
+
+
+register_value_opaque_quantizer(MXFP8Quantizer)
+
 
 class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
     """Experimental tensor class with FP8 data
@@ -193,8 +236,9 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
     ----------
     data : torch.Tensor
           Raw FP8 data in a uint8 tensor
-    fp8_dtype : transformer_engine_torch.DType, default = kFloat8E4M3
-               FP8 format.
+    fp8_dtype : transformer_engine.pytorch.DType or transformer_engine_torch.DType,
+                optional, default = kFloat8E4M3 FP8 format. transformer_engine_torch.DType
+                is accepted for backward compatibility.
     fp8_scale_inv : torch.Tensor
                    Reciprocal of the scaling factor applied when
                    casting to FP8, i.e. the scaling factor that must
@@ -214,7 +258,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         rowwise_scale_inv: Optional[torch.Tensor],
         columnwise_data: Optional[torch.Tensor],
         columnwise_scale_inv: Optional[torch.Tensor],
-        fp8_dtype: TE_DType,
+        fp8_dtype: DType,
         quantizer: Optional[Quantizer],
         with_gemm_swizzled_scales: bool,
         **kwargs,
@@ -233,7 +277,10 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         )
 
     def __repr__(self, *, tensor_contents=None):
-        return f"MXFP8Tensor(fp8_dtype={self._fp8_dtype}, data={self.dequantize()})"
+        try:
+            return f"MXFP8Tensor(fp8_dtype={self._fp8_dtype}, data={self.dequantize()})"
+        except Exception as exc:  # pylint: disable=broad-except
+            return safe_quantized_repr(self, "MXFP8Tensor", error=exc)
 
     def dequantize(self, *, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
         """
@@ -274,15 +321,12 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
             return self.quantize_(tensor.dequantize())
         return super().quantize_(tensor, noop_flag=noop_flag)
 
-    def detach(self) -> MXFP8Tensor:
-        # pylint: disable=missing-function-docstring
-        # TODO(ksivamani): Fix the detach bug
-        return MXFP8Tensor.make_like(self)
-
     def clone(self) -> MXFP8Tensor:
         # pylint: disable=missing-function-docstring
-        assert self._rowwise_data is not None
-        rowwise_data = self._rowwise_data.detach().clone()
+        # _rowwise_data may be None for columnwise-only sub-storages (hybrid quantization)
+        rowwise_data = (
+            self._rowwise_data.detach().clone() if self._rowwise_data is not None else None
+        )
         columnwise_data = None
         if self._columnwise_data is not None:
             columnwise_data = self._columnwise_data.detach().clone()
@@ -396,67 +440,73 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
             ):
                 return super().__torch_dispatch__(func, types, args, kwargs)
 
-            out_data = []
-            for data in [tensor._rowwise_data, tensor._columnwise_data]:
-                func_out = (
-                    data.__torch_dispatch__(
-                        func,
-                        types,
-                        [data] + list(args[1:]),
-                        kwargs,
-                    )
-                    if data is not None
-                    else None
+            def _split_data(data):
+                if data is None:
+                    return None
+                return data.__torch_dispatch__(
+                    func,
+                    types,
+                    [data] + list(args[1:]),
+                    kwargs,
                 )
-                out_data.append(func_out)
 
-            scale_invs = [tensor._rowwise_scale_inv, tensor._columnwise_scale_inv]
-            split_sizes_for_scale = [split_size, split_size // MXFP8_BLOCK_SCALING_SIZE]
-            # Padding requirements: rowwise dim0 should be divisble by 128, columnwise dim0 should be divisble by 4
-            padding_multiples = [128, 4]
-            for scale_inv, scale_split_size, pad_multiple in zip(
-                scale_invs, split_sizes_for_scale, padding_multiples
-            ):
-                scale_inv_out = (
+            row_data_splits = _split_data(tensor._rowwise_data)
+            col_data_splits = _split_data(tensor._columnwise_data)
+
+            def _split_scale_inv(scale_inv, scale_split_size, pad_multiple):
+                if scale_inv is None:
+                    return None
+                scale_inv_out = list(
                     scale_inv.__torch_dispatch__(
                         func,
                         types,
                         [scale_inv, scale_split_size] + list(args[2:]),
                         kwargs,
                     )
-                    if scale_inv is not None
-                    else None
                 )
-                scale_inv_out = list(scale_inv_out) if scale_inv_out is not None else None
-                # Pad scale_inv_out to be a multiple of pad_multiple
-                if scale_inv_out is not None:
-                    for idx, split_scale_inv_out in enumerate(scale_inv_out):
-                        current_shape = split_scale_inv_out.shape
-                        pad_dim0 = (pad_multiple - current_shape[0] % pad_multiple) % pad_multiple
-                        if pad_dim0 > 0:
-                            scale_inv_out[idx] = torch.nn.functional.pad(
-                                split_scale_inv_out, (0, 0, 0, pad_dim0)
-                            )
-                out_data.append(scale_inv_out)
+                for idx, split_scale_inv_out in enumerate(scale_inv_out):
+                    current_shape = split_scale_inv_out.shape
+                    pad_dim0 = (pad_multiple - current_shape[0] % pad_multiple) % pad_multiple
+                    if pad_dim0 > 0:
+                        scale_inv_out[idx] = torch.nn.functional.pad(
+                            split_scale_inv_out, (0, 0, 0, pad_dim0)
+                        )
+                return scale_inv_out
+
+            row_scale_splits = _split_scale_inv(
+                tensor._rowwise_scale_inv,
+                split_size,
+                128,
+            )
+            col_scale_splits = _split_scale_inv(
+                tensor._columnwise_scale_inv,
+                split_size // MXFP8_BLOCK_SCALING_SIZE,
+                4,
+            )
+
+            ref_splits = row_data_splits if row_data_splits is not None else col_data_splits
+            num_splits = len(ref_splits)
             return [
                 MXFP8Tensor(
                     shape=(
-                        splitted_tensor_data[0].size()
-                        if splitted_tensor_data[0] is not None
-                        else splitted_tensor_data[1].size()
+                        row_data_splits[i].size()
+                        if row_data_splits is not None
+                        else col_data_splits[i].size()
                     ),
                     dtype=tensor.dtype,
-                    rowwise_data=splitted_tensor_data[0],
-                    rowwise_scale_inv=splitted_tensor_data[2],
-                    columnwise_data=splitted_tensor_data[1],
-                    columnwise_scale_inv=splitted_tensor_data[3],
+                    rowwise_data=row_data_splits[i] if row_data_splits is not None else None,
+                    rowwise_scale_inv=row_scale_splits[i] if row_scale_splits is not None else None,
+                    columnwise_data=col_data_splits[i] if col_data_splits is not None else None,
+                    columnwise_scale_inv=(
+                        col_scale_splits[i] if col_scale_splits is not None else None
+                    ),
                     quantizer=tensor._quantizer,
                     requires_grad=False,
                     fp8_dtype=tensor._fp8_dtype,
                     with_gemm_swizzled_scales=False,
                     device=tensor.device,
                 )
-                for splitted_tensor_data in zip(*out_data)
+                for i in range(num_splits)
             ]
 
         if func == torch.ops.aten.as_strided.default:
@@ -546,6 +596,9 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                 with_gemm_swizzled_scales=tensor._with_gemm_swizzled_scales,
                 device=tensor.device,
             )
+
+        if func == torch.ops.aten.clone.default:
+            return cls.clone(args[0])
 
         # Default case
         return super().__torch_dispatch__(func, types, args, kwargs)
@@ -727,7 +780,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         rowwise_scale_inv: torch.Tensor,
         columnwise_data: torch.Tensor,
         columnwise_scale_inv: torch.Tensor,
-        fp8_dtype: TE_DType,
+        fp8_dtype: DType,
         dtype: torch.dtype,
         shape: torch.Size,
         quantizer: Optional[Quantizer] = None,
@@ -849,7 +902,7 @@ def _make_mxfp8_tensor_in_reduce_ex(
     rowwise_scale_inv: torch.Tensor,
     columnwise_data: torch.Tensor,
     columnwise_scale_inv: torch.Tensor,
-    fp8_dtype: TE_DType,
+    fp8_dtype: DType,
     dtype: torch.dtype,
     shape: torch.Size,
     quantizer: Optional[Quantizer] = None,

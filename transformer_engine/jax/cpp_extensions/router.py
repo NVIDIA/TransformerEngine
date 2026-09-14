@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for fused MoE router"""
+
 from enum import IntEnum
 
 import jax.numpy as jnp
@@ -27,6 +28,7 @@ class ScoreFunction(IntEnum):
 
     SIGMOID = int(JAXX_Score_Function.SIGMOID)
     SOFTMAX = int(JAXX_Score_Function.SOFTMAX)
+    SQRTSOFTPLUS = int(JAXX_Score_Function.SQRTSOFTPLUS)
 
 
 class RoutingMapFormat(IntEnum):
@@ -99,7 +101,8 @@ class FusedTopkWithScoreFunctionFwdPrimitive(BasePrimitive):
         else:
             routing_map_aval = logits_aval.update(shape=i_shape, dtype=jnp.bool_)
         # The CUDA kernel always uses float32 (CompType) for intermediate
-        # computations (softmax/sigmoid values saved for backward).
+        # computations. Softmax/sigmoid save activation values for backward;
+        # sqrtsoftplus saves the original logits.
         intermediate_aval = logits_aval.update(shape=i_shape, dtype=jnp.float32)
         return probs_aval, routing_map_aval, intermediate_aval
 
@@ -412,7 +415,12 @@ class FusedTopkWithScoreFunctionBwdPrimitive(BasePrimitive):
         arg_infos,
         result_infos,
     ):
-        del result_infos, routing_map_format
+        # NOTE: do NOT include ``routing_map_format`` in this ``del``: the
+        # ``sharded_impl`` closure below resolves it by name at call time
+        # (when XLA invokes the partitioned impl), so deleting it here
+        # raises ``NameError: cannot access free variable 'routing_map_format'``
+        # at execution time of the bwd custom_partitioning.
+        del result_infos
         grad_spec = get_padded_spec(arg_infos[2])
         out_sharding = NamedSharding(mesh, PartitionSpec(*grad_spec))
         arg_shardings = (arg_infos[0].sharding, arg_infos[1].sharding, arg_infos[2].sharding)
@@ -645,7 +653,14 @@ class FusedMoEAuxLossBwdPrimitive(BasePrimitive):
         # backward reconstructs the full [num_tokens, num_experts] grad_probs from
         # scalar inputs.  Shardy will leave num_tokens unsharded, which matches the
         # replicated PartitionSpec(None, None) in partition().
-        return "const_buf_one, num_experts, grad_one -> i num_experts"
+        #
+        # grad_aux_loss is the cotangent of a scalar loss and is therefore
+        # rank-0; the third operand entry is empty (no factor labels). Declaring
+        # it with the spurious "grad_one" factor gave it rank-1 and tripped
+        # JAX's custom_partitioning_sharding_rule check once the MoE block
+        # lifted its aux-loss path out of shard_map (the rule is skipped under
+        # shard_map, which is why this surfaces only at global view).
+        return "const_buf_one, num_experts, -> i num_experts"
 
 
 register_primitive(FusedMoEAuxLossBwdPrimitive)
@@ -690,9 +705,9 @@ def fused_topk_with_score_function_fwd(
     scaling_factor : float
         Scaling factor for output probs.
     score_function : ScoreFunction
-        ScoreFunction.SOFTMAX or ScoreFunction.SIGMOID.
+        ScoreFunction.SOFTMAX, ScoreFunction.SIGMOID, or ScoreFunction.SQRTSOFTPLUS.
     expert_bias : jnp.ndarray
-        Expert bias (only used with sigmoid). Pass empty array if unused.
+        Expert bias (only used with sigmoid/sqrtsoftplus). Pass empty array if unused.
     compute_aux_scores : bool
         If True, compute clean scores for aux loss instead of full top-k.
     routing_map_format : int

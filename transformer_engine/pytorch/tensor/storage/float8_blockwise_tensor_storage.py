@@ -5,18 +5,109 @@
 """Mixin class holding data specific for Float8BlockwiseQTensor"""
 
 from __future__ import annotations
+from collections.abc import Iterable
 import math
-from typing import Optional, Dict, Any, Tuple
+from typing import Annotated, Optional, Dict, Any, Tuple, Union
 import torch
 
 import transformer_engine_torch as tex
-from transformer_engine_torch import DType as TE_DType
 
-from ...quantized_tensor import QuantizedTensorStorage, Quantizer
+from ...quantized_tensor import InnerTensor, QuantizedTensorStorage, Quantizer
+from .._quantization_helpers import safe_quantized_repr
 
-from ...constants import TE_DType_To_Torch
+from ...constants import TE_DType_To_Torch, DType
 
-from ...utils import _empty_tensor
+from ...utils import _empty_tensor, round_up_to_nearest_multiple
+
+
+class _FromFloat8BlockwiseFunc(torch.autograd.Function):
+    """Cast from Float8 blockwise to other dtype"""
+
+    @staticmethod
+    def forward(
+        _ctx: Optional[torch.autograd.function.FunctionCtx],  # unused
+        tensor: Float8BlockwiseQTensorStorage,
+        dtype: Optional[torch.dtype] = None,
+    ) -> torch.Tensor:
+        # pylint: disable=missing-function-docstring
+        if dtype is None:
+            dtype = tensor._dtype
+
+        if tensor._rowwise_data is not None and tensor._rowwise_data.numel() == 0:
+            return torch.empty(tensor.size(), dtype=dtype, device=tensor.device)
+
+        block_len = 128
+        if not tensor._is_2D_scaled:
+            return tensor._dequantize_vectorwise(dtype=dtype)
+
+        def format_scale_as_logical_shape(q_K, scales, block_len):
+            # The GEMM for 2D blocks required padding in the scales.
+            derived_scale_k_shape = math.ceil(q_K / block_len)
+            _, scale_K = scales.shape
+            if derived_scale_k_shape == scale_K:
+                return scales
+            return scales[:, :derived_scale_k_shape].contiguous()
+
+        q_M, q_K = 1, 1
+        if tensor._rowwise_data is not None:
+            q = tensor._rowwise_data
+            scale_inv = tensor._rowwise_scale_inv
+            transpose_output = False
+            if len(q.shape) >= 1:
+                q_K = q.shape[-1]
+            for i in range(len(q.shape) - 1):
+                q_M *= q.shape[i]
+        else:
+            assert tensor._columnwise_data is not None, "No data to dequantize"
+            q = tensor._columnwise_data
+            scale_inv = tensor._columnwise_scale_inv
+            transpose_output = True
+            if len(q.shape) >= 1:
+                q_M = q.shape[0]
+            for i in range(1, len(q.shape)):
+                q_K *= q.shape[i]
+
+        orig_shape = q.shape
+        q = q.reshape(q_M, q_K)
+        formatted_scales = format_scale_as_logical_shape(q_K, scale_inv, block_len)
+        assert len(formatted_scales.shape) == 2
+        m_tiles, k_tiles = formatted_scales.shape
+        unpadded_m, unpadded_k = q_M, q_K
+        m_block_len = block_len
+        k_block_len = block_len
+        if q_M % m_block_len != 0 or q_K % k_block_len != 0:
+            m_pad_amount = (m_block_len - (q_M % m_block_len)) % m_block_len
+            k_pad_amount = (k_block_len - (q_K % k_block_len)) % k_block_len
+            q = torch.nn.functional.pad(
+                q, (0, k_pad_amount, 0, m_pad_amount), mode="constant", value=0
+            ).contiguous()
+        padded_M, padded_K = q.shape
+        q_tiled = q.reshape(m_tiles, m_block_len, k_tiles, k_block_len)
+
+        torch_q_dtype = TE_DType_To_Torch[tensor._fp8_dtype]
+
+        result = q_tiled.view(torch_q_dtype).to(torch.float32) * formatted_scales.view(
+            m_tiles, 1, k_tiles, 1
+        )
+        result = result.view(padded_M, padded_K).to(dtype)
+        if padded_M != unpadded_m or padded_K != unpadded_k:
+            result = result[:unpadded_m, :unpadded_k]
+        if len(orig_shape) == 0:
+            result = result.reshape([])
+        else:
+            result = result.reshape(*orig_shape).contiguous()
+        if transpose_output:
+            return tensor._transpose_dq_columnwise_output(result)
+        return result
+
+    @staticmethod
+    def backward(
+        _ctx: torch.autograd.function.FunctionCtx,  # unused
+        grad: torch.Tensor,
+    ) -> Tuple[Optional[torch.Tensor], ...]:
+        # pylint: disable=missing-function-docstring
+        # Assume that we want gradients in full precision
+        return grad, None
 
 
 class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
@@ -28,12 +119,12 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
     be instantiated directly for performance-critical internal usage.
     """
 
-    _rowwise_data: Optional[torch.Tensor]
-    _columnwise_data: Optional[torch.Tensor]
+    _rowwise_data: Annotated[Optional[torch.Tensor], InnerTensor("rowwise_data")]
+    _rowwise_scale_inv: Annotated[Optional[torch.Tensor], InnerTensor("rowwise_scale_inv")]
+    _columnwise_data: Annotated[Optional[torch.Tensor], InnerTensor("columnwise_data")]
+    _columnwise_scale_inv: Annotated[Optional[torch.Tensor], InnerTensor("columnwise_scale_inv")]
     _quantizer: Quantizer
-    _fp8_dtype: TE_DType
-    _rowwise_scale_inv: Optional[torch.Tensor]
-    _columnwise_scale_inv: Optional[torch.Tensor]
+    _fp8_dtype: DType
     _is_2D_scaled: bool
 
     def __new__(
@@ -42,7 +133,7 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         rowwise_scale_inv: Optional[torch.Tensor],
         columnwise_data: Optional[torch.Tensor],
         columnwise_scale_inv: Optional[torch.Tensor],
-        fp8_dtype: TE_DType,
+        fp8_dtype: Union[DType, tex.DType],
         quantizer: Quantizer,
         is_2D_scaled: bool,
         *args,
@@ -57,7 +148,7 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         instance._rowwise_data = rowwise_data
         instance._columnwise_data = columnwise_data
         instance._quantizer = quantizer.copy() if quantizer is not None else None
-        instance._fp8_dtype = fp8_dtype
+        instance._fp8_dtype = DType.cast(fp8_dtype)
         instance._rowwise_scale_inv = rowwise_scale_inv
         instance._columnwise_scale_inv = columnwise_scale_inv
         instance._is_2D_scaled = is_2D_scaled
@@ -220,86 +311,76 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         """
         Construct plain PyTorch tensor from Float8BlockwiseQTensor
         """
-        if dtype is None:
-            dtype = self._dtype
-
-        if self._rowwise_data is not None and self._rowwise_data.numel() == 0:
-            return torch.empty(self.size(), dtype=dtype, device=self.device)
-
-        block_len = 128
-        if not self._is_2D_scaled:
-            return self._dequantize_vectorwise(dtype=dtype)
-
-        def format_scale_as_logical_shape(q_K, scales, block_len):
-            # The GEMM for 2D blocks required padding in the scales.
-            derived_scale_k_shape = math.ceil(q_K / block_len)
-            _, scale_K = scales.shape
-            if derived_scale_k_shape == scale_K:
-                return scales
-            return scales[:, :derived_scale_k_shape].contiguous()
-
-        q_M, q_K = 1, 1
-        if self._rowwise_data is not None:
-            q = self._rowwise_data
-            scale_inv = self._rowwise_scale_inv
-            transpose_output = False
-            if len(q.shape) >= 1:
-                q_K = q.shape[-1]
-            for i in range(len(q.shape) - 1):
-                q_M *= q.shape[i]
-        else:
-            assert self._columnwise_data is not None, "No data to dequantize"
-            q = self._columnwise_data
-            scale_inv = self._columnwise_scale_inv
-            transpose_output = True
-            if len(q.shape) >= 1:
-                q_M = q.shape[0]
-            for i in range(1, len(q.shape)):
-                q_K *= q.shape[i]
-
-        orig_shape = q.shape
-        q = q.reshape(q_M, q_K)
-        formatted_scales = format_scale_as_logical_shape(q_K, scale_inv, block_len)
-        assert len(formatted_scales.shape) == 2
-        m_tiles, k_tiles = formatted_scales.shape
-        unpadded_m, unpadded_k = q_M, q_K
-        m_block_len = block_len
-        k_block_len = block_len
-        if q_M % m_block_len != 0 or q_K % k_block_len != 0:
-            m_pad_amount = (m_block_len - (q_M % m_block_len)) % m_block_len
-            k_pad_amount = (k_block_len - (q_K % k_block_len)) % k_block_len
-            q = torch.nn.functional.pad(
-                q, (0, k_pad_amount, 0, m_pad_amount), mode="constant", value=0
-            ).contiguous()
-        padded_M, padded_K = q.shape
-        q_tiled = q.reshape(m_tiles, m_block_len, k_tiles, k_block_len)
-
-        torch_q_dtype = TE_DType_To_Torch[self._fp8_dtype]
-
-        result = q_tiled.view(torch_q_dtype).to(torch.float32) * formatted_scales.view(
-            m_tiles, 1, k_tiles, 1
-        )
-        result = result.view(padded_M, padded_K).to(dtype)
-        if padded_M != unpadded_m or padded_K != unpadded_k:
-            result = result[:unpadded_m, :unpadded_k]
-        if len(orig_shape) == 0:
-            result = result.reshape([])
-        else:
-            result = result.reshape(*orig_shape).contiguous()
-        if transpose_output:
-            return self._transpose_dq_columnwise_output(result)
-        return result
+        return _FromFloat8BlockwiseFunc.forward(None, self, dtype)
 
     def size(self, *args, **kwargs):
         # pylint: disable=missing-function-docstring
         if self._rowwise_data is not None:
             return self._rowwise_data.size(*args, **kwargs)
-        dims = list(self._columnwise_data.size(*args, **kwargs))
-        reordered = []
-        for i in range(1, len(dims)):
-            reordered.append(dims[i])
-        reordered.append(dims[0])
-        return torch.Size(reordered)
+        # Columnwise data is stored transposed, so a dim argument cannot be
+        # forwarded to it: rebuild the logical shape first, then index into it.
+        dims = self._columnwise_data.shape
+        if len(dims) == 2:
+            shape = torch.Size((dims[1], dims[0]))
+        else:
+            shape = torch.Size(tuple(dims[1:]) + (dims[0],))
+        dim = args[0] if args else kwargs.get("dim")
+        return shape if dim is None else shape[dim]
+
+    def view(self, shape):
+        """Reshape the leading (token) dims without dequantizing.
+
+        Mirrors ``MXFP8TensorStorage.view``. Only leading dims may change: block tiling fixes
+        the inner dim (1D) or inner two (2D), so scale-inv stays valid. Columnwise data is
+        stored transposed, viewed as ``[inner, *leading]``.
+        """
+        cur_shape = self.size()
+        if shape is None or shape == cur_shape:
+            return self
+        # Canonicalize shape
+        if not isinstance(shape, Iterable):
+            shape = [shape]
+        elif len(shape) == 1 and isinstance(shape[0], Iterable):
+            shape = shape[0]
+        shape = list(shape)
+        if -1 in shape:
+            d_inferred = -math.prod(cur_shape) // math.prod(shape)
+            for i, d in enumerate(shape):
+                if d == -1:
+                    shape[i] = d_inferred
+                    break
+        if shape == list(cur_shape):
+            return self
+
+        if self._is_2D_scaled:
+            if shape[-2:] != list(cur_shape)[-2:]:
+                raise RuntimeError(
+                    "Float8BlockwiseQTensorStorage (2D block scaling) cannot reshape the inner "
+                    f"two dimensions (attempted {tuple(cur_shape)} -> {tuple(shape)})"
+                )
+        elif shape[-1] != cur_shape[-1]:
+            raise RuntimeError(
+                "Float8BlockwiseQTensorStorage (1D block scaling) cannot reshape the inner "
+                f"dimension (attempted {tuple(cur_shape)} -> {tuple(shape)})"
+            )
+
+        new_rowwise_data = None
+        if self._rowwise_data is not None:
+            new_rowwise_data = self._rowwise_data.view(*shape)
+        new_columnwise_data = None
+        if self._columnwise_data is not None:
+            new_columnwise_data = self._columnwise_data.view([shape[-1], *shape[:-1]])
+
+        return Float8BlockwiseQTensorStorage(
+            new_rowwise_data,
+            self._rowwise_scale_inv,
+            new_columnwise_data,
+            self._columnwise_scale_inv,
+            self._fp8_dtype,
+            self._quantizer,
+            self._is_2D_scaled,
+            fake_dtype=self._dtype,
+        )
 
     @property
     def device(self):
@@ -355,17 +436,25 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
             del _old_data
 
     def __repr__(self):
-        if self._rowwise_data is not None:
-            data = self.dequantize()
-            descriptor = "rowwise"
-        else:
-            data = self.dequantize()
-            descriptor = "columnwise"
-        return (
-            "Float8BlockwiseQTensorStorage("
-            f"fp8_dtype={self._fp8_dtype}, "
-            f"{descriptor}_scaled_data={data})"
-        )
+        try:
+            if self._rowwise_data is not None:
+                data = self.dequantize()
+                descriptor = "rowwise"
+            else:
+                data = self.dequantize()
+                descriptor = "columnwise"
+            return (
+                "Float8BlockwiseQTensorStorage("
+                f"fp8_dtype={self._fp8_dtype}, "
+                f"{descriptor}_scaled_data={data})"
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            return safe_quantized_repr(
+                self,
+                "Float8BlockwiseQTensorStorage",
+                extras={"is_2D_scaled": self._is_2D_scaled},
+                error=exc,
+            )
 
     def update_usage(
         self, rowwise_usage: Optional[bool] = None, columnwise_usage: Optional[bool] = None
@@ -425,3 +514,154 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
             "rowwise": self._rowwise_data is not None,
             "columnwise": self._columnwise_data is not None,
         }
+
+    # ── FSDP2 sub-storage buffer protocol ────────────────────────────
+    #
+    # Float8Block stores columnwise data N-major (transposed) for the GEMM, so
+    # it cannot be dim-0 all-gathered directly. Each direction is made
+    # self-contained: the columnwise direction fp8-transposes its own data to
+    # M-major for the gather and back on assign, using only its own buffers (no
+    # dependency on a rowwise sibling, which in a hybrid tensor may be a
+    # different format). Block-scale GEMM alignment padding (round-up-to-4) is
+    # stripped before the gather and re-applied after. Only 2D block scaling is
+    # supported -- the 1D scale layout has M in dim1, incompatible with FSDP2's
+    # dim-0 all-gather.
+
+    _FSDP_BLOCK_LEN = 128
+
+    def _fsdp_logical_mn(self) -> Tuple[int, int]:
+        """Flattened ``(M, N)`` of this sub-storage's logical shape."""
+        shape = self.size()
+        last_dim = shape[-1] if len(shape) > 0 else 1
+        leading = 1
+        for dim in shape[:-1]:
+            leading *= dim
+        return leading, last_dim
+
+    def fsdp_buffer_fields(self) -> Tuple[str, ...]:
+        """Fields gathered by FSDP2 for Float8 block scaling (2D scaling only)."""
+        if not self._is_2D_scaled:
+            raise NotImplementedError(
+                "FSDP2 for Float8BlockwiseQTensor requires 2D block scaling "
+                "(block_scaling_dim=2). 1D block scaling is not supported because "
+                "its scale layout has M in dim1, which is incompatible with FSDP2 "
+                "dim-0 all-gather."
+            )
+        fields = []
+        if self._rowwise_data is not None:
+            fields.extend(("_rowwise_data", "_rowwise_scale_inv"))
+        if self._columnwise_data is not None:
+            fields.extend(("_columnwise_data", "_columnwise_scale_inv"))
+        return tuple(fields)
+
+    def fsdp_extract_buffers(
+        self,
+    ) -> Tuple[Tuple[Optional[torch.Tensor], ...], Dict[str, Any]]:
+        """Extract M-major, alignment-stripped buffers for dim-0 all-gather.
+
+        Rowwise data is already M-major; columnwise data is N-major and is
+        fp8-transposed to M-major here (and transposed back in
+        :meth:`fsdp_assign_gathered`). The block-scale round-up-to-4 alignment
+        padding is stripped so dim-0 concatenation across shards is well-defined.
+        """
+        names = self.fsdp_buffer_fields()
+        block_len = self._FSDP_BLOCK_LEN
+        m, n = self._fsdp_logical_mn()
+        if m % block_len != 0:
+            raise RuntimeError(
+                "FSDP2 cannot all-gather a 2-D Float8BlockwiseQTensor whose "
+                f"local flattened M dimension ({m}) is not a multiple of {block_len}; "
+                "the shard boundary splits a block-scale tile. Choose aligned shard "
+                "boundaries or use a supported non-blockwise recipe."
+            )
+        m_tiles = (m + block_len - 1) // block_len
+        last_tiles = (n + block_len - 1) // block_len
+
+        if self._rowwise_data is not None:
+            # Rowwise scale is (m_tiles, round_up(last_tiles, 4)); m_tiles sits in
+            # dim-0 (sharded/gathered) unpadded, the round-up padding is on dim-1
+            # (not sharded). Strip dim-1 to the compact tile count.
+            scale = self._rowwise_scale_inv
+            if scale is not None and scale.size(1) > last_tiles:
+                scale = scale[:, :last_tiles].contiguous()
+            buffers = (self._rowwise_data, scale)
+            direction = "rowwise"
+        else:
+            # Columnwise data is N-major (N, M); transpose to M-major (M, N).
+            col_data = self._columnwise_data
+            if not col_data.is_contiguous():
+                col_data = col_data.contiguous()
+            data_m = tex.fp8_transpose(col_data, self._fp8_dtype, out=None)
+            # Columnwise scale is (last_tiles, round_up(m_tiles, 4)); transpose to
+            # (round_up(m_tiles, 4), last_tiles) and strip dim-0 to m_tiles so the
+            # gathered (dim-0) axis is the M-tiles, matching the rowwise layout.
+            scale = self._columnwise_scale_inv.transpose(0, 1).contiguous()
+            if scale.size(0) > m_tiles:
+                scale = scale[:m_tiles].contiguous()
+            buffers = (data_m, scale)
+            direction = "columnwise"
+
+        return buffers, {"direction": direction, "field_names": names}
+
+    def fsdp_assign_gathered(
+        self,
+        gathered: Tuple[Optional[torch.Tensor], ...],
+        meta: Dict[str, Any],
+    ) -> None:
+        """Write gathered buffers back, re-applying transpose + scale padding.
+
+        Inverse of :meth:`fsdp_extract_buffers`: rowwise re-pads the scale's
+        last-dim alignment; columnwise transposes the M-major gathered data back
+        to N-major and re-pads/transposes the scale to the GEMM scale layout
+        produced by ``get_scale_shape(..., columnwise=True)``.
+        """
+        block_len = self._FSDP_BLOCK_LEN
+        direction = meta["direction"]
+        data, scale = gathered
+        if direction not in ("rowwise", "columnwise"):
+            raise RuntimeError(f"Invalid Float8Block FSDP gather direction: {direction!r}")
+        if data is None or scale is None:
+            raise RuntimeError(
+                "Float8Block FSDP gathered data and scale buffers must both be present."
+            )
+
+        m_full = 1
+        for dim in data.shape[:-1]:
+            m_full *= dim
+        last_dim = data.size(-1) if data.dim() > 0 else 1
+        expected_scale_shape = (
+            (m_full + block_len - 1) // block_len,
+            (last_dim + block_len - 1) // block_len,
+        )
+        if tuple(scale.shape) != expected_scale_shape:
+            raise RuntimeError(
+                "Float8Block FSDP gathered scale geometry does not match gathered data: "
+                f"got scale shape {tuple(scale.shape)}, expected {expected_scale_shape} "
+                f"for gathered data shape {tuple(data.shape)}."
+            )
+
+        if direction == "rowwise":
+            last_dim = data.size(-1)
+            last_tiles = (last_dim + block_len - 1) // block_len
+            if scale is not None:
+                pad = round_up_to_nearest_multiple(last_tiles, 4) - last_tiles
+                if pad > 0:
+                    scale = torch.nn.functional.pad(scale, (0, pad))
+            self._rowwise_data = data
+            self._rowwise_scale_inv = scale
+            return
+
+        # Columnwise: gathered data is M-major (M_full, N); transpose to N-major.
+        data_m = data if data.is_contiguous() else data.contiguous()
+        self._columnwise_data = tex.fp8_transpose(data_m, self._fp8_dtype, out=None)
+        m_full = 1
+        for dim in data.shape[:-1]:
+            m_full *= dim
+        m_tiles_full = (m_full + block_len - 1) // block_len
+        # Gathered scale is compact (m_tiles_full, last_tiles); transpose to
+        # (last_tiles, m_tiles_full) and re-pad the M-tile dim to multiple of 4.
+        scale_t = scale.transpose(0, 1).contiguous()
+        pad = round_up_to_nearest_multiple(m_tiles_full, 4) - m_tiles_full
+        if pad > 0:
+            scale_t = torch.nn.functional.pad(scale_t, (0, pad))
+        self._columnwise_scale_inv = scale_t.contiguous()

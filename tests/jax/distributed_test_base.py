@@ -17,6 +17,17 @@ from utils import assert_allclose, is_devices_enough, is_devices_equal
 
 def generate_configs():
     configs = []
+    if is_devices_enough(8):
+        configs.append(
+            pytest.param(
+                8,
+                (2, 2, 2),
+                ("dp", "fsdp", "tpsp"),
+                MeshResource(dp_resource="dp", fsdp_resource="fsdp", tpsp_resource="tpsp"),
+                id="n8_dp2_fsdp2_tp2",
+            )
+        )
+
     if is_devices_enough(4):
         configs.append(
             pytest.param(
@@ -79,6 +90,7 @@ def generate_collectives_count(allreduce, allgather, other):
 def assert_equal_collectives(target_hlo, coll_count_ref):
     target_splitted_hlo = target_hlo.splitlines()
     start_symb = "-start"
+    sync_symb = '"is_sync":true'
 
     def count_bytes(hlo_text):
         bytes_count = 0
@@ -114,15 +126,62 @@ def assert_equal_collectives(target_hlo, coll_count_ref):
 
         return bytes_count
 
+    def get_called_collective_type(line):
+        """Identify a collective hidden inside an async/fusion wrapper."""
+        match = re.search(r"\bcalls=(%[-.\w]+)", line)
+        if not match:
+            return None
+
+        computation_name = match.group(1)
+        computation = re.search(
+            rf"(?ms)^[ \t]*{re.escape(computation_name)}(?=[ \t(])" rf".*?^[ \t]*}}[ \t]*$",
+            target_hlo,
+        )
+        if not computation:
+            return None
+
+        computation_text = computation.group(0)
+        has_all_reduce = COLL_AR_KEY in computation_text
+        has_all_gather = COLL_AG_KEY in computation_text
+
+        if has_all_reduce and not has_all_gather:
+            return COLL_AR_KEY
+        if has_all_gather and not has_all_reduce:
+            return COLL_AG_KEY
+
+        return None
+
     def count_collectives(splitted_hlo):
         result = generate_collectives_count(0, 0, 0)
 
         for line in splitted_hlo:
             txt = line.split()
-            if len(txt) > 0 and start_symb in txt[0]:
-                if COLL_AR_KEY in txt[0]:
+
+            # strip optional HLO syntax prefix
+            if txt and txt[0] == "ROOT":
+                txt = txt[1:]
+
+            # Asynchronous collectives are represented by *-start and *-done
+            # instructions, so count only *-start. Synchronous collectives are
+            # represented by a single instruction without either suffix.
+            is_async_start = txt and start_symb in txt[0]
+            is_sync_collective = "collective_backend_config" in line and sync_symb in line
+
+            if is_async_start or is_sync_collective:
+                # Some direct *-start instructions are tagged with
+                # `"is_sync":true`. Classify the explicit async form first so
+                # it is not mistaken for an unsuffixed synchronous collective.
+                if is_async_start:
+                    called_collective = get_called_collective_type(line)
+                    is_all_reduce = COLL_AR_KEY in txt[0] or called_collective == COLL_AR_KEY
+                    is_all_gather = COLL_AG_KEY in txt[0] or called_collective == COLL_AG_KEY
+                else:
+                    is_all_reduce = re.search(r"\ball-reduce\s*\(", line)
+                    is_all_gather = re.search(r"\ball-gather\s*\(", line)
+
+                if is_all_reduce:
                     result[COLL_AR_KEY] += count_bytes(txt)
-                elif COLL_AG_KEY in txt[0]:
+                elif is_all_gather:
                     result[COLL_AG_KEY] += count_bytes(txt)
                 else:
                     result[COLL_OTHER_KEY] += count_bytes(txt)

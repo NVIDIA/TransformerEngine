@@ -17,12 +17,13 @@ import pytest
 import torch
 
 import transformer_engine
-import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch import InferenceParams, QuantizedTensor
+from transformer_engine.pytorch import DType
 from transformer_engine.pytorch.attention.dot_product_attention import _attention_backends
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     get_attention_backend,
+    get_qkv_format,
     AttentionParams,
     AttentionLogging,
     check_set_window_size,
@@ -70,7 +71,7 @@ def str_to_dtype(dtype: str | torch.dtype) -> torch.dtype:
     return dtype
 
 
-def dtype_tols(dtype: torch.dtype | tex.DType) -> dict[str, float]:
+def dtype_tols(dtype: torch.dtype | DType) -> dict[str, float]:
     """Estimated numerical error for a datatype
 
     Based on tolerances for torch.testing.assert_close.
@@ -78,17 +79,17 @@ def dtype_tols(dtype: torch.dtype | tex.DType) -> dict[str, float]:
     """
 
     # Transformer Engine dtypes
-    if isinstance(dtype, tex.DType):
-        if dtype == tex.DType.kFloat4E2M1:
+    if isinstance(dtype, DType):
+        if dtype == DType.kFloat4E2M1:
             return dict(rtol=0.25, atol=0.125)  # epsilon = 0.25
         dtype = {
-            tex.DType.kByte: torch.uint8,
-            tex.DType.kInt32: torch.int32,
-            tex.DType.kFloat32: torch.float32,
-            tex.DType.kFloat16: torch.half,
-            tex.DType.kBFloat16: torch.bfloat16,
-            tex.DType.kFloat8E4M3: torch.float8_e4m3fn,
-            tex.DType.kFloat8E5M2: torch.float8_e5m2,
+            DType.kByte: torch.uint8,
+            DType.kInt32: torch.int32,
+            DType.kFloat32: torch.float32,
+            DType.kFloat16: torch.half,
+            DType.kBFloat16: torch.bfloat16,
+            DType.kFloat8E4M3: torch.float8_e4m3fn,
+            DType.kFloat8E5M2: torch.float8_e5m2,
         }[dtype]
 
     # PyTorch dtypes
@@ -114,12 +115,13 @@ def quantization_tols(name: str) -> dict[str, float]:
         "fp8_delayed_scaling",
         "fp8_current_scaling",
         "fp8_blockwise",
+        "fp8_block_scaling",
         "mxfp8",
         "mxfp8_block_scaling",
     ):
-        return dtype_tols(tex.DType.kFloat8E4M3)
+        return dtype_tols(DType.kFloat8E4M3)
     if name in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6", "nvfp4_rht"):
-        return dtype_tols(tex.DType.kFloat4E2M1)
+        return dtype_tols(DType.kFloat4E2M1)
     raise ValueError(f"Unsupported quantization scheme ({name})")
 
 
@@ -281,6 +283,7 @@ class ModelConfig:
         alibi_type: str = "none",
         bias_shape: str = "1hss",
         window_size: Tuple[int, int] = (-1, -1),
+        softcap: float = 0.0,
         context_parallel: bool = False,
         cp_comm_type: str = "p2p",
         return_max_logit=False,
@@ -311,6 +314,11 @@ class ModelConfig:
         self.attn_type = "self" if (self.max_seqlen_q == self.max_seqlen_kv) else "cross"
         self.bias_shape = bias_shape
         self.window_size = check_set_window_size(self.attn_mask_type, window_size)
+        self.bottom_right_diagonal = self.attn_mask_type not in {
+            "causal",
+            "padding_causal",
+        }
+        self.softcap = softcap
         self.context_parallel = context_parallel
         self.cp_comm_type = cp_comm_type
         self.return_max_logit = return_max_logit
@@ -335,14 +343,31 @@ def get_available_attention_backends(
     config: ModelConfig,
     qkv_dtype: torch.dtype,
     qkv_layout: str,
+    nominal_dtype: Optional[torch.dtype] = None,
     pad_between_seqs: bool = False,
     deterministic: bool = False,
     fp8: bool = False,
     fp8_meta: Optional[Dict[str, Any]] = None,
     is_training: bool = True,
     inference_params: Optional[InferenceParams] = None,
+    score_mod: bool = False,
+    score_mod_bprop: bool = False,
+    cp_size: int = 1,
+    cp_size_a2a: int = 1,
+    num_tokens_q: Optional[int] = None,
+    num_tokens_kv: Optional[int] = None,
 ) -> Tuple[List, List]:
     """Check for all available attention backends that support a model configuration"""
+
+    _, q_format, kv_format = get_qkv_format(qkv_layout, inference_params)
+    if num_tokens_q is None:
+        num_tokens_q = (
+            max(config.batch_size * config.max_seqlen_q // cp_size, 1) if q_format == "thd" else 0
+        )
+    if num_tokens_kv is None:
+        num_tokens_kv = (
+            max(config.batch_size * config.max_seqlen_kv // cp_size, 1) if kv_format == "thd" else 0
+        )
 
     os.environ["NVTE_FLASH_ATTN"] = "1"
     os.environ["NVTE_FUSED_ATTN"] = "1"
@@ -355,9 +380,15 @@ def get_available_attention_backends(
         if config.bias_shape == "bhss":
             alibi_slopes_shape = [config.batch_size, config.num_heads]
 
-    core_attention_bias_shape = (
-        config.bias_shape if config.attn_bias_type == "post_scale_bias" else None
-    )
+    core_attention_bias_shape = None
+    if config.attn_bias_type == "post_scale_bias":
+        b_dim, h_dim, sq_dim, skv_dim = config.bias_shape
+        core_attention_bias_shape = (
+            config.batch_size if b_dim == "b" else 1,
+            config.num_heads if h_dim == "h" else 1,
+            config.max_seqlen_q if sq_dim == "s" else 1,
+            config.max_seqlen_kv if skv_dim == "s" else 1,
+        )
     core_attention_bias_requires_grad = False
     # d=256 is supported by cuDNN 9.0+ for inference but not training
     if (
@@ -366,7 +397,7 @@ def get_available_attention_backends(
         and config.head_dim_v <= 128
     ):
         # TODO(KshitijLakhani): Remove this guard when cuDNN starts support dbias calculation for bias shape 111s
-        if core_attention_bias_shape != "111s":
+        if config.bias_shape != "111s":
             core_attention_bias_requires_grad = True
 
     fused_attn_backends = []
@@ -377,6 +408,7 @@ def get_available_attention_backends(
     def test():
         attention_params = AttentionParams(
             qkv_dtype=qkv_dtype,
+            nominal_dtype=nominal_dtype,
             qkv_layout=qkv_layout,
             batch_size=config.batch_size,
             num_heads=config.num_heads,
@@ -385,8 +417,12 @@ def get_available_attention_backends(
             max_seqlen_kv=config.max_seqlen_kv,
             head_dim_qk=config.head_dim_qk,
             head_dim_v=config.head_dim_v,
+            num_tokens_q=num_tokens_q,
+            num_tokens_kv=num_tokens_kv,
             attn_mask_type=config.attn_mask_type,
             window_size=config.window_size,
+            bottom_right_diagonal=config.bottom_right_diagonal,
+            softcap=config.softcap,
             alibi_slopes_shape=alibi_slopes_shape,
             core_attention_bias_type=config.attn_bias_type,
             core_attention_bias_shape=core_attention_bias_shape,
@@ -395,6 +431,8 @@ def get_available_attention_backends(
             attention_dropout=config.dropout_p,
             context_parallel=config.context_parallel,
             cp_comm_type=config.cp_comm_type,
+            cp_size=cp_size,
+            cp_size_a2a=cp_size_a2a,
             deterministic=deterministic,
             fp8=fp8,
             fp8_meta=fp8_meta,
@@ -402,6 +440,8 @@ def get_available_attention_backends(
             inference_params=inference_params,
             softmax_type=config.softmax_type,
             return_max_logit=config.return_max_logit,
+            has_score_mod=score_mod,
+            has_score_mod_bprop=score_mod_bprop,
             # allow all backends to pass so they can be used for testing;
             # check for FA3 availability later
             num_splits=1,
@@ -432,12 +472,10 @@ def get_available_attention_backends(
     if AttentionLogging._is_logging_setup is False:
         AttentionLogging.setup_logging()
 
-    for i in backends:
-        os.environ["NVTE_FUSED_ATTN_BACKEND"] = str(i)
-        _attention_backends["backend_selection_requires_update"] = True
-        available_backends, flash_attention_backend, fused_attention_backend = test()
-        if fused_attention_backend == FusedAttnBackend[backends[i]]:
-            fused_attn_backends.append(fused_attention_backend)
+    _attention_backends["backend_selection_requires_update"] = True
+    available_backends, flash_attention_backend, fused_attention_backend = test()
+    if fused_attention_backend in (FusedAttnBackend[name] for name in backends.values()):
+        fused_attn_backends.append(fused_attention_backend)
     return available_backends, flash_attention_backend, fused_attn_backends
 
 
