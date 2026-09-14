@@ -51,11 +51,11 @@ def make_row_id_map(
         to the first n_routed row indices above.
     """
     row_id_map = torch.empty(
-        (num_tokens, num_experts * 2 + 1), dtype=torch.int32, device=te_device_type()
+        (num_tokens, num_experts * 2 + 1), dtype=torch.int32, device=routing_map.device
     )
     block_size = 1024
     grid = (num_experts, triton.cdiv(num_tokens, block_size))
-    workspace_tensor = torch.empty(grid, dtype=torch.int32, device=te_device_type())
+    workspace_tensor = torch.empty(grid, dtype=torch.int32, device=routing_map.device)
 
     # supposing num_tokens == 5, num_experts == 3, block_size == 3
     # and we have a routing_map like this:
