@@ -7,8 +7,9 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Hashable
 from dataclasses import dataclass
-from typing import Any, Dict, Hashable, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 

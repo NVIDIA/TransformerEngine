@@ -92,6 +92,8 @@ class FusedAttnBackend(IntEnum):
 
     @classmethod
     def cast(cls, backend: Union["FusedAttnBackend", int, Any]) -> "FusedAttnBackend":
+        """Convert a legacy backend integer to a fused-attention backend."""
+
         if isinstance(backend, cls):
             return backend
         return cls(int(backend))
@@ -515,7 +517,6 @@ def _build_f16_fwd_graph(
     cu_seqlens_kv_padded: torch.Tensor,
     page_table_k: Optional[torch.Tensor],
     page_table_v: Optional[torch.Tensor],
-    rng_state: torch.Tensor,
     softmax_offset: Optional[torch.Tensor],
     attn_scale: float,
     dropout: float,
@@ -899,7 +900,6 @@ def _f16_forward(
             cu_seqlens_kv_padded=cu_seqlens_kv_padded,
             page_table_k=page_table_k,
             page_table_v=page_table_v,
-            rng_state=rng_state,
             softmax_offset=softmax_offset,
             attn_scale=attn_scale,
             dropout=dropout,
@@ -1112,9 +1112,6 @@ def _build_fp8_fwd_graph(
     k,
     v,
     output,
-    stats,
-    amax_s,
-    amax_o,
     s_quantizer,
     o_quantizer,
     qkv_layout,
@@ -1590,9 +1587,6 @@ def _fp8_forward(
             k=k,
             v=v,
             output=output,
-            stats=stats,
-            amax_s=amax_s,
-            amax_o=amax_o,
             s_quantizer=s_quantizer,
             o_quantizer=o_quantizer,
             qkv_layout=qkv_layout,
@@ -1799,7 +1793,6 @@ def _build_f16_bwd_graph(
     v: torch.Tensor,
     o: torch.Tensor,
     d_o: torch.Tensor,
-    stats: torch.Tensor,
     d_q: torch.Tensor,
     d_k: torch.Tensor,
     d_v: torch.Tensor,
@@ -2083,7 +2076,6 @@ def _build_fp8_bwd_graph(
     o,
     d_o,
     d_o_f16,
-    stats,
     d_q,
     d_k,
     d_v,
@@ -2701,7 +2693,6 @@ def _fp8_backward(
             o=o,
             d_o=d_o,
             d_o_f16=d_o_f16,
-            stats=stats,
             d_q=d_q,
             d_k=d_k,
             d_v=d_v,
@@ -2954,7 +2945,7 @@ def fused_attn_bwd(
     d_bias = None
     if attn_bias_type == "post_scale_bias":
         # cuDNN does not support the [1,1,1,S] reduction form.
-        if not tuple(attn_bias.shape[:3]) == (1, 1, 1):
+        if tuple(attn_bias.shape[:3]) != (1, 1, 1):
             d_bias = torch.empty_like(attn_bias)
     d_softmax_offset = torch.empty_like(softmax_offset) if softmax_type != "vanilla" else None
     cu_seqlens_q_padded = cu_seqlens_q if cu_seqlens_q_padded is None else cu_seqlens_q_padded
@@ -3008,7 +2999,6 @@ def fused_attn_bwd(
             v=v,
             o=o,
             d_o=d_o,
-            stats=stats,
             d_q=d_q,
             d_k=d_k,
             d_v=d_v,

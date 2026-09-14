@@ -345,7 +345,7 @@ def check_f16_fused_attention_support(
         or blackwell_d256_bwd
     ):
         return _unsupported("head dimensions are not supported")
-    if (
+    unsupported_hopper_bwd_dims = (
         version >= 91100
         and is_training
         and arch == 90
@@ -353,8 +353,11 @@ def check_f16_fused_attention_support(
         and dv >= 128
         and (dqk, dv) != (192, 128)
         and dqk != dv
-    ):
-        return _unsupported("this Hopper backward head-dimension combination is unsupported")
+    )
+    if unsupported_hopper_bwd_dims:
+        return _unsupported(
+            "this Hopper backward head-dimension combination is unsupported"
+        )
 
     alibi_supported = (
         bias == "alibi"
@@ -376,6 +379,8 @@ def check_f16_fused_attention_support(
 
     standard_format = layout.qkv_format in ("sbhd", "bshd")
     basic_masks = mask in ("no_mask", "causal", "padding", "padding_causal")
+    aligned_bottom_right = sq % 64 == 0 and skv % 64 == 0 and sq <= skv
+    no_bias_no_dropout = bias == "no_bias" and dropout == 0.0
     mask_ok = version < 8906 and mask == "causal"
     if version >= 8906 and standard_format and basic_masks:
         mask_ok = True
@@ -393,37 +398,25 @@ def check_f16_fused_attention_support(
         version >= 90300
         and standard_format
         and mask == "causal_bottom_right"
-        and sq % 64 == 0
-        and skv % 64 == 0
-        and sq <= skv
-        and bias == "no_bias"
-        and dropout == 0.0
+        and aligned_bottom_right
+        and no_bias_no_dropout
     ):
         mask_ok = True
+    paged_mask_supported = mask in ("padding", "padding_causal") or (
+        mask == "padding_causal_bottom_right" and aligned_bottom_right
+    )
     if (
         version >= 90500
         and layout.layout_group == "paged_separate"
-        and (
-            mask in ("padding", "padding_causal")
-            or (
-                mask == "padding_causal_bottom_right"
-                and sq % 64 == 0
-                and skv % 64 == 0
-                and sq <= skv
-            )
-        )
-        and bias == "no_bias"
-        and dropout == 0.0
+        and paged_mask_supported
+        and no_bias_no_dropout
     ):
         mask_ok = True
     if (
         version >= 90600
         and mask == "padding_causal_bottom_right"
-        and sq % 64 == 0
-        and skv % 64 == 0
-        and sq <= skv
-        and bias == "no_bias"
-        and dropout == 0.0
+        and aligned_bottom_right
+        and no_bias_no_dropout
     ):
         mask_ok = True
     if version >= 90700:
@@ -539,14 +532,15 @@ def check_f16_fused_attention_support(
             "cuDNN 9.14.0 does not support this non-causal sliding window",
             "This non-causal sliding-window configuration requires cuDNN > 9.14.0",
         )
-    if (
+    unsupported_cuda_graph_bwd = (
         version <= 91500
         and is_training
         and standard_format
         and skv % 128 != 0
         and config.cuda_graph
         and mask not in ("padding", "padding_causal", "padding_causal_bottom_right")
-    ):
+    )
+    if unsupported_cuda_graph_bwd:
         return _unsupported(
             "this backward CUDA-graph configuration requires cuDNN 9.15.1",
             "This backward CUDA-graph configuration requires cuDNN 9.15.1 or newer",

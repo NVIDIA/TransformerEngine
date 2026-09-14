@@ -1121,7 +1121,7 @@ def cp_p2p_fwd_fused_attn(
         attn_bias = rest[0] if len(rest) > 0 else None
 
     if return_max_logit:
-        return out_per_step, softmax_lse_per_step, rng_states, attn_bias, *max_logit
+        return out_per_step, softmax_lse_per_step, rng_states, attn_bias, max_logit[0]
     return out_per_step, softmax_lse_per_step, rng_states, attn_bias, None
 
 
