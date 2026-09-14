@@ -1778,44 +1778,36 @@ def _fused_attn_forward_impl(
         mark_activation_offload(*tensor_list)
         mark_activation_offload(*aux_ctx_tensors)
 
-    # Split the aux pack into fixed slots (see FusedAttnBwdArgs.aux_ctx_tensors).
-    aux = list(aux_ctx_tensors)
-    softmax_stats = aux.pop(0)
-    rng_state = aux.pop(0)
-    aux_bias = (
-        aux.pop(0)
-        if args.attn_bias_type not in ["no_bias", "alibi"] and args.attn_bias is not None
-        else None
-    )
-    aux_softmax_offset = (
-        aux.pop(0) if args.softmax_type != "vanilla" and args.softmax_offset is not None else None
-    )
-    assert not aux, f"unexpected fused attention aux tensors: {len(aux)} left"
+    softmax_stats, rng_state, *aux = aux_ctx_tensors
+    has_bias = args.attn_bias_type not in ["no_bias", "alibi"] and args.attn_bias is not None
+    has_softmax_offset = args.softmax_type != "vanilla" and args.softmax_offset is not None
+    assert len(aux) == has_bias + has_softmax_offset, "unexpected fused attention aux tensors"
 
+    saved_from = (
+        "q" if fp8_tensors[0] is args.q else None,
+        "k" if fp8_tensors[1] is args.k else None,
+        "v" if fp8_tensors[2] is args.v else None,
+        "out" if fp8_tensors[3] is out_ret else None,
+        "q" if f16_tensors[0] is args.q else None,
+        "k" if f16_tensors[1] is args.k else None,
+        "v" if f16_tensors[2] is args.v else None,
+        "out" if f16_tensors[3] is out_ret else None,
+        None,
+        None,
+        "attn_bias" if has_bias else None,
+        "softmax_offset" if has_softmax_offset else None,
+    )
     tensors_to_save = (
         *fp8_tensors,
         *f16_tensors,
         softmax_stats,
         rng_state,
-        aux_bias,
-        aux_softmax_offset,
+        None,
+        None,
     )
-    # A saved tensor identical to an input / the output is not saved twice:
-    # backward takes it from the forward arguments / output (see setup_ctx).
-    sources = {
-        id(t): name
-        for name, t in (
-            ("q", args.q),
-            ("k", args.k),
-            ("v", args.v),
-            ("attn_bias", args.attn_bias),
-            ("softmax_offset", args.softmax_offset),
-            ("out", out_ret),
-        )
-        if t is not None
-    }
-    saved_from = tuple(sources.get(id(t)) for t in tensors_to_save)
-    tensors_to_save = tuple(None if src else t for t, src in zip(tensors_to_save, saved_from))
+    tensors_to_save = tuple(
+        None if src else t for t, src in zip(tensors_to_save, saved_from, strict=True)
+    )
 
     if is_bwd_fp8 and isinstance(S_quantizer, Float8Quantizer):
         S_quantizer = S_quantizer.copy()
@@ -1946,7 +1938,7 @@ def _fused_attn_setup_ctx(
         aux_softmax_offset,
     ) = (
         sources[src] if src else saved
-        for saved, src in zip(tensors_to_save_from_forward, ctx_attrs["saved_from"])
+        for saved, src in zip(tensors_to_save_from_forward, ctx_attrs["saved_from"], strict=True)
     )
     return (
         q_fp8,
