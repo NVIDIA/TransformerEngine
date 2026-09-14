@@ -16,7 +16,6 @@
 #include <cuda_runtime.h>
 #include <transformer_engine/transformer_engine.h>
 
-#include <cstdlib>
 #include <type_traits>
 
 #include "../../common.h"
@@ -421,11 +420,6 @@ __global__ void __launch_bounds__(FA_THREADS_NUM)
 inline bool fused_amax_supported(const Tensor &input, const Tensor *output) {
 #if FP4_TYPE_SUPPORTED
   using namespace row_scaled_amax_kernel;
-  static const bool enabled = []() {
-    const char *e = std::getenv("NVTE_NVFP4_FUSED_AMAX");
-    return (e == nullptr) || (e[0] != '0');
-  }();
-  if (!enabled) return false;
   const auto [rows, cols] = input.flat_2d_dims();
   return input.dtype() == DType::kBFloat16 && (rows % FA_CHUNK_DIM_Y == 0) &&
          (cols % FA_CHUNK_DIM_X == 0) && output->columnwise_amax.dptr != nullptr &&
@@ -499,6 +493,22 @@ inline void compute_fused_amax(const Tensor &input, const Tensor *noop, Tensor *
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
 #endif  // FP4_TYPE_SUPPORTED
 }
+
+namespace row_scaled {
+
+inline void compute_amaxes(const Tensor &input, const Tensor *noop, Tensor *output,
+                           cudaStream_t stream) {
+  if (output->has_columnwise_data() && fused_amax_supported(input, output)) {
+    compute_fused_amax(input, noop, output, stream);
+  } else {
+    compute_rowwise_amax(input, noop, output, stream);
+    if (output->has_columnwise_data()) {
+      compute_columnwise_amax(input, noop, output, stream);
+    }
+  }
+}
+
+}  // namespace row_scaled
 
 namespace quantize_transpose_kernel {
 
