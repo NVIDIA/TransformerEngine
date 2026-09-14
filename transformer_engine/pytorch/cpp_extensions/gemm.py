@@ -28,7 +28,7 @@ from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 from ..tensor.utils import is_custom
 from ..custom_recipes.gemm import custom_gemm
 from ...debug.pytorch.debug_quantization import DebugQuantizedTensor, DebugQuantizer
-from transformer_engine import te_device_type, te_platform
+from transformer_engine import te_device_type
 
 __all__ = [
     "general_gemm",
@@ -43,7 +43,7 @@ _NUM_MAX_UB_STREAMS = 3
 
 def get_cublas_workspace_size_bytes() -> None:
     """Return 32 MiB if using hopper, 4 MiB for all other architectures."""
-    if torch.cuda.get_device_properties(te_platform().current_device()).major >= 9:
+    if torch.cuda.get_device_properties(torch.cuda.current_device()).major >= 9:
         # 32 MiB for NVFP4 GEMM, plus additional 1024 B for alignment and misc scales
         return 32 * 1024 * 1024 + 1024
     return 4_194_304

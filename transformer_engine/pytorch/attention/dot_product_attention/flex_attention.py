@@ -10,7 +10,7 @@ import inspect
 from typing import Any, Callable, Dict, Optional, Tuple
 
 import torch
-from transformer_engine import te_device_type, te_platform
+from transformer_engine import te_device_type
 
 _cudnn_score_mod_handles: Dict[torch.device, Any] = {}
 _cudnn_score_mod_graph_cache: Dict[Tuple[Any, ...], Any] = {}
@@ -144,7 +144,7 @@ def _score_mod_device_key(device: torch.device) -> Tuple[Any, ...]:
     if device.type == te_device_type():
         index = device.index
         if index is None:
-            index = te_platform().current_device()
+            index = torch.cuda.current_device()
         return (device.type, index)
     return (device.type, device.index)
 
@@ -198,10 +198,10 @@ def _get_cudnn_current_stream_handle(cudnn, device: torch.device):
     if device.type != te_device_type():
         raise ValueError(f"Flex Attention only supports CUDA tensors, got device {device}.")
     if device.index is None:
-        device = torch.device(te_device_type(), te_platform().current_device())
+        device = torch.device(te_device_type(), torch.cuda.current_device())
 
     handle = _cudnn_score_mod_handles.get(device)
-    with te_platform().device(device):
+    with torch.cuda.device(device):
         if handle is None:
             handle = cudnn.create_handle()
             _cudnn_score_mod_handles[device] = handle
@@ -289,7 +289,7 @@ def _execute_cudnn_graph(
     cudnn = _import_cudnn_frontend()
 
     if device.type == te_device_type() and device.index is None:
-        device = torch.device(te_device_type(), te_platform().current_device())
+        device = torch.device(te_device_type(), torch.cuda.current_device())
     workspace = torch.empty(
         workspace_size,
         device=device,

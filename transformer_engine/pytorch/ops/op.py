@@ -15,7 +15,6 @@ import torch
 
 from transformer_engine.common.recipe import Recipe
 from .._extra_state import is_stateless_recipe, should_load_extra_state_pickle
-from transformer_engine import te_platform
 from ..quantization import (
     FP8GlobalStateManager,
     QuantizerRole,
@@ -704,7 +703,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             return torch.empty(0, dtype=torch.uint8)
 
         # Serialize state into byte tensor
-        te_platform().synchronize()
+        torch.cuda.synchronize()
         state_serialized = bytearray(pickle.dumps(state))
         state_serialized = torch.frombuffer(state_serialized, dtype=torch.uint8)
         return state_serialized
@@ -767,7 +766,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                     )
 
         # Finish CPU-GPU memory transfers
-        te_platform().synchronize()
+        torch.cuda.synchronize()
 
     def _load_from_state_dict(self, *args, **kwargs) -> None:
         """Load state"""

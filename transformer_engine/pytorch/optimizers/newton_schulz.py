@@ -11,7 +11,7 @@ import torch
 import torch.distributed as dist
 
 import transformer_engine_torch as tex
-from transformer_engine import te_platform, te_device_type
+from transformer_engine import te_device_type
 
 
 _COEFFICIENT_SETS = {
@@ -182,7 +182,7 @@ def _get_nccl_comm_ptr(group: dist.ProcessGroup) -> int:
     # ProcessGroupNCCL creates communicators lazily. This device-specific
     # collective ensures that the communicator returned by _comm_ptr() exists
     # and is ready on every group rank before cuSolverMp borrows it.
-    dist.barrier(group=group, device_ids=[te_platform().current_device()])
+    dist.barrier(group=group, device_ids=[torch.cuda.current_device()])
     nccl_backend = group._get_backend(torch.device(te_device_type()))
     comm_ptr = nccl_backend._comm_ptr()
     if not isinstance(comm_ptr, int) or comm_ptr == 0:

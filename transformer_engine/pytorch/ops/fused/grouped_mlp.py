@@ -20,7 +20,6 @@ import transformer_engine_torch as tex
 from ...constants import DType, MXFP8_BLOCK_SCALING_SIZE, NVFP4_BLOCK_SCALING_SIZE, TE_DType
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload, start_offload
 from ...cpp_extensions import general_gemm, general_grouped_gemm_for_grouped_tensor
-from transformer_engine import te_platform
 from ...distributed_weight import (
     is_distributed_weight,
     materialize_weight_for_forward,
@@ -549,7 +548,7 @@ def _cudnn_compute_wgrad(
           b = X  = (total_tokens, in_features) column-major.
     """
     if current_stream is None:
-        current_stream = te_platform().current_stream().cuda_stream
+        current_stream = torch.cuda.current_stream().cuda_stream
 
     out_features, in_features = weight_shape
     total_tokens = grouped_dy.logical_shape[0]

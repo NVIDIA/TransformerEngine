@@ -15,7 +15,6 @@ import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import NVFP4BlockScaling, Recipe
 from ..constants import NVFP4_BLOCK_SCALING_SIZE, dist_group_type, DType
-from transformer_engine import te_platform
 from ..utils import (
     canonicalize_process_group,
     devices_match,
@@ -174,7 +173,7 @@ class NVFP4Quantizer(Quantizer):
         if self.nvfp4_4over6_err_mode not in ("MAE", "MSE"):
             raise ValueError("nvfp4_4over6_err_mode must be 'MAE' or 'MSE'.")
         self.rht_matrix_random_sign_mask_t = get_random_sign_mask_for_rht(
-            with_random_sign_mask, te_platform().current_device()
+            with_random_sign_mask, torch.cuda.current_device()
         )
         self._rebuild_derived_state()
 
@@ -194,7 +193,7 @@ class NVFP4Quantizer(Quantizer):
         cheap hit.
         """
         self.rht_matrix = get_rht_matrix(
-            self.rht_matrix_random_sign_mask_t != 0, te_platform().current_device()
+            self.rht_matrix_random_sign_mask_t != 0, torch.cuda.current_device()
         )
 
     def update_quantized(

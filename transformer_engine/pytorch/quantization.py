@@ -17,7 +17,7 @@ from typing import Callable, List, Optional, Dict, Any, Tuple, Union
 import torch
 import transformer_engine_torch as tex
 
-from transformer_engine import te_platform, te_device_type
+from transformer_engine import te_device_type
 from transformer_engine.common.recipe import (
     Recipe,
     DelayedScaling,
@@ -593,8 +593,7 @@ class FP8GlobalStateManager:
             assert not cls.quantization_state.fp8_graph_capturing
             return False
         return (
-            cls.quantization_state.fp8_graph_capturing
-            or te_platform().is_current_stream_capturing()
+            cls.quantization_state.fp8_graph_capturing or torch.cuda.is_current_stream_capturing()
         )
 
     @classmethod

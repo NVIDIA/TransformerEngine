@@ -21,7 +21,7 @@ from torch.distributed.tensor import DTensor
 import transformer_engine_torch as tex
 
 from ._common import _ParameterInitMeta, noop_cat
-from transformer_engine import te_platform, te_device_type
+from transformer_engine import te_device_type
 from .._extra_state import (
     extra_state_pickle_advisory,
     is_stateless_recipe,
@@ -893,7 +893,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
     def __init__(self, name: Optional[str] = None) -> None:
         super().__init__()
-        if not te_platform().is_available():
+        if not torch.cuda.is_available():
             raise RuntimeError("TransformerEngine needs CUDA.")
         self.name = name
         self.next_iter_when_debug_should_be_run = 0
@@ -1412,7 +1412,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         state["extra_fp8_variables"] = extra
 
         # Serialize state into byte tensor
-        te_platform().synchronize()
+        torch.cuda.synchronize()
         state_serialized = bytearray(pickle.dumps(state))
         state_serialized = torch.frombuffer(state_serialized, dtype=torch.uint8)
         return state_serialized
@@ -1478,7 +1478,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             copy_tensor(state["amax_history_fwd"], self.fp8_meta["scaling_fwd"].amax_history)
             copy_tensor(state["scale_bwd"], self.fp8_meta["scaling_bwd"].scale)
             copy_tensor(state["amax_history_bwd"], self.fp8_meta["scaling_bwd"].amax_history)
-        te_platform().synchronize()
+        torch.cuda.synchronize()
 
     def set_activation_dtype(self, inp: torch.Tensor) -> None:
         """Get activation data type for AMP."""

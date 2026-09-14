@@ -10,7 +10,6 @@ from einops import rearrange
 
 import torch
 
-from transformer_engine import te_platform
 from transformer_engine.pytorch.attention.custom_ops import (
     copy_to_kv_cache,
     QKV_FORMAT_VALUE,
@@ -210,12 +209,12 @@ class InferenceParams:
         self.cu_seqlens_q = torch.zeros(
             self.max_batch_size + 1,
             dtype=torch.int32,
-            device=te_platform().current_device(),
+            device=torch.cuda.current_device(),
         )
         self.cu_seqlens_kv = torch.zeros(
             self.max_batch_size + 1,
             dtype=torch.int32,
-            device=te_platform().current_device(),
+            device=torch.cuda.current_device(),
         )
 
         # This internal buffer holds the running length of each
@@ -226,7 +225,7 @@ class InferenceParams:
         self.pre_step_seqlens = torch.zeros(
             self.max_batch_size,
             dtype=torch.int32,
-            device=te_platform().current_device(),
+            device=torch.cuda.current_device(),
         )
 
     def reset(self):
@@ -432,14 +431,14 @@ class NonPagedKVCacheManager(KVCacheManager):
         self.batch_indices = torch.zeros(
             self.max_batch_size,
             dtype=torch.int32,
-            device=te_platform().current_device(),
+            device=torch.cuda.current_device(),
         )
         # after re-indexing, batch indices are always [0, ..., b-1]
         self.batch_indices_post_step = torch.range(
             0,
             self.max_batch_size - 1,
             dtype=torch.int32,
-            device=te_platform().current_device(),
+            device=torch.cuda.current_device(),
         )
         # whether reindexing is needed, i.e. when batch seq_ids have changed
         self.need_reindex = True
@@ -452,7 +451,7 @@ class NonPagedKVCacheManager(KVCacheManager):
             self.num_heads,
             self.head_dim_k,
             dtype=self.dtype,
-            device=te_platform().current_device(),
+            device=torch.cuda.current_device(),
         )
         v_cache = torch.zeros(
             self.max_batch_size,
@@ -460,7 +459,7 @@ class NonPagedKVCacheManager(KVCacheManager):
             self.num_heads,
             self.head_dim_v,
             dtype=self.dtype,
-            device=te_platform().current_device(),
+            device=torch.cuda.current_device(),
         )
         # Mutated in place, so CUDA graphs are only captured if the addresses are fixed.
         torch._dynamo.mark_static_address(k_cache)
@@ -652,7 +651,7 @@ class PagedKVCacheManager(KVCacheManager):
             self.num_heads,
             self.head_dim_k,
             dtype=self.dtype,
-            device=te_platform().current_device(),
+            device=torch.cuda.current_device(),
         )
         v_cache = torch.zeros(
             self.total_num_pages,
@@ -660,7 +659,7 @@ class PagedKVCacheManager(KVCacheManager):
             self.num_heads,
             self.head_dim_v,
             dtype=self.dtype,
-            device=te_platform().current_device(),
+            device=torch.cuda.current_device(),
         )
         # Mutated in place, so CUDA graphs are only captured if the addresses are fixed.
         torch._dynamo.mark_static_address(k_cache)

@@ -8,7 +8,6 @@ from typing import List, Union, Tuple
 import torch
 import transformer_engine_torch as tex
 
-from transformer_engine import te_platform
 from transformer_engine.pytorch.utils import (
     get_cudnn_version,
     nvtx_range_pop,
@@ -571,7 +570,7 @@ def flash_attn_a2a_communicate(
                     a2a_outputs[i - 1], a2a_inputs[i - 1], group=cp_group, async_op=True
                 )
             if i > 1:
-                with te_platform().stream(cp_stream):
+                with torch.cuda.stream(cp_stream):
                     a2a_reqs[i - 2].wait()
                     x = a2a_outputs[i - 2]
                     if qkv_format in ["bshd", "sbhd", "bhsd"]:
@@ -644,7 +643,7 @@ def flash_attn_a2a_communicate(
                     # [cp*t, h//cp, d] -> [cp, t, h//cp, d]
                     a2a_inputs[i] = x.view(cp_size, -1, *x.shape[-2:])
             if i > 1:
-                with te_platform().stream(cp_stream):
+                with torch.cuda.stream(cp_stream):
                     a2a_reqs[i - 2].wait()
                     x = a2a_outputs[i - 2]
                     # [cp, 2, b, s//2, h//cp, d] -> [2, b, s//2, cp, h//cp, d]
@@ -676,7 +675,7 @@ def flash_attn_a2a_communicate(
                     # [b, cp, h//cp, 2, s//2, d] -> [b*h, s, d]
                     # [t, cp, h//cp, d] -> [t, h, d]
                     a2a_outputs[i - 2] = x.view(-1, x.shape[-3] * x.shape[-2], x.shape[-1])
-    te_platform().current_stream().wait_stream(cp_stream)
+    torch.cuda.current_stream().wait_stream(cp_stream)
     return a2a_outputs[0] if len(a2a_inputs) == 1 else a2a_outputs
 
 
@@ -715,14 +714,14 @@ def flash_attn_a2a_communicate_softmax_offset(
         # [1, h//cp, 1, 1] -> [1, h, 1, 1]
         inp = tensor.view(-1)
         output = torch.empty(cp_size * inp.shape[0], dtype=tensor.dtype, device=device)
-        with te_platform().stream(cp_stream):
+        with torch.cuda.stream(cp_stream):
             torch.distributed.all_gather_into_tensor(
                 output,
                 inp,
                 group=cp_group,
                 async_op=False,
             )
-        te_platform().current_stream().wait_stream(cp_stream)
+        torch.cuda.current_stream().wait_stream(cp_stream)
         output = output.view(
             *tensor.shape[:h_dim], cp_size * tensor.shape[h_dim], *tensor.shape[h_dim + 1 :]
         )
@@ -1923,9 +1922,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         attn_biases = [None for _ in range(cp_size)]
 
         # create two streams to resolve wave quantization issue of Flash Attn in each step
-        flash_attn_streams = [te_platform().current_stream(), cp_stream]
+        flash_attn_streams = [torch.cuda.current_stream(), cp_stream]
         # synchronize fwd results correction across steps
-        fwd_results_correction_done = te_platform().Event()
+        fwd_results_correction_done = torch.cuda.Event()
 
         # q, k, v, o:
         # causal: [b, 2, s//2, h, d] or [2, s//2, b, h, d]
@@ -1945,7 +1944,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         o_format = qkv_format
         for i in range(cp_size + 1):
             if i < cp_size:
-                with te_platform().stream(flash_attn_streams[i % 2]):
+                with torch.cuda.stream(flash_attn_streams[i % 2]):
                     # wait until KV is received
                     for req in send_recv_reqs[(i + 1) % 2]:
                         req.wait()
@@ -2165,7 +2164,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 if i > 1:
                     flash_attn_streams[(i - 1) % 2].wait_event(fwd_results_correction_done)
 
-                with te_platform().stream(flash_attn_streams[(i - 1) % 2]):
+                with torch.cuda.stream(flash_attn_streams[(i - 1) % 2]):
                     if use_fused_attention:
                         # [b, h, sq, 1] -> [b, h, sq]
                         # [t, h, 1] -> [t, h]
@@ -2216,7 +2215,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 if i < cp_size:
                     flash_attn_streams[(i - 1) % 2].record_event(fwd_results_correction_done)
 
-        te_platform().current_stream().wait_stream(flash_attn_streams[1])
+        torch.cuda.current_stream().wait_stream(flash_attn_streams[1])
         if return_max_logit:
             torch.distributed.all_reduce(
                 max_logit, op=torch.distributed.ReduceOp.MAX, group=cp_group
@@ -3505,7 +3504,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             v_ag = v_ag.view(-1, *v.shape[1:])
             # Non-THD cp_stream inputs are ready after K/V reorder, so wait here to
             # preserve overlap with output initialization below.
-            cp_stream.wait_stream(te_platform().current_stream())
+            cp_stream.wait_stream(torch.cuda.current_stream())
 
         # Shapes before per-step slicing and FP8 metadata wrapping.
         # q: [b, 2, s//2, h, d] or [2, s//2, b, h, d]
@@ -3519,7 +3518,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         out_f16 = torch.empty(o_shape, dtype=fwd_nominal_dtype, device=q.device)
 
         # create two streams to resolve wave quantization issue of Flash Attn in each step
-        flash_attn_streams = [te_platform().current_stream(), cp_stream]
+        flash_attn_streams = [torch.cuda.current_stream(), cp_stream]
         # prepare per-step tensors
         local_seq_chunk_ids = (
             [rank]
@@ -3635,7 +3634,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         if qkv_format == "thd":
             # Delay the THD wait so one dependency covers both restored K/V and the
             # per-step metadata produced above on the current stream.
-            cp_stream.wait_stream(te_platform().current_stream())
+            cp_stream.wait_stream(torch.cuda.current_stream())
 
         for i in range(len(local_seq_chunk_ids) + 1):
             if i < len(local_seq_chunk_ids):
@@ -3644,7 +3643,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                 # do not overlap. FusedAttention keeps the existing per-step overlap.
                 if i > 0 and (use_flash_attn_3 or use_flash_attn_4):
                     flash_attn_streams[i].wait_stream(flash_attn_streams[i - 1])
-                with te_platform().stream(flash_attn_streams[i]):
+                with torch.cuda.stream(flash_attn_streams[i]):
                     new_qkv_layout = qkv_layout
                     qkv_scale_inv_format = None
                     if qkv_format in ["bshd", "sbhd"]:
@@ -3849,7 +3848,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             if return_max_logit and i == 0:
                 max_logit = torch.clone(max_logit_per_step[0])
             if i > 0:
-                with te_platform().stream(flash_attn_streams[i - 1]):
+                with torch.cuda.stream(flash_attn_streams[i - 1]):
                     if o_format == "bshd":
                         out_f16[:, i - 1].copy_(out_per_step[i - 1])
                     elif o_format == "sbhd":
@@ -3870,10 +3869,10 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                     # default stream, so without this wait the read can race with
                     # the write. The post-loop wait_stream(cp_stream) is too late.
                     # No-op when flash_attn_streams[i-1] is current_stream().
-                    te_platform().current_stream().wait_stream(flash_attn_streams[i - 1])
+                    torch.cuda.current_stream().wait_stream(flash_attn_streams[i - 1])
                     max_logit = torch.maximum(max_logit, max_logit_per_step[i - 1])
 
-        te_platform().current_stream().wait_stream(cp_stream)
+        torch.cuda.current_stream().wait_stream(cp_stream)
 
         # all reduce max_logit across ranks
         if return_max_logit:
@@ -4123,9 +4122,9 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         dv_per_step = [None, None]
 
         # create two streams to resolve wave quantization issue of Flash Attn in each step
-        flash_attn_streams = [te_platform().current_stream(), ctx.cp_stream]
+        flash_attn_streams = [torch.cuda.current_stream(), ctx.cp_stream]
         # synchronize dkv update across steps
-        dkv_update_done = te_platform().Event()
+        dkv_update_done = torch.cuda.Event()
 
         # gather k and v along s or t: [s, b, h, d] -> [cp, s, b, h, d] or [t, h, d] -> [cp*t, h, d]
         k_ag, _ = gather_along_first_dim(k, ctx.cp_group)
@@ -4154,7 +4153,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             # flatten: [cp*2, s//2, b, h, d] -> [cp*s, b, h, d]
             k_ag = k_ag.view(-1, *k.shape[1:])
             v_ag = v_ag.view(-1, *v.shape[1:])
-        ctx.cp_stream.wait_stream(te_platform().current_stream())
+        ctx.cp_stream.wait_stream(torch.cuda.current_stream())
 
         # set up flash_attn_bwd
         flash_attn_bwd = None
@@ -4215,7 +4214,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                 # per-step overlap.
                 if i > 0 and (ctx.use_flash_attn_3 or ctx.use_flash_attn_4):
                     flash_attn_streams[i].wait_stream(flash_attn_streams[i - 1])
-                with te_platform().stream(flash_attn_streams[i]):
+                with torch.cuda.stream(flash_attn_streams[i]):
                     if ctx.qkv_format == "thd":
                         # THD passes full Q/dout; per-step cu_seqlens select chunks.
                         q_part = q
@@ -4463,7 +4462,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
 
             if i > 0:
                 # dq/dk/dv, dq_per_step/dk_per_step/dv_per_step: ctx.fwd_nominal_dtype
-                with te_platform().stream(flash_attn_streams[i - 1]):
+                with torch.cuda.stream(flash_attn_streams[i - 1]):
                     if ctx.qkv_format == "thd":
                         # dQ: copy every sequence's valid token range from this split's dQ.
                         tex.thd_copy_valid_tokens_from_per_split_to_rank_local(
@@ -4508,7 +4507,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                         if i < len(local_seq_chunk_ids):
                             flash_attn_streams[i - 1].record_event(dkv_update_done)
 
-        te_platform().current_stream().wait_stream(ctx.cp_stream)
+        torch.cuda.current_stream().wait_stream(ctx.cp_stream)
 
         if ctx.qkv_format == "thd":
             # Reorder dK/dV from sequence order back to dual-chunk CP rank order,

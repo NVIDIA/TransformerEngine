@@ -19,7 +19,7 @@ import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch.torch_version import torch_version
 from transformer_engine.pytorch.tensor.utils import clear_columnwise_cache, is_custom
-from transformer_engine import te_platform, te_device_type
+from transformer_engine import te_device_type
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
     _ub_communicators,
@@ -1333,7 +1333,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     # We use the send stream to copy into the userbuffers.
                     # This is the same stream that we will use to access the data in the AG,
                     # so we dont need to add any syncs yet.
-                    with te_platform().stream(dgrad_send_stream):
+                    with torch.cuda.stream(dgrad_send_stream):
                         grad_output, _ = fill_userbuffers_buffer_for_all_gather(
                             ub_obj_fc2_wgrad,
                             grad_outputs[0],
@@ -1767,14 +1767,14 @@ class _LayerNormMLP(torch.autograd.Function):
                     fc1_wgrad = torch.zeros(
                         fc1_weight_main_grad.shape,
                         dtype=fc1_weight_python_object.dtype,
-                        device=te_platform().current_device(),
+                        device=torch.cuda.current_device(),
                         requires_grad=False,
                     )
                 else:
                     fc1_wgrad = torch.empty(
                         fc1_weight_main_grad.shape,
                         dtype=fc1_weight_python_object.dtype,
-                        device=te_platform().current_device(),
+                        device=torch.cuda.current_device(),
                         requires_grad=False,
                     )
             elif ctx.fuse_wgrad_accumulation:
@@ -1792,14 +1792,14 @@ class _LayerNormMLP(torch.autograd.Function):
                     fc2_wgrad = torch.zeros(
                         fc2_weight_main_grad.shape,
                         dtype=fc2_weight_python_object.dtype,
-                        device=te_platform().current_device(),
+                        device=torch.cuda.current_device(),
                         requires_grad=False,
                     )
                 else:
                     fc2_wgrad = torch.empty(
                         fc2_weight_main_grad.shape,
                         dtype=fc2_weight_python_object.dtype,
-                        device=te_platform().current_device(),
+                        device=torch.cuda.current_device(),
                         requires_grad=False,
                     )
             elif ctx.fuse_wgrad_accumulation:

@@ -13,7 +13,6 @@ import torch
 from .torch_version import torch_version
 from .export import is_in_onnx_export_mode
 from .utils import gpu_autocast_ctx
-from transformer_engine import te_platform
 
 # pylint: disable=unnecessary-lambda-assignment
 
@@ -336,7 +335,7 @@ def warmup_jit_bias_dropout_add(
     """Compile BDA JIT function before the main training steps"""
 
     # Save cuda RNG state to ensure warmup does not affect reproducibility.
-    rng_state = te_platform().get_rng_state()
+    rng_state = torch.cuda.get_rng_state()
 
     inp = torch.rand(
         (seq_length, micro_batch_size, hidden_size),
@@ -360,8 +359,8 @@ def warmup_jit_bias_dropout_add(
             output = bias_dropout_add_fused_train(inp, bias, residual, dropout_rate)
     del bias, inp, residual, output
 
-    te_platform().empty_cache()
-    te_platform().set_rng_state(rng_state)
+    torch.cuda.empty_cache()
+    torch.cuda.set_rng_state(rng_state)
 
 
 def warmup_jit_bias_dropout_add_all_dtypes(
@@ -381,7 +380,7 @@ def warmup_jit_bias_gelu(
     """Compile bias-gelu JIT function before the main training steps"""
 
     # Save cuda RNG state to ensure warmup does not affect reproducibility.
-    rng_state = te_platform().get_rng_state()
+    rng_state = torch.cuda.get_rng_state()
 
     bias = torch.rand(ffn_hidden_size_per_partition, dtype=dtype, device=te_device_type())
     inp = torch.rand(
@@ -398,8 +397,8 @@ def warmup_jit_bias_gelu(
             _ = gelu_fused_(inp)
     del bias, inp
 
-    te_platform().empty_cache()
-    te_platform().set_rng_state(rng_state)
+    torch.cuda.empty_cache()
+    torch.cuda.set_rng_state(rng_state)
 
 
 def warmup_jit_bias_gelu_all_dtypes(
@@ -416,7 +415,7 @@ def warmup_jit_l2normalization(
     """Compile L2Normalization JIT function before the main training steps"""
 
     # Save cuda RNG state to ensure warmup does not affect reproducibility.
-    rng_state = te_platform().get_rng_state()
+    rng_state = torch.cuda.get_rng_state()
 
     inp = torch.rand(
         (seq_length * micro_batch_size, hidden_size),
@@ -440,8 +439,8 @@ def warmup_jit_l2normalization(
                 output = l2normalization_fused_(inp, eps)
     del inp, output
 
-    te_platform().empty_cache()
-    te_platform().set_rng_state(rng_state)
+    torch.cuda.empty_cache()
+    torch.cuda.set_rng_state(rng_state)
 
 
 def warmup_jit_l2normalization_all_dtypes(

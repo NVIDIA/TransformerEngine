@@ -12,7 +12,6 @@ import torch
 
 from ...torch_version import torch_version
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
-from transformer_engine import te_platform
 from ...jit import (
     l2normalization_fused,
     l2normalization_fwd_fused,
@@ -65,7 +64,7 @@ class L2Normalization(BasicOperation):
         # JIT warmup for L2Normalization fused operations
         if seq_length and micro_batch_size:
             if (
-                te_platform().is_available()
+                torch.cuda.is_available()
                 and torch_version() >= (2, 0, 0)
                 and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1")))
             ):

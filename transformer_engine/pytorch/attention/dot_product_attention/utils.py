@@ -22,7 +22,6 @@ import torch.distributed as dist
 import torch.nn.functional as F
 import transformer_engine_torch as tex
 import transformer_engine as te
-from transformer_engine import te_platform
 from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     QKVLayout,
     QKVFormat,
@@ -1829,7 +1828,7 @@ def get_attention_backend(
             use_flash_attention_4
             and not FlashAttentionUtils.v4_is_installed
             and not FlashAttentionUtils.v4_warning_printed
-            and te_platform().current_device() == 0
+            and torch.cuda.current_device() == 0
         ):
             logger.warning(
                 "flash-attn v4 may provide important feature support or performance improvement."
@@ -1841,7 +1840,7 @@ def get_attention_backend(
             use_flash_attention_3
             and not FlashAttentionUtils.v3_is_installed
             and not FlashAttentionUtils.v3_warning_printed
-            and te_platform().current_device() == 0
+            and torch.cuda.current_device() == 0
         ):
             logger.warning(
                 "flash-attn v3 may provide important feature support or performance improvement."
@@ -1853,7 +1852,7 @@ def get_attention_backend(
             use_flash_attention_2
             and not FlashAttentionUtils.is_installed
             and not FlashAttentionUtils.warning_printed
-            and te_platform().current_device() == 0
+            and torch.cuda.current_device() == 0
         ):
             logger.warning(
                 "flash-attn may provide important feature support or performance improvement."

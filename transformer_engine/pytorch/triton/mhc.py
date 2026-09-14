@@ -9,7 +9,6 @@ from typing import Optional
 import torch
 import triton
 
-from transformer_engine import te_platform
 from transformer_engine.common.triton.mhc import (
     _mhc_projection_bwd_fused_dphi,
     _mhc_projection_bwd_fused_dx,
@@ -32,7 +31,7 @@ ENFORCE_DETERMINISTIC = os.environ.get("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1") 
 
 def _support_tma(x: torch.Tensor):
     # get_device_capability returns a (major, minor) tuple; TMA needs Hopper+ (major >= 9)
-    return te_platform().get_device_capability(x.device)[0] >= 9
+    return torch.cuda.get_device_capability(x.device)[0] >= 9
 
 
 def _tma_aligned(t):

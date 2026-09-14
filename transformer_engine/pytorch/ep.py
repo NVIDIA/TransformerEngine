@@ -18,7 +18,7 @@ import transformer_engine_torch as tex
 from .cpu_offload import mark_not_offload
 from .distributed import symm_mem_alloc, release_symm_mem_pool
 from .quantized_tensor import QuantizedTensor
-from transformer_engine import te_platform, te_device_type
+from transformer_engine import te_device_type
 
 # Type-hint-only import; keeps the ``Recipe`` annotation without a runtime import of
 # common.recipe (the concrete recipe classes are imported lazily where used).
@@ -159,7 +159,7 @@ def ep_bootstrap(
         )
 
     # Materialize the PG's NCCL comm before borrowing its raw handle.
-    dist.barrier(group=ep_group, device_ids=[te_platform().current_device()])
+    dist.barrier(group=ep_group, device_ids=[torch.cuda.current_device()])
     comm_ptr = ep_group._get_backend(torch.device(te_device_type()))._comm_ptr()
 
     tex.ep_initialize(
@@ -275,7 +275,7 @@ class EpBuffer:
         if not _BOOTSTRAPPED:
             raise RuntimeError("EpBuffer requires ep_bootstrap() to be called first.")
         if device is None:
-            device = torch.device(te_device_type(), te_platform().current_device())
+            device = torch.device(te_device_type(), torch.cuda.current_device())
         alignment = int(alignment)
         if alignment > 1 and (alignment & (alignment - 1)) != 0:
             raise ValueError(f"alignment must be 0, 1, or a power of two (got {alignment}).")
@@ -898,7 +898,7 @@ def _alloc_io(shape, dtype: torch.dtype, device, zero_copy: bool) -> torch.Tenso
     The zero-copy pool path is not CUDA-graph capturable; supply persistent recv_tokens / grad_out
     buffers to capture a graph."""
     if zero_copy:
-        if te_platform().is_current_stream_capturing():
+        if torch.cuda.is_current_stream_capturing():
             raise RuntimeError(
                 "EP zero-copy pool allocation is not CUDA-graph capturable; supply persistent "
                 "recv_tokens / grad_out buffers (allocated once via symm_mem_alloc) before capture."

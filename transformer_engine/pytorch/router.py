@@ -19,7 +19,6 @@ from typing import Optional, Union
 
 import torch
 import transformer_engine_torch as tex
-from transformer_engine import te_platform
 
 # Re-export the C++ enum NVTERoutingMapFormat under a friendlier Python name.
 # Members:
@@ -58,8 +57,8 @@ def _validate_qb_bin_bounds(bin_bounds: torch.Tensor) -> bool:
     version = bin_bounds._version
     if getattr(bin_bounds, _QB_BOUNDS_VALIDATED_VERSION_ATTR, None) == version:
         return True
-    with te_platform().device(bin_bounds.device):
-        if te_platform().is_current_stream_capturing():
+    with torch.cuda.device(bin_bounds.device):
+        if torch.cuda.is_current_stream_capturing():
             raise RuntimeError(
                 "QB bin_bounds must be validated by an eager router call before CUDA graph capture"
             )

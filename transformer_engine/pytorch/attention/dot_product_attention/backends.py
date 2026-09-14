@@ -17,7 +17,6 @@ from packaging.version import Version as PkgVersion
 import torch
 import torch.nn.functional as F
 
-from transformer_engine import te_platform
 from transformer_engine.pytorch.utils import (
     get_device_compute_capability,
     split_tensor_along_dim,
@@ -108,7 +107,7 @@ try:
 except PackageNotFoundError:
     pass  # only print warning if use_flash_attention_2 = True in get_attention_backend
 else:
-    if te_platform().is_available() and get_device_compute_capability() >= (10, 0):
+    if torch.cuda.is_available() and get_device_compute_capability() >= (10, 0):
         if fa_utils.is_version_supported(fa_utils.version, fa_utils.version_required_blackwell):
             fa_utils.is_installed = True
     elif fa_utils.is_version_supported(fa_utils.version, fa_utils.version_required):
@@ -129,7 +128,7 @@ else:
         # Setup Flash attention utils
         fa_utils.set_flash_attention_version()
     elif (
-        te_platform().is_available()
+        torch.cuda.is_available()
         and get_device_compute_capability() >= (8, 0)
         and dpa_utils._NVTE_FLASH_ATTN
     ):
@@ -579,7 +578,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
             output_size[2],
             output_size[3],
             dtype=query_layer.dtype,
-            device=te_platform().current_device(),
+            device=torch.cuda.current_device(),
         )
 
         scale = self.softmax_scale

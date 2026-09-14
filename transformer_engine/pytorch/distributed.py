@@ -20,7 +20,7 @@ from torch.utils.checkpoint import detach_variable, noop_context_fn
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp._common_utils import _get_module_fsdp_state
 from torch.distributed.fsdp._traversal_utils import _get_fsdp_states_with_modules
-from transformer_engine import te_platform, te_device_type
+from transformer_engine import te_device_type
 
 try:
     import torch.distributed._symmetric_memory as symm_mem
@@ -110,7 +110,7 @@ def _get_cuda_rng_state(
         device = torch.device(te_device_type(), device)
     idx = device.index
     if idx is None:
-        idx = te_platform().current_device()
+        idx = torch.cuda.current_device()
     default_generator = torch.cuda.default_generators[idx]
     if graph_safe_rng_available() and graph_safe:
         if clone:
@@ -138,7 +138,7 @@ def _set_cuda_rng_state(
     def cb() -> None:
         idx = device.index
         if idx is None:
-            idx = te_platform().current_device()
+            idx = torch.cuda.current_device()
         default_generator = torch.cuda.default_generators[idx]
         if graph_safe_rng_available() and graph_safe:
             default_generator.graphsafe_set_state(new_state)
@@ -217,7 +217,7 @@ def split_tensor_into_1d_equal_chunks(
         data = torch.empty(
             partition_size,
             dtype=tensor.dtype,
-            device=te_platform().current_device(),
+            device=torch.cuda.current_device(),
             requires_grad=False,
         )
         data.copy_(tensor.view(-1)[start_index:end_index])
@@ -232,7 +232,7 @@ def gather_split_1d_tensor(tensor: torch.Tensor, tp_group: dist_group_type) -> t
     gathered = torch.empty(
         numel_gathered,
         dtype=tensor.dtype,
-        device=te_platform().current_device(),
+        device=torch.cuda.current_device(),
         requires_grad=False,
     )
     torch.distributed.all_gather_into_tensor(gathered, tensor, group=tp_group)
@@ -964,7 +964,7 @@ def reduce_scatter_along_first_dim(
     dim_size[0] = dim_size[0] // world_size
 
     if output is None:
-        output = torch.empty(dim_size, dtype=inp.dtype, device=te_platform().current_device())
+        output = torch.empty(dim_size, dtype=inp.dtype, device=torch.cuda.current_device())
     handle = torch.distributed.reduce_scatter_tensor(
         output, inp.contiguous(), group=tp_group, async_op=async_op
     )
@@ -1965,7 +1965,7 @@ def release_symm_mem_pool() -> None:
                 "release_symm_mem_pool()."
             )
         pools.pop(device, None)
-    te_platform().empty_cache()
+    torch.cuda.empty_cache()
 
 
 def symm_mem_alloc(
@@ -1986,7 +1986,7 @@ def symm_mem_alloc(
     be a shared static buffer. ``backend`` selects the symm-mem backend (default NCCL; for the pool it
     is captured at pool creation)."""
     if device is None:
-        device = torch.device(te_device_type(), te_platform().current_device())
+        device = torch.device(te_device_type(), torch.cuda.current_device())
     if not HAS_TORCH_SYMMETRIC:
         raise RuntimeError(
             "torch.distributed._symmetric_memory is unavailable; symm_mem_alloc "

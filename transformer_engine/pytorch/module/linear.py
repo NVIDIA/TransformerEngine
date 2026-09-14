@@ -18,7 +18,7 @@ import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch.torch_version import torch_version
 
-from transformer_engine import te_platform, te_device_type
+from transformer_engine import te_device_type
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
     get_dummy_wgrad,
@@ -1540,7 +1540,7 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
                 # We use the send stream to copy into the userbuffers.
                 # This is the same stream that we will use to access the data in the AG,
                 # so we dont need to add any syncs yet.
-                with te_platform().stream(dgrad_send_stream):
+                with torch.cuda.stream(dgrad_send_stream):
                     grad_output, _ = fill_userbuffers_buffer_for_all_gather(
                         ub_obj_overlap_wgrad,
                         grad_output_arg,
