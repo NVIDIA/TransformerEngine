@@ -45,6 +45,9 @@ using transformer_engine::dispatch::mxfp8::swizzle::gemm_swizzled_scale_idx;
 // Elements in one MX block, all sharing a single E8M0 scale.
 constexpr int32_t kBlockElems = 32;
 
+// Bytes in one GEMM-swizzled scale tile (128 rows x 4 scale columns).
+constexpr int32_t kSwzTileSize = 512;
+
 // Two lanes cooperate on each MX block.  A lane's half of a block is 16 BF16
 // values = 32 bytes = one 256-bit load, the widest the ISA offers; splitting
 // the block any further would waste load width, and any less would exceed it.
@@ -204,6 +207,12 @@ __device__ __forceinline__ void scale_and_convert(const uint32_t (&in)[kInWordsP
  *                                  read when PARTIAL_L2_CACHING is true.
  * \param[in]  num_blocks           Total MX blocks in the tensor.  Only read
  *                                  when CHECK_BOUNDS is true.
+ * \param[in]  col_spans            Column spans per 128-row band, i.e. the
+ *                                  factor of the grid the CTA index is
+ *                                  decomposed by.  Computed by the launcher,
+ *                                  which also sizes the grid with it, so the
+ *                                  two cannot disagree.  Only read when
+ *                                  SWIZZLED_SCALES is true.
  */
 template <typename OType, int32_t THREADS_PER_CTA, int32_t BLOCKS_PER_LANE, bool PARTIAL_L2_CACHING,
           bool CHECK_BOUNDS, bool SWIZZLED_SCALES>
@@ -211,7 +220,7 @@ __global__ void __launch_bounds__(THREADS_PER_CTA)
     quantize_contiguous_kernel(const uint32_t *__restrict__ input, uint32_t *__restrict__ output,
                                e8m0_t *__restrict__ scales, uint32_t first_streaming_cta,
                                int64_t num_blocks, int32_t blocks_per_row, int32_t num_tiles_X,
-                               uint32_t magic_mul, uint32_t magic_shift, uint32_t magic_add) {
+                               int32_t col_spans, int32_t rows) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   constexpr int32_t kWarpsPerCta = THREADS_PER_CTA / THREADS_PER_WARP;
   constexpr int32_t kBlocksPerWarpPass = kBlocksPerWarp * BLOCKS_PER_LANE;
@@ -221,13 +230,53 @@ __global__ void __launch_bounds__(THREADS_PER_CTA)
       static_cast<int64_t>(blockIdx.x) * kWarpsPerCta + threadIdx.x / THREADS_PER_WARP;
   const int64_t first_block = warp_id * kBlocksPerWarpPass;
 
-  // Output is marked evict_last so its lines linger long enough to coalesce on
-  // write-back.
-  const uint64_t output_policy = ptx::create_l2_policy_evict_last();
-
   // Lanes pair up as (even, odd); the even lane of each pair owns the scale.
   const int32_t block_in_warp = lane / kLanesPerBlock;
   const bool owns_scale = (lane % kLanesPerBlock) == 0;
+
+  // Swizzled scales need rows 32 apart to form a contiguous run, but putting that
+  // spread inside a warp costs more than it saves: the warp then reads four
+  // regions far apart and loses DRAM locality, moving the same bytes at a much
+  // lower rate.  So the spread lives at CTA level.  Each warp keeps one
+  // contiguous run of a single row, exactly as the packed shape does, and the
+  // four sub-rows are covered by four different warps whose scale bytes meet in
+  // shared memory.  The payload never does, which is what still separates this
+  // kernel from the staged one.
+  constexpr int32_t kSubRows = 4;                      // rows 32 apart, = 128/32
+  constexpr int32_t kQuads = kWarpsPerCta / kSubRows;  // row offsets per CTA
+  const int32_t warp_in_cta = threadIdx.x / THREADS_PER_WARP;
+  const int32_t sub_row = warp_in_cta % kSubRows;  // s
+  const int32_t quad = warp_in_cta / kSubRows;     // q
+  const int32_t half_in_block = lane % kLanesPerBlock;
+
+  int64_t swz_band = 0;
+  int32_t swz_a = 0, swz_j0 = 0;
+  if constexpr (SWIZZLED_SCALES) {
+    // Column groups vary fastest, so concurrent CTAs walk adjacent columns of the
+    // same rows.  col_spans comes from the launcher rather than being recomputed:
+    // it must match the factor the grid was sized with exactly, or the CTA index
+    // decomposes into a different (band, row slot, column span) than the grid was
+    // built for.
+    const int64_t r_slots = 32 / kQuads;
+    const int64_t b = blockIdx.x;
+    swz_j0 = static_cast<int32_t>(b % col_spans) * (kBlocksPerWarp * BLOCKS_PER_LANE);
+    const int64_t t = b / col_spans;
+    swz_a = static_cast<int32_t>(t % r_slots) * kQuads;
+    swz_band = t / r_slots;
+  }
+  const int32_t swz_row_v = static_cast<int32_t>(swz_band) * 128 + 32 * sub_row + swz_a + quad;
+  auto swz_row = [&](int32_t) -> int32_t { return swz_row_v; };
+  auto swz_block = [&](int32_t u) -> int32_t {
+    return swz_j0 + kBlocksPerWarp * u + block_in_warp;
+  };
+
+  // One 16-byte run per (pass, quad, tile-in-span); 4 words each.  256 bytes at
+  // the widest configuration, flushed after a single barrier.
+  __shared__ uint32_t swz_scratch[SWIZZLED_SCALES ? BLOCKS_PER_LANE * kQuads * 4 * kSubRows : 1];
+
+  // Output is marked evict_last so its lines linger long enough to coalesce on
+  // write-back.
+  const uint64_t output_policy = ptx::create_l2_policy_evict_last();
 
   // Should be inlined by NVCC so there is never an actual function call
   auto is_live = [&](int64_t group_base) -> bool {
@@ -238,6 +287,44 @@ __global__ void __launch_bounds__(THREADS_PER_CTA)
     }
   };
 
+  // The swizzled shape is indexed by row, so its bound is the row count; the
+  // grid is rounded up to whole 128-row bands because the GEMM scale array is
+  // padded to that anyway.
+  auto swz_live = [&](int32_t u) -> bool {
+    if constexpr (CHECK_BOUNDS) {
+      // Both axes can be ragged: rows are padded to whole 128-row bands, and the
+      // column span (16 * blocks_per_lane) need not divide blocks_per_row.
+      return swz_row(u) < rows && swz_block(u) < blocks_per_row;
+    } else {
+      return true;
+    }
+  };
+  auto in_offset = [&](int32_t u, int64_t group_base) -> int64_t {
+    if constexpr (SWIZZLED_SCALES) {
+      return static_cast<int64_t>(swz_row(u)) * blocks_per_row * kInWordsPerBlock +
+             static_cast<int64_t>(swz_block(u)) * kInWordsPerBlock +
+             half_in_block * kInWordsPerLane;
+    } else {
+      return group_base * kInWordsPerBlock + lane * kInWordsPerLane;
+    }
+  };
+  auto out_offset = [&](int32_t u, int64_t group_base) -> int64_t {
+    if constexpr (SWIZZLED_SCALES) {
+      return static_cast<int64_t>(swz_row(u)) * blocks_per_row * kOutWordsPerBlock +
+             static_cast<int64_t>(swz_block(u)) * kOutWordsPerBlock +
+             half_in_block * kOutWordsPerLane;
+    } else {
+      return group_base * kOutWordsPerBlock + lane * kOutWordsPerLane;
+    }
+  };
+  auto live = [&](int32_t u, int64_t group_base) -> bool {
+    if constexpr (SWIZZLED_SCALES) {
+      return swz_live(u);
+    } else {
+      return is_live(group_base);
+    }
+  };
+
   uint32_t in_words[BLOCKS_PER_LANE][kInWordsPerLane];
   if constexpr (PARTIAL_L2_CACHING) {
     const uint64_t input_policy =
@@ -245,24 +332,21 @@ __global__ void __launch_bounds__(THREADS_PER_CTA)
 #pragma unroll
     for (int32_t u = 0; u < BLOCKS_PER_LANE; ++u) {
       const int64_t group_base = first_block + static_cast<int64_t>(u) * kBlocksPerWarp;
-      if (!is_live(group_base)) {
+      if (!live(u, group_base)) {
         zero_words(in_words[u]);
         continue;
       }
-      ptx::ld_global_nc_b32x8(in_words[u],
-                              input + group_base * kInWordsPerBlock + lane * kInWordsPerLane,
-                              input_policy);
+      ptx::ld_global_nc_b32x8(in_words[u], input + in_offset(u, group_base), input_policy);
     }
   } else {
 #pragma unroll
     for (int32_t u = 0; u < BLOCKS_PER_LANE; ++u) {
       const int64_t group_base = first_block + static_cast<int64_t>(u) * kBlocksPerWarp;
-      if (!is_live(group_base)) {
+      if (!live(u, group_base)) {
         zero_words(in_words[u]);
         continue;
       }
-      ptx::ld_global_nc_evict_first_b32x8(
-          in_words[u], input + group_base * kInWordsPerBlock + lane * kInWordsPerLane);
+      ptx::ld_global_nc_evict_first_b32x8(in_words[u], input + in_offset(u, group_base));
     }
   }
 
@@ -281,67 +365,67 @@ __global__ void __launch_bounds__(THREADS_PER_CTA)
 
     const e8m0_t biased_exponent =
         ptx::float_to_e8m0(pair_amax_to_float(block_amax) * Quantized_Limits<OType>::max_norm_rcp);
-    const bool live = is_live(group_base);
+    const bool blk_live = live(u, group_base);
     if constexpr (SWIZZLED_SCALES) {
-      // The GEMM scale layout is a pure function of (row, block-in-row), so the
-      // scale still goes straight to global; only the address changes.  Two things
-      // make that cheap.  Recovering the row from a flat block index needs a
-      // division, and a 64-bit one costs more than everything else this kernel does
-      // -- it more than doubled the instruction count -- so the host passes a magic
-      // reciprocal.  And four blocks whose indices are congruent mod 4 land
-      // contiguously in that layout (j % 4 is the low term), so rather than four
-      // scattered bytes one lane packs and stores them as a single word.
-      // blocks_per_row is a multiple of 4 and group_base is a multiple of 16, so a
-      // 4-aligned group can never straddle a row.
+      // Collapse the four scale columns adjacent in the GEMM layout into one word:
+      // lanes 8t,8t+2,8t+4,8t+6 hold j%4 = 0..3, so three shuffles suffice.  The
+      // other axis of the run lives in sibling warps, so the word goes to scratch
+      // and the flush below turns four of them into one 16-byte store.
       const uint32_t my_byte = static_cast<uint32_t>(biased_exponent);
-      const uint32_t b1 = __shfl_down_sync(0xFFFFFFFFu, my_byte, kLanesPerBlock);
-      const uint32_t b2 = __shfl_down_sync(0xFFFFFFFFu, my_byte, 2 * kLanesPerBlock);
-      const uint32_t b3 = __shfl_down_sync(0xFFFFFFFFu, my_byte, 3 * kLanesPerBlock);
-
-      bool group_live = true;
-      if constexpr (CHECK_BOUNDS) {
-        const uint32_t l1 =
-            __shfl_down_sync(0xFFFFFFFFu, static_cast<uint32_t>(live), kLanesPerBlock);
-        const uint32_t l2 =
-            __shfl_down_sync(0xFFFFFFFFu, static_cast<uint32_t>(live), 2 * kLanesPerBlock);
-        const uint32_t l3 =
-            __shfl_down_sync(0xFFFFFFFFu, static_cast<uint32_t>(live), 3 * kLanesPerBlock);
-        const uint32_t leader_lane = (lane / (4 * kLanesPerBlock)) * (4 * kLanesPerBlock);
-        group_live = __shfl_sync(0xFFFFFFFFu, static_cast<uint32_t>(live && l1 && l2 && l3),
-                                 leader_lane) != 0;
+      const uint32_t c1 = __shfl_down_sync(0xFFFFFFFFu, my_byte, kLanesPerBlock);
+      const uint32_t c2 = __shfl_down_sync(0xFFFFFFFFu, my_byte, 2 * kLanesPerBlock);
+      const uint32_t c3 = __shfl_down_sync(0xFFFFFFFFu, my_byte, 3 * kLanesPerBlock);
+      if ((lane % (4 * kLanesPerBlock)) == 0) {
+        const int32_t t = block_in_warp / 4;
+        swz_scratch[((u * kQuads + quad) * 4 + t) * kSubRows + sub_row] =
+            my_byte | (c1 << 8) | (c2 << 16) | (c3 << 24);
       }
-
-      const uint32_t flat32 = static_cast<uint32_t>(group_base + block_in_warp);
-      uint32_t row;
-      if (magic_mul == 0) {
-        row = flat32 >> magic_shift;  // blocks_per_row is a power of two
-      } else {
-        uint32_t q = __umulhi(flat32, magic_mul);
-        if (magic_add) {
-          q = ((flat32 - q) >> 1) + q;
-        }
-        row = q >> magic_shift;
-      }
-      const uint32_t col = flat32 - row * static_cast<uint32_t>(blocks_per_row);
-
-      if (group_live) {
-        if ((lane % (4 * kLanesPerBlock)) == 0) {
-          const uint32_t packed = my_byte | (b1 << 8) | (b2 << 16) | (b3 << 24);
-          *reinterpret_cast<uint32_t *>(&scales[gemm_swizzled_scale_idx(row, col, num_tiles_X)]) =
-              packed;
-        }
-      } else if (owns_scale && live) {
-        scales[gemm_swizzled_scale_idx(row, col, num_tiles_X)] = biased_exponent;
-      }
-    } else if (owns_scale && live) {
+    } else if (owns_scale && blk_live) {
       scales[group_base + block_in_warp] = biased_exponent;
     }
 
     uint32_t out_words[kOutWordsPerLane];
     scale_and_convert<OType>(in_words[u], ptx::exp2f_rcp_2x(biased_exponent), out_words);
-    if (live) {
-      ptx::st_global_b32x4(output + group_base * kOutWordsPerBlock + lane * kOutWordsPerLane,
-                           out_words, output_policy);
+    if (blk_live) {
+      ptx::st_global_b32x4(output + out_offset(u, group_base), out_words, output_policy);
+    }
+  }
+
+  if constexpr (SWIZZLED_SCALES) {
+    // One barrier for the whole kernel: every pass has already deposited its words.
+    __syncthreads();
+    constexpr int32_t kRuns = BLOCKS_PER_LANE * kQuads * 4;
+    for (int32_t r = threadIdx.x; r < kRuns; r += THREADS_PER_CTA) {
+      const int32_t t = r % 4;
+      const int32_t q = (r / 4) % kQuads;
+      const int32_t u = r / (4 * kQuads);
+      const int32_t row0 = static_cast<int32_t>(swz_band) * 128 + swz_a + q;
+      const size_t base =
+          (static_cast<size_t>(swz_band) * num_tiles_X + swz_j0 / 4 + 4 * u + t) * kSwzTileSize +
+          static_cast<size_t>(swz_a + q) * 16;
+      const uint32_t *src = &swz_scratch[((u * kQuads + q) * 4 + t) * kSubRows];
+      bool all_rows = true;
+      if constexpr (CHECK_BOUNDS) {
+        if (swz_j0 + kBlocksPerWarp * u + 4 * t >= blocks_per_row) {
+          continue;
+        }
+#pragma unroll
+        for (int32_t sr = 0; sr < kSubRows; ++sr) {
+          all_rows = all_rows && (row0 + 32 * sr < rows);
+        }
+      }
+      if (all_rows) {
+        uint32_t quad_words[4] = {src[0], src[1], src[2], src[3]};
+        ptx::st_global_b32x4(reinterpret_cast<uint32_t *>(&scales[base]), quad_words,
+                             output_policy);
+      } else {
+#pragma unroll
+        for (int32_t sr = 0; sr < kSubRows; ++sr) {
+          if (row0 + 32 * sr < rows) {
+            *reinterpret_cast<uint32_t *>(&scales[base + sr * 4]) = src[sr];
+          }
+        }
+      }
     }
   }
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
@@ -354,9 +438,9 @@ namespace {
 template <typename OType, bool CHECK_BOUNDS, bool SWIZZLED_SCALES>
 void launch_contiguous_checked(const LaunchConfig &config, int64_t grid,
                                uint32_t first_streaming_cta, int64_t num_blocks,
-                               int32_t blocks_per_row, int32_t num_tiles_X, uint32_t magic_mul,
-                               uint32_t magic_shift, uint32_t magic_add, const uint32_t *input,
-                               uint32_t *output, e8m0_t *scales, cudaStream_t stream) {
+                               int32_t blocks_per_row, int32_t num_tiles_X, int32_t col_spans,
+                               int32_t rows, const uint32_t *input, uint32_t *output,
+                               e8m0_t *scales, cudaStream_t stream) {
   const dim3 blocks(static_cast<unsigned>(grid));
   const dim3 threads(static_cast<unsigned>(config.threads_per_cta));
 
@@ -365,23 +449,19 @@ void launch_contiguous_checked(const LaunchConfig &config, int64_t grid,
   if (config.threads_per_cta == 256 && config.blocks_per_lane == 1 && !partial) {
     quantize_contiguous_kernel<OType, 256, 1, false, CHECK_BOUNDS, SWIZZLED_SCALES>
         <<<blocks, threads, 0, stream>>>(input, output, scales, first_streaming_cta, num_blocks,
-                                         blocks_per_row, num_tiles_X, magic_mul, magic_shift,
-                                         magic_add);
+                                         blocks_per_row, num_tiles_X, col_spans, rows);
   } else if (config.threads_per_cta == 256 && config.blocks_per_lane == 2 && !partial) {
     quantize_contiguous_kernel<OType, 256, 2, false, CHECK_BOUNDS, SWIZZLED_SCALES>
         <<<blocks, threads, 0, stream>>>(input, output, scales, first_streaming_cta, num_blocks,
-                                         blocks_per_row, num_tiles_X, magic_mul, magic_shift,
-                                         magic_add);
+                                         blocks_per_row, num_tiles_X, col_spans, rows);
   } else if (config.threads_per_cta == 128 && config.blocks_per_lane == 2 && partial) {
     quantize_contiguous_kernel<OType, 128, 2, true, CHECK_BOUNDS, SWIZZLED_SCALES>
         <<<blocks, threads, 0, stream>>>(input, output, scales, first_streaming_cta, num_blocks,
-                                         blocks_per_row, num_tiles_X, magic_mul, magic_shift,
-                                         magic_add);
+                                         blocks_per_row, num_tiles_X, col_spans, rows);
   } else if (config.threads_per_cta == 256 && config.blocks_per_lane == 2 && partial) {
     quantize_contiguous_kernel<OType, 256, 2, true, CHECK_BOUNDS, SWIZZLED_SCALES>
         <<<blocks, threads, 0, stream>>>(input, output, scales, first_streaming_cta, num_blocks,
-                                         blocks_per_row, num_tiles_X, magic_mul, magic_shift,
-                                         magic_add);
+                                         blocks_per_row, num_tiles_X, col_spans, rows);
   } else {
     NVTE_ERROR("No quantize_contiguous_kernel instantiation for ", config.threads_per_cta,
                " threads, ", config.blocks_per_lane, " blocks per lane, partial L2 caching ",
@@ -393,17 +473,16 @@ void launch_contiguous_checked(const LaunchConfig &config, int64_t grid,
 template <typename OType, bool SWIZZLED_SCALES>
 void launch_contiguous(const LaunchConfig &config, int64_t grid, uint32_t first_streaming_cta,
                        int64_t num_blocks, int32_t blocks_per_row, int32_t num_tiles_X,
-                       uint32_t magic_mul, uint32_t magic_shift, uint32_t magic_add,
-                       bool check_bounds, const uint32_t *input, uint32_t *output, e8m0_t *scales,
-                       cudaStream_t stream) {
+                       int32_t col_spans, int32_t rows, bool check_bounds, const uint32_t *input,
+                       uint32_t *output, e8m0_t *scales, cudaStream_t stream) {
   if (check_bounds) {
     launch_contiguous_checked<OType, true, SWIZZLED_SCALES>(
-        config, grid, first_streaming_cta, num_blocks, blocks_per_row, num_tiles_X, magic_mul,
-        magic_shift, magic_add, input, output, scales, stream);
+        config, grid, first_streaming_cta, num_blocks, blocks_per_row, num_tiles_X, col_spans, rows,
+        input, output, scales, stream);
   } else {
     launch_contiguous_checked<OType, false, SWIZZLED_SCALES>(
-        config, grid, first_streaming_cta, num_blocks, blocks_per_row, num_tiles_X, magic_mul,
-        magic_shift, magic_add, input, output, scales, stream);
+        config, grid, first_streaming_cta, num_blocks, blocks_per_row, num_tiles_X, col_spans, rows,
+        input, output, scales, stream);
   }
 }
 
@@ -420,12 +499,10 @@ void launch_cast_rowwise(const void *input, void *output, void *scales, int rows
   uint32_t *out = reinterpret_cast<uint32_t *>(output);
   e8m0_t *scale_out = reinterpret_cast<e8m0_t *>(scales);
 
-  // The kernel treats the scale array as one flat image of the block sequence, so
-  // a padded row stride would silently misplace every scale past the first row.
-  // Dispatch only reaches here with cols % 128 == 0, which makes cols/32 a
-  // multiple of 4 and the allocators' DIVUP_TO_MULTIPLE(cols/32, 4) a no-op, so
-  // the two always agree.  State that as a contract rather than carry an
-  // unreachable slow path for it.
+  // The scale array is treated as one flat image of the block sequence, so a
+  // padded row stride would misplace every scale past the first row.  Dispatch
+  // only admits cols % 128 == 0, which makes the allocators' round-up a no-op --
+  // state that as a contract rather than carry an unreachable slow path.
   NVTE_CHECK(scale_stride == blocks_per_row, "Rowwise MXFP8 requires a packed scale array: stride ",
              scale_stride, " must equal cols/", kBlockElems, " = ", blocks_per_row, ".");
 
@@ -436,15 +513,43 @@ void launch_cast_rowwise(const void *input, void *output, void *scales, int rows
   while (tier < kNumTiers - 1 && output_bytes > kTierMaxBytes[tier]) {
     ++tier;
   }
-  const LaunchConfig config = kTierConfigs[tier];
+  LaunchConfig config = kTierConfigs[tier];
+  if constexpr (SWIZZLED_SCALES) {
+    // The swizzled shape needs four warps just to cover the four sub-rows of one
+    // row offset, so a 128-thread CTA has a single quad and nothing to amortise
+    // its row span across.  Give it the wider CTA.
+    if (config.threads_per_cta == 128) {
+      config.threads_per_cta = 256;
+    }
+  }
 
   // Every CTA covers a whole number of MX blocks.  When the count does not
   // divide evenly the grid is rounded up and the kernel predicates its accesses
   // instead, so there is always exactly one launch.
   const int64_t blocks_per_cta =
       static_cast<int64_t>(config.threads_per_cta) / kLanesPerBlock * config.blocks_per_lane;
-  const bool check_bounds = (num_blocks % blocks_per_cta) != 0;
-  const int64_t grid = DIVUP(num_blocks, blocks_per_cta);
+  const int64_t warps_per_cta = config.threads_per_cta / THREADS_PER_WARP;
+
+  int64_t grid;
+  bool check_bounds;
+  // Column spans per 128-row band.  The kernel decomposes its CTA index by this
+  // exact value, so it is computed once, here, and passed down.
+  int32_t col_spans = 1;
+  if constexpr (SWIZZLED_SCALES) {
+    // A CTA covers 4 sub-rows x (warps_per_cta / 4) row offsets and one span of
+    // 16 * blocks_per_lane columns, so a 128-row band needs 32 / quads CTAs per
+    // span.  Column spans vary fastest (see the kernel) to keep concurrent CTAs on
+    // adjacent columns of the same rows.
+    const int64_t quads = warps_per_cta / 4;
+    const int64_t span = 16 * static_cast<int64_t>(config.blocks_per_lane);
+    col_spans = static_cast<int32_t>(DIVUP(static_cast<int64_t>(blocks_per_row), span));
+    const int64_t bands = DIVUP(rows, 128);
+    grid = bands * (32 / quads) * static_cast<int64_t>(col_spans);
+    check_bounds = (rows % 128) != 0 || (static_cast<int64_t>(blocks_per_row) % span) != 0;
+  } else {
+    check_bounds = (num_blocks % blocks_per_cta) != 0;
+    grid = DIVUP(num_blocks, blocks_per_cta);
+  }
 
   if (grid > 0) {
     const uint32_t first_streaming_cta =
@@ -452,9 +557,6 @@ void launch_cast_rowwise(const void *input, void *output, void *scales, int rows
     // Scale tiles across the row axis; only read when SWIZZLED_SCALES.
     const int32_t num_tiles_X = static_cast<int32_t>(DIVUP(cols, 128));
 
-    // Magic reciprocal of blocks_per_row, so the kernel recovers a row index with
-    // a multiply-high instead of a division.  Powers of two would overflow the
-    // general form, so they take the shift-only case.
     if constexpr (SWIZZLED_SCALES) {
       // The packed 32-bit scale store assumes a 4-aligned group of blocks never
       // straddles a row, which needs blocks_per_row to be a multiple of 4.  The
@@ -466,30 +568,9 @@ void launch_cast_rowwise(const void *input, void *output, void *scales, int rows
       NVTE_CHECK(num_blocks <= static_cast<int64_t>(UINT32_MAX),
                  "GEMM-swizzled MXFP8 scales index MX blocks with 32 bits; got ", num_blocks);
     }
-    const uint32_t d = static_cast<uint32_t>(blocks_per_row);
-    uint32_t magic_shift = 0;
-    while ((1u << (magic_shift + 1)) <= d) {
-      ++magic_shift;  // floor(log2(d))
-    }
-    uint32_t magic_mul = 0;
-    uint32_t magic_add = 0;
-    if ((d & (d - 1)) != 0) {
-      const uint64_t num = 1ull << (32 + magic_shift);
-      uint64_t proposed = num / d;
-      const uint64_t rem = num - proposed * d;
-      if (d - rem < (1ull << magic_shift)) {
-        proposed *= 2;
-        const uint64_t twice = rem * 2;
-        if (twice >= d || twice < rem) {
-          proposed += 1;
-        }
-        magic_add = 1;
-      }
-      magic_mul = static_cast<uint32_t>(proposed + 1);
-    }
     launch_contiguous<OType, SWIZZLED_SCALES>(config, grid, first_streaming_cta, num_blocks,
-                                              blocks_per_row, num_tiles_X, magic_mul, magic_shift,
-                                              magic_add, check_bounds, in, out, scale_out, stream);
+                                              blocks_per_row, num_tiles_X, col_spans, rows,
+                                              check_bounds, in, out, scale_out, stream);
     NVTE_CHECK_CUDA(cudaGetLastError());
   }
 }

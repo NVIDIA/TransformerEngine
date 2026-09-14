@@ -473,20 +473,13 @@ constexpr int32_t kNarrowColsPerLane = 8;
 constexpr int32_t kWideMinBlocksPerSm = 4;
 constexpr int32_t kNarrowMinBlocksPerSm = 6;
 
-// Thread-block cluster widths.  Clustering does NOT reduce L2 traffic -- L2 is
-// shared by every CTA regardless, and ablating the cluster leaves both the DRAM
-// byte count and the L2 hit rate unchanged.  What it buys is delivery rate:
-// 3.5-4.5% at large shapes, with DRAM throughput up 2.6-3.1 points for identical
-// traffic.
-//
-// The benefit comes from co-scheduled CTAs touching *adjacent* columns, not from
-// the cluster itself.  Permuting the CTA-to-tile map so a cluster's members read
-// distant columns -- cluster still active, same total work -- gives back the
-// whole gain (4.8-7.0% slower, DRAM throughput returning to the no-cluster
-// value), and is in fact marginally worse than not clustering at all.  So
-// GPC/L2-slice affinity is not the mechanism.  Which part of the memory system
-// rewards the adjacency (DRAM row buffer, controller queueing, sector merging)
-// is not something the available counters can separate, so it is left open.
+// Thread-block cluster widths.  Clustering does not reduce L2 traffic -- L2 is
+// shared by every CTA regardless, and ablating it leaves DRAM bytes and the L2
+// hit rate unchanged.  What it buys is delivery rate, and only because the
+// co-scheduled CTAs read *adjacent* columns of the same rows: permuting the
+// CTA-to-tile map so a cluster's members read distant columns gives the whole
+// gain back.  Which part of the memory system rewards that adjacency is not
+// separable with the available counters.
 constexpr int32_t kWideClusterShallow = 1;
 constexpr int32_t kWideClusterDeep = 4;
 constexpr int32_t kNarrowCluster = 8;
@@ -551,12 +544,12 @@ void launch_tiled(const void *input, void *output_rowwise, void *scales_rowwise,
   } while (0)
 
   // Specialising on K folds `cols` and both scale strides into constants, which
-  // removes 16% of the executed instructions.  The kernel is memory-bound, so
-  // that converts to time only where the memory system has slack: measured 2.8%
-  // at K=4096, ~1% at 7168/16384 and 0.1% at 8192/32768 -- i.e. it pays least at
-  // exactly the large shapes it looks like it should help.  Only the small-K
-  // cases are kept; everything else takes the runtime path and saves four
-  // instantiations per output type and tile width.
+  // cuts a noticeable share of the executed instructions.  This kernel is
+  // memory-bound, so that only becomes time where the memory system has slack --
+  // which means small K, not the large shapes the specialisation looks aimed at.
+  // Keep the small cases; everything else takes the runtime path.  All column
+  // counts work either way: `default` is the runtime instantiation, not a
+  // rejection.
   switch (cols) {
     case 2048:
       NVTE_LAUNCH_BIDIM(2048);
