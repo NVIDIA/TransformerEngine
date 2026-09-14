@@ -14,6 +14,7 @@ import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 
 from transformer_engine.common import _get_shared_object_file
+from transformer_engine.common.CuTeDSL.utils import device_compute_capability
 from transformer_engine.pytorch import MXFP8Quantizer
 
 tvm_ffi = pytest.importorskip("tvm_ffi")
@@ -156,8 +157,9 @@ def get_cfg_key(method, act, in_dtype, fp8_dtype, rowwise, colwise, swizzled):
     # with_amax is hardcoded to False for now because there is no way to obtain this value and validate in python
     # trailing False is use_2d_quantization; these cases never request 2D block scaling
     flags = (rowwise, colwise, swizzled, False, with_dbias, with_dact, with_act, False)
+    major, minor = device_compute_capability()
     return (
-        "cutedsl_mxfp8_"
+        f"cutedsl_mxfp8_sm{major * 10 + minor}_"
         + DTYPE_TO_STR[in_dtype]
         + "_"
         + FP8_TO_KEY[fp8_dtype]

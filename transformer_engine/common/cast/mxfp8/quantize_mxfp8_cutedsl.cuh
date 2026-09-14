@@ -42,19 +42,21 @@ struct MXFP8QuantConfig {
   bool with_act = false;             // If an activation operation is fused
   bool use_2d_quantization = false;  // If use 2D quantization
   Activation activation = Activation::kNone;
+  uint32_t sm_arch = static_cast<uint32_t>(cuda::sm_arch());
 
-  constexpr uint32_t to_id() const {
-    static_assert(static_cast<uint32_t>(DType::kNumTypes) <= 256,
-                  "DType no longer fits in the 8 bits to_id() gives it.");
-    static_assert(static_cast<uint32_t>(Activation::kNumTypes) <= 256,
-                  "Activation no longer fits in the 8 bits to_id() gives it.");
-    return static_cast<uint32_t>(dtype) | (static_cast<uint32_t>(fp8_dtype) << 8) |
-           (static_cast<uint32_t>(rowwise) << 16) | (static_cast<uint32_t>(colwise) << 17) |
-           (static_cast<uint32_t>(swizzled) << 18) | (static_cast<uint32_t>(with_amax) << 19) |
-           (static_cast<uint32_t>(with_dbias) << 20) | (static_cast<uint32_t>(with_dact) << 21) |
-           (static_cast<uint32_t>(with_act) << 22) |
-           (static_cast<uint32_t>(use_2d_quantization) << 23) |
-           (static_cast<uint32_t>(activation) << 24);
+  uint32_t to_id() const {
+    static_assert(static_cast<uint32_t>(DType::kNumTypes) <= 16,
+                  "DType no longer fits in the 4 bits to_id() gives it.");
+    static_assert(static_cast<uint32_t>(Activation::kNumTypes) <= 64,
+                  "Activation no longer fits in the 6 bits to_id() gives it.");
+    NVTE_CHECK(sm_arch < 512, "SM architecture no longer fits in the 9 bits to_id() gives it.");
+    return static_cast<uint32_t>(dtype) | (static_cast<uint32_t>(fp8_dtype) << 4) |
+           (static_cast<uint32_t>(rowwise) << 8) | (static_cast<uint32_t>(colwise) << 9) |
+           (static_cast<uint32_t>(swizzled) << 10) | (static_cast<uint32_t>(with_amax) << 11) |
+           (static_cast<uint32_t>(with_dbias) << 12) | (static_cast<uint32_t>(with_dact) << 13) |
+           (static_cast<uint32_t>(with_act) << 14) |
+           (static_cast<uint32_t>(use_2d_quantization) << 15) |
+           (static_cast<uint32_t>(activation) << 16) | (sm_arch << 22);
   }
 
   std::optional<tvm::ffi::Function> get_kernel() const {
@@ -66,8 +68,10 @@ struct MXFP8QuantConfig {
   // compiled and registered on a cache miss.
   std::string to_key() const {
     std::string key;
-    key.reserve(64);  // longest: cutedsl_mxfp8_bf16_fp8_e4m3fn_..._dqgelu
-    key.append("cutedsl_mxfp8_")
+    key.reserve(72);  // longest: cutedsl_mxfp8_smXXX_bf16_fp8_e4m3fn_..._dqgelu
+    key.append("cutedsl_mxfp8_sm")
+        .append(std::to_string(sm_arch))
+        .append("_")
         .append(te_dtype_to_str(dtype))
         .append("_")
         .append(te_dtype_to_str(fp8_dtype))
@@ -293,6 +297,7 @@ bool mxfp8_quantize_cutedsl(const Tensor *input_tensor, const Tensor *act_input_
         "the fused activation/activation derivative operation is not supported.");
     return false;
   } else {
+    checkCuDriverContext(stream);
     const MXFP8QuantConfig config{/*dtype=*/input_tensor->dtype(),
                                   /*fp8_dtype=*/output_tensor->dtype(),
                                   /*rowwise=*/output_tensor->has_data(),
@@ -304,7 +309,6 @@ bool mxfp8_quantize_cutedsl(const Tensor *input_tensor, const Tensor *act_input_
                                   /*with_act=*/IS_ACT,
                                   /*use_2d_quantization=*/use_2d_quantization,
                                   /*activation=*/Fused::activation};
-    checkCuDriverContext(stream);
     // Sanity checks, mirroring mxfp8::quantize in quantize_mxfp8.cuh
     if (config.rowwise) {
       NVTE_CHECK(output_tensor->scale_inv.dptr != nullptr, "Scaling tensor must be allocated");

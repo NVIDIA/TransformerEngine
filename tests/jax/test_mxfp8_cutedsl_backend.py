@@ -15,6 +15,7 @@ import pytest
 from utils import assert_allclose
 
 from transformer_engine.common import _get_shared_object_file
+from transformer_engine.common.CuTeDSL.utils import device_compute_capability
 from transformer_engine.jax import cpp_extensions as tex
 from transformer_engine.jax.quantize import (
     QuantizerFactory,
@@ -151,8 +152,9 @@ def get_cfg_key(method, in_dtype, fp8_dtype, q_layout):
     # (non-swizzled) layout -- the GEMM swizzle happens later, in JAX (see gemm.swizzled_scale).
     # trailing False is use_2d_quantization; JAX never requests 2D block scaling
     flags = (True, q_layout.has_colwise, False, False, with_dbias, with_dact, with_act, False)
+    major, minor = device_compute_capability()
     return (
-        "cutedsl_mxfp8_"
+        f"cutedsl_mxfp8_sm{major * 10 + minor}_"
         + DTYPE_TO_STR[in_dtype]
         + "_"
         + FP8_TO_KEY[fp8_dtype]
