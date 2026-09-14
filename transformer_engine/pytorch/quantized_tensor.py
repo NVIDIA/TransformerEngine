@@ -17,8 +17,9 @@ import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch.constants import dist_group_type
-from transformer_engine.pytorch.tensor._quantization_helpers import (
+
 from transformer_engine import te_platform, te_device_type
+from transformer_engine.pytorch.tensor._quantization_helpers import (
     _QuantizeFunc,
     _IdentityFunc,
     _stride_from_shape,

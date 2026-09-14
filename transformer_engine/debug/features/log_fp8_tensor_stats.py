@@ -17,8 +17,9 @@ from transformer_engine.pytorch import DType
 from transformer_engine.debug.features.utils.stats_buffer import STATS_BUFFERS
 from transformer_engine.debug.features.utils import get_reduction_params, next_enabled_iter
 from transformer_engine.pytorch.tensor import Quantizer, QuantizedTensor
-from transformer_engine.pytorch.tensor.float8_tensor import (
+
 from transformer_engine import te_device_type, te_platform
+from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8Quantizer,
     Float8CurrentScalingQuantizer,
 )
@@ -58,7 +59,10 @@ def _get_new_quantizer(recipe_name, fp8_dtype):
         return Float8BlockQuantizer(fp8_dtype=fp8_dtype, rowwise=True, columnwise=True)
     if recipe_name == "fp8_current_scaling":
         return Float8CurrentScalingQuantizer(
-            fp8_dtype=fp8_dtype, device=torch.device(te_device_type()), rowwise=True, columnwise=True
+            fp8_dtype=fp8_dtype,
+            device=torch.device(te_device_type()),
+            rowwise=True,
+            columnwise=True,
         )
     if recipe_name == "mxfp8":
         return MXFP8Quantizer(fp8_dtype=fp8_dtype, rowwise=True, columnwise=True)
@@ -211,7 +215,10 @@ class LogFp8TensorStats(BaseLogTensorStats):
         if recipe_from_stat == "fp8_delayed_scaling" and stat_without_recipe == "overflows%":
             return True
 
-        if recipe_from_stat in ["fp8_block_scaling"] and te_platform().get_device_capability()[0] < 9:
+        if (
+            recipe_from_stat in ["fp8_block_scaling"]
+            and te_platform().get_device_capability()[0] < 9
+        ):
             raise ValueError(f"Stat {stat} needs Hopper or later GPU.")
 
         if recipe_from_stat == "mxfp8" and te_platform().get_device_capability()[0] < 10:
