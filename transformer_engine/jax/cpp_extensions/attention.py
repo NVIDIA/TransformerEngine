@@ -959,7 +959,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         )
 
         (
-            batch_shape,
+            _batch_shape,
             q_max_seqlen,
             kv_max_seqlen,
             attn_heads,

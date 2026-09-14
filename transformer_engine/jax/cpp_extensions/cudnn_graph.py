@@ -198,9 +198,9 @@ def make_graph(cudnn, io_dtype):
     return make_cudnn_graph(cudnn, io_dtype)
 
 
-def graph_hash(serialized_graph: bytes) -> tuple[int, int]:
+def graph_hash(graph_data: bytes) -> tuple[int, int]:
     """Return two signed int64 values used as the C++ graph-cache key."""
-    digest = hashlib.sha256(serialized_graph).digest()
+    digest = hashlib.sha256(graph_data).digest()
     return (
         int.from_bytes(digest[0:8], byteorder="little", signed=True),
         int.from_bytes(digest[8:16], byteorder="little", signed=True),

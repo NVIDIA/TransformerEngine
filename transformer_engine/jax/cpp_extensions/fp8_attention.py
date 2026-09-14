@@ -966,7 +966,7 @@ def _quantized_operands(qkv, layout, quantizer, *, both=False):
         tensor = quantized[0]
         return (tensor, tensor, tensor), (_rowwise(tensor).data, empty, empty)
     if layout.is_kvpacked():
-        q_tensor, kv_tensor = quantized
+        q_tensor, kv_tensor = quantized[0], quantized[1]
         return (
             q_tensor,
             kv_tensor,
@@ -1178,7 +1178,7 @@ def fused_attn_fp8_bwd(ctx, doutput, config):
     q_tensor, k_tensor, v_tensor = quantized
     mode = _scaling_mode(quantizers.qkv)
     input_dtype = _rowwise(q_tensor).dq_dtype
-    (do_tensor,) = _quantize_many((doutput,), quantizers.do, both=mode == "mxfp8")
+    do_tensor = _quantize_many((doutput,), quantizers.do, both=mode == "mxfp8")[0]
     q_data, k_data, v_data = (
         _rowwise(q_tensor).data,
         _rowwise(k_tensor).data,

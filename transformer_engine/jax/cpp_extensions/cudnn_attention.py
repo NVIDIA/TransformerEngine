@@ -265,7 +265,7 @@ def _graph_dimensions(info: _LayoutInfo, config):
     return graph_batch, graph_sq, graph_skv, use_ragged_stats, stats_shape, max_shape
 
 
-def _tensor(graph, cudnn, *, name, dim, stride, dtype, uid):
+def _tensor(graph, _cudnn, *, name, dim, stride, dtype, uid):
     return graph.tensor(
         name=name,
         dim=tuple(int(x) for x in dim),
@@ -319,7 +319,7 @@ def _mask_options(cudnn, info: _LayoutInfo, config):
     return options
 
 
-def _scalar_tensor(graph, cudnn, name: str, uid: int, dtype):
+def _scalar_tensor(graph, _cudnn, name: str, uid: int, dtype):
     return graph.tensor(
         name=name,
         dim=(1, 1, 1, 1),
@@ -639,6 +639,8 @@ def _build_bwd_graph(
     doutput_aval,
     config,
 ) -> AttentionGraphInfo:
+    del stats_aval, output_aval, doutput_aval
+
     cudnn = import_cudnn()
     info = _layout_info(q_aval, k_aval, v_aval, config.qkv_layout)
     graph_batch, graph_sq, graph_skv, ragged_stats, stats_shape, max_shape = _graph_dimensions(
