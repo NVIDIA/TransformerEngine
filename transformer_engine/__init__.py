@@ -103,7 +103,6 @@ def require_nccl_ep() -> None:
 
 try:
     from . import pytorch
-    from .pytorch import te_platform, te_device_type
 except ImportError:
     pass
 except FileNotFoundError as e:
