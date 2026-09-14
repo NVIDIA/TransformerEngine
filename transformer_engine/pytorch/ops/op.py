@@ -15,8 +15,8 @@ import torch
 
 from transformer_engine.common.recipe import Recipe
 from .._extra_state import is_stateless_recipe, should_load_extra_state_pickle
-from ..quantization import (
 from transformer_engine import te_platform
+from ..quantization import (
     FP8GlobalStateManager,
     QuantizerRole,
     RecipeState,

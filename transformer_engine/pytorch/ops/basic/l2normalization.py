@@ -12,8 +12,8 @@ import torch
 
 from ...torch_version import torch_version
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
-from ...jit import (
 from transformer_engine import te_platform
+from ...jit import (
     l2normalization_fused,
     l2normalization_fwd_fused,
     l2normalization_backward_fused,

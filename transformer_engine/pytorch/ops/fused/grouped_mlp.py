@@ -20,8 +20,8 @@ import transformer_engine_torch as tex
 from ...constants import DType, MXFP8_BLOCK_SCALING_SIZE, NVFP4_BLOCK_SCALING_SIZE, TE_DType
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload, start_offload
 from ...cpp_extensions import general_gemm, general_grouped_gemm_for_grouped_tensor
-from ...distributed_weight import (
 from transformer_engine import te_platform
+from ...distributed_weight import (
     is_distributed_weight,
     materialize_weight_for_forward,
     materialize_weight_for_backward,

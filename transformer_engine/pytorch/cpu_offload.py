@@ -16,8 +16,8 @@ from torch.autograd.graph import saved_tensors_hooks
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
 import transformer_engine.pytorch as te
 import transformer_engine.pytorch.cpu_offload_v1 as v1_code_path
-from .quantized_tensor import (
 from transformer_engine import te_platform, te_device_type
+from .quantized_tensor import (
     restore_from_saved,
     prepare_for_saving,
     QuantizedTensor,
@@ -507,7 +507,9 @@ class OffloadSynchronizer:
         offload_stream: Optional[torch.cuda.Stream] = None,
     ):
         self.num_layers = num_layers
-        self.offload_stream = offload_stream if offload_stream is not None else te_platform().Stream()
+        self.offload_stream = (
+            offload_stream if offload_stream is not None else te_platform().Stream()
+        )
 
         self.layer_states = {
             i: OffloadableLayerState(self.offload_stream, retain_pinned_cpu_buffers)

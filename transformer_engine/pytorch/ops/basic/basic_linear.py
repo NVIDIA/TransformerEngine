@@ -14,8 +14,8 @@ import torch
 
 from ...cpp_extensions import general_gemm
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
-from ...distributed import (
 from transformer_engine import te_device_type
+from ...distributed import (
     CudaRNGStatesTracker,
     gather_along_first_dim,
     reduce_scatter_along_first_dim,

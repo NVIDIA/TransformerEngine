@@ -13,8 +13,8 @@ import torch
 from transformer_engine_torch import CommOverlapType, bulk_overlap_ag_with_external_gemm
 from ...cpp_extensions import general_gemm
 from ...distributed import gather_along_first_dim, get_distributed_world_size
-from ...module.base import (
 from transformer_engine import te_platform
+from ...module.base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
     fill_userbuffers_buffer_for_all_gather,

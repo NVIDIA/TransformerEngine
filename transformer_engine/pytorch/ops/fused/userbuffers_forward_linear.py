@@ -15,8 +15,8 @@ from ...cpp_extensions import general_gemm
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...distributed import get_distributed_world_size
 from ...quantization import FP8GlobalStateManager
-from ...module.base import (
 from transformer_engine import te_device_type
+from ...module.base import (
     fill_userbuffers_buffer_for_all_gather,
     get_ub,
     _2X_ACC_FPROP,

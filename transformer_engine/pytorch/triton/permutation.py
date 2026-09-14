@@ -9,8 +9,8 @@ from typing import Union
 import torch
 import triton
 
-from transformer_engine.common.triton.permutation import (
 from transformer_engine import te_device_type
+from transformer_engine.common.triton.permutation import (
     _row_id_map_pass_1_kernel,
     _row_id_map_pass_2_kernel,
     _row_id_map_pass_3_kernel,
@@ -50,7 +50,9 @@ def make_row_id_map(
         The [num_experts, num_experts + n_routed) items are the indices of the experts corresponding
         to the first n_routed row indices above.
     """
-    row_id_map = torch.empty((num_tokens, num_experts * 2 + 1), dtype=torch.int32, device=te_device_type())
+    row_id_map = torch.empty(
+        (num_tokens, num_experts * 2 + 1), dtype=torch.int32, device=te_device_type()
+    )
     block_size = 1024
     grid = (num_experts, triton.cdiv(num_tokens, block_size))
     workspace_tensor = torch.empty(grid, dtype=torch.int32, device=te_device_type())
@@ -163,7 +165,9 @@ def permute_with_mask_map(
     alloc = torch.zeros if pad_offsets is not None else torch.empty
     output = alloc((num_out_tokens, hidden_size), dtype=inp.dtype, device=te_device_type())
     permuted_probs = (
-        alloc((num_out_tokens,), dtype=probs.dtype, device=te_device_type()) if probs is not None else None
+        alloc((num_out_tokens,), dtype=probs.dtype, device=te_device_type())
+        if probs is not None
+        else None
     )
     permuted_scale = (
         alloc((num_out_tokens, scale_hidden_dim), dtype=scale.dtype, device=te_device_type())
@@ -326,7 +330,9 @@ def unpermute_with_mask_map_bwd_with_merging_probs(
     # by the kernel. This matches the behavior of Fp8Unpadding.backward which zeros
     # out the padding slots.
     alloc = torch.zeros if pad_offsets is not None else torch.empty
-    act_grad = alloc((num_out_tokens, hidden_size), dtype=fwd_output_grad.dtype, device=te_device_type())
+    act_grad = alloc(
+        (num_out_tokens, hidden_size), dtype=fwd_output_grad.dtype, device=te_device_type()
+    )
     merging_probs_grad = torch.empty(
         (num_tokens, num_experts), dtype=merging_probs.dtype, device=te_device_type()
     )

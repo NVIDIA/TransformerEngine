@@ -21,8 +21,8 @@ from torch.distributed.tensor import DTensor
 import transformer_engine_torch as tex
 
 from ._common import _ParameterInitMeta, noop_cat
-from .._extra_state import (
 from transformer_engine import te_platform, te_device_type
+from .._extra_state import (
     extra_state_pickle_advisory,
     is_stateless_recipe,
     should_load_extra_state_pickle,

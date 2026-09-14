@@ -9,8 +9,8 @@ from typing import Optional
 import torch
 import triton
 
-from transformer_engine.common.triton.mhc import (
 from transformer_engine import te_platform
+from transformer_engine.common.triton.mhc import (
     _mhc_projection_bwd_fused_dphi,
     _mhc_projection_bwd_fused_dx,
     _mhc_scale_fwd_fused,

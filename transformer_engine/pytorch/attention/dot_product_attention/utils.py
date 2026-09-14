@@ -22,8 +22,8 @@ import torch.distributed as dist
 import torch.nn.functional as F
 import transformer_engine_torch as tex
 import transformer_engine as te
-from transformer_engine.pytorch.cpp_extensions.fused_attn import (
 from transformer_engine import te_platform
+from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     QKVLayout,
     QKVFormat,
     AttnBiasType,
@@ -2094,7 +2094,9 @@ def get_full_mask(
     # apply SWA mask
     mask = torch.arange(max_seqlen_q, dtype=torch.int32, device=te_device_type()).view(
         1, 1, max_seqlen_q, 1
-    ) - torch.arange(max_seqlen_kv, dtype=torch.int32, device=te_device_type()).view(1, 1, 1, max_seqlen_kv)
+    ) - torch.arange(max_seqlen_kv, dtype=torch.int32, device=te_device_type()).view(
+        1, 1, 1, max_seqlen_kv
+    )
     swa_left = None
     swa_right = None
     if attn_mask_type == "causal_bottom_right" or (
@@ -2225,7 +2227,9 @@ def get_alibi(
         _alibi_cache["_max_seqlen_q"], _alibi_cache["_max_seqlen_kv"] = max_seqlen_q, max_seqlen_kv
         _alibi_cache["_bottom_right_alignment"] = bottom_right_alignment
         bias_dtype = torch.float32 if bias_dtype is None else bias_dtype
-        _alibi_cache["_alibi_bias"] = bias.contiguous().to(dtype=bias_dtype, device=te_device_type())
+        _alibi_cache["_alibi_bias"] = bias.contiguous().to(
+            dtype=bias_dtype, device=te_device_type()
+        )
         _alibi_cache["_alibi_bias_require_update"] = False
 
     return _alibi_cache["_alibi_slopes"], _alibi_cache["_alibi_bias"]

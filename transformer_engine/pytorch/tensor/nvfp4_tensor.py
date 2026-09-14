@@ -15,8 +15,8 @@ import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import NVFP4BlockScaling, Recipe
 from ..constants import NVFP4_BLOCK_SCALING_SIZE, dist_group_type, DType
-from ..utils import (
 from transformer_engine import te_platform
+from ..utils import (
     canonicalize_process_group,
     devices_match,
     round_up_to_nearest_multiple,

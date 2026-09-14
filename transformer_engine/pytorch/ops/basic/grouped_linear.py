@@ -19,8 +19,8 @@ from ...constants import DType, TE_DType
 from ...cpp_extensions import general_grouped_gemm, general_grouped_gemm_for_grouped_tensor
 from ...distributed import CudaRNGStatesTracker
 from ...module._common import WeightGradStore
-from ...module.base import (
 from transformer_engine import te_device_type
+from ...module.base import (
     _2X_ACC_FPROP,
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,

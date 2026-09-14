@@ -19,8 +19,8 @@ import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch.torch_version import torch_version
 from transformer_engine.pytorch.tensor.utils import clear_columnwise_cache, is_custom
-from .base import (
 from transformer_engine import te_platform, te_device_type
+from .base import (
     fill_userbuffers_buffer_for_all_gather,
     _ub_communicators,
     get_ub,

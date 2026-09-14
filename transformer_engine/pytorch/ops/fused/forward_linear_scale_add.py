@@ -14,8 +14,8 @@ from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...quantization import FP8GlobalStateManager
 from ...tensor import Quantizer
 from ..basic import AddExtraInput, BasicLinear, ConstantScale
-from ..op import (
 from transformer_engine import te_device_type
+from ..op import (
     FusedOperation,
     FusibleOperation,
     OperationContext,
