@@ -28,7 +28,7 @@ from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 from ..tensor.utils import is_custom
 from ..custom_recipes.gemm import custom_gemm
 from ...debug.pytorch.debug_quantization import DebugQuantizedTensor, DebugQuantizer
-from transformer_engine import te_platform
+from transformer_engine import te_device_type, te_platform
 
 __all__ = [
     "general_gemm",

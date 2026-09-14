@@ -16,7 +16,7 @@ import torch
 
 from .torch_version import torch_version
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
-from transformer_engine import te_platform
+from transformer_engine import te_device_type, te_platform
 
 
 __all__ = [
