@@ -1063,6 +1063,18 @@ class FusedAttnFwdPrimitive(BasePrimitive):
 register_primitive(FusedAttnFwdPrimitive)
 
 
+def _get_fused_attn_bwd_arg_shardings(arg_infos):
+    """Apply the common sharding constraints between backward operands."""
+    arg_shardings = [arg_i.sharding for arg_i in arg_infos]
+    # The fused backward kernel consumes q, output, and doutput elementwise.
+    doutput_idx = 8
+    arg_shardings[doutput_idx] = arg_shardings[0]
+    # Each segment position tensor describes the tokens in its matching ID tensor.
+    arg_shardings[-1] = arg_shardings[-3]
+    arg_shardings[-2] = arg_shardings[-4]
+    return tuple(arg_shardings)
+
+
 class FusedAttnBwdPrimitive(BasePrimitive):
     """
     Fused Attention Backward Primitive
@@ -1455,10 +1467,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         dv_sharding = NamedSharding(mesh, PartitionSpec(*v_spec))
         dbias_sharding = NamedSharding(mesh, PartitionSpec(*bias_spec))
         dsoftmax_offset_sharding = NamedSharding(mesh, PartitionSpec(*softmax_offset_spec))
-        arg_shardings = [arg_i.sharding for arg_i in arg_infos]
-        arg_shardings[-1] = arg_shardings[-3]
-        arg_shardings[-2] = arg_shardings[-4]
-        arg_shardings = tuple(arg_shardings)
+        arg_shardings = _get_fused_attn_bwd_arg_shardings(arg_infos)
         out_shardings = (
             dq_sharding,
             dk_sharding,
@@ -1523,10 +1532,12 @@ class FusedAttnBwdPrimitive(BasePrimitive):
     @staticmethod
     def shardy_sharding_rule(config, mesh, value_types, result_types):
         del config, mesh
-        # Keep in sync with `infer_sharding_from_operands`.
-        input_spec = tuple((f"…{x}",) for x in range(len(value_types)))
+        # Keep doutput aligned with the saved output. Fused attention forward in turn
+        # aligns output with q, which is required by the local backward kernel.
+        input_spec = [(f"…{x}",) for x in range(len(value_types))]
+        input_spec[8] = input_spec[7]
         output_spec = tuple((f"…{x}",) for x in range(len(result_types)))
-        return SdyShardingRule(input_spec, output_spec)
+        return SdyShardingRule(tuple(input_spec), output_spec)
 
 
 register_primitive(FusedAttnBwdPrimitive)
@@ -2255,7 +2266,7 @@ class FusedAttnCPWithAllGatherBwdPrimitive(FusedAttnBwdPrimitive):
         dv_sharding = NamedSharding(mesh, PartitionSpec(*v_spec))
         dbias_sharding = NamedSharding(mesh, PartitionSpec(*bias_spec))
         dsoftmax_offset_sharding = NamedSharding(mesh, PartitionSpec(*softmax_offset_spec))
-        arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
+        arg_shardings = _get_fused_attn_bwd_arg_shardings(arg_infos)
         out_shardings = (
             dq_sharding,
             dk_sharding,
@@ -2578,7 +2589,7 @@ class FusedAttnCPStripedWithAllGatherBwdPrimitive(FusedAttnBwdPrimitive):
         dv_sharding = NamedSharding(mesh, PartitionSpec(*v_spec))
         dbias_sharding = NamedSharding(mesh, PartitionSpec(*bias_spec))
         dsoftmax_offset_sharding = NamedSharding(mesh, PartitionSpec(*softmax_offset_spec))
-        arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
+        arg_shardings = _get_fused_attn_bwd_arg_shardings(arg_infos)
         out_shardings = (
             dq_sharding,
             dk_sharding,
@@ -3125,10 +3136,7 @@ class FusedRingAttnBwdPrimitive(FusedAttnBwdPrimitive):
         dbias_sharding = NamedSharding(mesh, PartitionSpec(*bias_spec))
         # Ring attention doesn't use dsoftmax_offset, but we need to return it for arity matching
         dsoftmax_offset_sharding = NamedSharding(mesh, PartitionSpec(*softmax_offset_spec))
-        arg_shardings = [arg_i.sharding for arg_i in arg_infos]
-        arg_shardings[-1] = arg_shardings[-3]
-        arg_shardings[-2] = arg_shardings[-4]
-        arg_shardings = tuple(arg_shardings)
+        arg_shardings = _get_fused_attn_bwd_arg_shardings(arg_infos)
         out_shardings = (
             dq_sharding,
             dk_sharding,
@@ -3580,11 +3588,7 @@ class FusedRingAttnStripedBwdPrimitive(FusedAttnBwdPrimitive):
         if not is_context_parallel:
             return FusedAttnBwdPrimitive.partition(config, mesh, arg_infos, result_infos)
 
-        arg_shardings = [arg_i.sharding for arg_i in arg_infos]
-        # Ensure segment_pos gets same sharding as ID.
-        arg_shardings[-1] = arg_shardings[-3]
-        arg_shardings[-2] = arg_shardings[-4]
-        arg_shardings = tuple(arg_shardings)
+        arg_shardings = _get_fused_attn_bwd_arg_shardings(arg_infos)
         # dq, dk, dv, dbias, dsoftmax_offset sharding = q, k, v, bias, softmax_offset sharding
         out_shardings = tuple(arg.sharding for arg in arg_infos[:5])
 
