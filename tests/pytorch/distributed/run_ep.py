@@ -246,16 +246,13 @@ class _EpTestCase(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        # unittest invokes this fixture for each concrete subclass, but EP is process-global.
         if hasattr(_EpTestCase, "cfg"):
-            cls.cfg = _EpTestCase.cfg
-            cls.ep_group = _EpTestCase.ep_group
             return
         if _device_sm() < 90:
             raise unittest.SkipTest(f"NCCL EP requires SM>=90 (got SM{_device_sm()})")
         _EpTestCase.cfg = _make_cfg()
         _EpTestCase.ep_group = _build_ep_group()
-        cls.cfg = _EpTestCase.cfg
-        cls.ep_group = _EpTestCase.ep_group
         ep_bootstrap(
             cls.ep_group,
             num_experts=cls.cfg.num_experts,
@@ -342,6 +339,13 @@ class _EpTestCase(unittest.TestCase):
             dispatch_fwd_quant_recipe=dispatch_fwd_quant_recipe,
             combine_bwd_quant_recipe=combine_bwd_quant_recipe,
         )
+
+    def _require_mxfp8_shapes(self):
+        if HIDDEN_DIM % 512 != 0 or TOKENS_PER_RANK % 32 != 0:
+            self.skipTest(
+                "MXFP8 needs HIDDEN_DIM % 512 == 0 and TOKENS_PER_RANK % 32 == 0 "
+                "(set NVTE_EP_HIDDEN_DIM / NVTE_EP_TOKENS_PER_RANK)"
+            )
 
 
 class TestEP(_EpTestCase):
@@ -536,13 +540,6 @@ class TestEP(_EpTestCase):
         from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 
         return MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=False)
-
-    def _require_mxfp8_shapes(self):
-        if HIDDEN_DIM % 512 != 0 or TOKENS_PER_RANK % 32 != 0:
-            self.skipTest(
-                "MXFP8 needs HIDDEN_DIM % 512 == 0 and TOKENS_PER_RANK % 32 == 0 "
-                "(set NVTE_EP_HIDDEN_DIM / NVTE_EP_TOKENS_PER_RANK)"
-            )
 
     def _assert_mxfp8_matches_bf16(self, recv_mx, tokens, topk_idx, w, tc):
         """Dequantized MXFP8 recv matches a bf16 dispatch of the same tokens. Both share the
@@ -945,18 +942,6 @@ class TestEP(_EpTestCase):
 class TestMoeEpSequential(_EpTestCase):
     """Integration tests for Dispatch -> expert MLP -> Combine sequences."""
 
-    def _mxfp8_quantizer(self):
-        from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
-
-        return MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=False)
-
-    def _require_mxfp8_shapes(self):
-        if HIDDEN_DIM % 512 != 0 or TOKENS_PER_RANK % 32 != 0:
-            self.skipTest(
-                "MXFP8 needs HIDDEN_DIM % 512 == 0 and TOKENS_PER_RANK % 32 == 0 "
-                "(set NVTE_EP_HIDDEN_DIM / NVTE_EP_TOKENS_PER_RANK)"
-            )
-
     def test_runtime_buffer_config_mismatch(self):
         config = self._make_config()
         buffer = self._make_buffer_from_config(config)
@@ -1031,7 +1016,10 @@ class TestMoeEpSequential(_EpTestCase):
             with self.assertRaisesRegex(ValueError, "does not have an MXFP8BlockScaling recipe"):
                 combine(expert_out)
 
-    def _make_dispatch_combine_ops(self, *, mxfp8):
+    def _run_dispatch_combine_identity(self, *, mxfp8):
+        """Route, apply top-k weights, and combine back to local token order."""
+        if mxfp8:
+            self._require_mxfp8_shapes()
         recipe = MXFP8BlockScaling() if mxfp8 else None
         config = self._make_config(alignment=128 if mxfp8 else 0)
         buffer = self._make_buffer_from_config(
@@ -1039,22 +1027,12 @@ class TestMoeEpSequential(_EpTestCase):
             dispatch_fwd_quant_recipe=recipe,
             combine_bwd_quant_recipe=recipe,
         )
-        return (
-            buffer,
-            te_ops.MoeDispatch(config, buffer),
-            te_ops.MoeCombine(config, buffer),
-        )
-
-    def _run_dispatch_combine_identity(self, *, mxfp8):
-        """Route, apply top-k weights, and combine back to local token order."""
-        if mxfp8:
-            self._require_mxfp8_shapes()
-        buffer, dispatch, combine = self._make_dispatch_combine_ops(mxfp8=mxfp8)
+        dispatch = te_ops.MoeDispatch(config, buffer)
+        combine = te_ops.MoeCombine(config, buffer)
         topk_idx, tokens, topk_weights = _make_identity_inputs(
             self.cfg.rank,
             self.cfg.ep_size,
         )
-        recipe = MXFP8BlockScaling() if mxfp8 else None
         with te.autocast(enabled=mxfp8, recipe=recipe):
             recv_tokens, tokens_per_expert, recv_weights = dispatch(
                 tokens,
@@ -1062,6 +1040,9 @@ class TestMoeEpSequential(_EpTestCase):
                 topk_weights,
             )
             if mxfp8:
+                # Convert to BF16 since combine only supports BF16 in NCCL EP
+                # for now. dequantizing to mxfp8 below changes its overall shape
+                # to sum(tokens_per_expert).
                 recv_tokens = _degroup_mxfp8(recv_tokens)
                 recv_weights = recv_weights[: recv_tokens.shape[0]]
             weighted_expert_output = (recv_tokens.float() * recv_weights.float().unsqueeze(-1)).to(
@@ -1139,7 +1120,6 @@ class TestMoeEpSequential(_EpTestCase):
             else:
                 os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"] = previous_single_param
         combine = te_ops.MoeCombine(config, buffer)
-
         dispatch.set_extra_output_channel(0, "tokens_per_expert", output_to_caller=False)
         dispatch.set_extra_output_channel(1, "routing_weights", output_to_caller=False)
         fc1.set_extra_input_channel(0, "tokens_per_expert")
@@ -1178,9 +1158,9 @@ class TestMoeEpSequential(_EpTestCase):
             self.cfg.device,
         )
 
-        static_tokens = tokens.detach().clone().requires_grad_(True)
-        static_topk_idx = topk_idx.detach().clone()
-        static_topk_weights = topk_weights.detach().clone().requires_grad_(True)
+        static_tokens = tokens.requires_grad_(True)
+        static_topk_idx = topk_idx
+        static_topk_weights = topk_weights.requires_grad_(True)
         static_dy = torch.randn_like(static_tokens)
         graphed_model = te.make_graphed_callables(
             graph_model,
@@ -1363,8 +1343,8 @@ class TestMoeEpSequential(_EpTestCase):
             self.cfg.ep_size,
             self.cfg.device,
         )
-        seq_tokens = tokens.detach().clone().requires_grad_(True)
-        seq_topk_weights = topk_weights.detach().clone().requires_grad_(True)
+        seq_tokens = tokens.requires_grad_(True)
+        seq_topk_weights = topk_weights.requires_grad_(True)
         main_grad_sentinel = 0.5
         if accumulate_into_main_grad:
             for op in (fc1, fc2):
@@ -1520,5 +1500,7 @@ if __name__ == "__main__":
     result = runner.run(suite)
     dist.barrier()
     ep_finalize()
+    # Deregister symm-mem windows while the comm is still valid.
+    release_symm_mem_pool()
     dist.destroy_process_group()
     sys.exit(0 if result.wasSuccessful() else 1)
