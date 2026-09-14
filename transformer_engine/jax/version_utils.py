@@ -86,9 +86,7 @@ def is_collective_stream_supported() -> bool:
 
 # Minimum JAX version whose XLA ships the FFI collectives extension (lets an FFI
 # handler fetch XLA's own communicator). Conservative floor: the first version
-# this was verified on. build_tools/jax.py loads these by file path (it can't
-# `import transformer_engine` before the extension is built) -- same floors,
-# single source of truth.
+# this was verified on.
 _XLA_FFI_COLLECTIVES_NIGHTLY_FLOOR = "0.11.2.dev20260828"
 _XLA_FFI_COLLECTIVES_STABLE_FLOOR = "0.11.2"
 

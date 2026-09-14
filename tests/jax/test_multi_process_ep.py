@@ -904,6 +904,8 @@ class TestEPOverflowDrop(unittest.TestCase):
         sm = _local_device_sm()
         if sm is not None and sm < 90:
             raise unittest.SkipTest(f"NCCL EP requires SM>=90 (got SM{sm})")
+        cls._prev_comm_env = os.environ.get("NVTE_JAX_EP_NCCL_COMM_FROM_XLA")
+        os.environ["NVTE_JAX_EP_NCCL_COMM_FROM_XLA"] = "0"
         cls.num_procs = jax.process_count()
         cls.rank = jax.process_index()
         cls.dp, cls.ep = _factor_dp_ep(cls.num_procs)
@@ -931,6 +933,10 @@ class TestEPOverflowDrop(unittest.TestCase):
     def tearDownClass(cls):
         # Leave a clean slate so another class can bootstrap after us.
         ep_finalize()
+        if cls._prev_comm_env is None:
+            os.environ.pop("NVTE_JAX_EP_NCCL_COMM_FROM_XLA", None)
+        else:
+            os.environ["NVTE_JAX_EP_NCCL_COMM_FROM_XLA"] = cls._prev_comm_env
 
     def _make_concentrated_inputs(self):
         """All top-1 routes to expert 0; top-2 spread over the rest, so the rank
@@ -1059,6 +1065,25 @@ class TestEpCommSelection(unittest.TestCase):
             self._use("1", built=False, supported=True)
 
 
+def _ep_test_cases():
+    """Select test classes for one communicator mode."""
+    all_test_cases = {
+        c.__name__: c
+        for c in (TestEP, TestEPBorrowedComm, TestEPOverflowDrop, TestEpDomainGrouping)
+    }
+    names = os.environ.get("NVTE_TEST_EP_CLASSES")
+    test_cases = (
+        tuple(all_test_cases[name.strip()] for name in names.split(","))
+        if names
+        else (TestEP, TestEPOverflowDrop, TestEpDomainGrouping)
+    )
+    if TestEPBorrowedComm in test_cases and any(
+        c in test_cases for c in (TestEP, TestEPOverflowDrop)
+    ):
+        raise ValueError("Run borrowed-comm and self-hosted EP tests in separate processes.")
+    return test_cases
+
+
 # ── Entry point ──────────────────────────────────────────────────────────────
 
 
@@ -1070,6 +1095,20 @@ if __name__ == "__main__":
     coord_addr = sys.argv[1]
     proc_id = int(sys.argv[2])
     num_procs = int(sys.argv[3])
+    test_cases = _ep_test_cases()
+
+    target = os.environ.get("TARGET_TEST")
+    if target:
+        name = target.split(".")[-1]
+        if not any(
+            hasattr(c, name)
+            for c in (TestEP, TestEPBorrowedComm, TestEPOverflowDrop, TestEpDomainGrouping)
+        ):
+            raise ValueError(f"Unknown EP test: {target}")
+        test_cases = tuple(c for c in test_cases if hasattr(c, name))
+        if not test_cases:
+            unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite())
+            sys.exit(0)
 
     jax.distributed.initialize(
         coordinator_address=coord_addr,
@@ -1079,12 +1118,8 @@ if __name__ == "__main__":
     )
 
     loader = unittest.TestLoader()
-    test_cases = (TestEP, TestEPBorrowedComm, TestEPOverflowDrop, TestEpDomainGrouping)
-    target = os.environ.get("TARGET_TEST")
     if target:
-        name = target.split(".")[-1]
-        cls = next((c for c in test_cases if hasattr(c, name)), TestEP)
-        suite = loader.loadTestsFromName(name, cls)
+        suite = unittest.TestSuite(loader.loadTestsFromName(name, c) for c in test_cases)
     else:
         suite = unittest.TestSuite(loader.loadTestsFromTestCase(c) for c in test_cases)
     runner = unittest.TextTestRunner(verbosity=2)
