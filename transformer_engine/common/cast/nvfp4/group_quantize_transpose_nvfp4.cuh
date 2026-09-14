@@ -17,7 +17,6 @@
 #include <transformer_engine/transformer_engine.h>
 
 #include <algorithm>
-#include <cstdlib>
 #include <vector>
 
 #include "../../common.h"
@@ -267,33 +266,6 @@ __global__ void __launch_bounds__(FA_THREADS_NUM)
 
 }  // namespace group_row_scaled_amax_kernel
 
-// Returns true if the packed grouped input and per-expert split sizes are eligible
-// for the single-launch fused amax path.
-inline bool group_fused_amax_supported(const Tensor &input, const size_t *split_sections,
-                                       size_t num_tensors) {
-#if FP4_TYPE_SUPPORTED
-  using namespace group_row_scaled_amax_kernel;
-  static const bool enabled = []() {
-    const char *e = std::getenv("NVTE_NVFP4_FUSED_AMAX");
-    return (e == nullptr) || (e[0] != '0');
-  }();
-  if (!enabled) return false;
-  if (num_tensors == 0 || num_tensors > static_cast<size_t>(kMaxAmaxTensorsPerKernel)) return false;
-  const auto [rows, cols] = input.flat_2d_dims();
-  if (input.dtype() != DType::kBFloat16) return false;
-  if (rows % FA_CHUNK_DIM_Y != 0 || cols % FA_CHUNK_DIM_X != 0) return false;
-  for (size_t i = 0; i < num_tensors; ++i) {
-    if (split_sections[i] % FA_CHUNK_DIM_Y != 0) return false;
-  }
-  return true;
-#else
-  return false;
-#endif  // FP4_TYPE_SUPPORTED
-}
-
-// Single-launch fused row/col amax over a packed grouped (sum_M, K) BF16 input.
-// Writes per-expert rowwise amax [M_i] (output_list[i]->amax) and/or columnwise
-// amax [K] (output_list[i]->columnwise_amax).
 inline void group_compute_fused_amax(const Tensor &input, const Tensor *noop,
                                      std::vector<Tensor *> &output_list,
                                      const size_t *split_sections, size_t num_tensors,
