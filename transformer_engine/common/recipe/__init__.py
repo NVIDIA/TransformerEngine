@@ -149,11 +149,6 @@ _CACHE_ATTRIBUTES = ("_cached_repr", "_cached_quantizer_config", "_has_cached_qu
 _DerivedQParams = Dict[str, Tuple[Tuple[str, str, Callable[[Any], Any]], ...]]
 
 
-def _unchanged(value: Any) -> Any:
-    """Derived ``QParams`` field takes the recipe option's value unchanged."""
-    return value
-
-
 def _negated(value: Any) -> bool:
     """Derived ``QParams`` field takes the negation of the recipe option's value."""
     return not value
@@ -169,7 +164,8 @@ def _attached_qfactory_key(qfactory: Any) -> Optional[Hashable]:
 
 def _config_factory_key(recipe: Any, value: Any) -> Hashable:
     """Configuration entry for the quantizer factory: its semantic key alone."""
-    if value is None:
+    key = value if value is not None else _attached_qfactory_key(recipe.qfactory)
+    if key is None:
         qfactory = getattr(recipe, "qfactory", None)
         name = getattr(qfactory, "__qualname__", None) or repr(qfactory)
         raise ValueError(
@@ -183,83 +179,7 @@ def _config_factory_key(recipe: Any, value: Any) -> Hashable:
             "Bump the revision whenever the factory's behavior changes, so quantizers built from"
             " the previous behavior are rebuilt instead of silently reused."
         )
-    return value
-
-
-def _config_algorithm(field_name: str, *, half: int) -> Callable[[Any, Any], Any]:
-    """Converter for one half of a literal-or-callable algorithm field.
-
-    ``half=0`` is the algorithm entry, ``half=1`` its semantic key; each keeps its
-    own declaration position in the configuration.
-    """
-    key_name = f"{field_name}_key"
-
-    def convert(recipe: Any, value: Any) -> Any:
-        algorithm = value if half == 0 else getattr(recipe, field_name)
-        return _algorithm_config(algorithm, getattr(recipe, key_name), field_name=field_name)[half]
-
-    return convert
-
-
-# Semantic-configuration fields per recipe class, populated on first use. Kept in a
-# module dict rather than on the class: writing to a class ``__dict__`` is not
-# traceable by torch.compile, and a first activation can happen inside a compiled
-# region.
-_QUANTIZER_CONFIG_FIELDS: Dict[type, tuple] = {}
-
-
-# Converters for field values that are not their own configuration, by value type.
-_VALUE_CONFIG_CONVERTERS = (
-    (Enum, lambda recipe, value: value.name),
-    (QParams, lambda recipe, value: _qparams_config(value)),
-    (MMParams, lambda recipe, value: _mmparams_config(value)),
-)
-
-
-def _build_quantizer_config_fields(recipe: Any) -> tuple:
-    """Resolve how each dataclass field contributes to the semantic configuration.
-
-    The result depends only on the recipe class, so it is computed once per class:
-    per instance the work is then one attribute read and one ``is None`` test per
-    field. Entries are ``(entry_name, source_field, converter)`` in declaration
-    order; a ``None`` converter means the value is already its own configuration.
-    """
-    # ``fields`` is given the instance, not the class: torch.compile can trace the
-    # instance form, and a recipe's first activation may happen inside a compiled
-    # region.
-    recipe_fields = fields(recipe)
-    field_names = {f.name for f in recipe_fields}
-    config_fields = []
-    for recipe_field in recipe_fields:
-        name = recipe_field.name
-
-        # The quantizer factory is represented by its semantic key alone: the
-        # callable itself is deliberately not part of the configuration.
-        if name == "qfactory":
-            config_fields.append(("qfactory_key", "qfactory_key", _config_factory_key))
-            continue
-        if name == "qfactory_key":
-            continue
-
-        # A field with a sibling ``<field>_key`` is a literal-or-callable algorithm.
-        if f"{name}_key" in field_names:
-            config_fields.append((name, name, _config_algorithm(name, half=0)))
-            continue
-        if name.endswith("_key") and name[: -len("_key")] in field_names:
-            config_fields.append((name, name, _config_algorithm(name[: -len("_key")], half=1)))
-            continue
-
-        value = getattr(recipe, name)
-        converter = next(
-            (
-                convert
-                for value_type, convert in _VALUE_CONFIG_CONVERTERS
-                if isinstance(value, value_type)
-            ),
-            None,
-        )
-        config_fields.append((name, name, converter))
-    return tuple(config_fields)
+    return _validate_qfactory_key(key, source="CustomRecipe qfactory_key")
 
 
 def _recipe_type_entry(cls: type) -> tuple:
@@ -488,19 +408,35 @@ class Recipe:
         get this for free; adding a field to a recipe therefore cannot leave it
         out of the semantic configuration.
         """
-        cls = type(self)
-        cached_fields = _QUANTIZER_CONFIG_FIELDS.get(cls)
-        if cached_fields is None:
-            cached_fields = (_recipe_type_entry(cls), _build_quantizer_config_fields(self))
-            _QUANTIZER_CONFIG_FIELDS[cls] = cached_fields
-        recipe_type_entry, config_fields = cached_fields
-
-        values = self.__dict__
-        items = [recipe_type_entry]
+        recipe_fields = fields(self)
+        field_names = {recipe_field.name for recipe_field in recipe_fields}
+        items = [_recipe_type_entry(type(self))]
         append = items.append
-        for entry_name, source, convert in config_fields:
-            value = values[source]
-            append((entry_name, value if convert is None else convert(self, value)))
+        for recipe_field in recipe_fields:
+            name = recipe_field.name
+
+            if name == "qfactory":
+                append(("qfactory_key", _config_factory_key(self, self.qfactory_key)))
+                continue
+            if name == "qfactory_key":
+                continue
+
+            value = getattr(self, name)
+            key_name = f"{name}_key"
+            if key_name in field_names:
+                value = _algorithm_config(value, getattr(self, key_name), field_name=name)[0]
+            elif name.endswith("_key") and name[: -len("_key")] in field_names:
+                algorithm_name = name[: -len("_key")]
+                value = _algorithm_config(
+                    getattr(self, algorithm_name), value, field_name=algorithm_name
+                )[1]
+            elif isinstance(value, Enum):
+                value = value.name
+            elif isinstance(value, QParams):
+                value = _qparams_config(value)
+            elif isinstance(value, MMParams):
+                value = _mmparams_config(value)
+            append((name, value))
         return tuple(items)
 
     @abc.abstractmethod
@@ -695,9 +631,15 @@ class Float8CurrentScaling(Recipe):
 
     use_power_2_scales: bool = os.getenv("NVTE_FP8_CURRENT_SCALING_POWER_2_SCALES", "0") == "1"
     fp8_format: Format = Format.HYBRID
-    fp8_quant_fwd_inp: QParams = field(init=False)
-    fp8_quant_fwd_weight: QParams = field(init=False)
-    fp8_quant_bwd_grad: QParams = field(init=False)
+    fp8_quant_fwd_inp: QParams = field(
+        default=QParams(power_2_scale=use_power_2_scales, amax_epsilon=0.0), init=False
+    )
+    fp8_quant_fwd_weight: QParams = field(
+        default=QParams(power_2_scale=use_power_2_scales, amax_epsilon=0.0), init=False
+    )
+    fp8_quant_bwd_grad: QParams = field(
+        default=QParams(power_2_scale=use_power_2_scales, amax_epsilon=0.0), init=False
+    )
     fp8_gemm_fprop: MMParams = MMParams(use_split_accumulator=False)
     fp8_gemm_dgrad: MMParams = MMParams(use_split_accumulator=True)
     fp8_gemm_wgrad: MMParams = MMParams(use_split_accumulator=True)
@@ -705,35 +647,12 @@ class Float8CurrentScaling(Recipe):
     fp8_mha: bool = False
     backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
 
-    _DERIVED_QPARAMS: ClassVar[_DerivedQParams] = {
-        "use_power_2_scales": (
-            ("fp8_quant_fwd_inp", "power_2_scale", _unchanged),
-            ("fp8_quant_fwd_weight", "power_2_scale", _unchanged),
-            ("fp8_quant_bwd_grad", "power_2_scale", _unchanged),
-        ),
-    }
-
     def validate(self) -> None:
         super().validate()
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
         assert (
             self.backward_override in _BACKWARD_OVERRIDES
         ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
-
-    def __post_init__(self) -> None:
-        self.fp8_quant_fwd_inp = QParams(
-            power_2_scale=self.use_power_2_scales,
-            amax_epsilon=0.0,
-        )
-        self.fp8_quant_fwd_weight = QParams(
-            power_2_scale=self.use_power_2_scales,
-            amax_epsilon=0.0,
-        )
-        self.fp8_quant_bwd_grad = QParams(
-            power_2_scale=self.use_power_2_scales,
-            amax_epsilon=0.0,
-        )
-        super().__post_init__()
 
     def _make_repr(self) -> str:
         return (
@@ -848,9 +767,15 @@ class Float8BlockScaling(Recipe):
     use_f32_scales: bool = os.getenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", "0") == "1"
 
     fp8_format: Format = Format.E4M3
-    fp8_quant_fwd_inp: QParams = field(init=False)
-    fp8_quant_fwd_weight: QParams = field(init=False)
-    fp8_quant_bwd_grad: QParams = field(init=False)
+    fp8_quant_fwd_inp: QParams = field(
+        default=QParams(power_2_scale=not use_f32_scales, amax_epsilon=0.0), init=False
+    )
+    fp8_quant_fwd_weight: QParams = field(
+        default=QParams(power_2_scale=not use_f32_scales, amax_epsilon=0.0), init=False
+    )
+    fp8_quant_bwd_grad: QParams = field(
+        default=QParams(power_2_scale=not use_f32_scales, amax_epsilon=0.0), init=False
+    )
     x_block_scaling_dim: int = 1
     w_block_scaling_dim: int = 2
     grad_block_scaling_dim: int = 1
@@ -860,14 +785,6 @@ class Float8BlockScaling(Recipe):
     fp8_dpa: bool = False
     fp8_mha: bool = False
     backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
-
-    _DERIVED_QPARAMS: ClassVar[_DerivedQParams] = {
-        "use_f32_scales": (
-            ("fp8_quant_fwd_inp", "power_2_scale", _negated),
-            ("fp8_quant_fwd_weight", "power_2_scale", _negated),
-            ("fp8_quant_bwd_grad", "power_2_scale", _negated),
-        ),
-    }
 
     def validate(self) -> None:
         super().validate()
@@ -893,22 +810,6 @@ class Float8BlockScaling(Recipe):
         assert (
             self.backward_override in _BACKWARD_OVERRIDES
         ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
-
-    def __post_init__(self) -> None:
-        power_2_scale = not self.use_f32_scales
-        self.fp8_quant_fwd_inp = QParams(
-            power_2_scale=power_2_scale,
-            amax_epsilon=0.0,
-        )
-        self.fp8_quant_fwd_weight = QParams(
-            power_2_scale=power_2_scale,
-            amax_epsilon=0.0,
-        )
-        self.fp8_quant_bwd_grad = QParams(
-            power_2_scale=power_2_scale,
-            amax_epsilon=0.0,
-        )
-        super().__post_init__()
 
     def _make_repr(self) -> str:
         return (
@@ -1178,17 +1079,37 @@ class CustomRecipe(Recipe):
             raise ValueError("CustomRecipe quantization_alignment must be positive.")
 
     def __setattr__(self, name: str, value: Any) -> None:
+        if name != "qfactory" or "qfactory" not in self.__dict__:
+            super().__setattr__(name, value)
+            return
+
+        current = self.__dict__["qfactory"]
+        if current is value or current == value:
+            # Decorator metadata may have changed in place. In that case assigning
+            # the same factory is the explicit signal to rebuild its semantic config.
+            if self.qfactory_key is None:
+                object.__setattr__(self, "_cached_repr", None)
+                try:
+                    attached_key = _attached_qfactory_key(value)
+                except (TypeError, ValueError):
+                    object.__setattr__(self, "_cached_quantizer_config", None)
+                    object.__setattr__(self, "_has_cached_quantizer_config", False)
+                    raise
+                if self._has_cached_quantizer_config:
+                    cached_key = dict(self._cached_quantizer_config)["qfactory_key"]
+                    if cached_key != attached_key:
+                        object.__setattr__(self, "_cached_quantizer_config", None)
+                        object.__setattr__(self, "_has_cached_quantizer_config", False)
+            return
+
+        # An explicit key describes the factory it was supplied with. Replacing
+        # that factory requires a new explicit key or decorator metadata.
         super().__setattr__(name, value)
-        # A key stands in for one factory's behavior, so it must not outlive the
-        # factory it came from: replacing the factory re-derives it, and a
-        # replacement without a key is reported at the next activation. During
-        # construction the key is resolved by ``__post_init__`` instead.
-        if name == "qfactory" and "qfactory_key" in self.__dict__:
-            object.__setattr__(self, "qfactory_key", _attached_qfactory_key(value))
+        super().__setattr__("qfactory_key", None)
 
     def __post_init__(self) -> None:
         if self.qfactory_key is None:
-            self.qfactory_key = _attached_qfactory_key(self.qfactory)
+            _attached_qfactory_key(self.qfactory)
         else:
             self.qfactory_key = _validate_qfactory_key(
                 self.qfactory_key,
@@ -1197,10 +1118,13 @@ class CustomRecipe(Recipe):
         super().__post_init__()
 
     def _make_repr(self) -> str:
+        qfactory_key = self.qfactory_key
+        if qfactory_key is None:
+            qfactory_key = _attached_qfactory_key(self.qfactory)
         return (
             f"recipe_type={self.__class__.__name__}, "
             f"qfactory={self.qfactory}, "
-            f"qfactory_key={self.qfactory_key}, "
+            f"qfactory_key={qfactory_key}, "
             f"backward_override={self.backward_override}, "
             f"quantization_alignment={self.quantization_alignment}"
         )

@@ -372,7 +372,10 @@ class MultiheadAttention(torch.nn.Module):
         # quantized_model_init eagerly creates runtimes for weight-owning children.
         # Pass the final composed topology into their constructors so each initial
         # runtime is created with the same roles it will use during execution.
-        dpa_name = name + ".core_attention" if name is not None else ""
+        # ``_validate_name`` gives unnamed MHA modules a stable effective name.
+        # Compose every child and boundary role from it so factories see the same
+        # consumer identity on both sides of each boundary.
+        dpa_name = f"{self.name}.core_attention"
         qkv_output_role = QuantizerRole(
             module_type="dpa",
             tensor_type="qkv",
@@ -407,7 +410,7 @@ class MultiheadAttention(torch.nn.Module):
                     ub_overlap_ag=ub_overlap_ag,
                     normalization=normalization,
                     ub_name="qkv",
-                    name=name + ".layernorm_linear_qkv" if name is not None else None,
+                    name=f"{self.name}.layernorm_linear_qkv",
                     _declared_output_quantizer_role=qkv_output_role,
                     **common_gemm_kwargs,
                 )
@@ -421,7 +424,7 @@ class MultiheadAttention(torch.nn.Module):
                     return_bias=False,
                     parallel_mode=qkv_parallel_mode,
                     parameters_split=parameters_split,
-                    name=name + ".linear_qkv" if name is not None else None,
+                    name=f"{self.name}.linear_qkv",
                     _declared_output_quantizer_role=qkv_output_role,
                     **common_gemm_kwargs,
                 )
@@ -445,7 +448,7 @@ class MultiheadAttention(torch.nn.Module):
                     ub_overlap_ag=ub_overlap_ag,
                     normalization=normalization,
                     ub_name="qkv",
-                    name=name + ".layernorm_linear_q" if name is not None else None,
+                    name=f"{self.name}.layernorm_linear_q",
                     _declared_output_quantizer_role=qkv_output_role,
                     **common_gemm_kwargs,
                 )
@@ -457,6 +460,7 @@ class MultiheadAttention(torch.nn.Module):
                     bias=bias,
                     return_bias=False,
                     parallel_mode=qkv_parallel_mode,
+                    name=f"{self.name}.linear_q",
                     _declared_output_quantizer_role=qkv_output_role,
                     **common_gemm_kwargs,
                 )
@@ -468,7 +472,7 @@ class MultiheadAttention(torch.nn.Module):
                 return_bias=False,
                 parallel_mode=qkv_parallel_mode,
                 parameters_split=("key", "value") if not fuse_qkv_params else None,
-                name=name + ".linear_kv" if name is not None else None,
+                name=f"{self.name}.linear_kv",
                 _declared_output_quantizer_role=qkv_output_role,
                 **common_gemm_kwargs,
             )
@@ -477,8 +481,8 @@ class MultiheadAttention(torch.nn.Module):
                 self.key_value,
             ]
 
-        qkv_name = qkv_producers[0].name if name is not None else ""
-        proj_name = name + ".proj" if name is not None else ""
+        qkv_name = qkv_producers[0].name
+        proj_name = f"{self.name}.proj"
 
         # Attention.
         self.core_attention = DotProductAttention(
@@ -494,7 +498,7 @@ class MultiheadAttention(torch.nn.Module):
             layer_number=self.layer_number,
             attention_type=self.attention_type,
             softmax_type=self.softmax_type,
-            name=name + ".core_attention" if name is not None else None,
+            name=dpa_name,
             _declared_output_quantizer_role=QuantizerRole(
                 module_type="linear",
                 tensor_type="input",
@@ -518,7 +522,7 @@ class MultiheadAttention(torch.nn.Module):
             ub_overlap_rs=ub_overlap_rs,
             ub_overlap_ag=ub_overlap_ag,
             ub_name="proj",
-            name=name + ".proj" if name is not None else None,
+            name=proj_name,
             _declared_grad_input_quantizer_role=QuantizerRole(
                 module_type="dpa",
                 tensor_type="do",

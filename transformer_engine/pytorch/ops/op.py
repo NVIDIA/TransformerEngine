@@ -486,6 +486,12 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
 
                 # Construct builder class for quantized tensors
                 self._quantizers[mode] = recipe_state.make_quantizers()
+                if recipe.float8_current_scaling():
+                    # Preserve the legacy te.ops behavior. Its current-scaling
+                    # customization wrote the wrong attribute, so amax epsilon
+                    # remained at the quantizer default.
+                    for quantizer in self._quantizers[mode]:
+                        quantizer.amax_epsilon = 0.0
         else:
             # Update quantization recipe states
             for mode in ("forward", "backward"):

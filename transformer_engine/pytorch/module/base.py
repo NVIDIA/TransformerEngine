@@ -87,7 +87,6 @@ class _QuantizationUpdate:
     """A validated runtime update that is ready to commit."""
 
     candidate: Optional[_QuantizationRuntime]
-    validation_result: Any
     role_revision: int
 
 
@@ -1194,6 +1193,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             recipe = copy.copy(runtime.recipe)
             recipe.amax_history_len = length
             runtime.recipe = recipe
+            runtime.forward_state.recipe = recipe
+            runtime.backward_state.recipe = recipe
             runtime.key = dataclasses.replace(runtime.key, recipe_config=recipe.quantizer_config())
             runtime.forward_quantizers = self.quantizers["scaling_fwd"]
             runtime.backward_quantizers = self.quantizers["scaling_bwd"]
@@ -1322,19 +1323,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             backward_quantizers=backward_quantizers,
         )
 
-    def _validate_quantization_runtime(self, candidate: _QuantizationRuntime) -> Any:
-        """Validate a built candidate and return optional precomputed activation data."""
+    def _validate_quantization_runtime(self, candidate: _QuantizationRuntime) -> None:
+        """Validate a built candidate and attach any owner-specific traits to it."""
         del candidate
 
-    def _activate_quantization_runtime(
-        self,
-        candidate: _QuantizationRuntime,
-        *,
-        validation_result: Any = None,
-    ) -> None:
+    def _activate_quantization_runtime(self, candidate: _QuantizationRuntime) -> None:
         """Publish a validated replacement runtime and its compatibility views."""
-        # Owner-derived state lives on the runtime, so it cannot outlive it.
-        candidate.owner_traits = validation_result
         recipe = candidate.recipe
         forward_state = candidate.forward_state
         backward_state = candidate.backward_state
@@ -1450,7 +1444,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if active is not None and active.key == requested_key and active.num_gemms == num_gemms:
             return _QuantizationUpdate(
                 candidate=None,
-                validation_result=None,
                 role_revision=role_revision,
             )
 
@@ -1480,13 +1473,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         )
         if active is not None and self._runtime_has_delayed_scaling(candidate):
             self._reject_delayed_scaling_update()
-        # Subclasses may return transient commit data even though the base implementation
-        # returns None, which pylint cannot infer through dynamic dispatch.
-        # pylint: disable-next=assignment-from-no-return
-        validation_result = self._validate_quantization_runtime(candidate)
+        self._validate_quantization_runtime(candidate)
         return _QuantizationUpdate(
             candidate=candidate,
-            validation_result=validation_result,
             role_revision=role_revision,
         )
 
@@ -1525,10 +1514,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             active.role_revision = update.role_revision
             return False
 
-        self._activate_quantization_runtime(
-            candidate,
-            validation_result=update.validation_result,
-        )
+        self._activate_quantization_runtime(candidate)
         return True
 
     def _ensure_quantization_runtime(
@@ -1950,16 +1936,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         original_recipe = meta.get("recipe")
         recipe = FP8GlobalStateManager.get_fp8_recipe()
 
-        try:
-            runtime_changed = self._ensure_quantization_runtime(
-                recipe=recipe,
-                num_gemms=num_gemms,
-            )
-        except BaseException:
-            # Any failure here leaves this module's delayed state unusable for a
-            # reduction the region may still complete.
-            FP8GlobalStateManager.abort_current_amax_reduction()
-            raise
+        runtime_changed = self._ensure_quantization_runtime(
+            recipe=recipe,
+            num_gemms=num_gemms,
+        )
         if fp8_enabled:
             meta["fp8_group"] = FP8GlobalStateManager.get_fp8_group()
         if fp8_enabled:

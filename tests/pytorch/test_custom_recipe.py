@@ -66,7 +66,9 @@ def test_first_party_qfactories_have_canonical_qfactory_keys(qfactory):
     assert len(qfactory_key) == 2
     assert isinstance(qfactory_key[0], str) and qfactory_key[0]
     assert isinstance(qfactory_key[1], int) and qfactory_key[1] > 0
-    assert recipe.CustomRecipe(qfactory=qfactory).qfactory_key == qfactory_key
+    custom_recipe = recipe.CustomRecipe(qfactory=qfactory)
+    assert custom_recipe.qfactory_key is None
+    assert dict(custom_recipe.quantizer_config())["qfactory_key"] == qfactory_key
 
 
 @pytest.mark.parametrize("module_type", ["Linear", "LayerNormLinear", "OpsLinear"])
@@ -1674,6 +1676,7 @@ def test_fp8block_recipe_state_per_slot_qparams_are_honoured():
         fp8_recipe,
         mode="forward",
         num_quantizers=3,
+        device=torch.device("cpu"),
         roles=[
             _fp8block_role("input"),
             _fp8block_role("weight"),
@@ -1688,6 +1691,7 @@ def test_fp8block_recipe_state_per_slot_qparams_are_honoured():
         fp8_recipe,
         mode="backward",
         num_quantizers=2,
+        device=torch.device("cpu"),
         roles=[
             _fp8block_role("grad_output"),
             _fp8block_role("grad_input"),

@@ -502,149 +502,24 @@ def test_same_delayed_recipe_object_mutation_keeps_committed_snapshot():
     assert committed_recipe.margin == 0
 
 
-def test_rejected_delayed_update_aborts_autocast_reduction():
-    """A caught activation failure cannot update the old delayed tensors on exit."""
-    available, reason = is_fp8_available(return_reason=True)
-    if not available:
-        pytest.skip(reason)
-
-    module = Linear(
-        16,
-        16,
-        bias=False,
-        params_dtype=torch.bfloat16,
-        device="cuda",
-        name="linear",
-    )
-    inp = torch.randn(8, 16, device="cuda", dtype=torch.bfloat16)
-    recipe = DelayedScaling(amax_history_len=4, margin=0)
-    with autocast(enabled=True, recipe=recipe):
-        module(inp)
-
-    state = module.fp8_meta["scaling_fwd"]
-    state.scale.fill_(3)
-    state.amax_history.fill_(7)
-    expected_scale = state.scale.clone()
-    expected_history = state.amax_history.clone()
-
-    recipe.margin = 1
-    with autocast(enabled=True, recipe=recipe):
-        with pytest.raises(RuntimeError, match="do not support delayed scaling"):
-            module(inp)
-
-    assert torch.equal(state.scale, expected_scale)
-    assert torch.equal(state.amax_history, expected_history)
-
-
-def test_failed_stateless_activation_aborts_a_registered_delayed_reduction():
-    """A caught failure in one module must not update another module's delayed bucket."""
+def test_region_failure_does_not_skip_autocast_reduction(monkeypatch):
+    """All ranks retain the DelayedScaling collective schedule after an exception."""
     available, reason = is_fp8_available(return_reason=True)
     if not available:
         pytest.skip(reason)
 
     FP8GlobalStateManager.reset()
     try:
-        inp = torch.randn(16, 16, device="cuda", dtype=torch.bfloat16)
-        delayed_module = Linear(
-            16,
-            16,
-            bias=False,
-            params_dtype=torch.bfloat16,
-            device="cuda",
-            name="delayed",
-        )
-        with autocast(enabled=True, recipe=DelayedScaling(amax_history_len=4, margin=0)):
-            delayed_module(inp)
-
-        state = delayed_module.fp8_meta["scaling_fwd"]
-        state.scale.fill_(3)
-        state.amax_history.fill_(7)
-        expected_scale = state.scale.clone()
-        expected_history = state.amax_history.clone()
-
-        def failing_qfactory(role):
-            del role
-            raise RuntimeError("deliberate qfactory failure")
-
-        stateless_module = Linear(
-            16,
-            16,
-            bias=False,
-            params_dtype=torch.bfloat16,
-            device="cuda",
-            name="stateless",
-        )
-        recipe = CustomRecipe(qfactory=failing_qfactory, qfactory_key=("abort-stateless", 1))
-        with autocast(enabled=True, recipe=recipe):
-            with pytest.raises(RuntimeError, match="deliberate qfactory failure"):
-                stateless_module(inp)
-
-        assert torch.equal(state.scale, expected_scale)
-        assert torch.equal(state.amax_history, expected_history)
-    finally:
-        FP8GlobalStateManager.reset()
-
-
-def test_uncaught_region_failure_aborts_the_autocast_reduction():
-    """An exception that escapes the region leaves its delayed tensors untouched."""
-    available, reason = is_fp8_available(return_reason=True)
-    if not available:
-        pytest.skip(reason)
-
-    FP8GlobalStateManager.reset()
-    try:
-        inp = torch.randn(16, 16, device="cuda", dtype=torch.bfloat16)
-        module = Linear(
-            16,
-            16,
-            bias=False,
-            params_dtype=torch.bfloat16,
-            device="cuda",
-            name="linear",
-        )
-        recipe = DelayedScaling(amax_history_len=4, margin=0)
-        with autocast(enabled=True, recipe=recipe):
-            module(inp)
-
-        state = module.fp8_meta["scaling_fwd"]
-        state.scale.fill_(3)
-        state.amax_history.fill_(7)
-        expected_scale = state.scale.clone()
-        expected_history = state.amax_history.clone()
-
-        with pytest.raises(RuntimeError, match="deliberate region failure"):
-            with autocast(enabled=True, recipe=recipe):
-                raise RuntimeError("deliberate region failure")
-
-        assert torch.equal(state.scale, expected_scale)
-        assert torch.equal(state.amax_history, expected_history)
-    finally:
-        FP8GlobalStateManager.reset()
-
-
-def test_rejected_fusible_update_aborts_autocast_reduction(monkeypatch):
-    """The fusible rejection fires before the op reset loop, so it must still abort."""
-    available, reason = is_fp8_available(return_reason=True)
-    if not available:
-        pytest.skip(reason)
-
-    FP8GlobalStateManager.reset()
-    try:
-        model = te_ops.Sequential(te_ops.Linear(16, 16, bias=False, device="cuda"))
-        inp = torch.randn(16, 16, device="cuda", dtype=torch.bfloat16)
-        with autocast(enabled=True, recipe=DelayedScaling(amax_history_len=4, margin=0)):
-            model(inp)
-
         reductions = []
         monkeypatch.setattr(
             FP8GlobalStateManager,
             "reduce_and_update_fp8_tensors",
             classmethod(lambda _cls, forward=True: reductions.append(forward)),
         )
-        with autocast(enabled=True, recipe=DelayedScaling(amax_history_len=4, margin=1)):
-            with pytest.raises(RuntimeError, match="not supported for fusible operations"):
-                model(inp)
-        assert not reductions
+        with pytest.raises(RuntimeError, match="deliberate region failure"):
+            with autocast(enabled=True, recipe=DelayedScaling()):
+                raise RuntimeError("deliberate region failure")
+        assert reductions == [True]
     finally:
         FP8GlobalStateManager.reset()
 
@@ -910,63 +785,6 @@ def test_same_recipe_object_semantic_mutation_rebuilds_runtime():
     assert len(calls) == 10
 
 
-def test_current_scaling_flag_mutation_rebuilds_concrete_quantizers():
-    """A same-object power-of-two update must change the active quantizers."""
-    available, reason = is_fp8_available(return_reason=True)
-    if not available:
-        pytest.skip(reason)
-
-    FP8GlobalStateManager.reset()
-    recipe = Float8CurrentScaling(use_power_2_scales=False)
-    module = Linear(
-        128,
-        128,
-        bias=False,
-        params_dtype=torch.bfloat16,
-        device="cuda",
-        name="current",
-    )
-    try:
-        apply_recipe(module, recipe)
-        old_runtime = module._quantization_runtime  # pylint: disable=protected-access
-        assert not old_runtime.forward_quantizers[0].force_pow_2_scales
-        assert not old_runtime.forward_quantizers[1].force_pow_2_scales
-        assert not old_runtime.backward_quantizers[0].force_pow_2_scales
-
-        recipe.use_power_2_scales = True
-        apply_recipe(module, recipe)
-        runtime = module._quantization_runtime  # pylint: disable=protected-access
-        assert runtime is not old_runtime
-        assert runtime.forward_quantizers[0].force_pow_2_scales
-        assert runtime.forward_quantizers[1].force_pow_2_scales
-        assert runtime.backward_quantizers[0].force_pow_2_scales
-
-        inp = torch.randn(128, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-        _run_update_step(module, recipe, inp)
-        assert module._quantization_runtime is runtime  # pylint: disable=protected-access
-    finally:
-        FP8GlobalStateManager.reset()
-
-
-@pytest.mark.parametrize(("initial", "target"), ((False, True), (True, False)))
-def test_current_scaling_same_object_mutation_matches_fresh_recipe(initial, target):
-    """Same-object flag updates match fresh target recipes in both directions."""
-    available, reason = is_fp8_available(return_reason=True)
-    if not available:
-        pytest.skip(reason)
-
-    FP8GlobalStateManager.reset()
-    try:
-        _check_same_object_mutation_against_fresh_recipe(
-            Float8CurrentScaling(use_power_2_scales=initial),
-            Float8CurrentScaling(use_power_2_scales=target),
-            {"use_power_2_scales": target},
-            seed=6200 + int(target),
-        )
-    finally:
-        FP8GlobalStateManager.reset()
-
-
 def test_float8_block_same_object_layout_mutation_matches_fresh_recipe():
     """A warmed Float8BlockScaling layout update matches a fresh target."""
     available, reason = is_fp8_block_scaling_available(return_reason=True)
@@ -981,6 +799,33 @@ def test_float8_block_same_object_layout_mutation_matches_fresh_recipe():
             {"x_block_scaling_dim": 2, "w_block_scaling_dim": 1},
             seed=6250,
         )
+    finally:
+        FP8GlobalStateManager.reset()
+
+
+def test_apply_recipe_rejects_unsupported_block_scales_before_commit():
+    """Blackwell scale restrictions are checked before an existing runtime is replaced."""
+    available, reason = is_fp8_block_scaling_available(return_reason=True)
+    if not available:
+        pytest.skip(reason)
+    if torch.cuda.get_device_capability() < (10, 0):
+        pytest.skip("FP32 block scales are supported before Blackwell")
+
+    FP8GlobalStateManager.reset()
+    module = Linear(128, 128, bias=False, device="cuda", name="block")
+    initial_recipe = Float8BlockScaling()
+    try:
+        apply_recipe(module, initial_recipe)
+        old_runtime = module._quantization_runtime  # pylint: disable=protected-access
+        old_global_state = _global_recipe_state()
+
+        unsupported_recipe = Float8BlockScaling()
+        unsupported_recipe.fp8_quant_fwd_inp = QParams(power_2_scale=False)
+        for _ in range(2):
+            with pytest.raises(RuntimeError, match="requires power-of-two scales"):
+                apply_recipe(module, unsupported_recipe)
+            assert module._quantization_runtime is old_runtime  # pylint: disable=protected-access
+            assert _global_recipe_state() == old_global_state
     finally:
         FP8GlobalStateManager.reset()
 
@@ -1056,42 +901,6 @@ def test_native_recipe_transition_matches_fresh_target():
             (Float8CurrentScaling(), MXFP8BlockScaling(), Float8CurrentScaling()),
             seed=6300,
         )
-    finally:
-        FP8GlobalStateManager.reset()
-
-
-def test_float8_block_scaling_flag_mutation_rebuilds_concrete_quantizers():
-    """A same-object FP32-scale update must change the active quantizers."""
-    available, reason = is_fp8_block_scaling_available(return_reason=True)
-    if not available:
-        pytest.skip(reason)
-    if torch.cuda.get_device_capability() >= (10, 0):
-        pytest.skip("Blackwell FP8 block-scaling emulation requires power-of-two scales")
-
-    FP8GlobalStateManager.reset()
-    recipe = Float8BlockScaling(use_f32_scales=False)
-    module = Linear(
-        128,
-        128,
-        bias=False,
-        params_dtype=torch.bfloat16,
-        device="cuda",
-        name="block",
-    )
-    try:
-        apply_recipe(module, recipe)
-        old_runtime = module._quantization_runtime  # pylint: disable=protected-access
-        assert old_runtime.forward_quantizers[0].force_pow_2_scales
-        assert old_runtime.forward_quantizers[1].force_pow_2_scales
-        assert old_runtime.backward_quantizers[0].force_pow_2_scales
-
-        recipe.use_f32_scales = True
-        apply_recipe(module, recipe)
-        runtime = module._quantization_runtime  # pylint: disable=protected-access
-        assert runtime is not old_runtime
-        assert not runtime.forward_quantizers[0].force_pow_2_scales
-        assert not runtime.forward_quantizers[1].force_pow_2_scales
-        assert not runtime.backward_quantizers[0].force_pow_2_scales
     finally:
         FP8GlobalStateManager.reset()
 
@@ -1549,6 +1358,70 @@ def test_composed_module_executes_after_recipe_update(module_factory):
     _assert_numerical_traces_match(second_trace, first_trace)
 
 
+@pytest.mark.parametrize("eager_apply", (False, True), ids=("lazy", "apply-recipe"))
+def test_inert_builtin_dpa_recipe_update_matches_fresh_target(eager_apply):
+    """A warmed BF16-attention MHA accepts an outer built-in recipe update."""
+    if not is_nvfp4_available():
+        pytest.skip("NVFP4 is not available")
+    available, reason = is_mxfp8_available(return_reason=True)
+    if not available:
+        pytest.skip(reason)
+
+    def make_mha():
+        return MultiheadAttention(
+            hidden_size=128,
+            num_attention_heads=2,
+            attention_dropout=0.0,
+            attn_mask_type="no_mask",
+            bias=False,
+            params_dtype=torch.bfloat16,
+            device="cuda",
+            name="mha",
+        )
+
+    FP8GlobalStateManager.reset()
+    torch.manual_seed(2026)
+    switching = make_mha()
+    reference = make_mha()
+    reference.load_state_dict(switching.state_dict())
+    old_recipe = NVFP4BlockScaling(
+        disable_rht=True,
+        disable_stochastic_rounding=True,
+    )
+    target_recipe = MXFP8BlockScaling()
+
+    try:
+        warmup_inp = torch.randn(
+            128,
+            2,
+            128,
+            device="cuda",
+            dtype=torch.bfloat16,
+            requires_grad=True,
+        )
+        _run_numerical_step(switching, old_recipe, warmup_inp)
+        assert switching.core_attention.fp8_initialized
+
+        if eager_apply:
+            apply_recipe(switching, target_recipe)
+
+        base_inp = torch.randn(128, 2, 128, device="cuda", dtype=torch.bfloat16)
+        actual, output_grad = _run_numerical_step(
+            switching,
+            target_recipe,
+            base_inp.detach().clone().requires_grad_(True),
+        )
+        expected, _ = _run_numerical_step(
+            reference,
+            target_recipe,
+            base_inp.detach().clone().requires_grad_(True),
+            output_grad=output_grad,
+        )
+        _assert_numerical_traces_match(actual, expected)
+    finally:
+        FP8GlobalStateManager.reset()
+
+
 @pytest.mark.parametrize(
     "module_factory",
     (
@@ -1822,8 +1695,8 @@ def test_apply_recipe_rejects_e2e_mha_reproducer_during_planning():
     "name",
     (pytest.param(None, id="unnamed"), pytest.param("mha", id="named")),
 )
-def test_mha_constructor_declares_literal_dpa_qkv_role(attention_type, input_layernorm, name):
-    """Every MHA variant constructs and declares the QKV boundary role by literal name.
+def test_mha_constructor_uses_consistent_dpa_qkv_role(attention_type, input_layernorm, name):
+    """Every MHA variant uses one effective name on both sides of its boundaries.
 
     Construction alone is the regression guard: ``dpa_name`` used to be
     referenced before assignment, so every one of these variants raised
@@ -1841,12 +1714,10 @@ def test_mha_constructor_declares_literal_dpa_qkv_role(attention_type, input_lay
         name=name,
     )
 
-    # Literal, not derived from the DPA child: an unnamed MHA declares "" like
-    # qkv_name/proj_name do, a named one declares the child's composed name.
     expected_qkv = QuantizerRole(
         module_type="dpa",
         tensor_type="qkv",
-        name="mha.core_attention" if name is not None else "",
+        name=module.core_attention.name,
     )
     if attention_type == "self":
         qkv_producers = [module.layernorm_qkv if input_layernorm else module.qkv]
@@ -1866,16 +1737,9 @@ def test_mha_constructor_declares_literal_dpa_qkv_role(attention_type, input_lay
         num_quantizers=9,
         boundary_role=None,
     )[0]
-    if name is not None:
-        # Producer-declared and DPA own-slot roles agree on both sides.
-        assert dpa_own_qkv_role == expected_qkv
-    else:
-        # WP9(b) will give unnamed modules "" on both sides. Today the DPA child
-        # still auto-names itself in __init__, so the two sides disagree; pin that
-        # so the equality above can be extended deliberately.
-        assert module.core_attention.name.startswith("Layer_")
-        assert dpa_own_qkv_role.name == module.core_attention.name
-        assert dpa_own_qkv_role != expected_qkv
+    assert dpa_own_qkv_role == expected_qkv
+    assert module.core_attention.name == f"{module.name}.core_attention"
+    assert module.proj.name == f"{module.name}.proj"
 
 
 @pytest.mark.parametrize(
@@ -2040,9 +1904,9 @@ def test_delayed_qmi_mha_first_forward_preserves_initialized_runtimes(
         initialized_owners = _active_runtime_owners(module)
         assert initialized_owners == [qkv, module.proj]
         assert all(owner.primary_weights_in_fp8 for owner in initialized_owners)
-        semantic_dpa_name = "" if name is None else module.core_attention.name
-        semantic_qkv_name = "" if name is None else qkv.name
-        semantic_proj_name = "" if name is None else module.proj.name
+        semantic_dpa_name = module.core_attention.name
+        semantic_qkv_name = qkv.name
+        semantic_proj_name = module.proj.name
         assert all(
             owner._role_revision == owner._quantization_runtime.role_revision == 0
             for owner in initialized_owners
@@ -2623,6 +2487,67 @@ def test_apply_recipe_rejects_legacy_dpa_path():
         FP8GlobalStateManager.reset()
 
 
+def test_rejected_builtin_dpa_update_keeps_planning_and_forward_state_atomic(monkeypatch):
+    """Unsupported built-in FP8-attention changes never publish partial state."""
+    import importlib
+
+    available, reason = is_fp8_available(return_reason=True)
+    if not available:
+        pytest.skip(reason)
+
+    dpa_module = importlib.import_module(
+        "transformer_engine.pytorch.attention.dot_product_attention.dot_product_attention"
+    )
+    monkeypatch.setattr(dpa_module, "_dpa_fp8_recipe", "Float8CurrentScaling")
+
+    FP8GlobalStateManager.reset()
+    dpa = DotProductAttention(
+        num_attention_heads=2,
+        kv_channels=16,
+        attention_dropout=0.0,
+        name="dpa",
+    ).cuda()
+    linear = Linear(16, 16, bias=False, device="cuda", name="linear")
+    active_recipe = Float8CurrentScaling(fp8_dpa=True)
+
+    try:
+        with autocast(enabled=True, recipe=active_recipe):
+            dpa.init_fp8_metadata()
+        assert dpa.fp8_initialized
+
+        metadata_keys = (
+            "global_recipe",
+            "local_recipes",
+            "recipe",
+            "scaling_fwd",
+            "scaling_bwd",
+        )
+        metadata_before = {key: dpa.fp8_meta.get(key) for key in metadata_keys}
+
+        def assert_metadata_unchanged():
+            assert all(dpa.fp8_meta.get(key) is value for key, value in metadata_before.items())
+
+        global_before = _global_recipe_state()
+
+        # Planning an active-attention -> BF16-attention transition rejects before
+        # the sibling Linear candidate or global recipe can be committed.
+        with pytest.raises(RuntimeError, match="only through CustomRecipe"):
+            apply_recipe(torch.nn.ModuleList([linear, dpa]), Float8CurrentScaling())
+        assert linear._quantization_runtime is None  # pylint: disable=protected-access
+        assert _global_recipe_state() == global_before
+        assert_metadata_unchanged()
+
+        changed_recipe = Float8CurrentScaling(fp8_dpa=True)
+        changed_recipe.fp8_quant_fwd_inp = QParams(amax_epsilon=0.25)
+        for _ in range(2):
+            with pytest.raises(RuntimeError, match="built-in DotProductAttention recipe path"):
+                with autocast(enabled=True, recipe=changed_recipe):
+                    dpa.init_fp8_metadata()
+            assert_metadata_unchanged()
+    finally:
+        FP8GlobalStateManager.reset()
+
+
 def test_graph_capture_resizes_amax_history_and_leaves_a_consistent_runtime():
     """A direct resize bypasses the planner, so it must re-key the runtime itself."""
     available, reason = is_fp8_available(return_reason=True)
@@ -2649,6 +2574,8 @@ def test_graph_capture_resizes_amax_history_and_leaves_a_consistent_runtime():
         assert module.fp8_meta["scaling_fwd"].amax_history.shape[0] == 16
         runtime = module._quantization_runtime  # pylint: disable=protected-access
         assert runtime.recipe.amax_history_len == 16
+        assert runtime.forward_state.recipe is runtime.recipe
+        assert runtime.backward_state.recipe is runtime.recipe
         assert runtime.key.recipe_config == runtime.recipe.quantizer_config()
         assert module.fp8_meta["recipe"] is runtime.recipe
     finally:

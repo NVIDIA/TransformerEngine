@@ -1143,14 +1143,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             super().init_fp8_metadata(num_gemms=num_gemms)
             return
 
-        try:
-            self._init_builtin_fp8_metadata(num_gemms, fp8_recipe, _original_recipe)
-        except BaseException:
-            # The built-in path bypasses the base init_fp8_metadata abort wrapper,
-            # so its rejections must still protect a reduction this region may
-            # complete with delayed tensors this module can no longer update.
-            FP8GlobalStateManager.abort_current_amax_reduction()
-            raise
+        self._init_builtin_fp8_metadata(num_gemms, fp8_recipe, _original_recipe)
 
     def _init_builtin_fp8_metadata(
         self,
@@ -1295,18 +1288,14 @@ class DotProductAttention(TransformerEngineBaseModule):
         # assume attention uses the same fp8_group as GEMMs
         fp8_group = FP8GlobalStateManager.get_fp8_group()
 
-        self.fast_setattr("fp8_parameters", FP8GlobalStateManager.with_fp8_parameters())
-        self.fast_setattr("fp8", FP8GlobalStateManager.is_fp8_enabled())
-        self.fast_setattr("fp8_calibration", FP8GlobalStateManager.is_fp8_calibration())
-        fp8_enabled = self.fp8 or self.fp8_calibration
-        self.fp8_meta["fp8_checkpoint"] = self.fp8 or self.fp8_calibration
+        fp8_parameters = FP8GlobalStateManager.with_fp8_parameters()
+        fp8 = FP8GlobalStateManager.is_fp8_enabled()
+        fp8_calibration = FP8GlobalStateManager.is_fp8_calibration()
+        fp8_enabled = fp8 or fp8_calibration
         local_recipes = fp8_recipes if isinstance(fp8_recipes, List) else [fp8_recipes]
         previous_local_recipes = self.fp8_meta.get("local_recipes")
-        if self.fp8_parameters or fp8_enabled:
-            self.fp8_meta["global_recipe"] = fp8_recipe
-            self.fp8_meta["local_recipes"] = local_recipes
 
-        if self.fp8_parameters or fp8_enabled:
+        if fp8_parameters or fp8_enabled:
             # Taking ownership here would strand a CustomRecipe runtime still
             # pointing at this module's state. The two paths do not hand state
             # back and forth; with quantization off nothing is published, so this
@@ -1319,8 +1308,23 @@ class DotProductAttention(TransformerEngineBaseModule):
                 self.fp8_initialized
                 and previous_local_recipes
                 and previous_local_recipes != local_recipes
+                and (
+                    self._builtin_recipes_quantize_attention(previous_local_recipes)
+                    or self._builtin_recipes_quantize_attention(local_recipes)
+                )
             ):
                 self._reject_builtin_dpa_update()
+
+        # Publish only after transition validation. A rejected update must not
+        # change the baseline used by the next attempt.
+        self.fast_setattr("fp8_parameters", fp8_parameters)
+        self.fast_setattr("fp8", fp8)
+        self.fast_setattr("fp8_calibration", fp8_calibration)
+        self.fp8_meta["fp8_checkpoint"] = fp8_enabled
+
+        if self.fp8_parameters or fp8_enabled:
+            self.fp8_meta["global_recipe"] = fp8_recipe
+            self.fp8_meta["local_recipes"] = local_recipes
             if self.fp8_initialized and fp8_recipe_dpa == self.fp8_meta["recipe"]:
                 # FP8 init has already been run and recipe is the same, don't do anything.
                 return
@@ -1374,6 +1378,11 @@ class DotProductAttention(TransformerEngineBaseModule):
         )
 
     @staticmethod
+    def _builtin_recipes_quantize_attention(recipes: Optional[List[Recipe]]) -> bool:
+        """Return whether resolved built-in recipes enable attention quantization."""
+        return bool(recipes) and any(recipe.fp8_dpa or recipe.fp8_mha for recipe in recipes)
+
+    @staticmethod
     def _rehash_autocast_arguments(fp8_recipe, fp8_recipe_dpa, fp8_group) -> None:
         """Re-register reduction arguments when DPA resolved its own recipe."""
         if fp8_recipe == fp8_recipe_dpa:
@@ -1399,10 +1408,19 @@ class DotProductAttention(TransformerEngineBaseModule):
                     f"{diagnostic_name!r}."
                 )
             runtime = getattr(self, "_quantization_runtime", None)
-            if runtime is not None and self._runtime_has_delayed_scaling(runtime):
-                # Committing would hand this module to the built-in path while it
-                # owns delayed state registered for reduction.
+            if runtime is not None:
+                # The forward path cannot hand CustomRecipe-owned state to the
+                # built-in path. Reject during planning before sibling owners commit.
                 self._reject_builtin_dpa_update()
+            previous_local_recipes = self.fp8_meta.get("local_recipes")
+            if self.fp8_initialized and self._builtin_recipes_quantize_attention(
+                previous_local_recipes
+            ):
+                raise RuntimeError(
+                    "te.apply_recipe() supports DotProductAttention only through CustomRecipe; "
+                    "the built-in NVTE_DPA_* path remains lazy and unchanged for "
+                    f"{diagnostic_name!r}."
+                )
             # Quantization-inert for attention: nothing here to update.
             return None
         return super()._plan_recipe_update(recipe, diagnostic_name=diagnostic_name)
@@ -1438,20 +1456,12 @@ class DotProductAttention(TransformerEngineBaseModule):
         """Force backend reselection after a committed quantizer replacement."""
         _attention_backends["backend_selection_requires_update"] = True
 
-    def _activate_quantization_runtime(
-        self,
-        candidate: _QuantizationRuntime,
-        *,
-        validation_result: Optional[List[Recipe]] = None,
-    ) -> None:
+    def _activate_quantization_runtime(self, candidate: _QuantizationRuntime) -> None:
         """Publish a CustomRecipe DPA runtime and its derived cache state."""
-        super()._activate_quantization_runtime(
-            candidate,
-            validation_result=validation_result,
-        )
+        super()._activate_quantization_runtime(candidate)
         self._invalidate_dpa_runtime_caches()
 
-        local_recipes = validation_result
+        local_recipes = candidate.owner_traits
         if local_recipes is None:
             # Do not leave labels from an earlier supported quantizer family
             # attached after a rebuild to an unsupported family.
@@ -1462,7 +1472,7 @@ class DotProductAttention(TransformerEngineBaseModule):
     def _validate_quantization_runtime(
         self,
         candidate: _QuantizationRuntime,
-    ) -> Optional[List[Recipe]]:
+    ) -> None:
         """Validate an FP8-attention candidate before publishing it."""
         super()._validate_quantization_runtime(candidate)
         if candidate.recipe.fp8_dpa:
@@ -1504,7 +1514,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     "for DPA tensor types 's' and 'dp'."
                 )
 
-        return _infer_custom_dpa_local_recipes(
+        candidate.owner_traits = _infer_custom_dpa_local_recipes(
             candidate.recipe,
             {"scaling_fwd": candidate.forward_state},
             {

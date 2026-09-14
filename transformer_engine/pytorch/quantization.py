@@ -455,7 +455,6 @@ class FP8GlobalState:
     is_first_fp8_module: bool = False
     fp8_graph_capturing: bool = False
     autocast_depth: int = 0
-    abort_amax_reduction: bool = False
     global_amax_buffer: Dict[str, list] = field(default_factory=dict)
     global_amax_history_buffer: Dict[str, list] = field(default_factory=dict)
     global_scale_buffer: Dict[str, list] = field(default_factory=dict)
@@ -755,8 +754,6 @@ class FP8GlobalStateManager:
         """Delayed scaling only. Concatenate, reduce, and split amaxes in the global buffer."""
         # global_amax_buffer should only be non-empty for fp8 delayed scaling
         qstate = cls.quantization_state
-        if qstate.abort_amax_reduction:
-            return
         for (
             buffer_key,
             amax_buffer,
@@ -862,36 +859,18 @@ class FP8GlobalStateManager:
         qstate.fp8_graph_capturing = _graph
 
         if qstate.autocast_depth == 0:
-            qstate.abort_amax_reduction = False
             qstate.is_first_fp8_module = True
         qstate.autocast_depth += 1
-
-    @classmethod
-    def abort_current_amax_reduction(cls) -> None:
-        """Prevent delayed-state updates when the active autocast has failed."""
-        qstate = cls.quantization_state
-        if qstate.autocast_depth > 0:
-            qstate.abort_amax_reduction = True
 
     @classmethod
     def autocast_exit(cls, enabled: bool, _graph: bool) -> None:
         """Set state and tracking variables for exit from FP8 region."""
         qstate = cls.quantization_state
         qstate.autocast_depth -= 1
-        outermost = qstate.autocast_depth == 0
         # Reduce only the non-FP8 weight modules here.
         # FP8 weight modules are reduced at the end of the optimizer
         # step after the weight amax is populated.
-        should_reduce = (
-            enabled
-            and outermost
-            and not qstate.abort_amax_reduction
-            and not _graph
-            and torch.is_grad_enabled()
-        )
-        if outermost:
-            qstate.abort_amax_reduction = False
-        if should_reduce:
+        if enabled and qstate.autocast_depth == 0 and not _graph and torch.is_grad_enabled():
             # Delayed scaling only function. For other recipes this is a
             # no-op because the global amax buffer is empty.
             cls.reduce_and_update_fp8_tensors(forward=True)
@@ -1264,8 +1243,6 @@ class autocast:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        if exc_type is not None:
-            FP8GlobalStateManager.abort_current_amax_reduction()
         try:
             FP8GlobalStateManager.set_autocast_state(self._fp8_state)
             FP8GlobalStateManager.autocast_exit(self._enabled, _graph=self._graph)
@@ -1709,13 +1686,15 @@ class Float8CurrentScalingRecipeState(RecipeState):
 
         Input, weight, and grad-output slots use their corresponding recipe
         qparams. Output and grad-input boundary slots retain the legacy
-        constructor defaults. Missing or non-canonical roles use the common
-        positional fallback provided by :meth:`RecipeState._slot_tensor_type`.
+        constructor defaults. A missing role list also retains constructor
+        defaults, matching the built-in DPA path.
         """
         from .tensor.float8_tensor import Float8CurrentScalingQuantizer
 
         def _make(tensor_type: str) -> Float8CurrentScalingQuantizer:
-            if tensor_type == "input":
+            if self.roles is None:
+                qparams = None
+            elif tensor_type == "input":
                 qparams = self.recipe.fp8_quant_fwd_inp
             elif tensor_type == "weight":
                 qparams = self.recipe.fp8_quant_fwd_weight
@@ -1832,6 +1811,16 @@ class Float8BlockScalingRecipeState(RecipeState):
         if device is None:
             device = torch.device("cuda")
         self.device = device
+        if self.device.type == "cuda" and torch.cuda.get_device_capability(self.device) >= (10, 0):
+            qparams = (
+                recipe.fp8_quant_fwd_inp,
+                recipe.fp8_quant_fwd_weight,
+                recipe.fp8_quant_bwd_grad,
+            )
+            if any(not params.power_2_scale for params in qparams):
+                raise RuntimeError(
+                    "Float8BlockScaling requires power-of-two scales on Blackwell and newer GPUs."
+                )
 
     def make_quantizers(self) -> list:
         """Build one ``Float8BlockQuantizer`` per slot, dispatched by tensor type.

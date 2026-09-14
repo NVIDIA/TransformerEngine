@@ -1825,7 +1825,7 @@ class GroupedLinear(TransformerEngineBaseModule):
     def _validate_quantization_runtime(
         self,
         candidate: _QuantizationRuntime,
-    ) -> "_GroupedRuntimeTraits":
+    ) -> None:
         """Validate both grouped directions and derive the runtime's traits.
 
         Only a ``CustomRecipe`` is checked: the built-in recipes build their own
@@ -1872,7 +1872,7 @@ class GroupedLinear(TransformerEngineBaseModule):
             # Native recipe construction guarantees homogeneous expert quantizers.
             input_quantizers = (forward[self._offsets["input"]],)
 
-        return _GroupedRuntimeTraits(
+        candidate.owner_traits = _GroupedRuntimeTraits(
             delayed_scaling_input_quantizer=next(
                 (q for q in input_quantizers if isinstance(q, Float8Quantizer)),
                 None,
