@@ -554,7 +554,7 @@ class FusedAdam(torch.optim.Optimizer):
         Arguments:
             closure (callable, optional): A closure that reevaluates the model
                 and returns the loss.
-            grad_scaler (te_platform().amp.GradScaler, optional):
+            grad_scaler (torch.cuda.amp.GradScaler, optional):
                 gradient scaler (default: None)
         """
         loss = None

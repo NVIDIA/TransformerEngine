@@ -315,7 +315,7 @@ def _get_active_autocast_contexts():
     else:
         gpu_autocast_enabled = torch.is_autocast_enabled()
         gpu_autocast_dtype = torch.get_autocast_gpu_dtype()
-        gpu_autocast_ctx = te_platform().amp.autocast(
+        gpu_autocast_ctx = torch.cuda.amp.autocast(
             gpu_autocast_enabled, gpu_autocast_dtype, autocast_cached
         )
 

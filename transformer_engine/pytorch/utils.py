@@ -899,7 +899,7 @@ def get_nvtx_range_context(msg: str):
     """
 
     if _nvtx_enabled():
-        return te_platform().nvtx.range(msg)
+        return torch.cuda.nvtx.range(msg)
     return nullcontext()
 
 
@@ -918,7 +918,7 @@ def nvtx_range_push(msg: str) -> None:
     if not _nvtx_enabled():
         return
     _nvtx_range_messages.append(msg)
-    te_platform().nvtx.range_push(msg)
+    torch.cuda.nvtx.range_push(msg)
 
 
 def nvtx_range_pop(msg: Optional[str] = None) -> None:
@@ -949,7 +949,7 @@ def nvtx_range_pop(msg: Optional[str] = None) -> None:
         )
 
     # Pop NVTX range
-    te_platform().nvtx.range_pop()
+    torch.cuda.nvtx.range_pop()
 
 
 def canonicalize_process_group(
@@ -975,7 +975,7 @@ def torch_get_autocast_gpu_dtype() -> torch.dtype:
 if torch_version() >= (2, 4, 0):
     gpu_autocast_ctx = functools.partial(torch.amp.autocast, device_type=te_device_type())
 else:
-    gpu_autocast_ctx = te_platform().amp.autocast
+    gpu_autocast_ctx = torch.cuda.amp.autocast
 
 
 _torch_dtype_to_np_typestr_dict = {
