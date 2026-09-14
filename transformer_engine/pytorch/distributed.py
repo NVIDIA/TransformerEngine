@@ -30,6 +30,7 @@ except ImportError:
 
 import transformer_engine_torch as tex
 
+from transformer_engine import te_device_type, te_platform
 from transformer_engine.pytorch.triton.pad import pad_columnwise_scale_inv
 from .torch_version import torch_version
 from .utils import (
@@ -83,7 +84,7 @@ def set_all_rng_states(states: List) -> None:
 def graph_safe_rng_available() -> bool:
     """Returns whether cuda graph safe RNG state manipulation is supported."""
     return (
-        hasattr(torch.cuda.CUDAGraph, "register_generator_state")
+        hasattr(te_platform().CUDAGraph, "register_generator_state")
         and hasattr(torch.Generator, "graphsafe_set_state")
         and hasattr(torch.Generator, "graphsafe_get_state")
         and hasattr(torch.Generator, "clone_state")
@@ -96,7 +97,7 @@ def is_graph_safe_rng_state(state: Union[torch.Tensor, torch.Generator]) -> bool
 
 
 def _get_cuda_rng_state(
-    device: Union[int, str, torch.device] = "cuda",
+    device: Union[int, str, torch.device] = te_device_type(),
     clone: bool = False,
     graph_safe: bool = True,
 ) -> torch.Tensor:
@@ -106,11 +107,11 @@ def _get_cuda_rng_state(
     if isinstance(device, str):
         device = torch.device(device)
     elif isinstance(device, int):
-        device = torch.device("cuda", device)
+        device = torch.device(te_device_type(), device)
     idx = device.index
     if idx is None:
-        idx = torch.cuda.current_device()
-    default_generator = torch.cuda.default_generators[idx]
+        idx = te_platform().current_device()
+    default_generator = te_platform().default_generators[idx]
     if graph_safe_rng_available() and graph_safe:
         if clone:
             # Reference to the cloned generator state
@@ -128,17 +129,17 @@ def _set_cuda_rng_state(
     """Sets the random number generator state of the current GPU."""
 
     if device == -1:
-        device = torch.device("cuda")
+        device = torch.device(te_device_type())
     elif isinstance(device, str):
         device = torch.device(device)
     elif isinstance(device, int):
-        device = torch.device("cuda", device)
+        device = torch.device(te_device_type(), device)
 
     def cb() -> None:
         idx = device.index
         if idx is None:
-            idx = torch.cuda.current_device()
-        default_generator = torch.cuda.default_generators[idx]
+            idx = te_platform().current_device()
+        default_generator = te_platform().default_generators[idx]
         if graph_safe_rng_available() and graph_safe:
             default_generator.graphsafe_set_state(new_state)
             return
@@ -216,7 +217,7 @@ def split_tensor_into_1d_equal_chunks(
         data = torch.empty(
             partition_size,
             dtype=tensor.dtype,
-            device=torch.cuda.current_device(),
+            device=te_platform().current_device(),
             requires_grad=False,
         )
         data.copy_(tensor.view(-1)[start_index:end_index])
@@ -231,7 +232,7 @@ def gather_split_1d_tensor(tensor: torch.Tensor, tp_group: dist_group_type) -> t
     gathered = torch.empty(
         numel_gathered,
         dtype=tensor.dtype,
-        device=torch.cuda.current_device(),
+        device=te_platform().current_device(),
         requires_grad=False,
     )
     torch.distributed.all_gather_into_tensor(gathered, tensor, group=tp_group)
@@ -294,10 +295,10 @@ def _get_active_autocast_contexts():
     autocast_cached = torch.is_autocast_cache_enabled()
 
     if torch_version() >= (2, 4, 0):
-        gpu_autocast_enabled = torch.is_autocast_enabled("cuda")
-        gpu_autocast_dtype = torch.get_autocast_dtype("cuda")
+        gpu_autocast_enabled = torch.is_autocast_enabled(te_device_type())
+        gpu_autocast_dtype = torch.get_autocast_dtype(te_device_type())
         gpu_autocast_ctx = torch.amp.autocast(
-            "cuda",
+            te_device_type(),
             enabled=gpu_autocast_enabled,
             dtype=gpu_autocast_dtype,
             cache_enabled=autocast_cached,
@@ -314,7 +315,7 @@ def _get_active_autocast_contexts():
     else:
         gpu_autocast_enabled = torch.is_autocast_enabled()
         gpu_autocast_dtype = torch.get_autocast_gpu_dtype()
-        gpu_autocast_ctx = torch.cuda.amp.autocast(
+        gpu_autocast_ctx = te_platform().amp.autocast(
             gpu_autocast_enabled, gpu_autocast_dtype, autocast_cached
         )
 
@@ -330,7 +331,7 @@ def _get_active_autocast_contexts():
 class _CheckpointFunction(torch.autograd.Function):
     """This function is adapted from torch.utils.checkpoint with
     two main changes:
-        1) torch.cuda.set_rng_state is replaced with `_set_cuda_rng_state`
+        1) te_platform().set_rng_state is replaced with `_set_cuda_rng_state`
         2) the states in the model parallel tracker are also properly
            tracked/set/reset.
     """
@@ -892,7 +893,7 @@ class CudaRNGStatesTracker:
             # Get the current rng state.
             orig_rng_state = _get_cuda_rng_state()
             # Set the new state and store it.
-            torch.cuda.manual_seed(seed)
+            te_platform().manual_seed(seed)
             self.states_[name] = _get_cuda_rng_state(clone=True)
             # Reset rng state to what it was.
             _set_cuda_rng_state(orig_rng_state)
@@ -951,7 +952,7 @@ def reduce_scatter_along_first_dim(
     dim_size[0] = dim_size[0] // world_size
 
     if output is None:
-        output = torch.empty(dim_size, dtype=inp.dtype, device=torch.cuda.current_device())
+        output = torch.empty(dim_size, dtype=inp.dtype, device=te_platform().current_device())
     handle = torch.distributed.reduce_scatter_tensor(
         output, inp.contiguous(), group=tp_group, async_op=async_op
     )
@@ -1033,7 +1034,7 @@ def _all_gather_fp8(
     out: Float8TensorStorage
     if quantizer is not None:
         dtype = torch.float32
-        device = "cuda"
+        device = te_device_type()
         if isinstance(inp, Float8Tensor):
             dtype = inp.dtype
             device = inp.device
@@ -1907,11 +1908,11 @@ def _get_symm_mem_pool(device: torch.device, backend: str = "NCCL"):
             _SYMM_MEM_POOL = symm_mem.get_mem_pool(device)
             _SYMM_MEM_POOL_TORCH_CACHED = True
         elif hasattr(torch.cuda, "MemPool") and hasattr(symm_mem, "get_mempool_allocator"):
-            _SYMM_MEM_POOL = torch.cuda.MemPool(symm_mem.get_mempool_allocator(device))
+            _SYMM_MEM_POOL = te_platform().MemPool(symm_mem.get_mempool_allocator(device))
         else:
             raise RuntimeError(
                 "No symmetric-memory MemPool API available (need torch symm-mem get_mem_pool, or "
-                "torch.cuda.MemPool + get_mempool_allocator)."
+                "te_platform().MemPool + get_mempool_allocator)."
             )
     elif backend != _SYMM_MEM_POOL_BACKEND:
         raise RuntimeError(
@@ -1952,7 +1953,7 @@ def release_symm_mem_pool() -> None:
                 "release_symm_mem_pool()."
             )
         pools.pop(device, None)
-    torch.cuda.empty_cache()
+    te_platform().empty_cache()
 
 
 def symm_mem_alloc(
@@ -1973,7 +1974,7 @@ def symm_mem_alloc(
     be a shared static buffer. ``backend`` selects the symm-mem backend (default NCCL; for the pool it
     is captured at pool creation)."""
     if device is None:
-        device = torch.device("cuda", torch.cuda.current_device())
+        device = torch.device(te_device_type(), te_platform().current_device())
     if not HAS_TORCH_SYMMETRIC:
         raise RuntimeError(
             "torch.distributed._symmetric_memory is unavailable; symm_mem_alloc "
@@ -1981,7 +1982,7 @@ def symm_mem_alloc(
         )
     if use_pool:
         pool = _get_symm_mem_pool(device, backend)
-        with torch.cuda.use_mem_pool(pool):
+        with te_platform().use_mem_pool(pool):
             t = torch.empty(*shape, dtype=dtype, device=device)
     else:
         if symm_mem.get_backend(device) != backend:

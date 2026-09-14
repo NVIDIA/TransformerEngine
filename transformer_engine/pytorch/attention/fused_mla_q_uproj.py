@@ -4,6 +4,7 @@
 
 """Fused MLA Q up-projection + per-head RoPE + MXFP8 quantize."""
 
+from transformer_engine import te_platform
 from __future__ import annotations
 import functools
 import os
@@ -83,7 +84,7 @@ class FusedMLAQUpProjRopeQuant:
 
         from cuda.bindings import driver as cuda
 
-        stream = cuda.CUstream(torch.cuda.current_stream(x.device).cuda_stream)
+        stream = cuda.CUstream(te_platform().current_stream(x.device).cuda_stream)
         wrapper = cls._kernel()
 
         if isinstance(w, QuantizedTensor):

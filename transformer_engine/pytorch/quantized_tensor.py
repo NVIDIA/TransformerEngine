@@ -15,6 +15,7 @@ from torch.utils._pytree import tree_map
 
 import transformer_engine_torch as tex
 
+from transformer_engine import te_platform, te_device_type
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch.constants import dist_group_type
 from transformer_engine.pytorch.tensor._quantization_helpers import (
@@ -484,7 +485,7 @@ class Quantizer(abc.ABC):
             )
 
         if device is None:
-            device = torch.device("cuda")
+            device = torch.device(te_device_type())
         # Handle the device passed as string
         device = torch.device(device)
         result = tex.create_empty_quantized_tensor(
@@ -540,7 +541,7 @@ class Quantizer(abc.ABC):
         Returns ``{attr_name: torch.Tensor}`` suitable as the ``inner_tensors``
         argument of the storage's ``__tensor_unflatten__``.
         """
-        device = torch.device(device if device is not None else "cuda")
+        device = torch.device(device if device is not None else te_device_type())
         return {
             attr: torch.empty(buf_shape, dtype=buf_dtype, device=device)
             for attr, (buf_shape, buf_dtype) in self.inner_tensor_specs(tuple(shape)).items()
@@ -740,7 +741,7 @@ class QuantizedTensor(torch.Tensor):
             dtype=dtype,
             layout=torch.strided,
             requires_grad=requires_grad,
-            device=torch.cuda.current_device() if device is None else device,
+            device=te_platform().current_device() if device is None else device,
         )
         instance._requires_grad = requires_grad
         instance._dtype = dtype

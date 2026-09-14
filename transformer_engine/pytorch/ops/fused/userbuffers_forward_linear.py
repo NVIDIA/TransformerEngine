@@ -4,6 +4,7 @@
 
 """Linear layer forward with Userbuffers communication."""
 
+from transformer_engine import te_device_type
 from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any, Optional
@@ -155,7 +156,7 @@ class UserbuffersForwardLinear(FusedOperation):
         """
 
         # Check device
-        if device.type != "cuda":
+        if device.type != te_device_type():
             raise ValueError(f"Only CUDA devices are supported (got {device})")
 
         # Check datatype
@@ -322,7 +323,7 @@ class UserbuffersForwardLinear(FusedOperation):
 
         # Get autocast dtype if needed
         if torch.is_autocast_enabled():
-            dtype = torch.get_autocast_dtype("cuda")
+            dtype = torch.get_autocast_dtype(te_device_type())
         else:
             dtype = linear_op.weight.dtype
 

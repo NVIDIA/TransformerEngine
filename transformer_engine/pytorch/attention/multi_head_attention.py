@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Multi-head Attention."""
+from transformer_engine import te_platform
 import os
 import collections
 from typing import Any, Callable, List, Optional, Tuple, Union
@@ -278,7 +279,7 @@ class MultiheadAttention(torch.nn.Module):
         ub_bulk_wgrad: bool = False,
         bias: bool = True,
         normalization: str = "LayerNorm",
-        device: Union[torch.device, str] = "cuda",
+        device: Union[torch.device, str] = te_device_type(),
         qkv_format: str = "sbhd",
         name: str = None,
         qk_norm_type: Optional[str] = None,
@@ -657,7 +658,7 @@ class MultiheadAttention(torch.nn.Module):
         self,
         cp_group: Union[dist_group_type, List[dist_group_type], None],
         cp_global_ranks: List[int],
-        cp_stream: torch.cuda.Stream,
+        cp_stream: te_platform().Stream,
         cp_comm_type: str = "p2p",
     ) -> None:
         """
@@ -673,7 +674,7 @@ class MultiheadAttention(torch.nn.Module):
                   and :attr:`cp_group[1]` are for ``"a2a"`` and ``"p2p"`` communications respectively.
         cp_global_ranks : List[int]
                          list of global ranks in the context group.
-        cp_stream : torch.cuda.Stream
+        cp_stream : te_platform().Stream
                    cuda stream for context parallel execution.
         cp_comm_type : str, default = "p2p"
                       inter-gpu communication type for context parallelism.

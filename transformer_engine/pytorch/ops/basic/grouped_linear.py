@@ -4,6 +4,7 @@
 
 """Fusible operation for grouped linear layer."""
 
+from transformer_engine import te_device_type
 from __future__ import annotations
 from collections.abc import Callable, Iterable, Sequence
 import contextlib
@@ -1030,7 +1031,7 @@ class GroupedLinear(BasicOperation):
 
         # Get autocast dtype if needed
         if torch.is_autocast_enabled():
-            dtype = torch.get_autocast_dtype("cuda")
+            dtype = torch.get_autocast_dtype(te_device_type())
         else:
             dtype = weight_param.dtype
 
@@ -1182,7 +1183,7 @@ class GroupedLinear(BasicOperation):
         # through ``save_for_backward`` (see ``_fuser_forward_split_quantize``
         # and ``_fuser_forward_grouped_tensor`` for the saved-tensor layout).
         if torch.is_autocast_enabled():
-            ctx.dtype = torch.get_autocast_dtype("cuda")
+            ctx.dtype = torch.get_autocast_dtype(te_device_type())
         else:
             ctx.dtype = weight_param.dtype
         ctx.input_requires_grad = requires_grad[0]

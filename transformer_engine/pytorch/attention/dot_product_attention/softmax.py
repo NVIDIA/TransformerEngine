@@ -4,6 +4,7 @@
 
 """Fused scaled masked softmax functions"""
 
+from transformer_engine import te_device_type
 import os
 from typing import Callable, Optional
 import torch
@@ -236,7 +237,7 @@ def _get_default_causal_mask(mask_type: str, sq: int, sk: int) -> torch.Tensor:
     def _get_mask():
         diagonal_offset = sk - sq + 1 if "bottom_right" in mask_type else 1
         return torch.triu(
-            torch.ones(sq, sk, dtype=torch.bool, device="cuda"), diagonal=diagonal_offset
+            torch.ones(sq, sk, dtype=torch.bool, device=te_device_type()), diagonal=diagonal_offset
         )
 
     if is_in_onnx_export_mode():

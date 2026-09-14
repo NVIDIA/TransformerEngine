@@ -4,6 +4,7 @@
 
 """TensorSpec: a data-free description of a tensor / quantized tensor."""
 
+from transformer_engine import te_device_type
 from __future__ import annotations
 import copy as _copy
 from dataclasses import dataclass, field
@@ -104,7 +105,7 @@ class TensorSpec:
         Under ``register_fake`` the ``torch.empty`` calls produce ``FakeTensor``s;
         ``requires_grad`` is left default (managed by ``register_autograd``).
         """
-        device = self.device if self.device is not None else torch.device("cuda")
+        device = self.device if self.device is not None else torch.device(te_device_type())
         if self.quantizer is None:
             return [torch.empty(tuple(self.shape), dtype=self.dtype, device=device)]
         inner = self.quantizer.alloc_tensors(tuple(self.shape), device=device)
@@ -135,7 +136,7 @@ class TensorSpec:
         inner tensors via :meth:`assemble`.
         """
         if self.quantizer is None:
-            device = self.device if self.device is not None else torch.device("cuda")
+            device = self.device if self.device is not None else torch.device(te_device_type())
             return torch.empty(
                 tuple(self.shape),
                 dtype=self.dtype,

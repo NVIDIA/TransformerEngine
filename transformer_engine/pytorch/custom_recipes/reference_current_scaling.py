@@ -4,6 +4,7 @@
 
 """Current scaling recipe reference implementation."""
 
+from transformer_engine import te_device_type
 import dataclasses
 import math
 from typing import Optional, Tuple, Iterable
@@ -501,7 +502,7 @@ class CurrentScalingQuantizerRef(Quantizer):
 
         # Canonicalize tensor attributes
         if device is None:
-            device = torch.device("cuda")
+            device = torch.device(te_device_type())
 
         # Allocate quantized data
         qx = torch.empty(shape, dtype=self.dtype, device=device)

@@ -4,6 +4,7 @@
 
 """Base classes for fusible operations."""
 
+from transformer_engine import te_platform
 from __future__ import annotations
 import abc
 from collections.abc import Iterable, Sequence
@@ -703,7 +704,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             return torch.empty(0, dtype=torch.uint8)
 
         # Serialize state into byte tensor
-        torch.cuda.synchronize()
+        te_platform().synchronize()
         state_serialized = bytearray(pickle.dumps(state))
         state_serialized = torch.frombuffer(state_serialized, dtype=torch.uint8)
         return state_serialized
@@ -766,7 +767,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                     )
 
         # Finish CPU-GPU memory transfers
-        torch.cuda.synchronize()
+        te_platform().synchronize()
 
     def _load_from_state_dict(self, *args, **kwargs) -> None:
         """Load state"""

@@ -4,6 +4,7 @@
 
 """cuDNN-backed Flex Attention helpers."""
 
+from transformer_engine import te_platform
 from dataclasses import dataclass
 import importlib
 import inspect
@@ -140,10 +141,10 @@ def _score_mod_callback_cache_key(callback: Optional[Callable]) -> Any:
 
 def _score_mod_device_key(device: torch.device) -> Tuple[Any, ...]:
     """Normalize a tensor device for graph cache keys."""
-    if device.type == "cuda":
+    if device.type == te_device_type():
         index = device.index
         if index is None:
-            index = torch.cuda.current_device()
+            index = te_platform().current_device()
         return (device.type, index)
     return (device.type, device.index)
 
@@ -194,10 +195,10 @@ def _wrap_score_mod(score_mod: Optional[Callable], graph_tensors: Dict[str, Any]
 
 def _get_cudnn_current_stream_handle(cudnn, device: torch.device):
     """Return a cuDNN handle for device, bound to PyTorch's current stream."""
-    if device.type != "cuda":
+    if device.type != te_device_type():
         raise ValueError(f"Flex Attention only supports CUDA tensors, got device {device}.")
     if device.index is None:
-        device = torch.device("cuda", torch.cuda.current_device())
+        device = torch.device(te_device_type(), te_platform().current_device())
 
     handle = _cudnn_score_mod_handles.get(device)
     with torch.cuda.device(device):
@@ -205,7 +206,7 @@ def _get_cudnn_current_stream_handle(cudnn, device: torch.device):
             handle = cudnn.create_handle()
             _cudnn_score_mod_handles[device] = handle
 
-        stream = torch.cuda.current_stream(device).cuda_stream
+        stream = te_platform().current_stream(device).cuda_stream
         cudnn.set_stream(handle=handle, stream=stream)
     return handle
 
@@ -287,8 +288,8 @@ def _execute_cudnn_graph(
     """Execute a built cuDNN frontend Python graph."""
     cudnn = _import_cudnn_frontend()
 
-    if device.type == "cuda" and device.index is None:
-        device = torch.device("cuda", torch.cuda.current_device())
+    if device.type == te_device_type() and device.index is None:
+        device = torch.device(te_device_type(), te_platform().current_device())
     workspace = torch.empty(
         workspace_size,
         device=device,

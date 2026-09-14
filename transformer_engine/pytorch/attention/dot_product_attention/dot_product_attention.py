@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Attention."""
+from transformer_engine import te_device_type, te_platform
 from contextlib import nullcontext
 import math
 import os
@@ -685,7 +686,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         attention_type: str = "self",
         cp_group: Optional[Union[dist_group_type, List[dist_group_type]]] = None,
         cp_global_ranks: List[int] = None,
-        cp_stream: torch.cuda.Stream = None,
+        cp_stream: te_platform().Stream = None,
         cp_comm_type: str = "p2p",
         softmax_scale: Optional[float] = None,
         softmax_type: str = "vanilla",
@@ -774,12 +775,14 @@ class DotProductAttention(TransformerEngineBaseModule):
             self.softmax_offset = None
         if self.softmax_type == "off-by-one":
             self.softmax_offset = torch.zeros(
-                self.num_attention_heads // self.tp_size, device="cuda"
+                self.num_attention_heads // self.tp_size, device=te_device_type()
             )
         if self.softmax_type == "learnable":
             self.register_parameter(
                 "softmax_offset",
-                Parameter(torch.zeros(self.num_attention_heads // self.tp_size, device="cuda")),
+                Parameter(
+                    torch.zeros(self.num_attention_heads // self.tp_size, device=te_device_type())
+                ),
                 get_rng_state_tracker=get_rng_state_tracker,
             )
 
@@ -877,7 +880,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         self,
         cp_group: Union[dist_group_type, List[dist_group_type], None],
         cp_global_ranks: List[int],
-        cp_stream: torch.cuda.Stream,
+        cp_stream: te_platform().Stream,
         cp_comm_type: str = "p2p",
     ) -> None:
         """
@@ -893,7 +896,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                   and :attr:`cp_group[1]` are for ``"a2a"`` and ``"p2p"`` communications respectively.
         cp_global_ranks : List[int]
                          list of global ranks in the context group.
-        cp_stream : torch.cuda.Stream
+        cp_stream : te_platform().Stream
                    cuda stream for context parallel execution.
         cp_comm_type : str, default = "p2p"
                       inter-gpu communication type for context parallelism.

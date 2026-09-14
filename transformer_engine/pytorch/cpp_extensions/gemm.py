@@ -4,6 +4,7 @@
 
 """Python interface for GEMM extensions"""
 
+from transformer_engine import te_device_type, te_platform
 from typing import Iterable, Literal, Optional, Tuple, Union, List
 import os
 import functools
@@ -39,7 +40,7 @@ _NUM_MAX_UB_STREAMS = 3
 
 def get_cublas_workspace_size_bytes() -> None:
     """Return 32 MiB if using hopper, 4 MiB for all other architectures."""
-    if torch.cuda.get_device_properties(torch.cuda.current_device()).major >= 9:
+    if torch.cuda.get_device_properties(te_platform().current_device()).major >= 9:
         # 32 MiB for NVFP4 GEMM, plus additional 1024 B for alignment and misc scales
         return 32 * 1024 * 1024 + 1024
     return 4_194_304
@@ -416,7 +417,8 @@ def general_grouped_gemm(
 
     if grad and use_bias:
         grad_bias = [
-            torch.empty(B[i].size(1), dtype=out[0].dtype, device="cuda") for i in range(num_gemms)
+            torch.empty(B[i].size(1), dtype=out[0].dtype, device=te_device_type())
+            for i in range(num_gemms)
         ]
     else:
         grad_bias = empty_tensors

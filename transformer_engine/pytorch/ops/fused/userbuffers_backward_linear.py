@@ -4,6 +4,7 @@
 
 """Linear layer backward with Userbuffers communication."""
 
+from transformer_engine import te_platform
 from __future__ import annotations
 from typing import Optional
 import warnings
@@ -181,7 +182,7 @@ class UserbuffersBackwardLinear(FusedOperation):
             else:
                 device = grad_output.device
         device = canonicalize_device(device)
-        if device.type != "cuda":
+        if device.type != te_device_type():
             raise ValueError(f"Only CUDA devices are supported (got {device})")
 
         # Check datatype
@@ -481,7 +482,7 @@ class UserbuffersBackwardLinear(FusedOperation):
                 # We use the send stream to copy into the userbuffers.
                 # This is the same stream that we will use to access the data in the AG,
                 # so we dont need to add any syncs yet.
-                with torch.cuda.stream(dgrad_send_stream):
+                with te_platform().stream(dgrad_send_stream):
                     dy, _ = fill_userbuffers_buffer_for_all_gather(
                         ub_obj_overlap_wgrad,
                         dy_local,

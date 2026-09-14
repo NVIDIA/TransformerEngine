@@ -4,6 +4,7 @@
 
 """Fused operation for forward GEMM + bias + add."""
 
+from transformer_engine import te_device_type
 from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any, Optional
@@ -93,7 +94,7 @@ class ForwardLinearBiasAdd(FusedOperation):
 
         # Get autocast dtype if needed
         if torch.is_autocast_enabled():
-            dtype = torch.get_autocast_dtype("cuda")
+            dtype = torch.get_autocast_dtype(te_device_type())
         else:
             dtype = linear_op.weight.dtype
 

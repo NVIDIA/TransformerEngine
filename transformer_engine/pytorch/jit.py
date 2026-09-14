@@ -10,6 +10,7 @@ from functools import wraps
 from typing import Callable, Optional, Tuple
 import torch
 
+from transformer_engine import te_device_type, te_platform
 from .torch_version import torch_version
 from .export import is_in_onnx_export_mode
 from .utils import gpu_autocast_ctx
@@ -341,11 +342,15 @@ def warmup_jit_bias_dropout_add(
     """Compile BDA JIT function before the main training steps"""
 
     # Save cuda RNG state to ensure warmup does not affect reproducibility.
-    rng_state = torch.cuda.get_rng_state()
+    rng_state = te_platform().get_rng_state()
 
-    inp = torch.rand((seq_length, micro_batch_size, hidden_size), dtype=dtype, device="cuda")
-    residual = torch.rand((seq_length, micro_batch_size, hidden_size), dtype=dtype, device="cuda")
-    bias = torch.rand((hidden_size), dtype=dtype, device="cuda")
+    inp = torch.rand(
+        (seq_length, micro_batch_size, hidden_size), dtype=dtype, device=te_device_type()
+    )
+    residual = torch.rand(
+        (seq_length, micro_batch_size, hidden_size), dtype=dtype, device=te_device_type()
+    )
+    bias = torch.rand((hidden_size), dtype=dtype, device=te_device_type())
     dropout_rate = 0.1
     # Warmup JIT fusions with the input grad_enable state of both forward
     # prop and recomputation
@@ -357,8 +362,8 @@ def warmup_jit_bias_dropout_add(
             output = bias_dropout_add_fused_train(inp, bias, residual, dropout_rate)
     del bias, inp, residual, output
 
-    torch.cuda.empty_cache()
-    torch.cuda.set_rng_state(rng_state)
+    te_platform().empty_cache()
+    te_platform().set_rng_state(rng_state)
 
 
 def warmup_jit_bias_dropout_add_all_dtypes(
@@ -378,13 +383,13 @@ def warmup_jit_bias_gelu(
     """Compile bias-gelu JIT function before the main training steps"""
 
     # Save cuda RNG state to ensure warmup does not affect reproducibility.
-    rng_state = torch.cuda.get_rng_state()
+    rng_state = te_platform().get_rng_state()
 
-    bias = torch.rand(ffn_hidden_size_per_partition, dtype=dtype, device="cuda")
+    bias = torch.rand(ffn_hidden_size_per_partition, dtype=dtype, device=te_device_type())
     inp = torch.rand(
         (seq_length * micro_batch_size, ffn_hidden_size_per_partition),
         dtype=dtype,
-        device="cuda",
+        device=te_device_type(),
     )
     # Warmup JIT fusions with the input grad_enable state of both forward
     # prop and recomputation
@@ -395,8 +400,8 @@ def warmup_jit_bias_gelu(
             _ = gelu_fused_(inp)
     del bias, inp
 
-    torch.cuda.empty_cache()
-    torch.cuda.set_rng_state(rng_state)
+    te_platform().empty_cache()
+    te_platform().set_rng_state(rng_state)
 
 
 def warmup_jit_bias_gelu_all_dtypes(
@@ -413,12 +418,12 @@ def warmup_jit_l2normalization(
     """Compile L2Normalization JIT function before the main training steps"""
 
     # Save cuda RNG state to ensure warmup does not affect reproducibility.
-    rng_state = torch.cuda.get_rng_state()
+    rng_state = te_platform().get_rng_state()
 
     inp = torch.rand(
         (seq_length * micro_batch_size, hidden_size),
         dtype=dtype,
-        device="cuda",
+        device=te_device_type(),
     )
     eps = 1e-6
     # Warmup JIT fusions with the input grad_enable state of both forward
@@ -437,8 +442,8 @@ def warmup_jit_l2normalization(
                 output = l2normalization_fused_(inp, eps)
     del inp, output
 
-    torch.cuda.empty_cache()
-    torch.cuda.set_rng_state(rng_state)
+    te_platform().empty_cache()
+    te_platform().set_rng_state(rng_state)
 
 
 def warmup_jit_l2normalization_all_dtypes(

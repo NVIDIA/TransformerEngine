@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """LayerNormMLP API"""
+from transformer_engine import te_device_type, te_platform
 import os
 import warnings
 import weakref
@@ -1332,7 +1333,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     # We use the send stream to copy into the userbuffers.
                     # This is the same stream that we will use to access the data in the AG,
                     # so we dont need to add any syncs yet.
-                    with torch.cuda.stream(dgrad_send_stream):
+                    with te_platform().stream(dgrad_send_stream):
                         grad_output, _ = fill_userbuffers_buffer_for_all_gather(
                             ub_obj_fc2_wgrad,
                             grad_outputs[0],
@@ -1541,7 +1542,7 @@ class _LayerNormMLP(torch.autograd.Function):
             reduce_scatter_out = None
             if ctx.ub_overlap_rs_dgrad:
                 reduce_scatter_out = torch.empty(
-                    fc1_dgrad_shape, dtype=ctx.activation_dtype, device="cuda"
+                    fc1_dgrad_shape, dtype=ctx.activation_dtype, device=te_device_type()
                 )
             if ctx.ub_bulk_wgrad:
                 gemm_out = ub_obj_fc1_wgrad.get_buffer(local_chunk=False)
@@ -1637,7 +1638,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 reduce_scatter_out = None
                 if ctx.ub_bulk_wgrad and ub_obj_fc1_wgrad.is_fp8_ubuf():
                     reduce_scatter_out = torch.empty(
-                        fc1_dgrad_shape, dtype=ctx.activation_dtype, device="cuda"
+                        fc1_dgrad_shape, dtype=ctx.activation_dtype, device=te_device_type()
                     )
 
                 # Arguments to include in wgrad GEMM closure
@@ -1766,14 +1767,14 @@ class _LayerNormMLP(torch.autograd.Function):
                     fc1_wgrad = torch.zeros(
                         fc1_weight_main_grad.shape,
                         dtype=fc1_weight_python_object.dtype,
-                        device=torch.cuda.current_device(),
+                        device=te_platform().current_device(),
                         requires_grad=False,
                     )
                 else:
                     fc1_wgrad = torch.empty(
                         fc1_weight_main_grad.shape,
                         dtype=fc1_weight_python_object.dtype,
-                        device=torch.cuda.current_device(),
+                        device=te_platform().current_device(),
                         requires_grad=False,
                     )
             elif ctx.fuse_wgrad_accumulation:
@@ -1791,14 +1792,14 @@ class _LayerNormMLP(torch.autograd.Function):
                     fc2_wgrad = torch.zeros(
                         fc2_weight_main_grad.shape,
                         dtype=fc2_weight_python_object.dtype,
-                        device=torch.cuda.current_device(),
+                        device=te_platform().current_device(),
                         requires_grad=False,
                     )
                 else:
                     fc2_wgrad = torch.empty(
                         fc2_weight_main_grad.shape,
                         dtype=fc2_weight_python_object.dtype,
-                        device=torch.cuda.current_device(),
+                        device=te_platform().current_device(),
                         requires_grad=False,
                     )
             elif ctx.fuse_wgrad_accumulation:
@@ -1970,7 +1971,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         micro_batch_size: Optional[int] = None,
         set_parallel_mode: bool = False,
         zero_centered_gamma: bool = False,
-        device: Union[torch.device, str] = "cuda",
+        device: Union[torch.device, str] = te_device_type(),
         ub_overlap_ag: bool = False,
         name: Optional[str] = None,
         ub_overlap_rs: bool = False,

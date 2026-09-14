@@ -4,6 +4,7 @@
 
 """Fusible operations for activation functions."""
 
+from transformer_engine import te_device_type
 from __future__ import annotations
 import abc
 from collections.abc import Iterable, Sequence
@@ -94,7 +95,7 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
         # Compute dtype
         dtype: torch.dtype
         if torch.is_autocast_enabled():
-            dtype = torch.get_autocast_dtype("cuda")
+            dtype = torch.get_autocast_dtype(te_device_type())
         else:
             dtype = input_.dtype
         if dtype not in (torch.float32, torch.float16, torch.bfloat16):
@@ -411,7 +412,7 @@ class _ScaledUnary(BasicOperation, metaclass=abc.ABCMeta):
         extra_input = basic_op_extra_inputs[0][0]
 
         if torch.is_autocast_enabled():
-            dtype = torch.get_autocast_dtype("cuda")
+            dtype = torch.get_autocast_dtype(te_device_type())
         elif isinstance(input_, torch.Tensor):
             dtype = input_.dtype
         else:

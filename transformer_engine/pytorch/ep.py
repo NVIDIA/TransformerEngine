@@ -14,6 +14,7 @@ import torch.distributed as dist
 
 import transformer_engine_torch as tex
 
+from transformer_engine import te_device_type, te_platform
 from .cpu_offload import mark_not_offload
 from .distributed import symm_mem_alloc, release_symm_mem_pool
 from .quantized_tensor import QuantizedTensor
@@ -152,8 +153,8 @@ def ep_bootstrap(
         )
 
     # Materialize the PG's NCCL comm before borrowing its raw handle.
-    dist.barrier(group=ep_group, device_ids=[torch.cuda.current_device()])
-    comm_ptr = ep_group._get_backend(torch.device("cuda"))._comm_ptr()
+    dist.barrier(group=ep_group, device_ids=[te_platform().current_device()])
+    comm_ptr = ep_group._get_backend(torch.device(te_device_type()))._comm_ptr()
 
     tex.ep_initialize(
         int(comm_ptr),
@@ -269,7 +270,7 @@ class EpBuffer:
         if not _BOOTSTRAPPED:
             raise RuntimeError("EpBuffer requires ep_bootstrap() to be called first.")
         if device is None:
-            device = torch.device("cuda", torch.cuda.current_device())
+            device = torch.device(te_device_type(), te_platform().current_device())
         alignment = int(alignment)
         if alignment > 1 and (alignment & (alignment - 1)) != 0:
             raise ValueError(f"alignment must be 0, 1, or a power of two (got {alignment}).")
@@ -323,7 +324,7 @@ _LIB = "transformer_engine_ep"
 @torch.library.custom_op(
     f"{_LIB}::prepare",
     mutates_args=("handle_mem", "tokens_per_expert", "total_recv_tokens"),
-    device_types="cuda",
+    device_types=te_device_type(),
 )
 def _prepare_op(
     handle_mem: torch.Tensor,
@@ -344,7 +345,7 @@ def _(*_args, **_kw):
 @torch.library.custom_op(
     f"{_LIB}::dispatch",
     mutates_args=("recv_tokens", "recv_topk_weights", "recv_scale_inv"),
-    device_types="cuda",
+    device_types=te_device_type(),
 )
 def _dispatch_op(
     handle_mem: torch.Tensor,
@@ -376,7 +377,7 @@ def _(*_args, **_kw):
 @torch.library.custom_op(
     f"{_LIB}::combine",
     mutates_args=("result",),
-    device_types="cuda",
+    device_types=te_device_type(),
 )
 def _combine_op(
     handle_mem: torch.Tensor,
@@ -394,7 +395,7 @@ def _(*_args, **_kw):
 @torch.library.custom_op(
     f"{_LIB}::dispatch_bwd",
     mutates_args=("grad_tokens", "grad_topk_weights"),
-    device_types="cuda",
+    device_types=te_device_type(),
 )
 def _dispatch_bwd_op(
     handle_mem: torch.Tensor,
@@ -414,7 +415,7 @@ def _(*_args, **_kw):
 @torch.library.custom_op(
     f"{_LIB}::combine_bwd",
     mutates_args=("grad_expert_out", "grad_expert_out_scale_inv"),
-    device_types="cuda",
+    device_types=te_device_type(),
 )
 def _combine_bwd_op(
     handle_mem: torch.Tensor,
@@ -456,7 +457,7 @@ def ep_prepare(buffer: "EpBuffer", topk_idx: torch.Tensor) -> torch.Tensor:
         # total_recv_tokens is pinned host memory stored by the prepare kernel; a CPU
         # tensor's .item() does not synchronize, so sync the stream first, then the
         # read is a free CPU load (no D2H copy).
-        torch.cuda.current_stream().synchronize()
+        te_platform().current_stream().synchronize()
         buffer._host_total_recv_tokens = int(buffer.total_recv_tokens.item())
     return buffer.tokens_per_expert
 

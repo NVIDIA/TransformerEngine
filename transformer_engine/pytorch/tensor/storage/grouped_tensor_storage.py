@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Grouped tensor storage class for handling collections of tensors with different shapes"""
+from transformer_engine import te_platform
 from __future__ import annotations
 from typing import Optional, Tuple, List, Union
 import math
@@ -668,7 +669,7 @@ class GroupedTensorStorage:
 
         # Set device
         if device is None:
-            device = torch.cuda.current_device()
+            device = te_platform().current_device()
 
         # Shape patterns and validation.
         all_same_first = first_dims is None

@@ -23,6 +23,7 @@ Usage (any factory)::
         output = model(input)
 """
 
+from transformer_engine import te_device_type
 from __future__ import annotations
 
 from typing import Optional
@@ -86,7 +87,7 @@ def current_scaling_factory(
 
     return Float8CurrentScalingQuantizer(
         fp8_dtype=fp8_dtype,
-        device=torch.device("cuda"),
+        device=torch.device(te_device_type()),
         force_pow_2_scales=False,
         amax_epsilon=0.0,
     )

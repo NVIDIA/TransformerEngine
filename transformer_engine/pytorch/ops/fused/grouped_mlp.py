@@ -4,6 +4,7 @@
 
 """Joint fused operation for MoE grouped MLP."""
 
+from transformer_engine import te_device_type, te_platform
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
@@ -474,7 +475,7 @@ def _cudnn_compute_wgrad(
           b = X  = (total_tokens, in_features) column-major.
     """
     if current_stream is None:
-        current_stream = torch.cuda.current_stream().cuda_stream
+        current_stream = te_platform().current_stream().cuda_stream
 
     out_features, in_features = weight_shape
     total_tokens = grouped_dy.logical_shape[0]
@@ -1034,7 +1035,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
 
         device = fc1_weight_param.device
         if torch.is_autocast_enabled():
-            dtype = torch.get_autocast_dtype("cuda")
+            dtype = torch.get_autocast_dtype(te_device_type())
         else:
             dtype = fc1_weight_param.dtype
 
@@ -1312,7 +1313,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
 
         alpha_tensor = get_cached_ones_tensor(num_groups, dtype, device)
         norm_const_tensor = get_cached_ones_tensor(1, torch.float32, device)
-        current_stream = torch.cuda.current_stream().cuda_stream
+        current_stream = te_platform().current_stream().cuda_stream
 
         fc1_bias_packed = _pack_grouped_linear_bias_for_cudnn(fc1_op)
         fc2_bias_packed = _pack_grouped_linear_bias_for_cudnn(fc2_op)
@@ -1979,7 +1980,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         # Kernel scaling factors
         alpha_tensor = get_cached_ones_tensor(num_groups, dtype, device)
         norm_const_tensor = get_cached_ones_tensor(1, torch.float32, device)
-        current_stream = torch.cuda.current_stream().cuda_stream
+        current_stream = te_platform().current_stream().cuda_stream
 
         unit_activation_scale = bool(getattr(fc1_ctx, "unit_activation_scale", False))
         scales_f32 = None

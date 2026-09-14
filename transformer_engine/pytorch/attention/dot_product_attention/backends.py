@@ -4,6 +4,7 @@
 
 """Attention Backends."""
 
+from transformer_engine import te_device_type, te_platform
 from contextlib import nullcontext
 from importlib.metadata import version as get_pkg_version
 from importlib.metadata import PackageNotFoundError
@@ -554,7 +555,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
             output_size[2],
             output_size[3],
             dtype=query_layer.dtype,
-            device=torch.cuda.current_device(),
+            device=te_platform().current_device(),
         )
 
         scale = self.softmax_scale
@@ -573,10 +574,10 @@ class UnfusedDotProductAttention(torch.nn.Module):
             # S/dP are forced to use DS quantizers in DPA.init_fp8_metadata; revert them here for true CS emulation
             if fp8_recipe.float8_current_scaling():
                 S_quantizer = Float8CurrentScalingQuantizer(
-                    fp8_dtype=S_quantizer.dtype, device="cuda"
+                    fp8_dtype=S_quantizer.dtype, device=te_device_type()
                 )
                 dP_quantizer = Float8CurrentScalingQuantizer(
-                    fp8_dtype=dP_quantizer.dtype, device="cuda"
+                    fp8_dtype=dP_quantizer.dtype, device=te_device_type()
                 )
             # disable swizzle for MXFP8Quantizer
             for quantizer in [
@@ -888,7 +889,7 @@ class FlashAttention(torch.nn.Module):
         alibi_slopes: Optional[torch.Tensor] = None,
         cp_group: Optional[Union[dist_group_type, List[dist_group_type]]] = None,
         cp_global_ranks: List[int] = None,
-        cp_stream: torch.cuda.Stream = None,
+        cp_stream: te_platform().Stream = None,
         cp_comm_type: str = "p2p",
         fp8: bool = False,
         fp8_meta: Optional[Dict[str, Any]] = None,
@@ -2100,7 +2101,7 @@ class FusedAttention(torch.nn.Module):
         fast_zero_fill: bool = True,
         cp_group: Optional[Union[dist_group_type, List[dist_group_type]]] = None,
         cp_global_ranks: List[int] = None,
-        cp_stream: torch.cuda.Stream = None,
+        cp_stream: te_platform().Stream = None,
         cp_comm_type: str = "p2p",
         fp8: bool = False,
         fp8_meta: Optional[Dict[str, Any]] = None,

@@ -93,7 +93,7 @@ def maybe_dequantize(
 
 def maybe_autocast_dtype(
     *,
-    device_type: str = "cuda",
+    device_type: str = te_device_type(),
     default_dtype: Optional[torch.dtype] = None,
 ) -> torch.dtype:
     """Get autocast dtype if enabled"""

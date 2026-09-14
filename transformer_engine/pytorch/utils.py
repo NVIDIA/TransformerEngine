@@ -13,6 +13,7 @@ from contextlib import nullcontext
 import numpy as np
 import torch
 
+from transformer_engine import te_device_type, te_platform
 from .torch_version import torch_version
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
 
@@ -86,7 +87,7 @@ def _get_device_compute_capability(device: torch.device) -> Tuple[int, int]:
 @torch.compiler.assume_constant_result
 def get_device_compute_capability() -> Tuple[int, int]:
     """CUDA compute capability of current GPU"""
-    return _get_device_compute_capability(torch.cuda.current_device())
+    return _get_device_compute_capability(te_platform().current_device())
 
 
 def deinterleave_glu_tensor(tensor: torch.Tensor, interleave_size: int) -> torch.Tensor:
@@ -275,7 +276,7 @@ def all_close(a: torch.Tensor, b: torch.Tensor) -> bool:
 
 def print_rank_0(*args: Any) -> None:
     """print on rank 0"""
-    if torch.cuda.current_device() == 0:
+    if te_platform().current_device() == 0:
         print(*args)
 
 
@@ -690,12 +691,12 @@ def canonicalize_device(device: Optional[torch.device | str]) -> torch.device:
     if device is None:
         # Use default CUDA device
         device = torch.get_default_device()
-        if device.type != "cuda":
-            device = torch.device("cuda", torch.cuda.current_device())
+        if device.type != te_device_type():
+            device = torch.device(te_device_type(), te_platform().current_device())
     elif not isinstance(device, torch.device):
         device = torch.device(device)
-    if device.type == "cuda" and device.index is None:
-        device = torch.device("cuda", torch.cuda.current_device())
+    if device.type == te_device_type() and device.index is None:
+        device = torch.device(te_device_type(), te_platform().current_device())
     return device
 
 
@@ -717,15 +718,15 @@ def devices_match(device1: torch.device, device2: torch.device) -> bool:
     device2 = torch.device(device2)
     if device1.type != device2.type:
         return False
-    if device1.type == "cuda":
+    if device1.type == te_device_type():
         index1 = device1.index
         index2 = device2.index
         if index1 == index2:
             return True
         if index1 is None:
-            index1 = torch.cuda.current_device()
+            index1 = te_platform().current_device()
         if index2 is None:
-            index2 = torch.cuda.current_device()
+            index2 = te_platform().current_device()
         return index1 == index2
     return device1 == device2
 
@@ -733,7 +734,7 @@ def devices_match(device1: torch.device, device2: torch.device) -> bool:
 @functools.lru_cache
 def get_sm_count() -> int:
     """Returns the number of streaming multiprocessors in the current device."""
-    return torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
+    return torch.cuda.get_device_properties(te_platform().current_device()).multi_processor_count
 
 
 def ceil_div(numerator, denominator):
@@ -856,14 +857,14 @@ def canonicalize_process_group(
 def torch_get_autocast_gpu_dtype() -> torch.dtype:
     """Get PyTorch autocast GPU dtype."""
     if torch_version() >= (2, 4, 0):
-        return torch.get_autocast_dtype("cuda")
+        return torch.get_autocast_dtype(te_device_type())
     return torch.get_autocast_gpu_dtype()
 
 
 if torch_version() >= (2, 4, 0):
-    gpu_autocast_ctx = functools.partial(torch.amp.autocast, device_type="cuda")
+    gpu_autocast_ctx = functools.partial(torch.amp.autocast, device_type=te_device_type())
 else:
-    gpu_autocast_ctx = torch.cuda.amp.autocast
+    gpu_autocast_ctx = te_platform().amp.autocast
 
 
 _torch_dtype_to_np_typestr_dict = {

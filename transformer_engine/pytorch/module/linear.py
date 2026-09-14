@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Linear API"""
+from transformer_engine import te_platform
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Tuple, Union, List
 from functools import reduce
@@ -1201,7 +1202,7 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
                 # We use the send stream to copy into the userbuffers.
                 # This is the same stream that we will use to access the data in the AG,
                 # so we dont need to add any syncs yet.
-                with torch.cuda.stream(dgrad_send_stream):
+                with te_platform().stream(dgrad_send_stream):
                     grad_output, _ = fill_userbuffers_buffer_for_all_gather(
                         ub_obj_overlap_wgrad,
                         grad_output_arg,
@@ -1575,7 +1576,7 @@ class Linear(TransformerEngineBaseModule):
         params_dtype: Optional[torch.dtype] = None,
         parallel_mode: Optional[str] = None,
         parameters_split: Optional[Union[Tuple[str, ...], Dict[str, int]]] = None,
-        device: Union[torch.device, str] = "cuda",
+        device: Union[torch.device, str] = te_device_type(),
         ub_overlap_ag: bool = False,
         ub_overlap_rs: bool = False,
         ub_overlap_rs_dgrad: bool = False,

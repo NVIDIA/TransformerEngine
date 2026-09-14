@@ -13,6 +13,7 @@ means the held compute dtype, typically BF16, FP16, or FP32; it does not mean
 FP32 specifically.
 """
 
+from transformer_engine import te_device_type
 from __future__ import annotations
 from typing import Any, Iterable, Optional, Tuple, Union
 
@@ -110,7 +111,7 @@ class IdentityQuantizer(Quantizer):
         pin_memory: bool = False,
     ) -> Union["IdentityTensor", IdentityTensorStorage]:
         if device is None:
-            device = torch.device("cuda")
+            device = torch.device(te_device_type())
         device = torch.device(device)
         data_dtype = self.dtype if self.dtype is not None else dtype
         data = torch.empty(tuple(shape), dtype=data_dtype, device=device, pin_memory=pin_memory)

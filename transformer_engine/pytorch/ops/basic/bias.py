@@ -4,6 +4,7 @@
 
 """Fusible operation for bias."""
 
+from transformer_engine import te_device_type
 from __future__ import annotations
 from typing import Optional
 
@@ -95,7 +96,7 @@ class Bias(BasicOperation):
 
         # Make sure parameter is initialized
         bias = self.bias
-        if bias.device.type != "cuda":
+        if bias.device.type != te_device_type():
             bias = torch.empty_like(bias, device=self.device)
         else:
             bias = bias.to(device=self.device)

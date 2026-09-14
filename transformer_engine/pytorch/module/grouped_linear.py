@@ -4,6 +4,7 @@
 
 """GroupedLinear API"""
 
+from transformer_engine import te_device_type
 from typing import Union, Optional, Callable, Tuple, List, Sequence
 from itertools import chain
 import os
@@ -1142,7 +1143,7 @@ class _GroupedLinear(torch.autograd.Function):
                 "single_grouped_bias to allow the split-quantize fallback."
             )
         if grouped_tensor_supported:
-            if m_splits.device.type != "cuda":
+            if m_splits.device.type != te_device_type():
                 raise ValueError(
                     "The native grouped_tensor path requires CUDA m_splits. Pass a CUDA int64 "
                     "tensor, or set use_grouped_tensor=False."
@@ -1991,7 +1992,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         return_bias: bool = False,
         params_dtype: Optional[torch.dtype] = None,
         parallel_mode: Optional[str] = None,
-        device: Union[torch.device, str] = "cuda",
+        device: Union[torch.device, str] = te_device_type(),
         ub_overlap_rs: bool = False,
         ub_overlap_ag: bool = False,
         ub_name: Optional[str] = None,

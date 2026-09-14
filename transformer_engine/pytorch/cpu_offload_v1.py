@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Functionality for CPU offloading of tensors saved for backward pass."""
+from transformer_engine import te_platform
 from __future__ import annotations
 from contextlib import nullcontext
 from typing import Any, Dict, Optional
@@ -363,8 +364,8 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                 self.layer_window_map[i] += constant
 
         # allocate streams and events for synchronization
-        self.d2h_stream = torch.cuda.Stream()
-        self.h2d_stream = torch.cuda.Stream()
+        self.d2h_stream = te_platform().Stream()
+        self.h2d_stream = te_platform().Stream()
 
     def tensor_push(self, tensor: torch.Tensor, **kwargs) -> Any:
         global CPUOffloadedLayer
@@ -463,7 +464,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
 
     def bulk_offload_group(self, group_to_offload):
         """Bulk offload group."""
-        with torch.cuda.stream(self.d2h_stream):
+        with te_platform().stream(self.d2h_stream):
             for tensor_tag, state in self.tensor_tag_to_state.items():
                 group_id, _ = tensor_tag
                 if group_id == group_to_offload:
@@ -507,7 +508,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         # For the first group, kickstart the offload after we have
         # the first compute completion
         if current_group == 0:
-            self.d2h_stream.wait_stream(torch.cuda.current_stream())
+            self.d2h_stream.wait_stream(te_platform().current_stream())
 
             if not self.double_buffer_created:
                 # Creating the first copy of double buffer for tensors that are offloaded
@@ -529,8 +530,8 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         if self.layer_window_map[self.offloaded_group_count] == current_group:
 
             # Stream synchronization both ways
-            self.d2h_stream.wait_stream(torch.cuda.current_stream())
-            torch.cuda.current_stream().wait_stream(self.d2h_stream)
+            self.d2h_stream.wait_stream(te_platform().current_stream())
+            te_platform().current_stream().wait_stream(self.d2h_stream)
 
             # Time to free the activation memory after usage
             for tensor_tag, tensor_buf in self.tensor_tag_to_buf.items():
@@ -577,9 +578,9 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         buffer_idx = 0
         double_buffer_idx = group_to_reload % 2
 
-        main_stream = torch.cuda.current_stream()
+        main_stream = te_platform().current_stream()
 
-        with torch.cuda.stream(self.h2d_stream):
+        with te_platform().stream(self.h2d_stream):
             # move back tensors
             for tensor_label, state in self.tensor_tag_to_state.items():
                 group_id, _ = tensor_label
@@ -589,9 +590,9 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                         if self.double_buffering:
                             reload_buffer = self.reload_double_buffer[double_buffer_idx][buffer_idx]
                         else:
-                            with torch.cuda.stream(main_stream):
+                            with te_platform().stream(main_stream):
                                 reload_buffer = torch.empty_like(
-                                    state[1], device=torch.cuda.current_device()
+                                    state[1], device=te_platform().current_device()
                                 )
 
                         recovered_tensor = SynchronizedGroupOffloadHandler.reload(
@@ -609,9 +610,9 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                                         buffer_idx
                                     ]
                                 else:
-                                    with torch.cuda.stream(main_stream):
+                                    with te_platform().stream(main_stream):
                                         reload_buffer = torch.empty_like(
-                                            state_tuple[1], device=torch.cuda.current_device()
+                                            state_tuple[1], device=te_platform().current_device()
                                         )
 
                                 tensor_list.append(
@@ -654,8 +655,8 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         if self.layer_window_map[self.offloaded_group_count - 1] == self.current_group:
 
             # Stream synchronization both ways
-            self.h2d_stream.wait_stream(torch.cuda.current_stream())
-            torch.cuda.current_stream().wait_stream(self.h2d_stream)
+            self.h2d_stream.wait_stream(te_platform().current_stream())
+            te_platform().current_stream().wait_stream(self.h2d_stream)
 
             # Time to reload the next group
             self.bulk_reload_group(self.offloaded_group_count - 1)
@@ -665,7 +666,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
 
         # Last group computation needs to wait till all the reloads complete
         if self.current_group == 0:
-            torch.cuda.current_stream().wait_stream(self.h2d_stream)
+            te_platform().current_stream().wait_stream(self.h2d_stream)
             self.offloaded_group_count = 0
 
 
