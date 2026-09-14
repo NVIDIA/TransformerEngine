@@ -191,11 +191,11 @@ class LogFp8TensorStats(BaseLogTensorStats):
                 f"Stat {stat} does not contain a recipe name and the current recipe is not set."
             )
 
+        if recipe_from_stat == "nvfp4":
+            raise ValueError(f"Stat {stat} requires LogNvfp4TensorStats for NVFP4 tensors.")
+
         if recipe_from_stat != "" and recipe_from_stat not in ALL_RECIPE_NAMES:
             raise ValueError(f"Stat {stat} contains an unsupported recipe name: {recipe_from_stat}")
-
-        # NVFP4-resolved stats are filtered out before this point in inspect_tensor().
-        assert recipe_from_stat != "nvfp4"
 
         if recipe_from_stat in ["fp8_delayed_scaling", "fp8_current_scaling"] and columnwise:
             raise ValueError(
