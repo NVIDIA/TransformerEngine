@@ -550,24 +550,19 @@ void launch_tiled(const void *input, void *output_rowwise, void *scales_rowwise,
     }                                                                                          \
   } while (0)
 
+  // Specialising on K folds `cols` and both scale strides into constants, which
+  // removes 16% of the executed instructions.  The kernel is memory-bound, so
+  // that converts to time only where the memory system has slack: measured 2.8%
+  // at K=4096, ~1% at 7168/16384 and 0.1% at 8192/32768 -- i.e. it pays least at
+  // exactly the large shapes it looks like it should help.  Only the small-K
+  // cases are kept; everything else takes the runtime path and saves four
+  // instantiations per output type and tile width.
   switch (cols) {
     case 2048:
       NVTE_LAUNCH_BIDIM(2048);
       break;
     case 4096:
       NVTE_LAUNCH_BIDIM(4096);
-      break;
-    case 7168:
-      NVTE_LAUNCH_BIDIM(7168);
-      break;
-    case 8192:
-      NVTE_LAUNCH_BIDIM(8192);
-      break;
-    case 16384:
-      NVTE_LAUNCH_BIDIM(16384);
-      break;
-    case 32768:
-      NVTE_LAUNCH_BIDIM(32768);
       break;
     default:
       NVTE_LAUNCH_BIDIM(0);
