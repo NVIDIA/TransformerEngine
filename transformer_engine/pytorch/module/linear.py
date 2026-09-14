@@ -1901,7 +1901,13 @@ def _linear_eager(
 class Linear(TransformerEngineBaseModule):
     """Applies a linear transformation to the incoming data :math:`y = xA^T + b`
 
-    On NVIDIA GPUs it is a drop-in replacement for ``torch.nn.Linear``.
+    On NVIDIA GPUs, this module implements the same linear transformation as
+    ``torch.nn.Linear``.
+
+    .. note::
+
+       Its constructor signature differs from ``torch.nn.Linear``. Pass optional
+       arguments, including ``bias``, by keyword.
 
     Parameters
     ----------

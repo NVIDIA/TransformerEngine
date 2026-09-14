@@ -143,6 +143,61 @@ Transformer Engine chooses the best possible fusion internally taking the recipe
 
 *Figure 3: Three scenarios of producing quantized tensors in rowwise and columnwise usages.*
 
+**Usages in the quantizer API**
+
+The usages are visible directly in the quantizer API:
+
+.. tabs::
+
+   .. tab:: PyTorch
+
+      At quantization time, the quantizer's ``rowwise_usage`` and
+      ``columnwise_usage`` flags select which representations ``quantize()``
+      produces; when both are set, the representations are computed together
+      in one fused kernel (scenario 1 above).
+
+      After quantization, ``update_usage()`` on the quantized tensor removes a
+      representation or, when supported by the format, generates a missing one.
+      Passing ``rowwise_usage=False`` after the forward pass frees the rowwise
+      data while keeping the columnwise data for backward. Some formats also
+      support ``columnwise_usage=True`` to create the columnwise representation
+      from the data already present (e.g. by a transpose on Hopper — scenario 3
+      above); unsupported requests raise an error. Arguments left as ``None``
+      preserve the current state.
+
+      .. code-block:: python
+
+         quantizer = te.MXFP8Quantizer(
+             fp8_dtype=te.DType.kFloat8E4M3,
+             rowwise=True,
+             columnwise=True,
+         )
+
+         qtensor = quantizer(tensor)   # both representations, one fused kernel
+
+         qtensor.update_usage(rowwise_usage=False)  # drop rowwise, keep columnwise
+
+   .. tab:: JAX
+
+      The usages are selected when the tensor is quantized: the quantizer's
+      ``q_layout`` (``QuantizeLayout.ROWWISE``, ``COLWISE``, or
+      ``ROWWISE_COLWISE``) sets the default, and ``quantize()`` accepts
+      ``is_rowwise``/``is_colwise`` overrides. Requesting both usages returns
+      a ``ScaledTensor2x`` holding the two representations. There is no
+      in-place ``update_usage()``: JAX arrays are immutable, so a
+      representation is not added or dropped later — unneeded ones are simply
+      not requested and get dropped by XLA's dead-code elimination.
+
+      .. code-block:: python
+
+         quantizer = QuantizerFactory.create(
+             scaling_mode=ScalingMode.MXFP8_1D_SCALING,
+             q_dtype=jnp.float8_e4m3fn,
+             q_layout=QuantizeLayout.ROWWISE_COLWISE,
+         )
+
+         qtensor = quantizer.quantize(x)  # ScaledTensor2x, both representations
+         rowwise_only = quantizer.quantize(x, is_rowwise=True, is_colwise=False)
 
 
 Memory usage
@@ -469,5 +524,4 @@ Actual behavior depends on the recipe and module configuration.
 
 *Figure 5: All-gather of quantized tensors for input and gradient tensors. 
 This is one possible scenario — actual behavior varies depending on the recipe and module configuration.*
-
 
