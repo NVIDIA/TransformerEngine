@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 660" width="100%" style="max-width: 900px;" role="img" aria-labelledby="title description">
+  <title id="title">Precision assignment by tensor role and module</title>
+  <desc id="description">Each tensor role provides a rowwise and a columnwise representation, consumed by fprop, dgrad, and wgrad GEMMs. demo.fc1: input is MXFP8 rowwise and original BF16 columnwise; weight is MXFP8 rowwise and NVFP4 columnwise; grad_output is NVFP4 rowwise and original BF16 columnwise. demo.fc2 keeps every tensor in BF16. Other TE modules use MXFP8 everywhere.</desc>
+  <defs>
+    <style>
+      @import url("../_static/css/diagram-colors.css");
+      .label { font: 600 14px 'Segoe UI', Arial, sans-serif; fill: #212121; text-anchor: middle; }
+      .rowlabel { font: 13px 'Segoe UI', Arial, sans-serif; fill: #424242; text-anchor: end; }
+      .format { font: 600 14px 'Segoe UI', Arial, sans-serif; text-anchor: middle; }
+      .legend { font: 13px 'Segoe UI', Arial, sans-serif; fill: #424242; text-anchor: start; }
+      .fmt-mxfp8 { fill: #e3f2fd; stroke: #1976d2; stroke-width: 2; }
+      .fmt-nvfp4 { fill: #fff3e0; stroke: #f57c00; stroke-width: 2; }
+      .fmt-bf16 { fill: #e8f5e9; stroke: #388e3c; stroke-width: 2; }
+      .fmt-mxfp8-text { fill: #1565c0; }
+      .fmt-nvfp4-text { fill: #e65100; }
+      .fmt-bf16-text { fill: #2e7d32; }
+    </style>
+  </defs>
+
+  <text x="500" y="28" class="title">Precision assignment by tensor role and module</text>
+
+  <text x="335" y="70" class="label">demo.fc1</text>
+  <text x="585" y="70" class="label">demo.fc2</text>
+  <text x="835" y="70" class="label">Other TE modules</text>
+
+  <g aria-label="Input tensor">
+    <rect x="40" y="84" width="920" height="150" rx="7" class="panel"/>
+    <text x="66" y="159" class="section-title" transform="rotate(-90 66 159)">input</text>
+    <text x="200" y="150" class="rowlabel">rowwise (fprop)</text>
+    <rect x="220" y="122" width="230" height="44" rx="6" class="fmt-mxfp8"/>
+    <text x="335" y="150" class="format fmt-mxfp8-text">MXFP8</text>
+    <rect x="470" y="122" width="230" height="44" rx="6" class="fmt-bf16"/>
+    <text x="585" y="150" class="format fmt-bf16-text">BF16</text>
+    <rect x="720" y="122" width="230" height="44" rx="6" class="fmt-mxfp8"/>
+    <text x="835" y="150" class="format fmt-mxfp8-text">MXFP8</text>
+
+    <text x="200" y="206" class="rowlabel">columnwise (wgrad)</text>
+    <rect x="220" y="178" width="230" height="44" rx="6" class="fmt-bf16"/>
+    <text x="335" y="206" class="format fmt-bf16-text">BF16 (original)</text>
+    <rect x="470" y="178" width="230" height="44" rx="6" class="fmt-bf16"/>
+    <text x="585" y="206" class="format fmt-bf16-text">BF16</text>
+    <rect x="720" y="178" width="230" height="44" rx="6" class="fmt-mxfp8"/>
+    <text x="835" y="206" class="format fmt-mxfp8-text">MXFP8</text>
+  </g>
+
+  <g aria-label="Weight tensor">
+    <rect x="40" y="250" width="920" height="150" rx="7" class="panel"/>
+    <text x="66" y="325" class="section-title" transform="rotate(-90 66 325)">weight</text>
+    <text x="200" y="316" class="rowlabel">rowwise (fprop)</text>
+    <rect x="220" y="288" width="230" height="44" rx="6" class="fmt-mxfp8"/>
+    <text x="335" y="316" class="format fmt-mxfp8-text">MXFP8</text>
+    <rect x="470" y="288" width="230" height="44" rx="6" class="fmt-bf16"/>
+    <text x="585" y="316" class="format fmt-bf16-text">BF16</text>
+    <rect x="720" y="288" width="230" height="44" rx="6" class="fmt-mxfp8"/>
+    <text x="835" y="316" class="format fmt-mxfp8-text">MXFP8</text>
+
+    <text x="200" y="372" class="rowlabel">columnwise (dgrad)</text>
+    <rect x="220" y="344" width="230" height="44" rx="6" class="fmt-nvfp4"/>
+    <text x="335" y="372" class="format fmt-nvfp4-text">NVFP4</text>
+    <rect x="470" y="344" width="230" height="44" rx="6" class="fmt-bf16"/>
+    <text x="585" y="372" class="format fmt-bf16-text">BF16</text>
+    <rect x="720" y="344" width="230" height="44" rx="6" class="fmt-mxfp8"/>
+    <text x="835" y="372" class="format fmt-mxfp8-text">MXFP8</text>
+  </g>
+
+  <g aria-label="Grad output tensor">
+    <rect x="40" y="416" width="920" height="150" rx="7" class="panel"/>
+    <text x="66" y="491" class="section-title" transform="rotate(-90 66 491)">grad_output</text>
+    <text x="200" y="482" class="rowlabel">rowwise (dgrad)</text>
+    <rect x="220" y="454" width="230" height="44" rx="6" class="fmt-nvfp4"/>
+    <text x="335" y="482" class="format fmt-nvfp4-text">NVFP4</text>
+    <rect x="470" y="454" width="230" height="44" rx="6" class="fmt-bf16"/>
+    <text x="585" y="482" class="format fmt-bf16-text">BF16</text>
+    <rect x="720" y="454" width="230" height="44" rx="6" class="fmt-mxfp8"/>
+    <text x="835" y="482" class="format fmt-mxfp8-text">MXFP8</text>
+
+    <text x="200" y="538" class="rowlabel">columnwise (wgrad)</text>
+    <rect x="220" y="510" width="230" height="44" rx="6" class="fmt-bf16"/>
+    <text x="335" y="538" class="format fmt-bf16-text">BF16 (original)</text>
+    <rect x="470" y="510" width="230" height="44" rx="6" class="fmt-bf16"/>
+    <text x="585" y="538" class="format fmt-bf16-text">BF16</text>
+    <rect x="720" y="510" width="230" height="44" rx="6" class="fmt-mxfp8"/>
+    <text x="835" y="538" class="format fmt-mxfp8-text">MXFP8</text>
+  </g>
+
+  <g aria-label="Legend">
+    <rect x="220" y="600" width="26" height="18" rx="4" class="fmt-mxfp8"/>
+    <text x="254" y="614" class="legend">MXFP8</text>
+    <rect x="360" y="600" width="26" height="18" rx="4" class="fmt-nvfp4"/>
+    <text x="394" y="614" class="legend">NVFP4</text>
+    <rect x="500" y="600" width="26" height="18" rx="4" class="fmt-bf16"/>
+    <text x="534" y="614" class="legend">BF16 (high precision)</text>
+  </g>
+</svg>

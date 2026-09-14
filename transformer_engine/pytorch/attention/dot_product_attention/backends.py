@@ -8,6 +8,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from importlib.metadata import version as get_pkg_version
 from importlib.metadata import PackageNotFoundError
+import inspect
 import os
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import warnings
@@ -169,6 +170,18 @@ else:
     from flash_attn_interface import _flash_attn_backward as _flash_attn_bwd_v3
 
     fa_utils.set_flash_attention_3_params()
+
+    # Older FA3 releases expose no `softcap` kwarg, so probe the API rather than the version.
+    # This cannot see a FLASHATTENTION_DISABLE_SOFTCAP build: that still exposes the kwarg and
+    # rejects a nonzero cap at dispatch.
+    try:
+        fa_utils.fa3_supports_softcap = (
+            "softcap" in inspect.signature(flash_attn_func_v3).parameters
+            and "softcap" in inspect.signature(flash_attn_varlen_func_v3).parameters
+            and "softcap" in inspect.signature(flash_attn_with_kvcache_v3).parameters
+        )
+    except (ValueError, TypeError):
+        fa_utils.fa3_supports_softcap = False
 
 # Try to import Flash Attention v4
 try:
@@ -439,6 +452,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
         attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
         window_size: Optional[Tuple[int, int]] = None,
         bottom_right_diagonal: Optional[bool] = None,
+        softcap: float = 0.0,
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
         alibi_slopes: Optional[torch.Tensor] = None,
@@ -630,6 +644,8 @@ class UnfusedDotProductAttention(torch.nn.Module):
         key_layer = key_layer.reshape(output_size[3], output_size[0] * output_size[1], -1)
 
         # Raw attention scores. [b * h, sq, sk]
+        # `post_scale_bias`/ALiBi are deferred until after the softcap below; see the cap.
+        deferred_bias = None
         if core_attention_bias_type == "no_bias":
             matmul_result = torch.baddbmm(
                 matmul_result,
@@ -673,9 +689,19 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 beta=0.0,
                 alpha=scale,
             )
-            matmul_result = (matmul_result.view(*output_size) + core_attention_bias).to(
-                dtype=query_layer.dtype
-            )
+            matmul_result = matmul_result.view(*output_size)
+            deferred_bias = core_attention_bias
+
+        # The cap lands on the scaled logits before `post_scale_bias`/ALiBi: FA2 caps right
+        # after the QK^T gemm and adds ALiBi afterwards, so capping those would diverge from it.
+        # `pre_scale_bias` is folded in before the scaling, so it stays inside the cap. qk layer
+        # scaling defers the layer_number factor to the softmax below, so divide it out here.
+        if softcap != 0.0:
+            cap = softcap / self.layer_number if apply_qk_layer_scaling else softcap
+            matmul_result = cap * torch.tanh(matmul_result / cap)
+
+        if deferred_bias is not None:
+            matmul_result = (matmul_result + deferred_bias).to(dtype=query_layer.dtype)
 
         if fp8:
             # quantize and dequantize dP to emulate FP8
@@ -898,6 +924,7 @@ class FlashAttention(torch.nn.Module):
         max_seqlen_kv: Optional[int] = None,
         attn_mask_type: str = "causal",
         window_size: Optional[Tuple[int, int]] = None,
+        softcap: float = 0.0,
         alibi_slopes: Optional[torch.Tensor] = None,
         cp_group: Optional[Union[dist_group_type, List[dist_group_type]]] = None,
         cp_global_ranks: List[int] = None,
@@ -1114,6 +1141,11 @@ class FlashAttention(torch.nn.Module):
             assert (
                 alibi_slopes is None
             ), "Alibi slope bias addition is not supported with context parallelism."
+            if use_flash_attn_3 and softcap != 0.0:
+                raise NotImplementedError(
+                    "softcap is not supported by the FlashAttention 3 backend in context "
+                    "parallel. Please use FlashAttention 2 (>= 2.6.0) for softcap support."
+                )
             with self.attention_dropout_ctx():
                 output = attn_forward_func_with_cp(
                     self.training,
@@ -1144,6 +1176,7 @@ class FlashAttention(torch.nn.Module):
                     attn_mask_type=attn_mask_type,
                     deterministic=self.deterministic,
                     window_size=window_size,
+                    softcap=softcap,
                     quantizers=quantizers,
                     pad_between_seqs=pad_between_seqs,
                     use_flash_attn_3=use_flash_attn_3,
@@ -1241,6 +1274,8 @@ class FlashAttention(torch.nn.Module):
                         fa_optional_forward_kwargs["alibi_slopes"] = alibi_slopes
                     if fa_utils.v2_4_1_plus:
                         fa_optional_forward_kwargs["deterministic"] = self.deterministic
+                    if fa_utils.v2_6_0_plus:
+                        fa_optional_forward_kwargs["softcap"] = softcap
                     if inference_params is not None:
                         # use block_table kwarg to support thd_2bshd for non-paged
                         fa_optional_forward_kwargs["block_table"] = (
@@ -1261,9 +1296,17 @@ class FlashAttention(torch.nn.Module):
                         **fa_optional_forward_kwargs,
                     )
                 else:
+                    if softcap != 0.0 and not fa_utils.fa3_supports_softcap:
+                        raise NotImplementedError(
+                            "softcap is not supported by the installed FlashAttention 3 build. "
+                            "Please use FlashAttention 2 (>= 2.6.0) for softcap support."
+                        )
                     fa_3_optional_forward_kwargs = {}
                     fa_3_optional_forward_kwargs["window_size"] = window_size
                     fa_3_optional_forward_kwargs["num_splits"] = num_splits
+                    if softcap != 0.0 and fa_utils.fa3_supports_softcap:
+                        # FA3 entry points are autograd functions, so this drives the backward too.
+                        fa_3_optional_forward_kwargs["softcap"] = softcap
                     if pad_between_seqs:
                         fa_3_optional_forward_kwargs["seqused_q"] = (
                             cu_seqlens_q[1:] - cu_seqlens_q[:-1]
@@ -1411,7 +1454,8 @@ class FusedAttnFwdArgs:
     cu_seqlens_kv: torch.Tensor
     cu_seqlens_q_padded: Optional[torch.Tensor]
     cu_seqlens_kv_padded: Optional[torch.Tensor]
-    page_table: Optional[torch.Tensor]
+    page_table_k: Optional[torch.Tensor]
+    page_table_v: Optional[torch.Tensor]
     packed_qkv: Optional[torch.Tensor]
     packed_kv: Optional[torch.Tensor]
 
@@ -1468,28 +1512,28 @@ class FusedAttnBwdArgs:
     aux_softmax_offset: Optional[torch.Tensor] = None
 
     # --- Attention config ---
-    max_seqlen_q: int = 0
-    max_seqlen_kv: int = 0
-    attn_scale: float = 1.0
-    dropout_p: float = 0.0
-    fast_zero_fill: bool = True
-    qkv_layout: str = "sbh3d"
-    dqkv_layout: str = "sbh3d"
-    o_format: str = "sbhd"
-    attn_bias_type: str = "no_bias"
-    attn_mask_type: str = "causal"
-    softmax_type: str = "vanilla"
+    max_seqlen_q: Optional[int] = None
+    max_seqlen_kv: Optional[int] = None
+    attn_scale: Optional[float] = None
+    dropout_p: Optional[float] = None
+    fast_zero_fill: Optional[bool] = None
+    qkv_layout: Optional[str] = None
+    dqkv_layout: Optional[str] = None
+    o_format: Optional[str] = None
+    attn_bias_type: Optional[str] = None
+    attn_mask_type: Optional[str] = None
+    softmax_type: Optional[str] = None
     window_size: Optional[Tuple[int, int]] = None
     bottom_right_diagonal: Optional[bool] = None
-    fused_attention_backend: int = int(FusedAttnBackend["F16_arbitrary_seqlen"])
-    deterministic: bool = False
-    use_FAv2_bwd: bool = False
+    fused_attention_backend: Optional[int] = None
+    deterministic: Optional[bool] = None
+    use_FAv2_bwd: Optional[bool] = None
     nominal_dtype: Optional[torch.dtype] = None
 
     # --- FP8 ---
-    fp8: bool = False
-    is_input_fp8: bool = False
-    bf16_backward: bool = False
+    fp8: Optional[bool] = None
+    is_input_fp8: Optional[bool] = None
+    bf16_backward: Optional[bool] = None
     qkv_type: Optional[str] = None
     qkv_scale_inv_format: Optional[str] = None
     layer_number: Optional[int] = None
@@ -1743,8 +1787,8 @@ def _fused_attn_forward_impl(
             args.attn_bias,
             args.cu_seqlens_q_padded,
             args.cu_seqlens_kv_padded,
-            args.page_table,
-            args.page_table,
+            args.page_table_k,
+            args.page_table_v,
             None,  # s_quantizer
             None,  # o_quantizer
             args.attn_scale,
@@ -1780,44 +1824,36 @@ def _fused_attn_forward_impl(
         mark_activation_offload(*tensor_list)
         mark_activation_offload(*aux_ctx_tensors)
 
-    # Split the aux pack into fixed slots (see FusedAttnBwdArgs.aux_ctx_tensors).
-    aux = list(aux_ctx_tensors)
-    softmax_stats = aux.pop(0)
-    rng_state = aux.pop(0)
-    aux_bias = (
-        aux.pop(0)
-        if args.attn_bias_type not in ["no_bias", "alibi"] and args.attn_bias is not None
-        else None
-    )
-    aux_softmax_offset = (
-        aux.pop(0) if args.softmax_type != "vanilla" and args.softmax_offset is not None else None
-    )
-    assert not aux, f"unexpected fused attention aux tensors: {len(aux)} left"
+    softmax_stats, rng_state, *aux = aux_ctx_tensors
+    has_bias = args.attn_bias_type not in ["no_bias", "alibi"] and args.attn_bias is not None
+    has_softmax_offset = args.softmax_type != "vanilla" and args.softmax_offset is not None
+    assert len(aux) == has_bias + has_softmax_offset, "unexpected fused attention aux tensors"
 
+    saved_from = (
+        "q" if fp8_tensors[0] is args.q else None,
+        "k" if fp8_tensors[1] is args.k else None,
+        "v" if fp8_tensors[2] is args.v else None,
+        "out" if fp8_tensors[3] is out_ret else None,
+        "q" if f16_tensors[0] is args.q else None,
+        "k" if f16_tensors[1] is args.k else None,
+        "v" if f16_tensors[2] is args.v else None,
+        "out" if f16_tensors[3] is out_ret else None,
+        None,
+        None,
+        "attn_bias" if has_bias else None,
+        "softmax_offset" if has_softmax_offset else None,
+    )
     tensors_to_save = (
         *fp8_tensors,
         *f16_tensors,
         softmax_stats,
         rng_state,
-        aux_bias,
-        aux_softmax_offset,
+        None,
+        None,
     )
-    # A saved tensor identical to an input / the output is not saved twice:
-    # backward takes it from the forward arguments / output (see setup_ctx).
-    sources = {
-        id(t): name
-        for name, t in (
-            ("q", args.q),
-            ("k", args.k),
-            ("v", args.v),
-            ("attn_bias", args.attn_bias),
-            ("softmax_offset", args.softmax_offset),
-            ("out", out_ret),
-        )
-        if t is not None
-    }
-    saved_from = tuple(sources.get(id(t)) for t in tensors_to_save)
-    tensors_to_save = tuple(None if src else t for t, src in zip(tensors_to_save, saved_from))
+    tensors_to_save = tuple(
+        None if src else t for t, src in zip(tensors_to_save, saved_from, strict=True)
+    )
 
     if is_bwd_fp8 and isinstance(S_quantizer, Float8Quantizer):
         S_quantizer = S_quantizer.copy()
@@ -1948,7 +1984,7 @@ def _fused_attn_setup_ctx(
         aux_softmax_offset,
     ) = (
         sources[src] if src else saved
-        for saved, src in zip(tensors_to_save_from_forward, ctx_attrs["saved_from"])
+        for saved, src in zip(tensors_to_save_from_forward, ctx_attrs["saved_from"], strict=True)
     )
     return (
         q_fp8,
@@ -2381,12 +2417,29 @@ def _needs_eager_fused_attention(call: Dict[str, Any]) -> Optional[str]:
 
 
 class FusedAttention(torch.nn.Module):
-    """Dot product attention using cuDNN attention:
+    """Dot product attention using `cuDNN attention <https://github.com/NVIDIA/cudnn-frontend>`_:
 
     FusedAttnBackend["F16_arbitrary_seqlen"]
        cuDNN attention for FP16/BF16 with any sequence length.
     FusedAttnBackend["FP8"]
-       cuDNN attention for FP8 with any sequence length.
+       cuDNN attention for FP8 with any sequence length. It supports the following recipes, where
+       "Inputs", "Intermediates" and "Outputs" are in the format of "tensor: quantizer". The recipes
+       are implemented in transformer_engine.pytorch.cpp_extension.fused_attn.fused_attn_fwd and
+       transformer_engine.pytorch.cpp_extension.fused_attn.fused_attn_bwd.
+
+                                    Direction   Inputs                                       Intermediates  Outputs
+       DelayedScaling (DS)          forward     Q/K/V: DS                                    S: DS          O: DS
+                                    backward    Q/K/V/O (from forward), dO: DS               dP: DS         dQ/dK/dV: DS
+       Float8CurrentScaling (CS)    forward     Q/K/V: CS                                    S: DS          O: F16
+                                    backward    Q/K/V (from forward), dO: CS,
+                                                O: F16 (or CS if NVTE_DPA_FP8CS_O_in_F16=0)  dP: DS         dQ/dK/dV: F16
+       MXFP8BlockScaling (MXFP8)    forward     Q/K row, V col: MXFP8                        S: None        O: F16
+                                    backward    Q/K row+col, V row: MXFP8,
+                                                O/dO: F16, dO row+col: MXFP8                 dP: None       dQ/dK/dV: F16
+
+       For MXFP8, "row" and "col" are the quantization directions, which align with the contraction axes
+       of the matmuls that consume the tensor. For more details, please refer to
+       `How Scales Are Applied in MXFP8 Attention <https://nvidia.github.io/cudnn-frontend/mxfp8-attention-scaling/>`_.
     """
 
     def __init__(
@@ -2669,7 +2722,8 @@ class FusedAttention(torch.nn.Module):
                 cu_seqlens_kv=cu_seqlens_kv,
                 cu_seqlens_q_padded=cu_seqlens_q_padded,
                 cu_seqlens_kv_padded=cu_seqlens_kv_padded,
-                page_table=page_table,
+                page_table_k=page_table,
+                page_table_v=page_table,
                 packed_qkv=packed_qkv,
                 packed_kv=packed_kv,
                 is_training=self.training,

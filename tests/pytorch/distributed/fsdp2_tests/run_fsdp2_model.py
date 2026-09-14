@@ -510,6 +510,10 @@ def test_distributed_hybrid(hybrid_recipe_name):
     _check_fp8_fsdp2_allgather(model, tols=dict(atol=5e-4, rtol=5e-3))
 
 
+@pytest.mark.skipif(
+    not te.is_fp8_available(),
+    reason=te.is_fp8_available(return_reason=True)[1],
+)
 def test_distributed_hybrid_identity_all():
     """FSDP2 training/all-gather with an all-Identity CustomRecipe.
 

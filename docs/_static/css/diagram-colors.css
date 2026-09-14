@@ -279,3 +279,18 @@ html[data-theme="dark"] .subtitle,
 html[data-theme="dark"] .memory-label { fill: #e0e0e0; }
 html[data-theme="dark"] .connector { stroke: #bdbdbd; }
 
+
+/* fine_grained_quantization diagrams */
+html[data-theme="dark"] .fmt-mxfp8 { fill: #10375c; stroke: #64b5f6; }
+html[data-theme="dark"] .fmt-nvfp4 { fill: #5c3a10; stroke: #ffb74d; }
+html[data-theme="dark"] .fmt-bf16 { fill: #1e4620; stroke: #81c784; }
+html[data-theme="dark"] .fmt-mxfp8-text { fill: #90caf9; }
+html[data-theme="dark"] .fmt-nvfp4-text { fill: #ffcc80; }
+html[data-theme="dark"] .fmt-bf16-text { fill: #a5d6a7; }
+html[data-theme="dark"] .source { fill: #3a2f5c; stroke: #b39ddb; }
+html[data-theme="dark"] .quantizer { fill: #1e4620; stroke: #81c784; }
+html[data-theme="dark"] .representation { fill: #10375c; stroke: #64b5f6; }
+html[data-theme="dark"] .dequantize { fill: #5c3a10; stroke: #ffb74d; }
+html[data-theme="dark"] .rowlabel,
+html[data-theme="dark"] .legend,
+html[data-theme="dark"] .op { fill: #e0e0e0; }
