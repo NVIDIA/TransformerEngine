@@ -17,6 +17,13 @@ from ..tensor.hybrid_tensor import HybridQuantizer
 from ..utils import get_default_init_method
 
 
+def sum_bias_grad(tensor: torch.Tensor) -> torch.Tensor:
+    """Reduce all token dimensions, preserving the final feature dimension."""
+    if tensor.ndim == 1:
+        return tensor.clone()
+    return tensor.sum(dim=tuple(range(tensor.ndim - 1)))
+
+
 def set_quantizer_amax_reduction_group(quantizer, amax_reduction_group) -> None:
     """Set the amax reduction group on a quantizer; no-op if it doesn't support it.
 

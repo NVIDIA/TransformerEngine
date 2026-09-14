@@ -20,7 +20,7 @@ from torch.distributed.tensor import DTensor
 
 import transformer_engine_torch as tex
 
-from ._common import _ParameterInitMeta, noop_cat
+from ._common import _ParameterInitMeta, noop_cat, sum_bias_grad
 from .._extra_state import (
     extra_state_pickle_advisory,
     is_stateless_recipe,
@@ -1721,7 +1721,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if gather_grad_output:
             grad_bias = None
             if ctx.use_bias:
-                grad_bias = grad_output.view(-1, grad_output.shape[-1]).sum(dim=0)
+                grad_bias = sum_bias_grad(grad_output)
             if ctx.ub_overlap_ag:
                 # Quantize the gradient if needed
                 if not isinstance(
@@ -1755,7 +1755,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if ctx.debug:
             grad_output_ = quantizer(grad_output)
             if ctx.use_bias:
-                grad_bias = grad_output.view(-1, grad_output.shape[-1]).sum(dim=0)
+                grad_bias = sum_bias_grad(grad_output)
             else:
                 grad_bias = None
             grad_output = grad_output_
@@ -1773,7 +1773,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     Float8BlockwiseQTensorStorage,
                 ),
             ):
-                grad_bias = grad_output.dequantize().view(-1, grad_output.shape[-1]).sum(dim=0)
+                grad_bias = sum_bias_grad(grad_output.dequantize())
             else:
                 if isinstance(
                     quantizer, (Float8BlockQuantizer, HybridQuantizer, IdentityQuantizer)
@@ -1781,7 +1781,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     # Float8BlockQuantizer: unfused until cast_transpose + dgrad is ready.
                     # HybridQuantizer: tex.bgrad_quantize doesn't recognize hybrid quantizers.
                     # IdentityQuantizer: high-precision passthrough; bgrad computed in HP.
-                    grad_bias = grad_output.view(-1, grad_output.shape[-1]).sum(dim=0)
+                    grad_bias = sum_bias_grad(grad_output)
                 else:
                     grad_bias, grad_output = tex.bgrad_quantize(grad_output, quantizer)
         if not isinstance(grad_output, QuantizedTensorStorage):

@@ -73,6 +73,7 @@ from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor.hybrid_tensor import HybridQuantizer
 from ..tensor.identity_tensor import IdentityQuantizer
 from ._common import (
+    sum_bias_grad,
     apply_normalization,
     set_quantizer_amax_reduction_group,
     set_quantizer_usage_for_wgrad_all_gather,
@@ -1416,7 +1417,7 @@ class _LayerNormMLP(torch.autograd.Function):
                             and fc2_bias is not None
                         ):
                             # BGRAD not fused with GEMM for float8 blockwise gemm.
-                            fc2_bias_grad_ = act_out.view(-1, act_out.shape[-1]).sum(dim=0)
+                            fc2_bias_grad_ = sum_bias_grad(act_out)
                         fc2_bias_grad = fc2_bias_grad_
                     del fc2_bias_grad_
 
@@ -1444,7 +1445,7 @@ class _LayerNormMLP(torch.autograd.Function):
             elif ctx.debug:
                 dact_func = _act_func(ctx.activation)[1]
                 dact = dact_func(fc2_dgrad, fc1_out.to(ctx.activation_dtype), None, **act_params)
-                fc1_bias_grad = dact.sum(dim=0)
+                fc1_bias_grad = sum_bias_grad(dact)
                 dact = ctx.fc1_grad_output_quantizer(dact)
             elif (
                 _act_func(ctx.activation, ctx.fp8_recipe if ctx.fp8 else None)[2] is not None
@@ -1479,7 +1480,7 @@ class _LayerNormMLP(torch.autograd.Function):
                         )
                         or ctx.fp8_recipe.custom()
                     ):
-                        fc1_bias_grad = dact.view(-1, dact.shape[-1]).sum(dim=0)
+                        fc1_bias_grad = sum_bias_grad(dact)
                         dact = ctx.fc1_grad_output_quantizer(dact)
                     else:
                         fc1_bias_grad, dact = tex.bgrad_quantize(
@@ -1492,7 +1493,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     # it may  not be calculated in case wgrad is not required.
                     if fc1_bias is not None:
                         if not ctx.fc1_weight_requires_grad and fc1_bias.requires_grad:
-                            fc1_bias_grad = dact.sum(dim=0)
+                            fc1_bias_grad = sum_bias_grad(dact)
 
             # Overwrite data. Deleting the tensor does not release underlying memory.
             clear_tensor_data(fc1_out, fc1_out_without_bias)
@@ -2753,7 +2754,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                     ):
                         act_out = tensor_list_fc2[0]
                         # BGRAD not fused with GEMM for float8 blockwise gemm.
-                        fc2_bias_grad_ = act_out.view(-1, act_out.shape[-1]).sum(dim=0)
+                        fc2_bias_grad_ = sum_bias_grad(act_out)
                     self.fc2_bias.grad = fc2_bias_grad_.to(self.fc2_bias.dtype)
                 if self.fc1_bias.grad is None:
                     self.fc1_bias.grad = fc1_bias_grad.to(self.fc1_bias.dtype)
