@@ -5,21 +5,29 @@
  ************************************************************************/
 
 #include <algorithm>
+#include <cstdlib>
 
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
+#include <Python.h>
 #include <cstring>
 #include <gtest/gtest.h>
+#include <string>
 
 #include <transformer_engine/cast.h>
 #include <transformer_engine/activation.h>
 #include <transformer_engine/swizzle.h>
 #include "../test_common.h"
+#pragma push_macro("TRANSFORMER_ENGINE_TYPE_SWITCH_ALL")
+#undef TRANSFORMER_ENGINE_TYPE_SWITCH_ALL
+#include "cast/mxfp8/quantize_mxfp8_cutedsl.cuh"
+#pragma pop_macro("TRANSFORMER_ENGINE_TYPE_SWITCH_ALL")
 #include "transformer_engine/transformer_engine.h"
 
+namespace test {
+
 using namespace transformer_engine;
-using namespace test;
 
 namespace {
 
@@ -45,6 +53,42 @@ enum MXFP82DScalingDirection {
     ColwiseOnly,
     Bidirectional
 };
+
+std::string mxfp8_cutedsl_key(DType input_type, DType output_type, bool rowwise, bool colwise,
+                              bool swizzled, ProcessingMethod processing_method,
+                              float (*OP)(const float));
+
+bool is_cutedsl_kernel_registered(const std::string &key) {
+  if (!Py_IsInitialized()) {
+    return false;
+  }
+  PyObject *tvm_ffi = PyImport_ImportModule("tvm_ffi");
+  PyObject *function = tvm_ffi == nullptr
+                           ? nullptr
+                           : PyObject_CallMethod(tvm_ffi, "get_global_func", "si", key.c_str(), 1);
+  const bool registered = function != nullptr && function != Py_None;
+  if (function == nullptr) {
+    PyErr_Print();
+  }
+  Py_XDECREF(function);
+  Py_XDECREF(tvm_ffi);
+  return registered;
+}
+
+void expect_cutedsl_mxfp8_kernel(const DType input_type, const DType output_type,
+                                 const bool rowwise, const bool colwise, const bool swizzled,
+                                 const ProcessingMethod processing_method,
+                                 float (*OP)(const float)) {
+  const char* enabled = std::getenv("NVTE_ENABLE_CUTEDSL_QUANT_BACKEND");
+  if (enabled == nullptr || std::strcmp(enabled, "0") == 0) {
+    return;
+  }
+  const std::string key =
+      mxfp8_cutedsl_key(input_type, output_type, rowwise, colwise, swizzled, processing_method, OP);
+  EXPECT_TRUE(is_cutedsl_kernel_registered(key))
+      << "CuTeDSL kernel was not registered for " << key
+      << "; this case fell back to the CUDA kernel";
+}
 
 template <typename InputType, typename OutputType>
 void compute_ref(const ProcessingMethod processing_method,
@@ -359,6 +403,7 @@ void performTest_x1(const ProcessingMethod processing_method,
     cudaDeviceSynchronize();
     auto err = cudaGetLastError();
     ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
+    expect_cutedsl_mxfp8_kernel(itype, otype, rowwise, colwise, false, processing_method, OP);
 
     compute_ref<InputType, OutputType>(processing_method,
                                        OP,
@@ -535,6 +580,7 @@ void performTest_x2(const ProcessingMethod processing_method,
     cudaDeviceSynchronize();
     auto err = cudaGetLastError();
     ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
+    expect_cutedsl_mxfp8_kernel(itype, otype, true, true, false, processing_method, OP);
 
     compute_ref<InputType, OutputType>(processing_method,
                                        OP,
@@ -1063,6 +1109,10 @@ TEST_P(SwizzledScalesFusedCastMXFP8TestSuite, TestSwizzledCastMXFP8) {
 
     cudaDeviceSynchronize();
     ASSERT_EQ(cudaGetLastError(), cudaSuccess) << "swizzled-scale nvte_quantize failed";
+    expect_cutedsl_mxfp8_kernel(itype, otype, true, true, true, ProcessingMethod::CAST_ONLY,
+                                &identity);
+    expect_cutedsl_mxfp8_kernel(itype, otype, true, false, true, ProcessingMethod::CAST_ONLY,
+                                &identity);
 
     // Reference construction: nvte_swizzle_scaling_factors accepts tensors with
     // exactly one scale direction, so we build the rowwise and colwise references
@@ -1227,3 +1277,52 @@ INSTANTIATE_TEST_SUITE_P(
         std::make_tuple(std::vector<size_t>{1024, 1024}, DType::kFloat32, DType::kFloat8E4M3)
     ),
     swizzled_test_name_generator);
+
+}  // namespace test
+
+namespace test {
+namespace {
+
+transformer_engine::tvm_ffi_bridge::Activation to_internal_activation(
+    const ProcessingMethod processing_method, float (*OP)(const float)) {
+  using Activation = transformer_engine::tvm_ffi_bridge::Activation;
+  if (processing_method == ProcessingMethod::CAST_ACT) {
+    if (OP == &gelu) return Activation::kGeLU;
+    if (OP == &silu) return Activation::kSiLU;
+    if (OP == &relu) return Activation::kReLU;
+    if (OP == &qgelu) return Activation::kQGeLU;
+    if (OP == &srelu) return Activation::kSReLU;
+  } else if (processing_method == ProcessingMethod::CAST_DACT ||
+             processing_method == ProcessingMethod::CAST_DBIAS_DACT) {
+    if (OP == &dgelu) return Activation::kDGeLU;
+    if (OP == &dsilu) return Activation::kDSiLU;
+    if (OP == &drelu) return Activation::kDReLU;
+    if (OP == &dqgelu) return Activation::kDQGeLU;
+    if (OP == &dsrelu) return Activation::kDSReLU;
+  }
+  return Activation::kNone;
+}
+
+std::string mxfp8_cutedsl_key(const DType input_type, const DType output_type, const bool rowwise,
+                              const bool colwise, const bool swizzled,
+                              const ProcessingMethod processing_method,
+                              float (*OP)(const float)) {
+  const transformer_engine::cutedsl_backend::MXFP8QuantConfig config{
+      /*dtype=*/input_type,
+      /*fp8_dtype=*/output_type,
+      /*rowwise=*/rowwise,
+      /*colwise=*/colwise,
+      /*swizzled=*/swizzled,
+      /*with_amax=*/false,
+      /*with_dbias=*/processing_method == ProcessingMethod::CAST_DBIAS ||
+          processing_method == ProcessingMethod::CAST_DBIAS_DACT,
+      /*with_dact=*/processing_method == ProcessingMethod::CAST_DACT ||
+          processing_method == ProcessingMethod::CAST_DBIAS_DACT,
+      /*with_act=*/processing_method == ProcessingMethod::CAST_ACT,
+      /*use_2d_quantization=*/false,
+      /*activation=*/to_internal_activation(processing_method, OP)};
+  return config.to_key();
+}
+
+}  // namespace
+}  // namespace test
