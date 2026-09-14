@@ -1452,7 +1452,8 @@ class FusedAttnFwdArgs:
     cu_seqlens_kv: torch.Tensor
     cu_seqlens_q_padded: Optional[torch.Tensor]
     cu_seqlens_kv_padded: Optional[torch.Tensor]
-    page_table: Optional[torch.Tensor]
+    page_table_k: Optional[torch.Tensor]
+    page_table_v: Optional[torch.Tensor]
     packed_qkv: Optional[torch.Tensor]
     packed_kv: Optional[torch.Tensor]
 
@@ -1509,28 +1510,28 @@ class FusedAttnBwdArgs:
     aux_softmax_offset: Optional[torch.Tensor] = None
 
     # --- Attention config ---
-    max_seqlen_q: int = 0
-    max_seqlen_kv: int = 0
-    attn_scale: float = 1.0
-    dropout_p: float = 0.0
-    fast_zero_fill: bool = True
-    qkv_layout: str = "sbh3d"
-    dqkv_layout: str = "sbh3d"
-    o_format: str = "sbhd"
-    attn_bias_type: str = "no_bias"
-    attn_mask_type: str = "causal"
-    softmax_type: str = "vanilla"
+    max_seqlen_q: Optional[int] = None
+    max_seqlen_kv: Optional[int] = None
+    attn_scale: Optional[float] = None
+    dropout_p: Optional[float] = None
+    fast_zero_fill: Optional[bool] = None
+    qkv_layout: Optional[str] = None
+    dqkv_layout: Optional[str] = None
+    o_format: Optional[str] = None
+    attn_bias_type: Optional[str] = None
+    attn_mask_type: Optional[str] = None
+    softmax_type: Optional[str] = None
     window_size: Optional[Tuple[int, int]] = None
     bottom_right_diagonal: Optional[bool] = None
-    fused_attention_backend: int = int(FusedAttnBackend["F16_arbitrary_seqlen"])
-    deterministic: bool = False
-    use_FAv2_bwd: bool = False
+    fused_attention_backend: Optional[int] = None
+    deterministic: Optional[bool] = None
+    use_FAv2_bwd: Optional[bool] = None
     nominal_dtype: Optional[torch.dtype] = None
 
     # --- FP8 ---
-    fp8: bool = False
-    is_input_fp8: bool = False
-    bf16_backward: bool = False
+    fp8: Optional[bool] = None
+    is_input_fp8: Optional[bool] = None
+    bf16_backward: Optional[bool] = None
     qkv_type: Optional[str] = None
     qkv_scale_inv_format: Optional[str] = None
     layer_number: Optional[int] = None
@@ -1784,8 +1785,8 @@ def _fused_attn_forward_impl(
             args.attn_bias,
             args.cu_seqlens_q_padded,
             args.cu_seqlens_kv_padded,
-            args.page_table,
-            args.page_table,
+            args.page_table_k,
+            args.page_table_v,
             None,  # s_quantizer
             None,  # o_quantizer
             args.attn_scale,
@@ -2591,7 +2592,8 @@ class FusedAttention(torch.nn.Module):
                 cu_seqlens_kv=cu_seqlens_kv,
                 cu_seqlens_q_padded=cu_seqlens_q_padded,
                 cu_seqlens_kv_padded=cu_seqlens_kv_padded,
-                page_table=page_table,
+                page_table_k=page_table,
+                page_table_v=page_table,
                 packed_qkv=packed_qkv,
                 packed_kv=packed_kv,
                 is_training=self.training,
