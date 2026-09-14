@@ -47,9 +47,27 @@ namespace specialized {
  *  \param[in]  stream                CUDA stream.
  */
 template <typename OType>
-void launch_cast_bidim(const void *input, void *output_rowwise, void *scales_rowwise,
-                       void *output_colwise, void *scales_colwise, int rows, int cols,
-                       int scale_stride_rowwise, int scale_stride_colwise, cudaStream_t stream);
+void launch_cast_bidim_packed(const void *input, void *output_rowwise, void *scales_rowwise,
+                              void *output_colwise, void *scales_colwise, int rows, int cols,
+                              int scale_stride_rowwise, int scale_stride_colwise,
+                              cudaStream_t stream);
+
+/*! \brief Entry point.  Rejects swizzled scales at compile time; see above. */
+template <typename OType, bool SWIZZLED_SCALES = false>
+inline void launch_cast_bidim(const void *input, void *output_rowwise, void *scales_rowwise,
+                              void *output_colwise, void *scales_colwise, int rows, int cols,
+                              int scale_stride_rowwise, int scale_stride_colwise,
+                              cudaStream_t stream) {
+  static_assert(!SWIZZLED_SCALES,
+                "launch_cast_bidim writes packed scales for both directions.  The GEMM-swizzled "
+                "layout is a property of the whole tensor, so emitting it for the rowwise array "
+                "while leaving the colwise one packed produces a tensor no consumer can read, and "
+                "the colwise swizzle is not implemented here.  Route swizzled bidimensional casts "
+                "to the staged kernel instead.");
+  launch_cast_bidim_packed<OType>(input, output_rowwise, scales_rowwise, output_colwise,
+                                  scales_colwise, rows, cols, scale_stride_rowwise,
+                                  scale_stride_colwise, stream);
+}
 
 }  // namespace specialized
 }  // namespace quantize_kernel

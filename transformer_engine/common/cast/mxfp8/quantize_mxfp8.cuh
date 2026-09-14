@@ -846,6 +846,14 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                     // GEMM swizzle, so this kernel does not handle it yet.
                     if constexpr (std::is_same_v<IType, bf16> && !WITH_GEMM_SWIZZLED_SCALES) {
                       if (rows % 32 == 0 && cols % 256 == 0) {
+                        // Both scale arrays must share a layout; this kernel only
+                        // writes the packed one.  The template gate above should
+                        // already have excluded swizzled tensors, so this catches
+                        // the two disagreeing.
+                        NVTE_CHECK(!with_gemm_swizzled_scales,
+                                   "Specialized bidimensional MXFP8 cast cannot emit GEMM-swizzled "
+                                   "scales; the colwise direction is unimplemented and a "
+                                   "half-swizzled tensor would be unreadable.");
                         specialized::launch_cast_bidim<OType>(
                             input.data.dptr, output->data.dptr,
                             reinterpret_cast<void *>(scales_rowwise_ptr),

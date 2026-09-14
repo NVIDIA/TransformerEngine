@@ -567,9 +567,10 @@ void launch_tiled(const void *input, void *output_rowwise, void *scales_rowwise,
 }  // namespace
 
 template <typename OType>
-void launch_cast_bidim(const void *input, void *output_rowwise, void *scales_rowwise,
-                       void *output_colwise, void *scales_colwise, int rows, int cols,
-                       int scale_stride_rowwise, int scale_stride_colwise, cudaStream_t stream) {
+void launch_cast_bidim_packed(const void *input, void *output_rowwise, void *scales_rowwise,
+                              void *output_colwise, void *scales_colwise, int rows, int cols,
+                              int scale_stride_rowwise, int scale_stride_colwise,
+                              cudaStream_t stream) {
   constexpr int32_t kWideColsPerTile = THREADS_PER_WARP * kWideColsPerLane;
   constexpr int32_t kNarrowColsPerTile = THREADS_PER_WARP * kNarrowColsPerLane;
 
@@ -597,10 +598,10 @@ void launch_cast_bidim(const void *input, void *output_rowwise, void *scales_row
 }
 
 // The MXFP8 output types the specialized dispatch can reach; see hasSpec.
-template void launch_cast_bidim<fp8e4m3>(const void *, void *, void *, void *, void *, int, int,
-                                         int, int, cudaStream_t);
-template void launch_cast_bidim<fp8e5m2>(const void *, void *, void *, void *, void *, int, int,
-                                         int, int, cudaStream_t);
+template void launch_cast_bidim_packed<fp8e4m3>(const void *, void *, void *, void *, void *, int,
+                                                int, int, int, cudaStream_t);
+template void launch_cast_bidim_packed<fp8e5m2>(const void *, void *, void *, void *, void *, int,
+                                                int, int, int, cudaStream_t);
 
 }  // namespace specialized
 }  // namespace quantize_kernel

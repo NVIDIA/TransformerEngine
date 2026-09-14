@@ -814,6 +814,7 @@ __device__ __forceinline__ bf16x2 exp2f_rcp_2x(e8m0_t biased_exp) {
 __device__ __forceinline__ void mul_cvt_4x(fp8e4m3x4 &out, const bf16x2 &in0, const bf16x2 &scale0,
                                            const bf16x2 &in1, const bf16x2 &scale1) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+#if (defined CUDA_VERSION) && (CUDA_VERSION >= 13010)
   asm volatile(
       "{\n\t"
       ".reg.b32 y0, y1; \n\t"
@@ -830,6 +831,33 @@ __device__ __forceinline__ void mul_cvt_4x(fp8e4m3x4 &out, const bf16x2 &in0, co
         "r"(reinterpret_cast<const uint32_t &>(in1)),
         "r"(reinterpret_cast<const uint32_t &>(scale1)));
 #else
+  // ptxas before 13.1 rejects the bf16x2 form of this cvt, so go through F32.
+  // Each half keeps its own scale, which is the whole point of this overload.
+  asm volatile(
+      "{\n\t"
+      ".reg.b16 x0,x1,x2,x3; \n\t"
+      ".reg.b16 s0,s1,s2,s3; \n\t"
+      "mov.b32 {x0,x1}, %1; \n\t"
+      "mov.b32 {s0,s1}, %2; \n\t"
+      "mov.b32 {x2,x3}, %3; \n\t"
+      "mov.b32 {s2,s3}, %4; \n\t"
+      ".reg.f32 y0,y1,y2,y3; \n\t"
+      "fma.rn.f32.bf16 y0, x0, s0, 0f00000000; \n\t"
+      "fma.rn.f32.bf16 y1, x1, s1, 0f00000000; \n\t"
+      "fma.rn.f32.bf16 y2, x2, s2, 0f00000000; \n\t"
+      "fma.rn.f32.bf16 y3, x3, s3, 0f00000000; \n\t"
+      ".reg.b16 z0, z1; \n\t"
+      "cvt.rn.satfinite.e4m3x2.f32 z0, y1, y0; \n\t"
+      "cvt.rn.satfinite.e4m3x2.f32 z1, y3, y2; \n\t"
+      "mov.b32 %0, {z0, z1}; \n"
+      "}\n"
+      : "=r"(reinterpret_cast<uint32_t &>(out))
+      : "r"(reinterpret_cast<const uint32_t &>(in0)),
+        "r"(reinterpret_cast<const uint32_t &>(scale0)),
+        "r"(reinterpret_cast<const uint32_t &>(in1)),
+        "r"(reinterpret_cast<const uint32_t &>(scale1)));
+#endif
+#else
   NVTE_DEVICE_ERROR("mul_cvt_4x is only supported on SM 10.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
@@ -837,6 +865,7 @@ __device__ __forceinline__ void mul_cvt_4x(fp8e4m3x4 &out, const bf16x2 &in0, co
 __device__ __forceinline__ void mul_cvt_4x(fp8e5m2x4 &out, const bf16x2 &in0, const bf16x2 &scale0,
                                            const bf16x2 &in1, const bf16x2 &scale1) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+#if (defined CUDA_VERSION) && (CUDA_VERSION >= 13010)
   asm volatile(
       "{\n\t"
       ".reg.b32 y0, y1; \n\t"
@@ -852,6 +881,33 @@ __device__ __forceinline__ void mul_cvt_4x(fp8e5m2x4 &out, const bf16x2 &in0, co
         "r"(reinterpret_cast<const uint32_t &>(scale0)),
         "r"(reinterpret_cast<const uint32_t &>(in1)),
         "r"(reinterpret_cast<const uint32_t &>(scale1)));
+#else
+  // ptxas before 13.1 rejects the bf16x2 form of this cvt, so go through F32.
+  // Each half keeps its own scale, which is the whole point of this overload.
+  asm volatile(
+      "{\n\t"
+      ".reg.b16 x0,x1,x2,x3; \n\t"
+      ".reg.b16 s0,s1,s2,s3; \n\t"
+      "mov.b32 {x0,x1}, %1; \n\t"
+      "mov.b32 {s0,s1}, %2; \n\t"
+      "mov.b32 {x2,x3}, %3; \n\t"
+      "mov.b32 {s2,s3}, %4; \n\t"
+      ".reg.f32 y0,y1,y2,y3; \n\t"
+      "fma.rn.f32.bf16 y0, x0, s0, 0f00000000; \n\t"
+      "fma.rn.f32.bf16 y1, x1, s1, 0f00000000; \n\t"
+      "fma.rn.f32.bf16 y2, x2, s2, 0f00000000; \n\t"
+      "fma.rn.f32.bf16 y3, x3, s3, 0f00000000; \n\t"
+      ".reg.b16 z0, z1; \n\t"
+      "cvt.rn.satfinite.e5m2x2.f32 z0, y1, y0; \n\t"
+      "cvt.rn.satfinite.e5m2x2.f32 z1, y3, y2; \n\t"
+      "mov.b32 %0, {z0, z1}; \n"
+      "}\n"
+      : "=r"(reinterpret_cast<uint32_t &>(out))
+      : "r"(reinterpret_cast<const uint32_t &>(in0)),
+        "r"(reinterpret_cast<const uint32_t &>(scale0)),
+        "r"(reinterpret_cast<const uint32_t &>(in1)),
+        "r"(reinterpret_cast<const uint32_t &>(scale1)));
+#endif
 #else
   NVTE_DEVICE_ERROR("mul_cvt_4x is only supported on SM 10.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
