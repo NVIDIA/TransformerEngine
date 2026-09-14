@@ -41,9 +41,6 @@ using transformer_engine::dispatch::mxfp8::swizzle::gemm_swizzled_scale_idx;
 // just a flat sequence of M*(K/32) independent blocks.  That reduces the
 // kernel to a pure streaming problem, and what is left to tune is how the
 // input and output streams share L2.
-//
-// A tensor whose scale array is padded (scale_stride > K/32) breaks the flat
-// view; those shapes go to quantize_strided_kernel below.
 
 // Elements in one MX block, all sharing a single E8M0 scale.
 constexpr int32_t kBlockElems = 32;
@@ -179,45 +176,6 @@ __device__ __forceinline__ void scale_and_convert(const uint32_t (&in)[kInWordsP
     ptx::mul_cvt_4x(reinterpret_cast<ptx::FPx4<OType> &>(out[i]),
                     reinterpret_cast<const ptx::bf16x4 &>(in[2 * i]), scale_reciprocal);
   }
-}
-
-/*! \brief Quantize one whole MX block held by a single thread.
- *
- * Used by the strided kernel, which handles far too little data per thread to
- * be worth the two-lane split of the main kernel.
- */
-template <typename OType>
-__device__ __forceinline__ void quantize_one_block(const uint32_t *__restrict__ in,
-                                                   uint32_t *__restrict__ out,
-                                                   e8m0_t *__restrict__ scale,
-                                                   uint64_t output_policy) {
-  uint32_t words[kInWordsPerBlock];
-  ptx::ld_global_nc_b32x8(reinterpret_cast<uint32_t(&)[8]>(words[0]), in);
-  ptx::ld_global_nc_b32x8(reinterpret_cast<uint32_t(&)[8]>(words[kInWordsPerLane]),
-                          in + kInWordsPerLane);
-
-  ptx::bf16x2 amax_lo = block_half_amax(reinterpret_cast<const uint32_t(&)[8]>(words[0]));
-  ptx::bf16x2 amax_hi =
-      block_half_amax(reinterpret_cast<const uint32_t(&)[8]>(words[kInWordsPerLane]));
-  ptx::bf16x2 amax_pair;
-  ptx::abs_max_2x(amax_pair, amax_lo, amax_hi);
-
-  const float amax = pair_amax_to_float(amax_pair);
-  const e8m0_t biased_exponent = ptx::float_to_e8m0(amax * Quantized_Limits<OType>::max_norm_rcp);
-  *scale = biased_exponent;
-
-  const ptx::bf16x2 scale_reciprocal = ptx::exp2f_rcp_2x(biased_exponent);
-  uint32_t out_words[kOutWordsPerBlock];
-  scale_and_convert<OType>(reinterpret_cast<const uint32_t(&)[8]>(words[0]), scale_reciprocal,
-                           reinterpret_cast<uint32_t(&)[4]>(out_words[0]));
-  scale_and_convert<OType>(reinterpret_cast<const uint32_t(&)[8]>(words[kInWordsPerLane]),
-                           scale_reciprocal,
-                           reinterpret_cast<uint32_t(&)[4]>(out_words[kOutWordsPerLane]));
-
-  ptx::st_global_b32x4(out, reinterpret_cast<const uint32_t(&)[4]>(out_words[0]), output_policy);
-  ptx::st_global_b32x4(out + kOutWordsPerLane,
-                       reinterpret_cast<const uint32_t(&)[4]>(out_words[kOutWordsPerLane]),
-                       output_policy);
 }
 
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
@@ -389,33 +347,7 @@ __global__ void __launch_bounds__(THREADS_PER_CTA)
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
-/*! \brief Quantize a tensor whose scale rows are padded.
- *
- * With scale_stride > K/32 the scale array is no longer a flat image of the
- * block sequence, so blocks are indexed two-dimensionally.  One block per
- * thread; grid.y walks the rows.
- */
-template <typename OType>
-__global__ void __launch_bounds__(128)
-    quantize_strided_kernel(const uint32_t *__restrict__ input, uint32_t *__restrict__ output,
-                            e8m0_t *__restrict__ scales, int32_t blocks_per_row,
-                            int32_t scale_stride) {
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-  const int32_t block_in_row = blockIdx.x * blockDim.x + threadIdx.x;
-  if (block_in_row >= blocks_per_row) {
-    return;
-  }
-  const int64_t block = static_cast<int64_t>(blockIdx.y) * blocks_per_row + block_in_row;
-  quantize_one_block<OType>(input + block * kInWordsPerBlock, output + block * kOutWordsPerBlock,
-                            scales + static_cast<int64_t>(blockIdx.y) * scale_stride + block_in_row,
-                            ptx::create_l2_policy_evict_last());
-#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-}
-
 namespace {
-
-//! Threads per CTA for the block-per-thread strided kernel.
-constexpr int32_t kHelperThreads = 128;
 
 /*! \brief Launch quantize_contiguous_kernel for a configuration resolved at
  *         run time, instantiating only the combinations the tier table uses. */
@@ -488,14 +420,14 @@ void launch_cast_rowwise(const void *input, void *output, void *scales, int rows
   uint32_t *out = reinterpret_cast<uint32_t *>(output);
   e8m0_t *scale_out = reinterpret_cast<e8m0_t *>(scales);
 
-  // A padded scale array breaks the flat block view the fast path relies on.
-  if (scale_stride != blocks_per_row) {
-    const dim3 grid(DIVUP(blocks_per_row, kHelperThreads), rows);
-    quantize_strided_kernel<OType>
-        <<<grid, kHelperThreads, 0, stream>>>(in, out, scale_out, blocks_per_row, scale_stride);
-    NVTE_CHECK_CUDA(cudaGetLastError());
-    return;
-  }
+  // The kernel treats the scale array as one flat image of the block sequence, so
+  // a padded row stride would silently misplace every scale past the first row.
+  // Dispatch only reaches here with cols % 128 == 0, which makes cols/32 a
+  // multiple of 4 and the allocators' DIVUP_TO_MULTIPLE(cols/32, 4) a no-op, so
+  // the two always agree.  State that as a contract rather than carry an
+  // unreachable slow path for it.
+  NVTE_CHECK(scale_stride == blocks_per_row, "Rowwise MXFP8 requires a packed scale array: stride ",
+             scale_stride, " must equal cols/", kBlockElems, " = ", blocks_per_row, ".");
 
   const int64_t num_blocks = static_cast<int64_t>(rows) * blocks_per_row;
   const int64_t output_bytes = static_cast<int64_t>(rows) * cols;
