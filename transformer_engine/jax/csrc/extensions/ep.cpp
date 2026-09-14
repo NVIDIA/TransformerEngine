@@ -197,6 +197,23 @@ void ReleaseEpResources() {
   // to_drop dtor runs outside the lock.
 }
 
+// Atexit-only variant: drops the self-hosted anchor (its destructor safely
+// tears down its own NCCL comm while the process is still alive) but never
+// touches a borrowed backend. Ep bootstrap/finalize can switch comm paths
+// mid-process (e.g. tests), so by the time atexit fires the live backend may
+// be borrowed-comm; XLA may already be tearing down that comm, and calling
+// nvte_ep_shutdown() on it here would race that teardown. A borrowed backend
+// left live at process exit is handled separately by EPBackend's own
+// atexit-safe static destructor (skips NCCL calls).
+void ReleaseEpResourcesAtExit() {
+  std::shared_ptr<EpResources> to_drop;
+  {
+    std::lock_guard<std::mutex> lock(g_ep_mu);
+    to_drop = std::move(g_ep_resources_anchor);
+  }
+  // to_drop dtor runs outside the lock.
+}
+
 size_t EpHandleMemSize(int top_k, size_t dispatch_output_per_expert_alignment) {
   NVTEEpLayerConfig layer_cfg{
       .struct_size = sizeof(NVTEEpLayerConfig),
@@ -226,8 +243,7 @@ static ::xla::ffi::ErrorOr<std::unique_ptr<EpInstanceState>> EpInstantiateImpl()
   try {
     state->resources = AcquireEpResources();
   } catch (const std::exception& e) {
-    return ::xla::ffi::Unexpected(
-        ::xla::ffi::Error::Internal(std::string("EP instantiate failed: ") + e.what()));
+    return ::xla::ffi::Unexpected(ffi_internal_error("EP instantiate failed: ", e));
   }
   return state;
 }
@@ -541,7 +557,11 @@ Error_Type EpBootstrapBorrowedCommFFI(cudaStream_t stream, EpInstanceState* ep_s
   if (comm_or.has_error()) return comm_or.error();
   ncclComm_t comm = comm_or.value();
   NVTE_CHECK(comm != nullptr, "XLA returned a null EP communicator.");
-  EnsureEpBackendFromBorrowedComm(comm);
+  try {
+    EnsureEpBackendFromBorrowedComm(comm);
+  } catch (const std::exception& e) {
+    return ffi_internal_error("EP borrowed-comm bootstrap failed: ", e);
+  }
   const size_t bytes = token.size_bytes();
   if (bytes > 0) {
     NVTE_CHECK_CUDA(cudaMemcpyAsync(out->untyped_data(), token.untyped_data(), bytes,

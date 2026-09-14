@@ -260,9 +260,13 @@ def ep_bootstrap(
     )
 
     # Release the C++ anchor at interpreter shutdown so RAII can tear down NCCL.
+    # release_ep_resources_at_exit (not release_ep_resources): a later
+    # ep_finalize + borrowed-comm ep_bootstrap in this same process must not
+    # leave this self-hosted-registered hook shutting down the borrowed
+    # backend at exit (see ReleaseEpResourcesAtExit).
     global _atexit_registered
     if not _atexit_registered:
-        atexit.register(transformer_engine_jax.release_ep_resources)
+        atexit.register(transformer_engine_jax.release_ep_resources_at_exit)
         _atexit_registered = True
 
     tex.ep.set_ep_config(tex.ep.EpConfig(**common_cfg))

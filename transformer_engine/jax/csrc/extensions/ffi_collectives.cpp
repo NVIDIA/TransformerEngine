@@ -40,7 +40,7 @@ std::vector<XLA_FFI_ReplicaGroup> ToRawGroups(const std::vector<std::vector<int6
                                 const std::vector<std::vector<int64_t>>& groups,
                                 int64_t communication_id) {
   std::vector<XLA_FFI_ReplicaGroup> raw = ToRawGroups(groups);
-  XLA_FFI_Communicator_Request_Args args;
+  XLA_FFI_Communicator_Request_Args args = {};
   args.struct_size = XLA_FFI_Communicator_Request_Args_STRUCT_SIZE;
   args.extension_start = nullptr;
   args.group_mode = XLA_FFI_GROUP_FLATTENED_ID;
@@ -57,7 +57,7 @@ std::vector<XLA_FFI_ReplicaGroup> ToRawGroups(const std::vector<std::vector<int6
                                         const std::vector<std::vector<int64_t>>& groups,
                                         int64_t communication_id) {
   std::vector<XLA_FFI_ReplicaGroup> raw = ToRawGroups(groups);
-  XLA_FFI_Communicator_Get_Args args;
+  XLA_FFI_Communicator_Get_Args args = {};
   args.struct_size = XLA_FFI_Communicator_Get_Args_STRUCT_SIZE;
   args.extension_start = nullptr;
   args.group_mode = XLA_FFI_GROUP_FLATTENED_ID;

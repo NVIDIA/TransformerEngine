@@ -41,6 +41,15 @@ struct FfiCollectivesCtx {
 // Trait type for ::xla::ffi::Extension<FfiCollectives>. The public FFI
 // CtxDecoding looks the extension up by kExtensionType and hands us a typed
 // context, so we do not depend on XLA-internal headers that jaxlib omits.
+//
+// TODO: XLA ships an equivalent trait + wrapper (xla::ffi::Collectives /
+// xla::ffi::Communicator) in xla/ffi/api/collectives_ffi.h. Drop this trait
+// and RequestClique/GetComm/ToRawGroups below in favor of that once both:
+//  1. jaxlib packages collectives_ffi.h (not shipped as of jaxlib
+//     0.11.2.dev20260913), and
+//  2. XLA's CollectivesExtensionBase gains a Support() override accepting
+//     any minor within the same major (currently exact-match only), so we
+//     do not regress the forward-compat policy below.
 struct FfiCollectives {
   using Type = FfiCollectivesCtx;
   using CExtension = XLA_FFI_Collectives_Extension;

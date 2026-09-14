@@ -175,6 +175,7 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
         pybind11::arg("hidden_dim"), pybind11::arg("max_num_sms"), pybind11::arg("max_token_dtype"),
         pybind11::arg("drop_on_overflow"), pybind11::arg("borrowed_comm") = false);
   m.def("release_ep_resources", &ReleaseEpResources);
+  m.def("release_ep_resources_at_exit", &ReleaseEpResourcesAtExit);
   m.def("ep_handle_mem_size", &EpHandleMemSize, pybind11::arg("top_k"),
         pybind11::arg("dispatch_output_per_expert_alignment") = 0);
   m.def("get_ep_instance_state_type_id", &GetEpInstanceStateTypeIdCapsule);

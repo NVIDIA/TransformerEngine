@@ -8,6 +8,7 @@
 #include <xla/ffi/api/ffi.h>
 
 #include <numeric>
+#include <string>
 
 #include "common/util/logging.h"
 
@@ -32,6 +33,9 @@ constexpr auto FFI_CudaGraph_Traits = {xla::ffi::Traits::kCmdBufferCompatible};
 DType convert_ffi_datatype_to_te_dtype(const xla::ffi::DataType& type);
 
 Error_Type ffi_with_cuda_error_check();
+
+// Wraps a caught std::exception as an Error_Type, prefixed with `context`.
+Error_Type ffi_internal_error(const std::string& context, const std::exception& e);
 
 // source_location is not available in C++17, so we implement it ourselves
 #if defined(__GNUC__) || defined(__clang__)

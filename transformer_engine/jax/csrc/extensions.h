@@ -209,6 +209,9 @@ void SetEpBootstrapParams(pybind11::bytes unique_id_bytes, int ep_size, int rank
                           int hidden_dim, int max_num_sms, int max_token_dtype,
                           bool drop_on_overflow, bool borrowed_comm);
 void ReleaseEpResources();
+// Atexit-safe variant of ReleaseEpResources; never shuts down a borrowed
+// backend (see definition).
+void ReleaseEpResourcesAtExit();
 // Return the handle_mem byte size for a layer config.
 size_t EpHandleMemSize(int top_k, size_t dispatch_output_per_expert_alignment);
 
