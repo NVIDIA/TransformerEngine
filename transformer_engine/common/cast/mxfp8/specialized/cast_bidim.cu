@@ -475,12 +475,18 @@ constexpr int32_t kNarrowMinBlocksPerSm = 6;
 
 // Thread-block cluster widths.  Clustering does NOT reduce L2 traffic -- L2 is
 // shared by every CTA regardless, and ablating the cluster leaves both the DRAM
-// byte count and the L2 hit rate unchanged.  What it buys is delivery rate: a
-// cluster is co-scheduled on one GPC, so neighbouring CTAs read adjacent columns
-// of the same rows at the same time and their requests reach the memory
-// controller together, which lifts DRAM row-buffer locality.  Measured on
-// CC 10.7 that is worth 3.5-4.5% at large shapes (DRAM throughput +2.6-3.1
-// points) for identical traffic.
+// byte count and the L2 hit rate unchanged.  What it buys is delivery rate:
+// 3.5-4.5% at large shapes, with DRAM throughput up 2.6-3.1 points for identical
+// traffic.
+//
+// The benefit comes from co-scheduled CTAs touching *adjacent* columns, not from
+// the cluster itself.  Permuting the CTA-to-tile map so a cluster's members read
+// distant columns -- cluster still active, same total work -- gives back the
+// whole gain (4.8-7.0% slower, DRAM throughput returning to the no-cluster
+// value), and is in fact marginally worse than not clustering at all.  So
+// GPC/L2-slice affinity is not the mechanism.  Which part of the memory system
+// rewards the adjacency (DRAM row buffer, controller queueing, sector merging)
+// is not something the available counters can separate, so it is left open.
 constexpr int32_t kWideClusterShallow = 1;
 constexpr int32_t kWideClusterDeep = 4;
 constexpr int32_t kNarrowCluster = 8;
