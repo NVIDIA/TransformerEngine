@@ -469,8 +469,8 @@ inline void compute_fused_amax(const Tensor &input, const Tensor *noop, Tensor *
 
   auto kernel = compute_fused_amax_kernel<true, true>;
   cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);
-  kernel<<<grid, block, dshmem_size, stream>>>(
-      tensor_map_input, row_amax_ptr, col_amax_ptr, noop_ptr, rows, cols);
+  kernel<<<grid, block, dshmem_size, stream>>>(tensor_map_input, row_amax_ptr, col_amax_ptr,
+                                               noop_ptr, rows, cols);
   NVTE_CHECK_CUDA(cudaGetLastError());
 #else
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
