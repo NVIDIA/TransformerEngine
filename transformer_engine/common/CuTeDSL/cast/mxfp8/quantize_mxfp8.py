@@ -2518,6 +2518,7 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
         mWorkspace: Optional[cute.Tensor],
         stream: CUstream,
     ):
+        M = mX.shape[0]
         N = mX.shape[1]
         # Select specialized kernels if possible
         plain_cast_only = (
@@ -2530,8 +2531,11 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
         # Only dispatch to the specialized kernels for packed16 types (bf16/fp16)
         if cutlass.const_expr(plain_cast_only and is_packed16(self.cfg.DTYPE)):
             if cutlass.const_expr(self.cfg.ROWWISE and not self.cfg.COLWISE):
+                rowwise_specialized_grid_fits = (
+                    cute.ceil_div(M, self.specialized_rowwise._TILE_ROWS) <= 65535
+                )
                 # The rowwise specialized kernel requires N divisible by 128 for vectorized stores
-                if N % 128 == 0:
+                if N % 128 == 0 and rowwise_specialized_grid_fits:
                     dispatched_to_specialized = True
                     self.specialized_rowwise(
                         mX,
@@ -2549,10 +2553,28 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
             if cutlass.const_expr(
                 self.cfg.ROWWISE and self.cfg.COLWISE and not self.cfg.WITH_GEMM_SWIZZLED_SCALES
             ):
-                dispatched_to_specialized = True
-                self.specialized_bidim(
-                    mX, mO_row, mS_row, mO_col, mS_col, mAmax, mNoop, mDActInput, mWorkspace, stream
+                bidim_specialized_grid_fits = (
+                    cute.ceil_div(
+                        M,
+                        self.specialized_bidim._TILE_ROWS
+                        * self.specialized_bidim._NUM_TILES_Y,
+                    )
+                    <= 65535
                 )
+                if bidim_specialized_grid_fits:
+                    dispatched_to_specialized = True
+                    self.specialized_bidim(
+                        mX,
+                        mO_row,
+                        mS_row,
+                        mO_col,
+                        mS_col,
+                        mAmax,
+                        mNoop,
+                        mDActInput,
+                        mWorkspace,
+                        stream,
+                    )
         # If not using a specialized kernel, fall back to the general kernel
         if not dispatched_to_specialized:
             # If the input shape can be perfectly tiled by the general kernel's tile size, we can skip some boundary check because
