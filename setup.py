@@ -18,7 +18,6 @@ from wheel.bdist_wheel import bdist_wheel
 from build_tools.build_ext import CMakeExtension, get_build_ext
 from build_tools.te_version import te_version
 from build_tools.utils import (
-    bolt_compatible_build_enabled,
     cuda_archs,
     cuda_home_path,
     cuda_version,
@@ -82,8 +81,6 @@ def setup_common_extension() -> CMakeExtension:
     if bool(int(os.getenv("NVTE_BUILD_ACTIVATION_WITH_FAST_MATH", "0"))):
         cmake_flags.append("-DNVTE_BUILD_ACTIVATION_WITH_FAST_MATH=ON")
 
-    bolt_compatible = bolt_compatible_build_enabled()
-
     if bool(int(os.getenv("NVTE_WITH_CUBLASMP", "0"))):
         cmake_flags.append("-DNVTE_WITH_CUBLASMP=ON")
         cublasmp_dir = os.getenv("CUBLASMP_HOME") or metadata.distribution(
@@ -111,9 +108,7 @@ def setup_common_extension() -> CMakeExtension:
 
     # Keep the common CMake library consistent with the framework and NCCL EP
     # libraries, which use the same Python-side BOLT configuration.
-    cmake_flags.append(f"-DNVTE_ENABLE_BOLT_COMPATIBLE={'ON' if bolt_compatible else 'OFF'}")
-    if bolt_compatible:
-        cmake_flags.append(f"-DNVTE_BUILD_TARGET_IS_ARM64={'ON' if target_is_arm64() else 'OFF'}")
+    cmake_flags.append(f"-DNVTE_BUILD_TARGET_IS_ARM64={'ON' if target_is_arm64() else 'OFF'}")
 
     # Project directory root
     root_path = Path(__file__).resolve().parent
