@@ -20,7 +20,7 @@ RET=0
 FAILED_CASES=""
 
 export NVTE_JAX_TEST_TIMING=1
-export NVTE_ENABLE_CUTEDSL_QUANT_BACKEND=1
+export NVTE_ENABLE_CUTEDSL_BACKEND=1
 
 pip3 install "nltk>=3.8.2,!=3.10.1" || error_exit "Failed to install nltk"
 pip3 install pytest==8.2.1 pytest-timeout==2.4.0 || error_exit "Failed to install pytest dependencies"

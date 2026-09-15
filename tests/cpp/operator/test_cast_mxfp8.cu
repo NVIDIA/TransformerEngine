@@ -76,7 +76,7 @@ void expect_cutedsl_mxfp8_kernel(const DType input_type, const DType output_type
                                  const bool rowwise, const bool colwise, const bool swizzled,
                                  const ProcessingMethod processing_method,
                                  float (*OP)(const float)) {
-  const char* enabled = std::getenv("NVTE_ENABLE_CUTEDSL_QUANT_BACKEND");
+  const char* enabled = std::getenv("NVTE_ENABLE_CUTEDSL_BACKEND");
   if (enabled == nullptr || std::strcmp(enabled, "0") == 0) {
     return;
   }

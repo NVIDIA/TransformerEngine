@@ -311,7 +311,7 @@ class TVMFFICentral {
       maybe_warn_not_chosen(
           "the CuTeDSL backend is disabled, so no kernel is available for "
           "config `",
-          cfg.to_key(), "`. Set NVTE_ENABLE_CUTEDSL_QUANT_BACKEND=1 to enable it.");
+          cfg.to_key(), "`. Set NVTE_ENABLE_CUTEDSL_BACKEND=1 to enable it.");
       return std::nullopt;
     }
     // Only check if libtvm_ffi.so is loaded if user enables the CuTeDSL backend.
@@ -334,8 +334,8 @@ class TVMFFICentral {
     return fn;
   }
 
-  // Runtime override of NVTE_ENABLE_CUTEDSL_QUANT_BACKEND (exposed to Python as
-  // nvte_set_cutedsl_quant_backend; used by tests to compare both backends in
+  // Runtime override of NVTE_ENABLE_CUTEDSL_BACKEND (exposed to Python as
+  // nvte_set_cutedsl_backend; used by tests to compare both backends in
   // one process). Safe to toggle at any time
   void set_cutedsl_backend_enabled(bool enabled) {
     cutedsl_backend_enabled_.store(enabled, std::memory_order_relaxed);
@@ -373,8 +373,8 @@ class TVMFFICentral {
   TVMFFICentral &operator=(TVMFFICentral &&) = delete;
 
   static bool is_cutedsl_backend_enabled() {
-    // Off by default; set NVTE_ENABLE_CUTEDSL_QUANT_BACKEND=1 to enable.
-    return transformer_engine::getenv<bool>("NVTE_ENABLE_CUTEDSL_QUANT_BACKEND");
+    // Off by default; set NVTE_ENABLE_CUTEDSL_BACKEND=1 to enable.
+    return transformer_engine::getenv<bool>("NVTE_ENABLE_CUTEDSL_BACKEND");
   }
 
   static bool warn_if_cutedsl_backend_not_chosen() {

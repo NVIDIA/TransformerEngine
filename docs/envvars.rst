@@ -138,7 +138,7 @@ General
                  value if an application legitimately creates more tensor handles than
                  the default pool can hold.
 
-.. envvar:: NVTE_ENABLE_CUTEDSL_QUANT_BACKEND
+.. envvar:: NVTE_ENABLE_CUTEDSL_BACKEND
 
    :Type: ``int`` (0 or 1)
    :Default: ``0``

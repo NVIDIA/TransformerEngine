@@ -480,7 +480,7 @@ if "NVTE_PROJECT_BUILDING" not in os.environ or bool(int(os.getenv("NVTE_RELEASE
         _CUDNN_ALL_LIB_CTYPES = _load_cuda_library_from_python("cudnn", strict=True)
 
     # Prepare CuTeDSL backend for on-demand compilation via TVM-FFI if user enables it.
-    if os.environ.get("NVTE_ENABLE_CUTEDSL_QUANT_BACKEND", "0") != "0":
+    if os.environ.get("NVTE_ENABLE_CUTEDSL_BACKEND", "0") != "0":
         _load_tvm_ffi_library()
         _register_cutedsl_backends()
 

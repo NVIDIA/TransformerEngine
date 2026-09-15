@@ -27,7 +27,7 @@ export NVTE_FLASH_ATTN_V2=1
 export NVTE_FLASH_ATTN_V3=0
 export NVTE_FLASH_ATTN_V4=0
 
-export NVTE_ENABLE_CUTEDSL_QUANT_BACKEND=1
+export NVTE_ENABLE_CUTEDSL_BACKEND=1
 
 pip3 install pytest==8.2.1 || error_exit "Failed to install pytest"
 

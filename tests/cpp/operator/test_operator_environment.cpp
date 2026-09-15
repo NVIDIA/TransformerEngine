@@ -18,7 +18,7 @@ class CuTeDSLEnvironment : public ::testing::Environment {
   // which imports tvm_ffi and prepare the CuTeDSL entrypoint, so C++ can ask python to compile
   // CuTeDSL kernels and use that to run C++ tests
   void SetUp() override {
-    const char *enable_cutedsl = std::getenv("NVTE_ENABLE_CUTEDSL_QUANT_BACKEND");
+    const char *enable_cutedsl = std::getenv("NVTE_ENABLE_CUTEDSL_BACKEND");
     if (enable_cutedsl == nullptr || std::strcmp(enable_cutedsl, "0") == 0) {
       return;
     }

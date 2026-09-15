@@ -25,19 +25,19 @@ recipe_available, reason_for_no_recipe = te.is_mxfp8_available(return_reason=Tru
 # so the call mutates the same dispatcher singleton the quantize ops read).
 CORE_LIB = ctypes.CDLL(str(_get_shared_object_file("core")))
 # We need this API to manually enable & disable the CuTeDSL backend for the tests
-if not hasattr(CORE_LIB, "nvte_set_cutedsl_quant_backend"):
+if not hasattr(CORE_LIB, "nvte_set_cutedsl_backend"):
     raise RuntimeError(
-        "libtransformer_engine.so lacks nvte_set_cutedsl_quant_backend -- rebuild the "
+        "libtransformer_engine.so lacks nvte_set_cutedsl_backend -- rebuild the "
         "Transformer Engine core library."
     )
 
-# The CuTeDSL entrypoint is registered only when NVTE_ENABLE_CUTEDSL_QUANT_BACKEND
+# The CuTeDSL entrypoint is registered only when NVTE_ENABLE_CUTEDSL_BACKEND
 # is set (see common/__init__.py); without it there is nothing to compare against
 # the CUDA path, so skip these runs.
-cutedsl_enabled = os.environ.get("NVTE_ENABLE_CUTEDSL_QUANT_BACKEND", "0") != "0"
+cutedsl_enabled = os.environ.get("NVTE_ENABLE_CUTEDSL_BACKEND", "0") != "0"
 pytestmark = pytest.mark.skipif(
     not (recipe_available and cutedsl_enabled),
-    reason=reason_for_no_recipe or "NVTE_ENABLE_CUTEDSL_QUANT_BACKEND is not set",
+    reason=reason_for_no_recipe or "NVTE_ENABLE_CUTEDSL_BACKEND is not set",
 )
 
 # We reject irregular shapes in transformer_engine/pytorch/csrc/quantizer.cpp's MXFP8Quantizer::get_scale_shape
@@ -95,14 +95,14 @@ get_swizzle_id = lambda s: "swizzled" if s else "non-swizzled"
 
 
 def set_cutedsl_backend(enabled):
-    CORE_LIB.nvte_set_cutedsl_quant_backend(1 if enabled else 0)
+    CORE_LIB.nvte_set_cutedsl_backend(1 if enabled else 0)
 
 
 @pytest.fixture(scope="module", autouse=True)
 def _restore_backend_choice_from_env():
     """Restore the flag that decides the CuTeDSL / CUDA backend choice when this pytest module is done."""
     yield
-    flag = os.getenv("NVTE_ENABLE_CUTEDSL_QUANT_BACKEND")
+    flag = os.getenv("NVTE_ENABLE_CUTEDSL_BACKEND")
     set_cutedsl_backend(flag is not None and not flag.startswith("0"))
 
 
