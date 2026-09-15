@@ -180,37 +180,6 @@ def _degroup_mxfp8(recv_grouped, valid_counts=None):
     return torch.cat([p.dequantize()[:v] for p, v in zip(parts, valid_counts)], dim=0)
 
 
-def _reference_weights(op):
-    """Pack GroupedLinear weights into MoeEpReference ``(E, in, out)`` layout."""
-    weight = op.weight
-    num_groups = op.num_groups
-    out_features = op.out_features
-    in_features = op.in_features
-    data = weight.rowwise_data.view(
-        num_groups,
-        out_features,
-        in_features,
-    ).permute(0, 2, 1)
-    if weight.quantizer is None:
-        return data.detach()
-    scale = (
-        weight.scale_inv.view(
-            num_groups,
-            out_features,
-            in_features // 32,
-        )
-        .view(torch.float8_e8m0fnu)
-        .permute(0, 2, 1)
-    )
-    return BlockScaledTensor(
-        data=data.view(torch.float8_e4m3fn).detach(),
-        scale=scale.detach(),
-        format="mxfp8",
-        logical_shape=tuple(data.shape),
-        axis=1,
-    )
-
-
 class _Cfg:
     rank: int
     world_size: int
@@ -942,6 +911,37 @@ class TestEP(_EpTestCase):
 class TestMoeEpSequential(_EpTestCase):
     """Integration tests for Dispatch -> expert MLP -> Combine sequences."""
 
+    @staticmethod
+    def _reference_weights(op):
+        """Pack GroupedLinear weights into MoeEpReference ``(E, in, out)`` layout."""
+        weight = op.weight
+        num_groups = op.num_groups
+        out_features = op.out_features
+        in_features = op.in_features
+        data = weight.rowwise_data.view(
+            num_groups,
+            out_features,
+            in_features,
+        ).permute(0, 2, 1)
+        if weight.quantizer is None:
+            return data.detach()
+        scale = (
+            weight.scale_inv.view(
+                num_groups,
+                out_features,
+                in_features // 32,
+            )
+            .view(torch.float8_e8m0fnu)
+            .permute(0, 2, 1)
+        )
+        return BlockScaledTensor(
+            data=data.view(torch.float8_e4m3fn).detach(),
+            scale=scale.detach(),
+            format="mxfp8",
+            logical_shape=tuple(data.shape),
+            axis=1,
+        )
+
     def test_runtime_buffer_config_mismatch(self):
         config = self._make_config()
         buffer = self._make_buffer_from_config(config)
@@ -1369,8 +1369,8 @@ class TestMoeEpSequential(_EpTestCase):
 
         self.assertEqual(seq_out.dtype, torch.bfloat16)
 
-        fc1_weight = _reference_weights(fc1)
-        fc2_weight = _reference_weights(fc2)
+        fc1_weight = self._reference_weights(fc1)
+        fc2_weight = self._reference_weights(fc2)
         emulate_mxfp8 = quantization == "mxfp8"
         reference = MoeEpReference(
             num_experts=self.cfg.num_experts,
