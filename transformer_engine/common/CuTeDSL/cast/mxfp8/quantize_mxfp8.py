@@ -2556,8 +2556,7 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
                 bidim_specialized_grid_fits = (
                     cute.ceil_div(
                         M,
-                        self.specialized_bidim._TILE_ROWS
-                        * self.specialized_bidim._NUM_TILES_Y,
+                        self.specialized_bidim._TILE_ROWS * self.specialized_bidim._NUM_TILES_Y,
                     )
                     <= 65535
                 )
