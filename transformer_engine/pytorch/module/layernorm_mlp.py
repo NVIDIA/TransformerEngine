@@ -7,8 +7,6 @@ import os
 import warnings
 import weakref
 from typing import Callable, Optional, Tuple, Union, List
-from functools import reduce
-from operator import mul as multiply_op
 
 import torch
 from torch.nn.parameter import Parameter
@@ -352,7 +350,7 @@ class _LayerNormMLP(torch.autograd.Function):
         # Make sure input dimensions are compatible
         in_features, inp_shape = ln_weight.numel(), inp.shape
         assert inp_shape[-1] == in_features, "GEMM not possible"
-        inputmat = inp.view((-1, in_features))
+        inputmat = inp
         if fp8:
             assert_dim_for_fp8_exec(inputmat, fc1_weight, fc2_weight)
 
@@ -733,7 +731,6 @@ class _LayerNormMLP(torch.autograd.Function):
                     fc2_out, _ = allreduce(gemm_out, tp_group)
             else:
                 fc2_out = gemm_out
-            fc2_out = fc2_out.view(-1, *inp_shape[1:-1], fc2_out.shape[-1])
 
         # now saving stuff for bwd:
         # if we are using checkpointing, this information will be saved in the bwd recomputation stage, so can skip it in fwd
@@ -940,14 +937,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 )
 
         # we only get to this point if we are not recomputing for bwd, since that would have returned in the block above
-        ln_out_for_return = None
-        if return_layernorm_output:
-            if return_layernorm_output_gathered:
-                shape = list(inp_shape)
-                shape[0] *= tp_size if (sequence_parallel and set_parallel_mode) else 1
-                ln_out_for_return = ln_out_return.view(shape)
-            else:
-                ln_out_for_return = ln_out_return.view(inp_shape)
+        ln_out_for_return = ln_out_return if return_layernorm_output else None
         return fc2_out, ln_out_for_return, new_fc1_weight_workspace, new_fc2_weight_workspace
 
     @staticmethod
@@ -1503,7 +1493,7 @@ class _LayerNormMLP(torch.autograd.Function):
             ub_obj_fc1_wgrad = None
             ub_type_fc1_dgrad = None
             ub_type_fc1_wgrad = None
-            fc1_dgrad_shape = [reduce(multiply_op, inputmat.shape[:-1]), inputmat.shape[-1]]
+            fc1_dgrad_shape = inputmat.shape
             if ctx.ub_overlap_rs_dgrad:
                 # Overlap DGRAD+RS
                 ub_obj_fc1_dgrad = get_ub("fc1_dgrad", ctx.fp8)
@@ -1545,7 +1535,9 @@ class _LayerNormMLP(torch.autograd.Function):
                     fc1_dgrad_shape, dtype=ctx.activation_dtype, device="cuda"
                 )
             if ctx.ub_bulk_wgrad:
-                gemm_out = ub_obj_fc1_wgrad.get_buffer(local_chunk=False)
+                gemm_out = ub_obj_fc1_wgrad.get_buffer(
+                    local_chunk=False, shape=(*dact.shape[:-1], fc1_dgrad_shape[-1])
+                )
 
             # dgrad GEMM
             gemm_out, *_, reduce_scatter_out = general_gemm(
@@ -1584,12 +1576,12 @@ class _LayerNormMLP(torch.autograd.Function):
                     else reduce_scatter_out
                 )
             elif ctx.ub_bulk_wgrad:
-                fc1_dgrad = ub_obj_fc1_wgrad.get_buffer(local_chunk=True)
+                fc1_dgrad = ub_obj_fc1_wgrad.get_buffer(local_chunk=True, shape=fc1_dgrad_shape)
             elif ctx.set_parallel_mode and not ctx.ub_bulk_wgrad:
                 fc1_dgrad = gemm_out
                 if ctx.sequence_parallel:
                     if ctx.return_layernorm_output and ctx.return_layernorm_output_gathered:
-                        fc1_dgrad = fc1_dgrad + grad_outputs[1].view_as(fc1_dgrad)
+                        fc1_dgrad = fc1_dgrad + grad_outputs[1]
                     fc1_dgrad, fc1_dgrad_work = reduce_scatter_along_first_dim(
                         fc1_dgrad,
                         ctx.tp_group,
@@ -1713,7 +1705,9 @@ class _LayerNormMLP(torch.autograd.Function):
                     if ub_obj_fc1_wgrad.is_fp8_ubuf():
                         fc1_dgrad = reduce_scatter_out
                     else:
-                        fc1_dgrad = ub_obj_fc1_wgrad.get_buffer(local_chunk=True).clone()
+                        fc1_dgrad = ub_obj_fc1_wgrad.get_buffer(
+                            local_chunk=True, shape=fc1_dgrad_shape
+                        ).clone()
 
             # --------------------------------------------------
             # Finished FC1 WGRAD...
@@ -1728,9 +1722,9 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc1_dgrad_work = None
 
             # Residual gradient
-            dgrad = fc1_dgrad.view(inputmat.shape)
+            dgrad = fc1_dgrad
             if ctx.return_layernorm_output and not ctx.return_layernorm_output_gathered:
-                dgrad = dgrad + grad_outputs[1].view_as(dgrad)
+                dgrad = dgrad + grad_outputs[1]
 
             # Norm gradient
             dgamma = None
@@ -1819,7 +1813,7 @@ class _LayerNormMLP(torch.autograd.Function):
         #        fc2_weight_fp8 if not isinstance(fc2_weight, Float8Tensor) else None,
         #    )
         return (
-            dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
+            dgrad if ctx.requires_dgrad else None,
             dgamma,
             dbeta,
             fc1_wgrad,

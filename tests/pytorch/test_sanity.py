@@ -41,6 +41,7 @@ from transformer_engine.pytorch.module import (
     _common as module_common,
     is_module_grouped_tensor_path_supported,
     layernorm_linear,
+    layernorm_mlp,
     linear,
 )
 from utils import ModelConfig, recipe_id, skip_unsupported_backward_override
@@ -741,7 +742,10 @@ def test_sanity_layernorm_mlp(
     _test_sanity_common(block, dtype, config, fp8_recipe, skip_wgrad, skip_dgrad, microbatching)
 
 
-@pytest.mark.parametrize("kind", ["linear", "lnlinear", "rmslinear"])
+@pytest.mark.parametrize(
+    "kind",
+    ["linear", "lnlinear", "rmslinear", "mlp_gelu", "rmsmlp_swiglu"],
+)
 @pytest.mark.parametrize(
     "shape,noncontiguous",
     [
@@ -757,7 +761,8 @@ def test_sanity_logical_activation_shapes(kind, shape, noncontiguous, monkeypatc
         module = Linear(128, 256, **kwargs)
         reference_module = Linear(128, 256, **kwargs)
         module_impl = linear
-    else:
+        output_bias = module.bias
+    elif kind.endswith("linear"):
         module_kwargs = dict(
             normalization="RMSNorm" if kind == "rmslinear" else "LayerNorm",
             return_layernorm_output=True,
@@ -765,8 +770,18 @@ def test_sanity_logical_activation_shapes(kind, shape, noncontiguous, monkeypatc
         module = LayerNormLinear(128, 256, **module_kwargs, **kwargs)
         reference_module = LayerNormLinear(128, 256, **module_kwargs, **kwargs)
         module_impl = layernorm_linear
+        output_bias = module.bias
+    else:
+        module_kwargs = dict(
+            normalization="RMSNorm" if kind.startswith("rms") else "LayerNorm",
+            activation="gelu" if kind == "mlp_gelu" else "swiglu",
+            return_layernorm_output=True,
+        )
+        module = LayerNormMLP(128, 256, **module_kwargs, **kwargs)
+        reference_module = LayerNormMLP(128, 256, **module_kwargs, **kwargs)
+        module_impl = layernorm_mlp
+        output_bias = module.fc2_bias
     reference_module.load_state_dict(module.state_dict())
-    output_bias = module.bias
 
     storage_shape = (*shape[:-1], shape[-1] * 2) if noncontiguous else shape
     x = torch.randn(storage_shape, device="cuda", dtype=torch.bfloat16)
@@ -794,7 +809,7 @@ def test_sanity_logical_activation_shapes(kind, shape, noncontiguous, monkeypatc
 
     seen_norm_stages = []
     if kind != "linear":
-        norm = "rmsnorm" if kind == "rmslinear" else "layernorm"
+        norm = "rmsnorm" if kind.startswith("rms") else "layernorm"
         for suffix in ("fwd", "bwd"):
             tex = module_common.tex if suffix == "fwd" else module_impl.tex
             norm_ = getattr(tex, f"{norm}_{suffix}")
