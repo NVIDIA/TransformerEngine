@@ -790,19 +790,32 @@ __device__ __forceinline__ fp16 get_amax(fp16 a, fp16 b) {
 // lanes at once costs one multiply and one subtract, replacing a scalar
 // conversion followed by a broadcast.
 //
-// Valid for biased_exp <= 253.  Every scale derived from finite BF16 or FP16
-// input stays well inside that bound -- the largest finite BF16 yields
-// biased_exp 247.  The two excluded encodings are 254, whose reciprocal is
-// subnormal, and 255, which marks NaN; in both cases the E8M0 scale byte
-// itself carries the marker, so a consumer still reads the block correctly.
+// The subtraction only covers biased_exp <= 253, where the reciprocal is a
+// normal BF16 and lives entirely in the exponent field.  The two remaining
+// encodings have to be supplied directly, matching exp2f_rcp<bf16>:
+//   254 -- 2^-127, which is subnormal, so the exponent field is exhausted and
+//          the leading mantissa bit has to carry the value instead;
+//   255 -- NaN, which the subtraction cannot express at all, and which would
+//          additionally borrow out of the low lane into the high one.
+// The scale byte alone is not enough to make these correct: the reciprocal
+// here also produces the payload, so a block containing Inf or NaN would be
+// scaled by the wrong factor even though its stored E8M0 byte was right.
 __device__ __forceinline__ bf16x2 exp2f_rcp_2x(e8m0_t biased_exp) {
   // Encoding of 2^127 in both BF16 lanes, and one exponent step in both lanes.
   constexpr uint32_t kTwoPow127Pair = 0x7F007F00u;
   constexpr uint32_t kExponentStepPair = 0x00800080u;
-  // biased_exp <= 255 keeps biased_exp<<7 within 16 bits, so neither lane
-  // borrows into the other.
+  // Both lanes of 2^-127, and of BF16 NaN.
+  constexpr uint32_t kSubnormalPair = 0x00400040u;
+  constexpr uint32_t kNaNPair = 0x7FFF7FFFu;
+
+  uint32_t bits = kTwoPow127Pair - biased_exp * kExponentStepPair;
+  // Only amax of Inf or NaN reaches these, so the branch is uniformly not
+  // taken on real data and folds to a pair of selects.
+  if (__builtin_expect(biased_exp >= 254, 0)) {
+    bits = (biased_exp == 254) ? kSubnormalPair : kNaNPair;
+  }
   bf16x2 result;
-  reinterpret_cast<uint32_t &>(result) = kTwoPow127Pair - biased_exp * kExponentStepPair;
+  reinterpret_cast<uint32_t &>(result) = bits;
   return result;
 }
 
