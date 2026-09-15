@@ -93,25 +93,9 @@ def cxx_compiler_is_gcc() -> bool:
     return re.search(r"^gcc version\b", output, flags=re.IGNORECASE | re.MULTILINE) is not None
 
 
-@functools.lru_cache(maxsize=None)
-def bolt_compatible_build_enabled() -> bool:
-    """Whether to build host ELF libraries with BOLT-compatible options."""
-    configured = os.getenv("NVTE_ENABLE_BOLT_COMPATIBLE")
-    if configured is None:
-        enabled = platform.system() == "Linux" and target_is_arm64()
-    else:
-        enabled = bool(int(configured))
-
-    if enabled and platform.system() != "Linux":
-        raise RuntimeError("NVTE_ENABLE_BOLT_COMPATIBLE is only supported on Linux")
-    return enabled
-
 
 def get_bolt_build_flags() -> Tuple[List[str], List[str]]:
     """BOLT-compatible host compiler and linker flags."""
-    if not bolt_compatible_build_enabled():
-        return [], []
-
     compiler_flags = ["-fno-jump-tables"]
     if cxx_compiler_is_gcc():
         compiler_flags.append("-fno-reorder-blocks-and-partition")
