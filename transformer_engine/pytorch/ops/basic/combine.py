@@ -134,13 +134,9 @@ class MoeCombine(BasicOperation):
         result, combine_state = _ep_combine_fwd(
             input_,
             None,
-            handle_mem=buffer.handle_mem,
-            token_counts=buffer.tokens_per_expert,
-            num_local_tokens=buffer.num_local_tokens,
-            hidden_dim=input_.shape[-1],
-            bwd_quant_recipe=transport_quantizer,
-            eager=buffer.eager,
-            zero_copy=False,
+            buffer,
+            buffer.num_local_tokens,
+            transport_quantizer,
         )
         if ctx.requires_grad:
             ctx.combine_state = combine_state

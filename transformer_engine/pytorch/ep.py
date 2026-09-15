@@ -836,21 +836,20 @@ class _CombineState:
 def _ep_combine_fwd(
     expert_out: torch.Tensor,
     grad_out: Optional[torch.Tensor],
-    *,
-    handle_mem: torch.Tensor,
-    token_counts: torch.Tensor,
+    buffer: "EpBuffer",
     num_local_tokens: int,
-    hidden_dim: int,
     bwd_quant_recipe,
-    eager: bool,
-    zero_copy: bool,
 ):
     """Run combine and return ``(result, _CombineState)``. Eager mode is not graph-capturable, so
     it calls the backend op directly and skips the torch.library dispatch. No autograd; the caller
     owns context handling."""
 
+    handle_mem = buffer.handle_mem
+    eager = buffer.eager
     device = expert_out.device
-    result = torch.empty(num_local_tokens, hidden_dim, dtype=expert_out.dtype, device=device)
+    result = torch.empty(
+        num_local_tokens, buffer.hidden_dim, dtype=expert_out.dtype, device=device
+    )
     if eager:
         tex.ep_combine(handle_mem, expert_out, result)
     else:
@@ -859,12 +858,12 @@ def _ep_combine_fwd(
         handle_mem=handle_mem,
         grad_out=grad_out,
         bwd_quant_recipe=bwd_quant_recipe,
-        token_counts=token_counts,
+        token_counts=buffer.tokens_per_expert,
         expert_out_shape=expert_out.shape,
         expert_out_dtype=expert_out.dtype,
         device=device,
         eager=eager,
-        zero_copy=zero_copy,
+        zero_copy=buffer.zero_copy,
     )
     return result, state
 
@@ -957,15 +956,7 @@ class _EpCombine(torch.autograd.Function):
         """Combine fwd; stashes the backward state on ctx. When ``bwd_quant_recipe`` is set, the
         backward sends the result-grad as MXFP8."""
         result, ctx.state = _ep_combine_fwd(
-            expert_out,
-            grad_out,
-            handle_mem=buffer.handle_mem,
-            token_counts=buffer.tokens_per_expert,
-            num_local_tokens=num_local_tokens,
-            hidden_dim=buffer.hidden_dim,
-            bwd_quant_recipe=bwd_quant_recipe,
-            eager=buffer.eager,
-            zero_copy=buffer.zero_copy,
+            expert_out, grad_out, buffer, num_local_tokens, bwd_quant_recipe
         )
         return result
 
