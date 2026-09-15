@@ -235,6 +235,50 @@ def test_mxfp8_bidirectional_swizzled_vmm() -> None:
     workspace.close()
 
 
+@pytest.mark.skipif(
+    not _localization_available(), reason="CUDA localization is unavailable"
+)
+def test_mxfp8_vmm_add_producer() -> None:
+    """A BF16 add can write directly into the VMM input consumed by quantization."""
+    shape = (256, 32768)
+    lhs = torch.randn(shape, dtype=torch.bfloat16, device="cuda")
+    rhs = torch.randn_like(lhs)
+    quantizer = te.MXFP8Quantizer(
+        fp8_dtype=te.DType.kFloat8E4M3,
+        rowwise=True,
+        columnwise=True,
+    )
+    quantizer.optimize_for_gemm = True
+    reference = quantizer(lhs + rhs)
+
+    try:
+        workspace = te.MXFP8VMMWorkspace.empty(
+            shape,
+            dtype=lhs.dtype,
+            device=lhs.device,
+            quantizer=quantizer,
+        )
+    except (ImportError, RuntimeError, ValueError) as exc:
+        pytest.skip(f"VMM localization is unavailable: {exc}")
+
+    torch.add(lhs, rhs, out=workspace.input)
+    output = workspace.quantize()
+    torch.cuda.synchronize()
+    for name in (
+        "_rowwise_data",
+        "_rowwise_scale_inv",
+        "_columnwise_data",
+        "_columnwise_scale_inv",
+    ):
+        torch.testing.assert_close(
+            getattr(output, name),
+            getattr(reference, name),
+            atol=0.0,
+            rtol=0.0,
+        )
+    workspace.close()
+
+
 def _run_localized_performance_comparison(
     quantizer: te.MXFP8Quantizer,
     mode: str,
@@ -477,5 +521,85 @@ def test_mxfp8_bidirectional_swizzled_vmm_performance() -> None:
         f"\n  localized output + GEMM:      {localized_pipeline_ms:.3f} ms"
         f"\n  quant + GEMM speedup:         "
         f"{baseline_pipeline_ms / localized_pipeline_ms:.3f}x"
+    )
+    workspace.close()
+
+
+@pytest.mark.skipif(
+    not _localization_available(), reason="CUDA localization is unavailable"
+)
+@pytest.mark.skipif(
+    os.getenv("RUN_BENCHMARK_TESTS") != "1",
+    reason="Benchmark test - run with RUN_BENCHMARK_TESTS=1",
+)
+def test_mxfp8_vmm_add_producer_performance() -> None:
+    """Measure BF16 add plus quant with ordinary and VMM producer outputs."""
+    shape = (4096, 32768)
+    lhs = torch.randn(shape, dtype=torch.bfloat16, device="cuda")
+    rhs = torch.randn_like(lhs)
+    ordinary_input = torch.empty_like(lhs)
+    quantizer = te.MXFP8Quantizer(
+        fp8_dtype=te.DType.kFloat8E4M3,
+        rowwise=True,
+        columnwise=True,
+    )
+    quantizer.optimize_for_gemm = True
+    ordinary_output = quantizer.make_empty(
+        shape,
+        dtype=lhs.dtype,
+        device=lhs.device,
+    )
+    try:
+        workspace = te.MXFP8VMMWorkspace.empty(
+            shape,
+            dtype=lhs.dtype,
+            device=lhs.device,
+            quantizer=quantizer,
+        )
+    except (ImportError, RuntimeError, ValueError) as exc:
+        pytest.skip(f"VMM localization is unavailable: {exc}")
+
+    def ordinary_pipeline() -> None:
+        torch.add(lhs, rhs, out=ordinary_input)
+        quantizer.update_quantized(ordinary_input, ordinary_output)
+
+    def localized_pipeline() -> None:
+        torch.add(lhs, rhs, out=workspace.input)
+        workspace.quantize()
+
+    use_cuda_graph = os.getenv("MXFP8_LOCALIZATION_USE_CUDA_GRAPH") == "1"
+    if use_cuda_graph:
+        ordinary_function = _capture_cuda_graph(ordinary_pipeline).replay
+        localized_function = _capture_cuda_graph(localized_pipeline).replay
+    else:
+        ordinary_function = ordinary_pipeline
+        localized_function = localized_pipeline
+
+    ordinary_ms = _benchmark_ms(ordinary_function)
+    localized_ms = _benchmark_ms(localized_function)
+
+    lhs.normal_()
+    ordinary_function()
+    localized_function()
+    torch.cuda.synchronize()
+    for name in (
+        "_rowwise_data",
+        "_rowwise_scale_inv",
+        "_columnwise_data",
+        "_columnwise_scale_inv",
+    ):
+        torch.testing.assert_close(
+            getattr(workspace.output, name),
+            getattr(ordinary_output, name),
+            atol=0.0,
+            rtol=0.0,
+        )
+
+    execution = "CUDA Graph" if use_cuda_graph else "eager"
+    print(
+        f"\nMXFP8 BF16-add producer {shape} ({execution}):"
+        f"\n  ordinary add output + quant: {ordinary_ms:.3f} ms"
+        f"\n  VMM add output + quant:      {localized_ms:.3f} ms"
+        f"\n  speedup:                     {ordinary_ms / localized_ms:.3f}x"
     )
     workspace.close()

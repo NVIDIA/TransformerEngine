@@ -188,12 +188,18 @@ class VMMRowSplitAllocator:
             torch.device("cuda", self.device_index),
             total_bytes,
         )
+        strides = []
+        stride = 1
+        for dimension in reversed(shape):
+            strides.append(stride)
+            stride *= dimension
+        strides.reverse()
         tensor = torch.empty(
             0,
             dtype=dtype,
             device=torch.device("cuda", self.device_index),
-        ).set_(storage)
-        tensor = tensor[:numel].view(shape)
+        )
+        tensor.set_(storage, 0, shape, tuple(strides))
         # Keep the allocator reachable for as long as a full tensor is alive.
         # Views are used only while their owning full tensor is retained.
         tensor._nvte_vmm_allocator = self
