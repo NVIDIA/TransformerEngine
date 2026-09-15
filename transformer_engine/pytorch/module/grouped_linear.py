@@ -430,15 +430,24 @@ class _GroupedLinear(torch.autograd.Function):
         single_grouped_bias: bool,
         weights: Tuple[torch.Tensor, ...],
         biases: Tuple[torch.Tensor, ...],
+        origin_weights: Tuple[torch.Tensor, ...],
+        is_dist_weight: bool,
         out: Optional[torch.Tensor] = None,
         dgrad_out: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, list]:
-        """Forward path backed by GroupedTensor + cuBLASLt grouped GEMM."""
+        """Forward path backed by GroupedTensor + cuBLASLt grouped GEMM.
+
+        ``weights`` feed the GEMM; for a distributed weight they are transient gathered
+        copies. ``origin_weights`` are the sharded parameters, which own ``grad_buffer``
+        and survive into backward.
+        """
         num_gemms = len(m_splits)
         device = inp.device
         in_features = weights[0].size(-1)
         out_features = weights[0].size(-2)
-        weight_requires_grad = weights[0].requires_grad
+        # Read from the parameters: the protocol does not require a materialized copy to
+        # carry requires_grad, and a False here would silently skip the whole wgrad path.
+        weight_requires_grad = (origin_weights if is_dist_weight else weights)[0].requires_grad
         save_original_input = save_original_input and weight_requires_grad
 
         split_sizes, (
@@ -492,7 +501,9 @@ class _GroupedLinear(torch.autograd.Function):
             activation_dtype=activation_dtype,
             is_first_microbatch=is_first_microbatch,
             skip_fp8_weight_update=skip_fp8_weight_update,
-            cache_weight=cache_weight,
+            # Never cache a gathered copy: the workspace would pin the unsharded weight for
+            # the module's lifetime, which is the memory sharding exists to avoid.
+            cache_weight=cache_weight and not is_dist_weight,
         )
 
         out = _GroupedLinear._validate_or_alloc_output(
@@ -553,6 +564,9 @@ class _GroupedLinear(torch.autograd.Function):
             weights_to_save = [weights_for_gemm] if single_grouped_weight else weights_for_gemm
             if not inp.requires_grad:
                 weights_to_save = [None] * len(weights_to_save)
+            if is_dist_weight:
+                # Gathered copies are transient, so save the shards and re-gather in backward.
+                weights_to_save = list(origin_weights)
 
             # Megatron-LM paged stashing uses this marker to identify the dynamic activation
             # buffers among the tensors saved by the GroupedLinear autograd function. The
@@ -579,13 +593,21 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.weights_requires_grad = weight_requires_grad
             ctx.single_grouped_weight = single_grouped_weight
             ctx.single_grouped_bias = single_grouped_bias
+            ctx.is_dist_weight = is_dist_weight
+            ctx.fp8_for_weight_prep = fp8
             if fuse_wgrad_accumulation and ctx.weights_requires_grad:
-                ctx.origin_weight_refs = [weakref.ref(w) for w in weights]
+                # Weakref the parameters, not the gathered copies: those can be dead by backward.
+                ref_weights = origin_weights if is_dist_weight else weights
+                ctx.origin_weight_refs = [weakref.ref(w) for w in ref_weights]
                 ctx.origin_weights_overwrite_main_grad = getattr(
-                    weights[0], "overwrite_main_grad", False
+                    ref_weights[0], "overwrite_main_grad", False
                 )
                 if hasattr(weights[0], "__fsdp_param__"):
                     ctx.main_grad_funcs = [weight.get_main_grad for weight in weights]
+                elif is_dist_weight:
+                    # main_grad is shard-shaped; the unsharded wgrad goes to grad_buffer,
+                    # which finalize_weight_grads reduce-scatters.
+                    ctx.main_grad_funcs = [w.grad_buffer for w in origin_weights]
                 else:
                     ctx.main_grad_funcs = [
                         lambda j=i: weights[j].main_grad for i in range(len(weights))
@@ -811,6 +833,8 @@ class _GroupedLinear(torch.autograd.Function):
                 single_grouped_bias=single_grouped_bias,
                 weights=weights,
                 biases=biases,
+                origin_weights=origin_weights,
+                is_dist_weight=is_dist_weight,
                 out=out,
                 dgrad_out=dgrad_out,
             )
@@ -848,7 +872,9 @@ class _GroupedLinear(torch.autograd.Function):
                     update_workspace=update_ws,
                     skip_update_flag=skip_fp8_weight_update,
                     workspace_dtype=activation_dtype,
-                    cache=cache_weight,
+                    # Never cache a gathered copy: the workspace would pin the unsharded
+                    # weight for the module's lifetime.
+                    cache=cache_weight and not is_dist_weight,
                 )
                 weights_fp8.append(weight_fp8)
 
@@ -945,13 +971,17 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.grad_output_quantizers = grad_output_quantizers
             ctx.grad_weight_quantizers = grad_weight_quantizers
 
-            ctx.weights_requires_grad = weights[0].requires_grad
+            # weight_requires_grad was read from the parameters, before materialization
+            # replaced ``weights`` with gathered copies that need not carry requires_grad.
+            ctx.weights_requires_grad = weight_requires_grad
             if fuse_wgrad_accumulation and ctx.weights_requires_grad:
                 # Keep weakrefs to weights to preserve attributes like main_grad
-                # when we need to modify the weight python objects
-                ctx.origin_weight_refs = [weakref.ref(w) for w in weights]
+                # when we need to modify the weight python objects. Target the parameters:
+                # the gathered copies are transient and carry none of these attributes.
+                ref_weights = origin_weights if is_dist_weight else weights
+                ctx.origin_weight_refs = [weakref.ref(w) for w in ref_weights]
                 ctx.origin_weights_overwrite_main_grad = getattr(
-                    weights[0], "overwrite_main_grad", False
+                    ref_weights[0], "overwrite_main_grad", False
                 )
                 # This check is needed to ensure that main_grad is not created
                 # during the forward pass when using MCore FSDP as it creates
@@ -1057,7 +1087,32 @@ class _GroupedLinear(torch.autograd.Function):
         num_weight_args = 1 if ctx.single_grouped_weight else N
         origin_weights = [None] * num_weight_args
         main_grads = [None] * num_weight_args
-        if ctx.fuse_wgrad_accumulation and ctx.weights_requires_grad:
+        is_dist_weight = getattr(ctx, "is_dist_weight", False)
+        if is_dist_weight:
+            # Forward saved the shards, not the gathered copies.
+            origin_weights = list(weight_tensors)
+            if ctx.fuse_wgrad_accumulation and ctx.weights_requires_grad:
+                main_grads = [main_grad_func() for main_grad_func in ctx.main_grad_funcs]
+            # Re-gather unconditionally to keep an implementer's prefetch chain intact, but
+            # only rebuild the operand for dgrad, which is all that consumes it.
+            weight_tensors = materialize_weight_for_backward(origin_weights)
+            weights_for_gemm = None
+            if ctx.requires_dgrad:
+                # cache_weight=False: the gathered copy must not outlive this backward.
+                weights_for_gemm, _ = _GroupedLinear._prepare_weights_for_grouped_tensor_gemm(
+                    weight_tensors,
+                    ctx.weight_quantizers,
+                    None,
+                    num_gemms=N,
+                    single_grouped_weight=ctx.single_grouped_weight,
+                    with_quantized_compute=ctx.fp8_for_weight_prep,
+                    columnwise_usage=True,
+                    activation_dtype=ctx.activation_dtype,
+                    is_first_microbatch=None,
+                    skip_fp8_weight_update=None,
+                    cache_weight=False,
+                )
+        elif ctx.fuse_wgrad_accumulation and ctx.weights_requires_grad:
             origin_weight_refs = ctx.origin_weight_refs
             ctx.origin_weight_refs = None
             origin_weights = [ref() if ref is not None else None for ref in origin_weight_refs]
@@ -1154,7 +1209,10 @@ class _GroupedLinear(torch.autograd.Function):
                 use_split_accumulator=dgrad_gemm_use_split_accumulator,
             )
 
-        if ctx.is_first_microbatch is not None:
+        if is_dist_weight:
+            # grad_buffer is per-step scratch, so overwrite it instead of accumulating.
+            accumulate_wgrad_into_param_main_grad = False
+        elif ctx.is_first_microbatch is not None:
             accumulate_wgrad_into_param_main_grad = (
                 ctx.fuse_wgrad_accumulation and not ctx.is_first_microbatch
             )
@@ -1162,6 +1220,14 @@ class _GroupedLinear(torch.autograd.Function):
             accumulate_wgrad_into_param_main_grad = ctx.fuse_wgrad_accumulation
 
         if ctx.weights_requires_grad:
+            if (
+                is_dist_weight
+                and ctx.wgrad_store is not None
+                and ctx.wgrad_store.delay_wgrad_compute()
+            ):
+                raise RuntimeError(
+                    "distributed-weight GroupedLinear requires delay_wgrad_compute=False."
+                )
             wgrad_gemm_use_split_accumulator = _2X_ACC_WGRAD
             if ctx.fp8:
                 recipe = ctx.fp8_recipe
@@ -1248,10 +1314,13 @@ class _GroupedLinear(torch.autograd.Function):
                     wgrad = None
                 return wgrad
 
-            wgrad_list = [
-                handle_custom_ddp_from_mcore(weight, main_grad, wgrad)
-                for weight, main_grad, wgrad in zip(origin_weights, main_grads, wgrad_list)
-            ]
+            if is_dist_weight:
+                wgrad_list = finalize_weight_grads(origin_weights, wgrad_list)
+            else:
+                wgrad_list = [
+                    handle_custom_ddp_from_mcore(weight, main_grad, wgrad)
+                    for weight, main_grad, wgrad in zip(origin_weights, main_grads, wgrad_list)
+                ]
         else:
             wgrad_list = [None] * num_weight_args
 
@@ -1379,6 +1448,16 @@ class _GroupedLinear(torch.autograd.Function):
                         )
                         for weight in saved_weights
                     ]
+                elif is_dist_weight and ctx.fp8:
+                    # Re-gathering drops the quantization forward applied: a bf16 shard comes
+                    # back bf16, which this GEMM cannot pair with fp8 grad_output.
+                    weights_for_dgrad = []
+                    for idx, weight in enumerate(weights):
+                        if not isinstance(weight, QuantizedTensorStorage):
+                            quantizer = ctx.weight_quantizers[idx]
+                            quantizer.set_usage(rowwise=True, columnwise=True)
+                            weight = quantizer(weight)
+                        weights_for_dgrad.append(weight)
                 # Make sure weights are available in column-wise format
                 # for dgrad computation.
                 for weight in weights_for_dgrad:
@@ -1398,6 +1477,14 @@ class _GroupedLinear(torch.autograd.Function):
                 )
 
             if ctx.weights_requires_grad:
+                if (
+                    is_dist_weight
+                    and ctx.wgrad_store is not None
+                    and ctx.wgrad_store.delay_wgrad_compute()
+                ):
+                    raise RuntimeError(
+                        "distributed-weight GroupedLinear requires delay_wgrad_compute=False."
+                    )
                 wgrad_gemm_use_split_accumulator = _2X_ACC_WGRAD
                 if ctx.fp8:
                     recipe = ctx.fp8_recipe
