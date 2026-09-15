@@ -16,7 +16,8 @@ export LD_LIBRARY_PATH=$TE_LIB_PATH:$LD_LIBRARY_PATH
 NUM_PHYSICAL_CORES=$(nproc)
 NUM_PARALLEL_JOBS=4
 
-export NVTE_ENABLE_CUTEDSL_QUANT_BACKEND=1
+# Run the CUDA implementation only in L1 as we want to migrate to CuTeDSL implementation so it should have more coverage in L0
+export NVTE_ENABLE_CUTEDSL_QUANT_BACKEND=0
 
 cd $TE_PATH/tests/cpp
 cmake -GNinja -Bbuild .

@@ -27,6 +27,8 @@ export NVTE_FLASH_ATTN_V2=1
 export NVTE_FLASH_ATTN_V3=0
 export NVTE_FLASH_ATTN_V4=0
 
+export NVTE_ENABLE_CUTEDSL_QUANT_BACKEND=1
+
 pip3 install pytest==8.2.1 || error_exit "Failed to install pytest"
 
 NVTE_GROUPED_LINEAR_SINGLE_PARAM=1 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_sanity.xml $TE_PATH/tests/pytorch/test_sanity.py || test_fail "test_sanity.py"
@@ -86,7 +88,7 @@ PYTORCH_JIT=0 NVTE_TORCH_COMPILE=0 python3 -m pytest --tb=auto --junitxml=$XML_L
 PYTORCH_JIT=0 NVTE_TORCH_COMPILE=0 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_ops_grouped_linear_distributed_weight.xml $TE_PATH/tests/pytorch/test_ops_grouped_linear_distributed_weight.py || test_fail "test_ops_grouped_linear_distributed_weight.py"
 NVTE_GROUPED_LINEAR_SINGLE_PARAM=1 NVTE_CUTEDSL_FUSED_GROUPED_MLP=1 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_grouped_mlp.xml $TE_PATH/tests/pytorch/test_grouped_mlp.py || test_fail "test_grouped_mlp.py"
 
-NVTE_ENABLE_CUTEDSL_QUANT_BACKEND=1 NVTE_DEBUG=1 python3 -m pytest -s --tb=auto --junitxml=$XML_LOG_DIR/pytest_cutedsl_test_mxfp8.xml $TE_PATH/tests/pytorch/mxfp8 || test_fail "test_mxfp8"
+NVTE_DEBUG=1 python3 -m pytest -s --tb=auto --junitxml=$XML_LOG_DIR/pytest_cutedsl_test_mxfp8.xml $TE_PATH/tests/pytorch/mxfp8 || test_fail "test_mxfp8"
 
 if [ "$RET" -ne 0 ]; then
     echo "Error in the following test cases:$FAILED_CASES"

@@ -20,6 +20,7 @@ RET=0
 FAILED_CASES=""
 
 export NVTE_JAX_TEST_TIMING=1
+export NVTE_ENABLE_CUTEDSL_QUANT_BACKEND=1
 
 pip3 install "nltk>=3.8.2,!=3.10.1" || error_exit "Failed to install nltk"
 pip3 install pytest==8.2.1 pytest-timeout==2.4.0 || error_exit "Failed to install pytest dependencies"
@@ -47,7 +48,7 @@ NVTE_JAX_CUSTOM_CALLS="false" python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini
 # single-GPU runners.
 CUDA_VISIBLE_DEVICES=0 python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest_docs_examples_jax.xml $TE_PATH/docs/examples/jax/ || test_fail "docs/examples/jax"
 
-NVTE_ENABLE_CUTEDSL_QUANT_BACKEND=1 NVTE_DEBUG=1 python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -s -v --junitxml=$XML_LOG_DIR/pytest_jax_cutedsl_test_mxfp8_cutedsl_backend.xml $TE_PATH/tests/jax/test_mxfp8_cutedsl_backend.py -k 'not distributed' || test_fail "test_mxfp8_cutedsl_backend.py"
+NVTE_DEBUG=1 python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -s -v --junitxml=$XML_LOG_DIR/pytest_jax_cutedsl_test_mxfp8_cutedsl_backend.xml $TE_PATH/tests/jax/test_mxfp8_cutedsl_backend.py -k 'not distributed' || test_fail "test_mxfp8_cutedsl_backend.py"
 
 
 if [ $RET -ne 0 ]; then
