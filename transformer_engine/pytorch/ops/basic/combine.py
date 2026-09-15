@@ -71,9 +71,8 @@ class MoeCombine(BasicOperation):
     num_extra_inputs: int = 0
 
     def __init__(self, config: EpConfig, buffer: Optional[EpBuffer] = None) -> None:
-        # EpBuffer(specific to NCCL EP) is needed by this op. Fused implementation which uses
-        # a different transport mechanism than NCCL EP wont need this buffer to be passed.
-        # For eg. FusedMoeEp fused op uses NVSHMEM.
+        # EpBuffer is specific to NCCL EP. Fused implementations using another communication
+        # backend, such as NVSHMEM, do not need it.
         super().__init__()
         if not isinstance(config, EpConfig):
             raise TypeError(f"config must be an EpConfig, got {type(config).__name__}.")
@@ -122,7 +121,7 @@ class MoeCombine(BasicOperation):
         next_op_input_quantizer: Optional[Quantizer],
         basic_op_kwargs: list[dict[str, Any]],
     ) -> tuple[torch.Tensor, list[tuple[()]]]:
-        # Combine's transport format is selected by Combine's own grad-output quantizer.
+        # Combine's comms format is selected by its own grad-output quantizer.
         # If the preceding op expects a different gradient quantized format,
         # it is requantized in that op's backward implementation (e.g., GroupedLinear backward).
         del (

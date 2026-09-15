@@ -1003,29 +1003,32 @@ def quantize_for_ep(
     input_: torch.Tensor | QuantizedTensorStorage,
     quantizer: Optional["Quantizer"],
 ) -> tuple[MXFP8TensorStorage, torch.Tensor]:
-    """Quantize an EP transport input with a supported quantizer."""
+    """Quantize an EP input with a supported quantizer."""
     from .tensor.mxfp8_tensor import MXFP8Quantizer
 
     if quantizer is None:
         raise ValueError("EP quantization requires a quantizer.")
     if isinstance(quantizer, MXFP8Quantizer):
         return _quantize_mxfp8(input_, quantizer)
-    raise TypeError(f"EP transport does not support {type(quantizer).__name__}.")
+    raise NotImplementedError(
+        "EP dispatch/combine quantization currently supports only MXFP8; "
+        f"got {type(quantizer).__name__}."
+    )
 
 
 def _quantize_mxfp8(
     input_: torch.Tensor | QuantizedTensorStorage,
     quantizer: "MXFP8Quantizer",
 ) -> tuple[MXFP8TensorStorage, torch.Tensor]:
-    """Return E4M3 MXFP8 storage and compact rowwise scales for EP transport."""
+    """Return E4M3 MXFP8 storage and compact rowwise scales for EP."""
     from .constants import MXFP8_BLOCK_SCALING_SIZE
 
     if quantizer.dtype != DType.kFloat8E4M3:
-        raise NotImplementedError("EP MXFP8 transport supports E4M3 only.")
+        raise NotImplementedError("EP supports only E4M3 MXFP8 data.")
     if isinstance(input_, MXFP8TensorStorage):
         quantized = input_
     elif isinstance(input_, QuantizedTensorStorage):
-        raise TypeError(f"EP MXFP8 transport requires an MXFP8 input, got {type(input_).__name__}.")
+        raise TypeError(f"EP requires an MXFP8 input, got {type(input_).__name__}.")
     else:
         if not quantizer.internal:
             quantizer = quantizer.copy()
@@ -1033,7 +1036,7 @@ def _quantize_mxfp8(
         quantized = quantizer(input_)
 
     if quantized._fp8_dtype != DType.kFloat8E4M3:
-        raise NotImplementedError("EP MXFP8 transport supports E4M3 only.")
+        raise NotImplementedError("EP supports only E4M3 MXFP8 data.")
     if quantized._with_gemm_swizzled_scales:
         raise ValueError("EP requires unswizzled MXFP8 scales.")
     data = quantized._rowwise_data
