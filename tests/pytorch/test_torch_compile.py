@@ -709,6 +709,9 @@ _DPA_COMPILE_CONFIGS = {
         ModelConfig(2, 128, 4, 64, attn_mask_type="causal"), packed="qkv", interleave_dim=-2
     ),
     "packed_kv_bshd_bs2hd": _cfg(ModelConfig(2, 128, 4, 64, attn_mask_type="causal"), packed="kv"),
+    "packed_kv_bshd_bsh2d": _cfg(
+        ModelConfig(2, 128, 4, 64, attn_mask_type="causal"), packed="kv", interleave_dim=-2
+    ),
     "packed_kv_thd_th2d": _cfg(
         ModelConfig(2, 128, 4, 64, attn_mask_type="padding_causal"),
         "thd",
@@ -1042,7 +1045,56 @@ def test_dpa_torch_compile(monkeypatch, backend, config):
     )
 
 
-def test_dpa_torch_compile_around_fused(monkeypatch):
+@pytest.mark.parametrize("packed", ["qkv", "kv"])
+@pytest.mark.parametrize("interleave_dim", [-3, -2])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("shape", [(2, 128, 4, 64), (1, 1, 1, 64)])
+def test_dpa_torch_compile_packed_gradients(monkeypatch, packed, interleave_dim, dtype, shape):
+    """Packed gradients reach the input without unpacking and assembling them again."""
+    from functorch.compile import make_boxed_func
+    from torch._dynamo.backends.common import aot_autograd
+
+    spec = _cfg(
+        ModelConfig(*shape, attn_mask_type="causal"),
+        packed=packed,
+        interleave_dim=interleave_dim,
+    )
+    _skip_unsupported(spec, "fused", dtype)
+    module = _make_dpa(spec, dtype)
+    args, kwargs, grads = _make_dpa_inputs(spec, dtype)
+    backward_graphs = []
+
+    def capture_backward(graph, _):
+        backward_graphs.append(graph)
+        return make_boxed_func(graph.forward)
+
+    compiler = aot_autograd(
+        fw_compiler=lambda graph, _: make_boxed_func(graph.forward),
+        bw_compiler=capture_backward,
+    )
+    _force_dpa_backend(monkeypatch, "fused")
+    eager = _run_and_capture(module, args, kwargs, grads)
+    torch._dynamo.reset()
+    _force_dpa_backend(monkeypatch, "fused")
+    compiled = _run_and_capture(
+        torch.compile(module, fullgraph=True, backend=compiler), args, kwargs, grads
+    )
+    _assert_dpa_backend("fused")
+    _assert_run_matches(compiled, eager, "fused", dtype)
+    assert len(backward_graphs) == 1
+    targets = {node.target for node in backward_graphs[0].graph.nodes if node.op == "call_function"}
+    assert any("fused_attn_backward" in str(target) for target in targets)
+    assert targets.isdisjoint(
+        {
+            torch.ops.aten.select_backward.default,
+            torch.ops.aten.slice_backward.default,
+            torch.ops.aten.cat.default,
+            torch.ops.aten.stack.default,
+        }
+    )
+
+
+def test_dpa_torch_compile_fused_op_unavailable(monkeypatch):
     """Without the fused attention custom op, FusedAttention is an eager island
     and everything around it is compiled: DotProductAttention traces up to the
     backend call, breaks the graph there and resumes afterwards. What crosses
@@ -1064,7 +1116,10 @@ def test_dpa_torch_compile_around_fused(monkeypatch):
 
 
 @pytest.mark.parametrize("backend", ["flash", "fused", "unfused"])
-@pytest.mark.parametrize("config", ["self_bshd_causal", "kv_cache_bshd"])
+@pytest.mark.parametrize(
+    "config",
+    ["self_bshd_causal", "kv_cache_bshd", "packed_qkv_bsh3d", "packed_kv_bshd_bsh2d"],
+)
 def test_dpa_torch_compile_cudagraphs(monkeypatch, backend, config):
     """`mode="reduce-overhead"`: forward and backward of DotProductAttention
     are captured into CUDA graphs and replayed on subsequent iterations."""
