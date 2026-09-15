@@ -244,22 +244,24 @@ inline bool mxfp8_quantize_cutedsl(const MXFP8QuantConfig &config, const Tensor 
   }
 
   // Data tensors auto-flatten to 2D (DLTensorWrapper's default)
-  tvm_ffi_bridge::DLTensorWrapper mX(input_tensor->data);
+  const int32_t device_index = transformer_engine::cuda::current_device();
+  tvm_ffi_bridge::DLTensorWrapper mX(input_tensor->data, true, device_index);
   tvm_ffi_bridge::DLTensorWrapper mO_row, mS_row, mO_col, mS_col, mAmax, mActInput, mWorkspace;
   if (output_tensor->has_data()) {
-    mO_row = tvm_ffi_bridge::DLTensorWrapper(output_tensor->data);
-    mS_row = tvm_ffi_bridge::DLTensorWrapper(output_tensor->scale_inv);
+    mO_row = tvm_ffi_bridge::DLTensorWrapper(output_tensor->data, true, device_index);
+    mS_row = tvm_ffi_bridge::DLTensorWrapper(output_tensor->scale_inv, true, device_index);
   }
   if (output_tensor->has_columnwise_data()) {
-    mO_col = tvm_ffi_bridge::DLTensorWrapper(output_tensor->columnwise_data);
-    mS_col = tvm_ffi_bridge::DLTensorWrapper(output_tensor->columnwise_scale_inv);
+    mO_col = tvm_ffi_bridge::DLTensorWrapper(output_tensor->columnwise_data, true, device_index);
+    mS_col =
+        tvm_ffi_bridge::DLTensorWrapper(output_tensor->columnwise_scale_inv, true, device_index);
   }
   if (output_tensor->amax.dptr != nullptr)
-    mAmax = tvm_ffi_bridge::DLTensorWrapper(output_tensor->amax);
+    mAmax = tvm_ffi_bridge::DLTensorWrapper(output_tensor->amax, true, device_index);
   if (act_input_tensor != nullptr && act_input_tensor->data.dptr != nullptr)
-    mActInput = tvm_ffi_bridge::DLTensorWrapper(act_input_tensor->data);
+    mActInput = tvm_ffi_bridge::DLTensorWrapper(act_input_tensor->data, true, device_index);
   if (workspace_tensor != nullptr && workspace_tensor->data.dptr != nullptr)
-    mWorkspace = tvm_ffi_bridge::DLTensorWrapper(workspace_tensor->data);
+    mWorkspace = tvm_ffi_bridge::DLTensorWrapper(workspace_tensor->data, true, device_index);
   // noop and stream are tvm-ffi opaque "handles"; pass them as void*.
   (*mxfp8_quant_func_opt)(&mX, &mO_row, &mS_row, &mO_col, &mS_col, &mAmax, noop_ptr, &mActInput,
                           &mWorkspace, static_cast<void *>(stream));

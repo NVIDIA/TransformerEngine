@@ -2791,7 +2791,16 @@ def get_mxfp8_quantization_function(
 
         logger.debug("Compiling CuTeDSL MXFP8 quantization kernel for %s", cfg)
         compiled = compile_cutedsl_function_from_cfg(cfg)
-        tvm_ffi.register_global_func(fn_name, compiled, override=True)
+        # The returned compiled object is not neccessarily the compiled function itself. It could be a Python
+        # wrapper that parses arguments and calls the underlying function. This is needed in the general case
+        # as TVM-FFI is positional-only, however, for us this is unnecessary launch overhead as we pass the
+        # arguments in the correct order on the C++ side.
+        # Relevant issue: https://github.com/NVIDIA/cutlass/issues/3527
+        # https://github.com/NVIDIA/cutlass/pull/3589 recommends using an explicit positional only marker (/)
+        # in the function signature, however it is not merged and it is something easy to miss and silently
+        # introduce unnecessarry overhead.
+        native = getattr(compiled, "__tvm_ffi_object__", lambda: None)()
+        tvm_ffi.register_global_func(fn_name, native if native is not None else compiled, override=True)
         return True
     except Exception as e:  # pylint: disable=broad-exception-caught
         logger.error(
