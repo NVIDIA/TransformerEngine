@@ -47,12 +47,12 @@ void nvte_quantize_v2(const NVTETensor input, NVTETensor output,
   dispatch::quantize_fwd_helper<IS_ACT, Empty, nullptr>(input, output, quant_config, stream);
 }
 
-void nvte_quantize_mxfp8_slab(const NVTETensor input, NVTETensor output,
-                              const NVTEQuantizationConfig quant_config,
-                              const size_t global_row_offset,
-                              const size_t global_rows, cudaStream_t stream) {
-  NVTE_API_CALL(nvte_quantize_mxfp8_slab);
-  transformer_engine::dispatch::quantize_mxfp8_slab_helper(
+void nvte_quantize_mxfp8_row_partition(
+    const NVTETensor input, NVTETensor output,
+    const NVTEQuantizationConfig quant_config, const size_t global_row_offset,
+    const size_t global_rows, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_quantize_mxfp8_row_partition);
+  transformer_engine::dispatch::quantize_mxfp8_row_partition_helper(
       input, output, quant_config, global_row_offset, global_rows, stream);
 }
 

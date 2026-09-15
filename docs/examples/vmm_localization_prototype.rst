@@ -14,14 +14,14 @@ Workflow
 
 The activation remains an ordinary PyTorch allocation. The quantized MXFP8
 data buffers use one contiguous virtual address range whose first and second
-row slabs are backed by physical memory in locality domains 0 and 1.
+row partitions are backed by physical memory in locality domains 0 and 1.
 
-Two green-context streams quantize the slabs concurrently:
+Two green-context streams quantize the partitions concurrently:
 
 1. The parent stream records a fork event after the input is ready.
 2. Each green stream waits for the fork event.
-3. Each stream reads its ordinary-memory input slab and writes its
-   locality-backed output slab.
+3. Each stream reads its ordinary-memory input partition and writes its
+   locality-backed output partition.
 4. The parent stream waits for both completion events.
 5. An unchanged full-chip GEMM consumes the single MXFP8 tensor directly.
 
@@ -81,7 +81,7 @@ Focused validation
 Prototype limitations
 ---------------------
 
-* Exactly two locality domains and equal, aligned row slabs.
+* Exactly two locality domains and equal, aligned row partitions.
 * Bidirectional MXFP8 with fused GEMM scale swizzling only.
 * Ordinary input allocation; only MXFP8 data outputs are VMM-localized.
 * Scale buffers remain ordinary allocations.

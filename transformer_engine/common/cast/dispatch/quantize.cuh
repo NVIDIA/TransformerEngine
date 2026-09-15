@@ -30,7 +30,7 @@
 namespace transformer_engine {
 namespace dispatch {
 
-inline void quantize_mxfp8_slab_helper(
+inline void quantize_mxfp8_row_partition_helper(
     const NVTETensor input, NVTETensor output,
     const NVTEQuantizationConfig quant_config, const size_t global_row_offset,
     const size_t global_rows, cudaStream_t stream) {
@@ -39,14 +39,14 @@ inline void quantize_mxfp8_slab_helper(
   const Tensor *input_tensor = convertNVTETensorCheck(input);
   Tensor *output_tensor = convertNVTETensorCheck(output);
   NVTE_CHECK(output_tensor->scaling_mode == NVTE_MXFP8_1D_SCALING,
-             "MXFP8 slab quantization requires MXFP8 output");
+             "MXFP8 row partition quantization requires MXFP8 output");
 
   QuantizationConfig quant_config_cpp;
   if (quant_config != nullptr) {
     quant_config_cpp = *reinterpret_cast<QuantizationConfig *>(quant_config);
   }
   NVTE_CHECK(!quant_config_cpp.mxfp8_2d_quantization,
-             "MXFP8 slab quantization does not support 2D scaling");
+             "MXFP8 row partition quantization does not support 2D scaling");
 
   Tensor dummy_tensor;
   Tensor *noop_tensor = &dummy_tensor;

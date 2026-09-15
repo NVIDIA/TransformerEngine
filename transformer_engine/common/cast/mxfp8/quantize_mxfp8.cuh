@@ -676,8 +676,8 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
   const auto [rows, cols] = input.flat_2d_dims();
   const size_t effective_global_rows = global_rows == 0 ? rows : global_rows;
   NVTE_CHECK(global_row_offset + rows <= effective_global_rows,
-             "MXFP8 slab exceeds full tensor rows (offset=", global_row_offset,
-             ", slab_rows=", rows, ", global_rows=", effective_global_rows, ")");
+             "MXFP8 row partition exceeds full tensor rows (offset=", global_row_offset,
+             ", partition_rows=", rows, ", global_rows=", effective_global_rows, ")");
 
   // Tensor chunk handled by each CUDA block
   constexpr size_t CHUNK_DIM_Y = CAST_DBIAS_ONLY ? 128 : 64;

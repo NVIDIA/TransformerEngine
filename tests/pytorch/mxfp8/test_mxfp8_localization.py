@@ -188,7 +188,7 @@ def test_mxfp8_bidirectional_swizzled_localized_pair() -> None:
     not _localization_available(), reason="CUDA localization is unavailable"
 )
 def test_mxfp8_bidirectional_swizzled_vmm() -> None:
-    """Two slab launches must produce one full GEMM-swizzled MXFP8 tensor."""
+    """Two row-partition launches must produce one GEMM-swizzled MXFP8 tensor."""
     shape = (256, 32768)
     tensor = torch.randn(shape, dtype=torch.bfloat16, device="cuda")
     quantizer = te.MXFP8Quantizer(

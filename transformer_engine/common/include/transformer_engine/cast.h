@@ -125,23 +125,23 @@ void nvte_quantize_noop(const NVTETensor input, NVTETensor output, NVTETensor no
 void nvte_quantize_v2(const NVTETensor input, NVTETensor output,
                       const NVTEQuantizationConfig quant_config, cudaStream_t stream);
 
-/*! \brief Experimental MXFP8 quantization of one row slab in a full tensor.
+/*! \brief Experimental MXFP8 quantization of one row partition in a full tensor.
  *
- * The input and data outputs describe only the local row slab. Scale buffers
+ * The input and data outputs describe only the local row partition. Scale buffers
  * may describe the full tensor so fused-swizzle indexing can use global
  * coordinates.
  *
- *  \param[in]      input              Input row slab.
- *  \param[in,out]  output             Output row slab with shared full scale storage.
+ *  \param[in]      input              Input row partition.
+ *  \param[in,out]  output             Output row partition with shared full scale storage.
  *  \param[in]      quant_config       Quantization configuration.
- *  \param[in]      global_row_offset  First slab row in the full tensor.
+ *  \param[in]      global_row_offset  First partition row in the full tensor.
  *  \param[in]      global_rows        Number of rows in the full tensor.
  *  \param[in]      stream             CUDA stream used for the operation.
  */
-void nvte_quantize_mxfp8_slab(const NVTETensor input, NVTETensor output,
-                              const NVTEQuantizationConfig quant_config,
-                              size_t global_row_offset, size_t global_rows,
-                              cudaStream_t stream);
+void nvte_quantize_mxfp8_row_partition(
+    const NVTETensor input, NVTETensor output,
+    const NVTEQuantizationConfig quant_config, size_t global_row_offset,
+    size_t global_rows, cudaStream_t stream);
 
 /*! \brief Casts input tensor to MXFP8. Additionally, reduces the input along columns.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,

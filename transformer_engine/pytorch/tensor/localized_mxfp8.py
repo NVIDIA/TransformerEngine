@@ -250,25 +250,25 @@ class MXFP8LocalizedPair:
 class MXFP8VMMWorkspace:
     """One input activation and one VMM-backed, GEMM-ready MXFP8 output.
 
-    This prototype supports exactly two equal row slabs, bidirectional MXFP8,
-    fused GEMM scale swizzling, and VMM-aligned output slabs. The input may be
+    This prototype supports exactly two equal row partitions, bidirectional MXFP8,
+    fused GEMM scale swizzling, and VMM-aligned output partitions. The input may be
     either an ordinary contiguous allocation or a VMM allocation. Scale
     buffers remain ordinary allocations. They are small relative to the data,
-    and the global columnwise swizzle interleaves scale tiles from both slabs.
+    and the global columnwise swizzle interleaves scale tiles from both partitions.
     """
 
     def __init__(
         self,
         input_tensor: torch.Tensor,
         output: MXFP8Tensor,
-        slab_outputs: Tuple[MXFP8Tensor, MXFP8Tensor],
+        partition_outputs: Tuple[MXFP8Tensor, MXFP8Tensor],
         quantizer: MXFP8Quantizer,
         allocator: VMMRowSplitAllocator,
         streams: Tuple[torch.cuda.Stream, torch.cuda.Stream],
     ) -> None:
         self.input = input_tensor
         self.output = output
-        self.slab_outputs = slab_outputs
+        self.partition_outputs = partition_outputs
         self.quantizer = quantizer
         self.allocator = allocator
         self.streams = streams
@@ -356,21 +356,21 @@ class MXFP8VMMWorkspace:
         )
 
         rows_per_domain = shape[0] // 2
-        slab_shape = (rows_per_domain, shape[1])
-        slab_outputs = []
+        partition_shape = (rows_per_domain, shape[1])
+        partition_outputs = []
         for domain in range(2):
             row_start = domain * rows_per_domain
             row_end = row_start + rows_per_domain
             scale_start = domain * (row_scale_shape[0] // 2)
             scale_end = scale_start + row_scale_shape[0] // 2
-            slab_outputs.append(
+            partition_outputs.append(
                 MXFP8Tensor(
-                    shape=slab_shape,
+                    shape=partition_shape,
                     dtype=dtype,
                     rowwise_data=rowwise_data[row_start:row_end],
                     rowwise_scale_inv=rowwise_scale_inv[scale_start:scale_end],
                     columnwise_data=columnwise_data[row_start:row_end],
-                    # Both slabs write global swizzle coordinates into this
+                    # Both partitions write global swizzle coordinates into this
                     # shared scale plane.
                     columnwise_scale_inv=columnwise_scale_inv,
                     fp8_dtype=quantizer.dtype,
@@ -383,7 +383,7 @@ class MXFP8VMMWorkspace:
         return cls(
             input_tensor=input_tensor,
             output=output,
-            slab_outputs=tuple(slab_outputs),
+            partition_outputs=tuple(partition_outputs),
             quantizer=quantizer,
             allocator=allocator,
             streams=streams,
@@ -463,7 +463,7 @@ class MXFP8VMMWorkspace:
         self,
         parent_stream: Optional[torch.cuda.Stream] = None,
     ) -> MXFP8Tensor:
-        """Quantize both VMM row slabs and return one full MXFP8 tensor."""
+        """Quantize both VMM row partitions and return one full MXFP8 tensor."""
         if parent_stream is None:
             parent_stream = torch.cuda.current_stream(self.input.device)
         fork_event, join_events = self._fork_join_events()
@@ -473,11 +473,11 @@ class MXFP8VMMWorkspace:
 
         rows_per_domain = self.input.shape[0] // 2
         for domain, (output, stream) in enumerate(
-            zip(self.slab_outputs, self.streams)
+            zip(self.partition_outputs, self.streams)
         ):
             row_start = domain * rows_per_domain
             with torch.cuda.stream(stream):
-                tex.quantize_mxfp8_slab(
+                tex.quantize_mxfp8_row_partition(
                     self.input[row_start : row_start + rows_per_domain],
                     self.quantizer,
                     output,

@@ -7,7 +7,7 @@
 This module intentionally supports only allocations whose logical midpoint is
 already aligned to the CUDA VMM granularity. That restriction keeps the
 returned tensor truly contiguous: there is no hidden padding between its two
-row slabs.
+row partitions.
 """
 
 from __future__ import annotations
@@ -133,7 +133,7 @@ class VMMRowSplitAllocator:
             raise ValueError(f"Allocation size must be positive and even, got {total_bytes}")
         if half_bytes % self.granularity != 0:
             raise ValueError(
-                "Each logical row slab must be VMM-granularity aligned "
+                "Each logical row partition must be VMM-granularity aligned "
                 f"(half={half_bytes} bytes, granularity={self.granularity} bytes)"
             )
 
