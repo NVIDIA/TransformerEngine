@@ -116,8 +116,8 @@ def _ep_flattened_replica_groups(mesh, ep_resource):
 
 
 def ep_bootstrap(
-    world_size=None,
-    rank=None,
+    world_size,
+    rank,
     num_experts,
     max_tokens_per_rank,
     recv_capacity_per_rank,
@@ -138,10 +138,10 @@ def ep_bootstrap(
 
     Args:
         world_size: Total number of devices (product of all mesh axes).
-            Defaults to the active mesh size; an explicit value must match it.
+            Pass None to use the active mesh size; an explicit value must match it.
         rank: Global rank of the calling process. Unused on the borrowed-comm
             path, where each device's identity comes from its mesh position.
-            Defaults to jax.process_index().
+            Pass None to use jax.process_index().
         num_experts: Total experts across the EP group.
         max_tokens_per_rank: Max tokens one rank dispatches per step (sizes send buffers).
         recv_capacity_per_rank: Max tokens one rank receives per step; set to
