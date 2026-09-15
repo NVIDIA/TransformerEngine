@@ -379,9 +379,7 @@ def test_gdn2_state_round_trip_matches_single_shot():
     )
 
     with torch.no_grad():
-        full_output, full_state = attention(
-            q, k, v, g=g, beta=beta, w=w, output_final_state=True
-        )
+        full_output, full_state = attention(q, k, v, g=g, beta=beta, w=w, output_final_state=True)
         first_output, first_state = attention(
             q[:, :split],
             k[:, :split],
@@ -560,9 +558,7 @@ def test_gdn2_matches_gdn_with_scalar_gates():
     beta = torch.rand(batch, sequence, heads, device="cuda", dtype=torch.float32)
 
     gdn = GatedDeltaNetAttention(num_attention_heads=heads, kv_channels=dim, qkv_format="bshd")
-    gdn2 = GatedDeltaNet2Attention(
-        num_attention_heads=heads, kv_channels=dim, qkv_format="bshd"
-    )
+    gdn2 = GatedDeltaNet2Attention(num_attention_heads=heads, kv_channels=dim, qkv_format="bshd")
     with torch.no_grad():
         expected = gdn(q, k, v, g=g, beta=beta, use_qk_l2norm_in_kernel=True)
         # GDN applies beta to both the erase and the write; GDN-2 splits those
