@@ -7,6 +7,7 @@
 This module is **experimental** and subject to change.
 """
 
-from .gdn import GatedDeltaNetAttention
+from .gdn import GatedDeltaNetAttention, GDNConfig, GDNInputs
+from .linear_attention import LinearAttention
 
-__all__ = ["GatedDeltaNetAttention"]
+__all__ = ["GatedDeltaNetAttention", "LinearAttention", "GDNConfig", "GDNInputs"]

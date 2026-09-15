@@ -28,6 +28,50 @@ PyTorch
 .. autoapiclass:: transformer_engine.pytorch.GatedDeltaNetAttention(num_attention_heads, kv_channels, **kwargs)
   :members: forward
 
+.. autoapiclass:: transformer_engine.pytorch.LinearAttention(variant, num_attention_heads, kv_channels, **kwargs)
+  :members: forward
+
+.. autoapiclass:: transformer_engine.pytorch.GDNConfig(use_qk_l2norm_in_kernel=False)
+
+.. autoapiclass:: transformer_engine.pytorch.GDNInputs(g, beta)
+
+Generic linear-attention API
+----------------------------
+
+``LinearAttention`` provides a stable entry point for multiple linear-attention
+algorithms. A typed configuration selects the algorithm and stores its static
+options, while a typed input tuple carries the algorithm-specific per-call
+tensors. The existing ``GatedDeltaNetAttention`` API remains available for
+direct GDN integrations.
+
+Gated DeltaNet can be invoked through the generic API as follows::
+
+  attention = LinearAttention(
+      variant=GDNConfig(use_qk_l2norm_in_kernel=True),
+      num_attention_heads=8,
+      kv_channels=(128, 128),
+      qkv_format="thd",
+      attn_mask_type="padding_causal",
+  )
+  output, final_state = attention(
+      q,
+      k,
+      v,
+      variant_inputs=GDNInputs(g=g, beta=beta),
+      cu_seqlens_q=cu_seqlens,
+      cu_seqlens_kv=cu_seqlens,
+      initial_state=initial_state,
+      output_final_state=True,
+  )
+
+The common interface retains separate ``cu_seqlens_q`` and ``cu_seqlens_kv``
+arguments for variants that may support distinct query and key/value streams.
+GDN operates on one aligned recurrent token stream, so callers must either omit
+``cu_seqlens_kv`` or pass the same tensor object as ``cu_seqlens_q``. This
+identity-based contract avoids a device synchronization to compare tensor
+contents.
+
+
 .. autoapiclass:: transformer_engine.pytorch.MultiheadAttention(hidden_size, num_attention_heads, **kwargs)
   :members: forward, set_context_parallel_group, set_tensor_parallel_group
 

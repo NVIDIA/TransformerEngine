@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Tests for Gated DeltaNet through the GatedDeltaNetAttention API."""
+"""Tests for Gated DeltaNet through its direct and generic linear-attention APIs."""
 
 import importlib.util
 import math
@@ -13,7 +13,14 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from transformer_engine.pytorch import GatedDeltaNetAttention, autocast, is_fp8_available
+from transformer_engine.pytorch import (
+    GatedDeltaNetAttention,
+    GDNConfig,
+    GDNInputs,
+    LinearAttention,
+    autocast,
+    is_fp8_available,
+)
 
 
 def _gdn_available() -> bool:
@@ -489,3 +496,149 @@ def test_gdn_runs_te_forward_lifecycle(monkeypatch):
     output = attention(q, k, v, g=g, beta=beta)
     assert output.shape == (1, 128, 64)
     assert events == ["prepare", "end"]
+
+
+def test_linear_attention_validates_variant_and_tensor_parallel_configuration():
+    """The generic facade rejects unknown variants and invalid TP topology."""
+    with pytest.raises(TypeError, match="Unsupported linear-attention configuration"):
+        LinearAttention(object(), num_attention_heads=2, kv_channels=64)
+    with pytest.raises(ValueError, match="tp_size must be positive"):
+        LinearAttention(GDNConfig(), num_attention_heads=2, kv_channels=64, tp_size=0)
+    with pytest.raises(ValueError, match="must be divisible"):
+        LinearAttention(GDNConfig(), num_attention_heads=3, kv_channels=64, tp_size=2)
+    with pytest.raises(TypeError, match="must be a bool"):
+        GDNConfig(use_qk_l2norm_in_kernel=1)
+
+
+def test_linear_attention_requires_typed_variant_inputs():
+    """GDN-specific runtime tensors must be supplied through GDNInputs."""
+    q, k, v, _, _ = _inputs(1, 128, 1, 1)
+    attention = LinearAttention(
+        GDNConfig(),
+        num_attention_heads=1,
+        kv_channels=64,
+        qkv_format="bshd",
+    )
+    with pytest.raises(TypeError, match="GDNInputs"):
+        attention(q, k, v, variant_inputs=object())
+
+
+def test_linear_attention_gdn_rejects_unproven_kv_boundaries():
+    """Distinct metadata tensors are rejected without synchronizing to compare contents."""
+    q, k, v, g, beta = (tensor.squeeze(0) for tensor in _inputs(1, 128, 1, 1))
+    cu_seqlens_q = torch.tensor([0, 128], device="cuda", dtype=torch.int32)
+    cu_seqlens_kv = cu_seqlens_q.clone()
+    attention = LinearAttention(
+        GDNConfig(),
+        num_attention_heads=1,
+        kv_channels=64,
+        qkv_format="thd",
+        attn_mask_type="padding_causal",
+    )
+    with pytest.raises(ValueError, match="identical Q and KV sequence boundaries"):
+        attention(
+            q,
+            k,
+            v,
+            variant_inputs=GDNInputs(g=g, beta=beta),
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_kv=cu_seqlens_kv,
+        )
+
+
+@requires_gdn
+@pytest.mark.parametrize("qkv_format", ["bshd", "thd"])
+@pytest.mark.parametrize("checkpoint_core_attention", [False, True], ids=["eager", "checkpoint"])
+def test_linear_attention_gdn_matches_direct_api(qkv_format, checkpoint_core_attention):
+    """The generic GDN facade preserves direct-API outputs, states, and gradients."""
+    batch, sequence, heads, qk_dim, v_dim = 2, 128, 2, 64, 128
+    base_inputs = _inputs(batch, sequence, heads, heads, qk_dim, v_dim)
+    if qkv_format == "thd":
+        base_inputs = tuple(
+            tensor.reshape(batch * sequence, *tensor.shape[2:]) for tensor in base_inputs
+        )
+        cu_seqlens = torch.arange(batch + 1, device="cuda", dtype=torch.int32) * sequence
+        attn_mask_type = "padding_causal"
+    else:
+        cu_seqlens = None
+        attn_mask_type = "causal"
+
+    direct_inputs = tuple(tensor.detach().clone().requires_grad_() for tensor in base_inputs)
+    generic_inputs = tuple(tensor.detach().clone().requires_grad_() for tensor in base_inputs)
+    direct_initial_state = (
+        torch.randn(batch, heads, v_dim, qk_dim, device="cuda", dtype=torch.float32) * 0.05
+    ).requires_grad_()
+    generic_initial_state = direct_initial_state.detach().clone().requires_grad_()
+
+    direct = GatedDeltaNetAttention(
+        num_attention_heads=heads,
+        kv_channels=(qk_dim, v_dim),
+        qkv_format=qkv_format,
+    )
+    generic = LinearAttention(
+        GDNConfig(use_qk_l2norm_in_kernel=True),
+        num_attention_heads=heads,
+        kv_channels=(qk_dim, v_dim),
+        qkv_format=qkv_format,
+        attn_mask_type=attn_mask_type,
+    )
+
+    direct_output, direct_state = direct(
+        *direct_inputs[:3],
+        g=direct_inputs[3],
+        beta=direct_inputs[4],
+        cu_seqlens=cu_seqlens,
+        initial_state=direct_initial_state,
+        output_final_state=True,
+        checkpoint_core_attention=checkpoint_core_attention,
+        use_qk_l2norm_in_kernel=True,
+    )
+    generic_output, generic_state = generic(
+        *generic_inputs[:3],
+        variant_inputs=GDNInputs(g=generic_inputs[3], beta=generic_inputs[4]),
+        cu_seqlens_q=cu_seqlens,
+        cu_seqlens_kv=cu_seqlens,
+        initial_state=generic_initial_state,
+        output_final_state=True,
+        checkpoint_core_attention=checkpoint_core_attention,
+    )
+
+    _assert_rms_close(
+        generic_output, direct_output, _FWD_TOL[generic_inputs[0].dtype], "facade output"
+    )
+    _assert_rms_close(
+        generic_state,
+        direct_state,
+        _STATE_TOL[generic_inputs[0].dtype],
+        "facade final state",
+    )
+
+    output_weight = torch.randn_like(direct_output, dtype=torch.float32)
+    state_weight = torch.randn_like(direct_state, dtype=torch.float32)
+    (
+        (direct_output.float() * output_weight).sum() + (direct_state.float() * state_weight).sum()
+    ).backward()
+    (
+        (generic_output.float() * output_weight).sum()
+        + (generic_state.float() * state_weight).sum()
+    ).backward()
+
+    for name, direct_tensor, generic_tensor in zip(
+        ("q", "k", "v", "g", "beta"), direct_inputs, generic_inputs
+    ):
+        assert direct_tensor.grad is not None, f"no direct gradient for {name}"
+        assert generic_tensor.grad is not None, f"no generic gradient for {name}"
+        _assert_rms_close(
+            generic_tensor.grad,
+            direct_tensor.grad,
+            _BWD_TOL[generic_inputs[0].dtype],
+            f"facade d{name}",
+        )
+    assert generic_initial_state.grad is not None
+    assert direct_initial_state.grad is not None
+    _assert_rms_close(
+        generic_initial_state.grad,
+        direct_initial_state.grad,
+        _BWD_TOL[generic_inputs[0].dtype],
+        "facade dinitial_state",
+    )
