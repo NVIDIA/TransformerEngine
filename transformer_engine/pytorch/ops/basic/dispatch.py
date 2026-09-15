@@ -15,10 +15,9 @@ from ...ep import (
     EpConfig,
     _ep_dispatch_bwd,
     _ep_prepare_and_dispatch_fwd,
-    quantize_for_ep,
 )
 from ...quantization import QuantizerRole
-from ...tensor import MXFP8Quantizer, Quantizer
+from ...tensor import Quantizer
 from .._common import (
     is_quantized_tensor,
     maybe_dequantize,
@@ -148,10 +147,6 @@ class MoeDispatch(BasicOperation):
             topk_weights,
             device=buffer.device,
         )
-        # Prepare the input
-        input_scale_inv = None
-        if isinstance(input_quantizer, MXFP8Quantizer):
-            input_, input_scale_inv = quantize_for_ep(input_, input_quantizer)
         output, recv_topk_weights, dispatch_state = _ep_prepare_and_dispatch_fwd(
             input_,
             topk_weights,
@@ -159,7 +154,6 @@ class MoeDispatch(BasicOperation):
             buffer,
             None,
             None,
-            input_scale_inv,
         )
         tokens_per_expert = buffer.tokens_per_expert
         # If next_op_input_quantizer is different from input_quantizer,

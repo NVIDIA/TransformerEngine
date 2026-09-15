@@ -15,11 +15,11 @@ from ...ep import (
     EpConfig,
     _ep_combine_bwd,
     _ep_combine_fwd,
-    quantize_for_ep,
 )
 from ...quantization import QuantizerRole
-from ...tensor import MXFP8Quantizer, Quantizer
+from ...tensor import Quantizer
 from .._common import (
+    is_quantized_tensor,
     maybe_dequantize,
     validate_ep_buffer,
     validate_ep_comms_recipe,
@@ -46,6 +46,20 @@ def _validate_combine_inputs(
             "MoeCombine tokens_per_expert must be an int64 tensor on the input device."
         )
     return tuple(input_.shape)
+
+
+def _validate_combine_grad_output(grad_output: torch.Tensor) -> None:
+    """Validate the high-precision gradient dispatched by combine backward."""
+    if (
+        not isinstance(grad_output, torch.Tensor)
+        or is_quantized_tensor(grad_output)
+        or grad_output.dtype is not torch.bfloat16
+    ):
+        raise TypeError(
+            "MoeCombine grad_output must be a plain BF16 tensor, "
+            f"got {type(grad_output).__name__} with "
+            f"dtype={getattr(grad_output, 'dtype', None)}."
+        )
 
 
 class MoeCombine(BasicOperation):
@@ -118,9 +132,6 @@ class MoeCombine(BasicOperation):
             basic_op_kwargs,
         )
         grad_output_quantizer = self.get_quantizer("backward", 0)
-        transport_quantizer = (
-            grad_output_quantizer if isinstance(grad_output_quantizer, MXFP8Quantizer) else None
-        )
         buffer = validate_ep_buffer("MoeCombine", self.config, self.buffer)
         validate_ep_comms_recipe(
             "MoeCombine",
@@ -136,7 +147,7 @@ class MoeCombine(BasicOperation):
             None,
             buffer,
             buffer.num_local_tokens,
-            transport_quantizer,
+            buffer.combine_bwd_quant_recipe,
         )
         if ctx.requires_grad:
             ctx.combine_state = combine_state
@@ -156,22 +167,7 @@ class MoeCombine(BasicOperation):
     ]:
         del basic_op_grad_extra_outputs
         ctx = basic_op_ctxs[0]
-        grad_output_quantizer = self.get_quantizer("backward", 0)
-        grad_scale_inv = None
-        # Prepare grad_output (Quantize if necessary)
-        if isinstance(grad_output_quantizer, MXFP8Quantizer):
-            quantized_grad, grad_scale_inv = quantize_for_ep(
-                grad_output,
-                grad_output_quantizer,
-            )
-            grad_output = quantized_grad
-        else:
-            grad_output = maybe_dequantize(grad_output, torch.bfloat16).contiguous()
-            quantized_grad = None
-        grad_input = _ep_combine_bwd(
-            ctx.combine_state,
-            grad_output,
-            quantized_grad,
-            grad_scale_inv,
-        )
+        _validate_combine_grad_output(grad_output)
+        grad_output = grad_output.contiguous()
+        grad_input = _ep_combine_bwd(ctx.combine_state, grad_output)
         return grad_input, [()], [()]
