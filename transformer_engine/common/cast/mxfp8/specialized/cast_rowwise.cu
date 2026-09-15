@@ -75,9 +75,9 @@ static_assert(kLanesPerBlock == 2, "A wider lane group would need a multi-step r
 /*! \brief Launch parameters for one tensor-size regime.
  *
  * The kernel is bandwidth-bound, so the best configuration tracks how the
- * working set compares with L2 rather than the shape itself.  These were
- * selected by autotuning over a B200 shape sweep; see kTierMaxBytes below for
- * the one threshold that has since been re-measured.
+ * working set compares with L2 rather than the shape itself.  These came from
+ * an autotuning sweep; see kTierMaxBytes below for the one threshold that has
+ * since been re-measured.
  */
 struct LaunchConfig {
   //! CTA width.  Trades occupancy against per-CTA scheduling overhead.
@@ -99,11 +99,9 @@ struct LaunchConfig {
 // Output bytes (one FP8 byte per element, i.e. M*K) separating the regimes.
 //
 // The first threshold is 12 MiB rather than the 24 MiB the original sweep
-// picked.  The single-block-per-lane configuration of tier 0 stops paying off
-// well before 24 MiB: measured on B200, a 16 MiB tensor ran 8.29 us on tier 0
-// against 6.78 us on tier 1, and a 24 MiB tensor 11.58 us against 9.82 us.
-// Both were also slower than the TMA kernel this one replaces, so the tier 0
-// range is cut where the crossover actually lies.
+// picked: the single-block-per-lane configuration of tier 0 stops paying off
+// well before 24 MiB, losing to tier 1 and to the staged kernel alike over the
+// upper half of that range.  Re-measuring put the crossover here instead.
 constexpr int64_t kTierMaxBytes[] = {12ll << 20, 48ll << 20, 96ll << 20};
 
 constexpr LaunchConfig kTierConfigs[] = {
@@ -441,6 +439,8 @@ void launch_contiguous_checked(const LaunchConfig &config, int64_t grid,
                                int32_t blocks_per_row, int32_t num_tiles_X, int32_t col_spans,
                                int32_t rows, const uint32_t *input, uint32_t *output,
                                e8m0_t *scales, cudaStream_t stream) {
+  NVTE_CHECK(grid <= static_cast<int64_t>(UINT32_MAX), "MXFP8 rowwise cast needs ", grid,
+             " CTAs, which exceeds the grid limit.");
   const dim3 blocks(static_cast<unsigned>(grid));
   const dim3 threads(static_cast<unsigned>(config.threads_per_cta));
 
@@ -521,6 +521,17 @@ void launch_cast_rowwise(const void *input, void *output, void *scales, int rows
     if (config.threads_per_cta == 128) {
       config.threads_per_cta = 256;
     }
+    // The rest of the tier is reused as-is, and the table was fit on the packed
+    // layout.  Two of its assumptions are weaker here:
+    //   - l2_cached_cta_percent splits CTAs by index, which in the packed layout
+    //     is a prefix of the tensor.  Swizzled, the index decomposes into
+    //     (band, row slot, column span) with spans varying fastest, so the same
+    //     split selects rows interleaved across each band rather than a
+    //     contiguous run.  It still covers roughly the same fraction of bytes.
+    //   - tier 0 gives each lane a single block, which leaves a swizzled CTA
+    //     with the least to amortise its four-sub-row span across; the smallest
+    //     shapes are where this layout is furthest off the packed path.
+    // Neither has been re-tuned for this layout.
   }
 
   // Every CTA covers a whole number of MX blocks.  When the count does not
@@ -565,8 +576,11 @@ void launch_cast_rowwise(const void *input, void *output, void *scales, int rows
       // silently without it rather than fail.
       NVTE_CHECK(blocks_per_row % 4 == 0, "GEMM-swizzled MXFP8 scales require the column count (",
                  cols, ") to be a multiple of 128; blocks per row was ", blocks_per_row, ".");
-      NVTE_CHECK(num_blocks <= static_cast<int64_t>(UINT32_MAX),
-                 "GEMM-swizzled MXFP8 scales index MX blocks with 32 bits; got ", num_blocks);
+      // Row and block indices inside the kernel are int32, and the CTA index is
+      // decomposed from blockIdx.x, so the swizzled path is bounded by the row
+      // count rather than by the block count the packed path carries.
+      NVTE_CHECK(rows <= INT32_MAX - 128,
+                 "GEMM-swizzled MXFP8 scales index rows with 32 bits; got ", rows);
     }
     launch_contiguous<OType, SWIZZLED_SCALES>(config, grid, first_streaming_cta, num_blocks,
                                               blocks_per_row, num_tiles_X, col_spans, rows,
