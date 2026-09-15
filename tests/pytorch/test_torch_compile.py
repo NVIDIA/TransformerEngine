@@ -1062,14 +1062,19 @@ def test_dpa_torch_compile_packed_gradients(monkeypatch, packed, interleave_dim,
     _skip_unsupported(spec, "fused", dtype)
     module = _make_dpa(spec, dtype)
     args, kwargs, grads = _make_dpa_inputs(spec, dtype)
+    forward_graphs = []
     backward_graphs = []
+
+    def capture_forward(graph, _):
+        forward_graphs.append(graph)
+        return make_boxed_func(graph.forward)
 
     def capture_backward(graph, _):
         backward_graphs.append(graph)
         return make_boxed_func(graph.forward)
 
     compiler = aot_autograd(
-        fw_compiler=lambda graph, _: make_boxed_func(graph.forward),
+        fw_compiler=capture_forward,
         bw_compiler=capture_backward,
     )
     _force_dpa_backend(monkeypatch, "fused")
@@ -1081,6 +1086,11 @@ def test_dpa_torch_compile_packed_gradients(monkeypatch, packed, interleave_dim,
     )
     _assert_dpa_backend("fused")
     _assert_run_matches(compiled, eager, "fused", dtype)
+    assert len(forward_graphs) == 1
+    assert all(
+        node.target not in (torch.ops.aten.select.int, torch.ops.aten.unbind.int)
+        for node in forward_graphs[0].graph.nodes
+    )
     assert len(backward_graphs) == 1
     targets = {node.target for node in backward_graphs[0].graph.nodes if node.op == "call_function"}
     assert any("fused_attn_backward" in str(target) for target in targets)

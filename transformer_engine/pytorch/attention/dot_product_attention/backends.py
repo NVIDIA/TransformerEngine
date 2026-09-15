@@ -5,7 +5,7 @@
 """Attention Backends."""
 
 from contextlib import nullcontext
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from importlib.metadata import version as get_pkg_version
 from importlib.metadata import PackageNotFoundError
 import inspect
@@ -1500,6 +1500,8 @@ class FusedAttnBwdArgs:
     q: Optional[torch.Tensor] = None
     k: Optional[torch.Tensor] = None
     v: Optional[torch.Tensor] = None
+    packed_qkv: Optional[torch.Tensor] = None
+    packed_kv: Optional[torch.Tensor] = None
     out: Optional[torch.Tensor] = None
     cu_seqlens_q: Optional[torch.Tensor] = None
     cu_seqlens_kv: Optional[torch.Tensor] = None
@@ -1514,8 +1516,6 @@ class FusedAttnBwdArgs:
     # --- Attention config ---
     max_seqlen_q: Optional[int] = None
     max_seqlen_kv: Optional[int] = None
-    packed_qkv: Optional[bool] = None
-    packed_kv: Optional[bool] = None
     attn_scale: Optional[float] = None
     dropout_p: Optional[float] = None
     fast_zero_fill: Optional[bool] = None
@@ -1565,6 +1565,8 @@ class FusedAttnBwdArgs:
             self.rng_state,
             self.aux_bias,
             self.aux_softmax_offset,
+            self.packed_qkv,
+            self.packed_kv,
         ) = restore_from_func_ctx(
             ctx
         )  # pylint: disable=unbalanced-tuple-unpacking
@@ -1579,27 +1581,14 @@ class FusedAttnBwdArgs:
         return aux
 
 
-def _fused_attn_split_packed(packed, dim, count):
-    if isinstance(packed, TensorSpec):
-        shape = list(packed.shape)
-        del shape[dim]
-        return tuple(
-            TensorSpec(shape=tuple(shape), dtype=packed.dtype, device=packed.device)
-            for _ in range(count)
-        )
-    return tuple(packed.select(dim, i) for i in range(count))
-
-
-def _fused_attn_unpack_args(args: FusedAttnFwdArgs) -> FusedAttnFwdArgs:
+def _fused_attn_qkv(args):
     if args.q is None and args.packed_qkv is not None:
         dim = -2 if "h3d" in args.qkv_layout else -3
-        q, k, v = _fused_attn_split_packed(args.packed_qkv, dim, 3)
-        return replace(args, q=q, k=k, v=v)
+        return args.packed_qkv.unbind(dim)
     if args.k is None and args.packed_kv is not None:
         dim = -2 if "h2d" in args.qkv_layout else -3
-        k, v = _fused_attn_split_packed(args.packed_kv, dim, 2)
-        return replace(args, k=k, v=v)
-    return args
+        return args.q, *args.packed_kv.unbind(dim)
+    return args.q, args.k, args.v
 
 
 def _fused_attn_forward_impl(
@@ -1614,8 +1603,7 @@ def _fused_attn_forward_impl(
     input / the output is replaced by ``None`` and named in
     ``ctx_attrs["saved_from"]``, so backward takes it from there instead.
     """
-    args = _fused_attn_unpack_args(args)
-    q, k, v = args.q, args.k, args.v
+    q, k, v = _fused_attn_qkv(args)
     is_training = args.is_training
     fp8 = args.fp8
     fp8_meta = args.fp8_meta
@@ -1837,7 +1825,7 @@ def _fused_attn_forward_impl(
         out_f16 = out_
         out_ret = out_
         fp8_tensors = (None, None, None, None)
-        f16_tensors = (q, k, v, out_f16)
+        f16_tensors = (args.q, args.k, args.v, out_f16)
 
     nvtx_range_pop(f"{nvtx_label}")
 
@@ -1933,12 +1921,9 @@ def _fused_attn_setup_ctx(
 
     ``fwd_outputs`` is ``(out, max_logit)`` as returned by the forward impl.
     """
-    fwd_args = _fused_attn_unpack_args(fwd_args)
     out = fwd_outputs[0]
     fp8 = ctx_attrs["fp8"]
 
-    bwd_args.packed_qkv = fwd_args.packed_qkv is not None
-    bwd_args.packed_kv = fwd_args.packed_kv is not None
     bwd_args.fp8 = fp8
     bwd_args.is_input_fp8 = ctx_attrs["is_input_fp8"]
     # assume fwd and bwd always use the same high precision, i.e. torch.float16 or torch.bfloat16
@@ -2032,6 +2017,8 @@ def _fused_attn_setup_ctx(
         rng_state,
         aux_bias,
         aux_softmax_offset,
+        fwd_args.packed_qkv if fwd_args.q is None else None,
+        fwd_args.packed_kv if fwd_args.k is None else None,
     )
 
 
@@ -2059,7 +2046,8 @@ def _fused_attn_backward_impl(
         else:
             d_out_fp8 = args.dO_quantizer(d_out)
     q_fp8, k_fp8, v_fp8, out_fp8 = args.q_fp8, args.k_fp8, args.v_fp8, args.out_fp8
-    q, k, v, out = args.q, args.k, args.v, args.out
+    q, k, v = _fused_attn_qkv(args)
+    out = args.out
     cu_seqlens_q, cu_seqlens_kv = args.cu_seqlens_q, args.cu_seqlens_kv
     cu_seqlens_q_padded, cu_seqlens_kv_padded = args.cu_seqlens_q_padded, args.cu_seqlens_kv_padded
     aux_ctx_tensors = args.aux_ctx_tensors()
@@ -2317,9 +2305,18 @@ class FusedAttnFunc(torch.autograd.Function):
         return (*_fused_attn_backward_impl(bwd_args), None)
 
 
-def _fused_attn_stats_shape(args: FusedAttnFwdArgs, q_format: str) -> Tuple[int, ...]:
+def _fused_attn_q_shape(args) -> Tuple[int, ...]:
+    if args.q is not None:
+        return tuple(args.q.shape)
+    shape = list(args.packed_qkv.shape)
+    del shape[-2 if "h3d" in args.qkv_layout else -3]
+    return tuple(shape)
+
+
+def _fused_attn_stats_shape(
+    args: FusedAttnFwdArgs, q_format: str, q_shape: Tuple[int, ...]
+) -> Tuple[int, ...]:
     """Shape of the softmax stats auxiliary tensor cuDNN returns."""
-    q_shape = args.q.shape
     if q_format == "thd":
         num_heads = q_shape[1]
         major, minor, _ = get_cudnn_version()
@@ -2338,15 +2335,18 @@ def _fused_attn_forward_fake(
     args: FusedAttnFwdArgs,
 ) -> Tuple[TensorSpec, Optional[TensorSpec], Tuple[Any, ...], Dict[str, Any]]:
     """Data-free twin of :func:`_fused_attn_forward_impl` (non-FP8 only)."""
-    args = _fused_attn_unpack_args(args)
-    q, v = args.q, args.v
+    q = args.q if args.q is not None else args.packed_qkv
+    v = args.v
+    if v is None:
+        v = args.packed_qkv if args.packed_qkv is not None else args.packed_kv
+    q_shape = _fused_attn_q_shape(args)
     _, o_format, _ = dpa_utils.get_qkv_format(args.qkv_layout)
-    out = TensorSpec(shape=(*q.shape[:-1], v.shape[-1]), dtype=q.dtype, device=q.device)
+    out = TensorSpec(shape=(*q_shape[:-1], v.shape[-1]), dtype=q.dtype, device=q.device)
     max_logit = None
     if args.return_max_logit:
-        max_logit = TensorSpec(shape=(q.shape[-2],), dtype=q.dtype, device=q.device)
+        max_logit = TensorSpec(shape=(q_shape[-2],), dtype=q.dtype, device=q.device)
     softmax_stats = TensorSpec(
-        shape=_fused_attn_stats_shape(args, o_format), dtype=torch.float32, device=q.device
+        shape=_fused_attn_stats_shape(args, o_format, q_shape), dtype=torch.float32, device=q.device
     )
     rng_state = TensorSpec(shape=(2,), dtype=torch.int64, device=q.device)
     has_bias = args.attn_bias_type not in ["no_bias", "alibi"] and args.attn_bias is not None
@@ -2398,11 +2398,11 @@ def _fused_attn_backward_op_impl(
 ) -> Tuple[Optional[torch.Tensor], ...]:
     dq, dk, dv, d_bias, d_softmax_offset = _fused_attn_backward_impl(args)
     dqkv, dkv = None, None
-    if args.packed_qkv:
+    if args.packed_qkv is not None:
         dim = -2 if "h3d" in args.dqkv_layout else -3
         dqkv = _fused_attn_pack_grad(dq, dim, 3)
         dq, dk, dv = None, None, None
-    elif args.packed_kv:
+    elif args.packed_kv is not None:
         dim = -2 if "h2d" in args.dqkv_layout else -3
         dkv = _fused_attn_pack_grad(dk, dim, 2)
         dk, dv = None, None
@@ -2413,31 +2413,18 @@ def _fused_attn_backward_fake(
     args: FusedAttnBwdArgs,
 ) -> Tuple[Optional[TensorSpec], ...]:
     """Data-free twin of :func:`_fused_attn_backward_op_impl`."""
-    q, k, v = args.q, args.k, args.v
-    dq = TensorSpec(shape=tuple(q.shape), dtype=q.dtype, device=q.device)
-    dk = TensorSpec(shape=tuple(k.shape), dtype=k.dtype, device=k.device)
-    dv = TensorSpec(shape=tuple(v.shape), dtype=v.dtype, device=v.device)
-    dqkv, dkv = None, None
-    if args.packed_qkv or args.packed_kv:
-        grad = dq if args.packed_qkv else dk
-        count = 3 if args.packed_qkv else 2
-        dim = -2 if f"h{count}d" in args.dqkv_layout else -3
-        shape = list(grad.shape)
-        shape.insert(dim + 1, count)
-        packed = TensorSpec(shape=tuple(shape), dtype=grad.dtype, device=grad.device)
-        if args.packed_qkv:
-            dqkv = packed
-            dq = None
-        else:
-            dkv = packed
-        dk, dv = None, None
+    dq, dk, dv, dqkv, dkv = (
+        TensorSpec(shape=tuple(t.shape), dtype=t.dtype, device=t.device) if t is not None else None
+        for t in (args.q, args.k, args.v, args.packed_qkv, args.packed_kv)
+    )
+    q = args.q if args.q is not None else args.packed_qkv
     d_bias = None
     if args.aux_bias is not None:
         d_bias = TensorSpec(shape=tuple(args.aux_bias.shape), dtype=q.dtype, device=q.device)
     d_softmax_offset = None
     if args.aux_softmax_offset is not None:
         d_softmax_offset = TensorSpec(
-            shape=(1, q.shape[-2], 1, 1), dtype=torch.float32, device=q.device
+            shape=(1, _fused_attn_q_shape(args)[-2], 1, 1), dtype=torch.float32, device=q.device
         )
     return dq, dk, dv, d_bias, d_softmax_offset, dqkv, dkv
 
