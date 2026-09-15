@@ -2418,8 +2418,6 @@ def _fused_attn_backward_op_impl(
         dim = -2 if "h2d" in args.dqkv_layout else -3
         dkv = _fused_attn_pack_grad(dk, dim, 2)
         dk, dv = None, None
-    else:
-        dq, dk, dv = dq.contiguous(), dk.contiguous(), dv.contiguous()
     return dq, dk, dv, d_bias, d_softmax_offset, dqkv, dkv
 
 
