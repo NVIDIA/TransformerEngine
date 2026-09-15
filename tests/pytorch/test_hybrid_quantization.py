@@ -506,8 +506,10 @@ class TestDPARuntimeRecipeUpdate:
 
         assert dpa._apply_quantization_update(update)
         assert dpa._quantization_runtime is update.candidate
-        assert dpa.fp8_meta["local_recipes"] is update.validation_result
-        assert [type(item).__name__ for item in update.validation_result] == ["MXFP8BlockScaling"]
+        assert dpa.fp8_meta["local_recipes"] is update.candidate.owner_traits
+        assert [type(item).__name__ for item in update.candidate.owner_traits] == [
+            "MXFP8BlockScaling"
+        ]
         assert _canonical_qkv_quantizer(dpa) is not old_qkv_quantizer
 
     def test_candidate_failure_preserves_active_runtime_and_caches(self):

@@ -584,7 +584,7 @@ def _test_export_layernorm_linear(
                 normalization=normalization,
             ).to(device="cuda")
             if fp8_recipe is not None:
-                set_layer_scale(model, scale_factor, num_gemms=2)
+                set_layer_scale(model, scale_factor, num_gemms=1)
             do_export(model, inp, fname, fp8_recipe)
 
             te_outputs = te_infer(model, inp, is_fp8=fp8_recipe is not None, fp8_recipe=fp8_recipe)

@@ -4395,6 +4395,10 @@ class TestCheckpointing:
         quantized_compute = quantization is not None
         maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
         maybe_skip_quantization(quantization, dims=out_shape)
+        if quantized_weight:
+            fp8_available, reason = te.is_fp8_available(return_reason=True)
+            if not fp8_available:
+                pytest.skip(reason)
 
         # Construct model
         recipe = make_recipe(quantization)

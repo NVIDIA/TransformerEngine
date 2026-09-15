@@ -47,6 +47,8 @@ from transformer_engine.pytorch.quantization import (
 from transformer_engine.pytorch.tensor.identity_tensor import IdentityQuantizer
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+fp8_available, reason_for_no_fp8 = is_fp8_available(return_reason=True)
+requires_fp8 = pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 
 
 def _make_counting_recipe(key, calls, *, fail_on_grad_output=False):
@@ -736,6 +738,7 @@ def test_module_owns_runtime_slot_layout(module_factory, expected_num_gemms):
     )
 
 
+@requires_fp8
 def test_unchanged_forward_uses_revision_hot_path(monkeypatch):
     """Repeated forwards do not enter any runtime-construction cold path."""
     calls = []
@@ -1130,6 +1133,7 @@ def test_runtime_update_workspace_lifecycle(
     assert not module._fp8_workspaces  # pylint: disable=protected-access
 
 
+@requires_fp8
 def test_forward_recipe_mutation_breaks_committed_key_invariant():
     """A forward path must not change its committed recipe snapshot."""
 
@@ -1203,6 +1207,7 @@ def test_forward_recipe_mutation_breaks_committed_key_invariant():
         ),
     ),
 )
+@requires_fp8
 def test_module_family_executes_after_recipe_update(
     module_factory,
     input_factory,
@@ -1456,6 +1461,7 @@ def test_inert_builtin_dpa_recipe_update_matches_fresh_target(eager_apply):
 )
 def test_apply_recipe_before_first_mha_forward_has_stable_boundary_topology(
     module_factory,
+    monkeypatch,
 ):
     """E2E TE-1 regression: first forward must not migrate unwarmed MHA roles."""
     from transformer_engine.pytorch.utils import get_device_compute_capability
@@ -1466,6 +1472,9 @@ def test_apply_recipe_before_first_mha_forward_has_stable_boundary_topology(
     compute_capability = get_device_compute_capability()
     if compute_capability < (9, 0) or compute_capability >= (12, 0):
         pytest.skip("FP8 attention is not supported on this compute capability")
+    # This test exercises runtime topology, not backend availability. Keep an
+    # executable fallback on CI configurations without FP8 fused attention.
+    monkeypatch.setenv("NVTE_UnfusedDPA_Emulate_FP8", "1")
 
     FP8GlobalStateManager.reset()
     module = module_factory()
@@ -1535,7 +1544,7 @@ def test_apply_recipe_before_first_mha_forward_has_stable_boundary_topology(
         FP8GlobalStateManager.reset()
 
 
-def test_mha_warmed_and_unwarmed_topology_matches_and_rope_does_not_migrate_runtime():
+def test_mha_warmed_and_unwarmed_topology_matches_and_rope_does_not_migrate_runtime(monkeypatch):
     """Cover the TE-1 invariants not asserted by existing attention numerics tests."""
     from transformer_engine.pytorch import RotaryPositionEmbedding
     from transformer_engine.pytorch.utils import get_device_compute_capability
@@ -1546,6 +1555,9 @@ def test_mha_warmed_and_unwarmed_topology_matches_and_rope_does_not_migrate_runt
     compute_capability = get_device_compute_capability()
     if compute_capability < (9, 0) or compute_capability >= (12, 0):
         pytest.skip("FP8 attention is not supported on this compute capability")
+    # This test exercises runtime topology, not backend availability. Keep an
+    # executable fallback on CI configurations without FP8 fused attention.
+    monkeypatch.setenv("NVTE_UnfusedDPA_Emulate_FP8", "1")
 
     FP8GlobalStateManager.reset()
     recipe = _make_compatible_fp8_mha_recipe(("mha-warm-rope-topology", 1))
@@ -1952,6 +1964,7 @@ def test_delayed_qmi_mha_first_forward_preserves_initialized_runtimes(
         FP8GlobalStateManager.reset()
 
 
+@requires_fp8
 def test_explicit_mha_boundary_override_wins_and_can_restore_declared_role():
     """Public role overrides retain revision semantics above declared topology."""
     FP8GlobalStateManager.reset()
@@ -2064,6 +2077,7 @@ def test_shipped_dpa_factory_unwarmed_mha_keeps_bf16_boundaries_stable():
         FP8GlobalStateManager.reset()
 
 
+@requires_fp8
 def test_apply_recipe_rejects_quantized_primary_update_before_candidate_construction():
     """The model-wide API preserves the quantized-model-init support boundary."""
     FP8GlobalStateManager.reset()
@@ -2104,6 +2118,7 @@ def test_apply_recipe_rejects_quantized_primary_update_before_candidate_construc
         FP8GlobalStateManager.reset()
 
 
+@requires_fp8
 def test_apply_recipe_success_noop_mutation_and_forward_fast_path():
     """Explicit application publishes once and matching forwards remain lazy-path no-ops."""
     FP8GlobalStateManager.reset()
@@ -2152,6 +2167,7 @@ def test_apply_recipe_success_noop_mutation_and_forward_fast_path():
         FP8GlobalStateManager.reset()
 
 
+@requires_fp8
 def test_apply_recipe_computes_config_once(monkeypatch):
     """All participant plans receive one shared semantic configuration."""
     FP8GlobalStateManager.reset()
@@ -2177,6 +2193,7 @@ def test_apply_recipe_computes_config_once(monkeypatch):
         FP8GlobalStateManager.reset()
 
 
+@requires_fp8
 def test_apply_recipe_reconstructs_stateless_runtime_after_checkpoint_restore():
     """A restored model can rebuild its committed recipe before its first forward."""
     FP8GlobalStateManager.reset()
@@ -2219,6 +2236,7 @@ def test_apply_recipe_reconstructs_stateless_runtime_after_checkpoint_restore():
         FP8GlobalStateManager.reset()
 
 
+@requires_fp8
 def test_apply_recipe_includes_unexecuted_conditional_branch():
     """Traversal updates owners independently of the branch executed by forward."""
 
@@ -2260,6 +2278,7 @@ def test_apply_recipe_includes_unexecuted_conditional_branch():
         FP8GlobalStateManager.reset()
 
 
+@requires_fp8
 def test_apply_recipe_supports_custom_recipe_dpa():
     """Runtime-managed CustomRecipe DPA participates in model-wide application."""
     FP8GlobalStateManager.reset()
@@ -2282,6 +2301,7 @@ def test_apply_recipe_supports_custom_recipe_dpa():
 
 
 @pytest.mark.parametrize("failure_index", (0, 1, 2))
+@requires_fp8
 def test_apply_recipe_planning_failure_is_model_wide_atomic(failure_index):
     """A factory failure in any participant leaves modules and manager unchanged."""
     FP8GlobalStateManager.reset()
@@ -2357,6 +2377,7 @@ def test_apply_recipe_planning_failure_is_model_wide_atomic(failure_index):
         FP8GlobalStateManager.reset()
 
 
+@requires_fp8
 def test_apply_recipe_deduplicates_shared_runtime_owner():
     """A shared module is planned and applied exactly once."""
     FP8GlobalStateManager.reset()
@@ -2375,6 +2396,7 @@ def test_apply_recipe_deduplicates_shared_runtime_owner():
         FP8GlobalStateManager.reset()
 
 
+@requires_fp8
 def test_apply_recipe_rejects_fusible_owner_without_committing_anything():
     """A fusible owner rejects the model, and nothing is committed on the way there.
 
@@ -2411,6 +2433,7 @@ def test_apply_recipe_rejects_fusible_owner_without_committing_anything():
         FP8GlobalStateManager.reset()
 
 
+@requires_fp8
 def test_apply_recipe_skips_zero_quantizer_fusible_owner():
     """An operation that builds no quantizers is inert, not an excluded owner."""
     FP8GlobalStateManager.reset()
@@ -2672,6 +2695,7 @@ def test_checkpoint_restore_adopts_the_checkpoints_recipe(monkeypatch, live_reci
         FP8GlobalStateManager.reset()
 
 
+@requires_fp8
 def test_apply_recipe_dispatches_on_the_owner_protocol_not_concrete_classes():
     """Any owner implementing the private plan/apply pair participates."""
     FP8GlobalStateManager.reset()

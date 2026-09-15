@@ -292,6 +292,17 @@ def check_recipe_support(recipe: Recipe) -> None:
         raise RuntimeError(unsupported_reason)
 
 
+def _validate_recipe_activation(recipe: Recipe) -> None:
+    """Validate recipe semantics before checking platform support.
+
+    Semantic validation is platform-independent and must not be hidden by a
+    hardware error. In particular, an invalid ``CustomRecipe`` should report
+    its missing factory key consistently on every GPU architecture.
+    """
+    recipe.quantizer_config()
+    check_recipe_support(recipe)
+
+
 def get_default_fp8_recipe() -> Recipe:
     """FP8 recipe with default args."""
     assert not torch.compiler.is_compiling(), (
@@ -828,12 +839,12 @@ class FP8GlobalStateManager:
     ) -> Recipe:
         """Resolve and validate an autocast activation without publishing state."""
         fp8_recipe = get_default_fp8_recipe() if fp8_recipe is None else fp8_recipe
-        if enabled or calibrating:
-            check_recipe_support(fp8_recipe)
         if enabled or calibrating or cls.quantization_state.fp8_parameters:
             # Building the configuration validates the recipe. A region that
             # quantizes nothing must not reject a recipe it will never use.
             fp8_recipe.quantizer_config()
+        if enabled or calibrating:
+            check_recipe_support(fp8_recipe)
         return fp8_recipe
 
     @classmethod
@@ -983,8 +994,7 @@ def apply_recipe(model: torch.nn.Module, recipe: Recipe) -> None:
     if FP8GlobalStateManager.fp8_graph_capturing():
         raise RuntimeError("te.apply_recipe() must be called outside CUDA graph capture.")
 
-    check_recipe_support(recipe)
-    recipe.quantizer_config()
+    _validate_recipe_activation(recipe)
 
     # Dispatch on a private owner protocol rather than concrete classes, so this
     # function needs no imports from the module/attention/ops packages and any
@@ -1104,8 +1114,7 @@ def quantized_model_init(
     # cannot use must leave the process as it found it.
     recipe = get_default_fp8_recipe() if recipe is None else recipe
     if enabled:
-        check_recipe_support(recipe)
-        recipe.quantizer_config()
+        _validate_recipe_activation(recipe)
 
     _fp8_parameters = qstate.fp8_parameters
     _fp8_recipe = qstate.fp8_recipe
