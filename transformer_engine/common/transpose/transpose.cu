@@ -203,12 +203,10 @@ void transpose(const Tensor &input, const Tensor &noop, Tensor *output_, cudaStr
   const size_t num_rows = flat_dims[0];
   const size_t row_length = flat_dims[1];
 
-  NVTE_CHECK(output.data.shape[0] == row_length,
-             "Output has invalid first dimension (expected ", row_length, ", got ",
-             output.data.shape[0], ").");
-  const size_t output_cols =
-      std::accumulate(output.data.shape.begin() + 1, output.data.shape.end(), size_t{1},
-                      std::multiplies<size_t>());
+  NVTE_CHECK(output.data.shape[0] == row_length, "Output has invalid first dimension (expected ",
+             row_length, ", got ", output.data.shape[0], ").");
+  const size_t output_cols = std::accumulate(output.data.shape.begin() + 1, output.data.shape.end(),
+                                             size_t{1}, std::multiplies<size_t>());
   NVTE_CHECK(output_cols == num_rows,
              "Output has invalid product of dimensions after the first (expected ", num_rows,
              ", got ", output_cols, ").");

@@ -185,13 +185,11 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
     NVTE_CHECK(A_shape.ndim >= 2 && B_shape.ndim >= 2,
                "Comm+GEMM overlap does not support 1-dimensional operands");
     if (comm_type.value() == CommOverlapType::RS) {
-      const auto unsharded_shape =
-          detail::getGemmOutputShape(A_shape, transa, B_shape, transb);
+      const auto unsharded_shape = detail::getGemmOutputShape(A_shape, transa, B_shape, transb);
       const auto overlap_tp_size = comm_overlap->get_tp_size();
-      NVTE_CHECK(unsharded_shape[0] % overlap_tp_size == 0,
-                 "First output dimension (", unsharded_shape[0],
-                 ") must be divisible by tensor parallel size (", overlap_tp_size,
-                 ") for reduce-scatter overlap");
+      NVTE_CHECK(unsharded_shape[0] % overlap_tp_size == 0, "First output dimension (",
+                 unsharded_shape[0], ") must be divisible by tensor parallel size (",
+                 overlap_tp_size, ") for reduce-scatter overlap");
     }
   }
   const auto D_shape =

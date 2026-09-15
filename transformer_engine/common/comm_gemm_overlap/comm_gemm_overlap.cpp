@@ -471,8 +471,7 @@ void CommOverlapBase::bulk_overlap(const TensorWrapper &A, bool transa, const Te
       NVTE_CHECK(rs_output.numel() == _ubuf.numel() / _tp_size,
                  "Reduce-scatter output has an invalid element count (expected ",
                  _ubuf.numel() / _tp_size, ", got ", rs_output.numel(), ")");
-      NVTE_CHECK(convertNVTETensor(rs_output.data())->flat_first_dim() ==
-                     _ubuf.size(0) / _tp_size,
+      NVTE_CHECK(convertNVTETensor(rs_output.data())->flat_first_dim() == _ubuf.size(0) / _tp_size,
                  "Reduce-scatter output has an invalid flattened first dimension (expected ",
                  _ubuf.size(0) / _tp_size, ", got ",
                  convertNVTETensor(rs_output.data())->flat_first_dim(), ")");
