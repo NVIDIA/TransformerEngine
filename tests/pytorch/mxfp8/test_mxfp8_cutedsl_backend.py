@@ -252,6 +252,34 @@ def test_cast_only(swizzled, fp8_dtype, in_dtype, block_size, shape):
     run_test_case("CAST_ONLY", IDENTITY, shape, block_size, in_dtype, fp8_dtype, swizzled)
 
 
+def test_cast_only_rowwise_specialized_grid_y_overflow():
+    """Fall back when the specialized rowwise launch would exceed CUDA's grid.y limit."""
+    # The specialized kernel covers four rows per CTA, so this shape would require
+    # grid.y=65536. The general kernel must handle it instead.
+    run_test_case(
+        "CAST_ONLY",
+        IDENTITY,
+        (4 * 65536, 128),
+        (1, 32),
+        torch.float16,
+        tex.DType.kFloat8E4M3,
+    )
+
+
+def test_cast_only_bidimensional_specialized_grid_y_overflow():
+    """Fall back when the specialized bidimensional launch exceeds CUDA's grid.y limit."""
+    # The specialized kernel covers 32 rows per CTA, so this shape would require
+    # grid.y=65536. Use the minimum valid N to limit the test's memory footprint.
+    run_test_case(
+        "CAST_ONLY",
+        IDENTITY,
+        (32 * 65536, 32),
+        (32, 32),
+        torch.float16,
+        tex.DType.kFloat8E4M3,
+    )
+
+
 # Test cases with varying matrix shapes and block shapes
 # (OperatorTest_FusedCastMXFP8_Sizes).
 @pytest.mark.parametrize("shape", MATRIX_SIZES, ids=get_shape_id)
