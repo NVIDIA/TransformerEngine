@@ -908,13 +908,8 @@ def _make_dpa_inputs(spec: dict, dtype: torch.dtype):
     return args, kwargs, grad_tensors
 
 
-def _skip_unsupported(
-    spec: dict, backend: str, dtype, compiled: bool = True, inference_params=None
-) -> None:
-    """Skip what the backend under test cannot run, or -- for a test that
-    compiles it -- cannot be compiled."""
-    if compiled and backend == "fused" and inference_params is not None:
-        pytest.skip("KV caching with FusedAttention falls back to eager under torch.compile")
+def _skip_unsupported(spec: dict, backend: str, dtype, inference_params=None) -> None:
+    """Skip configurations the backend under test cannot run."""
     available, _, _ = get_available_attention_backends(
         spec["model_config"],
         dtype,
@@ -1067,7 +1062,7 @@ def test_dpa_torch_compile_fused_op_unavailable(monkeypatch):
 
     dtype = torch.bfloat16
     spec = _DPA_COMPILE_CONFIGS["self_bshd_causal"]
-    _skip_unsupported(spec, "fused", dtype, compiled=False)
+    _skip_unsupported(spec, "fused", dtype)
     _force_dpa_backend(monkeypatch, "fused")
     monkeypatch.setattr(backends, "_fused_attn_op", None)
 
@@ -1113,7 +1108,7 @@ def test_dpa_torch_compile_cudagraphs(monkeypatch, backend, config):
     assert not counters["inductor"]["cudagraph_skips"], "inductor skipped CUDA graphs"
 
 
-@pytest.mark.parametrize("backend", ["flash", "unfused"])
+@pytest.mark.parametrize("backend", ["flash", "fused", "unfused"])
 @pytest.mark.parametrize("paged", [False, True], ids=["non_paged", "paged"])
 @pytest.mark.parametrize("cuda_graphs", [False, True], ids=["default", "cudagraphs"])
 def test_dpa_torch_compile_kv_cache_decoding(monkeypatch, backend, paged, cuda_graphs):
@@ -1263,7 +1258,7 @@ def test_dpa_torch_compile_eager_fallback(monkeypatch, backend, case):
     dtype = torch.bfloat16
     config_name, make_inputs = _EAGER_FALLBACK_CASES[case]
     spec = _DPA_COMPILE_CONFIGS[config_name]
-    _skip_unsupported(spec, backend, dtype, compiled=False)
+    _skip_unsupported(spec, backend, dtype)
     _force_dpa_backend(monkeypatch, backend)
 
     module = _make_dpa(spec, dtype)

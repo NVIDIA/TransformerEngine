@@ -2320,15 +2320,16 @@ def _fused_attn_stats_shape(
     if q_format == "thd":
         num_heads = q_shape[1]
         major, minor, _ = get_cudnn_version()
-        if (major, minor) >= (9, 6) and get_device_compute_capability() != (12, 0):
+        sm = get_device_compute_capability()
+        if (major, minor) >= (9, 6) and sm >= (9, 0) and sm != (12, 0):
             return (q_shape[0], num_heads, 1)
         batch_size = args.cu_seqlens_q.shape[0] - 1
         return (batch_size, num_heads, args.max_seqlen_q, 1)
     if q_format == "bshd":
-        batch_size, seqlen, num_heads = q_shape[0], q_shape[1], q_shape[2]
+        batch_size, num_heads = q_shape[0], q_shape[2]
     else:
-        seqlen, batch_size, num_heads = q_shape[0], q_shape[1], q_shape[2]
-    return (batch_size, num_heads, seqlen, 1)
+        batch_size, num_heads = q_shape[1], q_shape[2]
+    return (batch_size, num_heads, args.max_seqlen_q, 1)
 
 
 def _fused_attn_forward_fake(
@@ -2448,6 +2449,7 @@ _fused_attn_op = register_custom_op(
     bwd_arg_type=FusedAttnBwdArgs,
     bwd_impl=_fused_attn_backward_op_impl,
     bwd_fake_impl=_fused_attn_backward_fake,
+    fwd_tags=(torch.Tag.nondeterministic_seeded,),
 )
 
 
