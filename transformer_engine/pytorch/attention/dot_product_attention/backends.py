@@ -2839,9 +2839,9 @@ class FusedAttention(torch.nn.Module):
                         fwd_args.q, fwd_args.k, fwd_args.v = None, None, None
                     elif packed_kv is not None:
                         fwd_args.k, fwd_args.v = None, None
-                    output, max_logit = _fused_attn_op(fwd_args)
-                    if self.return_max_logit:
-                        output = (output, max_logit)
+                    output = _fused_attn_op(fwd_args)
+                    if not self.return_max_logit:
+                        output = output[0]
                 else:
                     output = FusedAttnFunc.apply(
                         query_layer,
