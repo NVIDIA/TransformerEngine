@@ -71,5 +71,7 @@ set_source_files_properties(
 target_link_libraries(test_operator PUBLIC ${test_operator_LINKER_LIBS} OpenMP::OpenMP_CXX)
 target_compile_options(test_operator PRIVATE -O2 -fopenmp)
 
-include(GoogleTest)
-gtest_discover_tests(test_operator DISCOVERY_TIMEOUT 600)
+# Keep all operator tests in one process so CUDA initialization and, when enabled,
+# the embedded Python interpreter and CuTeDSL kernel cache are initialized only once.
+# TODO(kainingz): This will only use 1 CPU and 1 GPU. Make it able to utilize all CPUs and GPUs later
+add_test(NAME test_operator COMMAND test_operator)
