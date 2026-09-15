@@ -118,7 +118,6 @@ def _ep_flattened_replica_groups(mesh, ep_resource):
 def ep_bootstrap(
     world_size=None,
     rank=None,
-    *,
     num_experts,
     max_tokens_per_rank,
     recv_capacity_per_rank,
