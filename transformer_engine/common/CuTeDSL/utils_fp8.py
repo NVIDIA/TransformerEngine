@@ -42,6 +42,8 @@ def cvt_f32_to_fp8e8m0fnu(val: Float32, *, loc=None, ip=None) -> Float8E8M0FNU:
             has_side_effects=False,
             is_align_stack=False,
             asm_dialect=llvm.AsmDialect.AD_ATT,
+            loc=loc,
+            ip=ip,
         )
     )
     result_i32 = Int32(
@@ -104,6 +106,8 @@ def _build_mul_f32x2_cvt_f32x4_to_fp8x4(fp8_dtype, relu: bool = False) -> Callab
                 has_side_effects=False,
                 is_align_stack=False,
                 asm_dialect=llvm.AsmDialect.AD_ATT,
+                loc=loc,
+                ip=ip,
             )
         )
 
@@ -181,6 +185,8 @@ def _build_mul_f32x4_cvt_f32x4_to_fp8x4(fp8_dtype, relu: bool = False) -> Callab
                 has_side_effects=False,
                 is_align_stack=False,
                 asm_dialect=llvm.AsmDialect.AD_ATT,
+                loc=loc,
+                ip=ip,
             )
         )
 
@@ -262,6 +268,8 @@ def _build_mul_f32x2_cvt_packed16x4_to_fp8x4(
                 has_side_effects=False,
                 is_align_stack=False,
                 asm_dialect=llvm.AsmDialect.AD_ATT,
+                loc=loc,
+                ip=ip,
             )
         )
 
@@ -297,6 +305,8 @@ def cvt_f32x2_to_fp8e4m3x2(
             has_side_effects=False,
             is_align_stack=False,
             asm_dialect=llvm.AsmDialect.AD_ATT,
+            loc=loc,
+            ip=ip,
         )
     )
 
@@ -319,6 +329,8 @@ def cvt_f32x2_to_fp8e5m2x2(
             has_side_effects=False,
             is_align_stack=False,
             asm_dialect=llvm.AsmDialect.AD_ATT,
+            loc=loc,
+            ip=ip,
         )
     )
 
