@@ -847,9 +847,7 @@ def _ep_combine_fwd(
     handle_mem = buffer.handle_mem
     eager = buffer.eager
     device = expert_out.device
-    result = torch.empty(
-        num_local_tokens, buffer.hidden_dim, dtype=expert_out.dtype, device=device
-    )
+    result = torch.empty(num_local_tokens, buffer.hidden_dim, dtype=expert_out.dtype, device=device)
     if eager:
         tex.ep_combine(handle_mem, expert_out, result)
     else:
