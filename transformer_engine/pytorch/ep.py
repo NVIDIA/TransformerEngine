@@ -26,6 +26,7 @@ from .tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 if TYPE_CHECKING:
     from ..common.recipe import Recipe
     from .quantized_tensor import Quantizer
+    from .tensor.mxfp8_tensor import MXFP8Quantizer
 
 __all__ = [
     "EpConfig",
@@ -1002,32 +1003,30 @@ def quantize_for_ep(
     input_: torch.Tensor | QuantizedTensorStorage,
     quantizer: Optional["Quantizer"],
 ) -> tuple[MXFP8TensorStorage, torch.Tensor]:
-    """Return E4M3 MXFP8 storage and compact rowwise scales for EP transport.
-
-    High-precision input is quantized with ``quantizer``; existing MXFP8 storage is accepted
-    as-is. The returned storage owns the FP8 payload in ``_rowwise_data``, while ``scale_inv`` has
-    the compact ``[T, H/block]`` layout routed by the EP backend. EP transports E4M3 in both
-    directions, so other FP8 formats are rejected. GEMM scale-row padding is stripped, and each
-    compact scale row must remain contiguous and 16-byte aligned.
-    """
-    from .constants import MXFP8_BLOCK_SCALING_SIZE
+    """Quantize an EP transport input with a supported quantizer."""
     from .tensor.mxfp8_tensor import MXFP8Quantizer
 
-    if quantizer is not None:
-        if not isinstance(quantizer, MXFP8Quantizer):
-            raise TypeError(
-                f"EP MXFP8 transport requires MXFP8Quantizer, got {type(quantizer).__name__}."
-            )
-        if quantizer.dtype != DType.kFloat8E4M3:
-            raise NotImplementedError("EP MXFP8 transport supports E4M3 only.")
+    if quantizer is None:
+        raise ValueError("EP quantization requires a quantizer.")
+    if isinstance(quantizer, MXFP8Quantizer):
+        return _quantize_mxfp8(input_, quantizer)
+    raise TypeError(f"EP transport does not support {type(quantizer).__name__}.")
 
+
+def _quantize_mxfp8(
+    input_: torch.Tensor | QuantizedTensorStorage,
+    quantizer: "MXFP8Quantizer",
+) -> tuple[MXFP8TensorStorage, torch.Tensor]:
+    """Return E4M3 MXFP8 storage and compact rowwise scales for EP transport."""
+    from .constants import MXFP8_BLOCK_SCALING_SIZE
+
+    if quantizer.dtype != DType.kFloat8E4M3:
+        raise NotImplementedError("EP MXFP8 transport supports E4M3 only.")
     if isinstance(input_, MXFP8TensorStorage):
         quantized = input_
     elif isinstance(input_, QuantizedTensorStorage):
         raise TypeError(f"EP MXFP8 transport requires an MXFP8 input, got {type(input_).__name__}.")
     else:
-        if quantizer is None:
-            raise ValueError("An MXFP8 quantizer is required for a non-quantized EP input.")
         if not quantizer.internal:
             quantizer = quantizer.copy()
             quantizer.internal = True
