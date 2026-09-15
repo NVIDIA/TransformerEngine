@@ -5,13 +5,15 @@
 
 import pytest
 import torch
+from mxfp8_utils import swizzle_mxfp8_scale
+
+import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
-from transformer_engine.pytorch import is_mxfp8_available
 from transformer_engine.pytorch.cpp_extensions import general_gemm
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
 
 
-@pytest.mark.skipif(not is_mxfp8_available(), reason="MXFP8 requires Blackwell")
+@pytest.mark.skipif(not te.is_mxfp8_available(), reason="MXFP8 requires Blackwell")
 @pytest.mark.parametrize("shape", [(64, 64), (96, 160), (256, 128)])
 @pytest.mark.parametrize("layout", ["TN", "NN", "NT"])
 @pytest.mark.parametrize("compact", [False, True])
@@ -70,3 +72,35 @@ def test_compact_scales_gemm(shape, layout, compact):
         ):
             assert scale.data_ptr() == pointer
             torch.testing.assert_close(scale, before, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not te.is_mxfp8_available(), reason="MXFP8 requires Blackwell")
+@pytest.mark.parametrize(
+    "shape", [(32, 32), (64, 64), (96, 160), (128, 128), (160, 96), (4096, 4128)]
+)
+@pytest.mark.parametrize("rowwise", [False, True])
+def test_compact_scale_swizzle_bytes(shape, rowwise):
+    m, n = shape
+    scale_shape = (m, n // 32) if rowwise else (m // 32, n)
+    scales = torch.randint(0, 256, scale_shape, dtype=torch.uint8, device="cuda")
+    padded_m, padded_n = (m + 127) // 128 * 128, (n + 127) // 128 * 128
+    padded_shape = (padded_m, padded_n // 32) if rowwise else (padded_m // 32, padded_n)
+    padded = torch.zeros(padded_shape, dtype=torch.uint8, device="cuda")
+    padded[: scale_shape[0], : scale_shape[1]].copy_(scales)
+    expected = swizzle_mxfp8_scale(padded_m, padded_n, padded, columnwise=not rowwise)
+    tensor = MXFP8Tensor(
+        shape=shape,
+        dtype=torch.bfloat16,
+        device="cuda",
+        rowwise_data=(torch.empty(shape, dtype=torch.uint8, device="cuda") if rowwise else None),
+        columnwise_data=(None if rowwise else torch.empty(shape, dtype=torch.uint8, device="cuda")),
+        rowwise_scale_inv=scales if rowwise else None,
+        columnwise_scale_inv=None if rowwise else scales,
+        fp8_dtype=tex.DType.kFloat8E4M3,
+        quantizer=MXFP8Quantizer(tex.DType.kFloat8E4M3, rowwise=rowwise, columnwise=not rowwise),
+        with_gemm_swizzled_scales=False,
+    )
+    tex.swizzle_scales_for_gemm_(tensor)
+    actual = tensor._rowwise_scale_inv if rowwise else tensor._columnwise_scale_inv
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert tensor._with_gemm_swizzled_scales

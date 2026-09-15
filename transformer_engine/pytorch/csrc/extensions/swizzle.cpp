@@ -35,30 +35,6 @@ void reset_tensor_data(transformer_engine::TensorWrapper &tensor, bool rowwise, 
   }
 }
 
-// Keep compact MXFP8 storage usable by the existing padded swizzle kernel.
-std::optional<at::Tensor> pad_mxfp8_scales(const TensorWrapper &tensor, bool rowwise) {
-  if (tensor.scaling_mode() != NVTE_MXFP8_1D_SCALING) return std::nullopt;
-  const auto scales = rowwise ? tensor.get_rowwise_scale_inv() : tensor.get_columnwise_scale_inv();
-  const auto data = rowwise ? tensor.get_rowwise_data() : tensor.get_columnwise_data();
-  const auto [m, n] = get_2d_dims(data.shape, false);
-  const size_t rows = rowwise ? m : ceildiv(m, 32);
-  const size_t cols = rowwise ? ceildiv(n, 32) : n;
-  // Leave malformed and already-padded inputs to the existing validation path.
-  if (scales.shape.ndim != 2 || scales.shape.data[0] != rows || scales.shape.data[1] != cols)
-    return std::nullopt;
-  const size_t padded_rows = ceildiv(rows, rowwise ? 128 : 4) * (rowwise ? 128 : 4);
-  const size_t padded_cols = ceildiv(cols, rowwise ? 4 : 128) * (rowwise ? 4 : 128);
-  if (rows == padded_rows && cols == padded_cols) return std::nullopt;
-  NVTE_CHECK(scales.dtype == kNVTEFloat8E8M0, "Expected MXFP8 E8M0 scales.");
-  auto input =
-      at::from_blob(scales.data_ptr, {static_cast<int64_t>(rows), static_cast<int64_t>(cols)},
-                    at::TensorOptions().dtype(at::kByte).device(at::kCUDA));
-  return at::constant_pad_nd(
-      input,
-      {0, static_cast<int64_t>(padded_cols - cols), 0, static_cast<int64_t>(padded_rows - rows)},
-      0);
-}
-
 bool is_empty_grouped_tensor_param(const NVTEBasicTensor &t) {
   if (t.data_ptr == nullptr) {
     return true;
@@ -97,19 +73,17 @@ std::tuple<std::optional<at::Tensor>, std::optional<at::Tensor>> swizzle_scales_
   if (rowwise_usage) {
     // Buffer for unswizzled scales
     const auto input_scales_nvte = tensor.get_rowwise_scale_inv();
-    auto padded_scales = pad_mxfp8_scales(tensor, true);
-    void *input_scales_dptr =
-        padded_scales ? padded_scales->data_ptr() : input_scales_nvte.data_ptr;
-    NVTEShape input_scales_shape = input_scales_nvte.shape;
-    if (padded_scales) {
-      input_scales_shape.data[0] = padded_scales->size(0);
-      input_scales_shape.data[1] = padded_scales->size(1);
-    }
+    void *input_scales_dptr = input_scales_nvte.data_ptr;
+    const NVTEShape input_scales_shape = input_scales_nvte.shape;
     const auto scales_dtype = static_cast<DType>(input_scales_nvte.dtype);
 
     // Allocate buffer for swizzled scales (uint8, like all quantizer allocations)
-    const NVTEShape output_scales_shape = input_scales_shape;
-    rowwise_scales_pyt = allocateSpace(input_scales_shape, DType::kByte, false);
+    NVTEShape output_scales_shape = input_scales_shape;
+    if (scaling_mode == NVTE_MXFP8_1D_SCALING && output_scales_shape.ndim == 2) {
+      output_scales_shape.data[0] = ceildiv(output_scales_shape.data[0], 128) * 128;
+      output_scales_shape.data[1] = ceildiv(output_scales_shape.data[1], 4) * 4;
+    }
+    rowwise_scales_pyt = allocateSpace(output_scales_shape, DType::kByte, false);
     void *output_scales_dptr = getDataPtr(*rowwise_scales_pyt);
 
     // Initialize TE tensors with scales
@@ -136,19 +110,17 @@ std::tuple<std::optional<at::Tensor>, std::optional<at::Tensor>> swizzle_scales_
   if (columnwise_usage) {
     // Buffer for unswizzled scales
     const auto input_scales_nvte = tensor.get_columnwise_scale_inv();
-    auto padded_scales = pad_mxfp8_scales(tensor, false);
-    void *input_scales_dptr =
-        padded_scales ? padded_scales->data_ptr() : input_scales_nvte.data_ptr;
-    NVTEShape input_scales_shape = input_scales_nvte.shape;
-    if (padded_scales) {
-      input_scales_shape.data[0] = padded_scales->size(0);
-      input_scales_shape.data[1] = padded_scales->size(1);
-    }
+    void *input_scales_dptr = input_scales_nvte.data_ptr;
+    const NVTEShape input_scales_shape = input_scales_nvte.shape;
     const auto scales_dtype = static_cast<DType>(input_scales_nvte.dtype);
 
     // Allocate buffer for swizzled scales (uint8, like all quantizer allocations)
-    const NVTEShape output_scales_shape = input_scales_shape;
-    columnwise_scales_pyt = allocateSpace(input_scales_shape, DType::kByte, false);
+    NVTEShape output_scales_shape = input_scales_shape;
+    if (scaling_mode == NVTE_MXFP8_1D_SCALING && output_scales_shape.ndim == 2) {
+      output_scales_shape.data[0] = ceildiv(output_scales_shape.data[0], 4) * 4;
+      output_scales_shape.data[1] = ceildiv(output_scales_shape.data[1], 128) * 128;
+    }
+    columnwise_scales_pyt = allocateSpace(output_scales_shape, DType::kByte, false);
     void *output_scales_dptr = getDataPtr(*columnwise_scales_pyt);
 
     // Initialize TE tensors with scales
