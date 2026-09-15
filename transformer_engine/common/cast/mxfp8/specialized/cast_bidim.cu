@@ -11,7 +11,6 @@
 #include <cuda_runtime.h>
 
 #include "../../../common.h"
-#include "../../../util/cuda_runtime.h"
 #include "../../../util/ptx.cuh"
 #include "../../../utils.cuh"
 #include "cast_bidim.h"
@@ -60,9 +59,6 @@ static_assert(kRowsPerTile % kWarpsPerCta == 0, "Warps must divide the row band 
 // on those words, so a shared-memory "slot" holds one column pair.
 constexpr int32_t kElemsPerWord = sizeof(uint32_t) / sizeof(bf16);
 
-// Bytes in an L2 cache line, for sizing the software prefetch.
-constexpr int32_t kCacheLineBytes = 128;
-
 //
 // MX scale arithmetic.
 //
@@ -109,9 +105,16 @@ template <typename OType>
 constexpr uint32_t kReciprocalBias = (254u + kMaxNormExponent<OType>) << 7;
 // BF16 magnitude at or above which a value is Inf or NaN.
 constexpr uint32_t kBf16InfBits = 0x7F80u;
-// Reciprocal paired with the E8M0 NaN scale (254): the smallest subnormal.
-constexpr uint32_t kNaNReciprocal = 0x0040u;
+// The two reciprocals the exponent subtraction cannot produce, matching
+// ptx::exp2f_rcp<bf16> for E8M0 codes 254 and 255: 2^-127, which is subnormal
+// and so lives in the leading mantissa bit rather than the exponent field, and
+// BF16 NaN.  Both also give the right scale byte through mx_scale_byte below.
+constexpr uint32_t kInfReciprocal = 0x0040u;
+constexpr uint32_t kNaNReciprocal = 0x7FFFu;
 constexpr uint32_t kBf16MagnitudeMask = 0x7FFFu;
+constexpr uint32_t kMagnitudeMaskPair = 0x7FFF7FFFu;
+// Added to a masked magnitude, this lifts bit 15 exactly for Inf and NaN.
+constexpr uint32_t kInfProbePair = 0x00800080u;
 // Bias such that kScaleByteBias - (reciprocal >> 7) is the E8M0 scale byte.
 constexpr uint32_t kScaleByteBias = 254u;
 
@@ -120,14 +123,18 @@ constexpr uint32_t kScaleByteBias = 254u;
 template <typename OType>
 __device__ __forceinline__ uint32_t mx_scale_reciprocal(uint32_t amax_bits) {
   if (amax_bits >= kBf16InfBits) {
-    return kNaNReciprocal;
+    return amax_bits == kBf16InfBits ? kInfReciprocal : kNaNReciprocal;
   }
   const uint32_t rounded_exponent =
       max((amax_bits + kMantissaRoundUp) & kBf16ExponentMask, kMinExponentField<OType>);
   return kReciprocalBias<OType> - rounded_exponent;
 }
 
-/*! \brief E8M0 scale byte matching a reciprocal from mx_scale_reciprocal. */
+/*! \brief E8M0 scale byte matching a reciprocal from mx_scale_reciprocal.
+ *
+ * kNaNReciprocal is the one input whose subtraction goes negative, and it wraps
+ * to exactly 255, the E8M0 NaN code.  Every other reciprocal lands in [0, 254].
+ */
 __device__ __forceinline__ e8m0_t mx_scale_byte(uint32_t reciprocal_bits) {
   return static_cast<e8m0_t>(kScaleByteBias - (reciprocal_bits >> 7));
 }
@@ -139,7 +146,6 @@ __device__ __forceinline__ e8m0_t mx_scale_byte(uint32_t reciprocal_bits) {
  */
 template <typename OType>
 __device__ __forceinline__ uint32_t mx_scale_reciprocal_x2(uint32_t amax_pair) {
-  constexpr uint32_t kMagnitudeMaskPair = 0x7FFF7FFFu;
   constexpr uint32_t kMantissaRoundUpPair = 0x001F001Fu;
   constexpr uint32_t kExponentMaskPair = 0xFF80FF80u;
   constexpr uint32_t kMinExponentPair = (kMinExponentField<OType> << 16) | kMinExponentField<OType>;
@@ -160,8 +166,12 @@ __device__ __forceinline__ uint32_t mx_scale_reciprocal_x2(uint32_t amax_pair) {
 /*! \brief The two E8M0 scale bytes of a packed reciprocal pair, in the low
  *         16 bits of the result. */
 __device__ __forceinline__ uint32_t mx_scale_byte_x2(uint32_t reciprocal_pair) {
-  constexpr uint32_t kScaleByteBiasPair = 0x00FE00FEu;
-  const uint32_t bytes = kScaleByteBiasPair - ((reciprocal_pair >> 7) & 0x00FF00FFu);
+  // The scalar form relies on 254 - 255 wrapping to the NaN code.  Packed, that
+  // borrow would run out of the low half and corrupt the other column's byte,
+  // so each half gets its own carry headroom and is masked back afterwards.
+  constexpr uint32_t kScaleByteBiasPair = 0x01FE01FEu;
+  const uint32_t bytes =
+      (kScaleByteBiasPair - ((reciprocal_pair >> 7) & 0x00FF00FFu)) & 0x00FF00FFu;
   // Gather the two scale bytes, at byte 0 and byte 2, into the low half.
   return __byte_perm(bytes, 0u, 0x4420);
 }
@@ -264,10 +274,6 @@ __device__ __forceinline__ void load_shared_words(uint32_t *dst, const uint32_t 
  *                           and the grid width into immediates.  Zero takes
  *                           them at run time.
  * \tparam MIN_BLOCKS_PER_SM Occupancy target for __launch_bounds__.
- *
- *                                Set to one full resident wave so the next
- *                                wave's tile lands in L2 as this one drains;
- *                                0 disables the prefetch.
  */
 template <typename OType, int32_t COLS_PER_LANE, int32_t K_COMPILE_TIME, int32_t MIN_BLOCKS_PER_SM>
 __global__ __launch_bounds__(kThreadsPerCta, MIN_BLOCKS_PER_SM) void quantize_bidim_kernel(
@@ -415,7 +421,13 @@ __global__ __launch_bounds__(kThreadsPerCta, MIN_BLOCKS_PER_SM) void quantize_bi
     const uint32_t amax_pair = reinterpret_cast<const uint32_t &>(acc);
 
     uint32_t reciprocal_pair;
-    if (__builtin_expect(fold_pair_magnitude(amax_pair) < kBf16InfBits, 1)) {
+    // Test both halves directly rather than folding them first: the fold uses
+    // max.xorsign.abs, which returns the *other* operand when one is NaN, so a
+    // NaN column paired with a finite one would slip into the packed path.
+    // magnitude + 0x0080 sets bit 15 exactly when magnitude >= 0x7F80, and the
+    // sum cannot carry between halves.
+    const uint32_t exceptional = ((amax_pair & kMagnitudeMaskPair) + kInfProbePair) & 0x80008000u;
+    if (__builtin_expect(exceptional == 0u, 1)) {
       reciprocal_pair = mx_scale_reciprocal_x2<OType>(amax_pair);
     } else {
       // At least one of the two columns is Inf or NaN; take them separately.
@@ -470,8 +482,10 @@ namespace {
 // once the grid is deep enough to keep every SM busy regardless.
 constexpr int32_t kWideColsPerLane = 16;
 constexpr int32_t kNarrowColsPerLane = 8;
+// 4 is the most ptxas accepts at 256 threads per CTA on this target; anything
+// higher is rejected outright and the hint is dropped, with a warning.
 constexpr int32_t kWideMinBlocksPerSm = 4;
-constexpr int32_t kNarrowMinBlocksPerSm = 6;
+constexpr int32_t kNarrowMinBlocksPerSm = 4;
 
 // Thread-block cluster widths.  Clustering does not reduce L2 traffic -- L2 is
 // shared by every CTA regardless, and ablating it leaves DRAM bytes and the L2
@@ -578,9 +592,6 @@ void launch_cast_bidim_packed(const void *input, void *output_rowwise, void *sca
              ") to be a multiple of the MX block size (", kRowsPerTile, ").");
   NVTE_CHECK(cols % kNarrowColsPerTile == 0, "Bidimensional MXFP8 requires the column count (",
              cols, ") to be a multiple of ", kNarrowColsPerTile, ".");
-
-  // One resident wave of CTAs, which is how far ahead the prefetch should run.
-  const int32_t sm_count = cuda::sm_count();
 
   if (cols % kWideColsPerTile == 0) {
     const int64_t wide_ctas = static_cast<int64_t>(rows / kRowsPerTile) * (cols / kWideColsPerTile);
