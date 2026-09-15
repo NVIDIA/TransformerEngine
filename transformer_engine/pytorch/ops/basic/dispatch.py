@@ -87,7 +87,7 @@ class MoeDispatch(BasicOperation):
         self.buffer = buffer
 
     def num_quantizers(self, mode: str) -> int:
-        # quantized dispatch_bwd/combine is not supported.
+        # quantized dispatch_bwd is not supported.
         return 1 if mode == "forward" else 0
 
     def get_quantizer_roles(self, mode: str) -> Optional[list[QuantizerRole]]:
