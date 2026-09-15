@@ -54,6 +54,7 @@ from ..tensor.nvfp4_tensor import NVFP4Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor.hybrid_tensor import HybridQuantizer
 from ..tensor.identity_tensor import IdentityQuantizer
+from ..tensor.utils import is_custom
 from ..tensor.storage.float8_tensor_storage import Float8TensorStorage
 from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
@@ -1697,7 +1698,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             R2: bias gradient on R1.
 
         """
-        grad_output = grad_output.reshape((-1, grad_output.shape[-1]))
         grad_output = grad_output.contiguous()
         gather_grad_output = row_parallel_mode and ctx.sequence_parallel
         use_fp8_bwd = ctx.fp8 and ctx.backward_override is None
@@ -1777,10 +1777,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             else:
                 if isinstance(
                     quantizer, (Float8BlockQuantizer, HybridQuantizer, IdentityQuantizer)
-                ):
+                ) or is_custom(quantizer):
                     # Float8BlockQuantizer: unfused until cast_transpose + dgrad is ready.
                     # HybridQuantizer: tex.bgrad_quantize doesn't recognize hybrid quantizers.
                     # IdentityQuantizer: high-precision passthrough; bgrad computed in HP.
+                    # Custom recipes may provide quantizers unknown to the C++ extension.
                     grad_bias = sum_bias_grad(grad_output)
                 else:
                     grad_bias, grad_output = tex.bgrad_quantize(grad_output, quantizer)

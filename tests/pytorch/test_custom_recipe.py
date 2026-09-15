@@ -41,6 +41,9 @@ from transformer_engine.pytorch.custom_recipes.quantizer_factory_zoo import (
 from transformer_engine.pytorch.custom_recipes.reference_nvfp4 import (
     nvfp4_ref_rht_2d_factory,
 )
+from transformer_engine.pytorch.custom_recipes.reference_current_scaling import (
+    current_scaling_ref_factory,
+)
 
 
 @pytest.mark.parametrize("module_type", ["Linear", "LayerNormLinear", "OpsLinear"])
@@ -127,6 +130,50 @@ def test_custom_recipe_sanity(module_type):
 
     # Basic sanity: gradients exist
     assert inp.grad is not None
+
+
+def test_custom_recipe_linear_preserves_logical_shape():
+    """Custom GEMM results match the same operation on flattened activations."""
+    available, reason = te.is_fp8_available(return_reason=True)
+    if not torch.cuda.is_available() or not available:
+        pytest.skip(f"FP8 unsupported on this device: {reason}")
+
+    torch.manual_seed(0)
+    input_shape = (2, 4, 4, 64)
+    logical_model = Linear(64, 64, params_dtype=torch.bfloat16).cuda()
+    flattened_model = Linear(64, 64, params_dtype=torch.bfloat16).cuda()
+    flattened_model.load_state_dict(logical_model.state_dict())
+
+    base_input = torch.randn(input_shape, device="cuda", dtype=torch.bfloat16)
+    logical_input = base_input.detach().clone().requires_grad_(True)
+    flattened_input = base_input.reshape(-1, input_shape[-1]).clone().requires_grad_(True)
+    custom_recipe = recipe.CustomRecipe(qfactory=current_scaling_ref_factory)
+
+    with autocast(enabled=True, recipe=custom_recipe):
+        logical_output = logical_model(logical_input)
+        flattened_output = flattened_model(flattened_input)
+    logical_output.sum().backward()
+    flattened_output.sum().backward()
+
+    assert logical_output.shape == (*input_shape[:-1], 64)
+    assert logical_output._base is None
+    torch.testing.assert_close(
+        logical_output,
+        flattened_output.reshape_as(logical_output),
+        rtol=0,
+        atol=0,
+    )
+    torch.testing.assert_close(
+        logical_input.grad,
+        flattened_input.grad.reshape_as(logical_input),
+        rtol=0,
+        atol=0,
+    )
+    for (name, parameter), (flattened_name, flattened_parameter) in zip(
+        logical_model.named_parameters(), flattened_model.named_parameters()
+    ):
+        assert name == flattened_name
+        torch.testing.assert_close(parameter.grad, flattened_parameter.grad, rtol=0, atol=0)
 
 
 def test_custom_recipe_grouped_linear_matches_current_scaling():

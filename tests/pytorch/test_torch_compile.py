@@ -1928,6 +1928,37 @@ def test_te_linear_compiles(fp8_recipe, compile_mode):
 
 
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
+@pytest.mark.parametrize("compile_mode", _compile_modes)
+@pytest.mark.parametrize(
+    "input_shape",
+    [(64,), (2, 4, 4, 64)],
+    ids=["rank1", "rank4"],
+)
+def test_te_linear_compiles_non_2d_input(input_shape, compile_mode):
+    """Compiled Linear preserves non-matrix activation shapes in forward and backward."""
+    dtype = torch.bfloat16
+    model = te.Linear(64, 32, params_dtype=dtype, device="cuda")
+
+    def fn(inp):
+        return model(inp)
+
+    torch._dynamo.reset()
+    if compile_mode == "reduce-overhead":
+        _cudagraph_warmup(
+            fn,
+            torch.randn(input_shape, dtype=dtype, device="cuda", requires_grad=True),
+            backward=True,
+        )
+        model.zero_grad(set_to_none=True)
+    compiled = torch.compile(fn, fullgraph=True, mode=compile_mode)
+
+    with _assert_no_cudagraph_skips(compile_mode == "reduce-overhead"):
+        for _ in range(3 if compile_mode == "reduce-overhead" else 1):
+            base = torch.randn(input_shape, dtype=dtype, device="cuda")
+            _assert_close_eager_compiled(fn, compiled, model, base)
+
+
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 @pytest.mark.parametrize("compile_mode", _compile_modes)
 def test_te_linear_compile_with_quantized_fp8_weight(compile_mode):

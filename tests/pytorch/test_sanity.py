@@ -37,7 +37,7 @@ from transformer_engine.pytorch import (
 from transformer_engine.common import recipe
 from transformer_engine.pytorch.cpp_extensions import general_gemm
 from transformer_engine.pytorch.tensor.utils import replace_raw_data
-from transformer_engine.pytorch.module import is_module_grouped_tensor_path_supported
+from transformer_engine.pytorch.module import is_module_grouped_tensor_path_supported, linear
 from utils import ModelConfig, recipe_id, skip_unsupported_backward_override
 
 # Only run FP8 tests on supported devices.
@@ -734,6 +734,105 @@ def test_sanity_layernorm_mlp(
         checkpoint=checkpoint,
     )
     _test_sanity_common(block, dtype, config, fp8_recipe, skip_wgrad, skip_dgrad, microbatching)
+
+
+@pytest.mark.parametrize(
+    "shape,noncontiguous",
+    [
+        ((128,), False),
+        ((2, 4, 4, 128), False),
+        ((2, 4, 4, 128), True),
+    ],
+)
+def test_sanity_logical_activation_shapes(shape, noncontiguous, monkeypatch):
+    """Modules preserve unusual logical shapes without restoration views."""
+    kwargs = dict(device="cuda", params_dtype=torch.bfloat16, bias=True)
+    module = Linear(128, 256, **kwargs)
+    reference_module = Linear(128, 256, **kwargs)
+    reference_module.load_state_dict(module.state_dict())
+    output_bias = module.bias
+
+    storage_shape = (*shape[:-1], shape[-1] * 2) if noncontiguous else shape
+    x = torch.randn(storage_shape, device="cuda", dtype=torch.bfloat16)
+    if noncontiguous:
+        x = x[..., ::2]
+        assert not x.is_contiguous()
+    x = x.detach().requires_grad_()
+    reference_x = x.detach().reshape(-1, x.shape[-1]).clone().requires_grad_()
+
+    seen_gemm_layouts = []
+    general_gemm_ = linear.general_gemm
+    check_logical_shapes = True
+
+    def checked_gemm(a, b, *args, **kwargs):
+        # Fprop and dgrad retain activation rank; wgrad contracts token dimensions.
+        out = general_gemm_(a, b, *args, **kwargs)
+        if check_logical_shapes:
+            assert b.ndim == len(shape)
+            if kwargs.get("layout", "TN") != "NT":
+                assert out[0].ndim == len(shape)
+            seen_gemm_layouts.append(kwargs.get("layout", "TN"))
+        return out
+
+    monkeypatch.setattr(linear, "general_gemm", checked_gemm)
+
+    output = module(x)
+    assert output.shape[:-1] == shape[:-1]
+    assert output._base is None
+    output.sum().backward()
+
+    check_logical_shapes = False
+    reference_output = reference_module(reference_x)
+    reference_output.sum().backward()
+    reference_output = reference_output.reshape(*shape[:-1], reference_output.shape[-1])
+
+    assert x.grad is not None and x.grad.shape == x.shape
+    torch.testing.assert_close(output, reference_output, rtol=0, atol=0)
+    torch.testing.assert_close(x.grad, reference_x.grad.reshape(shape), rtol=0, atol=0)
+    for (name, parameter), (reference_name, reference_parameter) in zip(
+        module.named_parameters(), reference_module.named_parameters()
+    ):
+        assert name == reference_name
+        assert parameter.grad is not None and parameter.grad.shape == parameter.shape
+        torch.testing.assert_close(parameter.grad, reference_parameter.grad, rtol=0, atol=0)
+    num_tokens = x.numel() // x.shape[-1]
+    torch.testing.assert_close(
+        output_bias.grad,
+        torch.full_like(output_bias, num_tokens),
+        rtol=0,
+        atol=0,
+    )
+    assert {"TN", "NN", "NT"}.issubset(seen_gemm_layouts)
+
+
+def test_linear_outputs_have_independent_storage_and_allow_inplace_updates():
+    """Removing the autograd view must not introduce output-buffer reuse."""
+    module = Linear(16, 16, device="cuda", params_dtype=torch.bfloat16)
+    reference_module = Linear(16, 16, device="cuda", params_dtype=torch.bfloat16)
+    reference_module.load_state_dict(module.state_dict())
+    x = torch.randn(8, 2, 16, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    reference_x = x.detach().reshape(-1, x.shape[-1]).clone().requires_grad_()
+    first = module(x)
+    first_before = first.detach().clone()
+    second = module(x)
+    reference = reference_module(reference_x).reshape_as(first)
+    assert first._base is None
+    assert second._base is None
+    assert first.data_ptr() != second.data_ptr()
+    torch.testing.assert_close(first, first_before, rtol=0, atol=0)
+    torch.testing.assert_close(first, reference, rtol=0, atol=0)
+    version = first._version
+    first.add_(1)
+    assert first._version == version + 1
+    torch.testing.assert_close(first, first_before + 1, rtol=0, atol=0)
+    first.sum().backward()
+    reference.sum().backward()
+    torch.testing.assert_close(x.grad, reference_x.grad.reshape_as(x), rtol=0, atol=0)
+    for (name, parameter), (reference_name, reference_parameter) in zip(
+        module.named_parameters(), reference_module.named_parameters()
+    ):
+        assert name == reference_name
+        torch.testing.assert_close(parameter.grad, reference_parameter.grad, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("dtype", param_types)

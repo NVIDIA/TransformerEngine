@@ -6,7 +6,7 @@
 
 import dataclasses
 import enum
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Sequence
 
 import torch
 
@@ -30,6 +30,29 @@ class MMParams:
     out_dtype: torch.dtype | None = None
     # Use split accumulator for more accurate FP8 GEMM
     use_split_accumulator: bool = True
+
+
+def _restore_activation_shape(
+    result: torch.Tensor,
+    original_shape: Optional[Sequence[int]],
+    gemm_type: GEMMType,
+) -> torch.Tensor:
+    """Restore logical activation dimensions on FPROP and DGRAD outputs.
+
+    Custom ``qgemm`` implementations operate on flattened matrix operands and
+    may return a 2-D result. Shape restoration belongs to this adapter so user
+    implementations do not need to duplicate TE's logical-shape handling. A
+    clone prevents the returned tensor from becoming an autograd-visible view.
+    """
+    if original_shape is None:
+        raise ValueError(
+            f"{gemm_type.value.upper()} GEMM: input original_shape is None, "
+            "cannot determine output shape"
+        )
+    output_shape = (*original_shape[:-1], result.shape[-1])
+    if tuple(result.shape) == output_shape:
+        return result
+    return result.view(output_shape)
 
 
 def custom_gemm(
@@ -93,9 +116,6 @@ def custom_gemm(
             raise ValueError("FPROP GEMM: quantized weight data (B.data) is None")
         if sw is None:
             raise ValueError("FPROP GEMM: weight scale (B.scale) is None")
-        if A.original_shape is None:
-            raise ValueError("FPROP GEMM: A.original_shape is None, cannot determine output shape")
-
         # Call quantizer's qgemm method
         result = quantizer.qgemm(
             qx,
@@ -109,11 +129,7 @@ def custom_gemm(
             qresult_x=A,
             qresult_w=B,
         )
-        if len(A.original_shape) > 2:
-            # Original input was 3D, so we need to reshape result back to 3D
-            batch_size = A.original_shape[0]
-            seq_len = A.original_shape[1]
-            result = result.view(batch_size, seq_len, result.shape[-1])
+        result = _restore_activation_shape(result, A.original_shape, gemm_type)
     elif gemm_type == GEMMType.DGRAD:
         qdy, sdy = A.data, A.scale
         qw_t, sw_t = B.data_t, B.scale_t
@@ -138,6 +154,7 @@ def custom_gemm(
             qresult_x=A,
             qresult_w=B,
         )
+        result = _restore_activation_shape(result, A.original_shape, gemm_type)
     elif gemm_type == GEMMType.WGRAD:
         qdy_t, sdy_t = A.data_t, A.scale_t
         qx_t, sx_t = B.data_t, B.scale_t
