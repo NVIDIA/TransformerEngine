@@ -21,6 +21,7 @@ _CUTLASS_DTYPE_FROM_STR = {
     "fp8_e4m3fn": cutlass.Float8E4M3FN,
     "fp8_e5m2": cutlass.Float8E5M2,
     "fp8_e8m0fnu": cutlass.Float8E8M0FNU,
+    "fp4_e2m1fn": cutlass.Float4E2M1FN,
 }
 _STR_FROM_CUTLASS_DTYPE = {v: k for k, v in _CUTLASS_DTYPE_FROM_STR.items()}
 
@@ -94,6 +95,8 @@ def fma_f32(a: Float32, b: Float32, c: Float32, *, loc=None, ip=None) -> Float32
             has_side_effects=False,
             is_align_stack=False,
             asm_dialect=llvm.AsmDialect.AD_ATT,
+            loc=loc,
+            ip=ip,
         )
     )
 
@@ -137,6 +140,8 @@ def pack_f32x2(lo: Float32, hi: Float32, *, loc=None, ip=None) -> Int64:
             has_side_effects=False,
             is_align_stack=False,
             asm_dialect=llvm.AsmDialect.AD_ATT,
+            loc=loc,
+            ip=ip,
         )
     )
 
@@ -183,6 +188,8 @@ def _build_packed16_kit(in_fmt: str):
                 has_side_effects=False,
                 is_align_stack=False,
                 asm_dialect=llvm.AsmDialect.AD_ATT,
+                loc=loc,
+                ip=ip,
             )
         )
 
@@ -197,6 +204,8 @@ def _build_packed16_kit(in_fmt: str):
                 has_side_effects=False,
                 is_align_stack=False,
                 asm_dialect=llvm.AsmDialect.AD_ATT,
+                loc=loc,
+                ip=ip,
             )
         )
 
@@ -211,6 +220,8 @@ def _build_packed16_kit(in_fmt: str):
                 has_side_effects=False,
                 is_align_stack=False,
                 asm_dialect=llvm.AsmDialect.AD_ATT,
+                loc=loc,
+                ip=ip,
             )
         )
 
@@ -225,6 +236,8 @@ def _build_packed16_kit(in_fmt: str):
                 has_side_effects=False,
                 is_align_stack=False,
                 asm_dialect=llvm.AsmDialect.AD_ATT,
+                loc=loc,
+                ip=ip,
             )
         )
 
@@ -259,6 +272,8 @@ def _build_packed16_kit(in_fmt: str):
                     has_side_effects=False,
                     is_align_stack=False,
                     asm_dialect=llvm.AsmDialect.AD_ATT,
+                    loc=loc,
+                    ip=ip,
                 )
             )
             i32 = Int32(
@@ -279,6 +294,8 @@ def _build_packed16_kit(in_fmt: str):
                     has_side_effects=False,
                     is_align_stack=False,
                     asm_dialect=llvm.AsmDialect.AD_ATT,
+                    loc=loc,
+                    ip=ip,
                 )
             )
 
@@ -309,6 +326,8 @@ def _build_packed16_kit(in_fmt: str):
                     has_side_effects=False,
                     is_align_stack=False,
                     asm_dialect=llvm.AsmDialect.AD_ATT,
+                    loc=loc,
+                    ip=ip,
                 )
             )
             return Float32(
@@ -320,6 +339,8 @@ def _build_packed16_kit(in_fmt: str):
                     has_side_effects=False,
                     is_align_stack=False,
                     asm_dialect=llvm.AsmDialect.AD_ATT,
+                    loc=loc,
+                    ip=ip,
                 )
             )
 

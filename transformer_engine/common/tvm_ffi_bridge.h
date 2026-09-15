@@ -47,6 +47,8 @@ inline const char *te_dtype_to_str(DType dtype) {
       return "fp8_e5m2";
     case DType::kFloat8E8M0:
       return "fp8_e8m0fnu";
+    case DType::kFloat4E2M1:
+      return "fp4_e2m1fn";
     default:
       return "";
   }
@@ -112,6 +114,8 @@ inline DLDataType convert_to_dltype(NVTEDType type) {
       return DLDataType{kDLBfloat, 16, 1};
     case kNVTEByte:
       return DLDataType{kDLUInt, 8, 1};
+    case kNVTEInt16:
+      return DLDataType{kDLInt, 16, 1};
     case kNVTEInt32:
       return DLDataType{kDLInt, 32, 1};
     case kNVTEInt64:
@@ -122,6 +126,8 @@ inline DLDataType convert_to_dltype(NVTEDType type) {
       return DLDataType{kDLFloat8_e5m2, 8, 1};
     case kNVTEFloat8E8M0:
       return DLDataType{kDLFloat8_e8m0fnu, 8, 1};
+    case kNVTEFloat4E2M1:
+      return DLDataType{kDLFloat4_e2m1fn, 4, 2};
     default:
       NVTE_ERROR("unsupported NVTEDType: ", static_cast<int>(type));
   }
