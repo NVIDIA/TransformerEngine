@@ -810,11 +810,23 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                     // few hundred bytes of shared memory; each warp still reads one
                     // contiguous run, and the payload never touches shared memory.
                     if constexpr (std::is_same_v<IType, bf16>) {
-                      specialized::launch_cast_rowwise<OType, WITH_GEMM_SWIZZLED_SCALES>(
-                          input.data.dptr, output->data.dptr,
-                          reinterpret_cast<void *>(scales_rowwise_ptr), static_cast<int>(rows),
-                          static_cast<int>(cols), static_cast<int>(scale_stride_rowwise), stream);
-                      break;
+                      // Gate on what the kernel actually requires, so loosening
+                      // the outer shape conditions costs a fall-through to the
+                      // staged kernel rather than a thrown NVTE_CHECK: MX blocks
+                      // must not straddle a row, the scale array must be packed,
+                      // and the swizzled layout needs whole 128-column scale
+                      // tiles.
+                      const bool blocks_fit_rows = (cols % 32 == 0);
+                      const bool packed_scales = (scale_stride_rowwise == cols / 32);
+                      const bool swizzle_tiles_fit =
+                          !WITH_GEMM_SWIZZLED_SCALES || (cols % 128 == 0);
+                      if (blocks_fit_rows && packed_scales && swizzle_tiles_fit) {
+                        specialized::launch_cast_rowwise<OType, WITH_GEMM_SWIZZLED_SCALES>(
+                            input.data.dptr, output->data.dptr,
+                            reinterpret_cast<void *>(scales_rowwise_ptr), static_cast<int>(rows),
+                            static_cast<int>(cols), static_cast<int>(scale_stride_rowwise), stream);
+                        break;
+                      }
                     }
 
                     using traits = specialized::CastTraits<IType, OType, true, false,
