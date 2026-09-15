@@ -2800,7 +2800,9 @@ def get_mxfp8_quantization_function(
         # in the function signature, however it is not merged and it is something easy to miss and silently
         # introduce unnecessarry overhead.
         native = getattr(compiled, "__tvm_ffi_object__", lambda: None)()
-        tvm_ffi.register_global_func(fn_name, native if native is not None else compiled, override=True)
+        tvm_ffi.register_global_func(
+            fn_name, native if native is not None else compiled, override=True
+        )
         return True
     except Exception as e:  # pylint: disable=broad-exception-caught
         logger.error(

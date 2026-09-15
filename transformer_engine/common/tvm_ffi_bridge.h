@@ -135,7 +135,8 @@ class DLTensorWrapper : public DLTensor {
   DLTensorWrapper() : DLTensor{} {}
 
   explicit DLTensorWrapper(const NVTEBasicTensor &tensor, bool flatten_2D = true,
-                           int32_t device_index = -1) : DLTensor{} {
+                           int32_t device_index = -1)
+      : DLTensor{} {
     if (device_index < 0) {
       device_index = transformer_engine::cuda::current_device();
     }
