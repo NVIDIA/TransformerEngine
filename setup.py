@@ -29,7 +29,6 @@ from build_tools.utils import (
     nccl_ep_enabled,
     get_max_jobs_for_parallel_build,
     nvcc_path,
-    target_is_arm64,
 )
 
 frameworks = get_frameworks()
@@ -105,10 +104,6 @@ def setup_common_extension() -> CMakeExtension:
     nvte_cmake_extra_args = os.getenv("NVTE_CMAKE_EXTRA_ARGS")
     if nvte_cmake_extra_args:
         cmake_flags.extend(nvte_cmake_extra_args.split())
-
-    # Keep the common CMake library consistent with the framework and NCCL EP
-    # libraries, which use the same Python-side BOLT configuration.
-    cmake_flags.append(f"-DNVTE_BUILD_TARGET_IS_ARM64={'ON' if target_is_arm64() else 'OFF'}")
 
     # Project directory root
     root_path = Path(__file__).resolve().parent
