@@ -125,6 +125,7 @@ def _pad_between_seqs_cache_key(
         if t is None:
             return (0, 0)
         return (id(t), _get_thd_policy_tensor_version(t))
+
     return (
         _key(cu_seqlens_q),
         _key(cu_seqlens_kv),
