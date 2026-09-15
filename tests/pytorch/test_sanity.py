@@ -37,7 +37,12 @@ from transformer_engine.pytorch import (
 from transformer_engine.common import recipe
 from transformer_engine.pytorch.cpp_extensions import general_gemm
 from transformer_engine.pytorch.tensor.utils import replace_raw_data
-from transformer_engine.pytorch.module import is_module_grouped_tensor_path_supported, linear
+from transformer_engine.pytorch.module import (
+    _common as module_common,
+    is_module_grouped_tensor_path_supported,
+    layernorm_linear,
+    linear,
+)
 from utils import ModelConfig, recipe_id, skip_unsupported_backward_override
 
 # Only run FP8 tests on supported devices.
@@ -736,6 +741,7 @@ def test_sanity_layernorm_mlp(
     _test_sanity_common(block, dtype, config, fp8_recipe, skip_wgrad, skip_dgrad, microbatching)
 
 
+@pytest.mark.parametrize("kind", ["linear", "lnlinear", "rmslinear"])
 @pytest.mark.parametrize(
     "shape,noncontiguous",
     [
@@ -744,11 +750,21 @@ def test_sanity_layernorm_mlp(
         ((2, 4, 4, 128), True),
     ],
 )
-def test_sanity_logical_activation_shapes(shape, noncontiguous, monkeypatch):
+def test_sanity_logical_activation_shapes(kind, shape, noncontiguous, monkeypatch):
     """Modules preserve unusual logical shapes without restoration views."""
     kwargs = dict(device="cuda", params_dtype=torch.bfloat16, bias=True)
-    module = Linear(128, 256, **kwargs)
-    reference_module = Linear(128, 256, **kwargs)
+    if kind == "linear":
+        module = Linear(128, 256, **kwargs)
+        reference_module = Linear(128, 256, **kwargs)
+        module_impl = linear
+    else:
+        module_kwargs = dict(
+            normalization="RMSNorm" if kind == "rmslinear" else "LayerNorm",
+            return_layernorm_output=True,
+        )
+        module = LayerNormLinear(128, 256, **module_kwargs, **kwargs)
+        reference_module = LayerNormLinear(128, 256, **module_kwargs, **kwargs)
+        module_impl = layernorm_linear
     reference_module.load_state_dict(module.state_dict())
     output_bias = module.bias
 
@@ -761,7 +777,7 @@ def test_sanity_logical_activation_shapes(shape, noncontiguous, monkeypatch):
     reference_x = x.detach().reshape(-1, x.shape[-1]).clone().requires_grad_()
 
     seen_gemm_layouts = []
-    general_gemm_ = linear.general_gemm
+    general_gemm_ = module_impl.general_gemm
     check_logical_shapes = True
 
     def checked_gemm(a, b, *args, **kwargs):
@@ -774,20 +790,42 @@ def test_sanity_logical_activation_shapes(shape, noncontiguous, monkeypatch):
             seen_gemm_layouts.append(kwargs.get("layout", "TN"))
         return out
 
-    monkeypatch.setattr(linear, "general_gemm", checked_gemm)
+    monkeypatch.setattr(module_impl, "general_gemm", checked_gemm)
 
-    output = module(x)
-    assert output.shape[:-1] == shape[:-1]
-    assert output._base is None
-    output.sum().backward()
+    seen_norm_stages = []
+    if kind != "linear":
+        norm = "rmsnorm" if kind == "rmslinear" else "layernorm"
+        for suffix in ("fwd", "bwd"):
+            tex = module_common.tex if suffix == "fwd" else module_impl.tex
+            norm_ = getattr(tex, f"{norm}_{suffix}")
+
+            def checked_norm(*args, _norm=norm_, _suffix=suffix, **kwargs):
+                if check_logical_shapes:
+                    assert args[0].ndim == len(shape)
+                    seen_norm_stages.append(_suffix)
+                return _norm(*args, **kwargs)
+
+            monkeypatch.setattr(tex, f"{norm}_{suffix}", checked_norm)
+
+    outputs = module(x)
+    outputs = outputs if isinstance(outputs, tuple) else (outputs,)
+    for output in outputs:
+        assert output.shape[:-1] == shape[:-1]
+        assert output._base is None
+    sum(output.sum() for output in outputs).backward()
 
     check_logical_shapes = False
-    reference_output = reference_module(reference_x)
-    reference_output.sum().backward()
-    reference_output = reference_output.reshape(*shape[:-1], reference_output.shape[-1])
+    reference_outputs = reference_module(reference_x)
+    reference_outputs = (
+        reference_outputs if isinstance(reference_outputs, tuple) else (reference_outputs,)
+    )
+    sum(output.sum() for output in reference_outputs).backward()
 
     assert x.grad is not None and x.grad.shape == x.shape
-    torch.testing.assert_close(output, reference_output, rtol=0, atol=0)
+    assert len(outputs) == len(reference_outputs)
+    for output, reference_output in zip(outputs, reference_outputs):
+        reference_output = reference_output.reshape(*shape[:-1], reference_output.shape[-1])
+        torch.testing.assert_close(output, reference_output, rtol=0, atol=0)
     torch.testing.assert_close(x.grad, reference_x.grad.reshape(shape), rtol=0, atol=0)
     for (name, parameter), (reference_name, reference_parameter) in zip(
         module.named_parameters(), reference_module.named_parameters()
@@ -803,6 +841,8 @@ def test_sanity_logical_activation_shapes(shape, noncontiguous, monkeypatch):
         atol=0,
     )
     assert {"TN", "NN", "NT"}.issubset(seen_gemm_layouts)
+    if kind != "linear":
+        assert set(seen_norm_stages) == {"fwd", "bwd"}
 
 
 def test_linear_outputs_have_independent_storage_and_allow_inplace_updates():
