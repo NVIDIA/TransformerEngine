@@ -90,6 +90,42 @@ py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::ob
   return output_py;
 }
 
+py::object quantize_mxfp8_slab(const at::Tensor &tensor, py::handle quantizer,
+                               const py::object &output, const size_t global_row_offset,
+                               const size_t global_rows) {
+  using namespace transformer_engine::pytorch::detail;
+
+  NVTE_CHECK(IsMXFP8Quantizers(quantizer.ptr()),
+             "quantize_mxfp8_slab requires an MXFP8 quantizer");
+  NVTE_CHECK(tensor.dim() == 2, "quantize_mxfp8_slab requires a 2D input");
+  NVTE_CHECK(!output.is_none(), "quantize_mxfp8_slab requires a preallocated output");
+  NVTE_CHECK(global_row_offset % MXFP8_BLOCK_SIZE == 0,
+             "MXFP8 slab row offset must be divisible by ", MXFP8_BLOCK_SIZE);
+  NVTE_CHECK(global_row_offset + tensor.size(0) <= global_rows,
+             "MXFP8 slab exceeds the full tensor row count");
+
+  auto quantizer_cpp = convert_quantizer(quantizer);
+  auto *mxfp8_quantizer_cpp = static_cast<MXFP8Quantizer *>(quantizer_cpp.get());
+  NVTE_CHECK(!mxfp8_quantizer_cpp->with_2d_quantization,
+             "quantize_mxfp8_slab does not support 2D quantization");
+  NVTE_CHECK(mxfp8_quantizer_cpp->optimize_for_gemm,
+             "quantize_mxfp8_slab prototype requires fused GEMM-swizzled scales");
+
+  auto input_contiguous = tensor.contiguous();
+  auto input_cpp = makeTransformerEngineTensor(input_contiguous);
+  auto [output_cpp, output_py] = quantizer_cpp->convert_and_update_tensor(output);
+  NVTE_CHECK(output_cpp.get_with_gemm_swizzled_scales(),
+             "quantize_mxfp8_slab output must use GEMM-swizzled scales");
+
+  QuantizationConfigWrapper quant_config;
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_quantize_mxfp8_slab(input_cpp.data(), output_cpp.data(), quant_config,
+                             global_row_offset, global_rows,
+                             at::cuda::getCurrentCUDAStream());
+  });
+  return output_py;
+}
+
 py::object nvfp4_quantize_with_amax(const at::Tensor &tensor, py::handle quantizer,
                                     const at::Tensor &rowwise_amax,
                                     const at::Tensor &columnwise_amax) {

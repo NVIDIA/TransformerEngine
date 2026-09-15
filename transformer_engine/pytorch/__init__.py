@@ -86,6 +86,11 @@ from transformer_engine.pytorch.quantized_tensor import restore_from_func_ctx
 from transformer_engine.pytorch.tensor import Float8Quantizer
 from transformer_engine.pytorch.tensor import Float8CurrentScalingQuantizer
 from transformer_engine.pytorch.tensor import MXFP8Quantizer
+from transformer_engine.pytorch.tensor import MXFP8LocalizedPair
+from transformer_engine.pytorch.tensor import MXFP8VMMWorkspace
+from transformer_engine.pytorch.tensor import localize_mxfp8_output_vmm
+from transformer_engine.pytorch.tensor import localize_mxfp8_tensor
+from transformer_engine.pytorch.tensor import localize_mxfp8_tensor_vmm
 from transformer_engine.pytorch.tensor import Float8BlockQuantizer
 from transformer_engine.pytorch.tensor import NVFP4Quantizer
 from transformer_engine.pytorch.tensor import Float8TensorStorage

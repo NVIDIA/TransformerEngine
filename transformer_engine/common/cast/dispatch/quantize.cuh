@@ -30,6 +30,39 @@
 namespace transformer_engine {
 namespace dispatch {
 
+inline void quantize_mxfp8_slab_helper(
+    const NVTETensor input, NVTETensor output,
+    const NVTEQuantizationConfig quant_config, const size_t global_row_offset,
+    const size_t global_rows, cudaStream_t stream) {
+  using namespace detail;
+
+  const Tensor *input_tensor = convertNVTETensorCheck(input);
+  Tensor *output_tensor = convertNVTETensorCheck(output);
+  NVTE_CHECK(output_tensor->scaling_mode == NVTE_MXFP8_1D_SCALING,
+             "MXFP8 slab quantization requires MXFP8 output");
+
+  QuantizationConfig quant_config_cpp;
+  if (quant_config != nullptr) {
+    quant_config_cpp = *reinterpret_cast<QuantizationConfig *>(quant_config);
+  }
+  NVTE_CHECK(!quant_config_cpp.mxfp8_2d_quantization,
+             "MXFP8 slab quantization does not support 2D scaling");
+
+  Tensor dummy_tensor;
+  Tensor *noop_tensor = &dummy_tensor;
+  if (quant_config_cpp.noop_tensor != nullptr) {
+    noop_tensor = convertNVTETensorCheck(quant_config_cpp.noop_tensor);
+  }
+
+  const Tensor *dummy_input_tensor = nullptr;
+  Tensor *dummy_output_tensor = nullptr;
+  mxfp8::quantize</*IS_DBIAS=*/false, /*IS_DACT=*/false, /*IS_ACT=*/false,
+                   Empty, nullptr>(
+      *input_tensor, dummy_input_tensor, noop_tensor, output_tensor,
+      dummy_output_tensor, dummy_output_tensor,
+      /*use_2d_quantization=*/false, stream, global_row_offset, global_rows);
+}
+
 template <bool IS_ACT, typename ParamOP, float (*OP)(float, const ParamOP &)>
 void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
                          const NVTEQuantizationConfig quant_config, cudaStream_t stream) {

@@ -1337,7 +1337,8 @@ __global__ void quantize_mxfp8_kernel_cast_only(
     const __grid_constant__ CUtensorMap tensor_map_rowwise_output,
     const __grid_constant__ CUtensorMap tensor_map_colwise_output, e8m0_t *scales_rowwise,
     e8m0_t *scales_colwise, const float *noop, int32_t rows, int32_t cols,
-    int32_t scale_stride_rowwise, int32_t scale_stride_colwise) {
+    int32_t scale_stride_rowwise, int32_t scale_stride_colwise,
+    int32_t global_row_offset, int32_t global_rows) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   if (noop != nullptr && noop[0] == 1.0f) {
     return;
@@ -1478,7 +1479,7 @@ __global__ void quantize_mxfp8_kernel_cast_only(
   const size_t row_swz_num_tiles_X =
       CastTraits::_with_swizzled_scales ? DIVUP(cols, static_cast<int32_t>(128)) : 0;
   const size_t col_swz_num_tiles_X =
-      CastTraits::_with_swizzled_scales ? DIVUP(rows, static_cast<int32_t>(128)) : 0;
+      CastTraits::_with_swizzled_scales ? DIVUP(global_rows, static_cast<int32_t>(128)) : 0;
 
   constexpr int32_t rowwise_scale_stride_in_smem =
       CastTraits::blockDIM::N / CastTraits::rowChunkElems;
@@ -1636,7 +1637,8 @@ __global__ void quantize_mxfp8_kernel_cast_only(
                                  iter_n * CastTraits::blockIterDim::N;
               sColwiseScale[smem_row * CastTraits::blockDIM::N + smem_col] = col_biased_exponent;
             } else if constexpr (CastTraits::_with_swizzled_scales) {
-              int32_t abs_row = col_scale_row_base +
+              int32_t abs_row = global_row_offset / CastTraits::colChunkElems +
+                                col_scale_row_base +
                                 iter_m * (CastTraits::blockIterDim::M / CastTraits::colChunkElems);
               int32_t abs_col = col_scale_col_base + iter_n * CastTraits::blockIterDim::N;
               // Colwise scale tensor's X/Y axes are transposed vs rowwise
@@ -1886,7 +1888,9 @@ __global__ void quantize_mxfp8_kernel_cast_only(
   // the rowwise flush above: the last-iter __syncthreads already ordered every
   // in-loop sColwiseScale byte store before this block reads them.
   if constexpr (CastTraits::_cache_colwise_scale_in_smem && CastTraits::_with_swizzled_scales) {
-    const int32_t scale_row_base = block_coords.y / CastTraits::colChunkElems;
+    const int32_t scale_row_base =
+        global_row_offset / CastTraits::colChunkElems +
+        block_coords.y / CastTraits::colChunkElems;
     // DIVUP so a partial last block (e.g. rows=993, colChunkElems=32 -> last CTA
     // has 1 valid input row) still emits its scale row. Truncating divison here
     // drops the last partial scale row, causing the fast path to diverge from

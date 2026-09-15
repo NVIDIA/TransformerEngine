@@ -652,7 +652,8 @@ template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &)>
 void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop,  // TODO (ksivamani)
               Tensor *output, Tensor *dbias, Tensor *workspace, const bool use_2d_quantization,
-              cudaStream_t stream) {
+              cudaStream_t stream, const size_t global_row_offset = 0,
+              const size_t global_rows = 0) {
   using namespace quantize_kernel;
   checkCuDriverContext(stream);
 
@@ -673,6 +674,10 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
 
   // Tensor dimensions
   const auto [rows, cols] = input.flat_2d_dims();
+  const size_t effective_global_rows = global_rows == 0 ? rows : global_rows;
+  NVTE_CHECK(global_row_offset + rows <= effective_global_rows,
+             "MXFP8 slab exceeds full tensor rows (offset=", global_row_offset,
+             ", slab_rows=", rows, ", global_rows=", effective_global_rows, ")");
 
   // Tensor chunk handled by each CUDA block
   constexpr size_t CHUNK_DIM_Y = CAST_DBIAS_ONLY ? 128 : 64;
@@ -854,7 +859,9 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                     kernel<<<grid, block, traits::smem, stream>>>(
                         tensor_map_input, tensor_map_rowwise_output, tensor_map_colwise_output,
                         scales_rowwise_ptr, scales_colwise_ptr, noop_ptr, rows, cols,
-                        scale_stride_rowwise, scale_stride_colwise);
+                        scale_stride_rowwise, scale_stride_colwise,
+                        static_cast<int32_t>(global_row_offset),
+                        static_cast<int32_t>(effective_global_rows));
 
                     break;
                   }
