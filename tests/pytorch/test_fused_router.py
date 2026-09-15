@@ -731,16 +731,15 @@ def test_qb_topk_cuda_graph_uses_mutable_bounds(histogram_mode, use_dense_indice
 
     run_router()
     bounds_data_ptr = bin_bounds.data_ptr()
-    validated_version = bin_bounds._version
-    bin_bounds.copy_(torch.tensor([-0.25, 0.75], device="cuda"))
-    assert bin_bounds.data_ptr() == bounds_data_ptr
-    assert bin_bounds._version != validated_version
-    mark_qb_bin_bounds_validated(bin_bounds)
+    initial_bounds = bin_bounds.clone()
 
     histogram.zero_()
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         probs, routing_output = run_router()
+
+    bin_bounds.copy_(torch.tensor([-0.75, 0.25], device="cuda"))
+    assert bin_bounds.data_ptr() == bounds_data_ptr
     histogram.zero_()
     graph.replay()
     torch.cuda.synchronize()
@@ -756,18 +755,10 @@ def test_qb_topk_cuda_graph_uses_mutable_bounds(histogram_mode, use_dense_indice
     else:
         torch.testing.assert_close(routing_output, reference["routing_map"])
     torch.testing.assert_close(histogram, reference["histogram"])
-    first_histogram = histogram.clone()
-
-    bin_bounds.copy_(torch.tensor([-0.75, 0.25], device="cuda"))
-    assert bin_bounds.data_ptr() == bounds_data_ptr
-    histogram.zero_()
-    graph.replay()
-    torch.cuda.synchronize()
-    reference = qb_topk_score_function_pytorch(
-        logits, 4, expert_bias, bin_bounds, histogram.shape[1]
+    initial_reference = qb_topk_score_function_pytorch(
+        logits, 4, expert_bias, initial_bounds, histogram.shape[1]
     )
-    torch.testing.assert_close(histogram, reference["histogram"])
-    assert not torch.equal(histogram, first_histogram)
+    assert not torch.equal(histogram, initial_reference["histogram"])
 
 
 @pytest.mark.parametrize("histogram_mode", ["two_kernel", "fused_atomic"])
@@ -814,6 +805,44 @@ def test_qb_topk_cuda_graph_captures_bounds_update(histogram_mode):
     torch.testing.assert_close(routing_map, reference["routing_map"])
     torch.testing.assert_close(histogram, reference["histogram"])
     torch.testing.assert_close(bin_bounds, next_bounds)
+
+
+@pytest.mark.parametrize("histogram_mode", ["two_kernel", "fused_atomic"])
+def test_qb_topk_eager_call_revalidates_after_captured_bounds_update(histogram_mode):
+    logits = torch.randn(8, 16, device="cuda", dtype=torch.float32)
+    expert_bias = torch.zeros(16, device="cuda", dtype=torch.float32)
+    histogram = torch.zeros(16, 32, device="cuda", dtype=torch.int32)
+    bin_bounds = torch.tensor([-1.0, 1.0], device="cuda", dtype=torch.float32)
+    next_bounds = torch.tensor([-0.75, 0.25], device="cuda", dtype=torch.float32)
+
+    def run_router():
+        return fused_topk_with_score_function(
+            logits,
+            4,
+            False,
+            None,
+            None,
+            None,
+            "sigmoid",
+            expert_bias,
+            qb_histogram=histogram,
+            qb_bin_bounds=bin_bounds,
+            qb_histogram_mode=histogram_mode,
+        )
+
+    run_router()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        bin_bounds.copy_(next_bounds)
+        mark_qb_bin_bounds_validated(bin_bounds)
+
+    # Replayed device writes do not advance bin_bounds._version. The capture-time marker must not
+    # let a subsequent eager router call inherit trust in the replay-produced values.
+    next_bounds.zero_()
+    graph.replay()
+    torch.cuda.synchronize()
+    with pytest.raises(ValueError, match="finite with lower < upper"):
+        run_router()
 
 
 @pytest.mark.parametrize("histogram_mode", ["two_kernel", "fused_atomic"])
