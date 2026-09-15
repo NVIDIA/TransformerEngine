@@ -93,7 +93,6 @@ def cxx_compiler_is_gcc() -> bool:
     return re.search(r"^gcc version\b", output, flags=re.IGNORECASE | re.MULTILINE) is not None
 
 
-
 def get_bolt_build_flags() -> Tuple[List[str], List[str]]:
     """BOLT-compatible host compiler and linker flags."""
     compiler_flags = ["-fno-jump-tables"]
