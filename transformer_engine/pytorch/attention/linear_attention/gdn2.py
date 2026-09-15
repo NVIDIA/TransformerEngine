@@ -13,6 +13,12 @@ gate ``beta``, and a per-value-channel write gate ``w``. For state ``S_t``:
 
 Collapsing all three gates to scalars recovers Gated DeltaNet.
 
+Note that the state is written ``[qk_head_dim, v_head_dim]`` above, the natural
+orientation for the recurrence. The module's ``initial_state``/final-state
+tensors follow the cuDNN frontend's transposed convention instead,
+``[batch, heads, v_head_dim, qk_head_dim]``, where the per-key-channel gates
+scale the state's columns.
+
 This module is **experimental** and subject to change.
 """
 
@@ -41,6 +47,9 @@ class _GDN2KernelAdapter(LinearAttentionKernelAdapter):
     variant = "GDN2"
     module_name = "GatedDeltaNet2Attention"
     op_name = "gated_delta_net_v2"
+
+    # Head sizes the cuDNN frontend's only GDN-2 engine (FROST) is built for.
+    supported_head_dims = (64, 128)
 
     def _validate_gates(
         self,
@@ -204,6 +213,19 @@ class GatedDeltaNet2Attention(LinearAttentionBase):
             scale=scale,
         )
 
+        # Reject unsupported head sizes here rather than letting them reach cuDNN
+        # frontend engine selection, which reports them as a kernel-level failure.
+        for name, head_dim in (
+            ("query/key head size", self.qk_head_dim),
+            ("value head size", self.v_head_dim),
+        ):
+            if head_dim not in _GDN2KernelAdapter.supported_head_dims:
+                raise ValueError(
+                    f"GatedDeltaNet2Attention {name} must be one of "
+                    f"{_GDN2KernelAdapter.supported_head_dims}, got {head_dim}. "
+                    "kv_channels sets both; pass a tuple to size them separately."
+                )
+
         self.gdn2_attention = _GDN2KernelAdapter(
             self.scale,
             self.num_attention_heads_per_partition,
@@ -240,15 +262,17 @@ class GatedDeltaNet2Attention(LinearAttentionBase):
             (or the module's configured `qkv_format` when omitted).
         g : torch.Tensor
             Per-key-channel log-decay gate, of shape matching Q/K/V's token
-            dimensions followed by `[num_attention_heads, qk_head_dim]`. Either
-            float32 or the Q/K/V dtype. Required.
+            dimensions followed by
+            `[num_attention_heads // tp_size, qk_head_dim]`. Either float32 or
+            the Q/K/V dtype. Required.
         beta : torch.Tensor
             Per-key-channel erase gate, of the same shape as `g` and of the
             Q/K/V dtype. Required.
         w : torch.Tensor
             Per-value-channel write gate, of shape matching Q/K/V's token
-            dimensions followed by `[num_attention_heads, v_head_dim]`, of the
-            Q/K/V dtype. Required.
+            dimensions followed by
+            `[num_attention_heads // tp_size, v_head_dim]`, of the Q/K/V dtype.
+            Required.
         qkv_format : Optional[str], default = `None`
             Overrides the module's configured `qkv_format` for this call.
         cu_seqlens : Optional[torch.Tensor], default = `None`
@@ -259,7 +283,8 @@ class GatedDeltaNet2Attention(LinearAttentionBase):
             during the backward pass instead of saved.
         initial_state : Optional[torch.Tensor], default = `None`
             Recurrent state to seed the recurrence with, of shape
-            `[batch_size, num_attention_heads, v_head_dim, qk_head_dim]`.
+            `[batch_size, num_attention_heads // tp_size, v_head_dim, qk_head_dim]`
+            and dtype `torch.float32`.
         output_final_state : bool, default = `False`
             If true, also return the final recurrent state.
         use_qk_l2norm_in_kernel : bool, default = `False`

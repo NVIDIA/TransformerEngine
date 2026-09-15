@@ -414,6 +414,18 @@ class LinearAttentionBase(torch.nn.Module):
 
         self.scale = 1.0 / math.sqrt(self.qk_head_dim) if scale is None else scale
 
+    def fast_setattr(self, name: str, value: Any) -> None:
+        """Set a regular attribute, bypassing ``nn.Module.__setattr__``.
+
+        Part of the TE module contract: ``prepare_te_modules_for_fsdp`` injects
+        ``fsdp_group`` through this on every module ``get_te_classes()`` matches,
+        and these modules are in that set.
+
+        Should be used for regular attributes, but not properties nor
+        parameters/buffers.
+        """
+        self.__dict__[name] = value
+
     def set_tensor_parallel_group(self, tp_group: Optional[dist_group_type]) -> None:
         """Set the tensor parallel group for this module before the forward pass.
 

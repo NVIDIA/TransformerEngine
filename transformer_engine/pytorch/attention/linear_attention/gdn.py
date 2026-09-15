@@ -120,7 +120,7 @@ class GatedDeltaNetAttention(LinearAttentionBase):
                dimension format for query_layer, key_layer and value_layer,
                {`sbhd`, `bshd`, `thd`}. `s` stands for the sequence length,
                `b` batch size, `h` the number of heads, `d` head size, and
-               `t` the total number of tokens in a batch, with with with
+               `t` the total number of tokens in a batch, with
                ``t = sum(s_i)`` for all sequences in the batch. Gated DeltaNet is
                inherently causal; padded batches must use `qkv_format='thd'` with
                `cu_seqlens` passed to `forward` to exclude padding tokens from the
@@ -190,7 +190,8 @@ class GatedDeltaNetAttention(LinearAttentionBase):
             (or the module's configured `qkv_format` when omitted).
         g : torch.Tensor
             Per-head log-decay gate, of shape matching Q/K/V's token dimensions
-            followed by the number of attention heads. Required.
+            followed by the number of attention heads on this tensor-parallel
+            rank (`num_attention_heads // tp_size`). Required.
         beta : torch.Tensor
             Per-head write-strength gate, of the same shape as `g`. Required.
         qkv_format : Optional[str], default = `None`
@@ -203,7 +204,8 @@ class GatedDeltaNetAttention(LinearAttentionBase):
             during the backward pass instead of saved.
         initial_state : Optional[torch.Tensor], default = `None`
             Recurrent state to seed the Gated DeltaNet recurrence with, of shape
-            `[batch_size, num_attention_heads, v_head_dim, qk_head_dim]`.
+            `[batch_size, num_attention_heads // tp_size, v_head_dim, qk_head_dim]`
+            and dtype `torch.float32`.
         output_final_state : bool, default = `False`
             If true, also return the final recurrent state.
         use_qk_l2norm_in_kernel : bool, default = `False`
