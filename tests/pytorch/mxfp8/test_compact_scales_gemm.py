@@ -21,23 +21,17 @@ def test_compact_scales_gemm(shape, layout, compact):
     m, n = shape
     # general_gemm uses column-major operand conventions.
     b_shape = (96, n) if layout == "TN" else (96, m) if layout == "NN" else (m, 96)
-    inputs = [
-        torch.randn(s, device="cuda", dtype=torch.float32) for s in (shape, b_shape)
-    ]
+    inputs = [torch.randn(s, device="cuda", dtype=torch.float32) for s in (shape, b_shape)]
     references = [quantizer(x) for x in inputs]
     operands = []
     snapshots = []
     for x, reference in zip(inputs, references):
         rows, cols = x.shape
         row_shape = (
-            (rows, cols // 32)
-            if compact
-            else ((rows + 127) // 128 * 128, (cols + 127) // 128 * 4)
+            (rows, cols // 32) if compact else ((rows + 127) // 128 * 128, (cols + 127) // 128 * 4)
         )
         col_shape = (
-            (rows // 32, cols)
-            if compact
-            else ((rows + 127) // 128 * 4, (cols + 127) // 128 * 128)
+            (rows // 32, cols) if compact else ((rows + 127) // 128 * 4, (cols + 127) // 128 * 128)
         )
         tensor = MXFP8Tensor(
             shape=x.shape,
@@ -45,12 +39,8 @@ def test_compact_scales_gemm(shape, layout, compact):
             device=x.device,
             rowwise_data=torch.empty_like(x, dtype=torch.uint8),
             columnwise_data=torch.empty_like(x, dtype=torch.uint8),
-            rowwise_scale_inv=torch.empty(
-                row_shape, device=x.device, dtype=torch.uint8
-            ),
-            columnwise_scale_inv=torch.empty(
-                col_shape, device=x.device, dtype=torch.uint8
-            ),
+            rowwise_scale_inv=torch.empty(row_shape, device=x.device, dtype=torch.uint8),
+            columnwise_scale_inv=torch.empty(col_shape, device=x.device, dtype=torch.uint8),
             fp8_dtype=tex.DType.kFloat8E4M3,
             quantizer=quantizer,
             with_gemm_swizzled_scales=False,
