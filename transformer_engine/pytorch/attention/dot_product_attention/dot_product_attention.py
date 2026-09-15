@@ -4,6 +4,7 @@
 
 """Attention."""
 from contextlib import nullcontext
+import functools
 import math
 import os
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -114,7 +115,7 @@ _THD_POLICY_VALIDATION_CACHE_LIMIT = 64
 _thd_policy_validation_cache = []
 
 _PAD_BETWEEN_SEQS_EAGER_CACHE_LIMIT = 64
-_pad_between_seqs_eager_cache = {}
+_pad_between_seqs_eager_store = {}
 
 
 def _pad_between_seqs_cache_key(
@@ -122,19 +123,34 @@ def _pad_between_seqs_cache_key(
 ):
     def _key(t):
         if t is None:
-            return (0, 0, 0, 0)
-        try:
-            version = t._version
-        except AttributeError:
-            version = 0
-        return (t.data_ptr(), tuple(t.shape), t.dtype, version)
-
+            return (0, 0)
+        return (id(t), _get_thd_policy_tensor_version(t))
     return (
         _key(cu_seqlens_q),
         _key(cu_seqlens_kv),
         _key(cu_seqlens_q_padded),
         _key(cu_seqlens_kv_padded),
     )
+
+
+@functools.lru_cache(maxsize=_PAD_BETWEEN_SEQS_EAGER_CACHE_LIMIT)
+def _lookup_pad_between_seqs_cache(key):
+    return _pad_between_seqs_eager_store[key]
+
+
+def _store_pad_between_seqs_cache(key, tensors, decision):
+    overwrite = key in _pad_between_seqs_eager_store
+    _pad_between_seqs_eager_store[key] = (tensors, decision)
+    evicted = False
+    while len(_pad_between_seqs_eager_store) > _PAD_BETWEEN_SEQS_EAGER_CACHE_LIMIT:
+        _pad_between_seqs_eager_store.pop(next(iter(_pad_between_seqs_eager_store)))
+        evicted = True
+    if overwrite or evicted:
+        _lookup_pad_between_seqs_cache.cache_clear()
+    try:
+        _lookup_pad_between_seqs_cache(key)
+    except KeyError:
+        pass
 
 
 def _get_thd_policy_attention_backend(
@@ -2731,24 +2747,33 @@ class DotProductAttention(TransformerEngineBaseModule):
 
             if pad_between_seqs is None:
                 if qkv_format == "thd":
+                    tensors = (
+                        cu_seqlens_q,
+                        cu_seqlens_kv,
+                        cu_seqlens_q_padded,
+                        cu_seqlens_kv_padded,
+                    )
                     if is_graph_capturing():
-                        cache_key = _pad_between_seqs_cache_key(
-                            cu_seqlens_q,
-                            cu_seqlens_kv,
-                            cu_seqlens_q_padded,
-                            cu_seqlens_kv_padded,
-                        )
-                        if cache_key in _pad_between_seqs_eager_cache:
-                            pad_between_seqs = _pad_between_seqs_eager_cache[cache_key]
-                        elif (
-                            cu_seqlens_q_padded is cu_seqlens_q
-                            and cu_seqlens_kv_padded is cu_seqlens_kv
-                        ):
-                            pad_between_seqs = False
-                        else:
-                            pad_between_seqs = (
-                                cu_seqlens_q_padded is not None or cu_seqlens_kv_padded is not None
+                        cache_key = _pad_between_seqs_cache_key(*tensors)
+                        try:
+                            cached_tensors, pad_between_seqs = _lookup_pad_between_seqs_cache(
+                                cache_key
                             )
+                        except KeyError:
+                            cached_tensors = None
+                        if cached_tensors is None or any(
+                            t is not ct for t, ct in zip(tensors, cached_tensors)
+                        ):
+                            if (
+                                cu_seqlens_q_padded is cu_seqlens_q
+                                and cu_seqlens_kv_padded is cu_seqlens_kv
+                            ):
+                                pad_between_seqs = False
+                            else:
+                                pad_between_seqs = (
+                                    cu_seqlens_q_padded is not None
+                                    or cu_seqlens_kv_padded is not None
+                                )
                     else:
                         pad_between_seqs = (
                             cu_seqlens_q_padded is not None
@@ -2757,19 +2782,11 @@ class DotProductAttention(TransformerEngineBaseModule):
                             cu_seqlens_kv_padded is not None
                             and not torch.equal(cu_seqlens_kv_padded[:-1], cu_seqlens_kv[:-1])
                         )
-                        cache_key = _pad_between_seqs_cache_key(
-                            cu_seqlens_q,
-                            cu_seqlens_kv,
-                            cu_seqlens_q_padded,
-                            cu_seqlens_kv_padded,
+                        _store_pad_between_seqs_cache(
+                            _pad_between_seqs_cache_key(*tensors),
+                            tensors,
+                            pad_between_seqs,
                         )
-                        _pad_between_seqs_eager_cache[cache_key] = pad_between_seqs
-                        while (
-                            len(_pad_between_seqs_eager_cache) > _PAD_BETWEEN_SEQS_EAGER_CACHE_LIMIT
-                        ):
-                            _pad_between_seqs_eager_cache.pop(
-                                next(iter(_pad_between_seqs_eager_cache))
-                            )
                 else:
                     pad_between_seqs = False
 
