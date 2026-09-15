@@ -45,61 +45,60 @@ def debug_build_enabled() -> bool:
 
 
 @functools.lru_cache(maxsize=None)
-def build_target_cpu_arch() -> str:
-    """CPU architecture targeted by the configured C++ compiler."""
+def _cxx_compiler_predefined_macros() -> Tuple[str, ...]:
+    """Predefined macros from the configured C++ compiler."""
     cxx = shlex.split(os.getenv("CXX", "c++"))
+    if not cxx:
+        return ()
     try:
         result = subprocess.run(
-            [*cxx, "-dumpmachine"],
+            [*cxx, "-dM", "-E", "-x", "c++", "-"],
+            input="",
             capture_output=True,
-            check=True,
             text=True,
         )
-    except (OSError, subprocess.CalledProcessError) as e:
-        raise RuntimeError(
-            "Could not determine the C++ compiler target architecture with "
-            f"`{' '.join(cxx)} -dumpmachine`"
-        ) from e
-
-    target = result.stdout.strip().split("-", 1)[0]
-    if not target:
-        raise RuntimeError(
-            "Could not determine the C++ compiler target architecture: "
-            f"`{' '.join(cxx)} -dumpmachine` returned no target"
-        )
-    return target.lower()
-
-
-def target_is_arm64() -> bool:
-    """Whether the configured C++ compiler targets Arm64."""
-    return build_target_cpu_arch() in ("aarch64", "arm64")
+    except OSError:
+        return ()
+    if result.returncode != 0:
+        return ()
+    return tuple(
+        fields[1]
+        for line in result.stdout.splitlines()
+        if len(fields := line.split(maxsplit=2)) >= 2 and fields[0] == "#define"
+    )
 
 
 @functools.lru_cache(maxsize=None)
-def cxx_compiler_is_gcc() -> bool:
-    """Whether the configured C++ compiler is GCC."""
+def cxx_compiler_supports_flag(flag: str) -> bool:
+    """Whether the configured C++ compiler accepts a command-line flag."""
     cxx = shlex.split(os.getenv("CXX", "c++"))
+    if not cxx:
+        return False
     try:
         result = subprocess.run(
-            [*cxx, "-v"],
+            [*cxx, flag, "-x", "c++", "-fsyntax-only", "-"],
+            input="",
             capture_output=True,
-            check=True,
             text=True,
         )
-    except (OSError, subprocess.CalledProcessError) as e:
-        raise RuntimeError(f"Could not identify the C++ compiler with `{' '.join(cxx)} -v`") from e
+    except OSError:
+        return False
+    return result.returncode == 0
 
-    output = f"{result.stdout}\n{result.stderr}"
-    return re.search(r"^gcc version\b", output, flags=re.IGNORECASE | re.MULTILINE) is not None
+
+def cxx_compiler_targets_arm64() -> bool:
+    """Whether the configured C++ compiler targets Arm64."""
+    macros = _cxx_compiler_predefined_macros()
+    return any(macro in macros for macro in ("__aarch64__", "__arm64__", "_M_ARM64"))
 
 
 def get_bolt_build_flags() -> Tuple[List[str], List[str]]:
     """BOLT-compatible host compiler and linker flags."""
     compiler_flags = ["-fno-jump-tables"]
-    if cxx_compiler_is_gcc():
+    if cxx_compiler_supports_flag("-fno-reorder-blocks-and-partition"):
         compiler_flags.append("-fno-reorder-blocks-and-partition")
     linker_flags = ["-Wl,--emit-relocs", "-Wl,-z,now"]
-    if target_is_arm64():
+    if cxx_compiler_targets_arm64():
         compiler_flags.extend(
             [
                 "-mno-fix-cortex-a53-835769",
