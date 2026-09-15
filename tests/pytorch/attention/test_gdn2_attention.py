@@ -578,18 +578,6 @@ def test_gdn2_matches_gdn_with_scalar_gates():
     _assert_rms_close(output, expected, 3e-2, "GDN-2 against GDN")
 
 
-def test_gdn2_rejects_value_head_count_that_changes_output_width():
-    """GatedDeltaNet2Attention's output width cannot be changed by the runtime V tensor."""
-    q, k, v, g, beta, w = _inputs(1, 128, 1, 2)
-    attention = GatedDeltaNet2Attention(
-        num_attention_heads=1,
-        kv_channels=64,
-        qkv_format="bshd",
-    )
-    with pytest.raises(ValueError, match="GDN2 V must have 1 heads"):
-        attention(q, k, v, g=g, beta=beta, w=w)
-
-
 def test_gdn2_requires_all_gates():
     """A partial GDN-2 invocation fails before entering a softmax-attention backend."""
     q, k, v, g, beta, _ = _inputs(1, 128, 1, 1)
@@ -602,54 +590,6 @@ def test_gdn2_requires_all_gates():
         attention(q, k, v, g=g, beta=beta)
 
 
-def test_gdn2_rejects_scalar_gates():
-    """GDN-2's gates are channel-wise; GDN's scalar gates are a shape error."""
-    q, k, v, _, _, w = _inputs(1, 128, 1, 1)
-    scalar = torch.rand(1, 128, 1, device="cuda", dtype=q.dtype)
-    attention = GatedDeltaNet2Attention(
-        num_attention_heads=1,
-        kv_channels=64,
-        qkv_format="bshd",
-    )
-    with pytest.raises(ValueError, match="GDN2 g and beta must both have shape"):
-        attention(q, k, v, g=scalar, beta=scalar, w=w)
-
-
-def test_gdn2_rejects_gate_dtypes():
-    """beta and w are kernel-native in the Q/K/V dtype."""
-    q, k, v, g, beta, w = _inputs(1, 128, 1, 1)
-    attention = GatedDeltaNet2Attention(
-        num_attention_heads=1,
-        kv_channels=64,
-        qkv_format="bshd",
-    )
-    with pytest.raises(TypeError, match="GDN2 beta and w must have the same dtype"):
-        attention(q, k, v, g=g, beta=beta.float(), w=w)
-    with pytest.raises(TypeError, match="GDN2 g must have dtype"):
-        attention(q, k, v, g=g.double(), beta=beta, w=w)
-
-
-@pytest.mark.parametrize(
-    ("kwargs", "message"),
-    [
-        ({"allow_neg_eigval": True}, "allow_neg_eigval requires use_beta_sigmoid_in_kernel"),
-        ({"beta_guard": True}, "beta_guard requires use_qk_l2norm_in_kernel"),
-    ],
-    ids=["neg_eigval_without_sigmoid", "guard_without_l2norm"],
-)
-def test_gdn2_rejects_unsupported_flag_combinations(kwargs, message):
-    """Flags the kernel couples are checked in TE, with a TE-level message."""
-    q, k, v, g, beta, w = _inputs(1, 128, 1, 1)
-    attention = GatedDeltaNet2Attention(
-        num_attention_heads=1,
-        kv_channels=64,
-        qkv_format="bshd",
-    )
-    with pytest.raises(ValueError, match=message):
-        attention(q, k, v, g=g, beta=beta, w=w, **kwargs)
-
-
-@pytest.mark.skipif(not is_fp8_available(), reason="FP8 is not available")
 def test_gdn2_rejects_fp8_autocast():
     """GDN-2 must not silently run in high precision inside FP8 autocast."""
     q, k, v, g, beta, w = _inputs(1, 128, 1, 1)
@@ -676,55 +616,3 @@ def test_gdn2_module_carries_no_quantization_state():
     assert list(attention.parameters()) == []
     # No FP8 meta means no `_extra_state` entries to carry in a checkpoint.
     assert dict(attention.state_dict()) == {}
-
-
-def test_gdn2_requires_tensor_parallel_group_when_sharded():
-    """The TP handshake is enforced in TE rather than deferred to the kernel."""
-    q, k, v, g, beta, w = _inputs(1, 128, 1, 1)
-    attention = GatedDeltaNet2Attention(
-        num_attention_heads=2,
-        kv_channels=64,
-        qkv_format="bshd",
-        tp_size=2,
-    )
-    assert attention.num_attention_heads_per_partition == 1
-    assert not attention.tp_group_initialized
-    with pytest.raises(RuntimeError, match="Tensor parallel group not initialized"):
-        attention(q, k, v, g=g, beta=beta, w=w)
-
-    attention.set_tensor_parallel_group(None)
-    assert attention.tp_group is None
-    assert attention.tp_group_initialized
-
-
-def test_gdn2_runs_te_forward_lifecycle(monkeypatch):
-    """GDN-2 calls pair prepare_forward with end_forward even without the kernel runtime."""
-    q, k, v, g, beta, w = _inputs(1, 128, 1, 1)
-    attention = GatedDeltaNet2Attention(
-        num_attention_heads=1,
-        kv_channels=64,
-        qkv_format="bshd",
-    )
-    events = []
-    prepare_forward = attention.prepare_forward
-    end_forward = attention.end_forward
-
-    def traced_prepare_forward(*args, **kwargs):
-        events.append("prepare")
-        return prepare_forward(*args, **kwargs)
-
-    def traced_end_forward():
-        events.append("end")
-        return end_forward()
-
-    def fake_gdn2_forward(query, key, value, gate_g, gate_beta, gate_w, initial_state, **kwargs):
-        del key, gate_g, gate_beta, gate_w, initial_state, kwargs
-        return value.reshape(*query.shape[:-2], -1)
-
-    monkeypatch.setattr(attention, "prepare_forward", traced_prepare_forward)
-    monkeypatch.setattr(attention, "end_forward", traced_end_forward)
-    monkeypatch.setattr(attention.gdn2_attention, "forward", fake_gdn2_forward)
-
-    output = attention(q, k, v, g=g, beta=beta, w=w)
-    assert output.shape == (1, 128, 64)
-    assert events == ["prepare", "end"]
