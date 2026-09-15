@@ -19,10 +19,7 @@
 #include <transformer_engine/activation.h>
 #include <transformer_engine/swizzle.h>
 #include "../test_common.h"
-#pragma push_macro("TRANSFORMER_ENGINE_TYPE_SWITCH_ALL")
-#undef TRANSFORMER_ENGINE_TYPE_SWITCH_ALL
-#include "cast/mxfp8/quantize_mxfp8_cutedsl.cuh"
-#pragma pop_macro("TRANSFORMER_ENGINE_TYPE_SWITCH_ALL")
+#include "cast/mxfp8/quantize_mxfp8_cutedsl_config.h"
 #include "transformer_engine/transformer_engine.h"
 
 namespace test {
