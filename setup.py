@@ -261,6 +261,9 @@ def build_nccl_ep_submodule() -> str:
 
     nproc = get_max_jobs_for_parallel_build()
     env = os.environ.copy()
+    # get_bolt_build_flags() defaults to `c++` when CXX is unset. Export the
+    # same default so Make does not independently select its `g++` default.
+    env.setdefault("CXX", "c++")
     if (cuda_home := cuda_home_path()) is not None:
         env.setdefault("CUDA_HOME", str(cuda_home))
     if (nvcc_bin := nvcc_path()) is not None:
@@ -291,6 +294,7 @@ def build_nccl_ep_submodule() -> str:
     build_signature = "\n".join(
         (
             f"gencode={gencode}",
+            f"cxx={env['CXX']}",
             f"bolt_cxx_flags={' '.join(bolt_cxx_flags)}",
             f"bolt_linker_flags={' '.join(nvcc_linker_flags)}",
         )
