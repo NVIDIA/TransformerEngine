@@ -33,6 +33,8 @@ namespace pytorch {
 
 namespace {
 
+constexpr size_t kMXFP8BlockSize = 32;
+
 std::vector<size_t> get_tensor_shape(const TensorWrapper &tensor) {
   const auto &shape = tensor.shape();
   return std::vector<size_t>(shape.data, shape.data + shape.ndim);
@@ -100,8 +102,8 @@ py::object quantize_mxfp8_row_partition(
   NVTE_CHECK(tensor.dim() == 2, "quantize_mxfp8_row_partition requires a 2D input");
   NVTE_CHECK(!output.is_none(),
              "quantize_mxfp8_row_partition requires a preallocated output");
-  NVTE_CHECK(global_row_offset % MXFP8_BLOCK_SIZE == 0,
-             "MXFP8 row partition offset must be divisible by ", MXFP8_BLOCK_SIZE);
+  NVTE_CHECK(global_row_offset % kMXFP8BlockSize == 0,
+             "MXFP8 row partition offset must be divisible by ", kMXFP8BlockSize);
   NVTE_CHECK(global_row_offset + tensor.size(0) <= global_rows,
              "MXFP8 row partition exceeds the full tensor row count");
 
