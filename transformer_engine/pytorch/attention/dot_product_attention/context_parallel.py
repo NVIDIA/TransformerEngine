@@ -1347,6 +1347,7 @@ def cp_p2p_bwd_fused_attn(
     out_part,
     dout_part,
     section,
+    deterministic=False,
 ):
     """Per-tile backward call of CP P2P with FusedAttention backend"""
     aux_tensors = [softmax_lse, rng_states[cp_size - step - 1]]
@@ -1467,6 +1468,7 @@ def cp_p2p_bwd_flash_attn(
     out_part,
     dout_part,
     section,
+    deterministic=False,
 ):
     """Per-tile backward call of CP P2P with FlashAttention backend"""
     if pad_between_seqs:
@@ -1653,6 +1655,7 @@ def cp_ag_bwd_frost_attn(
     v_part,
     out_part,
     dout_part,
+    deterministic=False,
 ):
     """Per-step backward for CP all_gather with the cuDNN FROST backend."""
     from .frost_attention import (  # pylint: disable=import-outside-toplevel
@@ -1670,6 +1673,7 @@ def cp_ag_bwd_frost_attn(
         to_frost_layout(dout_part.contiguous(), qkv_format),
         attn_scale=softmax_scale,
         attn_mask_type=_frost_mask_for_window(window_size),
+        deterministic=deterministic,
     )
     return (
         from_frost_layout(dq, qkv_format),
@@ -1702,7 +1706,7 @@ def cp_a2a_fwd_frost_attn(softmax_scale, attn_mask_type, qkv_format, q, k, v):
 
 
 def cp_a2a_bwd_frost_attn(
-    softmax_scale, attn_mask_type, qkv_format, softmax_lse, q, k, v, out, dout
+    softmax_scale, attn_mask_type, qkv_format, softmax_lse, q, k, v, out, dout, deterministic=False
 ):
     """Backward for CP a2a with the cuDNN FROST backend."""
     from .frost_attention import (  # pylint: disable=import-outside-toplevel
@@ -1720,6 +1724,7 @@ def cp_a2a_bwd_frost_attn(
         to_frost_layout(dout.contiguous(), qkv_format),
         attn_scale=softmax_scale,
         attn_mask_type=attn_mask_type,
+        deterministic=deterministic,
     )
     return (
         from_frost_layout(dq, qkv_format),
@@ -1776,6 +1781,7 @@ def cp_p2p_bwd_frost_attn(
     out_part,
     dout_part,
     section,
+    deterministic=False,
 ):
     """Per-tile backward call of CP P2P with the cuDNN FROST backend.
 
@@ -1797,6 +1803,7 @@ def cp_p2p_bwd_frost_attn(
         to_frost_layout(dout_part.contiguous(), qkv_format),
         attn_scale=softmax_scale,
         attn_mask_type=_frost_mask_for_section(attn_mask_type, section),
+        deterministic=deterministic,
     )
     return (
         from_frost_layout(dq, qkv_format),
@@ -3110,7 +3117,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     prepare_outputs = cp_p2p_bwd_prepare_qkv(*prepare_inputs, section)
                     if ctx.use_frost_attention:
                         dq_, dk_, dv_, dbias_ = cp_p2p_bwd_frost_attn(
-                            *frost_attn_inputs, *prepare_outputs, section
+                            *frost_attn_inputs,
+                            *prepare_outputs,
+                            section,
+                            deterministic=ctx.deterministic,
                         )
                     elif ctx.use_fused_attention:
                         dq_, dk_, dv_, dbias_ = cp_p2p_bwd_fused_attn(
@@ -3127,7 +3137,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     prepare_outputs = cp_p2p_bwd_prepare_qkv(*prepare_inputs, section)
                     if ctx.use_frost_attention:
                         dq_, dk_, dv_, dbias_ = cp_p2p_bwd_frost_attn(
-                            *frost_attn_inputs, *prepare_outputs, section
+                            *frost_attn_inputs,
+                            *prepare_outputs,
+                            section,
+                            deterministic=ctx.deterministic,
                         )
                     elif ctx.use_fused_attention:
                         dq_, dk_, dv_, dbias_ = cp_p2p_bwd_fused_attn(
@@ -3144,7 +3157,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     prepare_outputs = cp_p2p_bwd_prepare_qkv(*prepare_inputs, section)
                     if ctx.use_frost_attention:
                         dq_, dk_, dv_, dbias_ = cp_p2p_bwd_frost_attn(
-                            *frost_attn_inputs, *prepare_outputs, section
+                            *frost_attn_inputs,
+                            *prepare_outputs,
+                            section,
+                            deterministic=ctx.deterministic,
                         )
                     elif ctx.use_fused_attention:
                         dq_, dk_, dv_, dbias_ = cp_p2p_bwd_fused_attn(
@@ -3161,7 +3177,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 prepare_outputs = cp_p2p_bwd_prepare_qkv(*prepare_inputs, section)
                 if ctx.use_frost_attention:
                     dq_, dk_, dv_, dbias_ = cp_p2p_bwd_frost_attn(
-                        *frost_attn_inputs, *prepare_outputs, section
+                        *frost_attn_inputs,
+                        *prepare_outputs,
+                        section,
+                        deterministic=ctx.deterministic,
                     )
                 elif ctx.use_fused_attention:
                     dq_, dk_, dv_, dbias_ = cp_p2p_bwd_fused_attn(
@@ -4567,6 +4586,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             v_part,
                             out_part,
                             dout_part,
+                            deterministic=ctx.deterministic,
                         )
                     elif ctx.use_fused_attention:
                         # Set per-step parameters for THD
@@ -5536,6 +5556,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 v,
                 out,
                 dout,
+                deterministic=ctx.deterministic,
             )
         elif ctx.use_fused_attention:
             do_format = ctx.o_format

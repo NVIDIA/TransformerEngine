@@ -481,6 +481,8 @@ def get_attention_backend(
     available_backends : List[bool]
         All available backends that could support the provided input. A list of Booleans
         in the form of [use_flash_attention, use_fused_attention, use_unfused_attention].
+        FrostAttention is deliberately not a member: the list's length is relied on by
+        existing three-way unpacks. Use the `use_frost_attention` return value instead.
     """
     # NOTE: As part of refactoring attention.py, populating the _attention_backends cache in attention
     # is no longer performed at the end of get_attention_backend(), but the responsibility of doing so
@@ -1970,7 +1972,7 @@ def get_attention_backend(
 
     logger.debug(
         "Available backends = {FlashAttention=%s%s, FusedAttention=%s%s,"
-        " UnfusedDotProductAttention=%s}",
+        " UnfusedDotProductAttention=%s, FrostAttention=%s}",
         bool(available_backends[0]),
         (f" ({str(flash_attention_backend)})" if flash_attention_backend is not None else ""),
         bool(available_backends[1]),
@@ -1980,6 +1982,10 @@ def get_attention_backend(
             else ""
         ),
         bool(available_backends[2]),
+        # Read from the local flag rather than available_backends, which excludes FROST by
+        # design. Without this the log reports every backend as unavailable and then selects
+        # FrostAttention a few lines later, which reads as a contradiction.
+        bool(use_frost_attention),
     )
 
     # Select FusedAttention for performance

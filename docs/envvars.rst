@@ -149,9 +149,12 @@ Then it applies a performance-based preference order among the remaining eligibl
 In PyTorch, the broad preference order is ``FlashAttention > FusedAttention >
 UnfusedDotProductAttention`` on supported pre-Hopper GPUs such as Ampere/Ada, and
 ``FusedAttention > FlashAttention > UnfusedDotProductAttention`` on Hopper and newer GPUs,
-including Blackwell. In JAX, Transformer Engine uses cuDNN fused attention when
-``NVTE_FUSED_ATTN=1`` and an eligible cuDNN kernel is available; otherwise it falls back to the
-JAX-native implementation. See :doc:`examples/attention/attention` for a longer
+including Blackwell. On Blackwell SM100/SM103 the order is ``FusedAttention > FlashAttention >
+FrostAttention > UnfusedDotProductAttention``; FrostAttention only becomes eligible for
+symmetric ``head_dim`` in (256, 512], which flash and fused attention do not serve, so it never
+displaces a backend that could otherwise have run. In JAX, Transformer Engine uses cuDNN fused
+attention when ``NVTE_FUSED_ATTN=1`` and an eligible cuDNN kernel is available; otherwise it
+falls back to the JAX-native implementation. See :doc:`examples/attention/attention` for a longer
 backend-selection overview.
 
 .. envvar:: NVTE_FLASH_ATTN
@@ -183,6 +186,12 @@ backend-selection overview.
    :Type: ``int`` (0 or 1)
    :Default: ``1``
    :Description: Enable or disable FusedAttention backend (cuDNN-based) for DotProductAttention. When set to ``0``, FusedAttention will not be used.
+
+.. envvar:: NVTE_FROST_ATTN
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``1``
+   :Description: Enable or disable FrostAttention backend (the cuDNN FROST CuTe-DSL SDPA kernels in cuDNN Frontend) for DotProductAttention. When set to ``0``, FrostAttention will not be used. FrostAttention is the only backend serving symmetric ``head_dim`` in (256, 512], and is limited to SM100/SM103 with BF16/FP16 inputs and ``nvidia-cudnn-frontend>=1.29.0`` and ``nvidia-cutlass-dsl>=4.7.0`` installed. It supports context parallelism with ``cp_comm_type`` of ``p2p``, ``all_gather`` or ``a2a``, and declines FP8, ``thd`` layouts, dropout, attention bias, sliding window, softcap, KV caching and ``max_logit``.
 
 .. envvar:: NVTE_UNFUSED_ATTN
 

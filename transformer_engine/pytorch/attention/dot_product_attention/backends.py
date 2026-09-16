@@ -2295,7 +2295,9 @@ class FrostAttnFunc(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, q, k, v, softmax_scale, attn_mask_type, qkv_format, is_training):
+    def forward(
+        ctx, q, k, v, softmax_scale, attn_mask_type, qkv_format, is_training, deterministic
+    ):
         # pylint: disable=missing-function-docstring
         from .frost_attention import (  # pylint: disable=import-outside-toplevel
             frost_attn_fwd,
@@ -2319,6 +2321,7 @@ class FrostAttnFunc(torch.autograd.Function):
             ctx.attn_mask_type = attn_mask_type
             ctx.qkv_format = qkv_format
             ctx.unflattened_shape = out.shape
+            ctx.deterministic = deterministic
         # TE attention modules return the heads flattened into the last dimension
         # ([b, s, h*d] for bshd), matching FlashAttention and FusedAttention. Returning the
         # unflattened [b, s, h, d] makes autograd reject the incoming grad on shape mismatch.
@@ -2346,11 +2349,15 @@ class FrostAttnFunc(torch.autograd.Function):
             to_frost_layout(dout.contiguous(), fmt),
             attn_scale=ctx.softmax_scale,
             attn_mask_type=ctx.attn_mask_type,
+            deterministic=ctx.deterministic,
         )
+        # One None per non-tensor forward argument: softmax_scale, attn_mask_type, qkv_format,
+        # is_training, deterministic. Must track forward's signature exactly.
         return (
             from_frost_layout(dq, fmt),
             from_frost_layout(dk, fmt),
             from_frost_layout(dv, fmt),
+            None,
             None,
             None,
             None,
@@ -2449,6 +2456,7 @@ class FrostAttention(torch.nn.Module):
             attn_mask_type,
             qkv_format,
             self.training,
+            self.deterministic,
         )
 
 

@@ -400,7 +400,9 @@ def _select_frost_plan(graph, token: str, what: str):
 def _build_fwd(key) -> dict:
     """Build (and JIT-compile) a forward graph. Expensive; always reached through the cache."""
     cudnn = _import_cudnn()
-    *_device, b, hq, hkv, sq, skv, d, dtype, mask, scale, qs, ks = key
+    # deterministic is unused here: it selects a backward algorithm. Callers pass False for the
+    # forward so the two never split the forward cache.
+    *_device, b, hq, hkv, sq, skv, d, dtype, mask, scale, qs, ks, _deterministic = key
     io_dt = _cudnn_dtype(dtype)
     shq, shkv = [b, hq, sq, d], [b, hkv, skv, d]
 
@@ -440,7 +442,7 @@ def _build_fwd(key) -> dict:
 def _build_bwd(key) -> dict:
     """Build (and JIT-compile) a backward graph. Expensive; always reached through the cache."""
     cudnn = _import_cudnn()
-    *_device, b, hq, hkv, sq, skv, d, dtype, mask, scale, qs, ks = key
+    *_device, b, hq, hkv, sq, skv, d, dtype, mask, scale, qs, ks, deterministic = key
     io_dt = _cudnn_dtype(dtype)
     shq, shkv = [b, hq, sq, d], [b, hkv, skv, d]
 
@@ -475,6 +477,7 @@ def _build_bwd(key) -> dict:
         dO=handles["do"],
         stats=handles["stats"],
         attn_scale=scale,
+        use_deterministic_algorithm=deterministic,
         **_MASK_MODES[mask],
     )
     for tensor, stride in ((tdq, qs), (tdk, ks), (tdv, ks)):
@@ -507,7 +510,7 @@ def _cached(kind: str, key):
     return entry
 
 
-def _key(q, k, mask, scale):
+def _key(q, k, mask, scale, deterministic=False):
     return (
         # The graph is built under whichever device was current, so it must not be reused on
         # another one. Matches the C++ fused-attn cache, which keys on device_id for the same
@@ -527,6 +530,9 @@ def _key(q, k, mask, scale):
         # lets bshd and sbhd both run without a transpose.
         tuple(q.stride()),
         tuple(k.stride()),
+        # The deterministic backward is a different algorithm, not a flag on the same one, so a
+        # plan built either way must not be handed to a call that asked for the other.
+        bool(deterministic),
     )
 
 
@@ -589,6 +595,7 @@ def frost_attn_bwd(
     dout: torch.Tensor,
     attn_scale: Optional[float] = None,
     attn_mask_type: str = "causal",
+    deterministic: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Backward attention via cuDNN FROST. `softmax_lse` is [b, h, s] as returned by the forward."""
     for name, tensor in (("q", q), ("k", k), ("v", v), ("out", out), ("dout", dout)):
@@ -621,7 +628,7 @@ def frost_attn_bwd(
 
     mask = _mask_mode(attn_mask_type)
     scale = attn_scale if attn_scale is not None else q.shape[-1] ** -0.5
-    entry = _cached("bwd", _key(q, k, mask, scale))
+    entry = _cached("bwd", _key(q, k, mask, scale, deterministic))
     h = entry["handles"]
 
     if softmax_lse.dim() == 3:
