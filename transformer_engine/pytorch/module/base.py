@@ -10,7 +10,7 @@ import pickle
 import warnings
 from enum import Enum
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Generator, List, Optional, Tuple, Union
+from typing import Any, Dict, Generator, Iterable, List, Optional, Tuple, Union
 from contextlib import contextmanager
 from types import MethodType
 
@@ -789,6 +789,32 @@ def _is_weight_workspace_valid(
     return True
 
 
+def release_frozen_weight_columnwise(
+    weights: Iterable[Union[torch.Tensor, QuantizedTensorStorage]],
+) -> None:
+    """Release the columnwise copy of frozen quantized weights after dgrad.
+
+    Callers must gate on their backward wgrad flag; restored tensors and
+    workspaces may not have a meaningful ``requires_grad`` attribute.
+    Requires ``NVTE_RELEASE_FROZEN_WEIGHT_COLUMNWISE=1`` and a complete
+    rowwise representation of 2D-block-scaled FP8 weights for rebuilding.
+    Skips CUDA graph capture. See ``docs/envvars.rst`` for usage limitations.
+    """
+    if os.getenv("NVTE_RELEASE_FROZEN_WEIGHT_COLUMNWISE", "0") != "1":
+        return
+    if FP8GlobalStateManager.fp8_graph_capturing():
+        return
+    for weight in weights:
+        if not isinstance(weight, Float8BlockwiseQTensorStorage):
+            continue
+        if not weight._is_2D_scaled:
+            continue
+        # Columnwise-only FSDP2 backward weights cannot rebuild from rowwise data.
+        if weight._rowwise_data is None or weight._rowwise_scale_inv is None:
+            continue
+        weight.update_usage(rowwise_usage=True, columnwise_usage=False)
+
+
 def quantize_weight(
     *,
     tensor: Optional[torch.Tensor] = None,
@@ -836,6 +862,21 @@ def quantize_weight(
     if isinstance(tensor, QuantizedTensor):
         update_rowwise = True if quantizer.rowwise_usage else None
         update_columnwise = True if quantizer.columnwise_usage else None
+        # Frozen primary weights need columnwise data only for dgrad.
+        if (
+            os.getenv("NVTE_RELEASE_FROZEN_WEIGHT_COLUMNWISE", "0") == "1"
+            and isinstance(tensor, Float8BlockwiseQTensorStorage)
+            and not tensor.requires_grad
+            and tensor._is_2D_scaled
+        ):
+            if (
+                tensor._rowwise_data is not None
+                and tensor._rowwise_scale_inv is not None
+                and not isinstance(quantizer, DebugQuantizer)
+                and not FP8GlobalStateManager.fp8_graph_capturing()
+            ):
+                update_rowwise = True
+                update_columnwise = False
         tensor.update_usage(
             rowwise_usage=update_rowwise,
             columnwise_usage=update_columnwise,

@@ -238,6 +238,12 @@ FP8 Configuration
    :Default: ``0``
    :Description: Use unfused kernel for FP8 amax and scale updates. When set to ``1``, amax and scale updates are computed using separate unfused kernels instead of fused operations.
 
+.. envvar:: NVTE_RELEASE_FROZEN_WEIGHT_COLUMNWISE
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Release frozen ``Float8BlockScaling`` weight columnwise copies after dgrad in ``Linear``, ``GroupedLinear``, ``LayerNormLinear``, and ``LayerNormMLP``, saving roughly one byte per locally resident eligible parameter after backward at the cost of rebuilding on demand. For primary FP8 parameters, also skip eager columnwise materialization in forward, without changing the weight quantizer's usage settings. Requires 2D scaling and complete rowwise data; skipped during CUDA graph capture, with no columnwise-memory savings during graph replay. The forward optimization does not apply to debug quantization or non-primary weight workspaces. This option does not reduce construction-time memory; initializing frozen parameters under ``torch.no_grad()`` can reduce that separately.
+
 .. envvar:: NVTE_FP8_DPA_BWD
 
    :Type: ``int`` (0 or 1)
