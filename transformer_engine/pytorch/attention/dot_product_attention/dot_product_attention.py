@@ -158,6 +158,7 @@ def _get_thd_policy_attention_backend(
         use_fused_attention,
         fused_attention_backend,
         use_unfused_attention,
+        use_frost_attention,
         _,
     ) = selection
     _attention_backends.update(
@@ -168,6 +169,7 @@ def _get_thd_policy_attention_backend(
             "use_fused_attention": use_fused_attention,
             "fused_attention_backend": fused_attention_backend,
             "use_unfused_attention": use_unfused_attention,
+            "use_frost_attention": use_frost_attention,
             "backend_selection_requires_update": False,
         }
     )
