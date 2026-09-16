@@ -1950,9 +1950,11 @@ def get_attention_backend(
         and (window_size[0] != -1 or window_size[1] not in [-1, 0])
         and cp_comm_type in ["p2p", "a2a+p2p"]
     ):
-        # Same rule FusedAttention carries: the p2p ring shards KV across steps, so a left bound
-        # measured against the full sequence does not survive the per-step tiles. all_gather and
-        # a2a both see a contiguous KV range and do support it.
+        # Same rule FusedAttention carries, and for a reason visible in the ring itself: the p2p
+        # path hardcodes the per-step window to (-1, 0) or (-1, -1) at every kernel call, so a
+        # user window is discarded there for any backend. all_gather has real machinery for this
+        # (window_size_per_step, from get_kv_seq_info_after_all_gather) and a2a sees the whole
+        # sequence, so both can serve it.
         logger.debug(
             "Disabling FrostAttention as it does not support context parallelism with sliding"
             " window attention and cp_comm_type = %s",
