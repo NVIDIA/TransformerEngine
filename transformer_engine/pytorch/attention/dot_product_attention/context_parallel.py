@@ -1347,7 +1347,6 @@ def cp_p2p_bwd_fused_attn(
     out_part,
     dout_part,
     section,
-    deterministic=False,
 ):
     """Per-tile backward call of CP P2P with FusedAttention backend"""
     aux_tensors = [softmax_lse, rng_states[cp_size - step - 1]]
