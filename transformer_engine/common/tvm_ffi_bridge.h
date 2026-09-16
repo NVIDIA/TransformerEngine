@@ -28,6 +28,7 @@
 #include "common.h"
 #include "util/cuda_runtime.h"
 #include "util/logging.h"
+#include "util/math.h"
 #include "util/system.h"
 
 namespace transformer_engine {
@@ -51,6 +52,7 @@ enum class Activation {
   kDSiLU,
   kDQGeLU,
   kDSReLU,
+  kUnsupported,
   kNumTypes
 };
 
@@ -76,11 +78,43 @@ inline const char *activation_to_str(Activation act) {
       return "dqgelu";
     case Activation::kDSReLU:
       return "dsrelu";
+    case Activation::kUnsupported:
+      return "unsupported";
     case Activation::kNone:
     case Activation::kNumTypes:
       return "none";
   }
   return "none";
+}
+
+template <typename ParamOP, float (*OP)(float, const ParamOP &)>
+constexpr Activation activation_func_to_enum() {
+  if constexpr (OP == nullptr) {
+    return Activation::kNone;
+  } else if constexpr (std::is_same_v<ParamOP, Empty>) {
+    if constexpr (OP == relu<fp32, fp32>) {
+      return Activation::kReLU;
+    } else if constexpr (OP == gelu<fp32, fp32>) {
+      return Activation::kGeLU;
+    } else if constexpr (OP == silu<fp32, fp32>) {
+      return Activation::kSiLU;
+    } else if constexpr (OP == qgelu<fp32, fp32>) {
+      return Activation::kQGeLU;
+    } else if constexpr (OP == srelu<fp32, fp32>) {
+      return Activation::kSReLU;
+    } else if constexpr (OP == drelu<fp32, fp32>) {
+      return Activation::kDReLU;
+    } else if constexpr (OP == dgelu<fp32, fp32>) {
+      return Activation::kDGeLU;
+    } else if constexpr (OP == dsilu<fp32, fp32>) {
+      return Activation::kDSiLU;
+    } else if constexpr (OP == dqgelu<fp32, fp32>) {
+      return Activation::kDQGeLU;
+    } else if constexpr (OP == dsrelu<fp32, fp32>) {
+      return Activation::kDSReLU;
+    }
+  }
+  return Activation::kUnsupported;
 }
 
 inline DLDataType convert_to_dltype(NVTEDType type) {

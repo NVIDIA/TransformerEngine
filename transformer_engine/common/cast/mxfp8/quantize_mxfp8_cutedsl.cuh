@@ -29,64 +29,6 @@ namespace cutedsl_backend {
 // all live in transformer_engine::tvm_ffi_bridge (tvm_ffi_bridge.h).
 using namespace tvm_ffi_bridge;
 
-template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
-          float (*OP)(float, const ParamOP &)>
-struct MXFP8QuantFused {
-  static constexpr Activation activation = Activation::kNone;
-  // No fused activation / activation derivative op: plain quantize
-  static constexpr bool supported = (OP == nullptr) && !IS_DACT && !IS_ACT;
-};
-template <>
-struct MXFP8QuantFused<false, false, true, Empty, relu<fp32, fp32>> {
-  static constexpr Activation activation = Activation::kReLU;
-  static constexpr bool supported = true;
-};
-template <>
-struct MXFP8QuantFused<false, false, true, Empty, gelu<fp32, fp32>> {
-  static constexpr Activation activation = Activation::kGeLU;
-  static constexpr bool supported = true;
-};
-template <>
-struct MXFP8QuantFused<false, false, true, Empty, silu<fp32, fp32>> {
-  static constexpr Activation activation = Activation::kSiLU;
-  static constexpr bool supported = true;
-};
-template <>
-struct MXFP8QuantFused<false, false, true, Empty, qgelu<fp32, fp32>> {
-  static constexpr Activation activation = Activation::kQGeLU;
-  static constexpr bool supported = true;
-};
-template <>
-struct MXFP8QuantFused<false, false, true, Empty, srelu<fp32, fp32>> {
-  static constexpr Activation activation = Activation::kSReLU;
-  static constexpr bool supported = true;
-};
-template <bool IS_DBIAS>
-struct MXFP8QuantFused<IS_DBIAS, true, false, Empty, drelu<fp32, fp32>> {
-  static constexpr Activation activation = Activation::kDReLU;
-  static constexpr bool supported = true;
-};
-template <bool IS_DBIAS>
-struct MXFP8QuantFused<IS_DBIAS, true, false, Empty, dgelu<fp32, fp32>> {
-  static constexpr Activation activation = Activation::kDGeLU;
-  static constexpr bool supported = true;
-};
-template <bool IS_DBIAS>
-struct MXFP8QuantFused<IS_DBIAS, true, false, Empty, dsilu<fp32, fp32>> {
-  static constexpr Activation activation = Activation::kDSiLU;
-  static constexpr bool supported = true;
-};
-template <bool IS_DBIAS>
-struct MXFP8QuantFused<IS_DBIAS, true, false, Empty, dqgelu<fp32, fp32>> {
-  static constexpr Activation activation = Activation::kDQGeLU;
-  static constexpr bool supported = true;
-};
-template <bool IS_DBIAS>
-struct MXFP8QuantFused<IS_DBIAS, true, false, Empty, dsrelu<fp32, fp32>> {
-  static constexpr Activation activation = Activation::kDSReLU;
-  static constexpr bool supported = true;
-};
-
 // Signature mirrors mxfp8::quantize (input, act_input, noop, output, dbias,
 // workspace, stream). Returns false to fall back to the CUDA kernel.
 inline bool mxfp8_quantize_cutedsl(const MXFP8QuantConfig &config, const Tensor *input_tensor,
@@ -212,46 +154,39 @@ bool mxfp8_quantize_cutedsl(const Tensor *input_tensor, const Tensor *act_input_
     maybe_warn_cutedsl_not_chosen("2D quantization is not supported.");
     return false;
   }
-  using Fused = MXFP8QuantFused<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>;
-  if constexpr (!Fused::supported) {
-    maybe_warn_cutedsl_not_chosen(
-        "the fused activation/activation derivative operation is not supported.");
-    return false;
-  } else {
-    checkCuDriverContext(stream);
-    const MXFP8QuantConfig config{/*dtype=*/input_tensor->dtype(),
-                                  /*fp8_dtype=*/output_tensor->dtype(),
-                                  /*rowwise=*/output_tensor->has_data(),
-                                  /*colwise=*/output_tensor->has_columnwise_data(),
-                                  /*swizzled=*/output_tensor->with_gemm_swizzled_scales,
-                                  /*with_amax=*/output_tensor->amax.dptr != nullptr,
-                                  /*with_dbias=*/IS_DBIAS,
-                                  /*with_dact=*/IS_DACT,
-                                  /*with_act=*/IS_ACT,
-                                  /*use_2d_quantization=*/use_2d_quantization,
-                                  /*activation=*/Fused::activation};
-    // Sanity checks, mirroring mxfp8::quantize in quantize_mxfp8.cuh
-    if (config.rowwise) {
-      NVTE_CHECK(output_tensor->scale_inv.dptr != nullptr, "Scaling tensor must be allocated");
-    }
-    if (config.colwise) {
-      NVTE_CHECK(output_tensor->columnwise_scale_inv.dptr != nullptr,
-                 "Columnwise scaling tensor must be allocated");
-    }
-    if (noop_tensor != nullptr) {
-      CheckNoopTensor(*noop_tensor, "cast_noop");
-    }
-    if constexpr (IS_DBIAS) {
-      NVTE_CHECK(dbias_tensor != nullptr, "DBias must be a tensor.");
-      NVTE_CHECK(dbias_tensor->data.dtype == input_tensor->dtype(),
-                 "DBias must have the same type as input.");
-      NVTE_CHECK(dbias_tensor->data.shape == Shape{input_tensor->flat_last_dim()},
-                 "Wrong shape of DBias.");
-      NVTE_CHECK(workspace_tensor != nullptr, "Workspace must be a tensor.");
-    }
-    return mxfp8_quantize_cutedsl(config, input_tensor, act_input_tensor, noop_tensor,
-                                  output_tensor, dbias_tensor, workspace_tensor, stream);
+  checkCuDriverContext(stream);
+  const MXFP8QuantConfig config{/*dtype=*/input_tensor->dtype(),
+                                /*fp8_dtype=*/output_tensor->dtype(),
+                                /*rowwise=*/output_tensor->has_data(),
+                                /*colwise=*/output_tensor->has_columnwise_data(),
+                                /*swizzled=*/output_tensor->with_gemm_swizzled_scales,
+                                /*with_amax=*/output_tensor->amax.dptr != nullptr,
+                                /*with_dbias=*/IS_DBIAS,
+                                /*with_dact=*/IS_DACT,
+                                /*with_act=*/IS_ACT,
+                                /*use_2d_quantization=*/use_2d_quantization,
+                                /*activation=*/activation_func_to_enum<ParamOP, OP>()};
+  // Sanity checks, mirroring mxfp8::quantize in quantize_mxfp8.cuh
+  if (config.rowwise) {
+    NVTE_CHECK(output_tensor->scale_inv.dptr != nullptr, "Scaling tensor must be allocated");
   }
+  if (config.colwise) {
+    NVTE_CHECK(output_tensor->columnwise_scale_inv.dptr != nullptr,
+               "Columnwise scaling tensor must be allocated");
+  }
+  if (noop_tensor != nullptr) {
+    CheckNoopTensor(*noop_tensor, "cast_noop");
+  }
+  if constexpr (IS_DBIAS) {
+    NVTE_CHECK(dbias_tensor != nullptr, "DBias must be a tensor.");
+    NVTE_CHECK(dbias_tensor->data.dtype == input_tensor->dtype(),
+               "DBias must have the same type as input.");
+    NVTE_CHECK(dbias_tensor->data.shape == Shape{input_tensor->flat_last_dim()},
+               "Wrong shape of DBias.");
+    NVTE_CHECK(workspace_tensor != nullptr, "Workspace must be a tensor.");
+  }
+  return mxfp8_quantize_cutedsl(config, input_tensor, act_input_tensor, noop_tensor, output_tensor,
+                                dbias_tensor, workspace_tensor, stream);
 }
 
 }  // namespace cutedsl_backend
