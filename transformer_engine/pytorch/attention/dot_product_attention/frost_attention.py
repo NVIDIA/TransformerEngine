@@ -120,7 +120,7 @@ def _handle_for(device: torch.device):
     executed from different streams across ring steps.
     """
     if device.type != "cuda":
-        raise ValueError("FrostAttention requires CUDA tensors; got device %s" % device)
+        raise ValueError(f"FrostAttention requires CUDA tensors; got device {device}")
     cudnn = _import_cudnn()
     if device.index is None:
         device = torch.device("cuda", torch.cuda.current_device())
@@ -185,14 +185,12 @@ def is_frost_attention_available() -> Tuple[bool, str]:
         # and raising from _select_frost_plan once a plan is built.
         return _no("CUDNN_FRONTEND_ENABLE_FROST_ENGINES=0 disables the FROST engines")
     if torch.cuda.get_device_capability() not in _SUPPORTED_ARCHS:
-        return _no(
-            "cuDNN FROST head_dim>256 kernels are SM100/SM103 only; found sm%d%d"
-            % torch.cuda.get_device_capability()
-        )
+        major, minor = torch.cuda.get_device_capability()
+        return _no(f"cuDNN FROST head_dim>256 kernels are SM100/SM103 only; found sm{major}{minor}")
     try:
         _import_cudnn()
     except ImportError as exc:
-        return _no("nvidia-cudnn-frontend not importable: %s" % exc)
+        return _no(f"nvidia-cudnn-frontend not importable: {exc}")
 
     # Decline on positive evidence that FROST cannot work: a version below a floor, or a package
     # that is absent outright. A version that is present but unparseable is NOT evidence, so it
@@ -200,20 +198,19 @@ def is_frost_attention_available() -> Tuple[bool, str]:
     frontend, frontend_raw = _pkg_version("nvidia-cudnn-frontend", _cudnn)
     if frontend is not None and frontend < _MIN_CUDNN_FRONTEND:
         return _no(
-            "nvidia-cudnn-frontend %s registers no sm100 backward engine; >= %s is required"
-            " (1.28.0 ships the d512 forward only, so this would otherwise raise on the first"
-            " backward rather than here)" % (frontend_raw, _MIN_CUDNN_FRONTEND)
+            f"nvidia-cudnn-frontend {frontend_raw} registers no sm100 backward engine; >="
+            f" {_MIN_CUDNN_FRONTEND} is required (1.28.0 ships the d512 forward only, so this would"
+            " otherwise raise on the first backward rather than here)"
         )
 
     cutlass, cutlass_raw = _pkg_version("nvidia-cutlass-dsl")
     if cutlass_raw is None:
-        return _no("nvidia-cutlass-dsl not installed (FROST requires >= %s)" % _MIN_CUTLASS_DSL)
+        return _no(f"nvidia-cutlass-dsl not installed (FROST requires >= {_MIN_CUTLASS_DSL})")
     if cutlass is not None and cutlass < _MIN_CUTLASS_DSL:
         # Worth being loud: this combination fails by silently declining, not by raising.
         return _no(
-            "nvidia-cutlass-dsl %s is below the FROST floor %s; FROST engines would be"
-            " silently skipped in favour of ordinary cuDNN backend plans"
-            % (cutlass_raw, _MIN_CUTLASS_DSL)
+            f"nvidia-cutlass-dsl {cutlass_raw} is below the FROST floor {_MIN_CUTLASS_DSL}; FROST"
+            " engines would be silently skipped in favour of ordinary cuDNN backend plans"
         )
 
     _availability = (True, "")
@@ -241,8 +238,8 @@ def _mask_spec(attn_mask_type: str, window_size=None):
     """Validate a TE mask type and window, returning the hashable spec the plan is keyed on."""
     if attn_mask_type not in _SUPPORTED_MASKS:
         raise NotImplementedError(
-            "FROST attention supports attn_mask_type in %s; got %r"
-            % (str(_SUPPORTED_MASKS), attn_mask_type)
+            f"FROST attention supports attn_mask_type in {str(_SUPPORTED_MASKS)}; got"
+            f" {attn_mask_type!r}"
         )
     try:
         window = _NO_WINDOW if window_size is None else tuple(window_size)
@@ -250,18 +247,18 @@ def _mask_spec(attn_mask_type: str, window_size=None):
         # Raised as NotImplementedError so the selector declines instead of propagating out of
         # backend selection, which is the only thing is_frost_attention_supported catches.
         raise NotImplementedError(
-            "window_size must be a (left, right) pair; got %r" % (window_size,)
+            f"window_size must be a (left, right) pair; got {window_size!r}"
         ) from None
     if len(window) != 2:
-        raise NotImplementedError("window_size must be a (left, right) pair; got %r" % (window,))
+        raise NotImplementedError(f"window_size must be a (left, right) pair; got {window!r}")
     if window[0] < -1:
         # cuDNN's left bound must be >= 1, so a left of -2 would build diagonal_band_left_bound=-1
         # and fail at plan build rather than declining here.
-        raise NotImplementedError("window_size left must be -1 or >= 0; got %r" % (window,))
+        raise NotImplementedError(f"window_size left must be -1 or >= 0; got {window!r}")
     if window[1] not in (-1, 0):
         # A right bound past the diagonal is future context. cuDNN can express it, but no TE mask
         # type asks for it, so decline rather than guess the intent.
-        raise NotImplementedError("FROST attention does not support a right window %r" % (window,))
+        raise NotImplementedError(f"FROST attention does not support a right window {window!r}")
     return attn_mask_type, window
 
 
@@ -303,19 +300,19 @@ def is_frost_attention_supported(
     them should pay that cost or have their engine pool changed underneath them.
     """
     if head_dim_qk != head_dim_v:
-        return False, "FROST path requires symmetric head_dim; got %d/%d" % (
-            head_dim_qk,
-            head_dim_v,
-        )
+        return False, f"FROST path requires symmetric head_dim; got {head_dim_qk}/{head_dim_v}"
     if not _MIN_HEAD_DIM <= head_dim_qk <= _MAX_HEAD_DIM:
-        return False, "FROST path covers head_dim in (256, 512]; got %d" % head_dim_qk
+        return False, f"FROST path covers head_dim in (256, 512]; got {head_dim_qk}"
     if head_dim_qk % _HEAD_DIM_MULTIPLE != 0:
-        return False, "FROST path needs head_dim to be a multiple of %d; got %d" % (
-            _HEAD_DIM_MULTIPLE,
-            head_dim_qk,
+        return (
+            False,
+            (
+                f"FROST path needs head_dim to be a multiple of {_HEAD_DIM_MULTIPLE}; got"
+                f" {head_dim_qk}"
+            ),
         )
     if qkv_dtype not in (torch.bfloat16, torch.float16):
-        return False, "FROST path supports bf16/fp16; got %s" % qkv_dtype
+        return False, f"FROST path supports bf16/fp16; got {qkv_dtype}"
     if dropout != 0.0:
         return False, "FROST path does not support dropout"
     if attn_bias_type != "no_bias":
@@ -342,8 +339,8 @@ def to_frost_layout(t: torch.Tensor, qkv_format: str) -> torch.Tensor:
     if qkv_format == "sbhd":  # [s, b, h, d] -> [b, h, s, d]
         return t.permute(1, 2, 0, 3)
     raise NotImplementedError(
-        "FROST attention supports qkv_format 'bshd' and 'sbhd'; got %r."
-        " thd needs varlen support that is not implemented here." % qkv_format
+        f"FROST attention supports qkv_format 'bshd' and 'sbhd'; got {qkv_format!r}. thd needs"
+        " varlen support that is not implemented here."
     )
 
 
@@ -354,7 +351,7 @@ def from_frost_layout(t: torch.Tensor, qkv_format: str) -> torch.Tensor:
     if qkv_format == "sbhd":  # [b, h, s, d] -> [s, b, h, d]
         return t.permute(2, 0, 1, 3)
     raise NotImplementedError(
-        "FROST attention supports qkv_format 'bshd' and 'sbhd'; got %r." % qkv_format
+        f"FROST attention supports qkv_format 'bshd' and 'sbhd'; got {qkv_format!r}."
     )
 
 
@@ -374,11 +371,11 @@ def _check_layout(name: str, t: torch.Tensor) -> None:
     dimension is contiguous, which the kernels assume.
     """
     if t.dim() != 4:
-        raise ValueError("%s must be 4D [b, h, s, d]; got %s" % (name, tuple(t.shape)))
+        raise ValueError(f"{name} must be 4D [b, h, s, d]; got {tuple(t.shape)}")
     if t.stride(3) != 1:
         raise ValueError(
-            "%s must have a contiguous head dimension; got shape %s stride %s"
-            % (name, tuple(t.shape), tuple(t.stride()))
+            f"{name} must have a contiguous head dimension; got shape {tuple(t.shape)} stride"
+            f" {tuple(t.stride())}"
         )
 
 
@@ -390,7 +387,7 @@ def _check_dtype(name: str, t: torch.Tensor, expected: torch.dtype) -> None:
     matters most: it arrives from autograd and is not this module's to control.
     """
     if t.dtype != expected:
-        raise ValueError("%s must be %s to match q; got %s" % (name, expected, t.dtype))
+        raise ValueError(f"{name} must be {expected} to match q; got {t.dtype}")
 
 
 def _check_kv_match(k: torch.Tensor, v: torch.Tensor) -> None:
@@ -402,11 +399,11 @@ def _check_kv_match(k: torch.Tensor, v: torch.Tensor) -> None:
     and is purely a guard against a silent wrong answer.
     """
     if k.shape != v.shape:
-        raise ValueError("k and v must have the same shape; got %s and %s" % (k.shape, v.shape))
+        raise ValueError(f"k and v must have the same shape; got {k.shape} and {v.shape}")
     if k.stride() != v.stride():
         raise ValueError(
-            "k and v must have the same layout; got strides %s and %s"
-            % (tuple(k.stride()), tuple(v.stride()))
+            f"k and v must have the same layout; got strides {tuple(k.stride())} and"
+            f" {tuple(v.stride())}"
         )
 
 
@@ -425,17 +422,12 @@ def _select_frost_plan(graph, token: str, what: str):
         # Both versions, because either floor can cause this and blaming one misdirects. Looked
         # up defensively: this is the message explaining a failure, so it must not raise itself.
         raise RuntimeError(
-            "no cuDNN FROST %s engine was offered (looked for %r). Candidate plans: %s."
-            " nvidia-cudnn-frontend=%s (floor %s), nvidia-cutlass-dsl=%s (floor %s)."
-            % (
-                what,
-                token,
-                names[:6],
-                _pkg_version("nvidia-cudnn-frontend", _cudnn)[1] or "unknown",
-                _MIN_CUDNN_FRONTEND,
-                _pkg_version("nvidia-cutlass-dsl")[1] or "unknown",
-                _MIN_CUTLASS_DSL,
-            )
+            f"no cuDNN FROST {what} engine was offered (looked for {token!r}). Candidate plans:"
+            f" {names[:6]}."
+            f" nvidia-cudnn-frontend={_pkg_version('nvidia-cudnn-frontend', _cudnn)[1] or 'unknown'} (floor"
+            f" {_MIN_CUDNN_FRONTEND}),"
+            f" nvidia-cutlass-dsl={_pkg_version('nvidia-cutlass-dsl')[1] or 'unknown'} (floor"
+            f" {_MIN_CUTLASS_DSL})."
         )
     graph.select_plan(hits[0])
     graph.check_support()
@@ -605,13 +597,10 @@ def frost_attn_fwd(
     if k.shape[0] != q.shape[0] or k.shape[3] != q.shape[3]:
         # The graph declares k and v with q's batch and head_dim, so a mismatch would bind a
         # differently shaped buffer to that node and read the wrong elements silently.
-        raise ValueError(
-            "k must match q in batch and head_dim; got q %s and k %s" % (q.shape, k.shape)
-        )
+        raise ValueError(f"k must match q in batch and head_dim; got q {q.shape} and k {k.shape}")
     if q.shape[1] % k.shape[1] != 0:
         raise ValueError(
-            "num_heads must be divisible by num_gqa_groups; got %d and %d"
-            % (q.shape[1], k.shape[1])
+            f"num_heads must be divisible by num_gqa_groups; got {q.shape[1]} and {k.shape[1]}"
         )
 
     mask = _mask_spec(attn_mask_type, window_size)
@@ -653,25 +642,20 @@ def frost_attn_bwd(
     # The same shape assumptions the forward makes, plus o/dO, which the graph declares with q's
     # shape. The forward runs first in autograd, but the CP ring calls this directly.
     if k.shape[0] != q.shape[0] or k.shape[3] != q.shape[3]:
-        raise ValueError(
-            "k must match q in batch and head_dim; got q %s and k %s" % (q.shape, k.shape)
-        )
+        raise ValueError(f"k must match q in batch and head_dim; got q {q.shape} and k {k.shape}")
     if q.shape[1] % k.shape[1] != 0:
         raise ValueError(
-            "num_heads must be divisible by num_gqa_groups; got %d and %d"
-            % (q.shape[1], k.shape[1])
+            f"num_heads must be divisible by num_gqa_groups; got {q.shape[1]} and {k.shape[1]}"
         )
     for name, tensor in (("out", out), ("dout", dout)):
         if tensor.shape != q.shape:
-            raise ValueError(
-                "%s must have q's shape; got %s and %s" % (name, tensor.shape, q.shape)
-            )
+            raise ValueError(f"{name} must have q's shape; got {tensor.shape} and {q.shape}")
     if softmax_lse.dtype != torch.float32:
-        raise ValueError("softmax_lse must be fp32; got %s" % softmax_lse.dtype)
+        raise ValueError(f"softmax_lse must be fp32; got {softmax_lse.dtype}")
     if tuple(softmax_lse.shape[:3]) != tuple(q.shape[:3]):
         raise ValueError(
-            "softmax_lse must be [b, h, s] matching q; got %s and %s"
-            % (tuple(softmax_lse.shape), tuple(q.shape))
+            f"softmax_lse must be [b, h, s] matching q; got {tuple(softmax_lse.shape)} and"
+            f" {tuple(q.shape)}"
         )
 
     mask = _mask_spec(attn_mask_type, window_size)

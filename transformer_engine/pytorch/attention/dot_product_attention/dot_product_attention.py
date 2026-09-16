@@ -2858,6 +2858,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                 use_flash_attention = False
                 use_fused_attention = False
                 use_unfused_attention = True
+                # Bound here too: the availability check below reads all four flags at this
+                # scope, and this branch never calls get_attention_backend.
+                use_frost_attention = False
             else:
                 if (
                     _attention_backends["attention_params"] is None

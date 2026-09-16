@@ -1917,6 +1917,35 @@ def get_attention_backend(
         # cuDNN ships a deterministic d512 backward.
         logger.debug("Disabling FrostAttention as its backward has no deterministic cuDNN plan")
         use_frost_attention = False
+    if use_frost_attention and (has_score_mod or has_score_mod_bprop):
+        # The score_mod filter above disables flash, fused and unfused, and at head_dim 512 the
+        # fused path is unavailable anyway -- so without this FROST would be the sole survivor
+        # and would compute plain attention with the callback silently dropped. That includes the
+        # score_mod_bprop-without-score_mod case, which is meant to end in "no backend available".
+        logger.debug("Disabling FrostAttention for score_mod")
+        use_frost_attention = False
+    if use_frost_attention and qkv_type is not torch.Tensor:
+        # Every other backend filters on the tensor class, not just the dtype: a quantized tensor
+        # can carry a nominal bf16 dtype outside an fp8 autocast, and the fp8 guard below keys on
+        # the autocast flag rather than the type.
+        logger.debug("Disabling FrostAttention for qkv_type = %s", qkv_type)
+        use_frost_attention = False
+    if use_frost_attention and num_splits != 1:
+        # Declined for the same reason the fused and unfused paths are: silently ignoring it
+        # would change the computation the caller asked for.
+        logger.debug("Disabling FrostAttention for num_splits = %s", num_splits)
+        use_frost_attention = False
+    if use_frost_attention and checkpoint_core_attention:
+        # The backend FROST displaces at this head dim is unfused, which does honour activation
+        # recompute. Selecting FROST would silently remove it, which is a memory regression
+        # rather than a wrong answer, but not one the caller asked for.
+        logger.debug("Disabling FrostAttention for checkpoint_core_attention")
+        use_frost_attention = False
+    if use_frost_attention and cuda_graph:
+        # Plan lookup and lazy handle creation are host-side work on the first call, which is
+        # hazardous inside a capture. Not validated under capture, so decline rather than guess.
+        logger.debug("Disabling FrostAttention for CUDA graph capture")
+        use_frost_attention = False
     if use_frost_attention and return_max_logit:
         # FrostAttention returns the context layer alone, where UnfusedDotProductAttention returns
         # (context, max_logit). Selecting it here would break the caller's unpack.
@@ -1943,11 +1972,13 @@ def get_attention_backend(
             "max_seqlen_kv, where the diagonal anchor is ambiguous"
         )
         use_frost_attention = False
+    has_sliding_window = window_size is not None and (
+        window_size[0] != -1 or window_size[1] not in [-1, 0]
+    )
     if (
         use_frost_attention
         and context_parallel
-        and window_size is not None
-        and (window_size[0] != -1 or window_size[1] not in [-1, 0])
+        and has_sliding_window
         and cp_comm_type in ["p2p", "a2a+p2p"]
     ):
         # Same rule FusedAttention carries, and for a reason visible in the ring itself: the p2p
