@@ -429,12 +429,12 @@ if (NVTE_WITH_CUBLASMP)
                  NAMES nccl libnccl
                  PATH_SUFFIXES lib
                  REQUIRED)
-    # cuBLASMp 0.8 is the first release with CUDA-graph-safe overlap algos,
+    # cuBLASMp 0.8.1 adds MXFP8 support to the CUDA-graph-safe overlap algos,
     # and NCCL 2.30 is the first release with graph-safe one-sided RMA
     # primitives (ncclPutSignal/ncclWaitSignal) that those algos use.
-    if (CUBLASMP_VERSION VERSION_LESS 0.8.0)
+    if (CUBLASMP_VERSION VERSION_LESS 0.8.1)
       message(FATAL_ERROR
-              "NVTE_WITH_CUBLASMP requires cuBLASMp >= 0.8.0, but found cuBLASMp "
+              "NVTE_WITH_CUBLASMP requires cuBLASMp >= 0.8.1, but found cuBLASMp "
               "${CUBLASMP_VERSION} in ${CUBLASMP_INCLUDE_DIR}/cublasmp.h")
     endif()
     if (NCCL_VERSION VERSION_LESS 2.30.0)
