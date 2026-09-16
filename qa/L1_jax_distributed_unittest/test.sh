@@ -31,7 +31,10 @@ python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/py
 
 python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest_dist_mlp.xml $TE_PATH/tests/jax/test_distributed_layernorm_mlp.py || test_fail "test_distributed_layernorm_mlp.py"
 
-python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest_dist_fused_attn.xml $TE_PATH/tests/jax/test_distributed_fused_attn.py || test_fail "test_distributed_fused_attn.py"
+# XLA_FLAGS to WAR for AssociativeScanRewriter iterator-invalidation SIGSEGV in CP fused attention
+# TODO(KshitijLakhani): remove when the XLA fix is available in jaxlib
+python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest_dist_fused_attn_non_cp.xml $TE_PATH/tests/jax/test_distributed_fused_attn.py -k "not TestDistributedContextParallelSelfAttn" || test_fail "test_distributed_fused_attn.py (non-CP)"
+XLA_FLAGS="$XLA_FLAGS --xla_disable_hlo_passes=associative-scan-rewriter" python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest_dist_fused_attn_cp.xml $TE_PATH/tests/jax/test_distributed_fused_attn.py::TestDistributedContextParallelSelfAttn || test_fail "test_distributed_fused_attn.py (CP)"
 
 # XLA_FLAGS to WAR for test_distributed_softmax issue with NCCL
 # TODO(KshitijLakhani): remove when NCCL issue is fixed
