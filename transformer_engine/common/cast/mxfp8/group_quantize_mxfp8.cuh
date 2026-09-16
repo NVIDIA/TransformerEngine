@@ -133,6 +133,13 @@ struct LaunchConfig {
   dim3 grid;
 };
 
+struct alignas(8) DirectVaryingFirstMapperStorage {
+  size_t active_elements;
+  size_t tensor_id;
+  size_t rows;
+  size_t tensor_start_offset;
+};
+
 template <typename CastTraits>
 LaunchConfig get_launch_config(const size_t first_logical_dim, const size_t last_logical_dim,
                                const size_t elts_total, const size_t num_tensors) {
@@ -659,6 +666,22 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
   constexpr bool is_single_tensor = (shape_rep == SAME_BOTH_DIMS || shape_rep == VARYING_FIRST_DIM);
 
   const bool leading_thread = (threadIdx.x == 0);
+  // Keep mapper metadata separate from dynamic shared memory. The latter is the destination of
+  // asynchronous TMA loads and may be overwritten before every warp has consumed the metadata.
+  __shared__ DirectVaryingFirstMapperStorage direct_mapper_storage;
+
+  if constexpr (use_direct_varying_first_mapper) {
+    static_assert(CastTraits::THREADS_PER_CHUNK >= MAX_SUPPORTED_TENSOR_DESCRIPTORS,
+                  "The first CTA must have enough threads to validate every tensor.");
+    // The direct mapper relies on every tensor boundary being TILE_DIM_Y-aligned. The legacy
+    // mapper validated this while decoding each job, but the direct path no longer calls it.
+    // Validate all per-tensor row counts once, using the first CTA. num_tensors is bounded by
+    // MAX_SUPPORTED_TENSOR_DESCRIPTORS (64), which is smaller than the CTA size.
+    if (blockIdx.x == 0 && threadIdx.x < num_tensors) {
+      get_tensor_rows_num<ShapeRepresentation::VARYING_FIRST_DIM>(threadIdx.x, first_logical_dim,
+                                                                  first_dims_ptr, num_tensors);
+    }
+  }
 
   // Decode the linear direct-mapper grid once per CTA. Valid CUDA grid extents fit in uint, which
   // also keeps this one-time coordinate calculation in 32-bit arithmetic.
@@ -704,8 +727,8 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
   constexpr size_t out_mem_rowwise = (ROWWISE_SCALING ? buff_size_aligned_out : 0);
 
   // The destination shared memory buffer of a bulk tensor operation should be 16-byte aligned
-  extern __shared__ unsigned char dynamic_shmem[];
-  unsigned char *dshmem = align_smem_ptr_per_TMA_requirements(dynamic_shmem);
+  extern __shared__ char dynamic_shmem[];
+  char *dshmem = align_up(dynamic_shmem, TMA_SHMEM_ALIGNMENT);
 
   // The destination shared memory buffer of a bulk tensor operation should be 16-byte aligned
   IType *sIn_ptr = reinterpret_cast<IType *>(dshmem);
@@ -719,26 +742,26 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
 
   if constexpr (use_direct_varying_first_mapper) {
     // logical_shape may describe graph-safe capacity beyond the active tensors. Resolve the
-    // active tail once per CTA and reject it before initializing TMA barriers. Reuse the same
-    // temporary storage for the exceptional colwise-swizzled tensor metadata.
-    size_t *const mapper_storage = reinterpret_cast<size_t *>(dshmem);
+    // active tail once per CTA and reject it before initializing TMA barriers. Cache the
+    // exceptional colwise-swizzled tensor metadata in dedicated static shared memory.
     const size_t block_offset_Y = direct_block_id_Y * CHUNK_DIM_Y;
     const size_t tensor_offset = block_offset_Y * last_logical_dim;
     if (leading_thread) {
       const size_t active_elements = static_cast<size_t>(offsets_ptr[num_tensors]);
-      mapper_storage[0] = active_elements;
+      direct_mapper_storage.active_elements = active_elements;
       if constexpr (WITH_GEMM_SWIZZLED_SCALES && COLWISE_SCALING) {
         if (tensor_offset < active_elements) {
           const size_t mapped_tensor_id =
               find_tensor_from_offsets(offsets_ptr, num_tensors, tensor_offset);
-          mapper_storage[1] = mapped_tensor_id;
-          mapper_storage[2] = static_cast<size_t>(first_dims_ptr[mapped_tensor_id]);
-          mapper_storage[3] = static_cast<size_t>(offsets_ptr[mapped_tensor_id]);
+          direct_mapper_storage.tensor_id = mapped_tensor_id;
+          direct_mapper_storage.rows = static_cast<size_t>(first_dims_ptr[mapped_tensor_id]);
+          direct_mapper_storage.tensor_start_offset =
+              static_cast<size_t>(offsets_ptr[mapped_tensor_id]);
         }
       }
     }
     __syncthreads();
-    if (tensor_offset >= mapper_storage[0]) {
+    if (tensor_offset >= direct_mapper_storage.active_elements) {
       return;
     }
   }
@@ -839,10 +862,10 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
       if constexpr (WITH_GEMM_SWIZZLED_SCALES && COLWISE_SCALING) {
         // Colwise GEMM-swizzled scale indices restart at each tensor and depend on M_i.
         // The leading thread decoded this exceptional metadata before barrier initialization.
-        size_t *const mapper_storage = reinterpret_cast<size_t *>(dshmem);
-        tensor_id = mapper_storage[1];
-        rows = mapper_storage[2];
-        tensor_start_offset = mapper_storage[3];
+        tensor_id = direct_mapper_storage.tensor_id;
+        rows = direct_mapper_storage.rows;
+        tensor_start_offset = direct_mapper_storage.tensor_start_offset;
+        tensor_offset_Y = block_offset_Y - tensor_start_offset / cols;
       }
     } else {
       block_id_Y = current_block_id / fixed_blocks_X;
@@ -1289,12 +1312,13 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
                               use_colwise_scaling
                                   ? reinterpret_cast<OType *>(output->columnwise_data.dptr)
                                   : nullptr;
-                          update_tma_descriptors<IType, OType><<<num_tensors, 1, 0, stream>>>(
-                              tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
-                              tensor_map_output_colwise, input_dptr, act_input_dptr,
-                              output_rowwise_dptr, output_colwise_dptr, shape_rep, num_tensors,
-                              first_logical_dim, last_logical_dim, offsets_ptr, first_dims_ptr,
-                              last_dims_ptr, use_rowwise_scaling, use_colwise_scaling, IS_DACT);
+                          update_tma_descriptors<IType, OType>
+                              <<<num_tensors, THREADS_PER_WARP, 0, stream>>>(
+                                  tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
+                                  tensor_map_output_colwise, input_dptr, act_input_dptr,
+                                  output_rowwise_dptr, output_colwise_dptr, shape_rep, num_tensors,
+                                  first_logical_dim, last_logical_dim, offsets_ptr, first_dims_ptr,
+                                  last_dims_ptr, use_rowwise_scaling, use_colwise_scaling, IS_DACT);
                         }
 
                         TRANSFORMER_ENGINE_SWITCH_CONDITION(

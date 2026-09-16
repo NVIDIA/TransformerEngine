@@ -1632,7 +1632,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(self.fp8_meta)
 
                 # Activation recomputation is used and this is the first forward phase.
-                if self.training and is_fp8_activation_recompute_enabled():
+                if is_fp8_activation_recompute_enabled():
                     FP8GlobalStateManager.copy_forward_fp8_meta_tensors_for_recompute(self.fp8_meta)
 
         nvtx_range_push(self.__class__.__name__ + " forward")
