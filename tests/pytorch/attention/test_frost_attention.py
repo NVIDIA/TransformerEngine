@@ -18,6 +18,7 @@ dtype instead of encoding a number that silently rots.
 """
 
 import math
+import os
 
 import pytest
 import torch
@@ -40,6 +41,11 @@ def _frost_availability():
 
 
 _SKIP = _frost_availability()
+# Mirrors NVTE_GDN_TEST_REQUIRED in test_gdn_attention.py. These tests skip on any machine that
+# cannot reach the backend, which on most CI hardware is every machine; setting this on a lane
+# that is supposed to cover FROST turns a silent skip into a loud failure.
+if os.getenv("NVTE_FROST_TEST_REQUIRED", "0") == "1" and _SKIP is not None:
+    raise RuntimeError("NVTE_FROST_TEST_REQUIRED=1, but FrostAttention is unavailable: %s" % _SKIP)
 pytestmark = pytest.mark.skipif(_SKIP is not None, reason=str(_SKIP))
 
 # head_dim 512 is the whole point of the backend; 320 checks the interior of the (256, 512] range
