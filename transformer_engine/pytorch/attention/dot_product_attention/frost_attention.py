@@ -6,10 +6,17 @@
 
 Why this exists. Gemma-4 global layers use symmetric head_dim=512, and no backend TE can select
 today serves both that head dim and context parallelism: FlashAttention 2/3 cap at 256, FA4 is
-gated off at symmetric 512, the C++ cuDNN fused path caps at 256, and the unfused path supports
-512 but cannot do CP. cuDNN Frontend 1.29.0 ships CuTe-DSL ("FROST") SDPA kernels that do serve
-symmetric 512 forward and backward on Blackwell, reachable through the ordinary cuDNN graph API.
-This module wraps them so TE, including its CP ring, can dispatch to them.
+gated off at symmetric 512, the C++ cuDNN fused path is refused a graph by cuDNN above 256, and
+the unfused path supports 512 but cannot do CP. cuDNN Frontend 1.29.0 ships CuTe-DSL ("FROST")
+SDPA kernels that do serve symmetric 512 forward and backward on Blackwell.
+
+Why a separate Python backend rather than teaching the existing C++ fused path. The 256 ceiling
+there is not a TE check -- the f16 dispatch applies no head-dim test and simply asks cuDNN to
+build a graph -- so the natural question is why the new engines cannot just be picked up. They
+cannot: FROST engines are registered at Python import time behind
+CUDNN_FRONTEND_ENABLE_FROST_ENGINES and require the nvidia-cutlass-dsl Python package, while
+TE's C++ builds against cuDNN Frontend headers only. Reaching them therefore requires a Python
+graph, which is what this module is.
 
 Three properties of these kernels were verified on Blackwell before this was written, and each
 one constrains the code:
@@ -78,7 +85,12 @@ _HANDLES: dict = {}
 
 
 def _import_cudnn():
-    """Import cuDNN Frontend with FROST engines enabled, once."""
+    """Import cuDNN Frontend with FROST engines enabled, once.
+
+    Note the ordering hazard: the engines register at import time, so if another module imported
+    cudnn first without the switch set, setdefault here is too late and no FROST engine exists.
+    _select_frost_plan catches that by checking the plan name, but only once a plan is built.
+    """
     global _cudnn
     if _cudnn is None:
         # Must be set before the import: the engines are registered at import time.
@@ -161,6 +173,10 @@ def is_frost_attention_available() -> Tuple[bool, str]:
 
     if not torch.cuda.is_available():
         return _no("no CUDA device")
+    if os.environ.get("CUDNN_FRONTEND_ENABLE_FROST_ENGINES", "1") == "0":
+        # Explicitly switched off. Declining here is the difference between falling back cleanly
+        # and raising from _select_frost_plan once a plan is built.
+        return _no("CUDNN_FRONTEND_ENABLE_FROST_ENGINES=0 disables the FROST engines")
     if torch.cuda.get_device_capability() not in _SUPPORTED_ARCHS:
         return _no(
             "cuDNN FROST head_dim>256 kernels are SM100/SM103 only; found sm%d%d"
@@ -236,10 +252,15 @@ def is_frost_attention_supported(
     dropout: float = 0.0,
     attn_bias_type: str = "no_bias",
 ) -> Tuple[bool, str]:
-    """Whether this specific attention configuration should route to FROST."""
-    ok, reason = is_frost_attention_available()
-    if not ok:
-        return False, reason
+    """Whether this specific attention configuration should route to FROST.
+
+    Shape and dtype are checked before availability, and the ordering is deliberate rather than
+    stylistic. Probing availability imports cuDNN Frontend and sets
+    CUDNN_FRONTEND_ENABLE_FROST_ENGINES, which registers extra engines process-wide and so is
+    visible to every other cuDNN consumer in the process. This function runs for every attention
+    config on the machine, the vast majority of which are nowhere near head_dim 512, and none of
+    them should pay that cost or have their engine pool changed underneath them.
+    """
     if head_dim_qk != head_dim_v:
         return False, "FROST path requires symmetric head_dim; got %d/%d" % (
             head_dim_qk,
@@ -257,6 +278,9 @@ def is_frost_attention_supported(
         _mask_mode(attn_mask_type)
     except NotImplementedError as exc:
         return False, str(exc)
+    ok, reason = is_frost_attention_available()
+    if not ok:
+        return False, reason
     return True, ""
 
 

@@ -1866,9 +1866,9 @@ def get_attention_backend(
             FlashAttentionUtils.warning_printed = True
     # cuDNN FROST (CuTe-DSL SDPA in cuDNN Frontend >= 1.29.0) is the only backend that serves
     # symmetric head_dim in (256, 512] on SM100/SM103. Every other option stops short: FA2/FA3
-    # cap at 256, FA4 is disabled at symmetric 512 above, the C++ cuDNN fused path caps at 256,
-    # and UnfusedDotProductAttention supports 512 but not context parallelism. Without this,
-    # Gemma-4 global layers with CP > 1 select no backend at all.
+    # cap at 256, FA4 is disabled at symmetric 512 above, the C++ cuDNN fused path is refused a
+    # graph by cuDNN above 256, and UnfusedDotProductAttention supports 512 but not context
+    # parallelism. Without this, Gemma-4 global layers with CP > 1 select no backend at all.
     if use_frost_attention:
         # Local import: frost_attention pulls in cudnn lazily, so this stays cheap and keeps
         # TE importable on systems without cudnn-frontend installed.
