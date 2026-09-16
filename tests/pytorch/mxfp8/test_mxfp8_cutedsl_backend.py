@@ -158,8 +158,8 @@ def get_cfg_key(method, act, in_dtype, fp8_dtype, rowwise, colwise, swizzled):
         desc = act["desc"]
     elif with_dact:
         desc = f"d{act['desc']}"
-    # with_amax is hardcoded to False for now because there is no way to obtain this value and validate in python
-    # trailing False is use_2d_quantization; these cases never request 2D block scaling
+    # with_amax is hardcoded to False for now because currently MXFP8 quantizers never allocate an amax
+    # The last False is for use_2d_quantization; these cases never request 2D block scaling
     flags = (rowwise, colwise, swizzled, False, with_dbias, with_dact, with_act, False)
     major, minor = device_compute_capability()
     return (
