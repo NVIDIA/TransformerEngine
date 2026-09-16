@@ -17,6 +17,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import com
 from transformer_engine.pytorch import DType
 from test_attention_with_cp import (
     model_configs_flash_attn,
+    model_configs_frost_attn,
     model_configs_fused_attn,
 )
 from transformer_engine.pytorch import (
@@ -273,6 +274,14 @@ def run_dpa_with_cp(
             config = copy.deepcopy(model_configs_fused_attn[model])
         else:
             assert False, f"{model=} is not a known FusedAttention CP config!"
+    if kernel_backend == "FrostAttention":
+        # Leave NVTE_FLASH_ATTN and NVTE_FUSED_ATTN at 0: FROST is the only backend that serves
+        # head_dim > 256, so get_attention_backend selects it on its own.
+        os.environ["NVTE_FROST_ATTN"] = "1"
+        if model in model_configs_frost_attn:
+            config = copy.deepcopy(model_configs_frost_attn[model])
+        else:
+            assert False, f"{model=} is not a known FrostAttention CP config!"
     assert config.attn_mask_type in [
         "causal",
         "no_mask",
