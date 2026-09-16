@@ -8,21 +8,17 @@ from __future__ import annotations
 import atexit
 import warnings
 from dataclasses import dataclass
-from typing import Optional, TYPE_CHECKING
+from typing import Optional
 
 import torch
 import torch.distributed as dist
 
 import transformer_engine_torch as tex
 
+from ..common.recipe import MXFP8BlockScaling, Recipe
 from .cpu_offload import mark_not_offload
 from .distributed import symm_mem_alloc, release_symm_mem_pool
 from .quantized_tensor import QuantizedTensor
-
-# Type-hint-only import; keeps the ``Recipe`` annotation without a runtime import of
-# common.recipe (the concrete recipe classes are imported lazily where used).
-if TYPE_CHECKING:
-    from ..common.recipe import Recipe
 
 __all__ = [
     "EpBuffer",
@@ -300,17 +296,26 @@ class EpBuffer:
 
         size_bytes = tex.ep_handle_mem_size(self.top_k, self.alignment)
         self.handle_mem = torch.empty(int(size_bytes), dtype=torch.uint8, device=device)
-        self.tokens_per_expert = torch.empty(
-            self.num_local_experts, dtype=torch.int64, device=device
-        )
-        # Persistent tensor; keep resident if activation CPU offloading is on.
         mark_not_offload(self.handle_mem)
-        # Per-step recv-token total (int64 [1]), written by ep_prepare. Eager reads it
-        # host-side to size the recv outputs, so it lives in pinned host memory the prepare
-        # kernel writes directly (UVA) — no D2H copy, just a stream sync. Graph mode keeps
-        # it on device for the backend's post-replay overflow check. The eager tensor is host
-        # memory, so activation CPU offloading (which targets device tensors) never touches it
-        # and no mark_not_offload guard is needed.
+        # Per-step recv-token total (int64 [1]) and per-expert counts (int64 [num_local_experts]),
+        # both written by ep_prepare. Eager reads them host-side (recv sizing, grouped-GEMM group
+        # sizes), so they live in pinned host memory the prepare kernel writes directly (UVA) - no
+        # D2H copy, just a stream sync. Graph mode keeps both on device (post-replay overflow check;
+        # device-side group sizes). MXFP8 also needs the counts on device even in eager: dispatch and
+        # combine backward build the per-expert GroupedTensor from them device-side.
+        needs_device_counts = (
+            not self.eager
+            or isinstance(self.dispatch_fwd_quant_recipe, MXFP8BlockScaling)
+            or isinstance(self.combine_bwd_quant_recipe, MXFP8BlockScaling)
+        )
+        if needs_device_counts:
+            self.tokens_per_expert = torch.empty(
+                self.num_local_experts, dtype=torch.int64, device=device
+            )
+        else:
+            self.tokens_per_expert = torch.empty(
+                self.num_local_experts, dtype=torch.int64, pin_memory=True
+            )
         if self.eager:
             self.total_recv_tokens = torch.empty(1, dtype=torch.int64, pin_memory=True)
         else:
@@ -1053,8 +1058,6 @@ def ep_dispatch(
     # quantized tensor stays the autograd operand; grad reaches the pre-quant input.
     tokens_scale_inv = None
     if buffer.dispatch_fwd_quant_recipe is not None:
-        from ..common.recipe import MXFP8BlockScaling
-
         if not isinstance(buffer.dispatch_fwd_quant_recipe, MXFP8BlockScaling):
             raise NotImplementedError(
                 "EP block-scaled dispatch supports MXFP8BlockScaling only; got "
@@ -1107,8 +1110,6 @@ def ep_combine(
     # wire as MXFP8 and returns the expert_out grad as a GroupedTensor.
     bwd_quant_recipe = None
     if buffer.combine_bwd_quant_recipe is not None:
-        from ..common.recipe import MXFP8BlockScaling
-
         if not isinstance(buffer.combine_bwd_quant_recipe, MXFP8BlockScaling):
             raise NotImplementedError(
                 "EP combine backward supports MXFP8BlockScaling only; got "
