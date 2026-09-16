@@ -5,6 +5,7 @@
 """JAX related extensions."""
 
 import os
+import warnings
 from pathlib import Path
 from packaging import version
 
@@ -95,15 +96,23 @@ def setup_jax_extension(
     if (discovered_nccl_include_path := nccl_include_path()) is not None:
         include_dirs.append(discovered_nccl_include_path)
     include_dirs.append(cudnn_frontend_include_path())
+    xla_include_path = xla_path()
     include_dirs.extend(
         [
             common_header_files,
             common_header_files / "common",
             common_header_files / "common" / "include",
             csrc_header_files,
-            xla_path(),
+            xla_include_path,
         ]
     )
+
+    # Match the borrowed-comm path's compile-time header check.
+    if not (Path(xla_include_path) / "xla/ffi/api/collectives_c_api.h").is_file():
+        warnings.warn(
+            f"XLA headers in {xla_include_path} do not include "
+            "xla/ffi/api/collectives_c_api.h; the EP borrowed-comm path will not be built."
+        )
 
     # Compile flags
     cxx_flags = ["-O3"]
