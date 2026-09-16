@@ -14,6 +14,7 @@ import torch
 
 from ...cpp_extensions import general_gemm
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
+from transformer_engine import te_device_type
 from ...distributed import (
     CudaRNGStatesTracker,
     gather_along_first_dim,
@@ -1016,7 +1017,7 @@ class BasicLinear(BasicOperation):
 
         # Get autocast dtype if needed
         if torch.is_autocast_enabled():
-            dtype = torch.get_autocast_dtype("cuda")
+            dtype = torch.get_autocast_dtype(te_device_type())
         else:
             dtype = self.weight.dtype
 

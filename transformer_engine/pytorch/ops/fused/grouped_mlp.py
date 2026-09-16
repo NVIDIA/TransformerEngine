@@ -1149,7 +1149,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
 
         device = fc1_weight_param.device
         if torch.is_autocast_enabled():
-            dtype = torch.get_autocast_dtype("cuda")
+            dtype = torch.get_autocast_dtype(te_device_type())
         else:
             dtype = fc1_weight_param.dtype
 

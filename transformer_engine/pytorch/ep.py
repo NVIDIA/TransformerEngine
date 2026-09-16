@@ -18,6 +18,7 @@ import transformer_engine_torch as tex
 from .cpu_offload import mark_not_offload
 from .distributed import symm_mem_alloc, release_symm_mem_pool
 from .quantized_tensor import QuantizedTensor
+from transformer_engine import te_device_type
 
 # Type-hint-only import; keeps the ``Recipe`` annotation without a runtime import of
 # common.recipe (the concrete recipe classes are imported lazily where used).
@@ -159,7 +160,7 @@ def ep_bootstrap(
 
     # Materialize the PG's NCCL comm before borrowing its raw handle.
     dist.barrier(group=ep_group, device_ids=[torch.cuda.current_device()])
-    comm_ptr = ep_group._get_backend(torch.device("cuda"))._comm_ptr()
+    comm_ptr = ep_group._get_backend(torch.device(te_device_type()))._comm_ptr()
 
     tex.ep_initialize(
         int(comm_ptr),
@@ -274,7 +275,7 @@ class EpBuffer:
         if not _BOOTSTRAPPED:
             raise RuntimeError("EpBuffer requires ep_bootstrap() to be called first.")
         if device is None:
-            device = torch.device("cuda", torch.cuda.current_device())
+            device = torch.device(te_device_type(), torch.cuda.current_device())
         alignment = int(alignment)
         if alignment > 1 and (alignment & (alignment - 1)) != 0:
             raise ValueError(f"alignment must be 0, 1, or a power of two (got {alignment}).")

@@ -15,6 +15,7 @@ import torch.nn.functional as F
 from torch.fx.experimental.symbolic_shapes import guard_scalar
 from torch.nn.parameter import Parameter
 
+from transformer_engine import te_device_type
 from transformer_engine.common.recipe import (
     Format,
     Recipe,
@@ -962,12 +963,14 @@ class DotProductAttention(TransformerEngineBaseModule):
             self.softmax_offset = None
         if self.softmax_type == "off-by-one":
             self.softmax_offset = torch.zeros(
-                self.num_attention_heads // self.tp_size, device="cuda"
+                self.num_attention_heads // self.tp_size, device=te_device_type()
             )
         if self.softmax_type == "learnable":
             self.register_parameter(
                 "softmax_offset",
-                Parameter(torch.zeros(self.num_attention_heads // self.tp_size, device="cuda")),
+                Parameter(
+                    torch.zeros(self.num_attention_heads // self.tp_size, device=te_device_type())
+                ),
                 get_rng_state_tracker=get_rng_state_tracker,
             )
 

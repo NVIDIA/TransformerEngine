@@ -19,6 +19,7 @@ import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch.torch_version import torch_version
 from transformer_engine.pytorch.tensor.utils import clear_columnwise_cache, is_custom
+from transformer_engine import te_device_type
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
     _ub_communicators,
@@ -1549,7 +1550,7 @@ class _LayerNormMLP(torch.autograd.Function):
             reduce_scatter_out = None
             if ctx.ub_overlap_rs_dgrad:
                 reduce_scatter_out = torch.empty(
-                    fc1_dgrad_shape, dtype=ctx.activation_dtype, device="cuda"
+                    fc1_dgrad_shape, dtype=ctx.activation_dtype, device=te_device_type()
                 )
             if ctx.ub_bulk_wgrad:
                 gemm_out = ub_obj_fc1_wgrad.get_buffer(local_chunk=False)
@@ -1645,7 +1646,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 reduce_scatter_out = None
                 if ctx.ub_bulk_wgrad and ub_obj_fc1_wgrad.is_fp8_ubuf():
                     reduce_scatter_out = torch.empty(
-                        fc1_dgrad_shape, dtype=ctx.activation_dtype, device="cuda"
+                        fc1_dgrad_shape, dtype=ctx.activation_dtype, device=te_device_type()
                     )
 
                 # Arguments to include in wgrad GEMM closure
@@ -1889,7 +1890,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                          .. math::
                             y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \varepsilon}} *
                             (1 + \gamma) + \beta
-    device : Union[torch.device, str], default = "cuda"
+    device : Union[torch.device, str], default=te_device_type()
           The device on which the parameters of the model will be allocated. It is the user's
           responsibility to ensure all parameters are moved to the GPU before running the
           forward pass.
@@ -1978,7 +1979,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         micro_batch_size: Optional[int] = None,
         set_parallel_mode: bool = False,
         zero_centered_gamma: bool = False,
-        device: Union[torch.device, str] = "cuda",
+        device: Union[torch.device, str] = te_device_type(),
         ub_overlap_ag: bool = False,
         name: Optional[str] = None,
         ub_overlap_rs: bool = False,

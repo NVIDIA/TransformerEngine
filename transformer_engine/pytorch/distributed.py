@@ -20,6 +20,7 @@ from torch.utils.checkpoint import detach_variable, noop_context_fn
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp._common_utils import _get_module_fsdp_state
 from torch.distributed.fsdp._traversal_utils import _get_fsdp_states_with_modules
+from transformer_engine import te_device_type
 
 try:
     import torch.distributed._symmetric_memory as symm_mem
@@ -96,7 +97,7 @@ def is_graph_safe_rng_state(state: Union[torch.Tensor, torch.Generator]) -> bool
 
 
 def _get_cuda_rng_state(
-    device: Union[int, str, torch.device] = "cuda",
+    device: Union[int, str, torch.device] = te_device_type(),
     clone: bool = False,
     graph_safe: bool = True,
 ) -> torch.Tensor:
@@ -106,7 +107,7 @@ def _get_cuda_rng_state(
     if isinstance(device, str):
         device = torch.device(device)
     elif isinstance(device, int):
-        device = torch.device("cuda", device)
+        device = torch.device(te_device_type(), device)
     idx = device.index
     if idx is None:
         idx = torch.cuda.current_device()
@@ -128,11 +129,11 @@ def _set_cuda_rng_state(
     """Sets the random number generator state of the current GPU."""
 
     if device == -1:
-        device = torch.device("cuda")
+        device = torch.device(te_device_type())
     elif isinstance(device, str):
         device = torch.device(device)
     elif isinstance(device, int):
-        device = torch.device("cuda", device)
+        device = torch.device(te_device_type(), device)
 
     def cb() -> None:
         idx = device.index
@@ -294,10 +295,10 @@ def _get_active_autocast_contexts():
     autocast_cached = torch.is_autocast_cache_enabled()
 
     if torch_version() >= (2, 4, 0):
-        gpu_autocast_enabled = torch.is_autocast_enabled("cuda")
-        gpu_autocast_dtype = torch.get_autocast_dtype("cuda")
+        gpu_autocast_enabled = torch.is_autocast_enabled(te_device_type())
+        gpu_autocast_dtype = torch.get_autocast_dtype(te_device_type())
         gpu_autocast_ctx = torch.amp.autocast(
-            "cuda",
+            te_device_type(),
             enabled=gpu_autocast_enabled,
             dtype=gpu_autocast_dtype,
             cache_enabled=autocast_cached,
@@ -1045,7 +1046,7 @@ def _all_gather_fp8(
     out: Float8TensorStorage
     if quantizer is not None:
         dtype = torch.float32
-        device = "cuda"
+        device = te_device_type()
         if isinstance(inp, Float8Tensor):
             dtype = inp.dtype
             device = inp.device
@@ -1985,7 +1986,7 @@ def symm_mem_alloc(
     be a shared static buffer. ``backend`` selects the symm-mem backend (default NCCL; for the pool it
     is captured at pool creation)."""
     if device is None:
-        device = torch.device("cuda", torch.cuda.current_device())
+        device = torch.device(te_device_type(), torch.cuda.current_device())
     if not HAS_TORCH_SYMMETRIC:
         raise RuntimeError(
             "torch.distributed._symmetric_memory is unavailable; symm_mem_alloc "

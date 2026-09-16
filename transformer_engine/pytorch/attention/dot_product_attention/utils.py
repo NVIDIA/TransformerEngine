@@ -1965,7 +1965,7 @@ def get_padding_mask(
         return (
             (positions.unsqueeze(0) >= seqlens.unsqueeze(1))
             .view(batch_size, 1, 1, max_seqlen)
-            .to(device="cuda")
+            .to(device=te_device_type())
         )
 
     attention_mask_q = _mask(cu_seqlens_q, max_seqlen_q)
@@ -2091,9 +2091,11 @@ def get_full_mask(
         actual_seqlens_kv = m[:, 0, 0, :].sum(dim=1)
 
     # apply SWA mask
-    mask = torch.arange(max_seqlen_q, dtype=torch.int32, device="cuda").view(
+    mask = torch.arange(max_seqlen_q, dtype=torch.int32, device=te_device_type()).view(
         1, 1, max_seqlen_q, 1
-    ) - torch.arange(max_seqlen_kv, dtype=torch.int32, device="cuda").view(1, 1, 1, max_seqlen_kv)
+    ) - torch.arange(max_seqlen_kv, dtype=torch.int32, device=te_device_type()).view(
+        1, 1, 1, max_seqlen_kv
+    )
     swa_left = None
     swa_right = None
     if attn_mask_type == "causal_bottom_right" or (
@@ -2189,7 +2191,7 @@ def get_alibi(
                 m_hat = torch.pow(m_hat_0, torch.arange(1, 1 + 2 * (num_heads - n), 2))
                 m = torch.cat([m, m_hat])
 
-            _alibi_cache["_alibi_slopes"] = m.to(dtype=torch.float32, device="cuda")
+            _alibi_cache["_alibi_slopes"] = m.to(dtype=torch.float32, device=te_device_type())
         _alibi_cache["_num_heads"] = num_heads
         _alibi_cache["_alibi_slopes_require_update"] = False
 
@@ -2202,9 +2204,9 @@ def get_alibi(
         else:
             raise ValueError("ALiBi slopes cannot exceed 2 dimensions.")
 
-        bias = torch.arange(max_seqlen_q, dtype=torch.int32, device="cuda").view(
+        bias = torch.arange(max_seqlen_q, dtype=torch.int32, device=te_device_type()).view(
             1, 1, max_seqlen_q, 1
-        ) - torch.arange(max_seqlen_kv, dtype=torch.int32, device="cuda").view(
+        ) - torch.arange(max_seqlen_kv, dtype=torch.int32, device=te_device_type()).view(
             1, 1, 1, max_seqlen_kv
         )
         if actual_seqlens_q is None and actual_seqlens_kv is None:
@@ -2224,7 +2226,9 @@ def get_alibi(
         _alibi_cache["_max_seqlen_q"], _alibi_cache["_max_seqlen_kv"] = max_seqlen_q, max_seqlen_kv
         _alibi_cache["_bottom_right_alignment"] = bottom_right_alignment
         bias_dtype = torch.float32 if bias_dtype is None else bias_dtype
-        _alibi_cache["_alibi_bias"] = bias.contiguous().to(dtype=bias_dtype, device="cuda")
+        _alibi_cache["_alibi_bias"] = bias.contiguous().to(
+            dtype=bias_dtype, device=te_device_type()
+        )
         _alibi_cache["_alibi_bias_require_update"] = False
 
     return _alibi_cache["_alibi_slopes"], _alibi_cache["_alibi_bias"]
@@ -2239,7 +2243,7 @@ def get_cu_seqlens(mask: torch.Tensor) -> torch.Tensor:
     mask = mask.squeeze(1).squeeze(1)
     reduced_mask = mask.logical_not().sum(dim=1)
     cu_seqlens = reduced_mask.cumsum(dim=0).to(torch.int32)
-    zero = torch.zeros(1, dtype=torch.int32, device="cuda")
+    zero = torch.zeros(1, dtype=torch.int32, device=te_device_type())
     cu_seqlens = torch.cat((zero, cu_seqlens))
 
     return cu_seqlens
@@ -2257,7 +2261,7 @@ def get_cu_seqlens_and_indices(mask: torch.Tensor) -> Tuple[torch.Tensor, torch.
 
     reduced_mask = mask.logical_not().sum(dim=1)
     cu_seqlens = reduced_mask.cumsum(dim=0).to(torch.int32)
-    zero = torch.zeros(1, dtype=torch.int32, device="cuda")
+    zero = torch.zeros(1, dtype=torch.int32, device=te_device_type())
     cu_seqlens = torch.cat((zero, cu_seqlens))
 
     mask = mask.reshape(-1)
@@ -2293,7 +2297,7 @@ def get_indices(max_seqlen: int, cu_seqlens: torch.Tensor) -> torch.Tensor:
         ordered,
         bs * max_seqlen,
     )
-    return indices.to(dtype=torch.int64, device="cuda").unsqueeze(1).unsqueeze(1)
+    return indices.to(dtype=torch.int64, device=te_device_type()).unsqueeze(1).unsqueeze(1)
 
 
 def get_full_cu_seqlens(

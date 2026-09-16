@@ -18,6 +18,7 @@ from ...tensor import Float8CurrentScalingQuantizer, Quantizer
 from ...utils import clear_tensor_data
 from ..op import BasicOperation, OperationContext
 from .._common import maybe_dequantize
+from transformer_engine import te_device_type
 
 __all__ = [
     "SwiGLU",
@@ -116,7 +117,7 @@ class SwiGLU(BasicOperation):
         # Compute dtype
         dtype: torch.dtype
         if torch.is_autocast_enabled():
-            dtype = torch.get_autocast_dtype("cuda")
+            dtype = torch.get_autocast_dtype(te_device_type())
         else:
             dtype = input_.dtype
         if dtype not in (torch.float32, torch.float16, torch.bfloat16):
@@ -363,7 +364,7 @@ class ClampedSwiGLU(BasicOperation):
         # Compute dtype
         dtype: torch.dtype
         if torch.is_autocast_enabled():
-            dtype = torch.get_autocast_dtype("cuda")
+            dtype = torch.get_autocast_dtype(te_device_type())
         else:
             dtype = input_.dtype
         if dtype not in (torch.float32, torch.float16, torch.bfloat16):
@@ -530,7 +531,7 @@ class _ScaledGLU(BasicOperation):
 
         # Determine compute dtype
         if torch.is_autocast_enabled():
-            dtype = torch.get_autocast_dtype("cuda")
+            dtype = torch.get_autocast_dtype(te_device_type())
         elif isinstance(input_, torch.Tensor):
             dtype = input_.dtype
         else:
