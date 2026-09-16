@@ -34,6 +34,8 @@
 namespace transformer_engine {
 namespace tvm_ffi_bridge {
 
+bool initialize_python_cutedsl_backend();
+
 // Fused activation token forwarded to Python. Encodes both the family and the
 // forward-vs-derivative direction: "relu" is the forward activation, "drelu" its
 // backward derivative (dact). This is why no separate is_act/is_dact flag is
@@ -371,7 +373,7 @@ class TVMFFICentral {
  private:
   ~TVMFFICentral() = default;
   TVMFFICentral()
-      : tvm_ffi_available_(load_tvm_ffi()),
+      : tvm_ffi_available_(prepare_tvm_ffi()),
         cutedsl_backend_enabled_(is_cutedsl_backend_enabled()),
         warn_cutedsl_backend_not_chosen_(warn_if_cutedsl_backend_not_chosen()) {}
 
@@ -379,7 +381,12 @@ class TVMFFICentral {
   // if user uses TE from a python environment. Otherwise, if user stays in C++ only without python, then CuTeDSL kernels
   // will be unavailable either because we fail to load libtvm_ffi.so or CuTeDSL kernel entrypoints are not registered in Python.
   // In either case, we will fall back to the default TE CUDA C++ kernels.
-  static bool load_tvm_ffi() { return dlopen("libtvm_ffi.so", RTLD_NOW | RTLD_GLOBAL) != nullptr; }
+  static bool prepare_tvm_ffi() {
+    if (!initialize_python_cutedsl_backend()) {
+      return false;
+    }
+    return dlopen("libtvm_ffi.so", RTLD_NOW | RTLD_GLOBAL) != nullptr;
+  }
   TVMFFICentral(const TVMFFICentral &) = delete;
   TVMFFICentral &operator=(const TVMFFICentral &) = delete;
   TVMFFICentral(TVMFFICentral &&) = delete;

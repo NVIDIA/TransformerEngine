@@ -3,7 +3,6 @@
 # See LICENSE for license information.
 
 add_executable(test_operator
-               test_operator_environment.cpp
                test_cast.cu
                test_cast_current_scaling.cu
                test_cast_current_scaling_grouped.cu
@@ -48,25 +47,7 @@ add_executable(test_operator
 
 # Find required packages
 find_package(OpenMP REQUIRED)
-find_package(Python COMPONENTS Interpreter Development.Embed REQUIRED)
-list(APPEND test_operator_LINKER_LIBS CUDA::cudart GTest::gtest_main ${TE_LIB} CUDA::nvrtc CUDNN::cudnn Python::Python)
-
-if(NOT TVM_FFI_INCLUDE_DIR)
-  execute_process(
-      COMMAND ${Python_EXECUTABLE} -c
-              "from importlib.metadata import distribution; print(distribution('apache-tvm-ffi').locate_file('tvm_ffi/include'))"
-      OUTPUT_VARIABLE TVM_FFI_INCLUDE_DIR
-      OUTPUT_STRIP_TRAILING_WHITESPACE
-      COMMAND_ERROR_IS_FATAL ANY)
-endif()
-target_include_directories(test_operator PRIVATE ${TVM_FFI_INCLUDE_DIR})
-
-set_source_files_properties(
-    test_operator_environment.cpp PROPERTIES
-    COMPILE_DEFINITIONS NVTE_SOURCE_DIR="${CMAKE_SOURCE_DIR}/../..")
-set_source_files_properties(
-    test_cast_mxfp8.cu PROPERTIES
-    COMPILE_OPTIONS "--expt-relaxed-constexpr")
+list(APPEND test_operator_LINKER_LIBS CUDA::cudart GTest::gtest_main ${TE_LIB} CUDA::nvrtc CUDNN::cudnn)
 
 target_link_libraries(test_operator PUBLIC ${test_operator_LINKER_LIBS} OpenMP::OpenMP_CXX)
 target_compile_options(test_operator PRIVATE -O2 -fopenmp)
