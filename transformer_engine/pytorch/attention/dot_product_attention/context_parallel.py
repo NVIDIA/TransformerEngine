@@ -1467,7 +1467,6 @@ def cp_p2p_bwd_flash_attn(
     out_part,
     dout_part,
     section,
-    deterministic=False,
 ):
     """Per-tile backward call of CP P2P with FlashAttention backend"""
     if pad_between_seqs:
@@ -1595,19 +1594,25 @@ def _frost_mask_for_section(attn_mask_type, section):
         return attn_mask_type
     if section in ("lower-triangle", "upper-triangle"):
         return "no_mask"
-    raise ValueError("unknown CP section %r" % section)
+    raise ValueError(f"unknown CP section {section!r}")
 
 
 def _frost_mask_for_window(window_size):
     """Per-step mask for the all_gather path, derived from its adjusted window.
 
     get_kv_seq_info_after_all_gather trims KV and returns a window that is BOTTOM-RIGHT aligned:
-    (-1, 0) means causal relative to the trimmed KV, not top-left causal. Using top-left here
-    would silently compute a different mask, since the two only coincide when SQ == SKV and
-    all_gather never produces that.
+    (-1, 0) means causal relative to the trimmed KV, not top-left causal. Using top-left would be
+    wrong wherever the two differ, which is whenever the trim leaves SKV > SQ.
     """
     if window_size is None or tuple(window_size) == (-1, -1):
         return "no_mask", None
+    # A positive right bound is look-ahead, which none of the supported masks express. _mask_spec
+    # rejects it at selection time, but that is a different file, so assert the invariant here
+    # rather than quietly returning a causal mask that admits future keys.
+    assert window_size[1] in (
+        -1,
+        0,
+    ), f"all_gather produced a look-ahead window {window_size}"
     # Anything with a bounded side is causal relative to the trimmed KV, and a bounded left side
     # is a sliding window. Both are expressed as a band against the bottom-right diagonal, so the
     # window travels with the mask type rather than needing a separate spelling per case.
@@ -1754,11 +1759,15 @@ def cp_p2p_fwd_frost_attn(
     q_part,
     k_part,
     v_part,
-    cu_seqlens_q_per_step,  # noqa: ARG001  unused for bshd; matches the fused call convention
-    cu_seqlens_kv_per_step,  # noqa: ARG001
+    cu_seqlens_q_per_step,
+    cu_seqlens_kv_per_step,
     section,
-):
+):  # pylint: disable=unused-argument
     """Per-tile forward call of CP P2P with the cuDNN FROST backend.
+
+    cu_seqlens_*_per_step are accepted but unused: they carry the thd offsets, and thd is
+    declined by the selector. They stay in the signature so the ring can call this and
+    cp_p2p_fwd_fused_attn with one argument list.
 
     Returns the same 5-tuple shape as cp_p2p_fwd_fused_attn so the ring code can consume it
     unchanged. rng_state, attn_bias and max_logit are None: FROST supports neither dropout nor
@@ -5562,6 +5571,10 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                     fa_backward_kwargs["softcap"] = ctx.softcap
 
         dq_fp8, dk_fp8, dv_fp8 = None, None, None
+        # Only the fused branch below binds this, and only the fused branch reads it further
+        # down -- but with three branches that binding no longer dominates the read, so give it
+        # a definition rather than rely on the conditions staying in step.
+        rest = []
         if ctx.use_frost_attention:
             dq, dk, dv = cp_a2a_bwd_frost_attn(
                 ctx.softmax_scale,

@@ -129,7 +129,10 @@ def test_frost_forward_matches_reference(shape, mask, dtype):
     torch.manual_seed(0)
     # Generate in fp32 so there is a true high-precision original to measure against, then cast
     # for the kernel. [b, h, s, d] views over bshd-contiguous memory is what the backend consumes.
-    mk = lambda s_, h_: torch.randn(b, s_, h_, d, device="cuda").permute(0, 2, 1, 3).contiguous()
+    # A bshd VIEW, which is what the backend receives: to_frost_layout permutes a bshd-contiguous
+    # tensor and hands the result over without a copy. Materialising with .contiguous() here would
+    # produce bhsd strides instead and leave the stride-keyed plan cache untested.
+    mk = lambda s_, h_: torch.randn(b, s_, h_, d, device="cuda").permute(0, 2, 1, 3)
     q32, k32, v32 = mk(sq, hq), mk(skv, hkv), mk(skv, hkv)
     q, k, v = q32.to(dtype), k32.to(dtype), v32.to(dtype)
     scale = 1.0 / math.sqrt(d)
@@ -159,8 +162,9 @@ def test_frost_forward_matches_reference(shape, mask, dtype):
 
 
 @pytest.mark.parametrize("window", [(256, 0), (128, 0), (0, 0)], ids=lambda w: "win%d" % w[0])
-@pytest.mark.parametrize("mask", ["causal", "causal_bottom_right"])
-def test_frost_sliding_window_matches_reference(mask, window):
+@pytest.mark.parametrize("mask", ["causal", "causal_bottom_right", "no_mask"])
+@pytest.mark.parametrize("sq,skv", [(1024, 1024), (512, 1024)], ids=["square", "rect"])
+def test_frost_sliding_window_matches_reference(mask, window, sq, skv):
     """Sliding window against the float64 reference.
 
     The engine advertises swa support, and cuDNN expresses a window as a left bound on the same
@@ -172,10 +176,15 @@ def test_frost_sliding_window_matches_reference(mask, window):
         frost_attn_fwd,
     )
 
-    b, hq, hkv, sq, skv, d = 2, 8, 4, 1024, 1024, 512
+    # The rectangular case is the one that matters for alignment: top-left and bottom-right
+    # coincide when sq == skv, so a swapped alignment is invisible in square shapes.
+    b, hq, hkv, d = 2, 8, 4, 512
     dtype = torch.bfloat16
     torch.manual_seed(0)
-    mk = lambda s_, h_: torch.randn(b, s_, h_, d, device="cuda").permute(0, 2, 1, 3).contiguous()
+    # A bshd VIEW, which is what the backend receives: to_frost_layout permutes a bshd-contiguous
+    # tensor and hands the result over without a copy. Materialising with .contiguous() here would
+    # produce bhsd strides instead and leave the stride-keyed plan cache untested.
+    mk = lambda s_, h_: torch.randn(b, s_, h_, d, device="cuda").permute(0, 2, 1, 3)
     q32, k32, v32 = mk(sq, hq), mk(skv, hkv), mk(skv, hkv)
     q, k, v = q32.to(dtype), k32.to(dtype), v32.to(dtype)
     scale = 1.0 / math.sqrt(d)
@@ -210,7 +219,10 @@ def test_frost_backward_matches_reference(shape, mask, window):
     b, hq, hkv, sq, skv, d = shape
     dtype = torch.bfloat16
     torch.manual_seed(0)
-    mk = lambda s_, h_: torch.randn(b, s_, h_, d, device="cuda").permute(0, 2, 1, 3).contiguous()
+    # A bshd VIEW, which is what the backend receives: to_frost_layout permutes a bshd-contiguous
+    # tensor and hands the result over without a copy. Materialising with .contiguous() here would
+    # produce bhsd strides instead and leave the stride-keyed plan cache untested.
+    mk = lambda s_, h_: torch.randn(b, s_, h_, d, device="cuda").permute(0, 2, 1, 3)
     q32, k32, v32 = mk(sq, hq), mk(skv, hkv), mk(skv, hkv)
     q, k, v = q32.to(dtype), k32.to(dtype), v32.to(dtype)
     scale = 1.0 / math.sqrt(d)
