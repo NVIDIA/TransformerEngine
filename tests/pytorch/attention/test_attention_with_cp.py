@@ -758,6 +758,55 @@ def test_cp_with_fused_attention(
     )
 
 
+def _frost_availability():
+    """Why FrostAttention cannot run here, or None if it can.
+
+    The backend needs cuDNN Frontend >= 1.29.0 and, less obviously,
+    nvidia-cutlass-dsl >= 4.7.0: cudnn-frontend only declares >= 4.6.2, and below the FROST floor
+    every FROST engine silently declines and ordinary backend plans are returned with no error.
+    Reporting the reason as a skip keeps that distinguishable from a real failure.
+    """
+    if get_device_compute_capability() not in ((10, 0), (10, 3)):
+        return "FrostAttention requires SM100/SM103 (the cuDNN d512 backward is Blackwell-only)."
+    from transformer_engine.pytorch.attention.dot_product_attention.frost_attention import (
+        is_frost_attention_available,
+    )
+
+    ok, reason = is_frost_attention_available()
+    return None if ok else reason
+
+
+@pytest.mark.parametrize("model", model_configs_frost_attn.keys())
+@pytest.mark.parametrize("qkv_format", ["bshd", "sbhd"])
+@pytest.mark.parametrize("cp_comm_type", ["p2p", "all_gather", "a2a"])
+def test_cp_with_frost_attention(cp_pool, model, qkv_format, cp_comm_type):
+    """Context parallelism at head_dim 512, which no other backend serves.
+
+    thd and a2a+p2p are excluded because the backend declines them: thd needs varlen support that
+    is not implemented, and a2a+p2p is not wired up.
+    """
+    reason = _frost_availability()
+    if reason is not None:
+        pytest.skip(reason)
+
+    config = model_configs_frost_attn[model]
+    config.context_parallel = True
+    config.cp_comm_type = cp_comm_type
+
+    pool = cp_pool(2)
+
+    _submit(
+        pool,
+        dtype="bf16",
+        model=model,
+        qkv_format=qkv_format,
+        kernel_backend="FrostAttention",
+        cp_comm_type=cp_comm_type,
+        is_training=True,
+        log_level=pytest_logging_level,
+    )
+
+
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 7), reason="cuDNN 8.9.7+ is required.")
 @pytest.mark.skipif(
     get_device_compute_capability() < (9, 0), reason="FusedAttention THD requires sm90+."
