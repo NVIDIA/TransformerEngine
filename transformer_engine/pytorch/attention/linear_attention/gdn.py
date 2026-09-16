@@ -22,7 +22,7 @@ from transformer_engine.pytorch.constants import dist_group_type
 from transformer_engine.pytorch.distributed import get_distributed_world_size, checkpoint
 from transformer_engine.pytorch.jit import no_torch_dynamo
 
-_dpa_fp8_recipe = os.getenv("NVTE_DPA_FP8_RECIPE", "")
+_la_fp8_recipe = os.getenv("NVTE_LA_FP8_RECIPE", "")
 
 
 @lru_cache(maxsize=1)
@@ -280,7 +280,7 @@ class GatedDeltaNetAttention(TransformerEngineBaseModule):
 
     This module is **experimental** and subject to change.
 
-    Set ``NVTE_DPA_FP8_RECIPE=F16`` before importing Transformer Engine to run
+    Set ``NVTE_LA_FP8_RECIPE=F16`` before importing Transformer Engine to run
     GDN in FP16/BF16 inside a quantized autocast region. This preserves the
     input dtype and disables quantization and calibration only for GDN.
 
@@ -431,7 +431,7 @@ class GatedDeltaNetAttention(TransformerEngineBaseModule):
                 f"got g={'set' if g is not None else 'None'} and "
                 f"beta={'set' if beta is not None else 'None'}."
             )
-        force_f16 = _dpa_fp8_recipe == "F16"
+        force_f16 = _la_fp8_recipe == "F16"
         if not force_f16 and (
             FP8GlobalStateManager.is_fp8_enabled() or FP8GlobalStateManager.is_fp8_calibration()
         ):

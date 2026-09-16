@@ -256,13 +256,18 @@ FP8 Configuration
    :Default: Empty (use same as linear layers)
    :Description: Override FP8 recipe for DotProductAttention layers. Valid values: ``"F16"`` (disable FP8), ``"DelayedScaling"``, or ``"Float8CurrentScaling"``. This allows using different FP8 recipes for attention vs. linear layers.
 
-   ``"F16"`` also allows GatedDeltaNetAttention to run inside a quantized autocast
-   region, including MXFP8. It preserves FP16/BF16 Q/K/V inputs and disables
-   quantization and calibration locally, leaving the enclosing linear-layer
-   recipe unchanged. GDN gates and recurrent state still require FP32. Other
-   values do not enable quantized GDN; without this override, GDN continues to
-   reject FP8 autocast and calibration. Set this variable before importing
-   Transformer Engine. It also retains its existing effect on DotProductAttention.
+.. envvar:: NVTE_LA_FP8_RECIPE
+
+   :Type: ``str``
+   :Default: Empty (no override)
+   :Description: Override the precision of linear attention independently of DotProductAttention. Currently, ``"F16"`` allows GatedDeltaNetAttention to run inside a quantized autocast region, including MXFP8.
+
+   This preserves FP16/BF16 Q/K/V inputs and disables quantization and calibration
+   locally, leaving the enclosing linear-layer recipe unchanged. GDN gates and
+   recurrent state still require FP32. Other values do not enable quantized GDN;
+   without this override, GDN continues to reject FP8 autocast and calibration.
+   Set this variable before importing Transformer Engine. This setting does not
+   affect DotProductAttention or GQA.
 
 .. envvar:: NVTE_DPA_FP8_RECIPE_DPA
 

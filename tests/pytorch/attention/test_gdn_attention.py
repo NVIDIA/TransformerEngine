@@ -463,7 +463,7 @@ def test_gdn_rejects_fp8_autocast(monkeypatch, override, calibrating):
     gdn_module = importlib.import_module(
         "transformer_engine.pytorch.attention.linear_attention.gdn"
     )
-    monkeypatch.setattr(gdn_module, "_dpa_fp8_recipe", override)
+    monkeypatch.setattr(gdn_module, "_la_fp8_recipe", override)
     q, k, v, g, beta = _inputs(1, 128, 1, 1)
     attention = GatedDeltaNetAttention(
         num_attention_heads=1,
@@ -484,7 +484,7 @@ def test_gdn_f16_override_restores_autocast(monkeypatch, calibrating, kernel_err
     gdn_module = importlib.import_module(
         "transformer_engine.pytorch.attention.linear_attention.gdn"
     )
-    monkeypatch.setattr(gdn_module, "_dpa_fp8_recipe", "F16")
+    monkeypatch.setattr(gdn_module, "_la_fp8_recipe", "F16")
     q, k, v, g, beta = _inputs(1, 128, 1, 1)
     attention = GatedDeltaNetAttention(num_attention_heads=1, kv_channels=64, qkv_format="bshd")
 
@@ -523,7 +523,7 @@ def test_gdn_f16_override_with_mxfp8_linears(monkeypatch, dtype, checkpoint_core
     gdn_module = importlib.import_module(
         "transformer_engine.pytorch.attention.linear_attention.gdn"
     )
-    monkeypatch.setattr(gdn_module, "_dpa_fp8_recipe", "F16")
+    monkeypatch.setattr(gdn_module, "_la_fp8_recipe", "F16")
     q, k, v, g, beta = (
         tensor.requires_grad_() for tensor in _inputs(1, 128, 1, 1, 128, 128, dtype)
     )
