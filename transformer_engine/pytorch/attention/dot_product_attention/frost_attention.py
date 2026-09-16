@@ -88,23 +88,29 @@ def _import_cudnn():
     return _cudnn
 
 
-def _pkg_version(name: str, module=None) -> Optional[PkgVersion]:
-    """Installed version of a package, or None if it cannot be determined.
+def _pkg_version(name: str, module=None) -> Tuple[Optional[PkgVersion], Optional[str]]:
+    """(parsed version, raw string) for a package. Either element is None if undeterminable.
 
     Distribution metadata first, matching the sibling check in fused_mla_q_uproj.py, with the
-    module attribute as a fallback so a source or vendored install is not misreported as old.
+    module attribute as a fallback so a source or vendored install is not misreported as absent.
+    The raw string is returned separately so callers can tell "not installed" from "installed but
+    unparseable"; those warrant different answers, and conflating them declines valid installs.
     """
     raw = None
+    for candidate in (lambda: get_pkg_version(name), lambda: getattr(module, "__version__", None)):
+        try:
+            raw = candidate()
+        except PackageNotFoundError:
+            raw = None
+        if isinstance(raw, str):
+            break
+        raw = None
+    if raw is None:
+        return None, None
     try:
-        raw = get_pkg_version(name)
-    except PackageNotFoundError:
-        raw = getattr(module, "__version__", None)
-    if not isinstance(raw, str):
-        return None
-    try:
-        return PkgVersion(raw)
+        return PkgVersion(raw), raw
     except InvalidVersion:
-        return None
+        return None, raw
 
 
 def is_frost_attention_available() -> Tuple[bool, str]:
@@ -133,25 +139,26 @@ def is_frost_attention_available() -> Tuple[bool, str]:
     except ImportError as exc:
         return _no("nvidia-cudnn-frontend not importable: %s" % exc)
 
-    # Decline only on positive evidence of a too-old install. An undeterminable version is left
-    # to _select_frost_plan, which checks the plan by name and fails loudly with both versions.
-    frontend = _pkg_version("nvidia-cudnn-frontend", _cudnn)
+    # Decline on positive evidence that FROST cannot work: a version below a floor, or a package
+    # that is absent outright. A version that is present but unparseable is NOT evidence, so it
+    # defers to _select_frost_plan, which checks the plan by name and reports both versions.
+    frontend, frontend_raw = _pkg_version("nvidia-cudnn-frontend", _cudnn)
     if frontend is not None and frontend < _MIN_CUDNN_FRONTEND:
         return _no(
             "nvidia-cudnn-frontend %s registers no sm100 backward engine; >= %s is required"
             " (1.28.0 ships the d512 forward only, so this would otherwise raise on the first"
-            " backward rather than here)" % (frontend, _MIN_CUDNN_FRONTEND)
+            " backward rather than here)" % (frontend_raw, _MIN_CUDNN_FRONTEND)
         )
 
-    cutlass = _pkg_version("nvidia-cutlass-dsl")
-    if cutlass is None:
+    cutlass, cutlass_raw = _pkg_version("nvidia-cutlass-dsl")
+    if cutlass_raw is None:
         return _no("nvidia-cutlass-dsl not installed (FROST requires >= %s)" % _MIN_CUTLASS_DSL)
-    if cutlass < _MIN_CUTLASS_DSL:
+    if cutlass is not None and cutlass < _MIN_CUTLASS_DSL:
         # Worth being loud: this combination fails by silently declining, not by raising.
         return _no(
             "nvidia-cutlass-dsl %s is below the FROST floor %s; FROST engines would be"
             " silently skipped in favour of ordinary cuDNN backend plans"
-            % (cutlass, _MIN_CUTLASS_DSL)
+            % (cutlass_raw, _MIN_CUTLASS_DSL)
         )
 
     _availability = (True, "")
@@ -273,6 +280,23 @@ def _check_layout(name: str, t: torch.Tensor) -> None:
         )
 
 
+def _check_kv_match(k: torch.Tensor, v: torch.Tensor) -> None:
+    """Require v to match k in both shape and layout.
+
+    Both graphs declare v with k's shape and stride, and _key records only q's and k's, so a v
+    that differs would hit a cached plan built for k's layout and read the wrong elements with no
+    error at all. Callers in TE always split k and v from one QKV tensor, so this costs nothing
+    and is purely a guard against a silent wrong answer.
+    """
+    if k.shape != v.shape:
+        raise ValueError("k and v must have the same shape; got %s and %s" % (k.shape, v.shape))
+    if k.stride() != v.stride():
+        raise ValueError(
+            "k and v must have the same layout; got strides %s and %s"
+            % (tuple(k.stride()), tuple(v.stride()))
+        )
+
+
 def _select_frost_plan(graph, token: str, what: str):
     """Select a plan whose name proves a FROST engine was chosen.
 
@@ -294,9 +318,9 @@ def _select_frost_plan(graph, token: str, what: str):
                 what,
                 token,
                 names[:6],
-                _pkg_version("nvidia-cudnn-frontend", _cudnn) or "unknown",
+                _pkg_version("nvidia-cudnn-frontend", _cudnn)[1] or "unknown",
                 _MIN_CUDNN_FRONTEND,
-                _pkg_version("nvidia-cutlass-dsl") or "unknown",
+                _pkg_version("nvidia-cutlass-dsl")[1] or "unknown",
                 _MIN_CUTLASS_DSL,
             )
         )
@@ -447,8 +471,7 @@ def frost_attn_fwd(
     """
     for name, tensor in (("q", q), ("k", k), ("v", v)):
         _check_layout(name, tensor)
-    if k.shape != v.shape:
-        raise ValueError("k and v must have the same shape; got %s and %s" % (k.shape, v.shape))
+    _check_kv_match(k, v)
     if q.shape[1] % k.shape[1] != 0:
         raise ValueError(
             "num_heads must be divisible by num_gqa_groups; got %d and %d"
@@ -485,6 +508,7 @@ def frost_attn_bwd(
     """Backward attention via cuDNN FROST. `softmax_lse` is [b, h, s] as returned by the forward."""
     for name, tensor in (("q", q), ("k", k), ("v", v), ("out", out), ("dout", dout)):
         _check_layout(name, tensor)
+    _check_kv_match(k, v)
 
     mask = _mask_mode(attn_mask_type)
     scale = attn_scale if attn_scale is not None else q.shape[-1] ** -0.5

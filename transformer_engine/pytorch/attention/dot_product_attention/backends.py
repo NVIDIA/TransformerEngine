@@ -2303,8 +2303,9 @@ class FrostAttnFunc(torch.autograd.Function):
             to_frost_layout,
         )
 
-        # .contiguous() first: the graphs are built for BSHD-contiguous memory and
-        # frost_attention raises on anything else rather than computing on wrong strides.
+        # .contiguous() first: the graphs are built from each tensor's actual strides, so an
+        # arbitrary incoming layout would key a separate plan per layout and require k and v to
+        # agree. Normalising here keeps one plan per shape.
         q_f = to_frost_layout(q.contiguous(), qkv_format)
         k_f = to_frost_layout(k.contiguous(), qkv_format)
         v_f = to_frost_layout(v.contiguous(), qkv_format)
