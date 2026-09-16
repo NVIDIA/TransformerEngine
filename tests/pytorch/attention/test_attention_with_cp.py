@@ -459,6 +459,16 @@ def test_cp_with_flash_attention_softcap(cp_pool, cp_comm_type):
     )
 
 
+# cuDNN FROST: symmetric head_dim in (256, 512] on SM100/SM103, the range no other backend
+# serves together with context parallelism. Shapes are Gemma-4 global layers, which is what
+# motivated the backend. seqlen must stay divisible by cp_size * 2 for causal load balancing.
+model_configs_frost_attn = {
+    #   test:         ModelConfig(b, sq, hq, dqk)
+    "cp_hd512_0": ModelConfig(2, 4096, 8, 512, num_gqa_groups=4, attn_mask_type="causal"),
+    "cp_hd512_1": ModelConfig(2, 4096, 8, 512, num_gqa_groups=4, attn_mask_type="no_mask"),
+    "cp_hd512_2": ModelConfig(2, 2048, 8, 512, num_gqa_groups=8, attn_mask_type="causal"),
+}
+
 model_configs_fused_attn = {
     # test: ModelConfig(b, sq, hq, dqk)
     "cp_1_0": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal", return_max_logit=True),  # MHA
