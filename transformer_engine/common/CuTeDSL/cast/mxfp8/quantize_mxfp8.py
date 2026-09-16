@@ -1206,25 +1206,6 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
                 ]
                 sAmax: cute.struct.MemRange[Float32, self._NUM_WARPS]
 
-        elif cutlass.const_expr(cfg.ROWWISE):
-
-            @cute.struct
-            class SharedStorage:
-                mbar_storage: cute.struct.MemRange[cute.Int64, 2 * self._NUM_STAGES]
-                sX: cute.struct.Align[
-                    cute.struct.MemRange[
-                        dtype, self._TILE_ROWS * self._TILE_COLS * self._NUM_STAGES
-                    ],
-                    128,
-                ]
-                sO_row: cute.struct.Align[
-                    cute.struct.MemRange[
-                        FP8_DTYPE, self._TILE_ROWS * self._TILE_COLS * self._NUM_STAGES
-                    ],
-                    128,
-                ]
-                sAmax: cute.struct.MemRange[Float32, self._NUM_WARPS]
-
         else:
 
             @cute.struct
