@@ -713,6 +713,7 @@ def _segment_ids_pos_to_seqlens_offsets(
     attn_mask_type,
     window_size,
     max_segments_per_seq,
+    use_fast_causal_path=True,
 ):
     """Compute per-segment seqlens and start offsets(currently only used for THD)
     Given segment-id and segment-position tensors for Q and KV,
@@ -734,12 +735,15 @@ def _segment_ids_pos_to_seqlens_offsets(
                         Used here only as a fast-path eligibility hint
         max_segments_per_seq: maximum number of segments expected per row
                               Used to size the bincount / argwhere outputs
+        use_fast_causal_path: whether causal inputs may use the boundary-only fast path.
+                              Ring attention disables it because rotated Q and KV subsets can
+                              have inter-segment padding at different local boundaries.
 
     Routing (only invoked for THD qkv_layout):
         1. Fast path -- ``_segment_ids_pos_to_seqlens_offsets_fast_causal_path``.
            O(T) per row. Counts all segment tokens via bincount on
            segment_ids and trims at most one token per segment at the
-           boundary. Used for:
+           boundary. Used when ``use_fast_causal_path`` is true for:
              - top-left CAUSAL / PADDING_CAUSAL with ``window_size is None``
              - SWA with ``window_size == (-1, -1)`` and not bottom-right
            Bottom-right causal cross-attention is excluded: the boundary
@@ -777,9 +781,14 @@ def _segment_ids_pos_to_seqlens_offsets(
     # must route bottom-right masks to the slow path.
 
     # Fast path: O(T) per row.
-    if (
-        attn_mask_type.is_causal() and not attn_mask_type.is_bottom_right() and window_size is None
-    ) or (window_size == (-1, -1) and not attn_mask_type.is_bottom_right()):
+    if use_fast_causal_path and (
+        (
+            attn_mask_type.is_causal()
+            and not attn_mask_type.is_bottom_right()
+            and window_size is None
+        )
+        or (window_size == (-1, -1) and not attn_mask_type.is_bottom_right())
+    ):
         return _segment_ids_pos_to_seqlens_offsets_fast_causal_path(
             segment_ids_q, segment_ids_kv, segment_pos_q, segment_pos_kv, max_segments_per_seq
         )
@@ -847,7 +856,12 @@ class SequenceDescriptor:
         return cls(*children)
 
     def get_seqlens_and_offsets(
-        self, attn_mask_type, qkv_layout, window_size, max_segments_per_seq
+        self,
+        attn_mask_type,
+        qkv_layout,
+        window_size,
+        max_segments_per_seq,
+        use_fast_causal_path=True,
     ):
         """
         Acquire the seqlens/offsets for cuDNN backend.
@@ -906,6 +920,7 @@ class SequenceDescriptor:
                     attn_mask_type=attn_mask_type,
                     window_size=window_size,
                     max_segments_per_seq=max_segments_per_seq,
+                    use_fast_causal_path=use_fast_causal_path,
                 )
 
                 q_sl, kv_sl, q_off, kv_off = jax.vmap(
@@ -925,6 +940,7 @@ class SequenceDescriptor:
                     attn_mask_type,
                     window_size,
                     max_segments_per_seq,
+                    use_fast_causal_path,
                 )
         # BSHD: compute seqlens/offsets.
         else:
