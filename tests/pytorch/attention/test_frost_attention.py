@@ -78,18 +78,21 @@ def _reference(q, k, v, scale, mask, window=None):
     kk = kk.repeat_interleave(rep, dim=1)
     vv = vv.repeat_interleave(rep, dim=1)
     s = (qq @ kk.transpose(-1, -2)) * scale
-    if mask != "no_mask":
-        sq, skv = qq.shape[2], kk.shape[2]
-        # Top-left for "causal", bottom-right for "causal_bottom_right". These coincide only when
-        # sq == skv, which is exactly why _SHAPES includes a rectangular case.
-        offset = 0 if mask == "causal" else skv - sq
-        blocked = torch.ones(sq, skv, device=q.device, dtype=torch.bool).triu(offset + 1)
-        if window is not None and window[0] != -1:
-            # A left window keeps only the most recent window[0] keys before the diagonal, so
-            # everything further back is masked as well.
-            blocked |= torch.ones(sq, skv, device=q.device, dtype=torch.bool).tril(
-                offset - window[0] - 1
-            )
+    sq, skv = qq.shape[2], kk.shape[2]
+    left, right = (-1, -1) if window is None else tuple(window)
+    # TE's rule, from the SWA construction in utils.py: a causal mask type pins the right bound to
+    # the diagonal, -1 means unbounded on that side, and a window applies to ANY mask type -- so
+    # no_mask with (w, 0) is a causal band of width w, not an unmasked attention. Top-left for
+    # "causal", bottom-right for "causal_bottom_right"; the two coincide only when sq == skv.
+    if mask in ("causal", "causal_bottom_right"):
+        right = 0
+    offset = skv - sq if mask == "causal_bottom_right" else 0
+    blocked = torch.zeros(sq, skv, device=q.device, dtype=torch.bool)
+    if right != -1:
+        blocked |= torch.ones(sq, skv, device=q.device, dtype=torch.bool).triu(offset + right + 1)
+    if left != -1:
+        blocked |= torch.ones(sq, skv, device=q.device, dtype=torch.bool).tril(offset - left - 1)
+    if bool(blocked.any()):
         s = s.masked_fill(blocked, float("-inf"))
     p = s.softmax(-1)
     return p @ vv, torch.logsumexp(s, dim=-1)
