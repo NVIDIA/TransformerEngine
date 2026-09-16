@@ -18,6 +18,28 @@ import sysconfig
 from typing import Optional, Tuple
 import warnings
 
+# Minimum cuDNN version supported by Transformer Engine, as (major, minor, patch).
+# Keep in sync with kMinCudnnVersion in transformer_engine/common/cudnn_utils.h.
+MIN_CUDNN_VERSION = (9, 12, 0)
+
+
+def decode_cudnn_version(encoded_version: int) -> Tuple[int, int, int]:
+    """Decode a cudnnGetVersion() result into (major, minor, patch)."""
+    major_version_magnitude = 1000 if encoded_version < 90000 else 10000
+    major, encoded_version = divmod(encoded_version, major_version_magnitude)
+    minor, patch = divmod(encoded_version, 100)
+    return (major, minor, patch)
+
+
+def check_cudnn_version(encoded_version: int) -> None:
+    """Raise if the cuDNN runtime is older than the minimum supported version."""
+    cudnn_version = decode_cudnn_version(encoded_version)
+    if cudnn_version < MIN_CUDNN_VERSION:
+        raise RuntimeError(
+            f"Transformer Engine requires cuDNN {'.'.join(map(str, MIN_CUDNN_VERSION))} or later,"
+            f" but the cuDNN runtime is {'.'.join(map(str, cudnn_version))}."
+        )
+
 
 @functools.lru_cache(maxsize=None)
 def _is_package_installed(package) -> bool:
