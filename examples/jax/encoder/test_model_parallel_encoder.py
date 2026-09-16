@@ -382,7 +382,7 @@ def train_and_evaluate(args):
 
             if args.dry_run:
                 labels = jnp.zeros(label_shape, dtype=jnp.bfloat16)
-                rngs = {DROPOUT_KEY: dropout_rng, SR_KEY: sr_rng_state}
+                rngs = {DROPOUT_KEY: dropout_rng, SR_KEY: sr_rng}
                 jit_train_step(state, inputs, masks, labels, var_collect, rngs)
                 print("PASSED")
                 return None
