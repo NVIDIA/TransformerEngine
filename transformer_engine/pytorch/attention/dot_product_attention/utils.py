@@ -1927,6 +1927,22 @@ def get_attention_backend(
         # Explicit anyway: no page table reaches the backend, so a paged cache would be read raw.
         logger.debug("Disabling FrostAttention for KV caching")
         use_frost_attention = False
+    if (
+        use_frost_attention
+        and context_parallel
+        and window_size is not None
+        and (window_size[0] != -1 or window_size[1] not in [-1, 0])
+        and cp_comm_type in ["p2p", "a2a+p2p"]
+    ):
+        # Same rule FusedAttention carries: the p2p ring shards KV across steps, so a left bound
+        # measured against the full sequence does not survive the per-step tiles. all_gather and
+        # a2a both see a contiguous KV range and do support it.
+        logger.debug(
+            "Disabling FrostAttention as it does not support context parallelism with sliding"
+            " window attention and cp_comm_type = %s",
+            cp_comm_type,
+        )
+        use_frost_attention = False
     if use_frost_attention and context_parallel:
         # Same two restrictions FlashAttention and FusedAttention carry above. Both are about
         # where the causal diagonal sits: the ring shards q and kv independently, so a mask whose
