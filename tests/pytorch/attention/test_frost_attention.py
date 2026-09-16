@@ -217,8 +217,11 @@ def test_frost_rejects_mismatched_kv():
         frost_attn_fwd(q, k, mk(h * 2).contiguous())
     with pytest.raises(ValueError, match="same layout"):
         # Same shape, different stride order: a cache hit would otherwise run a graph built for
-        # k's layout over v's memory and read the wrong elements silently.
-        v_odd = torch.randn(b, h, s, d, device="cuda", dtype=dtype)
+        # k's layout over v's memory and read the wrong elements silently. Build it as sbhd and
+        # permute, so the strides genuinely differ -- a [b, h, s, d] contiguous tensor would come
+        # out with exactly k's strides and prove nothing.
+        v_odd = torch.randn(s, b, h, d, device="cuda", dtype=dtype).permute(1, 2, 0, 3)
+        assert v_odd.shape == k.shape and v_odd.stride() != k.stride()
         frost_attn_fwd(q, k, v_odd)
     with pytest.raises(ValueError, match="match q"):
         frost_attn_fwd(q, k, k.to(torch.float32))
