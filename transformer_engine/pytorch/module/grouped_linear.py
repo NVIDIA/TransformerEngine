@@ -1093,8 +1093,8 @@ class _GroupedLinear(torch.autograd.Function):
             origin_weights = list(weight_tensors)
             if ctx.fuse_wgrad_accumulation and ctx.weights_requires_grad:
                 main_grads = [main_grad_func() for main_grad_func in ctx.main_grad_funcs]
-            # Re-gather unconditionally to keep an implementer's prefetch chain intact, but
-            # only rebuild the operand for dgrad, which is all that consumes it.
+            # Re-gather even without dgrad: the call advances the implementer's prefetch chain
+            # for the next layer's backward. Only the operand rebuild is dgrad-only.
             weight_tensors = materialize_weight_for_backward(origin_weights)
             weights_for_gemm = None
             if ctx.requires_dgrad:

@@ -228,3 +228,53 @@ def test_unfused_wgrad_returns_grads_through_finalize(use_grouped_tensor):
         # wgrad is x summed per group, independent of the weight values, so it matches exactly.
         torch.testing.assert_close(w.grad.float(), ref_w.grad.float(), rtol=1e-5, atol=1e-5)
         assert torch.count_nonzero(w.main_grad) == 0, "main_grad was written without fusion"
+
+
+def test_single_grouped_weight_dispatches(monkeypatch):
+    """A distributed weight must also work when the group is one packed GroupedTensor.
+
+    single_grouped_weight requires use_grouped_tensor, and makes the group a single ``weight``
+    instead of weight0..N -- so finalize_group_grads receives a bare tensor, not a list.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("requires CUDA")
+
+    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
+    torch.manual_seed(0)
+    num_gemms = 2
+    module = te.GroupedLinear(
+        num_gemms,
+        IN_F,
+        OUT_F,
+        bias=False,
+        device=DEVICE,
+        params_dtype=DTYPE,
+        fuse_wgrad_accumulation=True,
+        use_grouped_tensor=True,
+        single_grouped_weight=True,
+    )
+    weight = getattr(module, "weight", None)
+    assert weight is not None, "single_grouped_weight did not take effect"
+
+    # Duck-type the protocol onto the GroupedTensor: this path needs the GEMM operand to stay
+    # a GroupedTensor, so the materialize hooks hand back the same object.
+    calls = []
+    # grad_buffer is shaped like the unsharded weight, not flattened.
+    weight.wgrad_scratch = torch.zeros((num_gemms, OUT_F, IN_F), dtype=torch.float32, device=DEVICE)
+    weight.is_distributed_weight = True
+    weight.grad_buffer = lambda: weight.wgrad_scratch
+    weight.materialize_group_for_forward = lambda: (calls.append("fwd"), [weight])[1]
+    weight.materialize_group_for_backward = lambda **kw: (calls.append("bwd"), [weight])[1]
+
+    def _finalize(wgrads, **kwargs):
+        assert not isinstance(wgrads, (list, tuple)), "a one-member group should pass a bare tensor"
+        calls.append("finalize")
+        return [torch.zeros_like(wgrads)]
+
+    weight.finalize_group_grads = _finalize
+
+    m_splits, x = _inputs(num_gemms)
+    module(x, m_splits).sum().backward()
+
+    assert calls == ["fwd", "bwd", "finalize"], f"unexpected hook dispatch: {calls}"
+    assert torch.count_nonzero(weight.wgrad_scratch) > 0, "wgrad never reached grad_buffer"
