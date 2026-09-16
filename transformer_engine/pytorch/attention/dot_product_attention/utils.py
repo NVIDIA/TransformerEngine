@@ -1910,6 +1910,15 @@ def get_attention_backend(
         # needs cu_seqlens plumbing that is neither implemented nor validated here.
         logger.debug("Disabling FrostAttention for qkv_layout = %s", qkv_layout)
         use_frost_attention = False
+    if use_frost_attention and deterministic and is_training:
+        # Measured on B200 with cuDNN Frontend 1.29.0: requesting a deterministic backward is
+        # refused outright -- cudnnGraphNotSupportedError, no engine proposes a plan -- so unlike
+        # the C++ fused path there is nothing to opt into. Declining keeps
+        # NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 an honest guarantee instead of silently running the
+        # non-deterministic kernel. The graph still passes the flag, so this lifts on its own if
+        # cuDNN ships a deterministic d512 backward.
+        logger.debug("Disabling FrostAttention as its backward has no deterministic cuDNN plan")
+        use_frost_attention = False
     if use_frost_attention and return_max_logit:
         # FrostAttention returns the context layer alone, where UnfusedDotProductAttention returns
         # (context, max_logit). Selecting it here would break the caller's unpack.
