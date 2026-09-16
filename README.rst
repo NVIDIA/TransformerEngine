@@ -68,17 +68,16 @@ Integrations
 
 Transformer Engine has been integrated with popular LLM frameworks such as:
 
-* `DeepSpeed <https://github.com/deepspeedai/DeepSpeed>`_
 * `Hugging Face Accelerate <https://huggingface.co/docs/accelerate/main/en/usage_guides/low_precision_training#configuring-transformersengine>`_
 * `Lightning <https://lightning.ai/docs/pytorch/stable/common/precision.html>`_
-* `MosaicML Composer <https://github.com/mosaicml/composer/releases/tag/v0.13.1>`_
+* `MosaicML Composer <https://github.com/mosaicml/composer>`_
 * `NVIDIA JAX Toolbox <https://github.com/NVIDIA/JAX-Toolbox>`_
 * `NVIDIA Megatron-LM <https://github.com/NVIDIA/Megatron-LM>`_
 * `NVIDIA NeMo Megatron Bridge <https://github.com/NVIDIA-NeMo/Megatron-Bridge>`_
 * `Amazon SageMaker Model Parallel Library <https://docs.aws.amazon.com/sagemaker/latest/dg/model-parallel-core-features-v2-tensor-parallelism.html>`_
-* `Levanter <https://github.com/stanford-crfm/levanter>`_
-* `GPT-NeoX <https://github.com/EleutherAI/gpt-neox>`_
-* `Hugging Face Nanotron <https://github.com/huggingface/nanotron>`_
+
+See `Ecosystem and historical integrations <docs/ecosystem.rst>`_ for additional
+community integrations and projects that have worked with Transformer Engine.
 
 Contributing
 ============

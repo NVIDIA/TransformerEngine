@@ -38,6 +38,7 @@ Transformer Engine documentation
    :caption: Project
 
    project_updates
+   ecosystem
    resources
 
 .. toctree::
