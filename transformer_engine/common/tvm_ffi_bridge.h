@@ -301,11 +301,12 @@ template <typename, typename = void>
 struct is_lazyloadable_config : std::false_type {};
 template <typename T>
 struct is_lazyloadable_config<
-    T, std::void_t<decltype(std::declval<const T &>().to_key()),
-                   decltype(std::declval<const T &>().retrieve_func_from_python(
-                       std::declval<const std::string &>())),
-                   std::enable_if_t<std::is_same<decltype(std::declval<const T &>().get_kernel()),
-                                                 std::optional<tvm::ffi::Function>>::value>>>
+    T, std::void_t<
+           std::enable_if_t<std::is_same<decltype(&T::to_key), std::string (T::*)() const>::value>,
+           std::enable_if_t<std::is_same<decltype(&T::retrieve_func_from_python),
+                                         bool (T::*)(const std::string &) const>::value>,
+           std::enable_if_t<std::is_same<decltype(&T::get_kernel),
+                                         std::optional<tvm::ffi::Function> (T::*)() const>::value>>>
     : std::true_type {};
 }  // namespace detail
 
@@ -364,7 +365,7 @@ class TVMFFICentral {
 
   // Optionally emit a warning explaining why the CuTeDSL backend was not chosen for this config.
   template <typename... Args>
-  void maybe_warn_not_chosen(Args &&...reason) const {
+  void maybe_warn_not_chosen(const Args &...reason) const {
     if (warn_cutedsl_backend_not_chosen_) {
       NVTE_WARN("The CuTeDSL kernel is not chosen because ", reason...);
     }
@@ -460,7 +461,7 @@ class TVMFFIConfigCache {
 
 // Optionally emit a warning explaining why the CuTeDSL backend was not chosen for this config.
 template <typename... Args>
-inline void maybe_warn_cutedsl_not_chosen(Args &&...reason) {
+inline void maybe_warn_cutedsl_not_chosen(const Args &...reason) {
   TVMFFICentral::getInstance().maybe_warn_not_chosen(reason...);
 }
 
