@@ -258,6 +258,11 @@ def test_frost_declines_unsupported_configs():
         # is part of the selector contract rather than an internal detail.
         (dict(window_size=(-1, 5)), "a right window past the diagonal"),
         (dict(window_size=(128,)), "a malformed window pair"),
+        (dict(window_size=(-2, 0)), "a left window below -1"),
+        (dict(window_size=7), "a non-iterable window"),
+        # The engine pads head_dim to a multiple of 8, so an in-range but unpadded dim has to be
+        # declined here rather than failing later at plan selection.
+        (dict(head_dim_qk=260, head_dim_v=260), "head_dim not a multiple of 8"),
     ):
         cfg = dict(base)
         cfg.update(override)

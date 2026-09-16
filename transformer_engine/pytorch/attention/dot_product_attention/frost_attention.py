@@ -37,7 +37,7 @@ one constrains the code:
 
 Numerics were validated against the criterion FlashAttention applies to itself, namely that the
 kernel error must stay within 2x the error bf16 inputs alone produce, across square and
-rectangular, causal and non-causal shapes.
+rectangular, causal and non-causal, windowed and unwindowed shapes.
 """
 
 from __future__ import annotations
@@ -241,9 +241,20 @@ def _mask_spec(attn_mask_type: str, window_size=None):
             "FROST attention supports attn_mask_type in %s; got %r"
             % (str(_SUPPORTED_MASKS), attn_mask_type)
         )
-    window = _NO_WINDOW if window_size is None else tuple(window_size)
+    try:
+        window = _NO_WINDOW if window_size is None else tuple(window_size)
+    except TypeError:
+        # Raised as NotImplementedError so the selector declines instead of propagating out of
+        # backend selection, which is the only thing is_frost_attention_supported catches.
+        raise NotImplementedError(
+            "window_size must be a (left, right) pair; got %r" % (window_size,)
+        ) from None
     if len(window) != 2:
         raise NotImplementedError("window_size must be a (left, right) pair; got %r" % (window,))
+    if window[0] < -1:
+        # cuDNN's left bound must be >= 1, so a left of -2 would build diagonal_band_left_bound=-1
+        # and fail at plan build rather than declining here.
+        raise NotImplementedError("window_size left must be -1 or >= 0; got %r" % (window,))
     if window[1] not in (-1, 0):
         # A right bound past the diagonal is future context. cuDNN can express it, but no TE mask
         # type asks for it, so decline rather than guess the intent.
@@ -628,8 +639,8 @@ def frost_attn_bwd(
     dout: torch.Tensor,
     attn_scale: Optional[float] = None,
     attn_mask_type: str = "causal",
-    window_size: Optional[Tuple[int, int]] = None,
     deterministic: bool = False,
+    window_size: Optional[Tuple[int, int]] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Backward attention via cuDNN FROST. `softmax_lse` is [b, h, s] as returned by the forward."""
     for name, tensor in (("q", q), ("k", k), ("v", v), ("out", out), ("dout", dout)):
