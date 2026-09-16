@@ -200,6 +200,11 @@ class VMMRowSplitAllocator:
             device=torch.device("cuda", self.device_index),
         )
         tensor.set_(storage, 0, shape, tuple(strides))
+        # Some PyTorch versions retain alias metadata after set_(), which makes
+        # custom autograd Functions reject mark_dirty() on multiple VMM-backed
+        # outputs. detach() creates a root tensor wrapper without changing the
+        # data pointer or VMM physical placement.
+        tensor = tensor.detach()
         # Keep the allocator reachable for as long as a full tensor is alive.
         # Views are used only while their owning full tensor is retained.
         tensor._nvte_vmm_allocator = self
