@@ -585,7 +585,8 @@ __global__ static void row_col_rht_gemm_device(
 
       mma.accumulate_ = UMMA::ScaleOut::Zero;
 
-      tmem_allocator.allocate(TmemAllocator::Sm100TmemCapacityColumns, &shared_storage.tmem_base_ptr);
+      tmem_allocator.allocate(cute::TMEM::Sm100TmemCapacityColumns,
+                              &shared_storage.tmem_base_ptr);
       __syncwarp();
       tmem_allocation_result_barrier.arrive();
       uint32_t tmem_base_ptr = shared_storage.tmem_base_ptr;
@@ -633,7 +634,7 @@ __global__ static void row_col_rht_gemm_device(
       } while (scheduler.is_valid());
       tmem_allocator.release_allocation_lock();
       accumulator_pipeline.producer_tail(accumulator_pipe_producer_state);
-      tmem_allocator.free(tmem_base_ptr, TmemAllocator::Sm100TmemCapacityColumns);
+      tmem_allocator.free(tmem_base_ptr, cute::TMEM::Sm100TmemCapacityColumns);
     }
   } else if(is_sched_warp) {
     cutlass::arch::warpgroup_reg_dealloc<32>();

@@ -953,10 +953,10 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
                                  DType::kByte);
 
   TensorWrapper alpha_tensor(static_cast<void *>(alpha.untyped_data()),
-                             std::vector<size_t>{num_gemms},
+                             std::vector<size_t>{alpha.element_count()},
                              convert_ffi_datatype_to_te_dtype(alpha.element_type()));
   TensorWrapper beta_tensor(static_cast<void *>(beta.untyped_data()),
-                            std::vector<size_t>{num_gemms},
+                            std::vector<size_t>{beta.element_count()},
                             convert_ffi_datatype_to_te_dtype(beta.element_type()));
 
   // Build grouped tensors from XLA buffer shapes and group_sizes — no m/n/k derivation needed.
