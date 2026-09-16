@@ -9,16 +9,20 @@ This module is **experimental** and subject to change.
 
 import importlib
 import math
+import os
+from contextlib import nullcontext
 from functools import lru_cache
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import torch
 
-from transformer_engine.pytorch.quantization import FP8GlobalStateManager
+from transformer_engine.pytorch.quantization import FP8GlobalStateManager, autocast
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.constants import dist_group_type
 from transformer_engine.pytorch.distributed import get_distributed_world_size, checkpoint
 from transformer_engine.pytorch.jit import no_torch_dynamo
+
+_dpa_fp8_recipe = os.getenv("NVTE_DPA_FP8_RECIPE", "")
 
 
 @lru_cache(maxsize=1)
@@ -276,6 +280,10 @@ class GatedDeltaNetAttention(TransformerEngineBaseModule):
 
     This module is **experimental** and subject to change.
 
+    Set ``NVTE_DPA_FP8_RECIPE=F16`` before importing Transformer Engine to run
+    GDN in FP16/BF16 inside a quantized autocast region. This preserves the
+    input dtype and disables quantization and calibration only for GDN.
+
     Parameters
     ----------
     num_attention_heads : int
@@ -423,7 +431,10 @@ class GatedDeltaNetAttention(TransformerEngineBaseModule):
                 f"got g={'set' if g is not None else 'None'} and "
                 f"beta={'set' if beta is not None else 'None'}."
             )
-        if FP8GlobalStateManager.is_fp8_enabled() or FP8GlobalStateManager.is_fp8_calibration():
+        force_f16 = _dpa_fp8_recipe == "F16"
+        if not force_f16 and (
+            FP8GlobalStateManager.is_fp8_enabled() or FP8GlobalStateManager.is_fp8_calibration()
+        ):
             raise ValueError(
                 "GatedDeltaNetAttention does not support FP8 autocast or FP8 calibration."
             )
@@ -434,7 +445,12 @@ class GatedDeltaNetAttention(TransformerEngineBaseModule):
             "output_final_state": output_final_state,
             "use_qk_l2norm_in_kernel": use_qk_l2norm_in_kernel,
         }
-        with self.prepare_forward_ctx(
+        # Disable quantization before the TE lifecycle initializes FP8 metadata.
+        # The enclosing recipe is restored on exit, including on kernel errors.
+        quantization_context = (
+            autocast(enabled=False, calibrating=False) if force_f16 else nullcontext()
+        )
+        with quantization_context, self.prepare_forward_ctx(
             query_layer,
             num_gemms=3,
             allow_non_contiguous=True,

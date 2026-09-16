@@ -13,7 +13,15 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from transformer_engine.pytorch import GatedDeltaNetAttention, autocast, is_fp8_available
+from transformer_engine.common.recipe import MXFP8BlockScaling
+from transformer_engine.pytorch import (
+    GatedDeltaNetAttention,
+    Linear,
+    autocast,
+    is_fp8_available,
+    is_mxfp8_available,
+)
+from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 
 
 def _gdn_available() -> bool:
@@ -446,16 +454,117 @@ def test_gdn_requires_both_gates():
 
 
 @pytest.mark.skipif(not is_fp8_available(), reason="FP8 is not available")
-def test_gdn_rejects_fp8_autocast():
+@pytest.mark.parametrize(
+    "override", ["", "DelayedScaling", "Float8CurrentScaling", "MXFP8BlockScaling"]
+)
+@pytest.mark.parametrize("calibrating", [False, True])
+def test_gdn_rejects_fp8_autocast(monkeypatch, override, calibrating):
     """GDN must not silently run in high precision inside FP8 autocast."""
+    gdn_module = importlib.import_module(
+        "transformer_engine.pytorch.attention.linear_attention.gdn"
+    )
+    monkeypatch.setattr(gdn_module, "_dpa_fp8_recipe", override)
     q, k, v, g, beta = _inputs(1, 128, 1, 1)
     attention = GatedDeltaNetAttention(
         num_attention_heads=1,
         kv_channels=64,
         qkv_format="bshd",
     )
-    with autocast(enabled=True), pytest.raises(ValueError, match="does not support FP8 autocast"):
+    with autocast(enabled=not calibrating, calibrating=calibrating), pytest.raises(
+        ValueError, match="does not support FP8 autocast"
+    ):
         attention(q, k, v, g=g, beta=beta)
+
+
+@pytest.mark.skipif(not is_fp8_available(), reason="FP8 is not available")
+@pytest.mark.parametrize("calibrating", [False, True])
+@pytest.mark.parametrize("kernel_error", [False, True])
+def test_gdn_f16_override_restores_autocast(monkeypatch, calibrating, kernel_error):
+    """F16 disables the TE lifecycle's FP8 state and restores the enclosing context."""
+    gdn_module = importlib.import_module(
+        "transformer_engine.pytorch.attention.linear_attention.gdn"
+    )
+    monkeypatch.setattr(gdn_module, "_dpa_fp8_recipe", "F16")
+    q, k, v, g, beta = _inputs(1, 128, 1, 1)
+    attention = GatedDeltaNetAttention(num_attention_heads=1, kv_channels=64, qkv_format="bshd")
+
+    def fake_gdn_forward(query, key, value, gate_g, gate_beta, initial_state, **kwargs):
+        del key, initial_state, kwargs
+        assert not FP8GlobalStateManager.is_fp8_enabled()
+        assert not FP8GlobalStateManager.is_fp8_calibration()
+        assert not attention.fp8 and not attention.fp8_calibration
+        assert not attention.fp8_initialized
+        assert query.dtype == q.dtype and value.dtype == v.dtype
+        assert gate_g.dtype == gate_beta.dtype == torch.float32
+        if kernel_error:
+            raise RuntimeError("GDN test kernel error")
+        return value.reshape(*query.shape[:-2], -1)
+
+    monkeypatch.setattr(attention.gdn_attention, "forward", fake_gdn_forward)
+    original_state = FP8GlobalStateManager.get_autocast_state()
+    with autocast(enabled=not calibrating, calibrating=calibrating):
+        outer_state = FP8GlobalStateManager.get_autocast_state()
+        if kernel_error:
+            with pytest.raises(RuntimeError, match="GDN test kernel error"):
+                attention(q, k, v, g=g, beta=beta)
+        else:
+            output = attention(q, k, v, g=g, beta=beta)
+            torch.testing.assert_close(output, v.flatten(-2), rtol=0, atol=0)
+        assert FP8GlobalStateManager.get_autocast_state() == outer_state
+    assert FP8GlobalStateManager.get_autocast_state() == original_state
+
+
+@requires_gdn
+@pytest.mark.skipif(not is_mxfp8_available(), reason="MXFP8 is not available")
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16], ids=["bf16", "fp16"])
+@pytest.mark.parametrize("checkpoint_core_attention", [False, True], ids=["eager", "checkpoint"])
+def test_gdn_f16_override_with_mxfp8_linears(monkeypatch, dtype, checkpoint_core_attention):
+    """MXFP8 projections surround F16 GDN, including its recomputed backward."""
+    gdn_module = importlib.import_module(
+        "transformer_engine.pytorch.attention.linear_attention.gdn"
+    )
+    monkeypatch.setattr(gdn_module, "_dpa_fp8_recipe", "F16")
+    q, k, v, g, beta = (
+        tensor.requires_grad_() for tensor in _inputs(1, 128, 1, 1, 128, 128, dtype)
+    )
+    in_proj = Linear(128, 128, bias=False, params_dtype=dtype)
+    out_proj = Linear(128, 128, bias=False, params_dtype=dtype)
+    attention = GatedDeltaNetAttention(num_attention_heads=1, kv_channels=128, qkv_format="bshd")
+    recipe = MXFP8BlockScaling()
+    with autocast(recipe=recipe):
+        projected_q = in_proj(q.reshape(-1, 128)).reshape_as(q)
+        core_output = attention(
+            projected_q,
+            k,
+            v,
+            g=g,
+            beta=beta,
+            use_qk_l2norm_in_kernel=True,
+            checkpoint_core_attention=checkpoint_core_attention,
+        )
+        assert core_output.dtype == dtype
+        assert not attention.fp8 and not attention.fp8_calibration
+        assert FP8GlobalStateManager.is_fp8_enabled()
+        assert FP8GlobalStateManager.get_fp8_recipe() is recipe
+        output = out_proj(core_output)
+        assert in_proj.fp8 and out_proj.fp8
+        assert in_proj.fp8_meta["recipe"] is recipe
+        assert out_proj.fp8_meta["recipe"] is recipe
+
+    with torch.no_grad():
+        reference, _ = _gdn_reference(
+            F.normalize(projected_q.double(), dim=-1),
+            F.normalize(k.double(), dim=-1),
+            v,
+            g,
+            beta,
+        )
+        _assert_rms_close(core_output, reference.flatten(-2), _FWD_TOL[dtype], "F16 override")
+
+    output.float().square().mean().backward()
+    for tensor in (q, k, v, g, beta, in_proj.weight, out_proj.weight):
+        assert tensor.grad is not None
+        assert torch.isfinite(tensor.grad).all()
 
 
 def test_gdn_runs_te_forward_lifecycle(monkeypatch):
