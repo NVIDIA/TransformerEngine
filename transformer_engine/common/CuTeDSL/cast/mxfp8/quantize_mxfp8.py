@@ -801,13 +801,15 @@ class MXFP8QuantizeConfig:
     ):
         if use_2d_quantization:
             raise ValueError("2D block scaling is not implemented by the CuTeDSL MXFP8 kernels")
-        if dtype is None or dtype not in ("fp32", "fp16", "bf16"):
-            raise ValueError(f"unknown input dtype {dtype!r}; expected fp32|fp16|bf16")
+        if dtype is None or dtype not in ("Float32", "Float16", "BFloat16"):
+            raise ValueError(
+                f"unknown input dtype {dtype!r}; expected Float32|Float16|BFloat16"
+            )
         self.DTYPE = str_to_cutlass_dtype(dtype)
         self.DTYPE_STR = dtype  # readable input-dtype token, for __str__
-        if fp8_dtype not in ("fp8_e4m3fn", "fp8_e5m2"):
+        if fp8_dtype not in ("Float8E4M3", "Float8E5M2"):
             raise ValueError(
-                f"unknown FP8 dtype {fp8_dtype!r}; expected 'fp8_e4m3fn' or 'fp8_e5m2'"
+                f"unknown FP8 dtype {fp8_dtype!r}; expected 'Float8E4M3' or 'Float8E5M2'"
             )
         self.FP8_DTYPE = str_to_cutlass_dtype(fp8_dtype)
         self.FP8_DTYPE_STR = fp8_dtype  # readable token, for __str__
@@ -854,7 +856,7 @@ class MXFP8QuantizeConfig:
         # kernel's COLWISE_SCALING / rowwise dbias branches.
         self.WITH_DBIAS = with_dbias
         self.MAX_NORM_RCP = (
-            FP8E4M3_MAX_NORM_RCP if fp8_dtype == "fp8_e4m3fn" else FP8E5M2_MAX_NORM_RCP
+            FP8E4M3_MAX_NORM_RCP if fp8_dtype == "Float8E4M3" else FP8E5M2_MAX_NORM_RCP
         )
 
     def __str__(self):

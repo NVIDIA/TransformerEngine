@@ -25,7 +25,7 @@
 namespace transformer_engine {
 namespace cutedsl_backend {
 
-// Activation, te_dtype_to_str, activation_to_str, DLTensorWrapper, TVMFFICentral
+// Activation, activation_to_str, DLTensorWrapper, TVMFFICentral
 // all live in transformer_engine::tvm_ffi_bridge (tvm_ffi_bridge.h).
 using namespace tvm_ffi_bridge;
 

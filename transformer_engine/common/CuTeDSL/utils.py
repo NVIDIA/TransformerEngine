@@ -15,13 +15,13 @@ from cutlass._mlir.dialects import llvm
 from cutlass.cutlass_dsl import T, dsl_user_op
 
 _CUTLASS_DTYPE_FROM_STR = {
-    "fp32": cutlass.Float32,
-    "fp16": cutlass.Float16,
-    "bf16": cutlass.BFloat16,
-    "fp8_e4m3fn": cutlass.Float8E4M3FN,
-    "fp8_e5m2": cutlass.Float8E5M2,
-    "fp8_e8m0fnu": cutlass.Float8E8M0FNU,
-    "fp4_e2m1fn": cutlass.Float4E2M1FN,
+    "Float32": cutlass.Float32,
+    "Float16": cutlass.Float16,
+    "BFloat16": cutlass.BFloat16,
+    "Float8E4M3": cutlass.Float8E4M3FN,
+    "Float8E5M2": cutlass.Float8E5M2,
+    "Float8E8M0": cutlass.Float8E8M0FNU,
+    "Float4E2M1": cutlass.Float4E2M1FN,
 }
 _STR_FROM_CUTLASS_DTYPE = {v: k for k, v in _CUTLASS_DTYPE_FROM_STR.items()}
 

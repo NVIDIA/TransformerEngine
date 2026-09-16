@@ -25,34 +25,13 @@
 #include <utility>
 #include <vector>
 
-#include "transformer_engine/transformer_engine.h"
+#include "common.h"
 #include "util/cuda_runtime.h"
 #include "util/logging.h"
 #include "util/system.h"
 
 namespace transformer_engine {
 namespace tvm_ffi_bridge {
-
-inline const char *te_dtype_to_str(DType dtype) {
-  switch (dtype) {
-    case DType::kFloat32:
-      return "fp32";
-    case DType::kFloat16:
-      return "fp16";
-    case DType::kBFloat16:
-      return "bf16";
-    case DType::kFloat8E4M3:
-      return "fp8_e4m3fn";
-    case DType::kFloat8E5M2:
-      return "fp8_e5m2";
-    case DType::kFloat8E8M0:
-      return "fp8_e8m0fnu";
-    case DType::kFloat4E2M1:
-      return "fp4_e2m1fn";
-    default:
-      return "";
-  }
-}
 
 // Fused activation token forwarded to Python. Encodes both the family and the
 // forward-vs-derivative direction: "relu" is the forward activation, "drelu" its

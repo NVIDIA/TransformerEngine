@@ -79,15 +79,19 @@ METHOD_FUSION_IDS = [f"{m}X{f['name']}" for m, f in METHOD_FUSION_CASES]
 IN_DTYPES = [torch.float32, torch.bfloat16, torch.float16]
 FP8_DTYPES = [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2]
 FP8_TO_KEY = {
-    tex.DType.kFloat8E4M3: "fp8_e4m3fn",
-    tex.DType.kFloat8E5M2: "fp8_e5m2",
+    tex.DType.kFloat8E4M3: "Float8E4M3",
+    tex.DType.kFloat8E5M2: "Float8E5M2",
 }
 
 SWIZZLE_MODES = [False, True]
 
 get_shape_id = lambda s: f"{s[0]}x{s[1]}"
 get_block_id = lambda b: f"{b[0]}x{b[1]}"
-DTYPE_TO_STR = {torch.float32: "fp32", torch.bfloat16: "bf16", torch.float16: "fp16"}
+DTYPE_TO_STR = {
+    torch.float32: "Float32",
+    torch.bfloat16: "BFloat16",
+    torch.float16: "Float16",
+}
 get_dtype_id = DTYPE_TO_STR.get
 FP8_TO_STR = {tex.DType.kFloat8E4M3: "e4m3", tex.DType.kFloat8E5M2: "e5m2"}
 get_fp8_id = FP8_TO_STR.get

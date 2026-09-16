@@ -73,13 +73,17 @@ METHODS = ["CAST_ONLY", "CAST_DBIAS", "CAST_ACT", "CAST_DACT", "CAST_DBIAS_DACT"
 IN_DTYPES = [jnp.float32, jnp.bfloat16, jnp.float16]
 FP8_DTYPES = [jnp.float8_e4m3fn, jnp.float8_e5m2]
 FP8_TO_KEY = {
-    jnp.float8_e4m3fn: "fp8_e4m3fn",
-    jnp.float8_e5m2: "fp8_e5m2",
+    jnp.float8_e4m3fn: "Float8E4M3",
+    jnp.float8_e5m2: "Float8E5M2",
 }
 
 get_shape_id = lambda s: f"{s[0]}x{s[1]}"
 get_layout_id = lambda l: "rowwise" if l == QuantizeLayout.ROWWISE else "bidim"
-DTYPE_TO_STR = {jnp.float32: "fp32", jnp.bfloat16: "bf16", jnp.float16: "fp16"}
+DTYPE_TO_STR = {
+    jnp.float32: "Float32",
+    jnp.bfloat16: "BFloat16",
+    jnp.float16: "Float16",
+}
 get_dtype_id = DTYPE_TO_STR.get
 FP8_TO_STR = {jnp.float8_e4m3fn: "e4m3", jnp.float8_e5m2: "e5m2"}
 get_fp8_id = FP8_TO_STR.get
