@@ -11,26 +11,26 @@ gated off at symmetric 512, the C++ cuDNN fused path caps at 256, and the unfuse
 symmetric 512 forward and backward on Blackwell, reachable through the ordinary cuDNN graph API.
 This module wraps them so TE, including its CP ring, can dispatch to them.
 
-Three properties were measured on B200 before this was written, and each one constrains the code:
+Three properties of these kernels were verified on Blackwell before this was written, and each
+one constrains the code:
 
 1. cuDNN's `use_causal_mask` is TOP-LEFT aligned and `use_causal_mask_bottom_right` is
-   bottom-right; both were verified against references at SQ=1024/SKV=2048, where the two
-   disagree by three orders of magnitude (1.6e-03 vs 3.5e+00). They coincide when SQ == SKV, so
-   the distinction is invisible in square tests and decisive for all_gather, which trims KV.
-   `_MASK_MODES` lists only spellings checked this way: sdpa() ignores unknown kwargs silently,
-   so an unverified name would apply no mask at all and still run.
+   bottom-right. They coincide when SQ == SKV, so the distinction is invisible in square tests
+   and decisive for all_gather, which trims KV. `_MASK_MODES` lists only spellings checked
+   against a reference for their alignment: sdpa() ignores unknown kwargs silently, so an
+   unverified name would apply no mask at all and still run.
 
-2. Plan building must be cached. Building a plan costs ~1972 ms the first time and ~12 ms once
-   cuDNN has cached the JIT, against a ~0.129 ms execute. Even the cached rebuild is ~90x an
-   execute, so a per-call build would make training build-bound. Hence `_PLAN_CACHE`.
+2. Plan building must be cached. Building a plan is by far the most expensive cuDNN frontend
+   call here, and dominates an execute even after cuDNN has cached the JIT and made rebuilds
+   cheap, so a per-call build would leave training build-bound. Hence `_PLAN_CACHE`.
 
 3. The forward LSE is natural-log logsumexp in fp32, shaped [b, h, s, 1]. Squeezed to [b, h, s]
-   it is exactly what the CP ring correction in context_parallel.py consumes (max err 1.8e-06 vs
-   an fp64 reference), which is what makes ring attention over these kernels valid at all.
+   it is exactly what the CP ring correction in context_parallel.py consumes, which is what
+   makes ring attention over these kernels valid at all.
 
 Numerics were validated against the criterion FlashAttention applies to itself, namely that the
-kernel error must stay within 2x the error bf16 inputs alone produce: observed 0.21x to 0.62x
-across square and rectangular, causal and non-causal shapes.
+kernel error must stay within 2x the error bf16 inputs alone produce, across square and
+rectangular, causal and non-causal shapes.
 """
 
 from __future__ import annotations
@@ -423,7 +423,8 @@ def _build_bwd(key) -> dict:
 
 
 def _cached(kind: str, key):
-    """Plan cache. See module docstring: a build is ~15000x an execute, so this is required."""
+    """Plan cache. See module docstring: building dominates executing even once the JIT is
+    cached, so this is required rather than an optimisation."""
     cache_key = (kind,) + key
     entry = _PLAN_CACHE.get(cache_key)
     if entry is None:

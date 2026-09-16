@@ -1746,7 +1746,7 @@ def cp_p2p_fwd_frost_attn(
     bias, and the selector declines those configurations before we get here.
 
     softmax_lse comes back as [b, h, s] natural-log logsumexp in fp32, which is what the ring
-    correction in this file consumes (measured against an fp64 reference at 1.8e-06).
+    correction in this file consumes.
     """
     from .frost_attention import (  # pylint: disable=import-outside-toplevel
         frost_attn_fwd,
