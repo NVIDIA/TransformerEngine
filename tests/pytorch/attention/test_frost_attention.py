@@ -155,7 +155,7 @@ def test_frost_forward_matches_reference(shape, mask, dtype):
     assert lse.dtype == torch.float32, "lse must be fp32; got %s" % lse.dtype
 
 
-@pytest.mark.parametrize("window", [(256, 0), (128, 0)], ids=lambda w: "win%d" % w[0])
+@pytest.mark.parametrize("window", [(256, 0), (128, 0), (0, 0)], ids=lambda w: "win%d" % w[0])
 @pytest.mark.parametrize("mask", ["causal", "causal_bottom_right"])
 def test_frost_sliding_window_matches_reference(mask, window):
     """Sliding window against the float64 reference.
@@ -196,7 +196,8 @@ def test_frost_sliding_window_matches_reference(mask, window):
 
 @pytest.mark.parametrize("shape", _SHAPES[:2], ids=lambda s: "b%d_hq%d_hkv%d_sq%d_skv%d_d%d" % s)
 @pytest.mark.parametrize("mask", ["no_mask", "causal"])
-def test_frost_backward_matches_reference(shape, mask):
+@pytest.mark.parametrize("window", [None, (128, 0)], ids=["nowin", "win128"])
+def test_frost_backward_matches_reference(shape, mask, window):
     """dq/dk/dv against autograd on the same independent float64 reference."""
     from transformer_engine.pytorch.attention.dot_product_attention.frost_attention import (
         frost_attn_bwd,
@@ -211,14 +212,16 @@ def test_frost_backward_matches_reference(shape, mask):
     q, k, v = q32.to(dtype), k32.to(dtype), v32.to(dtype)
     scale = 1.0 / math.sqrt(d)
 
-    out, lse = frost_attn_fwd(q, k, v, attn_scale=scale, attn_mask_type=mask)
+    out, lse = frost_attn_fwd(q, k, v, attn_scale=scale, attn_mask_type=mask, window_size=window)
     dout = torch.randn_like(out)
-    dq, dk, dv = frost_attn_bwd(q, k, v, out, lse, dout, attn_scale=scale, attn_mask_type=mask)
+    dq, dk, dv = frost_attn_bwd(
+        q, k, v, out, lse, dout, attn_scale=scale, attn_mask_type=mask, window_size=window
+    )
 
     qr = q32.detach().clone().requires_grad_(True)
     kr = k32.detach().clone().requires_grad_(True)
     vr = v32.detach().clone().requires_grad_(True)
-    ref_o, _ = _reference(qr, kr, vr, scale, mask)
+    ref_o, _ = _reference(qr, kr, vr, scale, mask, window)
     ref_o.backward(dout.double())
 
     for name, got, want in (("dq", dq, qr.grad), ("dk", dk, kr.grad), ("dv", dv, vr.grad)):
@@ -251,12 +254,67 @@ def test_frost_declines_unsupported_configs():
         (dict(attn_bias_type="post_scale_bias"), "attention bias"),
         (dict(attn_mask_type="padding_causal"), "padding mask"),
         (dict(attn_mask_type="arbitrary"), "arbitrary mask"),
+        # window_size reaches _mask_spec through is_frost_attention_supported, so its validation
+        # is part of the selector contract rather than an internal detail.
+        (dict(window_size=(-1, 5)), "a right window past the diagonal"),
+        (dict(window_size=(128,)), "a malformed window pair"),
     ):
         cfg = dict(base)
         cfg.update(override)
         ok, reason = is_frost_attention_supported(**cfg)
         assert not ok, "%s must be declined" % why
         assert reason, "a decline must explain itself"
+
+
+@pytest.mark.parametrize(
+    "cp_comm_type,window,expect_frost",
+    [
+        ("all_gather", (128, 0), True),
+        ("a2a", (128, 0), True),
+        ("p2p", (128, 0), False),
+        ("a2a+p2p", (128, 0), False),
+        ("p2p", (-1, 0), True),
+        ("p2p", (-1, -1), True),
+    ],
+)
+def test_frost_sliding_window_selection_by_cp_comm_type(cp_comm_type, window, expect_frost):
+    """Which context-parallel paths may serve a sliding window.
+
+    all_gather and a2a each see a contiguous KV range, so the window applies unchanged. The p2p
+    ring shards KV across steps, so a bound measured against the full sequence does not survive
+    the per-step tiles -- the same rule FusedAttention carries. The cases without a real window
+    must still select FROST, since the decline has to key on the window and not on p2p itself.
+    """
+    from transformer_engine.pytorch.attention.dot_product_attention.utils import (
+        AttentionParams,
+        get_attention_backend,
+    )
+
+    params = AttentionParams(
+        qkv_dtype=torch.bfloat16,
+        qkv_layout="bshd_bshd_bshd",
+        batch_size=2,
+        num_heads=8,
+        num_gqa_groups=4,
+        max_seqlen_q=4096,
+        max_seqlen_kv=4096,
+        head_dim_qk=512,
+        head_dim_v=512,
+        attn_mask_type="causal",
+        window_size=window,
+        context_parallel=True,
+        cp_comm_type=cp_comm_type,
+        is_training=True,
+    )
+    use_frost = get_attention_backend(params)[5]
+    assert (
+        bool(use_frost) == expect_frost
+    ), "cp_comm_type=%s window=%s: expected use_frost_attention=%s, got %s" % (
+        cp_comm_type,
+        window,
+        expect_frost,
+        bool(use_frost),
+    )
 
 
 def test_frost_rejects_mismatched_kv():
