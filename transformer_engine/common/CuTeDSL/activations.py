@@ -11,8 +11,6 @@ import os
 
 from cutlass import cute
 from cutlass import Float32
-from cutlass._mlir.dialects import arith as mlir_arith
-from cutlass.cutlass_dsl import dsl_user_op
 
 from transformer_engine.common.CuTeDSL.utils import fma_f32
 
@@ -44,24 +42,9 @@ def act_srelu(x: Float32) -> Float32:
     return r * r
 
 
-@dsl_user_op
-def dact_drelu(x: Float32, *, loc=None, ip=None) -> Float32:
-    cond = mlir_arith.cmpf(
-        mlir_arith.CmpFPredicate.OGT,
-        x.ir_value(loc=loc, ip=ip),
-        Float32(0.0).ir_value(loc=loc, ip=ip),
-        loc=loc,
-        ip=ip,
-    )
-    return Float32(
-        mlir_arith.select(
-            cond,
-            Float32(1.0).ir_value(loc=loc, ip=ip),
-            Float32(0.0).ir_value(loc=loc, ip=ip),
-            loc=loc,
-            ip=ip,
-        )
-    )
+@cute.jit
+def dact_drelu(x: Float32) -> Float32:
+    return Float32(x > Float32(0.0))
 
 
 def dact_dsrelu(x: Float32) -> Float32:

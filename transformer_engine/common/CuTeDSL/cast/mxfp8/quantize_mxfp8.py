@@ -33,7 +33,6 @@ from cuda.bindings.driver import CUstream  # pylint: disable=no-name-in-module
 import tvm_ffi
 
 from transformer_engine.common.CuTeDSL.utils import (
-    _bitcast_f32_to_i32,
     device_compute_capability,
     str_to_cutlass_dtype,
     is_packed16,
@@ -1659,7 +1658,7 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
             # The first thread updates the global amax with an atomic max on the bitcasted float value
             cute.arch.atomic_max(
                 amax_i32.iterator,
-                _bitcast_f32_to_i32(cta_amax),
+                cta_amax.bitcast(Int32),
             )
 
     @cute.jit

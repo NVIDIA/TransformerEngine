@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import Optional
 
 import cutlass
+from cutlass import cute
 from cutlass import Float32, Int64, Int32, Int16
 from cutlass._mlir.dialects import arith as mlir_arith
 from cutlass._mlir.dialects import llvm
@@ -63,24 +64,10 @@ def cutlass_dtype_to_str(dtype):
 FP32_MANTISSA_BITS = 23
 
 
-@dsl_user_op
-def _bitcast_f32_to_i32(val: Float32, *, loc=None, ip=None) -> Int32:
-    """Bitcast a float32 value to int32 without changing the bit pattern."""
-    return Int32(mlir_arith.bitcast(T.i32(), val.ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
-
-
-@dsl_user_op
-def _bitcast_i32_to_f32(val: Int32, *, loc=None, ip=None) -> Float32:
-    """Bitcast an int32 value to float32 without changing the bit pattern."""
-    return Float32(mlir_arith.bitcast(T.f32(), val.ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
-
-
-@dsl_user_op
-def fabs_f32(val: Float32, *, loc=None, ip=None) -> Float32:
+@cute.jit
+def fabs_f32(val: Float32) -> Float32:
     """Compute the absolute value of a float32."""
-    val_i32 = _bitcast_f32_to_i32(val, loc=loc, ip=ip)
-    abs_i32 = val_i32 & Int32(0x7FFFFFFF)
-    return _bitcast_i32_to_f32(abs_i32, loc=loc, ip=ip)
+    return (val.bitcast(Int32) & Int32(0x7FFFFFFF)).bitcast(Float32)
 
 
 @dsl_user_op
@@ -101,26 +88,17 @@ def fma_f32(a: Float32, b: Float32, c: Float32, *, loc=None, ip=None) -> Float32
     )
 
 
-@dsl_user_op
-def exp2f_rcp(scale_e8m0, *, loc=None, ip=None) -> Float32:
+@cute.jit
+def exp2f_rcp(scale_e8m0) -> Float32:
     """2^(127 - biased_exp) with special-case handling, for an e8m0 scale."""
-    biased_exp = Int32(scale_e8m0.bitcast(cutlass.Uint8, loc=loc, ip=ip))
+    biased_exp = Int32(scale_e8m0.bitcast(cutlass.Uint8))
     new_exp = (Int32(254) - biased_exp) << Int32(FP32_MANTISSA_BITS)
-    result = _bitcast_i32_to_f32(new_exp, loc=loc, ip=ip)
+    result = new_exp.bitcast(Float32)
+    # CuTeDSL unrolls this fixed loop and emits predicate instructions for the
+    # scalar conditionals, so this control flow does not hurt performance.
     for cmp_val, repl_bits in [(255, 0x7FFFFFFF), (254, 0x00400000), (0, 0x7F000000)]:
-        cond = mlir_arith.cmpi(
-            mlir_arith.CmpIPredicate.eq,
-            biased_exp.ir_value(loc=loc, ip=ip),
-            Int32(cmp_val).ir_value(loc=loc, ip=ip),
-            loc=loc,
-            ip=ip,
-        )
-        alt = _bitcast_i32_to_f32(Int32(repl_bits), loc=loc, ip=ip)
-        result = Float32(
-            mlir_arith.select(
-                cond, alt.ir_value(loc=loc, ip=ip), result.ir_value(loc=loc, ip=ip), loc=loc, ip=ip
-            )
-        )
+        if biased_exp == Int32(cmp_val):
+            result = Int32(repl_bits).bitcast(Float32)
     return result
 
 
@@ -146,18 +124,15 @@ def pack_f32x2(lo: Float32, hi: Float32, *, loc=None, ip=None) -> Int64:
     )
 
 
-@dsl_user_op
-def unpack_i64_to_i32x2(v: Int64, *, loc=None, ip=None):
+@cute.jit
+def unpack_i64_to_i32x2(v: Int64):
     """Split a 64-bit value into (lo, hi) 32-bit halves.
 
     Inverse of pack_f32x2's register-pair layout. Lowers to register-pair
     aliasing in SASS (no real instructions), so an 8-byte smem load + this
     split costs one LDS.64 total."""
-    lo = Int32(mlir_arith.trunci(T.i32(), v.ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
-    hi_64 = mlir_arith.shrui(
-        v.ir_value(loc=loc, ip=ip), Int64(32).ir_value(loc=loc, ip=ip), loc=loc, ip=ip
-    )
-    hi = Int32(mlir_arith.trunci(T.i32(), hi_64, loc=loc, ip=ip))
+    lo = Int32(v)
+    hi = Int32(v >> Int64(32))
     return lo, hi
 
 
@@ -243,21 +218,21 @@ def _build_packed16_kit(in_fmt: str):
 
     if in_fmt == "bf16":
         # bf16 == top 16 bits of f32 — widening is a free bit-shift.
-        @dsl_user_op
-        def bits_to_f32(bits: Int16, *, loc=None, ip=None) -> Float32:
-            i32 = Int32(mlir_arith.extui(T.i32(), bits.ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
-            return _bitcast_i32_to_f32(i32 << Int32(16), loc=loc, ip=ip)
+        @cute.jit
+        def bits_to_f32(bits: Int16) -> Float32:
+            i32 = cutlass.Uint32(bits)
+            return (i32 << cutlass.Uint32(16)).bitcast(Float32)
 
-        @dsl_user_op
-        def x2_lo_to_f32(bits: Int32, *, loc=None, ip=None) -> Float32:
-            return _bitcast_i32_to_f32((bits & Int32(0xFFFF)) << Int32(16), loc=loc, ip=ip)
+        @cute.jit
+        def x2_lo_to_f32(bits: Int32) -> Float32:
+            return ((bits & Int32(0xFFFF)) << Int32(16)).bitcast(Float32)
 
-        @dsl_user_op
-        def x2_hi_to_f32(bits: Int32, *, loc=None, ip=None) -> Float32:
+        @cute.jit
+        def x2_hi_to_f32(bits: Int32) -> Float32:
             # `(x >> 16) << 16` ≡ `x & 0xFFFF0000`, sidestepping signed-literal
             # issues. Sign bits from the arith-right shift get zeroed by the
             # left shift.
-            return _bitcast_i32_to_f32((bits >> Int32(16)) << Int32(16), loc=loc, ip=ip)
+            return ((bits >> Int32(16)) << Int32(16)).bitcast(Float32)
 
         @dsl_user_op
         def truncate_f32(val: Float32, *, loc=None, ip=None) -> Float32:
@@ -279,7 +254,7 @@ def _build_packed16_kit(in_fmt: str):
             i32 = Int32(
                 mlir_arith.extui(T.i32(), bf16_bits.ir_value(loc=loc, ip=ip), loc=loc, ip=ip)
             )
-            return _bitcast_i32_to_f32(i32 << Int32(16), loc=loc, ip=ip)
+            return (i32 << Int32(16)).bitcast(Float32)
 
     else:
         # f16 has its own bit layout; widening requires `cvt.f32.f16`.
@@ -299,20 +274,14 @@ def _build_packed16_kit(in_fmt: str):
                 )
             )
 
-        @dsl_user_op
-        def x2_lo_to_f32(bits: Int32, *, loc=None, ip=None) -> Float32:
-            lo_i16 = Int16(
-                mlir_arith.trunci(T.i16(), bits.ir_value(loc=loc, ip=ip), loc=loc, ip=ip)
-            )
-            return bits_to_f32(lo_i16, loc=loc, ip=ip)
+        @cute.jit
+        def x2_lo_to_f32(bits: Int32) -> Float32:
+            return bits_to_f32(Int16(bits))
 
-        @dsl_user_op
-        def x2_hi_to_f32(bits: Int32, *, loc=None, ip=None) -> Float32:
+        @cute.jit
+        def x2_hi_to_f32(bits: Int32) -> Float32:
             hi_shifted = bits >> Int32(16)
-            hi_i16 = Int16(
-                mlir_arith.trunci(T.i16(), hi_shifted.ir_value(loc=loc, ip=ip), loc=loc, ip=ip)
-            )
-            return bits_to_f32(hi_i16, loc=loc, ip=ip)
+            return bits_to_f32(Int16(hi_shifted))
 
         @dsl_user_op
         def truncate_f32(val: Float32, *, loc=None, ip=None) -> Float32:
