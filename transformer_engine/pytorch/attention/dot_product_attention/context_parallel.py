@@ -1607,12 +1607,11 @@ def _frost_mask_for_window(window_size):
     all_gather never produces that.
     """
     if window_size is None or tuple(window_size) == (-1, -1):
-        return "no_mask"
-    if tuple(window_size) == (-1, 0):
-        return "causal_bottom_right"
-    raise NotImplementedError(
-        "FROST all_gather does not support sliding window %s" % str(window_size)
-    )
+        return "no_mask", None
+    # Anything with a bounded side is causal relative to the trimmed KV, and a bounded left side
+    # is a sliding window. Both are expressed as a band against the bottom-right diagonal, so the
+    # window travels with the mask type rather than needing a separate spelling per case.
+    return "causal_bottom_right", tuple(window_size)
 
 
 def cp_ag_fwd_frost_attn(
@@ -1634,12 +1633,14 @@ def cp_ag_fwd_frost_attn(
         to_frost_layout,
     )
 
+    mask_type, window = _frost_mask_for_window(window_size)
     out, softmax_lse = frost_attn_fwd(
         to_frost_layout(q_part.contiguous(), qkv_format),
         to_frost_layout(k_part.contiguous(), qkv_format),
         to_frost_layout(v_part.contiguous(), qkv_format),
         attn_scale=softmax_scale,
-        attn_mask_type=_frost_mask_for_window(window_size),
+        attn_mask_type=mask_type,
+        window_size=window,
     )
     return from_frost_layout(out, qkv_format), softmax_lse
 
@@ -1663,6 +1664,7 @@ def cp_ag_bwd_frost_attn(
         to_frost_layout,
     )
 
+    mask_type, window = _frost_mask_for_window(window_size)
     dq, dk, dv = frost_attn_bwd(
         to_frost_layout(q_part.contiguous(), qkv_format),
         to_frost_layout(k_part.contiguous(), qkv_format),
@@ -1671,7 +1673,8 @@ def cp_ag_bwd_frost_attn(
         softmax_lse,
         to_frost_layout(dout_part.contiguous(), qkv_format),
         attn_scale=softmax_scale,
-        attn_mask_type=_frost_mask_for_window(window_size),
+        attn_mask_type=mask_type,
+        window_size=window,
         deterministic=deterministic,
     )
     return (

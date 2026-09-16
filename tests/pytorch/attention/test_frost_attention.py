@@ -64,7 +64,7 @@ _SHAPES = [
 ]
 
 
-def _reference(q, k, v, scale, mask):
+def _reference(q, k, v, scale, mask, window=None):
     """Attention in float64, computed independently of TE and of cuDNN.
 
     float64 rather than float32 on purpose. torch uses TF32 for fp32 matmuls on Ampere and newer,
@@ -83,21 +83,27 @@ def _reference(q, k, v, scale, mask):
         # Top-left for "causal", bottom-right for "causal_bottom_right". These coincide only when
         # sq == skv, which is exactly why _SHAPES includes a rectangular case.
         offset = 0 if mask == "causal" else skv - sq
-        causal = torch.ones(sq, skv, device=q.device, dtype=torch.bool).triu(offset + 1)
-        s = s.masked_fill(causal, float("-inf"))
+        blocked = torch.ones(sq, skv, device=q.device, dtype=torch.bool).triu(offset + 1)
+        if window is not None and window[0] != -1:
+            # A left window keeps only the most recent window[0] keys before the diagonal, so
+            # everything further back is masked as well.
+            blocked |= torch.ones(sq, skv, device=q.device, dtype=torch.bool).tril(
+                offset - window[0] - 1
+            )
+        s = s.masked_fill(blocked, float("-inf"))
     p = s.softmax(-1)
     return p @ vv, torch.logsumexp(s, dim=-1)
 
 
-def _floor(q32, k32, v32, scale, mask, dtype):
+def _floor(q32, k32, v32, scale, mask, dtype, window=None):
     """The error `dtype` inputs alone cause, and the exact answer to measure the kernel against.
 
     The inputs must originate in higher precision: rounding an already-rounded tensor is a no-op,
     which would collapse the floor to zero and turn the criterion below into an impossible bound.
     """
-    exact, exact_lse = _reference(q32, k32, v32, scale, mask)
+    exact, exact_lse = _reference(q32, k32, v32, scale, mask, window)
     lossy, lossy_lse = _reference(
-        q32.to(dtype).double(), k32.to(dtype).double(), v32.to(dtype).double(), scale, mask
+        q32.to(dtype).double(), k32.to(dtype).double(), v32.to(dtype).double(), scale, mask, window
     )
     return (
         (exact - lossy).abs().max().item(),
@@ -147,6 +153,45 @@ def test_frost_forward_matches_reference(shape, mask, dtype):
     )
     assert lse.shape == (b, hq, sq), "lse must be [b, h, s]; got %s" % (tuple(lse.shape),)
     assert lse.dtype == torch.float32, "lse must be fp32; got %s" % lse.dtype
+
+
+@pytest.mark.parametrize("window", [(256, 0), (128, 0)], ids=lambda w: "win%d" % w[0])
+@pytest.mark.parametrize("mask", ["causal", "causal_bottom_right"])
+def test_frost_sliding_window_matches_reference(mask, window):
+    """Sliding window against the float64 reference.
+
+    The engine advertises swa support, and cuDNN expresses a window as a left bound on the same
+    diagonal band that gives causal masking, so this shares a code path with the cases above. It
+    is worth its own test because a left bound that is off by one, or silently dropped, still
+    produces finite plausible-looking output -- the reference is the only thing that catches it.
+    """
+    from transformer_engine.pytorch.attention.dot_product_attention.frost_attention import (
+        frost_attn_fwd,
+    )
+
+    b, hq, hkv, sq, skv, d = 2, 8, 4, 1024, 1024, 512
+    dtype = torch.bfloat16
+    torch.manual_seed(0)
+    mk = lambda s_, h_: torch.randn(b, s_, h_, d, device="cuda").permute(0, 2, 1, 3).contiguous()
+    q32, k32, v32 = mk(sq, hq), mk(skv, hkv), mk(skv, hkv)
+    q, k, v = q32.to(dtype), k32.to(dtype), v32.to(dtype)
+    scale = 1.0 / math.sqrt(d)
+
+    out, _ = frost_attn_fwd(q, k, v, attn_scale=scale, attn_mask_type=mask, window_size=window)
+
+    floor_o, _, ref_o, _ = _floor(q32, k32, v32, scale, mask, dtype, window)
+    err = (out.double() - ref_o).abs().max().item()
+    assert torch.isfinite(out).all(), "sliding-window forward produced non-finite values"
+    assert err <= 2 * floor_o + 1e-3, "out err %.3e exceeds 2x the floor %.3e for window %s" % (
+        err,
+        floor_o,
+        window,
+    )
+
+    # A window must actually change the result; if the bound were dropped this would match the
+    # unwindowed output and the check above would still pass.
+    full, _ = frost_attn_fwd(q, k, v, attn_scale=scale, attn_mask_type=mask)
+    assert not torch.equal(out, full), "window %s produced the same output as no window" % (window,)
 
 
 @pytest.mark.parametrize("shape", _SHAPES[:2], ids=lambda s: "b%d_hq%d_hkv%d_sq%d_skv%d_d%d" % s)

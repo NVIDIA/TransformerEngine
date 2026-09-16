@@ -2296,7 +2296,16 @@ class FrostAttnFunc(torch.autograd.Function):
 
     @staticmethod
     def forward(
-        ctx, q, k, v, softmax_scale, attn_mask_type, qkv_format, is_training, deterministic
+        ctx,
+        q,
+        k,
+        v,
+        softmax_scale,
+        attn_mask_type,
+        qkv_format,
+        is_training,
+        deterministic,
+        window_size,
     ):
         # pylint: disable=missing-function-docstring
         from .frost_attention import (  # pylint: disable=import-outside-toplevel
@@ -2312,13 +2321,19 @@ class FrostAttnFunc(torch.autograd.Function):
         k_f = to_frost_layout(k.contiguous(), qkv_format)
         v_f = to_frost_layout(v.contiguous(), qkv_format)
         out_f, softmax_lse = frost_attn_fwd(
-            q_f, k_f, v_f, attn_scale=softmax_scale, attn_mask_type=attn_mask_type
+            q_f,
+            k_f,
+            v_f,
+            attn_scale=softmax_scale,
+            attn_mask_type=attn_mask_type,
+            window_size=window_size,
         )
         out = from_frost_layout(out_f, qkv_format)
         if is_training:
             ctx.save_for_backward(q_f, k_f, v_f, out_f, softmax_lse)
             ctx.softmax_scale = softmax_scale
             ctx.attn_mask_type = attn_mask_type
+            ctx.window_size = window_size
             ctx.qkv_format = qkv_format
             ctx.unflattened_shape = out.shape
             ctx.deterministic = deterministic
@@ -2349,14 +2364,16 @@ class FrostAttnFunc(torch.autograd.Function):
             to_frost_layout(dout.contiguous(), fmt),
             attn_scale=ctx.softmax_scale,
             attn_mask_type=ctx.attn_mask_type,
+            window_size=ctx.window_size,
             deterministic=ctx.deterministic,
         )
         # One None per non-tensor forward argument: softmax_scale, attn_mask_type, qkv_format,
-        # is_training, deterministic. Must track forward's signature exactly.
+        # is_training, deterministic, window_size. Must track forward's signature exactly.
         return (
             from_frost_layout(dq, fmt),
             from_frost_layout(dk, fmt),
             from_frost_layout(dv, fmt),
+            None,
             None,
             None,
             None,
@@ -2457,6 +2474,7 @@ class FrostAttention(torch.nn.Module):
             qkv_format,
             self.training,
             self.deterministic,
+            window_size,
         )
 
 
