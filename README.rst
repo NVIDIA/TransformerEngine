@@ -8,7 +8,7 @@ Transformer Engine
 
 |PyPI| |Documentation| |License|
 
-`Quick start <#quick-start>`_ | `User guide <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/index.html>`_ | `PyTorch API <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/api/pytorch.html>`_ | `JAX API <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/api/jax.html>`_ | `Examples <https://github.com/NVIDIA/TransformerEngine/tree/main/examples>`_ | `Releases <https://github.com/NVIDIA/TransformerEngine/releases>`_
+`Quick start <#quick-start>`_ | `User guide <https://docs.nvidia.com/deeplearning/transformer-engine/index.html>`_ | `PyTorch API <https://docs.nvidia.com/deeplearning/transformer-engine/api/pytorch.html>`_ | `JAX API <https://docs.nvidia.com/deeplearning/transformer-engine/api/jax.html>`_ | `Examples <https://github.com/NVIDIA/TransformerEngine/tree/main/examples>`_ | `Releases <https://github.com/NVIDIA/TransformerEngine/releases>`_
 
 Why Transformer Engine?
 =======================
@@ -59,9 +59,9 @@ container release listed in the `NVIDIA Deep Learning Frameworks Support Matrix 
     docker run --gpus all -it --rm nvcr.io/nvidia/pytorch:<YY.MM>-py3
     docker run --gpus all -it --rm nvcr.io/nvidia/jax:<YY.MM>-py3
 
-Continue with the `PyTorch and JAX getting started guide <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/getting_started/index.html>`_.
+Continue with the `PyTorch and JAX getting started guide <https://docs.nvidia.com/deeplearning/transformer-engine/getting_started/index.html>`_.
 For prerequisites, source builds, environment variables, and troubleshooting, see the
-`installation guide <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/installation.html>`_.
+`installation guide <https://docs.nvidia.com/deeplearning/transformer-engine/installation.html>`_.
 
 Convergence
 ===========
@@ -116,7 +116,7 @@ See `Resources <docs/resources.rst>`_ for papers and recorded talks.
    :target: https://pypi.org/project/transformer-engine/
    :alt: PyPI release
 .. |Documentation| image:: https://img.shields.io/badge/docs-latest-76B900.svg
-   :target: https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/index.html
+   :target: https://docs.nvidia.com/deeplearning/transformer-engine/index.html
    :alt: Documentation
 .. |License| image:: https://img.shields.io/badge/License-Apache%202.0-blue.svg
    :target: https://opensource.org/licenses/Apache-2.0
