@@ -319,7 +319,6 @@ class GatedDeltaNet2Attention(LinearAttentionBase):
                 "GatedDeltaNet2Attention beta_guard requires use_qk_l2norm_in_kernel; "
                 "the guard is defined on the normalized key."
             )
-        self._check_fp8_disabled()
 
         gdn2_kwargs = {
             "qkv_format": qkv_format if qkv_format is not None else self.qkv_format,

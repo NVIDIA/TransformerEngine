@@ -590,18 +590,6 @@ def test_gdn2_requires_all_gates():
         attention(q, k, v, g=g, beta=beta)
 
 
-def test_gdn2_rejects_fp8_autocast():
-    """GDN-2 must not silently run in high precision inside FP8 autocast."""
-    q, k, v, g, beta, w = _inputs(1, 128, 1, 1)
-    attention = GatedDeltaNet2Attention(
-        num_attention_heads=1,
-        kv_channels=64,
-        qkv_format="bshd",
-    )
-    with autocast(enabled=True), pytest.raises(ValueError, match="does not support FP8 autocast"):
-        attention(q, k, v, g=g, beta=beta, w=w)
-
-
 def test_gdn2_module_carries_no_quantization_state():
     """LinearAttentionBase is a plain nn.Module: no parameters, no FP8 state."""
     from transformer_engine.pytorch.module.base import TransformerEngineBaseModule

@@ -217,7 +217,6 @@ class GatedDeltaNetAttention(LinearAttentionBase):
                 f"got g={'set' if g is not None else 'None'} and "
                 f"beta={'set' if beta is not None else 'None'}."
             )
-        self._check_fp8_disabled()
 
         gdn_kwargs = {
             "qkv_format": qkv_format if qkv_format is not None else self.qkv_format,

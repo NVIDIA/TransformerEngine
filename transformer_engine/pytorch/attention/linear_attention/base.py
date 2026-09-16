@@ -21,7 +21,6 @@ from typing import Any, Callable, Dict, Generator, Optional, Tuple, Union
 
 import torch
 
-from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 from transformer_engine.pytorch.constants import dist_group_type
 from transformer_engine.pytorch.distributed import get_distributed_world_size, checkpoint
 from transformer_engine.pytorch.utils import nvtx_range_pop, nvtx_range_push
@@ -335,9 +334,10 @@ class LinearAttentionBase(torch.nn.Module):
     cuDNN frontend op owns its own matmuls -- so this deliberately does not derive
     from ``TransformerEngineBaseModule``: that class's quantization state (FP8 meta,
     quantizers, the FP8 extra state in the state dict) would be built on every
-    forward only to go unused, and these modules refuse to run under FP8 anyway.
-    What they do need from the TE module contract is reimplemented here: the
-    tensor-parallel group handshake and the forward lifecycle.
+    forward only to go unused. These modules therefore ignore FP8 autocast and
+    always run at the input precision. What they do need from the TE module
+    contract is reimplemented here: the tensor-parallel group handshake and the
+    forward lifecycle.
 
     Subclasses build a :class:`LinearAttentionKernelAdapter` from the head
     geometry resolved here and implement `forward`.
@@ -506,10 +506,3 @@ class LinearAttentionBase(torch.nn.Module):
                 attention_func, *forward_args, **forward_kwargs
             )
         return attention_func(*forward_args, **forward_kwargs)
-
-    def _check_fp8_disabled(self) -> None:
-        """Linear attention has no FP8 kernel; fail instead of silently upcasting."""
-        if FP8GlobalStateManager.is_fp8_enabled() or FP8GlobalStateManager.is_fp8_calibration():
-            raise ValueError(
-                f"{type(self).__name__} does not support FP8 autocast or FP8 calibration."
-            )
