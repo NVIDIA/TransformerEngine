@@ -1929,6 +1929,22 @@ def get_attention_backend(
         use_frost_attention = False
     if (
         use_frost_attention
+        and window_size is not None
+        and window_size[0] != -1
+        and "causal" not in attn_mask_type
+        and max_seqlen_q != max_seqlen_kv
+    ):
+        # FROST anchors the band from the mask type, so a windowed non-causal mask always lands
+        # top-left. TE's bottom_right_diagonal defaults to True and the C++ fused path honours it
+        # (fused_attn_f16_arbitrary_seqlen.cu picks the alignment from that flag), so for unequal
+        # q/kv lengths the two would disagree silently. Decline rather than guess the anchor.
+        logger.debug(
+            "Disabling FrostAttention for a windowed non-causal mask with max_seqlen_q != "
+            "max_seqlen_kv, where the diagonal anchor is ambiguous"
+        )
+        use_frost_attention = False
+    if (
+        use_frost_attention
         and context_parallel
         and window_size is not None
         and (window_size[0] != -1 or window_size[1] not in [-1, 0])

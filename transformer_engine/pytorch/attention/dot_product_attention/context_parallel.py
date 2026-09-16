@@ -3661,11 +3661,12 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             or use_fused_attention
             or use_flash_attn_3
             or use_flash_attn_4
+            or use_frost_attention
             or fa_utils.v2_3_plus
         ), (
-            "cp_comm_type='all_gather' only supports SWA through FusedAttention or FlashAttention"
-            f" >= 2.3. Found {use_fused_attention=}, {use_flash_attn_3=}, "
-            f"{use_flash_attn_4=}, "
+            "cp_comm_type='all_gather' only supports SWA through FusedAttention, FrostAttention"
+            f" or FlashAttention >= 2.3. Found {use_fused_attention=}, {use_flash_attn_3=}, "
+            f"{use_flash_attn_4=}, {use_frost_attention=}, "
             f"and {fa_utils.v2_3_plus=}."
         )
         if load_balancing_strategy is CPLoadBalancingStrategy.DUAL_CHUNK_SWAP:
@@ -5004,10 +5005,12 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             or use_fused_attention
             or use_flash_attn_3
             or use_flash_attn_4
+            or use_frost_attention
             or fa_utils.v2_3_plus
         ), (
-            "cp_comm_type='a2a' only supports SWA through FusedAttention or FlashAttention >= 2.3."
-            f" Found {use_fused_attention=}, {use_flash_attn_3=}, {use_flash_attn_4=}, "
+            "cp_comm_type='a2a' only supports SWA through FusedAttention, FrostAttention or"
+            f" FlashAttention >= 2.3. Found {use_fused_attention=}, {use_flash_attn_3=}, "
+            f"{use_flash_attn_4=}, {use_frost_attention=}, "
             f"and {fa_utils.v2_3_plus=}."
         )
         assert q.shape[seq_dim_qkv] % 2 == 0 and k.shape[seq_dim_qkv] % 2 == 0, (
