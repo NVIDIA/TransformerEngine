@@ -1684,7 +1684,7 @@ def cp_ag_bwd_frost_attn(
     )
 
 
-def cp_a2a_fwd_frost_attn(softmax_scale, attn_mask_type, qkv_format, q, k, v):
+def cp_a2a_fwd_frost_attn(softmax_scale, attn_mask_type, qkv_format, q, k, v, window_size=None):
     """Forward for CP a2a with the cuDNN FROST backend.
 
     The simplest of the three. After the all-to-all each rank holds the FULL sequence for a subset
@@ -1703,12 +1703,23 @@ def cp_a2a_fwd_frost_attn(softmax_scale, attn_mask_type, qkv_format, q, k, v):
         to_frost_layout(v.contiguous(), qkv_format),
         attn_scale=softmax_scale,
         attn_mask_type=attn_mask_type,
+        window_size=window_size,
     )
     return from_frost_layout(out, qkv_format), softmax_lse
 
 
 def cp_a2a_bwd_frost_attn(
-    softmax_scale, attn_mask_type, qkv_format, softmax_lse, q, k, v, out, dout, deterministic=False
+    softmax_scale,
+    attn_mask_type,
+    qkv_format,
+    softmax_lse,
+    q,
+    k,
+    v,
+    out,
+    dout,
+    deterministic=False,
+    window_size=None,
 ):
     """Backward for CP a2a with the cuDNN FROST backend."""
     from .frost_attention import (  # pylint: disable=import-outside-toplevel
@@ -1726,6 +1737,7 @@ def cp_a2a_bwd_frost_attn(
         to_frost_layout(dout.contiguous(), qkv_format),
         attn_scale=softmax_scale,
         attn_mask_type=attn_mask_type,
+        window_size=window_size,
         deterministic=deterministic,
     )
     return (
@@ -5150,7 +5162,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         qkv_scale_inv_format = None
         if use_frost_attention:
             out_, softmax_lse = cp_a2a_fwd_frost_attn(
-                softmax_scale, attn_mask_type, qkv_format, q, k, v
+                softmax_scale, attn_mask_type, qkv_format, q, k, v, window_size=window_size
             )
             # Only the LSE: FROST has no dropout, so there is no RNG state to carry, and a
             # None in this list would have to survive the save/restore machinery.
@@ -5559,6 +5571,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 out,
                 dout,
                 deterministic=ctx.deterministic,
+                window_size=ctx.window_size,
             )
         elif ctx.use_fused_attention:
             do_format = ctx.o_format
