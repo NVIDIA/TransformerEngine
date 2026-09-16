@@ -35,6 +35,13 @@ Transformer Engine documentation
 
 .. toctree::
    :hidden:
+   :caption: Project
+
+   project_updates
+   resources
+
+.. toctree::
+   :hidden:
    :caption: Python API documentation
 
    api/common
