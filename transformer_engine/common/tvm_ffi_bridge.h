@@ -351,7 +351,7 @@ class TVMFFICentral {
   template <typename... Args>
   void maybe_warn_not_chosen(Args &&...reason) const {
     if (warn_cutedsl_backend_not_chosen_) {
-      NVTE_WARN("The CuTe DSL kernel is not chosen because ", reason...);
+      NVTE_WARN("The CuTeDSL kernel is not chosen because ", reason...);
     }
   }
 
@@ -378,7 +378,7 @@ class TVMFFICentral {
   }
 
   static bool warn_if_cutedsl_backend_not_chosen() {
-    return transformer_engine::getenv<bool>("NVTE_DEBUG");
+    return transformer_engine::getenv<bool>("NVTE_WARN_IF_CUTEDSL_BACKEND_NOT_CHOSEN");
   }
 
   const bool tvm_ffi_available_;  // libtvm_ffi.so loaded; false disables the backend
