@@ -1277,9 +1277,9 @@ class _LayerNormMLP(torch.autograd.Function):
             # we gather here. Route through the same FP8-aware all-gather as
             # the non-overlap path in
             # ``TransformerEngineBaseModule.grad_output_preprocess`` by passing
-            # the grad_output quantizer. Columnwise data needed for fc2_wgrad
-            # is produced by ``update_usage(columnwise_usage=True)`` further
-            # below.
+            # the grad_output quantizer. Per-tensor FP8 can reconstruct columnwise
+            # data from the gathered rowwise data; MXFP8 must instead quantize
+            # the original gradient columnwise to avoid double quantization.
             if (
                 ctx.fc2_weight_requires_grad
                 and ctx.ub_overlap_ag
@@ -1288,6 +1288,10 @@ class _LayerNormMLP(torch.autograd.Function):
             ):
                 if ctx.fc2_grad_output_quantizer is not None:
                     set_quantizer_usage_for_wgrad_all_gather(ctx.fc2_grad_output_quantizer)
+                if isinstance(ctx.fc2_grad_output_quantizer, MXFP8Quantizer):
+                    grad_output = (
+                        grad_outputs[0].reshape(-1, grad_outputs[0].shape[-1]).contiguous()
+                    )
                 grad_output, _ = gather_along_first_dim(
                     grad_output,
                     ctx.tp_group,
@@ -1303,7 +1307,11 @@ class _LayerNormMLP(torch.autograd.Function):
                 # Prepare grad output tensor
                 # Note: Synchronize tensor-parallel communication and
                 # make sure required data is available
-                if ctx.ub_overlap_ag and isinstance(ctx.fc2_grad_output_quantizer, MXFP8Quantizer):
+                if (
+                    ctx.ub_overlap_ag
+                    and isinstance(ctx.fc2_grad_output_quantizer, MXFP8Quantizer)
+                    and not ub_obj_fc2_dgrad.with_cublasmp()
+                ):
                     # UB does not support pipelined overlapping grad output
                     # all-gather with wgrad GEMM. Also, we can't
                     # convert row-scaled MXFP8 to column-scaled, so we
