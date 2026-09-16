@@ -9,12 +9,17 @@ run_attention_with_cp.py compares a context-parallel run against a non-CP run *o
 backend*, which validates the ring plumbing and nothing about the kernel: a systematic error --
 a wrong softmax scale, a causal mask anchored to the wrong corner, an LSE in the wrong log base
 -- appears identically on both sides and cancels. Everything here is anchored to an independent
-fp32 reference instead.
+float64 reference instead.
 
-The pass criterion is the one FlashAttention applies to itself: the kernel's error against an
-fp32 reference must stay within 2x the error that comes from feeding the same reference bf16
+The pass criterion is the one FlashAttention applies to itself: the kernel's error against that
+reference must stay within 2x the error the reference itself incurs from reduced-precision
 inputs. That floor is measured per case rather than hard-coded, so the bar tracks the shape and
 dtype instead of encoding a number that silently rots.
+
+The reference is float64, not float32. torch uses TF32 for fp32 matmuls on Ampere and newer, and
+TF32's significand is 11 bits -- the same as fp16 -- so an fp32 reference is no more accurate
+than an fp16 kernel and the floor collapses to nothing. Measured on B200: the fp16 floor came out
+at 3e-08 instead of ~1e-03, which turned the bound into the bare absolute slack.
 """
 
 import math
@@ -60,8 +65,15 @@ _SHAPES = [
 
 
 def _reference(q, k, v, scale, mask):
-    """Attention in fp32, computed independently of TE and of cuDNN."""
-    qq, kk, vv = q.float(), k.float(), v.float()
+    """Attention in float64, computed independently of TE and of cuDNN.
+
+    float64 rather than float32 on purpose. torch uses TF32 for fp32 matmuls on Ampere and newer,
+    and TF32 carries an 11-bit significand -- the same as fp16. An fp32 reference is therefore no
+    more accurate than the fp16 kernel it is meant to judge, which silently collapses the error
+    floor below and makes the comparison meaningless. float64 is immune to that and to whatever
+    the ambient TF32 flags happen to be.
+    """
+    qq, kk, vv = q.double(), k.double(), v.double()
     rep = qq.shape[1] // kk.shape[1]
     kk = kk.repeat_interleave(rep, dim=1)
     vv = vv.repeat_interleave(rep, dim=1)
@@ -80,12 +92,12 @@ def _reference(q, k, v, scale, mask):
 def _floor(q32, k32, v32, scale, mask, dtype):
     """The error `dtype` inputs alone cause, and the exact answer to measure the kernel against.
 
-    The inputs must originate in fp32: rounding an already-rounded tensor is a no-op, which would
-    collapse the floor to zero and turn the criterion below into an impossible bound.
+    The inputs must originate in higher precision: rounding an already-rounded tensor is a no-op,
+    which would collapse the floor to zero and turn the criterion below into an impossible bound.
     """
     exact, exact_lse = _reference(q32, k32, v32, scale, mask)
     lossy, lossy_lse = _reference(
-        q32.to(dtype).float(), k32.to(dtype).float(), v32.to(dtype).float(), scale, mask
+        q32.to(dtype).double(), k32.to(dtype).double(), v32.to(dtype).double(), scale, mask
     )
     return (
         (exact - lossy).abs().max().item(),
@@ -98,8 +110,8 @@ def _floor(q32, k32, v32, scale, mask, dtype):
 @pytest.mark.parametrize("shape", _SHAPES, ids=lambda s: "b%d_hq%d_hkv%d_sq%d_skv%d_d%d" % s)
 @pytest.mark.parametrize("mask", ["no_mask", "causal", "causal_bottom_right"])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
-def test_frost_forward_matches_fp32_reference(shape, mask, dtype):
-    """Forward output and LSE against an independent fp32 reference."""
+def test_frost_forward_matches_reference(shape, mask, dtype):
+    """Forward output and LSE against an independent float64 reference."""
     from transformer_engine.pytorch.attention.dot_product_attention.frost_attention import (
         frost_attn_fwd,
     )
@@ -116,8 +128,8 @@ def test_frost_forward_matches_fp32_reference(shape, mask, dtype):
     out, lse = frost_attn_fwd(q, k, v, attn_scale=scale, attn_mask_type=mask)
 
     floor_o, floor_l, ref_o, ref_lse = _floor(q32, k32, v32, scale, mask, dtype)
-    err_o = (out.float() - ref_o).abs().max().item()
-    err_l = (lse.float() - ref_lse).abs().max().item()
+    err_o = (out.double() - ref_o).abs().max().item()
+    err_l = (lse.double() - ref_lse).abs().max().item()
 
     assert torch.isfinite(out).all(), "forward produced non-finite values"
     # A floor of exactly zero would make the ratio meaningless; guard with a small absolute term.
@@ -139,8 +151,8 @@ def test_frost_forward_matches_fp32_reference(shape, mask, dtype):
 
 @pytest.mark.parametrize("shape", _SHAPES[:2], ids=lambda s: "b%d_hq%d_hkv%d_sq%d_skv%d_d%d" % s)
 @pytest.mark.parametrize("mask", ["no_mask", "causal"])
-def test_frost_backward_matches_fp32_reference(shape, mask):
-    """dq/dk/dv against autograd on the same independent fp32 reference."""
+def test_frost_backward_matches_reference(shape, mask):
+    """dq/dk/dv against autograd on the same independent float64 reference."""
     from transformer_engine.pytorch.attention.dot_product_attention.frost_attention import (
         frost_attn_bwd,
         frost_attn_fwd,
@@ -162,12 +174,12 @@ def test_frost_backward_matches_fp32_reference(shape, mask):
     kr = k32.detach().clone().requires_grad_(True)
     vr = v32.detach().clone().requires_grad_(True)
     ref_o, _ = _reference(qr, kr, vr, scale, mask)
-    ref_o.backward(dout.float())
+    ref_o.backward(dout.double())
 
     for name, got, want in (("dq", dq, qr.grad), ("dk", dk, kr.grad), ("dv", dv, vr.grad)):
         assert torch.isfinite(got).all(), "%s has non-finite values" % name
         assert got.shape == want.shape, "%s shape %s != %s" % (name, got.shape, want.shape)
-        err = (got.float() - want).abs().max().item()
+        err = (got.double() - want).abs().max().item()
         # Gradients accumulate over the sequence, so scale the bar with skv rather than reusing
         # the forward's floor. This is a sanity bound on systematic error, not a tight check.
         assert err <= 0.05 * want.abs().max().item() + 1e-2, "%s max|err|=%.3e vs ref max %.3e" % (
