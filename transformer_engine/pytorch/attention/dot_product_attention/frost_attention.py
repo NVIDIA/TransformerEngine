@@ -91,9 +91,12 @@ _HANDLES: dict = {}
 def _import_cudnn():
     """Import cuDNN Frontend with FROST engines enabled, once.
 
-    Note the ordering hazard: the engines register at import time, so if another module imported
-    cudnn first without the switch set, setdefault here is too late and no FROST engine exists.
-    _select_frost_plan catches that by checking the plan name, but only once a plan is built.
+    The switch is set before the import because the documentation describes the engines as
+    registering at import time. Measured on B200 with cuDNN Frontend 1.29.0, the ordering turns
+    out not to matter: importing cudnn and cudnn.sdpa first with the switch unset, then setting
+    it and building a plan, still selects a FROST engine. Setting it first is kept because it is
+    what the documentation asks for and costs nothing, but nothing here depends on winning that
+    race, and _select_frost_plan verifies the engine by plan name regardless.
     """
     global _cudnn
     if _cudnn is None:
