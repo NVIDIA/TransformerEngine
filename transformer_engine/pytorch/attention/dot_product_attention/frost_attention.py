@@ -35,6 +35,7 @@ rectangular, causal and non-causal shapes.
 
 from __future__ import annotations
 
+import contextlib
 import os
 from importlib.metadata import PackageNotFoundError, version as get_pkg_version
 from typing import Optional, Tuple
@@ -472,7 +473,12 @@ def _cached(kind: str, key):
     cache_key = (kind,) + key
     entry = _PLAN_CACHE.get(cache_key)
     if entry is None:
-        entry = _build_fwd(key) if kind == "fwd" else _build_bwd(key)
+        # Build under the device the key names, not merely with that device's handle: the plans
+        # are CuTe-DSL JIT-compiled, and a compile path is far more likely to read the ambient
+        # CUDA context than the handle. Free to do, and removes the question entirely.
+        device = _device_from_key(key[:2])
+        with torch.cuda.device(device) if device.type == "cuda" else contextlib.nullcontext():
+            entry = _build_fwd(key) if kind == "fwd" else _build_bwd(key)
         _PLAN_CACHE[cache_key] = entry
     return entry
 
