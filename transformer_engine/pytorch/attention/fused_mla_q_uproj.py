@@ -203,6 +203,7 @@ class FusedMLAQUpProjRopeQuant:
 
         from cuda.bindings import driver as cuda
 
+        # pylint: disable-next=c-extension-no-member
         stream = cuda.CUstream(torch.cuda.current_stream(x.device).cuda_stream)
         wrapper = cls._kernel()
 

@@ -132,9 +132,16 @@ class MXFP8Quantizer(Quantizer):
             return False
         return True
 
-    def calibrate(self, tensor: torch.Tensor) -> None:
-        # TODO(ksivamani): No calibration needed for mxfp8?
-        pass
+    def calibrate(self, tensor: torch.Tensor, *, calibration_decay: float = 0.0) -> None:
+        """Calibrate an MXFP8 tensor."""
+        # NOTE(@cspades): Currently, PTQ calibration requirements don't need
+        # non-global / blockwise scaling factors, which are usually computed
+        # on-the-fly during inference. Implement this interface for future
+        # applications of MXFP8 calibration.
+
+    def get_quantization_recipe_name(self) -> str:
+        """Get the stable name of the quantization recipe."""
+        return "mxfp8"
 
     def get_scale_shape(
         self,

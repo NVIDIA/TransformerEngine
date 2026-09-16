@@ -162,9 +162,8 @@ class IdentityQuantizer(Quantizer):
         dst._dtype = data.dtype
         return dst
 
-    def calibrate(self, tensor: torch.Tensor) -> None:
-        # No state to calibrate.
-        return
+    def calibrate(self, tensor: torch.Tensor, *, calibration_decay: float = 0.0) -> None:
+        """No-op since identity quantization has no calibration state."""
 
     def _get_compatible_recipe(self):
         # Only reachable via CustomRecipe (qfactory returns IdentityQuantizer).

@@ -1442,6 +1442,7 @@ def test_quantizer_value_object(factory):
     rebuilt = eval(repr_str, dict(globals_))  # pylint: disable=eval-used
     assert rebuilt == a and rebuilt is not a
     assert hash(rebuilt) == hash(a)
+    assert rebuilt._calibration_state == {}
     # The deprecated amax-reduction group is never part of the value.
     assert getattr(rebuilt, "amax_reduction_group", None) is None
 
@@ -2022,6 +2023,7 @@ _FALLBACK_CASES = [
     "fuse_wgrad_accumulation",
     "delayed_wgrad",
     "quantized_input",
+    "scale_buffering",
 ]
 
 
@@ -2055,6 +2057,17 @@ def _fallback_case(case, dtype, device):
                 return model(inp)
 
         return model, fn, "no_grad", None, "a quantized input tensor"
+    if case == "scale_buffering":
+        fp8_recipe = recipe.Float8CurrentScaling()
+
+        def fn(inp):
+            with te.autocast(
+                recipe=fp8_recipe,
+                calibration_config=te.QuantizationCalibrationConfig(),
+            ):
+                return model(inp)
+
+        return model, fn, "bwd", None, "Transformer Engine calibration metadata buffering"
     raise ValueError(case)
 
 
@@ -2113,6 +2126,21 @@ def test_te_linear_compile_eager_fallback(case):
                 model.weight.grad, model_ref.weight.grad, atol=_EAGER_ATOL, rtol=_EAGER_RTOL
             )
     torch.testing.assert_close(out.detach(), out_ref.detach(), atol=_EAGER_ATOL, rtol=_EAGER_RTOL)
+    if case == "scale_buffering":
+        calibration_buffers_ref = {
+            name: value
+            for name, value in model_ref.named_buffers()
+            if name.endswith("_te_ptq_calibrated")
+        }
+        calibration_buffers = {
+            name: value
+            for name, value in model.named_buffers()
+            if name.endswith("_te_ptq_calibrated")
+        }
+        assert calibration_buffers
+        assert calibration_buffers.keys() == calibration_buffers_ref.keys()
+        for name, value in calibration_buffers.items():
+            torch.testing.assert_close(value, calibration_buffers_ref[name])
 
     torch._dynamo.reset()
     compiled_fg = torch.compile(fn, fullgraph=True)
