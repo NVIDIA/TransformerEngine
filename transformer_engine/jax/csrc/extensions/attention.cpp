@@ -247,12 +247,7 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
   TensorWrapper query_workspace_tensor;
   // It is a WAR to pre-create all possible cuDNN graph at the JIT compile time
   size_t max_num_segments = is_ragged ? input_batch * max_segments_per_seq : input_batch;
-  size_t min_num_segments = input_batch;
-  auto cudnn_runtime_version = cudnnGetVersion();
-  if (is_ragged && cudnn_runtime_version >= 90300) {
-    // For cuDNN < 9.3.0, it requires to run all possible seqlens to address act_seqlen = 0
-    min_num_segments = input_batch * max_segments_per_seq;
-  }
+  size_t min_num_segments = is_ragged ? input_batch * max_segments_per_seq : input_batch;
   for (auto num_segments = min_num_segments; num_segments <= max_num_segments; ++num_segments) {
     // the last one is the largest which will be the returned workspace size
     auto q_cu_seqlens_tensor =
@@ -313,18 +308,7 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
   const size_t bias_seqlen_kv = has_bias_tensor ? kv_max_seqlen : 0;                          \
   size_t num_segments = input_batch;                                                          \
   if (is_ragged) {                                                                            \
-    auto cudnn_runtime_version = cudnnGetVersion();                                           \
-    if (cudnn_runtime_version >= 90300) {                                                     \
-      num_segments = input_batch * max_segments_per_seq;                                      \
-    } else {                                                                                  \
-      size_t runtime_num_segments_q = nvte_get_runtime_num_segments(                          \
-          q_cu_seqlens, workspace, input_batch * q_max_seqlen, stream);                       \
-      size_t runtime_num_segments_kv = nvte_get_runtime_num_segments(                         \
-          kv_cu_seqlens, workspace, input_batch * kv_max_seqlen, stream);                     \
-      NVTE_CHECK(runtime_num_segments_q == runtime_num_segments_kv);                          \
-      NVTE_CHECK(runtime_num_segments_q <= input_batch * max_segments_per_seq);               \
-      num_segments = runtime_num_segments_q;                                                  \
-    }                                                                                         \
+    num_segments = input_batch * max_segments_per_seq;                                        \
   }                                                                                           \
   std::vector<size_t> seq_shape{num_segments + 1};                                            \
   auto q_cu_seqlens_tensor = TensorWrapper(q_cu_seqlens, seq_shape, DType::kInt32);           \
@@ -639,12 +623,7 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
 
   // It is a WAR to pre-create all possible cuDNN graph at the JIT compile time
   size_t max_num_segments = is_ragged ? input_batch * max_segments_per_seq : input_batch;
-  size_t min_num_segments = input_batch;
-  auto cudnn_runtime_version = cudnnGetVersion();
-  if (is_ragged && cudnn_runtime_version >= 90300) {
-    // For cuDNN < 9.3.0, it requires to run all possible seqlens to address act_seqlen = 0
-    min_num_segments = input_batch * max_segments_per_seq;
-  }
+  size_t min_num_segments = is_ragged ? input_batch * max_segments_per_seq : input_batch;
 
   TensorWrapper dummy_d_softmax_offset_tensor;
   if (softmax_type == NVTE_Softmax_Type::NVTE_OFF_BY_ONE_SOFTMAX ||
