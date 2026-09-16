@@ -63,27 +63,6 @@ Continue with the `PyTorch and JAX getting started guide <https://docs.nvidia.co
 For prerequisites, source builds, environment variables, and troubleshooting, see the
 `installation guide <https://docs.nvidia.com/deeplearning/transformer-engine/installation.html>`_.
 
-Convergence
-===========
-
-FP8 and MXFP8 have been tested extensively across different model architectures and configurations and we found **no significant difference** between FP8/MXFP8 and BF16 training loss curves. FP8 and MXFP8 have also been validated for accuracy on downstream LLM tasks (e.g. LAMBADA and WikiText). Below are examples of models tested for convergence across different frameworks.
-
-+------------+------------------+---------------------------------------------------------------------------------------------------------+
-| Model      | Framework        | Source                                                                                                  |
-+============+==================+=========================================================================================================+
-| MPT-1.3B   |  Mosaic Composer | https://www.databricks.com/blog/coreweave-nvidia-h100-part-1                                            |
-+------------+------------------+---------------------------------------------------------------------------------------------------------+
-| LLama2-7B  |  Alibaba Pai     | https://mp.weixin.qq.com/s/NQT0uKXLbXyh5031zBdeBQ                                                       |
-+------------+------------------+---------------------------------------------------------------------------------------------------------+
-| LLM-8B     |  Megatron Core   | https://arxiv.org/abs/2506.08027                                                                        |
-+------------+------------------+---------------------------------------------------------------------------------------------------------+
-| MPT-13B    |  Mosaic Composer | https://www.databricks.com/blog/turbocharged-training-optimizing-databricks-mosaic-ai-stack-fp8         |
-+------------+------------------+---------------------------------------------------------------------------------------------------------+
-| MoE-16B    |  Megatron Core   | https://arxiv.org/abs/2506.08027                                                                        |
-+------------+------------------+---------------------------------------------------------------------------------------------------------+
-| LLama2-70B |  Alibaba Pai     | https://mp.weixin.qq.com/s/NQT0uKXLbXyh5031zBdeBQ                                                       |
-+------------+------------------+---------------------------------------------------------------------------------------------------------+
-
 Integrations
 ============
 
