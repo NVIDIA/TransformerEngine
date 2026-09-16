@@ -1918,8 +1918,10 @@ def get_attention_backend(
         logger.debug("Disabling FrostAttention for KV caching")
         use_frost_attention = False
     if use_frost_attention and context_parallel:
-        # Same two restrictions FlashAttention and FusedAttention carry above. The ring chunking
-        # assumes square tiles, so an unequal q/kv length is a wrong answer rather than an error.
+        # Same two restrictions FlashAttention and FusedAttention carry above. Both are about
+        # where the causal diagonal sits: the ring shards q and kv independently, so a mask whose
+        # position depends on the q/kv lengths lands differently per step. no_mask is unaffected
+        # and stays allowed even when the lengths differ.
         if "bottom_right" in attn_mask_type:
             logger.debug(
                 "Disabling FrostAttention as it does not support context parallelism with"
