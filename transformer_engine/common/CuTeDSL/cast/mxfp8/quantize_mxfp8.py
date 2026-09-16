@@ -802,9 +802,7 @@ class MXFP8QuantizeConfig:
         if use_2d_quantization:
             raise ValueError("2D block scaling is not implemented by the CuTeDSL MXFP8 kernels")
         if dtype is None or dtype not in ("Float32", "Float16", "BFloat16"):
-            raise ValueError(
-                f"unknown input dtype {dtype!r}; expected Float32|Float16|BFloat16"
-            )
+            raise ValueError(f"unknown input dtype {dtype!r}; expected Float32|Float16|BFloat16")
         self.DTYPE = str_to_cutlass_dtype(dtype)
         self.DTYPE_STR = dtype  # readable input-dtype token, for __str__
         if fp8_dtype not in ("Float8E4M3", "Float8E5M2"):

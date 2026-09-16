@@ -32,12 +32,11 @@ bool initialize_python_cutedsl_backend() {
     Py_DECREF(source_dir);
   }
 
-  const char *initialize = embedding_python
-                               ? "import sys\n"
-                                 "sys.modules['transformer_engine.pytorch'] = None\n"
-                                 "sys.modules['transformer_engine.jax'] = None\n"
-                                 "import transformer_engine.common"
-                               : "import transformer_engine.common";
+  const char *initialize = embedding_python ? "import sys\n"
+                                              "sys.modules['transformer_engine.pytorch'] = None\n"
+                                              "sys.modules['transformer_engine.jax'] = None\n"
+                                              "import transformer_engine.common"
+                                            : "import transformer_engine.common";
   const bool initialized = PyRun_SimpleString(initialize) == 0;
   if (!initialized) {
     PyErr_Print();

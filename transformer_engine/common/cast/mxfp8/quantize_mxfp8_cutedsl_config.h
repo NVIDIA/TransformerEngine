@@ -91,11 +91,10 @@ struct MXFP8QuantConfig {
     if (!entrypoint.has_value()) {
       return false;
     }
-    tvm::ffi::Any result =
-        (*entrypoint)(tvm::ffi::String(fn_name), tvm::ffi::String(to_string(dtype)),
-                      tvm::ffi::String(to_string(fp8_dtype)), rowwise, colwise, swizzled,
-                      with_amax, with_dbias, with_dact, with_act, use_2d_quantization,
-                      tvm::ffi::String(activation_to_str(activation)));
+    tvm::ffi::Any result = (*entrypoint)(
+        tvm::ffi::String(fn_name), tvm::ffi::String(to_string(dtype)),
+        tvm::ffi::String(to_string(fp8_dtype)), rowwise, colwise, swizzled, with_amax, with_dbias,
+        with_dact, with_act, use_2d_quantization, tvm::ffi::String(activation_to_str(activation)));
     return result.try_cast<bool>().value_or(false);
   }
 };
