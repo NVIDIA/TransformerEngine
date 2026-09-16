@@ -2400,6 +2400,9 @@ class FrostAttention(torch.nn.Module):
         cp_global_ranks: List[int] = None,
         cp_stream: torch.cuda.Stream = None,
         cp_comm_type: str = "p2p",
+        load_balancing_strategy: CPLoadBalancingStrategy = (
+            CPLoadBalancingStrategy.DUAL_CHUNK_SWAP
+        ),
     ) -> torch.Tensor:
         """Forward pass. Routes through the CP ring when a cp_group is present."""
         assert self.attention_dropout == 0.0, "FrostAttention does not support dropout"
@@ -2432,6 +2435,7 @@ class FrostAttention(torch.nn.Module):
                 use_frost_attention=True,
                 window_size=window_size,
                 layer_number=self.layer_number,
+                load_balancing_strategy=load_balancing_strategy,
             )
             # Same flattening the other backends apply after the CP call: the ring returns
             # [b, s_local, h, d] but TE attention modules return heads in the last dimension.

@@ -3105,6 +3105,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     cp_global_ranks=self.cp_global_ranks,
                     cp_stream=self.cp_stream,
                     cp_comm_type=self.cp_comm_type,
+                    load_balancing_strategy=self.load_balancing_strategy,
                 )
 
             if use_unfused_attention:
