@@ -1583,6 +1583,229 @@ def cp_p2p_bwd_flash_attn(
     return dq, dk, dv
 
 
+def _frost_mask_for_section(attn_mask_type, section):
+    """Per-ring-step mask, mirroring cp_p2p_fwd_fused_attn.
+
+    Only the diagonal tile keeps the causal mask; the off-diagonal tiles see a fully visible KV
+    block. This matches what was validated on B200: causal on the square diagonal, no_mask on the
+    rectangular off-diagonal tiles.
+    """
+    if section in ("diagonal", "all"):
+        return attn_mask_type
+    if section in ("lower-triangle", "upper-triangle"):
+        return "no_mask"
+    raise ValueError("unknown CP section %r" % section)
+
+
+def _frost_mask_for_window(window_size):
+    """Per-step mask for the all_gather path, derived from its adjusted window.
+
+    get_kv_seq_info_after_all_gather trims KV and returns a window that is BOTTOM-RIGHT aligned:
+    (-1, 0) means causal relative to the trimmed KV, not top-left causal. Using top-left here
+    would silently compute a different mask, since the two only coincide when SQ == SKV and
+    all_gather never produces that.
+    """
+    if window_size is None or tuple(window_size) == (-1, -1):
+        return "no_mask"
+    if tuple(window_size) == (-1, 0):
+        return "causal_bottom_right"
+    raise NotImplementedError(
+        "FROST all_gather does not support sliding window %s" % str(window_size)
+    )
+
+
+def cp_ag_fwd_frost_attn(
+    softmax_scale,
+    qkv_format,
+    window_size,
+    q_part,
+    k_part,
+    v_part,
+):
+    """Per-step forward for CP all_gather with the cuDNN FROST backend.
+
+    Simpler than the p2p ring: KV is already gathered and trimmed, so each step is a single
+    attention call with no LSE correction. Returns (out, softmax_lse).
+    """
+    from .frost_attention import (  # pylint: disable=import-outside-toplevel
+        frost_attn_fwd,
+        from_frost_layout,
+        to_frost_layout,
+    )
+
+    out, softmax_lse = frost_attn_fwd(
+        to_frost_layout(q_part.contiguous(), qkv_format),
+        to_frost_layout(k_part.contiguous(), qkv_format),
+        to_frost_layout(v_part.contiguous(), qkv_format),
+        attn_scale=softmax_scale,
+        attn_mask_type=_frost_mask_for_window(window_size),
+    )
+    return from_frost_layout(out, qkv_format), softmax_lse
+
+
+def cp_ag_bwd_frost_attn(
+    softmax_scale,
+    qkv_format,
+    window_size,
+    softmax_lse,
+    q_part,
+    k_part,
+    v_part,
+    out_part,
+    dout_part,
+):
+    """Per-step backward for CP all_gather with the cuDNN FROST backend."""
+    from .frost_attention import (  # pylint: disable=import-outside-toplevel
+        frost_attn_bwd,
+        from_frost_layout,
+        to_frost_layout,
+    )
+
+    dq, dk, dv = frost_attn_bwd(
+        to_frost_layout(q_part.contiguous(), qkv_format),
+        to_frost_layout(k_part.contiguous(), qkv_format),
+        to_frost_layout(v_part.contiguous(), qkv_format),
+        to_frost_layout(out_part.contiguous(), qkv_format),
+        softmax_lse,
+        to_frost_layout(dout_part.contiguous(), qkv_format),
+        attn_scale=softmax_scale,
+        attn_mask_type=_frost_mask_for_window(window_size),
+    )
+    return (
+        from_frost_layout(dq, qkv_format),
+        from_frost_layout(dk, qkv_format),
+        from_frost_layout(dv, qkv_format),
+    )
+
+
+def cp_a2a_fwd_frost_attn(softmax_scale, attn_mask_type, qkv_format, q, k, v):
+    """Forward for CP a2a with the cuDNN FROST backend.
+
+    The simplest of the three. After the all-to-all each rank holds the FULL sequence for a subset
+    of heads, so there is no ring, no KV trimming and no LSE correction: one ordinary attention
+    call with the caller mask type, top-left causal as usual.
+    """
+    from .frost_attention import (  # pylint: disable=import-outside-toplevel
+        frost_attn_fwd,
+        from_frost_layout,
+        to_frost_layout,
+    )
+
+    out, softmax_lse = frost_attn_fwd(
+        to_frost_layout(q.contiguous(), qkv_format),
+        to_frost_layout(k.contiguous(), qkv_format),
+        to_frost_layout(v.contiguous(), qkv_format),
+        attn_scale=softmax_scale,
+        attn_mask_type=attn_mask_type,
+    )
+    return from_frost_layout(out, qkv_format), softmax_lse
+
+
+def cp_a2a_bwd_frost_attn(
+    softmax_scale, attn_mask_type, qkv_format, softmax_lse, q, k, v, out, dout
+):
+    """Backward for CP a2a with the cuDNN FROST backend."""
+    from .frost_attention import (  # pylint: disable=import-outside-toplevel
+        frost_attn_bwd,
+        from_frost_layout,
+        to_frost_layout,
+    )
+
+    dq, dk, dv = frost_attn_bwd(
+        to_frost_layout(q.contiguous(), qkv_format),
+        to_frost_layout(k.contiguous(), qkv_format),
+        to_frost_layout(v.contiguous(), qkv_format),
+        to_frost_layout(out.contiguous(), qkv_format),
+        softmax_lse,
+        to_frost_layout(dout.contiguous(), qkv_format),
+        attn_scale=softmax_scale,
+        attn_mask_type=attn_mask_type,
+    )
+    return (
+        from_frost_layout(dq, qkv_format),
+        from_frost_layout(dk, qkv_format),
+        from_frost_layout(dv, qkv_format),
+    )
+
+
+def cp_p2p_fwd_frost_attn(
+    softmax_scale,
+    attn_mask_type,
+    qkv_format,
+    q_part,
+    k_part,
+    v_part,
+    cu_seqlens_q_per_step,  # noqa: ARG001  unused for bshd; matches the fused call convention
+    cu_seqlens_kv_per_step,  # noqa: ARG001
+    section,
+):
+    """Per-tile forward call of CP P2P with the cuDNN FROST backend.
+
+    Returns the same 5-tuple shape as cp_p2p_fwd_fused_attn so the ring code can consume it
+    unchanged. rng_state, attn_bias and max_logit are None: FROST supports neither dropout nor
+    bias, and the selector declines those configurations before we get here.
+
+    softmax_lse comes back as [b, h, s] natural-log logsumexp in fp32, which is what the ring
+    correction in this file consumes (measured against an fp64 reference at 1.8e-06).
+    """
+    from .frost_attention import (  # pylint: disable=import-outside-toplevel
+        frost_attn_fwd,
+        from_frost_layout,
+        to_frost_layout,
+    )
+
+    out, softmax_lse = frost_attn_fwd(
+        to_frost_layout(q_part.contiguous(), qkv_format),
+        to_frost_layout(k_part.contiguous(), qkv_format),
+        to_frost_layout(v_part.contiguous(), qkv_format),
+        attn_scale=softmax_scale,
+        attn_mask_type=_frost_mask_for_section(attn_mask_type, section),
+    )
+    return from_frost_layout(out, qkv_format), softmax_lse, None, None, None
+
+
+def cp_p2p_bwd_frost_attn(
+    softmax_scale,
+    attn_mask_type,
+    qkv_format,
+    softmax_lse,
+    softmax_lse_,
+    q_part,
+    k_part,
+    v_part,
+    out_part,
+    dout_part,
+    section,
+):
+    """Per-tile backward call of CP P2P with the cuDNN FROST backend.
+
+    Returns (dq, dk, dv, dbias) to match cp_p2p_bwd_fused_attn; dbias is always None.
+    """
+    from .frost_attention import (  # pylint: disable=import-outside-toplevel
+        frost_attn_bwd,
+        from_frost_layout,
+        to_frost_layout,
+    )
+
+    softmax_lse_part = softmax_lse_ if section == "upper-triangle" else softmax_lse
+    dq, dk, dv = frost_attn_bwd(
+        to_frost_layout(q_part.contiguous(), qkv_format),
+        to_frost_layout(k_part.contiguous(), qkv_format),
+        to_frost_layout(v_part.contiguous(), qkv_format),
+        to_frost_layout(out_part.contiguous(), qkv_format),
+        softmax_lse_part,
+        to_frost_layout(dout_part.contiguous(), qkv_format),
+        attn_scale=softmax_scale,
+        attn_mask_type=_frost_mask_for_section(attn_mask_type, section),
+    )
+    return (
+        from_frost_layout(dq, qkv_format),
+        from_frost_layout(dk, qkv_format),
+        from_frost_layout(dv, qkv_format),
+        None,
+    )
+
+
 class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
     """
     Attention implementation with context parallelism. Exchange KV between CP ranks
@@ -1629,6 +1852,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         use_flash_attn_4,
         fp8_output,
         layer_number,
+        use_frost_attention,
     ):
         # pylint: disable=missing-function-docstring
 
@@ -1978,7 +2202,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         i,
                         cp_size,
                     ]
-                    if use_fused_attention:
+                    if use_frost_attention:
+                        frost_attn_inputs = [softmax_scale, attn_mask_type, qkv_format]
+                    elif use_fused_attention:
                         fused_attn_inputs = [
                             attn_bias,
                             attn_bias_,
@@ -2049,7 +2275,17 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 cu_seqlens_kv_per_step[i],
                             ) = prepare_outputs
                             q_inputs[i % 2] = q_part
-                            if use_fused_attention:
+                            if use_frost_attention:
+                                (
+                                    out_per_step[i],
+                                    softmax_lse_per_step[i],
+                                    rng_states[i],
+                                    attn_biases[i],
+                                    max_logit_per_step[i],
+                                ) = cp_p2p_fwd_frost_attn(
+                                    *frost_attn_inputs, *prepare_outputs, section
+                                )
+                            elif use_fused_attention:
                                 (
                                     out_per_step[i],
                                     softmax_lse_per_step[i],
@@ -2078,7 +2314,17 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 cu_seqlens_kv_per_step[i],
                             ) = prepare_outputs
                             q_inputs[i % 2] = q_part
-                            if use_fused_attention:
+                            if use_frost_attention:
+                                (
+                                    out_per_step[i],
+                                    softmax_lse_per_step[i],
+                                    rng_states[i],
+                                    attn_biases[i],
+                                    max_logit_per_step[i],
+                                ) = cp_p2p_fwd_frost_attn(
+                                    *frost_attn_inputs, *prepare_outputs, section
+                                )
+                            elif use_fused_attention:
                                 (
                                     out_per_step[i],
                                     softmax_lse_per_step[i],
@@ -2107,7 +2353,17 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 cu_seqlens_kv_per_step[i],
                             ) = prepare_outputs
                             q_inputs[i % 2] = q_part
-                            if use_fused_attention:
+                            if use_frost_attention:
+                                (
+                                    out_per_step[i],
+                                    softmax_lse_per_step[i],
+                                    rng_states[i],
+                                    attn_biases[i],
+                                    max_logit_per_step[i],
+                                ) = cp_p2p_fwd_frost_attn(
+                                    *frost_attn_inputs, *prepare_outputs, section
+                                )
+                            elif use_fused_attention:
                                 (
                                     out_per_step[i],
                                     softmax_lse_per_step[i],
@@ -2137,7 +2393,15 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             cu_seqlens_kv_per_step[i],
                         ) = prepare_outputs
                         q_inputs[i % 2] = q_part
-                        if use_fused_attention:
+                        if use_frost_attention:
+                            (
+                                out_per_step[i],
+                                softmax_lse_per_step[i],
+                                rng_states[i],
+                                attn_biases[i],
+                                max_logit_per_step[i],
+                            ) = cp_p2p_fwd_frost_attn(*frost_attn_inputs, *prepare_outputs, section)
+                        elif use_fused_attention:
                             (
                                 out_per_step[i],
                                 softmax_lse_per_step[i],
@@ -2402,6 +2666,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         ctx.deterministic = deterministic
         ctx.softcap = softcap
         ctx.use_fused_attention = use_fused_attention
+        ctx.use_frost_attention = use_frost_attention
         ctx.pad_between_seqs = pad_between_seqs
         ctx.softmax_lse_in_packed_format = softmax_lse_in_packed_format
         ctx.second_half_lse_seqlen = second_half_lse_seqlen
@@ -2763,7 +3028,15 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 cu_seqlens_q_padded,
                 cu_seqlens_kv_padded,
             ]
-            if ctx.use_fused_attention:
+            if ctx.use_frost_attention:
+                frost_attn_inputs = [
+                    ctx.softmax_scale,
+                    ctx.attn_mask_type,
+                    ctx.qkv_format,
+                    softmax_lse,
+                    softmax_lse_,
+                ]
+            elif ctx.use_fused_attention:
                 fused_attn_inputs = [
                     ctx.fp8,
                     ctx.fp8_recipe,
@@ -2835,7 +3108,11 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 if i == (cp_size - 1):
                     section = "diagonal"
                     prepare_outputs = cp_p2p_bwd_prepare_qkv(*prepare_inputs, section)
-                    if ctx.use_fused_attention:
+                    if ctx.use_frost_attention:
+                        dq_, dk_, dv_, dbias_ = cp_p2p_bwd_frost_attn(
+                            *frost_attn_inputs, *prepare_outputs, section
+                        )
+                    elif ctx.use_fused_attention:
                         dq_, dk_, dv_, dbias_ = cp_p2p_bwd_fused_attn(
                             *fused_attn_inputs, *prepare_outputs, section
                         )
@@ -2848,7 +3125,11 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 elif i >= (cp_size - rank - 1):
                     section = "lower-triangle"
                     prepare_outputs = cp_p2p_bwd_prepare_qkv(*prepare_inputs, section)
-                    if ctx.use_fused_attention:
+                    if ctx.use_frost_attention:
+                        dq_, dk_, dv_, dbias_ = cp_p2p_bwd_frost_attn(
+                            *frost_attn_inputs, *prepare_outputs, section
+                        )
+                    elif ctx.use_fused_attention:
                         dq_, dk_, dv_, dbias_ = cp_p2p_bwd_fused_attn(
                             *fused_attn_inputs, *prepare_outputs, section
                         )
@@ -2861,7 +3142,11 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 else:
                     section = "upper-triangle"
                     prepare_outputs = cp_p2p_bwd_prepare_qkv(*prepare_inputs, section)
-                    if ctx.use_fused_attention:
+                    if ctx.use_frost_attention:
+                        dq_, dk_, dv_, dbias_ = cp_p2p_bwd_frost_attn(
+                            *frost_attn_inputs, *prepare_outputs, section
+                        )
+                    elif ctx.use_fused_attention:
                         dq_, dk_, dv_, dbias_ = cp_p2p_bwd_fused_attn(
                             *fused_attn_inputs, *prepare_outputs, section
                         )
@@ -2874,7 +3159,11 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             else:
                 section = "all"
                 prepare_outputs = cp_p2p_bwd_prepare_qkv(*prepare_inputs, section)
-                if ctx.use_fused_attention:
+                if ctx.use_frost_attention:
+                    dq_, dk_, dv_, dbias_ = cp_p2p_bwd_frost_attn(
+                        *frost_attn_inputs, *prepare_outputs, section
+                    )
+                elif ctx.use_fused_attention:
                     dq_, dk_, dv_, dbias_ = cp_p2p_bwd_fused_attn(
                         *fused_attn_inputs, *prepare_outputs, section
                     )
@@ -3215,6 +3504,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             None,
             None,
             None,
+            None,  # use_frost_attention
         )
 
 
@@ -3304,6 +3594,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         quantizers,
         fp8_output,
         load_balancing_strategy,
+        use_frost_attention,
     ):
         # pylint: disable=missing-function-docstring
         nvtx_range_push("transformer_engine.AttnFuncWithCPAndKVAllGather.forward")
@@ -3710,7 +4001,17 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                                 Float8Tensor.make_like(x, data=y, dtype=fwd_nominal_dtype)
                                 for x, y in zip([q_fp8, k_fp8, v_fp8], [q_part, k_part, v_part])
                             ]
-                    if use_fused_attention:
+                    if use_frost_attention:
+                        out_per_step[i], softmax_lse_per_step[i] = cp_ag_fwd_frost_attn(
+                            softmax_scale,
+                            qkv_format,
+                            window_size_per_step[i],
+                            q_part,
+                            k_part,
+                            v_part,
+                        )
+                        rng_states[i] = None  # FROST has no dropout, so no RNG state
+                    elif use_fused_attention:
                         # Set per-step parameters for THD vs bshd/sbhd
                         if qkv_format == "thd":
                             cu_seqlens_q_ = thd_cu_seqlens_q_per_step[i]
@@ -3980,6 +4281,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         ctx.deterministic = deterministic
         ctx.softcap = softcap
         ctx.use_fused_attention = use_fused_attention
+        ctx.use_frost_attention = use_frost_attention
         ctx.use_flash_attn_3 = use_flash_attn_3
         ctx.use_flash_attn_4 = use_flash_attn_4
         ctx.pad_between_seqs = pad_between_seqs
@@ -4250,7 +4552,23 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                         out_part = out.select(seq_dim_o, i).contiguous()
                         dout_part = dout.select(seq_dim_o, i).contiguous()
 
-                    if ctx.use_fused_attention:
+                    if ctx.use_frost_attention:
+                        (
+                            dq_per_step[i],
+                            dk_per_step[i],
+                            dv_per_step[i],
+                        ) = cp_ag_bwd_frost_attn(
+                            ctx.softmax_scale,
+                            ctx.qkv_format,
+                            window_size_per_step[i],
+                            softmax_lse_per_step[i],
+                            q_part,
+                            k_part,
+                            v_part,
+                            out_part,
+                            dout_part,
+                        )
+                    elif ctx.use_fused_attention:
                         # Set per-step parameters for THD
                         if ctx.qkv_format == "thd":
                             cu_seqlens_q_ = thd_cu_seqlens_q_per_step[i]
@@ -4577,6 +4895,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             None,
             None,
             None,
+            None,  # use_frost_attention
         )
 
 
@@ -4621,6 +4940,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         softmax_type,
         softmax_offset,
         fp8_output,
+        use_frost_attention,
     ):
         # pylint: disable=missing-function-docstring
         nvtx_range_push("transformer_engine.AttnFuncWithCPAndQKVOA2A.forward")
@@ -4806,7 +5126,19 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             )
         )
         qkv_scale_inv_format = None
-        if use_fused_attention:
+        if use_frost_attention:
+            out_, softmax_lse = cp_a2a_fwd_frost_attn(
+                softmax_scale, attn_mask_type, qkv_format, q, k, v
+            )
+            # Only the LSE: FROST has no dropout, so there is no RNG state to carry, and a
+            # None in this list would have to survive the save/restore machinery.
+            aux_ctx_tensors = [softmax_lse]
+            # out_part is what gets saved for backward (f16_tensors below). Leaving it at its
+            # None initialisation makes `out` arrive as None in backward, which is not obvious
+            # from this branch alone: the fused path sets it inside its fp8 bookkeeping.
+            out_part = out_
+            out_f16 = out_
+        elif use_fused_attention:
             if fp8:
                 if fp8_recipe.mxfp8():
                     q_fp8, k_fp8, v_fp8, qkv_layout, qkv_scale_inv_format = combine_and_quantize(
@@ -5038,6 +5370,10 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         ctx.softcap = softcap
         ctx.window_size = window_size
         ctx.use_fused_attention = use_fused_attention
+        ctx.use_frost_attention = use_frost_attention
+        # The a2a class never needed qkv_format in backward before: the fused and flash paths
+        # take a qkv_layout instead. FROST builds its graphs from the tensor layout, so it does.
+        ctx.qkv_format = qkv_format
         ctx.fp8_meta = fp8_meta
         ctx.is_input_fp8 = is_input_fp8
         ctx.is_output_fp8 = is_output_fp8
@@ -5189,7 +5525,19 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                     fa_backward_kwargs["softcap"] = ctx.softcap
 
         dq_fp8, dk_fp8, dv_fp8 = None, None, None
-        if ctx.use_fused_attention:
+        if ctx.use_frost_attention:
+            dq, dk, dv = cp_a2a_bwd_frost_attn(
+                ctx.softmax_scale,
+                ctx.attn_mask_type,
+                ctx.qkv_format,
+                aux_ctx_tensors[0],
+                q,
+                k,
+                v,
+                out,
+                dout,
+            )
+        elif ctx.use_fused_attention:
             do_format = ctx.o_format
             do_scale_inv_format = None
             q_part, k_part, v_part, out_part, dout_part = q, k, v, out, dout
@@ -5417,6 +5765,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             None,
             d_softmax_offset,
             None,
+            None,  # use_frost_attention
         )
 
 
@@ -5556,6 +5905,7 @@ def attn_forward_func_with_cp(
     attn_bias=None,
     deterministic=False,
     use_fused_attention=False,
+    use_frost_attention=False,
     window_size=None,
     softcap=0.0,
     fp8=False,
@@ -5693,9 +6043,12 @@ def attn_forward_func_with_cp(
         assert cu_seqlens_q is cu_seqlens_kv and (
             cu_seqlens_q_padded is cu_seqlens_kv_padded
         ), "No-load-balance THD self-attention requires shared Q/KV sequence metadata tensors."
-    assert (
-        qkv_format != "sbhd" or use_fused_attention
-    ), "Context parallelism does not support FlashAttention backend with qkv_format = 'sbhd'!"
+    # The restriction is FlashAttention-specific; the condition infers "not fused means flash",
+    # which predates FROST. FROST builds its cuDNN graphs from each tensor's actual strides, so
+    # sbhd is served directly. This matters because Megatron uses sbhd internally.
+    assert qkv_format != "sbhd" or use_fused_attention or use_frost_attention, (
+        "Context parallelism does not support FlashAttention backend with qkv_format = 'sbhd'!"
+    )
     assert attn_bias is None or (use_fused_attention and "padding" not in attn_mask_type), (
         "Context parallelism only supports attention bias with FusedAttention backend and"
         " non-padding mask types!"
@@ -5760,6 +6113,7 @@ def attn_forward_func_with_cp(
             use_flash_attn_4,
             fp8_output,
             layer_number,
+            use_frost_attention,
         ]
         out = AttnFuncWithCPAndKVP2P.apply(*args)
     elif cp_comm_type == "all_gather":
@@ -5775,6 +6129,7 @@ def attn_forward_func_with_cp(
             quantizers,
             fp8_output,
             load_balancing_strategy,
+            use_frost_attention,
         ]
         out = AttnFuncWithCPAndKVAllGather.apply(*args)
     elif cp_comm_type == "a2a":
@@ -5791,6 +6146,7 @@ def attn_forward_func_with_cp(
             softmax_type,
             softmax_offset,
             fp8_output,
+            use_frost_attention,
         ]
         out = AttnFuncWithCPAndQKVOA2A.apply(*args)
     else:
