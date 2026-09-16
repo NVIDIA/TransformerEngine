@@ -29,6 +29,9 @@ from transformer_engine.pytorch.ep import (
 ZERO_COPY = os.environ.get("NVTE_EP_ZERO_COPY", "0") == "1"
 EAGER = os.environ.get("NVTE_EP_EAGER", "0") == "1"
 OVERFLOW = os.environ.get("NVTE_EP_OVERFLOW", "0") == "1"
+# Fused prepare+dispatch under CUDA graph capture is opt-in on the C++ side; the tests that
+# exercise it only run when the same env var is set so they match the active dispatch path.
+FUSED_COUNT = os.environ.get("NVTE_EP_FUSED_PREPARE_DISPATCH", "0") == "1"
 
 # Must come after the transformer_engine import so libtransformer_engine.so is loaded.
 import transformer_engine_torch as tex  # noqa: F401
@@ -712,8 +715,9 @@ class TestEP(unittest.TestCase):
 
     def _capture(self, step):
         """Warm up ``step`` on a side stream then capture it into a CUDA graph. Returns
-        the graph; the caller replays it. Under capture, dispatch takes the fused
-        count-mode path that derives the counts from the dispatch scan."""
+        the graph; the caller replays it. With NVTE_EP_FUSED_PREPARE_DISPATCH set, dispatch
+        under capture takes the fused count-mode path that derives the counts from the
+        dispatch scan."""
         s = torch.cuda.Stream()
         s.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(s):
@@ -740,6 +744,8 @@ class TestEP(unittest.TestCase):
         tokens_per_expert / total_recv_tokens from the fused count scan instead of the
         AllGather prepare. Zeroing the counts before replay forces the replayed graph to
         repopulate them; the result must match the AllGather counts for the same routing."""
+        if not FUSED_COUNT:
+            self.skipTest("fused count-mode dispatch not enabled")
         if EAGER:
             self.skipTest("fused count mode requires non-eager static recv capacity")
         topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
@@ -767,10 +773,48 @@ class TestEP(unittest.TestCase):
         torch.testing.assert_close(buf.tokens_per_expert, ref_tokens_per_expert, atol=0, rtol=0)
         self.assertEqual(int(buf.total_recv_tokens.item()), ref_total)
 
+    def test_fused_count_mode_changing_routing(self):
+        """Routing may differ between graph replays. Each replay must re-derive its counts from
+        its own routing rather than reuse the captured step's values (stale-count guard)."""
+        if not FUSED_COUNT:
+            self.skipTest("fused count-mode dispatch not enabled")
+        if EAGER:
+            self.skipTest("fused count mode requires non-eager static recv capacity")
+        E = self.cfg.ep_size * NUM_LOCAL_EXPERTS
+        idx_a, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+        idx_b = (idx_a + 1) % E  # a distinct routing over the same tokens/weights
+
+        buf = self._make_buffer()
+        topk_idx, rbuf_t, rbuf_w = idx_a.clone(), *self._caller_recv()
+        graph = self._capture(
+            lambda: ep_dispatch(
+                buf, tokens, topk_idx, w, recv_tokens=rbuf_t, recv_topk_weights=rbuf_w
+            )
+        )
+
+        for routing in (idx_b, idx_a):
+            # Reference counts for this routing via the AllGather prepare path.
+            ref_buf = self._make_buffer()
+            ref_tpe = ep_prepare(ref_buf, routing).clone()
+            torch.cuda.synchronize()
+
+            topk_idx.copy_(routing)
+            buf.tokens_per_expert.zero_()
+            buf.total_recv_tokens.zero_()
+            graph.replay()
+            torch.cuda.synchronize()
+
+            torch.testing.assert_close(buf.tokens_per_expert, ref_tpe, atol=0, rtol=0)
+            self.assertEqual(
+                int(buf.total_recv_tokens.item()), int(ref_buf.total_recv_tokens.item())
+            )
+
     @_overflow_test_include
     def test_fused_count_mode_overflow(self):
         """Fused count-mode dispatch under capture reports the pre-drop recv total and caps the
         per-expert counts at recv_capacity, matching the AllGather prepare overflow semantics."""
+        if not FUSED_COUNT:
+            self.skipTest("fused count-mode dispatch not enabled")
         if not OVERFLOW:
             self.skipTest("overflow-only assertions")
         if EAGER:
@@ -800,6 +844,8 @@ class TestEP(unittest.TestCase):
         count-mode block-scaled branch (scale-window wiring, grouped recv). The returned
         GroupedTensor must view the caller buffer's data then scale regions, and the replayed
         counts must match the AllGather prepare."""
+        if not FUSED_COUNT:
+            self.skipTest("fused count-mode dispatch not enabled")
         if EAGER:
             self.skipTest("fused count mode requires non-eager static recv capacity")
         self._require_mxfp8_shapes()

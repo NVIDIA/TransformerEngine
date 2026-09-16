@@ -184,8 +184,8 @@ void nvte_ep_dispatch(NVTETensor handle_mem, NVTETensor topk_idx, NVTETensor tok
  *  dispatches tokens (as nvte_ep_dispatch) in a single call. Per-expert recv
  *  counts are produced by the dispatch and written to recv_tokens_per_expert;
  *  they are not available before the dispatch returns. No separate
- *  nvte_ep_prepare is needed. CUDA graph-capturable: unlike nvte_ep_prepare,
- *  the counts never need a host-side stream sync to become usable.
+ *  nvte_ep_prepare is needed. CUDA graph-capturable: the counts stay on device,
+ *  so no host-side stream sync is needed to size the recv buffers.
  *
  *  \param[in]     handle_mem             uint8 routing-state buffer.
  *  \param[in]     topk_idx               [T, top_k] int64 routing indices.

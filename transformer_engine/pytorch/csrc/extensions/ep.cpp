@@ -498,7 +498,20 @@ std::vector<at::Tensor> ep_prepare_and_dispatch(
   // that supplies them (non-eager) uses static recv capacity, so no count read is needed.
   const bool caller_omitted_recv = !recv_tokens.has_value();
 
-  if (!caller_omitted_recv &&
+  // Opt-in: the fused NCCL count-mode dispatch replaces the AllGather-based prepare + dispatch
+  // under CUDA graph capture. Off by default; the standard path stays unfused.
+  static const bool fused_prepare_dispatch = [] {
+    const char* env = std::getenv("NVTE_EP_FUSED_PREPARE_DISPATCH");
+    const bool enabled = env != nullptr && env[0] == '1';
+    if (enabled) {
+      TORCH_WARN_ONCE(
+          "NVTE_EP_FUSED_PREPARE_DISPATCH is set: fused prepare+dispatch only supports EP within a "
+          "single NVLink domain.");
+    }
+    return enabled;
+  }();
+
+  if (fused_prepare_dispatch && !caller_omitted_recv &&
       at::cuda::currentStreamCaptureStatus() != at::cuda::CaptureStatus::None) {
     ep_prepare_and_dispatch_fused(handle_mem, topk_idx, tokens, topk_weights, *recv_tokens,
                                   *recv_topk_weights, tokens_per_expert, total_recv_tokens, top_k,
