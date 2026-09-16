@@ -659,6 +659,7 @@ class _LayerNormMLP(torch.autograd.Function):
 
         # we want to skip fc2 computation if we are checkpointing and recomputing,
         # otherwise we compute fc2
+        fc2_out = None
         if not (is_recomputation and checkpoint):
 
             # if we get to this point, we know this is not bwd recomputation
@@ -711,7 +712,6 @@ class _LayerNormMLP(torch.autograd.Function):
 
             # Prepare output tensor
             # Note: Perform tensor-parallel communication if needed
-            fc2_out = None
             if ub_overlap_rs:
                 # cuBLASMp writes the reduce-scattered output directly into the
                 # GEMM output tensor; Userbuffers writes it into the extra-output buffer.

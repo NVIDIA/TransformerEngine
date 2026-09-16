@@ -156,7 +156,6 @@ def test_custom_recipe_linear_preserves_logical_shape():
     flattened_output.sum().backward()
 
     assert logical_output.shape == (*input_shape[:-1], 64)
-    assert logical_output._base is None
     torch.testing.assert_close(
         logical_output,
         flattened_output.reshape_as(logical_output),

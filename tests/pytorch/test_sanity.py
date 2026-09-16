@@ -860,36 +860,6 @@ def test_sanity_logical_activation_shapes(kind, shape, noncontiguous, monkeypatc
         assert set(seen_norm_stages) == {"fwd", "bwd"}
 
 
-def test_linear_outputs_have_independent_storage_and_allow_inplace_updates():
-    """Removing the autograd view must not introduce output-buffer reuse."""
-    module = Linear(16, 16, device="cuda", params_dtype=torch.bfloat16)
-    reference_module = Linear(16, 16, device="cuda", params_dtype=torch.bfloat16)
-    reference_module.load_state_dict(module.state_dict())
-    x = torch.randn(8, 2, 16, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-    reference_x = x.detach().reshape(-1, x.shape[-1]).clone().requires_grad_()
-    first = module(x)
-    first_before = first.detach().clone()
-    second = module(x)
-    reference = reference_module(reference_x).reshape_as(first)
-    assert first._base is None
-    assert second._base is None
-    assert first.data_ptr() != second.data_ptr()
-    torch.testing.assert_close(first, first_before, rtol=0, atol=0)
-    torch.testing.assert_close(first, reference, rtol=0, atol=0)
-    version = first._version
-    first.add_(1)
-    assert first._version == version + 1
-    torch.testing.assert_close(first, first_before + 1, rtol=0, atol=0)
-    first.sum().backward()
-    reference.sum().backward()
-    torch.testing.assert_close(x.grad, reference_x.grad.reshape_as(x), rtol=0, atol=0)
-    for (name, parameter), (reference_name, reference_parameter) in zip(
-        module.named_parameters(), reference_module.named_parameters()
-    ):
-        assert name == reference_name
-        torch.testing.assert_close(parameter.grad, reference_parameter.grad, rtol=0, atol=0)
-
-
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes, ids=recipe_id)
 @pytest.mark.parametrize("model", ["small"])

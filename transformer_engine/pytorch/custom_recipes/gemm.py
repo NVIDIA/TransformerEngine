@@ -41,8 +41,7 @@ def _restore_activation_shape(
 
     Custom ``qgemm`` implementations operate on flattened matrix operands and
     may return a 2-D result. Shape restoration belongs to this adapter so user
-    implementations do not need to duplicate TE's logical-shape handling. A
-    clone prevents the returned tensor from becoming an autograd-visible view.
+    implementations do not need to duplicate TE's logical-shape handling.
     """
     if original_shape is None:
         raise ValueError(
