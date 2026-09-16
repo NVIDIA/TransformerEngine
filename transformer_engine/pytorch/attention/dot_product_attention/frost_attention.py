@@ -59,6 +59,11 @@ _FROST_FWD_PLAN_TOKEN = "sdpa_fwd_prefill_sm100"
 _FROST_BWD_PLAN_TOKEN = "sdpa_bwd_sm100"
 _MIN_CUTLASS_DSL = (4, 7, 0)
 
+# 1.29.0 is the first release carrying the head_dim=512 BACKWARD (bprop_d512_f16_sm100). 1.28.0
+# ships the forward only, and the repo's own pin allows it, so without this check training would
+# build a forward plan and then raise on the first backward.
+_MIN_CUDNN_FRONTEND = (1, 29, 0)
+
 _SUPPORTED_ARCHS = ((10, 0), (10, 3))
 _MAX_HEAD_DIM = 512
 _MIN_HEAD_DIM = 257  # below this the existing cuDNN/flash backends already serve the shape
@@ -79,6 +84,22 @@ def _import_cudnn():
 
         _cudnn = cudnn
     return _cudnn
+
+
+def _parse_version(raw: str) -> Tuple[int, ...]:
+    """Leading numeric components of a version, ignoring any suffix. Unparseable sorts lowest."""
+    parts = []
+    for piece in str(raw).split(".")[:3]:
+        digits = ""
+        for ch in piece:
+            if not ch.isdigit():
+                break
+            digits += ch
+        if not digits:
+            break
+        parts.append(int(digits))
+    # Pad, or "1.29" would compare below (1, 29, 0) and be rejected as too old.
+    return tuple(parts + [0] * (3 - len(parts))) if parts else (0, 0, 0)
 
 
 def is_frost_attention_available() -> Tuple[bool, str]:
@@ -109,14 +130,24 @@ def is_frost_attention_available() -> Tuple[bool, str]:
 
     from importlib.metadata import PackageNotFoundError, version
 
+    fe_raw = getattr(_cudnn, "__version__", None)
+    if fe_raw is None:
+        try:
+            fe_raw = version("nvidia-cudnn-frontend")
+        except PackageNotFoundError:
+            fe_raw = "0"
+    if _parse_version(fe_raw) < _MIN_CUDNN_FRONTEND:
+        return _no(
+            "nvidia-cudnn-frontend %s does not carry the head_dim>256 backward; >= 1.29.0 is"
+            " required (1.28.0 ships the forward only, so this would raise on the first"
+            " backward rather than here)" % fe_raw
+        )
+
     try:
         raw = version("nvidia-cutlass-dsl")
     except PackageNotFoundError:
         return _no("nvidia-cutlass-dsl not installed (FROST requires >= 4.7.0)")
-    try:
-        parsed = tuple(int(p) for p in raw.split(".")[:3])
-    except ValueError:
-        parsed = (0, 0, 0)
+    parsed = _parse_version(raw)
     if parsed < _MIN_CUTLASS_DSL:
         # Worth being loud: this combination fails by silently declining, not by raising.
         return _no(
@@ -259,8 +290,14 @@ def _select_frost_plan(graph, token: str, what: str):
 
         raise RuntimeError(
             "no cuDNN FROST %s engine was offered (looked for %r). Candidate plans: %s."
-            " nvidia-cutlass-dsl=%s (FROST floor 4.7.0)."
-            % (what, token, names[:6], version("nvidia-cutlass-dsl"))
+            " nvidia-cudnn-frontend=%s (floor 1.29.0), nvidia-cutlass-dsl=%s (floor 4.7.0)."
+            % (
+                what,
+                token,
+                names[:6],
+                getattr(_cudnn, "__version__", None) or version("nvidia-cudnn-frontend"),
+                version("nvidia-cutlass-dsl"),
+            )
         )
     graph.select_plan(hits[0])
     graph.check_support()
@@ -372,6 +409,10 @@ def _cached(kind: str, key):
 
 def _key(q, k, mask, scale):
     return (
+        # The graph is built under whichever device was current, so it must not be reused on
+        # another one. Matches the C++ fused-attn cache, which keys on device_id for the same
+        # reason. Normalise None, or "cuda" and "cuda:0" would build two plans for one device.
+        q.device.index if q.device.index is not None else torch.cuda.current_device(),
         q.shape[0],
         q.shape[1],
         k.shape[1],
