@@ -2391,7 +2391,7 @@ class _AffineOp(BasicOperation):
         return output, [()], ()
 
     @classmethod
-    def forward_fake(cls, args):
+    def forward_compute_fake(cls, args):
         return args.input_, [()], ()
 
     @classmethod
@@ -2400,7 +2400,7 @@ class _AffineOp(BasicOperation):
         return dy * args.weight * args.gain, [((dy * args.input_).sum() * args.gain,)], [()]
 
     @classmethod
-    def backward_fake(cls, args):
+    def backward_compute_fake(cls, args):
         dy = args.grad_output
         return dy, [(TensorSpec(shape=(), dtype=dy.dtype, device=dy.device),)], [()]
 
@@ -2459,7 +2459,7 @@ class _AffinePair(te.ops.FusedOperation):
         return output, [(), (intermediate.square(), None)], (intermediate,)
 
     @classmethod
-    def forward_fake(cls, args):
+    def forward_compute_fake(cls, args):
         return args.input_, [(), (args.input_, None)], (args.input_,)
 
     @classmethod
@@ -2473,7 +2473,7 @@ class _AffinePair(te.ops.FusedOperation):
         )
 
     @classmethod
-    def backward_fake(cls, args):
+    def backward_compute_fake(cls, args):
         dy = args.grad_output
         scalar = TensorSpec(shape=(), dtype=dy.dtype, device=dy.device)
         return dy, [(scalar,), (scalar,)], [(), (dy,)]
@@ -2517,8 +2517,10 @@ def _assert_custom_ops(graphs, name, present=True):
         for node in module.graph.nodes
         if node.op == "call_function"
     }
-    for suffix in ("", "_backward"):
-        assert (f"transformer_engine_compile.{name}{suffix}" in targets) == present, targets
+    if isinstance(present, bool):
+        present = (present, present)
+    for suffix, expected in zip(("", "_backward"), present):
+        assert (f"transformer_engine_compile.{name}{suffix}" in targets) == expected, targets
 
 
 def _check_ops(fn, model, x, dy, kwargs=None):
@@ -2542,16 +2544,28 @@ def _check_ops(fn, model, x, dy, kwargs=None):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize(
-    "case,reason",
+    "case,reason,compiled_passes",
     [
-        ("single", None),
-        ("multi", "several operations"),
-        ("backward_fusion", "backward fusion"),
-        ("legacy", "without a custom op"),
+        ("single", None, (True, True)),
+        ("single_forward", "without a custom op for backward", (True, False)),
+        ("single_backward", "without a custom op for forward", (False, True)),
+        ("single_eager", "without a custom op", (False, False)),
+        ("multi", "several operations", (False, False)),
+        ("backward_fusion", "backward fusion", (False, False)),
+        ("legacy", "without a custom op", (False, False)),
     ],
 )
-def test_te_ops_pipeline(case, reason, dtype, monkeypatch):
+def test_te_ops_pipeline(case, reason, compiled_passes, dtype, monkeypatch):
     torch._dynamo.reset()
+    if case.startswith("single"):
+        monkeypatch.setattr(
+            _AffineOp,
+            "compile_ops",
+            tuple(
+                op if enabled else None
+                for op, enabled in zip(_AffineOp.compile_ops, compiled_passes)
+            ),
+        )
     if case == "backward_fusion":
 
         def fuse(ops, **unused):
@@ -2563,7 +2577,7 @@ def test_te_ops_pipeline(case, reason, dtype, monkeypatch):
     ops = (
         [te.ops.Identity()]
         if case == "legacy"
-        else [_AffineOp(float(i + 2), dtype) for i in range(1 if case == "single" else 2)]
+        else [_AffineOp(float(i + 2), dtype) for i in range(1 if case.startswith("single") else 2)]
     )
     model = te.ops.Sequential(*ops)
     compiled, graphs = _compile_with_graphs(model)
@@ -2573,7 +2587,36 @@ def test_te_ops_pipeline(case, reason, dtype, monkeypatch):
     with pytest.warns(UserWarning, match=reason) if reason else contextlib.nullcontext():
         _check_ops(compiled, model, x, dy)
     _check_ops(model, model, x, dy)
-    _assert_custom_ops(graphs, "_affineop", present=reason is None)
+    _assert_custom_ops(graphs, "_affineop", present=compiled_passes)
+    if case == "single_forward":
+        compiled, graphs = _compile_with_graphs(model)
+        with torch.no_grad():
+            torch.testing.assert_close(compiled(x), x * ops[0].weight)
+        _assert_custom_ops(graphs, "_affineop", present=(True, False))
+
+
+@pytest.mark.parametrize(
+    "forward,backward", [(True, True), (True, False), (False, True), (False, False)]
+)
+def test_te_ops_registration(forward, backward, monkeypatch):
+    registered = []
+
+    def register(**kwargs):
+        registered.append(kwargs["op_name"])
+        return kwargs["impl"]
+
+    monkeypatch.setattr("transformer_engine.pytorch.ops.op.register_custom_op", register)
+    monkeypatch.setattr(_AffineOp, "fwd_args_type", _AffineFwdArgs if forward else None)
+    monkeypatch.setattr(_AffineOp, "bwd_args_type", _AffineBwdArgs if backward else None)
+    monkeypatch.setattr(_AffineOp, "compile_ops", (None, None))
+    _AffineOp._register_compile_ops()
+    assert registered == (["_affineop"] if forward else []) + (
+        ["_affineop_backward"] if backward else []
+    )
+    assert _AffineOp.compile_ops == (
+        _AffineOp.forward_compute if forward else None,
+        _AffineOp.backward_compute if backward else None,
+    )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")

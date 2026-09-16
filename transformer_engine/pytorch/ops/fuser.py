@@ -70,7 +70,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         fuser: OperationFuser,
         basic_op_kwargs: list[dict[str, Any]],
         set_output_requires_grad: bool,
-        use_custom_ops: bool,
+        use_custom_ops: tuple[bool, bool],
         *params_and_extra_inputs: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, ...]:
         """Forward pass
@@ -87,9 +87,9 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             Keyword arguments to BasicOperation
         set_output_requires_grad: bool
             Whether to set ``requires_grad`` flags on returned tensors
-        use_custom_ops: bool
+        use_custom_ops: tuple of bool
             Whether to call the operations' custom ops instead of tracing their
-            eager implementations. Decided once per group by ``OperationFuser``.
+            eager implementations, separately for forward and backward.
         *params_and_extra_inputs: torch.Tensor
             Other tensor inputs to include in autograd graph. Consists
             of parameter tensors, followed by extra operation inputs.
@@ -166,7 +166,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             if next_op is not None:
                 next_op_input_quantizer = next_op.get_input_quantizer()
 
-            compile_kwargs = {"use_custom_ops": True} if use_custom_ops else {}
+            compile_kwargs = {"use_custom_ops": True} if use_custom_ops[0] else {}
             x, fused_op_extra_outputs = op.fuser_forward(
                 [basic_op_ctxs[idx] for idx in basic_op_idxs],
                 x,
@@ -263,7 +263,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             func_ctx.basic_op_extra_output_consumers = fuser._basic_op_extra_output_consumers
             func_ctx.basic_op_extra_input_sources = fuser._basic_op_extra_input_sources
             func_ctx.is_first_module = is_first_module
-            func_ctx.use_custom_ops = use_custom_ops
+            func_ctx.use_custom_ops = use_custom_ops[1]
 
         # Mark output tensors as not deletable in backward (eager only; see above)
         if not torch.compiler.is_compiling():
@@ -738,15 +738,15 @@ class OperationFuser:
         self._fused_ops_cache[fusion_params] = (self._forward_ops, self._backward_ops)
 
     def _custom_ops_unsupported_reason(
-        self, basic_op_kwargs: list[dict[str, Any]]
+        self, basic_op_kwargs: list[dict[str, Any]], mode: str
     ) -> Optional[str]:
-        """Why this group may not run through its operations' custom ops."""
-        for mode, ops in (("forward", self._forward_ops), ("backward", self._backward_ops)):
-            if len(ops) != self._num_basic_ops or any(
-                op is not self._basic_ops[idx] or basic_op_idxs != [idx]
-                for idx, (op, basic_op_idxs) in enumerate(ops)
-            ):
-                return f"a {mode} fusion"
+        """Why this pass may not run through its operations' custom ops."""
+        ops = self._forward_ops if mode == "forward" else self._backward_ops
+        if len(ops) != self._num_basic_ops or any(
+            op is not self._basic_ops[idx] or basic_op_idxs != [idx]
+            for idx, (op, basic_op_idxs) in enumerate(ops)
+        ):
+            return f"a {mode} fusion"
         if self._num_basic_ops != 1:
             return "a group of several operations"
         for op, kwargs in zip(self._basic_ops, basic_op_kwargs, strict=True):
@@ -761,20 +761,16 @@ class OperationFuser:
         for op in self._basic_ops:
             if op.num_extra_inputs or op.num_extra_outputs:
                 return f"{type(op).__name__} with extra tensor inputs or outputs"
-            reason = op.compile_unsupported_reason()
+            reason = op.compile_unsupported_reason(mode)
             if reason is not None:
                 return reason
         return None
 
-    def _use_custom_ops(self, basic_op_kwargs: list[dict[str, Any]]) -> bool:
-        """Whether this group runs through its operations' custom ops.
-
-        Decided once for the whole group: a pipeline compiles as a whole, so one
-        unsupported operation sends all of them to eager.
-        """
+    def _use_custom_ops(self, basic_op_kwargs: list[dict[str, Any]], mode: str) -> bool:
+        """Whether this pass runs through its operations' custom ops."""
         if not torch.compiler.is_compiling():
             return False
-        reason = self._custom_ops_unsupported_reason(basic_op_kwargs)
+        reason = self._custom_ops_unsupported_reason(basic_op_kwargs, mode)
         if reason is None:
             return True
         warn_compile_eager_fallback(reason)
@@ -831,7 +827,12 @@ class OperationFuser:
         # Note: We call forward directly when is_grad_enabled=False,
         # which can expose non-leaf tensors to the inner ops. Avoid
         # problems in this case by passing set_output_requires_grad=False.
-        use_custom_ops = self._use_custom_ops(basic_op_kwargs)
+        use_custom_ops = (
+            self._use_custom_ops(basic_op_kwargs, "forward"),
+            is_grad_enabled
+            and self.first_op_requiring_backward < self._num_basic_ops
+            and self._use_custom_ops(basic_op_kwargs, "backward"),
+        )
 
         args = (
             input,

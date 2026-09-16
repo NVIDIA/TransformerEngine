@@ -63,45 +63,46 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
     # Custom ops are registered once per operation class.
     fwd_args_type: Optional[type] = None
     bwd_args_type: Optional[type] = None
-    # (forward_fn, backward_fn), or None if the operation cannot be compiled.
-    compile_ops: Optional[tuple[Callable[..., Any], Callable[..., Any]]] = None
+    # Each pass may provide its own custom op.
+    compile_ops: tuple[Optional[Callable[..., Any]], Optional[Callable[..., Any]]] = (None, None)
 
     def __init_subclass__(cls, **kwargs) -> None:
         super().__init_subclass__(**kwargs)
-        if cls.fwd_args_type is not None and cls.bwd_args_type is not None:
-            cls._register_compile_ops()
+        cls._register_compile_ops()
 
     @classmethod
     def _register_compile_ops(cls) -> None:
-        for name in ("fwd_args_type", "bwd_args_type"):
-            if not dataclasses.is_dataclass(getattr(cls, name)):
-                raise TypeError(f"{cls.__name__}.{name} must be a dataclass")
         name = cls.__name__.lower()
-        forward = register_custom_op(
-            op_name=name,
-            arg_type=cls.fwd_args_type,
-            impl=cls.forward_compute,
-            fake_impl=cls.forward_fake,
-        )
-        backward = register_custom_op(
-            op_name=f"{name}_backward",
-            arg_type=cls.bwd_args_type,
-            impl=cls.backward_compute,
-            fake_impl=cls.backward_fake,
-        )
-        cls.compile_ops = (
-            (forward, backward) if forward is not None and backward is not None else None
-        )
+        ops = []
+        for mode, arg_name, op_name in (
+            ("forward", "fwd_args_type", name),
+            ("backward", "bwd_args_type", f"{name}_backward"),
+        ):
+            arg_type = getattr(cls, arg_name)
+            if arg_type is None:
+                ops.append(None)
+                continue
+            if not dataclasses.is_dataclass(arg_type):
+                raise TypeError(f"{cls.__name__}.{arg_name} must be a dataclass")
+            ops.append(
+                register_custom_op(
+                    op_name=op_name,
+                    arg_type=arg_type,
+                    impl=getattr(cls, f"{mode}_compute"),
+                    fake_impl=getattr(cls, f"{mode}_compute_fake"),
+                )
+            )
+        cls.compile_ops = (ops[0], ops[1])
 
-    def compile_unsupported_reason(self) -> Optional[str]:
+    def compile_unsupported_reason(self, mode: str) -> Optional[str]:
         """Why this operation cannot run through its custom op, or ``None``."""
-        if self.compile_ops is None:
-            return f"{self.__class__.__name__} without a custom op"
+        if self.compile_ops[("forward", "backward").index(mode)] is None:
+            return f"{self.__class__.__name__} without a custom op for {mode}"
         basic_ops = self.basic_ops if self.is_fused_op else (self,)
         for op in basic_ops:
-            for mode in ("forward", "backward"):
-                for index in range(op.num_quantizers(mode)):
-                    quantizer = op.get_quantizer(mode, index)
+            for quantizer_mode in ("forward", "backward"):
+                for index in range(op.num_quantizers(quantizer_mode)):
+                    quantizer = op.get_quantizer(quantizer_mode, index)
                     if quantizer is not None and not is_value_opaque_quantizer(quantizer):
                         return (
                             f"{type(quantizer).__name__} (not a torch.compile value-opaque"
@@ -247,7 +248,7 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @classmethod
-    def forward_fake(cls, args: Any) -> tuple:
+    def forward_compute_fake(cls, args: Any) -> tuple:
         """Shape-only twin of forward_compute, using TensorSpec."""
         raise NotImplementedError
 
@@ -260,7 +261,7 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @classmethod
-    def backward_fake(cls, args: Any) -> tuple:
+    def backward_compute_fake(cls, args: Any) -> tuple:
         """Shape-only twin of backward_compute, using TensorSpec."""
         raise NotImplementedError
 
