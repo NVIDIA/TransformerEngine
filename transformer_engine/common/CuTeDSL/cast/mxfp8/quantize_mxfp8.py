@@ -2461,6 +2461,8 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
         self.cfg = cfg
         # These activation functions satisfy f(0) = 0 so we don't need to mask with OOB regions
         # (zeros filled by TMA are still zeros without applying activation to them)
+        # Note that as the time of writing, all activations supported by MXFP8 satisfy this property, so !ACT_NEED_MASKING is never reachable.
+        # This is only a precaution for future use cases if someone wants to add a new activation function.
         self.ACT_NEED_MASKING = cfg.WITH_ACT and cfg.ACTIVATION not in (
             "relu",
             "gelu",
