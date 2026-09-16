@@ -1907,10 +1907,15 @@ def get_attention_backend(
         # needs cu_seqlens plumbing that is neither implemented nor validated here.
         logger.debug("Disabling FrostAttention for qkv_layout = %s", qkv_layout)
         use_frost_attention = False
-    if use_frost_attention and context_parallel and cp_comm_type not in (
-        "p2p",
-        "all_gather",
-        "a2a",
+    if (
+        use_frost_attention
+        and context_parallel
+        and cp_comm_type
+        not in (
+            "p2p",
+            "all_gather",
+            "a2a",
+        )
     ):
         # p2p (ring), all_gather and a2a are wired up in context_parallel.py; a2a+p2p is not.
         # Non-p2p types matter for Gemma-4: TE refuses sliding-window attention with p2p, and the
