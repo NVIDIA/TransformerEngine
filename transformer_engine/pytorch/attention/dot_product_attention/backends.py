@@ -2286,6 +2286,167 @@ class FusedAttnFunc(torch.autograd.Function):
         return (*_fused_attn_backward_impl(bwd_args), None)
 
 
+class FrostAttnFunc(torch.autograd.Function):
+    """Autograd wrapper around the cuDNN FROST kernels, for the non-context-parallel path.
+
+    The CP path does not go through here: context_parallel.py calls frost_attn_fwd/bwd per ring
+    step itself, because the ring has to interleave those calls with KV exchange and LSE
+    correction rather than treating attention as one opaque autograd node.
+    """
+
+    @staticmethod
+    def forward(ctx, q, k, v, softmax_scale, attn_mask_type, qkv_format, is_training):
+        # pylint: disable=missing-function-docstring
+        from .frost_attention import (  # pylint: disable=import-outside-toplevel
+            frost_attn_fwd,
+            from_frost_layout,
+            to_frost_layout,
+        )
+
+        # .contiguous() first: the graphs are built for BSHD-contiguous memory and
+        # frost_attention raises on anything else rather than computing on wrong strides.
+        q_f = to_frost_layout(q.contiguous(), qkv_format)
+        k_f = to_frost_layout(k.contiguous(), qkv_format)
+        v_f = to_frost_layout(v.contiguous(), qkv_format)
+        out_f, softmax_lse = frost_attn_fwd(
+            q_f, k_f, v_f, attn_scale=softmax_scale, attn_mask_type=attn_mask_type
+        )
+        out = from_frost_layout(out_f, qkv_format)
+        if is_training:
+            ctx.save_for_backward(q_f, k_f, v_f, out_f, softmax_lse)
+            ctx.softmax_scale = softmax_scale
+            ctx.attn_mask_type = attn_mask_type
+            ctx.qkv_format = qkv_format
+            ctx.unflattened_shape = out.shape
+        # TE attention modules return the heads flattened into the last dimension
+        # ([b, s, h*d] for bshd), matching FlashAttention and FusedAttention. Returning the
+        # unflattened [b, s, h, d] makes autograd reject the incoming grad on shape mismatch.
+        return out.reshape(out.shape[0], out.shape[1], -1)
+
+    @staticmethod
+    def backward(ctx, dout):
+        # pylint: disable=missing-function-docstring
+        from .frost_attention import (  # pylint: disable=import-outside-toplevel
+            frost_attn_bwd,
+            from_frost_layout,
+            to_frost_layout,
+        )
+
+        q_f, k_f, v_f, out_f, softmax_lse = ctx.saved_tensors
+        fmt = ctx.qkv_format
+        # dout arrives flattened, matching what forward returned; restore [b, s, h, d].
+        dout = dout.reshape(ctx.unflattened_shape)
+        dq, dk, dv = frost_attn_bwd(
+            q_f,
+            k_f,
+            v_f,
+            out_f,
+            softmax_lse,
+            to_frost_layout(dout.contiguous(), fmt),
+            attn_scale=ctx.softmax_scale,
+            attn_mask_type=ctx.attn_mask_type,
+        )
+        return (
+            from_frost_layout(dq, fmt),
+            from_frost_layout(dk, fmt),
+            from_frost_layout(dv, fmt),
+            None,
+            None,
+            None,
+            None,
+        )
+
+
+class FrostAttention(torch.nn.Module):
+    """cuDNN FROST attention for symmetric head_dim in (256, 512] on SM100/SM103.
+
+    This is the only backend that serves that head-dim range together with context parallelism,
+    which is what Gemma-4 global layers need. Deliberately narrow: no FP8, no bias, no dropout,
+    no softmax offset, no paging. get_attention_backend declines all of those before selecting
+    this backend, so anything reaching here should already be supported.
+    """
+
+    def __init__(
+        self,
+        softmax_scale: float,
+        attention_type: str = "self",
+        layer_number: Optional[int] = None,
+        deterministic: bool = False,
+        **kwargs,  # attention_dropout / attention_dropout_ctx: accepted, must be unused
+    ) -> None:
+        super().__init__()
+        self.softmax_scale = softmax_scale
+        self.attention_type = attention_type
+        self.layer_number = 1 if layer_number is None else layer_number
+        self.deterministic = deterministic
+        self.attention_dropout = kwargs.get("attention_dropout", 0.0)
+
+    def forward(
+        self,
+        query_layer: torch.Tensor,
+        key_layer: torch.Tensor,
+        value_layer: torch.Tensor,
+        qkv_format: str = "bshd",
+        cu_seqlens_q: Optional[torch.Tensor] = None,
+        cu_seqlens_kv: Optional[torch.Tensor] = None,
+        max_seqlen_q: Optional[int] = None,
+        max_seqlen_kv: Optional[int] = None,
+        cu_seqlens_q_padded: Optional[torch.Tensor] = None,
+        cu_seqlens_kv_padded: Optional[torch.Tensor] = None,
+        attn_mask_type: str = "causal",
+        window_size: Optional[Tuple[int, int]] = None,
+        cp_group: Optional[Union[dist_group_type, List[dist_group_type]]] = None,
+        cp_global_ranks: List[int] = None,
+        cp_stream: torch.cuda.Stream = None,
+        cp_comm_type: str = "p2p",
+    ) -> torch.Tensor:
+        """Forward pass. Routes through the CP ring when a cp_group is present."""
+        assert self.attention_dropout == 0.0, "FrostAttention does not support dropout"
+
+        context_parallel = cp_group is not None and get_distributed_world_size(cp_group) != 1
+        if context_parallel:
+            output = attn_forward_func_with_cp(
+                self.training,
+                query_layer,
+                key_layer,
+                value_layer,
+                cu_seqlens_q,
+                cu_seqlens_kv,
+                max_seqlen_q,
+                max_seqlen_kv,
+                cu_seqlens_q_padded,
+                cu_seqlens_kv_padded,
+                0.0,
+                cp_group,
+                cp_global_ranks,
+                cp_stream,
+                cp_comm_type,
+                softmax_scale=self.softmax_scale,
+                qkv_format=qkv_format,
+                attn_mask_type=attn_mask_type,
+                attn_bias_type="no_bias",
+                attn_bias=None,
+                deterministic=self.deterministic,
+                use_fused_attention=False,
+                use_frost_attention=True,
+                window_size=window_size,
+                layer_number=self.layer_number,
+            )
+            # Same flattening the other backends apply after the CP call: the ring returns
+            # [b, s_local, h, d] but TE attention modules return heads in the last dimension.
+            return output.reshape(output.shape[0], output.shape[1], -1).contiguous()
+
+        return FrostAttnFunc.apply(
+            query_layer,
+            key_layer,
+            value_layer,
+            self.softmax_scale,
+            attn_mask_type,
+            qkv_format,
+            self.training,
+        )
+
+
 class FusedAttention(torch.nn.Module):
     """Dot product attention using `cuDNN attention <https://github.com/NVIDIA/cudnn-frontend>`_:
 
