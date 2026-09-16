@@ -23,9 +23,9 @@ one constrains the code:
 
 1. cuDNN's `use_causal_mask` is TOP-LEFT aligned and `use_causal_mask_bottom_right` is
    bottom-right. They coincide when SQ == SKV, so the distinction is invisible in square tests
-   and decisive for all_gather, which trims KV. `_MASK_MODES` lists only spellings checked
-   against a reference for their alignment: sdpa() ignores unknown kwargs silently, so an
-   unverified name would apply no mask at all and still run.
+   and decisive for all_gather, which trims KV. Both alignments were checked against a
+   reference rather than assumed, and masking is built as a diagonal band so causal,
+   bottom-right and sliding window come from one mechanism instead of three spellings.
 
 2. Plan building must be cached. Building a plan is by far the most expensive cuDNN frontend
    call here, and dominates an execute even after cuDNN has cached the JIT and made rebuilds
@@ -77,6 +77,10 @@ _MIN_CUDNN_FRONTEND = PkgVersion("1.29.0")
 _SUPPORTED_ARCHS = ((10, 0), (10, 3))
 _MAX_HEAD_DIM = 512
 _MIN_HEAD_DIM = 257  # below this the existing cuDNN/flash backends already serve the shape
+# The engine pads head_dim to a multiple of 8, so 260 is not servable even though it is in range.
+# Without this it passes the gate and then fails at plan selection with a message about missing
+# engines, instead of declining cleanly here.
+_HEAD_DIM_MULTIPLE = 8
 
 _cudnn = None
 _availability: Optional[Tuple[bool, str]] = None
@@ -213,35 +217,57 @@ def is_frost_attention_available() -> Tuple[bool, str]:
     return _availability
 
 
-# cuDNN sdpa() kwargs per TE mask type.
+# TE mask types this backend serves. cuDNN expresses causal, bottom-right and sliding-window
+# masking as ONE mechanism -- a diagonal alignment plus a two-sided band -- rather than three
+# separate flags, so that is what _mask_options builds. The legacy spellings desugar into exactly
+# that: pygraph/sdpa.cpp maps use_causal_mask to (TOP_LEFT, right_bound=0) and
+# use_causal_mask_bottom_right to (BOTTOM_RIGHT, right_bound=0), and refuses to combine either
+# with an explicit right bound. Building the band directly is equivalent for those two and
+# additionally expresses a left bound, which is what a sliding window is.
 #
-# These exact spellings are behaviourally verified, which matters more than it sounds: sdpa()
-# takes **kwargs and SILENTLY IGNORES names it does not recognise, so a typo here would apply no
-# mask at all and still build and run. Do not add an entry without checking the output against a
-# reference for that alignment.
-#
-# Both alignments are needed. The p2p ring produces square diagonal tiles (top-left and
-# bottom-right coincide there), while all_gather trims KV and relies on bottom-right alignment,
-# where the two differ completely.
-_MASK_MODES = {
-    "no_mask": {},
-    "causal": {"use_causal_mask": True},
-    "causal_bottom_right": {"use_causal_mask_bottom_right": True},
-}
+# Both alignments are needed. The p2p ring produces square diagonal tiles, where top-left and
+# bottom-right coincide, while all_gather trims KV and relies on bottom-right alignment, where
+# the two differ completely.
+_SUPPORTED_MASKS = ("no_mask", "causal", "causal_bottom_right")
+
+# Sliding window as TE spells it: (left, right), -1 meaning unbounded on that side.
+_NO_WINDOW = (-1, -1)
 
 
-def _mask_mode(attn_mask_type: str) -> str:
-    """Validate a TE mask type and return its key in _MASK_MODES.
+def _mask_spec(attn_mask_type: str, window_size=None):
+    """Validate a TE mask type and window, returning the hashable spec the plan is keyed on."""
+    if attn_mask_type not in _SUPPORTED_MASKS:
+        raise NotImplementedError(
+            "FROST attention supports attn_mask_type in %s; got %r"
+            % (str(_SUPPORTED_MASKS), attn_mask_type)
+        )
+    window = _NO_WINDOW if window_size is None else tuple(window_size)
+    if len(window) != 2:
+        raise NotImplementedError("window_size must be a (left, right) pair; got %r" % (window,))
+    if window[1] not in (-1, 0):
+        # A right bound past the diagonal is future context. cuDNN can express it, but no TE mask
+        # type asks for it, so decline rather than guess the intent.
+        raise NotImplementedError("FROST attention does not support a right window %r" % (window,))
+    return attn_mask_type, window
 
-    Anything not listed is rejected rather than approximated: the failure mode of guessing wrong
-    is silent numerical corruption, not an exception.
-    """
-    if attn_mask_type in _MASK_MODES:
-        return attn_mask_type
-    raise NotImplementedError(
-        "FROST attention supports attn_mask_type in %s; got %r. Padding variants need varlen"
-        " support that is not implemented here." % (sorted(_MASK_MODES), attn_mask_type)
-    )
+
+def _mask_options(cudnn, spec):
+    """cuDNN sdpa kwargs for a (mask type, window) spec: a diagonal alignment plus a band."""
+    attn_mask_type, window = spec
+    left, right = window
+    options = {}
+    if attn_mask_type in ("causal", "causal_bottom_right") or right == 0:
+        options["diagonal_alignment"] = (
+            cudnn.diagonal_alignment.BOTTOM_RIGHT
+            if attn_mask_type == "causal_bottom_right"
+            else cudnn.diagonal_alignment.TOP_LEFT
+        )
+        options["diagonal_band_right_bound"] = 0
+    if left != -1:
+        # cuDNN counts the diagonal itself, TE does not, hence the +1 -- the same convention the
+        # C++ fused path and the Python port both use.
+        options["diagonal_band_left_bound"] = left + 1
+    return options
 
 
 def is_frost_attention_supported(
@@ -251,6 +277,7 @@ def is_frost_attention_supported(
     attn_mask_type: str,
     dropout: float = 0.0,
     attn_bias_type: str = "no_bias",
+    window_size: Optional[Tuple[int, int]] = None,
 ) -> Tuple[bool, str]:
     """Whether this specific attention configuration should route to FROST.
 
@@ -268,6 +295,11 @@ def is_frost_attention_supported(
         )
     if not _MIN_HEAD_DIM <= head_dim_qk <= _MAX_HEAD_DIM:
         return False, "FROST path covers head_dim in (256, 512]; got %d" % head_dim_qk
+    if head_dim_qk % _HEAD_DIM_MULTIPLE != 0:
+        return False, "FROST path needs head_dim to be a multiple of %d; got %d" % (
+            _HEAD_DIM_MULTIPLE,
+            head_dim_qk,
+        )
     if qkv_dtype not in (torch.bfloat16, torch.float16):
         return False, "FROST path supports bf16/fp16; got %s" % qkv_dtype
     if dropout != 0.0:
@@ -275,7 +307,7 @@ def is_frost_attention_supported(
     if attn_bias_type != "no_bias":
         return False, "FROST path does not support attention bias"
     try:
-        _mask_mode(attn_mask_type)
+        _mask_spec(attn_mask_type, window_size)
     except NotImplementedError as exc:
         return False, str(exc)
     ok, reason = is_frost_attention_available()
@@ -422,7 +454,7 @@ def _build_fwd(key) -> dict:
         v=tv,
         generate_stats=True,  # the CP ring needs the LSE, and it is cheap
         attn_scale=scale,
-        **_MASK_MODES[mask],
+        **_mask_options(cudnn, mask),
     )
     tout.set_output(True).set_dim(shq).set_stride(list(qs))  # out mirrors q
     tlse.set_output(True).set_dim([b, hq, sq, 1]).set_stride([hq * sq, sq, 1, 1]).set_data_type(
@@ -478,7 +510,7 @@ def _build_bwd(key) -> dict:
         stats=handles["stats"],
         attn_scale=scale,
         use_deterministic_algorithm=deterministic,
-        **_MASK_MODES[mask],
+        **_mask_options(cudnn, mask),
     )
     for tensor, stride in ((tdq, qs), (tdk, ks), (tdv, ks)):
         tensor.set_output(True).set_data_type(io_dt).set_stride(list(stride))
@@ -542,6 +574,7 @@ def frost_attn_fwd(
     v: torch.Tensor,
     attn_scale: Optional[float] = None,
     attn_mask_type: str = "causal",
+    window_size: Optional[Tuple[int, int]] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Forward attention via cuDNN FROST.
 
@@ -567,7 +600,7 @@ def frost_attn_fwd(
             % (q.shape[1], k.shape[1])
         )
 
-    mask = _mask_mode(attn_mask_type)
+    mask = _mask_spec(attn_mask_type, window_size)
     scale = attn_scale if attn_scale is not None else q.shape[-1] ** -0.5
     entry = _cached("fwd", _key(q, k, mask, scale))
     tq, tk, tv, tout, tlse = entry["handles"]
@@ -595,6 +628,7 @@ def frost_attn_bwd(
     dout: torch.Tensor,
     attn_scale: Optional[float] = None,
     attn_mask_type: str = "causal",
+    window_size: Optional[Tuple[int, int]] = None,
     deterministic: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Backward attention via cuDNN FROST. `softmax_lse` is [b, h, s] as returned by the forward."""
@@ -626,7 +660,7 @@ def frost_attn_bwd(
             % (tuple(softmax_lse.shape), tuple(q.shape))
         )
 
-    mask = _mask_mode(attn_mask_type)
+    mask = _mask_spec(attn_mask_type, window_size)
     scale = attn_scale if attn_scale is not None else q.shape[-1] ** -0.5
     entry = _cached("bwd", _key(q, k, mask, scale, deterministic))
     h = entry["handles"]

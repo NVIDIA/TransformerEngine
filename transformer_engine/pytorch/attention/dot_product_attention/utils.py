@@ -1886,6 +1886,7 @@ def get_attention_backend(
             attn_mask_type=attn_mask_type,
             dropout=attention_dropout,
             attn_bias_type=core_attention_bias_type,
+            window_size=window_size,
         )
         if not frost_supported:
             logger.debug("Disabling FrostAttention: %s", frost_reason)
@@ -1901,9 +1902,6 @@ def get_attention_backend(
         use_frost_attention = False
     if use_frost_attention and softcap is not None and softcap != 0.0:
         logger.debug("Disabling FrostAttention for softcap")
-        use_frost_attention = False
-    if use_frost_attention and window_size not in ((-1, -1), (-1, 0)):
-        logger.debug("Disabling FrostAttention for sliding window %s", str(window_size))
         use_frost_attention = False
     if use_frost_attention and "thd" in qkv_layout:
         # bshd and sbhd are served directly from their own strides; thd is packed/varlen, which
