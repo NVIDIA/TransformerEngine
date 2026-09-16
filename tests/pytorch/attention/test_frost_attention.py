@@ -51,7 +51,10 @@ _SKIP = _frost_availability()
 # that is supposed to cover FROST turns a silent skip into a loud failure.
 if os.getenv("NVTE_FROST_TEST_REQUIRED", "0") == "1" and _SKIP is not None:
     raise RuntimeError("NVTE_FROST_TEST_REQUIRED=1, but FrostAttention is unavailable: %s" % _SKIP)
-pytestmark = pytest.mark.skipif(_SKIP is not None, reason=str(_SKIP))
+# Applied per test rather than as a module-level pytestmark: the ONNX-export regression
+# below guards a code path that runs on every GPU, so gating it on Blackwell would skip it
+# exactly where the bug it covers can still occur.
+requires_frost = pytest.mark.skipif(_SKIP is not None, reason=str(_SKIP))
 
 # head_dim 512 is the whole point of the backend; 320 checks the interior of the (256, 512] range
 # rather than only its endpoint.
@@ -116,6 +119,7 @@ def _floor(q32, k32, v32, scale, mask, dtype, window=None):
     )
 
 
+@requires_frost
 @pytest.mark.parametrize("shape", _SHAPES, ids=lambda s: "b%d_hq%d_hkv%d_sq%d_skv%d_d%d" % s)
 @pytest.mark.parametrize("mask", ["no_mask", "causal", "causal_bottom_right"])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
@@ -161,6 +165,7 @@ def test_frost_forward_matches_reference(shape, mask, dtype):
     assert lse.dtype == torch.float32, "lse must be fp32; got %s" % lse.dtype
 
 
+@requires_frost
 @pytest.mark.parametrize("window", [(256, 0), (128, 0), (0, 0)], ids=lambda w: "win%d" % w[0])
 @pytest.mark.parametrize("mask", ["causal", "causal_bottom_right", "no_mask"])
 @pytest.mark.parametrize("sq,skv", [(1024, 1024), (512, 1024)], ids=["square", "rect"])
@@ -206,6 +211,7 @@ def test_frost_sliding_window_matches_reference(mask, window, sq, skv):
     assert not torch.equal(out, full), "window %s produced the same output as no window" % (window,)
 
 
+@requires_frost
 @pytest.mark.parametrize("shape", _SHAPES[:2], ids=lambda s: "b%d_hq%d_hkv%d_sq%d_skv%d_d%d" % s)
 @pytest.mark.parametrize("mask", ["no_mask", "causal"])
 @pytest.mark.parametrize("window", [None, (128, 0)], ids=["nowin", "win128"])
@@ -252,6 +258,7 @@ def test_frost_backward_matches_reference(shape, mask, window):
         )
 
 
+@requires_frost
 def test_frost_declines_unsupported_configs():
     """The selector must decline what the kernels do not serve, rather than computing wrongly."""
     from transformer_engine.pytorch.attention.dot_product_attention.frost_attention import (
@@ -286,6 +293,7 @@ def test_frost_declines_unsupported_configs():
         assert reason, "a decline must explain itself"
 
 
+@requires_frost
 @pytest.mark.parametrize(
     "cp_comm_type,window,expect_frost",
     [
@@ -337,6 +345,7 @@ def test_frost_sliding_window_selection_by_cp_comm_type(cp_comm_type, window, ex
     )
 
 
+@requires_frost
 def test_frost_rejects_mismatched_kv():
     """k and v must agree: the graphs declare v with k's shape and stride."""
     from transformer_engine.pytorch.attention.dot_product_attention.frost_attention import (
@@ -360,3 +369,29 @@ def test_frost_rejects_mismatched_kv():
         frost_attn_fwd(q, k, v_odd)
     with pytest.raises(ValueError, match="match q"):
         frost_attn_fwd(q, k, k.to(torch.float32))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+def test_dot_product_attention_runs_in_onnx_export_mode():
+    """The ONNX-export branch must bind every backend flag the availability check reads.
+
+    Deliberately not gated on FROST: that branch skips get_attention_backend entirely and sets the
+    flags by hand, so leaving use_frost_attention unbound there raised UnboundLocalError for every
+    user on every GPU, whether or not FROST could run. A plain head_dim-64 config reproduces it --
+    the failure is in the selector bookkeeping, not in any kernel.
+    """
+    from transformer_engine.pytorch import DotProductAttention
+    from transformer_engine.pytorch.export import onnx_export
+
+    b, h, s, d = 2, 4, 128, 64
+    dtype = torch.bfloat16
+    qkv = [torch.randn(s, b, h, d, device="cuda", dtype=dtype) for _ in range(3)]
+    block = DotProductAttention(
+        h, d, qkv_format="sbhd", attn_mask_type="causal", attention_dropout=0.0
+    ).to(dtype=dtype, device="cuda")
+
+    with onnx_export(enabled=True):
+        out = block(*qkv)
+
+    assert out.numel() == s * b * h * d
+    assert torch.isfinite(out).all()
