@@ -36,9 +36,11 @@ across square and rectangular, causal and non-causal shapes.
 from __future__ import annotations
 
 import os
+from importlib.metadata import PackageNotFoundError, version as get_pkg_version
 from typing import Optional, Tuple
 
 import torch
+from packaging.version import InvalidVersion, Version as PkgVersion
 
 __all__ = [
     "is_frost_attention_available",
@@ -57,12 +59,12 @@ __all__ = [
 # the selected plan by NAME rather than trusting that the engine was used.
 _FROST_FWD_PLAN_TOKEN = "sdpa_fwd_prefill_sm100"
 _FROST_BWD_PLAN_TOKEN = "sdpa_bwd_sm100"
-_MIN_CUTLASS_DSL = (4, 7, 0)
+_MIN_CUTLASS_DSL = PkgVersion("4.7.0")
 
 # 1.29.0 is the first release carrying the head_dim=512 BACKWARD (bprop_d512_f16_sm100). 1.28.0
 # ships the forward only, and the repo's own pin allows it, so without this check training would
 # build a forward plan and then raise on the first backward.
-_MIN_CUDNN_FRONTEND = (1, 29, 0)
+_MIN_CUDNN_FRONTEND = PkgVersion("1.29.0")
 
 _SUPPORTED_ARCHS = ((10, 0), (10, 3))
 _MAX_HEAD_DIM = 512
@@ -86,20 +88,23 @@ def _import_cudnn():
     return _cudnn
 
 
-def _parse_version(raw: str) -> Tuple[int, ...]:
-    """Leading numeric components of a version, ignoring any suffix. Unparseable sorts lowest."""
-    parts = []
-    for piece in str(raw).split(".")[:3]:
-        digits = ""
-        for ch in piece:
-            if not ch.isdigit():
-                break
-            digits += ch
-        if not digits:
-            break
-        parts.append(int(digits))
-    # Pad, or "1.29" would compare below (1, 29, 0) and be rejected as too old.
-    return tuple(parts + [0] * (3 - len(parts))) if parts else (0, 0, 0)
+def _pkg_version(name: str, module=None) -> Optional[PkgVersion]:
+    """Installed version of a package, or None if it cannot be determined.
+
+    Distribution metadata first, matching the sibling check in fused_mla_q_uproj.py, with the
+    module attribute as a fallback so a source or vendored install is not misreported as old.
+    """
+    raw = None
+    try:
+        raw = get_pkg_version(name)
+    except PackageNotFoundError:
+        raw = getattr(module, "__version__", None)
+    if not isinstance(raw, str):
+        return None
+    try:
+        return PkgVersion(raw)
+    except InvalidVersion:
+        return None
 
 
 def is_frost_attention_available() -> Tuple[bool, str]:
@@ -128,31 +133,25 @@ def is_frost_attention_available() -> Tuple[bool, str]:
     except ImportError as exc:
         return _no("nvidia-cudnn-frontend not importable: %s" % exc)
 
-    from importlib.metadata import PackageNotFoundError, version
-
-    fe_raw = getattr(_cudnn, "__version__", None)
-    if fe_raw is None:
-        try:
-            fe_raw = version("nvidia-cudnn-frontend")
-        except PackageNotFoundError:
-            fe_raw = "0"
-    if _parse_version(fe_raw) < _MIN_CUDNN_FRONTEND:
+    # Decline only on positive evidence of a too-old install. An undeterminable version is left
+    # to _select_frost_plan, which checks the plan by name and fails loudly with both versions.
+    frontend = _pkg_version("nvidia-cudnn-frontend", _cudnn)
+    if frontend is not None and frontend < _MIN_CUDNN_FRONTEND:
         return _no(
-            "nvidia-cudnn-frontend %s does not carry the head_dim>256 backward; >= 1.29.0 is"
-            " required (1.28.0 ships the forward only, so this would raise on the first"
-            " backward rather than here)" % fe_raw
+            "nvidia-cudnn-frontend %s registers no sm100 backward engine; >= %s is required"
+            " (1.28.0 ships the d512 forward only, so this would otherwise raise on the first"
+            " backward rather than here)" % (frontend, _MIN_CUDNN_FRONTEND)
         )
 
-    try:
-        raw = version("nvidia-cutlass-dsl")
-    except PackageNotFoundError:
-        return _no("nvidia-cutlass-dsl not installed (FROST requires >= 4.7.0)")
-    parsed = _parse_version(raw)
-    if parsed < _MIN_CUTLASS_DSL:
+    cutlass = _pkg_version("nvidia-cutlass-dsl")
+    if cutlass is None:
+        return _no("nvidia-cutlass-dsl not installed (FROST requires >= %s)" % _MIN_CUTLASS_DSL)
+    if cutlass < _MIN_CUTLASS_DSL:
         # Worth being loud: this combination fails by silently declining, not by raising.
         return _no(
-            "nvidia-cutlass-dsl %s is below the FROST floor 4.7.0; FROST engines would be"
-            " silently skipped in favour of ordinary cuDNN backend plans" % raw
+            "nvidia-cutlass-dsl %s is below the FROST floor %s; FROST engines would be"
+            " silently skipped in favour of ordinary cuDNN backend plans"
+            % (cutlass, _MIN_CUTLASS_DSL)
         )
 
     _availability = (True, "")
@@ -286,17 +285,19 @@ def _select_frost_plan(graph, token: str, what: str):
     names = [graph.get_plan_name_at_index(i) for i in range(graph.get_execution_plan_count())]
     hits = [i for i, n in enumerate(names) if token in n]
     if not hits:
-        from importlib.metadata import version
-
+        # Both versions, because either floor can cause this and blaming one misdirects. Looked
+        # up defensively: this is the message explaining a failure, so it must not raise itself.
         raise RuntimeError(
             "no cuDNN FROST %s engine was offered (looked for %r). Candidate plans: %s."
-            " nvidia-cudnn-frontend=%s (floor 1.29.0), nvidia-cutlass-dsl=%s (floor 4.7.0)."
+            " nvidia-cudnn-frontend=%s (floor %s), nvidia-cutlass-dsl=%s (floor %s)."
             % (
                 what,
                 token,
                 names[:6],
-                getattr(_cudnn, "__version__", None) or version("nvidia-cudnn-frontend"),
-                version("nvidia-cutlass-dsl"),
+                _pkg_version("nvidia-cudnn-frontend", _cudnn) or "unknown",
+                _MIN_CUDNN_FRONTEND,
+                _pkg_version("nvidia-cutlass-dsl") or "unknown",
+                _MIN_CUTLASS_DSL,
             )
         )
     graph.select_plan(hits[0])
@@ -308,7 +309,7 @@ def _select_frost_plan(graph, token: str, what: str):
 def _build_fwd(key) -> dict:
     """Build (and JIT-compile) a forward graph. Expensive; always reached through the cache."""
     cudnn = _import_cudnn()
-    b, hq, hkv, sq, skv, d, dtype, mask, scale, qs, ks = key
+    *_device, b, hq, hkv, sq, skv, d, dtype, mask, scale, qs, ks = key
     io_dt = _cudnn_dtype(dtype)
     shq, shkv = [b, hq, sq, d], [b, hkv, skv, d]
 
@@ -347,7 +348,7 @@ def _build_fwd(key) -> dict:
 def _build_bwd(key) -> dict:
     """Build (and JIT-compile) a backward graph. Expensive; always reached through the cache."""
     cudnn = _import_cudnn()
-    b, hq, hkv, sq, skv, d, dtype, mask, scale, qs, ks = key
+    *_device, b, hq, hkv, sq, skv, d, dtype, mask, scale, qs, ks = key
     io_dt = _cudnn_dtype(dtype)
     shq, shkv = [b, hq, sq, d], [b, hkv, skv, d]
 
@@ -411,8 +412,9 @@ def _key(q, k, mask, scale):
     return (
         # The graph is built under whichever device was current, so it must not be reused on
         # another one. Matches the C++ fused-attn cache, which keys on device_id for the same
-        # reason. Normalise None, or "cuda" and "cuda:0" would build two plans for one device.
-        q.device.index if q.device.index is not None else torch.cuda.current_device(),
+        # reason. Type is included too, so a CPU tensor cannot alias cuda:0.
+        q.device.type,
+        q.device.index,
         q.shape[0],
         q.shape[1],
         k.shape[1],
