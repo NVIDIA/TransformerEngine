@@ -535,8 +535,18 @@ def flash_attn_a2a_communicate(
     cu_seqlens_q_padded: torch.Tensor = None,
     cu_seqlens_kv_padded: torch.Tensor = None,
     a2a_input_names: List[str] = None,
+    load_balancing_strategy=CPLoadBalancingStrategy.DUAL_CHUNK_SWAP,
 ) -> Union[torch.Tensor, List[torch.Tensor]]:
-    """A2A communication for context parallelism."""
+    """A2A communication for context parallelism.
+
+    With ``CPLoadBalancingStrategy.NO_LOAD_BALANCE`` the tokens are sharded flat
+    (rank ``r`` owns the contiguous global range ``[r * s_local, (r + 1) * s_local)``),
+    so the A2A exchange already lands them in sequence order and the dual-chunk
+    reordering is skipped. Dropping the reorder also drops its ``s_local % 2 == 0``
+    view, which is what lowers the per-sequence divisibility requirement from
+    ``2 * cp_size`` to ``cp_size``.
+    """
+    flat = load_balancing_strategy is CPLoadBalancingStrategy.NO_LOAD_BALANCE
     assert a2a_input_names in [
         ["q", "k", "v"],
         ["out"],
@@ -570,10 +580,17 @@ def flash_attn_a2a_communicate(
                     a2a_reqs[i - 2].wait()
                     x = a2a_outputs[i - 2]
                     if qkv_format in ["bshd", "sbhd", "bhsd"]:
-                        # reorder the sequence chunks
-                        x = reorder_seq_chunks_for_a2a_before_attn(
-                            x, chunk_ids_for_a2a, seq_dim, cp_size
-                        )
+                        if flat:
+                            # Flat shards are already in sequence order after the A2A,
+                            # so only the rank axis has to be folded into the seq axis.
+                            # [cp, b, s, h//cp, d] -> [b, cp, s, h//cp, d]
+                            # [cp, s, b, h//cp, d] -> [cp, s, b, h//cp, d]
+                            x = x.movedim(0, seq_dim).contiguous()
+                        else:
+                            # reorder the sequence chunks
+                            x = reorder_seq_chunks_for_a2a_before_attn(
+                                x, chunk_ids_for_a2a, seq_dim, cp_size
+                            )
                         # [b, cp*2, s//2, h//cp, d] -> [b, cp*s, h//cp, d]
                         # [cp*2, s//2, b, h//cp, d] -> [cp*s, b, h//cp, d]
                         # [b, h//cp, cp*2, s//2, d] -> [b, h//cp, cp*s, d]
@@ -581,17 +598,22 @@ def flash_attn_a2a_communicate(
                             *x.shape[:seq_dim], -1, *x.shape[(seq_dim + 2) :]
                         )
                     else:  # qkv_format == "thd"
-                        cu_seqlens_padded = (
-                            cu_seqlens_q_padded
-                            if a2a_input_names[i - 2] in ["q", "out", "dout", "dq"]
-                            else cu_seqlens_kv_padded
-                        )
                         # [cp, t, h//cp, d] -> [cp*t, h//cp, d]
                         x = x.view(-1, *x.shape[2:])
-                        # reorder the sequence chunks
-                        a2a_outputs[i - 2] = thd_cp_rank_order_to_sequence_order(
-                            x, cu_seqlens_padded, cp_size
-                        )
+                        if flat:
+                            # Concatenating the flat shards in rank order already
+                            # reproduces the global token order.
+                            a2a_outputs[i - 2] = x
+                        else:
+                            cu_seqlens_padded = (
+                                cu_seqlens_q_padded
+                                if a2a_input_names[i - 2] in ["q", "out", "dout", "dq"]
+                                else cu_seqlens_kv_padded
+                            )
+                            # reorder the sequence chunks
+                            a2a_outputs[i - 2] = thd_cp_rank_order_to_sequence_order(
+                                x, cu_seqlens_padded, cp_size
+                            )
 
             if i < len(a2a_inputs):
                 x = a2a_inputs[i]
@@ -620,22 +642,31 @@ def flash_attn_a2a_communicate(
             if i < len(a2a_inputs):
                 x = a2a_inputs[i]
                 if qkv_format in ["bshd", "sbhd", "bhsd"]:
-                    # [b, cp*s, h//cp, d] -> [b, cp*2, s//2, h//cp, d]
-                    # [cp*s, b, h//cp, d] -> [cp*2, s//2, b, h//cp, d]
-                    # [b, h//cp, cp*s, d] -> [b, h//cp, cp*2, s//2, d]
-                    x = x.view(*x.shape[:seq_dim], cp_size * 2, -1, *x.shape[(seq_dim + 1) :])
-                    # reorder the sequence chunks
-                    a2a_inputs[i] = reorder_seq_chunks_for_a2a_after_attn(
-                        x, chunk_ids_for_a2a, seq_dim, cp_size
-                    )
+                    if flat:
+                        # Splitting the global sequence in rank order is the inverse
+                        # of the flat shard, so no chunk reordering is needed.
+                        # [b, cp*s, h//cp, d] -> [b, cp, s, h//cp, d] -> [cp, b, s, h//cp, d]
+                        # [cp*s, b, h//cp, d] -> [cp, s, b, h//cp, d]
+                        x = x.view(*x.shape[:seq_dim], cp_size, -1, *x.shape[(seq_dim + 1) :])
+                        a2a_inputs[i] = x.movedim(seq_dim, 0).contiguous()
+                    else:
+                        # [b, cp*s, h//cp, d] -> [b, cp*2, s//2, h//cp, d]
+                        # [cp*s, b, h//cp, d] -> [cp*2, s//2, b, h//cp, d]
+                        # [b, h//cp, cp*s, d] -> [b, h//cp, cp*2, s//2, d]
+                        x = x.view(*x.shape[:seq_dim], cp_size * 2, -1, *x.shape[(seq_dim + 1) :])
+                        # reorder the sequence chunks
+                        a2a_inputs[i] = reorder_seq_chunks_for_a2a_after_attn(
+                            x, chunk_ids_for_a2a, seq_dim, cp_size
+                        )
                 else:  # qkv_format == "thd"
-                    cu_seqlens_padded = (
-                        cu_seqlens_q_padded
-                        if a2a_input_names[i] in ["q", "out", "dout", "dq"]
-                        else cu_seqlens_kv_padded
-                    )
-                    # reorder the sequence chunks
-                    x = thd_sequence_order_to_cp_rank_order(x, cu_seqlens_padded, cp_size)
+                    if not flat:
+                        cu_seqlens_padded = (
+                            cu_seqlens_q_padded
+                            if a2a_input_names[i] in ["q", "out", "dout", "dq"]
+                            else cu_seqlens_kv_padded
+                        )
+                        # reorder the sequence chunks
+                        x = thd_sequence_order_to_cp_rank_order(x, cu_seqlens_padded, cp_size)
                     # [cp*t, h//cp, d] -> [cp, t, h//cp, d]
                     a2a_inputs[i] = x.view(cp_size, -1, *x.shape[-2:])
             if i > 1:
@@ -646,8 +677,11 @@ def flash_attn_a2a_communicate(
                     # [cp, 2, s//2, b, h//cp, d] -> [2, s//2, b, cp, h//cp, d]
                     # [cp, 2, b, h//cp, s//2, d] -> [2, b, cp, h//cp, s//2, d]
                     # [cp, t, h//cp, d] -> [t, cp, h//cp, d]
+                    # Flat shards carry no dual-chunk axis, so the rank axis alone is
+                    # moved next to the head axis and the sequence axis is already in
+                    # place (the dual-chunk path needs a second movedim for that).
                     tmp_list = list(qkv_format)
-                    if "t" not in qkv_format:
+                    if "t" not in qkv_format and not flat:
                         tmp_list.insert(0, "2")
                     tmp_list.insert(0, "c")
                     tmp_format = "".join(tmp_list)
@@ -658,7 +692,7 @@ def flash_attn_a2a_communicate(
                     # [2, s//2, b, cp, h//cp, d] -> [2, s//2, b, cp, h//cp, d]
                     # [2, b, cp, h//cp, s//2, d] -> [b, cp, h//cp, 2, s//2, d]
                     # [t, cp, h//cp, d] -> [t, cp, h//cp, d]
-                    if "t" not in qkv_format:
+                    if "t" not in qkv_format and not flat:
                         tmp_format = "".join(tmp_list)
                         seq_dim_ = tmp_format.index("s") - 1
                         tmp_list.insert(seq_dim_, tmp_list.pop(0))
@@ -4621,6 +4655,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         softmax_type,
         softmax_offset,
         fp8_output,
+        load_balancing_strategy,
     ):
         # pylint: disable=missing-function-docstring
         nvtx_range_push("transformer_engine.AttnFuncWithCPAndQKVOA2A.forward")
@@ -4636,6 +4671,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
         causal = "causal" in attn_mask_type
+        flat = load_balancing_strategy is CPLoadBalancingStrategy.NO_LOAD_BALANCE
 
         if qkv_format in ["bshd", "sbhd"]:
             assert (
@@ -4656,7 +4692,10 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             f" Found {use_fused_attention=}, {use_flash_attn_3=}, {use_flash_attn_4=}, "
             f"and {fa_utils.v2_3_plus=}."
         )
-        assert q.shape[seq_dim_qkv] % 2 == 0 and k.shape[seq_dim_qkv] % 2 == 0, (
+        # The dual-chunk reordering views the local sequence as two halves, hence the
+        # seq_len % 2 requirement. Flat sharding skips that reorder, so only the
+        # global-level seq_len % cp_size == 0 (enforced by the caller) is needed.
+        assert flat or (q.shape[seq_dim_qkv] % 2 == 0 and k.shape[seq_dim_qkv] % 2 == 0), (
             "cp_comm_type='a2a' requires seq_len % 2 == 0 for Q, K, V. Found seq_len_q ="
             f" {q.shape[seq_dim_qkv]}, seq_len_kv = {k.shape[seq_dim_qkv]}, cp_size = {cp_size}."
         )
@@ -4774,6 +4813,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             cu_seqlens_q_padded=cu_seqlens_q_padded,
             cu_seqlens_kv_padded=cu_seqlens_kv_padded,
             a2a_input_names=["q", "k", "v"],
+            load_balancing_strategy=load_balancing_strategy,
         )
 
         # softmax_offset: split h
@@ -4943,6 +4983,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             qkv_format=o_format,
             cu_seqlens_q_padded=cu_seqlens_q_padded,
             a2a_input_names=["out"],
+            load_balancing_strategy=load_balancing_strategy,
         )
         # [b*s//cp, h, d] -> [b, s//cp, h, d]
         # [s//cp*b, h, d] -> [s//cp, b, h, d]
@@ -4982,6 +5023,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         ctx.orig_k_shape = orig_k_shape
         ctx.orig_v_shape = orig_v_shape
         ctx.orig_o_shape = orig_o_shape
+        ctx.load_balancing_strategy = load_balancing_strategy
 
         # save tensors for backward
         ctx.fp8 = is_bwd_fp8
@@ -5137,6 +5179,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             qkv_format=ctx.o_format,
             cu_seqlens_q_padded=cu_seqlens_q_padded,
             a2a_input_names=["dout"],
+            load_balancing_strategy=ctx.load_balancing_strategy,
         )
 
         flash_attn_bwd = None
@@ -5343,6 +5386,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             cu_seqlens_q_padded=cu_seqlens_q_padded,
             cu_seqlens_kv_padded=cu_seqlens_kv_padded,
             a2a_input_names=["dq", "dk", "dv"],
+            load_balancing_strategy=ctx.load_balancing_strategy,
         )
         dq, dk, dv = [
             x.view(y)
@@ -5416,6 +5460,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             None,
             None,
             d_softmax_offset,
+            None,
             None,
         )
 
@@ -5667,10 +5712,34 @@ def attn_forward_func_with_cp(
         load_balancing_strategy, CPLoadBalancingStrategy
     ), f"Expected {CPLoadBalancingStrategy.__name__}, got {type(load_balancing_strategy).__name__}."
     if load_balancing_strategy is CPLoadBalancingStrategy.NO_LOAD_BALANCE:
-        assert qkv_format == "thd", "No-load-balance CP partitioning requires qkv_format='thd'."
+        assert cp_comm_type in ("all_gather", "a2a"), (
+            "No-load-balance CP partitioning requires cp_comm_type='all_gather' or 'a2a', got"
+            f" {cp_comm_type}."
+        )
+        assert not fp8, "No-load-balance CP partitioning does not support FP8 yet."
         assert (
-            cp_comm_type == "all_gather"
-        ), "No-load-balance THD partitioning requires cp_comm_type='all_gather'."
+            not is_graph_capturing()
+        ), "No-load-balance CP partitioning does not support CUDA graph capture yet."
+    if load_balancing_strategy is CPLoadBalancingStrategy.NO_LOAD_BALANCE and cp_comm_type == "a2a":
+        # Flat sharding: rank r owns the contiguous global token range
+        # [r * s_local, (r + 1) * s_local). The A2A exchange restores the full
+        # sequence on every rank before attention, so the mask, the sequence
+        # metadata and the attention math are identical to cp_size = 1 and every
+        # attn_mask_type / window_size stays valid. Skipping the dual-chunk
+        # reorder drops its seq_len % 2 view, lowering the per-sequence
+        # divisibility requirement from 2 * cp_size to cp_size.
+        if qkv_format == "thd":
+            assert (
+                q.shape[0] == k.shape[0] == v.shape[0]
+            ), "No-load-balance THD partitioning requires equal local Q/K/V physical lengths."
+            # The caller must also pad the packed batch so that the global token
+            # total is divisible by cp_size, i.e. cu_seqlens_q_padded[-1] ==
+            # q.shape[0] * cp_size. That is deliberately not asserted here:
+            # reading cu_seqlens_q_padded[-1] forces a device-to-host sync on
+            # every layer of every step. A violation surfaces as a view error in
+            # flash_attn_a2a_communicate instead.
+    elif load_balancing_strategy is CPLoadBalancingStrategy.NO_LOAD_BALANCE:
+        assert qkv_format == "thd", "No-load-balance CP partitioning requires qkv_format='thd'."
         # Backend selection is handled by the caller. FlashAttention does not yet
         # support inter-sequence padding with this partitioning strategy.
         assert (
@@ -5683,10 +5752,6 @@ def attn_forward_func_with_cp(
             "No-load-balance THD partitioning requires causal attention without a sliding "
             "window (window_size=(-1, 0))."
         )
-        assert not fp8, "No-load-balance THD partitioning does not support FP8 yet."
-        assert (
-            not is_graph_capturing()
-        ), "No-load-balance THD partitioning does not support CUDA graph capture yet."
         assert (
             q.shape[0] == k.shape[0] == v.shape[0]
         ), "No-load-balance THD partitioning requires equal local Q/K/V physical lengths."
@@ -5791,6 +5856,7 @@ def attn_forward_func_with_cp(
             softmax_type,
             softmax_offset,
             fp8_output,
+            load_balancing_strategy,
         ]
         out = AttnFuncWithCPAndQKVOA2A.apply(*args)
     else:
