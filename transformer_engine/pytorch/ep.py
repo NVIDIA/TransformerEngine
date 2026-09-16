@@ -497,6 +497,9 @@ def ep_prepare(buffer: "EpBuffer", topk_idx: torch.Tensor) -> torch.Tensor:
     Also fills ``buffer.total_recv_tokens`` (int64 [1]; pinned host in eager mode,
     device otherwise) with the per-step recv total; graph mode reads it device-side
     to detect overflow.
+
+    In eager mode without MXFP8 the counts live in pinned host memory and are ready to
+    read on return (this call syncs the current stream); otherwise they are on device.
     """
     torch.ops.transformer_engine_ep.prepare(
         buffer.handle_mem,
@@ -506,6 +509,10 @@ def ep_prepare(buffer: "EpBuffer", topk_idx: torch.Tensor) -> torch.Tensor:
         buffer.alignment,
         buffer.total_recv_tokens,
     )
+    if not buffer.tokens_per_expert.is_cuda:
+        # Pinned host counts are written by the kernel via UVA; a host read has no implicit
+        # stream ordering (unlike a D2H copy from a CUDA tensor), so make them ready here.
+        torch.cuda.current_stream().synchronize()
     return buffer.tokens_per_expert
 
 
