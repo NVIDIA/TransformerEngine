@@ -73,6 +73,7 @@ _MIN_HEAD_DIM = 257  # below this the existing cuDNN/flash backends already serv
 _cudnn = None
 _availability: Optional[Tuple[bool, str]] = None
 _PLAN_CACHE: dict = {}
+_HANDLES: dict = {}
 
 
 def _import_cudnn():
@@ -86,6 +87,36 @@ def _import_cudnn():
 
         _cudnn = cudnn
     return _cudnn
+
+
+def _handle_for(device: torch.device):
+    """A cuDNN handle for `device`, bound to PyTorch's current stream on it.
+
+    Without this, cuDNN runs on its default handle's stream while the tensors and workspace are
+    allocated on PyTorch's current stream, and nothing orders the two. That is not hypothetical
+    here: the p2p CP ring issues attention inside `with torch.cuda.stream(cp_stream)`, so on
+    alternating ring steps the kernel and its buffers would be on different streams. Re-binding
+    on every call is what flex_attention.py does, and is required because the same cached plan is
+    executed from different streams across ring steps.
+    """
+    if device.type != "cuda":
+        raise ValueError("FrostAttention requires CUDA tensors; got device %s" % device)
+    cudnn = _import_cudnn()
+    if device.index is None:
+        device = torch.device("cuda", torch.cuda.current_device())
+    with torch.cuda.device(device):
+        handle = _HANDLES.get(device)
+        if handle is None:
+            handle = cudnn.create_handle()
+            _HANDLES[device] = handle
+        cudnn.set_stream(handle=handle, stream=torch.cuda.current_stream(device).cuda_stream)
+    return handle
+
+
+def _device_from_key(device_key) -> torch.device:
+    """Rebuild the torch.device that _key recorded, for building under the right device."""
+    kind, index = device_key
+    return torch.device(kind) if index is None else torch.device(kind, index)
 
 
 def _pkg_version(name: str, module=None) -> Tuple[Optional[PkgVersion], Optional[str]]:
@@ -280,6 +311,17 @@ def _check_layout(name: str, t: torch.Tensor) -> None:
         )
 
 
+def _check_dtype(name: str, t: torch.Tensor, expected: torch.dtype) -> None:
+    """Require a tensor to carry the dtype its graph node was declared with.
+
+    Every node but `stats` is declared from q's dtype, and execute() binds raw pointers, so a
+    tensor of another dtype would have its bits reinterpreted with no error at all. `dout`
+    matters most: it arrives from autograd and is not this module's to control.
+    """
+    if t.dtype != expected:
+        raise ValueError("%s must be %s to match q; got %s" % (name, expected, t.dtype))
+
+
 def _check_kv_match(k: torch.Tensor, v: torch.Tensor) -> None:
     """Require v to match k in both shape and layout.
 
@@ -341,6 +383,7 @@ def _build_fwd(key) -> dict:
         io_data_type=io_dt,
         intermediate_data_type=cudnn.data_type.FLOAT,
         compute_data_type=cudnn.data_type.FLOAT,
+        handle=_handle_for(_device_from_key(_device)),
     )
     tq = graph.tensor(name="q", dim=shq, stride=list(qs))
     tk = graph.tensor(name="k", dim=shkv, stride=list(ks))
@@ -380,6 +423,7 @@ def _build_bwd(key) -> dict:
         io_data_type=io_dt,
         intermediate_data_type=cudnn.data_type.FLOAT,
         compute_data_type=cudnn.data_type.FLOAT,
+        handle=_handle_for(_device_from_key(_device)),
     )
     handles = {}
     # o and dO share q's layout; k, v and their grads share k's.
@@ -465,14 +509,22 @@ def frost_attn_fwd(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Forward attention via cuDNN FROST.
 
-    q, k, v are [b, h, s, d] views over BSHD-contiguous memory. GQA is supported directly
-    (h_kv may differ from h_q) and SQ need not equal SKV, which is what lets a CP ring step
-    use this. Returns (out, softmax_lse) with softmax_lse as [b, h, s] fp32 natural-log
-    logsumexp, the layout and convention the CP ring correction expects.
+    q, k, v are [b, h, s, d] views; bshd and sbhd are both served, since the graph is built from
+    each tensor's actual strides. GQA is supported directly (h_kv may differ from h_q) and SQ
+    need not equal SKV, which is what lets a CP ring step use this. Returns (out, softmax_lse)
+    with softmax_lse as [b, h, s] fp32 natural-log logsumexp, the layout and convention the CP
+    ring correction expects.
     """
     for name, tensor in (("q", q), ("k", k), ("v", v)):
         _check_layout(name, tensor)
+        _check_dtype(name, tensor, q.dtype)
     _check_kv_match(k, v)
+    if k.shape[0] != q.shape[0] or k.shape[3] != q.shape[3]:
+        # The graph declares k and v with q's batch and head_dim, so a mismatch would bind a
+        # differently shaped buffer to that node and read the wrong elements silently.
+        raise ValueError(
+            "k must match q in batch and head_dim; got q %s and k %s" % (q.shape, k.shape)
+        )
     if q.shape[1] % k.shape[1] != 0:
         raise ValueError(
             "num_heads must be divisible by num_gqa_groups; got %d and %d"
@@ -492,7 +544,9 @@ def frost_attn_fwd(
     out = torch.empty_strided(q.shape, q.stride(), device=q.device, dtype=q.dtype)
     lse = torch.empty(b, hq, sq, 1, device=q.device, dtype=torch.float32)
     workspace = torch.empty(entry["workspace"], device=q.device, dtype=torch.uint8)
-    entry["graph"].execute({tq: q, tk: k, tv: v, tout: out, tlse: lse}, workspace)
+    entry["graph"].execute(
+        {tq: q, tk: k, tv: v, tout: out, tlse: lse}, workspace, handle=_handle_for(q.device)
+    )
     return out, lse.squeeze(-1)
 
 
@@ -509,7 +563,31 @@ def frost_attn_bwd(
     """Backward attention via cuDNN FROST. `softmax_lse` is [b, h, s] as returned by the forward."""
     for name, tensor in (("q", q), ("k", k), ("v", v), ("out", out), ("dout", dout)):
         _check_layout(name, tensor)
+        _check_dtype(name, tensor, q.dtype)
     _check_kv_match(k, v)
+    # The same shape assumptions the forward makes, plus o/dO, which the graph declares with q's
+    # shape. The forward runs first in autograd, but the CP ring calls this directly.
+    if k.shape[0] != q.shape[0] or k.shape[3] != q.shape[3]:
+        raise ValueError(
+            "k must match q in batch and head_dim; got q %s and k %s" % (q.shape, k.shape)
+        )
+    if q.shape[1] % k.shape[1] != 0:
+        raise ValueError(
+            "num_heads must be divisible by num_gqa_groups; got %d and %d"
+            % (q.shape[1], k.shape[1])
+        )
+    for name, tensor in (("out", out), ("dout", dout)):
+        if tensor.shape != q.shape:
+            raise ValueError(
+                "%s must have q's shape; got %s and %s" % (name, tensor.shape, q.shape)
+            )
+    if softmax_lse.dtype != torch.float32:
+        raise ValueError("softmax_lse must be fp32; got %s" % softmax_lse.dtype)
+    if tuple(softmax_lse.shape[:3]) != tuple(q.shape[:3]):
+        raise ValueError(
+            "softmax_lse must be [b, h, s] matching q; got %s and %s"
+            % (tuple(softmax_lse.shape), tuple(q.shape))
+        )
 
     mask = _mask_mode(attn_mask_type)
     scale = attn_scale if attn_scale is not None else q.shape[-1] ** -0.5
@@ -550,5 +628,6 @@ def frost_attn_bwd(
             h["dv"]: dv,
         },
         workspace,
+        handle=_handle_for(q.device),
     )
     return dq, dk, dv

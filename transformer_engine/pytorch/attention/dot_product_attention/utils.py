@@ -1907,6 +1907,31 @@ def get_attention_backend(
         # needs cu_seqlens plumbing that is neither implemented nor validated here.
         logger.debug("Disabling FrostAttention for qkv_layout = %s", qkv_layout)
         use_frost_attention = False
+    if use_frost_attention and return_max_logit:
+        # FrostAttention returns the context layer alone, where UnfusedDotProductAttention returns
+        # (context, max_logit). Selecting it here would break the caller's unpack.
+        logger.debug("Disabling FrostAttention for max_logit")
+        use_frost_attention = False
+    if use_frost_attention and inference_params is not None:
+        # Unreachable today, since KV caching asserts a padding mask and FROST declines those.
+        # Explicit anyway: no page table reaches the backend, so a paged cache would be read raw.
+        logger.debug("Disabling FrostAttention for KV caching")
+        use_frost_attention = False
+    if use_frost_attention and context_parallel:
+        # Same two restrictions FlashAttention and FusedAttention carry above. The ring chunking
+        # assumes square tiles, so an unequal q/kv length is a wrong answer rather than an error.
+        if "bottom_right" in attn_mask_type:
+            logger.debug(
+                "Disabling FrostAttention as it does not support context parallelism with"
+                " causal_bottom_right masking"
+            )
+            use_frost_attention = False
+        elif "causal" in attn_mask_type and max_seqlen_q != max_seqlen_kv:
+            logger.debug(
+                "Disabling FrostAttention as it does not support context parallelism with causal"
+                " masking for cross-attention"
+            )
+            use_frost_attention = False
     if (
         use_frost_attention
         and context_parallel
