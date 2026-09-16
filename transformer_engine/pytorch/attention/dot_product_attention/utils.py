@@ -1924,11 +1924,15 @@ def get_attention_backend(
         # score_mod_bprop-without-score_mod case, which is meant to end in "no backend available".
         logger.debug("Disabling FrostAttention for score_mod")
         use_frost_attention = False
-    if use_frost_attention and qkv_type is not torch.Tensor:
+    if use_frost_attention and attention_params.qkv_type is not torch.Tensor:
         # Every other backend filters on the tensor class, not just the dtype: a quantized tensor
         # can carry a nominal bf16 dtype outside an fp8 autocast, and the fp8 guard below keys on
         # the autocast flag rather than the type.
-        logger.debug("Disabling FrostAttention for qkv_type = %s", qkv_type)
+        #
+        # Read from attention_params, not the local: the fused-attention dtype spec rebinds
+        # qkv_type to an NVTE dtype enum well before this point, so the local compares unequal to
+        # torch.Tensor for every input and would decline FROST unconditionally.
+        logger.debug("Disabling FrostAttention for qkv_type = %s", attention_params.qkv_type)
         use_frost_attention = False
     if use_frost_attention and num_splits != 1:
         # Declined for the same reason the fused and unfused paths are: silently ignoring it
