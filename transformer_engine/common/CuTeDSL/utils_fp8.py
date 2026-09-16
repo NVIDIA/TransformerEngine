@@ -9,31 +9,63 @@ import logging
 from typing import Callable
 
 import cutlass
+from cutlass import cute
 from cutlass import Uint8
-from cutlass import Float32, Int64, Int32, Int16, Uint16, Uint32
+from cutlass import Float32, Int64, Int32, Uint16, Uint32
 from cutlass import Float8E5M2, Float8E8M0FNU, Float8E4M3FN
 from cutlass._mlir.dialects import arith as mlir_arith
 from cutlass._mlir.dialects import llvm
-from cutlass.cutlass_dsl import T, dsl_user_op
+from cutlass.cutlass_dsl import BaseDSL, T, dsl_user_op
 
 logger = logging.getLogger("transformer_engine.cutedsl.utils_fp8")
 
 
+@cute.jit
+def cvt_f32_to_fp8e8m0fnu(val: Float32) -> Float8E8M0FNU:
+    """Convert float32 to fp8e8m0fnu.
+
+    Architecture-specific Blackwell targets use the native conversion
+    instruction. Older and baseline targets use the same bit-level software
+    conversion as ptx::float_to_e8m0.
+    """
+    arch = BaseDSL._get_dsl().get_arch_enum()
+    result = Uint8(0).bitcast(Float8E8M0FNU)
+    # The instruction is available only in architecture-conditional or
+    # family-specific Blackwell targets (sm_XXXa/sm_XXXf), not baseline ones.
+    if cutlass.const_expr(
+        arch in cutlass.Arch.BlackwellArchs() and arch.suffix in ("a", "f")
+    ):
+        result = cvt_f32_to_fp8e8m0fnu_native(val)
+    else:
+        FP32_MANTISSA_BITS = 23
+        if cute.math.isnan(val):
+            result = Uint8(0xFF).bitcast(Float8E8M0FNU)
+        elif cute.math.isinf(val):
+            result = Uint8(0xFE).bitcast(Float8E8M0FNU)
+        elif val == Float32(0.0):
+            result = Uint8(0).bitcast(Float8E8M0FNU)
+        else:
+            val_u32 = Uint32(
+                mlir_arith.bitcast(T.i32(), val.ir_value())
+            )
+            exponent = (val_u32 >> Uint32(FP32_MANTISSA_BITS)) & Uint32(0xFF)
+            mantissa = val_u32 & Uint32(0x7FFFFF)
+            if (mantissa > Uint32(0) and exponent != Uint32(0xFE)) and \
+                not (exponent == Uint32(0) and mantissa <= Uint32(0x400000)):
+                exponent += Uint32(1)
+            result = Uint8(exponent).bitcast(Float8E8M0FNU)
+    return result
+
+
 @dsl_user_op
-def cvt_f32_to_fp8e8m0fnu(val: Float32, *, loc=None, ip=None) -> Float8E8M0FNU:
-    """float32 -> fp8e8m0fnu conversion (Blackwell, SM >= 100).
+def cvt_f32_to_fp8e8m0fnu_native(val: Float32, *, loc=None, ip=None) -> Float8E8M0FNU:
+    """Native float32 -> fp8e8m0fnu conversion for Blackwell family targets.
 
-    Uses the hardware cvt.rp.satfinite.ue8m0x2.f32 instruction, mirroring
-    ptx::float_to_e8m0's Blackwell branch. The x2 form packs two e8m0 bytes;
-    we feed (0.0, val) so the low byte is e8m0(val) and mask it out.
-
-    There is deliberately no pre-Blackwell software fallback: the backend refuses
-    to dispatch below cc 10.0 (see get_mxfp8_quantization_function) and hands the
-    work to the CUDA kernel, so such a path would be unreachable -- and getting its
-    NaN/inf/subnormal edges to match ptx::float_to_e8m0 exactly is fiddly enough
-    that an untested copy is a liability."""
+    The x2 instruction packs the conversion of its second input into the low
+    byte, so converting (0.0, val) and truncating the result extracts e8m0(val).
+    """
     zero = Float32(0.0)
-    result_i16 = Int16(
+    result_i16 = Uint16(
         llvm.inline_asm(
             T.i16(),
             [zero.ir_value(loc=loc, ip=ip), val.ir_value(loc=loc, ip=ip)],
@@ -46,10 +78,7 @@ def cvt_f32_to_fp8e8m0fnu(val: Float32, *, loc=None, ip=None) -> Float8E8M0FNU:
             ip=ip,
         )
     )
-    result_i32 = Int32(
-        mlir_arith.extui(T.i32(), result_i16.ir_value(loc=loc, ip=ip), loc=loc, ip=ip)
-    )
-    return Uint8(result_i32 & Int32(0xFF)).bitcast(Float8E8M0FNU, loc=loc, ip=ip)
+    return Uint8(result_i16).bitcast(Float8E8M0FNU, loc=loc, ip=ip)
 
 
 def _build_mul_f32x2_cvt_f32x4_to_fp8x4(fp8_dtype, relu: bool = False) -> Callable[..., Uint32]:
