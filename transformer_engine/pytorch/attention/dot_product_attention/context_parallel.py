@@ -6046,9 +6046,9 @@ def attn_forward_func_with_cp(
     # The restriction is FlashAttention-specific; the condition infers "not fused means flash",
     # which predates FROST. FROST builds its cuDNN graphs from each tensor's actual strides, so
     # sbhd is served directly. This matters because Megatron uses sbhd internally.
-    assert qkv_format != "sbhd" or use_fused_attention or use_frost_attention, (
-        "Context parallelism does not support FlashAttention backend with qkv_format = 'sbhd'!"
-    )
+    assert (
+        qkv_format != "sbhd" or use_fused_attention or use_frost_attention
+    ), "Context parallelism does not support FlashAttention backend with qkv_format = 'sbhd'!"
     assert attn_bias is None or (use_fused_attention and "padding" not in attn_mask_type), (
         "Context parallelism only supports attention bias with FusedAttention backend and"
         " non-padding mask types!"
