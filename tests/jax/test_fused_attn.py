@@ -1212,8 +1212,15 @@ class FusedAttnRunner:
         ]
         if self.doutput is not None:
             args.append(self.doutput)
-            customcall_args.append(jax.device_put(self.doutput, self.qkvo_sharding))
-            input_shardings.append(self.qkvo_sharding)
+            # Keep CP doutput in logical token order, as it would be when inferred by
+            # JAX through the inverse reorder. TE must align it inside the backward rule.
+            doutput_sharding = (
+                NamedSharding(self.mesh, PartitionSpec())
+                if self.cp_size > 1
+                else self.qkvo_sharding
+            )
+            customcall_args.append(jax.device_put(self.doutput, doutput_sharding))
+            input_shardings.append(doutput_sharding)
         kwargs = {
             "attn_bias_type": self.attn_bias_type,
             "attn_mask_type": self.attn_mask_type,

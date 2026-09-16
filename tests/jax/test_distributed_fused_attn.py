@@ -448,6 +448,7 @@ class TestDistributedContextParallelSelfAttn:
             mesh_resource=mesh_resource,
             cp_strategy=cp_strategy,
             cp_load_balanced=load_balanced,
+            doutput_seed=None if return_max_logit else 45,
         )
 
         # Mirror _FusedAttnCPWithAllGatherHelper.get_adjusted_max_segments_per_seq()
