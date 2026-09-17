@@ -16,6 +16,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.context_parallel
 from transformer_engine.pytorch.attention.dot_product_attention.utils import combine_and_quantize
 from transformer_engine.pytorch import DType
 from test_attention_with_cp import (
+    model_configs_cp_flat_a2a,
     model_configs_flash_attn,
     model_configs_fused_attn,
 )
@@ -54,6 +55,7 @@ def generate_input_shapes(
     kernel_backend: str,
     fa_pad_between_seqs: str = "False",
     load_balancing_strategy=CPLoadBalancingStrategy.DUAL_CHUNK_SWAP,
+    cp_comm_type: str = "p2p",
 ):
     if qkv_format == "bshd":
         q_input_shape = (
@@ -112,7 +114,22 @@ def generate_input_shapes(
         cu_seqlens_q_padded = None
         cu_seqlens_kv_padded = None
     elif qkv_format == "thd":
-        if load_balancing_strategy is CPLoadBalancingStrategy.NO_LOAD_BALANCE:
+        if (
+            load_balancing_strategy is CPLoadBalancingStrategy.NO_LOAD_BALANCE
+            and cp_comm_type == "a2a"
+        ):
+            # Flat a2a shards the packed buffer by token position, so individual
+            # sequences need no divisibility at all -- only the padded total must
+            # be a multiple of cp_size. Pick lengths that are deliberately NOT
+            # multiples of 2 * cp_size, which is exactly what dual-chunk requires.
+            seqlens_q = torch.randint(1, config.max_seqlen_q + 1, [config.batch_size]).to(
+                torch.int32
+            )
+            seqlens_q_padded = seqlens_q.clone()
+            remainder = int(seqlens_q_padded.sum().item()) % world_size
+            if remainder:
+                seqlens_q_padded[-1] += world_size - remainder
+        elif load_balancing_strategy is CPLoadBalancingStrategy.NO_LOAD_BALANCE:
             assert config.batch_size == 2
             if kernel_backend == "FlashAttention" and fa_pad_between_seqs == "False":
                 seqlens_q = torch.tensor(
@@ -240,6 +257,7 @@ def run_dpa_with_cp(
     """Test DotProductAttention module with context parallelism"""
     logging.root.setLevel(log_level)
     load_balancing_strategy = CPLoadBalancingStrategy[load_balancing_strategy]
+    no_load_balance = load_balancing_strategy is CPLoadBalancingStrategy.NO_LOAD_BALANCE
     # When is_training is False, gradient outputs are None.
     is_training = is_training == "True"
     pad_between_seqs = None
@@ -271,6 +289,8 @@ def run_dpa_with_cp(
         os.environ["NVTE_FUSED_ATTN"] = "1"
         if model in model_configs_fused_attn:
             config = copy.deepcopy(model_configs_fused_attn[model])
+        elif model in model_configs_cp_flat_a2a:
+            config = copy.deepcopy(model_configs_cp_flat_a2a[model])
         else:
             assert False, f"{model=} is not a known FusedAttention CP config!"
     assert config.attn_mask_type in [
@@ -370,6 +390,7 @@ def run_dpa_with_cp(
         kernel_backend,
         fa_pad_between_seqs,
         load_balancing_strategy,
+        cp_comm_type,
     )
     q_orig = torch.clamp(torch.randn(q_input_shape, dtype=dtypes[dtype]), min=-1, max=1).cuda()
     k_orig = torch.clamp(torch.randn(k_input_shape, dtype=dtypes[dtype]), min=-1, max=1).cuda()
@@ -492,20 +513,36 @@ def run_dpa_with_cp(
     bias_ = rest[0] if len(rest) else None
     if qkv_format == "bshd" or qkv_format == "sbhd":
         seq_dim = qkv_format.index("s")
-        q_, k_, v_, dout_ = [
-            x.view(
-                *x.shape[:seq_dim],
-                2 * world_size,
-                x.shape[seq_dim] // (2 * world_size),
-                *x.shape[(seq_dim + 1) :],
-            )
-            for x in [q_, k_, v_, dout_]
-        ]
-        seq_idx = torch.tensor([rank, 2 * world_size - rank - 1], device=q_.device)
-        q_, k_, v_, dout_ = [x.index_select(seq_dim, seq_idx) for x in [q_, k_, v_, dout_]]
-        q_, k_, v_, dout_ = [
-            x.view(*x.shape[:seq_dim], -1, *x.shape[(seq_dim + 2) :]) for x in [q_, k_, v_, dout_]
-        ]
+        if no_load_balance:
+            # Flat shard: rank r owns the contiguous global range
+            # [r * s_local, (r + 1) * s_local). No chunk swap, so no 2 * cp factor.
+            # clone(), not contiguous(): for sbhd the narrowed slice is already
+            # contiguous, so contiguous() is a no-op and leaves a nonzero
+            # storage_offset, which get_qkv_layout rejects.
+            q_, k_, v_, dout_ = [
+                x.narrow(
+                    seq_dim,
+                    rank * (x.shape[seq_dim] // world_size),
+                    x.shape[seq_dim] // world_size,
+                ).clone()
+                for x in [q_, k_, v_, dout_]
+            ]
+        else:
+            q_, k_, v_, dout_ = [
+                x.view(
+                    *x.shape[:seq_dim],
+                    2 * world_size,
+                    x.shape[seq_dim] // (2 * world_size),
+                    *x.shape[(seq_dim + 1) :],
+                )
+                for x in [q_, k_, v_, dout_]
+            ]
+            seq_idx = torch.tensor([rank, 2 * world_size - rank - 1], device=q_.device)
+            q_, k_, v_, dout_ = [x.index_select(seq_dim, seq_idx) for x in [q_, k_, v_, dout_]]
+            q_, k_, v_, dout_ = [
+                x.view(*x.shape[:seq_dim], -1, *x.shape[(seq_dim + 2) :])
+                for x in [q_, k_, v_, dout_]
+            ]
     elif qkv_format == "thd":
         seq_idx_q = get_thd_partitioned_indices(
             cu_seqlens_q_padded,
@@ -635,7 +672,19 @@ def run_dpa_with_cp(
 
     ############  compare results between CP and no-CP ############
     if qkv_format == "bshd" or qkv_format == "sbhd":
-        if is_training:
+        if no_load_balance:
+            # Flat shard: the CP result is already this rank's contiguous global
+            # range, so narrow the no-CP reference and compare 1:1. There is no
+            # dual-chunk axis to split on either side.
+            def _flat_slice(x):
+                per_rank = x.shape[seq_dim] // world_size
+                return x.narrow(seq_dim, rank * per_rank, per_rank).contiguous()
+
+            if is_training:
+                dq, dk, dv, out = [_flat_slice(x) for x in [dq, dk, dv, out]]
+            else:
+                out = _flat_slice(out)
+        elif is_training:
             dq, dk, dv, out = [
                 x.view(
                     *x.shape[:seq_dim],
@@ -686,19 +735,23 @@ def run_dpa_with_cp(
         if is_training:
             dq, out = [x.index_select(0, seq_idx_q).contiguous() for x in [dq, out]]
             dk, dv = [x.index_select(0, seq_idx_kv).contiguous() for x in [dk, dv]]
-            cu_seqlens_q_padded = cu_seqlens_q_padded // world_size
-            cu_seqlens_q = get_cu_seqlens_on_cp_rank(
-                cu_seqlens_q, cu_seqlens_q_padded, world_size, rank, True, True
-            )
-            cu_pads_q = cu_seqlens_q_padded - cu_seqlens_q
-            num_pads_q = cu_pads_q[1:] - cu_pads_q[:-1]
-            cu_seqlens_kv_padded = cu_seqlens_kv_padded // world_size
-            cu_seqlens_kv = get_cu_seqlens_on_cp_rank(
-                cu_seqlens_kv, cu_seqlens_kv_padded, world_size, rank, True, True
-            )
-            num_pads_kv = (cu_seqlens_kv_padded - cu_seqlens_kv)[1:] - (
-                cu_seqlens_kv_padded - cu_seqlens_kv
-            )[:-1]
+            if not no_load_balance:
+                # Per-rank padded offsets, dual-chunk layout (2 chunks per sequence).
+                # Flat sharding has no per-rank document split, so these do not apply;
+                # they only feed the FA3 padding checks below, which flat mode skips.
+                cu_seqlens_q_padded = cu_seqlens_q_padded // world_size
+                cu_seqlens_q = get_cu_seqlens_on_cp_rank(
+                    cu_seqlens_q, cu_seqlens_q_padded, world_size, rank, True, True
+                )
+                cu_pads_q = cu_seqlens_q_padded - cu_seqlens_q
+                num_pads_q = cu_pads_q[1:] - cu_pads_q[:-1]
+                cu_seqlens_kv_padded = cu_seqlens_kv_padded // world_size
+                cu_seqlens_kv = get_cu_seqlens_on_cp_rank(
+                    cu_seqlens_kv, cu_seqlens_kv_padded, world_size, rank, True, True
+                )
+                num_pads_kv = (cu_seqlens_kv_padded - cu_seqlens_kv)[1:] - (
+                    cu_seqlens_kv_padded - cu_seqlens_kv
+                )[:-1]
             # FA3 leaves garbage at padding positions despite seqused_q/k (tile spillover).
             # Forward out_ can't be pre-zeroed because FA3's custom op returns out_ as an
             # output rather than mutating it in-place, triggering PyTorch's aliasing constraint.
@@ -752,7 +805,20 @@ def run_dpa_with_cp(
     for i, t in enumerate(tensors_no_cp):
         if t is not None:
             if "softmax_offset" not in names[i] and "max_logit" not in names[i]:
-                if qkv_format == "bshd":
+                if no_load_balance:
+                    # Flat shard: both sides are this rank's contiguous range, so
+                    # there is no dual-chunk axis to compare separately.
+                    compare_and_assert(
+                        t,
+                        tensors_cp[i],
+                        names_no_cp[i],
+                        names_cp[i],
+                        atol,
+                        rtol,
+                        rmse_tol,
+                        is_fp8,
+                    )
+                elif qkv_format == "bshd":
                     # Compare the two sequence chunks separately
                     # Compare dbias
                     if names[i] == "dbias":
