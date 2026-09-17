@@ -234,6 +234,7 @@ def run_dpa_with_cp(
     fa_pad_between_seqs="False",
     deterministic="False",
     load_balancing_strategy="DUAL_CHUNK_SWAP",
+    softcap="0.0",
     log_level=logging.WARNING,
 ):
     """Test DotProductAttention module with context parallelism"""
@@ -281,6 +282,7 @@ def run_dpa_with_cp(
             config.attn_mask_type = "padding_causal"
         else:
             config.attn_mask_type = "padding"
+    config.softcap = float(softcap)
 
     # set up distributed group
     rank = int(os.getenv("RANK", "0"))
@@ -342,6 +344,7 @@ def run_dpa_with_cp(
         qkv_format=qkv_format,
         attn_mask_type=config.attn_mask_type,
         window_size=config.window_size,
+        softcap=config.softcap,
         softmax_type=config.softmax_type,
         return_max_logit=config.return_max_logit,
     ).cuda()

@@ -7,6 +7,16 @@
 SCRIPT_NAMES="${SCRIPT_NAMES:-test_multi_process_ep.py}"
 TEST_TIMEOUT_S="${TEST_TIMEOUT_S:-180}"
 
+# Each communicator mode needs a fresh process group.
+if [ -z "${NVTE_TEST_EP_CLASSES:-}" ]; then
+  RET=0
+  NVTE_TEST_EP_CLASSES="TestEP,TestEPOverflowDrop,TestEpDomainGrouping" \
+    bash "${BASH_SOURCE[0]}" || RET=1
+  NVTE_TEST_EP_CLASSES="TestEPBorrowedComm" \
+    bash "${BASH_SOURCE[0]}" || RET=1
+  exit "$RET"
+fi
+
 
 XLA_BASE_FLAGS="--xla_gpu_enable_latency_hiding_scheduler=true
                 --xla_gpu_graph_min_graph_size=1"
