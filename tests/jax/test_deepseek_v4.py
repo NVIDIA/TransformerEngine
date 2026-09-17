@@ -8,11 +8,15 @@ import pytest
 
 jax = pytest.importorskip("jax")
 import jax.numpy as jnp
+from jax.sharding import Mesh
 
 from transformer_engine.jax.deepseek_v4 import (
     csa_compressor,
+    csa_compressor_batched,
     dsa_indexer,
+    dsa_indexer_batched,
     dsa_sparse_attention,
+    dsa_sparse_attention_batched,
 )
 
 
@@ -117,3 +121,43 @@ def test_dsa_sparse_attention_vjp():
     )(q, kv, sinks)
     for actual, expected in zip(grads, expected_grads, strict=True):
         np.testing.assert_allclose(np.asarray(actual), np.asarray(expected), atol=4e-2, rtol=2e-2)
+
+
+@pytest.mark.L0
+def test_batched_csa_kernels_compound_fsdp_ep_batch_sharding():
+    """FSDP and EP together form the local CSA batch dimension."""
+    _require_sm100()
+    if len(jax.devices()) < 4:
+        pytest.skip("requires four local CUDA devices")
+    mesh = Mesh(np.array(jax.devices()[:4]).reshape(2, 2), ("fsdp", "expert"))
+    batch_axes = ("fsdp", "expert")
+    key = jax.random.key(7)
+    kv = jax.random.normal(key, (4, 16, 256), jnp.bfloat16)
+    score = jax.random.normal(jax.random.fold_in(key, 1), kv.shape, jnp.bfloat16)
+    ape = jax.random.normal(jax.random.fold_in(key, 2), (4, 256), jnp.float32)
+    cu = jnp.arange(5, dtype=jnp.int32) * 16
+    cu_comp = jnp.arange(5, dtype=jnp.int32) * 4
+
+    with jax.set_mesh(mesh):
+        got_compressor = jax.jit(
+            lambda x, s, a: csa_compressor_batched(x, s, a, batch_axes=batch_axes)
+        )(kv, score, ape)
+        got_indexer = jax.jit(
+            lambda q, k, w: dsa_indexer_batched(q, k, w, batch_axes=batch_axes, ratio=4)
+        )(
+            jax.random.normal(jax.random.fold_in(key, 3), (4, 16, 64, 128), jnp.bfloat16),
+            jax.random.normal(jax.random.fold_in(key, 4), (4, 4, 1, 128), jnp.bfloat16),
+            jax.random.normal(jax.random.fold_in(key, 5), (4, 16, 64), jnp.bfloat16),
+        )
+
+    expected_compressor = csa_compressor(
+        kv.reshape(64, 256), score.reshape(64, 256), ape, cu, cu_comp, total_comp=16
+    ).reshape(4, 4, 128)
+    np.testing.assert_allclose(
+        np.asarray(got_compressor, np.float32),
+        np.asarray(expected_compressor, np.float32),
+        atol=8e-3,
+        rtol=8e-3,
+    )
+    assert got_compressor.sharding.spec[0] == ("fsdp", "expert")
+    assert got_indexer.sharding.spec[0] == ("fsdp", "expert")

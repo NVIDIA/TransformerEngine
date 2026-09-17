@@ -38,7 +38,14 @@ from .quantize import autocast, fp8_autocast, update_collections
 from .quantize import NVTE_FP8_COLLECTION_NAME
 
 from .sharding import MeshResource
-from .deepseek_v4 import csa_compressor, dsa_indexer, dsa_sparse_attention
+from .deepseek_v4 import (
+    csa_compressor,
+    csa_compressor_batched,
+    dsa_indexer,
+    dsa_indexer_batched,
+    dsa_sparse_attention,
+    dsa_sparse_attention_batched,
+)
 
 from ..common.utils import deprecate_wrapper
 from ..common.utils import DeprecatedEnum
@@ -51,8 +58,11 @@ __all__ = [
     "update_collections",
     "MeshResource",
     "csa_compressor",
+    "csa_compressor_batched",
     "dsa_indexer",
+    "dsa_indexer_batched",
     "dsa_sparse_attention",
+    "dsa_sparse_attention_batched",
     "flax",
     "quantize",
 ]
