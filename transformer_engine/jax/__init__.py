@@ -27,13 +27,9 @@ model and support automatic differentiation.
 # extensions are not available.
 import jax
 
-from transformer_engine.common import check_cudnn_version, load_framework_extension
+from transformer_engine.common import load_framework_extension
 
 load_framework_extension("jax")
-
-import transformer_engine_jax
-
-check_cudnn_version(transformer_engine_jax.get_cudnn_version())
 
 from . import flax
 from . import quantize

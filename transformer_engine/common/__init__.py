@@ -216,6 +216,9 @@ def load_framework_extension(framework: str) -> None:
     sys.modules[module_name] = solib
     spec.loader.exec_module(solib)
 
+    # Check if the cuDNN version is supported.
+    check_cudnn_version(solib.get_cudnn_version())
+
     # Plugin system: set NVTE_PLUGIN=<module_name> to let plugin stub take over
     # transformer_engine_torch and register original pybind as _nv for CUDA backend.
     # Only applies to the PyTorch extension — JAX has no plugin stub.
