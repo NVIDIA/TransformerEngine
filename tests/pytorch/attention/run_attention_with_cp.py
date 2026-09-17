@@ -219,6 +219,86 @@ def get_tols(config, dtype):
     return atol, rtol, rmse_tol
 
 
+def assert_matches_independent_reference(out, q, k, v, config, qkv_format, dtype, softmax_scale):
+    """Check the non-CP output against a float64 reference instead of against another run.
+
+    The CP suite compares a context-parallel run with a non-CP run *of the same backend*
+    (``tensors_no_cp`` vs ``tensors_cp``). That validates the context-parallel plumbing and nothing
+    about the kernel beneath it: any error affecting both sides equally cancels and the comparison
+    passes. It is not a theoretical gap -- a backend was found returning an all-zero output while
+    two of three ``cp_comm_type`` values reported PASS, because zeros matched zeros. The same
+    structure then reported a partial *fix* as a regression, since correcting one side made the two
+    disagree.
+
+    This anchors one (batch, head) slice of the non-CP output to an independently computed
+    reference, so a systematically wrong kernel cannot cancel itself out. It is a sanity bound, not
+    a precision test -- the CP/no-CP comparison already covers precision. It is meant to catch
+    catastrophic wrongness: zeros, NaNs, a mask applied in the wrong place.
+
+    float64 rather than float32: torch computes fp32 matmuls in TF32 on Ampere and newer, whose
+    significand is 11 bits -- the same as fp16 -- so an fp32 reference cannot judge a bf16 kernel.
+
+    Configurations the reference does not model (fp8, bias, non-vanilla softmax, thd/ragged,
+    padding masks) are skipped rather than approximated, so this never fails for a reason it cannot
+    explain.
+    """
+    if qkv_format not in ("bshd", "sbhd"):
+        return
+    if dtype == "fp8" or config.attn_bias_type != "no_bias" or config.softmax_type != "vanilla":
+        return
+    if "padding" in config.attn_mask_type:
+        return
+    if out is None or q is None:
+        return
+    # DotProductAttention returns [..., h * d_v], i.e. 3D. Restore the head axis from q and v --
+    # without this the guard below would return early and the whole check would silently do
+    # nothing, which is the failure mode this function exists to catch in the first place.
+    if out.dim() == 3:
+        out = out.view(*out.shape[:2], q.shape[2], v.shape[-1])
+    if out.dim() != 4:
+        return
+
+    seq_dim = 1 if qkv_format == "bshd" else 0
+    # One (batch, head) slice: the full float64 score matrix would be gigabytes.
+    take = (
+        lambda t, head: (t[0, :, head] if qkv_format == "bshd" else t[:, 0, head]).detach().double()
+    )
+    qhead, kvhead = 0, 0  # GQA groups are contiguous, so q head 0 belongs to kv group 0
+    qs, ks, vs = take(q, qhead), take(k, kvhead), take(v, kvhead)
+    got = take(out, qhead)
+    sq, skv = qs.shape[0], ks.shape[0]
+
+    scores = (qs @ ks.transpose(-1, -2)) * softmax_scale
+    window = getattr(config, "window_size", None)
+    left, right = window if window is not None else (-1, -1)
+    if "causal" in config.attn_mask_type:
+        right = 0
+    # Bottom-right alignment when the lengths differ; identical to top-left when they do not.
+    offset = (skv - sq) if "bottom_right" in config.attn_mask_type else 0
+    blocked = torch.zeros(sq, skv, dtype=torch.bool, device=qs.device)
+    if right != -1:
+        blocked |= torch.ones(sq, skv, dtype=torch.bool, device=qs.device).triu(offset + right + 1)
+    if left != -1:
+        blocked |= torch.ones(sq, skv, dtype=torch.bool, device=qs.device).tril(offset - left - 1)
+    scores = scores.masked_fill(blocked, float("-inf"))
+    reference = torch.softmax(scores, dim=-1) @ vs
+
+    # Reported separately from the tolerance: an all-zero or non-finite output is the specific
+    # failure this exists to catch, and it should be named rather than shown as a large error.
+    assert torch.isfinite(out).all(), "non-CP output is not finite"
+    assert out.abs().max() > 0, (
+        "non-CP output is all zeros -- the backend computed nothing. The CP/no-CP comparison"
+        " cannot see this, because both sides are equally zero."
+    )
+    denom = reference.abs().max().clamp_min(1e-12)
+    error = float((got - reference).abs().max() / denom)
+    assert error < 5e-2, (
+        "non-CP output disagrees with an independent float64 reference: relative error"
+        f" {error:.3e}. This is a loose sanity bound, so exceeding it points at a wrong mask or a"
+        " wrong kernel rather than a precision issue."
+    )
+
+
 def run_dpa_with_cp(
     dtype="bf16",
     model=None,
@@ -466,6 +546,11 @@ def run_dpa_with_cp(
         )
         if config.return_max_logit:
             out, max_logit = out
+        # Anchor the non-CP result to something other than another run of the same backend, before
+        # it is reshaped for the CP comparison. See the function docstring for why this exists.
+        assert_matches_independent_reference(
+            out, q, k, v, config, qkv_format, dtype, core_attn.softmax_scale
+        )
         if is_training:
             if fp8_bwd and fp8_mha:
                 dout_fp8 = dout_quantizer(dout)
