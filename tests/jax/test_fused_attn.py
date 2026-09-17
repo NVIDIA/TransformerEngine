@@ -704,7 +704,16 @@ class FusedAttnRunner:
         # Create a mesh for distributed tests
         self.devices = np.asarray(jax.devices()[: self.number_of_devices]).reshape(*self.mesh_shape)
         self.mesh = Mesh(self.devices, self.mesh_axes)
-        self.dp_size = self.mesh.shape.get(self.mesh_resource.dp_resource, 1)
+        data_axes = tuple(
+            axis
+            for axis in (
+                self.mesh_resource.dp_resource,
+                self.mesh_resource.fsdp_resource,
+            )
+            if axis is not None
+        )
+        self.data_axis = data_axes[0] if len(data_axes) == 1 else data_axes or None
+        self.data_parallel_size = np.prod([self.mesh.shape[axis] for axis in data_axes], dtype=int)
         self.cp_size = self.mesh.shape.get(self.mesh_resource.cp_resource, 1)
         self.tp_size = self.mesh.shape.get(self.mesh_resource.tpsp_resource, 1)
 
@@ -964,16 +973,14 @@ class FusedAttnRunner:
         # Setup distributed sharding specs
         # Setup shardings for distributed tests
         self.qkvo_psec = PartitionSpec(
-            self.mesh_resource.dp_resource,
+            self.data_axis,
             self.mesh_resource.cp_resource,
             self.mesh_resource.tpsp_resource,
             None,
         )
         self.qkvo_sharding = NamedSharding(self.mesh, self.qkvo_psec)
 
-        mask_pspec = PartitionSpec(
-            self.mesh_resource.dp_resource, None, self.mesh_resource.cp_resource, None
-        )
+        mask_pspec = PartitionSpec(self.data_axis, None, self.mesh_resource.cp_resource, None)
         self.mask_sharding = NamedSharding(self.mesh, mask_pspec)
 
         match self.seq_desc_format:
@@ -983,11 +990,9 @@ class FusedAttnRunner:
 
                 def to_dp_shardings(x):
                     if x.ndim == 1:
-                        pspec = PartitionSpec(self.mesh_resource.dp_resource)
+                        pspec = PartitionSpec(self.data_axis)
                     else:
-                        pspec = PartitionSpec(
-                            self.mesh_resource.dp_resource, self.mesh_resource.cp_resource
-                        )
+                        pspec = PartitionSpec(self.data_axis, self.mesh_resource.cp_resource)
                     return NamedSharding(self.mesh, pspec)
 
                 self.seq_desc_sharding = jax.tree.map(to_dp_shardings, self.sequence_desciptor)
@@ -998,7 +1003,7 @@ class FusedAttnRunner:
             )
         elif self.bias_shape == BiasShape._B1SS:
             self.bias_pspec = PartitionSpec(
-                self.mesh_resource.dp_resource, None, self.mesh_resource.cp_resource, None
+                self.data_axis, None, self.mesh_resource.cp_resource, None
             )
         elif self.bias_shape == BiasShape._11SS:
             self.bias_pspec = PartitionSpec(None, None, self.mesh_resource.cp_resource, None)
@@ -1026,7 +1031,7 @@ class FusedAttnRunner:
 
         # [batch][max_segments_per_batch]
         # TODO(mgoldfarb-nvidia): Will need to handle CP cases of replicated or distributed length/offset.
-        self.seq_length_offset_pspec = PartitionSpec(self.mesh_resource.dp_resource, None)
+        self.seq_length_offset_pspec = PartitionSpec(self.data_axis, None)
         self.seq_length_offset_sharding = NamedSharding(self.mesh, self.seq_length_offset_pspec)
 
     def test_forward(self, return_max_logit=False, check_output=True):

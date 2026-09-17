@@ -270,13 +270,18 @@ class TestDistributedScoreModSelfAttn:
     ):
         ScoreModFusedAttnRunner.require_cudnn_frontend()
         batch, seqlen, num_heads, head_dim = data_shape
-        dp_axis = mesh_resource.dp_resource
+        data_axes = tuple(
+            axis
+            for axis in (mesh_resource.dp_resource, mesh_resource.fsdp_resource)
+            if axis is not None
+        )
         tp_axis = mesh_resource.tpsp_resource
 
-        if dp_axis is not None:
-            dp_size = mesh_shape[mesh_axes.index(dp_axis)]
-            if batch % dp_size != 0:
-                pytest.skip(f"{batch=} must be divisible by {dp_size=}")
+        data_parallel_size = 1
+        for axis in data_axes:
+            data_parallel_size *= mesh_shape[mesh_axes.index(axis)]
+        if batch % data_parallel_size != 0:
+            pytest.skip(f"{batch=} must be divisible by {data_parallel_size=}")
         if tp_axis is not None:
             tp_size = mesh_shape[mesh_axes.index(tp_axis)]
             if num_heads % tp_size != 0:
