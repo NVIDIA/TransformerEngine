@@ -85,10 +85,19 @@ Contributing
 We welcome contributions to Transformer Engine! To contribute to Transformer Engine and make pull requests,
 follow the guidelines outlined in the `<CONTRIBUTING.rst>`_ guide.
 
-Additional resources
+Technical deep dives
 ====================
 
-See `Resources <docs/resources.rst>`_ for papers and recorded talks.
+Low-precision training involves important numerical and performance tradeoffs.
+These resources are good starting points for understanding the formats, scaling
+strategies, and training recipes behind Transformer Engine:
+
+* `Low precision training guide <https://docs.nvidia.com/deeplearning/transformer-engine/features/low_precision_training/index.html>`_ — FP8, MXFP8, NVFP4, scaling recipes, and performance considerations.
+* `Using FP8 and FP4 with Transformer Engine <https://docs.nvidia.com/deeplearning/transformer-engine/examples/fp8_primer.html>`_ — a practical introduction with code examples.
+* `FP8 Formats for Deep Learning <https://arxiv.org/abs/2209.05433>`_ — the foundational paper describing the FP8 formats used for deep learning.
+* `Stable and Scalable FP8 Deep Learning Training on Blackwell <https://www.nvidia.com/en-us/on-demand/session/gtc25-s72778/>`_ — a technical GTC 2025 session on training numerics and scale.
+
+See `Resources <docs/resources.rst>`_ for the complete collection of papers and recorded talks.
 
 .. |PyPI| image:: https://img.shields.io/pypi/v/transformer-engine.svg
    :target: https://pypi.org/project/transformer-engine/
