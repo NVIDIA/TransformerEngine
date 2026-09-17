@@ -87,10 +87,6 @@ follow the guidelines outlined in the `<CONTRIBUTING.rst>`_ guide.
 Technical deep dives
 ====================
 
-Low-precision training involves important numerical and performance tradeoffs.
-These resources are good starting points for understanding the formats, scaling
-strategies, and training recipes behind Transformer Engine:
-
 * `Low precision training guide <https://docs.nvidia.com/deeplearning/transformer-engine/features/low_precision_training/index.html>`_ — FP8, MXFP8, NVFP4, scaling recipes, and performance considerations.
 * `Using FP8 and FP4 with Transformer Engine <https://docs.nvidia.com/deeplearning/transformer-engine/examples/fp8_primer.html>`_ — a practical introduction with code examples.
 * `FP8 Formats for Deep Learning <https://arxiv.org/abs/2209.05433>`_ — the foundational paper describing the FP8 formats used for deep learning.
