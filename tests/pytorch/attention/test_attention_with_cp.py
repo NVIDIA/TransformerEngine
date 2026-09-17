@@ -820,6 +820,37 @@ def test_cp_with_frost_attention(cp_pool, model, qkv_format, cp_comm_type):
     )
 
 
+@pytest.mark.parametrize("cp_comm_type", ["p2p", "all_gather", "a2a"])
+def test_cp_with_frost_attention_fp16(cp_pool, cp_comm_type):
+    """One fp16 arm per comm type, since the matrix above is bf16 throughout.
+
+    The backend serves BF16 and FP16, but every context-parallel configuration was covered in bf16
+    only. fp16 has a far narrower exponent range, and the ring correction exponentiates a difference
+    of log-sum-exp values across steps, so a range problem would surface here rather than in the
+    non-CP numerics. One model and one layout keeps the cost to three cases rather than doubling
+    the matrix; a2a+p2p is omitted because it would need a second four-rank pool for a dtype that
+    exercises no additional code path.
+    """
+    reason = _frost_availability()
+    if reason is not None:
+        pytest.skip(reason)
+
+    config = model_configs_frost_attn["cp_hd512_0"]
+    config.context_parallel = True
+    config.cp_comm_type = cp_comm_type
+
+    _submit(
+        cp_pool(2),
+        dtype="fp16",
+        model="cp_hd512_0",
+        qkv_format="bshd",
+        kernel_backend="FrostAttention",
+        cp_comm_type=cp_comm_type,
+        is_training=True,
+        log_level=pytest_logging_level,
+    )
+
+
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 7), reason="cuDNN 8.9.7+ is required.")
 @pytest.mark.skipif(
     get_device_compute_capability() < (9, 0), reason="FusedAttention THD requires sm90+."
