@@ -91,6 +91,23 @@ def _get_device_attribute(cuda_device, attribute: int) -> int:
         return value.value
 
 
+def is_driver_localization_supported(device_index: int) -> bool:
+    """Return whether the CUDA driver exposes two locality domains."""
+    try:
+        _check(driver.cuInit(0), "cuInit")
+        error, cuda_device = driver.cuDeviceGet(device_index)
+        _check(error, "cuDeviceGet")
+        return (
+            _get_device_attribute(
+                cuda_device,
+                _CU_DEVICE_ATTRIBUTE_LOCALITY_DOMAIN_COUNT,
+            )
+            == 2
+        )
+    except (AttributeError, OSError, RuntimeError):
+        return False
+
+
 def _split_sm_resources(cuda_device, num_domains: int):
     error, device_resource = driver.cuDeviceGetDevResource(
         cuda_device,
