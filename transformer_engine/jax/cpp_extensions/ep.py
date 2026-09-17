@@ -315,8 +315,6 @@ def _leading_axis_ok(spec, resource_axes=None, mesh=None, *, ep_axes=None):
 
 def _ep_outer_axis(ep_axes=None):
     """Legacy single outer axis used by the standalone EP custom VJP wrapper."""
-    if ep_axes is not None:
-        return None
     resource = global_mesh_resource()
     ep_axes = _resolve_ep_axes(ep_axes)
     dp_resource = None if resource.dp_resource in ep_axes else resource.dp_resource
