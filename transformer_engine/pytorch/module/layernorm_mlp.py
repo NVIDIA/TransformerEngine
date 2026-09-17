@@ -1823,9 +1823,7 @@ def _layernorm_mlp_backward_impl(
                 else reduce_scatter_out
             )
         elif ub_bulk_wgrad:
-            fc1_dgrad = ub_obj_fc1_wgrad.get_buffer(
-                local_chunk=True, shape=fc1_dgrad_shape
-            )
+            fc1_dgrad = ub_obj_fc1_wgrad.get_buffer(local_chunk=True, shape=fc1_dgrad_shape)
         elif args.set_parallel_mode and not ub_bulk_wgrad:
             fc1_dgrad = gemm_out
             if args.sequence_parallel:
