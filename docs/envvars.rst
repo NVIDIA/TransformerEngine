@@ -196,6 +196,12 @@ backend-selection overview.
    :Default: ``0``
    :Description: When using FusedAttention, use FlashAttention-2 implementation for the backward pass instead of the cuDNN implementation. This can be useful due to performance differences between various versions of flash-attn and FusedAttention.
 
+.. envvar:: NVTE_FUSED_ATTN_CP_USE_FAv4_BWD
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Use head-parallel FlashAttention-4 backward with cuDNN P2P context-parallel forward. Input packing and gradient restoration each use one all-to-all exchange. Requires an installed FA4 backend, SM100, FP16 or BF16, causal ``sbhd`` self-attention, equal query/key/value head counts divisible by CP size, CP size 2, 4, or 8, and head dimensions (128, 128) or (192, 128). Dropout, bias, softcapping, explicit sequence lengths, FP8, max-logit output, hierarchical CP, and ``torch.compile`` use the existing backward implementation. Unsupported configurations also retain that implementation. Performance and temporary memory depend on the sequence length and CP topology; benchmark before enabling.
+
 .. envvar:: NVTE_FUSED_ATTN_CACHE_DEBUG
 
    :Type: ``int`` (0, 1 or 2), optionally followed by ``:<ranks>``
