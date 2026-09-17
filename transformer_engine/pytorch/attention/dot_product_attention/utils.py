@@ -2021,9 +2021,13 @@ def get_attention_backend(
             "p2p",
             "all_gather",
             "a2a",
+            "a2a+p2p",
         )
     ):
-        # p2p (ring), all_gather and a2a are wired up in context_parallel.py; a2a+p2p is not.
+        # a2a+p2p needs no separate wiring: it dispatches to AttnFuncWithCPAndKVP2P, the same class
+        # as plain p2p, and its a2a stage is flash_attn_a2a_communicate -- a redistribution between
+        # sequence- and head-sharding that calls no attention kernel. The per-step calls are the
+        # ordinary p2p section calls with fewer heads per rank.
         # Non-p2p types matter for Gemma-4: TE refuses sliding-window attention with p2p, and the
         # model has sliding layers, so those layers need all_gather or a2a.
         logger.debug(
