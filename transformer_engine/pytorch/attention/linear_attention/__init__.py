@@ -9,5 +9,10 @@ This module is **experimental** and subject to change.
 
 from .gdn import GatedDeltaNetAttention
 from .gdn2 import GatedDeltaNet2Attention
+from .gdp import GatedDeltaProductAttention
 
-__all__ = ["GatedDeltaNetAttention", "GatedDeltaNet2Attention"]
+__all__ = [
+    "GatedDeltaNetAttention",
+    "GatedDeltaNet2Attention",
+    "GatedDeltaProductAttention",
+]

@@ -113,6 +113,72 @@ class LinearAttentionKernelAdapter(torch.nn.Module):
         self._dense_cu_seqlens_key: Optional[Tuple[torch.device, int, int]] = None
         self._dense_cu_seqlens: Optional[torch.Tensor] = None
 
+    def _validate_qkv_shapes(
+        self,
+        query_layer: torch.Tensor,
+        key_layer: torch.Tensor,
+        value_layer: torch.Tensor,
+        qkv_format: str,
+    ) -> None:
+        """Check the variant's Q/K/V layout against the module's head geometry.
+
+        The default encodes GDN/GDN-2's layout: aligned Q/K/V token dimensions,
+        identical Q/K shapes, equal Q/V head counts, and state heads derived from
+        Q heads. That does not describe linear attention generally -- GDP carries
+        ``num_householder`` K/V rows per Q row -- so variants whose layout differs
+        override this.
+        """
+        expected_rank = 3 if qkv_format == "thd" else 4
+        qkv = (query_layer, key_layer, value_layer)
+        if any(tensor.dim() != expected_rank for tensor in qkv):
+            raise ValueError(
+                f"Q, K, and V must be {expected_rank}D tensors for qkv_format={qkv_format!r}."
+            )
+        if query_layer.shape != key_layer.shape:
+            raise ValueError(
+                f"{self.variant} requires Q and K to have the same shape; got "
+                f"{tuple(query_layer.shape)} and {tuple(key_layer.shape)}."
+            )
+        if query_layer.shape[:-2] != value_layer.shape[:-2]:
+            raise ValueError(
+                f"{self.variant} requires Q, K, and V to have the same token dimensions."
+            )
+        self._validate_head_geometry(query_layer, value_layer)
+
+    def _validate_head_geometry(
+        self,
+        query_layer: torch.Tensor,
+        value_layer: torch.Tensor,
+    ) -> None:
+        """Check the Q/V head counts and head sizes against the output contract."""
+        if query_layer.shape[-2] != self.num_q_heads:
+            raise ValueError(
+                f"{self.variant} Q and K must have {self.num_q_heads} heads, "
+                f"got {query_layer.shape[-2]}."
+            )
+        # The underlying ops support grouped value heads, but the module's output
+        # contract is fixed at construction time. Integrations that use more V
+        # heads must expand Q/K before the module.
+        # TODO(KshitijLakhani/cyanguwa): cuDNN's GDN-2 op accepts distinct Q/K/V head
+        # counts; plumb that through the module's output contract so the wrapper stops
+        # requiring them to be equal.
+        if value_layer.shape[-2] != self.num_q_heads:
+            raise ValueError(
+                f"{self.variant} V must have {self.num_q_heads} heads, "
+                f"got {value_layer.shape[-2]}. {self.module_name} requires its output "
+                "width to match num_attention_heads * v_head_dim."
+            )
+        if query_layer.shape[-1] != self.qk_head_dim:
+            raise ValueError(
+                f"{self.variant} Q and K head dimension must match kv_channels; expected "
+                f"{self.qk_head_dim}, got {query_layer.shape[-1]}."
+            )
+        if value_layer.shape[-1] != self.v_head_dim:
+            raise ValueError(
+                f"{self.variant} V head dimension must match kv_channels; expected "
+                f"{self.v_head_dim}, got {value_layer.shape[-1]}."
+            )
+
     def _validate_gates(
         self,
         gates: Dict[str, torch.Tensor],
@@ -236,55 +302,7 @@ class LinearAttentionKernelAdapter(torch.nn.Module):
         if initial_state is not None and not isinstance(initial_state, torch.Tensor):
             raise TypeError(f"{self.variant} initial_state must be a torch.Tensor when provided.")
 
-        # The checks below encode GDN/GDN-2's layout: aligned Q/K/V token dimensions,
-        # identical Q/K shapes, equal Q/V head counts, and state heads derived from Q
-        # heads. These do not describe linear attention generally -- GDP uses T rows for
-        # Q/g but T * num_householder rows for K/V/beta, and KDA allows HK in {H, HV}
-        # with HO = max(H, HV) for its output and state heads.
-        # TODO(KshitijLakhani/cyanguwa): when KDA/GDP land, move these into the
-        # flavor-specific adapters rather than relaxing them here, so GDN/GDN-2 keep
-        # strict validation.
-        expected_rank = 3 if qkv_format == "thd" else 4
-        if any(tensor.dim() != expected_rank for tensor in qkv):
-            raise ValueError(
-                f"Q, K, and V must be {expected_rank}D tensors for qkv_format={qkv_format!r}."
-            )
-        if query_layer.shape != key_layer.shape:
-            raise ValueError(
-                f"{self.variant} requires Q and K to have the same shape; got "
-                f"{tuple(query_layer.shape)} and {tuple(key_layer.shape)}."
-            )
-        if query_layer.shape[:-2] != value_layer.shape[:-2]:
-            raise ValueError(
-                f"{self.variant} requires Q, K, and V to have the same token dimensions."
-            )
-        if query_layer.shape[-2] != self.num_q_heads:
-            raise ValueError(
-                f"{self.variant} Q and K must have {self.num_q_heads} heads, "
-                f"got {query_layer.shape[-2]}."
-            )
-        # The underlying ops support grouped value heads, but the module's output
-        # contract is fixed at construction time. Integrations that use more V
-        # heads must expand Q/K before the module.
-        # TODO(KshitijLakhani/cyanguwa): cuDNN's GDN-2 op accepts distinct Q/K/V head
-        # counts; plumb that through the module's output contract so the wrapper stops
-        # requiring them to be equal.
-        if value_layer.shape[-2] != self.num_q_heads:
-            raise ValueError(
-                f"{self.variant} V must have {self.num_q_heads} heads, "
-                f"got {value_layer.shape[-2]}. {self.module_name} requires its output "
-                "width to match num_attention_heads * v_head_dim."
-            )
-        if query_layer.shape[-1] != self.qk_head_dim:
-            raise ValueError(
-                f"{self.variant} Q and K head dimension must match kv_channels; expected "
-                f"{self.qk_head_dim}, got {query_layer.shape[-1]}."
-            )
-        if value_layer.shape[-1] != self.v_head_dim:
-            raise ValueError(
-                f"{self.variant} V head dimension must match kv_channels; expected "
-                f"{self.v_head_dim}, got {value_layer.shape[-1]}."
-            )
+        self._validate_qkv_shapes(query_layer, key_layer, value_layer, qkv_format)
 
         device = query_layer.device
         if any(not tensor.is_cuda for tensor in qkv):
