@@ -12,7 +12,7 @@ import torch
 from transformer_engine.pytorch.module import Linear, LayerNormLinear
 from transformer_engine.pytorch.attention import DotProductAttention
 from transformer_engine.pytorch.distributed import allreduce, get_distributed_world_size
-from transformer_engine.pytorch.models.deepseek_v3.mla_rope import (
+from transformer_engine.pytorch.attention.mla_rope import (
     apply_mla_rope_kv,
     apply_mla_rope_q,
     build_rope_tables,
@@ -53,8 +53,9 @@ class MultiLatentAttention(torch.nn.Module):
     ``kv_channels=(qk_nope_head_dim + qk_rope_head_dim, v_head_dim)``, which
     supports the cuDNN fused attention backend.
 
-    RoPE uses the fused MLA kernels from :mod:`.mla_rope` (in-place on the
-    query rope slice, single-pass key/value assembly); the rope slice follows
+    RoPE uses the fused MLA kernels from
+    :mod:`transformer_engine.pytorch.attention.mla_rope` (in-place on the query
+    rope slice, single-pass key/value assembly); the rope slice follows
     the DeepSeekV3 checkpoint convention (interleaved weights, NeoX output).
 
     Parameters

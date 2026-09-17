@@ -36,7 +36,7 @@ from transformer_engine.pytorch.utils import get_cudnn_version
 _current_file = pathlib.Path(__file__).resolve()
 sys.path = [str(_current_file.parent.parent)] + sys.path
 from utils import ModelConfig, compare_and_assert, get_available_attention_backends
-from transformer_engine.pytorch.models.deepseek_v3.mla_rope import (
+from transformer_engine.pytorch.attention.mla_rope import (
     apply_mla_rope_kv,
     apply_mla_rope_q,
     build_rope_tables,
