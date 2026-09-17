@@ -923,7 +923,9 @@ def quantized_model_init(
              This functionality is *EXPERIMENTAL*.
 
     Recipes with ``backward_override="high_precision"`` or ``"dequantized"``
-    automatically omit columnwise primary-weight storage. Such weights must be
+    automatically omit columnwise primary-weight storage in modules and ops that
+    support override backward. Op-fuser GroupedLinear retains columnwise storage
+    because its backward still uses quantized GEMMs. Rowwise-only weights must be
     reconstructed with columnwise storage before switching to quantized backward
     or using an external optimizer that requires both storage directions.
     """

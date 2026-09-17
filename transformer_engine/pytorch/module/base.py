@@ -2069,7 +2069,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             return
 
         recipe = self.fp8_meta["recipe"]
-        if self._primary_weights_rowwise_only and recipe.backward_override is None:
+        if (
+            torch.is_grad_enabled()
+            and self._primary_weights_rowwise_only
+            and recipe.backward_override is None
+        ):
             raise RuntimeError(
                 "Primary weights were initialized without columnwise storage, but the current "
                 "recipe uses quantized backward. Recreate the model with columnwise primary-weight "

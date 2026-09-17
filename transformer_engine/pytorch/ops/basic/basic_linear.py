@@ -352,7 +352,8 @@ class BasicLinear(BasicOperation):
 
     def pre_fuser_forward(self, *, requires_grad: bool) -> None:
         if (
-            FP8GlobalStateManager.is_fp8_enabled()
+            requires_grad
+            and FP8GlobalStateManager.is_fp8_enabled()
             and getattr(self, "_primary_weight_rowwise_only", False)
             and FP8GlobalStateManager.get_fp8_recipe().backward_override is None
         ):
