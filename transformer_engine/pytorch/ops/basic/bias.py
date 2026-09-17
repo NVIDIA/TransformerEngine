@@ -20,6 +20,8 @@ from ...tensor import Quantizer
 
 @dataclass(slots=True)
 class BiasFwdArgs:
+    """Tensor inputs and backward quantizer for the bias forward custom op."""
+
     input_: torch.Tensor
     bias: torch.Tensor
     grad_input_quantizer: Optional[Quantizer]
@@ -27,6 +29,8 @@ class BiasFwdArgs:
 
 @dataclass(slots=True)
 class BiasBwdArgs:
+    """Output gradient and optional quantizer for the bias backward custom op."""
+
     grad_output: TensorOrQuantized
     grad_input_quantizer: Optional[Quantizer]
 
@@ -132,7 +136,13 @@ class Bias(BasicOperation):
     bwd_args_type = BiasBwdArgs
 
     def pack_forward_args(
-        self, basic_op_ctxs, input_, *, prev_op_grad_output_quantizer, basic_op_kwargs, **unused
+        self,
+        basic_op_ctxs,
+        input_,
+        *,
+        prev_op_grad_output_quantizer,
+        basic_op_kwargs,
+        **unused,  # pylint: disable=unused-argument
     ) -> BiasFwdArgs:
         if basic_op_kwargs[0]:
             raise ValueError("Bias forward does not expect keyword arguments")
@@ -161,7 +171,9 @@ class Bias(BasicOperation):
     def forward_setup_context(self, basic_op_ctxs, args, aux) -> None:
         basic_op_ctxs[0].grad_input_quantizer = args.grad_input_quantizer
 
-    def pack_backward_args(self, basic_op_ctxs, grad_output, **unused) -> BiasBwdArgs:
+    def pack_backward_args(
+        self, basic_op_ctxs, grad_output, **unused  # pylint: disable=unused-argument
+    ) -> BiasBwdArgs:
         return BiasBwdArgs(grad_output, basic_op_ctxs[0].grad_input_quantizer)
 
     @classmethod

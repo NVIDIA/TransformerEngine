@@ -49,6 +49,8 @@ from .._common import (
 
 @dataclass(slots=True)
 class BasicLinearFwdArgs:
+    """Tensor inputs and configuration for the linear forward custom op."""
+
     input_: TensorOrQuantized
     weight: TensorOrQuantized
     dtype: torch.dtype
@@ -66,6 +68,8 @@ class BasicLinearFwdArgs:
 
 @dataclass(slots=True)
 class BasicLinearBwdArgs:
+    """Saved tensors and configuration for the linear backward custom op."""
+
     grad_output: TensorOrQuantized
     input_: Optional[TensorOrQuantized]
     weight: Optional[TensorOrQuantized]
@@ -82,7 +86,7 @@ class BasicLinearBwdArgs:
 def _save_quantized_input(args: BasicLinearFwdArgs) -> bool:
     return (
         args.with_quantized_compute
-        and args.backward_override is None
+        and args.backward_override != "high_precision"
         and args.weight_requires_grad
         and not is_quantized_tensor(args.input_)
         and not (isinstance(args.input_, TensorSpec) and args.input_.quantizer is not None)
@@ -92,7 +96,7 @@ def _save_quantized_input(args: BasicLinearFwdArgs) -> bool:
 def _save_quantized_weight(args: BasicLinearFwdArgs) -> bool:
     return (
         args.with_quantized_compute
-        and args.backward_override is None
+        and args.backward_override != "high_precision"
         and args.input_requires_grad
         and not is_quantized_tensor(args.weight)
         and not (isinstance(args.weight, TensorSpec) and args.weight.quantizer is not None)
@@ -1064,7 +1068,7 @@ class BasicLinear(BasicOperation):
         prev_op_grad_output_quantizer,
         next_op_input_quantizer,
         basic_op_kwargs,
-        **unused,
+        **unused,  # pylint: disable=unused-argument
     ) -> BasicLinearFwdArgs:
         if basic_op_kwargs[0]:
             raise ValueError("BasicLinear forward does not expect keyword arguments")
@@ -1133,7 +1137,10 @@ class BasicLinear(BasicOperation):
             spec = None
             if needed:
                 quantizer = quantizer.copy()
-                quantizer.set_usage(rowwise=False, columnwise=True)
+                quantizer.set_usage(
+                    rowwise=args.backward_override is not None,
+                    columnwise=args.backward_override is None,
+                )
                 spec = TensorSpec(
                     shape=value.shape, dtype=args.dtype, device=value.device, quantizer=quantizer
                 )
@@ -1160,7 +1167,9 @@ class BasicLinear(BasicOperation):
         ctx.input_requires_grad = args.input_requires_grad
         ctx.weight_requires_grad = args.weight_requires_grad
 
-    def pack_backward_args(self, basic_op_ctxs, grad_output, **unused) -> BasicLinearBwdArgs:
+    def pack_backward_args(
+        self, basic_op_ctxs, grad_output, **unused  # pylint: disable=unused-argument
+    ) -> BasicLinearBwdArgs:
         ctx = basic_op_ctxs[0]
         return BasicLinearBwdArgs(
             grad_output=grad_output,
