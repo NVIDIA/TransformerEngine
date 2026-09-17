@@ -152,52 +152,6 @@ def flash_attn_p2p_communicate(
 
 
 @jit_fuser
-def flash_attn_fwd_out_correction_init(
-    out_init_step: torch.Tensor,
-    softmax_lse: torch.Tensor,
-    softmax_lse_init_step: torch.Tensor,
-    seq_dim: int,
-):
-    """Merge partial outputs of the first step in Attention with context parallelism"""
-    softmax_lse_corrected_exp = torch.exp(softmax_lse_init_step - softmax_lse).movedim(2, seq_dim)
-    softmax_lse_corrected_exp = softmax_lse_corrected_exp.unsqueeze(-1)
-    out_corrected = out_init_step * softmax_lse_corrected_exp
-    return out_corrected.to(out_init_step.dtype)
-
-
-@jit_fuser
-def flash_attn_fwd_out_correction(
-    out: torch.Tensor,
-    out_per_step: torch.Tensor,
-    softmax_lse: torch.Tensor,
-    softmax_lse_per_step: torch.Tensor,
-    seq_dim: int,
-):
-    """Merge partial outputs of each step in Attention with context parallelism"""
-    softmax_lse_corrected_exp = torch.exp(softmax_lse_per_step - softmax_lse).movedim(2, seq_dim)
-    softmax_lse_corrected_exp = softmax_lse_corrected_exp.unsqueeze(-1)
-    out_corrected = out_per_step * softmax_lse_corrected_exp
-    out.add_(out_corrected)
-
-
-@jit_fuser
-def flash_attn_fwd_second_half_out_correction(
-    out: torch.Tensor,
-    out_per_step: torch.Tensor,
-    softmax_lse: torch.Tensor,
-    softmax_lse_per_step: torch.Tensor,
-    seq_dim: int,
-):
-    """Merge second half of partial outputs of each step in Attention with context parallelism"""
-    out_ = out.select(seq_dim, 1)
-    softmax_lse_ = softmax_lse.view(*softmax_lse.shape[:-1], 2, -1)[..., 1, :]
-    softmax_lse_corrected_exp = torch.exp(softmax_lse_per_step - softmax_lse_).movedim(2, seq_dim)
-    softmax_lse_corrected_exp = softmax_lse_corrected_exp.unsqueeze(-1)
-    out_corrected = out_per_step * softmax_lse_corrected_exp
-    out_.add_(out_corrected)
-
-
-@jit_fuser
 def flash_attn_fwd_softmax_lse_correction(
     softmax_lse: torch.Tensor,
     softmax_lse_per_step: torch.Tensor,
@@ -1969,8 +1923,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         # MXFP8/F16 attention:    q, k, v: torch.Tensor, dtype=fwd_nominal_dtype
         # FP8DS/CS attention:     q, k, v: torch.Tensor, dtype=torch.uint8
         out = None
-        # Current fused/A2A plumbing still consumes this original format; the
-        # online merge only changes the lifetime of per-step outputs.
+        # Preserve the original format for fused output and post-attention A2A.
         o_format = qkv_format
         second_half_lse_seqlen = None
         for i in range(cp_size + 1):
@@ -2197,7 +2150,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
                 with torch.cuda.stream(flash_attn_streams[(i - 1) % 2]):
                     if use_fused_attention:
-                        # [b, h, sq, 1] -> [b, h, sq] or [t, h, 1] -> [t, np]
+                        # [b, h, sq, 1] -> [b, h, sq] or [t, h, 1] -> [t, h]
                         softmax_lse_per_step[(i - 1) % 2].squeeze_(-1)
                         if softmax_lse_in_packed_format:
                             softmax_lse_per_step[(i - 1) % 2] = (
@@ -2221,7 +2174,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             # performs its own promotion and requires matching dtypes.
                             out = out_per_step[0].clone().view(o_shape)
                         elif qkv_format in ["bshd", "sbhd"]:
-                            out = out_per_step[0].to(torch.float32)
+                            # Keep the accumulator in the partial-output dtype. FP8
+                            # partial outputs have already been dequantized to FP32.
+                            out = out_per_step[0].clone()
                             out = out.view(o_shape)
                     elif (i - 1) <= rank or not causal:
                         old_softmax_lse = softmax_lse.clone()
@@ -2299,14 +2254,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 max_logit, op=torch.distributed.ReduceOp.MAX, group=cp_group
             )
 
-        if qkv_format == "bshd":
-            out = out.view(out.shape[0], -1, *out.shape[-2:])
-            ctx.batch_size = out.shape[0]
-        elif qkv_format == "sbhd":
-            out = out.view(-1, *out.shape[-3:])
-            ctx.batch_size = out.shape[1]
-        # The backward context needs the rank-local output before any A2A
-        # restoration, matching the pre-existing post-loop correction path.
+        # Save the rank-local output for backward before restoring the A2A layout.
         out = out.view(post_a2a_o_shape)
         out_part = out.to(fwd_nominal_dtype)
 
