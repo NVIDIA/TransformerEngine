@@ -17,6 +17,7 @@
 #include <transformer_engine/transformer_engine.h>
 
 #include "../../common.h"
+#include "../../util/cuda_runtime.h"
 #include "../../util/math.h"
 #include "../../util/ptx_arch_spec.cuh"
 #include "../../utils.cuh"
@@ -792,6 +793,13 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                   (scaling_type == ScalingType::BIDIMENSIONAL && has_full_bidimensional_chunks &&
                    bidimensional_specialized_grid_fits);
 
+              // The register-resident kernels issue 256-bit loads, which need sm_100
+              // or later and a 32-byte aligned base pointer.  Everything that fails
+              // either test falls through to the staged kernels below.
+              const bool register_resident_supported =
+                  (transformer_engine::cuda::sm_arch() >= 100) &&
+                  (reinterpret_cast<uintptr_t>(input.data.dptr) % 32 == 0);
+
               // Specialized cast-only kernels do not consume the device noop flag.
               // Preserve cached outputs by keeping noop-aware calls on the generic path.
               if (noop_ptr == nullptr &&
@@ -810,11 +818,13 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                     // few hundred bytes of shared memory; each warp still reads one
                     // contiguous run, and the payload never touches shared memory.
                     if constexpr (std::is_same_v<IType, bf16>) {
-                      specialized::launch_cast_rowwise<OType, WITH_GEMM_SWIZZLED_SCALES>(
-                          input.data.dptr, output->data.dptr,
-                          reinterpret_cast<void *>(scales_rowwise_ptr), static_cast<int>(rows),
-                          static_cast<int>(cols), static_cast<int>(scale_stride_rowwise), stream);
-                      break;
+                      if (register_resident_supported) {
+                        specialized::launch_cast_rowwise<OType, WITH_GEMM_SWIZZLED_SCALES>(
+                            input.data.dptr, output->data.dptr,
+                            reinterpret_cast<void *>(scales_rowwise_ptr), static_cast<int>(rows),
+                            static_cast<int>(cols), static_cast<int>(scale_stride_rowwise), stream);
+                        break;
+                      }
                     }
 
                     using traits = specialized::CastTraits<IType, OType, true, false,
@@ -845,7 +855,7 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                     // Gated per path: the colwise scale axis is transposed under the
                     // GEMM swizzle, so this kernel does not handle it yet.
                     if constexpr (std::is_same_v<IType, bf16> && !WITH_GEMM_SWIZZLED_SCALES) {
-                      if (rows % 32 == 0 && cols % 256 == 0) {
+                      if (register_resident_supported && rows % 32 == 0 && cols % 256 == 0) {
                         // Both scale arrays must share a layout; this kernel only
                         // writes the packed one.  The template gate above should
                         // already have excluded swizzled tensors, so this catches

@@ -1757,15 +1757,30 @@ __device__ __forceinline__ uint64_t create_l2_policy_evict_first(float fraction)
 // Non-coherent (read-only / `__ldg`-style) 256-bit global load.  This is the
 // widest load the ISA offers and keeps the number of in-flight requests, and
 // hence the latency that must be hidden, as low as possible.
+//
+// `ld.global.nc.v8.b32` needs sm_100 or later and PTX ISA 8.8 (CUDA 12.9).
+// Everywhere else these fall back to a pair of 128-bit loads, which is
+// semantically identical and costs only the extra request.  The 256-bit form
+// additionally requires the address to be 32-byte aligned; the fallback needs
+// only 16.
 __device__ __forceinline__ void ld_global_nc_b32x8(uint32_t (&dst)[8], const void *src) {
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000) && (defined CUDA_VERSION) && \
+    (CUDA_VERSION >= 12090)
   asm volatile("ld.global.nc.v8.b32 {%0,%1,%2,%3,%4,%5,%6,%7}, [%8];"
                : "=r"(dst[0]), "=r"(dst[1]), "=r"(dst[2]), "=r"(dst[3]), "=r"(dst[4]), "=r"(dst[5]),
                  "=r"(dst[6]), "=r"(dst[7])
                : "l"(src));
+#elif (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+  const uint8_t *bytes = reinterpret_cast<const uint8_t *>(src);
+  asm volatile("ld.global.nc.v4.b32 {%0,%1,%2,%3}, [%4];"
+               : "=r"(dst[0]), "=r"(dst[1]), "=r"(dst[2]), "=r"(dst[3])
+               : "l"(bytes));
+  asm volatile("ld.global.nc.v4.b32 {%0,%1,%2,%3}, [%4];"
+               : "=r"(dst[4]), "=r"(dst[5]), "=r"(dst[6]), "=r"(dst[7])
+               : "l"(bytes + 16));
 #else
-  NVTE_DEVICE_ERROR("ld_global_nc_b32x8 is only supported on SM 9.0+.");
-#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  NVTE_DEVICE_ERROR("ld_global_nc_b32x8 is only supported on SM 8.0+.");
+#endif
 }
 
 // As above, but streaming the lines past L2 rather than letting them displace
@@ -1773,27 +1788,45 @@ __device__ __forceinline__ void ld_global_nc_b32x8(uint32_t (&dst)[8], const voi
 // evict_first(1.0)` hint, without needing to materialise the policy token.
 __device__ __forceinline__ void ld_global_nc_evict_first_b32x8(uint32_t (&dst)[8],
                                                                const void *src) {
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000) && (defined CUDA_VERSION) && \
+    (CUDA_VERSION >= 12090)
   asm volatile("ld.global.nc.L2::evict_first.v8.b32 {%0,%1,%2,%3,%4,%5,%6,%7}, [%8];"
                : "=r"(dst[0]), "=r"(dst[1]), "=r"(dst[2]), "=r"(dst[3]), "=r"(dst[4]), "=r"(dst[5]),
                  "=r"(dst[6]), "=r"(dst[7])
                : "l"(src));
+#elif (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+  const uint8_t *bytes = reinterpret_cast<const uint8_t *>(src);
+  asm volatile("ld.global.nc.L2::evict_first.v4.b32 {%0,%1,%2,%3}, [%4];"
+               : "=r"(dst[0]), "=r"(dst[1]), "=r"(dst[2]), "=r"(dst[3])
+               : "l"(bytes));
+  asm volatile("ld.global.nc.L2::evict_first.v4.b32 {%0,%1,%2,%3}, [%4];"
+               : "=r"(dst[4]), "=r"(dst[5]), "=r"(dst[6]), "=r"(dst[7])
+               : "l"(bytes + 16));
 #else
-  NVTE_DEVICE_ERROR("ld_global_nc_evict_first_b32x8 is only supported on SM 9.0+.");
-#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  NVTE_DEVICE_ERROR("ld_global_nc_evict_first_b32x8 is only supported on SM 8.0+.");
+#endif
 }
 
 // As above, tagged with an L2 cache policy from `create_l2_policy_*`.
 __device__ __forceinline__ void ld_global_nc_b32x8(uint32_t (&dst)[8], const void *src,
                                                    uint64_t l2_policy) {
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000) && (defined CUDA_VERSION) && \
+    (CUDA_VERSION >= 12090)
   asm volatile("ld.global.nc.L2::cache_hint.v8.b32 {%0,%1,%2,%3,%4,%5,%6,%7}, [%8], %9;"
                : "=r"(dst[0]), "=r"(dst[1]), "=r"(dst[2]), "=r"(dst[3]), "=r"(dst[4]), "=r"(dst[5]),
                  "=r"(dst[6]), "=r"(dst[7])
                : "l"(src), "l"(l2_policy));
+#elif (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+  const uint8_t *bytes = reinterpret_cast<const uint8_t *>(src);
+  asm volatile("ld.global.nc.L2::cache_hint.v4.b32 {%0,%1,%2,%3}, [%4], %5;"
+               : "=r"(dst[0]), "=r"(dst[1]), "=r"(dst[2]), "=r"(dst[3])
+               : "l"(bytes), "l"(l2_policy));
+  asm volatile("ld.global.nc.L2::cache_hint.v4.b32 {%0,%1,%2,%3}, [%4], %5;"
+               : "=r"(dst[4]), "=r"(dst[5]), "=r"(dst[6]), "=r"(dst[7])
+               : "l"(bytes + 16), "l"(l2_policy));
 #else
-  NVTE_DEVICE_ERROR("ld_global_nc_b32x8 is only supported on SM 9.0+.");
-#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  NVTE_DEVICE_ERROR("ld_global_nc_b32x8 is only supported on SM 8.0+.");
+#endif
 }
 
 // 128-bit global store tagged with an L2 cache policy.
