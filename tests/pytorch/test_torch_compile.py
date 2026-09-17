@@ -2332,6 +2332,56 @@ def test_te_modules_dynamic_shapes(module, bias_gelu_fusion):
 
 
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
+@pytest.mark.parametrize("module", ["LayerNormLinear", "LayerNormMLP"])
+@pytest.mark.parametrize("loss_source", ["output", "normalization", "both"])
+@pytest.mark.parametrize("fp8_recipe", [None, recipe.Float8CurrentScaling()])
+def test_te_layernorm_output_gradients(module, loss_source, fp8_recipe):
+    """Route distinct gradients from each public output to the correct backward field."""
+    if fp8_recipe is not None and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+    model = _make_linear_module(module, return_layernorm_output=True)
+
+    def fn(inp):
+        if fp8_recipe is None:
+            output, norm_output = model(inp)
+        else:
+            with te.autocast(recipe=fp8_recipe):
+                output, norm_output = model(inp)
+        if loss_source == "output":
+            return output
+        if loss_source == "normalization":
+            return norm_output
+        return output, 0.25 * norm_output
+
+    torch._dynamo.reset()
+    compiled = torch.compile(fn, fullgraph=True)
+    base = torch.randn(32, 64, dtype=torch.bfloat16, device="cuda")
+    _assert_close_eager_compiled(fn, compiled, model, base)
+
+
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
+@pytest.mark.parametrize("field", ["missing_gradient", "fp8"])
+def test_custom_op_rejects_invalid_output_grad_field(field):
+    """An unknown name or a non-tensor field must fail before any op is registered."""
+    from transformer_engine.pytorch.dynamo import register_custom_op
+
+    linear = importlib.import_module("transformer_engine.pytorch.module.linear")
+    with pytest.raises(ValueError, match="output_grad_fields.*not a tensor field"):
+        register_custom_op(
+            op_name="invalid_output_grad_field",
+            input_tensors_for_grad=["weight", "inp", "bias"],
+            output_grad_fields=(field, None),
+            fwd_arg_type=linear.LinearFwdArgs,
+            fwd_impl=linear._linear_forward_impl,
+            fwd_fake_impl=linear._linear_forward_fake,
+            setup_context=linear._linear_setup_ctx,
+            bwd_arg_type=linear.LinearBwdArgs,
+            bwd_impl=linear._linear_backward_impl,
+            bwd_fake_impl=linear._linear_backward_fake,
+        )
+
+
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
 @pytest.mark.parametrize(
     "case", ["linear", "layernorm_linear", "mlp_bias_gelu", "mlp_gemm_gelu", "mlp_swiglu"]
 )

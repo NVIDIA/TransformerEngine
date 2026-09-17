@@ -1757,6 +1757,7 @@ def _linear_backward_fake(
 # Custom op used under ``torch.compile``.
 _linear_op = register_custom_op(
     op_name="linear",
+    output_grad_fields=("grad_output", None),
     input_tensors_for_grad=["weight", "inp", "bias"],
     fwd_arg_type=LinearFwdArgs,
     fwd_impl=_linear_forward_impl,

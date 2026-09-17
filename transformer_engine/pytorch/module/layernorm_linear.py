@@ -7,7 +7,7 @@ import os
 import warnings
 import weakref
 from dataclasses import dataclass, replace as dataclass_replace
-from typing import Any, Callable, ClassVar, Dict, Optional, Tuple, Union, List
+from typing import Any, Callable, Dict, Optional, Tuple, Union, List
 from functools import reduce
 from operator import mul as multiply_op
 
@@ -259,9 +259,6 @@ class LayerNormLinearFwdArgs:
 @dataclass(slots=True)
 class LayerNormLinearBwdArgs:
     """Single-argument bag for the backward path of :class:`_LayerNormLinear`."""
-
-    # One field per user output of the forward op, in order (see custom_op.py).
-    GRAD_OUTPUT_FIELDS: ClassVar[Tuple[str, ...]] = ("grad_output", "grad_ln_out")
 
     # --- Incoming gradients (populated at backward entry) ---
     grad_output: Optional[torch.Tensor] = None
@@ -1873,6 +1870,7 @@ def _layernorm_linear_backward_fake(
 # Custom op used under ``torch.compile``.
 _layernorm_linear_op = register_custom_op(
     op_name="layernorm_linear",
+    output_grad_fields=("grad_output", "grad_ln_out", None),
     input_tensors_for_grad=["inp", "ln_weight", "ln_bias", "weight", "bias"],
     fwd_arg_type=LayerNormLinearFwdArgs,
     fwd_impl=_layernorm_linear_forward_impl,
