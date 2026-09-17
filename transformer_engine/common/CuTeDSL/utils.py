@@ -40,15 +40,6 @@ def device_compute_capability(device_id: Optional[int] = None) -> tuple:
         return (0, 0)
 
 
-def device_is_blackwell(device_id: Optional[int] = None) -> bool:
-    """Return True if the device (current device by default) is Blackwell family
-    (SM 10.0 / 11.0 / 12.0). Run-time check, not compile-time."""
-    major, minor = device_compute_capability(device_id)
-    return (
-        (major == 10 and minor == 0) or (major == 11 and minor == 0) or (major == 12 and minor == 0)
-    )
-
-
 def str_to_cutlass_dtype(dtype_str: str):
     """Convert a string dtype to a cutlass dtype, or None if unknown."""
     return _CUTLASS_DTYPE_FROM_STR.get(dtype_str, None)
