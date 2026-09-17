@@ -297,8 +297,9 @@ class LayerNormMLPFwdArgs:
             return "differentiable fp8_output=True"
         if self.cpu_offloading:
             return "CPU activation offloading"
-        if self.wgrad_store is not None:
-            # Non-None only when delayed wgrad compute is on (see LayerNormMLP.forward).
+        if self.wgrad_store is not None and (
+            self.wgrad_store.context is not None or self.wgrad_store.delay_wgrad_compute()
+        ):
             return "delayed wgrad compute (wgrad_store)"
         if self.cache_weight and self.fp8:
             # The cached workspaces are updated in place on the first microbatch,
@@ -3381,6 +3382,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
                     use_compiled_op = False
 
             if use_compiled_op:
+                # Only queue-free stores reach this path. Keep the live store in eager,
+                # but do not pass an unused Python object across the custom-op boundary.
+                fwd_args.wgrad_store = None
                 check_gemm_dims(inp, fc1_weight, self.fp8)
                 out, ln_out, new_fc1_ws, new_fc2_ws = _layernorm_mlp_op(fwd_args)
             else:
@@ -3443,7 +3447,10 @@ class LayerNormMLP(TransformerEngineBaseModule):
             return "differentiable fp8_output=True"
         if is_cpu_offload_enabled():
             return "CPU activation offloading"
-        if self.wgrad_store is not None and self.wgrad_store.delay_wgrad_compute():
+        # A queued store can be enabled between forward and backward.
+        if self.wgrad_store is not None and (
+            self.wgrad_store.context is not None or self.wgrad_store.delay_wgrad_compute()
+        ):
             return "delayed wgrad compute (wgrad_store)"
         if self.fuse_wgrad_accumulation:
             return "fuse_wgrad_accumulation (main_grad)"

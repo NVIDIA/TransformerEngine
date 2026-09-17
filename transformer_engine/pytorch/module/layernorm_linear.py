@@ -221,8 +221,9 @@ class LayerNormLinearFwdArgs:
             return "differentiable fp8_output=True"
         if self.cpu_offloading:
             return "CPU activation offloading"
-        if self.wgrad_store is not None:
-            # Non-None only when delayed wgrad compute is on (see LayerNormLinear.forward).
+        if self.wgrad_store is not None and (
+            self.wgrad_store.context is not None or self.wgrad_store.delay_wgrad_compute()
+        ):
             return "delayed wgrad compute (wgrad_store)"
         if (
             self.grad_input_quantizer is not None
@@ -2675,6 +2676,9 @@ class LayerNormLinear(TransformerEngineBaseModule):
                     use_compiled_op = False
 
             if use_compiled_op:
+                # Only queue-free stores reach this path. Keep the live store in eager,
+                # but do not pass an unused Python object across the custom-op boundary.
+                fwd_args.wgrad_store = None
                 check_gemm_dims(inp, weight_tensor, self.fp8)
                 out, ln_out, new_weight_workspace = _layernorm_linear_op(fwd_args)
             else:
@@ -2783,7 +2787,10 @@ class LayerNormLinear(TransformerEngineBaseModule):
             return "differentiable fp8_output=True"
         if is_cpu_offload_enabled():
             return "CPU activation offloading"
-        if self.wgrad_store is not None and self.wgrad_store.delay_wgrad_compute():
+        # A queued store can be enabled between forward and backward.
+        if self.wgrad_store is not None and (
+            self.wgrad_store.context is not None or self.wgrad_store.delay_wgrad_compute()
+        ):
             return "delayed wgrad compute (wgrad_store)"
         if self.fuse_wgrad_accumulation:
             return "fuse_wgrad_accumulation (main_grad)"
