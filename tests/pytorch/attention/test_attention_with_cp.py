@@ -56,7 +56,7 @@ model_configs_flash_attn = {
     "cp_1_1": ModelConfig(2, 4096, 12, 128),  # MHA
     "cp_1_2": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal", window_size=(512, 0)),  # MHA
     "cp_1_3": ModelConfig(2, 4096, 12, 128, window_size=(512, 512)),  # MHA
-    "cp_2_0": ModelConfig(2, 4096, 32, 128, num_gqa_groups=4, attn_mask_type="causal"),  # GQA
+    "cp_2_0": ModelConfig(2, 4096, 32, 256, num_gqa_groups=4, attn_mask_type="causal"),  # GQA
     "cp_2_1": ModelConfig(2, 4096, 12, 128, num_gqa_groups=2),  # GQA
     "cp_2_2": ModelConfig(2, 4096, 32, 128, attn_mask_type="causal", window_size=(128, 0)),  # GQA
     "cp_2_3": ModelConfig(2, 4096, 12, 128, num_gqa_groups=2, window_size=(512, 512)),  # GQA
