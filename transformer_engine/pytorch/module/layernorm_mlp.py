@@ -75,6 +75,9 @@ from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor.hybrid_tensor import HybridQuantizer
 from ..tensor.identity_tensor import IdentityQuantizer
 from ._common import (
+    get_compile_input_unsupported_reason,
+    get_compile_training_unsupported_reason,
+    get_compile_quantizer_unsupported_reason,
     apply_normalization,
     check_fp8_reduce_and_update,
     fake_workspace_valid,
@@ -89,7 +92,6 @@ from ..cpu_offload import (
     mark_activation_offload,
 )
 from ..quantized_tensor import (
-    QuantizedTensor,
     QuantizedTensorStorage,
     Quantizer,
     prepare_for_saving,
@@ -99,7 +101,6 @@ from ..dynamo import (
     TensorSpec,
     TensorOrQuantized,
     register_custom_op,
-    is_value_opaque_quantizer,
 )
 from ..cpp_extensions import (
     general_gemm,
@@ -285,45 +286,45 @@ class LayerNormMLPFwdArgs:
             return "debug instrumentation (nvidia-dlfw-inspect)"
         if self.checkpoint and self.is_grad_enabled:
             return "activation checkpointing (checkpoint=True)"
-        if isinstance(self.inp, (QuantizedTensor, QuantizedTensorStorage)):
-            return "a quantized input tensor"
-        if self.fsdp_group is not None:
-            return "manual TE FSDP (fsdp_group); use FSDP2 or MCore FSDP"
-        if (
-            self.fc2_output_quantizer is not None
-            and self.is_grad_enabled
-            and self.any_requires_grad()
-        ):
-            return "differentiable fp8_output=True"
-        if self.cpu_offloading:
-            return "CPU activation offloading"
-        if self.wgrad_store is not None and (
-            self.wgrad_store.context is not None or self.wgrad_store.delay_wgrad_compute()
-        ):
-            return "delayed wgrad compute (wgrad_store)"
+        reason = get_compile_input_unsupported_reason(self.inp, self.fsdp_group)
+        if reason is not None:
+            return reason
+        reason = get_compile_training_unsupported_reason(
+            differentiable_fp8_output=(
+                self.fc2_output_quantizer is not None
+                and self.is_grad_enabled
+                and self.any_requires_grad()
+            ),
+            cpu_offloading=self.cpu_offloading,
+            delayed_wgrad=(
+                self.wgrad_store is not None
+                and (self.wgrad_store.context is not None or self.wgrad_store.delay_wgrad_compute())
+            ),
+        )
+        if reason is not None:
+            return reason
         if self.cache_weight and self.fp8:
             # The cached workspaces are updated in place on the first microbatch,
             # which the functional op (mutates_args=()) can't express.
             return "FP8 weight caching (is_first_microbatch)"
         if self.fuse_wgrad_accumulation:
             return "fuse_wgrad_accumulation (main_grad)"
-        for quantizer in (
-            self.fc1_input_quantizer,
-            self.fc1_weight_quantizer,
-            self.fc1_output_quantizer,
-            self.fc1_grad_input_quantizer,
-            self.fc1_grad_weight_quantizer,
-            self.fc1_grad_output_quantizer,
-            self.fc2_input_quantizer,
-            self.fc2_weight_quantizer,
-            self.fc2_output_quantizer,
-            self.fc2_grad_input_quantizer,
-            self.fc2_grad_weight_quantizer,
-            self.fc2_grad_output_quantizer,
-        ):
-            if quantizer is not None and not is_value_opaque_quantizer(quantizer):
-                return "a quantizer not registered as a torch.compile value-opaque type"
-        return None
+        return get_compile_quantizer_unsupported_reason(
+            (
+                self.fc1_input_quantizer,
+                self.fc1_weight_quantizer,
+                self.fc1_output_quantizer,
+                self.fc1_grad_input_quantizer,
+                self.fc1_grad_weight_quantizer,
+                self.fc1_grad_output_quantizer,
+                self.fc2_input_quantizer,
+                self.fc2_weight_quantizer,
+                self.fc2_output_quantizer,
+                self.fc2_grad_input_quantizer,
+                self.fc2_grad_weight_quantizer,
+                self.fc2_grad_output_quantizer,
+            )
+        )
 
 
 @dataclass(slots=True)
@@ -3442,19 +3443,23 @@ class LayerNormMLP(TransformerEngineBaseModule):
             return "debug instrumentation (nvidia-dlfw-inspect)"
         if self.checkpoint and is_grad_enabled:
             return "activation checkpointing (checkpoint=True)"
-        if isinstance(inp, (QuantizedTensor, QuantizedTensorStorage)):
-            return "a quantized input tensor"
-        if self.fsdp_group is not None:
-            return "manual TE FSDP (fsdp_group); use FSDP2 or MCore FSDP"
-        if fp8_output and is_grad_enabled and (inp.requires_grad or self.requires_grad_params()):
-            return "differentiable fp8_output=True"
-        if is_cpu_offload_enabled():
-            return "CPU activation offloading"
-        # A queued store can be enabled between forward and backward.
-        if self.wgrad_store is not None and (
-            self.wgrad_store.context is not None or self.wgrad_store.delay_wgrad_compute()
-        ):
-            return "delayed wgrad compute (wgrad_store)"
+        reason = get_compile_input_unsupported_reason(inp, self.fsdp_group)
+        if reason is not None:
+            return reason
+        reason = get_compile_training_unsupported_reason(
+            differentiable_fp8_output=(
+                fp8_output
+                and is_grad_enabled
+                and (inp.requires_grad or self.requires_grad_params())
+            ),
+            cpu_offloading=is_cpu_offload_enabled(),
+            delayed_wgrad=(
+                self.wgrad_store is not None
+                and (self.wgrad_store.context is not None or self.wgrad_store.delay_wgrad_compute())
+            ),
+        )
+        if reason is not None:
+            return reason
         if self.fuse_wgrad_accumulation:
             return "fuse_wgrad_accumulation (main_grad)"
         fp8 = FP8GlobalStateManager.is_fp8_enabled()

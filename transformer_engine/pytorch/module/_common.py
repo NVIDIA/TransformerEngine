@@ -13,10 +13,10 @@ import torch
 from .. import cpp_extensions as tex
 from ..constants import TE_DType
 from ..distributed import in_fp8_activation_recompute_phase
-from ..dynamo import TensorSpec
+from ..dynamo import TensorSpec, is_value_opaque_quantizer
 from ..export import is_in_onnx_export_mode
 from ..quantization import FP8GlobalStateManager
-from ..quantized_tensor import Quantizer
+from ..quantized_tensor import QuantizedTensor, QuantizedTensorStorage, Quantizer
 from ..tensor.hybrid_tensor import HybridQuantizer
 from ..utils import get_default_init_method
 
@@ -324,6 +324,45 @@ class WeightGradStore:
         assert self.enabled is True, "delay_wgrad_compute is not enabled"
         rank = torch.distributed.get_rank()
         assert self.context.empty(), f"Queue is not empty. rank {rank}"
+
+
+def get_compile_input_unsupported_reason(inp: torch.Tensor, fsdp_group: Any) -> Optional[str]:
+    """Check input restrictions before inspecting gradients or preparing quantizers."""
+    if isinstance(inp, (QuantizedTensor, QuantizedTensorStorage)):
+        return "a quantized input tensor"
+    if fsdp_group is not None:
+        return "manual TE FSDP (fsdp_group); use FSDP2 or MCore FSDP"
+    return None
+
+
+def get_compile_training_unsupported_reason(
+    *,
+    differentiable_fp8_output: bool,
+    cpu_offloading: bool,
+    delayed_wgrad: bool,
+) -> Optional[str]:
+    """Training restrictions checked before and after preparing forward args.
+
+    Callers determine differentiability and delayed-wgrad state according to
+    their module's semantics. Module-specific checks retain their own priority.
+    """
+    if differentiable_fp8_output:
+        return "differentiable fp8_output=True"
+    if cpu_offloading:
+        return "CPU activation offloading"
+    if delayed_wgrad:
+        return "delayed wgrad compute (wgrad_store)"
+    return None
+
+
+def get_compile_quantizer_unsupported_reason(
+    quantizers: Tuple[Optional[Quantizer], ...],
+) -> Optional[str]:
+    """Reject quantizers that cannot cross the value-opaque custom-op boundary."""
+    for quantizer in quantizers:
+        if quantizer is not None and not is_value_opaque_quantizer(quantizer):
+            return "a quantizer not registered as a torch.compile value-opaque type"
+    return None
 
 
 def check_fp8_reduce_and_update(restore_first_module: bool = False) -> bool:
