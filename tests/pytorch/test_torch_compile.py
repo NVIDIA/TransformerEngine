@@ -2360,28 +2360,6 @@ def test_te_layernorm_output_gradients(module, loss_source, fp8_recipe):
 
 
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
-@pytest.mark.parametrize("field", ["missing_gradient", "fp8"])
-def test_custom_op_rejects_invalid_output_grad_field(field):
-    """An unknown name or a non-tensor field must fail before any op is registered."""
-    from transformer_engine.pytorch.dynamo import register_custom_op
-
-    linear = importlib.import_module("transformer_engine.pytorch.module.linear")
-    with pytest.raises(ValueError, match="output_grad_fields.*not a tensor field"):
-        register_custom_op(
-            op_name="invalid_output_grad_field",
-            input_tensors_for_grad=["weight", "inp", "bias"],
-            output_grad_fields=(field, None),
-            fwd_arg_type=linear.LinearFwdArgs,
-            fwd_impl=linear._linear_forward_impl,
-            fwd_fake_impl=linear._linear_forward_fake,
-            setup_context=linear._linear_setup_ctx,
-            bwd_arg_type=linear.LinearBwdArgs,
-            bwd_impl=linear._linear_backward_impl,
-            bwd_fake_impl=linear._linear_backward_fake,
-        )
-
-
-@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
 @pytest.mark.parametrize(
     "case", ["linear", "layernorm_linear", "mlp_bias_gelu", "mlp_gemm_gelu", "mlp_swiglu"]
 )

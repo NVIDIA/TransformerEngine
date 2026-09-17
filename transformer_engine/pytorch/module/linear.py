@@ -5,7 +5,7 @@
 """Linear API"""
 
 from dataclasses import dataclass, replace as dataclass_replace
-from typing import Any, Callable, Dict, Optional, Tuple, Union, List
+from typing import Sequence, Any, Callable, Dict, Optional, Tuple, Union, List
 from functools import reduce
 from operator import mul as multiply_op
 import warnings
@@ -308,6 +308,10 @@ class LinearBwdArgs:
 
     # --- Per-backward scratch state (populated inside _linear_backward_impl) ---
     ub_obj_gradout: Optional[Any] = None
+
+    def setup_grad_outputs(self, grads: Sequence[Any]) -> None:
+        """Unpack gradients in forward-output order, ignoring weight workspaces."""
+        self.grad_output, _ = grads
 
     def setup_saved_tensors(self, ctx: torch.autograd.function.FunctionCtx) -> None:
         """Pull saved tensors from ``ctx`` into the fields backward consumes."""
@@ -1757,7 +1761,6 @@ def _linear_backward_fake(
 # Custom op used under ``torch.compile``.
 _linear_op = register_custom_op(
     op_name="linear",
-    output_grad_fields=("grad_output", None),
     input_tensors_for_grad=["weight", "inp", "bias"],
     fwd_arg_type=LinearFwdArgs,
     fwd_impl=_linear_forward_impl,
@@ -1834,7 +1837,7 @@ class _Linear(torch.autograd.Function):
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         """Backward pass: compute gradients and reduce FP8 scaling factors."""
         bwd_args: LinearBwdArgs = ctx.backward_objects
-        bwd_args.grad_output = grad_output
+        bwd_args.setup_grad_outputs((grad_output, _grad_weight_workspace))
         bwd_args.setup_saved_tensors(ctx)
         nvtx_label = "transformer_engine._Linear.backward"
         if bwd_args.ub_name is not None:

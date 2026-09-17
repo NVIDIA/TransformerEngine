@@ -7,7 +7,7 @@ import os
 import warnings
 import weakref
 from dataclasses import dataclass, replace as dataclass_replace
-from typing import Any, Callable, Dict, Optional, Tuple, Union, List
+from typing import Sequence, Any, Callable, Dict, Optional, Tuple, Union, List
 from functools import reduce
 from operator import mul as multiply_op
 
@@ -339,6 +339,10 @@ class LayerNormLinearBwdArgs:
 
     # --- Per-backward scratch state (populated inside the backward impl) ---
     ub_obj_gradout: Optional[Any] = None
+
+    def setup_grad_outputs(self, grads: Sequence[Any]) -> None:
+        """Unpack gradients in forward-output order, ignoring weight workspaces."""
+        self.grad_output, self.grad_ln_out, _ = grads
 
     def setup_saved_tensors(self, ctx: torch.autograd.function.FunctionCtx) -> None:
         """Pull saved tensors from ``ctx`` into the fields backward consumes."""
@@ -1870,7 +1874,6 @@ def _layernorm_linear_backward_fake(
 # Custom op used under ``torch.compile``.
 _layernorm_linear_op = register_custom_op(
     op_name="layernorm_linear",
-    output_grad_fields=("grad_output", "grad_ln_out", None),
     input_tensors_for_grad=["inp", "ln_weight", "ln_bias", "weight", "bias"],
     fwd_arg_type=LayerNormLinearFwdArgs,
     fwd_impl=_layernorm_linear_forward_impl,
@@ -1946,8 +1949,7 @@ class _LayerNormLinear(torch.autograd.Function):
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         """Backward pass: compute gradients and reduce FP8 scaling factors."""
         bwd_args: LayerNormLinearBwdArgs = ctx.backward_objects
-        bwd_args.grad_output = grad_output
-        bwd_args.grad_ln_out = grad_ln_out
+        bwd_args.setup_grad_outputs((grad_output, grad_ln_out, _grad_weight_workspace))
         bwd_args.setup_saved_tensors(ctx)
         nvtx_label = "transformer_engine._LayerNormLinear.backward"
         if bwd_args.ub_name is not None:

@@ -438,6 +438,10 @@ class LayerNormMLPBwdArgs:
     # --- Per-backward scratch state (populated inside the backward impl) ---
     ub_obj_gradout: Optional[Any] = None
 
+    def setup_grad_outputs(self, grads: Sequence[Any]) -> None:
+        """Unpack gradients in forward-output order, ignoring weight workspaces."""
+        self.grad_output, self.grad_ln_out, _, _ = grads
+
     def setup_saved_tensors(self, ctx: torch.autograd.function.FunctionCtx) -> None:
         """Pull saved tensors from ``ctx`` into the fields backward consumes."""
         self.set_saved_tensors(restore_from_func_ctx(ctx))
@@ -2547,7 +2551,6 @@ def _layernorm_mlp_backward_fake(
 # Custom op used under ``torch.compile``.
 _layernorm_mlp_op = register_custom_op(
     op_name="layernorm_mlp",
-    output_grad_fields=("grad_output", "grad_ln_out", None, None),
     input_tensors_for_grad=[
         "inp",
         "ln_weight",
@@ -2637,8 +2640,9 @@ class _LayerNormMLP(torch.autograd.Function):
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         """Backward pass: compute gradients and reduce FP8 scaling factors."""
         bwd_args: LayerNormMLPBwdArgs = ctx.backward_objects
-        bwd_args.grad_output = grad_output
-        bwd_args.grad_ln_out = grad_ln_out
+        bwd_args.setup_grad_outputs(
+            (grad_output, grad_ln_out, _grad_fc1_weight_workspace, _grad_fc2_weight_workspace)
+        )
         with get_nvtx_range_context("_LayerNormMLP_backward"):
             _layernorm_mlp_recompute(bwd_args, ctx)
         (
