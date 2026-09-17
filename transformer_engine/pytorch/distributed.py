@@ -166,6 +166,8 @@ def set_tensor_model_parallel_attributes(
 @lru_cache
 def get_distributed_world_size(group: Optional[dist_group_type] = None) -> int:
     """Return world size for the distributed group."""
+    if is_logical_process_group(group):
+        return int(group.cp_size)
     if not torch.distributed.is_initialized():
         return 1
     return torch.distributed.get_world_size(group=group)
@@ -174,12 +176,24 @@ def get_distributed_world_size(group: Optional[dist_group_type] = None) -> int:
 @lru_cache
 def get_distributed_rank(group: Optional[dist_group_type] = None) -> int:
     """Return my rank for the distributed group."""
+    if is_logical_process_group(group):
+        return int(group.cp_rank)
     if not torch.distributed.is_initialized():
         raise RuntimeError(
             "torch.distributed is not initialized. Call torch.distributed.init_process_group() "
             "before calling get_distributed_rank()."
         )
     return torch.distributed.get_rank(group=group)
+
+
+def is_logical_process_group(group: Any) -> bool:
+    """Return whether ``group`` is a topology-only CP descriptor."""
+    return (
+        group is not None
+        and hasattr(group, "ranks")
+        and hasattr(group, "cp_size")
+        and hasattr(group, "cp_rank")
+    )
 
 
 def initialize_affine_weight_gpu(

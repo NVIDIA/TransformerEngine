@@ -38,6 +38,13 @@ def setup_pytorch_extension(
 
     # Source files
     sources = all_files_in_dir(Path(csrc_source_files), name_extension="cpp")
+    build_native_cp_transport = bool(int(os.getenv("NVTE_WITH_NCCL_DEVICE_CP", "0")))
+    if build_native_cp_transport:
+        sources.extend(
+            path
+            for path in all_files_in_dir(Path(csrc_source_files), name_extension="cu")
+            if path.name == "cp_native_transport.cu"
+        )
 
     # Header files
     include_dirs = get_cuda_include_dirs()
@@ -87,16 +94,37 @@ def setup_pytorch_extension(
         libraries.append("nvshmem_host")
         cxx_flags.append("-DNVTE_ENABLE_NVSHMEM")
 
+    extra_compile_args = {"cxx": cxx_flags}
+    if build_native_cp_transport:
+        nvcc_flags = ["-O3", "-std=c++17"]
+        nccl_home = os.getenv("NCCL_HOME")
+        nccl_include_dir = os.getenv("NVTE_NCCL_INCLUDE_DIR")
+        nccl_library_dir = os.getenv("NVTE_NCCL_LIBRARY_DIR")
+        if nccl_home:
+            nccl_home = Path(nccl_home)
+            nccl_include_dir = nccl_include_dir or str(nccl_home / "include")
+            nccl_library_dir = nccl_library_dir or str(nccl_home / "lib")
+        if nccl_include_dir:
+            include_dirs.append(Path(nccl_include_dir))
+        if nccl_library_dir:
+            library_dirs.append(Path(nccl_library_dir))
+        libraries.append("nccl")
+        cxx_flags.append("-DNVTE_WITH_NCCL_DEVICE_CP")
+        nvcc_flags.append("-DNVTE_WITH_NCCL_DEVICE_CP")
+        extra_compile_args["nvcc"] = nvcc_flags
+
     # Construct PyTorch CUDA extension
     sources = [str(path) for path in sources]
     include_dirs = [str(path) for path in include_dirs]
-    from torch.utils.cpp_extension import CppExtension
+    from torch.utils.cpp_extension import CppExtension, CUDAExtension
 
-    return CppExtension(
+    extension_cls = CUDAExtension if build_native_cp_transport else CppExtension
+
+    return extension_cls(
         name="transformer_engine_torch",
         sources=[str(src) for src in sources],
         include_dirs=[str(inc) for inc in include_dirs],
-        extra_compile_args={"cxx": cxx_flags},
+        extra_compile_args=extra_compile_args,
         libraries=[str(lib) for lib in libraries],
         library_dirs=[str(lib_dir) for lib_dir in library_dirs],
     )

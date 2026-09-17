@@ -5,15 +5,38 @@
 import os
 import sys
 import logging
+import copy
 from contextlib import nullcontext
 import torch
 import torch.distributed as dist
 from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
     get_cu_seqlens_on_cp_rank,
 )
+from transformer_engine.pytorch.attention.native_cp_transport import (
+    destroy_native_cp_transport,
+    initialize_native_cp_transport,
+    set_native_cp_parent_group,
+)
 from transformer_engine.pytorch.attention.dot_product_attention.utils import combine_and_quantize
 import transformer_engine_torch as tex
 from test_attention_with_cp import model_configs_flash_attn, model_configs_fused_attn
+
+
+class _LogicalCPGroup:
+    """Minimal topology descriptor used by native-transport tests."""
+
+    def __init__(self, ranks, rank):
+        self.ranks = tuple(ranks)
+        self.cp_size = len(self.ranks)
+        self.cp_rank = self.ranks.index(rank)
+
+    def size(self):
+        return self.cp_size
+
+    def rank(self):
+        return self.cp_rank
+
+
 from transformer_engine.pytorch import (
     autocast,
     DotProductAttention,
@@ -180,6 +203,9 @@ def run_dpa_with_cp(
     scaling_mode="delayed",
     f16_O="False",
     is_training="True",
+    native_cp_transport="False",
+    logical_cp_ring="False",
+    max_seqlen=None,
     log_level=logging.WARNING,
 ):
     """Test DotProductAttention module with context parallelism"""
@@ -202,6 +228,14 @@ def run_dpa_with_cp(
     if kernel_backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
         config = model_configs_fused_attn[model]
+    config = copy.deepcopy(config)
+    native_cp_transport = native_cp_transport == "True"
+    logical_cp_ring = logical_cp_ring == "True"
+    if logical_cp_ring and not native_cp_transport:
+        raise ValueError("logical_cp_ring requires native_cp_transport=True")
+    if max_seqlen is not None:
+        config.max_seqlen_q = int(max_seqlen)
+        config.max_seqlen_kv = int(max_seqlen)
     assert config.attn_mask_type in [
         "causal",
         "no_mask",
@@ -229,6 +263,14 @@ def run_dpa_with_cp(
     cp_comm_ranks = range(world_size)
     assert rank in cp_comm_ranks
     cp_comm_group = dist.new_group(cp_comm_ranks, backend="nccl")
+    cp_group = cp_comm_group
+    cp_rank = rank
+    cp_global_ranks = tuple(cp_comm_ranks)
+    if logical_cp_ring:
+        offsets = [0, *range(1, world_size, 2), *reversed(range(2, world_size, 2))]
+        cp_global_ranks = tuple(cp_comm_ranks[offset] for offset in offsets)
+        cp_group = _LogicalCPGroup(cp_global_ranks, rank)
+        cp_rank = cp_group.rank()
     if cp_comm_type == "a2a+p2p":
         assert world_size % 2 == 0, (
             "{cp_comm_type=} requires world_size % 2 = 0 as it assumes the a2a level has cp_size"
@@ -390,17 +432,17 @@ def run_dpa_with_cp(
             )
             for x in [q_, k_, v_, dout_]
         ]
-        seq_idx = torch.tensor([rank, 2 * world_size - rank - 1], device=q_.device)
+        seq_idx = torch.tensor([cp_rank, 2 * world_size - cp_rank - 1], device=q_.device)
         q_, k_, v_, dout_ = [x.index_select(seq_dim, seq_idx) for x in [q_, k_, v_, dout_]]
         q_, k_, v_, dout_ = [
             x.view(*x.shape[:seq_dim], -1, *x.shape[(seq_dim + 2) :]) for x in [q_, k_, v_, dout_]
         ]
     elif qkv_format == "thd":
         seq_idx_q = tex.thd_get_partitioned_indices(
-            cu_seqlens_q_padded, q_.shape[0], world_size, rank
+            cu_seqlens_q_padded, q_.shape[0], world_size, cp_rank
         )
         seq_idx_kv = tex.thd_get_partitioned_indices(
-            cu_seqlens_kv_padded, k_.shape[0], world_size, rank
+            cu_seqlens_kv_padded, k_.shape[0], world_size, cp_rank
         )
         q_, dout_ = [x.index_select(0, seq_idx_q) for x in [q_, dout_]]
         k_, v_ = [x.index_select(0, seq_idx_kv) for x in [k_, v_]]
@@ -438,10 +480,27 @@ def run_dpa_with_cp(
             bias_ = bias_.index_select(seq_q_dim, bias_seq_idx)
             bias_ = bias_.view(*shape_before_seq, -1, seq_kv_size)
             bias_.requires_grad = True
+
+    if native_cp_transport:
+        kv_bytes = (k_.numel() + v_.numel()) * k_.element_size()
+        pair_bytes = 2 * kv_bytes
+        gin_env_names = (
+            "NCCL_GIN_NCONTEXTS",
+            "NCCL_GIN_SIGNAL_POOL_SIZE",
+            "NCCL_GIN_COUNTER_POOL_SIZE",
+        )
+        gin_env_before = {name: os.environ.get(name) for name in gin_env_names}
+        initialize_native_cp_transport(
+            cp_comm_group,
+            ((pair_bytes + 255) // 256) * 256 + pair_bytes,
+        )
+        assert {name: os.environ.get(name) for name in gin_env_names} == gin_env_before
+        if logical_cp_ring:
+            set_native_cp_parent_group(cp_group, cp_comm_group)
     # set up environment
     core_attn.set_context_parallel_group(
-        cp_comm_sub_groups if cp_comm_type == "a2a+p2p" else cp_comm_group,
-        cp_comm_ranks,
+        cp_comm_sub_groups if cp_comm_type == "a2a+p2p" else cp_group,
+        cp_global_ranks,
         torch.cuda.Stream(),
         cp_comm_type,
     )
@@ -562,7 +621,7 @@ def run_dpa_with_cp(
             dq_, dk_, dv_, out_ = [dq_, dk_, dv_, out_]
             cu_seqlens_q_padded = cu_seqlens_q_padded // world_size
             cu_seqlens_q = get_cu_seqlens_on_cp_rank(
-                cu_seqlens_q, cu_seqlens_q_padded, world_size, rank, True, True
+                cu_seqlens_q, cu_seqlens_q_padded, world_size, cp_rank, True, True
             )
             cu_pads_q = cu_seqlens_q_padded - cu_seqlens_q
             num_pads_q = cu_pads_q[1:] - cu_pads_q[:-1]
@@ -582,7 +641,7 @@ def run_dpa_with_cp(
                     )
             cu_seqlens_kv_padded = cu_seqlens_kv_padded // world_size
             cu_seqlens_kv = get_cu_seqlens_on_cp_rank(
-                cu_seqlens_kv, cu_seqlens_kv_padded, world_size, rank, True, True
+                cu_seqlens_kv, cu_seqlens_kv_padded, world_size, cp_rank, True, True
             )
             cu_pads_kv = cu_seqlens_kv_padded - cu_seqlens_kv
             num_pads_kv = cu_pads_kv[1:] - cu_pads_kv[:-1]
@@ -732,6 +791,9 @@ def run_dpa_with_cp(
                     t, tensors_cp[i], names_no_cp[i], names_cp[i], atol, rtol, rmse_tol, is_fp8
                 )
             logging.info(f"[Rank {rank}] CP vs no-CP: {names[i]} matches")
+
+    if native_cp_transport:
+        destroy_native_cp_transport(cp_comm_group)
 
     # destroy distribution group
     dist.destroy_process_group()

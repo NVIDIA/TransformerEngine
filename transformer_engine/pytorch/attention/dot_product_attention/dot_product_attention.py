@@ -40,6 +40,7 @@ from transformer_engine.pytorch.constants import (
 )
 from transformer_engine.pytorch.distributed import (
     get_distributed_world_size,
+    is_logical_process_group,
     checkpoint,
     set_all_rng_states,
     CudaRNGStatesTracker,
@@ -1236,7 +1237,9 @@ class DotProductAttention(TransformerEngineBaseModule):
 
             # adjust max_seqlen and cu_seqlens for CP
             cp_size = 1
-            if isinstance(self.cp_group, dist_group_type):
+            if isinstance(self.cp_group, dist_group_type) or is_logical_process_group(
+                self.cp_group
+            ):
                 cp_size = get_distributed_world_size(self.cp_group)
             elif isinstance(self.cp_group, list):
                 for group in self.cp_group:
