@@ -2327,16 +2327,18 @@ def test_te_modules_dynamic_shapes(module, bias_gelu_fusion):
 
 
 # ---------------------------------------------------------------------------
-# te.LayerNormLinear / te.LayerNormMLP
+# Module fake/real metadata and LayerNorm variants
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
-@pytest.mark.parametrize("case", ["linear", "mlp_bias_gelu", "mlp_gemm_gelu", "mlp_swiglu"])
+@pytest.mark.parametrize(
+    "case", ["linear", "layernorm_linear", "mlp_bias_gelu", "mlp_gemm_gelu", "mlp_swiglu"]
+)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("bias", [False, True])
 @pytest.mark.parametrize("fp8_recipe", [None, recipe.Float8CurrentScaling()])
-def test_te_layernorm_module_fake_matches_real(monkeypatch, case, dtype, bias, fp8_recipe):
+def test_te_modules_fake_matches_real(monkeypatch, case, dtype, bias, fp8_recipe):
     """Compare fake outputs, saved buffers and gradients against the eager kernels."""
     from transformer_engine.pytorch.dynamo.custom_op import _parse_arg_type, _spec_view
 
@@ -2347,7 +2349,7 @@ def test_te_layernorm_module_fake_matches_real(monkeypatch, case, dtype, bias, f
             pytest.skip(
                 "cuBLAS FP8 GELU requires matching output and auxiliary dtypes (BF16 without bias)"
             )
-    module_name = "layernorm_linear" if case == "linear" else "layernorm_mlp"
+    module_name = case if case in ("linear", "layernorm_linear") else "layernorm_mlp"
     module = importlib.import_module(f"transformer_engine.pytorch.module.{module_name}")
     checked = []
 
@@ -2407,8 +2409,12 @@ def test_te_layernorm_module_fake_matches_real(monkeypatch, case, dtype, bias, f
 
     for direction in ("forward", "backward"):
         monkeypatch.setattr(module, f"_{module_name}_{direction}_impl", checked_impl(direction))
-    kwargs = dict(params_dtype=dtype, device="cuda", bias=bias, return_layernorm_output=True)
+    kwargs = dict(params_dtype=dtype, device="cuda", bias=bias)
+    if case != "linear":
+        kwargs["return_layernorm_output"] = True
     if case == "linear":
+        model = te.Linear(64, 32, **kwargs)
+    elif case == "layernorm_linear":
         model = te.LayerNormLinear(64, 32, **kwargs)
     else:
         model = te.LayerNormMLP(
@@ -2418,7 +2424,7 @@ def test_te_layernorm_module_fake_matches_real(monkeypatch, case, dtype, bias, f
         model.gemm_gelu_fusion = case == "mlp_gemm_gelu"
     inp = torch.randn(2, 16, 64, dtype=dtype, device="cuda", requires_grad=True)
     with te.autocast(enabled=fp8_recipe is not None, recipe=fp8_recipe):
-        outs = model(inp)
+        outs = _flatten_outputs(model(inp))
     sum(out.sum() for out in outs).backward()
     assert checked == ["forward", "backward"]
 
