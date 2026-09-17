@@ -5,15 +5,30 @@
 """Fusible operation for bias."""
 
 from __future__ import annotations
+from dataclasses import dataclass
 from typing import Optional
 
 import torch
 
 import transformer_engine_torch as tex
+from ...dynamo import TensorOrQuantized, TensorSpec
 from ...quantization import FP8GlobalStateManager
 from ..op import BasicOperation, OperationContext
 from ...utils import canonicalize_device, canonicalize_dtype
 from ...tensor import Quantizer
+
+
+@dataclass(slots=True)
+class BiasFwdArgs:
+    input_: torch.Tensor
+    bias: torch.Tensor
+    grad_input_quantizer: Optional[Quantizer]
+
+
+@dataclass(slots=True)
+class BiasBwdArgs:
+    grad_output: TensorOrQuantized
+    grad_input_quantizer: Optional[Quantizer]
 
 
 class Bias(BasicOperation):
@@ -112,6 +127,66 @@ class Bias(BasicOperation):
         super().pre_first_fuser_forward()
         if self.bias.device.type == "meta":
             self.reset_parameters()
+
+    fwd_args_type = BiasFwdArgs
+    bwd_args_type = BiasBwdArgs
+
+    def pack_forward_args(
+        self, basic_op_ctxs, input_, *, prev_op_grad_output_quantizer, basic_op_kwargs, **unused
+    ) -> BiasFwdArgs:
+        if basic_op_kwargs[0]:
+            raise ValueError("Bias forward does not expect keyword arguments")
+        quantizer = prev_op_grad_output_quantizer
+        if FP8GlobalStateManager.is_fp8_enabled():
+            if FP8GlobalStateManager.get_fp8_recipe().backward_override is not None:
+                quantizer = None
+        return BiasFwdArgs(input_, self.bias, quantizer)
+
+    @classmethod
+    def forward_compute(cls, args: BiasFwdArgs):
+        return args.input_ + args.bias, [()], ()
+
+    @classmethod
+    def forward_compute_fake(cls, args: BiasFwdArgs):
+        return (
+            TensorSpec(
+                shape=args.input_.shape,
+                dtype=torch.promote_types(args.input_.dtype, args.bias.dtype),
+                device=args.input_.device,
+            ),
+            [()],
+            (),
+        )
+
+    def forward_setup_context(self, basic_op_ctxs, args, aux) -> None:
+        basic_op_ctxs[0].grad_input_quantizer = args.grad_input_quantizer
+
+    def pack_backward_args(self, basic_op_ctxs, grad_output, **unused) -> BiasBwdArgs:
+        return BiasBwdArgs(grad_output, basic_op_ctxs[0].grad_input_quantizer)
+
+    @classmethod
+    def backward_compute(cls, args: BiasBwdArgs):
+        dy = args.grad_output
+        if dy.dim() == 1:
+            return None, [(dy.clone(),)], [()]
+        if args.grad_input_quantizer is None:
+            return None, [(dy.sum(tuple(range(dy.dim() - 1))),)], [()]
+        db, dx = tex.bgrad_quantize(dy, args.grad_input_quantizer)
+        return dx, [(db,)], [()]
+
+    @classmethod
+    def backward_compute_fake(cls, args: BiasBwdArgs):
+        dy = args.grad_output
+        dx = None
+        if len(dy.shape) > 1 and args.grad_input_quantizer is not None:
+            dx = TensorSpec(
+                shape=dy.shape,
+                dtype=dy.dtype,
+                device=dy.device,
+                quantizer=args.grad_input_quantizer,
+            )
+        db = TensorSpec(shape=(dy.shape[-1],), dtype=dy.dtype, device=dy.device)
+        return dx, [(db,)], [()]
 
     def op_forward(
         self,

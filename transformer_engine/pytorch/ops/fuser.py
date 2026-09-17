@@ -742,13 +742,6 @@ class OperationFuser:
     ) -> Optional[str]:
         """Why this pass may not run through its operations' custom ops."""
         ops = self._forward_ops if mode == "forward" else self._backward_ops
-        if len(ops) != self._num_basic_ops or any(
-            op is not self._basic_ops[idx] or basic_op_idxs != [idx]
-            for idx, (op, basic_op_idxs) in enumerate(ops)
-        ):
-            return f"a {mode} fusion"
-        if self._num_basic_ops != 1:
-            return "a group of several operations"
         for op, kwargs in zip(self._basic_ops, basic_op_kwargs, strict=True):
             # Only tensors. The other fields of an args container are values read
             # off the module, constant across calls and baked into the graph; a
@@ -761,6 +754,9 @@ class OperationFuser:
         for op in self._basic_ops:
             if op.num_extra_inputs or op.num_extra_outputs:
                 return f"{type(op).__name__} with extra tensor inputs or outputs"
+        for op, basic_op_idxs in ops:
+            if mode == "backward" and basic_op_idxs[-1] < self.first_op_requiring_backward:
+                continue
             reason = op.compile_unsupported_reason(mode)
             if reason is not None:
                 return reason

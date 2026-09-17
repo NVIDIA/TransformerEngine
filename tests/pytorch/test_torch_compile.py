@@ -2550,8 +2550,8 @@ def _check_ops(fn, model, x, dy, kwargs=None):
         ("single_forward", "without a custom op for backward", (True, False)),
         ("single_backward", "without a custom op for forward", (False, True)),
         ("single_eager", "without a custom op", (False, False)),
-        ("multi", "several operations", (False, False)),
-        ("backward_fusion", "backward fusion", (False, False)),
+        ("multi", None, (True, True)),
+        ("backward_fusion", "without a custom op for backward", (True, False)),
         ("legacy", "without a custom op", (False, False)),
     ],
 )
@@ -2689,3 +2689,89 @@ def test_te_ops_forward_kwargs_compile():
         for gain in (3.0, 5.0):
             _check_ops(compiled, model, x, dy, {"gain": gain})
     _assert_custom_ops(graphs[-1:], "_affineop", present=False)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("quantization", [None, "fp8"])
+@pytest.mark.parametrize("case", ["linear", "bias", "pair", "unfused"])
+@pytest.mark.parametrize("grads", ["all", "input", "weight", "bias", "none"])
+def test_te_ops_linear_bias_compile(dtype, quantization, case, grads, monkeypatch):
+    if quantization == "fp8" and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+    if (case == "linear" and grads == "bias") or (case == "bias" and grads == "weight"):
+        pytest.skip("Requested parameter is absent")
+    torch._dynamo.reset()
+    if case == "unfused":
+        monkeypatch.setattr(OperationFuser, "forward_fusion_functions", [])
+    ops = []
+    if case != "bias":
+        ops.append(te.ops.BasicLinear(32, 64, dtype=dtype))
+        ops[-1].weight.requires_grad_(grads in ("all", "weight"))
+    if case != "linear":
+        ops.append(te.ops.Bias(32 if case == "bias" else 64, dtype=dtype))
+        ops[-1].bias.requires_grad_(grads in ("all", "bias"))
+        with torch.no_grad():
+            ops[-1].bias.uniform_(-0.1, 0.1)
+    model = te.ops.Sequential(*ops)
+    quant_recipe = recipe.Float8CurrentScaling() if quantization == "fp8" else None
+
+    def run(x):
+        if quant_recipe is None:
+            return model(x)
+        with te.autocast(recipe=quant_recipe):
+            return model(x)
+
+    compiled, graphs = _compile_with_graphs(run)
+    x = torch.randn(2, 16, 32, device="cuda", dtype=dtype)
+    x.requires_grad_(grads in ("all", "input"))
+    targets = tuple(t for t in (x, *model.parameters()) if t.requires_grad)
+    graph_count = None
+    with torch.no_grad() if grads == "none" else contextlib.nullcontext():
+        for iteration in range(3):
+            with torch.no_grad():
+                x.uniform_(-0.5, 0.5)
+                for param in model.parameters():
+                    param.add_(0.001)
+            actual = compiled(x)
+            expected = run(x)
+            torch.testing.assert_close(actual, expected)
+            if targets:
+                dy = torch.randn_like(actual)
+                torch.testing.assert_close(
+                    torch.autograd.grad(actual, targets, dy),
+                    torch.autograd.grad(expected, targets, dy),
+                )
+            if quant_recipe is None:
+                reference = x
+                for op in ops:
+                    reference = (
+                        torch.nn.functional.linear(reference, op.weight)
+                        if isinstance(op, BasicLinear)
+                        else reference + op.bias
+                    )
+                torch.testing.assert_close(actual, reference, **dtype_tols(dtype))
+                if targets:
+                    torch.testing.assert_close(
+                        torch.autograd.grad(run(x), targets, dy),
+                        torch.autograd.grad(reference, targets, dy),
+                        **dtype_tols(dtype),
+                    )
+            if iteration == 1:
+                graph_count = len(graphs)
+            elif iteration == 2:
+                assert len(graphs) == graph_count
+    _assert_custom_ops(graphs, "forwardlinearbiasactivation", present=(case == "pair", False))
+    _assert_custom_ops(
+        graphs,
+        "basiclinear",
+        present=(
+            case in ("linear", "unfused"),
+            case != "bias" and grads in ("all", "input", "weight"),
+        ),
+    )
+    _assert_custom_ops(
+        graphs,
+        "bias",
+        present=(case in ("bias", "unfused"), case != "linear" and bool(targets)),
+    )

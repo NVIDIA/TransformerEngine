@@ -14,6 +14,7 @@ from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...quantization import FP8GlobalStateManager
 from ...tensor import Quantizer
 from ..basic import BasicLinear, Bias
+from ..basic.basic_linear import BasicLinearFwdArgs
 from ..op import FusedOperation, FusibleOperation, OperationContext
 
 
@@ -59,7 +60,19 @@ class ForwardLinearBiasActivation(FusedOperation):
         prev_op_grad_output_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
         basic_op_kwargs: list[dict[str, Any]],
+        use_custom_ops: bool = False,
     ) -> tuple[torch.Tensor, Sequence[Sequence[torch.Tensor]]]:
+
+        if use_custom_ops:
+            return super().fuser_forward(
+                basic_op_ctxs,
+                input_,
+                basic_op_extra_inputs=basic_op_extra_inputs,
+                prev_op_grad_output_quantizer=prev_op_grad_output_quantizer,
+                next_op_input_quantizer=next_op_input_quantizer,
+                basic_op_kwargs=basic_op_kwargs,
+                use_custom_ops=True,
+            )
 
         # Get basic operations
         idx = self._op_idxs["linear"]
@@ -149,6 +162,46 @@ class ForwardLinearBiasActivation(FusedOperation):
                 bias_op_ctx.grad_input_quantizer = None
 
         return output, [() for _ in range(len(self.basic_ops))]
+
+    fwd_args_type = BasicLinearFwdArgs
+
+    def compile_unsupported_reason(self, mode: str) -> Optional[str]:
+        reason = super().compile_unsupported_reason(mode)
+        if reason is not None:
+            return reason
+        return self.basic_ops[0].compile_unsupported_reason(mode)
+
+    def pack_forward_args(self, basic_op_ctxs, input_, *, basic_op_kwargs, **kwargs):
+        args = self.basic_ops[0].pack_forward_args(
+            basic_op_ctxs[:1], input_, basic_op_kwargs=basic_op_kwargs[:1], **kwargs
+        )
+        if self._op_idxs["bias"] is not None:
+            idx = self._op_idxs["bias"]
+            if basic_op_kwargs[idx]:
+                raise ValueError("Bias forward does not expect keyword arguments")
+            args.bias = self.basic_ops[idx].bias
+        return args
+
+    @classmethod
+    def forward_compute(cls, args: BasicLinearFwdArgs):
+        output, extras, aux = BasicLinear.forward_compute(args)
+        if args.bias is not None:
+            extras.append(())
+        return output, extras, aux
+
+    @classmethod
+    def forward_compute_fake(cls, args: BasicLinearFwdArgs):
+        output, extras, aux = BasicLinear.forward_compute_fake(args)
+        if args.bias is not None:
+            extras.append(())
+        return output, extras, aux
+
+    def forward_setup_context(self, basic_op_ctxs, args, aux) -> None:
+        self.basic_ops[0].forward_setup_context(basic_op_ctxs[:1], args, aux)
+        if self._op_idxs["bias"] is not None:
+            basic_op_ctxs[self._op_idxs["bias"]].grad_input_quantizer = (
+                args.grad_output_quantizer if args.backward_override is None else None
+            )
 
     @staticmethod
     def fuse_forward_ops(
