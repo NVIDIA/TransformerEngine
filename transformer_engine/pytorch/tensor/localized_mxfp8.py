@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Optional, Tuple
 
 import torch
@@ -16,6 +17,7 @@ from .vmm import VMMRowSplitAllocator
 
 
 _LOCALIZATION_CONTEXTS = {}
+_DRIVER_CONTEXT_OWNERS = {}
 
 
 def _get_localization_context(device_index: int):
@@ -26,28 +28,50 @@ def _get_localization_context(device_index: int):
     try:
         from torch.cuda.green_contexts import GreenContext, is_localization_supported
         from torch.cuda.memory import LocalizedMemPool, get_num_locality_domains
-    except ImportError as exc:
-        raise RuntimeError("This PyTorch build does not provide CUDA locality-domain APIs") from exc
+    except ImportError:
+        GreenContext = None
+        is_localization_supported = None
+        LocalizedMemPool = None
+        get_num_locality_domains = None
 
-    try:
-        supported = is_localization_supported(device_index)
-    except TypeError:
-        supported = is_localization_supported()
-    if not supported:
-        raise RuntimeError(f"CUDA device {device_index} does not support localization")
+    use_pytorch_locality = os.getenv("NVTE_FORCE_DRIVER_LOCALIZATION", "0") != "1"
+    if (
+        use_pytorch_locality
+        and GreenContext is not None
+        and is_localization_supported is not None
+        and LocalizedMemPool is not None
+        and get_num_locality_domains is not None
+    ):
+        try:
+            supported = is_localization_supported(device_index)
+        except TypeError:
+            supported = is_localization_supported()
+        if not supported:
+            raise RuntimeError(f"CUDA device {device_index} does not support localization")
 
-    num_domains = get_num_locality_domains(device_index)
-    if num_domains != 2:
-        raise RuntimeError(f"Expected exactly 2 locality domains, got {num_domains}")
+        num_domains = get_num_locality_domains(device_index)
+        if num_domains != 2:
+            raise RuntimeError(f"Expected exactly 2 locality domains, got {num_domains}")
 
-    green_contexts = tuple(
-        GreenContext.create(locality_domain_id=domain, device_id=device_index)
-        for domain in range(2)
-    )
-    mempools = tuple(LocalizedMemPool(domain, device=device_index) for domain in range(2))
-    for pool in mempools:
-        pool.alloc_in_order = True
-    streams = tuple(green_context.Stream() for green_context in green_contexts)
+        green_contexts = tuple(
+            GreenContext.create(locality_domain_id=domain, device_id=device_index)
+            for domain in range(2)
+        )
+        mempools = tuple(
+            LocalizedMemPool(domain, device=device_index) for domain in range(2)
+        )
+        for pool in mempools:
+            pool.alloc_in_order = True
+        streams = tuple(green_context.Stream() for green_context in green_contexts)
+    else:
+        from .driver_localization import DriverLocalityContext
+
+        owner = DriverLocalityContext(device_index)
+        _DRIVER_CONTEXT_OWNERS[device_index] = owner
+        green_contexts = owner.green_contexts
+        mempools = (None, None)
+        streams = owner.streams
+
     context = (green_contexts, mempools, streams)
     _LOCALIZATION_CONTEXTS[device_index] = context
     return context
@@ -133,6 +157,11 @@ class MXFP8LocalizedPair:
         if device_index is None:
             device_index = torch.cuda.current_device()
         green_contexts, mempools, streams = _get_localization_context(device_index)
+        if any(pool is None for pool in mempools):
+            raise RuntimeError(
+                "MXFP8LocalizedPair requires PyTorch LocalizedMemPool support; "
+                "use MXFP8VMMWorkspace with the CUDA-driver localization backend"
+            )
 
         parent_stream = torch.cuda.current_stream(device_index)
         fork_event = torch.cuda.Event(enable_timing=False)
