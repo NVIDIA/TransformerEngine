@@ -778,12 +778,17 @@ def _frost_availability():
 
 @pytest.mark.parametrize("model", model_configs_frost_attn.keys())
 @pytest.mark.parametrize("qkv_format", ["bshd", "sbhd"])
-@pytest.mark.parametrize("cp_comm_type", ["p2p", "all_gather", "a2a"])
+@pytest.mark.parametrize("cp_comm_type", ["p2p", "all_gather", "a2a", "a2a+p2p"])
 def test_cp_with_frost_attention(cp_pool, model, qkv_format, cp_comm_type):
     """Context parallelism at head_dim 512, which no other backend serves.
 
-    thd and a2a+p2p are excluded because the backend declines them: thd needs varlen support that
-    is not implemented, and a2a+p2p is not wired up.
+    thd is excluded because the backend declines it: it needs varlen support that is not
+    implemented.
+
+    a2a+p2p needs four ranks rather than two -- an a2a subgroup crossed with a p2p subgroup -- and
+    exercises no new attention code: it dispatches to the same AttnFuncWithCPAndKVP2P as plain p2p,
+    with an a2a communication stage on either side of the ring. It is covered here so that claim is
+    measured rather than assumed.
     """
     reason = _frost_availability()
     if reason is not None:
@@ -793,7 +798,15 @@ def test_cp_with_frost_attention(cp_pool, model, qkv_format, cp_comm_type):
     config.context_parallel = True
     config.cp_comm_type = cp_comm_type
 
-    pool = cp_pool(2)
+    # a2a requires num_heads and num_gqa_groups divisible by the a2a subgroup size; every config
+    # here satisfies that, but assert rather than rely on it staying true.
+    if cp_comm_type == "a2a+p2p":
+        assert config.num_heads % 2 == 0 and config.num_gqa_groups % 2 == 0, (
+            f"cp_comm_type=a2a+p2p needs num_heads ({config.num_heads}) and num_gqa_groups"
+            f" ({config.num_gqa_groups}) divisible by the a2a subgroup size"
+        )
+
+    pool = cp_pool(4 if cp_comm_type == "a2a+p2p" else 2)
 
     _submit(
         pool,
