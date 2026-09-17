@@ -156,7 +156,7 @@ class GatedDeltaNet2Attention(LinearAttentionBase):
 
     Gated DeltaNet v2 replaces Gated DeltaNet's scalar gates with channel-wise
     ones: ``g`` and ``beta`` carry one value per query/key channel and ``w`` one
-    value per value channel. The cuDNN frontend serves GDN-2 on Blackwell
+    value per value channel. The cuDNN frontend serves GDN-2 on Blackwell+
     (SM100/SM103/SM107) only.
 
     This module is **experimental** and subject to change.
