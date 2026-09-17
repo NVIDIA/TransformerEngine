@@ -91,9 +91,12 @@ _SKIP = _fa4_causal_unavailable()
 def test_fa4_causal_attention_is_not_all_zeros():
     """End to end: FA4 causal through DotProductAttention must match a float64 reference.
 
-    Pinned to FlashAttention because cuDNN FusedAttention wins backend selection for this shape and
-    would mask the defect entirely -- the first attempt at reproducing this measured a correct
-    result for exactly that reason.
+    Pins the backend three ways, because every one of them can silently turn this green while
+    measuring something else: cuDNN FusedAttention wins selection for this shape (the first attempt
+    at reproducing the bug measured a correct result for exactly that reason), the unfused path
+    would serve it too, and NVTE_FLASH_ATTN_V4=0 is exported by qa/L0_pytorch_unittest -- which
+    would leave FA2 answering a test named for FA4. The selected backend is asserted afterwards
+    rather than assumed, so a future lane cannot quietly opt this out again.
     """
     import os
 
@@ -107,9 +110,9 @@ def test_fa4_causal_attention_is_not_all_zeros():
     torch.manual_seed(0)
     q, k, v = (torch.randn(b, s, h, d, device="cuda", dtype=dtype) for _ in range(3))
 
-    saved = {key: os.environ.get(key) for key in ("NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN")}
-    os.environ["NVTE_FUSED_ATTN"] = "0"
-    os.environ["NVTE_UNFUSED_ATTN"] = "0"
+    pinned = {"NVTE_FUSED_ATTN": "0", "NVTE_UNFUSED_ATTN": "0", "NVTE_FLASH_ATTN_V4": "1"}
+    saved = {key: os.environ.get(key) for key in pinned}
+    os.environ.update(pinned)
     _attention_backends["backend_selection_requires_update"] = True
     try:
         dpa = DotProductAttention(
@@ -123,6 +126,14 @@ def test_fa4_causal_attention_is_not_all_zeros():
             else:
                 os.environ[key] = value
         _attention_backends["backend_selection_requires_update"] = True
+
+    # Prove FA4 actually answered before grading the numbers. Without this the test passes on FA2
+    # wherever FA4 is disabled, which is the default in at least one existing CI lane.
+    selected = _attention_backends["flash_attention_backend"]
+    assert selected is not None and str(selected).startswith("4"), (
+        f"expected FlashAttention 4 to serve this config, got {selected}; the test would otherwise"
+        " grade a backend it is not written for"
+    )
 
     # Stated separately from the tolerance check: an all-zero output is the specific failure this
     # test exists for, and it should be reported as such rather than as a large error.
