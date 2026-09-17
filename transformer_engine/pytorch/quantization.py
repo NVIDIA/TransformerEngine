@@ -405,6 +405,9 @@ class FP8GlobalState:
     global_amax_buffer: Dict[str, list] = field(default_factory=dict)
     global_amax_history_buffer: Dict[str, list] = field(default_factory=dict)
     global_scale_buffer: Dict[str, list] = field(default_factory=dict)
+    # Devices of each key's registered amax tensors. Modules placed off the
+    # current device (single-process multi-GPU) make a buffer span devices.
+    global_amax_devices: Dict[str, set] = field(default_factory=dict)
     fp8_tensors_recompute_buffer: list = field(default_factory=list)
     autocast_arguments: Dict[Any, Tuple[Recipe, Optional[dist_group_type]]] = field(
         default_factory=dict
@@ -555,12 +558,14 @@ class FP8GlobalStateManager:
                     fp8_meta[fp8_meta_tensor_key].amax_history
                 ]
                 qstate.global_scale_buffer[key] = [fp8_meta[fp8_meta_tensor_key].scale]
+                qstate.global_amax_devices[key] = {fp8_meta[fp8_meta_tensor_key].scale.device}
             else:
                 qstate.global_amax_buffer[key].append(fp8_meta[fp8_meta_tensor_key].amax_history[0])
                 qstate.global_amax_history_buffer[key].append(
                     fp8_meta[fp8_meta_tensor_key].amax_history
                 )
                 qstate.global_scale_buffer[key].append(fp8_meta[fp8_meta_tensor_key].scale)
+                qstate.global_amax_devices[key].add(fp8_meta[fp8_meta_tensor_key].scale.device)
             fp8_meta[index_in_buffer].append(len(qstate.global_amax_buffer[key]) - 1)
             fp8_meta[index_in_buffer].append(key)
 
@@ -653,6 +658,40 @@ class FP8GlobalStateManager:
             )
 
     @classmethod
+    def _update_amax_histories_and_scales(
+        cls,
+        contiguous_amax: torch.Tensor,
+        amax_buffer: List[torch.Tensor],
+        amax_histories: List[torch.Tensor],
+        scales: List[torch.Tensor],
+        recipe: Recipe,
+        forward: bool,
+    ) -> None:
+        """Update amax histories and scales from reduced amaxes that all live on one device."""
+        unfused_update = (
+            bool(int(os.getenv("NVTE_UNFUSED_FP8_UPDATE", "0")))
+            or callable(recipe.amax_compute_algo)
+            or callable(recipe.scaling_factor_compute_algo)
+        )
+        # The fused kernel launches on the current device, not the tensors' device.
+        with torch.cuda.device(contiguous_amax.device):
+            if not unfused_update:
+                tex.fused_amax_and_scale_update_after_reduction(
+                    contiguous_amax,
+                    amax_histories,
+                    scales,
+                    recipe.amax_compute_algo,
+                    get_fp8_te_dtype(recipe, forward),
+                    recipe.margin,
+                )
+            else:
+                split_and_copy(contiguous_amax, amax_buffer, [x.numel() for x in amax_buffer])
+                for amax_history, scale in zip(amax_histories, scales):
+                    _amax_and_scale_update(
+                        amax_history, scale, get_fp8_max(recipe, forward), recipe
+                    )
+
+    @classmethod
     def reduce_and_update_fp8_tensors(
         cls,
         forward: bool = True,
@@ -671,44 +710,63 @@ class FP8GlobalStateManager:
             if len(amax_buffer) == 0:
                 continue
 
-            # Retrieve autocast specific args and concat amaxes.
+            # Retrieve autocast specific args.
             recipe, group = qstate.autocast_arguments[autocast_key]
-            contiguous_amax = torch.cat(amax_buffer)
-
-            # Reduction.
-            if (
+            amax_histories = qstate.global_amax_history_buffer[buffer_key]
+            scales = qstate.global_scale_buffer[buffer_key]
+            need_reduce = (
                 recipe.reduce_amax
                 and torch.distributed.is_initialized()
                 and torch.distributed.get_world_size(group=group) > 1
-            ):
-                cls.reduce_tensor_across_group_op_max(contiguous_amax, group)
-
-            # Amax and scale update.
-            unfused_update = (
-                bool(int(os.getenv("NVTE_UNFUSED_FP8_UPDATE", "0")))
-                or callable(recipe.amax_compute_algo)
-                or callable(recipe.scaling_factor_compute_algo)
             )
 
-            if not unfused_update:
-                tex.fused_amax_and_scale_update_after_reduction(
-                    contiguous_amax,
-                    qstate.global_amax_history_buffer[buffer_key],
-                    qstate.global_scale_buffer[buffer_key],
-                    recipe.amax_compute_algo,
-                    get_fp8_te_dtype(recipe, forward),
-                    recipe.margin,
+            if len(qstate.global_amax_devices[buffer_key]) == 1:
+                contiguous_amax = torch.cat(amax_buffer)
+                if need_reduce:
+                    cls.reduce_tensor_across_group_op_max(contiguous_amax, group)
+                cls._update_amax_histories_and_scales(
+                    contiguous_amax, amax_buffer, amax_histories, scales, recipe, forward
                 )
-            else:
-                split_and_copy(contiguous_amax, amax_buffer, [x.numel() for x in amax_buffer])
+                continue
 
-                for amax_history, scale in zip(
-                    qstate.global_amax_history_buffer[buffer_key],
-                    qstate.global_scale_buffer[buffer_key],
-                ):
-                    _amax_and_scale_update(
-                        amax_history, scale, get_fp8_max(recipe, forward), recipe
-                    )
+            # Modules registered under one autocast live on several CUDA devices
+            # (single-process multi-GPU, e.g. accelerate.dispatch_model). Group the
+            # entries by device, keeping registration order within each group, and
+            # finalize each group on its own device.
+            by_device: Dict[torch.device, List[int]] = {}
+            for i, amax in enumerate(amax_buffer):
+                by_device.setdefault(amax.device, []).append(i)
+            group_amaxes = {
+                dev: torch.cat([amax_buffer[i] for i in idxs]) for dev, idxs in by_device.items()
+            }
+            if need_reduce:
+                # Keep the single collective over the whole buffer in registration
+                # order, so entry i still refers to the same quantizer on every
+                # rank: gather each device's entries to the first-registered device
+                # with one copy per device, reduce, and scatter back the same way.
+                reduce_device = amax_buffer[0].device
+                numels = [amax.numel() for amax in amax_buffer]
+                parts: List[torch.Tensor] = [None] * len(amax_buffer)
+                for dev, idxs in by_device.items():
+                    chunks = group_amaxes[dev].to(reduce_device).split([numels[i] for i in idxs])
+                    for i, chunk in zip(idxs, chunks):
+                        parts[i] = chunk
+                contiguous_amax = torch.cat(parts)
+                cls.reduce_tensor_across_group_op_max(contiguous_amax, group)
+                chunks = contiguous_amax.split(numels)
+                group_amaxes = {
+                    dev: torch.cat([chunks[i] for i in idxs]).to(dev)
+                    for dev, idxs in by_device.items()
+                }
+            for dev, idxs in by_device.items():
+                cls._update_amax_histories_and_scales(
+                    group_amaxes[dev],
+                    [amax_buffer[i] for i in idxs],
+                    [amax_histories[i] for i in idxs],
+                    [scales[i] for i in idxs],
+                    recipe,
+                    forward,
+                )
 
     @staticmethod
     def get_unique_autocast_key(

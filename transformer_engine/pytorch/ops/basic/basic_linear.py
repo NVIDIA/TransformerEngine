@@ -143,11 +143,6 @@ class BasicLinear(BasicOperation):
             out_features=out_features,
         )
 
-        # Initialize recipe state if needed for natively quantized weight
-        self._with_quantized_weight: bool = FP8GlobalStateManager.with_fp8_parameters()
-        if self._with_quantized_weight:
-            self.reset_recipe_state(recipe=FP8GlobalStateManager.get_fp8_recipe())
-
         # Initialize parameters if needed
         weight = torch.empty(
             self.local_out_features,
@@ -160,6 +155,13 @@ class BasicLinear(BasicOperation):
         self.register_parameter("weight", weight)
         self._rng_state_tracker_function: Optional[Callable[[], CudaRNGStatesTracker]]
         self._rng_state_tracker_function = rng_state_tracker_function
+
+        # Initialize recipe state if needed for natively quantized weight
+        # Note: After registering the weight so the state is allocated on its device.
+        self._with_quantized_weight: bool = FP8GlobalStateManager.with_fp8_parameters()
+        if self._with_quantized_weight:
+            self.reset_recipe_state(recipe=FP8GlobalStateManager.get_fp8_recipe())
+
         if weight.device.type != "meta":
             self.reset_parameters()
 
@@ -333,7 +335,8 @@ class BasicLinear(BasicOperation):
                 columnwise=torch.is_grad_enabled(),
             )
             quantizer.internal = False
-            with torch.no_grad():
+            # Quantize on the weight's device: TE kernels launch on the current device
+            with torch.cuda.device(weight.get_device()), torch.no_grad():
                 weight = quantizer(weight)
 
         # Save updated parameter

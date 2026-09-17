@@ -239,11 +239,6 @@ class GroupedLinear(BasicOperation):
         if dtype not in (torch.float32, torch.float16, torch.bfloat16):
             raise ValueError(f"Supported dtypes are float32, float16, bfloat16 (got {dtype})")
 
-        # Initialize recipe state if needed for natively quantized weight
-        self._with_quantized_weight: bool = FP8GlobalStateManager.with_fp8_parameters()
-        if self._with_quantized_weight:
-            self.reset_recipe_state(recipe=FP8GlobalStateManager.get_fp8_recipe())
-
         # RNG state tracker
         self._rng_state_tracker_function: Optional[Callable[[], CudaRNGStatesTracker]]
         self._rng_state_tracker_function = rng_state_tracker_function
@@ -277,6 +272,12 @@ class GroupedLinear(BasicOperation):
                 )
                 bias_tensor = torch.nn.Parameter(bias_tensor)
             self.register_parameter(f"bias{group_idx}", bias_tensor)
+
+        # Initialize recipe state if needed for natively quantized weight
+        # Note: After registering the weights so the state is allocated on their device.
+        self._with_quantized_weight: bool = FP8GlobalStateManager.with_fp8_parameters()
+        if self._with_quantized_weight:
+            self.reset_recipe_state(recipe=FP8GlobalStateManager.get_fp8_recipe())
 
         # Initialize weights if needed
         if device.type != "meta":
@@ -479,8 +480,9 @@ class GroupedLinear(BasicOperation):
                 )
                 quantizer.internal = False
 
-            # Quantize weights
-            weights = self._quantize_weights(weights, quantizers)
+            # Quantize on the weights' device: TE kernels launch on the current device
+            with torch.cuda.device(weights[0].get_device()):
+                weights = self._quantize_weights(weights, quantizers)
 
         # Register weights
         for group_idx, weight in enumerate(weights):

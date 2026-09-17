@@ -62,6 +62,7 @@ from ..utils import (
     is_non_tn_fp8_gemm_supported,
     torch_get_autocast_gpu_dtype,
     get_device_compute_capability,
+    get_module_device,
     get_nvtx_range_context,
     nvtx_range_push,
     nvtx_range_pop,
@@ -918,6 +919,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.wgrad_store = None
         self._output_quantizer_role: Optional[QuantizerRole] = None
         self._grad_input_quantizer_role: Optional[QuantizerRole] = None
+        # Current CUDA devices saved by prepare_forward and restored by end_forward.
+        # A stack so nested and activation-recompute forwards stay balanced.
+        self._forward_prev_devices: List[int] = []
 
         if not TEDebugState.debug_enabled:
             TEDebugState.initialize()
@@ -1151,6 +1155,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             mode=("forward" if fwd else "backward"),
             num_quantizers=num_fp8_tensors,
             roles=roles,
+            device=get_module_device(self),
         )
 
         # Reached the rebuild path because ``fp8_meta_tensors_initialized``
@@ -1592,53 +1597,78 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         allow_different_data_and_param_types: bool = False,
     ) -> torch.Tensor:
         """Checks and prepares for FWD execution."""
-        self.fast_setattr(
-            "allow_different_data_and_param_types", allow_different_data_and_param_types
-        )
-        self.fast_setattr("forwarded_at_least_once", True)
-
-        # Activation recomputation is used and this is the second forward phase.
-        if self.fp8 and in_fp8_activation_recompute_phase():
-            delayed_scaling_recipe = _has_delayed_scaling_state(self.fp8_meta)
-            FP8GlobalStateManager.get_old_fp8_meta_tensors_for_recompute(self.fp8_meta)
+        # TE kernels resolve their launch device from the current CUDA device, not
+        # from ``inp`` (e.g. the runtime-compiled kernel cache is keyed on
+        # cuda::current_device()). Pin the current device to the input's for the
+        # duration of the forward so that a module living off the current device
+        # (single-process multi-GPU, e.g. accelerate.dispatch_model) does not raise
+        # an illegal memory access. Restored in ``end_forward``, or here if
+        # preparation fails.
+        prev_device = torch.cuda.current_device()
+        if inp.is_cuda and inp.device.index != prev_device:
+            torch.cuda.set_device(inp.device.index)
         else:
-            if not inp.is_cuda:
-                raise RuntimeError(
-                    f"TransformerEngine needs CUDA. Got input on device: {inp.device}"
-                )
+            prev_device = -1
+        self._forward_prev_devices.append(prev_device)
+        try:
+            self.fast_setattr(
+                "allow_different_data_and_param_types", allow_different_data_and_param_types
+            )
+            self.fast_setattr("forwarded_at_least_once", True)
 
-            if self.tp_size > 1:
-                if not self.tp_group_initialized:
+            # Activation recomputation is used and this is the second forward phase.
+            if self.fp8 and in_fp8_activation_recompute_phase():
+                delayed_scaling_recipe = _has_delayed_scaling_state(self.fp8_meta)
+                FP8GlobalStateManager.get_old_fp8_meta_tensors_for_recompute(self.fp8_meta)
+            else:
+                if not inp.is_cuda:
                     raise RuntimeError(
-                        "Tensor parallel group not initialized. Call "
-                        "set_tensor_parallel_group() before forward pass when tp_size > 1."
+                        f"TransformerEngine needs CUDA. Got input on device: {inp.device}"
                     )
 
-            self.set_activation_dtype(inp)
-            self.init_fp8_metadata(num_gemms=num_gemms)
-            self._check_weight_tensor_recipe_correspondence()
+                if self.tp_size > 1:
+                    if not self.tp_group_initialized:
+                        raise RuntimeError(
+                            "Tensor parallel group not initialized. Call "
+                            "set_tensor_parallel_group() before forward pass when tp_size > 1."
+                        )
 
-            delayed_scaling_recipe = self.fp8 and _has_delayed_scaling_state(self.fp8_meta)
-            if delayed_scaling_recipe:
-                if self.sequence_parallel:
-                    assert (
-                        self.fp8_meta["recipe"].custom() or self.fp8_meta["recipe"].reduce_amax
-                    ), (
-                        "Amax reduction across tensor parallel group is "
-                        "necessary when using sequence parallelism with FP8."
-                    )
+                self.set_activation_dtype(inp)
+                self.init_fp8_metadata(num_gemms=num_gemms)
+                self._check_weight_tensor_recipe_correspondence()
 
-                if not FP8GlobalStateManager.fp8_graph_capturing():
-                    FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(self.fp8_meta)
+                delayed_scaling_recipe = self.fp8 and _has_delayed_scaling_state(self.fp8_meta)
+                if delayed_scaling_recipe:
+                    if self.sequence_parallel:
+                        assert (
+                            self.fp8_meta["recipe"].custom() or self.fp8_meta["recipe"].reduce_amax
+                        ), (
+                            "Amax reduction across tensor parallel group is "
+                            "necessary when using sequence parallelism with FP8."
+                        )
 
-                # Activation recomputation is used and this is the first forward phase.
-                if is_fp8_activation_recompute_enabled():
-                    FP8GlobalStateManager.copy_forward_fp8_meta_tensors_for_recompute(self.fp8_meta)
+                    if not FP8GlobalStateManager.fp8_graph_capturing():
+                        FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(self.fp8_meta)
 
-        nvtx_range_push(self.__class__.__name__ + " forward")
-        if not allow_non_contiguous and not inp.is_contiguous():
-            inp = inp.contiguous()
-        return inp
+                    # Activation recomputation is used and this is the first forward phase.
+                    if is_fp8_activation_recompute_enabled():
+                        FP8GlobalStateManager.copy_forward_fp8_meta_tensors_for_recompute(
+                            self.fp8_meta
+                        )
+
+            nvtx_range_push(self.__class__.__name__ + " forward")
+            if not allow_non_contiguous and not inp.is_contiguous():
+                inp = inp.contiguous()
+            return inp
+        except BaseException:
+            self._restore_forward_device()
+            raise
+
+    def _restore_forward_device(self) -> None:
+        """Restore the current CUDA device saved by ``prepare_forward``."""
+        prev_device = self._forward_prev_devices.pop()
+        if prev_device >= 0:
+            torch.cuda.set_device(prev_device)
 
     def end_forward(self):
         """
@@ -1649,6 +1679,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if delayed_scaling_recipe and self.fp8 and in_fp8_activation_recompute_phase():
             FP8GlobalStateManager.restore_fp8_meta_tensors(self.fp8_meta)
         nvtx_range_pop()
+        self._restore_forward_device()
 
     @contextmanager
     def prepare_forward_ctx(
@@ -1861,8 +1892,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     )
                     quantizer.amax_reduction_group = amax_reduction_group
                     quantizer.with_amax_reduction = True
-                # Quantize parameter
-                param = quantizer(param)
+                # Quantize parameter on its own device (see prepare_forward)
+                with torch.cuda.device(param.get_device()):
+                    param = quantizer(param)
 
             # Redo parameter wrap in case we broke it above
             # NOTE: Currently this can only be broken when primary weights are in Fp8 but
