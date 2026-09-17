@@ -31,7 +31,6 @@ class CrossEntropyFunction(torch.autograd.Function):
         reduce_loss=False,
         dist_process_group=None,
         ignore_idx=-100,
-        is_cg_capturable=False,
         overwrite_input=False,
     ):
         """Compute the loss and save the input and softmax statistics for backward."""
@@ -62,7 +61,6 @@ class CrossEntropyFunction(torch.autograd.Function):
         ctx.rank = rank
         ctx.world_size = world_size
         ctx.ignore_idx = ignore_idx
-        ctx.is_cg_capturable = is_cg_capturable
         ctx.overwrite_input = overwrite_input
         ctx.did_backward = False
         return loss
@@ -90,11 +88,10 @@ class CrossEntropyFunction(torch.autograd.Function):
             ctx.rank,
             ctx.world_size,
             ctx.ignore_idx,
-            ctx.is_cg_capturable,
         )
         if ctx.overwrite_input:
             torch.autograd.graph.increment_version(saved_input)
-        return grad_input, None, None, None, None, None, None, None
+        return grad_input, None, None, None, None, None, None
 
 
 def _validate_inputs(
@@ -136,7 +133,6 @@ def _parallel_cross_entropy_overwrite_input(
     reduce_loss: bool,
     dist_process_group: Optional[torch.distributed.ProcessGroup],
     ignore_idx: int,
-    is_cg_capturable: bool,
 ) -> torch.Tensor:
     """Run destructive cross entropy outside Torch Dynamo's compiled graph."""
 
@@ -147,7 +143,6 @@ def _parallel_cross_entropy_overwrite_input(
         reduce_loss,
         dist_process_group,
         ignore_idx,
-        is_cg_capturable,
         True,
     )
 
@@ -191,7 +186,7 @@ def parallel_cross_entropy(
     ignore_idx : int, default = -100
         Target value for ignored rows.
     is_cg_capturable : bool, default = False
-        Whether the operation is CUDA graph capturable.
+        Deprecated and unused. The operation is always CUDA graph capturable.
     overwrite_input : bool, default = False
         Allow ``inp`` to be overwritten during backward. The input must be
         contiguous and cannot be reused afterward. This mode is incompatible with
@@ -210,6 +205,13 @@ def parallel_cross_entropy(
         )
         inp = _input
 
+    if is_cg_capturable:
+        warnings.warn(
+            "The 'is_cg_capturable' parameter is deprecated and has no effect. "
+            "The operation is always CUDA graph capturable.",
+            FutureWarning,
+        )
+
     _validate_inputs(inp, target, label_smoothing, overwrite_input)
     if overwrite_input:
         return _parallel_cross_entropy_overwrite_input(
@@ -219,7 +221,6 @@ def parallel_cross_entropy(
             reduce_loss,
             dist_process_group,
             ignore_idx,
-            is_cg_capturable,
         )
     return CrossEntropyFunction.apply(
         inp,
@@ -228,6 +229,5 @@ def parallel_cross_entropy(
         reduce_loss,
         dist_process_group,
         ignore_idx,
-        is_cg_capturable,
         overwrite_input,
     )
