@@ -14,7 +14,7 @@ What is Transformer Engine?
 ===========================
 .. overview-begin-marker-do-not-remove
 
-Transformer Engine (TE) is an NVIDIA library for accelerating Transformer training on NVIDIA GPUs.
+Transformer Engine (TE) is an NVIDIA library for accelerating Transformer model training on NVIDIA GPUs.
 It combines optimized building blocks and fused kernels with automatic mixed-precision-style APIs
 for PyTorch and JAX, so low-precision training can be adopted without rewriting a training stack.
 
