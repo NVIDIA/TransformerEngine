@@ -6,19 +6,30 @@
 
 import dataclasses
 import queue
-from typing import Any, Callable, List, Optional, Tuple, Union
+from typing import Any, Callable, List, Optional, Sequence, Tuple, Union
 
 import torch
 
 from .. import cpp_extensions as tex
 from ..constants import TE_DType
 from ..distributed import in_fp8_activation_recompute_phase
-from ..dynamo import TensorSpec
+from ..dynamo import TensorSpec, is_value_opaque_quantizer
 from ..export import is_in_onnx_export_mode
 from ..quantization import FP8GlobalStateManager
 from ..quantized_tensor import Quantizer
 from ..tensor.hybrid_tensor import HybridQuantizer
 from ..utils import get_default_init_method
+
+
+def compile_unsupported_quantizer_reason(
+    quantizers: Sequence[Optional[Quantizer]],
+) -> Optional[str]:
+    """Return a fallback reason if a quantizer cannot cross the custom-op boundary."""
+    for quantizer in quantizers:
+        # Delayed-scaling and unregistered custom-recipe quantizers are not value-opaque.
+        if quantizer is not None and not is_value_opaque_quantizer(quantizer):
+            return "a quantizer not registered as a torch.compile value-opaque type"
+    return None
 
 
 def set_quantizer_amax_reduction_group(quantizer, amax_reduction_group) -> None:

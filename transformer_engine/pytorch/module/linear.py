@@ -32,6 +32,7 @@ from .base import (
     _2X_ACC_WGRAD,
 )
 from ._common import (
+    compile_unsupported_quantizer_reason,
     can_reconstruct_wgrad_input_from_original,
     check_fp8_reduce_and_update,
     fake_workspace_valid,
@@ -93,7 +94,6 @@ from ..dynamo import (
     TensorSpec,
     TensorOrQuantized,
     register_custom_op,
-    is_value_opaque_quantizer,
 )
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
@@ -183,22 +183,6 @@ class LinearFwdArgs:
     # --- Misc ---
     cpu_offloading: bool
     is_grad_enabled: bool
-
-    def compile_unsupported_quantizer_reason(self) -> Optional[str]:
-        """Check prepared quantizers; other fallback checks run before prepare_forward."""
-        for quantizer in (
-            self.input_quantizer,
-            self.weight_quantizer,
-            self.output_quantizer,
-            self.grad_input_quantizer,
-            self.grad_weight_quantizer,
-            self.grad_output_quantizer,
-        ):
-            # e.g. delayed-scaling Float8Quantizer and unregistered custom-recipe
-            # quantizers are not value-opaque and can't cross the custom-op boundary.
-            if quantizer is not None and not is_value_opaque_quantizer(quantizer):
-                return "a quantizer not registered as a torch.compile value-opaque type"
-        return None
 
 
 @dataclass(slots=True)
@@ -2468,7 +2452,7 @@ class Linear(TransformerEngineBaseModule):
 
             if use_compiled_op:
                 # Safety net for quantizer-dependent conditions only.
-                fallback_reason = fwd_args.compile_unsupported_quantizer_reason()
+                fallback_reason = compile_unsupported_quantizer_reason(quantizers)
                 if fallback_reason is not None:
                     warn_compile_eager_fallback(fallback_reason)
                     torch._dynamo.graph_break(
