@@ -728,6 +728,43 @@ def test_dpa_fa4_mla(dtype, model_configs, model):
     test_dot_product_attention(dtype, model_configs, model, False, "bshd_bshd_bshd", False, False)
 
 
+fa3_enabled = bool(int(os.getenv("NVTE_FLASH_ATTN", "1"))) and bool(
+    int(os.getenv("NVTE_FLASH_ATTN_V3", "1"))
+)
+requires_fa3 = pytest.mark.skipif(
+    not fa3_enabled
+    or not FlashAttentionUtils.v3_is_installed
+    or device_compute_capability < (9, 0),
+    reason="Enabled Flash-attn v3 and compute capability >= SM90 are required.",
+)
+
+model_configs_fa3_mla = {
+    # test: ModelConfig(b, sq, hq, dqk, head_dim_v=dv)
+    # DeepSeek-style MLA, and the second mismatch branch of _is_fa3_supported.
+    "fa3_mla_1": ModelConfig(2, 1024, 16, 192, head_dim_v=128, attn_mask_type="causal"),
+    "fa3_mla_2": ModelConfig(2, 512, 16, 64, head_dim_v=512),
+}
+
+
+@requires_fa3
+@pytest.mark.parametrize("dtype", param_types_lean)
+@pytest.mark.parametrize("model_configs", [model_configs_fa3_mla])
+@pytest.mark.parametrize("model", model_configs_fa3_mla.keys())
+def test_dpa_fa3_mla(dtype, model_configs, model, monkeypatch):
+    """Training with head_dim_qk != head_dim_v must produce correct results.
+
+    FA3's forward supports these shapes, so backend selection used to hand
+    training to it and the backward crashed inside ``flash_attn_3_cuda.bwd``
+    (Dao-AILab/flash-attention#1487). FusedAttention is disabled here so the
+    selection has to reject FA3 on its own; forward and backward then run on a
+    viable backend and are compared against the reference like any other
+    configuration.
+    """
+    monkeypatch.setenv("NVTE_FUSED_ATTN", "0")
+    _attention_backends["backend_selection_requires_update"] = True
+    test_dot_product_attention(dtype, model_configs, model, False, "bshd_bshd_bshd", False, False)
+
+
 model_configs_fa4_swa = {
     # test: ModelConfig(b, sq, hq, dqk, window_size=(left, right))
     "fa4_swa_1": ModelConfig(2, 2048, 16, 128, attn_mask_type="causal", window_size=(128, 0)),
