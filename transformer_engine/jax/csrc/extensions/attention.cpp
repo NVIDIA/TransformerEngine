@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "../extensions.h"
+#include "common/cudnn_utils.h"
 #include "transformer_engine/fused_attn.h"
 #include "transformer_engine/transformer_engine.h"
 
@@ -946,33 +947,6 @@ std::mutex &getScoreModGraphCacheMutex() {
   return mutex;
 }
 
-struct ScoreModCudnnHandleCache {
-  std::unordered_map<int, cudnnHandle_t> handles;
-
-  cudnnHandle_t GetHandle() {
-    int device_id = 0;
-    NVTE_CHECK_CUDA(cudaGetDevice(&device_id));
-    auto it = handles.find(device_id);
-    if (it == handles.end()) {
-      cudnnHandle_t handle = nullptr;
-      NVTE_CHECK_CUDNN(cudnnCreate(&handle));
-      it = handles.emplace(device_id, handle).first;
-    }
-    return it->second;
-  }
-
-  ~ScoreModCudnnHandleCache() {
-    for (auto &[_, handle] : handles) {
-      cudnnDestroy(handle);
-    }
-  }
-};
-
-cudnnHandle_t GetScoreModCudnnHandle() {
-  static thread_local ScoreModCudnnHandleCache cache;
-  return cache.GetHandle();
-}
-
 ScoreModGraphCacheKey GetScoreModGraphCacheKey(Dictionary &attrs) {
   const int64_t frontend_version = get_attr_value<int64_t>(attrs, "cudnn_frontend_version");
   NVTE_CHECK(frontend_version == CUDNN_FRONTEND_VERSION,
@@ -1006,7 +980,7 @@ ScoreModGraphPtr GetScoreModGraph(cudaStream_t stream, Dictionary &attrs) {
   const auto serialized_graph = get_attr_value<std::string_view>(attrs, "serialized_graph");
   std::vector<uint8_t> serialized_data(serialized_graph.begin(), serialized_graph.end());
 
-  auto handle = GetScoreModCudnnHandle();
+  auto handle = cudnnExecutionPlanManager::Instance().GetHandle();
   NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
 
   auto graph = std::make_shared<cudnn_frontend::graph::Graph>();
@@ -1060,7 +1034,7 @@ Error_Type ExecuteScoreModGraph(cudaStream_t stream, Dictionary &attrs,
     variant_pack.emplace(scalar_uids[i], scalar_storage[i].data.data());
   }
 
-  auto handle = GetScoreModCudnnHandle();
+  auto handle = cudnnExecutionPlanManager::Instance().GetHandle();
   NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
   auto status = graph->execute(handle, variant_pack, workspace);
   NVTE_CHECK(status.is_good(),
