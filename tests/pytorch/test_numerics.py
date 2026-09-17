@@ -1013,7 +1013,7 @@ class _UpdateCounter:
         return [m.fp8_meta["scaling_bwd"].amax_history[0] for m in self._modules]
 
     def __enter__(self):
-        self._original = FP8GlobalStateManager.reduce_and_update_quantization_state.__func__
+        self._original = FP8GlobalStateManager.reduce_and_update_fp8_tensors.__func__
         original = self._original
         counter = self
 
@@ -1028,11 +1028,11 @@ class _UpdateCounter:
                     assert not amax.any(), "backward update did not roll the amax history"
             return result
 
-        FP8GlobalStateManager.reduce_and_update_quantization_state = classmethod(counted)
+        FP8GlobalStateManager.reduce_and_update_fp8_tensors = classmethod(counted)
         return self
 
     def __exit__(self, *exc):
-        FP8GlobalStateManager.reduce_and_update_quantization_state = classmethod(self._original)
+        FP8GlobalStateManager.reduce_and_update_fp8_tensors = classmethod(self._original)
 
 
 def _make_update_test_model(num_layers=3, seed=1234):
