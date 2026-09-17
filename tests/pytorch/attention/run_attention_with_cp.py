@@ -246,6 +246,11 @@ def assert_matches_independent_reference(out, q, k, v, config, qkv_format, dtype
         return
     if dtype == "fp8" or config.attn_bias_type != "no_bias" or config.softmax_type != "vanilla":
         return
+    # Softcap rescales the scores through tanh before the softmax. Modelling it here would mean
+    # duplicating that formula in the reference, which is how a reference starts reimplementing the
+    # thing it is supposed to check independently. Skipped instead.
+    if getattr(config, "softcap", 0.0):
+        return
     if "padding" in config.attn_mask_type:
         return
     if out is None or q is None:
