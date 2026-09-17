@@ -903,8 +903,9 @@ def test_illegal_2D_by_2D_enforced(
 @pytest.mark.parametrize(
     "M, K, N, legalX1d, legalX2d",
     [
-        # M dim unconstrained when X is 2D.
-        (255, 128, 256, False, True),
+        # Hopper block-scaling layouts require M and N to be multiples of 4.
+        # 1D scaling has the stronger multiple-of-8 requirement.
+        (255, 128, 256, False, False),
         # K must be multiple of 16
         (256, 120, 256, False, False),
         # N must be a multiple of 8
@@ -952,7 +953,7 @@ def test_unaligned_shapes(
             use_split_accumulator,
             is_x_1d_scaled,
             is_w_1d_scaled,
-            expected_err_msg="dimension requirement",
+            expected_err_msg="requires (leading dimension|[mn]) .*divisible",
         )
     else:
         cublas_gemm_fp8_blockwise_case(

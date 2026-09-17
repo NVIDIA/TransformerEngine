@@ -369,6 +369,16 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
                  n, " (m=", m, ", k=", k,
                  ")."
                  " See https://docs.nvidia.com/cuda/cublas/#tensor-core-usage.");
+    } else {
+      // Hopper FP32-scale block-scaling layouts require both outer GEMM
+      // dimensions to be multiples of 4. The 1D case above has the stronger
+      // 8-element requirement from the output/stride alignment.
+      NVTE_CHECK((n % 4) == 0,
+                 "Block-scaled FP8 GEMM requires n to be divisible by 4 for 2D block scaling,"
+                 " got n=",
+                 n, " (m=", m, ", k=", k,
+                 ")."
+                 " See https://docs.nvidia.com/cuda/cublas/#d-block-scaling-factors-layout.");
     }
   } else {
     NVTE_ERROR("B has unsupported scaling mode");

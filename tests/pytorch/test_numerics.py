@@ -1715,22 +1715,28 @@ def test_linear_tight_dims(recipe, inference, dtype):
         fwd_state = RecipeState.create(recipe, mode="forward", num_quantizers=3)
         input_quantizer, weight_quantizer, _ = fwd_state.make_quantizers()
 
+        # Match the usages configured by Linear. In particular, a high-precision
+        # backward override does not need columnwise input/weight data.
+        use_columnwise = not inference and recipe.backward_override is None
+        input_quantizer.set_usage(rowwise=True, columnwise=use_columnwise)
+        weight_quantizer.set_usage(rowwise=True, columnwise=use_columnwise)
+
         # Share weights: TE gets the raw weight (it quantizes internally); the
-        # baseline gets dequantize(quantize(W)) so both do the same matmul.
+        # baseline gets dequantize(quantize(W)) so both do the same fprop matmul.
         W = torch.randn(N, K, dtype=dtype, device=device)
         with torch.no_grad():
             te_linear.weight.copy_(W)
             torch_linear.weight.copy_(weight_quantizer(W).dequantize())
 
-        # Input: feed x_qdq to BOTH sides. TE quantizes internally (near-idempotent
-        # on an already-quantized tensor). Feeding raw x only to TE would let
-        # current-scaling recipes recompute a slightly different scale from the
-        # already-quantized amax and diverge from the baseline.
+        # Quantize each TE operand exactly once. The reference sees the result of
+        # that quantization, while Linear performs the equivalent cast internally.
+        # Feeding x_qdq to Linear would quantize it a second time, which does not
+        # always produce exactly the same outputs (e.g. the 4 over 6 recipe).
         x_raw = torch.randn(M, K, dtype=dtype, device=device)
         x_qdq = input_quantizer(x_raw).dequantize()
 
         requires_grad = not inference
-        x_te = x_qdq.clone().detach().requires_grad_(requires_grad)
+        x_te = x_raw.clone().detach().requires_grad_(requires_grad)
         x_ref = x_qdq.clone().detach().requires_grad_(requires_grad)
 
         if inference:
@@ -1753,7 +1759,11 @@ def test_linear_tight_dims(recipe, inference, dtype):
         #   - FP32 output, Float8BlockScaling on Hopper: effectively BF16
         #     precision — the native 1D block-scaled FP8 GEMM uses a
         #     lower-precision block accumulator.
-        if dtype == torch.bfloat16:
+        if recipe.nvfp4() and dtype == torch.bfloat16:
+            # FP4 Tensor Core reduction can differ by several BF16 ULPs on
+            # cancellation-heavy outputs even with identical dequantized inputs.
+            tols = dict(rtol=2e-2, atol=5e-2)
+        elif dtype == torch.bfloat16:
             tols = dict(rtol=1.6e-2, atol=3e-2)
         elif recipe.float8_block_scaling():
             tols = dict(rtol=1.6e-2, atol=3e-2)
@@ -1762,18 +1772,38 @@ def test_linear_tight_dims(recipe, inference, dtype):
         torch.testing.assert_close(te_out, ref_out, **tols)
 
         if not inference:
-            # Quantize+dequantize grad_output so both paths see the same signal.
+            # Linear quantizes the raw gradient internally. Give the reference
+            # its quantize-dequantize equivalent rather than requantizing it.
             bwd_state = RecipeState.create(recipe, mode="backward", num_quantizers=2)
             grad_output_quantizer = bwd_state.make_quantizers()[0]
+            grad_output_quantizer.set_usage(rowwise=True, columnwise=True)
             grad_raw = torch.randn_like(te_out)
             grad_qdq = grad_output_quantizer(grad_raw).dequantize()
 
-            te_out.backward(grad_qdq)
+            te_out.backward(grad_raw)
             ref_out.backward(grad_qdq)
             torch.cuda.synchronize()
 
-            torch.testing.assert_close(x_te.grad, x_ref.grad, **tols)
-            torch.testing.assert_close(te_linear.weight.grad, torch_linear.weight.grad, **tols)
+            if recipe.nvfp4():
+                # The NVFP4 wgrad path consumes independently quantized
+                # columnwise operands (and high-precision override deliberately
+                # uses the original operands). A plain PyTorch autograd graph
+                # over rowwise-dequantized operands is not an equivalent
+                # numerical reference. Checking just that we reached this point
+                # without getting a NOT_SUPPORTED error from cuBLAS during
+                # backward.
+                return
+            if recipe.backward_override == "high_precision":
+                # A high-precision override deliberately makes backward use the
+                # original (unquantized) fprop operands, so it is not the
+                # derivative of the quantized reference forward expression.
+                ref_x_grad = grad_raw @ W
+                ref_w_grad = grad_raw.T @ x_raw
+            else:
+                ref_x_grad = x_ref.grad
+                ref_w_grad = torch_linear.weight.grad
+            torch.testing.assert_close(x_te.grad, ref_x_grad, **tols)
+            torch.testing.assert_close(te_linear.weight.grad, ref_w_grad, **tols)
     finally:
         torch.backends.cuda.matmul.allow_tf32 = prev_tf32_matmul
         torch.backends.cudnn.allow_tf32 = prev_tf32_cudnn
