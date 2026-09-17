@@ -23,7 +23,7 @@
   <g id="linearization">
     <!-- Left: Scaling factors grid -->
     <!-- Main rectangle with white background -->
-    <rect x="40" y="40" width="120" height="240" fill="#FFFFFF" stroke="#444" stroke-width="2"/>
+    <rect x="40" y="40" width="120" height="240" class="diagram-bg tensor-outline" fill="#FFFFFF" stroke="#444" stroke-width="2"/>
     
     <!-- Orange grid area (upper-left) -->
     <rect x="40" y="40" width="60" height="180" fill="#FFA500" stroke="#444" stroke-width="2"/>
@@ -72,14 +72,14 @@
     
     <!-- Arrow pointing to first block with label 128x4 -->
     <text x="50" y="0" class="label" text-anchor="middle">128x4</text>
-    <path d="M 50 5 L 50 38" class="arrow-line" marker-end="url(#arrowhead)"/>
+    <path d="M 50 5 L 50 38" class="arrow-line tensor-outline" marker-end="url(#arrowhead)"/>
     
     <!-- Arrow -->
-    <path d="M 200 150 L 300 150" class="arrow-line" marker-end="url(#arrowhead)"/>
+    <path d="M 200 150 L 300 150" class="arrow-line tensor-outline" marker-end="url(#arrowhead)"/>
     
     <!-- Right: Linearized 1D array -->
     <!-- Main rectangle with white background -->
-    <rect x="340" y="140" width="520" height="20" fill="#FFFFFF" stroke="#444" stroke-width="2"/>
+    <rect x="340" y="140" width="520" height="20" class="diagram-bg tensor-outline" fill="#FFFFFF" stroke="#444" stroke-width="2"/>
     
     <!-- Orange cells -->
     <rect x="340" y="140" width="70" height="20" fill="#FFA500" stroke="#444" stroke-width="2"/>
@@ -89,7 +89,7 @@
     <text x="445" y="150" class="num-text">2</text>
     
     <rect x="480" y="140" width="70" height="20" fill="#FFA500" stroke="#444" stroke-width="2"/>
-    <text x="515" y="150" class="dots-text">…</text>
+    <text x="515" y="150" class="dots-text on-light-bg">…</text>
     
     <rect x="550" y="140" width="70" height="20" fill="#FFA500" stroke="#444" stroke-width="2"/>
     <text x="585" y="150" class="num-text">K + 1</text>
@@ -102,7 +102,7 @@
     
     <!-- Arrow pointing to first linearized block with label 1x512 -->
     <text x="375" y="75" class="label" text-anchor="middle">1x512</text>
-    <path d="M 375 80 L 375 138" class="arrow-line" marker-end="url(#arrowhead)"/>
+    <path d="M 375 80 L 375 138" class="arrow-line tensor-outline" marker-end="url(#arrowhead)"/>
   </g>
   
   <!-- ======== Connection: Arrow from "1" to bottom left block with brace ======== -->
@@ -118,10 +118,10 @@
              Q 250 345, 255 345
              L 375 345
              Q 385 345, 385 355" 
-          fill="none" stroke="#444" stroke-width="2"/>
+          class="tensor-outline" fill="none" stroke="#444" stroke-width="2"/>
     
     <!-- Arrow from "1" cell down to the center of the brace -->
-    <path d="M 375 175 Q 375 260, 250 315" class="arrow-line" marker-end="url(#arrowhead)"/>
+    <path d="M 375 175 Q 375 260, 250 315" class="arrow-line tensor-outline" marker-end="url(#arrowhead)"/>
   </g>
   
   <!-- ======== PART 2: Swizzling (from mxfp8_swizzle_indices.svg) ======== -->
@@ -152,11 +152,11 @@
       <text x="180" y="50" class="num-text-small">5</text>
       <text x="210" y="50" class="num-text-small">6</text>
       <text x="240" y="50" class="num-text-small">7</text>
-      <text x="270" y="50" class="dots-text-small">...</text>
+      <text x="270" y="50" class="dots-text-small on-light-bg">...</text>
     </g>
     
     <!-- Arrow -->
-    <path d="M 300 50 L 340 50" class="arrow-line" marker-end="url(#arrowhead)"/>
+    <path d="M 300 50 L 340 50" class="arrow-line tensor-outline" marker-end="url(#arrowhead)"/>
     
     <!-- Right: Swizzled indices -->
     <g id="swizzled">
@@ -183,7 +183,7 @@
       <text x="525" y="50" class="num-text-small">33</text>
       <text x="555" y="50" class="num-text-small">65</text>
       <text x="585" y="50" class="num-text-small">97</text>
-      <text x="615" y="50" class="dots-text-small">...</text>
+      <text x="615" y="50" class="dots-text-small on-light-bg">...</text>
     </g>
   </g>
 </svg>

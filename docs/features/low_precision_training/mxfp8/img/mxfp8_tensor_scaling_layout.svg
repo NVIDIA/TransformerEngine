@@ -9,7 +9,7 @@
   
   <!-- Left tensor (128x128 blocks) - FP8 tensor -->
   <!-- Main rectangle with white background -->
-  <rect x="60" y="40" width="260" height="240" fill="#FFFFFF" stroke="#444" stroke-width="2"/>
+  <rect x="60" y="40" width="260" height="240" class="diagram-bg tensor-outline" fill="#FFFFFF" stroke="#444" stroke-width="2"/>
   
   <!-- Blue grid area (upper-left) -->
   <rect x="60" y="40" width="180" height="180" fill="#87CEEB" stroke="#444" stroke-width="2"/>
@@ -37,7 +37,7 @@
   
   <!-- Right tensor (128x4 blocks) - Scaling factors (orange) -->
   <!-- Main rectangle with white background -->
-  <rect x="480" y="40" width="120" height="240" fill="#FFFFFF" stroke="#444" stroke-width="2"/>
+  <rect x="480" y="40" width="120" height="240" class="diagram-bg tensor-outline" fill="#FFFFFF" stroke="#444" stroke-width="2"/>
   
   <!-- Orange grid area (upper-left) -->
   <rect x="480" y="40" width="60" height="180" fill="#FFA500" stroke="#444" stroke-width="2"/>

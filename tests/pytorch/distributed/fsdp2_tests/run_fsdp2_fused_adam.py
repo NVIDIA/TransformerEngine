@@ -1733,6 +1733,10 @@ def test_fused_adam_hybrid_scale_uniform_across_shards(hybrid_recipe_name):
     ), f"missing hybrid current-scaling directions: {checked}"
 
 
+@pytest.mark.skipif(
+    not te.is_fp8_available(),
+    reason=te.is_fp8_available(return_reason=True)[1],
+)
 def test_fused_adam_hybrid_identity_fp8_master_weights():
     """FSDP2 + FusedAdam with Hybrid(FP8 current rowwise, Identity columnwise).
 

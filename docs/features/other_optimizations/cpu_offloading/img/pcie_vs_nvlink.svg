@@ -6,7 +6,7 @@
       .label { font: 12px sans-serif; fill: #333; text-anchor: middle; }
       .memory-label { font: 12px sans-serif; fill: #333; text-anchor: middle; }
       .small-text { font: 11px sans-serif; fill: #555; text-anchor: middle; }
-      .speed-text { font: bold 11px sans-serif; fill: #fff; text-anchor: middle; }
+      .speed-text { font: bold 11px sans-serif; fill: #1a1a1a; text-anchor: middle; }
       
       .cpu-box { fill: #9db4d0; stroke: #444; stroke-width: 2; }
       .gpu-box { fill: #a8d99c; stroke: #444; stroke-width: 2; }
@@ -60,7 +60,7 @@
   <line x1="275" y1="125" x2="275" y2="145" class="connector"/>
 
   <!-- PCIe Connection (between frames) -->
-  <line x1="160" y1="135" x2="210" y2="135" class="connector"/>
+  <line x1="160" y1="135" x2="210" y2="135" class="connector connector-ext"/>
   <rect x="165" y="120" width="40" height="30" rx="4" class="pcie-bar"/>
   <text x="185" y="139" class="speed-text">PCIe</text>
   
@@ -89,7 +89,7 @@
   <line x1="465" y1="130" x2="465" y2="150" class="connector"/>
 
   <!-- NVLink-C2C Connection (GPU 1 to CPU) -->
-  <line x1="520" y1="108" x2="575" y2="108" class="connector"/>
+  <line x1="520" y1="108" x2="575" y2="108" class="connector connector-ext"/>
   <rect x="527" y="95" width="40" height="26" rx="4" class="nvlink-bar"/>
   <text x="547" y="108" class="speed-text" style="font-size: 9px;">NVLink</text>
   <text x="547" y="117" class="speed-text" style="font-size: 9px;">C2C</text>
@@ -108,7 +108,7 @@
   <line x1="630" y1="130" x2="630" y2="150" class="connector"/>
 
   <!-- NVLink-C2C Connection (CPU to GPU 2) -->
-  <line x1="685" y1="108" x2="740" y2="108" class="connector"/>
+  <line x1="685" y1="108" x2="740" y2="108" class="connector connector-ext"/>
   <rect x="692" y="95" width="40" height="26" rx="4" class="nvlink-bar"/>
   <text x="712" y="108" class="speed-text" style="font-size: 9px;">NVLink</text>
   <text x="712" y="117" class="speed-text" style="font-size: 9px;">C2C</text>

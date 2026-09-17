@@ -184,6 +184,7 @@ list(APPEND transformer_engine_cpp_sources
      cudnn_utils.cpp
      transformer_engine.cpp
      fused_attn/fused_attn.cpp
+     fused_attn/config_and_params.cpp
      gemm/config.cpp
      normalization/common.cpp
      normalization/rtc_dispatch.cpp
@@ -250,18 +251,29 @@ list(APPEND transformer_engine_cuda_arch_specific_sources
      activation/gelu.cu
      activation/gelu_dbias.cu
      activation/gelu_grouped.cu
+     activation/gelu_grouped_bwd.cu
      activation/gelu_grouped_dbias.cu
+     activation/qgelu_grouped.cu
+     activation/qgelu_grouped_bwd.cu
+     activation/qgelu_grouped_dbias.cu
      activation/glu.cu
      activation/relu.cu
      activation/relu_dbias.cu
      activation/relu_grouped.cu
+     activation/relu_grouped_bwd.cu
      activation/relu_grouped_dbias.cu
+     activation/srelu_grouped.cu
+     activation/srelu_grouped_bwd.cu
+     activation/srelu_grouped_dbias.cu
      activation/scaled_activation.cu
+     activation/scaled_clamped_swiglu_grouped.cu
      activation/scaled_srelu.cu
      activation/scaled_swiglu.cu
+     activation/scaled_swiglu_grouped.cu
      activation/swiglu.cu
      activation/swiglu_dbias.cu
      activation/swiglu_grouped.cu
+     activation/swiglu_grouped_bwd.cu
      activation/swiglu_grouped_dbias.cu
      cast/cast.cu
      cast/cast_dbias.cu
@@ -415,12 +427,12 @@ if (NVTE_WITH_CUBLASMP)
                  NAMES nccl libnccl
                  PATH_SUFFIXES lib
                  REQUIRED)
-    # cuBLASMp 0.8 is the first release with CUDA-graph-safe overlap algos,
+    # cuBLASMp 0.8.1 adds MXFP8 support to the CUDA-graph-safe overlap algos,
     # and NCCL 2.30 is the first release with graph-safe one-sided RMA
     # primitives (ncclPutSignal/ncclWaitSignal) that those algos use.
-    if (CUBLASMP_VERSION VERSION_LESS 0.8.0)
+    if (CUBLASMP_VERSION VERSION_LESS 0.8.1)
       message(FATAL_ERROR
-              "NVTE_WITH_CUBLASMP requires cuBLASMp >= 0.8.0, but found cuBLASMp "
+              "NVTE_WITH_CUBLASMP requires cuBLASMp >= 0.8.1, but found cuBLASMp "
               "${CUBLASMP_VERSION} in ${CUBLASMP_INCLUDE_DIR}/cublasmp.h")
     endif()
     if (NCCL_VERSION VERSION_LESS 2.30.0)
@@ -628,18 +640,29 @@ if (NVTE_BUILD_ACTIVATION_WITH_FAST_MATH)
   list(APPEND nvte_sources_with_fast_math activation/gelu.cu
                                           activation/gelu_dbias.cu
                                           activation/gelu_grouped.cu
+                                          activation/gelu_grouped_bwd.cu
                                           activation/gelu_grouped_dbias.cu
+                                          activation/qgelu_grouped.cu
+                                          activation/qgelu_grouped_bwd.cu
+                                          activation/qgelu_grouped_dbias.cu
                                           activation/glu.cu
                                           activation/relu.cu
                                           activation/relu_dbias.cu
                                           activation/relu_grouped.cu
+                                          activation/relu_grouped_bwd.cu
                                           activation/relu_grouped_dbias.cu
+                                          activation/srelu_grouped.cu
+                                          activation/srelu_grouped_bwd.cu
+                                          activation/srelu_grouped_dbias.cu
                                           activation/scaled_activation.cu
+                                          activation/scaled_clamped_swiglu_grouped.cu
                                           activation/scaled_srelu.cu
                                           activation/scaled_swiglu.cu
+                                          activation/scaled_swiglu_grouped.cu
                                           activation/swiglu.cu
                                           activation/swiglu_dbias.cu
                                           activation/swiglu_grouped.cu
+                                          activation/swiglu_grouped_bwd.cu
                                           activation/swiglu_grouped_dbias.cu)
 endif()
 
@@ -653,6 +676,14 @@ endforeach()
 
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3")
+
+# Compress every embedded cubin. CUDA 13 supports size-optimized compression
+# without imposing an additional driver requirement. Keep CUDA 12 on its
+# legacy/default compression mode to preserve compatibility with pre-12.4 drivers.
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xfatbin -compress-all")
+if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 13.0)
+  set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --compress-mode=size")
+endif()
 
 # Number of parallel build jobs
 if($ENV{MAX_JOBS})

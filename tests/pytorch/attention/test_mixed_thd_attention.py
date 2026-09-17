@@ -1,0 +1,890 @@
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
+"""Tests for per-sequence mask types in packed THD attention."""
+
+import pytest
+import torch
+
+from transformer_engine.pytorch import DotProductAttention, MultiheadAttention, TransformerLayer
+from transformer_engine.pytorch.attention.dot_product_attention import (
+    dot_product_attention as dpa_module,
+)
+from test_attention import (
+    ModelConfig,
+    compare_and_assert,
+    dtype_tols,
+    make_cu_seqlens,
+    make_dot_product_attention,
+    reset_rng_states,
+    run_dot_product_attention,
+)
+
+
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+
+MODEL_CONFIG = ModelConfig(
+    batch_size=4,
+    max_seqlen_q=7,
+    num_heads=16,
+    head_dim_qk=64,
+    attn_mask_type="padding",
+)
+NUM_HEADS = MODEL_CONFIG.num_heads
+HEAD_DIM = MODEL_CONFIG.head_dim_qk
+
+
+def _make_cu_seqlens(lengths):
+    lengths = torch.tensor(lengths, dtype=torch.int32, device="cuda")
+    return make_cu_seqlens(lengths)
+
+
+def _make_policies(policy_specs):
+    return [
+        {
+            "sequence_ids": torch.tensor(sequence_ids, dtype=torch.int64, device="cuda"),
+            "mask_type": mask_type,
+            "window_size": window_size,
+        }
+        for mask_type, sequence_ids, window_size in policy_specs
+    ]
+
+
+@pytest.mark.parametrize("module_type", ("multihead_attention", "transformer_layer"))
+def test_thd_attention_policies_plumbed_through_attention_layers(module_type):
+    """MHA and TransformerLayer should pass mixed THD policies to DPA."""
+    dtype = torch.float16
+    cu_seqlens = _make_cu_seqlens((7, 3, 5, 4))
+    policies = _make_policies((("padding", (0, 2), (-1, -1)), ("padding_causal", (1, 3), (-1, 0))))
+    hidden_states = torch.randn(
+        19,
+        MODEL_CONFIG.hidden_size,
+        dtype=dtype,
+        device="cuda",
+    )
+    if module_type == "multihead_attention":
+        module = MultiheadAttention(
+            MODEL_CONFIG.hidden_size,
+            MODEL_CONFIG.num_heads,
+            kv_channels=MODEL_CONFIG.head_dim_qk,
+            attention_dropout=0.0,
+            attn_mask_type="padding",
+            qkv_format="thd",
+            params_dtype=dtype,
+        ).to(device="cuda")
+    else:
+        module = TransformerLayer(
+            MODEL_CONFIG.hidden_size,
+            4 * MODEL_CONFIG.hidden_size,
+            MODEL_CONFIG.num_heads,
+            kv_channels=MODEL_CONFIG.head_dim_qk,
+            hidden_dropout=0.0,
+            attention_dropout=0.0,
+            self_attn_mask_type="padding",
+            attn_input_format="thd",
+            params_dtype=dtype,
+        ).to(device="cuda")
+    module.eval()
+
+    with torch.inference_mode():
+        output = module(
+            hidden_states,
+            cu_seqlens_q=cu_seqlens,
+            cu_seqlens_kv=cu_seqlens,
+            max_seqlen_q=7,
+            max_seqlen_kv=7,
+            thd_attention_policies=policies,
+            thd_attention_policy_dispatch="grouped",
+        )
+    assert output.shape == hidden_states.shape
+
+
+def _per_sequence_scalar_reference(
+    attention: DotProductAttention,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_kv: torch.Tensor,
+    policies,
+    *,
+    cu_seqlens_q_padded=None,
+    cu_seqlens_kv_padded=None,
+) -> torch.Tensor:
+    """Reference each physical sequence through an ordinary scalar-mask call."""
+    q_physical = cu_seqlens_q if cu_seqlens_q_padded is None else cu_seqlens_q_padded
+    kv_physical = cu_seqlens_kv if cu_seqlens_kv_padded is None else cu_seqlens_kv_padded
+    outputs = [None] * (cu_seqlens_q.numel() - 1)
+    for policy in policies:
+        mask_type = policy["mask_type"]
+        sequence_ids = policy["sequence_ids"]
+        policy_window_size = policy["window_size"]
+        policy_bottom_right_diagonal = policy.get("bottom_right_diagonal")
+        for sequence_id in sequence_ids.tolist():
+            q_length = int((cu_seqlens_q[sequence_id + 1] - cu_seqlens_q[sequence_id]).item())
+            kv_length = int((cu_seqlens_kv[sequence_id + 1] - cu_seqlens_kv[sequence_id]).item())
+            q_start = int(q_physical[sequence_id].item())
+            kv_start = int(kv_physical[sequence_id].item())
+            q_end = q_start + q_length
+            kv_end = kv_start + kv_length
+            sequence_cu_seqlens_q = torch.tensor(
+                (0, q_length), dtype=torch.int32, device=query.device
+            )
+            sequence_cu_seqlens_kv = torch.tensor(
+                (0, kv_length), dtype=torch.int32, device=query.device
+            )
+            outputs[sequence_id] = attention(
+                # THD scalar attention requires zero-offset storage. clone() is
+                # differentiable, so gradients still reach the packed inputs.
+                query[q_start:q_end].clone(),
+                key[kv_start:kv_end].clone(),
+                value[kv_start:kv_end].clone(),
+                qkv_format="thd",
+                cu_seqlens_q=sequence_cu_seqlens_q,
+                cu_seqlens_kv=sequence_cu_seqlens_kv,
+                max_seqlen_q=q_length,
+                max_seqlen_kv=kv_length,
+                attn_mask_type=mask_type,
+                window_size=policy_window_size,
+                bottom_right_diagonal=policy_bottom_right_diagonal,
+            )
+
+    output = query.new_zeros((query.shape[0], NUM_HEADS * HEAD_DIM))
+    for sequence_id, sequence_output in enumerate(outputs):
+        q_length = int((cu_seqlens_q[sequence_id + 1] - cu_seqlens_q[sequence_id]).item())
+        q_start = int(q_physical[sequence_id].item())
+        output[q_start : q_start + q_length] = sequence_output
+    return output
+
+
+@pytest.mark.parametrize(
+    "policy_specs",
+    (
+        (("padding", (0, 2), (-1, -1)), ("padding_causal", (1, 3), (-1, 0))),
+        (("padding", (0, 1, 2, 3), (-1, -1)),),
+        (("padding_causal", (0, 1, 2, 3), (-1, 0)),),
+        (
+            ("padding", (0, 2), (-1, -1)),
+            ("padding_causal_bottom_right", (1, 3), (-1, 0)),
+        ),
+    ),
+)
+@pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16))
+def test_thd_mask_types_match_scalar_forward_and_backward(policy_specs, dtype):
+    """Per-sequence masks must match independent scalar-policy attention."""
+    if dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
+        pytest.skip("BF16 is not supported by this GPU")
+
+    reset_rng_states()
+    cu_seqlens = _make_cu_seqlens((7, 3, 5, 4))
+    token_count = 19
+    policies = _make_policies(policy_specs)
+
+    def make_input():
+        return (
+            0.1 * torch.randn(token_count, NUM_HEADS, HEAD_DIM, dtype=dtype, device="cuda")
+        ).requires_grad_()
+
+    query, key, value = make_input(), make_input(), make_input()
+    reference_query = query.detach().clone().requires_grad_()
+    reference_key = key.detach().clone().requires_grad_()
+    reference_value = value.detach().clone().requires_grad_()
+
+    attention = make_dot_product_attention(dtype, MODEL_CONFIG, "thd")
+    output = attention(
+        query,
+        key,
+        value,
+        qkv_format="thd",
+        cu_seqlens_q=cu_seqlens,
+        cu_seqlens_kv=cu_seqlens,
+        max_seqlen_q=7,
+        max_seqlen_kv=7,
+        thd_attention_policies=policies,
+    )
+    reference_output = _per_sequence_scalar_reference(
+        attention,
+        reference_query,
+        reference_key,
+        reference_value,
+        cu_seqlens,
+        cu_seqlens,
+        policies,
+    )
+
+    tolerances = dtype_tols(dtype)
+    tolerances["atol"] = tolerances["rtol"]
+    compare_and_assert(
+        output,
+        reference_output,
+        "mixed policy output",
+        "scalar policy output",
+        tolerances["atol"],
+        tolerances["rtol"],
+        0.0,
+        False,
+    )
+
+    output_grad = torch.randn_like(output)
+    output.backward(output_grad)
+    reference_output.backward(output_grad)
+    for actual_grad, reference_grad in (
+        (query.grad, reference_query.grad),
+        (key.grad, reference_key.grad),
+        (value.grad, reference_value.grad),
+    ):
+        compare_and_assert(
+            actual_grad,
+            reference_grad,
+            "mixed policy gradient",
+            "scalar policy gradient",
+            tolerances["atol"],
+            tolerances["rtol"],
+            0.0,
+            False,
+        )
+
+
+def test_thd_mask_types_compose_with_existing_inter_sequence_padding():
+    """Policy gaps and pre-existing THD padding must share the physical layout."""
+    reset_rng_states()
+    dtype = torch.float16
+    cu_seqlens = _make_cu_seqlens((7, 3, 5, 4))
+    cu_seqlens_padded = torch.tensor((0, 9, 12, 19, 23), dtype=torch.int32, device="cuda")
+    policies = _make_policies((("padding", (0, 2), (-1, -1)), ("padding_causal", (1, 3), (-1, 0))))
+
+    def make_input():
+        return (
+            0.1 * torch.randn(23, NUM_HEADS, HEAD_DIM, dtype=dtype, device="cuda")
+        ).requires_grad_()
+
+    query, key, value = make_input(), make_input(), make_input()
+    reference_query = query.detach().clone().requires_grad_()
+    reference_key = key.detach().clone().requires_grad_()
+    reference_value = value.detach().clone().requires_grad_()
+    attention = make_dot_product_attention(dtype, MODEL_CONFIG, "thd")
+
+    output = attention(
+        query,
+        key,
+        value,
+        qkv_format="thd",
+        cu_seqlens_q=cu_seqlens,
+        cu_seqlens_kv=cu_seqlens,
+        cu_seqlens_q_padded=cu_seqlens_padded,
+        cu_seqlens_kv_padded=cu_seqlens_padded,
+        max_seqlen_q=7,
+        max_seqlen_kv=7,
+        thd_attention_policies=policies,
+    )
+    reference_output = _per_sequence_scalar_reference(
+        attention,
+        reference_query,
+        reference_key,
+        reference_value,
+        cu_seqlens,
+        cu_seqlens,
+        policies,
+        cu_seqlens_q_padded=cu_seqlens_padded,
+        cu_seqlens_kv_padded=cu_seqlens_padded,
+    )
+    torch.testing.assert_close(output, reference_output, atol=1.0e-3, rtol=1.0e-3)
+
+    output_grad = torch.randn_like(output)
+    output.backward(output_grad)
+    reference_output.backward(output_grad)
+    for actual_grad, reference_grad in (
+        (query.grad, reference_query.grad),
+        (key.grad, reference_key.grad),
+        (value.grad, reference_value.grad),
+    ):
+        torch.testing.assert_close(actual_grad, reference_grad, atol=1.0e-3, rtol=1.0e-3)
+
+
+def test_thd_mask_types_support_cross_attention_and_per_policy_options():
+    """Mask groups may use different Q/KV lengths, windows, and diagonal alignment."""
+    reset_rng_states()
+    dtype = torch.float16
+    cu_seqlens_q = _make_cu_seqlens((5, 3, 4))
+    cu_seqlens_kv = _make_cu_seqlens((7, 4, 5))
+    policies = _make_policies(
+        (
+            ("padding", (0,), (2, 1)),
+            ("padding", (1,), (2, 1)),
+            ("padding_causal_bottom_right", (2,), (2, 0)),
+        )
+    )
+    policies[0]["bottom_right_diagonal"] = True
+    policies[1]["bottom_right_diagonal"] = False
+
+    query = (
+        0.1 * torch.randn(12, NUM_HEADS, HEAD_DIM, dtype=dtype, device="cuda")
+    ).requires_grad_()
+    key = (0.1 * torch.randn(16, NUM_HEADS, HEAD_DIM, dtype=dtype, device="cuda")).requires_grad_()
+    value = (0.1 * torch.randn_like(key)).requires_grad_()
+    reference_query = query.detach().clone().requires_grad_()
+    reference_key = key.detach().clone().requires_grad_()
+    reference_value = value.detach().clone().requires_grad_()
+    attention = make_dot_product_attention(
+        dtype,
+        MODEL_CONFIG,
+        "thd",
+        attention_type="cross",
+    )
+
+    output = attention(
+        query,
+        key,
+        value,
+        qkv_format="thd",
+        cu_seqlens_q=cu_seqlens_q,
+        cu_seqlens_kv=cu_seqlens_kv,
+        max_seqlen_q=5,
+        max_seqlen_kv=7,
+        thd_attention_policies=policies,
+    )
+    reference_output = _per_sequence_scalar_reference(
+        attention,
+        reference_query,
+        reference_key,
+        reference_value,
+        cu_seqlens_q,
+        cu_seqlens_kv,
+        policies,
+    )
+    torch.testing.assert_close(output, reference_output, atol=1.0e-3, rtol=1.0e-3)
+
+    output_grad = torch.randn_like(output)
+    output.backward(output_grad)
+    reference_output.backward(output_grad)
+    for actual_grad, reference_grad in (
+        (query.grad, reference_query.grad),
+        (key.grad, reference_key.grad),
+        (value.grad, reference_value.grad),
+    ):
+        torch.testing.assert_close(actual_grad, reference_grad, atol=1.0e-3, rtol=1.0e-3)
+
+
+@pytest.mark.parametrize(
+    "policy_specs",
+    (
+        (
+            ("padding_causal", (0,), (1, 0)),
+            ("padding_causal", (2,), (3, 0)),
+            ("padding", (1, 3), (2, 2)),
+        ),
+        (
+            ("padding", (1, 3), (2, 2)),
+            ("padding_causal", (2,), (3, 0)),
+            ("padding_causal", (0,), (1, 0)),
+        ),
+    ),
+)
+def test_thd_mask_types_support_repeated_masks_and_policy_order(policy_specs):
+    """Repeated mask types may use distinct windows in any policy-list order."""
+    reset_rng_states()
+    dtype = torch.float16
+    cu_seqlens = _make_cu_seqlens((7, 3, 5, 4))
+    policies = _make_policies(policy_specs)
+
+    def make_input():
+        return (
+            0.1 * torch.randn(19, NUM_HEADS, HEAD_DIM, dtype=dtype, device="cuda")
+        ).requires_grad_()
+
+    query, key, value = make_input(), make_input(), make_input()
+    reference_query = query.detach().clone().requires_grad_()
+    reference_key = key.detach().clone().requires_grad_()
+    reference_value = value.detach().clone().requires_grad_()
+    attention = make_dot_product_attention(dtype, MODEL_CONFIG, "thd")
+
+    output = attention(
+        query,
+        key,
+        value,
+        qkv_format="thd",
+        cu_seqlens_q=cu_seqlens,
+        cu_seqlens_kv=cu_seqlens,
+        max_seqlen_q=7,
+        max_seqlen_kv=7,
+        thd_attention_policies=policies,
+    )
+    reference_output = _per_sequence_scalar_reference(
+        attention,
+        reference_query,
+        reference_key,
+        reference_value,
+        cu_seqlens,
+        cu_seqlens,
+        policies,
+    )
+    torch.testing.assert_close(output, reference_output, atol=1.0e-3, rtol=1.0e-3)
+
+    output_grad = torch.randn_like(output)
+    output.backward(output_grad)
+    reference_output.backward(output_grad)
+    for actual_grad, reference_grad in (
+        (query.grad, reference_query.grad),
+        (key.grad, reference_key.grad),
+        (value.grad, reference_value.grad),
+    ):
+        torch.testing.assert_close(actual_grad, reference_grad, atol=1.0e-3, rtol=1.0e-3)
+
+
+def test_thd_mask_type_runtime_dispatch_uses_backend_selection(monkeypatch):
+    """Route each policy according to backend support for inter-sequence padding."""
+    policies = [
+        {
+            "sequence_ids": torch.tensor((0, 2), dtype=torch.int64, device="cuda"),
+            "mask_type": "padding",
+            "window_size": (-1, -1),
+            "bottom_right_diagonal": True,
+        },
+        {
+            "sequence_ids": torch.tensor((1,), dtype=torch.int64, device="cuda"),
+            "mask_type": "padding_causal",
+            "window_size": (2, 0),
+            "bottom_right_diagonal": False,
+        },
+    ]
+    observed_params = []
+
+    def fake_get_attention_backend(attention_params):
+        observed_params.append(attention_params)
+        available_backends = [False, attention_params.attn_mask_type == "padding", False]
+        return False, None, available_backends[1], None, False, available_backends
+
+    monkeypatch.setattr(dpa_module.dpa_utils, "get_attention_backend", fake_get_attention_backend)
+    padded_policies, grouped_policies = DotProductAttention._partition_thd_mask_policies(
+        policies,
+        {},
+    )
+
+    assert padded_policies[0] is policies[0]
+    assert grouped_policies[0] is policies[1]
+    assert [params.batch_size for params in observed_params] == [2, 1]
+    assert [params.attn_mask_type for params in observed_params] == [
+        "padding",
+        "padding_causal",
+    ]
+    assert [params.window_size for params in observed_params] == [(-1, -1), (2, 0)]
+    assert [params.bottom_right_diagonal for params in observed_params] == [True, False]
+    assert all(params.pad_between_seqs for params in observed_params)
+
+    DotProductAttention._partition_thd_mask_policies(policies, {})
+    assert len(observed_params) == 2
+
+    monkeypatch.setenv("NVTE_FLASH_ATTN", "0")
+    DotProductAttention._partition_thd_mask_policies(policies, {})
+    assert len(observed_params) == 4
+
+
+def test_thd_mask_type_runtime_dispatch_caches_backend_selection(monkeypatch):
+    """Repeated mixed-policy forwards should reuse backend-selection results."""
+    monkeypatch.setenv("NVTE_FLASH_ATTN", "1")
+    monkeypatch.setenv("NVTE_FUSED_ATTN", "0")
+    monkeypatch.setenv("NVTE_UNFUSED_ATTN", "0")
+
+    original_get_attention_backend = dpa_module.dpa_utils.get_attention_backend
+    selector_calls = 0
+
+    def counted_get_attention_backend(attention_params):
+        nonlocal selector_calls
+        selector_calls += 1
+        return original_get_attention_backend(attention_params)
+
+    monkeypatch.setattr(
+        dpa_module.dpa_utils,
+        "get_attention_backend",
+        counted_get_attention_backend,
+    )
+
+    attention = make_dot_product_attention(
+        torch.float16,
+        MODEL_CONFIG,
+        "thd",
+        is_training=False,
+    )
+    cu_seqlens = _make_cu_seqlens((7, 3, 5, 4))
+    query = torch.randn(19, NUM_HEADS, HEAD_DIM, dtype=torch.float16, device="cuda")
+    key = torch.randn_like(query)
+    value = torch.randn_like(query)
+    policies = _make_policies((("padding", (0, 2), (-1, -1)), ("padding_causal", (1, 3), (-1, 0))))
+
+    def run_attention():
+        return attention(
+            query,
+            key,
+            value,
+            qkv_format="thd",
+            cu_seqlens_q=cu_seqlens,
+            cu_seqlens_kv=cu_seqlens,
+            max_seqlen_q=7,
+            max_seqlen_kv=7,
+            thd_attention_policies=policies,
+        )
+
+    with torch.inference_mode():
+        run_attention()
+        torch.cuda.synchronize()
+        warmup_selector_calls = selector_calls
+        assert warmup_selector_calls > 0
+        run_attention()
+        torch.cuda.synchronize()
+
+    assert selector_calls == warmup_selector_calls
+
+
+def test_thd_mask_type_runtime_dispatch_combines_backend_outputs(monkeypatch):
+    """Policies routed to different backend representations share one output."""
+    attention = make_dot_product_attention(torch.float16, MODEL_CONFIG, "thd")
+    cu_seqlens = _make_cu_seqlens((1, 1))
+    policies = [
+        {
+            "sequence_ids": torch.tensor((0,), dtype=torch.int64, device="cuda"),
+            "mask_type": "padding",
+            "window_size": (-1, -1),
+            "bottom_right_diagonal": True,
+        },
+        {
+            "sequence_ids": torch.tensor((1,), dtype=torch.int64, device="cuda"),
+            "mask_type": "padding_causal",
+            "window_size": (-1, 0),
+            "bottom_right_diagonal": False,
+        },
+    ]
+    query = torch.zeros(2, NUM_HEADS, HEAD_DIM, dtype=torch.float16, device="cuda")
+    padded_output = query.new_zeros((2, NUM_HEADS * HEAD_DIM))
+    grouped_output = torch.zeros_like(padded_output)
+    padded_output[0] = 1
+    grouped_output[1] = 2
+
+    monkeypatch.setattr(
+        attention,
+        "_partition_thd_mask_policies",
+        lambda *_args, **_kwargs: ([policies[0]], [policies[1]]),
+    )
+    monkeypatch.setattr(
+        attention,
+        "_forward_thd_mask_types_with_padding",
+        lambda *_args, **_kwargs: padded_output,
+    )
+    monkeypatch.setattr(
+        attention,
+        "_forward_thd_mask_types_grouped",
+        lambda *_args, **_kwargs: grouped_output,
+    )
+
+    output = attention._forward_thd_mask_types(
+        query,
+        query,
+        query,
+        cu_seqlens,
+        cu_seqlens,
+        None,
+        None,
+        policies,
+        1,
+        1,
+        attention_params_kwargs={},
+        checkpoint_core_attention=False,
+        fast_zero_fill=True,
+        pad_between_seqs=False,
+        bf16_backward=None,
+        num_splits=None,
+        thd_attention_policy_dispatch="auto",
+    )
+    torch.testing.assert_close(output, padded_output + grouped_output)
+
+
+@pytest.mark.parametrize("uniform_policy", (False, True))
+def test_thd_mask_type_runtime_dispatch_can_force_grouped(monkeypatch, uniform_policy):
+    """The per-call override must bypass padded backend probing."""
+    attention = make_dot_product_attention(torch.float16, MODEL_CONFIG, "thd")
+    cu_seqlens = _make_cu_seqlens((1, 1))
+    if uniform_policy:
+        policies = _make_policies((("padding", (0, 1), (-1, -1)),))
+    else:
+        policies = _make_policies((("padding", (0,), (-1, -1)), ("padding_causal", (1,), (-1, 0))))
+    query = torch.zeros(2, NUM_HEADS, HEAD_DIM, dtype=torch.float16, device="cuda")
+    grouped_output = query.new_ones((2, NUM_HEADS * HEAD_DIM))
+
+    monkeypatch.setattr(
+        attention,
+        "_partition_thd_mask_policies",
+        lambda *_args, **_kwargs: pytest.fail("grouped override probed padded backends"),
+    )
+    monkeypatch.setattr(
+        attention,
+        "_forward_thd_mask_types_with_padding",
+        lambda *_args, **_kwargs: pytest.fail("grouped override used padded dispatch"),
+    )
+    monkeypatch.setattr(
+        attention,
+        "_forward_thd_mask_types_grouped",
+        lambda *_args, **_kwargs: grouped_output,
+    )
+
+    output = attention._forward_thd_mask_types(
+        query,
+        query,
+        query,
+        cu_seqlens,
+        cu_seqlens,
+        None,
+        None,
+        policies,
+        1,
+        1,
+        attention_params_kwargs={},
+        checkpoint_core_attention=False,
+        fast_zero_fill=True,
+        pad_between_seqs=False,
+        bf16_backward=None,
+        num_splits=None,
+        thd_attention_policy_dispatch="grouped",
+    )
+    torch.testing.assert_close(output, grouped_output)
+
+
+def test_thd_mask_type_grouped_override_matches_auto_dispatch():
+    """The shared DPA runner must produce matching automatic and grouped results."""
+    policies = _make_policies((("padding", (0, 2), (-1, -1)), ("padding_causal", (1, 3), (-1, 0))))
+    common_forward_kwargs = {
+        "attention_mask": None,
+        "attn_mask_type": None,
+        "window_size": None,
+        "thd_attention_policies": policies,
+    }
+    runner_kwargs = {
+        "dtype": torch.float16,
+        "config": MODEL_CONFIG,
+        "backend": "FlashAttention",
+        "ckpt_attn": False,
+        "qkv_layout": "thd_thd_thd",
+        "pad_between_seqs": False,
+        "is_training": True,
+    }
+
+    auto_output, _, auto_grads = run_dot_product_attention(
+        **runner_kwargs,
+        forward_kwargs={
+            **common_forward_kwargs,
+            "thd_attention_policy_dispatch": "auto",
+        },
+    )
+    grouped_output, _, grouped_grads = run_dot_product_attention(
+        **runner_kwargs,
+        forward_kwargs={
+            **common_forward_kwargs,
+            "thd_attention_policy_dispatch": "grouped",
+        },
+    )
+
+    tolerances = dtype_tols(torch.float16)
+    tolerances["atol"] = tolerances["rtol"]
+    compare_and_assert(
+        auto_output,
+        grouped_output,
+        "automatic mixed policy output",
+        "grouped mixed policy output",
+        tolerances["atol"],
+        tolerances["rtol"],
+        0.0,
+        False,
+    )
+    for auto_grad, grouped_grad in zip(auto_grads[:3], grouped_grads[:3]):
+        compare_and_assert(
+            auto_grad,
+            grouped_grad,
+            "automatic mixed policy gradient",
+            "grouped mixed policy gradient",
+            tolerances["atol"],
+            tolerances["rtol"],
+            0.0,
+            False,
+        )
+
+
+def test_thd_mask_types_support_cuda_graph_capture(monkeypatch):
+    """The sync-free policy metadata path must be replayable in a CUDA graph."""
+    if dpa_module.dpa_utils.get_device_compute_capability() != (9, 0):
+        pytest.skip("CUDA graph capture requires a Hopper GPU for the FA3 test path")
+    if not dpa_module.FlashAttentionUtils.v3_is_installed:
+        pytest.skip("CUDA graph capture requires the Hopper/FA3 padding implementation")
+
+    monkeypatch.setenv("NVTE_FLASH_ATTN", "1")
+    monkeypatch.setenv("NVTE_FLASH_ATTN_V3", "1")
+    monkeypatch.setenv("NVTE_FUSED_ATTN", "0")
+    monkeypatch.setenv("NVTE_UNFUSED_ATTN", "0")
+
+    reset_rng_states()
+    dtype = torch.float16
+    cu_seqlens = _make_cu_seqlens((7, 3, 5, 4))
+    policies = _make_policies((("padding", (0, 2), (-1, -1)), ("padding_causal", (1, 3), (-1, 0))))
+    query = 0.1 * torch.randn(19, NUM_HEADS, HEAD_DIM, dtype=dtype, device="cuda")
+    key = 0.1 * torch.randn_like(query)
+    value = 0.1 * torch.randn_like(query)
+    attention = make_dot_product_attention(
+        dtype,
+        MODEL_CONFIG,
+        "thd",
+        is_training=False,
+    )
+
+    def run_attention():
+        return attention(
+            query,
+            key,
+            value,
+            qkv_format="thd",
+            cu_seqlens_q=cu_seqlens,
+            cu_seqlens_kv=cu_seqlens,
+            max_seqlen_q=7,
+            max_seqlen_kv=7,
+            thd_attention_policies=policies,
+        )
+
+    warmup_stream = torch.cuda.Stream()
+    warmup_stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(warmup_stream):
+        for _ in range(3):
+            run_attention()
+    torch.cuda.current_stream().wait_stream(warmup_stream)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured_output = run_attention()
+    graph.replay()
+    actual_output = captured_output.clone()
+    expected_output = run_attention()
+    torch.testing.assert_close(actual_output, expected_output, atol=1.0e-3, rtol=1.0e-3)
+
+
+@pytest.mark.parametrize(
+    ("invalid_case", "error"),
+    (
+        ("policy_dtype", "one-dimensional int32 or int64"),
+        ("missing_sequence", "assign every sequence exactly once by count"),
+        ("sequence_order", "strictly ascending"),
+        ("sequence_duplicate", "strictly ascending"),
+        ("sequence_overlap", "assign every sequence exactly once"),
+        ("sequence_range", "assign every sequence exactly once"),
+        ("mask_type", "only padding mask types"),
+        ("policy_keys", "must contain"),
+        ("bottom_right_diagonal", "must be a bool"),
+        ("scalar_mask", "do not also pass"),
+        ("policy_dispatch", "must be either 'auto' or 'grouped'"),
+    ),
+)
+def test_thd_mask_types_reject_invalid_inputs(invalid_case, error):
+    """Reject malformed policy metadata before launching attention."""
+    query = torch.randn(4, NUM_HEADS, HEAD_DIM, device="cuda", dtype=torch.float16)
+    key = torch.randn_like(query)
+    value = torch.randn_like(query)
+    cu_seqlens = torch.tensor((0, 2, 4), dtype=torch.int32, device="cuda")
+    attention = make_dot_product_attention(torch.float16, MODEL_CONFIG, "thd")
+    policies = _make_policies((("padding", (0,), (-1, -1)), ("padding_causal", (1,), (-1, 0))))
+    scalar_mask_type = None
+    policy_dispatch = "auto"
+
+    if invalid_case == "policy_dtype":
+        policies[0]["sequence_ids"] = torch.tensor((0,), dtype=torch.float32, device="cuda")
+    elif invalid_case == "missing_sequence":
+        policies = _make_policies((("padding", (0,), (-1, -1)),))
+    elif invalid_case == "sequence_order":
+        policies = _make_policies((("padding", (1, 0), (-1, -1)),))
+    elif invalid_case == "sequence_duplicate":
+        policies = _make_policies((("padding", (0, 0), (-1, -1)),))
+    elif invalid_case == "sequence_overlap":
+        policies = _make_policies((("padding", (0,), (-1, -1)), ("padding_causal", (0,), (-1, 0))))
+    elif invalid_case == "sequence_range":
+        policies = _make_policies((("padding", (0, 2), (-1, -1)),))
+    elif invalid_case == "mask_type":
+        policies[0]["mask_type"] = "no_mask"
+    elif invalid_case == "policy_keys":
+        del policies[0]["window_size"]
+    elif invalid_case == "bottom_right_diagonal":
+        policies[0]["bottom_right_diagonal"] = "bottom_right"
+    elif invalid_case == "scalar_mask":
+        scalar_mask_type = "padding"
+    else:
+        policy_dispatch = "padded"
+
+    with pytest.raises(ValueError, match=error):
+        attention(
+            query,
+            key,
+            value,
+            qkv_format="thd",
+            cu_seqlens_q=cu_seqlens,
+            cu_seqlens_kv=cu_seqlens,
+            max_seqlen_q=2,
+            max_seqlen_kv=2,
+            attn_mask_type=scalar_mask_type,
+            thd_attention_policies=policies,
+            thd_attention_policy_dispatch=policy_dispatch,
+        )
+
+
+def test_thd_mask_types_reject_context_parallelism(monkeypatch):
+    """Mixed THD policies must fail before entering an unsupported CP path."""
+    query = torch.randn(4, NUM_HEADS, HEAD_DIM, device="cuda", dtype=torch.float16)
+    cu_seqlens = torch.tensor((0, 2, 4), dtype=torch.int32, device="cuda")
+    attention = make_dot_product_attention(torch.float16, MODEL_CONFIG, "thd")
+    attention.cp_group = [object()]
+    monkeypatch.setattr(dpa_module, "get_distributed_world_size", lambda _group: 2)
+    monkeypatch.setattr(
+        attention,
+        "_forward_thd_mask_types",
+        lambda *_args, **_kwargs: query.new_zeros((query.shape[0], NUM_HEADS * HEAD_DIM)),
+    )
+
+    with pytest.raises(ValueError, match="do not support context parallelism"):
+        attention(
+            query,
+            query,
+            query,
+            qkv_format="thd",
+            cu_seqlens_q=cu_seqlens,
+            cu_seqlens_kv=cu_seqlens,
+            max_seqlen_q=2,
+            max_seqlen_kv=2,
+            thd_attention_policies=_make_policies(
+                (("padding", (0,), (-1, -1)), ("padding_causal", (1,), (-1, 0)))
+            ),
+        )
+
+
+def test_thd_mask_types_empty_batch_preserves_input_gradients():
+    """An empty packed batch needs zero gradients, not a disconnected output."""
+    attention = make_dot_product_attention(torch.float16, MODEL_CONFIG, "thd")
+    query = torch.empty(
+        0, NUM_HEADS, HEAD_DIM, device="cuda", dtype=torch.float16, requires_grad=True
+    )
+    key = torch.empty_like(query, requires_grad=True)
+    value = torch.empty_like(query, requires_grad=True)
+    cu_seqlens = torch.zeros(1, dtype=torch.int32, device="cuda")
+
+    output = attention(
+        query,
+        key,
+        value,
+        qkv_format="thd",
+        cu_seqlens_q=cu_seqlens,
+        cu_seqlens_kv=cu_seqlens,
+        max_seqlen_q=0,
+        max_seqlen_kv=0,
+        thd_attention_policies=[
+            {
+                "sequence_ids": torch.empty(0, dtype=torch.int64, device="cuda"),
+                "mask_type": "padding",
+                "window_size": (-1, -1),
+            }
+        ],
+    )
+    assert output.shape == (0, NUM_HEADS * HEAD_DIM)
+    output.sum().backward()
+    for input_tensor in (query, key, value):
+        torch.testing.assert_close(input_tensor.grad, torch.zeros_like(input_tensor))

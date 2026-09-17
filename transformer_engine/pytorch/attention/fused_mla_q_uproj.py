@@ -279,7 +279,12 @@ class FusedMLAQUpProjRopeQuant:
         sequence_parallel,
     ):
         """Linear backward for the fused Q up-proj."""
-        from ..module.linear import LinearBwdArgs, _linear_backward, _2X_ACC_DGRAD, _2X_ACC_WGRAD
+        from ..module.linear import (
+            LinearBwdArgs,
+            _linear_backward_impl,
+            _2X_ACC_DGRAD,
+            _2X_ACC_WGRAD,
+        )
 
         tp_size = get_distributed_world_size(tp_group) if tp_group is not None else 1
         fp8 = isinstance(w_q, QuantizedTensor)
@@ -318,7 +323,7 @@ class FusedMLAQUpProjRopeQuant:
             main_grad_func=(lambda: w_q.main_grad) if fuse_wgrad_accumulation else None,
         )
 
-        wgrad, dgrad, grad_bias = _linear_backward(bwd_args)
+        wgrad, dgrad, grad_bias = _linear_backward_impl(bwd_args)
         return dgrad, wgrad, grad_bias
 
     @classmethod

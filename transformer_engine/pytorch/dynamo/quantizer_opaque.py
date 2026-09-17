@@ -9,6 +9,7 @@ import enum
 from typing import Any, Dict, Tuple, get_type_hints
 
 from ..constants import DType
+from ..utils import record_compile_disabled
 
 
 # Qualnames of the registered quantizer classes. The set holds strings rather
@@ -107,28 +108,32 @@ def register_value_opaque_quantizer(cls: type) -> None:
                 "the field in ``_rebuild_derived_state`` instead."
             )
     cls._value_field_names = tuple(fields)
-    # ``register_opaque_type`` requires ``__fx_repr__`` to already exist on the
+    # ``register_custom_class`` requires ``__fx_repr__`` to already exist on the
     # class, so attach it before registering.
     if "__fx_repr__" not in cls.__dict__:
         cls.__fx_repr__ = _quantizer_fx_repr
 
     try:
         from torch._library.opaque_object import (  # pylint: disable=import-outside-toplevel
-            register_opaque_type,
-            is_opaque_value_type,
+            register_custom_class,
+            is_opaque_constant_type,
         )
-    except (ImportError, AttributeError):
+    except (ImportError, AttributeError) as e:
         # Older PyTorch without the opaque-object API: eager value semantics
         # still work; torch.compile specialization on the quantizer does not.
+        record_compile_disabled(
+            f"this PyTorch build has no opaque-object API ({e}); use a newer build"
+        )
         return
 
     try:
-        if not is_opaque_value_type(cls):
-            register_opaque_type(cls, typ="value")
-    except (RuntimeError, TypeError):
+        if not is_opaque_constant_type(cls):
+            register_custom_class(cls, typ="constant")
+    except (RuntimeError, TypeError) as e:
         # Keep TE importable: neither the opaque-type query nor the registration
         # must crash the import, e.g. on PyTorch versions with only partial /
         # experimental opaque-object support.
+        record_compile_disabled(f"could not register {cls.__name__} as an opaque type ({e})")
         return
 
     _VALUE_OPAQUE_QUALNAMES.add(cls.__qualname__)

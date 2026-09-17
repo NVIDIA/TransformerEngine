@@ -639,12 +639,17 @@ class CustomRecipe(Recipe):
     ----------
     qfactory : Callable
         Factory callable that returns a quantizer instance *or* a
-        ``QuantizerRequest`` subclass for a given ``QuantizerRole``.
+        ``QuantizerRequest`` subclass for a given optional ``QuantizerRole``.
         The callable is invoked as::
 
             qfactory(
-                role: QuantizerRole,
+                role: Optional[QuantizerRole],
             ) -> Union[Quantizer, QuantizerRequest]
+
+        Boundary slots may provide ``None`` or a role with empty fields. The
+        factory must return a valid object for every call. Return an
+        ``IdentityQuantizer`` for an intentional high-precision slot instead
+        of returning ``None``.
 
         ``QuantizerRole`` is a frozen dataclass with the following fields:
 
@@ -663,7 +668,8 @@ class CustomRecipe(Recipe):
 
         See ``transformer_engine.pytorch.quantization.QuantizerRole``
         and ``transformer_engine.pytorch.quantization.DelayedScalingRequest``
-        for full documentation.
+        for API details. See :ref:`heterogeneous-quantization-recipes` for
+        construction rules and direction mapping.
 
     backward_override : {None, 'high_precision', 'dequantized'}, default = None
         Backward precision mode. None does not modify backward behavior,

@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 270" width="100%" style="max-width: 900px;" role="img" aria-labelledby="title description">
+  <title id="title">Per-GEMM formats and the operands each GEMM consumes</title>
+  <desc id="description">Three GEMM cards. Fprop consumes input.rowwise and weight.rowwise, both MXFP8. Dgrad consumes weight.columnwise and grad_output.rowwise, both NVFP4. Wgrad consumes input.columnwise and grad_output.columnwise, both BF16.</desc>
+  <defs>
+    <style>
+      @import url("../_static/css/diagram-colors.css");
+      .label { font: 600 14px 'Segoe UI', Arial, sans-serif; fill: #212121; text-anchor: middle; }
+      .format { font: 600 13px 'Segoe UI', Arial, sans-serif; text-anchor: middle; }
+      .op { font: 600 16px 'Segoe UI', Arial, sans-serif; fill: #616161; text-anchor: middle; }
+      .fmt-mxfp8 { fill: #e3f2fd; stroke: #1976d2; stroke-width: 2; }
+      .fmt-nvfp4 { fill: #fff3e0; stroke: #f57c00; stroke-width: 2; }
+      .fmt-bf16 { fill: #e8f5e9; stroke: #388e3c; stroke-width: 2; }
+      .fmt-mxfp8-text { fill: #1565c0; }
+      .fmt-nvfp4-text { fill: #e65100; }
+      .fmt-bf16-text { fill: #2e7d32; }
+      .legend { font: 13px 'Segoe UI', Arial, sans-serif; fill: #424242; text-anchor: start; }
+    </style>
+  </defs>
+
+  <g aria-label="Fprop GEMM">
+    <rect x="30" y="30" width="300" height="220" rx="7" class="panel"/>
+    <text x="180" y="58" class="label">fprop</text>
+    <text x="180" y="78" class="small-text">format: MXFP8</text>
+    <rect x="55" y="95" width="250" height="50" rx="6" class="fmt-mxfp8"/>
+    <text x="180" y="116" class="small-text">input.rowwise</text>
+    <text x="180" y="134" class="format fmt-mxfp8-text">MXFP8</text>
+    <text x="180" y="167" class="op">&#215;</text>
+    <rect x="55" y="180" width="250" height="50" rx="6" class="fmt-mxfp8"/>
+    <text x="180" y="201" class="small-text">weight.rowwise</text>
+    <text x="180" y="219" class="format fmt-mxfp8-text">MXFP8</text>
+  </g>
+
+  <g aria-label="Dgrad GEMM">
+    <rect x="350" y="30" width="300" height="220" rx="7" class="panel"/>
+    <text x="500" y="58" class="label">dgrad</text>
+    <text x="500" y="78" class="small-text">format: NVFP4</text>
+    <rect x="375" y="95" width="250" height="50" rx="6" class="fmt-nvfp4"/>
+    <text x="500" y="116" class="small-text">grad_output.rowwise</text>
+    <text x="500" y="134" class="format fmt-nvfp4-text">NVFP4</text>
+    <text x="500" y="167" class="op">&#215;</text>
+    <rect x="375" y="180" width="250" height="50" rx="6" class="fmt-nvfp4"/>
+    <text x="500" y="201" class="small-text">weight.columnwise</text>
+    <text x="500" y="219" class="format fmt-nvfp4-text">NVFP4</text>
+  </g>
+
+  <g aria-label="Wgrad GEMM">
+    <rect x="670" y="30" width="300" height="220" rx="7" class="panel"/>
+    <text x="820" y="58" class="label">wgrad</text>
+    <text x="820" y="78" class="small-text">format: BF16</text>
+    <rect x="695" y="95" width="250" height="50" rx="6" class="fmt-bf16"/>
+    <text x="820" y="116" class="small-text">input.columnwise</text>
+    <text x="820" y="134" class="format fmt-bf16-text">BF16</text>
+    <text x="820" y="167" class="op">&#215;</text>
+    <rect x="695" y="180" width="250" height="50" rx="6" class="fmt-bf16"/>
+    <text x="820" y="201" class="small-text">grad_output.columnwise</text>
+    <text x="820" y="219" class="format fmt-bf16-text">BF16</text>
+  </g>
+</svg>
