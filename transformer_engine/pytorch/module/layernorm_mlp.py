@@ -3397,7 +3397,11 @@ class LayerNormMLP(TransformerEngineBaseModule):
             return "a quantized input tensor"
         if self.fsdp_group is not None:
             return "manual TE FSDP (fsdp_group); use FSDP2 or MCore FSDP"
-        if fp8_output and is_grad_enabled and (inp.requires_grad or self.requires_grad_params()):
+        if (
+            fp8_output
+            and is_grad_enabled
+            and (inp.requires_grad or any(p.requires_grad for p in self.parameters()))
+        ):
             return "differentiable fp8_output=True"
         if is_cpu_offload_enabled():
             return "CPU activation offloading"
@@ -3412,10 +3416,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
         if fp8 and is_first_microbatch is not None and not self.is_fsdp2:
             return "FP8 weight caching (is_first_microbatch)"
         return None
-
-    def requires_grad_params(self) -> bool:
-        """Whether any parameter of this module requires a gradient."""
-        return any(p.requires_grad for p in self.parameters())
 
     @torch._dynamo.disable
     def _forward_eager_fallback(
