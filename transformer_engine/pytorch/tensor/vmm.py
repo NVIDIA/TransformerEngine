@@ -35,8 +35,7 @@ def is_vmm_tensor(tensor: torch.Tensor) -> bool:
         device_index = torch.cuda.current_device()
     pointer = tensor.data_ptr()
     return any(
-        base <= pointer < base + size
-        for base, size in _VMM_RANGES.get(device_index, {}).items()
+        base <= pointer < base + size for base, size in _VMM_RANGES.get(device_index, {}).items()
     )
 
 
@@ -63,11 +62,11 @@ def _set_memory_node(
 ) -> None:
     """Set the localized location union on a CUmemAllocationProp."""
     pointer = _cuda_object_pointer(prop)
-    ctypes.cast(pointer + 8, ctypes.POINTER(ctypes.c_int))[0] = (
-        _CU_MEM_LOCATION_TYPE_DEVICE_MEMORY_NODE
-    )
-    ctypes.cast(pointer + 12, ctypes.POINTER(ctypes.c_int))[0] = (
-        int(device_index) | (int(locality_domain_ordinal) << 8)
+    ctypes.cast(pointer + 8, ctypes.POINTER(ctypes.c_int))[
+        0
+    ] = _CU_MEM_LOCATION_TYPE_DEVICE_MEMORY_NODE
+    ctypes.cast(pointer + 12, ctypes.POINTER(ctypes.c_int))[0] = int(device_index) | (
+        int(locality_domain_ordinal) << 8
     )
 
 
@@ -96,9 +95,7 @@ class VMMRowSplitAllocator:
         if device.type != "cuda":
             raise ValueError(f"VMM localization requires a CUDA device, got {device}")
         self.device = device
-        self.device_index = (
-            torch.cuda.current_device() if device.index is None else device.index
-        )
+        self.device_index = torch.cuda.current_device() if device.index is None else device.index
         _check_cuda(driver.cuInit(0), "cuInit")
         self._driver = driver
         self._granularity: Optional[int] = None

@@ -57,9 +57,7 @@ def _localization_available() -> bool:
     return supported and get_num_locality_domains(device) == 2
 
 
-@pytest.mark.skipif(
-    not _localization_available(), reason="CUDA localization is unavailable"
-)
+@pytest.mark.skipif(not _localization_available(), reason="CUDA localization is unavailable")
 def test_mxfp8_rowwise_localized_pair() -> None:
     """Localized halves must match a full-tensor rowwise quantization."""
     tensor = torch.randn((256, 128), dtype=torch.bfloat16, device="cuda")
@@ -86,9 +84,7 @@ def test_mxfp8_rowwise_localized_pair() -> None:
     )
 
 
-@pytest.mark.skipif(
-    not _localization_available(), reason="CUDA localization is unavailable"
-)
+@pytest.mark.skipif(not _localization_available(), reason="CUDA localization is unavailable")
 def test_mxfp8_bidirectional_localized_pair() -> None:
     """Localized compact rowwise and columnwise outputs must match full-tensor output."""
     tensor = torch.randn((256, 128), dtype=torch.bfloat16, device="cuda")
@@ -136,9 +132,7 @@ def test_mxfp8_bidirectional_localized_pair() -> None:
         )
 
 
-@pytest.mark.skipif(
-    not _localization_available(), reason="CUDA localization is unavailable"
-)
+@pytest.mark.skipif(not _localization_available(), reason="CUDA localization is unavailable")
 def test_mxfp8_bidirectional_swizzled_localized_pair() -> None:
     """Localized fused-swizzle outputs must match independent half-tensor outputs."""
     tensor = torch.randn((256, 128), dtype=torch.bfloat16, device="cuda")
@@ -184,9 +178,7 @@ def test_mxfp8_bidirectional_swizzled_localized_pair() -> None:
         )
 
 
-@pytest.mark.skipif(
-    not _localization_available(), reason="CUDA localization is unavailable"
-)
+@pytest.mark.skipif(not _localization_available(), reason="CUDA localization is unavailable")
 def test_mxfp8_bidirectional_compact_vmm() -> None:
     """Two row-partition launches must produce one compact MXFP8 tensor."""
     shape = (256, 32768)
@@ -222,9 +214,7 @@ def test_mxfp8_bidirectional_compact_vmm() -> None:
     workspace.close()
 
 
-@pytest.mark.skipif(
-    not _localization_available(), reason="CUDA localization is unavailable"
-)
+@pytest.mark.skipif(not _localization_available(), reason="CUDA localization is unavailable")
 def test_mxfp8_bidirectional_swizzled_vmm() -> None:
     """Two row-partition launches must produce one GEMM-swizzled MXFP8 tensor."""
     shape = (256, 32768)
@@ -273,9 +263,7 @@ def test_mxfp8_bidirectional_swizzled_vmm() -> None:
     workspace.close()
 
 
-@pytest.mark.skipif(
-    not _localization_available(), reason="CUDA localization is unavailable"
-)
+@pytest.mark.skipif(not _localization_available(), reason="CUDA localization is unavailable")
 def test_mxfp8_vmm_add_producer() -> None:
     """A BF16 add can write directly into the VMM input consumed by quantization."""
     shape = (256, 32768)
@@ -378,9 +366,7 @@ def _run_localized_performance_comparison(
     use_cuda_graph = os.getenv("MXFP8_LOCALIZATION_USE_CUDA_GRAPH") == "1"
     if use_cuda_graph:
         baseline_function = _capture_cuda_graph(baseline_quantize).replay
-        green_unlocalized_function = _capture_cuda_graph(
-            green_unlocalized_quantize
-        ).replay
+        green_unlocalized_function = _capture_cuda_graph(green_unlocalized_quantize).replay
         localized_function = _capture_cuda_graph(localized.quantize).replay
     else:
         baseline_function = baseline_quantize
@@ -406,9 +392,7 @@ def _run_localized_performance_comparison(
     )
 
 
-@pytest.mark.skipif(
-    not _localization_available(), reason="CUDA localization is unavailable"
-)
+@pytest.mark.skipif(not _localization_available(), reason="CUDA localization is unavailable")
 @pytest.mark.skipif(
     os.getenv("RUN_BENCHMARK_TESTS") != "1",
     reason="Benchmark test - run with RUN_BENCHMARK_TESTS=1",
@@ -424,9 +408,7 @@ def test_mxfp8_rowwise_localized_performance() -> None:
     _run_localized_performance_comparison(quantizer, "rowwise")
 
 
-@pytest.mark.skipif(
-    not _localization_available(), reason="CUDA localization is unavailable"
-)
+@pytest.mark.skipif(not _localization_available(), reason="CUDA localization is unavailable")
 @pytest.mark.skipif(
     os.getenv("RUN_BENCHMARK_TESTS") != "1",
     reason="Benchmark test - run with RUN_BENCHMARK_TESTS=1",
@@ -441,9 +423,7 @@ def test_mxfp8_bidirectional_localized_performance() -> None:
     _run_localized_performance_comparison(quantizer, "bidirectional compact")
 
 
-@pytest.mark.skipif(
-    not _localization_available(), reason="CUDA localization is unavailable"
-)
+@pytest.mark.skipif(not _localization_available(), reason="CUDA localization is unavailable")
 @pytest.mark.skipif(
     os.getenv("RUN_BENCHMARK_TESTS") != "1",
     reason="Benchmark test - run with RUN_BENCHMARK_TESTS=1",
@@ -459,9 +439,7 @@ def test_mxfp8_bidirectional_swizzled_localized_performance() -> None:
     _run_localized_performance_comparison(quantizer, "bidirectional fused-swizzle")
 
 
-@pytest.mark.skipif(
-    not _localization_available(), reason="CUDA localization is unavailable"
-)
+@pytest.mark.skipif(not _localization_available(), reason="CUDA localization is unavailable")
 @pytest.mark.skipif(
     os.getenv("RUN_BENCHMARK_TESTS") != "1",
     reason="Benchmark test - run with RUN_BENCHMARK_TESTS=1",
@@ -557,15 +535,13 @@ def test_mxfp8_bidirectional_swizzled_vmm_performance() -> None:
         f"\n  quant speedup:                {baseline_ms / localized_ms:.3f}x"
         f"\n  full-chip quant + GEMM:       {baseline_pipeline_ms:.3f} ms"
         f"\n  localized output + GEMM:      {localized_pipeline_ms:.3f} ms"
-        f"\n  quant + GEMM speedup:         "
+        "\n  quant + GEMM speedup:         "
         f"{baseline_pipeline_ms / localized_pipeline_ms:.3f}x"
     )
     workspace.close()
 
 
-@pytest.mark.skipif(
-    not _localization_available(), reason="CUDA localization is unavailable"
-)
+@pytest.mark.skipif(not _localization_available(), reason="CUDA localization is unavailable")
 @pytest.mark.skipif(
     os.getenv("RUN_BENCHMARK_TESTS") != "1",
     reason="Benchmark test - run with RUN_BENCHMARK_TESTS=1",

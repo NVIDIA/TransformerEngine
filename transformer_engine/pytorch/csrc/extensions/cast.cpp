@@ -92,16 +92,15 @@ py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::ob
   return output_py;
 }
 
-py::object quantize_mxfp8_row_partition(
-    const at::Tensor &tensor, py::handle quantizer, const py::object &output,
-    const size_t global_row_offset, const size_t global_rows) {
+py::object quantize_mxfp8_row_partition(const at::Tensor &tensor, py::handle quantizer,
+                                        const py::object &output, const size_t global_row_offset,
+                                        const size_t global_rows) {
   using namespace transformer_engine::pytorch::detail;
 
   NVTE_CHECK(IsMXFP8Quantizers(quantizer.ptr()),
              "quantize_mxfp8_row_partition requires an MXFP8 quantizer");
   NVTE_CHECK(tensor.dim() == 2, "quantize_mxfp8_row_partition requires a 2D input");
-  NVTE_CHECK(!output.is_none(),
-             "quantize_mxfp8_row_partition requires a preallocated output");
+  NVTE_CHECK(!output.is_none(), "quantize_mxfp8_row_partition requires a preallocated output");
   NVTE_CHECK(global_row_offset % kMXFP8BlockSize == 0,
              "MXFP8 row partition offset must be divisible by ", kMXFP8BlockSize);
   NVTE_CHECK(global_row_offset + tensor.size(0) <= global_rows,

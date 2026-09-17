@@ -27,9 +27,7 @@ def _get_localization_context(device_index: int):
         from torch.cuda.green_contexts import GreenContext, is_localization_supported
         from torch.cuda.memory import LocalizedMemPool, get_num_locality_domains
     except ImportError as exc:
-        raise RuntimeError(
-            "This PyTorch build does not provide CUDA locality-domain APIs"
-        ) from exc
+        raise RuntimeError("This PyTorch build does not provide CUDA locality-domain APIs") from exc
 
     try:
         supported = is_localization_supported(device_index)
@@ -46,9 +44,7 @@ def _get_localization_context(device_index: int):
         GreenContext.create(locality_domain_id=domain, device_id=device_index)
         for domain in range(2)
     )
-    mempools = tuple(
-        LocalizedMemPool(domain, device=device_index) for domain in range(2)
-    )
+    mempools = tuple(LocalizedMemPool(domain, device=device_index) for domain in range(2))
     for pool in mempools:
         pool.alloc_in_order = True
     streams = tuple(green_context.Stream() for green_context in green_contexts)
@@ -112,9 +108,7 @@ class MXFP8LocalizedPair:
         if quantizer.with_2d_quantization:
             raise ValueError("MXFP8 localization does not support 2D quantization")
         if quantizer.internal:
-            raise ValueError(
-                "MXFP8 localization currently requires quantizer.internal=False"
-            )
+            raise ValueError("MXFP8 localization currently requires quantizer.internal=False")
 
         rows, cols = tensor.shape
         if rows % 2 != 0:
@@ -127,8 +121,7 @@ class MXFP8LocalizedPair:
             )
         if not quantizer.columnwise_usage and cols % 128 != 0:
             raise ValueError(
-                "The specialized rowwise-only kernel requires 128-aligned columns "
-                f"(got {cols})"
+                f"The specialized rowwise-only kernel requires 128-aligned columns (got {cols})"
             )
         if quantizer.optimize_for_gemm and rows_per_domain % 128 != 0:
             raise ValueError(
@@ -200,9 +193,7 @@ class MXFP8LocalizedPair:
             )
         expected_shape = (self.inputs[0].shape[0] * 2, self.inputs[0].shape[1])
         if tuple(tensor.shape) != expected_shape:
-            raise ValueError(
-                f"Expected input shape {expected_shape}, got {tuple(tensor.shape)}"
-            )
+            raise ValueError(f"Expected input shape {expected_shape}, got {tuple(tensor.shape)}")
         if not tensor.is_contiguous():
             tensor = tensor.contiguous()
         if parent_stream is None:
@@ -273,9 +264,7 @@ class MXFP8VMMWorkspace:
         self.allocator = allocator
         self.streams = streams
         self._fork_event = torch.cuda.Event(enable_timing=False)
-        self._join_events = tuple(
-            torch.cuda.Event(enable_timing=False) for _ in range(2)
-        )
+        self._join_events = tuple(torch.cuda.Event(enable_timing=False) for _ in range(2))
         self._capture_events = []
 
     @classmethod
@@ -306,9 +295,7 @@ class MXFP8VMMWorkspace:
         device = torch.device(device)
         if device.type != "cuda":
             raise ValueError(f"VMM localization requires a CUDA device, got {device}")
-        device_index = (
-            torch.cuda.current_device() if device.index is None else device.index
-        )
+        device_index = torch.cuda.current_device() if device.index is None else device.index
         device = torch.device("cuda", device_index)
         _, _, streams = _get_localization_context(device_index)
         allocator = VMMRowSplitAllocator(device)
@@ -367,9 +354,7 @@ class MXFP8VMMWorkspace:
             else:
                 col_scale_start = domain * (col_scale_shape[0] // 2)
                 col_scale_end = col_scale_start + col_scale_shape[0] // 2
-                partition_columnwise_scale_inv = columnwise_scale_inv[
-                    col_scale_start:col_scale_end
-                ]
+                partition_columnwise_scale_inv = columnwise_scale_inv[col_scale_start:col_scale_end]
             partition_outputs.append(
                 MXFP8Tensor(
                     shape=partition_shape,
@@ -443,9 +428,7 @@ class MXFP8VMMWorkspace:
     def _fork_join_events(self):
         if torch.cuda.is_current_stream_capturing():
             fork_event = torch.cuda.Event(enable_timing=False)
-            join_events = tuple(
-                torch.cuda.Event(enable_timing=False) for _ in range(2)
-            )
+            join_events = tuple(torch.cuda.Event(enable_timing=False) for _ in range(2))
             self._capture_events.extend((fork_event, *join_events))
             return fork_event, join_events
         return self._fork_event, self._join_events
@@ -477,9 +460,7 @@ class MXFP8VMMWorkspace:
             stream.wait_event(fork_event)
 
         rows_per_domain = self.input.shape[0] // 2
-        for domain, (output, stream) in enumerate(
-            zip(self.partition_outputs, self.streams)
-        ):
+        for domain, (output, stream) in enumerate(zip(self.partition_outputs, self.streams)):
             row_start = domain * rows_per_domain
             with torch.cuda.stream(stream):
                 tex.quantize_mxfp8_row_partition(

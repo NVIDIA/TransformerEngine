@@ -138,10 +138,10 @@ void nvte_quantize_v2(const NVTETensor input, NVTETensor output,
  *  \param[in]      global_rows        Number of rows in the full tensor.
  *  \param[in]      stream             CUDA stream used for the operation.
  */
-void nvte_quantize_mxfp8_row_partition(
-    const NVTETensor input, NVTETensor output,
-    const NVTEQuantizationConfig quant_config, size_t global_row_offset,
-    size_t global_rows, cudaStream_t stream);
+void nvte_quantize_mxfp8_row_partition(const NVTETensor input, NVTETensor output,
+                                       const NVTEQuantizationConfig quant_config,
+                                       size_t global_row_offset, size_t global_rows,
+                                       cudaStream_t stream);
 
 /*! \brief Casts input tensor to MXFP8. Additionally, reduces the input along columns.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,

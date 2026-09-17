@@ -30,10 +30,10 @@
 namespace transformer_engine {
 namespace dispatch {
 
-inline void quantize_mxfp8_row_partition_helper(
-    const NVTETensor input, NVTETensor output,
-    const NVTEQuantizationConfig quant_config, const size_t global_row_offset,
-    const size_t global_rows, cudaStream_t stream) {
+inline void quantize_mxfp8_row_partition_helper(const NVTETensor input, NVTETensor output,
+                                                const NVTEQuantizationConfig quant_config,
+                                                const size_t global_row_offset,
+                                                const size_t global_rows, cudaStream_t stream) {
   using namespace detail;
 
   const Tensor *input_tensor = convertNVTETensorCheck(input);
@@ -56,10 +56,9 @@ inline void quantize_mxfp8_row_partition_helper(
 
   const Tensor *dummy_input_tensor = nullptr;
   Tensor *dummy_output_tensor = nullptr;
-  mxfp8::quantize</*IS_DBIAS=*/false, /*IS_DACT=*/false, /*IS_ACT=*/false,
-                   Empty, nullptr>(
-      *input_tensor, dummy_input_tensor, noop_tensor, output_tensor,
-      dummy_output_tensor, dummy_output_tensor,
+  mxfp8::quantize</*IS_DBIAS=*/false, /*IS_DACT=*/false, /*IS_ACT=*/false, Empty, nullptr>(
+      *input_tensor, dummy_input_tensor, noop_tensor, output_tensor, dummy_output_tensor,
+      dummy_output_tensor,
       /*use_2d_quantization=*/false, stream, global_row_offset, global_rows);
 }
 
