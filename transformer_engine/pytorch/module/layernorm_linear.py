@@ -89,7 +89,7 @@ from ..quantized_tensor import (
 from ..dynamo import (
     TensorSpec,
     TensorOrQuantized,
-    register_custom_op,
+    register_custom_op_with_autograd,
 )
 from ...debug.pytorch.debug_state import TEDebugState
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
@@ -1819,7 +1819,7 @@ def _layernorm_linear_backward_fake(
 
 
 # Custom op used under ``torch.compile``.
-_layernorm_linear_op = register_custom_op(
+_layernorm_linear_op = register_custom_op_with_autograd(
     op_name="layernorm_linear",
     input_tensors_for_grad=["inp", "ln_weight", "ln_bias", "weight", "bias"],
     fwd_arg_type=LayerNormLinearFwdArgs,

@@ -99,7 +99,7 @@ from ..quantized_tensor import (
 from ..dynamo import (
     TensorSpec,
     TensorOrQuantized,
-    register_custom_op,
+    register_custom_op_with_autograd,
 )
 from ..cpp_extensions import (
     general_gemm,
@@ -2498,7 +2498,7 @@ def _layernorm_mlp_backward_fake(
 
 
 # Custom op used under ``torch.compile``.
-_layernorm_mlp_op = register_custom_op(
+_layernorm_mlp_op = register_custom_op_with_autograd(
     op_name="layernorm_mlp",
     input_tensors_for_grad=[
         "inp",

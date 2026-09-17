@@ -131,6 +131,8 @@ def clear_tensor_data(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
 
     Must be used carefully.
     """
+    if torch.compiler.is_compiling():
+        return
 
     for t in tensors:
         if t is not None:
