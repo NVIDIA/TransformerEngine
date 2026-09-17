@@ -215,15 +215,20 @@ def test_frost_sliding_window_matches_reference(mask, window, sq, skv):
 @pytest.mark.parametrize("shape", _SHAPES[:2], ids=lambda s: "b%d_hq%d_hkv%d_sq%d_skv%d_d%d" % s)
 @pytest.mark.parametrize("mask", ["no_mask", "causal"])
 @pytest.mark.parametrize("window", [None, (128, 0)], ids=["nowin", "win128"])
-def test_frost_backward_matches_reference(shape, mask, window):
-    """dq/dk/dv against autograd on the same independent float64 reference."""
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_frost_backward_matches_reference(shape, mask, window, dtype):
+    """dq/dk/dv against autograd on the same independent float64 reference.
+
+    Both dtypes, not just bf16: fp16 has a much narrower exponent range, and the backward is where
+    that would show first -- the gradient of a softmax involves a subtraction of similarly sized
+    terms, so a range problem surfaces there before it surfaces in the forward.
+    """
     from transformer_engine.pytorch.attention.dot_product_attention.frost_attention import (
         frost_attn_bwd,
         frost_attn_fwd,
     )
 
     b, hq, hkv, sq, skv, d = shape
-    dtype = torch.bfloat16
     torch.manual_seed(0)
     # A bshd VIEW, which is what the backend receives: to_frost_layout permutes a bshd-contiguous
     # tensor and hands the result over without a copy. Materialising with .contiguous() here would
