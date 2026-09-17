@@ -3339,7 +3339,13 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 # Only queue-free stores reach this path. Keep the live store in eager,
                 # but do not pass an unused Python object across the custom-op boundary.
                 fwd_args.wgrad_store = None
-                check_gemm_dims(inp, fc1_weight, self.fp8)
+                check_gemm_dims(inp.shape, fc1_weight.shape, self.fp8)
+                act_features = fc1_weight.shape[0]
+                if self.activation in _GATED_ACTIVATIONS:
+                    act_features //= 2
+                rows = reduce(multiply_op, inp.shape[:-1], 1)
+                rows_total = rows * self.tp_size if self.sequence_parallel else rows
+                check_gemm_dims((rows_total, act_features), fc2_weight.shape, self.fp8)
                 out, ln_out, new_fc1_ws, new_fc2_ws = _layernorm_mlp_op(fwd_args)
             else:
                 out, ln_out, new_fc1_ws, new_fc2_ws = _layernorm_mlp_eager(

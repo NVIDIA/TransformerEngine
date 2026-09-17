@@ -2630,7 +2630,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 # Only queue-free stores reach this path. Keep the live store in eager,
                 # but do not pass an unused Python object across the custom-op boundary.
                 fwd_args.wgrad_store = None
-                check_gemm_dims(inp, weight_tensor, self.fp8)
+                check_gemm_dims(inp.shape, weight_tensor.shape, self.fp8)
                 out, ln_out, new_weight_workspace = _layernorm_linear_op(fwd_args)
             else:
                 out, ln_out, new_weight_workspace = _layernorm_linear_eager(

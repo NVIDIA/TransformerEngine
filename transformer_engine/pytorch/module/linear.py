@@ -2461,7 +2461,7 @@ class Linear(TransformerEngineBaseModule):
                     use_compiled_op = False
 
             if use_compiled_op:
-                check_gemm_dims(inp, weight_tensor, self.fp8)
+                check_gemm_dims(inp.shape, weight_tensor.shape, self.fp8)
                 out, new_weight_workspace = _linear_op(fwd_args)
             else:
                 out, new_weight_workspace = _linear_eager(
