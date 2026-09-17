@@ -202,7 +202,8 @@ def newton_schulz(
     x : torch.Tensor
         Local part of the distributed matrix (modified in-place).
         Must be a 2D CUDA tensor of type float32 or bfloat16.
-        Columns are distributed across ranks.
+        Columns are distributed across ranks. The global matrix must have no
+        more rows than columns; use :func:`newton_schulz_tp` for tall matrices.
     ctx : CusolverMpCtx
         cuSolverMp context created by :func:`cusolvermp_ctx_create`.
     num_iterations : int, optional
@@ -237,6 +238,10 @@ def newton_schulz(
     # Global matrix dimensions; columns are distributed across ranks.
     m = x.size(0)
     n = x.size(1) * ctx.nranks
+    if m > n:
+        raise ValueError(
+            f"Expected global rows <= columns for the column-sharded API, got {m} > {n}"
+        )
 
     tex.newton_schulz(ctx._ptr, m, n, x, num_iterations, flat_coefficients)
 

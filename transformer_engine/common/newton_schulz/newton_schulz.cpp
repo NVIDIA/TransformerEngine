@@ -8,6 +8,7 @@
 
 #include <cuda_runtime.h>
 
+#include <cstdint>
 #include <memory>
 #include <vector>
 
@@ -103,6 +104,7 @@ CudaEvent MakeCudaEvent() {
 struct NVTECusolverMpCtx {
   int64_t nranks;
   int64_t rank;
+  ncclComm_t comm;
   CudaStream stream;
   CudaEvent in_ready;
   CudaEvent out_ready;
@@ -111,11 +113,14 @@ struct NVTECusolverMpCtx {
   void* workspace;
   size_t workspace_size;
   bool workspace_registered;
+  std::vector<uint8_t> workspace_host;
 };
 
 namespace {
 
 void FreeWorkspace(NVTECusolverMpCtx* ctx) {
+  // Buffer deregistration and grid destruction require all grid work to be complete.
+  NVTE_CHECK_CUDA(cudaStreamSynchronize(ctx->stream.get()));
   if (ctx->workspace == nullptr) {
     return;
   }
@@ -128,6 +133,25 @@ void FreeWorkspace(NVTECusolverMpCtx* ctx) {
   ctx->workspace = nullptr;
   ctx->workspace_size = 0;
   ctx->workspace_registered = false;
+}
+
+size_t GridMaxWorkspaceSize(NVTECusolverMpCtx* ctx, size_t local_size) {
+  if (ctx->nranks == 1) {
+    return local_size;
+  }
+
+  uint64_t size = local_size;
+  uint64_t* device_size = nullptr;
+  NVTE_CHECK_CUDA(cudaMalloc(&device_size, sizeof(size)));
+  NVTE_CHECK_CUDA(
+      cudaMemcpyAsync(device_size, &size, sizeof(size), cudaMemcpyHostToDevice, ctx->stream.get()));
+  NVTE_CHECK_NCCL(ncclAllReduce(device_size, device_size, 1, ncclUint64, ncclMax, ctx->comm,
+                                ctx->stream.get()));
+  NVTE_CHECK_CUDA(
+      cudaMemcpyAsync(&size, device_size, sizeof(size), cudaMemcpyDeviceToHost, ctx->stream.get()));
+  NVTE_CHECK_CUDA(cudaStreamSynchronize(ctx->stream.get()));
+  NVTE_CHECK_CUDA(cudaFree(device_size));
+  return static_cast<size_t>(size);
 }
 
 }  // namespace
@@ -160,6 +184,7 @@ NVTECusolverMpCtx* nvte_cusolvermp_ctx_create(ncclComm_t comm, int nranks, int r
   return new NVTECusolverMpCtx{
       nranks,
       rank,
+      comm,
       std::move(stream),
       std::move(in_ready),
       std::move(out_ready),
@@ -168,6 +193,7 @@ NVTECusolverMpCtx* nvte_cusolvermp_ctx_create(ncclComm_t comm, int nranks, int r
       nullptr,
       0,
       false,
+      {},
   };
 }
 
@@ -187,6 +213,7 @@ void nvte_newton_schulz(NVTECusolverMpCtx* ctx, int64_t m, int64_t n, NVTETensor
   NVTE_CHECK(num_coefficients == num_iterations * 3, num_iterations, " iterations require ",
              num_iterations * 3, " coefficients, but ", num_coefficients, " are passed");
   const auto* t = convertNVTETensorCheck(x);
+  NVTE_CHECK(m <= n, "Column-sharded Newton-Schulz requires rows <= columns, got ", m, " > ", n);
 
   // Make the internal stream wait for the caller's stream so that
   // the input tensor is ready before cuSolverMp reads it.
@@ -200,6 +227,7 @@ void nvte_newton_schulz(NVTECusolverMpCtx* ctx, int64_t m, int64_t n, NVTETensor
   // Compute local leading dimension
   const int64_t local_cols = cusolverMpNUMROC(n, nb, ctx->rank, 0, ctx->nranks);
   NVTE_CHECK(t->shape().size() == 2, "Shape size:", t->shape().size());
+  NVTE_CHECK(t->shape()[0] == m, "Tensor rows:", t->shape()[0], "Expected rows:", m);
   NVTE_CHECK(t->shape()[1] == local_cols, "Tensor cols:", t->shape()[1], "Local cols:", local_cols);
   const int64_t lld = std::max(local_cols, static_cast<int64_t>(1));
 
@@ -210,6 +238,13 @@ void nvte_newton_schulz(NVTECusolverMpCtx* ctx, int64_t m, int64_t n, NVTETensor
 
   // Create Newton-Schulz descriptor
   auto ns_desc = MakeCusolverMpNSDesc();
+  const int enabled = 1;
+  NVTE_CHECK_CUSOLVERMP(cusolverMpNewtonSchulzDescriptorSetAttribute(
+      ns_desc.get(), CUSOLVERMP_NEWTON_SCHULZ_DESCRIPTOR_ATTRIBUTE_NORMALIZE, &enabled,
+      sizeof(enabled)));
+  NVTE_CHECK_CUSOLVERMP(cusolverMpNewtonSchulzDescriptorSetAttribute(
+      ns_desc.get(), CUSOLVERMP_NEWTON_SCHULZ_DESCRIPTOR_ATTRIBUTE_REDUCE_VIA_COMPUTE_TYPE,
+      &enabled, sizeof(enabled)));
 
   // Query workspace sizes
   size_t wrksp_size_device = 0;
@@ -217,6 +252,7 @@ void nvte_newton_schulz(NVTECusolverMpCtx* ctx, int64_t m, int64_t n, NVTETensor
   NVTE_CHECK_CUSOLVERMP(cusolverMpNewtonSchulz_bufferSize(
       ctx->handle.get(), ns_desc.get(), n, m, t->data.dptr, 1, 1, mat_desc.get(), num_iterations,
       coefficients, CUDA_R_32F, &wrksp_size_device, &wrksp_size_host));
+  wrksp_size_device = GridMaxWorkspaceSize(ctx, wrksp_size_device);
 
   // Allocate/grow device workspace
   if (ctx->workspace_size < wrksp_size_device) {
@@ -244,14 +280,17 @@ void nvte_newton_schulz(NVTECusolverMpCtx* ctx, int64_t m, int64_t n, NVTETensor
     ctx->workspace_registered = workspace_registered;
   }
 
-  // Allocate host workspace
-  std::vector<uint8_t> workspace_host(wrksp_size_host);
+  // Keep host workspace alive until all work on the internal stream is complete.
+  if (ctx->workspace_host.size() < wrksp_size_host) {
+    NVTE_CHECK_CUDA(cudaStreamSynchronize(ctx->stream.get()));
+    ctx->workspace_host.resize(wrksp_size_host);
+  }
 
   // Execute Newton-Schulz
   NVTE_CHECK_CUSOLVERMP(cusolverMpNewtonSchulz(
       ctx->handle.get(), ns_desc.get(), n, m, t->data.dptr, 1, 1, mat_desc.get(), num_iterations,
-      coefficients, CUDA_R_32F, ctx->workspace, ctx->workspace_size, workspace_host.data(),
-      workspace_host.size(), nullptr));
+      coefficients, CUDA_R_32F, ctx->workspace, ctx->workspace_size, ctx->workspace_host.data(),
+      ctx->workspace_host.size(), nullptr));
 
   // Make the caller's stream wait for the internal stream so that
   // the output tensor is ready before the caller uses it.
