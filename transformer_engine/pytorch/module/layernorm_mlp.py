@@ -375,7 +375,6 @@ class LayerNormMLPBwdArgs:
     fc1_weight_requires_grad: bool = False
     fc1_bias_requires_grad: bool = False
     fc2_weight_requires_grad: bool = False
-    inp_shape: Optional[torch.Size] = None
 
     # --- Normalization ---
     normalization: str = "LayerNorm"
@@ -1201,9 +1200,6 @@ def _layernorm_mlp_setup_ctx(
     bwd_args.fc1_weight_requires_grad = fc1_weight_requires_grad
     bwd_args.fc1_bias_requires_grad = fwd_args.fc1_bias_requires_grad
     bwd_args.fc2_weight_requires_grad = fc2_weight_requires_grad
-    # Not stored (SymInt dims are not hashable in OpaqueValueBundle under
-    # torch.compile(dynamic=True)); backward rederives it from grad_output.
-    bwd_args.inp_shape = None
 
     # Normalization
     bwd_args.normalization = fwd_args.normalization
@@ -1378,13 +1374,12 @@ def _layernorm_mlp_backward_impl(
     the saved-tensor fields before invocation. Returns ``(dgrad, dgamma,
     dbeta, fc1_wgrad, fc1_bias_grad, fc2_wgrad, fc2_bias_grad)``.
     """
-    if args.inp_shape is None:
-        in_features = args.ln_weight.shape[-1]
-        inp_leading = args.grad_output.shape[0]
-        if args.sequence_parallel and not args.set_parallel_mode:
-            # FC1's input was all-gathered but FC2's output was not reduce-scattered.
-            inp_leading = inp_leading // args.tp_size
-        args.inp_shape = torch.Size([inp_leading, *args.grad_output.shape[1:-1], in_features])
+    in_features = args.ln_weight.shape[-1]
+    inp_leading = args.grad_output.shape[0]
+    if args.sequence_parallel and not args.set_parallel_mode:
+        # FC1's input was all-gathered but FC2's output was not reduce-scattered.
+        inp_leading = inp_leading // args.tp_size
+    inp_shape = torch.Size([inp_leading, *args.grad_output.shape[1:-1], in_features])
 
     with get_nvtx_range_context("_LayerNormMLP_backward"):
         inputmat = args.inputmat
@@ -2127,7 +2122,7 @@ def _layernorm_mlp_backward_impl(
     #        fc2_weight_fp8 if not isinstance(fc2_weight, Float8Tensor) else None,
     #    )
     return (
-        dgrad.view(args.inp_shape) if args.requires_dgrad else None,
+        dgrad.view(inp_shape) if args.requires_dgrad else None,
         dgamma,
         dbeta,
         fc1_wgrad,

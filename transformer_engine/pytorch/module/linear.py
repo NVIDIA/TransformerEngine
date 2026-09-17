@@ -258,7 +258,6 @@ class LinearBwdArgs:
     use_bias: bool = False
     requires_dgrad: bool = False
     requires_wgrad: bool = False
-    inp_shape: Optional[torch.Size] = None
 
     # --- Numerical / dtype config ---
     activation_dtype: Optional[torch.dtype] = None
@@ -999,10 +998,6 @@ def _linear_setup_ctx(
     bwd_args.use_bias = bias is not None
     bwd_args.requires_dgrad = fwd_args.input_requires_grad
     bwd_args.requires_wgrad = fwd_args.weight_requires_grad
-    # Don't store inp_shape in the value bundle: under torch.compile(dynamic=True)
-    # inp.shape contains SymInt dims which are not hashable in OpaqueValueBundle.
-    # The backward reconstructs inp_shape from grad_output + weight + SP config.
-    bwd_args.inp_shape = None
 
     # Numerical / dtype config
     bwd_args.activation_dtype = fwd_args.activation_dtype
@@ -1154,11 +1149,9 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
         )
         nvtx_range_pop(f"{nvtx_label}.fsdp_gather")
 
-        # Reconstruct inp_shape when not stored (compiled mode with dynamic shapes).
-        if bwd_args.inp_shape is None:
-            in_features = saved_weight.shape[-1]
-            inp_leading = get_input_first_dim_size(grad_output.shape[0], bwd_args)
-            bwd_args.inp_shape = torch.Size([inp_leading, *grad_output.shape[1:-1], in_features])
+        in_features = saved_weight.shape[-1]
+        inp_leading = get_input_first_dim_size(grad_output.shape[0], bwd_args)
+        inp_shape = torch.Size([inp_leading, *grad_output.shape[1:-1], in_features])
 
         # Configure Userbuffers communication (comm+GEMM overlap)
         bwd_args.ub_obj_gradout = None
@@ -1167,8 +1160,8 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
         ub_type_dgrad = None
         ub_type_wgrad = None
         dgrad_shape = [
-            reduce(multiply_op, bwd_args.inp_shape[:-1]),
-            bwd_args.inp_shape[-1],
+            reduce(multiply_op, inp_shape[:-1]),
+            inp_shape[-1],
         ]
         if bwd_args.ub_overlap_ag:
             # Overlap grad_output all-gather with dgrad compute
@@ -1691,7 +1684,7 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
         _fsdp_scatter_tensors(bwd_args.fsdp_group, weight_fp8)
     return (
         wgrad,
-        dgrad.view(bwd_args.inp_shape) if bwd_args.requires_dgrad else None,
+        dgrad.view(inp_shape) if bwd_args.requires_dgrad else None,
         grad_bias,
     )
 

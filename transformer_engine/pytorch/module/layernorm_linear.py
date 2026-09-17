@@ -286,7 +286,6 @@ class LayerNormLinearBwdArgs:
     requires_dgrad: bool = False
     requires_wgrad: bool = False
     ln_out_needs_gather: bool = False
-    inp_shape: Optional[torch.Size] = None
 
     # --- Normalization ---
     normalization: str = "LayerNorm"
@@ -845,9 +844,6 @@ def _layernorm_linear_setup_ctx(
     bwd_args.requires_dgrad = fwd_args.input_requires_grad
     bwd_args.requires_wgrad = fwd_args.weight_requires_grad
     bwd_args.ln_out_needs_gather = ctx_attrs["ln_out_needs_gather"]
-    # Not stored (SymInt dims are not hashable in OpaqueValueBundle under
-    # torch.compile(dynamic=True)); backward rederives it from grad_output.
-    bwd_args.inp_shape = None
 
     # Normalization
     bwd_args.normalization = fwd_args.normalization
@@ -981,10 +977,9 @@ def _layernorm_linear_backward_impl(
     """
     grad_output = args.grad_output
     assert grad_output is not None
-    if args.inp_shape is None:
-        in_features = args.saved_weight.shape[-1]
-        inp_leading = get_input_first_dim_size(grad_output.shape[0], args)
-        args.inp_shape = torch.Size([inp_leading, *grad_output.shape[1:-1], in_features])
+    in_features = args.saved_weight.shape[-1]
+    inp_leading = get_input_first_dim_size(grad_output.shape[0], args)
+    inp_shape = torch.Size([inp_leading, *grad_output.shape[1:-1], in_features])
 
     # NVTX label for profiling
     nvtx_label = "transformer_engine._LayerNormLinear.backward"
@@ -1042,7 +1037,7 @@ def _layernorm_linear_backward_impl(
         ub_obj_wgrad = None
         ub_type_dgrad = None
         ub_type_wgrad = None
-        dgrad_shape = [reduce(multiply_op, args.inp_shape[:-1]), args.inp_shape[-1]]
+        dgrad_shape = [reduce(multiply_op, inp_shape[:-1]), inp_shape[-1]]
         if args.ub_overlap_ag:
             # Overlap grad_output all-gather with dgrad compute
             args.ub_obj_gradout = get_ub(args.ub_name + "_dgrad", args.fp8)
@@ -1532,7 +1527,7 @@ def _layernorm_linear_backward_impl(
         wgrad = None
 
     return (
-        dgrad.view(args.inp_shape) if args.requires_dgrad else None,
+        dgrad.view(inp_shape) if args.requires_dgrad else None,
         dgamma,
         dbeta,
         wgrad,
