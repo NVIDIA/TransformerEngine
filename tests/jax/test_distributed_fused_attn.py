@@ -113,6 +113,7 @@ class TestDistributedSelfAttn:
             mesh_axes=mesh_axes,
             mesh_resource=mesh_resource,
             coll_count_ref=col_ref,
+            doutput_seed=2026,
         )
         runner.test_backward()
 
@@ -239,6 +240,7 @@ class TestDistributedCrossAttn:
             mesh_axes=mesh_axes,
             mesh_resource=mesh_resource,
             coll_count_ref=col_ref,
+            doutput_seed=2026,
         )
         runner.test_backward()
 
@@ -453,7 +455,7 @@ class TestDistributedContextParallelSelfAttn:
             mesh_resource=mesh_resource,
             cp_strategy=cp_strategy,
             cp_load_balanced=load_balanced,
-            doutput_seed=None if return_max_logit else 45,
+            doutput_seed=None if return_max_logit else 2026,
         )
 
         # Mirror _FusedAttnCPWithAllGatherHelper.get_adjusted_max_segments_per_seq()
