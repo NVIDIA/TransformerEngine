@@ -427,8 +427,7 @@ def test_gdp_thd_ragged_sequences(bounds):
     """
     total_tokens, heads, dim, num_householder = bounds[-1], 2, 64, 2
     q, k, v, g, beta = (
-        tensor.squeeze(0)
-        for tensor in _inputs(1, total_tokens, heads, num_householder, dim, dim)
+        tensor.squeeze(0) for tensor in _inputs(1, total_tokens, heads, num_householder, dim, dim)
     )
     cu_seqlens = torch.tensor(bounds, device="cuda", dtype=torch.int32)
     initial_state = torch.randn(

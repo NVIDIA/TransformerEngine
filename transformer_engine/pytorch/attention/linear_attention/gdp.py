@@ -106,7 +106,7 @@ class _GDPKernelAdapter(LinearAttentionKernelAdapter):
                 raise ValueError(
                     f"GDP {name} must be a {token_rank + 3}D tensor for "
                     f"qkv_format={qkv_format!r}: Q's token dimensions, then a "
-                    f"num_householder axis, then [heads, head_dim]. Got "
+                    "num_householder axis, then [heads, head_dim]. Got "
                     f"{tuple(tensor.shape)}."
                 )
             if tuple(tensor.shape[:token_rank]) != token_dims:
@@ -358,7 +358,7 @@ class GatedDeltaProductAttention(LinearAttentionBase):
 
         if not isinstance(num_householder, int) or isinstance(num_householder, bool):
             raise TypeError(
-                f"GatedDeltaProductAttention num_householder must be an int, "
+                "GatedDeltaProductAttention num_householder must be an int, "
                 f"got {type(num_householder).__name__}."
             )
         if num_householder < 1:
