@@ -70,6 +70,7 @@ Transformer Engine has been integrated with popular LLM frameworks such as:
 
 * `Hugging Face Accelerate <https://huggingface.co/docs/accelerate/main/en/usage_guides/low_precision_training#configuring-transformersengine>`_
 * `Lightning <https://lightning.ai/docs/pytorch/stable/common/precision.html>`_
+* `NVIDIA BioNeMo Recipes <https://github.com/NVIDIA-BioNeMo/bionemo-recipes>`_
 * `NVIDIA JAX Toolbox <https://github.com/NVIDIA/JAX-Toolbox>`_
 * `NVIDIA Megatron-LM <https://github.com/NVIDIA/Megatron-LM>`_
 * `NVIDIA NeMo Megatron Bridge <https://github.com/NVIDIA-NeMo/Megatron-Bridge>`_
