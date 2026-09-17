@@ -207,6 +207,7 @@ class LinearBwdArgs:
     use_bias: bool = False
     requires_dgrad: bool = False
     requires_wgrad: bool = False
+    inp_shape: Optional[torch.Size] = None
 
     # --- Numerical / dtype config ---
     activation_dtype: Optional[torch.dtype] = None
@@ -1098,9 +1099,11 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
         )
         nvtx_range_pop(f"{nvtx_label}.fsdp_gather")
 
-        in_features = saved_weight.shape[-1]
-        inp_leading = get_input_first_dim_size(grad_output.shape[0], bwd_args)
-        inp_shape = torch.Size([inp_leading, *grad_output.shape[1:-1], in_features])
+        inp_shape = bwd_args.inp_shape
+        if inp_shape is None:
+            in_features = saved_weight.shape[-1]
+            inp_leading = get_input_first_dim_size(grad_output.shape[0], bwd_args)
+            inp_shape = torch.Size([inp_leading, *grad_output.shape[1:-1], in_features])
 
         # Configure Userbuffers communication (comm+GEMM overlap)
         bwd_args.ub_obj_gradout = None

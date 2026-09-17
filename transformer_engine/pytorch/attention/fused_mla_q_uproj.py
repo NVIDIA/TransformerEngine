@@ -15,8 +15,8 @@ import weakref
 from importlib.metadata import PackageNotFoundError, version as get_pkg_version
 
 import torch
-from packaging.version import Version as PkgVersion
 import transformer_engine_torch as tex
+from packaging.version import Version as PkgVersion
 
 try:
     import triton
@@ -302,6 +302,7 @@ class FusedMLAQUpProjRopeQuant:
             weight_fp8=w_q,
             saved_weight=w_q,
             grad_output_quantizer=grad_output_quantizer,
+            inp_shape=x_saved.shape,
             activation_dtype=act_dtype,
             fp8=fp8,
             # This temporary fused API always computes both projection gradients.
