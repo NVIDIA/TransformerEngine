@@ -20,6 +20,33 @@ import transformer_engine_torch as tex
 _group_transports = weakref.WeakKeyDictionary()
 
 
+def get_native_cp_transport_unavailable_reason(parent_group=None) -> Optional[str]:
+    """Return a local capability failure, or ``None`` when native CP is supported.
+
+    Without a parent, only the extension build and loaded NCCL version are checked.
+    An optional parent must already have an initialized NCCL communicator; querying
+    it also checks Device API and cross-domain GIN support. This function does not
+    initialize communicators, allocate an arena, or perform any collective/P2P work.
+    The caller must agree on one transport across ranks before initializing it.
+    """
+    if not hasattr(tex, "cp_native_transport_create"):
+        return "Transformer Engine was not built with native CP transport"
+    if not hasattr(tex, "cp_native_transport_get_unavailable_reason"):
+        return "Transformer Engine native CP capability query is unavailable; rebuild TE"
+    try:
+        comm_ptr = 0
+        if parent_group is not None:
+            backend = parent_group._get_backend(torch.device("cuda"))
+            if not hasattr(backend, "_comm_ptr"):
+                return "ProcessGroupNCCL does not expose _comm_ptr()"
+            comm_ptr = int(backend._comm_ptr())
+            if not comm_ptr:
+                return "The parent NCCL communicator is not initialized"
+        return tex.cp_native_transport_get_unavailable_reason(comm_ptr) or None
+    except (AttributeError, RuntimeError, TypeError) as error:
+        return f"Native CP capability query failed: {error}"
+
+
 class _Work:
     """Stream dependency compatible with ProcessGroup work handles."""
 

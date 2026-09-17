@@ -50,6 +50,25 @@ size_t align_up(size_t value) {
   return (value + kArenaAlignment - 1) / kArenaAlignment * kArenaAlignment;
 }
 
+// Local queries only: safe before deciding whether to allocate a native arena.
+std::string native_cp_unavailable_reason(ncclComm_t comm, ncclCommProperties_t &properties) {
+  int runtime_version = 0;
+  NVTE_CP_NCCL_CHECK(ncclGetVersion(&runtime_version));
+  if (runtime_version != NCCL_VERSION_CODE) {
+    return "NCCL Device API GIN requires matching compile/runtime versions; compiled with " +
+           std::to_string(NCCL_VERSION_CODE) + ", loaded " + std::to_string(runtime_version);
+  }
+  if (comm == nullptr) return {};
+  NVTE_CP_NCCL_CHECK(ncclCommQueryProperties(comm, &properties));
+  if (!properties.deviceApiSupport) {
+    return "The parent NCCL communicator does not support NCCL Device API";
+  }
+  if (properties.nRanks != ncclTeamLsa(comm).nRanks && properties.ginType == NCCL_GIN_TYPE_NONE) {
+    return "The parent communicator spans multiple LSA domains but GIN is unavailable";
+  }
+  return {};
+}
+
 struct NativeCPTransport {
   ncclComm_t comm = nullptr;
   ncclDevComm dev_comm{};
@@ -256,6 +275,11 @@ void validate_tensor(const NativeCPTransport &transport, const at::Tensor &tenso
 
 }  // namespace
 
+std::string cp_native_transport_get_unavailable_reason(int64_t nccl_comm_ptr) {
+  ncclCommProperties_t properties = NCCL_COMM_PROPERTIES_INITIALIZER;
+  return native_cp_unavailable_reason(reinterpret_cast<ncclComm_t>(nccl_comm_ptr), properties);
+}
+
 std::tuple<int64_t, at::Tensor> cp_native_transport_create(int64_t nccl_comm_ptr,
                                                            int64_t payload_bytes) {
   TORCH_CHECK(nccl_comm_ptr != 0, "nccl_comm_ptr must not be null");
@@ -268,22 +292,13 @@ std::tuple<int64_t, at::Tensor> cp_native_transport_create(int64_t nccl_comm_ptr
   transport->device = c10::cuda::current_device();
   transport->payload_bytes = static_cast<size_t>(payload_bytes);
 
-  int runtime_version = 0;
-  NVTE_CP_NCCL_CHECK(ncclGetVersion(&runtime_version));
-  TORCH_CHECK(runtime_version == NCCL_VERSION_CODE,
-              "NCCL Device API GIN requires matching compile/runtime versions; ", "compiled with ",
-              NCCL_VERSION_CODE, ", loaded ", runtime_version);
-
   ncclCommProperties_t properties = NCCL_COMM_PROPERTIES_INITIALIZER;
-  NVTE_CP_NCCL_CHECK(ncclCommQueryProperties(transport->comm, &properties));
-  TORCH_CHECK(properties.deviceApiSupport,
-              "The parent NCCL communicator does not support NCCL Device API");
+  const std::string unavailable_reason = native_cp_unavailable_reason(transport->comm, properties);
+  TORCH_CHECK(unavailable_reason.empty(), unavailable_reason);
   transport->rank = properties.rank;
   transport->nranks = properties.nRanks;
   const int lsa_size = ncclTeamLsa(transport->comm).nRanks;
   const bool needs_gin = transport->nranks != lsa_size;
-  TORCH_CHECK(transport->nranks == lsa_size || properties.ginType != NCCL_GIN_TYPE_NONE,
-              "The parent communicator spans multiple LSA domains but GIN is unavailable");
 
   const size_t peer_channel_bytes =
       static_cast<size_t>(transport->nranks) * kNumChannels * sizeof(Counter);

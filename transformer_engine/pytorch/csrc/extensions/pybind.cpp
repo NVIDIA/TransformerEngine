@@ -136,6 +136,9 @@ void init_extension() {
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   NVTE_DECLARE_COMMON_PYBIND11_HANDLES(m)
 #ifdef NVTE_WITH_NCCL_DEVICE_CP
+  m.def("cp_native_transport_get_unavailable_reason",
+        &transformer_engine::pytorch::cp_native_transport_get_unavailable_reason,
+        py::arg("nccl_comm_ptr") = 0);
   m.def("cp_native_transport_create", &transformer_engine::pytorch::cp_native_transport_create,
         py::arg("nccl_comm_ptr"), py::arg("payload_bytes"));
   m.def("cp_native_transport_destroy", &transformer_engine::pytorch::cp_native_transport_destroy,

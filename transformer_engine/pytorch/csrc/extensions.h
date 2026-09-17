@@ -23,6 +23,7 @@ class CommOverlapP2P;
 namespace transformer_engine::pytorch {
 
 #ifdef NVTE_WITH_NCCL_DEVICE_CP
+std::string cp_native_transport_get_unavailable_reason(int64_t nccl_comm_ptr);
 std::tuple<int64_t, at::Tensor> cp_native_transport_create(int64_t nccl_comm_ptr,
                                                            int64_t payload_bytes);
 void cp_native_transport_destroy(int64_t handle);

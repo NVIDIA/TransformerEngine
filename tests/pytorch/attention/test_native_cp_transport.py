@@ -17,7 +17,10 @@ import torch
 @pytest.fixture
 def native_module(monkeypatch):
     """Load the transport without importing GPU-only TE modules."""
-    extension = Mock(cp_native_transport_create=Mock(return_value=(1, None)))
+    extension = Mock(
+        cp_native_transport_create=Mock(return_value=(1, None)),
+        cp_native_transport_get_unavailable_reason=Mock(return_value=""),
+    )
     monkeypatch.setitem(sys.modules, "transformer_engine_torch", extension)
     monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
     monkeypatch.setattr(torch.distributed, "barrier", lambda **kwargs: None)
@@ -30,6 +33,102 @@ def native_module(monkeypatch):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module, extension
+
+
+@pytest.mark.parametrize("with_parent", [False, True])
+def test_native_cp_capability_query_is_local(monkeypatch, native_module, with_parent):
+    """Preflight must never initialize transports or launch communication."""
+    module, extension = native_module
+    parent = Mock()
+    parent._get_backend.return_value._comm_ptr.return_value = 123
+    barrier = Mock(side_effect=AssertionError("capability query must not synchronize"))
+    monkeypatch.setattr(torch.distributed, "barrier", barrier)
+    monkeypatch.setattr(torch.cuda, "current_device", barrier)
+
+    assert module.get_native_cp_transport_unavailable_reason(parent if with_parent else None) is None
+
+    extension.cp_native_transport_get_unavailable_reason.assert_called_once_with(
+        123 if with_parent else 0
+    )
+    extension.cp_native_transport_create.assert_not_called()
+    extension.cp_native_transport_send_recv.assert_not_called()
+    barrier.assert_not_called()
+    assert not module._group_transports
+    if not with_parent:
+        parent._get_backend.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "missing_symbol, expected",
+    [
+        ("cp_native_transport_create", "not built with native CP transport"),
+        ("cp_native_transport_get_unavailable_reason", "capability query is unavailable"),
+    ],
+)
+def test_native_cp_capability_query_requires_build_symbols(native_module, missing_symbol, expected):
+    module, extension = native_module
+    delattr(extension, missing_symbol)
+    parent = Mock()
+
+    assert expected in module.get_native_cp_transport_unavailable_reason(parent)
+
+    parent._get_backend.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "NCCL Device API GIN requires matching compile/runtime versions",
+        "The parent NCCL communicator does not support NCCL Device API",
+        "The parent communicator spans multiple LSA domains but GIN is unavailable",
+    ],
+)
+def test_native_cp_capability_query_preserves_reason(native_module, failure):
+    module, extension = native_module
+    extension.cp_native_transport_get_unavailable_reason.return_value = failure
+
+    assert module.get_native_cp_transport_unavailable_reason() == failure
+
+    extension.cp_native_transport_create.assert_not_called()
+
+
+def test_native_cp_capability_query_requires_comm_ptr(native_module):
+    module, extension = native_module
+    parent = Mock()
+    parent._get_backend.return_value = object()
+
+    assert "does not expose _comm_ptr" in module.get_native_cp_transport_unavailable_reason(parent)
+
+    extension.cp_native_transport_get_unavailable_reason.assert_not_called()
+
+
+def test_native_cp_capability_query_rejects_uninitialized_parent(native_module):
+    module, extension = native_module
+    parent = Mock()
+    parent._get_backend.return_value._comm_ptr.return_value = 0
+
+    assert "not initialized" in module.get_native_cp_transport_unavailable_reason(parent)
+
+    extension.cp_native_transport_get_unavailable_reason.assert_not_called()
+
+
+@pytest.mark.parametrize("failure_site", ["backend", "comm_ptr", "properties"])
+def test_native_cp_capability_query_reports_runtime_failure(native_module, failure_site):
+    module, extension = native_module
+    parent = Mock()
+    parent._get_backend.return_value._comm_ptr.return_value = 123
+    target = {
+        "backend": parent._get_backend,
+        "comm_ptr": parent._get_backend.return_value._comm_ptr,
+        "properties": extension.cp_native_transport_get_unavailable_reason,
+    }[failure_site]
+    target.side_effect = RuntimeError("test query failure")
+
+    assert module.get_native_cp_transport_unavailable_reason(parent) == (
+        "Native CP capability query failed: test query failure"
+    )
+
+    extension.cp_native_transport_create.assert_not_called()
 
 
 @pytest.mark.parametrize("configured_value", [None, "512"])
