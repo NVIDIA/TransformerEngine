@@ -148,11 +148,12 @@ class FlashAttentionUtils:
 
     v4_is_installed = False
     fa4_version = PkgVersion("0")
+    v4_0_0_beta31 = PkgVersion("4.0.0b31")
     use_v4 = False
     # Set by a signature probe in backends.py; fail-closed default.
     fa3_supports_softcap = False
     v4_installation_steps = """\
-pip install flash-attn-4==4.0.0b11 nvidia-cutlass-dsl[cu13]"""
+pip install flash-attn-4==4.0.0b31 nvidia-cutlass-dsl[cu13]==4.6.2"""
     v4_warning_printed = False
     # Set by backends.py if FA4 is installed; calls flash_attn.cute.interface._validate_head_dims
     # which raises AssertionError for unsupported (head_dim, head_dim_v) combinations.
@@ -1279,6 +1280,22 @@ def get_attention_backend(
                 cp_comm_type,
             )
             use_flash_attention_4 = False
+        elif (
+            qkv_format == "thd"
+            and cp_comm_type == "all_gather"
+            and (10, 0) <= device_compute_capability < (12, 0)
+            and head_dim_qk == head_dim_v == 256
+            and FlashAttentionUtils.fa4_version < FlashAttentionUtils.v4_0_0_beta31
+        ):
+            # Earlier FA4 releases predate the complete D=256 varlen support
+            # needed by THD all-gather CP, so compact metadata can be incorrect.
+            logger.debug(
+                "Disabling FlashAttention 4 for THD all-gather context parallelism with "
+                "head_dim=256 on SM100/SM110 with version %s (requires >= %s)",
+                FlashAttentionUtils.fa4_version,
+                FlashAttentionUtils.v4_0_0_beta31,
+            )
+            use_flash_attention_4 = False
     if context_parallel and (
         use_flash_attention_2 or use_flash_attention_3 or use_flash_attention_4
     ):
@@ -1757,6 +1774,19 @@ def get_attention_backend(
                 head_dim_v,
             )
             use_flash_attention_3 = False
+    if use_flash_attention_4 and deterministic and FlashAttentionUtils.v4_is_installed:
+        if (
+            is_training
+            and (10, 0) <= device_compute_capability < (12, 0)
+            and head_dim_qk == head_dim_v == 256
+        ):
+            # FA4's dedicated SM100/SM110 D=256 backward kernel rejects
+            # deterministic execution, so select another backend before launch.
+            logger.debug(
+                "Disabling FlashAttention 4 for deterministic backward with "
+                "head_dim=256 on SM100/SM110."
+            )
+            use_flash_attention_4 = False
     if use_fused_attention and deterministic:
         if softmax_type != "vanilla":
             logger.debug(
