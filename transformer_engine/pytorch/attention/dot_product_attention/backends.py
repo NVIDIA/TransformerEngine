@@ -2431,7 +2431,16 @@ class FrostAttention(torch.nn.Module):
         """Forward pass. Routes through the CP ring when a cp_group is present."""
         assert self.attention_dropout == 0.0, "FrostAttention does not support dropout"
 
-        context_parallel = cp_group is not None and get_distributed_world_size(cp_group) != 1
+        # Same form as FlashAttention and FusedAttention above. cp_group is a list of two groups
+        # for cp_comm_type="a2a+p2p", and passing that list to get_distributed_world_size raises
+        # TypeError: unhashable type: 'list'.
+        cp_size = 1
+        if isinstance(cp_group, dist_group_type):
+            cp_size = get_distributed_world_size(cp_group)
+        elif isinstance(cp_group, list):
+            for group in cp_group:
+                cp_size *= get_distributed_world_size(group)
+        context_parallel = cp_size > 1
         if context_parallel:
             output = attn_forward_func_with_cp(
                 self.training,
