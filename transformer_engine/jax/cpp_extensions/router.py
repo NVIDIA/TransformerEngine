@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for fused MoE router"""
+
 from enum import IntEnum
 
 import jax.numpy as jnp
@@ -27,6 +28,7 @@ class ScoreFunction(IntEnum):
 
     SIGMOID = int(JAXX_Score_Function.SIGMOID)
     SOFTMAX = int(JAXX_Score_Function.SOFTMAX)
+    SQRTSOFTPLUS = int(JAXX_Score_Function.SQRTSOFTPLUS)
 
 
 class RoutingMapFormat(IntEnum):
@@ -99,7 +101,8 @@ class FusedTopkWithScoreFunctionFwdPrimitive(BasePrimitive):
         else:
             routing_map_aval = logits_aval.update(shape=i_shape, dtype=jnp.bool_)
         # The CUDA kernel always uses float32 (CompType) for intermediate
-        # computations (softmax/sigmoid values saved for backward).
+        # computations. Softmax/sigmoid save activation values for backward;
+        # sqrtsoftplus saves the original logits.
         intermediate_aval = logits_aval.update(shape=i_shape, dtype=jnp.float32)
         return probs_aval, routing_map_aval, intermediate_aval
 
@@ -702,9 +705,9 @@ def fused_topk_with_score_function_fwd(
     scaling_factor : float
         Scaling factor for output probs.
     score_function : ScoreFunction
-        ScoreFunction.SOFTMAX or ScoreFunction.SIGMOID.
+        ScoreFunction.SOFTMAX, ScoreFunction.SIGMOID, or ScoreFunction.SQRTSOFTPLUS.
     expert_bias : jnp.ndarray
-        Expert bias (only used with sigmoid). Pass empty array if unused.
+        Expert bias (only used with sigmoid/sqrtsoftplus). Pass empty array if unused.
     compute_aux_scores : bool
         If True, compute clean scores for aux loss instead of full top-k.
     routing_map_format : int

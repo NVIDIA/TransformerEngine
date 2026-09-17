@@ -1481,8 +1481,9 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
         # its persistent buffer; cuBLASMp does not, so we gather here. Route
         # through the same FP8-aware all-gather as the non-overlap path in
         # ``TransformerEngineBaseModule.grad_output_preprocess`` by passing the
-        # grad_output quantizer. The columnwise data needed for wgrad is then
-        # produced by ``update_usage(columnwise_usage=True)`` further below.
+        # grad_output quantizer. Per-tensor FP8 can reconstruct columnwise
+        # data from the gathered rowwise data; MXFP8 must instead quantize
+        # the original gradient columnwise to avoid double quantization.
         if (
             bwd_args.requires_wgrad
             and bwd_args.ub_overlap_ag
@@ -1491,6 +1492,8 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
         ):
             if grad_output_quantizer is not None:
                 set_quantizer_usage_for_wgrad_all_gather(grad_output_quantizer)
+            if isinstance(grad_output_quantizer, MXFP8Quantizer):
+                grad_output = grad_output_arg.reshape(-1, grad_output_arg.shape[-1]).contiguous()
             grad_output, _ = gather_along_first_dim(
                 grad_output,
                 bwd_args.tp_group,
@@ -1520,7 +1523,11 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
             # Prepare grad output tensor
             # Note: Synchronize tensor-parallel communication and
             # make sure required data is available
-            if bwd_args.ub_overlap_ag and isinstance(grad_output_quantizer, MXFP8Quantizer):
+            if (
+                bwd_args.ub_overlap_ag
+                and isinstance(grad_output_quantizer, MXFP8Quantizer)
+                and not ub_obj_dgrad.with_cublasmp()
+            ):
                 # UB does not support pipelined overlapping grad output
                 # all-gather with wgrad GEMM. Also, we can't
                 # convert row-scaled MXFP8 to column-scaled, so we
@@ -1901,7 +1908,13 @@ def _linear_eager(
 class Linear(TransformerEngineBaseModule):
     """Applies a linear transformation to the incoming data :math:`y = xA^T + b`
 
-    On NVIDIA GPUs it is a drop-in replacement for ``torch.nn.Linear``.
+    On NVIDIA GPUs, this module implements the same linear transformation as
+    ``torch.nn.Linear``.
+
+    .. note::
+
+       Its constructor signature differs from ``torch.nn.Linear``. Pass optional
+       arguments, including ``bias``, by keyword.
 
     Parameters
     ----------
