@@ -184,43 +184,8 @@ class LinearFwdArgs:
     cpu_offloading: bool
     is_grad_enabled: bool
 
-    def compile_unsupported_reason(self) -> Optional[str]:
-        """Reason this config can't use the torch.compile custom-op path (else None)."""
-        if self.debug:
-            return "debug instrumentation (nvidia-dlfw-inspect)"
-        if is_distributed_weight(self.weight):
-            return "a DistributedWeight (custom weight parallelism, e.g. GTP)"
-        if isinstance(self.inp, (QuantizedTensor, QuantizedTensorStorage)):
-            return "a quantized input tensor"
-        if self.fsdp_group is not None:
-            return "manual TE FSDP (fsdp_group); use FSDP2 or MCore FSDP"
-        if (
-            self.fp8_output
-            and self.is_grad_enabled
-            and (self.input_requires_grad or self.weight_requires_grad or self.bias_requires_grad)
-        ):
-            return "differentiable fp8_output=True"
-        if self.cpu_offloading:
-            return "CPU activation offloading"
-        if self.wgrad_store is not None:
-            # Non-None only when delayed wgrad compute is on (see Linear.forward).
-            return "delayed wgrad compute (wgrad_store)"
-        if (
-            self.grad_input_quantizer is not None
-            and self.is_grad_enabled
-            and self.input_requires_grad
-            and not (self.ub_overlap_rs_dgrad or self.ub_bulk_wgrad)
-        ):
-            # A quantized dgrad can't cross the op boundary: grads are packed
-            # one plain Tensor[] slot each (_pack_bwd_result).
-            return "a quantized input grad (fp8_grad=True)"
-        if self.cache_weight and self.fp8:
-            # The cached workspace is updated in place on the first microbatch,
-            # which the functional op (mutates_args=()) can't express. Without
-            # FP8 no workspace exists, so is_first_microbatch is inert.
-            return "FP8 weight caching (is_first_microbatch)"
-        if self.fuse_wgrad_accumulation:
-            return "fuse_wgrad_accumulation (main_grad)"
+    def compile_unsupported_quantizer_reason(self) -> Optional[str]:
+        """Check prepared quantizers; other fallback checks run before prepare_forward."""
         for quantizer in (
             self.input_quantizer,
             self.weight_quantizer,
@@ -2503,7 +2468,7 @@ class Linear(TransformerEngineBaseModule):
 
             if use_compiled_op:
                 # Safety net for quantizer-dependent conditions only.
-                fallback_reason = fwd_args.compile_unsupported_reason()
+                fallback_reason = fwd_args.compile_unsupported_quantizer_reason()
                 if fallback_reason is not None:
                     warn_compile_eager_fallback(fallback_reason)
                     torch._dynamo.graph_break(
@@ -2604,7 +2569,7 @@ class Linear(TransformerEngineBaseModule):
         debug: bool,
     ) -> Optional[str]:
         """Why this call can't use the compiled op (else None), decided before
-        prepare_forward. Quantizer checks stay in compile_unsupported_reason."""
+        prepare_forward. Quantizers are checked after they are initialized."""
         if debug:
             return "debug instrumentation (nvidia-dlfw-inspect)"
         weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()

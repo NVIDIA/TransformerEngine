@@ -279,34 +279,8 @@ class LayerNormMLPFwdArgs:
             )
         )
 
-    def compile_unsupported_reason(self) -> Optional[str]:
-        """Reason this config can't use the torch.compile custom-op path (else None)."""
-        if self.debug:
-            return "debug instrumentation (nvidia-dlfw-inspect)"
-        if self.checkpoint and self.is_grad_enabled:
-            return "activation checkpointing (checkpoint=True)"
-        if isinstance(self.inp, (QuantizedTensor, QuantizedTensorStorage)):
-            return "a quantized input tensor"
-        if self.fsdp_group is not None:
-            return "manual TE FSDP (fsdp_group); use FSDP2 or MCore FSDP"
-        if (
-            self.fc2_output_quantizer is not None
-            and self.is_grad_enabled
-            and self.any_requires_grad()
-        ):
-            return "differentiable fp8_output=True"
-        if self.cpu_offloading:
-            return "CPU activation offloading"
-        if self.wgrad_store is not None and (
-            self.wgrad_store.context is not None or self.wgrad_store.delay_wgrad_compute()
-        ):
-            return "delayed wgrad compute (wgrad_store)"
-        if self.cache_weight and self.fp8:
-            # The cached workspaces are updated in place on the first microbatch,
-            # which the functional op (mutates_args=()) can't express.
-            return "FP8 weight caching (is_first_microbatch)"
-        if self.fuse_wgrad_accumulation:
-            return "fuse_wgrad_accumulation (main_grad)"
+    def compile_unsupported_quantizer_reason(self) -> Optional[str]:
+        """Check prepared quantizers; other fallback checks run before prepare_forward."""
         for quantizer in (
             self.fc1_input_quantizer,
             self.fc1_weight_quantizer,
@@ -3373,7 +3347,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
             if use_compiled_op:
                 # Safety net for quantizer-dependent conditions only.
-                fallback_reason = fwd_args.compile_unsupported_reason()
+                fallback_reason = fwd_args.compile_unsupported_quantizer_reason()
                 if fallback_reason is not None:
                     warn_compile_eager_fallback(fallback_reason)
                     torch._dynamo.graph_break(
@@ -3434,7 +3408,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         debug: bool,
     ) -> Optional[str]:
         """Why this call can't use the compiled op (else None), decided before
-        prepare_forward. Quantizer checks stay in compile_unsupported_reason."""
+        prepare_forward. Quantizers are checked after they are initialized."""
         if debug:
             return "debug instrumentation (nvidia-dlfw-inspect)"
         if self.checkpoint and is_grad_enabled:

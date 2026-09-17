@@ -2005,7 +2005,7 @@ def test_te_linear_compile_with_fp8_output(compile_mode):
             )
 
 
-# Configs rejected by the modules' compile_unsupported_reason() that a
+# Configs rejected by the modules' early fallback checks that a
 # single-GPU unit test can construct. Distributed-only reasons (fsdp_group,
 # DistributedWeight) and CPU offloading need machinery this file doesn't have;
 # delayed scaling is a hard error (check_recipe_support), tested separately.
