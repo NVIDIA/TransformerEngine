@@ -44,7 +44,7 @@ def _gdn2_supported_arch() -> bool:
     if not torch.cuda.is_available():
         return False
     major, minor = torch.cuda.get_device_capability()
-    return (major, minor) in {(10, 0), (10, 1), (10, 2), (10, 3), (10, 7)}
+    return (major, minor) in {(10, 0), (10, 3), (10, 7)}
 
 
 _GDN2_OP_AVAILABLE = _gdn2_op_available()

@@ -236,6 +236,14 @@ class LinearAttentionKernelAdapter(torch.nn.Module):
         if initial_state is not None and not isinstance(initial_state, torch.Tensor):
             raise TypeError(f"{self.variant} initial_state must be a torch.Tensor when provided.")
 
+        # The checks below encode GDN/GDN-2's layout: aligned Q/K/V token dimensions,
+        # identical Q/K shapes, equal Q/V head counts, and state heads derived from Q
+        # heads. These do not describe linear attention generally -- GDP uses T rows for
+        # Q/g but T * num_householder rows for K/V/beta, and KDA allows HK in {H, HV}
+        # with HO = max(H, HV) for its output and state heads.
+        # TODO(KshitijLakhani/cyanguwa): when KDA/GDP land, move these into the
+        # flavor-specific adapters rather than relaxing them here, so GDN/GDN-2 keep
+        # strict validation.
         expected_rank = 3 if qkv_format == "thd" else 4
         if any(tensor.dim() != expected_rank for tensor in qkv):
             raise ValueError(
@@ -258,6 +266,9 @@ class LinearAttentionKernelAdapter(torch.nn.Module):
         # The underlying ops support grouped value heads, but the module's output
         # contract is fixed at construction time. Integrations that use more V
         # heads must expand Q/K before the module.
+        # TODO(KshitijLakhani/cyanguwa): cuDNN's GDN-2 op accepts distinct Q/K/V head
+        # counts; plumb that through the module's output contract so the wrapper stops
+        # requiring them to be equal.
         if value_layer.shape[-2] != self.num_q_heads:
             raise ValueError(
                 f"{self.variant} V must have {self.num_q_heads} heads, "
@@ -338,6 +349,28 @@ class LinearAttentionBase(torch.nn.Module):
     always run at the input precision. What they do need from the TE module
     contract is reimplemented here: the tensor-parallel group handshake and the
     forward lifecycle.
+
+    Because this is a second module type participating in TE-wide lifecycle
+    behavior, the minimal contract it implements is spelled out here, so
+    framework-level code that today keys off ``TransformerEngineBaseModule``
+    knows what to expect from these modules:
+
+    * ``set_tensor_parallel_group(tp_group)`` -- accepts the TP group after
+      construction and marks it initialized; ``prepare_forward`` raises if
+      ``tp_size > 1`` and it was never called.
+    * ``fast_setattr(name, value)`` -- the FSDP hook. ``prepare_te_modules_for_fsdp``
+      injects ``fsdp_group`` through it on every module ``get_te_classes()`` matches,
+      and these modules are in that set.
+    * ``prepare_forward`` / ``end_forward`` (and the ``prepare_forward_ctx``
+      context manager) -- input validation plus the module's NVTX range.
+    * CUDA-graph discovery -- these modules are recognized by the graph capture
+      machinery, and ``_needs_eager_linear_attention`` marks the calls that must
+      run outside the graph.
+
+    Deliberately *not* implemented, since there are no parameters or TE GEMMs:
+    FP8/quantization state, ``fp8_init``, and the FP8 extra state in the state
+    dict. Anything added to the TE module contract that a parameter-free module
+    should honor needs mirroring here.
 
     Subclasses build a :class:`LinearAttentionKernelAdapter` from the head
     geometry resolved here and implement `forward`.
