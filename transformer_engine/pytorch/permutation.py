@@ -260,11 +260,16 @@ class _moe_permute_mask_map(torch.autograd.Function):
 
         if use_musa_kernel:
             dtype = TE_DType[inp.dtype]
+            musa_probs = probs
+            if musa_probs is None:
+                # The MUSA binding accepts at::Tensor, not Python None.  An
+                # empty device tensor preserves the no-probabilities path.
+                musa_probs = torch.empty(0, dtype=torch.float32, device=inp.device)
             output, permuted_probs = tex.moe_permute_mask(
                 dtype,
                 inp,
                 row_id_map_non_trans,
-                probs,
+                musa_probs,
                 num_tokens,
                 num_experts,
                 num_out_tokens,
@@ -659,7 +664,7 @@ def moe_permute(
         return _moe_permute_index_map.apply(inp, routing_map, num_out_tokens, max_token_num)
     if map_type == "mask":
         output, row_id_map, _ = _moe_permute_mask_map.apply(
-            inp, routing_map, num_out_tokens, None, None
+            inp, routing_map, num_out_tokens, None, None, None
         )
         return output, row_id_map
     raise ValueError("map_type should be one of 'mask' or 'index'")

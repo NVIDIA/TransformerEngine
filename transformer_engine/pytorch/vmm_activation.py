@@ -10,9 +10,23 @@ import torch
 import transformer_engine_torch as tex
 
 
+def vmm_enable_trace(enabled: bool, path: str) -> None:
+    """Enable thread-safe native VMM trace collection to a JSONL path."""
+    tex.vmm_enable_trace(bool(enabled), str(path))
+
+
+def vmm_initialize_workers() -> None:
+    """Start native VMM workers before profiler capture begins."""
+    tex.vmm_initialize_workers()
+
+
+def vmm_profiler_status() -> dict[str, object]:
+    """Return profiler callback and native trace state."""
+    return dict(tex.vmm_profiler_status())
 def vmm_driver_memory_info() -> dict[str, int]:
     """Return free and total bytes reported by the active MUSA driver context."""
     return {key: int(value) for key, value in dict(tex.vmm_driver_memory_info()).items()}
+
 
 
 class MUSAActivationVMMAllocation:
@@ -52,6 +66,10 @@ class MUSAActivationVMMAllocation:
     @property
     def address(self) -> int:
         return self._address
+
+    def set_slot_id(self, slot_id: str) -> None:
+        """Attach a stable human-readable identity used by worker diagnostics."""
+        self._allocation.set_slot_id(str(slot_id))
 
     @property
     def mapped(self) -> bool:
@@ -162,6 +180,65 @@ def remap_and_copy_after(
     )
 
 
+def remap_and_copy_slot_after(
+    allocation: MUSAActivationVMMAllocation,
+    host_tensor: torch.Tensor,
+    stream: torch.Stream,
+) -> "VMMRemapHookContext":
+    """Submit exactly one slot request to the remap server."""
+    return tex.remap_and_copy_slot_after(
+        allocation._allocation,
+        host_tensor,
+        _raw_musa_stream(stream),
+    )
+
+
+def remap_only_slot_after(
+    allocation: MUSAActivationVMMAllocation,
+    host_tensor: torch.Tensor,
+    stream: torch.Stream,
+) -> "VMMRemapHookContext":
+    """Submit one remap-only slot request; H2D is deferred to launch_slot_h2d."""
+    return tex.remap_only_slot_after(
+        allocation._allocation,
+        host_tensor,
+        _raw_musa_stream(stream),
+    )
+
+
+def launch_remap_slot_h2d(
+    context: "VMMRemapHookContext", slot_index: int, stream: torch.Stream
+) -> None:
+    """Launch one deferred slot's H2D now, waiting for its remap if needed."""
+    context.launch_slot_h2d(int(slot_index), _raw_musa_stream(stream))
+
+
 def wait_remap_copy_on_stream(context: "VMMRemapHookContext", stream: torch.Stream) -> None:
-    """Install a GPU-side wait for an asynchronous reload on ``stream``."""
+    """Wait for worker submission, then install the GPU-side H2D dependency."""
     context.wait_on_stream(_raw_musa_stream(stream))
+
+
+def enqueue_remap_copy_wait(context: "VMMRemapHookContext", stream: torch.Stream) -> None:
+    """Install only the GPU-side H2D dependency without waiting on the worker."""
+    context.enqueue_wait_on_stream(_raw_musa_stream(stream))
+
+
+def enqueue_remap_slot_waits(context: "VMMRemapHookContext", stream: torch.Stream) -> None:
+    """Install one completion wait for each remapped slot."""
+    context.enqueue_slot_waits(_raw_musa_stream(stream))
+
+
+def wait_remap_slot_on_stream(
+    context: "VMMRemapHookContext", slot_index: int, stream: torch.Stream
+) -> None:
+    """Wait until one slot H2D is submitted, then enqueue its GPU dependency."""
+    context.enqueue_slot_wait(int(slot_index), _raw_musa_stream(stream))
+
+
+def wait_until_remap_slot_submitted(
+    context: "VMMRemapHookContext", slot_index: int
+) -> None:
+    """Block until one slot's remap and H2D event have been submitted."""
+    context.wait_until_slot_submitted(int(slot_index))
+
+
