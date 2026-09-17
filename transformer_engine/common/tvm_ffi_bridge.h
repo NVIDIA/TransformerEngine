@@ -28,96 +28,12 @@
 #include "common.h"
 #include "util/cuda_runtime.h"
 #include "util/logging.h"
-#include "util/math.h"
 #include "util/system.h"
 
 namespace transformer_engine {
 namespace tvm_ffi_bridge {
 
 bool initialize_python_cutedsl_backend();
-
-// Fused activation token forwarded to Python. Encodes both the family and the
-// forward-vs-derivative direction: "relu" is the forward activation, "drelu" its
-// backward derivative (dact). This is why no separate is_act/is_dact flag is
-// needed — the token carries it; only with_dbias (orthogonal) is a separate flag.
-// The d-variants are slots for the not-yet-wired backward path; the forward
-// tokens must match Python's SUPPORTED_ACTIVATIONS set.
-enum class Activation {
-  kNone,
-  kReLU,
-  kGeLU,
-  kSiLU,
-  kQGeLU,
-  kSReLU,
-  kDReLU,
-  kDGeLU,
-  kDSiLU,
-  kDQGeLU,
-  kDSReLU,
-  kUnsupported,
-  kNumTypes
-};
-
-inline const char *activation_to_str(Activation act) {
-  switch (act) {
-    case Activation::kReLU:
-      return "relu";
-    case Activation::kGeLU:
-      return "gelu";
-    case Activation::kSiLU:
-      return "silu";
-    case Activation::kQGeLU:
-      return "qgelu";
-    case Activation::kSReLU:
-      return "srelu";
-    case Activation::kDReLU:
-      return "drelu";
-    case Activation::kDGeLU:
-      return "dgelu";
-    case Activation::kDSiLU:
-      return "dsilu";
-    case Activation::kDQGeLU:
-      return "dqgelu";
-    case Activation::kDSReLU:
-      return "dsrelu";
-    case Activation::kUnsupported:
-      return "unsupported";
-    case Activation::kNone:
-    case Activation::kNumTypes:
-      return "none";
-  }
-  return "none";
-}
-
-template <typename ParamOP, float (*OP)(float, const ParamOP &)>
-constexpr Activation activation_func_to_enum() {
-  if constexpr (OP == nullptr) {
-    return Activation::kNone;
-  } else if constexpr (std::is_same_v<ParamOP, Empty>) {
-    if constexpr (OP == relu<fp32, fp32>) {
-      return Activation::kReLU;
-    } else if constexpr (OP == gelu<fp32, fp32>) {
-      return Activation::kGeLU;
-    } else if constexpr (OP == silu<fp32, fp32>) {
-      return Activation::kSiLU;
-    } else if constexpr (OP == qgelu<fp32, fp32>) {
-      return Activation::kQGeLU;
-    } else if constexpr (OP == srelu<fp32, fp32>) {
-      return Activation::kSReLU;
-    } else if constexpr (OP == drelu<fp32, fp32>) {
-      return Activation::kDReLU;
-    } else if constexpr (OP == dgelu<fp32, fp32>) {
-      return Activation::kDGeLU;
-    } else if constexpr (OP == dsilu<fp32, fp32>) {
-      return Activation::kDSiLU;
-    } else if constexpr (OP == dqgelu<fp32, fp32>) {
-      return Activation::kDQGeLU;
-    } else if constexpr (OP == dsrelu<fp32, fp32>) {
-      return Activation::kDSReLU;
-    }
-  }
-  return Activation::kUnsupported;
-}
 
 inline DLDataType convert_to_dltype(NVTEDType type) {
   switch (type) {

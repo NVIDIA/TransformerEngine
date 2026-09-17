@@ -24,8 +24,7 @@
 namespace transformer_engine {
 namespace cutedsl_backend {
 
-// Activation, activation_to_str, DLTensorWrapper, TVMFFICentral
-// all live in transformer_engine::tvm_ffi_bridge (tvm_ffi_bridge.h).
+// DLTensorWrapper and TVMFFICentral live in transformer_engine::tvm_ffi_bridge.
 using namespace tvm_ffi_bridge;
 
 struct MXFP8QuantConfig {

@@ -11,6 +11,8 @@ import cutlass
 from cutlass import cute
 from cutlass import Float32, Int64, Int32, Uint16, Uint32
 
+# This must match `inline std::string to_string(const DType type)`` in transformer_engine/common/common.h exactly
+# which is how we encode types to strings in C++
 _CUTLASS_DTYPE_FROM_STR = {
     "Float32": cutlass.Float32,
     "Float16": cutlass.Float16,
