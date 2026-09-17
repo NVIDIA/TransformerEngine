@@ -4,9 +4,12 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-/*! \file cast_rowwise.cu
- *  \brief Register-resident rowwise MXFP8 quantization kernel.
+/*! \file cast_rowwise.cuh
+ *  \brief Register-resident MXFP8 cast kernel and its launcher.
  */
+
+#ifndef TRANSFORMER_ENGINE_MXFP8_SPECIALIZED_CAST_ROWWISE_CUH_
+#define TRANSFORMER_ENGINE_MXFP8_SPECIALIZED_CAST_ROWWISE_CUH_
 
 #include <cuda_runtime.h>
 
@@ -15,13 +18,17 @@
 #include "../../../util/ptx_arch_spec.cuh"
 #include "../../../utils.cuh"
 #include "../swizzle.cuh"  // gemm_swizzled_scale_idx (GEMM scale layout)
-#include "cast_rowwise.h"
 
 namespace transformer_engine {
 namespace dispatch {
 namespace mxfp8 {
 namespace quantize_kernel {
 namespace specialized {
+
+// Implementation details.  Both register-resident kernels define constants and
+// helpers of the same name; now that they are headers included into the same
+// translation unit, each needs its own scope.
+namespace rowwise_detail {
 
 namespace ptx = transformer_engine::ptx;
 
@@ -488,7 +495,31 @@ void launch_contiguous(const LaunchConfig &config, int64_t grid, uint32_t first_
 
 }  // namespace
 
-template <typename OType, bool SWIZZLED_SCALES>
+/*! \brief Cast BF16 to rowwise-scaled MXFP8.
+ *
+ * Every run of 32 consecutive elements in a row forms one MX block sharing a
+ * single E8M0 scale.  This is the register-resident member of the specialized
+ * cast-only family: it keeps its tile in registers instead of staging it
+ * through shared memory as quantize_mxfp8_kernel_cast_only does.  See
+ * cast_rowwise.cuh for the layout and tuning rationale.
+ *
+ * Instantiated for the MXFP8 output types the specialized dispatch can reach,
+ * fp8e4m3 and fp8e5m2.  Requires SM 10.0+ (Blackwell), matching MXFP8 support
+ * in the rest of TE.
+ *
+ *  \tparam     OType         FP8 output type.
+ *  \tparam     SWIZZLED_SCALES  Write scales in the GEMM-swizzled layout rather
+ *                            than one packed byte per MX block.
+ *  \param[in]  input         BF16 input, [rows, cols], row-major.
+ *  \param[out] output        FP8 output, [rows, cols], row-major.
+ *  \param[out] scales        E8M0 scales, one byte per MX block.
+ *  \param[in]  rows          Number of rows.
+ *  \param[in]  cols          Number of columns; must be a multiple of 32.
+ *  \param[in]  scale_stride  Scale elements per row.  Equals cols/32 for a
+ *                            packed scale array, or more when it is padded.
+ *  \param[in]  stream        CUDA stream.
+ */
+template <typename OType, bool SWIZZLED_SCALES = false>
 void launch_cast_rowwise(const void *input, void *output, void *scales, int rows, int cols,
                          int scale_stride, cudaStream_t stream) {
   NVTE_CHECK(cols % kBlockElems == 0, "Rowwise MXFP8 requires the column count (", cols,
@@ -589,18 +620,14 @@ void launch_cast_rowwise(const void *input, void *output, void *scales, int rows
   }
 }
 
-// The MXFP8 output types the specialized dispatch can reach; see hasSpec.
-template void launch_cast_rowwise<fp8e4m3, false>(const void *, void *, void *, int, int, int,
-                                                  cudaStream_t);
-template void launch_cast_rowwise<fp8e5m2, false>(const void *, void *, void *, int, int, int,
-                                                  cudaStream_t);
-template void launch_cast_rowwise<fp8e4m3, true>(const void *, void *, void *, int, int, int,
-                                                 cudaStream_t);
-template void launch_cast_rowwise<fp8e5m2, true>(const void *, void *, void *, int, int, int,
-                                                 cudaStream_t);
+}  // namespace rowwise_detail
+
+using rowwise_detail::launch_cast_rowwise;
 
 }  // namespace specialized
 }  // namespace quantize_kernel
 }  // namespace mxfp8
 }  // namespace dispatch
 }  // namespace transformer_engine
+
+#endif  // TRANSFORMER_ENGINE_MXFP8_SPECIALIZED_CAST_ROWWISE_CUH_

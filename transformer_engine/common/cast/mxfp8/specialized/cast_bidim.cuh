@@ -4,22 +4,29 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-/*! \file cast_bidim.cu
- *  \brief Register-resident bidimensional MXFP8 quantization kernel.
+/*! \file cast_bidim.cuh
+ *  \brief Register-resident MXFP8 cast kernel and its launcher.
  */
+
+#ifndef TRANSFORMER_ENGINE_MXFP8_SPECIALIZED_CAST_BIDIM_CUH_
+#define TRANSFORMER_ENGINE_MXFP8_SPECIALIZED_CAST_BIDIM_CUH_
 
 #include <cuda_runtime.h>
 
 #include "../../../common.h"
 #include "../../../util/ptx.cuh"
 #include "../../../utils.cuh"
-#include "cast_bidim.h"
 
 namespace transformer_engine {
 namespace dispatch {
 namespace mxfp8 {
 namespace quantize_kernel {
 namespace specialized {
+
+// Implementation details.  Both register-resident kernels define constants and
+// helpers of the same name; now that they are headers included into the same
+// translation unit, each needs its own scope.
+namespace bidim_detail {
 
 namespace ptx = transformer_engine::ptx;
 
@@ -580,6 +587,31 @@ void launch_tiled(const void *input, void *output_rowwise, void *scales_rowwise,
 
 }  // namespace
 
+/*! \brief Cast BF16 to MXFP8 with both rowwise and colwise scales.
+ *
+ * Produces two quantizations of the same tensor: a rowwise one, where 32
+ * consecutive elements of a row share a scale, and a colwise one, where 32
+ * consecutive elements of a column share a scale.  Both outputs keep the
+ * input's row-major [rows, cols] layout; the colwise result is not transposed.
+ *
+ * Unlike the TMA kernel in mxfp8/specialized this one is register-resident: a
+ * CTA reads its 32-row tile once and drives both passes from registers.  See
+ * cast_bidim.cu for the layout and tuning rationale.
+ *
+ * Requires SM 10.0+ (Blackwell), matching MXFP8 support in the rest of TE.
+ *
+ *  \tparam     OType                 FP8 output type.
+ *  \param[in]  input                 BF16 input, [rows, cols], row-major.
+ *  \param[out] output_rowwise        FP8E4M3 rowwise-scaled output, [rows, cols].
+ *  \param[out] scales_rowwise        E8M0 rowwise scales, one per 32 columns.
+ *  \param[out] output_colwise        FP8E4M3 colwise-scaled output, [rows, cols].
+ *  \param[out] scales_colwise        E8M0 colwise scales, one per 32 rows.
+ *  \param[in]  rows                  Row count; must be a multiple of 32.
+ *  \param[in]  cols                  Column count; must be a multiple of 256.
+ *  \param[in]  scale_stride_rowwise  Rowwise scale elements per row.
+ *  \param[in]  scale_stride_colwise  Colwise scale elements per 32-row band.
+ *  \param[in]  stream                CUDA stream.
+ */
 template <typename OType>
 void launch_cast_bidim_packed(const void *input, void *output_rowwise, void *scales_rowwise,
                               void *output_colwise, void *scales_colwise, int rows, int cols,
@@ -608,14 +640,32 @@ void launch_cast_bidim_packed(const void *input, void *output_rowwise, void *sca
       scale_stride_rowwise, scale_stride_colwise, kNarrowCluster, stream);
 }
 
-// The MXFP8 output types the specialized dispatch can reach; see hasSpec.
-template void launch_cast_bidim_packed<fp8e4m3>(const void *, void *, void *, void *, void *, int,
-                                                int, int, int, cudaStream_t);
-template void launch_cast_bidim_packed<fp8e5m2>(const void *, void *, void *, void *, void *, int,
-                                                int, int, int, cudaStream_t);
+/*! \brief Entry point.  Rejects swizzled scales at compile time; see above. */
+template <typename OType, bool SWIZZLED_SCALES = false>
+inline void launch_cast_bidim(const void *input, void *output_rowwise, void *scales_rowwise,
+                              void *output_colwise, void *scales_colwise, int rows, int cols,
+                              int scale_stride_rowwise, int scale_stride_colwise,
+                              cudaStream_t stream) {
+  static_assert(!SWIZZLED_SCALES,
+                "launch_cast_bidim writes packed scales for both directions.  The GEMM-swizzled "
+                "layout is a property of the whole tensor, so emitting it for the rowwise array "
+                "while leaving the colwise one packed produces a tensor no consumer can read, and "
+                "the colwise swizzle is not implemented here.  Route swizzled bidimensional casts "
+                "to the staged kernel instead.");
+  launch_cast_bidim_packed<OType>(input, output_rowwise, scales_rowwise, output_colwise,
+                                  scales_colwise, rows, cols, scale_stride_rowwise,
+                                  scale_stride_colwise, stream);
+}
+
+}  // namespace bidim_detail
+
+using bidim_detail::launch_cast_bidim;
+using bidim_detail::launch_cast_bidim_packed;
 
 }  // namespace specialized
 }  // namespace quantize_kernel
 }  // namespace mxfp8
 }  // namespace dispatch
 }  // namespace transformer_engine
+
+#endif  // TRANSFORMER_ENGINE_MXFP8_SPECIALIZED_CAST_BIDIM_CUH_

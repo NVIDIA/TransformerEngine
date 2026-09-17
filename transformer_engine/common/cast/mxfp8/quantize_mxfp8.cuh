@@ -21,8 +21,8 @@
 #include "../../util/ptx_arch_spec.cuh"
 #include "../../utils.cuh"
 #include "../core/common.cuh"
-#include "specialized/cast_bidim.h"
-#include "specialized/cast_rowwise.h"
+#include "specialized/cast_bidim.cuh"
+#include "specialized/cast_rowwise.cuh"
 #include "specialized/quantize_mxfp8.cuh"
 #include "swizzle.cuh"
 
