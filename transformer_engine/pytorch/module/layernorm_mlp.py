@@ -307,8 +307,6 @@ class LayerNormMLPFwdArgs:
             return "FP8 weight caching (is_first_microbatch)"
         if self.fuse_wgrad_accumulation:
             return "fuse_wgrad_accumulation (main_grad)"
-        if self.fp8 and self.gemm_gelu_fusion and self.activation == "gelu":
-            return "gemm_gelu_fusion with FP8"
         for quantizer in (
             self.fc1_input_quantizer,
             self.fc1_weight_quantizer,
@@ -2336,8 +2334,13 @@ def _layernorm_mlp_forward_fake(
             shape=(rows_total, fc1_out_features), dtype=args.activation_dtype, device=device
         )
     else:
+        # generic_gemm stores the pre-GELU auxiliary output in the bias dtype
+        # for low-precision inputs, defaulting to BF16 when there is no bias.
+        fc1_out_dtype = args.activation_dtype
+        if gemm_gelu_fusion and args.fp8:
+            fc1_out_dtype = bias_dtype if args.fc1_bias is not None else torch.bfloat16
         fc1_out = TensorSpec(
-            shape=(rows_total, fc1_out_features), dtype=args.activation_dtype, device=device
+            shape=(rows_total, fc1_out_features), dtype=fc1_out_dtype, device=device
         )
     act_out = TensorSpec(
         shape=(rows_total, act_features),
@@ -3457,8 +3460,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
         fp8 = FP8GlobalStateManager.is_fp8_enabled()
         if fp8 and is_first_microbatch is not None and not self.is_fsdp2:
             return "FP8 weight caching (is_first_microbatch)"
-        if fp8 and self.gemm_gelu_fusion and self.activation == "gelu":
-            return "gemm_gelu_fusion with FP8"
         return None
 
     def requires_grad_params(self) -> bool:

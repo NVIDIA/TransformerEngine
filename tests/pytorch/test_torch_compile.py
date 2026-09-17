@@ -4,6 +4,8 @@
 
 import abc
 import contextlib
+import dataclasses
+import importlib
 import os
 import re
 import sys
@@ -17,6 +19,7 @@ try:
 except ImportError:  # pragma: no cover
     counters = None
 from torch._subclasses.fake_tensor import FakeTensor, FakeTensorMode
+from torch._dynamo.testing import CompileCounterWithBackend
 
 try:
     from torch._opaque_base import OpaqueBaseMeta
@@ -2383,8 +2386,10 @@ def _assert_module_close_eager_compiled(fn, compiled, model, base):
         )
 
 
-def _run_module_compile_test(model, fp8_recipe, compile_mode, in_features, backward=True):
-    dtype, device = torch.bfloat16, "cuda"
+def _run_module_compile_test(
+    model, fp8_recipe, compile_mode, in_features, backward=True, dtype=torch.bfloat16
+):
+    device = "cuda"
 
     def fn(inp):
         if fp8_recipe is None:
@@ -2405,6 +2410,111 @@ def _run_module_compile_test(model, fp8_recipe, compile_mode, in_features, backw
         for _ in range(n_iters):
             base = torch.randn(32, in_features, dtype=dtype, device=device)
             _assert_module_close_eager_compiled(fn, compiled, model, base)
+
+
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
+@pytest.mark.parametrize("case", ["linear", "mlp_bias_gelu", "mlp_gemm_gelu", "mlp_swiglu"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("bias", [False, True])
+@pytest.mark.parametrize("fp8_recipe", [None, recipe.Float8CurrentScaling()])
+def test_te_layernorm_module_fake_matches_real(monkeypatch, case, dtype, bias, fp8_recipe):
+    """Compare fake outputs, saved buffers and gradients against the eager kernels."""
+    from transformer_engine.pytorch.dynamo.custom_op import _parse_arg_type, _spec_view
+
+    if fp8_recipe is not None and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+    if fp8_recipe is not None and case == "mlp_gemm_gelu":
+        if dtype == torch.float32 or (dtype == torch.float16 and not bias):
+            pytest.skip(
+                "cuBLAS FP8 GELU requires matching output and auxiliary dtypes (BF16 without bias)"
+            )
+    module_name = "layernorm_linear" if case == "linear" else "layernorm_mlp"
+    module = importlib.import_module(f"transformer_engine.pytorch.module.{module_name}")
+    checked = []
+
+    def assert_metadata(spec, real):
+        if isinstance(spec, TensorSpec):
+            assert real is not None
+            assert tuple(spec.shape) == tuple(real.shape)
+            assert spec.dtype == to_tensor_spec(real).dtype
+            assert spec.device == real.device
+            names = (
+                tuple(real.__tensor_flatten__()[0])
+                if hasattr(real, "__tensor_flatten__")
+                else ("data",)
+            )
+            assert spec.inner_names() == names
+            for name, fake_inner in zip(names, spec.create_inner_tensors()):
+                real_inner = real if name == "data" else getattr(real, name)
+                assert fake_inner.shape == real_inner.shape
+                assert fake_inner.dtype == real_inner.dtype
+                assert fake_inner.stride() == real_inner.stride()
+        elif isinstance(spec, tuple):
+            assert isinstance(real, tuple) and len(spec) == len(real)
+            for fake_value, real_value in zip(spec, real):
+                assert_metadata(fake_value, real_value)
+        elif isinstance(spec, dict):
+            # No manual FSDP or checkpointing here; [] and None both denote no shards.
+            for key in spec.keys() | real.keys():
+                if key in ("fsdp_shapes", "checkpoint"):
+                    assert not spec.get(key) and not real.get(key)
+                else:
+                    assert spec[key] == real[key]
+        else:
+            assert spec == real
+
+    def checked_impl(direction):
+        real_impl = getattr(module, f"_{module_name}_{direction}_impl")
+        fake_impl = getattr(module, f"_{module_name}_{direction}_fake")
+
+        def wrapper(args):
+            spec_args = _spec_view(args, _parse_arg_type(type(args)).tensor_field_names())
+            # Fake execution may change quantizer usage; leave the real invocation untouched.
+            spec_args = dataclasses.replace(
+                spec_args,
+                **{
+                    field.name: value.copy()
+                    for field in dataclasses.fields(spec_args)
+                    if isinstance(value := getattr(spec_args, field.name), Quantizer)
+                },
+            )
+            expected = fake_impl(spec_args)
+            actual = real_impl(args)
+            assert_metadata(expected, actual)
+            checked.append(direction)
+            return actual
+
+        return wrapper
+
+    for direction in ("forward", "backward"):
+        monkeypatch.setattr(module, f"_{module_name}_{direction}_impl", checked_impl(direction))
+    kwargs = dict(params_dtype=dtype, device="cuda", bias=bias, return_layernorm_output=True)
+    if case == "linear":
+        model = te.LayerNormLinear(64, 32, **kwargs)
+    else:
+        model = te.LayerNormMLP(
+            64, 128, activation="swiglu" if case == "mlp_swiglu" else "gelu", **kwargs
+        )
+        model.bias_gelu_nvfusion = case == "mlp_bias_gelu"
+        model.gemm_gelu_fusion = case == "mlp_gemm_gelu"
+    inp = torch.randn(2, 16, 64, dtype=dtype, device="cuda", requires_grad=True)
+    with te.autocast(enabled=fp8_recipe is not None, recipe=fp8_recipe):
+        outs = model(inp)
+    sum(out.sum() for out in outs).backward()
+    assert checked == ["forward", "backward"]
+
+
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.parametrize(
+    "dtype,bias", [(torch.bfloat16, False), (torch.bfloat16, True), (torch.float16, True)]
+)
+@pytest.mark.parametrize("compile_mode", _compile_modes)
+def test_te_layernorm_mlp_compile_fp8_gemm_gelu(dtype, bias, compile_mode):
+    """Fused FP8 GEMM-GELU must preserve the auxiliary tensor dtype through backward."""
+    model = te.LayerNormMLP(64, 128, params_dtype=dtype, device="cuda", bias=bias)
+    model.gemm_gelu_fusion = True
+    _run_module_compile_test(model, recipe.Float8CurrentScaling(), compile_mode, 64, dtype=dtype)
 
 
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
@@ -2456,8 +2566,11 @@ def test_te_layernorm_linear_compile_with_quantized_fp8_weight():
 
 
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
-@pytest.mark.parametrize("module", ["LayerNormLinear", "LayerNormMLP"])
-def test_te_layernorm_module_dynamic_shapes(module):
+@pytest.mark.parametrize(
+    "module,bias_gelu_fusion",
+    [("LayerNormLinear", False), ("LayerNormMLP", False), ("LayerNormMLP", True)],
+)
+def test_te_layernorm_module_dynamic_shapes(module, bias_gelu_fusion):
     """LayerNorm modules with a ``mark_dynamic`` batch dim: one graph for all
     batch sizes, numerics matching eager."""
     dtype, device = torch.bfloat16, "cuda"
@@ -2466,22 +2579,24 @@ def test_te_layernorm_module_dynamic_shapes(module):
         weight = model.weight
     else:
         model = te.LayerNormMLP(64, 128, params_dtype=dtype, device=device)
-        # The fused bias-gelu helpers are torch.compile'd on their own inside the
-        # op and recompile per shape; keep them out of the graph count.
-        model.bias_gelu_nvfusion = False
+        model.bias_gelu_nvfusion = bias_gelu_fusion
         weight = model.fc1_weight
 
     def fn(inp):
         return model(inp)
 
     torch._dynamo.reset()
-    compiled = torch.compile(fn, fullgraph=True)
+    # Count the outer graph independently of lazy compilation of fused helpers.
+    compile_counter = CompileCounterWithBackend("inductor")
+    compiled = torch.compile(fn, fullgraph=True, backend=compile_counter)
     for _ in range(2):
         warm = torch.randn(16, 64, dtype=dtype, device=device)
         torch._dynamo.mark_dynamic(warm, 0)
         compiled(warm.requires_grad_(True)).sum().backward()
     model.zero_grad(set_to_none=True)
-    unique_graphs_baseline = _dynamo_counter("stats", "unique_graphs")
+    # TE initializes module state lazily on the first call.
+    frames_after_warmup = compile_counter.frame_count
+    assert frames_after_warmup > 0
 
     for batch in (16, 32, 48):
         base = torch.randn(batch, 64, dtype=dtype, device=device)
@@ -2499,8 +2614,7 @@ def test_te_layernorm_module_dynamic_shapes(module):
         torch.testing.assert_close(igrad, inp_eager.grad, atol=0.0, rtol=0.0)
         torch.testing.assert_close(wgrad, weight.grad, atol=0.0, rtol=0.0)
 
-    if unique_graphs_baseline:
-        assert _dynamo_counter("stats", "unique_graphs") == unique_graphs_baseline
+    assert compile_counter.frame_count == frames_after_warmup
 
 
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
