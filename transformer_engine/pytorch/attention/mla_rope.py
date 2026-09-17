@@ -77,11 +77,34 @@ def build_rope_tables(
     mscale: float = 1.0,
     mscale_all_dim: float = 0.0,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """cos/sin tables of shape ``[seq_len, emb_dim]`` (fp32, NeoX duplicated halves).
+    """Build cosine/sine tables for :func:`apply_mla_rope_q` and :func:`apply_mla_rope_kv`.
 
-    With ``scaling_factor`` set, frequencies follow YaRN (NTK-by-parts ramp between
-    ``beta_fast``/``beta_slow`` rotations over ``original_max_position_embeddings``) and the
-    tables are scaled by the YaRN concentration factor.
+    Parameters
+    ----------
+    seq_len : int
+        Number of sequence positions.
+    emb_dim : int
+        Positive, even number of rotary channels; excludes the non-rotary channels.
+    base : float, default = 10000.0
+        Base for the rotary frequencies.
+    device : torch.device, optional
+        Table device; ``None`` uses the default PyTorch device.
+    scaling_factor : float, optional
+        YaRN context-extension factor; ``None`` selects unscaled RoPE.
+    original_max_position_embeddings : int, default = 4096
+        Original context length used to determine the YaRN frequency ramp.
+    beta_fast, beta_slow : float, default = 32.0, 1.0
+        Rotation-count boundaries of the YaRN interpolation ramp.
+    mscale, mscale_all_dim : float, default = 1.0, 0.0
+        YaRN magnitude coefficients. Tables are multiplied by the ratio of
+        ``yarn_mscale(scaling_factor, mscale)`` to
+        ``yarn_mscale(scaling_factor, mscale_all_dim)``.
+
+    Returns
+    -------
+    tuple of torch.Tensor
+        Contiguous FP32 ``(cos_table, sin_table)``, each of shape
+        ``[seq_len, emb_dim]`` with duplicated halves for NeoX layout.
     """
     exponent = torch.arange(0, emb_dim, 2, dtype=torch.float32, device=device) / emb_dim
     inv_freq = 1.0 / (base**exponent)
@@ -536,7 +559,37 @@ def apply_mla_rope_q(
     head_dim_rope: int,
     tensor_format: str = "sbhd",
 ) -> torch.Tensor:
-    """RoPE on the trailing ``head_dim_rope`` slice of q; in place on the Triton path."""
+    """Rotate the trailing query channels, preserving the non-rotary prefix.
+
+    Parameters
+    ----------
+    q : torch.Tensor
+        CUDA query tensor of shape ``[s, b, h, head_dim_nope + head_dim_rope]``
+        for ``sbhd``, or ``[b, s, h, head_dim_nope + head_dim_rope]`` for ``bshd``.
+    cos_table, sin_table : torch.Tensor
+        Contiguous FP32 tables of shape ``[s, head_dim_rope]`` on the same device
+        as ``q``, as returned by :func:`build_rope_tables`.
+    head_dim_nope, head_dim_rope : int
+        Number of non-rotary and rotary channels per head.
+    tensor_format : {"sbhd", "bshd"}, default = "sbhd"
+        Input and output layout.
+
+    Returns
+    -------
+    torch.Tensor
+        Rotated queries with the same shape and dtype as ``q``.
+
+    Notes
+    -----
+    Triton is used for ``sbhd`` when ``head_dim_rope`` is a power of two and
+    at least two; other supported layouts/dimensions use PyTorch operations.
+    The Triton path computes gradients for ``q`` only; treat the tables as constants.
+
+    The Triton path overwrites a contiguous ``q`` in forward and may overwrite a
+    contiguous incoming gradient in backward. Clone inputs or explicitly supplied
+    backward gradients whose original values must be preserved. Noncontiguous
+    queries and incoming gradients are copied to contiguous storage first.
+    """
     if (
         HAVE_TRITON
         and tensor_format == "sbhd"
@@ -559,7 +612,41 @@ def apply_mla_rope_kv(
     head_dim_v: int,
     tensor_format: str = "sbhd",
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Build (k, v) from kv ``[.., h, nope+v]`` and the shared rope head ``[.., 1, rope]``."""
+    """Assemble keys and values using a shared rotary key head.
+
+    Parameters
+    ----------
+    kv : torch.Tensor
+        CUDA tensor of shape ``[s, b, h, head_dim_nope + head_dim_v]`` for
+        ``sbhd``, or ``[b, s, h, head_dim_nope + head_dim_v]`` for ``bshd``.
+        Each head contains the non-rotary key channels followed by value channels.
+    k_pos_emb : torch.Tensor
+        Shared rotary key channels of shape ``[s, b, 1, head_dim_rope]`` for
+        ``sbhd``, or ``[b, s, 1, head_dim_rope]`` for ``bshd``, matching the
+        device and dtype of ``kv``. Triton requires a contiguous last dimension
+        and ``stride(0) == b * stride(1)``.
+    cos_table, sin_table : torch.Tensor
+        Contiguous FP32 tables of shape ``[s, head_dim_rope]`` on the same device
+        as ``kv``, as returned by :func:`build_rope_tables`.
+    head_dim_nope, head_dim_rope, head_dim_v : int
+        Number of non-rotary key, rotary key and value channels per head.
+    tensor_format : {"sbhd", "bshd"}, default = "sbhd"
+        Input and output layout.
+
+    Returns
+    -------
+    tuple of torch.Tensor
+        Contiguous ``(k, v)`` in the selected layout and input dtype. The last
+        dimensions are ``head_dim_nope + head_dim_rope`` for ``k`` and
+        ``head_dim_v`` for ``v``. The rotated shared key head is broadcast to all heads.
+
+    Notes
+    -----
+    Triton is used for ``sbhd`` when all three head dimensions are powers of two
+    and ``head_dim_rope >= 2``; other supported layouts/dimensions use PyTorch.
+    Inputs are preserved. The Triton path computes gradients for ``kv`` and
+    ``k_pos_emb`` only; treat the tables as constants.
+    """
     if (
         HAVE_TRITON
         and tensor_format == "sbhd"
