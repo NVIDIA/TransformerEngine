@@ -110,14 +110,10 @@ py::object quantize_mxfp8_row_partition(const at::Tensor &tensor, py::handle qua
   auto *mxfp8_quantizer_cpp = static_cast<MXFP8Quantizer *>(quantizer_cpp.get());
   NVTE_CHECK(!mxfp8_quantizer_cpp->with_2d_quantization,
              "quantize_mxfp8_row_partition does not support 2D quantization");
-  NVTE_CHECK(mxfp8_quantizer_cpp->optimize_for_gemm,
-             "quantize_mxfp8_row_partition requires fused GEMM-swizzled scales");
 
   auto input_contiguous = tensor.contiguous();
   auto input_cpp = makeTransformerEngineTensor(input_contiguous);
   auto [output_cpp, output_py] = quantizer_cpp->convert_and_update_tensor(output);
-  NVTE_CHECK(output_cpp.get_with_gemm_swizzled_scales(),
-             "quantize_mxfp8_row_partition output must use GEMM-swizzled scales");
 
   QuantizationConfigWrapper quant_config;
   NVTE_SCOPED_GIL_RELEASE({
