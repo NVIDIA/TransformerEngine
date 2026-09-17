@@ -40,6 +40,7 @@ from ..utils import (
     clear_tensor_data,
     get_device_compute_capability,
     init_method_constant,
+    mark_grouped_tensor,
     resolve_grouped_linear_single_param_flags,
     get_nvtx_range_context,
 )
@@ -552,6 +553,10 @@ class _GroupedLinear(torch.autograd.Function):
             if not inp.requires_grad:
                 weights_to_save = [None] * len(weights_to_save)
 
+            # Megatron-LM paged stashing uses this marker to identify the dynamic activation
+            # buffers among the tensors saved by the GroupedLinear autograd function. The
+            # operation-fuser grouped MLP applies the same marker to its saved activations.
+            mark_grouped_tensor(input_to_save)
             tensors_to_save, tensor_objects = prepare_for_saving(
                 input_to_save,
                 *weights_to_save,
@@ -1802,6 +1807,8 @@ class GroupedLinear(TransformerEngineBaseModule):
             return
         if self._custom_quantizer_cache.get(meta_key) is generation:
             return
+        if not fwd and not torch.is_grad_enabled():
+            return
 
         if fwd:
             stride = self._num_fp8_tensors_per_gemm["fwd"]
@@ -2447,8 +2454,7 @@ class GroupedLinear(TransformerEngineBaseModule):
             # a failed generation remains installed when the caller catches the error.
             recipe = FP8GlobalStateManager.get_fp8_recipe()
             self._validate_custom_recipe_quantizers(True, recipe)
-            if torch.is_grad_enabled():
-                self._validate_custom_recipe_quantizers(False, recipe)
+            self._validate_custom_recipe_quantizers(False, recipe)
 
         weight_quantizers = self._get_weight_quantizers()
         input_quantizers, output_quantizers = (

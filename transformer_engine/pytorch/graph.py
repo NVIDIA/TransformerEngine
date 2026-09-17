@@ -8,7 +8,7 @@ import contextlib
 import gc
 import warnings
 from math import ceil
-from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar, Union
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple, TypeVar, Union
 
 import torch
 from torch.utils._pytree import tree_flatten as _tree_flatten
@@ -42,6 +42,13 @@ _CAPTURE_TIME_HOOK_NAMES = (
     "backward_pre_hooks",
     "backward_hooks",
 )
+
+
+class _GraphedCallableHelpers(NamedTuple):
+    """Lifecycle helpers owned by one graphed callable invocation."""
+
+    ensure_not_reset: Callable[[], None]
+    release_static_state: Callable[[], None]
 
 
 def set_capture_start() -> None:
@@ -633,13 +640,17 @@ def _make_graphed_callables(
                 warmup_outputs = []
                 for func_idx, func in zip(warmup_func_idx, warmup_func):
                     outputs = _run_warmup_forward(func_idx, func, func_idx)
-                    warmup_outputs.append((func_idx, func, outputs))
-                if is_training:
-                    for func_idx, func, outputs in reversed(warmup_outputs):
-                        _run_warmup_backward(func_idx, func, outputs, warmup_iter, func_idx)
+                    if is_training:
+                        warmup_outputs.append((func_idx, func, outputs))
+                    else:
+                        del outputs
+                while warmup_outputs:
+                    func_idx, func, outputs = warmup_outputs.pop()
+                    _run_warmup_backward(func_idx, func, outputs, warmup_iter, func_idx)
+                    del outputs
             else:
                 # Follow _order exactly, mirroring the capture phase.
-                per_fwd_outputs = {}  # per_callable_fwd_idx -> flattened outputs
+                per_fwd_outputs = {}  # per_callable_fwd_idx -> outstanding flattened outputs
                 fwd_idx = [0] * num_model_chunks
                 bwd_idx = [0] * num_model_chunks
                 for c_id in _order:
@@ -653,7 +664,10 @@ def _make_graphed_callables(
                             ) + (fwd_idx[m_chunk] * _num_layers_per_chunk[m_chunk] + l_no)
                             func = callables[callable_idx]
                             outputs = _run_warmup_forward(per_callable_fwd_idx, func, callable_idx)
-                            per_fwd_outputs[per_callable_fwd_idx] = outputs
+                            if is_training:
+                                per_fwd_outputs[per_callable_fwd_idx] = outputs
+                            else:
+                                del outputs
                         fwd_idx[m_chunk] += 1
                     elif ceil(c_id) == c_id:
                         # Backward pass for chunk -c_id.
@@ -665,10 +679,11 @@ def _make_graphed_callables(
                                     _prefix_num_layers[m_chunk] * num_microbatches
                                 ) + (bwd_idx[m_chunk] * _num_layers_per_chunk[m_chunk] + l_no)
                                 func = callables[callable_idx]
-                                outputs = per_fwd_outputs[per_callable_bwd_idx]
+                                outputs = per_fwd_outputs.pop(per_callable_bwd_idx)
                                 _run_warmup_backward(
                                     per_callable_bwd_idx, func, outputs, warmup_iter, callable_idx
                                 )
+                                del outputs
                             bwd_idx[m_chunk] += 1
 
         if post_warmup_hook is not None:
@@ -729,6 +744,7 @@ def _make_graphed_callables(
                     per_callable_static_outputs[per_callable_fwd_idx] = tuple(flatten_outputs)
                     per_callable_output_unflatten_spec[per_callable_fwd_idx] = spec
                     graph_callables[per_callable_fwd_idx] = func
+                    del outputs, flatten_outputs
                 fwd_idx[m_chunk] += 1
             else:
                 # Capture backward graph for model chunk c_id, microbatch bwd_idx[-c_id-1]
@@ -917,6 +933,11 @@ def _make_graphed_callables(
                                     per_callable_static_grad_inputs[idx]
                                 )
                             previous_chunk_last_callable_bwd_idx = per_callable_bwd_idx
+
+                        # The per-callable containers now own all tensors that must survive
+                        # capture. Drop local strong references so weak-refed graph buffers can
+                        # be returned to the shared CUDA graph pool before the next capture.
+                        del static_outputs, static_grad_inputs, grad_inputs
                 if ceil(c_id) == c_id:
                     bwd_idx[m_chunk] += 1
     else:
@@ -1028,12 +1049,22 @@ def _make_graphed_callables(
         static_grad_inputs,
         returned_param_grad_clone_slots,
     ):
+        is_reset = False
+
+        def ensure_not_reset():
+            """Reject replay after this callable's graph state has been released."""
+            if is_reset:
+                raise RuntimeError(
+                    "This graphed callable has been reset and can no longer be used."
+                )
+
         class Graphed(torch.autograd.Function):
             """Autograd function for graph replay."""
 
             @staticmethod
             def forward(ctx, skip_fp8_weight_update, cuda_graph_stream, cuda_graph_event, *inputs):
                 # pylint: disable=missing-function-docstring
+                ensure_not_reset()
 
                 # Set flag for whether to update FP8 weight updates
                 ctx.is_first_module = FP8GlobalStateManager.is_first_fp8_module()
@@ -1071,6 +1102,7 @@ def _make_graphed_callables(
             @torch.autograd.function.once_differentiable
             def backward(ctx, *grads):
                 # pylint: disable=missing-function-docstring
+                ensure_not_reset()
 
                 # Replay backward graph
                 if len(grads) != len(static_grad_outputs):
@@ -1119,6 +1151,7 @@ def _make_graphed_callables(
                 return (None, None, None) + tuple(grad_inputs)
 
         def functionalized(*user_args, **user_kwargs):
+            ensure_not_reset()
 
             # Decide whether to update FP8 weights
             skip_fp8_weight_update = None
@@ -1170,16 +1203,43 @@ def _make_graphed_callables(
             )
             return _tree_unflatten(out, output_unflatten_spec)
 
-        return functionalized
+        def release_static_state():
+            """Release per-callable state captured by replay closures."""
+            nonlocal fwd_graph, bwd_graph, is_reset
+            nonlocal module_params
+            nonlocal static_input_surface, static_outputs
+            nonlocal static_grad_outputs, static_grad_inputs
 
-    def make_graphed_attribute_functions(graph_idx):
-        # Get te modules for current graph
+            is_reset = True
+
+            # Drop the per-callable references that can own graph-pool storage.
+            fwd_graph = None
+            bwd_graph = None
+            module_params = ()
+            static_input_surface = ()
+            static_outputs = ()
+            static_grad_outputs = ()
+            static_grad_inputs = ()
+
+        helpers = _GraphedCallableHelpers(
+            ensure_not_reset=ensure_not_reset,
+            release_static_state=release_static_state,
+        )
+        return functionalized, helpers
+
+    def make_graphed_attribute_functions(graph_idx, helpers):
+        # Snapshot per-callable state so returned closures do not retain the outer lists.
+        fwd_graph = fwd_graphs[graph_idx]
+        bwd_graph = bwd_graphs[graph_idx]
+        bwd_dw_graph = bwd_dw_graphs[graph_idx]
+        need_bwd_dw = need_bwd_dw_graph.get(graph_idx, False)
         te_modules = visited_te_modules.get(graph_idx, set())
 
         # Attach backward_dw as an attribute to the graphed callable.
         def backward_dw():
-            if need_bwd_dw_graph.get(graph_idx, False):
-                bwd_dw_graphs[graph_idx].replay()
+            helpers.ensure_not_reset()
+            if need_bwd_dw:
+                bwd_dw_graph.replay()
 
                 # Trigger the grad accumulation hook for wgrad graphs.
                 for module in te_modules:
@@ -1191,16 +1251,24 @@ def _make_graphed_callables(
 
         # Attach reset as an attribute to the graphed callable.
         def reset():
-            fwd_graphs[graph_idx].reset()
-            bwd_graphs[graph_idx].reset()
-            bwd_dw_graphs[graph_idx].reset()
+            nonlocal fwd_graph, bwd_graph, bwd_dw_graph, te_modules
+
+            for graph in (fwd_graph, bwd_graph, bwd_dw_graph):
+                if graph is not None:
+                    graph.reset()
+
+            fwd_graph = None
+            bwd_graph = None
+            bwd_dw_graph = None
+            te_modules = ()
+            helpers.release_static_state()
 
         return backward_dw, reset
 
     # Put together the final graphed callables
     ret = []
     for i in range(len(sample_args)):
-        graphed = make_graphed_autograd_function(
+        graphed, helpers = make_graphed_autograd_function(
             fwd_graphs[i],
             bwd_graphs[i],
             per_callable_module_params[i],
@@ -1218,8 +1286,17 @@ def _make_graphed_callables(
         te_modules = visited_te_modules.get(i, set())
         if isinstance(func, torch.nn.Module):
 
-            def make_graphed_forward(func, graph_training_state, graphed, orig_fwd, te_modules):
+            def make_graphed_forward(
+                func,
+                graph_training_state,
+                graphed,
+                orig_fwd,
+                te_modules,
+                helpers,
+            ):
                 def new_fwd(*user_args, **user_kwargs):
+                    helpers.ensure_not_reset()
+
                     # If the module's training-or-eval state matches what we graphed,
                     # run the graph, otherwise run the original forward method
                     if func.training == graph_training_state:
@@ -1264,7 +1341,14 @@ def _make_graphed_callables(
 
                 return new_fwd
 
-            forward = make_graphed_forward(func, func.training, graphed, func.forward, te_modules)
+            forward = make_graphed_forward(
+                func,
+                func.training,
+                graphed,
+                func.forward,
+                te_modules,
+                helpers,
+            )
             if _order is None:
                 func.forward = forward
                 ret.append(func)
@@ -1273,7 +1357,10 @@ def _make_graphed_callables(
         else:
             ret.append(graphed)
 
-        backward_dw_func, reset_func = make_graphed_attribute_functions(i)
+        backward_dw_func, reset_func = make_graphed_attribute_functions(
+            i,
+            helpers,
+        )
         setattr(ret[-1], "backward_dw", backward_dw_func)
         setattr(ret[-1], "reset", reset_func)
 
