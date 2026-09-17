@@ -1,0 +1,29 @@
+ARG FROM_IMAGE_DEVEL
+ARG FROM_IMAGE
+ARG FRAMEWORK=pytorch
+
+FROM ${FROM_IMAGE_DEVEL} as devel
+FROM ${FROM_IMAGE}
+
+ARG FRAMEWORK
+WORKDIR /opt/transformerengine/
+SHELL ["bash", "-c"]
+
+# Copy artifacts for testing
+COPY te_ci_artifacts/ /opt/transformerengine/artifacts/
+
+# Remove PyTorch tests if not needed
+RUN [[ ! "${FRAMEWORK}" =~ pytorch|all ]] \
+    && rm -rf /opt/transformerengine/qa/L?_pytorch_* \
+    || [[ "${FRAMEWORK}" =~ pytorch|all ]]
+
+# Remove JAX tests if not needed
+RUN [[ ! "${FRAMEWORK}" =~ jax|all ]] \
+    && rm -rf /opt/transformerengine/qa/L?_jax_* \
+    || [[ "${FRAMEWORK}" =~ jax|all ]]
+
+# Export pipeline and build IDs
+ARG NVIDIA_PIPELINE_ID=unknown
+ARG NVIDIA_BUILD_ID=unknown
+ENV NVIDIA_PIPELINE_ID=${NVIDIA_PIPELINE_ID}
+ENV NVIDIA_BUILD_ID=${NVIDIA_BUILD_ID}
