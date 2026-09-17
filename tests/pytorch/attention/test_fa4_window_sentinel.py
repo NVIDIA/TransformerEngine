@@ -98,7 +98,7 @@ def test_fa4_causal_attention_is_not_all_zeros():
     import os
 
     from transformer_engine.pytorch import DotProductAttention
-    from transformer_engine.pytorch.attention.dot_product_attention.utils import (
+    from transformer_engine.pytorch.attention.dot_product_attention.dot_product_attention import (
         _attention_backends,
     )
 
