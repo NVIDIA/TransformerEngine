@@ -1350,12 +1350,12 @@ class TestMoeEpSequential(_EpTestCase):
             delay_wgrad_compute=True,
         )
 
-    @_eager_test_include
     @_mxfp8_align_test
     def test_megamoe_delayed_wgrad(self):
         self._run_megamoe_vs_reference(
             quantization="mxfp8",
             delay_wgrad_compute=True,
+            require_fused=True,
         )
 
     @_eager_test_include
@@ -1366,13 +1366,13 @@ class TestMoeEpSequential(_EpTestCase):
             delay_wgrad_compute=True,
         )
 
-    @_eager_test_include
     @_mxfp8_align_test
     def test_megamoe_delayed_main_grad(self):
         self._run_megamoe_vs_reference(
             quantization="mxfp8",
             accumulate_into_main_grad=True,
             delay_wgrad_compute=True,
+            require_fused=True,
         )
 
     def _run_megamoe_vs_reference(
@@ -1382,12 +1382,15 @@ class TestMoeEpSequential(_EpTestCase):
         accumulate_into_main_grad=False,
         overwrite_main_grad=False,
         delay_wgrad_compute=False,
+        require_fused=False,
     ):
         """Compare the five-op MoE sequence with the PyTorch EP reference.
 
         The fuser selects MegaMoE when its runtime gates pass. Otherwise this
         exercises the same sequence as separate NCCL EP and grouped-MLP ops.
         """
+        if require_fused and not _cudnn_megamoe_supported():
+            self.skipTest("FusedMoeEp is unavailable in the current environment")
         recipe = MXFP8BlockScaling() if quantization == "mxfp8" else None
         model, fc1, fc2, _ = self._make_megamoe_model(
             recipe=recipe,
@@ -1447,6 +1450,8 @@ class TestMoeEpSequential(_EpTestCase):
 
         forward_ops = model._module_groups[0]._forward_ops
         fused = len(forward_ops) == 1 and isinstance(forward_ops[0][0], FusedMoeEp)
+        if require_fused:
+            self.assertTrue(fused, "delay_wgrad_compute test must exercise FusedMoeEp")
         if fused:
             self.assertTrue(_cudnn_megamoe_supported())
         else:
@@ -1516,8 +1521,19 @@ class TestMoeEpSequential(_EpTestCase):
         ).to(torch.bfloat16)
         seq_out.backward(dy)
         if delay_wgrad_compute:
-            fc1.backward_dw()
+            if fused:
+                self.assertEqual(fc1.wgrad_store.context.qsize(), 1)
+                self.assertEqual(fc2.wgrad_store.context.qsize(), 1)
+                if accumulate_into_main_grad:
+                    for op in (fc1, fc2):
+                        self.assertTrue(
+                            torch.all(op.weight.main_grad == main_grad_sentinel).item()
+                        )
             fc2.backward_dw()
+            fc1.backward_dw()
+            if fused:
+                self.assertTrue(fc1.wgrad_store.context.empty())
+                self.assertTrue(fc2.wgrad_store.context.empty())
         reference_grads = reference.backward(
             dy,
             fc1_weight,

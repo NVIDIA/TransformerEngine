@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+import functools
 import os
 from typing import Any, Optional
 
@@ -204,25 +205,30 @@ _MOE_EP_RESOURCE_MANAGER = _MoeEpResourceManager()
 
 def _cudnn_megamoe_supported() -> bool:
     """Whether cuDNN FE provides the stateless training API."""
+    if bool(int(os.getenv("NVTE_DISABLE_CUDNN_MEGAMOE", "0"))):
+        return False
     try:
         import cudnn
         import cudnn.moe_ep as cudnn_moe_ep
     except (AttributeError, ImportError):
         return False
-    return all(
-        hasattr(module, name)
-        for module, name in (
-            (cudnn, "grouped_gemm_wgrad_wrapper_sm100"),
-            (cudnn_moe_ep, "MoeEp"),
-            (cudnn_moe_ep, "MoeEpTuningConfig"),
-            (cudnn_moe_ep.MoeEp, "training_symmetric_buffers"),
-            (cudnn_moe_ep, "MoeEpNativeForwardWeights"),
-            (cudnn_moe_ep, "MoeEpNativeBackwardWeights"),
-            (cudnn_moe_ep, "MoeEpTrainingForwardOutputs"),
-            (cudnn_moe_ep, "MoeEpTrainingBackwardOutputs"),
-            (cudnn_moe_ep, "MoeEpTrainingWgradOperands"),
+    try:
+        return all(
+            hasattr(module, name)
+            for module, name in (
+                (cudnn, "grouped_gemm_wgrad_wrapper_sm100"),
+                (cudnn_moe_ep, "MoeEp"),
+                (cudnn_moe_ep, "MoeEpTuningConfig"),
+                (cudnn_moe_ep.MoeEp, "training_symmetric_buffers"),
+                (cudnn_moe_ep, "MoeEpNativeForwardWeights"),
+                (cudnn_moe_ep, "MoeEpNativeBackwardWeights"),
+                (cudnn_moe_ep, "MoeEpTrainingForwardOutputs"),
+                (cudnn_moe_ep, "MoeEpTrainingBackwardOutputs"),
+                (cudnn_moe_ep, "MoeEpTrainingWgradOperands"),
+            )
         )
-    )
+    except (AttributeError, ImportError):
+        return False
 
 
 def finalize_moe_ep_resources() -> None:
@@ -232,6 +238,13 @@ def finalize_moe_ep_resources() -> None:
     import gc
 
     gc.collect()
+    devices = {
+        resource.device
+        for resource in _MOE_EP_RESOURCE_MANAGER._resources.values()
+        if resource.device is not None
+    }
+    for device in devices:
+        torch.cuda.synchronize(device)
     _MOE_EP_RESOURCE_MANAGER.cleanup()
 
 
@@ -287,19 +300,21 @@ def _quantize_into_cudnn_symmetric_buffer(
 
 
 def _launch_grouped_wgrad_from_operands(
-    layer_operands: list[torch.Tensor],
-    unused: None,
-    output: torch.Tensor | GroupedTensor,
+    x_operands: list[torch.Tensor],
+    dy_operands: list[torch.Tensor],
+    output: torch.Tensor | GroupedTensor | list[torch.Tensor],
     *,
+    packed_output: Optional[torch.Tensor] = None,
     offsets: torch.Tensor,
     accumulate: bool,
     descriptor_workspace: torch.Tensor,
 ) -> None:
     """Compute one TE-layout grouped wgrad directly from MegaMoE's operands."""
-    del unused
     from cudnn import grouped_gemm_wgrad_wrapper_sm100
 
-    x, x_scale, dy, dy_scale = layer_operands
+    x, x_scale = x_operands
+    dy, dy_scale = dy_operands
+    output = packed_output if packed_output is not None else output
     output_data = (
         output.rowwise_data.view(output.shape) if isinstance(output, GroupedTensor) else output
     )
@@ -356,15 +371,31 @@ def _compute_grouped_weight_grad(
             device=weight.device,
         )
 
-    layer_operands = [
+    x_operands = [
         getattr(operands, f"{prefix}_a"),
         getattr(operands, f"{prefix}_sfa"),
+    ]
+    dy_operands = [
         getattr(operands, f"{prefix}_b"),
         getattr(operands, f"{prefix}_sfb"),
     ]
+    if op.wgrad_store.delay_wgrad_compute():
+        grad_views = [output_data[i] for i in range(op.num_groups)]
+        wgrad_fn = functools.partial(
+            _launch_grouped_wgrad_from_operands,
+            packed_output=output_data,
+            offsets=operands.expert_offsets,
+            accumulate=accumulate,
+            descriptor_workspace=descriptor_workspace,
+        )
+        op.wgrad_store.put([x_operands, dy_operands, grad_views], wgrad_fn)
+        if op._accumulate_into_main_grad:
+            return get_dummy_wgrads_for_params([weight])
+        return [None]
+
     _launch_grouped_wgrad_from_operands(
-        layer_operands,
-        None,
+        x_operands,
+        dy_operands,
         output_data,
         offsets=operands.expert_offsets,
         accumulate=accumulate,
@@ -403,7 +434,6 @@ def _grouped_linear_supported(op: GroupedLinear) -> bool:
         and op.single_grouped_weight
         and not op.single_grouped_bias
         and not op._is_distributed_weight()
-        and not op.wgrad_store.delay_wgrad_compute()
         and weight_ok
     )
 
