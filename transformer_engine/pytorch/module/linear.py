@@ -32,9 +32,6 @@ from .base import (
     _2X_ACC_WGRAD,
 )
 from ._common import (
-    get_compile_input_unsupported_reason,
-    get_compile_training_unsupported_reason,
-    get_compile_quantizer_unsupported_reason,
     can_reconstruct_wgrad_input_from_original,
     check_fp8_reduce_and_update,
     fake_workspace_valid,
@@ -96,6 +93,7 @@ from ..dynamo import (
     TensorSpec,
     TensorOrQuantized,
     register_custom_op,
+    is_value_opaque_quantizer,
 )
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
@@ -192,22 +190,21 @@ class LinearFwdArgs:
             return "debug instrumentation (nvidia-dlfw-inspect)"
         if is_distributed_weight(self.weight):
             return "a DistributedWeight (custom weight parallelism, e.g. GTP)"
-        reason = get_compile_input_unsupported_reason(self.inp, self.fsdp_group)
-        if reason is not None:
-            return reason
-        reason = get_compile_training_unsupported_reason(
-            differentiable_fp8_output=(
-                self.fp8_output
-                and self.is_grad_enabled
-                and (
-                    self.input_requires_grad or self.weight_requires_grad or self.bias_requires_grad
-                )
-            ),
-            cpu_offloading=self.cpu_offloading,
-            delayed_wgrad=self.wgrad_store is not None,
-        )
-        if reason is not None:
-            return reason
+        if isinstance(self.inp, (QuantizedTensor, QuantizedTensorStorage)):
+            return "a quantized input tensor"
+        if self.fsdp_group is not None:
+            return "manual TE FSDP (fsdp_group); use FSDP2 or MCore FSDP"
+        if (
+            self.fp8_output
+            and self.is_grad_enabled
+            and (self.input_requires_grad or self.weight_requires_grad or self.bias_requires_grad)
+        ):
+            return "differentiable fp8_output=True"
+        if self.cpu_offloading:
+            return "CPU activation offloading"
+        if self.wgrad_store is not None:
+            # Non-None only when delayed wgrad compute is on (see Linear.forward).
+            return "delayed wgrad compute (wgrad_store)"
         if (
             self.grad_input_quantizer is not None
             and self.is_grad_enabled
@@ -224,16 +221,19 @@ class LinearFwdArgs:
             return "FP8 weight caching (is_first_microbatch)"
         if self.fuse_wgrad_accumulation:
             return "fuse_wgrad_accumulation (main_grad)"
-        return get_compile_quantizer_unsupported_reason(
-            (
-                self.input_quantizer,
-                self.weight_quantizer,
-                self.output_quantizer,
-                self.grad_input_quantizer,
-                self.grad_weight_quantizer,
-                self.grad_output_quantizer,
-            )
-        )
+        for quantizer in (
+            self.input_quantizer,
+            self.weight_quantizer,
+            self.output_quantizer,
+            self.grad_input_quantizer,
+            self.grad_weight_quantizer,
+            self.grad_output_quantizer,
+        ):
+            # e.g. delayed-scaling Float8Quantizer and unregistered custom-recipe
+            # quantizers are not value-opaque and can't cross the custom-op boundary.
+            if quantizer is not None and not is_value_opaque_quantizer(quantizer):
+                return "a quantizer not registered as a torch.compile value-opaque type"
+        return None
 
 
 @dataclass(slots=True)
@@ -2613,21 +2613,21 @@ class Linear(TransformerEngineBaseModule):
         weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
         if is_distributed_weight(weight_tensor):
             return "a DistributedWeight (custom weight parallelism, e.g. GTP)"
-        reason = get_compile_input_unsupported_reason(inp, self.fsdp_group)
-        if reason is not None:
-            return reason
+        if isinstance(inp, (QuantizedTensor, QuantizedTensorStorage)):
+            return "a quantized input tensor"
+        if self.fsdp_group is not None:
+            return "manual TE FSDP (fsdp_group); use FSDP2 or MCore FSDP"
         any_requires_grad = (
             inp.requires_grad
             or weight_tensor.requires_grad
             or (bias_tensor is not None and bias_tensor.requires_grad)
         )
-        reason = get_compile_training_unsupported_reason(
-            differentiable_fp8_output=(fp8_output and is_grad_enabled and any_requires_grad),
-            cpu_offloading=is_cpu_offload_enabled(),
-            delayed_wgrad=(self.wgrad_store is not None and self.wgrad_store.delay_wgrad_compute()),
-        )
-        if reason is not None:
-            return reason
+        if fp8_output and is_grad_enabled and any_requires_grad:
+            return "differentiable fp8_output=True"
+        if is_cpu_offload_enabled():
+            return "CPU activation offloading"
+        if self.wgrad_store is not None and self.wgrad_store.delay_wgrad_compute():
+            return "delayed wgrad compute (wgrad_store)"
         if self.fuse_wgrad_accumulation:
             return "fuse_wgrad_accumulation (main_grad)"
         fp8 = FP8GlobalStateManager.is_fp8_enabled()
