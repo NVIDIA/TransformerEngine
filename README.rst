@@ -29,7 +29,7 @@ Highlights
 * MXFP8 and NVFP4 training on NVIDIA Blackwell GPUs.
 * Optimized attention, GEMM, normalization, quantization, and fused Transformer and MoE modules.
 * PyTorch and JAX APIs with autocast-style contexts and configurable low-precision recipes.
-* Support for tensor, sequence, context, and expert parallelism, including communication overlap.
+* Support for tensor, sequence, context, and EP, including communication overlap.
 * FP16 and BF16 optimizations on NVIDIA Ampere architecture GPUs and later.
 
 .. overview-end-marker-do-not-remove
@@ -37,10 +37,10 @@ Highlights
 News
 ====
 
-* **[09/2026]** `Transformer Engine v2.19 <https://github.com/NVIDIA/TransformerEngine/releases/tag/v2.19>`_ adds Rubin support, hybrid quantization, MXFP8 expert-parallel communication, and expanded FP8 attention support.
+* **[09/2026]** `Transformer Engine v2.19 <https://github.com/NVIDIA/TransformerEngine/releases/tag/v2.19>`_ adds Rubin support, hybrid quantization, MXFP8 EP communication, and expanded FP8 attention support.
 * **[09/2026]** `Accelerating Dropless MoE Training in JAX with NVIDIA Transformer Engine <https://developer.nvidia.com/blog/accelerating-dropless-moe-training-in-jax-with-nvidia-transform-engine/>`_ describes optimized JAX MoE training on GB200 and GB300 systems.
-* **[08/2026]** `Transformer Engine v2.18 <https://github.com/NVIDIA/TransformerEngine/releases/tag/v2.18>`_ adds FP8 block scaling in PyTorch, zero-copy expert parallelism, and CUDA Graph support for THD attention.
-* **[07/2026]** `Transformer Engine v2.17 <https://github.com/NVIDIA/TransformerEngine/releases/tag/v2.17>`_ introduces NCCL-backed expert parallelism for PyTorch and JAX, faster MoE routing, and a JAX Flax MoE block.
+* **[08/2026]** `Transformer Engine v2.18 <https://github.com/NVIDIA/TransformerEngine/releases/tag/v2.18>`_ adds FP8 block scaling in PyTorch, zero-copy EP, and CUDA Graph support for THD attention.
+* **[07/2026]** `Transformer Engine v2.17 <https://github.com/NVIDIA/TransformerEngine/releases/tag/v2.17>`_ introduces NCCL-backed EP for PyTorch and JAX, faster MoE routing, and a JAX Flax MoE block.
 * **[06/2026]** `Boosting MoE Training Throughput with Advanced Fusion Kernels <https://developer.nvidia.com/blog/boosting-moe-training-throughput-with-advanced-fusion-kernels/>`_ shows how fused Transformer Engine operations accelerate MoE training.
 
 See the `project updates archive <docs/project_updates.rst>`_ for earlier news.

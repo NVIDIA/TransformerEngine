@@ -12,7 +12,7 @@ The README highlights only the most recent updates.
 2026
 ----
 
-* **[09/2026]** `Transformer Engine v2.19 <https://github.com/NVIDIA/TransformerEngine/releases/tag/v2.19>`_ adds Rubin support, hybrid quantization, MXFP8 expert-parallel communication, and expanded FP8 attention support.
+* **[09/2026]** `Transformer Engine v2.19 <https://github.com/NVIDIA/TransformerEngine/releases/tag/v2.19>`_ adds Rubin support, hybrid quantization, MXFP8 EP communication, and expanded FP8 attention support.
 * **[09/2026]** `Accelerating Dropless MoE Training in JAX with NVIDIA Transformer Engine <https://developer.nvidia.com/blog/accelerating-dropless-moe-training-in-jax-with-nvidia-transform-engine/>`_.
 * **[08/2026]** `Transformer Engine v2.18 <https://github.com/NVIDIA/TransformerEngine/releases/tag/v2.18>`_.
 * **[07/2026]** `Transformer Engine v2.17 <https://github.com/NVIDIA/TransformerEngine/releases/tag/v2.17>`_.
