@@ -263,8 +263,6 @@ def _ep_outer_axis(ep_axes=None):
     A dp/fsdp axis that is sized 1 in the active mesh is treated as absent so
     we don't pin EP-output specs to a degenerate axis that JAX may collapse.
     """
-    if ep_axes is not None:
-        return None
     gsr = global_mesh_resource()
     ep_axes = _resolve_ep_axes(ep_axes)
     candidates = tuple(

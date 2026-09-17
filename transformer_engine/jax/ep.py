@@ -105,15 +105,17 @@ def _ep_domain_for_rank(mesh, ep_resource, rank, device_to_rank=None):
 def _ep_flattened_replica_groups(mesh, ep_resource):
     """FLATTENED_ID replica groups for the EP axis, as a flat int64 array.
 
-    Each group fixes all non-ep mesh coordinates and varies ep. Returns
-    ``(flat_groups, ep_size)``.
+    Each group fixes all non-EP mesh coordinates and varies the ordered EP
+    axes. Returns ``(flat_groups, ep_size)``.
     """
     shape = tuple(mesh.shape[a] for a in mesh.axis_names)
-    ep_pos = mesh.axis_names.index(ep_resource)
-    ep_size = shape[ep_pos]
+    ep_axes = _normalize_ep_axes(ep_resource)
+    ep_pos = tuple(mesh.axis_names.index(axis) for axis in ep_axes)
+    non_ep_pos = tuple(i for i in range(len(shape)) if i not in ep_pos)
+    ep_size = int(np.prod([shape[i] for i in ep_pos]))
     world = int(np.prod(shape))
     grid = np.arange(world, dtype=np.int64).reshape(shape)
-    groups = np.moveaxis(grid, ep_pos, -1).reshape(-1, ep_size)
+    groups = np.transpose(grid, non_ep_pos + ep_pos).reshape(-1, ep_size)
     return groups.reshape(-1), ep_size
 
 
