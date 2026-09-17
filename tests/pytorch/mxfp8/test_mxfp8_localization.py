@@ -187,6 +187,44 @@ def test_mxfp8_bidirectional_swizzled_localized_pair() -> None:
 @pytest.mark.skipif(
     not _localization_available(), reason="CUDA localization is unavailable"
 )
+def test_mxfp8_bidirectional_compact_vmm() -> None:
+    """Two row-partition launches must produce one compact MXFP8 tensor."""
+    shape = (256, 32768)
+    tensor = torch.randn(shape, dtype=torch.bfloat16, device="cuda")
+    quantizer = te.MXFP8Quantizer(
+        fp8_dtype=te.DType.kFloat8E4M3,
+        rowwise=True,
+        columnwise=True,
+    )
+    quantizer.optimize_for_gemm = False
+    reference = quantizer(tensor)
+
+    try:
+        workspace = te.localize_mxfp8_output_vmm(tensor, quantizer)
+    except (ImportError, RuntimeError, ValueError) as exc:
+        pytest.skip(f"VMM localization is unavailable: {exc}")
+    output = workspace.quantize()
+    torch.cuda.synchronize()
+
+    for name in (
+        "_rowwise_data",
+        "_rowwise_scale_inv",
+        "_columnwise_data",
+        "_columnwise_scale_inv",
+    ):
+        torch.testing.assert_close(
+            getattr(output, name),
+            getattr(reference, name),
+            atol=0.0,
+            rtol=0.0,
+        )
+    assert not output._with_gemm_swizzled_scales
+    workspace.close()
+
+
+@pytest.mark.skipif(
+    not _localization_available(), reason="CUDA localization is unavailable"
+)
 def test_mxfp8_bidirectional_swizzled_vmm() -> None:
     """Two row-partition launches must produce one GEMM-swizzled MXFP8 tensor."""
     shape = (256, 32768)

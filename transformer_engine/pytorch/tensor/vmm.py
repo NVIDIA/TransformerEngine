@@ -23,6 +23,21 @@ import torch
 # cuda.h (CUDA 13.4): CU_MEM_LOCATION_TYPE_DEVICE_MEMORY_NODE.
 # cuda-bindings releases that predate the enum still have the right ABI layout.
 _CU_MEM_LOCATION_TYPE_DEVICE_MEMORY_NODE = 6
+_VMM_RANGES: Dict[int, Dict[int, int]] = {}
+
+
+def is_vmm_tensor(tensor: torch.Tensor) -> bool:
+    """Return whether a tensor or view points into a live VMM allocation."""
+    if tensor.device.type != "cuda" or tensor.numel() == 0:
+        return False
+    device_index = tensor.device.index
+    if device_index is None:
+        device_index = torch.cuda.current_device()
+    pointer = tensor.data_ptr()
+    return any(
+        base <= pointer < base + size
+        for base, size in _VMM_RANGES.get(device_index, {}).items()
+    )
 
 
 def _cuda_object_pointer(obj) -> int:
@@ -183,6 +198,7 @@ class VMMRowSplitAllocator:
             raise
 
         self._allocations[base] = (total_bytes, (handles[0], handles[1]))
+        _VMM_RANGES.setdefault(self.device_index, {})[base] = total_bytes
         storage = torch._C._construct_storage_from_data_pointer(
             base,
             torch.device("cuda", self.device_index),
@@ -229,4 +245,5 @@ class VMMRowSplitAllocator:
                 driver.cuMemAddressFree(base, total_bytes),
                 "cuMemAddressFree",
             )
+            _VMM_RANGES.get(self.device_index, {}).pop(base, None)
             del self._allocations[base]

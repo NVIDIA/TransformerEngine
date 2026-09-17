@@ -248,13 +248,13 @@ class MXFP8LocalizedPair:
 
 
 class MXFP8VMMWorkspace:
-    """One input activation and one VMM-backed, GEMM-ready MXFP8 output.
+    """One input activation and one VMM-backed MXFP8 output.
 
     This prototype supports exactly two equal row partitions, bidirectional MXFP8,
-    fused GEMM scale swizzling, and VMM-aligned output partitions. The input may be
-    either an ordinary contiguous allocation or a VMM allocation. Scale
-    buffers remain ordinary allocations. They are small relative to the data,
-    and the global columnwise swizzle interleaves scale tiles from both partitions.
+    and VMM-aligned output partitions. Scales may either remain compact for an
+    attention-specific layout transform or be fused-swizzled for GEMM. The input
+    may be either an ordinary contiguous allocation or a VMM allocation. Scale
+    buffers remain ordinary allocations since they are small relative to the data.
     """
 
     def __init__(
@@ -298,8 +298,6 @@ class MXFP8VMMWorkspace:
             raise ValueError(f"Expected FP16 or BF16 input dtype, got {dtype}")
         if not quantizer.rowwise_usage or not quantizer.columnwise_usage:
             raise ValueError("VMM prototype requires bidirectional MXFP8")
-        if not quantizer.optimize_for_gemm:
-            raise ValueError("VMM prototype requires optimize_for_gemm=True")
         if quantizer.with_2d_quantization:
             raise ValueError("VMM prototype does not support 2D quantization")
         if quantizer.internal:
@@ -351,7 +349,7 @@ class MXFP8VMMWorkspace:
             columnwise_scale_inv=columnwise_scale_inv,
             fp8_dtype=quantizer.dtype,
             quantizer=quantizer,
-            with_gemm_swizzled_scales=True,
+            with_gemm_swizzled_scales=quantizer.optimize_for_gemm,
             device=device,
         )
 
@@ -363,6 +361,15 @@ class MXFP8VMMWorkspace:
             row_end = row_start + rows_per_domain
             scale_start = domain * (row_scale_shape[0] // 2)
             scale_end = scale_start + row_scale_shape[0] // 2
+            if quantizer.optimize_for_gemm:
+                # Global GEMM swizzle coordinates interleave both row partitions.
+                partition_columnwise_scale_inv = columnwise_scale_inv
+            else:
+                col_scale_start = domain * (col_scale_shape[0] // 2)
+                col_scale_end = col_scale_start + col_scale_shape[0] // 2
+                partition_columnwise_scale_inv = columnwise_scale_inv[
+                    col_scale_start:col_scale_end
+                ]
             partition_outputs.append(
                 MXFP8Tensor(
                     shape=partition_shape,
@@ -370,12 +377,10 @@ class MXFP8VMMWorkspace:
                     rowwise_data=rowwise_data[row_start:row_end],
                     rowwise_scale_inv=rowwise_scale_inv[scale_start:scale_end],
                     columnwise_data=columnwise_data[row_start:row_end],
-                    # Both partitions write global swizzle coordinates into this
-                    # shared scale plane.
-                    columnwise_scale_inv=columnwise_scale_inv,
+                    columnwise_scale_inv=partition_columnwise_scale_inv,
                     fp8_dtype=quantizer.dtype,
                     quantizer=quantizer,
-                    with_gemm_swizzled_scales=True,
+                    with_gemm_swizzled_scales=quantizer.optimize_for_gemm,
                     device=device,
                 )
             )

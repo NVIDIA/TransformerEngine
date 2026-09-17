@@ -6,6 +6,7 @@
 from __future__ import annotations
 from collections.abc import Iterable
 import math
+import os
 from typing import Optional, Tuple, Union, Any, Dict
 import warnings
 
@@ -120,6 +121,22 @@ class MXFP8Quantizer(Quantizer):
 
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
         """Quantize tensor implementation"""
+        if (
+            os.getenv("NVTE_MXFP8_VMM_LOCALIZATION", "0") == "1"
+            and tensor.ndim == 2
+            and self.rowwise_usage
+            and self.columnwise_usage
+            and not self.internal
+        ):
+            from .vmm import is_vmm_tensor
+
+            if is_vmm_tensor(tensor):
+                from .localized_mxfp8 import MXFP8VMMWorkspace
+
+                workspace = MXFP8VMMWorkspace.from_vmm_input(tensor, self)
+                output = workspace.quantize()
+                output._nvte_vmm_workspace = workspace
+                return output
         return tex.quantize(tensor, self)
 
     def is_quantizable(self, inp: torch.Tensor) -> bool:

@@ -3250,8 +3250,25 @@ def mxfp8_quantize_only(tensor_quantizer_pairs, src_format):
             t2d = tensor.view(tensor.shape[0], -1)
         orig_optimize = quantizer.optimize_for_gemm
         quantizer.optimize_for_gemm = False
-        fp8_2d = quantizer(t2d)
-        quantizer.optimize_for_gemm = orig_optimize
+        vmm_workspace = None
+        try:
+            from transformer_engine.pytorch.tensor.vmm import is_vmm_tensor
+
+            use_vmm_localization = (
+                os.getenv("NVTE_MXFP8_VMM_LOCALIZATION", "0") == "1"
+                and is_vmm_tensor(tensor)
+                and quantizer.rowwise_usage
+                and quantizer.columnwise_usage
+            )
+            if use_vmm_localization:
+                from transformer_engine.pytorch.tensor.localized_mxfp8 import MXFP8VMMWorkspace
+
+                vmm_workspace = MXFP8VMMWorkspace.from_vmm_input(t2d, quantizer)
+                fp8_2d = vmm_workspace.quantize()
+            else:
+                fp8_2d = quantizer(t2d)
+        finally:
+            quantizer.optimize_for_gemm = orig_optimize
         # Re-wrap with the original 4D SBHD/BSHD shape so that shape[-1] equals the per-head
         # dimension (matching Q's wrapper shape) and fused_attn_bwd produces 4D dkv that
         # matches key/value's expected gradient shape in _KFQuantizeKVForAttn.backward.
@@ -3283,6 +3300,10 @@ def mxfp8_quantize_only(tensor_quantizer_pairs, src_format):
             fp8_dtype=fp8_2d._fp8_dtype,
             with_gemm_swizzled_scales=False,
         )
+        if vmm_workspace is not None:
+            # Keep the VMM mappings alive for as long as DPA retains the
+            # quantized activation for backward or CUDA graph replay.
+            fp8_t._nvte_vmm_workspace = vmm_workspace
         fp8_tensors.append(fp8_t)
     return fp8_tensors
 
