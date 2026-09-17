@@ -340,28 +340,35 @@ def check_fp8_reduce_and_update(restore_first_module: bool = False) -> bool:
     return result
 
 
-def sp_out_leading(leading: int, args: Any) -> int:
-    """Output's leading (sequence) dim from the input's: sequence parallelism
-    gathers it (column-parallel) or scatters it (row-parallel). ``args`` carries
-    ``sequence_parallel`` / ``parallel_mode`` / ``tp_size``."""
+def get_output_first_dim_size(input_first_dim_size: int, args: Any) -> int:
+    """Compute the output's first dimension size from the input's.
+
+    Sequence parallelism gathers this dimension in column-parallel mode and
+    scatters it in row-parallel mode. ``args`` provides ``sequence_parallel``,
+    ``parallel_mode``, and ``tp_size``.
+    """
     if not args.sequence_parallel:
-        return leading
+        return input_first_dim_size
     if args.parallel_mode == "column":
-        return leading * args.tp_size
+        return input_first_dim_size * args.tp_size
     if args.parallel_mode == "row":
-        return leading // args.tp_size
-    return leading
+        return input_first_dim_size // args.tp_size
+    return input_first_dim_size
 
 
-def sp_inp_leading(leading: int, args: Any) -> int:
-    """Inverse of :func:`sp_out_leading`."""
+def get_input_first_dim_size(output_first_dim_size: int, args: Any) -> int:
+    """Recover the input's first dimension size from the output's.
+
+    Inverts the sequence-parallel gather/scatter in
+    :func:`get_output_first_dim_size`, including when called with a gradient's shape.
+    """
     if not args.sequence_parallel:
-        return leading
+        return output_first_dim_size
     if args.parallel_mode == "column":
-        return leading // args.tp_size
+        return output_first_dim_size // args.tp_size
     if args.parallel_mode == "row":
-        return leading * args.tp_size
-    return leading
+        return output_first_dim_size * args.tp_size
+    return output_first_dim_size
 
 
 def fake_workspace_valid(workspace: TensorSpec, quantizer: Optional[Quantizer]) -> bool:

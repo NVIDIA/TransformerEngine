@@ -72,8 +72,8 @@ from ._common import (
     check_fp8_reduce_and_update,
     fake_workspace_valid,
     noop_cat,
-    sp_inp_leading,
-    sp_out_leading,
+    get_input_first_dim_size,
+    get_output_first_dim_size,
     set_quantizer_amax_reduction_group,
     set_quantizer_usage_for_wgrad_all_gather,
     WeightGradStore,
@@ -982,7 +982,7 @@ def _layernorm_linear_backward_impl(
     assert grad_output is not None
     if args.inp_shape is None:
         in_features = args.saved_weight.shape[-1]
-        inp_leading = sp_inp_leading(grad_output.shape[0], args)
+        inp_leading = get_input_first_dim_size(grad_output.shape[0], args)
         args.inp_shape = torch.Size([inp_leading, *grad_output.shape[1:-1], in_features])
 
     # NVTX label for profiling
@@ -1686,7 +1686,11 @@ def _layernorm_linear_forward_fake(
     # ------------------------------------------------------
     requires_grad = args.is_grad_enabled and args.any_requires_grad()
     out = TensorSpec(
-        shape=(sp_out_leading(inp_leading, args), *tuple(args.inp.shape[1:-1]), out_features),
+        shape=(
+            get_output_first_dim_size(inp_leading, args),
+            *tuple(args.inp.shape[1:-1]),
+            out_features,
+        ),
         dtype=args.activation_dtype,
         quantizer=args.output_quantizer,
         requires_grad=requires_grad,
@@ -1832,7 +1836,7 @@ def _layernorm_linear_backward_fake(
 
     dgrad = None
     if args.requires_dgrad:
-        dgrad_leading = sp_inp_leading(args.grad_output.shape[0], args)
+        dgrad_leading = get_input_first_dim_size(args.grad_output.shape[0], args)
         dgrad = TensorSpec(
             shape=(dgrad_leading, *args.grad_output.shape[1:-1], in_features),
             dtype=out_dtype,

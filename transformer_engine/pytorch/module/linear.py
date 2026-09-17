@@ -35,8 +35,8 @@ from ._common import (
     can_reconstruct_wgrad_input_from_original,
     check_fp8_reduce_and_update,
     fake_workspace_valid,
-    sp_inp_leading,
-    sp_out_leading,
+    get_input_first_dim_size,
+    get_output_first_dim_size,
     noop_cat,
     set_quantizer_amax_reduction_group,
     set_quantizer_usage_for_wgrad_all_gather,
@@ -872,7 +872,7 @@ def _linear_forward_fake(
     # ------------------------------------------------------
     # A rank-1 input is viewed to (1, in_features), so the output leads with 1.
     inp_leading = inp.shape[0] if len(inp.shape) > 1 else 1
-    out_leading = sp_out_leading(inp_leading, args)
+    out_leading = get_output_first_dim_size(inp_leading, args)
     out = TensorSpec(
         shape=(out_leading, *tuple(inp.shape[1:-1]), out_features),
         dtype=activation_dtype,
@@ -1153,7 +1153,7 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
         # Reconstruct inp_shape when not stored (compiled mode with dynamic shapes).
         if bwd_args.inp_shape is None:
             in_features = saved_weight.shape[-1]
-            inp_leading = sp_inp_leading(grad_output.shape[0], bwd_args)
+            inp_leading = get_input_first_dim_size(grad_output.shape[0], bwd_args)
             bwd_args.inp_shape = torch.Size([inp_leading, *grad_output.shape[1:-1], in_features])
 
         # Configure Userbuffers communication (comm+GEMM overlap)
@@ -1718,7 +1718,7 @@ def _linear_backward_fake(
     if args.requires_dgrad:
         # Input shape rederived from grad_output + SP config (inp_shape is not
         # stored: torch.Size with SymInt cannot cross in OpaqueValueBundle).
-        dgrad_leading = sp_inp_leading(args.grad_output.shape[0], args)
+        dgrad_leading = get_input_first_dim_size(args.grad_output.shape[0], args)
         # Under UB reduce-scatter or bulk-wgrad overlap the returned dgrad is a
         # plain tensor; the quantizer only feeds the comm buffer.
         dgrad_quantizer = (
