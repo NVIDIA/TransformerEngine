@@ -77,6 +77,7 @@ from ..tensor.identity_tensor import IdentityQuantizer
 from ._common import (
     compile_unsupported_quantizer_reason,
     apply_normalization,
+    update_normalization_output_spec,
     check_fp8_reduce_and_update,
     fake_workspace_valid,
     set_quantizer_amax_reduction_group,
@@ -2195,6 +2196,8 @@ def _layernorm_mlp_forward_fake(
         quantizer=args.fc1_input_quantizer if ln_out_quantized else None,
         device=device,
     )
+    if with_quantized_norm:
+        update_normalization_output_spec(ln_out)
     if args.sequence_parallel and fp8_or_debug:
         args.fc1_input_quantizer.set_usage(rowwise=True, columnwise=False)
     ln_out_return_is_total = args.sequence_parallel and args.return_layernorm_output_gathered

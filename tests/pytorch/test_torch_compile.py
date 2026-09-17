@@ -121,7 +121,7 @@ if fp8_block_scaling_available:
 if mxfp8_available:
     _all_recipes.append(recipe.MXFP8BlockScaling())
 if nvfp4_available:
-    _all_recipes.append(recipe.NVFP4BlockScaling())
+    _all_recipes.append(recipe.NVFP4BlockScaling(disable_stochastic_rounding=True))
     _all_recipes.append(nvfp4_4over6())
     _all_recipes.append(nvfp4_row_scaled())
 
@@ -1915,11 +1915,19 @@ def test_to_tensor_spec_plain():
 
 
 @pytest.mark.parametrize("factory, shape", _SPEC_QUANTIZERS)
-def test_to_tensor_spec_quantized(factory, shape):
+@pytest.mark.parametrize("swizzled", [False, True])
+def test_to_tensor_spec_quantized(factory, shape, swizzled):
     """``to_tensor_spec`` round-trips a quantized tensor back into a spec."""
     q = factory()
+    has_scale_layout = isinstance(q, (MXFP8Quantizer, NVFP4Quantizer))
+    if has_scale_layout:
+        q.optimize_for_gemm = not swizzled
     tensor = TensorSpec(
-        shape=shape, dtype=torch.bfloat16, quantizer=q, device=torch.device("cpu")
+        shape=shape,
+        dtype=torch.bfloat16,
+        quantizer=q,
+        device=torch.device("cpu"),
+        with_gemm_swizzled_scales=swizzled if has_scale_layout else None,
     ).create_tensor()
 
     spec = to_tensor_spec(tensor)
@@ -1929,9 +1937,13 @@ def test_to_tensor_spec_quantized(factory, shape):
     # Same buffer layout as the original tensor.
     assert spec.inner_names() == tuple(q.inner_tensor_specs(shape))
     # Rebuilding from the derived spec matches the original tensor's structure.
-    assert _signature(spec.create_tensor(), spec.inner_names()) == _signature(
-        tensor, spec.inner_names()
-    )
+    rebuilt = spec.create_tensor()
+    assert _signature(rebuilt, spec.inner_names()) == _signature(tensor, spec.inner_names())
+    if has_scale_layout:
+        assert tensor._with_gemm_swizzled_scales == swizzled
+        assert spec.with_gemm_swizzled_scales == swizzled
+        assert rebuilt._with_gemm_swizzled_scales == swizzled
+        assert spec.quantizer.optimize_for_gemm == q.optimize_for_gemm == (not swizzled)
 
 
 # ---------------------------------------------------------------------------
@@ -1949,6 +1961,8 @@ def test_to_tensor_spec_quantized(factory, shape):
 @pytest.mark.parametrize("module", _LINEAR_MODULES)
 def test_te_modules_compile(module, fp8_recipe, compile_mode):
     """Fullgraph forward/backward agrees with eager across modules, recipes and modes."""
+    if module == "LayerNormMLP" and getattr(fp8_recipe, "backward_override", None) is not None:
+        pytest.skip("LayerNormMLP does not support backward_override, including in eager mode")
     model = _make_linear_module(module)
     _run_module_compile_test(model, fp8_recipe, compile_mode, 64)
 

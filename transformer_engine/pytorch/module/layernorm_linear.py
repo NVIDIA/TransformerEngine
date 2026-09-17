@@ -70,6 +70,7 @@ from ..graph import is_graph_capturing
 from ._common import (
     compile_unsupported_quantizer_reason,
     apply_normalization,
+    update_normalization_output_spec,
     check_fp8_reduce_and_update,
     fake_workspace_valid,
     noop_cat,
@@ -1553,6 +1554,8 @@ def _layernorm_linear_forward_fake(
         quantizer=args.input_quantizer if ln_out_quantized else None,
         device=device,
     )
+    if with_quantized_norm:
+        update_normalization_output_spec(ln_out_spec)
     if with_input_all_gather and fp8_or_debug:
         args.input_quantizer.set_usage(rowwise=True, columnwise=False)
     # ``ln_out_return`` is the high-precision norm output (or its all-gathered copy).
