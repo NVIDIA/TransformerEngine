@@ -13,7 +13,7 @@ import torch
 import transformer_engine_torch as tex
 from ...dynamo import TensorOrQuantized, TensorSpec
 from ...quantization import FP8GlobalStateManager
-from ..op import BasicOperation, OperationContext
+from ..op import BasicOperation
 from ...utils import canonicalize_device, canonicalize_dtype
 from ...tensor import Quantizer
 
@@ -174,7 +174,8 @@ class Bias(BasicOperation):
     def pack_backward_args(
         self, basic_op_ctxs, grad_output, **unused  # pylint: disable=unused-argument
     ) -> BiasBwdArgs:
-        return BiasBwdArgs(grad_output, basic_op_ctxs[0].grad_input_quantizer)
+        quantizer = basic_op_ctxs[0].grad_input_quantizer if len(grad_output.shape) > 1 else None
+        return BiasBwdArgs(grad_output, quantizer)
 
     @classmethod
     def backward_compute(cls, args: BiasBwdArgs):
@@ -199,38 +200,3 @@ class Bias(BasicOperation):
             )
         db = TensorSpec(shape=(dy.shape[-1],), dtype=dy.dtype, device=dy.device)
         return dx, [(db,)], [()]
-
-    def op_forward(
-        self,
-        ctx: OperationContext,
-        input_: torch.Tensor,
-        prev_op_grad_output_quantizer: Optional[Quantizer],
-        next_op_input_quantizer: Optional[Quantizer],
-    ) -> torch.Tensor:
-        x = input_
-        b = self.bias.view([1] * (x.dim() - 1) + [self.local_size])
-
-        if ctx.requires_grad:
-            ctx.grad_input_quantizer = prev_op_grad_output_quantizer
-            if FP8GlobalStateManager.is_fp8_enabled():
-                fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
-                if fp8_recipe.backward_override is not None:
-                    ctx.grad_input_quantizer = None
-
-        return x + b
-
-    def op_backward(
-        self,
-        ctx: OperationContext,
-        grad_output: torch.Tensor,
-    ) -> tuple[torch.Tensor, tuple[()]]:
-        dy = grad_output
-        if dy.dim() > 1:
-            quantizer = ctx.grad_input_quantizer
-            if quantizer is None:
-                db = dy.sum(tuple(range(dy.dim() - 1)))
-            else:
-                db, dy = tex.bgrad_quantize(dy, quantizer)
-        else:
-            db = dy
-        return dy, (db,)

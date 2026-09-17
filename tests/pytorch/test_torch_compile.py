@@ -4,6 +4,7 @@
 
 import abc
 import contextlib
+import copy
 import dataclasses
 import os
 import re
@@ -2697,6 +2698,21 @@ def test_te_ops_forward_kwargs_compile():
 @pytest.mark.parametrize("case", ["linear", "bias", "pair", "unfused"])
 @pytest.mark.parametrize("grads", ["all", "input", "weight", "bias", "none"])
 def test_te_ops_linear_bias_compile(dtype, quantization, case, grads, monkeypatch):
+    _check_linear_bias_compile(dtype, quantization, case, grads, monkeypatch)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("backward_override", ["high_precision", "dequantized"])
+def test_te_ops_linear_bias_backward_override(dtype, backward_override, monkeypatch):
+    _check_linear_bias_compile(
+        dtype, "fp8", "pair", "all", monkeypatch, backward_override=backward_override
+    )
+
+
+def _check_linear_bias_compile(
+    dtype, quantization, case, grads, monkeypatch, *, backward_override=None
+):
     if quantization == "fp8" and not fp8_available:
         pytest.skip(reason_for_no_fp8)
     if (case == "linear" and grads == "bias") or (case == "bias" and grads == "weight"):
@@ -2714,43 +2730,62 @@ def test_te_ops_linear_bias_compile(dtype, quantization, case, grads, monkeypatc
         with torch.no_grad():
             ops[-1].bias.uniform_(-0.1, 0.1)
     model = te.ops.Sequential(*ops)
-    quant_recipe = recipe.Float8CurrentScaling() if quantization == "fp8" else None
+    eager_model = copy.deepcopy(model)
+    quant_recipe = (
+        recipe.Float8CurrentScaling(backward_override=backward_override)
+        if quantization == "fp8"
+        else None
+    )
 
-    def run(x):
+    def run(x, module=model):
         if quant_recipe is None:
-            return model(x)
+            return module(x)
         with te.autocast(recipe=quant_recipe):
-            return model(x)
+            return module(x)
 
     compiled, graphs = _compile_with_graphs(run)
     x = torch.randn(2, 16, 32, device="cuda", dtype=dtype)
     x.requires_grad_(grads in ("all", "input"))
     targets = tuple(t for t in (x, *model.parameters()) if t.requires_grad)
+    eager_targets = tuple(t for t in (x, *eager_model.parameters()) if t.requires_grad)
     graph_count = None
     with torch.no_grad() if grads == "none" else contextlib.nullcontext():
         for iteration in range(3):
             with torch.no_grad():
-                x.uniform_(-0.5, 0.5)
-                for param in model.parameters():
-                    param.add_(0.001)
+                if quant_recipe is None:
+                    # Keep the native-reference GEMM exact in FP16 and BF16.
+                    x.copy_(torch.randint(-2, 3, x.shape, device=x.device) / 8)
+                else:
+                    x.uniform_(-0.5, 0.5)
+                for param, eager_param in zip(model.parameters(), eager_model.parameters()):
+                    if quant_recipe is None:
+                        param.copy_(torch.randint(-2, 3, param.shape, device=param.device) / 16)
+                    else:
+                        param.add_(0.001)
+                    eager_param.copy_(param)
             actual = compiled(x)
-            expected = run(x)
+            expected = run(x, eager_model)
             torch.testing.assert_close(actual, expected)
             if targets:
                 dy = torch.randn_like(actual)
                 torch.testing.assert_close(
                     torch.autograd.grad(actual, targets, dy),
-                    torch.autograd.grad(expected, targets, dy),
+                    torch.autograd.grad(expected, eager_targets, dy),
                 )
             if quant_recipe is None:
-                reference = x
+                reference = x.double()
                 for op in ops:
                     reference = (
-                        torch.nn.functional.linear(reference, op.weight)
+                        torch.nn.functional.linear(reference, op.weight.double())
                         if isinstance(op, BasicLinear)
-                        else reference + op.bias
+                        else reference + op.bias.double()
                     )
-                torch.testing.assert_close(actual, reference, **dtype_tols(dtype))
+                    # Unfused operations round their intermediate outputs.
+                    if case != "pair":
+                        reference = reference.to(dtype).double()
+                torch.testing.assert_close(
+                    actual, reference, check_dtype=False, **dtype_tols(dtype)
+                )
                 if targets:
                     torch.testing.assert_close(
                         torch.autograd.grad(run(x), targets, dy),
