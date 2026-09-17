@@ -45,7 +45,9 @@ def test_native_cp_capability_query_is_local(monkeypatch, native_module, with_pa
     monkeypatch.setattr(torch.distributed, "barrier", barrier)
     monkeypatch.setattr(torch.cuda, "current_device", barrier)
 
-    assert module.get_native_cp_transport_unavailable_reason(parent if with_parent else None) is None
+    assert (
+        module.get_native_cp_transport_unavailable_reason(parent if with_parent else None) is None
+    )
 
     extension.cp_native_transport_get_unavailable_reason.assert_called_once_with(
         123 if with_parent else 0
@@ -124,8 +126,9 @@ def test_native_cp_capability_query_reports_runtime_failure(native_module, failu
     }[failure_site]
     target.side_effect = RuntimeError("test query failure")
 
-    assert module.get_native_cp_transport_unavailable_reason(parent) == (
-        "Native CP capability query failed: test query failure"
+    assert (
+        module.get_native_cp_transport_unavailable_reason(parent)
+        == "Native CP capability query failed: test query failure"
     )
 
     extension.cp_native_transport_create.assert_not_called()
