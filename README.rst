@@ -10,20 +10,27 @@ Transformer Engine
 
 `Quick start <#quick-start>`_ | `User guide <https://docs.nvidia.com/deeplearning/transformer-engine/index.html>`_ | `PyTorch API <https://docs.nvidia.com/deeplearning/transformer-engine/api/pytorch.html>`_ | `JAX API <https://docs.nvidia.com/deeplearning/transformer-engine/api/jax.html>`_ | `Examples <https://github.com/NVIDIA/TransformerEngine/tree/main/examples>`_ | `Releases <https://github.com/NVIDIA/TransformerEngine/releases>`_
 
-Why Transformer Engine?
-=======================
+What is Transformer Engine?
+===========================
 .. overview-begin-marker-do-not-remove
 
 Transformer Engine (TE) is an NVIDIA library for accelerating Transformer training on NVIDIA GPUs.
-It provides optimized modules, fused kernels, and automatic mixed-precision-style APIs for both
-PyTorch and JAX.
+It combines optimized building blocks and fused kernels with automatic mixed-precision-style APIs
+for PyTorch and JAX, so low-precision training can be adopted without rewriting a training stack.
 
-* Train with FP8 on NVIDIA Hopper, Ada, and Blackwell GPUs.
-* Use MXFP8 and NVFP4 on NVIDIA Blackwell GPUs for greater training efficiency.
-* Accelerate dense Transformers, mixture-of-experts models, and distributed training with optimized
-  attention, linear, normalization, quantization, and communication operations.
-* Keep familiar PyTorch and JAX workflows while Transformer Engine manages low-precision metadata
-  such as scaling factors.
+Transformer Engine manages the scaling factors, amax histories, and quantization metadata required
+by low-precision recipes. Its modules cover attention, linear layers, normalization, Mixture-of-Experts
+(MoE), and communication operations used in large-scale distributed training.
+
+Highlights
+==========
+
+* FP8 training on NVIDIA Hopper, Ada, and Blackwell GPUs.
+* MXFP8 and NVFP4 training on NVIDIA Blackwell GPUs.
+* Optimized attention, GEMM, normalization, quantization, and fused Transformer and MoE modules.
+* PyTorch and JAX APIs with autocast-style contexts and configurable low-precision recipes.
+* Support for tensor, sequence, context, and expert parallelism, including communication overlap.
+* FP16 and BF16 optimizations on NVIDIA Ampere architecture GPUs and later.
 
 .. overview-end-marker-do-not-remove
 
