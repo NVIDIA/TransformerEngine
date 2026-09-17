@@ -205,13 +205,15 @@ def to_f32_bf16(value: cutlass.BFloat16) -> Float32:
 
 @cute.jit
 def x2_lo_to_f32_bf16(bits: Int32) -> Float32:
+    """Extract and widen the low BF16 lane from a packed 32-bit value."""
     return ((bits & Int32(0xFFFF)) << Int32(16)).bitcast(Float32)
 
 
 @cute.jit
 def x2_hi_to_f32_bf16(bits: Int32) -> Float32:
-    # `(x >> 16) << 16` ≡ `x & 0xFFFF0000`, sidestepping signed-literal
-    # issues. Sign bits from the arith-right shift get zeroed by the left shift.
+    """Extract and widen the high BF16 lane from a packed 32-bit value."""
+    # Clear the low 16 bits while preserving the high BF16 value. Use shifts because
+    # the equivalent 0xFFFF0000 mask does not fit in a positive signed Int32 literal.
     return ((bits >> Int32(16)) << Int32(16)).bitcast(Float32)
 
 
@@ -238,11 +240,13 @@ def to_f32_f16(value: cutlass.Float16) -> Float32:
 
 @cute.jit
 def x2_lo_to_f32_f16(bits: Int32) -> Float32:
+    """Extract and widen the low FP16 lane from a packed 32-bit value."""
     return to_f32_f16(Uint16(bits).bitcast(cutlass.Float16))
 
 
 @cute.jit
 def x2_hi_to_f32_f16(bits: Int32) -> Float32:
+    """Extract and widen the high FP16 lane from a packed 32-bit value."""
     hi_shifted = bits >> Int32(16)
     return to_f32_f16(Uint16(hi_shifted).bitcast(cutlass.Float16))
 
