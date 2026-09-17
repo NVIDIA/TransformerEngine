@@ -39,21 +39,6 @@ Standard layers
 .. autoapiclass:: transformer_engine.pytorch.TransformerLayer(hidden_size, ffn_hidden_size, num_attention_heads, **kwargs)
   :members: forward, set_context_parallel_group, set_tensor_parallel_group
 
-MLA rotary position embeddings
-------------------------------
-
-These functions apply the decoupled RoPE used by multi-latent attention (MLA).
-The rotary input channels contain interleaved pairs; rotated outputs use
-NeoX half-split order. ``sbhd`` denotes sequence, batch, head and channel axes;
-``bshd`` exchanges the first two axes. Build the cosine/sine tables on the
-same device as the tensors, with one row per sequence position.
-
-.. autoapifunction:: transformer_engine.pytorch.attention.mla_rope.build_rope_tables
-
-.. autoapifunction:: transformer_engine.pytorch.attention.mla_rope.apply_mla_rope_q
-
-.. autoapifunction:: transformer_engine.pytorch.attention.mla_rope.apply_mla_rope_kv
-
 Model-specific layers
 ---------------------
 
@@ -95,6 +80,21 @@ Other
 .. autoapifunction:: transformer_engine.pytorch.interleave_glu_tensor
 
 .. autoapifunction:: transformer_engine.pytorch.deinterleave_glu_tensor
+
+MLA rotary position embeddings
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+These functions apply the decoupled RoPE used by multi-latent attention (MLA).
+The rotary input channels contain interleaved pairs; rotated outputs use
+NeoX half-split order. ``sbhd`` denotes sequence, batch, head and channel axes;
+``bshd`` exchanges the first two axes. Build the cosine/sine tables on the
+same device as the tensors, with one row per sequence position.
+
+.. autoapifunction:: transformer_engine.pytorch.attention.mla_rope.build_rope_tables
+
+.. autoapifunction:: transformer_engine.pytorch.attention.mla_rope.apply_mla_rope_q
+
+.. autoapifunction:: transformer_engine.pytorch.attention.mla_rope.apply_mla_rope_kv
 
 Data types
 ----------
