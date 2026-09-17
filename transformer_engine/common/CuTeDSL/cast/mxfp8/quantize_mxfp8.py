@@ -28,7 +28,7 @@ from typing import Optional, Type
 import cutlass
 from cutlass import cute
 from cutlass import pipeline
-from cutlass import Boolean, Float32, Float8E8M0FNU, Int16, Int32, Int64, Uint16, Uint32, Uint8
+from cutlass import Boolean, Float32, Float8E8M0FNU, Int32, Int64, Uint16, Uint32, Uint8
 from cuda.bindings.driver import CUstream  # pylint: disable=no-name-in-module
 import tvm_ffi
 
@@ -36,7 +36,22 @@ from transformer_engine.common.CuTeDSL.utils import (
     device_compute_capability,
     str_to_cutlass_dtype,
     is_packed16,
-    packed16_kit,
+    abs_max_x2_bf16,
+    abs_max_x2_f16,
+    max_x2_bf16,
+    max_x2_f16,
+    max_scalar_bf16,
+    max_scalar_f16,
+    abs_max_scalar_bf16,
+    abs_max_scalar_f16,
+    to_f32_bf16,
+    to_f32_f16,
+    x2_lo_to_f32_bf16,
+    x2_lo_to_f32_f16,
+    x2_hi_to_f32_bf16,
+    x2_hi_to_f32_f16,
+    truncate_f32_bf16,
+    truncate_f32_f16,
     fabs_f32,
     exp2f_rcp,
     pack_f32x2,
@@ -203,7 +218,14 @@ def quantize_rowwise_mxfp8(
     if cutlass.const_expr(USE_HALF_PRECISION):
         # If no activation, f16 / bf16 and rowwise quantization, we can read 2 f16 / bf16 at once in a pack
         # and use max.xorsign.abs.f16x2 / max.xorsign.abs.bf16x2 to compute
-        kit = packed16_kit(DTYPE)
+        max_x2 = max_x2_f16 if DTYPE is cutlass.Float16 else max_x2_bf16
+        abs_max_x2 = abs_max_x2_f16 if DTYPE is cutlass.Float16 else abs_max_x2_bf16
+        x2_lo_to_f32 = (
+            x2_lo_to_f32_f16 if DTYPE is cutlass.Float16 else x2_lo_to_f32_bf16
+        )
+        x2_hi_to_f32 = (
+            x2_hi_to_f32_f16 if DTYPE is cutlass.Float16 else x2_hi_to_f32_bf16
+        )
         sX_thread_rw_i64 = cute.make_tensor(
             cute.recast_ptr(sX_thread.iterator, dtype=Int64),
             cute.make_layout(
@@ -218,34 +240,38 @@ def quantize_rowwise_mxfp8(
 
         if cutlass.const_expr(WITH_DBIAS):
             for w in cutlass.range_constexpr(WAVES):
-                dbias_acc[w * PACK_SIZE + 0] += kit.x2_lo_to_f32(in_r[w][0])
-                dbias_acc[w * PACK_SIZE + 1] += kit.x2_hi_to_f32(in_r[w][0])
-                dbias_acc[w * PACK_SIZE + 2] += kit.x2_lo_to_f32(in_r[w][1])
-                dbias_acc[w * PACK_SIZE + 3] += kit.x2_hi_to_f32(in_r[w][1])
+                dbias_acc[w * PACK_SIZE + 0] += x2_lo_to_f32(in_r[w][0])
+                dbias_acc[w * PACK_SIZE + 1] += x2_hi_to_f32(in_r[w][0])
+                dbias_acc[w * PACK_SIZE + 2] += x2_lo_to_f32(in_r[w][1])
+                dbias_acc[w * PACK_SIZE + 3] += x2_hi_to_f32(in_r[w][1])
 
-        amax_2x = Int32(0)
+        amax_2x = in_r[0][0]
         # Each wave will use max.xorsign.abs.f16x2 or max.xorsign.abs.bf16x2 to compare 2 packed elements in parallel
         for w in cutlass.range_constexpr(WAVES):
             if cutlass.const_expr(FUSE_RELU):
-                # If we fuse relu then we don't want to do abs since negative value will be set to 0 and they will lose comparison automatically
-                amax_2x = kit.max_x2(amax_2x, in_r[w][0])
-                amax_2x = kit.max_x2(amax_2x, in_r[w][1])
+                # Skip the first iteration because we assigned in_r[0][0] to amax_2x already
+                if cutlass.const_expr(w > 0):
+                    # If we fuse relu then we don't want to do abs since negative value will be set to 0 and they will lose comparison automatically
+                    amax_2x = max_x2(amax_2x, in_r[w][0])
+                amax_2x = max_x2(amax_2x, in_r[w][1])
             else:
-                amax_2x = kit.abs_max_x2(amax_2x, in_r[w][0])
-                amax_2x = kit.abs_max_x2(amax_2x, in_r[w][1])
+                # Skip the first iteration because we assigned in_r[0][0] to amax_2x already
+                if cutlass.const_expr(w > 0):
+                    amax_2x = abs_max_x2(amax_2x, in_r[w][0])
+                amax_2x = abs_max_x2(amax_2x, in_r[w][1])
         if cutlass.const_expr(FUSE_RELU):
             # Compare the 2 packed max without abs
             amax_r = cute.arch.fmax(
-                kit.x2_lo_to_f32(amax_2x),
-                kit.x2_hi_to_f32(amax_2x),
+                x2_lo_to_f32(amax_2x),
+                x2_hi_to_f32(amax_2x),
             )
             # For relu the max is at least 0
             amax_r = cute.arch.fmax(amax_r, Float32(0.0))
         else:
             # Compare the 2 packed abs max
             amax_r = cute.arch.fmax(
-                fabs_f32(kit.x2_lo_to_f32(amax_2x)),
-                fabs_f32(kit.x2_hi_to_f32(amax_2x)),
+                fabs_f32(x2_lo_to_f32(amax_2x)),
+                fabs_f32(x2_hi_to_f32(amax_2x)),
             )
     else:
         # Since we need to do computation on individual f16 / bf16 elements, we can't read in pack
@@ -266,7 +292,9 @@ def quantize_rowwise_mxfp8(
             op = SUPPORTED_ACTIVATIONS[ACTIVATION]
 
         if cutlass.const_expr(is_packed16(DTYPE) and ACTIVATION is not None):
-            kit_act = packed16_kit(DTYPE)
+            truncate_f32 = (
+                truncate_f32_f16 if DTYPE is cutlass.Float16 else truncate_f32_bf16
+            )
 
         # Each wave we read PACK_SIZE elements, and we have WAVES waves, so we read WAVES * PACK_SIZE (= MXFP8_BLOCK_SCALING_SIZE) elements in total.
         in_r = [[None] * PACK_SIZE for _ in range(WAVES)]
@@ -323,7 +351,7 @@ def quantize_rowwise_mxfp8(
                     dbias_acc[w * PACK_SIZE + i] += x
                 # If 16-bit input with activation, truncate to IType
                 if cutlass.const_expr(is_packed16(DTYPE) and ACTIVATION is not None):
-                    x = kit_act.truncate_f32(x)
+                    x = truncate_f32(x)
                 in_r[w][i] = x
                 if cutlass.const_expr(FUSE_RELU):
                     amax_r = cute.arch.fmax(
@@ -422,28 +450,35 @@ def quantize_colwise_mxfp8(
     dbias_partial = Float32(0.0)
 
     if cutlass.const_expr(USE_HALF_PRECISION):
-        kit = packed16_kit(DTYPE)
+        max_scalar = max_scalar_f16 if DTYPE is cutlass.Float16 else max_scalar_bf16
+        abs_max_scalar = (
+            abs_max_scalar_f16 if DTYPE is cutlass.Float16 else abs_max_scalar_bf16
+        )
+        to_f32 = to_f32_f16 if DTYPE is cutlass.Float16 else to_f32_bf16
         # If we can use the half precision format, then use the input tile directly since there is no need to upcast
-        sX_thread_i16 = cute.make_tensor(
-            cute.recast_ptr(sX_thread.iterator, dtype=Int16),
+        sX_thread_packed16 = cute.make_tensor(
+            sX_thread.iterator,
             cute.make_layout((MXFP8_BLOCK_SCALING_SIZE,), stride=(TILE_X,)),
         )
         # Stash the strided column reads in registers (CUDA's in_colwise_IType):
         # the cvt loop below reuses them instead of re-reading smem.
         in_c = [None] * MXFP8_BLOCK_SCALING_SIZE
-        amax_bits = Int16(0)
         for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
-            in_c[i] = sX_thread_i16[i]
+            in_c[i] = sX_thread_packed16[i]
+
+        amax_value = in_c[0]
+        # Skip the first iteration because we assigned in_c[0] to amax_value already
+        for i in cutlass.range_constexpr(1, MXFP8_BLOCK_SCALING_SIZE):
             if cutlass.const_expr(FUSE_RELU):
                 # If we fuse relu then we don't want to do abs since negative value will be set to 0
                 # and they will lose comparison automatically
-                amax_bits = kit.max_scalar(amax_bits, in_c[i])
+                amax_value = max_scalar(amax_value, in_c[i])
             else:
-                amax_bits = kit.abs_max_scalar(amax_bits, in_c[i])
+                amax_value = abs_max_scalar(amax_value, in_c[i])
         if cutlass.const_expr(FUSE_RELU):
-            amax_c = kit.bits_to_f32(amax_bits)
+            amax_c = cute.arch.fmax(to_f32(amax_value), Float32(0.0))
         else:
-            amax_c = fabs_f32(kit.bits_to_f32(amax_bits))
+            amax_c = fabs_f32(to_f32(amax_value))
     else:
         # Otherwise we need to case input values to fp32. Allocate the register tensor and load from SMEM input tiles.
         rX_thread_f32 = cute.make_rmem_tensor(
@@ -481,9 +516,11 @@ def quantize_colwise_mxfp8(
                 dbias_partial += rX_thread_f32[i]
         # Truncate the activation (after we apply op) back to the half precision type if input is also half precision.
         if cutlass.const_expr(is_packed16(DTYPE) and ACTIVATION is not None):
-            kit_act = packed16_kit(DTYPE)
+            truncate_f32 = (
+                truncate_f32_f16 if DTYPE is cutlass.Float16 else truncate_f32_bf16
+            )
             for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
-                rX_thread_f32[i] = kit_act.truncate_f32(rX_thread_f32[i])
+                rX_thread_f32[i] = truncate_f32(rX_thread_f32[i])
         # Columnwise is the preferred direction so it runs first. If it needs to cache the activation in the input tile
         # to let the rowwise pass read it, we need to cast and overwrite the input data in-place here
         if cutlass.const_expr(CACHE_ACTIVATION):
@@ -522,11 +559,11 @@ def quantize_colwise_mxfp8(
         cute.recast_ptr(sO_thread.iterator, dtype=FP8_DTYPE), sO_thread.layout
     )
     if cutlass.const_expr(USE_HALF_PRECISION):
-        kit_cast = packed16_kit(DTYPE)
+        to_f32 = to_f32_f16 if DTYPE is cutlass.Float16 else to_f32_bf16
         for j in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE // 2):
             lo, hi = 2 * j, 2 * j + 1
-            v_lo = kit_cast.bits_to_f32(in_c[lo])
-            v_hi = kit_cast.bits_to_f32(in_c[hi])
+            v_lo = to_f32(in_c[lo])
+            v_hi = to_f32(in_c[hi])
             # Accumulate the per-thread column partial for dbias if WITH_DBIAS.
             # Kept as two adds in element order: f32 addition is not associative
             if cutlass.const_expr(WITH_DBIAS):
@@ -650,7 +687,13 @@ def quantize_bidimensional_mxfp8_swizzled(
 
     if cutlass.const_expr(is_packed16(DTYPE)):
         # If the input is bf16 / fp16, take this fast path and process 2 elements at a time in a packed i32
-        kit = packed16_kit(DTYPE)
+        abs_max_x2 = abs_max_x2_f16 if DTYPE is cutlass.Float16 else abs_max_x2_bf16
+        x2_lo_to_f32 = (
+            x2_lo_to_f32_f16 if DTYPE is cutlass.Float16 else x2_lo_to_f32_bf16
+        )
+        x2_hi_to_f32 = (
+            x2_hi_to_f32_f16 if DTYPE is cutlass.Float16 else x2_hi_to_f32_bf16
+        )
         rX = cute.make_rmem_tensor(MXFP8_BLOCK_SCALING_SIZE, DTYPE)
         # Do a vectorized load from SMEM to RMEM and unswizzle in the meantime.
         cute.autovec_copy(tXsX, rX)
@@ -663,12 +706,14 @@ def quantize_bidimensional_mxfp8_swizzled(
             cute.make_layout((MXFP8_BLOCK_SCALING_SIZE // 2,), stride=(1,)),
         )
 
-        row_amax2 = Int32(0)
+        row_amax2 = rX_2x[0]
         for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE // 2):
             pair = rX_2x[i]
-            row_amax2 = kit.abs_max_x2(row_amax2, pair)
-            a_lo = fabs_f32(kit.x2_lo_to_f32(pair))
-            a_hi = fabs_f32(kit.x2_hi_to_f32(pair))
+            # Skip the first iteration because we assigned rX_2x[0] to row_amax2 already
+            if cutlass.const_expr(i > 0):
+                row_amax2 = abs_max_x2(row_amax2, pair)
+            a_lo = fabs_f32(x2_lo_to_f32(pair))
+            a_hi = fabs_f32(x2_hi_to_f32(pair))
             col_lo = cute.arch.warp_redux_sync(a_lo, kind="fmax")
             col_hi = cute.arch.warp_redux_sync(a_hi, kind="fmax")
             with cute.arch.elect_one():
@@ -676,7 +721,7 @@ def quantize_bidimensional_mxfp8_swizzled(
 
         # Compute the rowwise scale factor
         row_amax = cute.arch.fmax(
-            fabs_f32(kit.x2_lo_to_f32(row_amax2)), fabs_f32(kit.x2_hi_to_f32(row_amax2))
+            fabs_f32(x2_lo_to_f32(row_amax2)), fabs_f32(x2_hi_to_f32(row_amax2))
         )
         row_exp = cvt_f32_to_fp8e8m0fnu(row_amax * MAX_NORM_RCP)
         row_inv = exp2f_rcp(row_exp)
@@ -697,10 +742,10 @@ def quantize_bidimensional_mxfp8_swizzled(
             cute.autovec_copy(sColReduce[j, None], col_inv4)  # LDS.128, warp-broadcast
             p01 = rX_2x[2 * j]
             p23 = rX_2x[2 * j + 1]
-            f0 = kit.x2_lo_to_f32(p01)
-            f1 = kit.x2_hi_to_f32(p01)
-            f2 = kit.x2_lo_to_f32(p23)
-            f3 = kit.x2_hi_to_f32(p23)
+            f0 = x2_lo_to_f32(p01)
+            f1 = x2_hi_to_f32(p01)
+            f2 = x2_lo_to_f32(p23)
+            f3 = x2_hi_to_f32(p23)
             # For rowwise quantized values, they use the same scale for all 4 elements,
             # so we can just pass two row_inv to mul_cvt4 to apply it to all 4 elements at once.
             rO_row_u32[j] = mul_cvt4(f0, f1, f2, f3, row_scale_2x)
@@ -1854,11 +1899,12 @@ class MXFP8QuantizeSpecializedRowwiseKernel(MXFP8QuantizeKernelBase):
             cute.make_layout((1, MXFP8_BLOCK_SCALING_SIZE), stride=(MXFP8_BLOCK_SCALING_SIZE, 1)),
             dtype=DTYPE,
         )
-        kit = packed16_kit(DTYPE)
-        abs_max_x2, x2_lo_to_f32, x2_hi_to_f32 = (
-            kit.abs_max_x2,
-            kit.x2_lo_to_f32,
-            kit.x2_hi_to_f32,
+        abs_max_x2 = abs_max_x2_f16 if DTYPE is cutlass.Float16 else abs_max_x2_bf16
+        x2_lo_to_f32 = (
+            x2_lo_to_f32_f16 if DTYPE is cutlass.Float16 else x2_lo_to_f32_bf16
+        )
+        x2_hi_to_f32 = (
+            x2_hi_to_f32_f16 if DTYPE is cutlass.Float16 else x2_hi_to_f32_bf16
         )
         mul_cvt4 = mul_f32x2_cvt_packed16x4_to_fp8x4(DTYPE, self.cfg.FP8_DTYPE)
         rX_i32 = cute.make_tensor(
@@ -1898,8 +1944,9 @@ class MXFP8QuantizeSpecializedRowwiseKernel(MXFP8QuantizeKernelBase):
         col = bidx * self._TILE_COLS + (tidx % CTA_X) * MXFP8_BLOCK_SCALING_SIZE
         if row < M and col < N:
             cute.autovec_copy(mX_thread, rX_thread)
-            amax_2x = Int32(0)
-            for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE // 2):
+            amax_2x = rX_i32[0]
+            # Skip the first iteration because we assigned rX_i32[0] to amax_2x already
+            for i in cutlass.range_constexpr(1, MXFP8_BLOCK_SCALING_SIZE // 2):
                 amax_2x = abs_max_x2(amax_2x, rX_i32[i])
             amax = cute.arch.fmax(fabs_f32(x2_lo_to_f32(amax_2x)), fabs_f32(x2_hi_to_f32(amax_2x)))
 
