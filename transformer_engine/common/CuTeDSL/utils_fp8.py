@@ -103,9 +103,7 @@ def _build_mul_f32x2_cvt_f32x4_to_fp8x4(fp8_dtype, relu: bool = False) -> Callab
     )
 
     @cute.jit
-    def fn(
-        v0: Float32, v1: Float32, v2: Float32, v3: Float32, scale_2x: Int64
-    ) -> Uint32:
+    def fn(v0: Float32, v1: Float32, v2: Float32, v3: Float32, scale_2x: Int64) -> Uint32:
         return cute.arch.inline_ptx(
             asm,
             write_only_types=[Uint32],

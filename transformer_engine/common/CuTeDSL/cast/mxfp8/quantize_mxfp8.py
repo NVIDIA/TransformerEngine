@@ -220,12 +220,8 @@ def quantize_rowwise_mxfp8(
         # and use max.xorsign.abs.f16x2 / max.xorsign.abs.bf16x2 to compute
         max_x2 = max_x2_f16 if DTYPE is cutlass.Float16 else max_x2_bf16
         abs_max_x2 = abs_max_x2_f16 if DTYPE is cutlass.Float16 else abs_max_x2_bf16
-        x2_lo_to_f32 = (
-            x2_lo_to_f32_f16 if DTYPE is cutlass.Float16 else x2_lo_to_f32_bf16
-        )
-        x2_hi_to_f32 = (
-            x2_hi_to_f32_f16 if DTYPE is cutlass.Float16 else x2_hi_to_f32_bf16
-        )
+        x2_lo_to_f32 = x2_lo_to_f32_f16 if DTYPE is cutlass.Float16 else x2_lo_to_f32_bf16
+        x2_hi_to_f32 = x2_hi_to_f32_f16 if DTYPE is cutlass.Float16 else x2_hi_to_f32_bf16
         sX_thread_rw_i64 = cute.make_tensor(
             cute.recast_ptr(sX_thread.iterator, dtype=Int64),
             cute.make_layout(
@@ -292,9 +288,7 @@ def quantize_rowwise_mxfp8(
             op = SUPPORTED_ACTIVATIONS[ACTIVATION]
 
         if cutlass.const_expr(is_packed16(DTYPE) and ACTIVATION is not None):
-            truncate_f32 = (
-                truncate_f32_f16 if DTYPE is cutlass.Float16 else truncate_f32_bf16
-            )
+            truncate_f32 = truncate_f32_f16 if DTYPE is cutlass.Float16 else truncate_f32_bf16
 
         # Each wave we read PACK_SIZE elements, and we have WAVES waves, so we read WAVES * PACK_SIZE (= MXFP8_BLOCK_SCALING_SIZE) elements in total.
         in_r = [[None] * PACK_SIZE for _ in range(WAVES)]
@@ -451,9 +445,7 @@ def quantize_colwise_mxfp8(
 
     if cutlass.const_expr(USE_HALF_PRECISION):
         max_scalar = max_scalar_f16 if DTYPE is cutlass.Float16 else max_scalar_bf16
-        abs_max_scalar = (
-            abs_max_scalar_f16 if DTYPE is cutlass.Float16 else abs_max_scalar_bf16
-        )
+        abs_max_scalar = abs_max_scalar_f16 if DTYPE is cutlass.Float16 else abs_max_scalar_bf16
         to_f32 = to_f32_f16 if DTYPE is cutlass.Float16 else to_f32_bf16
         # If we can use the half precision format, then use the input tile directly since there is no need to upcast
         sX_thread_packed16 = cute.make_tensor(
@@ -516,9 +508,7 @@ def quantize_colwise_mxfp8(
                 dbias_partial += rX_thread_f32[i]
         # Truncate the activation (after we apply op) back to the half precision type if input is also half precision.
         if cutlass.const_expr(is_packed16(DTYPE) and ACTIVATION is not None):
-            truncate_f32 = (
-                truncate_f32_f16 if DTYPE is cutlass.Float16 else truncate_f32_bf16
-            )
+            truncate_f32 = truncate_f32_f16 if DTYPE is cutlass.Float16 else truncate_f32_bf16
             for i in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
                 rX_thread_f32[i] = truncate_f32(rX_thread_f32[i])
         # Columnwise is the preferred direction so it runs first. If it needs to cache the activation in the input tile
@@ -688,12 +678,8 @@ def quantize_bidimensional_mxfp8_swizzled(
     if cutlass.const_expr(is_packed16(DTYPE)):
         # If the input is bf16 / fp16, take this fast path and process 2 elements at a time in a packed i32
         abs_max_x2 = abs_max_x2_f16 if DTYPE is cutlass.Float16 else abs_max_x2_bf16
-        x2_lo_to_f32 = (
-            x2_lo_to_f32_f16 if DTYPE is cutlass.Float16 else x2_lo_to_f32_bf16
-        )
-        x2_hi_to_f32 = (
-            x2_hi_to_f32_f16 if DTYPE is cutlass.Float16 else x2_hi_to_f32_bf16
-        )
+        x2_lo_to_f32 = x2_lo_to_f32_f16 if DTYPE is cutlass.Float16 else x2_lo_to_f32_bf16
+        x2_hi_to_f32 = x2_hi_to_f32_f16 if DTYPE is cutlass.Float16 else x2_hi_to_f32_bf16
         rX = cute.make_rmem_tensor(MXFP8_BLOCK_SCALING_SIZE, DTYPE)
         # Do a vectorized load from SMEM to RMEM and unswizzle in the meantime.
         cute.autovec_copy(tXsX, rX)
@@ -1900,12 +1886,8 @@ class MXFP8QuantizeSpecializedRowwiseKernel(MXFP8QuantizeKernelBase):
             dtype=DTYPE,
         )
         abs_max_x2 = abs_max_x2_f16 if DTYPE is cutlass.Float16 else abs_max_x2_bf16
-        x2_lo_to_f32 = (
-            x2_lo_to_f32_f16 if DTYPE is cutlass.Float16 else x2_lo_to_f32_bf16
-        )
-        x2_hi_to_f32 = (
-            x2_hi_to_f32_f16 if DTYPE is cutlass.Float16 else x2_hi_to_f32_bf16
-        )
+        x2_lo_to_f32 = x2_lo_to_f32_f16 if DTYPE is cutlass.Float16 else x2_lo_to_f32_bf16
+        x2_hi_to_f32 = x2_hi_to_f32_f16 if DTYPE is cutlass.Float16 else x2_hi_to_f32_bf16
         mul_cvt4 = mul_f32x2_cvt_packed16x4_to_fp8x4(DTYPE, self.cfg.FP8_DTYPE)
         rX_i32 = cute.make_tensor(
             cute.recast_ptr(rX_thread.iterator, dtype=Int32),
