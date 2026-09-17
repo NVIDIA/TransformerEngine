@@ -57,9 +57,7 @@ def _get_localization_context(device_index: int):
             GreenContext.create(locality_domain_id=domain, device_id=device_index)
             for domain in range(2)
         )
-        mempools = tuple(
-            LocalizedMemPool(domain, device=device_index) for domain in range(2)
-        )
+        mempools = tuple(LocalizedMemPool(domain, device=device_index) for domain in range(2))
         for pool in mempools:
             pool.alloc_in_order = True
         streams = tuple(green_context.Stream() for green_context in green_contexts)

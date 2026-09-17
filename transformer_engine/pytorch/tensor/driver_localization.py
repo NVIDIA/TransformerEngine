@@ -166,9 +166,7 @@ class DriverLocalityContext:
         self.cuda_streams = []
         self.streams = []
         device = torch.device("cuda", device_index)
-        for domain, resource in enumerate(
-            _split_sm_resources(self.cuda_device, self.num_domains)
-        ):
+        for domain, resource in enumerate(_split_sm_resources(self.cuda_device, self.num_domains)):
             error, descriptor = driver.cuDevResourceGenerateDesc([resource], 1)
             _check(error, f"cuDevResourceGenerateDesc(domain={domain})")
             error, green_context = driver.cuGreenCtxCreate(
