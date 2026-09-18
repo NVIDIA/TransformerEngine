@@ -9,8 +9,8 @@
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
+#include <cstring>
 #include <gtest/gtest.h>
-#include <string>
 
 #include <transformer_engine/cast.h>
 #include <transformer_engine/activation.h>
@@ -18,9 +18,8 @@
 #include "../test_common.h"
 #include "transformer_engine/transformer_engine.h"
 
-namespace test {
-
 using namespace transformer_engine;
+using namespace test;
 
 namespace {
 
@@ -360,6 +359,7 @@ void performTest_x1(const ProcessingMethod processing_method,
     cudaDeviceSynchronize();
     auto err = cudaGetLastError();
     ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
+
     compute_ref<InputType, OutputType>(processing_method,
                                        OP,
                                        rowwise,
@@ -535,6 +535,7 @@ void performTest_x2(const ProcessingMethod processing_method,
     cudaDeviceSynchronize();
     auto err = cudaGetLastError();
     ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
+
     compute_ref<InputType, OutputType>(processing_method,
                                        OP,
                                        true,
@@ -1062,6 +1063,7 @@ TEST_P(SwizzledScalesFusedCastMXFP8TestSuite, TestSwizzledCastMXFP8) {
 
     cudaDeviceSynchronize();
     ASSERT_EQ(cudaGetLastError(), cudaSuccess) << "swizzled-scale nvte_quantize failed";
+
     // Reference construction: nvte_swizzle_scaling_factors accepts tensors with
     // exactly one scale direction, so we build the rowwise and colwise references
     // independently. Each is a single-direction linear cast followed by a
@@ -1225,5 +1227,3 @@ INSTANTIATE_TEST_SUITE_P(
         std::make_tuple(std::vector<size_t>{1024, 1024}, DType::kFloat32, DType::kFloat8E4M3)
     ),
     swizzled_test_name_generator);
-
-}  // namespace test
