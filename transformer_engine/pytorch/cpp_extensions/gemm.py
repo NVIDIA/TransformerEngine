@@ -582,10 +582,12 @@ def _pytorch_grouped_gemm(A, B, out, *, layout, bias, bias_scale, accumulate, al
         raise NotImplementedError("PyTorch CUTLASS grouped GEMM is disabled.")
     if torch.cuda.get_device_capability() != (10, 0):
         raise NotImplementedError("PyTorch CUTLASS grouped GEMM requires SM100.")
-    if accumulate or alpha is not None or beta is not None:
-        raise NotImplementedError(
-            "PyTorch CUTLASS grouped GEMM does not support accumulation or explicit alpha/beta."
-        )
+    if accumulate:
+        raise NotImplementedError("PyTorch CUTLASS grouped GEMM does not support accumulation.")
+    if alpha is not None:
+        raise NotImplementedError("PyTorch CUTLASS grouped GEMM does not support explicit alpha.")
+    if beta is not None:
+        raise NotImplementedError("PyTorch CUTLASS grouped GEMM does not support explicit beta.")
 
     inputs = A if isinstance(A, list) else [A]
     outputs = out if isinstance(out, list) else [out]
@@ -595,16 +597,25 @@ def _pytorch_grouped_gemm(A, B, out, *, layout, bias, bias_scale, accumulate, al
             raise NotImplementedError("Quantized inputs and outputs are not supported.")
         if isinstance(tensor, GroupedTensorStorage):
             tensor = tensor.rowwise_data
-        if tensor is None or tensor.dtype != torch.bfloat16:
-            raise NotImplementedError("Inputs and outputs must have BF16 rowwise data.")
-    if not B.all_same_last_dim() or (layout != "NT" and isinstance(out, list)):
-        raise NotImplementedError("Unsupported B shapes or discrete output layout.")
+        if tensor is None:
+            raise NotImplementedError("Inputs and outputs must have rowwise data.")
+        if tensor.dtype != torch.bfloat16:
+            raise NotImplementedError("Inputs and outputs must have BF16 dtype.")
+    if not B.all_same_last_dim():
+        raise NotImplementedError("B tensors must have the same last dimension.")
+    if layout != "NT" and isinstance(out, list):
+        raise NotImplementedError("List outputs require the NT layout.")
     if isinstance(A, list):
         shapes = [tensor.shape[-1:] if layout == "NT" else tensor.shape for tensor in A]
         if any(shape != shapes[0] for shape in shapes):
             raise NotImplementedError("Discrete inputs must have matching shapes.")
-    elif not A.all_same_last_dim() or (layout != "NT" and not A.all_same_shape()):
-        raise NotImplementedError("Unsupported grouped input shapes.")
+    else:
+        if not A.all_same_last_dim():
+            raise NotImplementedError("A tensors must have the same last dimension.")
+        if layout != "NT" and not A.all_same_shape():
+            raise NotImplementedError(
+                "Grouped A tensors must have matching shapes for TN/NN layouts."
+            )
     # Older PyTorch builds use CUTLASS directly and do not expose this preference.
     if getattr(torch.backends.cuda.matmul, "prefer_cublaslt_grouped_gemm", False):
         raise RuntimeError(
