@@ -59,7 +59,10 @@ from transformer_engine.pytorch.attention.custom_ops import (
     fa_prepare_fwd,
 )
 from transformer_engine.pytorch.jit import no_torch_dynamo
-from transformer_engine.pytorch.dynamo.custom_op import TensorOrQuantized, register_custom_op
+from transformer_engine.pytorch.dynamo.custom_op import (
+    TensorOrQuantized,
+    register_custom_op_with_autograd,
+)
 from transformer_engine.pytorch.dynamo.tensor_spec import TensorSpec
 from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
     attn_forward_func_with_cp,
@@ -2444,7 +2447,7 @@ def _fused_attn_backward_fake(
 
 
 # Custom op used under ``torch.compile``.
-_fused_attn_op = register_custom_op(
+_fused_attn_op = register_custom_op_with_autograd(
     op_name="fused_attn",
     input_tensors_for_grad=[
         "q",
