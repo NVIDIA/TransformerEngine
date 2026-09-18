@@ -121,18 +121,30 @@ def compute_max_blockwise_dynamic_range(tensor, stat_config):
 
 
 @torch.compile
-def compute_variance(variances, numels, sums):
-    """Welford algorithm is used for numerically stable distributed variance computation."""
-    mean = torch.sum(sums) / torch.sum(numels)
+def compute_variance(variances, numels, sums, unbiased=True):
+    """Parallel (Chan/Welford) combination of per-group variances.
+
+    `unbiased` describes both the stored per-group variances and the result:
+    True -> sample (divide by N-1), False -> population (divide by N). The combine
+    is done on M2 (sum of squared deviations), which is convention-agnostic, so
+    both biased and unbiased inputs combine exactly across groups with different
+    means. The stored per-group variances must use the same `unbiased` convention
+    as this call - M2 is reconstructed as variance * (n-1) when unbiased else
+    variance * n, so mixing conventions silently corrupts the result.
+    """
+    total = torch.sum(numels)
+    mean = torch.sum(sums) / total
     means = sums / numels
-    var = torch.sum(numels * (variances - torch.pow((means - mean), 2))) / torch.sum(numels)
-    return var
+    # Reconstruct each group's M2, recombine, then re-divide once at the end.
+    per_group_div = (numels - 1) if unbiased else numels
+    m2 = torch.sum(variances * per_group_div + numels * torch.pow(means - mean, 2))
+    return m2 / ((total - 1) if unbiased else total)
 
 
 @torch.compile
-def compute_std(variances, numels, sums):
-    """Computates standard deviation."""
-    return torch.sqrt(compute_variance(variances, numels, sums))
+def compute_std(variances, numels, sums, unbiased=True):
+    """Computes standard deviation; see `compute_variance` for `unbiased`."""
+    return torch.sqrt(compute_variance(variances, numels, sums, unbiased=unbiased))
 
 
 def compute_fp8_delayed_scaling_overflows_num(tensor, quantized_tensor):
@@ -335,11 +347,13 @@ def add_underflows_stats(recipe_name: str, columnwise: bool = False):
 
 
 def add_scale_inv_stats(recipe_name: str, columnwise: bool = False):
-    """Register *both* scale-inv min and max stats for a given recipe.
+    """Register scale-inv min/max/std stats for a given recipe.
 
-    This replaces the earlier separate helpers and avoids duplicated boilerplate.
+    The std uses Welford's algorithm to combine partial variances across
+    microbatches/ranks, so helper buffers for variance/numel/sum are also
+    registered. Population variance (unbiased=False) is used so single-element
+    scale_inv tensors (delayed/current scaling) yield std=0 rather than NaN.
     """
-    # Determine which attribute holds the scale-inverse tensor.
 
     def get_scale_inv(quantized_tensor, columnwise):
         if hasattr(quantized_tensor, "_scale_inv"):
@@ -348,48 +362,86 @@ def add_scale_inv_stats(recipe_name: str, columnwise: bool = False):
             return getattr(quantized_tensor, "_columnwise_scale_inv")
         return getattr(quantized_tensor, "_rowwise_scale_inv")
 
-    def nonzero_min(scale_inv):
+    def _prefix():
+        return f"{recipe_name}{'_' if recipe_name != '' else ''}"
+
+    def real_scale_inv(quantized_tensor, columnwise):
         # MXFP8/NVFP4 quantizers round the scale_inv shape up to multiples of
-        # 128 along one axis and 4 along the other and fill the extra slots
-        # with zeros (via torch.nn.functional.pad with the default value=0),
-        # so a plain .min() always returns 0 for shapes that needed padding.
-        # A real scale_inv entry is never 0: compute_scale_from_amax returns
-        # scale=1.0 for all-zero blocks and clamps the inf case to a finite
-        # fallback, so zeros uniquely identify padding and masking them out
-        # gives the true minimum. The empty-after-mask branch is a safety
-        # net for the (in practice unreachable) all-zero tensor.
-        nz = scale_inv[scale_inv != 0]
-        if nz.numel() == 0:
-            return scale_inv.new_zeros(())
-        return nz.min()
+        # 128 along one axis and 4 along the other and fill the extra slots with
+        # zeros (via torch.nn.functional.pad with the default value=0). A real
+        # scale_inv entry is never 0: compute_scale_from_amax returns scale=1.0
+        # for all-zero blocks and clamps the inf case to a finite fallback, so
+        # zeros uniquely identify padding. Every scale_inv stat masks them out;
+        # otherwise the padding deflates the mean and shows up as spurious spread
+        # (min/std) and inflated counts (numel), which would also corrupt the
+        # numel-weighted variance reduction across microbatches/ranks.
+        scale_inv = get_scale_inv(quantized_tensor, columnwise).float()
+        return scale_inv[scale_inv != 0]
+
+    def scale_inv_min(quantized_tensor, columnwise):
+        nz = real_scale_inv(quantized_tensor, columnwise)
+        # Empty only for the (in practice unreachable) all-zero tensor.
+        return nz.min() if nz.numel() > 0 else nz.new_zeros(())
 
     columnwise_suffix = "_columnwise" if columnwise else ""
-    # Prepare stat names.
-    stat_name_min = (
-        f"{recipe_name}{'_' if recipe_name != '' else ''}scale_inv_min{columnwise_suffix}"
-    )
-    stat_name_max = (
-        f"{recipe_name}{'_' if recipe_name != '' else ''}scale_inv_max{columnwise_suffix}"
-    )
+    stat_name_min = f"{_prefix()}scale_inv_min{columnwise_suffix}"
+    stat_name_max = f"{_prefix()}scale_inv_max{columnwise_suffix}"
+    stat_name_std = f"{_prefix()}scale_inv_std{columnwise_suffix}"
+    stat_name_var = f"{_prefix()}scale_inv_variance{columnwise_suffix}"
+    stat_name_numel = f"{_prefix()}scale_inv_numel{columnwise_suffix}"
+    stat_name_sum = f"{_prefix()}scale_inv_sum{columnwise_suffix}"
 
     # Assign indices in `stats_to_num` (order matters — keep insertion order deterministic).
-    stats_to_num[stat_name_min] = len(stats_to_num)
-    stats_to_num[stat_name_max] = len(stats_to_num)
+    for name in (
+        stat_name_min,
+        stat_name_max,
+        stat_name_std,
+        stat_name_var,
+        stat_name_numel,
+        stat_name_sum,
+    ):
+        stats_to_num[name] = len(stats_to_num)
 
     # Capture the attribute name inside lambdas via default args to avoid late binding.
     STATS[stat_name_min] = (
-        lambda x, aux_dict, _col=columnwise: nonzero_min(
-            get_scale_inv(aux_dict[recipe_name], _col)
-        ),
+        lambda x, aux_dict, _col=columnwise: scale_inv_min(aux_dict[recipe_name], _col),
         lambda buffers, _sn=stat_name_min: min(_get(buffers, _sn)),
     )
     STATS[stat_name_max] = (
         lambda x, aux_dict, _col=columnwise: get_scale_inv(aux_dict[recipe_name], _col).max(),
         lambda buffers, _sn=stat_name_max: max(_get(buffers, _sn)),
     )
+    STATS[stat_name_var] = (
+        lambda x, aux_dict, _col=columnwise: torch.var(
+            real_scale_inv(aux_dict[recipe_name], _col), unbiased=False
+        ),
+        lambda buffers, _sv=stat_name_var, _sn=stat_name_numel, _ss=stat_name_sum: compute_variance(
+            _get(buffers, _sv), _get(buffers, _sn), _get(buffers, _ss), unbiased=False
+        ),
+    )
+    STATS[stat_name_numel] = (
+        lambda x, aux_dict, _col=columnwise: real_scale_inv(aux_dict[recipe_name], _col).numel(),
+        lambda buffers, _sn=stat_name_numel: sum(_get(buffers, _sn)),
+    )
+    STATS[stat_name_sum] = (
+        lambda x, aux_dict, _col=columnwise: real_scale_inv(aux_dict[recipe_name], _col).sum(),
+        lambda buffers, _ss=stat_name_sum: sum(_get(buffers, _ss)),
+    )
+    STATS[stat_name_std] = (
+        lambda x, aux_dict, _col=columnwise: torch.std(
+            real_scale_inv(aux_dict[recipe_name], _col), unbiased=False
+        ),
+        lambda buffers, _sv=stat_name_var, _sn=stat_name_numel, _ss=stat_name_sum: compute_std(
+            _get(buffers, _sv), _get(buffers, _sn), _get(buffers, _ss), unbiased=False
+        ),
+    )
 
     DEPENDENCIES[stat_name_min] = {stat_name_min}
     DEPENDENCIES[stat_name_max] = {stat_name_max}
+    DEPENDENCIES[stat_name_numel] = {stat_name_numel}
+    DEPENDENCIES[stat_name_sum] = {stat_name_sum}
+    DEPENDENCIES[stat_name_var] = {stat_name_var, stat_name_numel, stat_name_sum}
+    DEPENDENCIES[stat_name_std] = {stat_name_var, stat_name_numel, stat_name_sum}
 
 
 def add_mse_stats(recipe_name: str, columnwise: bool = False):
@@ -522,3 +574,5 @@ def add_nvfp4_underflows_stats():
 # Register NVFP4 stats
 add_nvfp4_underflows_stats()
 add_mse_stats("nvfp4")  # Reuse existing MSE function
+for _columnwise in [True, False]:
+    add_scale_inv_stats("nvfp4", _columnwise)
