@@ -7,8 +7,6 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_UTIL_CUTEDSL_UTILS_H_
 #define TRANSFORMER_ENGINE_COMMON_UTIL_CUTEDSL_UTILS_H_
 
-#include <type_traits>
-
 #include "math.h"
 
 namespace transformer_engine {
@@ -65,33 +63,32 @@ inline const char *activation_to_str(Activation act) {
 
 template <typename ParamOP, float (*OP)(float, const ParamOP &)>
 constexpr Activation activation_func_to_enum() {
-  if constexpr (OP == nullptr) {
-    return Activation::kNone;
-  } else if constexpr (std::is_same_v<ParamOP, Empty>) {
-    if constexpr (OP == relu<float, float>) {
-      return Activation::kReLU;
-    } else if constexpr (OP == gelu<float, float>) {
-      return Activation::kGeLU;
-    } else if constexpr (OP == silu<float, float>) {
-      return Activation::kSiLU;
-    } else if constexpr (OP == qgelu<float, float>) {
-      return Activation::kQGeLU;
-    } else if constexpr (OP == srelu<float, float>) {
-      return Activation::kSReLU;
-    } else if constexpr (OP == drelu<float, float>) {
-      return Activation::kDReLU;
-    } else if constexpr (OP == dgelu<float, float>) {
-      return Activation::kDGeLU;
-    } else if constexpr (OP == dsilu<float, float>) {
-      return Activation::kDSiLU;
-    } else if constexpr (OP == dqgelu<float, float>) {
-      return Activation::kDQGeLU;
-    } else if constexpr (OP == dsrelu<float, float>) {
-      return Activation::kDSReLU;
-    }
-  }
   return Activation::kUnsupported;
 }
+
+#define NVTE_SPECIALIZE_CUTEDSL_ACTIVATION_FUNC_TO_ENUM(OP, ACTIVATION)     \
+  template <>                                                               \
+  constexpr Activation activation_func_to_enum<Empty, OP<float, float>>() { \
+    return Activation::ACTIVATION;                                          \
+  }
+
+template <>
+constexpr Activation activation_func_to_enum<Empty, nullptr>() {
+  return Activation::kNone;
+}
+
+NVTE_SPECIALIZE_CUTEDSL_ACTIVATION_FUNC_TO_ENUM(relu, kReLU)
+NVTE_SPECIALIZE_CUTEDSL_ACTIVATION_FUNC_TO_ENUM(gelu, kGeLU)
+NVTE_SPECIALIZE_CUTEDSL_ACTIVATION_FUNC_TO_ENUM(silu, kSiLU)
+NVTE_SPECIALIZE_CUTEDSL_ACTIVATION_FUNC_TO_ENUM(qgelu, kQGeLU)
+NVTE_SPECIALIZE_CUTEDSL_ACTIVATION_FUNC_TO_ENUM(srelu, kSReLU)
+NVTE_SPECIALIZE_CUTEDSL_ACTIVATION_FUNC_TO_ENUM(drelu, kDReLU)
+NVTE_SPECIALIZE_CUTEDSL_ACTIVATION_FUNC_TO_ENUM(dgelu, kDGeLU)
+NVTE_SPECIALIZE_CUTEDSL_ACTIVATION_FUNC_TO_ENUM(dsilu, kDSiLU)
+NVTE_SPECIALIZE_CUTEDSL_ACTIVATION_FUNC_TO_ENUM(dqgelu, kDQGeLU)
+NVTE_SPECIALIZE_CUTEDSL_ACTIVATION_FUNC_TO_ENUM(dsrelu, kDSReLU)
+
+#undef NVTE_SPECIALIZE_CUTEDSL_ACTIVATION_FUNC_TO_ENUM
 
 }  // namespace cutedsl_backend
 }  // namespace transformer_engine
