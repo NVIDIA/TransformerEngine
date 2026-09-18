@@ -38,12 +38,7 @@ def cuda_available() -> bool:
 
 
 def synchronize(output: Any = None) -> None:
-    """Block until all device work, including ``output``, has completed.
-
-    ``output`` is duck-typed for host-async frameworks; the device synchronization
-    covers eager ones. Without cuda-python that synchronization is skipped, so timings
-    taken around this call are not trustworthy.
-    """
+    """Block until all device work, including ``output``, has completed."""
     _block_until_ready(output)
     runtime = _runtime()
     if runtime is None:
@@ -127,11 +122,7 @@ def device_metadata() -> dict[str, Any]:
 
 
 def device_architecture() -> str | None:
-    """Return the current device's arch as ``sm_<major*10+minor>``.
-
-    Never raises: any failure yields None, which callers must treat as "unknown" rather
-    than as a proven architecture mismatch.
-    """
+    """Return the current device's arch as ``sm_<major*10+minor>``, or None when unknown."""
     runtime = _runtime()
     if runtime is None:
         return None
@@ -149,13 +140,9 @@ def device_architecture() -> str | None:
 
 @functools.lru_cache(maxsize=None)
 def build_architectures() -> dict[str, Any]:
-    """Return the SASS architectures embedded in ``libtransformer_engine.so``.
+    """Return the SASS architectures embedded in the loaded ``libtransformer_engine.so``.
 
-    Reads the loaded shared object with ``cuobjdump`` rather than trusting
-    ``NVTE_CUDA_ARCHS``, so it also holds for libraries built elsewhere. Cached because
-    ``cuobjdump`` takes seconds. Never raises: any failure yields
-    ``{"available": False, "reason": ...}``, which callers must treat as "unknown"
-    rather than as a proven architecture mismatch.
+    Yields ``{"available": False, "reason": ...}`` when they cannot be read.
     """
     from transformer_engine.common import _get_shared_object_file
 

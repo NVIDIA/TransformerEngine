@@ -67,22 +67,17 @@ def _require_plugin() -> None:
     )
 
 
-#: Budget for a whole multi-rank launch -- child startup, import, rendezvous, every
-#: iteration and teardown -- when a Case does not set one. Deliberately generous: waiting
-#: on a slow test costs time, cutting a valid one short costs a debugging session.
+#: Default budget for a whole multi-rank launch: child startup, import, rendezvous,
+#: every iteration and teardown.
 DEFAULT_TIMEOUT_S = 1800.0
 
 
 @dataclass
 class Case:
-    """What a benchmarkable test returns: ``setup`` builds an opaque state object,
-    ``evaluate`` is the Transformer Engine path, and ``reference`` is the comparison
-    target in correctness mode and a timed baseline in benchmark mode.
+    """The callables a benchmarkable test hands the harness, and the metadata it records.
 
-    One ``state`` threads through every callable. ``dist_init`` is handed this rank, the
-    world size and the coordinator address and port, and seeds the state with whatever it
-    builds from them; ``setup`` fills in the test data; ``dist_clean`` tears the
-    communicator down. ``state`` is ``None`` throughout for a serial Case.
+    One opaque ``state`` threads through every callable: ``dist_init`` creates it for a
+    multi-rank Case, ``setup`` fills in the test data, and it is ``None`` for a serial one.
     """
 
     setup: Callable[[Any], Any]
@@ -92,8 +87,7 @@ class Case:
     reset: Callable[[Any], None] | None = None
     dist_init: Callable[[int, int, str, int], Any] | None = None
     dist_clean: Callable[[Any], None] | None = None
-    #: Must block the host, not merely order the stream: a stream-ordered barrier folds
-    #: rank skew back into the measured interval.
+    #: Must block the host, not merely order the stream.
     barrier: Callable[[Any], None] | None = None
     num_gpus: int = 1
     timeout: float = DEFAULT_TIMEOUT_S
@@ -105,9 +99,7 @@ class Case:
     # Setting `reset` implies not batchable: ``runner.py`` pins inner_iterations to 1.
 
     def __post_init__(self) -> None:
-        """Validate the plugin is present to run this Case, that ``reference`` and
-        ``verify`` are set together, and that a multi-rank Case can form and align a
-        process group."""
+        """Validate the Case's fields."""
         _require_plugin()
         if self.reference is None and self.verify is not None:
             raise ValueError("Case defines verify but no reference to compare against.")

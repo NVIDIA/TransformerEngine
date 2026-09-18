@@ -25,8 +25,7 @@ def plugin_active() -> bool:
 
 
 def normalize_argnames(argnames: Any) -> str:
-    """Return a canonical comma-joined key with no spaces, so a declaration and a
-    ``pytest.mark.parametrize`` mark written with different spacing still match."""
+    """Return a canonical comma-joined key with no spaces."""
     if isinstance(argnames, str):
         names = [name.strip() for name in argnames.split(",") if name.strip()]
     else:

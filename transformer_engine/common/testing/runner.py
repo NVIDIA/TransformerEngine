@@ -15,10 +15,7 @@ from .timing import TIMING_METHOD, WallClockSampler, timing_stats
 
 
 def _framework_for(pyfuncitem) -> str:
-    """Infer the framework label for the report from the test's location under tests/.
-
-    This is a reporting label only; nothing in the execution path branches on it.
-    """
+    """Infer the report's framework label from the test's location under tests/."""
     path = str(pyfuncitem.path)
     if f"{os.sep}jax{os.sep}" in path or path.endswith(f"{os.sep}jax"):
         return "jax"
@@ -129,11 +126,7 @@ def _time_variant(
     precondition_verified,
     state,
 ):
-    """Warm up, then time ``function``, with no verification inside the timed loop.
-
-    A ``CaseSkip`` from ``setup()`` here means ``setup()`` is non-deterministic, which
-    the ``Case`` contract forbids, so it is left to propagate rather than caught.
-    """
+    """Warm up, then time ``function``, and return its record alongside the state."""
     record = _base_record(pyfuncitem, variant, precondition_verified)
     state = case.setup(state)
     for _ in range(settings["warmup"]):
@@ -226,12 +219,6 @@ def _base_record(pyfuncitem, variant, precondition_verified):
 
 
 def case_id_for(pyfuncitem, params) -> str:
-    """Build the stable identity for a benchmark record.
-
-    Keyed on module, test function and sorted named axis values rather than the
-    positional pytest node ID, which would rename cases when an axis is reordered.
-    ``params`` is already rendered by the caller; re-applying ``axis_value`` here is safe
-    only because it is idempotent on the primitives that rendering produces.
-    """
+    """Build a record's stable identity from its module, test function and sorted axes."""
     axes = ".".join(f"{name}{axis_value(params[name])}" for name in sorted(params))
     return f"{pyfuncitem.module.__name__}.{pyfuncitem.originalname}.{axes}"

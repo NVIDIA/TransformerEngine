@@ -173,7 +173,7 @@ def _guard_benchmark_collection(config, kept, suppressed, unmatched) -> None:
 
 
 def _zero_points_message(suppressed, unmatched) -> str:
-    """Explain a zero-point benchmark session without blaming the wrong thing."""
+    """Explain why a benchmark session collected zero points."""
     if suppressed:
         detail = (
             f"all {suppressed} Case-bearing test(s) here carry @benchmark.skip or a true"
@@ -233,12 +233,9 @@ def benchmark_settings(config) -> dict[str, Any]:
 
 @pytest.hookimpl(hookwrapper=True)
 def pytest_generate_tests(metafunc):
-    """Swap benchmark values into a test's existing parametrize marks.
+    """Swap benchmark values into a test's existing parametrize marks, then restore them.
 
-    Substituting in place preserves the parametrization's positional structure, so ``pytest.param``
-    ids and coupled argnames keep working. Class-level declarations are picked up via
-    ``metafunc.cls``; function-level entries win. Mutates ``own_markers``, not public pytest API
-    (pytest is pinned to 8.2.1).
+    Class-level declarations are picked up via ``metafunc.cls``; function-level entries win.
     """
     saved = []
     # Eligibility is checked before anything else: a suppressed or undeclared sibling
@@ -277,9 +274,7 @@ def pytest_generate_tests(metafunc):
 
 
 def _check_own_declarations_matched(metafunc, own, saved) -> None:
-    """Fail loudly when an axis declared on this test itself matches no parametrize mark:
-    a typo would otherwise silently benchmark the correctness values. An axis inherited from
-    a class is best-effort, since a sibling method need not parametrize it."""
+    """Fail when an axis declared on this test itself matches no parametrize mark."""
     matched = {normalize_argnames(mark.args[0]) for _, _, mark in saved}
     missing = sorted(set(own) - matched)
     if not missing:
@@ -333,12 +328,7 @@ def pytest_pyfunc_call(pyfuncitem):
 
 
 def _check_rank_is_running_its_own_test(pyfuncitem) -> None:
-    """Fail loudly when a rank's environment does not belong to the test it is running.
-
-    A launch marker left over from an earlier run -- a stale export, a command line copied
-    out of a log -- would otherwise make the parent believe it is a child and silently run
-    one rank where the test asked for several.
-    """
+    """Fail when a rank's launch environment does not belong to the test it is running."""
     current = launch()
     if current is not None and current.node_id != pyfuncitem.nodeid:
         raise pytest.UsageError(
@@ -400,8 +390,7 @@ def _dispose_of_non_case(pyfuncitem, result):
 
 
 def pytest_sessionfinish(session, exitstatus):  # pylint: disable=unused-argument
-    """Write benchmark artifacts once the session completes. Guarded against a second
-    registered copy of the plugin, since this hook is not ``firstresult``."""
+    """Write benchmark artifacts once the session completes."""
     config = session.config
     if getattr(config, "_benchmarkable_report_written", False):
         return

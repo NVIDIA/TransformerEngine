@@ -79,11 +79,7 @@ def build_report(
 
 
 def collect_environment(command: list[str] | None = None) -> dict[str, Any]:
-    """Collect stable environment metadata without copying arbitrary environment variables.
-
-    Framework versions are read from already-imported modules; never import one here.
-    ``build`` holds the architectures embedded in the loaded ``libtransformer_engine.so``.
-    """
+    """Collect the environment metadata recorded with a run."""
     return {
         "python": {
             "version": sys.version,
@@ -116,10 +112,7 @@ def merge_worker_reports(
     selection: dict[str, Any],
     sharding: dict[str, Any],
 ) -> dict[str, Path]:
-    """Merge worker reports into the standard top-level artifact set.
-
-    A worker report that cannot be read is recorded in the output rather than raising.
-    """
+    """Merge worker reports into the standard top-level artifact set."""
     merged_records: list[dict[str, Any]] = []
     worker_summaries = []
     unreadable_reports = []
@@ -158,12 +151,7 @@ def merge_worker_reports(
 
 
 def record_key(record: dict[str, Any]) -> str:
-    """Return a deterministic key for comparing benchmark records.
-
-    ``params`` goes through ``axis_value``. Unlike the record writers, this ``json.dumps``
-    has no ``default=str``, so a value it did not normalize raises here instead of becoming
-    a key that differs every run.
-    """
+    """Return a deterministic key for comparing benchmark records."""
     key = {
         "case_id": record.get("case_id"),
         "framework": record.get("framework"),

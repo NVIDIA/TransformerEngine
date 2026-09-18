@@ -1,12 +1,7 @@
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-"""Row-parallel te.Linear as a benchmarkable distributed Case.
-
-The harness launches the ranks: this file only says how many it wants and what each one
-does. ``dist_init`` builds the process group, ``setup`` allocates against it, and
-``evaluate`` runs the forward whose all-reduce is the collective being measured.
-"""
+"""Row-parallel te.Linear as a benchmarkable distributed Case."""
 
 import datetime
 import math
@@ -51,16 +46,12 @@ def test_row_parallel_linear(hidden_size, dtype):
         return {"pg": dist.group.WORLD, "rank": rank, "world": world}
 
     def dist_clean(state):
-        """Release the process group. The harness calls this once, on success or failure.
-
-        It does not run when the harness has to stop a rank outright; process death
-        releases the communicator in that case.
-        """
+        """Release the process group."""
         if dist.is_initialized():
             dist.destroy_process_group()
 
     def barrier(state):
-        """Align ranks before a timed sample, outside the measured interval."""
+        """Block the host until every rank arrives."""
         dist.barrier(group=state["pg"])
 
     def setup(state):

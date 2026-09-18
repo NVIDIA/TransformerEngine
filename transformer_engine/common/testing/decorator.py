@@ -37,20 +37,13 @@ def _apply(holder, *names, **kwargs):
 
 
 class _Benchmark:
-    """Implements the ``benchmark`` decorator.
-
-    An instance, not a module-level function carrying attributes, so ``skip`` and
-    ``skipif`` are real bound methods that ``help()``, ``inspect`` and pylint resolve.
-    """
+    """Implements the ``benchmark`` decorator."""
 
     def __call__(self, argnames, values):
-        """Mark a test Case-bearing and benchmark-eligible, and declare the values one axis
-        takes in benchmark mode.
+        """Declare the values one axis takes in benchmark mode.
 
-        ``argnames`` accepts the same forms as ``pytest.mark.parametrize``. The values are
-        substituted into an existing ``parametrize`` mark on the test, its class, or its
-        module; undeclared axes keep their correctness values. Applies to a function, a
-        method, or a class.
+        ``argnames`` accepts the same forms as ``pytest.mark.parametrize``. Applies to a
+        function, a method, or a class.
         """
 
         def decorator(holder):
@@ -70,10 +63,7 @@ class _Benchmark:
         return decorator if holder is None else decorator(holder)
 
     def skipif(self, condition, *, reason=""):
-        """Mark a test Case-bearing, and suppress benchmarking when ``condition`` is true.
-
-        A false condition declares nothing: skip and skipif only ever subtract benchmarking.
-        """
+        """Mark a test Case-bearing, and suppress benchmarking when ``condition`` is true."""
 
         def decorator(target):
             target = _apply(target, CASE_MARKER)

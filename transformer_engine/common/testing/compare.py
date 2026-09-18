@@ -215,11 +215,7 @@ def _hardware_compatible(
     baseline_report: dict[str, Any],
     current_report: dict[str, Any],
 ) -> tuple[bool, str | None]:
-    """Return whether the two reports were recorded on compatible hardware, plus a reason.
-
-    Missing device metadata on either side means compatibility cannot be established, and is
-    treated as incompatible rather than as a match.
-    """
+    """Return whether the two reports were recorded on compatible hardware, plus a reason."""
     baseline_device = _primary_device_identity(baseline_report)
     current_device = _primary_device_identity(current_report)
     if baseline_device is None and current_device is None:
@@ -252,10 +248,7 @@ def _hardware_compatible(
 
 
 def _primary_device_identity(report: dict[str, Any]) -> tuple[Any, ...] | None:
-    """Return the primary CUDA device's ``(name, compute_capability)``.
-
-    Returns ``None`` when the report carries no CUDA device metadata.
-    """
+    """Return the primary CUDA device's ``(name, compute_capability)``, or ``None``."""
     devices = report.get("environment", {}).get("devices", {}).get("cuda", {}).get("devices", [])
     if not devices:
         return None

@@ -23,9 +23,7 @@ _OUTPUT_TAIL_CHARS = 4000
 _POLL_INTERVAL_S = 0.05
 _KILL_GRACE_S = 10.0
 
-#: The one variable the harness owns. Its presence means "this process is a rank I
-#: spawned, for this node ID", which is what stops a child launching ranks of its own and
-#: what keeps an unrelated RANK in the environment from being read as one of ours.
+#: Set by the harness on each rank it spawns, to the node ID that rank must run.
 LAUNCH_ENV = "NVTE_BENCHMARK_DIST_LAUNCH"
 
 
@@ -54,12 +52,7 @@ def launch() -> Launch | None:
 
 
 def _primary_address() -> str:
-    """This host's outward-facing address, falling back to loopback on a closed box.
-
-    Opening a UDP socket reserves nothing and sends nothing; it only asks the routing
-    table which local address would be used, which ``gethostbyname`` gets wrong on hosts
-    whose hostname maps to 127.0.1.1.
-    """
+    """This host's outward-facing address, falling back to loopback."""
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
             probe.connect(("8.8.8.8", 80))
@@ -69,12 +62,7 @@ def _primary_address() -> str:
 
 
 def _free_port() -> int:
-    """A port the OS picks and has just confirmed free.
-
-    Binding to 0 and closing leaves a window before the ranks claim it, but any fixed
-    choice -- 29500 included -- collides outright with the previous config or with the
-    concurrent pytest session qa/L1_pytorch_distributed_unittest runs on other GPUs.
-    """
+    """A port the OS picks and has just confirmed free."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.bind(("", 0))
         return probe.getsockname()[1]
@@ -112,14 +100,7 @@ def _child_command(pyfuncitem, settings, report_dir) -> list[str]:
 
 
 def _child_env(parent_env, rank_index, world, endpoint, nodeid) -> dict[str, str]:
-    """Build a rank's environment as a copy, never by mutating the parent's.
-
-    Every launch variable is set rather than defaulted: an inherited value describes some
-    other launch, and inheriting RANK in particular would give every rank the same index.
-    A test needs none of these -- ``dist_init`` is handed the same facts as arguments --
-    but setting the names ``env://`` reads means a rank can rendezvous the way it would
-    under torchrun.
-    """
+    """Build a rank's environment: the launch marker plus the standard ``env://`` names."""
     address, port = endpoint
     env = dict(parent_env)
     env[LAUNCH_ENV] = nodeid
@@ -140,12 +121,7 @@ def _harvest(procs, results) -> None:
 
 
 def _stop_remaining(procs, results) -> None:
-    """Stop ranks still running: ask, then insist.
-
-    ``terminate`` is a kill, not an unwind -- CPython installs a handler for SIGINT only,
-    so a rank does not run its ``finally`` blocks. Process death is what releases the
-    communicator and the device.
-    """
+    """Stop ranks still running: ``terminate``, then ``kill`` after a grace period."""
     pending = [i for i in range(len(procs)) if i not in results]
     for index in pending:
         procs[index].terminate()
@@ -160,11 +136,8 @@ def _stop_remaining(procs, results) -> None:
 
 
 def _supervise(procs, results, timeout) -> bool:
-    """Wait for every rank, stopping the rest once one fails or the budget expires.
-
-    Returns whether the budget expired. The parent runs no collective of its own, and
-    writes rank output to files rather than pipes, so it has nothing to block on.
-    """
+    """Wait for every rank, stopping the rest once one fails or the budget expires, and
+    return whether the budget expired."""
     deadline = time.monotonic() + timeout
     timed_out = False
     while len(results) < len(procs):
@@ -180,7 +153,7 @@ def _supervise(procs, results, timeout) -> bool:
 
 
 def _rank_output(log_dir, index) -> str:
-    """One rank's captured streams, tail-bounded so a cascade stays readable."""
+    """One rank's captured streams, bounded to the last ``_OUTPUT_TAIL_CHARS`` of each."""
     text = []
     for stream in ("stdout", "stderr"):
         path = log_dir / f"rank{index}.{stream}"
@@ -191,12 +164,7 @@ def _rank_output(log_dir, index) -> str:
 
 
 def _report_outcomes(results, log_dir, timed_out, timeout) -> None:
-    """Raise if the launch did not succeed, with the output of the ranks that explain it.
-
-    A rank the harness stopped exits -SIGTERM/-SIGKILL. Counting those as failures would
-    blame the survivors for the one rank that actually failed, and bury its output under
-    theirs.
-    """
+    """Raise if the launch did not succeed, with the output of the ranks that explain it."""
     stopped = {-signal.SIGTERM, -signal.SIGKILL}
     failed = [i for i, rc in sorted(results.items()) if rc != 0 and rc not in stopped]
     if timed_out:
@@ -213,7 +181,7 @@ def _report_outcomes(results, log_dir, timed_out, timeout) -> None:
 
 
 def _collect_records(report_root) -> list:
-    """Read every rank's report. Records already carry rank, so they stay distinguishable."""
+    """Read the benchmark records every rank wrote."""
     records = []
     for report in sorted(report_root.glob("rank*/benchmark_report.json")):
         with report.open("r", encoding="utf-8") as handle:
@@ -224,8 +192,7 @@ def _collect_records(report_root) -> list:
 def run_across_ranks(pyfuncitem, case, settings) -> list:
     """Run one test across ``case.num_gpus`` ranks and return their benchmark records.
 
-    Each rank is a full pytest session collecting exactly this node ID, so fixtures,
-    parametrization and Case construction work the way they do serially.
+    Each rank is a full pytest session collecting exactly this node ID.
     """
     with tempfile.TemporaryDirectory(prefix=f"nvte-benchmark-{os.getpid()}-") as workdir:
         work = pathlib.Path(workdir)
