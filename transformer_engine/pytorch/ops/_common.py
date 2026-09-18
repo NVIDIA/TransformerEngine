@@ -11,6 +11,12 @@ from typing import Optional
 import torch
 
 from transformer_engine_torch import FP8TensorMeta
+from ..ep import (
+    EpBuffer,
+    EpConfig,
+    get_ep_drop_on_overflow,
+    get_ep_group,
+)
 from ..torch_version import torch_version
 from ..quantization import FP8GlobalStateManager
 from ..quantized_tensor import QuantizedTensorStorage, Quantizer
@@ -41,6 +47,98 @@ def get_fused_normalization_quantizer(
     ):
         return quantizer
     return None
+
+
+def validate_buffer(
+    name: str,
+    buffer: Optional[torch.Tensor],
+    *,
+    shape: Optional[tuple[int, ...] | list[int]] = None,
+    dtype: Optional[torch.dtype] = None,
+    device: Optional[torch.device] = None,
+    contiguous: Optional[bool] = None,
+) -> Optional[torch.Tensor]:
+    """Validate requested buffer properties and return detached storage."""
+    if buffer is None:
+        return None
+    if shape is not None and tuple(buffer.shape) != tuple(shape):
+        raise ValueError(f"{name} shape {tuple(buffer.shape)} does not match {tuple(shape)}.")
+    if dtype is not None and buffer.dtype is not dtype:
+        raise TypeError(f"{name} must have dtype {dtype}, got {buffer.dtype}.")
+    if device is not None and buffer.device != device:
+        raise ValueError(f"{name} must be on {device}, got {buffer.device}.")
+    if contiguous is not None and buffer.is_contiguous() != contiguous:
+        requirement = "contiguous" if contiguous else "non-contiguous"
+        raise ValueError(f"{name} must be {requirement}.")
+    return buffer.detach()
+
+
+def validate_ep_buffer(
+    op_name: str,
+    expected_config: EpConfig,
+    buffer: object,
+) -> EpBuffer:
+    """Validate an operation-owned EP buffer against its immutable config. Needed by
+    MoeDispatch and MoeCombine basic ops which use NCCL EP."""
+    if not isinstance(buffer, EpBuffer):
+        raise TypeError(
+            f"{op_name} requires an EpBuffer passed to its constructor, "
+            f"got {type(buffer).__name__}."
+        )
+
+    mismatches = {
+        name: (getattr(buffer, name), getattr(expected_config, name))
+        for name in (
+            "top_k",
+            "hidden_dim",
+            "num_local_experts",
+            "max_tokens_per_rank",
+            "recv_capacity_per_rank",
+            "alignment",
+            "payload_dtype",
+            "zero_copy",
+        )
+        if getattr(buffer, name) != getattr(expected_config, name)
+    }
+    ep_group = get_ep_group()
+    if expected_config.ep_group is not ep_group:
+        mismatches["ep_group"] = (ep_group, expected_config.ep_group)
+    drop_on_overflow = get_ep_drop_on_overflow()
+    if expected_config.drop_on_overflow != drop_on_overflow:
+        mismatches["drop_on_overflow"] = (
+            drop_on_overflow,
+            expected_config.drop_on_overflow,
+        )
+    if mismatches:
+        details = ", ".join(
+            f"{name}={actual!r} (expected {expected!r})"
+            for name, (actual, expected) in mismatches.items()
+        )
+        raise ValueError(
+            f"{op_name} buffer config does not match its initialized config: {details}."
+        )
+    return buffer
+
+
+def validate_ep_comms_recipe(
+    op_name: str,
+    quantizer: Optional[Quantizer],
+    buffer_recipe: object,
+) -> None:
+    """Require the buffer recipe to match the Op's quantizer role."""
+    if isinstance(quantizer, MXFP8Quantizer):
+        from transformer_engine.common.recipe import MXFP8BlockScaling
+
+        if not isinstance(buffer_recipe, MXFP8BlockScaling):
+            raise ValueError(
+                f"{op_name} selected MXFP8 Comms from its quantizer role, but the "
+                "runtime EpBuffer does not have an MXFP8BlockScaling recipe."
+            )
+    elif buffer_recipe is not None:
+        raise ValueError(
+            f"{op_name} selected BF16 Comms from its quantizer role, but the "
+            f"runtime EpBuffer has recipe {type(buffer_recipe).__name__}."
+        )
 
 
 def validate_or_alloc_output(
