@@ -135,6 +135,7 @@ class _MoeEpResourceManager:
                 token_in_flag_batch=8,
                 group_hint=512,
                 reduce_topk_in_kernel=False,
+                dgrad_optimization="rolling"
             ),
             training_weight_storage_mode=(
                 moe_ep_api.MoeEpNativeWeightStorageMode.CONTIGUOUS
