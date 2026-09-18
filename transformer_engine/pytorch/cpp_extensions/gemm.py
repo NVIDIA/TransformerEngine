@@ -603,19 +603,11 @@ def _pytorch_grouped_gemm(A, B, out, *, layout, bias, bias_scale, accumulate, al
             raise NotImplementedError("Inputs and outputs must have BF16 dtype.")
     if not B.all_same_last_dim():
         raise NotImplementedError("B tensors must have the same last dimension.")
-    if layout != "NT" and isinstance(out, list):
-        raise NotImplementedError("List outputs require the NT layout.")
     if isinstance(A, list):
-        shapes = [tensor.shape[-1:] if layout == "NT" else tensor.shape for tensor in A]
-        if any(shape != shapes[0] for shape in shapes):
-            raise NotImplementedError("Discrete inputs must have matching shapes.")
-    else:
-        if not A.all_same_last_dim():
+        if any(tensor.shape[-1] != A[0].shape[-1] for tensor in A):
             raise NotImplementedError("A tensors must have the same last dimension.")
-        if layout != "NT" and not A.all_same_shape():
-            raise NotImplementedError(
-                "Grouped A tensors must have matching shapes for TN/NN layouts."
-            )
+    elif not A.all_same_last_dim():
+        raise NotImplementedError("A tensors must have the same last dimension.")
     # Older PyTorch builds use CUTLASS directly and do not expose this preference.
     if getattr(torch.backends.cuda.matmul, "prefer_cublaslt_grouped_gemm", False):
         raise RuntimeError(
@@ -630,17 +622,38 @@ def _pytorch_grouped_gemm(A, B, out, *, layout, bias, bias_scale, accumulate, al
     else:
         offsets = torch.cumsum(B.first_dims, dim=0, dtype=torch.int32)
 
-    # TE computes B @ A. PyTorch splits output rows for TN/NN, or the reduction
-    # dimension for NT, which produces one output matrix per group.
-    lhs = B.rowwise_data.view(-1, B.get_common_last_dim())
-    rhs = torch.cat(A) if isinstance(A, list) else A.rowwise_data.view(-1, A.get_common_last_dim())
-    if layout == "NT":
-        lhs = lhs.T
-    else:
-        rhs = rhs.view(groups, -1, rhs.size(-1))
-        if layout == "TN":
-            rhs = rhs.mT
-    result = torch._grouped_mm(lhs, rhs, offs=offsets)
+    # The layout letters describe A, then B: T means transpose, N means unchanged.
+    # TE multiplies B by A after applying those transposes:
+    #   TN: B @ A.T (forward)
+    #   NN: B @ A   (input gradient)
+    #   NT: B.T @ A (weight gradient)
+    a = torch.cat(A) if isinstance(A, list) else A.rowwise_data.view(-1, A.get_common_last_dim())
+    b = B.rowwise_data.view(-1, B.get_common_last_dim())
+    match layout:
+        case "TN":
+            if isinstance(out, list):
+                raise NotImplementedError("TN requires a packed output buffer.")
+            if isinstance(A, list):
+                if any(tensor.shape != A[0].shape for tensor in A):
+                    raise NotImplementedError("TN requires A tensors with matching shapes.")
+            elif not A.all_same_shape():
+                raise NotImplementedError("TN requires A tensors with matching shapes.")
+            a = a.view(groups, -1, a.size(-1))
+            result = torch._grouped_mm(b, a.mT, offs=offsets)
+        case "NN":
+            if isinstance(out, list):
+                raise NotImplementedError("NN requires a packed output buffer.")
+            if isinstance(A, list):
+                if any(tensor.shape != A[0].shape for tensor in A):
+                    raise NotImplementedError("NN requires A tensors with matching shapes.")
+            elif not A.all_same_shape():
+                raise NotImplementedError("NN requires A tensors with matching shapes.")
+            a = a.view(groups, -1, a.size(-1))
+            result = torch._grouped_mm(b, a, offs=offsets)
+        case "NT":
+            result = torch._grouped_mm(b.T, a, offs=offsets)
+        case _:
+            raise NotImplementedError(f"Unsupported GEMM layout: {layout}.")
 
     if layout != "NT":
         rows = torch.arange(result.size(0), device=result.device)
