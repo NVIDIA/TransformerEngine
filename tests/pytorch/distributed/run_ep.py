@@ -1526,9 +1526,7 @@ class TestMoeEpSequential(_EpTestCase):
                 self.assertEqual(fc2.wgrad_store.context.qsize(), 1)
                 if accumulate_into_main_grad:
                     for op in (fc1, fc2):
-                        self.assertTrue(
-                            torch.all(op.weight.main_grad == main_grad_sentinel).item()
-                        )
+                        self.assertTrue(torch.all(op.weight.main_grad == main_grad_sentinel).item())
             fc2.backward_dw()
             fc1.backward_dw()
             if fused:
