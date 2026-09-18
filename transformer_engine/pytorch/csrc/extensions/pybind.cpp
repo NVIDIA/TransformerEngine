@@ -117,6 +117,7 @@ void init_extension() {
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   NVTE_DECLARE_COMMON_PYBIND11_HANDLES(m)
+  transformer_engine::pytorch::init_vmm_activation_extension(m);
   m.def("quantize", transformer_engine::pytorch::quantize, py::arg("tensor"), py::arg("quantizer"),
         py::arg("output") = py::none(), py::arg("noop") = py::none());
   m.def("dequantize", &transformer_engine::pytorch::dequantize, "Dequantize", py::arg("input"),
