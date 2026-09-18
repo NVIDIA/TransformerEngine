@@ -38,9 +38,7 @@ if(CUDNN_INCLUDE_DIR)
     else()
         set(CUDNN_VERSION
             "${CUDNN_VERSION_MAJOR}.${CUDNN_VERSION_MINOR}.${CUDNN_VERSION_PATCH}")
-        # Keep in sync with kMinCudnnVersion in transformer_engine/common/cudnn_min_version.h. That
-        # static_assert is the backstop for integrated builds, which return early above and
-        # never reach this check.
+        # Keep in sync with kMinCudnnVersion in transformer_engine/common/cudnn_min_version.h.
         if(CUDNN_VERSION VERSION_LESS "9.12.0")
             message(FATAL_ERROR
                     "Transformer Engine requires cuDNN 9.12.0 or later, but found ${CUDNN_VERSION} "

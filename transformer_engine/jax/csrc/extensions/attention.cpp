@@ -980,7 +980,7 @@ ScoreModGraphPtr GetScoreModGraph(cudaStream_t stream, Dictionary &attrs) {
   const auto serialized_graph = get_attr_value<std::string_view>(attrs, "serialized_graph");
   std::vector<uint8_t> serialized_data(serialized_graph.begin(), serialized_graph.end());
 
-  auto handle = cudnnExecutionPlanManager::Instance().GetHandle();
+  auto handle = nvte_get_cudnn_handle();
   NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
 
   auto graph = std::make_shared<cudnn_frontend::graph::Graph>();
@@ -1034,7 +1034,7 @@ Error_Type ExecuteScoreModGraph(cudaStream_t stream, Dictionary &attrs,
     variant_pack.emplace(scalar_uids[i], scalar_storage[i].data.data());
   }
 
-  auto handle = cudnnExecutionPlanManager::Instance().GetHandle();
+  auto handle = nvte_get_cudnn_handle();
   NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
   auto status = graph->execute(handle, variant_pack, workspace);
   NVTE_CHECK(status.is_good(),

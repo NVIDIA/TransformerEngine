@@ -32,4 +32,10 @@ using cudnnExecutionPlanManager = detail::HandleManager<cudnnHandle_t, detail::C
 
 }  // namespace transformer_engine
 
+// Handle owned by the common library, shared with the framework extensions. Declared extern "C" at
+// global scope so the nvte_* rule in libtransformer_engine.version exports it: the extensions
+// cannot instantiate cudnnExecutionPlanManager themselves, since HandleManager depends on symbols
+// that are hidden from the shared object.
+extern "C" cudnnHandle_t nvte_get_cudnn_handle();
+
 #endif  //  TRANSFORMER_ENGINE_CUDNN_UTILS_H_
