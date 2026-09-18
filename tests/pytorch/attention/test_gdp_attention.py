@@ -261,8 +261,8 @@ def _inputs(
 @pytest.mark.parametrize("num_householder", [1, 2, 3], ids=["n1", "n2", "n3"])
 @pytest.mark.parametrize(
     ("qk_dim", "v_dim"),
-    [(64, 64), (128, 128), (64, 128)],
-    ids=["qk64_v64", "qk128_v128", "qk64_v128"],
+    [(64, 64), (128, 128), (64, 128), (128, 64)],
+    ids=["qk64_v64", "qk128_v128", "qk64_v128", "qk128_v64"],
 )
 def test_gdp_thd_forward_final_state_and_backward(
     checkpoint_core_attention, num_householder, qk_dim, v_dim

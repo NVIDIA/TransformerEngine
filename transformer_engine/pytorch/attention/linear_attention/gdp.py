@@ -290,9 +290,10 @@ class GatedDeltaProductAttention(LinearAttentionBase):
 
     Gated DeltaProduct applies ``num_householder`` beta-gated Householder
     updates per token, with one scalar decay per token applied before them.
-    ``num_householder=1`` reduces to Gated DeltaNet. K, V and ``beta`` therefore
-    carry ``num_householder`` sub-token rows per token, passed as an explicit
-    axis just after the token dimensions. The cuDNN frontend serves GDP on
+    With ``num_householder=1``, the GDP recurrence is mathematically equivalent
+    to GDN under equivalent gate settings. K, V and ``beta`` therefore carry
+    ``num_householder`` sub-token rows per token, passed as an explicit axis
+    just after the token dimensions. The cuDNN frontend serves GDP on
     Blackwell+ (SM100/SM103/SM107) only.
 
     This module is **experimental** and subject to change.
