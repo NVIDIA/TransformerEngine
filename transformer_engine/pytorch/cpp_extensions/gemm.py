@@ -586,13 +586,12 @@ def _pytorch_grouped_gemm(A, B, out, *, layout, bias, bias_scale, accumulate, al
     inputs = A if isinstance(A, list) else [A]
     outputs = out if isinstance(out, list) else [out]
     for tensor in [B, *inputs, *outputs]:
+        # Quantized wrappers can report a logical BF16 dtype.
+        if isinstance(tensor, QuantizedTensorStorage):
+            return False
         if isinstance(tensor, GroupedTensorStorage):
             tensor = tensor.rowwise_data
-        if (
-            tensor is None
-            or isinstance(tensor, QuantizedTensorStorage)
-            or tensor.dtype != torch.bfloat16
-        ):
+        if tensor is None or tensor.dtype != torch.bfloat16:
             return False
     if not B.all_same_last_dim() or (layout != "NT" and isinstance(out, list)):
         return False
@@ -602,6 +601,7 @@ def _pytorch_grouped_gemm(A, B, out, *, layout, bias, bias_scale, accumulate, al
             return False
     elif not A.all_same_last_dim() or (layout != "NT" and not A.all_same_shape()):
         return False
+    # Older PyTorch builds use CUTLASS directly and do not expose this preference.
     if getattr(torch.backends.cuda.matmul, "prefer_cublaslt_grouped_gemm", False):
         raise RuntimeError(
             "Set torch.backends.cuda.matmul.prefer_cublaslt_grouped_gemm = False "
@@ -626,7 +626,8 @@ def _pytorch_grouped_gemm(A, B, out, *, layout, bias, bias_scale, accumulate, al
     if bias is not None:
         bias_data = bias.rowwise_data.view(groups, 1, -1).float()
         if rows is not None:
-            group_ids = torch.bucketize(rows, offsets, right=True).clamp_max(groups - 1)
+            # Use only inter-expert boundaries; the output mask handles unused capacity.
+            group_ids = torch.bucketize(rows, offsets[:-1], right=True)
             bias_data = bias_data[group_ids, 0]
         if bias_scale is not None:
             bias_data = bias_data * bias_scale[:, None]
