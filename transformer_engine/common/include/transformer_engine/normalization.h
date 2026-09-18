@@ -27,11 +27,14 @@ extern "C" {
  * Calling this function with workspace set to an empty tensor will not perform the operation,
  * but instead set the shape and type of the workspace tensor to the required values.
  *
- *  \param[in]     x                   Input tensor of shape [N, H].
+ *  N is the product of the input dimensions preceding H. Inputs and outputs
+ *  retain their logical shape; normalization is over the last dimension.
+ *
+ *  \param[in]     x                   Input tensor of shape [..., H].
  *  \param[in]     gamma               Gamma tensor of shape [H].
  *  \param[in]     beta                Beta tensor of shape [H].
  *  \param[in]     epsilon             Value added to denominator for numerical stability.
- *  \param[in,out] z                   Output tensor of shape [N, H].
+ *  \param[in,out] z                   Output tensor of shape [..., H].
  *  \param[out]    mu                  Mean of the input calculated over the last dimension.
  *                                     Shape: [N].
  *  \param[out]    rsigma              Inverse of the variance of the input calculated over
@@ -58,14 +61,14 @@ void nvte_layernorm_fwd(const NVTETensor x, const NVTETensor gamma, const NVTETe
  * Calling this function with workspace set to an empty tensor will not perform the operation,
  * but instead set the shape and type of the workspace tensor to the required values.
  *
- *  \param[in]     dz                  Incoming gradient tensor of shape [N, H].
- *  \param[in]     x                   Forward input tensor of shape [N, H].
+ *  \param[in]     dz                  Incoming gradient tensor of shape [..., H].
+ *  \param[in]     x                   Forward input tensor of shape [..., H].
  *  \param[in]     mu                  Mean of the input calculated over the last dimension.
  *                                     Shape: [N].
  *  \param[in]     rsigma              Inverse of the variance of the input calculated over
  *                                     the last dimension. Shape: [N].
  *  \param[in]     gamma               Gamma tensor of shape [H].
- *  \param[out]    dx                  Output gradient of shape [N, H].
+ *  \param[out]    dx                  Output gradient of shape [..., H].
  *  \param[out]    dgamma              Gradient for gamma tensor of shape [H].
  *  \param[out]    dbeta               Gradient for beta tensor of shape [H].
  *  \param[out]    workspace           Workspace tensor.
@@ -93,10 +96,13 @@ void nvte_layernorm_bwd(const NVTETensor dz, const NVTETensor x, const NVTETenso
  * Calling this function with workspace set to an empty tensor will not perform the operation,
  * but instead set the shape and type of the workspace tensor to the required values.
  *
- *  \param[in]     x                   Input tensor of shape [N, H].
+ *  N is the product of the input dimensions preceding H. Inputs and outputs
+ *  retain their logical shape; normalization is over the last dimension.
+ *
+ *  \param[in]     x                   Input tensor of shape [..., H].
  *  \param[in]     gamma               Gamma tensor of shape [H].
  *  \param[in]     epsilon             Value added to denominator for numerical stability.
- *  \param[in,out] z                   Output tensor of shape [N, H].
+ *  \param[in,out] z                   Output tensor of shape [..., H].
  *  \param[out]    rsigma              Reciprocal of the root mean square of the input
  *                                     calculated over the last dimension. Shape: [N].
  *  \param[out]    workspace           Workspace tensor.
@@ -123,12 +129,12 @@ void nvte_rmsnorm_fwd(const NVTETensor x, const NVTETensor gamma, const float ep
  * Calling this function with workspace set to an empty tensor will not perform the operation,
  * but instead set the shape and type of the workspace tensor to the required values.
  *
- *  \param[in]     dz                  Incoming gradient tensor of shape [N, H].
- *  \param[in]     x                   Forward input tensor of shape [N, H].
+ *  \param[in]     dz                  Incoming gradient tensor of shape [..., H].
+ *  \param[in]     x                   Forward input tensor of shape [..., H].
  *  \param[in]     rsigma              Reciprocal of the root mean square of the input
  *                                     calculated over the last dimension. Shape: [N].
  *  \param[in]     gamma               Gamma tensor of shape [H].
- *  \param[out]    dx                  Output gradient of shape [N, H].
+ *  \param[out]    dx                  Output gradient of shape [..., H].
  *  \param[out]    dgamma              Gradient for gamma tensor of shape [H].
  *  \param[out]    workspace           Workspace tensor.
  *  \param[in]     multiprocessorCount Number of SMs in the device.
@@ -145,13 +151,13 @@ void nvte_rmsnorm_bwd(const NVTETensor dz, const NVTETensor x, const NVTETensor 
  * Calling this function with workspace set to an empty tensor will not perform the operation,
  * but instead set the shape and type of the workspace tensor to the required values.
  *
- *  \param[in]     dz                  Incoming gradient tensor of shape [N, H].
- *  \param[in]     x                   Forward input tensor of shape [N, H].
- *  \param[in]     add                 Additional tensor to add to output gradient [N, H].
+ *  \param[in]     dz                  Incoming gradient tensor of shape [..., H].
+ *  \param[in]     x                   Forward input tensor of shape [..., H].
+ *  \param[in]     add                 Additional tensor to add to output gradient [..., H].
  *  \param[in]     rsigma              Reciprocal of the root mean square of the input
  *                                     calculated over the last dimension. Shape: [N].
  *  \param[in]     gamma               Gamma tensor of shape [H].
- *  \param[out]    dx                  Output gradient of shape [N, H].
+ *  \param[out]    dx                  Output gradient of shape [..., H].
  *  \param[out]    dgamma              Gradient for gamma tensor of shape [H].
  *  \param[out]    workspace           Workspace tensor.
  *  \param[in]     multiprocessorCount Number of SMs in the device.
