@@ -164,7 +164,21 @@ class VMMRowSplitAllocator:
                     self._allocation_properties(domain),
                     0,
                 )
-                _check_cuda(result[0], f"cuMemCreate(domain={domain})")
+                try:
+                    _check_cuda(result[0], f"cuMemCreate(domain={domain})")
+                except RuntimeError as exc:
+                    free_bytes, total_device_bytes = torch.cuda.mem_get_info(self.device_index)
+                    tracked_vmm_bytes = sum(
+                        _VMM_RANGES.get(self.device_index, {}).values()
+                    )
+                    raise RuntimeError(
+                        f"{exc}; requested={half_bytes} bytes for shape={shape}, dtype={dtype}; "
+                        f"device_free={free_bytes}/{total_device_bytes} bytes; "
+                        f"torch_allocated={torch.cuda.memory_allocated(self.device_index)} bytes; "
+                        f"torch_reserved={torch.cuda.memory_reserved(self.device_index)} bytes; "
+                        f"tracked_vmm_total={tracked_vmm_bytes} bytes "
+                        f"(approximately {tracked_vmm_bytes // 2} bytes per domain)"
+                    ) from exc
                 handle = result[1]
                 handles.append(handle)
                 _check_cuda(
