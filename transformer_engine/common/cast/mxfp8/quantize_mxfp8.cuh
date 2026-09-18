@@ -798,7 +798,7 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
               // either test falls through to the staged kernels below.
               const bool register_resident_supported =
                   (transformer_engine::cuda::sm_arch() >= 100) &&
-                  (reinterpret_cast<uintptr_t>(input.data.dptr) % 32 == 0);
+                  is_aligned_ptr(input.data.dptr, 32);
 
               // Specialized cast-only kernels do not consume the device noop flag.
               // Preserve cached outputs by keeping noop-aware calls on the generic path.
