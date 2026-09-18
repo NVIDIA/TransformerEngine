@@ -17,6 +17,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import com
 from transformer_engine.pytorch import DType
 from test_attention_with_cp import (
     model_configs_flash_attn,
+    model_configs_frost_attn,
     model_configs_fused_attn,
 )
 from transformer_engine.pytorch import (
@@ -273,6 +274,14 @@ def run_dpa_with_cp(
             config = copy.deepcopy(model_configs_fused_attn[model])
         else:
             assert False, f"{model=} is not a known FusedAttention CP config!"
+    if kernel_backend == "FrostAttention":
+        # Leave NVTE_FLASH_ATTN and NVTE_FUSED_ATTN at 0: FROST is the only backend that serves
+        # head_dim > 256, so get_attention_backend selects it on its own.
+        os.environ["NVTE_FROST_ATTN"] = "1"
+        if model in model_configs_frost_attn:
+            config = copy.deepcopy(model_configs_frost_attn[model])
+        else:
+            assert False, f"{model=} is not a known FrostAttention CP config!"
     assert config.attn_mask_type in [
         "causal",
         "no_mask",
@@ -593,6 +602,19 @@ def run_dpa_with_cp(
             pad_between_seqs=pad_between_seqs,
             fp8_output=fp8_mha,
         )
+        if kernel_backend == "FrostAttention":
+            # Assert the backend actually used, not just the one requested. FROST is currently
+            # the only selectable backend for these configs -- flash and fused are env-gated off
+            # and CP disables unfused -- so a silent substitution is impossible today and this
+            # would pass by construction. It is here so it stops passing if that stops being
+            # true, rather than quietly testing some other kernel.
+            from transformer_engine.pytorch.attention.dot_product_attention.dot_product_attention import (  # pylint: disable=import-outside-toplevel
+                _attention_backends,
+            )
+
+            assert _attention_backends[
+                "use_frost_attention"
+            ], "expected FrostAttention to be selected, got %s" % (_attention_backends,)
         if config.return_max_logit:
             out_, max_logit_ = out_
         if is_training:

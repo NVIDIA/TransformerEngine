@@ -481,6 +481,8 @@ def get_attention_backend(
     available_backends : List[bool]
         All available backends that could support the provided input. A list of Booleans
         in the form of [use_flash_attention, use_fused_attention, use_unfused_attention].
+        FrostAttention is deliberately not a member: the list's length is relied on by
+        existing three-way unpacks. Use the `use_frost_attention` return value instead.
     """
     # NOTE: As part of refactoring attention.py, populating the _attention_backends cache in attention
     # is no longer performed at the end of get_attention_backend(), but the responsibility of doing so
@@ -613,6 +615,7 @@ def get_attention_backend(
     flash_attention_backend = None
     use_fused_attention = int(os.environ.get("NVTE_FUSED_ATTN", "1"))
     use_unfused_attention = int(os.environ.get("NVTE_UNFUSED_ATTN", "1"))
+    use_frost_attention = int(os.environ.get("NVTE_FROST_ATTN", "1"))
     if not use_flash_attention_2 and FlashAttentionUtils.is_installed:
         logger.debug("Disabling FlashAttention 2 due to NVTE_FLASH_ATTN=0 or NVTE_FLASH_ATTN_V2=0")
     if not use_flash_attention_3 and FlashAttentionUtils.v3_is_installed:
@@ -1863,6 +1866,175 @@ def get_attention_backend(
                 ),
             )
             FlashAttentionUtils.warning_printed = True
+    # cuDNN FROST (CuTe-DSL SDPA in cuDNN Frontend >= 1.29.0) is the only backend that serves
+    # symmetric head_dim in (256, 512] with context parallelism on SM100/SM103. Every other option
+    # stops short: FA2/FA3 cap at 256, FA4 is disabled at symmetric 512 above, the C++ cuDNN fused
+    # path is refused a graph by cuDNN above 256, and UnfusedDotProductAttention supports 512 but
+    # not context parallelism. Without this, Gemma-4 global layers with CP > 1 select no backend at
+    # all.
+    if use_frost_attention:
+        # Local import: frost_attention pulls in cudnn lazily, so this stays cheap and keeps
+        # TE importable on systems without cudnn-frontend installed.
+        from .frost_attention import (  # pylint: disable=import-outside-toplevel
+            is_frost_attention_supported,
+        )
+
+        frost_supported, frost_reason = is_frost_attention_supported(
+            head_dim_qk=head_dim_qk,
+            head_dim_v=head_dim_v,
+            qkv_dtype=qkv_dtype,
+            attn_mask_type=attn_mask_type,
+            dropout=attention_dropout,
+            attn_bias_type=core_attention_bias_type,
+            window_size=window_size,
+        )
+        if not frost_supported:
+            logger.debug("Disabling FrostAttention: %s", frost_reason)
+            use_frost_attention = False
+    # Conservative guards for capabilities that exist in cuDNN but are not validated here yet.
+    # Each is a silent-wrong-answer risk rather than an error, so default to declining.
+    if use_frost_attention and softmax_type != "vanilla":
+        # CP asserts non-vanilla softmax needs FusedAttention; FROST implements plain softmax.
+        logger.debug("Disabling FrostAttention for softmax_type = %s", softmax_type)
+        use_frost_attention = False
+    if use_frost_attention and fp8:
+        logger.debug("Disabling FrostAttention for FP8")
+        use_frost_attention = False
+    if use_frost_attention and softcap is not None and softcap != 0.0:
+        logger.debug("Disabling FrostAttention for softcap")
+        use_frost_attention = False
+    if use_frost_attention and "thd" in qkv_layout:
+        # bshd and sbhd are served directly from their own strides; thd is packed/varlen, which
+        # needs cu_seqlens plumbing that is neither implemented nor validated here.
+        logger.debug("Disabling FrostAttention for qkv_layout = %s", qkv_layout)
+        use_frost_attention = False
+    if use_frost_attention and deterministic and is_training:
+        # Measured on B200 with cuDNN Frontend 1.29.0: requesting a deterministic backward is
+        # refused outright -- cudnnGraphNotSupportedError, no engine proposes a plan -- so unlike
+        # the C++ fused path there is nothing to opt into. Declining keeps
+        # NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 an honest guarantee instead of silently running the
+        # non-deterministic kernel. The graph still passes the flag, so this lifts on its own if
+        # cuDNN ships a deterministic d512 backward.
+        logger.debug("Disabling FrostAttention as its backward has no deterministic cuDNN plan")
+        use_frost_attention = False
+    if use_frost_attention and (has_score_mod or has_score_mod_bprop):
+        # The score_mod filter above disables flash, fused and unfused, and at head_dim 512 the
+        # fused path is unavailable anyway -- so without this FROST would be the sole survivor
+        # and would compute plain attention with the callback silently dropped. That includes the
+        # score_mod_bprop-without-score_mod case, which is meant to end in "no backend available".
+        logger.debug("Disabling FrostAttention for score_mod")
+        use_frost_attention = False
+    if use_frost_attention and attention_params.qkv_type is not torch.Tensor:
+        # Every other backend filters on the tensor class, not just the dtype: a quantized tensor
+        # can carry a nominal bf16 dtype outside an fp8 autocast, and the fp8 guard below keys on
+        # the autocast flag rather than the type.
+        #
+        # Read from attention_params, not the local: the fused-attention dtype spec rebinds
+        # qkv_type to an NVTE dtype enum well before this point, so the local compares unequal to
+        # torch.Tensor for every input and would decline FROST unconditionally.
+        logger.debug("Disabling FrostAttention for qkv_type = %s", attention_params.qkv_type)
+        use_frost_attention = False
+    if use_frost_attention and num_splits != 1:
+        # Declined for the same reason the fused and unfused paths are: silently ignoring it
+        # would change the computation the caller asked for.
+        logger.debug("Disabling FrostAttention for num_splits = %s", num_splits)
+        use_frost_attention = False
+    if use_frost_attention and checkpoint_core_attention:
+        # The backend FROST displaces at this head dim is unfused, which does honour activation
+        # recompute. Selecting FROST would silently remove it, which is a memory regression
+        # rather than a wrong answer, but not one the caller asked for.
+        logger.debug("Disabling FrostAttention for checkpoint_core_attention")
+        use_frost_attention = False
+    if use_frost_attention and cuda_graph:
+        # Plan lookup and lazy handle creation are host-side work on the first call, which is
+        # hazardous inside a capture. Not validated under capture, so decline rather than guess.
+        logger.debug("Disabling FrostAttention for CUDA graph capture")
+        use_frost_attention = False
+    if use_frost_attention and return_max_logit:
+        # FrostAttention returns the context layer alone, where UnfusedDotProductAttention returns
+        # (context, max_logit). Selecting it here would break the caller's unpack.
+        logger.debug("Disabling FrostAttention for max_logit")
+        use_frost_attention = False
+    if use_frost_attention and inference_params is not None:
+        # Unreachable today, since KV caching asserts a padding mask and FROST declines those.
+        # Explicit anyway: no page table reaches the backend, so a paged cache would be read raw.
+        logger.debug("Disabling FrostAttention for KV caching")
+        use_frost_attention = False
+    if (
+        use_frost_attention
+        and window_size is not None
+        and window_size[0] != -1
+        and "causal" not in attn_mask_type
+        and max_seqlen_q != max_seqlen_kv
+    ):
+        # FROST anchors the band from the mask type, so a windowed non-causal mask always lands
+        # top-left. TE's bottom_right_diagonal defaults to True and the C++ fused path honours it
+        # (fused_attn_f16_arbitrary_seqlen.cu picks the alignment from that flag), so for unequal
+        # q/kv lengths the two would disagree silently. Decline rather than guess the anchor.
+        logger.debug(
+            "Disabling FrostAttention for a windowed non-causal mask with max_seqlen_q != "
+            "max_seqlen_kv, where the diagonal anchor is ambiguous"
+        )
+        use_frost_attention = False
+    has_sliding_window = window_size is not None and (
+        window_size[0] != -1 or window_size[1] not in [-1, 0]
+    )
+    if (
+        use_frost_attention
+        and context_parallel
+        and has_sliding_window
+        and cp_comm_type in ["p2p", "a2a+p2p"]
+    ):
+        # Same rule FusedAttention carries, and for a reason visible in the ring itself: the p2p
+        # path hardcodes the per-step window to (-1, 0) or (-1, -1) at every kernel call, so a
+        # user window is discarded there for any backend. all_gather has real machinery for this
+        # (window_size_per_step, from get_kv_seq_info_after_all_gather) and a2a sees the whole
+        # sequence, so both can serve it.
+        logger.debug(
+            "Disabling FrostAttention as it does not support context parallelism with sliding"
+            " window attention and cp_comm_type = %s",
+            cp_comm_type,
+        )
+        use_frost_attention = False
+    if use_frost_attention and context_parallel:
+        # Same two restrictions FlashAttention and FusedAttention carry above. Both are about
+        # where the causal diagonal sits: the ring shards q and kv independently, so a mask whose
+        # position depends on the q/kv lengths lands differently per step. no_mask is unaffected
+        # and stays allowed even when the lengths differ.
+        if "bottom_right" in attn_mask_type:
+            logger.debug(
+                "Disabling FrostAttention as it does not support context parallelism with"
+                " causal_bottom_right masking"
+            )
+            use_frost_attention = False
+        elif "causal" in attn_mask_type and max_seqlen_q != max_seqlen_kv:
+            logger.debug(
+                "Disabling FrostAttention as it does not support context parallelism with causal"
+                " masking for cross-attention"
+            )
+            use_frost_attention = False
+    if (
+        use_frost_attention
+        and context_parallel
+        and cp_comm_type
+        not in (
+            "p2p",
+            "all_gather",
+            "a2a",
+            "a2a+p2p",
+        )
+    ):
+        # a2a+p2p needs no separate wiring: it dispatches to AttnFuncWithCPAndKVP2P, the same class
+        # as plain p2p, and its a2a stage is flash_attn_a2a_communicate -- a redistribution between
+        # sequence- and head-sharding that calls no attention kernel. The per-step calls are the
+        # ordinary p2p section calls with fewer heads per rank.
+        # Non-p2p types matter for Gemma-4: TE refuses sliding-window attention with p2p, and the
+        # model has sliding layers, so those layers need all_gather or a2a.
+        logger.debug(
+            "Disabling FrostAttention for context parallelism with cp_comm_type = %s", cp_comm_type
+        )
+        use_frost_attention = False
+
     # All available backends
     if use_flash_attention_2 and not FlashAttentionUtils.is_installed:
         use_flash_attention_2 = False
@@ -1881,7 +2053,7 @@ def get_attention_backend(
 
     logger.debug(
         "Available backends = {FlashAttention=%s%s, FusedAttention=%s%s,"
-        " UnfusedDotProductAttention=%s}",
+        " UnfusedDotProductAttention=%s, FrostAttention=%s}",
         bool(available_backends[0]),
         (f" ({str(flash_attention_backend)})" if flash_attention_backend is not None else ""),
         bool(available_backends[1]),
@@ -1891,6 +2063,10 @@ def get_attention_backend(
             else ""
         ),
         bool(available_backends[2]),
+        # Read from the local flag rather than available_backends, which excludes FROST by
+        # design. Without this the log reports every backend as unavailable and then selects
+        # FrostAttention a few lines later, which reads as a contradiction.
+        bool(use_frost_attention),
     )
 
     # Select FusedAttention for performance
@@ -1905,13 +2081,20 @@ def get_attention_backend(
     if use_flash_attention:
         use_fused_attention = False
         use_unfused_attention = False
+        use_frost_attention = False
     elif use_fused_attention:
+        use_unfused_attention = False
+        use_frost_attention = False
+    elif use_frost_attention:
+        # Preferred over the unfused path: same shape coverage, but fused and CP-capable.
         use_unfused_attention = False
     selected_backend = "NoBackend"
     if use_flash_attention:
         selected_backend = f"FlashAttention ({str(flash_attention_backend)})"
     elif use_fused_attention:
         selected_backend = f"FusedAttention (sub-backend {int(fused_attention_backend)})"
+    elif use_frost_attention:
+        selected_backend = "FrostAttention (cuDNN FROST)"
     elif use_unfused_attention:
         selected_backend = "UnfusedDotProductAttention"
     logger.debug("Selected backend = %s.", selected_backend)
@@ -1922,6 +2105,7 @@ def get_attention_backend(
         use_fused_attention,
         fused_attention_backend,
         use_unfused_attention,
+        use_frost_attention,
         available_backends,
     )
 
