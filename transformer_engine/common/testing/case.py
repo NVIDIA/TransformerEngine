@@ -79,9 +79,10 @@ class Case:
     ``evaluate`` is the Transformer Engine path, and ``reference`` is the comparison
     target in correctness mode and a timed baseline in benchmark mode.
 
-    One ``state`` threads through every callable. ``dist_init`` seeds it, ``setup``
-    fills in the test data, and ``dist_clean`` tears the communicator down. ``state`` is
-    ``None`` throughout for a serial Case.
+    One ``state`` threads through every callable. ``dist_init`` is handed this rank, the
+    world size and the coordinator address and port, and seeds the state with whatever it
+    builds from them; ``setup`` fills in the test data; ``dist_clean`` tears the
+    communicator down. ``state`` is ``None`` throughout for a serial Case.
     """
 
     setup: Callable[[Any], Any]
@@ -89,7 +90,7 @@ class Case:
     reference: Callable[[Any], Any] | None = None
     verify: Callable[[Any, Any], None] | None = None
     reset: Callable[[Any], None] | None = None
-    dist_init: Callable[[], Any] | None = None
+    dist_init: Callable[[int, int, str, int], Any] | None = None
     dist_clean: Callable[[Any], None] | None = None
     #: Must block the host, not merely order the stream: a stream-ordered barrier folds
     #: rank skew back into the measured interval.

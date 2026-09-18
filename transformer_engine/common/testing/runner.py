@@ -10,7 +10,7 @@ import time
 
 from .case import Case, axis_value
 from .device import synchronize
-from .distributed import rank as dist_rank, world_size as dist_world_size
+from .distributed import coordinator, rank as dist_rank, world_size as dist_world_size
 from .timing import TIMING_METHOD, WallClockSampler, timing_stats
 
 
@@ -25,9 +25,16 @@ def _framework_for(pyfuncitem) -> str:
     return "pytorch"
 
 
+def _dist_arguments() -> tuple[int, int, str, int]:
+    """What ``dist_init`` receives: this rank, the world size, and the coordinator."""
+    address, port = coordinator()
+    rank, world = dist_rank(), dist_world_size()
+    return (0 if rank is None else rank, 1 if world is None else world, address, port)
+
+
 def _run_correctness(case: Case) -> None:
     """Run one setup/evaluate/reference/verify cycle with no timing."""
-    state = case.dist_init() if case.dist_init is not None else None
+    state = case.dist_init(*_dist_arguments()) if case.dist_init is not None else None
     try:
         state = case.setup(state)
         actual = case.evaluate(state)
@@ -51,7 +58,7 @@ def _run_correctness(case: Case) -> None:
 
 def _run_benchmark_point(case, settings, pyfuncitem):
     """Gate once on correctness, then time evaluate and optionally reference."""
-    state = case.dist_init() if case.dist_init is not None else None
+    state = case.dist_init(*_dist_arguments()) if case.dist_init is not None else None
     try:
         state = case.setup(state)
 

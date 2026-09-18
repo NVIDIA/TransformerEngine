@@ -10,7 +10,6 @@ does. ``dist_init`` builds the process group, ``setup`` allocates against it, an
 
 import datetime
 import math
-import os
 
 import pytest
 import torch
@@ -18,7 +17,6 @@ import torch.distributed as dist
 
 import transformer_engine.pytorch as te
 from transformer_engine.common.testing import Case, CaseSkip, benchmark
-from transformer_engine.common.testing.distributed import RANK_ENV, RENDEZVOUS_ENV, WORLD_SIZE_ENV
 
 # Defined here rather than imported: tests/pytorch is not on sys.path from this
 # subdirectory, which is why the other distributed tests carry their own tolerances.
@@ -37,14 +35,12 @@ def test_row_parallel_linear(hidden_size, dtype):
     """Compare row-parallel te.Linear against the same matmul computed whole."""
     batch = 2048
 
-    def dist_init():
+    def dist_init(rank, world, coordinator_addr, coordinator_port):
         """Build the process group this Case's ranks share."""
-        rank = int(os.environ[RANK_ENV])
-        world = int(os.environ[WORLD_SIZE_ENV])
         torch.cuda.set_device(rank)
         dist.init_process_group(
             backend="nccl",
-            init_method=f"file://{os.environ[RENDEZVOUS_ENV]}",
+            init_method=f"tcp://{coordinator_addr}:{coordinator_port}",
             rank=rank,
             world_size=world,
             # The harness enforces its own budget too; this one lets a wedged collective

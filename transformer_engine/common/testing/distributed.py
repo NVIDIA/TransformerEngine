@@ -9,6 +9,7 @@ import json
 import os
 import pathlib
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -23,7 +24,12 @@ _KILL_GRACE_S = 10.0
 
 RANK_ENV = "NVTE_BENCHMARK_DIST_RANK"
 WORLD_SIZE_ENV = "NVTE_BENCHMARK_DIST_WORLD_SIZE"
-RENDEZVOUS_ENV = "NVTE_BENCHMARK_DIST_RENDEZVOUS"
+COORDINATOR_ADDR_ENV = "NVTE_BENCHMARK_DIST_COORDINATOR_ADDR"
+COORDINATOR_PORT_ENV = "NVTE_BENCHMARK_DIST_COORDINATOR_PORT"
+
+#: PyTorch's own default, so a test that ignores the arguments and rendezvous through
+#: ``env://`` still lands on the port it expects.
+DEFAULT_COORDINATOR_PORT = 29500
 NODE_ID_ENV = "NVTE_BENCHMARK_DIST_NODE_ID"
 
 
@@ -37,6 +43,47 @@ def world_size() -> int | None:
     """The launch's world size, or ``None`` when this is not a spawned rank."""
     value = os.environ.get(WORLD_SIZE_ENV)
     return None if value is None else int(value)
+
+
+def coordinator() -> tuple[str, int]:
+    """The rendezvous endpoint this launch agreed on, as ``(address, port)``."""
+    return (
+        os.environ.get(COORDINATOR_ADDR_ENV, "127.0.0.1"),
+        int(os.environ.get(COORDINATOR_PORT_ENV, DEFAULT_COORDINATOR_PORT)),
+    )
+
+
+def _primary_address() -> str:
+    """This host's outward-facing address, falling back to loopback on a closed box.
+
+    Opening a UDP socket reserves nothing and sends nothing; it only asks the routing
+    table which local address would be used, which ``gethostbyname`` gets wrong on hosts
+    whose hostname maps to 127.0.1.1.
+    """
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.connect(("8.8.8.8", 80))
+            return probe.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+
+
+def _free_port(preferred) -> int:
+    """``preferred`` if it can be bound right now, else a port the OS picks.
+
+    Sequential launches reuse the preferred port happily, but two pytest sessions running
+    concurrently -- which qa/L1_pytorch_distributed_unittest does on disjoint GPUs -- would
+    otherwise both reach for it and the second would fail to bind.
+    """
+    for candidate in (preferred, 0):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                probe.bind(("", candidate))
+                return probe.getsockname()[1]
+        except OSError:
+            continue
+    return preferred
 
 
 def _child_command(pyfuncitem, settings, report_dir) -> list[str]:
@@ -70,7 +117,7 @@ def _child_command(pyfuncitem, settings, report_dir) -> list[str]:
     return cmd
 
 
-def _child_env(parent_env, rank_index, world, rendezvous_path, nodeid) -> dict[str, str]:
+def _child_env(parent_env, rank_index, world, endpoint, nodeid) -> dict[str, str]:
     """Build a rank's environment as a copy, never by mutating the parent's.
 
     Mutating ``os.environ`` and unsetting afterwards leaks values into later launches in
@@ -79,7 +126,17 @@ def _child_env(parent_env, rank_index, world, rendezvous_path, nodeid) -> dict[s
     env = dict(parent_env)
     env[RANK_ENV] = str(rank_index)
     env[WORLD_SIZE_ENV] = str(world)
-    env[RENDEZVOUS_ENV] = str(rendezvous_path)
+    env[COORDINATOR_ADDR_ENV], port = endpoint[0], endpoint[1]
+    env[COORDINATOR_PORT_ENV] = str(port)
+    # The full set init_process_group(init_method="env://") reads, so a test can ignore
+    # the arguments and rendezvous the way it would under torchrun. setdefault, so a value
+    # the surrounding environment set deliberately still wins.
+    env.setdefault("MASTER_ADDR", endpoint[0])
+    env.setdefault("MASTER_PORT", str(port))
+    env.setdefault("RANK", str(rank_index))
+    env.setdefault("WORLD_SIZE", str(world))
+    env.setdefault("LOCAL_RANK", str(rank_index))
+    env.setdefault("LOCAL_WORLD_SIZE", str(world))
     env[NODE_ID_ENV] = nodeid
     return env
 
@@ -183,10 +240,9 @@ def run_across_ranks(pyfuncitem, case, settings) -> list:
         work = pathlib.Path(workdir)
         reports = work / "reports"
         reports.mkdir()
-        # Unique per launch, not merely per world size: two configs at the same size in
-        # one session would otherwise share a store, and a stale one surfaces as an NCCL
-        # bootstrap failure rather than a rendezvous error.
-        rendezvous_path = work / "rdzv"
+        # Checked free per launch: a port still held by the previous config, or by a
+        # concurrent pytest session, would fail to bind rather than rendezvous.
+        endpoint = (_primary_address(), _free_port(DEFAULT_COORDINATOR_PORT))
         procs, streams, results = [], [], {}
         try:
             for index in range(case.num_gpus):
@@ -199,7 +255,7 @@ def run_across_ranks(pyfuncitem, case, settings) -> list:
                     subprocess.Popen(  # pylint: disable=consider-using-with
                         _child_command(pyfuncitem, settings, reports / f"rank{index}"),
                         env=_child_env(
-                            os.environ, index, case.num_gpus, rendezvous_path, pyfuncitem.nodeid
+                            os.environ, index, case.num_gpus, endpoint, pyfuncitem.nodeid
                         ),
                         cwd=str(pyfuncitem.config.rootpath),
                         stdout=out,

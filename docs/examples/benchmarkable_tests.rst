@@ -98,26 +98,19 @@ A ``Case`` that sets ``num_gpus`` runs on that many ranks, and the harness launc
 The test says only how many ranks it wants and what each one does, so what gets recorded is
 the compute rather than the process startup and rendezvous in front of it.
 
-Multi-rank Cases add three callables. ``dist_init`` builds the process group and returns it
-as the state; every other callable receives that state, and ``setup`` must keep the
-distributed part of it intact when it adds the test data:
+Multi-rank Cases add three callables. ``dist_init`` receives this rank, the world size and
+the coordinator address and port, builds the process group, and returns it as the state;
+every other callable receives that state, and ``setup`` must keep the distributed part of it
+intact when it adds the test data:
 
 .. code-block:: python
 
-   from transformer_engine.common.testing.distributed import (
-       RANK_ENV,
-       RENDEZVOUS_ENV,
-       WORLD_SIZE_ENV,
-   )
-
    def test_row_parallel(hidden_size, dtype):
-       def dist_init():
-           rank = int(os.environ[RANK_ENV])
-           world = int(os.environ[WORLD_SIZE_ENV])
+       def dist_init(rank, world, coordinator_addr, coordinator_port):
            torch.cuda.set_device(rank)
            dist.init_process_group(
                backend="nccl",
-               init_method=f"file://{os.environ[RENDEZVOUS_ENV]}",
+               init_method=f"tcp://{coordinator_addr}:{coordinator_port}",
                rank=rank,
                world_size=world,
                timeout=datetime.timedelta(seconds=120),
@@ -140,6 +133,14 @@ distributed part of it intact when it adds the test data:
            dist_init=dist_init, dist_clean=dist_clean, barrier=barrier,
            num_gpus=min(4, torch.cuda.device_count()),
        )
+
+The coordinator is a TCP endpoint the harness picks per launch, checking the port is free
+first so a concurrent pytest session cannot collide with it. ``tcp://`` is what JAX's
+``jax.distributed.initialize`` needs, since it cannot rendezvous through a file. A test that
+prefers ``env://`` can ignore the arguments entirely: ``MASTER_ADDR``, ``MASTER_PORT``,
+``RANK``, ``WORLD_SIZE``, ``LOCAL_RANK`` and ``LOCAL_WORLD_SIZE`` describe the same launch,
+so the rendezvous matches what the test would see under ``torchrun``. A test that prefers
+``file://`` is free to choose its own path.
 
 ``dist_init`` and ``dist_clean`` run once per point, so the process group survives every
 timed sample; ``setup`` and ``reset`` run per variant and touch only the test data.
