@@ -570,37 +570,41 @@ def _get_grouped_cublas_workspace(device: int, layout: str) -> torch.Tensor:
 
 
 @torch.no_grad()
-def _pytorch_grouped_gemm(A, B, out, *, layout, bias, bias_scale, accumulate, alpha, beta) -> bool:
-    """Try CUTLASS for packed BF16 GEMMs; return False for TE's existing backend."""
+def _pytorch_grouped_gemm(A, B, out, *, layout, bias, bias_scale, accumulate, alpha, beta) -> None:
+    """Run CUTLASS for packed BF16 GEMMs, writing into ``out``.
+
+    Raises:
+        NotImplementedError: The configuration requires TE's existing backend.
+    """
     # PyTorch returns a BF16 product, so a separate add would lose the precision
     # of TE's fused accumulation. Leave that case on the existing backend.
-    if (
-        os.getenv("NVTE_USE_CUTLASS_GROUPED_GEMM", "0") != "1"
-        or torch.cuda.get_device_capability() != (10, 0)
-        or accumulate
-        or alpha is not None
-        or beta is not None
-    ):
-        return False
+    if os.getenv("NVTE_USE_CUTLASS_GROUPED_GEMM", "0") != "1":
+        raise NotImplementedError("PyTorch CUTLASS grouped GEMM is disabled.")
+    if torch.cuda.get_device_capability() != (10, 0):
+        raise NotImplementedError("PyTorch CUTLASS grouped GEMM requires SM100.")
+    if accumulate or alpha is not None or beta is not None:
+        raise NotImplementedError(
+            "PyTorch CUTLASS grouped GEMM does not support accumulation or explicit alpha/beta."
+        )
 
     inputs = A if isinstance(A, list) else [A]
     outputs = out if isinstance(out, list) else [out]
     for tensor in [B, *inputs, *outputs]:
         # Quantized wrappers can report a logical BF16 dtype.
         if isinstance(tensor, QuantizedTensorStorage):
-            return False
+            raise NotImplementedError("Quantized inputs and outputs are not supported.")
         if isinstance(tensor, GroupedTensorStorage):
             tensor = tensor.rowwise_data
         if tensor is None or tensor.dtype != torch.bfloat16:
-            return False
+            raise NotImplementedError("Inputs and outputs must have BF16 rowwise data.")
     if not B.all_same_last_dim() or (layout != "NT" and isinstance(out, list)):
-        return False
+        raise NotImplementedError("Unsupported B shapes or discrete output layout.")
     if isinstance(A, list):
         shapes = [tensor.shape[-1:] if layout == "NT" else tensor.shape for tensor in A]
         if any(shape != shapes[0] for shape in shapes):
-            return False
+            raise NotImplementedError("Discrete inputs must have matching shapes.")
     elif not A.all_same_last_dim() or (layout != "NT" and not A.all_same_shape()):
-        return False
+        raise NotImplementedError("Unsupported grouped input shapes.")
     # Older PyTorch builds use CUTLASS directly and do not expose this preference.
     if getattr(torch.backends.cuda.matmul, "prefer_cublaslt_grouped_gemm", False):
         raise RuntimeError(
@@ -642,7 +646,6 @@ def _pytorch_grouped_gemm(A, B, out, *, layout, bias, bias_scale, accumulate, al
         else:
             # Preserve caller-owned capacity beyond the final expert's rows.
             torch.where(rows[:, None] < offsets[-1], result, destination, out=destination)
-    return True
 
 
 def general_grouped_gemm_for_grouped_tensor(
@@ -717,17 +720,21 @@ def general_grouped_gemm_for_grouped_tensor(
     if bias_scale is not None and bias is None:
         raise ValueError("bias_scale requires bias to be provided.")
 
-    if _pytorch_grouped_gemm(
-        A,
-        B,
-        out,
-        layout=layout,
-        bias=bias,
-        bias_scale=bias_scale,
-        accumulate=accumulate,
-        alpha=alpha,
-        beta=beta,
-    ):
+    try:
+        _pytorch_grouped_gemm(
+            A,
+            B,
+            out,
+            layout=layout,
+            bias=bias,
+            bias_scale=bias_scale,
+            accumulate=accumulate,
+            alpha=alpha,
+            beta=beta,
+        )
+    except NotImplementedError:
+        pass  # Fall back to TE's existing backend for unsupported configurations.
+    else:
         return out
 
     num_tensors = B.num_tensors
