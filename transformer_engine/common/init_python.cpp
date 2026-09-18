@@ -14,9 +14,6 @@ namespace tvm_ffi_bridge {
 // Initialize the Python interpreter and import the CuTeDSL backend module. This is only compiled
 // with NVTE_WITH_CUTEDSL=ON in CMake and will be ignored otherwise
 bool initialize_python_cutedsl_backend() {
-  if (!transformer_engine::getenv<bool>("NVTE_ENABLE_CUTEDSL_BACKEND")) {
-    return false;
-  }
   const bool embedding_python = !Py_IsInitialized();
 
   // TE is loaded as a C++ library and it's not loaded from python. We need to launch an embedded
@@ -30,24 +27,13 @@ bool initialize_python_cutedsl_backend() {
           "CUDA backend as fallback.");
       return false;
     }
-    PyObject *path = PySys_GetObject("path");
-    PyObject *source_dir = PyUnicode_FromString(NVTE_SOURCE_DIR);
-    if (path == nullptr || source_dir == nullptr || PyList_Insert(path, 0, source_dir) != 0) {
-      Py_XDECREF(source_dir);
-      PyErr_Print();
-      NVTE_WARN(
-          "Failed to initialize CuTeDSL backend: failed to insert source directory into Python "
-          "path. Using CUDA backend as fallback.");
-      (void)PyEval_SaveThread();
-      return false;
-    }
-    Py_DECREF(source_dir);
-
     const bool initialized = PyRun_SimpleString(
                                  "import sys\n"
                                  "sys.modules['transformer_engine.pytorch'] = None\n"
                                  "sys.modules['transformer_engine.jax'] = None\n"
-                                 "import transformer_engine.common") == 0;
+                                 "import transformer_engine.common as te_common\n"
+                                 "te_common._load_tvm_ffi_library()\n"
+                                 "te_common._register_cutedsl_backends()") == 0;
     if (!initialized) {
       PyErr_Print();
       NVTE_WARN(
@@ -63,7 +49,10 @@ bool initialize_python_cutedsl_backend() {
   // Python is already running in this process but we don't know if it has imported TE or not,
   // so we import here just to be sure
   const PyGILState_STATE gil_state = PyGILState_Ensure();
-  const bool initialized = PyRun_SimpleString("import transformer_engine.common") == 0;
+  const bool initialized = PyRun_SimpleString(
+                               "import transformer_engine.common as te_common\n"
+                               "te_common._load_tvm_ffi_library()\n"
+                               "te_common._register_cutedsl_backends()") == 0;
   if (!initialized) {
     PyErr_Print();
     NVTE_WARN(
