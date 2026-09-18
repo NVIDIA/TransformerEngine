@@ -570,8 +570,19 @@ def _get_grouped_cublas_workspace(device: int, layout: str) -> torch.Tensor:
 
 
 @torch.no_grad()
-def _pytorch_grouped_gemm(A, B, out, *, layout, bias, bias_scale) -> bool:
+def _pytorch_grouped_gemm(A, B, out, *, layout, bias, bias_scale, accumulate, alpha, beta) -> bool:
     """Try CUTLASS for packed BF16 GEMMs; return False for TE's existing backend."""
+    # PyTorch returns a BF16 product, so a separate add would lose the precision
+    # of TE's fused accumulation. Leave that case on the existing backend.
+    if (
+        os.getenv("NVTE_USE_CUTLASS_GROUPED_GEMM", "0") != "1"
+        or torch.cuda.get_device_capability() != (10, 0)
+        or accumulate
+        or alpha is not None
+        or beta is not None
+    ):
+        return False
+
     inputs = A if isinstance(A, list) else [A]
     outputs = out if isinstance(out, list) else [out]
     for tensor in [B, *inputs, *outputs]:
@@ -705,16 +716,16 @@ def general_grouped_gemm_for_grouped_tensor(
     if bias_scale is not None and bias is None:
         raise ValueError("bias_scale requires bias to be provided.")
 
-    # PyTorch returns a BF16 product, so a separate add would lose the precision
-    # of TE's fused accumulation. Leave that case on the existing backend.
-    if (
-        os.getenv("NVTE_USE_CUTLASS_GROUPED_GEMM", "0") == "1"
-        and hasattr(torch, "_grouped_mm")
-        and torch.cuda.get_device_capability() == (10, 0)
-        and not accumulate
-        and alpha is None
-        and beta is None
-        and _pytorch_grouped_gemm(A, B, out, layout=layout, bias=bias, bias_scale=bias_scale)
+    if _pytorch_grouped_gemm(
+        A,
+        B,
+        out,
+        layout=layout,
+        bias=bias,
+        bias_scale=bias_scale,
+        accumulate=accumulate,
+        alpha=alpha,
+        beta=beta,
     ):
         return out
 
