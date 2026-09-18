@@ -4,11 +4,17 @@
 
 """Cross-backend bit-exactness tests for the CuTeDSL MXFP8 quantize kernels, driven from pytorch."""
 
+# Optional CuTeDSL dependencies must be checked before importing Transformer Engine.
+# pylint: disable=wrong-import-position
+
 import ctypes
 import os
 
 import pytest
 import torch
+
+tvm_ffi = pytest.importorskip("tvm_ffi")
+pytest.importorskip("cutlass")
 
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
@@ -16,8 +22,6 @@ import transformer_engine_torch as tex
 from transformer_engine.common import _get_shared_object_file
 from transformer_engine.common.CuTeDSL.utils import device_compute_capability
 from transformer_engine.pytorch import MXFP8Quantizer
-
-tvm_ffi = pytest.importorskip("tvm_ffi")
 
 recipe_available, reason_for_no_recipe = te.is_mxfp8_available(return_reason=True)
 
@@ -148,7 +152,7 @@ def run_quantize(method, act, x, ain, rowwise, columnwise, fp8_dtype, swizzled):
 
 def get_cfg_key(method, act, in_dtype, fp8_dtype, rowwise, colwise, swizzled):
     """Mirror of MXFP8QuantConfig::to_key (quantize_mxfp8_cutedsl.cuh): the name the CuTeDSL backend registers its compiled kernel under for this config.
-    Used to check if the CuTeDSL implmentation is registered
+    Used to check if the CuTeDSL implementation is registered
     """
     with_dbias = method in ("CAST_DBIAS", "CAST_DBIAS_DACT")
     with_dact = method in ("CAST_DACT", "CAST_DBIAS_DACT")

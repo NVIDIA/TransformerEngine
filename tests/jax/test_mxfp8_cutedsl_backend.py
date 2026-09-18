@@ -4,6 +4,9 @@
 
 """Cross-backend bit-exactness tests for the CuTeDSL MXFP8 quantize kernels, driven from jax."""
 
+# Optional CuTeDSL dependencies must be checked before importing Transformer Engine.
+# pylint: disable=wrong-import-position
+
 import ctypes
 import os
 
@@ -11,6 +14,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+
+tvm_ffi = pytest.importorskip("tvm_ffi")
+pytest.importorskip("cutlass")
 
 from utils import assert_allclose
 
@@ -24,8 +30,6 @@ from transformer_engine.jax.quantize import (
     ScalingMode,
     helper,
 )
-
-tvm_ffi = pytest.importorskip("tvm_ffi")
 
 recipe_available, reason_for_no_recipe = helper.is_scaling_mode_supported(
     ScalingMode.MXFP8_1D_SCALING
