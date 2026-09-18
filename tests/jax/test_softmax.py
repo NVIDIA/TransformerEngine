@@ -215,7 +215,7 @@ class TestSoftmaxPrimitives:
         # Resolved here, outside the timed callables; depends only on construction-time fields.
         supported = runner._is_support()
 
-        def setup():
+        def setup(state):
             runner._setup_inputs()
             return runner
 

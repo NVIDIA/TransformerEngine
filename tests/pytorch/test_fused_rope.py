@@ -72,7 +72,7 @@ def test_fused_rope(
     device = torch.device("cuda:0")
     batch_size, head_num = 2, 64
 
-    def setup():
+    def setup(state):
         t = torch.rand(
             (seq_length - margin, batch_size, head_num, hidden_size),
             dtype=dtype,

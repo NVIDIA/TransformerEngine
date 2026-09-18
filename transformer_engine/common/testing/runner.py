@@ -27,24 +27,44 @@ def _framework_for(pyfuncitem) -> str:
 
 def _run_correctness(case: Case) -> None:
     """Run one setup/evaluate/reference/verify cycle with no timing."""
-    state = case.setup()
-    actual = case.evaluate(state)
-    if case.reference is None:
-        return
-    # ``synchronize(actual)`` must precede ``reset(state)``: ``actual`` may alias
-    # ``state``, so an eager ``reset`` would race with in-flight ``evaluate`` work.
-    # ``reset`` must precede ``reference`` so it sees unmutated state.
-    synchronize(actual)
-    if case.reset is not None:
-        case.reset(state)
-    expected = case.reference(state)
-    synchronize(expected)
-    case.run_verify(actual, expected)
+    state = case.dist_init() if case.dist_init is not None else None
+    try:
+        state = case.setup(state)
+        actual = case.evaluate(state)
+        if case.reference is None:
+            return
+        # ``synchronize(actual)`` must precede ``reset(state)``: ``actual`` may alias
+        # ``state``, so an eager ``reset`` would race with in-flight ``evaluate`` work.
+        # ``reset`` must precede ``reference`` so it sees unmutated state.
+        synchronize(actual)
+        if case.reset is not None:
+            case.reset(state)
+        expected = case.reference(state)
+        synchronize(expected)
+        case.run_verify(actual, expected)
+    finally:
+        # The harness owns teardown so a Case callable never has to be defensive: a
+        # CaseSkip from setup or a failing verify still releases the communicator.
+        if case.dist_clean is not None:
+            case.dist_clean(state)
 
 
 def _run_benchmark_point(case, settings, pyfuncitem):
     """Gate once on correctness, then time evaluate and optionally reference."""
-    state = case.setup()
+    # A one-element holder, not a return value: on the failure path ``dist_clean`` still
+    # needs the state as last threaded, which an exception would otherwise discard.
+    holder = [case.dist_init() if case.dist_init is not None else None]
+    try:
+        return _benchmark_variants(case, settings, pyfuncitem, holder)
+    finally:
+        # The harness owns teardown so a Case callable never has to be defensive.
+        if case.dist_clean is not None:
+            case.dist_clean(holder[0])
+
+
+def _benchmark_variants(case, settings, pyfuncitem, holder):
+    """Run the precondition gate, then time each variant, threading state through."""
+    state = holder[0] = case.setup(holder[0])
 
     precondition_verified = False
     if case.reference is not None:
@@ -75,16 +95,32 @@ def _run_benchmark_point(case, settings, pyfuncitem):
     inner = settings["inner_iterations"] if batchable else 1
     records = []
     for name, function in variants:
-        records.append(
-            _time_variant(
-                case, settings, pyfuncitem, name, function, inner, batchable, precondition_verified
-            )
+        record, state = _time_variant(
+            case,
+            settings,
+            pyfuncitem,
+            name,
+            function,
+            inner,
+            batchable,
+            precondition_verified,
+            state,
         )
+        holder[0] = state
+        records.append(record)
     return records
 
 
 def _time_variant(
-    case, settings, pyfuncitem, variant, function, inner, batchable, precondition_verified
+    case,
+    settings,
+    pyfuncitem,
+    variant,
+    function,
+    inner,
+    batchable,
+    precondition_verified,
+    state,
 ):
     """Warm up, then time ``function``, with no verification inside the timed loop.
 
@@ -92,7 +128,7 @@ def _time_variant(
     the ``Case`` contract forbids, so it is left to propagate rather than caught.
     """
     record = _base_record(pyfuncitem, variant, precondition_verified)
-    state = case.setup()
+    state = case.setup(state)
     for _ in range(settings["warmup"]):
         output = function(state)
         synchronize(output)
@@ -107,6 +143,11 @@ def _time_variant(
         len(samples_ms) < settings["iterations"]
         or time.perf_counter() - start < settings["min_run_time"]
     ):
+        # Align ranks outside the measured interval: a rank arriving late would
+        # otherwise have its wait recorded as this operation's cost on every rank that
+        # arrived on time.
+        if case.barrier is not None:
+            case.barrier(state)
         samples_ms.append(sampler(function, state))
         if case.reset is not None:
             case.reset(state)
@@ -126,7 +167,7 @@ def _time_variant(
             "metrics": _metrics(case, stats["median_ms"]),
         }
     )
-    return record
+    return record, state
 
 
 def _metrics(case, median_ms):

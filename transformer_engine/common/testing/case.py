@@ -67,18 +67,32 @@ def _require_plugin() -> None:
     )
 
 
+#: Per-phase budget when a Case does not set one. Deliberately generous: waiting on a
+#: slow test costs time, cutting a valid one short costs a debugging session.
+DEFAULT_TIMEOUT_S = 1800.0
+
+
 @dataclass
 class Case:
     """What a benchmarkable test returns: ``setup`` builds an opaque state object,
     ``evaluate`` is the Transformer Engine path, and ``reference`` is the comparison
     target in correctness mode and a timed baseline in benchmark mode.
+
+    One ``state`` threads through every callable. ``dist_init`` seeds it, ``setup``
+    fills in the test data, and ``dist_clean`` tears the communicator down. ``state`` is
+    ``None`` throughout for a serial Case.
     """
 
-    setup: Callable[[], Any]
+    setup: Callable[[Any], Any]
     evaluate: Callable[[Any], Any]
     reference: Callable[[Any], Any] | None = None
     verify: Callable[[Any, Any], None] | None = None
     reset: Callable[[Any], None] | None = None
+    dist_init: Callable[[], Any] | None = None
+    dist_clean: Callable[[Any], None] | None = None
+    barrier: Callable[[Any], None] | None = None
+    num_gpus: int = 1
+    timeout: float = DEFAULT_TIMEOUT_S
     batchable: bool = True
     time_reference: bool = True
     bytes_moved: int | None = None
@@ -87,8 +101,9 @@ class Case:
     # Setting `reset` implies not batchable: ``runner.py`` pins inner_iterations to 1.
 
     def __post_init__(self) -> None:
-        """Validate the plugin is present to run this Case, and that ``reference`` and
-        ``verify`` are set together."""
+        """Validate the plugin is present to run this Case, that ``reference`` and
+        ``verify`` are set together, and that a multi-rank Case can form and align a
+        process group."""
         _require_plugin()
         if self.reference is None and self.verify is not None:
             raise ValueError("Case defines verify but no reference to compare against.")
@@ -98,6 +113,24 @@ class Case:
                 "comparator. Pass a verify built on the framework's tolerance helper "
                 "(tests/pytorch/utils.py::dtype_tols, tests/jax/utils.py::assert_allclose)."
             )
+        if self.num_gpus < 1:
+            raise ValueError(f"Case num_gpus must be at least 1, got {self.num_gpus}.")
+        if self.num_gpus > 1:
+            if self.dist_init is None:
+                raise ValueError(
+                    f"Case asks for {self.num_gpus} ranks but defines no dist_init, so the"
+                    " ranks would never form a process group. dist_init builds it and"
+                    " returns it as the state every other callable receives."
+                )
+            if self.barrier is None:
+                raise ValueError(
+                    f"Case asks for {self.num_gpus} ranks but defines no barrier. Without"
+                    " one the harness cannot align ranks before a timed sample, and a rank"
+                    " arriving late would be recorded as collective cost on every other"
+                    " rank."
+                )
+        if self.timeout <= 0:
+            raise ValueError(f"Case timeout must be positive, got {self.timeout}.")
 
     def run_verify(self, actual: Any, expected: Any) -> None:
         """Compare one evaluate output against one reference output."""

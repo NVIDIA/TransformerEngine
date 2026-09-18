@@ -21,7 +21,7 @@ Build a ``Case`` from four callables and return it:
    from transformer_engine.common.testing import Case, benchmark
 
    def test_something(shape, dtype):
-       def setup():
+       def setup(state):
            return make_inputs(shape, dtype)          # deterministic
 
        def evaluate(state):

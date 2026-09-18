@@ -16,6 +16,7 @@ import pytest
 
 from .artifacts import write_run_artifacts
 from .case import Case, CaseSkip
+from .distributed import expected_node_id, is_child, run_across_ranks
 from .declaration import declared_axes, normalize_argnames, set_plugin_active
 from .decorator import (
     BENCHMARK_MARKER,
@@ -306,6 +307,10 @@ def pytest_pyfunc_call(pyfuncitem):
     if not isinstance(case, Case):
         return _dispose_of_non_case(pyfuncitem, case)
 
+    _check_rank_is_running_its_own_test(pyfuncitem)
+    if case.num_gpus > 1 and not is_child():
+        return _run_across_ranks(pyfuncitem, case)
+
     # CaseSkip from setup() is a coverage skip (unavailable backend or arch), not a
     # failure.
     if _resolve_mode(pyfuncitem.config) == MODE_CORRECTNESS:
@@ -320,12 +325,42 @@ def pytest_pyfunc_call(pyfuncitem):
         records = _run_benchmark_point(case, settings, pyfuncitem)
     except CaseSkip as exc:
         pytest.skip(str(exc))
-    store = getattr(pyfuncitem.config, "_benchmarkable_records", None)
+    _record_store(pyfuncitem.config).extend(records)
+    return True
+
+
+def _check_rank_is_running_its_own_test(pyfuncitem) -> None:
+    """Fail loudly when a rank's environment does not belong to the test it is running.
+
+    ``NVTE_BENCHMARK_DIST_*`` left over from an earlier run -- a stale export, a command
+    line copied out of a log -- would otherwise make the parent believe it is a child and
+    silently run one rank where the test asked for several.
+    """
+    expected = expected_node_id()
+    if expected is not None and expected != pyfuncitem.nodeid:
+        raise pytest.UsageError(
+            f"{pyfuncitem.nodeid} ran with NVTE_BENCHMARK_DIST_* set for {expected}. These"
+            " are set by the harness for the ranks it spawns; unset them to run this test"
+            " directly."
+        )
+
+
+def _run_across_ranks(pyfuncitem, case):
+    """Launch this test across its ranks and keep whatever records they produced."""
+    settings = benchmark_settings(pyfuncitem.config)
+    records = run_across_ranks(pyfuncitem, case, settings)
+    if records:
+        _record_store(pyfuncitem.config).extend(records)
+    return True
+
+
+def _record_store(config) -> list:
+    """The session's benchmark records, created on first use."""
+    store = getattr(config, "_benchmarkable_records", None)
     if store is None:
         store = []
-        pyfuncitem.config._benchmarkable_records = store  # pylint: disable=protected-access
-    store.extend(records)
-    return True
+        config._benchmarkable_records = store  # pylint: disable=protected-access
+    return store
 
 
 def _dispose_of_non_case(pyfuncitem, result):
