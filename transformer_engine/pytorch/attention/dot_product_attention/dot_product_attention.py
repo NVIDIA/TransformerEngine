@@ -4,6 +4,7 @@
 
 """Attention."""
 from contextlib import nullcontext
+import functools
 import math
 import os
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -112,6 +113,45 @@ _alibi_cache = {
 # policy sets so dynamically constructed batches do not grow the cache without bound.
 _THD_POLICY_VALIDATION_CACHE_LIMIT = 64
 _thd_policy_validation_cache = []
+
+_PAD_BETWEEN_SEQS_EAGER_CACHE_LIMIT = 64
+_pad_between_seqs_eager_store = {}
+
+
+def _pad_between_seqs_cache_key(
+    cu_seqlens_q, cu_seqlens_kv, cu_seqlens_q_padded, cu_seqlens_kv_padded
+):
+    def _key(t):
+        if t is None:
+            return (0, 0)
+        return (id(t), _get_thd_policy_tensor_version(t))
+
+    return (
+        _key(cu_seqlens_q),
+        _key(cu_seqlens_kv),
+        _key(cu_seqlens_q_padded),
+        _key(cu_seqlens_kv_padded),
+    )
+
+
+@functools.lru_cache(maxsize=_PAD_BETWEEN_SEQS_EAGER_CACHE_LIMIT)
+def _lookup_pad_between_seqs_cache(key):
+    return _pad_between_seqs_eager_store[key]
+
+
+def _store_pad_between_seqs_cache(key, tensors, decision):
+    overwrite = key in _pad_between_seqs_eager_store
+    _pad_between_seqs_eager_store[key] = (tensors, decision)
+    evicted = False
+    while len(_pad_between_seqs_eager_store) > _PAD_BETWEEN_SEQS_EAGER_CACHE_LIMIT:
+        _pad_between_seqs_eager_store.pop(next(iter(_pad_between_seqs_eager_store)))
+        evicted = True
+    if overwrite or evicted:
+        _lookup_pad_between_seqs_cache.cache_clear()
+    try:
+        _lookup_pad_between_seqs_cache(key)
+    except KeyError:
+        pass
 
 
 def _get_thd_policy_attention_backend(
@@ -2706,23 +2746,47 @@ class DotProductAttention(TransformerEngineBaseModule):
                 else None
             )
 
-            # Default pad_between_seqs auto-detect. For THD, infer presence of
-            # inter-sequence padding from whether padded cu_seqlens were supplied --
-            # sync-free, and stable across eager and CUDA graph capture (the auto-detect
-            # must return the same value in both modes for backend selection to match).
-            # If padded cu_seqlens are the *same object* as the unpadded ones, no real
-            # inter-sequence padding exists (only THD tail padding) -- treat as False so
-            # FlashAttention v2/v4 remain eligible.
             if pad_between_seqs is None:
                 if qkv_format == "thd":
-                    if (
-                        cu_seqlens_q_padded is cu_seqlens_q
-                        and cu_seqlens_kv_padded is cu_seqlens_kv
-                    ):
-                        pad_between_seqs = False
+                    tensors = (
+                        cu_seqlens_q,
+                        cu_seqlens_kv,
+                        cu_seqlens_q_padded,
+                        cu_seqlens_kv_padded,
+                    )
+                    if is_graph_capturing():
+                        cache_key = _pad_between_seqs_cache_key(*tensors)
+                        try:
+                            cached_tensors, pad_between_seqs = _lookup_pad_between_seqs_cache(
+                                cache_key
+                            )
+                        except KeyError:
+                            cached_tensors = None
+                        if cached_tensors is None or any(
+                            t is not ct for t, ct in zip(tensors, cached_tensors)
+                        ):
+                            if (
+                                cu_seqlens_q_padded is cu_seqlens_q
+                                and cu_seqlens_kv_padded is cu_seqlens_kv
+                            ):
+                                pad_between_seqs = False
+                            else:
+                                pad_between_seqs = (
+                                    cu_seqlens_q_padded is not None
+                                    or cu_seqlens_kv_padded is not None
+                                )
                     else:
                         pad_between_seqs = (
-                            cu_seqlens_q_padded is not None or cu_seqlens_kv_padded is not None
+                            cu_seqlens_q_padded is not None
+                            and not torch.equal(cu_seqlens_q_padded[:-1], cu_seqlens_q[:-1])
+                        ) or (
+                            cu_seqlens_kv_padded is not None
+                            and not torch.equal(cu_seqlens_kv_padded[:-1], cu_seqlens_kv[:-1])
+                        )
+                        _store_pad_between_seqs_cache(
+                            _pad_between_seqs_cache_key(*tensors),
+                            tensors,
+                            pad_between_seqs,
                         )
                 else:
                     pad_between_seqs = False
