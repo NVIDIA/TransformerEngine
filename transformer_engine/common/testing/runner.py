@@ -41,7 +41,7 @@ def _run_correctness(case: Case) -> None:
             case.reset(state)
         expected = case.reference(state)
         synchronize(expected)
-        case.run_verify(actual, expected)
+        case.verify(actual, expected)
     finally:
         # The harness owns teardown so a Case callable never has to be defensive: a
         # CaseSkip from setup or a failing verify still releases the communicator.
@@ -51,64 +51,57 @@ def _run_correctness(case: Case) -> None:
 
 def _run_benchmark_point(case, settings, pyfuncitem):
     """Gate once on correctness, then time evaluate and optionally reference."""
-    # A one-element holder, not a return value: on the failure path ``dist_clean`` still
-    # needs the state as last threaded, which an exception would otherwise discard.
-    holder = [case.dist_init() if case.dist_init is not None else None]
+    state = case.dist_init() if case.dist_init is not None else None
     try:
-        return _benchmark_variants(case, settings, pyfuncitem, holder)
-    finally:
-        # The harness owns teardown so a Case callable never has to be defensive.
-        if case.dist_clean is not None:
-            case.dist_clean(holder[0])
+        state = case.setup(state)
 
+        precondition_verified = False
+        if case.reference is not None:
+            actual = case.evaluate(state)
+            # Same ordering rule as ``_run_correctness``: synchronize before reset.
+            synchronize(actual)
+            if case.reset is not None:
+                case.reset(state)
+            expected = case.reference(state)
+            synchronize(expected)
+            case.verify(actual, expected)
+            precondition_verified = True
 
-def _benchmark_variants(case, settings, pyfuncitem, holder):
-    """Run the precondition gate, then time each variant, threading state through."""
-    state = holder[0] = case.setup(holder[0])
-
-    precondition_verified = False
-    if case.reference is not None:
-        actual = case.evaluate(state)
-        # Same ordering rule as ``_run_correctness``: synchronize before reset.
-        synchronize(actual)
+        # Invariant: setup() is never called twice without a reset() in between. The
+        # next setup happens inside _time_variant, so this is the boundary that would
+        # otherwise leave the gate's test data unreleased.
         if case.reset is not None:
             case.reset(state)
-        expected = case.reference(state)
-        synchronize(expected)
-        case.run_verify(actual, expected)
-        precondition_verified = True
 
-    # Invariant: setup() is never called twice without a reset() in between. The gate's
-    # state is discarded here and _time_variant allocates a fresh one, so this is the
-    # boundary that would otherwise leak it.
-    if case.reset is not None:
-        case.reset(state)
+        variants = [("evaluation", case.evaluate)]
+        if case.reference is not None and case.time_reference and not settings["no_reference"]:
+            variants.insert(0, ("reference", case.reference))
 
-    variants = [("evaluation", case.evaluate)]
-    if case.reference is not None and case.time_reference and not settings["no_reference"]:
-        variants.insert(0, ("reference", case.reference))
-
-    # A case needing reset between calls cannot be batched: inner iterations are
-    # submitted back to back with no chance to reset, so timings would average over
-    # drifting state.
-    batchable = case.batchable and case.reset is None
-    inner = settings["inner_iterations"] if batchable else 1
-    records = []
-    for name, function in variants:
-        record, state = _time_variant(
-            case,
-            settings,
-            pyfuncitem,
-            name,
-            function,
-            inner,
-            batchable,
-            precondition_verified,
-            state,
-        )
-        holder[0] = state
-        records.append(record)
-    return records
+        # A case needing reset between calls cannot be batched: inner iterations are
+        # submitted back to back with no chance to reset, so timings would average over
+        # drifting state.
+        batchable = case.batchable and case.reset is None
+        inner = settings["inner_iterations"] if batchable else 1
+        records = []
+        for name, function in variants:
+            record, state = _time_variant(
+                case,
+                settings,
+                pyfuncitem,
+                name,
+                function,
+                inner,
+                batchable,
+                precondition_verified,
+                state,
+            )
+            records.append(record)
+        return records
+    finally:
+        # The harness owns teardown so a Case callable never has to be defensive: a
+        # CaseSkip from setup or a failing verify still releases the communicator.
+        if case.dist_clean is not None:
+            case.dist_clean(state)
 
 
 def _time_variant(
@@ -190,6 +183,12 @@ def _base_record(pyfuncitem, variant, precondition_verified):
     # collapse into one another.
     world = dist_world_size()
     if world is not None:
+        declared = params.get("world_size")
+        if declared is not None and declared != world:
+            raise ValueError(
+                f"{pyfuncitem.nodeid} parametrizes world_size={declared} but is running on"
+                f" {world} ranks, so its case_id would not describe what ran."
+            )
         params["world_size"] = world
     return {
         "schema_version": "benchmark_record/v1",

@@ -16,7 +16,7 @@ import pytest
 
 from .artifacts import write_run_artifacts
 from .case import Case, CaseSkip
-from .distributed import expected_node_id, is_child, run_across_ranks
+from .distributed import NODE_ID_ENV, rank as dist_rank, run_across_ranks
 from .declaration import declared_axes, normalize_argnames, set_plugin_active
 from .decorator import (
     BENCHMARK_MARKER,
@@ -308,8 +308,11 @@ def pytest_pyfunc_call(pyfuncitem):
         return _dispose_of_non_case(pyfuncitem, case)
 
     _check_rank_is_running_its_own_test(pyfuncitem)
-    if case.num_gpus > 1 and not is_child():
-        return _run_across_ranks(pyfuncitem, case)
+    # Launch on dist_init, not on num_gpus: a one-rank distributed Case is a legitimate
+    # way to debug, and running it in-process would call dist_init with no rank
+    # environment set.
+    if case.dist_init is not None and dist_rank() is None:
+        return _launch_ranks(pyfuncitem, case)
 
     # CaseSkip from setup() is a coverage skip (unavailable backend or arch), not a
     # failure.
@@ -336,7 +339,7 @@ def _check_rank_is_running_its_own_test(pyfuncitem) -> None:
     line copied out of a log -- would otherwise make the parent believe it is a child and
     silently run one rank where the test asked for several.
     """
-    expected = expected_node_id()
+    expected = os.environ.get(NODE_ID_ENV)
     if expected is not None and expected != pyfuncitem.nodeid:
         raise pytest.UsageError(
             f"{pyfuncitem.nodeid} ran with NVTE_BENCHMARK_DIST_* set for {expected}. These"
@@ -345,12 +348,23 @@ def _check_rank_is_running_its_own_test(pyfuncitem) -> None:
         )
 
 
-def _run_across_ranks(pyfuncitem, case):
-    """Launch this test across its ranks and keep whatever records they produced."""
+def _launch_ranks(pyfuncitem, case):
+    """Run this test across its ranks and keep whatever records they produced."""
     settings = benchmark_settings(pyfuncitem.config)
+    benchmarking = settings["mode"] == MODE_BENCHMARK
+    if benchmarking and settings["min_run_time"] > 0 and case.num_gpus > 1:
+        raise pytest.UsageError(
+            "--nvte-benchmark-min-run-time cannot be used with a multi-rank Case: ranks"
+            " would leave the sampling loop after different numbers of iterations, and"
+            " their barrier counts would diverge until the launch deadlocked."
+        )
     records = run_across_ranks(pyfuncitem, case, settings)
-    if records:
-        _record_store(pyfuncitem.config).extend(records)
+    if benchmarking and not records:
+        # Every rank exited cleanly and wrote nothing, which is what a CaseSkip on each
+        # rank looks like from here. Reporting a pass would claim coverage none of them
+        # produced.
+        pytest.skip("every rank skipped, so this point produced no measurement")
+    _record_store(pyfuncitem.config).extend(records)
     return True
 
 

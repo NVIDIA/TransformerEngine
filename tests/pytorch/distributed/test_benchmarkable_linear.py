@@ -18,6 +18,7 @@ import torch.distributed as dist
 
 import transformer_engine.pytorch as te
 from transformer_engine.common.testing import Case, CaseSkip, benchmark
+from transformer_engine.common.testing.distributed import RANK_ENV, RENDEZVOUS_ENV, WORLD_SIZE_ENV
 
 # Defined here rather than imported: tests/pytorch is not on sys.path from this
 # subdirectory, which is why the other distributed tests carry their own tolerances.
@@ -26,9 +27,9 @@ from transformer_engine.common.testing import Case, CaseSkip, benchmark
 _TOLS = {torch.bfloat16: {"rtol": 2e-2, "atol": 2e-2}}
 
 NUM_GPUS = min(4, torch.cuda.device_count())
-RENDEZVOUS_ENV = "NVTE_BENCHMARK_DIST_RENDEZVOUS"
 
 
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="needs at least 2 GPUs")
 @benchmark("hidden_size", [4096])
 @pytest.mark.parametrize("hidden_size", [1024, 4096])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
@@ -38,8 +39,8 @@ def test_row_parallel_linear(hidden_size, dtype):
 
     def dist_init():
         """Build the process group this Case's ranks share."""
-        rank = int(os.environ["NVTE_BENCHMARK_DIST_RANK"])
-        world = int(os.environ["NVTE_BENCHMARK_DIST_WORLD_SIZE"])
+        rank = int(os.environ[RANK_ENV])
+        world = int(os.environ[WORLD_SIZE_ENV])
         torch.cuda.set_device(rank)
         dist.init_process_group(
             backend="nccl",
@@ -54,7 +55,11 @@ def test_row_parallel_linear(hidden_size, dtype):
         return {"pg": dist.group.WORLD, "rank": rank, "world": world}
 
     def dist_clean(state):
-        """Release the process group. Runs once, even when the body raised."""
+        """Release the process group. The harness calls this once, on success or failure.
+
+        It does not run when the harness has to stop a rank outright; process death
+        releases the communicator in that case.
+        """
         if dist.is_initialized():
             dist.destroy_process_group()
 

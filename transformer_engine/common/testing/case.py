@@ -67,8 +67,9 @@ def _require_plugin() -> None:
     )
 
 
-#: Per-phase budget when a Case does not set one. Deliberately generous: waiting on a
-#: slow test costs time, cutting a valid one short costs a debugging session.
+#: Budget for a whole multi-rank launch -- child startup, import, rendezvous, every
+#: iteration and teardown -- when a Case does not set one. Deliberately generous: waiting
+#: on a slow test costs time, cutting a valid one short costs a debugging session.
 DEFAULT_TIMEOUT_S = 1800.0
 
 
@@ -90,6 +91,8 @@ class Case:
     reset: Callable[[Any], None] | None = None
     dist_init: Callable[[], Any] | None = None
     dist_clean: Callable[[Any], None] | None = None
+    #: Must block the host, not merely order the stream: a stream-ordered barrier folds
+    #: rank skew back into the measured interval.
     barrier: Callable[[Any], None] | None = None
     num_gpus: int = 1
     timeout: float = DEFAULT_TIMEOUT_S
@@ -118,20 +121,13 @@ class Case:
         if self.num_gpus > 1:
             if self.dist_init is None:
                 raise ValueError(
-                    f"Case asks for {self.num_gpus} ranks but defines no dist_init, so the"
-                    " ranks would never form a process group. dist_init builds it and"
-                    " returns it as the state every other callable receives."
+                    f"Case with num_gpus={self.num_gpus} must define dist_init to build the"
+                    " process group its ranks share."
                 )
             if self.barrier is None:
                 raise ValueError(
-                    f"Case asks for {self.num_gpus} ranks but defines no barrier. Without"
-                    " one the harness cannot align ranks before a timed sample, and a rank"
-                    " arriving late would be recorded as collective cost on every other"
-                    " rank."
+                    f"Case with num_gpus={self.num_gpus} must define barrier so the harness"
+                    " can align ranks before each timed sample."
                 )
         if self.timeout <= 0:
             raise ValueError(f"Case timeout must be positive, got {self.timeout}.")
-
-    def run_verify(self, actual: Any, expected: Any) -> None:
-        """Compare one evaluate output against one reference output."""
-        self.verify(actual, expected)

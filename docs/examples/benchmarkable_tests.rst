@@ -35,7 +35,9 @@ Build a ``Case`` from four callables and return it:
 
        return Case(setup=setup, evaluate=evaluate, reference=reference, verify=verify)
 
-``setup`` must be deterministic, because benchmark mode calls it again for each timed variant.
+``setup`` receives the test's state and returns it; it is ``None`` for an ordinary
+single-GPU test. ``setup`` must be deterministic, because benchmark mode calls it again for each
+timed variant.
 ``verify`` is required whenever ``reference`` is set; there is no default comparator, so build one
 on ``tests/pytorch/utils.py::dtype_tols`` or ``tests/jax/utils.py::assert_allclose``. Raise
 ``CaseSkip`` from ``setup`` when a backend or architecture is unavailable and the test is skipped.
