@@ -64,7 +64,6 @@ from ..distributed import (
 )
 from ..constants import FP8BwdTensorIdx, FP8FwdTensorIdx, dist_group_type
 from ..jit import no_torch_dynamo
-from ..graph import is_graph_capturing
 from ..tensor.float8_tensor import Float8Tensor
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.nvfp4_tensor import NVFP4Quantizer
@@ -73,7 +72,6 @@ from ..tensor.hybrid_tensor import HybridQuantizer
 from ..tensor.identity_tensor import IdentityQuantizer
 from ._common import (
     apply_normalization,
-    check_fp8_reduce_and_update,
     set_quantizer_amax_reduction_group,
     set_quantizer_usage_for_wgrad_all_gather,
     WeightGradStore,
@@ -389,8 +387,8 @@ class LayerNormMLPBwdArgs:
     fc1_main_grad_func: Optional[Callable[[], torch.Tensor]] = None
     fc2_main_grad_func: Optional[Callable[[], torch.Tensor]] = None
 
-    # --- FP8 reduce-and-update bookkeeping ---
-    reduce_and_update_bwd_fp8_tensors: bool = False
+    # --- Backward quantization update scheduling ---
+    request_backward_quantization_update: bool = False
 
     # --- Misc ---
     cpu_offloading: bool = False
@@ -1176,6 +1174,9 @@ def _layernorm_mlp_setup_ctx(
     # Numerical / dtype config
     bwd_args.activation_dtype = fwd_args.activation_dtype
     bwd_args.fp8 = fp8
+    bwd_args.request_backward_quantization_update = (
+        bwd_args.fp8 and FP8GlobalStateManager.backward_quantization_update_needed()
+    )
     bwd_args.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
     bwd_args.dgrad_use_split_accumulator = fwd_args.dgrad_use_split_accumulator
     bwd_args.wgrad_use_split_accumulator = fwd_args.wgrad_use_split_accumulator
@@ -1304,10 +1305,6 @@ def _layernorm_mlp_recompute(
         tensors_to_save_from_forward,
     )
     bwd_args.set_saved_tensors(recomputed)
-    if fwd_args.fp8 and fwd_args.any_requires_grad():
-        bwd_args.reduce_and_update_bwd_fp8_tensors = check_fp8_reduce_and_update(
-            restore_first_module=True
-        )
 
     FP8GlobalStateManager.set_autocast_state(final_autocast_state)
     if (
@@ -2129,8 +2126,6 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.save_for_backward(*tensors_to_save)
             ctx.tensor_objects = tensor_objects
             ctx.backward_objects = bwd_args
-            if not bwd_args.checkpoint and fwd_args.fp8 and fwd_args.any_requires_grad():
-                bwd_args.reduce_and_update_bwd_fp8_tensors = check_fp8_reduce_and_update()
 
         return out, ln_out_return, new_fc1_weight_workspace, new_fc2_weight_workspace
 
@@ -2157,13 +2152,13 @@ class _LayerNormMLP(torch.autograd.Function):
             fc2_wgrad,
             fc2_bias_grad,
         ) = _layernorm_mlp_backward_impl(bwd_args)
-        reduce_and_update_bwd_fp8_tensors = bwd_args.reduce_and_update_bwd_fp8_tensors
+        request_update = bwd_args.request_backward_quantization_update
         # Drop all references held by bwd_args (saved tensors, quantizers, weakrefs,
         # main_grad closures) so they don't outlive backward via ctx under retain_graph.
         ctx.backward_objects = None
         del bwd_args
-        if reduce_and_update_bwd_fp8_tensors and not is_graph_capturing():
-            FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
+        if request_update:
+            FP8GlobalStateManager.request_backward_quantization_update()
         return (
             dgrad,
             dgamma,

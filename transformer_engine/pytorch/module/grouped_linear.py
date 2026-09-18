@@ -41,7 +41,6 @@ from ..utils import (
     get_device_compute_capability,
     init_method_constant,
     mark_grouped_tensor,
-    requires_grad,
     resolve_grouped_linear_single_param_flags,
     get_nvtx_range_context,
 )
@@ -604,12 +603,9 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.use_bias = use_bias
             ctx.inp_shape = inp.shape
             ctx.requires_dgrad = inp.requires_grad
-            ctx.reduce_and_update_bwd_fp8_tensors = False
-            if ctx.fp8 and requires_grad(inp, weights[0], biases[0]):
-                ctx.reduce_and_update_bwd_fp8_tensors = (
-                    ctx.reduce_and_update_bwd_fp8_tensors
-                    or FP8GlobalStateManager.is_first_fp8_module()
-                )
+            ctx.request_backward_quantization_update = (
+                ctx.fp8 and FP8GlobalStateManager.backward_quantization_update_needed()
+            )
             ctx.wgrad_store = wgrad_store
             ctx.debug = False
             ctx.save_original_input = save_original_input
@@ -980,12 +976,6 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.sequence_parallel = sequence_parallel
             ctx.inp_shape = inp.shape
             ctx.requires_dgrad = inp.requires_grad
-            ctx.reduce_and_update_bwd_fp8_tensors = False
-            if ctx.fp8 and requires_grad(inp, weights[0], biases[0]):
-                ctx.reduce_and_update_bwd_fp8_tensors = (
-                    ctx.reduce_and_update_bwd_fp8_tensors
-                    or FP8GlobalStateManager.is_first_fp8_module()
-                )
             ctx.wgrad_store = wgrad_store
             ctx.debug = debug
             ctx.save_original_input = save_original_input
@@ -1003,7 +993,9 @@ class _GroupedLinear(torch.autograd.Function):
                 ctx.grad_input_quantizers = [None] * num_gemms
                 ctx.grad_weight_quantizers = [None] * num_gemms
                 ctx.grad_output_quantizers = [None] * num_gemms
-                ctx.reduce_and_update_bwd_fp8_tensors = False
+            ctx.request_backward_quantization_update = (
+                ctx.fp8 and FP8GlobalStateManager.backward_quantization_update_needed()
+            )
 
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
         return out.view(-1, *inp.shape[1:-1], out.shape[-1]), new_workspaces
@@ -1255,8 +1247,8 @@ class _GroupedLinear(torch.autograd.Function):
         else:
             wgrad_list = [None] * num_weight_args
 
-        if ctx.reduce_and_update_bwd_fp8_tensors:
-            FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
+        if ctx.request_backward_quantization_update:
+            FP8GlobalStateManager.request_backward_quantization_update()
         return (
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             None,  # m_splits
@@ -1522,8 +1514,8 @@ class _GroupedLinear(torch.autograd.Function):
             ):
                 grad_biases = [None] * ctx.num_gemms
 
-        if ctx.reduce_and_update_bwd_fp8_tensors:
-            FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
+        if ctx.request_backward_quantization_update:
+            FP8GlobalStateManager.request_backward_quantization_update()
         return (
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             None,  # m_splits
