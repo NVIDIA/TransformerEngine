@@ -589,9 +589,11 @@ def _pytorch_grouped_gemm(A, B, out, *, layout, bias, bias_scale, accumulate, al
     if beta is not None:
         raise NotImplementedError("PyTorch CUTLASS grouped GEMM does not support explicit beta.")
 
-    inputs = A if isinstance(A, list) else [A]
-    outputs = out if isinstance(out, list) else [out]
-    for tensor in [B, *inputs, *outputs]:
+    for tensor in [
+        *(A if isinstance(A, list) else [A]),
+        B,
+        *(out if isinstance(out, list) else [out]),
+    ]:
         # Quantized wrappers can report a logical BF16 dtype.
         if isinstance(tensor, QuantizedTensorStorage):
             raise NotImplementedError("Quantized inputs and outputs are not supported.")
@@ -703,6 +705,8 @@ def general_grouped_gemm_for_grouped_tensor(
     The caller must ensure that GroupedTensor metadata is already compatible with the
     underlying GEMM implementation (e.g., aligned offsets and output metadata layout).
     """
+    if not isinstance(B, GroupedTensorStorage):
+        raise TypeError(f"B must be a GroupedTensorStorage, got {type(B).__name__}.")
     assert layout in ("TN", "NN", "NT"), f"GEMM layout {layout} not supported."
     if grad:
         raise NotImplementedError("grad is not supported for grouped_tensor GEMM yet.")
@@ -715,7 +719,7 @@ def general_grouped_gemm_for_grouped_tensor(
 
     if isinstance(A, GroupedTensorStorage) and A.row_scaled_nvfp4:
         raise NotImplementedError("Row-scaled NVFP4 GroupedTensor GEMM is not supported yet.")
-    if isinstance(B, GroupedTensorStorage) and B.row_scaled_nvfp4:
+    if B.row_scaled_nvfp4:
         raise NotImplementedError("Row-scaled NVFP4 GroupedTensor GEMM is not supported yet.")
     if isinstance(out, GroupedTensorStorage) and out.row_scaled_nvfp4:
         raise NotImplementedError("Row-scaled NVFP4 GroupedTensor GEMM is not supported yet.")
