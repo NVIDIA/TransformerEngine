@@ -54,8 +54,6 @@ def _require_plugin() -> None:
     """Refuse to build a Case inside a pytest session that has no plugin to run it."""
     # pytest sets PYTEST_CURRENT_TEST only while a test is executing, so this fires
     # exactly when a Case would be discarded and its test pass having verified nothing.
-    # It lives here, not in the decorators, because a Case-bearing test need not be
-    # decorated at all, and a class-level decorator never wraps its methods.
     current = os.environ.get("PYTEST_CURRENT_TEST")
     if not current or plugin_active():
         return
@@ -77,7 +75,8 @@ class Case:
     """The callables a benchmarkable test hands the harness, and the metadata it records.
 
     One opaque ``state`` threads through every callable: ``dist_init`` creates it for a
-    multi-rank Case, ``setup`` fills in the test data, and it is ``None`` for a serial one.
+    multi-rank Case, ``setup`` fills in the test data, and a serial Case's ``setup`` is
+    handed ``None``.
     """
 
     setup: Callable[[Any], Any]
@@ -91,12 +90,11 @@ class Case:
     barrier: Callable[[Any], None] | None = None
     num_gpus: int = 1
     timeout: float = DEFAULT_TIMEOUT_S
+    #: Ignored when ``reset`` is set; those cases run one inner iteration.
     batchable: bool = True
     time_reference: bool = True
     bytes_moved: int | None = None
     flops: int | None = None
-
-    # Setting `reset` implies not batchable: ``runner.py`` pins inner_iterations to 1.
 
     def __post_init__(self) -> None:
         """Validate the Case's fields."""

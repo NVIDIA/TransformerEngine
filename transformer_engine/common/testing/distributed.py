@@ -8,23 +8,31 @@ from __future__ import annotations
 import json
 import os
 import pathlib
-import signal
 import socket
 import subprocess
 import sys
 import tempfile
 import time
 from typing import NamedTuple
+from xml.etree import ElementTree
 
 from .decorator import MODE_BENCHMARK
 
-#: Bounded so a failing rank's context reaches pytest and JUnit without burying it.
+#: Characters kept from the end of each of a rank's captured streams.
 _OUTPUT_TAIL_CHARS = 4000
 _POLL_INTERVAL_S = 0.05
 _KILL_GRACE_S = 10.0
 
 #: Set by the harness on each rank it spawns, to the node ID that rank must run.
 LAUNCH_ENV = "NVTE_BENCHMARK_DIST_LAUNCH"
+
+
+class LaunchResult(NamedTuple):
+    """What a multi-rank launch produced: benchmark records, and the reason every rank
+    gave if they all skipped."""
+
+    records: list
+    skip_reason: str | None
 
 
 class Launch(NamedTuple):
@@ -68,7 +76,7 @@ def _free_port() -> int:
         return probe.getsockname()[1]
 
 
-def _child_command(pyfuncitem, settings, report_dir) -> list[str]:
+def _child_command(pyfuncitem, settings, report_dir, junit_path) -> list[str]:
     """Build the pytest invocation one rank runs: exactly this test, nothing else."""
     cmd = [
         sys.executable,
@@ -79,6 +87,9 @@ def _child_command(pyfuncitem, settings, report_dir) -> list[str]:
         # Ranks run concurrently against one cache directory otherwise.
         "-p",
         "no:cacheprovider",
+        # The parent's only evidence of what the rank did: ran, skipped, or never
+        # collected the test at all. An exit code cannot tell those apart.
+        f"--junitxml={junit_path}",
     ]
     if settings["mode"] == MODE_BENCHMARK:
         cmd += [
@@ -120,8 +131,9 @@ def _harvest(procs, results) -> None:
             results[index] = proc.returncode
 
 
-def _stop_remaining(procs, results) -> None:
-    """Stop ranks still running: ``terminate``, then ``kill`` after a grace period."""
+def _stop_remaining(procs, results) -> set[int]:
+    """Stop ranks still running, returning their indices: ``terminate``, then ``kill``
+    after a grace period."""
     pending = [i for i in range(len(procs)) if i not in results]
     for index in pending:
         procs[index].terminate()
@@ -133,11 +145,12 @@ def _stop_remaining(procs, results) -> None:
             proc.kill()
             proc.wait()
         results[index] = proc.returncode
+    return set(pending)
 
 
-def _supervise(procs, results, timeout) -> bool:
+def _supervise(procs, results, timeout) -> tuple[bool, set[int]]:
     """Wait for every rank, stopping the rest once one fails or the budget expires, and
-    return whether the budget expired."""
+    return whether the budget expired alongside the ranks the harness stopped."""
     deadline = time.monotonic() + timeout
     timed_out = False
     while len(results) < len(procs):
@@ -148,8 +161,7 @@ def _supervise(procs, results, timeout) -> bool:
             timed_out = True
             break
         time.sleep(_POLL_INTERVAL_S)
-    _stop_remaining(procs, results)
-    return timed_out
+    return timed_out, _stop_remaining(procs, results)
 
 
 def _rank_output(log_dir, index) -> str:
@@ -163,34 +175,74 @@ def _rank_output(log_dir, index) -> str:
     return "".join(text)
 
 
-def _report_outcomes(results, log_dir, timed_out, timeout) -> None:
-    """Raise if the launch did not succeed, with the output of the ranks that explain it."""
-    stopped = {-signal.SIGTERM, -signal.SIGKILL}
-    failed = [i for i, rc in sorted(results.items()) if rc != 0 and rc not in stopped]
+def _report_outcomes(results, stopped, log_dir, timed_out, timeout) -> None:
+    """Raise if any rank exited badly, with every rank's output."""
+    # Membership in ``stopped``, not the signal number: a rank the OOM killer or the job
+    # scheduler reaped also exits -SIGKILL/-SIGTERM, and that is a failure.
+    failed = [i for i, rc in sorted(results.items()) if rc != 0 and i not in stopped]
+    # Every rank's output either way: the rank that exits first is often not the one that
+    # explains why, and a hang names no culprit at all.
+    detail = "".join(_rank_output(log_dir, i) for i in sorted(results))
     if timed_out:
-        # Every rank's output is kept: a hang is the case where it is most needed, and
-        # the cause is usually visible in whichever rank stopped making progress.
-        detail = "".join(_rank_output(log_dir, i) for i in sorted(results))
         raise AssertionError(
-            f"Distributed test hit its {timeout:g}s budget with"
-            f" {len(results) - len(failed)} rank(s) still running.{detail}"
+            f"Distributed test hit its {timeout:g}s budget with {len(stopped)} rank(s)"
+            f" still running.{detail}"
         )
     if failed:
-        detail = "".join(_rank_output(log_dir, i) for i in failed)
         raise AssertionError(f"rank(s) {failed} failed.{detail}")
 
 
-def _collect_records(report_root) -> list:
-    """Read the benchmark records every rank wrote."""
+#: JUnit child elements that mean the rank did not simply run the test.
+_OUTCOME_ELEMENTS = {"skipped": "skipped", "failure": "failed", "error": "failed"}
+
+
+def _rank_outcome(junit_path) -> tuple[str, str]:
+    """One rank's pytest outcome and its reason, read from that rank's JUnit report."""
+    if not junit_path.exists():
+        return "missing", "wrote no JUnit report"
+    cases = list(ElementTree.parse(junit_path).iter("testcase"))
+    if not cases:
+        return "missing", "collected no test"
+    for element in cases[0]:
+        outcome = _OUTCOME_ELEMENTS.get(element.tag)
+        if outcome is not None:
+            return outcome, element.get("message", "")
+    return "passed", ""
+
+
+def _rank_skip_reason(work, world) -> str | None:
+    """Require every rank to have run this test, and return their reason if all skipped."""
+    outcomes = [_rank_outcome(work / f"rank{index}.xml") for index in range(world)]
+    broken = [i for i, (state, _) in enumerate(outcomes) if state in ("missing", "failed")]
+    if broken:
+        reasons = ", ".join(f"rank {i}: {outcomes[i][1] or outcomes[i][0]}" for i in broken)
+        detail = "".join(_rank_output(work, i) for i in broken)
+        raise AssertionError(f"rank(s) {broken} did not run this test ({reasons}).{detail}")
+    skipped = [i for i, (state, _) in enumerate(outcomes) if state == "skipped"]
+    if len(skipped) == world:
+        return outcomes[0][1] or "every rank skipped"
+    if skipped:
+        raise AssertionError(
+            f"rank(s) {skipped} skipped while the rest ran: a collective test must skip on"
+            " every rank or none."
+        )
+    return None
+
+
+def _collect_records(report_root, world) -> list:
+    """Read every rank's benchmark records, requiring a report from each."""
     records = []
-    for report in sorted(report_root.glob("rank*/benchmark_report.json")):
+    for index in range(world):
+        report = report_root / f"rank{index}" / "benchmark_report.json"
+        if not report.exists():
+            raise AssertionError(f"rank {index} ran this test but wrote no benchmark report.")
         with report.open("r", encoding="utf-8") as handle:
             records.extend(json.load(handle).get("records", []))
     return records
 
 
-def run_across_ranks(pyfuncitem, case, settings) -> list:
-    """Run one test across ``case.num_gpus`` ranks and return their benchmark records.
+def run_across_ranks(pyfuncitem, case, settings) -> LaunchResult:
+    """Run one test across ``case.num_gpus`` ranks.
 
     Each rank is a full pytest session collecting exactly this node ID.
     """
@@ -198,20 +250,22 @@ def run_across_ranks(pyfuncitem, case, settings) -> list:
         work = pathlib.Path(workdir)
         reports = work / "reports"
         reports.mkdir()
-        # Checked free per launch: a port still held by the previous config, or by a
-        # concurrent pytest session, would fail to bind rather than rendezvous.
         endpoint = (_primary_address(), _free_port())
         procs, streams, results = [], [], {}
         try:
             for index in range(case.num_gpus):
-                # Files, not pipes: nothing drains a running rank, and a rank that wrote
-                # past the pipe buffer would block in write() until the budget expired.
+                # Files, not pipes: nothing drains a running rank.
                 out = (work / f"rank{index}.stdout").open("w", encoding="utf-8")
                 err = (work / f"rank{index}.stderr").open("w", encoding="utf-8")
                 streams += [out, err]
                 procs.append(
                     subprocess.Popen(  # pylint: disable=consider-using-with
-                        _child_command(pyfuncitem, settings, reports / f"rank{index}"),
+                        _child_command(
+                            pyfuncitem,
+                            settings,
+                            reports / f"rank{index}",
+                            work / f"rank{index}.xml",
+                        ),
                         env=_child_env(
                             os.environ, index, case.num_gpus, endpoint, pyfuncitem.nodeid
                         ),
@@ -220,7 +274,7 @@ def run_across_ranks(pyfuncitem, case, settings) -> list:
                         stderr=err,
                     )
                 )
-            timed_out = _supervise(procs, results, case.timeout)
+            timed_out, stopped = _supervise(procs, results, case.timeout)
         finally:
             for proc in procs:
                 if proc.poll() is None:
@@ -228,5 +282,10 @@ def run_across_ranks(pyfuncitem, case, settings) -> list:
                     proc.wait()
             for stream in streams:
                 stream.close()
-        _report_outcomes(results, work, timed_out, case.timeout)
-        return _collect_records(reports)
+        _report_outcomes(results, stopped, work, timed_out, case.timeout)
+        skip_reason = _rank_skip_reason(work, case.num_gpus)
+        if skip_reason is not None:
+            return LaunchResult([], skip_reason)
+        if settings["mode"] != MODE_BENCHMARK:
+            return LaunchResult([], None)
+        return LaunchResult(_collect_records(reports, case.num_gpus), None)

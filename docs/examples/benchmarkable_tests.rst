@@ -94,7 +94,7 @@ you are temporarily disabling.
 Running across multiple GPUs
 ----------------------------
 
-A ``Case`` that sets ``num_gpus`` runs on that many ranks, and the harness launches them.
+A ``Case`` that sets ``dist_init`` is launched by the harness across its ``num_gpus`` ranks.
 The test says only how many ranks it wants and what each one does, so what gets recorded is
 the compute rather than the process startup and rendezvous in front of it.
 
@@ -135,8 +135,7 @@ intact when it adds the test data:
        )
 
 The coordinator is a TCP endpoint the harness picks per launch, on a port the OS assigns
-and has just confirmed free, so nothing collides with the previous config or with a
-concurrent pytest session. ``tcp://`` is what JAX's
+and has just confirmed free. ``tcp://`` is what JAX's
 ``jax.distributed.initialize`` needs, since it cannot rendezvous through a file. A test that
 prefers ``env://`` can ignore the arguments entirely: ``MASTER_ADDR``, ``MASTER_PORT``,
 ``RANK``, ``WORLD_SIZE``, ``LOCAL_RANK`` and ``LOCAL_WORLD_SIZE`` describe the same launch,
@@ -155,6 +154,11 @@ this operation's cost on every rank that arrived on time.
 ``num_gpus`` comes from the test, which is what lets the harness stay framework-agnostic.
 Guard the test so it skips when the box has too few GPUs. ``timeout`` (default 1800s)
 budgets the whole launch, including interpreter startup and rendezvous on every rank.
+
+Every rank must reach the same verdict: the harness requires each one to report that it ran
+the test, and a ``CaseSkip`` must therefore fire on every rank or none. A launch where some
+ranks skipped and others ran fails, as does one where a rank exited without running the test
+at all -- including when something outside the harness, such as the OOM killer, stopped it.
 
 Every rank records its own timings, and the report keeps them separate: ``world_size`` is
 part of a record's identity, so a four-rank run never compares against an eight-rank one,
@@ -181,5 +185,5 @@ Options, with defaults:
   enough that host launch latency dominates.
 * ``--nvte-benchmark-min-run-time`` (0.0) -- keep sampling until this many seconds have elapsed.
 * ``--nvte-benchmark-no-reference`` (off) -- skip timing the reference variant.
-* ``--nvte-benchmark-report-dir`` (unset) -- where to write the JSON, JSONL and CSV reports.
-  Without it, the collected numbers are discarded with a warning.
+* ``--nvte-benchmark-report-dir`` -- where to write the JSON, JSONL and CSV reports.
+  Required, so a timed run cannot end with its numbers discarded.

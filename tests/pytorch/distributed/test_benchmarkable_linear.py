@@ -5,6 +5,8 @@
 
 import datetime
 import math
+import pathlib
+import sys
 
 import pytest
 import torch
@@ -13,11 +15,9 @@ import torch.distributed as dist
 import transformer_engine.pytorch as te
 from transformer_engine.common.testing import Case, CaseSkip, benchmark
 
-# Defined here rather than imported: tests/pytorch is not on sys.path from this
-# subdirectory, which is why the other distributed tests carry their own tolerances.
-# Loose because the two paths reduce differently: the parallel one sums four partial
-# products across ranks, the reference reduces all hidden_size terms at once.
-_TOLS = {torch.bfloat16: {"rtol": 2e-2, "atol": 2e-2}}
+# Prepend so installed packages with a top-level utils module cannot shadow the test helpers.
+sys.path = [str(pathlib.Path(__file__).resolve().parent.parent)] + sys.path
+from utils import dtype_tols
 
 NUM_GPUS = min(4, torch.cuda.device_count())
 
@@ -38,8 +38,8 @@ def test_row_parallel_linear(hidden_size, dtype):
             init_method=f"tcp://{coordinator_addr}:{coordinator_port}",
             rank=rank,
             world_size=world,
-            # The harness enforces its own budget too; this one lets a wedged collective
-            # surface as an error in the rank rather than as a killed process.
+            # Shorter than the harness budget, so a wedged collective surfaces as a rank
+            # error rather than as a killed process.
             timeout=datetime.timedelta(seconds=120),
             device_id=torch.device(f"cuda:{rank}"),
         )
@@ -62,8 +62,7 @@ def test_row_parallel_linear(hidden_size, dtype):
         shard = hidden_size // world
         torch.manual_seed(1234)
         x_full = torch.randn(batch, hidden_size, device="cuda", dtype=dtype)
-        # Scaled so outputs are O(1); unscaled randn would make a bf16 reduction over
-        # hidden_size terms produce values whose absolute error dwarfs any sane atol.
+        # Scaled so outputs are O(1) in bf16.
         w_full = torch.randn(hidden_size, hidden_size, device="cuda", dtype=dtype) / math.sqrt(
             hidden_size
         )
@@ -102,7 +101,11 @@ def test_row_parallel_linear(hidden_size, dtype):
             return state["x_full"] @ state["w_full"].transpose(0, 1)
 
     def verify(actual, expected):
-        torch.testing.assert_close(actual, expected, **_TOLS[dtype])
+        tols = dtype_tols(dtype)
+        # Wider than the shared atol: the parallel path sums one partial product per rank
+        # while the reference reduces all hidden_size terms at once.
+        tols["atol"] = 2e-2
+        torch.testing.assert_close(actual, expected, **tols)
 
     return Case(
         setup=setup,

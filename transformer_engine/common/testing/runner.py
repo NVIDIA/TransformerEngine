@@ -8,7 +8,7 @@ from __future__ import annotations
 import os
 import time
 
-from .case import Case, axis_value
+from .case import Case, CaseSkip, axis_value
 from .device import synchronize
 from .distributed import launch
 from .timing import TIMING_METHOD, WallClockSampler, timing_stats
@@ -22,7 +22,7 @@ def _framework_for(pyfuncitem) -> str:
     return "pytorch"
 
 
-def _run_correctness(case: Case) -> None:
+def run_correctness(case: Case) -> None:
     """Run one setup/evaluate/reference/verify cycle with no timing."""
     current = launch()
     state = (
@@ -34,26 +34,37 @@ def _run_correctness(case: Case) -> None:
     )
     try:
         state = case.setup(state)
-        actual = case.evaluate(state)
-        if case.reference is None:
-            return
-        # ``synchronize(actual)`` must precede ``reset(state)``: ``actual`` may alias
-        # ``state``, so an eager ``reset`` would race with in-flight ``evaluate`` work.
-        # ``reset`` must precede ``reference`` so it sees unmutated state.
-        synchronize(actual)
-        if case.reset is not None:
-            case.reset(state)
-        expected = case.reference(state)
-        synchronize(expected)
-        case.verify(actual, expected)
+        try:
+            if case.reference is None:
+                # Still synchronized: this is the only place an async CUDA fault in
+                # ``evaluate`` becomes an error attributable to this test.
+                synchronize(case.evaluate(state))
+            else:
+                _verify_once(case, state)
+        except CaseSkip as exc:
+            raise RuntimeError(
+                f"CaseSkip raised after setup() returned: {exc}. Only setup() may skip."
+            ) from exc
     finally:
-        # The harness owns teardown so a Case callable never has to be defensive: a
-        # CaseSkip from setup or a failing verify still releases the communicator.
         if case.dist_clean is not None:
             case.dist_clean(state)
 
 
-def _run_benchmark_point(case, settings, pyfuncitem):
+def _verify_once(case, state) -> None:
+    """Evaluate once and check it against the reference."""
+    actual = case.evaluate(state)
+    # ``synchronize(actual)`` must precede ``reset(state)``: ``actual`` may alias
+    # ``state``, so an eager ``reset`` would race with in-flight ``evaluate`` work.
+    # ``reset`` must precede ``reference`` so it sees unmutated state.
+    synchronize(actual)
+    if case.reset is not None:
+        case.reset(state)
+    expected = case.reference(state)
+    synchronize(expected)
+    case.verify(actual, expected)
+
+
+def run_benchmark_point(case, settings, pyfuncitem) -> list[dict]:
     """Gate once on correctness, then time evaluate and optionally reference."""
     current = launch()
     state = (
@@ -64,25 +75,21 @@ def _run_benchmark_point(case, settings, pyfuncitem):
         else None
     )
     try:
-        state = case.setup(state)
-
         precondition_verified = False
         if case.reference is not None:
-            actual = case.evaluate(state)
-            # Same ordering rule as ``_run_correctness``: synchronize before reset.
-            synchronize(actual)
+            # The gate owns this setup; _time_variant does its own. Without a reference
+            # there is nothing to gate, so no setup happens here at all.
+            state = case.setup(state)
+            try:
+                _verify_once(case, state)
+            except CaseSkip as exc:
+                raise RuntimeError(
+                    f"CaseSkip raised after setup() returned: {exc}. Only setup() may skip."
+                ) from exc
+            precondition_verified = True
+            # Release the gate's test data before _time_variant calls setup() again.
             if case.reset is not None:
                 case.reset(state)
-            expected = case.reference(state)
-            synchronize(expected)
-            case.verify(actual, expected)
-            precondition_verified = True
-
-        # Invariant: setup() is never called twice without a reset() in between. The
-        # next setup happens inside _time_variant, so this is the boundary that would
-        # otherwise leave the gate's test data unreleased.
-        if case.reset is not None:
-            case.reset(state)
 
         variants = [("evaluation", case.evaluate)]
         if case.reference is not None and case.time_reference and not settings["no_reference"]:
@@ -109,8 +116,6 @@ def _run_benchmark_point(case, settings, pyfuncitem):
             records.append(record)
         return records
     finally:
-        # The harness owns teardown so a Case callable never has to be defensive: a
-        # CaseSkip from setup or a failing verify still releases the communicator.
         if case.dist_clean is not None:
             case.dist_clean(state)
 
@@ -143,9 +148,7 @@ def _time_variant(
         len(samples_ms) < settings["iterations"]
         or time.perf_counter() - start < settings["min_run_time"]
     ):
-        # Align ranks outside the measured interval: a rank arriving late would
-        # otherwise have its wait recorded as this operation's cost on every rank that
-        # arrived on time.
+        # Align ranks outside the measured interval.
         if case.barrier is not None:
             case.barrier(state)
         samples_ms.append(sampler(function, state))
@@ -164,7 +167,9 @@ def _time_variant(
             "timing_method": TIMING_METHOD,
             "samples_ms": samples_ms,
             "timing": stats,
-            "metrics": _metrics(case, stats["median_ms"]),
+            # bytes_moved/flops describe ``evaluate``; the reference almost always moves
+            # a different amount, so it gets no derived metrics.
+            "metrics": _metrics(case, stats["median_ms"]) if variant == "evaluation" else {},
         }
     )
     return record, state
@@ -184,10 +189,7 @@ def _metrics(case, median_ms):
 def _base_record(pyfuncitem, variant, precondition_verified):
     """Build the record fields that are known before timing runs."""
     params = {name: axis_value(v) for name, v in pyfuncitem.callspec.params.items()}
-    # world_size is workload identity, so it rides in params and therefore reaches both
-    # case_id and record_key: a 4-rank run is a different workload from an 8-rank one.
-    # rank is not -- it is a separate field, keyed on only so N ranks' records cannot
-    # collapse into one another.
+    # world_size is workload identity and rides in params; rank is a separate field.
     current = launch()
     world = None if current is None else current.world_size
     if world is not None:

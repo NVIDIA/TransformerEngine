@@ -12,7 +12,7 @@ import subprocess
 from typing import Any
 
 # Cubin sections from ``cuobjdump --list-elf``, e.g. ``libtransformer_engine.4.sm_103a.cubin``.
-# The ``[af]`` group must stay: dropping the Blackwell ``a``/``f`` suffix yields the wrong arch.
+# The ``[af]`` group keeps the Blackwell suffix in the recorded architecture string.
 _ELF_ARCH = re.compile(r"\.sm_(\d+)([af]?)\.cubin")
 
 
@@ -38,7 +38,8 @@ def cuda_available() -> bool:
 
 
 def synchronize(output: Any = None) -> None:
-    """Block until all device work, including ``output``, has completed."""
+    """Block until all device work, including ``output``, has completed, or return
+    without blocking when cuda-python is absent."""
     _block_until_ready(output)
     runtime = _runtime()
     if runtime is None:
@@ -62,26 +63,6 @@ def _block_until_ready(value: Any) -> None:
     elif isinstance(value, (list, tuple)):
         for item in value:
             _block_until_ready(item)
-
-
-def profiler_start() -> bool:
-    """Start CUDA profiler capture, reporting whether it actually started."""
-    runtime = _runtime()
-    if runtime is None:
-        return False
-    error = runtime.cudaProfilerStart()
-    error = error[0] if isinstance(error, tuple) else error
-    return int(error) == 0
-
-
-def profiler_stop() -> bool:
-    """Stop CUDA profiler capture, reporting whether it stopped cleanly."""
-    runtime = _runtime()
-    if runtime is None:
-        return False
-    error = runtime.cudaProfilerStop()
-    error = error[0] if isinstance(error, tuple) else error
-    return int(error) == 0
 
 
 def device_metadata() -> dict[str, Any]:
@@ -142,7 +123,7 @@ def device_architecture() -> str | None:
 def build_architectures() -> dict[str, Any]:
     """Return the SASS architectures embedded in the loaded ``libtransformer_engine.so``.
 
-    Yields ``{"available": False, "reason": ...}`` when they cannot be read.
+    Returns ``{"available": False, "reason": ...}`` when they cannot be read.
     """
     from transformer_engine.common import _get_shared_object_file
 

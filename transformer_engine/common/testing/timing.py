@@ -35,14 +35,8 @@ class WallClockSampler:
 def timing_stats(samples_ms: list[float]) -> dict[str, float]:
     """Compute timing statistics in milliseconds."""
     if not samples_ms:
-        return {
-            "median_ms": 0.0,
-            "mean_ms": 0.0,
-            "min_ms": 0.0,
-            "max_ms": 0.0,
-            "stddev_ms": 0.0,
-            "p95_ms": 0.0,
-        }
+        # Zeros would be written into a report as a real measurement.
+        raise ValueError("timing_stats received no samples.")
 
     ordered = sorted(samples_ms)
     p95_index = max(0, math.ceil(0.95 * len(ordered)) - 1)

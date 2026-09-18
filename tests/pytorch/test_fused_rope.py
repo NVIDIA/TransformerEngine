@@ -100,9 +100,8 @@ def test_fused_rope(
         return {"t": t, "start_positions": sp, "emb": emb}
 
     def reset(state):
-        # A no-op here (the cp_rank loop already clears `t.grad`); declared to
-        # exercise the runner's reset contract, whose presence pins this case to
-        # batchable=False / inner_iterations=1.
+        # t.grad is already None here; reset is declared to pin this case to one inner
+        # iteration.
         state["t"].grad = None
 
     def evaluate(state):
@@ -122,10 +121,8 @@ def test_fused_rope(
             loss_fused = loss_func(output_fused)
             loss_fused.backward()
             grad_fused = t.grad.detach()
-            # detach() without clone(): the `t.grad = None` below is what keeps the
-            # capture alias-free -- the next backward() installs a fresh buffer
-            # instead of accumulating into what `grad_fused` aliases. Removing or
-            # reordering it silently corrupts every earlier capture.
+            # t.grad = None keeps grad_fused alias-free: the next backward() installs a
+            # fresh buffer instead of accumulating into what grad_fused aliases.
             t.grad = None
             outputs.append((output_fused, grad_fused))
         return tuple(outputs)
@@ -149,8 +146,7 @@ def test_fused_rope(
             loss_unfused = loss_func(output_unfused)
             loss_unfused.backward()
             grad_unfused = t.grad.detach()
-            # detach() without clone(); as in evaluate(), the `t.grad = None` below
-            # is what keeps the capture alias-free.
+            # As in evaluate().
             t.grad = None
             outputs.append((output_unfused, grad_unfused))
         return tuple(outputs)

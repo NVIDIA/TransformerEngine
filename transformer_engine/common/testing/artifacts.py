@@ -32,18 +32,14 @@ def write_run_artifacts(
     records: list[dict[str, Any]],
     command: list[str],
     selection: dict[str, Any],
-    sharding: dict[str, Any] | None = None,
-    report_name: str = "benchmark_report.json",
-    records_name: str = "benchmark_records.jsonl",
-    summary_name: str = "benchmark_summary.csv",
 ) -> dict[str, Path]:
     """Write JSON, JSONL and CSV artifacts for one benchmark run."""
     output_dir.mkdir(parents=True, exist_ok=True)
-    report = build_report(records, command, selection, sharding=sharding)
+    report = build_report(records, command, selection)
 
-    report_path = output_dir / report_name
-    records_path = output_dir / records_name
-    summary_path = output_dir / summary_name
+    report_path = output_dir / "benchmark_report.json"
+    records_path = output_dir / "benchmark_records.jsonl"
+    summary_path = output_dir / "benchmark_summary.csv"
 
     _write_json(report_path, report)
     _write_jsonl(records_path, records)
@@ -55,7 +51,6 @@ def build_report(
     records: list[dict[str, Any]],
     command: list[str],
     selection: dict[str, Any],
-    sharding: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a self-contained machine-readable benchmark report."""
     status_counts: dict[str, int] = {}
@@ -69,7 +64,6 @@ def build_report(
         "command": command,
         "selection": selection,
         "environment": collect_environment(command),
-        "sharding": sharding or {"enabled": False},
         "summary": {
             "record_count": len(records),
             "status_counts": status_counts,
@@ -105,51 +99,6 @@ def collect_environment(command: list[str] | None = None) -> dict[str, Any]:
     }
 
 
-def merge_worker_reports(
-    output_dir: Path,
-    worker_report_paths: list[Path],
-    command: list[str],
-    selection: dict[str, Any],
-    sharding: dict[str, Any],
-) -> dict[str, Path]:
-    """Merge worker reports into the standard top-level artifact set."""
-    merged_records: list[dict[str, Any]] = []
-    worker_summaries = []
-    unreadable_reports = []
-    for report_path in sorted(worker_report_paths):
-        try:
-            with report_path.open("r", encoding="utf-8") as handle:
-                report = json.load(handle)
-        except (OSError, json.JSONDecodeError) as exc:
-            unreadable_reports.append({"path": str(report_path), "reason": str(exc)})
-            continue
-        worker_summaries.append(
-            {
-                "path": str(report_path),
-                "summary": report.get("summary", {}),
-                "selection": report.get("selection", {}),
-            }
-        )
-        merged_records.extend(report.get("records", []))
-
-    expected_records = _expected_records_from_worker_summaries(worker_summaries)
-    sharding = dict(sharding)
-    sharding["worker_reports"] = worker_summaries
-    sharding["unreadable_worker_reports"] = unreadable_reports
-    sharding["merge_validation"] = _validate_merged_records(
-        merged_records,
-        expected_records=expected_records,
-        unreadable_reports=unreadable_reports,
-    )
-    return write_run_artifacts(
-        output_dir,
-        merged_records,
-        command,
-        selection,
-        sharding=sharding,
-    )
-
-
 def record_key(record: dict[str, Any]) -> str:
     """Return a deterministic key for comparing benchmark records."""
     key = {
@@ -163,56 +112,6 @@ def record_key(record: dict[str, Any]) -> str:
         "params": {name: axis_value(value) for name, value in record.get("params", {}).items()},
     }
     return json.dumps(key, sort_keys=True, separators=(",", ":"))
-
-
-def _validate_merged_records(
-    records: list[dict[str, Any]],
-    expected_records: list[dict[str, Any]] | None = None,
-    unreadable_reports: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    counts: dict[str, int] = {}
-    for record in records:
-        key = record_key(record)
-        counts[key] = counts.get(key, 0) + 1
-    duplicates = sorted(key for key, count in counts.items() if count > 1)
-    missing = []
-    if expected_records is not None:
-        expected_keys = sorted({record_key(record) for record in expected_records})
-        missing = sorted(key for key in expected_keys if key not in counts)
-    unreadable = unreadable_reports or []
-    return {
-        "record_count": len(records),
-        "unique_record_count": len(counts),
-        "duplicate_keys": duplicates,
-        "missing_keys": missing,
-        "unreadable_report_count": len(unreadable),
-        "valid": not duplicates and not missing and not unreadable,
-    }
-
-
-def _expected_records_from_worker_summaries(
-    worker_summaries: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    expected_records = []
-    for worker in worker_summaries:
-        selection = worker.get("selection", {})
-        include_reference = selection.get("include_reference", True)
-        for case in selection.get("selected_cases", []):
-            variants = []
-            if include_reference and case.get("has_reference"):
-                variants.append("reference")
-            variants.append("evaluation")
-            for variant in variants:
-                expected_records.append(
-                    {
-                        "case_id": case.get("case_id"),
-                        "framework": case.get("framework"),
-                        "operation": case.get("operation"),
-                        "variant": variant,
-                        "params": case.get("params", {}),
-                    }
-                )
-    return expected_records
 
 
 def _write_json(path: Path, data: dict[str, Any]) -> None:
@@ -238,10 +137,11 @@ def _write_summary_csv(path: Path, records: list[dict[str, Any]]) -> None:
         "variant",
         "component",
         "operation",
+        "rank",
+        "world_size",
         "median_ms",
         "mean_ms",
         "p95_ms",
-        "reason",
     ]
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
@@ -256,10 +156,11 @@ def _write_summary_csv(path: Path, records: list[dict[str, Any]]) -> None:
                     "variant": record.get("variant"),
                     "component": record.get("component"),
                     "operation": record.get("operation"),
+                    "rank": record.get("rank"),
+                    "world_size": record.get("world_size"),
                     "median_ms": timing.get("median_ms"),
                     "mean_ms": timing.get("mean_ms"),
                     "p95_ms": timing.get("p95_ms"),
-                    "reason": record.get("reason"),
                 }
             )
 
@@ -299,6 +200,7 @@ def _framework_versions() -> dict[str, str | None]:
 
 
 def _module_version(module_name: str) -> str | None:
+    # sys.modules only: importing a framework here would pull it into every run.
     module = sys.modules.get(module_name)
     if module is None:
         return None
@@ -315,7 +217,7 @@ def _scheduler_metadata() -> dict[str, Any]:
         "SLURM_STEP_GPUS",
     ]
     metadata = {name: os.environ.get(name) for name in names if os.environ.get(name) is not None}
-    visible_devices = visible_cuda_devices()
+    visible_devices = parse_device_list(os.environ.get("CUDA_VISIBLE_DEVICES"))
     allocated_devices = scheduler_allocated_devices()
     metadata.update(
         {
@@ -335,11 +237,6 @@ def scheduler_allocated_devices() -> list[str]:
         if devices:
             return devices
     return []
-
-
-def visible_cuda_devices() -> list[str]:
-    """Return the devices named by ``CUDA_VISIBLE_DEVICES``."""
-    return parse_device_list(os.environ.get("CUDA_VISIBLE_DEVICES"))
 
 
 def parse_device_list(raw: str | None) -> list[str]:

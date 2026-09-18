@@ -40,7 +40,8 @@ class _Benchmark:
     """Implements the ``benchmark`` decorator."""
 
     def __call__(self, argnames, values):
-        """Declare the values one axis takes in benchmark mode.
+        """Mark a test Case-bearing and benchmark-eligible, and declare the values one
+        axis takes when benchmarking.
 
         ``argnames`` accepts the same forms as ``pytest.mark.parametrize``. Applies to a
         function, a method, or a class.

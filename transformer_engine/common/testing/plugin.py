@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import inspect
-import os
 from pathlib import Path
 import sys
 from typing import Any
@@ -16,7 +15,6 @@ import pytest
 
 from .artifacts import write_run_artifacts
 from .case import Case, CaseSkip
-from .distributed import LAUNCH_ENV, launch, run_across_ranks
 from .declaration import declared_axes, normalize_argnames, set_plugin_active
 from .decorator import (
     BENCHMARK_MARKER,
@@ -27,7 +25,8 @@ from .decorator import (
     SUPPRESS_MARKER,
 )
 from .device import build_architectures, cuda_available, device_architecture
-from .runner import _run_benchmark_point, _run_correctness
+from .distributed import LAUNCH_ENV, launch, run_across_ranks
+from .runner import run_benchmark_point, run_correctness
 from .timing import TIMING_METHOD
 
 
@@ -73,8 +72,7 @@ def _resolve_mode(config) -> str:
 
 def pytest_configure(config):
     """Resolve the mode before test modules are imported, and register markers."""
-    # Ahead of the double-fire guard, so a second registered copy of this hook still
-    # sets the flag; Case.__post_init__ reads it to detect a plugin-less session.
+    # Ahead of the double-fire guard, so a second registered copy still sets the flag.
     set_plugin_active(True)
 
     if getattr(config, "_benchmarkable_configured", False):
@@ -84,6 +82,11 @@ def pytest_configure(config):
     for name, description in MARKERS:
         config.addinivalue_line("markers", f"{name}: {description}")
 
+    # Owned here rather than by an ini file: a Case-bearing test the plugin does not claim
+    # falls through to pytest, and this is what stops it passing having verified nothing.
+    # An ini entry would be lost to whichever pytest.ini wins in a given directory.
+    config.addinivalue_line("filterwarnings", "error::pytest.PytestReturnNotNoneWarning")
+
     if _resolve_mode(config) == MODE_CORRECTNESS:
         return
 
@@ -91,6 +94,16 @@ def pytest_configure(config):
         raise pytest.UsageError("--nvte-benchmark-inner-iterations must be at least 1.")
     if config.getoption("--nvte-benchmark-iterations") < 1:
         raise pytest.UsageError("--nvte-benchmark-iterations must be at least 1.")
+    if not config.option.collectonly and not config.getoption("--nvte-benchmark-report-dir"):
+        raise pytest.UsageError(
+            "--nvte-benchmark needs --nvte-benchmark-report-dir; without it the run is timed"
+            " and then discarded."
+        )
+
+
+def pytest_unconfigure(config):  # pylint: disable=unused-argument
+    """Clear the plugin-active flag so a later plugin-less session is still detected."""
+    set_plugin_active(False)
 
 
 def _is_case_bearing(node) -> bool:
@@ -258,17 +271,17 @@ def pytest_generate_tests(metafunc):
                         key = normalize_argnames(mark.args[0])
                         if key in declarations:
                             saved.append((markers, index, mark))
+                            # **mark.kwargs matters: dropping indirect= would feed the
+                            # test the raw value instead of the fixture's product.
                             markers[index] = pytest.mark.parametrize(
-                                mark.args[0], declarations[key]
+                                mark.args[0], declarations[key], **mark.kwargs
                             ).mark
                 node = getattr(node, "parent", None)
             _check_own_declarations_matched(metafunc, own, saved)
             _substitutions(metafunc.config)[_definition_key(metafunc.definition)] = bool(saved)
         yield
     finally:
-        # Class- and module-level marks are shared, so a substituted mark left in place
-        # corrupts every sibling test for the rest of the session. The finally must
-        # therefore span the validation calls and the yield, not just the swap loop.
+        # Class- and module-level marks are shared, so every substitution must be undone.
         for markers, index, original in saved:
             markers[index] = original
 
@@ -309,18 +322,18 @@ def pytest_pyfunc_call(pyfuncitem):
     if case.dist_init is not None and launch() is None:
         return _launch_ranks(pyfuncitem, case)
 
-    # CaseSkip from setup() is a coverage skip (unavailable backend or arch), not a
-    # failure.
+    # CaseSkip from setup() is a coverage skip, not a failure; the runner rejects one
+    # raised anywhere else.
     if _resolve_mode(pyfuncitem.config) == MODE_CORRECTNESS:
         try:
-            _run_correctness(case)
+            run_correctness(case)
         except CaseSkip as exc:
             pytest.skip(str(exc))
         return True
 
     settings = benchmark_settings(pyfuncitem.config)
     try:
-        records = _run_benchmark_point(case, settings, pyfuncitem)
+        records = run_benchmark_point(case, settings, pyfuncitem)
     except CaseSkip as exc:
         pytest.skip(str(exc))
     _record_store(pyfuncitem.config).extend(records)
@@ -347,13 +360,10 @@ def _launch_ranks(pyfuncitem, case):
             " would leave the sampling loop after different numbers of iterations, and"
             " their barrier counts would diverge until the launch deadlocked."
         )
-    records = run_across_ranks(pyfuncitem, case, settings)
-    if benchmarking and not records:
-        # Every rank exited cleanly and wrote nothing, which is what a CaseSkip on each
-        # rank looks like from here. Reporting a pass would claim coverage none of them
-        # produced.
-        pytest.skip("every rank skipped, so this point produced no measurement")
-    _record_store(pyfuncitem.config).extend(records)
+    result = run_across_ranks(pyfuncitem, case, settings)
+    if result.skip_reason is not None:
+        pytest.skip(result.skip_reason)
+    _record_store(pyfuncitem.config).extend(result.records)
     return True
 
 
@@ -376,8 +386,7 @@ def _dispose_of_non_case(pyfuncitem, result):
         )
     if _resolve_mode(pyfuncitem.config) == MODE_BENCHMARK:
         pytest.skip("returns no Case, so it is not a benchmark point.")
-    # Mirrors _pytest/python.py::pytest_pyfunc_call, which owns this test in every other
-    # respect: an inherited declaration is a blanket statement, not a per-method claim.
+    # Mirrors _pytest/python.py::pytest_pyfunc_call for a test this plugin does not own.
     if result is not None:
         warnings.warn(
             pytest.PytestReturnNotNoneWarning(
@@ -399,15 +408,6 @@ def pytest_sessionfinish(session, exitstatus):  # pylint: disable=unused-argumen
     if not records:
         return
     settings = benchmark_settings(config)
-    if settings["report_dir"] is None:
-        print(
-            f"\nWarning: {len(records)} benchmark record(s) were collected but "
-            "--nvte-benchmark-report-dir was not set, so they were discarded. Pass "
-            "--nvte-benchmark-report-dir to write a benchmark_report/v1 artifact.",
-            file=sys.stderr,
-        )
-        return
-
     selection = {
         "mode": settings["mode"],
         "warmup": settings["warmup"],
@@ -420,7 +420,7 @@ def pytest_sessionfinish(session, exitstatus):  # pylint: disable=unused-argumen
     }
     # Only argv[0]'s basename is kept: the full launcher path leaks the invoking user's
     # home directory into every persisted report, and selection["args"] has the rest.
-    command = [os.path.basename(sys.argv[0])] + list(sys.argv[1:])
+    command = [Path(sys.argv[0]).name] + list(sys.argv[1:])
     paths = write_run_artifacts(
         settings["report_dir"],
         records,
