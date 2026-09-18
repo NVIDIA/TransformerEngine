@@ -3765,7 +3765,14 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             thd_cu_seqlens_q_per_step[i] if qkv_format == "thd" else cu_seqlens_q
                         )
                         fa_cu_seqlens_kv = cu_seqlens_kv_per_step[i]
-                        if (use_flash_attn_3 or use_flash_attn_4) and qkv_format == "thd":
+                        if (
+                            (use_flash_attn_3 or use_flash_attn_4)
+                            and qkv_format == "thd"
+                            # NO_LOAD_BALANCE buffers are already compact, so their
+                            # cu_seqlens carry both offsets and sequence lengths.
+                            and load_balancing_strategy
+                            is not CPLoadBalancingStrategy.NO_LOAD_BALANCE
+                        ):
                             seqused_q = (
                                 thd_cu_seqlens_q_per_step[i][1:] - thd_cu_seqlens_q_per_step[i][:-1]
                             )
@@ -4369,8 +4376,13 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                         )
                         fa_cu_seqlens_kv = cu_seqlens_kv_per_step[i]
                         if (
-                            ctx.use_flash_attn_3 or ctx.use_flash_attn_4
-                        ) and ctx.qkv_format == "thd":
+                            (ctx.use_flash_attn_3 or ctx.use_flash_attn_4)
+                            and ctx.qkv_format == "thd"
+                            and (
+                                ctx.load_balancing_strategy
+                                is not CPLoadBalancingStrategy.NO_LOAD_BALANCE
+                            )
+                        ):
                             seqused_q = (
                                 thd_cu_seqlens_q_per_step[i][1:] - thd_cu_seqlens_q_per_step[i][:-1]
                             )
