@@ -1,0 +1,246 @@
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+"""Artifact helpers for benchmarkable runs."""
+
+from __future__ import annotations
+
+import csv
+from datetime import datetime, timezone
+import json
+import os
+from pathlib import Path
+import platform
+import socket
+import subprocess
+import sys
+from typing import Any
+
+from .case import axis_value
+from .device import build_architectures, device_metadata
+
+
+REPORT_SCHEMA_VERSION = "benchmark_report/v1"
+
+# .../transformer_engine/common/testing/artifacts.py -> testing -> common
+# -> transformer_engine -> repo root
+REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+def write_run_artifacts(
+    output_dir: Path,
+    records: list[dict[str, Any]],
+    command: list[str],
+    selection: dict[str, Any],
+) -> dict[str, Path]:
+    """Write JSON, JSONL and CSV artifacts for one benchmark run."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    report = build_report(records, command, selection)
+
+    report_path = output_dir / "benchmark_report.json"
+    records_path = output_dir / "benchmark_records.jsonl"
+    summary_path = output_dir / "benchmark_summary.csv"
+
+    _write_json(report_path, report)
+    _write_jsonl(records_path, records)
+    _write_summary_csv(summary_path, records)
+    return {"report": report_path, "records": records_path, "summary": summary_path}
+
+
+def build_report(
+    records: list[dict[str, Any]],
+    command: list[str],
+    selection: dict[str, Any],
+) -> dict[str, Any]:
+    """Build a self-contained machine-readable benchmark report."""
+    status_counts: dict[str, int] = {}
+    for record in records:
+        status = str(record.get("status", "unknown"))
+        status_counts[status] = status_counts.get(status, 0) + 1
+
+    return {
+        "schema_version": REPORT_SCHEMA_VERSION,
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "command": command,
+        "selection": selection,
+        "environment": collect_environment(command),
+        "summary": {
+            "record_count": len(records),
+            "status_counts": status_counts,
+        },
+        "records": records,
+    }
+
+
+def collect_environment(command: list[str] | None = None) -> dict[str, Any]:
+    """Collect the environment metadata recorded with a run."""
+    return {
+        "python": {
+            "version": sys.version,
+            "executable": sys.executable,
+        },
+        "platform": {
+            "system": platform.system(),
+            "release": platform.release(),
+            "machine": platform.machine(),
+            "processor": platform.processor(),
+            "python_implementation": platform.python_implementation(),
+        },
+        "host": {
+            "hostname": socket.gethostname(),
+            "cpu_count": os.cpu_count(),
+        },
+        "git": _git_metadata(),
+        "frameworks": _framework_versions(),
+        "devices": {"cuda": device_metadata()},
+        "build": build_architectures(),
+        "scheduler": _scheduler_metadata(),
+        "command": command or [],
+    }
+
+
+def record_key(record: dict[str, Any]) -> str:
+    """Return a deterministic key for comparing benchmark records."""
+    key = {
+        "case_id": record.get("case_id"),
+        "framework": record.get("framework"),
+        "operation": record.get("operation"),
+        "variant": record.get("variant"),
+        # Without rank, every rank of one launch shares a key and compare.py's
+        # ``records[record_key(record)] = record`` keeps only the last one seen.
+        "rank": record.get("rank"),
+        "params": {name: axis_value(value) for name, value in record.get("params", {}).items()},
+    }
+    return json.dumps(key, sort_keys=True, separators=(",", ":"))
+
+
+def _write_json(path: Path, data: dict[str, Any]) -> None:
+    with path.open("w", encoding="utf-8") as handle:
+        # default=str: ``params`` hold pytest parametrize values, which are not always
+        # JSON-native (a JAX dtype is a bare type object, not a serializable instance).
+        json.dump(data, handle, indent=2, sort_keys=True, default=str)
+        handle.write("\n")
+
+
+def _write_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
+    with path.open("w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record, sort_keys=True, default=str))
+            handle.write("\n")
+
+
+def _write_summary_csv(path: Path, records: list[dict[str, Any]]) -> None:
+    fields = [
+        "status",
+        "framework",
+        "case_id",
+        "variant",
+        "component",
+        "operation",
+        "rank",
+        "world_size",
+        "median_ms",
+        "mean_ms",
+        "p95_ms",
+    ]
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        for record in records:
+            timing = record.get("timing", {})
+            writer.writerow(
+                {
+                    "status": record.get("status"),
+                    "framework": record.get("framework"),
+                    "case_id": record.get("case_id"),
+                    "variant": record.get("variant"),
+                    "component": record.get("component"),
+                    "operation": record.get("operation"),
+                    "rank": record.get("rank"),
+                    "world_size": record.get("world_size"),
+                    "median_ms": timing.get("median_ms"),
+                    "mean_ms": timing.get("mean_ms"),
+                    "p95_ms": timing.get("p95_ms"),
+                }
+            )
+
+
+def _git_metadata() -> dict[str, Any]:
+    return {
+        "commit": _run_git(["rev-parse", "HEAD"]),
+        "branch": _run_git(["rev-parse", "--abbrev-ref", "HEAD"]),
+        "dirty": bool(_run_git(["status", "--porcelain"])),
+    }
+
+
+def _run_git(args: list[str]) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            check=False,
+            capture_output=True,
+            encoding="utf-8",
+            cwd=REPO_ROOT,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def _framework_versions() -> dict[str, str | None]:
+    versions: dict[str, str | None] = {
+        "transformer_engine": _module_version("transformer_engine"),
+        "torch": _module_version("torch"),
+        "jax": _module_version("jax"),
+        "jaxlib": _module_version("jaxlib"),
+    }
+    return versions
+
+
+def _module_version(module_name: str) -> str | None:
+    # sys.modules only: importing a framework here would pull it into every run.
+    module = sys.modules.get(module_name)
+    if module is None:
+        return None
+    return getattr(module, "__version__", None)
+
+
+def _scheduler_metadata() -> dict[str, Any]:
+    names = [
+        "CUDA_VISIBLE_DEVICES",
+        "SLURM_JOB_ID",
+        "SLURM_JOB_GPUS",
+        "SLURM_GPUS",
+        "SLURM_GPUS_ON_NODE",
+        "SLURM_STEP_GPUS",
+    ]
+    metadata = {name: os.environ.get(name) for name in names if os.environ.get(name) is not None}
+    visible_devices = parse_device_list(os.environ.get("CUDA_VISIBLE_DEVICES"))
+    allocated_devices = scheduler_allocated_devices()
+    metadata.update(
+        {
+            "visible_cuda_devices": visible_devices,
+            "visible_gpu_count": len(visible_devices),
+            "scheduler_allocated_devices": allocated_devices,
+            "scheduler_allocated_gpu_count": len(allocated_devices),
+        }
+    )
+    return metadata
+
+
+def scheduler_allocated_devices() -> list[str]:
+    """Return the device list the job scheduler allocated to this process."""
+    for name in ("SLURM_STEP_GPUS", "SLURM_JOB_GPUS", "CUDA_VISIBLE_DEVICES"):
+        devices = parse_device_list(os.environ.get(name))
+        if devices:
+            return devices
+    return []
+
+
+def parse_device_list(raw: str | None) -> list[str]:
+    """Split a comma-separated device list, dropping empty entries."""
+    if raw is None:
+        return []
+    return [item.strip() for item in raw.split(",") if item.strip()]
