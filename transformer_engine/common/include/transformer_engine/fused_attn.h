@@ -660,7 +660,7 @@ void nvte_populate_rng_state_async(NVTETensor rng_state_dst, const NVTETensor se
                                    size_t q_max_seqlen, size_t kv_max_seqlen,
                                    NVTE_Fused_Attn_Backend backend, cudaStream_t stream);
 
-/*!  \brief Get KV format for a given QKV layout.
+/*!  \brief Count the non-empty segments in a batch of cumulative sequence lengths.
  *
  * \warning   This API is **experimental** and subject to change.
  *
@@ -668,6 +668,10 @@ void nvte_populate_rng_state_async(NVTETensor rng_state_dst, const NVTETensor se
  *  \param[in]     workspace                Workspace tensor.
  *  \param[in]     len                      batch_size x sequence_length.
  *  \param[in]     stream                   CUDA stream used for this operation.
+ *
+ *  \deprecated Transformer Engine no longer calls this function. It worked around cuDNN versions
+ *              before 9.3, which could not handle an actual sequence length of 0, and is
+ *              scheduled for removal in a future release.
  */
 uint32_t nvte_get_runtime_num_segments(NVTETensor cu_seqlens, NVTETensor workspace, size_t len,
                                        cudaStream_t stream);
