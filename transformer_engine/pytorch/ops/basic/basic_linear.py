@@ -96,6 +96,9 @@ def _save_quantized_input(args: BasicLinearFwdArgs) -> bool:
         args.with_quantized_compute
         and args.backward_override != "high_precision"
         and args.weight_requires_grad
+        # Column SP gathers/quantizes a separate tensor; the saved local input
+        # is still the caller's tensor and must not be returned as fresh FP8 aux.
+        and not (args.tensor_parallel_mode == "column" and args.sequence_parallel)
         and not is_quantized_tensor(args.input_)
         and not (isinstance(args.input_, TensorSpec) and args.input_.quantizer is not None)
     )
@@ -1060,8 +1063,6 @@ class BasicLinear(BasicOperation):
     bwd_args_type = BasicLinearBwdArgs
 
     def compile_unsupported_reason(self, mode: str) -> Optional[str]:
-        if self.tensor_parallel_mode is not None:
-            return "tensor parallel BasicLinear"
         if self._accumulate_into_main_grad:
             return "accumulate_into_main_grad"
         if is_cpu_offload_enabled():
@@ -1110,15 +1111,11 @@ class BasicLinear(BasicOperation):
 
     @classmethod
     def forward_compute(cls, args: BasicLinearFwdArgs):
-        return cls._forward_compute(args)
-
-    @classmethod
-    def _forward_compute(cls, args: BasicLinearFwdArgs, *, bias=None):
         """Shared GEMM and saved tensors, optionally with a fused bias epilogue."""
         output, saved_input, saved_weight = cls._functional_forward(
             input=args.input_,
             weight=args.weight,
-            bias=bias,
+            bias=args.bias,
             dtype=args.dtype,
             input_requires_grad=args.input_requires_grad,
             weight_requires_grad=args.weight_requires_grad,
@@ -1142,11 +1139,23 @@ class BasicLinear(BasicOperation):
 
     @classmethod
     def forward_compute_fake(cls, args: BasicLinearFwdArgs):
+        shape = list(args.input_.shape)
+        shape[-1] = args.weight.shape[0]
+        if args.sequence_parallel:
+            group_size = torch.distributed.get_world_size(args.tensor_parallel_group)
+            if args.tensor_parallel_mode == "column":
+                shape[0] *= group_size
+            elif args.tensor_parallel_mode == "row":
+                shape[0] //= group_size
         output = TensorSpec(
-            shape=(*args.input_.shape[:-1], args.weight.shape[0]),
+            shape=tuple(shape),
             dtype=args.dtype,
             device=args.input_.device,
-            quantizer=args.output_quantizer if args.with_quantized_compute else None,
+            quantizer=(
+                args.output_quantizer
+                if args.with_quantized_compute and args.tensor_parallel_mode != "row"
+                else None
+            ),
         )
         saved = []
         for needed, value, quantizer in (
@@ -1242,11 +1251,23 @@ class BasicLinear(BasicOperation):
     def backward_compute_fake(cls, args: BasicLinearBwdArgs):
         dx = None
         if args.input_requires_grad:
+            shape = list(args.grad_output.shape)
+            shape[-1] = args.weight.shape[-1]
+            if args.sequence_parallel:
+                group_size = torch.distributed.get_world_size(args.tensor_parallel_group)
+                if args.tensor_parallel_mode == "column":
+                    shape[0] //= group_size
+                elif args.tensor_parallel_mode == "row":
+                    shape[0] *= group_size
             dx = TensorSpec(
-                shape=(*args.grad_output.shape[:-1], args.weight.shape[-1]),
+                shape=tuple(shape),
                 dtype=args.dtype,
                 device=args.grad_output.device,
-                quantizer=args.grad_input_quantizer if args.with_quantized_compute else None,
+                quantizer=(
+                    args.grad_input_quantizer
+                    if args.with_quantized_compute and args.tensor_parallel_mode != "column"
+                    else None
+                ),
             )
         dw = None
         if args.weight_requires_grad:
@@ -1265,6 +1286,7 @@ class BasicLinear(BasicOperation):
         basic_op_grad_extra_outputs,
         use_custom_ops=False,
     ):
+        # The shared dispatcher selects compile_ops[1] when use_custom_ops=True.
         result = super().fuser_backward(
             basic_op_ctxs,
             grad_output,
@@ -1272,6 +1294,8 @@ class BasicLinear(BasicOperation):
             use_custom_ops=use_custom_ops,
         )
         if not use_custom_ops:
+            # Eager-only storage release and main_grad bookkeeping. The custom
+            # op has a functional schema: it must not clear saved input storage.
             ctx = basic_op_ctxs[0]
             clear_tensor_data(ctx.saved_tensors[0])
             if (

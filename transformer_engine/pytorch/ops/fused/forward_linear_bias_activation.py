@@ -70,7 +70,7 @@ class ForwardLinearBiasActivation(FusedOperation):
 
     @classmethod
     def forward_compute(cls, args: BasicLinearFwdArgs):
-        output, extras, aux = BasicLinear._forward_compute(args, bias=args.bias)
+        output, extras, aux = BasicLinear.forward_compute(args)
         if args.bias is not None:
             extras.append(())
         return output, extras, aux

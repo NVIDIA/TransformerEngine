@@ -755,6 +755,8 @@ class OperationFuser:
             if op.num_extra_inputs or op.num_extra_outputs:
                 return f"{type(op).__name__} with extra tensor inputs or outputs"
         for op, basic_op_idxs in ops:
+            # A frozen prefix is not visited by backward, so its missing
+            # backward custom ops must not force the trainable suffix to eager.
             if mode == "backward" and basic_op_idxs[-1] < self.first_op_requiring_backward:
                 continue
             reason = op.compile_unsupported_reason(mode)

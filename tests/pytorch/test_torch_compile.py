@@ -2551,7 +2551,9 @@ def _check_ops(fn, model, x, dy, kwargs=None):
         ("single_forward", "without a custom op for backward", (True, False)),
         ("single_backward", "without a custom op for forward", (False, True)),
         ("single_eager", "without a custom op", (False, False)),
+        # A pipeline can dispatch each operation through its own custom op.
         ("multi", None, (True, True)),
+        # This test fusion only implements eager backward; forward still compiles.
         ("backward_fusion", "without a custom op for backward", (True, False)),
         ("legacy", "without a custom op", (False, False)),
     ],
@@ -2594,6 +2596,28 @@ def test_te_ops_pipeline(case, reason, compiled_passes, dtype, monkeypatch):
         with torch.no_grad():
             torch.testing.assert_close(compiled(x), x * ops[0].weight)
         _assert_custom_ops(graphs, "_affineop", present=(True, False))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("train_prefix", [False, True])
+def test_te_ops_backward_skips_frozen_prefix(train_prefix, monkeypatch):
+    prefix, suffix = _AffineOp(), _AffineOp()
+    prefix.weight.requires_grad_(train_prefix)
+    monkeypatch.setattr(prefix, "compile_ops", (prefix.compile_ops[0], None))
+    model = te.ops.Sequential(prefix, suffix)
+    compiled, graphs = _compile_with_graphs(model)
+    x = torch.randn(8, 16, device="cuda")
+    targets = tuple(p for p in model.parameters() if p.requires_grad)
+    reason = "without a custom op for backward"
+    with pytest.warns(UserWarning, match=reason) if train_prefix else contextlib.nullcontext():
+        actual = compiled(x)
+        expected = x * prefix.weight * suffix.weight
+        torch.testing.assert_close(actual, expected)
+        torch.testing.assert_close(
+            torch.autograd.grad(actual.sum(), targets),
+            torch.autograd.grad(expected.sum(), targets),
+        )
+    _assert_custom_ops(graphs, "_affineop", present=(True, not train_prefix))
 
 
 @pytest.mark.parametrize(
@@ -2713,6 +2737,8 @@ def test_te_ops_linear_bias_backward_override(dtype, backward_override, monkeypa
 def _check_linear_bias_compile(
     dtype, quantization, case, grads, monkeypatch, *, backward_override=None
 ):
+    # Native PyTorch numerics are covered by test_fusible_ops.py. Here check
+    # compilation, selective gradients, tensor updates, and graph reuse.
     if quantization == "fp8" and not fp8_available:
         pytest.skip(reason_for_no_fp8)
     if (case == "linear" and grads == "bias") or (case == "bias" and grads == "weight"):
@@ -2727,8 +2753,6 @@ def _check_linear_bias_compile(
     if case != "linear":
         ops.append(te.ops.Bias(32 if case == "bias" else 64, dtype=dtype))
         ops[-1].bias.requires_grad_(grads in ("all", "bias"))
-        with torch.no_grad():
-            ops[-1].bias.uniform_(-0.1, 0.1)
     model = te.ops.Sequential(*ops)
     eager_model = copy.deepcopy(model)
     quant_recipe = (
@@ -2752,16 +2776,9 @@ def _check_linear_bias_compile(
     with torch.no_grad() if grads == "none" else contextlib.nullcontext():
         for iteration in range(3):
             with torch.no_grad():
-                if quant_recipe is None:
-                    # Keep the native-reference GEMM exact in FP16 and BF16.
-                    x.copy_(torch.randint(-2, 3, x.shape, device=x.device) / 8)
-                else:
-                    x.uniform_(-0.5, 0.5)
+                x.uniform_(-0.5, 0.5)
                 for param, eager_param in zip(model.parameters(), eager_model.parameters()):
-                    if quant_recipe is None:
-                        param.copy_(torch.randint(-2, 3, param.shape, device=param.device) / 16)
-                    else:
-                        param.add_(0.001)
+                    param.uniform_(-0.5, 0.5)
                     eager_param.copy_(param)
             actual = compiled(x)
             expected = run(x, eager_model)
@@ -2772,26 +2789,6 @@ def _check_linear_bias_compile(
                     torch.autograd.grad(actual, targets, dy),
                     torch.autograd.grad(expected, eager_targets, dy),
                 )
-            if quant_recipe is None:
-                reference = x.double()
-                for op in ops:
-                    reference = (
-                        torch.nn.functional.linear(reference, op.weight.double())
-                        if isinstance(op, BasicLinear)
-                        else reference + op.bias.double()
-                    )
-                    # Unfused operations round their intermediate outputs.
-                    if case != "pair":
-                        reference = reference.to(dtype).double()
-                torch.testing.assert_close(
-                    actual, reference, check_dtype=False, **dtype_tols(dtype)
-                )
-                if targets:
-                    torch.testing.assert_close(
-                        torch.autograd.grad(run(x), targets, dy),
-                        torch.autograd.grad(reference, targets, dy),
-                        **dtype_tols(dtype),
-                    )
             if iteration == 1:
                 graph_count = len(graphs)
             elif iteration == 2:
