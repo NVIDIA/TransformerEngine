@@ -14,8 +14,9 @@ updates, and the readout follows the last one. For state ``S_t``:
                                                               j = 0 .. n - 1
     S_t = S,  o_t = scale * q_t S_t.
 
-``num_householder=1`` is exactly Gated DeltaNet. The extra updates let a single
-token move the state further than one rank-one correction can, which raises the
+With ``num_householder=1``, the recurrence is mathematically equivalent to Gated
+DeltaNet under equivalent gate settings. The extra updates let a single token
+move the state further than one rank-one correction can, which raises the
 expressivity of the recurrence without lengthening the token timeline.
 
 The decay tensor ``g`` reaches ``alpha_t`` through one of three
@@ -310,7 +311,9 @@ class GatedDeltaProductAttention(LinearAttentionBase):
     num_householder : int, default = 1
                     number of beta-gated Householder updates applied per token.
                     Must be positive. K, V and `beta` carry this many rows per
-                    token; `num_householder=1` is Gated DeltaNet.
+                    token; with `num_householder=1` the recurrence is
+                    mathematically equivalent to Gated DeltaNet under equivalent
+                    gate settings.
     qkv_format : str, default = `sbhd`
                dimension format for query_layer, key_layer and value_layer,
                {`sbhd`, `bshd`, `thd`}. `s` stands for the sequence length,
