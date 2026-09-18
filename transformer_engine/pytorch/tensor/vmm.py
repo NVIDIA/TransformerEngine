@@ -168,9 +168,7 @@ class VMMRowSplitAllocator:
                     _check_cuda(result[0], f"cuMemCreate(domain={domain})")
                 except RuntimeError as exc:
                     free_bytes, total_device_bytes = torch.cuda.mem_get_info(self.device_index)
-                    tracked_vmm_bytes = sum(
-                        _VMM_RANGES.get(self.device_index, {}).values()
-                    )
+                    tracked_vmm_bytes = sum(_VMM_RANGES.get(self.device_index, {}).values())
                     raise RuntimeError(
                         f"{exc}; requested={half_bytes} bytes for shape={shape}, dtype={dtype}; "
                         f"device_free={free_bytes}/{total_device_bytes} bytes; "
