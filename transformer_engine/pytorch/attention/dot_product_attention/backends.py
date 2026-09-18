@@ -18,7 +18,6 @@ from packaging.version import Version as PkgVersion
 import torch
 import torch.nn.functional as F
 from transformer_engine.pytorch.utils import (
-    get_cudnn_version,
     get_device_compute_capability,
     split_tensor_along_dim,
 )
@@ -1774,17 +1773,17 @@ def _fused_attn_forward_impl(
 
         # save q, k, v, o tensors
         fp8_tensors = (None, None, None, None)
-        f16_tensors = (None, None, None, None)
+        f16_tensors = (None, None, None, None, None, None)
         if is_bwd_fp8:
             if (qkv_type == "current" and _dpa_fp8_cs_o_in_f16) or qkv_type == "mxfp8":
                 fp8_tensors = (q_fp8, k_fp8, v_fp8, None)
-                f16_tensors = (None, None, None, out_f16)
+                f16_tensors = (None, None, None, out_f16, None, None)
             elif qkv_type == "delayed" or (qkv_type == "current" and not _dpa_fp8_cs_o_in_f16):
                 fp8_tensors = (q_fp8, k_fp8, v_fp8, out_fp8)
         else:
             if is_input_fp8:
                 q, k, v = combine_and_dequantize(qkv_layout, q_fp8, k_fp8, v_fp8)
-            f16_tensors = (q, k, v, out_f16)
+            f16_tensors = (q, k, v, out_f16, None, None)
     else:
         # q, k, v, out_: torch.Tensor; dtype = torch.float16 or torch.bfloat16
         out_, aux_ctx_tensors, *max_logit = fused_attn_fwd(
@@ -1825,7 +1824,14 @@ def _fused_attn_forward_impl(
         out_f16 = out_
         out_ret = out_
         fp8_tensors = (None, None, None, None)
-        f16_tensors = (args.q, args.k, args.v, out_f16)
+        f16_tensors = (
+            args.q,
+            args.k,
+            args.v,
+            out_f16,
+            args.packed_qkv if args.q is None else None,
+            args.packed_kv if args.k is None else None,
+        )
 
     nvtx_range_pop(f"{nvtx_label}")
 
@@ -1852,6 +1858,8 @@ def _fused_attn_forward_impl(
         "k" if f16_tensors[1] is args.k else None,
         "v" if f16_tensors[2] is args.v else None,
         "out" if f16_tensors[3] is out_ret else None,
+        "packed_qkv" if f16_tensors[4] is not None else None,
+        "packed_kv" if f16_tensors[5] is not None else None,
         None,
         None,
         "attn_bias" if has_bias else None,
@@ -1979,6 +1987,8 @@ def _fused_attn_setup_ctx(
         "q": fwd_args.q,
         "k": fwd_args.k,
         "v": fwd_args.v,
+        "packed_qkv": fwd_args.packed_qkv,
+        "packed_kv": fwd_args.packed_kv,
         "attn_bias": fwd_args.attn_bias,
         "softmax_offset": fwd_args.softmax_offset,
         "out": out,
@@ -1992,6 +2002,8 @@ def _fused_attn_setup_ctx(
         k,
         v,
         out_f16,
+        packed_qkv,
+        packed_kv,
         softmax_stats,
         rng_state,
         aux_bias,
@@ -2017,8 +2029,8 @@ def _fused_attn_setup_ctx(
         rng_state,
         aux_bias,
         aux_softmax_offset,
-        fwd_args.packed_qkv if fwd_args.q is None else None,
-        fwd_args.packed_kv if fwd_args.k is None else None,
+        packed_qkv,
+        packed_kv,
     )
 
 
@@ -2319,9 +2331,8 @@ def _fused_attn_stats_shape(
     """Shape of the softmax stats auxiliary tensor cuDNN returns."""
     if q_format == "thd":
         num_heads = q_shape[1]
-        major, minor, _ = get_cudnn_version()
         sm = get_device_compute_capability()
-        if (major, minor) >= (9, 6) and sm >= (9, 0) and sm != (12, 0):
+        if sm >= (9, 0) and sm != (12, 0):
             return (q_shape[0], num_heads, 1)
         batch_size = args.cu_seqlens_q.shape[0] - 1
         return (batch_size, num_heads, args.max_seqlen_q, 1)
@@ -2352,13 +2363,15 @@ def _fused_attn_forward_fake(
     rng_state = TensorSpec(shape=(2,), dtype=torch.int64, device=q.device)
     has_bias = args.attn_bias_type not in ["no_bias", "alibi"] and args.attn_bias is not None
     has_softmax_offset = args.softmax_type != "vanilla" and args.softmax_offset is not None
-    tensors_to_save = (*(None,) * 8, softmax_stats, rng_state, None, None)
+    tensors_to_save = (*(None,) * 10, softmax_stats, rng_state, None, None)
     saved_from = (
         *(None,) * 4,
         "q",
         "k",
         "v",
         "out",
+        "packed_qkv" if args.q is None and args.packed_qkv is not None else None,
+        "packed_kv" if args.k is None and args.packed_kv is not None else None,
         None,
         None,
         "attn_bias" if has_bias else None,
@@ -2460,7 +2473,7 @@ def _needs_eager_fused_attention(call: Dict[str, Any]) -> Optional[str]:
     this call passed, including `self`.
     """
     if _fused_attn_op is None:
-        return "the fused attention custom op (unavailable on this PyTorch build)"
+        return "fused attention without custom-op support"
     if call.get("fp8", False):
         return "FP8 attention"
     if call.get("cp_group") is not None:

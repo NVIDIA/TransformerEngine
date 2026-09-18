@@ -689,6 +689,9 @@ def _packed_layout(qkv_format: str, packed_dim: int, interleave_dim: int) -> str
 
 _DPA_COMPILE_CONFIGS = {
     "self_bshd_causal": _cfg(ModelConfig(2, 128, 4, 64, attn_mask_type="causal")),
+    "self_bshd_causal_dropout": _cfg(
+        ModelConfig(2, 128, 4, 64, attn_mask_type="causal", dropout_p=0.1)
+    ),
     "self_sbhd_no_mask": _cfg(ModelConfig(2, 128, 4, 64, attn_mask_type="no_mask"), "sbhd"),
     "self_bshd_swa": _cfg(ModelConfig(2, 128, 4, 64, attn_mask_type="causal", window_size=(16, 0))),
     "gqa_bshd_causal": _cfg(ModelConfig(2, 128, 8, 64, num_gqa_groups=2, attn_mask_type="causal")),
@@ -1017,12 +1020,17 @@ def _compare_compiled_to_eager(
 ) -> None:
     """Run the module eagerly and compiled on the same inputs, and compare both
     the output and every input gradient."""
+    cpu_rng_state = torch.get_rng_state()
+    cuda_rng_state = torch.cuda.get_rng_state()
     eager = _run_and_capture(module, args, kwargs, grads)
 
     torch._dynamo.reset()
     # Force backend selection to be re-run (and traced) inside the compiled
     # region instead of being served from the cache the eager call populated.
     _force_dpa_backend(monkeypatch, backend)
+    # Reuse the eager dropout mask when comparing outputs and gradients.
+    torch.set_rng_state(cpu_rng_state)
+    torch.cuda.set_rng_state(cuda_rng_state)
     compiled = _run_and_capture(torch.compile(module, **compile_kwargs), args, kwargs, grads)
 
     _assert_dpa_backend(backend)
@@ -1047,8 +1055,13 @@ def test_dpa_torch_compile(monkeypatch, backend, config, dtype):
     _skip_unsupported(spec, backend, dtype, inference_params=kwargs.get("inference_params"))
     _force_dpa_backend(monkeypatch, backend)
 
+    # Inductor uses a different RNG for unfused dropout by default. Keep the
+    # eager RNG here so this numerical comparison uses the same dropout mask.
+    options = (
+        {"fallback_random": True} if backend == "unfused" and spec["model_config"].dropout_p else {}
+    )
     _compare_compiled_to_eager(
-        module, args, kwargs, grads, monkeypatch, backend, dtype, fullgraph=True
+        module, args, kwargs, grads, monkeypatch, backend, dtype, fullgraph=True, options=options
     )
 
 
