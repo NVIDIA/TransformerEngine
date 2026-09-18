@@ -24,6 +24,7 @@ import torch
 # cuda-bindings releases that predate the enum still have the right ABI layout.
 _CU_MEM_LOCATION_TYPE_DEVICE_MEMORY_NODE = 6
 _VMM_RANGES: Dict[int, Dict[int, int]] = {}
+_CAPTURED_VMM_ALLOCATORS: Dict[int, "VMMRowSplitAllocator"] = {}
 
 
 def is_vmm_tensor(tensor: torch.Tensor) -> bool:
@@ -196,6 +197,8 @@ class VMMRowSplitAllocator:
 
         self._allocations[base] = (total_bytes, (handles[0], handles[1]))
         _VMM_RANGES.setdefault(self.device_index, {})[base] = total_bytes
+        if torch.cuda.is_current_stream_capturing():
+            _CAPTURED_VMM_ALLOCATORS[id(self)] = self
         storage = torch._C._construct_storage_from_data_pointer(
             base,
             torch.device("cuda", self.device_index),
@@ -244,3 +247,11 @@ class VMMRowSplitAllocator:
             )
             _VMM_RANGES.get(self.device_index, {}).pop(base, None)
             del self._allocations[base]
+        _CAPTURED_VMM_ALLOCATORS.pop(id(self), None)
+
+
+def clear_captured_vmm_allocations() -> None:
+    """Release VMM mappings after every graph referencing them is reset."""
+    for allocator in list(_CAPTURED_VMM_ALLOCATORS.values()):
+        allocator.close()
+    _CAPTURED_VMM_ALLOCATORS.clear()
