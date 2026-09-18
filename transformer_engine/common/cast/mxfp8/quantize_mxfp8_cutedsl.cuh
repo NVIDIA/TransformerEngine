@@ -17,7 +17,7 @@
 
 #include "../../common.h"
 #include "../../tvm_ffi_bridge.h"
-#include "../../util/math.h"
+#include "../../util/cutedsl_utils.h"
 #include "../core/common.cuh"  // dispatch::common::reduce_dbias
 #include "quantize_mxfp8.cuh"  // dispatch::mxfp8::quantize_kernel::zero_scales_kernel
 
