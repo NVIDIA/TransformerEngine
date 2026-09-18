@@ -39,7 +39,6 @@ class _MoeEpResource:
 
     moe: Any
     requirements: Any = None
-    lane: Any = None
     symmetric_buffers: Any = None
     device: Optional[torch.device] = None
 
@@ -55,7 +54,6 @@ class _MoeEpResourceManager:
         config: EpConfig,
         device: torch.device,
         intermediate_size: int,
-        glu_interleave_size: int,
     ) -> _MoeEpResource:
         """Get or construct the cuDNN operator for one complete configuration."""
         device = torch.device(device)
@@ -64,7 +62,6 @@ class _MoeEpResourceManager:
             config,
             device,
             intermediate_size,
-            glu_interleave_size,
             combine_format,
         )
         resource = self._resources.get(key)
@@ -73,7 +70,6 @@ class _MoeEpResourceManager:
                 moe=self._construct_moe(
                     config,
                     intermediate_size,
-                    glu_interleave_size,
                     combine_format,
                 ),
             )
@@ -85,58 +81,73 @@ class _MoeEpResourceManager:
     def _construct_moe(
         config: EpConfig,
         intermediate_size: int,
-        glu_interleave_size: int,
         combine_format: str,
     ):
         """Construct one cuDNN MoeEp instance from its complete static configuration."""
-        moe_ep_cls = _import_cudnn_moe_ep()
-        if moe_ep_cls is None:
+        moe_ep_api = _import_cudnn_moe_ep()
+        if moe_ep_api is None:
             raise ImportError(
                 "FusedMoeEp requires cudnn.moe_ep.MoeEp. Install the in-tree "
                 "cuDNN frontend with: pip install --force-reinstall "
                 "'./cudnn_frontend[moe_ep]'"
             )
-        from cudnn.moe_ep import MoeEpTuningConfig
 
         forward_group_hint = 768 if combine_format == "mxfp8" else 1024
-        return moe_ep_cls(
-            num_experts=config.num_local_experts * config.ep_group.size(),
-            hidden_size=config.hidden_dim,
-            intermediate_size=intermediate_size,
-            top_k=config.top_k,
-            ep_group=config.ep_group,
-            max_tokens_per_rank=config.max_tokens_per_rank,
-            max_recv_size_per_rank=config.recv_capacity_per_rank,
-            drop_on_overflow=config.drop_on_overflow,
-            apply_topk_in_fc1=True,
-            weight_interleave_size=glu_interleave_size,
-            token_padding_size=128,
-            sf_padding_size=128,
-            combine_format=combine_format,
-            output_format="bf16",
-            validation_mode="trusted",
-            forward_tuning=MoeEpTuningConfig(
+        resolved_combine_format = (
+            moe_ep_api.MoeFormat.MXFP8
+            if combine_format == "mxfp8"
+            else moe_ep_api.MoeFormat.BF16
+        )
+
+        moe_config = moe_ep_api.MoeEpConfig(
+            model=moe_ep_api.MoeEpModelConfig(
+                num_experts=config.num_local_experts * config.ep_group.size(),
+                hidden_size=config.hidden_dim,
+                intermediate_size=intermediate_size,
+                top_k=config.top_k,
+            ),
+            parallel=moe_ep_api.MoeEpParallelConfig(
+                ep_group=config.ep_group,
+                max_tokens_per_rank=config.max_tokens_per_rank,
+                max_recv_size_per_rank=config.recv_capacity_per_rank,
+                drop_on_overflow=config.drop_on_overflow,
+                token_padding_size=128,
+                sf_padding_size=128,
+            ),
+            data_path=moe_ep_api.MoeEpDataPathConfig(
+                apply_topk_in_fc1=True,
+                fc1_weight_layout=(
+                    moe_ep_api.MoeEpFc1WeightLayout.GATE_UP_INTERLEAVED_32
+                ),
+                combine_format=resolved_combine_format,
+                output_format=moe_ep_api.MoeFormat.BF16,
+            ),
+            training_forward_tuning=moe_ep_api.MoeEpTuningConfig(
                 token_back_mode="standalone_warps",
                 epi_flag_batch=(2, 2),
                 token_in_flag_batch=8,
                 group_hint=forward_group_hint,
                 reduce_topk_in_kernel=False,
             ),
-            backward_tuning=MoeEpTuningConfig(
+            training_backward_tuning=moe_ep_api.MoeEpTuningConfig(
                 token_back_mode="epi_warps",
                 epi_flag_batch=(2, 2),
                 token_in_flag_batch=8,
                 group_hint=512,
                 reduce_topk_in_kernel=False,
             ),
+            training_weight_storage_mode=(
+                moe_ep_api.MoeEpNativeWeightStorageMode.CONTIGUOUS
+            ),
+            validation_mode="trusted",
         )
+        return moe_ep_api.MoeEp(moe_config)
 
     @staticmethod
     def _resource_key(
         config: EpConfig,
         device: torch.device,
         intermediate_size: int,
-        glu_interleave_size: int,
         combine_format: str,
     ) -> tuple[Any, ...]:
         """Return every value that affects a shared cuDNN MoeEp instance."""
@@ -154,7 +165,6 @@ class _MoeEpResourceManager:
             config.payload_dtype,
             config.zero_copy,
             config.drop_on_overflow,
-            glu_interleave_size,
             combine_format,
         )
 
@@ -162,22 +172,18 @@ class _MoeEpResourceManager:
         self,
         resource: _MoeEpResource,
         device: torch.device,
-    ) -> tuple[Any, Any, Any]:
-        """Prepare and cache one resource's lane and symmetric buffer views."""
+    ) -> tuple[Any, Any]:
+        """Prepare and cache one resource's symmetric buffer views."""
         device = torch.device(device)
         if resource.requirements is None:
-            resource.requirements = resource.moe.prepare_training(
-                lane_count=1,
-                device=device,
-            )
-            resource.lane = resource.moe.training_lanes[0]
-            resource.symmetric_buffers = resource.moe.training_symmetric_buffers(resource.lane)
+            resource.requirements = resource.moe.prepare_training(device=device)
+            resource.symmetric_buffers = resource.moe.training_symmetric_buffers()
             resource.device = device
         elif resource.device != device:
             raise ValueError(
                 f"shared MoeEp is prepared on {resource.device}, but was requested on {device}"
             )
-        return resource.requirements, resource.lane, resource.symmetric_buffers
+        return resource.requirements, resource.symmetric_buffers
 
     def cleanup(self) -> None:
         """Close every cached MoeEp instance and clear the registry."""
@@ -191,7 +197,6 @@ class _MoeEpResourceManager:
                     first_error = error
             finally:
                 resource.requirements = None
-                resource.lane = None
                 resource.symmetric_buffers = None
                 resource.device = None
                 resource.moe = None
@@ -218,7 +223,14 @@ def _cudnn_megamoe_supported() -> bool:
             for module, name in (
                 (cudnn, "grouped_gemm_wgrad_wrapper_sm100"),
                 (cudnn_moe_ep, "MoeEp"),
+                (cudnn_moe_ep, "MoeEpConfig"),
+                (cudnn_moe_ep, "MoeEpModelConfig"),
+                (cudnn_moe_ep, "MoeEpParallelConfig"),
+                (cudnn_moe_ep, "MoeEpDataPathConfig"),
+                (cudnn_moe_ep, "MoeEpFc1WeightLayout"),
+                (cudnn_moe_ep, "MoeEpNativeWeightStorageMode"),
                 (cudnn_moe_ep, "MoeEpTuningConfig"),
+                (cudnn_moe_ep, "MoeFormat"),
                 (cudnn_moe_ep.MoeEp, "training_symmetric_buffers"),
                 (cudnn_moe_ep, "MoeEpNativeForwardWeights"),
                 (cudnn_moe_ep, "MoeEpNativeBackwardWeights"),
@@ -439,12 +451,12 @@ def _grouped_linear_supported(op: GroupedLinear) -> bool:
 
 
 def _import_cudnn_moe_ep():
-    """Return ``cudnn.moe_ep.MoeEp`` or ``None`` if the package is missing."""
+    """Return the ``cudnn.moe_ep`` API module or ``None`` if it is missing."""
     try:
-        from cudnn.moe_ep import MoeEp
+        import cudnn.moe_ep as moe_ep_api
     except ImportError:
         return None
-    return MoeEp
+    return moe_ep_api
 
 
 def _routing_extras_internal(
@@ -555,7 +567,6 @@ class FusedMoeEp(FusedOperation):
             self.dispatch.config,
             device,
             self.fc2.in_features,
-            self.basic_ops[2].glu_interleave_size,
         )
         self._resource = resource
 
@@ -730,7 +741,6 @@ class FusedMoeEp(FusedOperation):
         forward_weights, backward_weights = self._make_native_training_weights()
         forward_out = self._make_training_forward_outputs(activation.device)
         output = self._resource.moe.training_forward(
-            self._resource.lane,
             activation,
             topk_idx,
             topk_weights,
@@ -833,7 +843,6 @@ class FusedMoeEp(FusedOperation):
         )
         backward_out = self._make_training_backward_outputs(grad_output.device)
         grad_input, grad_topk_weights, wgrad_operands = self._resource.moe.training_backward(
-            self._resource.lane,
             grad_output,
             topk_idx,
             topk_weights,
