@@ -697,7 +697,13 @@ def test_kda_linear_gate_domain():
 
 @requires_gdn_and_kda
 def test_kda_matches_gdn_with_scalar_decay():
-    """Broadcasting GDN's scalar decay over the channels reproduces GDN."""
+    """KDA reduces to GDN when its per-channel decay is constant across channels.
+
+    A scalar decay commutes with the delta-rule correction, so KDA's
+    decay-first order collapses onto GDN's. Feeding KDA a channel-broadcast
+    copy of GDN's scalar g -- and the same scalar beta, which both variants
+    apply to the erase and the write alike -- must therefore reproduce GDN.
+    """
     from transformer_engine.pytorch import GatedDeltaNetAttention
 
     batch, sequence, heads, dim = 1, 128, 2, 128
@@ -709,8 +715,6 @@ def test_kda_matches_gdn_with_scalar_decay():
     kda = KimiDeltaAttention(num_attention_heads=heads, kv_channels=dim, qkv_format="bshd")
     with torch.no_grad():
         expected = gdn(q, k, v, g=g, beta=beta, use_qk_l2norm_in_kernel=True)
-        # A scalar decay commutes with the delta-rule correction, so KDA's
-        # decay-first order reduces to GDN's when g is constant across channels.
         output = kda(
             q,
             k,
