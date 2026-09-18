@@ -30,13 +30,13 @@ from transformer_engine.pytorch.constants import dist_group_type
 from transformer_engine.pytorch.jit import no_torch_dynamo
 
 from .base import (
+    AlignedTimelineKernelAdapter,
     LinearAttentionBase,
-    LinearAttentionKernelAdapter,
     _needs_eager_linear_attention,
 )
 
 
-class _GDN2KernelAdapter(LinearAttentionKernelAdapter):
+class _GDN2KernelAdapter(AlignedTimelineKernelAdapter):
     """Adapter from TransformerEngine attention layouts to cuDNN frontend GDN-2.
 
     GDN-2's gates are channel-wise: ``g`` and ``beta`` carry one value per
