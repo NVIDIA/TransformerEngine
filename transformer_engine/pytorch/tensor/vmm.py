@@ -25,6 +25,13 @@ import torch
 _CU_MEM_LOCATION_TYPE_DEVICE_MEMORY_NODE = 6
 _VMM_RANGES: Dict[int, Dict[int, int]] = {}
 _CAPTURED_VMM_ALLOCATORS: Dict[int, "VMMRowSplitAllocator"] = {}
+_VMM_CURRENT_MICROBATCH: Optional[int] = None
+
+
+def set_vmm_current_microbatch(microbatch_id: Optional[int]) -> None:
+    """Set the zero-based forward microbatch shown in VMM allocation errors."""
+    global _VMM_CURRENT_MICROBATCH
+    _VMM_CURRENT_MICROBATCH = microbatch_id
 
 
 def is_vmm_tensor(tensor: torch.Tensor) -> bool:
@@ -169,8 +176,12 @@ class VMMRowSplitAllocator:
                 except RuntimeError as exc:
                     free_bytes, total_device_bytes = torch.cuda.mem_get_info(self.device_index)
                     tracked_vmm_bytes = sum(_VMM_RANGES.get(self.device_index, {}).values())
+                    microbatch = _VMM_CURRENT_MICROBATCH
+                    accumulation_step = None if microbatch is None else microbatch + 1
                     raise RuntimeError(
                         f"{exc}; requested={half_bytes} bytes for shape={shape}, dtype={dtype}; "
+                        f"forward_microbatch={microbatch}, "
+                        f"accumulation_step={accumulation_step}; "
                         f"device_free={free_bytes}/{total_device_bytes} bytes; "
                         f"torch_allocated={torch.cuda.memory_allocated(self.device_index)} bytes; "
                         f"torch_reserved={torch.cuda.memory_reserved(self.device_index)} bytes; "
