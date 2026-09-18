@@ -54,6 +54,7 @@ python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_multi_tensor.xml
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_fusible_ops.xml $TE_PATH/tests/pytorch/test_fusible_ops.py || test_fail "test_fusible_ops.py"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_selective_activation_checkpoint.xml $TE_PATH/tests/pytorch/layernorm_mlp/test_selective_activation_checkpoint.py || test_fail "test_selective_activation_checkpoint.py"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_distributed_weight.xml $TE_PATH/tests/pytorch/test_distributed_weight.py || test_fail "test_distributed_weight.py"
+python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_module_distributed_weight_saved_tensor_hooks.xml $TE_PATH/tests/pytorch/test_module_distributed_weight_saved_tensor_hooks.py || test_fail "test_module_distributed_weight_saved_tensor_hooks.py"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_backward_override.xml $TE_PATH/tests/pytorch/test_backward_override.py || test_fail "test_backward_override.py"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_permutation.xml $TE_PATH/tests/pytorch/test_permutation.py || test_fail "test_permutation.py"
 python3 -m pytest --tb=auto --junitxml=$XML_LOG_DIR/pytest_test_cross_entropy.xml $TE_PATH/tests/pytorch/test_cross_entropy.py || test_fail "test_cross_entropy.py"
