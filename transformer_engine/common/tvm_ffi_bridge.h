@@ -294,10 +294,6 @@ class TVMFFICentral {
         cutedsl_backend_enabled_(is_cutedsl_backend_enabled()),
         warn_cutedsl_backend_not_chosen_(warn_if_cutedsl_backend_not_chosen()) {}
 
-  // Load all tvm-ffi symbols into the global namespace, which should be already loaded in common/__init__.py via ctypes.CDLL
-  // if user uses TE from a python environment. Otherwise, if user stays in C++ only without python, then CuTeDSL kernels
-  // will be unavailable either because we fail to load libtvm_ffi.so or CuTeDSL kernel entrypoints are not registered in Python.
-  // In either case, we will fall back to the default TE CUDA C++ kernels.
   static bool prepare_tvm_ffi() {
     if (!initialize_python_cutedsl_backend()) {
       return false;

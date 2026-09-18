@@ -19,8 +19,10 @@ NUM_PARALLEL_JOBS=4
 # Run the CUDA implementation only in L1 as we want to migrate to CuTeDSL implementation so it should have more coverage in L0
 export NVTE_ENABLE_CUTEDSL_BACKEND=0
 
+TVM_FFI_LIBRARY=$(python3 -c 'from importlib.metadata import distribution; print(distribution("apache-tvm-ffi").locate_file("tvm_ffi/lib/libtvm_ffi.so"))')
+
 cd $TE_PATH/tests/cpp
-cmake -GNinja -Bbuild .
+cmake -GNinja -Bbuild -DTVM_FFI_LIBRARY="$TVM_FFI_LIBRARY" .
 cmake --build build
 export OMP_NUM_THREADS=$((NUM_PHYSICAL_CORES / NUM_PARALLEL_JOBS))
 ctest --test-dir build -j$NUM_PARALLEL_JOBS --output-junit $XML_LOG_DIR/ctest_cppunittest.xml
