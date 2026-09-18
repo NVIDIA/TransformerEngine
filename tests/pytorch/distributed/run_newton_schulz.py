@@ -298,9 +298,7 @@ def run_all_tests(ctx: CusolverMpCtx) -> None:
         if "must be partitioned along their larger dimension" not in str(exc):
             raise
     else:
-        raise AssertionError(
-            "Expected a directly column-sharded tall matrix to be rejected"
-        )
+        raise AssertionError("Expected a directly column-sharded tall matrix to be rejected")
 
     if rank == 0:
         print("Running TP API reference check with replicated input", flush=True)

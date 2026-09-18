@@ -8,8 +8,8 @@
 
 #include <cuda_runtime.h>
 
-#include <cstring>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <vector>
 
@@ -155,12 +155,10 @@ size_t GridMaxWorkspaceSize(NVTECusolverMpCtx* ctx, size_t local_size) {
   if (ctx->workspace_size_reduction == nullptr) {
     NVTE_CHECK_CUDA(cudaMalloc(&ctx->workspace_size_reduction, sizeof(size)));
   }
-  NVTE_CHECK_CUDA(
-      cudaMemcpyAsync(ctx->workspace_size_reduction, &size, sizeof(size), cudaMemcpyHostToDevice,
-                      ctx->stream.get()));
-  NVTE_CHECK_NCCL(
-      ncclAllReduce(ctx->workspace_size_reduction, ctx->workspace_size_reduction, 1, ncclUint64,
-                    ncclMax, ctx->comm, ctx->stream.get()));
+  NVTE_CHECK_CUDA(cudaMemcpyAsync(ctx->workspace_size_reduction, &size, sizeof(size),
+                                  cudaMemcpyHostToDevice, ctx->stream.get()));
+  NVTE_CHECK_NCCL(ncclAllReduce(ctx->workspace_size_reduction, ctx->workspace_size_reduction, 1,
+                                ncclUint64, ncclMax, ctx->comm, ctx->stream.get()));
   NVTE_CHECK_CUDA(cudaMemcpyAsync(&size, ctx->workspace_size_reduction, sizeof(size),
                                   cudaMemcpyDeviceToHost, ctx->stream.get()));
   NVTE_CHECK_CUDA(cudaStreamSynchronize(ctx->stream.get()));
@@ -300,9 +298,8 @@ void nvte_newton_schulz(NVTECusolverMpCtx* ctx, int64_t m, int64_t n, NVTETensor
 
   // Workspace requirements are stable for a given operation configuration. Cache configurations
   // so repeated optimizer steps avoid a device allocation, collective, and stream synchronization.
-  const bool workspace_config_cached =
-      IsWorkspaceConfigCached(ctx, m, n, cuda_dtype, num_iterations, coefficients,
-                              num_coefficients);
+  const bool workspace_config_cached = IsWorkspaceConfigCached(
+      ctx, m, n, cuda_dtype, num_iterations, coefficients, num_coefficients);
   if (!workspace_config_cached) {
     size_t wrksp_size_device = 0;
     size_t wrksp_size_host = 0;
