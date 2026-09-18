@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import os
-from typing import Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import transformer_engine_torch as tex
@@ -18,6 +18,9 @@ from .vmm import VMMRowSplitAllocator
 
 _LOCALIZATION_CONTEXTS = {}
 _DRIVER_CONTEXT_OWNERS = {}
+_VMM_WORKSPACE_POOLS: Dict[str, List[Tuple[tuple, "MXFP8VMMWorkspace"]]] = {}
+_VMM_WORKSPACE_POOL_STAGE: Optional[str] = None
+_VMM_WORKSPACE_POOL_CURSOR = 0
 
 
 def _get_localization_context(device_index: int):
@@ -522,6 +525,99 @@ class MXFP8VMMWorkspace:
     def close(self) -> None:
         """Release VMM mappings after all users of the workspace are done."""
         self.allocator.close()
+
+
+def begin_mxfp8_vmm_workspace_iteration(stage: str) -> None:
+    """Start an eager-warmup or capture pass through a fixed workspace sequence."""
+    global _VMM_WORKSPACE_POOL_STAGE, _VMM_WORKSPACE_POOL_CURSOR
+    if _VMM_WORKSPACE_POOL_STAGE is not None:
+        raise RuntimeError(
+            f"VMM workspace iteration {_VMM_WORKSPACE_POOL_STAGE!r} is already active"
+        )
+    _VMM_WORKSPACE_POOL_STAGE = stage
+    _VMM_WORKSPACE_POOL_CURSOR = 0
+
+
+def is_mxfp8_vmm_workspace_iteration_active() -> bool:
+    """Return whether full-iteration VMM workspace recording is active."""
+    return _VMM_WORKSPACE_POOL_STAGE is not None
+
+
+def acquire_mxfp8_vmm_workspace(
+    tensor: torch.Tensor,
+    quantizer: MXFP8Quantizer,
+    *,
+    localized_data_layout: str,
+) -> MXFP8VMMWorkspace:
+    """Acquire the next graph-stable workspace in the active iteration."""
+    global _VMM_WORKSPACE_POOL_CURSOR
+    stage = _VMM_WORKSPACE_POOL_STAGE
+    if stage is None:
+        return MXFP8VMMWorkspace.from_vmm_input(
+            tensor,
+            quantizer,
+            localized_data_layout=localized_data_layout,
+        )
+
+    signature = (
+        tuple(tensor.shape),
+        tensor.dtype,
+        tensor.device,
+        quantizer.dtype,
+        quantizer.rowwise_usage,
+        quantizer.columnwise_usage,
+        quantizer.optimize_for_gemm,
+        localized_data_layout,
+    )
+    pool = _VMM_WORKSPACE_POOLS.setdefault(stage, [])
+    slot = _VMM_WORKSPACE_POOL_CURSOR
+    if slot == len(pool):
+        workspace = MXFP8VMMWorkspace.from_vmm_input(
+            tensor,
+            quantizer,
+            localized_data_layout=localized_data_layout,
+        )
+        pool.append((signature, workspace))
+    else:
+        expected, workspace = pool[slot]
+        if expected != signature:
+            raise RuntimeError(
+                f"VMM workspace sequence changed at {stage} slot {slot}: "
+                f"expected {expected}, got {signature}"
+            )
+        workspace.set_input(tensor)
+        workspace.quantizer = quantizer
+        workspace.output._quantizer = quantizer
+        for output in workspace.partition_outputs:
+            output._quantizer = quantizer
+    _VMM_WORKSPACE_POOL_CURSOR += 1
+    return workspace
+
+
+def end_mxfp8_vmm_workspace_iteration(*, validate: bool = True) -> None:
+    """Finish a workspace sequence and verify every existing slot was consumed."""
+    global _VMM_WORKSPACE_POOL_STAGE, _VMM_WORKSPACE_POOL_CURSOR
+    stage = _VMM_WORKSPACE_POOL_STAGE
+    if stage is None:
+        return
+    expected = len(_VMM_WORKSPACE_POOLS.get(stage, ()))
+    consumed = _VMM_WORKSPACE_POOL_CURSOR
+    _VMM_WORKSPACE_POOL_STAGE = None
+    _VMM_WORKSPACE_POOL_CURSOR = 0
+    if validate and consumed != expected:
+        raise RuntimeError(
+            f"VMM workspace sequence for {stage} consumed {consumed} of {expected} slots"
+        )
+
+
+def clear_mxfp8_vmm_workspace_pools() -> None:
+    """Release full-iteration workspaces after their CUDA graphs are reset."""
+    if _VMM_WORKSPACE_POOL_STAGE is not None:
+        raise RuntimeError("Cannot clear an active VMM workspace iteration")
+    for pool in _VMM_WORKSPACE_POOLS.values():
+        for _, workspace in pool:
+            workspace.close()
+    _VMM_WORKSPACE_POOLS.clear()
 
 
 def localize_mxfp8_tensor(

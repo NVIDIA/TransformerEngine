@@ -3274,9 +3274,11 @@ def mxfp8_quantize_only(tensor_quantizer_pairs, src_format):
                 and quantizer.columnwise_usage
             )
             if use_vmm_localization:
-                from transformer_engine.pytorch.tensor.localized_mxfp8 import MXFP8VMMWorkspace
+                from transformer_engine.pytorch.tensor.localized_mxfp8 import (
+                    acquire_mxfp8_vmm_workspace,
+                )
 
-                vmm_workspace = MXFP8VMMWorkspace.from_vmm_input(
+                vmm_workspace = acquire_mxfp8_vmm_workspace(
                     t2d,
                     quantizer,
                     localized_data_layout=localized_data_layout,

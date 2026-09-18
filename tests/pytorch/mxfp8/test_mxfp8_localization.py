@@ -269,6 +269,50 @@ def test_mxfp8_vmm_single_localized_data_layout(localized_data_layout: str) -> N
 
 
 @pytest.mark.skipif(not _localization_available(), reason="CUDA localization is unavailable")
+def test_mxfp8_vmm_workspace_pool_reuses_warmup_storage() -> None:
+    """Full-iteration capture reuses VMM outputs allocated during eager warmup."""
+    from transformer_engine.pytorch.tensor.localized_mxfp8 import (
+        acquire_mxfp8_vmm_workspace,
+        begin_mxfp8_vmm_workspace_iteration,
+        clear_mxfp8_vmm_workspace_pools,
+        end_mxfp8_vmm_workspace_iteration,
+    )
+    from transformer_engine.pytorch.tensor.vmm import VMMRowSplitAllocator
+
+    shape = (256, 32768)
+    input_allocator = VMMRowSplitAllocator("cuda")
+    tensor = input_allocator.allocate(shape, torch.bfloat16)
+    quantizer = te.MXFP8Quantizer(
+        fp8_dtype=te.DType.kFloat8E4M3,
+        rowwise=True,
+        columnwise=True,
+    )
+    quantizer.optimize_for_gemm = False
+    try:
+        begin_mxfp8_vmm_workspace_iteration("test")
+        first = acquire_mxfp8_vmm_workspace(
+            tensor,
+            quantizer,
+            localized_data_layout="rowwise",
+        )
+        end_mxfp8_vmm_workspace_iteration()
+
+        begin_mxfp8_vmm_workspace_iteration("test")
+        second = acquire_mxfp8_vmm_workspace(
+            tensor.view(shape),
+            quantizer,
+            localized_data_layout="rowwise",
+        )
+        end_mxfp8_vmm_workspace_iteration()
+
+        assert second is first
+        assert second.output._rowwise_data.data_ptr() == first.output._rowwise_data.data_ptr()
+    finally:
+        clear_mxfp8_vmm_workspace_pools()
+        input_allocator.close()
+
+
+@pytest.mark.skipif(not _localization_available(), reason="CUDA localization is unavailable")
 def test_mxfp8_bidirectional_swizzled_vmm() -> None:
     """Two row-partition launches must produce one GEMM-swizzled MXFP8 tensor."""
     shape = (256, 32768)
