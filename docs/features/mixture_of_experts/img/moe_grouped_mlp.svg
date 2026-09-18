@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 270" width="100%" style="max-width: 820px;">
+  <defs>
+    <style>
+      .label { font: 15px sans-serif; fill: #333; text-anchor: middle; }
+      .small-label { font: 13px sans-serif; fill: #555; text-anchor: middle; }
+      .moe-op { fill: #e3f2fd; stroke: #1976d2; stroke-width: 1.8; }
+      .act { fill: #e8f5e9; stroke: #388e3c; stroke-width: 1.8; }
+      .fused-mlp { fill: #f3e5f5; stroke: #7b1fa2; stroke-width: 2.5; }
+      .arrow { stroke: #424242; stroke-width: 2; fill: none; marker-end: url(#ah); }
+      .farrow { stroke: #7b1fa2; stroke-width: 2.2; fill: none; marker-end: url(#ahp); }
+    </style>
+    <marker id="ah" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#424242"/></marker>
+    <marker id="ahp" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto"><polygon points="0 0, 9 3.5, 0 7" fill="#7b1fa2"/></marker>
+  </defs>
+
+  <rect x="110" y="30" width="160" height="54" class="moe-op" rx="6"/>
+  <text x="190" y="62" class="label">FC1 grouped GEMM</text>
+  <path d="M 270 57 L 330 57" class="arrow"/>
+
+  <rect x="330" y="30" width="160" height="54" class="act" rx="6"/>
+  <text x="410" y="62" class="label">activation</text>
+  <path d="M 490 57 L 550 57" class="arrow"/>
+
+  <rect x="550" y="30" width="160" height="54" class="moe-op" rx="6"/>
+  <text x="630" y="62" class="label">FC2 grouped GEMM</text>
+
+  <path d="M 410 90 L 410 140" class="farrow"/>
+  <text x="424" y="120" class="small-label" style="text-anchor:start;">operation fuser</text>
+
+  <rect x="90" y="146" width="640" height="104" class="fused-mlp" rx="6"/>
+  <text x="410" y="168" class="label">fused grouped-MLP operation</text>
+  <rect x="110" y="182" width="240" height="50" class="moe-op" rx="6"/>
+  <text x="230" y="203" class="label">FC1 grouped GEMM</text>
+  <text x="230" y="221" class="small-label">+ activation</text>
+  <path d="M 350 207 L 510 207" class="arrow"/>
+  <text x="430" y="198" class="small-label">intermediate</text>
+  <text x="430" y="226" class="small-label">device memory</text>
+  <rect x="510" y="182" width="200" height="50" class="moe-op" rx="6"/>
+  <text x="610" y="212" class="label">FC2 grouped GEMM</text>
+</svg>
