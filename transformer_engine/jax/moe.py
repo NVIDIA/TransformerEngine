@@ -16,8 +16,8 @@ residuals into the user-facing autograd graph.
 
 Sharding model
 --------------
-* Inbound activations are 3D ``[B, S, H]`` sharded
-  ``((*data_parallelism_axes, ep_axis), None, None)``. The public
+* Inbound activations are 3D ``[B, S, H]`` sharded over the combined
+  data-parallel and EP axes. The public
   :func:`moe` soft-repins this on entry and warns when a reshard is
   inserted.
 * The EP, grouped-quantize, and grouped-GEMM primitives operate at global
@@ -584,7 +584,8 @@ def _moe_fwd_rule(
         raise ValueError("moe(...) requires an active jax.sharding.Mesh.")
     if ep_axis is None:
         raise ValueError("moe(...) requires ep_axis to be set (TE EP backend).")
-    num_ep = mesh.shape[ep_axis]
+    ep_axes = tex.ep._normalize_ep_axes(ep_axis)
+    num_ep = math.prod(mesh.shape[axis] for axis in ep_axes)
     if num_experts % num_ep != 0:
         raise ValueError(f"num_experts={num_experts} must be divisible by EP size={num_ep}")
     num_local_experts = num_experts // num_ep
@@ -636,7 +637,7 @@ def _moe_fwd_rule(
         # ep must be innermost: ep_bootstrap forms NCCL EP comms from
         # consecutive global ranks (dp_color = rank // ep_size), so the
         # comm only stays within one model replica under (outer_dp, ep).
-        batch_pspec_axis = (*data_parallelism_axes, ep_axis)
+        batch_pspec_axis = (*data_parallelism_axes, *ep_axes)
     ep3_spec = P(batch_pspec_axis, None, None)
     ep2_spec = P(batch_pspec_axis, None)
     x = jax.lax.with_sharding_constraint(x, NamedSharding(mesh, ep3_spec))
@@ -738,10 +739,10 @@ def _moe_fwd_rule(
         top_k=K,
         dispatch_output_per_expert_alignment=_ALIGN_SIZE,
     )
-    token_counts, total_recv_tokens, handle_mem = tex.ep_prepare(cfg, topk_idx_3d)
+    token_counts, total_recv_tokens, handle_mem = tex.ep_prepare(cfg, topk_idx_3d, ep_axes=ep_axes)
     token_counts = jax.lax.with_sharding_constraint(token_counts, NamedSharding(mesh, ep2_spec))
     recv_tokens, recv_topk_weights = tex.ep_dispatch_fwd(
-        cfg, handle_mem, topk_idx_3d, x, topk_w_3d, recv_pr
+        cfg, handle_mem, topk_idx_3d, x, topk_w_3d, recv_pr, ep_axes=ep_axes
     )
     recv_tokens = jax.lax.with_sharding_constraint(recv_tokens, NamedSharding(mesh, ep3_spec))
     recv_topk_weights = jax.lax.with_sharding_constraint(
@@ -816,6 +817,7 @@ def _moe_fwd_rule(
             expert_outputs,
             num_local_tokens=(B, S),
             out_partition_spec=out_partition_spec,
+            ep_axes=ep_axes,
         )
     else:
         # HT combine is unweighted; apply routing weights before calling it.
@@ -828,6 +830,7 @@ def _moe_fwd_rule(
             weighted,
             num_local_tokens=(B, S),
             out_partition_spec=out_partition_spec,
+            ep_axes=ep_axes,
         )
     # output of MLP should be sharded the same way as the activation input
     output = with_sharding_constraint_by_logical_axes(output, input_axes)
@@ -913,17 +916,20 @@ def _moe_bwd_rule(
         raise ValueError("moe(...) requires an active jax.sharding.Mesh.")
     B, S, _ = x_shape
     K = num_experts_per_tok
+    ep_axes = tex.ep._normalize_ep_axes(ep_axis)
     if not data_parallelism_axes:
         batch_pspec_axis: Any = ep_axis
     else:
-        batch_pspec_axis = (*data_parallelism_axes, ep_axis)
+        batch_pspec_axis = (*data_parallelism_axes, *ep_axes)
     ep3_spec = P(batch_pspec_axis, None, None)
     ep2_spec = P(batch_pspec_axis, None)
     out_partition_spec = (batch_pspec_axis, None, None)
 
     # ---------------- Combine bwd (global view) ----------------
     d_output = jax.lax.with_sharding_constraint(d_output, NamedSharding(mesh, ep3_spec))
-    grad_pre_combine = tex.ep_combine_bwd(ctx.cfg, ctx.handle_mem, d_output, recv_pr)
+    grad_pre_combine = tex.ep_combine_bwd(
+        ctx.cfg, ctx.handle_mem, d_output, recv_pr, ep_axes=ep_axes
+    )
     grad_pre_combine = jax.lax.with_sharding_constraint(
         grad_pre_combine, NamedSharding(mesh, ep3_spec)
     )
@@ -1044,6 +1050,7 @@ def _moe_bwd_rule(
         d_recv_w_total,
         num_local_tokens=(B, S),
         out_partition_spec=out_partition_spec,
+        ep_axes=ep_axes,
     )
 
     # ---------------- Routing bwd (global view) ----------------
@@ -1229,7 +1236,7 @@ def moe(
         noop_quantizer_set,
         noop_quantizer_set,
     ),
-    ep_axis: str,
+    ep_axis: Union[str, Tuple[str, ...]],
     data_parallelism_axes: Tuple[str, ...] = (),
     input_axes: Tuple[Optional[str], ...] = (),
     gate_kernel_axes: Tuple[Optional[str], ...] = (),
@@ -1279,8 +1286,8 @@ def moe(
     Axis-name parameters:
 
     * ``ep_axis`` and ``data_parallelism_axes`` are *physical mesh
-      axis names* -- they index ``jax.sharding.Mesh.shape`` directly
-      (to compute ``num_ep`` / ``dp_size`` and to construct
+      axis names*. ``ep_axis`` may be an ordered tuple of names. They
+      are used to compute ``num_ep`` / ``dp_size`` and to construct
       ``P((dp..., ep), None, None)`` for the physical
       ``jax.lax.with_sharding_constraint`` calls that JAX requires
       to refer to real mesh axes).
@@ -1313,7 +1320,8 @@ def moe(
     mesh = _get_mesh()
     if mesh is None or mesh.empty:
         raise ValueError("moe(...) requires an active jax.sharding.Mesh.")
-    expected_leading: Any = (*data_parallelism_axes, ep_axis) if data_parallelism_axes else ep_axis
+    ep_axes = tex.ep._normalize_ep_axes(ep_axis)
+    expected_leading: Any = (*data_parallelism_axes, *ep_axes) if data_parallelism_axes else ep_axis
     expected_spec = P(expected_leading, None, None)
     actual_spec = getattr(getattr(x, "sharding", None), "spec", None)
     if actual_spec is not None and tuple(actual_spec) != tuple(expected_spec):
