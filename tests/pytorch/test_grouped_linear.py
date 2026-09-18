@@ -480,8 +480,8 @@ def test_grouped_linear_row_scaled_quantized_backward(dtype, num_gemms, bs, bias
 
 
 @pytest.mark.skipif(
-    torch.cuda.get_device_capability() != (9, 0),
-    reason="Only enable CUTLASS grouped gemm on Hopper",
+    torch.cuda.get_device_capability() not in ((9, 0), (10, 0)),
+    reason="CUTLASS grouped GEMM requires Hopper or Blackwell SM100",
 )
 @pytest.mark.parametrize("dtype", param_types, ids=str)
 @pytest.mark.parametrize("num_gemms", [3, 6])
@@ -499,6 +499,10 @@ def test_grouped_linear_accuracy_cutlass(
     monkeypatch,
 ):
     monkeypatch.setenv("NVTE_USE_CUTLASS_GROUPED_GEMM", "1")
+    if torch.cuda.get_device_capability() == (10, 0):
+        if dtype != torch.bfloat16:
+            pytest.skip("The Blackwell CUTLASS path supports BF16")
+        monkeypatch.setenv(_FUSED_GROUPED_GEMM_ENV, "1")
     test_grouped_linear_accuracy(
         dtype,
         num_gemms,

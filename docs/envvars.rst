@@ -317,7 +317,7 @@ Kernel Configuration
 
    :Type: ``int`` (0 or 1)
    :Default: ``0``
-   :Description: Use CUTLASS implementation for grouped GEMM operations instead of cuBLAS. When set to ``1``, enables CUTLASS grouped GEMM kernels, which may provide better performance for certain workloads on Hopper (SM90) GPUs.
+   :Description: Use CUTLASS for grouped GEMM on Hopper (SM90). On Blackwell SM100, use ``torch._grouped_mm`` for BF16 forward, input-gradient, and weight-gradient GEMMs in the graph-safe GroupedLinear path. FP32 outputs and fused accumulation retain the existing backend. The module API requires ``NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM=1``. If available, ``torch.backends.cuda.matmul.prefer_cublaslt_grouped_gemm`` must be ``False``.
 
 .. envvar:: NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK
 

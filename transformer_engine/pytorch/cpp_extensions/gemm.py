@@ -4,28 +4,31 @@
 
 """Python interface for GEMM extensions"""
 
-from typing import Iterable, Literal, Optional, Tuple, Union, List
-import os
 import functools
+import os
+from typing import Iterable, List, Literal, Optional, Tuple, Union
+
 import torch
 import transformer_engine_torch as tex
-from ..constants import TE_DType, DType
-from ..utils import get_sm_count, _empty_tensor
 
+from ...debug.pytorch.debug_quantization import DebugQuantizedTensor, DebugQuantizer
+from ..constants import DType, TE_DType
+from ..custom_recipes.gemm import custom_gemm
 from ..quantized_tensor import QuantizedTensorStorage, Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.nvfp4_tensor import NVFP4Quantizer
-from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
+from ..tensor.storage.float8_blockwise_tensor_storage import (
+    Float8BlockwiseQTensorStorage,
+)
 from ..tensor.storage.float8_tensor_storage import Float8TensorStorage
 from ..tensor.storage.grouped_tensor_storage import GroupedTensorStorage
 from ..tensor.storage.hybrid_tensor_storage import HybridQuantizedTensorStorage
 from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 from ..tensor.utils import is_custom
-from ..custom_recipes.gemm import custom_gemm
-from ...debug.pytorch.debug_quantization import DebugQuantizedTensor, DebugQuantizer
+from ..utils import _empty_tensor, get_sm_count
 
 __all__ = [
     "general_gemm",
@@ -566,6 +569,88 @@ def _get_grouped_cublas_workspace(device: int, layout: str) -> torch.Tensor:
     return torch.empty(get_cublas_workspace_size_bytes(), dtype=torch.uint8, device=device)
 
 
+@torch.no_grad()
+def _pytorch_grouped_gemm(A, B, out, *, layout, bias, bias_scale) -> bool:
+    """Try CUTLASS for packed BF16 GEMMs; return False for TE's existing backend."""
+    if (
+        os.getenv("NVTE_USE_CUTLASS_GROUPED_GEMM", "0") != "1"
+        or not hasattr(torch, "_grouped_mm")
+        or torch.cuda.get_device_capability() != (10, 0)
+    ):
+        return False
+
+    def is_bf16(tensor):
+        if isinstance(tensor, GroupedTensorStorage):
+            tensor = tensor.rowwise_data
+        return (
+            isinstance(tensor, torch.Tensor)
+            and not isinstance(tensor, QuantizedTensorStorage)
+            and tensor.dtype == torch.bfloat16
+        )
+
+    inputs = A if isinstance(A, list) else [A]
+    outputs = out if isinstance(out, list) else [out]
+    if not all(is_bf16(tensor) for tensor in [B, *inputs, *outputs]):
+        return False
+    if not B.all_same_last_dim():
+        return False
+    if isinstance(A, list):
+        shapes = [tensor.shape[-1:] if layout == "NT" else tensor.shape for tensor in A]
+        if any(shape != shapes[0] for shape in shapes):
+            return False
+    elif not A.all_same_last_dim() or (layout != "NT" and not A.all_same_shape()):
+        return False
+    if layout != "NT" and isinstance(out, list):
+        return False
+    if getattr(torch.backends.cuda.matmul, "prefer_cublaslt_grouped_gemm", False):
+        raise RuntimeError(
+            "Set torch.backends.cuda.matmul.prefer_cublaslt_grouped_gemm = False "
+            "before using NVTE_USE_CUTLASS_GROUPED_GEMM on SM100."
+        )
+
+    groups = B.num_tensors
+    b = B.rowwise_data.view(-1, B.get_common_last_dim())
+    if isinstance(A, list):
+        a = torch.cat(A) if layout == "NT" else torch.stack(A)
+    else:
+        a = A.rowwise_data.view(-1, A.get_common_last_dim())
+        if layout != "NT":
+            a = a.view(groups, -1, a.size(-1))
+    if B.first_dims is None:
+        offsets = torch.arange(1, groups + 1, device=b.device, dtype=torch.int32)
+        offsets = offsets * B.get_common_first_dim()
+    else:
+        offsets = torch.cumsum(B.first_dims, dim=0, dtype=torch.int32)
+
+    if layout == "NT":
+        result = torch._grouped_mm(b.T, a, offs=offsets)
+    else:
+        result = torch._grouped_mm(b, a.transpose(-1, -2) if layout == "TN" else a, offs=offsets)
+    destination = None if isinstance(out, list) else out.rowwise_data.view_as(result)
+    if bias is not None:
+        bias_data = bias.rowwise_data.view(groups, -1)
+        if layout == "NT":
+            bias_data = bias_data[:, None, :]
+        else:
+            rows = torch.arange(result.size(0), device=result.device)
+            group_ids = torch.bucketize(rows, offsets, right=True).clamp_max(groups - 1)
+            bias_data = bias_data[group_ids]
+        bias_data = bias_data.float()
+        if bias_scale is not None:
+            bias_data = bias_data * bias_scale[:, None]
+        result = (result.float() + bias_data).to(result.dtype)
+    if isinstance(out, list):
+        for dst, src in zip(out, result):
+            dst.copy_(src)
+    elif layout == "NT":
+        destination.copy_(result)
+    else:
+        # Preserve caller-owned capacity beyond the final expert's rows.
+        valid_rows = torch.arange(result.size(0), device=result.device) < offsets[-1]
+        torch.where(valid_rows[:, None], result, destination, out=destination)
+    return True
+
+
 def general_grouped_gemm_for_grouped_tensor(
     A,
     B,
@@ -637,6 +722,16 @@ def general_grouped_gemm_for_grouped_tensor(
 
     if bias_scale is not None and bias is None:
         raise ValueError("bias_scale requires bias to be provided.")
+
+    # PyTorch returns a BF16 product, so a separate add would lose the precision
+    # of TE's fused accumulation. Leave that case on the existing backend.
+    if (
+        not accumulate
+        and alpha is None
+        and beta is None
+        and _pytorch_grouped_gemm(A, B, out, layout=layout, bias=bias, bias_scale=bias_scale)
+    ):
+        return out
 
     num_tensors = B.num_tensors
     rowwise = B.rowwise_data
