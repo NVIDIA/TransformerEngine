@@ -22,6 +22,8 @@ class CommOverlapP2P;
 
 namespace transformer_engine::pytorch {
 
+void init_vmm_activation_extension(py::module_ &module);
+
 /***************************************************************************************************
  * Router fusion
  **************************************************************************************************/
