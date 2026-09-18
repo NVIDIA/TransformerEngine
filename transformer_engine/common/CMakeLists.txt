@@ -407,8 +407,7 @@ if(NVTE_WITH_CUTEDSL)
   target_include_directories(transformer_engine PRIVATE ${TVM_FFI_INCLUDE_DIR})
   target_compile_definitions(
     transformer_engine PRIVATE
-    NVTE_WITH_CUTEDSL
-    NVTE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../..")
+    NVTE_WITH_CUTEDSL)
   target_link_libraries(transformer_engine PRIVATE Python::Python)
 endif()
 

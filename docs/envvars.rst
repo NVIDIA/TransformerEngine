@@ -95,11 +95,11 @@ Optional Dependencies
 
 .. envvar:: NVTE_WITH_CUTEDSL
 
-   :Type: CMake option
-   :Default: ``ON``
-   :Description: Build CuTeDSL kernel bindings in C++. Only applies when configuring the C++ library with CMake directly; pass
-                 ``-DNVTE_WITH_CUTEDSL=OFF`` to build without it. This is intended for C++ users who do not want to introduce
-                 a python environment which is required to generate CuTeDSL kernels at runtime.
+   :Type: ``int`` (0 or 1)
+   :Default: ``1``
+   :Description: Build CuTeDSL kernel bindings in C++. Set this environment variable to ``0`` when building through
+                 ``setup.py`` to disable them. If you prefer to control this through CMake, pass ``-DNVTE_WITH_CUTEDSL=OFF`` instead. 
+                 Disable this for builds that do not have a Python environment or do not want apache-tvm-ffi as their dependency.
 
 .. envvar:: NVTE_BUILD_ACTIVATION_WITH_FAST_MATH
 
@@ -142,7 +142,7 @@ General
 
    :Type: ``int`` (0 or 1)
    :Default: ``0``
-   :Description: Use CuTeDSL kernels when it's available, otherwise fallback to the 
+   :Description: Use CuTeDSL kernels when available; otherwise, fall back to the
                  CUDA C++ kernels. CuTeDSL kernels will be registered when
                  ``import transformer_engine`` so this env var should be set before that.
 
@@ -150,7 +150,7 @@ General
 
    :Type: ``int`` (0 or 1)
    :Default: ``0``
-   :Description: Warn TE falls back to the CUDA C++ kernels instead of dispatching to
+   :Description: Warn when TE falls back to the CUDA C++ kernels instead of dispatching to
                  available CuTeDSL kernels. Useful to check if CuTeDSL path is taken,
                  since a silent fallback is otherwise indistinguishable from success.
 

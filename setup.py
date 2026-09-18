@@ -65,14 +65,13 @@ def setup_common_extension() -> CMakeExtension:
         f"-DCUDNN_FRONTEND_INCLUDE_DIR={cudnn_frontend_include_path()}",
     ]
 
-    # CuTeDSL kernels are compiled and registered through Python, so the
-    # framework-agnostic C++ build cannot exercise this backend.
-    if not frameworks:
-        cmake_flags.append("-DNVTE_WITH_CUTEDSL=OFF")
-    else:
+    with_cutedsl = bool(int(os.getenv("NVTE_WITH_CUTEDSL", "1")))
+    if with_cutedsl:
         tvm_ffi_include_dir = metadata.distribution("apache-tvm-ffi").locate_file("tvm_ffi/include")
         cmake_flags.append(f"-DTVM_FFI_INCLUDE_DIR={tvm_ffi_include_dir}")
         cmake_flags.append("-DNVTE_WITH_CUTEDSL=ON")
+    else:
+        cmake_flags.append("-DNVTE_WITH_CUTEDSL=OFF")
 
     if bool(int(os.getenv("NVTE_UB_WITH_MPI", "0"))):
         assert (
