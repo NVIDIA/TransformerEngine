@@ -169,6 +169,9 @@ def record_key(record: dict[str, Any]) -> str:
         "framework": record.get("framework"),
         "operation": record.get("operation"),
         "variant": record.get("variant"),
+        # Without rank, every rank of one launch shares a key and compare.py's
+        # ``records[record_key(record)] = record`` keeps only the last one seen.
+        "rank": record.get("rank"),
         "params": {name: axis_value(value) for name, value in record.get("params", {}).items()},
     }
     return json.dumps(key, sort_keys=True, separators=(",", ":"))

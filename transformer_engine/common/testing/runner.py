@@ -10,6 +10,7 @@ import time
 
 from .case import Case, axis_value
 from .device import synchronize
+from .distributed import rank as dist_rank, world_size as dist_world_size
 from .timing import TIMING_METHOD, WallClockSampler, timing_stats
 
 
@@ -56,6 +57,12 @@ def _run_benchmark_point(case, settings, pyfuncitem):
         synchronize(expected)
         case.run_verify(actual, expected)
         precondition_verified = True
+
+    # Invariant: setup() is never called twice without a reset() in between. The gate's
+    # state is discarded here and _time_variant allocates a fresh one, so this is the
+    # boundary that would otherwise leak it.
+    if case.reset is not None:
+        case.reset(state)
 
     variants = [("evaluation", case.evaluate)]
     if case.reference is not None and case.time_reference and not settings["no_reference"]:
@@ -136,6 +143,13 @@ def _metrics(case, median_ms):
 def _base_record(pyfuncitem, variant, precondition_verified):
     """Build the record fields that are known before timing runs."""
     params = {name: axis_value(v) for name, v in pyfuncitem.callspec.params.items()}
+    # world_size is workload identity, so it rides in params and therefore reaches both
+    # case_id and record_key: a 4-rank run is a different workload from an 8-rank one.
+    # rank is not -- it is a separate field, keyed on only so N ranks' records cannot
+    # collapse into one another.
+    world = dist_world_size()
+    if world is not None:
+        params["world_size"] = world
     return {
         "schema_version": "benchmark_record/v1",
         "status": "pending",
@@ -146,6 +160,8 @@ def _base_record(pyfuncitem, variant, precondition_verified):
         "operation": pyfuncitem.originalname,
         "params": params,
         "node_id": pyfuncitem.nodeid,
+        "rank": dist_rank(),
+        "world_size": world,
         "precondition_verified": precondition_verified,
         "tags": [],
         "unit_test": pyfuncitem.nodeid,
