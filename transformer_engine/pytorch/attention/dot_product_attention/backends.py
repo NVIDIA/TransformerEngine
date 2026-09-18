@@ -1601,6 +1601,12 @@ class FusedAttnFunc(torch.autograd.Function):
                 softmax_offset,
                 cuda_graph=is_graph_capturing(),
             )
+            if not is_training:
+                from transformer_engine.pytorch.tensor.localized_mxfp8 import (
+                    release_mxfp8_vmm_tensor_workspaces,
+                )
+
+                release_mxfp8_vmm_tensor_workspaces(q_fp8, k_fp8, v_fp8)
 
             # out_fp8: Float8Tensor/MXFP8Tensor; dtype = torch.float16 or torch.bfloat16
             #                        fp8_dtype = tex.DType.kFloat8E4M3
@@ -2040,6 +2046,12 @@ class FusedAttnFunc(torch.autograd.Function):
                         ctx.deterministic,
                         is_graph_capturing(),
                     )
+
+        from transformer_engine.pytorch.tensor.localized_mxfp8 import (
+            release_mxfp8_vmm_tensor_workspaces,
+        )
+
+        release_mxfp8_vmm_tensor_workspaces(q_fp8, k_fp8, v_fp8)
 
         d_bias = None
         if ctx.attn_bias_type not in ["no_bias", "alibi"]:

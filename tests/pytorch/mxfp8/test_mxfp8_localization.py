@@ -276,6 +276,7 @@ def test_mxfp8_vmm_workspace_pool_reuses_warmup_storage() -> None:
         begin_mxfp8_vmm_workspace_iteration,
         clear_mxfp8_vmm_workspace_pools,
         end_mxfp8_vmm_workspace_iteration,
+        release_mxfp8_vmm_workspace,
     )
     from transformer_engine.pytorch.tensor.vmm import VMMRowSplitAllocator
 
@@ -295,18 +296,38 @@ def test_mxfp8_vmm_workspace_pool_reuses_warmup_storage() -> None:
             quantizer,
             localized_data_layout="rowwise",
         )
-        end_mxfp8_vmm_workspace_iteration()
-
-        begin_mxfp8_vmm_workspace_iteration("test")
         second = acquire_mxfp8_vmm_workspace(
             tensor.view(shape),
             quantizer,
             localized_data_layout="rowwise",
         )
+        assert second is not first
+
+        release_mxfp8_vmm_workspace(first)
+        reused = acquire_mxfp8_vmm_workspace(
+            tensor,
+            quantizer,
+            localized_data_layout="rowwise",
+        )
+        assert reused is first
+        release_mxfp8_vmm_workspace(reused)
+        release_mxfp8_vmm_workspace(second)
         end_mxfp8_vmm_workspace_iteration()
 
-        assert second is first
-        assert second.output._rowwise_data.data_ptr() == first.output._rowwise_data.data_ptr()
+        begin_mxfp8_vmm_workspace_iteration("test")
+        next_iteration = acquire_mxfp8_vmm_workspace(
+            tensor.view(shape),
+            quantizer,
+            localized_data_layout="rowwise",
+        )
+        release_mxfp8_vmm_workspace(next_iteration)
+        end_mxfp8_vmm_workspace_iteration()
+
+        assert next_iteration is first
+        assert (
+            next_iteration.output._rowwise_data.data_ptr()
+            == first.output._rowwise_data.data_ptr()
+        )
     finally:
         clear_mxfp8_vmm_workspace_pools()
         input_allocator.close()

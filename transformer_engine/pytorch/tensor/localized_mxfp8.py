@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -18,9 +19,17 @@ from .vmm import VMMRowSplitAllocator
 
 _LOCALIZATION_CONTEXTS = {}
 _DRIVER_CONTEXT_OWNERS = {}
-_VMM_WORKSPACE_POOLS: Dict[str, List[Tuple[tuple, "MXFP8VMMWorkspace"]]] = {}
+
+
+@dataclass
+class _VMMWorkspaceSlot:
+    signature: tuple
+    workspace: "MXFP8VMMWorkspace"
+    in_use: bool = False
+
+
+_VMM_WORKSPACE_POOLS: Dict[str, List[_VMMWorkspaceSlot]] = {}
 _VMM_WORKSPACE_POOL_STAGE: Optional[str] = None
-_VMM_WORKSPACE_POOL_CURSOR = 0
 
 
 def _get_localization_context(device_index: int):
@@ -528,14 +537,16 @@ class MXFP8VMMWorkspace:
 
 
 def begin_mxfp8_vmm_workspace_iteration(stage: str) -> None:
-    """Start an eager-warmup or capture pass through a fixed workspace sequence."""
-    global _VMM_WORKSPACE_POOL_STAGE, _VMM_WORKSPACE_POOL_CURSOR
+    """Start an eager-warmup or capture pass through a liveness-aware pool."""
+    global _VMM_WORKSPACE_POOL_STAGE
     if _VMM_WORKSPACE_POOL_STAGE is not None:
         raise RuntimeError(
             f"VMM workspace iteration {_VMM_WORKSPACE_POOL_STAGE!r} is already active"
         )
     _VMM_WORKSPACE_POOL_STAGE = stage
-    _VMM_WORKSPACE_POOL_CURSOR = 0
+    for slot in _VMM_WORKSPACE_POOLS.get(stage, ()):
+        if slot.in_use:
+            raise RuntimeError(f"VMM workspace for {stage} was not released by backward")
 
 
 def is_mxfp8_vmm_workspace_iteration_active() -> bool:
@@ -549,8 +560,7 @@ def acquire_mxfp8_vmm_workspace(
     *,
     localized_data_layout: str,
 ) -> MXFP8VMMWorkspace:
-    """Acquire the next graph-stable workspace in the active iteration."""
-    global _VMM_WORKSPACE_POOL_CURSOR
+    """Acquire a graph-stable workspace that is not live in another attention."""
     stage = _VMM_WORKSPACE_POOL_STAGE
     if stage is None:
         return MXFP8VMMWorkspace.from_vmm_input(
@@ -570,43 +580,62 @@ def acquire_mxfp8_vmm_workspace(
         localized_data_layout,
     )
     pool = _VMM_WORKSPACE_POOLS.setdefault(stage, [])
-    slot = _VMM_WORKSPACE_POOL_CURSOR
-    if slot == len(pool):
+    slot = next(
+        (candidate for candidate in pool if candidate.signature == signature and not candidate.in_use),
+        None,
+    )
+    if slot is None:
         workspace = MXFP8VMMWorkspace.from_vmm_input(
             tensor,
             quantizer,
             localized_data_layout=localized_data_layout,
         )
-        pool.append((signature, workspace))
+        slot = _VMMWorkspaceSlot(signature, workspace, in_use=True)
+        pool.append(slot)
     else:
-        expected, workspace = pool[slot]
-        if expected != signature:
-            raise RuntimeError(
-                f"VMM workspace sequence changed at {stage} slot {slot}: "
-                f"expected {expected}, got {signature}"
-            )
+        slot.in_use = True
+        workspace = slot.workspace
         workspace.set_input(tensor)
         workspace.quantizer = quantizer
         workspace.output._quantizer = quantizer
         for output in workspace.partition_outputs:
             output._quantizer = quantizer
-    _VMM_WORKSPACE_POOL_CURSOR += 1
+    workspace._vmm_pool_slot = slot
     return workspace
 
 
+def release_mxfp8_vmm_workspace(workspace: MXFP8VMMWorkspace) -> None:
+    """Return a workspace after fused-attention backward's last Q/K/V use."""
+    slot = getattr(workspace, "_vmm_pool_slot", None)
+    if slot is not None:
+        slot.in_use = False
+
+
+def release_mxfp8_vmm_tensor_workspaces(*tensors: object) -> None:
+    """Release unique pooled workspaces attached to MXFP8 tensor wrappers."""
+    released = set()
+    for tensor in tensors:
+        workspace = getattr(tensor, "_nvte_vmm_workspace", None)
+        if workspace is not None and id(workspace) not in released:
+            release_mxfp8_vmm_workspace(workspace)
+            released.add(id(workspace))
+
+
 def end_mxfp8_vmm_workspace_iteration(*, validate: bool = True) -> None:
-    """Finish a workspace sequence and verify every existing slot was consumed."""
-    global _VMM_WORKSPACE_POOL_STAGE, _VMM_WORKSPACE_POOL_CURSOR
+    """Finish an iteration and verify that backward released every lease."""
+    global _VMM_WORKSPACE_POOL_STAGE
     stage = _VMM_WORKSPACE_POOL_STAGE
     if stage is None:
         return
-    expected = len(_VMM_WORKSPACE_POOLS.get(stage, ()))
-    consumed = _VMM_WORKSPACE_POOL_CURSOR
     _VMM_WORKSPACE_POOL_STAGE = None
-    _VMM_WORKSPACE_POOL_CURSOR = 0
-    if validate and consumed != expected:
+    pool = _VMM_WORKSPACE_POOLS.get(stage, ())
+    live = sum(slot.in_use for slot in pool)
+    if not validate:
+        for slot in pool:
+            slot.in_use = False
+    if validate and live:
         raise RuntimeError(
-            f"VMM workspace sequence for {stage} consumed {consumed} of {expected} slots"
+            f"VMM workspace iteration for {stage} ended with {live} live leases"
         )
 
 
@@ -615,8 +644,8 @@ def clear_mxfp8_vmm_workspace_pools() -> None:
     if _VMM_WORKSPACE_POOL_STAGE is not None:
         raise RuntimeError("Cannot clear an active VMM workspace iteration")
     for pool in _VMM_WORKSPACE_POOLS.values():
-        for _, workspace in pool:
-            workspace.close()
+        for slot in pool:
+            slot.workspace.close()
     _VMM_WORKSPACE_POOLS.clear()
 
 
