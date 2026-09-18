@@ -3237,8 +3237,21 @@ def mxfp8_quantize_only(tensor_quantizer_pairs, src_format):
     _s_dim = {"bshd": 1, "sbhd": 0}
     _d_dim = {"bshd": 3, "sbhd": 3}
 
+    # Attention consumes rowwise Q/K and columnwise V in forward. Localize
+    # only that representation; the backward-only representation stays in
+    # PyTorch's graph pool instead of requesting additional raw driver memory.
+    if len(tensor_quantizer_pairs) == 1:
+        localized_data_layouts = ("rowwise",)
+    elif len(tensor_quantizer_pairs) == 2:
+        localized_data_layouts = ("rowwise", "columnwise")
+    else:
+        assert len(tensor_quantizer_pairs) == 3
+        localized_data_layouts = ("rowwise", "rowwise", "columnwise")
+
     fp8_tensors = []
-    for tensor, quantizer in tensor_quantizer_pairs:
+    for (tensor, quantizer), localized_data_layout in zip(
+        tensor_quantizer_pairs, localized_data_layouts
+    ):
         original_shape = tensor.shape
         rs_shape = list(original_shape)
         rs_shape[_d_dim[src_format]] //= MXFP8_BLOCK_SCALING_SIZE
@@ -3263,7 +3276,11 @@ def mxfp8_quantize_only(tensor_quantizer_pairs, src_format):
             if use_vmm_localization:
                 from transformer_engine.pytorch.tensor.localized_mxfp8 import MXFP8VMMWorkspace
 
-                vmm_workspace = MXFP8VMMWorkspace.from_vmm_input(t2d, quantizer)
+                vmm_workspace = MXFP8VMMWorkspace.from_vmm_input(
+                    t2d,
+                    quantizer,
+                    localized_data_layout=localized_data_layout,
+                )
                 fp8_2d = vmm_workspace.quantize()
             else:
                 fp8_2d = quantizer(t2d)

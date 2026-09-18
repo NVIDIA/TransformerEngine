@@ -224,6 +224,53 @@ def test_mxfp8_bidirectional_compact_vmm() -> None:
 
 
 @pytest.mark.skipif(not _localization_available(), reason="CUDA localization is unavailable")
+@pytest.mark.parametrize("localized_data_layout", ["rowwise", "columnwise"])
+def test_mxfp8_vmm_single_localized_data_layout(localized_data_layout: str) -> None:
+    """Attention localizes its forward layout and graph-pools its backward layout."""
+    from transformer_engine.pytorch.tensor.localized_mxfp8 import MXFP8VMMWorkspace
+    from transformer_engine.pytorch.tensor.vmm import VMMRowSplitAllocator, is_vmm_tensor
+
+    shape = (256, 32768)
+    input_allocator = VMMRowSplitAllocator("cuda")
+    tensor = input_allocator.allocate(shape, torch.bfloat16)
+    tensor.normal_()
+    quantizer = te.MXFP8Quantizer(
+        fp8_dtype=te.DType.kFloat8E4M3,
+        rowwise=True,
+        columnwise=True,
+    )
+    quantizer.optimize_for_gemm = False
+    reference = quantizer(tensor)
+    workspace = MXFP8VMMWorkspace.from_vmm_input(
+        tensor,
+        quantizer,
+        localized_data_layout=localized_data_layout,
+    )
+    try:
+        output = workspace.quantize()
+        torch.cuda.synchronize()
+        assert is_vmm_tensor(output._rowwise_data) == (localized_data_layout == "rowwise")
+        assert is_vmm_tensor(output._columnwise_data) == (
+            localized_data_layout == "columnwise"
+        )
+        for name in (
+            "_rowwise_data",
+            "_rowwise_scale_inv",
+            "_columnwise_data",
+            "_columnwise_scale_inv",
+        ):
+            torch.testing.assert_close(
+                getattr(output, name),
+                getattr(reference, name),
+                atol=0.0,
+                rtol=0.0,
+            )
+    finally:
+        workspace.close()
+        input_allocator.close()
+
+
+@pytest.mark.skipif(not _localization_available(), reason="CUDA localization is unavailable")
 def test_mxfp8_bidirectional_swizzled_vmm() -> None:
     """Two row-partition launches must produce one GEMM-swizzled MXFP8 tensor."""
     shape = (256, 32768)

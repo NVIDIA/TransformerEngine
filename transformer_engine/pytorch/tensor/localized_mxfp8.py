@@ -303,6 +303,7 @@ class MXFP8VMMWorkspace:
         device: torch.device | str,
         quantizer: MXFP8Quantizer,
         input_tensor: Optional[torch.Tensor] = None,
+        localized_data_layout: str = "both",
     ) -> "MXFP8VMMWorkspace":
         """Allocate persistent outputs and, unless provided, a VMM input."""
         if len(shape) != 2 or shape[0] % 256 != 0 or shape[1] % 128 != 0:
@@ -318,6 +319,11 @@ class MXFP8VMMWorkspace:
             raise ValueError("VMM prototype does not support 2D quantization")
         if quantizer.internal:
             raise ValueError("VMM prototype requires quantizer.internal=False")
+        if localized_data_layout not in ("both", "rowwise", "columnwise"):
+            raise ValueError(
+                "localized_data_layout must be 'both', 'rowwise', or 'columnwise', "
+                f"got {localized_data_layout!r}"
+            )
 
         device = torch.device(device)
         if device.type != "cuda":
@@ -339,8 +345,14 @@ class MXFP8VMMWorkspace:
                 "External input must match the workspace shape, dtype, device, "
                 "and contiguous layout"
             )
-        rowwise_data = allocator.allocate(shape, torch.uint8)
-        columnwise_data = allocator.allocate(shape, torch.uint8)
+        if localized_data_layout in ("both", "rowwise"):
+            rowwise_data = allocator.allocate(shape, torch.uint8)
+        else:
+            rowwise_data = torch.empty(shape, dtype=torch.uint8, device=device)
+        if localized_data_layout in ("both", "columnwise"):
+            columnwise_data = allocator.allocate(shape, torch.uint8)
+        else:
+            columnwise_data = torch.empty(shape, dtype=torch.uint8, device=device)
         row_scale_shape = tuple(quantizer.get_scale_shape(shape, columnwise=False))
         col_scale_shape = tuple(quantizer.get_scale_shape(shape, columnwise=True))
         rowwise_scale_inv = torch.empty(
@@ -427,6 +439,8 @@ class MXFP8VMMWorkspace:
         cls,
         tensor: torch.Tensor,
         quantizer: MXFP8Quantizer,
+        *,
+        localized_data_layout: str = "both",
     ) -> "MXFP8VMMWorkspace":
         """Allocate only MXFP8 outputs and consume an existing VMM activation."""
         return cls.empty(
@@ -435,6 +449,7 @@ class MXFP8VMMWorkspace:
             device=tensor.device,
             quantizer=quantizer,
             input_tensor=tensor,
+            localized_data_layout=localized_data_layout,
         )
 
     @classmethod
