@@ -248,8 +248,8 @@ class TVMFFICentral {
     }
     // Only check if libtvm_ffi.so is loaded if user enables the CuTeDSL backend.
     // So if user disables the CuTeDSL backend, don't output this warning message.
-    if (!tvm_ffi_available_) {
-      // Warn once: the state is permanent, so a per-call warning would spam every quantize.
+    if (!get_tvm_ffi_available()) {
+      // Warn once rather than spamming every quantize call while TVM-FFI is unavailable.
       static std::once_flag warned;
       std::call_once(warned, [this] {
         maybe_warn_not_chosen(
@@ -268,9 +268,24 @@ class TVMFFICentral {
 
   // Runtime override of NVTE_ENABLE_CUTEDSL_BACKEND (exposed to Python as
   // nvte_set_cutedsl_backend; used by tests to compare both backends in
-  // one process). Safe to toggle at any time
+  // one process). Safe to toggle at any time.
   void set_cutedsl_backend_enabled(bool enabled) {
     cutedsl_backend_enabled_.store(enabled, std::memory_order_relaxed);
+    // If tvm-ffi is not available because it's disabled in the beginning,
+    // try to initialized it
+    if (enabled && !get_tvm_ffi_available()) {
+      std::lock_guard<std::mutex> init_lock(tvm_ffi_init_mutex_);
+      // Check again after acquiring the lock, in case another thread already initialized it.
+      if (!get_tvm_ffi_available()) {
+        set_tvm_ffi_available(prepare_tvm_ffi());
+      }
+    }
+  }
+
+  bool get_tvm_ffi_available() const { return tvm_ffi_available_.load(std::memory_order_acquire); }
+
+  void set_tvm_ffi_available(bool available) {
+    tvm_ffi_available_.store(available, std::memory_order_release);
   }
 
   bool get_cutedsl_backend_enabled() const {
@@ -290,12 +305,14 @@ class TVMFFICentral {
  private:
   ~TVMFFICentral() = default;
   TVMFFICentral()
-      : tvm_ffi_available_(prepare_tvm_ffi()),
+      : tvm_ffi_available_(false),
         cutedsl_backend_enabled_(is_cutedsl_backend_enabled()),
-        warn_cutedsl_backend_not_chosen_(warn_if_cutedsl_backend_not_chosen()) {}
+        warn_cutedsl_backend_not_chosen_(warn_if_cutedsl_backend_not_chosen()) {
+    set_tvm_ffi_available(prepare_tvm_ffi());
+  }
 
-  static bool prepare_tvm_ffi() {
-    if (!initialize_python_cutedsl_backend()) {
+  bool prepare_tvm_ffi() const {
+    if (!get_cutedsl_backend_enabled() || !initialize_python_cutedsl_backend()) {
       return false;
     }
     return dlopen("libtvm_ffi.so", RTLD_NOW | RTLD_GLOBAL) != nullptr;
@@ -314,7 +331,8 @@ class TVMFFICentral {
     return transformer_engine::getenv<bool>("NVTE_WARN_IF_CUTEDSL_BACKEND_NOT_CHOSEN");
   }
 
-  const bool tvm_ffi_available_;  // libtvm_ffi.so loaded; false disables the backend
+  std::atomic<bool> tvm_ffi_available_;  // libtvm_ffi.so loaded; false disables the backend
+  std::mutex tvm_ffi_init_mutex_;
   std::atomic<bool> cutedsl_backend_enabled_;
   const bool warn_cutedsl_backend_not_chosen_;
 };
