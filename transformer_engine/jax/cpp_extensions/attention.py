@@ -117,6 +117,7 @@ class AttentionLogging:
         "cp_striped_window_size",
         "stripe_size",
         "return_max_logit",
+        "allow_fast_causal_path",
     ],
 )
 @dataclass(frozen=True)
@@ -142,6 +143,7 @@ class _FusedAttnConfig:
         int | None
     )  # Only for CP + Striped. For Ring P2P, stripe_size=1 only.For AG, stripe_size>=1.
     return_max_logit: bool = False
+    allow_fast_causal_path: bool = True
 
     @property
     def effective_window_size(self) -> Tuple[int, int]:
@@ -756,12 +758,15 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             segment_ids=(_q_segment_ids, _kv_segment_ids),
             segment_pos=(_q_segment_pos, _kv_segment_pos),
         )
+        # Rotated THD ring steps can have different inter-segment padding at the
+        # local Q and KV boundaries, which violates the causal fast-path assumption.
         (q_seqlen, kv_seqlen), (q_seq_offsets, k_seq_offsets) = (
             sequence_descriptor.get_seqlens_and_offsets(
                 config.attn_mask_type,
                 config.qkv_layout,
                 config.window_size,
                 config.max_segments_per_seq,
+                allow_fast_causal_path=config.allow_fast_causal_path,
             )
         )
         raw_q_seqlen = q_seqlen
@@ -1063,6 +1068,20 @@ class FusedAttnFwdPrimitive(BasePrimitive):
 register_primitive(FusedAttnFwdPrimitive)
 
 
+def _get_fused_attn_bwd_arg_shardings(arg_infos):
+    """Apply the common sharding constraints between backward operands."""
+    arg_shardings = [arg_i.sharding for arg_i in arg_infos]
+    # The fused backward kernel consumes output and doutput elementwise. Use the
+    # saved output rather than q: QKV-packed q has an additional packing axis.
+    output_idx = 7
+    doutput_idx = 8
+    arg_shardings[doutput_idx] = arg_shardings[output_idx]
+    # Each segment position tensor describes the tokens in its matching ID tensor.
+    arg_shardings[-1] = arg_shardings[-3]
+    arg_shardings[-2] = arg_shardings[-4]
+    return tuple(arg_shardings)
+
+
 class FusedAttnBwdPrimitive(BasePrimitive):
     """
     Fused Attention Backward Primitive
@@ -1324,12 +1343,14 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             segment_pos=(_q_segment_pos, _kv_segment_pos),
         )
 
+        # Keep backward metadata identical to forward for rotated THD ring steps.
         (q_seqlen, kv_seqlen), (q_seq_offsets, k_seq_offsets) = (
             sequence_descriptor.get_seqlens_and_offsets(
                 config.attn_mask_type,
                 config.qkv_layout,
                 config.window_size,
                 config.max_segments_per_seq,
+                allow_fast_causal_path=config.allow_fast_causal_path,
             )
         )
 
@@ -1455,10 +1476,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         dv_sharding = NamedSharding(mesh, PartitionSpec(*v_spec))
         dbias_sharding = NamedSharding(mesh, PartitionSpec(*bias_spec))
         dsoftmax_offset_sharding = NamedSharding(mesh, PartitionSpec(*softmax_offset_spec))
-        arg_shardings = [arg_i.sharding for arg_i in arg_infos]
-        arg_shardings[-1] = arg_shardings[-3]
-        arg_shardings[-2] = arg_shardings[-4]
-        arg_shardings = tuple(arg_shardings)
+        arg_shardings = _get_fused_attn_bwd_arg_shardings(arg_infos)
         out_shardings = (
             dq_sharding,
             dk_sharding,
@@ -1523,10 +1541,12 @@ class FusedAttnBwdPrimitive(BasePrimitive):
     @staticmethod
     def shardy_sharding_rule(config, mesh, value_types, result_types):
         del config, mesh
-        # Keep in sync with `infer_sharding_from_operands`.
-        input_spec = tuple((f"…{x}",) for x in range(len(value_types)))
+        # Keep doutput aligned with the saved output. Fused attention forward in turn
+        # aligns output with q, which is required by the local backward kernel.
+        input_spec = [(f"…{x}",) for x in range(len(value_types))]
+        input_spec[8] = input_spec[7]
         output_spec = tuple((f"…{x}",) for x in range(len(result_types)))
-        return SdyShardingRule(input_spec, output_spec)
+        return SdyShardingRule(tuple(input_spec), output_spec)
 
 
 register_primitive(FusedAttnBwdPrimitive)
@@ -2255,7 +2275,7 @@ class FusedAttnCPWithAllGatherBwdPrimitive(FusedAttnBwdPrimitive):
         dv_sharding = NamedSharding(mesh, PartitionSpec(*v_spec))
         dbias_sharding = NamedSharding(mesh, PartitionSpec(*bias_spec))
         dsoftmax_offset_sharding = NamedSharding(mesh, PartitionSpec(*softmax_offset_spec))
-        arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
+        arg_shardings = _get_fused_attn_bwd_arg_shardings(arg_infos)
         out_shardings = (
             dq_sharding,
             dk_sharding,
@@ -2578,7 +2598,7 @@ class FusedAttnCPStripedWithAllGatherBwdPrimitive(FusedAttnBwdPrimitive):
         dv_sharding = NamedSharding(mesh, PartitionSpec(*v_spec))
         dbias_sharding = NamedSharding(mesh, PartitionSpec(*bias_spec))
         dsoftmax_offset_sharding = NamedSharding(mesh, PartitionSpec(*softmax_offset_spec))
-        arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
+        arg_shardings = _get_fused_attn_bwd_arg_shardings(arg_infos)
         out_shardings = (
             dq_sharding,
             dk_sharding,
@@ -2814,6 +2834,18 @@ class _FusedAttnCPWithP2PHelper:
             cp_striped_window_size=None,
             stripe_size=self.config.stripe_size,
             return_max_logit=self.config.return_max_logit,
+        )
+
+    def get_striped_thd_step_config(self) -> _FusedAttnConfig:
+        """Return the config for a rotated THD ring-attention step."""
+        assert self.config.qkv_layout.is_thd()
+        qkv_layout = self.config.qkv_layout
+        if not qkv_layout.is_qkvpacked():
+            qkv_layout = qkv_layout.to_kvpacked()
+        return replace(
+            self.config,
+            qkv_layout=qkv_layout,
+            allow_fast_causal_path=False,
         )
 
     def stack_kv(self, k, v):
@@ -3125,10 +3157,7 @@ class FusedRingAttnBwdPrimitive(FusedAttnBwdPrimitive):
         dbias_sharding = NamedSharding(mesh, PartitionSpec(*bias_spec))
         # Ring attention doesn't use dsoftmax_offset, but we need to return it for arity matching
         dsoftmax_offset_sharding = NamedSharding(mesh, PartitionSpec(*softmax_offset_spec))
-        arg_shardings = [arg_i.sharding for arg_i in arg_infos]
-        arg_shardings[-1] = arg_shardings[-3]
-        arg_shardings[-2] = arg_shardings[-4]
-        arg_shardings = tuple(arg_shardings)
+        arg_shardings = _get_fused_attn_bwd_arg_shardings(arg_infos)
         out_shardings = (
             dq_sharding,
             dk_sharding,
@@ -3450,10 +3479,7 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
             # Combine KV tensors if separate for better permute scheduling and performance.
             # Eventually XLA should perform this automatically.
             kv = helper.stack_kv(k, v)
-            if not config.qkv_layout.is_qkvpacked():
-                subblock_config = replace(config, qkv_layout=config.qkv_layout.to_kvpacked())
-            else:
-                subblock_config = config
+            subblock_config = helper.get_striped_thd_step_config()
 
             cp_size = get_mesh_axis_size(config.cp_axis, mesh)
             cp_rank = get_mesh_axis_rank_host(config.cp_axis, mesh)
@@ -3580,11 +3606,7 @@ class FusedRingAttnStripedBwdPrimitive(FusedAttnBwdPrimitive):
         if not is_context_parallel:
             return FusedAttnBwdPrimitive.partition(config, mesh, arg_infos, result_infos)
 
-        arg_shardings = [arg_i.sharding for arg_i in arg_infos]
-        # Ensure segment_pos gets same sharding as ID.
-        arg_shardings[-1] = arg_shardings[-3]
-        arg_shardings[-2] = arg_shardings[-4]
-        arg_shardings = tuple(arg_shardings)
+        arg_shardings = _get_fused_attn_bwd_arg_shardings(arg_infos)
         # dq, dk, dv, dbias, dsoftmax_offset sharding = q, k, v, bias, softmax_offset sharding
         out_shardings = tuple(arg.sharding for arg in arg_infos[:5])
 
@@ -3619,10 +3641,7 @@ class FusedRingAttnStripedBwdPrimitive(FusedAttnBwdPrimitive):
             # Combine KV tensors if separate for better permute scheduling and performance.
             # Eventually XLA should perform this automatically.
             kv = helper.stack_kv(k, v)
-            if not config.qkv_layout.is_qkvpacked():
-                subblock_config = replace(config, qkv_layout=config.qkv_layout.to_kvpacked())
-            else:
-                subblock_config = config
+            subblock_config = helper.get_striped_thd_step_config()
 
             cp_size = get_mesh_axis_size(config.cp_axis, mesh)
             # We need cp_rank to be a host value for adjust_cp_striped_window_size()
