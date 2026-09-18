@@ -16,7 +16,7 @@ import pytest
 
 from .artifacts import write_run_artifacts
 from .case import Case, CaseSkip
-from .distributed import LAUNCH_ENV, launched_node_id, rank as dist_rank, run_across_ranks
+from .distributed import LAUNCH_ENV, launch, run_across_ranks
 from .declaration import declared_axes, normalize_argnames, set_plugin_active
 from .decorator import (
     BENCHMARK_MARKER,
@@ -311,7 +311,7 @@ def pytest_pyfunc_call(pyfuncitem):
     # Launch on dist_init, not on num_gpus: a one-rank distributed Case is a legitimate
     # way to debug, and running it in-process would call dist_init with no rank
     # environment set.
-    if case.dist_init is not None and dist_rank() is None:
+    if case.dist_init is not None and launch() is None:
         return _launch_ranks(pyfuncitem, case)
 
     # CaseSkip from setup() is a coverage skip (unavailable backend or arch), not a
@@ -339,11 +339,11 @@ def _check_rank_is_running_its_own_test(pyfuncitem) -> None:
     out of a log -- would otherwise make the parent believe it is a child and silently run
     one rank where the test asked for several.
     """
-    expected = launched_node_id()
-    if expected is not None and expected != pyfuncitem.nodeid:
+    current = launch()
+    if current is not None and current.node_id != pyfuncitem.nodeid:
         raise pytest.UsageError(
-            f"{pyfuncitem.nodeid} ran with {LAUNCH_ENV} set for {expected}. The harness sets"
-            " it on the ranks it spawns; unset it to run this test directly."
+            f"{pyfuncitem.nodeid} ran with {LAUNCH_ENV} set for {current.node_id}. The harness"
+            " sets it on the ranks it spawns; unset it to run this test directly."
         )
 
 

@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from typing import NamedTuple
 
 from .decorator import MODE_BENCHMARK
 
@@ -24,34 +25,31 @@ _KILL_GRACE_S = 10.0
 
 #: The one variable the harness owns. Its presence means "this process is a rank I
 #: spawned, for this node ID", which is what stops a child launching ranks of its own and
-#: what keeps an unrelated RANK in the environment from being mistaken for one of ours.
+#: what keeps an unrelated RANK in the environment from being read as one of ours.
 LAUNCH_ENV = "NVTE_BENCHMARK_DIST_LAUNCH"
 
-#: PyTorch's own default, so a rank that rendezvous through ``env://`` lands where it
-#: expects.
-DEFAULT_COORDINATOR_PORT = 29500
+
+class Launch(NamedTuple):
+    """The launch a spawned rank belongs to."""
+
+    node_id: str
+    rank: int
+    world_size: int
+    coordinator_addr: str
+    coordinator_port: int
 
 
-def launched_node_id() -> str | None:
-    """The node ID this rank was spawned to run, or ``None`` if it was not spawned."""
-    return os.environ.get(LAUNCH_ENV)
-
-
-def rank() -> int | None:
-    """This rank's index, or ``None`` outside a launch the harness started."""
-    return None if launched_node_id() is None else int(os.environ["RANK"])
-
-
-def world_size() -> int | None:
-    """The launch's world size, or ``None`` outside a launch the harness started."""
-    return None if launched_node_id() is None else int(os.environ["WORLD_SIZE"])
-
-
-def coordinator() -> tuple[str, int]:
-    """The rendezvous endpoint this launch agreed on, as ``(address, port)``."""
-    return (
-        os.environ.get("MASTER_ADDR", "127.0.0.1"),
-        int(os.environ.get("MASTER_PORT", DEFAULT_COORDINATOR_PORT)),
+def launch() -> Launch | None:
+    """This rank's launch, or ``None`` when the harness did not spawn this process."""
+    node_id = os.environ.get(LAUNCH_ENV)
+    if node_id is None:
+        return None
+    return Launch(
+        node_id,
+        int(os.environ["RANK"]),
+        int(os.environ["WORLD_SIZE"]),
+        os.environ["MASTER_ADDR"],
+        int(os.environ["MASTER_PORT"]),
     )
 
 
@@ -70,22 +68,16 @@ def _primary_address() -> str:
         return "127.0.0.1"
 
 
-def _free_port(preferred) -> int:
-    """``preferred`` if it can be bound right now, else a port the OS picks.
+def _free_port() -> int:
+    """A port the OS picks and has just confirmed free.
 
-    Sequential launches reuse the preferred port happily, but two pytest sessions running
-    concurrently -- which qa/L1_pytorch_distributed_unittest does on disjoint GPUs -- would
-    otherwise both reach for it and the second would fail to bind.
+    Binding to 0 and closing leaves a window before the ranks claim it, but any fixed
+    choice -- 29500 included -- collides outright with the previous config or with the
+    concurrent pytest session qa/L1_pytorch_distributed_unittest runs on other GPUs.
     """
-    for candidate in (preferred, 0):
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-                probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                probe.bind(("", candidate))
-                return probe.getsockname()[1]
-        except OSError:
-            continue
-    return preferred
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("", 0))
+        return probe.getsockname()[1]
 
 
 def _child_command(pyfuncitem, settings, report_dir) -> list[str]:
@@ -241,7 +233,7 @@ def run_across_ranks(pyfuncitem, case, settings) -> list:
         reports.mkdir()
         # Checked free per launch: a port still held by the previous config, or by a
         # concurrent pytest session, would fail to bind rather than rendezvous.
-        endpoint = (_primary_address(), _free_port(DEFAULT_COORDINATOR_PORT))
+        endpoint = (_primary_address(), _free_port())
         procs, streams, results = [], [], {}
         try:
             for index in range(case.num_gpus):

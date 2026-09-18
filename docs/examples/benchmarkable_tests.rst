@@ -134,8 +134,9 @@ intact when it adds the test data:
            num_gpus=min(4, torch.cuda.device_count()),
        )
 
-The coordinator is a TCP endpoint the harness picks per launch, checking the port is free
-first so a concurrent pytest session cannot collide with it. ``tcp://`` is what JAX's
+The coordinator is a TCP endpoint the harness picks per launch, on a port the OS assigns
+and has just confirmed free, so nothing collides with the previous config or with a
+concurrent pytest session. ``tcp://`` is what JAX's
 ``jax.distributed.initialize`` needs, since it cannot rendezvous through a file. A test that
 prefers ``env://`` can ignore the arguments entirely: ``MASTER_ADDR``, ``MASTER_PORT``,
 ``RANK``, ``WORLD_SIZE``, ``LOCAL_RANK`` and ``LOCAL_WORLD_SIZE`` describe the same launch,

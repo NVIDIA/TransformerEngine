@@ -10,7 +10,7 @@ import time
 
 from .case import Case, axis_value
 from .device import synchronize
-from .distributed import coordinator, rank as dist_rank, world_size as dist_world_size
+from .distributed import launch
 from .timing import TIMING_METHOD, WallClockSampler, timing_stats
 
 
@@ -25,16 +25,16 @@ def _framework_for(pyfuncitem) -> str:
     return "pytorch"
 
 
-def _dist_arguments() -> tuple[int, int, str, int]:
-    """What ``dist_init`` receives: this rank, the world size, and the coordinator."""
-    address, port = coordinator()
-    rank, world = dist_rank(), dist_world_size()
-    return (0 if rank is None else rank, 1 if world is None else world, address, port)
-
-
 def _run_correctness(case: Case) -> None:
     """Run one setup/evaluate/reference/verify cycle with no timing."""
-    state = case.dist_init(*_dist_arguments()) if case.dist_init is not None else None
+    current = launch()
+    state = (
+        case.dist_init(
+            current.rank, current.world_size, current.coordinator_addr, current.coordinator_port
+        )
+        if case.dist_init is not None
+        else None
+    )
     try:
         state = case.setup(state)
         actual = case.evaluate(state)
@@ -58,7 +58,14 @@ def _run_correctness(case: Case) -> None:
 
 def _run_benchmark_point(case, settings, pyfuncitem):
     """Gate once on correctness, then time evaluate and optionally reference."""
-    state = case.dist_init(*_dist_arguments()) if case.dist_init is not None else None
+    current = launch()
+    state = (
+        case.dist_init(
+            current.rank, current.world_size, current.coordinator_addr, current.coordinator_port
+        )
+        if case.dist_init is not None
+        else None
+    )
     try:
         state = case.setup(state)
 
@@ -188,7 +195,8 @@ def _base_record(pyfuncitem, variant, precondition_verified):
     # case_id and record_key: a 4-rank run is a different workload from an 8-rank one.
     # rank is not -- it is a separate field, keyed on only so N ranks' records cannot
     # collapse into one another.
-    world = dist_world_size()
+    current = launch()
+    world = None if current is None else current.world_size
     if world is not None:
         declared = params.get("world_size")
         if declared is not None and declared != world:
@@ -207,7 +215,7 @@ def _base_record(pyfuncitem, variant, precondition_verified):
         "operation": pyfuncitem.originalname,
         "params": params,
         "node_id": pyfuncitem.nodeid,
-        "rank": dist_rank(),
+        "rank": None if current is None else current.rank,
         "world_size": world,
         "precondition_verified": precondition_verified,
         "tags": [],
