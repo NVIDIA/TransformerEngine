@@ -19,7 +19,7 @@ from typing import Optional, Tuple
 import warnings
 
 # Minimum cuDNN version supported by Transformer Engine, as (major, minor, patch).
-# Keep in sync with kMinCudnnVersion in transformer_engine/common/cudnn_utils.h.
+# Keep in sync with kMinCudnnVersion in transformer_engine/common/cudnn_min_version.h.
 MIN_CUDNN_VERSION = (9, 12, 0)
 
 
