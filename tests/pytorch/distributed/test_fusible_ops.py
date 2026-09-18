@@ -1104,8 +1104,10 @@ def test_distributed_fuser_ops(world_size: int, compile_model: bool) -> None:
         "torch.distributed.run",
         f"--nproc_per_node={world_size}",
         current_file,
-        "--compile" if compile_model else "--parallel",
+        "--parallel",
     ]
+    if compile_model:
+        command.append("--compile")
     with tempfile.TemporaryDirectory(prefix="te-test-fusible-ops-") as temp_dir:
         env = dict(os.environ)
         env["NVTE_TEST_RDZV_PATH"] = str(pathlib.Path(temp_dir) / "rdzv")
@@ -1115,12 +1117,15 @@ def test_distributed_fuser_ops(world_size: int, compile_model: bool) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--parallel", action="store_true", help="Run parallel tests")
-    parser.add_argument("--compile", action="store_true", help="Run compiled TP tests")
+    parser.add_argument("--compile", action="store_true", help="Use the compiled TP test suite")
     args = parser.parse_args()
+    if args.compile and not args.parallel:
+        parser.error("--compile requires --parallel")
     if args.parallel:
-        run_parallel_tests()
-    if args.compile:
-        run_compile_parallel_tests()
+        if args.compile:
+            run_compile_parallel_tests()
+        else:
+            run_parallel_tests()
 
 
 if __name__ == "__main__":

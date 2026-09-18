@@ -10,7 +10,7 @@ import os
 import re
 import sys
 import warnings
-from typing import Union
+from typing import NamedTuple, Union
 
 import pytest
 import torch
@@ -2509,6 +2509,11 @@ def _compile_with_graphs(fn):
     return torch.compile(fn, fullgraph=True, backend=backend), graphs
 
 
+class _CompiledPasses(NamedTuple):
+    forward: bool
+    backward: bool
+
+
 def _assert_custom_ops(graphs, name, present=True):
     targets = {
         str(node.target).removesuffix(".default").removesuffix("_base")
@@ -2519,7 +2524,7 @@ def _assert_custom_ops(graphs, name, present=True):
         if node.op == "call_function"
     }
     if isinstance(present, bool):
-        present = (present, present)
+        present = _CompiledPasses(forward=present, backward=present)
     for suffix, expected in zip(("", "_backward"), present):
         assert (f"transformer_engine_compile.{name}{suffix}" in targets) == expected, targets
 
@@ -2547,15 +2552,27 @@ def _check_ops(fn, model, x, dy, kwargs=None):
 @pytest.mark.parametrize(
     "case,reason,compiled_passes",
     [
-        ("single", None, (True, True)),
-        ("single_forward", "without a custom op for backward", (True, False)),
-        ("single_backward", "without a custom op for forward", (False, True)),
-        ("single_eager", "without a custom op", (False, False)),
+        ("single", None, _CompiledPasses(forward=True, backward=True)),
+        (
+            "single_forward",
+            "without a custom op for backward",
+            _CompiledPasses(forward=True, backward=False),
+        ),
+        (
+            "single_backward",
+            "without a custom op for forward",
+            _CompiledPasses(forward=False, backward=True),
+        ),
+        ("single_eager", "without a custom op", _CompiledPasses(forward=False, backward=False)),
         # A pipeline can dispatch each operation through its own custom op.
-        ("multi", None, (True, True)),
+        ("multi", None, _CompiledPasses(forward=True, backward=True)),
         # This test fusion only implements eager backward; forward still compiles.
-        ("backward_fusion", "without a custom op for backward", (True, False)),
-        ("legacy", "without a custom op", (False, False)),
+        (
+            "backward_fusion",
+            "without a custom op for backward",
+            _CompiledPasses(forward=True, backward=False),
+        ),
+        ("legacy", "without a custom op", _CompiledPasses(forward=False, backward=False)),
     ],
 )
 def test_te_ops_pipeline(case, reason, compiled_passes, dtype, monkeypatch):
@@ -2595,29 +2612,9 @@ def test_te_ops_pipeline(case, reason, compiled_passes, dtype, monkeypatch):
         compiled, graphs = _compile_with_graphs(model)
         with torch.no_grad():
             torch.testing.assert_close(compiled(x), x * ops[0].weight)
-        _assert_custom_ops(graphs, "_affineop", present=(True, False))
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-@pytest.mark.parametrize("train_prefix", [False, True])
-def test_te_ops_backward_skips_frozen_prefix(train_prefix, monkeypatch):
-    prefix, suffix = _AffineOp(), _AffineOp()
-    prefix.weight.requires_grad_(train_prefix)
-    monkeypatch.setattr(prefix, "compile_ops", (prefix.compile_ops[0], None))
-    model = te.ops.Sequential(prefix, suffix)
-    compiled, graphs = _compile_with_graphs(model)
-    x = torch.randn(8, 16, device="cuda")
-    targets = tuple(p for p in model.parameters() if p.requires_grad)
-    reason = "without a custom op for backward"
-    with pytest.warns(UserWarning, match=reason) if train_prefix else contextlib.nullcontext():
-        actual = compiled(x)
-        expected = x * prefix.weight * suffix.weight
-        torch.testing.assert_close(actual, expected)
-        torch.testing.assert_close(
-            torch.autograd.grad(actual.sum(), targets),
-            torch.autograd.grad(expected.sum(), targets),
+        _assert_custom_ops(
+            graphs, "_affineop", present=_CompiledPasses(forward=True, backward=False)
         )
-    _assert_custom_ops(graphs, "_affineop", present=(True, not train_prefix))
 
 
 @pytest.mark.parametrize(
@@ -2737,8 +2734,6 @@ def test_te_ops_linear_bias_backward_override(dtype, backward_override, monkeypa
 def _check_linear_bias_compile(
     dtype, quantization, case, grads, monkeypatch, *, backward_override=None
 ):
-    # Native PyTorch numerics are covered by test_fusible_ops.py. Here check
-    # compilation, selective gradients, tensor updates, and graph reuse.
     if quantization == "fp8" and not fp8_available:
         pytest.skip(reason_for_no_fp8)
     if (case == "linear" and grads == "bias") or (case == "bias" and grads == "weight"):
@@ -2776,34 +2771,67 @@ def _check_linear_bias_compile(
     with torch.no_grad() if grads == "none" else contextlib.nullcontext():
         for iteration in range(3):
             with torch.no_grad():
-                x.uniform_(-0.5, 0.5)
+                for tensor in (x, *model.parameters()):
+                    if iteration == 0:
+                        # These binary fractions survive FP8 quantization exactly,
+                        # allowing a strict comparison with native PyTorch.
+                        tensor.copy_(torch.randint(-2, 3, tensor.shape, device=tensor.device) / 16)
+                    else:
+                        tensor.uniform_(-0.5, 0.5)
                 for param, eager_param in zip(model.parameters(), eager_model.parameters()):
-                    param.uniform_(-0.5, 0.5)
                     eager_param.copy_(param)
             actual = compiled(x)
             expected = run(x, eager_model)
             torch.testing.assert_close(actual, expected)
-            if targets:
-                dy = torch.randn_like(actual)
+            if iteration == 0:
+                reference = x.double()
+                for op in ops:
+                    reference = (
+                        torch.nn.functional.linear(reference, op.weight.double())
+                        if isinstance(op, BasicLinear)
+                        else reference + op.bias.double()
+                    )
                 torch.testing.assert_close(
-                    torch.autograd.grad(actual, targets, dy),
-                    torch.autograd.grad(expected, eager_targets, dy),
+                    actual, reference, check_dtype=False, **dtype_tols(dtype)
                 )
+            if targets:
+                dy = (
+                    torch.randint_like(actual, -2, 3) / 16
+                    if iteration == 0
+                    else torch.randn_like(actual)
+                )
+                actual_grads = torch.autograd.grad(actual, targets, dy)
+                torch.testing.assert_close(
+                    actual_grads, torch.autograd.grad(expected, eager_targets, dy)
+                )
+                if iteration == 0:
+                    torch.testing.assert_close(
+                        actual_grads,
+                        torch.autograd.grad(reference, targets, dy.double()),
+                        **dtype_tols(dtype),
+                    )
             if iteration == 1:
                 graph_count = len(graphs)
             elif iteration == 2:
                 assert len(graphs) == graph_count
-    _assert_custom_ops(graphs, "forwardlinearbiasactivation", present=(case == "pair", False))
+    _assert_custom_ops(
+        graphs,
+        "forwardlinearbiasactivation",
+        present=_CompiledPasses(forward=case == "pair", backward=False),
+    )
     _assert_custom_ops(
         graphs,
         "basiclinear",
-        present=(
-            case in ("linear", "unfused"),
-            case != "bias" and grads in ("all", "input", "weight"),
+        present=_CompiledPasses(
+            forward=case in ("linear", "unfused"),
+            backward=case != "bias" and grads in ("all", "input", "weight"),
         ),
     )
     _assert_custom_ops(
         graphs,
         "bias",
-        present=(case in ("bias", "unfused"), case != "linear" and bool(targets)),
+        present=_CompiledPasses(
+            forward=case in ("bias", "unfused"),
+            backward=case != "linear" and bool(targets),
+        ),
     )

@@ -1278,31 +1278,13 @@ class BasicLinear(BasicOperation):
             )
         return dx, [(dw,)], [()]
 
-    def fuser_backward(
-        self,
-        basic_op_ctxs,
-        grad_output,
-        *,
-        basic_op_grad_extra_outputs,
-        use_custom_ops=False,
-    ):
-        # The shared dispatcher selects compile_ops[1] when use_custom_ops=True.
-        result = super().fuser_backward(
-            basic_op_ctxs,
-            grad_output,
-            basic_op_grad_extra_outputs=basic_op_grad_extra_outputs,
-            use_custom_ops=use_custom_ops,
-        )
-        if not use_custom_ops:
-            # Eager-only storage release and main_grad bookkeeping. The custom
-            # op has a functional schema: it must not clear saved input storage.
-            ctx = basic_op_ctxs[0]
-            clear_tensor_data(ctx.saved_tensors[0])
-            if (
-                ctx.weight_requires_grad
-                and self._accumulate_into_main_grad
-                and get_accumulate_flag_in_param(self.weight)
-            ):
-                dx, _, extras = result
-                return dx, [get_dummy_wgrads_for_params([self.weight])], extras
-        return result
+    def backward_postprocess(self, basic_op_ctxs, grad_params):
+        ctx = basic_op_ctxs[0]
+        clear_tensor_data(ctx.saved_tensors[0])
+        if (
+            ctx.weight_requires_grad
+            and self._accumulate_into_main_grad
+            and get_accumulate_flag_in_param(self.weight)
+        ):
+            return [get_dummy_wgrads_for_params([self.weight])]
+        return grad_params

@@ -238,6 +238,8 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         )
         compute = self.compile_ops[1] if use_custom_ops else self.backward_compute
         grad_input, grad_params, grad_extra_inputs = compute(args)
+        if not use_custom_ops:
+            grad_params = self.backward_postprocess(basic_op_ctxs, grad_params)
         if grad_input is None:
             grad_input = grad_output
         return grad_input, grad_params, grad_extra_inputs
@@ -292,6 +294,18 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         self, basic_op_ctxs: list[OperationContext], args: Any, aux: tuple
     ) -> None:
         """Save state needed by the basic operations' backward passes."""
+
+    def backward_postprocess(
+        self,
+        basic_op_ctxs: list[OperationContext],  # pylint: disable=unused-argument
+        grad_params: Sequence[Sequence[Optional[torch.Tensor]]],
+    ) -> Sequence[Sequence[Optional[torch.Tensor]]]:
+        """Finish an eager compute pass and return parameter gradients per basic op.
+
+        Override for storage cleanup or parameter bookkeeping such as main_grad.
+        The shared dispatcher skips this hook when using functional custom ops.
+        """
+        return grad_params
 
 
 class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
