@@ -22,6 +22,7 @@ from build_tools.utils import (
     cuda_home_path,
     cuda_version,
     cudnn_frontend_include_path,
+    get_bolt_build_flags,
     get_frameworks,
     remove_dups,
     min_python_version_str,
@@ -255,6 +256,9 @@ def build_nccl_ep_submodule() -> str:
 
     nproc = get_max_jobs_for_parallel_build()
     env = os.environ.copy()
+    # get_bolt_build_flags() defaults to `c++` when CXX is unset. Export the
+    # same default so Make does not independently select its `g++` default.
+    env.setdefault("CXX", "c++")
     if (cuda_home := cuda_home_path()) is not None:
         env.setdefault("CUDA_HOME", str(cuda_home))
     if (nvcc_bin := nvcc_path()) is not None:
@@ -266,13 +270,34 @@ def build_nccl_ep_submodule() -> str:
     env["NCCL_HOME"] = nccl_home
     env["NCCL_EP_BUILDDIR"] = str(build_dir)
 
-    prev_gencode = gencode_stamp.read_text().strip() if gencode_stamp.exists() else None
-    if not nccl_ep_shared_lib.exists() or prev_gencode != gencode:
-        if nccl_ep_shared_lib.exists() and prev_gencode != gencode:
-            print(
-                f"[NCCL EP] gencode changed ('{prev_gencode}' -> '{gencode}'); "
-                "rebuilding NCCL EP libraries"
-            )
+    bolt_cxx_flags, bolt_linker_flags = get_bolt_build_flags()
+    nvcc_host_flags = [f"-Xcompiler={flag}" for flag in bolt_cxx_flags]
+    nvcc_linker_flags = []
+    if bolt_linker_flags:
+        nvcc_linker_flags.extend(["-Xlinker=--emit-relocs", "-Xlinker=-z", "-Xlinker=now"])
+        if "-mno-fix-cortex-a53-843419" in bolt_linker_flags:
+            nvcc_linker_flags.append("-Xlinker=--no-fix-cortex-a53-843419")
+
+    def append_env_flags(name: str, flags: List[str]) -> None:
+        if flags:
+            env[name] = " ".join([env.get(name, ""), *flags]).strip()
+
+    append_env_flags("CXXFLAGS", bolt_cxx_flags)
+    append_env_flags("NVCC_PREPEND_FLAGS", nvcc_host_flags)
+    append_env_flags("LDFLAGS", nvcc_linker_flags)
+
+    build_signature = "\n".join(
+        (
+            f"gencode={gencode}",
+            f"cxx={env['CXX']}",
+            f"bolt_cxx_flags={' '.join(bolt_cxx_flags)}",
+            f"bolt_linker_flags={' '.join(nvcc_linker_flags)}",
+        )
+    )
+    previous_signature = gencode_stamp.read_text().strip() if gencode_stamp.exists() else None
+    if not nccl_ep_shared_lib.exists() or previous_signature != build_signature:
+        if nccl_ep_shared_lib.exists() and previous_signature != build_signature:
+            print("[NCCL EP] build configuration changed; rebuilding NCCL EP libraries")
             subprocess.check_call(
                 ["make", "-C", "nccl_ep", "clean"],
                 cwd=str(nccl_root),
@@ -286,7 +311,7 @@ def build_nccl_ep_submodule() -> str:
             env=env,
         )
         gencode_stamp.parent.mkdir(parents=True, exist_ok=True)
-        gencode_stamp.write_text(gencode)
+        gencode_stamp.write_text(build_signature)
 
     return nccl_home
 

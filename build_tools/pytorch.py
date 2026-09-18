@@ -15,6 +15,7 @@ from .utils import (
     cuda_version,
     get_cuda_include_dirs,
     debug_build_enabled,
+    get_bolt_build_flags,
     nccl_ep_enabled,
     setup_mpi_flags,
 )
@@ -76,6 +77,9 @@ def setup_pytorch_extension(
     else:
         cxx_flags.append("-g0")
 
+    bolt_cxx_flags, linker_flags = get_bolt_build_flags()
+    cxx_flags.extend(bolt_cxx_flags)
+
     # Version-dependent CUDA options
     try:
         version = cuda_version()
@@ -122,6 +126,7 @@ def setup_pytorch_extension(
         sources=[str(src) for src in sources],
         include_dirs=[str(inc) for inc in include_dirs],
         extra_compile_args={"cxx": cxx_flags},
+        extra_link_args=linker_flags,
         libraries=[str(lib) for lib in libraries],
         library_dirs=[str(lib_dir) for lib_dir in library_dirs],
     )

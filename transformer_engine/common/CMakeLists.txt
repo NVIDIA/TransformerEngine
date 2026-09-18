@@ -15,6 +15,71 @@ endif()
 # Transformer Engine library
 project(transformer_engine LANGUAGES CUDA CXX)
 
+# Enable BOLT-compatible builds. ARM64 targets require additional compiler flags.
+string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" _nvte_system_processor)
+set(NVTE_TARGET_IS_ARM64 OFF)
+if(_nvte_system_processor MATCHES "^(aarch64|arm64)$")
+  set(NVTE_TARGET_IS_ARM64 ON)
+endif()
+unset(_nvte_system_processor)
+
+include(CheckCXXCompilerFlag)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  check_cxx_compiler_flag("-fno-reorder-blocks-and-partition"
+                          NVTE_CXX_SUPPORTS_FNO_REORDER_BLOCKS_AND_PARTITION)
+endif()
+check_cxx_compiler_flag("-fno-jump-tables"
+                        NVTE_CXX_SUPPORTS_FNO_JUMP_TABLES)
+if(NVTE_TARGET_IS_ARM64)
+  check_cxx_compiler_flag("-mno-fix-cortex-a53-835769"
+                          NVTE_CXX_SUPPORTS_MNO_FIX_CORTEX_A53_835769)
+  check_cxx_compiler_flag("-mno-fix-cortex-a53-843419"
+                          NVTE_CXX_SUPPORTS_MNO_FIX_CORTEX_A53_843419)
+endif()
+if((CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
+    AND NOT NVTE_CXX_SUPPORTS_FNO_REORDER_BLOCKS_AND_PARTITION)
+    OR NOT NVTE_CXX_SUPPORTS_FNO_JUMP_TABLES
+    OR (NVTE_TARGET_IS_ARM64
+        AND (NOT NVTE_CXX_SUPPORTS_MNO_FIX_CORTEX_A53_835769
+            OR NOT NVTE_CXX_SUPPORTS_MNO_FIX_CORTEX_A53_843419)))
+  message(FATAL_ERROR
+          "The host C++ compiler does not support the flags required for "
+          "BOLT-compatible builds")
+endif()
+
+# BOLT consumes the regular symbol table and emitted relocations. Shadow the
+# cached strip tool for this configure without changing it for later builds.
+set(CMAKE_STRIP "")
+
+function(nvte_enable_bolt_compatible_compile_options TARGET_NAME)
+  target_compile_options(
+    ${TARGET_NAME}
+    PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:-fno-jump-tables>
+    $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fno-jump-tables>
+  )
+
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(
+      ${TARGET_NAME}
+      PRIVATE
+      $<$<COMPILE_LANGUAGE:CXX>:-fno-reorder-blocks-and-partition>
+      $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fno-reorder-blocks-and-partition>
+    )
+  endif()
+
+  if(NVTE_TARGET_IS_ARM64)
+    target_compile_options(
+      ${TARGET_NAME}
+      PRIVATE
+      $<$<COMPILE_LANGUAGE:CXX>:-mno-fix-cortex-a53-835769>
+      $<$<COMPILE_LANGUAGE:CXX>:-mno-fix-cortex-a53-843419>
+      $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-mno-fix-cortex-a53-835769>
+      $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-mno-fix-cortex-a53-843419>
+    )
+  endif()
+endfunction()
+
 # CUDA Toolkit
 find_package(CUDAToolkit REQUIRED)
 if (CUDAToolkit_VERSION VERSION_LESS 12.1)
@@ -345,6 +410,7 @@ foreach(cuda_source IN LISTS transformer_engine_cuda_arch_specific_sources)
 endforeach()
 
 add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
+nvte_enable_bolt_compatible_compile_options(transformer_engine)
 
 # This is TE-specific and should not apply to all targets
 target_link_options(
@@ -352,6 +418,20 @@ target_link_options(
   PRIVATE
   "LINKER:--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version"
 )
+target_link_options(
+  transformer_engine
+  PRIVATE
+  "LINKER:--emit-relocs"
+  "LINKER:-z,now"
+)
+if(NVTE_TARGET_IS_ARM64)
+  # The Cortex-A53 843419 workaround is applied by the linker.
+  target_link_options(
+    transformer_engine
+    PRIVATE
+    "LINKER:--no-fix-cortex-a53-843419"
+  )
+endif()
 
 # Disable CMake's automatic architecture flag injection.
 # All architectures are handled explicitly via per-source COMPILE_OPTIONS
@@ -408,6 +488,7 @@ endif()
 option(NVTE_ENABLE_NVSHMEM "Compile with NVSHMEM library" OFF)
 if (NVTE_ENABLE_NVSHMEM)
     add_subdirectory(nvshmem_api)
+    nvte_enable_bolt_compatible_compile_options(nvshmemapi)
     target_link_libraries(transformer_engine PUBLIC nvshmemapi)
     target_include_directories(transformer_engine PUBLIC ${NVSHMEMAPI_INCLUDE_DIR})
 endif()
