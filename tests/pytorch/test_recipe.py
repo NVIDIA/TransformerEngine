@@ -590,8 +590,9 @@ def test_nvfp4_row_scaled_quantizer_roles(
         expected_e4m3_max(tensor_type) for tensor_type in ("input", "weight", "output")
     ]
     assert [q.nvfp4_4over6_err_mode for q in forward_quantizers] == [nvfp4_4over6_err_mode] * 3
-    assert not forward_quantizers[0].is_quantizable(torch.empty(16, 16))
-    assert forward_quantizers[1].is_quantizable(torch.empty(16, 16))
+    all_gather_input = torch.empty(16, 32)
+    assert not forward_quantizers[0].supports_quantized_allgather(all_gather_input)
+    assert forward_quantizers[1].supports_quantized_allgather(all_gather_input)
 
     role_quantizers = NVFP4BlockScalingRecipeState(
         recipe,
