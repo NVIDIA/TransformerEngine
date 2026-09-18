@@ -72,6 +72,10 @@ def _reference_shapes(world_size: int) -> list[tuple[int, int]]:
     return [(size, size)]
 
 
+def _tall_reference_shape(world_size: int) -> tuple[int, int]:
+    return (_aligned_size(768, world_size), _aligned_size(512, world_size))
+
+
 def _make_matrix(
     m: int,
     n: int,
@@ -253,6 +257,49 @@ def run_all_tests(ctx: CusolverMpCtx) -> None:
             api="tp",
             partition_dim=partition_dim,
             tp_mode=tp_mode,
+        )
+
+    tall_shape = _tall_reference_shape(world_size)
+    tall_tp_configs = (
+        (0, "distributed"),
+        (0, "duplicated"),
+        (1, "duplicated"),
+        (None, "duplicated"),
+    )
+    for partition_dim, tp_mode in tall_tp_configs:
+        config = (tall_shape, partition_dim, tp_mode)
+        if rank == 0:
+            print(f"Running tall TP API reference check with {config=}", flush=True)
+        _run_case(
+            ctx=ctx,
+            check="reference",
+            dtype_name="float32",
+            matrix_shape=tall_shape,
+            num_iterations=5,
+            coeff_type="quintic",
+            api="tp",
+            partition_dim=partition_dim,
+            tp_mode=tp_mode,
+        )
+
+    # A directly column-sharded tall matrix cannot be transposed into the column distribution
+    # required by the low-level API without first redistributing it.
+    m, n = tall_shape
+    x_local = torch.empty(m, n // world_size, device="cuda", dtype=torch.float32)
+    try:
+        newton_schulz_tp(
+            x_local,
+            ctx,
+            num_iterations=5,
+            partition_dim=1,
+            tp_mode="distributed",
+        )
+    except ValueError as exc:
+        if "must be partitioned along their larger dimension" not in str(exc):
+            raise
+    else:
+        raise AssertionError(
+            "Expected a directly column-sharded tall matrix to be rejected"
         )
 
     if rank == 0:

@@ -302,7 +302,9 @@ def newton_schulz_tp(
     tp_mode : {"duplicated", "distributed"}, optional
         ``"distributed"`` orthogonalizes the existing partition directly.
         ``"duplicated"`` first gathers the full tensor, orthogonalizes it, and
-        copies this rank's partition back into ``x``.
+        copies this rank's partition back into ``x``. In ``"distributed"``
+        mode, tall matrices must be partitioned along rows and wide matrices
+        must be partitioned along columns.
     """
     if x.dim() != 2:
         raise ValueError(f"Expected 2D tensor, got {x.dim()}D")
@@ -330,6 +332,19 @@ def newton_schulz_tp(
         )
         x.copy_(output)
         return
+
+    if tp_mode == "distributed":
+        if partition_dim == 0:
+            global_shape = (x.size(0) * ctx.nranks, x.size(1))
+        else:
+            global_shape = (x.size(0), x.size(1) * ctx.nranks)
+        if (global_shape[0] > global_shape[1] and partition_dim != 0) or (
+            global_shape[0] < global_shape[1] and partition_dim != 1
+        ):
+            raise ValueError(
+                f"Distributed {global_shape[0]}x{global_shape[1]} matrices must be partitioned "
+                "along their larger dimension; use tp_mode='duplicated' to redistribute the input"
+            )
 
     if tp_mode == "duplicated":
         x_shards = [torch.empty_like(x) for _ in range(ctx.nranks)]
