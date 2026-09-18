@@ -94,9 +94,7 @@ class _MoeEpResourceManager:
 
         forward_group_hint = 768 if combine_format == "mxfp8" else 1024
         resolved_combine_format = (
-            moe_ep_api.MoeFormat.MXFP8
-            if combine_format == "mxfp8"
-            else moe_ep_api.MoeFormat.BF16
+            moe_ep_api.MoeFormat.MXFP8 if combine_format == "mxfp8" else moe_ep_api.MoeFormat.BF16
         )
 
         moe_config = moe_ep_api.MoeEpConfig(
@@ -116,9 +114,7 @@ class _MoeEpResourceManager:
             ),
             data_path=moe_ep_api.MoeEpDataPathConfig(
                 apply_topk_in_fc1=True,
-                fc1_weight_layout=(
-                    moe_ep_api.MoeEpFc1WeightLayout.GATE_UP_INTERLEAVED_32
-                ),
+                fc1_weight_layout=(moe_ep_api.MoeEpFc1WeightLayout.GATE_UP_INTERLEAVED_32),
                 combine_format=resolved_combine_format,
                 output_format=moe_ep_api.MoeFormat.BF16,
             ),
@@ -136,9 +132,7 @@ class _MoeEpResourceManager:
                 group_hint=512,
                 reduce_topk_in_kernel=False,
             ),
-            training_weight_storage_mode=(
-                moe_ep_api.MoeEpNativeWeightStorageMode.CONTIGUOUS
-            ),
+            training_weight_storage_mode=(moe_ep_api.MoeEpNativeWeightStorageMode.CONTIGUOUS),
             validation_mode="trusted",
         )
         return moe_ep_api.MoeEp(moe_config)
