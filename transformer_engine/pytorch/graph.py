@@ -6,6 +6,7 @@
 from collections.abc import Iterable
 import contextlib
 import gc
+import os
 import warnings
 from math import ceil
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple, TypeVar, Union
@@ -692,6 +693,12 @@ def _make_graphed_callables(
         if post_warmup_hook is not None:
             post_warmup_hook()
     torch.cuda.synchronize()
+    if os.getenv("NVTE_MXFP8_VMM_LOCALIZATION", "0") == "1":
+        # Eager warmup allocations are cached by PyTorch, but raw VMM
+        # cuMemCreate calls during capture cannot consume those reserved
+        # blocks. Return unused warmup storage to the driver first.
+        gc.collect()
+        torch.cuda.empty_cache()
 
     # All captures here share a mempool. To avoid replays corrupting each other's memory,
     # the safest approach is to capture all passes in the same order they'll run:

@@ -383,6 +383,10 @@ py::object create_empty_quantized_tensor(py::handle quantizer, const std::vector
 py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::object &output,
                     std::optional<at::Tensor> noop_flag);
 
+py::object quantize_mxfp8_row_partition(const at::Tensor &tensor, py::handle quantizer,
+                                        const py::object &output, size_t global_row_offset,
+                                        size_t global_rows);
+
 py::object nvfp4_quantize_with_amax(const at::Tensor &tensor, py::handle quantizer,
                                     const at::Tensor &rowwise_amax,
                                     const at::Tensor &columnwise_amax);

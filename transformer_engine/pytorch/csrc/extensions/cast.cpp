@@ -33,6 +33,8 @@ namespace pytorch {
 
 namespace {
 
+constexpr size_t kMXFP8BlockSize = 32;
+
 std::vector<size_t> get_tensor_shape(const TensorWrapper &tensor) {
   const auto &shape = tensor.shape();
   return std::vector<size_t>(shape.data, shape.data + shape.ndim);
@@ -87,6 +89,38 @@ py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::ob
     inplace_swizzle_scale_for_gemm(output_py);
   }
 
+  return output_py;
+}
+
+py::object quantize_mxfp8_row_partition(const at::Tensor &tensor, py::handle quantizer,
+                                        const py::object &output, const size_t global_row_offset,
+                                        const size_t global_rows) {
+  using namespace transformer_engine::pytorch::detail;
+
+  NVTE_CHECK(IsMXFP8Quantizers(quantizer.ptr()),
+             "quantize_mxfp8_row_partition requires an MXFP8 quantizer");
+  NVTE_CHECK(tensor.dim() == 2, "quantize_mxfp8_row_partition requires a 2D input");
+  NVTE_CHECK(!output.is_none(), "quantize_mxfp8_row_partition requires a preallocated output");
+  NVTE_CHECK(global_row_offset % kMXFP8BlockSize == 0,
+             "MXFP8 row partition offset must be divisible by ", kMXFP8BlockSize);
+  NVTE_CHECK(global_row_offset + tensor.size(0) <= global_rows,
+             "MXFP8 row partition exceeds the full tensor row count");
+
+  auto quantizer_cpp = convert_quantizer(quantizer);
+  auto *mxfp8_quantizer_cpp = static_cast<MXFP8Quantizer *>(quantizer_cpp.get());
+  NVTE_CHECK(!mxfp8_quantizer_cpp->with_2d_quantization,
+             "quantize_mxfp8_row_partition does not support 2D quantization");
+
+  auto input_contiguous = tensor.contiguous();
+  auto input_cpp = makeTransformerEngineTensor(input_contiguous);
+  auto [output_cpp, output_py] = quantizer_cpp->convert_and_update_tensor(output);
+
+  QuantizationConfigWrapper quant_config;
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_quantize_mxfp8_row_partition(input_cpp.data(), output_cpp.data(), quant_config,
+                                      global_row_offset, global_rows,
+                                      at::cuda::getCurrentCUDAStream());
+  });
   return output_py;
 }
 
