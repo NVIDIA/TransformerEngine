@@ -250,9 +250,7 @@ def test_mxfp8_vmm_single_localized_data_layout(localized_data_layout: str) -> N
         output = workspace.quantize()
         torch.cuda.synchronize()
         assert is_vmm_tensor(output._rowwise_data) == (localized_data_layout == "rowwise")
-        assert is_vmm_tensor(output._columnwise_data) == (
-            localized_data_layout == "columnwise"
-        )
+        assert is_vmm_tensor(output._columnwise_data) == (localized_data_layout == "columnwise")
         for name in (
             "_rowwise_data",
             "_rowwise_scale_inv",
