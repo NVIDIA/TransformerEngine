@@ -34,6 +34,9 @@ PyTorch
 .. autoapiclass:: transformer_engine.pytorch.GatedDeltaProductAttention(num_attention_heads, kv_channels, num_householder=1, **kwargs)
   :members: forward
 
+.. autoapiclass:: transformer_engine.pytorch.KimiDeltaAttention(num_attention_heads, kv_channels, **kwargs)
+  :members: forward
+
 .. autoapiclass:: transformer_engine.pytorch.MultiheadAttention(hidden_size, num_attention_heads, **kwargs)
   :members: forward, set_context_parallel_group, set_tensor_parallel_group
 
