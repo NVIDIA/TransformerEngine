@@ -89,6 +89,8 @@ class BasicLinearBwdArgs:
     sequence_parallel: bool
     grad_weight: Optional[torch.Tensor]
     accumulate_into_grad_weight: bool
+    # Original parameter for eager-only main_grad flags and dummy wgrad.
+    weight_param: Optional[torch.Tensor] = None
 
 
 def _save_quantized_input(args: BasicLinearFwdArgs) -> bool:
@@ -1110,7 +1112,9 @@ class BasicLinear(BasicOperation):
         )
 
     @classmethod
-    def forward_compute(cls, args: BasicLinearFwdArgs):
+    def forward_compute(
+        cls, args: BasicLinearFwdArgs, *, in_custom_op: bool = False
+    ):  # pylint: disable=unused-argument
         """Shared GEMM and saved tensors, optionally with a fused bias epilogue."""
         output, saved_input, saved_weight = cls._functional_forward(
             input=args.input_,
@@ -1223,10 +1227,11 @@ class BasicLinear(BasicOperation):
             sequence_parallel=self.sequence_parallel,
             grad_weight=grad_weight,
             accumulate_into_grad_weight=accumulate_into_grad_weight,
+            weight_param=self.weight if accumulate_into_grad_weight else None,
         )
 
     @classmethod
-    def backward_compute(cls, args: BasicLinearBwdArgs):
+    def backward_compute(cls, args: BasicLinearBwdArgs, *, in_custom_op: bool = False):
         dx, dw = cls._functional_backward(
             grad_output=args.grad_output,
             input=args.input_,
@@ -1245,6 +1250,10 @@ class BasicLinear(BasicOperation):
             grad_weight=args.grad_weight,
             accumulate_into_grad_weight=args.accumulate_into_grad_weight,
         )
+        if not in_custom_op:
+            clear_tensor_data(args.input_)
+            if args.accumulate_into_grad_weight:
+                dw = get_dummy_wgrads_for_params([args.weight_param])[0]
         return dx, [(dw,)], [()]
 
     @classmethod
@@ -1277,14 +1286,3 @@ class BasicLinear(BasicOperation):
                 device=args.grad_output.device,
             )
         return dx, [(dw,)], [()]
-
-    def backward_postprocess(self, basic_op_ctxs, grad_params):
-        ctx = basic_op_ctxs[0]
-        clear_tensor_data(ctx.saved_tensors[0])
-        if (
-            ctx.weight_requires_grad
-            and self._accumulate_into_main_grad
-            and get_accumulate_flag_in_param(self.weight)
-        ):
-            return [get_dummy_wgrads_for_params([self.weight])]
-        return grad_params

@@ -153,7 +153,9 @@ class Bias(BasicOperation):
         return BiasFwdArgs(input_, self.bias, quantizer)
 
     @classmethod
-    def forward_compute(cls, args: BiasFwdArgs):
+    def forward_compute(
+        cls, args: BiasFwdArgs, *, in_custom_op: bool = False
+    ):  # pylint: disable=unused-argument
         return args.input_ + args.bias, [()], ()
 
     @classmethod
@@ -178,7 +180,9 @@ class Bias(BasicOperation):
         return BiasBwdArgs(grad_output, quantizer)
 
     @classmethod
-    def backward_compute(cls, args: BiasBwdArgs):
+    def backward_compute(
+        cls, args: BiasBwdArgs, *, in_custom_op: bool = False
+    ):  # pylint: disable=unused-argument
         dy = args.grad_output
         if dy.dim() == 1:
             return None, [(dy.clone(),)], [()]

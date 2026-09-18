@@ -2382,7 +2382,7 @@ class _AffineOp(BasicOperation):
         self.weight = torch.nn.Parameter(torch.tensor(weight, dtype=dtype, device="cuda"))
 
     @classmethod
-    def forward_compute(cls, args):
+    def forward_compute(cls, args, *, in_custom_op=False):
         output = args.input_ * args.weight * args.gain
         offset = args.offset
         if isinstance(offset, QuantizedTensorStorage):
@@ -2396,7 +2396,7 @@ class _AffineOp(BasicOperation):
         return args.input_, [()], ()
 
     @classmethod
-    def backward_compute(cls, args):
+    def backward_compute(cls, args, *, in_custom_op=False):
         dy = args.grad_output
         return dy * args.weight * args.gain, [((dy * args.input_).sum() * args.gain,)], [()]
 
@@ -2454,7 +2454,7 @@ class _AffinePair(te.ops.FusedOperation):
     bwd_args_type = _AffinePairBwdArgs
 
     @classmethod
-    def forward_compute(cls, args):
+    def forward_compute(cls, args, *, in_custom_op=False):
         intermediate = args.input_ * args.weight0
         output = intermediate * args.weight1 + args.residual
         return output, [(), (intermediate.square(), None)], (intermediate,)
@@ -2464,7 +2464,7 @@ class _AffinePair(te.ops.FusedOperation):
         return args.input_, [(), (args.input_, None)], (args.input_,)
 
     @classmethod
-    def backward_compute(cls, args):
+    def backward_compute(cls, args, *, in_custom_op=False):
         dy = args.grad_output
         du = dy * args.weight1 + 2 * args.intermediate * args.grad_extra_output
         return (
@@ -2627,7 +2627,12 @@ def test_te_ops_registration(forward, backward, monkeypatch):
         registered.append(kwargs["op_name"])
         return kwargs["impl"]
 
+    def compute(args, *, in_custom_op=False):
+        return in_custom_op
+
     monkeypatch.setattr("transformer_engine.pytorch.ops.op.register_custom_op", register)
+    monkeypatch.setattr(_AffineOp, "forward_compute", staticmethod(compute))
+    monkeypatch.setattr(_AffineOp, "backward_compute", staticmethod(compute))
     monkeypatch.setattr(_AffineOp, "fwd_args_type", _AffineFwdArgs if forward else None)
     monkeypatch.setattr(_AffineOp, "bwd_args_type", _AffineBwdArgs if backward else None)
     monkeypatch.setattr(_AffineOp, "compile_ops", (None, None))
@@ -2635,10 +2640,13 @@ def test_te_ops_registration(forward, backward, monkeypatch):
     assert registered == (["_affineop"] if forward else []) + (
         ["_affineop_backward"] if backward else []
     )
-    assert _AffineOp.compile_ops == (
-        _AffineOp.forward_compute if forward else None,
-        _AffineOp.backward_compute if backward else None,
-    )
+    for custom_op, enabled in zip(_AffineOp.compile_ops, (forward, backward)):
+        if enabled:
+            assert custom_op(None) is True
+        else:
+            assert custom_op is None
+    assert _AffineOp.forward_compute(None) is False
+    assert _AffineOp.backward_compute(None) is False
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")

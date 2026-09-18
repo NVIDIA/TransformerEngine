@@ -8,6 +8,7 @@ from __future__ import annotations
 import abc
 from collections.abc import Iterable, Sequence
 import dataclasses
+import functools
 import pickle
 from typing import Any, Callable, Optional
 
@@ -88,7 +89,7 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
                 register_custom_op(
                     op_name=op_name,
                     arg_type=arg_type,
-                    impl=getattr(cls, f"{mode}_compute"),
+                    impl=functools.partial(getattr(cls, f"{mode}_compute"), in_custom_op=True),
                     fake_impl=getattr(cls, f"{mode}_compute_fake"),
                 )
             )
@@ -238,15 +239,17 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         )
         compute = self.compile_ops[1] if use_custom_ops else self.backward_compute
         grad_input, grad_params, grad_extra_inputs = compute(args)
-        if not use_custom_ops:
-            grad_params = self.backward_postprocess(basic_op_ctxs, grad_params)
         if grad_input is None:
             grad_input = grad_output
         return grad_input, grad_params, grad_extra_inputs
 
     @classmethod
-    def forward_compute(cls, args: Any) -> tuple:
-        """Return (output, extra_outputs per basic op, fresh aux tensors)."""
+    def forward_compute(cls, args: Any, *, in_custom_op: bool = False) -> tuple:
+        """Return (output, extra_outputs per basic op, fresh aux tensors).
+
+        The registered custom op passes in_custom_op=True; direct eager calls
+        use False. Inside a custom op, do not mutate tensors supplied in args.
+        """
         raise NotImplementedError
 
     @classmethod
@@ -255,10 +258,11 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @classmethod
-    def backward_compute(cls, args: Any) -> tuple:
+    def backward_compute(cls, args: Any, *, in_custom_op: bool = False) -> tuple:
         """Return (grad_input, grad_params per basic op, grad_extra_inputs per basic op).
 
         A None grad_input passes grad_output through unchanged.
+        in_custom_op has the same meaning as in forward_compute.
         """
         raise NotImplementedError
 
@@ -294,18 +298,6 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         self, basic_op_ctxs: list[OperationContext], args: Any, aux: tuple
     ) -> None:
         """Save state needed by the basic operations' backward passes."""
-
-    def backward_postprocess(
-        self,
-        basic_op_ctxs: list[OperationContext],  # pylint: disable=unused-argument
-        grad_params: Sequence[Sequence[Optional[torch.Tensor]]],
-    ) -> Sequence[Sequence[Optional[torch.Tensor]]]:
-        """Finish an eager compute pass and return parameter gradients per basic op.
-
-        Override for storage cleanup or parameter bookkeeping such as main_grad.
-        The shared dispatcher skips this hook when using functional custom ops.
-        """
-        return grad_params
 
 
 class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
