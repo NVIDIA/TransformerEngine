@@ -62,6 +62,21 @@ NVTEShape convertTorchShape(const c10::IntArrayRef torch_shape) {
   return ret;
 }
 
+#ifdef NVTE_WITH_TORCH_STABLE
+NVTEShape convertTorchShape(const torch::headeronly::IntHeaderOnlyArrayRef torch_shape) {
+  NVTEShape ret;
+  ret.ndim = torch_shape.size();
+  constexpr int max_dimensions = sizeof(ret.data) / sizeof(size_t);
+  NVTE_CHECK(ret.ndim < max_dimensions,
+             "Torch tensor has too many dimensions. Max supported: ", max_dimensions, " and got ",
+             ret.ndim, ".");
+  for (size_t i = 0; i < ret.ndim; ++i) {
+    ret.data[i] = static_cast<size_t>(torch_shape[i]);
+  }
+  return ret;
+}
+#endif
+
 std::unique_ptr<Quantizer> convert_quantizer(py::handle quantizer) {
   init_extension();
   if (quantizer.is_none()) {
@@ -164,6 +179,15 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(at::Tensor tensor)
   }
   return makeTransformerEngineTensor(tensor.data_ptr(), shape, dtype);
 }
+
+#ifdef NVTE_WITH_TORCH_STABLE
+transformer_engine::TensorWrapper makeTransformerEngineTensor(const torch_stable::Tensor& tensor) {
+  transformer_engine::DType dtype = GetTransformerEngineDType(tensor.scalar_type());
+  const auto sizes = tensor.sizes();
+  std::vector<size_t> shape(sizes.begin(), sizes.end());
+  return makeTransformerEngineTensor(tensor.data_ptr(), shape, dtype);
+}
+#endif
 
 std::tuple<std::vector<transformer_engine::TensorWrapper>, std::vector<std::vector<NVTETensor>>,
            std::vector<NVTETensor*>, size_t, size_t>
