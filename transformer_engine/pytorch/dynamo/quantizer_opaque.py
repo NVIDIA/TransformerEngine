@@ -108,15 +108,15 @@ def register_value_opaque_quantizer(cls: type) -> None:
                 "the field in ``_rebuild_derived_state`` instead."
             )
     cls._value_field_names = tuple(fields)
-    # ``register_opaque_type`` requires ``__fx_repr__`` to already exist on the
+    # ``register_custom_class`` requires ``__fx_repr__`` to already exist on the
     # class, so attach it before registering.
     if "__fx_repr__" not in cls.__dict__:
         cls.__fx_repr__ = _quantizer_fx_repr
 
     try:
         from torch._library.opaque_object import (  # pylint: disable=import-outside-toplevel
-            register_opaque_type,
-            is_opaque_value_type,
+            register_custom_class,
+            is_opaque_constant_type,
         )
     except (ImportError, AttributeError) as e:
         # Older PyTorch without the opaque-object API: eager value semantics
@@ -127,8 +127,8 @@ def register_value_opaque_quantizer(cls: type) -> None:
         return
 
     try:
-        if not is_opaque_value_type(cls):
-            register_opaque_type(cls, typ="value")
+        if not is_opaque_constant_type(cls):
+            register_custom_class(cls, typ="constant")
     except (RuntimeError, TypeError) as e:
         # Keep TE importable: neither the opaque-type query nor the registration
         # must crash the import, e.g. on PyTorch versions with only partial /

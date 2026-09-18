@@ -7,6 +7,7 @@
 #include "../extensions.h"
 #include "cgemm_helper.h"
 #include "common/util/cuda_runtime.h"
+#include "ffi_collectives.h"  // FfiRequestCliqueHandler (borrowed-comm prepare)
 #include "transformer_engine/gemm.h"
 
 namespace transformer_engine {
@@ -124,6 +125,17 @@ pybind11::dict Registrations() {
   dict["te_ep_combine_bwd_ffi"] =
       pybind11::dict(pybind11::arg("instantiate") = EncapsulateFFI(EpInstantiateHandler),
                      pybind11::arg("execute") = EncapsulateFFI(EpCombineBwdHandler));
+
+  // Borrowed-comm bootstrap: a one-shot op requests the collective clique
+  // (generic prepare) and initializes EPBackend from the borrowed comm (EP
+  // execute). Registered only when the XLA collectives headers were available
+  // at build time; its absence is how Python detects an unbuilt path.
+#ifdef XLA_FFI_COLLECTIVES_AVAILABLE
+  dict["te_ep_bootstrap_borrowed_comm_ffi"] =
+      pybind11::dict(pybind11::arg("instantiate") = EncapsulateFFI(EpInstantiateHandler),
+                     pybind11::arg("prepare") = EncapsulateFFI(FfiRequestCliqueHandler),
+                     pybind11::arg("execute") = EncapsulateFFI(EpBootstrapBorrowedCommHandler));
+#endif  // collectives header available
 #endif  // NVTE_WITH_NCCL_EP
 
   // TopK
@@ -134,7 +146,8 @@ pybind11::dict Registrations() {
 
 PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("registrations", &Registrations);
-  m.def("get_fused_attn_backend", &GetFusedAttnBackend);
+  m.def("get_fused_attn_backend", &GetFusedAttnBackend, "Get Fused Attention backend",
+        pybind11::arg("fused_attn_params"));
   m.def("get_cuda_version", &GetCudaRuntimeVersion);
   m.def("get_cudnn_version", &GetCudnnRuntimeVersion);
   m.def("get_cudnn_frontend_version", &GetCudnnFrontendVersion);
@@ -160,8 +173,9 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
         pybind11::arg("ep_size"), pybind11::arg("rank_within_group"), pybind11::arg("num_experts"),
         pybind11::arg("max_tokens_per_rank"), pybind11::arg("max_recv_tokens_per_rank"),
         pybind11::arg("hidden_dim"), pybind11::arg("max_num_sms"), pybind11::arg("max_token_dtype"),
-        pybind11::arg("drop_on_overflow"));
+        pybind11::arg("drop_on_overflow"), pybind11::arg("borrowed_comm") = false);
   m.def("release_ep_resources", &ReleaseEpResources);
+  m.def("release_ep_resources_at_exit", &ReleaseEpResourcesAtExit);
   m.def("ep_handle_mem_size", &EpHandleMemSize, pybind11::arg("top_k"),
         pybind11::arg("dispatch_output_per_expert_alignment") = 0);
   m.def("get_ep_instance_state_type_id", &GetEpInstanceStateTypeIdCapsule);
@@ -200,12 +214,14 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
       .value("NVTE_BSHD_BSHD_BSHD", NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD)
       .value("NVTE_T3HD", NVTE_QKV_Layout::NVTE_T3HD)
       .value("NVTE_THD_T2HD", NVTE_QKV_Layout::NVTE_THD_T2HD)
-      .value("NVTE_THD_THD_THD", NVTE_QKV_Layout::NVTE_THD_THD_THD);
+      .value("NVTE_THD_THD_THD", NVTE_QKV_Layout::NVTE_THD_THD_THD)
+      .value("NVTE_QKV_Layout_NOT_SET", NVTE_QKV_Layout::NVTE_QKV_Layout_NOT_SET);
 
   pybind11::enum_<NVTE_QKV_Format>(m, "NVTE_QKV_Format", pybind11::module_local())
       .value("NVTE_SBHD", NVTE_QKV_Format::NVTE_SBHD)
       .value("NVTE_BSHD", NVTE_QKV_Format::NVTE_BSHD)
-      .value("NVTE_THD", NVTE_QKV_Format::NVTE_THD);
+      .value("NVTE_THD", NVTE_QKV_Format::NVTE_THD)
+      .value("NVTE_QKV_Format_NOT_SET", NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET);
 
   pybind11::enum_<NVTE_Softmax_Type>(m, "NVTE_Softmax_Type", pybind11::module_local())
       .value("NVTE_VANILLA_SOFTMAX", NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX)

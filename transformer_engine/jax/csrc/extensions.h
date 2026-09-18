@@ -23,6 +23,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "common/common.h"
@@ -157,12 +158,8 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnScoreModForwardHandler);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnScoreModBackwardHandler);
 
-NVTE_Fused_Attn_Backend GetFusedAttnBackend(
-    bool is_training, DType q_dtype, DType kv_dtype, NVTE_QKV_Layout qkv_layout,
-    NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type,
-    float dropout_probability, size_t q_attn_heads, size_t kv_attn_heads, size_t q_max_seqlen,
-    size_t kv_max_seqlen, size_t qk_head_dim, size_t v_head_dim, int64_t window_size_left,
-    int64_t window_size_right, bool return_max_logit, bool deterministic);
+std::tuple<NVTE_Fused_Attn_Backend, std::string> GetFusedAttnBackend(
+    const pybind11::object &params);
 
 pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
     size_t input_batch, size_t bias_batch, size_t q_max_seqlen, size_t kv_max_seqlen,
@@ -216,8 +213,11 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedMoEAuxLossBackwardHandler);
 void SetEpBootstrapParams(pybind11::bytes unique_id_bytes, int ep_size, int rank_within_group,
                           int num_experts, int max_tokens_per_rank, int max_recv_tokens_per_rank,
                           int hidden_dim, int max_num_sms, int max_token_dtype,
-                          bool drop_on_overflow);
+                          bool drop_on_overflow, bool borrowed_comm);
 void ReleaseEpResources();
+// Atexit-safe variant of ReleaseEpResources; never shuts down a borrowed
+// backend (see definition).
+void ReleaseEpResourcesAtExit();
 // Return the handle_mem byte size for a layer config.
 size_t EpHandleMemSize(int top_k, size_t dispatch_output_per_expert_alignment);
 
@@ -232,6 +232,11 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(EpDispatchHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(EpCombineHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(EpDispatchBwdHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(EpCombineBwdHandler);
+
+// EP-specific execute stage of the borrowed-comm bootstrap op (see
+// tex.ep.use_nccl_comm_from_xla). The prepare stage is the generic
+// FfiRequestCliqueHandler in extensions/ffi_collectives.h.
+XLA_FFI_DECLARE_HANDLER_SYMBOL(EpBootstrapBorrowedCommHandler);
 
 // TopK
 XLA_FFI_DECLARE_HANDLER_SYMBOL(TopkHandler);
