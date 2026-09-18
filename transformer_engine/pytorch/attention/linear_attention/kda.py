@@ -404,8 +404,7 @@ class KimiDeltaAttention(LinearAttentionBase):
             )
         if gate_domain not in {"log", "linear"}:
             raise ValueError(
-                "KimiDeltaAttention gate_domain must be 'log' or 'linear', "
-                f"got {gate_domain!r}."
+                f"KimiDeltaAttention gate_domain must be 'log' or 'linear', got {gate_domain!r}."
             )
         if not safe_gate:
             extra = [
