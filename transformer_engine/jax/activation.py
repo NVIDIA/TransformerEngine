@@ -17,23 +17,30 @@ from .quantize.tensor import NoScaleTensor
 from .quantize.quantizer import Quantizer
 
 
+ActivationParams = tex.activation.ActivationParams
+
+__all__ = ["activation", "ActivationParams"]
+
+
 def activation(
     x: jnp.ndarray,
     activation_type: Sequence[Union[str, Callable]],
     quantizer: Optional[Quantizer] = None,
-    act_params: Optional[tex.activation.ActivationParams] = None,
+    act_params: Optional[ActivationParams] = None,
 ) -> jnp.ndarray:
     """Apply activation functions to input tensor with optional quantization.
 
     This function applies a sequence of activation functions to the input tensor.
     It supports string-based activation types (e.g., 'relu', 'gelu', ('gelu', 'linear')).
+    SiTU-GLU is selected with ``('situ', 'situ_linear')``; ``situ_linear`` computes
+    the soft-capped up branch and is not an identity function.
 
     Args:
         x: Input tensor to apply activations to
         activation_type: Sequence of activation functions
         quantizer: Optional quantizer for quantizing the output
-        act_params: Optional activation parameters. Currently used
-        just for ClampedSwiGLU.
+        act_params: Optional parameters for configurable activations such as
+            ClampedSwiGLU and SiTU-GLU.
 
     Returns:
         Activated output tensor
@@ -54,8 +61,8 @@ def _activation(x, activation_type, quantizer, act_params):
         x: Input tensor
         activation_type: Sequence of activation functions
         quantizer: Optional quantizer
-        act_params: Optional activation parameters. Currently used
-        just for ClampedSwiGLU.
+        act_params: Optional parameters for configurable activations such as
+            ClampedSwiGLU and SiTU-GLU.
 
     Returns:
         Activated tensor
@@ -71,8 +78,8 @@ def _activation_fwd_rule(x, activation_type, quantizer, act_params):
         x: Input tensor
         activation_type: Sequence of activation functions
         quantizer: Optional quantizer
-        act_params: Optional activation parameters. Currently used
-        just for ClampedSwiGLU.
+        act_params: Optional parameters for configurable activations such as
+            ClampedSwiGLU and SiTU-GLU.
 
     Returns:
         Tuple of (output, context) for backward pass
@@ -88,8 +95,8 @@ def _activation_bwd_rule(activation_type, act_params, ctx, g):
 
     Args:
         activation_type: Sequence of activation functions
-        act_params: Optional activation parameters. Currently used
-        just for ClampedSwiGLU.
+        act_params: Optional parameters for configurable activations such as
+            ClampedSwiGLU and SiTU-GLU.
         ctx: Context from forward pass
         g: Gradient from upstream
 
