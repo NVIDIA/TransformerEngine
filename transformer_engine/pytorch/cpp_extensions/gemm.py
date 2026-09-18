@@ -572,35 +572,24 @@ def _get_grouped_cublas_workspace(device: int, layout: str) -> torch.Tensor:
 @torch.no_grad()
 def _pytorch_grouped_gemm(A, B, out, *, layout, bias, bias_scale) -> bool:
     """Try CUTLASS for packed BF16 GEMMs; return False for TE's existing backend."""
-    if (
-        os.getenv("NVTE_USE_CUTLASS_GROUPED_GEMM", "0") != "1"
-        or not hasattr(torch, "_grouped_mm")
-        or torch.cuda.get_device_capability() != (10, 0)
-    ):
-        return False
-
-    def is_bf16(tensor):
-        if isinstance(tensor, GroupedTensorStorage):
-            tensor = tensor.rowwise_data
-        return (
-            isinstance(tensor, torch.Tensor)
-            and not isinstance(tensor, QuantizedTensorStorage)
-            and tensor.dtype == torch.bfloat16
-        )
-
     inputs = A if isinstance(A, list) else [A]
     outputs = out if isinstance(out, list) else [out]
-    if not all(is_bf16(tensor) for tensor in [B, *inputs, *outputs]):
-        return False
-    if not B.all_same_last_dim():
+    for tensor in [B, *inputs, *outputs]:
+        if isinstance(tensor, GroupedTensorStorage):
+            tensor = tensor.rowwise_data
+        if (
+            tensor is None
+            or isinstance(tensor, QuantizedTensorStorage)
+            or tensor.dtype != torch.bfloat16
+        ):
+            return False
+    if not B.all_same_last_dim() or (layout != "NT" and isinstance(out, list)):
         return False
     if isinstance(A, list):
         shapes = [tensor.shape[-1:] if layout == "NT" else tensor.shape for tensor in A]
         if any(shape != shapes[0] for shape in shapes):
             return False
     elif not A.all_same_last_dim() or (layout != "NT" and not A.all_same_shape()):
-        return False
-    if layout != "NT" and isinstance(out, list):
         return False
     if getattr(torch.backends.cuda.matmul, "prefer_cublaslt_grouped_gemm", False):
         raise RuntimeError(
@@ -610,44 +599,37 @@ def _pytorch_grouped_gemm(A, B, out, *, layout, bias, bias_scale) -> bool:
 
     groups = B.num_tensors
     b = B.rowwise_data.view(-1, B.get_common_last_dim())
-    if isinstance(A, list):
-        a = torch.cat(A) if layout == "NT" else torch.stack(A)
-    else:
-        a = A.rowwise_data.view(-1, A.get_common_last_dim())
-        if layout != "NT":
-            a = a.view(groups, -1, a.size(-1))
+    a = torch.cat(A) if isinstance(A, list) else A.rowwise_data.view(-1, A.get_common_last_dim())
+    if layout != "NT":
+        a = a.view(groups, -1, a.size(-1))
     if B.first_dims is None:
         offsets = torch.arange(1, groups + 1, device=b.device, dtype=torch.int32)
         offsets = offsets * B.get_common_first_dim()
     else:
         offsets = torch.cumsum(B.first_dims, dim=0, dtype=torch.int32)
 
-    if layout == "NT":
-        result = torch._grouped_mm(b.T, a, offs=offsets)
-    else:
-        result = torch._grouped_mm(b, a.transpose(-1, -2) if layout == "TN" else a, offs=offsets)
-    destination = None if isinstance(out, list) else out.rowwise_data.view_as(result)
+    result = torch._grouped_mm(
+        b.T if layout == "NT" else b, a.mT if layout == "TN" else a, offs=offsets
+    )
+    rows = torch.arange(b.size(0), device=b.device) if layout != "NT" else None
     if bias is not None:
-        bias_data = bias.rowwise_data.view(groups, -1)
-        if layout == "NT":
-            bias_data = bias_data[:, None, :]
-        else:
-            rows = torch.arange(result.size(0), device=result.device)
+        bias_data = bias.rowwise_data.view(groups, 1, -1).float()
+        if rows is not None:
             group_ids = torch.bucketize(rows, offsets, right=True).clamp_max(groups - 1)
-            bias_data = bias_data[group_ids]
-        bias_data = bias_data.float()
+            bias_data = bias_data[group_ids, 0]
         if bias_scale is not None:
             bias_data = bias_data * bias_scale[:, None]
         result = (result.float() + bias_data).to(result.dtype)
     if isinstance(out, list):
         for dst, src in zip(out, result):
             dst.copy_(src)
-    elif layout == "NT":
-        destination.copy_(result)
     else:
-        # Preserve caller-owned capacity beyond the final expert's rows.
-        valid_rows = torch.arange(result.size(0), device=result.device) < offsets[-1]
-        torch.where(valid_rows[:, None], result, destination, out=destination)
+        destination = out.rowwise_data.view_as(result)
+        if rows is None:
+            destination.copy_(result)
+        else:
+            # Preserve caller-owned capacity beyond the final expert's rows.
+            torch.where(rows[:, None] < offsets[-1], result, destination, out=destination)
     return True
 
 
@@ -726,7 +708,10 @@ def general_grouped_gemm_for_grouped_tensor(
     # PyTorch returns a BF16 product, so a separate add would lose the precision
     # of TE's fused accumulation. Leave that case on the existing backend.
     if (
-        not accumulate
+        os.getenv("NVTE_USE_CUTLASS_GROUPED_GEMM", "0") == "1"
+        and hasattr(torch, "_grouped_mm")
+        and torch.cuda.get_device_capability() == (10, 0)
+        and not accumulate
         and alpha is None
         and beta is None
         and _pytorch_grouped_gemm(A, B, out, layout=layout, bias=bias, bias_scale=bias_scale)
