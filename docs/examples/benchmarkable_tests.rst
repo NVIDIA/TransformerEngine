@@ -91,6 +91,75 @@ Use ``@benchmark.skip`` or ``@benchmark.skipif(condition)`` for a test that retu
 should not be benchmarked -- a correctness-only test written in this style, or one whose benchmark
 you are temporarily disabling.
 
+Running across multiple GPUs
+----------------------------
+
+A ``Case`` that sets ``num_gpus`` runs on that many ranks, and the harness launches them.
+The test says only how many ranks it wants and what each one does, so what gets recorded is
+the compute rather than the process startup and rendezvous in front of it.
+
+Multi-rank Cases add three callables. ``dist_init`` builds the process group and returns it
+as the state; every other callable receives that state, and ``setup`` must keep the
+distributed part of it intact when it adds the test data:
+
+.. code-block:: python
+
+   from transformer_engine.common.testing.distributed import (
+       RANK_ENV,
+       RENDEZVOUS_ENV,
+       WORLD_SIZE_ENV,
+   )
+
+   def test_row_parallel(hidden_size, dtype):
+       def dist_init():
+           rank = int(os.environ[RANK_ENV])
+           world = int(os.environ[WORLD_SIZE_ENV])
+           torch.cuda.set_device(rank)
+           dist.init_process_group(
+               backend="nccl",
+               init_method=f"file://{os.environ[RENDEZVOUS_ENV]}",
+               rank=rank,
+               world_size=world,
+               timeout=datetime.timedelta(seconds=120),
+           )
+           return {"pg": dist.group.WORLD, "rank": rank, "world": world}
+
+       def dist_clean(state):
+           dist.destroy_process_group()
+
+       def barrier(state):
+           dist.barrier(group=state["pg"])
+
+       def setup(state):
+           state["x"] = make_input(hidden_size, state["rank"], dtype)
+           return state                      # keep what dist_init put there
+
+       ...
+       return Case(
+           setup=setup, evaluate=evaluate, reference=reference, verify=verify,
+           dist_init=dist_init, dist_clean=dist_clean, barrier=barrier,
+           num_gpus=min(4, torch.cuda.device_count()),
+       )
+
+``dist_init`` and ``dist_clean`` run once per point, so the process group survives every
+timed sample; ``setup`` and ``reset`` run per variant and touch only the test data.
+``dist_clean`` runs whether the body succeeded or failed.
+
+``barrier`` is required whenever ``num_gpus`` is greater than one, and must block the host
+rather than only ordering the stream. The harness calls it before each timed sample and
+outside the measured interval: without it, a rank arriving late has its wait recorded as
+this operation's cost on every rank that arrived on time.
+
+``num_gpus`` comes from the test, which is what lets the harness stay framework-agnostic.
+Guard the test so it skips when the box has too few GPUs. ``timeout`` (default 1800s)
+budgets the whole launch, including interpreter startup and rendezvous on every rank.
+
+Every rank records its own timings, and the report keeps them separate: ``world_size`` is
+part of a record's identity, so a four-rank run never compares against an eight-rank one,
+while ``rank`` distinguishes records within a launch so load imbalance stays visible.
+``--nvte-benchmark-min-run-time`` cannot be combined with a multi-rank Case, because ranks
+would leave the sampling loop after different numbers of iterations.
+
 Running benchmarks
 ------------------
 
