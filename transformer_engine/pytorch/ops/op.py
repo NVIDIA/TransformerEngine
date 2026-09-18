@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 import abc
-from collections.abc import Iterable, Sequence
+from collections.abc import Hashable, Iterable, Sequence
 import dataclasses
 import pickle
 from typing import Any, Callable, Optional
@@ -23,6 +23,55 @@ from ..quantization import (
 )
 from ..tensor import Quantizer
 from ..dynamo import is_value_opaque_quantizer, register_custom_op
+
+
+def _only_recipe_fields_changed(
+    old_config: Hashable,
+    new_config: Hashable,
+    allowed_fields: Iterable[str],
+) -> bool:
+    """Whether unequal recipe configs differ only in explicitly allowed top-level fields."""
+    if old_config == new_config:
+        return False
+    allowed_field_names = frozenset(allowed_fields)
+
+    def without_allowed_fields(config: Hashable) -> tuple:
+        return tuple(item for item in config if item[0] not in allowed_field_names)
+
+    return without_allowed_fields(old_config) == without_allowed_fields(new_config)
+
+
+def _only_delayed_history_length_changed(
+    old_config: Hashable,
+    new_config: Hashable,
+) -> bool:
+    """Whether delayed-scaling configs differ only in history length."""
+    return _only_recipe_fields_changed(
+        old_config,
+        new_config,
+        ("amax_history_len",),
+    )
+
+
+def _is_preserved_fusible_recipe_transition(
+    recipe: Recipe,
+    old_config: Hashable,
+    new_config: Hashable,
+) -> bool:
+    """Whether this config delta is a transition already preserved by fusible ops.
+
+    Delayed recipes retain only their legacy history-resize path. For other recipes,
+    ``backward_override`` may change because the fuser already rebuilds the affected
+    topology and the field does not alter quantizer construction. Every other
+    same-class semantic delta remains unsupported.
+    """
+    if recipe.delayed():
+        return _only_delayed_history_length_changed(old_config, new_config)
+    return _only_recipe_fields_changed(
+        old_config,
+        new_config,
+        ("backward_override",),
+    )
 
 
 @dataclasses.dataclass
@@ -114,6 +163,19 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def is_fused_op(self) -> bool:
         """Whether this op is the fusion of one or more basic ops"""
+
+    def _plan_recipe_update(
+        self,
+        recipe: Recipe,
+        *,
+        diagnostic_name: str,
+    ) -> Optional[object]:
+        """Reject a model-wide recipe update: fusible ops are recreated, not updated."""
+        del recipe
+        raise RuntimeError(
+            "te.apply_recipe() does not support fusible operations yet; "
+            f"recreate or update this owner separately: {diagnostic_name!r}."
+        )
 
     def pre_first_fuser_forward(self) -> None:
         """Preprocessing before first fuser forward pass"""
@@ -307,6 +369,25 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
     # Number of extra tensor outputs
     num_extra_outputs: int = 0
 
+    def _builds_quantizers(self) -> bool:
+        """Whether this operation constructs any quantizers.
+
+        An operation that builds none (e.g. ``te.ops.LayerNorm`` / ``RMSNorm``,
+        Megatron's ``TENorm``) holds no state a recipe change could invalidate.
+        """
+        return bool(self.num_quantizers("forward") or self.num_quantizers("backward"))
+
+    def _plan_recipe_update(
+        self,
+        recipe: Recipe,
+        *,
+        diagnostic_name: str,
+    ) -> Optional[object]:
+        """Skip an operation that builds no quantizers; it holds nothing to update."""
+        if not self._builds_quantizers():
+            return None
+        return super()._plan_recipe_update(recipe, diagnostic_name=diagnostic_name)
+
     def __init__(self) -> None:
         super().__init__()
 
@@ -323,6 +404,8 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         # Objects for quantization
         self._fp8_metas: Optional[dict[str, dict[str, Any]]] = None
         self._quantizers: Optional[dict[str, list[Quantizer]]] = None
+        self._recipe_type: Optional[type[Recipe]] = None
+        self._recipe_config: Optional[Hashable] = None
 
     def _lock_extra_tensor_channels(self) -> None:
         """Freeze channel routing after an OperationFuser has captured it."""
@@ -447,7 +530,28 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         if recipe is None:
             self._fp8_metas = None
             self._quantizers = None
+            self._recipe_type = None
+            self._recipe_config = None
             return
+
+        recipe_type = type(recipe)
+        recipe_config = recipe.quantizer_config()
+        if (
+            self._recipe_type is recipe_type
+            and self._recipe_config is not None
+            and self._recipe_config != recipe_config
+            # Interim form; WP8 moves this into the transition check.
+            and self._builds_quantizers()
+            and not _is_preserved_fusible_recipe_transition(
+                recipe,
+                self._recipe_config,
+                recipe_config,
+            )
+        ):
+            raise RuntimeError(
+                "Mid-training recipe updates are not supported for fusible operations. "
+                "Recreate the fusible operation or operation pipeline with the new recipe."
+            )
 
         # Communication group for FP8 amax reductions
         fp8_group = FP8GlobalStateManager.get_fp8_group()
@@ -503,6 +607,12 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
 
                 # Construct builder class for quantized tensors
                 self._quantizers[mode] = recipe_state.make_quantizers()
+                if recipe.float8_current_scaling():
+                    # Preserve the legacy te.ops behavior. Its current-scaling
+                    # customization wrote the wrong attribute, so amax epsilon
+                    # remained at the quantizer default.
+                    for quantizer in self._quantizers[mode]:
+                        quantizer.amax_epsilon = 0.0
         else:
             # Update quantization recipe states
             for mode in ("forward", "backward"):
@@ -563,6 +673,9 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                 FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(
                     self._fp8_metas[mode],
                 )
+
+        self._recipe_type = recipe_type
+        self._recipe_config = recipe_config
 
     def get_quantizer(
         self,

@@ -655,15 +655,28 @@ class GroupedTensorStorage:
         """
 
         if quantizer is not None:
-            # TODO(#3158): Support Identity/Hybrid packed grouped storage.
-            from ..hybrid_tensor import HybridQuantizer
-            from ..identity_tensor import IdentityQuantizer
+            # TODO(#3158): widen this allowlist as packed grouped storage gains
+            # support, rather than enumerating what is unsupported.
+            from ...tensor.float8_tensor import (
+                Float8CurrentScalingQuantizer,
+                Float8Quantizer,
+            )
+            from ...tensor.mxfp8_tensor import MXFP8Quantizer
+            from ...tensor.nvfp4_tensor import NVFP4Quantizer
+            from ...tensor.float8_blockwise_tensor import Float8BlockQuantizer
 
-            if isinstance(quantizer, (IdentityQuantizer, HybridQuantizer)):
+            supported = (
+                Float8Quantizer,
+                Float8CurrentScalingQuantizer,
+                Float8BlockQuantizer,
+                MXFP8Quantizer,
+                NVFP4Quantizer,
+            )
+            if not isinstance(quantizer, supported):
                 raise NotImplementedError(
-                    "GroupedTensorStorage does not support IdentityQuantizer or "
-                    "HybridQuantizer yet. Use separate tensors, or set "
-                    "GroupedLinear(single_grouped_weight=False). See #3158."
+                    f"GroupedTensorStorage does not support {type(quantizer).__name__} yet. "
+                    "Use separate tensors, set GroupedLinear(single_grouped_weight=False), "
+                    "or unset NVTE_GROUPED_LINEAR_SINGLE_PARAM. See #3158."
                 )
 
         # Set device

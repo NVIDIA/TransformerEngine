@@ -809,20 +809,6 @@ class GroupedLinear(BasicOperation):
                     or weight_is_quantized
                 )
 
-            # Recipe-specific configuration
-            if recipe is not None:
-                if recipe.float8_current_scaling():
-                    input_quantizer.force_pow_2_scales = recipe.fp8_quant_fwd_inp.power_2_scale
-                    input_quantizer.amax_epsilon_scales = recipe.fp8_quant_fwd_inp.amax_epsilon
-                    weight_quantizer.force_pow_2_scales = recipe.fp8_quant_fwd_weight.power_2_scale
-                    weight_quantizer.amax_epsilon_scales = recipe.fp8_quant_fwd_weight.amax_epsilon
-                    grad_output_quantizer.force_pow_2_scales = (
-                        recipe.fp8_quant_bwd_grad.power_2_scale
-                    )
-                    grad_output_quantizer.amax_epsilon_scales = (
-                        recipe.fp8_quant_bwd_grad.amax_epsilon
-                    )
-
             # Update quantizer in quantized weight tensor
             if weight_quantizer is not None and weight_is_quantized:
                 # Get quantizer from weight tensor

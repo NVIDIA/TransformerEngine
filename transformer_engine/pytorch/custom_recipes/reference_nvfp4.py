@@ -9,11 +9,13 @@ from typing import Optional, Tuple, Union
 
 import torch
 
+from transformer_engine.common.recipe import quantizer_factory
 from transformer_engine.pytorch.custom_recipes import gemm
 from transformer_engine.pytorch.custom_recipes import reference_utils
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage, Quantizer
 
 
+@quantizer_factory(key=("nvfp4_reference_rht_2d", 1))
 def nvfp4_ref_rht_2d_factory(role):
     """
     Quantizer factory for NVFP4 recipe reference implementation (RHT and 2D quantization for weights).
