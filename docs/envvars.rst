@@ -317,7 +317,13 @@ Kernel Configuration
 
    :Type: ``int`` (0 or 1)
    :Default: ``0``
-   :Description: Use CUTLASS for grouped GEMM on Hopper (SM90). On Blackwell SM100, use ``torch._grouped_mm`` for BF16 forward, input-gradient, and weight-gradient GEMMs in the graph-safe GroupedLinear path. FP32 outputs and fused accumulation retain the existing backend. The module API requires ``NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM=1``. If available, ``torch.backends.cuda.matmul.prefer_cublaslt_grouped_gemm`` must be ``False``.
+   :Description: Enable CUTLASS for supported grouped GEMMs.
+
+      * **Hopper (SM90):** Use TE's CUTLASS backend.
+      * **Blackwell (SM100):** Use PyTorch's CUTLASS backend via
+        ``torch._grouped_mm`` for BF16 inputs and outputs in the shared
+        grouped-tensor GEMM path. This applies to all callers of that path,
+        including GroupedLinear and fused grouped MLP operations.
 
 .. envvar:: NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK
 

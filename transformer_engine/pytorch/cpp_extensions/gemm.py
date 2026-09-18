@@ -613,39 +613,48 @@ def _pytorch_grouped_gemm(A, B, out, *, layout, bias, bias_scale, accumulate, al
         )
 
     groups = B.num_tensors
-    b = B.rowwise_data.view(-1, B.get_common_last_dim())
-    a = torch.cat(A) if isinstance(A, list) else A.rowwise_data.view(-1, A.get_common_last_dim())
-    if layout != "NT":
-        a = a.view(groups, -1, a.size(-1))
     if B.first_dims is None:
-        offsets = torch.arange(1, groups + 1, device=b.device, dtype=torch.int32)
-        offsets = offsets * B.get_common_first_dim()
+        offsets = torch.arange(1, groups + 1, device=B.rowwise_data.device, dtype=torch.int32)
+        offsets *= B.get_common_first_dim()
     else:
         offsets = torch.cumsum(B.first_dims, dim=0, dtype=torch.int32)
 
-    result = torch._grouped_mm(
-        b.T if layout == "NT" else b, a.mT if layout == "TN" else a, offs=offsets
-    )
-    rows = torch.arange(b.size(0), device=b.device) if layout != "NT" else None
+    # TE computes B @ A. PyTorch splits output rows for TN/NN, or the reduction
+    # dimension for NT, which produces one output matrix per group.
+    lhs = B.rowwise_data.view(-1, B.get_common_last_dim())
+    rhs = torch.cat(A) if isinstance(A, list) else A.rowwise_data.view(-1, A.get_common_last_dim())
+    if layout == "NT":
+        lhs = lhs.T
+    else:
+        rhs = rhs.view(groups, -1, rhs.size(-1))
+        if layout == "TN":
+            rhs = rhs.mT
+    result = torch._grouped_mm(lhs, rhs, offs=offsets)
+
+    if layout != "NT":
+        rows = torch.arange(result.size(0), device=result.device)
     if bias is not None:
-        bias_data = bias.rowwise_data.view(groups, 1, -1).float()
-        if rows is not None:
-            # Use only inter-expert boundaries; the output mask handles unused capacity.
-            group_ids = torch.bucketize(rows, offsets[:-1], right=True)
-            bias_data = bias_data[group_ids, 0]
+        bias_data = bias.rowwise_data.view(groups, -1).float()
+        if layout == "NT":
+            bias_data = bias_data[:, None, :]
+        else:
+            # Exclude the final boundary so unused capacity maps to the last group.
+            bias_data = bias_data[torch.bucketize(rows, offsets[:-1], right=True)]
         if bias_scale is not None:
             bias_data = bias_data * bias_scale[:, None]
         result = (result.float() + bias_data).to(result.dtype)
+
     if isinstance(out, list):
         for dst, src in zip(out, result):
             dst.copy_(src)
+        return
+
+    destination = out.rowwise_data.view_as(result)
+    if layout == "NT":
+        destination.copy_(result)
     else:
-        destination = out.rowwise_data.view_as(result)
-        if rows is None:
-            destination.copy_(result)
-        else:
-            # Preserve caller-owned capacity beyond the final expert's rows.
-            torch.where(rows[:, None] < offsets[-1], result, destination, out=destination)
+        # Preserve caller-owned capacity beyond the final expert's rows.
+        torch.where(rows[:, None] < offsets[-1], result, destination, out=destination)
 
 
 def general_grouped_gemm_for_grouped_tensor(
