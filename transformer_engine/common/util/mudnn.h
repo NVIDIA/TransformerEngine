@@ -1,14 +1,14 @@
 #ifndef TRANSFORMER_ENGINE_MUSA_COMMON_UTIL_MUDNN_H_
 #define TRANSFORMER_ENGINE_MUSA_COMMON_UTIL_MUDNN_H_
 
-#include <vector>
-#include <utility>
-
 #include <c10/util/strides.h>
+#include <mudnncxx/mudnn.h>
 #include <torch/csrc/utils/pycfunction_helpers.h>
 #include <torch_musa/csrc/aten/utils/Context.h>
 #include <torch_musa/csrc/aten/utils/Utils.h>
-#include <mudnncxx/mudnn.h>
+
+#include <utility>
+#include <vector>
 
 namespace transformer_engine::musa {
 
@@ -21,8 +21,7 @@ inline std::vector<size_t> Flat2DimShape(const Tensor* t) {
   return {t->flat_first_dim(), t->flat_last_dim()};
 }
 
-inline std::pair<DimVector, DimVector>
-make_mudnn_sizes_strides(const std::vector<size_t>& shape) {
+inline std::pair<DimVector, DimVector> make_mudnn_sizes_strides(const std::vector<size_t>& shape) {
   auto mudnn_sizes = DimVector(shape.cbegin(), shape.cend());
   auto mudnn_strides = c10::contiguous_strides(mudnn_sizes);
   return std::make_pair(std::move(mudnn_sizes), std::move(mudnn_strides));
@@ -69,20 +68,13 @@ inline ScalarType ToTorchDtype(DType te_dtype) {
   return th_dtype;
 }
 
-inline void SetMUTensorDType(DType te_dtype, MUTensor& m_t) {
-  m_t.SetType(ToMudnnType(te_dtype));
-}
+inline void SetMUTensorDType(DType te_dtype, MUTensor& m_t) { m_t.SetType(ToMudnnType(te_dtype)); }
 
-inline void SetMUTensorAddr(void* addr, MUTensor& m_t) {
-  m_t.SetAddr(addr);
-}
+inline void SetMUTensorAddr(void* addr, MUTensor& m_t) { m_t.SetAddr(addr); }
 
-inline void SetMUTensorFormat(
-    const std::vector<size_t>& shape,
-    MUTensor& m_t) {
+inline void SetMUTensorFormat(const std::vector<size_t>& shape, MUTensor& m_t) {
   const int ndim = shape.size();
-  const auto mudnn_format = (ndim == 5) ? MUTensor::Format::NCDHW
-                                        : MUTensor::Format::NCHW;
+  const auto mudnn_format = (ndim == 5) ? MUTensor::Format::NCDHW : MUTensor::Format::NCHW;
   m_t.SetFormat(mudnn_format);
 
   const auto ss = make_mudnn_sizes_strides(shape);
@@ -97,9 +89,7 @@ inline MUTensor CreateMUTensor(const SimpleTensor& st) {
   return m_t;
 }
 
-inline MUTensor CreateMUTensor(
-    const SimpleTensor& st,
-    const std::vector<size_t>& shape) {
+inline MUTensor CreateMUTensor(const SimpleTensor& st, const std::vector<size_t>& shape) {
   MUTensor m_t;
   SetMUTensorDType(st.dtype, m_t);
   SetMUTensorAddr(st.dptr, m_t);
@@ -107,6 +97,6 @@ inline MUTensor CreateMUTensor(
   return m_t;
 }
 
-} // namespace transformer_engine::musa
+}  // namespace transformer_engine::musa
 
 #endif  // TRANSFORMER_ENGINE_MUSA_COMMON_UTIL_MUDNN_H_

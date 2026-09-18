@@ -7,13 +7,12 @@
 #ifndef TRANSFORMER_ENGINE_CUDNN_UTILS_H_
 #define TRANSFORMER_ENGINE_CUDNN_UTILS_H_
 
-#include "transformer_engine/musify.h"
-
-#include <mudnn.h>
 #include <cudnn_frontend.h>
 #include <cudnn_frontend_utils.h>
 #include <cudnn_graph.h>
+#include <mudnn.h>
 
+#include "transformer_engine/musify.h"
 #include "transformer_engine/transformer_engine.h"
 #include "util/handle_manager.h"
 

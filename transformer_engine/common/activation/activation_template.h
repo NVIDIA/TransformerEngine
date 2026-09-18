@@ -13,11 +13,12 @@
 
 #include <musa_runtime.h>
 #include <transformer_engine/activation.h>
+
 #include "../cast/dispatch/gated.cuh"
 #include "../cast/dispatch/quantize.cuh"
+#include "../common.h"
 #include "../util/math.h"
 #include "../util/vectorized_pointwise.h"
-#include "../common.h"
 
 namespace transformer_engine {
 

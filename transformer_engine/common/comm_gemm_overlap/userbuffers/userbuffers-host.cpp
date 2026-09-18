@@ -5,10 +5,10 @@
  ************************************************************************/
 
 #include <assert.h>
-#include <musa_runtime.h>
-#include <musa_runtime_api.h>
 #include <inttypes.h>
 #include <math.h>
+#include <musa_runtime.h>
+#include <musa_runtime_api.h>
 #include <sched.h>
 #include <stdio.h>
 #include <string.h>

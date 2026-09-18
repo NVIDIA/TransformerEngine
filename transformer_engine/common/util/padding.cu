@@ -4,8 +4,6 @@
  * See LICENSE for license information.
  ************************************************************************/
 
- #include "transformer_engine/musify.h"
- 
 #include <musa_runtime.h>
 #include <transformer_engine/padding.h>
 
@@ -15,6 +13,7 @@
 
 #include "../common.h"
 #include "../utils.cuh"
+#include "transformer_engine/musify.h"
 
 namespace transformer_engine {
 

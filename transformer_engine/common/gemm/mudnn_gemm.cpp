@@ -1,10 +1,9 @@
-#include <transformer_engine/gemm.h>
-#include <transformer_engine/transformer_engine.h>
-
-#include <mudnncxx/mudnn.h>
-#include <c10/musa/MUSACachingAllocator.h>
 #include <ATen/Functions.h>
 #include <ATen/core/Tensor.h>
+#include <c10/musa/MUSACachingAllocator.h>
+#include <mudnncxx/mudnn.h>
+#include <transformer_engine/gemm.h>
+#include <transformer_engine/transformer_engine.h>
 
 #include <memory>
 #include <unordered_map>
@@ -12,22 +11,22 @@
 
 #include "../common.h"
 #include "../util/logging.h"
-#include "../util/mudnn.h"
 #include "../util/mtfp8_utils.muh"
+#include "../util/mudnn.h"
 
 namespace transformer_engine {
 
 namespace {
 
-using transformer_engine::musa::Flat2DimShape;
-using transformer_engine::musa::CreateMUTensor;
-using transformer_engine::musa::MUTensor;
-using transformer_engine::musa::ToTorchDtype;
-using transformer_engine::musa::SetMUTensorDType;
 using mtfp8::next_power_of_2;
+using transformer_engine::musa::CreateMUTensor;
+using transformer_engine::musa::Flat2DimShape;
+using transformer_engine::musa::MUTensor;
+using transformer_engine::musa::SetMUTensorDType;
+using transformer_engine::musa::ToTorchDtype;
 
-#define CHECK_MUDNN_STATUS_CPP(result, message)                                      \
-  TORCH_CHECK((result) == ::musa::dnn::Status::SUCCESS, __FUNCTION__,               \
+#define CHECK_MUDNN_STATUS_CPP(result, message)                       \
+  TORCH_CHECK((result) == ::musa::dnn::Status::SUCCESS, __FUNCTION__, \
               " muDNN failed in: ", (message))
 
 inline ::musa::dnn::MemoryHandler InternalMemAlloc(size_t size) {
@@ -35,27 +34,24 @@ inline ::musa::dnn::MemoryHandler InternalMemAlloc(size_t size) {
   musaStream_t stream = at::musa::getCurrentMUSAStream().stream();
   if (musaStreamIsCapturing(stream, &status) == musaSuccess &&
       status == musaStreamCaptureStatusActive) {
-    at::Tensor workspace = at::empty(
-        {static_cast<int64_t>(size)},
-        at::TensorOptions().dtype(at::kByte).device(at::kMUSA));
+    at::Tensor workspace = at::empty({static_cast<int64_t>(size)},
+                                     at::TensorOptions().dtype(at::kByte).device(at::kMUSA));
     workspace.zero_();
     static std::vector<at::Tensor> captured_workspaces;
     captured_workspaces.push_back(workspace);
-    return ::musa::dnn::MemoryHandler(
-        workspace.data_ptr(), [](void *pointer) { (void)pointer; });
+    return ::musa::dnn::MemoryHandler(workspace.data_ptr(), [](void* pointer) { (void)pointer; });
   }
 
-  void *pointer = c10::musa::MUSACachingAllocator::raw_alloc(size);
-  return ::musa::dnn::MemoryHandler(pointer, [](void *value) {
-    c10::musa::MUSACachingAllocator::raw_delete(value);
-  });
+  void* pointer = c10::musa::MUSACachingAllocator::raw_alloc(size);
+  return ::musa::dnn::MemoryHandler(
+      pointer, [](void* value) { c10::musa::MUSACachingAllocator::raw_delete(value); });
 }
 
-inline ::musa::dnn::Handle &GetMudnnHandle() {
+inline ::musa::dnn::Handle& GetMudnnHandle() {
   int device = 0;
   NVTE_CHECK_CUDA(musaGetDevice(&device));
   static std::unordered_map<int, std::unique_ptr<::musa::dnn::Handle>> handles;
-  auto &handle = handles[device];
+  auto& handle = handles[device];
   if (!handle) handle = std::make_unique<::musa::dnn::Handle>(device);
   return *handle;
 }
@@ -90,9 +86,9 @@ void init_streams_and_events() {
     NVTE_CHECK_CUDA(musaStreamCreateWithPriority(&compute_streams[i], musaStreamNonBlocking, -1));
     NVTE_CHECK_CUDA(musaEventCreate(&cublas_event[i]));
   }
-  
+
   multistream_to_use = false;
-  const char *multi_stream_env = std::getenv("TE_MULTI_STREAM_GROUPGEMM");
+  const char* multi_stream_env = std::getenv("TE_MULTI_STREAM_GROUPGEMM");
   if (multi_stream_env == nullptr) {
     multi_stream_env = std::getenv("MULTI_STREAM_GROUPGEMM");
   }
@@ -116,19 +112,14 @@ struct GEMM_INFO {
   bool is_per_tensor = true;
 };
 
-GEMM_INFO get_gemm_info(
-    const Tensor* a,
-    bool trans_a,
-    const Tensor* b,
-    bool trans_b) {
-  NVTE_CHECK(a->scaling_mode == b->scaling_mode ||
-                 (a->scaling_mode == NVTE_BLOCK_SCALING_1D &&
-                  b->scaling_mode == NVTE_BLOCK_SCALING_2D) ||
-                 (a->scaling_mode == NVTE_BLOCK_SCALING_2D &&
-                  b->scaling_mode == NVTE_BLOCK_SCALING_1D),
-             "Inputs A and B to GEMM need to have compatible scaling modes! ",
-             "A scaling mode: ", to_string(a->scaling_mode),
-             ", B scaling mode: ", to_string(b->scaling_mode));
+GEMM_INFO get_gemm_info(const Tensor* a, bool trans_a, const Tensor* b, bool trans_b) {
+  NVTE_CHECK(
+      a->scaling_mode == b->scaling_mode ||
+          (a->scaling_mode == NVTE_BLOCK_SCALING_1D && b->scaling_mode == NVTE_BLOCK_SCALING_2D) ||
+          (a->scaling_mode == NVTE_BLOCK_SCALING_2D && b->scaling_mode == NVTE_BLOCK_SCALING_1D),
+      "Inputs A and B to GEMM need to have compatible scaling modes! ",
+      "A scaling mode: ", to_string(a->scaling_mode),
+      ", B scaling mode: ", to_string(b->scaling_mode));
   NVTE_CHECK(a->has_data() || a->has_columnwise_data(), "Input A does not hold any data!");
   NVTE_CHECK(b->has_data() || b->has_columnwise_data(), "Input B does not hold any data!");
 
@@ -142,13 +133,14 @@ GEMM_INFO get_gemm_info(
     return info;
   }
 
-  const bool weight_is_nn_block = (not (a->data).shape.empty()) &&
-                                  (product(a->data.shape, 0, a->data.shape.size() - 1) != product(a->scale_inv.shape, 0, a->scale_inv.shape.size() - 1));
+  const bool weight_is_nn_block = (not(a->data).shape.empty()) &&
+                                  (product(a->data.shape, 0, a->data.shape.size() - 1) !=
+                                   product(a->scale_inv.shape, 0, a->scale_inv.shape.size() - 1));
 
   if (weight_is_nn_block || trans_a) {
     info.data_a = &(a->data);
     info.sinv_a = &(a->scale_inv);
-  } else  {
+  } else {
     info.data_a = &(a->columnwise_data);
     info.sinv_a = &(a->columnwise_scale_inv);
   }
@@ -164,42 +156,33 @@ GEMM_INFO get_gemm_info(
   return info;
 }
 
-} // anonymous namespace
+}  // anonymous namespace
 
-void non_fp8_gemm(
-    const Tensor* inputA,
-    bool transa,
-    const Tensor* inputB,
-    bool transb,
-    Tensor* outputD,
-    const Tensor* biasTensor,
-    bool accumulate,
-    int math_sm_count,
-    musaStream_t stream) {
+void non_fp8_gemm(const Tensor* inputA, bool transa, const Tensor* inputB, bool transb,
+                  Tensor* outputD, const Tensor* biasTensor, bool accumulate, int math_sm_count,
+                  musaStream_t stream) {
   musaStreamCaptureStatus capture_status = musaStreamCaptureStatusNone;
   musaStreamIsCapturing(stream, &capture_status);
   if (capture_status == musaStreamCaptureStatusActive && !accumulate) {
     auto a_shape = Flat2DimShape(inputA);
     auto b_shape = Flat2DimShape(inputB);
     auto d_shape = Flat2DimShape(outputD);
-    auto weight = at::from_blob(
-        const_cast<void *>(get_data(inputA, transa)->dptr),
-        {static_cast<int64_t>(a_shape[0]), static_cast<int64_t>(a_shape[1])},
-        at::TensorOptions().dtype(ToTorchDtype(inputA->dtype())).device(at::kMUSA));
-    auto activation = at::from_blob(
-        const_cast<void *>(get_data(inputB, transb)->dptr),
-        {static_cast<int64_t>(b_shape[0]), static_cast<int64_t>(b_shape[1])},
-        at::TensorOptions().dtype(ToTorchDtype(inputB->dtype())).device(at::kMUSA));
+    auto weight =
+        at::from_blob(const_cast<void*>(get_data(inputA, transa)->dptr),
+                      {static_cast<int64_t>(a_shape[0]), static_cast<int64_t>(a_shape[1])},
+                      at::TensorOptions().dtype(ToTorchDtype(inputA->dtype())).device(at::kMUSA));
+    auto activation =
+        at::from_blob(const_cast<void*>(get_data(inputB, transb)->dptr),
+                      {static_cast<int64_t>(b_shape[0]), static_cast<int64_t>(b_shape[1])},
+                      at::TensorOptions().dtype(ToTorchDtype(inputB->dtype())).device(at::kMUSA));
     auto output = at::from_blob(
-        outputD->data.dptr,
-        {static_cast<int64_t>(d_shape[0]), static_cast<int64_t>(d_shape[1])},
+        outputD->data.dptr, {static_cast<int64_t>(d_shape[0]), static_cast<int64_t>(d_shape[1])},
         at::TensorOptions().dtype(ToTorchDtype(outputD->dtype())).device(at::kMUSA));
     auto lhs = transb ? activation.t() : activation;
     auto rhs = transa ? weight.t() : weight;
     if (biasTensor->has_data()) {
       auto bias = at::from_blob(
-          biasTensor->data.dptr,
-          {static_cast<int64_t>(biasTensor->data.shape[0])},
+          biasTensor->data.dptr, {static_cast<int64_t>(biasTensor->data.shape[0])},
           at::TensorOptions().dtype(ToTorchDtype(biasTensor->dtype())).device(at::kMUSA));
       at::addmm_out(output, bias, lhs, rhs);
     } else {
@@ -219,29 +202,18 @@ void non_fp8_gemm(
 
   ::musa::dnn::MatMul op;
   CHECK_MUDNN_STATUS_CPP(op.SetTranspose(transb, transa), "SetTranspose");
-  CHECK_MUDNN_STATUS_CPP(
-      op.SetComputeMode(GetComputeModeFromCtx(ToTorchDtype(inputB->dtype()))),
-      "SetComputeMode");
+  CHECK_MUDNN_STATUS_CPP(op.SetComputeMode(GetComputeModeFromCtx(ToTorchDtype(inputB->dtype()))),
+                         "SetComputeMode");
   CHECK_MUDNN_STATUS_CPP(op.SetAlpha(1.0), "SetAlpha");
   CHECK_MUDNN_STATUS_CPP(op.SetBeta(accumulate ? 1.0 : 0.0), "SetBeta");
   CHECK_MUDNN_STATUS_CPP(op.SetGamma(has_bias ? 1.0 : 0.0), "SetGamma");
 
-  CHECK_MUDNN_STATUS_CPP(
-      op.RunWithBiasAdd(
-          h, mu_o, mu_l, mu_r, mu_o, mu_b, InternalMemAlloc),
-      "RunWithBiasAdd");
+  CHECK_MUDNN_STATUS_CPP(op.RunWithBiasAdd(h, mu_o, mu_l, mu_r, mu_o, mu_b, InternalMemAlloc),
+                         "RunWithBiasAdd");
 }
 
-void fp8_gemm(
-    const Tensor* inputA,
-    bool transa,
-    const Tensor* inputB,
-    bool transb,
-    Tensor* outputD,
-    const Tensor* biasTensor,
-    bool accumulate,
-    int math_sm_count,
-    musaStream_t stream) {
+void fp8_gemm(const Tensor* inputA, bool transa, const Tensor* inputB, bool transb, Tensor* outputD,
+              const Tensor* biasTensor, bool accumulate, int math_sm_count, musaStream_t stream) {
   auto& h = GetMudnnHandle();
   h.SetStream(stream);
 
@@ -267,18 +239,14 @@ void fp8_gemm(
 
   auto mu_scale_l = CreateMUTensor(sinv_b);
   auto mu_scale_r = CreateMUTensor(sinv_a);
-  auto mu_scale_b = has_bias_scale
-      ? CreateMUTensor(biasTensor->scale_inv) : empty_mu_tensor;
-  auto mu_scale_o = has_output_scale
-      ? CreateMUTensor(outputD->scale): empty_mu_tensor;
-  auto mu_amax_o = has_output_amax
-      ? CreateMUTensor(outputD->amax): empty_mu_tensor;
+  auto mu_scale_b = has_bias_scale ? CreateMUTensor(biasTensor->scale_inv) : empty_mu_tensor;
+  auto mu_scale_o = has_output_scale ? CreateMUTensor(outputD->scale) : empty_mu_tensor;
+  auto mu_amax_o = has_output_amax ? CreateMUTensor(outputD->amax) : empty_mu_tensor;
 
   ::musa::dnn::BatchMatMul op;
   CHECK_MUDNN_STATUS_CPP(op.SetTranspose(transb, transa), "SetTranspose");
-  CHECK_MUDNN_STATUS_CPP(
-      op.SetComputeMode(GetComputeModeFromCtx(ToTorchDtype(inputB->dtype()))),
-      "SetComputeMode");
+  CHECK_MUDNN_STATUS_CPP(op.SetComputeMode(GetComputeModeFromCtx(ToTorchDtype(inputB->dtype()))),
+                         "SetComputeMode");
   CHECK_MUDNN_STATUS_CPP(op.SetAlpha(1.0), "SetAlpha");
   CHECK_MUDNN_STATUS_CPP(op.SetBeta(accumulate ? 1.0 : 0.0), "SetBeta");
   CHECK_MUDNN_STATUS_CPP(op.SetGamma(has_bias ? 1.0 : 0.0), "SetGamma");
@@ -288,22 +256,22 @@ void fp8_gemm(
 
   ::musa::dnn::MatMulLtParam param;
   if (info.is_per_tensor) {
-    CHECK_MUDNN_STATUS_CPP(param.SetScale(mu_scale_l, mu_scale_r, mu_scale_b, mu_scale_o), "SetScale");
+    CHECK_MUDNN_STATUS_CPP(param.SetScale(mu_scale_l, mu_scale_r, mu_scale_b, mu_scale_o),
+                           "SetScale");
   } else {
     NVTE_CHECK(inputB->scale_inv.shape.size() == 2);
-    const auto tile_size = static_cast<int>(next_power_of_2(inputB->flat_last_dim() / inputB->scale_inv.shape[1]));
-    CHECK_MUDNN_STATUS_CPP(param.SetScale(mu_scale_l, mu_scale_r, mu_scale_b, mu_scale_o, tile_size), "SetScale");
+    const auto tile_size =
+        static_cast<int>(next_power_of_2(inputB->flat_last_dim() / inputB->scale_inv.shape[1]));
+    CHECK_MUDNN_STATUS_CPP(
+        param.SetScale(mu_scale_l, mu_scale_r, mu_scale_b, mu_scale_o, tile_size), "SetScale");
   }
   CHECK_MUDNN_STATUS_CPP(param.SetAmaxD(mu_amax_o), "SetAmax");
 
-  CHECK_MUDNN_STATUS_CPP(op.RunLt(h, mu_o, mu_l, mu_r, mu_o, mu_b, param, InternalMemAlloc), "RunLt");
+  CHECK_MUDNN_STATUS_CPP(op.RunLt(h, mu_o, mu_l, mu_r, mu_o, mu_b, param, InternalMemAlloc),
+                         "RunLt");
 }
 
-void no_fp8_grad_bias(
-    const Tensor* gradO,
-    bool trans,
-    const Tensor* gradB,
-    musaStream_t stream) {
+void no_fp8_grad_bias(const Tensor* gradO, bool trans, const Tensor* gradB, musaStream_t stream) {
   using REDUCE_MODE = ::musa::dnn::Reduce::Mode;
   const int reduce_dim = trans ? 0 : 1;
 
@@ -319,31 +287,21 @@ void no_fp8_grad_bias(
   CHECK_MUDNN_STATUS_CPP(rdc.Run(h, mu_o, mu_i, InternalMemAlloc), "Run");
 }
 
-} // namespace transformer_engine
+}  // namespace transformer_engine
 
 // D = B @ A.T
-void mudnn_gemm(
-    const NVTETensor A,
-    const NVTETensor B,
-    NVTETensor D,
-    const NVTETensor bias,
-    NVTETensor pre_gelu_out,
-    bool transa,
-    bool transb,
-    bool grad,
-    NVTETensor workspace,
-    bool accumulate,
-    bool use_split_accumulator,
-    int math_sm_count,
-    musaStream_t stream) {
+void mudnn_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D, const NVTETensor bias,
+                NVTETensor pre_gelu_out, bool transa, bool transb, bool grad, NVTETensor workspace,
+                bool accumulate, bool use_split_accumulator, int math_sm_count,
+                musaStream_t stream) {
   using namespace transformer_engine;
 
-  const Tensor *inputA = convertNVTETensorCheck(A);
-  const Tensor *inputB = convertNVTETensorCheck(B);
-  Tensor *outputD = convertNVTETensorCheck(D);
-  const Tensor *biasTensor = convertNVTETensor(bias);
-  Tensor *geluOut = convertNVTETensor(pre_gelu_out);
-  Tensor *wspace = convertNVTETensor(workspace);
+  const Tensor* inputA = convertNVTETensorCheck(A);
+  const Tensor* inputB = convertNVTETensorCheck(B);
+  Tensor* outputD = convertNVTETensorCheck(D);
+  const Tensor* biasTensor = convertNVTETensor(bias);
+  Tensor* geluOut = convertNVTETensor(pre_gelu_out);
+  Tensor* wspace = convertNVTETensor(workspace);
 
   NVTE_CHECK(outputD->has_data());
   NVTE_CHECK(!geluOut->has_data(), "Gelu epilogue is not supported!");
@@ -354,21 +312,14 @@ void mudnn_gemm(
   const auto B_type = inputB->dtype();
   const auto is_fp8_B = is_fp8_dtype(B_type);
 
-  NVTE_CHECK(
-      is_fp8_A == is_fp8_B,
-      "Inputs to muDNN GEMM must all be non-fp8 or fp8 dtypes!");
+  NVTE_CHECK(is_fp8_A == is_fp8_B, "Inputs to muDNN GEMM must all be non-fp8 or fp8 dtypes!");
   if (!is_fp8_A) {
-    NVTE_CHECK(
-        A_type == B_type,
-        "Both inputs to muDNN non-FP8 GEMM must have the same dtype!");
+    NVTE_CHECK(A_type == B_type, "Both inputs to muDNN non-FP8 GEMM must have the same dtype!");
   }
   if (biasTensor->has_data() && !grad) {
     NVTE_CHECK(
-        biasTensor->data.shape.size() == 1 &&
-            biasTensor->data.shape[0] == outputD->flat_last_dim(),
-        "Mismatch bias shape, expect ",
-        outputD->flat_last_dim(),
-        ", but got ",
+        biasTensor->data.shape.size() == 1 && biasTensor->data.shape[0] == outputD->flat_last_dim(),
+        "Mismatch bias shape, expect ", outputD->flat_last_dim(), ", but got ",
         biasTensor->data.shape[0]);
   }
 
@@ -376,7 +327,8 @@ void mudnn_gemm(
   if (is_fp8_A) {
     fp8_gemm(inputA, transa, inputB, transb, outputD, fwd_bias, accumulate, math_sm_count, stream);
   } else {
-    non_fp8_gemm(inputA, transa, inputB, transb, outputD, fwd_bias, accumulate, math_sm_count, stream);
+    non_fp8_gemm(inputA, transa, inputB, transb, outputD, fwd_bias, accumulate, math_sm_count,
+                 stream);
   }
 
   if (!grad || !(biasTensor->has_data())) {
@@ -388,63 +340,31 @@ void mudnn_gemm(
   }
 }
 
-void nvte_cublas_gemm(
-    const NVTETensor A,
-    const NVTETensor B,
-    NVTETensor D,
-    const NVTETensor bias,
-    NVTETensor pre_gelu_out,
-    bool transa,
-    bool transb,
-    bool grad,
-    NVTETensor workspace,
-    bool accumulate,
-    bool use_split_accumulator,
-    int math_sm_count,
-    musaStream_t stream) {
+void nvte_cublas_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D, const NVTETensor bias,
+                      NVTETensor pre_gelu_out, bool transa, bool transb, bool grad,
+                      NVTETensor workspace, bool accumulate, bool use_split_accumulator,
+                      int math_sm_count, musaStream_t stream) {
   NVTE_API_CALL(nvte_cublas_gemm);
-  mudnn_gemm(
-      A, B, D, bias, pre_gelu_out, transa, transb, grad, workspace,
-      accumulate, use_split_accumulator, math_sm_count, stream);
+  mudnn_gemm(A, B, D, bias, pre_gelu_out, transa, transb, grad, workspace, accumulate,
+             use_split_accumulator, math_sm_count, stream);
 }
 
-void nvte_cublas_atomic_gemm(
-    const NVTETensor A,
-    const NVTETensor B,
-    NVTETensor D,
-    const NVTETensor bias,
-    NVTETensor pre_gelu_out,
-    bool transa,
-    bool transb,
-    bool grad,
-    NVTETensor workspace,
-    bool accumulate,
-    bool use_split_accumulator,
-    int math_sm_count,
-    int m_split,
-    int n_split,
-    bool gemm_producer,
-    const NVTETensor counter,
-    musaStream_t stream) {
+void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D,
+                             const NVTETensor bias, NVTETensor pre_gelu_out, bool transa,
+                             bool transb, bool grad, NVTETensor workspace, bool accumulate,
+                             bool use_split_accumulator, int math_sm_count, int m_split,
+                             int n_split, bool gemm_producer, const NVTETensor counter,
+                             musaStream_t stream) {
   NVTE_API_CALL(nvte_cublas_atomic_gemm);
   NVTE_CHECK(false, "atomic_gemm is not supported.");
 }
 
-void nvte_multi_stream_cublas_gemm(
-    const NVTETensor* A,
-    const NVTETensor* B,
-    NVTETensor* D,
-    const NVTETensor* bias,
-    NVTETensor* pre_gelu_out,
-    const int num_gemms,
-    bool transa,
-    bool transb,
-    bool grad,
-    NVTETensor* workspace,
-    bool accumulate,
-    bool use_split_accumulator,
-    int math_sm_count,
-    musaStream_t stream) {
+void nvte_multi_stream_cublas_gemm(const NVTETensor* A, const NVTETensor* B, NVTETensor* D,
+                                   const NVTETensor* bias, NVTETensor* pre_gelu_out,
+                                   const int num_gemms, bool transa, bool transb, bool grad,
+                                   NVTETensor* workspace, bool accumulate,
+                                   bool use_split_accumulator, int math_sm_count,
+                                   musaStream_t stream) {
   NVTE_API_CALL(nvte_multi_stream_cublas_gemm);
   using namespace transformer_engine;
 
@@ -455,10 +375,9 @@ void nvte_multi_stream_cublas_gemm(
     // Using the legacy stream here lets grouped GEMMs escape a non-default
     // capture stream and allows their inputs to be reused before completion.
     for (int i = 0; i < num_gemms; i++) {
-      mudnn_gemm(
-          A[i], B[i], D[i], bias[i], pre_gelu_out[i], transa, transb, grad,
-          workspace[i % num_streams], accumulate, use_split_accumulator, math_sm_count,
-          stream);
+      mudnn_gemm(A[i], B[i], D[i], bias[i], pre_gelu_out[i], transa, transb, grad,
+                 workspace[i % num_streams], accumulate, use_split_accumulator, math_sm_count,
+                 stream);
     }
     return;
   }
@@ -471,10 +390,9 @@ void nvte_multi_stream_cublas_gemm(
   }
 
   for (int i = 0; i < num_gemms; i++) {
-    mudnn_gemm(
-        A[i], B[i], D[i], bias[i], pre_gelu_out[i], transa, transb, grad,
-        workspace[i % num_streams], accumulate, use_split_accumulator, math_sm_count,
-        compute_streams[i % num_streams]);
+    mudnn_gemm(A[i], B[i], D[i], bias[i], pre_gelu_out[i], transa, transb, grad,
+               workspace[i % num_streams], accumulate, use_split_accumulator, math_sm_count,
+               compute_streams[i % num_streams]);
   }
 
   for (int s = 0; s < num_stream_used; s++) {
@@ -485,23 +403,11 @@ void nvte_multi_stream_cublas_gemm(
   }
 }
 
-
-
-void nvte_grouped_mudnn_gemm(
-    const NVTETensor* A,
-    const NVTETensor* B,
-    NVTETensor* D,
-    const NVTETensor* bias,
-    NVTETensor* pre_gelu_out,
-    const int num_gemms,
-    bool transa,
-    bool transb,
-    bool grad,
-    NVTETensor* workspace,
-    bool accumulate,
-    bool use_split_accumulator,
-    int math_sm_count,
-    musaStream_t stream) {
+void nvte_grouped_mudnn_gemm(const NVTETensor* A, const NVTETensor* B, NVTETensor* D,
+                             const NVTETensor* bias, NVTETensor* pre_gelu_out, const int num_gemms,
+                             bool transa, bool transb, bool grad, NVTETensor* workspace,
+                             bool accumulate, bool use_split_accumulator, int math_sm_count,
+                             musaStream_t stream) {
   NVTE_API_CALL(nvte_grouped_mudnn_gemm);
   using namespace transformer_engine;
 
@@ -513,10 +419,8 @@ void nvte_grouped_mudnn_gemm(
   NVTE_CHECK(B != nullptr, "Grouped GEMM B tensor array is null.");
   NVTE_CHECK(D != nullptr, "Grouped GEMM output tensor array is null.");
   NVTE_CHECK(bias != nullptr, "Grouped GEMM bias tensor array is null.");
-  NVTE_CHECK(pre_gelu_out != nullptr,
-             "Grouped GEMM pre-GELU tensor array is null.");
-  NVTE_CHECK(B[0] != nullptr,
-             "Grouped GEMM received an invalid first B tensor handle.");
+  NVTE_CHECK(pre_gelu_out != nullptr, "Grouped GEMM pre-GELU tensor array is null.");
+  NVTE_CHECK(B[0] != nullptr, "Grouped GEMM received an invalid first B tensor handle.");
 
   std::vector<MUTensor> inputL(num_gemms);
   std::vector<MUTensor> inputR(num_gemms);
@@ -542,18 +446,13 @@ void nvte_grouped_mudnn_gemm(
     const auto B_type = inputB->dtype();
     const auto is_fp8_B = is_fp8_dtype(B_type);
 
-    NVTE_CHECK(
-      is_fp8_A == is_fp8_B,
-      "Inputs to muDNN GEMM must all be non-fp8 or fp8 dtypes!");
+    NVTE_CHECK(is_fp8_A == is_fp8_B, "Inputs to muDNN GEMM must all be non-fp8 or fp8 dtypes!");
 
     if (biasTensor->has_data() && !grad) {
-      NVTE_CHECK(
-          biasTensor->data.shape.size() == 1 &&
-              biasTensor->data.shape[0] == outputD->flat_last_dim(),
-          "Mismatch bias shape, expect ",
-          outputD->flat_last_dim(),
-          ", but got ",
-          biasTensor->data.shape[0]);
+      NVTE_CHECK(biasTensor->data.shape.size() == 1 &&
+                     biasTensor->data.shape[0] == outputD->flat_last_dim(),
+                 "Mismatch bias shape, expect ", outputD->flat_last_dim(), ", but got ",
+                 biasTensor->data.shape[0]);
     }
     if (is_fp8_A) {
       const bool has_bias_scale = (biasTensor->scale_inv.dptr != nullptr);
@@ -569,30 +468,28 @@ void nvte_grouped_mudnn_gemm(
       //set scales which will be used in mudnn kernel.
       auto mu_scale_l = CreateMUTensor(sinv_b);
       auto mu_scale_r = CreateMUTensor(sinv_a);
-      auto mu_scale_b = has_bias_scale
-          ? CreateMUTensor(biasTensor->scale_inv) : empty_mu_tensor;
-      auto mu_scale_o = has_output_scale
-          ? CreateMUTensor(outputD->scale): empty_mu_tensor;
-      auto mu_amax_o = has_output_amax
-          ? CreateMUTensor(outputD->amax): empty_mu_tensor;
+      auto mu_scale_b = has_bias_scale ? CreateMUTensor(biasTensor->scale_inv) : empty_mu_tensor;
+      auto mu_scale_o = has_output_scale ? CreateMUTensor(outputD->scale) : empty_mu_tensor;
+      auto mu_amax_o = has_output_amax ? CreateMUTensor(outputD->amax) : empty_mu_tensor;
 
       if (info.is_per_tensor) {
-        CHECK_MUDNN_STATUS_CPP(lt_parap_vec[i].SetScale(mu_scale_l, mu_scale_r, mu_scale_b, mu_scale_o), "SetScale");
+        CHECK_MUDNN_STATUS_CPP(
+            lt_parap_vec[i].SetScale(mu_scale_l, mu_scale_r, mu_scale_b, mu_scale_o), "SetScale");
       } else {
         NVTE_CHECK(inputB->scale_inv.shape.size() == 2);
-        const auto tile_size = static_cast<int>(next_power_of_2(inputB->flat_last_dim() / inputB->scale_inv.shape[1]));
-        CHECK_MUDNN_STATUS_CPP(lt_parap_vec[i].SetScale(mu_scale_l, mu_scale_r, mu_scale_b, mu_scale_o, tile_size), "SetScale");
+        const auto tile_size =
+            static_cast<int>(next_power_of_2(inputB->flat_last_dim() / inputB->scale_inv.shape[1]));
+        CHECK_MUDNN_STATUS_CPP(
+            lt_parap_vec[i].SetScale(mu_scale_l, mu_scale_r, mu_scale_b, mu_scale_o, tile_size),
+            "SetScale");
       }
       CHECK_MUDNN_STATUS_CPP(lt_parap_vec[i].SetAmaxD(mu_amax_o), "SetAmax");
       inputR[i] = CreateMUTensor(data_a, Flat2DimShape(inputA));
       inputL[i] = CreateMUTensor(data_b, Flat2DimShape(inputB));
     } else {
-      NVTE_CHECK(
-          A_type == B_type,
-          "Both inputs to muDNN non-FP8 GEMM must have the same dtype!");
+      NVTE_CHECK(A_type == B_type, "Both inputs to muDNN non-FP8 GEMM must have the same dtype!");
       inputR[i] = CreateMUTensor(*get_data(inputA, transa), Flat2DimShape(inputA));
       inputL[i] = CreateMUTensor(*get_data(inputB, transb), Flat2DimShape(inputB));
-
     }
 
     // trans NVTETenso to MUTensor
@@ -633,18 +530,17 @@ void nvte_grouped_mudnn_gemm(
       auto sA = Flat2DimShape(tA);
       auto sB = Flat2DimShape(tB);
       auto sD = Flat2DimShape(dst);
-      auto a_t = at::from_blob(
-          const_cast<void*>(reinterpret_cast<const void*>(tA->data.dptr)),
-          {static_cast<int64_t>(sA[0]), static_cast<int64_t>(sA[1])},
-          at::TensorOptions().dtype(ToTorchDtype(tA->dtype())).device(at::kMUSA));
-      auto b_t = at::from_blob(
-          const_cast<void*>(reinterpret_cast<const void*>(tB->data.dptr)),
-          {static_cast<int64_t>(sB[0]), static_cast<int64_t>(sB[1])},
-          at::TensorOptions().dtype(ToTorchDtype(tB->dtype())).device(at::kMUSA));
-      auto d_t = at::from_blob(
-          dst->data.dptr,
-          {static_cast<int64_t>(sD[0]), static_cast<int64_t>(sD[1])},
-          at::TensorOptions().dtype(ToTorchDtype(dst->dtype())).device(at::kMUSA));
+      auto a_t =
+          at::from_blob(const_cast<void*>(reinterpret_cast<const void*>(tA->data.dptr)),
+                        {static_cast<int64_t>(sA[0]), static_cast<int64_t>(sA[1])},
+                        at::TensorOptions().dtype(ToTorchDtype(tA->dtype())).device(at::kMUSA));
+      auto b_t =
+          at::from_blob(const_cast<void*>(reinterpret_cast<const void*>(tB->data.dptr)),
+                        {static_cast<int64_t>(sB[0]), static_cast<int64_t>(sB[1])},
+                        at::TensorOptions().dtype(ToTorchDtype(tB->dtype())).device(at::kMUSA));
+      auto d_t =
+          at::from_blob(dst->data.dptr, {static_cast<int64_t>(sD[0]), static_cast<int64_t>(sD[1])},
+                        at::TensorOptions().dtype(ToTorchDtype(dst->dtype())).device(at::kMUSA));
       auto lhs = transb ? b_t.t() : b_t;  // (transb ? B^T : B)
       auto rhs = transa ? a_t.t() : a_t;  // (transa ? A^T : A)
       at::mm_out(d_t, lhs, rhs);
@@ -654,7 +550,7 @@ void nvte_grouped_mudnn_gemm(
 
   static std::unordered_map<int, std::unique_ptr<::musa::dnn::Handle>> handle_pool;
   if (handle_pool.find(current_device) == handle_pool.end()) {
-      handle_pool[current_device] = std::make_unique<::musa::dnn::Handle>(current_device);
+    handle_pool[current_device] = std::make_unique<::musa::dnn::Handle>(current_device);
   }
   auto& h = *handle_pool[current_device];
   h.SetStream(stream);
@@ -677,12 +573,12 @@ void nvte_grouped_mudnn_gemm(
     }
   }
   CHECK_MUDNN_STATUS_CPP(op.SetDeterministic(!split_k), "SetDeterministic");
-  CHECK_MUDNN_STATUS_CPP(
-      op.SetComputeMode(toMudnnComputeMode(at::musa::GetComputeModeFromCtx(transformer_engine::musa::ToTorchDtype(B_type)))),
-      "SetComputeMode");
+  CHECK_MUDNN_STATUS_CPP(op.SetComputeMode(toMudnnComputeMode(at::musa::GetComputeModeFromCtx(
+                             transformer_engine::musa::ToTorchDtype(B_type)))),
+                         "SetComputeMode");
   CHECK_MUDNN_STATUS_CPP(op.SetBeta(accumulate ? 1.0 : 0.0), "SetBeta");
 
-  CHECK_MUDNN_STATUS_CPP(op.RunLt(h, inputOut.data(), inputL.data(), inputR.data(), inputOut.data(), bias_ptr,
-             lt_parap_vec.data(), num_gemms, InternalMemAlloc), "RunLt");
-
+  CHECK_MUDNN_STATUS_CPP(op.RunLt(h, inputOut.data(), inputL.data(), inputR.data(), inputOut.data(),
+                                  bias_ptr, lt_parap_vec.data(), num_gemms, InternalMemAlloc),
+                         "RunLt");
 }

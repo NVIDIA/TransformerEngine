@@ -11,8 +11,8 @@
 #ifndef TRANSFORMER_ENGINE_MULTI_STREAM_H
 #define TRANSFORMER_ENGINE_MULTI_STREAM_H
 
-#include "musify.h"
 #include "musa_runtime.h"
+#include "musify.h"
 
 #ifdef __cplusplus
 extern "C" {

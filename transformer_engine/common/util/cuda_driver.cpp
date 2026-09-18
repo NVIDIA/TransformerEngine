@@ -4,7 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
- #include <dlfcn.h>
+#include <dlfcn.h>
 #if !(defined(_WIN32) || defined(_WIN64) || defined(__WINDOWS__))
 #include <execinfo.h>
 #include <unistd.h>
@@ -12,10 +12,9 @@
 #include <cstdio>
 #include <filesystem>
 
-#include "transformer_engine/musify.h"
-
 #include "../common.h"
 #include "../util/cuda_runtime.h"
+#include "transformer_engine/musify.h"
 
 namespace transformer_engine {
 

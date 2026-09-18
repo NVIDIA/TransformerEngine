@@ -22,9 +22,7 @@ def test_repeated_async_reload_releases_context_off_host_callback():
 
     try:
         for iteration in range(10):
-            expected = torch.full(
-                (4096,), iteration + 1, dtype=torch.float32, device="musa"
-            )
+            expected = torch.full((4096,), iteration + 1, dtype=torch.float32, device="musa")
             allocation.tensor.copy_(expected)
             torch.musa.synchronize()
 
@@ -32,9 +30,7 @@ def test_repeated_async_reload_releases_context_off_host_callback():
                 host.copy_(allocation.tensor, non_blocking=True)
                 vmm_activation.release_hooks_after([allocation], copy_stream)
 
-            context = vmm_activation.remap_and_copy_after(
-                [allocation], [host], copy_stream
-            )
+            context = vmm_activation.remap_and_copy_after([allocation], [host], copy_stream)
             vmm_activation.wait_remap_copy_on_stream(context, compute_stream)
             with torch.musa.stream(compute_stream):
                 observed = allocation.tensor.clone()

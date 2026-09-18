@@ -23,17 +23,19 @@ def vmm_initialize_workers() -> None:
 def vmm_profiler_status() -> dict[str, object]:
     """Return profiler callback and native trace state."""
     return dict(tex.vmm_profiler_status())
+
+
 def vmm_driver_memory_info() -> dict[str, int]:
     """Return free and total bytes reported by the active CUDA driver context."""
     return {key: int(value) for key, value in dict(tex.vmm_driver_memory_info()).items()}
 
 
-
 class CUDAActivationVMMAllocation:
     """Own a fixed virtual address and replaceable physical device backing."""
 
-    def __init__(self, shape: Sequence[int], stride: Sequence[int], dtype: torch.dtype,
-                 device: torch.device) -> None:
+    def __init__(
+        self, shape: Sequence[int], stride: Sequence[int], dtype: torch.dtype, device: torch.device
+    ) -> None:
         self.shape = tuple(shape)
         self.stride = tuple(stride)
         self.dtype = dtype
@@ -45,7 +47,9 @@ class CUDAActivationVMMAllocation:
         if any(size <= 0 for size in self.shape) or any(value < 0 for value in self.stride):
             raise ValueError(f"unsupported shape/stride: {self.shape}/{self.stride}")
         element_size = torch.empty((), dtype=dtype).element_size()
-        maximum_element_offset = sum((size - 1) * value for size, value in zip(self.shape, self.stride))
+        maximum_element_offset = sum(
+            (size - 1) * value for size, value in zip(self.shape, self.stride)
+        )
         self.storage_bytes = (maximum_element_offset + 1) * element_size
         device_index = self.device.index
         if device_index is None:
@@ -150,23 +154,23 @@ def _raw_cuda_stream(stream: torch.Stream) -> int:
     return int(raw)
 
 
-def release_hooks_after(allocations: Sequence["CUDAActivationVMMAllocation"],
-                        stream: torch.Stream) -> "VMMReleaseHookContext":
+def release_hooks_after(
+    allocations: Sequence["CUDAActivationVMMAllocation"], stream: torch.Stream
+) -> "VMMReleaseHookContext":
     """Batch variant: one host func releases backing for many slots at once.
 
     Enqueue all D2H copies on `stream` first; this adds a single host function
     after them so the DMA burst stays contiguous and the worker receives all
     raw release work in one batch.
     """
-    return tex.release_hooks_after([a._allocation for a in allocations],
-                                   _raw_cuda_stream(stream))
+    return tex.release_hooks_after([a._allocation for a in allocations], _raw_cuda_stream(stream))
 
 
-def remap_hooks_after(allocations: Sequence["CUDAActivationVMMAllocation"],
-                      stream: torch.Stream) -> "VMMRemapHookContext":
+def remap_hooks_after(
+    allocations: Sequence["CUDAActivationVMMAllocation"], stream: torch.Stream
+) -> "VMMRemapHookContext":
     """Submit one asynchronous fixed-address remap batch on ``stream``."""
-    return tex.remap_hooks_after([a._allocation for a in allocations],
-                                 _raw_cuda_stream(stream))
+    return tex.remap_hooks_after([a._allocation for a in allocations], _raw_cuda_stream(stream))
 
 
 def remap_and_copy_after(
@@ -237,10 +241,6 @@ def wait_remap_slot_on_stream(
     context.enqueue_slot_wait(int(slot_index), _raw_cuda_stream(stream))
 
 
-def wait_until_remap_slot_submitted(
-    context: "VMMRemapHookContext", slot_index: int
-) -> None:
+def wait_until_remap_slot_submitted(context: "VMMRemapHookContext", slot_index: int) -> None:
     """Block until one slot's remap and H2D event have been submitted."""
     context.wait_until_slot_submitted(int(slot_index))
-
-

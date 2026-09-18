@@ -75,7 +75,8 @@ Kernel::~Kernel() {
       if (cuda_driver::call(NVTE_STRINGIFY(cuDeviceGet), &device, device_id) != CUDA_SUCCESS) {
         continue;
       }
-      if (cuda_driver::call(NVTE_STRINGIFY(cuDevicePrimaryCtxRetain), &context, device) != CUDA_SUCCESS) {
+      if (cuda_driver::call(NVTE_STRINGIFY(cuDevicePrimaryCtxRetain), &context, device) !=
+          CUDA_SUCCESS) {
         continue;
       }
       if (cuda_driver::call(NVTE_STRINGIFY(cuCtxSetCurrent), context) != CUDA_SUCCESS) {

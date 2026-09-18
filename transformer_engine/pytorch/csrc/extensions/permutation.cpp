@@ -163,92 +163,113 @@ std::tuple<at::Tensor, at::Tensor> moe_permute_mask(const transformer_engine::DT
   using namespace transformer_engine::pytorch;
   const transformer_engine::DType probs_dtype = GetTransformerEngineDType(probs.scalar_type());
 
-  at::Tensor output = torch::empty({num_out_tokens, hidden_size},
-        torch::dtype(input.dtype()).device(torch::kPrivateUse1).requires_grad(false));
+  at::Tensor output =
+      torch::empty({num_out_tokens, hidden_size},
+                   torch::dtype(input.dtype()).device(torch::kPrivateUse1).requires_grad(false));
 
-  at::Tensor permuted_probs = torch::empty({num_out_tokens},
-        torch::dtype(probs.dtype()).device(torch::kPrivateUse1).requires_grad(false));;
+  at::Tensor permuted_probs =
+      torch::empty({num_out_tokens},
+                   torch::dtype(probs.dtype()).device(torch::kPrivateUse1).requires_grad(false));
+  ;
 
   auto stream = at::musa::getCurrentMUSAStream().stream();
 
   auto input_cu = makeTransformerEngineTensor(
-      input.data_ptr(), std::vector<size_t>{static_cast<size_t>(num_tokens), static_cast<size_t>(hidden_size)}, dtype);
-  auto output_cu = makeTransformerEngineTensor(
-      output.data_ptr(), std::vector<size_t>{static_cast<size_t>(num_out_tokens), static_cast<size_t>(hidden_size)},
+      input.data_ptr(),
+      std::vector<size_t>{static_cast<size_t>(num_tokens), static_cast<size_t>(hidden_size)},
       dtype);
-  auto row_id_map_cu = makeTransformerEngineTensor(
-      row_id_map.data_ptr(),
-      std::vector<size_t>{static_cast<size_t>(row_id_map.size(0)), static_cast<size_t>(row_id_map.size(1))},
-      transformer_engine::DType::kInt64);
+  auto output_cu = makeTransformerEngineTensor(
+      output.data_ptr(),
+      std::vector<size_t>{static_cast<size_t>(num_out_tokens), static_cast<size_t>(hidden_size)},
+      dtype);
+  auto row_id_map_cu =
+      makeTransformerEngineTensor(row_id_map.data_ptr(),
+                                  std::vector<size_t>{static_cast<size_t>(row_id_map.size(0)),
+                                                      static_cast<size_t>(row_id_map.size(1))},
+                                  transformer_engine::DType::kInt64);
   auto probs_cu = makeTransformerEngineTensor(
-      probs.data_ptr(), std::vector<size_t>{static_cast<size_t>(num_tokens), static_cast<size_t>(num_experts)}, probs_dtype); // probs dtype
+      probs.data_ptr(),
+      std::vector<size_t>{static_cast<size_t>(num_tokens), static_cast<size_t>(num_experts)},
+      probs_dtype);  // probs dtype
   auto permuted_probs_cu = makeTransformerEngineTensor(
-      permuted_probs.data_ptr(), std::vector<size_t>{static_cast<size_t>(num_out_tokens)}, probs_dtype); // probs dtype
+      permuted_probs.data_ptr(), std::vector<size_t>{static_cast<size_t>(num_out_tokens)},
+      probs_dtype);  // probs dtype
 
-    if(dtype == probs_dtype){
-        nvte_permute_mask(input_cu.data(), output_cu.data(), row_id_map_cu.data(), probs_cu.data(),
-                        permuted_probs_cu.data(), num_tokens, num_experts, num_out_tokens, hidden_size,
-                        stream);
-    }
-    else{
-        nvte_permute_mask_high_precision_probs(input_cu.data(), output_cu.data(), row_id_map_cu.data(), probs_cu.data(),
-                        permuted_probs_cu.data(), num_tokens, num_experts, num_out_tokens, hidden_size,
-                        stream);
-    }
-    return std::make_tuple(output, permuted_probs);
+  if (dtype == probs_dtype) {
+    nvte_permute_mask(input_cu.data(), output_cu.data(), row_id_map_cu.data(), probs_cu.data(),
+                      permuted_probs_cu.data(), num_tokens, num_experts, num_out_tokens,
+                      hidden_size, stream);
+  } else {
+    nvte_permute_mask_high_precision_probs(input_cu.data(), output_cu.data(), row_id_map_cu.data(),
+                                           probs_cu.data(), permuted_probs_cu.data(), num_tokens,
+                                           num_experts, num_out_tokens, hidden_size, stream);
+  }
+  return std::make_tuple(output, permuted_probs);
 }
 
 std::tuple<at::Tensor, at::Tensor> moe_unpermute_mask(const transformer_engine::DType dtype,
                                                       at::Tensor input, at::Tensor row_id_map,
                                                       at::Tensor merging_probs,
                                                       at::Tensor permuted_probs, int num_tokens,
-                                                      int num_experts, int hidden_size, 
+                                                      int num_experts, int hidden_size,
                                                       at::Tensor preallocated_act) {
   using namespace transformer_engine::pytorch;
-  const transformer_engine::DType probs_dtype = GetTransformerEngineDType(permuted_probs.scalar_type());
+  const transformer_engine::DType probs_dtype =
+      GetTransformerEngineDType(permuted_probs.scalar_type());
 
   at::Tensor output = preallocated_act;
   if (output.data_ptr() == nullptr) {
-    output = torch::empty({num_tokens, hidden_size},
-        torch::dtype(input.dtype()).device(torch::kPrivateUse1).requires_grad(false));
+    output =
+        torch::empty({num_tokens, hidden_size},
+                     torch::dtype(input.dtype()).device(torch::kPrivateUse1).requires_grad(false));
   }
 
-  at::Tensor unpermuted_probs = torch::empty({num_tokens, num_experts},
-        torch::dtype(permuted_probs.dtype()).device(torch::kPrivateUse1).requires_grad(false));;
+  at::Tensor unpermuted_probs = torch::empty(
+      {num_tokens, num_experts},
+      torch::dtype(permuted_probs.dtype()).device(torch::kPrivateUse1).requires_grad(false));
+  ;
 
   auto stream = at::musa::getCurrentMUSAStream().stream();
 
   auto input_cu = makeTransformerEngineTensor(
-      input.data_ptr(), std::vector<size_t>{static_cast<size_t>(input.size(0)), static_cast<size_t>(hidden_size)},
+      input.data_ptr(),
+      std::vector<size_t>{static_cast<size_t>(input.size(0)), static_cast<size_t>(hidden_size)},
       dtype);
   auto output_cu = makeTransformerEngineTensor(
-      output.data_ptr(), std::vector<size_t>{static_cast<size_t>(num_tokens), static_cast<size_t>(hidden_size)},
+      output.data_ptr(),
+      std::vector<size_t>{static_cast<size_t>(num_tokens), static_cast<size_t>(hidden_size)},
       dtype);
-  auto row_id_map_cu = makeTransformerEngineTensor(
-      row_id_map.data_ptr(),
-      std::vector<size_t>{static_cast<size_t>(row_id_map.size(0)), static_cast<size_t>(row_id_map.size(1))},
-      transformer_engine::DType::kInt64);
+  auto row_id_map_cu =
+      makeTransformerEngineTensor(row_id_map.data_ptr(),
+                                  std::vector<size_t>{static_cast<size_t>(row_id_map.size(0)),
+                                                      static_cast<size_t>(row_id_map.size(1))},
+                                  transformer_engine::DType::kInt64);
 
   auto merging_probs_cu = makeTransformerEngineTensor(
-      merging_probs.data_ptr(), std::vector<size_t>{static_cast<size_t>(num_tokens), static_cast<size_t>(num_experts)},
+      merging_probs.data_ptr(),
+      std::vector<size_t>{static_cast<size_t>(num_tokens), static_cast<size_t>(num_experts)},
       probs_dtype);
-//   auto permuted_probs_cu = makeTransformerEngineTensor(permuted_probs);
-  auto permuted_probs_cu = makeTransformerEngineTensor(permuted_probs.data_ptr(), std::vector<size_t>{static_cast<size_t>(num_tokens), static_cast<size_t>(num_experts)},
+  //   auto permuted_probs_cu = makeTransformerEngineTensor(permuted_probs);
+  auto permuted_probs_cu = makeTransformerEngineTensor(
+      permuted_probs.data_ptr(),
+      std::vector<size_t>{static_cast<size_t>(num_tokens), static_cast<size_t>(num_experts)},
       probs_dtype);
   auto unpermuted_probs_cu = makeTransformerEngineTensor(
       unpermuted_probs.data_ptr(),
-      std::vector<size_t>{static_cast<size_t>(num_tokens), static_cast<size_t>(num_experts)}, probs_dtype);
+      std::vector<size_t>{static_cast<size_t>(num_tokens), static_cast<size_t>(num_experts)},
+      probs_dtype);
 
-    if(dtype == probs_dtype){
-        nvte_unpermute_mask(input_cu.data(), output_cu.data(), row_id_map_cu.data(),
-                        merging_probs_cu.data(), permuted_probs_cu.data(), unpermuted_probs_cu.data(),
-                        num_tokens, num_experts, hidden_size, stream);
-    }else{
-        nvte_unpermute_mask_high_precision_probs(input_cu.data(), output_cu.data(), row_id_map_cu.data(),
-                        merging_probs_cu.data(), permuted_probs_cu.data(), unpermuted_probs_cu.data(),
-                        num_tokens, num_experts, hidden_size, stream);
-    }
-    return std::make_tuple(output, unpermuted_probs);
+  if (dtype == probs_dtype) {
+    nvte_unpermute_mask(input_cu.data(), output_cu.data(), row_id_map_cu.data(),
+                        merging_probs_cu.data(), permuted_probs_cu.data(),
+                        unpermuted_probs_cu.data(), num_tokens, num_experts, hidden_size, stream);
+  } else {
+    nvte_unpermute_mask_high_precision_probs(input_cu.data(), output_cu.data(),
+                                             row_id_map_cu.data(), merging_probs_cu.data(),
+                                             permuted_probs_cu.data(), unpermuted_probs_cu.data(),
+                                             num_tokens, num_experts, hidden_size, stream);
+  }
+  return std::make_tuple(output, unpermuted_probs);
 }
 
 std::tuple<at::Tensor, at::Tensor> moe_unpermute_mask_bwd_with_merging_probs(
@@ -268,23 +289,29 @@ std::tuple<at::Tensor, at::Tensor> moe_unpermute_mask_bwd_with_merging_probs(
 
   auto fwd_output_grad_cu = makeTransformerEngineTensor(
       fwd_output_grad.data_ptr(),
-      std::vector<size_t>{static_cast<size_t>(num_tokens), static_cast<size_t>(hidden_size)}, dtype);
+      std::vector<size_t>{static_cast<size_t>(num_tokens), static_cast<size_t>(hidden_size)},
+      dtype);
   auto fwd_input_grad_cu = makeTransformerEngineTensor(
       fwd_input_grad.data_ptr(),
-      std::vector<size_t>{static_cast<size_t>(num_out_tokens), static_cast<size_t>(hidden_size)}, dtype);
+      std::vector<size_t>{static_cast<size_t>(num_out_tokens), static_cast<size_t>(hidden_size)},
+      dtype);
   auto fwd_input_cu = makeTransformerEngineTensor(
-      fwd_input.data_ptr(), std::vector<size_t>{static_cast<size_t>(num_out_tokens), static_cast<size_t>(hidden_size)},
+      fwd_input.data_ptr(),
+      std::vector<size_t>{static_cast<size_t>(num_out_tokens), static_cast<size_t>(hidden_size)},
       dtype);
   auto merging_probs_cu = makeTransformerEngineTensor(
-      merging_probs.data_ptr(), std::vector<size_t>{static_cast<size_t>(num_tokens), static_cast<size_t>(num_experts)},
+      merging_probs.data_ptr(),
+      std::vector<size_t>{static_cast<size_t>(num_tokens), static_cast<size_t>(num_experts)},
       dtype);
   auto merging_probs_grad_cu = makeTransformerEngineTensor(
       merging_probs_grad.data_ptr(),
-      std::vector<size_t>{static_cast<size_t>(num_tokens), static_cast<size_t>(num_experts)}, dtype);
-  auto row_id_map_cu = makeTransformerEngineTensor(
-      row_id_map.data_ptr(),
-      std::vector<size_t>{static_cast<size_t>(row_id_map.size(0)), static_cast<size_t>(row_id_map.size(1))},
-      transformer_engine::DType::kInt64);
+      std::vector<size_t>{static_cast<size_t>(num_tokens), static_cast<size_t>(num_experts)},
+      dtype);
+  auto row_id_map_cu =
+      makeTransformerEngineTensor(row_id_map.data_ptr(),
+                                  std::vector<size_t>{static_cast<size_t>(row_id_map.size(0)),
+                                                      static_cast<size_t>(row_id_map.size(1))},
+                                  transformer_engine::DType::kInt64);
 
   nvte_unpermute_mask_bwd_with_merging_probs(fwd_output_grad_cu.data(), fwd_input_grad_cu.data(),
                                              fwd_input_cu.data(), merging_probs_cu.data(),

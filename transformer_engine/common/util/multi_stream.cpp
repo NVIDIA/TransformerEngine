@@ -14,8 +14,8 @@
 #include <mutex>
 #include <vector>
 
-#include "musa_runtime.h"
 #include "logging.h"
+#include "musa_runtime.h"
 
 namespace transformer_engine::detail {
 

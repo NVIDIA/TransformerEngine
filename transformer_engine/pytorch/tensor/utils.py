@@ -442,8 +442,8 @@ def _cast_master_weights_to_fp8_blockwise_scaling(
             amax_for_scale = torch.where(
                 amax < amax_epsilon, torch.full_like(amax, amax_epsilon), amax
             )
-            invalid_amax = torch.isinf(amax_for_scale) | (amax_for_scale == 0) | torch.isnan(
-                amax_for_scale
+            invalid_amax = (
+                torch.isinf(amax_for_scale) | (amax_for_scale == 0) | torch.isnan(amax_for_scale)
             )
             scale_value = max_fp8 / amax_for_scale
             scale_value = torch.where(

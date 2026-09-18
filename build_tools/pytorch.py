@@ -10,6 +10,7 @@ import setuptools
 
 from .utils import all_files_in_dir
 
+
 def setup_pytorch_extension(
     csrc_source_files,
     csrc_header_files,
@@ -27,12 +28,13 @@ def setup_pytorch_extension(
     ] + all_files_in_dir(extensions_dir)
 
     import torch, torch_musa
+
     torch_musa_dir = Path(torch_musa.__file__).parent
 
     # Header files
     include_dirs = [
         torch_musa_dir / "share" / "torch_musa_codegen",
-        "/home/torch_musa", # some *.muh not installed!
+        "/home/torch_musa",  # some *.muh not installed!
         common_header_files,
         common_header_files / "common",
         common_header_files / "common" / "include",
@@ -53,9 +55,7 @@ def setup_pytorch_extension(
     ]
 
     # Libraries
-    library_dirs = [
-        torch_musa_dir / "lib"
-    ]
+    library_dirs = [torch_musa_dir / "lib"]
     libraries = [
         "musa_kernels",
         "musa_python",

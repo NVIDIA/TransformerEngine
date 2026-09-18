@@ -33,6 +33,7 @@ def is_float8_tensor(tensor: Any) -> bool:
     """Check if object is a `Float8Tensor`"""
     return isinstance(tensor, Float8Tensor)
 
+
 def convert_tensor(
     tensor: torch.Tensor | Float8Tensor,
     device: Optional[torch.device] = None,
@@ -83,7 +84,6 @@ def convert_tensor(
         # https://github.com/pytorch/pytorch/issues/132020).
         tensor = tensor.contiguous(memory_format=memory_format)
     return tensor
-
 
 
 def maybe_dequantize(

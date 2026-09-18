@@ -4,7 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
- #include "transformer_engine/musify.h"
+#include "transformer_engine/musify.h"
 
 #ifndef TRANSFORMER_ENGINE_UTIL_MULTI_STREAM_H_
 #define TRANSFORMER_ENGINE_UTIL_MULTI_STREAM_H_

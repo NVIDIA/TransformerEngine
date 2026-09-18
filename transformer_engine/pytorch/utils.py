@@ -16,22 +16,28 @@ from .quantized_tensor import Quantizer
 from .torch_version import torch_version
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
 
+
 def wrap_name(src):
     return f"_orig_{src}"
 
+
 def add_attr(module, name, target):
     setattr(module, name, target)
+
 
 def wrap_attr(module, name, wrapper):
     target = getattr(module, name)
     setattr(module, wrap_name(name), target)
     setattr(module, name, wrapper)
 
+
 def replace_attr(module, name, target):
     wrap_attr(module, name, target)
 
+
 def musa_assert_dim_for_fp8_exec(*tensors: List[torch.Tensor]) -> None:
     return
+
 
 __all__ = ["get_device_compute_capability", "get_mudnn_version", "is_bf16_available"]
 

@@ -7,12 +7,11 @@
 #ifndef TRANSFORMER_ENGINE_PYTORCH_CSRC_COMMON_H_
 #define TRANSFORMER_ENGINE_PYTORCH_CSRC_COMMON_H_
 
-#include <transformer_engine/musify.h>
-
 #include <ATen/ATen.h>
 #include <ATen/Dispatch.h>
 #include <ATen/musa/MUSAContext.h>
 #include <ATen/musa/MUSAGeneratorImpl.h>
+#include <transformer_engine/musify.h>
 #ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
 #include <ATen/cudnn/Handle.h>
 #endif
@@ -21,10 +20,10 @@
 #include <c10/util/Float8_e4m3fn.h>
 #include <c10/util/Float8_e5m2.h>
 #include <mublas.h>
+#include <mudnn.h>
 #include <musa.h>
 #include <musa_bf16.h>
 #include <musa_runtime.h>
-#include <mudnn.h>
 #include <torch/extension.h>
 #include <torch/torch.h>
 #include <transformer_engine/activation.h>

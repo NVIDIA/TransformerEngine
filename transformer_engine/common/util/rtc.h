@@ -7,10 +7,10 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_UTIL_RTC_H_
 #define TRANSFORMER_ENGINE_COMMON_UTIL_RTC_H_
 
-#include "transformer_engine/musify.h"
-
 #include <musa.h>
 #include <musa_runtime_api.h>
+
+#include "transformer_engine/musify.h"
 // #include <nvrtc.h>
 
 #include <memory>

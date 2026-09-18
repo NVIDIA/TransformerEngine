@@ -4,12 +4,12 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <cuda_pipeline.h>
+#include <cutlass/arch/barrier.h>
 #include <musa.h>
 #include <musaTypedefs.h>
 #include <musa_bf16.h>
-#include <cuda_pipeline.h>
 #include <musa_runtime.h>
-#include <cutlass/arch/barrier.h>
 #include <transformer_engine/hadamard_transform.h>
 
 #include <cuda/barrier>

@@ -225,7 +225,9 @@ class _moe_permute_mask_map(torch.autograd.Function):
             use_musa_kernel = not fp8 and num_experts % 4 == 0
         assert use_musa_kernel is not None
         if use_musa_kernel:
-            row_id_map, row_id_map_non_trans = triton_permutation.make_row_id_map_musa(routing_map, num_tokens, num_experts)
+            row_id_map, row_id_map_non_trans = triton_permutation.make_row_id_map_musa(
+                routing_map, num_tokens, num_experts
+            )
         else:
             row_id_map = triton_permutation.make_row_id_map(routing_map, num_tokens, num_experts)
 
@@ -342,7 +344,7 @@ class _moe_permute_mask_map(torch.autograd.Function):
         # pylint: disable=missing-function-docstring
         if not permuted_act_grad.numel():
             return permuted_act_grad, None, None, ctx.probs, None
-        
+
         assert use_musa_kernel is not None
 
         preallocated_act_b = ctx.preallocated_act_b
@@ -362,7 +364,7 @@ class _moe_permute_mask_map(torch.autograd.Function):
                     preallocated_act_b = torch.empty(0)
                 else:
                     preallocated_act_b = preallocated_act_b.view(permuted_act_grad.dtype)
-                    preallocated_act_b = preallocated_act_b[:ctx.num_tokens*ctx.hidden_size]
+                    preallocated_act_b = preallocated_act_b[: ctx.num_tokens * ctx.hidden_size]
                     preallocated_act_b = preallocated_act_b.view(ctx.num_tokens, ctx.hidden_size)
                 act_grad, probs_grad = tex.moe_unpermute_mask(
                     dtype,
@@ -438,7 +440,7 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
                 preallocated_act_f = torch.empty(0)
             else:
                 preallocated_act_f = preallocated_act_f.view(inp.dtype)
-                preallocated_act_f = preallocated_act_f[:num_tokens*hidden_size]
+                preallocated_act_f = preallocated_act_f[: num_tokens * hidden_size]
                 preallocated_act_f = preallocated_act_f.view(num_tokens, hidden_size)
             unpermuted_output, _ = tex.moe_unpermute_mask(
                 dtype,
@@ -531,18 +533,16 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
                 ), "The backward of moe_unpermute with merging probs does not support FP8."
                 if use_musa_kernel:
                     dtype = TE_DType[unpermuted_act_grad.dtype]
-                    act_grad, probs_grad = (
-                        tex.moe_unpermute_mask_bwd_with_merging_probs(
-                            dtype,
-                            unpermuted_act_grad,
-                            fwd_input,
-                            merging_probs,
-                            row_id_map,
-                            ctx.num_tokens,
-                            ctx.num_experts,
-                            ctx.num_permuted_tokens,
-                            ctx.hidden_size,
-                        )
+                    act_grad, probs_grad = tex.moe_unpermute_mask_bwd_with_merging_probs(
+                        dtype,
+                        unpermuted_act_grad,
+                        fwd_input,
+                        merging_probs,
+                        row_id_map,
+                        ctx.num_tokens,
+                        ctx.num_experts,
+                        ctx.num_permuted_tokens,
+                        ctx.hidden_size,
                     )
                 else:
                     act_grad, probs_grad = (

@@ -359,10 +359,10 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
  *  \param[in]     math_sm_count         Number of GPU SMs to use (default=0: use cuBLAS heuristics)
  *  \param[in]     stream                CUDA stream to wait on.
  */
-void nvte_multi_stream_cublas_gemm(const NVTETensor* A, const NVTETensor* B, NVTETensor* D,
-                                   const NVTETensor* bias, NVTETensor* pre_gelu_out,
+void nvte_multi_stream_cublas_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
+                                   const NVTETensor *bias, NVTETensor *pre_gelu_out,
                                    const int num_gemms, bool transa, bool transb, bool grad,
-                                   NVTETensor* workspace, bool accumulate,
+                                   NVTETensor *workspace, bool accumulate,
                                    bool use_split_accumulator, int math_sm_count,
                                    musaStream_t stream);
 
@@ -371,11 +371,10 @@ void nvte_multi_stream_cublas_gemm(const NVTETensor* A, const NVTETensor* B, NVT
  *  During graph capture the implementation uses graph-safe per-GEMM ATen
  *  matmuls; eager execution retains the fused muDNN grouped operation.
  */
-void nvte_grouped_mudnn_gemm(const NVTETensor* A, const NVTETensor* B, NVTETensor* D,
-                             const NVTETensor* bias, NVTETensor* pre_gelu_out,
-                             const int num_gemms, bool transa, bool transb, bool grad,
-                             NVTETensor* workspace, bool accumulate,
-                             bool use_split_accumulator, int math_sm_count,
+void nvte_grouped_mudnn_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
+                             const NVTETensor *bias, NVTETensor *pre_gelu_out, const int num_gemms,
+                             bool transa, bool transb, bool grad, NVTETensor *workspace,
+                             bool accumulate, bool use_split_accumulator, int math_sm_count,
                              musaStream_t stream);
 
 #ifdef __cplusplus

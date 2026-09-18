@@ -8,12 +8,12 @@
 #define TRANSFORMER_ENGINE_COMMON_UTIL_CUDA_DRIVER_H_
 
 #include <musa.h>
-#include "transformer_engine/musify.h"
 
 #include <string>
 
 #include "../common.h"
 #include "../util/string.h"
+#include "transformer_engine/musify.h"
 
 namespace transformer_engine {
 
@@ -52,25 +52,25 @@ void ensure_context_exists();
 
 }  // namespace transformer_engine
 
-#define NVTE_CHECK_CUDA_DRIVER(expr)                                                             \
-  do {                                                                                           \
-    const CUresult status_NVTE_CHECK_CUDA_DRIVER = (expr);                                       \
-    if (status_NVTE_CHECK_CUDA_DRIVER != CUDA_SUCCESS) {                                         \
-      const char *desc_NVTE_CHECK_CUDA_DRIVER;                                                   \
-      ::transformer_engine::cuda_driver::call(NVTE_STRINGIFY(cuGetErrorString),                    \
-                                              status_NVTE_CHECK_CUDA_DRIVER,                       \
-                                              &desc_NVTE_CHECK_CUDA_DRIVER);                     \
-      NVTE_ERROR("CUDA Error: ", desc_NVTE_CHECK_CUDA_DRIVER);                                   \
-    }                                                                                            \
+#define NVTE_CHECK_CUDA_DRIVER(expr)                                            \
+  do {                                                                          \
+    const CUresult status_NVTE_CHECK_CUDA_DRIVER = (expr);                      \
+    if (status_NVTE_CHECK_CUDA_DRIVER != CUDA_SUCCESS) {                        \
+      const char *desc_NVTE_CHECK_CUDA_DRIVER;                                  \
+      ::transformer_engine::cuda_driver::call(NVTE_STRINGIFY(cuGetErrorString), \
+                                              status_NVTE_CHECK_CUDA_DRIVER,    \
+                                              &desc_NVTE_CHECK_CUDA_DRIVER);    \
+      NVTE_ERROR("CUDA Error: ", desc_NVTE_CHECK_CUDA_DRIVER);                  \
+    }                                                                           \
   } while (false)
 
 #define NVTE_STRINGIFY_IMPL(symbol) #symbol
 #define NVTE_STRINGIFY(symbol) NVTE_STRINGIFY_IMPL(symbol)
 
-#define NVTE_CALL_CHECK_CUDA_DRIVER(symbol, ...)                                            \
-  do {                                                                                      \
-    NVTE_CHECK_CUDA_DRIVER(                                                                 \
-        ::transformer_engine::cuda_driver::call(NVTE_STRINGIFY(symbol), __VA_ARGS__));      \
+#define NVTE_CALL_CHECK_CUDA_DRIVER(symbol, ...)                                       \
+  do {                                                                                 \
+    NVTE_CHECK_CUDA_DRIVER(                                                            \
+        ::transformer_engine::cuda_driver::call(NVTE_STRINGIFY(symbol), __VA_ARGS__)); \
   } while (false)
 
 #endif  // TRANSFORMER_ENGINE_COMMON_UTIL_CUDA_DRIVER_H_

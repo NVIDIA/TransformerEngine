@@ -7,10 +7,11 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_UTIL_LOGGING_H_
 #define TRANSFORMER_ENGINE_COMMON_UTIL_LOGGING_H_
 
-#include "transformer_engine/musify.h"
 #include <mublas.h>
-#include <musa_runtime_api.h>
 #include <mudnn.h>
+#include <musa_runtime_api.h>
+
+#include "transformer_engine/musify.h"
 // #include <nvrtc.h>
 
 // #include "mccl.h"

@@ -7,11 +7,11 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_UTILS_CUH_
 #define TRANSFORMER_ENGINE_COMMON_UTILS_CUH_
 
-#include "transformer_engine/musify.h"
-
 #include <musa_bf16.h>
 #include <musa_fp16.h>
 #include <musa_fp8.h>
+
+#include "transformer_engine/musify.h"
 
 #if CUDA_VERSION >= 12080
 #include <musa_fp4.h>
@@ -304,14 +304,14 @@ struct Vec {
 
   __device__ Vec() = default;
 
-  __device__ Vec(const Elt_type& num) {
+  __device__ Vec(const Elt_type &num) {
 #pragma unroll
     for (int i = 0; i < NUM_ELT; i++) {
       this->data.elt[i] = num;
     }
   }
 
-  __device__ Vec& operator=(const Elt_type& num) {
+  __device__ Vec &operator=(const Elt_type &num) {
 #pragma unroll
     for (int i = 0; i < NUM_ELT; i++) {
       this->data.elt[i] = num;

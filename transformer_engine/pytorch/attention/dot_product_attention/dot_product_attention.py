@@ -1526,7 +1526,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     fused_attention_backend = _attention_backends["fused_attention_backend"]
                     use_unfused_attention = _attention_backends["use_unfused_attention"]
 
-            use_flash_attention = True #TODO:huang.huang set fa manually now!
+            use_flash_attention = True  # TODO:huang.huang set fa manually now!
             # raise exception if no backend is available
             if sum([use_flash_attention, use_fused_attention, use_unfused_attention]) == 0:
                 raise ValueError(

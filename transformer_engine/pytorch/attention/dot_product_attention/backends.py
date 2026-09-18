@@ -742,7 +742,10 @@ class FlashAttention(torch.nn.Module):
         del cp_global_ranks, cp_stream, cp_comm_type, fp8_meta, quantizers
         assert self.recompute_variance, "Split FlashAttention requires recompute_variance=True."
         assert not fp8, "Split MUSA FlashAttention does not support FP8."
-        assert all(x.dtype in [torch.float16, torch.bfloat16] for x in (query_layer, key_layer, value_layer))
+        assert all(
+            x.dtype in [torch.float16, torch.bfloat16]
+            for x in (query_layer, key_layer, value_layer)
+        )
         assert all(x.is_cuda for x in (query_layer, key_layer, value_layer))
         assert qkv_layout in QKVLayouts, f"Unsupported qkv_layout = {qkv_layout}."
 
@@ -771,9 +774,9 @@ class FlashAttention(torch.nn.Module):
                     x.reshape(x.shape[0] * x.shape[1], *x.shape[2:])
                     for x in (query_layer, key_layer, value_layer)
                 ]
-                assert self.attention_type == "self", (
-                    "Split MUSA FlashAttention only supports padding with self-attention."
-                )
+                assert (
+                    self.attention_type == "self"
+                ), "Split MUSA FlashAttention only supports padding with self-attention."
                 if cu_seqlens_q is None:
                     assert attention_mask is not None, "Please provide attention_mask for padding."
                     cu_seqlens_q, indices_q = dpa_utils.get_cu_seqlens_and_indices(attention_mask)
@@ -802,7 +805,9 @@ class FlashAttention(torch.nn.Module):
                 max_seqlen_kv = (cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]).max().item()
 
         if is_cpu_offload_enabled():
-            mark_activation_offload(query_layer, key_layer, value_layer, cu_seqlens_q, cu_seqlens_kv)
+            mark_activation_offload(
+                query_layer, key_layer, value_layer, cu_seqlens_q, cu_seqlens_kv
+            )
 
         q_shape, v_shape = query_layer.shape, value_layer.shape
         assert qkv_format != "thd", "Split MUSA FlashAttention does not support THD input."
@@ -811,9 +816,21 @@ class FlashAttention(torch.nn.Module):
             for x in (query_layer, key_layer, value_layer)
         ]
         return (
-            query_layer, key_layer, value_layer, cu_seqlens_q, cu_seqlens_kv,
-            max_seqlen_q, max_seqlen_kv, attn_mask_type, window_size, alibi_slopes,
-            qkv_format, indices_q, batch_size, q_shape, v_shape,
+            query_layer,
+            key_layer,
+            value_layer,
+            cu_seqlens_q,
+            cu_seqlens_kv,
+            max_seqlen_q,
+            max_seqlen_kv,
+            attn_mask_type,
+            window_size,
+            alibi_slopes,
+            qkv_format,
+            indices_q,
+            batch_size,
+            q_shape,
+            v_shape,
         )
 
     def forward_fa(self, *args) -> Tuple[Any, ...]:
@@ -823,7 +840,9 @@ class FlashAttention(torch.nn.Module):
         q_shape, v_shape = args[13], args[14]
         head_dim = query_layer.shape[-1]
         if not 64 <= head_dim <= 192:
-            raise NotImplementedError(f"head_dim={head_dim} is not supported by MUSA FlashAttention")
+            raise NotImplementedError(
+                f"head_dim={head_dim} is not supported by MUSA FlashAttention"
+            )
         with self.attention_dropout_ctx():
             with torch.backends.cuda.sdp_kernel(enable_flash=True, enable_math=False):
                 output = torch.ops.aten._scaled_dot_product_attention_flash_musa(
@@ -834,17 +853,33 @@ class FlashAttention(torch.nn.Module):
                     is_causal="causal" in attn_mask_type,
                 )
         return (
-            output, qkv_format, indices_q, batch_size, attn_mask_type,
-            q_shape[1], q_shape, v_shape,
+            output,
+            qkv_format,
+            indices_q,
+            batch_size,
+            attn_mask_type,
+            q_shape[1],
+            q_shape,
+            v_shape,
         )
 
     def forward_after_fa(
-        self, output, qkv_format, indices_q, batch_size, attn_mask_type,
-        max_seqlen_q, q_shape, v_shape,
+        self,
+        output,
+        qkv_format,
+        indices_q,
+        batch_size,
+        attn_mask_type,
+        max_seqlen_q,
+        q_shape,
+        v_shape,
     ) -> torch.Tensor:
         """Restore the Transformer Engine output layout after split MUSA FlashAttention."""
-        output = output[0].transpose(1, 2).contiguous().view(
-            q_shape[0], q_shape[1], q_shape[-2], v_shape[-1]
+        output = (
+            output[0]
+            .transpose(1, 2)
+            .contiguous()
+            .view(q_shape[0], q_shape[1], q_shape[-2], v_shape[-1])
         )
         if "padding" in attn_mask_type:
             output = dpa_utils.UnpackTensor.apply(indices_q, batch_size * max_seqlen_q, output)

@@ -14,8 +14,8 @@
 
 #include <musa.h>
 #include <musa_fp8.h>
-#include <torch/musa.h>
 #include <torch/extension.h>
+#include <torch/musa.h>
 
 namespace transformer_engine::pytorch {
 

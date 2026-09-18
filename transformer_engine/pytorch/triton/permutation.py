@@ -22,6 +22,7 @@ from transformer_engine.common.triton.permutation import (
     _row_id_map_pass_2_kernel_musa,
 )
 
+
 def make_row_id_map_musa(
     routing_map: torch.Tensor,
     num_tokens: int,
@@ -283,7 +284,7 @@ def unpermute_with_mask_map(
         output = torch.empty((num_tokens, hidden_size), dtype=inp.dtype, device="cuda")
     else:
         preallocated_out = preallocated_out.view(inp.dtype)
-        preallocated_out = preallocated_out[:num_tokens * hidden_size]
+        preallocated_out = preallocated_out[: num_tokens * hidden_size]
         output = preallocated_out.view((num_tokens, hidden_size))
     if permuted_probs is not None:
         unpermuted_probs = torch.empty(

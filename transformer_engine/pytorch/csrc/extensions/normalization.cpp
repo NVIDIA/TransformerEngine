@@ -4,13 +4,13 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <ATen/ops/_fused_rms_norm_backward.h>
+#include <torch_musa/csrc/aten/ops/RMSNorm.h>
+#include <torch_musa/csrc/core/MUSAGuard.h>
+
 #include "../extensions.h"
 #include "common/util/system.h"
 #include "pybind.h"
-
-#include <torch_musa/csrc/core/MUSAGuard.h>
-#include <ATen/ops/_fused_rms_norm_backward.h>
-#include <torch_musa/csrc/aten/ops/RMSNorm.h>
 
 namespace transformer_engine::pytorch {
 
@@ -257,8 +257,8 @@ std::vector<py::object> rmsnorm_bwd(const at::Tensor &dz, const at::Tensor &x,
                      zero_centered_gamma, at::musa::getCurrentCUDAStream());
   });
 #else
-  std::tie(dx, dgamma) = at::_fused_rms_norm_backward(
-      dz_, x_, {x_.size(-1)}, rsigma_, gamma_, {true, true});
+  std::tie(dx, dgamma) =
+      at::_fused_rms_norm_backward(dz_, x_, {x_.size(-1)}, rsigma_, gamma_, {true, true});
 
 #endif
   return {py::cast(dx), py::cast(dgamma)};
@@ -423,12 +423,12 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
   if (impl == Impl::UNFUSED || impl == Impl::FUSED_NORM_AMAX_FP8 ||
       impl == Impl::FUSED_NORM_AMAX_NVFP4) {
     at::Tensor th_out = unquantized_out.cast<at::Tensor>();
-    std::tie(th_out, rsigma_musa) = at::musa::FusedRMSNormForwardOut(
-        th_input, th_out, {th_input.size(-1)}, eps, th_weight);
+    std::tie(th_out, rsigma_musa) =
+        at::musa::FusedRMSNormForwardOut(th_input, th_out, {th_input.size(-1)}, eps, th_weight);
   } else {
     at::Tensor th_out = out.cast<at::Tensor>();
-    std::tie(th_out, rsigma_musa) = at::musa::FusedRMSNormForwardOut(
-        th_input, th_out, {th_input.size(-1)}, eps, th_weight);
+    std::tie(th_out, rsigma_musa) =
+        at::musa::FusedRMSNormForwardOut(th_input, th_out, {th_input.size(-1)}, eps, th_weight);
   }
 #else
   // Query workspace size

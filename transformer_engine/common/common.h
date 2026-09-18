@@ -7,9 +7,9 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_COMMON_H_
 #define TRANSFORMER_ENGINE_COMMON_COMMON_H_
 
-#include "transformer_engine/musify.h"
-
 #include <musaTypedefs.h>
+
+#include "transformer_engine/musify.h"
 #define FP4_TYPE_SUPPORTED (CUDA_VERSION >= 12080)
 
 #include <musa_bf16.h>

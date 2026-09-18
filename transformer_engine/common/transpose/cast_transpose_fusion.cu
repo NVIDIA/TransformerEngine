@@ -1244,8 +1244,9 @@ void dgated_act_cast_transpose(const Tensor &input, const Tensor &gated_act_inpu
 // Explicit template instantiation
 template void cast_transpose_fused<true, false, false, float, transformer_engine::Empty, nullptr>(
     const Tensor &, const Tensor *, Tensor *, Tensor *, Tensor *, cudaStream_t);
-template void cast_transpose_fused<true, false, false, float, transformer_engine::Empty, detail::identity>(
-    const Tensor &, const Tensor *, Tensor *, Tensor *, Tensor *, cudaStream_t);
+template void cast_transpose_fused<true, false, false, float, transformer_engine::Empty,
+                                   detail::identity>(const Tensor &, const Tensor *, Tensor *,
+                                                     Tensor *, Tensor *, cudaStream_t);
 #define NVTE_INSTANTIATE_ACTIVATION(op)                                                    \
   template void cast_transpose_fused<false, false, true, float, transformer_engine::Empty, \
                                      transformer_engine::op<float, float>>(                \

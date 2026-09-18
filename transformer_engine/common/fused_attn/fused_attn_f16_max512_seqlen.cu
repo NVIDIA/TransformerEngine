@@ -4,9 +4,9 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <cudnn_frontend.h>
 #include <musa_bf16.h>
 #include <musa_fp16.h>
-#include <cudnn_frontend.h>
 
 #include <map>
 #include <vector>

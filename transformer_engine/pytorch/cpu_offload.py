@@ -41,7 +41,6 @@ NVTE_CPU_OFFLOAD_V1 = os.environ.get("NVTE_CPU_OFFLOAD_V1", "0") == "1"
 OFFLOAD_SYNCHRONIZER = None
 
 
-
 def set_offloading_param(tensor, param_name, value):
     """Set the type of the offloading needed for a tensor."""
     assert param_name in ["weight_offloading", "activation_offloading", "fine_grained_offloading"]
@@ -55,11 +54,13 @@ def set_offloading_param(tensor, param_name, value):
             if tensor is not None:
                 setattr(tensor, param_name, value)
 
+
 def has_acivation_offloading_param(tensor):
     for param_name in ["activation_offloading", "fine_grained_offloading"]:
         if hasattr(tensor, param_name):
             return True
     return False
+
 
 def is_cpu_offload_enabled():
     """Returns True if CPU offload is enabled."""
@@ -945,6 +946,7 @@ def get_cpu_offload_context(
         cpu_offload_context.synchronization_function,
     )
 
+
 class OffloadHandler:
     """Base interface used by the fine-grained offload handler."""
 
@@ -976,9 +978,9 @@ class _FineGrainedAsyncDoubleBufferGroupOffloadHandler(OffloadHandler):
         self.d2h_stream = None
         self.h2d_stream = None
 
-        self.OFFLOAD_TENSOR_ATTR_KEY = 'fine_grained_offloading'
+        self.OFFLOAD_TENSOR_ATTR_KEY = "fine_grained_offloading"
 
-        self.num_layers = None # num of layers in a PP/VPP stage
+        self.num_layers = None  # num of layers in a PP/VPP stage
         self.pp_size = None
         self.pp_rank = None
         self.num_microbatches = None
@@ -986,60 +988,70 @@ class _FineGrainedAsyncDoubleBufferGroupOffloadHandler(OffloadHandler):
         self.pin_memory_tensor_pool_released = False
 
         self.moe_layer_pattern = []
-        self.num_model_chunks = None # vpp size
+        self.num_model_chunks = None  # vpp size
 
         # (microbatch_id, chunk_id) -> virtual_batch_id_backward (list index of (microbatch_id, chunk_id) in self.schedule_table_backward)
         self.microbatch_id_chunk_id_to_virtual_batch_id_backward = {}
 
-        self.schedule_table_forward = [] # schedule_table [(microbatch_id_, chunk_id)] for forward
-        self.schedule_table_backward = [] # schedule_table [(microbatch_id_, chunk_id)] for backward
-        self.schedule_table_forward_backward = [] # [(microbatch_id_, chunk_id, "forward" / "backward")]
+        self.schedule_table_forward = []  # schedule_table [(microbatch_id_, chunk_id)] for forward
+        self.schedule_table_backward = (
+            []
+        )  # schedule_table [(microbatch_id_, chunk_id)] for backward
+        self.schedule_table_forward_backward = (
+            []
+        )  # [(microbatch_id_, chunk_id, "forward" / "backward")]
 
         # (current_microbatch_id, current_layer_id) -> True/False (should offload)
         self.cur_batch_id_cur_layer_id_to_should_offload = {}
 
-
     def init_by_config(self, config):
         self.config = config
-        from megatron.core.parallel_state import get_pipeline_model_parallel_rank, get_pipeline_model_parallel_world_size
+        from megatron.core.parallel_state import (
+            get_pipeline_model_parallel_rank,
+            get_pipeline_model_parallel_world_size,
+        )
+
         self.pp_rank = get_pipeline_model_parallel_rank()
         self.pp_size = get_pipeline_model_parallel_world_size()
 
         if config.overlap_moe_expert_parallel_comm:
             from megatron.core.pipeline_parallel.utils import get_comm_stream
+
             self.a2a_stream = get_comm_stream()
 
         import queue
-        if config.offload_moe_fc1_input:
-            self.to_offload_tensor_tag_queue_dict['moe_fc1_input'] = queue.Queue()
-            self.to_offload_tensor_queue_dict['moe_fc1_input'] = queue.Queue()
-            self.to_release_tensor_queue_dict['moe_fc1_input'] = queue.Queue()
-        if config.offload_moe_fused_swiglu_input:
-            self.to_offload_tensor_tag_queue_dict['moe_fused_swiglu_input'] = queue.Queue()
-            self.to_offload_tensor_queue_dict['moe_fused_swiglu_input'] = queue.Queue()
-            self.to_release_tensor_queue_dict['moe_fused_swiglu_input'] = queue.Queue()
 
+        if config.offload_moe_fc1_input:
+            self.to_offload_tensor_tag_queue_dict["moe_fc1_input"] = queue.Queue()
+            self.to_offload_tensor_queue_dict["moe_fc1_input"] = queue.Queue()
+            self.to_release_tensor_queue_dict["moe_fc1_input"] = queue.Queue()
+        if config.offload_moe_fused_swiglu_input:
+            self.to_offload_tensor_tag_queue_dict["moe_fused_swiglu_input"] = queue.Queue()
+            self.to_offload_tensor_queue_dict["moe_fused_swiglu_input"] = queue.Queue()
+            self.to_release_tensor_queue_dict["moe_fused_swiglu_input"] = queue.Queue()
 
     def release_cpu_pinmem_pool(self):
         torch.cuda.synchronize()
         self.tensor_tag_to_state.clear()
 
         import gc
+
         gc.collect()
         import torch_musa
+
         torch_musa._MUSAC._host_emptyCache()
         torch.distributed.barrier()
         self.pin_memory_tensor_pool_released = True
 
-
     def is_last_2_pipeline_parallel_stage(self):
         return (self.pp_rank == (self.pp_size - 1)) or (self.pp_rank == (self.pp_size - 2))
 
-
     def is_last_batch_last_layer(self):
         # print(f"self.current_microbatch_id = {self.current_microbatch_id}, self.num_microbatches = {self.num_microbatches}, self.current_layer_id = {self.current_layer_id}, self.num_layers = {self.num_layers}")
-        return self.current_microbatch_id >= self.num_microbatches - 1 and self.current_layer_id >= len(self.moe_layer_pattern) - 1
-
+        return (
+            self.current_microbatch_id >= self.num_microbatches - 1
+            and self.current_layer_id >= len(self.moe_layer_pattern) - 1
+        )
 
     def make_should_offload_table(self, num_warmup_microbatches):
         def make_schedule_table_forward_backward():
@@ -1047,17 +1059,37 @@ class _FineGrainedAsyncDoubleBufferGroupOffloadHandler(OffloadHandler):
             virtual_batch_id_bwd = 0
             self.schedule_table_forward_backward = []
             for i in range(num_warmup_microbatches):
-                self.schedule_table_forward_backward.append((self.schedule_table_forward[virtual_batch_id_fwd][0], self.schedule_table_forward[virtual_batch_id_fwd][1], "forward"))
-                virtual_batch_id_fwd +=1
+                self.schedule_table_forward_backward.append(
+                    (
+                        self.schedule_table_forward[virtual_batch_id_fwd][0],
+                        self.schedule_table_forward[virtual_batch_id_fwd][1],
+                        "forward",
+                    )
+                )
+                virtual_batch_id_fwd += 1
 
             while True:
                 if virtual_batch_id_fwd < len(self.schedule_table_forward):
-                    self.schedule_table_forward_backward.append((self.schedule_table_forward[virtual_batch_id_fwd][0], self.schedule_table_forward[virtual_batch_id_fwd][1], "forward"))
-                    virtual_batch_id_fwd +=1
+                    self.schedule_table_forward_backward.append(
+                        (
+                            self.schedule_table_forward[virtual_batch_id_fwd][0],
+                            self.schedule_table_forward[virtual_batch_id_fwd][1],
+                            "forward",
+                        )
+                    )
+                    virtual_batch_id_fwd += 1
                 if virtual_batch_id_bwd < len(self.schedule_table_backward):
-                    self.schedule_table_forward_backward.append((self.schedule_table_backward[virtual_batch_id_bwd][0], self.schedule_table_backward[virtual_batch_id_bwd][1], "backward"))
-                    virtual_batch_id_bwd +=1
-                if virtual_batch_id_fwd == len(self.schedule_table_forward) and virtual_batch_id_bwd == len(self.schedule_table_backward):
+                    self.schedule_table_forward_backward.append(
+                        (
+                            self.schedule_table_backward[virtual_batch_id_bwd][0],
+                            self.schedule_table_backward[virtual_batch_id_bwd][1],
+                            "backward",
+                        )
+                    )
+                    virtual_batch_id_bwd += 1
+                if virtual_batch_id_fwd == len(
+                    self.schedule_table_forward
+                ) and virtual_batch_id_bwd == len(self.schedule_table_backward):
                     break
 
         def is_moe_layer(layer_id):
@@ -1080,12 +1112,16 @@ class _FineGrainedAsyncDoubleBufferGroupOffloadHandler(OffloadHandler):
                             judging_microbatch_id = microbatch_id
                             judging_layer_id = layer_id
                         if judging_microbatch_id != microbatch_id or judging_layer_id != layer_id:
-                            self.cur_batch_id_cur_layer_id_to_should_offload[(judging_microbatch_id, judging_layer_id)] = 1
+                            self.cur_batch_id_cur_layer_id_to_should_offload[
+                                (judging_microbatch_id, judging_layer_id)
+                            ] = 1
                             judging_microbatch_id = microbatch_id
                             judging_layer_id = layer_id
                     else:
                         if judging_microbatch_id == microbatch_id and judging_layer_id == layer_id:
-                            self.cur_batch_id_cur_layer_id_to_should_offload[(judging_microbatch_id, judging_layer_id)] = 0
+                            self.cur_batch_id_cur_layer_id_to_should_offload[
+                                (judging_microbatch_id, judging_layer_id)
+                            ] = 0
                             judging_microbatch_id = None
                             judging_layer_id = None
 
@@ -1143,14 +1179,18 @@ class _FineGrainedAsyncDoubleBufferGroupOffloadHandler(OffloadHandler):
 
         # print(f"self.cur_batch_id_cur_layer_id_to_should_offload = {self.cur_batch_id_cur_layer_id_to_should_offload}")
 
-
     def should_offload(self):
         if self.is_last_batch_last_layer():
             return False
-        if self.config.virtual_pipeline_model_parallel_size != None and self.config.virtual_pipeline_model_parallel_size > 1:
+        if (
+            self.config.virtual_pipeline_model_parallel_size != None
+            and self.config.virtual_pipeline_model_parallel_size > 1
+        ):
             # vpp
 
-            whether_offload = self.cur_batch_id_cur_layer_id_to_should_offload.get((self.current_microbatch_id, self.current_layer_id))
+            whether_offload = self.cur_batch_id_cur_layer_id_to_should_offload.get(
+                (self.current_microbatch_id, self.current_layer_id)
+            )
             if whether_offload == None or whether_offload == 0:
                 return False
             else:
@@ -1168,7 +1208,6 @@ class _FineGrainedAsyncDoubleBufferGroupOffloadHandler(OffloadHandler):
             # 1F1B
             return not self.is_last_2_pipeline_parallel_stage()
 
-
     def register_offload(self, src_tensor):
         assert hasattr(src_tensor, self.OFFLOAD_TENSOR_ATTR_KEY)
         tensor_name = getattr(src_tensor, self.OFFLOAD_TENSOR_ATTR_KEY)
@@ -1177,19 +1216,21 @@ class _FineGrainedAsyncDoubleBufferGroupOffloadHandler(OffloadHandler):
         self.to_offload_tensor_queue_dict[tensor_name].put(src_tensor)
         return tensor_tag
 
-
     def get_tag_from_name(self, tensor_name):
         tensor_tag = (self.current_microbatch_id, self.current_layer_id, tensor_name)
         return tensor_tag
 
-
-    def launch_offload(self, tensor_name, offloading_microbatch_id = None, offloading_layer_id = None):
+    def launch_offload(self, tensor_name, offloading_microbatch_id=None, offloading_layer_id=None):
         # print(f"[launch_offload] call with tensor_name:{tensor_name}, offloading_microbatch_id:{offloading_microbatch_id}, offloading_layer_id:{offloading_layer_id}")
         # print(f"[launch_offload] current_layer_id={self.current_layer_id}")
         if self.d2h_stream is None:
             self.d2h_stream = torch.cuda.Stream()
 
-        if self.current_layer_id >= len(self.moe_layer_pattern) or self.moe_layer_pattern[self.current_layer_id] == 0 or self.to_offload_tensor_queue_dict[tensor_name].empty():
+        if (
+            self.current_layer_id >= len(self.moe_layer_pattern)
+            or self.moe_layer_pattern[self.current_layer_id] == 0
+            or self.to_offload_tensor_queue_dict[tensor_name].empty()
+        ):
             return
 
         src_tensor = self.to_offload_tensor_queue_dict[tensor_name].get()
@@ -1224,21 +1265,25 @@ class _FineGrainedAsyncDoubleBufferGroupOffloadHandler(OffloadHandler):
 
         return tensor_tag
 
-
-    def wait_offload(self, tensor_name, offloading_microbatch_id = None, offloading_layer_id = None):
+    def wait_offload(self, tensor_name, offloading_microbatch_id=None, offloading_layer_id=None):
         # print(f"[wait_offload] call with tensor_name:{tensor_name}, offloading_microbatch_id:{offloading_microbatch_id}, offloading_layer_id:{offloading_layer_id}")
         # print(f"[wait_offload] current_layer_id={self.current_layer_id}")
-        if self.current_layer_id >= len(self.moe_layer_pattern) or self.moe_layer_pattern[self.current_layer_id] == 0 or self.to_release_tensor_queue_dict[tensor_name].empty():
+        if (
+            self.current_layer_id >= len(self.moe_layer_pattern)
+            or self.moe_layer_pattern[self.current_layer_id] == 0
+            or self.to_release_tensor_queue_dict[tensor_name].empty()
+        ):
             return
 
         copy_done_event, release_src_tensor = self.to_release_tensor_queue_dict[tensor_name].get()
-        copy_done_event.synchronize() # TODO: use .wait() to check the stream with copy engine (d2h / h2d / all2all)
+        copy_done_event.synchronize()  # TODO: use .wait() to check the stream with copy engine (d2h / h2d / all2all)
         release_src_tensor.untyped_storage().resize_(0)
-
 
     def get_reloading_microbatch_id_layer_id_from_table(self):
         chunk_id = int(self.current_layer_id / self.num_layers)
-        virtual_batch_id_backward = self.microbatch_id_chunk_id_to_virtual_batch_id_backward[(self.current_microbatch_id, chunk_id)]
+        virtual_batch_id_backward = self.microbatch_id_chunk_id_to_virtual_batch_id_backward[
+            (self.current_microbatch_id, chunk_id)
+        ]
         cur_virtual_layer_id = self.current_layer_id % self.num_layers
         for virtual_layer_id in range(cur_virtual_layer_id - 1, -1, -1):
             layer_id = virtual_layer_id + chunk_id * self.num_layers
@@ -1246,26 +1291,39 @@ class _FineGrainedAsyncDoubleBufferGroupOffloadHandler(OffloadHandler):
                 return (self.current_microbatch_id, layer_id)
 
         reloading_virtual_batch_id_backward = virtual_batch_id_backward
-        while reloading_virtual_batch_id_backward + 1 < len(self.microbatch_id_chunk_id_to_virtual_batch_id_backward):
+        while reloading_virtual_batch_id_backward + 1 < len(
+            self.microbatch_id_chunk_id_to_virtual_batch_id_backward
+        ):
             reloading_virtual_batch_id_backward += 1
-            reloading_microbatch_id, reloading_chunk_id = self.schedule_table_backward[reloading_virtual_batch_id_backward]
+            reloading_microbatch_id, reloading_chunk_id = self.schedule_table_backward[
+                reloading_virtual_batch_id_backward
+            ]
             if reloading_chunk_id == chunk_id:
                 return (self.current_microbatch_id + 1, self.current_layer_id)
             else:
                 for virtual_layer_id in range(self.num_layers - 1, -1, -1):
-                    if self.pp_rank == (self.pp_size - 1) and reloading_chunk_id == (self.num_model_chunks - 1) and virtual_layer_id == (self.num_layers - 1):
+                    if (
+                        self.pp_rank == (self.pp_size - 1)
+                        and reloading_chunk_id == (self.num_model_chunks - 1)
+                        and virtual_layer_id == (self.num_layers - 1)
+                    ):
                         continue
                     layer_id = virtual_layer_id + reloading_chunk_id * self.num_layers
-                    if layer_id < len(self.moe_layer_pattern) and self.moe_layer_pattern[layer_id] == 1:
+                    if (
+                        layer_id < len(self.moe_layer_pattern)
+                        and self.moe_layer_pattern[layer_id] == 1
+                    ):
                         return (reloading_microbatch_id, layer_id)
         # print("get_reloading_microbatch_id_layer_id_from_table returning (-1,-1)")
         return (-1, -1)
 
-
-    def launch_reload(self, tensor_name, reloading_microbatch_id = None, reloading_layer_id = None):
+    def launch_reload(self, tensor_name, reloading_microbatch_id=None, reloading_layer_id=None):
         # print(f"[launch_reload] call with tensor_name:{tensor_name}, reloading_microbatch_id:{reloading_microbatch_id}, reloading_layer_id:{reloading_layer_id}")
         # print(f"[launch_reload] self.current_layer_id = {self.current_layer_id}")
-        if reloading_microbatch_id == None and (self.current_layer_id >= len(self.moe_layer_pattern) or self.moe_layer_pattern[self.current_layer_id] == 0):
+        if reloading_microbatch_id == None and (
+            self.current_layer_id >= len(self.moe_layer_pattern)
+            or self.moe_layer_pattern[self.current_layer_id] == 0
+        ):
             return
 
         if self.h2d_stream is None:
@@ -1299,9 +1357,16 @@ class _FineGrainedAsyncDoubleBufferGroupOffloadHandler(OffloadHandler):
         else:
             # interleaved 1F1B (VPP)
             if reloading_microbatch_id == None and reloading_layer_id == None:
-                reloading_microbatch_id, reloading_layer_id = self.get_reloading_microbatch_id_layer_id_from_table()
+                reloading_microbatch_id, reloading_layer_id = (
+                    self.get_reloading_microbatch_id_layer_id_from_table()
+                )
 
-            if reloading_microbatch_id < 0 or reloading_layer_id < 0 or reloading_layer_id >= len(self.moe_layer_pattern) or self.moe_layer_pattern[reloading_layer_id] == 0:
+            if (
+                reloading_microbatch_id < 0
+                or reloading_layer_id < 0
+                or reloading_layer_id >= len(self.moe_layer_pattern)
+                or self.moe_layer_pattern[reloading_layer_id] == 0
+            ):
                 return
 
         tensor_tag = (reloading_microbatch_id, reloading_layer_id, tensor_name)
@@ -1309,7 +1374,9 @@ class _FineGrainedAsyncDoubleBufferGroupOffloadHandler(OffloadHandler):
             # in the bwd of layer 0 of the last mircobatch
             # print(f"launch reload : not tensor_tag in self.tensor_tag_to_state")
             return
-        (src_tensor, cpu_backup, copy_done_event, untyped_size) = self.tensor_tag_to_state.pop(tensor_tag)
+        (src_tensor, cpu_backup, copy_done_event, untyped_size) = self.tensor_tag_to_state.pop(
+            tensor_tag
+        )
         # print(f"[SUCCES launch reload] on tensor_tag (reloading_microbatch_id, reloading_layer_id, tensor_name): {tensor_tag}")
 
         copy_done_event = torch.cuda.Event()
@@ -1323,10 +1390,12 @@ class _FineGrainedAsyncDoubleBufferGroupOffloadHandler(OffloadHandler):
             state = (copy_done_event, src_tensor)
             self.reloading_tensor[tensor_tag] = state
 
-
-    def wait_reload(self, tensor_name, reloading_microbatch_id = None, reloading_layer_id = None):
+    def wait_reload(self, tensor_name, reloading_microbatch_id=None, reloading_layer_id=None):
         # print(f"[wait_reload] current_layer_id={self.current_layer_id}")
-        if reloading_microbatch_id == None and (self.current_layer_id >= len(self.moe_layer_pattern) or self.moe_layer_pattern[self.current_layer_id] == 0):
+        if reloading_microbatch_id == None and (
+            self.current_layer_id >= len(self.moe_layer_pattern)
+            or self.moe_layer_pattern[self.current_layer_id] == 0
+        ):
             return
 
         if self.num_model_chunks == None:
@@ -1355,9 +1424,16 @@ class _FineGrainedAsyncDoubleBufferGroupOffloadHandler(OffloadHandler):
         else:
             # interleaved 1F1B (VPP)
             if reloading_microbatch_id == None and reloading_layer_id == None:
-                reloading_microbatch_id, reloading_layer_id = self.get_reloading_microbatch_id_layer_id_from_table()
+                reloading_microbatch_id, reloading_layer_id = (
+                    self.get_reloading_microbatch_id_layer_id_from_table()
+                )
 
-            if reloading_microbatch_id < 0 or reloading_layer_id < 0 or reloading_layer_id >= len(self.moe_layer_pattern) or self.moe_layer_pattern[reloading_layer_id] == 0:
+            if (
+                reloading_microbatch_id < 0
+                or reloading_layer_id < 0
+                or reloading_layer_id >= len(self.moe_layer_pattern)
+                or self.moe_layer_pattern[reloading_layer_id] == 0
+            ):
                 return
 
         tensor_tag = (reloading_microbatch_id, reloading_layer_id, tensor_name)
@@ -1367,34 +1443,29 @@ class _FineGrainedAsyncDoubleBufferGroupOffloadHandler(OffloadHandler):
             return
         # print(f"[SUCCES wait_reload] on tensor_tag (reloading_microbatch_id, reloading_layer_id, tensor_name): {tensor_tag}")
         (copy_done_event, device_tensor) = self.reloading_tensor[tensor_tag]
-        copy_done_event.synchronize() # TODO: use .wait() to check the stream with copy engine (d2h / h2d / all2all)
+        copy_done_event.synchronize()  # TODO: use .wait() to check the stream with copy engine (d2h / h2d / all2all)
         return
-
 
     def get_reloaded(self, tensor_tag):
         (copy_done_event, device_tensor) = self.reloading_tensor.pop(tensor_tag)
         return device_tensor
-
 
     def tensor_push(self, tensor: torch.Tensor, **kwargs) -> Any:
         if hasattr(tensor, self.OFFLOAD_TENSOR_ATTR_KEY):
             return self.register_offload(tensor)
         return tensor
 
-
     def tensor_pop(self, tensor_tag, **kwargs):
         if tensor_tag in self.reloading_tensor:
             return self.wait_reload(tensor_tag)
         return tensor_tag
 
-
-    def start_microbatch_forward(self, current_microbatch_id, current_layer_id = 0):
+    def start_microbatch_forward(self, current_microbatch_id, current_layer_id=0):
         # print(f"[start_microbatch_forward] batch id: {current_microbatch_id}, from layer current_layer_id = {current_layer_id}")
         self.current_microbatch_id = current_microbatch_id
         self.current_layer_id = current_layer_id
 
-
-    def start_microbatch_backward(self, current_microbatch_id, current_layer_id = None):
+    def start_microbatch_backward(self, current_microbatch_id, current_layer_id=None):
         # print(f"[start_microbatch_backward] batch id: {current_microbatch_id}, from layer current_layer_id = {current_layer_id}")
         self.current_microbatch_id = current_microbatch_id
         if current_layer_id == None:
@@ -1403,13 +1474,11 @@ class _FineGrainedAsyncDoubleBufferGroupOffloadHandler(OffloadHandler):
             self.current_layer_id = current_layer_id
 
 
-
 _fg_offload_handler_instance = _FineGrainedAsyncDoubleBufferGroupOffloadHandler()
 
 
 def get_fine_grained_offload_handler():
     return _fg_offload_handler_instance
-
 
 
 # class CpuOffloadHookWithFineGrainedOffloadHandler(CpuOffloadSavedTensorHook):

@@ -4,10 +4,10 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "../extensions.h"
-
 #include <mublasLt.h>
 #include <mudnncxx/mudnn.h>
+
+#include "../extensions.h"
 
 namespace transformer_engine::pytorch {
 
@@ -18,6 +18,5 @@ namespace transformer_engine::pytorch {
 size_t get_mublas_version() { return mublasLtGetVersion(); }
 
 size_t get_mudnn_version() { return ::musa::dnn::GetVersion(); }
-
 
 }  // namespace transformer_engine::pytorch

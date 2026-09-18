@@ -4,11 +4,11 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <torch_musa/csrc/core/MUSAGuard.h>
+
 #include "../extensions.h"
 #include "common.h"
 #include "pybind.h"
-
-#include <torch_musa/csrc/core/MUSAGuard.h>
 
 namespace {
 

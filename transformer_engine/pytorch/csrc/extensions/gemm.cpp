@@ -5,6 +5,7 @@
  ************************************************************************/
 
 #include <pybind11/pybind11.h>
+#include <torch_musa/csrc/core/MUSAGuard.h>
 
 #include <optional>
 #include <string>
@@ -17,8 +18,6 @@
 #include "pybind.h"
 #include "transformer_engine/transformer_engine.h"
 #include "util.h"
-
-#include <torch_musa/csrc/core/MUSAGuard.h>
 
 namespace {
 
@@ -324,8 +323,8 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
 #else
       NVTE_SCOPED_GIL_RELEASE({
         nvte_cublas_gemm(A_tensor.data(), B_tensor.data(), out_tensor.data(), bias_tensor.data(),
-                        te_pre_gelu_out.data(), transa, transb, grad, te_workspace.data(),
-                        accumulate, use_split_accumulator, num_math_sms, main_stream);
+                         te_pre_gelu_out.data(), transa, transb, grad, te_workspace.data(),
+                         accumulate, use_split_accumulator, num_math_sms, main_stream);
       });
 #endif
     }
@@ -584,17 +583,17 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
   NVTE_SCOPED_GIL_RELEASE({
     const char* multi_stream_env = std::getenv("TE_MULTI_STREAM_GROUPGEMM");
     if (multi_stream_env != nullptr && std::string(multi_stream_env) == "1") {
-      nvte_multi_stream_cublas_gemm(
-          te_A_vector.data(), te_B_vector.data(), te_D_vector.data(), te_bias_vector.data(),
-          te_pre_gelu_out_vector.data(), te_A_vector.size(), transa, transb, grad,
-          te_workspace_vector.data(), accumulate, use_split_accumulator, math_sm_count,
-          at::musa::getCurrentCUDAStream());
+      nvte_multi_stream_cublas_gemm(te_A_vector.data(), te_B_vector.data(), te_D_vector.data(),
+                                    te_bias_vector.data(), te_pre_gelu_out_vector.data(),
+                                    te_A_vector.size(), transa, transb, grad,
+                                    te_workspace_vector.data(), accumulate, use_split_accumulator,
+                                    math_sm_count, at::musa::getCurrentCUDAStream());
     } else {
-      nvte_grouped_mudnn_gemm(
-          te_A_vector.data(), te_B_vector.data(), te_D_vector.data(), te_bias_vector.data(),
-          te_pre_gelu_out_vector.data(), te_A_vector.size(), transa, transb, grad,
-          te_workspace_vector.data(), accumulate, use_split_accumulator, math_sm_count,
-          at::musa::getCurrentCUDAStream());
+      nvte_grouped_mudnn_gemm(te_A_vector.data(), te_B_vector.data(), te_D_vector.data(),
+                              te_bias_vector.data(), te_pre_gelu_out_vector.data(),
+                              te_A_vector.size(), transa, transb, grad, te_workspace_vector.data(),
+                              accumulate, use_split_accumulator, math_sm_count,
+                              at::musa::getCurrentCUDAStream());
     }
   });
 #endif
