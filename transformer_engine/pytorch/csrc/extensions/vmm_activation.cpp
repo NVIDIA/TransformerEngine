@@ -4,11 +4,10 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "../common.h"
-
-#include <ATen/record_function.h>
 #include <ATen/ThreadLocalState.h>
-
+#include <ATen/record_function.h>
+#include <cuda.h>
+#include <cuda_runtime.h>
 #include <pybind11/stl.h>
 
 #include <atomic>
@@ -18,19 +17,18 @@
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
+#include <fstream>
+#include <functional>
 #include <limits>
 #include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
-#include <fstream>
-#include <functional>
 #include <unordered_set>
 #include <vector>
 
-#include <cuda.h>
-#include <cuda_runtime.h>
+#include "../common.h"
 
 #ifndef RECORD_USER_SCOPE
 #define RECORD_USER_SCOPE(name) RECORD_FUNCTION((name), c10::ArrayRef<c10::IValue>{})
@@ -84,7 +82,9 @@ void vmm_remap_trace(const char *message, double elapsed_ms = -1.0) {
   if (elapsed_ms >= 0.0) {
     std::ostringstream record;
     record << "{\"ts_ns\":"
-           << std::chrono::duration_cast<std::chrono::nanoseconds>(VmmClock::now().time_since_epoch()).count()
+           << std::chrono::duration_cast<std::chrono::nanoseconds>(
+                  VmmClock::now().time_since_epoch())
+                  .count()
            << ",\"thread\":" << thread_id << ",\"message\":\"" << message
            << "\",\"elapsed_ms\":" << elapsed_ms << "}";
     if (vmm_trace_enabled.load(std::memory_order_acquire)) {
@@ -128,8 +128,7 @@ std::string cuda_runtime_error_text(cudaError_t error) {
 
 void check_cuda_runtime(cudaError_t error, const char *operation) {
   if (error != cudaSuccess) {
-    throw std::runtime_error(std::string(operation) + " failed: " +
-                             cuda_runtime_error_text(error));
+    throw std::runtime_error(std::string(operation) + " failed: " + cuda_runtime_error_text(error));
   }
 }
 
@@ -143,8 +142,7 @@ CUmemAllocationProp allocation_properties(int device) {
 }
 
 size_t round_up(size_t value, size_t alignment) {
-  if (value == 0 || alignment == 0 ||
-      value > std::numeric_limits<size_t>::max() - alignment + 1) {
+  if (value == 0 || alignment == 0 || value > std::numeric_limits<size_t>::max() - alignment + 1) {
     throw std::runtime_error("invalid value/alignment for round-up");
   }
   return ((value + alignment - 1) / alignment) * alignment;
@@ -181,9 +179,9 @@ struct ReleaseHookContext {
   std::vector<ReleaseRequest> requests;
   std::shared_ptr<at::ThreadLocalState> tls_state;
   std::atomic<int> worker_has_callbacks{0};
-  std::atomic<int> done{0};          // 1 once unmap+release finished (or failed)
-  std::atomic<int> error{0};         // 1 if any cuMemUnmap/cuMemRelease failed
-  std::atomic<int> error_code{0};    // first failing CUresult
+  std::atomic<int> done{0};        // 1 once unmap+release finished (or failed)
+  std::atomic<int> error{0};       // 1 if any cuMemUnmap/cuMemRelease failed
+  std::atomic<int> error_code{0};  // first failing CUresult
   std::atomic<int> callback_fired{0};
   std::mutex completion_mutex;
   std::condition_variable completion_cv;
@@ -244,8 +242,7 @@ struct RemapRequest {
   std::shared_ptr<std::atomic<int>> remapped{std::make_shared<std::atomic<int>>(0)};
   // Per-slot completion synchronization; batch context lock is not used for waits.
   std::shared_ptr<std::mutex> state_mutex{std::make_shared<std::mutex>()};
-  std::shared_ptr<std::condition_variable> state_cv{
-      std::make_shared<std::condition_variable>()};
+  std::shared_ptr<std::condition_variable> state_cv{std::make_shared<std::condition_variable>()};
 };
 
 struct RemapHookContext {
@@ -369,19 +366,16 @@ template <typename Context>
 void wait_for_context(const std::shared_ptr<Context> &context) {
   if (context->done.load(std::memory_order_acquire) == 1) return;
   std::unique_lock<std::mutex> lock(context->completion_mutex);
-  context->completion_cv.wait(lock, [&] {
-    return context->done.load(std::memory_order_acquire) == 1;
-  });
+  context->completion_cv.wait(lock,
+                              [&] { return context->done.load(std::memory_order_acquire) == 1; });
 }
 
 template <typename Context>
-bool wait_for_context(const std::shared_ptr<Context> &context,
-                      std::chrono::milliseconds timeout) {
+bool wait_for_context(const std::shared_ptr<Context> &context, std::chrono::milliseconds timeout) {
   if (context->done.load(std::memory_order_acquire) == 1) return true;
   std::unique_lock<std::mutex> lock(context->completion_mutex);
-  return context->completion_cv.wait_for(lock, timeout, [&] {
-    return context->done.load(std::memory_order_acquire) == 1;
-  });
+  return context->completion_cv.wait_for(
+      lock, timeout, [&] { return context->done.load(std::memory_order_acquire) == 1; });
 }
 
 // Sentinel error_code used when the worker thread is already gone (process
@@ -457,12 +451,13 @@ class ReleaseWorker {
   static void process_release_batch(const std::shared_ptr<ReleaseHookContext> &context) {
     RECORD_USER_SCOPE("vmm::ReleaseWorker");
     std::unique_ptr<at::ThreadLocalStateGuard> tls_guard;
-    if (context->tls_state) tls_guard = std::make_unique<at::ThreadLocalStateGuard>(*context->tls_state);
+    if (context->tls_state)
+      tls_guard = std::make_unique<at::ThreadLocalStateGuard>(*context->tls_state);
     context->worker_has_callbacks.store(at::hasCallbacks(), std::memory_order_release);
     auto &ctx = *context;
     auto trace_stage = [](const char *stage, const auto &stage_started) {
-      const double elapsed = std::chrono::duration<double, std::milli>(
-          VmmClock::now() - stage_started).count();
+      const double elapsed =
+          std::chrono::duration<double, std::milli>(VmmClock::now() - stage_started).count();
       vmm_remap_trace(stage, elapsed);
     };
     vmm_remap_trace("release worker start (batch)");
@@ -470,10 +465,10 @@ class ReleaseWorker {
       const auto &request = ctx.requests[index];
       char label[64];
       const auto request_started = VmmClock::now();
-      std::snprintf(label, sizeof(label), "release[%zu] id=%s begin address=0x%llx bytes=%zu handle=0x%llx", index,
-                    request.slot_id.c_str(),
-                    static_cast<unsigned long long>(request.address), request.bytes,
-                    static_cast<unsigned long long>(request.handle));
+      std::snprintf(label, sizeof(label),
+                    "release[%zu] id=%s begin address=0x%llx bytes=%zu handle=0x%llx", index,
+                    request.slot_id.c_str(), static_cast<unsigned long long>(request.address),
+                    request.bytes, static_cast<unsigned long long>(request.handle));
       vmm_remap_trace(label);
       std::snprintf(label, sizeof(label), "release[%zu] cuMemUnmap begin", index);
       const auto unmap_started = VmmClock::now();
@@ -569,7 +564,7 @@ void ReleaseWorker::enqueue_remap(std::shared_ptr<RemapHookContext> context) {
 
 static bool request_ready(const RemapRequest &request) {
   return !request.release_dependency ||
-      request.release_dependency->done.load(std::memory_order_acquire) != 0;
+         request.release_dependency->done.load(std::memory_order_acquire) != 0;
 }
 
 static size_t find_ready_request(const RemapHookContext &context,
@@ -657,12 +652,14 @@ class RemapWorker {
 
   static void process(const std::shared_ptr<RemapHookContext> &context, bool serial_requeue) {
     std::unique_ptr<at::ThreadLocalStateGuard> tls_guard;
-    if (context->tls_state) tls_guard = std::make_unique<at::ThreadLocalStateGuard>(*context->tls_state);
+    if (context->tls_state)
+      tls_guard = std::make_unique<at::ThreadLocalStateGuard>(*context->tls_state);
     RECORD_USER_SCOPE("vmm::RemapWorker.process");
     auto &ctx = *context;
     auto trace_stage = [&](const char *stage, const auto &stage_started) {
-      vmm_remap_trace(stage, std::chrono::duration<double, std::milli>(
-          VmmClock::now() - stage_started).count());
+      vmm_remap_trace(
+          stage,
+          std::chrono::duration<double, std::milli>(VmmClock::now() - stage_started).count());
     };
     vmm_remap_trace(serial_requeue ? "worker start (serial, requeued)" : "worker start");
     bool any_copy_submitted = false;
@@ -683,7 +680,8 @@ class RemapWorker {
     for (size_t index = 0; index < ctx.requests.size(); ++index) {
       const auto &request = ctx.requests[index];
       const bool terminal = request.remapped->load(std::memory_order_acquire) != 0 ||
-          (request.done_event != nullptr && request.event_recorded->load(std::memory_order_acquire) != 0);
+                            (request.done_event != nullptr &&
+                             request.event_recorded->load(std::memory_order_acquire) != 0);
       if (terminal) {
         processed[index] = true;
         ++completed_requests;
@@ -705,9 +703,7 @@ class RemapWorker {
         auto &notifier = remap_release_notifier();
         std::unique_lock<std::mutex> notifier_lock(notifier.mutex);
         const uint64_t generation = notifier.generation;
-        notifier.cv.wait(notifier_lock, [&] {
-          return notifier.generation != generation;
-        });
+        notifier.cv.wait(notifier_lock, [&] { return notifier.generation != generation; });
         continue;
       }
       processed[slot_index] = true;
@@ -715,16 +711,16 @@ class RemapWorker {
       auto &request = ctx.requests[slot_index];
       char label[256];
       std::snprintf(label, sizeof(label), "remap request id=%s begin address=0x%llx",
-                    request.slot_id.c_str(),
-                    static_cast<unsigned long long>(request.address));
+                    request.slot_id.c_str(), static_cast<unsigned long long>(request.address));
       vmm_remap_trace(label);
       const auto request_started = VmmClock::now();
       auto trace_request_stage = [&](const char *stage, const auto &stage_started) {
         char stage_label[320];
         std::snprintf(stage_label, sizeof(stage_label), "request id=%s slot=%zu stage=%s",
                       request.slot_id.c_str(), request.slot_index, stage);
-        vmm_remap_trace(stage_label, std::chrono::duration<double, std::milli>(
-            VmmClock::now() - stage_started).count());
+        vmm_remap_trace(
+            stage_label,
+            std::chrono::duration<double, std::milli>(VmmClock::now() - stage_started).count());
       };
       if (request.release_dependency) {
         trace_request_stage("release_dependency_ready", request_started);
@@ -737,25 +733,40 @@ class RemapWorker {
       const auto properties = allocation_properties(request.device);
       CUresult rc;
       const auto create_started = VmmClock::now();
-      { RECORD_USER_SCOPE("vmm::remap.cuMemCreate");
-        rc = cuMemCreate(&request.handle, request.bytes, &properties, 0); }
+      {
+        RECORD_USER_SCOPE("vmm::remap.cuMemCreate");
+        rc = cuMemCreate(&request.handle, request.bytes, &properties, 0);
+      }
       trace_request_stage("cuMemCreate", create_started);
-      if (rc != CUDA_SUCCESS) { fail(static_cast<int>(rc)); return; }
+      if (rc != CUDA_SUCCESS) {
+        fail(static_cast<int>(rc));
+        return;
+      }
       const auto map_started = VmmClock::now();
-      { RECORD_USER_SCOPE("vmm::remap.cuMemMap");
-        rc = cuMemMap(request.address, request.bytes, 0, request.handle, 0); }
+      {
+        RECORD_USER_SCOPE("vmm::remap.cuMemMap");
+        rc = cuMemMap(request.address, request.bytes, 0, request.handle, 0);
+      }
       trace_request_stage("cuMemMap", map_started);
-      if (rc != CUDA_SUCCESS) { fail(static_cast<int>(rc)); return; }
+      if (rc != CUDA_SUCCESS) {
+        fail(static_cast<int>(rc));
+        return;
+      }
       request.mapped = true;
       CUmemAccessDesc access{};
       access.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
       access.location.id = request.device;
       access.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
       const auto access_started = VmmClock::now();
-      { RECORD_USER_SCOPE("vmm::remap.cuMemSetAccess");
-        rc = cuMemSetAccess(request.address, request.bytes, &access, 1); }
+      {
+        RECORD_USER_SCOPE("vmm::remap.cuMemSetAccess");
+        rc = cuMemSetAccess(request.address, request.bytes, &access, 1);
+      }
       trace_request_stage("cuMemSetAccess", access_started);
-      if (rc != CUDA_SUCCESS) { fail(static_cast<int>(rc)); return; }
+      if (rc != CUDA_SUCCESS) {
+        fail(static_cast<int>(rc));
+        return;
+      }
       ctx.remaps_done.fetch_add(1, std::memory_order_release);
       if (ctx.defer_copy) {
         // Deferred-H2D mode: the mapping transition is complete, but the copy
@@ -769,17 +780,31 @@ class RemapWorker {
         notify_remap_worker_release_ready();
       } else if (ctx.copy_enabled) {
         cudaError_t runtime_rc = cudaSetDevice(request.device);
-        if (runtime_rc != cudaSuccess) { fail(static_cast<int>(runtime_rc)); return; }
-        { RECORD_USER_SCOPE("vmm::remap.slot_h2d_submit");
-          runtime_rc = cudaMemcpyAsync(reinterpret_cast<void *>(static_cast<uintptr_t>(request.address)),
-              request.host_address, request.copy_bytes, cudaMemcpyHostToDevice, ctx.copy_stream); }
-        if (runtime_rc != cudaSuccess) { fail(static_cast<int>(runtime_rc)); return; }
+        if (runtime_rc != cudaSuccess) {
+          fail(static_cast<int>(runtime_rc));
+          return;
+        }
+        {
+          RECORD_USER_SCOPE("vmm::remap.slot_h2d_submit");
+          runtime_rc = cudaMemcpyAsync(
+              reinterpret_cast<void *>(static_cast<uintptr_t>(request.address)),
+              request.host_address, request.copy_bytes, cudaMemcpyHostToDevice, ctx.copy_stream);
+        }
+        if (runtime_rc != cudaSuccess) {
+          fail(static_cast<int>(runtime_rc));
+          return;
+        }
         request.copy_submitted = true;
         any_copy_submitted = true;
         ctx.copies_submitted.fetch_add(1, std::memory_order_release);
-        { RECORD_USER_SCOPE("vmm::remap.slot_event_record");
-          runtime_rc = cudaEventRecord(ctx.slot_done_events[slot_index], ctx.copy_stream); }
-        if (runtime_rc != cudaSuccess) { fail(static_cast<int>(runtime_rc)); return; }
+        {
+          RECORD_USER_SCOPE("vmm::remap.slot_event_record");
+          runtime_rc = cudaEventRecord(ctx.slot_done_events[slot_index], ctx.copy_stream);
+        }
+        if (runtime_rc != cudaSuccess) {
+          fail(static_cast<int>(runtime_rc));
+          return;
+        }
         {
           std::lock_guard<std::mutex> lock(ctx.completion_mutex);
           request.event_recorded->store(1, std::memory_order_release);
@@ -874,8 +899,7 @@ void release_host_func(void *user_data) {
   // NOTE: no CUDA/driver API calls here (they deadlock on the callback thread).
 }
 
-void launch_release_hook(const std::shared_ptr<ReleaseHookContext> &context,
-                         cudaStream_t stream) {
+void launch_release_hook(const std::shared_ptr<ReleaseHookContext> &context, cudaStream_t stream) {
   auto *boxed = new std::shared_ptr<ReleaseHookContext>(context);
   cudaError_t rc = cudaLaunchHostFunc(stream, release_host_func, boxed);
   if (rc != cudaSuccess) {
@@ -893,8 +917,7 @@ void remap_host_func(void *user_data) {
   RemapWorker::instance().enqueue(std::move(context));
 }
 
-void launch_remap_hook(const std::shared_ptr<RemapHookContext> &context,
-                       cudaStream_t stream) {
+void launch_remap_hook(const std::shared_ptr<RemapHookContext> &context, cudaStream_t stream) {
   auto *boxed = new std::shared_ptr<RemapHookContext>(context);
   cudaError_t rc = cudaLaunchHostFunc(stream, remap_host_func, boxed);
   if (rc != cudaSuccess) {
@@ -910,10 +933,11 @@ std::shared_ptr<ReleaseHookContext> release_hooks_after(
 std::shared_ptr<RemapHookContext> remap_hooks_after(
     std::vector<std::shared_ptr<VMMActivationSlot>> slots, uintptr_t raw_stream);
 std::shared_ptr<RemapHookContext> remap_and_copy_after(
-    std::vector<std::shared_ptr<VMMActivationSlot>> slots,
-    std::vector<at::Tensor> host_tensors, uintptr_t raw_stream);
-std::shared_ptr<RemapHookContext> remap_and_copy_slot_after(
-    std::shared_ptr<VMMActivationSlot> slot, at::Tensor host_tensor, uintptr_t raw_stream);
+    std::vector<std::shared_ptr<VMMActivationSlot>> slots, std::vector<at::Tensor> host_tensors,
+    uintptr_t raw_stream);
+std::shared_ptr<RemapHookContext> remap_and_copy_slot_after(std::shared_ptr<VMMActivationSlot> slot,
+                                                            at::Tensor host_tensor,
+                                                            uintptr_t raw_stream);
 
 class VMMActivationSlot {
  public:
@@ -922,15 +946,15 @@ class VMMActivationSlot {
     check_cuda(cuInit(0), "cuInit");
     check_cuda(cuDeviceGet(&cuda_device_, device_), "cuDeviceGet");
     int supported = 0;
-    check_cuda(cuDeviceGetAttribute(&supported,
-                                    CU_DEVICE_ATTRIBUTE_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED,
-                                    cuda_device_),
-               "cuDeviceGetAttribute(VMM_SUPPORTED)");
+    check_cuda(
+        cuDeviceGetAttribute(&supported, CU_DEVICE_ATTRIBUTE_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED,
+                             cuda_device_),
+        "cuDeviceGetAttribute(VMM_SUPPORTED)");
     if (!supported) throw std::runtime_error("CUDA device does not support VMM");
     const auto properties = allocation_properties(device_);
-    check_cuda(cuMemGetAllocationGranularity(&granularity_, &properties,
-                                             CU_MEM_ALLOC_GRANULARITY_MINIMUM),
-               "cuMemGetAllocationGranularity");
+    check_cuda(
+        cuMemGetAllocationGranularity(&granularity_, &properties, CU_MEM_ALLOC_GRANULARITY_MINIMUM),
+        "cuMemGetAllocationGranularity");
     bytes_ = round_up(requested_bytes_, granularity_);
     check_cuda(cuMemAddressReserve(&address_, bytes_, 0, 0, 0), "cuMemAddressReserve");
     reserved_ = true;
@@ -958,16 +982,17 @@ class VMMActivationSlot {
       if (sizes[index] <= 0 || strides[index] < 0) {
         throw std::runtime_error("VMM tensor dimensions must be positive and strides non-negative");
       }
-      maximum_element_offset += static_cast<size_t>(sizes[index] - 1) *
-                                static_cast<size_t>(strides[index]);
+      maximum_element_offset +=
+          static_cast<size_t>(sizes[index] - 1) * static_cast<size_t>(strides[index]);
     }
     const size_t required = (maximum_element_offset + 1) * c10::elementSize(dtype);
     if (required > requested_bytes_) {
       throw std::runtime_error("requested tensor view exceeds VMM activation slot");
     }
     auto options = at::TensorOptions().dtype(dtype).device(at::Device(at::kCUDA, device_));
-    return at::from_blob(reinterpret_cast<void *>(static_cast<uintptr_t>(address_)), sizes,
-                         strides, [](void *) {}, options);
+    return at::from_blob(
+        reinterpret_cast<void *>(static_cast<uintptr_t>(address_)), sizes, strides, [](void *) {},
+        options);
     // NOTE: the returned tensor is a non-owning view; it must never be used
     // while the slot is unmapped (hard page fault on dereference).
   }
@@ -1072,8 +1097,7 @@ class VMMActivationSlot {
     // A slot is independently adoptable as soon as its own mapping, H2D, and
     // completion event have been submitted.  Do not wait for later requests
     // in the shared worker context (select/epoll-style readiness).
-    if (context->copy_enabled &&
-        request.event_recorded->load(std::memory_order_acquire) == 0) {
+    if (context->copy_enabled && request.event_recorded->load(std::memory_order_acquire) == 0) {
       throw std::runtime_error("VMM async remap slot submission is not complete");
     }
     if (!request.mapped || request.handle == 0) {
@@ -1130,11 +1154,10 @@ class VMMActivationSlot {
   friend std::shared_ptr<RemapHookContext> remap_hooks_after(
       std::vector<std::shared_ptr<VMMActivationSlot>> slots, uintptr_t raw_stream);
   friend std::shared_ptr<RemapHookContext> remap_and_copy_after(
-      std::vector<std::shared_ptr<VMMActivationSlot>> slots,
-      std::vector<at::Tensor> host_tensors, uintptr_t raw_stream);
-  friend std::shared_ptr<RemapHookContext> remap_only_slot_after(
-      std::shared_ptr<VMMActivationSlot> slot, at::Tensor host_tensor,
+      std::vector<std::shared_ptr<VMMActivationSlot>> slots, std::vector<at::Tensor> host_tensors,
       uintptr_t raw_stream);
+  friend std::shared_ptr<RemapHookContext> remap_only_slot_after(
+      std::shared_ptr<VMMActivationSlot> slot, at::Tensor host_tensor, uintptr_t raw_stream);
 
   void drain_remap() {
     auto context = pending_remap_;
@@ -1167,9 +1190,9 @@ class VMMActivationSlot {
     if (!context) return;
     const auto wait_started = VmmClock::now();
     wait_for_context(context);
-    vmm_remap_trace("wait_for_async_release host wait",
-                    std::chrono::duration<double, std::milli>(
-                        VmmClock::now() - wait_started).count());
+    vmm_remap_trace(
+        "wait_for_async_release host wait",
+        std::chrono::duration<double, std::milli>(VmmClock::now() - wait_started).count());
     pending_.reset();
     if (context->error.load(std::memory_order_acquire)) {
       throw std::runtime_error("VMM async release failed on worker: CUresult " +
@@ -1324,9 +1347,19 @@ std::shared_ptr<RemapHookContext> remap_hooks_after(
     if (slot->mapped_ && !slot->pending_) {
       throw std::runtime_error("VMM batch remap hook got a mapped slot without a pending release");
     }
-    RemapRequest request{slot->slot_id(), slot->address_, slot->bytes_, 0, nullptr,
-                         slot->device_, slot->pending_, 0, false, false,
-                         index, nullptr, std::make_shared<std::atomic<int>>(0),
+    RemapRequest request{slot->slot_id(),
+                         slot->address_,
+                         slot->bytes_,
+                         0,
+                         nullptr,
+                         slot->device_,
+                         slot->pending_,
+                         0,
+                         false,
+                         false,
+                         index,
+                         nullptr,
+                         std::make_shared<std::atomic<int>>(0),
                          std::make_shared<std::atomic<int>>(0),
                          std::make_shared<std::atomic<int>>(1)};
     context->requests.push_back(std::move(request));
@@ -1347,8 +1380,8 @@ std::shared_ptr<RemapHookContext> remap_hooks_after(
 }
 
 std::shared_ptr<RemapHookContext> remap_and_copy_after(
-    std::vector<std::shared_ptr<VMMActivationSlot>> slots,
-    std::vector<at::Tensor> host_tensors, uintptr_t raw_stream) {
+    std::vector<std::shared_ptr<VMMActivationSlot>> slots, std::vector<at::Tensor> host_tensors,
+    uintptr_t raw_stream) {
   RECORD_USER_SCOPE("vmm::remap_and_copy_after");
   if (slots.size() != host_tensors.size()) {
     throw std::runtime_error("VMM remap-and-copy requires one host tensor per slot");
@@ -1391,9 +1424,18 @@ std::shared_ptr<RemapHookContext> remap_and_copy_after(
         host_tensor.storage().nbytes() < slot->requested_bytes_) {
       throw std::runtime_error("VMM remap-and-copy source storage is too small or offset");
     }
-    RemapRequest request{slot->slot_id(), slot->address_, slot->bytes_, slot->requested_bytes_,
-                         host_tensor.data_ptr(), slot->device_, slot->pending_,
-                         0, false, false, index, context->slot_done_events[index],
+    RemapRequest request{slot->slot_id(),
+                         slot->address_,
+                         slot->bytes_,
+                         slot->requested_bytes_,
+                         host_tensor.data_ptr(),
+                         slot->device_,
+                         slot->pending_,
+                         0,
+                         false,
+                         false,
+                         index,
+                         context->slot_done_events[index],
                          std::make_shared<std::atomic<int>>(0),
                          std::make_shared<std::atomic<int>>(0),
                          std::make_shared<std::atomic<int>>(0)};
@@ -1412,8 +1454,9 @@ std::shared_ptr<RemapHookContext> remap_and_copy_after(
   return context;
 }
 
-std::shared_ptr<RemapHookContext> remap_and_copy_slot_after(
-    std::shared_ptr<VMMActivationSlot> slot, at::Tensor host_tensor, uintptr_t raw_stream) {
+std::shared_ptr<RemapHookContext> remap_and_copy_slot_after(std::shared_ptr<VMMActivationSlot> slot,
+                                                            at::Tensor host_tensor,
+                                                            uintptr_t raw_stream) {
   if (!slot) throw std::runtime_error("VMM remap slot request got a null slot");
   // Keep this API intentionally one-slot: one call is one server request, one
   // mapping transition, one H2D submission, and one completion event.
@@ -1427,8 +1470,9 @@ std::shared_ptr<RemapHookContext> remap_and_copy_slot_after(
 
 // Deferred-H2D variant: the worker performs only the VMM transition now; the
 // H2D memcpy is submitted later by remap_slot_launch_h2d at replay time.
-std::shared_ptr<RemapHookContext> remap_only_slot_after(
-    std::shared_ptr<VMMActivationSlot> slot, at::Tensor host_tensor, uintptr_t raw_stream) {
+std::shared_ptr<RemapHookContext> remap_only_slot_after(std::shared_ptr<VMMActivationSlot> slot,
+                                                        at::Tensor host_tensor,
+                                                        uintptr_t raw_stream) {
   if (!slot) throw std::runtime_error("VMM remap-only slot request got a null slot");
   vmm_remap_trace((std::string("enqueue remap-only request id=") + slot->slot_id()).c_str());
   ReloadCleanupWorker::instance();
@@ -1439,9 +1483,9 @@ std::shared_ptr<RemapHookContext> remap_only_slot_after(
   context->copy_stream = reinterpret_cast<cudaStream_t>(raw_stream);
   context->host_tensors.push_back(std::move(host_tensor));
   context->slot_done_events.resize(1, nullptr);
-  check_cuda_runtime(cudaEventCreateWithFlags(&context->slot_done_events[0],
-                                              cudaEventDisableTiming),
-                     "cudaEventCreateWithFlags(remap-only-slot)");
+  check_cuda_runtime(
+      cudaEventCreateWithFlags(&context->slot_done_events[0], cudaEventDisableTiming),
+      "cudaEventCreateWithFlags(remap-only-slot)");
   auto &host_tensor_ref = context->host_tensors[0];
   auto &checked_slot = slot;
   if (!checked_slot) throw std::runtime_error("VMM remap-only got a null slot");
@@ -1459,10 +1503,18 @@ std::shared_ptr<RemapHookContext> remap_only_slot_after(
       host_tensor_ref.storage().nbytes() < checked_slot->requested_bytes_) {
     throw std::runtime_error("VMM remap-only source storage is too small or offset");
   }
-  RemapRequest request{checked_slot->slot_id(), checked_slot->address_, checked_slot->bytes_,
-                       checked_slot->requested_bytes_, host_tensor_ref.data_ptr(),
-                       checked_slot->device_, checked_slot->pending_,
-                       0, false, false, 0, context->slot_done_events[0],
+  RemapRequest request{checked_slot->slot_id(),
+                       checked_slot->address_,
+                       checked_slot->bytes_,
+                       checked_slot->requested_bytes_,
+                       host_tensor_ref.data_ptr(),
+                       checked_slot->device_,
+                       checked_slot->pending_,
+                       0,
+                       false,
+                       false,
+                       0,
+                       context->slot_done_events[0],
                        std::make_shared<std::atomic<int>>(0),
                        std::make_shared<std::atomic<int>>(0),
                        std::make_shared<std::atomic<int>>(1),
@@ -1475,9 +1527,7 @@ std::shared_ptr<RemapHookContext> remap_only_slot_after(
   return context;
 }
 
-
-void remap_wait_on_stream(const std::shared_ptr<RemapHookContext> &context,
-                          uintptr_t raw_stream) {
+void remap_wait_on_stream(const std::shared_ptr<RemapHookContext> &context, uintptr_t raw_stream) {
   RECORD_USER_SCOPE("vmm::wait_remap_copy_on_stream");
   const auto wait_started = VmmClock::now();
   vmm_remap_trace("wait_on_stream begin");
@@ -1497,10 +1547,9 @@ void remap_wait_on_stream(const std::shared_ptr<RemapHookContext> &context,
   }
   {
     RECORD_USER_SCOPE("vmm::wait_remap_copy_on_stream.stream_wait_event");
-    check_cuda_runtime(
-        cudaStreamWaitEvent(reinterpret_cast<cudaStream_t>(raw_stream),
-                            context->copy_done_event, 0),
-        "cudaStreamWaitEvent(remap-and-copy)");
+    check_cuda_runtime(cudaStreamWaitEvent(reinterpret_cast<cudaStream_t>(raw_stream),
+                                           context->copy_done_event, 0),
+                       "cudaStreamWaitEvent(remap-and-copy)");
   }
 }
 
@@ -1516,10 +1565,9 @@ void remap_enqueue_wait_on_stream(const std::shared_ptr<RemapHookContext> &conte
   }
   {
     RECORD_USER_SCOPE("vmm::enqueue_remap_copy_wait.stream_wait_event");
-    check_cuda_runtime(
-        cudaStreamWaitEvent(reinterpret_cast<cudaStream_t>(raw_stream),
-                            context->copy_done_event, 0),
-        "cudaStreamWaitEvent(remap-and-copy)");
+    check_cuda_runtime(cudaStreamWaitEvent(reinterpret_cast<cudaStream_t>(raw_stream),
+                                           context->copy_done_event, 0),
+                       "cudaStreamWaitEvent(remap-and-copy)");
   }
 }
 
@@ -1547,25 +1595,24 @@ void wait_until_slot_submitted(const std::shared_ptr<RemapHookContext> &context,
   }
 }
 
-void remap_enqueue_slot_wait(const std::shared_ptr<RemapHookContext> &context,
-                             size_t slot_index, uintptr_t raw_stream) {
+void remap_enqueue_slot_wait(const std::shared_ptr<RemapHookContext> &context, size_t slot_index,
+                             uintptr_t raw_stream) {
   RECORD_USER_SCOPE("vmm::enqueue_remap_slot_wait");
   wait_until_slot_submitted(context, slot_index);
   auto event = context->requests[slot_index].done_event;
   if (event == nullptr) {
     throw std::runtime_error("VMM remap slot has no completion event");
   }
-  check_cuda_runtime(
-      cudaStreamWaitEvent(reinterpret_cast<cudaStream_t>(raw_stream), event, 0),
-      "cudaStreamWaitEvent(remap-slot)");
+  check_cuda_runtime(cudaStreamWaitEvent(reinterpret_cast<cudaStream_t>(raw_stream), event, 0),
+                     "cudaStreamWaitEvent(remap-slot)");
 }
 
 // Deferred-H2D launch: the worker finished the VMM transition for this slot
 // earlier; submit the H2D memcpy now (graph-replay time) on the caller's
 // stream.  If the remap is not finished yet, block until it is, so the graph
 // and its H2D are issued at the same host moment.
-void remap_slot_launch_h2d(const std::shared_ptr<RemapHookContext> &context,
-                           size_t slot_index, uintptr_t raw_stream) {
+void remap_slot_launch_h2d(const std::shared_ptr<RemapHookContext> &context, size_t slot_index,
+                           uintptr_t raw_stream) {
   RECORD_USER_SCOPE("vmm::remap_slot_launch_h2d");
   if (!context->defer_copy) {
     throw std::runtime_error("VMM slot H2D launch requires a deferred-copy context");
@@ -1584,12 +1631,12 @@ void remap_slot_launch_h2d(const std::shared_ptr<RemapHookContext> &context,
              ctx.done.load(std::memory_order_acquire) != 0;
     });
   }
-  const double wait_ms = std::chrono::duration<double, std::milli>(
-      VmmClock::now() - wait_started).count();
+  const double wait_ms =
+      std::chrono::duration<double, std::milli>(VmmClock::now() - wait_started).count();
   if (wait_ms > 0.1) {
     char label[256];
-    std::snprintf(label, sizeof(label),
-                  "h2d_launch id=%s remap_wait_ms=%.3f", request.slot_id.c_str(), wait_ms);
+    std::snprintf(label, sizeof(label), "h2d_launch id=%s remap_wait_ms=%.3f",
+                  request.slot_id.c_str(), wait_ms);
     vmm_remap_trace(label);
   }
   if (ctx.error.load(std::memory_order_acquire)) {
@@ -1606,8 +1653,7 @@ void remap_slot_launch_h2d(const std::shared_ptr<RemapHookContext> &context,
   {
     RECORD_USER_SCOPE("vmm::remap_slot_launch_h2d.memcpy_async");
     rc = cudaMemcpyAsync(reinterpret_cast<void *>(static_cast<uintptr_t>(request.address)),
-                         request.host_address, request.copy_bytes,
-                         cudaMemcpyHostToDevice, stream);
+                         request.host_address, request.copy_bytes, cudaMemcpyHostToDevice, stream);
   }
   if (rc != cudaSuccess) {
     throw std::runtime_error(std::string("cudaMemcpyAsync(H2D launch) failed: ") +
@@ -1644,8 +1690,6 @@ void remap_slot_launch_h2d(const std::shared_ptr<RemapHookContext> &context,
   }
 }
 
-
-
 void remap_enqueue_slot_waits(const std::shared_ptr<RemapHookContext> &context,
                               uintptr_t raw_stream) {
   RECORD_USER_SCOPE("vmm::enqueue_remap_slot_waits");
@@ -1657,8 +1701,7 @@ void remap_enqueue_slot_waits(const std::shared_ptr<RemapHookContext> &context,
   auto stream = reinterpret_cast<cudaStream_t>(raw_stream);
   for (auto event : context->slot_done_events) {
     if (event == nullptr) throw std::runtime_error("VMM slot has no completion event");
-    check_cuda_runtime(cudaStreamWaitEvent(stream, event, 0),
-                       "cudaStreamWaitEvent(remap-slot)");
+    check_cuda_runtime(cudaStreamWaitEvent(stream, event, 0), "cudaStreamWaitEvent(remap-slot)");
   }
 }
 py::dict release_hook_status(const std::shared_ptr<ReleaseHookContext> &context) {
@@ -1717,9 +1760,7 @@ void vmm_set_serial_driver_workers(bool enabled) {
   vmm_serial_driver_override.store(enabled ? 1 : 0, std::memory_order_release);
 }
 
-bool vmm_get_serial_driver_workers() {
-  return vmm_serial_driver_workers();
-}
+bool vmm_get_serial_driver_workers() { return vmm_serial_driver_workers(); }
 
 void init_vmm_activation_extension(py::module_ &module) {
   module.def("vmm_enable_trace", &vmm_enable_trace, py::arg("enabled"), py::arg("path"));
@@ -1728,8 +1769,7 @@ void init_vmm_activation_extension(py::module_ &module) {
   module.def("vmm_initialize_workers", &vmm_initialize_workers);
   module.def("vmm_profiler_status", &vmm_profiler_status);
   module.def("vmm_driver_memory_info", &vmm_driver_memory_info);
-  module.def("vmm_set_serial_driver_workers", &vmm_set_serial_driver_workers,
-             py::arg("enabled"));
+  module.def("vmm_set_serial_driver_workers", &vmm_set_serial_driver_workers, py::arg("enabled"));
   module.def("vmm_get_serial_driver_workers", &vmm_get_serial_driver_workers);
   py::class_<VMMActivationSlot, std::shared_ptr<VMMActivationSlot>>(module, "VMMActivationSlot")
       .def(py::init<size_t, int>(), py::arg("requested_bytes"), py::arg("device") = 0)
@@ -1751,29 +1791,23 @@ void init_vmm_activation_extension(py::module_ &module) {
                                                                       "VMMReleaseHookContext")
       .def(py::init<>())
       .def("status", &release_hook_status);
-  py::class_<RemapHookContext, std::shared_ptr<RemapHookContext>>(module,
-                                                                  "VMMRemapHookContext")
+  py::class_<RemapHookContext, std::shared_ptr<RemapHookContext>>(module, "VMMRemapHookContext")
       .def(py::init<>())
       .def("status", &remap_hook_status)
       .def("wait_on_stream", &remap_wait_on_stream, py::arg("stream"))
       .def("enqueue_wait_on_stream", &remap_enqueue_wait_on_stream, py::arg("stream"))
       .def("enqueue_slot_waits", &remap_enqueue_slot_waits, py::arg("stream"))
-      .def("wait_until_slot_submitted", &wait_until_slot_submitted,
-           py::arg("slot_index"))
-      .def("enqueue_slot_wait", &remap_enqueue_slot_wait,
-           py::arg("slot_index"), py::arg("stream"))
-      .def("launch_slot_h2d", &remap_slot_launch_h2d,
-           py::arg("slot_index"), py::arg("stream"));
-  module.def("release_hooks_after", &release_hooks_after,
-             py::arg("slots"), py::arg("stream"));
-  module.def("remap_hooks_after", &remap_hooks_after,
-             py::arg("slots"), py::arg("stream"));
-  module.def("remap_and_copy_after", &remap_and_copy_after,
-             py::arg("slots"), py::arg("host_tensors"), py::arg("stream"));
-  module.def("remap_and_copy_slot_after", &remap_and_copy_slot_after,
-             py::arg("slot"), py::arg("host_tensor"), py::arg("stream"));
-  module.def("remap_only_slot_after", &remap_only_slot_after,
-             py::arg("slot"), py::arg("host_tensor"), py::arg("stream"));
+      .def("wait_until_slot_submitted", &wait_until_slot_submitted, py::arg("slot_index"))
+      .def("enqueue_slot_wait", &remap_enqueue_slot_wait, py::arg("slot_index"), py::arg("stream"))
+      .def("launch_slot_h2d", &remap_slot_launch_h2d, py::arg("slot_index"), py::arg("stream"));
+  module.def("release_hooks_after", &release_hooks_after, py::arg("slots"), py::arg("stream"));
+  module.def("remap_hooks_after", &remap_hooks_after, py::arg("slots"), py::arg("stream"));
+  module.def("remap_and_copy_after", &remap_and_copy_after, py::arg("slots"),
+             py::arg("host_tensors"), py::arg("stream"));
+  module.def("remap_and_copy_slot_after", &remap_and_copy_slot_after, py::arg("slot"),
+             py::arg("host_tensor"), py::arg("stream"));
+  module.def("remap_only_slot_after", &remap_only_slot_after, py::arg("slot"),
+             py::arg("host_tensor"), py::arg("stream"));
 }
 
 }  // namespace transformer_engine::pytorch
