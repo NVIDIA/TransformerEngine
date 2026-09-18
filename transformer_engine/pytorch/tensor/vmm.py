@@ -13,6 +13,7 @@ row partitions.
 from __future__ import annotations
 
 import ctypes
+import warnings
 from functools import reduce
 from operator import mul
 from typing import Dict, Optional, Tuple
@@ -26,6 +27,7 @@ _CU_MEM_LOCATION_TYPE_DEVICE_MEMORY_NODE = 6
 _VMM_RANGES: Dict[int, Dict[int, int]] = {}
 _CAPTURED_VMM_ALLOCATORS: Dict[int, "VMMRowSplitAllocator"] = {}
 _VMM_CURRENT_MICROBATCH: Optional[int] = None
+_VMM_OOM_CACHE_RETRY_WARNED = False
 
 
 def set_vmm_current_microbatch(microbatch_id: Optional[int]) -> None:
@@ -171,6 +173,29 @@ class VMMRowSplitAllocator:
                     self._allocation_properties(domain),
                     0,
                 )
+                if (
+                    result[0] == driver.CUresult.CUDA_ERROR_OUT_OF_MEMORY
+                    and not torch.cuda.is_current_stream_capturing()
+                ):
+                    global _VMM_OOM_CACHE_RETRY_WARNED
+                    reserved_before = torch.cuda.memory_reserved(self.device_index)
+                    torch.cuda.empty_cache()
+                    reserved_after = torch.cuda.memory_reserved(self.device_index)
+                    if not _VMM_OOM_CACHE_RETRY_WARNED:
+                        warnings.warn(
+                            "cuMemCreate exhausted driver-visible memory during eager "
+                            "execution; released "
+                            f"{reserved_before - reserved_after} bytes from PyTorch's "
+                            "cache and retried once.",
+                            RuntimeWarning,
+                            stacklevel=2,
+                        )
+                        _VMM_OOM_CACHE_RETRY_WARNED = True
+                    result = driver.cuMemCreate(
+                        half_bytes,
+                        self._allocation_properties(domain),
+                        0,
+                    )
                 try:
                     _check_cuda(result[0], f"cuMemCreate(domain={domain})")
                 except RuntimeError as exc:
