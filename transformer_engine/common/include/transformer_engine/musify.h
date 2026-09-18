@@ -10,7 +10,10 @@
 #define CU_MEM_ACCESS_FLAGS_PROT_READWRITE MU_MEM_ACCESS_FLAGS_PROT_READWRITE
 #define CU_MEM_ALLOC_GRANULARITY_MINIMUM MU_MEM_ALLOC_GRANULARITY_MINIMUM
 #define CU_MEM_ALLOCATION_TYPE_PINNED MU_MEM_ALLOCATION_TYPE_PINNED
+#define CU_MEM_HANDLE_TYPE_NONE MU_MEM_HANDLE_TYPE_NONE
 #define CU_MEM_HANDLE_TYPE_FABRIC MU_MEM_HANDLE_TYPE_FABRIC
+#define CU_DEVICE_ATTRIBUTE_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED \
+    MU_DEVICE_ATTRIBUTE_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED
 #define CU_MEM_LOCATION_TYPE_DEVICE MU_MEM_LOCATION_TYPE_DEVICE
 #define CU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD MU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD
 #define CU_MEMORYTYPE_DEVICE MU_MEMORYTYPE_DEVICE
@@ -37,13 +40,16 @@
 #define CUmodule MUmodule
 #define cuDeviceGet muDeviceGet
 #define cuDeviceGetAttribute muDeviceGetAttribute
+#define cuGetErrorName muGetErrorName
 #define cuGetErrorString muGetErrorString
+#define cuInit muInit
 #define cuMemAddressFree muMemAddressFree
 #define cuMemAddressReserve muMemAddressReserve
 #define cuMemCreate muMemCreate
 #define cuMemExportToShareableHandle muMemExportToShareableHandle
 #define cuMemGetAddressRange muMemGetAddressRange
 #define cuMemGetAllocationGranularity muMemGetAllocationGranularity
+#define cuMemGetInfo muMemGetInfo
 #define cuMemGetHandleForAddressRange muMemGetHandleForAddressRange
 #define cuMemImportFromShareableHandle muMemImportFromShareableHandle
 #define cuMemMap muMemMap
@@ -75,6 +81,7 @@
 #define cudaFreeHost musaFreeHost
 #define cudaGetDevice musaGetDevice
 #define cudaGetDeviceCount musaGetDeviceCount
+#define cudaGetErrorName musaGetErrorName
 #define cudaGetErrorString musaGetErrorString
 #define cudaGetLastError musaGetLastError
 #define cudaHostRegister musaHostRegister
@@ -85,6 +92,7 @@
 #define cudaIpcMemHandle_t musaIpcMemHandle_t
 #define cudaIpcMemLazyEnablePeerAccess musaIpcMemLazyEnablePeerAccess
 #define cudaIpcOpenMemHandle musaIpcOpenMemHandle
+#define cudaLaunchHostFunc musaLaunchHostFunc
 #define cudaMalloc musaMalloc
 #define cudaMallocHost musaMallocHost
 #define cudaMemcpy musaMemcpy

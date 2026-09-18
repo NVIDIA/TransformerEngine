@@ -29,8 +29,14 @@
 #include <unordered_set>
 #include <vector>
 
+#if NVTE_USE_MUSA
+#include <transformer_engine/musify.h>
 #include <musa.h>
 #include <musa_runtime.h>
+#else
+#include <cuda.h>
+#include <cuda_runtime.h>
+#endif
 
 namespace py = pybind11;
 
@@ -69,7 +75,7 @@ void vmm_dump_trace() {
   if (vmm_trace_path.empty()) throw std::runtime_error("VMM trace path is empty");
   std::ofstream out(vmm_trace_path, std::ios::trunc);
   if (!out) throw std::runtime_error("cannot open VMM trace path: " + vmm_trace_path);
-  for (const auto &record : vmm_trace_records) out << record << '\\n';
+  for (const auto &record : vmm_trace_records) out << record << '\n';
   out.flush();
 }
 
@@ -95,46 +101,46 @@ void vmm_remap_trace(const char *message, double elapsed_ms = -1.0) {
   std::fflush(stdout);
 }
 
-std::string musa_error_text(MUresult result) {
+std::string cuda_error_text(CUresult result) {
   const char *name = nullptr;
   const char *message = nullptr;
-  muGetErrorName(result, &name);
-  muGetErrorString(result, &message);
+  cuGetErrorName(result, &name);
+  cuGetErrorString(result, &message);
   std::ostringstream out;
-  out << (name ? name : "MUSA_ERROR_UNKNOWN") << " (" << static_cast<int>(result) << ")";
+  out << (name ? name : "CUDA_ERROR_UNKNOWN") << " (" << static_cast<int>(result) << ")";
   if (message != nullptr) out << ": " << message;
   return out.str();
 }
 
-void check_musa(MUresult result, const char *operation) {
-  if (result != MUSA_SUCCESS) {
-    throw std::runtime_error(std::string(operation) + " failed: " + musa_error_text(result));
+void check_cuda(CUresult result, const char *operation) {
+  if (result != CUDA_SUCCESS) {
+    throw std::runtime_error(std::string(operation) + " failed: " + cuda_error_text(result));
   }
 }
 
-// Runtime-API counterpart: musaLaunchHostFunc returns musaError_t, not MUresult.
-std::string musa_runtime_error_text(musaError_t error) {
-  const char *name = musaGetErrorName(error);
-  const char *message = musaGetErrorString(error);
+// Runtime-API counterpart: cudaLaunchHostFunc returns cudaError_t, not CUresult.
+std::string cuda_runtime_error_text(cudaError_t error) {
+  const char *name = cudaGetErrorName(error);
+  const char *message = cudaGetErrorString(error);
   std::ostringstream out;
-  out << (name ? name : "musaErrorUnknown") << " (" << static_cast<int>(error) << ")";
+  out << (name ? name : "cudaErrorUnknown") << " (" << static_cast<int>(error) << ")";
   if (message != nullptr) out << ": " << message;
   return out.str();
 }
 
-void check_musa_runtime(musaError_t error, const char *operation) {
-  if (error != MUSA_SUCCESS) {
+void check_cuda_runtime(cudaError_t error, const char *operation) {
+  if (error != cudaSuccess) {
     throw std::runtime_error(std::string(operation) + " failed: " +
-                             musa_runtime_error_text(error));
+                             cuda_runtime_error_text(error));
   }
 }
 
-MUmemAllocationProp allocation_properties(int device) {
-  MUmemAllocationProp properties{};
-  properties.type = MU_MEM_ALLOCATION_TYPE_PINNED;
-  properties.location.type = MU_MEM_LOCATION_TYPE_DEVICE;
+CUmemAllocationProp allocation_properties(int device) {
+  CUmemAllocationProp properties{};
+  properties.type = CU_MEM_ALLOCATION_TYPE_PINNED;
+  properties.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
   properties.location.id = device;
-  properties.requestedHandleTypes = MU_MEM_HANDLE_TYPE_NONE;
+  properties.requestedHandleTypes = CU_MEM_HANDLE_TYPE_NONE;
   return properties;
 }
 
@@ -149,15 +155,15 @@ size_t round_up(size_t value, size_t alignment) {
 // ---------------------------------------------------------------------------
 // Asynchronous release infrastructure
 //
-// MUSA host functions (musaLaunchHostFunc) may NOT call driver APIs from the
-// callback thread: muMemUnmap/muMemRelease deadlocked there in our probe
+// CUDA host functions (cudaLaunchHostFunc) may NOT call driver APIs from the
+// callback thread: cuMemUnmap/cuMemRelease deadlocked there in our probe
 // (/tmp/test_vmm_hostfn2.c, 2026-08-28). The supported shape is therefore:
 //
 //   D2H burst completes
 //     -> host func fires: move the shared context into a queue, notify CV
-//        (fast, no MUSA calls, callback returns immediately so the stream
+//        (fast, no CUDA calls, callback returns immediately so the stream
 //        unblocks)
-//     -> resident release worker wakes, performs muMemUnmap + muMemRelease,
+//     -> resident release worker wakes, performs cuMemUnmap + cuMemRelease,
 //        publishes error status and the completion flag
 //   backward side reads the completion flag (no event synchronize at all)
 //
@@ -168,9 +174,9 @@ size_t round_up(size_t value, size_t alignment) {
 
 struct ReleaseRequest {
   std::string slot_id;
-  MUdeviceptr address;
+  CUdeviceptr address;
   size_t bytes;
-  MUmemGenericAllocationHandle handle;
+  CUmemGenericAllocationHandle handle;
 };
 
 struct ReleaseHookContext {
@@ -178,8 +184,8 @@ struct ReleaseHookContext {
   std::shared_ptr<at::ThreadLocalState> tls_state;
   std::atomic<int> worker_has_callbacks{0};
   std::atomic<int> done{0};          // 1 once unmap+release finished (or failed)
-  std::atomic<int> error{0};         // 1 if any muMemUnmap/muMemRelease failed
-  std::atomic<int> error_code{0};    // first failing MUresult
+  std::atomic<int> error{0};         // 1 if any cuMemUnmap/cuMemRelease failed
+  std::atomic<int> error_code{0};    // first failing CUresult
   std::atomic<int> callback_fired{0};
   std::mutex completion_mutex;
   std::condition_variable completion_cv;
@@ -201,7 +207,7 @@ void notify_remap_worker_release_ready();
 // Serial-driver mode (VMM_SERIAL_DRIVER_WORKERS=1): unmap/release and
 // create/map/setAccess run on one resident thread instead of two concurrent
 // ones.  Two driver workers contending on the same page-table lock produced
-// ~40ms muMemSetAccess tails when a remap landed while a release batch was
+// ~40ms cuMemSetAccess tails when a remap landed while a release batch was
 // mid-unmap; serializing the driver calls removes that interleaving.
 // The Python setter (vmm_set_serial_driver_workers) overrides the env var;
 // -1 = unset.  The mode must be fixed before the first remap enqueue.
@@ -217,17 +223,17 @@ bool vmm_serial_driver_workers() {
 }
 struct RemapRequest {
   std::string slot_id;
-  MUdeviceptr address;
+  CUdeviceptr address;
   size_t bytes;
   size_t copy_bytes{0};
   const void *host_address{nullptr};
   int device;
   std::shared_ptr<ReleaseHookContext> release_dependency;
-  MUmemGenericAllocationHandle handle{0};
+  CUmemGenericAllocationHandle handle{0};
   bool mapped{false};
   bool copy_submitted{false};
   size_t slot_index{0};
-  musaEvent_t done_event{nullptr};
+  cudaEvent_t done_event{nullptr};
   std::shared_ptr<std::atomic<int>> event_recorded;
   // Set with acquire/release semantics when ownership of the mapping moves to
   // the consumer slot. Cleanup must never unmap or release an adopted mapping.
@@ -251,9 +257,9 @@ struct RemapHookContext {
   // Keep pinned CPU storage alive until every H2D copy submitted by the worker
   // has completed. ReloadCleanupWorker retains this context through that point.
   std::vector<at::Tensor> host_tensors;
-  musaStream_t copy_stream{nullptr};
-  musaEvent_t copy_done_event{nullptr};
-  std::vector<musaEvent_t> slot_done_events;
+  cudaStream_t copy_stream{nullptr};
+  cudaEvent_t copy_done_event{nullptr};
+  std::vector<cudaEvent_t> slot_done_events;
   bool copy_enabled{false};
   // Deferred-H2D mode: the worker only performs the VMM transition; H2D is
   // launched at replay time via remap_slot_launch_h2d.
@@ -271,16 +277,16 @@ struct RemapHookContext {
 
   ~RemapHookContext() {
     for (auto event : slot_done_events) {
-      if (event != nullptr) musaEventDestroy(event);
+      if (event != nullptr) cudaEventDestroy(event);
     }
-    if (copy_done_event != nullptr) musaEventDestroy(copy_done_event);
+    if (copy_done_event != nullptr) cudaEventDestroy(copy_done_event);
   }
 };
 
 // Retain each reload context until its H2D event completes on an ordinary
 // resident thread. In particular, do not release the final shared_ptr from a
-// musaLaunchHostFunc callback: RemapHookContext destruction calls
-// musaEventDestroy, and MUSA runtime/driver APIs can deadlock on that callback
+// cudaLaunchHostFunc callback: RemapHookContext destruction calls
+// cudaEventDestroy, and CUDA runtime/driver APIs can deadlock on that callback
 // thread.
 class ReloadCleanupWorker {
  public:
@@ -290,7 +296,7 @@ class ReloadCleanupWorker {
   }
 
   // Called only after the copy stream reaches the lifetime host callback. Move
-  // the reference into this queue without invoking any MUSA API or destructing
+  // the reference into this queue without invoking any CUDA API or destructing
   // the event-owning context on the callback thread.
   void enqueue_from_callback(std::shared_ptr<RemapHookContext> context) {
     {
@@ -330,7 +336,7 @@ class ReloadCleanupWorker {
       queue_.pop_front();
       lock.unlock();
       // The callback reached this point only after H2D completion. Destruction
-      // and musaEventDestroy now run on this ordinary worker thread.
+      // and cudaEventDestroy now run on this ordinary worker thread.
       context.reset();
       lock.lock();
     }
@@ -348,7 +354,7 @@ void reload_lifetime_host_func(void *user_data) {
   std::shared_ptr<RemapHookContext> context(std::move(*boxed));
   delete boxed;
   ReloadCleanupWorker::instance().enqueue_from_callback(std::move(context));
-  // No MUSA API and no RemapHookContext destruction on this callback thread.
+  // No CUDA API and no RemapHookContext destruction on this callback thread.
 }
 
 template <typename Context>
@@ -400,7 +406,7 @@ class ReleaseWorker {
   void enqueue_remap(std::shared_ptr<RemapHookContext> context);
 
   // Called from the host-func callback thread. Must not block beyond the
-  // queue push and must not call any MUSA API.
+  // queue push and must not call any CUDA API.
   void enqueue_from_callback(std::shared_ptr<ReleaseHookContext> context) {
     {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -471,29 +477,29 @@ class ReleaseWorker {
                     static_cast<unsigned long long>(request.address), request.bytes,
                     static_cast<unsigned long long>(request.handle));
       vmm_remap_trace(label);
-      std::snprintf(label, sizeof(label), "release[%zu] muMemUnmap begin", index);
+      std::snprintf(label, sizeof(label), "release[%zu] cuMemUnmap begin", index);
       const auto unmap_started = VmmClock::now();
-      MUresult unmap_rc;
+      CUresult unmap_rc;
       {
-        RECORD_USER_SCOPE("vmm::ReleaseWorker.muMemUnmap");
-        unmap_rc = muMemUnmap(request.address, request.bytes);
+        RECORD_USER_SCOPE("vmm::ReleaseWorker.cuMemUnmap");
+        unmap_rc = cuMemUnmap(request.address, request.bytes);
       }
-      trace_stage("release muMemUnmap", unmap_started);
-      if (unmap_rc != MUSA_SUCCESS && !ctx.error.load(std::memory_order_relaxed)) {
+      trace_stage("release cuMemUnmap", unmap_started);
+      if (unmap_rc != CUDA_SUCCESS && !ctx.error.load(std::memory_order_relaxed)) {
         ctx.error_code.store(static_cast<int>(unmap_rc), std::memory_order_relaxed);
         ctx.error.store(1, std::memory_order_relaxed);
       }
       const auto release_started = VmmClock::now();
-      std::snprintf(label, sizeof(label), "release[%zu] muMemRelease begin", index);
+      std::snprintf(label, sizeof(label), "release[%zu] cuMemRelease begin", index);
       vmm_remap_trace(label);
-      MUresult release_rc;
+      CUresult release_rc;
       {
-        RECORD_USER_SCOPE("vmm::ReleaseWorker.muMemRelease");
-        release_rc = muMemRelease(request.handle);
+        RECORD_USER_SCOPE("vmm::ReleaseWorker.cuMemRelease");
+        release_rc = cuMemRelease(request.handle);
       }
-      std::snprintf(label, sizeof(label), "release[%zu] muMemRelease", index);
+      std::snprintf(label, sizeof(label), "release[%zu] cuMemRelease", index);
       trace_stage(label, release_started);
-      if (release_rc != MUSA_SUCCESS && !ctx.error.load(std::memory_order_relaxed)) {
+      if (release_rc != CUDA_SUCCESS && !ctx.error.load(std::memory_order_relaxed)) {
         ctx.error_code.store(static_cast<int>(release_rc), std::memory_order_relaxed);
         ctx.error.store(1, std::memory_order_relaxed);
       }
@@ -641,11 +647,11 @@ class RemapWorker {
         continue;
       }
       if (request.mapped) {
-        muMemUnmap(request.address, request.bytes);
+        cuMemUnmap(request.address, request.bytes);
         request.mapped = false;
       }
       if (request.handle != 0) {
-        muMemRelease(request.handle);
+        cuMemRelease(request.handle);
         request.handle = 0;
       }
     }
@@ -666,7 +672,7 @@ class RemapWorker {
       set_error(ctx, error_code);
       // A previously submitted copy may still access its new mapping. Finish
       // those copies before rolling the batch back on a later-slot failure.
-      if (any_copy_submitted) musaStreamSynchronize(ctx.copy_stream);
+      if (any_copy_submitted) cudaStreamSynchronize(ctx.copy_stream);
       cleanup_requests(ctx);
       complete_context(ctx);
     };
@@ -731,27 +737,27 @@ class RemapWorker {
       }
       ctx.releases_ready.fetch_add(1, std::memory_order_release);
       const auto properties = allocation_properties(request.device);
-      MUresult rc;
+      CUresult rc;
       const auto create_started = VmmClock::now();
-      { RECORD_USER_SCOPE("vmm::remap.muMemCreate");
-        rc = muMemCreate(&request.handle, request.bytes, &properties, 0); }
-      trace_request_stage("muMemCreate", create_started);
-      if (rc != MUSA_SUCCESS) { fail(static_cast<int>(rc)); return; }
+      { RECORD_USER_SCOPE("vmm::remap.cuMemCreate");
+        rc = cuMemCreate(&request.handle, request.bytes, &properties, 0); }
+      trace_request_stage("cuMemCreate", create_started);
+      if (rc != CUDA_SUCCESS) { fail(static_cast<int>(rc)); return; }
       const auto map_started = VmmClock::now();
-      { RECORD_USER_SCOPE("vmm::remap.muMemMap");
-        rc = muMemMap(request.address, request.bytes, 0, request.handle, 0); }
-      trace_request_stage("muMemMap", map_started);
-      if (rc != MUSA_SUCCESS) { fail(static_cast<int>(rc)); return; }
+      { RECORD_USER_SCOPE("vmm::remap.cuMemMap");
+        rc = cuMemMap(request.address, request.bytes, 0, request.handle, 0); }
+      trace_request_stage("cuMemMap", map_started);
+      if (rc != CUDA_SUCCESS) { fail(static_cast<int>(rc)); return; }
       request.mapped = true;
-      MUmemAccessDesc access{};
-      access.location.type = MU_MEM_LOCATION_TYPE_DEVICE;
+      CUmemAccessDesc access{};
+      access.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
       access.location.id = request.device;
-      access.flags = MU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+      access.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
       const auto access_started = VmmClock::now();
-      { RECORD_USER_SCOPE("vmm::remap.muMemSetAccess");
-        rc = muMemSetAccess(request.address, request.bytes, &access, 1); }
-      trace_request_stage("muMemSetAccess", access_started);
-      if (rc != MUSA_SUCCESS) { fail(static_cast<int>(rc)); return; }
+      { RECORD_USER_SCOPE("vmm::remap.cuMemSetAccess");
+        rc = cuMemSetAccess(request.address, request.bytes, &access, 1); }
+      trace_request_stage("cuMemSetAccess", access_started);
+      if (rc != CUDA_SUCCESS) { fail(static_cast<int>(rc)); return; }
       ctx.remaps_done.fetch_add(1, std::memory_order_release);
       if (ctx.defer_copy) {
         // Deferred-H2D mode: the mapping transition is complete, but the copy
@@ -764,18 +770,18 @@ class RemapWorker {
         ctx.completion_cv.notify_all();
         notify_remap_worker_release_ready();
       } else if (ctx.copy_enabled) {
-        musaError_t runtime_rc = musaSetDevice(request.device);
-        if (runtime_rc != MUSA_SUCCESS) { fail(static_cast<int>(runtime_rc)); return; }
+        cudaError_t runtime_rc = cudaSetDevice(request.device);
+        if (runtime_rc != cudaSuccess) { fail(static_cast<int>(runtime_rc)); return; }
         { RECORD_USER_SCOPE("vmm::remap.slot_h2d_submit");
-          runtime_rc = musaMemcpyAsync(reinterpret_cast<void *>(static_cast<uintptr_t>(request.address)),
-              request.host_address, request.copy_bytes, musaMemcpyHostToDevice, ctx.copy_stream); }
-        if (runtime_rc != MUSA_SUCCESS) { fail(static_cast<int>(runtime_rc)); return; }
+          runtime_rc = cudaMemcpyAsync(reinterpret_cast<void *>(static_cast<uintptr_t>(request.address)),
+              request.host_address, request.copy_bytes, cudaMemcpyHostToDevice, ctx.copy_stream); }
+        if (runtime_rc != cudaSuccess) { fail(static_cast<int>(runtime_rc)); return; }
         request.copy_submitted = true;
         any_copy_submitted = true;
         ctx.copies_submitted.fetch_add(1, std::memory_order_release);
         { RECORD_USER_SCOPE("vmm::remap.slot_event_record");
-          runtime_rc = musaEventRecord(ctx.slot_done_events[slot_index], ctx.copy_stream); }
-        if (runtime_rc != MUSA_SUCCESS) { fail(static_cast<int>(runtime_rc)); return; }
+          runtime_rc = cudaEventRecord(ctx.slot_done_events[slot_index], ctx.copy_stream); }
+        if (runtime_rc != cudaSuccess) { fail(static_cast<int>(runtime_rc)); return; }
         {
           std::lock_guard<std::mutex> lock(ctx.completion_mutex);
           request.event_recorded->store(1, std::memory_order_release);
@@ -795,20 +801,20 @@ class RemapWorker {
       return;
     }
     if (ctx.copy_enabled) {
-      musaError_t rc;
+      cudaError_t rc;
       {
         RECORD_USER_SCOPE("vmm::remap.copy_done_event_record");
-        rc = musaEventRecord(ctx.copy_done_event, ctx.copy_stream);
+        rc = cudaEventRecord(ctx.copy_done_event, ctx.copy_stream);
       }
-      if (rc != MUSA_SUCCESS) {
+      if (rc != cudaSuccess) {
         fail(static_cast<int>(rc));
         return;
       }
       // The callback runs after H2D and transfers its stream-owned reference to
-      // ReloadCleanupWorker. It neither calls a MUSA API nor destroys the context.
+      // ReloadCleanupWorker. It neither calls a CUDA API nor destroys the context.
       auto *lifetime = new std::shared_ptr<RemapHookContext>(context);
-      rc = musaLaunchHostFunc(ctx.copy_stream, reload_lifetime_host_func, lifetime);
-      if (rc != MUSA_SUCCESS) {
+      rc = cudaLaunchHostFunc(ctx.copy_stream, reload_lifetime_host_func, lifetime);
+      if (rc != cudaSuccess) {
         delete lifetime;
         fail(static_cast<int>(rc));
         return;
@@ -867,17 +873,17 @@ void release_host_func(void *user_data) {
   context->callback_fired.store(1, std::memory_order_release);
   vmm_remap_trace("release host func fired (D2H burst complete, batch queued)");
   ReleaseWorker::instance().enqueue_from_callback(std::move(context));
-  // NOTE: no MUSA/driver API calls here (they deadlock on the callback thread).
+  // NOTE: no CUDA/driver API calls here (they deadlock on the callback thread).
 }
 
 void launch_release_hook(const std::shared_ptr<ReleaseHookContext> &context,
-                         musaStream_t stream) {
+                         cudaStream_t stream) {
   auto *boxed = new std::shared_ptr<ReleaseHookContext>(context);
-  musaError_t rc = musaLaunchHostFunc(stream, release_host_func, boxed);
-  if (rc != MUSA_SUCCESS) {
+  cudaError_t rc = cudaLaunchHostFunc(stream, release_host_func, boxed);
+  if (rc != cudaSuccess) {
     delete boxed;
-    throw std::runtime_error(std::string("musaLaunchHostFunc failed: ") +
-                             musa_runtime_error_text(rc));
+    throw std::runtime_error(std::string("cudaLaunchHostFunc failed: ") +
+                             cuda_runtime_error_text(rc));
   }
 }
 
@@ -890,13 +896,13 @@ void remap_host_func(void *user_data) {
 }
 
 void launch_remap_hook(const std::shared_ptr<RemapHookContext> &context,
-                       musaStream_t stream) {
+                       cudaStream_t stream) {
   auto *boxed = new std::shared_ptr<RemapHookContext>(context);
-  musaError_t rc = musaLaunchHostFunc(stream, remap_host_func, boxed);
-  if (rc != MUSA_SUCCESS) {
+  cudaError_t rc = cudaLaunchHostFunc(stream, remap_host_func, boxed);
+  if (rc != cudaSuccess) {
     delete boxed;
-    throw std::runtime_error(std::string("musaLaunchHostFunc(remap) failed: ") +
-                             musa_runtime_error_text(rc));
+    throw std::runtime_error(std::string("cudaLaunchHostFunc(remap) failed: ") +
+                             cuda_runtime_error_text(rc));
   }
 }
 
@@ -915,25 +921,25 @@ class VMMActivationSlot {
  public:
   VMMActivationSlot(size_t requested_bytes, int device)
       : device_(device), requested_bytes_(requested_bytes) {
-    check_musa(muInit(0), "muInit");
-    check_musa(muDeviceGet(&musa_device_, device_), "muDeviceGet");
+    check_cuda(cuInit(0), "cuInit");
+    check_cuda(cuDeviceGet(&cuda_device_, device_), "cuDeviceGet");
     int supported = 0;
-    check_musa(muDeviceGetAttribute(&supported,
-                                    MU_DEVICE_ATTRIBUTE_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED,
-                                    musa_device_),
-               "muDeviceGetAttribute(VMM_SUPPORTED)");
-    if (!supported) throw std::runtime_error("MUSA device does not support VMM");
+    check_cuda(cuDeviceGetAttribute(&supported,
+                                    CU_DEVICE_ATTRIBUTE_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED,
+                                    cuda_device_),
+               "cuDeviceGetAttribute(VMM_SUPPORTED)");
+    if (!supported) throw std::runtime_error("CUDA device does not support VMM");
     const auto properties = allocation_properties(device_);
-    check_musa(muMemGetAllocationGranularity(&granularity_, &properties,
-                                             MU_MEM_ALLOC_GRANULARITY_MINIMUM),
-               "muMemGetAllocationGranularity");
+    check_cuda(cuMemGetAllocationGranularity(&granularity_, &properties,
+                                             CU_MEM_ALLOC_GRANULARITY_MINIMUM),
+               "cuMemGetAllocationGranularity");
     bytes_ = round_up(requested_bytes_, granularity_);
-    check_musa(muMemAddressReserve(&address_, bytes_, 0, 0, 0), "muMemAddressReserve");
+    check_cuda(cuMemAddressReserve(&address_, bytes_, 0, 0, 0), "cuMemAddressReserve");
     reserved_ = true;
     try {
       map_new_physical_allocation();
     } catch (...) {
-      muMemAddressFree(address_, bytes_);
+      cuMemAddressFree(address_, bytes_);
       reserved_ = false;
       throw;
     }
@@ -980,9 +986,9 @@ class VMMActivationSlot {
     drain_pending();
     ensure_reserved();
     if (!mapped_) throw std::runtime_error("VMM activation slot is already unmapped");
-    check_musa(muMemUnmap(address_, bytes_), "muMemUnmap");
+    check_cuda(cuMemUnmap(address_, bytes_), "cuMemUnmap");
     mapped_ = false;
-    check_musa(muMemRelease(handle_), "muMemRelease");
+    check_cuda(cuMemRelease(handle_), "cuMemRelease");
     handle_ = 0;
   }
 
@@ -1038,13 +1044,13 @@ class VMMActivationSlot {
     context->tls_state = std::make_shared<at::ThreadLocalState>();
     context->requests.push_back(make_release_request());
     pending_ = context;
-    launch_release_hook(context, reinterpret_cast<musaStream_t>(raw_stream));
+    launch_release_hook(context, reinterpret_cast<cudaStream_t>(raw_stream));
     return context;
   }
 
   // Block until the in-flight async release finished and apply its state.
   // This compatibility API uses a condition variable and never polls or
-  // synchronizes a MUSA stream/event.
+  // synchronizes a CUDA stream/event.
   void wait_for_async_release() {
     RECORD_USER_SCOPE("vmm::wait_for_async_release");
     drain_pending();
@@ -1111,12 +1117,12 @@ class VMMActivationSlot {
     drain_pending();
     if (!reserved_) return;
     if (mapped_) {
-      check_musa(muMemUnmap(address_, bytes_), "muMemUnmap(close)");
+      check_cuda(cuMemUnmap(address_, bytes_), "cuMemUnmap(close)");
       mapped_ = false;
-      check_musa(muMemRelease(handle_), "muMemRelease(close)");
+      check_cuda(cuMemRelease(handle_), "cuMemRelease(close)");
       handle_ = 0;
     }
-    check_musa(muMemAddressFree(address_, bytes_), "muMemAddressFree");
+    check_cuda(cuMemAddressFree(address_, bytes_), "cuMemAddressFree");
     reserved_ = false;
     address_ = 0;
   }
@@ -1192,20 +1198,20 @@ class VMMActivationSlot {
   }
   void map_new_physical_allocation() {
     const auto properties = allocation_properties(device_);
-    check_musa(muMemCreate(&handle_, bytes_, &properties, 0), "muMemCreate");
+    check_cuda(cuMemCreate(&handle_, bytes_, &properties, 0), "cuMemCreate");
     bool mapping_created = false;
     try {
-      check_musa(muMemMap(address_, bytes_, 0, handle_, 0), "muMemMap");
+      check_cuda(cuMemMap(address_, bytes_, 0, handle_, 0), "cuMemMap");
       mapping_created = true;
-      MUmemAccessDesc access{};
-      access.location.type = MU_MEM_LOCATION_TYPE_DEVICE;
+      CUmemAccessDesc access{};
+      access.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
       access.location.id = device_;
-      access.flags = MU_MEM_ACCESS_FLAGS_PROT_READWRITE;
-      check_musa(muMemSetAccess(address_, bytes_, &access, 1), "muMemSetAccess");
+      access.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+      check_cuda(cuMemSetAccess(address_, bytes_, &access, 1), "cuMemSetAccess");
       mapped_ = true;
     } catch (...) {
-      if (mapping_created) muMemUnmap(address_, bytes_);
-      muMemRelease(handle_);
+      if (mapping_created) cuMemUnmap(address_, bytes_);
+      cuMemRelease(handle_);
       handle_ = 0;
       throw;
     }
@@ -1238,22 +1244,22 @@ class VMMActivationSlot {
       pending_.reset();
     }
     if (mapped_) {
-      muMemUnmap(address_, bytes_);
+      cuMemUnmap(address_, bytes_);
       mapped_ = false;
-      muMemRelease(handle_);
+      cuMemRelease(handle_);
       handle_ = 0;
     }
-    muMemAddressFree(address_, bytes_);
+    cuMemAddressFree(address_, bytes_);
     reserved_ = false;
     address_ = 0;
   }
   int device_ = 0;
-  MUdevice musa_device_ = 0;
+  CUdevice cuda_device_ = 0;
   size_t requested_bytes_ = 0;
   size_t bytes_ = 0;
   size_t granularity_ = 0;
-  MUdeviceptr address_ = 0;
-  MUmemGenericAllocationHandle handle_ = 0;
+  CUdeviceptr address_ = 0;
+  CUmemGenericAllocationHandle handle_ = 0;
   bool reserved_ = false;
   bool mapped_ = false;
   std::shared_ptr<ReleaseHookContext> pending_;  // in-flight async release
@@ -1289,7 +1295,7 @@ std::shared_ptr<ReleaseHookContext> release_hooks_after(
   }
   for (auto &slot : slots) slot->pending_ = context;
   try {
-    launch_release_hook(context, reinterpret_cast<musaStream_t>(raw_stream));
+    launch_release_hook(context, reinterpret_cast<cudaStream_t>(raw_stream));
   } catch (...) {
     for (auto &slot : slots) {
       if (slot->pending_ == context) slot->pending_.reset();
@@ -1333,7 +1339,7 @@ std::shared_ptr<RemapHookContext> remap_hooks_after(
     slots[index]->pending_remap_index_ = index;
   }
   try {
-    launch_remap_hook(context, reinterpret_cast<musaStream_t>(raw_stream));
+    launch_remap_hook(context, reinterpret_cast<cudaStream_t>(raw_stream));
   } catch (...) {
     for (auto &slot : slots) {
       if (slot->pending_remap_ == context) slot->pending_remap_.reset();
@@ -1354,15 +1360,15 @@ std::shared_ptr<RemapHookContext> remap_and_copy_after(
   RemapWorker::instance();
   auto context = std::make_shared<RemapHookContext>();
   context->tls_state = std::make_shared<at::ThreadLocalState>();
-  context->copy_stream = reinterpret_cast<musaStream_t>(raw_stream);
+  context->copy_stream = reinterpret_cast<cudaStream_t>(raw_stream);
   context->copy_enabled = true;
   context->host_tensors = std::move(host_tensors);
-  check_musa_runtime(musaEventCreateWithFlags(&context->copy_done_event, musaEventDisableTiming),
-                     "musaEventCreateWithFlags(remap-and-copy)");
+  check_cuda_runtime(cudaEventCreateWithFlags(&context->copy_done_event, cudaEventDisableTiming),
+                     "cudaEventCreateWithFlags(remap-and-copy)");
   context->slot_done_events.resize(slots.size(), nullptr);
   for (auto &event : context->slot_done_events) {
-    check_musa_runtime(musaEventCreateWithFlags(&event, musaEventDisableTiming),
-                       "musaEventCreateWithFlags(remap-slot)");
+    check_cuda_runtime(cudaEventCreateWithFlags(&event, cudaEventDisableTiming),
+                       "cudaEventCreateWithFlags(remap-slot)");
   }
 
   std::unordered_set<VMMActivationSlot *> seen_slots;
@@ -1433,12 +1439,12 @@ std::shared_ptr<RemapHookContext> remap_only_slot_after(
   auto context = std::make_shared<RemapHookContext>();
   context->tls_state = std::make_shared<at::ThreadLocalState>();
   context->defer_copy = true;
-  context->copy_stream = reinterpret_cast<musaStream_t>(raw_stream);
+  context->copy_stream = reinterpret_cast<cudaStream_t>(raw_stream);
   context->host_tensors.push_back(std::move(host_tensor));
   context->slot_done_events.resize(1, nullptr);
-  check_musa_runtime(musaEventCreateWithFlags(&context->slot_done_events[0],
-                                              musaEventDisableTiming),
-                     "musaEventCreateWithFlags(remap-only-slot)");
+  check_cuda_runtime(cudaEventCreateWithFlags(&context->slot_done_events[0],
+                                              cudaEventDisableTiming),
+                     "cudaEventCreateWithFlags(remap-only-slot)");
   auto &host_tensor_ref = context->host_tensors[0];
   auto &checked_slot = slot;
   if (!checked_slot) throw std::runtime_error("VMM remap-only got a null slot");
@@ -1494,10 +1500,10 @@ void remap_wait_on_stream(const std::shared_ptr<RemapHookContext> &context,
   }
   {
     RECORD_USER_SCOPE("vmm::wait_remap_copy_on_stream.stream_wait_event");
-    check_musa_runtime(
-        musaStreamWaitEvent(reinterpret_cast<musaStream_t>(raw_stream),
+    check_cuda_runtime(
+        cudaStreamWaitEvent(reinterpret_cast<cudaStream_t>(raw_stream),
                             context->copy_done_event, 0),
-        "musaStreamWaitEvent(remap-and-copy)");
+        "cudaStreamWaitEvent(remap-and-copy)");
   }
 }
 
@@ -1513,10 +1519,10 @@ void remap_enqueue_wait_on_stream(const std::shared_ptr<RemapHookContext> &conte
   }
   {
     RECORD_USER_SCOPE("vmm::enqueue_remap_copy_wait.stream_wait_event");
-    check_musa_runtime(
-        musaStreamWaitEvent(reinterpret_cast<musaStream_t>(raw_stream),
+    check_cuda_runtime(
+        cudaStreamWaitEvent(reinterpret_cast<cudaStream_t>(raw_stream),
                             context->copy_done_event, 0),
-        "musaStreamWaitEvent(remap-and-copy)");
+        "cudaStreamWaitEvent(remap-and-copy)");
   }
 }
 
@@ -1552,9 +1558,9 @@ void remap_enqueue_slot_wait(const std::shared_ptr<RemapHookContext> &context,
   if (event == nullptr) {
     throw std::runtime_error("VMM remap slot has no completion event");
   }
-  check_musa_runtime(
-      musaStreamWaitEvent(reinterpret_cast<musaStream_t>(raw_stream), event, 0),
-      "musaStreamWaitEvent(remap-slot)");
+  check_cuda_runtime(
+      cudaStreamWaitEvent(reinterpret_cast<cudaStream_t>(raw_stream), event, 0),
+      "cudaStreamWaitEvent(remap-slot)");
 }
 
 // Deferred-H2D launch: the worker finished the VMM transition for this slot
@@ -1572,7 +1578,7 @@ void remap_slot_launch_h2d(const std::shared_ptr<RemapHookContext> &context,
   }
   auto &ctx = *context;
   auto &request = ctx.requests[slot_index];
-  auto stream = reinterpret_cast<musaStream_t>(raw_stream);
+  auto stream = reinterpret_cast<cudaStream_t>(raw_stream);
   const auto wait_started = VmmClock::now();
   {
     std::unique_lock<std::mutex> lock(*request.state_mutex);
@@ -1596,29 +1602,29 @@ void remap_slot_launch_h2d(const std::shared_ptr<RemapHookContext> &context,
   if (request.remapped->load(std::memory_order_acquire) == 0) {
     throw std::runtime_error("VMM remap slot completed without a mapping");
   }
-  musaError_t rc = musaSetDevice(request.device);
-  if (rc != MUSA_SUCCESS) {
-    throw std::runtime_error(std::string("musaSetDevice failed: ") + musaGetErrorString(rc));
+  cudaError_t rc = cudaSetDevice(request.device);
+  if (rc != cudaSuccess) {
+    throw std::runtime_error(std::string("cudaSetDevice failed: ") + cudaGetErrorString(rc));
   }
   {
     RECORD_USER_SCOPE("vmm::remap_slot_launch_h2d.memcpy_async");
-    rc = musaMemcpyAsync(reinterpret_cast<void *>(static_cast<uintptr_t>(request.address)),
+    rc = cudaMemcpyAsync(reinterpret_cast<void *>(static_cast<uintptr_t>(request.address)),
                          request.host_address, request.copy_bytes,
-                         musaMemcpyHostToDevice, stream);
+                         cudaMemcpyHostToDevice, stream);
   }
-  if (rc != MUSA_SUCCESS) {
-    throw std::runtime_error(std::string("musaMemcpyAsync(H2D launch) failed: ") +
-                             musaGetErrorString(rc));
+  if (rc != cudaSuccess) {
+    throw std::runtime_error(std::string("cudaMemcpyAsync(H2D launch) failed: ") +
+                             cudaGetErrorString(rc));
   }
   request.copy_submitted = true;
   ctx.copies_submitted.fetch_add(1, std::memory_order_release);
   {
     RECORD_USER_SCOPE("vmm::remap_slot_launch_h2d.event_record");
-    rc = musaEventRecord(request.done_event, stream);
+    rc = cudaEventRecord(request.done_event, stream);
   }
-  if (rc != MUSA_SUCCESS) {
-    throw std::runtime_error(std::string("musaEventRecord(H2D launch) failed: ") +
-                             musaGetErrorString(rc));
+  if (rc != cudaSuccess) {
+    throw std::runtime_error(std::string("cudaEventRecord(H2D launch) failed: ") +
+                             cudaGetErrorString(rc));
   }
   {
     std::lock_guard<std::mutex> lock(ctx.completion_mutex);
@@ -1632,11 +1638,11 @@ void remap_slot_launch_h2d(const std::shared_ptr<RemapHookContext> &context,
     // cleanup worker so the context outlives the copies without a host-side
     // block here.
     auto *lifetime = new std::shared_ptr<RemapHookContext>(context);
-    rc = musaLaunchHostFunc(stream, reload_lifetime_host_func, lifetime);
-    if (rc != MUSA_SUCCESS) {
+    rc = cudaLaunchHostFunc(stream, reload_lifetime_host_func, lifetime);
+    if (rc != cudaSuccess) {
       delete lifetime;
-      throw std::runtime_error(std::string("musaLaunchHostFunc(H2D launch) failed: ") +
-                               musaGetErrorString(rc));
+      throw std::runtime_error(std::string("cudaLaunchHostFunc(H2D launch) failed: ") +
+                               cudaGetErrorString(rc));
     }
   }
 }
@@ -1651,11 +1657,11 @@ void remap_enqueue_slot_waits(const std::shared_ptr<RemapHookContext> &context,
     throw std::runtime_error("VMM asynchronous reload submission failed: error " +
                              std::to_string(context->error_code.load()));
   }
-  auto stream = reinterpret_cast<musaStream_t>(raw_stream);
+  auto stream = reinterpret_cast<cudaStream_t>(raw_stream);
   for (auto event : context->slot_done_events) {
     if (event == nullptr) throw std::runtime_error("VMM slot has no completion event");
-    check_musa_runtime(musaStreamWaitEvent(stream, event, 0),
-                       "musaStreamWaitEvent(remap-slot)");
+    check_cuda_runtime(cudaStreamWaitEvent(stream, event, 0),
+                       "cudaStreamWaitEvent(remap-slot)");
   }
 }
 py::dict release_hook_status(const std::shared_ptr<ReleaseHookContext> &context) {
@@ -1683,7 +1689,7 @@ py::dict remap_hook_status(const std::shared_ptr<RemapHookContext> &context) {
 py::dict vmm_driver_memory_info() {
   size_t free_bytes = 0;
   size_t total_bytes = 0;
-  check_musa(muMemGetInfo(&free_bytes, &total_bytes), "muMemGetInfo");
+  check_cuda(cuMemGetInfo(&free_bytes, &total_bytes), "cuMemGetInfo");
   py::dict result;
   result["free_bytes"] = free_bytes;
   result["total_bytes"] = total_bytes;

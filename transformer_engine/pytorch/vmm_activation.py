@@ -1,6 +1,6 @@
 # Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
-"""Fixed-address MUSA virtual-memory slots for graph-captured activations."""
+"""Fixed-address CUDA virtual-memory slots for graph-captured activations."""
 
 from __future__ import annotations
 
@@ -24,12 +24,12 @@ def vmm_profiler_status() -> dict[str, object]:
     """Return profiler callback and native trace state."""
     return dict(tex.vmm_profiler_status())
 def vmm_driver_memory_info() -> dict[str, int]:
-    """Return free and total bytes reported by the active MUSA driver context."""
+    """Return free and total bytes reported by the active CUDA driver context."""
     return {key: int(value) for key, value in dict(tex.vmm_driver_memory_info()).items()}
 
 
 
-class MUSAActivationVMMAllocation:
+class CUDAActivationVMMAllocation:
     """Own a fixed virtual address and replaceable physical device backing."""
 
     def __init__(self, shape: Sequence[int], stride: Sequence[int], dtype: torch.dtype,
@@ -38,8 +38,8 @@ class MUSAActivationVMMAllocation:
         self.stride = tuple(stride)
         self.dtype = dtype
         self.device = torch.device(device)
-        if self.device.type != "musa":
-            raise ValueError(f"MUSA VMM allocation requires a MUSA device, got {self.device}")
+        if self.device.type not in ("cuda", "musa"):
+            raise ValueError(f"CUDA VMM allocation requires a CUDA device, got {self.device}")
         if not self.shape or len(self.shape) != len(self.stride):
             raise ValueError(f"invalid shape/stride: {self.shape}/{self.stride}")
         if any(size <= 0 for size in self.shape) or any(value < 0 for value in self.stride):
@@ -49,7 +49,7 @@ class MUSAActivationVMMAllocation:
         self.storage_bytes = (maximum_element_offset + 1) * element_size
         device_index = self.device.index
         if device_index is None:
-            device_index = torch.musa.current_device()
+            device_index = torch.cuda.current_device()
         self._allocation = tex.VMMActivationSlot(self.storage_bytes, device_index)
         self._tensor = self._allocation.tensor(self.shape, self.stride, self.dtype)
         self._address = self._tensor.data_ptr()
@@ -94,7 +94,7 @@ class MUSAActivationVMMAllocation:
     def create_and_remap(self) -> None:
         self._allocation.create_and_remap()
         if self.info()["address"] != self._address or self._tensor.data_ptr() != self._address:
-            raise RuntimeError("MUSA VMM allocation changed virtual address after remap")
+            raise RuntimeError("CUDA VMM allocation changed virtual address after remap")
 
     # ------------------------------------------------------------------
     # Asynchronous release API
@@ -107,7 +107,7 @@ class MUSAActivationVMMAllocation:
         completed everything enqueued before this call (the D2H burst). The
         virtual address reservation is kept; remap with `create_and_remap()`.
         """
-        return self._allocation.release_hook_after(_raw_musa_stream(stream))
+        return self._allocation.release_hook_after(_raw_cuda_stream(stream))
 
     def wait_for_async_release(self) -> None:
         """Block until the in-flight async release completed; surface errors."""
@@ -121,13 +121,13 @@ class MUSAActivationVMMAllocation:
         """Adopt a completed async remap and verify its fixed address."""
         self._allocation.wait_for_async_remap()
         if self.info()["address"] != self._address or self._tensor.data_ptr() != self._address:
-            raise RuntimeError("MUSA VMM allocation changed virtual address after async remap")
+            raise RuntimeError("CUDA VMM allocation changed virtual address after async remap")
 
     def adopt_async_remap(self) -> None:
         """Adopt a worker-completed remap without waiting for it."""
         self._allocation.adopt_async_remap()
         if self.info()["address"] != self._address or self._tensor.data_ptr() != self._address:
-            raise RuntimeError("MUSA VMM allocation changed virtual address after async remap")
+            raise RuntimeError("CUDA VMM allocation changed virtual address after async remap")
 
     def async_remap_done(self) -> bool:
         """Whether a previously enqueued asynchronous remap already finished."""
@@ -140,15 +140,17 @@ class MUSAActivationVMMAllocation:
         self._closed = True
 
 
-def _raw_musa_stream(stream: torch.Stream) -> int:
-    """Return the raw MUSA stream handle (uintptr_t) for a torch stream."""
-    raw = getattr(stream, "musa_stream", None)
+def _raw_cuda_stream(stream: torch.Stream) -> int:
+    """Return the raw CUDA stream handle (uintptr_t) for a torch stream."""
+    raw = getattr(stream, "cuda_stream", None)
     if raw is None:
-        raise ValueError(f"stream {stream!r} does not expose a musa_stream handle")
+        raw = getattr(stream, "musa_stream", None)
+    if raw is None:
+        raise ValueError(f"stream {stream!r} does not expose a cuda_stream handle")
     return int(raw)
 
 
-def release_hooks_after(allocations: Sequence["MUSAActivationVMMAllocation"],
+def release_hooks_after(allocations: Sequence["CUDAActivationVMMAllocation"],
                         stream: torch.Stream) -> "VMMReleaseHookContext":
     """Batch variant: one host func releases backing for many slots at once.
 
@@ -157,18 +159,18 @@ def release_hooks_after(allocations: Sequence["MUSAActivationVMMAllocation"],
     raw release work in one batch.
     """
     return tex.release_hooks_after([a._allocation for a in allocations],
-                                   _raw_musa_stream(stream))
+                                   _raw_cuda_stream(stream))
 
 
-def remap_hooks_after(allocations: Sequence["MUSAActivationVMMAllocation"],
+def remap_hooks_after(allocations: Sequence["CUDAActivationVMMAllocation"],
                       stream: torch.Stream) -> "VMMRemapHookContext":
     """Submit one asynchronous fixed-address remap batch on ``stream``."""
     return tex.remap_hooks_after([a._allocation for a in allocations],
-                                 _raw_musa_stream(stream))
+                                 _raw_cuda_stream(stream))
 
 
 def remap_and_copy_after(
-    allocations: Sequence["MUSAActivationVMMAllocation"],
+    allocations: Sequence["CUDAActivationVMMAllocation"],
     host_tensors: Sequence[torch.Tensor],
     stream: torch.Stream,
 ) -> "VMMRemapHookContext":
@@ -176,12 +178,12 @@ def remap_and_copy_after(
     return tex.remap_and_copy_after(
         [allocation._allocation for allocation in allocations],
         list(host_tensors),
-        _raw_musa_stream(stream),
+        _raw_cuda_stream(stream),
     )
 
 
 def remap_and_copy_slot_after(
-    allocation: MUSAActivationVMMAllocation,
+    allocation: CUDAActivationVMMAllocation,
     host_tensor: torch.Tensor,
     stream: torch.Stream,
 ) -> "VMMRemapHookContext":
@@ -189,12 +191,12 @@ def remap_and_copy_slot_after(
     return tex.remap_and_copy_slot_after(
         allocation._allocation,
         host_tensor,
-        _raw_musa_stream(stream),
+        _raw_cuda_stream(stream),
     )
 
 
 def remap_only_slot_after(
-    allocation: MUSAActivationVMMAllocation,
+    allocation: CUDAActivationVMMAllocation,
     host_tensor: torch.Tensor,
     stream: torch.Stream,
 ) -> "VMMRemapHookContext":
@@ -202,7 +204,7 @@ def remap_only_slot_after(
     return tex.remap_only_slot_after(
         allocation._allocation,
         host_tensor,
-        _raw_musa_stream(stream),
+        _raw_cuda_stream(stream),
     )
 
 
@@ -210,29 +212,29 @@ def launch_remap_slot_h2d(
     context: "VMMRemapHookContext", slot_index: int, stream: torch.Stream
 ) -> None:
     """Launch one deferred slot's H2D now, waiting for its remap if needed."""
-    context.launch_slot_h2d(int(slot_index), _raw_musa_stream(stream))
+    context.launch_slot_h2d(int(slot_index), _raw_cuda_stream(stream))
 
 
 def wait_remap_copy_on_stream(context: "VMMRemapHookContext", stream: torch.Stream) -> None:
     """Wait for worker submission, then install the GPU-side H2D dependency."""
-    context.wait_on_stream(_raw_musa_stream(stream))
+    context.wait_on_stream(_raw_cuda_stream(stream))
 
 
 def enqueue_remap_copy_wait(context: "VMMRemapHookContext", stream: torch.Stream) -> None:
     """Install only the GPU-side H2D dependency without waiting on the worker."""
-    context.enqueue_wait_on_stream(_raw_musa_stream(stream))
+    context.enqueue_wait_on_stream(_raw_cuda_stream(stream))
 
 
 def enqueue_remap_slot_waits(context: "VMMRemapHookContext", stream: torch.Stream) -> None:
     """Install one completion wait for each remapped slot."""
-    context.enqueue_slot_waits(_raw_musa_stream(stream))
+    context.enqueue_slot_waits(_raw_cuda_stream(stream))
 
 
 def wait_remap_slot_on_stream(
     context: "VMMRemapHookContext", slot_index: int, stream: torch.Stream
 ) -> None:
     """Wait until one slot H2D is submitted, then enqueue its GPU dependency."""
-    context.enqueue_slot_wait(int(slot_index), _raw_musa_stream(stream))
+    context.enqueue_slot_wait(int(slot_index), _raw_cuda_stream(stream))
 
 
 def wait_until_remap_slot_submitted(
