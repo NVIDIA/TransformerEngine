@@ -16,7 +16,7 @@ import pytest
 
 from .artifacts import write_run_artifacts
 from .case import Case, CaseSkip
-from .distributed import NODE_ID_ENV, rank as dist_rank, run_across_ranks
+from .distributed import LAUNCH_ENV, launched_node_id, rank as dist_rank, run_across_ranks
 from .declaration import declared_axes, normalize_argnames, set_plugin_active
 from .decorator import (
     BENCHMARK_MARKER,
@@ -335,16 +335,15 @@ def pytest_pyfunc_call(pyfuncitem):
 def _check_rank_is_running_its_own_test(pyfuncitem) -> None:
     """Fail loudly when a rank's environment does not belong to the test it is running.
 
-    ``NVTE_BENCHMARK_DIST_*`` left over from an earlier run -- a stale export, a command
-    line copied out of a log -- would otherwise make the parent believe it is a child and
-    silently run one rank where the test asked for several.
+    A launch marker left over from an earlier run -- a stale export, a command line copied
+    out of a log -- would otherwise make the parent believe it is a child and silently run
+    one rank where the test asked for several.
     """
-    expected = os.environ.get(NODE_ID_ENV)
+    expected = launched_node_id()
     if expected is not None and expected != pyfuncitem.nodeid:
         raise pytest.UsageError(
-            f"{pyfuncitem.nodeid} ran with NVTE_BENCHMARK_DIST_* set for {expected}. These"
-            " are set by the harness for the ranks it spawns; unset them to run this test"
-            " directly."
+            f"{pyfuncitem.nodeid} ran with {LAUNCH_ENV} set for {expected}. The harness sets"
+            " it on the ranks it spawns; unset it to run this test directly."
         )
 
 

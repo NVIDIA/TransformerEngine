@@ -22,34 +22,36 @@ _OUTPUT_TAIL_CHARS = 4000
 _POLL_INTERVAL_S = 0.05
 _KILL_GRACE_S = 10.0
 
-RANK_ENV = "NVTE_BENCHMARK_DIST_RANK"
-WORLD_SIZE_ENV = "NVTE_BENCHMARK_DIST_WORLD_SIZE"
-COORDINATOR_ADDR_ENV = "NVTE_BENCHMARK_DIST_COORDINATOR_ADDR"
-COORDINATOR_PORT_ENV = "NVTE_BENCHMARK_DIST_COORDINATOR_PORT"
+#: The one variable the harness owns. Its presence means "this process is a rank I
+#: spawned, for this node ID", which is what stops a child launching ranks of its own and
+#: what keeps an unrelated RANK in the environment from being mistaken for one of ours.
+LAUNCH_ENV = "NVTE_BENCHMARK_DIST_LAUNCH"
 
-#: PyTorch's own default, so a test that ignores the arguments and rendezvous through
-#: ``env://`` still lands on the port it expects.
+#: PyTorch's own default, so a rank that rendezvous through ``env://`` lands where it
+#: expects.
 DEFAULT_COORDINATOR_PORT = 29500
-NODE_ID_ENV = "NVTE_BENCHMARK_DIST_NODE_ID"
+
+
+def launched_node_id() -> str | None:
+    """The node ID this rank was spawned to run, or ``None`` if it was not spawned."""
+    return os.environ.get(LAUNCH_ENV)
 
 
 def rank() -> int | None:
-    """This process's rank, or ``None`` when it is not a rank the harness spawned."""
-    value = os.environ.get(RANK_ENV)
-    return None if value is None else int(value)
+    """This rank's index, or ``None`` outside a launch the harness started."""
+    return None if launched_node_id() is None else int(os.environ["RANK"])
 
 
 def world_size() -> int | None:
-    """The launch's world size, or ``None`` when this is not a spawned rank."""
-    value = os.environ.get(WORLD_SIZE_ENV)
-    return None if value is None else int(value)
+    """The launch's world size, or ``None`` outside a launch the harness started."""
+    return None if launched_node_id() is None else int(os.environ["WORLD_SIZE"])
 
 
 def coordinator() -> tuple[str, int]:
     """The rendezvous endpoint this launch agreed on, as ``(address, port)``."""
     return (
-        os.environ.get(COORDINATOR_ADDR_ENV, "127.0.0.1"),
-        int(os.environ.get(COORDINATOR_PORT_ENV, DEFAULT_COORDINATOR_PORT)),
+        os.environ.get("MASTER_ADDR", "127.0.0.1"),
+        int(os.environ.get("MASTER_PORT", DEFAULT_COORDINATOR_PORT)),
     )
 
 
@@ -120,24 +122,21 @@ def _child_command(pyfuncitem, settings, report_dir) -> list[str]:
 def _child_env(parent_env, rank_index, world, endpoint, nodeid) -> dict[str, str]:
     """Build a rank's environment as a copy, never by mutating the parent's.
 
-    Mutating ``os.environ`` and unsetting afterwards leaks values into later launches in
-    the same session, which silently changes the workload being measured.
+    Every launch variable is set rather than defaulted: an inherited value describes some
+    other launch, and inheriting RANK in particular would give every rank the same index.
+    A test needs none of these -- ``dist_init`` is handed the same facts as arguments --
+    but setting the names ``env://`` reads means a rank can rendezvous the way it would
+    under torchrun.
     """
+    address, port = endpoint
     env = dict(parent_env)
-    env[RANK_ENV] = str(rank_index)
-    env[WORLD_SIZE_ENV] = str(world)
-    env[COORDINATOR_ADDR_ENV], port = endpoint[0], endpoint[1]
-    env[COORDINATOR_PORT_ENV] = str(port)
-    # The full set init_process_group(init_method="env://") reads, so a test can ignore
-    # the arguments and rendezvous the way it would under torchrun. setdefault, so a value
-    # the surrounding environment set deliberately still wins.
-    env.setdefault("MASTER_ADDR", endpoint[0])
-    env.setdefault("MASTER_PORT", str(port))
-    env.setdefault("RANK", str(rank_index))
-    env.setdefault("WORLD_SIZE", str(world))
-    env.setdefault("LOCAL_RANK", str(rank_index))
-    env.setdefault("LOCAL_WORLD_SIZE", str(world))
-    env[NODE_ID_ENV] = nodeid
+    env[LAUNCH_ENV] = nodeid
+    env["MASTER_ADDR"] = address
+    env["MASTER_PORT"] = str(port)
+    env["RANK"] = str(rank_index)
+    env["WORLD_SIZE"] = str(world)
+    env["LOCAL_RANK"] = str(rank_index)
+    env["LOCAL_WORLD_SIZE"] = str(world)
     return env
 
 
