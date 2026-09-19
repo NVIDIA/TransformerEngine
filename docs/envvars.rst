@@ -100,6 +100,8 @@ Optional Dependencies
    :Description: Build CuTeDSL kernel bindings in C++. Set this environment variable to ``0`` when building through
                  ``setup.py`` to disable them. If you prefer to control this through CMake, pass ``-DNVTE_WITH_CUTEDSL=OFF`` instead.
                  Disable this for builds that do not have a Python environment or do not want apache-tvm-ffi as their dependency.
+                 Note: Standalone C++ executables that link a ``libtransformer_engine.so`` built with CuTeDSL enabled must also
+                 link a Python embedding library using CMake's ``Python::Python`` target.
 
 .. envvar:: NVTE_BUILD_ACTIVATION_WITH_FAST_MATH
 
