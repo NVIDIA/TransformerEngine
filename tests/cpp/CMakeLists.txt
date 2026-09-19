@@ -41,7 +41,13 @@ include_directories(../../transformer_engine)
 include_directories(${CMAKE_SOURCE_DIR})
 
 find_package(CUDAToolkit REQUIRED)
+find_package(Python COMPONENTS Development.Embed REQUIRED)
 include(${CMAKE_SOURCE_DIR}/../../transformer_engine/common/cmake/cuDNN.cmake)
 
 add_subdirectory(operator)
 add_subdirectory(util)
+
+# The tests are standalone C++ executables, so they provide the Python interpreter used by
+# libtransformer_engine's CuTeDSL backend.
+target_link_libraries(test_operator PRIVATE Python::Python)
+target_link_libraries(test_util PRIVATE Python::Python)

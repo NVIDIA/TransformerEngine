@@ -93,6 +93,16 @@ Optional Dependencies
    :Default: ``0``
    :Description: Enable NVSHMEM support. When set to ``1``, requires ``NVSHMEM_HOME`` to be set to the NVSHMEM installation directory.
 
+.. envvar:: NVTE_WITH_CUTEDSL
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``1``
+   :Description: Build CuTeDSL kernel bindings in C++. Set this environment variable to ``0`` when building through
+                 ``setup.py`` to disable them. If you prefer to control this through CMake, pass ``-DNVTE_WITH_CUTEDSL=OFF`` instead.
+                 Disable this for builds that do not want CuTeDSL support or Apache TVM-FFI as a build dependency.
+                 Note: Standalone C++ executables that link a ``libtransformer_engine.so`` built with CuTeDSL enabled must also
+                 link a Python embedding library using CMake's ``Python::Python`` target.
+
 .. envvar:: NVTE_BUILD_ACTIVATION_WITH_FAST_MATH
 
    :Type: CMake option
@@ -129,6 +139,22 @@ General
    :Description: Size in MiB of the internal ``NVTETensor`` handle pool. Increase this
                  value if an application legitimately creates more tensor handles than
                  the default pool can hold.
+
+.. envvar:: NVTE_ENABLE_CUTEDSL_BACKEND
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Use CuTeDSL kernels when available; otherwise, fall back to the
+                 CUDA C++ kernels. CuTeDSL kernels will be registered when
+                 ``import transformer_engine`` so this env var should be set before that.
+
+.. envvar:: NVTE_WARN_IF_CUTEDSL_BACKEND_NOT_CHOSEN
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Warn when TE falls back to the CUDA C++ kernels instead of dispatching to
+                 available CuTeDSL kernels. Useful to check if CuTeDSL path is taken,
+                 since a silent fallback is otherwise indistinguishable from success.
 
 .. envvar:: NVTE_GROUPED_TENSOR_HANDLE_POOL_SIZE_MB
 
@@ -305,7 +331,7 @@ Kernel Configuration
 
    :Type: ``int`` (0 or 1)
    :Default: ``0``
-   :Description: Enable fast math optimizations in runtime-compiled (NVRTC) kernels. This trades numerical accuracy for performance. These optimizations are experimental and inconsistently implemented.
+   :Description: Enable fast math optimizations in runtime-compiled (NVRTC / CuTeDSL) kernels. This trades numerical accuracy for performance. These optimizations are experimental and inconsistently implemented.
 
 .. envvar:: NVTE_DISABLE_NVRTC
 

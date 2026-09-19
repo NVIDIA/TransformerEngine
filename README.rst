@@ -227,7 +227,12 @@ Alternatively, install directly from the GitHub repository:
 
 .. code-block:: bash
 
+    # Required by the default CuTeDSL-enabled build when using --no-build-isolation.
+    pip install "apache-tvm-ffi>=0.1.12"
     pip install --no-build-isolation git+https://github.com/NVIDIA/TransformerEngine.git@stable
+
+Set ``NVTE_WITH_CUTEDSL=0`` on the second command to build without the optional CuTeDSL bridge
+and apache-tvm-ffi as its python build dependency.
 
 When installing from GitHub, you can explicitly specify frameworks using the environment variable:
 
