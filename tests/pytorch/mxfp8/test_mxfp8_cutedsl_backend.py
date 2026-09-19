@@ -9,6 +9,9 @@
 
 import ctypes
 import os
+import subprocess
+import sys
+import textwrap
 
 import pytest
 import torch
@@ -104,6 +107,41 @@ get_swizzle_id = lambda s: "swizzled" if s else "non-swizzled"
 
 def set_cutedsl_backend(enabled):
     CORE_LIB.nvte_set_cutedsl_backend(1 if enabled else 0)
+
+
+def test_enable_cutedsl_backend_after_import():
+    """Test if we can manually enable the CuTeDSL backend without enabling CuTeDSL backend in the beginning."""
+    script = textwrap.dedent(
+        """
+        import ctypes
+
+        import transformer_engine.pytorch  # pylint: disable=unused-import
+        import tvm_ffi
+
+        from transformer_engine.common import _get_shared_object_file
+
+        entrypoint = "get_mxfp8_quantization_function"
+        assert tvm_ffi.get_global_func(entrypoint, allow_missing=True) is None
+
+        core = ctypes.CDLL(str(_get_shared_object_file("core")))
+        setter = core.nvte_set_cutedsl_backend
+        setter.argtypes = [ctypes.c_int]
+        setter.restype = None
+        setter(1)
+
+        assert tvm_ffi.get_global_func(entrypoint, allow_missing=True) is not None
+        """
+    )
+    env = os.environ.copy()
+    env["NVTE_ENABLE_CUTEDSL_BACKEND"] = "0"
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 @pytest.fixture(scope="module", autouse=True)
