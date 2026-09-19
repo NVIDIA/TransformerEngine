@@ -19,10 +19,8 @@ NUM_PARALLEL_JOBS=4
 export NVTE_ENABLE_CUTEDSL_BACKEND=1
 export NVTE_WARN_IF_CUTEDSL_BACKEND_NOT_CHOSEN=1
 
-TVM_FFI_LIBRARY=$(python3 -c 'from importlib.metadata import distribution; print(distribution("apache-tvm-ffi").locate_file("tvm_ffi/lib/libtvm_ffi.so"))')
-
 cd $TE_PATH/tests/cpp
-cmake -GNinja -Bbuild -DTVM_FFI_LIBRARY="$TVM_FFI_LIBRARY" .
+cmake -GNinja -Bbuild .
 cmake --build build
 export OMP_NUM_THREADS=$((NUM_PHYSICAL_CORES / NUM_PARALLEL_JOBS))
 ctest --test-dir build -j$NUM_PARALLEL_JOBS --output-junit $XML_LOG_DIR/ctest_cppunittest.xml
