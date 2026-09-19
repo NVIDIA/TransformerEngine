@@ -98,7 +98,7 @@ Optional Dependencies
    :Type: ``int`` (0 or 1)
    :Default: ``1``
    :Description: Build CuTeDSL kernel bindings in C++. Set this environment variable to ``0`` when building through
-                 ``setup.py`` to disable them. If you prefer to control this through CMake, pass ``-DNVTE_WITH_CUTEDSL=OFF`` instead. 
+                 ``setup.py`` to disable them. If you prefer to control this through CMake, pass ``-DNVTE_WITH_CUTEDSL=OFF`` instead.
                  Disable this for builds that do not have a Python environment or do not want apache-tvm-ffi as their dependency.
 
 .. envvar:: NVTE_BUILD_ACTIVATION_WITH_FAST_MATH

@@ -272,7 +272,7 @@ class TVMFFICentral {
   void set_cutedsl_backend_enabled(bool enabled) {
     cutedsl_backend_enabled_.store(enabled, std::memory_order_relaxed);
     // If tvm-ffi is not available because it's disabled in the beginning,
-    // try to initialized it
+    // try to initialize it
     if (enabled && !get_tvm_ffi_available()) {
       std::lock_guard<std::mutex> init_lock(tvm_ffi_init_mutex_);
       // Check again after acquiring the lock, in case another thread already initialized it.
