@@ -328,7 +328,8 @@ class TVMFFICentral {
       tvm_ffi_handle_ = dlopen("libtvm_ffi.so", RTLD_NOW | RTLD_GLOBAL);
     }
     if (tvm_ffi_handle_ == nullptr) {
-      NVTE_WARN("The CuTeDSL kernel is not chosen because the TVM-FFI library could not be loaded.");
+      NVTE_WARN(
+          "The CuTeDSL kernel is not chosen because the TVM-FFI library could not be loaded.");
       return false;
     }
 
@@ -338,7 +339,8 @@ class TVMFFICentral {
     move_error_ =
         reinterpret_cast<MoveErrorFn>(dlsym(tvm_ffi_handle_, "TVMFFIErrorMoveFromRaised"));
     if (get_global_ == nullptr || move_error_ == nullptr) {
-      NVTE_WARN("The CuTeDSL kernel is not chosen because the TVM-FFI library could not be loaded.");
+      NVTE_WARN(
+          "The CuTeDSL kernel is not chosen because the TVM-FFI library could not be loaded.");
       return false;
     }
     return true;
