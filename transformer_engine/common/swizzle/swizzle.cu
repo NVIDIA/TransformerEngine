@@ -954,6 +954,24 @@ __global__ void __launch_bounds__(TB_DIM* TB_DIM)
       input, output, M, K, original_M, original_K, flat_bid, grid_dim);
 }
 
+// Compact inputs need independent input strides and must not issue vector loads
+// across their allocation boundary. Each block writes one 128x4 scale tile.
+template <bool ROWWISE>
+__global__ void swizzle_compact_mxfp8_kernel(const uint8_t* input, uint8_t* output, size_t input_m,
+                                             size_t input_k) {
+  const size_t tile_offset = (blockIdx.y * static_cast<size_t>(gridDim.x) + blockIdx.x) * 512;
+#pragma unroll
+  for (int within_tile = threadIdx.x; within_tile < 512; within_tile += 256) {
+    const size_t m = blockIdx.y * size_t{128} + within_tile / 16 + ((within_tile % 16) / 4) * 32;
+    const size_t k = blockIdx.x * size_t{4} + within_tile % 4;
+    uint8_t value = 0;
+    if (m < input_m && k < input_k) {
+      value = ROWWISE ? input[m * input_k + k] : input[k * input_m + m];
+    }
+    output[tile_offset + within_tile] = value;
+  }
+}
+
 }  // namespace
 
 void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t stream) {
@@ -962,8 +980,22 @@ void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t s
   NVTE_CHECK(scaling_mode == NVTE_MXFP8_1D_SCALING || scaling_mode == NVTE_NVFP4_1D_SCALING,
              "Input tensor has invalid scaling mode (", to_string(input->scaling_mode), ").");
 
-  // Check tensors
-  CheckInputTensor(*input, "scaling_factor_input");
+  // Only relax scale-shape validation for the exact compact MXFP8 layout.
+  bool compact_mxfp8 = false;
+  if (scaling_mode == NVTE_MXFP8_1D_SCALING && !input->with_gemm_swizzled_scales) {
+    const auto [rows, cols] = input->flat_2d_dims();
+    if (input->scale_inv.has_data() && !input->columnwise_scale_inv.has_data()) {
+      const auto& shape = input->scale_inv.shape;
+      compact_mxfp8 = shape.size() == 2 && shape[0] == rows &&
+                      shape[1] == DIVUP(cols, size_t{32}) &&
+                      (shape[0] % 128 != 0 || shape[1] % 4 != 0);
+    } else if (input->columnwise_scale_inv.has_data() && !input->scale_inv.has_data()) {
+      const auto& shape = input->columnwise_scale_inv.shape;
+      compact_mxfp8 = shape.size() == 2 && shape[0] == DIVUP(rows, size_t{32}) &&
+                      shape[1] == cols && (shape[0] % 4 != 0 || shape[1] % 128 != 0);
+    }
+  }
+  CheckInputTensor(*input, "scaling_factor_input", !compact_mxfp8);
   CheckInputTensor(*output, "scaling_factor_output");
   NVTE_CHECK(!input->with_gemm_swizzled_scales,
              "Expected input tensor with scales in compact format.");
@@ -1026,6 +1058,34 @@ void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t s
     }
     default:
       NVTE_ERROR("Invalid scaling mode");
+  }
+
+  if (compact_mxfp8) {
+    NVTE_CHECK(
+        output->scaling_mode == scaling_mode && output->flat_2d_dims() == input->flat_2d_dims(),
+        "Input and output tensor layouts must match.");
+    const auto& input_scales =
+        has_rowwise_scale_inv ? input->scale_inv : input->columnwise_scale_inv;
+    const auto& output_scales =
+        has_rowwise_scale_inv ? output->scale_inv : output->columnwise_scale_inv;
+    NVTE_CHECK(
+        input_scales.dtype == DType::kFloat8E8M0 && output_scales.dtype == DType::kFloat8E8M0,
+        "Expected MXFP8 E8M0 scales.");
+    NVTE_CHECK(output_scales.has_data(), "Missing output scaling factors.");
+    const size_t output_size = output_scales.numel();
+    if (output_size == 0) return;
+    const size_t padded_k = DIVUP(static_cast<size_t>(k), size_t{4}) * 4;
+    const auto* src = static_cast<const uint8_t*>(input_scales.dptr);
+    auto* dst = static_cast<uint8_t*>(output_scales.dptr);
+    constexpr int threads = 256;
+    const dim3 blocks(padded_k / 4, DIVUP(static_cast<size_t>(m), size_t{128}));
+    if (has_rowwise_scale_inv) {
+      swizzle_compact_mxfp8_kernel<true><<<blocks, threads, 0, stream>>>(src, dst, m, k);
+    } else {
+      swizzle_compact_mxfp8_kernel<false><<<blocks, threads, 0, stream>>>(src, dst, m, k);
+    }
+    NVTE_CHECK_CUDA(cudaGetLastError());
+    return;
   }
 
   // Check dims
