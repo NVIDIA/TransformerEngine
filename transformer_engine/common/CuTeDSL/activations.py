@@ -17,6 +17,14 @@ from transformer_engine.common.CuTeDSL.utils import fma_f32
 USE_FAST_MATH = os.environ.get("NVTE_USE_FAST_MATH", "0") == "1"
 
 
+def tanh(x: Float32) -> Float32:
+    return cute.math.tanh(x, fastmath=USE_FAST_MATH)
+
+
+def exp(x: Float32) -> Float32:
+    return cute.math.exp(x, fastmath=USE_FAST_MATH)
+
+
 def act_relu(x: Float32) -> Float32:
     return cute.arch.fmax(x, Float32(0.0))
 
@@ -24,13 +32,11 @@ def act_relu(x: Float32) -> Float32:
 def act_gelu(x: Float32) -> Float32:
     A = Float32(0.79788456)  # sqrt(2/π) truncated to TE's 8-digit literal
     B = Float32(0.03567741)  # = sqrt(2/π) · 0.044715, same truncation
-    return x * (
-        Float32(0.5) + Float32(0.5) * cute.math.tanh(x * (A + B * x * x), fastmath=USE_FAST_MATH)
-    )
+    return x * (Float32(0.5) + Float32(0.5) * tanh(x * (A + B * x * x)))
 
 
 def act_silu(x: Float32) -> Float32:
-    return x / (Float32(1.0) + cute.math.exp(-x, fastmath=USE_FAST_MATH))
+    return x / (Float32(1.0) + exp(-x))
 
 
 def act_qgelu(x: Float32) -> Float32:
@@ -52,7 +58,7 @@ def dact_dsrelu(x: Float32) -> Float32:
 
 
 def sigmoid(x: Float32) -> Float32:
-    return Float32(1.0) / (Float32(1.0) + cute.math.exp(-x, fastmath=USE_FAST_MATH))
+    return Float32(1.0) / (Float32(1.0) + exp(-x))
 
 
 def dsigmoid(x: Float32) -> Float32:
@@ -70,10 +76,7 @@ def dact_dqgelu(x: Float32) -> Float32:
 
 
 def dact_dgelu(x: Float32) -> Float32:
-    t = cute.math.tanh(
-        Float32(0.79788456) * x * (Float32(1.0) + Float32(0.044715) * x * x),
-        fastmath=USE_FAST_MATH,
-    )
+    t = tanh(Float32(0.79788456) * x * (Float32(1.0) + Float32(0.044715) * x * x))
     return Float32(0.5) * x * (
         (Float32(1.0) - t * t) * (Float32(0.79788456) + Float32(0.1070322243) * x * x)
     ) + Float32(0.5) * (Float32(1.0) + t)
