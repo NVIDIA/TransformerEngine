@@ -952,6 +952,36 @@ class TestFusedSGD(TestFusedOptimizer):
         self.ref_optim = torch.optim.SGD
         self.fused_optim = te.optimizers.FusedSGD
 
+    @pytest.mark.parametrize(
+        "set_grad_none,set_to_none,expected_none",
+        [
+            (None, None, True),
+            (None, True, True),
+            (None, False, False),
+            (True, None, True),
+            (False, None, False),
+        ],
+    )
+    def test_zero_grad(self, set_grad_none, set_to_none, expected_none):
+        param = nn.Parameter(torch.ones(4, device="cuda"))
+        unused_param = nn.Parameter(torch.ones_like(param))
+        param.grad = torch.ones_like(param)
+        grad = param.grad
+        warning = pytest.warns(DeprecationWarning) if set_grad_none is not None else nullcontext()
+        with warning:
+            optimizer = self.fused_optim(
+                [param, unused_param], set_grad_none=set_grad_none, **self.options
+            )
+
+        optimizer.zero_grad(set_to_none=set_to_none)
+
+        if expected_none:
+            assert param.grad is None
+        else:
+            assert param.grad is grad
+            torch.testing.assert_close(param.grad, torch.zeros_like(param))
+        assert unused_param.grad is None
+
     def test_float(self):
         self.gen_single_type_test(param_type=torch.float)
 

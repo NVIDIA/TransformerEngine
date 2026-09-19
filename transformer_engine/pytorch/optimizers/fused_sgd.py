@@ -159,7 +159,7 @@ class FusedSGD(Optimizer):
                 for p in group["params"]:
                     p.grad = None
         else:
-            super().zero_grad()
+            super().zero_grad(set_to_none=set_to_none)
 
     def get_momentums(self, params):
         """Get momentum buffers of parameters. Create if needed.
