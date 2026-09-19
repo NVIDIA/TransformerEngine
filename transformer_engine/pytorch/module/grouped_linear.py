@@ -946,6 +946,12 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.grad_weight_quantizers = grad_weight_quantizers
 
             ctx.weights_requires_grad = weights[0].requires_grad
+            # DistributedWeight objects must survive to backward as Python objects. They are
+            # also passed through save_for_backward (as saved_weights), but when saved-tensor
+            # hooks are active (e.g. activation offloading) autograd unpacks saved leaves as
+            # fresh plain tensors, dropping the subclass and its ``is_distributed_weight``
+            # marker. Keep the originals on ctx and prefer them in backward.
+            ctx.dist_weights = list(origin_weights) if is_dist_weight else None
             if fuse_wgrad_accumulation and ctx.weights_requires_grad:
                 # Keep weakrefs to weights to preserve attributes like main_grad
                 # when we need to modify the weight python objects
@@ -1282,6 +1288,12 @@ class _GroupedLinear(torch.autograd.Function):
             weights = saved_tensors[N : 2 * N]
             saved_weights = saved_tensors[2 * N : 3 * N]
             biases = saved_tensors[3 * N : 4 * N]
+            dist_weights = getattr(ctx, "dist_weights", None)
+            if dist_weights is not None:
+                # See forward: saved-tensor hooks may have replaced the DistributedWeight
+                # objects with plain aliases; the originals were kept on ctx.
+                saved_weights = dist_weights
+                ctx.dist_weights = None
 
             # Restore from weakrefs to get original weight python objects
             # (preserves attributes like main_grad, grad_added_to_main_grad, etc.)
