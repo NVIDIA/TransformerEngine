@@ -657,8 +657,7 @@ def _pytorch_grouped_gemm(A, B, out, *, layout, bias, bias_scale, accumulate, al
         case _:
             raise NotImplementedError(f"Unsupported GEMM layout: {layout}.")
 
-    if layout != "NT":
-        rows = torch.arange(result.size(0), device=result.device)
+    rows = torch.arange(result.size(0), device=result.device) if layout != "NT" else None
     if bias is not None:
         bias_data = bias.rowwise_data.view(groups, -1).float()
         if layout == "NT":
