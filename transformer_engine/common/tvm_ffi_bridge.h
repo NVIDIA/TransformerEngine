@@ -294,6 +294,14 @@ class TVMFFICentral {
 
   bool get_warn_cutedsl_backend_not_chosen() const { return warn_cutedsl_backend_not_chosen_; }
 
+  // These are C ABI calls: TVM reports failures through its return code and thread-local error,
+  // not C++ exceptions. noexcept prevents an unexpected exception from crossing that ABI boundary.
+  int get_global(const TVMFFIByteArray *name, TVMFFIObjectHandle *out) const noexcept {
+    return get_global_(name, out);
+  }
+
+  void move_error(TVMFFIObjectHandle *result) const noexcept { move_error_(result); }
+
   // Optionally emit a warning explaining why the CuTeDSL backend was not chosen for this config.
   template <typename... Args>
   void maybe_warn_not_chosen(const Args &...reason) const {
@@ -311,12 +319,31 @@ class TVMFFICentral {
     set_tvm_ffi_available(prepare_tvm_ffi());
   }
 
-  bool prepare_tvm_ffi() const {
+  bool prepare_tvm_ffi() {
     if (!get_cutedsl_backend_enabled() || !initialize_python_cutedsl_backend()) {
       return false;
     }
-    return dlopen("libtvm_ffi.so", RTLD_NOW | RTLD_GLOBAL) != nullptr;
+    if (tvm_ffi_handle_ == nullptr) {
+      // Keep the library open for the lifetime of cached tvm::ffi::Function objects.
+      tvm_ffi_handle_ = dlopen("libtvm_ffi.so", RTLD_NOW | RTLD_GLOBAL);
+    }
+    if (tvm_ffi_handle_ == nullptr) {
+      NVTE_WARN("The CuTeDSL kernel is not chosen because the TVM-FFI library could not be loaded.");
+      return false;
+    }
+
+    // TODO(kainingz): Replace these forwarding shims when TVM-FFI provides an official API for
+    // dynamically loading its C++ wrappers without creating undefined ELF symbols.
+    get_global_ = reinterpret_cast<GetGlobalFn>(dlsym(tvm_ffi_handle_, "TVMFFIFunctionGetGlobal"));
+    move_error_ =
+        reinterpret_cast<MoveErrorFn>(dlsym(tvm_ffi_handle_, "TVMFFIErrorMoveFromRaised"));
+    if (get_global_ == nullptr || move_error_ == nullptr) {
+      NVTE_WARN("The CuTeDSL kernel is not chosen because the TVM-FFI library could not be loaded.");
+      return false;
+    }
+    return true;
   }
+
   TVMFFICentral(const TVMFFICentral &) = delete;
   TVMFFICentral &operator=(const TVMFFICentral &) = delete;
   TVMFFICentral(TVMFFICentral &&) = delete;
@@ -335,6 +362,14 @@ class TVMFFICentral {
   std::mutex tvm_ffi_init_mutex_;
   std::atomic<bool> cutedsl_backend_enabled_;
   const bool warn_cutedsl_backend_not_chosen_;
+  void *tvm_ffi_handle_ = nullptr;
+
+  // These are symbols dynamically loaded from TVM-FFI
+  using GetGlobalFn = decltype(&::TVMFFIFunctionGetGlobal);
+  using MoveErrorFn = decltype(&::TVMFFIErrorMoveFromRaised);
+
+  GetGlobalFn get_global_ = nullptr;
+  MoveErrorFn move_error_ = nullptr;
 };
 
 // A utility class that each Config struct can use to cache the registered TVM-FFI functions
@@ -397,5 +432,16 @@ inline void maybe_warn_cutedsl_not_chosen(const Args &...reason) {
 
 }  // namespace tvm_ffi_bridge
 }  // namespace transformer_engine
+
+// In tvm/ffi/function.h, tvm::ffi::Function::GetGlobal references these two symbols,
+// which need to be dynamically loaded from libtvm_ffi.so and forwarded to TVMFFICentral.
+extern "C" inline int TVMFFIFunctionGetGlobal(const TVMFFIByteArray *name,
+                                              TVMFFIObjectHandle *out) {
+  return transformer_engine::tvm_ffi_bridge::TVMFFICentral::getInstance().get_global(name, out);
+}
+
+extern "C" inline void TVMFFIErrorMoveFromRaised(TVMFFIObjectHandle *result) {
+  transformer_engine::tvm_ffi_bridge::TVMFFICentral::getInstance().move_error(result);
+}
 
 #endif  // TRANSFORMER_ENGINE_COMMON_TVM_FFI_BRIDGE_H_

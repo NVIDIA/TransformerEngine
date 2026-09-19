@@ -45,9 +45,3 @@ include(${CMAKE_SOURCE_DIR}/../../transformer_engine/common/cmake/cuDNN.cmake)
 
 add_subdirectory(operator)
 add_subdirectory(util)
-
-if(NOT EXISTS "${TVM_FFI_LIBRARY}")
-  message(FATAL_ERROR "Could not find the TVM-FFI library at '${TVM_FFI_LIBRARY}'")
-endif()
-target_link_libraries(test_operator PRIVATE "${TVM_FFI_LIBRARY}")
-target_link_libraries(test_util PRIVATE "${TVM_FFI_LIBRARY}")
