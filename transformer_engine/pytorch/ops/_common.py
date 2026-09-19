@@ -67,9 +67,8 @@ def validate_buffer(
         raise TypeError(f"{name} must have dtype {dtype}, got {buffer.dtype}.")
     if device is not None and buffer.device != device:
         raise ValueError(f"{name} must be on {device}, got {buffer.device}.")
-    if contiguous is not None and buffer.is_contiguous() != contiguous:
-        requirement = "contiguous" if contiguous else "non-contiguous"
-        raise ValueError(f"{name} must be {requirement}.")
+    if contiguous and not buffer.is_contiguous():
+        raise ValueError(f"{name} must be contiguous")
     return buffer.detach()
 
 
