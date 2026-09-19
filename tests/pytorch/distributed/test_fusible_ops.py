@@ -331,6 +331,8 @@ def _test_basic_linear(
     quantized_weight: bool = False,
     tensor_parallel_mode: str = "column",
     sequence_parallel: bool = False,
+    bias: bool = False,
+    compile_model: bool = False,
 ) -> None:
 
     # Skip invalid configurations
@@ -378,12 +380,19 @@ def _test_basic_linear(
         requires_grad=False,
     )
 
+    b_ref, b_test = None, None
+    if bias:
+        b_ref, b_test = make_reference_and_test_tensors(
+            (out_features,), test_dtype=dtype, test_device=device
+        )
+
     # Plain PyTorch implementation
-    y_ref = torch.nn.functional.linear(x_ref, w_ref)
+    y_ref = torch.nn.functional.linear(x_ref, w_ref, b_ref)
     y_ref.backward(dy_ref)
 
     # Convert to distributed tensors
     with torch.no_grad():
+        db_ref = b_ref.grad if bias else None
         dw_ref = w_ref.grad
         dx_ref = x_ref.grad
         if tensor_parallel_mode == "column":
@@ -392,6 +401,9 @@ def _test_basic_linear(
                 rank * local_out_features,
                 (rank + 1) * local_out_features,
             )
+            if bias:
+                b_test = b_test[local_slice]
+                db_ref = db_ref[local_slice]
             w_ref = w_ref[local_slice, :]
             dw_ref = dw_ref[local_slice, :]
             w_test = w_test[local_slice, :]
@@ -424,10 +436,14 @@ def _test_basic_linear(
                 y_ref = y_ref[local_slice, ...]
                 dy_ref = dy_ref[local_slice, ...]
                 dy_test = dy_test[local_slice, ...].clone()
+                if bias:
+                    db_ref = dy_ref.sum(dim=0)
     x_test.requires_grad_()
 
     # Implementation with fusible operation
     recipe = make_recipe(quantization)
+    if compile_model and recipe is not None:
+        recipe.backward_override = None
     with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
         op = te_ops.BasicLinear(
             in_features,
@@ -441,9 +457,21 @@ def _test_basic_linear(
     with torch.no_grad():
         op.weight.copy_(w_test)
         del w_test
-    with te.autocast(enabled=quantized_compute, recipe=recipe):
-        y_test = op(x_test)
-    y_test.backward(dy_test)
+    model = te_ops.Sequential(op)
+    if bias:
+        model.append(te_ops.Bias(local_out_features, device=device, dtype=dtype))
+        with torch.no_grad():
+            model[1].bias.copy_(b_test)
+
+    def forward(x):
+        if not quantized_compute:
+            return model(x)
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
+            return model(x)
+
+    if compile_model:
+        torch._dynamo.reset()
+        forward = torch.compile(forward, fullgraph=True)
 
     # Expected numerical error
     tols = dtype_tols(dtype)
@@ -452,13 +480,17 @@ def _test_basic_linear(
     if quantized_compute:
         tols = quantization_tols(quantization)
 
-    # Check results
-    y_test = y_test.to(dtype=torch.float64, device="cpu")
-    dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
-    dw_test = op.weight.grad.to(dtype=torch.float64, device="cpu")
-    torch.testing.assert_close(y_test, y_ref, **tols)
-    torch.testing.assert_close(dx_test, dx_ref, **tols)
-    torch.testing.assert_close(dw_test, dw_ref, **tols)
+    # Repeated calls also exercise the compiled backward and cached graph.
+    for _ in range(3 if compile_model else 1):
+        model.zero_grad(set_to_none=True)
+        x_test.grad = None
+        y_test = forward(x_test)
+        y_test.backward(dy_test)
+        torch.testing.assert_close(y_test.double().cpu(), y_ref, **tols)
+        torch.testing.assert_close(x_test.grad.double().cpu(), dx_ref, **tols)
+        torch.testing.assert_close(op.weight.grad.double().cpu(), dw_ref, **tols)
+        if bias:
+            torch.testing.assert_close(model[1].bias.grad.double().cpu(), db_ref, **tols)
 
 
 def _test_linear(
@@ -1034,6 +1066,24 @@ def run_parallel_tests() -> None:
         _test_fp8_scale_update()
 
 
+def run_compile_parallel_tests() -> None:
+    """Compile the existing TP numerical test, including the Linear+Bias fusion."""
+    quantizations = [None, "fp8_current_scaling"] if fp8_available else [None]
+    for quantization, mode, sp, bias in itertools.product(
+        quantizations, ("column", "row"), (False, True), (False, True)
+    ):
+        if torch.distributed.get_rank(world_group()) == 0:
+            print(f"Compile BasicLinear: {quantization=}, {mode=}, {sp=}, {bias=}", flush=True)
+        _test_basic_linear(
+            dtype=torch.bfloat16,
+            quantization=quantization,
+            tensor_parallel_mode=mode,
+            sequence_parallel=sp,
+            bias=bias,
+            compile_model=True,
+        )
+
+
 # Parallel job sizes
 _world_sizes = [torch.cuda.device_count()]
 if 1 not in _world_sizes:
@@ -1043,7 +1093,8 @@ if torch.cuda.device_count() >= 2 and 2 not in _world_sizes:
 
 
 @pytest.mark.parametrize("world_size", _world_sizes)
-def test_distributed_fuser_ops(world_size: int) -> None:
+@pytest.mark.parametrize("compile_model", [False, True], ids=["eager", "compile"])
+def test_distributed_fuser_ops(world_size: int, compile_model: bool) -> None:
     """Launch parallel job that runs parallel tests"""
     python_exe = pathlib.Path(sys.executable)
     current_file = pathlib.Path(__file__).resolve()
@@ -1055,6 +1106,8 @@ def test_distributed_fuser_ops(world_size: int) -> None:
         current_file,
         "--parallel",
     ]
+    if compile_model:
+        command.append("--compile")
     with tempfile.TemporaryDirectory(prefix="te-test-fusible-ops-") as temp_dir:
         env = dict(os.environ)
         env["NVTE_TEST_RDZV_PATH"] = str(pathlib.Path(temp_dir) / "rdzv")
@@ -1064,9 +1117,15 @@ def test_distributed_fuser_ops(world_size: int) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--parallel", action="store_true", help="Run parallel tests")
+    parser.add_argument("--compile", action="store_true", help="Use the compiled TP test suite")
     args = parser.parse_args()
+    if args.compile and not args.parallel:
+        parser.error("--compile requires --parallel")
     if args.parallel:
-        run_parallel_tests()
+        if args.compile:
+            run_compile_parallel_tests()
+        else:
+            run_parallel_tests()
 
 
 if __name__ == "__main__":
