@@ -809,3 +809,58 @@ def test_cp_with_flash_attention_no_load_balance(cp_pool):
         deterministic=_deterministic,
         log_level=pytest_logging_level,
     )
+
+
+# Flat (no-load-balance) a2a sharding. Kept out of model_configs_fused_attn on
+# purpose: "cp_flat_1" has max_seqlen_q % (2 * cp_size) != 0, which the
+# dual-chunk paths in the main matrix legitimately reject.
+model_configs_cp_flat_a2a = {
+    # full attention, seqlen divisible by 2 * cp_size (works either way)
+    "cp_flat_0": ModelConfig(2, 4096, 32, 128, num_gqa_groups=4),
+    # full attention, seqlen divisible by cp_size but NOT by 2 * cp_size: at
+    # cp_size = 2 this gives an odd per-rank seqlen, which only flat supports
+    "cp_flat_1": ModelConfig(2, 4094, 32, 128, num_gqa_groups=4),
+    # causal is still valid under flat a2a: every rank runs the whole sequence
+    # against the global mask, so the math matches cp_size = 1
+    "cp_flat_2": ModelConfig(2, 4096, 32, 128, num_gqa_groups=4, attn_mask_type="causal"),
+}
+
+
+@pytest.mark.skipif(get_cudnn_version() < (8, 9, 7), reason="cuDNN 8.9.7+ is required.")
+@pytest.mark.skipif(get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
+@pytest.mark.parametrize("model", model_configs_cp_flat_a2a.keys())
+@pytest.mark.parametrize("qkv_format", ["bshd", "sbhd", "thd"])
+def test_cp_with_fused_attention_flat_a2a(cp_pool, model, qkv_format):
+    """Flat a2a CP: skipping the dual-chunk reorder must match no-CP exactly.
+
+    Flat sharding gives rank r the contiguous global range
+    [r * s_local, (r + 1) * s_local). The a2a exchange restores the full sequence
+    on each rank before attention, so no chunk reordering is required and the
+    per-sequence divisibility drops from 2 * cp_size to cp_size.
+    """
+    config = copy.deepcopy(model_configs_cp_flat_a2a[model])
+    config.context_parallel = True
+    config.cp_comm_type = "a2a"
+    if qkv_format == "thd":
+        config.attn_mask_type = "padding_causal" if "causal" in config.attn_mask_type else "padding"
+    available_backends, _, _ = get_available_attention_backends(
+        config,
+        qkv_dtype=torch.bfloat16,
+        qkv_layout="_".join([qkv_format] * 3),
+        pad_between_seqs=qkv_format == "thd",
+        is_training=True,
+        deterministic=_deterministic,
+    )
+    if not available_backends[1]:
+        pytest.skip("No FusedAttention backend available.")
+    _submit(
+        cp_pool(2),
+        dtype="bf16",
+        model=model,
+        qkv_format=qkv_format,
+        kernel_backend="FusedAttention",
+        cp_comm_type="a2a",
+        load_balancing_strategy="NO_LOAD_BALANCE",
+        deterministic=_deterministic,
+        log_level=pytest_logging_level,
+    )
