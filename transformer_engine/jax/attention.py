@@ -887,10 +887,34 @@ class SequenceDescriptor:
         qkv_layout,
         window_size,
         max_segments_per_seq,
-        allow_fast_causal_path=True,
     ):
         """
         Acquire the seqlens/offsets for cuDNN backend.
+
+        The implementation automatically selects the fastest correct metadata path.
+        """
+        return self._get_seqlens_and_offsets(
+            attn_mask_type,
+            qkv_layout,
+            window_size,
+            max_segments_per_seq,
+            allow_fast_causal_path=True,
+        )
+
+    def _get_seqlens_and_offsets(
+        self,
+        attn_mask_type,
+        qkv_layout,
+        window_size,
+        max_segments_per_seq,
+        *,
+        allow_fast_causal_path,
+    ):
+        """Internal variant that lets CP primitives disable the causal fast path.
+
+        Rotated THD ring steps may have different local Q and KV boundaries even
+        when their metadata matched before rotation. Only those internal callers
+        should override automatic fast-path selection.
         """
         q_segment_ids, kv_segment_ids = self.segment_ids
         q_segment_pos, kv_segment_pos = self.segment_pos

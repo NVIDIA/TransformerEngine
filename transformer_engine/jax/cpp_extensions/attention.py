@@ -761,7 +761,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         # Rotated THD ring steps can have different inter-segment padding at the
         # local Q and KV boundaries, which violates the causal fast-path assumption.
         (q_seqlen, kv_seqlen), (q_seq_offsets, k_seq_offsets) = (
-            sequence_descriptor.get_seqlens_and_offsets(
+            sequence_descriptor._get_seqlens_and_offsets(
                 config.attn_mask_type,
                 config.qkv_layout,
                 config.window_size,
@@ -1345,7 +1345,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
 
         # Keep backward metadata identical to forward for rotated THD ring steps.
         (q_seqlen, kv_seqlen), (q_seq_offsets, k_seq_offsets) = (
-            sequence_descriptor.get_seqlens_and_offsets(
+            sequence_descriptor._get_seqlens_and_offsets(
                 config.attn_mask_type,
                 config.qkv_layout,
                 config.window_size,
