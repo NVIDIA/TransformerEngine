@@ -36,9 +36,7 @@ def test_rows_are_bitwise_stable_across_batch_composition(operands):
     full = batch_invariant_gemm(a, b)
     for lo, hi in SLICES:
         part = batch_invariant_gemm(a[lo:hi].contiguous(), b)
-        assert torch.equal(part, full[lo:hi]), (
-            f"rows {lo}:{hi} changed when the batch was sliced"
-        )
+        assert torch.equal(part, full[lo:hi]), f"rows {lo}:{hi} changed when the batch was sliced"
 
 
 def test_matches_torch_reference(operands):

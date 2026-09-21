@@ -72,8 +72,9 @@ def _bi_gemm_kernel(
         b_ptrs += BLOCK_K * stride_bk
 
     c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
-    tl.store(c_ptrs, acc.to(c_ptr.dtype.element_ty),
-             mask=(offs_m[:, None] < M) & (offs_n[None, :] < N))
+    tl.store(
+        c_ptrs, acc.to(c_ptr.dtype.element_ty), mask=(offs_m[:, None] < M) & (offs_n[None, :] < N)
+    )
 
 
 def is_supported(
@@ -101,9 +102,7 @@ def _check(a: torch.Tensor, b: torch.Tensor, out: Optional[torch.Tensor]) -> Non
     if not a.is_contiguous() or not b.is_contiguous():
         raise ValueError("batch_invariant_gemm requires contiguous operands.")
     if a.shape[1] != b.shape[1]:
-        raise ValueError(
-            f"K mismatch: A has {a.shape[1]} columns, B has {b.shape[1]}."
-        )
+        raise ValueError(f"K mismatch: A has {a.shape[1]} columns, B has {b.shape[1]}.")
     if out is not None and (out.dim() != 2 or not out.is_contiguous()):
         raise ValueError("batch_invariant_gemm requires a contiguous 2-D out tensor.")
 
@@ -143,11 +142,20 @@ def batch_invariant_gemm(
 
     grid = (triton.cdiv(m, BLOCK_M), triton.cdiv(n, BLOCK_N))
     _bi_gemm_kernel[grid](
-        a, b, out,
-        m, n, k,
-        a.stride(0), a.stride(1),
-        b.stride(0), b.stride(1),
-        out.stride(0), out.stride(1),
-        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
+        a,
+        b,
+        out,
+        m,
+        n,
+        k,
+        a.stride(0),
+        a.stride(1),
+        b.stride(0),
+        b.stride(1),
+        out.stride(0),
+        out.stride(1),
+        BLOCK_M=BLOCK_M,
+        BLOCK_N=BLOCK_N,
+        BLOCK_K=BLOCK_K,
     )
     return out
