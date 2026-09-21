@@ -7,7 +7,6 @@ import torch
 
 from transformer_engine.pytorch import DotProductAttention
 from transformer_engine.pytorch.attention.dot_product_attention import utils as dpa_utils
-from transformer_engine.pytorch.utils import get_cudnn_version
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required.")
@@ -39,7 +38,6 @@ def _make_qkv(device: torch.device, requires_grad: bool = False):
     return q, k, v
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 def test_cu_seqlens_cache_isolated_across_devices_for_forward():
     if torch.cuda.device_count() < 2:
         pytest.skip("Requires at least 2 CUDA devices.")
@@ -69,7 +67,6 @@ def test_cu_seqlens_cache_isolated_across_devices_for_forward():
     assert dpa_utils._cu_seqlens_cache[expected_key_1].device == dev1
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 def test_cu_seqlens_cache_isolated_between_inference_and_train_forward():
     dev = torch.device("cuda:0")
     dpa = _make_dpa(dev)

@@ -260,13 +260,6 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(NVTEFusedAttnConfig confi
   const auto cudnn_runtime_version = cudnnGetVersion();
   const int sm_arch = cuda::sm_arch(cuda::current_device());
 
-  // THD + 64-bit ragged offsets require cuDNN >= 9.5
-  if (cfg.needs_64bit_ragged_offset && cudnn_runtime_version < 90500) {
-    return reject(
-        message,
-        "This config requires 64-bit ragged offsets, which is only supported by cuDNN >= 9.5.");
-  }
-
   // THD input requires a padding mask
   if ((cfg.is_ragged_q || cfg.is_ragged_kv) && !cfg.is_padding) {
     return reject(
@@ -321,19 +314,6 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(NVTEFusedAttnConfig confi
   if (is_f16_or_bf16) {
     if (cfg.is_ragged_q && cfg.is_ragged_kv && sm_arch < 90) {
       return reject(message, "F16/BF16 fused attention with THD format requires sm90 or later.");
-    }
-    if ((cfg.is_ragged_q || cfg.is_ragged_kv) && sm_arch < 90 && cudnn_runtime_version < 90700) {
-      return reject(message,
-                    "F16/BF16 fused attention with a ragged Q and non-ragged KV requires cuDNN "
-                    ">= 9.7 before sm90.");
-    }
-    const bool has_sliding_window = !(cfg.window_size_left == -1 &&
-                                      (cfg.window_size_right == -1 || cfg.window_size_right == 0));
-    if (cfg.is_causal_bottom_right && has_sliding_window && cfg.max_seqlen_q != cfg.max_seqlen_kv &&
-        cudnn_runtime_version <= 90700 && sm_arch >= 100) {
-      return reject(message,
-                    "Known cuDNN <= 9.7.0 issue with bottom-right causal masking and a sliding "
-                    "window for cross-attention on sm100. Please upgrade cuDNN.");
     }
     if (cudnn_runtime_version <= 91500 && cfg.is_training &&
         (cfg.qkv_format == NVTE_QKV_Format::NVTE_BSHD ||
