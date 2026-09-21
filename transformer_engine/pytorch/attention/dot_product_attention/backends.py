@@ -1601,7 +1601,22 @@ class FusedAttnFunc(torch.autograd.Function):
                 softmax_offset,
                 cuda_graph=is_graph_capturing(),
             )
-            if not is_training or not is_bwd_fp8:
+            release_vmm_inputs = not is_training or not is_bwd_fp8
+            if (
+                not release_vmm_inputs
+                and os.getenv("NVTE_MXFP8_VMM_LOCALIZATION", "0") == "1"
+            ):
+                from transformer_engine.pytorch.tensor.localized_mxfp8 import (
+                    get_mxfp8_vmm_workspace_iteration_stage,
+                )
+
+                # Full-CUDA-graph validation may leave the module in training
+                # mode even though forward_only=True, so no backward will
+                # consume these Q/K/V tensors.
+                release_vmm_inputs = (
+                    get_mxfp8_vmm_workspace_iteration_stage() == "validation"
+                )
+            if release_vmm_inputs:
                 from transformer_engine.pytorch.tensor.localized_mxfp8 import (
                     release_mxfp8_vmm_tensor_workspaces,
                 )

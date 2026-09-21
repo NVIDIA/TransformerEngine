@@ -573,6 +573,11 @@ def is_mxfp8_vmm_workspace_iteration_active() -> bool:
     return _VMM_WORKSPACE_POOL_STAGE is not None
 
 
+def get_mxfp8_vmm_workspace_iteration_stage() -> Optional[str]:
+    """Return the active full-iteration workspace stage, if any."""
+    return _VMM_WORKSPACE_POOL_STAGE
+
+
 def acquire_mxfp8_vmm_workspace(
     tensor: torch.Tensor,
     quantizer: MXFP8Quantizer,
