@@ -474,7 +474,6 @@ def _layernorm_mlp_forward_impl(
     debug = args.debug
     cpu_offloading = args.cpu_offloading
     tp_group = args.tp_group
-    tp_size = args.tp_size
     sequence_parallel = args.sequence_parallel
     tensor_parallel = args.tensor_parallel
     set_parallel_mode = args.set_parallel_mode
