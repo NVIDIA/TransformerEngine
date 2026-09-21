@@ -734,8 +734,8 @@ fa3_enabled = bool(int(os.getenv("NVTE_FLASH_ATTN", "1"))) and bool(
 requires_fa3 = pytest.mark.skipif(
     not fa3_enabled
     or not FlashAttentionUtils.v3_is_installed
-    or device_compute_capability < (9, 0),
-    reason="Enabled Flash-attn v3 and compute capability >= SM90 are required.",
+    or device_compute_capability != (9, 0),
+    reason="Enabled Flash-attn v3 and SM90 are required.",
 )
 
 model_configs_fa3_mla = {
@@ -743,26 +743,90 @@ model_configs_fa3_mla = {
     # DeepSeek-style MLA, and the second mismatch branch of _is_fa3_supported.
     "fa3_mla_1": ModelConfig(2, 1024, 16, 192, head_dim_v=128, attn_mask_type="causal"),
     "fa3_mla_2": ModelConfig(2, 512, 16, 64, head_dim_v=512),
+    "fa3_mla_3": ModelConfig(2, 128, 16, 64, head_dim_v=128, attn_mask_type="causal"),
+    # Equal dimensions must retain FA3 for training as well as inference.
+    "fa3_equal_heads": ModelConfig(2, 128, 16, 128),
 }
 
 
 @requires_fa3
-@pytest.mark.parametrize("dtype", param_types_lean)
+@pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("model_configs", [model_configs_fa3_mla])
 @pytest.mark.parametrize("model", model_configs_fa3_mla.keys())
-def test_dpa_fa3_mla(dtype, model_configs, model, monkeypatch):
-    """Training with head_dim_qk != head_dim_v must produce correct results.
-
-    FA3's forward supports these shapes, so backend selection used to hand
-    training to it and the backward crashed inside ``flash_attn_3_cuda.bwd``
-    (Dao-AILab/flash-attention#1487). FusedAttention is disabled here so the
-    selection has to reject FA3 on its own; forward and backward then run on a
-    viable backend and are compared against the reference like any other
-    configuration.
-    """
+@pytest.mark.parametrize("qkv_format", ["bshd", "sbhd"])
+@pytest.mark.parametrize("is_training", [True, False])
+def test_dpa_fa3_mla(dtype, model_configs, model, qkv_format, is_training, monkeypatch):
+    """Check real FA3 dispatch and its training fallback against an FP32 reference."""
+    # Keep FA3 available to the real selector, with only UnfusedAttention as its
+    # fallback. The cross-backend helper re-enables cuDNN and can switch to
+    # inference-only comparisons, which would hide this backward regression.
+    monkeypatch.setenv("NVTE_FLASH_ATTN", "1")
+    monkeypatch.setenv("NVTE_FLASH_ATTN_V2", "0")
+    monkeypatch.setenv("NVTE_FLASH_ATTN_V3", "1")
+    monkeypatch.setenv("NVTE_FLASH_ATTN_V4", "0")
     monkeypatch.setenv("NVTE_FUSED_ATTN", "0")
+    monkeypatch.setenv("NVTE_UNFUSED_ATTN", "1")
+    monkeypatch.setenv("NVTE_APPLY_QK_LAYER_SCALING", "0")
     _attention_backends["backend_selection_requires_update"] = True
-    test_dot_product_attention(dtype, model_configs, model, False, "bshd_bshd_bshd", False, False)
+    reset_rng_states()
+    config = model_configs[model]
+    shapes = (
+        (config.batch_size, config.max_seqlen_q, config.num_heads, config.head_dim_qk),
+        (config.batch_size, config.max_seqlen_kv, config.num_gqa_groups, config.head_dim_qk),
+        (config.batch_size, config.max_seqlen_kv, config.num_gqa_groups, config.head_dim_v),
+    )
+    inputs = [torch.randn(shape, dtype=dtype, device="cuda") for shape in shapes]
+    if qkv_format == "sbhd":
+        inputs = [x.transpose(0, 1).contiguous() for x in inputs]
+    q, k, v = (x.requires_grad_(is_training) for x in inputs)
+    reference_inputs = [x.detach().float().requires_grad_(is_training) for x in inputs]
+    reference_bshd = reference_inputs
+    if qkv_format == "sbhd":
+        reference_bshd = [x.transpose(0, 1) for x in reference_inputs]
+
+    tols = dict(atol=2e-2, rtol=2e-2)
+    if dtype == torch.bfloat16:
+        tols = dict(atol=4e-2, rtol=4e-2)
+
+    try:
+        with torch.set_grad_enabled(is_training):
+            block = make_dot_product_attention(dtype, config, qkv_format, is_training=is_training)
+            out = block(q, k, v).view(*q.shape[:2], config.num_heads, config.head_dim_v)
+            if qkv_format == "sbhd":
+                out = out.transpose(0, 1)
+            selected_backends = _attention_backends.copy()
+            # softcap=0 reduces the existing closed-form reference to ordinary
+            # scaled dot-product attention, independent of all TE backends.
+            out_ref = _softcap_reference_attention(
+                *reference_bshd,
+                softmax_scale=config.head_dim_qk**-0.5,
+                softcap=0.0,
+                causal=config.attn_mask_type == "causal",
+            )
+            torch.testing.assert_close(out.float(), out_ref, **tols)
+            assert torch.isfinite(out).all()
+
+            if is_training:
+                d_out = torch.randn_like(out)
+                # Run backward before checking the selected backend so removing
+                # the production fix reproduces FA3's original backward failure.
+                out.backward(d_out)
+                out_ref.backward(d_out.float())
+                for actual, reference in zip(inputs, reference_inputs):
+                    assert actual.grad is not None
+                    assert reference.grad is not None
+                    assert torch.isfinite(actual.grad).all()
+                    torch.testing.assert_close(actual.grad.float(), reference.grad, **tols)
+
+            expected_fa3 = not is_training or config.head_dim_qk == config.head_dim_v
+            assert bool(selected_backends["use_flash_attention"]) == expected_fa3
+            assert not selected_backends["use_fused_attention"]
+            assert bool(selected_backends["use_unfused_attention"]) != expected_fa3
+            assert selected_backends["flash_attention_backend"] == (
+                FlashAttentionUtils.fa3_version if expected_fa3 else None
+            )
+    finally:
+        _attention_backends["backend_selection_requires_update"] = True
 
 
 model_configs_fa4_swa = {
