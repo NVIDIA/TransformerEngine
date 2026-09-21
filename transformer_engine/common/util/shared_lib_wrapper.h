@@ -9,7 +9,33 @@
 
 #include <dlfcn.h>
 
+#include <filesystem>
+
 namespace transformer_engine {
+
+/*! \brief Return the shared object containing an address. */
+inline std::filesystem::path shared_library_path(const void *anchor) {
+  Dl_info library_info{};
+  if (anchor == nullptr || dladdr(anchor, &library_info) == 0 ||
+      library_info.dli_fname == nullptr) {
+    return {};
+  }
+
+  std::filesystem::path library_path = library_info.dli_fname;
+  if (library_path.is_relative()) {
+    std::error_code error;
+    library_path = std::filesystem::absolute(library_path, error);
+    if (error) {
+      return {};
+    }
+  }
+  return library_path;
+}
+
+/*! \brief Return the directory containing the shared object for an address. */
+inline std::filesystem::path shared_library_directory(const void *anchor) {
+  return shared_library_path(anchor).parent_path();
+}
 
 /*! \brief Wrapper class for a shared library
  *

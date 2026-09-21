@@ -458,6 +458,27 @@ class TestEP(unittest.TestCase):
             self.assertTrue(is_symm_backed(recv_mx.scale_inv))
         self._assert_mxfp8_matches_bf16(recv_mx, tokens, topk_idx, w, tc)
 
+    @_eager_test_include
+    @_mxfp8_align_test
+    def test_dispatch_mxfp8_autograd(self):
+        """MXFP8 dispatch fwd+bwd. Seeding the recv grad with ones scatters TOP_K back to each token
+        under identity routing, so grad_tokens equals TOP_K through the dispatch backward and the
+        input quantizer STE. Exercises the fused eager MXFP8 dispatch backward."""
+        self._require_mxfp8_shapes()
+        topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+        tokens_p = tokens.detach().clone().requires_grad_(True)
+        buf = self._make_buffer(dispatch_fwd_quant_recipe=MXFP8BlockScaling(), alignment=128)
+        recv_mx, _rw, _tc = ep_dispatch(buf, tokens_p, topk_idx, w)
+        g_recv = torch.ones(recv_mx.shape, dtype=torch.bfloat16, device=self.cfg.device)
+        torch.autograd.backward(recv_mx, grad_tensors=g_recv)
+        torch.cuda.synchronize()
+        torch.testing.assert_close(
+            tokens_p.grad.float(),
+            torch.full_like(tokens_p, float(TOP_K)).float(),
+            atol=5e-2,
+            rtol=5e-2,
+        )
+
     @_zero_copy_test_include
     @_mxfp8_align_test
     def test_caller_provides_dispatch_recv_mxfp8(self):

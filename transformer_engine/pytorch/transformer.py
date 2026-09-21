@@ -6,7 +6,7 @@
 import os
 import warnings
 from contextlib import nullcontext
-from typing import Any, Callable, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 
@@ -28,6 +28,7 @@ from transformer_engine.pytorch.utils import (
 )
 from transformer_engine.pytorch.constants import (
     AttnMaskTypes,
+    CPLoadBalancingStrategy,
     LayerTypes,
     dist_group_type,
 )
@@ -153,6 +154,12 @@ class TransformerLayer(torch.nn.Module):
                         or bottom right (`True`) corner of the softmax matrix in the encoder.
                         If `None`, it will be set to `False` for `self_attn_mask_type` =
                         {`causal`, `padding_causal`} and `True` for other mask types.
+    softcap : float, default = 0.0
+            tanh logit softcapping value applied to the attention scores as
+            ``softcap * tanh(scores / softcap)``. A value of ``0.0`` disables softcapping.
+            Applied to both self-attention and, in decoder layers, cross-attention.
+            Similar to :attr:`window_size`, ``softcap`` can be overridden by
+            :attr:`softcap` in :meth:`forward` as well.
     enc_dec_attn_mask_type : {'no_mask', 'causal', 'padding', 'padding_causal', 'arbitrary'},
                            default = "no_mask"
                            type of attention mask passed into softmax operation for decoder.
@@ -313,6 +320,7 @@ class TransformerLayer(torch.nn.Module):
         self_attn_mask_type: str = "causal",
         window_size: Optional[Tuple[int, int]] = None,
         bottom_right_diagonal: Optional[bool] = None,
+        softcap: float = 0.0,
         enc_dec_attn_mask_type: str = "no_mask",
         enc_dec_bottom_right_diagonal: Optional[bool] = None,
         enc_dec_window_size: Optional[Tuple[int, int]] = None,
@@ -357,6 +365,7 @@ class TransformerLayer(torch.nn.Module):
         self.self_attn_mask_type = self_attn_mask_type
         self.window_size = window_size
         self.bottom_right_diagonal = bottom_right_diagonal
+        self.softcap = softcap
         self.enc_dec_attn_mask_type = enc_dec_attn_mask_type
         self.enc_dec_window_size = enc_dec_window_size
         self.enc_dec_bottom_right_diagonal = enc_dec_bottom_right_diagonal
@@ -594,6 +603,7 @@ class TransformerLayer(torch.nn.Module):
         cp_global_ranks: List[int],
         cp_stream: torch.cuda.Stream,
         cp_comm_type: str = "p2p",
+        load_balancing_strategy=CPLoadBalancingStrategy.DUAL_CHUNK_SWAP,
     ) -> None:
         r"""
         Set the context parallel attributes for the given
@@ -623,13 +633,28 @@ class TransformerLayer(torch.nn.Module):
                       - ``"a2a+p2p"``: hierarchical CP implementation. First applying a2a to QKV
                         across each CP sub-group (e.g., via NVLink), then exchanging KV with
                         p2p between sub-groups (e.g., via IBLink).
+        load_balancing_strategy : CPLoadBalancingStrategy
+                                  token partition strategy for context-parallel attention.
+                                  ``NO_LOAD_BALANCE`` is experimental.
         """
+        # Preserve the legacy child-setter call unless an experimental strategy is requested.
+        load_balancing_kwargs = (
+            {}
+            if load_balancing_strategy is CPLoadBalancingStrategy.DUAL_CHUNK_SWAP
+            else {"load_balancing_strategy": load_balancing_strategy}
+        )
         # Deep iterate but skip self to avoid infinite recursion.
         for index, child in enumerate(self.modules()):
             if index == 0:
                 continue
             if hasattr(child, "set_context_parallel_group"):
-                child.set_context_parallel_group(cp_group, cp_global_ranks, cp_stream, cp_comm_type)
+                child.set_context_parallel_group(
+                    cp_group,
+                    cp_global_ranks,
+                    cp_stream,
+                    cp_comm_type,
+                    **load_balancing_kwargs,
+                )
 
     def forward(
         self,
@@ -658,6 +683,9 @@ class TransformerLayer(torch.nn.Module):
         max_seqlen_kv: Optional[int] = None,
         fast_zero_fill: bool = True,
         pad_between_seqs: Optional[bool] = None,
+        thd_attention_policies: Optional[List[Dict[str, Any]]] = None,
+        thd_attention_policy_dispatch: str = "auto",
+        softcap: Optional[float] = None,
     ) -> torch.Tensor:
         r"""
         Transformer Layer: attention block and a feedforward network (MLP)
@@ -692,6 +720,17 @@ class TransformerLayer(torch.nn.Module):
             or bottom right (`True`) corner of the softmax matrix in the encoder.
             If `None`, it will be set to `False` for `self_attn_mask_type` =
             {`causal`, `padding_causal`} and `True` for other mask types.
+        softcap: Optional[float], default = None
+            tanh logit softcapping value applied to the attention scores as
+            ``softcap * tanh(scores / softcap)``. A value of ``0.0`` disables softcapping.
+            When `None`, the value passed to the constructor is used.
+        thd_attention_policies: Optional[List[Dict[str, Any]]], default = None
+            Per-sequence policies for packed THD self-attention. Passed through to
+            :class:`MultiheadAttention`; do not also pass :attr:`self_attn_mask_type`
+            or :attr:`window_size`.
+        thd_attention_policy_dispatch: {``"auto"``, ``"grouped"``}, default = ``"auto"``
+            Dispatch strategy for :attr:`thd_attention_policies`. Passed through to
+            :class:`MultiheadAttention`.
         encoder_output : Optional[torch.Tensor], default = None
             Output of the encoder block to be fed into the decoder block if using
             :attr:`layer_type` = ``"decoder"``.
@@ -775,11 +814,26 @@ class TransformerLayer(torch.nn.Module):
             i.e. :attr:`qkv_format` = ``'thd'``.
         """
 
-        if self_attn_mask_type is None:
-            self_attn_mask_type = self.self_attn_mask_type
-        if window_size is None:
-            window_size = self.window_size
-        window_size = dpa_utils.check_set_window_size(self_attn_mask_type, window_size)
+        if thd_attention_policies is None:
+            if self_attn_mask_type is None:
+                self_attn_mask_type = self.self_attn_mask_type
+            if window_size is None:
+                window_size = self.window_size
+            window_size = dpa_utils.check_set_window_size(self_attn_mask_type, window_size)
+
+            if bottom_right_diagonal is None:
+                bottom_right_diagonal = self.bottom_right_diagonal
+            if self_attn_mask_type in {"causal", "padding_causal"}:
+                bottom_right_diagonal = False
+            if bottom_right_diagonal is None or self_attn_mask_type in {
+                "causal_bottom_right",
+                "padding_causal_bottom_right",
+            }:
+                bottom_right_diagonal = True
+
+        # softcap is not mask-specific, so resolve it outside the policy branch above.
+        if softcap is None:
+            softcap = self.softcap
 
         if enc_dec_attn_mask_type is None:
             enc_dec_attn_mask_type = self.enc_dec_attn_mask_type
@@ -788,16 +842,6 @@ class TransformerLayer(torch.nn.Module):
         enc_dec_window_size = dpa_utils.check_set_window_size(
             enc_dec_attn_mask_type, enc_dec_window_size
         )
-
-        if bottom_right_diagonal is None:
-            bottom_right_diagonal = self.bottom_right_diagonal
-        if self_attn_mask_type in {"causal", "padding_causal"}:
-            bottom_right_diagonal = False
-        if bottom_right_diagonal is None or self_attn_mask_type in {
-            "causal_bottom_right",
-            "padding_causal_bottom_right",
-        }:
-            bottom_right_diagonal = True
 
         if enc_dec_bottom_right_diagonal is None:
             enc_dec_bottom_right_diagonal = self.enc_dec_bottom_right_diagonal
@@ -809,7 +853,7 @@ class TransformerLayer(torch.nn.Module):
         }:
             enc_dec_bottom_right_diagonal = True
 
-        if self_attn_mask_type not in AttnMaskTypes:
+        if thd_attention_policies is None and self_attn_mask_type not in AttnMaskTypes:
             raise ValueError(
                 f"self_attn_mask_type {self_attn_mask_type!r} is not supported. "
                 f"Supported types are: {', '.join(repr(t) for t in AttnMaskTypes)}"
@@ -833,7 +877,8 @@ class TransformerLayer(torch.nn.Module):
                 )
 
         if (
-            "padding" in self_attn_mask_type or self_attn_mask_type == "arbitrary"
+            thd_attention_policies is None
+            and ("padding" in self_attn_mask_type or self_attn_mask_type == "arbitrary")
         ) and attention_mask is not None:
             if not all(attention_mask[i].dtype == torch.bool for i in range(len(attention_mask))):
                 non_bool_dtypes = [
@@ -872,6 +917,9 @@ class TransformerLayer(torch.nn.Module):
             attn_mask_type=self_attn_mask_type,
             window_size=window_size,
             bottom_right_diagonal=bottom_right_diagonal,
+            softcap=softcap,
+            thd_attention_policies=thd_attention_policies,
+            thd_attention_policy_dispatch=thd_attention_policy_dispatch,
             inference_params=inference_params,
             is_first_microbatch=is_first_microbatch,
             checkpoint_core_attention=checkpoint_core_attention,
@@ -908,6 +956,7 @@ class TransformerLayer(torch.nn.Module):
                 attn_mask_type=enc_dec_attn_mask_type,
                 window_size=enc_dec_window_size,
                 bottom_right_diagonal=enc_dec_bottom_right_diagonal,
+                softcap=softcap,
                 encoder_output=encoder_output,
                 inference_params=inference_params,
                 is_first_microbatch=is_first_microbatch,

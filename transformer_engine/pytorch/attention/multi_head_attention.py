@@ -5,7 +5,7 @@
 """Multi-head Attention."""
 import os
 import collections
-from typing import Any, Callable, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import torch
 
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager, QuantizerRole
@@ -22,6 +22,7 @@ from transformer_engine.pytorch.utils import (
 from transformer_engine.pytorch.constants import (
     AttnTypes,
     AttnBiasTypes,
+    CPLoadBalancingStrategy,
     dist_group_type,
 )
 from transformer_engine.pytorch.distributed import (
@@ -99,6 +100,11 @@ class MultiheadAttention(torch.nn.Module):
                           or bottom right (`True`) corner of the softmax matrix in the encoder.
                           If `None`, it will be set to `False` for `attn_mask_type` =
                           {`causal`, `padding_causal`} and `True` for other mask types.
+    softcap : float, default = 0.0
+             tanh logit softcapping value applied to the attention scores as
+             ``softcap * tanh(scores / softcap)``. A value of ``0.0`` disables softcapping.
+             Similar to :attr:`window_size`, ``softcap`` can be overridden by
+             :attr:`softcap` in :meth:`forward` as well.
     num_gqa_groups : int, default = None
                          number of GQA groups in the transformer layer.
                          Grouped Query Attention is described in
@@ -255,6 +261,7 @@ class MultiheadAttention(torch.nn.Module):
         attn_mask_type: str = "causal",
         window_size: Optional[Tuple[int, int]] = None,
         bottom_right_diagonal: Optional[bool] = None,
+        softcap: float = 0.0,
         tp_group: Optional[dist_group_type] = None,
         tp_size: int = 1,
         num_gqa_groups: Optional[int] = None,
@@ -294,6 +301,7 @@ class MultiheadAttention(torch.nn.Module):
         self.attn_mask_type = attn_mask_type
         self.window_size = window_size
         self.bottom_right_diagonal = bottom_right_diagonal
+        self.softcap = softcap
         self.layer_number = 1 if layer_number is None else layer_number
         self.input_layernorm = input_layernorm
         self.attention_type = attention_type
@@ -659,6 +667,7 @@ class MultiheadAttention(torch.nn.Module):
         cp_global_ranks: List[int],
         cp_stream: torch.cuda.Stream,
         cp_comm_type: str = "p2p",
+        load_balancing_strategy=CPLoadBalancingStrategy.DUAL_CHUNK_SWAP,
     ) -> None:
         """
         Set the context parallel attributes for the given
@@ -688,6 +697,8 @@ class MultiheadAttention(torch.nn.Module):
                       - ``"a2a+p2p"``: hierarchical CP implementation. First applying a2a to QKV
                         across each CP sub-group (e.g., via NVLink), then exchanging KV with
                         p2p between sub-groups (e.g., via IBLink).
+        load_balancing_strategy : CPLoadBalancingStrategy
+                                  token partition strategy for context-parallel attention.
         """
         if isinstance(cp_group, dist_group_type):
             self.cp_size = get_distributed_world_size(cp_group)
@@ -706,12 +717,24 @@ class MultiheadAttention(torch.nn.Module):
             self.cp_size = cp_size_a2a * cp_size_p2p
             self.cp_rank = cp_size_a2a * cp_rank_p2p + cp_rank_a2a
 
+        # Preserve the legacy child-setter call unless an experimental strategy is requested.
+        load_balancing_kwargs = (
+            {}
+            if load_balancing_strategy is CPLoadBalancingStrategy.DUAL_CHUNK_SWAP
+            else {"load_balancing_strategy": load_balancing_strategy}
+        )
         # Deep iterate but skip self to avoid infinite recursion.
         for index, child in enumerate(self.modules()):
             if index == 0:
                 continue
             if hasattr(child, "set_context_parallel_group"):
-                child.set_context_parallel_group(cp_group, cp_global_ranks, cp_stream, cp_comm_type)
+                child.set_context_parallel_group(
+                    cp_group,
+                    cp_global_ranks,
+                    cp_stream,
+                    cp_comm_type,
+                    **load_balancing_kwargs,
+                )
 
     def forward(
         self,
@@ -736,6 +759,9 @@ class MultiheadAttention(torch.nn.Module):
         max_seqlen_kv: Optional[int] = None,
         fast_zero_fill: bool = True,
         pad_between_seqs: Optional[bool] = None,
+        thd_attention_policies: Optional[List[Dict[str, Any]]] = None,
+        thd_attention_policy_dispatch: str = "auto",
+        softcap: Optional[float] = None,
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         r"""
         Forward propagation for MultiheadAttention layer.
@@ -772,6 +798,17 @@ class MultiheadAttention(torch.nn.Module):
                               or bottom right (`True`) corner of the softmax matrix in the encoder.
                               If `None`, it will be set to `False` for `attn_mask_type` =
                               {`causal`, `padding_causal`} and `True` for other mask types.
+        softcap: Optional[float], default = None
+                    tanh logit softcapping value applied to the attention scores as
+                    ``softcap * tanh(scores / softcap)``. A value of ``0.0`` disables
+                    softcapping. When `None`, the value passed to the constructor is used.
+        thd_attention_policies: Optional[List[Dict[str, Any]]], default = None
+                              Per-sequence policies for packed THD attention. Passed through to
+                              :class:`DotProductAttention`; do not also pass :attr:`attn_mask_type`
+                              or :attr:`window_size`.
+        thd_attention_policy_dispatch: {``"auto"``, ``"grouped"``}, default = ``"auto"``
+                              Dispatch strategy for :attr:`thd_attention_policies`. Passed through
+                              to :class:`DotProductAttention`.
         encoder_output : Optional[torch.Tensor], default = None
              Output of the encoder block to be fed into the decoder block if using
              ``layer_type="decoder"``.
@@ -831,23 +868,32 @@ class MultiheadAttention(torch.nn.Module):
         """
         # hidden_states: [sq, b, h]
 
-        if attn_mask_type is None:
-            attn_mask_type = self.attn_mask_type
-        if window_size is None:
-            window_size = self.window_size
+        if thd_attention_policies is None:
+            if attn_mask_type is None:
+                attn_mask_type = self.attn_mask_type
+            if window_size is None:
+                window_size = self.window_size
 
-        window_size = dpa_utils.check_set_window_size(attn_mask_type, window_size)
-        if bottom_right_diagonal is None:
-            bottom_right_diagonal = self.bottom_right_diagonal
-        if attn_mask_type in {"causal", "padding_causal"}:
-            bottom_right_diagonal = False
-        if bottom_right_diagonal is None or attn_mask_type in {
-            "causal_bottom_right",
-            "padding_causal_bottom_right",
-        }:
-            bottom_right_diagonal = True
+            window_size = dpa_utils.check_set_window_size(attn_mask_type, window_size)
+            if bottom_right_diagonal is None:
+                bottom_right_diagonal = self.bottom_right_diagonal
+            if attn_mask_type in {"causal", "padding_causal"}:
+                bottom_right_diagonal = False
+            if bottom_right_diagonal is None or attn_mask_type in {
+                "causal_bottom_right",
+                "padding_causal_bottom_right",
+            }:
+                bottom_right_diagonal = True
 
-        if "padding" in attn_mask_type and attention_mask is not None:
+        # softcap is not mask-specific, so resolve it outside the policy branch above.
+        if softcap is None:
+            softcap = self.softcap
+
+        if (
+            thd_attention_policies is None
+            and "padding" in attn_mask_type
+            and attention_mask is not None
+        ):
             for mask in attention_mask:
                 assert mask.dtype == torch.bool, "Attention mask must be in boolean type!"
 
@@ -1210,7 +1256,10 @@ class MultiheadAttention(torch.nn.Module):
             attention_mask=attention_mask,
             attn_mask_type=attn_mask_type,
             window_size=window_size,
+            softcap=softcap,
             bottom_right_diagonal=bottom_right_diagonal,
+            thd_attention_policies=thd_attention_policies,
+            thd_attention_policy_dispatch=thd_attention_policy_dispatch,
             checkpoint_core_attention=checkpoint_core_attention,
             core_attention_bias_type=core_attention_bias_type,
             core_attention_bias=core_attention_bias,

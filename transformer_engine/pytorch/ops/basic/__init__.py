@@ -14,6 +14,7 @@ from .activation import (
     ReGLU,
     SReLU,
     ScaledSReLU,
+    ScaledTanhSReLU,
     SReGLU,
     SiLU,
 )
@@ -33,4 +34,11 @@ from .quantize import Quantize
 from .reduce_scatter import ReduceScatter
 from .reshape import Reshape
 from .rmsnorm import RMSNorm
-from .swiglu import ClampedSwiGLU, ScaledClampedQGeGLU, ScaledSwiGLU, SwiGLU
+from .swiglu import (
+    ClampedSwiGLU,
+    ScaledClampedQGeGLU,
+    ScaledSiTUGLU,
+    ScaledSwiGLU,
+    SiTUGLU,
+    SwiGLU,
+)
