@@ -137,18 +137,33 @@ def test_multiple_microbatches_accumulate():
 
 @pytest.mark.parametrize("set_to_none", [True, False])
 def test_two_optimizer_steps_do_not_pollute_each_other(set_to_none):
-    """After a reset, the second step's grad must not inherit the first's."""
+    """After a reset, the second step's grad must be the second step's alone.
+
+    ``zero_grad(set_to_none=False)`` leaves a zeroed tensor where ``set_to_none=True`` leaves
+    ``None``, so the first contribution of the step takes the add path instead of the assign
+    path. Both settings have to deliver the same value, and ``second != first`` on its own
+    would not show pollution: a first-step value carried into the second still differs from
+    the first.
+    """
     model = _build(True, True)
     params = list({id(p): p for p in model.parameters()}.values())
     opt = torch.optim.SGD(params, lr=0.0)
 
-    _run(model, torch.randn(BATCH, SIZE, device=DEVICE, dtype=DTYPE), delay=True)
+    _run(model, _x(), delay=True)
     first = model[0].weight.grad.detach().clone()
     opt.zero_grad(set_to_none=set_to_none)
 
-    _run(model, torch.randn(BATCH, SIZE, device=DEVICE, dtype=DTYPE), delay=True)
+    second_x = _x()
+    _run(model, second_x, delay=True)
     second = model[0].weight.grad.detach().clone()
 
+    # What the second step owes on its own: same weights, same input, first backward only.
+    fresh = _build(True, True)
+    fresh.load_state_dict(model.state_dict())
+    _tie(fresh, True)
+    _run(fresh, second_x.detach().clone().requires_grad_(True), delay=True)
+
+    torch.testing.assert_close(second, fresh[0].weight.grad, rtol=0, atol=0)
     assert not torch.equal(first, second)
     assert second.abs().sum() > 0
 

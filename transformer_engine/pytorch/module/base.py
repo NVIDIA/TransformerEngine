@@ -1966,6 +1966,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 # module overwrite the contributions of the earlier ones, so
                 # accumulate instead: initialise on the first contribution of the
                 # step and add on every later one.
+                #
+                # The first contribution is assigned only when zero_grad left grad as
+                # None, which is what set_to_none=True does. set_to_none=False leaves a
+                # zeroed tensor instead, so that same contribution takes the add path and
+                # lands on the same value; nothing here needs grad to be None to start a
+                # step.
                 if weight_tensor.grad is None:
                     weight_tensor.grad = wgrad
                 else:
