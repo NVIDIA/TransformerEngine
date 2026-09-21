@@ -811,11 +811,6 @@ class EPPipelineTest : public EpOpTestBase, public ::testing::WithParamInterface
 
 TEST_P(EPPipelineTest, FullForwardBackward) {
   const DType dtype = GetParam();
-  // NCCL EP backend currently asserts ncclBfloat16 in ncclEpDispatch
-  // (nccl_ep/nccl_ep.cc); skip FP16/FP32 until the backend supports them.
-  if (dtype != DType::kBFloat16) {
-    GTEST_SKIP() << test::typeName(dtype) << " not yet supported by NCCL EP backend";
-  }
   switch (dtype) {
     case DType::kBFloat16: run_full_forward_backward<nv_bfloat16>(); break;
     case DType::kFloat16:  run_full_forward_backward<__half>     (); break;
