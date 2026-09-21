@@ -64,12 +64,7 @@ def test_nvfp4_stochastic_rounding_allocation_independence(columns):
                     "column_amax": output._amax_columnwise,
                 }
                 return {
-                    name: tensor.contiguous()
-                    .reshape(-1)
-                    .view(torch.uint8)
-                    .cpu()
-                    .numpy()
-                    .tobytes()
+                    name: tensor.contiguous().reshape(-1).view(torch.uint8).cpu().numpy().tobytes()
                     for name, tensor in tensors.items()
                 }
 
@@ -81,8 +76,7 @@ def test_nvfp4_stochastic_rounding_allocation_independence(columns):
                     # This is allocator-dependent; the no-caching Compute Sanitizer
                     # control establishes the invalid read independently of reuse.
                     anchors = [
-                        torch.empty(64, dtype=torch.int64, device=cuda_device)
-                        for _ in range(64)
+                        torch.empty(64, dtype=torch.int64, device=cuda_device) for _ in range(64)
                     ]
                     torch.cuda.synchronize()
                     for index in range(1, len(anchors), 2):
@@ -94,18 +88,12 @@ def test_nvfp4_stochastic_rounding_allocation_independence(columns):
                     actual = snapshot()
                     torch.cuda.set_rng_state(state)
                     replay = snapshot()
-                    mismatches = [
-                        name for name in actual if actual[name] != replay[name]
-                    ]
+                    mismatches = [name for name in actual if actual[name] != replay[name]]
                     assert not mismatches, f"Restored-RNG replay differs: {mismatches}"
                     if seed not in reference:
                         reference[seed] = actual
-                    mismatches = [
-                        name for name in actual if actual[name] != reference[seed][name]
-                    ]
-                    assert (
-                        not mismatches
-                    ), f"Allocation history changed seeded output: {mismatches}"
+                    mismatches = [name for name in actual if actual[name] != reference[seed][name]]
+                    assert not mismatches, f"Allocation history changed seeded output: {mismatches}"
                     outputs.append(actual)
                 for component in ("row_data", "column_data"):
                     assert (
