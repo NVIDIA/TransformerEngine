@@ -365,6 +365,13 @@ class EpBuffer:
         self.recv_capacity_per_rank = (
             None if recv_capacity_per_rank is None else int(recv_capacity_per_rank)
         )
+        max_token_dtype = _BOOTSTRAP_SETTINGS["payload_dtype"]
+        if payload_dtype.itemsize > max_token_dtype.itemsize:
+            raise ValueError(
+                f"EpBuffer payload_dtype={payload_dtype} is wider than the group's"
+                f" bootstrap-time max_token_dtype={max_token_dtype}; staging buffers were"
+                " not sized for it."
+            )
         self.hidden_dim = int(hidden_dim)
         self.num_local_experts = int(num_local_experts)
         self.payload_dtype = payload_dtype
