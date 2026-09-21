@@ -2357,6 +2357,8 @@ class TestGroupedMLPFusedOp:
         hidden_size: int,
         dtype: torch.dtype,
         device: torch.device | str,
+        bias: bool = False,
+        delay_wgrad_compute: bool = False,
     ) -> dict:
         """Fused grouped MLP forward and backward with deterministic weights and inputs.
 
@@ -2370,10 +2372,23 @@ class TestGroupedMLPFusedOp:
             )
             fc1_out_features = 2 * hidden_size if is_glu_activation(scaled_act) else hidden_size
             fc1 = te.ops.GroupedLinear(
-                group_size, hidden_size, fc1_out_features, bias=False, device=device, dtype=dtype
+                group_size,
+                hidden_size,
+                fc1_out_features,
+                bias=bias,
+                device=device,
+                dtype=dtype,
+                delay_wgrad_compute=delay_wgrad_compute,
             )
             fc2 = te.ops.GroupedLinear(
-                group_size, hidden_size, hidden_size, bias=False, device=device, dtype=dtype
+                group_size,
+                hidden_size,
+                hidden_size,
+                bias=bias,
+                device=device,
+                dtype=dtype,
+                delay_wgrad_compute=delay_wgrad_compute,
+                scale_bias=bias,
             )
             module = te.ops.Sequential(fc1, scaled_act, fc2)
 
@@ -2395,10 +2410,14 @@ class TestGroupedMLPFusedOp:
             saved_bytes += tensor.numel() * tensor.element_size()
             return tensor
 
+        fc2_extra_inputs = (split_sizes, probs) if bias else (split_sizes,)
         with torch.autograd.graph.saved_tensors_hooks(count_saved, lambda tensor: tensor):
             with te.autocast(enabled=True, recipe=recipe):
-                y = module(x, split_sizes, probs, split_sizes)
+                y = module(x, split_sizes, probs, *fc2_extra_inputs)
         y.backward(dy)
+        if delay_wgrad_compute:
+            fc1.backward_dw()
+            fc2.backward_dw()
 
         forward_ops = module._module_groups[0]._forward_ops
         assert len(forward_ops) == 1 and isinstance(
@@ -2406,18 +2425,28 @@ class TestGroupedMLPFusedOp:
             (te.ops.fused.GroupedMLP_CuTeGEMMUnary, te.ops.fused.GroupedMLP_CuTeGEMMGLU),
         ), "Fused grouped MLP did not run"
 
-        def weight_grads(fc):
-            return torch.stack([getattr(fc, f"weight{i}").grad for i in range(group_size)])
+        def param_grads(fc, name):
+            return torch.stack([getattr(fc, f"{name}{i}").grad for i in range(group_size)])
 
         return {
             "y": y.detach().clone(),
             "dx": x.grad,
             "dprobs": probs.grad,
-            "fc1_dw": weight_grads(fc1),
-            "fc2_dw": weight_grads(fc2),
+            "fc1_dw": param_grads(fc1, "weight"),
+            "fc2_dw": param_grads(fc2, "weight"),
+            "fc1_db": param_grads(fc1, "bias") if bias else None,
+            "fc2_db": param_grads(fc2, "bias") if bias else None,
             "saved_bytes": saved_bytes,
         }
 
+    @pytest.mark.parametrize(
+        "bias, delay_wgrad_compute",
+        (
+            pytest.param(False, False, id="default"),
+            pytest.param(True, False, id="bias"),
+            pytest.param(False, True, id="delay_wgrad_compute"),
+        ),
+    )
     @pytest.mark.parametrize("activation", ("scaled_srelu", "scaled_tanh_srelu"))
     @pytest.mark.parametrize(
         "quantization",
@@ -2436,6 +2465,8 @@ class TestGroupedMLPFusedOp:
         self,
         activation: str,
         quantization: str,
+        bias: bool,
+        delay_wgrad_compute: bool,
         *,
         dtype: torch.dtype = torch.bfloat16,
         device: torch.device = "cuda",
@@ -2450,6 +2481,8 @@ class TestGroupedMLPFusedOp:
             and not grouped_mlp_module._cudnn_frontend_supports_grouped_gemm_srelu_tanh()
         ):
             pytest.skip("Installed cuDNN frontend lacks tanh_clamp_scale")
+        if bias and quantization == "nvfp4_rht":
+            pytest.skip("NVFP4 SReLU grouped MLP coverage is limited to no-bias")
 
         split_sizes = torch.tensor(
             [256 * (i + 1) for i in range(group_size)], dtype=torch.int64, device=device
@@ -2462,6 +2495,8 @@ class TestGroupedMLPFusedOp:
             hidden_size=hidden_size,
             dtype=dtype,
             device=device,
+            bias=bias,
+            delay_wgrad_compute=delay_wgrad_compute,
         )
         off = self._run_recompute_case(activation_recompute_in_mlp=False, **common)
         on = self._run_recompute_case(activation_recompute_in_mlp=True, **common)
@@ -2470,9 +2505,16 @@ class TestGroupedMLPFusedOp:
         num_tokens = int(split_sizes.sum())
         assert off["saved_bytes"] - on["saved_bytes"] >= num_tokens * hidden_size // 2
 
-        # Only FC2's weight gradient depends on the regenerated tensor
-        for name in ("y", "dx", "dprobs", "fc1_dw"):
+        # Only FC2's weight gradient depends on the regenerated tensor. dprob and the bias
+        # gradients are accumulated with atomics when FC2's bias is scaled, so they are not
+        # reproducible bitwise in that configuration.
+        for name in ("y", "dx", "fc1_dw"):
             torch.testing.assert_close(on[name], off[name], rtol=0, atol=0)
+        tols = {"rtol": 0.05, "atol": 0.015625} if bias else {"rtol": 0, "atol": 0}
+        torch.testing.assert_close(on["dprobs"], off["dprobs"], **tols)
+        if bias:
+            torch.testing.assert_close(on["fc1_db"], off["fc1_db"], **tols)
+            torch.testing.assert_close(on["fc2_db"], off["fc2_db"], **tols)
         assert_close_rms(
             on["fc2_dw"], off["fc2_dw"], rtol=self._RECOMPUTE_FC2_WGRAD_RMS_TOL[quantization]
         )
