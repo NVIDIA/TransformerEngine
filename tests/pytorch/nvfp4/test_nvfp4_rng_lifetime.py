@@ -16,19 +16,29 @@ recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=Tru
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 @pytest.mark.parametrize("columns", [32, 64, 96, 128])
 def test_nvfp4_stochastic_rounding_allocation_independence(columns):
-    """Cover small unfused RHT shapes and a fused shape with logical-byte checks."""
+    """Check unfused RHT regression shapes and 128-column dispatch parity.
+
+    The latter uses fused RHT on SM100/SM110; newer architectures may use the
+    unfused path. The fused path does not allocate between RNG setup and dispatch.
+    """
     device = torch.cuda.current_device()
     cuda_device = torch.device("cuda", device)
     was_enabled = torch.are_deterministic_algorithms_enabled()
     was_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
     was_fill = torch.utils.deterministic.fill_uninitialized_memory
     try:
+        # Make reuse of a prematurely freed RNG allocation overwrite seed/offset
+        # bytes before quantization consumes them, instead of preserving old bits.
         torch.use_deterministic_algorithms(True, warn_only=True)
         torch.utils.deterministic.fill_uninitialized_memory = True
         with torch.random.fork_rng(devices=[device]):
             generator = torch.Generator(device=cuda_device).manual_seed(2027)
             data = torch.randn(
-                128, columns, device=cuda_device, dtype=torch.bfloat16, generator=generator
+                128,
+                columns,
+                device=cuda_device,
+                dtype=torch.bfloat16,
+                generator=generator,
             )
             quantizer = NVFP4Quantizer(
                 rowwise=True,
@@ -54,7 +64,12 @@ def test_nvfp4_stochastic_rounding_allocation_independence(columns):
                     "column_amax": output._amax_columnwise,
                 }
                 return {
-                    name: tensor.contiguous().reshape(-1).view(torch.uint8).cpu().numpy().tobytes()
+                    name: tensor.contiguous()
+                    .reshape(-1)
+                    .view(torch.uint8)
+                    .cpu()
+                    .numpy()
+                    .tobytes()
                     for name, tensor in tensors.items()
                 }
 
@@ -62,8 +77,12 @@ def test_nvfp4_stochastic_rounding_allocation_independence(columns):
             for fragmented in (False, True, False):
                 anchors = []
                 if fragmented:
+                    # Alternate live/free blocks encourage reuse of the RNG region.
+                    # This is allocator-dependent; the no-caching Compute Sanitizer
+                    # control establishes the invalid read independently of reuse.
                     anchors = [
-                        torch.empty(64, dtype=torch.int64, device=cuda_device) for _ in range(64)
+                        torch.empty(64, dtype=torch.int64, device=cuda_device)
+                        for _ in range(64)
                     ]
                     torch.cuda.synchronize()
                     for index in range(1, len(anchors), 2):
@@ -75,12 +94,18 @@ def test_nvfp4_stochastic_rounding_allocation_independence(columns):
                     actual = snapshot()
                     torch.cuda.set_rng_state(state)
                     replay = snapshot()
-                    mismatches = [name for name in actual if actual[name] != replay[name]]
+                    mismatches = [
+                        name for name in actual if actual[name] != replay[name]
+                    ]
                     assert not mismatches, f"Restored-RNG replay differs: {mismatches}"
                     if seed not in reference:
                         reference[seed] = actual
-                    mismatches = [name for name in actual if actual[name] != reference[seed][name]]
-                    assert not mismatches, f"Allocation history changed seeded output: {mismatches}"
+                    mismatches = [
+                        name for name in actual if actual[name] != reference[seed][name]
+                    ]
+                    assert (
+                        not mismatches
+                    ), f"Allocation history changed seeded output: {mismatches}"
                     outputs.append(actual)
                 for component in ("row_data", "column_data"):
                     assert (
