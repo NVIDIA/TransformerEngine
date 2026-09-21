@@ -2385,10 +2385,13 @@ class FrostAttnFunc(torch.autograd.Function):
 class FrostAttention(torch.nn.Module):
     """cuDNN FROST attention for symmetric head_dim in (256, 512] on SM100/SM103.
 
-    This is the only backend that serves that head-dim range together with context parallelism,
-    which is what Gemma-4 global layers need. Deliberately narrow: no FP8, no bias, no dropout,
-    no softmax offset, no paging. get_attention_backend declines all of those before selecting
-    this backend, so anything reaching here should already be supported.
+    **Experimental and subject to change**, including the possibility of being folded into
+    FusedAttention: the underlying cuDNN FROST engines are themselves experimental.
+
+    This is the only backend that serves that head-dim range together with context parallelism.
+    Deliberately narrow: no FP8, no bias, no dropout, no softmax offset, no paging.
+    get_attention_backend declines all of those before selecting this backend, so anything
+    reaching here should already be supported.
     """
 
     def __init__(

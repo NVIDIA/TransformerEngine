@@ -4,40 +4,27 @@
 
 """cuDNN FROST attention backend for head_dim in (256, 512] on SM100/SM103.
 
-Why this exists. Gemma-4 global layers use symmetric head_dim=512, and no backend TE can select
-today serves both that head dim and context parallelism: FlashAttention 2/3 cap at 256, FA4 is
-gated off at symmetric 512, the C++ cuDNN fused path is refused a graph by cuDNN above 256, and
-the unfused path supports 512 but cannot do CP. cuDNN Frontend 1.29.0 ships CuTe-DSL ("FROST")
-SDPA kernels that do serve symmetric 512 forward and backward on Blackwell.
+**Experimental and subject to change.** The engines this wraps are themselves experimental in
+cuDNN Frontend, and if the fused path gains these shapes this backend may be folded into it.
 
-Why a separate Python backend rather than teaching the existing C++ fused path. The 256 ceiling
-there is not a TE check -- the f16 dispatch applies no head-dim test and simply asks cuDNN to
-build a graph -- so the natural question is why the new engines cannot just be picked up. They
-cannot: FROST engines are registered at Python import time behind
-CUDNN_FRONTEND_ENABLE_FROST_ENGINES and require the nvidia-cutlass-dsl Python package, while
-TE's C++ builds against cuDNN Frontend headers only. Reaching them therefore requires a Python
-graph, which is what this module is.
+Why a separate Python backend rather than teaching the existing C++ fused path: FROST engines are
+registered at Python import time behind CUDNN_FRONTEND_ENABLE_FROST_ENGINES and require the
+nvidia-cutlass-dsl Python package, while TE's C++ builds against cuDNN Frontend headers only.
+Reaching them requires a Python graph, which is what this module is.
 
-Three properties of these kernels were verified on Blackwell before this was written, and each
-one constrains the code:
+Three properties of these kernels were verified on Blackwell, and each constrains the code:
 
-1. cuDNN's `use_causal_mask` is TOP-LEFT aligned and `use_causal_mask_bottom_right` is
-   bottom-right. They coincide when SQ == SKV, so the distinction is invisible in square tests
-   and decisive for all_gather, which trims KV. Both alignments were checked against a
-   reference rather than assumed, and masking is built as a diagonal band so causal,
-   bottom-right and sliding window come from one mechanism instead of three spellings.
+1. cuDNN's causal masking is TOP_LEFT aligned unless bottom-right is requested. The two coincide
+   when SQ == SKV, so the distinction is invisible in square tests and decisive for all_gather,
+   which trims KV. Masking is built as a diagonal band so causal, bottom-right and sliding window
+   come from one mechanism.
 
-2. Plan building must be cached. Building a plan is by far the most expensive cuDNN frontend
-   call here, and dominates an execute even after cuDNN has cached the JIT and made rebuilds
-   cheap, so a per-call build would leave training build-bound. Hence `_PLAN_CACHE`.
+2. Plan building must be cached. It dominates an execute even after cuDNN has cached the JIT, so a
+   per-call build would leave training build-bound. Hence `_PLAN_CACHE`.
 
-3. The forward LSE is natural-log logsumexp in fp32, shaped [b, h, s, 1]. Squeezed to [b, h, s]
-   it is exactly what the CP ring correction in context_parallel.py consumes, which is what
-   makes ring attention over these kernels valid at all.
-
-Numerics were validated against the criterion FlashAttention applies to itself, namely that the
-kernel error must stay within 2x the error bf16 inputs alone produce, across square and
-rectangular, causal and non-causal, windowed and unwindowed shapes.
+3. The forward LSE is natural-log logsumexp in fp32, shaped [b, h, s, 1]. Squeezed to [b, h, s] it
+   is what the CP ring correction in context_parallel.py consumes, which is what makes ring
+   attention over these kernels valid at all.
 """
 
 from __future__ import annotations
@@ -429,6 +416,10 @@ def _select_frost_plan(graph, token: str, what: str):
             f" nvidia-cutlass-dsl={_pkg_version('nvidia-cutlass-dsl')[1] or 'unknown'} (floor"
             f" {_MIN_CUTLASS_DSL})."
         )
+    # select_plan before check_support, not after: check_support is scoped to the *selected*
+    # plan, so calling it first would answer for whichever plan the heuristic ranked at index 0.
+    # Pinning also makes build_plans strict -- a decline raises instead of walking on to a
+    # non-FROST plan, which is the fallback this selection exists to prevent.
     graph.select_plan(hits[0])
     graph.check_support()
     graph.build_plans()
