@@ -25,18 +25,9 @@ import transformer_engine.pytorch as te
 SIZE = 16
 BATCH = 2
 DTYPE = torch.bfloat16
-DEVICE = "cuda"
-
-# The delayed path sums contributions in arrival order while the regular path
-# lets autograd accumulate, so with several microbatches the two orders can
-# differ by a BF16 ULP. That is not something the fix promises to remove, so the
-# tolerance is declared here and applies to the multi-microbatch case only;
-# every single-microbatch comparison below stays bit-exact.
-MULTI_MICROBATCH_RTOL = 1e-2
-MULTI_MICROBATCH_ATOL = 1e-2
 
 
-def _tie(model, bias):
+def _tie(model, *, bias):
     """Re-tie after load_state_dict, which rebinds parameters."""
     model[1].weight = model[0].weight
     if bias:
@@ -44,14 +35,15 @@ def _tie(model, bias):
     return model
 
 
-def _build(delay, tied, bias=False):
+def _build(delay, *, bias=False, device="cuda"):
+    """Two Linear layers over the same shapes. Tying is the caller's business."""
     model = nn.Sequential(
         te.Linear(
             SIZE,
             SIZE,
             bias=bias,
             params_dtype=DTYPE,
-            device=DEVICE,
+            device=device,
             delay_wgrad_compute=delay,
             fuse_wgrad_accumulation=False,
         ),
@@ -60,26 +52,30 @@ def _build(delay, tied, bias=False):
             SIZE,
             bias=bias,
             params_dtype=DTYPE,
-            device=DEVICE,
+            device=device,
             delay_wgrad_compute=delay,
             fuse_wgrad_accumulation=False,
         ),
     )
-    return _tie(model, bias) if tied else model
+    return model
 
 
-def _run(model, x, microbatches=1, delay=False, order=(0, 1)):
-    """Run the microbatches, then drain the delayed wgrad queues."""
+def _run(model, x, microbatches=1, delay=False, backward_dw_order=(0, 1)):
+    """Run the microbatches, then drain the delayed wgrad queues.
+
+    ``backward_dw_order`` is the module order used for draining, which decides which tied
+    module pops its delayed wgrad first.
+    """
     for xb in torch.chunk(x, microbatches, dim=0):
         model(xb).float().sum().backward()
     if delay:
         for _ in range(microbatches):
-            for i in order:
+            for i in backward_dw_order:
                 model[i].backward_dw()
 
 
-def _x(batch=BATCH):
-    return torch.randn(batch, SIZE, device=DEVICE, dtype=DTYPE, requires_grad=True)
+def _x(batch=BATCH, device="cuda"):
+    return torch.randn(batch, SIZE, device=device, dtype=DTYPE, requires_grad=True)
 
 
 @pytest.fixture(autouse=True)
@@ -89,9 +85,10 @@ def _seed():
 
 def test_tied_delayed_wgrad_accumulates():
     """The issue's own case: a tied delayed grad must match the regular path."""
-    delayed, regular = _build(True, True), _build(False, True)
+    delayed = _tie(_build(True), bias=False)
+    regular = _build(False)
     regular.load_state_dict(delayed.state_dict())
-    _tie(regular, False)
+    _tie(regular, bias=False)
     xd = _x()
     _run(delayed, xd, delay=True)
     _run(regular, xd.detach().clone().requires_grad_(True))
@@ -100,7 +97,7 @@ def test_tied_delayed_wgrad_accumulates():
 
 def test_non_tied_control_still_passes():
     """Independent parameters keep working."""
-    delayed, regular = _build(True, False), _build(False, False)
+    delayed, regular = _build(True), _build(False)
     regular.load_state_dict(delayed.state_dict())
     xd = _x()
     _run(delayed, xd, delay=True)
@@ -111,28 +108,31 @@ def test_non_tied_control_still_passes():
 
 def test_both_backward_dw_orders_match():
     """The shared gradient must not depend on which module pops first."""
-    a, b = _build(True, True), _build(True, True)
+    a = _tie(_build(True), bias=False)
+    b = _build(True)
     b.load_state_dict(a.state_dict())
-    _tie(b, False)
+    _tie(b, bias=False)
     xa = _x()
-    _run(a, xa, delay=True, order=(0, 1))
-    _run(b, xa.detach().clone().requires_grad_(True), delay=True, order=(1, 0))
+    _run(a, xa, delay=True, backward_dw_order=(0, 1))
+    _run(b, xa.detach().clone().requires_grad_(True), delay=True, backward_dw_order=(1, 0))
     torch.testing.assert_close(a[0].weight.grad, b[0].weight.grad, rtol=0, atol=0)
 
 
 def test_multiple_microbatches_accumulate():
-    delayed, regular = _build(True, True), _build(False, True)
+    # The delayed path sums contributions in arrival order while the regular path lets
+    # autograd accumulate, so with several microbatches the two orders can differ by a BF16
+    # ULP. That is not something the fix promises to remove, so the tolerance belongs to this
+    # test only; every single-microbatch comparison below stays bit-exact.
+    rtol = atol = 1e-2
+
+    delayed = _tie(_build(True), bias=False)
+    regular = _build(False)
     regular.load_state_dict(delayed.state_dict())
-    _tie(regular, False)
-    x = torch.randn(4, SIZE, device=DEVICE, dtype=DTYPE)
+    _tie(regular, bias=False)
+    x = _x(4)
     _run(delayed, x.clone().requires_grad_(True), microbatches=2, delay=True)
     _run(regular, x.clone().requires_grad_(True), microbatches=2)
-    torch.testing.assert_close(
-        delayed[0].weight.grad,
-        regular[0].weight.grad,
-        rtol=MULTI_MICROBATCH_RTOL,
-        atol=MULTI_MICROBATCH_ATOL,
-    )
+    torch.testing.assert_close(delayed[0].weight.grad, regular[0].weight.grad, rtol=rtol, atol=atol)
 
 
 @pytest.mark.parametrize("set_to_none", [True, False])
@@ -145,7 +145,7 @@ def test_two_optimizer_steps_do_not_pollute_each_other(set_to_none):
     would not show pollution: a first-step value carried into the second still differs from
     the first.
     """
-    model = _build(True, True)
+    model = _tie(_build(True), bias=False)
     params = list({id(p): p for p in model.parameters()}.values())
     opt = torch.optim.SGD(params, lr=0.0)
 
@@ -158,9 +158,9 @@ def test_two_optimizer_steps_do_not_pollute_each_other(set_to_none):
     second = model[0].weight.grad.detach().clone()
 
     # What the second step owes on its own: same weights, same input, first backward only.
-    fresh = _build(True, True)
+    fresh = _build(True)
     fresh.load_state_dict(model.state_dict())
-    _tie(fresh, True)
+    _tie(fresh, bias=False)
     _run(fresh, second_x.detach().clone().requires_grad_(True), delay=True)
 
     torch.testing.assert_close(second, fresh[0].weight.grad, rtol=0, atol=0)
@@ -170,9 +170,10 @@ def test_two_optimizer_steps_do_not_pollute_each_other(set_to_none):
 
 def test_tied_bias_delayed_wgrad_accumulates():
     """The bias shares the pop path, so it must accumulate too."""
-    delayed, regular = _build(True, True, bias=True), _build(False, True, bias=True)
+    delayed = _tie(_build(True, bias=True), bias=True)
+    regular = _build(False, bias=True)
     regular.load_state_dict(delayed.state_dict())
-    _tie(regular, True)
+    _tie(regular, bias=True)
     xd = _x()
     _run(delayed, xd, delay=True)
     _run(regular, xd.detach().clone().requires_grad_(True))
@@ -181,12 +182,13 @@ def test_tied_bias_delayed_wgrad_accumulates():
 
 def test_matches_pure_pytorch_reference():
     """Independent oracle: plain nn.Linear over the same weight and input."""
-    model = _build(True, True)
+    model = _tie(_build(True), bias=False)
     x = _x()
     _run(model, x, delay=True)
 
-    lin = nn.Linear(SIZE, SIZE, bias=False).to(device=DEVICE, dtype=DTYPE)
+    weight = model[0].weight
+    lin = nn.Linear(SIZE, SIZE, bias=False).to(device=weight.device, dtype=weight.dtype)
     with torch.no_grad():
-        lin.weight.copy_(model[0].weight)
+        lin.weight.copy_(weight)
     lin(lin(x.detach().clone().requires_grad_(True))).float().sum().backward()
     torch.testing.assert_close(model[0].weight.grad, lin.weight.grad, rtol=0, atol=0)
