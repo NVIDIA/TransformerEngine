@@ -539,26 +539,17 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         ).get_fused_attn_backend()
 
         if backend == NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
-            # cuDNN 9.6 reduces the required softmax shape
-            if get_cudnn_version() >= (9, 6, 0):
-                if config.qkv_layout.is_thd():
-                    softmax_shape = (*batch_shape, q_max_seqlen, attn_heads, 1)
-                else:
-                    softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, 1)
+            if config.qkv_layout.is_thd():
+                softmax_shape = (*batch_shape, q_max_seqlen, attn_heads, 1)
             else:
-                softmax_shape = (
-                    *batch_shape,
-                    attn_heads,
-                    q_max_seqlen,
-                    config.max_segments_per_seq,
-                )
+                softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, 1)
             softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
         else:
             raise ValueError(f"Unsupported backend: {message}")
         softmax_aux_aval = q_aval.update(shape=softmax_shape, dtype=softmax_dtype)
         if config.return_max_logit:
             # cuDNN Max is row-wise over S_kv. Dense and SM120 THD use
-            # [..., H, S_q, 1]; cuDNN >= 9.6 non-SM120 THD uses [..., S_q, H, 1].
+            # [..., H, S_q, 1]; non-SM120 THD uses [..., S_q, H, 1].
             # Both raw layouts are reduced to the public per-head [H] result below.
             if FusedAttnFwdPrimitive._uses_thd_ragged_max_tensor(config):
                 max_tensor_shape = (*batch_shape, q_max_seqlen, attn_heads, 1)
@@ -791,18 +782,11 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             assert len(batch) == 1, f"Expected len(batch) == 1, but got {len(batch)=}"
             kv_batch = q_batch = batch[0]
 
-            # Gather valid q_seqlen, which is greater than 0
-            # cuDNN version < 9.3.0:
-            # [[3, 5, 7, -1, -1], [2, 4, 6, -1, -1]] -> [[3, 5, 7, 2, 4], [6, -1, -1, -1, -1]]
-            # cuDNN version >= 9.3.0, which supports act_seqlen = 0
+            # Gather valid q_seqlen, which is greater than 0. cuDNN supports
+            # act_seqlen = 0, so padded slots are filled with 0:
             # [[3, 5, 7, -1, -1], [2, 4, 6, -1, -1]] -> [[3, 5, 7, 2, 4], [6, 0, 0, 0, 0]]
-            if get_cudnn_version() >= (9, 3, 0):
-                fill_value = 0
-            else:
-                fill_value = -1
-
-            q_seqlen = _fix_len_take(q_seqlen, q_seqlen > 0, fill_value=fill_value)
-            kv_seqlen = _fix_len_take(kv_seqlen, kv_seqlen > 0, fill_value=fill_value)
+            q_seqlen = _fix_len_take(q_seqlen, q_seqlen > 0, fill_value=0)
+            kv_seqlen = _fix_len_take(kv_seqlen, kv_seqlen > 0, fill_value=0)
 
             # Flatten the offset calculation
             # max_seqlen = 8, [[0, 3, 5, -1], [0, 2, 4, -1]] -> [[0, 3, 5, -1], [8, 11, 13, -1]]
@@ -850,7 +834,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
     def _reduce_max_logit(max_tensor, output, q_seqlen, q_seq_offsets, config):
         """Reduce cuDNN's row-wise Max tensor to the public per-head max_logit.
 
-        Dense and SM120 THD use ``[..., H, S_q, 1]``; cuDNN >= 9.6 non-SM120
+        Dense and SM120 THD use ``[..., H, S_q, 1]``; non-SM120
         THD uses ``[..., S_q, H, 1]``. A rank-3 THD result is ``[T_q, H, 1]``.
         All layouts reduce to ``[H]``. Static THD buffers can contain invalid query
         rows, so those rows are masked before reduction.
@@ -890,11 +874,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
     @staticmethod
     def _uses_thd_ragged_max_tensor(config):
         """Return whether cuDNN writes THD Max with BSH-like ragged-stats layout."""
-        return (
-            config.qkv_layout.is_thd()
-            and get_cudnn_version() >= (9, 6, 0)
-            and 120 not in get_all_device_compute_capability()
-        )
+        return config.qkv_layout.is_thd() and 120 not in get_all_device_compute_capability()
 
     @staticmethod
     def _empty_or_neg_inf_max_logit(head, dtype, config):
@@ -948,9 +928,8 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         del result_infos
         q_spec = get_padded_spec(arg_infos[0])
 
-        # when supported softmax_aux shape is (b, s, h, 1) for thd on cudnn 9.6+
-        # otherwise softmax_aux shape is (b, h, s, 1) or (b, h, s, max_segments)
-        is_packed_softmax = get_cudnn_version() >= (9, 6, 0) and config.qkv_layout.is_thd()
+        # softmax_aux shape is (b, s, h, 1) for thd, otherwise (b, h, s, 1)
+        is_packed_softmax = config.qkv_layout.is_thd()
 
         if config.qkv_layout.is_qkvpacked():
             # q_spec = (...batch, q_seqlen, 3, head, hidden)
@@ -1046,7 +1025,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         else:
             raise ValueError(f"Unsupported {config.qkv_layout=}")
 
-        is_packed_softmax = get_cudnn_version() >= (9, 6, 0) and config.qkv_layout.is_thd()
+        is_packed_softmax = config.qkv_layout.is_thd()
         out_sharding = ("…0", "seqlen", "head", "hidden")
         if is_packed_softmax:
             softmax_aux_sharding = ("…0", "seqlen", "head", "i")
@@ -1360,17 +1339,11 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             ), f"Expected len(batch) == 1, but got len(batch)={len(batch)}, batch={batch}"
             kv_batch = q_batch = batch[0]
 
-            # Gather valid q_seqlen, which is greater than 0
-            # cuDNN version < 9.3.0:
-            # [[3, 5, 7, -1, -1], [2, 4, 6, -1, -1]] -> [[3, 5, 7, 2, 4], [6, -1, -1, -1, -1]]
-            # cuDNN version >= 9.3.0, which supports act_seqlen = 0
+            # Gather valid q_seqlen, which is greater than 0. cuDNN supports
+            # act_seqlen = 0, so padded slots are filled with 0:
             # [[3, 5, 7, -1, -1], [2, 4, 6, -1, -1]] -> [[3, 5, 7, 2, 4], [6, 0, 0, 0, 0]]
-            if get_cudnn_version() >= (9, 3, 0):
-                fill_value = 0
-            else:
-                fill_value = -1
-            q_seqlen = _fix_len_take(q_seqlen, q_seqlen > 0, fill_value=fill_value)
-            kv_seqlen = _fix_len_take(kv_seqlen, kv_seqlen > 0, fill_value=fill_value)
+            q_seqlen = _fix_len_take(q_seqlen, q_seqlen > 0, fill_value=0)
+            kv_seqlen = _fix_len_take(kv_seqlen, kv_seqlen > 0, fill_value=0)
 
             # Flatten the offset calculation
             # max_seqlen = 8, [[0, 3, 5, -1], [0, 2, 4, -1]] -> [[0, 3, 5, -1], [8, 11, 13, -1]]
@@ -4007,7 +3980,6 @@ def fused_attn_bwd(
     if any(x >= 100 for x in compute_capabilities) and is_training:
         assert (
             FusedAttnHelper.is_non_deterministic_allowed()
-            and get_cudnn_version() >= (9, 7, 0)
             and (attn_bias_type == AttnBiasType.NO_BIAS or dropout_probability == 0.0)
         ) or (
             not FusedAttnHelper.is_non_deterministic_allowed()
@@ -4015,7 +3987,7 @@ def fused_attn_bwd(
             and attn_bias_type == AttnBiasType.NO_BIAS
             and dropout_probability == 0.0
         ), (
-            "For sm100+, non-deterministic bprop (cuDNN 9.7+) does not support bias with dropout,"
+            "For sm100+, non-deterministic bprop does not support bias with dropout,"
             " and deterministic bprop (cuDNN 9.18.1+) does not support bias or dropout"
         )
 
