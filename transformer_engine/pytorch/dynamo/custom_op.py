@@ -66,8 +66,8 @@ Autograd, registered on the op, drives backward:
     forward state + ``ctx_attrs`` (e.g. saved-tensor aliases) and return the
     tensors to persist; the plan's output ranges are stashed on ``ctx``;
   * on ``backward()`` the incoming flat grads are sliced per user output from the
-    stashed plan (a ``grad_outputs`` field on the backward args receives the
-    whole tuple; otherwise ``grad_output`` receives the first output's grad),
+    stashed plan and passed in forward-output order to the backward
+    container's ``setup_grad_outputs`` method,
     the container's optional ``setup_saved_tensors`` hook restores the saved
     tensors, then the *backward op* runs the real ``bwd_impl`` and returns the
     flat grads (``bwd_fake_impl`` is its data-free fake).
@@ -1018,7 +1018,6 @@ def _register_autograd_for_op(
     the saved tuple + ``ctx_attrs`` to the module's ``setup_context`` and stashes
     the plan on ``ctx`` so backward can slice its grads per user output.
     """
-    bwd_takes_grad_tuple = any(f.name == "grad_outputs" for f in bwd_plan.fields)
 
     def _setup_context(ctx, inputs, output):
         ctx.fwd_tensor_list_lengths = {
@@ -1058,10 +1057,7 @@ def _register_autograd_for_op(
         ctx.tensor_objects = None
         user_grads = _slice_user_grads(ctx.output_ranges, grad_outputs[0])
         ctx.output_ranges = None
-        if bwd_takes_grad_tuple:
-            bwd_obj.grad_outputs = tuple(user_grads)
-        else:
-            bwd_obj.grad_output = user_grads[0]
+        bwd_obj.setup_grad_outputs(user_grads)
         kwargs = bwd_plan.pack(bwd_obj)
         bwd_args_flat = [kwargs[name] for name in bwd_plan.slot_names]
         grads = [_decode_none(g) for g in bwd_op(*bwd_args_flat)]
@@ -1337,6 +1333,9 @@ def register_custom_op_with_autograd(
       non-differentiable input).
     * ``bwd_fake_impl(bwd_args)`` -- data-free twin of ``bwd_impl`` returning
       :class:`TensorSpec` grads.
+    * ``bwd_arg_type.setup_grad_outputs(grads)`` -- assign incoming gradients
+      to the container's fields. Receives one entry per forward user output,
+      in return order, including auxiliary outputs such as weight workspaces.
     * ``bwd_arg_type.setup_saved_tensors(ctx)`` -- optional hook; skipped if
       absent.
 
@@ -1345,10 +1344,8 @@ def register_custom_op_with_autograd(
     forward state and returns the tensors to persist; the framework saves them
     via ``ctx.save_for_backward``. Before ``bwd_impl`` runs, the framework
     restores them into the container's tensor fields through the
-    ``setup_saved_tensors`` hook and sets the incoming gradient directly --
-    into a ``grad_outputs`` field (tuple, one grad per user output) if
-    ``bwd_arg_type`` declares one, else into ``grad_output`` (the first user
-    output's grad) -- so ``bwd_impl`` receives a fully-populated
+    ``setup_saved_tensors`` hook and passes the incoming gradients to
+    ``setup_grad_outputs``, so ``bwd_impl`` receives a fully-populated
     ``bwd_arg_type``.
 
     Registration touches experimental ``torch.library`` / opaque-object APIs
