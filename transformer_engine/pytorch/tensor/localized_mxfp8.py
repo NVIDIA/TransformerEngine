@@ -328,8 +328,6 @@ class MXFP8VMMWorkspace:
             raise ValueError("VMM prototype requires rowwise or columnwise MXFP8")
         if quantizer.with_2d_quantization:
             raise ValueError("VMM prototype does not support 2D quantization")
-        if quantizer.internal:
-            raise ValueError("VMM prototype requires quantizer.internal=False")
         if localized_data_layout not in ("both", "rowwise", "columnwise"):
             raise ValueError(
                 "localized_data_layout must be 'both', 'rowwise', or 'columnwise', "

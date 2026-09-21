@@ -125,7 +125,6 @@ class MXFP8Quantizer(Quantizer):
             os.getenv("NVTE_MXFP8_VMM_LOCALIZATION", "0") == "1"
             and tensor.ndim == 2
             and (self.rowwise_usage or self.columnwise_usage)
-            and not self.internal
         ):
             from .vmm import is_vmm_tensor
 

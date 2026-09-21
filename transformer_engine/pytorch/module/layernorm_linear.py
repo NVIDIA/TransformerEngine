@@ -1184,6 +1184,11 @@ class _LayerNormLinear(torch.autograd.Function):
         else:
             wgrad = None
 
+        if os.getenv("NVTE_MXFP8_VMM_LOCALIZATION", "0") == "1":
+            from ..tensor.localized_mxfp8 import release_mxfp8_vmm_tensor_workspaces
+
+            release_mxfp8_vmm_tensor_workspaces(grad_output)
+
         if ctx.reduce_and_update_bwd_fp8_tensors and not is_graph_capturing():
             nvtx_range_push(f"{nvtx_label}.reduce_and_update_fp8_tensors")
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)

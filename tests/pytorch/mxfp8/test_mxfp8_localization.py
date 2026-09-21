@@ -288,6 +288,8 @@ def test_mxfp8_vmm_columnwise_only_quantize_impl(monkeypatch) -> None:
         rowwise=False,
         columnwise=True,
     )
+    # TE LayerNormLinear owns this quantizer and marks it internal.
+    quantizer.internal = True
     quantizer.optimize_for_gemm = True
     reference = quantizer.make_empty(shape, dtype=tensor.dtype, device=tensor.device)
     quantizer.update_quantized(tensor, reference)
