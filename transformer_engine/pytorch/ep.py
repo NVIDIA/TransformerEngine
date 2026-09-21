@@ -81,11 +81,14 @@ _EP_GROUP: Optional[dist.ProcessGroup] = None
 # omitted); ep_dispatch reads it to size the recv outputs from the per-step
 # recv-token total instead of a fixed recv_capacity_per_rank.
 _EAGER = False
+# Widest token dtype the group was bootstrapped for; EpBuffer.payload_dtype
+# must fit within it (staging buffers are sized to this at bootstrap).
+_MAX_TOKEN_DTYPE: torch.dtype = torch.bfloat16
 
 
 def _atexit_finalize() -> None:
     """Best-effort teardown at interpreter shutdown; swallows errors."""
-    global _BOOTSTRAPPED, _EP_GROUP, _EAGER
+    global _BOOTSTRAPPED, _EP_GROUP, _EAGER, _MAX_TOKEN_DTYPE
     if _BOOTSTRAPPED:
         try:
             tex.ep_finalize()
@@ -97,6 +100,7 @@ def _atexit_finalize() -> None:
             _BOOTSTRAPPED = False
             _EP_GROUP = None
             _EAGER = False
+            _MAX_TOKEN_DTYPE = torch.bfloat16
 
 
 def ep_bootstrap(
@@ -132,7 +136,7 @@ def ep_bootstrap(
     ``drop_on_overflow`` drops tokens exceeding ``recv_capacity_per_rank`` instead
     of trapping. Requires ``recv_capacity_per_rank``.
     """
-    global _BOOTSTRAPPED, _ATEXIT_REGISTERED, _EP_GROUP, _EAGER
+    global _BOOTSTRAPPED, _ATEXIT_REGISTERED, _EP_GROUP, _EAGER, _MAX_TOKEN_DTYPE
     eager = recv_capacity_per_rank is None
     if _BOOTSTRAPPED:
         raise RuntimeError("ep_bootstrap was already called in this process")
@@ -179,6 +183,7 @@ def ep_bootstrap(
     _BOOTSTRAPPED = True
     _EP_GROUP = ep_group
     _EAGER = bool(eager)
+    _MAX_TOKEN_DTYPE = max_token_dtype
     if not _ATEXIT_REGISTERED:
         atexit.register(_atexit_finalize)
         _ATEXIT_REGISTERED = True
@@ -199,7 +204,7 @@ def ep_finalize() -> None:
     a caller that used ``symm_mem_alloc(use_pool=True)`` does not need a separate
     ``release_symm_mem_pool()`` before destroying the PG.
     """
-    global _BOOTSTRAPPED, _EP_GROUP, _EAGER
+    global _BOOTSTRAPPED, _EP_GROUP, _EAGER, _MAX_TOKEN_DTYPE
     if not _BOOTSTRAPPED:
         return
     try:
@@ -210,6 +215,7 @@ def ep_finalize() -> None:
         _BOOTSTRAPPED = False
         _EP_GROUP = None
         _EAGER = False
+        _MAX_TOKEN_DTYPE = torch.bfloat16
 
 
 def is_symm_backed(t: torch.Tensor) -> bool:
@@ -290,6 +296,12 @@ class EpBuffer:
         self.recv_capacity_per_rank = (
             None if recv_capacity_per_rank is None else int(recv_capacity_per_rank)
         )
+        if payload_dtype.itemsize > _MAX_TOKEN_DTYPE.itemsize:
+            raise ValueError(
+                f"EpBuffer payload_dtype={payload_dtype} is wider than the group's"
+                f" bootstrap-time max_token_dtype={_MAX_TOKEN_DTYPE}; staging buffers were"
+                " not sized for it."
+            )
         self.hidden_dim = int(hidden_dim)
         self.num_local_experts = int(num_local_experts)
         self.payload_dtype = payload_dtype
