@@ -3237,20 +3237,23 @@ def mxfp8_quantize_only(tensor_quantizer_pairs, src_format):
     _s_dim = {"bshd": 1, "sbhd": 0}
     _d_dim = {"bshd": 3, "sbhd": 3}
 
-    # Attention consumes rowwise Q/K and columnwise V in forward. Localize
-    # only that representation; the backward-only representation stays in
-    # PyTorch's graph pool instead of requesting additional raw driver memory.
+    # Q localization is owned by the separate fused Q-up/RoPE/quant path.
+    # This prototype localizes only rowwise K and columnwise V; backward-only
+    # representations stay in PyTorch's graph pool.
     if len(tensor_quantizer_pairs) == 1:
         localized_data_layouts = ("rowwise",)
+        vmm_localization_roles = (False,)
     elif len(tensor_quantizer_pairs) == 2:
         localized_data_layouts = ("rowwise", "columnwise")
+        vmm_localization_roles = (True, True)
     else:
         assert len(tensor_quantizer_pairs) == 3
         localized_data_layouts = ("rowwise", "rowwise", "columnwise")
+        vmm_localization_roles = (False, True, True)
 
     fp8_tensors = []
-    for (tensor, quantizer), localized_data_layout in zip(
-        tensor_quantizer_pairs, localized_data_layouts
+    for (tensor, quantizer), localized_data_layout, localize_vmm in zip(
+        tensor_quantizer_pairs, localized_data_layouts, vmm_localization_roles
     ):
         original_shape = tensor.shape
         rs_shape = list(original_shape)
@@ -3269,6 +3272,7 @@ def mxfp8_quantize_only(tensor_quantizer_pairs, src_format):
 
             use_vmm_localization = (
                 os.getenv("NVTE_MXFP8_VMM_LOCALIZATION", "0") == "1"
+                and localize_vmm
                 and is_vmm_tensor(tensor)
                 and quantizer.rowwise_usage
                 and quantizer.columnwise_usage
