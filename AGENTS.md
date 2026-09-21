@@ -4,9 +4,6 @@ This file provides repository-specific guidance for working on Transformer
 Engine. `README.rst`, `CONTRIBUTING.rst`, `docs/`, `qa/` remain the authoritative sources for
 user documentation, contribution policy, and executable CI behavior.
 
-> **Draft status:** The architecture rules and expectations for complete local
-> validation are provisional and require maintainer review before merge.
-
 ## Project Scope
 
 Transformer Engine provides optimized building blocks for Transformer models
