@@ -269,6 +269,58 @@ def test_mxfp8_vmm_single_localized_data_layout(localized_data_layout: str) -> N
 
 
 @pytest.mark.skipif(not _localization_available(), reason="CUDA localization is unavailable")
+def test_mxfp8_vmm_columnwise_only_quantize_impl(monkeypatch) -> None:
+    """Linear backward can localize its columnwise-only dKV quantization."""
+    from transformer_engine.pytorch.tensor.localized_mxfp8 import (
+        begin_mxfp8_vmm_workspace_iteration,
+        clear_mxfp8_vmm_workspace_pools,
+        end_mxfp8_vmm_workspace_iteration,
+        release_mxfp8_vmm_tensor_workspaces,
+    )
+    from transformer_engine.pytorch.tensor.vmm import VMMRowSplitAllocator, is_vmm_tensor
+
+    shape = (256, 32768)
+    input_allocator = VMMRowSplitAllocator("cuda")
+    tensor = input_allocator.allocate(shape, torch.bfloat16)
+    tensor.normal_()
+    quantizer = te.MXFP8Quantizer(
+        fp8_dtype=te.DType.kFloat8E4M3,
+        rowwise=False,
+        columnwise=True,
+    )
+    quantizer.optimize_for_gemm = True
+    reference = quantizer.make_empty(shape, dtype=tensor.dtype, device=tensor.device)
+    quantizer.update_quantized(tensor, reference)
+
+    monkeypatch.setenv("NVTE_MXFP8_VMM_LOCALIZATION", "1")
+    try:
+        begin_mxfp8_vmm_workspace_iteration("test-columnwise")
+        output = quantizer(tensor)
+        torch.cuda.synchronize()
+        assert output._rowwise_data is None
+        assert output._rowwise_scale_inv is None
+        assert is_vmm_tensor(output._columnwise_data)
+        torch.testing.assert_close(
+            output._columnwise_data,
+            reference._columnwise_data,
+            atol=0.0,
+            rtol=0.0,
+        )
+        torch.testing.assert_close(
+            output._columnwise_scale_inv,
+            reference._columnwise_scale_inv,
+            atol=0.0,
+            rtol=0.0,
+        )
+        release_mxfp8_vmm_tensor_workspaces(output)
+        end_mxfp8_vmm_workspace_iteration()
+    finally:
+        end_mxfp8_vmm_workspace_iteration(validate=False)
+        clear_mxfp8_vmm_workspace_pools()
+        input_allocator.close()
+
+
+@pytest.mark.skipif(not _localization_available(), reason="CUDA localization is unavailable")
 def test_mxfp8_vmm_workspace_pool_reuses_warmup_storage() -> None:
     """Full-iteration capture reuses VMM outputs allocated during eager warmup."""
     from transformer_engine.pytorch.tensor.localized_mxfp8 import (

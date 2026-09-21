@@ -280,11 +280,10 @@ class MXFP8LocalizedPair:
 class MXFP8VMMWorkspace:
     """One input activation and one VMM-backed MXFP8 output.
 
-    This prototype supports exactly two equal row partitions, bidirectional MXFP8,
-    and VMM-aligned output partitions. Scales may either remain compact for an
-    attention-specific layout transform or be fused-swizzled for GEMM. The input
-    may be either an ordinary contiguous allocation or a VMM allocation. Scale
-    buffers remain ordinary allocations since they are small relative to the data.
+    This prototype supports exactly two equal row partitions and rowwise,
+    columnwise, or bidirectional MXFP8. Data outputs may be VMM-localized while
+    scale buffers remain ordinary allocations since they are small relative to
+    the data.
     """
 
     def __init__(
@@ -325,8 +324,8 @@ class MXFP8VMMWorkspace:
             )
         if dtype not in (torch.float16, torch.bfloat16):
             raise ValueError(f"Expected FP16 or BF16 input dtype, got {dtype}")
-        if not quantizer.rowwise_usage or not quantizer.columnwise_usage:
-            raise ValueError("VMM prototype requires bidirectional MXFP8")
+        if not quantizer.rowwise_usage and not quantizer.columnwise_usage:
+            raise ValueError("VMM prototype requires rowwise or columnwise MXFP8")
         if quantizer.with_2d_quantization:
             raise ValueError("VMM prototype does not support 2D quantization")
         if quantizer.internal:
@@ -357,26 +356,35 @@ class MXFP8VMMWorkspace:
                 "External input must match the workspace shape, dtype, device, "
                 "and contiguous layout"
             )
-        if localized_data_layout in ("both", "rowwise"):
-            rowwise_data = allocator.allocate(shape, torch.uint8)
-        else:
-            rowwise_data = torch.empty(shape, dtype=torch.uint8, device=device)
-        if localized_data_layout in ("both", "columnwise"):
-            columnwise_data = allocator.allocate(shape, torch.uint8)
-        else:
-            columnwise_data = torch.empty(shape, dtype=torch.uint8, device=device)
-        row_scale_shape = tuple(quantizer.get_scale_shape(shape, columnwise=False))
-        col_scale_shape = tuple(quantizer.get_scale_shape(shape, columnwise=True))
-        rowwise_scale_inv = torch.empty(
-            row_scale_shape,
-            dtype=torch.uint8,
-            device=device,
-        )
-        columnwise_scale_inv = torch.empty(
-            col_scale_shape,
-            dtype=torch.uint8,
-            device=device,
-        )
+        rowwise_data = None
+        rowwise_scale_inv = None
+        row_scale_shape = None
+        if quantizer.rowwise_usage:
+            if localized_data_layout in ("both", "rowwise"):
+                rowwise_data = allocator.allocate(shape, torch.uint8)
+            else:
+                rowwise_data = torch.empty(shape, dtype=torch.uint8, device=device)
+            row_scale_shape = tuple(quantizer.get_scale_shape(shape, columnwise=False))
+            rowwise_scale_inv = torch.empty(
+                row_scale_shape,
+                dtype=torch.uint8,
+                device=device,
+            )
+
+        columnwise_data = None
+        columnwise_scale_inv = None
+        col_scale_shape = None
+        if quantizer.columnwise_usage:
+            if localized_data_layout in ("both", "columnwise"):
+                columnwise_data = allocator.allocate(shape, torch.uint8)
+            else:
+                columnwise_data = torch.empty(shape, dtype=torch.uint8, device=device)
+            col_scale_shape = tuple(quantizer.get_scale_shape(shape, columnwise=True))
+            columnwise_scale_inv = torch.empty(
+                col_scale_shape,
+                dtype=torch.uint8,
+                device=device,
+            )
 
         output = MXFP8Tensor(
             shape=shape,
@@ -397,9 +405,20 @@ class MXFP8VMMWorkspace:
         for domain in range(2):
             row_start = domain * rows_per_domain
             row_end = row_start + rows_per_domain
-            scale_start = domain * (row_scale_shape[0] // 2)
-            scale_end = scale_start + row_scale_shape[0] // 2
-            if quantizer.optimize_for_gemm:
+            partition_rowwise_data = (
+                rowwise_data[row_start:row_end] if rowwise_data is not None else None
+            )
+            partition_rowwise_scale_inv = None
+            if rowwise_scale_inv is not None:
+                scale_start = domain * (row_scale_shape[0] // 2)
+                scale_end = scale_start + row_scale_shape[0] // 2
+                partition_rowwise_scale_inv = rowwise_scale_inv[scale_start:scale_end]
+            partition_columnwise_data = (
+                columnwise_data[row_start:row_end] if columnwise_data is not None else None
+            )
+            if columnwise_scale_inv is None:
+                partition_columnwise_scale_inv = None
+            elif quantizer.optimize_for_gemm:
                 # Global GEMM swizzle coordinates interleave both row partitions.
                 partition_columnwise_scale_inv = columnwise_scale_inv
             else:
@@ -410,9 +429,9 @@ class MXFP8VMMWorkspace:
                 MXFP8Tensor(
                     shape=partition_shape,
                     dtype=dtype,
-                    rowwise_data=rowwise_data[row_start:row_end],
-                    rowwise_scale_inv=rowwise_scale_inv[scale_start:scale_end],
-                    columnwise_data=columnwise_data[row_start:row_end],
+                    rowwise_data=partition_rowwise_data,
+                    rowwise_scale_inv=partition_rowwise_scale_inv,
+                    columnwise_data=partition_columnwise_data,
                     columnwise_scale_inv=partition_columnwise_scale_inv,
                     fp8_dtype=quantizer.dtype,
                     quantizer=quantizer,

@@ -124,17 +124,33 @@ class MXFP8Quantizer(Quantizer):
         if (
             os.getenv("NVTE_MXFP8_VMM_LOCALIZATION", "0") == "1"
             and tensor.ndim == 2
-            and self.rowwise_usage
-            and self.columnwise_usage
+            and (self.rowwise_usage or self.columnwise_usage)
             and not self.internal
         ):
             from .vmm import is_vmm_tensor
 
             if is_vmm_tensor(tensor):
-                from .localized_mxfp8 import MXFP8VMMWorkspace
+                from .localized_mxfp8 import (
+                    acquire_mxfp8_vmm_workspace,
+                    release_mxfp8_vmm_workspace,
+                )
 
-                workspace = MXFP8VMMWorkspace.from_vmm_input(tensor, self)
-                output = workspace.quantize()
+                if self.rowwise_usage and self.columnwise_usage:
+                    localized_data_layout = "both"
+                elif self.rowwise_usage:
+                    localized_data_layout = "rowwise"
+                else:
+                    localized_data_layout = "columnwise"
+                workspace = acquire_mxfp8_vmm_workspace(
+                    tensor,
+                    self,
+                    localized_data_layout=localized_data_layout,
+                )
+                try:
+                    output = workspace.quantize()
+                except Exception:
+                    release_mxfp8_vmm_workspace(workspace)
+                    raise
                 output._nvte_vmm_workspace = workspace
                 return output
         return tex.quantize(tensor, self)
