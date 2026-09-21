@@ -21,6 +21,8 @@ Coverage:
 Launch via tests/jax/multi_process_launch_ep.sh (one process per GPU).
 """
 
+import ctypes
+import ctypes.util
 import os
 import re
 import sys
@@ -34,6 +36,8 @@ import numpy as np
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
 from utils import is_devices_enough
+import transformer_engine.jax  # noqa: F401 -- registers the transformer_engine_jax module alias
+import transformer_engine_jax
 from transformer_engine.jax.sharding import MeshResource, global_shard_guard
 from transformer_engine.jax.ep import (
     EpLayerConfig,
@@ -42,6 +46,7 @@ from transformer_engine.jax.ep import (
     ep_dispatch,
     ep_combine,
     _ep_domain_for_rank,
+    _ep_flattened_replica_groups,
 )
 from transformer_engine.jax.cpp_extensions.ep import (
     ep_prepare,
@@ -99,6 +104,30 @@ def _build_mesh(dp, ep):
     return Mesh(devs, ("dp", "ep"))
 
 
+def _cudart():
+    # Defer loading CUDA so test collection does not require it.
+    if not hasattr(_cudart, "_lib"):
+        _cudart._lib = ctypes.CDLL(ctypes.util.find_library("cudart") or "libcudart.so")
+    return _cudart._lib
+
+
+def _cuda_device_count():
+    """Return the number of CUDA-visible devices."""
+    n = ctypes.c_int()
+    assert _cudart().cudaGetDeviceCount(ctypes.byref(n)) == 0
+    return n.value
+
+
+def _cuda_current_device():
+    d = ctypes.c_int()
+    assert _cudart().cudaGetDevice(ctypes.byref(d)) == 0
+    return d.value
+
+
+def _cuda_set_device(d):
+    assert _cudart().cudaSetDevice(d) == 0
+
+
 def _local_device_sm():
     """Return SM major*10+minor of the first local CUDA device, or None."""
     try:
@@ -118,20 +147,10 @@ class TestEP(unittest.TestCase):
     USE_BORROWED_COMM = False
 
     @classmethod
-    def setUpClass(cls):
-        sm = _local_device_sm()
-        if sm is not None and sm < 90:
-            raise unittest.SkipTest(f"NCCL EP requires SM>=90 (got SM{sm})")
-        if cls.USE_BORROWED_COMM and not (
-            is_ep_borrowed_comm_built() and is_xla_ffi_collectives_supported()
-        ):
-            raise unittest.SkipTest("EP borrowed-comm path needs a newer JAX/XLA build")
-        cls._prev_comm_env = os.environ.get("NVTE_JAX_EP_NCCL_COMM_FROM_XLA")
-        os.environ["NVTE_JAX_EP_NCCL_COMM_FROM_XLA"] = "1" if cls.USE_BORROWED_COMM else "0"
-        # Drop any communicator a prior class left so we bootstrap on a clean slate.
-        ep_finalize()
-        cls.num_procs = jax.process_count()
-        cls.rank = jax.process_index()
+    def _bootstrap(cls, num_procs, rank):
+        """Initialize the test mesh, communicator, and layer configuration."""
+        cls.num_procs = num_procs
+        cls.rank = rank
         cls.dp, cls.ep = _factor_dp_ep(cls.num_procs)
         cls.num_experts = NUM_LOCAL_EXPERTS * cls.ep
         # recv_capacity is per-DP-group (NCCL EP comms isolated per DP color).
@@ -163,6 +182,21 @@ class TestEP(unittest.TestCase):
         cls.hk = EpLayerConfig(top_k=TOP_K, dispatch_output_per_expert_alignment=16)
 
     @classmethod
+    def setUpClass(cls):
+        sm = _local_device_sm()
+        if sm is not None and sm < 90:
+            raise unittest.SkipTest(f"NCCL EP requires SM>=90 (got SM{sm})")
+        if cls.USE_BORROWED_COMM and not (
+            is_ep_borrowed_comm_built() and is_xla_ffi_collectives_supported()
+        ):
+            raise unittest.SkipTest("EP borrowed-comm path needs a newer JAX/XLA build")
+        cls._prev_comm_env = os.environ.get("NVTE_JAX_EP_NCCL_COMM_FROM_XLA")
+        os.environ["NVTE_JAX_EP_NCCL_COMM_FROM_XLA"] = "1" if cls.USE_BORROWED_COMM else "0"
+        # Drop any communicator a prior class left so we bootstrap on a clean slate.
+        ep_finalize()
+        cls._bootstrap(jax.device_count(), jax.process_index())
+
+    @classmethod
     def tearDownClass(cls):
         # Leave a clean slate for the next class and restore the env override.
         ep_finalize()
@@ -185,6 +219,33 @@ class TestEP(unittest.TestCase):
                     recv_capacity_per_rank=self.recv_capacity_per_rank,
                     hidden_dim=HIDDEN_DIM,
                 )
+
+    def test_finalize_restores_current_cuda_device(self):
+        """Verify self-hosted teardown preserves the caller's current CUDA device."""
+        if self.USE_BORROWED_COMM:
+            self.skipTest("self-hosted communicator ownership test")
+        if _cuda_device_count() < 2:
+            self.skipTest("requires two CUDA-visible devices")
+        jax.clear_caches()
+        owner = _cuda_current_device()
+        other = (owner + 1) % _cuda_device_count()
+        _cuda_set_device(other)
+        try:
+            ep_finalize()
+            current = _cuda_current_device()
+        finally:
+            _cuda_set_device(owner)
+            # Re-bootstrap on every rank before an assertion can interrupt the collective.
+            with self.mesh, global_shard_guard(self.mr):
+                ep_bootstrap(
+                    world_size=self.num_procs,
+                    rank=self.rank,
+                    num_experts=self.num_experts,
+                    max_tokens_per_rank=TOKENS_PER_DP_SHARD,
+                    recv_capacity_per_rank=self.recv_capacity_per_rank,
+                    hidden_dim=HIDDEN_DIM,
+                )
+        self.assertEqual(current, other)
 
     # ── Helpers ───────────────────────────────────────────────────────────
 
@@ -277,7 +338,11 @@ class TestEP(unittest.TestCase):
             hm_a, hm_b = run(idx_s)
             hm_a.block_until_ready()
             hm_b.block_until_ready()
-        self.assertNotEqual(hm_a.unsafe_buffer_pointer(), hm_b.unsafe_buffer_pointer())
+        # unsafe_buffer_pointer() requires an unsharded array; compare
+        # per-shard pointers instead (also covers the single-shard case).
+        ptrs_a = {s.data.unsafe_buffer_pointer() for s in hm_a.addressable_shards}
+        ptrs_b = {s.data.unsafe_buffer_pointer() for s in hm_b.addressable_shards}
+        self.assertTrue(ptrs_a.isdisjoint(ptrs_b))
 
     def test_two_layer_dispatch_no_handle_aliasing(self):
         """Two ep_dispatch calls in one jit must not clobber each other's routing
@@ -365,6 +430,29 @@ class TestEP(unittest.TestCase):
         padded = ((np.asarray(tc).astype(np.int64) + align - 1) // align) * align
         expected = padded.sum(axis=-1, keepdims=True)
         np.testing.assert_array_equal(np.asarray(trt).astype(np.int64), expected)
+
+    def test_primitive_prepare_rejects_undersized_handle(self):
+        """Reject an undersized handle before NCCL EP writes routing state."""
+        import transformer_engine_jax
+
+        _T, topk_idx, _tokens, _w = self._make_identity_inputs()
+        dp_spec = PartitionSpec(("dp", "ep"), None)
+        jax.clear_caches()
+        with self.mesh, global_shard_guard(self.mr):
+            idx_s = jax.lax.with_sharding_constraint(topk_idx, NamedSharding(self.mesh, dp_spec))
+
+            @jax.jit
+            def run(idx):
+                return ep_prepare(self.hk, idx)
+
+            try:
+                with mock.patch.object(
+                    transformer_engine_jax, "ep_handle_mem_size", return_value=1
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "handle_mem buffer is too small"):
+                        jax.block_until_ready(run(idx_s))
+            finally:
+                jax.clear_caches()
 
     def _run_identity_round_trip(self, nonuniform):
         T_global, topk_idx, tokens, topk_w = self._make_identity_inputs(nonuniform=nonuniform)
@@ -878,6 +966,36 @@ class TestEPBorrowedComm(TestEP):
             self.skipTest("borrowed-comm full suite runs at L2 (NVTE_JAX_UNITTEST_LEVEL=L2)")
 
 
+# ── Single-process, multi-device, multi-domain EP ────────────────────────────
+
+
+class TestEpSingleProcessMultiDomain(TestEP):
+    """Test multiple EP domains in one process with borrowed XLA communicators."""
+
+    USE_BORROWED_COMM = True
+
+    @classmethod
+    def setUpClass(cls):
+        if jax.process_count() != 1:
+            raise unittest.SkipTest(
+                "single-process multi-domain EP test requires jax.process_count() == 1"
+            )
+        sm = _local_device_sm()
+        if sm is not None and sm < 90:
+            raise unittest.SkipTest(f"NCCL EP requires SM>=90 (got SM{sm})")
+        if not (is_ep_borrowed_comm_built() and is_xla_ffi_collectives_supported()):
+            raise unittest.SkipTest("EP borrowed-comm path needs a newer JAX/XLA build")
+        if jax.local_device_count() < 4:
+            raise unittest.SkipTest(
+                "needs >=4 local GPUs for a multi-domain (dp=2, ep=2) mesh, got"
+                f" {jax.local_device_count()}"
+            )
+        cls._prev_comm_env = os.environ.get("NVTE_JAX_EP_NCCL_COMM_FROM_XLA")
+        os.environ["NVTE_JAX_EP_NCCL_COMM_FROM_XLA"] = "1"
+        ep_finalize()
+        cls._bootstrap(jax.local_device_count(), 0)
+
+
 # ── Drop-on-overflow ─────────────────────────────────────────────────────────
 
 
@@ -906,7 +1024,7 @@ class TestEPOverflowDrop(unittest.TestCase):
             raise unittest.SkipTest(f"NCCL EP requires SM>=90 (got SM{sm})")
         cls._prev_comm_env = os.environ.get("NVTE_JAX_EP_NCCL_COMM_FROM_XLA")
         os.environ["NVTE_JAX_EP_NCCL_COMM_FROM_XLA"] = "0"
-        cls.num_procs = jax.process_count()
+        cls.num_procs = jax.device_count()
         cls.rank = jax.process_index()
         cls.dp, cls.ep = _factor_dp_ep(cls.num_procs)
         cls.num_experts = NUM_LOCAL_EXPERTS * cls.ep
@@ -1024,6 +1142,24 @@ class TestEpDomainGrouping(unittest.TestCase):
 
         self.assertEqual(domains, {0: [0, 2, 4, 6], 1: [1, 3, 5, 7]})
 
+    def test_ep_flattened_replica_groups_multi_domain(self):
+        """Verify flattened replica IDs are grouped by DP coordinate."""
+        if not is_devices_enough(4):
+            self.skipTest("requires 4 devices")
+        mesh = Mesh(np.asarray(jax.devices()[:4]).reshape(2, 2), ("dp", "ep"))
+        flat_groups, ep_size = _ep_flattened_replica_groups(mesh, "ep")
+        self.assertEqual(ep_size, 2)
+        np.testing.assert_array_equal(np.asarray(flat_groups), np.array([0, 1, 2, 3]))
+
+    def test_ep_flattened_replica_groups_ep_axis_first(self):
+        """Verify replica grouping when EP is the first mesh axis."""
+        if not is_devices_enough(4):
+            self.skipTest("requires 4 devices")
+        mesh = Mesh(np.asarray(jax.devices()[:4]).reshape(2, 2), ("ep", "dp"))
+        flat_groups, ep_size = _ep_flattened_replica_groups(mesh, "ep")
+        self.assertEqual(ep_size, 2)
+        np.testing.assert_array_equal(np.asarray(flat_groups), np.array([0, 2, 1, 3]))
+
 
 # ── Comm-path selection (single-process; no GPU needed) ──────────────────────
 
@@ -1065,19 +1201,84 @@ class TestEpCommSelection(unittest.TestCase):
             self._use("1", built=False, supported=True)
 
 
+class TestEpBootstrapMultiDeviceGuard(unittest.TestCase):
+    """Require borrowed XLA communicators for multiple local devices."""
+
+    def test_raises_when_borrowed_comm_unavailable(self):
+        import transformer_engine.jax.ep as ep_mod
+
+        with mock.patch.object(ep_mod.jax, "local_device_count", return_value=2), mock.patch.object(
+            ep_mod.tex.ep, "use_nccl_comm_from_xla", return_value=False
+        ):
+            with self.assertRaisesRegex(RuntimeError, "XLA-borrowed-comm"):
+                ep_mod.ep_bootstrap(
+                    world_size=2,
+                    rank=0,
+                    num_experts=2,
+                    max_tokens_per_rank=4,
+                    recv_capacity_per_rank=8,
+                    hidden_dim=HIDDEN_DIM,
+                )
+
+
+@unittest.skipUnless(
+    hasattr(transformer_engine_jax, "set_ep_bootstrap_params"), "requires an NCCL EP build"
+)
+class TestEpCommPathSwitchGuard(unittest.TestCase):
+    """Reject communicator mode changes within a process."""
+
+    def test_raises_on_comm_path_switch(self):
+        import transformer_engine_jax
+        from transformer_engine.jax.cpp_extensions.misc import jax_dtype_to_te_dtype
+
+        max_token_dtype = int(jax_dtype_to_te_dtype(jnp.bfloat16))
+        transformer_engine_jax.set_ep_bootstrap_params(
+            bytes(128), 2, 0, 2, 4, 8, HIDDEN_DIM, 0, max_token_dtype, False, borrowed_comm=True
+        )
+        try:
+            with self.assertRaisesRegex(RuntimeError, "switching between self-hosted"):
+                transformer_engine_jax.set_ep_bootstrap_params(
+                    bytes(128),
+                    2,
+                    0,
+                    2,
+                    4,
+                    8,
+                    HIDDEN_DIM,
+                    0,
+                    max_token_dtype,
+                    False,
+                    borrowed_comm=False,
+                )
+        finally:
+            transformer_engine_jax.release_ep_resources()
+
+
 def _ep_test_cases():
     """Select test classes for one communicator mode."""
     all_test_cases = {
         c.__name__: c
-        for c in (TestEP, TestEPBorrowedComm, TestEPOverflowDrop, TestEpDomainGrouping)
+        for c in (
+            TestEP,
+            TestEPBorrowedComm,
+            TestEPOverflowDrop,
+            TestEpDomainGrouping,
+            TestEpSingleProcessMultiDomain,
+        )
     }
     names = os.environ.get("NVTE_TEST_EP_CLASSES")
-    test_cases = (
-        tuple(all_test_cases[name.strip()] for name in names.split(","))
-        if names
-        else (TestEP, TestEPOverflowDrop, TestEpDomainGrouping)
-    )
-    if TestEPBorrowedComm in test_cases and any(
+    if names:
+        requested = [name.strip() for name in names.split(",")]
+        unknown = [name for name in requested if name not in all_test_cases]
+        if unknown:
+            raise ValueError(
+                f"NVTE_TEST_EP_CLASSES: unknown test class(es) {unknown}; known:"
+                f" {sorted(all_test_cases)}"
+            )
+        test_cases = tuple(all_test_cases[name] for name in requested)
+    else:
+        test_cases = (TestEP, TestEPOverflowDrop, TestEpDomainGrouping)
+    if any(c in test_cases for c in (TestEPBorrowedComm, TestEpSingleProcessMultiDomain)) and any(
         c in test_cases for c in (TestEP, TestEPOverflowDrop)
     ):
         raise ValueError("Run borrowed-comm and self-hosted EP tests in separate processes.")
@@ -1089,12 +1290,17 @@ def _ep_test_cases():
 
 if __name__ == "__main__":
     if len(sys.argv) < 4:
-        print("Usage: python test_multi_process_ep.py <coord_addr> <proc_id> <num_procs>")
+        print(
+            "Usage: python test_multi_process_ep.py <coord_addr> <proc_id> <num_procs>"
+            " [devices_per_proc]"
+        )
         sys.exit(1)
 
     coord_addr = sys.argv[1]
     proc_id = int(sys.argv[2])
     num_procs = int(sys.argv[3])
+    devices_per_proc = int(sys.argv[4]) if len(sys.argv) > 4 else 1
+
     test_cases = _ep_test_cases()
 
     target = os.environ.get("TARGET_TEST")
@@ -1102,7 +1308,13 @@ if __name__ == "__main__":
         name = target.split(".")[-1]
         if not any(
             hasattr(c, name)
-            for c in (TestEP, TestEPBorrowedComm, TestEPOverflowDrop, TestEpDomainGrouping)
+            for c in (
+                TestEP,
+                TestEPBorrowedComm,
+                TestEPOverflowDrop,
+                TestEpDomainGrouping,
+                TestEpSingleProcessMultiDomain,
+            )
         ):
             raise ValueError(f"Unknown EP test: {target}")
         test_cases = tuple(c for c in test_cases if hasattr(c, name))
@@ -1114,7 +1326,7 @@ if __name__ == "__main__":
         coordinator_address=coord_addr,
         num_processes=num_procs,
         process_id=proc_id,
-        local_device_ids=[proc_id],
+        local_device_ids=list(range(proc_id * devices_per_proc, (proc_id + 1) * devices_per_proc)),
     )
 
     loader = unittest.TestLoader()

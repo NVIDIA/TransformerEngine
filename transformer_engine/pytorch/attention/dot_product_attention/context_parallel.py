@@ -1843,16 +1843,12 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             )
 
         # stats tensor shape:
-        # BHS1 before cuDNN 9.6 or flash-attention v2.6/v3
-        # TH1 after cuDNN 9.6 or flash-attention v2.6/v3
+        # BHS1 before flash-attention v2.6/v3
+        # TH1 with cuDNN, or after flash-attention v2.6/v3
         softmax_lse_in_packed_format = False
         if qkv_format == "thd":
             if use_fused_attention:
-                softmax_lse_in_packed_format = get_cudnn_version() >= (
-                    9,
-                    6,
-                    0,
-                ) and get_device_compute_capability() != (12, 0)
+                softmax_lse_in_packed_format = get_device_compute_capability() != (12, 0)
             else:
                 softmax_lse_in_packed_format = (
                     fa_utils.v2_6_0_plus or use_flash_attn_3 or use_flash_attn_4
