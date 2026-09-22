@@ -25,7 +25,7 @@ residuals into the user-facing autograd graph.
 
 Sharding model
 --------------
-* Inbound activations are 3D ``[B, S, H]`` sharded
+* Inbound activations are 2D ``[T, H]`` or 3D ``[B, S, H]`` sharded
   ``((outer_dp_axes..., ep_axes...), None, None)``. The public
   :func:`moe` soft-repins this on entry and warns when a reshard is
   inserted.
@@ -141,7 +141,8 @@ class RoutingMapInfo:
     Parameters
     ----------
     routing_indices : jnp.ndarray
-        Integer expert indices with shape ``[batch, sequence, top_k]``.
+        Integer expert indices with shape ``[batch, sequence, top_k]``, or
+        ``[tokens, top_k]`` for a ``[tokens, hidden]`` input.
         Non-differentiable. Each token's ``top_k`` indices must be distinct,
         otherwise the default receive-capacity bound is invalid.
     routing_weights : jnp.ndarray
@@ -2310,6 +2311,18 @@ def moe(
     mesh_resource, quant_before_fsdp_ag = _resolve_moe_mesh_resource(
         mesh_resource, quant_before_fsdp_ag, ep_axis=ep_axis
     )
+    original_shape = x.shape
+    if x.ndim not in (2, 3):
+        raise ValueError(f"moe expects rank-2 or rank-3 input, got {x.shape}")
+    if x.ndim == 2:
+        x = x.reshape(x.shape[0], 1, x.shape[1])
+        if input_axes:
+            input_axes = (input_axes[0], None, input_axes[1])
+        if isinstance(router_info, RoutingMapInfo):
+            router_info = router_info.replace(
+                routing_indices=router_info.routing_indices[:, None],
+                routing_weights=router_info.routing_weights[:, None],
+            )
     ep_axis, data_parallelism_axes = _moe_mesh_axes(mesh_resource)
 
     if isinstance(router_info, RouterComputationInfo):
@@ -2400,4 +2413,4 @@ def moe(
         assert (
             output.dtype == x.dtype
         ), f"moe() output dtype {output.dtype} != input dtype {x.dtype}"
-        return output, aux_loss, total_recv_tokens, expert_counts
+        return output.reshape(original_shape), aux_loss, total_recv_tokens, expert_counts
