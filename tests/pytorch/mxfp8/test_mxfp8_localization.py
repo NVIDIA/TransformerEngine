@@ -8,9 +8,9 @@ import os
 
 import pytest
 import torch
-import transformer_engine_torch as tex
 
 import transformer_engine.pytorch as te
+from transformer_engine.pytorch import cpp_extensions as tex
 from transformer_engine.pytorch.cpp_extensions import general_gemm
 
 
