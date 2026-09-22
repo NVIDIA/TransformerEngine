@@ -856,6 +856,9 @@ def test_mxfp8_vmm_layernorm_quant_localization_performance(
 
     ordinary_input_outputs = tuple(make_partition_output(domain) for domain in range(2))
     localized_input_outputs = tuple(make_partition_output(domain) for domain in range(2))
+    split_ordinary_outputs = tuple(
+        quantizer.make_empty(partition_shape, dtype=dtype, device=device) for _ in range(2)
+    )
     ordinary_inputs = tuple(input_tensor.chunk(2, dim=0))
     localized_inputs = tuple(
         allocator.allocate_in_domain(partition_shape, dtype, domain) for domain in range(2)
@@ -866,6 +869,7 @@ def test_mxfp8_vmm_layernorm_quant_localization_performance(
 
     _, _, streams = _get_localization_context(torch.cuda.current_device())
     assert len(streams) == 2
+    ordinary_streams = tuple(torch.cuda.Stream(device=device) for _ in range(2))
 
     total_sms = torch.cuda.get_device_properties(device).multi_processor_count
     sms_per_domain = total_sms // 2
@@ -893,10 +897,14 @@ def test_mxfp8_vmm_layernorm_quant_localization_performance(
             torch.cuda.Event(enable_timing=False),
             tuple(torch.cuda.Event(enable_timing=False) for _ in range(2)),
         ),
+        "split": (
+            torch.cuda.Event(enable_timing=False),
+            tuple(torch.cuda.Event(enable_timing=False) for _ in range(2)),
+        ),
     }
     capture_events = []
 
-    def localized(inputs, outputs, event_key: str) -> None:
+    def partitioned(inputs, outputs, launch_streams, event_key: str) -> None:
         parent_stream = torch.cuda.current_stream(device)
         if torch.cuda.is_current_stream_capturing():
             fork_event = torch.cuda.Event(enable_timing=False)
@@ -906,7 +914,7 @@ def test_mxfp8_vmm_layernorm_quant_localization_performance(
             fork_event, join_events = eager_events[event_key]
         fork_event.record(parent_stream)
         for domain, (local_input, output, stream) in enumerate(
-            zip(inputs, outputs, streams)
+            zip(inputs, outputs, launch_streams)
         ):
             stream.wait_event(fork_event)
             with torch.cuda.stream(stream):
@@ -926,34 +934,51 @@ def test_mxfp8_vmm_layernorm_quant_localization_performance(
             parent_stream.wait_event(event)
 
     def ordinary_input_localized_output() -> None:
-        localized(
+        partitioned(
             ordinary_inputs,
             ordinary_input_outputs,
+            streams,
             "ordinary",
         )
 
     def localized_input_and_output() -> None:
-        localized(localized_inputs, localized_input_outputs, "localized")
+        partitioned(localized_inputs, localized_input_outputs, streams, "localized")
+
+    def split_ordinary() -> None:
+        partitioned(
+            ordinary_inputs,
+            split_ordinary_outputs,
+            ordinary_streams,
+            "split",
+        )
 
     use_cuda_graph = os.getenv("MXFP8_LOCALIZATION_USE_CUDA_GRAPH") == "1"
     if use_cuda_graph:
         baseline_fn = _capture_cuda_graph(baseline).replay
+        split_ordinary_fn = _capture_cuda_graph(split_ordinary).replay
         ordinary_input_fn = _capture_cuda_graph(ordinary_input_localized_output).replay
         localized_input_fn = _capture_cuda_graph(localized_input_and_output).replay
     else:
         baseline_fn = baseline
+        split_ordinary_fn = split_ordinary
         ordinary_input_fn = ordinary_input_localized_output
         localized_input_fn = localized_input_and_output
 
     baseline_ms = _benchmark_ms(baseline_fn)
+    split_ordinary_ms = _benchmark_ms(split_ordinary_fn)
     ordinary_input_ms = _benchmark_ms(ordinary_input_fn)
     localized_input_ms = _benchmark_ms(localized_input_fn)
 
     baseline_fn()
+    split_ordinary_fn()
     ordinary_input_fn()
     localized_input_fn()
     torch.cuda.synchronize()
-    for outputs in (ordinary_input_outputs, localized_input_outputs):
+    for outputs in (
+        split_ordinary_outputs,
+        ordinary_input_outputs,
+        localized_input_outputs,
+    ):
         for domain, output in enumerate(outputs):
             for name in (
                 "_rowwise_data",
@@ -990,8 +1015,13 @@ def test_mxfp8_vmm_layernorm_quant_localization_performance(
     print(
         f"\nMXFP8 fused LayerNorm+quant {shape} ({execution}):"
         f"\n  full-chip ordinary input/output:       {baseline_ms:.3f} ms"
+        f"\n  split ordinary input/output:           {split_ordinary_ms:.3f} ms"
         f"\n  green ordinary input/VMM output:       {ordinary_input_ms:.3f} ms"
         f"\n  green VMM input/output:                {localized_input_ms:.3f} ms"
+        f"\n  split-launch speedup:                  "
+        f"{baseline_ms / split_ordinary_ms:.3f}x"
+        f"\n  green vs split-ordinary speedup:       "
+        f"{split_ordinary_ms / ordinary_input_ms:.3f}x"
         f"\n  output-only localization speedup:      "
         f"{baseline_ms / ordinary_input_ms:.3f}x"
         f"\n  input+output localization speedup:     "
