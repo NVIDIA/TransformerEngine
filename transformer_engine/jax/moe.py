@@ -16,8 +16,8 @@ residuals into the user-facing autograd graph.
 
 Sharding model
 --------------
-* Inbound activations are 3D ``[B, S, H]`` sharded over the combined
-  data-parallel and EP axes. The public
+* Inbound activations are either 2D ``[T, H]`` or 3D ``[B, S, H]``,
+  sharded over the combined data-parallel and EP axes. The public
   :func:`moe` soft-repins this on entry and warns when a reshard is
   inserted.
 * The EP, grouped-quantize, and grouped-GEMM primitives operate at global
@@ -600,13 +600,25 @@ def _moe_fwd_rule(
         num_expert_groups=num_experts,
     )
 
-    B, S, H = x.shape
+    if x.ndim not in (2, 3):
+        raise ValueError(
+            "moe(...) expects [tokens, hidden] or [batch, sequence, hidden] input, "
+            f"got shape {x.shape}"
+        )
+    leading_shape = x.shape[:-1]
+    H = x.shape[-1]
     K = num_experts_per_tok
-    if B % num_procs != 0:
-        raise ValueError(f"batch={B} not divisible by ep*dp={num_procs}")
+    leading_size = leading_shape[0]
+    if leading_size % num_procs != 0:
+        leading_name = "tokens" if x.ndim == 2 else "batch"
+        raise ValueError(
+            f"{leading_name}={leading_size} not divisible by ep*dp={num_procs}"
+        )
 
-    # Per-rank send capacity: B/num_procs rows x S tokens per rank.
-    max_tokens_per_rank = (B // num_procs) * S
+    # The first activation dimension carries (*dp, *ep). Any remaining
+    # leading dimensions are replicated and contribute tokens locally.
+    tokens_per_row = math.prod(leading_shape[1:])
+    max_tokens_per_rank = (leading_size // num_procs) * tokens_per_row
     worst_case_recv_pr = get_moe_recv_capacity_per_rank(
         num_experts=num_experts,
         num_experts_per_tok=K,
@@ -638,9 +650,10 @@ def _moe_fwd_rule(
         # consecutive global ranks (dp_color = rank // ep_size), so the
         # comm only stays within one model replica under (outer_dp, ep).
         batch_pspec_axis = (*data_parallelism_axes, *ep_axes)
+    input_spec = P(batch_pspec_axis, *([None] * (x.ndim - 1)))
     ep3_spec = P(batch_pspec_axis, None, None)
     ep2_spec = P(batch_pspec_axis, None)
-    x = jax.lax.with_sharding_constraint(x, NamedSharding(mesh, ep3_spec))
+    x = jax.lax.with_sharding_constraint(x, NamedSharding(mesh, input_spec))
 
     # ---------------- Gate (global view) ----------------
     # tex.fused_topk_with_score_function is only validated against its
@@ -652,7 +665,7 @@ def _moe_fwd_rule(
     # whose normalised weights underflow. Cast to fp32 here to stay in
     # the validated regime.
     gate_kernel_cast = gate_kernel.astype(x.dtype)
-    gate_logits = jnp.einsum("bsh,he->bse", x, gate_kernel_cast)
+    gate_logits = jnp.einsum("...h,he->...e", x, gate_kernel_cast)
     logits_2d = gate_logits.reshape(-1, num_experts).astype(jnp.float32)
 
     # ---------------- Routing (global view) ----------------
@@ -719,30 +732,30 @@ def _moe_fwd_rule(
         aux_tokens_per_expert = None
         aux_saved_scores = None
 
-    # ---------------- Routing -> (topk_idx, topk_w) at 3D ----------------
+    # ---------------- Routing -> rank-preserving (topk_idx, topk_w) ----------------
     # argsort on a bool tensor places True last (False=0 < True=1), so the
     # last K indices are the selected expert IDs.
     selected_experts = jnp.argsort(routing_map, axis=-1)[..., -K:]
     routing_weights = jnp.take_along_axis(sparse_probs, selected_experts, axis=-1)
-    topk_idx_3d = selected_experts.reshape(B, S, K).astype(jnp.int32)
-    topk_w_3d = routing_weights.reshape(B, S, K).astype(jnp.float32)
+    topk_idx = selected_experts.reshape(*leading_shape, K).astype(jnp.int32)
+    topk_w = routing_weights.reshape(*leading_shape, K).astype(jnp.float32)
     # tex.ep_prepare/dispatch's partition only folds ep_axis into a replicated
     # leading dim, not the outer dp/fsdp axes, so a replicated topk_idx makes
     # each rank see B/ep rows (not B/num_procs) and overrun the bootstrap-sized
     # send buffer. Pin both routing tensors to the (outer, ep) leading sharding
     # so per-rank token counts match max_tokens_per_rank.
-    topk_idx_3d = jax.lax.with_sharding_constraint(topk_idx_3d, NamedSharding(mesh, ep3_spec))
-    topk_w_3d = jax.lax.with_sharding_constraint(topk_w_3d, NamedSharding(mesh, ep3_spec))
+    topk_idx = jax.lax.with_sharding_constraint(topk_idx, NamedSharding(mesh, input_spec))
+    topk_w = jax.lax.with_sharding_constraint(topk_w, NamedSharding(mesh, input_spec))
 
     # ---------------- TE EP dispatch (global view) ----------------
     cfg = tex.EpLayerConfig(
         top_k=K,
         dispatch_output_per_expert_alignment=_ALIGN_SIZE,
     )
-    token_counts, total_recv_tokens, handle_mem = tex.ep_prepare(cfg, topk_idx_3d, ep_axes=ep_axes)
+    token_counts, total_recv_tokens, handle_mem = tex.ep_prepare(cfg, topk_idx, ep_axes=ep_axes)
     token_counts = jax.lax.with_sharding_constraint(token_counts, NamedSharding(mesh, ep2_spec))
     recv_tokens, recv_topk_weights = tex.ep_dispatch_fwd(
-        cfg, handle_mem, topk_idx_3d, x, topk_w_3d, recv_pr, ep_axes=ep_axes
+        cfg, handle_mem, topk_idx, x, topk_w, recv_pr, ep_axes=ep_axes
     )
     recv_tokens = jax.lax.with_sharding_constraint(recv_tokens, NamedSharding(mesh, ep3_spec))
     recv_topk_weights = jax.lax.with_sharding_constraint(
@@ -808,14 +821,14 @@ def _moe_fwd_rule(
     expert_outputs = jax.lax.with_sharding_constraint(expert_outputs, NamedSharding(mesh, ep3_spec))
 
     # ---------------- TE EP combine (global view) ----------------
-    out_partition_spec = (batch_pspec_axis, None, None)
+    out_partition_spec = tuple(input_spec)
     if apply_topk_weights_early:
         # expert_outputs is already weighted upstream.
         output = tex.ep_combine_fwd(
             cfg,
             handle_mem,
             expert_outputs,
-            num_local_tokens=(B, S),
+            num_local_tokens=leading_shape,
             out_partition_spec=out_partition_spec,
             ep_axes=ep_axes,
         )
@@ -828,7 +841,7 @@ def _moe_fwd_rule(
             cfg,
             handle_mem,
             weighted,
-            num_local_tokens=(B, S),
+            num_local_tokens=leading_shape,
             out_partition_spec=out_partition_spec,
             ep_axes=ep_axes,
         )
@@ -914,19 +927,20 @@ def _moe_bwd_rule(
     mesh = _get_mesh()
     if mesh is None or mesh.empty:
         raise ValueError("moe(...) requires an active jax.sharding.Mesh.")
-    B, S, _ = x_shape
+    leading_shape = x_shape[:-1]
     K = num_experts_per_tok
     ep_axes = tex.ep._normalize_ep_axes(ep_axis)
     if not data_parallelism_axes:
         batch_pspec_axis: Any = ep_axis
     else:
         batch_pspec_axis = (*data_parallelism_axes, *ep_axes)
+    input_spec = P(batch_pspec_axis, *([None] * (len(x_shape) - 1)))
     ep3_spec = P(batch_pspec_axis, None, None)
     ep2_spec = P(batch_pspec_axis, None)
-    out_partition_spec = (batch_pspec_axis, None, None)
+    out_partition_spec = tuple(input_spec)
 
     # ---------------- Combine bwd (global view) ----------------
-    d_output = jax.lax.with_sharding_constraint(d_output, NamedSharding(mesh, ep3_spec))
+    d_output = jax.lax.with_sharding_constraint(d_output, NamedSharding(mesh, input_spec))
     grad_pre_combine = tex.ep_combine_bwd(
         ctx.cfg, ctx.handle_mem, d_output, recv_pr, ep_axes=ep_axes
     )
@@ -1048,7 +1062,7 @@ def _moe_bwd_rule(
         ctx.handle_mem,
         d_sorted_x,
         d_recv_w_total,
-        num_local_tokens=(B, S),
+        num_local_tokens=leading_shape,
         out_partition_spec=out_partition_spec,
         ep_axes=ep_axes,
     )
@@ -1104,10 +1118,10 @@ def _moe_bwd_rule(
         d_logits_2d = d_logits_2d + d_logits_aux.astype(d_logits_2d.dtype)
 
     # ---------------- Gate bwd (global view) ----------------
-    d_gate_logits = d_logits_2d.reshape(B, S, num_experts)
+    d_gate_logits = d_logits_2d.reshape(*leading_shape, num_experts)
     gate_kernel_cast = ctx.gate_kernel.astype(ctx.x.dtype)
-    d_x_from_gate = jnp.einsum("bse,he->bsh", d_gate_logits, gate_kernel_cast)
-    d_gate_kernel = jnp.einsum("bsh,bse->he", ctx.x, d_gate_logits).astype(ctx.gate_kernel.dtype)
+    d_x_from_gate = jnp.einsum("...e,he->...h", d_gate_logits, gate_kernel_cast)
+    d_gate_kernel = jnp.einsum("...h,...e->he", ctx.x, d_gate_logits).astype(ctx.gate_kernel.dtype)
     d_x = d_x_from_gate + d_x_from_dispatch
 
     # Pin output grads to the declared logical axes so downstream
@@ -1313,7 +1327,13 @@ def moe(
     """
     score_function = _validate_score_function(score_function)
 
-    # Enforce ((outer_dp..., ep), None, None) on inbound activations. The
+    if x.ndim not in (2, 3):
+        raise ValueError(
+            "moe(...) expects [tokens, hidden] or [batch, sequence, hidden] input, "
+            f"got shape {x.shape}"
+        )
+
+    # Enforce ((outer_dp..., ep), None[, None]) on inbound activations. The
     # EP comm groups consecutive global ranks (dp_color = rank // ep_size),
     # so ep MUST be innermost in the partition spec. Soft re-pin: free if
     # upstream already matches, single reshard otherwise.
@@ -1322,7 +1342,7 @@ def moe(
         raise ValueError("moe(...) requires an active jax.sharding.Mesh.")
     ep_axes = tex.ep._normalize_ep_axes(ep_axis)
     expected_leading: Any = (*data_parallelism_axes, *ep_axes) if data_parallelism_axes else ep_axis
-    expected_spec = P(expected_leading, None, None)
+    expected_spec = P(expected_leading, *([None] * (x.ndim - 1)))
     actual_spec = getattr(getattr(x, "sharding", None), "spec", None)
     if actual_spec is not None and tuple(actual_spec) != tuple(expected_spec):
         warnings.warn(

@@ -182,12 +182,12 @@ class _MoEBlock(TransformerEngineBase):
         Parameters
         ----------
         inputs : jnp.ndarray
-            ``[batch, sequence, hidden]``.
+            ``[tokens, hidden]`` or ``[batch, sequence, hidden]``.
 
         Returns
         -------
         output : jnp.ndarray
-            ``[batch, sequence, hidden]``.
+            Same shape and rank as ``inputs``.
         aux_loss : Optional[jnp.ndarray]
             Scalar load-balancing loss when ``aux_loss_coeff > 0``,
             else ``None``.
@@ -195,10 +195,12 @@ class _MoEBlock(TransformerEngineBase):
             Non-differentiable per-rank pre-drop recv-slot total; flags
             overflow when ``drop_on_overflow`` is set at ep_bootstrap.
         """
-        assert (
-            inputs.ndim == 3
-        ), f"_MoEBlock expects [batch, sequence, hidden] input, got shape {inputs.shape}"
-        _, _, hidden_size = inputs.shape
+        if inputs.ndim not in (2, 3):
+            raise ValueError(
+                "_MoEBlock expects [tokens, hidden] or [batch, sequence, hidden] input, "
+                f"got shape {inputs.shape}"
+            )
+        hidden_size = inputs.shape[-1]
 
         # Param registrations -- must run OUTSIDE any JAX transform that
         # alters the variable scope (e.g. shard_map). The functional

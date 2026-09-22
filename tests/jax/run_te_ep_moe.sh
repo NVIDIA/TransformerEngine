@@ -8,7 +8,7 @@
 # its own --num-process=N --process-id=i, and waits for all of them. Each
 # child calls jax.distributed.initialize(..., local_device_ids=process_id)
 # so each Python process only sees its one GPU as a local device and the
-# participating processes form a global (ep, fsdp) mesh.
+# participating processes form a global (fsdp, expert[, tensor]) mesh.
 
 set -euo pipefail
 
@@ -31,6 +31,7 @@ echo "============================================================"
 echo "TE-EP MoE MULTIPROCESS test (one process per GPU, ${NUM_GPUS} GPUs)"
 echo "  test file          : $TEST_FILE"
 echo "  coordinator        : $TE_EP_MOE_COORDINATOR_ADDRESS"
+echo "  TP size / input rank: ${TE_EP_MOE_TP_SIZE:-2} / ${TE_EP_MOE_INPUT_RANK:-auto}"
 echo "  XLA_PYTHON_CLIENT_PREALLOCATE: $XLA_PYTHON_CLIENT_PREALLOCATE"
 echo "  XLA_PYTHON_CLIENT_MEM_FRACTION: $XLA_PYTHON_CLIENT_MEM_FRACTION"
 echo "============================================================"
