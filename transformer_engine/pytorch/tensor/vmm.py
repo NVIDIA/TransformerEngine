@@ -280,6 +280,84 @@ class VMMRowSplitAllocator:
         tensor._nvte_vmm_allocator = self
         return tensor
 
+    def allocate_in_domain(
+        self,
+        shape: Tuple[int, ...],
+        dtype: torch.dtype,
+        domain: int,
+    ) -> torch.Tensor:
+        """Allocate a logical tensor backed entirely by one memory domain."""
+        if domain not in (0, 1):
+            raise ValueError(f"Expected memory domain 0 or 1, got {domain}")
+        element_size = torch.empty((), dtype=dtype).element_size()
+        logical_bytes = reduce(mul, shape, 1) * element_size
+        if logical_bytes <= 0:
+            raise ValueError(f"Allocation size must be positive, got {logical_bytes}")
+        mapped_bytes = (
+            (logical_bytes + self.granularity - 1) // self.granularity
+        ) * self.granularity
+
+        driver = self._driver
+        result = driver.cuMemAddressReserve(mapped_bytes, self.granularity, 0, 0)
+        _check_cuda(result[0], "cuMemAddressReserve")
+        base = int(result[1])
+        handle = None
+        mapped = False
+        try:
+            result = driver.cuMemCreate(
+                mapped_bytes,
+                self._allocation_properties(domain),
+                0,
+            )
+            _check_cuda(result[0], f"cuMemCreate(domain={domain})")
+            handle = result[1]
+            _check_cuda(
+                driver.cuMemMap(base, mapped_bytes, 0, handle, 0),
+                f"cuMemMap(domain={domain})",
+            )
+            mapped = True
+            _check_cuda(
+                driver.cuMemSetAccess(
+                    base,
+                    mapped_bytes,
+                    [self._access_descriptor()],
+                    1,
+                ),
+                "cuMemSetAccess",
+            )
+        except Exception:
+            if mapped:
+                driver.cuMemUnmap(base, mapped_bytes)
+            if handle is not None:
+                driver.cuMemRelease(handle)
+            driver.cuMemAddressFree(base, mapped_bytes)
+            raise
+
+        self._allocations[base] = (mapped_bytes, (handle,))
+        _VMM_RANGES.setdefault(self.device_index, {})[base] = mapped_bytes
+        if torch.cuda.is_current_stream_capturing():
+            _CAPTURED_VMM_ALLOCATORS[id(self)] = self
+        storage = torch._C._construct_storage_from_data_pointer(
+            base,
+            torch.device("cuda", self.device_index),
+            mapped_bytes,
+        )
+        strides = []
+        stride = 1
+        for dimension in reversed(shape):
+            strides.append(stride)
+            stride *= dimension
+        strides.reverse()
+        tensor = torch.empty(
+            0,
+            dtype=dtype,
+            device=torch.device("cuda", self.device_index),
+        )
+        tensor.set_(storage, 0, shape, tuple(strides))
+        tensor = tensor.detach()
+        tensor._nvte_vmm_allocator = self
+        return tensor
+
     def split(self, tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Return the two dim-0 views matching the physical VMM mappings."""
         midpoint = tensor.shape[0] // 2

@@ -803,7 +803,9 @@ def test_mxfp8_vmm_layernorm_quant_localization_performance(
     hidden_size: int, monkeypatch
 ) -> None:
     """Measure the fused MLA LayerNorm+MXFP8 producer on two locality domains."""
-    from transformer_engine.pytorch.tensor.localized_mxfp8 import MXFP8VMMWorkspace
+    from transformer_engine.pytorch.tensor.localized_mxfp8 import _get_localization_context
+    from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
+    from transformer_engine.pytorch.tensor.vmm import VMMRowSplitAllocator
 
     monkeypatch.setenv("NVTE_NORM_FWD_USE_CUDNN", "1")
     shape = (4096, hidden_size)
@@ -822,17 +824,48 @@ def test_mxfp8_vmm_layernorm_quant_localization_performance(
     # swizzles the scales for GEMM in a subsequent small kernel.
     quantizer.optimize_for_gemm = False
     baseline_output = quantizer.make_empty(shape, dtype=dtype, device=device)
-    ordinary_input_workspace = MXFP8VMMWorkspace.from_unlocalized_input(
-        input_tensor,
-        quantizer,
+    allocator = VMMRowSplitAllocator(device)
+    rows_per_domain = shape[0] // 2
+    partition_shape = (rows_per_domain, hidden_size)
+
+    def make_partition_output(domain: int) -> MXFP8Tensor:
+        return MXFP8Tensor(
+            shape=partition_shape,
+            dtype=dtype,
+            rowwise_data=allocator.allocate_in_domain(
+                partition_shape, torch.uint8, domain
+            ),
+            rowwise_scale_inv=torch.empty(
+                quantizer.get_scale_shape(partition_shape, columnwise=False),
+                dtype=torch.uint8,
+                device=device,
+            ),
+            columnwise_data=allocator.allocate_in_domain(
+                partition_shape, torch.uint8, domain
+            ),
+            columnwise_scale_inv=torch.empty(
+                quantizer.get_scale_shape(partition_shape, columnwise=True),
+                dtype=torch.uint8,
+                device=device,
+            ),
+            fp8_dtype=quantizer.dtype,
+            quantizer=quantizer,
+            with_gemm_swizzled_scales=False,
+            device=device,
+        )
+
+    ordinary_input_outputs = tuple(make_partition_output(domain) for domain in range(2))
+    localized_input_outputs = tuple(make_partition_output(domain) for domain in range(2))
+    ordinary_inputs = tuple(input_tensor.chunk(2, dim=0))
+    localized_inputs = tuple(
+        allocator.allocate_in_domain(partition_shape, dtype, domain) for domain in range(2)
     )
-    localized_input_workspace = MXFP8VMMWorkspace.empty(
-        shape,
-        dtype=dtype,
-        device=device,
-        quantizer=quantizer,
-    )
-    localized_input_workspace.input.copy_(input_tensor)
+    for domain, local_input in enumerate(localized_inputs):
+        row_start = domain * rows_per_domain
+        local_input.copy_(input_tensor[row_start : row_start + rows_per_domain])
+
+    _, _, streams = _get_localization_context(torch.cuda.current_device())
+    assert len(streams) == 2
 
     total_sms = torch.cuda.get_device_properties(device).multi_processor_count
     sms_per_domain = total_sms // 2
@@ -851,19 +884,34 @@ def test_mxfp8_vmm_layernorm_quant_localization_performance(
             False,
         )
 
-    def localized(workspace: MXFP8VMMWorkspace) -> None:
+    eager_events = {
+        "ordinary": (
+            torch.cuda.Event(enable_timing=False),
+            tuple(torch.cuda.Event(enable_timing=False) for _ in range(2)),
+        ),
+        "localized": (
+            torch.cuda.Event(enable_timing=False),
+            tuple(torch.cuda.Event(enable_timing=False) for _ in range(2)),
+        ),
+    }
+    capture_events = []
+
+    def localized(inputs, outputs, event_key: str) -> None:
         parent_stream = torch.cuda.current_stream(device)
-        fork_event, join_events = workspace._fork_join_events()
+        if torch.cuda.is_current_stream_capturing():
+            fork_event = torch.cuda.Event(enable_timing=False)
+            join_events = tuple(torch.cuda.Event(enable_timing=False) for _ in range(2))
+            capture_events.extend((fork_event, *join_events))
+        else:
+            fork_event, join_events = eager_events[event_key]
         fork_event.record(parent_stream)
-        rows_per_domain = shape[0] // 2
-        for domain, (output, stream) in enumerate(
-            zip(workspace.partition_outputs, workspace.streams)
+        for domain, (local_input, output, stream) in enumerate(
+            zip(inputs, outputs, streams)
         ):
-            row_start = domain * rows_per_domain
             stream.wait_event(fork_event)
             with torch.cuda.stream(stream):
                 tex.layernorm_fwd(
-                    workspace.input[row_start : row_start + rows_per_domain],
+                    local_input,
                     weight,
                     bias,
                     eps,
@@ -878,10 +926,14 @@ def test_mxfp8_vmm_layernorm_quant_localization_performance(
             parent_stream.wait_event(event)
 
     def ordinary_input_localized_output() -> None:
-        localized(ordinary_input_workspace)
+        localized(
+            ordinary_inputs,
+            ordinary_input_outputs,
+            "ordinary",
+        )
 
     def localized_input_and_output() -> None:
-        localized(localized_input_workspace)
+        localized(localized_inputs, localized_input_outputs, "localized")
 
     use_cuda_graph = os.getenv("MXFP8_LOCALIZATION_USE_CUDA_GRAPH") == "1"
     if use_cuda_graph:
@@ -901,19 +953,25 @@ def test_mxfp8_vmm_layernorm_quant_localization_performance(
     ordinary_input_fn()
     localized_input_fn()
     torch.cuda.synchronize()
-    for workspace in (ordinary_input_workspace, localized_input_workspace):
-        for name in (
-            "_rowwise_data",
-            "_rowwise_scale_inv",
-            "_columnwise_data",
-            "_columnwise_scale_inv",
-        ):
-            torch.testing.assert_close(
-                getattr(workspace.output, name),
-                getattr(baseline_output, name),
-                atol=0.0,
-                rtol=0.0,
-            )
+    for outputs in (ordinary_input_outputs, localized_input_outputs):
+        for domain, output in enumerate(outputs):
+            for name in (
+                "_rowwise_data",
+                "_rowwise_scale_inv",
+                "_columnwise_data",
+                "_columnwise_scale_inv",
+            ):
+                partition = getattr(output, name)
+                reference = getattr(baseline_output, name)
+                partition_rows = partition.shape[0]
+                row_start = domain * partition_rows
+                reference_partition = reference[row_start : row_start + partition_rows]
+                torch.testing.assert_close(
+                    partition,
+                    reference_partition,
+                    atol=0.0,
+                    rtol=0.0,
+                )
 
     execution = "CUDA Graph" if use_cuda_graph else "eager"
     print(
@@ -927,5 +985,4 @@ def test_mxfp8_vmm_layernorm_quant_localization_performance(
         f"{baseline_ms / localized_input_ms:.3f}x"
     )
 
-    ordinary_input_workspace.close()
-    localized_input_workspace.close()
+    allocator.close()
