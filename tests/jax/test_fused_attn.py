@@ -514,15 +514,10 @@ class FusedAttnRunner:
                 jax.random.PRNGKey(self.doutput_seed), output_shape, dtype=self.dtype
             )
 
-    # See https://docs.nvidia.com/deeplearning/cudnn/latest/release-notes.html#cudnn-9-4-0 for known issue
-    # generating zero-length ragged tensors. This setting adjusts the test to avoid the zero-length cases.
     def _get_max_segments_per_sequence(self):
         if self.qkv_layout.is_thd():
-            if 90400 <= get_cudnn_version() < 90500:
-                return self.num_segments_per_seq
-            else:
-                # +1 for testing runtime_segments < max_segments
-                return self.num_segments_per_seq + 1
+            # +1 for testing runtime_segments < max_segments
+            return self.num_segments_per_seq + 1
         else:
             return 1
 
@@ -626,12 +621,10 @@ class FusedAttnRunner:
 
         if compute_capability >= 100 and self.is_training:
             if FusedAttnHelper.is_non_deterministic_allowed() and (
-                (self.dropout_prob != 0.0 and self.attn_bias_type != AttnBiasType.NO_BIAS)
-                or cudnn_version < 90700
+                self.dropout_prob != 0.0 and self.attn_bias_type != AttnBiasType.NO_BIAS
             ):
                 pytest.skip(
-                    "For sm100+, non-deterministic bprop (cuDNN 9.7+) does not support bias with"
-                    " dropout"
+                    "For sm100+, non-deterministic bprop does not support bias with dropout"
                 )
             if not FusedAttnHelper.is_non_deterministic_allowed() and (
                 self.dropout_prob != 0.0
@@ -1500,22 +1493,17 @@ class TestFusedAttnMaxLogit:
 
 
 def _get_swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tuple[int, int]:
-    """Pick a sliding-window size for SWA tests, gated on cuDNN version.
+    """Pick a sliding-window size for SWA tests.
 
-    cuDNN < 9.2: skip (no SWA support).
-    cuDNN >= 9.2: left-only window (s_kv // 10, 0).
-    cuDNN >= 9.6: bidirectional window (s_kv // 10, s_kv // 10 + 5) for the mask types whose
-                  bidirectional fused dispatch is meaningful here (NO_MASK, PADDING_MASK).
-                  Other mask types keep the left-only window: causal-family masks would
-                  collapse (W, W) -> (W, 0), hence not tested here.
+    Bidirectional window (s_kv // 10, s_kv // 10 + 5) is used for the mask types whose
+    bidirectional fused dispatch is meaningful here (NO_MASK, PADDING_MASK). Other mask
+    types keep a left-only window (s_kv // 10, 0): causal-family masks would collapse
+    (W, W) -> (W, 0), hence not tested here.
     """
-    cudnn_version = get_cudnn_version()
-    if cudnn_version < 90200:
-        pytest.skip("Sliding window attention requires cuDNN >= 9.2")
     left_window_size = s_kv // 10
     # choose asymmetric window size for testing
     right_window_size = left_window_size + 5
-    if cudnn_version >= 90600 and attn_mask_type in (
+    if attn_mask_type in (
         AttnMaskType.NO_MASK,
         AttnMaskType.PADDING_MASK,
     ):
