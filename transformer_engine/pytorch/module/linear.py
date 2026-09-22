@@ -34,6 +34,7 @@ from .base import (
 )
 from ._common import (
     can_reconstruct_wgrad_input_from_original,
+    check_fp8_reduce_and_update,
     noop_cat,
     set_quantizer_amax_reduction_group,
     set_quantizer_usage_for_wgrad_all_gather,
@@ -89,7 +90,7 @@ from ..quantized_tensor import (
 from ..dynamo import (
     TensorSpec,
     TensorOrQuantized,
-    register_custom_op,
+    register_custom_op_with_autograd,
     is_value_opaque_quantizer,
 )
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
@@ -316,16 +317,6 @@ class LinearBwdArgs:
         ) = restore_from_func_ctx(
             ctx
         )  # pylint: disable=unbalanced-tuple-unpacking
-
-
-def _check_fp8_reduce_and_update():
-    """Check if this is the first FP8 module (for backward reduce-and-update)."""
-    qstate = FP8GlobalStateManager.quantization_state
-    _first_fp8_module = qstate.is_first_fp8_module
-    result = FP8GlobalStateManager.is_first_fp8_module()
-    if in_fp8_activation_recompute_phase():
-        qstate.is_first_fp8_module = _first_fp8_module
-    return result
 
 
 def _out_leading_from_inp(leading: int, args: Union[LinearFwdArgs, LinearBwdArgs]) -> int:
@@ -1482,8 +1473,9 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
         # its persistent buffer; cuBLASMp does not, so we gather here. Route
         # through the same FP8-aware all-gather as the non-overlap path in
         # ``TransformerEngineBaseModule.grad_output_preprocess`` by passing the
-        # grad_output quantizer. The columnwise data needed for wgrad is then
-        # produced by ``update_usage(columnwise_usage=True)`` further below.
+        # grad_output quantizer. Per-tensor FP8 can reconstruct columnwise
+        # data from the gathered rowwise data; MXFP8 must instead quantize
+        # the original gradient columnwise to avoid double quantization.
         if (
             bwd_args.requires_wgrad
             and bwd_args.ub_overlap_ag
@@ -1492,6 +1484,8 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
         ):
             if grad_output_quantizer is not None:
                 set_quantizer_usage_for_wgrad_all_gather(grad_output_quantizer)
+            if isinstance(grad_output_quantizer, MXFP8Quantizer):
+                grad_output = grad_output_arg.reshape(-1, grad_output_arg.shape[-1]).contiguous()
             grad_output, _ = gather_along_first_dim(
                 grad_output,
                 bwd_args.tp_group,
@@ -1521,7 +1515,11 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
             # Prepare grad output tensor
             # Note: Synchronize tensor-parallel communication and
             # make sure required data is available
-            if bwd_args.ub_overlap_ag and isinstance(grad_output_quantizer, MXFP8Quantizer):
+            if (
+                bwd_args.ub_overlap_ag
+                and isinstance(grad_output_quantizer, MXFP8Quantizer)
+                and not ub_obj_dgrad.with_cublasmp()
+            ):
                 # UB does not support pipelined overlapping grad output
                 # all-gather with wgrad GEMM. Also, we can't
                 # convert row-scaled MXFP8 to column-scaled, so we
@@ -1789,7 +1787,7 @@ def _linear_backward_fake(
 
 
 # Custom op used under ``torch.compile``.
-_linear_op = register_custom_op(
+_linear_op = register_custom_op_with_autograd(
     op_name="linear",
     input_tensors_for_grad=["weight", "inp", "bias"],
     fwd_arg_type=LinearFwdArgs,
@@ -1853,7 +1851,7 @@ class _Linear(torch.autograd.Function):
                 or fwd_args.weight_requires_grad
                 or fwd_args.bias_requires_grad
             ):
-                bwd_args.reduce_and_update_bwd_fp8_tensors = _check_fp8_reduce_and_update()
+                bwd_args.reduce_and_update_bwd_fp8_tensors = check_fp8_reduce_and_update()
             if fwd_args.backward_override is not None:
                 bwd_args.reduce_and_update_bwd_fp8_tensors = False
 

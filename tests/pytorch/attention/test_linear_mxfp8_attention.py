@@ -31,7 +31,6 @@ import torch
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 from transformer_engine.pytorch.attention.dot_product_attention import _attention_backends
-from transformer_engine.pytorch.utils import get_cudnn_version
 
 _current_file = pathlib.Path(__file__).resolve()
 sys.path = [str(_current_file.parent.parent)] + sys.path
@@ -125,9 +124,6 @@ def _require_attention_backends(
     seq_len: int,
     fp8_recipe,
 ) -> None:
-    if get_cudnn_version() < (9, 2, 1):
-        pytest.skip("cuDNN 9.2.1+ is required for FP8 fused attention.")
-
     config = ModelConfig(
         batch_size,
         seq_len,
