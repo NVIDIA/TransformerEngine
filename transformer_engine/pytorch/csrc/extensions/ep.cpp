@@ -376,11 +376,11 @@ void ep_dispatch(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens,
 
 namespace {
 
-// Non-eager path under CUDA graph capture: routes through the fused NCCL count-mode
+// Non-eager path with caller-supplied recv buffers: routes through the fused NCCL count-mode
 // dispatch (nvte_ep_prepare_and_dispatch) instead of a separate ep_prepare + ep_dispatch.
-// tokens_per_expert is derived from the dispatch's own scan rather than a prior
-// AllGather round trip; recv buffers are caller-owned (static capacity), so there is
-// still no allocation or host read during capture.
+// tokens_per_expert is derived from the dispatch's own scan rather than a prior AllGather
+// round trip; recv buffers are caller-owned (static capacity), so no allocation or host read.
+// Received row order within an expert's block can differ from the AllGather-based path.
 void ep_prepare_and_dispatch_fused(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens,
                                    at::Tensor topk_weights, at::Tensor recv_tokens,
                                    at::Tensor recv_topk_weights, at::Tensor tokens_per_expert,
