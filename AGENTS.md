@@ -204,6 +204,14 @@ python -c 'import jax, transformer_engine, transformer_engine.jax; print(jax.__v
 
 ## Testing
 
+PyTorch and JAX tests require `pytest`. The `qa/**/test.sh` launchers install
+the pytest version and plugins used by their suites and contain the
+authoritative environment variables, configuration files, and command-line
+options for specialized tests. Before running a test directly, find its
+invocation or the closest analogous test in the relevant launcher and preserve
+those settings. Use a focused `python -m pytest` command during iteration, then
+use the launcher for the corresponding full suite.
+
 ### Focused framework tests
 
 ```bash
@@ -367,3 +375,16 @@ Follow `CONTRIBUTING.rst` and `.github/PULL_REQUEST_TEMPLATE.md`.
 ```bash
 TE_PATH="$PWD" bash qa/L0_license/test.sh
 ```
+
+If existing commits lack the correct sign-off, the following
+rewrites each commit after the branch point to add the trailer:
+
+```bash
+base_ref=origin/main  # Replace with the PR's target branch when different.
+merge_base=$(git merge-base "$base_ref" HEAD)
+git -c user.name="HUMAN NAME" -c user.email="HUMAN EMAIL" \
+    rebase --signoff "$merge_base"
+```
+
+Rebasing changes commit IDs. Obtain the user's explicit approval before doing
+this on a published branch or updating it with `git push --force-with-lease`.
