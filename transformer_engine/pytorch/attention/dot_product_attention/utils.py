@@ -1784,11 +1784,7 @@ def get_attention_backend(
         if (
             fused_attention_backend == FusedAttnBackend.F16_arbitrary_seqlen.value
             and is_training
-            and (
-                device_compute_capability < (9, 0)
-                or core_attention_bias_requires_grad
-                or cudnn_version < (8, 9, 5)
-            )
+            and (device_compute_capability < (9, 0) or core_attention_bias_requires_grad)
         ):
             logger.debug("Disabling FusedAttention for determinism reasons with post_scale_bias")
             use_fused_attention = False
