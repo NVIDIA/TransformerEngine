@@ -124,15 +124,21 @@ class VMMRowSplitAllocator:
 
     @property
     def granularity(self) -> int:
-        """Recommended VMM mapping granularity in bytes."""
+        """Minimum VMM mapping granularity required by both memory domains."""
         if self._granularity is None:
             driver = self._driver
-            result = driver.cuMemGetAllocationGranularity(
-                self._allocation_properties(),
-                driver.CUmemAllocationGranularity_flags.CU_MEM_ALLOC_GRANULARITY_RECOMMENDED,
-            )
-            _check_cuda(result[0], "cuMemGetAllocationGranularity")
-            self._granularity = int(result[1])
+            granularities = []
+            for domain in range(2):
+                result = driver.cuMemGetAllocationGranularity(
+                    self._allocation_properties(domain),
+                    driver.CUmemAllocationGranularity_flags.CU_MEM_ALLOC_GRANULARITY_MINIMUM,
+                )
+                _check_cuda(
+                    result[0],
+                    f"cuMemGetAllocationGranularity(domain={domain})",
+                )
+                granularities.append(int(result[1]))
+            self._granularity = max(granularities)
         return self._granularity
 
     def _access_descriptor(self):
