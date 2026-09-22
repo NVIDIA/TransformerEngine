@@ -63,10 +63,8 @@ from ..distributed_weight import (
 )
 from ..constants import FP8BwdTensorIdx, FP8FwdTensorIdx, GemmParallelModes, dist_group_type
 from ..jit import no_torch_dynamo
-from ..graph import is_graph_capturing
 from ._common import (
     apply_normalization,
-    check_fp8_reduce_and_update,
     noop_cat,
     set_quantizer_amax_reduction_group,
     set_quantizer_usage_for_wgrad_all_gather,
@@ -270,8 +268,8 @@ class LayerNormLinearBwdArgs:
     origin_weight_overwrites_main_grad: bool = False
     main_grad_func: Optional[Callable[[], torch.Tensor]] = None
 
-    # --- FP8 reduce-and-update bookkeeping ---
-    reduce_and_update_bwd_fp8_tensors: bool = False
+    # --- Backward quantization update scheduling ---
+    request_backward_quantization_update: bool = False
 
     # --- Misc ---
     cpu_offloading: bool = False
@@ -847,6 +845,9 @@ def _layernorm_linear_setup_ctx(
         bwd_args.grad_input_quantizer = None
         bwd_args.grad_weight_quantizer = None
         bwd_args.grad_output_quantizer = None
+    bwd_args.request_backward_quantization_update = (
+        bwd_args.fp8 and FP8GlobalStateManager.backward_quantization_update_needed()
+    )
 
     (
         saved_inputmat,
@@ -1513,10 +1514,6 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.save_for_backward(*tensors_to_save)
             ctx.tensor_objects = tensor_objects
             ctx.backward_objects = bwd_args
-            if fwd_args.fp8 and fwd_args.any_requires_grad():
-                bwd_args.reduce_and_update_bwd_fp8_tensors = check_fp8_reduce_and_update()
-            if fwd_args.backward_override is not None:
-                bwd_args.reduce_and_update_bwd_fp8_tensors = False
 
         return out, ln_out_return, new_weight_workspace
 
@@ -1536,15 +1533,13 @@ class _LayerNormLinear(torch.autograd.Function):
         if bwd_args.ub_name is not None:
             nvtx_label = f"{nvtx_label}.{bwd_args.ub_name}"
         dgrad, dgamma, dbeta, wgrad, grad_bias = _layernorm_linear_backward_impl(bwd_args)
-        reduce_and_update_bwd_fp8_tensors = bwd_args.reduce_and_update_bwd_fp8_tensors
+        request_update = bwd_args.request_backward_quantization_update
         # Drop all references held by bwd_args (saved tensors, quantizers, weakrefs,
         # main_grad closure) so they don't outlive backward via ctx under retain_graph.
         ctx.backward_objects = None
         del bwd_args
-        if reduce_and_update_bwd_fp8_tensors and not is_graph_capturing():
-            nvtx_range_push(f"{nvtx_label}.reduce_and_update_fp8_tensors")
-            FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
-            nvtx_range_pop(f"{nvtx_label}.reduce_and_update_fp8_tensors")
+        if request_update:
+            FP8GlobalStateManager.request_backward_quantization_update()
         return (
             dgrad,
             dgamma,
