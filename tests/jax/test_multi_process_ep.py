@@ -239,6 +239,8 @@ class TestEP(unittest.TestCase):
         finally:
             _cuda_set_device(owner)
             # Re-bootstrap on every rank before an assertion can interrupt the collective.
+            # Must match _bootstrap's max_token_dtype: this re-init replaces the group
+            # config for the rest of the class's tests (e.g. the dtype sweep below).
             with self.mesh, global_shard_guard(self.mr):
                 ep_bootstrap(
                     world_size=self.num_procs,
@@ -247,6 +249,7 @@ class TestEP(unittest.TestCase):
                     max_tokens_per_rank=TOKENS_PER_DP_SHARD,
                     recv_capacity_per_rank=self.recv_capacity_per_rank,
                     hidden_dim=HIDDEN_DIM,
+                    max_token_dtype=jnp.float32,
                 )
         self.assertEqual(current, other)
 
