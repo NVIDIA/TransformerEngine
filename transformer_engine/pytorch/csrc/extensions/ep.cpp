@@ -14,7 +14,6 @@
 #include <nccl.h>
 #include <torch/extension.h>
 
-#include <ATen/cuda/CUDAGraphsUtils.cuh>
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
@@ -498,8 +497,8 @@ std::vector<at::Tensor> ep_prepare_and_dispatch(
   // that supplies them (non-eager) uses static recv capacity, so no count read is needed.
   const bool caller_omitted_recv = !recv_tokens.has_value();
 
-  // Opt-in: the fused NCCL count-mode dispatch replaces the AllGather-based prepare + dispatch
-  // under CUDA graph capture. Off by default; the standard path stays unfused.
+  // Opt-in: the fused NCCL count-mode dispatch replaces the AllGather-based prepare + dispatch.
+  // Off by default; the standard path stays unfused.
   static const bool fused_prepare_dispatch = [] {
     const char* env = std::getenv("NVTE_EP_FUSED_PREPARE_DISPATCH");
     const bool enabled = env != nullptr && env[0] == '1';
@@ -511,8 +510,7 @@ std::vector<at::Tensor> ep_prepare_and_dispatch(
     return enabled;
   }();
 
-  if (fused_prepare_dispatch && !caller_omitted_recv &&
-      at::cuda::currentStreamCaptureStatus() != at::cuda::CaptureStatus::None) {
+  if (fused_prepare_dispatch && !caller_omitted_recv) {
     ep_prepare_and_dispatch_fused(handle_mem, topk_idx, tokens, topk_weights, *recv_tokens,
                                   *recv_topk_weights, tokens_per_expert, total_recv_tokens, top_k,
                                   dispatch_output_per_expert_alignment, tokens_scale_inv,
