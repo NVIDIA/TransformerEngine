@@ -47,10 +47,10 @@ inline void dequantize_helper(const Tensor &input, Tensor *output, cudaStream_t 
       }
       break;
     }
-    // case NVTE_NVFP4_1D_SCALING: {
-    //   nvfp4::dequantize(input, output, stream);
-    //   break;
-    // }
+    case NVTE_NVFP4_1D_SCALING: {
+      nvfp4::dequantize(input, output, stream);
+      break;
+    }
     default:
       NVTE_ERROR("Not implemented scaling mode: " + to_string(input.scaling_mode) + ".");
   }
@@ -70,11 +70,11 @@ inline void group_dequantize_helper(const GroupedTensor &input, GroupedTensor *o
       }
       break;
     }
-    // case NVTE_BLOCK_SCALING_1D:
-    // case NVTE_BLOCK_SCALING_2D: {
-    //   fp8_blockwise::group_dequantize(&input, output, stream);
-    //   break;
-    // }
+    case NVTE_BLOCK_SCALING_1D:
+    case NVTE_BLOCK_SCALING_2D: {
+      fp8_blockwise::group_dequantize(&input, output, stream);
+      break;
+    }
     default:
       NVTE_ERROR("Grouped dequantize not implemented for scaling mode: " +
                  to_string(input.scaling_mode) + ".");

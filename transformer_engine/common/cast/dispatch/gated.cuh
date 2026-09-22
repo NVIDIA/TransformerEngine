@@ -44,55 +44,55 @@ void quantize_gated_fwd_helper(const NVTETensor nvte_input, NVTETensor nvte_outp
   NVTE_CHECK(output->has_data() || output->has_columnwise_data(),
              "Either rowwise or columnwise output data need to be allocated.");
 
-  // switch (output->scaling_mode) {
-  //   case NVTE_DELAYED_TENSOR_SCALING: {
-  //     const bool use_tma_kernels = (cols % 32 == 0) && is_supported_by_CC_100();
-  //     if (use_tma_kernels) {
-  //       Tensor dummy_grad_tensor;
-  //       fp8::cast_gated_tma</*IS_BWD=*/false, ParamOP, ActOP, nullptr>(input, dummy_grad_tensor,
-  //                                                                      output, p, stream);
-  //     } else {
-  //       fp8::cast_gated_fwd<ParamOP, ActOP>(input, output, p, stream);
-  //     }
-  //     if (is_fp8_dtype(output->dtype()) && output->has_columnwise_data()) {
-  //       // FP8 kernel only populates row-wise data, so perform
-  //       // transpose separately if needed
-  //       Tensor transpose_in, transpose_out, dummy;
-  //       transpose_in.scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
-  //       transpose_in.data.dptr = output->data.dptr;
-  //       transpose_in.data.shape = {output->flat_first_dim(), output->flat_last_dim()};
-  //       transpose_in.data.dtype = output->data.dtype;
-  //       transpose_out.scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
-  //       transpose_out.data.dptr = output->columnwise_data.dptr;
-  //       transpose_out.data.shape = {output->flat_last_dim(), output->flat_first_dim()};
-  //       transpose_out.data.dtype = output->data.dtype;
-  //       detail::transpose(transpose_in, /*noop=*/dummy, &transpose_out, stream);
-  //     }
-  //     break;
-  //   }
-  //   case NVTE_MXFP8_1D_SCALING: {
-  //     NVTE_CHECK(cols % 32 == 0,
-  //                "Invalid input shape. Expected the last dimension to be "
-  //                "divisible by 32, but got ",
-  //                cols, ".");
-  //     if (output->has_data()) {
-  //       NVTE_CHECK(is_fp8_dtype(output->data.dtype),
-  //                  "The type of the output tensor should be FP8.");
-  //     }
-  //     if (output->has_columnwise_data()) {
-  //       NVTE_CHECK(is_fp8_dtype(output->columnwise_data.dtype),
-  //                  "The type of the columnwise output tensor should be FP8.");
-  //     }
-  //     NVTE_CHECK(is_supported_by_CC_100(),
-  //                "Gated FWD NVTE_MXFP8_1D_SCALING is only supported on SM 10.0+");
-  //     Tensor dummy_grad_tensor;
-  //     mxfp8::quantize_gated</*IS_BWD=*/false, ParamOP, ActOP, nullptr>(input, dummy_grad_tensor,
-  //                                                                      output, p, stream);
-  //     break;
-  //   }
-  //   default:
-  //     NVTE_ERROR("Not supported scaling mode: " + to_string(output->scaling_mode) + ".");
-  // }
+  switch (output->scaling_mode) {
+    case NVTE_DELAYED_TENSOR_SCALING: {
+      const bool use_tma_kernels = (cols % 32 == 0) && is_supported_by_CC_100();
+      if (use_tma_kernels) {
+        Tensor dummy_grad_tensor;
+        fp8::cast_gated_tma</*IS_BWD=*/false, ParamOP, ActOP, nullptr>(input, dummy_grad_tensor,
+                                                                       output, p, stream);
+      } else {
+        fp8::cast_gated_fwd<ParamOP, ActOP>(input, output, p, stream);
+      }
+      if (is_fp8_dtype(output->dtype()) && output->has_columnwise_data()) {
+        // FP8 kernel only populates row-wise data, so perform
+        // transpose separately if needed
+        Tensor transpose_in, transpose_out, dummy;
+        transpose_in.scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
+        transpose_in.data.dptr = output->data.dptr;
+        transpose_in.data.shape = {output->flat_first_dim(), output->flat_last_dim()};
+        transpose_in.data.dtype = output->data.dtype;
+        transpose_out.scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
+        transpose_out.data.dptr = output->columnwise_data.dptr;
+        transpose_out.data.shape = {output->flat_last_dim(), output->flat_first_dim()};
+        transpose_out.data.dtype = output->data.dtype;
+        detail::transpose(transpose_in, /*noop=*/dummy, &transpose_out, stream);
+      }
+      break;
+    }
+    case NVTE_MXFP8_1D_SCALING: {
+      NVTE_CHECK(cols % 32 == 0,
+                 "Invalid input shape. Expected the last dimension to be "
+                 "divisible by 32, but got ",
+                 cols, ".");
+      if (output->has_data()) {
+        NVTE_CHECK(is_fp8_dtype(output->data.dtype),
+                   "The type of the output tensor should be FP8.");
+      }
+      if (output->has_columnwise_data()) {
+        NVTE_CHECK(is_fp8_dtype(output->columnwise_data.dtype),
+                   "The type of the columnwise output tensor should be FP8.");
+      }
+      NVTE_CHECK(is_supported_by_CC_100(),
+                 "Gated FWD NVTE_MXFP8_1D_SCALING is only supported on SM 10.0+");
+      Tensor dummy_grad_tensor;
+      mxfp8::quantize_gated</*IS_BWD=*/false, ParamOP, ActOP, nullptr>(input, dummy_grad_tensor,
+                                                                       output, p, stream);
+      break;
+    }
+    default:
+      NVTE_ERROR("Not supported scaling mode: " + to_string(output->scaling_mode) + ".");
+  }
 }
 
 template <typename ParamOP, float (*ActOP)(float, const ParamOP &),
@@ -135,54 +135,54 @@ void quantize_gated_bwd_helper(const NVTETensor nvte_grad, const NVTETensor nvte
              "Gated input and output shapes must match. Input shape: ", gated_input.shape(),
              ", output shape: ", output->shape(), ".");
 
-  // switch (output->scaling_mode) {
-  //   case NVTE_DELAYED_TENSOR_SCALING: {
-  //     const bool use_tma_kernels = (cols % 32 == 0) && is_supported_by_CC_100();
-  //     if (use_tma_kernels) {
-  //       fp8::cast_gated_tma</*IS_BWD=*/true, ParamOP, ActOP, DActOP>(gated_input, grad, output, p,
-  //                                                                    stream);
-  //     } else {
-  //       fp8::cast_gated_bwd<ParamOP, ActOP, DActOP>(gated_input, grad, output, p, stream);
-  //     }
-  //     if (is_fp8_dtype(output->dtype()) && output->has_columnwise_data()) {
-  //       // FP8 kernel only populates row-wise data, so perform
-  //       // transpose separately if needed
-  //       Tensor transpose_in, transpose_out, dummy;
-  //       transpose_in.scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
-  //       transpose_in.data.dptr = output->data.dptr;
-  //       transpose_in.data.shape = {output->flat_first_dim(), output->flat_last_dim()};
-  //       transpose_in.data.dtype = output->data.dtype;
-  //       transpose_out.scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
-  //       transpose_out.data.dptr = output->columnwise_data.dptr;
-  //       transpose_out.data.shape = {output->flat_last_dim(), output->flat_first_dim()};
-  //       transpose_out.data.dtype = output->data.dtype;
-  //       detail::transpose(transpose_in, /*noop=*/dummy, &transpose_out, stream);
-  //     }
-  //     break;
-  //   }
-  //   case NVTE_MXFP8_1D_SCALING: {
-  //     NVTE_CHECK(cols % 32 == 0,
-  //                "Invalid input shape. Expected the last dimension to be "
-  //                "divisible by 32, but got ",
-  //                cols, ".");
-  //     if (output->has_data()) {
-  //       NVTE_CHECK(is_fp8_dtype(output->data.dtype),
-  //                  "The type of the output tensor should be FP8.");
-  //     }
-  //     if (output->has_columnwise_data()) {
-  //       NVTE_CHECK(is_fp8_dtype(output->columnwise_data.dtype),
-  //                  "The type of the columnwise output tensor should be FP8.");
-  //     }
-  //     NVTE_CHECK(is_supported_by_CC_100(),
-  //                "Gated BWD NVTE_MXFP8_1D_SCALING is only supported on SM 10.0+");
+  switch (output->scaling_mode) {
+    case NVTE_DELAYED_TENSOR_SCALING: {
+      const bool use_tma_kernels = (cols % 32 == 0) && is_supported_by_CC_100();
+      if (use_tma_kernels) {
+        fp8::cast_gated_tma</*IS_BWD=*/true, ParamOP, ActOP, DActOP>(gated_input, grad, output, p,
+                                                                     stream);
+      } else {
+        fp8::cast_gated_bwd<ParamOP, ActOP, DActOP>(gated_input, grad, output, p, stream);
+      }
+      if (is_fp8_dtype(output->dtype()) && output->has_columnwise_data()) {
+        // FP8 kernel only populates row-wise data, so perform
+        // transpose separately if needed
+        Tensor transpose_in, transpose_out, dummy;
+        transpose_in.scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
+        transpose_in.data.dptr = output->data.dptr;
+        transpose_in.data.shape = {output->flat_first_dim(), output->flat_last_dim()};
+        transpose_in.data.dtype = output->data.dtype;
+        transpose_out.scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
+        transpose_out.data.dptr = output->columnwise_data.dptr;
+        transpose_out.data.shape = {output->flat_last_dim(), output->flat_first_dim()};
+        transpose_out.data.dtype = output->data.dtype;
+        detail::transpose(transpose_in, /*noop=*/dummy, &transpose_out, stream);
+      }
+      break;
+    }
+    case NVTE_MXFP8_1D_SCALING: {
+      NVTE_CHECK(cols % 32 == 0,
+                 "Invalid input shape. Expected the last dimension to be "
+                 "divisible by 32, but got ",
+                 cols, ".");
+      if (output->has_data()) {
+        NVTE_CHECK(is_fp8_dtype(output->data.dtype),
+                   "The type of the output tensor should be FP8.");
+      }
+      if (output->has_columnwise_data()) {
+        NVTE_CHECK(is_fp8_dtype(output->columnwise_data.dtype),
+                   "The type of the columnwise output tensor should be FP8.");
+      }
+      NVTE_CHECK(is_supported_by_CC_100(),
+                 "Gated BWD NVTE_MXFP8_1D_SCALING is only supported on SM 10.0+");
 
-  //     mxfp8::quantize_gated</*IS_BWD=*/true, ParamOP, ActOP, DActOP>(gated_input, grad, output, p,
-  //                                                                    stream);
-  //     break;
-  //   }
-  //   default:
-  //     NVTE_ERROR("Not supported scaling mode: " + to_string(output->scaling_mode) + ".");
-  // }
+      mxfp8::quantize_gated</*IS_BWD=*/true, ParamOP, ActOP, DActOP>(gated_input, grad, output, p,
+                                                                     stream);
+      break;
+    }
+    default:
+      NVTE_ERROR("Not supported scaling mode: " + to_string(output->scaling_mode) + ".");
+  }
 }
 }  // namespace dispatch
 }  // namespace transformer_engine
