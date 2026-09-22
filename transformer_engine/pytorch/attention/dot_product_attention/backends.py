@@ -193,6 +193,13 @@ def _fa4_normalized_window_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
     all-zero output and an all ``-inf`` LSE without raising, which is a silent wrong answer.
 
     Genuine sliding windows already carry non-negative bounds and pass through untouched.
+
+    Applied unconditionally rather than behind a version gate, because it is inert on releases
+    predating #2490 rather than merely harmless there. Both the old and new
+    ``_resolve_causal_local_window`` reduce ``(None, 0)`` with ``causal=True`` to plain causal via
+    the same ``window_size_left is None and window_size_right == 0`` branch; the old one reaches
+    the identical state from ``(-1, 0)`` by widening. So every window TE emits resolves the same
+    way before the change and correctly after it, and there is no version boundary to track.
     """
     window = kwargs.get("window_size")
     if window is not None:
