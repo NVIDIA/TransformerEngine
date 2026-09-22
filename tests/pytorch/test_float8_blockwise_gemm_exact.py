@@ -223,7 +223,7 @@ def cublas_gemm_test_constraint_enforced(
     use_bias: bool = False,
     use_gelu: bool = False,
     use_grad: bool = False,
-    expected_err_msg="CUBLAS_STATUS_NOT_SUPPORTED",
+    expected_err_msg="Unable to find suitable cuBLAS GEMM algorithm",
     expected_err_cls=RuntimeError
 ):
     if not fp8_blockwise_gemm_supported():
