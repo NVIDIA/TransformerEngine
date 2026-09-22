@@ -21,6 +21,24 @@ Do not copy version tables into this file. Current hardware, CUDA, cuDNN,
 compiler, Python, and framework requirements are maintained in `README.rst`
 and `docs/installation.rst`.
 
+## External Integration References
+
+Transformer Engine must remain understandable and testable from this
+repository. Some integration-facing APIs are used primarily by downstream
+projects, especially Megatron-LM. When the purpose or expected usage of such an
+API is unclear, inspect the downstream integration and the corresponding
+launchers under `qa/` to understand its real usage. Treat that usage as
+supporting evidence rather than the authoritative definition of Transformer
+Engine behavior.
+
+Preserve or add standalone tests in this repository for the relevant
+Transformer Engine contract whenever practical. Downstream integration tests
+supplement those tests; they do not replace them.
+
+For external library dependencies such as cuDNN Frontend, consult the
+documentation matching the version supported by Transformer Engine rather than
+assuming behavior from the dependency's latest branch.
+
 ## Repository Map
 
 - `transformer_engine/common/`: framework-independent C++, CUDA, C API,
