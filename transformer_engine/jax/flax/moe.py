@@ -94,6 +94,7 @@ class _MoEBlock(TransformerEngineBase):
         :func:`with_sharding_constraint_by_logical_axes`).
     ep_axis : Optional[str | tuple[str, ...]]
         Physical EP axis or ordered tuple of axes, overriding the EP resource.
+        Inputs may be [tokens, hidden] or [batch, sequence, hidden].
     mesh_resource : Optional[MeshResource]
         Physical DP, FSDP and EP mesh axes. ``None`` resolves the active global
         MeshResource context. An explicit resource takes precedence; one of
@@ -224,10 +225,11 @@ class _MoEBlock(TransformerEngineBase):
             ep_axis=self.ep_axis,
         )
         _, data_parallelism_axes = _moe_mesh_axes(mesh_resource)
-        assert (
-            inputs.ndim == 3
-        ), f"_MoEBlock expects [batch, sequence, hidden] input, got shape {inputs.shape}"
-        _, _, hidden_size = inputs.shape
+        assert inputs.ndim in (2, 3), (
+            "_MoEBlock expects [tokens, hidden] or [batch, sequence, hidden] input, got shape"
+            f" {inputs.shape}"
+        )
+        hidden_size = inputs.shape[-1]
 
         # Param registrations -- must run OUTSIDE any JAX transform that
         # alters the variable scope (e.g. shard_map). The functional
