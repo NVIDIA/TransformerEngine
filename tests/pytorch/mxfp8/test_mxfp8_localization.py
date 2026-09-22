@@ -8,6 +8,7 @@ import os
 
 import pytest
 import torch
+import transformer_engine_torch as tex
 
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch.cpp_extensions import general_gemm
@@ -790,3 +791,141 @@ def test_mxfp8_vmm_add_producer_performance() -> None:
         f"\n  speedup:                     {ordinary_ms / localized_ms:.3f}x"
     )
     workspace.close()
+
+
+@pytest.mark.skipif(not _localization_available(), reason="CUDA localization is unavailable")
+@pytest.mark.skipif(
+    os.getenv("RUN_BENCHMARK_TESTS") != "1",
+    reason="Benchmark test - run with RUN_BENCHMARK_TESTS=1",
+)
+@pytest.mark.parametrize("hidden_size", [1536, 512], ids=["q_up", "kv_up"])
+def test_mxfp8_vmm_layernorm_quant_localization_performance(
+    hidden_size: int, monkeypatch
+) -> None:
+    """Measure the fused MLA LayerNorm+MXFP8 producer on two locality domains."""
+    from transformer_engine.pytorch.tensor.localized_mxfp8 import MXFP8VMMWorkspace
+
+    monkeypatch.setenv("NVTE_NORM_FWD_USE_CUDNN", "1")
+    shape = (4096, hidden_size)
+    dtype = torch.bfloat16
+    device = torch.device("cuda")
+    eps = 1e-6
+    input_tensor = torch.randn(shape, dtype=dtype, device=device)
+    weight = torch.randn((hidden_size,), dtype=dtype, device=device)
+    bias = torch.randn((hidden_size,), dtype=dtype, device=device)
+    quantizer = te.MXFP8Quantizer(
+        fp8_dtype=te.DType.kFloat8E4M3,
+        rowwise=True,
+        columnwise=True,
+    )
+    # cuDNN normalization produces compact MXFP8 scales. LayerNormLinear
+    # swizzles the scales for GEMM in a subsequent small kernel.
+    quantizer.optimize_for_gemm = False
+    baseline_output = quantizer.make_empty(shape, dtype=dtype, device=device)
+    ordinary_input_workspace = MXFP8VMMWorkspace.from_unlocalized_input(
+        input_tensor,
+        quantizer,
+    )
+    localized_input_workspace = MXFP8VMMWorkspace.empty(
+        shape,
+        dtype=dtype,
+        device=device,
+        quantizer=quantizer,
+    )
+    localized_input_workspace.input.copy_(input_tensor)
+
+    total_sms = torch.cuda.get_device_properties(device).multi_processor_count
+    sms_per_domain = total_sms // 2
+    localized_sm_margin = total_sms - sms_per_domain
+
+    def baseline() -> None:
+        tex.layernorm_fwd(
+            input_tensor,
+            weight,
+            bias,
+            eps,
+            baseline_output,
+            quantizer,
+            tex.DType.kBFloat16,
+            0,
+            False,
+        )
+
+    def localized(workspace: MXFP8VMMWorkspace) -> None:
+        parent_stream = torch.cuda.current_stream(device)
+        fork_event, join_events = workspace._fork_join_events()
+        fork_event.record(parent_stream)
+        rows_per_domain = shape[0] // 2
+        for domain, (output, stream) in enumerate(
+            zip(workspace.partition_outputs, workspace.streams)
+        ):
+            row_start = domain * rows_per_domain
+            stream.wait_event(fork_event)
+            with torch.cuda.stream(stream):
+                tex.layernorm_fwd(
+                    workspace.input[row_start : row_start + rows_per_domain],
+                    weight,
+                    bias,
+                    eps,
+                    output,
+                    quantizer,
+                    tex.DType.kBFloat16,
+                    localized_sm_margin,
+                    False,
+                )
+            join_events[domain].record(stream)
+        for event in join_events:
+            parent_stream.wait_event(event)
+
+    def ordinary_input_localized_output() -> None:
+        localized(ordinary_input_workspace)
+
+    def localized_input_and_output() -> None:
+        localized(localized_input_workspace)
+
+    use_cuda_graph = os.getenv("MXFP8_LOCALIZATION_USE_CUDA_GRAPH") == "1"
+    if use_cuda_graph:
+        baseline_fn = _capture_cuda_graph(baseline).replay
+        ordinary_input_fn = _capture_cuda_graph(ordinary_input_localized_output).replay
+        localized_input_fn = _capture_cuda_graph(localized_input_and_output).replay
+    else:
+        baseline_fn = baseline
+        ordinary_input_fn = ordinary_input_localized_output
+        localized_input_fn = localized_input_and_output
+
+    baseline_ms = _benchmark_ms(baseline_fn)
+    ordinary_input_ms = _benchmark_ms(ordinary_input_fn)
+    localized_input_ms = _benchmark_ms(localized_input_fn)
+
+    baseline_fn()
+    ordinary_input_fn()
+    localized_input_fn()
+    torch.cuda.synchronize()
+    for workspace in (ordinary_input_workspace, localized_input_workspace):
+        for name in (
+            "_rowwise_data",
+            "_rowwise_scale_inv",
+            "_columnwise_data",
+            "_columnwise_scale_inv",
+        ):
+            torch.testing.assert_close(
+                getattr(workspace.output, name),
+                getattr(baseline_output, name),
+                atol=0.0,
+                rtol=0.0,
+            )
+
+    execution = "CUDA Graph" if use_cuda_graph else "eager"
+    print(
+        f"\nMXFP8 fused LayerNorm+quant {shape} ({execution}):"
+        f"\n  full-chip ordinary input/output:       {baseline_ms:.3f} ms"
+        f"\n  green ordinary input/VMM output:       {ordinary_input_ms:.3f} ms"
+        f"\n  green VMM input/output:                {localized_input_ms:.3f} ms"
+        f"\n  output-only localization speedup:      "
+        f"{baseline_ms / ordinary_input_ms:.3f}x"
+        f"\n  input+output localization speedup:     "
+        f"{baseline_ms / localized_input_ms:.3f}x"
+    )
+
+    ordinary_input_workspace.close()
+    localized_input_workspace.close()
