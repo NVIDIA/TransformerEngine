@@ -396,8 +396,10 @@ void ep_prepare_and_dispatch_fused(at::Tensor handle_mem, at::Tensor topk_idx, a
   auto idx_dtype = check_topk_idx_dtype(topk_idx);
   NVTE_CHECK(tokens.is_contiguous(), "tokens must be contiguous");
   NVTE_CHECK(topk_weights.is_contiguous(), "topk_weights must be contiguous");
+  NVTE_CHECK(topk_weights.scalar_type() == at::kFloat, "topk_weights must be float32");
   NVTE_CHECK(recv_tokens.is_contiguous(), "recv_tokens must be contiguous");
   NVTE_CHECK(recv_topk_weights.is_contiguous(), "recv_topk_weights must be contiguous");
+  NVTE_CHECK(recv_topk_weights.scalar_type() == at::kFloat, "recv_topk_weights must be float32");
   NVTE_CHECK(tokens_per_expert.is_contiguous(), "tokens_per_expert must be contiguous");
   NVTE_CHECK(
       tokens_per_expert.scalar_type() == at::kInt || tokens_per_expert.scalar_type() == at::kLong,
