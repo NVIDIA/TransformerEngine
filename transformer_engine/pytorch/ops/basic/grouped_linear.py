@@ -14,7 +14,7 @@ from typing import Any, Optional
 import torch
 
 import transformer_engine_torch as tex
-from transformer_engine.common.recipe import Recipe
+from transformer_engine.common.recipe import Recipe, Format as RecipeFormat
 from ...constants import DType, TE_DType
 from ...cpp_extensions import general_grouped_gemm, general_grouped_gemm_for_grouped_tensor
 from ...distributed import CudaRNGStatesTracker
@@ -128,6 +128,7 @@ def is_op_fuser_grouped_tensor_path_supported(
             device_capability >= (10, 0)
             and not recipe.disable_rht
             and not recipe.row_scaled_activation
+            and recipe.fp8_format == RecipeFormat.E4M3
         )
     return False
 
