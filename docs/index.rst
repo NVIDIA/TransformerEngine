@@ -46,6 +46,7 @@ Transformer Engine documentation
    :caption: Features
 
    features/low_precision_training/index.rst
+   features/mixture_of_experts/mixture_of_experts.rst
    features/other_optimizations/index.rst
 
 

@@ -1,0 +1,148 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-80 0 1000 860" width="100%" style="max-width: 920px;">
+  <defs>
+    <style>
+      .title { font: bold 18px sans-serif; fill: #1a1a1a; text-anchor: middle; }
+      .section-title { font: bold 17px sans-serif; fill: #333; text-anchor: middle; }
+      .label { font: 14px sans-serif; fill: #333; text-anchor: middle; }
+      .small-label { font: 13px sans-serif; fill: #555; text-anchor: middle; }
+      .tiny-label { font: 12px sans-serif; fill: #555; text-anchor: middle; }
+      .brace-label { font: 15px sans-serif; fill: #333; text-anchor: end; }
+      .expert-e0 { fill: #e3f2fd; stroke: #1976d2; stroke-width: 1.5; }
+      .expert-e1 { fill: #e8f5e9; stroke: #388e3c; stroke-width: 1.5; }
+      .expert-e2 { fill: #fff3e0; stroke: #f57c00; stroke-width: 1.5; }
+      .linear { fill: #f8f9fa; stroke: #757575; stroke-width: 1.6; }
+      .grouped { fill: #f3e5f5; stroke: #7b1fa2; stroke-width: 2.5; }
+      .arrow { stroke: #424242; stroke-width: 2; fill: none; marker-end: url(#arrowhead); }
+      .soft-arrow { stroke: #777; stroke-width: 1.6; fill: none; marker-end: url(#small-arrow); }
+      .brace { stroke: #666; stroke-width: 1.4; fill: none; }
+      .param { fill: #fafafa; stroke: #9e9e9e; stroke-width: 1.4; }
+    </style>
+    <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#424242"/>
+    </marker>
+    <marker id="small-arrow" markerWidth="7" markerHeight="5" refX="6" refY="2.5" orient="auto">
+      <polygon points="0 0, 7 2.5, 0 5" fill="#777"/>
+    </marker>
+  </defs>
+
+  <!-- Top: separate Linear calls -->
+  <g transform="translate(240, 35)">
+    <text x="220" y="0" class="section-title">Loop over experts</text>
+
+    <g transform="translate(0, 58)">
+      <rect x="0" y="24" width="105" height="36" class="expert-e0"/>
+      <text x="52" y="46" class="label">X0</text>
+      <rect x="174" y="-28" width="60" height="28" class="expert-e0"/>
+      <text x="204" y="-10" class="tiny-label">W0</text>
+      <rect x="234" y="-28" width="20" height="28" class="expert-e0"/>
+      <text x="244" y="-10" class="tiny-label">b0</text>
+      <path d="M 105 42 L 154 42" class="soft-arrow"/>
+      <path d="M 214 0 L 214 14" class="soft-arrow"/>
+      <rect x="154" y="14" width="120" height="56" class="linear"/>
+      <text x="214" y="46" class="label">Expert 0 (Linear)</text>
+      <path d="M 274 42 L 330 42" class="soft-arrow"/>
+      <rect x="335" y="24" width="105" height="36" class="expert-e0"/>
+      <text x="387" y="46" class="label">Y0</text>
+    </g>
+
+    <g transform="translate(0, 176)">
+      <rect x="0" y="0" width="105" height="84" class="expert-e1"/>
+      <text x="52" y="46" class="label">X1</text>
+      <rect x="174" y="-28" width="60" height="28" class="expert-e1"/>
+      <text x="204" y="-10" class="tiny-label">W1</text>
+      <rect x="234" y="-28" width="20" height="28" class="expert-e1"/>
+      <text x="244" y="-10" class="tiny-label">b1</text>
+      <path d="M 105 42 L 154 42" class="soft-arrow"/>
+      <path d="M 214 0 L 214 14" class="soft-arrow"/>
+      <rect x="154" y="14" width="120" height="56" class="linear"/>
+      <text x="214" y="46" class="label">Expert 1 (Linear)</text>
+      <path d="M 274 42 L 330 42" class="soft-arrow"/>
+      <rect x="335" y="0" width="105" height="84" class="expert-e1"/>
+      <text x="387" y="46" class="label">Y1</text>
+    </g>
+
+    <g transform="translate(0, 308)">
+      <rect x="0" y="15" width="105" height="54" class="expert-e2"/>
+      <text x="52" y="46" class="label">X2</text>
+      <rect x="174" y="-28" width="60" height="28" class="expert-e2"/>
+      <text x="204" y="-10" class="tiny-label">W2</text>
+      <rect x="234" y="-28" width="20" height="28" class="expert-e2"/>
+      <text x="244" y="-10" class="tiny-label">b2</text>
+      <path d="M 105 42 L 154 42" class="soft-arrow"/>
+      <path d="M 214 0 L 214 14" class="soft-arrow"/>
+      <rect x="154" y="14" width="120" height="56" class="linear"/>
+      <text x="214" y="46" class="label">Expert 2 (Linear)</text>
+      <path d="M 274 42 L 330 42" class="soft-arrow"/>
+      <rect x="335" y="15" width="105" height="54" class="expert-e2"/>
+      <text x="387" y="46" class="label">Y2</text>
+    </g>
+
+  </g>
+
+  <!-- Bottom: GroupedLinear -->
+  <g transform="translate(128, 445)">
+    <text x="332" y="0" class="section-title">Grouped GEMM</text>
+
+    <!-- Stack of weights and biases ABOVE the GroupedLinear box -->
+    <g transform="translate(275, 30)">
+      <rect x="0" y="0" width="85" height="42" class="expert-e0"/>
+      <text x="42" y="26" class="label">W0</text>
+      <rect x="85" y="0" width="30" height="42" class="expert-e0"/>
+      <text x="100" y="26" class="label">b0</text>
+      <rect x="0" y="42" width="85" height="42" class="expert-e1"/>
+      <text x="42" y="68" class="label">W1</text>
+      <rect x="85" y="42" width="30" height="42" class="expert-e1"/>
+      <text x="100" y="68" class="label">b1</text>
+      <rect x="0" y="84" width="85" height="42" class="expert-e2"/>
+      <text x="42" y="110" class="label">W2</text>
+      <rect x="85" y="84" width="30" height="42" class="expert-e2"/>
+      <text x="100" y="110" class="label">b2</text>
+    </g>
+
+    <!-- Arrow W -> GroupedLinear (vertical) -->
+    <path d="M 332 156 L 332 178" class="arrow"/>
+
+    <!-- X tokens (left) with m_splits braces -->
+    <g transform="translate(0, 178)">
+      <rect x="0" y="0" width="125" height="36" class="expert-e0"/>
+      <rect x="0" y="36" width="125" height="84" class="expert-e1"/>
+      <rect x="0" y="120" width="125" height="54" class="expert-e2"/>
+      <text x="62" y="22" class="label">X0</text>
+      <text x="62" y="82" class="label">X1</text>
+      <text x="62" y="151" class="label">X2</text>
+
+      <path class="brace" d="M -2 0 Q -6 0 -6 4 L -6 14 Q -6 18 -10 18 Q -6 18 -6 22 L -6 32 Q -6 36 -2 36"/>
+      <text x="-14" y="23" class="brace-label" style="text-anchor: end;">tokens for expert 0</text>
+      <path class="brace" d="M -2 36 Q -6 36 -6 41 L -6 74 Q -6 78 -10 78 Q -6 78 -6 82 L -6 115 Q -6 120 -2 120"/>
+      <text x="-14" y="83" class="brace-label" style="text-anchor: end;">tokens for expert 1</text>
+      <path class="brace" d="M -2 120 Q -6 120 -6 125 L -6 143 Q -6 147 -10 147 Q -6 147 -6 151 L -6 169 Q -6 174 -2 174"/>
+      <text x="-14" y="152" class="brace-label" style="text-anchor: end;">tokens for expert 2</text>
+    </g>
+
+    <!-- Arrow X -> GroupedLinear (horizontal) -->
+    <path d="M 125 265 L 245 265" class="arrow"/>
+
+    <!-- GroupedLinear box -->
+    <rect x="245" y="178" width="175" height="174" class="grouped"/>
+    <text x="332" y="252" class="label">Grouped GEMM</text>
+    <text x="332" y="272" class="small-label">multiple experts</text>
+
+    <!-- per-expert token counts parameter input -->
+    <rect x="262" y="380" width="140" height="26" class="param"/>
+    <text x="332" y="397" class="label">tokens per expert</text>
+    <path d="M 332 380 L 332 352" class="arrow"/>
+
+    <!-- Arrow GroupedLinear -> Y (horizontal) -->
+    <path d="M 420 265 L 540 265" class="arrow"/>
+
+    <!-- Y outputs (right) -->
+    <g transform="translate(540, 178)">
+      <rect x="0" y="0" width="125" height="36" class="expert-e0"/>
+      <rect x="0" y="36" width="125" height="84" class="expert-e1"/>
+      <rect x="0" y="120" width="125" height="54" class="expert-e2"/>
+      <text x="62" y="22" class="label">Y0</text>
+      <text x="62" y="82" class="label">Y1</text>
+      <text x="62" y="151" class="label">Y2</text>
+    </g>
+  </g>
+</svg>
