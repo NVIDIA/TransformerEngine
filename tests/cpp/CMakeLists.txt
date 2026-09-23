@@ -47,7 +47,11 @@ include(${CMAKE_SOURCE_DIR}/../../transformer_engine/common/cmake/cuDNN.cmake)
 add_subdirectory(operator)
 add_subdirectory(util)
 
-# The tests are standalone C++ executables, so they provide the Python interpreter used by
-# libtransformer_engine's CuTeDSL backend.
-target_link_libraries(test_operator PRIVATE Python::Python)
-target_link_libraries(test_util PRIVATE Python::Python)
+# Executables that link libtransformerengine.so must also link to the Python::Python to provide
+# the definitions of these CPython symbols at runtime via dynamic linking.
+foreach(test_target test_operator test_util)
+  target_link_libraries(${test_target} PRIVATE
+                        "-Wl,--no-as-needed"
+                        Python::Python
+                        "-Wl,--as-needed")
+endforeach()

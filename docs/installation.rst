@@ -101,9 +101,6 @@ Execute the following commands to install Transformer Engine from source:
   git clone --branch stable --recursive https://github.com/NVIDIA/TransformerEngine.git
 
   cd TransformerEngine
-  # apache-tvm-ffi is required to build the CuTeDSL bridge when using --no-build-isolation.
-  # If that's not wanted, set NVTE_WITH_CUTEDSL=0 to build without CuTeDSL and tvm-ffi bindings.
-  pip3 install "apache-tvm-ffi>=0.1.12"
   export NVTE_FRAMEWORK=pytorch         # Optionally set framework
   pip3 install --no-build-isolation .   # Build and install
 
