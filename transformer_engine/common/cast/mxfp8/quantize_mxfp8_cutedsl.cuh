@@ -199,8 +199,9 @@ inline bool mxfp8_quantize_cutedsl(const MXFP8QuantConfig &config, const Tensor 
     mS_col =
         tvm_ffi_bridge::DLTensorWrapper(output_tensor->columnwise_scale_inv, true, device_index);
   }
+  // The compiled entrypoint expects a rank-1 amax tensor, unlike the 2D data views.
   if (output_tensor->amax.dptr != nullptr)
-    mAmax = tvm_ffi_bridge::DLTensorWrapper(output_tensor->amax, true, device_index);
+    mAmax = tvm_ffi_bridge::DLTensorWrapper(output_tensor->amax, false, device_index);
   if (act_input_tensor != nullptr && act_input_tensor->data.dptr != nullptr)
     mActInput = tvm_ffi_bridge::DLTensorWrapper(act_input_tensor->data, true, device_index);
   if (workspace_tensor != nullptr && workspace_tensor->data.dptr != nullptr)
