@@ -152,52 +152,6 @@ def flash_attn_p2p_communicate(
 
 
 @jit_fuser
-def flash_attn_fwd_out_correction_init(
-    out_init_step: torch.Tensor,
-    softmax_lse: torch.Tensor,
-    softmax_lse_init_step: torch.Tensor,
-    seq_dim: int,
-):
-    """Merge partial outputs of the first step in Attention with context parallelism"""
-    softmax_lse_corrected_exp = torch.exp(softmax_lse_init_step - softmax_lse).movedim(2, seq_dim)
-    softmax_lse_corrected_exp = softmax_lse_corrected_exp.unsqueeze(-1)
-    out_corrected = out_init_step * softmax_lse_corrected_exp
-    return out_corrected.to(out_init_step.dtype)
-
-
-@jit_fuser
-def flash_attn_fwd_out_correction(
-    out: torch.Tensor,
-    out_per_step: torch.Tensor,
-    softmax_lse: torch.Tensor,
-    softmax_lse_per_step: torch.Tensor,
-    seq_dim: int,
-):
-    """Merge partial outputs of each step in Attention with context parallelism"""
-    softmax_lse_corrected_exp = torch.exp(softmax_lse_per_step - softmax_lse).movedim(2, seq_dim)
-    softmax_lse_corrected_exp = softmax_lse_corrected_exp.unsqueeze(-1)
-    out_corrected = out_per_step * softmax_lse_corrected_exp
-    out.add_(out_corrected)
-
-
-@jit_fuser
-def flash_attn_fwd_second_half_out_correction(
-    out: torch.Tensor,
-    out_per_step: torch.Tensor,
-    softmax_lse: torch.Tensor,
-    softmax_lse_per_step: torch.Tensor,
-    seq_dim: int,
-):
-    """Merge second half of partial outputs of each step in Attention with context parallelism"""
-    out_ = out.select(seq_dim, 1)
-    softmax_lse_ = softmax_lse.view(*softmax_lse.shape[:-1], 2, -1)[..., 1, :]
-    softmax_lse_corrected_exp = torch.exp(softmax_lse_per_step - softmax_lse_).movedim(2, seq_dim)
-    softmax_lse_corrected_exp = softmax_lse_corrected_exp.unsqueeze(-1)
-    out_corrected = out_per_step * softmax_lse_corrected_exp
-    out_.add_(out_corrected)
-
-
-@jit_fuser
 def flash_attn_fwd_softmax_lse_correction(
     softmax_lse: torch.Tensor,
     softmax_lse_per_step: torch.Tensor,
@@ -220,6 +174,41 @@ def flash_attn_fwd_second_half_softmax_lse_correction(
     min_scale = torch.min(softmax_lse_, softmax_lse_per_step)
     new_scale = max_scale + torch.log1p(torch.exp(min_scale - max_scale))
     softmax_lse_.copy_(new_scale)
+
+
+@jit_fuser
+def flash_attn_fwd_incremental_out_correction(
+    out: torch.Tensor,
+    out_per_step: torch.Tensor,
+    old_softmax_lse: torch.Tensor,
+    new_softmax_lse: torch.Tensor,
+    softmax_lse_per_step: torch.Tensor,
+    seq_dim: int,
+):
+    """Online softmax merge: rescale accumulated output and add new step's contribution."""
+    scale_old = torch.exp(old_softmax_lse - new_softmax_lse).movedim(2, seq_dim).unsqueeze(-1)
+    scale_new = torch.exp(softmax_lse_per_step - new_softmax_lse).movedim(2, seq_dim).unsqueeze(-1)
+    out.mul_(scale_old)
+    out.addcmul_(out_per_step, scale_new)
+
+
+@jit_fuser
+def flash_attn_fwd_incremental_second_half_out_correction(
+    out: torch.Tensor,
+    out_per_step: torch.Tensor,
+    old_softmax_lse: torch.Tensor,
+    new_softmax_lse: torch.Tensor,
+    softmax_lse_per_step: torch.Tensor,
+    seq_dim: int,
+):
+    """Online softmax merge for second-half tokens only (causal upper-triangle steps)."""
+    out_ = out.select(seq_dim, 1)
+    old_lse_ = old_softmax_lse.view(*old_softmax_lse.shape[:-1], 2, -1)[..., 1, :]
+    new_lse_ = new_softmax_lse.view(*new_softmax_lse.shape[:-1], 2, -1)[..., 1, :]
+    scale_old = torch.exp(old_lse_ - new_lse_).movedim(2, seq_dim).unsqueeze(-1)
+    scale_new = torch.exp(softmax_lse_per_step - new_lse_).movedim(2, seq_dim).unsqueeze(-1)
+    out_.mul_(scale_old)
+    out_.addcmul_(out_per_step, scale_new)
 
 
 @jit_fuser
@@ -1617,6 +1606,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         deterministic,
         use_fused_attention,
         return_max_logit,
+        softcap,
         fp8,
         fp8_meta,
         cp_group,
@@ -1684,7 +1674,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         amax_per_step = None
         S_quantizer_per_step = [None for _ in range(cp_size)]
         O_quantizer_per_step = [None for _ in range(cp_size)]
-        max_logit_per_step = [None for _ in range(cp_size)]
+        max_logit_per_step = [None, None]
         max_logit = None
 
         assert isinstance(k, q.__class__) and isinstance(
@@ -1793,7 +1783,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
             if return_max_logit:
                 max_logit_per_step = [
-                    torch.empty(q.shape[-2], dtype=q.dtype, device=q.device) for _ in range(cp_size)
+                    torch.empty(q.shape[-2], dtype=q.dtype, device=q.device) for _ in range(2)
                 ]
 
         # split qkv to two halves and prepare for load balancing
@@ -1842,16 +1832,12 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             )
 
         # stats tensor shape:
-        # BHS1 before cuDNN 9.6 or flash-attention v2.6/v3
-        # TH1 after cuDNN 9.6 or flash-attention v2.6/v3
+        # BHS1 before flash-attention v2.6/v3
+        # TH1 with cuDNN, or after flash-attention v2.6/v3
         softmax_lse_in_packed_format = False
         if qkv_format == "thd":
             if use_fused_attention:
-                softmax_lse_in_packed_format = get_cudnn_version() >= (
-                    9,
-                    6,
-                    0,
-                ) and get_device_compute_capability() != (12, 0)
+                softmax_lse_in_packed_format = get_device_compute_capability() != (12, 0)
             else:
                 softmax_lse_in_packed_format = (
                     fa_utils.v2_6_0_plus or use_flash_attn_3 or use_flash_attn_4
@@ -1906,13 +1892,13 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 if fa_utils.v2_5_7_plus and qkv_format == "thd":
                     fa_forward_kwargs["block_table"] = None
                 if fa_utils.v2_6_0_plus:
-                    fa_forward_kwargs["softcap"] = 0.0
+                    fa_forward_kwargs["softcap"] = softcap
 
         # set up inputs for forward
         q_inputs = [None, None]
         kv_inputs = [None, None]
-        out_per_step = [None for _ in range(cp_size)]
-        softmax_lse_per_step = [None for _ in range(cp_size)]
+        out_per_step = [None, None]
+        softmax_lse_per_step = [None, None]
         rng_states = [None for _ in range(cp_size)]
         attn_biases = [None for _ in range(cp_size)]
 
@@ -1921,10 +1907,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         # synchronize fwd results correction across steps
         fwd_results_correction_done = torch.cuda.Event()
 
-        # q, k, v, o:
-        # causal: [b, 2, s//2, h, d] or [2, s//2, b, h, d]
-        # non-causal: [b, s, h, d] or [s, b, h, d]
-        p2p_comm_buffers = [None for _ in range(cp_size)]
+        p2p_comm_buffers = [None, None]
         k_shape = k.shape
         k_numel = k.numel()
         v_shape = v.shape
@@ -1936,7 +1919,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         # MXFP8/F16 attention:    q, k, v: torch.Tensor, dtype=fwd_nominal_dtype
         # FP8DS/CS attention:     q, k, v: torch.Tensor, dtype=torch.uint8
         out = None
+        # Preserve the original format for fused output and post-attention A2A.
         o_format = qkv_format
+        second_half_lse_seqlen = None
         for i in range(cp_size + 1):
             if i < cp_size:
                 with torch.cuda.stream(flash_attn_streams[i % 2]):
@@ -1945,18 +1930,18 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         req.wait()
 
                     if i < (cp_size - 1):
-                        p2p_comm_buffers[i + 1] = torch.empty_like(p2p_comm_buffers[i])
+                        p2p_comm_buffers[(i + 1) % 2] = torch.empty_like(p2p_comm_buffers[i % 2])
                         send_recv_reqs[i % 2] = flash_attn_p2p_communicate(
                             rank,
-                            p2p_comm_buffers[i],
+                            p2p_comm_buffers[i % 2],
                             send_dst,
-                            p2p_comm_buffers[i + 1],
+                            p2p_comm_buffers[(i + 1) % 2],
                             recv_src,
                             cp_group,
                             batch_p2p_comm,
                         )
 
-                    kv_inputs[i % 2] = p2p_comm_buffers[i]
+                    kv_inputs[i % 2] = p2p_comm_buffers[i % 2]
                     k_part = kv_inputs[i % 2][:k_numel].view(*k_shape)
                     v_part = kv_inputs[i % 2][k_numel:].view(*v_shape)
                     q_part = q
@@ -2050,16 +2035,16 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             q_inputs[i % 2] = q_part
                             if use_fused_attention:
                                 (
-                                    out_per_step[i],
-                                    softmax_lse_per_step[i],
+                                    out_per_step[i % 2],
+                                    softmax_lse_per_step[i % 2],
                                     rng_states[i],
                                     attn_biases[i],
-                                    max_logit_per_step[i],
+                                    max_logit_per_step[i % 2],
                                 ) = cp_p2p_fwd_fused_attn(
                                     *fused_attn_inputs, *prepare_outputs, section
                                 )
                             else:
-                                out_per_step[i], softmax_lse_per_step[i], rng_states[i] = (
+                                out_per_step[i % 2], softmax_lse_per_step[i % 2], rng_states[i] = (
                                     cp_p2p_fwd_flash_attn(
                                         *flash_attn_inputs,
                                         *prepare_outputs,
@@ -2079,16 +2064,16 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             q_inputs[i % 2] = q_part
                             if use_fused_attention:
                                 (
-                                    out_per_step[i],
-                                    softmax_lse_per_step[i],
+                                    out_per_step[i % 2],
+                                    softmax_lse_per_step[i % 2],
                                     rng_states[i],
                                     attn_biases[i],
-                                    max_logit_per_step[i],
+                                    max_logit_per_step[i % 2],
                                 ) = cp_p2p_fwd_fused_attn(
                                     *fused_attn_inputs, *prepare_outputs, section
                                 )
                             else:
-                                out_per_step[i], softmax_lse_per_step[i], rng_states[i] = (
+                                out_per_step[i % 2], softmax_lse_per_step[i % 2], rng_states[i] = (
                                     cp_p2p_fwd_flash_attn(
                                         *flash_attn_inputs,
                                         *prepare_outputs,
@@ -2108,16 +2093,16 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             q_inputs[i % 2] = q_part
                             if use_fused_attention:
                                 (
-                                    out_per_step[i],
-                                    softmax_lse_per_step[i],
+                                    out_per_step[i % 2],
+                                    softmax_lse_per_step[i % 2],
                                     rng_states[i],
                                     attn_biases[i],
-                                    max_logit_per_step[i],
+                                    max_logit_per_step[i % 2],
                                 ) = cp_p2p_fwd_fused_attn(
                                     *fused_attn_inputs, *prepare_outputs, section
                                 )
                             else:
-                                out_per_step[i], softmax_lse_per_step[i], rng_states[i] = (
+                                out_per_step[i % 2], softmax_lse_per_step[i % 2], rng_states[i] = (
                                     cp_p2p_fwd_flash_attn(
                                         *flash_attn_inputs,
                                         *prepare_outputs,
@@ -2138,14 +2123,14 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         q_inputs[i % 2] = q_part
                         if use_fused_attention:
                             (
-                                out_per_step[i],
-                                softmax_lse_per_step[i],
+                                out_per_step[i % 2],
+                                softmax_lse_per_step[i % 2],
                                 rng_states[i],
                                 attn_biases[i],
-                                max_logit_per_step[i],
+                                max_logit_per_step[i % 2],
                             ) = cp_p2p_fwd_fused_attn(*fused_attn_inputs, *prepare_outputs, section)
                         else:
-                            out_per_step[i], softmax_lse_per_step[i], rng_states[i] = (
+                            out_per_step[i % 2], softmax_lse_per_step[i % 2], rng_states[i] = (
                                 cp_p2p_fwd_flash_attn(
                                     *flash_attn_inputs,
                                     *prepare_outputs,
@@ -2153,7 +2138,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 )
                             )
 
-            # softmax_lse correction
+            # Incremental softmax_lse + output correction (online softmax merge)
             if i > 0:
                 # wait until fwd results correction of last step is done
                 if i > 1:
@@ -2161,51 +2146,100 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
                 with torch.cuda.stream(flash_attn_streams[(i - 1) % 2]):
                     if use_fused_attention:
-                        # [b, h, sq, 1] -> [b, h, sq]
-                        # [t, h, 1] -> [t, h]
-                        softmax_lse_per_step[i - 1].squeeze_(-1)
+                        # [b, h, sq, 1] -> [b, h, sq] or [t, h, 1] -> [t, h]
+                        softmax_lse_per_step[(i - 1) % 2].squeeze_(-1)
                         if softmax_lse_in_packed_format:
-                            softmax_lse_per_step[i - 1] = (
-                                softmax_lse_per_step[i - 1].transpose(0, 1).contiguous()
+                            softmax_lse_per_step[(i - 1) % 2] = (
+                                softmax_lse_per_step[(i - 1) % 2].transpose(0, 1).contiguous()
                             )
                     if fp8:
                         # dequantize out_per_step to torch.float32
                         if fp8_recipe.delayed():
-                            out_per_step[i - 1] = out_per_step[i - 1].dequantize(
+                            out_per_step[(i - 1) % 2] = out_per_step[(i - 1) % 2].dequantize(
                                 dtype=torch.float32
                             )
                         if fp8_recipe.float8_current_scaling() or fp8_recipe.mxfp8():
-                            out_per_step[i - 1] = out_per_step[i - 1].to(dtype=torch.float32)
+                            out_per_step[(i - 1) % 2] = out_per_step[(i - 1) % 2].to(
+                                dtype=torch.float32
+                            )
 
                     if i == 1:
                         softmax_lse = torch.clone(softmax_lse_per_step[0])
                         if qkv_format == "thd":
-                            if fp8:
-                                out = torch.zeros_like(out_per_step[0]).view(o_shape)
-                            else:
-                                out = torch.zeros(o_shape, dtype=q.dtype, device=q.device)
+                            # Keep THD in the kernel's input dtype; thd_out_correction
+                            # performs its own promotion and requires matching dtypes.
+                            out = out_per_step[0].clone().view(o_shape)
+                        elif qkv_format in ["bshd", "sbhd"]:
+                            # Keep the accumulator in the partial-output dtype. FP8
+                            # partial outputs have already been dequantized to FP32.
+                            out = out_per_step[0].clone()
+                            out = out.view(o_shape)
                     elif (i - 1) <= rank or not causal:
+                        old_softmax_lse = softmax_lse.clone()
                         flash_attn_fwd_softmax_lse_correction(
-                            softmax_lse, softmax_lse_per_step[i - 1]
+                            softmax_lse, softmax_lse_per_step[(i - 1) % 2]
                         )
+                        if qkv_format in ["bshd", "sbhd"]:
+                            flash_attn_fwd_incremental_out_correction(
+                                out.view(*out_per_step[(i - 1) % 2].shape),
+                                out_per_step[(i - 1) % 2],
+                                old_softmax_lse,
+                                softmax_lse,
+                                softmax_lse_per_step[(i - 1) % 2],
+                                seq_dim,
+                            )
+                        elif qkv_format == "thd":
+                            tex.thd_out_correction(
+                                out,
+                                out_per_step[(i - 1) % 2],
+                                old_softmax_lse,
+                                softmax_lse,
+                                softmax_lse_per_step[(i - 1) % 2],
+                                cu_seqlens_q_padded,
+                                False,
+                                softmax_lse_in_packed_format,
+                            )
                     else:
+                        old_softmax_lse = softmax_lse.clone()
                         if qkv_format == "thd":
                             tex.thd_second_half_lse_correction(
                                 softmax_lse,
-                                softmax_lse_per_step[i - 1],
+                                softmax_lse_per_step[(i - 1) % 2],
                                 cu_seqlens_q_padded,
+                                softmax_lse_in_packed_format,
+                            )
+                            tex.thd_out_correction(
+                                out,
+                                out_per_step[(i - 1) % 2],
+                                old_softmax_lse,
+                                softmax_lse,
+                                softmax_lse_per_step[(i - 1) % 2],
+                                cu_seqlens_q_padded,
+                                True,
                                 softmax_lse_in_packed_format,
                             )
                         else:
                             flash_attn_fwd_second_half_softmax_lse_correction(
                                 softmax_lse.view(*softmax_lse.shape[:-1], 2, -1),
-                                softmax_lse_per_step[i - 1],
+                                softmax_lse_per_step[(i - 1) % 2],
+                            )
+                            flash_attn_fwd_incremental_second_half_out_correction(
+                                out,
+                                out_per_step[(i - 1) % 2],
+                                old_softmax_lse,
+                                softmax_lse,
+                                softmax_lse_per_step[(i - 1) % 2],
+                                seq_dim,
                             )
                     if return_max_logit:
                         if i == 1:
                             max_logit = torch.clone(max_logit_per_step[0])
                         else:
-                            max_logit = torch.maximum(max_logit, max_logit_per_step[i - 1])
+                            max_logit = torch.maximum(max_logit, max_logit_per_step[(i - 1) % 2])
+
+                    # Capture second_half_lse_seqlen from the last step's LSE
+                    if i == cp_size and causal and rank < (cp_size - 1):
+                        second_half_lse_seqlen = softmax_lse_per_step[(cp_size - 1) % 2].shape[-1]
 
                 if i < cp_size:
                     flash_attn_streams[(i - 1) % 2].record_event(fwd_results_correction_done)
@@ -2216,59 +2250,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 max_logit, op=torch.distributed.ReduceOp.MAX, group=cp_group
             )
 
-        second_half_lse_seqlen = None
-        if causal and rank < (cp_size - 1):
-            second_half_lse_seqlen = softmax_lse_per_step[-1].shape[-1]
-
-        # fwd output correction: out in torch.float32
-        for i in range(cp_size):
-            if i <= rank or not causal:
-                if o_format in ["bshd", "sbhd"]:
-                    if i == 0:
-                        out = flash_attn_fwd_out_correction_init(
-                            out_per_step[0],
-                            softmax_lse,
-                            softmax_lse_per_step[0],
-                            seq_dim,
-                        )
-                        out = out.view(o_shape)
-                    else:
-                        flash_attn_fwd_out_correction(
-                            out.view(*out_per_step[i].shape),
-                            out_per_step[i],
-                            softmax_lse,
-                            softmax_lse_per_step[i],
-                            seq_dim,
-                        )
-                elif o_format == "thd":
-                    tex.thd_out_correction(
-                        out,
-                        out_per_step[i],
-                        softmax_lse,
-                        softmax_lse_per_step[i],
-                        cu_seqlens_q_padded,
-                        False,
-                        softmax_lse_in_packed_format,
-                    )
-            else:
-                if o_format in ["bshd", "sbhd"]:
-                    flash_attn_fwd_second_half_out_correction(
-                        out,
-                        out_per_step[i],
-                        softmax_lse,
-                        softmax_lse_per_step[i],
-                        seq_dim,
-                    )
-                elif o_format == "thd":
-                    tex.thd_out_correction(
-                        out,
-                        out_per_step[i],
-                        softmax_lse,
-                        softmax_lse_per_step[i],
-                        cu_seqlens_q_padded,
-                        True,
-                        softmax_lse_in_packed_format,
-                    )
+        # Save the rank-local output for backward before restoring the A2A layout.
         out = out.view(post_a2a_o_shape)
         out_part = out.to(fwd_nominal_dtype)
 
@@ -2327,7 +2309,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         ctx.fp8 = is_bwd_fp8
 
         kv_fp8 = None
-        kv = p2p_comm_buffers[-1]
+        kv = p2p_comm_buffers[(cp_size - 1) % 2]
         if fp8 and not fp8_recipe.mxfp8():
             q_fp8, kv_fp8 = [
                 Float8Tensor.make_like(x, data=y, dtype=fwd_nominal_dtype)
@@ -2399,6 +2381,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         ctx.attn_bias_type = attn_bias_type
         ctx.attn_bias_shape = None if attn_bias is None else attn_bias.shape
         ctx.deterministic = deterministic
+        ctx.softcap = softcap
         ctx.use_fused_attention = use_fused_attention
         ctx.pad_between_seqs = pad_between_seqs
         ctx.softmax_lse_in_packed_format = softmax_lse_in_packed_format
@@ -2705,7 +2688,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 if fa_utils.v2_4_1_plus:
                     fa_backward_kwargs["deterministic"] = ctx.deterministic
                 if fa_utils.v2_6_0_plus:
-                    fa_backward_kwargs["softcap"] = 0.0
+                    fa_backward_kwargs["softcap"] = ctx.softcap
 
         send_recv_reqs = []
         for i in range(cp_size):
@@ -3212,6 +3195,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -3289,6 +3273,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         deterministic,
         use_fused_attention,
         return_max_logit,
+        softcap,
         window_size,
         cp_group,
         cp_stream,
@@ -3382,7 +3367,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                 if fa_utils.v2_5_7_plus and qkv_format == "thd":
                     fa_forward_kwargs["block_table"] = None
                 if fa_utils.v2_6_0_plus:
-                    fa_forward_kwargs["softcap"] = 0.0
+                    fa_forward_kwargs["softcap"] = softcap
 
         qkv_layout = qkv_format + "_" + qkv_format + "_" + qkv_format
 
@@ -3974,6 +3959,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         ctx.attn_bias_type = attn_bias_type
         ctx.attn_mask_type = attn_mask_type
         ctx.deterministic = deterministic
+        ctx.softcap = softcap
         ctx.use_fused_attention = use_fused_attention
         ctx.use_flash_attn_3 = use_flash_attn_3
         ctx.use_flash_attn_4 = use_flash_attn_4
@@ -4183,7 +4169,14 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                 if fa_utils.v2_4_1_plus:
                     fa_backward_kwargs["deterministic"] = ctx.deterministic
                 if fa_utils.v2_6_0_plus:
-                    fa_backward_kwargs["softcap"] = 0.0
+                    fa_backward_kwargs["softcap"] = ctx.softcap
+                if (
+                    ctx.qkv_format == "thd"
+                    and ctx.load_balancing_strategy is CPLoadBalancingStrategy.NO_LOAD_BALANCE
+                ):
+                    # FA2 GQA backward accumulates into expanded K/V gradient buffers.
+                    # Initialize them before accumulation in this partitioning path.
+                    fa_backward_kwargs["zero_tensors"] = True
 
         local_seq_chunk_ids = (
             [rank]
@@ -4563,6 +4556,8 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             None,
             None,
             None,
+            None,
+            None,
         )
 
 
@@ -4594,6 +4589,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         deterministic,
         use_fused_attention,
         return_max_logit,
+        softcap,
         window_size,
         fp8,
         fp8_meta,
@@ -4695,7 +4691,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 if fa_utils.v2_5_7_plus and qkv_format == "thd":
                     fa_forward_kwargs["block_table"] = None
                 if fa_utils.v2_6_0_plus:
-                    fa_forward_kwargs["softcap"] = 0.0
+                    fa_forward_kwargs["softcap"] = softcap
 
         assert isinstance(k, q.__class__) and isinstance(
             v, q.__class__
@@ -5020,6 +5016,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         ctx.attn_mask_type = attn_mask_type
         ctx.attn_bias_type = attn_bias_type
         ctx.deterministic = deterministic
+        ctx.softcap = softcap
         ctx.window_size = window_size
         ctx.use_fused_attention = use_fused_attention
         ctx.fp8_meta = fp8_meta
@@ -5170,7 +5167,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 if fa_utils.v2_4_1_plus:
                     fa_backward_kwargs["deterministic"] = ctx.deterministic
                 if fa_utils.v2_6_0_plus:
-                    fa_backward_kwargs["softcap"] = 0.0
+                    fa_backward_kwargs["softcap"] = ctx.softcap
 
         dq_fp8, dk_fp8, dv_fp8 = None, None, None
         if ctx.use_fused_attention:
@@ -5398,9 +5395,123 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             None,
             None,
             None,
+            None,
             d_softmax_offset,
             None,
         )
+
+
+def cp_per_step_configs(
+    cp_comm_type,
+    cp_size,
+    cp_size_a2a,
+    *,
+    max_seqlen_q,
+    max_seqlen_kv,
+    num_tokens_q,
+    num_tokens_kv,
+    num_heads,
+    num_gqa_groups,
+    attn_mask_type,
+    window_size,
+    bottom_right_diagonal,
+):
+    """Per-step attention configs a context-parallel run dispatches to its attention backend.
+
+    CP runs attention in multiple steps, each with a distinct config (e.g. mask, and seqlens)
+    that differs from the single global config. This function returns the list of those distinct
+    per-step configs so `get_attention_backend` can check if the backend supports all of them.
+    """
+    is_causal = "causal" in attn_mask_type
+    padding_or_no_mask = "padding" if "padding" in attn_mask_type else "no_mask"
+    window_left, window_right = window_size
+
+    def config(mask, s_q, s_kv, heads, gqa, bottom_right, t_q, t_kv, window=None):
+        w_left, w_right = window if window is not None else (window_left, window_right)
+        return {
+            "attn_mask_type": mask,
+            "max_seqlen_q": s_q,
+            "max_seqlen_kv": s_kv,
+            "num_tokens_q": t_q,
+            "num_tokens_kv": t_kv,
+            "num_attn_heads": heads,
+            "num_gqa_groups": gqa,
+            "window_size_left": w_left,
+            "window_size_right": w_right,
+            "bottom_right_diagonal": bottom_right,
+        }
+
+    if cp_comm_type == "a2a":
+        # split heads across the cp ranks
+        return [
+            config(
+                attn_mask_type,
+                max_seqlen_q,
+                max_seqlen_kv,
+                num_heads // cp_size,
+                num_gqa_groups // cp_size,
+                bottom_right_diagonal,
+                num_tokens_q * cp_size,
+                num_tokens_kv * cp_size,
+            )
+        ]
+
+    if cp_comm_type == "all_gather":
+        # one short Q chunk vs a growing KV chunk; causal -> causal_bottom_right
+        s_q = max_seqlen_q // (2 * cp_size)
+        s_kv_chunk = max_seqlen_kv // (2 * cp_size)
+        mask, br = attn_mask_type, bottom_right_diagonal
+        if is_causal and "bottom_right" not in attn_mask_type:
+            mask, br = attn_mask_type + "_bottom_right", True
+        # Each step narrows max_seqlen_*, but the token counts it dispatches with are the
+        # rank's full Q tokens and the all-gathered KV tokens, unchanged across steps.
+        # Scaling them per step would key the probe's graph differently from the one the
+        # step looks up, and rebuild every graph this probes at execution time.
+        t_q = num_tokens_q
+        t_kv = num_tokens_kv * cp_size
+        # s_kv ranges from s_kv_chunk, i*s_kv_chunk, ..., max_seqlen_kv
+        # check a single chunk and the full KV
+        return [
+            config(mask, s_q, s_kv, num_heads, num_gqa_groups, br, t_q, t_kv)
+            for s_kv in dict.fromkeys([s_kv_chunk, max_seqlen_kv])
+        ]
+
+    # p2p and a2a+p2p: split heads across the a2a subgroup, and ring over the p2p subgroup
+    p2p_size = cp_size // cp_size_a2a
+    heads = num_heads // cp_size_a2a
+    gqa = num_gqa_groups // cp_size_a2a
+    r_q = max_seqlen_q // p2p_size
+    r_kv = max_seqlen_kv // p2p_size
+    # The tensors handed to this rank already correspond to (r_q, r_kv), so the token counts
+    # need no rescaling here; they only follow the halving below.
+    t_q, t_kv = num_tokens_q, num_tokens_kv
+    if not is_causal:
+        return [config(attn_mask_type, r_q, r_kv, heads, gqa, bottom_right_diagonal, t_q, t_kv)]
+    return [
+        config(attn_mask_type, r_q, r_kv, heads, gqa, bottom_right_diagonal, t_q, t_kv),  # diagonal
+        config(
+            padding_or_no_mask,
+            r_q,
+            r_kv // 2,
+            heads,
+            gqa,
+            bottom_right_diagonal,
+            t_q,
+            t_kv // 2,
+            window=(-1, -1),
+        ),  # lower-triangle
+        config(
+            padding_or_no_mask,
+            r_q // 2,
+            r_kv,
+            heads,
+            gqa,
+            bottom_right_diagonal,
+            t_q // 2,
+            t_kv,
+            window=(-1, -1),
+        ),  # upper-triangle
+    ]
 
 
 def attn_forward_func_with_cp(
@@ -5427,6 +5538,7 @@ def attn_forward_func_with_cp(
     deterministic=False,
     use_fused_attention=False,
     window_size=None,
+    softcap=0.0,
     fp8=False,
     fp8_meta=None,
     quantizers=None,
@@ -5452,7 +5564,7 @@ def attn_forward_func_with_cp(
     assigns one contiguous physical-buffer chunk to each rank and uses one attention
     step per rank. Logical sequences remain isolated by ``cu_seqlens``. This strategy
     requires THD, all-gather, causal self-attention without a sliding window, and
-    FusedAttention, or FlashAttention 3 with ``pad_between_seqs=False``. Input producers
+    FusedAttention, or FlashAttention with ``pad_between_seqs=False``. Input producers
     must use the same strategy when partitioning inputs with
     :func:`get_batch_on_this_cp_rank` or :func:`get_thd_partitioned_indices`.
 
@@ -5540,12 +5652,11 @@ def attn_forward_func_with_cp(
         assert (
             cp_comm_type == "all_gather"
         ), "No-load-balance THD partitioning requires cp_comm_type='all_gather'."
+        # Backend selection is handled by the caller. FlashAttention does not yet
+        # support inter-sequence padding with this partitioning strategy.
         assert (
-            use_fused_attention or use_flash_attn_3
-        ), "No-load-balance THD partitioning requires FusedAttention or FlashAttention 3."
-        assert not (
-            use_flash_attn_3 and pad_between_seqs
-        ), "No-load-balance THD partitioning with FlashAttention 3 does not support padding yet."
+            not pad_between_seqs or use_fused_attention
+        ), "No-load-balance THD partitioning only supports padding with FusedAttention."
         assert "causal" in attn_mask_type and window_size == (
             -1,
             0,
@@ -5614,6 +5725,7 @@ def attn_forward_func_with_cp(
         deterministic,
         use_fused_attention,
         return_max_logit,
+        softcap,
     ]
 
     if cp_comm_type in ["p2p", "a2a+p2p"]:

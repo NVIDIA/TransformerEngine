@@ -24,10 +24,10 @@
   </defs>
   
   <!-- Main Title -->
-  <text x="425" y="30" class="title" style="font-size: 18px; font-weight: 700; fill: #1a1a1a;">All-Gather of Quantized Tensors (one scenario)</text>
+  <text x="425" y="30" class="title" style="font-size: 18px; font-weight: 700;">All-Gather of Quantized Tensors (one scenario)</text>
   
   <!-- Section 1: Input Tensor -->
-  <text x="425" y="70" class="section-title" style="fill: #212121; font-weight: 600;">Input Tensor quantized all-gather</text>
+  <text x="425" y="70" class="section-title">Input Tensor quantized all-gather</text>
   
   <!-- Forward phase label -->
   <text x="20" y="128" class="text phase-forward" style="text-anchor: start;">FWD:</text>
@@ -93,7 +93,7 @@
   <line x1="30" y1="305" x2="820" y2="305" stroke="#bdbdbd" stroke-width="3"/>
   
   <!-- Section 2: Gradient Tensor -->
-  <text x="425" y="340" class="section-title" style="fill: #212121; font-weight: 600;">Gradient Tensor quantized all-gather</text>
+  <text x="425" y="340" class="section-title">Gradient Tensor quantized all-gather</text>
   
   <!-- Backward phase label -->
   <text x="20" y="413" class="text phase-backward" style="text-anchor: start;">BWD:</text>

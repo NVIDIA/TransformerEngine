@@ -59,6 +59,21 @@ std::atomic<bool> g_zero_copy_enabled{false};
 // is not symm-mem-backed; the backend treats it as "no window, use staged copy".
 constexpr NVTECommWindow kNoWindow = {nullptr, 0};
 
+#ifdef NCCL_HAS_SYMMEM_SUPPORT
+// Offset of a symm-mem allocation relative to the start of its NCCL window.
+// Newer torch places the signal pad at the front of the allocation and exposes
+// get_window_offset() for it; on older torch the window starts at the buffer
+// base, where get_offset() is already window-relative.
+template <typename T>
+auto symm_mem_window_offset(T* sm, int) -> decltype(sm->get_window_offset()) {
+  return sm->get_window_offset();
+}
+template <typename T>
+size_t symm_mem_window_offset(T* sm, ...) {
+  return sm->get_offset();
+}
+#endif
+
 // Resolve ``t`` to an NCCL symm-mem window for the zero-copy one-sided path.
 // Returns ``kNoWindow`` when symm-mem support isn't compiled in, zero-copy is
 // disabled, no group is set, or ``t`` isn't symm-mem-backed; callers pass the
@@ -78,12 +93,11 @@ NVTECommWindow maybe_make_window(const at::Tensor& t) {
   NVTE_CHECK(nccl_sm != nullptr,
              "Symm-mem backend mismatch: expected NCCLSymmetricMemory. Set the backend to "
              "\"NCCL\" before allocating EP payload buffers.");
-  // rendezvous resolves ``t`` by its storage base, so get_offset() is the allocation's offset in
-  // the NCCL window. Add ``t``'s own storage offset so a slice/view of a symm-mem allocation
-  // (e.g. the scale region carved from a shared recv buffer) resolves to its true position in the
-  // window rather than the allocation base.
+  // NCCL EP consumes window-relative offsets. Add ``t``'s own storage offset so a
+  // slice/view of a symm-mem allocation (e.g. the scale region carved from a shared
+  // recv buffer) resolves to its true position in the window.
   const uint64_t offset =
-      static_cast<uint64_t>(nccl_sm->get_offset()) +
+      static_cast<uint64_t>(symm_mem_window_offset(nccl_sm, 0)) +
       static_cast<uint64_t>(t.storage_offset()) * static_cast<uint64_t>(t.element_size());
   return NVTECommWindow{static_cast<ncclWindow_t>(nccl_sm->get_window()), offset};
 #else
