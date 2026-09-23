@@ -48,11 +48,14 @@ run_pass() {
   local eager="${3:-0}"
   local overflow="${4:-0}"
   local mxfp8="${5:-0}"
+  local dtype_pass="${6:-0}"
+  local max_dtype="${7:-bfloat16}"
   local log="stdout_ep_${label}.txt"
   echo "=== Running ${SCRIPT} [${label}] on ${NUM_RANKS} GPUs (timeout=${TEST_TIMEOUT_S}s) ==="
   # setsid + kill-after so SIGKILL takes down the whole process group, not just torchrun.
   NVTE_EP_ZERO_COPY="${zc}" NVTE_EP_EAGER="${eager}" NVTE_EP_OVERFLOW="${overflow}" \
     NVTE_EP_MXFP8_PASS="${mxfp8}" \
+    NVTE_EP_DTYPE_PASS="${dtype_pass}" NVTE_EP_MAX_TOKEN_DTYPE="${max_dtype}" \
     setsid timeout --foreground --kill-after=10 --signal=TERM "${TEST_TIMEOUT_S}" \
     torchrun --standalone --nnodes=1 --nproc-per-node="${NUM_RANKS}" \
     "${SCRIPT}" 2>&1 | tee "${log}"
@@ -74,6 +77,9 @@ run_pass "default" 0
 run_pass "zero_copy" 1
 run_pass "eager" 0 1
 run_pass "overflow" 0 0 1
+# High-precision payload dtypes (bf16/fp16/fp32). Bootstrapped with the widest dtype (float32) so a
+# single pass covers every payload width; dtype_pass is the 6th arg, max_token_dtype the 7th.
+run_pass "dtypes" 0 0 0 0 1 float32
 # MXFP8 grouped dispatch pins the per-expert alignment to 128, which the backend caches
 # process-wide, so its tests get their own passes (normal + zero-copy + eager IO). mxfp8 is the
 # 5th arg; eager is the 3rd.

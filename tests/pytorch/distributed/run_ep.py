@@ -30,6 +30,16 @@ ZERO_COPY = os.environ.get("NVTE_EP_ZERO_COPY", "0") == "1"
 EAGER = os.environ.get("NVTE_EP_EAGER", "0") == "1"
 OVERFLOW = os.environ.get("NVTE_EP_OVERFLOW", "0") == "1"
 
+# High-precision dtype pass: exercises fp16/fp32 payloads (in addition to bf16). The EP group is
+# bootstrapped with the widest dtype so every payload fits the staging buffers.
+DTYPE_PASS = os.environ.get("NVTE_EP_DTYPE_PASS", "0") == "1"
+_DTYPE_BY_NAME = {
+    "bfloat16": torch.bfloat16,
+    "float16": torch.float16,
+    "float32": torch.float32,
+}
+MAX_TOKEN_DTYPE = _DTYPE_BY_NAME[os.environ.get("NVTE_EP_MAX_TOKEN_DTYPE", "bfloat16")]
+
 # Must come after the transformer_engine import so libtransformer_engine.so is loaded.
 import transformer_engine_torch as tex  # noqa: F401
 
@@ -57,6 +67,12 @@ def _eager_test_include(fn):
 def _overflow_test_include(fn):
     """Mark a test to run in the overflow (drop-on-overflow) pass; others skip there."""
     fn._overflow_test_include = True
+    return fn
+
+
+def _highprec_test(fn):
+    """Mark a test that sweeps high-precision payload dtypes; runs only in the dtype pass."""
+    fn._highprec_test = True
     return fn
 
 
@@ -116,7 +132,7 @@ def _build_ep_group():
     return dist.new_group(ranks=ranks, backend="nccl")
 
 
-def _make_identity_inputs(rank, ep_size, device="cuda"):
+def _make_identity_inputs(rank, ep_size, device="cuda", dtype=torch.bfloat16):
     """Per-rank identity routing + uniform weights so combine matches tokens."""
     T = TOKENS_PER_RANK
     E = ep_size * NUM_LOCAL_EXPERTS
@@ -131,7 +147,7 @@ def _make_identity_inputs(rank, ep_size, device="cuda"):
     topk_weights = np.full((T, TOP_K), 1.0 / TOP_K, dtype=np.float32)
     return (
         torch.from_numpy(topk_idx).to(device),
-        torch.from_numpy(tokens_np).to(device=device, dtype=torch.bfloat16),
+        torch.from_numpy(tokens_np).to(device=device, dtype=dtype),
         torch.from_numpy(topk_weights).to(device),
     )
 
@@ -193,9 +209,17 @@ class TestEP(unittest.TestCase):
             recv_capacity_per_rank=None if EAGER else cls.cfg.recv_capacity_per_rank,
             zero_copy=ZERO_COPY,
             drop_on_overflow=OVERFLOW,
+            max_token_dtype=MAX_TOKEN_DTYPE,
         )
 
     def setUp(self):
+        # High-precision dtype tests run only in the dtype pass (bootstrapped with a wide
+        # max_token_dtype); everything else skips there and they skip outside it.
+        is_highprec = getattr(getattr(self, self._testMethodName), "_highprec_test", False)
+        if DTYPE_PASS and not is_highprec:
+            self.skipTest("only high-precision dtype tests run in the dtype pass")
+        if not DTYPE_PASS and is_highprec:
+            self.skipTest("high-precision dtype tests run in the dedicated dtype pass")
         # alignment=128 MXFP8 tests run only in the dedicated MXFP8 pass; everything else skips
         # there (and the MXFP8 tests skip outside it) since the backend pins one alignment/process.
         is_mxfp8_align = getattr(getattr(self, self._testMethodName), "_mxfp8_align_test", False)
@@ -226,6 +250,7 @@ class TestEP(unittest.TestCase):
         top_k=TOP_K,
         dispatch_fwd_quant_recipe=None,
         combine_bwd_quant_recipe=None,
+        payload_dtype=torch.bfloat16,
     ):
         return EpBuffer(
             top_k=top_k,
@@ -236,6 +261,7 @@ class TestEP(unittest.TestCase):
             alignment=alignment,
             dispatch_fwd_quant_recipe=dispatch_fwd_quant_recipe,
             combine_bwd_quant_recipe=combine_bwd_quant_recipe,
+            payload_dtype=payload_dtype,
         )
 
     def _expert_out(self, expert_out):
@@ -415,6 +441,33 @@ class TestEP(unittest.TestCase):
                 torch.cuda.synchronize()
                 torch.testing.assert_close(
                     tokens_p.grad.float(), tokens.float() * float(TOP_K), atol=5e-2, rtol=5e-2
+                )
+
+    # High-precision payload dtypes
+
+    @_highprec_test
+    def test_dispatch_combine_identity_dtypes(self):
+        """Dispatch+combine round-trip and dispatch autograd for each high-precision payload dtype
+        the group can stage. Identity routing makes combine reconstruct the tokens and the grad of
+        0.5*||out||^2 equal the tokens."""
+        for dt in (torch.bfloat16, torch.float16, torch.float32):
+            if dt.itemsize > MAX_TOKEN_DTYPE.itemsize:
+                continue
+            with self.subTest(dtype=dt):
+                buf = self._make_buffer(payload_dtype=dt)
+                topk_idx, tokens, w = _make_identity_inputs(
+                    self.cfg.rank, self.cfg.ep_size, dtype=dt
+                )
+                tokens_p = tokens.detach().clone().requires_grad_(True)
+                recv_t, recv_w, _ = ep_dispatch(buf, tokens_p, topk_idx, w)
+                self.assertEqual(recv_t.dtype, dt)
+                out = ep_combine(buf, self._weighted(recv_t, recv_w))
+                self.assertEqual(out.dtype, dt)
+                (0.5 * (out.float() ** 2).sum()).backward()
+                torch.cuda.synchronize()
+                torch.testing.assert_close(out.float(), tokens.float(), atol=5e-2, rtol=5e-2)
+                torch.testing.assert_close(
+                    tokens_p.grad.float(), tokens.float(), atol=5e-2, rtol=5e-2
                 )
 
     # MXFP8 dispatch

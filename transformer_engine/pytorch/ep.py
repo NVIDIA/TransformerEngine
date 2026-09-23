@@ -81,11 +81,14 @@ _EP_GROUP: Optional[dist.ProcessGroup] = None
 # omitted); ep_dispatch reads it to size the recv outputs from the per-step
 # recv-token total instead of a fixed recv_capacity_per_rank.
 _EAGER = False
+# Widest token dtype the group was bootstrapped for; EpBuffer.payload_dtype
+# must fit within it (staging buffers are sized to this at bootstrap).
+_MAX_TOKEN_DTYPE: torch.dtype = torch.bfloat16
 
 
 def _atexit_finalize() -> None:
     """Best-effort teardown at interpreter shutdown; swallows errors."""
-    global _BOOTSTRAPPED, _EP_GROUP, _EAGER
+    global _BOOTSTRAPPED, _EP_GROUP, _EAGER, _MAX_TOKEN_DTYPE
     if _BOOTSTRAPPED:
         try:
             tex.ep_finalize()
@@ -97,6 +100,7 @@ def _atexit_finalize() -> None:
             _BOOTSTRAPPED = False
             _EP_GROUP = None
             _EAGER = False
+            _MAX_TOKEN_DTYPE = torch.bfloat16
 
 
 def ep_bootstrap(
@@ -132,7 +136,7 @@ def ep_bootstrap(
     ``drop_on_overflow`` drops tokens exceeding ``recv_capacity_per_rank`` instead
     of trapping. Requires ``recv_capacity_per_rank``.
     """
-    global _BOOTSTRAPPED, _ATEXIT_REGISTERED, _EP_GROUP, _EAGER
+    global _BOOTSTRAPPED, _ATEXIT_REGISTERED, _EP_GROUP, _EAGER, _MAX_TOKEN_DTYPE
     eager = recv_capacity_per_rank is None
     if _BOOTSTRAPPED:
         raise RuntimeError("ep_bootstrap was already called in this process")
@@ -179,6 +183,7 @@ def ep_bootstrap(
     _BOOTSTRAPPED = True
     _EP_GROUP = ep_group
     _EAGER = bool(eager)
+    _MAX_TOKEN_DTYPE = max_token_dtype
     if not _ATEXIT_REGISTERED:
         atexit.register(_atexit_finalize)
         _ATEXIT_REGISTERED = True
@@ -199,7 +204,7 @@ def ep_finalize() -> None:
     a caller that used ``symm_mem_alloc(use_pool=True)`` does not need a separate
     ``release_symm_mem_pool()`` before destroying the PG.
     """
-    global _BOOTSTRAPPED, _EP_GROUP, _EAGER
+    global _BOOTSTRAPPED, _EP_GROUP, _EAGER, _MAX_TOKEN_DTYPE
     if not _BOOTSTRAPPED:
         return
     try:
@@ -210,6 +215,7 @@ def ep_finalize() -> None:
         _BOOTSTRAPPED = False
         _EP_GROUP = None
         _EAGER = False
+        _MAX_TOKEN_DTYPE = torch.bfloat16
 
 
 def is_symm_backed(t: torch.Tensor) -> bool:
@@ -290,6 +296,12 @@ class EpBuffer:
         self.recv_capacity_per_rank = (
             None if recv_capacity_per_rank is None else int(recv_capacity_per_rank)
         )
+        if payload_dtype.itemsize > _MAX_TOKEN_DTYPE.itemsize:
+            raise ValueError(
+                f"EpBuffer payload_dtype={payload_dtype} is wider than the group's"
+                f" bootstrap-time max_token_dtype={_MAX_TOKEN_DTYPE}; staging buffers were"
+                " not sized for it."
+            )
         self.hidden_dim = int(hidden_dim)
         self.num_local_experts = int(num_local_experts)
         self.payload_dtype = payload_dtype
@@ -881,11 +893,12 @@ class _EpCombine(torch.autograd.Function):
 # Public high-level wrappers
 
 
-# NCCL EP inputs are bfloat16; MXFP8 is applied internally via the buffer's dispatch_fwd_quant_recipe.
-def _require_bf16(name: str, t: torch.Tensor) -> None:
-    if t.dtype is not torch.bfloat16:
+# NCCL EP payloads carry the buffer's configured payload_dtype (recv/combine buffers are allocated
+# as it); MXFP8 is applied internally via the buffer's dispatch_fwd_quant_recipe.
+def _require_payload_dtype(name: str, t: torch.Tensor, expected: torch.dtype) -> None:
+    if t.dtype is not expected:
         raise NotImplementedError(
-            "NCCL EP currently supports only bfloat16 or MXFP8 payloads; got"
+            f"NCCL EP payload dtype must match the buffer's payload_dtype ({expected}); got"
             f" {name}.dtype={t.dtype}."
         )
 
@@ -1016,11 +1029,13 @@ def ep_dispatch(
     recv_tokens: Optional[torch.Tensor] = None,
     recv_topk_weights: Optional[torch.Tensor] = None,
 ):
-    """Prepare + dispatch with autograd. ``tokens`` is bfloat16; ``topk_idx`` is int32 or int64.
+    """Prepare + dispatch with autograd. ``tokens`` matches the buffer's ``payload_dtype`` (bf16 by
+    default; fp16/fp32 when the EP group and buffer were configured for it); ``topk_idx`` is int32 or
+    int64.
 
     When the buffer's ``dispatch_fwd_quant_recipe`` is set (``MXFP8BlockScaling`` only for now), tokens
     are quantized internally and recv is returned as a per-expert ``GroupedTensor``; otherwise recv
-    stays bfloat16. A pre-quantized ``tokens`` is not accepted.
+    stays the buffer's payload dtype. A pre-quantized ``tokens`` is not accepted.
 
     ``recv_tokens`` / ``recv_topk_weights`` are the recv outputs: pass caller-owned buffers
     (symm-mem-backed under zero-copy) or leave them None to allocate. For MXFP8 the recv data and
@@ -1039,10 +1054,10 @@ def ep_dispatch(
         )
     if isinstance(tokens, QuantizedTensor):
         raise NotImplementedError(
-            "NCCL EP dispatch takes a bfloat16 input and quantizes internally when the buffer's "
-            "dispatch_fwd_quant_recipe is set; a pre-quantized tensor is not accepted."
+            "NCCL EP dispatch takes a high-precision input and quantizes internally when the "
+            "buffer's dispatch_fwd_quant_recipe is set; a pre-quantized tensor is not accepted."
         )
-    _require_bf16("tokens", tokens)
+    _require_payload_dtype("tokens", tokens, buffer.payload_dtype)
     if buffer.eager and (recv_tokens is not None or recv_topk_weights is not None):
         raise ValueError(
             "eager mode sizes the recv outputs from the per-step recv-token total "
@@ -1095,7 +1110,7 @@ def ep_combine(
     capture a graph. Result shape is (num_local_tokens, hidden_dim); num_local_tokens defaults to
     buffer.max_tokens_per_rank.
     """
-    _require_bf16("expert_out", expert_out)
+    _require_payload_dtype("expert_out", expert_out, buffer.payload_dtype)
     if buffer.eager and grad_out is not None:
         raise ValueError(
             "eager mode sizes the combine grad target per step and cannot use a "
