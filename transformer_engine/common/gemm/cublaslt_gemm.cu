@@ -436,8 +436,8 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   if (bias && !(use_fp8 || use_fp4)) {
     NVTE_CHECK(bias_type == D_type,
                "Non-FP8/FP4 GEMM bias dtype must match output dtype (cuBLASLt epilogue). "
-               "Got bias=", to_string(inputBias->data.dtype), " D=",
-               to_string(outputD->data.dtype),
+               "Got bias=",
+               to_string(inputBias->data.dtype), " D=", to_string(outputD->data.dtype),
                ". Cast bias to the output dtype before calling.");
   }
 
