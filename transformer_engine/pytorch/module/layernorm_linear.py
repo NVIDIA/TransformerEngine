@@ -8,8 +8,6 @@ import warnings
 import weakref
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Tuple, Union, List
-from functools import reduce
-from operator import mul as multiply_op
 
 import torch
 from torch.nn import init
@@ -352,7 +350,6 @@ def _layernorm_linear_forward_impl(
     out_features, in_features = weight.shape
     inp_shape = inp.shape
     assert inp_shape[-1] == in_features, "GEMM not possible"
-    inp = inp.view((-1, in_features))
     inputmat = inp
     if fp8:
         assert_dim_for_fp8_exec(inputmat, weight)
@@ -619,7 +616,6 @@ def _layernorm_linear_forward_impl(
         nvtx_range_pop(f"{nvtx_label}.row_parallel_comm")
     else:
         out = gemm_out
-    out = out.view(-1, *inp_shape[1:-1], out_features)
     # ------------------------------------------------------
     # Output tensor is ready to return...
     # ------------------------------------------------------
@@ -730,14 +726,7 @@ def _layernorm_linear_forward_impl(
             "ln_out_needs_gather": ln_out_needs_gather,
         }
 
-    ln_out_for_return = None
-    if return_layernorm_output:
-        if return_layernorm_output_gathered:
-            shape = list(inp_shape)
-            shape[0] *= tp_size if with_input_all_gather else 1
-            ln_out_for_return = ln_out_return.view(shape)
-        else:
-            ln_out_for_return = ln_out_return.view(inp_shape)
+    ln_out_for_return = ln_out_return if return_layernorm_output else None
     return out, ln_out_for_return, new_weight_workspace, tensors_to_save_from_forward, ctx_attrs
 
 
@@ -869,9 +858,8 @@ def _layernorm_linear_setup_ctx(
         _,
         _,
     ) = ctx_attrs["saved_tensor_aliases"]
-    in_features = inp.shape[-1]
     if inputmat_alias == "inp":
-        saved_inputmat = inp.view((-1, in_features))
+        saved_inputmat = inp
     if wt_save_alias == "weight":
         wt_save = weight
     elif wt_save_alias == "new_weight_workspace":
@@ -885,7 +873,7 @@ def _layernorm_linear_setup_ctx(
     if ln_weight_alias == "ln_weight":
         saved_ln_weight = ln_weight
     if ln_out_alias == "ln_out":
-        saved_ln_out = fwd_outputs[1].view((-1, in_features))
+        saved_ln_out = fwd_outputs[1]
     if fwd_args.cpu_offloading:
         # Rebuilt views don't carry the offload marks set on the forward tensors
         mark_activation_offload(
@@ -972,7 +960,7 @@ def _layernorm_linear_backward_impl(
         ub_obj_wgrad = None
         ub_type_dgrad = None
         ub_type_wgrad = None
-        dgrad_shape = [reduce(multiply_op, args.inp_shape[:-1]), args.inp_shape[-1]]
+        dgrad_shape = args.inp_shape
         if args.ub_overlap_ag:
             # Overlap grad_output all-gather with dgrad compute
             args.ub_obj_gradout = get_ub(args.ub_name + "_dgrad", args.fp8)
@@ -1121,7 +1109,9 @@ def _layernorm_linear_backward_impl(
                 dgrad_shape, dtype=args.activation_dtype, device=args.grad_output.device
             )
         elif args.ub_bulk_wgrad:
-            gemm_out = ub_obj_wgrad.get_buffer(local_chunk=False)
+            gemm_out = ub_obj_wgrad.get_buffer(
+                local_chunk=False, shape=(*args.grad_output.shape[:-1], dgrad_shape[-1])
+            )
 
         # dgrad GEMM
         # Note: dx = dy * w
@@ -1173,7 +1163,7 @@ def _layernorm_linear_backward_impl(
                 else reduce_scatter_out
             )
         elif args.ub_bulk_wgrad:
-            dgrad = ub_obj_wgrad.get_buffer(local_chunk=True)
+            dgrad = ub_obj_wgrad.get_buffer(local_chunk=True, shape=dgrad_shape)
         elif args.parallel_mode == "column" and args.tp_size > 1:
             nvtx_range_push(f"{nvtx_label}.column_parallel_comm_dgrad")
             dgrad = gemm_out
@@ -1384,7 +1374,7 @@ def _layernorm_linear_backward_impl(
                 if ub_obj_wgrad.is_fp8_ubuf():
                     dgrad = reduce_scatter_out
                 else:
-                    dgrad = ub_obj_wgrad.get_buffer(local_chunk=True).clone()
+                    dgrad = ub_obj_wgrad.get_buffer(local_chunk=True, shape=dgrad_shape).clone()
 
         # --------------------------------------------------
         # Grad weight has been computed...
@@ -1403,9 +1393,8 @@ def _layernorm_linear_backward_impl(
             dgrad_work = None
 
         # Residual gradient
-        dgrad = dgrad.view(inputmat.shape)
         if args.return_layernorm_output and not args.return_layernorm_output_gathered:
-            dgrad = dgrad + args.grad_ln_out.view_as(dgrad)
+            dgrad = dgrad + args.grad_ln_out
 
         # Norm gradient
         dgamma = None
@@ -1421,7 +1410,6 @@ def _layernorm_linear_backward_impl(
                 args.bwd_ln_sm_margin,
                 args.zero_centered_gamma,
             )
-            dgrad = dgrad.reshape(inputmat.size())
         elif args.normalization == "RMSNorm":
             dgrad, dgamma = tex.rmsnorm_bwd(
                 dgrad,
@@ -1431,7 +1419,6 @@ def _layernorm_linear_backward_impl(
                 args.bwd_ln_sm_margin,
                 args.zero_centered_gamma,
             )
-            dgrad = dgrad.reshape(inputmat.size())
             dbeta = None
         nvtx_range_pop(f"{nvtx_label}.norm")
         clear_tensor_data(mu)
@@ -1458,7 +1445,7 @@ def _layernorm_linear_backward_impl(
         wgrad = None
 
     return (
-        dgrad.view(args.inp_shape) if args.requires_dgrad else None,
+        dgrad if args.requires_dgrad else None,
         dgamma,
         dbeta,
         wgrad,

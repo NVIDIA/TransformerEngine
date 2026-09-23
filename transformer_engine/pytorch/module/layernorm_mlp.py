@@ -8,8 +8,6 @@ import warnings
 from dataclasses import dataclass, replace as dataclass_replace
 import weakref
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple, Union, List
-from functools import reduce
-from operator import mul as multiply_op
 
 import torch
 from torch.nn.parameter import Parameter
@@ -73,6 +71,7 @@ from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor.hybrid_tensor import HybridQuantizer
 from ..tensor.identity_tensor import IdentityQuantizer
 from ._common import (
+    sum_bias_grad,
     apply_normalization,
     check_fp8_reduce_and_update,
     set_quantizer_amax_reduction_group,
@@ -476,7 +475,6 @@ def _layernorm_mlp_forward_impl(
     debug = args.debug
     cpu_offloading = args.cpu_offloading
     tp_group = args.tp_group
-    tp_size = args.tp_size
     sequence_parallel = args.sequence_parallel
     tensor_parallel = args.tensor_parallel
     set_parallel_mode = args.set_parallel_mode
@@ -535,7 +533,6 @@ def _layernorm_mlp_forward_impl(
     # Make sure input dimensions are compatible
     in_features, inp_shape = ln_weight.numel(), inp.shape
     assert inp_shape[-1] == in_features, "GEMM not possible"
-    inp = inp.view((-1, in_features))
     inputmat = inp
     if fp8:
         assert_dim_for_fp8_exec(inputmat, fc1_weight, fc2_weight)
@@ -911,7 +908,6 @@ def _layernorm_mlp_forward_impl(
                 fc2_out, _ = allreduce(gemm_out, tp_group)
         else:
             fc2_out = gemm_out
-        fc2_out = fc2_out.view(-1, *inp_shape[1:-1], fc2_out.shape[-1])
 
     # now saving stuff for bwd:
     # if we are using checkpointing, this information will be saved in the bwd recomputation stage, so can skip it in fwd
@@ -1059,14 +1055,7 @@ def _layernorm_mlp_forward_impl(
             return None, None, None, None, tensors_to_save_from_forward, ctx_attrs
 
     # we only get to this point if we are not recomputing for bwd, since that would have returned in the block above
-    ln_out_for_return = None
-    if return_layernorm_output:
-        if return_layernorm_output_gathered:
-            shape = list(inp_shape)
-            shape[0] *= tp_size if (sequence_parallel and set_parallel_mode) else 1
-            ln_out_for_return = ln_out_return.view(shape)
-        else:
-            ln_out_for_return = ln_out_return.view(inp_shape)
+    ln_out_for_return = ln_out_return if return_layernorm_output else None
     return (
         fc2_out,
         ln_out_for_return,
@@ -1233,14 +1222,13 @@ def _layernorm_mlp_setup_ctx(
 
     saved = list(tensors_to_save_from_forward)
     aliases = ctx_attrs["saved_tensor_aliases"]
-    in_features = inp.shape[-1]
     for i, alias in enumerate(aliases):
         if alias is None:
             continue
         if alias == "inp":
-            saved[i] = inp.view((-1, in_features))
+            saved[i] = inp
         elif alias == "ln_out":
-            saved[i] = fwd_outputs[1].view((-1, in_features))
+            saved[i] = fwd_outputs[1]
         elif alias == "new_fc1_weight_workspace":
             saved[i] = fwd_outputs[2]
         elif alias == "new_fc2_weight_workspace":
@@ -1670,7 +1658,7 @@ def _layernorm_mlp_backward_impl(
                 if fc2_bias_grad is None:
                     if args.fp8 and args.fp8_recipe.float8_block_scaling() and fc2_bias is not None:
                         # BGRAD not fused with GEMM for float8 blockwise gemm.
-                        fc2_bias_grad_ = act_out.view(-1, act_out.shape[-1]).sum(dim=0)
+                        fc2_bias_grad_ = sum_bias_grad(act_out)
                     fc2_bias_grad = fc2_bias_grad_
                 del fc2_bias_grad_
 
@@ -1698,7 +1686,7 @@ def _layernorm_mlp_backward_impl(
         elif args.debug:
             dact_func = _act_func(args.activation)[1]
             dact = dact_func(fc2_dgrad, fc1_out.to(args.activation_dtype), None, **act_params)
-            fc1_bias_grad = dact.sum(dim=0)
+            fc1_bias_grad = sum_bias_grad(dact)
             dact = args.fc1_grad_output_quantizer(dact)
         elif (
             _act_func(args.activation, args.fp8_recipe if args.fp8 else None)[2] is not None
@@ -1733,7 +1721,7 @@ def _layernorm_mlp_backward_impl(
                     )
                     or args.fp8_recipe.custom()
                 ):
-                    fc1_bias_grad = dact.view(-1, dact.shape[-1]).sum(dim=0)
+                    fc1_bias_grad = sum_bias_grad(dact)
                     dact = args.fc1_grad_output_quantizer(dact)
                 else:
                     fc1_bias_grad, dact = tex.bgrad_quantize(dact, args.fc1_grad_output_quantizer)
@@ -1744,7 +1732,7 @@ def _layernorm_mlp_backward_impl(
                 # it may  not be calculated in case wgrad is not required.
                 if fc1_bias is not None:
                     if not args.fc1_weight_requires_grad and args.fc1_bias_requires_grad:
-                        fc1_bias_grad = dact.sum(dim=0)
+                        fc1_bias_grad = sum_bias_grad(dact)
 
         # Overwrite data. Deleting the tensor does not release underlying memory.
         clear_tensor_data(fc1_out, fc1_out_without_bias)
@@ -1754,7 +1742,7 @@ def _layernorm_mlp_backward_impl(
         ub_obj_fc1_wgrad = None
         ub_type_fc1_dgrad = None
         ub_type_fc1_wgrad = None
-        fc1_dgrad_shape = [reduce(multiply_op, inputmat.shape[:-1]), inputmat.shape[-1]]
+        fc1_dgrad_shape = inputmat.shape
         if args.ub_overlap_rs_dgrad:
             # Overlap DGRAD+RS
             ub_obj_fc1_dgrad = get_ub("fc1_dgrad", args.fp8)
@@ -1794,7 +1782,9 @@ def _layernorm_mlp_backward_impl(
                 fc1_dgrad_shape, dtype=args.activation_dtype, device=te_device_type()
             )
         if ub_bulk_wgrad:
-            gemm_out = ub_obj_fc1_wgrad.get_buffer(local_chunk=False)
+            gemm_out = ub_obj_fc1_wgrad.get_buffer(
+                local_chunk=False, shape=(*dact.shape[:-1], fc1_dgrad_shape[-1])
+            )
 
         # dgrad GEMM
         gemm_out, *_, reduce_scatter_out = general_gemm(
@@ -1833,12 +1823,12 @@ def _layernorm_mlp_backward_impl(
                 else reduce_scatter_out
             )
         elif ub_bulk_wgrad:
-            fc1_dgrad = ub_obj_fc1_wgrad.get_buffer(local_chunk=True)
+            fc1_dgrad = ub_obj_fc1_wgrad.get_buffer(local_chunk=True, shape=fc1_dgrad_shape)
         elif args.set_parallel_mode and not ub_bulk_wgrad:
             fc1_dgrad = gemm_out
             if args.sequence_parallel:
                 if args.return_layernorm_output and args.return_layernorm_output_gathered:
-                    fc1_dgrad = fc1_dgrad + args.grad_ln_out.view_as(fc1_dgrad)
+                    fc1_dgrad = fc1_dgrad + args.grad_ln_out
                 fc1_dgrad, fc1_dgrad_work = reduce_scatter_along_first_dim(
                     fc1_dgrad,
                     args.tp_group,
@@ -1962,7 +1952,9 @@ def _layernorm_mlp_backward_impl(
                 if ub_obj_fc1_wgrad.is_fp8_ubuf():
                     fc1_dgrad = reduce_scatter_out
                 else:
-                    fc1_dgrad = ub_obj_fc1_wgrad.get_buffer(local_chunk=True).clone()
+                    fc1_dgrad = ub_obj_fc1_wgrad.get_buffer(
+                        local_chunk=True, shape=fc1_dgrad_shape
+                    ).clone()
 
         # --------------------------------------------------
         # Finished FC1 WGRAD...
@@ -1977,9 +1969,9 @@ def _layernorm_mlp_backward_impl(
             fc1_dgrad_work = None
 
         # Residual gradient
-        dgrad = fc1_dgrad.view(inputmat.shape)
+        dgrad = fc1_dgrad
         if args.return_layernorm_output and not args.return_layernorm_output_gathered:
-            dgrad = dgrad + args.grad_ln_out.view_as(dgrad)
+            dgrad = dgrad + args.grad_ln_out
 
         # Norm gradient
         dgamma = None
@@ -2065,7 +2057,7 @@ def _layernorm_mlp_backward_impl(
     #        fc2_weight_fp8 if not isinstance(fc2_weight, Float8Tensor) else None,
     #    )
     return (
-        dgrad.view(args.inp_shape) if args.requires_dgrad else None,
+        dgrad if args.requires_dgrad else None,
         dgamma,
         dbeta,
         fc1_wgrad,
@@ -3172,7 +3164,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                     ):
                         act_out = tensor_list_fc2[0]
                         # BGRAD not fused with GEMM for float8 blockwise gemm.
-                        fc2_bias_grad_ = act_out.view(-1, act_out.shape[-1]).sum(dim=0)
+                        fc2_bias_grad_ = sum_bias_grad(act_out)
                     self.fc2_bias.grad = fc2_bias_grad_.to(self.fc2_bias.dtype)
                 if self.fc1_bias.grad is None:
                     self.fc1_bias.grad = fc1_bias_grad.to(self.fc1_bias.dtype)

@@ -6,8 +6,6 @@
 
 from dataclasses import dataclass, replace as dataclass_replace
 from typing import Any, Callable, Dict, Optional, Tuple, Union, List
-from functools import reduce
-from operator import mul as multiply_op
 import warnings
 import weakref
 
@@ -667,12 +665,6 @@ def _linear_forward_impl(
     else:
         out = gemm_out
 
-    # Restore the input's logical rank (e.g., (seq, batch, hidden)) on the output.
-    # This is mainly to correct for cuBLASMp comm+GEMM operators that unconditionally
-    # return a 2D output buffer that ends up incompatible with downstream consumers
-    # (e.g. ``bias_dropout_add`` residual connections inside ``TransformerLayer``).
-    out = out.view(-1, *inp.shape[1:-1], out_features)
-
     # ------------------------------------------------------
     # Output tensor is ready to return...
     # ------------------------------------------------------
@@ -902,11 +894,14 @@ def _linear_forward_fake(
     # ------------------------------------------------------
     # Output tensor: y = x @ w^T (quantized iff an output quantizer is set).
     # ------------------------------------------------------
-    # A rank-1 input is viewed to (1, in_features), so the output leads with 1.
     inp_leading = inp.shape[0] if len(inp.shape) > 1 else 1
     out_leading = _out_leading_from_inp(inp_leading, args)
     out = TensorSpec(
-        shape=(out_leading, *tuple(inp.shape[1:-1]), out_features),
+        shape=(
+            (out_features,)
+            if len(inp.shape) == 1
+            else (out_leading, *tuple(inp.shape[1:-1]), out_features)
+        ),
         dtype=activation_dtype,
         quantizer=output_quantizer,
         requires_grad=is_grad_enabled
@@ -1186,7 +1181,11 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
         if bwd_args.inp_shape is None:
             in_features = saved_weight.shape[-1]
             inp_leading = _inp_leading_from_out(grad_output.shape[0], bwd_args)
-            bwd_args.inp_shape = torch.Size([inp_leading, *grad_output.shape[1:-1], in_features])
+            bwd_args.inp_shape = (
+                torch.Size([in_features])
+                if grad_output.ndim == 1
+                else torch.Size([inp_leading, *grad_output.shape[1:-1], in_features])
+            )
 
         # Configure Userbuffers communication (comm+GEMM overlap)
         bwd_args.ub_obj_gradout = None
@@ -1194,10 +1193,7 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
         ub_obj_wgrad = None
         ub_type_dgrad = None
         ub_type_wgrad = None
-        dgrad_shape = [
-            reduce(multiply_op, bwd_args.inp_shape[:-1]),
-            bwd_args.inp_shape[-1],
-        ]
+        dgrad_shape = bwd_args.inp_shape
         if bwd_args.ub_overlap_ag:
             # Overlap grad_output all-gather with dgrad compute
             bwd_args.ub_obj_gradout = get_ub(bwd_args.ub_name + "_dgrad", bwd_args.fp8)
@@ -1397,7 +1393,9 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
                     device=grad_output_arg.device,
                 )
             elif bwd_args.ub_bulk_wgrad:
-                gemm_out = ub_obj_wgrad.get_buffer(local_chunk=False)
+                gemm_out = ub_obj_wgrad.get_buffer(
+                    local_chunk=False, shape=(*grad_output.shape[:-1], dgrad_shape[-1])
+                )
 
             # dgrad GEMM
             # Note: dx = dy * w
@@ -1448,7 +1446,7 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
                     else reduce_scatter_out
                 )
             elif bwd_args.ub_bulk_wgrad:
-                dgrad = ub_obj_wgrad.get_buffer(local_chunk=True)
+                dgrad = ub_obj_wgrad.get_buffer(local_chunk=True, shape=dgrad_shape)
             elif bwd_args.parallel_mode == "column" and bwd_args.tp_size > 1:
                 nvtx_range_push(f"{nvtx_label}.column_parallel_comm_dgrad")
                 dgrad = gemm_out
@@ -1670,7 +1668,7 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
                 if ub_obj_wgrad.is_fp8_ubuf():
                     dgrad = reduce_scatter_out
                 else:
-                    dgrad = ub_obj_wgrad.get_buffer(local_chunk=True).clone()
+                    dgrad = ub_obj_wgrad.get_buffer(local_chunk=True, shape=dgrad_shape).clone()
 
         # --------------------------------------------------
         # Grad weight has been computed...
@@ -1719,7 +1717,7 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
         _fsdp_scatter_tensors(bwd_args.fsdp_group, weight_fp8)
     return (
         wgrad,
-        dgrad.view(bwd_args.inp_shape) if bwd_args.requires_dgrad else None,
+        dgrad if bwd_args.requires_dgrad else None,
         grad_bias,
     )
 
@@ -1757,7 +1755,11 @@ def _linear_backward_fake(
             None if (args.ub_overlap_rs_dgrad or args.ub_bulk_wgrad) else args.grad_input_quantizer
         )
         dgrad = TensorSpec(
-            shape=(dgrad_leading, *args.grad_output.shape[1:-1], in_features),
+            shape=(
+                (in_features,)
+                if len(args.grad_output.shape) == 1
+                else (dgrad_leading, *args.grad_output.shape[1:-1], in_features)
+            ),
             dtype=out_dtype,
             quantizer=dgrad_quantizer,
             device=args.grad_output.device,
