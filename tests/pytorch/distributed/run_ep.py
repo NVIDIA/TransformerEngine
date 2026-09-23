@@ -300,6 +300,8 @@ class TestEP(unittest.TestCase):
         topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
         recv_t, recv_w, tokens_per_expert = ep_dispatch(buf, tokens, topk_idx, w)
         torch.cuda.synchronize()
+        # Eager bf16 keeps the per-expert counts in pinned host memory (host reads are free).
+        self.assertTrue(tokens_per_expert.is_pinned())
         # The per-step recv-token total is exposed on the buffer (int64 [1]).
         self.assertEqual(buf.total_recv_tokens.dtype, torch.int64)
         total = int(buf.total_recv_tokens.item())
@@ -453,6 +455,8 @@ class TestEP(unittest.TestCase):
         topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
         buf = self._make_buffer(dispatch_fwd_quant_recipe=MXFP8BlockScaling(), alignment=128)
         recv_mx, _rw, tc = ep_dispatch(buf, tokens, topk_idx, w)
+        # MXFP8 groups device-side (GroupedTensor first_dims/offsets), so counts stay on device.
+        self.assertTrue(tc.is_cuda)
         if ZERO_COPY:
             self.assertTrue(is_symm_backed(recv_mx.rowwise_data))
             self.assertTrue(is_symm_backed(recv_mx.scale_inv))
