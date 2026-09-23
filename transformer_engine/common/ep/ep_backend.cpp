@@ -492,12 +492,15 @@ void EPBackend::prepare(NVTETensor handle_mem, const NVTETensor topk_idx,
   NVTE_CHECK_NCCL(nccl_ep::update_handle(h, &nccl_topk_idx, &layout_info, stream));
 }
 
-void EPBackend::dispatch(NVTETensor handle_mem, const NVTETensor topk_idx, const NVTETensor tokens,
-                         const NVTECommWindow& tokens_win, const NVTETensor topk_weights,
-                         const NVTECommWindow& topk_weights_win, NVTETensor recv_tokens,
-                         const NVTECommWindow& recv_tokens_win, NVTETensor recv_topk_weights,
-                         const NVTECommWindow& recv_topk_weights_win, cudaStream_t stream) {
-  void* hm_ptr = handle_mem_ptr(handle_mem);
+void EPBackend::issue_dispatch_locked(ncclEpHandle_t handle, const NVTETensor topk_idx,
+                                      const NVTETensor tokens, const NVTECommWindow& tokens_win,
+                                      const NVTETensor topk_weights,
+                                      const NVTECommWindow& topk_weights_win,
+                                      NVTETensor recv_tokens, const NVTECommWindow& recv_tokens_win,
+                                      NVTETensor recv_topk_weights,
+                                      const NVTECommWindow& recv_topk_weights_win,
+                                      NVTETensor recv_tokens_per_expert,
+                                      NVTETensor total_recv_tokens_per_rank, cudaStream_t stream) {
   NVTE_CHECK(nvte_tensor_shape(tokens).ndim == 2, "tokens must be 2D [T, hidden_dim]");
   NVTE_CHECK(nvte_tensor_shape(recv_tokens).ndim == 2,
              "recv_tokens must be 2D [recv_T, hidden_dim]");
@@ -577,11 +580,67 @@ void EPBackend::dispatch(NVTETensor handle_mem, const NVTETensor topk_idx, const
   // Block-scaled payloads forward the per-token scale-inverse; select the matching recipe.
   dispatch_cfg.quant_recipe = is_scaled ? NCCL_EP_DISP_QUANT_FWD : NCCL_EP_DISP_QUANT_NONE;
 
+  // Count mode: wire the caller's per-expert counts and the scalar pre-drop recv total so the
+  // fused dispatch writes them (the count scan is fused into the dispatch). NULL leaves
+  // layout_info unset (non-count callers).
+  ncclEpLayoutInfo_t layout_info = NCCL_EP_LAYOUT_INFO_INIT;
+  NVTEShape recv_counts_shape, total_recv_shape;
+  ncclEpTensor_t recv_counts_desc, total_recv_desc;
+  const ncclEpLayoutInfo_t* layout_info_ptr = nullptr;
+  if (recv_tokens_per_expert != nullptr) {
+    recv_counts_desc = make_nccl_ep_tensor(recv_tokens_per_expert, recv_counts_shape);
+    layout_info.expert_counters = &recv_counts_desc;
+    layout_info_ptr = &layout_info;
+  }
+  if (total_recv_tokens_per_rank != nullptr) {
+    total_recv_desc = make_nccl_ep_tensor(total_recv_tokens_per_rank, total_recv_shape);
+    layout_info.recv_total_counter = &total_recv_desc;
+    layout_info_ptr = &layout_info;
+  }
+
+  NVTE_CHECK_NCCL(
+      nccl_ep::dispatch(handle, &in_struct, &out_struct, layout_info_ptr, &dispatch_cfg, stream));
+}
+
+void EPBackend::dispatch(NVTETensor handle_mem, const NVTETensor topk_idx, const NVTETensor tokens,
+                         const NVTECommWindow& tokens_win, const NVTETensor topk_weights,
+                         const NVTECommWindow& topk_weights_win, NVTETensor recv_tokens,
+                         const NVTECommWindow& recv_tokens_win, NVTETensor recv_topk_weights,
+                         const NVTECommWindow& recv_topk_weights_win, cudaStream_t stream) {
+  void* hm_ptr = handle_mem_ptr(handle_mem);
   std::lock_guard<std::mutex> lock(mutex_);
   NVTE_CHECK(initialized_, "EPBackend not initialized");
   ncclEpHandle_t h = lookup_handle_locked(hm_ptr, nvte_tensor_size_bytes(handle_mem));
-  NVTE_CHECK_NCCL(nccl_ep::dispatch(h, &in_struct, &out_struct,
-                                    /*layout_info=*/nullptr, &dispatch_cfg, stream));
+  issue_dispatch_locked(h, topk_idx, tokens, tokens_win, topk_weights, topk_weights_win,
+                        recv_tokens, recv_tokens_win, recv_topk_weights, recv_topk_weights_win,
+                        /*recv_tokens_per_expert=*/nullptr,
+                        /*total_recv_tokens_per_rank=*/nullptr, stream);
+}
+
+void EPBackend::prepare_and_dispatch(
+    NVTETensor handle_mem, const NVTETensor topk_idx, const NVTETensor tokens,
+    const NVTECommWindow& tokens_win, const NVTETensor topk_weights,
+    const NVTECommWindow& topk_weights_win, NVTETensor recv_tokens,
+    const NVTECommWindow& recv_tokens_win, NVTETensor recv_topk_weights,
+    const NVTECommWindow& recv_topk_weights_win, NVTETensor recv_tokens_per_expert,
+    NVTETensor total_recv_tokens_per_rank, NVTEEpLayerConfig layer_cfg, cudaStream_t stream) {
+  void* hm_ptr = handle_mem_ptr(handle_mem);
+  NVTE_CHECK(layer_cfg.top_k > 0, "top_k must be > 0, got ", layer_cfg.top_k);
+  NVTE_CHECK(nvte_tensor_shape(topk_idx).ndim == 2, "topk_idx must be 2D [T, top_k]");
+
+  NVTEShape topk_idx_shape;
+  ncclEpTensor_t nccl_topk_idx = make_nccl_ep_tensor(topk_idx, topk_idx_shape);
+
+  // The per-expert recv counts and the scalar pre-drop per-rank recv total are produced by the
+  // dispatch, which fuses the count scan into itself. Leave UpdateHandle's layout_info NULL so the
+  // fused path stays active, then wire both tensors into the dispatch below.
+  std::lock_guard<std::mutex> lock(mutex_);
+  NVTE_CHECK(initialized_, "EPBackend not initialized");
+  ncclEpHandle_t h = prepare_handle_locked(hm_ptr, nvte_tensor_size_bytes(handle_mem), layer_cfg);
+  NVTE_CHECK_NCCL(nccl_ep::update_handle(h, &nccl_topk_idx, /*layout_info=*/nullptr, stream));
+  issue_dispatch_locked(h, topk_idx, tokens, tokens_win, topk_weights, topk_weights_win,
+                        recv_tokens, recv_tokens_win, recv_topk_weights, recv_topk_weights_win,
+                        recv_tokens_per_expert, total_recv_tokens_per_rank, stream);
 }
 
 void EPBackend::combine(NVTETensor handle_mem, const NVTETensor expert_out,
