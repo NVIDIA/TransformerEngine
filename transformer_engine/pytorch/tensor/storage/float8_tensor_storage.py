@@ -101,6 +101,7 @@ class Float8TensorStorage(QuantizedTensorStorage):
         fake_dtype: Optional[torch.dtype] = None,
         data_transpose: Optional[torch.Tensor] = None,
         quantizer: Optional[Quantizer] = None,
+        transpose_invalid: Optional[bool] = None,
         **kwargs,
     ):
         if cls is Float8TensorStorage:
@@ -113,7 +114,9 @@ class Float8TensorStorage(QuantizedTensorStorage):
         instance._fp8_dtype = DType.cast(fp8_dtype)
         instance._scale_inv = fp8_scale_inv
         instance._transpose = data_transpose
-        instance._transpose_invalid = instance._transpose is None
+        instance._transpose_invalid = (
+            transpose_invalid if transpose_invalid is not None else instance._transpose is None
+        )
 
         return instance
 
@@ -157,6 +160,13 @@ class Float8TensorStorage(QuantizedTensorStorage):
             "quantizer": self._quantizer,
             "fake_dtype": self._dtype,
         }
+
+    def _flatten_nontensor_kwargs(self) -> Dict[str, Any]:
+        kwargs = super()._flatten_nontensor_kwargs()
+        # Not derivable from the buffers: an allocated transpose may be stale
+        # (invalidated by _reset_caches); reconstruction must not revalidate it.
+        kwargs["transpose_invalid"] = self._transpose_invalid
+        return kwargs
 
     def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], QuantizedTensorStorage]:
         """Prepare the tensor base for saving for backward"""
@@ -253,6 +263,11 @@ class Float8TensorStorage(QuantizedTensorStorage):
         )
 
     def __repr__(self):
+        # Data-free repr for a fake/meta scale_inv (exact class check: fake /
+        # functional tensors subclass Tensor); materializing it under tracing
+        # would leak an unbacked symbol into the ShapeEnv.
+        if self._scale_inv.__class__ is not torch.Tensor or self._scale_inv.is_meta:
+            return safe_quantized_repr(self, "Float8TensorStorage")
         try:
             return (
                 "Float8TensorStorage("

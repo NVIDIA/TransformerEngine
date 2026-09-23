@@ -16,6 +16,29 @@ import subprocess
 import sys
 import sysconfig
 from typing import Optional, Tuple
+import warnings
+
+# Minimum cuDNN version supported by Transformer Engine, as (major, minor, patch).
+# Keep in sync with kMinCudnnVersion in transformer_engine/common/cudnn_min_version.h.
+MIN_CUDNN_VERSION = (9, 12, 0)
+
+
+def decode_cudnn_version(encoded_version: int) -> Tuple[int, int, int]:
+    """Decode a cudnnGetVersion() result into (major, minor, patch)."""
+    major_version_magnitude = 1000 if encoded_version < 90000 else 10000
+    major, encoded_version = divmod(encoded_version, major_version_magnitude)
+    minor, patch = divmod(encoded_version, 100)
+    return (major, minor, patch)
+
+
+def check_cudnn_version(encoded_version: int) -> None:
+    """Raise if the cuDNN runtime is older than the minimum supported version."""
+    cudnn_version = decode_cudnn_version(encoded_version)
+    if cudnn_version < MIN_CUDNN_VERSION:
+        raise RuntimeError(
+            f"Transformer Engine requires cuDNN {'.'.join(map(str, MIN_CUDNN_VERSION))} or later,"
+            f" but the cuDNN runtime is {'.'.join(map(str, cudnn_version))}."
+        )
 
 
 @functools.lru_cache(maxsize=None)
@@ -107,9 +130,11 @@ def _get_shared_object_file(library: str) -> Path:
     """
 
     # Check provided input and determine the correct prefix for .so.
-    assert library in ("core", "torch", "jax"), f"Unsupported TE library {library}."
+    assert library in ("core", "torch", "jax", "nccl_ep"), f"Unsupported TE library {library}."
     if library == "core":
         so_prefix = "libtransformer_engine"
+    elif library == "nccl_ep":
+        so_prefix = "libnccl_ep"
     else:
         so_prefix = f"transformer_engine_{library}"
 
@@ -190,6 +215,34 @@ def load_framework_extension(framework: str) -> None:
     solib = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = solib
     spec.loader.exec_module(solib)
+
+    # Check if the cuDNN version is supported.
+    check_cudnn_version(solib.get_cudnn_version())
+
+    # Plugin system: set NVTE_PLUGIN=<module_name> to let plugin stub take over
+    # transformer_engine_torch and register original pybind as _nv for CUDA backend.
+    # Only applies to the PyTorch extension — JAX has no plugin stub.
+    _nvte_plugin = os.environ.get("NVTE_PLUGIN")
+    if _nvte_plugin and framework == "torch":
+        _original_module = sys.modules.get(module_name)
+        try:
+            # Register _nv alias BEFORE importing the plugin, because the
+            # plugin module may import transformer_engine_torch_nv at top level.
+            sys.modules[module_name + "_nv"] = solib
+            _plugin = importlib.import_module(_nvte_plugin)
+            _plugin.load_plugins()
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            # Rollback to pre-plugin state if plugin failed to fully initialize
+            sys.modules.pop(module_name + "_nv", None)
+            if _original_module is not None:
+                sys.modules[module_name] = _original_module
+            else:
+                sys.modules.pop(module_name, None)
+            warnings.warn(
+                f"NVTE_PLUGIN={_nvte_plugin} but plugin loading failed: {e}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
 
 
 def sanity_checks_for_pypi_installation() -> None:

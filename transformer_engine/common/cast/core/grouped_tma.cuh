@@ -53,51 +53,59 @@ inline bool dimensions_supported_by_TMA(const Tensor *const t) {
   return cols % alignment_requirement == 0;
 }
 
-__device__ __forceinline__ unsigned char *align_smem_ptr_per_TMA_requirements(unsigned char *p) {
-  size_t addr = reinterpret_cast<size_t>(p);
-  addr = (addr + TMA_SHMEM_ALIGNMENT - 1) & ~(TMA_SHMEM_ALIGNMENT - 1);
-  return reinterpret_cast<unsigned char *>(addr);
-}
-
-// Copies the base tensor map to shmem, modifies the copy, stores the modified tensor map at index
+// Copy the base tensor map to shared memory, modify it, and publish it to global memory. This
+// function must be called convergently by every thread in a one-warp CTA.
 __device__ __forceinline__ void modify_base_tensor_map(const CUtensorMap base_tensor_map,
                                                        CUtensorMap *global_tensor_map,
                                                        const uintptr_t global_data_ptr,
                                                        const size_t global_dim_Y,
                                                        const size_t global_dim_X,
                                                        const size_t data_type_size_bytes) {
-  __shared__ CUtensorMap shared_tensor_map;
-  shared_tensor_map = base_tensor_map;  // Copy the base tensor map into shmem
+  __shared__ alignas(128) CUtensorMap shared_tensor_map;
   constexpr bool is_blackwell = ARCH_BLACKWELL_FAMILY;
   if constexpr (is_blackwell) {
-    const size_t global_stride_bytes = global_dim_X * data_type_size_bytes;
-    if (global_stride_bytes % TMA_GMEM_ALIGNMENT != 0) {
-      NVTE_DEVICE_ERROR("Shape not supported. Data stride must be 16B aligned.");
-    }
-    if (global_data_ptr % TMA_GMEM_ALIGNMENT != 0) {
-      NVTE_DEVICE_ERROR("Tensor data pointer must be 16B aligned");
+    const uint32_t shared_tensor_map_ptr = __cvta_generic_to_shared(&shared_tensor_map);
+    if (threadIdx.x == 0) {
+      shared_tensor_map = base_tensor_map;
+
+      const size_t global_stride_bytes = global_dim_X * data_type_size_bytes;
+      if (global_stride_bytes % TMA_GMEM_ALIGNMENT != 0) {
+        NVTE_DEVICE_ERROR("Shape not supported. Data stride must be 16B aligned.");
+      }
+      if (global_data_ptr % TMA_GMEM_ALIGNMENT != 0) {
+        NVTE_DEVICE_ERROR("Tensor data pointer must be 16B aligned");
+      }
+
+      asm volatile(
+          "tensormap.replace.tile.global_address.shared::cta.b1024.b64 [%0], %1;\n\t"
+          "tensormap.replace.tile.global_dim.shared::cta.b1024.b32 [%0], 1, %2;\n\t"
+          "tensormap.replace.tile.global_dim.shared::cta.b1024.b32 [%0], 0, %3;\n\t"
+          "tensormap.replace.tile.global_stride.shared::cta.b1024.b64 [%0], 0, %4;\n"
+          :
+          : "r"(shared_tensor_map_ptr), "l"(global_data_ptr),
+            "r"(static_cast<uint32_t>(global_dim_Y)), "r"(static_cast<uint32_t>(global_dim_X)),
+            "l"(static_cast<uint64_t>(global_stride_bytes))
+          : "memory");
     }
 
+    // tensormap.cp_fenceproxy is a warp-collective instruction. Besides copying the complete
+    // 128-byte descriptor, its GPU-scope release makes the update visible to tensor-map proxy
+    // accesses that perform a matching acquire in a consumer CTA.
+    __syncwarp();
+    const uintptr_t global_tensor_map_ptr = reinterpret_cast<uintptr_t>(global_tensor_map);
     asm volatile(
-        "{\n\t"
-        ".reg.b64 tensor_map_ptr; \n\t"
-        "mov.b64 tensor_map_ptr, %0; \n\t"
-        "tensormap.replace.tile.global_address.b1024.b64  [tensor_map_ptr], %1; \n\t"
-        "tensormap.replace.tile.global_dim.b1024.b32  [tensor_map_ptr], 1, %2; \n\t"  // DIM Y
-        "tensormap.replace.tile.global_dim.b1024.b32  [tensor_map_ptr], 0, %3; \n\t"  // DIM X
-        "tensormap.replace.tile.global_stride.b1024.b64  [tensor_map_ptr], 0, %4; \n"
-        "}\n" ::"l"(reinterpret_cast<uintptr_t>(&shared_tensor_map)),
-        "l"(global_data_ptr), "r"(static_cast<uint32_t>(global_dim_Y)),
-        "r"(static_cast<uint32_t>(global_dim_X)), "l"(static_cast<uint64_t>(global_stride_bytes))
+        "tensormap.cp_fenceproxy.global.shared::cta.tensormap::generic.release.gpu.sync.aligned "
+        "[%0], [%1], 128;"
+        :
+        : "l"(global_tensor_map_ptr), "r"(shared_tensor_map_ptr)
         : "memory");
-    *global_tensor_map = shared_tensor_map;
   } else {
     NVTE_DEVICE_ERROR("tensormap.replace is architecture-specific. ");
   }
 }
 
 template <typename IType, typename OType>
-__global__ void __launch_bounds__(1)
+__global__ void __launch_bounds__(THREADS_PER_WARP)
     update_tma_descriptors(const __grid_constant__ CUtensorMap base_tensor_map_input,
                            const __grid_constant__ CUtensorMap base_tensor_map_act_input,
                            const __grid_constant__ CUtensorMap base_tensor_map_output_rowwise,
@@ -118,9 +126,11 @@ __global__ void __launch_bounds__(1)
   const size_t cols = get_tensor_cols_num(tensor_id, shape_rep, last_logical_dim, last_dims_ptr);
 
   const size_t offset_elts = offsets_ptr[tensor_id];
-  g_tensor_maps.rows[tensor_id] = rows;
-  g_tensor_maps.cols[tensor_id] = cols;
-  g_tensor_maps.offsets[tensor_id] = offset_elts;
+  if (threadIdx.x == 0) {
+    g_tensor_maps.rows[tensor_id] = rows;
+    g_tensor_maps.cols[tensor_id] = cols;
+    g_tensor_maps.offsets[tensor_id] = offset_elts;
+  }
 
   // Zero-sized groups: skip TMA descriptor update. The main kernel already returns
   // early for rows==0 or cols==0, but creating a TMA descriptor with a zero dimension
@@ -162,7 +172,8 @@ __global__ void __launch_bounds__(1)
 
 __device__ __forceinline__ void fence_acquire_tensormap(const CUtensorMap *tensor_map) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  asm volatile("fence.proxy.tensormap::generic.acquire.cta [%0], 128;" ::"l"(tensor_map));
+  // The descriptor updater and consumer execute in different CTAs, so CTA scope is insufficient.
+  asm volatile("fence.proxy.tensormap::generic.acquire.gpu [%0], 128;" ::"l"(tensor_map));
 #else
   NVTE_DEVICE_ERROR("fence_acquire_tensormap is only supported on SM 9.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)

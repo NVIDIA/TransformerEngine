@@ -4,7 +4,7 @@
 """Tests for fused attention"""
 import os
 from enum import Enum, auto
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from math import sqrt
 from typing import Any, Callable, Mapping, Tuple, Optional, Dict
@@ -48,10 +48,13 @@ from transformer_engine_jax import (
 )
 
 from distributed_test_base import assert_equal_collectives
-from utils import assert_allclose, print_debug_tensor_stats
+from utils import assert_allclose, get_test_level, print_debug_tensor_stats
 
 # Get determinism
 _deterministic = not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
+
+# CI test level
+_TEST_LEVEL = get_test_level()
 
 
 @pytest.fixture(autouse=True, scope="module")
@@ -222,7 +225,7 @@ def make_mask(
             segment_pos_q,
             segment_pos_kv,
             window_size,
-            dtype=jnp.bool,
+            dtype=jnp.bool_,
             segment_ids_q=segment_ids_q,
             segment_ids_kv=segment_ids_kv,
         )
@@ -383,6 +386,48 @@ def test_fused_attn_score_mod_rejects_masks_before_cudnn_frontend():
         )
 
 
+def test_fused_attn_backend_message():
+    """Test the error messaging of the fused attention backend query."""
+    baseline = FusedAttnHelper(
+        is_training=True,
+        batch_size=2,
+        q_dtype=jnp.bfloat16,
+        kv_dtype=jnp.bfloat16,
+        qkv_layout=QKVLayout.BSHD_BSHD_BSHD,
+        attn_bias_type=AttnBiasType.NO_BIAS,
+        attn_mask_type=AttnMaskType.NO_MASK,
+        softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+        dropout_probability=0.0,
+        q_num_heads=8,
+        kv_num_heads=8,
+        q_max_seqlen=128,
+        kv_max_seqlen=128,
+        head_dim_qk=64,
+        head_dim_v=64,
+        window_size=(-1, -1),
+        attn_scale=0.125,
+    )
+
+    # One of TE's rules is violated and the error message is surfaced
+    backend, message = replace(
+        baseline, attn_bias_type=AttnBiasType.PRE_SCALE_BIAS
+    ).get_fused_attn_backend()
+    assert backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend
+    assert message == "Fused attention does not support pre-scale bias."
+
+    # No error message if supported; otherwise skip the test
+    backend, message = baseline.get_fused_attn_backend()
+    if backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
+        pytest.skip(f"FusedAttention does not support the baseline config: {message}")
+    assert message == ""
+
+    # All TE rules have cleared; now gets rejected by cuDNN's support check
+    # cuDNN's error message might change across cuDNN versions, so only verify the presence of the string
+    backend, message = replace(baseline, head_dim_qk=1024, head_dim_v=1024).get_fused_attn_backend()
+    assert backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend
+    assert message != ""
+
+
 class BiasShape(Enum):
     """
     Enum class to represent the different bias shapes used in the fused attention.
@@ -469,19 +514,35 @@ class FusedAttnRunner:
                 jax.random.PRNGKey(self.doutput_seed), output_shape, dtype=self.dtype
             )
 
-    # See https://docs.nvidia.com/deeplearning/cudnn/latest/release-notes.html#cudnn-9-4-0 for known issue
-    # generating zero-length ragged tensors. This setting adjusts the test to avoid the zero-length cases.
     def _get_max_segments_per_sequence(self):
         if self.qkv_layout.is_thd():
-            if 90400 <= get_cudnn_version() < 90500:
-                return self.num_segments_per_seq
-            else:
-                # +1 for testing runtime_segments < max_segments
-                return self.num_segments_per_seq + 1
+            # +1 for testing runtime_segments < max_segments
+            return self.num_segments_per_seq + 1
         else:
             return 1
 
     def _check_configs(self):
+        # Trim SWA configs for L0 and L1 to reduce test time; need to trim more in future test refactoring.
+        if self.window_size is not None and (
+            self.dropout_prob != 0.0 or self.attn_bias_type is not AttnBiasType.NO_BIAS
+        ):
+            if _TEST_LEVEL == "L0" and (
+                self.softmax_type != AttnSoftmaxType.VANILLA_SOFTMAX
+                or self.dtype != jnp.bfloat16
+                or self.attn_bias_type is not AttnBiasType.POST_SCALE_BIAS
+                or self.attn_mask_type is not AttnMaskType.NO_MASK
+            ):
+                pytest.skip(
+                    "Trimmed SWA+bias/dropout config: only vanilla-softmax + bf16 + post_scale_bias"
+                    " + no-mask runs at L0"
+                )
+            if _TEST_LEVEL == "L1" and (
+                self.dtype != jnp.float16 or self.softmax_type != AttnSoftmaxType.LEARNABLE_SOFTMAX
+            ):
+                pytest.skip(
+                    "Trimmed SWA+bias/dropout config: only float16 + learnable-softmax runs at L1"
+                )
+
         # TODO(KshitijLakhani): probably add/move this to is_fused_attn_available
         if self.qkv_layout.is_thd() and not self.attn_mask_type.is_padding():
             pytest.skip("THD format requires padding masks.")
@@ -560,12 +621,10 @@ class FusedAttnRunner:
 
         if compute_capability >= 100 and self.is_training:
             if FusedAttnHelper.is_non_deterministic_allowed() and (
-                (self.dropout_prob != 0.0 and self.attn_bias_type != AttnBiasType.NO_BIAS)
-                or cudnn_version < 90700
+                self.dropout_prob != 0.0 and self.attn_bias_type != AttnBiasType.NO_BIAS
             ):
                 pytest.skip(
-                    "For sm100+, non-deterministic bprop (cuDNN 9.7+) does not support bias with"
-                    " dropout"
+                    "For sm100+, non-deterministic bprop does not support bias with dropout"
                 )
             if not FusedAttnHelper.is_non_deterministic_allowed() and (
                 self.dropout_prob != 0.0
@@ -584,25 +643,44 @@ class FusedAttnRunner:
                 "is either BSHD_BSHD_BSHD or THD_THD_THD"
             )
 
-        self.backend = FusedAttnHelper(
-            self.is_training,
-            self.dtype,
-            self.dtype,
-            self.qkv_layout,
-            self.attn_bias_type,
-            self.attn_mask_type,
-            self.softmax_type,
-            self.dropout_prob,
-            self.num_heads_q,
-            self.num_heads_kv,
-            self.max_seqlen_q,
-            self.max_seqlen_kv,
-            self.head_dim_qk,
-            self.head_dim_v,
-            (-1, -1) if self.window_size is None else self.window_size,
+        bias_batch = bias_heads = bias_seqlen_q = bias_seqlen_kv = None
+        if self.attn_bias_type == AttnBiasType.POST_SCALE_BIAS:
+            if self.bias_shape == BiasShape._1HSS:
+                bias_batch, bias_heads = 1, self.num_heads_q
+            elif self.bias_shape == BiasShape._B1SS:
+                bias_batch, bias_heads = self.batch_size, 1
+            elif self.bias_shape == BiasShape._BHSS:
+                bias_batch, bias_heads = self.batch_size, self.num_heads_q
+            elif self.bias_shape == BiasShape._11SS:
+                bias_batch, bias_heads = 1, 1
+            bias_seqlen_q, bias_seqlen_kv = self.max_seqlen_q, self.max_seqlen_kv
+
+        self.backend, message = FusedAttnHelper(
+            is_training=self.is_training,
+            batch_size=self.batch_size,
+            q_dtype=self.dtype,
+            kv_dtype=self.dtype,
+            qkv_layout=self.qkv_layout,
+            attn_bias_type=self.attn_bias_type,
+            attn_mask_type=self.attn_mask_type,
+            softmax_type=self.softmax_type,
+            dropout_probability=self.dropout_prob,
+            q_num_heads=self.num_heads_q,
+            kv_num_heads=self.num_heads_kv,
+            q_max_seqlen=self.max_seqlen_q,
+            kv_max_seqlen=self.max_seqlen_kv,
+            head_dim_qk=self.head_dim_qk,
+            head_dim_v=self.head_dim_v,
+            window_size=(-1, -1) if self.window_size is None else self.window_size,
+            bottom_right_diagonal=self.attn_mask_type.is_bottom_right(),
+            bias_batch=bias_batch,
+            bias_heads=bias_heads,
+            bias_seqlen_q=bias_seqlen_q,
+            bias_seqlen_kv=bias_seqlen_kv,
+            max_segments_per_seq=self._get_max_segments_per_sequence(),
         ).get_fused_attn_backend()
         if self.backend != NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
-            pytest.skip("Unsupported inputs combination or device compute capability.")
+            pytest.skip(message)
 
         if (
             self.attn_bias_type == AttnBiasType.POST_SCALE_BIAS
@@ -611,11 +689,6 @@ class FusedAttnRunner:
             if self.attn_mask_type.is_padding():
                 pytest.skip(
                     "B1SS, BHSS and 11SS bias shapes are only supported for non-padding mask"
-                )
-            elif self.backend != NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
-                pytest.skip(
-                    "B1SS, BHSS and 11SS bias shapes are only supported for "
-                    "the F16_arbitrary_seqlen backend."
                 )
 
     def _setup_inputs(self):
@@ -1420,22 +1493,17 @@ class TestFusedAttnMaxLogit:
 
 
 def _get_swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tuple[int, int]:
-    """Pick a sliding-window size for SWA tests, gated on cuDNN version.
+    """Pick a sliding-window size for SWA tests.
 
-    cuDNN < 9.2: skip (no SWA support).
-    cuDNN >= 9.2: left-only window (s_kv // 10, 0).
-    cuDNN >= 9.6: bidirectional window (s_kv // 10, s_kv // 10 + 5) for the mask types whose
-                  bidirectional fused dispatch is meaningful here (NO_MASK, PADDING_MASK).
-                  Other mask types keep the left-only window: causal-family masks would
-                  collapse (W, W) -> (W, 0), hence not tested here.
+    Bidirectional window (s_kv // 10, s_kv // 10 + 5) is used for the mask types whose
+    bidirectional fused dispatch is meaningful here (NO_MASK, PADDING_MASK). Other mask
+    types keep a left-only window (s_kv // 10, 0): causal-family masks would collapse
+    (W, W) -> (W, 0), hence not tested here.
     """
-    cudnn_version = get_cudnn_version()
-    if cudnn_version < 90200:
-        pytest.skip("Sliding window attention requires cuDNN >= 9.2")
     left_window_size = s_kv // 10
     # choose asymmetric window size for testing
     right_window_size = left_window_size + 5
-    if cudnn_version >= 90600 and attn_mask_type in (
+    if attn_mask_type in (
         AttnMaskType.NO_MASK,
         AttnMaskType.PADDING_MASK,
     ):

@@ -20,7 +20,7 @@ from torch.distributed.tensor import DTensor
 
 import transformer_engine_torch as tex
 
-from ._common import _ParameterInitMeta, noop_cat
+from ._common import _ParameterInitMeta, noop_cat, sum_bias_grad
 from .._extra_state import (
     extra_state_pickle_advisory,
     is_stateless_recipe,
@@ -54,6 +54,7 @@ from ..tensor.nvfp4_tensor import NVFP4Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor.hybrid_tensor import HybridQuantizer
 from ..tensor.identity_tensor import IdentityQuantizer
+from ..tensor.utils import is_custom
 from ..tensor.storage.float8_tensor_storage import Float8TensorStorage
 from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
@@ -1632,7 +1633,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(self.fp8_meta)
 
                 # Activation recomputation is used and this is the first forward phase.
-                if self.training and is_fp8_activation_recompute_enabled():
+                if is_fp8_activation_recompute_enabled():
                     FP8GlobalStateManager.copy_forward_fp8_meta_tensors_for_recompute(self.fp8_meta)
 
         nvtx_range_push(self.__class__.__name__ + " forward")
@@ -1697,7 +1698,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             R2: bias gradient on R1.
 
         """
-        grad_output = grad_output.reshape((-1, grad_output.shape[-1]))
         grad_output = grad_output.contiguous()
         gather_grad_output = row_parallel_mode and ctx.sequence_parallel
         use_fp8_bwd = ctx.fp8 and ctx.backward_override is None
@@ -1721,7 +1721,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if gather_grad_output:
             grad_bias = None
             if ctx.use_bias:
-                grad_bias = grad_output.view(-1, grad_output.shape[-1]).sum(dim=0)
+                grad_bias = sum_bias_grad(grad_output)
             if ctx.ub_overlap_ag:
                 # Quantize the gradient if needed
                 if not isinstance(
@@ -1755,7 +1755,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if ctx.debug:
             grad_output_ = quantizer(grad_output)
             if ctx.use_bias:
-                grad_bias = grad_output.view(-1, grad_output.shape[-1]).sum(dim=0)
+                grad_bias = sum_bias_grad(grad_output)
             else:
                 grad_bias = None
             grad_output = grad_output_
@@ -1773,15 +1773,16 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     Float8BlockwiseQTensorStorage,
                 ),
             ):
-                grad_bias = grad_output.dequantize().view(-1, grad_output.shape[-1]).sum(dim=0)
+                grad_bias = sum_bias_grad(grad_output.dequantize())
             else:
                 if isinstance(
                     quantizer, (Float8BlockQuantizer, HybridQuantizer, IdentityQuantizer)
-                ):
+                ) or is_custom(quantizer):
                     # Float8BlockQuantizer: unfused until cast_transpose + dgrad is ready.
                     # HybridQuantizer: tex.bgrad_quantize doesn't recognize hybrid quantizers.
                     # IdentityQuantizer: high-precision passthrough; bgrad computed in HP.
-                    grad_bias = grad_output.view(-1, grad_output.shape[-1]).sum(dim=0)
+                    # Custom recipes may provide quantizers unknown to the C++ extension.
+                    grad_bias = sum_bias_grad(grad_output)
                 else:
                     grad_bias, grad_output = tex.bgrad_quantize(grad_output, quantizer)
         if not isinstance(grad_output, QuantizedTensorStorage):
@@ -1961,7 +1962,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if not self.fuse_wgrad_accumulation:
                 weight_tensor = noop_cat(self._get_weight_tensors())
                 weight_tensor.grad = wgrad.to(weight_tensor.dtype)
-            if self.use_bias:
+            if self.use_bias and bgrad is not None and bgrad.numel() != 0:
                 bias_tensor = noop_cat([getattr(self, name) for name in self.bias_names])
                 if bias_tensor.grad is None:
                     bias_tensor.grad = bgrad.to(bias_tensor.dtype)
