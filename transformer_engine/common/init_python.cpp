@@ -11,6 +11,51 @@
 namespace transformer_engine {
 namespace tvm_ffi_bridge {
 
+namespace {
+
+// Everything below must stay inside the CPython Stable ABI: this file is built with
+// Py_LIMITED_API so a single libtransformer_engine.so works across CPython 3.10+.
+// PyRun_SimpleString in particular is *not* part of the limited API.
+bool import_and_register_backends() {
+  PyObject *module = PyImport_ImportModule("transformer_engine.common");
+  if (module == nullptr) {
+    return false;
+  }
+  bool initialized = false;
+  PyObject *loaded = PyObject_CallMethod(module, "_load_tvm_ffi_library", nullptr);
+  if (loaded != nullptr) {
+    Py_DECREF(loaded);
+    PyObject *registered = PyObject_CallMethod(module, "_register_cutedsl_backends", nullptr);
+    if (registered != nullptr) {
+      Py_DECREF(registered);
+      initialized = true;
+    }
+  }
+  Py_DECREF(module);
+  return initialized;
+}
+
+// transformer_engine/__init__.py pulls in the framework subpackages when they are importable,
+// which an embedded interpreter has no reason to pay for. A None entry in sys.modules makes the
+// corresponding `import` raise ImportError.
+void mask_framework_modules() {
+  PyObject *modules = PyImport_GetModuleDict();  // borrowed
+  if (modules == nullptr) {
+    return;
+  }
+  PyDict_SetItemString(modules, "transformer_engine.pytorch", Py_None);
+  PyDict_SetItemString(modules, "transformer_engine.jax", Py_None);
+}
+
+void warn_import_failed() {
+  PyErr_Print();
+  NVTE_WARN(
+      "Failed to initialize CuTeDSL backend: unable to import transformer_engine.common from "
+      "python. Using CUDA backend as fallback.");
+}
+
+}  // namespace
+
 // Initialize the Python interpreter and import the CuTeDSL backend module. This is only compiled
 // with NVTE_WITH_CUTEDSL=ON in CMake and will be ignored otherwise
 bool initialize_python_cutedsl_backend() {
@@ -27,18 +72,10 @@ bool initialize_python_cutedsl_backend() {
           "CUDA backend as fallback.");
       return false;
     }
-    const bool initialized = PyRun_SimpleString(
-                                 "import sys\n"
-                                 "sys.modules['transformer_engine.pytorch'] = None\n"
-                                 "sys.modules['transformer_engine.jax'] = None\n"
-                                 "import transformer_engine.common as te_common\n"
-                                 "te_common._load_tvm_ffi_library()\n"
-                                 "te_common._register_cutedsl_backends()") == 0;
+    mask_framework_modules();
+    const bool initialized = import_and_register_backends();
     if (!initialized) {
-      PyErr_Print();
-      NVTE_WARN(
-          "Failed to initialize CuTeDSL backend: unable to import transformer_engine.common from "
-          "python. Using CUDA backend as fallback.");
+      warn_import_failed();
     }
     // Detach the initializing C++ thread and release the GIL so TVM-FFI callbacks can acquire it
     // from any thread. The interpreter has process lifetime, so no later restore is needed.
@@ -49,15 +86,9 @@ bool initialize_python_cutedsl_backend() {
   // Python is already running in this process but we don't know if it has imported TE or not,
   // so we import here just to be sure
   const PyGILState_STATE gil_state = PyGILState_Ensure();
-  const bool initialized = PyRun_SimpleString(
-                               "import transformer_engine.common as te_common\n"
-                               "te_common._load_tvm_ffi_library()\n"
-                               "te_common._register_cutedsl_backends()") == 0;
+  const bool initialized = import_and_register_backends();
   if (!initialized) {
-    PyErr_Print();
-    NVTE_WARN(
-        "Failed to initialize CuTeDSL backend: unable to import transformer_engine.common from "
-        "python. Using CUDA backend as fallback.");
+    warn_import_failed();
   }
   PyGILState_Release(gil_state);
   return initialized;

@@ -41,17 +41,24 @@ include_directories(../../transformer_engine)
 include_directories(${CMAKE_SOURCE_DIR})
 
 find_package(CUDAToolkit REQUIRED)
-find_package(Python COMPONENTS Development.Embed REQUIRED)
 include(${CMAKE_SOURCE_DIR}/../../transformer_engine/common/cmake/cuDNN.cmake)
+
+# Must match how libtransformer_engine.so was built, hence the env var default.
+option(NVTE_WITH_CUTEDSL
+       "Link the tests against libpython, required when libtransformer_engine.so was built with NVTE_WITH_CUTEDSL=ON"
+       "$ENV{NVTE_WITH_CUTEDSL}")
 
 add_subdirectory(operator)
 add_subdirectory(util)
 
-# Executables that link libtransformerengine.so must also link to the Python::Python to provide
-# the definitions of these CPython symbols at runtime via dynamic linking.
-foreach(test_target test_operator test_util)
-  target_link_libraries(${test_target} PRIVATE
-                        "-Wl,--no-as-needed"
-                        Python::Python
-                        "-Wl,--as-needed")
-endforeach()
+if(NVTE_WITH_CUTEDSL)
+  # Executables that link libtransformerengine.so must also link to the Python::Python to provide
+  # the definitions of these CPython symbols at runtime via dynamic linking.
+  find_package(Python COMPONENTS Development.Embed REQUIRED)
+  foreach(test_target test_operator test_util)
+    target_link_libraries(${test_target} PRIVATE
+                          "-Wl,--no-as-needed"
+                          Python::Python
+                          "-Wl,--as-needed")
+  endforeach()
+endif()
