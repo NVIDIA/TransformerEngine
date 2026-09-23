@@ -248,8 +248,7 @@ python -m pytest -c tests/jax/pytest.ini -v tests/jax/test_layer.py
 Separately built after the main build.
 
 ```bash
-cmake -GNinja -S tests/cpp -B tests/cpp/build \
-    -DCMAKE_CUDA_ARCHITECTURES="$NVTE_CUDA_ARCHS"
+cmake -GNinja -S tests/cpp -B tests/cpp/build
 cmake --build tests/cpp/build
 ctest --test-dir tests/cpp/build --output-on-failure
 ```
