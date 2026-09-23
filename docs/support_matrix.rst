@@ -7,18 +7,7 @@ Datatype and hardware support matrix
 ====================================
 
 This page summarizes which low-precision quantization formats Transformer Engine
-supports on which NVIDIA GPU architectures. Support is keyed by CUDA *compute
-capability*, since that is what Transformer Engine checks at runtime to decide
-whether a format is available.
-
-.. note::
-
-   The support conditions below mirror the runtime capability checks in
-   ``transformer_engine.pytorch.quantization``
-   (``_compute_fp8_support``, ``_compute_fp8_block_scaling_support``,
-   ``_compute_mxfp8_support``, ``_compute_nvfp4_support``) and the BF16 check in
-   ``transformer_engine.pytorch.utils``. If those checks change, update this
-   table to match.
+supports on NVIDIA GPU architectures (by compute capability).
 
 Compute capability reference
 ----------------------------
@@ -46,8 +35,8 @@ Compute capability reference
      - Blackwell (workstation / consumer)
      - RTX PRO 6000, RTX 50 series
 
-The architecture and GPU columns are indicative; the compute capability column is
-the value Transformer Engine uses for its support decisions.
+The architecture and GPU columns show representative examples. For a complete list,
+see NVIDIA's `CUDA GPU compute capability list <https://developer.nvidia.com/cuda/gpus>`_.
 
 Format support by compute capability
 -------------------------------------
@@ -91,7 +80,7 @@ Format support by compute capability
      - Yes
      - Yes [2]_
      - No [3]_
-     - Yes [4]_
+     - Partial [4]_
 
 * **BF16** requires compute capability 8.0 or higher.
 * **FP8 (per tensor)** covers the :class:`~transformer_engine.common.recipe.DelayedScaling`
@@ -103,27 +92,22 @@ Format support by compute capability
 * **NVFP4** is the :class:`~transformer_engine.common.recipe.NVFP4BlockScaling` recipe.
 
 .. [1] On Ada (compute capability 8.9), FP8 additionally requires cuBLASLt
-   version 12.1.3.x or higher and CUDA 12.1 or higher.
+   version 12.1.3.x or higher.
 
 .. [2] FP8 block scaling additionally requires CUDA 12.9 or higher.
 
 .. [3] MXFP8 is not yet supported on compute capability 12.0 and higher
    (support is currently limited to compute capability 10.0 through 10.x).
 
-.. [4] The capability check reports NVFP4 as available on compute capability
-   10.0 and higher. The default NVFP4 recipe additionally uses a random Hadamard
-   transform and stochastic rounding, whose FP4 conversion instructions are
-   architecture specific to compute capability 10.0 and 10.3. On compute
-   capability 12.0, running the default recipe currently raises an
-   architecture-specific error, and NVFP4 there requires round-to-nearest
-   (stochastic rounding disabled).
+.. [4] The full NVFP4 recipe is supported on compute capability 10.x GPUs. On
+   12.x GPUs, NVFP4 supports the forward pass or training with random Hadamard
+   transform (RHT) and stochastic rounding disabled.
 
 Default recipe by architecture
 -------------------------------
 
 When no recipe is passed explicitly, Transformer Engine selects a default based on
-the device (see ``get_default_fp8_recipe`` in
-``transformer_engine.pytorch.quantization``):
+the device:
 
 .. list-table::
    :header-rows: 1
