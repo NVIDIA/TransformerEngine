@@ -5,6 +5,8 @@
 """Python interface for attention"""
 
 from .dot_product_attention import DotProductAttention
+from . import sparse_attention
+from .sparse_attention import DSv4Attention
 from .linear_attention import GatedDeltaNetAttention
 from .fused_mla_q_uproj import FusedMLAQUpProjFunction, FusedMLAQUpProjRopeQuant
 from .multi_head_attention import MultiheadAttention
@@ -13,6 +15,8 @@ from .rope import RotaryPositionEmbedding
 
 __all__ = [
     "DotProductAttention",
+    "DSv4Attention",
+    "sparse_attention",
     "GatedDeltaNetAttention",
     "FusedMLAQUpProjFunction",
     "FusedMLAQUpProjRopeQuant",
