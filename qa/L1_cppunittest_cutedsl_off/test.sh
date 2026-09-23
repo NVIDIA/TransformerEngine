@@ -16,7 +16,16 @@ export LD_LIBRARY_PATH=$TE_LIB_PATH:$LD_LIBRARY_PATH
 NUM_PHYSICAL_CORES=$(nproc)
 NUM_PARALLEL_JOBS=4
 
-# Run the CUDA implementation only in L1 as we want to migrate to CuTeDSL implementation so it should have more coverage in L0
+# If NVTE_ENABLE_CUTEDSL_BACKEND is not set to 1, we assume this also applies to qa/L0_cppunittest,
+# in which case we don't need to run this test since L0_cppunittest already covers the CUDA path.
+# Otherwise, we override NVTE_ENABLE_CUTEDSL_BACKEND to 0 to force the test to take the CUDA implementation path,
+# so we can cover both CUDA and CuteDSL paths on CI.
+if [ "${NVTE_ENABLE_CUTEDSL_BACKEND:-0}" != "1" ]; then
+    echo "NVTE_ENABLE_CUTEDSL_BACKEND is not 1; L0_cppunittest should have validated the CUDA path already."
+    exit 0
+fi
+
+# Override this env var to force the test to take the CUDA implementation path
 export NVTE_ENABLE_CUTEDSL_BACKEND=0
 
 cd $TE_PATH/tests/cpp
