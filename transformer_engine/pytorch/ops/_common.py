@@ -10,6 +10,7 @@ from typing import Optional
 
 import torch
 
+from transformer_engine import te_device_type
 from transformer_engine_torch import FP8TensorMeta
 from ..torch_version import torch_version
 from ..quantization import FP8GlobalStateManager
@@ -93,7 +94,7 @@ def maybe_dequantize(
 
 def maybe_autocast_dtype(
     *,
-    device_type: str = "cuda",
+    device_type: str = te_device_type(),
     default_dtype: Optional[torch.dtype] = None,
 ) -> torch.dtype:
     """Get autocast dtype if enabled"""

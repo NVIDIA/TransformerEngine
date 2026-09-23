@@ -14,6 +14,7 @@ from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.module import LayerNormLinear, Linear, RMSNorm, LayerNorm
 from transformer_engine.pytorch.ops.basic.l2normalization import L2Normalization
+from transformer_engine import te_device_type
 from transformer_engine.pytorch.utils import (
     SplitAlongDim,
     divide,
@@ -141,7 +142,7 @@ class MultiheadAttention(torch.nn.Module):
                             whether to use interleaved rotary position embeddings.
     bias : bool, default = True
           if set to ``False``, the transformer layer will not learn any additive biases.
-    device : Union[torch.device, str], default = "cuda"
+    device : Union[torch.device, str], default=te_device_type()
           The device on which the parameters of the model will be allocated. It is the user's
           responsibility to ensure all parameters are moved to the GPU before running the
           forward pass.
@@ -285,7 +286,7 @@ class MultiheadAttention(torch.nn.Module):
         ub_bulk_wgrad: bool = False,
         bias: bool = True,
         normalization: str = "LayerNorm",
-        device: Union[torch.device, str] = "cuda",
+        device: Union[torch.device, str] = te_device_type(),
         qkv_format: str = "sbhd",
         name: str = None,
         qk_norm_type: Optional[str] = None,

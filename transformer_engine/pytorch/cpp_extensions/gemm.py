@@ -17,7 +17,9 @@ from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.nvfp4_tensor import NVFP4Quantizer
-from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
+from ..tensor.storage.float8_blockwise_tensor_storage import (
+    Float8BlockwiseQTensorStorage,
+)
 from ..tensor.storage.float8_tensor_storage import Float8TensorStorage
 from ..tensor.storage.grouped_tensor_storage import GroupedTensorStorage
 from ..tensor.storage.hybrid_tensor_storage import HybridQuantizedTensorStorage
@@ -26,6 +28,7 @@ from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 from ..tensor.utils import is_custom
 from ..custom_recipes.gemm import custom_gemm
 from ...debug.pytorch.debug_quantization import DebugQuantizedTensor, DebugQuantizer
+from transformer_engine import te_device_type
 
 __all__ = [
     "general_gemm",
@@ -417,7 +420,8 @@ def general_grouped_gemm(
 
     if grad and use_bias:
         grad_bias = [
-            torch.empty(B[i].size(1), dtype=out[0].dtype, device="cuda") for i in range(num_gemms)
+            torch.empty(B[i].size(1), dtype=out[0].dtype, device=te_device_type())
+            for i in range(num_gemms)
         ]
     else:
         grad_bias = empty_tensors
