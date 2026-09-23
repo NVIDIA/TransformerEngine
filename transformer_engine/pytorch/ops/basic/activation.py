@@ -414,13 +414,13 @@ class _ScaledUnary(BasicOperation, metaclass=abc.ABCMeta):
 
         if torch.is_autocast_enabled():
             dtype = torch.get_autocast_dtype("cuda")
-        elif isinstance(input_, torch.Tensor):
-            dtype = input_.dtype
+            extra_input_dtype = dtype
         else:
-            dtype = extra_input.dtype
+            dtype = input_.dtype
+            extra_input_dtype = extra_input.dtype
 
         x = maybe_dequantize(input_.contiguous(), dtype)
-        scales = maybe_dequantize(extra_input, dtype)
+        scales = maybe_dequantize(extra_input.contiguous(), extra_input_dtype)
         y = self._scaled_unary_forward(x, scales)
 
         ctx = basic_op_ctxs[0]
@@ -428,6 +428,7 @@ class _ScaledUnary(BasicOperation, metaclass=abc.ABCMeta):
             if is_cpu_offload_enabled():
                 mark_activation_offload(x)
             ctx.input_requires_grad = True
+            ctx.extra_input_dtype = extra_input_dtype
             ctx.extra_input_requires_grad = extra_input.requires_grad
             ctx.dtype = dtype
             ctx.save_for_backward(x, scales)
@@ -450,7 +451,7 @@ class _ScaledUnary(BasicOperation, metaclass=abc.ABCMeta):
         ctx = basic_op_ctxs[0]
         x, scales = ctx.saved_tensors
         x = maybe_dequantize(x.contiguous(), ctx.dtype)
-        scales = maybe_dequantize(scales, ctx.dtype)
+        scales = maybe_dequantize(scales, ctx.extra_input_dtype)
         grad_output = maybe_dequantize(grad_output.contiguous(), ctx.dtype)
 
         if self.activation_recompute_in_mlp:
