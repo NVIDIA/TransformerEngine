@@ -25,6 +25,7 @@ from transformer_engine.pytorch.ops.fused.grouped_mlp import (
     _cudnn_frontend_supports_grouped_gemm_situglu,
     _cudnn_frontend_supports_grouped_gemm_srelu,
     _cudnn_frontend_version_supported,
+    is_glu_activation,
 )
 from transformer_engine.pytorch.ops.basic.grouped_linear import (
     OUTPUT_BUFFER_KEY,
@@ -46,6 +47,7 @@ import transformer_engine_torch as tex
 from utils import (
     assert_close,
     assert_close_grads,
+    assert_close_rms,
     dtype_tols,
     make_recipe,
     MegatronTrainingHelper,
@@ -58,11 +60,46 @@ fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
 nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
 
-# Soft-clamp scale for ScaledTanhSReLU coverage. Deliberately small relative to the
-# FC1 outputs these tests produce, so tanh actually saturates -- a large scale would
-# make the activation numerically indistinguishable from plain ScaledSReLU and the
-# test would pass even if the clamp were dropped.
+# Small enough that tanh saturates on the FC1 outputs these tests produce.
 _TANH_SRELU_CLAMP_SCALE: float = 2.0
+
+
+def _make_scaled_activation(
+    activation: str,
+    *,
+    glu_interleave_size: Optional[int] = None,
+    situ_betas: tuple[float, float] = (4.0, 25.0),
+    geglu_limit: float = 7.0,
+    geglu_alpha: float = 1.702,
+    geglu_offset: float = 1.0,
+    **kwargs,
+) -> te.ops.BasicOperation:
+    """Construct the scaled activation op between the two GEMMs of a grouped MLP."""
+    if activation == "scaled_swiglu":
+        return te.ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size, **kwargs)
+    if activation == "scaled_situglu":
+        return te.ops.ScaledSiTUGLU(
+            glu_interleave_size=glu_interleave_size,
+            beta1=situ_betas[0],
+            beta2=situ_betas[1],
+            **kwargs,
+        )
+    if activation == "scaled_clamped_qgeglu_custom":
+        return te.ops.ScaledClampedQGeGLU(
+            glu_interleave_size=glu_interleave_size,
+            limit=geglu_limit,
+            alpha=geglu_alpha,
+            glu_linear_offset=geglu_offset,
+            **kwargs,
+        )
+    if activation.startswith("scaled_clamped_qgeglu"):
+        return te.ops.ScaledClampedQGeGLU(glu_interleave_size=glu_interleave_size, **kwargs)
+    if activation == "scaled_srelu":
+        return te.ops.ScaledSReLU(**kwargs)
+    if activation == "scaled_tanh_srelu":
+        return te.ops.ScaledTanhSReLU(tanh_clamp_scale=_TANH_SRELU_CLAMP_SCALE, **kwargs)
+    raise ValueError(f"Unexpected grouped MLP activation ({activation})")
+
 
 # Supported data types
 _dtypes: list[torch.dtype] = [torch.float32, torch.float16]
@@ -1197,10 +1234,6 @@ class TestGroupedMLPFusedOp:
         if quantization == "nvfp4_rht":
             if activation == "scaled_swiglu" and (bias or glu_interleave_size != 32):
                 pytest.skip("NVFP4 RHT SwiGLU grouped MLP coverage is limited to no-bias")
-            # tanh-SReLU is included deliberately: NVFP4 is the only path that exercises
-            # the dsrelu-family fc2 alpha (full product rather than sqrt), so excluding
-            # it here would leave that branch untested. It runs without the hadamard
-            # sub-kernel, which the fused op handles via the generic quantize fallback.
             if activation not in (
                 "scaled_swiglu",
                 "scaled_situglu",
@@ -1361,28 +1394,14 @@ class TestGroupedMLPFusedOp:
         recipe = make_recipe(quantization)
 
         def _make_scaled_act():
-            if activation == "scaled_swiglu":
-                return te.ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size)
-            if activation == "scaled_situglu":
-                return te.ops.ScaledSiTUGLU(
-                    glu_interleave_size=glu_interleave_size,
-                    beta1=situ_betas[0],
-                    beta2=situ_betas[1],
-                )
-            if activation == "scaled_clamped_qgeglu_custom":
-                return te.ops.ScaledClampedQGeGLU(
-                    glu_interleave_size=glu_interleave_size,
-                    limit=geglu_limit,
-                    alpha=geglu_alpha,
-                    glu_linear_offset=geglu_offset,
-                )
-            if activation.startswith("scaled_clamped_qgeglu"):
-                return te.ops.ScaledClampedQGeGLU(glu_interleave_size=glu_interleave_size)
-            if activation == "scaled_srelu":
-                return te.ops.ScaledSReLU()
-            if activation == "scaled_tanh_srelu":
-                return te.ops.ScaledTanhSReLU(tanh_clamp_scale=_TANH_SRELU_CLAMP_SCALE)
-            raise ValueError(f"Unexpected grouped MLP activation ({activation})")
+            return _make_scaled_activation(
+                activation,
+                glu_interleave_size=glu_interleave_size,
+                situ_betas=situ_betas,
+                geglu_limit=geglu_limit,
+                geglu_alpha=geglu_alpha,
+                geglu_offset=geglu_offset,
+            )
 
         def _make_module():
             with te.quantized_model_init(enabled=with_quantization, recipe=recipe):
@@ -1475,7 +1494,6 @@ class TestGroupedMLPFusedOp:
         elif activation == "scaled_srelu":
             cudnn_frontend_supports_grouped_mlp = _cudnn_frontend_supports_grouped_gemm_srelu()
         elif activation == "scaled_tanh_srelu":
-            # Needs both the base srelu kernels and the tanh_clamp_scale parameter.
             cudnn_frontend_supports_grouped_mlp = (
                 _cudnn_frontend_supports_grouped_gemm_srelu()
                 and grouped_mlp_module._cudnn_frontend_supports_grouped_gemm_srelu_tanh()
@@ -2322,6 +2340,184 @@ class TestGroupedMLPFusedOp:
             bias_tols = {"rtol": 0.05, "atol": 0.015625}
             torch.testing.assert_close(fc1_db_false, fc1_db_true, **bias_tols)
             torch.testing.assert_close(fc2_db_false, fc2_db_true, **bias_tols)
+
+    # Relative RMS tolerance on FC2's weight gradient when FC2's input is regenerated in the
+    # backward instead of saved. The regeneration works from FC1's quantized output, so the
+    # tolerance depends on the recipe.
+    _RECOMPUTE_FC2_WGRAD_RMS_TOL: dict[str, float] = {"mxfp8": 0.05, "nvfp4_rht": 0.25}
+
+    def _run_recompute_case(
+        self,
+        *,
+        activation: str,
+        activation_recompute_in_mlp: bool,
+        quantization: str,
+        split_sizes: torch.Tensor,
+        group_size: int,
+        hidden_size: int,
+        dtype: torch.dtype,
+        device: torch.device | str,
+        bias: bool = False,
+        delay_wgrad_compute: bool = False,
+    ) -> dict:
+        """Fused grouped MLP forward and backward with deterministic weights and inputs.
+
+        Returns the output, the gradients, and the number of bytes saved for the backward.
+        """
+        reset_rng_states()
+        recipe = make_recipe(quantization)
+        with te.quantized_model_init(enabled=True, recipe=recipe):
+            scaled_act = _make_scaled_activation(
+                activation, activation_recompute_in_mlp=activation_recompute_in_mlp
+            )
+            fc1_out_features = 2 * hidden_size if is_glu_activation(scaled_act) else hidden_size
+            fc1 = te.ops.GroupedLinear(
+                group_size,
+                hidden_size,
+                fc1_out_features,
+                bias=bias,
+                device=device,
+                dtype=dtype,
+                delay_wgrad_compute=delay_wgrad_compute,
+            )
+            fc2 = te.ops.GroupedLinear(
+                group_size,
+                hidden_size,
+                hidden_size,
+                bias=bias,
+                device=device,
+                dtype=dtype,
+                delay_wgrad_compute=delay_wgrad_compute,
+                scale_bias=bias,
+            )
+            module = te.ops.Sequential(fc1, scaled_act, fc2)
+
+        def rand(*shape):
+            return torch.empty(shape, device=device, dtype=dtype).uniform_(-0.25, 0.25)
+
+        with torch.no_grad():
+            for param in module.parameters():
+                param.copy_(rand(*param.shape))
+        num_tokens = int(split_sizes.sum())
+        x = rand(num_tokens, hidden_size).requires_grad_(True)
+        probs = rand(num_tokens).requires_grad_(True)
+        dy = rand(num_tokens, hidden_size)
+
+        saved_bytes = 0
+
+        def count_saved(tensor: torch.Tensor) -> torch.Tensor:
+            nonlocal saved_bytes
+            saved_bytes += tensor.numel() * tensor.element_size()
+            return tensor
+
+        fc2_extra_inputs = (split_sizes, probs) if bias else (split_sizes,)
+        with torch.autograd.graph.saved_tensors_hooks(count_saved, lambda tensor: tensor):
+            with te.autocast(enabled=True, recipe=recipe):
+                y = module(x, split_sizes, probs, *fc2_extra_inputs)
+        y.backward(dy)
+        if delay_wgrad_compute:
+            fc1.backward_dw()
+            fc2.backward_dw()
+
+        forward_ops = module._module_groups[0]._forward_ops
+        assert len(forward_ops) == 1 and isinstance(
+            forward_ops[0][0],
+            (te.ops.fused.GroupedMLP_CuTeGEMMUnary, te.ops.fused.GroupedMLP_CuTeGEMMGLU),
+        ), "Fused grouped MLP did not run"
+
+        def param_grads(fc, name):
+            return torch.stack([getattr(fc, f"{name}{i}").grad for i in range(group_size)])
+
+        return {
+            "y": y.detach().clone(),
+            "dx": x.grad,
+            "dprobs": probs.grad,
+            "fc1_dw": param_grads(fc1, "weight"),
+            "fc2_dw": param_grads(fc2, "weight"),
+            "fc1_db": param_grads(fc1, "bias") if bias else None,
+            "fc2_db": param_grads(fc2, "bias") if bias else None,
+            "saved_bytes": saved_bytes,
+        }
+
+    @pytest.mark.parametrize(
+        "bias, delay_wgrad_compute",
+        (
+            pytest.param(False, False, id="default"),
+            pytest.param(True, False, id="bias"),
+            pytest.param(False, True, id="delay_wgrad_compute"),
+        ),
+    )
+    @pytest.mark.parametrize("activation", ("scaled_srelu", "scaled_tanh_srelu"))
+    @pytest.mark.parametrize(
+        "quantization",
+        [
+            pytest.param(
+                "mxfp8",
+                marks=pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8),
+            ),
+            pytest.param(
+                "nvfp4_rht",
+                marks=pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4),
+            ),
+        ],
+    )
+    def test_grouped_mlp_activation_recompute(
+        self,
+        activation: str,
+        quantization: str,
+        bias: bool,
+        delay_wgrad_compute: bool,
+        *,
+        dtype: torch.dtype = torch.bfloat16,
+        device: torch.device = "cuda",
+        group_size: int = 4,
+        hidden_size: int = 256,
+    ) -> None:
+        """Recomputing the activation in the backward matches saving it in the forward."""
+        if not te.ops.fused.GroupedMLP_CuTeGEMMUnary.is_supported():
+            pytest.skip("Fused grouped MLP is not supported on this system")
+        if (
+            activation == "scaled_tanh_srelu"
+            and not grouped_mlp_module._cudnn_frontend_supports_grouped_gemm_srelu_tanh()
+        ):
+            pytest.skip("Installed cuDNN frontend lacks tanh_clamp_scale")
+        if bias and quantization == "nvfp4_rht":
+            pytest.skip("NVFP4 SReLU grouped MLP coverage is limited to no-bias")
+
+        split_sizes = torch.tensor(
+            [256 * (i + 1) for i in range(group_size)], dtype=torch.int64, device=device
+        )
+        common = dict(
+            activation=activation,
+            quantization=quantization,
+            split_sizes=split_sizes,
+            group_size=group_size,
+            hidden_size=hidden_size,
+            dtype=dtype,
+            device=device,
+            bias=bias,
+            delay_wgrad_compute=delay_wgrad_compute,
+        )
+        off = self._run_recompute_case(activation_recompute_in_mlp=False, **common)
+        on = self._run_recompute_case(activation_recompute_in_mlp=True, **common)
+
+        # FC2's input (at least 4 bits per element) is no longer saved for the backward
+        num_tokens = int(split_sizes.sum())
+        assert off["saved_bytes"] - on["saved_bytes"] >= num_tokens * hidden_size // 2
+
+        # Only FC2's weight gradient depends on the regenerated tensor. dprob and the bias
+        # gradients are accumulated with atomics when FC2's bias is scaled, so they are not
+        # reproducible bitwise in that configuration.
+        for name in ("y", "dx", "fc1_dw"):
+            torch.testing.assert_close(on[name], off[name], rtol=0, atol=0)
+        tols = {"rtol": 0.05, "atol": 0.015625} if bias else {"rtol": 0, "atol": 0}
+        torch.testing.assert_close(on["dprobs"], off["dprobs"], **tols)
+        if bias:
+            torch.testing.assert_close(on["fc1_db"], off["fc1_db"], **tols)
+            torch.testing.assert_close(on["fc2_db"], off["fc2_db"], **tols)
+        assert_close_rms(
+            on["fc2_dw"], off["fc2_dw"], rtol=self._RECOMPUTE_FC2_WGRAD_RMS_TOL[quantization]
+        )
 
     @pytest.mark.parametrize("quantization", ("mxfp8", "nvfp4_rht"))
     def test_grouped_mlp_caller_buffers(
