@@ -218,6 +218,17 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"),
         py::arg("last_dims") = py::none(), py::arg("tensor_offsets") = py::none(),
         py::arg("noop_flag") = py::none(), py::arg("output") = py::none());
+  m.def("group_scaled_swiglu", transformer_engine::pytorch::group_scaled_swiglu,
+        "Grouped scaled SwiGLU recompute fused with columnwise MXFP8 quantization",
+        py::arg("input_2h"), py::arg("prob"), py::arg("quantizer"), py::arg("num_tensors"),
+        py::arg("first_dims") = py::none(), py::arg("last_dims") = py::none(),
+        py::arg("tensor_offsets") = py::none());
+  m.def("group_scaled_clamped_swiglu", transformer_engine::pytorch::group_scaled_clamped_swiglu,
+        "Grouped scaled clamped-SwiGLU recompute fused with columnwise MXFP8 quantization",
+        py::arg("input_2h"), py::arg("prob"), py::arg("quantizer"), py::arg("num_tensors"),
+        py::arg("limit"), py::arg("alpha") = 1.702f, py::arg("glu_linear_offset") = 1.0f,
+        py::arg("first_dims") = py::none(), py::arg("last_dims") = py::none(),
+        py::arg("tensor_offsets") = py::none());
   transformer_engine::pytorch::bind_quantize_with_amax_extensions(m);
   m.def("group_dequantize", transformer_engine::pytorch::group_dequantize,
         "Dequantize group tensor", py::arg("input"), py::arg("otype"));
@@ -459,7 +470,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Swap first two tensor dimensions", py::arg("tensor"), py::kw_only(), py::arg("out"),
         py::call_guard<py::gil_scoped_release>());
   m.def("get_fused_attn_backend", &transformer_engine::pytorch::get_fused_attn_backend,
-        "Get Fused Attention backend", py::call_guard<py::gil_scoped_release>());
+        "Get Fused Attention backend", py::arg("fused_attn_params"));
   m.def("compute_amax", &transformer_engine::pytorch::compute_amax,
         "Compute absolute max value in tensor", py::arg("input"), py::arg("amax"),
         py::call_guard<py::gil_scoped_release>());

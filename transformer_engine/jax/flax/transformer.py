@@ -5,6 +5,7 @@
 Wrapper module for Transformer related layers with FP8 support.
 """
 import functools
+import operator
 from enum import Enum
 from math import sqrt
 import os
@@ -20,6 +21,7 @@ from jax import nn as jax_nn
 from jax import random as jax_random
 from jax import lax, vmap
 from jax.ad_checkpoint import checkpoint_name
+from transformer_engine_jax import NVTE_Fused_Attn_Backend
 
 from .module import DenseGeneral, LayerNormDenseGeneral, LayerNormMLP
 from .module import LayerNorm, Softmax
@@ -30,9 +32,10 @@ from ..attention import (
     QKVLayout,
     SequenceDescriptor,
 )
-from ..attention import is_fused_attn_kernel_available, make_swa_mask, canonicalize_attn_mask_type
+from ..attention import make_swa_mask, canonicalize_attn_mask_type
 from ..attention import fused_attn
 from ..attention import CPStrategy
+from ..cpp_extensions import FusedAttnHelper
 from ..softmax import SoftmaxFusionType
 from ..sharding import num_of_devices
 from ..sharding import get_sharding_map_logic_axis_to_mesh_axis
@@ -308,6 +311,7 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
     score_mod: Optional[Callable] = None
     score_mod_bprop: Optional[Callable] = None
     score_mod_requested: bool = False
+    return_max_logit: bool = False
 
     @nn.compact
     def __call__(
@@ -363,6 +367,7 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
             "score_mod_bprop": self.score_mod_bprop,
             "score_mod_tensors": score_mod_tensors,
             "score_mod_bprop_tensors": score_mod_bprop_tensors,
+            "return_max_logit": self.return_max_logit,
         }
 
         if self.qkv_layout.is_qkvpacked():
@@ -434,12 +439,17 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
         else:
             raise ValueError(f"Unsupported {self.qkv_layout=}.")
 
+        if self.return_max_logit:
+            x, max_logit = x
+
         if self.transpose_batch_sequence:
             x = x.transpose([1, 0, 2, 3])
 
         assert (
             x.dtype == query.dtype
         ), f"output dtype {x.dtype} does not match query dtype {query.dtype}"
+        if self.return_max_logit:
+            return x, max_logit
         return x
 
 
@@ -619,6 +629,9 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         argument to keep tensor operands as normal JAX inputs.
     score_mod_bprop_tensors: Optional[Mapping[str, Any]], default = None
         Additional tensors or pass-by-value scalars for ``score_mod_bprop``.
+    return_max_logit: bool, default = False
+        If True, return ``(output, max_logit)`` where ``max_logit`` contains the per-head
+        maximum attention logits with shape ``[h]``. This path requires fused attention.
 
     Optimization parameters
     -----------------------
@@ -647,6 +660,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
     softmax_type: str = "vanilla"
     score_mod: Optional[Callable] = None
     score_mod_bprop: Optional[Callable] = None
+    return_max_logit: bool = False
 
     def __post_init__(self):
         # TODO(KshitijLakhani): Remove warning in TransformerEngine v2.12
@@ -717,8 +731,8 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
 
         Returns
         -------
-        outputs: jax.numpy.ndarray
-            Output tensors.
+        outputs: jax.numpy.ndarray or tuple[jax.numpy.ndarray, jax.numpy.ndarray]
+            Output tensor, or ``(output, max_logit)`` when ``return_max_logit`` is enabled.
         """
         input_dtype = query.dtype
 
@@ -777,8 +791,12 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
 
         # Use fused attn (if kernel check below passes) by default
         enable_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "1"))
+        if self.return_max_logit and not enable_fused_attn:
+            raise ValueError("return_max_logit requires fused attention, but NVTE_FUSED_ATTN=0.")
 
         sequence_dim = 0 if self.transpose_batch_sequence else 1
+        batch_dim = 1 - sequence_dim
+        batch_size = query.shape[batch_dim]
         seqlen_q = query.shape[sequence_dim]
         if qkv_layout == QKVLayout.BS3HD:
             seqlen_kv = seqlen_q
@@ -795,42 +813,58 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             if not enable_fused_attn:
                 raise ValueError("score_mod requires fused attention, but NVTE_FUSED_ATTN=0.")
         kernel_qkv_layout = qkv_layout.to_separate() if score_mod_requested else qkv_layout
-        has_fused_attn_kernel = is_fused_attn_kernel_available(
+        bias_batch = bias_heads = bias_seqlen_q = bias_seqlen_kv = None
+        if attn_bias_type == AttnBiasType.POST_SCALE_BIAS:
+            *bias_batch_shape, bias_heads, bias_seqlen_q, bias_seqlen_kv = bias.shape
+            bias_batch = functools.reduce(operator.mul, bias_batch_shape)
+        fused_attn_helper = FusedAttnHelper(
             # This needs to be fixed: TE-Jax has historically correlated training mode
             # with deterministic mode.
-            not deterministic,
-            input_dtype,
+            is_training=not deterministic,
+            batch_size=batch_size,
+            q_dtype=input_dtype,
             # self._assert_dtypes enforces Q, K, V, bias to have the same dtype, so
             # using input_dtype as kv dtype is sufficient.
-            input_dtype,
-            kernel_qkv_layout,
-            attn_bias_type,
-            attn_mask_type,
-            softmax_type,
-            self.attention_dropout,
-            self.num_attention_heads,
-            self.num_gqa_groups,
-            seqlen_q,
-            seqlen_kv,
-            head_dim_qk,
-            head_dim_v,
-            self.window_size,
+            kv_dtype=input_dtype,
+            qkv_layout=kernel_qkv_layout,
+            attn_bias_type=attn_bias_type,
+            attn_mask_type=attn_mask_type,
+            softmax_type=softmax_type,
+            dropout_probability=self.attention_dropout,
+            q_num_heads=self.num_attention_heads,
+            kv_num_heads=self.num_gqa_groups,
+            q_max_seqlen=seqlen_q,
+            kv_max_seqlen=seqlen_kv,
+            head_dim_qk=head_dim_qk,
+            head_dim_v=head_dim_v,
+            window_size=(-1, -1) if self.window_size is None else self.window_size,
+            return_max_logit=self.return_max_logit,
+            bottom_right_diagonal=attn_mask_type.is_bottom_right(),
+            bias_batch=bias_batch,
+            bias_heads=bias_heads,
+            bias_seqlen_q=bias_seqlen_q,
+            bias_seqlen_kv=bias_seqlen_kv,
+            max_segments_per_seq=self.max_segments_per_seq,
         )
+        fused_attn_backend, _ = fused_attn_helper.get_fused_attn_backend()
+        has_fused_attn_kernel = fused_attn_backend != NVTE_Fused_Attn_Backend.NVTE_No_Backend
         if score_mod_requested and not has_fused_attn_kernel:
             raise ValueError(
                 "score_mod requires fused attention, but no fused attention kernel is available."
+            )
+        if self.return_max_logit and not has_fused_attn_kernel:
+            raise ValueError(
+                "return_max_logit requires fused attention, but no fused attention kernel is "
+                "available."
             )
 
         use_fused_attn = enable_fused_attn and has_fused_attn_kernel
 
         if enable_fused_attn and not has_fused_attn_kernel:
             warnings.warn(
-                "Fused attention is not enabled because there is no available kernel.\n"
-                "Fall back to the unfused attention.\n"
-                "Please try to update the cuDNN and TE to the latest version.\n"
-                f"{qkv_layout=}\n{attn_bias_type=}\n{attn_mask_type=}\n"
-                f"{self.attention_dropout=}\n{self.num_attention_heads=}\n{self.window_size=}\n"
-                f"{self.num_gqa_groups=}\n{seqlen_q=}\n{seqlen_kv=}\n{head_dim_qk=}\n{head_dim_v=}\n"
+                "Falling back to the unfused attention backend as fused attention does not support"
+                " this config. Set NVTE_DEBUG=1 and NVTE_DEBUG_LEVEL=2 to see the detailed"
+                " rejection reason.\n"
             )
 
         dropout_rng = None
@@ -916,6 +950,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 score_mod=self.score_mod,
                 score_mod_bprop=self.score_mod_bprop,
                 score_mod_requested=score_mod_requested,
+                return_max_logit=self.return_max_logit,
             )(
                 query,
                 key,
@@ -927,7 +962,10 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 score_mod_tensors=score_mod_tensors,
                 score_mod_bprop_tensors=score_mod_bprop_tensors,
             )
-        assert x.dtype == input_dtype, f"output_dtype={x.dtype}, input_dtype={input_dtype}"
+        output = x[0] if self.return_max_logit else x
+        assert (
+            output.dtype == input_dtype
+        ), f"output_dtype={output.dtype}, input_dtype={input_dtype}"
         return x
 
 

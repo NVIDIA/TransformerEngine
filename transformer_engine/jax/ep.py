@@ -100,6 +100,21 @@ def _ep_domain_for_rank(mesh, ep_resource, rank, device_to_rank=None):
     return int(grid[row, 0]), col, int(grid.shape[0])
 
 
+def _ep_flattened_replica_groups(mesh, ep_resource):
+    """FLATTENED_ID replica groups for the EP axis, as a flat int64 array.
+
+    Each group fixes all non-ep mesh coordinates and varies ep. Returns
+    ``(flat_groups, ep_size)``.
+    """
+    shape = tuple(mesh.shape[a] for a in mesh.axis_names)
+    ep_pos = mesh.axis_names.index(ep_resource)
+    ep_size = shape[ep_pos]
+    world = int(np.prod(shape))
+    grid = np.arange(world, dtype=np.int64).reshape(shape)
+    groups = np.moveaxis(grid, ep_pos, -1).reshape(-1, ep_size)
+    return groups.reshape(-1), ep_size
+
+
 def ep_bootstrap(
     world_size,
     rank,
@@ -116,37 +131,40 @@ def ep_bootstrap(
     Must run inside the active JAX Mesh and a global_shard_guard; ep_size and
     num_ep_groups are read from the mesh axes named by MeshResource.ep_resource
     and MeshResource.dp_resource/fsdp_resource. Axes orthogonal to EP (tp, pp,
-    cp, ...) are supported and replicated across EP tensors.
+    cp, ...) are supported and replicated across EP tensors. Auto-selects
+    between self-hosted NCCL and XLA's borrowed comm (see
+    tex.ep.use_nccl_comm_from_xla).
+    Multiple local devices require the XLA borrowed communicator path.
 
     Args:
-        world_size: Total number of processes (product of all mesh axes).
-        rank: Global rank of the calling process.
+        world_size: Total number of devices (product of all mesh axes).
+            Pass None to use the active mesh size; an explicit value must match it.
+        rank: Global rank of the calling process. Unused on the borrowed-comm
+            path, where each device's identity comes from its mesh position.
+            Pass None to use jax.process_index().
         num_experts: Total experts across the EP group.
         max_tokens_per_rank: Max tokens one rank dispatches per step (sizes send buffers).
         recv_capacity_per_rank: Max tokens one rank receives per step; set to
             at least ep_size * max_tokens_per_rank * top_k to avoid drops.
         hidden_dim: Feature dimension of token tensors passed to ep_dispatch.
         max_token_dtype: Widest dtype the group will dispatch (only bfloat16 supported).
-        max_num_sms: SM budget for EP kernels; 0 = auto.
+        max_num_sms: SM budget for the dispatch/combine kernels; 0 = default (32).
         drop_on_overflow: Drop tokens exceeding recv_capacity_per_rank instead of
             trapping on overflow. Dropped tokens are still counted in
             total_recv_tokens, so callers can detect overflow from it.
     """
+    if rank is None:
+        rank = jax.process_index()
     if jnp.dtype(max_token_dtype) != jnp.bfloat16:
         raise NotImplementedError(
             "ep_bootstrap: only max_token_dtype=jnp.bfloat16 is supported today, got"
             f" {jnp.dtype(max_token_dtype)}."
         )
-    if world_size < 2:
-        raise ValueError(
-            f"ep_bootstrap requires world_size >= 2 (got {world_size}); NCCL EP needs"
-            " at least 2 ranks to form a group."
-        )
-    if jax.local_device_count() != 1:
-        raise ValueError(
-            "ep_bootstrap requires one local device per process (got"
-            f" jax.local_device_count() = {jax.local_device_count()}); NCCL EP does not"
-            " support single-process multi-device setups."
+    if jax.local_device_count() != 1 and not tex.ep.use_nccl_comm_from_xla():
+        raise RuntimeError(
+            "ep_bootstrap: multiple local devices require the XLA-borrowed-comm EP path"
+            " (tex.ep.use_nccl_comm_from_xla), which is unavailable here -- rebuild TE with"
+            " XLA collectives FFI support, or launch one process per GPU instead."
         )
 
     gsr = global_mesh_resource()
@@ -162,6 +180,13 @@ def ep_bootstrap(
             "ep_bootstrap must run inside an active jax.sharding.Mesh; enter"
             " `with mesh:` (or jax.set_mesh(mesh)) before calling it."
         )
+    if world_size is None:
+        world_size = get_num_devices_in_mesh(mesh)
+    if world_size < 2:
+        raise ValueError(
+            f"ep_bootstrap requires world_size >= 2 (got {world_size}); NCCL EP needs"
+            " at least 2 ranks to form a group."
+        )
     if get_num_devices_in_mesh(mesh) != world_size:
         raise ValueError(
             f"ep_bootstrap: mesh device count ({get_num_devices_in_mesh(mesh)}) must equal"
@@ -174,6 +199,42 @@ def ep_bootstrap(
     num_ep_groups = 1 if outer_axis is None else get_mesh_axis_size(outer_axis)
     if num_experts % ep_size != 0:
         raise ValueError(f"num_experts ({num_experts}) must be divisible by ep_size ({ep_size}).")
+
+    common_cfg = {
+        "world_size": world_size,
+        "rank": rank,
+        "ep_size": ep_size,
+        "num_ep_groups": num_ep_groups,
+        "num_experts": num_experts,
+        "num_local_experts": num_experts // ep_size,
+        "max_tokens_per_rank": max_tokens_per_rank,
+        "recv_capacity_per_rank": recv_capacity_per_rank,
+        "hidden_dim": hidden_dim,
+    }
+
+    # Borrowed-comm path (auto-selected by tex.ep.use_nccl_comm_from_xla): XLA
+    # owns the EP communicator, so a one-shot bootstrap op fetches it and
+    # initializes EPBackend instead of a host-side UID exchange.
+    if tex.ep.use_nccl_comm_from_xla():
+        replica_groups, ep_group_size = _ep_flattened_replica_groups(mesh, ep_resource)
+        communication_id = tex.ep.EP_COMMUNICATION_ID
+        transformer_engine_jax.set_ep_bootstrap_params(
+            bytes(128),
+            ep_size,
+            0,
+            num_experts,
+            max_tokens_per_rank,
+            recv_capacity_per_rank,
+            hidden_dim,
+            max_num_sms=int(max_num_sms),
+            max_token_dtype=int(jax_dtype_to_te_dtype(max_token_dtype)),
+            drop_on_overflow=bool(drop_on_overflow),
+            borrowed_comm=True,
+        )
+        tex.ep.set_ep_config(tex.ep.EpConfig(**common_cfg))
+        # Initialize EPBackend now so trace-time handle_mem_size finds it ready.
+        tex.ep.run_borrowed_comm_bootstrap(mesh, replica_groups, ep_group_size, communication_id)
+        return
 
     UID_SIZE = 128
     root_rank, rank_within_group, _num_domains = _ep_domain_for_rank(mesh, ep_resource, rank)
@@ -206,34 +267,31 @@ def ep_bootstrap(
     )
 
     # Release the C++ anchor at interpreter shutdown so RAII can tear down NCCL.
+    # release_ep_resources_at_exit (not release_ep_resources): a later
+    # ep_finalize + borrowed-comm ep_bootstrap in this same process must not
+    # leave this self-hosted-registered hook shutting down the borrowed
+    # backend at exit (see ReleaseEpResourcesAtExit).
     global _atexit_registered
     if not _atexit_registered:
-        atexit.register(transformer_engine_jax.release_ep_resources)
+        atexit.register(transformer_engine_jax.release_ep_resources_at_exit)
         _atexit_registered = True
 
-    tex.ep.set_ep_config(
-        tex.ep.EpConfig(
-            world_size=world_size,
-            rank=rank,
-            ep_size=ep_size,
-            num_ep_groups=num_ep_groups,
-            num_experts=num_experts,
-            num_local_experts=num_experts // ep_size,
-            max_tokens_per_rank=max_tokens_per_rank,
-            recv_capacity_per_rank=recv_capacity_per_rank,
-            hidden_dim=hidden_dim,
-        )
-    )
+    tex.ep.set_ep_config(tex.ep.EpConfig(**common_cfg))
 
 
 def ep_finalize():
     """Tear down the EP communicator so ``ep_bootstrap`` can run again.
 
     Only for killing and re-bootstrapping EP mid-program (e.g. tests sweeping
-    configs); a normal run bootstraps once and lets atexit clean up. Calls the
-    process-global ``jax.clear_caches()`` so every cached executable releases
-    the NCCL comm it pins, then frees the EP resources. Call outside any active
-    EP computation.
+    configs); a normal run just exits without calling this. Self-hosted NCCL
+    also tears down via atexit; the borrowed-comm path has no atexit hook, so
+    use this for mid-process teardown there. Calls the process-global
+    ``jax.clear_caches()`` so every cached executable releases the NCCL comm
+    it pins, then frees the EP resources. Call outside any active EP
+    computation.
+
+    Reinitialization must use the same communicator mode; switching modes
+    requires a process restart.
     """
     jax.clear_caches()
     transformer_engine_jax.release_ep_resources()

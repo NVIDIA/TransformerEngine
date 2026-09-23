@@ -49,7 +49,7 @@ typedef struct {
   int max_recv_tokens_per_rank;
   /*! Token hidden dimension. */
   int hidden_dim;
-  /*! Max SMs for NCCL EP dispatch/combine kernels. 0 = auto. */
+  /*! Max SMs for NCCL EP dispatch/combine kernels. 0 = default (32, clamped to device SM count). */
   int num_comm_sms;
   /*! Widest token dtype the group will dispatch; sizes staging buffers.
    *  Required (no default): must be set to a real token dtype. Per-dispatch
@@ -94,17 +94,20 @@ typedef struct {
 /*! \brief Bootstrap the EP backend from an existing NCCL EP sub-communicator.
  *         Requires SM>=90.
  *
+ *  This call validates that the runtime NCCL is >=2.30.4 and then loads the
+ *  optional libnccl_ep.so library. Non-EP users do not load the library.
+ *
  *  ep_comm is borrowed and must span exactly group_config.ep_size ranks. The
  *  caller retains ownership and must keep it alive until nvte_ep_shutdown()
  *  returns. Re-init after shutdown is allowed; double-init throws. One EP
- *  group per process, bound to the current CUDA device.
+ *  group per local device, bound to the current CUDA device.
  *
  *  \param[in] ep_comm      Opaque ncclComm_t for the EP sub-group.
  *  \param[in] group_config Group-level EP configuration (struct_size set).
  */
 void nvte_ep_initialize(void* ep_comm, const NVTEEpGroupConfig* group_config);
 
-/*! \brief Tear down the EP backend. Idempotent. Does not destroy ep_comm. */
+/*! \brief Tear down all local EP backends. Idempotent. Does not destroy ep_comm. */
 void nvte_ep_shutdown(void);
 
 /* -- Layer sizing (host-only) --------------------------------------------- */
@@ -114,7 +117,8 @@ void nvte_ep_shutdown(void);
  *  handle_mem is a per-layer kByte routing-state buffer; allocate once and
  *  thread the same pointer through every prepare/dispatch/combine/_bwd call
  *  for that layer (the backend keys its cache on the pointer). Host-only;
- *  size is stable for a given (group, layer) pair.
+ *  returns the maximum required size across initialized local devices. Size
+ *  is stable while the initialized groups and layer config remain unchanged.
  *
  *  \param[in] layer_cfg  Per-call layer configuration (struct_size set).
  *  \return size in bytes for the handle_mem buffer.

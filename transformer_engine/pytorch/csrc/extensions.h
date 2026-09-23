@@ -94,12 +94,8 @@ std::tuple<at::Tensor, at::Tensor> moe_unpermute_bwd(at::Tensor input_bwd, at::T
  * Attention
  **************************************************************************************************/
 
-NVTE_Fused_Attn_Backend get_fused_attn_backend(
-    bool is_training, const DType q_dtype, const DType kv_dtype, NVTE_QKV_Layout qkv_layout,
-    NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
-    float p_dropout, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
-    size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, int64_t window_size_left,
-    int64_t window_size_right, bool return_max_logit, bool cuda_graph, bool deterministic);
+std::tuple<NVTE_Fused_Attn_Backend, std::string> get_fused_attn_backend(
+    const py::object &fused_attn_params);
 
 std::vector<py::object> fused_attn_fwd(
     size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training, float attn_scale, float p_dropout,
@@ -398,6 +394,19 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
                           std::optional<at::Tensor> tensor_offsets,
                           std::optional<at::Tensor> noop_flag, const py::object &output);
 
+py::object group_scaled_swiglu(const at::Tensor &input_2h, const at::Tensor &prob,
+                               py::handle quantizer, const size_t num_tensors,
+                               std::optional<at::Tensor> first_dims,
+                               std::optional<at::Tensor> last_dims,
+                               std::optional<at::Tensor> tensor_offsets);
+
+py::object group_scaled_clamped_swiglu(const at::Tensor &input_2h, const at::Tensor &prob,
+                                       py::handle quantizer, const size_t num_tensors, float limit,
+                                       float alpha, float glu_linear_offset,
+                                       std::optional<at::Tensor> first_dims,
+                                       std::optional<at::Tensor> last_dims,
+                                       std::optional<at::Tensor> tensor_offsets);
+
 py::object nvfp4_group_quantize_with_amax(const at::Tensor &tensor, py::handle quantizer,
                                           const size_t num_tensors,
                                           std::optional<at::Tensor> first_dims,
@@ -606,9 +615,9 @@ void thd_second_half_lse_correction(at::Tensor lse, const at::Tensor &lse_per_st
 at::Tensor thd_read_second_half_lse(const at::Tensor &lse, const at::Tensor &cu_seqlens,
                                     bool lse_packed, int second_half_lse_seqlen);
 
-void thd_out_correction(at::Tensor out, const at::Tensor &out_per_step, const at::Tensor &lse,
-                        const at::Tensor &lse_per_step, const at::Tensor &cu_seqlens,
-                        bool only_second_half, bool lse_packed);
+void thd_out_correction(at::Tensor out, const at::Tensor &out_per_step, const at::Tensor &old_lse,
+                        const at::Tensor &lse, const at::Tensor &lse_per_step,
+                        const at::Tensor &cu_seqlens, bool only_second_half, bool lse_packed);
 
 void thd_grad_correction(at::Tensor grad, const at::Tensor &grad_per_step,
                          const at::Tensor &cu_seqlens, const std::string &first_half,
@@ -745,6 +754,24 @@ void ep_dispatch(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens,
                  at::Tensor topk_weights, at::Tensor recv_tokens, at::Tensor recv_topk_weights,
                  std::optional<at::Tensor> tokens_scale_inv = std::nullopt,
                  std::optional<at::Tensor> recv_scale_inv = std::nullopt);
+
+// Fused prepare + dispatch in a single call. When the recv outputs are omitted
+// (eager mode), they are sized and allocated here from the per-step recv-count:
+// prepare writes the total into pinned-host total_recv_tokens (UVA), a stream sync
+// makes it host-readable with no D2H copy, and the recv outputs are carved from it
+// and returned; this path forbids symm-mem zero-copy IO. When the caller supplies
+// the recv outputs (non-eager), they are used as-is and mutated in place with no
+// stream sync. Passing tokens_scale_inv selects the MXFP8 path (recv_scale_inv is
+// then required or, in eager mode, allocated). Returns the allocated recv outputs
+// in eager mode ({recv_tokens, recv_topk_weights[, recv_scale_inv]}), else empty.
+std::vector<at::Tensor> ep_prepare_and_dispatch(
+    at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens, at::Tensor topk_weights,
+    at::Tensor tokens_per_expert, at::Tensor total_recv_tokens, int64_t top_k,
+    int64_t dispatch_output_per_expert_alignment,
+    std::optional<at::Tensor> recv_tokens = std::nullopt,
+    std::optional<at::Tensor> recv_topk_weights = std::nullopt,
+    std::optional<at::Tensor> recv_scale_inv = std::nullopt,
+    std::optional<at::Tensor> tokens_scale_inv = std::nullopt);
 
 void ep_combine(at::Tensor handle_mem, at::Tensor expert_out, at::Tensor result);
 
