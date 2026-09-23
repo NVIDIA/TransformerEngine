@@ -430,6 +430,16 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   if (use_fp4 && (D_type == CUDA_R_16F)) {
     NVTE_ERROR("FP4 GEMM does not support FP16 output!");
   }
+  // cuBLASLt non-FP8/FP4 support tables require Bias Type == C/D. When
+  // CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE is unset, cuBLAS assumes bias dtype
+  // equals D and will reinterpret / OOB-read a narrower bias buffer.
+  if (bias && !(use_fp8 || use_fp4)) {
+    NVTE_CHECK(bias_type == D_type,
+               "Non-FP8/FP4 GEMM bias dtype must match output dtype (cuBLASLt epilogue). "
+               "Got bias=", to_string(inputBias->data.dtype), " D=",
+               to_string(outputD->data.dtype),
+               ". Cast bias to the output dtype before calling.");
+  }
 
   cublasLtHandle_t handle = cublasHandleManager::Instance().GetHandle();
 
