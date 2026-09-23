@@ -35,23 +35,20 @@ recipe_available, reason_for_no_recipe = helper.is_scaling_mode_supported(
     ScalingMode.MXFP8_1D_SCALING
 )
 
-# The already-loaded core lib (dlopen refcounts: this returns the same handle,
-# so the call mutates the same dispatcher singleton the quantize ops read).
 CORE_LIB = ctypes.CDLL(str(_get_shared_object_file("core")))
-# We need this API to manually enable & disable the CuTeDSL backend for the tests
-if not hasattr(CORE_LIB, "nvte_set_cutedsl_backend"):
-    raise RuntimeError(
-        "libtransformer_engine.so lacks nvte_set_cutedsl_backend -- rebuild the "
-        "Transformer Engine core library."
-    )
-
-# The CuTeDSL entrypoint is registered only when NVTE_ENABLE_CUTEDSL_BACKEND
-# is set (see common/__init__.py); without it there is nothing to compare against
-# the CUDA path, so skip these runs.
+cutedsl_built = hasattr(CORE_LIB, "nvte_is_cutedsl_backend_built") and bool(
+    CORE_LIB.nvte_is_cutedsl_backend_built()
+)
 cutedsl_enabled = os.environ.get("NVTE_ENABLE_CUTEDSL_BACKEND", "0") != "0"
+if not cutedsl_built:
+    skip_reason = "Transformer Engine was built without NVTE_WITH_CUTEDSL=1"
+elif not cutedsl_enabled:
+    skip_reason = "NVTE_ENABLE_CUTEDSL_BACKEND is not set"
+else:
+    skip_reason = reason_for_no_recipe
 pytestmark = pytest.mark.skipif(
-    not (recipe_available and cutedsl_enabled),
-    reason=reason_for_no_recipe or "NVTE_ENABLE_CUTEDSL_BACKEND is not set",
+    not (recipe_available and cutedsl_built and cutedsl_enabled),
+    reason=skip_reason,
 )
 
 # CuTeDSL's divisibility assumption strictly requires 32x32 alignment, and the JAX
@@ -68,11 +65,29 @@ MATRIX_SIZES = [
 # covered by tests/pytorch/mxfp8/test_mxfp8_cutedsl_backend.py.
 Q_LAYOUTS = [QuantizeLayout.ROWWISE, QuantizeLayout.ROWWISE_COLWISE]
 
-# Only GeLU activation tests are used (SiLU/ReLU/QGeLU/SReLU commented out
-# in the C++ test as well). Gated variants go to a separate TE/common kernel
-# that the CuTeDSL backend does not cover.
-ACT_TYPE = ("gelu",)
-METHODS = ["CAST_ONLY", "CAST_DBIAS", "CAST_ACT", "CAST_DACT", "CAST_DBIAS_DACT"]
+# Every activation the CuTeDSL backend implements, as (JAX activation_type, name it goes by
+# in the config key). The two differ for qgelu/srelu: JAX spells them quick_gelu/squared_relu
+# (ActivationEnum in jax/cpp_extensions/activation.py), the backend uses the C++ spelling
+# (Activation in common/util/cutedsl_utils.h). Gated variants are absent because they go to a
+# separate TE/common kernel that the backend does not cover.
+ACTIVATIONS = [
+    (("gelu",), "gelu"),
+    (("relu",), "relu"),
+    (("silu",), "silu"),
+    (("quick_gelu",), "qgelu"),
+    (("squared_relu",), "srelu"),
+]
+# CAST_ONLY and CAST_DBIAS apply no activation, so their activation_type is never reached.
+NO_ACT = (("gelu",), "none")
+METHOD_ACT_CASES = [
+    ("CAST_ONLY", *NO_ACT),
+    ("CAST_DBIAS", *NO_ACT),
+] + [
+    (method, act_type, desc)
+    for method in ("CAST_ACT", "CAST_DACT", "CAST_DBIAS_DACT")
+    for act_type, desc in ACTIVATIONS
+]
+METHOD_ACT_IDS = [m if d == "none" else f"{m}X{d}" for m, _, d in METHOD_ACT_CASES]
 
 IN_DTYPES = [jnp.float32, jnp.bfloat16, jnp.float16]
 FP8_DTYPES = [jnp.float8_e4m3fn, jnp.float8_e5m2]
@@ -122,7 +137,7 @@ def generate_inputs(M, N, in_dtype, seed=0):
     return x, act_input
 
 
-def run_quantize(method, x, act_input, q_layout, fp8_dtype):
+def run_quantize(method, act_type, x, act_input, q_layout, fp8_dtype):
     """Quantize via the public dispatch; returns (scaled_tensor, dbias_or_None)."""
     quantizer = QuantizerFactory.create(
         scaling_mode=ScalingMode.MXFP8_1D_SCALING, q_dtype=fp8_dtype, q_layout=q_layout
@@ -132,18 +147,18 @@ def run_quantize(method, x, act_input, q_layout, fp8_dtype):
     if method == "CAST_DBIAS":
         return tex.quantize_dbias(x, quantizer=quantizer)
     if method == "CAST_ACT":
-        return tex.act_lu(act_input, ACT_TYPE, quantizer=quantizer), None
+        return tex.act_lu(act_input, act_type, quantizer=quantizer), None
     if method == "CAST_DACT":
         out, _ = tex.quantize_dact_dbias(
-            x, act_input, ACT_TYPE, is_dbias=False, quantizer=quantizer
+            x, act_input, act_type, is_dbias=False, quantizer=quantizer
         )
         return out, None
     if method == "CAST_DBIAS_DACT":
-        return tex.quantize_dact_dbias(x, act_input, ACT_TYPE, is_dbias=True, quantizer=quantizer)
+        return tex.quantize_dact_dbias(x, act_input, act_type, is_dbias=True, quantizer=quantizer)
     raise ValueError(f"unknown method {method!r}")
 
 
-def get_cfg_key(method, in_dtype, fp8_dtype, q_layout):
+def get_cfg_key(method, act_desc, in_dtype, fp8_dtype, q_layout):
     """Mirror of MXFP8QuantConfig::to_key (quantize_mxfp8_cutedsl.cuh): the name the CuTeDSL backend
     registers its compiled kernel under for this config.
     Used to check if the CuTeDSL implementation is registered
@@ -153,9 +168,9 @@ def get_cfg_key(method, in_dtype, fp8_dtype, q_layout):
     with_act = method == "CAST_ACT"
     desc = "none"
     if with_act:
-        desc = "gelu"
+        desc = act_desc
     elif with_dact:
-        desc = "dgelu"
+        desc = f"d{act_desc}"
     # MXFP8 never asks TE/common for an amax, and JAX quantize emits scales in the linear
     # (non-swizzled) layout -- the GEMM swizzle happens later, in JAX (see gemm.swizzled_scale).
     # trailing False is use_2d_quantization; JAX never requests 2D block scaling
@@ -192,7 +207,7 @@ def extract_quantized_output(out, dbias):
     return parts, None if dbias is None else np.asarray(dbias)
 
 
-def run_test_case(method, shape, q_layout, in_dtype, fp8_dtype):
+def run_test_case(method, act_type, act_desc, shape, q_layout, in_dtype, fp8_dtype):
     """Assert the CuTeDSL and CUDA backends produce bit-identical outputs for the
     same input and config.
     """
@@ -201,13 +216,13 @@ def run_test_case(method, shape, q_layout, in_dtype, fp8_dtype):
 
     set_cutedsl_backend(False)
     cuda_output, dbias_cuda = extract_quantized_output(
-        *run_quantize(method, x, act_input, q_layout, fp8_dtype)
+        *run_quantize(method, act_type, x, act_input, q_layout, fp8_dtype)
     )
 
     set_cutedsl_backend(True)
     try:
         cutedsl_output, dbias_cutedsl = extract_quantized_output(
-            *run_quantize(method, x, act_input, q_layout, fp8_dtype)
+            *run_quantize(method, act_type, x, act_input, q_layout, fp8_dtype)
         )
     finally:
         set_cutedsl_backend(False)
@@ -216,14 +231,14 @@ def run_test_case(method, shape, q_layout, in_dtype, fp8_dtype):
     # CuTeDSL backend supports, so its kernel must have been registered under the
     # config key. If not, the backend rejected or missed the config and the
     # comparison above was CUDA vs CUDA.
-    key = get_cfg_key(method, in_dtype, fp8_dtype, q_layout)
+    key = get_cfg_key(method, act_desc, in_dtype, fp8_dtype, q_layout)
     assert tvm_ffi.get_global_func(key, allow_missing=True) is not None, (
         f"CuTeDSL kernel not registered for {key}; the CuTeDSL backend fell back "
         "to CUDA and this case compared CUDA against itself"
     )
 
     tag = (
-        f"{method}/{get_layout_id(q_layout)}/{M}x{N}/"
+        f"{method}/{act_desc}/{get_layout_id(q_layout)}/{M}x{N}/"
         f"{DTYPE_TO_STR[in_dtype]}/{FP8_TO_STR[fp8_dtype]}"
     )
     for name, cuda_bytes in cuda_output.items():
@@ -242,21 +257,29 @@ def run_test_case(method, shape, q_layout, in_dtype, fp8_dtype):
 @pytest.mark.parametrize("in_dtype", IN_DTYPES, ids=get_dtype_id)
 @pytest.mark.parametrize("fp8_dtype", FP8_DTYPES, ids=get_fp8_id)
 def test_cast_only(fp8_dtype, in_dtype, q_layout, shape):
-    run_test_case("CAST_ONLY", shape, q_layout, in_dtype, fp8_dtype)
+    run_test_case("CAST_ONLY", *NO_ACT, shape, q_layout, in_dtype, fp8_dtype)
 
 
 # Test cases with varying matrix shapes and quantize layouts
 # (OperatorTest_FusedCastMXFP8_Sizes).
 @pytest.mark.parametrize("shape", MATRIX_SIZES, ids=get_shape_id)
 @pytest.mark.parametrize("q_layout", Q_LAYOUTS, ids=get_layout_id)
-@pytest.mark.parametrize("method", METHODS)
-def test_sizes(method, q_layout, shape):
-    run_test_case(method, shape, q_layout, jnp.bfloat16, jnp.float8_e4m3fn)
+@pytest.mark.parametrize("method,act_type,act_desc", METHOD_ACT_CASES, ids=METHOD_ACT_IDS)
+def test_sizes(method, act_type, act_desc, q_layout, shape):
+    run_test_case(method, act_type, act_desc, shape, q_layout, jnp.bfloat16, jnp.float8_e4m3fn)
 
 
 # Test cases with varying dtypes (OperatorTest_FusedCastMXFP8_Dtypes).
 @pytest.mark.parametrize("in_dtype", IN_DTYPES, ids=get_dtype_id)
 @pytest.mark.parametrize("fp8_dtype", FP8_DTYPES, ids=get_fp8_id)
-@pytest.mark.parametrize("method", METHODS)
-def test_dtypes(method, fp8_dtype, in_dtype):
-    run_test_case(method, (256, 384), QuantizeLayout.ROWWISE_COLWISE, in_dtype, fp8_dtype)
+@pytest.mark.parametrize("method,act_type,act_desc", METHOD_ACT_CASES, ids=METHOD_ACT_IDS)
+def test_dtypes(method, act_type, act_desc, fp8_dtype, in_dtype):
+    run_test_case(
+        method,
+        act_type,
+        act_desc,
+        (256, 384),
+        QuantizeLayout.ROWWISE_COLWISE,
+        in_dtype,
+        fp8_dtype,
+    )

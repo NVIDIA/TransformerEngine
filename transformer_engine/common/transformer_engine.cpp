@@ -1436,3 +1436,12 @@ extern "C" __attribute__((visibility("default"))) void nvte_set_cutedsl_backend(
   (void)enabled;
 #endif
 }
+
+extern "C" __attribute__((visibility("default"))) int nvte_is_cutedsl_backend_built() {
+  // Used to check if the CuTeDSL backend is built into the library.
+#ifdef NVTE_WITH_CUTEDSL
+  return 1;
+#else
+  return 0;
+#endif
+}

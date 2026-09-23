@@ -28,23 +28,20 @@ from transformer_engine.pytorch import MXFP8Quantizer
 
 recipe_available, reason_for_no_recipe = te.is_mxfp8_available(return_reason=True)
 
-# The already-loaded core lib (dlopen refcounts: this returns the same handle,
-# so the call mutates the same dispatcher singleton the quantize ops read).
 CORE_LIB = ctypes.CDLL(str(_get_shared_object_file("core")))
-# We need this API to manually enable & disable the CuTeDSL backend for the tests
-if not hasattr(CORE_LIB, "nvte_set_cutedsl_backend"):
-    raise RuntimeError(
-        "libtransformer_engine.so lacks nvte_set_cutedsl_backend -- rebuild the "
-        "Transformer Engine core library."
-    )
-
-# The CuTeDSL entrypoint is registered only when NVTE_ENABLE_CUTEDSL_BACKEND
-# is set (see common/__init__.py); without it there is nothing to compare against
-# the CUDA path, so skip these runs.
+cutedsl_built = hasattr(CORE_LIB, "nvte_is_cutedsl_backend_built") and bool(
+    CORE_LIB.nvte_is_cutedsl_backend_built()
+)
 cutedsl_enabled = os.environ.get("NVTE_ENABLE_CUTEDSL_BACKEND", "0") != "0"
+if not cutedsl_built:
+    skip_reason = "Transformer Engine was built without NVTE_WITH_CUTEDSL=1"
+elif not cutedsl_enabled:
+    skip_reason = "NVTE_ENABLE_CUTEDSL_BACKEND is not set"
+else:
+    skip_reason = reason_for_no_recipe
 pytestmark = pytest.mark.skipif(
-    not (recipe_available and cutedsl_enabled),
-    reason=reason_for_no_recipe or "NVTE_ENABLE_CUTEDSL_BACKEND is not set",
+    not (recipe_available and cutedsl_built and cutedsl_enabled),
+    reason=skip_reason,
 )
 
 # We reject irregular shapes in transformer_engine/pytorch/csrc/quantizer.cpp's MXFP8Quantizer::get_scale_shape
@@ -64,22 +61,52 @@ MATRIX_SIZES = [
 # (block_rows, block_cols): (1,32)=rowwise, (32,1)=colwise, (32,32)=both.
 BLOCK_SIZES = [(1, 32), (32, 1), (32, 32)]
 
-# Only GeLU activation tests are used (SiLU/ReLU/QGeLU/SReLU commented out
-# in the C++ test as well).
+# Every activation the CuTeDSL backend implements; "desc" is the name it goes by in the
+# config key (Activation in common/util/cutedsl_utils.h). Gated variants are absent because
+# they go to a separate TE/common kernel that the backend does not cover.
 IDENTITY = {"name": "Identity", "act": None, "dact": None, "dbias_dact": None, "desc": "none"}
-GELU = {
-    "name": "GeLU",
-    "act": tex.gelu,
-    "dact": tex.dgelu,
-    "dbias_dact": tex.dbias_dgelu,
-    "desc": "gelu",
-}
+ACTIVATIONS = [
+    {
+        "name": "GeLU",
+        "act": tex.gelu,
+        "dact": tex.dgelu,
+        "dbias_dact": tex.dbias_dgelu,
+        "desc": "gelu",
+    },
+    {
+        "name": "ReLU",
+        "act": tex.relu,
+        "dact": tex.drelu,
+        "dbias_dact": tex.dbias_drelu,
+        "desc": "relu",
+    },
+    {
+        "name": "SiLU",
+        "act": tex.silu,
+        "dact": tex.dsilu,
+        "dbias_dact": tex.dbias_dsilu,
+        "desc": "silu",
+    },
+    {
+        "name": "QGeLU",
+        "act": tex.qgelu,
+        "dact": tex.dqgelu,
+        "dbias_dact": tex.dbias_dqgelu,
+        "desc": "qgelu",
+    },
+    {
+        "name": "SReLU",
+        "act": tex.srelu,
+        "dact": tex.dsrelu,
+        "dbias_dact": tex.dbias_dsrelu,
+        "desc": "srelu",
+    },
+]
 METHOD_FUSION_CASES = [
     ("CAST_ONLY", IDENTITY),
     ("CAST_DBIAS", IDENTITY),
-    ("CAST_ACT", GELU),
-    ("CAST_DACT", GELU),
-    ("CAST_DBIAS_DACT", GELU),
+] + [
+    (method, act) for method in ("CAST_ACT", "CAST_DACT", "CAST_DBIAS_DACT") for act in ACTIVATIONS
 ]
 METHOD_FUSION_IDS = [f"{m}X{f['name']}" for m, f in METHOD_FUSION_CASES]
 
