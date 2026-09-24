@@ -24,6 +24,7 @@ import transformer_engine.pytorch.ops.fused.grouped_mlp as grouped_mlp_module
 from transformer_engine.pytorch.ops.fused.grouped_mlp import (
     _cudnn_frontend_supports_grouped_gemm_situglu,
     _cudnn_frontend_supports_grouped_gemm_srelu,
+    _cudnn_frontend_version_at_least,
     _cudnn_frontend_version_supported,
 )
 from transformer_engine.pytorch.ops.basic.grouped_linear import (
@@ -40,6 +41,7 @@ from transformer_engine.pytorch import (
     QuantizerRole,
     is_bf16_available,
 )
+from transformer_engine.pytorch.utils import get_device_compute_capability
 import transformer_engine_torch as tex
 
 # Import utility functions
@@ -57,6 +59,11 @@ from utils import (
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
 nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
+
+# Device arch
+device_arch = get_device_compute_capability()
+device_is_blackwell = device_arch[0] == 10 and device_arch[1] < 7
+device_is_rubin = device_arch[0] == 10 and device_arch[1] == 7
 
 # Soft-clamp scale for ScaledTanhSReLU coverage. Deliberately small relative to the
 # FC1 outputs these tests produce, so tanh actually saturates -- a large scale would
@@ -1081,11 +1088,7 @@ class TestGroupedMLPFusedOp:
         ops = [fc1, activation, fc2]
 
         def fuse(recipe):
-            return grouped_mlp_module.fuse_grouped_mlp_ops(
-                ops,
-                recipe=recipe,
-                fused_op_cls=fused_op_cls,
-            )
+            return grouped_mlp_module.fuse_glu_ops(ops, recipe=recipe)
 
         def assert_fused(recipe):
             fused_ops = fuse(recipe)
@@ -1468,20 +1471,40 @@ class TestGroupedMLPFusedOp:
             fc2.backward_dw()
 
         # Check for expected fusions
-        if activation == "scaled_situglu":
+        if activation == "scaled_swiglu":
+            cudnn_frontend_supports_grouped_mlp = (
+                _cudnn_frontend_version_supported()
+                and (device_is_blackwell or device_is_rubin)
+            )
+        elif activation in ("scaled_clamped_qgeglu", "scaled_clamped_qgeglu_custom"):
+            cudnn_frontend_supports_grouped_mlp = _cudnn_frontend_version_supported()
+            if device_is_blackwell:
+                pass
+            elif device_is_rubin:
+                if not _cudnn_frontend_version_at_least("1.30.0"):
+                    cudnn_frontend_supports_grouped_mlp = False
+            else:
+                cudnn_frontend_supports_grouped_mlp = False
+        elif activation == "scaled_situglu":
             cudnn_frontend_supports_grouped_mlp = (
                 grouped_mlp_module._cudnn_frontend_supports_grouped_gemm_situglu()
+                and device_is_blackwell
             )
         elif activation == "scaled_srelu":
-            cudnn_frontend_supports_grouped_mlp = _cudnn_frontend_supports_grouped_gemm_srelu()
+            cudnn_frontend_supports_grouped_mlp = (
+                _cudnn_frontend_supports_grouped_gemm_srelu()
+                and (device_is_blackwell or device_is_rubin)
+            )
         elif activation == "scaled_tanh_srelu":
             # Needs both the base srelu kernels and the tanh_clamp_scale parameter.
             cudnn_frontend_supports_grouped_mlp = (
                 _cudnn_frontend_supports_grouped_gemm_srelu()
                 and grouped_mlp_module._cudnn_frontend_supports_grouped_gemm_srelu_tanh()
+                and (device_is_blackwell or device_is_rubin)
             )
         else:
-            cudnn_frontend_supports_grouped_mlp = _cudnn_frontend_version_supported()
+            raise ValueError(f"Unexpected grouped MLP activation ({activation})")
+
         expected_grouped_mlp_fusion = cudnn_frontend_supports_grouped_mlp and (
             (
                 quantization == "mxfp8"
@@ -1657,6 +1680,8 @@ class TestGroupedMLPFusedOp:
         """Real cuDNN MXFP8 GLU wrappers execute with TE's generated argument dtypes."""
         if not _cudnn_frontend_supports_grouped_gemm_situglu():
             pytest.skip("Installed cuDNN frontend lacks grouped SiTU-GLU")
+        if not device_is_blackwell:
+            pytest.skip("cuDNN frontend only supports SiTU-GLU on Blackwell")
         fused_cls = te.ops.fused.GroupedMLP_CuTeGEMMGLU
         assert fused_cls.is_supported()
         # FC2 bias-gradient accumulation uses an atomic Triton reduction.
@@ -1722,6 +1747,8 @@ class TestGroupedMLPFusedOp:
         """NVFP4 SiTU uses cuDNN's fused GLU-Hadamard forward when available."""
         if not _cudnn_frontend_supports_grouped_gemm_situglu():
             pytest.skip("Installed cuDNN frontend lacks grouped SiTU-GLU")
+        if not device_is_blackwell:
+            pytest.skip("cuDNN frontend only supports SiTU-GLU on Blackwell")
         assert te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported()
         # FC2 bias-gradient accumulation uses an atomic Triton reduction.
         monkeypatch.setenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")
@@ -2138,6 +2165,14 @@ class TestGroupedMLPFusedOp:
             pytest.skip("single_grouped_weight requires NVTE_GROUPED_LINEAR_SINGLE_PARAM=1")
         if not te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
             pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
+        if activation == "scaled_clamped_qgeglu":
+            if device_is_blackwell:
+                pass
+            elif device_is_rubin:
+                if not _cudnn_frontend_version_at_least("1.30.0"):
+                    pytest.skip("Rubin kernel requires cuDNN Frontend 1.30.0+ for QGEGLU support")
+            else:
+                pytest.skip("cuDNN Frontend does not support QGEGLU on this device")
 
         split_sizes = [split_alignment * (i + 1) for i in range(group_size)]
         random.shuffle(split_sizes)
@@ -2593,6 +2628,14 @@ class TestGroupedMLPFusedOp:
             pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
         if dtype not in (torch.bfloat16, torch.float16):
             pytest.skip("MXFP8 fused grouped MLP is only supported with BF16/FP16")
+        if activation == "scaled_clamped_qgeglu":
+            if device_is_blackwell:
+                pass
+            elif device_is_rubin:
+                if not _cudnn_frontend_version_at_least("1.30.0"):
+                    pytest.skip("Rubin kernel requires cuDNN Frontend 1.30.0+ for QGEGLU support")
+            else:
+                pytest.skip("cuDNN Frontend does not support QGEGLU on this device")
 
         split_sizes = [split_alignment * (i + 1) for i in range(group_size)]
         random.shuffle(split_sizes)
