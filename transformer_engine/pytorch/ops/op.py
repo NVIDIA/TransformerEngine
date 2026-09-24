@@ -42,6 +42,11 @@ class OperationContext:
     # directly or with save_for_backward.
     to_save: Optional[tuple[Optional[torch.Tensor], ...]] = None
 
+    # Host-side split metadata captured by the forward pass, so the backward pass
+    # of the same invocation does not have to read the device tensor back again.
+    # Scoped to this context, which exists per forward invocation.
+    host_split_sizes: Optional[list[int]] = None
+
     # Corresponding range in pipeline's list of saved tensors
     _saved_tensors_range: Optional[tuple[int, int]] = None
 
