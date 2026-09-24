@@ -89,6 +89,9 @@ void fused_moe_aux_loss_forward_kernel_launcher(const DataType* probs,
                                                 cudaStream_t stream) {
   NVTE_CHECK(num_cols > 0, "num_cols must be positive, got ", num_cols);
   NVTE_CHECK(num_experts > 0, "num_experts must be positive, got ", num_experts);
+  NVTE_CHECK(static_cast<int64_t>(num_rows) * num_cols <= INT_MAX,
+             "num_rows * num_cols exceeds INT_MAX (kernel uses int offsets), got ",
+             static_cast<int64_t>(num_rows) * num_cols);
   // Sequence aux loss batches independent sequences along the expert dimension.
   NVTE_CHECK(num_cols % num_experts == 0, "Number of input columns (", num_cols,
              ") must be a multiple of number of experts (", num_experts, ").");
@@ -182,6 +185,9 @@ void fused_moe_aux_loss_forward_kernel_launcher_graph_safe(
     float* Coeff_buf, cudaStream_t stream) {
   NVTE_CHECK(num_cols > 0, "num_cols must be positive, got ", num_cols);
   NVTE_CHECK(num_experts > 0, "num_experts must be positive, got ", num_experts);
+  NVTE_CHECK(static_cast<int64_t>(num_rows) * num_cols <= INT_MAX,
+             "num_rows * num_cols exceeds INT_MAX (kernel uses int offsets), got ",
+             static_cast<int64_t>(num_rows) * num_cols);
   NVTE_CHECK(num_cols % num_experts == 0, "Number of input columns (", num_cols,
              ") must be a multiple of number of experts (", num_experts, ").");
 
@@ -252,6 +258,9 @@ void fused_moe_aux_loss_backward_kernel_launcher(const float* Const_buf,
                                                  const IndexType* tokens_per_expert, int num_rows,
                                                  int num_cols, DataType* grad_aux_loss,
                                                  DataType* grad_probs, cudaStream_t stream) {
+  NVTE_CHECK(static_cast<int64_t>(num_rows) * num_cols <= INT_MAX,
+             "num_rows * num_cols exceeds INT_MAX (kernel uses int offsets), got ",
+             static_cast<int64_t>(num_rows) * num_cols);
   // Meta data for the kernel
   int block_size = 256;
   int grid_size = (num_rows + block_size - 1) / block_size;
