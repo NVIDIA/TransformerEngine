@@ -60,6 +60,19 @@ class EPBackend {
                 const NVTECommWindow& recv_tokens_win, NVTETensor recv_topk_weights,
                 const NVTECommWindow& recv_topk_weights_win, cudaStream_t stream);
 
+  // Fused prepare + dispatch: seeds routing then dispatches in one call. Routing writes the
+  // per-expert recv counts to recv_tokens_per_expert and the scalar pre-drop per-rank recv total
+  // to total_recv_tokens_per_rank (nullable); the dispatch then reads the counts from the handle.
+  void prepare_and_dispatch(NVTETensor handle_mem, const NVTETensor topk_idx,
+                            const NVTETensor tokens, const NVTECommWindow& tokens_win,
+                            const NVTETensor topk_weights, const NVTECommWindow& topk_weights_win,
+                            NVTETensor recv_tokens, const NVTECommWindow& recv_tokens_win,
+                            NVTETensor recv_topk_weights,
+                            const NVTECommWindow& recv_topk_weights_win,
+                            NVTETensor recv_tokens_per_expert,
+                            NVTETensor total_recv_tokens_per_rank, NVTEEpLayerConfig layer_cfg,
+                            cudaStream_t stream);
+
   void combine(NVTETensor handle_mem, const NVTETensor expert_out,
                const NVTECommWindow& expert_out_win, NVTETensor result, cudaStream_t stream);
 
@@ -117,6 +130,19 @@ class EPBackend {
                                        NVTEEpLayerConfig layer_cfg);
   ncclEpHandle_t lookup_handle_locked(void* handle_mem, size_t handle_mem_size);
   size_t cache_cap_locked();
+
+  // Build the dispatch in/out structs and issue ncclEpDispatch on the resolved
+  // handle. When recv_tokens_per_expert != nullptr (count mode), it is wired to
+  // layout_info.expert_counters so the dispatch writes per-expert recv counts.
+  // Caller must hold mutex_.
+  void issue_dispatch_locked(ncclEpHandle_t handle, const NVTETensor topk_idx,
+                             const NVTETensor tokens, const NVTECommWindow& tokens_win,
+                             const NVTETensor topk_weights, const NVTECommWindow& topk_weights_win,
+                             NVTETensor recv_tokens, const NVTECommWindow& recv_tokens_win,
+                             NVTETensor recv_topk_weights,
+                             const NVTECommWindow& recv_topk_weights_win,
+                             NVTETensor recv_tokens_per_expert,
+                             NVTETensor total_recv_tokens_per_rank, cudaStream_t stream);
 
   // devices_mutex_ protects the map; each backend's mutex_ protects its state.
   static std::mutex devices_mutex_;
