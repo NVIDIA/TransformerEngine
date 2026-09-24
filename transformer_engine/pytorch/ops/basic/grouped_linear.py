@@ -463,6 +463,7 @@ class GroupedLinear(BasicOperation):
                 self.get_quantizer("forward", 2 * idx + 1) for idx in range(self.num_groups)
             ]
             with_rowwise_usage = True
+            # This op still uses quantized dgrad even under a backward override.
             with_columnwise_usage = torch.is_grad_enabled()
             for quantizer in quantizers:
                 if quantizer is None:
