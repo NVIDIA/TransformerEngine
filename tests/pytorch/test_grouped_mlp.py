@@ -1472,9 +1472,8 @@ class TestGroupedMLPFusedOp:
 
         # Check for expected fusions
         if activation == "scaled_swiglu":
-            cudnn_frontend_supports_grouped_mlp = (
-                _cudnn_frontend_version_supported()
-                and (device_is_blackwell or device_is_rubin)
+            cudnn_frontend_supports_grouped_mlp = _cudnn_frontend_version_supported() and (
+                device_is_blackwell or device_is_rubin
             )
         elif activation in ("scaled_clamped_qgeglu", "scaled_clamped_qgeglu_custom"):
             cudnn_frontend_supports_grouped_mlp = _cudnn_frontend_version_supported()
