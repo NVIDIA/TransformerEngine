@@ -983,6 +983,8 @@ def cp_p2p_fwd_fused_attn(
     step,
     cp_size,
     return_max_logit,
+    softmax_type,
+    softmax_offset,
     q_part,
     k_part,
     v_part,
@@ -1099,6 +1101,8 @@ def cp_p2p_fwd_fused_attn(
         cu_seqlens_kv_padded=cu_seqlens_kv_padded_,
         **fp8_meta_kwargs,
         return_max_logit=return_max_logit,
+        softmax_type=softmax_type,
+        softmax_offset=softmax_offset,
         cuda_graph=is_graph_capturing(),
         qkv_scale_inv_format=qkv_scale_inv_format,
     )
@@ -1107,7 +1111,10 @@ def cp_p2p_fwd_fused_attn(
         softmax_lse_per_step, rng_states = aux_ctx_tensors
     else:
         softmax_lse_per_step, rng_states, *rest = aux_ctx_tensors
-        attn_bias = rest[0] if len(rest) > 0 else None
+        # The aux pack is [stats, rng, (bias), (offset)], so an unconditional
+        # rest[0] would return the offset as the bias once a sink is active.
+        has_attn_bias = attn_bias_type not in ["no_bias", "alibi"] and attn_bias_inputs is not None
+        attn_bias = rest[0] if has_attn_bias else None
 
     if return_max_logit:
         return out_per_step, softmax_lse_per_step, rng_states, attn_bias, *max_logit
@@ -1303,6 +1310,8 @@ def cp_p2p_bwd_fused_attn(
     softmax_lse,
     softmax_lse_,
     rng_states,
+    softmax_type,
+    softmax_offset,
     attn_dbias,
     attn_biases,
     max_seqlen_q,
@@ -1363,6 +1372,11 @@ def cp_p2p_bwd_fused_attn(
     if attn_dbias is not None:
         aux_tensors += [attn_biases[cp_size - step - 1]]
 
+    # Aux pack order is [softmax_stats, rng_state, (bias), (softmax_offset)],
+    # matching what the forward returned.
+    if softmax_offset is not None:
+        aux_tensors += [softmax_offset]
+
     fp8_meta_kwargs = {}
     qkv_scale_inv_format = None
     do_scale_inv_format = None
@@ -1399,7 +1413,7 @@ def cp_p2p_bwd_fused_attn(
         fp8_meta_kwargs["dp_quantizer"] = dP_quantizer_per_step
         fp8_meta_kwargs["dqkv_quantizer"] = dQKV_quantizer_per_step
 
-    dq, dk, dv, dbias, *_ = fused_attn_bwd(
+    fused_bwd_out = fused_attn_bwd(
         max_seqlen_q_,
         max_seqlen_kv_,
         cu_seqlens_q_per_step[cp_size - step - 1],
@@ -1422,6 +1436,7 @@ def cp_p2p_bwd_fused_attn(
         dqkv_layout=dqkv_layout,
         attn_mask_type=attn_mask_type_,
         attn_bias_type=attn_bias_type,
+        softmax_type=softmax_type,
         deterministic=deterministic,
         cuda_graph=is_graph_capturing(),
         qkv_scale_inv_format=qkv_scale_inv_format,
@@ -1429,7 +1444,8 @@ def cp_p2p_bwd_fused_attn(
         **fp8_meta_kwargs,
     )
 
-    return dq, dk, dv, dbias
+    dq, dk, dv, dbias, d_softmax_offset = fused_bwd_out
+    return dq, dk, dv, dbias, d_softmax_offset
 
 
 def cp_p2p_bwd_flash_attn(
@@ -1607,6 +1623,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         use_fused_attention,
         return_max_logit,
         softcap,
+        softmax_offset,
         fp8,
         fp8_meta,
         cp_group,
@@ -1618,6 +1635,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         use_flash_attn_4,
         fp8_output,
         layer_number,
+        softmax_type,
     ):
         # pylint: disable=missing-function-docstring
 
@@ -1991,6 +2009,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             i,
                             cp_size,
                             return_max_logit,
+                            softmax_type,
+                            softmax_offset,
                         ]
                     else:
                         flash_attn_inputs = [
@@ -2377,6 +2397,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_kv = max_seqlen_kv
         ctx.softmax_scale = softmax_scale
+        ctx.softmax_offset = softmax_offset
+        ctx.softmax_type = softmax_type
         ctx.attn_mask_type = attn_mask_type
         ctx.attn_bias_type = attn_bias_type
         ctx.attn_bias_shape = None if attn_bias is None else attn_bias.shape
@@ -2500,6 +2522,12 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         else:
             attn_dbias = None
             attn_dbias_ = None
+
+        # Sink gradient accumulator. The offset is replicated on every rank and every
+        # per-tile fused call sees the same tensor, so tile contributions sum.
+        d_softmax_offset = (
+            torch.zeros_like(ctx.softmax_offset) if ctx.softmax_offset is not None else None
+        )
 
         # set up softmax_lse
         softmax_lse_ = None
@@ -2760,6 +2788,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     softmax_lse,
                     softmax_lse_,
                     rng_states,
+                    ctx.softmax_type,
+                    ctx.softmax_offset,
                     attn_dbias,
                     attn_biases,
                     ctx.max_seqlen_q,
@@ -2812,12 +2842,13 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             # Reverse the steps in forward. In the cp_size x cp_size (i.e. GPU x step) matrix,
             # there are still three sections in these tiles based on their attention pattern
             # for attn_mask_type = causal, and one for attn_mask_type != causal.
+            d_sink_ = None
             if causal:
                 if i == (cp_size - 1):
                     section = "diagonal"
                     prepare_outputs = cp_p2p_bwd_prepare_qkv(*prepare_inputs, section)
                     if ctx.use_fused_attention:
-                        dq_, dk_, dv_, dbias_ = cp_p2p_bwd_fused_attn(
+                        dq_, dk_, dv_, dbias_, d_sink_ = cp_p2p_bwd_fused_attn(
                             *fused_attn_inputs, *prepare_outputs, section
                         )
                     else:
@@ -2830,7 +2861,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     section = "lower-triangle"
                     prepare_outputs = cp_p2p_bwd_prepare_qkv(*prepare_inputs, section)
                     if ctx.use_fused_attention:
-                        dq_, dk_, dv_, dbias_ = cp_p2p_bwd_fused_attn(
+                        dq_, dk_, dv_, dbias_, d_sink_ = cp_p2p_bwd_fused_attn(
                             *fused_attn_inputs, *prepare_outputs, section
                         )
                     else:
@@ -2843,7 +2874,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     section = "upper-triangle"
                     prepare_outputs = cp_p2p_bwd_prepare_qkv(*prepare_inputs, section)
                     if ctx.use_fused_attention:
-                        dq_, dk_, dv_, dbias_ = cp_p2p_bwd_fused_attn(
+                        dq_, dk_, dv_, dbias_, d_sink_ = cp_p2p_bwd_fused_attn(
                             *fused_attn_inputs, *prepare_outputs, section
                         )
                     else:
@@ -2856,7 +2887,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 section = "all"
                 prepare_outputs = cp_p2p_bwd_prepare_qkv(*prepare_inputs, section)
                 if ctx.use_fused_attention:
-                    dq_, dk_, dv_, dbias_ = cp_p2p_bwd_fused_attn(
+                    dq_, dk_, dv_, dbias_, d_sink_ = cp_p2p_bwd_fused_attn(
                         *fused_attn_inputs, *prepare_outputs, section
                     )
                 else:
@@ -2865,6 +2896,13 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         *prepare_outputs,
                         section,
                     )
+
+            # Accumulate this tile's sink gradient. Every rank computes all query rows,
+            # so each already holds the full gradient for this replicated parameter and
+            # the outer framework's DDP average reproduces it; reducing here as well
+            # would double-count.
+            if d_sink_ is not None:
+                d_softmax_offset += d_sink_
 
             # dq, dk, dv are reduced across steps in higher precision
             # DelayedScaling: collect all results in uint8 to one tensor, dequantize to float32, then reduce
@@ -3184,6 +3222,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             None,
             None,
             None,
+            None,
+            d_softmax_offset,
             None,
             None,
             None,
@@ -5696,9 +5736,10 @@ def attn_forward_func_with_cp(
     assert (
         softmax_type == "vanilla" or use_fused_attention
     ), f"Context parallelism only supports {softmax_type=} with FusedAttention backend!"
-    assert (
-        softmax_type == "vanilla" or cp_comm_type == "a2a"
-    ), f"Context parallelism only supports {softmax_type=} with cp_comm_type = 'a2a'!"
+    assert softmax_type == "vanilla" or cp_comm_type in (
+        "a2a",
+        "p2p",
+    ), f"Context parallelism supports {softmax_type=} with cp_comm_type in ('a2a', 'p2p')!"
     if get_cudnn_version() < (9, 18, 0):
         assert softmax_type == "vanilla" or qkv_format != "thd", (
             f"Before cuDNN 9.18.0, context parallelism does not support {softmax_type=} with"
@@ -5730,6 +5771,7 @@ def attn_forward_func_with_cp(
 
     if cp_comm_type in ["p2p", "a2a+p2p"]:
         args += [
+            softmax_offset,
             fp8,
             fp8_meta,
             cp_group,
@@ -5741,6 +5783,7 @@ def attn_forward_func_with_cp(
             use_flash_attn_4,
             fp8_output,
             layer_number,
+            softmax_type,
         ]
         out = AttnFuncWithCPAndKVP2P.apply(*args)
     elif cp_comm_type == "all_gather":
