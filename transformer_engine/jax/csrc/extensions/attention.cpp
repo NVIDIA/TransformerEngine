@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "../extensions.h"
+#include "common/cudnn_utils.h"
 #include "transformer_engine/fused_attn.h"
 #include "transformer_engine/transformer_engine.h"
 
@@ -247,12 +248,7 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
   TensorWrapper query_workspace_tensor;
   // It is a WAR to pre-create all possible cuDNN graph at the JIT compile time
   size_t max_num_segments = is_ragged ? input_batch * max_segments_per_seq : input_batch;
-  size_t min_num_segments = input_batch;
-  auto cudnn_runtime_version = cudnnGetVersion();
-  if (is_ragged && cudnn_runtime_version >= 90300) {
-    // For cuDNN < 9.3.0, it requires to run all possible seqlens to address act_seqlen = 0
-    min_num_segments = input_batch * max_segments_per_seq;
-  }
+  size_t min_num_segments = is_ragged ? input_batch * max_segments_per_seq : input_batch;
   for (auto num_segments = min_num_segments; num_segments <= max_num_segments; ++num_segments) {
     // the last one is the largest which will be the returned workspace size
     auto q_cu_seqlens_tensor =
@@ -313,18 +309,7 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
   const size_t bias_seqlen_kv = has_bias_tensor ? kv_max_seqlen : 0;                          \
   size_t num_segments = input_batch;                                                          \
   if (is_ragged) {                                                                            \
-    auto cudnn_runtime_version = cudnnGetVersion();                                           \
-    if (cudnn_runtime_version >= 90300) {                                                     \
-      num_segments = input_batch * max_segments_per_seq;                                      \
-    } else {                                                                                  \
-      size_t runtime_num_segments_q = nvte_get_runtime_num_segments(                          \
-          q_cu_seqlens, workspace, input_batch * q_max_seqlen, stream);                       \
-      size_t runtime_num_segments_kv = nvte_get_runtime_num_segments(                         \
-          kv_cu_seqlens, workspace, input_batch * kv_max_seqlen, stream);                     \
-      NVTE_CHECK(runtime_num_segments_q == runtime_num_segments_kv);                          \
-      NVTE_CHECK(runtime_num_segments_q <= input_batch * max_segments_per_seq);               \
-      num_segments = runtime_num_segments_q;                                                  \
-    }                                                                                         \
+    num_segments = input_batch * max_segments_per_seq;                                        \
   }                                                                                           \
   std::vector<size_t> seq_shape{num_segments + 1};                                            \
   auto q_cu_seqlens_tensor = TensorWrapper(q_cu_seqlens, seq_shape, DType::kInt32);           \
@@ -639,12 +624,7 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
 
   // It is a WAR to pre-create all possible cuDNN graph at the JIT compile time
   size_t max_num_segments = is_ragged ? input_batch * max_segments_per_seq : input_batch;
-  size_t min_num_segments = input_batch;
-  auto cudnn_runtime_version = cudnnGetVersion();
-  if (is_ragged && cudnn_runtime_version >= 90300) {
-    // For cuDNN < 9.3.0, it requires to run all possible seqlens to address act_seqlen = 0
-    min_num_segments = input_batch * max_segments_per_seq;
-  }
+  size_t min_num_segments = is_ragged ? input_batch * max_segments_per_seq : input_batch;
 
   TensorWrapper dummy_d_softmax_offset_tensor;
   if (softmax_type == NVTE_Softmax_Type::NVTE_OFF_BY_ONE_SOFTMAX ||
@@ -967,33 +947,6 @@ std::mutex &getScoreModGraphCacheMutex() {
   return mutex;
 }
 
-struct ScoreModCudnnHandleCache {
-  std::unordered_map<int, cudnnHandle_t> handles;
-
-  cudnnHandle_t GetHandle() {
-    int device_id = 0;
-    NVTE_CHECK_CUDA(cudaGetDevice(&device_id));
-    auto it = handles.find(device_id);
-    if (it == handles.end()) {
-      cudnnHandle_t handle = nullptr;
-      NVTE_CHECK_CUDNN(cudnnCreate(&handle));
-      it = handles.emplace(device_id, handle).first;
-    }
-    return it->second;
-  }
-
-  ~ScoreModCudnnHandleCache() {
-    for (auto &[_, handle] : handles) {
-      cudnnDestroy(handle);
-    }
-  }
-};
-
-cudnnHandle_t GetScoreModCudnnHandle() {
-  static thread_local ScoreModCudnnHandleCache cache;
-  return cache.GetHandle();
-}
-
 ScoreModGraphCacheKey GetScoreModGraphCacheKey(Dictionary &attrs) {
   const int64_t frontend_version = get_attr_value<int64_t>(attrs, "cudnn_frontend_version");
   NVTE_CHECK(frontend_version == CUDNN_FRONTEND_VERSION,
@@ -1027,7 +980,7 @@ ScoreModGraphPtr GetScoreModGraph(cudaStream_t stream, Dictionary &attrs) {
   const auto serialized_graph = get_attr_value<std::string_view>(attrs, "serialized_graph");
   std::vector<uint8_t> serialized_data(serialized_graph.begin(), serialized_graph.end());
 
-  auto handle = GetScoreModCudnnHandle();
+  auto handle = nvte_get_cudnn_handle();
   NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
 
   auto graph = std::make_shared<cudnn_frontend::graph::Graph>();
@@ -1081,7 +1034,7 @@ Error_Type ExecuteScoreModGraph(cudaStream_t stream, Dictionary &attrs,
     variant_pack.emplace(scalar_uids[i], scalar_storage[i].data.data());
   }
 
-  auto handle = GetScoreModCudnnHandle();
+  auto handle = nvte_get_cudnn_handle();
   NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
   auto status = graph->execute(handle, variant_pack, workspace);
   NVTE_CHECK(status.is_good(),
