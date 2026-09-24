@@ -2110,11 +2110,40 @@ def allreduce(
     inp: torch.Tensor,
     tp_group: Optional[dist_group_type] = None,
     async_op: bool = False,
+    reduction_dtype: Optional[torch.dtype] = None,
 ) -> Tuple[torch.Tensor, Optional[torch.distributed.Work]]:
-    """All-reduce the input tensor across model parallel group."""
+    """All-reduce the input tensor across model parallel group.
+
+    ``reduction_dtype`` opts into reducing in a wider dtype than the tensor itself.
+    Only ``torch.float32`` is accepted: the collective runs over a float32 copy and
+    the result is rounded back into ``inp``, which keeps the original return contract
+    (same object, shape, device and dtype). The synchronous form is required because
+    the cast-back has to happen after the collective completes.
+    """
 
     # Bypass the function if we are using only 1 GPU.
     if get_distributed_world_size(tp_group) == 1:
+        return inp, None
+
+    if reduction_dtype is not None:
+        if reduction_dtype != torch.float32:
+            raise ValueError(
+                f"reduction_dtype must be torch.float32 when set, got {reduction_dtype}."
+            )
+        if inp.dtype == torch.float32:
+            reduction_dtype = None  # Already float32; widening would be a no-op copy.
+        elif async_op:
+            raise ValueError(
+                "reduction_dtype requires a synchronous collective: the float32 result "
+                "must be cast back into the caller's tensor before it is safe to read. "
+                "Pass async_op=False."
+            )
+
+    if reduction_dtype is not None:
+        work = torch.empty_like(inp, dtype=reduction_dtype)
+        work.copy_(inp)
+        torch.distributed.all_reduce(work, group=tp_group)
+        inp.copy_(work)
         return inp, None
 
     # All-reduce.

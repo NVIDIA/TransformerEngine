@@ -179,6 +179,9 @@ class LinearFwdArgs:
     cpu_offloading: bool
     is_grad_enabled: bool
 
+    # --- Opt-in reduction precision for the synchronous row-parallel forward ---
+    reduction_dtype: Optional[torch.dtype] = None
+
     def compile_unsupported_reason(self) -> Optional[str]:
         """Reason this config can't use the torch.compile custom-op path (else None)."""
         if self.debug:
@@ -659,7 +662,7 @@ def _linear_forward_impl(
             if symmetric_ar_type is not None:
                 out, _ = symmetric_all_reduce(out, tp_group, all_reduce_type=symmetric_ar_type)
             else:
-                out, _ = allreduce(out, tp_group)
+                out, _ = allreduce(out, tp_group, reduction_dtype=args.reduction_dtype)
         nvtx_range_pop(f"{nvtx_label}.row_parallel_comm")
     else:
         out = gemm_out
@@ -2342,6 +2345,7 @@ class Linear(TransformerEngineBaseModule):
         is_first_microbatch: Optional[bool] = None,
         fp8_output: Optional[bool] = False,
         fp8_grad: Optional[bool] = False,
+        reduction_dtype: Optional[torch.dtype] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """
         Apply the linear transformation to the input.
@@ -2398,6 +2402,23 @@ class Linear(TransformerEngineBaseModule):
                 return self._forward_eager_fallback(inp, is_first_microbatch, fp8_output, fp8_grad)
 
         inp = self.prepare_forward(inp, allow_non_contiguous=isinstance(inp, QuantizedTensor))
+        if reduction_dtype is not None:
+            # Validate before entering the compiled/fallback paths so an unsupported
+            # combination fails loudly instead of silently reducing in BF16.
+            if reduction_dtype != torch.float32:
+                raise ValueError(
+                    f"reduction_dtype must be torch.float32 when set, got {reduction_dtype}."
+                )
+            if self.parallel_mode != "row" or self.tp_size == 1:
+                raise ValueError(
+                    "reduction_dtype is only supported for the tensor-parallel row-parallel "
+                    f"forward path (parallel_mode={self.parallel_mode!r}, tp_size={self.tp_size})."
+                )
+            if self.sequence_parallel or self.ub_overlap_rs_fprop or self.ub_overlap_ag_fprop:
+                raise ValueError(
+                    "reduction_dtype is not supported together with sequence_parallel or "
+                    "Userbuffers communication; those paths keep their existing dtype."
+                )
         try:
             weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
 
@@ -2535,6 +2556,8 @@ class Linear(TransformerEngineBaseModule):
                 # misc
                 cpu_offloading=is_cpu_offload_enabled(),
                 is_grad_enabled=is_grad_enabled,
+                # opt-in tensor-parallel reduction precision
+                reduction_dtype=reduction_dtype,
             )
 
             if use_compiled_op:
