@@ -54,7 +54,8 @@ add_subdirectory(util)
 if(NVTE_WITH_CUTEDSL)
   # Executables that link libtransformerengine.so must also link to the Python::Python to provide
   # the definitions of these CPython symbols at runtime via dynamic linking.
-  find_package(Python COMPONENTS Development.Embed REQUIRED)
+  # Find the interpreter too so older CMake versions use its version to locate libpython.
+  find_package(Python COMPONENTS Interpreter Development.Embed REQUIRED)
   foreach(test_target test_operator test_util)
     target_link_libraries(${test_target} PRIVATE
                           "-Wl,--no-as-needed"
