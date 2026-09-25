@@ -862,11 +862,11 @@ def validate_grouped_mlp_dims(fc1, activation_op, fc2) -> None:
 
 
 def fuse_grouped_mlp_ops(
-    ops,
+    ops: list[FusibleOperation],
     *,
-    recipe,
-    fused_op_cls,
-    activation_op_types=None,
+    recipe: Optional[Recipe],
+    fused_op_cls: type[_GroupedMLP_CuTeGEMMBase],
+    activation_op_types: tuple[type[FusibleOperation]],
 ):
     """Sliding-window fusion for GroupedLinear + activation + GroupedLinear.
 
@@ -898,11 +898,6 @@ def fuse_grouped_mlp_ops(
     # excluded from the check rather than relying on its value.
     if recipe.mxfp8() and get_fp8_torch_dtype(recipe, fprop_tensor=False) != torch.float8_e4m3fn:
         return ops
-    if activation_op_types is None:
-        activation_op_types = [ScaledSwiGLU, ScaledClampedQGeGLU]
-        if _cudnn_frontend_supports_grouped_gemm_situglu():
-            activation_op_types.append(ScaledSiTUGLU)
-        activation_op_types = tuple(activation_op_types)
 
     out = []
     window, ops = ops[:3], ops[3:]
@@ -2757,7 +2752,7 @@ class GroupedMLP_CuTeGEMMUnary(_GroupedMLP_CuTeGEMMBase):
             return False
 
 
-def fuse_ops(
+def fuse_glu_ops(
     ops: list[FusibleOperation],
     *,
     recipe: Optional[Recipe] = None,
@@ -2765,14 +2760,30 @@ def fuse_ops(
 ) -> list[FusibleOperation]:
     """Apply joint GroupedLinear + scaled GLU + GroupedLinear fusion."""
 
+    # Determine supported activations
+    activation_op_types = []
+    device_arch = get_device_compute_capability()
+    if device_arch[0] == 10 and device_arch[1] < 7:  # Blackwell
+        activation_op_types.extend((ScaledSwiGLU, ScaledClampedQGeGLU))
+        if _cudnn_frontend_supports_grouped_gemm_situglu():
+            activation_op_types.append(ScaledSiTUGLU)
+    elif device_arch[0] == 10 and device_arch[1] == 7:  # Rubin
+        activation_op_types.append(ScaledSwiGLU)
+        if _cudnn_frontend_version_at_least("1.30.0"):
+            activation_op_types.append(ScaledClampedQGeGLU)
+    else:
+        # Unsupported device arch
+        return ops
+
     return fuse_grouped_mlp_ops(
         ops,
         recipe=recipe,
         fused_op_cls=GroupedMLP_CuTeGEMMGLU,
+        activation_op_types=tuple(activation_op_types),
     )
 
 
-def fuse_srelu_ops(
+def fuse_unary_activation_ops(
     ops: list[FusibleOperation],
     *,
     recipe: Optional[Recipe] = None,
@@ -2780,24 +2791,21 @@ def fuse_srelu_ops(
 ) -> list[FusibleOperation]:
     """Apply joint GroupedLinear + scaled unary activation + GroupedLinear fusion."""
 
-    # ScaledTanhSReLU joins only when the installed cuDNN frontend can actually
-    # clamp. Listing it unconditionally would let the op fuse and then raise from
-    # _GroupedMLP_CuTeGEMMBase.__init__; leaving it out simply declines the fusion
-    # and runs the correct unfused activation instead.
-    activation_op_types: tuple[type[FusibleOperation], ...] = (ScaledSReLU,)
+    # Determine supported activations
+    activation_op_types = [ScaledSReLU]
     if _cudnn_frontend_supports_grouped_gemm_srelu_tanh():
-        activation_op_types += (ScaledTanhSReLU,)
+        activation_op_types.append(ScaledTanhSReLU)
 
     return fuse_grouped_mlp_ops(
         ops,
         recipe=recipe,
         fused_op_cls=GroupedMLP_CuTeGEMMUnary,
-        activation_op_types=activation_op_types,
+        activation_op_types=tuple(activation_op_types),
     )
 
 
 # Register joint fusions if available.
 if GroupedMLP_CuTeGEMMGLU.is_supported():
-    register_forward_backward_fusion(fuse_ops, prepend=True)
+    register_forward_backward_fusion(fuse_glu_ops, prepend=True)
 if GroupedMLP_CuTeGEMMUnary.is_supported():
-    register_forward_backward_fusion(fuse_srelu_ops, prepend=True)
+    register_forward_backward_fusion(fuse_unary_activation_ops, prepend=True)
