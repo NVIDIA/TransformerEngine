@@ -122,10 +122,7 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
                 (dtype == DType::kBFloat16 && rows % 32 == 0 && cols % 32 == 0),
             "Row-scaled NVFP4 transpose quantization requires BF16 input and dimensions that are "
             "multiples of 32.");
-        nvfp4::compute_rowwise_amax(*input_tensor, noop_tensor, output_tensor, stream);
-        if (output_tensor->has_columnwise_data()) {
-          nvfp4::compute_columnwise_amax(*input_tensor, noop_tensor, output_tensor, stream);
-        }
+        nvfp4::row_scaled::compute_amaxes(*input_tensor, noop_tensor, output_tensor, stream);
       }
       // Columnwise-only is supported on the optimized path only for 2D scaling; rowwise-only and
       // both-directions keep their existing routing. Columnwise-only 1D and non-bf16 fall back to
@@ -299,10 +296,7 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
                 (dtype == DType::kBFloat16 && rows % 32 == 0 && cols % 32 == 0),
             "Row-scaled NVFP4 transpose quantization requires BF16 input and dimensions that are "
             "multiples of 32.");
-        nvfp4::compute_rowwise_amax(*grad_tensor, noop_tensor, output_tensor, stream);
-        if (output_tensor->has_columnwise_data()) {
-          nvfp4::compute_columnwise_amax(*grad_tensor, noop_tensor, output_tensor, stream);
-        }
+        nvfp4::row_scaled::compute_amaxes(*grad_tensor, noop_tensor, output_tensor, stream);
       }
       // Columnwise-only is supported on the optimized path only for 2D scaling; rowwise-only and
       // both-directions keep their existing routing. Columnwise-only 1D and non-bf16 fall back to
