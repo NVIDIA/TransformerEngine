@@ -35,6 +35,12 @@ BWD_SCALE = 4.0
 IN_F, OUT_F, TOKENS = 256, 512, 128
 DTYPE, DEVICE = torch.bfloat16, "cuda"
 
+# The native GroupedTensor grouped GEMM is Hopper+ only.
+pytestmark = pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.get_device_capability() < (9, 0),
+    reason="Requires Hopper (SM90) or newer; the GroupedTensor grouped GEMM is unavailable.",
+)
+
 PATHS = pytest.mark.parametrize(
     "use_grouped_tensor", [False, True], ids=["split-quantize", "grouped"]
 )
