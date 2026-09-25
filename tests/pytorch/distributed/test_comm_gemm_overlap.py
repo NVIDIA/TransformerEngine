@@ -131,6 +131,7 @@ def _run_layer_with_overlap(
     use_cublasmp=False,
     use_compile=False,
     compile_mode="default",
+    extra_args=None,
 ):
     test_path = TEST_ROOT / "run_layer_with_overlap.py"
     test_cmd = LAUNCH_CMD + [
@@ -165,6 +166,9 @@ def _run_layer_with_overlap(
         if not tex.nvte_built_with_cublasmp():
             pytest.skip("Transformer Engine not built with cuBLASMp (NVTE_WITH_CUBLASMP=0).")
         test_cmd.append("--use-cublasmp")
+
+    if extra_args is not None:
+        test_cmd.extend(extra_args)
 
     test_env = os.environ.copy()
     test_env["PYTORCH_JIT"] = "0"
@@ -388,6 +392,20 @@ def test_layers_with_overlap_fp8(
         True,
         quantization,
         use_cublasmp=use_cublasmp,
+    )
+
+
+@pytest.mark.parametrize("quantization", ("none", "fp8_delayed_scaling"))
+def test_layernorm_linear_all_gather_overlap_no_grad(quantization):
+    """Test LayerNormLinear forward AllGather overlap with gradient recording disabled."""
+    fp8 = quantization != "none"
+    _run_layer_with_overlap(
+        te.LayerNormLinear.__name__,
+        "column",
+        False,
+        fp8,
+        quantization if fp8 else None,
+        extra_args=["--no-grad"],
     )
 
 

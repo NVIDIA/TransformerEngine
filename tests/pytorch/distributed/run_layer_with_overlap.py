@@ -14,6 +14,7 @@ import pprint
 import yaml
 from contextlib import nullcontext
 from functools import partial
+from unittest.mock import patch
 
 import torch
 import torch.distributed as dist
@@ -25,6 +26,7 @@ except ImportError:  # pragma: no cover
     dynamo_counters = None
 
 import transformer_engine.pytorch as te
+import transformer_engine.pytorch.module.layernorm_linear as layernorm_linear_module
 from transformer_engine.common.recipe import (
     DelayedScaling,
     Float8CurrentScaling,
@@ -234,6 +236,12 @@ def _parse_args(argv=None, namespace=None):
         action="store_true",
         default=False,
         help="Benchmark comm-gemm overlap perf.",
+    )
+    parser.add_argument(
+        "--no-grad",
+        action="store_true",
+        default=False,
+        help="Run forward with gradient recording disabled.",
     )
     parser.add_argument(
         "--benchmark-iter",
@@ -559,14 +567,16 @@ def _train(opts):
 
     # Execute fwd/bwd and collect tensors to test
     def run_fwd_bwd(model, x):
-        with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+        grad_context = torch.no_grad if opts.no_grad else torch.enable_grad
+        with grad_context(), torch.amp.autocast("cuda", dtype=torch.bfloat16):
             y = model(x, layer_contexts)
             if isinstance(y, tuple):
                 out, *_ = y
             else:
                 out = y
-            loss = out.sum()
-            loss.backward()
+            if not opts.no_grad:
+                loss = out.sum()
+                loss.backward()
         return out
 
     if opts.compile:
@@ -595,16 +605,29 @@ def _train(opts):
                 test_model.zero_grad(set_to_none=True)
                 test_x.grad = None
             torch.compiler.cudagraph_mark_step_begin()
-        test_out = run_fwd_bwd(test_model, test_x)
+        if opts.no_grad:
+            original_fill_ub = layernorm_linear_module.fill_userbuffers_buffer_for_all_gather
+            with patch.object(
+                layernorm_linear_module,
+                "fill_userbuffers_buffer_for_all_gather",
+                wraps=original_fill_ub,
+            ) as fill_ub:
+                test_out = run_fwd_bwd(test_model, test_x)
+            assert fill_ub.called, "Userbuffers AllGather overlap was not used under no_grad"
+        else:
+            test_out = run_fwd_bwd(test_model, test_x)
         if opts.compile and opts.compile_mode == "reduce-overhead" and dynamo_counters is not None:
             skips = dynamo_counters["inductor"]["cudagraph_skips"]
             assert skips == 0, f"reduce-overhead fell back to eager: {skips} cudagraph skip(s)"
-    test_grads = [test_out, test_x.grad]
-    names = ["output", "input.grad"]
-    for test_name, test_param in test_model.named_parameters():
-        if test_param.requires_grad and "layer_norm" not in test_name:
-            test_grads.append(test_param.grad)
-            names.append(test_name + ".grad")
+    test_grads = [test_out]
+    names = ["output"]
+    if not opts.no_grad:
+        test_grads.append(test_x.grad)
+        names.append("input.grad")
+        for test_name, test_param in test_model.named_parameters():
+            if test_param.requires_grad and "layer_norm" not in test_name:
+                test_grads.append(test_param.grad)
+                names.append(test_name + ".grad")
 
     torch.set_rng_state(torch_rng_state)
     torch.cuda.set_rng_state(cuda_rng_state, torch.device(f"cuda:{LOCAL_RANK}"))
@@ -616,10 +639,12 @@ def _train(opts):
         del ref_graph
     else:
         ref_out = run_fwd_bwd(ref_model, ref_x)
-    ref_grads = [ref_out, ref_x.grad]
-    for ref_name, ref_param in ref_model.named_parameters():
-        if ref_param.requires_grad and "layer_norm" not in ref_name:
-            ref_grads.append(ref_param.grad)
+    ref_grads = [ref_out]
+    if not opts.no_grad:
+        ref_grads.append(ref_x.grad)
+        for ref_name, ref_param in ref_model.named_parameters():
+            if ref_param.requires_grad and "layer_norm" not in ref_name:
+                ref_grads.append(ref_param.grad)
 
     numerics_failed = torch.tensor([0], dtype=torch.uint8, device="cuda")
     if not opts.skip_verify:
