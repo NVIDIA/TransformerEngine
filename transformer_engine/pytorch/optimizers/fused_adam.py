@@ -516,7 +516,23 @@ class FusedAdam(torch.optim.Optimizer):
         """Override the load_state_dict() of pytorch. Since pytorch's load_state_dict forces the
         state to be the same dtype as param, We need to manully set the state again.
         """
-        super().load_state_dict(state_dict)
+        # Subclasses may observe intermediate state through __setstate__.
+        if (
+            type(self) is not FusedAdam  # pylint: disable=unidiomatic-typecheck
+            or self._optimizer_load_state_dict_pre_hooks
+            or self._optimizer_load_state_dict_post_hooks
+        ):
+            # Hooks and subclass __setstate__ implementations may inspect the loaded tensors.
+            super().load_state_dict(state_dict)
+        else:
+            # PyTorch casts parameter states to the parameter dtype. These copies
+            # would be discarded below when restoring the optimizer's state dtypes.
+            param_ids = {param for group in state_dict["param_groups"] for param in group["params"]}
+            metadata_state_dict = dict(state_dict)
+            metadata_state_dict["state"] = {
+                key: value for key, value in state_dict["state"].items() if key not in param_ids
+            }
+            super().load_state_dict(metadata_state_dict)
 
         groups = self.param_groups
         saved_groups = deepcopy(state_dict["param_groups"])
