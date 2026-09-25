@@ -323,7 +323,13 @@ Kernel Configuration
 
    :Type: ``int`` (0 or 1)
    :Default: ``0``
-   :Description: Use CUTLASS implementation for grouped GEMM operations instead of cuBLAS. When set to ``1``, enables CUTLASS grouped GEMM kernels, which may provide better performance for certain workloads on Hopper (SM90) GPUs.
+   :Description: Enable CUTLASS for supported grouped GEMMs.
+
+      * **Hopper (SM90):** Use TE's CUTLASS backend.
+      * **Blackwell (SM100):** Use PyTorch's CUTLASS backend via
+        ``torch._grouped_mm`` for BF16 inputs and outputs in the shared
+        grouped-tensor GEMM path. This applies to all callers of that path,
+        including GroupedLinear and fused grouped MLP operations.
 
 .. envvar:: NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK
 
