@@ -141,13 +141,16 @@ __version__ = str(metadata.version("transformer_engine"))
 def smoke_test(verbose: bool = True) -> bool:
     """Run smoke checks to verify the Transformer Engine installation.
 
-    Confirms the package is installed correctly and that each installed framework
-    extension actually loaded. The top-level import deliberately swallows a missing
-    framework extension and only warns, so a successful ``import transformer_engine``
-    does not imply ``transformer_engine.pytorch`` or ``transformer_engine.jax`` is
-    usable. For PyTorch a minimal forward pass runs on the current device. Checks
-    that need a GPU are skipped when no GPU is available, so the call is safe to run
-    anywhere as an installation sanity check.
+    Confirms the package is installed correctly and that each framework extension
+    that should be present actually loaded. The top-level import deliberately
+    swallows a missing framework extension and only warns, so a successful
+    ``import transformer_engine`` does not imply ``transformer_engine.pytorch`` or
+    ``transformer_engine.jax`` is usable. Because Transformer Engine is built per
+    framework, a framework that is installed without its extension is reported as
+    skipped when another extension did load, and as a failure only when none did.
+    For PyTorch a minimal forward pass runs on the current device. Checks that need
+    a GPU are skipped when no GPU is available, so the call is safe to run anywhere
+    as an installation sanity check.
 
     Parameters
     ----------
@@ -157,18 +160,29 @@ def smoke_test(verbose: bool = True) -> bool:
     Returns
     -------
     bool
-        ``True`` if every executed check passed, ``False`` otherwise.
+        ``True`` if every executed check passed, ``False`` otherwise. Skipped checks
+        do not affect the result.
     """
     # Deliberately a smoke test rather than the full suite: install integrity, that
     # each framework extension loaded, and one PyTorch forward pass. Deeper coverage
     # stays in tests/ and qa/.
     results = []
+    # Transformer Engine is built per framework via NVTE_FRAMEWORK, so an extension
+    # that is absent may well be deliberate; the module-level guard above only warns
+    # for exactly that reason. Track which frameworks are installed without their
+    # extension and only fail if none of them loaded.
+    loaded = []
+    missing = []
 
     def _record(name: str, passed: bool, detail: str = "") -> None:
         results.append(passed)
         if verbose:
             status = "PASS" if passed else "FAIL"
             print(f"[{status}] {name}" + (f": {detail}" if detail else ""))
+
+    def _skip(name: str, detail: str = "") -> None:
+        if verbose:
+            print(f"[SKIP] {name}" + (f": {detail}" if detail else ""))
 
     # Installation integrity (reuses the PyPI sanity check).
     try:
@@ -195,12 +209,9 @@ def smoke_test(verbose: bool = True) -> bool:
         except ImportError:
             pass
         else:
-            _record(
-                "pytorch",
-                False,
-                "torch is installed but the Transformer Engine PyTorch extension did not load",
-            )
+            missing.append(("pytorch", "torch", "PyTorch"))
     else:
+        loaded.append("pytorch")
         try:
             import torch
 
@@ -243,12 +254,9 @@ def smoke_test(verbose: bool = True) -> bool:
         except ImportError:
             pass
         else:
-            _record(
-                "jax",
-                False,
-                "jax is installed but the Transformer Engine JAX extension did not load",
-            )
+            missing.append(("jax", "jax", "JAX"))
     else:
+        loaded.append("jax")
         try:
             import jax
 
@@ -261,6 +269,23 @@ def smoke_test(verbose: bool = True) -> bool:
                 _record("jax", True, f"extension loaded; {len(gpus)} GPU device(s)")
         except Exception as err:  # pylint: disable=broad-except
             _record("jax", False, str(err))
+
+    # A framework whose extension was never built is only a failure when nothing
+    # else loaded, since a single-framework install is a normal, supported state.
+    for name, package, pretty in missing:
+        if loaded:
+            _skip(
+                name,
+                f"{package} is installed but Transformer Engine was not built for it "
+                f"(built for: {', '.join(loaded)})",
+            )
+        else:
+            _record(
+                name,
+                False,
+                f"{package} is installed but the Transformer Engine {pretty} extension "
+                "did not load",
+            )
 
     passed = all(results)
     if verbose:
