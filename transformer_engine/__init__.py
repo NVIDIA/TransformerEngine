@@ -146,8 +146,8 @@ def smoke_test(verbose: bool = True) -> bool:
     swallows a missing framework extension and only warns, so a successful
     ``import transformer_engine`` does not imply ``transformer_engine.pytorch`` or
     ``transformer_engine.jax`` is usable. Because Transformer Engine is built per
-    framework, a framework that is installed without its extension is reported as
-    skipped when another extension did load, and as a failure only when none did.
+    framework, an extension that was never built is reported as skipped, while one
+    whose shared object is present and still did not load is reported as a failure.
     For PyTorch a minimal forward pass runs on the current device. Checks that need
     a GPU are skipped when no GPU is available, so the call is safe to run anywhere
     as an installation sanity check.
@@ -169,9 +169,8 @@ def smoke_test(verbose: bool = True) -> bool:
     results = []
     # Transformer Engine is built per framework via NVTE_FRAMEWORK, so an extension
     # that is absent may well be deliberate; the module-level guard above only warns
-    # for exactly that reason. Track which frameworks are installed without their
-    # extension and only fail if none of them loaded.
-    loaded = []
+    # for exactly that reason. Collect the frameworks that are installed without a
+    # working extension and classify them once the backends have been tried.
     missing = []
 
     def _record(name: str, passed: bool, detail: str = "") -> None:
@@ -209,9 +208,8 @@ def smoke_test(verbose: bool = True) -> bool:
         except ImportError:
             pass
         else:
-            missing.append(("pytorch", "torch", "PyTorch"))
+            missing.append(("pytorch", "torch", "PyTorch", "torch"))
     else:
-        loaded.append("pytorch")
         try:
             import torch
 
@@ -254,9 +252,8 @@ def smoke_test(verbose: bool = True) -> bool:
         except ImportError:
             pass
         else:
-            missing.append(("jax", "jax", "JAX"))
+            missing.append(("jax", "jax", "JAX", "jax"))
     else:
-        loaded.append("jax")
         try:
             import jax
 
@@ -270,21 +267,34 @@ def smoke_test(verbose: bool = True) -> bool:
         except Exception as err:  # pylint: disable=broad-except
             _record("jax", False, str(err))
 
-    # A framework whose extension was never built is only a failure when nothing
-    # else loaded, since a single-framework install is a normal, supported state.
-    for name, package, pretty in missing:
-        if loaded:
+    # An extension that was never built is a supported state, since NVTE_FRAMEWORK
+    # selects what gets compiled, while one whose shared object is on disk and still
+    # did not load is a broken install. Transformer Engine's own loader tells the two
+    # apart by looking for the shared object, so ask it instead of inferring from
+    # which other extensions happened to load.
+    for name, package, pretty, library in missing:
+        try:
+            from .common import _get_shared_object_file
+
+            so_path = _get_shared_object_file(library)
+        except FileNotFoundError:
+            # Never built for this framework.
+            so_path = None
+        except ImportError:
+            # The core package itself is unusable; the installation check reports that.
+            so_path = None
+        if so_path is None:
             _skip(
                 name,
-                f"{package} is installed but Transformer Engine was not built for it "
-                f"(built for: {', '.join(loaded)})",
+                f"{package} is installed but Transformer Engine was not built for it; "
+                f"reinstall with the {pretty} extension if that was not intended",
             )
         else:
             _record(
                 name,
                 False,
-                f"{package} is installed but the Transformer Engine {pretty} extension "
-                "did not load",
+                f"{package} is installed and {so_path.name} is present, but the "
+                f"Transformer Engine {pretty} extension did not load",
             )
 
     passed = all(results)
