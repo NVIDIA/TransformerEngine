@@ -2588,6 +2588,9 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
   // Stochastic rounding
   // When both rowwise and columnwise quantization are used with RHT,
   // we need separate RNG states for each to ensure they use different random numbers.
+  // TensorWrapper does not own storage; retain both RNG buffers through dispatch.
+  at::Tensor rng_state;
+  at::Tensor rng_state_columnwise;
   TensorWrapper te_rng_state;
   TensorWrapper te_rng_state_columnwise;
 
@@ -2609,7 +2612,7 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
 
     // Generate RNG state for rowwise quantization
     at::PhiloxCudaState philox_args = init_philox_state(gen, rng_elts_per_thread);
-    auto rng_state = torch::empty({2}, opts);
+    rng_state = torch::empty({2}, opts);
     philox_unpack(philox_args, static_cast<int64_t*>(rng_state.data_ptr()));
     te_rng_state = makeTransformerEngineTensor(rng_state);
     quant_config.set_rng_state(te_rng_state.data());
@@ -2617,7 +2620,7 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
     // Generate separate RNG state for columnwise quantization
     if (need_separate_columnwise_rng) {
       at::PhiloxCudaState philox_args_columnwise = init_philox_state(gen, rng_elts_per_thread);
-      auto rng_state_columnwise = torch::empty({2}, opts);
+      rng_state_columnwise = torch::empty({2}, opts);
       philox_unpack(philox_args_columnwise, static_cast<int64_t*>(rng_state_columnwise.data_ptr()));
       te_rng_state_columnwise = makeTransformerEngineTensor(rng_state_columnwise);
       quant_config_columnwise.set_stochastic_rounding(true);

@@ -375,6 +375,11 @@ def test_layers_with_overlap_fp8(
 ):
     """
     Test Transformer Engine layers with comm+GEMM overlap.
+
+    The layer runner uses 3-D logical activations. Column-parallel and composite-layer cases
+    without RS-dgrad overlap exercise FP8 GEMMs with bulk reduce-scatter in backward, and the
+    runner checks that output and gradient shapes match the non-overlap reference in addition to
+    checking their values.
     """
     _run_layer_with_overlap(
         layer_type,
