@@ -200,6 +200,24 @@ def initialize_ub(
              for ``te.TransformerLayer`` GEMM layers in ``["qkv_fprop", "qkv_dgrad", "qkv_wgrad",
              "proj_fprop", "proj_dgrad", "proj_wgrad", "fc1_fprop", "fc1_dgrad", "fc2_dgrad",
              "fc2_fprop", "fc2_wgrad"]``.
+
+             The default overlap configuration for each GEMM layer is as follows. only keys that differ from the desired default need to be specified in ``ub_cfgs`` -- unspecified keys retain their default values:
+
+             Layer        | Comm Direction | Method        | num_sm | num_splits | Notes
+             -------------|----------------|---------------|--------|------------|-------------------------------
+             qkv_fprop    | AllGather      | ring_exchange | 1      | tp_size    |
+             qkv_dgrad    | AllGather      | bulk          | 16     | 4          | (1) switchable to RS
+             qkv_wgrad    | ReduceScatter  | bulk          | 16     | 4          | (2) disabled when qkv_dgrad switches to RS
+             proj_fprop   | ReduceScatter  | pipeline      | 16     | 4          |
+             proj_dgrad   | AllGather      | ring_exchange | 1      | tp_size    |
+             proj_wgrad   | AllGather      | external      | 16     | 4          | (3) overlaps with proj_dgrad (requires ring_exchange).
+             fc1_fprop    | AllGather      | ring_exchange | 1      | tp_size    |
+             fc1_dgrad    | AllGather      | bulk          | 16     | 4          | (1) switchable to RS
+             fc1_wgrad    | ReduceScatter  | bulk          | 16     | 4          | (2) disabled when fc1_dgrad switches to RS
+             fc2_fprop    | ReduceScatter  | pipeline      | 16     | 4          |
+             fc2_dgrad    | AllGather      | ring_exchange | 1      | tp_size    |
+             fc2_wgrad    | AllGather      | external      | 16     | 4          | (3) overlaps with fc2_dgrad (requires ring_exchange).
+
              a list may be provided to specify different overlap configurations for different the quantization settings in ``quantization_modes``
     bootstrap_backend : str = None
                         ``torch.distributed`` communication backend for the all-gather, broadcast and
