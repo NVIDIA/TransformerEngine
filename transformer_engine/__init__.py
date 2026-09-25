@@ -138,13 +138,16 @@ except FileNotFoundError as e:
 __version__ = str(metadata.version("transformer_engine"))
 
 
-def test(verbose: bool = True) -> bool:
+def smoke_test(verbose: bool = True) -> bool:
     """Run smoke checks to verify the Transformer Engine installation.
 
-    Confirms the package is installed correctly and, when the PyTorch backend is
-    available, runs a minimal functional check on the current device. Checks that
-    need a GPU are skipped when no CUDA device is available, so the call is safe
-    to run anywhere as an installation sanity check.
+    Confirms the package is installed correctly and that each installed framework
+    extension actually loaded. The top-level import deliberately swallows a missing
+    framework extension and only warns, so a successful ``import transformer_engine``
+    does not imply ``transformer_engine.pytorch`` or ``transformer_engine.jax`` is
+    usable. For PyTorch a minimal forward pass runs on the current device. Checks
+    that need a GPU are skipped when no GPU is available, so the call is safe to run
+    anywhere as an installation sanity check.
 
     Parameters
     ----------
@@ -156,8 +159,9 @@ def test(verbose: bool = True) -> bool:
     bool
         ``True`` if every executed check passed, ``False`` otherwise.
     """
-    # ponytail: smoke test, not the full suite. Covers install integrity and a
-    # single PyTorch forward pass; deeper coverage stays in tests/ and qa/.
+    # Deliberately a smoke test rather than the full suite: install integrity, that
+    # each framework extension loaded, and one PyTorch forward pass. Deeper coverage
+    # stays in tests/ and qa/.
     results = []
 
     def _record(name: str, passed: bool, detail: str = "") -> None:
@@ -183,7 +187,20 @@ def test(verbose: bool = True) -> bool:
         # FileNotFoundError mirrors the module-level guard: torch is installed but
         # the Transformer Engine PyTorch extension shared object is missing.
         te = None
-    if te is not None:
+    if te is None:
+        # The module-level guard only warns in this case, so the import above can
+        # succeed with the extension missing. Report it rather than stay silent.
+        try:
+            import torch  # pylint: disable=unused-import
+        except ImportError:
+            pass
+        else:
+            _record(
+                "pytorch",
+                False,
+                "torch is installed but the Transformer Engine PyTorch extension did not load",
+            )
+    else:
         try:
             import torch
 
@@ -210,6 +227,40 @@ def test(verbose: bool = True) -> bool:
                 _record("pytorch", True, detail)
         except Exception as err:  # pylint: disable=broad-except
             _record("pytorch", False, str(err))
+
+    # JAX backend, same treatment. Importing the module is itself the meaningful
+    # check here: it is what runs load_framework_extension, and the module-level
+    # guard above turns that failure into a warning rather than an error. No
+    # functional pass is attempted, since the loaded extension is what this
+    # reports on.
+    try:
+        from . import jax as te_jax  # pylint: disable=unused-import
+    except (ImportError, FileNotFoundError):
+        te_jax = None
+    if te_jax is None:
+        try:
+            import jax  # pylint: disable=unused-import
+        except ImportError:
+            pass
+        else:
+            _record(
+                "jax",
+                False,
+                "jax is installed but the Transformer Engine JAX extension did not load",
+            )
+    else:
+        try:
+            import jax
+
+            devices = jax.devices()
+            gpus = [device for device in devices if device.platform == "gpu"]
+            if not gpus:
+                platforms = sorted({device.platform for device in devices}) or ["none"]
+                _record("jax", True, f"extension loaded; no GPU device ({', '.join(platforms)})")
+            else:
+                _record("jax", True, f"extension loaded; {len(gpus)} GPU device(s)")
+        except Exception as err:  # pylint: disable=broad-except
+            _record("jax", False, str(err))
 
     passed = all(results)
     if verbose:
