@@ -136,3 +136,168 @@ except FileNotFoundError as e:
             )
 
 __version__ = str(metadata.version("transformer_engine"))
+
+
+def smoke_test(verbose: bool = True) -> bool:
+    """Run smoke checks to verify the Transformer Engine installation.
+
+    Confirms the package is installed correctly and that each framework extension
+    that should be present actually loaded. The top-level import deliberately
+    swallows a missing framework extension and only warns, so a successful
+    ``import transformer_engine`` does not imply ``transformer_engine.pytorch`` or
+    ``transformer_engine.jax`` is usable. Because Transformer Engine is built per
+    framework, an extension that was never built is reported as skipped, while one
+    whose shared object is present and still did not load is reported as a failure.
+    For PyTorch a minimal forward pass runs on the current device. Checks that need
+    a GPU are skipped when no GPU is available, so the call is safe to run anywhere
+    as an installation sanity check.
+
+    Parameters
+    ----------
+    verbose : bool, default = True
+        Print the result of each check.
+
+    Returns
+    -------
+    bool
+        ``True`` if every executed check passed, ``False`` otherwise. Skipped checks
+        do not affect the result.
+    """
+    # Deliberately a smoke test rather than the full suite: install integrity, that
+    # each framework extension loaded, and one PyTorch forward pass. Deeper coverage
+    # stays in tests/ and qa/.
+    results = []
+    # Transformer Engine is built per framework via NVTE_FRAMEWORK, so an extension
+    # that is absent may well be deliberate; the module-level guard above only warns
+    # for exactly that reason. Collect the frameworks that are installed without a
+    # working extension and classify them once the backends have been tried.
+    missing = []
+
+    def _record(name: str, passed: bool, detail: str = "") -> None:
+        results.append(passed)
+        if verbose:
+            status = "PASS" if passed else "FAIL"
+            print(f"[{status}] {name}" + (f": {detail}" if detail else ""))
+
+    def _skip(name: str, detail: str = "") -> None:
+        if verbose:
+            print(f"[SKIP] {name}" + (f": {detail}" if detail else ""))
+
+    # Installation integrity (reuses the PyPI sanity check).
+    try:
+        from .common import sanity_checks_for_pypi_installation
+
+        sanity_checks_for_pypi_installation()
+        _record("installation", True, f"transformer_engine {__version__}")
+    except Exception as err:  # pylint: disable=broad-except
+        _record("installation", False, str(err))
+
+    # PyTorch backend, checked only if it is available. A backend that is present
+    # but fails at runtime is reported, not skipped.
+    try:
+        from . import pytorch as te
+    except (ImportError, FileNotFoundError):
+        # FileNotFoundError mirrors the module-level guard: torch is installed but
+        # the Transformer Engine PyTorch extension shared object is missing.
+        te = None
+    if te is None:
+        # The module-level guard only warns in this case, so the import above can
+        # succeed with the extension missing. Report it rather than stay silent.
+        try:
+            import torch  # pylint: disable=unused-import
+        except ImportError:
+            pass
+        else:
+            missing.append(("pytorch", "torch", "PyTorch", "torch"))
+    else:
+        try:
+            import torch
+
+            if not torch.cuda.is_available():
+                _record("pytorch", True, "imported; no CUDA device, GPU checks skipped")
+            else:
+                major, minor = te.get_device_compute_capability()
+                dtype = torch.bfloat16 if te.is_bf16_available() else torch.float16
+                with torch.no_grad():
+                    model = te.Linear(16, 16, params_dtype=dtype, device="cuda")
+                    out = model(torch.zeros(4, 16, dtype=dtype, device="cuda"))
+                if tuple(out.shape) != (4, 16):
+                    raise RuntimeError(f"unexpected output shape {tuple(out.shape)}")
+                formats = [
+                    name
+                    for name, available in (
+                        ("FP8", te.is_fp8_available()),
+                        ("MXFP8", te.is_mxfp8_available()),
+                        ("NVFP4", te.is_nvfp4_available()),
+                    )
+                    if available
+                ]
+                detail = f"sm_{major}{minor}, {dtype}, formats: {', '.join(formats) or 'none'}"
+                _record("pytorch", True, detail)
+        except Exception as err:  # pylint: disable=broad-except
+            _record("pytorch", False, str(err))
+
+    # JAX backend, same treatment. Importing the module is itself the meaningful
+    # check here: it is what runs load_framework_extension, and the module-level
+    # guard above turns that failure into a warning rather than an error. No
+    # functional pass is attempted, since the loaded extension is what this
+    # reports on.
+    try:
+        from . import jax as te_jax  # pylint: disable=unused-import
+    except (ImportError, FileNotFoundError):
+        te_jax = None
+    if te_jax is None:
+        try:
+            import jax  # pylint: disable=unused-import
+        except ImportError:
+            pass
+        else:
+            missing.append(("jax", "jax", "JAX", "jax"))
+    else:
+        try:
+            import jax
+
+            devices = jax.devices()
+            gpus = [device for device in devices if device.platform == "gpu"]
+            if not gpus:
+                platforms = sorted({device.platform for device in devices}) or ["none"]
+                _record("jax", True, f"extension loaded; no GPU device ({', '.join(platforms)})")
+            else:
+                _record("jax", True, f"extension loaded; {len(gpus)} GPU device(s)")
+        except Exception as err:  # pylint: disable=broad-except
+            _record("jax", False, str(err))
+
+    # An extension that was never built is a supported state, since NVTE_FRAMEWORK
+    # selects what gets compiled, while one whose shared object is on disk and still
+    # did not load is a broken install. Transformer Engine's own loader tells the two
+    # apart by looking for the shared object, so ask it instead of inferring from
+    # which other extensions happened to load.
+    for name, package, pretty, library in missing:
+        try:
+            from .common import _get_shared_object_file
+
+            so_path = _get_shared_object_file(library)
+        except FileNotFoundError:
+            # Never built for this framework.
+            so_path = None
+        except ImportError:
+            # The core package itself is unusable; the installation check reports that.
+            so_path = None
+        if so_path is None:
+            _skip(
+                name,
+                f"{package} is installed but Transformer Engine was not built for it; "
+                f"reinstall with the {pretty} extension if that was not intended",
+            )
+        else:
+            _record(
+                name,
+                False,
+                f"{package} is installed and {so_path.name} is present, but the "
+                f"Transformer Engine {pretty} extension did not load",
+            )
+
+    passed = all(results)
+    if verbose:
+        print(f"\n{sum(results)}/{len(results)} checks passed.")
+    return passed
