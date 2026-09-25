@@ -12,8 +12,11 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <optional>
+#include <shared_mutex>
 #include <string>
+#include <unordered_set>
 
 #include "../../common.h"
 #include "../../tvm_ffi_bridge.h"
@@ -207,8 +210,31 @@ inline bool mxfp8_quantize_cutedsl(const MXFP8QuantConfig &config, const Tensor 
   if (workspace_tensor != nullptr && workspace_tensor->data.dptr != nullptr)
     mWorkspace = tvm_ffi_bridge::DLTensorWrapper(workspace_tensor->data, true, device_index);
   // noop and stream are tvm-ffi opaque "handles"; pass them as void*.
-  (*mxfp8_quant_func_opt)(&mX, &mO_row, &mS_row, &mO_col, &mS_col, &mAmax, noop_ptr, &mActInput,
-                          &mWorkspace, static_cast<void *>(stream));
+  auto launch = [&] {
+    (*mxfp8_quant_func_opt)(&mX, &mO_row, &mS_row, &mO_col, &mS_col, &mAmax, noop_ptr, &mActInput,
+                            &mWorkspace, static_cast<void *>(stream));
+  };
+  // The CuTeDSL TVM-FFI entrypoint initializes its CUDA module on first use. Serialize cold
+  // launches across configurations and devices: simultaneous initialization from JAX's
+  // per-device execution threads can leave the CuTeDSL runtime's global init lock held.
+  static std::shared_mutex first_launch_mutex;
+  static std::unordered_set<uint64_t> initialized_on_device;
+  const uint64_t launch_key = (static_cast<uint64_t>(device_index) << 32) | config.to_id();
+  bool initialized = false;
+  {
+    std::shared_lock<std::shared_mutex> lock(first_launch_mutex);
+    initialized = initialized_on_device.find(launch_key) != initialized_on_device.end();
+  }
+  bool launched = false;
+  if (!initialized) {
+    std::unique_lock<std::shared_mutex> lock(first_launch_mutex);
+    if (initialized_on_device.find(launch_key) == initialized_on_device.end()) {
+      launch();
+      initialized_on_device.insert(launch_key);
+      launched = true;
+    }
+  }
+  if (!launched) launch();
 
   // If WITH_DBIAS, reduce the workspace partial dbias in CUDA C++ for now.
   // This will not be affected by the noop flag, which is aligned with the CUDA C++ implementation
