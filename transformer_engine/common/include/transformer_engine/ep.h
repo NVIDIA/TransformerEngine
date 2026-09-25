@@ -100,14 +100,14 @@ typedef struct {
  *  ep_comm is borrowed and must span exactly group_config.ep_size ranks. The
  *  caller retains ownership and must keep it alive until nvte_ep_shutdown()
  *  returns. Re-init after shutdown is allowed; double-init throws. One EP
- *  group per process, bound to the current CUDA device.
+ *  group per local device, bound to the current CUDA device.
  *
  *  \param[in] ep_comm      Opaque ncclComm_t for the EP sub-group.
  *  \param[in] group_config Group-level EP configuration (struct_size set).
  */
 void nvte_ep_initialize(void* ep_comm, const NVTEEpGroupConfig* group_config);
 
-/*! \brief Tear down the EP backend. Idempotent. Does not destroy ep_comm. */
+/*! \brief Tear down all local EP backends. Idempotent. Does not destroy ep_comm. */
 void nvte_ep_shutdown(void);
 
 /* -- Layer sizing (host-only) --------------------------------------------- */
@@ -117,7 +117,8 @@ void nvte_ep_shutdown(void);
  *  handle_mem is a per-layer kByte routing-state buffer; allocate once and
  *  thread the same pointer through every prepare/dispatch/combine/_bwd call
  *  for that layer (the backend keys its cache on the pointer). Host-only;
- *  size is stable for a given (group, layer) pair.
+ *  returns the maximum required size across initialized local devices. Size
+ *  is stable while the initialized groups and layer config remain unchanged.
  *
  *  \param[in] layer_cfg  Per-call layer configuration (struct_size set).
  *  \return size in bytes for the handle_mem buffer.
@@ -176,6 +177,39 @@ void nvte_ep_dispatch(NVTETensor handle_mem, NVTETensor topk_idx, NVTETensor tok
                       NVTECommWindow topk_weights_win, NVTETensor recv_tokens,
                       NVTECommWindow recv_tokens_win, NVTETensor recv_topk_weights,
                       NVTECommWindow recv_topk_weights_win, cudaStream_t stream);
+
+/*! \brief Fused prepare + dispatch.
+ *
+ *  Seeds handle_mem with this step's routing (as nvte_ep_prepare) and then
+ *  dispatches tokens (as nvte_ep_dispatch) in a single call. Per-expert recv
+ *  counts are produced by the dispatch and written to recv_tokens_per_expert;
+ *  they are not available before the dispatch returns. No separate
+ *  nvte_ep_prepare is needed. CUDA graph-capturable: the counts stay on device,
+ *  so no host-side stream sync is needed to size the recv buffers.
+ *
+ *  \param[in]     handle_mem             uint8 routing-state buffer.
+ *  \param[in]     topk_idx               [T, top_k] int64 routing indices.
+ *  \param[in]     tokens                 [T, hidden_dim] input tokens.
+ *  \param[in]     tokens_win             Optional symmem window for tokens.
+ *  \param[in]     topk_weights           [T, top_k] float32 weights.
+ *  \param[in]     topk_weights_win       Optional symmem window for topk_weights.
+ *  \param[out]    recv_tokens            [recv_T, hidden_dim] received tokens.
+ *  \param[in]     recv_tokens_win        Optional symmem window for recv_tokens.
+ *  \param[out]    recv_topk_weights      [recv_T] float32 per-slot weights.
+ *  \param[in]     recv_topk_weights_win  Optional symmem window for recv_topk_weights.
+ *  \param[out]    recv_tokens_per_expert [num_local_experts] int32/int64 counts.
+ *  \param[out]    total_recv_tokens_per_rank Optional [1] int32/int64 scalar recv total. May be null.
+ *  \param[in]     layer_cfg              Per-call layer configuration (struct_size set).
+ *  \param[in]     stream                 CUDA stream.
+ */
+void nvte_ep_prepare_and_dispatch(NVTETensor handle_mem, NVTETensor topk_idx, NVTETensor tokens,
+                                  NVTECommWindow tokens_win, NVTETensor topk_weights,
+                                  NVTECommWindow topk_weights_win, NVTETensor recv_tokens,
+                                  NVTECommWindow recv_tokens_win, NVTETensor recv_topk_weights,
+                                  NVTECommWindow recv_topk_weights_win,
+                                  NVTETensor recv_tokens_per_expert,
+                                  NVTETensor total_recv_tokens_per_rank,
+                                  const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream);
 
 /*! \brief Scatter-sum expert outputs back to originating ranks.
  *
