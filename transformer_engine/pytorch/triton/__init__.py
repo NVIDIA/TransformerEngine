@@ -4,3 +4,4 @@
 
 """PyTorch wrappers for Triton kernels."""
 from transformer_engine.pytorch.triton import mhc
+from transformer_engine.pytorch.triton import mla
