@@ -1119,6 +1119,51 @@ def test_fused_moe_aux_loss(dtype, num_tokens, num_experts, topk, expert_multipl
     torch.testing.assert_close(probs.grad, probs_clone.grad, atol=atol, rtol=rtol)
 
 
+@pytest.mark.parametrize("path", ["forward", "graph_safe_forward", "backward"])
+def test_fused_moe_aux_loss_rejects_int_offset_overflow(path):
+    num_rows, num_cols = 8_388_609, 256  # Above INT_MAX elements.
+    bytes_needed = num_rows * num_cols * 2
+    if not torch.cuda.is_available():
+        pytest.skip("Requires a CUDA GPU")
+    torch.cuda.empty_cache()
+    free_bytes, _ = torch.cuda.mem_get_info()
+    if free_bytes < bytes_needed + (1 << 30):
+        pytest.skip("Needs 4.0 GiB for BF16 input/output plus 1 GiB headroom")
+
+    tokens_per_expert = torch.ones(num_cols, device="cuda", dtype=torch.int32)
+    try:
+        if path == "backward":
+            tex.fused_moe_aux_loss_bwd(
+                Const_buf=torch.ones(2, device="cuda", dtype=torch.float32),
+                tokens_per_expert=tokens_per_expert,
+                num_rows=num_rows,
+                num_cols=num_cols,
+                grad_aux_loss=torch.ones((), device="cuda", dtype=torch.bfloat16),
+            )
+        else:
+            probs = torch.empty((num_rows, num_cols), device="cuda", dtype=torch.bfloat16)
+            arguments = dict(
+                probs=probs,
+                tokens_per_expert=tokens_per_expert,
+                num_experts=num_cols,
+                num_rows=num_rows,
+                num_cols=num_cols,
+                topk=1,
+                coeff=0.01,
+            )
+            if path == "forward":
+                tex.fused_moe_aux_loss_fwd(total_num_tokens=num_rows, **arguments)
+            else:
+                total = torch.tensor(num_rows, device="cuda", dtype=torch.int64)
+                tex.fused_moe_aux_loss_fwd_graph_safe(total_num_tokens=total, **arguments)
+    except torch.cuda.OutOfMemoryError:
+        pytest.skip("Could not allocate the BF16 input/output tensor")
+    except RuntimeError as exc:
+        assert "num_rows * num_cols exceeds INT_MAX" in str(exc)
+    else:
+        pytest.fail("Expected the int-offset guard to reject the shape")
+
+
 def test_fused_moe_aux_loss_cuda_graph_capture():
     """CUDA-graph-safe path: total_num_tokens is a device tensor whose value
     changes between replays. Forward and backward must both observe the new
