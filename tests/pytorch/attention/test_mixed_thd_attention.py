@@ -453,7 +453,7 @@ def test_thd_mask_type_runtime_dispatch_uses_backend_selection(monkeypatch):
     def fake_get_attention_backend(attention_params):
         observed_params.append(attention_params)
         available_backends = [False, attention_params.attn_mask_type == "padding", False]
-        return False, None, available_backends[1], None, False, available_backends
+        return False, None, available_backends[1], None, False, False, available_backends
 
     monkeypatch.setattr(dpa_module.dpa_utils, "get_attention_backend", fake_get_attention_backend)
     padded_policies, grouped_policies = DotProductAttention._partition_thd_mask_policies(
