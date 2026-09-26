@@ -23,14 +23,14 @@ bool import_and_register_backends() {
   }
   bool initialized = false;
   PyObject *loaded = PyObject_CallMethod(module, "_load_tvm_ffi_library", nullptr);
-  if (loaded != nullptr) {
-    Py_DECREF(loaded);
+  if (loaded != nullptr && PyObject_IsTrue(loaded) == 1) {
     PyObject *registered = PyObject_CallMethod(module, "_register_cutedsl_backends", nullptr);
-    if (registered != nullptr) {
-      Py_DECREF(registered);
+    if (registered != nullptr && PyObject_IsTrue(registered) == 1) {
       initialized = true;
     }
+    Py_XDECREF(registered);
   }
+  Py_XDECREF(loaded);
   Py_DECREF(module);
   return initialized;
 }
@@ -47,11 +47,13 @@ void mask_framework_modules() {
   PyDict_SetItemString(modules, "transformer_engine.jax", Py_None);
 }
 
-void warn_import_failed() {
-  PyErr_Print();
+void warn_initialization_failed() {
+  if (PyErr_Occurred() != nullptr) {
+    PyErr_Print();
+  }
   NVTE_WARN(
-      "Failed to initialize CuTeDSL backend: unable to import transformer_engine.common from "
-      "python. Using CUDA backend as fallback.");
+      "Failed to initialize CuTeDSL backend: Python import, TVM-FFI load, or backend "
+      "registration failed. Using CUDA backend as fallback.");
 }
 
 }  // namespace
@@ -75,7 +77,7 @@ bool initialize_python_cutedsl_backend() {
     mask_framework_modules();
     const bool initialized = import_and_register_backends();
     if (!initialized) {
-      warn_import_failed();
+      warn_initialization_failed();
     }
     // Detach the initializing C++ thread and release the GIL so TVM-FFI callbacks can acquire it
     // from any thread. The interpreter has process lifetime, so no later restore is needed.
@@ -88,7 +90,7 @@ bool initialize_python_cutedsl_backend() {
   const PyGILState_STATE gil_state = PyGILState_Ensure();
   const bool initialized = import_and_register_backends();
   if (!initialized) {
-    warn_import_failed();
+    warn_initialization_failed();
   }
   PyGILState_Release(gil_state);
   return initialized;
