@@ -53,14 +53,15 @@ TE autocast path:
       .. code-block:: python
 
          import transformer_engine.pytorch as te
-         from transformer_engine.common.recipe import CustomRecipe
+         from transformer_engine.common.recipe import CustomRecipe, quantizer_factory
          from transformer_engine.pytorch.custom_recipes.quantizer_factories import (
              mxfp8_factory,
              nvfp4_factory,
          )
 
 
-         def quantizer_factory(role):
+         @quantizer_factory(key=("demo_factory", 1))
+         def demo_factory(role):
              if role is not None and role.name == "demo.fc1":
                  if role.tensor_type == "input":
                      # wgrad keeps the original BF16 input
@@ -88,7 +89,7 @@ TE autocast path:
              return mxfp8_factory(role)  # every other TE module in MXFP8
 
 
-         recipe = CustomRecipe(qfactory=quantizer_factory)
+         recipe = CustomRecipe(qfactory=demo_factory)
 
          with te.autocast(enabled=True, recipe=recipe):
              output = model(inputs)
@@ -130,7 +131,8 @@ It does not call the factory on every unchanged forward.
          #       name: str = ""
 
 
-         def quantizer_factory(role: Optional[te.QuantizerRole]):
+         @quantizer_factory(key=("demo_factory", 1))
+         def demo_factory(role: Optional[te.QuantizerRole]):
              # construct a fresh quantizer on every call
              ...
              # Boundary slots may pass role=None or a role with empty fields, so
@@ -139,7 +141,7 @@ It does not call the factory on every unchanged forward.
 
 
          # The factory plugs into the standard TE autocast path:
-         recipe = CustomRecipe(qfactory=quantizer_factory)
+         recipe = CustomRecipe(qfactory=demo_factory)
 
          with te.autocast(enabled=True, recipe=recipe):
              output = model(inputs)

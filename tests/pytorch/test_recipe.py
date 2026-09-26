@@ -2,6 +2,9 @@
 #
 # See LICENSE for license information.
 
+import copy
+from dataclasses import fields, replace
+from types import SimpleNamespace
 from typing import Optional
 
 import pickle
@@ -14,8 +17,8 @@ import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch import (
     Float8BlockQuantizer,
+    Float8CurrentScalingQuantizer,
     MXFP8Quantizer,
-    Float8Quantizer,
     NVFP4Quantizer,
     quantized_model_init,
     Linear,
@@ -27,8 +30,13 @@ from transformer_engine.pytorch import (
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.quantization import (
     FP8GlobalStateManager,
+    Float8BlockScalingRecipeState,
+    Float8CurrentScalingRecipeState,
     NVFP4BlockScalingRecipeState,
     QuantizerRole,
+    RecipeState,
+    _QuantizationRuntimeKey,
+    _QuantizationRuntime,
     _amax_and_scale_update,
 )
 import transformer_engine.pytorch.ops as te_ops
@@ -37,9 +45,12 @@ from transformer_engine.common.recipe import (
     DelayedScaling,
     Float8CurrentScaling,
     Float8BlockScaling,
+    Format,
     MXFP8BlockScaling,
     NVFP4BlockScaling,
+    QParams,
     Recipe,
+    quantizer_factory,
 )
 from transformer_engine.pytorch._extra_state import (
     CheckpointExtraStatePolicy,
@@ -55,6 +66,1305 @@ fp8_block_scaling_available, reason_for_no_fp8_block_scaling = te.is_fp8_block_s
     return_reason=True
 )
 fp4_available, reason_for_no_fp4 = te.is_nvfp4_available(return_reason=True)
+
+
+def test_recipe_quantizer_config_cache_and_invalidation():
+    """Semantic configuration is built once and rebuilt after recipe mutation."""
+
+    config_builds = []
+
+    class CountingRecipe(Recipe):
+        def __init__(self, value: int) -> None:
+            self.value = value
+
+        def _make_quantizer_config(self):
+            config_builds.append(self.value)
+            return ("counting_recipe", self.value)
+
+        def _make_repr(self) -> str:
+            return f"counting_recipe={self.value}"
+
+    recipe = CountingRecipe(1)
+    assert recipe.quantizer_config() == ("counting_recipe", 1)
+    assert recipe.quantizer_config() == ("counting_recipe", 1)
+    assert config_builds == [1]
+
+    # Populating the independent repr cache must not invalidate the config cache.
+    assert repr(recipe) == "counting_recipe=1"
+    assert recipe.quantizer_config() == ("counting_recipe", 1)
+    assert config_builds == [1]
+
+    recipe.value = 2
+    assert recipe.quantizer_config() == ("counting_recipe", 2)
+    assert config_builds == [1, 2]
+
+
+def test_recipe_quantizer_config_must_be_hashable():
+    """Reject mutable containers that cannot serve as runtime-key components."""
+
+    class UnhashableConfigRecipe(Recipe):
+        def _make_quantizer_config(self):
+            return ["mutable"]
+
+        def _make_repr(self) -> str:
+            return "unhashable_config_recipe"
+
+    with pytest.raises(
+        TypeError,
+        match=r"UnhashableConfigRecipe\._make_quantizer_config\(\) must return a hashable value",
+    ):
+        UnhashableConfigRecipe().quantizer_config()
+
+
+def test_quantization_runtime_key_is_semantic_over_ordered_slot_roles():
+    """Runtime-key equality includes recipe config and each ordered role slot.
+
+    Role containers are tuples by construction (``_resolve_quantizer_roles``
+    builds them), so the key normalizes nothing and stays a plain frozen record.
+    """
+    input_role = QuantizerRole(module_type="linear", tensor_type="input", name="qkv")
+    weight_role = QuantizerRole(module_type="linear", tensor_type="weight", name="qkv")
+    grad_role = QuantizerRole(module_type="linear", tensor_type="grad_output", name="qkv")
+
+    key = _QuantizationRuntimeKey(
+        recipe_config=("recipe", "fp8"),
+        forward_roles=(input_role, None, weight_role),
+        backward_roles=(grad_role,),
+    )
+    same_request = _QuantizationRuntimeKey(
+        recipe_config=("recipe", "fp8"),
+        forward_roles=(input_role, None, weight_role),
+        backward_roles=(grad_role,),
+    )
+
+    assert key == same_request
+    assert hash(key) == hash(same_request)
+    assert key.forward_roles == (input_role, None, weight_role)
+    assert key != _QuantizationRuntimeKey(
+        recipe_config=("recipe", "fp8"),
+        forward_roles=(input_role, weight_role),
+        backward_roles=(grad_role,),
+    )
+    assert key != _QuantizationRuntimeKey(
+        recipe_config=("recipe", "new-fp8"),
+        forward_roles=(input_role, None, weight_role),
+        backward_roles=(grad_role,),
+    )
+
+
+def test_quantization_runtime_bundles_both_quantization_directions():
+    """A runtime retains the complete active-or-candidate quantizer bundle."""
+    runtime_key = _QuantizationRuntimeKey(
+        recipe_config=("recipe", "fp8"),
+        forward_roles=(),
+        backward_roles=(),
+    )
+    forward_quantizers = []
+    backward_quantizers = []
+    runtime_recipe = Float8CurrentScaling()
+    runtime = _QuantizationRuntime(
+        key=runtime_key,
+        recipe=runtime_recipe,
+        num_gemms=1,
+        role_revision=2,
+        forward_state=None,
+        backward_state=None,
+        forward_quantizers=forward_quantizers,
+        backward_quantizers=backward_quantizers,
+    )
+
+    assert runtime.key is runtime_key
+    assert runtime.recipe is runtime_recipe
+    assert runtime.forward_quantizers is forward_quantizers
+    assert runtime.backward_quantizers is backward_quantizers
+
+
+@pytest.mark.parametrize(
+    "recipe_type,derived_fields",
+    [
+        (DelayedScaling, ()),
+        (
+            Float8CurrentScaling,
+            ("fp8_quant_fwd_inp", "fp8_quant_fwd_weight", "fp8_quant_bwd_grad"),
+        ),
+        (MXFP8BlockScaling, ()),
+        (
+            Float8BlockScaling,
+            ("fp8_quant_fwd_inp", "fp8_quant_fwd_weight", "fp8_quant_bwd_grad"),
+        ),
+        (
+            NVFP4BlockScaling,
+            ("fp4_quant_fwd_inp", "fp4_quant_fwd_weight", "fp4_quant_bwd_grad"),
+        ),
+    ],
+)
+def test_builtin_recipe_quantizer_configs_are_exhaustive(
+    recipe_type,
+    derived_fields,
+):
+    """Built-in configs include every declared field and derived parameter bundle."""
+    recipe = recipe_type()
+    config = recipe.quantizer_config()
+    config_labels = tuple(name for name, _ in config)
+    expected_labels = {
+        "recipe_type",
+        *(field.name for field in fields(recipe_type)),
+        *derived_fields,
+    }
+
+    assert len(config_labels) == len(set(config_labels))
+    assert set(config_labels) == expected_labels
+
+    config_by_name = dict(config)
+    for name in derived_fields:
+        params = getattr(recipe, name)
+        expected = tuple(
+            (field.name, getattr(params, field.name)) for field in fields(type(params))
+        )
+        assert config_by_name[name] == expected
+
+    for name in ("fp8_gemm_fprop", "fp8_gemm_dgrad", "fp8_gemm_wgrad"):
+        if hasattr(recipe, name):
+            params = getattr(recipe, name)
+            expected = tuple(
+                (field.name, getattr(params, field.name)) for field in fields(type(params))
+            )
+            assert config_by_name[name] == expected
+
+
+@pytest.mark.parametrize(
+    "recipe_type",
+    [
+        DelayedScaling,
+        Float8CurrentScaling,
+        MXFP8BlockScaling,
+        Float8BlockScaling,
+        NVFP4BlockScaling,
+    ],
+)
+def test_equal_builtin_recipes_have_equal_quantizer_configs(recipe_type):
+    """Independent built-in recipes with the same ingredients are semantically equal."""
+    first = recipe_type().quantizer_config()
+    second = recipe_type().quantizer_config()
+    assert first == second
+
+
+def test_mxfp8_2d_quantization_changes_quantizer_config():
+    """MXFP8 weight layout participates in construction and mutation semantics."""
+    recipe = MXFP8BlockScaling(enable_2d_quantization=False)
+    original_config = recipe.quantizer_config()
+
+    recipe.enable_2d_quantization = True
+    updated_config = recipe.quantizer_config()
+
+    assert updated_config != original_config
+    assert dict(updated_config)["enable_2d_quantization"] is True
+    assert updated_config == MXFP8BlockScaling(enable_2d_quantization=True).quantizer_config()
+
+
+def test_same_recipe_mutation_invalidates_config_for_direct_and_nested_parameters():
+    """Built-in recipe config changes for same-object and nested-qparam updates."""
+    recipe = Float8CurrentScaling()
+    original_config = recipe.quantizer_config()
+
+    recipe.fp8_dpa = True
+    direct_mutation_config = recipe.quantizer_config()
+    assert direct_mutation_config != original_config
+    assert dict(direct_mutation_config)["fp8_dpa"] is True
+
+    recipe.fp8_quant_fwd_inp = replace(recipe.fp8_quant_fwd_inp, amax_epsilon=0.25)
+    nested_mutation_config = recipe.quantizer_config()
+    assert nested_mutation_config != direct_mutation_config
+    assert dict(nested_mutation_config)["fp8_quant_fwd_inp"] == (
+        ("power_2_scale", recipe.fp8_quant_fwd_inp.power_2_scale),
+        ("amax_epsilon", 0.25),
+        ("random_hadamard_transform", recipe.fp8_quant_fwd_inp.random_hadamard_transform),
+        ("stochastic_rounding", recipe.fp8_quant_fwd_inp.stochastic_rounding),
+        ("fp4_2d_quantization", recipe.fp8_quant_fwd_inp.fp4_2d_quantization),
+    )
+
+
+@pytest.mark.parametrize(
+    "make_recipe",
+    (
+        pytest.param(DelayedScaling, id="delayed-scaling"),
+        pytest.param(Float8CurrentScaling, id="current-scaling"),
+        pytest.param(MXFP8BlockScaling, id="mxfp8"),
+        pytest.param(NVFP4BlockScaling, id="nvfp4"),
+        pytest.param(
+            lambda **kwargs: CustomRecipe(
+                qfactory=lambda _role: None,
+                qfactory_key=("canonical-attention-flags", 1),
+                **kwargs,
+            ),
+            id="custom",
+        ),
+    ),
+)
+def test_fp8_mha_requires_fp8_dpa_at_construction_and_after_mutation(make_recipe):
+    """FP8 MHA must never produce a semantic configuration with DPA disabled."""
+    constructed = make_recipe(fp8_mha=True)
+    assert constructed.fp8_mha is True
+    assert constructed.fp8_dpa is True
+    assert dict(constructed.quantizer_config())["fp8_dpa"] is True
+
+    # Construction canonicalizes; a later assignment does not. Enabling MHA alone
+    # is rejected at the next activation instead of silently enabling DPA.
+    mutated = make_recipe()
+    inactive_config = mutated.quantizer_config()
+    mutated.fp8_mha = True
+    assert mutated.fp8_dpa is False
+    with pytest.raises(ValueError, match="fp8_mha=True requires fp8_dpa=True"):
+        mutated.quantizer_config()
+
+    mutated.fp8_dpa = True
+    canonical_config = mutated.quantizer_config()
+    assert canonical_config != inactive_config
+    assert dict(canonical_config)["fp8_dpa"] is True
+    assert dict(canonical_config)["fp8_mha"] is True
+
+    # DPA cannot be disabled while MHA still depends on it: the assignment is
+    # kept as written and rejected when the recipe is next activated.
+    mutated.fp8_dpa = False
+    assert mutated.fp8_dpa is False
+    with pytest.raises(ValueError, match="fp8_mha=True requires fp8_dpa=True"):
+        mutated.quantizer_config()
+
+    # Disable MHA first when disabling both attention modes.
+    mutated.fp8_mha = False
+    assert mutated.quantizer_config() == inactive_config
+
+
+@pytest.mark.parametrize(
+    ("make_recipe", "field_name", "invalid_value", "match"),
+    (
+        pytest.param(
+            DelayedScaling,
+            "fp8_format",
+            transformer_engine.common.recipe.Format.E5M2,
+            "Pure E5M2",
+            id="delayed-format",
+        ),
+        pytest.param(
+            Float8BlockScaling,
+            "w_block_scaling_dim",
+            99,
+            "Only 1D or 2D blocks supported for w",
+            id="block-scaling-dim",
+        ),
+        pytest.param(
+            NVFP4BlockScaling,
+            "nvfp4_4over6_err_mode",
+            "BOGUS",
+            "NVTE_NVFP4_4OVER6_ERR_MODE",
+            id="nvfp4-err-mode",
+        ),
+    ),
+)
+def test_invalid_field_assignment_rejected_before_config(
+    make_recipe, field_name, invalid_value, match
+):
+    """A field assigned after construction is validated at the next activation.
+
+    The constructor's own message is reused, and the recipe never produces a
+    semantic configuration built from the invalid value.
+    """
+    recipe_instance = make_recipe()
+    valid_config = recipe_instance.quantizer_config()
+    valid_value = getattr(recipe_instance, field_name)
+
+    setattr(recipe_instance, field_name, invalid_value)
+    with pytest.raises((AssertionError, ValueError), match=match):
+        recipe_instance.quantizer_config()
+
+    # Restoring the field makes the recipe usable again with its original config.
+    setattr(recipe_instance, field_name, valid_value)
+    assert recipe_instance.quantizer_config() == valid_config
+
+
+def test_legacy_scaling_flags_keep_import_time_qparams_defaults():
+    """Keep constructor behavior stable until the shorthand semantics change separately."""
+    current = Float8CurrentScaling(use_power_2_scales=True)
+    current_quantizers = Float8CurrentScalingRecipeState(
+        current,
+        mode="forward",
+        num_quantizers=2,
+        device=torch.device("cpu"),
+        roles=[QuantizerRole(tensor_type="input"), QuantizerRole(tensor_type="weight")],
+    ).make_quantizers()
+    assert all(
+        quantizer.force_pow_2_scales == current.fp8_quant_fwd_inp.power_2_scale
+        for quantizer in current_quantizers
+    )
+
+    block = Float8BlockScaling(use_f32_scales=True)
+    block_quantizers = Float8BlockScalingRecipeState(
+        block,
+        mode="forward",
+        num_quantizers=2,
+        device=torch.device("cpu"),
+        roles=[QuantizerRole(tensor_type="input"), QuantizerRole(tensor_type="weight")],
+    ).make_quantizers()
+    assert all(quantizer.force_pow_2_scales for quantizer in block_quantizers)
+
+    nvfp4 = NVFP4BlockScaling(
+        disable_rht=True,
+        disable_stochastic_rounding=True,
+        disable_2d_quantization=True,
+    )
+    nvfp4_forward = NVFP4BlockScalingRecipeState(
+        nvfp4,
+        mode="forward",
+        num_quantizers=2,
+        device=torch.device("cpu"),
+        roles=[QuantizerRole(tensor_type="input"), QuantizerRole(tensor_type="weight")],
+    ).make_quantizers()
+    nvfp4_backward = NVFP4BlockScalingRecipeState(
+        nvfp4,
+        mode="backward",
+        num_quantizers=1,
+        device=torch.device("cpu"),
+        roles=[QuantizerRole(tensor_type="grad_output")],
+    ).make_quantizers()
+    assert not nvfp4_forward[0].with_rht
+    assert not nvfp4_forward[1].with_2d_quantization
+    assert not nvfp4_backward[0].with_rht
+    assert not nvfp4_backward[0].stochastic_rounding
+
+
+def test_high_level_recipe_mutation_preserves_legacy_qparams_semantics():
+    """Legacy inert shorthands do not overwrite QParams; NVFP4 shorthands still do."""
+    current = Float8CurrentScaling()
+    current.fp8_quant_fwd_inp = replace(current.fp8_quant_fwd_inp, amax_epsilon=0.125)
+    current.use_power_2_scales = True
+    assert not current.fp8_quant_fwd_inp.power_2_scale
+    assert current.fp8_quant_fwd_inp.amax_epsilon == 0.125
+    assert not current.fp8_quant_fwd_weight.power_2_scale
+    assert not current.fp8_quant_bwd_grad.power_2_scale
+
+    block = Float8BlockScaling()
+    block.fp8_quant_fwd_weight = replace(block.fp8_quant_fwd_weight, amax_epsilon=0.25)
+    block.use_f32_scales = True
+    assert block.fp8_quant_fwd_inp.power_2_scale
+    assert block.fp8_quant_fwd_weight.power_2_scale
+    assert block.fp8_quant_fwd_weight.amax_epsilon == 0.25
+    assert block.fp8_quant_bwd_grad.power_2_scale
+    block_quantizer = Float8BlockScalingRecipeState(
+        block,
+        mode="forward",
+        num_quantizers=1,
+        device=torch.device("cpu"),
+        roles=[QuantizerRole(tensor_type="weight")],
+    ).make_quantizers()[0]
+    assert block_quantizer.force_pow_2_scales
+
+    nvfp4 = NVFP4BlockScaling()
+    nvfp4.fp4_quant_fwd_inp = replace(nvfp4.fp4_quant_fwd_inp, amax_epsilon=0.375)
+    nvfp4.fp4_quant_fwd_weight = replace(
+        nvfp4.fp4_quant_fwd_weight,
+        stochastic_rounding=True,
+    )
+    nvfp4.fp4_quant_bwd_grad = replace(nvfp4.fp4_quant_bwd_grad, amax_epsilon=0.5)
+    nvfp4.disable_rht = True
+    nvfp4.disable_stochastic_rounding = True
+    nvfp4.disable_2d_quantization = True
+    assert not nvfp4.fp4_quant_fwd_inp.random_hadamard_transform
+    assert nvfp4.fp4_quant_fwd_inp.amax_epsilon == 0.375
+    assert not nvfp4.fp4_quant_fwd_weight.fp4_2d_quantization
+    assert nvfp4.fp4_quant_fwd_weight.stochastic_rounding
+    assert not nvfp4.fp4_quant_bwd_grad.random_hadamard_transform
+    assert not nvfp4.fp4_quant_bwd_grad.stochastic_rounding
+    assert nvfp4.fp4_quant_bwd_grad.amax_epsilon == 0.5
+
+
+def test_current_scaling_recipe_state_configures_roles_and_preserves_boundary_defaults():
+    """Current-scaling construction follows role dispatch and legacy boundary defaults."""
+    recipe = Float8CurrentScaling()
+    recipe.fp8_quant_fwd_inp = replace(
+        recipe.fp8_quant_fwd_inp, power_2_scale=True, amax_epsilon=0.1
+    )
+    recipe.fp8_quant_fwd_weight = replace(
+        recipe.fp8_quant_fwd_weight, power_2_scale=False, amax_epsilon=0.2
+    )
+    recipe.fp8_quant_bwd_grad = replace(
+        recipe.fp8_quant_bwd_grad, power_2_scale=True, amax_epsilon=0.3
+    )
+
+    forward_quantizers = Float8CurrentScalingRecipeState(
+        recipe,
+        mode="forward",
+        num_quantizers=4,
+        device=torch.device("cpu"),
+        roles=[
+            QuantizerRole(tensor_type="input"),
+            QuantizerRole(tensor_type="weight"),
+            None,
+            QuantizerRole(tensor_type="unknown"),
+        ],
+    ).make_quantizers()
+    backward_quantizers = Float8CurrentScalingRecipeState(
+        recipe,
+        mode="backward",
+        num_quantizers=3,
+        device=torch.device("cpu"),
+        roles=[
+            QuantizerRole(tensor_type="grad_output"),
+            None,
+            QuantizerRole(tensor_type="grad_input"),
+        ],
+    ).make_quantizers()
+
+    assert [(q.force_pow_2_scales, q.amax_epsilon) for q in forward_quantizers] == [
+        (True, 0.1),
+        (False, 0.2),
+        (recipe.use_power_2_scales, 0.0),
+        (True, 0.1),
+    ]
+    assert [(q.force_pow_2_scales, q.amax_epsilon) for q in backward_quantizers] == [
+        (True, 0.3),
+        (recipe.use_power_2_scales, 0.0),
+        (recipe.use_power_2_scales, 0.0),
+    ]
+
+    legacy_dpa_quantizers = Float8CurrentScalingRecipeState(
+        recipe,
+        mode="forward",
+        num_quantizers=3,
+        device=torch.device("cpu"),
+        roles=None,
+    ).make_quantizers()
+    assert [(q.force_pow_2_scales, q.amax_epsilon) for q in legacy_dpa_quantizers] == [
+        (recipe.use_power_2_scales, 0.0),
+    ] * 3
+
+
+@pytest.mark.parametrize(
+    "recipe",
+    [
+        DelayedScaling(),
+        Float8CurrentScaling(),
+        MXFP8BlockScaling(),
+        Float8BlockScaling(),
+        NVFP4BlockScaling(),
+        CustomRecipe(qfactory=lambda role: role, qfactory_key=("invalid-mode-test", 1)),
+    ],
+)
+def test_recipe_state_rejects_invalid_mode(recipe):
+    """Every RecipeState implementation uses the same mode validation."""
+    with pytest.raises(ValueError, match=r"Unexpected recipe mode \(invalid\)"):
+        RecipeState.create(recipe, mode="invalid", device=torch.device("cpu"))
+
+
+def test_current_scaling_role_layouts_cover_module_and_basic_op_families():
+    """Every Phase 2 owner supplies roles that select the expected per-slot qparams."""
+    recipe = Float8CurrentScaling()
+    recipe.fp8_quant_fwd_inp = replace(
+        recipe.fp8_quant_fwd_inp, power_2_scale=True, amax_epsilon=0.1
+    )
+    recipe.fp8_quant_fwd_weight = replace(
+        recipe.fp8_quant_fwd_weight, power_2_scale=False, amax_epsilon=0.2
+    )
+    recipe.fp8_quant_bwd_grad = replace(
+        recipe.fp8_quant_bwd_grad, power_2_scale=True, amax_epsilon=0.3
+    )
+
+    boundary = (recipe.use_power_2_scales, 0.0)
+    inp = (True, 0.1)
+    weight = (False, 0.2)
+    grad = (True, 0.3)
+
+    def settings(mode, roles):
+        quantizers = Float8CurrentScalingRecipeState(
+            recipe,
+            mode=mode,
+            num_quantizers=len(roles),
+            device=torch.device("cpu"),
+            roles=roles,
+        ).make_quantizers()
+        return [(q.force_pow_2_scales, q.amax_epsilon) for q in quantizers]
+
+    module_owner = SimpleNamespace(name="test")
+    for module_type in (Linear, LayerNormLinear):
+        forward_roles = module_type.get_quantizer_roles(
+            module_owner,
+            fwd=True,
+            num_quantizers=3,
+            boundary_role=None,
+        )
+        backward_roles = module_type.get_quantizer_roles(
+            module_owner,
+            fwd=False,
+            num_quantizers=2,
+            boundary_role=None,
+        )
+        assert settings("forward", forward_roles) == [inp, weight, boundary]
+        assert settings("backward", backward_roles) == [grad, boundary]
+
+    mlp_forward_roles = LayerNormMLP.get_quantizer_roles(
+        module_owner,
+        fwd=True,
+        num_quantizers=6,
+        boundary_role=None,
+    )
+    mlp_backward_roles = LayerNormMLP.get_quantizer_roles(
+        module_owner,
+        fwd=False,
+        num_quantizers=4,
+        boundary_role=None,
+    )
+    assert settings("forward", mlp_forward_roles) == [
+        inp,
+        weight,
+        inp,
+        inp,
+        weight,
+        boundary,
+    ]
+    assert settings("backward", mlp_backward_roles) == [grad, boundary, grad, grad]
+
+    grouped_forward_roles = GroupedLinear.get_quantizer_roles(
+        module_owner,
+        fwd=True,
+        num_quantizers=6,
+        boundary_role=None,
+    )
+    grouped_backward_roles = GroupedLinear.get_quantizer_roles(
+        module_owner,
+        fwd=False,
+        num_quantizers=4,
+        boundary_role=None,
+    )
+    assert settings("forward", grouped_forward_roles) == [
+        inp,
+        weight,
+        boundary,
+        inp,
+        weight,
+        boundary,
+    ]
+    assert settings("backward", grouped_backward_roles) == [grad, boundary, grad, boundary]
+
+    basic_owner = SimpleNamespace(name="test", num_groups=2)
+    basic_forward_roles = te_ops.BasicLinear.get_quantizer_roles(basic_owner, "forward")
+    basic_backward_roles = te_ops.BasicLinear.get_quantizer_roles(basic_owner, "backward")
+    assert settings("forward", basic_forward_roles) == [inp, weight]
+    assert settings("backward", basic_backward_roles) == [grad]
+
+    basic_grouped_forward_roles = te_ops.GroupedLinear.get_quantizer_roles(basic_owner, "forward")
+    basic_grouped_backward_roles = te_ops.GroupedLinear.get_quantizer_roles(basic_owner, "backward")
+    assert settings("forward", basic_grouped_forward_roles) == [inp, weight, inp, weight]
+    assert settings("backward", basic_grouped_backward_roles) == [grad, grad]
+
+
+def test_current_scaling_owner_configuration_paths_preserve_numerics_and_traits():
+    """Owner initialization paths publish identical qparams and retain non-numerical traits."""
+    recipe = Float8CurrentScaling()
+    recipe.fp8_quant_fwd_inp = replace(
+        recipe.fp8_quant_fwd_inp, power_2_scale=True, amax_epsilon=0.1
+    )
+    recipe.fp8_quant_fwd_weight = replace(
+        recipe.fp8_quant_fwd_weight, power_2_scale=False, amax_epsilon=0.2
+    )
+    recipe.fp8_quant_bwd_grad = replace(
+        recipe.fp8_quant_bwd_grad, power_2_scale=True, amax_epsilon=0.3
+    )
+
+    boundary = (recipe.use_power_2_scales, 0.0)
+    inp = (True, 0.1)
+    weight = (False, 0.2)
+    grad = (True, 0.3)
+
+    def settings(quantizers):
+        return [(q.force_pow_2_scales, q.amax_epsilon) for q in quantizers]
+
+    def make_module_owner(module_type, num_gemms):
+        owner = object.__new__(module_type)
+        owner.__dict__.update(
+            # ``name`` is a property backed by ``_name``: writing the public name
+            # into ``__dict__`` would be shadowed by the descriptor.
+            _name="test",
+            num_gemms=num_gemms,
+            fp8_meta={"num_gemms": num_gemms},
+            fp8_meta_tensors_initialized=False,
+            quantizers={"scaling_fwd": [], "scaling_bwd": []},
+            _output_quantizer_role=None,
+            _grad_input_quantizer_role=None,
+        )
+        return owner
+
+    FP8GlobalStateManager.reset()
+    FP8GlobalStateManager.activate_recipe(recipe)
+    try:
+        for module_type in (Linear, LayerNormLinear):
+            owner = make_module_owner(module_type, 1)
+            module_type.set_meta_tensor(owner, True, recipe)
+            module_type.set_meta_tensor(owner, False, recipe)
+            assert settings(owner.quantizers["scaling_fwd"]) == [inp, weight, boundary]
+            assert settings(owner.quantizers["scaling_bwd"]) == [grad, boundary]
+
+        mlp = make_module_owner(LayerNormMLP, 2)
+        LayerNormMLP.set_meta_tensor(mlp, True, recipe)
+        LayerNormMLP.set_meta_tensor(mlp, False, recipe)
+        assert settings(mlp.quantizers["scaling_fwd"]) == [
+            inp,
+            weight,
+            inp,
+            inp,
+            weight,
+            boundary,
+        ]
+        assert settings(mlp.quantizers["scaling_bwd"]) == [grad, boundary, grad, grad]
+
+        grouped = make_module_owner(GroupedLinear, 2)
+        grouped.__dict__.update(
+            tp_size=1,
+            _offsets={
+                "input": 0,
+                "weight": 1,
+                "output": 2,
+                "grad_output": 0,
+                "grad_input": 1,
+            },
+            _num_fp8_tensors_per_gemm={"fwd": 3, "bwd": 2},
+            use_grouped_tensor=False,
+        )
+        GroupedLinear.set_meta_tensor(grouped, True, recipe)
+        GroupedLinear.set_meta_tensor(grouped, False, recipe)
+        assert settings(grouped.quantizers["scaling_fwd"]) == [
+            inp,
+            weight,
+            boundary,
+            inp,
+            weight,
+            boundary,
+        ]
+        assert settings(grouped.quantizers["scaling_bwd"]) == [
+            grad,
+            boundary,
+            grad,
+            boundary,
+        ]
+
+        grouped_tp = make_module_owner(GroupedLinear, 2)
+        grouped_tp.__dict__["tp_size"] = 2
+        with pytest.raises(
+            ValueError,
+            match="GroupedLinear doesn't support TP > 1 with Float8 current scaling",
+        ):
+            GroupedLinear.set_meta_tensor(grouped_tp, True, recipe)
+
+        basic_linear = te_ops.BasicLinear(4, 4, device="meta")
+        basic_linear.reset_recipe_state(recipe=recipe)
+        assert settings(basic_linear._quantizers["forward"]) == [
+            (inp[0], 0.0),
+            (weight[0], 0.0),
+        ]
+        assert settings(basic_linear._quantizers["backward"]) == [(grad[0], 0.0)]
+        assert basic_linear.get_quantizer("forward", 0).internal
+        assert basic_linear.get_quantizer("forward", 0).optimize_for_gemm
+        assert basic_linear.get_quantizer("forward", 1).internal
+        assert basic_linear.get_quantizer("backward", 0).internal
+        assert basic_linear.get_quantizer("backward", 0).optimize_for_gemm
+
+        basic_grouped = te_ops.GroupedLinear(2, 4, 4, device="meta")
+        basic_grouped.reset_recipe_state(recipe=recipe)
+        assert settings(basic_grouped._quantizers["forward"]) == [
+            (inp[0], 0.0),
+            (weight[0], 0.0),
+            (inp[0], 0.0),
+            (weight[0], 0.0),
+        ]
+        assert settings(basic_grouped._quantizers["backward"]) == [
+            (grad[0], 0.0),
+            (grad[0], 0.0),
+        ]
+        for quantizer in basic_grouped._quantizers["forward"]:
+            assert quantizer.internal
+        for quantizer in basic_grouped._quantizers["backward"]:
+            assert quantizer.internal
+    finally:
+        FP8GlobalStateManager.reset()
+
+
+@pytest.mark.parametrize(
+    "algorithm_field",
+    ["amax_compute_algo", "scaling_factor_compute_algo"],
+)
+def test_delayed_scaling_callable_config_uses_explicit_key(algorithm_field):
+    """Delayed-scaling callable identity is replaced by an explicit semantic key."""
+    calls = []
+
+    def first_algorithm(*args):
+        calls.append(("first", args))
+
+    def second_algorithm(*args):
+        calls.append(("second", args))
+
+    key_field = f"{algorithm_field}_key"
+    shared_key = ("test_algorithm", 1)
+    first = DelayedScaling(**{algorithm_field: first_algorithm, key_field: shared_key})
+    second = DelayedScaling(**{algorithm_field: second_algorithm, key_field: shared_key})
+
+    assert first.quantizer_config() == second.quantizer_config()
+    assert calls == []
+
+    second = DelayedScaling(**{algorithm_field: second_algorithm, key_field: ("test_algorithm", 2)})
+    assert first.quantizer_config() != second.quantizer_config()
+
+    missing_key = DelayedScaling(**{algorithm_field: first_algorithm})
+    with pytest.raises(
+        ValueError,
+        match=rf"{algorithm_field} is callable, so {key_field} must provide",
+    ):
+        missing_key.quantizer_config()
+
+
+def test_quantizer_factory_contract():
+    """The decorator validates and attaches metadata without wrapping or calling."""
+    calls = []
+
+    def factory(role):
+        calls.append(role)
+
+    decorated = quantizer_factory(key=("test_policy", 1))(factory)
+
+    assert decorated is factory
+    assert getattr(decorated, "qfactory_key") == ("test_policy", 1)
+    assert calls == []
+    assert te.quantizer_factory is quantizer_factory
+
+    with pytest.raises(TypeError, match="quantizer_factory key must be hashable"):
+        quantizer_factory(key=["mutable"])
+
+
+def test_custom_recipe_qfactory_key_contract():
+    """Custom recipes resolve semantic keys without calling their factories."""
+    calls = []
+
+    def first_factory(role):
+        calls.append(("first", role))
+
+    def second_factory(role):
+        calls.append(("second", role))
+
+    qfactory_key = ("hybrid_policy", 2, ("double_quantization", True))
+    first = CustomRecipe(qfactory=first_factory, qfactory_key=qfactory_key)
+    second = CustomRecipe(qfactory=second_factory, qfactory_key=qfactory_key)
+
+    assert first.quantizer_config() == second.quantizer_config()
+    assert set(dict(first.quantizer_config())) == {
+        "recipe_type",
+        "qfactory_key",
+        "fp8_format",
+        "fp8_dpa",
+        "fp8_mha",
+        "backward_override",
+        "quantization_alignment",
+    }
+    assert calls == []
+
+    @quantizer_factory(key=("attached_policy", 1))
+    def factory(role):  # pylint: disable=unused-argument
+        calls.append(("attached", role))
+
+    attached = CustomRecipe(qfactory=factory)
+    assert attached.qfactory_key is None
+    assert dict(attached.quantizer_config())["qfactory_key"] == ("attached_policy", 1)
+
+    explicit = CustomRecipe(qfactory=factory, qfactory_key=("explicit_policy", 2))
+    assert explicit.qfactory_key == ("explicit_policy", 2)
+    assert dict(explicit.quantizer_config())["qfactory_key"] == ("explicit_policy", 2)
+
+    def unkeyed_factory(role):
+        calls.append(("unkeyed", role))
+
+    with pytest.raises(
+        ValueError,
+        match=r"(?s)requires a semantic qfactory key.*@quantizer_factory",
+    ):
+        CustomRecipe(qfactory=unkeyed_factory).quantizer_config()
+    assert calls == []
+
+
+def test_recipe_pickle_round_trip_drops_caches_and_restores_fields():
+    """Checkpoint bytes must not depend on whether caches were populated."""
+    warm = Float8CurrentScaling(use_power_2_scales=True)
+    warm.quantizer_config()
+    repr(warm)
+    cold = Float8CurrentScaling(use_power_2_scales=True)
+
+    assert pickle.dumps(warm) == pickle.dumps(cold)
+
+    restored = pickle.loads(pickle.dumps(warm))
+    assert "_cached_quantizer_config" not in pickle.loads(pickle.dumps(warm)).__dict__
+    assert restored.quantizer_config() == warm.quantizer_config()
+    assert restored.fp8_quant_fwd_inp == warm.fp8_quant_fwd_inp
+
+
+def test_legacy_pickled_recipe_gains_defaults_and_canonical_attention_flags():
+    """A payload written before a field existed still loads and validates."""
+    current = Float8CurrentScaling()
+
+    # A payload that predates ``backward_override`` and the derived bundles, and
+    # that stores the pre-canonicalization (fp8_dpa=False, fp8_mha=True) pair.
+    legacy_state = {
+        name: value
+        for name, value in current.__dict__.items()
+        if name
+        not in (
+            "backward_override",
+            "fp8_quant_fwd_inp",
+            "fp8_quant_fwd_weight",
+            "fp8_quant_bwd_grad",
+        )
+    }
+    legacy_state["use_power_2_scales"] = True
+    legacy_state["fp8_dpa"] = False
+    legacy_state["fp8_mha"] = True
+
+    restored = object.__new__(Float8CurrentScaling)
+    restored.__setstate__(legacy_state)
+
+    assert restored.backward_override is None
+    assert restored.fp8_dpa is True
+    assert restored.fp8_quant_fwd_inp == Float8CurrentScaling().fp8_quant_fwd_inp
+    assert (
+        restored.quantizer_config()
+        == Float8CurrentScaling(use_power_2_scales=True, fp8_mha=True).quantizer_config()
+    )
+
+
+def test_setstate_preserves_customized_qparams():
+    """Restoring must not re-run construction, which would reset customized bundles."""
+    customized = Float8CurrentScaling()
+    customized.fp8_quant_fwd_inp = QParams(power_2_scale=False, amax_epsilon=1e-5)
+
+    restored = pickle.loads(pickle.dumps(customized))
+
+    assert restored.fp8_quant_fwd_inp == QParams(power_2_scale=False, amax_epsilon=1e-5)
+    assert restored.quantizer_config() == customized.quantizer_config()
+
+
+def test_copy_keeps_cached_configuration_for_committed_snapshots():
+    """Runtime owners snapshot recipes per commit; the copy keeps the cached config."""
+    original = Float8CurrentScaling()
+    config = original.quantizer_config()
+
+    snapshot = copy.copy(original)
+
+    assert snapshot.quantizer_config() is config
+    assert snapshot is not original
+
+
+def test_reassigning_an_unchanged_value_keeps_the_cached_configuration():
+    """A framework that rewrites its recipe fields every step must not force rebuilds."""
+    recipe_instance = Float8CurrentScaling()
+    config = recipe_instance.quantizer_config()
+
+    recipe_instance.fp8_dpa = recipe_instance.fp8_dpa
+    recipe_instance.fp8_format = Format.HYBRID
+    recipe_instance.fp8_quant_fwd_inp = QParams(power_2_scale=False, amax_epsilon=0.0)
+
+    assert recipe_instance.quantizer_config() is config
+
+
+def test_qfactory_replacement_does_not_inherit_the_previous_key():
+    """A key describes one factory, so replacing the factory re-derives it."""
+
+    @quantizer_factory(key=("first_factory", 1))
+    def first_factory(role):
+        raise AssertionError("factory must not be called during key resolution")
+
+    @quantizer_factory(key=("second_factory", 1))
+    def second_factory(role):
+        raise AssertionError("factory must not be called during key resolution")
+
+    def unkeyed_factory(role):
+        raise AssertionError("factory must not be called during key resolution")
+
+    # An attached key is resolved when semantic configuration is constructed.
+    recipe_instance = CustomRecipe(qfactory=first_factory)
+    assert recipe_instance.qfactory_key is None
+    first_config = recipe_instance.quantizer_config()
+
+    recipe_instance.qfactory = second_factory
+    assert recipe_instance.qfactory_key is None
+    assert recipe_instance.quantizer_config() != first_config
+
+    # An explicit key describes the factory it was passed with, so it does not
+    # survive a replacement either: the new factory must bring its own.
+    explicit = CustomRecipe(qfactory=first_factory, qfactory_key=("explicit", 7))
+    assert explicit.qfactory_key == ("explicit", 7)
+    explicit.qfactory = unkeyed_factory
+    assert explicit.qfactory_key is None
+    with pytest.raises(ValueError, match="requires a semantic qfactory key"):
+        explicit.quantizer_config()
+
+
+def test_reassigning_qfactory_refreshes_changed_attached_key_without_losing_explicit_key():
+    """Factory metadata and an explicit recipe key cannot make the cache disagree."""
+
+    @quantizer_factory(key=("decorated", 1))
+    def factory(role):
+        raise AssertionError("factory must not be called during key resolution")
+
+    decorated = CustomRecipe(qfactory=factory)
+    first_config = decorated.quantizer_config()
+    factory.qfactory_key = ("decorated", 2)
+    decorated.qfactory = factory
+
+    assert decorated.qfactory_key is None
+    assert decorated.quantizer_config() != first_config
+    assert dict(decorated.quantizer_config())["qfactory_key"] == ("decorated", 2)
+
+    explicit = CustomRecipe(qfactory=factory, qfactory_key=("explicit", 1))
+    explicit_config = explicit.quantizer_config()
+    factory.qfactory_key = ("decorated", 3)
+    explicit.qfactory = factory
+
+    assert explicit.qfactory_key == ("explicit", 1)
+    assert explicit.quantizer_config() is explicit_config
+
+
+def test_unkeyed_qfactory_error_names_both_ways_to_supply_a_key():
+    """The rejection is the whole migration path, so it must be actionable."""
+
+    def unkeyed_factory(role):
+        raise AssertionError("factory must not be called during key resolution")
+
+    with pytest.raises(ValueError) as excinfo:
+        CustomRecipe(qfactory=unkeyed_factory).quantizer_config()
+
+    message = str(excinfo.value)
+    assert "unkeyed_factory" in message
+    assert "@quantizer_factory(key=" in message
+    assert "qfactory_key=" in message
+
+
+def test_custom_recipe_qfactory_key_mutation_changes_semantic_configuration():
+    """Changing a CustomRecipe policy key invalidates its cached config without probing."""
+    calls = []
+
+    def factory(role):
+        calls.append(role)
+
+    recipe = CustomRecipe(qfactory=factory, qfactory_key=("test-policy", 1))
+    original_config = recipe.quantizer_config()
+    recipe.qfactory_key = ("test-policy", 2)
+
+    assert recipe.quantizer_config() != original_config
+    assert dict(recipe.quantizer_config())["qfactory_key"] == ("test-policy", 2)
+    assert calls == []
+
+
+def test_global_state_publishes_the_active_recipe_and_its_configuration():
+    """Activation publishes one value: the recipe, which owns its configuration."""
+    FP8GlobalStateManager.reset()
+    active_recipe = Float8CurrentScaling()
+
+    FP8GlobalStateManager.activate_recipe(active_recipe)
+    original_config = active_recipe.quantizer_config()
+    assert FP8GlobalStateManager.get_fp8_recipe() is active_recipe
+    assert FP8GlobalStateManager.get_quantizer_config() is original_config
+
+    # An equivalent recipe object replaces the active recipe and compares equal.
+    equivalent_recipe = Float8CurrentScaling()
+    FP8GlobalStateManager.activate_recipe(equivalent_recipe)
+    assert FP8GlobalStateManager.get_fp8_recipe() is equivalent_recipe
+    assert FP8GlobalStateManager.get_quantizer_config() == original_config
+
+    # Mutating the active recipe is visible immediately.
+    equivalent_recipe.fp8_dpa = True
+    assert FP8GlobalStateManager.get_quantizer_config() != original_config
+    assert FP8GlobalStateManager.get_quantizer_config() == equivalent_recipe.quantizer_config()
+    FP8GlobalStateManager.reset()
+
+
+def test_recipe_activation_does_not_call_qfactory_and_is_atomic_on_config_error():
+    """Configuration is resolved without probing the factory and before changing active state."""
+    FP8GlobalStateManager.reset()
+    calls = []
+
+    @quantizer_factory(key=("activation_test", 1))
+    def keyed_factory(role):
+        calls.append(role)
+
+    keyed_recipe = CustomRecipe(qfactory=keyed_factory)
+    FP8GlobalStateManager.activate_recipe(keyed_recipe)
+    keyed_config = keyed_recipe.quantizer_config()
+    assert FP8GlobalStateManager.get_fp8_recipe() is keyed_recipe
+    assert FP8GlobalStateManager.get_quantizer_config() is keyed_config
+    assert calls == []
+
+    def unkeyed_factory(role):
+        calls.append(role)
+
+    with pytest.raises(ValueError, match="requires a semantic qfactory key"):
+        FP8GlobalStateManager.activate_recipe(CustomRecipe(qfactory=unkeyed_factory))
+    assert FP8GlobalStateManager.get_fp8_recipe() is keyed_recipe
+    assert FP8GlobalStateManager.get_quantizer_config() is keyed_config
+    assert calls == []
+    FP8GlobalStateManager.reset()
+
+
+def _autocast_activation_state():
+    """Capture identity-bearing state that autocast entry may publish."""
+    qstate = FP8GlobalStateManager.quantization_state
+    return (
+        qstate.fp8_enabled,
+        qstate.fp8_calibration,
+        id(qstate.fp8_recipe),
+        id(qstate.fp8_distributed_group),
+        qstate.is_first_fp8_module,
+        qstate.fp8_graph_capturing,
+        qstate.autocast_depth,
+        tuple(
+            (key, id(recipe), id(group))
+            for key, (recipe, group) in qstate.autocast_arguments.items()
+        ),
+    )
+
+
+def test_failed_autocast_recipe_activation_is_atomic_and_context_is_reusable():
+    """A semantic-config error must not publish state or poison the context instance."""
+    FP8GlobalStateManager.reset()
+    active_recipe = Float8CurrentScaling()
+    FP8GlobalStateManager.activate_recipe(active_recipe)
+    original_state = _autocast_activation_state()
+
+    def unkeyed_factory(role):
+        del role
+
+    context = te.autocast(
+        enabled=True,
+        calibrating=True,
+        recipe=CustomRecipe(qfactory=unkeyed_factory),
+    )
+    for _ in range(2):
+        with pytest.raises(ValueError, match="requires a semantic qfactory key"):
+            context.__enter__()
+        assert context._fp8_state is None  # pylint: disable=protected-access
+        assert _autocast_activation_state() == original_state
+
+    FP8GlobalStateManager.reset()
+
+
+def test_quantized_model_init_failure_restores_fp8_parameters():
+    """A recipe this context cannot use must leave the process as it found it."""
+    FP8GlobalStateManager.reset()
+
+    def unkeyed_factory(role):
+        raise AssertionError("factory must not be called")
+
+    assert not FP8GlobalStateManager.with_fp8_parameters()
+    with pytest.raises(ValueError, match="requires a semantic qfactory key"):
+        with te.quantized_model_init(enabled=True, recipe=CustomRecipe(qfactory=unkeyed_factory)):
+            pass
+
+    assert not FP8GlobalStateManager.with_fp8_parameters()
+    assert FP8GlobalStateManager.get_fp8_recipe() is not None
+    FP8GlobalStateManager.reset()
+
+
+def test_disabled_autocast_does_not_validate_the_recipe():
+    """A region that quantizes nothing must not reject a recipe it never uses."""
+    FP8GlobalStateManager.reset()
+
+    def unkeyed_factory(role):
+        raise AssertionError("factory must not be called")
+
+    unusable = CustomRecipe(qfactory=unkeyed_factory)
+
+    # Disabled: the recipe is published as a pointer and never asked for a config.
+    with te.autocast(enabled=False, recipe=unusable):
+        assert FP8GlobalStateManager.get_fp8_recipe() is unusable
+
+    # Calibration builds quantizers, so it validates like an enabled region.
+    with pytest.raises(ValueError, match="requires a semantic qfactory key"):
+        with te.autocast(enabled=False, calibrating=True, recipe=unusable):
+            pass
+    FP8GlobalStateManager.reset()
+
+
+def test_calibrating_autocast_runs_platform_preflight(monkeypatch):
+    """Calibration builds quantizers, so it needs the platform gate an fp8 region needs."""
+    FP8GlobalStateManager.reset()
+    try:
+        # A plain disabled region publishes a pointer without consulting the platform.
+        monkeypatch.setattr(
+            transformer_engine.pytorch.quantization,
+            "check_fp8_support",
+            lambda: (False, "injected FP8 support failure"),
+        )
+        with te.autocast(enabled=False, recipe=Float8CurrentScaling()):
+            pass
+
+        original_state = _autocast_activation_state()
+        with pytest.raises(RuntimeError, match="injected FP8 support failure"):
+            with te.autocast(enabled=False, calibrating=True, recipe=Float8CurrentScaling()):
+                pass
+        assert _autocast_activation_state() == original_state
+    finally:
+        FP8GlobalStateManager.reset()
+
+
+def test_stateless_regions_do_not_register_autocast_arguments():
+    """Only delayed buckets own reduction arguments, so only they register any."""
+    FP8GlobalStateManager.reset()
+    qstate = FP8GlobalStateManager.quantization_state
+    try:
+        for index in range(25):
+
+            @quantizer_factory(key=("stateless_region", index))
+            def stateless_factory(role):
+                del role
+
+            with te.autocast(enabled=False, recipe=CustomRecipe(qfactory=stateless_factory)):
+                pass
+        assert not qstate.autocast_arguments
+    finally:
+        FP8GlobalStateManager.reset()
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+def test_delayed_bucket_registers_exactly_one_autocast_argument():
+    """Reduction arguments are registered where the bucket is created, once."""
+    FP8GlobalStateManager.reset()
+    qstate = FP8GlobalStateManager.quantization_state
+    try:
+        inp = torch.randn(16, 16, device="cuda", dtype=torch.bfloat16)
+        stateless = Linear(16, 16, bias=False, params_dtype=torch.bfloat16, device="cuda")
+        delayed = Linear(16, 16, bias=False, params_dtype=torch.bfloat16, device="cuda")
+
+        # Stateless regions quantize without a bucket, so they register nothing.
+        for _ in range(25):
+            with te.autocast(enabled=True, recipe=Float8CurrentScaling()):
+                stateless(inp)
+        assert not qstate.autocast_arguments
+
+        # A delayed bucket is created once and owns one set of reduction arguments.
+        for _ in range(3):
+            with te.autocast(enabled=True, recipe=DelayedScaling(amax_history_len=4)):
+                delayed(inp)
+        assert len(qstate.autocast_arguments) == 1
+    finally:
+        FP8GlobalStateManager.reset()
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+def test_failed_buffer_registration_leaves_no_partial_entry(monkeypatch):
+    """A half-registered module would later unpack four buffer positions from two."""
+    FP8GlobalStateManager.reset()
+    try:
+        module = Linear(16, 16, bias=False, params_dtype=torch.bfloat16, device="cuda")
+        inp = torch.randn(16, 16, device="cuda", dtype=torch.bfloat16)
+
+        # The backward direction is registered second, so this fails mid-walk.
+        original_key = FP8GlobalStateManager.get_key_in_buffer.__func__
+
+        def failing_key(cls, forward, fp8_recipe, fp8_group):
+            if not forward:
+                raise RuntimeError("injected buffer registration failure")
+            return original_key(cls, forward, fp8_recipe, fp8_group)
+
+        monkeypatch.setattr(FP8GlobalStateManager, "get_key_in_buffer", classmethod(failing_key))
+
+        with pytest.raises(RuntimeError, match="injected buffer registration failure"):
+            with te.autocast(enabled=True, recipe=DelayedScaling(amax_history_len=4)):
+                module(inp)
+
+        assert FP8GlobalStateManager.get_buffer_info() not in module.fp8_meta
+    finally:
+        FP8GlobalStateManager.reset()
+
+
+def test_failed_autocast_support_check_is_atomic(monkeypatch):
+    """Platform validation must complete before autocast state is published."""
+    FP8GlobalStateManager.reset()
+    active_recipe = Float8CurrentScaling()
+    FP8GlobalStateManager.activate_recipe(active_recipe)
+    original_state = _autocast_activation_state()
+
+    @quantizer_factory(key=("autocast_support_failure", 1))
+    def keyed_factory(role):
+        del role
+
+    monkeypatch.setattr(
+        transformer_engine.pytorch.quantization,
+        "check_fp8_support",
+        lambda: (False, "injected FP8 support failure"),
+    )
+    context = te.autocast(enabled=True, recipe=CustomRecipe(qfactory=keyed_factory))
+    with pytest.raises(RuntimeError, match="injected FP8 support failure"):
+        context.__enter__()
+
+    assert context._fp8_state is None  # pylint: disable=protected-access
+    assert _autocast_activation_state() == original_state
+    FP8GlobalStateManager.reset()
+
+
+def test_failed_nested_autocast_activation_preserves_outer_state():
+    """A rejected inner recipe must leave its active outer autocast unchanged."""
+    FP8GlobalStateManager.reset()
+
+    def unkeyed_factory(role):
+        del role
+
+    invalid_context = te.autocast(
+        enabled=True,
+        calibrating=True,
+        recipe=CustomRecipe(qfactory=unkeyed_factory),
+    )
+    outer_recipe = Float8CurrentScaling()
+    with te.autocast(enabled=False, calibrating=True, recipe=outer_recipe):
+        outer_state = _autocast_activation_state()
+        with pytest.raises(ValueError, match="requires a semantic qfactory key"):
+            invalid_context.__enter__()
+        assert invalid_context._fp8_state is None  # pylint: disable=protected-access
+        assert _autocast_activation_state() == outer_state
+
+    assert FP8GlobalStateManager.quantization_state.autocast_depth == 0
+    FP8GlobalStateManager.reset()
+
+
+def test_autocast_restores_the_outer_recipe_pointer():
+    """Leaving autocast restores the recipe object that was active on entry."""
+    FP8GlobalStateManager.reset()
+    outer_recipe = Float8CurrentScaling()
+    inner_recipe = MXFP8BlockScaling()
+    FP8GlobalStateManager.activate_recipe(outer_recipe)
+    outer_config = FP8GlobalStateManager.get_quantizer_config()
+
+    # An equal but independent recipe leaves the same configuration active.
+    with te.autocast(enabled=False, recipe=Float8CurrentScaling()):
+        assert FP8GlobalStateManager.get_quantizer_config() == outer_config
+    assert FP8GlobalStateManager.get_fp8_recipe() is outer_recipe
+
+    with te.autocast(enabled=False, recipe=inner_recipe):
+        assert FP8GlobalStateManager.get_fp8_recipe() is inner_recipe
+        assert FP8GlobalStateManager.get_quantizer_config() == inner_recipe.quantizer_config()
+
+    # Restoration republishes the recipe object, so its cached config comes back.
+    assert FP8GlobalStateManager.get_fp8_recipe() is outer_recipe
+    assert FP8GlobalStateManager.get_quantizer_config() is outer_config
+    FP8GlobalStateManager.reset()
+
+
+def test_quantized_model_init_restores_the_outer_recipe_pointer():
+    """Model-init restores the recipe object that was active on entry."""
+    FP8GlobalStateManager.reset()
+    outer_recipe = Float8CurrentScaling()
+    inner_recipe = MXFP8BlockScaling()
+    FP8GlobalStateManager.activate_recipe(outer_recipe)
+    outer_config = FP8GlobalStateManager.get_quantizer_config()
+
+    with te.quantized_model_init(enabled=False, recipe=inner_recipe):
+        assert FP8GlobalStateManager.get_fp8_recipe() is inner_recipe
+        assert FP8GlobalStateManager.get_quantizer_config() == inner_recipe.quantizer_config()
+
+    assert FP8GlobalStateManager.get_fp8_recipe() is outer_recipe
+    assert FP8GlobalStateManager.get_quantizer_config() is outer_config
+    FP8GlobalStateManager.reset()
 
 
 # FP8 per tensor delayed scaling
@@ -331,7 +1641,9 @@ class TestFP8Recipe:
                 )
             )
         recipe = transformer_engine.common.recipe.DelayedScaling(
-            fp8_format=fp8_format, scaling_factor_compute_algo=scaling_factor_compute_algo
+            fp8_format=fp8_format,
+            scaling_factor_compute_algo=scaling_factor_compute_algo,
+            scaling_factor_compute_algo_key=("test_fused_update", 1) if fused_update else None,
         )
 
         # Setup fp8_meta dictionary
@@ -435,14 +1747,14 @@ class TestFP8Recipe:
                 MXFP8Quantizer,
                 mxfp8_available,
                 reason_for_no_mxfp8,
-                id="DelayedScaling->MXFP8BlockScaling",
+                id="Float8CurrentScaling->MXFP8BlockScaling",
             ),
             pytest.param(
                 Float8BlockScaling,
                 Float8BlockQuantizer,
                 fp8_block_scaling_available,
                 reason_for_no_fp8_block_scaling,
-                id="DelayedScaling->Float8BlockScaling",
+                id="Float8CurrentScaling->Float8BlockScaling",
             ),
         ],
     )
@@ -456,9 +1768,11 @@ class TestFP8Recipe:
         out_features = 32
         batch_size = 32
         linear = Linear(in_features, out_features).cuda()
-        initial_recipe = DelayedScaling()
+        initial_recipe = Float8CurrentScaling()
 
-        # Run initial iterations with DelayedScaling
+        # Run initial iterations with a stateless recipe. Delayed-scaling
+        # enter/leave transitions are intentionally rejected by the lazy
+        # module-local update path and covered separately.
         for _ in range(3):
             x = torch.randn(batch_size, in_features, device="cuda")
             with te.autocast(enabled=True, recipe=initial_recipe):
@@ -467,7 +1781,7 @@ class TestFP8Recipe:
             loss.backward()
 
         for quantizer in linear.quantizers["scaling_fwd"]:
-            assert isinstance(quantizer, Float8Quantizer)
+            assert isinstance(quantizer, Float8CurrentScalingQuantizer)
 
         # Change recipe
         target_recipe = target_recipe_class()
@@ -504,7 +1818,7 @@ class TestFP8Recipe:
             GroupedLinear,
         ],
     )
-    def test_quantizer_update(self, module_class):
+    def test_quantized_primary_recipe_update_is_rejected(self, module_class):
         in_features = 32
         out_features = 32
         batch_size = 32
@@ -519,8 +1833,7 @@ class TestFP8Recipe:
         x = torch.randn(batch_size, in_features, device="cuda")
         recipe = DelayedScaling(amax_history_len=1)
         with te.autocast(enabled=True, recipe=recipe):
-            warn_msg = "Quantizer is being updated, this may affect model behavior"
-            with pytest.warns(UserWarning, match=warn_msg):
+            with pytest.raises(RuntimeError, match="Recipe mismatch for quantized primary weights"):
                 if module_class == GroupedLinear:
                     y = module(x, [batch_size])
                 else:

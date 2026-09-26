@@ -197,6 +197,11 @@ pip install flash-attn-4==4.0.0b11 nvidia-cutlass-dsl[cu13]"""
         FlashAttentionUtils.v4_is_installed = True
 
 
+def _local_recipe_families(fp8_meta):
+    """Quantizer families the DPA resolved locally, used for backend-cache equality."""
+    return tuple(type(recipe) for recipe in (fp8_meta or {}).get("local_recipes") or ())
+
+
 @dataclass(eq=True)
 class AttentionParams:
     """
@@ -349,7 +354,13 @@ class AttentionParams:
             if fname != "fp8_meta":
                 if sf != of:
                     return False
-            elif (sf or {}).get("recipe", None) != (of or {}).get("recipe", None):
+                continue
+            if (sf or {}).get("recipe", None) != (of or {}).get("recipe", None):
+                return False
+            # Backend selection reads fp8_meta["local_recipes"], so two DPAs under
+            # one role-sensitive CustomRecipe must not share a backend decision
+            # when their resolved quantizer families differ.
+            if _local_recipe_families(sf) != _local_recipe_families(of):
                 return False
         return True
 
@@ -3034,54 +3045,33 @@ def check_set_window_size(
     return window_size
 
 
-def get_attention_quantizers(fp8, quantizers):
-    """Get the list of quantizers used in attention from the quantizers list."""
-    if not fp8:
-        return [None] * 6
+def _select_attention_quantizers(quantizers):
+    """Select the six DPA slot quantizers and check their families.
 
+    Pure: this inspects ``quantizers`` and writes no attributes, so validating a
+    candidate runtime cannot mutate a quantizer the active runtime still uses
+    (a ``qfactory`` is free to return aliased instances).
+    """
     QKV_quantizer = quantizers["scaling_fwd"][META_QKV]
-    QKV_quantizer.internal = False
-    QKV_quantizer.set_usage(rowwise=True, columnwise=False)
-
     S_quantizer = quantizers["scaling_fwd"][META_S]
-    S_quantizer.internal = True
-    S_quantizer.set_usage(rowwise=True, columnwise=False)
-
     O_quantizer = quantizers["scaling_fwd"][META_O]
-    O_quantizer.internal = False
-    O_quantizer.set_usage(rowwise=True, columnwise=False)
-
     dO_quantizer = quantizers["scaling_bwd"][META_DO]
-    dO_quantizer.internal = False
-    dO_quantizer.set_usage(rowwise=True, columnwise=False)
-
     dP_quantizer = quantizers["scaling_bwd"][META_DP]
-    dP_quantizer.internal = True
-    dP_quantizer.set_usage(rowwise=True, columnwise=False)
-
     dQKV_quantizer = quantizers["scaling_bwd"][META_DQKV]
-    dQKV_quantizer.internal = False
-    dQKV_quantizer.set_usage(rowwise=True, columnwise=False)
 
     # MXFP8 attention: detect from the QKV quantizer instance rather than the
     # recipe predicate so that CustomRecipe (whose `mxfp8()` predicate returns
     # False) gets the same treatment as the built-in MXFP8 recipe. The kernel
     # handles S/dP internally for MXFP8, hence S/dP are nulled out.
-    if isinstance(QKV_quantizer, MXFP8Quantizer):
-        QKV_quantizer.columnwise_usage = True
-        QKV_quantizer.optimize_for_gemm = True
+    is_mxfp8 = isinstance(QKV_quantizer, MXFP8Quantizer)
+    if is_mxfp8:
         S_quantizer = None
-        O_quantizer.columnwise_usage = True
-
-        dO_quantizer.columnwise_usage = True
-        dO_quantizer.optimize_for_gemm = True
         dP_quantizer = None
-        dQKV_quantizer.columnwise_usage = True
 
     _fp8_types = (Float8Quantizer, Float8CurrentScalingQuantizer, MXFP8Quantizer)
     # S/dP are intentionally None under MXFP8 attention; skip the type check
     # for those slots in that case.
-    _allow_none = {"S", "dP"} if isinstance(QKV_quantizer, MXFP8Quantizer) else set()
+    _allow_none = {"S", "dP"} if is_mxfp8 else set()
     for _name, _q in [
         ("QKV", QKV_quantizer),
         ("O", O_quantizer),
@@ -3098,11 +3088,39 @@ def get_attention_quantizers(fp8, quantizers):
                 f"but {_name} quantizer is {type(_q).__name__}. "
                 "When using CustomRecipe with fp8_dpa=True, ensure the factory returns an "
                 "FP8 quantizer (Float8Quantizer, Float8CurrentScalingQuantizer, or "
-                "MXFP8Quantizer) for all DPA roles (module_type='dpa') and for None roles "
-                "(boundary slots like O output and dQKV grad-input)."
+                "MXFP8Quantizer) for every role assigned to a DPA tensor slot. In composed "
+                "attention, O and dQKV carry their downstream linear consumer roles."
             )
 
     return QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer
+
+
+def get_attention_quantizers(fp8, quantizers):
+    """Get the list of quantizers used in attention, prepared for the fused kernel."""
+    if not fp8:
+        return [None] * 6
+
+    for _key, _index, _internal in (
+        ("scaling_fwd", META_QKV, False),
+        ("scaling_fwd", META_S, True),
+        ("scaling_fwd", META_O, False),
+        ("scaling_bwd", META_DO, False),
+        ("scaling_bwd", META_DP, True),
+        ("scaling_bwd", META_DQKV, False),
+    ):
+        quantizer = quantizers[_key][_index]
+        quantizer.internal = _internal
+        quantizer.set_usage(rowwise=True, columnwise=False)
+
+    if isinstance(quantizers["scaling_fwd"][META_QKV], MXFP8Quantizer):
+        quantizers["scaling_fwd"][META_QKV].columnwise_usage = True
+        quantizers["scaling_fwd"][META_QKV].optimize_for_gemm = True
+        quantizers["scaling_fwd"][META_O].columnwise_usage = True
+        quantizers["scaling_bwd"][META_DO].columnwise_usage = True
+        quantizers["scaling_bwd"][META_DO].optimize_for_gemm = True
+        quantizers["scaling_bwd"][META_DQKV].columnwise_usage = True
+
+    return _select_attention_quantizers(quantizers)
 
 
 def print_quantizers(
