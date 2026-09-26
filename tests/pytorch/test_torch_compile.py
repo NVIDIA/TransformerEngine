@@ -4,12 +4,13 @@
 
 import abc
 import contextlib
+import copy
 import dataclasses
 import os
 import re
 import sys
 import warnings
-from typing import Union
+from typing import NamedTuple, Union
 
 import pytest
 import torch
@@ -2412,7 +2413,7 @@ class _AffineOp(BasicOperation):
         self.weight = torch.nn.Parameter(torch.tensor(weight, dtype=dtype, device="cuda"))
 
     @classmethod
-    def forward_compute(cls, args):
+    def forward_compute(cls, args, *, in_custom_op=False):
         output = args.input_ * args.weight * args.gain
         offset = args.offset
         if isinstance(offset, QuantizedTensorStorage):
@@ -2426,7 +2427,7 @@ class _AffineOp(BasicOperation):
         return args.input_, [()], ()
 
     @classmethod
-    def backward_compute(cls, args):
+    def backward_compute(cls, args, *, in_custom_op=False):
         dy = args.grad_output
         return dy * args.weight * args.gain, [((dy * args.input_).sum() * args.gain,)], [()]
 
@@ -2484,7 +2485,7 @@ class _AffinePair(te.ops.FusedOperation):
     bwd_args_type = _AffinePairBwdArgs
 
     @classmethod
-    def forward_compute(cls, args):
+    def forward_compute(cls, args, *, in_custom_op=False):
         intermediate = args.input_ * args.weight0
         output = intermediate * args.weight1 + args.residual
         return output, [(), (intermediate.square(), None)], (intermediate,)
@@ -2494,7 +2495,7 @@ class _AffinePair(te.ops.FusedOperation):
         return args.input_, [(), (args.input_, None)], (args.input_,)
 
     @classmethod
-    def backward_compute(cls, args):
+    def backward_compute(cls, args, *, in_custom_op=False):
         dy = args.grad_output
         du = dy * args.weight1 + 2 * args.intermediate * args.grad_extra_output
         return (
@@ -2539,6 +2540,11 @@ def _compile_with_graphs(fn):
     return torch.compile(fn, fullgraph=True, backend=backend), graphs
 
 
+class _CompiledPasses(NamedTuple):
+    forward: bool
+    backward: bool
+
+
 def _assert_custom_ops(graphs, name, present=True):
     targets = {
         str(node.target).removesuffix(".default").removesuffix("_base")
@@ -2549,7 +2555,7 @@ def _assert_custom_ops(graphs, name, present=True):
         if node.op == "call_function"
     }
     if isinstance(present, bool):
-        present = (present, present)
+        present = _CompiledPasses(forward=present, backward=present)
     for suffix, expected in zip(("", "_backward"), present):
         assert (f"transformer_engine_compile.{name}{suffix}" in targets) == expected, targets
 
@@ -2577,13 +2583,27 @@ def _check_ops(fn, model, x, dy, kwargs=None):
 @pytest.mark.parametrize(
     "case,reason,compiled_passes",
     [
-        ("single", None, (True, True)),
-        ("single_forward", "without a custom op for backward", (True, False)),
-        ("single_backward", "without a custom op for forward", (False, True)),
-        ("single_eager", "without a custom op", (False, False)),
-        ("multi", "several operations", (False, False)),
-        ("backward_fusion", "backward fusion", (False, False)),
-        ("legacy", "without a custom op", (False, False)),
+        ("single", None, _CompiledPasses(forward=True, backward=True)),
+        (
+            "single_forward",
+            "without a custom op for backward",
+            _CompiledPasses(forward=True, backward=False),
+        ),
+        (
+            "single_backward",
+            "without a custom op for forward",
+            _CompiledPasses(forward=False, backward=True),
+        ),
+        ("single_eager", "without a custom op", _CompiledPasses(forward=False, backward=False)),
+        # A pipeline can dispatch each operation through its own custom op.
+        ("multi", None, _CompiledPasses(forward=True, backward=True)),
+        # This test fusion only implements eager backward; forward still compiles.
+        (
+            "backward_fusion",
+            "without a custom op for backward",
+            _CompiledPasses(forward=True, backward=False),
+        ),
+        ("legacy", "without a custom op", _CompiledPasses(forward=False, backward=False)),
     ],
 )
 def test_te_ops_pipeline(case, reason, compiled_passes, dtype, monkeypatch):
@@ -2623,7 +2643,9 @@ def test_te_ops_pipeline(case, reason, compiled_passes, dtype, monkeypatch):
         compiled, graphs = _compile_with_graphs(model)
         with torch.no_grad():
             torch.testing.assert_close(compiled(x), x * ops[0].weight)
-        _assert_custom_ops(graphs, "_affineop", present=(True, False))
+        _assert_custom_ops(
+            graphs, "_affineop", present=_CompiledPasses(forward=True, backward=False)
+        )
 
 
 @pytest.mark.parametrize(
@@ -2636,7 +2658,12 @@ def test_te_ops_registration(forward, backward, monkeypatch):
         registered.append(kwargs["op_name"])
         return kwargs["impl"]
 
+    def compute(args, *, in_custom_op=False):
+        return in_custom_op
+
     monkeypatch.setattr("transformer_engine.pytorch.ops.op.register_custom_op", register)
+    monkeypatch.setattr(_AffineOp, "forward_compute", staticmethod(compute))
+    monkeypatch.setattr(_AffineOp, "backward_compute", staticmethod(compute))
     monkeypatch.setattr(_AffineOp, "fwd_args_type", _AffineFwdArgs if forward else None)
     monkeypatch.setattr(_AffineOp, "bwd_args_type", _AffineBwdArgs if backward else None)
     monkeypatch.setattr(_AffineOp, "compile_ops", (None, None))
@@ -2644,10 +2671,13 @@ def test_te_ops_registration(forward, backward, monkeypatch):
     assert registered == (["_affineop"] if forward else []) + (
         ["_affineop_backward"] if backward else []
     )
-    assert _AffineOp.compile_ops == (
-        _AffineOp.forward_compute if forward else None,
-        _AffineOp.backward_compute if backward else None,
-    )
+    for custom_op, enabled in zip(_AffineOp.compile_ops, (forward, backward)):
+        if enabled:
+            assert custom_op(None) is True
+        else:
+            assert custom_op is None
+    assert _AffineOp.forward_compute(None) is False
+    assert _AffineOp.backward_compute(None) is False
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -2720,3 +2750,127 @@ def test_te_ops_forward_kwargs_compile():
         for gain in (3.0, 5.0):
             _check_ops(compiled, model, x, dy, {"gain": gain})
     _assert_custom_ops(graphs[-1:], "_affineop", present=False)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("quantization", [None, "fp8"])
+@pytest.mark.parametrize("case", ["linear", "bias", "pair", "unfused"])
+@pytest.mark.parametrize("grads", ["all", "input", "weight", "bias", "none"])
+def test_te_ops_linear_bias_compile(dtype, quantization, case, grads, monkeypatch):
+    _check_linear_bias_compile(dtype, quantization, case, grads, monkeypatch)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("backward_override", ["high_precision", "dequantized"])
+def test_te_ops_linear_bias_backward_override(dtype, backward_override, monkeypatch):
+    _check_linear_bias_compile(
+        dtype, "fp8", "pair", "all", monkeypatch, backward_override=backward_override
+    )
+
+
+def _check_linear_bias_compile(
+    dtype, quantization, case, grads, monkeypatch, *, backward_override=None
+):
+    if quantization == "fp8" and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+    if (case == "linear" and grads == "bias") or (case == "bias" and grads == "weight"):
+        pytest.skip("Requested parameter is absent")
+    torch._dynamo.reset()
+    if case == "unfused":
+        monkeypatch.setattr(OperationFuser, "forward_fusion_functions", [])
+    ops = []
+    if case != "bias":
+        ops.append(te.ops.BasicLinear(32, 64, dtype=dtype))
+        ops[-1].weight.requires_grad_(grads in ("all", "weight"))
+    if case != "linear":
+        ops.append(te.ops.Bias(32 if case == "bias" else 64, dtype=dtype))
+        ops[-1].bias.requires_grad_(grads in ("all", "bias"))
+    model = te.ops.Sequential(*ops)
+    eager_model = copy.deepcopy(model)
+    quant_recipe = (
+        recipe.Float8CurrentScaling(backward_override=backward_override)
+        if quantization == "fp8"
+        else None
+    )
+
+    def run(x, module=model):
+        if quant_recipe is None:
+            return module(x)
+        with te.autocast(recipe=quant_recipe):
+            return module(x)
+
+    compiled, graphs = _compile_with_graphs(run)
+    x = torch.randn(2, 16, 32, device="cuda", dtype=dtype)
+    x.requires_grad_(grads in ("all", "input"))
+    targets = tuple(t for t in (x, *model.parameters()) if t.requires_grad)
+    eager_targets = tuple(t for t in (x, *eager_model.parameters()) if t.requires_grad)
+    graph_count = None
+    with torch.no_grad() if grads == "none" else contextlib.nullcontext():
+        for iteration in range(3):
+            with torch.no_grad():
+                for tensor in (x, *model.parameters()):
+                    if iteration == 0:
+                        # These binary fractions survive FP8 quantization exactly,
+                        # allowing a strict comparison with native PyTorch.
+                        tensor.copy_(torch.randint(-2, 3, tensor.shape, device=tensor.device) / 16)
+                    else:
+                        tensor.uniform_(-0.5, 0.5)
+                for param, eager_param in zip(model.parameters(), eager_model.parameters()):
+                    eager_param.copy_(param)
+            actual = compiled(x)
+            expected = run(x, eager_model)
+            torch.testing.assert_close(actual, expected)
+            if iteration == 0:
+                reference = x.double()
+                for op in ops:
+                    reference = (
+                        torch.nn.functional.linear(reference, op.weight.double())
+                        if isinstance(op, BasicLinear)
+                        else reference + op.bias.double()
+                    )
+                torch.testing.assert_close(
+                    actual, reference, check_dtype=False, **dtype_tols(dtype)
+                )
+            if targets:
+                dy = (
+                    torch.randint_like(actual, -2, 3) / 16
+                    if iteration == 0
+                    else torch.randn_like(actual)
+                )
+                actual_grads = torch.autograd.grad(actual, targets, dy)
+                torch.testing.assert_close(
+                    actual_grads, torch.autograd.grad(expected, eager_targets, dy)
+                )
+                if iteration == 0:
+                    torch.testing.assert_close(
+                        actual_grads,
+                        torch.autograd.grad(reference, targets, dy.double()),
+                        **dtype_tols(dtype),
+                    )
+            if iteration == 1:
+                graph_count = len(graphs)
+            elif iteration == 2:
+                assert len(graphs) == graph_count
+    _assert_custom_ops(
+        graphs,
+        "forwardlinearbiasactivation",
+        present=_CompiledPasses(forward=case == "pair", backward=False),
+    )
+    _assert_custom_ops(
+        graphs,
+        "basiclinear",
+        present=_CompiledPasses(
+            forward=case in ("linear", "unfused"),
+            backward=case != "bias" and grads in ("all", "input", "weight"),
+        ),
+    )
+    _assert_custom_ops(
+        graphs,
+        "bias",
+        present=_CompiledPasses(
+            forward=case in ("bias", "unfused"),
+            backward=case != "linear" and bool(targets),
+        ),
+    )
