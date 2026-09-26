@@ -12,6 +12,7 @@ BUILD_JAX=${5:-true}
 CUDA_MAJOR=${6:-12}
 
 export NVTE_RELEASE_BUILD=1
+export NVTE_WITH_CUTEDSL=${NVTE_WITH_CUTEDSL:-0}
 export PIP_CONSTRAINT=""
 export TARGET_BRANCH=${TARGET_BRANCH:-}
 mkdir -p /wheelhouse/logs
@@ -23,7 +24,7 @@ git checkout $TARGET_BRANCH
 git submodule update --init --recursive
 
 # Install deps
-/opt/python/cp310-cp310/bin/pip install cmake pybind11[global] ninja setuptools wheel 'nvidia-cudnn-frontend>=1.25.0'
+/opt/python/cp310-cp310/bin/pip install cmake pybind11[global] ninja setuptools wheel 'nvidia-cudnn-frontend>=1.25.0' 'apache-tvm-ffi>=0.1.12'
 
 if $BUILD_METAPACKAGE ; then
         cd /TransformerEngine
@@ -35,8 +36,16 @@ if $BUILD_COMMON ; then
         VERSION=`cat build_tools/VERSION.txt`
         WHL_BASE="transformer_engine-${VERSION}"
 
+        if [[ "$NVTE_WITH_CUTEDSL" != "0" ]]; then
+                WHEEL_PYTHON_TAG=cp310
+                WHEEL_ABI_TAG=abi3
+        else
+                WHEEL_PYTHON_TAG=py3
+                WHEEL_ABI_TAG=none
+        fi
+
         # Create the wheel.
-        /opt/python/cp310-cp310/bin/python setup.py bdist_wheel --verbose --python-tag=py3 --plat-name=$PLATFORM 2>&1 | tee /wheelhouse/logs/common.txt
+        /opt/python/cp310-cp310/bin/python setup.py bdist_wheel --verbose --python-tag=$WHEEL_PYTHON_TAG --plat-name=$PLATFORM 2>&1 | tee /wheelhouse/logs/common.txt
 
         # Repack the wheel for specific cuda version.
         /opt/python/cp310-cp310/bin/wheel unpack dist/*
@@ -44,14 +53,19 @@ if $BUILD_COMMON ; then
         sed -i "s/Name: transformer-engine/Name: transformer-engine-cu${CUDA_MAJOR}/g" "transformer_engine-${VERSION}/transformer_engine-${VERSION}.dist-info/METADATA"
         sed -i "s/Name: transformer_engine/Name: transformer_engine_cu${CUDA_MAJOR}/g" "transformer_engine-${VERSION}/transformer_engine-${VERSION}.dist-info/METADATA"
         mv "${WHL_BASE}/${WHL_BASE}.dist-info" "${WHL_BASE}/transformer_engine_cu${CUDA_MAJOR}-${VERSION}.dist-info"
-        # Set WHEEL Tag to match the py3-none filename written by line 54.
-        sed -i "s/Tag: cp310-cp310/Tag: py3-none/g" "${WHL_BASE}/transformer_engine_cu${CUDA_MAJOR}-${VERSION}.dist-info/WHEEL"
+        if [[ "$NVTE_WITH_CUTEDSL" != "0" ]]; then
+                # Build with CuTeDSL support: uses the CPython 3.10+ Stable ABI.
+                sed -i "s/Tag: cp310-cp310/Tag: cp310-abi3/g" "${WHL_BASE}/transformer_engine_cu${CUDA_MAJOR}-${VERSION}.dist-info/WHEEL"
+        else
+                # Build without CuTeDSL support: remain python version agnostic.
+                sed -i "s/Tag: cp310-cp310/Tag: py3-none/g" "${WHL_BASE}/transformer_engine_cu${CUDA_MAJOR}-${VERSION}.dist-info/WHEEL"
+        fi
         /opt/python/cp310-cp310/bin/wheel pack ${WHL_BASE}
 
-        # Rename the wheel to make it python version agnostic.
+        # Rename the wheel to match the tag written above.
         whl_name=$(basename dist/*)
         IFS='-' read -ra whl_parts <<< "$whl_name"
-        whl_name_target="${whl_parts[0]}_cu${CUDA_MAJOR}-${whl_parts[1]}-py3-none-${whl_parts[4]}"
+        whl_name_target="${whl_parts[0]}_cu${CUDA_MAJOR}-${whl_parts[1]}-${WHEEL_PYTHON_TAG}-${WHEEL_ABI_TAG}-${whl_parts[4]}"
         rm -rf $WHL_BASE dist
         mv *.whl /wheelhouse/"$whl_name_target"
 fi
