@@ -28,10 +28,10 @@ bool import_and_register_backends() {
     if (registered != nullptr && PyObject_IsTrue(registered) == 1) {
       initialized = true;
     }
-    Py_XDECREF(registered);
+    Py_DecRef(registered);
   }
-  Py_XDECREF(loaded);
-  Py_DECREF(module);
+  Py_DecRef(loaded);
+  Py_DecRef(module);
   return initialized;
 }
 
