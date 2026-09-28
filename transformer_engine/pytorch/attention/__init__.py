@@ -5,6 +5,7 @@
 """Python interface for attention"""
 
 from .dot_product_attention import DotProductAttention
+from .packed_sequence import register_cu_seqlens, attention_backend_workspace
 from .linear_attention import (
     GatedDeltaNetAttention,
     GatedDeltaNet2Attention,
@@ -16,6 +17,8 @@ from .inference import InferenceParams
 from .rope import RotaryPositionEmbedding
 
 __all__ = [
+    "register_cu_seqlens",
+    "attention_backend_workspace",
     "DotProductAttention",
     "GatedDeltaNetAttention",
     "GatedDeltaNet2Attention",
