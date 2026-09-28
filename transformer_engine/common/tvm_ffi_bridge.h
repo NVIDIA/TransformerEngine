@@ -16,6 +16,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
@@ -32,6 +33,51 @@
 
 namespace transformer_engine {
 namespace tvm_ffi_bridge {
+
+// All CuTeDSL kernels share this lock while their TVM-FFI entrypoints are first used.
+inline std::mutex &first_cutedsl_launch_mutex() {
+  static auto *mutex = new std::mutex;
+  return *mutex;
+}
+
+// Cached copies of the lambda share this state for one compiled kernel.
+struct TVMFFIKernelState {
+  explicit TVMFFIKernelState(tvm::ffi::Function function)
+      : function(std::move(function)),
+        num_devices(cuda::num_devices()),
+        launched(new std::atomic<bool>[num_devices]) {
+    // All devices start out unlaunched.
+    for (int device = 0; device < num_devices; ++device) {
+      launched[device].store(false, std::memory_order_relaxed);
+    }
+  }
+
+  tvm::ffi::Function function;
+  int num_devices;
+  std::unique_ptr<std::atomic<bool>[]> launched;
+};
+
+inline auto make_tvm_ffi_kernel(tvm::ffi::Function function) {
+  auto state = std::make_shared<TVMFFIKernelState>(std::move(function));
+  return [state = std::move(state)](auto &&...args) -> tvm::ffi::Any {
+    const int device = cuda::current_device();
+    NVTE_CHECK(device >= 0 && device < state->num_devices, "Invalid CUDA device index: ", device);
+    // If we never launch the kernel on this device, we need to make its initial launch serialized
+    if (!state->launched[device].load(std::memory_order_acquire)) {
+      std::lock_guard<std::mutex> lock(first_cutedsl_launch_mutex());
+      // Check again in case another thread already launched it while we were waiting for the lock
+      if (!state->launched[device].load(std::memory_order_relaxed)) {
+        // Launch the kernel while holding the global mutex and mark it as launched for this device after we're done.
+        tvm::ffi::Any result = state->function(std::forward<decltype(args)>(args)...);
+        state->launched[device].store(true, std::memory_order_release);
+        return result;
+      }
+    }
+    return state->function(std::forward<decltype(args)>(args)...);
+  };
+}
+
+using TVMFFIKernel = decltype(make_tvm_ffi_kernel(std::declval<tvm::ffi::Function>()));
 
 bool initialize_python_cutedsl_backend();
 
@@ -192,12 +238,12 @@ namespace tvm_ffi_bridge {
 // This compiles + globally registers the kernel under `key`; returns whether
 // a kernel is now registered / the config is supported
 //
-//   - std::optional<tvm::ffi::Function> get_kernel() const
-// Retrieves the possibly cached function. If the config provides a
+//   - std::optional<TVMFFIKernel> get_kernel() const
+// Retrieves the possibly cached callable. If the config provides a
 // `uint32_t to_id() const` method, it can reuse TVMFFIConfigCache with the
 // canonical implementation:
 // ```
-// std::optional<tvm::ffi::Function> get_kernel() const {
+// std::optional<TVMFFIKernel> get_kernel() const {
 //   static TVMFFIConfigCache &cache = TVMFFIConfigCache::create();
 //   return cache.get_or_load(*this);
 // }
@@ -207,7 +253,7 @@ namespace tvm_ffi_bridge {
 // policy may implement get_kernel() themselves.
 //
 // Note: TVMFFIConfigCache::create() intentionally gives its cache process lifetime.
-// This prevents cached tvm::ffi::Function handles from being destroyed during
+// This prevents cached TVM-FFI function handles from being destroyed during
 // static teardown, when Python or TVM-FFI runtime state may already have been
 // finalized. The OS reclaims the allocation when the process exits.
 class TVMFFIConfigCache;
@@ -222,7 +268,7 @@ struct is_lazyloadable_config<
            std::enable_if_t<std::is_same<decltype(&T::retrieve_func_from_python),
                                          bool (T::*)(const std::string &) const>::value>,
            std::enable_if_t<std::is_same<decltype(&T::get_kernel),
-                                         std::optional<tvm::ffi::Function> (T::*)() const>::value>>>
+                                         std::optional<TVMFFIKernel> (T::*)() const>::value>>>
     : std::true_type {};
 }  // namespace detail
 
@@ -238,7 +284,7 @@ class TVMFFICentral {
     static_assert(detail::is_lazyloadable_config<Config>::value,
                   "Config must define `std::string to_key() const`, "
                   "`bool retrieve_func_from_python(const std::string&) const`, "
-                  "and `std::optional<tvm::ffi::Function> get_kernel() const`.");
+                  "and `std::optional<TVMFFIKernel> get_kernel() const`.");
     if (!cutedsl_backend_enabled_.load(std::memory_order_relaxed)) {
       maybe_warn_not_chosen(
           "the CuTeDSL backend is disabled, so no kernel is available for "
@@ -387,12 +433,13 @@ class TVMFFIConfigCache {
   // This requires the config to have a `uint32_t to_id() const` method, which returns an unique
   // identifier among all configs of this type.
   template <typename Config>
-  std::optional<tvm::ffi::Function> get_or_load(const Config &cfg) {
+  std::optional<TVMFFIKernel> get_or_load(const Config &cfg) {
     TVMFFICentral &central = TVMFFICentral::getInstance();
     // Checked ahead of the cache so that toggling the backend off still disables
     // already-resolved configs; load_tvm_ffi_function emits the "disabled" warning.
     if (!central.get_cutedsl_backend_enabled()) {
-      return central.load_tvm_ffi_function(cfg);
+      central.load_tvm_ffi_function(cfg);
+      return std::nullopt;
     }
     // Otherwise try the cache first, and ask Python to compile/register the kernel if not found.
     const uint32_t id = cfg.to_id();
@@ -414,8 +461,12 @@ class TVMFFIConfigCache {
 
     // No other thread has loaded it, and none can load it now while I hold the write lock.
     std::optional<tvm::ffi::Function> fn = central.load_tvm_ffi_function(cfg);
-    map_.emplace(id, fn);
-    return fn;
+    std::optional<TVMFFIKernel> kernel;
+    if (fn) {
+      kernel.emplace(make_tvm_ffi_kernel(std::move(*fn)));
+    }
+    map_.emplace(id, kernel);
+    return kernel;
   }
 
  private:
@@ -423,7 +474,7 @@ class TVMFFIConfigCache {
   ~TVMFFIConfigCache() = default;
 
   std::shared_mutex mutex_;
-  std::unordered_map<uint32_t, std::optional<tvm::ffi::Function>> map_;
+  std::unordered_map<uint32_t, std::optional<TVMFFIKernel>> map_;
 };
 
 // Optionally emit a warning explaining why the CuTeDSL backend was not chosen for this config.
