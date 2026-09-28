@@ -98,7 +98,7 @@ def _localize_output_data(output, allocator, domain: int) -> None:
     os.getenv("RUN_BENCHMARK_TESTS", "0") != "1",
     reason="Benchmark test - set RUN_BENCHMARK_TESTS=1",
 )
-@pytest.mark.parametrize("shape", [(16384, 4096)])
+@pytest.mark.parametrize("shape", [(16384, 28672)])
 def test_nvfp4_rht_sr_localization_performance(shape) -> None:
     """Benchmark the localized RHT-amax and row/column RHT+SR quant kernels."""
     from transformer_engine.pytorch.tensor.localized_mxfp8 import _get_localization_context
