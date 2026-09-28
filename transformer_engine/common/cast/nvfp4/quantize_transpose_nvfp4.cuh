@@ -41,6 +41,16 @@ __device__ __forceinline__ void load_matrix_b_16x16_from_shared(uint32_t &b0, ui
       : "l"(addr), "r"(stride));
 }
 
+__device__ __forceinline__ void store_matrix_16x16_to_shared(uint32_t c0, uint32_t c1,
+                                                              uint32_t c2, uint32_t c3,
+                                                              void *addr) {
+  const uint32_t smem_addr = static_cast<uint32_t>(__cvta_generic_to_shared(addr));
+  asm volatile("wmma.store.d.sync.aligned.row.m16n16k16.shared::cta.f16 "
+               "[%0], {%1,%2,%3,%4}, 16;\n"
+               :
+               : "r"(smem_addr), "r"(c0), "r"(c1), "r"(c2), "r"(c3));
+}
+
 namespace rowwise_amax_kernel {
 
 using namespace ptx;
@@ -442,6 +452,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
   IType *rht_sh =
       reinterpret_cast<IType *>(dshmem + in_mem + out_mem_rowwise_data + out_mem_colwise_data +
                                 out_mem_rowwise_scales + out_mem_colwise_scales);
+  IType *rht_result_sh = rht_sh + SCALE_DIM * SCALE_DIM;
   IType *cached_act_sh = in_sh;  // in_sh is used as a cache buffer
 
   constexpr size_t shmem_buff_size = buff_size_aligned_in / BUFFS_NUM;
@@ -536,43 +547,42 @@ __global__ void __launch_bounds__(THREADS_NUM)
             a_frag[0], a_frag[1], a_frag[2], a_frag[3], b_frag[0], b_frag[1], b_frag[2], b_frag[3],
             c_frag[0], c_frag[1], c_frag[2], c_frag[3], unused_amax);
 
-        // A WMMA lane owns two adjacent pairs in each of two rows. Quantize
-        // those fragments in registers and write both packed FP4 pairs
-        // directly to the transposed-output staging buffer.
+        // WMMA accumulator registers do not follow the packed output's row
+        // order. Store each warp's tile in shared memory, then quantize one
+        // complete transposed-output row per lane.
+        IType *warp_result = rht_result_sh + warp * SCALE_DIM * SCALE_DIM;
+        store_matrix_16x16_to_shared(c_frag[0], c_frag[1], c_frag[2], c_frag[3], warp_result);
+        __syncwarp();
         const int lane = threadIdx.x % THREADS_PER_WARP;
-        const int lane_in_quad = lane & 3;
-        const int row_in_half = lane >> 2;
+        if (lane < SCALE_DIM) {
+          const IType *row = warp_result + lane * SCALE_DIM;
+          float row_amax = 0.0f;
 #pragma unroll
-        for (int row_half = 0; row_half < 2; ++row_half) {
-          const uint32_t c_lo = c_frag[row_half * 2];
-          const uint32_t c_hi = c_frag[row_half * 2 + 1];
-          __nv_bfloat162 lo = *reinterpret_cast<const __nv_bfloat162 *>(&c_lo);
-          __nv_bfloat162 hi = *reinterpret_cast<const __nv_bfloat162 *>(&c_hi);
-          float row_amax =
-              fmaxf(fmaxf(fabsf(__bfloat162float(lo.x)), fabsf(__bfloat162float(lo.y))),
-                    fmaxf(fabsf(__bfloat162float(hi.x)), fabsf(__bfloat162float(hi.y))));
-          row_amax = fmaxf(row_amax, __shfl_xor_sync(0xffffffff, row_amax, 1));
-          row_amax = fmaxf(row_amax, __shfl_xor_sync(0xffffffff, row_amax, 2));
+          for (int i = 0; i < SCALE_DIM; ++i) {
+            row_amax = fmaxf(row_amax, fabsf(static_cast<float>(row[i])));
+          }
           const nvfp4_scale_t scale = compute_decoding_scaling_factor(row_amax, S_enc_colwise);
           const float scale_inverse = fminf(1.0f / (static_cast<float>(scale) * S_dec_colwise),
                                             detail::TypeExtrema<float>::max);
           const float2 scale_inverse_2x{scale_inverse, scale_inverse};
-          const uint64_t values = static_cast<uint64_t>(c_lo) | (static_cast<uint64_t>(c_hi) << 32);
-          const uint32_t rbits = get_rbits(rng, random_uint4, rnd_idx);
-          const fp4e2m1x4 packed =
-              ptx::mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(values, scale_inverse_2x, rbits);
-          const uint16_t packed_bits = *reinterpret_cast<const uint16_t *>(&packed);
-          const int output_row = tile_x * SCALE_DIM + row_in_half + row_half * 8;
+          const int output_row = tile_x * SCALE_DIM + lane;
           uint8_t *output_bytes = reinterpret_cast<uint8_t *>(out_t_data_sh) + buff_offset_out_t +
                                   output_row * BUFF_OUT_T_DIM_X + tile_y * (SCALE_DIM / 2);
-          output_bytes[lane_in_quad] = static_cast<uint8_t>(packed_bits);
-          output_bytes[lane_in_quad + 4] = static_cast<uint8_t>(packed_bits >> 8);
-          if (lane_in_quad == 0) {
-            const size_t scale_idx =
-                output_row * SCALES_PER_CHUNK_Y + stage * ITERATIONS_TRANSPOSE + tile_y;
-            out_colwise_scales_sh[scale_idx] = scale;
+#pragma unroll
+          for (int i = 0; i < SCALE_DIM; i += 4) {
+            const uint64_t values = *reinterpret_cast<const uint64_t *>(row + i);
+            const uint32_t rbits = get_rbits(rng, random_uint4, rnd_idx);
+            const fp4e2m1x4 packed = ptx::mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
+                values, scale_inverse_2x, rbits);
+            const uint16_t packed_bits = *reinterpret_cast<const uint16_t *>(&packed);
+            output_bytes[i / 2] = static_cast<uint8_t>(packed_bits);
+            output_bytes[i / 2 + 1] = static_cast<uint8_t>(packed_bits >> 8);
           }
+          const size_t scale_idx =
+              output_row * SCALES_PER_CHUNK_Y + stage * ITERATIONS_TRANSPOSE + tile_y;
+          out_colwise_scales_sh[scale_idx] = scale;
         }
+        __syncwarp();
       }
     }
 
@@ -1673,6 +1683,8 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
   constexpr size_t buff_size_scales = (CHUNK_DIM_Y * CHUNK_DIM_X) / 16 * sizeof(nvfp4_scale_t);
   constexpr size_t rht_matrix_mem = 16 * 16 * sizeof(IType);
   constexpr size_t rht_mem = DIVUP_TO_MULTIPLE(rht_matrix_mem, TMA_SHMEM_ALIGNMENT);
+  constexpr size_t rht_result_mem =
+      (THREADS_NUM / THREADS_PER_WARP) * 16 * 16 * sizeof(IType);
 
   constexpr size_t in_mem = buff_size_aligned_in;
 
@@ -1683,7 +1695,8 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
   constexpr size_t out_mem = out_data_mem + out_data_transpose_mem;
 
   const size_t dshmem_size = in_mem + out_mem + out_scales_transpose_mem +
-                             (apply_columnwise_rht ? rht_mem : 0) + TMA_SHMEM_ALIGNMENT;
+                             (apply_columnwise_rht ? rht_mem + rht_result_mem : 0) +
+                             TMA_SHMEM_ALIGNMENT;
 
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
       use_stochastic_rounding, USE_STOCHASTIC_ROUNDING,
