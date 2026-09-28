@@ -1382,8 +1382,7 @@ void nvte_quantize_with_hadamard_transform(const NVTETensor input, NVTETensor ou
   NVTE_API_CALL(nvte_quantize_with_hadamard_transform);
   using namespace transformer_engine;
   Tensor &output_cpp = *convertNVTETensorCheck(output);
-  const int sm_arch = transformer_engine::cuda::sm_arch(
-      transformer_engine::cuda::current_device());
+  const int sm_arch = transformer_engine::cuda::sm_arch(transformer_engine::cuda::current_device());
   NVTE_CHECK((sm_arch != 120 && sm_arch != 121) || !output_cpp.with_gemm_swizzled_scales,
              "NVFP4 RHT quantization on SM120/SM121 does not support GEMM-swizzled scales.");
   QuantizationConfig quant_config_cpp;

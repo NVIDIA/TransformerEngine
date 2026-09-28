@@ -41,14 +41,14 @@ __device__ __forceinline__ void load_matrix_b_16x16_from_shared(uint32_t &b0, ui
       : "l"(addr), "r"(stride));
 }
 
-__device__ __forceinline__ void store_matrix_16x16_to_shared(uint32_t c0, uint32_t c1,
-                                                              uint32_t c2, uint32_t c3,
-                                                              void *addr) {
+__device__ __forceinline__ void store_matrix_16x16_to_shared(uint32_t c0, uint32_t c1, uint32_t c2,
+                                                             uint32_t c3, void *addr) {
   const uint32_t smem_addr = static_cast<uint32_t>(__cvta_generic_to_shared(addr));
-  asm volatile("wmma.store.d.sync.aligned.row.m16n16k16.shared::cta.f16 "
-               "[%0], {%1,%2,%3,%4}, 16;\n"
-               :
-               : "r"(smem_addr), "r"(c0), "r"(c1), "r"(c2), "r"(c3));
+  asm volatile(
+      "wmma.store.d.sync.aligned.row.m16n16k16.shared::cta.f16 "
+      "[%0], {%1,%2,%3,%4}, 16;\n"
+      :
+      : "r"(smem_addr), "r"(c0), "r"(c1), "r"(c2), "r"(c3));
 }
 
 namespace rowwise_amax_kernel {
@@ -1682,8 +1682,7 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
   constexpr size_t buff_size_scales = (CHUNK_DIM_Y * CHUNK_DIM_X) / 16 * sizeof(nvfp4_scale_t);
   constexpr size_t rht_matrix_mem = 16 * 16 * sizeof(IType);
   constexpr size_t rht_mem = DIVUP_TO_MULTIPLE(rht_matrix_mem, TMA_SHMEM_ALIGNMENT);
-  constexpr size_t rht_result_mem =
-      (THREADS_NUM / THREADS_PER_WARP) * 16 * 16 * sizeof(IType);
+  constexpr size_t rht_result_mem = (THREADS_NUM / THREADS_PER_WARP) * 16 * 16 * sizeof(IType);
 
   constexpr size_t in_mem = buff_size_aligned_in;
 
