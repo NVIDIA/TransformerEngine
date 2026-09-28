@@ -355,8 +355,8 @@ inline void check_grouped_gemm_requirements(const std::string_view &api_name) {
              " requires cuBLAS 13.3+, but run-time cuBLAS version is ", cublas_ver);
 #endif
   if (api_name == "nvte_grouped_gemm_with_discrete_out") {
-    NVTE_CHECK(!(130700 <= cublas_ver && cublas_ver < 130801),
-               api_name, " has a data corruption bug with cuBLAS version ", cublas_ver,
+    NVTE_CHECK(!(130700 <= cublas_ver && cublas_ver < 130801), api_name,
+               " has a data corruption bug with cuBLAS version ", cublas_ver,
                ". Please upgrade to cuBLAS 13.8.1+.");
   }
 }
