@@ -699,21 +699,34 @@ class TestTeEpMoeBackward:
 
 
 class TestTeEpMoeCudnnCutedslFusion:
-    """End-to-end MXFP8 coverage for cuDNN's dedicated grouped SwiGLU JAX API."""
+    """End-to-end MXFP8 coverage for cuDNN's grouped GLU JAX APIs."""
 
     @pytest.mark.parametrize("apply_topk_weights_early", [False, True])
-    def test_mxfp8_forward_and_backward(self, mesh, apply_topk_weights_early):
+    def test_mxfp8_forward_and_backward(self, mesh, apply_topk_weights_early, monkeypatch):
         if not _use_cudnn_cutedsl_fusion_from_env():
             pytest.skip(
                 "run separately with "
                 "NVTE_JAX_TEMP_FLAG_FOR_ABHINAV_CUDNN_GROUPED_GEMM_FUSION=1"
             )
+        rubin_calls = []
+        if get_device_compute_capability(0) == 107:
+            from transformer_engine.jax import cpp_extensions as tex
+
+            original_glu = tex.grouped_gemm_glu
+
+            def checked_glu(*args, **kwargs):
+                rubin_calls.append(True)
+                return original_glu(*args, **kwargs)
+
+            monkeypatch.setattr(tex, "grouped_gemm_glu", checked_glu)
         block = _make_block(
             apply_topk_weights_early=apply_topk_weights_early,
             quantization_recipe=MXFP8BlockScaling(),
         )
         x = _make_inputs(jax.random.PRNGKey(30))
         variables, output, aux = _init_apply(block, mesh, x, jax.random.PRNGKey(31))
+        if get_device_compute_capability(0) == 107:
+            assert rubin_calls, "Rubin MoE did not select the cuDNN GLU JAX API"
         grads, grad_x = _grad_step(block, variables, mesh, x)
 
         assert output.shape == x.shape
@@ -730,6 +743,42 @@ class TestTeEpMoeCudnnCutedslFusion:
         grad_x_np = _to_global_numpy(grad_x, mesh).astype(np.float32)
         assert np.all(np.isfinite(grad_x_np))
         assert np.any(grad_x_np != 0)
+
+        if get_device_compute_capability(0) == 107:
+            # The dedicated SwiGLU path is the reference for this kernel
+            # substitution. Its MXFP8 gradients can differ from pure JAX by
+            # more than the strict unfused test threshold on Rubin.
+            monkeypatch.setattr(tex, "grouped_gemm_glu", tex.grouped_gemm_swiglu)
+            with _ctx(mesh):
+                x_sh = _shard_inputs(x, mesh)
+                baseline_output, _, _ = jax.jit(block.apply)(variables, x_sh)
+                baseline_output.block_until_ready()
+            baseline_grads, baseline_grad_x = _grad_step(block, variables, mesh, x)
+            np.testing.assert_allclose(
+                output_np,
+                _to_global_numpy(baseline_output, mesh).astype(np.float32),
+                **FWD_TOLERANCE["mxfp8"],
+                err_msg="Rubin GLU forward differs from dedicated SwiGLU",
+            )
+            for name in ("gate_kernel", "wi", "wo"):
+                tolerance = (
+                    GRAD_GATE_TOLERANCE["mxfp8"]
+                    if name == "gate_kernel"
+                    else GRAD_FFN_TOLERANCE["mxfp8"]
+                )
+                np.testing.assert_allclose(
+                    _to_global_numpy(_unwrap(grads["params"][name]), mesh).astype(np.float32),
+                    _to_global_numpy(_unwrap(baseline_grads["params"][name]), mesh).astype(np.float32),
+                    **tolerance,
+                    err_msg=f"Rubin GLU {name} gradient differs from dedicated SwiGLU",
+                )
+            np.testing.assert_allclose(
+                grad_x_np,
+                _to_global_numpy(baseline_grad_x, mesh).astype(np.float32),
+                **GRAD_FFN_TOLERANCE["mxfp8"],
+                err_msg="Rubin GLU input gradient differs from dedicated SwiGLU",
+            )
+            return
 
         params_np = _params_global_numpy(variables, mesh)
         x_np = np.asarray(jax.device_get(x))

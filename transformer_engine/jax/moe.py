@@ -75,6 +75,13 @@ def _use_cudnn_cutedsl_fusion_from_env() -> bool:
     return value == "1"
 
 
+def _is_rubin_device() -> bool:
+    """SM107 is reported as 107 by TransformerEngine's CUDA utility."""
+    from transformer_engine_jax import get_device_compute_capability
+
+    return get_device_compute_capability(0) == 107
+
+
 def _cudnn_jax_fusion_rejection_reasons(
     x,
     wi,
@@ -90,6 +97,7 @@ def _cudnn_jax_fusion_rejection_reasons(
     from transformer_engine_jax import get_device_compute_capability
 
     errors = []
+    compute_capability = None
     try:
         compute_capability = get_device_compute_capability(0)
     except RuntimeError as exc:
@@ -146,7 +154,7 @@ def _cudnn_jax_fusion_rejection_reasons(
             )
 
     dependencies_available, dependency_error = (
-        tex.grouped_gemm_swiglu_dependencies_available()
+        tex.grouped_gemm_swiglu_dependencies_available(rubin=compute_capability == 107)
     )
     if not dependencies_available:
         errors.append(
@@ -518,7 +526,7 @@ def _ffn_fwd_per_shard(
             intermediate_col,
             intermediate_scale_row,
             intermediate_scale_col,
-        ) = tex.grouped_gemm_swiglu(
+        ) = (tex.grouped_gemm_glu if _is_rubin_device() else tex.grouped_gemm_swiglu)(
             casted_sorted_x_lhs.data.reshape(sorted_x.shape[0], hidden, 1),
             casted_wi_rhs.data.reshape(
                 num_local_experts, hidden, wi_for_gemm.shape[-1]

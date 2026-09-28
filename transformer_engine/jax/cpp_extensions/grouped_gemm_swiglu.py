@@ -10,6 +10,7 @@ import jax.numpy as jnp
 
 __all__ = [
     "grouped_gemm_dswiglu",
+    "grouped_gemm_glu",
     "grouped_gemm_swiglu",
     "grouped_gemm_swiglu_dependencies_available",
     "pack_swiglu_pair",
@@ -69,7 +70,7 @@ def _compact_sf(scale: jax.Array, shape: tuple[int, ...], name: str) -> jax.Arra
     return scale.reshape(-1)[:size].reshape(shape)
 
 
-def grouped_gemm_swiglu_dependencies_available() -> tuple[bool, str]:
+def grouped_gemm_swiglu_dependencies_available(rubin: bool = False) -> tuple[bool, str]:
     """Check the public cuDNN JAX API without compiling a kernel."""
     try:
         import cutlass.jax
@@ -77,6 +78,9 @@ def grouped_gemm_swiglu_dependencies_available() -> tuple[bool, str]:
             grouped_gemm_dswiglu,
             grouped_gemm_swiglu,
         )
+
+        if rubin:
+            from cudnn.jax import grouped_gemm_glu  # noqa: F401
 
         if not cutlass.jax.is_available():
             return False, "CuTeDSL JAX support is unavailable"
@@ -109,13 +113,65 @@ def grouped_gemm_swiglu(
 
     from cudnn.jax import grouped_gemm_swiglu as cudnn_grouped_gemm_swiglu
 
+    return _grouped_gemm_forward(
+        cudnn_grouped_gemm_swiglu,
+        a,
+        b,
+        sfa,
+        sfb,
+        padded_offsets,
+        prob,
+        compute_dtype=compute_dtype,
+        output_dtype=output_dtype,
+    )
+
+
+def grouped_gemm_glu(
+    a: jax.Array,
+    b: jax.Array,
+    sfa: jax.Array,
+    sfb: jax.Array,
+    padded_offsets: jax.Array,
+    prob: jax.Array,
+    *,
+    compute_dtype,
+    output_dtype,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+    """Run the Rubin cuDNN grouped MXFP8 GEMM + SwiGLU kernel."""
+    from cudnn.jax import grouped_gemm_glu as cudnn_grouped_gemm_glu
+
+    return _grouped_gemm_forward(
+        cudnn_grouped_gemm_glu,
+        a,
+        b,
+        sfa,
+        sfb,
+        padded_offsets,
+        prob,
+        compute_dtype=compute_dtype,
+        output_dtype=output_dtype,
+    )
+
+
+def _grouped_gemm_forward(
+    cudnn_forward,
+    a,
+    b,
+    sfa,
+    sfb,
+    padded_offsets,
+    prob,
+    *,
+    compute_dtype,
+    output_dtype,
+):
     rows, hidden, _ = a.shape
     experts, combined, b_hidden = b.shape
     if hidden != b_hidden:
         raise ValueError(f"A K={hidden} does not match B K={b_hidden}")
     alpha = jnp.ones((experts,), dtype=jnp.float32)
     norm_const = jnp.ones((1,), dtype=jnp.float32)
-    result = cudnn_grouped_gemm_swiglu(
+    result = cudnn_forward(
         a_tensor=a.reshape(rows, hidden),
         b_tensor=b,
         sfa_tensor=_compact_sf(sfa, _sf_atom_shape(1, rows, hidden), "sfa"),
@@ -128,9 +184,9 @@ def grouped_gemm_swiglu(
         d_dtype=jnp.dtype(output_dtype),
     )
     return (
-        result["c_tensor"],
-        result["d_tensor"],
-        result["d_col_tensor"],
+        result["c_tensor"].reshape(rows, combined),
+        result["d_tensor"].reshape(rows, combined // 2),
+        result["d_col_tensor"].reshape(rows, combined // 2),
         result["sfd_row_tensor"].reshape(-1),
         result["sfd_col_tensor"].reshape(-1),
     )
