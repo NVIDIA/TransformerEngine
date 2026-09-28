@@ -1079,9 +1079,9 @@ class TestGroupedMLPFusedOp:
         """Fuse E4M3 MXFP8 and NVFP4, but decline MXFP8 with an E5M2 backward."""
         from transformer_engine.common.recipe import Format, MXFP8BlockScaling, NVFP4BlockScaling
 
-        # MXFP8 and NVFP4 are not supported on pre-Blackwell architectures
-        if not (device_is_blackwell or device_is_rubin):
-            pytest.skip("Fused grouped MLP GLU is only supported on Blackwell or Rubin")
+        # Skip invalid configurations
+        maybe_skip_quantization("mxfp8")
+        maybe_skip_quantization("nvfp4")
 
         fused_op_cls = grouped_mlp_module.GroupedMLP_CuTeGEMMGLU
         monkeypatch.setattr(fused_op_cls, "is_supported", classmethod(lambda cls: True))
