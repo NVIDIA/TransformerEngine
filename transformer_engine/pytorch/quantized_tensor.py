@@ -342,10 +342,10 @@ def restore_from_saved(
                 QuantizedTensorStorage.__tensor_unflatten__(inner, tensor.metadata, None, None)
             )
             offset += count
-            # Even zero-width storage detached the suffix in the original traversal.
+            # Preserve list-copy semantics even for zero-width compiled storage.
             copy_suffix = True
         else:
-            # Legacy storage objects consume and return a suffix themselves.
+            # Eager storage objects consume and return a suffix themselves.
             if offset or copy_suffix:
                 saved_tensors = saved_tensors[offset:]
                 offset = 0
