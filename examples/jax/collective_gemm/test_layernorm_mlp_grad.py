@@ -61,13 +61,14 @@ def _get_operand_sharding(mesh):
     return x_sharding, weight_1_sharding, bias_1_sharding, weight_2_sharding, bias_2_sharding
 
 
-def _mean_layernorm_mlp(
+def _loss_layernorm_mlp(
     x,
     weight_1,
     bias_1,
     weight_2,
     bias_2,
     gamma,
+    target,
     input_1_axes,
     input_2_axes,
     weight_1_axes,
@@ -90,7 +91,10 @@ def _mean_layernorm_mlp(
         collective_op_sets=collective_op_sets,
         quantizer_sets=quantizer_sets,
     )
-    return jnp.mean(output)
+    # Mean over tokens, with a sum over the hidden dimension to keep gradients measurable.
+    return jnp.mean(
+        jnp.sum((output.astype(jnp.float32) - target.astype(jnp.float32)) ** 2, axis=-1)
+    )
 
 
 def _value_and_grad_layernorm_mlp(
@@ -100,6 +104,7 @@ def _value_and_grad_layernorm_mlp(
     weight_2,
     bias_2,
     gamma,
+    target,
     input_1_axes,
     input_2_axes,
     weight_1_axes,
@@ -108,7 +113,8 @@ def _value_and_grad_layernorm_mlp(
     quantizer_sets,
 ):
     return jax.jit(
-        jax.value_and_grad(_mean_layernorm_mlp, (0, 1, 2, 3, 4, 5)), static_argnums=(6, 7, 8, 9, 10)
+        jax.value_and_grad(_loss_layernorm_mlp, (0, 1, 2, 3, 4, 5)),
+        static_argnums=(7, 8, 9, 10, 11),
     )(
         x,
         weight_1,
@@ -116,6 +122,7 @@ def _value_and_grad_layernorm_mlp(
         weight_2,
         bias_2,
         gamma,
+        target,
         input_1_axes,
         input_2_axes,
         weight_1_axes,
@@ -136,8 +143,8 @@ def run_layernorm_mlp_grad_tests(args, mesh=None):
 
     # Create test data
     rng = jax.random.PRNGKey(0)
-    rng, x_rng, weight_1_rng, bias_1_rng, weight_2_rng, bias_2_rng, gamma_rng = jax.random.split(
-        rng, 7
+    rng, x_rng, weight_1_rng, bias_1_rng, weight_2_rng, bias_2_rng, gamma_rng, target_rng = (
+        jax.random.split(rng, 8)
     )
     std = jnp.asarray(args.std, dtype=jnp.bfloat16)
     x = std * jax.random.normal(
@@ -159,6 +166,9 @@ def run_layernorm_mlp_grad_tests(args, mesh=None):
         std
         * jax.random.normal(gamma_rng, (args.hidden_in,), dtype=jnp.bfloat16)
         / jnp.sqrt(args.hidden_in)
+    )
+    target = std * jax.random.normal(
+        target_rng, (args.batch_size, args.seq_len, args.hidden_in), dtype=jnp.bfloat16
     )
     collective_op_set_1 = CollectiveOpSet.create(forward_collective_op=CollectiveOp.ALL_GATHER)
     collective_op_set_2 = CollectiveOpSet.create(forward_collective_op=CollectiveOp.REDUCE_SCATTER)
@@ -193,6 +203,7 @@ def run_layernorm_mlp_grad_tests(args, mesh=None):
             bias_1_sharded = jax.device_put(bias_1, bias_1_sharding)
             weight_2_sharded = jax.device_put(weight_2, weight_2_sharding)
             bias_2_sharded = jax.device_put(bias_2, bias_2_sharding)
+            target_sharded = jax.device_put(target, x_sharding)
 
             input_1_axes, weight_1_axes, _, input_2_axes, weight_2_axes, _ = _get_logical_axes()
             ref_output, ref_grads = _value_and_grad_layernorm_mlp(
@@ -202,6 +213,7 @@ def run_layernorm_mlp_grad_tests(args, mesh=None):
                 weight_2_sharded,
                 bias_2_sharded,
                 gamma,
+                target_sharded,
                 input_1_axes,
                 input_2_axes,
                 weight_1_axes,
@@ -216,6 +228,7 @@ def run_layernorm_mlp_grad_tests(args, mesh=None):
                 weight_2_sharded,
                 bias_2_sharded,
                 gamma,
+                target_sharded,
                 input_1_axes,
                 input_2_axes,
                 weight_1_axes,
