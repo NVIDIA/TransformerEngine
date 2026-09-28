@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <string_view>
 #include <type_traits>
 #include <vector>
 
@@ -334,7 +335,7 @@ inline size_t grouped_gemm_setup_workspace_size(size_t num_tensors) {
   return GroupedGemmSetupWorkspace::required_setup_size(num_tensors, kGroupedGemmAlignment);
 }
 
-inline void check_grouped_gemm_requirements(const char *api_name) {
+inline void check_grouped_gemm_requirements(const std::string_view &api_name) {
   const int current_device = transformer_engine::cuda::current_device();
   const int sm = transformer_engine::cuda::sm_arch(current_device);
   const int cublas_ver = transformer_engine::cuda::cublas_version();
@@ -353,6 +354,11 @@ inline void check_grouped_gemm_requirements(const char *api_name) {
   NVTE_CHECK(cublas_ver >= CUBLAS_GROUPED_GEMM_VERSION, api_name,
              " requires cuBLAS 13.3+, but run-time cuBLAS version is ", cublas_ver);
 #endif
+  if (api_name == "nvte_grouped_gemm_with_discrete_out") {
+    NVTE_CHECK(!(130700 <= cublas_ver && cublas_ver < 130801),
+               api_name, " has a data corruption bug with cuBLAS version ", cublas_ver,
+               ". Please upgrade to cuBLAS 13.8.1+.");
+  }
 }
 
 inline transformer_engine::GroupedMatmulConfig parse_grouped_gemm_config(
