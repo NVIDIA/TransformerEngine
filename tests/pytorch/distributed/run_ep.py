@@ -1361,7 +1361,7 @@ class TestMoeEpSequential(_EpTestCase):
         static_dy = torch.randn_like(static_tokens)
         graphed_model = te.make_graphed_callables(
             graph_model,
-            (static_tokens, static_topk_idx, static_topk_weights),
+            (static_tokens, static_topk_idx, static_topk_weights, static_topk_idx),
             num_warmup_iters=3,
             enabled=True,
             recipe=recipe,
