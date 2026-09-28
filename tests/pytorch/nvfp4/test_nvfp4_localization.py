@@ -77,7 +77,7 @@ def _make_quantizer(*, stochastic_rounding: bool) -> te.NVFP4Quantizer:
         with_post_rht_amax=True,
         stochastic_rounding=stochastic_rounding,
     )
-    quantizer.optimize_for_gemm = False
+    quantizer.optimize_for_gemm = True
     return quantizer
 
 
