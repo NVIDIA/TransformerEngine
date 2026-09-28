@@ -111,12 +111,8 @@ def test_two_outstanding_forwards_keep_their_routing():
 
     recv_a, _, recv_weights_a = dispatch(tokens_a, topk_a, weights_a)
     recv_b, _, recv_weights_b = dispatch(tokens_b, topk_b, weights_b)
-    output_a = combine(
-        (recv_a.float() * recv_weights_a.unsqueeze(-1)).to(torch.bfloat16), topk_a
-    )
-    output_b = combine(
-        (recv_b.float() * recv_weights_b.unsqueeze(-1)).to(torch.bfloat16), topk_b
-    )
+    output_a = combine((recv_a.float() * recv_weights_a.unsqueeze(-1)).to(torch.bfloat16), topk_a)
+    output_b = combine((recv_b.float() * recv_weights_b.unsqueeze(-1)).to(torch.bfloat16), topk_b)
     (output_a.float().sum() + 2 * output_b.float().sum()).backward()
 
     torch.testing.assert_close(output_a, tokens_a, **TOLERANCES)
