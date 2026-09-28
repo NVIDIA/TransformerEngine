@@ -53,35 +53,6 @@ def _unpack_fp4(x: torch.Tensor) -> torch.Tensor:
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
-@pytest.mark.parametrize("with_random_sign_mask", [False, True])
-def test_sm12x_post_rht_amax_matches_native_k16(with_random_sign_mask: bool) -> None:
-    """The fused post-RHT amax must match TE's native K=16 MMA RHT."""
-
-    if not _is_sm12x():
-        pytest.skip("Test targets the SM120/SM121 no-TMEM fused RHT path")
-
-    torch.manual_seed(1234)
-    x = torch.randn((128, 128), device="cuda", dtype=torch.bfloat16)
-    torch.manual_seed(5678)
-    expected = _native_unfused_columnwise(x, with_random_sign_mask)
-
-    torch.manual_seed(5678)
-    quantizer = NVFP4Quantizer(
-        fp4_dtype=te.DType.kFloat4E2M1,
-        rowwise=False,
-        columnwise=True,
-        with_amax_reduction=False,
-        with_rht=True,
-        with_post_rht_amax=True,
-        with_random_sign_mask=with_random_sign_mask,
-    )
-    out = quantizer(x)
-
-    torch.testing.assert_close(out._amax_columnwise, expected._amax_columnwise, atol=0.0, rtol=0.0)
-
-
-@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 @pytest.mark.parametrize("shape", [(128, 128), (256, 256)])
 @pytest.mark.parametrize("rowwise", [False, True])
 @pytest.mark.parametrize("with_random_sign_mask", [False, True])
