@@ -157,6 +157,53 @@ def _nvidia_cudnn_frontend_supports_wgrad() -> bool:
     return _cudnn_frontend_version_supported()
 
 
+@functools.lru_cache(maxsize=None)
+def _cudnn_wgrad_workspace_size_fn() -> Optional[Callable]:
+    """Workspace size query for the cuDNN wgrad kernel's ``descriptor_workspace``.
+
+    Returns ``None`` if the installed cuDNN frontend does not accept a
+    caller-owned descriptor workspace. Without it, dense-mode wgrad keys its
+    compile cache on the output pointer, so it recompiles whenever the wgrad
+    buffer changes and cannot be captured in a CUDA graph.
+    """
+    try:
+        from cudnn import (  # pylint: disable=import-outside-toplevel,no-name-in-module
+            get_grouped_gemm_wgrad_workspace_size_sm100,
+            grouped_gemm_wgrad_wrapper_sm100,
+        )
+    except ImportError:
+        return None
+    try:
+        if (
+            "descriptor_workspace"
+            not in inspect.signature(grouped_gemm_wgrad_wrapper_sm100).parameters
+        ):
+            return None
+    except (TypeError, ValueError):
+        return None
+    return get_grouped_gemm_wgrad_workspace_size_sm100
+
+
+def _alloc_cudnn_wgrad_workspace(
+    fc_op: GroupedLinear,
+    ctx: OperationContext,
+    wgrad_kernel_fn: Optional[Callable],
+    num_experts: int,
+    use_nvfp4: bool,
+    device: torch.device,
+) -> Optional[torch.Tensor]:
+    """Allocate the cuDNN wgrad descriptor workspace for one GroupedLinear, if supported."""
+    workspace_size_fn = _cudnn_wgrad_workspace_size_fn()
+    if wgrad_kernel_fn is None or workspace_size_fn is None or not ctx.weight_requires_grad:
+        return None
+    workspace_bytes = workspace_size_fn(
+        num_experts,
+        output_mode="dense" if fc_op.single_grouped_weight else "discrete",
+        input_order="tensor_ragged" if use_nvfp4 else "tensor2d",
+    )
+    return torch.empty(workspace_bytes, dtype=torch.uint8, device=device)
+
+
 def _cudnn_frontend_supports_single_group_runtime_offsets(
     activation_type: type[FusibleOperation],
 ) -> bool:
@@ -538,6 +585,7 @@ def _cudnn_compute_wgrad(
     data_dtype: torch.dtype,
     scale_view_dtype: torch.dtype,
     sf_vec_size: int,
+    descriptor_workspace: Optional[torch.Tensor] = None,
     current_stream=None,
 ):
     """Compute wgrad using the cuDNN CuTe DSL grouped GEMM wgrad kernel.
@@ -630,6 +678,8 @@ def _cudnn_compute_wgrad(
         "accumulate_on_output": accumulate,
         "current_stream": current_stream,
     }
+    if descriptor_workspace is not None:
+        common_wgrad_kwargs["descriptor_workspace"] = descriptor_workspace
     if use_nvfp4:
         global_scale_denom = 448.0 * 6.0
         if total_tokens == 0:
@@ -694,6 +744,7 @@ def _compute_grad_params(
     sf_vec_size,
     offsets,
     use_dense_single_group,
+    cudnn_wgrad_workspace=None,
 ):
     """Compute weight gradients and build grad_params for a GroupedLinear layer.
     Returns the grad_params list in parameter registration order.
@@ -785,6 +836,7 @@ def _compute_grad_params(
                 data_dtype=data_dtype,
                 scale_view_dtype=scale_view_dtype,
                 sf_vec_size=sf_vec_size,
+                descriptor_workspace=cudnn_wgrad_workspace,
             )
         else:
             gemm_fn = functools.partial(
@@ -2480,6 +2532,9 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             sf_vec_size=sf_vec_size,
             offsets=split_points,
             use_dense_single_group=use_dense_single_group,
+            cudnn_wgrad_workspace=_alloc_cudnn_wgrad_workspace(
+                fc2_op, fc2_ctx, wgrad_kernel_fn, split_points.shape[0], use_nvfp4, device
+            ),
         )
 
         # Clear FC2 input tensor if possible
@@ -2637,6 +2692,9 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             sf_vec_size=sf_vec_size,
             offsets=split_points,
             use_dense_single_group=use_dense_single_group,
+            cudnn_wgrad_workspace=_alloc_cudnn_wgrad_workspace(
+                fc1_op, fc1_ctx, wgrad_kernel_fn, split_points.shape[0], use_nvfp4, device
+            ),
         )
 
         # Clear FC1 input tensor if possible
