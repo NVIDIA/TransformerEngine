@@ -1949,6 +1949,61 @@ __device__ __forceinline__ void prefetch_l2_evict_last(const void *addr) {
   NVTE_DEVICE_ERROR("prefetch_l2_evict_last is only supported on SM 8.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
 }
+
+// Packed FP32x2 arithmetic.  Each lane rounds exactly like the scalar `.rn` form.
+#define NVTE_DEFINE_F32X2_BINARY_OP(NAME, OPCODE)                                                  \
+  __device__ __forceinline__ floatx2 NAME(const floatx2 &a, const floatx2 &b) {                    \
+    floatx2 d;                                                                                     \
+    asm(OPCODE " %0, %1, %2;"                                                                      \
+        : "=l"(reinterpret_cast<uint64_t &>(d))                                                    \
+        : "l"(reinterpret_cast<const uint64_t &>(a)), "l"(reinterpret_cast<const uint64_t &>(b))); \
+    return d;                                                                                      \
+  }
+NVTE_DEFINE_F32X2_BINARY_OP(add_2x, "add.rn.f32x2")
+NVTE_DEFINE_F32X2_BINARY_OP(mul_2x, "mul.rn.f32x2")
+#undef NVTE_DEFINE_F32X2_BINARY_OP
+
+__device__ __forceinline__ floatx2 fma_2x(const floatx2 &a, const floatx2 &b, const floatx2 &c) {
+  floatx2 d;
+  asm("fma.rn.f32x2 %0, %1, %2, %3;"
+      : "=l"(reinterpret_cast<uint64_t &>(d))
+      : "l"(reinterpret_cast<const uint64_t &>(a)), "l"(reinterpret_cast<const uint64_t &>(b)),
+        "l"(reinterpret_cast<const uint64_t &>(c)));
+  return d;
+}
+
+// Packed BF16 min/max and conversions on a raw 32-bit word.
+
+__device__ __forceinline__ uint32_t max_bf16x2(uint32_t a, uint32_t b) {
+  uint32_t d;
+  asm("max.bf16x2 %0, %1, %2;" : "=r"(d) : "r"(a), "r"(b));
+  return d;
+}
+
+__device__ __forceinline__ uint32_t min_bf16x2(uint32_t a, uint32_t b) {
+  uint32_t d;
+  asm("min.bf16x2 %0, %1, %2;" : "=r"(d) : "r"(a), "r"(b));
+  return d;
+}
+
+/*! \brief Round two FP32 values to one packed BF16 pair.
+ *  \note The PTX operand order puts the HIGH half first.
+ */
+__device__ __forceinline__ uint32_t cvt_bf16x2(float hi, float lo) {
+  uint32_t d;
+  asm("cvt.rn.bf16x2.f32 %0, %1, %2;" : "=r"(d) : "f"(hi), "f"(lo));
+  return d;
+}
+
+/*! \brief float_to_e8m0 for two values at once, returned as two packed bytes:
+ *         \p hi in the upper byte, \p lo in the lower one.
+ */
+__device__ __forceinline__ uint32_t float_to_e8m0_2x(float hi, float lo) {
+  uint16_t d;
+  asm("cvt.rp.satfinite.ue8m0x2.f32 %0, %1, %2;" : "=h"(d) : "f"(hi), "f"(lo));
+  return static_cast<uint32_t>(d);
+}
+
 }  // namespace ptx
 
 namespace {
