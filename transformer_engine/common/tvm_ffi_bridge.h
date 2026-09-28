@@ -35,17 +35,15 @@ namespace transformer_engine {
 namespace tvm_ffi_bridge {
 
 // All CuTeDSL kernels share this lock while their TVM-FFI entrypoints are first used.
-inline std::mutex &first_cutedsl_launch_mutex() {
-  static auto *mutex = new std::mutex;
-  return *mutex;
-}
+inline std::mutex first_cutedsl_launch_mutex;
 
 // Cached copies of the lambda share this state for one compiled kernel.
 struct TVMFFIKernelState {
+  static constexpr int kMaxDevices = 32;
   explicit TVMFFIKernelState(tvm::ffi::Function function)
-      : function(std::move(function)),
-        num_devices(cuda::num_devices()),
-        launched(new std::atomic<bool>[num_devices]) {
+      : function(std::move(function)), num_devices(cuda::num_devices()) {
+    NVTE_CHECK(num_devices <= kMaxDevices,
+               "Too many visible CUDA devices for CuTeDSL: ", num_devices);
     // All devices start out unlaunched.
     for (int device = 0; device < num_devices; ++device) {
       launched[device].store(false, std::memory_order_relaxed);
@@ -54,7 +52,7 @@ struct TVMFFIKernelState {
 
   tvm::ffi::Function function;
   int num_devices;
-  std::unique_ptr<std::atomic<bool>[]> launched;
+  std::atomic<bool> launched[kMaxDevices];
 };
 
 inline auto make_tvm_ffi_kernel(tvm::ffi::Function function) {
@@ -64,7 +62,7 @@ inline auto make_tvm_ffi_kernel(tvm::ffi::Function function) {
     NVTE_CHECK(device >= 0 && device < state->num_devices, "Invalid CUDA device index: ", device);
     // If we never launch the kernel on this device, we need to make its initial launch serialized
     if (!state->launched[device].load(std::memory_order_acquire)) {
-      std::lock_guard<std::mutex> lock(first_cutedsl_launch_mutex());
+      std::lock_guard<std::mutex> lock(first_cutedsl_launch_mutex);
       // Check again in case another thread already launched it while we were waiting for the lock
       if (!state->launched[device].load(std::memory_order_relaxed)) {
         // Launch the kernel while holding the global mutex and mark it as launched for this device after we're done.
@@ -436,8 +434,9 @@ class TVMFFIConfigCache {
   std::optional<TVMFFIKernel> get_or_load(const Config &cfg) {
     TVMFFICentral &central = TVMFFICentral::getInstance();
     // Checked ahead of the cache so that toggling the backend off still disables
-    // already-resolved configs; load_tvm_ffi_function emits the "disabled" warning.
+    // already-resolved configs.
     if (!central.get_cutedsl_backend_enabled()) {
+      // Preserve the "disabled" warning from load_tvm_ffi_function.
       central.load_tvm_ffi_function(cfg);
       return std::nullopt;
     }
