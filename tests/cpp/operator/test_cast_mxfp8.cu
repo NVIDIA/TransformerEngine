@@ -936,6 +936,153 @@ std::string mxfp8_2d_quantization_test_name_generator(
     return name;
 }
 
+// Regression test for https://github.com/NVIDIA/TransformerEngine/issues/3550:
+// the amax reduction of the half-precision MXFP8 rowwise/bidimensional kernels
+// used max.xorsign.abs (NaN-ignoring), so a NaN input element was dropped
+// before the exceptional-value handling and its block was quantized with a
+// finite scale.  Every 32-element block containing NaN must take the
+// exceptional E8M0 scale (255), NaN-free blocks must keep the finite scale,
+// and the cast payload must preserve NaN.
+TEST(CastMXFP8NaNScaling, RowwiseAndBidimNaNBlocksTakeExceptionalScale) {
+    // Regression test for https://github.com/NVIDIA/TransformerEngine/issues/3550:
+    // the amax reduction of the half-precision MXFP8 rowwise/bidimensional kernels
+    // used max.xorsign.abs (NaN-ignoring), so a NaN input element was dropped
+    // before the exceptional-value handling and its block was quantized with a
+    // finite scale.  Every 32-element block containing NaN must take the
+    // exceptional E8M0 scale (255) and the cast payload must preserve NaN.
+    // The shape reaches the specialized kernels: 256 % 128 == 0 (rowwise) and
+    // 256 % 256 == 0 (bidimensional).
+    if (getDeviceComputeCapability() < blackwellComputeCapability) {
+        GTEST_SKIP();
+    }
+
+    using namespace transformer_engine;
+    using namespace test;
+    using InputType = bf16;
+    using OutputType = fp8e4m3;
+
+    const size_t rows = 128;
+    const size_t cols = 256;
+    constexpr size_t kRowwiseBlockCols = 128;  // specialized rowwise kernel eligibility
+    constexpr size_t kRowBlockCols = 32;       // MXFP8 block width along a row
+
+    Tensor input("input", {rows, cols}, DType::kBFloat16);
+    {
+        // NaN lanes sit at j % 8 == 7 in every row except rows with i % 4 == 3,
+        // which stay NaN-free.  Rowwise blocks (one 128-column stretch of one
+        // row, four 32-element MXFP8 blocks) and colwise blocks (one column)
+        // therefore mix exceptional and finite scales within the same tensor.
+        InputType *data = input.rowwise_cpu_dptr<InputType>();
+        for (size_t i = 0; i < rows; ++i) {
+            for (size_t j = 0; j < cols; ++j) {
+                const size_t idx = i * cols + j;
+                if ((j % 8 == 7) && (i % 4 != 3)) {
+                    // bf16 quiet NaN: exponent all ones, nonzero mantissa
+                    reinterpret_cast<uint16_t &>(data[idx]) = 0x7FC0;
+                } else {
+                    const float magnitude = 1.0f + static_cast<float>(idx % 7);
+                    data[idx] = static_cast<InputType>((idx % 2 == 0) ? magnitude : -magnitude);
+                }
+            }
+        }
+        input.from_cpu();
+    }
+
+    const std::array<size_t, 4> scale_dims_rowwise = get_scale_tensor_dims(rows, cols, 1, 32);
+    const std::array<size_t, 4> scale_dims_colwise = get_scale_tensor_dims(rows, cols, 32, 1);
+    const size_t scales_stride_rowwise = scale_dims_rowwise[3];
+    const size_t scales_stride_colwise = scale_dims_colwise[3];
+
+    // Expected E8M0 scale byte for one 32-element MXFP8 block (mirrors the
+    // reference: std::max over |elements|, then float_to_e8m0).  Blocks
+    // containing NaN take the exceptional code 255.
+    auto expected_scale = [&](const size_t r0, const size_t r1, const size_t c0, const size_t c1) {
+        bool has_nan = false;
+        float block_amax = 0.0f;
+        for (size_t i = r0; i < std::min(r1, rows); ++i) {
+            for (size_t j = c0; j < std::min(c1, cols); ++j) {
+                const float elt = static_cast<float>(input.rowwise_cpu_dptr<InputType>()[i * cols + j]);
+                if (std::isnan(elt)) {
+                    has_nan = true;
+                } else {
+                    block_amax = std::max(block_amax, std::abs(elt));
+                }
+            }
+        }
+        return has_nan ? static_cast<uint8_t>(0xFF)
+                       : static_cast<uint8_t>(float_to_e8m0(
+                             block_amax * Quantized_Limits<OutputType>::max_reciprocal()));
+    };
+    auto is_nan_payload = [](const OutputType &elt) {
+        return (reinterpret_cast<const uint8_t &>(elt) & 0x7F) == 0x7F;
+    };
+
+    // ---- rowwise kernel (MXFP8 1D scaling, rowwise-only layout) ------------
+    Tensor output_rowwise("output_rowwise", {rows, cols}, DType::kFloat8E4M3,
+                          /*rowwise=*/true, /*colwise=*/false, NVTE_MXFP8_1D_SCALING);
+    nvte_quantize(input.data(), output_rowwise.data(), 0);
+    cudaDeviceSynchronize();
+    ASSERT_EQ(cudaGetLastError(), cudaSuccess);
+
+    const fp8e8m0 *scales_rowwise = output_rowwise.rowwise_cpu_scale_inv_ptr<fp8e8m0>();
+    const OutputType *out_rowwise = output_rowwise.rowwise_cpu_dptr<OutputType>();
+    for (size_t i = 0; i < rows; ++i) {
+        for (size_t b = 0; b < cols / kRowBlockCols; ++b) {
+            const uint8_t expected = expected_scale(i, i + 1, b * kRowBlockCols, (b + 1) * kRowBlockCols);
+            ASSERT_EQ(static_cast<uint8_t>(scales_rowwise[i * scales_stride_rowwise + b]), expected)
+                << "rowwise block (row " << i << ", block " << b << ")";
+        }
+        const bool row_has_nan = (i % 4 != 3);
+        for (size_t j = 0; j < cols; ++j) {
+            const uint8_t payload = reinterpret_cast<const uint8_t &>(out_rowwise[i * cols + j]);
+            if (row_has_nan) {
+                ASSERT_EQ(payload & 0x7F, 0x7F)
+                    << "rowwise payload (" << i << "," << j << ") must be NaN under the exceptional scale";
+            } else {
+                ASSERT_NE(payload & 0x7F, 0x7F)
+                    << "rowwise payload (" << i << "," << j << ") must stay finite in a NaN-free row";
+            }
+        }
+    }
+
+    // ---- bidimensional kernel (rowwise + colwise layouts) ------------------
+    Tensor output_bidim("output_bidim", {rows, cols}, DType::kFloat8E4M3,
+                        /*rowwise=*/true, /*colwise=*/true, NVTE_MXFP8_1D_SCALING);
+    nvte_quantize(input.data(), output_bidim.data(), 0);
+    cudaDeviceSynchronize();
+    ASSERT_EQ(cudaGetLastError(), cudaSuccess);
+
+    const fp8e8m0 *scales_bidim_rowwise = output_bidim.rowwise_cpu_scale_inv_ptr<fp8e8m0>();
+    const fp8e8m0 *scales_bidim_colwise = output_bidim.columnwise_cpu_scale_inv_ptr<fp8e8m0>();
+    const OutputType *out_bidim_rowwise = output_bidim.rowwise_cpu_dptr<OutputType>();
+    const OutputType *out_bidim_colwise = output_bidim.columnwise_cpu_dptr<OutputType>();
+    for (size_t i = 0; i < rows; ++i) {
+        for (size_t b = 0; b < cols / kRowBlockCols; ++b) {
+            const uint8_t expected = expected_scale(i, i + 1, b * kRowBlockCols, (b + 1) * kRowBlockCols);
+            ASSERT_EQ(static_cast<uint8_t>(scales_bidim_rowwise[i * scales_stride_rowwise + b]), expected)
+                << "bidim rowwise block (row " << i << ", block " << b << ")";
+        }
+    }
+    for (size_t j = 0; j < cols; ++j) {
+        for (size_t by = 0; by < rows / 32; ++by) {
+            const uint8_t expected = expected_scale(by * 32, (by + 1) * 32, j, j + 1);
+            ASSERT_EQ(static_cast<uint8_t>(scales_bidim_colwise[by * scales_stride_colwise + j]), expected)
+                << "bidim colwise block (col " << j << ", rows " << by * 32 << "+" << 32 << ")";
+        }
+    }
+    // Bidimensional payloads: NaN under exceptional scales, finite otherwise.
+    for (size_t i = 0; i < rows; ++i) {
+        const bool row_has_nan = (i % 4 != 3);
+        for (size_t j = 0; j < cols; ++j) {
+            ASSERT_EQ(is_nan_payload(out_bidim_rowwise[i * cols + j]), row_has_nan)
+                << "bidim rowwise payload (" << i << "," << j << ")";
+            ASSERT_EQ(is_nan_payload(out_bidim_colwise[i * cols + j]), (j % 8 == 7))
+                << "bidim colwise payload (" << i << "," << j << ")";
+        }
+    }
+}
+
+
 }  // namespace
 
 // Test cases with only cast kernels
