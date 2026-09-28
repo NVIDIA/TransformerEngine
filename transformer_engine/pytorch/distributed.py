@@ -1365,9 +1365,10 @@ def _all_gather_nvfp4(
     if isinstance(inp, torch.Tensor) and not isinstance(inp, NVFP4TensorStorage):
         # High-precision tensor.
         in_shape = NVFP4Quantizer.convert_shape_for_fp4(inp.size())
-        in_shape_t = NVFP4Quantizer.convert_shape_for_fp4(
-            NVFP4Quantizer.get_columnwise_shape(inp.size())
-        )
+        if quantizer.columnwise_usage:
+            in_shape_t = NVFP4Quantizer.convert_shape_for_fp4(
+                NVFP4Quantizer.get_columnwise_shape(inp.size())
+            )
         device = inp.device
         dtype = inp.dtype
     elif isinstance(inp, NVFP4TensorStorage):
