@@ -329,6 +329,29 @@ py::object dswiglu(const at::Tensor& grad, const at::Tensor& input, py::handle q
   return dactivation_helper<nvte_dswiglu, nullptr>(grad, input, quantizer);
 }
 
+void swiglu_out(const at::Tensor& input, const at::Tensor& output) {
+  init_extension();
+  NVTE_CHECK(input.is_contiguous(), "SwiGLU input must be contiguous");
+  NVTE_CHECK(output.is_contiguous(), "SwiGLU output must be contiguous");
+  const auto input_nvte = makeTransformerEngineTensor(input);
+  const auto output_nvte = makeTransformerEngineTensor(output);
+  auto stream = at::cuda::getCurrentCUDAStream();
+  NVTE_SCOPED_GIL_RELEASE({ nvte_swiglu(input_nvte.data(), output_nvte.data(), stream); });
+}
+
+void dswiglu_out(const at::Tensor& grad, const at::Tensor& input, const at::Tensor& output) {
+  init_extension();
+  NVTE_CHECK(grad.is_contiguous(), "SwiGLU gradient must be contiguous");
+  NVTE_CHECK(input.is_contiguous(), "SwiGLU forward input must be contiguous");
+  NVTE_CHECK(output.is_contiguous(), "SwiGLU backward output must be contiguous");
+  const auto grad_nvte = makeTransformerEngineTensor(grad);
+  const auto input_nvte = makeTransformerEngineTensor(input);
+  const auto output_nvte = makeTransformerEngineTensor(output);
+  auto stream = at::cuda::getCurrentCUDAStream();
+  NVTE_SCOPED_GIL_RELEASE(
+      { nvte_dswiglu(grad_nvte.data(), input_nvte.data(), output_nvte.data(), stream); });
+}
+
 py::object situglu(const at::Tensor& input, py::handle quantizer, float beta1, float beta2) {
   return activation_helper<nullptr, nvte_situglu>(input, quantizer, 2, beta1, beta2);
 }

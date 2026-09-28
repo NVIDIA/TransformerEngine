@@ -289,6 +289,10 @@ py::object swiglu(const at::Tensor &input, py::handle quantizer);
 
 py::object dswiglu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer);
 
+void swiglu_out(const at::Tensor &input, const at::Tensor &output);
+
+void dswiglu_out(const at::Tensor &grad, const at::Tensor &input, const at::Tensor &output);
+
 py::object situglu(const at::Tensor &input, py::handle quantizer, float beta1, float beta2);
 
 py::object dsituglu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer,

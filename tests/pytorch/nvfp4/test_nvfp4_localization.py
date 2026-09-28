@@ -10,6 +10,7 @@ import pytest
 import torch
 
 import transformer_engine.pytorch as te
+import transformer_engine_torch as tex
 
 
 NVFP4_AVAILABLE, NO_NVFP4_REASON = te.is_nvfp4_available(return_reason=True)
@@ -235,6 +236,148 @@ def test_nvfp4_rht_sr_localization_performance(shape) -> None:
         f"\n  green VMM input/output:        {timings['input_output']:.3f} ms"
         f"\n  split-launch speedup:          {timings['full'] / timings['split']:.3f}x"
         f"\n  green vs split speedup:        {timings['split'] / timings['output']:.3f}x"
+        f"\n  input+output speedup:          "
+        f"{timings['split'] / timings['input_output']:.3f}x"
+    )
+
+    allocator.close()
+
+
+@pytest.mark.skipif(not _localization_available(), reason="CUDA localization is unavailable")
+@pytest.mark.skipif(
+    os.getenv("RUN_BENCHMARK_TESTS", "0") != "1",
+    reason="Benchmark test - set RUN_BENCHMARK_TESTS=1",
+)
+@pytest.mark.parametrize("backward", [False, True], ids=["forward", "backward"])
+def test_bf16_swiglu_localization_performance(backward: bool) -> None:
+    """Benchmark the BF16 TMA SwiGLU kernel used before NVFP4 quantization."""
+    from transformer_engine.pytorch.tensor.localized_mxfp8 import _get_localization_context
+    from transformer_engine.pytorch.tensor.vmm import VMMRowSplitAllocator
+
+    shape = (16384, 28672)
+    dtype = torch.bfloat16
+    device = torch.device("cuda")
+    output_shape = shape if backward else (shape[0], shape[1] // 2)
+    partition_output_shape = (output_shape[0] // 2, output_shape[1])
+
+    gated_input = torch.randn(shape, dtype=dtype, device=device)
+    full_args = (gated_input,)
+    if backward:
+        grad = torch.randn(output_shape[0], output_shape[1] // 2, dtype=dtype, device=device)
+        full_args = (grad, gated_input)
+    ordinary_args = tuple(
+        tuple(tensor.chunk(2, dim=0)[domain] for tensor in full_args) for domain in range(2)
+    )
+
+    allocator = VMMRowSplitAllocator(device)
+    localized_args = []
+    for domain in range(2):
+        domain_args = []
+        for tensor in ordinary_args[domain]:
+            local_tensor = allocator.allocate_in_domain(tuple(tensor.shape), tensor.dtype, domain)
+            local_tensor.copy_(tensor)
+            domain_args.append(local_tensor)
+        localized_args.append(tuple(domain_args))
+    localized_args = tuple(localized_args)
+
+    full_output = torch.empty(output_shape, dtype=dtype, device=device)
+    split_outputs = tuple(
+        torch.empty(partition_output_shape, dtype=dtype, device=device) for _ in range(2)
+    )
+    localized_input_outputs = tuple(
+        torch.empty(partition_output_shape, dtype=dtype, device=device) for _ in range(2)
+    )
+    localized_output_outputs = tuple(
+        allocator.allocate_in_domain(partition_output_shape, dtype, domain)
+        for domain in range(2)
+    )
+    localized_input_output_outputs = tuple(
+        allocator.allocate_in_domain(partition_output_shape, dtype, domain)
+        for domain in range(2)
+    )
+
+    def launch(args, output) -> None:
+        if backward:
+            tex.dswiglu_out(args[0], args[1], output)
+        else:
+            tex.swiglu_out(args[0], output)
+
+    _, _, green_streams = _get_localization_context(torch.cuda.current_device())
+    ordinary_streams = tuple(torch.cuda.Stream(device=device) for _ in range(2))
+    eager_events = {
+        key: (
+            torch.cuda.Event(enable_timing=False),
+            tuple(torch.cuda.Event(enable_timing=False) for _ in range(2)),
+        )
+        for key in ("split", "input", "output", "input_output")
+    }
+    capture_events = []
+
+    def partitioned(args, outputs, streams, event_key: str) -> None:
+        parent_stream = torch.cuda.current_stream(device)
+        if torch.cuda.is_current_stream_capturing():
+            fork_event = torch.cuda.Event(enable_timing=False)
+            join_events = tuple(torch.cuda.Event(enable_timing=False) for _ in range(2))
+            capture_events.extend((fork_event, *join_events))
+        else:
+            fork_event, join_events = eager_events[event_key]
+        fork_event.record(parent_stream)
+        for domain_args, output, stream, join_event in zip(args, outputs, streams, join_events):
+            stream.wait_event(fork_event)
+            with torch.cuda.stream(stream):
+                launch(domain_args, output)
+            join_event.record(stream)
+        for event in join_events:
+            parent_stream.wait_event(event)
+
+    functions = {
+        "full": lambda: launch(full_args, full_output),
+        "split": lambda: partitioned(
+            ordinary_args, split_outputs, ordinary_streams, "split"
+        ),
+        "input": lambda: partitioned(
+            localized_args, localized_input_outputs, green_streams, "input"
+        ),
+        "output": lambda: partitioned(
+            ordinary_args, localized_output_outputs, green_streams, "output"
+        ),
+        "input_output": lambda: partitioned(
+            localized_args, localized_input_output_outputs, green_streams, "input_output"
+        ),
+    }
+    use_cuda_graph = os.getenv("SWIGLU_LOCALIZATION_USE_CUDA_GRAPH", "1") == "1"
+    if use_cuda_graph:
+        functions = {
+            name: _capture_cuda_graph(function).replay for name, function in functions.items()
+        }
+
+    timings = {name: _benchmark_ms(function) for name, function in functions.items()}
+    for function in functions.values():
+        function()
+    torch.cuda.synchronize()
+
+    full_partitions = full_output.chunk(2, dim=0)
+    for outputs in (
+        split_outputs,
+        localized_input_outputs,
+        localized_output_outputs,
+        localized_input_output_outputs,
+    ):
+        for output, reference in zip(outputs, full_partitions):
+            torch.testing.assert_close(output, reference, atol=0.0, rtol=0.0)
+
+    direction = "backward" if backward else "forward"
+    execution = "CUDA Graph" if use_cuda_graph else "eager"
+    print(
+        f"\nBF16 SwiGLU {direction} {shape} ({execution}):"
+        f"\n  full ordinary:                 {timings['full']:.3f} ms"
+        f"\n  split ordinary:                {timings['split']:.3f} ms"
+        f"\n  green VMM input/ordinary out:  {timings['input']:.3f} ms"
+        f"\n  green ordinary input/VMM out:  {timings['output']:.3f} ms"
+        f"\n  green VMM input/output:        {timings['input_output']:.3f} ms"
+        f"\n  split-launch speedup:          {timings['full'] / timings['split']:.3f}x"
+        f"\n  input-localization speedup:    {timings['split'] / timings['input']:.3f}x"
+        f"\n  output-localization speedup:   {timings['split'] / timings['output']:.3f}x"
         f"\n  input+output speedup:          "
         f"{timings['split'] / timings['input_output']:.3f}x"
     )

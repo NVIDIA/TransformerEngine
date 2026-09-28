@@ -280,6 +280,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("quantizer"));
   m.def("swiglu", transformer_engine::pytorch::swiglu, "SwiGLU activation", py::arg("input"),
         py::arg("quantizer"));
+  m.def("swiglu_out", transformer_engine::pytorch::swiglu_out,
+        "SwiGLU activation into a preallocated output", py::arg("input"), py::arg("output"));
   m.def("situglu", transformer_engine::pytorch::situglu, "SiTU-GLU activation", py::arg("input"),
         py::arg("quantizer"), py::arg("beta1") = 4.0f, py::arg("beta2") = 25.0f);
   m.def("clamped_swiglu", transformer_engine::pytorch::clamped_swiglu,
@@ -311,6 +313,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("fwd_input"), py::arg("quantizer"));
   m.def("dswiglu", transformer_engine::pytorch::dswiglu, "Backward of SwiGLU", py::arg("grad"),
         py::arg("fwd_input"), py::arg("quantizer"));
+  m.def("dswiglu_out", transformer_engine::pytorch::dswiglu_out,
+        "Backward of SwiGLU into a preallocated output", py::arg("grad"), py::arg("fwd_input"),
+        py::arg("output"));
   m.def("dsituglu", transformer_engine::pytorch::dsituglu, "Backward of SiTU-GLU", py::arg("grad"),
         py::arg("fwd_input"), py::arg("quantizer"), py::arg("beta1") = 4.0f,
         py::arg("beta2") = 25.0f);
