@@ -353,9 +353,14 @@ inline void check_grouped_gemm_requirements(const char *api_name) {
   NVTE_CHECK(cublas_ver >= CUBLAS_GROUPED_GEMM_VERSION, api_name,
              " requires cuBLAS 13.3+, but run-time cuBLAS version is ", cublas_ver);
 #endif
-  NVTE_CHECK(!(130700 <= cublas_ver && cublas_ver < 130801), api_name,
-             " has a data corruption bug with cuBLAS version ", cublas_ver,
-             ". Please upgrade to cuBLAS 13.8.1+.");
+  if (130700 <= cublas_ver && cublas_ver < 130801) {
+    // Warn once if cuBLAS version has data corruption bug 
+    static int _ = [cublas_ver]() -> int {
+      NVTE_WARN("cuBLAS version ", cublas_ver, " has a grouped GEMM bug that may cause data corruption. "
+                "Please upgrade to cuBLAS 13.8.1+.");
+      return 0;
+    }();
+  }
 }
 
 inline transformer_engine::GroupedMatmulConfig parse_grouped_gemm_config(
