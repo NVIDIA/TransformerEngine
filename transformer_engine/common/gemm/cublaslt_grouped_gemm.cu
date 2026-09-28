@@ -357,7 +357,8 @@ inline void check_grouped_gemm_requirements(const char *api_name) {
     // Warn once if cuBLAS version has data corruption bug
     // See https://docs.nvidia.com/cuda/cublas-patch-release-notes/#cublas-patch-release-13-8-1
     static int _ = [cublas_ver]() -> int {
-      NVTE_WARN("cuBLAS version ", cublas_ver, " has a grouped GEMM bug that may cause data corruption. "
+      NVTE_WARN("cuBLAS version ", cublas_ver,
+                " has a grouped GEMM bug that may cause data corruption. "
                 "Please upgrade to cuBLAS 13.8.1+.");
       return 0;
     }();
