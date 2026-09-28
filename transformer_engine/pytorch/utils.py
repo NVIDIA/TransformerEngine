@@ -15,6 +15,7 @@ import numpy as np
 import torch
 
 from .torch_version import torch_version
+from ..common import decode_cudnn_version
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
 
 
@@ -781,11 +782,7 @@ def _get_cudnn_version() -> Tuple[int, int, int]:
     """Runtime cuDNN version (major, minor, patch)"""
     import transformer_engine.pytorch.cpp_extensions as ext
 
-    encoded_version = ext.get_cudnn_version()
-    major_version_magnitude = 1000 if encoded_version < 90000 else 10000
-    major, encoded_version = divmod(encoded_version, major_version_magnitude)
-    minor, patch = divmod(encoded_version, 100)
-    return (major, minor, patch)
+    return decode_cudnn_version(ext.get_cudnn_version())
 
 
 @torch.compiler.assume_constant_result

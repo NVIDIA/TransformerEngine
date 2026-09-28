@@ -29,6 +29,9 @@ from transformer_engine.pytorch.ep import (
 ZERO_COPY = os.environ.get("NVTE_EP_ZERO_COPY", "0") == "1"
 EAGER = os.environ.get("NVTE_EP_EAGER", "0") == "1"
 OVERFLOW = os.environ.get("NVTE_EP_OVERFLOW", "0") == "1"
+# Fused prepare+dispatch (caller-supplied recv buffers) is opt-in on the C++ side; the tests
+# that exercise it only run when the same env var is set so they match the active dispatch path.
+FUSED_COUNT = os.environ.get("NVTE_EP_FUSED_PREPARE_DISPATCH", "0") == "1"
 
 # Must come after the transformer_engine import so libtransformer_engine.so is loaded.
 import transformer_engine_torch as tex  # noqa: F401
@@ -134,6 +137,20 @@ def _make_identity_inputs(rank, ep_size, device="cuda"):
         torch.from_numpy(tokens_np).to(device=device, dtype=torch.bfloat16),
         torch.from_numpy(topk_weights).to(device),
     )
+
+
+def _make_skewed_routing(rank, ep_size, device="cuda"):
+    """Routing whose per-expert and per-rank totals differ from the identity routing's uniform
+    distribution: every token's first top-k slot lands on this rank's own expert. A replay that
+    reuses stale counts from an identity-routed capture would then fail the count comparison."""
+    T = TOKENS_PER_RANK
+    E = ep_size * NUM_LOCAL_EXPERTS
+    topk_idx = np.empty((T, TOP_K), dtype=np.int64)
+    for t in range(T):
+        topk_idx[t, 0] = rank % E
+        for k in range(1, TOP_K):
+            topk_idx[t, k] = (rank % E + t * TOP_K + k) % E
+    return torch.from_numpy(topk_idx).to(device)
 
 
 def _degroup_mxfp8(recv_grouped, valid_counts=None):
@@ -432,15 +449,21 @@ class TestEP(unittest.TestCase):
             )
 
     def _assert_mxfp8_matches_bf16(self, recv_mx, tokens, topk_idx, w, tc):
-        """Dequantized MXFP8 recv matches a bf16 dispatch of the same tokens. Both share the
-        alignment=128 padded expert-major layout, so compare the full prefix [0:sum(padded)]."""
+        """Dequantized MXFP8 recv matches a bf16 dispatch of the same tokens, per expert. Row
+        order within an expert's block can differ between the two dispatch kernels, so compare
+        by sorted row sums (order-tolerant) instead of position."""
         ref_tokens = self._mxfp8_quantizer().quantize(tokens).dequantize()
         ref_recv, _rw, _tc = ep_dispatch(self._make_buffer(alignment=128), ref_tokens, topk_idx, w)
         torch.cuda.synchronize()
-        n = int(tc.sum())
-        torch.testing.assert_close(
-            _degroup_mxfp8(recv_mx).float(), ref_recv.float()[:n], atol=1e-2, rtol=1e-2
-        )
+        got = _degroup_mxfp8(recv_mx).float()
+        cum = [0] + tc.cumsum(0).tolist()
+        for lo, hi in zip(cum[:-1], cum[1:]):
+            torch.testing.assert_close(
+                got[lo:hi].sum(dim=1).sort().values,
+                ref_recv[lo:hi].float().sum(dim=1).sort().values,
+                atol=1e-1,
+                rtol=1e-1,
+            )
 
     @_eager_test_include
     @_zero_copy_test_include
@@ -709,6 +732,193 @@ class TestEP(unittest.TestCase):
             graph.replay()
         torch.cuda.synchronize()
         torch.testing.assert_close(result.float(), ref.float(), atol=0, rtol=0)
+
+    def _capture(self, step):
+        """Warm up ``step`` on a side stream then capture it into a CUDA graph. Returns
+        the graph; the caller replays it. With NVTE_EP_FUSED_PREPARE_DISPATCH set, dispatch
+        under capture takes the fused count-mode path that derives the counts from the
+        dispatch scan."""
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            for _ in range(3):
+                step()
+        torch.cuda.current_stream().wait_stream(s)
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            step()
+        return graph
+
+    def _caller_recv(self):
+        """A persistent recv token + weight buffer pair sized to recv_capacity_per_rank, for
+        capturing a caller-provided-recv dispatch."""
+        rc = self.cfg.recv_capacity_per_rank
+        return (
+            torch.empty(rc, HIDDEN_DIM, dtype=torch.bfloat16, device=self.cfg.device),
+            torch.empty(rc, dtype=torch.float32, device=self.cfg.device),
+        )
+
+    def test_fused_count_mode_parity(self):
+        """Under CUDA graph capture with a caller recv buffer, dispatch derives
+        tokens_per_expert / total_recv_tokens from the fused count scan instead of the
+        AllGather prepare. Zeroing the counts before replay forces the replayed graph to
+        repopulate them; the result must match the AllGather counts for the same routing."""
+        if not FUSED_COUNT:
+            self.skipTest("fused count-mode dispatch not enabled")
+        if EAGER:
+            self.skipTest("fused count mode requires non-eager static recv capacity")
+        topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+
+        # Reference counts via the AllGather prepare path.
+        ref_buf = self._make_buffer()
+        ref_tokens_per_expert = ep_prepare(ref_buf, topk_idx).clone()
+        torch.cuda.synchronize()
+        ref_total = int(ref_buf.total_recv_tokens.item())
+
+        # Fused path: capture a caller-recv dispatch, clear the counts, then replay so the
+        # replayed graph is the sole source of the counts.
+        buf = self._make_buffer()
+        rbuf_t, rbuf_w = self._caller_recv()
+        graph = self._capture(
+            lambda: ep_dispatch(
+                buf, tokens, topk_idx, w, recv_tokens=rbuf_t, recv_topk_weights=rbuf_w
+            )
+        )
+        buf.tokens_per_expert.zero_()
+        buf.total_recv_tokens.zero_()
+        graph.replay()
+        torch.cuda.synchronize()
+
+        torch.testing.assert_close(buf.tokens_per_expert, ref_tokens_per_expert, atol=0, rtol=0)
+        self.assertEqual(int(buf.total_recv_tokens.item()), ref_total)
+
+    def test_fused_count_mode_changing_routing(self):
+        """Routing may differ between graph replays. Each replay must re-derive its counts from
+        its own routing rather than reuse the captured step's values (stale-count guard)."""
+        if not FUSED_COUNT:
+            self.skipTest("fused count-mode dispatch not enabled")
+        if EAGER:
+            self.skipTest("fused count mode requires non-eager static recv capacity")
+        idx_a, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+        idx_b = _make_skewed_routing(self.cfg.rank, self.cfg.ep_size)  # skews expert/rank totals
+
+        buf = self._make_buffer()
+        topk_idx, rbuf_t, rbuf_w = idx_a.clone(), *self._caller_recv()
+        graph = self._capture(
+            lambda: ep_dispatch(
+                buf, tokens, topk_idx, w, recv_tokens=rbuf_t, recv_topk_weights=rbuf_w
+            )
+        )
+
+        ref_tpes = []
+        for routing in (idx_b, idx_a):
+            # Reference counts for this routing via the AllGather prepare path.
+            ref_buf = self._make_buffer()
+            ref_tpe = ep_prepare(ref_buf, routing).clone()
+            torch.cuda.synchronize()
+            ref_tpes.append(ref_tpe)
+
+            topk_idx.copy_(routing)
+            buf.tokens_per_expert.zero_()
+            buf.total_recv_tokens.zero_()
+            graph.replay()
+            torch.cuda.synchronize()
+
+            torch.testing.assert_close(buf.tokens_per_expert, ref_tpe, atol=0, rtol=0)
+            self.assertEqual(
+                int(buf.total_recv_tokens.item()), int(ref_buf.total_recv_tokens.item())
+            )
+
+        # Guard the guard: if the two routings happen to produce identical counts, reusing a
+        # stale copy would pass unnoticed and this test would stop detecting the bug.
+        self.assertFalse(torch.equal(ref_tpes[0], ref_tpes[1]))
+
+    @_overflow_test_include
+    def test_fused_count_mode_overflow(self):
+        """Fused count-mode dispatch under capture reports the pre-drop recv total and caps the
+        per-expert counts at recv_capacity, matching the AllGather prepare overflow semantics."""
+        if not FUSED_COUNT:
+            self.skipTest("fused count-mode dispatch not enabled")
+        if not OVERFLOW:
+            self.skipTest("overflow-only assertions")
+        if EAGER:
+            self.skipTest("fused count mode requires non-eager static recv capacity")
+        topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+        expected_recv = TOKENS_PER_RANK * TOP_K
+        self.assertGreater(expected_recv, self.cfg.recv_capacity_per_rank)
+
+        buf = self._make_buffer()
+        rbuf_t, rbuf_w = self._caller_recv()
+        graph = self._capture(
+            lambda: ep_dispatch(
+                buf, tokens, topk_idx, w, recv_tokens=rbuf_t, recv_topk_weights=rbuf_w
+            )
+        )
+        buf.tokens_per_expert.zero_()
+        buf.total_recv_tokens.zero_()
+        graph.replay()
+        torch.cuda.synchronize()
+
+        self.assertEqual(int(buf.total_recv_tokens.item()), expected_recv)
+        self.assertEqual(int(buf.tokens_per_expert.sum().item()), self.cfg.recv_capacity_per_rank)
+
+    @_mxfp8_align_test
+    def test_dispatch_mxfp8_fused_capture(self):
+        """Fused count-mode MXFP8 dispatch with a caller recv buffer. The returned GroupedTensor
+        views the caller buffer's data then scale regions; counts, payload/weights (per-expert,
+        order-tolerant), and total must match the AllGather prepare."""
+        if not FUSED_COUNT:
+            self.skipTest("fused count-mode dispatch not enabled")
+        if EAGER:
+            self.skipTest("fused count mode requires non-eager static recv capacity")
+        self._require_mxfp8_shapes()
+        from transformer_engine.pytorch.constants import MXFP8_BLOCK_SCALING_SIZE
+
+        rc = self.cfg.recv_capacity_per_rank
+        cols = HIDDEN_DIM // MXFP8_BLOCK_SCALING_SIZE
+        nbytes = rc * (HIDDEN_DIM + cols)  # fp8 data + e8m0 scales, one byte per element
+        recv_buf = torch.empty(nbytes, dtype=torch.uint8, device=self.cfg.device)
+        rbuf_w = torch.empty(rc, dtype=torch.float32, device=self.cfg.device)
+        buf = self._make_buffer(dispatch_fwd_quant_recipe=MXFP8BlockScaling(), alignment=128)
+        topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+
+        # Reference counts via the AllGather prepare path (alignment=128, no quant).
+        ref_tokens_per_expert = ep_prepare(self._make_buffer(alignment=128), topk_idx).clone()
+        torch.cuda.synchronize()
+
+        out = {}
+
+        def step():
+            out["recv_mx"], out["rw"], _tc = ep_dispatch(
+                buf, tokens, topk_idx, w, recv_tokens=recv_buf, recv_topk_weights=rbuf_w
+            )
+
+        graph = self._capture(step)
+        buf.tokens_per_expert.zero_()
+        buf.total_recv_tokens.zero_()
+        graph.replay()
+        torch.cuda.synchronize()
+
+        # The returned GroupedTensor views the caller buffer's data then scale regions, and the
+        # replayed fused scan repopulates the per-expert counts to match the AllGather path.
+        recv_mx = out["recv_mx"]
+        self.assertEqual(recv_mx.rowwise_data.data_ptr(), recv_buf.data_ptr())
+        self.assertEqual(recv_mx.scale_inv.data_ptr(), recv_buf.data_ptr() + rc * HIDDEN_DIM)
+        torch.testing.assert_close(buf.tokens_per_expert, ref_tokens_per_expert, atol=0, rtol=0)
+
+        # Replayed payload correctness: received tokens/scales, weights, and total count must
+        # come from the replay's own dispatch, not a stale copy from the captured step.
+        self._assert_mxfp8_matches_bf16(recv_mx, tokens, topk_idx, w, buf.tokens_per_expert)
+        ref_buf = self._make_buffer(alignment=128)
+        _ref_recv, ref_rw, _ref_tc = ep_dispatch(ref_buf, tokens, topk_idx, w)
+        torch.cuda.synchronize()
+        cum = [0] + buf.tokens_per_expert.cumsum(0).tolist()
+        for lo, hi in zip(cum[:-1], cum[1:]):
+            torch.testing.assert_close(
+                out["rw"][lo:hi].sort().values, ref_rw[lo:hi].sort().values, atol=0, rtol=0
+            )
+        self.assertEqual(int(buf.total_recv_tokens.item()), int(ref_buf.total_recv_tokens.item()))
 
     # PP-1F1B handle isolation
 

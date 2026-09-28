@@ -368,7 +368,6 @@ def _layernorm_linear_forward_impl(
     out_features, in_features = weight.shape
     inp_shape = inp.shape
     assert inp_shape[-1] == in_features, "GEMM not possible"
-    inp = inp.view((-1, in_features))
     inputmat = inp
     if fp8:
         assert_dim_for_fp8_exec(inputmat, weight)
@@ -635,7 +634,6 @@ def _layernorm_linear_forward_impl(
         nvtx_range_pop(f"{nvtx_label}.row_parallel_comm")
     else:
         out = gemm_out
-    out = out.view(-1, *inp_shape[1:-1], out_features)
     # ------------------------------------------------------
     # Output tensor is ready to return...
     # ------------------------------------------------------
@@ -746,14 +744,7 @@ def _layernorm_linear_forward_impl(
             "ln_out_needs_gather": ln_out_needs_gather,
         }
 
-    ln_out_for_return = None
-    if return_layernorm_output:
-        if return_layernorm_output_gathered:
-            shape = list(inp_shape)
-            shape[0] *= tp_size if with_input_all_gather else 1
-            ln_out_for_return = ln_out_return.view(shape)
-        else:
-            ln_out_for_return = ln_out_return.view(inp_shape)
+    ln_out_for_return = ln_out_return if return_layernorm_output else None
     return out, ln_out_for_return, new_weight_workspace, tensors_to_save_from_forward, ctx_attrs
 
 
@@ -884,9 +875,8 @@ def _layernorm_linear_setup_ctx(
         _,
         _,
     ) = ctx_attrs["saved_tensor_aliases"]
-    in_features = inp.shape[-1]
     if inputmat_alias == "inp":
-        saved_inputmat = inp.view((-1, in_features))
+        saved_inputmat = inp
     if wt_save_alias == "weight":
         wt_save = weight
     elif wt_save_alias == "new_weight_workspace":
@@ -900,7 +890,7 @@ def _layernorm_linear_setup_ctx(
     if ln_weight_alias == "ln_weight":
         saved_ln_weight = ln_weight
     if ln_out_alias == "ln_out":
-        saved_ln_out = fwd_outputs[1].view((-1, in_features))
+        saved_ln_out = fwd_outputs[1]
     if fwd_args.cpu_offloading:
         # Rebuilt views don't carry the offload marks set on the forward tensors
         mark_activation_offload(
@@ -932,7 +922,11 @@ def _layernorm_linear_backward_impl(
     assert grad_output is not None
     in_features = args.saved_weight.shape[-1]
     inp_leading = get_input_first_dim_size(grad_output.shape[0], args)
-    inp_shape = torch.Size([inp_leading, *grad_output.shape[1:-1], in_features])
+    inp_shape = (
+        torch.Size([in_features])
+        if grad_output.ndim == 1
+        else torch.Size([inp_leading, *grad_output.shape[1:-1], in_features])
+    )
 
     # NVTX label for profiling
     nvtx_label = "transformer_engine._LayerNormLinear.backward"
@@ -990,7 +984,7 @@ def _layernorm_linear_backward_impl(
         ub_obj_wgrad = None
         ub_type_dgrad = None
         ub_type_wgrad = None
-        dgrad_shape = [reduce(multiply_op, inp_shape[:-1]), inp_shape[-1]]
+        dgrad_shape = inp_shape
         if args.ub_overlap_ag:
             # Overlap grad_output all-gather with dgrad compute
             args.ub_obj_gradout = get_ub(args.ub_name + "_dgrad", args.fp8)
@@ -1139,7 +1133,9 @@ def _layernorm_linear_backward_impl(
                 dgrad_shape, dtype=args.activation_dtype, device=args.grad_output.device
             )
         elif args.ub_bulk_wgrad:
-            gemm_out = ub_obj_wgrad.get_buffer(local_chunk=False)
+            gemm_out = ub_obj_wgrad.get_buffer(
+                local_chunk=False, shape=(*args.grad_output.shape[:-1], dgrad_shape[-1])
+            )
 
         # dgrad GEMM
         # Note: dx = dy * w
@@ -1191,7 +1187,7 @@ def _layernorm_linear_backward_impl(
                 else reduce_scatter_out
             )
         elif args.ub_bulk_wgrad:
-            dgrad = ub_obj_wgrad.get_buffer(local_chunk=True)
+            dgrad = ub_obj_wgrad.get_buffer(local_chunk=True, shape=dgrad_shape)
         elif args.parallel_mode == "column" and args.tp_size > 1:
             nvtx_range_push(f"{nvtx_label}.column_parallel_comm_dgrad")
             dgrad = gemm_out
@@ -1402,7 +1398,7 @@ def _layernorm_linear_backward_impl(
                 if ub_obj_wgrad.is_fp8_ubuf():
                     dgrad = reduce_scatter_out
                 else:
-                    dgrad = ub_obj_wgrad.get_buffer(local_chunk=True).clone()
+                    dgrad = ub_obj_wgrad.get_buffer(local_chunk=True, shape=dgrad_shape).clone()
 
         # --------------------------------------------------
         # Grad weight has been computed...
@@ -1421,13 +1417,12 @@ def _layernorm_linear_backward_impl(
             dgrad_work = None
 
         # Residual gradient
-        dgrad = dgrad.view(inputmat.shape)
         if (
             args.return_layernorm_output
             and not args.return_layernorm_output_gathered
             and args.grad_ln_out is not None
         ):
-            dgrad = dgrad + args.grad_ln_out.view_as(dgrad)
+            dgrad = dgrad + args.grad_ln_out
 
         # Norm gradient
         dgamma = None
@@ -1443,7 +1438,6 @@ def _layernorm_linear_backward_impl(
                 args.bwd_ln_sm_margin,
                 args.zero_centered_gamma,
             )
-            dgrad = dgrad.reshape(inputmat.size())
         elif args.normalization == "RMSNorm":
             dgrad, dgamma = tex.rmsnorm_bwd(
                 dgrad,
@@ -1453,7 +1447,6 @@ def _layernorm_linear_backward_impl(
                 args.bwd_ln_sm_margin,
                 args.zero_centered_gamma,
             )
-            dgrad = dgrad.reshape(inputmat.size())
             dbeta = None
         nvtx_range_pop(f"{nvtx_label}.norm")
         clear_tensor_data(mu)
@@ -1480,7 +1473,7 @@ def _layernorm_linear_backward_impl(
         wgrad = None
 
     return (
-        dgrad.view(inp_shape) if args.requires_dgrad else None,
+        dgrad if args.requires_dgrad else None,
         dgamma,
         dbeta,
         wgrad,
@@ -1513,7 +1506,6 @@ def _layernorm_linear_forward_fake(
     device = args.inp.device
 
     out_features, in_features = args.weight.shape
-    # The impl views the input as (-1, in_features).
     rows = reduce(multiply_op, args.inp.shape[:-1], 1)
     inp_leading = args.inp.shape[0] if len(args.inp.shape) > 1 else 1
     inputmat_aliases_inp = args.inp.dtype == args.activation_dtype
@@ -1549,7 +1541,7 @@ def _layernorm_linear_forward_fake(
         with_input_all_gather and not args.return_layernorm_output_gathered and custom
     )
     ln_out_spec = TensorSpec(
-        shape=(rows, in_features),
+        shape=tuple(args.inp.shape),
         dtype=args.activation_dtype,
         quantizer=args.input_quantizer if ln_out_quantized else None,
         device=device,
@@ -1638,9 +1630,13 @@ def _layernorm_linear_forward_fake(
     requires_grad = args.is_grad_enabled and args.any_requires_grad()
     out = TensorSpec(
         shape=(
-            get_output_first_dim_size(inp_leading, args),
-            *tuple(args.inp.shape[1:-1]),
-            out_features,
+            (out_features,)
+            if len(args.inp.shape) == 1
+            else (
+                get_output_first_dim_size(inp_leading, args),
+                *tuple(args.inp.shape[1:-1]),
+                out_features,
+            )
         ),
         dtype=args.activation_dtype,
         quantizer=args.output_quantizer,
@@ -1678,7 +1674,7 @@ def _layernorm_linear_forward_fake(
         if args.backward_override == "high_precision":
             # ``ln_out_hp`` is taken before ln_out may be dropped, so it is always saved.
             ln_out_to_save = TensorSpec(
-                shape=(rows, in_features), dtype=args.activation_dtype, device=device
+                shape=tuple(args.inp.shape), dtype=args.activation_dtype, device=device
             )
             if args.return_layernorm_output and not ln_out_return_is_total:
                 ln_out_alias = "ln_out"
@@ -1732,7 +1728,7 @@ def _layernorm_linear_forward_fake(
                 None
                 if inputmat_aliases_inp
                 else TensorSpec(
-                    shape=(rows, in_features), dtype=args.activation_dtype, device=device
+                    shape=tuple(args.inp.shape), dtype=args.activation_dtype, device=device
                 )
             ),
             wt_save,
@@ -1789,7 +1785,11 @@ def _layernorm_linear_backward_fake(
     if args.requires_dgrad:
         dgrad_leading = get_input_first_dim_size(args.grad_output.shape[0], args)
         dgrad = TensorSpec(
-            shape=(dgrad_leading, *args.grad_output.shape[1:-1], in_features),
+            shape=(
+                (in_features,)
+                if len(args.grad_output.shape) == 1
+                else (dgrad_leading, *args.grad_output.shape[1:-1], in_features)
+            ),
             dtype=out_dtype,
             device=device,
         )
