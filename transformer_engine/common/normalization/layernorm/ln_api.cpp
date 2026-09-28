@@ -36,23 +36,25 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
                "MXFP8 output must have scales in compact format, not swizzled for GEMM.");
   }
 
-  NVTE_CHECK(x.data.shape.size() == 2, "x must be 2D tensor.");
+  NVTE_CHECK(!x.data.shape.empty(), "x must have at least one dimension.");
+  const auto [rows, cols] = x.flat_2d_dims();
   NVTE_CHECK(gamma.data.shape == beta.data.shape, "Gamma and Beta must have the same shape.");
   NVTE_CHECK(gamma.data.dtype == beta.data.dtype,
              "Gamma and Beta must have the same dtype. Gamma dtype: " +
                  to_string(gamma.data.dtype) + ", Beta dtype: " + to_string(beta.data.dtype));
-  NVTE_CHECK(x.data.shape[1] == gamma.data.shape[0], "Gamma must have the same hidden size.");
+  NVTE_CHECK(gamma.data.shape == Shape{cols}, "Gamma has invalid shape (expected ", Shape{cols},
+             ", got ", gamma.data.shape, ").");
 
   NVTE_CHECK(epsilon >= 0.f, "Epsilon must be non-negative.");
 
   NVTE_CHECK(z->data.shape == x.data.shape, "Output tensor must have the same shape as x.");
 
-  NVTE_CHECK(mu->data.shape == Shape{x.data.shape[0]},
-             "Mu must be 1D tensor with shape (x.shape[0],).");
+  NVTE_CHECK(mu->data.shape == Shape{rows}, "Mu has invalid shape (expected ", Shape{rows},
+             ", got ", mu->data.shape, ").");
   NVTE_CHECK(mu->data.dtype == DType::kFloat32, "Mu must be a float32 tensor.");
 
-  NVTE_CHECK(rsigma->data.shape == Shape{x.data.shape[0]},
-             "RSigma must be 1D tensor with shape (x.shape[0],).");
+  NVTE_CHECK(rsigma->data.shape == Shape{rows}, "RSigma has invalid shape (expected ", Shape{rows},
+             ", got ", rsigma->data.shape, ").");
   NVTE_CHECK(rsigma->data.dtype == DType::kFloat32, "RSigma must be a float32 tensor.");
 
   if (workspace->data.numel() != 0) {
@@ -93,8 +95,8 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
       gamma.data.dtype,  // wtype
       x.data.dtype,      // itype
       z->data.dtype,     // otype
-      x.data.shape[0],   // batch_size
-      x.data.shape[1],   // hidden_size
+      rows,              // batch_size
+      cols,              // hidden_size
       multiprocessorCount, zero_centered_gamma, is_aligned, z->scaling_mode, training,
       gamma_in_weight_dtype);
 
@@ -133,13 +135,16 @@ void layernorm_bwd(const Tensor& dz, const Tensor& x, const Tensor& mu, const Te
   NVTE_CHECK(mu.data.dtype == DType::kFloat32);
   NVTE_CHECK(rsigma.data.dtype == mu.data.dtype);
 
-  NVTE_CHECK(x.data.shape.size() == 2);
+  NVTE_CHECK(!x.data.shape.empty(), "x must have at least one dimension.");
+  const auto [rows, cols] = x.flat_2d_dims();
   NVTE_CHECK(dz.data.shape == x.data.shape);
 
-  NVTE_CHECK(mu.data.shape[0] == x.data.shape[0]);
+  NVTE_CHECK(mu.data.shape == Shape{rows}, "Mu has invalid shape (expected ", Shape{rows}, ", got ",
+             mu.data.shape, ").");
   NVTE_CHECK(mu.data.shape == rsigma.data.shape);
 
-  NVTE_CHECK(gamma.data.shape[0] == x.data.shape[1]);
+  NVTE_CHECK(gamma.data.shape == Shape{cols}, "Gamma has invalid shape (expected ", Shape{cols},
+             ", got ", gamma.data.shape, ").");
 
   NVTE_CHECK(dx->data.shape == x.data.shape);
   NVTE_CHECK(dx->data.dtype == x.data.dtype);
@@ -178,8 +183,8 @@ void layernorm_bwd(const Tensor& dz, const Tensor& x, const Tensor& mu, const Te
       gamma.data.dtype,  // wtype
       x.data.dtype,      // itype
       gamma.data.dtype,  // otype
-      x.data.shape[0],   // batch_size
-      x.data.shape[1],   // hidden_size
+      rows,              // batch_size
+      cols,              // hidden_size
       multiprocessorCount, zero_centered_gamma, is_aligned, NVTE_DELAYED_TENSOR_SCALING, true,
       gamma_in_weight_dtype);
 
