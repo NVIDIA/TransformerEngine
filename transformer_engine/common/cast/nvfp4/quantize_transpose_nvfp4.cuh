@@ -336,6 +336,77 @@ constexpr size_t TOTAL_BANKS_WIDTH = (32 * 4 * 8) / 4;  // 256
 // Number of threads (rowwise scaling) that span 32 banks (4-byte banks) of shared memory
 constexpr size_t THREADS_PER_BANK = TOTAL_BANKS_WIDTH / SCALE_DIM;  // 8 = 128 / 16
 
+template <typename IType, bool USE_STOCHASTIC_ROUNDING>
+__device__ __forceinline__ void quantize_columnwise_rht_stage(
+    IType *in_sh, const IType *rht_sh, IType *rht_result_sh, fp4e2m1x2 *out_t_data_sh,
+    nvfp4_scale_t *out_colwise_scales_sh, float S_enc_colwise, float S_dec_colwise,
+    size_t buff_offset_in, size_t buff_offset_out_t, size_t stage,
+    transformer_engine::curanddx::detail::philox4x32_native_state<NVTE_BUILD_NUM_PHILOX_ROUNDS>
+        &rng,
+    uint4 &random_uint4, int &rnd_idx) {
+  // SM120/121 have legacy warp MMA but no TMEM. The col-major A load consumes
+  // the transposed TMA input layout directly, avoiding an operand staging copy.
+  constexpr int kWarps = THREADS_NUM / THREADS_PER_WARP;
+  constexpr int kTilesX = BUFF_IN_DIM_X / SCALE_DIM;
+  constexpr int kTilesY = BUFF_DIM_Y / SCALE_DIM;
+  constexpr int kMmaTiles = kTilesX * kTilesY;
+  const int warp = threadIdx.x / THREADS_PER_WARP;
+  uint32_t b_frag[4];
+  load_matrix_b_16x16_from_shared(b_frag[0], b_frag[1], b_frag[2], b_frag[3], rht_sh, SCALE_DIM);
+
+  for (int tile = warp; tile < kMmaTiles; tile += kWarps) {
+    const int tile_y = tile / kTilesX;
+    const int tile_x = tile % kTilesX;
+    uint32_t a_frag[4];
+    uint32_t c_frag[4];
+    uint32_t unused_amax = 0;
+    IType *tile_in =
+        &in_sh[buff_offset_in + tile_y * SCALE_DIM * BUFF_IN_DIM_X + tile_x * SCALE_DIM];
+    load_matrix_16x16_from_shared<true>(a_frag[0], a_frag[1], a_frag[2], a_frag[3], tile_in,
+                                        BUFF_IN_DIM_X);
+    mma_m16_n16_k16_b16_b16_b16_noacc<false>(a_frag[0], a_frag[1], a_frag[2], a_frag[3], b_frag[0],
+                                             b_frag[1], b_frag[2], b_frag[3], c_frag[0], c_frag[1],
+                                             c_frag[2], c_frag[3], unused_amax);
+
+    // WMMA accumulator registers do not follow the packed output's row
+    // order. Store each warp's tile in shared memory, then quantize one
+    // complete transposed-output row per lane.
+    IType *warp_result = rht_result_sh + warp * SCALE_DIM * SCALE_DIM;
+    store_matrix_16x16_to_shared(c_frag[0], c_frag[1], c_frag[2], c_frag[3], warp_result);
+    __syncwarp();
+    const int lane = threadIdx.x % THREADS_PER_WARP;
+    if (lane < SCALE_DIM) {
+      const IType *row = warp_result + lane * SCALE_DIM;
+      float row_amax = 0.0f;
+#pragma unroll
+      for (int i = 0; i < SCALE_DIM; ++i) {
+        row_amax = fmaxf(row_amax, fabsf(static_cast<float>(row[i])));
+      }
+      const nvfp4_scale_t scale = compute_decoding_scaling_factor(row_amax, S_enc_colwise);
+      const float scale_inverse = fminf(1.0f / (static_cast<float>(scale) * S_dec_colwise),
+                                        detail::TypeExtrema<float>::max);
+      const float2 scale_inverse_2x{scale_inverse, scale_inverse};
+      const int output_row = tile_x * SCALE_DIM + lane;
+      uint8_t *output_bytes = reinterpret_cast<uint8_t *>(out_t_data_sh) + buff_offset_out_t +
+                              output_row * BUFF_OUT_T_DIM_X + tile_y * (SCALE_DIM / 2);
+#pragma unroll
+      for (int i = 0; i < SCALE_DIM; i += 4) {
+        const uint64_t values = *reinterpret_cast<const uint64_t *>(row + i);
+        const uint32_t rbits = get_rbits(rng, random_uint4, rnd_idx);
+        const fp4e2m1x4 packed =
+            ptx::mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(values, scale_inverse_2x, rbits);
+        const uint16_t packed_bits = *reinterpret_cast<const uint16_t *>(&packed);
+        output_bytes[i / 2] = static_cast<uint8_t>(packed_bits);
+        output_bytes[i / 2 + 1] = static_cast<uint8_t>(packed_bits >> 8);
+      }
+      const size_t scale_idx =
+          output_row * SCALES_PER_CHUNK_Y + stage * ITERATIONS_TRANSPOSE + tile_y;
+      out_colwise_scales_sh[scale_idx] = scale;
+    }
+    __syncwarp();
+  }
+}
+
 template <bool COMPUTE_ACTIVATIONS, typename ParamOP, float (*OP)(float, const ParamOP &),
           typename IType, bool USE_STOCHASTIC_ROUNDING, bool RETURN_TRANSPOSE,
           bool ROW_SCALED_NVFP4, bool RETURN_ROWWISE = true, bool APPLY_COLUMNWISE_RHT = false>
@@ -520,70 +591,9 @@ __global__ void __launch_bounds__(THREADS_NUM)
     ptx::mbarrier_wait_parity(&mbar[stage], 0);
     if constexpr (APPLY_COLUMNWISE_RHT) {
       ptx::mbarrier_wait_parity(&mbar_rht[0], 0);
-
-      // SM120/121 have legacy warp MMA but no TMEM. Form sixteen 16x16 tiles from
-      // the TMA input stage and compute A @ H in registers. The col-major A load
-      // consumes the transposed TMA layout directly, avoiding an operand staging copy.
-      constexpr int kWarps = THREADS_NUM / THREADS_PER_WARP;
-      constexpr int kTilesX = BUFF_IN_DIM_X / SCALE_DIM;
-      constexpr int kTilesY = BUFF_DIM_Y / SCALE_DIM;
-      constexpr int kMmaTiles = kTilesX * kTilesY;
-      const int warp = threadIdx.x / THREADS_PER_WARP;
-      uint32_t b_frag[4];
-      load_matrix_b_16x16_from_shared(b_frag[0], b_frag[1], b_frag[2], b_frag[3], rht_sh,
-                                      SCALE_DIM);
-
-      for (int tile = warp; tile < kMmaTiles; tile += kWarps) {
-        const int tile_y = tile / kTilesX;
-        const int tile_x = tile % kTilesX;
-        uint32_t a_frag[4];
-        uint32_t c_frag[4];
-        uint32_t unused_amax = 0;
-        IType *tile_in =
-            &in_sh[buff_offset_in + tile_y * SCALE_DIM * BUFF_IN_DIM_X + tile_x * SCALE_DIM];
-        load_matrix_16x16_from_shared<true>(a_frag[0], a_frag[1], a_frag[2], a_frag[3], tile_in,
-                                            BUFF_IN_DIM_X);
-        mma_m16_n16_k16_b16_b16_b16_noacc<false>(
-            a_frag[0], a_frag[1], a_frag[2], a_frag[3], b_frag[0], b_frag[1], b_frag[2], b_frag[3],
-            c_frag[0], c_frag[1], c_frag[2], c_frag[3], unused_amax);
-
-        // WMMA accumulator registers do not follow the packed output's row
-        // order. Store each warp's tile in shared memory, then quantize one
-        // complete transposed-output row per lane.
-        IType *warp_result = rht_result_sh + warp * SCALE_DIM * SCALE_DIM;
-        store_matrix_16x16_to_shared(c_frag[0], c_frag[1], c_frag[2], c_frag[3], warp_result);
-        __syncwarp();
-        const int lane = threadIdx.x % THREADS_PER_WARP;
-        if (lane < SCALE_DIM) {
-          const IType *row = warp_result + lane * SCALE_DIM;
-          float row_amax = 0.0f;
-#pragma unroll
-          for (int i = 0; i < SCALE_DIM; ++i) {
-            row_amax = fmaxf(row_amax, fabsf(static_cast<float>(row[i])));
-          }
-          const nvfp4_scale_t scale = compute_decoding_scaling_factor(row_amax, S_enc_colwise);
-          const float scale_inverse = fminf(1.0f / (static_cast<float>(scale) * S_dec_colwise),
-                                            detail::TypeExtrema<float>::max);
-          const float2 scale_inverse_2x{scale_inverse, scale_inverse};
-          const int output_row = tile_x * SCALE_DIM + lane;
-          uint8_t *output_bytes = reinterpret_cast<uint8_t *>(out_t_data_sh) + buff_offset_out_t +
-                                  output_row * BUFF_OUT_T_DIM_X + tile_y * (SCALE_DIM / 2);
-#pragma unroll
-          for (int i = 0; i < SCALE_DIM; i += 4) {
-            const uint64_t values = *reinterpret_cast<const uint64_t *>(row + i);
-            const uint32_t rbits = get_rbits(rng, random_uint4, rnd_idx);
-            const fp4e2m1x4 packed = ptx::mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
-                values, scale_inverse_2x, rbits);
-            const uint16_t packed_bits = *reinterpret_cast<const uint16_t *>(&packed);
-            output_bytes[i / 2] = static_cast<uint8_t>(packed_bits);
-            output_bytes[i / 2 + 1] = static_cast<uint8_t>(packed_bits >> 8);
-          }
-          const size_t scale_idx =
-              output_row * SCALES_PER_CHUNK_Y + stage * ITERATIONS_TRANSPOSE + tile_y;
-          out_colwise_scales_sh[scale_idx] = scale;
-        }
-        __syncwarp();
-      }
+      quantize_columnwise_rht_stage<IType, USE_STOCHASTIC_ROUNDING>(
+          in_sh, rht_sh, rht_result_sh, out_t_data_sh, out_colwise_scales_sh, S_enc_colwise,
+          S_dec_colwise, buff_offset_in, buff_offset_out_t, stage, rng, random_uint4, rnd_idx);
     }
 
     float block_amax = 0.0f;
