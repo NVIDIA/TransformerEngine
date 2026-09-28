@@ -594,6 +594,9 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.single_grouped_weight = single_grouped_weight
             ctx.single_grouped_bias = single_grouped_bias
             ctx.is_dist_weight = is_dist_weight
+            # Same reason as in ``forward``: saved-tensor hooks unpack the saved
+            # DistributedWeight shards as plain tensors, so keep the originals on ctx.
+            ctx.dist_weights = list(origin_weights) if is_dist_weight else None
             ctx.fp8_for_weight_prep = fp8
             if fuse_wgrad_accumulation and ctx.weights_requires_grad:
                 # Weakref the parameters, not the gathered copies: those can be dead by backward.
@@ -1095,7 +1098,12 @@ class _GroupedLinear(torch.autograd.Function):
         main_grads = [None] * num_weight_args
         is_dist_weight = getattr(ctx, "is_dist_weight", False)
         if is_dist_weight:
-            # Forward saved the shards, not the gathered copies.
+            # Forward saved the shards, not the gathered copies. Prefer the originals kept
+            # on ctx: saved-tensor hooks may have unpacked the shards as plain tensors.
+            dist_weights = getattr(ctx, "dist_weights", None)
+            if dist_weights is not None:
+                weight_tensors = dist_weights
+                ctx.dist_weights = None
             origin_weights = list(weight_tensors)
             if ctx.fuse_wgrad_accumulation and ctx.weights_requires_grad:
                 main_grads = [main_grad_func() for main_grad_func in ctx.main_grad_funcs]

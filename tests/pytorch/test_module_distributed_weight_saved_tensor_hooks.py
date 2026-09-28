@@ -188,8 +188,13 @@ def test_linear_distributed_weight_under_saved_tensor_hooks(fuse_wgrad):
 
 @FUSE_WGRAD
 @pytest.mark.parametrize("num_gemms", [2, 4])
-def test_grouped_linear_distributed_weight_under_saved_tensor_hooks(num_gemms, fuse_wgrad):
-    """``GroupedLinear`` (split-quantize path) must keep the distributed path under hooks."""
+@pytest.mark.parametrize(
+    "use_grouped_tensor", [False, True], ids=["split-quantize", "grouped-tensor"]
+)
+def test_grouped_linear_distributed_weight_under_saved_tensor_hooks(
+    num_gemms, fuse_wgrad, use_grouped_tensor
+):
+    """``GroupedLinear`` (both GEMM paths) must keep the distributed path under hooks."""
     _skip_without_cuda()
     torch.manual_seed(0)
     names = [f"weight{i}" for i in range(num_gemms)]
@@ -202,7 +207,7 @@ def test_grouped_linear_distributed_weight_under_saved_tensor_hooks(num_gemms, f
             device=DEVICE,
             params_dtype=DTYPE,
             fuse_wgrad_accumulation=fuse_wgrad,
-            use_grouped_tensor=False,
+            use_grouped_tensor=use_grouped_tensor,
         )
         for _ in range(2)
     )
