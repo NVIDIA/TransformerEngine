@@ -1969,15 +1969,16 @@ def test_te_modules_compile(module, fp8_recipe, compile_mode):
 
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
 @pytest.mark.parametrize("compile_mode", _compile_modes)
+@pytest.mark.parametrize("module", _LINEAR_MODULES)
 @pytest.mark.parametrize(
     "input_shape",
     [(64,), (2, 4, 4, 64)],
     ids=["rank1", "rank4"],
 )
-def test_te_linear_compiles_non_2d_input(input_shape, compile_mode):
-    """Compiled Linear preserves non-matrix activation shapes in forward and backward."""
+def test_te_modules_compile_non_2d_input(input_shape, module, compile_mode):
+    """Compiled modules preserve non-matrix activation shapes and gradients."""
     dtype = torch.bfloat16
-    model = te.Linear(64, 32, params_dtype=dtype, device="cuda")
+    model = _make_linear_module(module, dtype=dtype)
 
     def fn(inp):
         return model(inp)
