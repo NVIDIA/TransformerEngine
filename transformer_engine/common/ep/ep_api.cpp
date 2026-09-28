@@ -84,6 +84,21 @@ void nvte_ep_dispatch(NVTETensor handle_mem, NVTETensor topk_idx, NVTETensor tok
                             recv_topk_weights_win, stream);
 }
 
+void nvte_ep_prepare_and_dispatch(NVTETensor handle_mem, NVTETensor topk_idx, NVTETensor tokens,
+                                  NVTECommWindow tokens_win, NVTETensor topk_weights,
+                                  NVTECommWindow topk_weights_win, NVTETensor recv_tokens,
+                                  NVTECommWindow recv_tokens_win, NVTETensor recv_topk_weights,
+                                  NVTECommWindow recv_topk_weights_win,
+                                  NVTETensor recv_tokens_per_expert,
+                                  NVTETensor total_recv_tokens_per_rank,
+                                  const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream) {
+  NVTEEpLayerConfig cfg = normalize_ep_config(layer_cfg, kLayerConfigMinSize, "layer_cfg");
+  EPBackend::get().prepare_and_dispatch(
+      handle_mem, topk_idx, tokens, tokens_win, topk_weights, topk_weights_win, recv_tokens,
+      recv_tokens_win, recv_topk_weights, recv_topk_weights_win, recv_tokens_per_expert,
+      total_recv_tokens_per_rank, cfg, stream);
+}
+
 void nvte_ep_combine(NVTETensor handle_mem, NVTETensor expert_out, NVTECommWindow expert_out_win,
                      NVTETensor result, cudaStream_t stream) {
   EPBackend::get().combine(handle_mem, expert_out, expert_out_win, result, stream);
@@ -134,6 +149,18 @@ void nvte_ep_dispatch(NVTETensor /*handle_mem*/, NVTETensor /*topk_idx*/, NVTETe
                       NVTECommWindow /*topk_weights_win*/, NVTETensor /*recv_tokens*/,
                       NVTECommWindow /*recv_tokens_win*/, NVTETensor /*recv_topk_weights*/,
                       NVTECommWindow /*recv_topk_weights_win*/, cudaStream_t /*stream*/) {
+  ep_not_built();
+}
+
+void nvte_ep_prepare_and_dispatch(NVTETensor /*handle_mem*/, NVTETensor /*topk_idx*/,
+                                  NVTETensor /*tokens*/, NVTECommWindow /*tokens_win*/,
+                                  NVTETensor /*topk_weights*/, NVTECommWindow /*topk_weights_win*/,
+                                  NVTETensor /*recv_tokens*/, NVTECommWindow /*recv_tokens_win*/,
+                                  NVTETensor /*recv_topk_weights*/,
+                                  NVTECommWindow /*recv_topk_weights_win*/,
+                                  NVTETensor /*recv_tokens_per_expert*/,
+                                  NVTETensor /*total_recv_tokens_per_rank*/,
+                                  const NVTEEpLayerConfig* /*layer_cfg*/, cudaStream_t /*stream*/) {
   ep_not_built();
 }
 
