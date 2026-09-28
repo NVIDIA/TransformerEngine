@@ -1,0 +1,35 @@
+ARG BASE_IMAGE
+ARG FRAMEWORK=pytorch
+
+FROM ${BASE_IMAGE}
+ARG FRAMEWORK
+
+SHELL ["bash", "-c"]
+
+COPY .git/ /opt/transformerengine/.git/
+COPY .gitignore /opt/transformerengine/
+COPY .gitlab-ci.yml docker-build.sh Dockerfile.base Dockerfile.devel Dockerfile.qa README-ci.md /opt/transformerengine/
+COPY te_ci_artifacts/ /opt/transformerengine/artifacts/
+
+# Avoid "Problem with the SSL CA cert" from git commands in the container
+RUN set -x \
+ && cd /opt/transformerengine \
+ && GIT_URL="$(git config --get remote.origin.url)" \
+ && NO_PROT="${GIT_URL#*://}" \
+ && NO_USER="${NO_PROT#*@}" \
+ && SERVER_NAME="${NO_USER/\/*}" \
+ && git config --local --unset http.https://${SERVER_NAME}.sslcainfo
+
+# Strip out the CI Token from the git remote; it will be invalid after this build's job is done anyway
+RUN set -x \
+ && cd /opt/transformerengine \
+ && GIT_URL="$(git config --get remote.origin.url)" \
+ && NO_PROT="${GIT_URL#*://}" \
+ && NO_USER="${NO_PROT#*@}" \
+ && git remote set-url origin "https://${NO_USER}"
+
+# Export pipeline and build IDs
+ARG NVIDIA_PIPELINE_ID=unknown
+ARG NVIDIA_BUILD_ID=unknown
+ENV NVIDIA_PIPELINE_ID=${NVIDIA_PIPELINE_ID}
+ENV NVIDIA_BUILD_ID=${NVIDIA_BUILD_ID}
