@@ -172,7 +172,7 @@ def bgrad_dgelu_fused_(
         1 + tanh_out
     )
     dgelu = ff * grad_output
-    bgrad = dgelu.sum(dim=0)
+    bgrad = dgelu.clone() if dgelu.dim() == 1 else dgelu.sum(dim=list(range(dgelu.dim() - 1)))
     return bgrad, dgelu
 
 
