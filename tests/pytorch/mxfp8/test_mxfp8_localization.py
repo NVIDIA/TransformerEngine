@@ -494,14 +494,20 @@ def _run_localized_performance_comparison(
     )
     localized = te.localize_mxfp8_tensor(tensor, quantizer)
 
-    # Control: use the same two half-sized green-stream launches as the
-    # localized path, but keep input, output, and scales in ordinary allocations.
-    # Comparing this with localized_ms isolates memory placement from launch
-    # geometry and SM partitioning.
+    # Controls separate split-launch geometry, green-context SM partitioning,
+    # and VMM memory placement.
     rows_per_domain = shape[0] // 2
-    green_unlocalized_inputs = (
+    unlocalized_inputs = (
         tensor[:rows_per_domain],
         tensor[rows_per_domain:],
+    )
+    split_unlocalized_outputs = tuple(
+        quantizer.make_empty(
+            (rows_per_domain, shape[1]),
+            dtype=tensor.dtype,
+            device=tensor.device,
+        )
+        for _ in range(2)
     )
     green_unlocalized_outputs = tuple(
         quantizer.make_empty(
@@ -511,18 +517,41 @@ def _run_localized_performance_comparison(
         )
         for _ in range(2)
     )
+    ordinary_streams = tuple(torch.cuda.Stream(device=tensor.device) for _ in range(2))
+    split_fork = torch.cuda.Event(enable_timing=False)
+    split_joins = (
+        torch.cuda.Event(enable_timing=False),
+        torch.cuda.Event(enable_timing=False),
+    )
     green_fork = torch.cuda.Event(enable_timing=False)
     green_joins = (
         torch.cuda.Event(enable_timing=False),
         torch.cuda.Event(enable_timing=False),
     )
 
+    def split_unlocalized_quantize() -> None:
+        parent_stream = torch.cuda.current_stream(tensor.device)
+        split_fork.record(parent_stream)
+        for domain, (input_half, output_half, stream) in enumerate(
+            zip(
+                unlocalized_inputs,
+                split_unlocalized_outputs,
+                ordinary_streams,
+            )
+        ):
+            stream.wait_event(split_fork)
+            with torch.cuda.stream(stream):
+                quantizer.update_quantized(input_half, output_half)
+            split_joins[domain].record(stream)
+        for event in split_joins:
+            parent_stream.wait_event(event)
+
     def green_unlocalized_quantize() -> None:
         parent_stream = torch.cuda.current_stream(tensor.device)
         green_fork.record(parent_stream)
         for domain, (input_half, output_half, stream) in enumerate(
             zip(
-                green_unlocalized_inputs,
+                unlocalized_inputs,
                 green_unlocalized_outputs,
                 localized.streams,
             )
@@ -540,27 +569,34 @@ def _run_localized_performance_comparison(
     use_cuda_graph = os.getenv("MXFP8_LOCALIZATION_USE_CUDA_GRAPH") == "1"
     if use_cuda_graph:
         baseline_function = _capture_cuda_graph(baseline_quantize).replay
+        split_unlocalized_function = _capture_cuda_graph(split_unlocalized_quantize).replay
         green_unlocalized_function = _capture_cuda_graph(green_unlocalized_quantize).replay
         localized_function = _capture_cuda_graph(localized.quantize).replay
     else:
         baseline_function = baseline_quantize
+        split_unlocalized_function = split_unlocalized_quantize
         green_unlocalized_function = green_unlocalized_quantize
         localized_function = localized.quantize
 
     baseline_ms = _benchmark_ms(baseline_function)
+    split_unlocalized_ms = _benchmark_ms(split_unlocalized_function)
     green_unlocalized_ms = _benchmark_ms(green_unlocalized_function)
     localized_ms = _benchmark_ms(localized_function)
 
     assert baseline_ms > 0.0
+    assert split_unlocalized_ms > 0.0
     assert green_unlocalized_ms > 0.0
     assert localized_ms > 0.0
     execution = "CUDA Graph" if use_cuda_graph else "eager"
     print(
         f"\nMXFP8 {mode} localization {shape} ({execution}):"
         f"\n  full-chip single launch:       {baseline_ms:.3f} ms"
+        f"\n  split ordinary streams/memory: {split_unlocalized_ms:.3f} ms"
         f"\n  two green, ordinary memory:    {green_unlocalized_ms:.3f} ms"
         f"\n  two green, localized memory:   {localized_ms:.3f} ms"
-        f"\n  launch/partition contribution: {baseline_ms / green_unlocalized_ms:.3f}x"
+        f"\n  split-launch contribution:     {baseline_ms / split_unlocalized_ms:.3f}x"
+        "\n  green-context contribution:    "
+        f"{split_unlocalized_ms / green_unlocalized_ms:.3f}x"
         f"\n  memory-locality contribution:  {green_unlocalized_ms / localized_ms:.3f}x"
         f"\n  overall speedup:               {baseline_ms / localized_ms:.3f}x"
     )
