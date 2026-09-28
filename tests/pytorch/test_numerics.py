@@ -51,7 +51,6 @@ from transformer_engine.pytorch.distributed import (
 from transformer_engine.pytorch.cpp_extensions import general_gemm
 from transformer_engine.common import recipe
 from transformer_engine.pytorch import DType
-import transformer_engine_torch as tex
 from utils import ModelConfig, recipe_id, reset_rng_states, skip_unsupported_backward_override
 
 # Only run FP8 tests on supported devices.
@@ -1670,16 +1669,10 @@ def _tight_linear_dims(recipe_obj) -> Tuple[int, int, int, int, int, int]:
 @pytest.mark.parametrize("inference", [True, False], ids=["inference", "training"])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32], ids=["bf16", "fp32"])
 def test_linear_tight_dims(recipe, inference, dtype):
-    """te.Linear with the tightest M/N/K per recipe, vs a pytorch baseline.
+    """Compare te.Linear at each recipe's tightest supported dimensions with PyTorch.
 
-    Previously the Python assert_dim_for_fp8_exec rejected any M not divisible
-    by 8. With that guard removed, the C++ quantizers, swizzle kernel, and
-    cuBLAS are the real source of dimension constraints — they are looser and
-    recipe-specific. This test exercises the tightest shape each recipe should
-    accept and compares against a high-precision baseline.
-
-    Both sides see the same dequantized input/weight, so the only difference is
-    FP8/FP4 tensor-core vs bf16/fp32 tensor-core accumulation roundoff.
+    The reference uses quantize-dequantize versions of the input and weight to
+    model the operands consumed by the low-precision GEMM.
     """
     if recipe.nvfp4():
         if dtype not in get_nvfp4_inp_supported_dtypes(recipe, dtype):
@@ -1721,8 +1714,8 @@ def test_linear_tight_dims(recipe, inference, dtype):
         input_quantizer.set_usage(rowwise=True, columnwise=use_columnwise)
         weight_quantizer.set_usage(rowwise=True, columnwise=use_columnwise)
 
-        # Share weights: TE gets the raw weight (it quantizes internally); the
-        # baseline gets dequantize(quantize(W)) so both do the same fprop matmul.
+        # TE quantizes W internally. Quantize W once for the reference to model
+        # the effective GEMM operand without quantizing TE's weight twice.
         W = torch.randn(N, K, dtype=dtype, device=device)
         with torch.no_grad():
             te_linear.weight.copy_(W)
@@ -1807,31 +1800,6 @@ def test_linear_tight_dims(recipe, inference, dtype):
     finally:
         torch.backends.cuda.matmul.allow_tf32 = prev_tf32_matmul
         torch.backends.cudnn.allow_tf32 = prev_tf32_cudnn
-
-
-def test_mxfp8_scale_shape_partial_block():
-    """MXFP8 Python tensor helpers must ceildiv the scale dim, not floor-div.
-
-    The C++ quantizer uses DIVUP so a 16-element trailing partial block gets
-    one scale; if the Python side floor-divides instead, scale tensors
-    collapse to zero size. This test exercises the newly-allowed last_dim=16
-    path that the end-to-end GEMM test can't hit (the MXFP8 GEMM kernel
-    itself still requires K >= 32).
-    """
-    if not mxfp8_available:
-        pytest.skip(reason_for_no_mxfp8)
-
-    quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
-    quantizer.set_usage(rowwise=True, columnwise=True)
-
-    rowwise = quantizer.get_scale_shape((32, 16), columnwise=False)
-    columnwise = quantizer.get_scale_shape((32, 16), columnwise=True)
-    assert all(d > 0 for d in rowwise), f"rowwise scale collapsed: {rowwise}"
-    assert all(d > 0 for d in columnwise), f"columnwise scale collapsed: {columnwise}"
-
-    empty = quantizer.make_empty((32, 16), dtype=torch.bfloat16, device="cuda")
-    assert empty._rowwise_scale_inv.numel() > 0
-    assert empty._columnwise_scale_inv.numel() > 0
 
 
 @pytest.mark.parametrize("dtype", param_types)

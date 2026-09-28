@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Tensor class with NVFP4 data"""
+
 from __future__ import annotations
 from collections.abc import Iterable
 import math
@@ -17,6 +18,7 @@ from transformer_engine.common.recipe import NVFP4BlockScaling, Recipe
 from ..constants import NVFP4_BLOCK_SCALING_SIZE, dist_group_type, DType
 from ..utils import (
     canonicalize_process_group,
+    ceil_div,
     devices_match,
     round_up_to_nearest_multiple,
 )
@@ -304,11 +306,11 @@ class NVFP4Quantizer(Quantizer):
 
         if columnwise:
             outer = round_up_to_nearest_multiple(K, 128)
-            inner = round_up_to_nearest_multiple(math.ceil(M / NVFP4_BLOCK_SCALING_SIZE), 4)
+            inner = round_up_to_nearest_multiple(ceil_div(M, NVFP4_BLOCK_SCALING_SIZE), 4)
             return (outer, inner)
         # rowwise
         outer = round_up_to_nearest_multiple(M, 128)
-        inner = round_up_to_nearest_multiple(math.ceil(K / NVFP4_BLOCK_SCALING_SIZE), 4)
+        inner = round_up_to_nearest_multiple(ceil_div(K, NVFP4_BLOCK_SCALING_SIZE), 4)
         return (outer, inner)
 
     @staticmethod
@@ -341,6 +343,8 @@ class NVFP4Quantizer(Quantizer):
     def convert_shape_for_fp4(shape: Iterable[int]) -> Tuple[int, ...]:
         """Convert shape for FP4 data by dividing the last dimension by 2"""
         shape = list(shape)
+        if shape[-1] % 2 != 0:
+            raise ValueError(f"FP4 packing requires an even last dimension, got shape {shape}")
         shape[-1] = shape[-1] // 2
         return tuple(shape)
 

@@ -96,6 +96,8 @@ std::vector<T> stride_from_shape(const std::vector<T>& shape) {
 /*! @brief Convert shape for FP4 data by dividing the last dimension by 2 */
 template <typename T = size_t>
 std::vector<T> convert_shape_for_fp4(const std::vector<T>& shape) {
+  NVTE_CHECK(shape.back() % 2 == 0, "FP4 packing requires an even last dimension, got shape ",
+             shape);
   std::vector<T> ret;
   for (size_t i = 0; i < shape.size() - 1; ++i) {
     ret.push_back(shape[i]);

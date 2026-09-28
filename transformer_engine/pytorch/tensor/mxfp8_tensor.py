@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Tensor class with MXFP8 data"""
+
 from __future__ import annotations
 from collections.abc import Iterable
 import math
@@ -15,7 +16,7 @@ import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import MXFP8BlockScaling, Recipe
 from ..constants import MXFP8_BLOCK_SCALING_SIZE, DType
-from ..utils import devices_match, round_up_to_nearest_multiple
+from ..utils import ceil_div, devices_match, round_up_to_nearest_multiple
 from .storage.mxfp8_tensor_storage import MXFP8TensorStorage, _FromMXFP8Func
 from ..quantized_tensor import QuantizedTensor, Quantizer
 from ..dynamo import register_value_opaque_quantizer
@@ -174,7 +175,7 @@ class MXFP8Quantizer(Quantizer):
             # with padding to multiples of [4, 128]
             return (
                 round_up_to_nearest_multiple(
-                    math.ceil(math.prod(shape[:-1]) / MXFP8_BLOCK_SCALING_SIZE), 4
+                    ceil_div(math.prod(shape[:-1]), MXFP8_BLOCK_SCALING_SIZE), 4
                 ),
                 round_up_to_nearest_multiple(shape[-1], 128),
             )
@@ -182,7 +183,7 @@ class MXFP8Quantizer(Quantizer):
         # with padding to multiples of [128, 4]
         return (
             round_up_to_nearest_multiple(math.prod(shape[:-1]), 128),
-            round_up_to_nearest_multiple(math.ceil(shape[-1] / MXFP8_BLOCK_SCALING_SIZE), 4),
+            round_up_to_nearest_multiple(ceil_div(shape[-1], MXFP8_BLOCK_SCALING_SIZE), 4),
         )
 
     def get_columnwise_shape(self, rowwise_data_shape: Tuple[int, ...]) -> Tuple[int, ...]:
@@ -564,10 +565,10 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                 return super().__torch_dispatch__(func, types, args, kwargs)
             rowwise_scale_inv_shape = [
                 first_dim,
-                math.ceil(last_dim / MXFP8_BLOCK_SCALING_SIZE),
+                ceil_div(last_dim, MXFP8_BLOCK_SCALING_SIZE),
             ]
             columnwise_scale_inv_shape = [
-                math.ceil(first_dim / MXFP8_BLOCK_SCALING_SIZE),
+                ceil_div(first_dim, MXFP8_BLOCK_SCALING_SIZE),
                 last_dim,
             ]
             if tensor._rowwise_data is not None:

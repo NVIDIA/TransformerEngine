@@ -638,10 +638,9 @@ class Quantizer(abc.ABC):
 
         When False, the distributed all-gather falls back to gathering
         in high precision and quantizing afterward. This is needed when
-        the local shard's shape would cause scaling factor blocks to
-        span across GPU boundaries.
+        the quantizer does not support gathering its packed data directly.
         """
-        return True
+        return False
 
     def get_usages(self) -> Dict[str, bool]:
         """Get the usage of the quantizer"""
