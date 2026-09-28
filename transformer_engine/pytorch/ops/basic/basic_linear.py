@@ -8,6 +8,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 import contextlib
 import math
+import os
 from typing import Any, Optional
 
 import torch
@@ -1061,6 +1062,16 @@ class BasicLinear(BasicOperation):
             ctx.input_requires_grad = input_requires_grad
             ctx.weight_requires_grad = weight_requires_grad
 
+        # If FC2 does not retain its activation for wgrad (inference or frozen
+        # weight), its forward GEMM is the final consumer of the VMM workspace.
+        if (
+            os.getenv("NVTE_NVFP4_VMM_LOCALIZATION", "0") == "1"
+            and (not ctx.requires_grad or x_local is None)
+        ):
+            from ...tensor.localized_nvfp4 import release_nvfp4_vmm_tensor_workspaces
+
+            release_nvfp4_vmm_tensor_workspaces(input_)
+
         return output
 
     def op_backward(
@@ -1104,6 +1115,14 @@ class BasicLinear(BasicOperation):
             grad_output_quantizer=ctx.grad_output_quantizer,
             grad_input_quantizer=ctx.grad_input_quantizer,
         )
+
+        # FC2 consumes the pooled forward SwiGLU quantization here, while FC1
+        # consumes the pooled dSwiGLU quantization as grad_output. Their VMM
+        # producer/amax workspaces are dead after these GEMMs are enqueued.
+        if os.getenv("NVTE_NVFP4_VMM_LOCALIZATION", "0") == "1":
+            from ...tensor.localized_nvfp4 import release_nvfp4_vmm_tensor_workspaces
+
+            release_nvfp4_vmm_tensor_workspaces(x_local, grad_output)
 
         # Clear input tensor if possible
         clear_tensor_data(x_local)

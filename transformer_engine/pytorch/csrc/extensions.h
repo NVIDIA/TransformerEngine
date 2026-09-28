@@ -395,6 +395,15 @@ py::object nvfp4_quantize_with_amax(const at::Tensor &tensor, py::handle quantiz
                                     const at::Tensor &rowwise_amax,
                                     const at::Tensor &columnwise_amax);
 
+void nvfp4_compute_amax(const at::Tensor &tensor, py::handle quantizer,
+                        const at::Tensor &rowwise_amax,
+                        const at::Tensor &columnwise_amax);
+
+py::object nvfp4_quantize_with_amax_out(const at::Tensor &tensor, py::handle quantizer,
+                                        const at::Tensor &rowwise_amax,
+                                        const at::Tensor &columnwise_amax,
+                                        const py::object &output);
+
 py::object dequantize(const py::handle &input, DType otype);
 
 py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const size_t num_tensors,

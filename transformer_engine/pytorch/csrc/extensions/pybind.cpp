@@ -180,6 +180,11 @@ void init_router_bindings(pybind11::module &m) {
 void bind_quantize_with_amax_extensions(py::module_ &m) {
   m.def("nvfp4_quantize_with_amax", nvfp4_quantize_with_amax, py::arg("tensor"),
         py::arg("quantizer"), py::arg("rowwise_amax"), py::arg("columnwise_amax"));
+  m.def("nvfp4_compute_amax", nvfp4_compute_amax, py::arg("tensor"),
+        py::arg("quantizer"), py::arg("rowwise_amax"), py::arg("columnwise_amax"));
+  m.def("nvfp4_quantize_with_amax_out", nvfp4_quantize_with_amax_out,
+        py::arg("tensor"), py::arg("quantizer"), py::arg("rowwise_amax"),
+        py::arg("columnwise_amax"), py::arg("output"));
   m.def("nvfp4_group_quantize_with_amax", nvfp4_group_quantize_with_amax, py::arg("tensor"),
         py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"),
         py::arg("last_dims") = py::none(), py::arg("rowwise_amax"), py::arg("columnwise_amax"),

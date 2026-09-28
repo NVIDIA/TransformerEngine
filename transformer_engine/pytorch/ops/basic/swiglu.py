@@ -138,8 +138,31 @@ class SwiGLU(BasicOperation):
             swiglu_in = swiglu_in.transpose(1, 2).contiguous()
             swiglu_in = swiglu_in.view(shape)
 
-        # Launch kernel
-        out = self._tex_swiglu_forward(swiglu_in, next_op_input_quantizer)
+        # Launch kernel. The NVFP4 VMM path keeps the BF16 producer and the
+        # post-RHT quantization in the same locality domain.
+        out_cols = swiglu_in.shape[-1] // 2
+        from ...tensor.localized_nvfp4 import (
+            acquire_nvfp4_vmm_workspace,
+            is_nvfp4_vmm_localization_eligible,
+        )
+
+        if (
+            self.glu_interleave_size is None
+            and is_nvfp4_vmm_localization_eligible(
+                swiglu_in,
+                next_op_input_quantizer,
+                out_cols,
+            )
+        ):
+            workspace = acquire_nvfp4_vmm_workspace(
+                (swiglu_in.shape[0], out_cols),
+                dtype=swiglu_in.dtype,
+                device=swiglu_in.device,
+                quantizer=next_op_input_quantizer,
+            )
+            out = workspace.swiglu(swiglu_in)
+        else:
+            out = self._tex_swiglu_forward(swiglu_in, next_op_input_quantizer)
 
         # Quantize input to FP8 before caching if needed
         if self.cache_quantized_input:
@@ -192,7 +215,25 @@ class SwiGLU(BasicOperation):
             quantizer = None
 
         # Launch kernel
-        grad_swiglu_in = self._tex_swiglu_backward(dy, swiglu_in, quantizer)
+        from ...tensor.localized_nvfp4 import (
+            acquire_nvfp4_vmm_workspace,
+            is_nvfp4_vmm_localization_eligible,
+        )
+
+        if is_nvfp4_vmm_localization_eligible(
+            swiglu_in,
+            quantizer,
+            swiglu_in.shape[-1],
+        ):
+            workspace = acquire_nvfp4_vmm_workspace(
+                (swiglu_in.shape[0], swiglu_in.shape[-1]),
+                dtype=swiglu_in.dtype,
+                device=swiglu_in.device,
+                quantizer=quantizer,
+            )
+            grad_swiglu_in = workspace.dswiglu(dy, swiglu_in)
+        else:
+            grad_swiglu_in = self._tex_swiglu_backward(dy, swiglu_in, quantizer)
 
         # Apply interleaving if needed
         dx = grad_swiglu_in

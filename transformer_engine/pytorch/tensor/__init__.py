@@ -31,6 +31,7 @@ from .localized_mxfp8 import (
 )
 from .float8_blockwise_tensor import Float8BlockwiseQTensor, Float8BlockQuantizer
 from .nvfp4_tensor import NVFP4Tensor, NVFP4Quantizer
+from .localized_nvfp4 import NVFP4VMMWorkspace
 from .grouped_tensor import GroupedTensor
 from .hybrid_tensor import HybridQuantizedTensor, HybridQuantizer
 from .identity_tensor import IdentityTensor, IdentityQuantizer
@@ -44,6 +45,7 @@ __all__ = [
     "MXFP8Quantizer",
     "MXFP8LocalizedPair",
     "MXFP8VMMWorkspace",
+    "NVFP4VMMWorkspace",
     "localize_mxfp8_output_vmm",
     "localize_mxfp8_tensor",
     "localize_mxfp8_tensor_vmm",

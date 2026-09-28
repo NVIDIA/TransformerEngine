@@ -95,6 +95,76 @@ def _localize_output_data(output, allocator, domain: int) -> None:
 
 @pytest.mark.skipif(not NVFP4_AVAILABLE, reason=NO_NVFP4_REASON)
 @pytest.mark.skipif(not _localization_available(), reason="CUDA localization is unavailable")
+@pytest.mark.parametrize("backward", [False, True], ids=["forward", "backward"])
+def test_nvfp4_vmm_swiglu_quantization(backward: bool, monkeypatch) -> None:
+    """VMM SwiGLU quantization preserves full-tensor amax and packed output."""
+    from transformer_engine.pytorch.tensor.localized_nvfp4 import (
+        acquire_nvfp4_vmm_workspace,
+        clear_nvfp4_vmm_workspace_pools,
+        release_nvfp4_vmm_tensor_workspaces,
+    )
+
+    monkeypatch.setenv("NVTE_NVFP4_VMM_LOCALIZATION", "1")
+    rows, output_cols = 8192, 1024
+    dtype = torch.bfloat16
+    device = torch.device("cuda")
+    quantizer = _make_quantizer(stochastic_rounding=False)
+
+    if backward:
+        producer_input = torch.randn(
+            (rows, output_cols),
+            dtype=dtype,
+            device=device,
+        )
+        grad_output = torch.randn(
+            (rows, output_cols // 2),
+            dtype=dtype,
+            device=device,
+        )
+        baseline = tex.dswiglu(grad_output, producer_input, quantizer)
+    else:
+        producer_input = torch.randn(
+            (rows, output_cols * 2),
+            dtype=dtype,
+            device=device,
+        )
+        grad_output = None
+        baseline = tex.swiglu(producer_input, quantizer)
+
+    workspace = acquire_nvfp4_vmm_workspace(
+        (rows, output_cols),
+        dtype=dtype,
+        device=device,
+        quantizer=quantizer,
+    )
+    if backward:
+        localized = workspace.dswiglu(grad_output, producer_input)
+    else:
+        localized = workspace.swiglu(producer_input)
+    torch.cuda.synchronize()
+
+    for name in (
+        "_rowwise_data",
+        "_rowwise_scale_inv",
+        "_columnwise_data",
+        "_columnwise_scale_inv",
+        "_amax_rowwise",
+        "_amax_columnwise",
+    ):
+        torch.testing.assert_close(
+            getattr(localized, name),
+            getattr(baseline, name),
+            atol=0,
+            rtol=0,
+            msg=f"{name} changed with VMM localization",
+        )
+
+    release_nvfp4_vmm_tensor_workspaces(localized)
+    clear_nvfp4_vmm_workspace_pools()
+
+
+@pytest.mark.skipif(not NVFP4_AVAILABLE, reason=NO_NVFP4_REASON)
+@pytest.mark.skipif(not _localization_available(), reason="CUDA localization is unavailable")
 @pytest.mark.skipif(
     os.getenv("RUN_BENCHMARK_TESTS", "0") != "1",
     reason="Benchmark test - set RUN_BENCHMARK_TESTS=1",

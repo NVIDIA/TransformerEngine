@@ -169,6 +169,85 @@ py::object nvfp4_quantize_with_amax(const at::Tensor &tensor, py::handle quantiz
   return output_py;
 }
 
+void nvfp4_compute_amax(const at::Tensor &tensor, py::handle quantizer,
+                        const at::Tensor &rowwise_amax,
+                        const at::Tensor &columnwise_amax) {
+  using namespace transformer_engine::pytorch::detail;
+  init_extension();
+
+  NVTE_CHECK(tensor.dim() >= 2, "Tensor must be at least 2D");
+  NVTE_CHECK(tensor.scalar_type() == at::kBFloat16,
+             "NVFP4 RHT amax requires BF16 input.");
+  NVTE_CHECK(rowwise_amax.is_cuda() && columnwise_amax.is_cuda(),
+             "NVFP4 RHT amax outputs must be CUDA tensors.");
+  NVTE_CHECK(
+      rowwise_amax.scalar_type() == at::kFloat && columnwise_amax.scalar_type() == at::kFloat,
+      "NVFP4 RHT amax outputs must be float32.");
+  NVTE_CHECK(rowwise_amax.numel() == 1 && columnwise_amax.numel() == 1,
+             "NVFP4 RHT amax outputs must be scalars.");
+
+  auto quantizer_cpp = convert_quantizer(quantizer);
+  NVTE_CHECK(IsNVFP4Quantizers(quantizer.ptr()),
+             "nvfp4_compute_amax only supports NVFP4 quantizers.");
+  auto *nvfp4_quantizer_cpp = static_cast<NVFP4Quantizer *>(quantizer_cpp.get());
+  NVTE_CHECK(nvfp4_quantizer_cpp->with_rht &&
+                 nvfp4_quantizer_cpp->with_post_rht_amax,
+             "nvfp4_compute_amax requires post-RHT amax.");
+
+  auto input_contiguous = tensor.contiguous();
+  auto input_cpp = makeTransformerEngineTensor(input_contiguous);
+  TensorWrapper output_cpp(NVTE_NVFP4_1D_SCALING);
+  output_cpp.set_amax(rowwise_amax.data_ptr(), DType::kFloat32, getTensorShape(rowwise_amax));
+  output_cpp.set_columnwise_amax(columnwise_amax.data_ptr(), DType::kFloat32,
+                                 getTensorShape(columnwise_amax));
+
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_hadamard_transform_amax(
+        input_cpp.data(), output_cpp.data(), 0,
+        nvfp4_quantizer_cpp->rht_matrix_random_sign_mask_t,
+        at::cuda::getCurrentCUDAStream());
+  });
+}
+
+py::object nvfp4_quantize_with_amax_out(const at::Tensor &tensor, py::handle quantizer,
+                                        const at::Tensor &rowwise_amax,
+                                        const at::Tensor &columnwise_amax,
+                                        const py::object &output) {
+  using namespace transformer_engine::pytorch::detail;
+  init_extension();
+
+  NVTE_CHECK(tensor.dim() >= 2, "Tensor must be at least 2D");
+  NVTE_CHECK(rowwise_amax.is_cuda() && columnwise_amax.is_cuda(),
+             "Precomputed amax tensors must be CUDA tensors.");
+  NVTE_CHECK(
+      rowwise_amax.scalar_type() == at::kFloat && columnwise_amax.scalar_type() == at::kFloat,
+      "Precomputed amax tensors must be float32.");
+  NVTE_CHECK(rowwise_amax.numel() == 1 && columnwise_amax.numel() == 1,
+             "nvfp4_quantize_with_amax_out expects scalar rowwise and columnwise amaxes.");
+
+  auto quantizer_cpp = convert_quantizer(quantizer);
+  NVTE_CHECK(IsNVFP4Quantizers(quantizer.ptr()),
+             "nvfp4_quantize_with_amax_out only supports NVFP4 quantizers.");
+  auto *nvfp4_quantizer_cpp = static_cast<NVFP4Quantizer *>(quantizer_cpp.get());
+
+  auto input_contiguous = tensor.contiguous();
+  auto input_cpp = makeTransformerEngineTensor(input_contiguous);
+  auto [output_cpp, output_py] = quantizer_cpp->convert_and_update_tensor(output);
+
+  if (output_cpp.get_amax().data_ptr != nullptr) {
+    output_cpp.set_amax(rowwise_amax.data_ptr(), DType::kFloat32, getTensorShape(rowwise_amax));
+    output_py.attr("_amax_rowwise") = py::cast(rowwise_amax);
+  }
+  if (output_cpp.get_columnwise_amax().data_ptr != nullptr) {
+    output_cpp.set_columnwise_amax(columnwise_amax.data_ptr(), DType::kFloat32,
+                                   getTensorShape(columnwise_amax));
+    output_py.attr("_amax_columnwise") = py::cast(columnwise_amax);
+  }
+
+  nvfp4_quantizer_cpp->quantize_impl(input_cpp, output_cpp, std::nullopt, false);
+  return output_py;
+}
+
 py::object create_empty_quantized_tensor(py::handle quantizer, const std::vector<size_t> &shape,
                                          at::ScalarType dtype, at::Device device, bool pin_memory) {
   auto quantizer_cpp = convert_quantizer(quantizer);
