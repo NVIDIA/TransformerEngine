@@ -239,7 +239,7 @@ CudnnNormalizationPlan::CudnnNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Nor
       .set_intermediate_data_type(get_cudnn_fe_dtype(ctype))
       .set_compute_data_type(get_cudnn_fe_dtype(ctype));
 
-  if (cudnnGetVersion() >= 90400) _graph.set_sm_count(sm_count);
+  _graph.set_sm_count(sm_count);
 
   const auto batch_dim = static_cast<int32_t>(batch_size);
   const auto hidden_dim = static_cast<int32_t>(hidden_size);
