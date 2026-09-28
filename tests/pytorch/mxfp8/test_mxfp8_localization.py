@@ -674,6 +674,52 @@ def test_mxfp8_bidirectional_swizzled_vmm_performance() -> None:
     except (ImportError, RuntimeError, ValueError) as exc:
         pytest.skip(f"VMM localization is unavailable: {exc}")
 
+    rows_per_domain = shape[0] // 2
+    partition_shape = (rows_per_domain, shape[1])
+    partition_inputs = tuple(tensor.chunk(2, dim=0))
+    split_outputs = tuple(
+        quantizer.make_empty(partition_shape, dtype=tensor.dtype, device=tensor.device)
+        for _ in range(2)
+    )
+    green_unlocalized_outputs = tuple(
+        quantizer.make_empty(partition_shape, dtype=tensor.dtype, device=tensor.device)
+        for _ in range(2)
+    )
+    ordinary_streams = tuple(torch.cuda.Stream(device=tensor.device) for _ in range(2))
+    eager_events = {
+        key: (
+            torch.cuda.Event(enable_timing=False),
+            tuple(torch.cuda.Event(enable_timing=False) for _ in range(2)),
+        )
+        for key in ("split", "green")
+    }
+    capture_events = []
+
+    def partitioned_quantize(outputs, streams, event_key: str) -> None:
+        parent_stream = torch.cuda.current_stream(tensor.device)
+        if torch.cuda.is_current_stream_capturing():
+            fork_event = torch.cuda.Event(enable_timing=False)
+            join_events = tuple(torch.cuda.Event(enable_timing=False) for _ in range(2))
+            capture_events.extend((fork_event, *join_events))
+        else:
+            fork_event, join_events = eager_events[event_key]
+        fork_event.record(parent_stream)
+        for input_half, output_half, stream, join_event in zip(
+            partition_inputs, outputs, streams, join_events
+        ):
+            stream.wait_event(fork_event)
+            with torch.cuda.stream(stream):
+                quantizer.update_quantized(input_half, output_half)
+            join_event.record(stream)
+        for event in join_events:
+            parent_stream.wait_event(event)
+
+    def split_unlocalized_quantize() -> None:
+        partitioned_quantize(split_outputs, ordinary_streams, "split")
+
+    def green_unlocalized_quantize() -> None:
+        partitioned_quantize(green_unlocalized_outputs, workspace.streams, "green")
+
     gemm_n = int(os.getenv("MXFP8_LOCALIZATION_GEMM_N", "256"))
     if gemm_n % 128 != 0:
         raise ValueError(f"MXFP8_LOCALIZATION_GEMM_N must be 128-aligned, got {gemm_n}")
@@ -714,16 +760,22 @@ def test_mxfp8_bidirectional_swizzled_vmm_performance() -> None:
     use_cuda_graph = os.getenv("MXFP8_LOCALIZATION_USE_CUDA_GRAPH") == "1"
     if use_cuda_graph:
         baseline_function = _capture_cuda_graph(baseline_quantize).replay
+        split_unlocalized_function = _capture_cuda_graph(split_unlocalized_quantize).replay
+        green_unlocalized_function = _capture_cuda_graph(green_unlocalized_quantize).replay
         localized_function = _capture_cuda_graph(workspace.quantize).replay
         baseline_pipeline_function = _capture_cuda_graph(baseline_pipeline).replay
         localized_pipeline_function = _capture_cuda_graph(localized_pipeline).replay
     else:
         baseline_function = baseline_quantize
+        split_unlocalized_function = split_unlocalized_quantize
+        green_unlocalized_function = green_unlocalized_quantize
         localized_function = workspace.quantize
         baseline_pipeline_function = baseline_pipeline
         localized_pipeline_function = localized_pipeline
 
     baseline_ms = _benchmark_ms(baseline_function)
+    split_unlocalized_ms = _benchmark_ms(split_unlocalized_function)
+    green_unlocalized_ms = _benchmark_ms(green_unlocalized_function)
     localized_ms = _benchmark_ms(localized_function)
     baseline_pipeline_ms = _benchmark_ms(baseline_pipeline_function)
     localized_pipeline_ms = _benchmark_ms(localized_pipeline_function)
@@ -741,8 +793,15 @@ def test_mxfp8_bidirectional_swizzled_vmm_performance() -> None:
         f"\nMXFP8 ordinary-input/VMM-output {shape} ({execution}):"
         f"\n  GEMM N:                       {gemm_n}"
         f"\n  full-chip quant:              {baseline_ms:.3f} ms"
+        f"\n  split ordinary quant:         {split_unlocalized_ms:.3f} ms"
+        f"\n  green ordinary-memory quant:  {green_unlocalized_ms:.3f} ms"
         f"\n  localized-output quant:       {localized_ms:.3f} ms"
-        f"\n  quant speedup:                {baseline_ms / localized_ms:.3f}x"
+        f"\n  split-launch contribution:    {baseline_ms / split_unlocalized_ms:.3f}x"
+        "\n  green-context contribution:   "
+        f"{split_unlocalized_ms / green_unlocalized_ms:.3f}x"
+        "\n  memory-locality contribution: "
+        f"{green_unlocalized_ms / localized_ms:.3f}x"
+        f"\n  overall quant speedup:        {baseline_ms / localized_ms:.3f}x"
         f"\n  full-chip quant + GEMM:       {baseline_pipeline_ms:.3f} ms"
         f"\n  localized output + GEMM:      {localized_pipeline_ms:.3f} ms"
         "\n  quant + GEMM speedup:         "
