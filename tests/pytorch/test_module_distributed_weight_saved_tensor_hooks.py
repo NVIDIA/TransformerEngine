@@ -27,6 +27,9 @@ import torch
 from torch.autograd.graph import saved_tensors_hooks
 
 import transformer_engine.pytorch as te
+from transformer_engine.pytorch.module.grouped_linear import (
+    is_module_grouped_tensor_path_supported,
+)
 
 FWD_SCALE = 2.0
 BWD_SCALE = 4.0
@@ -196,6 +199,10 @@ def test_grouped_linear_distributed_weight_under_saved_tensor_hooks(
 ):
     """``GroupedLinear`` (both GEMM paths) must keep the distributed path under hooks."""
     _skip_without_cuda()
+    if use_grouped_tensor and not is_module_grouped_tensor_path_supported(None, DTYPE):
+        # GroupedLinear would silently fall back to split-quantize, which the other case
+        # already covers; skip rather than report coverage of the native backward.
+        pytest.skip("native grouped-tensor path unsupported on this device / cuBLASLt")
     torch.manual_seed(0)
     names = [f"weight{i}" for i in range(num_gemms)]
     module, reference = (
