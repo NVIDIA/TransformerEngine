@@ -7,3 +7,9 @@
 [submodule "3rdparty/nccl-extensions"]
 	path = 3rdparty/nccl-extensions
 	url = https://github.com/NVIDIA/nccl-extensions.git
+[submodule "dlfw-ci"]
+	path = dlfw-ci
+	url = ../../devops/dlfw-ci
+[submodule "te_ci_artifacts"]
+	path = te_ci_artifacts
+	url = ../te_ci_artifacts
