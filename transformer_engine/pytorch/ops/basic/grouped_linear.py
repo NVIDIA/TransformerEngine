@@ -19,6 +19,7 @@ from ...constants import DType, TE_DType
 from ...cpp_extensions import general_grouped_gemm, general_grouped_gemm_for_grouped_tensor
 from ...distributed import CudaRNGStatesTracker
 from ...module._common import WeightGradStore
+from ...module._split_quantization import _split_quantize
 from ...module.base import (
     _2X_ACC_FPROP,
     _2X_ACC_DGRAD,
@@ -128,6 +129,7 @@ def is_op_fuser_grouped_tensor_path_supported(
             device_capability >= (10, 0)
             and not recipe.disable_rht
             and not recipe.row_scaled_activation
+            and not recipe.dgrad_mxfp8
         )
     return False
 
@@ -1548,7 +1550,7 @@ class GroupedLinear(BasicOperation):
                     rowwise=ctx.input_requires_grad,
                     columnwise=ctx.weight_requires_grad,
                 )
-            dys = tex.split_quantize(dy, split_sizes_int, ctx.grad_output_quantizers)
+            dys, _ = _split_quantize(dy, split_sizes_int, ctx.grad_output_quantizers, ctx.dtype)
         else:
             dys = torch.split(dy, split_sizes_int)
 

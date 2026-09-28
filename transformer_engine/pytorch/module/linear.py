@@ -91,6 +91,7 @@ from ..dynamo import (
     is_value_opaque_quantizer,
 )
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
+from ..tensor.hybrid_tensor import HybridQuantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.utils import clear_columnwise_cache, is_custom
 from ..export import is_in_onnx_export_mode, assert_warmed_up
@@ -1471,8 +1472,9 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
         # through the same FP8-aware all-gather as the non-overlap path in
         # ``TransformerEngineBaseModule.grad_output_preprocess`` by passing the
         # grad_output quantizer. Per-tensor FP8 can reconstruct columnwise
-        # data from the gathered rowwise data; MXFP8 must instead quantize
-        # the original gradient columnwise to avoid double quantization.
+        # data from the gathered rowwise data; MXFP8 and hybrid quantizers
+        # must instead quantize the original gradient columnwise to avoid
+        # double quantization.
         if (
             bwd_args.requires_wgrad
             and bwd_args.ub_overlap_ag
@@ -1481,7 +1483,7 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
         ):
             if grad_output_quantizer is not None:
                 set_quantizer_usage_for_wgrad_all_gather(grad_output_quantizer)
-            if isinstance(grad_output_quantizer, MXFP8Quantizer):
+            if isinstance(grad_output_quantizer, (MXFP8Quantizer, HybridQuantizer)):
                 grad_output = grad_output_arg.reshape(-1, grad_output_arg.shape[-1]).contiguous()
             grad_output, _ = gather_along_first_dim(
                 grad_output,

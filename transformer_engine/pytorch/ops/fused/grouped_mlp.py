@@ -892,6 +892,9 @@ def fuse_grouped_mlp_ops(
     # NVFP4 fused grouped MLP uses graph-safe grouped quantize, which currently requires RHT.
     if recipe.nvfp4() and recipe.disable_rht:
         return ops
+    # The fused NVFP4 grouped MLP does not support hybrid MXFP8 dgrad operands.
+    if recipe.nvfp4() and recipe.dgrad_mxfp8:
+        return ops
     # The fused MXFP8 backward reinterprets the grad output's storage as E4M3, so an E5M2
     # backward format would have its gradients misread rather than converted. This declines
     # MXFP8 with Format.HYBRID. fp8_format does not describe NVFP4 gradients, so NVFP4 is

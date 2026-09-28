@@ -2062,6 +2062,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             return
 
         recipe = self.fp8_meta["recipe"]
+        if recipe.nvfp4() and recipe.dgrad_mxfp8:
+            # Quantized primary weights provide no MXFP8 columnwise data for dgrad.
+            raise RuntimeError(
+                "NVFP4BlockScaling(dgrad_mxfp8=True) does not support quantized primary weights"
+                " from quantized_model_init()."
+            )
         weight_tensors = [getattr(self, name) for name in self.weight_names]
         for i, tensor in enumerate(weight_tensors):
             if isinstance(tensor, QuantizedTensorStorage):

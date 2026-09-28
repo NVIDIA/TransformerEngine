@@ -547,6 +547,20 @@ class NVFP4BlockScaling(Recipe):
              to keep the standard NVFP4 448 bound for 4over6 tensors.
     nvfp4_4over6_err_mode : {'MAE', 'MSE'}, default = 'MAE'
              Error metric used by NVFP4 4over6 candidate selection.
+    nvfp4_4over6_grad : bool, default = False
+             If set to `True`, gradient quantizers also use 4over6 adaptive block
+             scaling. Requires `disable_rht=True` and
+             `disable_stochastic_rounding=True`. Gradient 4over6 tensors use 256 as
+             the global E4M3 scale bound only when ``nvfp4_4over6_e4m3_use_256`` is
+             ``'all'``; its ``'activations'`` scope covers forward activations only.
+    dgrad_mxfp8 : bool, default = False
+             If set to `True`, the dgrad GEMM uses MXFP8 operands while the fprop
+             and wgrad GEMMs keep NVFP4 operands. The weight quantizer emits NVFP4
+             rowwise data for fprop and MXFP8 columnwise data for dgrad, requantized
+             from the dequantized NVFP4 weight. The ``grad_output`` quantizer emits
+             MXFP8 rowwise data for dgrad and NVFP4 columnwise data for wgrad.
+             Cannot be combined with `backward_override` or with quantized primary
+             weights (`quantized_model_init`).
     backward_override : {None, 'high_precision', 'dequantized'}, default = None
             Backward precision mode. None does not modify backward behavior,
             `high_precision` keeps original high-precision operands for backward,
@@ -564,6 +578,8 @@ class NVFP4BlockScaling(Recipe):
     nvfp4_4over6: str = os.getenv("NVTE_NVFP4_4OVER6", "none")
     nvfp4_4over6_e4m3_use_256: str = os.getenv("NVTE_NVFP4_4OVER6_E4M3_USE_256", "all")
     nvfp4_4over6_err_mode: str = os.getenv("NVTE_NVFP4_4OVER6_ERR_MODE", "MAE").upper()
+    nvfp4_4over6_grad: bool = os.getenv("NVTE_NVFP4_4OVER6_GRAD", "0") == "1"
+    dgrad_mxfp8: bool = os.getenv("NVTE_NVFP4_DGRAD_MXFP8", "0") == "1"
 
     fp4_format: Format = Format.E2M1
     fp8_format: Format = Format.E4M3
@@ -588,6 +604,9 @@ class NVFP4BlockScaling(Recipe):
         assert (
             self.nvfp4_4over6_err_mode in _NVFP4_4OVER6_ERR_MODES
         ), "NVTE_NVFP4_4OVER6_ERR_MODE must be one of: 'MAE', 'MSE'."
+        assert (
+            not self.dgrad_mxfp8 or self.backward_override is None
+        ), "NVTE_NVFP4_DGRAD_MXFP8 cannot be combined with NVTE_BACKWARD_OVERRIDE."
 
         # Quantization params
         # Note: RHT is currently only applied to column-wise usage so that
@@ -620,6 +639,8 @@ class NVFP4BlockScaling(Recipe):
             f"nvfp4_4over6={self.nvfp4_4over6}, "
             f"nvfp4_4over6_e4m3_use_256={self.nvfp4_4over6_e4m3_use_256}, "
             f"nvfp4_4over6_err_mode={self.nvfp4_4over6_err_mode}, "
+            f"nvfp4_4over6_grad={self.nvfp4_4over6_grad}, "
+            f"dgrad_mxfp8={self.dgrad_mxfp8}, "
             f"fp4_quant_fwd_inp={self.fp4_quant_fwd_inp}, "
             f"fp4_quant_fwd_weight={self.fp4_quant_fwd_weight}, "
             f"fp4_quant_bwd_grad={self.fp4_quant_bwd_grad}, "
