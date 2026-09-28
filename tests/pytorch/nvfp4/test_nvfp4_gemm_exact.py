@@ -9,8 +9,8 @@ import transformer_engine_torch as tex
 from transformer_engine.pytorch.constants import TE_DType
 from transformer_engine.pytorch import NVFP4Quantizer
 from transformer_engine.pytorch.cpp_extensions import general_gemm, general_grouped_gemm
-from transformer_engine.pytorch.custom_recipes.quantization_ref_nvfp4 import NVFP4QuantizerRef
-from transformer_engine.pytorch.custom_recipes import utils
+from transformer_engine.pytorch.custom_recipes.reference_nvfp4 import NVFP4QuantizerRef
+from transformer_engine.pytorch.custom_recipes import reference_utils
 from transformer_engine.pytorch.tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 
 
@@ -128,7 +128,7 @@ def check_nvfp4_gemm_versus_reference(
 
     # Create reference quantizer for reference GEMM
     x_ref_quantizer = NVFP4QuantizerRef(
-        dtype=utils.Fp4Formats.E2M1,
+        dtype=reference_utils.Fp4Formats.E2M1,
         rowwise=True,
         columnwise=not row_scaled_nvfp4,
         pow_2_scales=False,
@@ -140,7 +140,7 @@ def check_nvfp4_gemm_versus_reference(
         nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
     w_ref_quantizer = NVFP4QuantizerRef(
-        dtype=utils.Fp4Formats.E2M1,
+        dtype=reference_utils.Fp4Formats.E2M1,
         rowwise=True,
         columnwise=True,
         pow_2_scales=False,

@@ -8,6 +8,7 @@
 #include <xla/ffi/api/ffi.h>
 
 #include <numeric>
+#include <string>
 
 #include "common/util/logging.h"
 
@@ -19,6 +20,8 @@ using Result_Type = xla::ffi::Result<xla::ffi::AnyBuffer>;
 using Variadic_Buffer_Type = xla::ffi::RemainingArgs;
 using Variadic_Result_Type = xla::ffi::RemainingRets;
 using Error_Type = xla::ffi::Error;
+template <typename T>
+using Span_Type = xla::ffi::Span<const T>;
 using FFI = xla::ffi::Ffi;
 using FFI_Stream_Type = xla::ffi::PlatformStream<cudaStream_t>;
 using Dictionary = xla::ffi::Dictionary;
@@ -30,6 +33,9 @@ constexpr auto FFI_CudaGraph_Traits = {xla::ffi::Traits::kCmdBufferCompatible};
 DType convert_ffi_datatype_to_te_dtype(const xla::ffi::DataType& type);
 
 Error_Type ffi_with_cuda_error_check();
+
+// Wraps a caught std::exception as an Error_Type, prefixed with `context`.
+Error_Type ffi_internal_error(const std::string& context, const std::exception& e);
 
 // source_location is not available in C++17, so we implement it ourselves
 #if defined(__GNUC__) || defined(__clang__)

@@ -654,6 +654,18 @@ class GroupedTensorStorage:
             A GroupedTensor.
         """
 
+        if quantizer is not None:
+            # TODO(#3158): Support Identity/Hybrid packed grouped storage.
+            from ..hybrid_tensor import HybridQuantizer
+            from ..identity_tensor import IdentityQuantizer
+
+            if isinstance(quantizer, (IdentityQuantizer, HybridQuantizer)):
+                raise NotImplementedError(
+                    "GroupedTensorStorage does not support IdentityQuantizer or "
+                    "HybridQuantizer yet. Use separate tensors, or set "
+                    "GroupedLinear(single_grouped_weight=False). See #3158."
+                )
+
         # Set device
         if device is None:
             device = torch.cuda.current_device()

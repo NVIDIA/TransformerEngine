@@ -606,6 +606,7 @@ struct QuantizationConfig {
   bool use_fast_math = false;
   NVTENVFP44Over6Mode nvfp4_4over6_mode = kNVTENVFP44Over6Disabled;
   bool nvfp4_4over6_err_use_fast_math = false;
+  bool mxfp8_2d_quantization = false;
 
   static constexpr size_t attr_sizes[] = {
       sizeof(uint8_t),                       // force_pow_2_scales
@@ -617,7 +618,8 @@ struct QuantizationConfig {
       sizeof(uint8_t),                       // stochastic_rounding
       sizeof(uint8_t),                       // use_fast_math
       sizeof(uint8_t),                       // nvfp4_4over6_mode
-      sizeof(uint8_t)                        // nvfp4_4over6_err_use_fast_math
+      sizeof(uint8_t),                       // nvfp4_4over6_err_use_fast_math
+      sizeof(uint8_t)                        // mxfp8_2d_quantization
   };
 };
 
@@ -647,12 +649,10 @@ using fp8e5m2 = __nv_fp8_e5m2;
 #if CUDA_VERSION >= 12080
 using fp8e8m0 = __nv_fp8_e8m0;
 #endif
-#if FP4_TYPE_SUPPORTED
-using fp4e2m1 = __nv_fp4_e2m1;
-using fp4e2m1x2 = __nv_fp4x2_e2m1;
-using fp4e2m1x4 = __nv_fp4x4_e2m1;
-#endif
 using e8m0_t = uint8_t;
+
+// FP4 aliases + device-safe TypeExtrema specializations (also used by NVRTC).
+#include "./util/type_extrema.h"
 
 namespace detail {
 
@@ -679,46 +679,6 @@ TRANSFORMER_ENGINE_TYPE_NAME(__nv_fp8_e8m0)
 TRANSFORMER_ENGINE_TYPE_NAME(__nv_fp4_e2m1)
 #endif
 #undef TRANSFORMER_ENGINE_TYPE_NAME
-
-template <typename T>
-struct TypeExtrema;
-
-#if FP4_TYPE_SUPPORTED
-template <>
-struct TypeExtrema<fp4e2m1> {
-  static constexpr float max = 6.0f;
-  static constexpr float max_inverse = 1.0 / max;
-};
-#endif
-
-template <>
-struct TypeExtrema<fp8e4m3> {
-  static constexpr float max = 448.0f;
-  static constexpr float max_inverse = 1.0 / max;
-};
-
-template <>
-struct TypeExtrema<fp8e5m2> {
-  static constexpr float max = 57344.0f;
-  static constexpr float max_inverse = 1.0 / max;
-};
-
-template <>
-struct TypeExtrema<bf16> {
-  // Hex float format of 1.(7 bits of 1) * 2 ^ 127
-  static constexpr float max = 0x1.FEp127;
-};
-
-template <>
-struct TypeExtrema<fp16> {
-  // Hex float format of 1.(10 bits of 1) * 2 ^ 15
-  static constexpr float max = 0x1.FFCp15;
-};
-
-template <typename T>
-struct TypeExtrema {
-  static constexpr float max = std::numeric_limits<T>::max();
-};
 
 }  // namespace detail
 
@@ -1151,6 +1111,26 @@ constexpr size_t TMA_SHMEM_ALIGNMENT = 128;  // shared memory address alignment
 
 inline bool is_aligned_ptr(const void *ptr, size_t alignment) {
   return reinterpret_cast<uintptr_t>(ptr) % alignment == 0;
+}
+
+/*! \brief Align a shared-memory base pointer up to `align` bytes.
+ *
+ * The result is derived from `p` by pointer arithmetic on purpose, without losing its
+ * identity as a pointer in between, so the address is never rounded through an integer
+ * -- in which case the compiler would lose the link back to the `extern __shared__`
+ * object, and ptxas could no longer prove the address lives in the shared window and
+ * would fall back to generic address-space accesses (`LD.E`/`ST.E`) instead of
+ * `LDS`/`STS`.
+ *
+ * `align` must be a power of two.
+ */
+__device__ __forceinline__ char *align_up(char *p, uintptr_t align) {
+  const uintptr_t misalign = reinterpret_cast<uintptr_t>(p) & (align - 1);
+  // If p is not aligned, (align - misalign) & (align - 1) is the number of bytes to fill the gap between p and
+  // the next aligned address.
+  // If p is aligned, misalign is 0 and (align - misalign) is align itself, so we use & (align - 1)
+  // to make it 0 and return p itself.
+  return p + ((align - misalign) & (align - 1));
 }
 
 inline bool is_aligned_tensor_data(const Tensor &t, size_t alignment) {

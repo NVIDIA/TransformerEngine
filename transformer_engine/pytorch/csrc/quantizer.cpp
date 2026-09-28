@@ -17,6 +17,25 @@ namespace transformer_engine::pytorch {
 
 namespace {
 
+/*! @brief Reject unsupported columnwise-only per-tensor FP8 quantization
+ *
+ * Per-tensor FP8 uses the legacy cast-transpose kernel whenever columnwise
+ * output is requested. That kernel requires both rowwise and columnwise
+ * output buffers, so a transpose-only output cannot be produced without an
+ * otherwise-unused rowwise allocation and write. Keep this limitation
+ * explicit until the kernel supports independently selecting its outputs.
+ */
+void check_per_tensor_fp8_quantize_output(const TensorWrapper& output) {
+  const auto rowwise_data = output.get_rowwise_data();
+  const auto columnwise_data = output.get_columnwise_data();
+  if (rowwise_data.data_ptr == nullptr && columnwise_data.data_ptr != nullptr) {
+    PyErr_SetString(PyExc_NotImplementedError,
+                    "Columnwise-only per-tensor FP8 quantization is not implemented; "
+                    "the cast-transpose kernel requires rowwise output storage.");
+    throw py::error_already_set();
+  }
+}
+
 /*! @brief Resolve an optional device to a concrete CUDA device
  *
  * If no device is provided, uses the current CUDA device.
@@ -615,6 +634,7 @@ void Float8Quantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
   if (input.numel() == 0) {
     return;
   }
+  check_per_tensor_fp8_quantize_output(out);
   QuantizationConfigWrapper quant_config;
   if (noop_flag) {
     quant_config.set_noop_tensor(noop_flag->data());
@@ -975,6 +995,7 @@ void Float8CurrentScalingQuantizer::quantize_impl(const TensorWrapper& input, Te
     out.set_scale(nullptr, DType::kFloat32, out.defaultShape);
     return;
   }
+  check_per_tensor_fp8_quantize_output(out);
 
   // Quantization configs
   QuantizationConfigWrapper quant_config;
@@ -1473,6 +1494,7 @@ std::vector<size_t> Float8BlockQuantizer::get_scale_shape(const std::vector<size
 
 MXFP8Quantizer::MXFP8Quantizer(const py::handle& quantizer) : Quantizer(quantizer) {
   this->dtype = quantizer.attr("dtype").cast<DType>();
+  this->with_2d_quantization = quantizer.attr("with_2d_quantization").cast<bool>();
 }
 
 void MXFP8Quantizer::set_quantization_params(TensorWrapper* tensor) const {}
@@ -1818,6 +1840,9 @@ void MXFP8Quantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
   QuantizationConfigWrapper quant_config;
   if (noop_flag) {
     quant_config.set_noop_tensor(noop_flag->data());
+  }
+  if (this->with_2d_quantization) {
+    quant_config.set_mxfp8_2d_quantization(true);
   }
   NVTE_SCOPED_GIL_RELEASE({
     nvte_quantize_v2(input.data(), out.data(), quant_config, at::cuda::getCurrentCUDAStream());
@@ -2574,6 +2599,9 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
   // Stochastic rounding
   // When both rowwise and columnwise quantization are used with RHT,
   // we need separate RNG states for each to ensure they use different random numbers.
+  // TensorWrapper does not own storage; retain both RNG buffers through dispatch.
+  at::Tensor rng_state;
+  at::Tensor rng_state_columnwise;
   TensorWrapper te_rng_state;
   TensorWrapper te_rng_state_columnwise;
 
@@ -2595,7 +2623,7 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
 
     // Generate RNG state for rowwise quantization
     at::PhiloxCudaState philox_args = init_philox_state(gen, rng_elts_per_thread);
-    auto rng_state = torch::empty({2}, opts);
+    rng_state = torch::empty({2}, opts);
     philox_unpack(philox_args, static_cast<int64_t*>(rng_state.data_ptr()));
     te_rng_state = makeTransformerEngineTensor(rng_state);
     quant_config.set_rng_state(te_rng_state.data());
@@ -2603,7 +2631,7 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
     // Generate separate RNG state for columnwise quantization
     if (need_separate_columnwise_rng) {
       at::PhiloxCudaState philox_args_columnwise = init_philox_state(gen, rng_elts_per_thread);
-      auto rng_state_columnwise = torch::empty({2}, opts);
+      rng_state_columnwise = torch::empty({2}, opts);
       philox_unpack(philox_args_columnwise, static_cast<int64_t*>(rng_state_columnwise.data_ptr()));
       te_rng_state_columnwise = makeTransformerEngineTensor(rng_state_columnwise);
       quant_config_columnwise.set_stochastic_rounding(true);

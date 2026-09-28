@@ -12,6 +12,7 @@ import os
 import pathlib
 import subprocess
 import sys
+import tempfile
 from typing import Optional
 
 import pytest
@@ -32,7 +33,8 @@ import transformer_engine.pytorch.ops as te_ops
 
 # Import utility functions
 _current_file = pathlib.Path(__file__).resolve()
-sys.path.append(str(_current_file.parent.parent))
+# Prepend so installed packages with a top-level utils module cannot shadow the test helpers.
+sys.path = [str(_current_file.parent.parent)] + sys.path
 from utils import dtype_tols, make_recipe, quantization_tols
 
 
@@ -57,7 +59,8 @@ def world_group() -> torch.distributed.ProcessGroup:
     torch.cuda.set_device(rank)
     group = torch.distributed.init_process_group(
         "nccl",
-        init_method="file:///tmp/rdzv",
+        # Each parallel job must use a fresh FileStore shared by only its ranks.
+        init_method=f"file://{os.environ['NVTE_TEST_RDZV_PATH']}",
         world_size=world_size,
         rank=rank,
     )
@@ -1052,10 +1055,10 @@ def test_distributed_fuser_ops(world_size: int) -> None:
         current_file,
         "--parallel",
     ]
-    result = subprocess.run(
-        command,
-        check=True,
-    )
+    with tempfile.TemporaryDirectory(prefix="te-test-fusible-ops-") as temp_dir:
+        env = dict(os.environ)
+        env["NVTE_TEST_RDZV_PATH"] = str(pathlib.Path(temp_dir) / "rdzv")
+        subprocess.run(command, check=True, env=env)
 
 
 def main() -> None:

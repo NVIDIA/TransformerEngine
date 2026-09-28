@@ -6,10 +6,10 @@
 
 from __future__ import annotations
 import abc
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 import dataclasses
 import pickle
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import torch
 
@@ -22,6 +22,7 @@ from ..quantization import (
     autocast,
 )
 from ..tensor import Quantizer
+from ..dynamo import is_value_opaque_quantizer, register_custom_op
 
 
 @dataclasses.dataclass
@@ -59,6 +60,56 @@ class OperationContext:
 class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
     """Tensor operation supported by the operation fuser"""
 
+    # Custom ops are registered once per operation class.
+    fwd_args_type: Optional[type] = None
+    bwd_args_type: Optional[type] = None
+    # Each pass may provide its own custom op.
+    compile_ops: tuple[Optional[Callable[..., Any]], Optional[Callable[..., Any]]] = (None, None)
+
+    def __init_subclass__(cls, **kwargs) -> None:
+        super().__init_subclass__(**kwargs)
+        cls._register_compile_ops()
+
+    @classmethod
+    def _register_compile_ops(cls) -> None:
+        name = cls.__name__.lower()
+        ops = []
+        for mode, arg_name, op_name in (
+            ("forward", "fwd_args_type", name),
+            ("backward", "bwd_args_type", f"{name}_backward"),
+        ):
+            arg_type = getattr(cls, arg_name)
+            if arg_type is None:
+                ops.append(None)
+                continue
+            if not dataclasses.is_dataclass(arg_type):
+                raise TypeError(f"{cls.__name__}.{arg_name} must be a dataclass")
+            ops.append(
+                register_custom_op(
+                    op_name=op_name,
+                    arg_type=arg_type,
+                    impl=getattr(cls, f"{mode}_compute"),
+                    fake_impl=getattr(cls, f"{mode}_compute_fake"),
+                )
+            )
+        cls.compile_ops = (ops[0], ops[1])
+
+    def compile_unsupported_reason(self, mode: str) -> Optional[str]:
+        """Why this operation cannot run through its custom op, or ``None``."""
+        if self.compile_ops[("forward", "backward").index(mode)] is None:
+            return f"{self.__class__.__name__} without a custom op for {mode}"
+        basic_ops = self.basic_ops if self.is_fused_op else (self,)
+        for op in basic_ops:
+            for quantizer_mode in ("forward", "backward"):
+                for index in range(op.num_quantizers(quantizer_mode)):
+                    quantizer = op.get_quantizer(quantizer_mode, index)
+                    if quantizer is not None and not is_value_opaque_quantizer(quantizer):
+                        return (
+                            f"{type(quantizer).__name__} (not a torch.compile value-opaque"
+                            " quantizer)"
+                        )
+        return None
+
     @property
     @abc.abstractmethod
     def is_fused_op(self) -> bool:
@@ -85,11 +136,12 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         basic_op_ctxs: list[OperationContext],
         input_: torch.Tensor,
         *,
-        basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
+        basic_op_extra_inputs: Sequence[Sequence[Optional[torch.Tensor]]],
         prev_op_grad_output_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
         basic_op_kwargs: list[dict[str, Any]],
-    ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
+        use_custom_ops: bool = False,
+    ) -> tuple[torch.Tensor, Sequence[Sequence[Optional[torch.Tensor]]]]:
         """Forward pass
 
         This op is either a basic op or the fusion of basic ops, so
@@ -104,8 +156,9 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
             Contexts for basic operations
         input_: torch.Tensor
             Input tensor
-        basic_op_extra_inputs: list of torch.Tensor
-            Extra tensor inputs to basic operations
+        basic_op_extra_inputs: sequence of sequences of torch.Tensor
+            Extra tensor inputs to basic operations. An internal input
+            owned by this fused operation may be ``None``.
         prev_op_grad_output_quantizer: Quantizer, optional
             The grad_output_quantizer of the preceeding operation
         next_op_input_quantizer: Quantizer, optional
@@ -118,24 +171,36 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         -------
         torch.Tensor:
             Output tensor.
-        Iterable of torch.Tensor:
-            Extra tensor outputs from basic operations.
+        Sequence of sequences of torch.Tensor:
+            Extra tensor outputs from basic operations. A non-public
+            channel owned by this fused operation may be ``None``.
 
         """
-        raise NotImplementedError(
-            f"Forward pass is not implemented for operation ({self.__class__.__name__})"
+        args = self.pack_forward_args(
+            basic_op_ctxs,
+            input_,
+            basic_op_extra_inputs=basic_op_extra_inputs,
+            prev_op_grad_output_quantizer=prev_op_grad_output_quantizer,
+            next_op_input_quantizer=next_op_input_quantizer,
+            basic_op_kwargs=basic_op_kwargs,
         )
+        compute = self.compile_ops[0] if use_custom_ops else self.forward_compute
+        output, extra_outputs, aux = compute(args)
+        if any(ctx.requires_grad for ctx in basic_op_ctxs):
+            self.forward_setup_context(basic_op_ctxs, args, aux)
+        return output, extra_outputs
 
     def fuser_backward(
         self,
         basic_op_ctxs: list[OperationContext],
         grad_output: torch.Tensor,
         *,
-        basic_op_grad_extra_outputs: list[tuple[torch.Tensor, ...]],
+        basic_op_grad_extra_outputs: Sequence[Sequence[Optional[torch.Tensor]]],
+        use_custom_ops: bool = False,
     ) -> tuple[
         torch.Tensor,
-        Iterable[Iterable[Optional[torch.Tensor]]],
-        Iterable[Iterable[Optional[torch.Tensor]]],
+        Sequence[Sequence[Optional[torch.Tensor]]],
+        Sequence[Sequence[Optional[torch.Tensor]]],
     ]:
         """Backward pass
 
@@ -159,16 +224,74 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         -------
         torch.Tensor:
             Loss gradient w.r.t. operation input
-        Iterable of iterable of torch.Tensor:
+        Sequence of sequences of torch.Tensor:
             Loss gradients w.r.t. parameters for basic operations
-        Iterable of iterable of torch.Tensor:
+        Sequence of sequences of torch.Tensor:
             Loss gradients w.r.t. extra tensor inputs to basic
             operations
 
         """
-        raise NotImplementedError(
-            f"Backward pass is not implemented for operation ({self.__class__.__name__})"
+        args = self.pack_backward_args(
+            basic_op_ctxs,
+            grad_output,
+            basic_op_grad_extra_outputs=basic_op_grad_extra_outputs,
         )
+        compute = self.compile_ops[1] if use_custom_ops else self.backward_compute
+        grad_input, grad_params, grad_extra_inputs = compute(args)
+        if grad_input is None:
+            grad_input = grad_output
+        return grad_input, grad_params, grad_extra_inputs
+
+    @classmethod
+    def forward_compute(cls, args: Any) -> tuple:
+        """Return (output, extra_outputs per basic op, fresh aux tensors)."""
+        raise NotImplementedError
+
+    @classmethod
+    def forward_compute_fake(cls, args: Any) -> tuple:
+        """Shape-only twin of forward_compute, using TensorSpec."""
+        raise NotImplementedError
+
+    @classmethod
+    def backward_compute(cls, args: Any) -> tuple:
+        """Return (grad_input, grad_params per basic op, grad_extra_inputs per basic op).
+
+        A None grad_input passes grad_output through unchanged.
+        """
+        raise NotImplementedError
+
+    @classmethod
+    def backward_compute_fake(cls, args: Any) -> tuple:
+        """Shape-only twin of backward_compute, using TensorSpec."""
+        raise NotImplementedError
+
+    def pack_forward_args(
+        self,
+        basic_op_ctxs: list[OperationContext],
+        input_: torch.Tensor,
+        *,
+        basic_op_extra_inputs: Sequence[Sequence[Optional[torch.Tensor]]],
+        prev_op_grad_output_quantizer: Optional[Quantizer],
+        next_op_input_quantizer: Optional[Quantizer],
+        basic_op_kwargs: list[dict[str, Any]],
+    ) -> Any:
+        """Gather inputs and module state into fwd_args_type."""
+        raise NotImplementedError
+
+    def pack_backward_args(
+        self,
+        basic_op_ctxs: list[OperationContext],
+        grad_output: torch.Tensor,
+        *,
+        basic_op_grad_extra_outputs: Sequence[Sequence[Optional[torch.Tensor]]],
+    ) -> Any:
+        """Gather gradients and saved context into bwd_args_type."""
+        raise NotImplementedError
+
+    def forward_setup_context(
+        self, basic_op_ctxs: list[OperationContext], args: Any, aux: tuple
+    ) -> None:
+        """Save state needed by the basic operations' backward passes."""
 
 
 class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
@@ -187,9 +310,90 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
     def __init__(self) -> None:
         super().__init__()
 
+        # Optional names for extra-tensor channels internal to an OperationFuser.
+        # Unbound slots remain public inputs/outputs, preserving the original API.
+        self._extra_input_channels: list[Optional[str]] = [None] * self.num_extra_inputs
+        self._extra_output_channels: list[Optional[str]] = [None] * self.num_extra_outputs
+        self._extra_output_to_caller: list[bool] = [True] * self.num_extra_outputs
+        # Channel routing is captured by an OperationFuser when it is
+        # constructed (including the transient fuser created by a
+        # standalone op(x) call), so it is frozen once that happens.
+        self._extra_tensor_channels_locked: bool = False
+
         # Objects for quantization
         self._fp8_metas: Optional[dict[str, dict[str, Any]]] = None
         self._quantizers: Optional[dict[str, list[Quantizer]]] = None
+
+    def _lock_extra_tensor_channels(self) -> None:
+        """Freeze channel routing after an OperationFuser has captured it."""
+        self._extra_tensor_channels_locked = True
+
+    def _check_extra_tensor_channels_unlocked(self) -> None:
+        """Reject channel rebinding after an OperationFuser has captured it."""
+        if self._extra_tensor_channels_locked:
+            raise RuntimeError(
+                f"Cannot change extra tensor channels of {type(self).__name__} because an "
+                "OperationFuser has already captured its channel routing. Construct new "
+                "operations, bind their channels, and build a new OperationFuser or Sequential."
+            )
+
+    def set_extra_input_channel(self, index: int, channel: Optional[str]) -> BasicOperation:
+        """Bind an extra input slot to an internal fuser channel.
+
+        A bound slot receives the matching extra output from an earlier
+        operation in the same fuser instead of consuming a public extra input.
+        Passing ``None`` removes the binding.
+
+        Channels must be bound before any ``OperationFuser`` captures
+        them. That includes constructing an ``OperationFuser`` or
+        ``Sequential``, and also calling the op directly (``op(x)``),
+        which builds a transient fuser and locks channels permanently.
+        """
+        if not 0 <= index < self.num_extra_inputs:
+            raise IndexError(
+                f"Extra input index {index} is out of range for "
+                f"{type(self).__name__} with {self.num_extra_inputs} extra inputs"
+            )
+        if channel is not None and (not isinstance(channel, str) or not channel):
+            raise ValueError("Extra input channel must be a non-empty string or None")
+        self._check_extra_tensor_channels_unlocked()
+        self._extra_input_channels[index] = channel
+        return self
+
+    def set_extra_output_channel(
+        self,
+        index: int,
+        channel: Optional[str],
+        *,
+        output_to_caller: bool = True,
+    ) -> BasicOperation:
+        """Bind an extra output slot to an internal fuser channel.
+
+        A bound slot can feed one or more later operations. By default, the
+        output is also returned to the caller. Set ``output_to_caller=False``
+        to keep it internal to the fuser. Passing ``channel=None`` removes the
+        binding and restores the output as public.
+
+        Channels must be bound before any ``OperationFuser`` captures
+        them. That includes constructing an ``OperationFuser`` or
+        ``Sequential``, and also calling the op directly (``op(x)``),
+        which builds a transient fuser and locks channels permanently.
+        """
+        if not 0 <= index < self.num_extra_outputs:
+            raise IndexError(
+                f"Extra output index {index} is out of range for "
+                f"{type(self).__name__} with {self.num_extra_outputs} extra outputs"
+            )
+        if channel is not None and (not isinstance(channel, str) or not channel):
+            raise ValueError("Extra output channel must be a non-empty string or None")
+        if not isinstance(output_to_caller, bool):
+            raise TypeError("output_to_caller must be a bool")
+        if channel is None:
+            output_to_caller = True
+        self._check_extra_tensor_channels_unlocked()
+        self._extra_output_channels[index] = channel
+        self._extra_output_to_caller[index] = output_to_caller
+        return self
 
     @property
     def is_fused_op(self) -> bool:
@@ -425,7 +629,6 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                 self._fp8_metas[mode][fp8_meta_key].scale.copy_(scale)
                 self._fp8_metas[mode][fp8_meta_key].amax_history.copy_(amax_history)
 
-    @abc.abstractmethod
     def op_forward(
         self,
         ctx: OperationContext,
@@ -436,6 +639,8 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         **kwargs: Any,
     ) -> torch.Tensor:
         """Forward pass
+
+        Convenience interface for operations without extra tensor inputs or outputs.
 
         Parameters
         ----------
@@ -454,14 +659,16 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             Output tensor
 
         """
+        raise NotImplementedError
 
-    @abc.abstractmethod
     def op_backward(
         self,
         ctx: OperationContext,
         grad_output: torch.Tensor,
     ) -> tuple[torch.Tensor, Iterable[Optional[torch.Tensor]]]:
         """Backward pass
+
+        Convenience interface for operations without extra tensor inputs or outputs.
 
         Parameters
         ----------
@@ -478,6 +685,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             Loss gradients w.r.t. parameters
 
         """
+        raise NotImplementedError
 
     def fuser_forward(
         self,
@@ -488,7 +696,18 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         prev_op_grad_output_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
         basic_op_kwargs: list[dict[str, Any]],
-    ) -> tuple[torch.Tensor, list[tuple[()]]]:
+        use_custom_ops: bool = False,
+    ) -> tuple[torch.Tensor, Sequence[Sequence[Optional[torch.Tensor]]]]:
+        if use_custom_ops or type(self).op_forward is BasicOperation.op_forward:
+            return super().fuser_forward(
+                basic_op_ctxs,
+                input_,
+                basic_op_extra_inputs=basic_op_extra_inputs,
+                prev_op_grad_output_quantizer=prev_op_grad_output_quantizer,
+                next_op_input_quantizer=next_op_input_quantizer,
+                basic_op_kwargs=basic_op_kwargs,
+                use_custom_ops=use_custom_ops,
+            )
         if self.num_extra_inputs > 0 or self.num_extra_outputs > 0:
             raise RuntimeError(
                 "{self.__class__.__name__} operation has "
@@ -511,11 +730,19 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         grad_output: torch.Tensor,
         *,
         basic_op_grad_extra_outputs: list[tuple[torch.Tensor, ...]],
+        use_custom_ops: bool = False,
     ) -> tuple[
         torch.Tensor,
-        list[Iterable[Optional[torch.Tensor]]],
-        list[tuple[()]],
+        Sequence[Sequence[Optional[torch.Tensor]]],
+        Sequence[Sequence[Optional[torch.Tensor]]],
     ]:
+        if use_custom_ops or type(self).op_backward is BasicOperation.op_backward:
+            return super().fuser_backward(
+                basic_op_ctxs,
+                grad_output,
+                basic_op_grad_extra_outputs=basic_op_grad_extra_outputs,
+                use_custom_ops=use_custom_ops,
+            )
         if self.num_extra_inputs > 0 or self.num_extra_outputs > 0:
             raise RuntimeError(
                 "{self.__class__.__name__} operation has "
@@ -532,7 +759,12 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         *extra_inputs: torch.Tensor,
         **kwargs: Any,
     ) -> torch.Tensor | tuple[torch.Tensor, ...]:
-        """Apply operation"""
+        """Apply operation.
+
+        Builds a transient ``OperationFuser([self])``, which captures and
+        locks this op's extra-tensor channel bindings. Bind channels before
+        the first call if they will be used later in a multi-op fuser.
+        """
         from .fuser import OperationFuser
 
         return OperationFuser([self])(
@@ -765,7 +997,11 @@ class FusedOperation(FusibleOperation):
         *extra_inputs: torch.Tensor,
         basic_op_kwargs: Optional[list[dict[str, Any]]] = None,
     ) -> torch.Tensor:
-        """Apply operation"""
+        """Apply operation.
+
+        Builds a transient ``OperationFuser([self])``, which captures and
+        locks every basic op's extra-tensor channel bindings.
+        """
         if basic_op_kwargs is None:
             basic_op_kwargs = [{} for _ in range(len(self.basic_ops))]
         from .fuser import OperationFuser

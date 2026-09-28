@@ -11,7 +11,6 @@
 #include <ATen/Dispatch.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <ATen/cuda/CUDAGeneratorImpl.h>
-#include <ATen/cudnn/Handle.h>
 #include <ATen/native/DispatchStub.h>
 #include <c10/macros/Macros.h>
 #include <c10/util/Float8_e4m3fn.h>
@@ -312,6 +311,8 @@ class Float8BlockQuantizer : public Quantizer {
 
 class MXFP8Quantizer : public Quantizer {
  public:
+  bool with_2d_quantization = false;
+
   explicit MXFP8Quantizer(const py::handle& quantizer);
 
   NVTEScalingMode get_scaling_mode() const override { return NVTE_MXFP8_1D_SCALING; }

@@ -14,17 +14,20 @@ Sharding model:
     compound ``(dp, ep)`` axis on the leading dim.
 """
 
+import functools
+import os
 from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax import dtypes, ffi
 from jax.sharding import NamedSharding, PartitionSpec
 
 import transformer_engine_jax
 from .base import BasePrimitive, register_primitive
 from ..sharding import global_mesh_resource, get_mesh_axis_size
-from ..version_utils import is_collective_stream_supported
+from ..version_utils import is_collective_stream_supported, is_xla_ffi_collectives_supported
 
 
 def _on_collective_stream(func):
@@ -34,7 +37,20 @@ def _on_collective_stream(func):
         return func
     from jax.experimental.compute_on import compute_on
 
-    return compute_on("gpu_stream:collective")(func)  # pylint: disable=not-callable
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        # compute_on traces its callee and abstract-evals every argument, so it
+        # cannot take the static EpLayerConfig/PartitionSpec args directly. Wrap
+        # a nullary thunk that closes over them; the array operands are captured
+        # as consts and lifted to real operands, outputs stay on device. XLA
+        # async-wraps the resulting call onto the collective stream.
+        annotated = compute_on(  # pylint: disable=not-callable
+            compute_type="gpu_stream:collective",
+            out_memory_spaces=jax.memory.Space.Device,
+        )(lambda: func(*args, **kwargs))
+        return annotated()
+
+    return wrapper
 
 
 __all__ = [
@@ -42,6 +58,7 @@ __all__ = [
     "EpLayerConfig",
     "set_ep_config",
     "get_ep_config",
+    "reset_ep_config",
     "ep_handle_mem_size",
     "ep_prepare",
     "ep_dispatch_fwd",
@@ -52,6 +69,35 @@ __all__ = [
 
 
 # ── Module-level EP config ──────────────────────────────────────────────────
+
+
+@functools.lru_cache(maxsize=None)
+def is_ep_borrowed_comm_built() -> bool:
+    """Return True if transformer_engine_jax was compiled with the borrowed-comm FFI."""
+    try:
+        return "te_ep_bootstrap_borrowed_comm_ffi" in transformer_engine_jax.registrations()
+    except Exception:  # pylint: disable=broad-except
+        return False
+
+
+def use_nccl_comm_from_xla() -> bool:
+    """Return True when EP should borrow XLA's NCCL comm instead of self-hosting NCCL.
+
+    Auto-selected when both the build and the installed JAX support the XLA
+    collectives FFI extension. NVTE_JAX_EP_NCCL_COMM_FROM_XLA=1/0 is an internal
+    override for tests, not a supported user knob.
+    """
+    env = os.environ.get("NVTE_JAX_EP_NCCL_COMM_FROM_XLA")
+    if env is not None:
+        forced_on = env not in ("0", "", "false", "False")
+        if forced_on and not is_ep_borrowed_comm_built():
+            raise RuntimeError(
+                "NVTE_JAX_EP_NCCL_COMM_FROM_XLA is set but transformer_engine_jax was built "
+                "without the EP borrowed-comm path (XLA collectives FFI headers were "
+                "unavailable at build time). Unset it to use the self-hosted NCCL comm."
+            )
+        return forced_on
+    return is_ep_borrowed_comm_built() and is_xla_ffi_collectives_supported()
 
 
 @dataclass(frozen=True)
@@ -76,6 +122,39 @@ class EpConfig:
 _ep_config: EpConfig = None
 
 
+# Fixed sentinel keeps EP on its own private comm so it never aliases an XLA
+# collective over the same devices. Must stay in [0, 2**63 - 1].
+# 0x54454550 spells "TEEP".
+EP_COMMUNICATION_ID = 0x54454550
+
+
+def run_borrowed_comm_bootstrap(
+    mesh, replica_groups_flat, group_size, communication_id=EP_COMMUNICATION_ID
+):
+    """Initialize EPBackend on the borrowed XLA comm (one-shot, all devices)."""
+    try:
+        from jax import shard_map  # top-level since v0.8.0
+    except ImportError:  # older JAX
+        from jax.experimental.shard_map import shard_map
+
+    all_axes = tuple(mesh.axis_names)
+    spec = PartitionSpec(all_axes)
+    world = int(np.prod([mesh.shape[a] for a in all_axes]))
+    rg = np.asarray(replica_groups_flat, np.int64)
+    gs = np.int64(group_size)
+    cid = np.int64(communication_id)
+
+    def _body(x):
+        out_type = jax.ShapeDtypeStruct(x.shape, x.dtype)
+        return ffi.ffi_call("te_ep_bootstrap_borrowed_comm_ffi", out_type, has_side_effect=True)(
+            x, replica_groups=rg, group_size=gs, communication_id=cid
+        )
+
+    dummy = jnp.zeros((world,), dtype=jnp.uint8)
+    fn = jax.jit(shard_map(_body, mesh=mesh, in_specs=spec, out_specs=spec))
+    jax.block_until_ready(fn(dummy))
+
+
 def set_ep_config(config: EpConfig) -> None:
     """Cache the EP config for abstract-eval / sharding helpers. Call once."""
     global _ep_config
@@ -87,6 +166,12 @@ def get_ep_config() -> EpConfig:
     if _ep_config is None:
         raise RuntimeError("EpConfig has not been set. Did you call ep_bootstrap()?")
     return _ep_config
+
+
+def reset_ep_config() -> None:
+    """Clear the cached EpConfig so a later ep_bootstrap starts fresh (see ep_finalize)."""
+    global _ep_config
+    _ep_config = None
 
 
 @dataclass(frozen=True)
@@ -215,8 +300,10 @@ class EpPreparePrimitive(BasePrimitive):
         )
         leading = _ep_leading_dims(is_outer)
         token_counts_aval = jax.core.ShapedArray(leading + (num_local_experts,), jnp.int32)
+        # Per-rank pre-drop recv-slot total (includes tokens dropped on overflow).
+        total_recv_tokens_aval = jax.core.ShapedArray(leading + (1,), jnp.int32)
         handle_mem_aval = jax.core.ShapedArray(leading + (handle_mem_size,), jnp.uint8)
-        return token_counts_aval, handle_mem_aval
+        return token_counts_aval, total_recv_tokens_aval, handle_mem_aval
 
     @staticmethod
     def outer_abstract(*args, **kwargs):
@@ -236,13 +323,13 @@ class EpPreparePrimitive(BasePrimitive):
     @staticmethod
     def impl(topk_idx, top_k, dispatch_output_per_expert_alignment, is_outer):
         assert EpPreparePrimitive.inner_primitive is not None
-        token_counts, handle_mem = EpPreparePrimitive.inner_primitive.bind(
+        token_counts, total_recv_tokens, handle_mem = EpPreparePrimitive.inner_primitive.bind(
             topk_idx,
             top_k=top_k,
             dispatch_output_per_expert_alignment=dispatch_output_per_expert_alignment,
             is_outer=is_outer,
         )
-        return token_counts, handle_mem
+        return token_counts, total_recv_tokens, handle_mem
 
     @staticmethod
     def batcher(batched_args, batch_dims, *, top_k, dispatch_output_per_expert_alignment, is_outer):
@@ -262,9 +349,11 @@ class EpPreparePrimitive(BasePrimitive):
                 f" with the topk dim replicated; got spec={idx_spec}."
             )
         arg_shardings = tuple(a.sharding for a in arg_infos)
-        # token_counts / handle_mem inherit the input's leading axis (trailing dims auto-pad to None).
+        # token_counts / total_recv_tokens / handle_mem inherit the input's leading
+        # axis (trailing dims auto-pad to None).
         leading_spec = PartitionSpec(idx_spec[0])
         tc_sharding = NamedSharding(mesh, leading_spec)
+        trt_sharding = NamedSharding(mesh, leading_spec)
         hm_sharding = NamedSharding(mesh, leading_spec)
 
         def sharded_impl(topk_idx):
@@ -272,7 +361,7 @@ class EpPreparePrimitive(BasePrimitive):
                 topk_idx, top_k, dispatch_output_per_expert_alignment, False
             )
 
-        return mesh, sharded_impl, (tc_sharding, hm_sharding), arg_shardings
+        return mesh, sharded_impl, (tc_sharding, trt_sharding, hm_sharding), arg_shardings
 
     @staticmethod
     def shardy_sharding_rule(*args):
@@ -281,7 +370,7 @@ class EpPreparePrimitive(BasePrimitive):
         value_types = args[-2]
         topk_idx_rank = len(value_types[0].shape)
         in_axes = " ".join(f"L{i}" for i in range(topk_idx_rank - 1)) + " topk"
-        return f"{in_axes} -> EPL nle, EPL hm"
+        return f"{in_axes} -> EPL nle, EPL trt, EPL hm"
 
 
 register_primitive(EpPreparePrimitive)
@@ -908,7 +997,9 @@ register_primitive(EpCombineBwdPrimitive)
 
 @_on_collective_stream
 def ep_prepare(cfg: EpLayerConfig, topk_idx):
-    """Exchange routing metadata for ``cfg``; return ``(token_counts, handle_mem)``."""
+    """Exchange routing metadata for ``cfg``; return
+    ``(token_counts, total_recv_tokens, handle_mem)``. ``total_recv_tokens`` is
+    the per-rank pre-drop recv-slot total (includes tokens dropped on overflow)."""
     return EpPreparePrimitive.outer_primitive.bind(
         topk_idx,
         top_k=int(cfg.top_k),

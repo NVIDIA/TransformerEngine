@@ -19,6 +19,8 @@
 extern "C" {
 #endif
 
+#include <transformer_engine/nvfp4/4over6.h>
+
 /*! \enum NVTEDType
  *  \brief TE datatype.
  */
@@ -116,15 +118,6 @@ enum NVTEScalingMode {
    * rowwise or columnwise direction */
   NVTE_NVFP4_1D_SCALING = 4,
   NVTE_INVALID_SCALING = 100
-};
-
-/*! \enum NVTENVFP44Over6Mode
- * \brief Method for NVFP4 4over6 quantization.
- */
-enum NVTENVFP44Over6Mode {
-  kNVTENVFP44Over6Disabled = 0, /*!< 4over6 is not applied */
-  kNVTENVFP44Over6MinMAE = 1,   /*!< Select the candidate with lower mean absolute error */
-  kNVTENVFP44Over6MinMSE = 2,   /*!< Select the candidate with lower mean squared error */
 };
 
 /*! \brief TE Tensor type
@@ -436,6 +429,8 @@ enum NVTEQuantizationConfigAttribute {
    *  of ordinary NVFP4 fast-math settings.
    */
   kNVTEQuantizationConfigNVFP44Over6ErrUseFastMath = 9,
+  /*! Whether to use 2D block scaling for MXFP8 */
+  kNVTEQuantizationConfigMXFP82DQuantization = 10,
   kNVTEQuantizationConfigNumAttributes
 };
 
@@ -1472,6 +1467,13 @@ class QuantizationConfigWrapper {
   void set_nvfp4_2d_quantization(bool nvfp4_2d_quantization) {
     const auto val = static_cast<uint8_t>(nvfp4_2d_quantization);
     nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigNVFP42DQuantization,
+                                           &val, sizeof(val));
+  }
+
+  /*! \brief Set whether to use 2D block scaling for MXFP8 */
+  void set_mxfp8_2d_quantization(bool mxfp8_2d_quantization) {
+    const auto val = static_cast<uint8_t>(mxfp8_2d_quantization);
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigMXFP82DQuantization,
                                            &val, sizeof(val));
   }
 

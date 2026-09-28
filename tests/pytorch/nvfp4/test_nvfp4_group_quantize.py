@@ -13,8 +13,8 @@
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 from transformer_engine.pytorch import NVFP4Quantizer
-from transformer_engine.pytorch.custom_recipes.quantization_ref_nvfp4 import NVFP4QuantizerRef
-from transformer_engine.pytorch.custom_recipes import utils
+from transformer_engine.pytorch.custom_recipes.reference_nvfp4 import NVFP4QuantizerRef
+from transformer_engine.pytorch.custom_recipes import reference_utils
 from transformer_engine.common.recipe import NVFP4BlockScaling
 
 import pytest
@@ -251,4 +251,26 @@ def test_rht_with_quantization_block_tiling_versus_reference(
         with_post_rht_amax=with_post_rht_amax,
         with_random_sign_mask=with_random_sign_mask,
         optimize_for_gemm=optimize_for_gemm,
+    )
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("quantize_mode", ["rowwise_only", "both_directions", "columnwise_only"])
+def test_rht_split_quantize_matches_per_tensor_reference(quantize_mode: str) -> None:
+    # split_quantize sends RHT-enabled NVFP4 quantizers to the grouped Hadamard
+    # transform kernels, which are implemented for the SM100 family only. On
+    # other architectures it falls back to quantizing each split on its own.
+    # Both routes have to give the same result as per-tensor quantization.
+    split_sections = [128, 128, 128, 128]
+    return_rowwise = quantize_mode in ("rowwise_only", "both_directions")
+    return_transpose = quantize_mode in ("columnwise_only", "both_directions")
+
+    check_group_quantization_nvfp4_versus_reference(
+        x_dtype=torch.bfloat16,
+        M=sum(split_sections),
+        N=256,
+        return_rowwise=return_rowwise,
+        return_transpose=return_transpose,
+        split_sections=split_sections,
+        with_rht=True,
     )

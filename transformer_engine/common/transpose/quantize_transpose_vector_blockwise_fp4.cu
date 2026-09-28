@@ -269,11 +269,11 @@ __device__ __forceinline__ __nv_fp4x4_e2m1 cvt_fp32_to_fp4_4x_with_stochastic_ro
         : "f"(in01.y), "f"(in01.x), "f"(in23.y), "f"(in23.x), "r"(rbits));
     return *reinterpret_cast<__nv_fp4x4_e2m1*>(&out_4x);
   } else {
-    NVTE_DEVICE_ERROR(
-        "FP4 cvt.rs PTX instructions are architecture-specific. "
-        "Try recompiling with sm_XXXa instead of sm_XXX.");
-    uint16_t dummy = 0;
-    return *reinterpret_cast<__nv_fp4x4_e2m1*>(&dummy);
+    const float q0 = ptx::stochastic_round_fp4_e2m1(in01.x, rbits);
+    const float q1 = ptx::stochastic_round_fp4_e2m1(in01.y, rbits >> 8);
+    const float q2 = ptx::stochastic_round_fp4_e2m1(in23.x, rbits >> 16);
+    const float q3 = ptx::stochastic_round_fp4_e2m1(in23.y, rbits >> 24);
+    return __nv_fp4x4_e2m1(make_float4(q0, q1, q2, q3));
   }
 }
 

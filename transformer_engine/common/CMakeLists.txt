@@ -49,6 +49,9 @@ if(NOT arch_100_index EQUAL -1)
   if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.9)
     list(APPEND NVTE_SPECIFIC_ARCHS "103a")
   endif()
+  if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 13.4)
+    list(APPEND NVTE_SPECIFIC_ARCHS "107a")
+  endif()
 endif()
 
 # Check for architecture 101 (if we see this we are in toolkit <= 12.9)
@@ -181,6 +184,8 @@ list(APPEND transformer_engine_cpp_sources
      cudnn_utils.cpp
      transformer_engine.cpp
      fused_attn/fused_attn.cpp
+     cast/nvfp4/rtc_dispatch.cpp
+     fused_attn/config_and_params.cpp
      gemm/config.cpp
      normalization/common.cpp
      normalization/rtc_dispatch.cpp
@@ -247,23 +252,35 @@ list(APPEND transformer_engine_cuda_arch_specific_sources
      activation/gelu.cu
      activation/gelu_dbias.cu
      activation/gelu_grouped.cu
+     activation/gelu_grouped_bwd.cu
      activation/gelu_grouped_dbias.cu
+     activation/qgelu_grouped.cu
+     activation/qgelu_grouped_bwd.cu
+     activation/qgelu_grouped_dbias.cu
      activation/glu.cu
      activation/relu.cu
      activation/relu_dbias.cu
      activation/relu_grouped.cu
+     activation/relu_grouped_bwd.cu
      activation/relu_grouped_dbias.cu
+     activation/srelu_grouped.cu
+     activation/srelu_grouped_bwd.cu
+     activation/srelu_grouped_dbias.cu
      activation/scaled_activation.cu
+     activation/scaled_clamped_swiglu_grouped.cu
      activation/scaled_srelu.cu
      activation/scaled_swiglu.cu
+     activation/scaled_swiglu_grouped.cu
      activation/swiglu.cu
      activation/swiglu_dbias.cu
      activation/swiglu_grouped.cu
+     activation/swiglu_grouped_bwd.cu
      activation/swiglu_grouped_dbias.cu
      cast/cast.cu
      cast/cast_dbias.cu
      cast/cast_grouped.cu
      cast/cast_grouped_dbias.cu
+     cast/fused_group_requantize.cu
      gemm/cutlass_grouped_gemm.cu
      hadamard_transform/group_hadamard_transform.cu
      hadamard_transform/graph_safe_group_hadamard_transform.cu
@@ -368,6 +385,7 @@ target_link_libraries(transformer_engine PUBLIC
                       CUDA::cublas
                       CUDA::cudart
                       CUDNN::cudnn_all)
+target_link_libraries(transformer_engine PRIVATE ${CMAKE_DL_LIBS})
 
 target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
@@ -410,12 +428,12 @@ if (NVTE_WITH_CUBLASMP)
                  NAMES nccl libnccl
                  PATH_SUFFIXES lib
                  REQUIRED)
-    # cuBLASMp 0.8 is the first release with CUDA-graph-safe overlap algos,
+    # cuBLASMp 0.8.1 adds MXFP8 support to the CUDA-graph-safe overlap algos,
     # and NCCL 2.30 is the first release with graph-safe one-sided RMA
     # primitives (ncclPutSignal/ncclWaitSignal) that those algos use.
-    if (CUBLASMP_VERSION VERSION_LESS 0.8.0)
+    if (CUBLASMP_VERSION VERSION_LESS 0.8.1)
       message(FATAL_ERROR
-              "NVTE_WITH_CUBLASMP requires cuBLASMp >= 0.8.0, but found cuBLASMp "
+              "NVTE_WITH_CUBLASMP requires cuBLASMp >= 0.8.1, but found cuBLASMp "
               "${CUBLASMP_VERSION} in ${CUBLASMP_INCLUDE_DIR}/cublasmp.h")
     endif()
     if (NCCL_VERSION VERSION_LESS 2.30.0)
@@ -450,7 +468,7 @@ endif()
 # Set -DNVTE_WITH_NCCL_EP=OFF (or NVTE_WITH_NCCL_EP=0 in setup.py) to
 # skip NCCL EP entirely - useful on older images whose system NCCL is below
 # the 2.30.4 EP minimum.
-option(NVTE_WITH_NCCL_EP "Build NCCL EP into libtransformer_engine.so" ON)
+option(NVTE_WITH_NCCL_EP "Build and package the runtime-loaded NCCL EP library" ON)
 if(NVTE_WITH_NCCL_EP)
 # SM>=90 and NCCL>=2.30.4 are gated at runtime in EPBackend::initialize.
 # -- NCCL EP headers --------------------------------------------------------
@@ -466,17 +484,17 @@ if(NOT EXISTS "${NCCL_EP_INCLUDE_DIR}/nccl_ep.h")
 endif()
 message(STATUS "NCCL EP headers: ${NCCL_EP_INCLUDE_DIR}")
 
-# -- libnccl_ep.a -----------------------------------------------------------
-# Statically linked into libtransformer_engine.so. EPBackend::initialize checks
-# NCCL >= 2.30.4 before any nccl_ep call, so the newer NCCL symbols nccl_ep
-# imports stay unresolved (and harmless) under default ELF lazy binding when
-# the gate trips. LD_BIND_NOW environments lose this property.
+# -- libnccl_ep.so ----------------------------------------------------------
+# Loaded on demand by EPBackend only after it verifies NCCL >= 2.30.4. Keeping
+# NCCL EP out of libtransformer_engine.so allows non-EP users to run with older
+# NCCL versions even when the core library uses eager symbol binding.
 set(NCCL_EP_LIB_DIR "${NCCL_EP_SUBMODULE_ROOT}/build/lib")
-find_file(NCCL_EP_LIB
-    NAMES libnccl_ep.a
+find_file(NCCL_EP_SHARED_LINK
+    NAMES libnccl_ep.so
     HINTS ${NCCL_EP_LIB_DIR}
     NO_DEFAULT_PATH
     REQUIRED)
+file(REAL_PATH "${NCCL_EP_SHARED_LINK}" NCCL_EP_SHARED_LIB)
 
 # -- NCCL core library -------------------------------------------------------
 if(NOT NCCL_LIB)
@@ -489,20 +507,17 @@ endif()
 target_include_directories(transformer_engine PRIVATE
     ${NCCL_EP_INCLUDE_DIR})
 
-# libnccl.so direct symbols (ncclGetVersion etc.) come from libnccl_ep.a's
-# DT_NEEDED chain plus this TU's own references. CUDA::cuda_driver must follow
-# the static archive on the link line so --as-needed records libcuda.so.1.
+# libtransformer_engine.so uses only the baseline NCCL API directly. NCCL EP's
+# newer symbols remain isolated in libnccl_ep.so until EP is initialized.
 target_link_libraries(transformer_engine PUBLIC ${NCCL_LIB})
-target_link_libraries(transformer_engine PRIVATE
-    -Wl,--whole-archive ${NCCL_EP_LIB} -Wl,--no-whole-archive
-    CUDA::cuda_driver)
 
 target_sources(transformer_engine PRIVATE
     ep/ep_backend.cpp
-    ep/ep_api.cpp)
+    ep/ep_api.cpp
+    ep/nccl_ep_provider.cpp)
 target_compile_definitions(transformer_engine PRIVATE NVTE_WITH_NCCL_EP)
 
-message(STATUS "NCCL EP enabled (static link): ${NCCL_EP_LIB}")
+message(STATUS "NCCL EP enabled (runtime-loaded library): ${NCCL_EP_SHARED_LIB}")
 message(STATUS "NCCL EP include: ${NCCL_EP_INCLUDE_DIR}")
 else()
   # NCCL EP off: ep_api.cpp's #else branch exports throwing nvte_ep_* stubs.
@@ -565,6 +580,20 @@ make_string_header_from_file(utils.cuh
 make_string_header_from_file(util/math.h
                              string_code_util_math_h)
 
+# NVFP4 4over6 quantize: NVRTC bundled headers + RTC source file
+make_string_header_from_file(include/transformer_engine/nvfp4/4over6.h
+                             string_code_transformer_engine_nvfp4_4over6_h)
+make_string_header_from_file(util/type_extrema.h
+                             string_code_util_type_extrema_h)
+make_string_header_from_file(util/ptx.cuh
+                             string_code_util_ptx_cuh)
+make_string_header_from_file(cast/nvfp4/core_nvfp4.cuh
+                             string_code_cast_nvfp4_core_nvfp4_cuh)
+make_string_header_from_file(cast/nvfp4/quantize_4over6_kernel.cuh
+                             string_code_cast_nvfp4_quantize_4over6_kernel_cuh)
+make_string_header_from_file(cast/nvfp4/rtc/quantize_4over6.cu
+                             string_code_cast_nvfp4_rtc_quantize_4over6_cu)
+
 # Norm NVRTC bundled headers + RTC source files
 make_string_header_from_file(normalization/kernel_params.h
                              string_code_normalization_kernel_params_h)
@@ -588,6 +617,16 @@ make_string_header_from_file(normalization/rmsnorm/rtc/rmsnorm_bwd_kernel.cu
                              string_code_normalization_rmsnorm_rtc_rmsnorm_bwd_kernel_cu)
 target_include_directories(transformer_engine PRIVATE
                            "${CMAKE_CURRENT_BINARY_DIR}/string_headers")
+
+# Default OFF: the NVFP4 4over6 quantize kernel (384-way fanout) is compiled via
+# NVRTC at runtime. Set ON to additionally statically instantiate it as the
+# fallback selected when NVTE_DISABLE_NVRTC=1.
+option(NVTE_BUILD_LEGACY_STATIC_NVFP4
+       "Also compile the static NVFP4 4over6 quantize kernel for NVTE_DISABLE_NVRTC fallback"
+       OFF)
+target_compile_definitions(transformer_engine
+                           PRIVATE
+                           NVTE_BUILD_LEGACY_STATIC_NVFP4=$<BOOL:${NVTE_BUILD_LEGACY_STATIC_NVFP4}>)
 
 option(NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX
        "Also compile legacy static fused softmax kernels for NVTE_DISABLE_NVRTC fallback"
@@ -626,18 +665,29 @@ if (NVTE_BUILD_ACTIVATION_WITH_FAST_MATH)
   list(APPEND nvte_sources_with_fast_math activation/gelu.cu
                                           activation/gelu_dbias.cu
                                           activation/gelu_grouped.cu
+                                          activation/gelu_grouped_bwd.cu
                                           activation/gelu_grouped_dbias.cu
+                                          activation/qgelu_grouped.cu
+                                          activation/qgelu_grouped_bwd.cu
+                                          activation/qgelu_grouped_dbias.cu
                                           activation/glu.cu
                                           activation/relu.cu
                                           activation/relu_dbias.cu
                                           activation/relu_grouped.cu
+                                          activation/relu_grouped_bwd.cu
                                           activation/relu_grouped_dbias.cu
+                                          activation/srelu_grouped.cu
+                                          activation/srelu_grouped_bwd.cu
+                                          activation/srelu_grouped_dbias.cu
                                           activation/scaled_activation.cu
+                                          activation/scaled_clamped_swiglu_grouped.cu
                                           activation/scaled_srelu.cu
                                           activation/scaled_swiglu.cu
+                                          activation/scaled_swiglu_grouped.cu
                                           activation/swiglu.cu
                                           activation/swiglu_dbias.cu
                                           activation/swiglu_grouped.cu
+                                          activation/swiglu_grouped_bwd.cu
                                           activation/swiglu_grouped_dbias.cu)
 endif()
 
@@ -651,6 +701,14 @@ endforeach()
 
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3")
+
+# Compress every embedded cubin. CUDA 13 supports size-optimized compression
+# without imposing an additional driver requirement. Keep CUDA 12 on its
+# legacy/default compression mode to preserve compatibility with pre-12.4 drivers.
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xfatbin -compress-all")
+if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 13.0)
+  set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --compress-mode=size")
+endif()
 
 # Number of parallel build jobs
 if($ENV{MAX_JOBS})
@@ -672,3 +730,16 @@ message(STATUS "Threads per parallel build job: ${BUILD_THREADS_PER_JOB}")
 
 # Install library
 install(TARGETS transformer_engine DESTINATION .)
+if(NVTE_WITH_NCCL_EP)
+  # Install a real file rather than the build-tree symlink so wheel packaging
+  # does not need to preserve the versioned symlink chain.
+  install(FILES "${NCCL_EP_SHARED_LIB}"
+          DESTINATION .
+          RENAME libnccl_ep.so)
+  # NCCL EP JIT compilation requires both the public header root and staged
+  # device headers under NCCL_EP_HOME/include/nccl_ep.
+  install(FILES "${NCCL_EP_INCLUDE_DIR}/nccl_ep.h"
+          DESTINATION nccl_ep/include)
+  install(DIRECTORY "${NCCL_EP_INCLUDE_DIR}/nccl_ep"
+          DESTINATION nccl_ep/include)
+endif()

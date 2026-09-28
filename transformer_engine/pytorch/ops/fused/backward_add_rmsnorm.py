@@ -33,7 +33,7 @@ class BackwardAddRMSNorm(FusedOperation):
         basic_op_ctxs: list[OperationContext],
         grad_output: torch.Tensor,
         *,
-        basic_op_grad_extra_outputs: list[tuple[torch.Tensor, ...]],
+        basic_op_grad_extra_outputs: list[tuple[Optional[torch.Tensor], ...]],
     ) -> tuple[
         torch.Tensor,
         list[tuple[Optional[torch.Tensor], ...]],
@@ -56,7 +56,11 @@ class BackwardAddRMSNorm(FusedOperation):
         extra_grad = basic_op_grad_extra_outputs[0][0]
         dy = maybe_dequantize(grad_output.contiguous(), dtype).view(x.size())
         w = maybe_dequantize(rmsnorm_op.weight, dtype).view((inner_dim,))
-        add = maybe_dequantize(extra_grad.contiguous(), dtype).view(x.size())
+        if extra_grad is None:
+            # Extra output is not consumed, so its gradient is zero
+            add = torch.zeros_like(dy)
+        else:
+            add = maybe_dequantize(extra_grad.contiguous(), dtype).view(x.size())
 
         # Compute RMSNorm backward pass
         dx, dw = tex.rmsnorm_bwd_add(

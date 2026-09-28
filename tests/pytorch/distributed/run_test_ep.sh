@@ -47,11 +47,14 @@ run_pass() {
   local zc="$2"
   local eager="${3:-0}"
   local overflow="${4:-0}"
+  local mxfp8="${5:-0}"
+  local fused="${6:-0}"
   local log="stdout_ep_${label}.txt"
   echo "=== Running ${SCRIPT} [${label}] on ${NUM_RANKS} GPUs (timeout=${TEST_TIMEOUT_S}s) ==="
   # setsid + kill-after so SIGKILL takes down the whole process group, not just torchrun.
-  NVTE_EP_ZERO_COPY="${zc}" NVTE_EP_EAGER="${eager}" NVTE_EP_OVERFLOW="${overflow}" setsid timeout --foreground \
-    --kill-after=10 --signal=TERM "${TEST_TIMEOUT_S}" \
+  NVTE_EP_ZERO_COPY="${zc}" NVTE_EP_EAGER="${eager}" NVTE_EP_OVERFLOW="${overflow}" \
+    NVTE_EP_MXFP8_PASS="${mxfp8}" NVTE_EP_FUSED_PREPARE_DISPATCH="${fused}" \
+    setsid timeout --foreground --kill-after=10 --signal=TERM "${TEST_TIMEOUT_S}" \
     torchrun --standalone --nnodes=1 --nproc-per-node="${NUM_RANKS}" \
     "${SCRIPT}" 2>&1 | tee "${log}"
   local rc=${PIPESTATUS[0]}
@@ -72,5 +75,18 @@ run_pass "default" 0
 run_pass "zero_copy" 1
 run_pass "eager" 0 1
 run_pass "overflow" 0 0 1
+# MXFP8 grouped dispatch pins the per-expert alignment to 128, which the backend caches
+# process-wide, so its tests get their own passes (normal + zero-copy + eager IO). mxfp8 is the
+# 5th arg; eager is the 3rd.
+run_pass "mxfp8" 0 0 0 1
+run_pass "mxfp8_zero_copy" 1 0 0 1
+run_pass "mxfp8_eager" 0 1 0 1
+
+# Fused count-mode dispatch under CUDA graph capture (NVTE_EP_FUSED_PREPARE_DISPATCH=1) is
+# opt-in and needs its own passes so the fused-only tests aren't skipped: overflow and mxfp8
+# variants need their own gating envs too, and all require non-eager (caller-provided recv).
+run_pass "fused" 0 0 0 0 1
+run_pass "fused_overflow" 0 0 1 0 1
+run_pass "fused_mxfp8" 0 0 0 1 1
 
 exit $RET

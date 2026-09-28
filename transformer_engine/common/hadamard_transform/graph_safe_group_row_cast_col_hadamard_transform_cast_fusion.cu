@@ -13,8 +13,6 @@
 #include <transformer_engine/hadamard_transform.h>
 
 #include <cuda/barrier>
-#include <cute/algorithm/gemm.hpp>
-#include <cute/arch/cluster_sm90.hpp>
 #include <cute/tensor.hpp>
 
 #include "common/common.h"
@@ -604,7 +602,7 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device_g
 
         mma.accumulate_ = UMMA::ScaleOut::Zero;
 
-        tmem_allocator.allocate(TmemAllocator::Sm100TmemCapacityColumns,
+        tmem_allocator.allocate(cute::TMEM::Sm100TmemCapacityColumns,
                                 &shared_storage.tmem_base_ptr);
         __syncwarp();
         tmem_allocation_result_barrier.arrive();
@@ -653,7 +651,7 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device_g
         } while (scheduler.is_valid());
         tmem_allocator.release_allocation_lock();
         accumulator_pipeline.producer_tail(accumulator_pipe_producer_state);
-        tmem_allocator.free(tmem_base_ptr, TmemAllocator::Sm100TmemCapacityColumns);
+        tmem_allocator.free(tmem_base_ptr, cute::TMEM::Sm100TmemCapacityColumns);
       }
     } else if (is_sched_warp) {
       // Scheduler warp manages tile assignment and pipeline progress for warps
@@ -746,7 +744,7 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device_g
 
         cutlass::arch::NamedBarrier::sync(NumEpilogueColQuantThreadCount,
                                           cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
-        // Aligning with TensorEngine's recipe to generate scale factors // {$nv-internal-release}
+        // Aligning with TensorEngine's recipe to generate scale factors
         static constexpr float fp4_max = 6.0f;
         static constexpr float fp8_max = 448.0f;
         static constexpr float fp4_max_inv = 1.0f / fp4_max;
@@ -1003,7 +1001,7 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device_g
             shape_rep, num_tensors, (scheduler.tile_n_base() * size<1>(epilogue_tiler)) * M,
             packed_N, M, offsets);
         float a_global_amax_val = shared_storage.global_a_amax[group_idx];
-        // Aligning with TensorEngine's recipe to generate scale factors // {$nv-internal-release}
+        // Aligning with TensorEngine's recipe to generate scale factors
         static constexpr float fp4_max = 6.0f;
         static constexpr float fp8_max = 448.0f;
         static constexpr float fp4_max_inv = 1.0f / fp4_max;

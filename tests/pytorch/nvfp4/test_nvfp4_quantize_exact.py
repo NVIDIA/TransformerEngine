@@ -11,8 +11,8 @@ import torch
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 from transformer_engine.pytorch import NVFP4Quantizer
-from transformer_engine.pytorch.custom_recipes.quantization_ref_nvfp4 import NVFP4QuantizerRef
-from transformer_engine.pytorch.custom_recipes import utils
+from transformer_engine.pytorch.custom_recipes.reference_nvfp4 import NVFP4QuantizerRef
+from transformer_engine.pytorch.custom_recipes import reference_utils
 from transformer_engine.common.recipe import NVFP4BlockScaling
 
 
@@ -185,7 +185,7 @@ def check_quantization_nvfp4_versus_reference(
     # Reference quantization
     quant_tile_shape = (1, 16) if not with_2d_quantization else (16, 16)
     ref_quantizer = NVFP4QuantizerRef(
-        dtype=utils.Fp4Formats.E2M1,
+        dtype=reference_utils.Fp4Formats.E2M1,
         rowwise=True,
         columnwise=return_transpose,
         pow_2_scales=False,
@@ -394,7 +394,7 @@ def test_nvfp4_quantization_extrema_versus_reference(
     qx_amax_t = x_nvfp4_sut._amax_columnwise
 
     ref_quantizer = NVFP4QuantizerRef(
-        dtype=utils.Fp4Formats.E2M1,
+        dtype=reference_utils.Fp4Formats.E2M1,
         rowwise=True,
         columnwise=return_transpose,
         pow_2_scales=False,
@@ -539,7 +539,7 @@ def test_nvfp4_quantization_boundary_values(
     qx_amax_t = x_nvfp4_sut._amax_columnwise
 
     ref_quantizer = NVFP4QuantizerRef(
-        dtype=utils.Fp4Formats.E2M1,
+        dtype=reference_utils.Fp4Formats.E2M1,
         rowwise=True,
         columnwise=return_transpose,
         pow_2_scales=False,
@@ -670,7 +670,7 @@ def test_nvfp4_quantization_noncontiguous_inputs(
     qx_amax_t = x_nvfp4_sut._amax_columnwise
 
     ref_quantizer = NVFP4QuantizerRef(
-        dtype=utils.Fp4Formats.E2M1,
+        dtype=reference_utils.Fp4Formats.E2M1,
         rowwise=True,
         columnwise=return_transpose,
         pow_2_scales=False,
