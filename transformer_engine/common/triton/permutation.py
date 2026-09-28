@@ -320,8 +320,8 @@ def _unpermute_kernel(
     merging_probs_ptr,
     permuted_probs_ptr,
     pad_offsets_ptr,
-    # Dummy parameters for JAX input_output_aliases compatibility (matches _permute_kernel signature pattern)
-    # These are unused in the unpermute kernel but maintain consistency with the permute kernel.
+    # Buffer inputs used by JAX input_output_aliases. The kernel writes through
+    # the output pointers appended by the custom call.
     output_buf_ptr,  # pylint: disable=unused-argument
     unpermuted_probs_buf_ptr,  # pylint: disable=unused-argument
     # strides
@@ -342,12 +342,13 @@ def _unpermute_kernel(
     # metas
     num_experts: tl.constexpr,
     hidden_size: tl.constexpr,
-    PROBS_LOAD_WIDTH: tl.constexpr,
     WITH_MERGING_PROBS: tl.constexpr,
     PERMUTE_PROBS: tl.constexpr,
     FUSION_UNPAD: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
+    # When PERMUTE_PROBS=True, unpermuted_probs_ptr must be pre-zeroed by
+    # the caller. This kernel writes only routed probability entries.
     data_type = input_ptr.dtype.element_ty
     compute_type = tl.float32
     expert_idx = 0
@@ -356,17 +357,6 @@ def _unpermute_kernel(
     pid_h = tl.program_id(1)
     current_offset = pid_h * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = current_offset < hidden_size
-    if PERMUTE_PROBS:
-        # write 0.0 to probs_grad that are not routed
-        if pid_h == 0:
-            map_load_off = tl.arange(0, PROBS_LOAD_WIDTH)
-            unpermuted_prob_off = (
-                pid_t * stride_unpermuted_probs_token
-                + stride_unpermuted_probs_expert * map_load_off
-            )
-            tl.store(
-                unpermuted_probs_ptr + unpermuted_prob_off, 0.0, mask=map_load_off < num_experts
-            )
     accumulator = tl.zeros((BLOCK_SIZE,), dtype=compute_type)
     n_routed = tl.load(
         row_id_map_ptr
@@ -433,6 +423,7 @@ def _unpermute_bwd_with_merging_probs_kernel(
     merging_probs_ptr,
     row_id_map_ptr,
     pad_offsets_ptr,
+    merging_probs_grad_buf_ptr,  # pylint: disable=unused-argument
     # strides
     stride_row_id_map_token,
     stride_row_id_map_expert,
@@ -452,19 +443,15 @@ def _unpermute_bwd_with_merging_probs_kernel(
     # metas
     num_experts: tl.constexpr,
     hidden_size: tl.constexpr,
-    PROBS_LOAD_WIDTH: tl.constexpr,
     FUSION_UNPAD: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
+    # merging_probs_grad_ptr must be pre-zeroed by the caller. This kernel
+    # writes only routed probability-gradient entries.
     data_type = fwd_output_grad_ptr.dtype.element_ty
     compute_type = tl.float32
 
     pid = tl.program_id(0)
-    map_load_off = tl.arange(0, PROBS_LOAD_WIDTH)
-    token_probs_grad_off = (
-        pid * stride_merging_probs_grad_token + stride_merging_probs_grad_expert * map_load_off
-    )
-    tl.store(merging_probs_grad_ptr + token_probs_grad_off, 0.0, mask=map_load_off < num_experts)
     n_routed = tl.load(
         row_id_map_ptr + pid * stride_row_id_map_token + num_experts * 2 * stride_row_id_map_expert
     )

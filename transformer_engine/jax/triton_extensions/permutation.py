@@ -875,7 +875,7 @@ class UnpermuteWithMaskMapPrimitive(BasePrimitive):
     # Outer primitive has 5 tensor inputs: inp, row_id_map, merging_probs, permuted_probs, pad_offsets
     # Static args for outer primitive: num_tokens, num_experts, hidden_size,
     #                                  with_merging_probs, with_probs, with_unpad
-    # Inner primitive has adds output_buf, unpermuted_probs_buf
+    # Inner primitive adds output_buf and a pre-zeroed unpermuted_probs_buf.
     impl_static_args = (
         5,
         6,
@@ -894,8 +894,8 @@ class UnpermuteWithMaskMapPrimitive(BasePrimitive):
         merging_probs_aval,
         permuted_probs_aval,
         pad_offsets_aval,
-        output_buf_aval=None,  # Dummy (inner primitive only)
-        unpermuted_probs_buf_aval=None,  # Dummy (inner primitive only)
+        output_buf_aval=None,  # Inner primitive only
+        unpermuted_probs_buf_aval=None,  # Pre-zeroed buffer (inner primitive only)
         *,
         num_tokens,
         num_experts,
@@ -938,11 +938,12 @@ class UnpermuteWithMaskMapPrimitive(BasePrimitive):
         """Forward to inner primitive."""
         assert UnpermuteWithMaskMapPrimitive.inner_primitive is not None
 
-        # Create dummy buffers for kernel signature consistency with _permute_kernel.
-        # These are not used for pre-zeroing since unpermute writes to all output positions.
+        # The activation output is fully written by the kernel. Probability
+        # gradients are sparse, so start from zeros and alias this buffer to the
+        # output instead of racing in-kernel zero stores with routed writes.
         output_buf = jnp.empty((num_tokens, hidden_size), dtype=inp.dtype)
         if with_probs:
-            unpermuted_probs_buf = jnp.empty((num_tokens, num_experts), dtype=permuted_probs.dtype)
+            unpermuted_probs_buf = jnp.zeros((num_tokens, num_experts), dtype=permuted_probs.dtype)
         else:
             unpermuted_probs_buf = jnp.empty((0,), dtype=inp.dtype)
 
@@ -970,8 +971,8 @@ class UnpermuteWithMaskMapPrimitive(BasePrimitive):
         merging_probs,
         permuted_probs,
         pad_offsets,
-        output_buf,  # Dummy for kernel signature consistency
-        unpermuted_probs_buf,  # Dummy for kernel signature consistency
+        output_buf,
+        unpermuted_probs_buf,  # Pre-zeroed and aliased to output 1 when with_probs=True
         *,
         num_tokens,
         num_experts,
@@ -1007,6 +1008,7 @@ class UnpermuteWithMaskMapPrimitive(BasePrimitive):
             return (num_tokens, triton.cdiv(hidden_size, meta["BLOCK_SIZE"]))
 
         block_size = _get_min_block_size(_unpermute_kernel)
+        input_output_aliases = {6: 1} if with_probs else None
 
         return triton_call_lowering(
             ctx,
@@ -1019,6 +1021,7 @@ class UnpermuteWithMaskMapPrimitive(BasePrimitive):
             output_buf,
             unpermuted_probs_buf,
             grid=grid,
+            input_output_aliases=input_output_aliases,
             constexprs={
                 "stride_row_id_map_token": row_id_stride_token,
                 "stride_row_id_map_expert": row_id_stride_expert,
@@ -1033,7 +1036,6 @@ class UnpermuteWithMaskMapPrimitive(BasePrimitive):
                 "stride_unpermuted_probs_expert": unpermuted_probs_stride_expert,
                 "num_experts": num_experts,
                 "hidden_size": hidden_size,
-                "PROBS_LOAD_WIDTH": triton.next_power_of_2(num_experts),
                 "WITH_MERGING_PROBS": with_merging_probs,
                 "PERMUTE_PROBS": with_probs,
                 "FUSION_UNPAD": with_unpad,
@@ -1210,6 +1212,7 @@ class UnpermuteBwdWithMergingProbsPrimitive(BasePrimitive):
         merging_probs_aval,
         row_id_map_aval,
         pad_offsets_aval,
+        merging_probs_grad_buf_aval=None,  # Pre-zeroed buffer (inner primitive only)
         *,
         num_tokens,
         num_experts,
@@ -1219,6 +1222,7 @@ class UnpermuteBwdWithMergingProbsPrimitive(BasePrimitive):
     ):
         """Shape/dtype inference for unpermute backward with merging probs."""
         del fwd_input_aval, row_id_map_aval, pad_offsets_aval, with_unpad
+        del merging_probs_grad_buf_aval
 
         # fwd_input_grad has same shape as fwd_input
         fwd_input_grad_shape = (num_out_tokens, hidden_size)
@@ -1247,12 +1251,14 @@ class UnpermuteBwdWithMergingProbsPrimitive(BasePrimitive):
     ):
         """Forward to inner primitive."""
         assert UnpermuteBwdWithMergingProbsPrimitive.inner_primitive is not None
+        merging_probs_grad_buf = jnp.zeros_like(merging_probs)
         return UnpermuteBwdWithMergingProbsPrimitive.inner_primitive.bind(
             fwd_output_grad,
             fwd_input,
             merging_probs,
             row_id_map,
             pad_offsets,
+            merging_probs_grad_buf,
             num_tokens=num_tokens,
             num_experts=num_experts,
             num_out_tokens=num_out_tokens,
@@ -1268,6 +1274,7 @@ class UnpermuteBwdWithMergingProbsPrimitive(BasePrimitive):
         merging_probs,
         row_id_map,
         pad_offsets,
+        merging_probs_grad_buf,
         *,
         num_tokens,
         num_experts,
@@ -1306,7 +1313,9 @@ class UnpermuteBwdWithMergingProbsPrimitive(BasePrimitive):
             merging_probs,
             row_id_map,
             pad_offsets,
+            merging_probs_grad_buf,
             grid=grid,
+            input_output_aliases={5: 1},
             constexprs={
                 "stride_row_id_map_token": row_id_stride_token,
                 "stride_row_id_map_expert": row_id_stride_expert,
@@ -1322,7 +1331,6 @@ class UnpermuteBwdWithMergingProbsPrimitive(BasePrimitive):
                 "stride_merging_probs_grad_expert": merging_probs_grad_stride_expert,
                 "num_experts": num_experts,
                 "hidden_size": hidden_size,
-                "PROBS_LOAD_WIDTH": triton.next_power_of_2(num_experts),
                 "FUSION_UNPAD": with_unpad,
                 "BLOCK_SIZE": block_size,
             },

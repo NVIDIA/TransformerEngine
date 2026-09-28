@@ -245,7 +245,9 @@ def unpermute_with_mask_map(
     """
     output = torch.empty((num_tokens, hidden_size), dtype=inp.dtype, device="cuda")
     if permuted_probs is not None:
-        unpermuted_probs = torch.empty(
+        # The kernel only writes routed entries. Initialize the rest here so
+        # routed writes cannot race with an in-kernel zeroing phase.
+        unpermuted_probs = torch.zeros(
             (num_tokens, num_experts), dtype=permuted_probs.dtype, device="cuda"
         )
     else:
@@ -258,10 +260,9 @@ def unpermute_with_mask_map(
         merging_probs,
         permuted_probs,
         pad_offsets,
-        # Dummy buffer parameters for kernel signature consistency with _permute_kernel.
-        # These are unused in unpermute but maintain consistent interface.
-        output,  # output_buf_ptr (unused, passed for signature consistency)
-        unpermuted_probs,  # unpermuted_probs_buf_ptr (unused, passed for signature consistency)
+        # Buffer parameters shared with the JAX input/output-aliasing interface.
+        output,
+        unpermuted_probs,
         row_id_map.stride(0),
         row_id_map.stride(1),
         inp.stride(0),
@@ -277,7 +278,6 @@ def unpermute_with_mask_map(
         unpermuted_probs,
         num_experts,
         hidden_size,
-        PROBS_LOAD_WIDTH=triton.next_power_of_2(num_experts),
         WITH_MERGING_PROBS=merging_probs is not None,
         PERMUTE_PROBS=permuted_probs is not None,
         FUSION_UNPAD=pad_offsets is not None,
@@ -326,7 +326,9 @@ def unpermute_with_mask_map_bwd_with_merging_probs(
     # out the padding slots.
     alloc = torch.zeros if pad_offsets is not None else torch.empty
     act_grad = alloc((num_out_tokens, hidden_size), dtype=fwd_output_grad.dtype, device="cuda")
-    merging_probs_grad = torch.empty(
+    # The kernel only writes routed entries. Initialize the rest here so routed
+    # writes cannot race with an in-kernel zeroing phase.
+    merging_probs_grad = torch.zeros(
         (num_tokens, num_experts), dtype=merging_probs.dtype, device="cuda"
     )
     grid = (num_tokens,)
@@ -336,6 +338,7 @@ def unpermute_with_mask_map_bwd_with_merging_probs(
         merging_probs,
         row_id_map,
         pad_offsets,
+        merging_probs_grad,
         row_id_map.stride(0),
         row_id_map.stride(1),
         fwd_output_grad.stride(0),
@@ -352,7 +355,6 @@ def unpermute_with_mask_map_bwd_with_merging_probs(
         merging_probs_grad,
         num_experts,
         hidden_size,
-        PROBS_LOAD_WIDTH=triton.next_power_of_2(num_experts),
         FUSION_UNPAD=pad_offsets is not None,
     )
     return act_grad, merging_probs_grad
