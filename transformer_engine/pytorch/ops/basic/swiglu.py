@@ -146,21 +146,25 @@ class SwiGLU(BasicOperation):
             is_nvfp4_vmm_localization_eligible,
         )
 
+        swiglu_in_2d = swiglu_in.view(-1, swiglu_in.shape[-1])
         if (
             self.glu_interleave_size is None
             and is_nvfp4_vmm_localization_eligible(
-                swiglu_in,
+                swiglu_in_2d,
                 next_op_input_quantizer,
                 out_cols,
             )
         ):
             workspace = acquire_nvfp4_vmm_workspace(
-                (swiglu_in.shape[0], out_cols),
+                (swiglu_in_2d.shape[0], out_cols),
                 dtype=swiglu_in.dtype,
                 device=swiglu_in.device,
                 quantizer=next_op_input_quantizer,
             )
-            out = workspace.swiglu(swiglu_in)
+            out = workspace.swiglu(swiglu_in_2d)
+            out = out.view((*swiglu_in.shape[:-1], out_cols))
+            out._nvte_vmm_workspace = workspace
+            out._do_not_clear = True
         else:
             out = self._tex_swiglu_forward(swiglu_in, next_op_input_quantizer)
 
@@ -220,18 +224,23 @@ class SwiGLU(BasicOperation):
             is_nvfp4_vmm_localization_eligible,
         )
 
+        swiglu_in_2d = swiglu_in.view(-1, swiglu_in.shape[-1])
+        dy_2d = dy.view(-1, dy.shape[-1])
         if is_nvfp4_vmm_localization_eligible(
-            swiglu_in,
+            swiglu_in_2d,
             quantizer,
             swiglu_in.shape[-1],
         ):
             workspace = acquire_nvfp4_vmm_workspace(
-                (swiglu_in.shape[0], swiglu_in.shape[-1]),
+                (swiglu_in_2d.shape[0], swiglu_in.shape[-1]),
                 dtype=swiglu_in.dtype,
                 device=swiglu_in.device,
                 quantizer=quantizer,
             )
-            grad_swiglu_in = workspace.dswiglu(dy, swiglu_in)
+            grad_swiglu_in = workspace.dswiglu(dy_2d, swiglu_in_2d)
+            grad_swiglu_in = grad_swiglu_in.view(swiglu_in.shape)
+            grad_swiglu_in._nvte_vmm_workspace = workspace
+            grad_swiglu_in._do_not_clear = True
         else:
             grad_swiglu_in = self._tex_swiglu_backward(dy, swiglu_in, quantizer)
 

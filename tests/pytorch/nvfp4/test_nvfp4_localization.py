@@ -99,48 +99,49 @@ def _localize_output_data(output, allocator, domain: int) -> None:
 def test_nvfp4_vmm_swiglu_quantization(backward: bool, monkeypatch) -> None:
     """VMM SwiGLU quantization preserves full-tensor amax and packed output."""
     from transformer_engine.pytorch.tensor.localized_nvfp4 import (
-        acquire_nvfp4_vmm_workspace,
         clear_nvfp4_vmm_workspace_pools,
         release_nvfp4_vmm_tensor_workspaces,
     )
+    from transformer_engine.pytorch.ops.basic.swiglu import SwiGLU
+    from transformer_engine.pytorch.ops.op import OperationContext
 
     monkeypatch.setenv("NVTE_NVFP4_VMM_LOCALIZATION", "1")
     rows, output_cols = 8192, 1024
+    leading_shape = (rows // 2, 2)
     dtype = torch.bfloat16
     device = torch.device("cuda")
     quantizer = _make_quantizer(stochastic_rounding=False)
+    op = SwiGLU()
 
     if backward:
         producer_input = torch.randn(
-            (rows, output_cols),
+            (*leading_shape, output_cols),
             dtype=dtype,
             device=device,
         )
         grad_output = torch.randn(
-            (rows, output_cols // 2),
+            (*leading_shape, output_cols // 2),
             dtype=dtype,
             device=device,
         )
         baseline = tex.dswiglu(grad_output, producer_input, quantizer)
+        ctx = OperationContext(requires_grad=True, saved_tensors=(producer_input,))
+        ctx.dtype = dtype
+        ctx.prev_op_grad_output_quantizer = quantizer
+        localized, _ = op.op_backward(ctx, grad_output)
     else:
         producer_input = torch.randn(
-            (rows, output_cols * 2),
+            (*leading_shape, output_cols * 2),
             dtype=dtype,
             device=device,
         )
-        grad_output = None
         baseline = tex.swiglu(producer_input, quantizer)
-
-    workspace = acquire_nvfp4_vmm_workspace(
-        (rows, output_cols),
-        dtype=dtype,
-        device=device,
-        quantizer=quantizer,
-    )
-    if backward:
-        localized = workspace.dswiglu(grad_output, producer_input)
-    else:
-        localized = workspace.swiglu(producer_input)
+        localized = op.op_forward(
+            OperationContext(requires_grad=False),
+            producer_input,
+            None,
+            quantizer,
+        )
     torch.cuda.synchronize()
 
     for name in (
