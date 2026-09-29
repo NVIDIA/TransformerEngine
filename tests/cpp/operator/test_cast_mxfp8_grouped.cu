@@ -4,6 +4,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <cstdlib>
+
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
@@ -13,6 +15,7 @@
 #include <transformer_engine/activation.h>
 #include "../test_common.h"
 #include "transformer_engine/transformer_engine.h"
+#include "util/cuda_runtime.h"
 
 using namespace transformer_engine;
 using namespace test;
@@ -889,6 +892,86 @@ TEST(OperatorTest_GroupedFusedCastMXFP8, Test2DQuantization) {
             colwise,
             /*use_2d_quantization=*/true);
     }
+}
+
+// NVTE_GROUPED_QUANTIZE_SM_MARGIN applies to every group_quantize shape representation.
+TEST(OperatorTest_GroupedFusedCastMXFP8, SMMarginWithinRangeSucceeds) {
+    if (getDeviceComputeCapability() < blackwellComputeCapability) {
+        GTEST_SKIP();
+    }
+    setenv("NVTE_GROUPED_QUANTIZE_SM_MARGIN", "4", 1);
+
+    constexpr size_t num_tensors = 2;
+    const std::vector<size_t> logical_shape = {1, (128 * 128) + (256 * 256)};
+    const std::vector<size_t> first_dims = {128, 256};
+    const std::vector<size_t> last_dims = {128, 256};
+    const std::vector<size_t> offsets = {0, 128 * 128, (128 * 128) + (256 * 256)};
+
+    performTest<bf16, fp8e4m3>(
+        ProcessingMethod::CAST_ONLY,
+        &identity,
+        ShapeRepresentation::VARYING_BOTH_DIMS,
+        num_tensors,
+        logical_shape,
+        first_dims,
+        last_dims,
+        offsets,
+        /*rowwise=*/true,
+        /*colwise=*/false);
+}
+
+TEST(OperatorTest_GroupedFusedCastMXFP8, SMMarginRejectsOutOfRangeValue) {
+    if (getDeviceComputeCapability() < blackwellComputeCapability) {
+        GTEST_SKIP();
+    }
+    const int device_sm_count = transformer_engine::cuda::sm_count();
+    setenv("NVTE_GROUPED_QUANTIZE_SM_MARGIN", std::to_string(device_sm_count).c_str(), 1);
+
+    constexpr size_t num_tensors = 2;
+    const std::vector<size_t> logical_shape = {1, (128 * 128) + (256 * 256)};
+    const std::vector<size_t> first_dims = {128, 256};
+    const std::vector<size_t> last_dims = {128, 256};
+    const std::vector<size_t> offsets = {0, 128 * 128, (128 * 128) + (256 * 256)};
+
+    EXPECT_THROW(
+        (performTest<bf16, fp8e4m3>(
+            ProcessingMethod::CAST_ONLY,
+            &identity,
+            ShapeRepresentation::VARYING_BOTH_DIMS,
+            num_tensors,
+            logical_shape,
+            first_dims,
+            last_dims,
+            offsets,
+            /*rowwise=*/true,
+            /*colwise=*/false)),
+        std::runtime_error);
+}
+
+// Same mechanism, exercised against a different shape representation (SAME_BOTH_DIMS).
+TEST(OperatorTest_GroupedFusedCastMXFP8, SMMarginDirectMapperWithinRangeSucceeds) {
+    if (getDeviceComputeCapability() < blackwellComputeCapability) {
+        GTEST_SKIP();
+    }
+    setenv("NVTE_GROUPED_QUANTIZE_SM_MARGIN", "4", 1);
+
+    constexpr size_t num_tensors = 2;
+    const std::vector<size_t> logical_shape = {256, 128};
+    const std::vector<size_t> first_dims = {128, 128};
+    const std::vector<size_t> last_dims = {128, 128};
+    const std::vector<size_t> offsets = {0, 128 * 128, 2 * 128 * 128};
+
+    performTest<bf16, fp8e4m3>(
+        ProcessingMethod::CAST_ONLY,
+        &identity,
+        ShapeRepresentation::SAME_BOTH_DIMS,
+        num_tensors,
+        logical_shape,
+        first_dims,
+        last_dims,
+        offsets,
+        /*rowwise=*/true,
+        /*colwise=*/false);
 }
 
 std::string to_string(const ProcessingMethod method) {
