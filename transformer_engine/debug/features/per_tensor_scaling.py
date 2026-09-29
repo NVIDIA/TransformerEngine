@@ -11,6 +11,7 @@ import torch
 import nvdlfw_inspect.api as debug_api
 from nvdlfw_inspect.registry import Registry, api_method
 
+from transformer_engine import te_device_type
 from transformer_engine.pytorch import DType
 from transformer_engine.pytorch.tensor import Quantizer
 from transformer_engine.pytorch.tensor.float8_tensor import (
@@ -33,7 +34,9 @@ def per_tensor_cast(
         torch.float16,
         torch.bfloat16,
     ), "[NVTORCH INSPECT ERROR] Unsupported tensor type for per tensor current scaling"
-    assert tensor.is_cuda, "[NVTORCH INSPECT ERROR] Must be a GPU tensor."
+    assert (
+        tensor.device.type == te_device_type()
+    ), f"[NVTORCH INSPECT ERROR] Must be a {te_device_type()} tensor."
     assert fp8_dtype in {
         DType.kFloat8E4M3,
         DType.kFloat8E5M2,

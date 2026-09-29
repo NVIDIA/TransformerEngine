@@ -7,6 +7,7 @@ import warnings
 from typing import Optional, Tuple
 import torch
 import transformer_engine_torch as tex
+from transformer_engine import te_device_type
 import transformer_engine.pytorch.triton.permutation as triton_permutation
 from transformer_engine.pytorch.constants import TE_DType
 from transformer_engine.pytorch.quantized_tensor import (
@@ -44,10 +45,14 @@ def moe_permute_index_map_forward(
     if not inp.numel():
         return inp.clone(), torch.empty(0, dtype=torch.int32, device=inp.device)
 
-    if not inp.is_cuda:
-        raise ValueError(f"inp must be a CUDA tensor, but got tensor on {inp.device}.")
-    if not index.is_cuda:
-        raise ValueError(f"index must be a CUDA tensor, but got tensor on {index.device}.")
+    if inp.device.type != te_device_type():
+        raise ValueError(
+            f"inp must be a {te_device_type()} tensor, but got tensor on {inp.device}."
+        )
+    if index.device.type != te_device_type():
+        raise ValueError(
+            f"index must be a {te_device_type()} tensor, but got tensor on {index.device}."
+        )
     if inp.size(0) != index.size(0):
         raise ValueError(
             f"Permute not possible: inp.size(0) ({inp.size(0)}) must match "
@@ -299,19 +304,25 @@ def moe_permute_mask_map_forward(
         )
         return inp.clone(), row_id_map, permuted_probs
 
-    if not inp.is_cuda:
-        raise ValueError(f"inp must be a CUDA tensor, but got tensor on {inp.device}.")
-    if not routing_map.is_cuda:
+    if inp.device.type != te_device_type():
         raise ValueError(
-            f"routing_map must be a CUDA tensor, but got tensor on {routing_map.device}."
+            f"inp must be a {te_device_type()} tensor, but got tensor on {inp.device}."
+        )
+    if routing_map.device.type != te_device_type():
+        raise ValueError(
+            f"routing_map must be a {te_device_type()} tensor, but got tensor on"
+            f" {routing_map.device}."
         )
     if probs is not None:
-        if not probs.is_cuda:
-            raise ValueError(f"probs must be a CUDA tensor, but got tensor on {probs.device}.")
-    if pad_offsets is not None:
-        if not pad_offsets.is_cuda:
+        if probs.device.type != te_device_type():
             raise ValueError(
-                f"pad_offsets must be a CUDA tensor, but got tensor on {pad_offsets.device}."
+                f"probs must be a {te_device_type()} tensor, but got tensor on {probs.device}."
+            )
+    if pad_offsets is not None:
+        if pad_offsets.device.type != te_device_type():
+            raise ValueError(
+                f"pad_offsets must be a {te_device_type()} tensor, but got tensor on"
+                f" {pad_offsets.device}."
             )
     if inp.size(0) != routing_map.size(0):
         raise ValueError(

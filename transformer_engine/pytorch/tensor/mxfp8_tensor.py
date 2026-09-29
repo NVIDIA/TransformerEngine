@@ -13,6 +13,7 @@ import torch
 from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
 import transformer_engine_torch as tex
 
+from transformer_engine import te_device_type
 from transformer_engine.common.recipe import MXFP8BlockScaling, Recipe
 from ..constants import MXFP8_BLOCK_SCALING_SIZE, DType
 from ..utils import devices_match, round_up_to_nearest_multiple
@@ -823,7 +824,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         """
 
         # Tensor device
-        new_device = tensor.device if tensor.is_cuda else self.device
+        new_device = tensor.device if tensor.device.type == te_device_type() else self.device
         if not devices_match(new_device, tensor.device):
             tensor = tensor.to(device=new_device)
 
