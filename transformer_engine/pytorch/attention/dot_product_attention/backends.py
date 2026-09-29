@@ -242,12 +242,11 @@ else:
     else:
         # Unlike versions 2 and 3, FlashAttention 4 registers no custom ops: it builds
         # its kernels through the CUTLASS DSL as it runs. Keep it an eager island.
-        # FA4 b31 changed its unbounded-window sentinel from -1 to None.
-        if fa_utils.fa4_version >= fa_utils.v4_0_0_beta31:
-            _flash_attn_func_v4 = _normalize_fa4_window_kwargs(_flash_attn_func_v4)
-            _flash_attn_varlen_func_v4 = _normalize_fa4_window_kwargs(_flash_attn_varlen_func_v4)
-            _flash_attn_fwd_v4 = _normalize_fa4_window_kwargs(_flash_attn_fwd_v4)
-            _flash_attn_bwd_v4 = _normalize_fa4_window_kwargs(_flash_attn_bwd_v4)
+        # All FA4 versions accept None for unbounded windows; TE uses -1.
+        _flash_attn_func_v4 = _normalize_fa4_window_kwargs(_flash_attn_func_v4)
+        _flash_attn_varlen_func_v4 = _normalize_fa4_window_kwargs(_flash_attn_varlen_func_v4)
+        _flash_attn_fwd_v4 = _normalize_fa4_window_kwargs(_flash_attn_fwd_v4)
+        _flash_attn_bwd_v4 = _normalize_fa4_window_kwargs(_flash_attn_bwd_v4)
         flash_attn_func_v4 = no_torch_dynamo()(_flash_attn_func_v4)
         flash_attn_varlen_func_v4 = no_torch_dynamo()(_flash_attn_varlen_func_v4)
         _flash_attn_fwd_v4 = no_torch_dynamo()(_flash_attn_fwd_v4)
