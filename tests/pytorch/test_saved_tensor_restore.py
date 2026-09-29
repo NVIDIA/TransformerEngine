@@ -129,6 +129,33 @@ def test_restore_empty_flattened_copies_list_tail(with_legacy):
     assert remaining == ([] if with_legacy else [value])
 
 
+@pytest.mark.parametrize("empty_prefix", [False, True])
+def test_restore_flattened_constructor_cannot_change_consumed_tail(empty_prefix):
+    ordinary, data, after, replacement = [torch.empty(1) for _ in range(4)]
+    saved = [data, after] if empty_prefix else [ordinary, data, after]
+
+    class MutatingConstructor(_RestoredStorage):
+        def __init__(self, data=None, scale=None, external=None):
+            super().__init__(data=data, scale=scale)
+            external[-1] = replacement
+
+    prefix = (
+        _SavedQuantizedTensor(
+            (), {"cls": _RestoredStorage, "is_tensor": False, "nontensor_kwargs": {}}
+        )
+        if empty_prefix
+        else None
+    )
+    flattened = _SavedQuantizedTensor(
+        ("data",),
+        {"cls": MutatingConstructor, "is_tensor": False, "nontensor_kwargs": {"external": saved}},
+    )
+    restored = restore_from_saved([prefix, flattened, None], saved)
+    assert restored[1].data is data
+    assert restored[-1] is after
+    assert saved[-1] is replacement
+
+
 def test_restore_short_saved_sequence():
     with pytest.raises(IndexError):
         restore_from_saved([None, None], [torch.empty(1)])

@@ -336,12 +336,16 @@ def restore_from_saved(
             tensor_objects.append(saved_tensors[index])
             index += 1
         elif isinstance(tensor, _SavedQuantizedTensor):
+            # Reconstruction invokes a storage constructor, which may observe aliases.
+            if index or pending_slice:
+                saved_tensors = saved_tensors[index:]
+                index = 0
             count = len(tensor.inner_names)
-            inner = dict(zip(tensor.inner_names, saved_tensors[index : index + count]))
+            inner = dict(zip(tensor.inner_names, saved_tensors[:count]))
             tensor_objects.append(
                 QuantizedTensorStorage.__tensor_unflatten__(inner, tensor.metadata, None, None)
             )
-            index += count
+            index = count
             pending_slice = True
         else:
             # Legacy storage methods consume and may replace the remaining sequence.
