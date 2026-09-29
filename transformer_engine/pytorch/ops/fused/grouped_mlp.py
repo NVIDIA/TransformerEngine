@@ -186,7 +186,7 @@ def _cudnn_wgrad_workspace_size_fn() -> Optional[Callable]:
 
 @functools.lru_cache(maxsize=None)
 def _cudnn_wgrad_workspace(
-    op_name: str, # pylint: disable=unused-argument
+    op_name: str,  # pylint: disable=unused-argument
     num_experts: int,
     output_mode: str,
     input_order: str,
