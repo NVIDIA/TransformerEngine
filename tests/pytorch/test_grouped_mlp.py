@@ -7,6 +7,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 import contextlib
 import functools
+import importlib.util
 import os
 import math
 import random
@@ -136,6 +137,142 @@ def _reset_rng_states_per_test():
     """Restore torch, CUDA, and Python ``random`` before each test in this module."""
     reset_rng_states()
     yield
+
+
+@pytest.fixture
+def isolated_grouped_mlp_module(monkeypatch):
+    """Import the module with a private fusion registry and fresh capability caches."""
+    from transformer_engine.pytorch import utils as te_utils
+    from transformer_engine.pytorch.ops.fuser import OperationFuser
+
+    monkeypatch.delenv("NVTE_CUTEDSL_FUSED_GROUPED_MLP", raising=False)
+
+    def reject_cuda_query(*args, **kwargs):
+        raise AssertionError("Importing grouped MLP must not query or initialize CUDA")
+
+    spec = importlib.util.spec_from_file_location(
+        f"{grouped_mlp_module.__package__}._test_grouped_mlp", grouped_mlp_module.__file__
+    )
+    module = importlib.util.module_from_spec(spec)
+    with monkeypatch.context() as import_patch:
+        import_patch.setattr(te_utils, "get_device_compute_capability", reject_cuda_query)
+        import_patch.setattr(torch.cuda, "is_available", reject_cuda_query)
+        import_patch.setattr(torch.cuda, "_lazy_init", reject_cuda_query)
+        import_patch.setattr(OperationFuser, "forward_backward_fusion_functions", [])
+        spec.loader.exec_module(module)
+        registered_fusions = tuple(OperationFuser.forward_backward_fusion_functions)
+    return module, registered_fusions
+
+
+def test_grouped_mlp_registers_without_cuda_query(isolated_grouped_mlp_module) -> None:
+    """Both default fusion callbacks must be registered before capability is known."""
+    module, registered_fusions = isolated_grouped_mlp_module
+    assert set(registered_fusions) == {module.fuse_glu_ops, module.fuse_unary_activation_ops}
+
+
+@pytest.mark.parametrize(
+    "pipeline,quantization",
+    (
+        ("unrelated", None),
+        ("unrelated", "mxfp8"),
+        ("unrelated", "nvfp4"),
+        ("glu", "mxfp8_hybrid"),
+        ("unary", "mxfp8_hybrid"),
+        ("glu", "nvfp4_no_rht"),
+        ("unary", "nvfp4_no_rht"),
+    ),
+)
+def test_grouped_mlp_ineligible_pipeline_skips_capability_queries(
+    monkeypatch, isolated_grouped_mlp_module, pipeline: str, quantization: Optional[str]
+) -> None:
+    """Unrelated ops and unsupported recipes must not trigger device or cuDNN probes."""
+    from transformer_engine.common.recipe import Format, MXFP8BlockScaling, NVFP4BlockScaling
+
+    module, registered_fusions = isolated_grouped_mlp_module
+
+    def reject_capability_query(*args, **kwargs):
+        raise AssertionError("Ineligible pipelines must bypass grouped MLP capability checks")
+
+    monkeypatch.setattr(torch.cuda, "is_available", reject_capability_query)
+    monkeypatch.setattr(module, "get_pkg_version", reject_capability_query)
+    recipe = None
+    if quantization in ("mxfp8", "mxfp8_hybrid"):
+        fp8_format = Format.HYBRID if quantization == "mxfp8_hybrid" else Format.E4M3
+        recipe = MXFP8BlockScaling(fp8_format=fp8_format)
+    elif quantization in ("nvfp4", "nvfp4_no_rht"):
+        recipe = NVFP4BlockScaling(disable_rht=quantization == "nvfp4_no_rht")
+
+    if pipeline == "unrelated":
+        ops = [te.ops.ReLU() for _ in range(3)]
+    else:
+        is_glu = pipeline == "glu"
+        kwargs = {"bias": False, "device": "meta", "dtype": torch.bfloat16}
+        ops = [
+            te.ops.GroupedLinear(2, 64, 128 if is_glu else 64, **kwargs),
+            te.ops.ScaledSwiGLU(glu_interleave_size=32) if is_glu else te.ops.ScaledSReLU(),
+            te.ops.GroupedLinear(2, 64, 64, **kwargs),
+        ]
+    for fuse in registered_fusions:
+        assert fuse(ops, recipe=recipe) is ops
+
+
+@pytest.mark.parametrize("activation", ("glu", "unary"))
+@pytest.mark.parametrize(
+    "capability", ("supported", "cuda", "architecture", "frontend", "wrapper", "recipe", "shape")
+)
+def test_grouped_mlp_default_fusion_capabilities(
+    monkeypatch, isolated_grouped_mlp_module, activation: str, capability: str
+) -> None:
+    """Default fusion still respects hardware, dependency, recipe, and shape support."""
+    from transformer_engine.common.recipe import Format, MXFP8BlockScaling
+
+    module, registered_fusions = isolated_grouped_mlp_module
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: capability != "cuda")
+    monkeypatch.setattr(
+        module,
+        "get_device_compute_capability",
+        lambda: (9, 0) if capability == "architecture" else (10, 0),
+    )
+    monkeypatch.setattr(
+        module, "get_pkg_version", lambda _: "1.22.0" if capability == "frontend" else "1.24.0"
+    )
+
+    def unused_kernel():
+        raise AssertionError("Fusion planning must not execute a kernel")
+
+    fake_cudnn = types.ModuleType("cudnn")
+    for name in ("glu", "dglu", "srelu", "dsrelu", "quant", "wgrad"):
+        setattr(fake_cudnn, f"grouped_gemm_{name}_wrapper_sm100", unused_kernel)
+    if capability == "wrapper":
+        del fake_cudnn.grouped_gemm_quant_wrapper_sm100
+    monkeypatch.setitem(sys.modules, "cudnn", fake_cudnn)
+
+    hidden_size = 96 if capability == "shape" else 64
+    if activation == "glu":
+        activation_op = te.ops.ScaledSwiGLU(glu_interleave_size=32)
+        fc1_out_features = 128
+        fuse = module.fuse_glu_ops
+        fused_cls = module.GroupedMLP_CuTeGEMMGLU
+    else:
+        activation_op = te.ops.ScaledSReLU()
+        fc1_out_features = 64
+        fuse = module.fuse_unary_activation_ops
+        fused_cls = module.GroupedMLP_CuTeGEMMUnary
+    assert fuse in registered_fusions
+    kwargs = {"bias": False, "device": "meta", "dtype": torch.bfloat16}
+    ops = [
+        te.ops.GroupedLinear(2, hidden_size, fc1_out_features, **kwargs),
+        activation_op,
+        te.ops.GroupedLinear(2, 64, hidden_size, **kwargs),
+    ]
+    recipe = None if capability == "recipe" else MXFP8BlockScaling(fp8_format=Format.E4M3)
+    fused_ops = fuse(ops, recipe=recipe)
+    if capability == "supported":
+        assert len(fused_ops) == 1
+        assert isinstance(fused_ops[0], fused_cls)
+        assert list(fused_ops[0].basic_ops) == ops
+    else:
+        assert fused_ops == ops
 
 
 @pytest.mark.parametrize(
@@ -445,10 +582,8 @@ class _InjectGrad(torch.autograd.Function):
 class TestGroupedLinearOp:
     """Tests for advanced features with grouped linear basic op"""
 
-    def test_meta_single_grouped_weight_with_delayed_wgrad(self, monkeypatch) -> None:
+    def test_meta_single_grouped_weight_with_delayed_wgrad(self) -> None:
         """A deferred op shell must not access its grouped parent before it is attached."""
-        monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
-
         op = te.ops.GroupedLinear(
             2,
             16,
@@ -472,9 +607,8 @@ class TestGroupedLinearOp:
 
         assert grouped_weight.skip_backward_post_hook
 
-    def test_single_grouped_bias_uses_registered_packed_storage(self, monkeypatch) -> None:
+    def test_single_grouped_bias_uses_registered_packed_storage(self) -> None:
         """The grouped bias compute view must alias the registered trainable parent."""
-        monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
         op = te.ops.GroupedLinear(
             2,
             128,
@@ -521,13 +655,6 @@ class TestGroupedLinearOp:
         single_grouped_bias: bool,
     ) -> None:
         """Grouped GEMM"""
-        if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0" and (
-            single_grouped_weight or single_grouped_bias
-        ):
-            pytest.skip(
-                "single_grouped_weight/single_grouped_bias requires"
-                " NVTE_GROUPED_LINEAR_SINGLE_PARAM=1"
-            )
         # Split sizes
         split_sizes = [split_alignment * i for i in range(group_size)]
         random.shuffle(split_sizes)
@@ -923,13 +1050,6 @@ class TestGroupedLinearOp:
         """
 
         # Skip invalid configurations
-        if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0" and (
-            single_grouped_weight
-        ):
-            pytest.skip(
-                "single_grouped_weight/single_grouped_bias requires"
-                " NVTE_GROUPED_LINEAR_SINGLE_PARAM=1"
-            )
         if quantization is None and quantized_weight:
             pytest.skip("quantized_weight requires a quantization recipe")
         if (
@@ -1213,13 +1333,6 @@ class TestGroupedMLPFusedOp:
         maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
         if dtype == torch.bfloat16 and not is_bf16_available():
             pytest.skip("BF16 requires SM 8.0+")
-        if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0" and (
-            single_grouped_weight or single_grouped_bias
-        ):
-            pytest.skip(
-                "single_grouped_weight/single_grouped_bias requires"
-                " NVTE_GROUPED_LINEAR_SINGLE_PARAM=1"
-            )
         if single_grouped_weight and quantization != "mxfp8":
             pytest.skip("single_grouped_weight is only supported for MXFP8 quantization")
         if single_grouped_bias and not bias:
@@ -1707,8 +1820,6 @@ class TestGroupedMLPFusedOp:
         assert fused_cls.is_supported()
         # FC2 bias-gradient accumulation uses an atomic Triton reduction.
         monkeypatch.setenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")
-        if single_grouped_weight:
-            monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
 
         self.test_grouped_mlp(
             group_size=4,
@@ -2182,8 +2293,6 @@ class TestGroupedMLPFusedOp:
     ) -> None:
         """single_grouped_weight=True/False should match exactly for fused MXFP8 grouped MLP."""
 
-        if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0":
-            pytest.skip("single_grouped_weight requires NVTE_GROUPED_LINEAR_SINGLE_PARAM=1")
         if not te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
             pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
         if activation == "scaled_clamped_qgeglu":
@@ -2688,8 +2797,6 @@ class TestGroupedMLPFusedOp:
         that read ``.grad`` don't see stale bytes from the cached dummy).
         """
 
-        if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0" and single_grouped_weight:
-            pytest.skip("single_grouped_weight requires NVTE_GROUPED_LINEAR_SINGLE_PARAM=1")
         if not te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
             pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
 
@@ -2821,8 +2928,6 @@ class TestGroupedMLPFusedOp:
     ) -> None:
         """Grouped MLP forward+backward should be CUDA graph capturable (MXFP8)."""
 
-        if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0" and single_grouped_weight:
-            pytest.skip("single_grouped_weight requires NVTE_GROUPED_LINEAR_SINGLE_PARAM=1")
         if not te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
             pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
         if dtype not in (torch.bfloat16, torch.float16):

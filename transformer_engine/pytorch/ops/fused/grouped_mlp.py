@@ -479,9 +479,7 @@ def _pack_grouped_linear_bias_for_cudnn(linear_op: GroupedLinear) -> Optional[to
 @functools.lru_cache(maxsize=1)
 def _grouped_gemm_dsrelu_backward_supported() -> bool:
     """Whether the cuDNN FE grouped GEMM dSReLU backward wrapper is available."""
-    if int(os.environ.get("NVTE_CUTEDSL_FUSED_GROUPED_MLP", "0")) <= 0:
-        return False
-    if get_device_compute_capability()[0] != 10:
+    if not torch.cuda.is_available() or get_device_compute_capability()[0] != 10:
         return False
     if not _cudnn_frontend_supports_grouped_gemm_srelu():
         return False
@@ -932,6 +930,29 @@ def validate_grouped_mlp_dims(fc1, activation_op, fc2) -> None:
         )
 
 
+def _is_grouped_mlp_fusion_candidate(
+    ops: list[FusibleOperation],
+    recipe: Optional[Recipe],
+    activation_op_types: tuple[type[FusibleOperation]],
+) -> bool:
+    """Check the recipe and operation pattern before probing CUDA or cuDNN."""
+    if len(ops) < 3 or recipe is None or not (recipe.mxfp8() or recipe.nvfp4()):
+        return False
+    # NVFP4 graph-safe grouped quantize currently requires RHT.
+    if recipe.nvfp4() and recipe.disable_rht:
+        return False
+    # The fused MXFP8 backward reinterprets grad-output storage as E4M3. It
+    # cannot consume E5M2 gradients from Format.HYBRID. NVFP4 has separate formats.
+    if recipe.mxfp8() and get_fp8_torch_dtype(recipe, fprop_tensor=False) != torch.float8_e4m3fn:
+        return False
+    return any(
+        isinstance(fc1, GroupedLinear)
+        and isinstance(activation, activation_op_types)
+        and isinstance(fc2, GroupedLinear)
+        for fc1, activation, fc2 in zip(ops, ops[1:], ops[2:])
+    )
+
+
 def fuse_grouped_mlp_ops(
     ops: list[FusibleOperation],
     *,
@@ -956,18 +977,9 @@ def fuse_grouped_mlp_ops(
     list of FusibleOperation
         Updated operations with matched triples replaced by fused ops.
     """
+    if not _is_grouped_mlp_fusion_candidate(ops, recipe, activation_op_types):
+        return ops
     if not fused_op_cls.is_supported():
-        return ops
-    if recipe is None or not (recipe.mxfp8() or recipe.nvfp4()):
-        return ops
-    # NVFP4 fused grouped MLP uses graph-safe grouped quantize, which currently requires RHT.
-    if recipe.nvfp4() and recipe.disable_rht:
-        return ops
-    # The fused MXFP8 backward reinterprets the grad output's storage as E4M3, so an E5M2
-    # backward format would have its gradients misread rather than converted. This declines
-    # MXFP8 with Format.HYBRID. fp8_format does not describe NVFP4 gradients, so NVFP4 is
-    # excluded from the check rather than relying on its value.
-    if recipe.mxfp8() and get_fp8_torch_dtype(recipe, fprop_tensor=False) != torch.float8_e4m3fn:
         return ops
 
     out = []
@@ -1068,9 +1080,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
     @functools.lru_cache(maxsize=None)
     def is_supported(cls) -> bool:
         """Whether this fused operation is supported on the current system."""
-        if int(os.environ.get("NVTE_CUTEDSL_FUSED_GROUPED_MLP", "0")) <= 0:
-            return False
-        if get_device_compute_capability()[0] != 10:
+        if not torch.cuda.is_available() or get_device_compute_capability()[0] != 10:
             return False
         if not _cudnn_frontend_version_supported():
             return False
@@ -2825,6 +2835,15 @@ def fuse_glu_ops(
 ) -> list[FusibleOperation]:
     """Apply joint GroupedLinear + scaled GLU + GroupedLinear fusion."""
 
+    # Registered at import time; defer CUDA and optional dependency checks until
+    # a block-scaled pipeline can actually use this fusion.
+    if not _is_grouped_mlp_fusion_candidate(
+        ops, recipe, (ScaledSwiGLU, ScaledClampedQGeGLU, ScaledSiTUGLU)
+    ):
+        return ops
+    if not torch.cuda.is_available():
+        return ops
+
     # Determine supported activations
     activation_op_types = []
     device_arch = get_device_compute_capability()
@@ -2856,6 +2875,11 @@ def fuse_unary_activation_ops(
 ) -> list[FusibleOperation]:
     """Apply joint GroupedLinear + scaled unary activation + GroupedLinear fusion."""
 
+    if not _is_grouped_mlp_fusion_candidate(ops, recipe, (ScaledSReLU, ScaledTanhSReLU)):
+        return ops
+    if not GroupedMLP_CuTeGEMMUnary.is_supported():
+        return ops
+
     # Determine supported activations
     activation_op_types = [ScaledSReLU]
     if _cudnn_frontend_supports_grouped_gemm_srelu_tanh():
@@ -2869,8 +2893,7 @@ def fuse_unary_activation_ops(
     )
 
 
-# Register joint fusions if available.
-if GroupedMLP_CuTeGEMMGLU.is_supported():
-    register_forward_backward_fusion(fuse_glu_ops, prepend=True)
-if GroupedMLP_CuTeGEMMUnary.is_supported():
-    register_forward_backward_fusion(fuse_unary_activation_ops, prepend=True)
+# Register without probing CUDA or importing optional cuDNN kernels. Capability
+# checks run when the fuser encounters a supported quantization recipe.
+register_forward_backward_fusion(fuse_glu_ops, prepend=True)
+register_forward_backward_fusion(fuse_unary_activation_ops, prepend=True)

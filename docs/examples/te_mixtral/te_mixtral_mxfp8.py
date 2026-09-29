@@ -11,9 +11,9 @@ MoE FFN is a TE ``Sequential`` of three fusible ops — ``GroupedLinear``
 MXFP8. HF gate (``w1``) and up (``w3``) weights are row-interleaved in
 blocks of 32 to match the GLU interleaved layout that fused kernel reads.
 
-The fused kernel is enabled by ``utils._enable_fused_mxfp8_grouped_mlp()``
-(sets ``NVTE_CUTEDSL_FUSED_GROUPED_MLP=1`` and patches the SM-version /
-cudnn-frontend signature checks). Requires
+Supported grouped-MLP sequences are fused automatically.
+``utils._enable_fused_mxfp8_grouped_mlp()`` provides legacy SM-version /
+cudnn-frontend signature compatibility patches. Requires
 ``nvidia-cudnn-frontend >= 1.23.0`` and SM>=10 (Blackwell B100/B200/B300+).
 """
 
