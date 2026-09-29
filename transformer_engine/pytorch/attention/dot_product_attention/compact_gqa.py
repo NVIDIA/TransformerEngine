@@ -121,6 +121,7 @@ def try_compact_gqa_backward(
     offsets, lengths = packing
     capacity = max(1, *lengths)
     stream = torch.cuda.current_stream(args.q.device).cuda_stream
+    # cuDNN compiles symbolic lengths; initialize_workspace updates scratch capacity.
     key = (args.q.device, stream, lse.ndim)
     # Forward captures the owner so autograd threads do not depend on ContextVar propagation.
     with scope.lock:

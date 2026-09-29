@@ -170,25 +170,36 @@ def test_workspace_reuse_resize_and_release(monkeypatch):
     monkeypatch.setattr(compact_gqa, "_PLANS", {})
     monkeypatch.setattr(compact_gqa, "_BOUND_WORKSPACES", {})
     monkeypatch.setattr(torch.cuda, "current_stream", lambda *_: SimpleNamespace(cuda_stream=3))
+    initialized_capacity = 0
+
+    def initialize_workspace(buffer, stream, *, max_seqlen):
+        nonlocal initialized_capacity
+        initialized_capacity = max_seqlen
+
+    def backward(q, k, v, *args, sequence_lengths, **kwargs):
+        assert max(sequence_lengths) <= initialized_capacity
+        return {"dq": q, "dk": k, "dv": v}
+
     plan = SimpleNamespace(
-        compile=Mock(), initialize_workspace=Mock(), scratch_workspace_bytes=lambda n: 256 + n
+        compile=Mock(),
+        initialize_workspace=Mock(side_effect=initialize_workspace),
+        scratch_workspace_bytes=lambda n: 256 + n,
     )
     api = ModuleType("cudnn.sdpa.bwd.compact_gqa")
     api.CompactGqaBackward = Mock(return_value=plan)
-    api.compact_gqa_backward = Mock(
-        side_effect=lambda q, k, v, *args, **kwargs: {"dq": q, "dk": k, "dv": v}
-    )
+    api.compact_gqa_backward = Mock(side_effect=backward)
     monkeypatch.setitem(sys.modules, api.__name__, api)
     with metadata.attention_backend_workspace():
         owner = metadata._get_attention_backend_workspace()
-        for lengths in ((3, 5), (3, 5), (7, 9)):
+        for lengths in ((3, 5), (3, 5), (7, 9), (3, 5)):
             args = inputs(lengths)
             lse = torch.zeros(args.q.shape[0], 8)
             result = compact_gqa.try_compact_gqa_backward(args, args.q, lse)
             assert result[0] is args.q
         assert plan.compile.call_count == 1
         assert plan.initialize_workspace.call_count == 2
-        assert api.compact_gqa_backward.call_args.kwargs["sequence_lengths"] == (7, 9)
+        assert api.CompactGqaBackward.call_count == 1
+        assert api.compact_gqa_backward.call_args.kwargs["sequence_lengths"] == (3, 5)
         assert owner.buffers
     assert not owner.buffers and not owner.active
     assert compact_gqa.try_compact_gqa_backward(args, args.q, lse) is None
@@ -234,7 +245,36 @@ def test_unsupported_modes(field, value, monkeypatch):
         ((4097, 8191), (4097, 8191)),
     ],
 )
-def test_native_compact_dispatch_matches_stock(lengths, spans):
+def test_native_compact_dispatch_matches_stock(lengths, spans, monkeypatch):
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (10, 7):
+        pytest.skip("Compact GQA requires SM107")
+    monkeypatch.setattr(compact_gqa, "_PLANS", {})
+    monkeypatch.setattr(compact_gqa, "_BOUND_WORKSPACES", {})
+    small = ((3, 125), (16, 128))
+    cached_plan = None
+    allocated = 0
+    try:
+        with metadata.attention_backend_workspace():
+            owner = metadata._get_attention_backend_workspace()
+            for current_lengths, current_spans in (small, (lengths, spans), small):
+                _check_native_compact_dispatch(current_lengths, current_spans)
+                assert len(compact_gqa._PLANS) == 1
+                plan = next(iter(compact_gqa._PLANS.values()))
+                if cached_plan is None:
+                    cached_plan = plan
+                assert plan is cached_plan
+                assert len(owner.buffers) == 1
+                _, capacity = next(iter(owner.buffers.values()))
+                allocated = max(allocated, *current_lengths)
+                assert capacity == allocated
+    finally:
+        torch.cuda.synchronize()
+        for plan in compact_gqa._PLANS.values():
+            plan.close()
+
+
+def _check_native_compact_dispatch(lengths, spans):
+    """Compare one pack with stock and an independent reference."""
     if torch.cuda.get_device_capability() != (10, 7):
         pytest.skip("Compact GQA requires SM107")
     api = pytest.importorskip("cudnn.sdpa.bwd.compact_gqa")

@@ -189,7 +189,7 @@ backend-selection overview.
    :Type: ``int`` (0 or 1)
    :Default: ``1``
    :Description: Enable or disable FusedAttention backend (cuDNN-based) for DotProductAttention. When set to ``0``, FusedAttention will not be used.
-      ``NVTE_CUDNN_COMPACT_GQA_BWD=1`` enables experimental SM107 compact GQA backward with registered packing metadata (default: ``0``).
+      ``NVTE_CUDNN_COMPACT_GQA_BWD=1`` enables experimental SM107 compact GQA backward (default: ``0``); call ``attention.register_cu_seqlens(tensor, offsets)`` for each prefix tensor after its final write and before forward.
 
 .. envvar:: NVTE_UNFUSED_ATTN
 
