@@ -12,8 +12,11 @@
  *  walks it twice.  Here a CTA covers whole 32-row bands, the colwise block
  *  height, so the tile is read once into registers and both directions are
  *  quantized from there; shared memory holds only the cross-warp colwise
- *  partials, the row scales and the dGeLU table.  Cast-only requests have their
- *  own register-resident kernel (specialized/cast_bidim.cuh); anything else this
+ *  partials, the row scales and the dGeLU table.
+ *
+ *  It replaces the generic kernel, not the specialized ones: cast-only requests
+ *  are served before the generic dispatch by the specialized kernels, one of
+ *  which (specialized/cast_bidim.cuh) is also register-resident.  Anything this
  *  kernel does not implement (see can_use) takes the generic kernel.
  */
 
@@ -29,8 +32,11 @@
 
 #include "../../../common.h"
 #include "../../../util/cuda_runtime.h"
+#include "../../../util/dgelu_table.cuh"
 #include "../../../util/math.h"
+#include "../../../util/packed_activation.cuh"
 #include "../../../util/ptx.cuh"
+#include "../../../utils.cuh"
 #include "../swizzle.cuh"
 
 namespace transformer_engine {
@@ -52,9 +58,17 @@ __device__ __forceinline__ unsigned abs_max_bf16x2(unsigned a, unsigned b) {
   return reinterpret_cast<const unsigned&>(d);
 }
 
-/*! \brief Widen the low / high BF16 of a word to FP32. */
-__device__ __forceinline__ float bf16_lo(unsigned v) { return __uint_as_float(v << 16); }
-__device__ __forceinline__ float bf16_hi(unsigned v) { return __uint_as_float(v & 0xffff0000u); }
+/*! \brief Widen a BF16 pair word to FP32, low half to x.  Same result as ptx::up_cast, whose
+ *  volatile asm the compiler cannot schedule as freely in the dGeLU loop. */
+__device__ __forceinline__ ptx::floatx2 widen_bf16x2(const unsigned v) {
+  return {__uint_as_float(v << 16), __uint_as_float(v & 0xffff0000u)};
+}
+
+/*! \brief Round an FP32 pair to a BF16 pair word, low lane in the low half. */
+__device__ __forceinline__ unsigned to_bf16x2(const ptx::floatx2& v) {
+  const __nv_bfloat162 r = __floats2bfloat162_rn(v.x, v.y);
+  return reinterpret_cast<const unsigned&>(r);
+}
 
 /*! \brief The reciprocal of an E8M0 scale, 2^(127-e), broadcast to a BF16 pair. */
 __device__ __forceinline__ unsigned e8m0_to_bf16x2_reciprocal(unsigned e) {
@@ -62,273 +76,34 @@ __device__ __forceinline__ unsigned e8m0_to_bf16x2_reciprocal(unsigned e) {
   return reinterpret_cast<const unsigned&>(r);
 }
 
-/*! \brief As e8m0_to_bf16x2_reciprocal, for a word holding one scale per half.
- *
- * e = 254 needs the subnormal 2^-127, as ptx::exp2f_rcp_2x gives, so that an
- * Inf saturates to +-448 instead of becoming NaN.  e = 255 does not occur: the
- * amax is clamped by amax_to_e8m0_2x.
- */
-__device__ __forceinline__ unsigned e8m0x2_to_bf16x2_reciprocal(unsigned e2) {
-  return ((0x00FE00FEu - e2) << 7) | (__vcmpeq2(e2, 0x00FE00FEu) & 0x00400040u);
-}
-
 /*! \brief E8M0 scales for two block amaxes, packed as ptx::float_to_e8m0_2x.
  *
  * The generic kernel's amax is a 0-seeded max that ignores NaN, so a block of
  * only NaNs gets amax 0; the fmaxf reproduces that for the data-seeded maxima
- * here.
+ * here.  The conversion saturates, so the scale never reaches 255.
  */
 __device__ __forceinline__ unsigned amax_to_e8m0_2x(float amax_hi, float amax_lo) {
-  return ptx::float_to_e8m0_2x(fmaxf(amax_hi * (1.0f / 448.0f), 0.0f),
-                               fmaxf(amax_lo * (1.0f / 448.0f), 0.0f));
-}
-
-// The activations follow util/math.h's operation order, with the FMA
-// contractions nvcc applies to it under -fmad=true written out as fmaf and _rn
-// intrinsics, so they round the same way as the generic kernel.
-__device__ __forceinline__ float act_dgelu(float v) {
-  float a3 = fmaf(__fmul_rn(0.044715f, v), v, 1.0f);
-  float a5 = __fmul_rn(__fmul_rn(0.79788456f, v), a3);
-  float t = tanhf(a5);
-  float c2 = fmaf(-t, t, 1.0f);
-  float d3 = fmaf(__fmul_rn(0.1070322243f, v), v, 0.79788456f);
-  float f = __fmul_rn(__fmul_rn(0.5f, v), __fmul_rn(c2, d3));
-  float h = __fmul_rn(0.5f, __fadd_rn(1.0f, t));
-  return __fadd_rn(f, h);
-}
-
-// A packed FP32 pair as the raw 64-bit register the .f32x2 instructions take.
-using f32x2 = unsigned long long;
-
-__device__ __forceinline__ f32x2 make_f32x2(float lo, float hi) {
-  f32x2 d;
-  asm("mov.b64 %0, {%1, %2};" : "=l"(d) : "f"(lo), "f"(hi));
-  return d;
-}
-__device__ __forceinline__ void unpack_f32x2(f32x2 a, float& lo, float& hi) {
-  asm("mov.b64 {%0, %1}, %2;" : "=f"(lo), "=f"(hi) : "l"(a));
-}
-__device__ __forceinline__ f32x2 splat_f32x2(float c) { return make_f32x2(c, c); }
-
-#define NVTE_REGTILE_F32X2_OP(NAME, PTX_NAME)                                       \
-  __device__ __forceinline__ f32x2 NAME(f32x2 a, f32x2 b) {                         \
-    const ptx::floatx2 d = ptx::PTX_NAME(reinterpret_cast<const ptx::floatx2&>(a),  \
-                                         reinterpret_cast<const ptx::floatx2&>(b)); \
-    return reinterpret_cast<const f32x2&>(d);                                       \
-  }
-NVTE_REGTILE_F32X2_OP(add_f32x2, add_2x)
-NVTE_REGTILE_F32X2_OP(mul_f32x2, mul_2x)
-#undef NVTE_REGTILE_F32X2_OP
-
-__device__ __forceinline__ f32x2 fma_f32x2(f32x2 a, f32x2 b, f32x2 c) {
-  const ptx::floatx2 d = ptx::fma_2x(reinterpret_cast<const ptx::floatx2&>(a),
-                                     reinterpret_cast<const ptx::floatx2&>(b),
-                                     reinterpret_cast<const ptx::floatx2&>(c));
-  return reinterpret_cast<const f32x2&>(d);
-}
-
-/*! \brief Widen both halves of a BF16 pair to a packed FP32 pair. */
-__device__ __forceinline__ f32x2 bf16x2_to_f32x2(unsigned a) {
-  return make_f32x2(bf16_lo(a), bf16_hi(a));
-}
-
-// Packed tanh, following libdevice tanhf step for step so it rounds the same.
-
-//! 2 * log2(e), the argument scale of the exponential branch.
-constexpr float kTanhLog2eX2 = 0x1.715476p+1f;
-//! Coefficients of the |x| < 0.6 minimax polynomial, in Horner order.
-constexpr float kTanhPoly4 = 0x1.01e104p-6f;
-constexpr float kTanhPoly3 = -0x1.ac795cp-5f;
-constexpr float kTanhPoly2 = 0x1.10b282p-3f;
-constexpr float kTanhPoly1 = -0x1.5553dap-2f;
-//! The branch threshold 0.6f, squared.  0.6f * 0.6f rounds exactly to 0.36f, so
-//! the predicate can be tested on the already-computed square.
-constexpr float kTanhBranchXSq = 0x1.70a3d8p-2f;
-
-/*! \brief copysign(a, b) where a is known non-negative, as one LOP3. */
-__device__ __forceinline__ float copysign_nonneg(float a, float b) {
-  unsigned d;
-  asm("lop3.b32 %0, %1, %2, 0x80000000, 0xec;"
-      : "=r"(d)
-      : "r"(__float_as_uint(b)), "r"(__float_as_uint(a)));
-  return __uint_as_float(d);
-}
-
-__device__ __forceinline__ f32x2 tanh_f32x2(f32x2 u) {
-  float ua, ub;
-  unpack_f32x2(u, ua, ub);
-  float e0, e1;
-  asm("ex2.approx.ftz.f32 %0, %1;" : "=f"(e0) : "f"(__fmul_rn(fabsf(ua), kTanhLog2eX2)));
-  asm("ex2.approx.ftz.f32 %0, %1;" : "=f"(e1) : "f"(__fmul_rn(fabsf(ub), kTanhLog2eX2)));
-  float f0, f1;
-  unpack_f32x2(add_f32x2(make_f32x2(e0, e1), splat_f32x2(1.0f)), f0, f1);
-  float r0, r1;
-  asm("rcp.approx.ftz.f32 %0, %1;" : "=f"(r0) : "f"(f0));
-  asm("rcp.approx.ftz.f32 %0, %1;" : "=f"(r1) : "f"(f1));
-  // libdevice clamps |x| >= 9.010914 to exactly 1.0; there 2*rcp(ex2(2ln2|x|))
-  // is already below half an ulp of 1.0f, so fma(r,-2,1) rounds to 1.0f on its
-  // own and the clamp select is dropped.
-  float g0, g1;
-  unpack_f32x2(fma_f32x2(make_f32x2(r0, r1), splat_f32x2(-2.0f), splat_f32x2(1.0f)), g0, g1);
-  const float xa = copysign_nonneg(g0, ua);
-  const float xb = copysign_nonneg(g1, ub);
-  const f32x2 s = mul_f32x2(u, u);
-  f32x2 p = fma_f32x2(s, splat_f32x2(kTanhPoly4), splat_f32x2(kTanhPoly3));
-  p = fma_f32x2(p, s, splat_f32x2(kTanhPoly2));
-  p = fma_f32x2(p, s, splat_f32x2(kTanhPoly1));
-  p = mul_f32x2(p, s);
-  p = fma_f32x2(p, u, u);
-  float pa, pb, sa, sb;
-  unpack_f32x2(p, pa, pb);
-  unpack_f32x2(s, sa, sb);
-  return make_f32x2(sa >= kTanhBranchXSq ? xa : pa, sb >= kTanhBranchXSq ? xb : pb);
-}
-
-/*! \brief GeLU on a packed pair, matching util/math.h gelu. */
-__device__ __forceinline__ f32x2 gelu_f32x2(f32x2 v) {
-  const f32x2 u =
-      mul_f32x2(v, fma_f32x2(mul_f32x2(splat_f32x2(0.03567741f), v), v, splat_f32x2(0.79788456f)));
-  const f32x2 t = tanh_f32x2(u);
-  // 0.5f * t is exact, so this fma rounds like 0.5f + 0.5f * t.
-  return mul_f32x2(v, fma_f32x2(splat_f32x2(0.5f), t, splat_f32x2(0.5f)));
-}
-
-/*! \brief dGeLU on a packed pair, matching act_dgelu term for term. */
-__device__ __forceinline__ f32x2 dgelu_f32x2(f32x2 v) {
-  const f32x2 a3 = fma_f32x2(mul_f32x2(splat_f32x2(0.044715f), v), v, splat_f32x2(1.0f));
-  const f32x2 a5 = mul_f32x2(mul_f32x2(splat_f32x2(0.79788456f), v), a3);
-  const f32x2 t = tanh_f32x2(a5);
-  // TE's fma(-t, t, 1), negated: round-to-nearest is sign-symmetric, so
-  // fma(t, t, -1) is exactly -(1 - t*t), and the sign folds into the 0.5 below
-  // for free instead of costing a negation per pair.
-  const f32x2 c2_neg = fma_f32x2(t, t, splat_f32x2(-1.0f));
-  const f32x2 d3 = fma_f32x2(mul_f32x2(splat_f32x2(0.1070322243f), v), v, splat_f32x2(0.79788456f));
-  const f32x2 f = mul_f32x2(mul_f32x2(splat_f32x2(-0.5f), v), mul_f32x2(c2_neg, d3));
-  // 0.5f*(1+t) and fma(0.5,t,0.5) round on the same grid (halving is exact).
-  const f32x2 h = fma_f32x2(splat_f32x2(0.5f), t, splat_f32x2(0.5f));
-  return add_f32x2(f, h);
+  constexpr float kMaxNormRcp = Quantized_Limits<fp8e4m3>::max_norm_rcp;
+  return ptx::float_to_e8m0_2x(fmaxf(amax_hi * kMaxNormRcp, 0.0f),
+                               fmaxf(amax_lo * kMaxNormRcp, 0.0f));
 }
 
 /*! \brief GeLU on a BF16 pair, returned as a BF16 pair. */
-__device__ __forceinline__ unsigned gelu_bf16x2(unsigned x_word) {
-  float v0, v1;
-  unpack_f32x2(gelu_f32x2(bf16x2_to_f32x2(x_word)), v0, v1);
-  return ptx::cvt_bf16x2(v1, v0);
+__device__ __forceinline__ unsigned gelu_bf16x2(unsigned x) {
+  return to_bf16x2(activation_2x<Empty, gelu<float, float>>(widen_bf16x2(x), {}));
 }
 
-// dGeLU lookup table.
-//
-// The activation input is BF16, so dgelu is a function of a 16-bit key and the
-// table holds exactly the FP32 values act_dgelu produces.  Some of each row's
-// words (TileConfig::kLutSlots) take the table and the rest the arithmetic body, which
-// spreads the work over the shared-memory and FP32/MUFU pipes.
-//
-// Range reduction keeps the table at 16 KB: magnitudes outside [2^-12, 8] are
-// clamped into it, and one "did the clamp move the value" test sends both tails
-// to dgelu_outside_window.
-
-//! BF16 bits of 2^-12, the smallest tabulated magnitude.
-constexpr unsigned kLutLoBits = 0x3980u;
-//! BF16 bits of 8.0, the largest tabulated magnitude.
-constexpr unsigned kLutHiBits = 0x4100u;
-//! Entries per sign.  kLutHiBits - kLutLoBits + 1 = 1921 of them are reachable.
-constexpr int kLutEntriesPerSign = 2048;
-//! Both bounds broadcast, for the packed clamp.
-constexpr unsigned kLutLoBitsX2 = 0x39803980u;
-constexpr unsigned kLutHiBitsX2 = 0x41004100u;
-//! Table size.  Reachable FP32 entries end at byte 15875; rounded up to the
-//! bulk-copy granularity.
-constexpr int kLutBytes = 15888;
-
-__device__ __align__(16) unsigned char d_dgelu_table[kLutBytes];
-
-/*! \brief Byte offsets of both halves of a BF16 pair into the dGeLU table.
- *
- * The sign bit is worth kLutEntriesPerSign four-byte entries, i.e. 0x8000, so
- * it needs no shift and each half stays below 0x10000: the packed add never
- * carries across the pair.
- *
- * \param[in,out] bad  Accumulates every bit the clamp moved, so several probes
- *                     can share one out-of-window test.
+/*! \brief dGeLU of a BF16 pair, by table or by arithmetic.
+ *  \tparam USE_TABLE  Which route this (row, word) slot takes; see LutSlot.
  */
-__device__ __forceinline__ unsigned lut_byte_offsets(unsigned x_word, unsigned& bad) {
-  const unsigned mag = x_word & 0x7fff7fffu;
-  const unsigned c = ptx::min_bf16x2(ptx::max_bf16x2(mag, kLutLoBitsX2), kLutHiBitsX2);
-  bad |= c ^ mag;
-  return ((c - kLutLoBitsX2) << 2) + ((x_word ^ mag) >> 2);
-}
-
-/*! \brief Probe the dGeLU table for both halves of a BF16 pair.
- *  \param[out] out_of_window  True if either half fell outside the tabulated window.
- */
-__device__ __forceinline__ f32x2 lut_dgelu(unsigned x_word, const unsigned char* __restrict__ table,
-                                           bool& out_of_window) {
-  unsigned bad = 0u;
-  const unsigned d = lut_byte_offsets(x_word, bad);
-  out_of_window = bad != 0u;
-  return make_f32x2(*(const float*)(table + (d & 0xffffu)), *(const float*)(table + (d >> 16)));
-}
-
-/*! \brief dGeLU below the tabulated window.
- *
- * For |v| < 2^-12 tanh collapses to its argument, and this form reproduces
- * dgelu_f32x2's rounding sequence term for term.
- */
-__device__ __forceinline__ float dgelu_tiny(float v) {
-  const float t = __fmul_rn(0.79788456f, v);
-  const float f = __fmul_rn(__fmul_rn(0.5f, v), 0.79788456f);
-  return __fadd_rn(f, __fmaf_rn(0.5f, t, 0.5f));
-}
-
-//! BF16 bits of the smallest |v| at which util/math.h's dgelu overflows to NaN.
-//! Between kLutHiBits and this, it equals the saturated last table entry.
-constexpr unsigned kDgeluOverflowBits = 0x6044u;
-
-/*! \brief dGeLU of one BF16 value whose probe may have been clamped.
- *
- * Above the window the clamped entry holds the saturated value, until the
- * formula overflows to NaN; that tail and Inf/NaN take the full formula.
- */
-__device__ __forceinline__ float dgelu_outside_window(unsigned bits, float probe) {
-  const unsigned mag = bits & 0x7fffu;
-  const float v = __uint_as_float(bits << 16);
-  if (mag < kLutLoBits) return dgelu_tiny(v);
-  if (mag >= kDgeluOverflowBits) return act_dgelu(v);
-  return probe;
-}
-
-/*! \brief Repair a clamped dGeLU probe. */
-__device__ __forceinline__ f32x2 dgelu_lut_tail(unsigned x_word, f32x2 probe) {
-  float d0, d1;
-  unpack_f32x2(probe, d0, d1);
-  return make_f32x2(dgelu_outside_window(x_word & 0xffffu, d0),
-                    dgelu_outside_window(x_word >> 16, d1));
-}
-
-/*! \brief dGeLU of one BF16 pair, by table or by arithmetic.
- *  \tparam USE_LUT  Which route this (row, word) slot takes; see LutSlot.
- */
-template <bool USE_LUT>
-__device__ __forceinline__ f32x2 dgelu_word(unsigned x_word,
-                                            const unsigned char* __restrict__ table) {
-  if constexpr (USE_LUT) {
-    bool out_of_window;
-    const f32x2 d = lut_dgelu(x_word, table, out_of_window);
-    if (__builtin_expect(!out_of_window, 1)) return d;
-    return dgelu_lut_tail(x_word, d);
+template <bool USE_TABLE>
+__device__ __forceinline__ ptx::floatx2 dgelu_word(unsigned x,
+                                                   const unsigned char* __restrict__ table) {
+  if constexpr (USE_TABLE) {
+    return dgelu_table::lookup(x, table);
+  } else {
+    return activation_2x<Empty, dgelu<float, float>>(widen_bf16x2(x), {});
   }
-  return dgelu_f32x2(bf16x2_to_f32x2(x_word));
-}
-
-/*! \brief Build the dGeLU table.  The contents depend only on the formula. */
-__global__ void init_dgelu_table_kernel() {
-  const int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i >= 2 * (int)(kLutHiBits - kLutLoBits + 1)) return;
-  const int sgn = i > (int)(kLutHiBits - kLutLoBits);
-  const unsigned mag = kLutLoBits + (unsigned)(sgn ? i - (int)(kLutHiBits - kLutLoBits + 1) : i);
-  const unsigned bits = ((unsigned)sgn << 15) | mag;
-  const unsigned idx = (mag - kLutLoBits) + (sgn ? (unsigned)kLutEntriesPerSign : 0u);
-  *(float*)(d_dgelu_table + (idx << 2)) = act_dgelu(__uint_as_float(bits << 16));
 }
 
 // Tile geometry.  A CTA covers 256 columns and walks 32-row sub-tiles; 32 rows
@@ -411,40 +186,8 @@ struct TileConfig {
   //! Only dGeLU tabulates; GeLU evaluates its closed form for every word.
   static constexpr bool kNeedsLut = IS_DACT;
   //! A non-tabulating instantiation still declares the array, at a minimal size.
-  static constexpr int kLutSharedBytes = kNeedsLut ? kLutBytes : 16;
+  static constexpr int kLutSharedBytes = kNeedsLut ? dgelu_table::kBytes : 16;
 };
-
-// Copy the dGeLU table into shared memory with one bulk-async (TMA) copy, so it
-// costs no LSU wavefronts.  issue_lut_copy starts it; wait_lut joins it, late
-// enough that the copy overlaps the first input loads.
-__device__ __forceinline__ void wait_lut(unsigned long long* bar) {
-  const unsigned b = (unsigned)__cvta_generic_to_shared(bar);
-  unsigned ok;
-  do {
-    asm volatile(
-        "{ .reg .pred p; mbarrier.try_wait.parity.shared::cta.b64 p, [%1], 0; "
-        "selp.b32 %0, 1, 0, p; }"
-        : "=r"(ok)
-        : "r"(b)
-        : "memory");
-  } while (!ok);
-}
-__device__ __forceinline__ void issue_lut_copy(unsigned char* dst, const void* src, int bytes,
-                                               unsigned long long* bar, int tid) {
-  const unsigned d = (unsigned)__cvta_generic_to_shared(dst);
-  const unsigned b = (unsigned)__cvta_generic_to_shared(bar);
-  if (tid == 0) asm volatile("mbarrier.init.shared::cta.b64 [%0], 1;" ::"r"(b) : "memory");
-  __syncthreads();
-  if (tid == 0) {
-    asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;" ::"r"(b), "r"(bytes)
-                 : "memory");
-    asm volatile(
-        "cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes "
-        "[%0], [%1], %2, [%3];" ::"r"(d),
-        "l"(__cvta_generic_to_global(src)), "r"(bytes), "r"(b)
-        : "memory");
-  }
-}
 
 // Register-resident tiling: the 32x256 tile stays in registers; only the
 // colwise partials go through shared memory.
@@ -462,7 +205,7 @@ __device__ __forceinline__ void quantize_regtile(
   __shared__ __align__(16) unsigned col_scale_rcp_smem[kTileCols / 2];
   __shared__ __align__(8) unsigned char row_scale_bytes[kRowsPerMxBlock * kMxGroupsPerRow];
   __shared__ __align__(16) unsigned char dgelu_table_smem[C::kLutSharedBytes];
-  __shared__ __align__(8) unsigned long long dgelu_table_barrier;
+  __shared__ __align__(8) uint64_t dgelu_table_barrier;
 
   const int tid = threadIdx.x;
   const int lane = tid & 31;
@@ -470,8 +213,9 @@ __device__ __forceinline__ void quantize_regtile(
   const int col0 = blockIdx.x * kTileCols;
   const int vecs_per_row = K >> 3;  // uint4 (8 bf16 values) per row
 
+  // The table copy overlaps the first input loads; see wait_table below.
   if constexpr (C::kNeedsLut)
-    issue_lut_copy(dgelu_table_smem, d_dgelu_table, C::kLutSharedBytes, &dgelu_table_barrier, tid);
+    dgelu_table::load_table_async(dgelu_table_smem, &dgelu_table_barrier, tid);
   const unsigned char* __restrict__ dgelu_table = dgelu_table_smem;
 
 #pragma unroll 1
@@ -503,7 +247,7 @@ __device__ __forceinline__ void quantize_regtile(
             grad_vec[t][n] = input_ptr[(size_t)(h * kRowsInFlight + t) * vecs_per_row + n];
       }
       if constexpr (C::kNeedsLut) {
-        if (it == 0 && h == 0) wait_lut(&dgelu_table_barrier);
+        if (it == 0 && h == 0) dgelu_table::wait_table(&dgelu_table_barrier);
       }
       // Convert the load group into the BF16 pairs the epilogue quantizes.
       if constexpr (!IS_DACT) {
@@ -521,15 +265,12 @@ __device__ __forceinline__ void quantize_regtile(
         }
       } else {
 // Each (row, word) slot takes the table or the arithmetic body per LutSlot.
-#define MXFP8_DACT_WORD(T, M)                                                                    \
-  {                                                                                              \
-    constexpr bool kUseLut = LutSlot<C::kSlots, C::kLutSlots, (T) * 4 + (M) + 2>::value;         \
-    const f32x2 product =                                                                        \
-        mul_f32x2(dgelu_word<kUseLut>(x_words[M], dgelu_table), bf16x2_to_f32x2(grad_words[M])); \
-    float product_lo, product_hi;                                                                \
-    unpack_f32x2(product, product_lo, product_hi);                                               \
-    tile_words[(h * kRowsInFlight + (T)) * kWordsPerLane + (M)] =                                \
-        ptx::cvt_bf16x2(product_hi, product_lo);                                                 \
+#define MXFP8_DACT_WORD(T, M)                                                                   \
+  {                                                                                             \
+    constexpr bool kUseLut = LutSlot<C::kSlots, C::kLutSlots, (T) * 4 + (M) + 2>::value;        \
+    const ptx::floatx2 product =                                                                \
+        ptx::mul_2x(widen_bf16x2(grad_words[M]), dgelu_word<kUseLut>(x_words[M], dgelu_table)); \
+    tile_words[(h * kRowsInFlight + (T)) * kWordsPerLane + (M)] = to_bf16x2(product);           \
   }
 #define MXFP8_DACT_ROW(T)                                          \
   {                                                                \
@@ -588,7 +329,8 @@ __device__ __forceinline__ void quantize_regtile(
 #pragma unroll
       for (int lane_mask = 1; lane_mask < kLanesPerMxGroup; lane_mask <<= 1)
         amax_pair = abs_max_bf16x2(amax_pair, __shfl_xor_sync(0xffffffffu, amax_pair, lane_mask));
-      const unsigned scale_pair = amax_to_e8m0_2x(bf16_hi(amax_pair), bf16_lo(amax_pair));
+      const ptx::floatx2 amax_2x = widen_bf16x2(amax_pair);
+      const unsigned scale_pair = amax_to_e8m0_2x(amax_2x.y, amax_2x.x);
       const unsigned scale_byte0 = scale_pair & 0xffu, scale_byte1 = (scale_pair >> 8) & 0xffu;
       if ((lane & (kLanesPerMxGroup - 1)) == 0) {
         unsigned char* scale_dst = row_scale_bytes + (warp * kRowsPerWarp + j) * kMxGroupsPerRow +
@@ -658,7 +400,8 @@ __device__ __forceinline__ void quantize_regtile(
       for (int w = 1; w < kWarpsPerCta; ++w)
         col_amax = abs_max_bf16x2(col_amax, col_amax_partials[w][tid]);
       col_amax &= 0x7fff7fffu;
-      const unsigned scale_pair = amax_to_e8m0_2x(bf16_hi(col_amax), bf16_lo(col_amax));
+      const ptx::floatx2 amax_2x = widen_bf16x2(col_amax);
+      const unsigned scale_pair = amax_to_e8m0_2x(amax_2x.y, amax_2x.x);
       if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
         // The colwise swizzle is the rowwise one with rows and columns swapped,
         // so the two columns of this pair land in different 16-byte rows.  The
@@ -674,7 +417,8 @@ __device__ __forceinline__ void quantize_regtile(
         *(unsigned short*)(colwise_scales + (size_t)(row0 / 32) * colwise_scale_stride + col0 +
                            2 * tid) = (unsigned short)scale_pair;
       }
-      col_scale_rcp_smem[tid] = e8m0x2_to_bf16x2_reciprocal(__byte_perm(scale_pair, 0, 0x4140));
+      const ptx::bf16x2 scale_rcp = ptx::exp2f_rcp_2x_per_lane(__byte_perm(scale_pair, 0, 0x4140));
+      col_scale_rcp_smem[tid] = reinterpret_cast<const unsigned&>(scale_rcp);
     }
     auto drain_row_scales = [&]() {
       constexpr int drain_tid_base = C::kDrainTidBase;
@@ -691,8 +435,8 @@ __device__ __forceinline__ void quantize_regtile(
           *(unsigned*)(rowwise_scales + idx) = bytes.x;
           *(unsigned*)(rowwise_scales + idx + kTileBytes) = bytes.y;
         } else {
-          *(f32x2*)(rowwise_scales + (size_t)(row0 + r) * rowwise_scale_stride + (col0 >> 5)) =
-              *(const f32x2*)(row_scale_bytes + r * kMxGroupsPerRow);
+          *(uint2*)(rowwise_scales + (size_t)(row0 + r) * rowwise_scale_stride + (col0 >> 5)) =
+              *(const uint2*)(row_scale_bytes + r * kMxGroupsPerRow);
         }
       }
     };
@@ -813,42 +557,6 @@ static void launch(const void* input, const void* act_input, void* rowwise_out,
           (unsigned char*)colwise_scales, K, rowwise_scale_stride, colwise_scale_stride, iters);
 }
 
-// The dGeLU table lives in an anonymous namespace, so there is one copy per
-// translation unit, and as a __device__ array one per device.  The ready flags
-// must match: this function has internal linkage and keeps one flag per device.
-// A build issued under stream capture only runs when the graph does, so it does
-// not mark the device ready.  Rebuilding is idempotent.
-static void ensure_act_tables(cudaStream_t stream) {
-  static std::mutex mutex;
-  static std::vector<bool> ready;
-  int device;
-  NVTE_CHECK_CUDA(cudaGetDevice(&device));
-  std::lock_guard<std::mutex> lock(mutex);
-  if (static_cast<size_t>(device) < ready.size() && ready[device]) return;
-  cudaStreamCaptureStatus capture;
-  NVTE_CHECK_CUDA(cudaStreamIsCapturing(stream, &capture));
-  init_dgelu_table_kernel<<<(2 * kLutEntriesPerSign + 255) / 256, 256, 0, stream>>>();
-  NVTE_CHECK_CUDA(cudaGetLastError());
-  if (capture == cudaStreamCaptureStatusNone) {
-    // Other streams on this device will skip the build, so it must complete.
-    NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
-    if (static_cast<size_t>(device) >= ready.size()) ready.resize(device + 1, false);
-    ready[device] = true;
-  }
-}
-
-// Only GeLU and dGeLU are implemented.  The op is identified by template
-// matching, since taking the address of a __device__ function in host code is
-// not portable.
-template <typename ParamOP, float (*OP)(float, const ParamOP&)>
-constexpr bool is_gelu = false;
-template <>
-constexpr bool is_gelu<Empty, gelu<fp32, fp32>> = true;
-template <typename ParamOP, float (*OP)(float, const ParamOP&)>
-constexpr bool is_dgelu = false;
-template <>
-constexpr bool is_dgelu<Empty, dgelu<fp32, fp32>> = true;
-
 // The grid is derived by exact division, so columns must tile into 256.  Rows
 // must be a multiple of the generic kernel's 64-row activation tile: on a
 // 32-row tail that kernel writes zero scales into the padding past the last
@@ -869,8 +577,9 @@ template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP&)>
 bool can_use(const Tensor& input, const Tensor* act_input, const Tensor& output, const Tensor& noop,
              bool use_2d_quantization) {
-  constexpr bool op_supported = !IS_DBIAS && ((IS_ACT && !IS_DACT && is_gelu<ParamOP, OP>) ||
-                                              (IS_DACT && !IS_ACT && is_dgelu<ParamOP, OP>));
+  constexpr bool op_supported =
+      !IS_DBIAS && ((IS_ACT && !IS_DACT && packed_activation::is_gelu<ParamOP, OP>) ||
+                    (IS_DACT && !IS_ACT && packed_activation::is_dgelu<ParamOP, OP>));
   if constexpr (!op_supported) {
     return false;
   } else {
@@ -908,7 +617,7 @@ void quantize(const Tensor& input, const Tensor* act_input, Tensor* output,
   NVTE_CHECK(shape_supported(rows, cols),
              "Unsupported shape for register-resident MXFP8 quantize.");
   if constexpr (C::kNeedsLut) {
-    ensure_act_tables(stream);
+    dgelu_table::ensure_table(stream);
   }
   const void* act_ptr = IS_DACT ? act_input->data.dptr : input.data.dptr;
   TRANSFORMER_ENGINE_SWITCH_CONDITION(

@@ -877,6 +877,17 @@ __device__ __forceinline__ bf16x2 exp2f_rcp_2x(e8m0_t biased_exp) {
   return result;
 }
 
+/*! \brief exp2f_rcp<bf16> for two biased exponents at once, one in the low byte of each
+ *         16-bit half of \p biased_exps, returned as a BF16 pair.
+ *
+ *  Exponent 254 gives the subnormal 2^-127, as exp2f_rcp_2x does. Exponent 255 is not handled.
+ */
+__device__ __forceinline__ bf16x2 exp2f_rcp_2x_per_lane(const uint32_t biased_exps) {
+  const uint32_t bits =
+      ((0x00FE00FEu - biased_exps) << 7) | (__vcmpeq2(biased_exps, 0x00FE00FEu) & 0x00400040u);
+  return reinterpret_cast<const bf16x2 &>(bits);
+}
+
 // Scale two BF16 pairs by independent scales and pack the four results into a
 // single FP8E4M3 word.  The mul_cvt_4x overload below shares one scale across
 // all four elements, which is what a rowwise MX block wants; a colwise block
@@ -1950,57 +1961,16 @@ __device__ __forceinline__ void prefetch_l2_evict_last(const void *addr) {
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
 }
 
-// Packed FP32x2 arithmetic.  Each lane rounds exactly like the scalar `.rn` form.
-#define NVTE_DEFINE_F32X2_BINARY_OP(NAME, OPCODE)                                                  \
-  __device__ __forceinline__ floatx2 NAME(const floatx2 &a, const floatx2 &b) {                    \
-    floatx2 d;                                                                                     \
-    asm(OPCODE " %0, %1, %2;"                                                                      \
-        : "=l"(reinterpret_cast<uint64_t &>(d))                                                    \
-        : "l"(reinterpret_cast<const uint64_t &>(a)), "l"(reinterpret_cast<const uint64_t &>(b))); \
-    return d;                                                                                      \
-  }
-NVTE_DEFINE_F32X2_BINARY_OP(add_2x, "add.rn.f32x2")
-NVTE_DEFINE_F32X2_BINARY_OP(mul_2x, "mul.rn.f32x2")
-#undef NVTE_DEFINE_F32X2_BINARY_OP
-
-__device__ __forceinline__ floatx2 fma_2x(const floatx2 &a, const floatx2 &b, const floatx2 &c) {
-  floatx2 d;
-  asm("fma.rn.f32x2 %0, %1, %2, %3;"
-      : "=l"(reinterpret_cast<uint64_t &>(d))
-      : "l"(reinterpret_cast<const uint64_t &>(a)), "l"(reinterpret_cast<const uint64_t &>(b)),
-        "l"(reinterpret_cast<const uint64_t &>(c)));
-  return d;
-}
-
-// Packed BF16 min/max and conversions on a raw 32-bit word.
-
-__device__ __forceinline__ uint32_t max_bf16x2(uint32_t a, uint32_t b) {
-  uint32_t d;
-  asm("max.bf16x2 %0, %1, %2;" : "=r"(d) : "r"(a), "r"(b));
-  return d;
-}
-
-__device__ __forceinline__ uint32_t min_bf16x2(uint32_t a, uint32_t b) {
-  uint32_t d;
-  asm("min.bf16x2 %0, %1, %2;" : "=r"(d) : "r"(a), "r"(b));
-  return d;
-}
-
-/*! \brief Round two FP32 values to one packed BF16 pair.
- *  \note The PTX operand order puts the HIGH half first.
- */
-__device__ __forceinline__ uint32_t cvt_bf16x2(float hi, float lo) {
-  uint32_t d;
-  asm("cvt.rn.bf16x2.f32 %0, %1, %2;" : "=r"(d) : "f"(hi), "f"(lo));
-  return d;
-}
-
 /*! \brief float_to_e8m0 for two values at once, returned as two packed bytes:
  *         \p hi in the upper byte, \p lo in the lower one.
  */
-__device__ __forceinline__ uint32_t float_to_e8m0_2x(float hi, float lo) {
-  uint16_t d;
+__device__ __forceinline__ uint32_t float_to_e8m0_2x(const float hi, const float lo) {
+  uint16_t d = 0;
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   asm("cvt.rp.satfinite.ue8m0x2.f32 %0, %1, %2;" : "=h"(d) : "f"(hi), "f"(lo));
+#else
+  NVTE_DEVICE_ERROR("float_to_e8m0_2x is only supported on SM 10.0+.");
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   return static_cast<uint32_t>(d);
 }
 

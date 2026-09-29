@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 add_executable(test_util
+               test_dgelu_table.cu
                test_nvrtc.cpp
                test_packed_activation.cu
                test_string.cpp
