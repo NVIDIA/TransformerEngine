@@ -415,7 +415,8 @@ struct TileConfig {
 };
 
 // Copy the dGeLU table into shared memory with one bulk-async (TMA) copy, so it
-// costs no LSU wavefronts, and join on an mbarrier.
+// costs no LSU wavefronts.  issue_lut_copy starts it; wait_lut joins it, late
+// enough that the copy overlaps the first input loads.
 __device__ __forceinline__ void wait_lut(unsigned long long* bar) {
   const unsigned b = (unsigned)__cvta_generic_to_shared(bar);
   unsigned ok;
@@ -428,8 +429,8 @@ __device__ __forceinline__ void wait_lut(unsigned long long* bar) {
         : "memory");
   } while (!ok);
 }
-__device__ __forceinline__ void load_lut(unsigned char* dst, const void* src, int bytes,
-                                         unsigned long long* bar, int tid) {
+__device__ __forceinline__ void issue_lut_copy(unsigned char* dst, const void* src, int bytes,
+                                               unsigned long long* bar, int tid) {
   const unsigned d = (unsigned)__cvta_generic_to_shared(dst);
   const unsigned b = (unsigned)__cvta_generic_to_shared(bar);
   if (tid == 0) asm volatile("mbarrier.init.shared::cta.b64 [%0], 1;" ::"r"(b) : "memory");
@@ -443,7 +444,6 @@ __device__ __forceinline__ void load_lut(unsigned char* dst, const void* src, in
         "l"(__cvta_generic_to_global(src)), "r"(bytes), "r"(b)
         : "memory");
   }
-  wait_lut(bar);
 }
 
 // Register-resident tiling: the 32x256 tile stays in registers; only the
@@ -471,7 +471,7 @@ __device__ __forceinline__ void quantize_regtile(
   const int vecs_per_row = K >> 3;  // uint4 (8 bf16 values) per row
 
   if constexpr (C::kNeedsLut)
-    load_lut(dgelu_table_smem, d_dgelu_table, C::kLutSharedBytes, &dgelu_table_barrier, tid);
+    issue_lut_copy(dgelu_table_smem, d_dgelu_table, C::kLutSharedBytes, &dgelu_table_barrier, tid);
   const unsigned char* __restrict__ dgelu_table = dgelu_table_smem;
 
 #pragma unroll 1
@@ -501,6 +501,9 @@ __device__ __forceinline__ void quantize_regtile(
 #pragma unroll
           for (int n = 0; n < kVecLoadsPerRow; ++n)
             grad_vec[t][n] = input_ptr[(size_t)(h * kRowsInFlight + t) * vecs_per_row + n];
+      }
+      if constexpr (C::kNeedsLut) {
+        if (it == 0 && h == 0) wait_lut(&dgelu_table_barrier);
       }
       // Convert the load group into the BF16 pairs the epilogue quantizes.
       if constexpr (!IS_DACT) {
@@ -782,8 +785,13 @@ static void set_carveout() {
 template <bool IS_DACT, bool IS_ACT>
 int walk_length(int M, int K) {
   using C = TileConfig<IS_DACT, IS_ACT>;
-  int iters = pick_walk_length(M / kRowsPerMxBlock, K / kTileCols, kCtaTargetActivation,
-                               C::kNeedsLut ? kMinWalk : 1);
+  const int row_blocks = M / kRowsPerMxBlock;
+  const int grid_cols = K / kTileCols;
+  // The minimum walk amortizes the table copy, but not at the price of leaving
+  // SMs without a CTA.
+  int min_walk = C::kNeedsLut ? kMinWalk : 1;
+  if ((long long)grid_cols * (row_blocks / min_walk) < 2LL * cuda::sm_count()) min_walk = 1;
+  int iters = pick_walk_length(row_blocks, grid_cols, kCtaTargetActivation, min_walk);
   if constexpr (IS_DACT) {
     if (iters > kMaxWalkDact) iters = kMaxWalkDact;
   }
