@@ -101,17 +101,12 @@ class Bias(BasicOperation):
             bias = bias.to(device=self.device)
 
         # Initialize values
-        bias.zero_()
+        torch.nn.init.zeros_(bias)
 
         # Save updated parameter
         if not isinstance(bias, torch.nn.Parameter):
             bias = torch.nn.Parameter(bias)
         self.bias = bias
-
-    def pre_first_fuser_forward(self) -> None:
-        super().pre_first_fuser_forward()
-        if self.bias.device.type == "meta":
-            self.reset_parameters()
 
     def op_forward(
         self,

@@ -122,6 +122,12 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
 
     def pre_first_fuser_forward(self) -> None:
         """Preprocessing before first fuser forward pass"""
+        for name, param in self.named_parameters():
+            if param.device.type == "meta":
+                raise RuntimeError(
+                    f"{self.__class__.__name__} has parameter {name} on the meta device. "
+                    "Call reset_parameters() on the model before the first forward pass."
+                )
 
     def pre_fuser_forward(
         self,

@@ -20,6 +20,13 @@ class Sequential(torch.nn.Module):
     This is a drop-in replacement for ``torch.nn.Sequential`` with
     support for fusing ``FusibleOperation`` s.
 
+    .. note::
+
+       For deferred initialization, construct operations with
+       ``device="meta"`` and call ``reset_parameters()`` on this
+       container before the first forward pass. Do not call
+       ``reset_parameters()`` on the contained modules individually.
+
     Parameters
     ----------
     *args: FusibleOperation or torch.nn.Module
@@ -141,6 +148,14 @@ class Sequential(torch.nn.Module):
         out.extend(self)
         out.extend(modules)
         return out
+
+    def reset_parameters(self) -> None:
+        """Initialize parameter buffers and values"""
+        # Fusers cache params, which ops may replace
+        self._module_groups = None
+        for module in self:
+            if hasattr(module, "reset_parameters"):
+                module.reset_parameters()
 
     @classmethod
     def _make_module_groups(
