@@ -222,17 +222,25 @@ def initialize_ub(
 
              ``num_splits`` is a default configuration value; ``ring_exchange``
              does not use it. Changing ``qkv_dgrad`` or ``fc1_dgrad`` to a non-``bulk``
-             method switches that GEMM to ReduceScatter and disables the corresponding
-             ``*_wgrad`` overlap. The ``external`` overlaps for ``proj_wgrad`` and
-             ``fc2_wgrad`` require ``ring_exchange`` on ``proj_dgrad`` and ``fc2_dgrad``,
-             respectively.
+             method configures its communicator for ReduceScatter and disables the
+             corresponding ``*_wgrad`` overlap communicator. To use DGRAD+ReduceScatter
+             overlap, also set ``sequence_parallel=True`` and ``ub_overlap_rs_dgrad=True``
+             on the layer. ``te.TransformerLayer`` additionally requires
+             ``ub_tp_comm_overlap=True``; ``te.Linear`` and ``te.LayerNormLinear``
+             require ``parallel_mode="column"``. The ``external`` overlaps for
+             ``proj_wgrad`` and ``fc2_wgrad`` require ``ring_exchange`` on
+             ``proj_dgrad`` and ``fc2_dgrad``, respectively.
 
              With ``with_cublasmp=True``, ``qkv_dgrad`` and ``fc1_dgrad`` default to
              ReduceScatter with ``ring_exchange``, ``num_sm=1``, and
              ``num_splits=tp_size`` in their configurations. The ``qkv_wgrad``,
              ``fc1_wgrad``, ``proj_wgrad``, and ``fc2_wgrad`` overlap communicators
              are not created. cuBLASMp does not support ``bulk`` or ``external``
-             overlap methods.
+             overlap methods. With cuBLASMp, a layer requesting ``ub_bulk_dgrad=True``
+             instead uses DGRAD+ReduceScatter overlap, even if
+             ``ub_overlap_rs_dgrad=False``, when sequence parallelism is active (and
+             ``ub_tp_comm_overlap=True`` for ``te.TransformerLayer``). The column-parallel
+             requirement still applies to ``te.Linear`` and ``te.LayerNormLinear``.
 
              A list may be provided to specify a separate configuration for each
              quantization mode in ``quantization_modes``.
