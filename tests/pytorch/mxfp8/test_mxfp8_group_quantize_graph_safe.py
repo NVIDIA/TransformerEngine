@@ -554,6 +554,7 @@ def check_prequantized_requantize_versus_reference(
     M: int,
     N: int,
     split_sections: list[int],
+    return_dequantized: bool = True,
 ) -> None:
     """Run the pre-quantized requantize path and check both directions against a reference.
 
@@ -615,7 +616,7 @@ def check_prequantized_requantize_versus_reference(
         num_groups,
         split_section_tensor,
         te.DType.kBFloat16,
-        return_dequantized=True,
+        return_dequantized=return_dequantized,
     )
 
     assert wire.columnwise_data is not None, "columnwise data must be built"
@@ -631,7 +632,10 @@ def check_prequantized_requantize_versus_reference(
     # The returned dequantized tensor is what bias gradients are reduced from. Compare only the
     # live rows: both this and the reference allocate M rows but write only the covered ones, and
     # their tails are separate uninitialized allocations.
-    torch.testing.assert_close(dequantized[:valid_rows, :], dequantized_ref, atol=0.0, rtol=0.0)
+    if return_dequantized:
+        torch.testing.assert_close(dequantized[:valid_rows, :], dequantized_ref, atol=0.0, rtol=0.0)
+    else:
+        assert dequantized is None
 
     # The rowwise DATA must pass through untouched; only its scales are re-laid-out.
     torch.testing.assert_close(wire.rowwise_data, rowwise_data_before, atol=0.0, rtol=0.0)
@@ -679,6 +683,27 @@ def check_prequantized_requantize_versus_reference(
             atol=0.0,
             rtol=0.0,
         )
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize(
+    "M, N, split_sections",
+    [
+        (1024, 256, [256, 256, 256, 256]),
+        (1024, 256, [128, 0, 256, 128]),
+    ],
+)
+def test_prequantized_requantize_without_dequantized_output(
+    M: int, N: int, split_sections: list[int]
+) -> None:
+    """The grouped API path matches the reference with uniform and paged groups."""
+    check_prequantized_requantize_versus_reference(
+        x_dtype=torch.bfloat16,
+        M=M,
+        N=N,
+        split_sections=split_sections,
+        return_dequantized=False,
+    )
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)

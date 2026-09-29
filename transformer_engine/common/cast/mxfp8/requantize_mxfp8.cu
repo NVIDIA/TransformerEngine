@@ -20,6 +20,7 @@
 #include "../../common.h"
 #include "../../util/cuda_runtime.h"
 #include "../../util/ptx.cuh"
+#include "../../util/ptx_arch_spec.cuh"
 #include "../../utils.cuh"
 #include "../core/grouped_tma.cuh"
 #include "specialized/swizzle.cuh"
@@ -906,7 +907,7 @@ void launch_group_requantize(
       Traits::SHAPE_REPRESENTATION == ShapeRepresentation::VARYING_FIRST_DIM;
   if constexpr (!single_tma_tensor) {
     alignas(64) CUtensorMap empty_tensor_map{};
-    update_tma_descriptors<IType, OType><<<num_tensors, 1, 0, stream>>>(
+    update_tma_descriptors<IType, OType><<<num_tensors, THREADS_PER_WARP, 0, stream>>>(
         tensor_map_input, empty_tensor_map, empty_tensor_map, tensor_map_output,
         reinterpret_cast<const IType *>(input.data.dptr), nullptr, nullptr,
         reinterpret_cast<OType *>(output->columnwise_data.dptr), shape_rep,
@@ -935,15 +936,14 @@ void group_requantize(const GroupedTensor &input, GroupedTensor *output,
   using namespace group_requantize_kernel;
 
   checkCuDriverContext(stream);
+  NVTE_CHECK(input.scaling_mode == NVTE_MXFP8_1D_SCALING,
+             "Grouped requantization currently supports only MXFP8 1D scaling for the input.");
+  NVTE_CHECK(output->scaling_mode == NVTE_MXFP8_1D_SCALING,
+             "Grouped requantization currently supports only MXFP8 1D scaling for the output.");
   NVTE_CHECK(is_supported_by_CC_100(),
              "Grouped MXFP8 requantization requires Blackwell (SM100+) hardware.");
   CheckInputGroupedTensor(input, "group_requantize_input");
   CheckOutputGroupedTensor(*output, "group_requantize_output");
-
-  NVTE_CHECK(input.scaling_mode == NVTE_MXFP8_1D_SCALING,
-             "Input must use MXFP8 1D scaling.");
-  NVTE_CHECK(output->scaling_mode == NVTE_MXFP8_1D_SCALING,
-             "Output must use MXFP8 1D scaling.");
   NVTE_CHECK(input.has_data() && !input.has_columnwise_data(),
              "Input must contain rowwise MXFP8 data only.");
   NVTE_CHECK(!input.with_gemm_swizzled_scales,
@@ -1022,10 +1022,10 @@ void group_requantize(const GroupedTensor &input, GroupedTensor *output,
 }  // namespace dispatch
 }  // namespace transformer_engine
 
-void nvte_group_requantize_mxfp8(
+void nvte_grouped_requantize(
     const NVTEGroupedTensor input, NVTEGroupedTensor output,
     const NVTEQuantizationConfig quant_config, cudaStream_t stream) {
-  NVTE_API_CALL(nvte_group_requantize_mxfp8);
+  NVTE_API_CALL(nvte_grouped_requantize);
   using namespace transformer_engine;
   const GroupedTensor *const input_cu = convertNVTEGroupedTensorCheck(input);
   GroupedTensor *const output_cu = convertNVTEGroupedTensorCheck(output);

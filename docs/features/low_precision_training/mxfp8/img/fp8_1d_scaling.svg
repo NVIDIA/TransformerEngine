@@ -29,8 +29,8 @@
     <!-- FP8 Tensor split into many small blocks (40×10) -->
     <g id="tensor-blocks">
       <!-- White backgrounds for dots areas - cross pattern -->
-      <rect x="250.0" y="140.0" width="40" height="120" fill="#FFFFFF" stroke="none"/>
-      <rect x="130.0" y="190.0" width="240" height="30" fill="#FFFFFF" stroke="none"/>
+      <rect x="250.0" y="140.0" width="40" height="120" class="diagram-bg" fill="#FFFFFF" stroke="none"/>
+      <rect x="130.0" y="190.0" width="240" height="30" class="diagram-bg" fill="#FFFFFF" stroke="none"/>
       
       <!-- Blocks ONLY where they don't overlap with white cross -->
       <rect x="130" y="140" width="40" height="10" class="fp8-block"/>
@@ -100,7 +100,7 @@
       <rect x="330" y="250" width="40" height="10" class="fp8-block"/>
       
       <!-- Main outline -->
-      <rect x="130.0" y="140.0" width="240" height="120" fill="none" stroke="#444" stroke-width="2"/>
+      <rect x="130.0" y="140.0" width="240" height="120" class="tensor-outline" fill="none" stroke="#444" stroke-width="2"/>
     </g>
     
     <!-- Scaling factors tensor - 3+2 columns of 10px squares -->
@@ -109,8 +109,8 @@
       <rect x="215" y="285" width="70" height="120" fill="#FFA500"/>
       
       <!-- White backgrounds for dots areas - cross pattern -->
-      <rect x="245" y="285" width="20" height="120" fill="#FFFFFF" stroke="none"/>
-      <rect x="215" y="335" width="70" height="30" fill="#FFFFFF" stroke="none"/>
+      <rect x="245" y="285" width="20" height="120" class="diagram-bg" fill="#FFFFFF" stroke="none"/>
+      <rect x="215" y="335" width="70" height="30" class="diagram-bg" fill="#FFFFFF" stroke="none"/>
       
       <!-- Grid lines showing 10x10 squares (3 left + 2 right columns) -->
       <!-- Vertical lines every 10px (skipping white space) -->
@@ -161,7 +161,7 @@
       <line x1="265" y1="405" x2="285" y2="405" class="grid-line" stroke-width="1"/>
       
       <!-- Main outline -->
-      <rect x="215" y="285" width="70" height="120" fill="none" stroke="#444" stroke-width="2"/>
+      <rect x="215" y="285" width="70" height="120" class="tensor-outline" fill="none" stroke="#444" stroke-width="2"/>
       
       <!-- Three dots -->
       <text x="255" y="312.5" class="dots-text" style="font-size: 14px;">…</text>

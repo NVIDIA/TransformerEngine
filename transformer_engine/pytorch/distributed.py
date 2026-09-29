@@ -372,9 +372,14 @@ class _CheckpointFunction(torch.autograd.Function):
         # Preserve torch autocast context for the backward pass
         torch_gpu_amp_ctx, torch_cpu_amp_ctx = _get_active_autocast_contexts()
 
-        with torch.no_grad(), forward_ctx:
-            with activation_recompute_forward(activation_recompute=True, recompute_phase=False):
-                outputs = run_function(*args, **kwargs)
+        # An ineligible nested checkpoint must inherit an enclosing recompute phase.
+        activation_recompute_ctx = (
+            activation_recompute_forward(activation_recompute=True, recompute_phase=False)
+            if any(ctx.needs_input_grad)
+            else nullcontext()
+        )
+        with torch.no_grad(), forward_ctx, activation_recompute_ctx:
+            outputs = run_function(*args, **kwargs)
 
         # Divide hidden states across model parallel group and only keep
         # the chunk corresponding to the current rank.
@@ -627,6 +632,7 @@ def get_te_classes():
         DotProductAttention,
     )
     from .attention.dot_product_attention.backends import UnfusedDotProductAttention
+    from .attention.linear_attention.base import LinearAttentionBase
     from .attention.multi_head_attention import MultiheadAttention
     from .transformer import TransformerLayer
 
@@ -634,6 +640,7 @@ def get_te_classes():
         LayerNorm,
         RMSNorm,
         TransformerEngineBaseModule,
+        LinearAttentionBase,
         UnfusedDotProductAttention,
         DotProductAttention,
         MultiheadAttention,
@@ -739,6 +746,13 @@ def checkpoint(
             debug=debug,
             **kwargs,
         )
+
+    # When checkpoint is entered with autograd disabled, run the forward directly
+    # to avoid unreachable FP8 recompute state. Preserve the forward context.
+    if not torch.is_grad_enabled():
+        forward_ctx, _ = context_fn()
+        with forward_ctx:
+            return function(*args, **kwargs)
 
     from .module.base import TransformerEngineBaseModule
 

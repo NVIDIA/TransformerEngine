@@ -8,7 +8,9 @@
 #include <cuda_runtime.h>
 #include <transformer_engine/fused_router.h>
 
+#include <algorithm>
 #include <climits>
+#include <cmath>
 #include <type_traits>
 #include <vector>
 
@@ -20,6 +22,79 @@
 namespace transformer_engine {
 namespace fused_router {
 
+enum class QBMode {
+  Disabled,
+  TwoKernel,
+  FusedAtomic,
+};
+
+struct QBBinParams {
+  CompType lower;
+  CompType scale;
+};
+
+__device__ inline QBBinParams load_qb_bin_params(const CompType *bin_bounds, int num_bins) {
+  const CompType lower = bin_bounds[0];
+  const CompType upper = bin_bounds[1];
+  return {lower, static_cast<CompType>(num_bins) / (upper - lower)};
+}
+
+void validate_qb_bin_bounds(const Tensor bin_bounds, cudaStream_t stream) {
+  float bounds[2];
+  NVTE_CHECK_CUDA(cudaMemcpyAsync(bounds, bin_bounds.data.dptr, sizeof(bounds),
+                                  cudaMemcpyDeviceToHost, stream));
+  NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
+  NVTE_CHECK(std::isfinite(bounds[0]) && std::isfinite(bounds[1]) && bounds[0] < bounds[1],
+             "QB bin_bounds values must be finite with lower < upper, got [", bounds[0], ", ",
+             bounds[1], "]");
+}
+
+template <QBMode Mode>
+__device__ inline CompType extract_qb_cutoff_and_compact(int *topk_indices, CompType *topk_scores,
+                                                         int topk, int lane_id) {
+  if constexpr (Mode == QBMode::Disabled) {
+    return 0.0f;
+  } else {
+    CompType cutoff = 0.0f;
+    if (lane_id == 0) {
+      int cutoff_pos = 0;
+      cutoff = topk_scores[0];
+      int cutoff_expert = topk_indices[0];
+      for (int i = 1; i < topk + 1; ++i) {
+        const CompType score = topk_scores[i];
+        const int expert = topk_indices[i];
+        if (score < cutoff || (score == cutoff && expert > cutoff_expert)) {
+          cutoff = score;
+          cutoff_expert = expert;
+          cutoff_pos = i;
+        }
+      }
+      for (int i = cutoff_pos; i < topk; ++i) {
+        topk_scores[i] = topk_scores[i + 1];
+        topk_indices[i] = topk_indices[i + 1];
+      }
+    }
+    __syncwarp();
+    return __shfl_sync(0xffffffff, cutoff, 0);
+  }
+}
+
+template <QBMode Mode>
+__device__ inline void accumulate_qb_histogram_epilogue(const CompType *raw_scores, CompType cutoff,
+                                                        int num_experts, int lane_id,
+                                                        const CompType *bin_bounds, int num_bins,
+                                                        int32_t *histogram) {
+  if constexpr (Mode == QBMode::FusedAtomic) {
+    const QBBinParams bin_params = load_qb_bin_params(bin_bounds, num_bins);
+    for (int expert = lane_id; expert < num_experts; expert += kThreadsPerWarp) {
+      int bin = static_cast<int>(
+          floorf((cutoff - raw_scores[expert] - bin_params.lower) * bin_params.scale));
+      bin = max(0, min(bin, num_bins - 1));
+      atomicAdd(histogram + static_cast<size_t>(expert) * num_bins + bin, 1);
+    }
+  }
+}
+
 // =============================================================================
 // Simple forward kernel — exact upstream structure (no async loader, no
 // persistent grid, runtime score_function dispatch).  Faster for small topk
@@ -27,13 +102,17 @@ namespace fused_router {
 // =============================================================================
 
 template <typename DataType, typename BiasType, NVTERoutingMapFormat RoutingMapFormat,
-          TopkFuncType TopkFunc = TopkFuncType::Naive, typename IndexType = int32_t>
+          TopkFuncType TopkFunc = TopkFuncType::Naive, typename IndexType = int32_t,
+          QBMode QbMode = QBMode::Disabled>
 __global__ void fused_topk_forward_simple_kernel(
     const DataType *logits, int num_tokens, int num_experts, int topk, bool use_pre_softmax,
     int num_groups, int group_topk, float scaling_factor, int score_function,
     const BiasType *expert_bias, DataType *probs, uint8_t *routing_map,
-    CompType *intermediate_output, IndexType *topk_indices_output) {
+    CompType *intermediate_output, IndexType *topk_indices_output, CompType *qb_cutoff,
+    int32_t *qb_histogram, const CompType *qb_bin_bounds, int qb_num_bins) {
   constexpr bool kIsBitmap = (RoutingMapFormat == NVTE_ROUTING_MAP_FORMAT_BITMAP_U8);
+  constexpr bool kUseQB = QbMode != QBMode::Disabled;
+  const int selection_topk = topk + (kUseQB ? 1 : 0);
   int num_token_per_block = blockDim.x / kThreadsPerWarp;
   int warp_id = threadIdx.x / kThreadsPerWarp;
   int lane_id = threadIdx.x % kThreadsPerWarp;
@@ -43,23 +122,25 @@ __global__ void fused_topk_forward_simple_kernel(
   CompType *group_scores_buf = nullptr, *masked_scores_buf = nullptr;
   int *topk_indices_buf = nullptr;
   if (group_topk > 0) {
-    masked_scores_buf = topk_scores_buf + topk * num_token_per_block;
+    masked_scores_buf = topk_scores_buf + selection_topk * num_token_per_block;
     group_scores_buf = masked_scores_buf + num_experts * num_token_per_block;
     topk_indices_buf = reinterpret_cast<int *>(group_scores_buf + num_groups * num_token_per_block);
   } else {
-    topk_indices_buf = reinterpret_cast<int *>(topk_scores_buf + topk * num_token_per_block);
+    topk_indices_buf =
+        reinterpret_cast<int *>(topk_scores_buf + selection_topk * num_token_per_block);
   }
   const int bitmap_words_per_warp = (num_experts + 31) / 32;
   const int bitmap_row_bytes = (num_experts + 7) / 8;
   uint32_t *bitmap_words_buf = nullptr;
   if constexpr (kIsBitmap) {
-    bitmap_words_buf = reinterpret_cast<uint32_t *>(topk_indices_buf + topk * num_token_per_block);
+    bitmap_words_buf =
+        reinterpret_cast<uint32_t *>(topk_indices_buf + selection_topk * num_token_per_block);
   }
   CompType *scores = scores_buf + warp_id * num_experts;
-  CompType *topk_scores = topk_scores_buf + warp_id * topk;
+  CompType *topk_scores = topk_scores_buf + warp_id * selection_topk;
   CompType *masked_scores = masked_scores_buf + warp_id * num_experts;
   CompType *group_scores = group_scores_buf + warp_id * num_groups;
-  int *topk_indices = topk_indices_buf + warp_id * topk;
+  int *topk_indices = topk_indices_buf + warp_id * selection_topk;
   uint32_t *local_bitmap_words =
       (bitmap_words_buf != nullptr) ? bitmap_words_buf + warp_id * bitmap_words_per_warp : nullptr;
 
@@ -131,8 +212,11 @@ __global__ void fused_topk_forward_simple_kernel(
       __syncwarp();
     }
 
-    // Topk selection
-    if (group_topk > 0) {
+    // Topk selection. QB is only supported without grouped Top-k.
+    if constexpr (kUseQB) {
+      topk_and_mask<TopkFunc>(scores, num_experts, selection_topk, topk_indices, topk_scores,
+                              lane_id);
+    } else if (group_topk > 0) {
       int group_size = num_experts / num_groups;
       for (int i = 0; i < num_groups; i++) {
         topk_and_mask<TopkFunc>(scores + i * group_size, group_size, topk / group_topk,
@@ -161,6 +245,20 @@ __global__ void fused_topk_forward_simple_kernel(
       topk_and_mask<TopkFunc>(masked_scores, num_experts, topk, topk_indices, topk_scores, lane_id);
     } else {
       topk_and_mask<TopkFunc>(scores, num_experts, topk, topk_indices, topk_scores, lane_id);
+    }
+    __syncwarp();
+
+    const CompType cutoff =
+        extract_qb_cutoff_and_compact<QbMode>(topk_indices, topk_scores, topk, lane_id);
+    if constexpr (kUseQB) {
+      if (lane_id == 0) {
+        qb_cutoff[token_offset_cur_warp] = cutoff;
+      }
+    }
+    if constexpr (QbMode == QBMode::FusedAtomic) {
+      accumulate_qb_histogram_epilogue<QbMode>(intermediate_output + pos_offset, cutoff,
+                                               num_experts, lane_id, qb_bin_bounds, qb_num_bins,
+                                               qb_histogram);
     }
     __syncwarp();
 
@@ -233,13 +331,16 @@ __global__ void fused_topk_forward_simple_kernel(
 
 template <typename DataType, typename BiasType, NVTERoutingMapFormat RoutingMapFormat,
           TopkFuncType TopkFunc = TopkFuncType::Naive, int ScoreFunc = 0,
-          typename IndexType = int32_t>
+          typename IndexType = int32_t, QBMode QbMode = QBMode::Disabled>
 __global__ void fused_topk_with_score_function_forward_kernel(
     const DataType *logits, int num_tokens, int num_experts, int topk, bool use_pre_softmax,
     int num_groups, int group_topk, float scaling_factor, const BiasType *expert_bias,
     DataType *probs, uint8_t *routing_map, CompType *intermediate_output,
-    IndexType *topk_indices_output, int num_buffers) {
+    IndexType *topk_indices_output, int num_buffers, CompType *qb_cutoff, int32_t *qb_histogram,
+    const CompType *qb_bin_bounds, int qb_num_bins) {
   constexpr bool kIsBitmap = (RoutingMapFormat == NVTE_ROUTING_MAP_FORMAT_BITMAP_U8);
+  constexpr bool kUseQB = QbMode != QBMode::Disabled;
+  const int selection_topk = topk + (kUseQB ? 1 : 0);
   /***
      * Section: Global Variables/Addresses init
      * - Each warp is responsible for one token, and has own shared memory buffer.
@@ -265,26 +366,28 @@ __global__ void fused_topk_with_score_function_forward_kernel(
   CompType *group_scores_buf = nullptr, *masked_scores_buf = nullptr;
   int *topk_indices_buf = nullptr;
   if (group_topk > 0) {
-    masked_scores_buf = topk_scores_buf + topk * num_token_per_block;
+    masked_scores_buf = topk_scores_buf + selection_topk * num_token_per_block;
     group_scores_buf = masked_scores_buf + num_experts * num_token_per_block;
     topk_indices_buf = reinterpret_cast<int *>(group_scores_buf + num_groups * num_token_per_block);
   } else {
-    topk_indices_buf = reinterpret_cast<int *>(topk_scores_buf + topk * num_token_per_block);
+    topk_indices_buf =
+        reinterpret_cast<int *>(topk_scores_buf + selection_topk * num_token_per_block);
   }
   const int bitmap_words_per_warp = (num_experts + 31) / 32;
   const int bitmap_row_bytes = (num_experts + 7) / 8;
   uint32_t *bitmap_words_buf = nullptr;
   if constexpr (kIsBitmap) {
-    bitmap_words_buf = reinterpret_cast<uint32_t *>(topk_indices_buf + topk * num_token_per_block);
+    bitmap_words_buf =
+        reinterpret_cast<uint32_t *>(topk_indices_buf + selection_topk * num_token_per_block);
   }
   // The address of buffers on the current warp
   CompType *scores = scores_buf + warp_id * num_experts;
-  CompType *topk_scores = topk_scores_buf + warp_id * topk;
+  CompType *topk_scores = topk_scores_buf + warp_id * selection_topk;
   CompType *masked_scores =
       (masked_scores_buf != nullptr) ? masked_scores_buf + warp_id * num_experts : nullptr;
   CompType *group_scores =
       (group_scores_buf != nullptr) ? group_scores_buf + warp_id * num_groups : nullptr;
-  int *topk_indices = topk_indices_buf + warp_id * topk;
+  int *topk_indices = topk_indices_buf + warp_id * selection_topk;
   uint32_t *local_bitmap_words =
       (bitmap_words_buf != nullptr) ? bitmap_words_buf + warp_id * bitmap_words_per_warp : nullptr;
 
@@ -411,9 +514,12 @@ __global__ void fused_topk_with_score_function_forward_kernel(
          * - naive topk
          * - topk with expert bias
          */
-    // Topk on the scores
-    // The bias being not empty happens at the sigmoid/sqrtsoftplus case
-    if (group_topk > 0) {
+    // Topk on the scores. QB is only supported without grouped Top-k.
+    // The bias being not empty happens at the sigmoid/sqrtsoftplus case.
+    if constexpr (kUseQB) {
+      topk_and_mask<TopkFunc>(scores, num_experts, selection_topk, topk_indices, topk_scores,
+                              lane_id);
+    } else if (group_topk > 0) {
       int group_size = num_experts / num_groups;
       // Top2
       for (int i = 0; i < num_groups; i++) {
@@ -458,6 +564,20 @@ __global__ void fused_topk_with_score_function_forward_kernel(
 
     } else {
       topk_and_mask<TopkFunc>(scores, num_experts, topk, topk_indices, topk_scores, lane_id);
+    }
+    __syncwarp();
+
+    const CompType cutoff =
+        extract_qb_cutoff_and_compact<QbMode>(topk_indices, topk_scores, topk, lane_id);
+    if constexpr (kUseQB) {
+      if (lane_id == 0) {
+        qb_cutoff[token_offset_cur_warp] = cutoff;
+      }
+    }
+    if constexpr (QbMode == QBMode::FusedAtomic) {
+      accumulate_qb_histogram_epilogue<QbMode>(intermediate_output + pos_offset, cutoff,
+                                               num_experts, lane_id, qb_bin_bounds, qb_num_bins,
+                                               qb_histogram);
     }
     __syncwarp();
 
@@ -539,12 +659,15 @@ __global__ void fused_topk_with_score_function_forward_kernel(
   }
 }
 
-template <typename DataType, typename BiasType, NVTERoutingMapFormat RoutingMapFormat>
+template <typename DataType, typename BiasType, NVTERoutingMapFormat RoutingMapFormat,
+          QBMode QbMode = QBMode::Disabled>
 void fused_topk_with_score_function_forward_kernel_launcher(
     const DataType *logits, int num_tokens, int num_experts, int topk, bool use_pre_softmax,
     int num_groups, int group_topk, float scaling_factor, int score_function,
     const BiasType *expert_bias, DataType *probs, uint8_t *routing_map,
-    CompType *intermediate_output, cudaStream_t stream) {
+    CompType *intermediate_output, CompType *qb_cutoff, int32_t *qb_histogram,
+    const CompType *qb_bin_bounds, int qb_num_bins, cudaStream_t stream) {
+  constexpr bool kUseQB = QbMode != QBMode::Disabled;
   NVTE_CHECK(num_experts > 0, "num_experts must be positive, got ", num_experts);
   NVTE_CHECK(topk > 0 && topk <= num_experts, "topk must be in [1, num_experts], got topk=", topk,
              " num_experts=", num_experts);
@@ -569,9 +692,10 @@ void fused_topk_with_score_function_forward_kernel_launcher(
   }
   size_t num_token_per_block = kThreadsPerBlock / kThreadsPerWarp;
   size_t total_blocks = (num_tokens + num_token_per_block - 1) / num_token_per_block;
+  size_t selection_topk = topk + (kUseQB ? 1 : 0);
   size_t scores_shmem = num_experts * num_token_per_block * sizeof(CompType);
-  size_t scratch_shmem =
-      topk * num_token_per_block * sizeof(CompType) + topk * num_token_per_block * sizeof(int);
+  size_t scratch_shmem = selection_topk * num_token_per_block * sizeof(CompType) +
+                         selection_topk * num_token_per_block * sizeof(int);
   if (group_topk > 0) {
     scratch_shmem += num_groups * num_token_per_block * sizeof(CompType);
     scratch_shmem += num_experts * num_token_per_block * sizeof(CompType);
@@ -596,7 +720,8 @@ void fused_topk_with_score_function_forward_kernel_launcher(
     kernel<<<grid_size, kThreadsPerBlock, shared_memory_size, stream>>>(
         logits, num_tokens, num_experts, topk, use_pre_softmax, num_groups, group_topk,
         scaling_factor, expert_bias, probs, routing_map, intermediate_output,
-        static_cast<int32_t *>(nullptr), num_buffers);
+        static_cast<int32_t *>(nullptr), num_buffers, qb_cutoff, qb_histogram, qb_bin_bounds,
+        qb_num_bins);
     NVTE_CHECK_CUDA(cudaGetLastError());
   };
 
@@ -614,26 +739,29 @@ void fused_topk_with_score_function_forward_kernel_launcher(
       kernel<<<total_blocks, kThreadsPerBlock, other_shmem, stream>>>(
           logits, num_tokens, num_experts, topk, use_pre_softmax, num_groups, group_topk,
           scaling_factor, score_function, expert_bias, probs, routing_map, intermediate_output,
-          static_cast<int32_t *>(nullptr));
+          static_cast<int32_t *>(nullptr), qb_cutoff, qb_histogram, qb_bin_bounds, qb_num_bins);
       NVTE_CHECK_CUDA(cudaGetLastError());
     };
 
     launch_simple(fused_topk_forward_simple_kernel<DataType, BiasType, RoutingMapFormat,
-                                                   TopkFuncType::Naive>);
+                                                   TopkFuncType::Naive, int32_t, QbMode>);
   } else {
     // Optimized path: async loader + persistent grid + radix topk.
     switch (score_function) {
       case 0:
-        launch(fused_topk_with_score_function_forward_kernel<DataType, BiasType, RoutingMapFormat,
-                                                             TopkFuncType::Radix, 0>);
+        launch(
+            fused_topk_with_score_function_forward_kernel<DataType, BiasType, RoutingMapFormat,
+                                                          TopkFuncType::Radix, 0, int32_t, QbMode>);
         break;
       case 1:
-        launch(fused_topk_with_score_function_forward_kernel<DataType, BiasType, RoutingMapFormat,
-                                                             TopkFuncType::Radix, 1>);
+        launch(
+            fused_topk_with_score_function_forward_kernel<DataType, BiasType, RoutingMapFormat,
+                                                          TopkFuncType::Radix, 1, int32_t, QbMode>);
         break;
       case 2:
-        launch(fused_topk_with_score_function_forward_kernel<DataType, BiasType, RoutingMapFormat,
-                                                             TopkFuncType::Radix, 2>);
+        launch(
+            fused_topk_with_score_function_forward_kernel<DataType, BiasType, RoutingMapFormat,
+                                                          TopkFuncType::Radix, 2, int32_t, QbMode>);
         break;
       default:
         NVTE_ERROR("Unsupported score_function: " + std::to_string(score_function));
@@ -641,12 +769,15 @@ void fused_topk_with_score_function_forward_kernel_launcher(
   }
 }
 
-template <typename DataType, typename BiasType, typename IndexType>
+template <typename DataType, typename BiasType, typename IndexType,
+          QBMode QbMode = QBMode::Disabled>
 void fused_topk_with_score_function_forward_with_indices_kernel_launcher(
     const DataType *logits, int num_tokens, int num_experts, int topk, bool use_pre_softmax,
     int num_groups, int group_topk, float scaling_factor, int score_function,
     const BiasType *expert_bias, DataType *probs, IndexType *topk_indices,
-    CompType *intermediate_output, cudaStream_t stream) {
+    CompType *intermediate_output, CompType *qb_cutoff, int32_t *qb_histogram,
+    const CompType *qb_bin_bounds, int qb_num_bins, cudaStream_t stream) {
+  constexpr bool kUseQB = QbMode != QBMode::Disabled;
   NVTE_CHECK(num_experts > 0, "num_experts must be positive, got ", num_experts);
   NVTE_CHECK(topk > 0 && topk <= num_experts, "topk must be in [1, num_experts], got topk=", topk,
              " num_experts=", num_experts);
@@ -676,9 +807,10 @@ void fused_topk_with_score_function_forward_with_indices_kernel_launcher(
 
   size_t num_token_per_block = kThreadsPerBlock / kThreadsPerWarp;
   size_t total_blocks = (num_tokens + num_token_per_block - 1) / num_token_per_block;
+  size_t selection_topk = topk + (kUseQB ? 1 : 0);
   size_t scores_shmem = num_experts * num_token_per_block * sizeof(CompType);
-  size_t scratch_shmem =
-      topk * num_token_per_block * sizeof(CompType) + topk * num_token_per_block * sizeof(int);
+  size_t scratch_shmem = selection_topk * num_token_per_block * sizeof(CompType) +
+                         selection_topk * num_token_per_block * sizeof(int);
   if (group_topk > 0) {
     scratch_shmem += num_groups * num_token_per_block * sizeof(CompType);
     scratch_shmem += num_experts * num_token_per_block * sizeof(CompType);
@@ -700,7 +832,7 @@ void fused_topk_with_score_function_forward_with_indices_kernel_launcher(
     kernel<<<grid_size, kThreadsPerBlock, shared_memory_size, stream>>>(
         logits, num_tokens, num_experts, topk, use_pre_softmax, num_groups, group_topk,
         scaling_factor, expert_bias, probs, static_cast<uint8_t *>(nullptr), intermediate_output,
-        topk_indices, num_buffers);
+        topk_indices, num_buffers, qb_cutoff, qb_histogram, qb_bin_bounds, qb_num_bins);
     NVTE_CHECK_CUDA(cudaGetLastError());
   };
 
@@ -715,34 +847,119 @@ void fused_topk_with_score_function_forward_with_indices_kernel_launcher(
       kernel<<<total_blocks, kThreadsPerBlock, other_shmem, stream>>>(
           logits, num_tokens, num_experts, topk, use_pre_softmax, num_groups, group_topk,
           scaling_factor, score_function, expert_bias, probs, static_cast<uint8_t *>(nullptr),
-          intermediate_output, topk_indices);
+          intermediate_output, topk_indices, qb_cutoff, qb_histogram, qb_bin_bounds, qb_num_bins);
       NVTE_CHECK_CUDA(cudaGetLastError());
     };
 
     launch_simple(
         fused_topk_forward_simple_kernel<DataType, BiasType, NVTE_ROUTING_MAP_FORMAT_BYTEMAP,
-                                         TopkFuncType::Naive, IndexType>);
+                                         TopkFuncType::Naive, IndexType, QbMode>);
   } else {
     switch (score_function) {
       case 0:
-        launch(fused_topk_with_score_function_forward_kernel<DataType, BiasType,
-                                                             NVTE_ROUTING_MAP_FORMAT_BYTEMAP,
-                                                             TopkFuncType::Radix, 0, IndexType>);
+        launch(fused_topk_with_score_function_forward_kernel<
+               DataType, BiasType, NVTE_ROUTING_MAP_FORMAT_BYTEMAP, TopkFuncType::Radix, 0,
+               IndexType, QbMode>);
         break;
       case 1:
-        launch(fused_topk_with_score_function_forward_kernel<DataType, BiasType,
-                                                             NVTE_ROUTING_MAP_FORMAT_BYTEMAP,
-                                                             TopkFuncType::Radix, 1, IndexType>);
+        launch(fused_topk_with_score_function_forward_kernel<
+               DataType, BiasType, NVTE_ROUTING_MAP_FORMAT_BYTEMAP, TopkFuncType::Radix, 1,
+               IndexType, QbMode>);
         break;
       case 2:
-        launch(fused_topk_with_score_function_forward_kernel<DataType, BiasType,
-                                                             NVTE_ROUTING_MAP_FORMAT_BYTEMAP,
-                                                             TopkFuncType::Radix, 2, IndexType>);
+        launch(fused_topk_with_score_function_forward_kernel<
+               DataType, BiasType, NVTE_ROUTING_MAP_FORMAT_BYTEMAP, TopkFuncType::Radix, 2,
+               IndexType, QbMode>);
         break;
       default:
         NVTE_ERROR("Unsupported score_function: " + std::to_string(score_function));
     }
   }
+}
+
+constexpr int kQBExpertsPerBlock = 8;
+constexpr int kQBHistogramThreads = 256;
+
+__global__ void qb_histogram_accumulate_kernel(const CompType *raw_scores, const CompType *cutoff,
+                                               int num_tokens, int num_experts,
+                                               const CompType *bin_bounds, int num_bins,
+                                               int32_t *histogram) {
+  extern __shared__ int32_t local_histogram[];
+  const int local_histogram_size = kQBExpertsPerBlock * num_bins;
+  for (int i = threadIdx.x; i < local_histogram_size; i += blockDim.x) {
+    local_histogram[i] = 0;
+  }
+  __syncthreads();
+
+  const int expert_begin = blockIdx.x * kQBExpertsPerBlock;
+  const int token_partition = blockIdx.y;
+  const int num_token_partitions = gridDim.y;
+  const int tokens_in_partition =
+      (num_tokens - token_partition + num_token_partitions - 1) / num_token_partitions;
+  const int num_items = tokens_in_partition * kQBExpertsPerBlock;
+  const QBBinParams bin_params = load_qb_bin_params(bin_bounds, num_bins);
+
+  for (int item = threadIdx.x; item < num_items; item += blockDim.x) {
+    const int token_in_partition = item / kQBExpertsPerBlock;
+    const int local_expert = item % kQBExpertsPerBlock;
+    const int token = token_partition + token_in_partition * num_token_partitions;
+    const int expert = expert_begin + local_expert;
+    if (token < num_tokens && expert < num_experts) {
+      const CompType required_bias =
+          cutoff[token] - raw_scores[static_cast<size_t>(token) * num_experts + expert];
+      int bin = static_cast<int>(floorf((required_bias - bin_params.lower) * bin_params.scale));
+      bin = max(0, min(bin, num_bins - 1));
+      atomicAdd(local_histogram + local_expert * num_bins + bin, 1);
+    }
+  }
+  __syncthreads();
+
+  for (int i = threadIdx.x; i < local_histogram_size; i += blockDim.x) {
+    const int count = local_histogram[i];
+    const int local_expert = i / num_bins;
+    const int expert = expert_begin + local_expert;
+    if (count != 0 && expert < num_experts) {
+      atomicAdd(histogram + static_cast<size_t>(expert) * num_bins + i % num_bins, count);
+    }
+  }
+}
+
+void qb_histogram_accumulate(const Tensor raw_scores, const Tensor cutoff, const Tensor bin_bounds,
+                             Tensor histogram, bool validate_bin_bounds, cudaStream_t stream) {
+  NVTE_CHECK(raw_scores.data.dtype == DType::kFloat32, "QB raw_scores must have FP32 dtype");
+  NVTE_CHECK(cutoff.data.dtype == DType::kFloat32, "QB cutoff must have FP32 dtype");
+  NVTE_CHECK(bin_bounds.data.dtype == DType::kFloat32, "QB bin_bounds must have FP32 dtype");
+  NVTE_CHECK(histogram.data.dtype == DType::kInt32, "QB histogram must have int32 dtype");
+  NVTE_CHECK(raw_scores.data.shape.size() == 2,
+             "QB raw_scores must have shape [num_tokens, num_experts]");
+  const int num_tokens = static_cast<int>(raw_scores.data.shape[0]);
+  const int num_experts = static_cast<int>(raw_scores.data.shape[1]);
+  NVTE_CHECK(cutoff.data.shape == std::vector<size_t>{static_cast<size_t>(num_tokens)},
+             "QB cutoff must have shape [num_tokens]");
+  NVTE_CHECK(bin_bounds.data.shape == std::vector<size_t>{2}, "QB bin_bounds must have shape [2]");
+  NVTE_CHECK(histogram.data.shape.size() == 2 &&
+                 histogram.data.shape[0] == static_cast<size_t>(num_experts),
+             "QB histogram must have shape [num_experts, num_bins]");
+  const int num_bins = static_cast<int>(histogram.data.shape[1]);
+  NVTE_CHECK(num_bins > 0, "QB num_bins must be positive");
+  if (validate_bin_bounds) {
+    validate_qb_bin_bounds(bin_bounds, stream);
+  }
+
+  const int token_partitions = std::min(4, std::max(1, (num_tokens + 1023) / 1024));
+  const dim3 grid((num_experts + kQBExpertsPerBlock - 1) / kQBExpertsPerBlock, token_partitions);
+  const size_t shared_memory_size =
+      static_cast<size_t>(kQBExpertsPerBlock) * num_bins * sizeof(int32_t);
+  check_shared_memory_capacity_num_experts(shared_memory_size, num_experts);
+  NVTE_CHECK_CUDA(cudaFuncSetAttribute(qb_histogram_accumulate_kernel,
+                                       cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                       static_cast<int>(shared_memory_size)));
+  qb_histogram_accumulate_kernel<<<grid, kQBHistogramThreads, shared_memory_size, stream>>>(
+      reinterpret_cast<const CompType *>(raw_scores.data.dptr),
+      reinterpret_cast<const CompType *>(cutoff.data.dptr), num_tokens, num_experts,
+      reinterpret_cast<const CompType *>(bin_bounds.data.dptr), num_bins,
+      reinterpret_cast<int32_t *>(histogram.data.dptr));
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 // Build the expected routing_map shape for a given NVTERoutingMapFormat.
@@ -801,7 +1018,8 @@ void fused_topk_with_score_function_forward(const Tensor logits, int num_tokens,
                 reinterpret_cast<BiasType *>(expert_bias.data.dptr),                           \
                 reinterpret_cast<DataType *>(probs.data.dptr),                                 \
                 reinterpret_cast<uint8_t *>(routing_map.data.dptr),                            \
-                reinterpret_cast<CompType *>(intermediate_output.data.dptr), stream););        \
+                reinterpret_cast<CompType *>(intermediate_output.data.dptr), nullptr, nullptr, \
+                nullptr, 0, stream););                                                         \
       } else {                                                                                 \
         fused_topk_with_score_function_forward_kernel_launcher<DataType, DataType,             \
                                                                RoutingMapFormatVal>(           \
@@ -809,7 +1027,8 @@ void fused_topk_with_score_function_forward(const Tensor logits, int num_tokens,
             use_pre_softmax, num_groups, group_topk, scaling_factor, score_function, nullptr,  \
             reinterpret_cast<DataType *>(probs.data.dptr),                                     \
             reinterpret_cast<uint8_t *>(routing_map.data.dptr),                                \
-            reinterpret_cast<CompType *>(intermediate_output.data.dptr), stream);              \
+            reinterpret_cast<CompType *>(intermediate_output.data.dptr), nullptr, nullptr,     \
+            nullptr, 0, stream);                                                               \
       });
   if (routing_map_format == NVTE_ROUTING_MAP_FORMAT_BITMAP_U8) {
     ROUTER_FORWARD_DISPATCH(NVTE_ROUTING_MAP_FORMAT_BITMAP_U8)
@@ -851,32 +1070,165 @@ void fused_topk_with_score_function_forward_with_indices(
   }
   // Dispatch logits dtype and output-index dtype first; expert-bias dtype is only
   // dispatched when an expert-bias tensor exists, otherwise the kernel receives nullptr.
-#define ROUTER_FORWARD_WITH_INDICES_DISPATCH(DataType, IndexType)                               \
-  if (expert_bias.has_data()) {                                                                 \
-    TE_ROUTER_PROBS_TYPE_SWITCH_ALL(                                                            \
-        expert_bias.data.dtype, BiasType,                                                       \
-        fused_topk_with_score_function_forward_with_indices_kernel_launcher<DataType, BiasType, \
-                                                                            IndexType>(         \
-            reinterpret_cast<DataType *>(logits.data.dptr), num_tokens, num_experts, topk,      \
-            use_pre_softmax, num_groups, group_topk, scaling_factor, score_function,            \
-            reinterpret_cast<BiasType *>(expert_bias.data.dptr),                                \
-            reinterpret_cast<DataType *>(probs.data.dptr),                                      \
-            reinterpret_cast<IndexType *>(topk_indices.data.dptr),                              \
-            reinterpret_cast<CompType *>(intermediate_output.data.dptr), stream););             \
-  } else {                                                                                      \
-    fused_topk_with_score_function_forward_with_indices_kernel_launcher<DataType, DataType,     \
-                                                                        IndexType>(             \
-        reinterpret_cast<DataType *>(logits.data.dptr), num_tokens, num_experts, topk,          \
-        use_pre_softmax, num_groups, group_topk, scaling_factor, score_function, nullptr,       \
-        reinterpret_cast<DataType *>(probs.data.dptr),                                          \
-        reinterpret_cast<IndexType *>(topk_indices.data.dptr),                                  \
-        reinterpret_cast<CompType *>(intermediate_output.data.dptr), stream);                   \
+#define ROUTER_FORWARD_WITH_INDICES_DISPATCH(DataType, IndexType)                                  \
+  if (expert_bias.has_data()) {                                                                    \
+    TE_ROUTER_PROBS_TYPE_SWITCH_ALL(                                                               \
+        expert_bias.data.dtype, BiasType,                                                          \
+        fused_topk_with_score_function_forward_with_indices_kernel_launcher<DataType, BiasType,    \
+                                                                            IndexType>(            \
+            reinterpret_cast<DataType *>(logits.data.dptr), num_tokens, num_experts, topk,         \
+            use_pre_softmax, num_groups, group_topk, scaling_factor, score_function,               \
+            reinterpret_cast<BiasType *>(expert_bias.data.dptr),                                   \
+            reinterpret_cast<DataType *>(probs.data.dptr),                                         \
+            reinterpret_cast<IndexType *>(topk_indices.data.dptr),                                 \
+            reinterpret_cast<CompType *>(intermediate_output.data.dptr), nullptr, nullptr,         \
+            nullptr, 0, stream););                                                                 \
+  } else {                                                                                         \
+    fused_topk_with_score_function_forward_with_indices_kernel_launcher<DataType, DataType,        \
+                                                                        IndexType>(                \
+        reinterpret_cast<DataType *>(logits.data.dptr), num_tokens, num_experts, topk,             \
+        use_pre_softmax, num_groups, group_topk, scaling_factor, score_function, nullptr,          \
+        reinterpret_cast<DataType *>(probs.data.dptr),                                             \
+        reinterpret_cast<IndexType *>(topk_indices.data.dptr),                                     \
+        reinterpret_cast<CompType *>(intermediate_output.data.dptr), nullptr, nullptr, nullptr, 0, \
+        stream);                                                                                   \
   }
   TE_ROUTER_PROBS_TYPE_SWITCH_ALL(logits.data.dtype, DataType,
                                   TE_ROUTER_DENSE_INDEX_TYPE_SWITCH_ALL(
                                       topk_indices.data.dtype, IndexType,
                                       ROUTER_FORWARD_WITH_INDICES_DISPATCH(DataType, IndexType);););
 #undef ROUTER_FORWARD_WITH_INDICES_DISPATCH
+}
+
+static int check_qb_forward_tensors(const Tensor logits, int num_tokens, int num_experts, int topk,
+                                    const Tensor expert_bias, const Tensor probs,
+                                    const Tensor intermediate_output, const Tensor cutoff,
+                                    const Tensor histogram, const Tensor bin_bounds) {
+  NVTE_CHECK(num_tokens > 0 && num_experts > 0, "QB num_tokens and num_experts must be positive");
+  NVTE_CHECK(topk > 0 && topk < num_experts, "QB topk must be in [1, num_experts), got topk=", topk,
+             " num_experts=", num_experts);
+  const std::vector<size_t> dense_shape{static_cast<size_t>(num_tokens),
+                                        static_cast<size_t>(num_experts)};
+  NVTE_CHECK(logits.data.shape == dense_shape,
+             "QB logits must have shape [num_tokens, num_experts]");
+  NVTE_CHECK(probs.data.shape == dense_shape, "QB probs must have shape [num_tokens, num_experts]");
+  NVTE_CHECK(intermediate_output.data.shape == dense_shape,
+             "QB intermediate_output must have shape [num_tokens, num_experts]");
+  NVTE_CHECK(intermediate_output.data.dtype == DType::kFloat32,
+             "QB intermediate_output must have FP32 dtype");
+  NVTE_CHECK(expert_bias.has_data(), "QB requires an expert_bias tensor");
+  NVTE_CHECK(expert_bias.data.dtype == DType::kFloat32, "QB expert_bias must have FP32 dtype");
+  NVTE_CHECK(expert_bias.data.shape == std::vector<size_t>{static_cast<size_t>(num_experts)},
+             "QB expert_bias must have shape [num_experts]");
+  NVTE_CHECK(cutoff.data.dtype == DType::kFloat32, "QB cutoff must have FP32 dtype");
+  NVTE_CHECK(cutoff.data.shape == std::vector<size_t>{static_cast<size_t>(num_tokens)},
+             "QB cutoff must have shape [num_tokens]");
+  NVTE_CHECK(histogram.data.dtype == DType::kInt32, "QB histogram must have int32 dtype");
+  NVTE_CHECK(histogram.data.shape.size() == 2 &&
+                 histogram.data.shape[0] == static_cast<size_t>(num_experts),
+             "QB histogram must have shape [num_experts, num_bins]");
+  const int num_bins = static_cast<int>(histogram.data.shape[1]);
+  NVTE_CHECK(num_bins > 0, "QB num_bins must be positive");
+  NVTE_CHECK(bin_bounds.data.dtype == DType::kFloat32, "QB bin_bounds must have FP32 dtype");
+  NVTE_CHECK(bin_bounds.data.shape == std::vector<size_t>{2}, "QB bin_bounds must have shape [2]");
+  return num_bins;
+}
+
+void fused_topk_with_score_function_forward_qb(
+    const Tensor logits, int num_tokens, int num_experts, int topk, float scaling_factor,
+    const Tensor expert_bias, Tensor probs, Tensor routing_map,
+    NVTERoutingMapFormat routing_map_format, Tensor intermediate_output, Tensor cutoff,
+    Tensor histogram, Tensor bin_bounds, NVTEQBHistogramMode histogram_mode,
+    bool validate_bin_bounds, cudaStream_t stream) {
+  check_routing_map_format(routing_map_format);
+  const int num_bins =
+      check_qb_forward_tensors(logits, num_tokens, num_experts, topk, expert_bias, probs,
+                               intermediate_output, cutoff, histogram, bin_bounds);
+  const auto routing_map_shape =
+      expected_routing_map_shape(num_tokens, num_experts, routing_map_format);
+  NVTE_CHECK(routing_map.data.shape == routing_map_shape,
+             "QB routing_map shape does not match routing_map_format");
+  if (validate_bin_bounds) {
+    validate_qb_bin_bounds(bin_bounds, stream);
+  }
+
+#define QB_ROUTER_FORWARD_LAUNCH(RoutingMapFormatVal, QbModeVal)                                   \
+  TE_ROUTER_PROBS_TYPE_SWITCH_ALL(                                                                 \
+      logits.data.dtype, DataType,                                                                 \
+      fused_topk_with_score_function_forward_kernel_launcher<DataType, float, RoutingMapFormatVal, \
+                                                             QbModeVal>(                           \
+          reinterpret_cast<DataType *>(logits.data.dptr), num_tokens, num_experts, topk, false,    \
+          -1, -1, scaling_factor, 0, reinterpret_cast<float *>(expert_bias.data.dptr),             \
+          reinterpret_cast<DataType *>(probs.data.dptr),                                           \
+          reinterpret_cast<uint8_t *>(routing_map.data.dptr),                                      \
+          reinterpret_cast<CompType *>(intermediate_output.data.dptr),                             \
+          reinterpret_cast<CompType *>(cutoff.data.dptr),                                          \
+          reinterpret_cast<int32_t *>(histogram.data.dptr),                                        \
+          reinterpret_cast<const CompType *>(bin_bounds.data.dptr), num_bins, stream););
+
+#define QB_ROUTER_FORWARD_MODE_DISPATCH(RoutingMapFormatVal)           \
+  if (histogram_mode == NVTE_QB_HISTOGRAM_TWO_KERNEL) {                \
+    QB_ROUTER_FORWARD_LAUNCH(RoutingMapFormatVal, QBMode::TwoKernel)   \
+  } else if (histogram_mode == NVTE_QB_HISTOGRAM_FUSED_ATOMIC) {       \
+    QB_ROUTER_FORWARD_LAUNCH(RoutingMapFormatVal, QBMode::FusedAtomic) \
+  } else {                                                             \
+    NVTE_ERROR("Unsupported QB histogram mode: " +                     \
+               std::to_string(static_cast<int>(histogram_mode)));      \
+  }
+
+  if (routing_map_format == NVTE_ROUTING_MAP_FORMAT_BITMAP_U8) {
+    QB_ROUTER_FORWARD_MODE_DISPATCH(NVTE_ROUTING_MAP_FORMAT_BITMAP_U8)
+  } else {
+    QB_ROUTER_FORWARD_MODE_DISPATCH(NVTE_ROUTING_MAP_FORMAT_BYTEMAP)
+  }
+#undef QB_ROUTER_FORWARD_MODE_DISPATCH
+#undef QB_ROUTER_FORWARD_LAUNCH
+}
+
+void fused_topk_with_score_function_forward_qb_with_indices(
+    const Tensor logits, int num_tokens, int num_experts, int topk, float scaling_factor,
+    const Tensor expert_bias, Tensor probs, Tensor topk_indices, Tensor intermediate_output,
+    Tensor cutoff, Tensor histogram, Tensor bin_bounds, NVTEQBHistogramMode histogram_mode,
+    bool validate_bin_bounds, cudaStream_t stream) {
+  const int num_bins =
+      check_qb_forward_tensors(logits, num_tokens, num_experts, topk, expert_bias, probs,
+                               intermediate_output, cutoff, histogram, bin_bounds);
+  const std::vector<size_t> indices_shape{static_cast<size_t>(num_tokens),
+                                          static_cast<size_t>(topk)};
+  NVTE_CHECK(topk_indices.data.shape == indices_shape,
+             "QB topk_indices must have shape [num_tokens, topk]");
+  if (validate_bin_bounds) {
+    validate_qb_bin_bounds(bin_bounds, stream);
+  }
+
+#define QB_ROUTER_FORWARD_WITH_INDICES_LAUNCH(DataType, IndexType, QbModeVal)                     \
+  fused_topk_with_score_function_forward_with_indices_kernel_launcher<DataType, float, IndexType, \
+                                                                      QbModeVal>(                 \
+      reinterpret_cast<DataType *>(logits.data.dptr), num_tokens, num_experts, topk, false, -1,   \
+      -1, scaling_factor, 0, reinterpret_cast<float *>(expert_bias.data.dptr),                    \
+      reinterpret_cast<DataType *>(probs.data.dptr),                                              \
+      reinterpret_cast<IndexType *>(topk_indices.data.dptr),                                      \
+      reinterpret_cast<CompType *>(intermediate_output.data.dptr),                                \
+      reinterpret_cast<CompType *>(cutoff.data.dptr),                                             \
+      reinterpret_cast<int32_t *>(histogram.data.dptr),                                           \
+      reinterpret_cast<const CompType *>(bin_bounds.data.dptr), num_bins, stream)
+
+#define QB_ROUTER_FORWARD_WITH_INDICES_MODE(DataType, IndexType)                     \
+  if (histogram_mode == NVTE_QB_HISTOGRAM_TWO_KERNEL) {                              \
+    QB_ROUTER_FORWARD_WITH_INDICES_LAUNCH(DataType, IndexType, QBMode::TwoKernel);   \
+  } else if (histogram_mode == NVTE_QB_HISTOGRAM_FUSED_ATOMIC) {                     \
+    QB_ROUTER_FORWARD_WITH_INDICES_LAUNCH(DataType, IndexType, QBMode::FusedAtomic); \
+  } else {                                                                           \
+    NVTE_ERROR("Unsupported QB histogram mode: " +                                   \
+               std::to_string(static_cast<int>(histogram_mode)));                    \
+  }
+
+  TE_ROUTER_PROBS_TYPE_SWITCH_ALL(logits.data.dtype, DataType,
+                                  TE_ROUTER_DENSE_INDEX_TYPE_SWITCH_ALL(
+                                      topk_indices.data.dtype, IndexType,
+                                      QB_ROUTER_FORWARD_WITH_INDICES_MODE(DataType, IndexType);););
+#undef QB_ROUTER_FORWARD_WITH_INDICES_MODE
+#undef QB_ROUTER_FORWARD_WITH_INDICES_LAUNCH
 }
 
 // Backward: grad_probs + intermediate_output + routing_map → grad_logits.
@@ -1405,6 +1757,92 @@ void nvte_fused_topk_with_score_function_forward_with_indices(
       static_cast<bool>(use_pre_softmax), num_groups, group_topk, scaling_factor, score_function,
       *convertNVTETensorCheck(expert_bias), *convertNVTETensorCheck(probs),
       *convertNVTETensorCheck(topk_indices), *convertNVTETensorCheck(intermediate_output), stream);
+}
+
+void nvte_fused_topk_with_score_function_forward_qb_v2(
+    const NVTETensor logits, int num_tokens, int num_experts, int topk, float scaling_factor,
+    const NVTETensor expert_bias, NVTETensor probs, NVTETensor routing_map,
+    NVTERoutingMapFormat routing_map_format, NVTETensor intermediate_output, NVTETensor cutoff,
+    NVTETensor histogram, NVTETensor bin_bounds, NVTEQBHistogramMode histogram_mode,
+    cudaStream_t stream) {
+  NVTE_API_CALL(nvte_fused_topk_with_score_function_forward_qb_v2);
+  using namespace transformer_engine;
+  fused_router::fused_topk_with_score_function_forward_qb(
+      *convertNVTETensorCheck(logits), num_tokens, num_experts, topk, scaling_factor,
+      *convertNVTETensorCheck(expert_bias), *convertNVTETensorCheck(probs),
+      *convertNVTETensorCheck(routing_map), routing_map_format,
+      *convertNVTETensorCheck(intermediate_output), *convertNVTETensorCheck(cutoff),
+      *convertNVTETensorCheck(histogram), *convertNVTETensorCheck(bin_bounds), histogram_mode,
+      /*validate_bin_bounds=*/true, stream);
+}
+
+void nvte_fused_topk_with_score_function_forward_qb_v2_unchecked(
+    const NVTETensor logits, int num_tokens, int num_experts, int topk, float scaling_factor,
+    const NVTETensor expert_bias, NVTETensor probs, NVTETensor routing_map,
+    NVTERoutingMapFormat routing_map_format, NVTETensor intermediate_output, NVTETensor cutoff,
+    NVTETensor histogram, NVTETensor bin_bounds, NVTEQBHistogramMode histogram_mode,
+    cudaStream_t stream) {
+  NVTE_API_CALL(nvte_fused_topk_with_score_function_forward_qb_v2_unchecked);
+  using namespace transformer_engine;
+  fused_router::fused_topk_with_score_function_forward_qb(
+      *convertNVTETensorCheck(logits), num_tokens, num_experts, topk, scaling_factor,
+      *convertNVTETensorCheck(expert_bias), *convertNVTETensorCheck(probs),
+      *convertNVTETensorCheck(routing_map), routing_map_format,
+      *convertNVTETensorCheck(intermediate_output), *convertNVTETensorCheck(cutoff),
+      *convertNVTETensorCheck(histogram), *convertNVTETensorCheck(bin_bounds), histogram_mode,
+      /*validate_bin_bounds=*/false, stream);
+}
+
+void nvte_fused_topk_with_score_function_forward_qb_with_indices(
+    const NVTETensor logits, int num_tokens, int num_experts, int topk, float scaling_factor,
+    const NVTETensor expert_bias, NVTETensor probs, NVTETensor topk_indices,
+    NVTETensor intermediate_output, NVTETensor cutoff, NVTETensor histogram, NVTETensor bin_bounds,
+    NVTEQBHistogramMode histogram_mode, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_fused_topk_with_score_function_forward_qb_with_indices);
+  using namespace transformer_engine;
+  fused_router::fused_topk_with_score_function_forward_qb_with_indices(
+      *convertNVTETensorCheck(logits), num_tokens, num_experts, topk, scaling_factor,
+      *convertNVTETensorCheck(expert_bias), *convertNVTETensorCheck(probs),
+      *convertNVTETensorCheck(topk_indices), *convertNVTETensorCheck(intermediate_output),
+      *convertNVTETensorCheck(cutoff), *convertNVTETensorCheck(histogram),
+      *convertNVTETensorCheck(bin_bounds), histogram_mode, /*validate_bin_bounds=*/true, stream);
+}
+
+void nvte_fused_topk_with_score_function_forward_qb_with_indices_unchecked(
+    const NVTETensor logits, int num_tokens, int num_experts, int topk, float scaling_factor,
+    const NVTETensor expert_bias, NVTETensor probs, NVTETensor topk_indices,
+    NVTETensor intermediate_output, NVTETensor cutoff, NVTETensor histogram, NVTETensor bin_bounds,
+    NVTEQBHistogramMode histogram_mode, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_fused_topk_with_score_function_forward_qb_with_indices_unchecked);
+  using namespace transformer_engine;
+  fused_router::fused_topk_with_score_function_forward_qb_with_indices(
+      *convertNVTETensorCheck(logits), num_tokens, num_experts, topk, scaling_factor,
+      *convertNVTETensorCheck(expert_bias), *convertNVTETensorCheck(probs),
+      *convertNVTETensorCheck(topk_indices), *convertNVTETensorCheck(intermediate_output),
+      *convertNVTETensorCheck(cutoff), *convertNVTETensorCheck(histogram),
+      *convertNVTETensorCheck(bin_bounds), histogram_mode, /*validate_bin_bounds=*/false, stream);
+}
+
+void nvte_qb_histogram_accumulate(const NVTETensor raw_scores, const NVTETensor cutoff,
+                                  const NVTETensor bin_bounds, NVTETensor histogram,
+                                  cudaStream_t stream) {
+  NVTE_API_CALL(nvte_qb_histogram_accumulate);
+  using namespace transformer_engine;
+  fused_router::qb_histogram_accumulate(
+      *convertNVTETensorCheck(raw_scores), *convertNVTETensorCheck(cutoff),
+      *convertNVTETensorCheck(bin_bounds), *convertNVTETensorCheck(histogram),
+      /*validate_bin_bounds=*/true, stream);
+}
+
+void nvte_qb_histogram_accumulate_unchecked(const NVTETensor raw_scores, const NVTETensor cutoff,
+                                            const NVTETensor bin_bounds, NVTETensor histogram,
+                                            cudaStream_t stream) {
+  NVTE_API_CALL(nvte_qb_histogram_accumulate_unchecked);
+  using namespace transformer_engine;
+  fused_router::qb_histogram_accumulate(
+      *convertNVTETensorCheck(raw_scores), *convertNVTETensorCheck(cutoff),
+      *convertNVTETensorCheck(bin_bounds), *convertNVTETensorCheck(histogram),
+      /*validate_bin_bounds=*/false, stream);
 }
 
 void nvte_fused_topk_with_score_function_backward_v2(const NVTETensor routing_map,

@@ -14,13 +14,13 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TE_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-TEST_FILE="$TE_ROOT/tests/jax/test_te_ep_moe.py"
+TEST_FILE="${TEST_FILE:-$TE_ROOT/tests/jax/test_te_ep_moe.py}"
 PYTEST_INI="$TE_ROOT/tests/jax/pytest.ini"
 
 NUM_GPUS="${NUM_GPUS:-$(nvidia-smi -L | wc -l)}"
 if [ "$NUM_GPUS" -lt 4 ]; then
-    echo "[run_te_ep_moe.sh] need >=4 GPUs (got $NUM_GPUS); aborting" >&2
-    exit 1
+    echo "[run_te_ep_moe.sh] need >=4 GPUs (got $NUM_GPUS); SKIPPING."
+    exit 0
 fi
 
 export XLA_PYTHON_CLIENT_PREALLOCATE="${XLA_PYTHON_CLIENT_PREALLOCATE:-false}"

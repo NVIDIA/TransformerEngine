@@ -13,7 +13,7 @@
 
 #include <cstdlib>
 
-#include "../../../util/ptx.cuh"
+#include "../../../util/ptx_arch_spec.cuh"
 #include "../swizzle.cuh"  // gemm_swizzled_scale_idx (parent dir, GEMM scale swizzle)
 #include "state_counter.cuh"
 #include "swizzle.cuh"  // specialized/swizzle.cuh (TMA input bank-conflict swizzle)
@@ -1518,7 +1518,7 @@ __global__ void quantize_mxfp8_kernel_cast_only(
       int2 coords;
       coords.y = block_coords.y + iter_m * CastTraits::blockIterDim::M;
       coords.x = block_coords.x + iter_n * CastTraits::blockIterDim::N;
-      if (coords.x < cols && coords.y < rows) {
+      if (next < CastTraits::iterLayout::num && coords.x < cols && coords.y < rows) {
         if (warpId == 0 && leader) {
           if constexpr (CastTraits::_need_wait_group) {
             ptx::cp_async_bulk_wait_group_read<CastTraits::numStages - 1>();

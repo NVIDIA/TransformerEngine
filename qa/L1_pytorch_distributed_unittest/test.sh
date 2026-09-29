@@ -18,31 +18,33 @@ FAILED_CASES=""
 
 : ${TE_PATH:=/opt/transformerengine}
 : ${XML_LOG_DIR:=/logs}
+# FA4 coverage belongs to the dedicated attention-backend suites.
+export NVTE_FLASH_ATTN_V4=0
 mkdir -p "$XML_LOG_DIR"
 
 pip3 install pytest==8.2.1 || error_exit "Failed to install pytest"
 
 # Run CP tests (deterministic + non-deterministic) first so they can be parallelized.
 # Each needs 4 GPUs, so >=8 GPUs allows them to run concurrently on disjoint GPU sets.
-# Main's CP implementation supports FA2/FA3. Keep FA4 disabled at the suite
-# boundary so both the reference and CP halves use the same backend generation.
+# Main's CP implementation supports FA2/FA3.
 NUM_GPUS=$(python3 -c "import torch; print(torch.cuda.device_count())")
 echo "Detected $NUM_GPUS GPU(s)"
 if [ "$NUM_GPUS" -ge 8 ]; then
     echo "Running CP tests in parallel: non-deterministic on GPUs 0-3, deterministic on GPUs 4-7"
-    CUDA_VISIBLE_DEVICES=0,1,2,3 NVTE_FLASH_ATTN_V4=0 python3 -m pytest -v -s --junitxml=$XML_LOG_DIR/pytest_test_attention_with_cp.xml $TE_PATH/tests/pytorch/attention/test_attention_with_cp.py &
+    CUDA_VISIBLE_DEVICES=0,1,2,3 python3 -m pytest -v -s --junitxml=$XML_LOG_DIR/pytest_test_attention_with_cp.xml $TE_PATH/tests/pytorch/attention/test_attention_with_cp.py &
     PID_CP_NONDET=$!
-    CUDA_VISIBLE_DEVICES=4,5,6,7 NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 NVTE_FLASH_ATTN_V4=0 python3 -m pytest -v -s --junitxml=$XML_LOG_DIR/pytest_test_attention_deterministic_with_cp.xml $TE_PATH/tests/pytorch/attention/test_attention_with_cp.py &
+    CUDA_VISIBLE_DEVICES=4,5,6,7 NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 python3 -m pytest -v -s --junitxml=$XML_LOG_DIR/pytest_test_attention_deterministic_with_cp.xml $TE_PATH/tests/pytorch/attention/test_attention_with_cp.py &
     PID_CP_DET=$!
     wait $PID_CP_NONDET || test_fail "test_attention_with_cp.py"
     wait $PID_CP_DET || test_fail "NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 test_attention_with_cp.py"
 else
     echo "Running CP tests sequentially: need >=8 GPUs for parallel execution"
-    NVTE_FLASH_ATTN_V4=0 python3 -m pytest -v -s --junitxml=$XML_LOG_DIR/pytest_test_attention_with_cp.xml $TE_PATH/tests/pytorch/attention/test_attention_with_cp.py || test_fail "test_attention_with_cp.py"
-    NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 NVTE_FLASH_ATTN_V4=0 python3 -m pytest -v -s --junitxml=$XML_LOG_DIR/pytest_test_attention_deterministic_with_cp.xml $TE_PATH/tests/pytorch/attention/test_attention_with_cp.py || test_fail "NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 test_attention_with_cp.py"
+    python3 -m pytest -v -s --junitxml=$XML_LOG_DIR/pytest_test_attention_with_cp.xml $TE_PATH/tests/pytorch/attention/test_attention_with_cp.py || test_fail "test_attention_with_cp.py"
+    NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 python3 -m pytest -v -s --junitxml=$XML_LOG_DIR/pytest_test_attention_deterministic_with_cp.xml $TE_PATH/tests/pytorch/attention/test_attention_with_cp.py || test_fail "NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 test_attention_with_cp.py"
 fi
 
 python3 -m pytest -v -s --junitxml=$XML_LOG_DIR/pytest_test_sanity.xml $TE_PATH/tests/pytorch/distributed/test_sanity.py || test_fail "test_sanity.py"
+python3 -m pytest -v -s --junitxml=$XML_LOG_DIR/pytest_test_parallel_cross_entropy.xml $TE_PATH/tests/pytorch/distributed/test_parallel_cross_entropy.py || test_fail "test_parallel_cross_entropy.py"
 python3 -m pytest -v -s --junitxml=$XML_LOG_DIR/pytest_test_numerics.xml $TE_PATH/tests/pytorch/distributed/test_numerics.py || test_fail "test_numerics.py"
 python3 -m pytest -v -s --junitxml=$XML_LOG_DIR/pytest_test_numerics_exact.xml $TE_PATH/tests/pytorch/distributed/test_numerics_exact.py || test_fail "test_numerics_exact.py"
 python3 -m pytest -v -s --junitxml=$XML_LOG_DIR/pytest_test_fusible_ops.xml $TE_PATH/tests/pytorch/distributed/test_fusible_ops.py || test_fail "test_fusible_ops.py"

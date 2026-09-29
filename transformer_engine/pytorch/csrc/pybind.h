@@ -57,13 +57,15 @@ inline bool IsFloat8CurrentScalingQuantizers(PyObject *obj) {
 }
 
 inline bool IsFloat8Tensor(PyObject *obj) {
-  return Py_TYPE(obj) == Float8TensorPythonClass || Py_TYPE(obj) == Float8TensorStoragePythonClass;
+  return PyObject_TypeCheck(obj, Float8TensorPythonClass) ||
+         PyObject_TypeCheck(obj, Float8TensorStoragePythonClass);
 }
 
 inline bool IsMXFP8Quantizers(PyObject *obj) { return Py_TYPE(obj) == MXFP8QuantizerClass; }
 
 inline bool IsMXFP8Tensor(PyObject *obj) {
-  return Py_TYPE(obj) == MXFP8TensorPythonClass || Py_TYPE(obj) == MXFP8TensorStoragePythonClass;
+  return PyObject_TypeCheck(obj, MXFP8TensorPythonClass) ||
+         PyObject_TypeCheck(obj, MXFP8TensorStoragePythonClass);
 }
 
 inline bool IsFloat8BlockwiseQuantizers(PyObject *obj) {
@@ -73,12 +75,13 @@ inline bool IsFloat8BlockwiseQuantizers(PyObject *obj) {
 inline bool IsNVFP4Quantizers(PyObject *obj) { return Py_TYPE(obj) == NVFP4QuantizerClass; }
 
 inline bool IsFloat8BlockwiseQTensor(PyObject *obj) {
-  return Py_TYPE(obj) == Float8BlockwiseQTensorPythonClass ||
-         Py_TYPE(obj) == Float8BlockwiseQTensorStoragePythonClass;
+  return PyObject_TypeCheck(obj, Float8BlockwiseQTensorPythonClass) ||
+         PyObject_TypeCheck(obj, Float8BlockwiseQTensorStoragePythonClass);
 }
 
 inline bool IsNVFP4Tensor(PyObject *obj) {
-  return Py_TYPE(obj) == NVFP4TensorPythonClass || Py_TYPE(obj) == NVFP4TensorStoragePythonClass;
+  return PyObject_TypeCheck(obj, NVFP4TensorPythonClass) ||
+         PyObject_TypeCheck(obj, NVFP4TensorStoragePythonClass);
 }
 
 TensorWrapper NVTETensorFromFloat8Tensor(py::handle tensor, Quantizer *quantizer);

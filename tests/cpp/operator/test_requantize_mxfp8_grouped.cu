@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -275,6 +276,17 @@ using RequantizeParam = std::tuple<GroupShapeCase, DType, bool, bool>;
 
 class GroupedRequantizeMXFP8TestSuite : public ::testing::TestWithParam<RequantizeParam> {};
 
+TEST(GroupedRequantizeTest, RejectsUnsupportedScalingModes) {
+  const std::vector<size_t> shape = {128, 128};
+  GroupedTensorWrapper delayed(1, shape, NVTE_DELAYED_TENSOR_SCALING);
+  GroupedTensorWrapper mxfp8(1, shape, NVTE_MXFP8_1D_SCALING);
+
+  EXPECT_THROW(nvte_grouped_requantize(delayed.data(), mxfp8.data(), nullptr, 0),
+               std::runtime_error);
+  EXPECT_THROW(nvte_grouped_requantize(mxfp8.data(), delayed.data(), nullptr, 0),
+               std::runtime_error);
+}
+
 TEST_P(GroupedRequantizeMXFP8TestSuite, MatchesDequantizeThenQuantize) {
   if (test::getDeviceComputeCapability() < test::blackwellComputeCapability) {
     GTEST_SKIP();
@@ -290,7 +302,7 @@ TEST_P(GroupedRequantizeMXFP8TestSuite, MatchesDequantizeThenQuantize) {
 
   // Build a production-like wire tensor: high precision -> grouped rowwise
   // MXFP8 with compact scales. This is the only input representation accepted
-  // by nvte_group_requantize_mxfp8.
+  // by nvte_grouped_requantize.
   auto source = make_grouped_tensor(shape_info, DType::kBFloat16,
                                     NVTE_DELAYED_TENSOR_SCALING,
                                     /*rowwise=*/true, /*columnwise=*/false);
@@ -309,7 +321,7 @@ TEST_P(GroupedRequantizeMXFP8TestSuite, MatchesDequantizeThenQuantize) {
   fill_output_sentinel(actual);
   QuantizationConfigWrapper quant_config;
   quant_config.set_use_fast_math(use_fast_math);
-  nvte_group_requantize_mxfp8(input.data(), actual.data(), quant_config, 0);
+  nvte_grouped_requantize(input.data(), actual.data(), quant_config, 0);
 
   // Exact reference. The intermediate precision is part of the requantize
   // contract, so fast_math selects BF16 here and the default path selects FP32.
@@ -363,13 +375,13 @@ const std::vector<GroupShapeCase> kGroupShapeCases = {
      {{1024, 8192}, {1024, 8192}, {2048, 8192}, {4096, 8192}}},
     {"VaryingFirstDim_2048to8192x16384",
      {{2048, 16384}, {2048, 16384}, {4096, 16384}, {8192, 16384}}},
-    // // An empty member in the middle must not terminate the persistent work loop.
-    // {"VaryingFirstDimWithEmpty",
-    //  {{128, 256}, {0, 256}, {384, 256}, {512, 256}}},
-    // {"VaryingLastDim",
-    //  {{256, 128}, {256, 384}, {256, 640}}},
-    // {"VaryingBothDims",
-    //  {{128, 128}, {256, 384}, {512, 640}}},
+    // An empty member in the middle must not terminate the persistent work loop.
+    {"VaryingFirstDimWithEmpty",
+     {{128, 256}, {0, 256}, {384, 256}, {512, 256}}},
+    {"VaryingLastDim",
+     {{256, 128}, {256, 384}, {256, 640}}},
+    {"VaryingBothDims",
+     {{128, 128}, {256, 384}, {512, 640}}},
 };
 
 std::string make_test_name(
@@ -390,9 +402,9 @@ INSTANTIATE_TEST_SUITE_P(
     OperatorTest, GroupedRequantizeMXFP8TestSuite,
     ::testing::Combine(
         ::testing::ValuesIn(kGroupShapeCases),
-        ::testing::Values(DType::kFloat8E4M3),
-        ::testing::Values(true),
-        ::testing::Values(true)
+        ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2),
+        ::testing::Bool(),
+        ::testing::Bool()
       ),
     make_test_name);
 
