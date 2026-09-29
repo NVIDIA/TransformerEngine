@@ -1757,6 +1757,13 @@ def get_attention_backend(
                 head_dim_v,
             )
             use_flash_attention_3 = False
+    if use_flash_attention_4 and deterministic and FlashAttentionUtils.v4_is_installed:
+        if is_training and device_compute_capability == (12, 0):
+            logger.debug(
+                "Disabling FlashAttention 4 for deterministic backward on sm120: the CuTe"
+                " SM 12.0 backward kernel does not support deterministic execution."
+            )
+            use_flash_attention_4 = False
     if use_fused_attention and deterministic:
         if softmax_type != "vanilla":
             logger.debug(
