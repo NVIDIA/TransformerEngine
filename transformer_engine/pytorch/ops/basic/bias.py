@@ -22,7 +22,7 @@ from ...tensor import Quantizer
 class BiasFwdArgs:
     """Tensor inputs and backward quantizer for the bias forward custom op."""
 
-    input_: torch.Tensor
+    input_: TensorOrQuantized
     bias: torch.Tensor
     grad_input_quantizer: Optional[Quantizer]
 

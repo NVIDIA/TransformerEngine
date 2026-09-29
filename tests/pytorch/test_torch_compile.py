@@ -8,9 +8,11 @@ import copy
 import dataclasses
 import os
 import re
+import subprocess
 import sys
+import textwrap
 import warnings
-from typing import NamedTuple, Union
+from typing import Literal, NamedTuple, Union
 
 import pytest
 import torch
@@ -2509,12 +2511,16 @@ def _compile_with_graphs(fn):
     return torch.compile(fn, fullgraph=True, backend=backend), graphs
 
 
-class _CompiledPasses(NamedTuple):
-    forward: bool
-    backward: bool
+_ExecutionPath = Literal["custom_op", "eager"]
 
 
-def _assert_custom_ops(graphs, name, present=True):
+def _assert_custom_ops(
+    graphs,
+    name,
+    *,
+    forward: bool = True,
+    backward: bool = True,
+):
     targets = {
         str(node.target).removesuffix(".default").removesuffix("_base")
         for graph in graphs
@@ -2523,9 +2529,7 @@ def _assert_custom_ops(graphs, name, present=True):
         for node in module.graph.nodes
         if node.op == "call_function"
     }
-    if isinstance(present, bool):
-        present = _CompiledPasses(forward=present, backward=present)
-    for suffix, expected in zip(("", "_backward"), present):
+    for suffix, expected in (("", forward), ("_backward", backward)):
         assert (f"transformer_engine_compile.{name}{suffix}" in targets) == expected, targets
 
 
@@ -2547,46 +2551,79 @@ def _check_ops(fn, model, x, dy, kwargs=None):
     torch.testing.assert_close(actual, expected)
 
 
+class _Scenario(NamedTuple):
+    variant: str
+    expected_warning: str | None
+    forward_path: _ExecutionPath
+    backward_path: _ExecutionPath
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize(
-    "case,reason,compiled_passes",
+    "scenario",
     [
-        ("single", None, _CompiledPasses(forward=True, backward=True)),
-        (
-            "single_forward",
-            "without a custom op for backward",
-            _CompiledPasses(forward=True, backward=False),
+        _Scenario(
+            variant="single",
+            expected_warning=None,
+            forward_path="custom_op",
+            backward_path="custom_op",
         ),
-        (
-            "single_backward",
-            "without a custom op for forward",
-            _CompiledPasses(forward=False, backward=True),
+        _Scenario(
+            variant="single_forward",
+            expected_warning="without a custom op for backward",
+            forward_path="custom_op",
+            backward_path="eager",
         ),
-        ("single_eager", "without a custom op", _CompiledPasses(forward=False, backward=False)),
+        _Scenario(
+            variant="single_backward",
+            expected_warning="without a custom op for forward",
+            forward_path="eager",
+            backward_path="custom_op",
+        ),
+        _Scenario(
+            variant="single_eager",
+            expected_warning="without a custom op",
+            forward_path="eager",
+            backward_path="eager",
+        ),
         # A pipeline can dispatch each operation through its own custom op.
-        ("multi", None, _CompiledPasses(forward=True, backward=True)),
-        # This test fusion only implements eager backward; forward still compiles.
-        (
-            "backward_fusion",
-            "without a custom op for backward",
-            _CompiledPasses(forward=True, backward=False),
+        _Scenario(
+            variant="multi",
+            expected_warning=None,
+            forward_path="custom_op",
+            backward_path="custom_op",
         ),
-        ("legacy", "without a custom op", _CompiledPasses(forward=False, backward=False)),
+        # This test fusion only implements eager backward; forward still compiles.
+        _Scenario(
+            variant="backward_fusion",
+            expected_warning="without a custom op for backward",
+            forward_path="custom_op",
+            backward_path="eager",
+        ),
+        _Scenario(
+            variant="legacy",
+            expected_warning="without a custom op",
+            forward_path="eager",
+            backward_path="eager",
+        ),
     ],
+    ids=lambda scenario: scenario.variant,
 )
-def test_te_ops_pipeline(case, reason, compiled_passes, dtype, monkeypatch):
+def test_te_ops_pipeline(scenario, dtype, monkeypatch):
     torch._dynamo.reset()
-    if case.startswith("single"):
+    if scenario.variant.startswith("single"):
         monkeypatch.setattr(
             _AffineOp,
             "compile_ops",
             tuple(
-                op if enabled else None
-                for op, enabled in zip(_AffineOp.compile_ops, compiled_passes)
+                op if path == "custom_op" else None
+                for op, path in zip(
+                    _AffineOp.compile_ops, (scenario.forward_path, scenario.backward_path)
+                )
             ),
         )
-    if case == "backward_fusion":
+    if scenario.variant == "backward_fusion":
 
         def fuse(ops, **unused):
             if len(ops) == 2 and all(isinstance(op, _AffineOp) for op in ops):
@@ -2596,25 +2633,35 @@ def test_te_ops_pipeline(case, reason, compiled_passes, dtype, monkeypatch):
         monkeypatch.setattr(OperationFuser, "backward_fusion_functions", [fuse])
     ops = (
         [te.ops.Identity()]
-        if case == "legacy"
-        else [_AffineOp(float(i + 2), dtype) for i in range(1 if case.startswith("single") else 2)]
+        if scenario.variant == "legacy"
+        else [
+            _AffineOp(float(i + 2), dtype)
+            for i in range(1 if scenario.variant.startswith("single") else 2)
+        ]
     )
     model = te.ops.Sequential(*ops)
     compiled, graphs = _compile_with_graphs(model)
     # Keep products exact in BF16 across eager and fused reductions.
     x = (torch.randint(-8, 9, (8, 16), device="cuda").to(dtype) / 8).requires_grad_()
     dy = torch.randint_like(x, -8, 9) / 8
-    with pytest.warns(UserWarning, match=reason) if reason else contextlib.nullcontext():
+    with (
+        pytest.warns(UserWarning, match=scenario.expected_warning)
+        if scenario.expected_warning
+        else contextlib.nullcontext()
+    ):
         _check_ops(compiled, model, x, dy)
     _check_ops(model, model, x, dy)
-    _assert_custom_ops(graphs, "_affineop", present=compiled_passes)
-    if case == "single_forward":
+    _assert_custom_ops(
+        graphs,
+        "_affineop",
+        forward=scenario.forward_path == "custom_op",
+        backward=scenario.backward_path == "custom_op",
+    )
+    if scenario.variant == "single_forward":
         compiled, graphs = _compile_with_graphs(model)
         with torch.no_grad():
             torch.testing.assert_close(compiled(x), x * ops[0].weight)
-        _assert_custom_ops(
-            graphs, "_affineop", present=_CompiledPasses(forward=True, backward=False)
-        )
+        _assert_custom_ops(graphs, "_affineop", backward=False)
 
 
 @pytest.mark.parametrize(
@@ -2693,7 +2740,7 @@ def test_te_ops_fused_compute_contract(use_custom_ops):
     )
     expected = output, [(), (extra, None)], (dx, [(dw0,), (dw1,)], [(), (dr,)])
     torch.testing.assert_close(actual, expected)
-    _assert_custom_ops(graphs, "_affinepair", present=use_custom_ops)
+    _assert_custom_ops(graphs, "_affinepair", forward=use_custom_ops, backward=use_custom_ops)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -2718,7 +2765,28 @@ def test_te_ops_forward_kwargs_compile():
     with pytest.warns(UserWarning, match="non-tensor keyword arguments"):
         for gain in (3.0, 5.0):
             _check_ops(compiled, model, x, dy, {"gain": gain})
-    _assert_custom_ops(graphs[-1:], "_affineop", present=False)
+    _assert_custom_ops(graphs[-1:], "_affineop", forward=False, backward=False)
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.parametrize("backward", [False, True])
+def test_te_ops_bias_compile_with_fp8_input(backward):
+    """A quantized tensor subclass must cross the Bias custom-op boundary."""
+    torch._dynamo.reset()
+    quantizer = Float8CurrentScalingQuantizer(fp8_dtype=tex.DType.kFloat8E4M3, device="cuda")
+    x = quantizer(torch.randn(32, 64, device="cuda", dtype=torch.bfloat16))
+    model = te.ops.Bias(64, device="cuda", dtype=torch.bfloat16)
+    compiled = torch.compile(lambda inp: model(inp), fullgraph=True)
+
+    with contextlib.nullcontext() if backward else torch.no_grad():
+        expected = model(x)
+        actual = compiled(x)
+        torch.testing.assert_close(actual, expected)
+        if backward:
+            dy = torch.randn_like(expected)
+            expected_db = torch.autograd.grad(expected, model.bias, dy)[0]
+            actual_db = torch.autograd.grad(actual, model.bias, dy)[0]
+            torch.testing.assert_close(actual_db, expected_db)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -2737,6 +2805,86 @@ def test_te_ops_linear_bias_backward_override(dtype, backward_override, monkeypa
     _check_linear_bias_compile(
         dtype, "fp8", "pair", "all", monkeypatch, backward_override=backward_override
     )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_te_ops_linear_workspace_fake_mode(monkeypatch):
+    def unexpected_allocation(*args, **kwargs):
+        pytest.fail("Fake initialization must not populate the real workspace cache")
+
+    monkeypatch.setattr(
+        "transformer_engine.pytorch.ops.basic.basic_linear.get_cublas_workspace",
+        unexpected_allocation,
+    )
+    with FakeTensorMode():
+        te.ops.BasicLinear(32, 64, device="cuda", dtype=torch.bfloat16)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("training", [False, True])
+@pytest.mark.parametrize("initial_device", ["cuda", "cpu", "meta"])
+def test_te_ops_linear_bias_cold_cudagraphs(training, initial_device):
+    """A fresh process prevents earlier GEMMs from hiding lazy workspace allocation."""
+    script = textwrap.dedent(
+        """
+        import contextlib
+        import sys
+        import torch
+        import transformer_engine.pytorch as te
+        from transformer_engine.pytorch.cpp_extensions.gemm import get_cublas_workspace
+        from torch._dynamo.utils import counters
+
+        training, initial_device = sys.argv[1:]
+        training = training == "True"
+        assert get_cublas_workspace.cache_info().currsize == 0
+        linear = te.ops.BasicLinear(32, 64, device=initial_device, dtype=torch.bfloat16)
+        if initial_device == "cpu":
+            assert get_cublas_workspace.cache_info().currsize == 0
+            linear.cuda()
+        elif initial_device == "meta":
+            assert get_cublas_workspace.cache_info().currsize == 0
+            linear.to_empty(device="cuda")
+            linear.reset_parameters()
+        assert get_cublas_workspace.cache_info().currsize > 0
+        model = te.ops.Sequential(linear, te.ops.Bias(64, dtype=torch.bfloat16))
+        x = torch.randn(32, 32, device="cuda", dtype=torch.bfloat16, requires_grad=training)
+        targets = (x, *model.parameters())
+        dy = torch.randn(32, 64, device="cuda", dtype=torch.bfloat16)
+
+        def forward(x):
+            return model(x)
+
+        compiled = torch.compile(forward, fullgraph=True, mode="reduce-overhead")
+        counters.clear()
+        with contextlib.nullcontext() if training else torch.no_grad():
+            for _ in range(5):
+                torch.compiler.cudagraph_mark_step_begin()
+                actual = compiled(x)
+                if training:
+                    grads = torch.autograd.grad(actual, targets, dy)
+                # Eager reference runs only after the first compiled invocation.
+                expected = forward(x)
+                torch.testing.assert_close(actual, expected)
+                if training:
+                    expected_grads = torch.autograd.grad(expected, targets, dy)
+                    torch.testing.assert_close(grads, expected_grads)
+                    del grads, expected_grads
+                del actual, expected
+        torch.cuda.synchronize()
+        assert not counters["inductor"]["cudagraph_skips"], counters["inductor"]
+        assert counters["inductor"]["cudagraph_recorded_non_static_inputs"] > 0, dict(
+            counters["inductor"]
+        )
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(training), initial_device],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=180,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def _check_linear_bias_compile(
@@ -2825,21 +2973,18 @@ def _check_linear_bias_compile(
     _assert_custom_ops(
         graphs,
         "forwardlinearbiasactivation",
-        present=_CompiledPasses(forward=case == "pair", backward=False),
+        forward=case == "pair",
+        backward=False,
     )
     _assert_custom_ops(
         graphs,
         "basiclinear",
-        present=_CompiledPasses(
-            forward=case in ("linear", "unfused"),
-            backward=case != "bias" and grads in ("all", "input", "weight"),
-        ),
+        forward=case in ("linear", "unfused"),
+        backward=case != "bias" and grads in ("all", "input", "weight"),
     )
     _assert_custom_ops(
         graphs,
         "bias",
-        present=_CompiledPasses(
-            forward=case in ("bias", "unfused"),
-            backward=case != "linear" and bool(targets),
-        ),
+        forward=case in ("bias", "unfused"),
+        backward=case != "linear" and bool(targets),
     )
