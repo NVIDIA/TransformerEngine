@@ -423,7 +423,8 @@ __global__ __launch_bounds__(kThreadsPerCta, MIN_BLOCKS_PER_SM) void quantize_bi
     reinterpret_cast<uint32_t &>(acc) = column[0];
 #pragma unroll
     for (int32_t w = 1; w < kWarpsPerCta; ++w) {
-      ptx::abs_max_nan_2x(acc, acc, reinterpret_cast<const ptx::bf16x2 &>(column[w * kColumnSlots]));
+      ptx::abs_max_nan_2x(acc, acc,
+                          reinterpret_cast<const ptx::bf16x2 &>(column[w * kColumnSlots]));
     }
     const uint32_t amax_pair = reinterpret_cast<const uint32_t &>(acc);
 
