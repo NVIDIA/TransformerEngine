@@ -26,16 +26,22 @@ import pytest
 
 PROBE = textwrap.dedent(
     """
+    import sys
+
     import transformer_engine.pytorch  # noqa: F401  (the import under test)
     from transformer_engine.pytorch.attention.dot_product_attention import backends
     from transformer_engine.pytorch.attention.dot_product_attention.utils import (
         FlashAttentionUtils,
     )
 
-    assert FlashAttentionUtils.is_installed is False
-    assert backends.flash_attn_func is None
-    if not FlashAttentionUtils.v3_is_installed:
+    if sys.argv[1] == "flash-attn":
+        assert FlashAttentionUtils.is_installed is False
+        assert backends.flash_attn_func is None
+    elif sys.argv[1] == "flash-attn-3":
+        assert FlashAttentionUtils.v3_is_installed is False
         assert backends.flash_attn_func_v3 is None
+    else:
+        raise ValueError(f"Unexpected FlashAttention distribution: {sys.argv[1]}")
     print("PROBE_OK")
     """
 )
@@ -71,7 +77,11 @@ def test_broken_flash_attn_does_not_break_te_import(name, version, module):
         inherited = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = tmp + (os.pathsep + inherited if inherited else "")
         proc = subprocess.run(
-            [sys.executable, "-c", PROBE], capture_output=True, text=True, env=env, timeout=900
+            [sys.executable, "-c", PROBE, name],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=900,
         )
     assert proc.returncode == 0, proc.stderr[-3000:]
     assert "PROBE_OK" in proc.stdout
