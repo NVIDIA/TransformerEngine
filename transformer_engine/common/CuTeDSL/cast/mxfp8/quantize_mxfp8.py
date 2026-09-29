@@ -175,6 +175,9 @@ def quantize_rowwise_mxfp8(
     WITH_DACT: cutlass.Constexpr[bool] = False,
     WITH_DBIAS: cutlass.Constexpr[bool] = False,
     dbias_acc: Optional[cute.Tensor] = None,  #  only needed when WITH_DBIAS is True
+    # Write 0 to the scales of col-blocks past N instead of skipping them, so the padding of the
+    # scale row is zeroed (mirrors group_quantize_mxfp8.cuh).
+    ZERO_OOB_SCALES: cutlass.Constexpr[bool] = False,
 ):
     """Quantize one SMEM tile rowwise to MXFP8 (per-row 32-elt block scales); returns the tile amax."""
     tidx, _, _ = cute.arch.thread_idx()
@@ -375,6 +378,11 @@ def quantize_rowwise_mxfp8(
         scale_col_first_elt = tile_col_start + (tidx % CTA_THREADS_X) * MXFP8_BLOCK_SCALING_SIZE
         if scale_row < M and scale_col_first_elt < N:
             mS_row_stage[(tidx // CTA_THREADS_X, tidx % CTA_THREADS_X)] = biased_exp_r
+        if cutlass.const_expr(ZERO_OOB_SCALES):
+            if scale_row < M and scale_col_first_elt >= N:
+                mS_row_stage[(tidx // CTA_THREADS_X, tidx % CTA_THREADS_X)] = Uint8(0).bitcast(
+                    Float8E8M0FNU
+                )
 
     inv_scale_r = exp2f_rcp(biased_exp_r)  # f32 reciprocal of the scale
     scale_2x = pack_f32x2(inv_scale_r, inv_scale_r)
@@ -421,6 +429,9 @@ def quantize_colwise_mxfp8(
     WITH_DACT: cutlass.Constexpr[bool] = False,
     WITH_DBIAS: cutlass.Constexpr[bool] = False,
     CACHE_ACTIVATION: cutlass.Constexpr[bool] = False,  # cache post-activation values to sX_tile
+    # Write 0 to the scales of columns past N instead of skipping them, so the padding of the
+    # scale row is zeroed (mirrors group_quantize_mxfp8.cuh).
+    ZERO_OOB_SCALES: cutlass.Constexpr[bool] = False,
 ):
     """Quantize one SMEM tile colwise to MXFP8 (per-column 32-elt block scales); returns (amax, dbias_partial)."""
     tidx, _, _ = cute.arch.thread_idx()
@@ -541,6 +552,11 @@ def quantize_colwise_mxfp8(
                 mS_col_stage[(0, tidx % 32, tidx // 32)] = biased_exp_c
             else:
                 mS_col_stage[(0, tidx)] = biased_exp_c
+        if cutlass.const_expr(ZERO_OOB_SCALES):
+            # Swizzled layouts pad through derive_swizzled_scale_layout instead.
+            assert not SWIZZLE
+            if tile_row_start < M and scale_col >= N:
+                mS_col_stage[(0, tidx)] = Uint8(0).bitcast(Float8E8M0FNU)
 
     inv_scale_c = exp2f_rcp(biased_exp_c)
     # cvt.rn.satfinite can be vectorized to convert 2 f32 to 2 fp8 in one instruction

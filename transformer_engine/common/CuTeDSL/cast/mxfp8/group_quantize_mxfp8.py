@@ -30,9 +30,8 @@ boundaries (CUDA's decode_job / advance_to_next_job, removed in #3483); the
 per-tensor grid above is what replaced it on both sides.
 
 Mechanics that provably yield the same bytes may differ: the mbarrier pipeline is
-expressed with PipelineTmaAsync instead of hand-rolled mbarriers, and
-out-of-bounds scale padding is skipped rather than explicitly zeroed (the CUDA
-kernel writes 0 there; downstream only consumes the meaningful region).
+expressed with PipelineTmaAsync instead of hand-rolled mbarriers. As in CUDA, the
+scales of out-of-bounds columns in a chunk (the scale-row padding) are written as 0.
 
 Scope: cast-only (no dbias / activation / dact / amax), compact (non-swizzled)
 scales, rowwise and/or colwise. VARYING_BOTH_DIMS is not handled here (its
@@ -44,9 +43,7 @@ shares the precondition but cannot check it -- CuTeDSL has no device-side assert
 and for VARYING_FIRST_DIM the per-tensor extents live in device memory, so the
 C++ bridge cannot check them either without a sync. A violating group mis-tiles
 silently here where CUDA raises.
-"""
 
-"""
 Measured, deliberately NOT changed:
   - sO_row and sO_col are both allocated unconditionally, where CUDA sizes only the
     direction in use. Sizing them conditionally does work -- ncu confirms the shared-memory
@@ -71,7 +68,7 @@ from cutlass import cute
 from cutlass import pipeline
 from cutlass import Boolean, Int32, Int64, Float8E8M0FNU
 from cutlass.cute.nvgpu import cpasync
-from cutlass.tensor_utils import TensorMapManager, TensorMapUpdateMode
+from cutlass.utils import TensorMapManager, TensorMapUpdateMode
 from cuda.bindings.driver import CUstream  # pylint: disable=no-name-in-module
 import tvm_ffi
 
@@ -222,14 +219,11 @@ class MXFP8GroupQuantizeKernel:
             (self.BUFF_DIM_Y, self.BUFF_DIM_X), order=(1, 0)
         )
         cta_tiler = (self.BUFF_DIM_Y, self.BUFF_DIM_X)
-        print(f"mx={mX}, smem_tile_layout={smem_tile_layout}, cta_tiler={cta_tiler}\n")
 
         op_load = cpasync.CopyBulkTensorTileG2SOp()
         tma_atom_x, tma_src = cpasync.make_tiled_tma_atom(
             op_load, mX, smem_tile_layout, cta_tiler, num_multicast=1
         )
-        print(f"tma_atom_x={tma_atom_x}\n")
-        print(f"tma_src={tma_src}\n")
         op_store = cpasync.CopyBulkTensorTileS2GOp()
         tma_atom_out_row, tma_dst_out_row = cpasync.make_tiled_tma_atom(
             op_store, mO_row, smem_tile_layout, cta_tiler, num_multicast=1
@@ -489,7 +483,6 @@ class MXFP8GroupQuantizeKernel:
             stride=((self.BUFF_DIM_X, 1), self.BUFF_DIM_Y * self.BUFF_DIM_X),
         )
         sX = storage.sX.get_tensor(tile_layout)
-        print(f"sX={sX}\n")
         sO_row = storage.sO_row.get_tensor(tile_layout)
         sO_col = storage.sO_col.get_tensor(tile_layout)
 
@@ -520,11 +513,6 @@ class MXFP8GroupQuantizeKernel:
         tXsO_col, tXgO_col = cpasync.tma_partition(
             tma_atom_out_col, 0, cute.make_layout(1), sO_col, gO_col_tiled
         )
-        print(f"tma_atom_x={tma_atom_x}\n")
-        print(f"tma_src={tma_src}\n")
-        print(f"gX_tiled={gX_tiled}\n")
-        print(f"tXsX={tXsX}\n")
-        print(f"tXgX={tXgX}\n")
 
         tmap = TensorMapManager(TensorMapUpdateMode.GMEM, BYTES_PER_TENSORMAP)
         cute.arch.sync_threads()
@@ -534,8 +522,6 @@ class MXFP8GroupQuantizeKernel:
         # Metadata of the tensor that owns this block
         tensor_rows = Int32(0)
         tensor_cols = Int32(0)
-        # Element offset of this tensor within the group: Int64 (CUDA uses size_t), since a
-        # group can exceed 2^31 elements even when every individual extent is small.
         # Element offset of this tensor within the group: Int64 (CUDA uses size_t), since a
         # group can exceed 2^31 elements even when every individual extent is small.
         tensor_base = Int64(0)
@@ -867,7 +853,7 @@ class MXFP8GroupQuantizeKernel:
                     SWIZZLE=False,
                     TILE_X=self.BUFF_DIM_X,
                     TILE_Y=self.BUFF_DIM_Y,
-                    SKIP_MASKING=False,
+                    ZERO_OOB_SCALES=True,
                 )
             if cutlass.const_expr(cfg.ROWWISE):
                 quantize_rowwise_mxfp8(
@@ -888,7 +874,7 @@ class MXFP8GroupQuantizeKernel:
                     WAVES=self.WAVES,
                     THREADS_PER_BANK=self.THREADS_PER_BANK,
                     PACK_SIZE=self.PACK_SIZE,
-                    SKIP_MASKING=False,
+                    ZERO_OOB_SCALES=True,
                 )
 
             # Force consumer's write to SMEM to be visible to TMA stores later
