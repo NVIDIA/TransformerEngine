@@ -143,6 +143,7 @@ _GATED_ACTIVATIONS = frozenset(
 
 
 def _recipe_has_dbias_dact_fusion(recipe: Optional[Recipe]) -> bool:
+    # TODO(ksivaman): Fuse nvfp4 act once kernel is available.
     return recipe is not None and (recipe.delayed() or recipe.mxfp8())
 
 

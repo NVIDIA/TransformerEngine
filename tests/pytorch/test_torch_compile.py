@@ -5,7 +5,6 @@
 import abc
 import contextlib
 import dataclasses
-import importlib
 import os
 import re
 import sys
@@ -39,6 +38,11 @@ import transformer_engine_torch as tex
 from transformer_engine.common import recipe
 from transformer_engine.pytorch.constants import FP8FwdTensorIdx, FP8BwdTensorIdx
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
+from transformer_engine.pytorch.module import (
+    linear as linear_module,
+    layernorm_linear as layernorm_linear_module,
+    layernorm_mlp as layernorm_mlp_module,
+)
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager, QuantizerRole
 from transformer_engine.pytorch.ops.basic.basic_linear import BasicLinear
 from transformer_engine.pytorch.ops.fuser import OperationFuser
@@ -2431,7 +2435,11 @@ def test_te_modules_fake_matches_real(monkeypatch, case, dtype, bias, fp8_recipe
                 "cuBLAS FP8 GELU requires matching output and auxiliary dtypes (BF16 without bias)"
             )
     module_name = case if case in ("linear", "layernorm_linear") else "layernorm_mlp"
-    module = importlib.import_module(f"transformer_engine.pytorch.module.{module_name}")
+    module = {
+        "linear": linear_module,
+        "layernorm_linear": layernorm_linear_module,
+        "layernorm_mlp": layernorm_mlp_module,
+    }[module_name]
     checked = []
 
     def assert_metadata(spec, real):
