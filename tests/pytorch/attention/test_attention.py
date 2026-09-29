@@ -31,6 +31,7 @@ from transformer_engine.pytorch import (
 )
 from transformer_engine.pytorch.attention.dot_product_attention import (
     _attention_backends,
+    utils as dpa_utils,
 )
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     FlashAttentionUtils,
@@ -135,6 +136,64 @@ def test_flash_attention_supported_version_message():
         )
         == ">= 2.1.1, < 2.8.4"
     )
+
+
+@pytest.mark.parametrize(
+    "compute_capability,deterministic,is_training,expect_flash",
+    [
+        ((12, 0), True, True, False),
+        ((12, 0), True, False, True),
+        ((12, 0), False, True, True),
+        ((12, 0), False, False, True),
+        ((9, 0), True, True, True),
+        ((10, 0), True, True, True),
+    ],
+)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("head_dim", [64, 128])
+@pytest.mark.parametrize("allow_unfused", [False, True])
+def test_fa4_sm120_deterministic_backend_selection(
+    monkeypatch,
+    compute_capability,
+    deterministic,
+    is_training,
+    expect_flash,
+    dtype,
+    head_dim,
+    allow_unfused,
+):
+    """Reject unsupported FA4 backward before launch, preserving eligible forward paths."""
+    for name, value in (
+        ("NVTE_FLASH_ATTN", "1"),
+        ("NVTE_FLASH_ATTN_V2", "0"),
+        ("NVTE_FLASH_ATTN_V3", "0"),
+        ("NVTE_FLASH_ATTN_V4", "1"),
+        ("NVTE_FUSED_ATTN", "0"),
+        ("NVTE_UNFUSED_ATTN", str(int(allow_unfused))),
+    ):
+        monkeypatch.setenv(name, value)
+    # Exercise the real selector without requiring an SM120 GPU or an FA4 installation.
+    monkeypatch.setattr(dpa_utils, "get_device_compute_capability", lambda: compute_capability)
+    monkeypatch.setattr(dpa_utils, "get_cudnn_version", lambda: (9, 26, 0))
+    monkeypatch.setattr(FlashAttentionUtils, "v4_is_installed", True)
+    monkeypatch.setattr(FlashAttentionUtils, "fa4_version", PkgVersion("4.0.0b24"))
+    monkeypatch.setattr(FlashAttentionUtils, "v4_validate_head_dims", None)
+    params = dpa_utils.AttentionParams(
+        qkv_dtype=dtype,
+        qkv_layout="bshd_bshd_bshd",
+        head_dim_qk=head_dim,
+        head_dim_v=head_dim,
+        attn_mask_type="causal",
+        window_size=(-1, 0),
+        deterministic=deterministic,
+        is_training=is_training,
+    )
+    flash, version, fused, _, unfused, available = dpa_utils.get_attention_backend(params)
+    assert bool(flash) is expect_flash
+    assert version == (FlashAttentionUtils.fa4_version if expect_flash else None)
+    assert not fused
+    assert bool(unfused) is (allow_unfused and not expect_flash)
+    assert available == [expect_flash, False, allow_unfused]
 
 
 def test_fused_attn_backend_message():
