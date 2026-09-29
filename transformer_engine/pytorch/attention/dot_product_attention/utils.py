@@ -1294,32 +1294,25 @@ def get_attention_backend(
             and cp_comm_type == "all_gather"
             and (10, 0) <= device_compute_capability < (12, 0)
             and head_dim_qk == head_dim_v == 256
-            and FlashAttentionUtils.fa4_version < FlashAttentionUtils.v4_0_0_beta31
         ):
-            # Earlier FA4 releases cannot use D=256 compact THD all-gather metadata.
-            logger.debug(
-                "Disabling FlashAttention 4 for THD all-gather context parallelism with "
-                "head_dim=256 on SM100/SM110 with version %s (requires >= %s)",
-                FlashAttentionUtils.fa4_version,
-                FlashAttentionUtils.v4_0_0_beta31,
-            )
-            use_flash_attention_4 = False
-        elif (
-            qkv_format == "thd"
-            and cp_comm_type == "all_gather"
-            and is_training
-            and (10, 0) <= device_compute_capability < (12, 0)
-            and head_dim_qk == head_dim_v == 256
-            and load_balancing_strategy is CPLoadBalancingStrategy.DUAL_CHUNK_SWAP
-        ):
-            # Dual-chunk all-gather passes seqused_q/k to backward; released FA4
-            # does not support those arguments with the SM100 D=256 kernel yet.
-            # Add a release-version gate once that backward support is published.
-            logger.debug(
-                "Disabling FlashAttention 4 for THD dual-chunk all-gather "
-                "head_dim=256 backward on SM100/SM110."
-            )
-            use_flash_attention_4 = False
+            if FlashAttentionUtils.fa4_version < FlashAttentionUtils.v4_0_0_beta31:
+                # Earlier FA4 releases cannot use D=256 compact THD all-gather metadata.
+                logger.debug(
+                    "Disabling FlashAttention 4 for THD all-gather context parallelism with "
+                    "head_dim=256 on SM100/SM110 with version %s (requires >= %s)",
+                    FlashAttentionUtils.fa4_version,
+                    FlashAttentionUtils.v4_0_0_beta31,
+                )
+                use_flash_attention_4 = False
+            elif is_training and load_balancing_strategy is CPLoadBalancingStrategy.DUAL_CHUNK_SWAP:
+                # Dual-chunk all-gather passes seqused_q/k to backward; released FA4
+                # does not support those arguments with the SM100 D=256 kernel yet.
+                # Add a release-version gate once that backward support is published.
+                logger.debug(
+                    "Disabling FlashAttention 4 for THD dual-chunk all-gather "
+                    "head_dim=256 backward on SM100/SM110."
+                )
+                use_flash_attention_4 = False
     if context_parallel and (
         use_flash_attention_2 or use_flash_attention_3 or use_flash_attention_4
     ):
