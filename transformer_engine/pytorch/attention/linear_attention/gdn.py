@@ -15,13 +15,13 @@ from transformer_engine.pytorch.constants import dist_group_type
 from transformer_engine.pytorch.jit import no_torch_dynamo
 
 from .base import (
+    AlignedTimelineKernelAdapter,
     LinearAttentionBase,
-    LinearAttentionKernelAdapter,
     _needs_eager_linear_attention,
 )
 
 
-class _GDNKernelAdapter(LinearAttentionKernelAdapter):
+class _GDNKernelAdapter(AlignedTimelineKernelAdapter):
     """Adapter from TransformerEngine attention layouts to cuDNN frontend GDN.
 
     GDN gates the recurrence with one scalar per token and head: a log decay

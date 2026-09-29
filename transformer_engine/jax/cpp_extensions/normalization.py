@@ -25,7 +25,6 @@ from .misc import (
     jax_dtype_to_te_dtype,
     te_dtype_to_jax_dtype,
     NamedSharding,
-    get_cudnn_version,
 )
 from .quantization import quantize, AmaxScope
 from ..sharding import (
@@ -84,10 +83,6 @@ def is_norm_zero_centered_gamma_in_weight_dtype(scaling_mode: ScalingMode) -> bo
     return int(os.getenv("NVTE_ZERO_CENTERED_GAMMA_IN_WTYPE", "0")) == 1
 
 
-# CuDNN version must be at least this to use MXFP8 fused normalization otherwise unfused norm and quantize will be used
-FUSED_MXFP8_NORM_CUDNN_MIN_VERSION = (9, 10, 0)
-
-
 class NormFwdPrimitive(BasePrimitive):
     """
     Layer Normalization Forward FP8 Primitive
@@ -143,14 +138,6 @@ class NormFwdPrimitive(BasePrimitive):
         assert (
             amax_aval is None or amax_aval.dtype == jnp.float32
         ), f"Expected amax_aval.dtype=float32, but got amax_aval.dtype={amax_aval.dtype}"
-
-        assert (
-            scaling_mode != ScalingMode.MXFP8_1D_SCALING.value
-            or get_cudnn_version() >= FUSED_MXFP8_NORM_CUDNN_MIN_VERSION
-        ), (
-            "MXFP8 Fused Normalization is only supported in CuDNN version"
-            f" {FUSED_MXFP8_NORM_CUDNN_MIN_VERSION} or higher"
-        )
 
         assert scaling_mode != ScalingMode.CURRENT_TENSOR_SCALING.value, (
             "Current tensor scaling is not supported for fused norm and quantization. Please do"
@@ -1090,26 +1077,6 @@ def layernorm_fwd(
         return NoScaleTensor(data=output, amax=updated_amax), mu, rsigma
 
     if (
-        quantizer.scaling_mode == ScalingMode.MXFP8_1D_SCALING
-        and get_cudnn_version() < FUSED_MXFP8_NORM_CUDNN_MIN_VERSION
-    ):
-        out, mu, rsigma = layernorm_fwd(
-            x,
-            gamma,
-            beta,
-            zero_centered_gamma,
-            epsilon,
-            quantizer=None,
-            amax_scope=amax_scope,
-            transpose_batch_sequence=transpose_batch_sequence,
-            output_amax_when_no_scaling=False,
-        )
-        out, _ = quantize(
-            out, quantizer, amax_scope=amax_scope, transpose_batch_sequence=transpose_batch_sequence
-        )
-        return out, mu, rsigma
-
-    if (
         quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING
         or quantizer.scaling_mode.is_nvfp4_scaling
     ):
@@ -1341,28 +1308,6 @@ def rmsnorm_fwd(
             else None
         )
         return NoScaleTensor(data=output, amax=updated_amax), rsigma
-
-    if (
-        quantizer.scaling_mode == ScalingMode.MXFP8_1D_SCALING
-        and get_cudnn_version() < FUSED_MXFP8_NORM_CUDNN_MIN_VERSION
-    ):
-        out, rsigma = rmsnorm_fwd(
-            x,
-            gamma,
-            zero_centered_gamma,
-            epsilon,
-            quantizer=None,
-            amax_scope=amax_scope,
-            transpose_batch_sequence=transpose_batch_sequence,
-            output_amax_when_no_scaling=False,
-        )
-        out = quantize(
-            out.data,
-            quantizer,
-            amax_scope=amax_scope,
-            transpose_batch_sequence=transpose_batch_sequence,
-        )
-        return out, rsigma
 
     if (
         quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING
