@@ -538,7 +538,7 @@ def test_graphed_delayed_scaling_update_respects_backward_scope(monkeypatch) -> 
     )
 
     update_count = 0
-    original_update = FP8GlobalStateManager.reduce_and_update_quantization_state.__func__
+    original_update = FP8GlobalStateManager.reduce_and_update_fp8_tensors.__func__
 
     def counted_update(cls, forward=True):
         nonlocal update_count
@@ -546,11 +546,6 @@ def test_graphed_delayed_scaling_update_respects_backward_scope(monkeypatch) -> 
             update_count += 1
         return original_update(cls, forward=forward)
 
-    monkeypatch.setattr(
-        FP8GlobalStateManager,
-        "reduce_and_update_quantization_state",
-        classmethod(counted_update),
-    )
     monkeypatch.setattr(
         FP8GlobalStateManager,
         "reduce_and_update_fp8_tensors",
