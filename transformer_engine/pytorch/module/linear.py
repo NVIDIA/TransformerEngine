@@ -30,10 +30,7 @@ from .base import (
     _2X_ACC_WGRAD,
 )
 from ._common import (
-    _get_calibration_metadata_buffers,
     _is_in_activation_recompute_phase,
-    _resolve_calibration_quantizer,
-    _supports_calibration_decay,
     can_reconstruct_wgrad_input_from_original,
     check_fp8_reduce_and_update,
     noop_cat,
@@ -41,7 +38,11 @@ from ._common import (
     set_quantizer_usage_for_wgrad_all_gather,
     WeightGradStore,
 )
-from ..quantization import FP8GlobalStateManager, QuantizerRole
+from ..quantization import (
+    FP8GlobalStateManager,
+    QuantizationCalibrationConfig,
+    QuantizerRole,
+)
 from ..utils import (
     cast_if_needed,
     clear_tensor_data,
@@ -184,7 +185,7 @@ class LinearFwdArgs:
 
     # Transformer Engine calibration metadata buffering
     calibration_buffers: Optional[Dict[str, Optional[torch.Tensor]]]
-    transformer_engine_calibration_decay: float
+    calibration_config: Optional[QuantizationCalibrationConfig]
 
     # --- Misc ---
     cpu_offloading: bool
@@ -599,27 +600,30 @@ def _linear_forward_impl(
         bias_dtype = torch.bfloat16
     bias = cast_if_needed(bias, bias_dtype) if bias is not None else bias
 
-    input_calibration_quantizer = _resolve_calibration_quantizer(inputmat_total, input_quantizer)
-    weight_calibration_quantizer = _resolve_calibration_quantizer(weightmat, weight_quantizer)
-
     # Calibrate quantizers and buffer their metadata when requested.
     if args.calibration_buffers is not None and not _is_in_activation_recompute_phase():
-        if input_calibration_quantizer is not None:
-            if _supports_calibration_decay(type(input_calibration_quantizer)):
-                input_calibration_quantizer.calibrate(
-                    inputmat_total,
-                    calibration_decay=args.transformer_engine_calibration_decay,
-                )
-            else:
-                input_calibration_quantizer.calibrate(inputmat_total)
-        if weight_calibration_quantizer is not None:
-            weight_calibration_quantizer.calibrate(weightmat)
-        args.calibration_buffers.update(
-            _get_calibration_metadata_buffers("input", input_calibration_quantizer)
-        )
-        args.calibration_buffers.update(
-            _get_calibration_metadata_buffers("weight", weight_calibration_quantizer)
-        )
+        assert args.calibration_config is not None
+        if input_quantizer is not None:
+            input_quantizer.calibrate(
+                inputmat_total,
+                calibration_config=args.calibration_config,
+            )
+        if weight_quantizer is not None:
+            weight_quantizer.calibrate(
+                weightmat,
+                calibration_config=dataclass_replace(
+                    args.calibration_config,
+                    transformer_engine_calibration_decay=0.0,
+                ),
+            )
+        if input_quantizer is not None:
+            args.calibration_buffers.update(
+                input_quantizer._get_calibration_metadata_buffers("input")
+            )
+        if weight_quantizer is not None:
+            args.calibration_buffers.update(
+                weight_quantizer._get_calibration_metadata_buffers("weight")
+            )
 
     # Choose whether to use GEMM kernel with split accumulator
     use_split_accumulator = _2X_ACC_FPROP
@@ -2568,11 +2572,7 @@ class Linear(TransformerEngineBaseModule):
                 wgrad_store=wgrad_store,
                 # Buffering TE calibration metadata, e.g. scaling factors.
                 calibration_buffers=calibration_buffers,
-                transformer_engine_calibration_decay=(
-                    calibration_config.transformer_engine_calibration_decay
-                    if calibration_config is not None
-                    else 0.0
-                ),
+                calibration_config=calibration_config,
                 # misc
                 cpu_offloading=is_cpu_offload_enabled(),
                 is_grad_enabled=is_grad_enabled,

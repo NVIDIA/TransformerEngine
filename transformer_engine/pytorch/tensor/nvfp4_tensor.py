@@ -7,7 +7,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 import math
 import warnings
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple, Union
 import functools
 
 import torch
@@ -22,7 +22,14 @@ from ..utils import (
 )
 
 from .storage.nvfp4_tensor_storage import NVFP4TensorStorage, _FromNVFP4Func
-from ..quantized_tensor import QuantizedTensor, QuantizedTensorStorage, Quantizer
+from ..quantized_tensor import (
+    QuantizedTensor,
+    QuantizedTensorStorage,
+    Quantizer,
+)
+
+if TYPE_CHECKING:
+    from ..quantization import QuantizationCalibrationConfig
 from ..dynamo import register_value_opaque_quantizer
 from ._quantization_helpers import _IdentityFunc, safe_quantized_repr
 
@@ -340,18 +347,24 @@ class NVFP4Quantizer(Quantizer):
         shape[-1] = shape[-1] // 2
         return tuple(shape)
 
-    def calibrate(self, tensor: torch.Tensor, *, calibration_decay: float = 0.0) -> None:
-        metadata_name = "amax_rowwise" if self.row_scaled_nvfp4 else "amax"
+    def calibrate(
+        self,
+        tensor: torch.Tensor,
+        *,
+        calibration_config: QuantizationCalibrationConfig,
+    ) -> None:
+        if self.row_scaled_nvfp4:
+            raise NotImplementedError(
+                "Row-wise NVFP4 calibration is not supported due to potentially "
+                "changing shape of scaling factors."
+            )
         if isinstance(tensor, (QuantizedTensor, QuantizedTensorStorage)):
             # Retrieve the quantization metadata from quantized storage.
             observed_amax = tensor._amax_rowwise
         else:
             # Direct calibration of a non-quantized tensor must reconstruct the metadata.
             # This path is NOT performant and should only be used for non-quantized Tensor calibration.
-            if self.row_scaled_nvfp4:
-                amin, amax = tensor.aminmax(dim=-1)
-            else:
-                amin, amax = tensor.aminmax()
+            amin, amax = tensor.aminmax()
             observed_amax = torch.maximum(-amin, amax).reshape(-1).float()
             if self.with_amax_reduction and torch.distributed.is_initialized():
                 torch.distributed.all_reduce(
@@ -360,14 +373,21 @@ class NVFP4Quantizer(Quantizer):
                     group=self._canonicalized_amax_reduction_group(),
                 )
         self._update_calibration_value(
-            metadata_name,
+            "amax",
             observed_amax,
-            calibration_decay=calibration_decay,
+            calibration_config=calibration_config,
         )
 
-    def get_quantization_recipe_name(self) -> str:
-        """Get the stable name of the quantization recipe."""
-        return "nvfp4_rowwise" if self.row_scaled_nvfp4 else "nvfp4"
+    def _get_calibration_metadata_buffers(
+        self, tensor_name: str
+    ) -> Dict[str, torch.Tensor]:
+        """Get module-buffer aliases for NVFP4 calibration state."""
+        if self.row_scaled_nvfp4:
+            raise NotImplementedError(
+                "Row-wise NVFP4 calibration metadata buffering is not supported due to "
+                "potentially changing shape of scaling factors."
+            )
+        return super()._get_calibration_metadata_buffers(tensor_name)
 
     def _canonicalized_amax_reduction_group(self) -> dist_group_type:
         """Get process group for amax reduction"""

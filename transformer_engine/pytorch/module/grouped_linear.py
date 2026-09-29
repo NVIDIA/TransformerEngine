@@ -4,6 +4,7 @@
 
 """GroupedLinear API"""
 
+from dataclasses import replace as dataclass_replace
 from typing import Union, Optional, Callable, Tuple, List, Dict
 from itertools import chain
 import os
@@ -32,15 +33,16 @@ from .base import (
     _get_high_precision_init_val,
 )
 from ._common import (
-    _get_calibration_metadata_buffers,
     _is_in_activation_recompute_phase,
-    _resolve_calibration_quantizer,
-    _supports_calibration_decay,
     can_reconstruct_wgrad_input_from_original,
     WeightGradStore,
 )
 from . import _split_quantization
-from ..quantization import FP8GlobalStateManager, QuantizerRole
+from ..quantization import (
+    FP8GlobalStateManager,
+    QuantizationCalibrationConfig,
+    QuantizerRole,
+)
 from ..utils import (
     divide,
     cast_if_needed,
@@ -161,22 +163,20 @@ def is_module_grouped_tensor_path_supported(
 
 def _update_grouped_calibration_metadata_buffers(
     calibration_buffers: Dict[str, Optional[torch.Tensor]],
-    input_tensors: List[Union[torch.Tensor, QuantizedTensorStorage]],
-    weight_tensors: List[Union[torch.Tensor, QuantizedTensorStorage]],
     input_quantizers: List[Optional[Quantizer]],
     weight_quantizers: List[Optional[Quantizer]],
 ) -> None:
     """Update GroupedLinear PTQ buffers from per-GEMM calibration state."""
-    for index, tensor in enumerate(input_tensors):
-        quantizer = _resolve_calibration_quantizer(tensor, input_quantizers[index])
-        calibration_buffers.update(
-            _get_calibration_metadata_buffers(f"input_gemm{index}", quantizer)
-        )
-    for index, tensor in enumerate(weight_tensors):
-        quantizer = _resolve_calibration_quantizer(tensor, weight_quantizers[index])
-        calibration_buffers.update(
-            _get_calibration_metadata_buffers(f"weight_gemm{index}", quantizer)
-        )
+    for index, quantizer in enumerate(input_quantizers):
+        if quantizer is not None:
+            calibration_buffers.update(
+                quantizer._get_calibration_metadata_buffers(f"input_gemm{index}")
+            )
+    for index, quantizer in enumerate(weight_quantizers):
+        if quantizer is not None:
+            calibration_buffers.update(
+                quantizer._get_calibration_metadata_buffers(f"weight_gemm{index}")
+            )
 
 
 def _calibrate_grouped_tensors(
@@ -184,23 +184,25 @@ def _calibrate_grouped_tensors(
     weight_tensors: List[Union[torch.Tensor, QuantizedTensorStorage]],
     input_quantizers: List[Optional[Quantizer]],
     weight_quantizers: List[Optional[Quantizer]],
-    transformer_engine_calibration_decay: float,
+    calibration_config: QuantizationCalibrationConfig,
 ) -> None:
     """Calibrate GroupedLinear input and weight quantizers once per GEMM."""
     for tensor, quantizer in zip(input_tensors, input_quantizers):
-        quantizer = _resolve_calibration_quantizer(tensor, quantizer)
         if quantizer is not None:
-            if _supports_calibration_decay(type(quantizer)):
-                quantizer.calibrate(
-                    tensor,
-                    calibration_decay=transformer_engine_calibration_decay,
-                )
-            else:
-                quantizer.calibrate(tensor)
+            quantizer.calibrate(
+                tensor,
+                calibration_config=calibration_config,
+            )
+    weight_calibration_config = dataclass_replace(
+        calibration_config,
+        transformer_engine_calibration_decay=0.0,
+    )
     for tensor, quantizer in zip(weight_tensors, weight_quantizers):
-        quantizer = _resolve_calibration_quantizer(tensor, quantizer)
         if quantizer is not None:
-            quantizer.calibrate(tensor)
+            quantizer.calibrate(
+                tensor,
+                calibration_config=weight_calibration_config,
+            )
 
 
 class _GroupedLinear(torch.autograd.Function):
@@ -480,7 +482,7 @@ class _GroupedLinear(torch.autograd.Function):
         single_grouped_weight: bool,
         single_grouped_bias: bool,
         calibration_buffers: Optional[Dict[str, Optional[torch.Tensor]]],
-        transformer_engine_calibration_decay: float,
+        calibration_config: Optional[QuantizationCalibrationConfig],
         weights: Tuple[torch.Tensor, ...],
         biases: Tuple[torch.Tensor, ...],
         origin_weights: Tuple[torch.Tensor, ...],
@@ -601,6 +603,7 @@ class _GroupedLinear(torch.autograd.Function):
         )
 
         if calibration_buffers is not None and not _is_in_activation_recompute_phase():
+            assert calibration_config is not None
             grouped_inputs = grouped_x.quantized_tensors
             if grouped_inputs is None:
                 grouped_inputs = grouped_x.split_into_quantized_tensors()
@@ -615,12 +618,10 @@ class _GroupedLinear(torch.autograd.Function):
                 grouped_weights,
                 input_quantizers,
                 weight_quantizers,
-                transformer_engine_calibration_decay,
+                calibration_config,
             )
             _update_grouped_calibration_metadata_buffers(
                 calibration_buffers,
-                grouped_inputs,
-                grouped_weights,
                 input_quantizers,
                 weight_quantizers,
             )
@@ -758,7 +759,7 @@ class _GroupedLinear(torch.autograd.Function):
             single_grouped_bias,
             use_grouped_tensor,
             calibration_buffers,
-            transformer_engine_calibration_decay,
+            calibration_config,
         ) = non_tensor_args
         recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
         backward_override = recipe.backward_override if recipe is not None else None
@@ -912,7 +913,7 @@ class _GroupedLinear(torch.autograd.Function):
                 single_grouped_weight=single_grouped_weight,
                 single_grouped_bias=single_grouped_bias,
                 calibration_buffers=calibration_buffers,
-                transformer_engine_calibration_decay=transformer_engine_calibration_decay,
+                calibration_config=calibration_config,
                 weights=weights,
                 biases=biases,
                 origin_weights=origin_weights,
@@ -965,17 +966,16 @@ class _GroupedLinear(torch.autograd.Function):
 
         # Calibrate quantizers and buffer their metadata when requested.
         if calibration_buffers is not None and not _is_in_activation_recompute_phase():
+            assert calibration_config is not None
             _calibrate_grouped_tensors(
                 inputmats,
                 weights_fp8,
                 input_quantizers,
                 weight_quantizers,
-                transformer_engine_calibration_decay,
+                calibration_config,
             )
             _update_grouped_calibration_metadata_buffers(
                 calibration_buffers,
-                inputmats,
-                weights_fp8,
                 input_quantizers,
                 weight_quantizers,
             )
@@ -2488,11 +2488,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                 use_grouped_bias,
                 self.use_grouped_tensor,
                 calibration_buffers,
-                (
-                    calibration_config.transformer_engine_calibration_decay
-                    if calibration_config is not None
-                    else 0.0
-                ),
+                calibration_config,
             )
             out, new_workspaces = linear_fn(
                 *autograd_ctx,

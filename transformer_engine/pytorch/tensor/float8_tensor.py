@@ -4,7 +4,7 @@
 
 """Tensor class with FP8 data"""
 from __future__ import annotations
-from typing import Any, Dict, Optional, Tuple, Iterable, Union
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple, Iterable, Union
 import warnings
 import torch
 from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
@@ -17,7 +17,14 @@ from transformer_engine.common.recipe import (
 )
 from ..utils import canonicalize_process_group, devices_match, is_non_tn_fp8_gemm_supported
 from .storage.float8_tensor_storage import Float8TensorStorage, _FromFloat8Func
-from ..quantized_tensor import QuantizedTensor, QuantizedTensorStorage, Quantizer
+from ..quantized_tensor import (
+    QuantizedTensor,
+    QuantizedTensorStorage,
+    Quantizer,
+)
+
+if TYPE_CHECKING:
+    from ..quantization import QuantizationCalibrationConfig
 from ..dynamo import register_value_opaque_quantizer
 from ._quantization_helpers import (
     _IdentityFunc,
@@ -125,7 +132,12 @@ class Float8Quantizer(Quantizer):
         """Quantize tensor implementation"""
         return tex.quantize(tensor, self)
 
-    def calibrate(self, tensor: torch.Tensor, *, calibration_decay: float = 0.0) -> None:
+    def calibrate(
+        self,
+        tensor: torch.Tensor,
+        *,
+        calibration_config: QuantizationCalibrationConfig,
+    ) -> None:
         if isinstance(tensor, (QuantizedTensor, QuantizedTensorStorage)):
             # Retrieve the quantization metadata from quantized storage.
             observed_amax = self.amax
@@ -136,11 +148,11 @@ class Float8Quantizer(Quantizer):
             amin, amax = tensor.aminmax()
             observed_amax = torch.max(-amin, amax).float().reshape(1)
             self.amax.copy_(observed_amax)
-        self._update_calibration_value("amax", observed_amax, calibration_decay=calibration_decay)
-
-    def get_quantization_recipe_name(self) -> str:
-        """Get the stable name of the quantization recipe."""
-        return "fp8_delayed_scaling"
+        self._update_calibration_value(
+            "amax",
+            observed_amax,
+            calibration_config=calibration_config,
+        )
 
     def get_columnwise_shape(self, rowwise_data_shape: Iterable[int]) -> Tuple[int, ...]:
         """Calculate the shape of the columnwise data for Float8 1D blockwise quantization."""
@@ -330,7 +342,12 @@ class Float8CurrentScalingQuantizer(Quantizer):
         """Quantize tensor implementation"""
         return tex.quantize(tensor, self)
 
-    def calibrate(self, tensor: torch.Tensor, *, calibration_decay: float = 0.0) -> None:
+    def calibrate(
+        self,
+        tensor: torch.Tensor,
+        *,
+        calibration_config: QuantizationCalibrationConfig,
+    ) -> None:
         """Compute and calibrate quantization metadata."""
         if isinstance(tensor, (QuantizedTensor, QuantizedTensorStorage)):
             # Retrieve the quantization metadata from quantized storage.
@@ -357,11 +374,11 @@ class Float8CurrentScalingQuantizer(Quantizer):
                 scale = torch.ldexp(torch.ones_like(scale), exponent - 1)
             scale.masked_fill_(torch.isinf(amax) | (amax == 0), 1.0)
             scale_inv = torch.reciprocal(scale)
-        self._update_calibration_value("scale_inv", scale_inv, calibration_decay=calibration_decay)
-
-    def get_quantization_recipe_name(self) -> str:
-        """Get the stable name of the quantization recipe."""
-        return "fp8_current_scaling"
+        self._update_calibration_value(
+            "scale_inv",
+            scale_inv,
+            calibration_config=calibration_config,
+        )
 
     def create_tensor_from_data(
         self,

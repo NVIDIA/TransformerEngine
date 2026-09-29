@@ -399,8 +399,11 @@ class QuantizationCalibrationConfig:
     transformer_engine_calibration_decay: float = 0.0
 
     def __post_init__(self) -> None:
-        if self.transformer_engine_calibration_decay < 0.0:
-            raise ValueError("transformer_engine_calibration_decay must be non-negative")
+        if (
+            self.transformer_engine_calibration_decay < 0.0
+            or self.transformer_engine_calibration_decay > 1.0
+        ):
+            raise ValueError("transformer_engine_calibration_decay must be non-negative and <= 1.0.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -787,6 +790,15 @@ class FP8GlobalStateManager:
             calibration_config = QuantizationCalibrationConfig()
 
         fp8_recipe = get_default_fp8_recipe() if fp8_recipe is None else fp8_recipe
+        if (
+            calibration_config is not None
+            and isinstance(fp8_recipe, NVFP4BlockScaling)
+            and fp8_recipe.row_scaled_activation
+        ):
+            raise NotImplementedError(
+                "Row-wise NVFP4 calibration is not supported due to potentially "
+                "changing shape of scaling factors."
+            )
         autocast_key = cls.get_unique_autocast_key(fp8_recipe, fp8_group)
         qstate = cls.quantization_state
         qstate.autocast_arguments[autocast_key] = (

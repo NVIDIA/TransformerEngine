@@ -5,7 +5,7 @@
 """Pure Python base classes for quantization."""
 
 from __future__ import annotations
-from typing import NamedTuple, Optional, Tuple, Iterable, Any, Dict, Union, get_type_hints
+from typing import TYPE_CHECKING, NamedTuple, Optional, Tuple, Iterable, Any, Dict, Union, get_type_hints
 import abc
 import warnings
 import math
@@ -22,6 +22,9 @@ from transformer_engine.pytorch.tensor._quantization_helpers import (
     _IdentityFunc,
     _stride_from_shape,
 )
+
+if TYPE_CHECKING:
+    from .quantization import QuantizationCalibrationConfig
 
 # Custom ops that should pass through __torch_dispatch__ without unwrapping
 # QuantizedTensor subclasses (e.g. Float8Tensor). Register ops here that
@@ -581,31 +584,48 @@ class Quantizer(abc.ABC):
             "nontensor_kwargs": meta["nontensor_kwargs"],
         }
 
-    def calibrate(self, tensor: torch.Tensor, *, calibration_decay: float = 0.0) -> None:
+    def calibrate(
+        self,
+        tensor: torch.Tensor,
+        *,
+        calibration_config: QuantizationCalibrationConfig,
+    ) -> None:
         """Observe a tensor and update persistent calibration state.
 
-        ``calibration_decay`` decays the historical maximum before incorporating
-        the current observation. A value of zero retains only the current metadata.
+        The calibration config controls how observations update persistent metadata.
         """
 
-    def get_quantization_recipe_name(self) -> str:
-        """Get the stable name of the quantization recipe."""
-        return ""
+    def _get_calibration_metadata_buffers(
+        self, tensor_name: str
+    ) -> Dict[str, torch.Tensor]:
+        """Get module-buffer aliases for this quantizer's calibration state."""
+        recipe_type = self._get_compatible_recipe()
+        if recipe_type is None:
+            return {}
+        recipe_name = recipe_type.__name__.lower()
+        return {
+            f"{tensor_name}_{metadata_name}_{recipe_name}_te_ptq_calibrated": value
+            for metadata_name, value in self._calibration_state.items()
+        }
 
     def _update_calibration_value(
         self,
         metadata_name: str,
         observed_value: Optional[torch.Tensor],
         *,
-        calibration_decay: float,
+        calibration_config: QuantizationCalibrationConfig,
     ) -> None:
         """Merge an observation into quantizer-owned calibration state."""
-        if observed_value is None or torch.isnan(observed_value).any():
+        if observed_value is None:
             # Un-initialized scale. Ignore it.
             return
-        observed_value = observed_value.detach()
+        # Convert NaN to zero, which is the default calibration value.
+        # Track NaN indices so we can also skip calibration decay.
+        observed_mask = ~torch.isnan(observed_value).detach()
+        observed_value = torch.nan_to_num(observed_value, nan=0.0).detach()
         calibration_state = self._calibration_state
         calibration_value = calibration_state.get(metadata_name)
+        calibration_decay = calibration_config.transformer_engine_calibration_decay
         if calibration_decay > 0.0:
             if calibration_value is not None and calibration_value.shape != observed_value.shape:
                 raise RuntimeError(
@@ -619,8 +639,9 @@ class Quantizer(abc.ABC):
                 calibration_state[metadata_name] = calibration_value
             # Track a decaying maximum so early-training activation
             # outliers do not permanently determine the inference scale.
-            calibration_value.mul_(calibration_decay)
-            torch.maximum(calibration_value, observed_value, out=calibration_value)
+            # Only update (and decay) the non-NaN values indexed by the mask.
+            decay_tensor = torch.where(observed_mask, calibration_decay, 1.0)
+            torch.maximum(calibration_value * decay_tensor, observed_value, out=calibration_value)
         else:
             # Without scale history, keep a reference to the current metadata
             # without allocating or copying a separate buffer.
