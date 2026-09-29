@@ -149,21 +149,16 @@ def init_baseline_model(hyperparams: HyperParameters):
 
 
 def _enable_fused_mxfp8_grouped_mlp() -> None:
-    """Improvement 3: enable the fused ``ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8`` and
-    backward kernel in the installed TE without recompiling.
+    """Improvement 3: adapt legacy fused grouped-MLP kernels without recompiling.
 
-    ``NVTE_CUTEDSL_FUSED_GROUPED_MLP=1`` must be set *before*
-    ``transformer_engine.pytorch.ops`` is imported — the fusion is registered
-    at TE module-import-time. ``run_finetune_ep.py`` sniffs ``--improvement 3``
-    and sets the env var before importing ``utils``.
+    Current TE selects supported grouped-MLP fusions automatically. The
+    compatibility patches below target older TE implementations.
 
-    We also (a) relax the SM-version check from ``!= 10`` to ``>= 10`` so
+    We (a) relax the SM-version check from ``!= 10`` to ``>= 10`` so
     SM>=11 successors of B300 fire the kernel, and (b) wrap the cudnn-frontend
     grouped-GEMM wrappers so the installed TE's ``c_dtype`` kwarg (dropped by
     cudnn-frontend 1.23.0) is silently filtered out.
     """
-    os.environ["NVTE_CUTEDSL_FUSED_GROUPED_MLP"] = "1"
-
     import inspect
     import cudnn  # type: ignore
     from transformer_engine.pytorch.ops.fused import forward_grouped_mlp as _fwd_mod
@@ -172,8 +167,6 @@ def _enable_fused_mxfp8_grouped_mlp() -> None:
 
     def _make_is_supported(kernel_method_names):
         def _is_supported(cls) -> bool:
-            if int(os.environ.get("NVTE_CUTEDSL_FUSED_GROUPED_MLP", "0")) <= 0:
-                return False
             if get_device_compute_capability()[0] < 10:
                 return False
             try:
