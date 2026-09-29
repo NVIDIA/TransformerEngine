@@ -61,7 +61,7 @@ int64_t get_nccl_comm_ptr(c10d::ProcessGroup* process_group) {
   }
 #endif
 
-  NVTE_ERROR("get_nccl_comm_ptr: EP requires a NCCL-backed process group, but backend '",
+  NVTE_ERROR("get_nccl_comm_ptr requires a NCCL-backed process group, but backend '",
              backend->getBackendName(), "' does not expose a borrowable NCCL communicator");
 }
 
