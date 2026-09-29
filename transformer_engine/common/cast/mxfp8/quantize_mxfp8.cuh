@@ -19,6 +19,7 @@
 #include "../../common.h"
 #include "../../util/cuda_runtime.h"
 #include "../../util/math.h"
+#include "../../util/packed_activation.cuh"
 #include "../../util/ptx_arch_spec.cuh"
 #include "../../utils.cuh"
 #include "../core/common.cuh"
@@ -100,6 +101,13 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   // dbias does not disable it: the partial sums are accumulated in the scaling loop below, which
   // upcasts the elements to FP32 anyway to feed the cvt.
   constexpr bool USE_HALF_PRECISION = NO_ACTIVATIONS && (!std::is_same_v<IType, float>);
+
+  // BF16 GeLU/dGeLU inputs go through the packed form, two elements per FP32x2
+  // instruction, with the same rounding as OP.  No API combines 2D block scaling
+  // with a fused activation, so those instantiations keep the scalar path.
+  constexpr bool USE_PACKED_ACT = std::is_same_v<IType, bf16> && !kIs2DBlockScaling &&
+                                  ((IS_ACT && packed_act::is_gelu<ParamOP, OP>) ||
+                                   (IS_DACT && packed_act::is_dgelu<ParamOP, OP>));
 
   // Cache activations in-place in the SMEM input tile so the activation is computed only once, in
   // the direction we favor (columnwise), and the rowwise pass reads the cached value back instead
@@ -236,8 +244,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     if constexpr (COLWISE_SCALING) {
       const size_t shmem_offset_base_colwise = buff * BUFF_DIM + tid_X_colwise;
       thread_amax = 0.0f;
-      float in_compute_colwise[BUFF_DIM_Y];
+      float in_compute_colwise[USE_PACKED_ACT ? 1 : BUFF_DIM_Y];
       IType in_colwise_IType[BUFF_DIM_Y];
+      IType2 in_colwise_pairs[USE_PACKED_ACT ? BUFF_DIM_Y / 2 : 1];
 
       // 1. Read/Compute elements. Find MXFP8-block AMAX
       if constexpr (USE_HALF_PRECISION) {
@@ -249,6 +258,42 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           thread_amax_f16 = __hmax(thread_amax_f16, __habs(in_colwise_IType[i]));
         }
         thread_amax = static_cast<float>(thread_amax_f16);
+      } else if constexpr (USE_PACKED_ACT) {
+        // Rows are taken in pairs: the activation, the gradient product, the
+        // rounding to BF16 and the amax run once per pair, while dbias still adds
+        // the rows one at a time, in order.  Rows past the tensor edge hold TMA
+        // zero-fill, for which GeLU and dGeLU times the gradient are 0, so the
+        // amax needs no bounds check.
+        IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
+        const IType *act_src = IS_DACT ? act_in_sh : in_sh;
+#pragma unroll
+        for (int i = 0; i < BUFF_DIM_Y; i += 2) {
+          const size_t offset0 = shmem_offset_base_colwise + i * BUFF_DIM_X;
+          const size_t offset1 = offset0 + BUFF_DIM_X;
+          packed_act::f32x2 elt2 = packed_act::apply_f32x2<ParamOP, OP>(packed_act::make_f32x2(
+              static_cast<float>(act_src[offset0]), static_cast<float>(act_src[offset1])));
+          if constexpr (IS_DACT) {
+            elt2 = packed_act::mul_f32x2(packed_act::make_f32x2(static_cast<float>(in_sh[offset0]),
+                                                                static_cast<float>(in_sh[offset1])),
+                                         elt2);
+          }
+          float elt0, elt1;
+          packed_act::unpack_f32x2(elt2, elt0, elt1);
+          if constexpr (DBIAS_REDUCTION_IN_COLWISE) {
+            partial_dbias_colwise += elt0;
+            partial_dbias_colwise += elt1;
+          }
+          const __nv_bfloat162 rounded_bf16x2 = __floats2bfloat162_rn(elt0, elt1);
+          const IType2 rounded = reinterpret_cast<const IType2 &>(rounded_bf16x2);
+          if constexpr (IS_CACHED_ACT_OP) {
+            cached_act_sh[offset0] = rounded.x;
+            cached_act_sh[offset1] = rounded.y;
+          }
+          ptx::abs_max_2x(thread_amax_2x, thread_amax_2x, rounded);
+          in_colwise_pairs[i / 2] = rounded;
+        }
+        thread_amax =
+            static_cast<float>(__hmax(__habs(thread_amax_2x.x), __habs(thread_amax_2x.y)));
       } else {
 #pragma unroll
         for (int i = 0; i < BUFF_DIM_Y; ++i) {
@@ -310,24 +355,35 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       const float block_scale_inverse = ptx::exp2f_rcp<float>(biased_exponent);
       const ptx::floatx2 block_scale_inverse_2x = {block_scale_inverse, block_scale_inverse};
 
-// 3. Scale elements
+      // 3. Scale elements
+      if constexpr (USE_PACKED_ACT) {
 #pragma unroll
-      for (int i = 0; i < SCALE_DIM_Y; ++i) {
-        float in;
-        if constexpr (USE_HALF_PRECISION) {
-          in = static_cast<float>(in_colwise_IType[i]);
-        } else {
-          in = in_compute_colwise[i];
+        for (int i = 0; i < SCALE_DIM_Y; i += 2) {
+          OType2 out_pair;
+          ptx::mul_cvt_2x(out_pair, in_colwise_pairs[i / 2], block_scale_inverse_2x);
+          const size_t offset0 = shmem_offset_base_colwise + i * BUFF_DIM_X;
+          out_colwise_data_sh[offset0] = out_pair.x;
+          out_colwise_data_sh[offset0 + BUFF_DIM_X] = out_pair.y;
         }
-        // On the half-precision path the read loop kept the elements in IType, so dbias is
-        // accumulated here instead, reusing the FP32 value the cvt needs anyway.
-        if constexpr (DBIAS_REDUCTION_IN_COLWISE && USE_HALF_PRECISION) {
-          partial_dbias_colwise += in;
-        }
-        const float scaled_out = in * block_scale_inverse;
+      } else {
+#pragma unroll
+        for (int i = 0; i < SCALE_DIM_Y; ++i) {
+          float in;
+          if constexpr (USE_HALF_PRECISION) {
+            in = static_cast<float>(in_colwise_IType[i]);
+          } else {
+            in = in_compute_colwise[i];
+          }
+          // On the half-precision path the read loop kept the elements in IType, so dbias is
+          // accumulated here instead, reusing the FP32 value the cvt needs anyway.
+          if constexpr (DBIAS_REDUCTION_IN_COLWISE && USE_HALF_PRECISION) {
+            partial_dbias_colwise += in;
+          }
+          const float scaled_out = in * block_scale_inverse;
 
-        const size_t shmem_offset_elt = shmem_offset_base_colwise + i * BUFF_DIM_X;
-        out_colwise_data_sh[shmem_offset_elt] = static_cast<OType>(scaled_out);
+          const size_t shmem_offset_elt = shmem_offset_base_colwise + i * BUFF_DIM_X;
+          out_colwise_data_sh[shmem_offset_elt] = static_cast<OType>(scaled_out);
+        }
       }
     }
 
@@ -336,17 +392,37 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     // post-activation values so that the rowwise pass below does not recompute them.
     if constexpr (DBIAS_REDUCTION_COLWISE_ONLY) {
       const size_t shmem_offset_base_colwise = buff * BUFF_DIM + tid_X_colwise;
+      float act_colwise[USE_PACKED_ACT ? BUFF_DIM_Y : 1];
+      if constexpr (USE_PACKED_ACT) {
+        const IType *act_src = IS_DACT ? act_in_sh : in_sh;
+#pragma unroll
+        for (int i = 0; i < BUFF_DIM_Y; i += 2) {
+          const size_t offset0 = shmem_offset_base_colwise + i * BUFF_DIM_X;
+          packed_act::unpack_f32x2(packed_act::apply_f32x2<ParamOP, OP>(packed_act::make_f32x2(
+                                       static_cast<float>(act_src[offset0]),
+                                       static_cast<float>(act_src[offset0 + BUFF_DIM_X]))),
+                                   act_colwise[i], act_colwise[i + 1]);
+        }
+      }
 #pragma unroll
       for (int i = 0; i < BUFF_DIM_Y; ++i) {
         const size_t shmem_offset_colwise = shmem_offset_base_colwise + i * BUFF_DIM_X;
 
         float elt = static_cast<float>(in_sh[shmem_offset_colwise]);
         if constexpr (IS_ACT) {
-          elt = OP(elt, {});
+          if constexpr (USE_PACKED_ACT) {
+            elt = act_colwise[i];
+          } else {
+            elt = OP(elt, {});
+          }
         }
         if constexpr (IS_DACT) {
-          const float act_in_elt = static_cast<float>(act_in_sh[shmem_offset_colwise]);
-          elt *= OP(act_in_elt, {});
+          if constexpr (USE_PACKED_ACT) {
+            elt *= act_colwise[i];
+          } else {
+            const float act_in_elt = static_cast<float>(act_in_sh[shmem_offset_colwise]);
+            elt *= OP(act_in_elt, {});
+          }
         }
         partial_dbias_colwise += elt;
         // Cache computed activations to avoid computing them again in the rowwise pass
@@ -435,17 +511,36 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           if constexpr (IS_DACT) {
             act_in.load_from(&act_in_sh[shmem_offset_rowwise]);
           }
+          float act_rowwise[USE_PACKED_ACT ? PACK_SIZE : 1];
+          if constexpr (USE_PACKED_ACT) {
+            const Vec<IType, PACK_SIZE> &act_src = IS_DACT ? act_in : in;
+#pragma unroll
+            for (int e = 0; e < PACK_SIZE; e += 2) {
+              packed_act::unpack_f32x2(packed_act::apply_f32x2<ParamOP, OP>(packed_act::make_f32x2(
+                                           static_cast<float>(act_src.data.elt[e]),
+                                           static_cast<float>(act_src.data.elt[e + 1]))),
+                                       act_rowwise[e], act_rowwise[e + 1]);
+            }
+          }
 #pragma unroll
           for (int e = 0; e < PACK_SIZE; ++e) {
             const int j = w * PACK_SIZE + e;
             // Compute element
             float elt = static_cast<float>(in.data.elt[e]);
             if constexpr (IS_ACT) {
-              elt = OP(elt, {});
+              if constexpr (USE_PACKED_ACT) {
+                elt = act_rowwise[e];
+              } else {
+                elt = OP(elt, {});
+              }
             }
             if constexpr (IS_DACT) {
-              float act_in_elt = static_cast<float>(act_in.data.elt[e]);
-              elt *= OP(act_in_elt, {});
+              if constexpr (USE_PACKED_ACT) {
+                elt *= act_rowwise[e];
+              } else {
+                float act_in_elt = static_cast<float>(act_in.data.elt[e]);
+                elt *= OP(act_in_elt, {});
+              }
             }
 
             // If DBIAS was computed in the 1st pass (COLWISE) then no need to compute it again
