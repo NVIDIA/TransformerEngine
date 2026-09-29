@@ -178,12 +178,12 @@ def initialize_ub(
               falls back to the legacy ``use_fp8`` parameter if ``None`` is provided.
     dtype : torch.dtype = torch.bfloat16
             non-FP8 data type of the communication buffer when ``use_fp8 = False``
-    ub_cfgs : dict = None
+    ub_cfgs : dict or List[dict] = None
              Configuration dictionary with the structure::
 
                  {
                     <gemm_name> : {
-                        "method": <"ring_exchange" or "pipeline">,
+                        "method": <"ring_exchange", "pipeline", "bulk", or "external">,
                         "is_reduce_scatter": bool,
                         "num_sm": int,
                         "cga_size": int,
@@ -200,24 +200,42 @@ def initialize_ub(
              "proj_fprop", "proj_dgrad", "proj_wgrad", "fc1_fprop", "fc1_dgrad", "fc2_dgrad",
              "fc2_fprop", "fc2_wgrad"]``.
 
-             The default overlap configuration for each GEMM layer is as follows. only keys that differ from the desired default need to be specified in ``ub_cfgs`` -- unspecified keys retain their default values:
+             With ``with_cublasmp=False``, the following defaults apply. Entries in
+             ``ub_cfgs`` are merged with the per-GEMM defaults. Omitted GEMMs use the
+             defaults below; changing a method can also affect a paired GEMM.
 
-             Layer        | Comm Direction | Method        | num_sm | num_splits | Notes
-             -------------|----------------|---------------|--------|------------|-------------------------------
-             qkv_fprop    | AllGather      | ring_exchange | 1      | tp_size    |
-             qkv_dgrad    | AllGather      | bulk          | 16     | 4          | (1) switchable to RS
-             qkv_wgrad    | ReduceScatter  | bulk          | 16     | 4          | (2) disabled when qkv_dgrad switches to RS
-             proj_fprop   | ReduceScatter  | pipeline      | 16     | 4          |
-             proj_dgrad   | AllGather      | ring_exchange | 1      | tp_size    |
-             proj_wgrad   | AllGather      | external      | 16     | 4          | (3) overlaps with proj_dgrad (requires ring_exchange).
-             fc1_fprop    | AllGather      | ring_exchange | 1      | tp_size    |
-             fc1_dgrad    | AllGather      | bulk          | 16     | 4          | (1) switchable to RS
-             fc1_wgrad    | ReduceScatter  | bulk          | 16     | 4          | (2) disabled when fc1_dgrad switches to RS
-             fc2_fprop    | ReduceScatter  | pipeline      | 16     | 4          |
-             fc2_dgrad    | AllGather      | ring_exchange | 1      | tp_size    |
-             fc2_wgrad    | AllGather      | external      | 16     | 4          | (3) overlaps with fc2_dgrad (requires ring_exchange).
+             .. csv-table:: Default Userbuffers overlap configurations
+                :header: "GEMM", "Communication", "Method", "num_sm", "num_splits"
 
-             a list may be provided to specify different overlap configurations for different the quantization settings in ``quantization_modes``
+                "qkv_fprop", "AllGather", "ring_exchange", 1, tp_size
+                "qkv_dgrad", "AllGather", "bulk", 16, 4
+                "qkv_wgrad", "ReduceScatter", "bulk", 16, 4
+                "proj_fprop", "ReduceScatter", "pipeline", 16, 4
+                "proj_dgrad", "AllGather", "ring_exchange", 1, tp_size
+                "proj_wgrad", "AllGather", "external", 16, 4
+                "fc1_fprop", "AllGather", "ring_exchange", 1, tp_size
+                "fc1_dgrad", "AllGather", "bulk", 16, 4
+                "fc1_wgrad", "ReduceScatter", "bulk", 16, 4
+                "fc2_fprop", "ReduceScatter", "pipeline", 16, 4
+                "fc2_dgrad", "AllGather", "ring_exchange", 1, tp_size
+                "fc2_wgrad", "AllGather", "external", 16, 4
+
+             ``num_splits`` is a default configuration value; ``ring_exchange``
+             does not use it. Changing ``qkv_dgrad`` or ``fc1_dgrad`` to a non-``bulk``
+             method switches that GEMM to ReduceScatter and disables the corresponding
+             ``*_wgrad`` overlap. The ``external`` overlaps for ``proj_wgrad`` and
+             ``fc2_wgrad`` require ``ring_exchange`` on ``proj_dgrad`` and ``fc2_dgrad``,
+             respectively.
+
+             With ``with_cublasmp=True``, ``qkv_dgrad`` and ``fc1_dgrad`` default to
+             ReduceScatter with ``ring_exchange``, ``num_sm=1``, and
+             ``num_splits=tp_size`` in their configurations. The ``qkv_wgrad``,
+             ``fc1_wgrad``, ``proj_wgrad``, and ``fc2_wgrad`` overlap communicators
+             are not created. cuBLASMp does not support ``bulk`` or ``external``
+             overlap methods.
+
+             A list may be provided to specify a separate configuration for each
+             quantization mode in ``quantization_modes``.
     bootstrap_backend : str = None
                         ``torch.distributed`` communication backend for the all-gather, broadcast and
                         barrier collectives during Userbuffers initialization. Not all backends are
