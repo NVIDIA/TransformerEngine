@@ -732,6 +732,47 @@ __device__ __forceinline__ void abs_max_2x(fp16x2 &dst, const fp16x2 &p1, const 
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 890)
 }
 
+// Packed FP32x2 arithmetic. Each lane rounds exactly like the scalar .rn operation.
+__device__ __forceinline__ floatx2 add_2x(const floatx2 &a, const floatx2 &b) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  floatx2 d;
+  asm("add.rn.f32x2 %0, %1, %2;"
+      : "=l"(reinterpret_cast<uint64_t &>(d))
+      : "l"(reinterpret_cast<const uint64_t &>(a)), "l"(reinterpret_cast<const uint64_t &>(b)));
+  return d;
+#else
+  NVTE_DEVICE_ERROR("add_2x is only supported on SM 10.0+.");
+  return {};
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+}
+
+__device__ __forceinline__ floatx2 mul_2x(const floatx2 &a, const floatx2 &b) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  floatx2 d;
+  asm("mul.rn.f32x2 %0, %1, %2;"
+      : "=l"(reinterpret_cast<uint64_t &>(d))
+      : "l"(reinterpret_cast<const uint64_t &>(a)), "l"(reinterpret_cast<const uint64_t &>(b)));
+  return d;
+#else
+  NVTE_DEVICE_ERROR("mul_2x is only supported on SM 10.0+.");
+  return {};
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+}
+
+__device__ __forceinline__ floatx2 fma_2x(const floatx2 &a, const floatx2 &b, const floatx2 &c) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  floatx2 d;
+  asm("fma.rn.f32x2 %0, %1, %2, %3;"
+      : "=l"(reinterpret_cast<uint64_t &>(d))
+      : "l"(reinterpret_cast<const uint64_t &>(a)), "l"(reinterpret_cast<const uint64_t &>(b)),
+        "l"(reinterpret_cast<const uint64_t &>(c)));
+  return d;
+#else
+  NVTE_DEVICE_ERROR("fma_2x is only supported on SM 10.0+.");
+  return {};
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+}
+
 __device__ __forceinline__ int32_t elect_one_sync(uint32_t mask = 0xFFFFFFFFu) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   int32_t pred = 0;

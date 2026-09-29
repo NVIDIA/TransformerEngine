@@ -13,8 +13,6 @@
 
 #include "util/packed_activation.cuh"
 
-using namespace transformer_engine;
-
 namespace {
 
 constexpr int kNumBf16Values = 1 << 16;
@@ -30,17 +28,14 @@ __global__ void packed_activation_kernel(float *ref_gelu, float *ref_dgelu, floa
   if (i >= kNumBf16Values) return;
   const float x = __uint_as_float(i << 16);
   const float other = __uint_as_float(((i * 40503u) & 0xffffu) << 16);
-  ref_gelu[i] = gelu<float, float>(x, Empty{});
-  ref_dgelu[i] = dgelu<float, float>(x, Empty{});
-  float lo, hi;
-  packed_act::unpack_f32x2(packed_act::gelu_f32x2(packed_act::make_f32x2(x, other)), lo, hi);
-  packed_gelu_lo[i] = lo;
-  packed_act::unpack_f32x2(packed_act::gelu_f32x2(packed_act::make_f32x2(other, x)), lo, hi);
-  packed_gelu_hi[i] = hi;
-  packed_act::unpack_f32x2(packed_act::dgelu_f32x2(packed_act::make_f32x2(x, other)), lo, hi);
-  packed_dgelu_lo[i] = lo;
-  packed_act::unpack_f32x2(packed_act::dgelu_f32x2(packed_act::make_f32x2(other, x)), lo, hi);
-  packed_dgelu_hi[i] = hi;
+  namespace te = transformer_engine;
+  namespace pa = te::packed_activation;
+  ref_gelu[i] = te::gelu<float, float>(x, te::Empty{});
+  ref_dgelu[i] = te::dgelu<float, float>(x, te::Empty{});
+  packed_gelu_lo[i] = pa::gelu_2x({x, other}).x;
+  packed_gelu_hi[i] = pa::gelu_2x({other, x}).y;
+  packed_dgelu_lo[i] = pa::dgelu_2x({x, other}).x;
+  packed_dgelu_hi[i] = pa::dgelu_2x({other, x}).y;
 #endif
 }
 
