@@ -2838,6 +2838,50 @@ def test_te_ops_linear_bias_backward_override(dtype, backward_override, monkeypa
     )
 
 
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.parametrize(
+    "input_dtype,weight_dtype",
+    [(torch.float32, torch.bfloat16), (torch.bfloat16, torch.float32)],
+)
+def test_te_ops_linear_saved_fp8_dtype_with_autocast(input_dtype, weight_dtype):
+    """Saved FP8 tensors retain their source dtype across the custom-op boundary."""
+    torch._dynamo.reset()
+    model = te.ops.BasicLinear(32, 64, device="cuda", dtype=weight_dtype)
+    eager_model = copy.deepcopy(model)
+    fp8_recipe = recipe.Float8CurrentScaling()
+
+    def run(module, inp):
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            with te.autocast(recipe=fp8_recipe):
+                return module(inp)
+
+    compiled, graphs = _compile_with_graphs(lambda inp: run(model, inp))
+    x = torch.randn(16, 32, device="cuda", dtype=input_dtype, requires_grad=True)
+    eager_x = x.detach().clone().requires_grad_()
+    actual = compiled(x)
+    expected = run(eager_model, eager_x)
+    torch.testing.assert_close(actual, expected)
+
+    dy = torch.randn_like(actual)
+    actual_grads = torch.autograd.grad(actual, (x, model.weight), dy)
+    expected_grads = torch.autograd.grad(expected, (eager_x, eager_model.weight), dy)
+    torch.testing.assert_close(actual_grads, expected_grads)
+    _assert_custom_ops(graphs, "basiclinear")
+
+    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        with te.autocast(recipe=fp8_recipe):
+            args = model.pack_forward_args(
+                [OperationContext()],
+                x,
+                prev_op_grad_output_quantizer=None,
+                next_op_input_quantizer=None,
+                basic_op_kwargs=[{}],
+            )
+            _, _, (saved_input, saved_weight) = model.forward_compute_fake(args)
+    assert saved_input.dtype == x.dtype
+    assert saved_weight.dtype == model.weight.dtype
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_te_ops_linear_workspace_fake_mode(monkeypatch):
     def unexpected_allocation(*args, **kwargs):

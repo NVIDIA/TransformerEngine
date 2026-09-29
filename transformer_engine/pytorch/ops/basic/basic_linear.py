@@ -1189,7 +1189,7 @@ class BasicLinear(BasicOperation):
                     columnwise=args.backward_override is None,
                 )
                 spec = TensorSpec(
-                    shape=value.shape, dtype=args.dtype, device=value.device, quantizer=quantizer
+                    shape=value.shape, dtype=value.dtype, device=value.device, quantizer=quantizer
                 )
             saved.append(spec)
         return output, [()], tuple(saved)
