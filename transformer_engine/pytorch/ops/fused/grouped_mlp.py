@@ -184,7 +184,31 @@ def _cudnn_wgrad_workspace_size_fn() -> Optional[Callable]:
     return get_grouped_gemm_wgrad_workspace_size_sm100
 
 
+@functools.lru_cache(maxsize=None)
+def _cudnn_wgrad_workspace(
+    op_name: str,
+    num_experts: int,
+    output_mode: str,
+    input_order: str,
+    device: torch.device,
+) -> torch.Tensor:
+    """Persistent cuDNN wgrad descriptor workspace for one GEMM role and kernel configuration.
+
+    The workspace must outlive the backward pass: one allocated per call breaks
+    CUDA-graph replay. FC1 and FC2 need separate workspaces even though their
+    sizes match, so ``op_name`` is part of the key; sharing one corrupts their
+    weight gradients.
+    """
+    workspace_bytes = _cudnn_wgrad_workspace_size_fn()(
+        num_experts,
+        output_mode=output_mode,
+        input_order=input_order,
+    )
+    return torch.empty(workspace_bytes, dtype=torch.uint8, device=device)
+
+
 def _alloc_cudnn_wgrad_workspace(
+    op_name: str,
     fc_op: GroupedLinear,
     ctx: OperationContext,
     wgrad_kernel_fn: Optional[Callable],
@@ -192,16 +216,20 @@ def _alloc_cudnn_wgrad_workspace(
     use_nvfp4: bool,
     device: torch.device,
 ) -> Optional[torch.Tensor]:
-    """Allocate the cuDNN wgrad descriptor workspace for one GroupedLinear, if supported."""
-    workspace_size_fn = _cudnn_wgrad_workspace_size_fn()
-    if wgrad_kernel_fn is None or workspace_size_fn is None or not ctx.weight_requires_grad:
+    """Return the cuDNN wgrad descriptor workspace for one GroupedLinear, if supported."""
+    if (
+        wgrad_kernel_fn is None
+        or _cudnn_wgrad_workspace_size_fn() is None
+        or not ctx.weight_requires_grad
+    ):
         return None
-    workspace_bytes = workspace_size_fn(
+    return _cudnn_wgrad_workspace(
+        op_name,
         num_experts,
-        output_mode="dense" if fc_op.single_grouped_weight else "discrete",
-        input_order="tensor_ragged" if use_nvfp4 else "tensor2d",
+        "dense" if fc_op.single_grouped_weight else "discrete",
+        "tensor_ragged" if use_nvfp4 else "tensor2d",
+        torch.device(device),
     )
-    return torch.empty(workspace_bytes, dtype=torch.uint8, device=device)
 
 
 def _cudnn_frontend_supports_single_group_runtime_offsets(
@@ -2533,7 +2561,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             offsets=split_points,
             use_dense_single_group=use_dense_single_group,
             cudnn_wgrad_workspace=_alloc_cudnn_wgrad_workspace(
-                fc2_op, fc2_ctx, wgrad_kernel_fn, split_points.shape[0], use_nvfp4, device
+                "FC2", fc2_op, fc2_ctx, wgrad_kernel_fn, split_points.shape[0], use_nvfp4, device
             ),
         )
 
@@ -2693,7 +2721,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             offsets=split_points,
             use_dense_single_group=use_dense_single_group,
             cudnn_wgrad_workspace=_alloc_cudnn_wgrad_workspace(
-                fc1_op, fc1_ctx, wgrad_kernel_fn, split_points.shape[0], use_nvfp4, device
+                "FC1", fc1_op, fc1_ctx, wgrad_kernel_fn, split_points.shape[0], use_nvfp4, device
             ),
         )
 
