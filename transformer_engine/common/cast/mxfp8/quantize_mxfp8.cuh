@@ -821,10 +821,13 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                   !use_2d_quantization && scaling_type_has_specialized_support) {
                 switch (scaling_type) {
                   case ScalingType::ROWWISE: {
-                    // The register-resident kernel supersedes the staged one below
-                    // wherever it applies.
-                    // hasSpec has already established cast-only, leaving the input
-                    // type and the scale layout.
+                    // specialized::launch_cast_rowwise is the specialized register-resident
+                    // cast-only kernel: it quantizes from registers instead of staging the
+                    // tile through shared memory like the kernel below, and supersedes it
+                    // wherever it applies. hasSpec has already established cast-only,
+                    // leaving the input type and the scale layout. It is unrelated to the
+                    // regtile kernel further down, which replaces the generic kernel for
+                    // fused activations.
                     //
                     // It emits both scale layouts.  The GEMM-swizzled one packs a
                     // 512-byte tile as 128 rows x 4 scale columns, so a CTA covers
@@ -861,13 +864,18 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                     break;
                   }
                   case ScalingType::BIDIMENSIONAL: {
-                    // The register-resident kernel supersedes the TMA one below
-                    // wherever it applies: it reads its 32-row tile once and drives
-                    // both the rowwise and colwise passes from registers.  hasSpec has
-                    // already established cast-only, leaving the input type, the
-                    // scale layout, and the tile alignment.
-                    // Gated per path: the colwise scale axis is transposed under the
-                    // GEMM swizzle, so this kernel does not handle it yet.
+                    // specialized::launch_cast_bidim is the specialized register-resident
+                    // cast-only kernel: it reads its 32-row tile once and drives both the
+                    // rowwise and colwise passes from registers, where the TMA kernel below
+                    // stages the tile through shared memory. It supersedes that kernel
+                    // wherever it applies: BF16 input 32-byte aligned, rows % 32 == 0,
+                    // cols % 256 == 0 and compact scales (the colwise scale axis is
+                    // transposed under the GEMM swizzle, which it does not handle yet).
+                    // hasSpec has already established cast-only.
+                    //
+                    // It is a different kernel from regtile::quantize further down, which
+                    // is also register-resident but replaces the generic kernel for fused
+                    // GeLU/dGeLU and has its own requirements (see regtile::can_use).
                     if constexpr (std::is_same_v<IType, bf16> && !WITH_GEMM_SWIZZLED_SCALES) {
                       if (register_resident_supported && rows % 32 == 0 && cols % 256 == 0) {
                         // Both scale arrays must share a layout; this kernel only
@@ -938,8 +946,13 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                 return;
               }
 
-              // A register-resident replacement for the generic kernel below, for
-              // the requests it implements.
+              // regtile::quantize replaces the generic kernel below for the requests it
+              // implements: bidimensional BF16 -> E4M3 with fused GeLU or dGeLU and no dbias,
+              // rows % 64 == 0, cols % 256 == 0, 16-byte aligned inputs (see
+              // regtile::can_use). Like the specialized cast-only kernels above it keeps
+              // the tile in registers instead of staging it through shared memory, but it is
+              // not specialized: it serves the generic kernel's fused-activation requests and
+              // writes the same output bytes the generic kernel would.
               if constexpr (std::is_same_v<IType, bf16> && std::is_same_v<OType, fp8e4m3> &&
                             !IS_DBIAS && IS_ACT != IS_DACT) {
                 if (regtile::can_use<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(
