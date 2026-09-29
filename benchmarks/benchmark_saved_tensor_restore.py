@@ -23,8 +23,10 @@ def main():
     assert min(args.experts) > 0 and args.iterations > 0 and args.repeats > 0
     for experts in args.experts:
         captured = []
-        weights = [torch.nn.Parameter(torch.empty(2, 2), requires_grad=False)] * experts
-        values = [None] * experts + weights + weights + [torch.empty(0)] * experts
+        weights = [
+            torch.nn.Parameter(torch.empty(2, 2), requires_grad=False) for _ in range(experts)
+        ]
+        values = [None] * experts + weights + weights + [torch.empty(0) for _ in range(experts)]
         saved, metadata = prepare_for_saving(*values)
 
         class Capture(torch.autograd.Function):
