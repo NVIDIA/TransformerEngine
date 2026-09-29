@@ -32,6 +32,7 @@
 #include "../nvfp4/quantize_transpose_nvfp4.cuh"
 
 #ifdef NVTE_WITH_CUTEDSL
+#include "../mxfp8/group_quantize_mxfp8_cutedsl.cuh"
 #include "../mxfp8/quantize_mxfp8_cutedsl.cuh"
 #endif
 
@@ -541,7 +542,8 @@ void group_quantize_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTensor 
       break;
     }
     case NVTE_MXFP8_1D_SCALING: {
-      #ifdef NVTE_WITH_CUTEDSL
+      bool quantized_with_cutedsl = false;
+#ifdef NVTE_WITH_CUTEDSL
       quantized_with_cutedsl =
           cutedsl_backend::mxfp8_group_quantize_cutedsl</*IS_DBIAS=*/false, /*IS_DACT=*/false,
                                                         IS_ACT, ParamOP, OP>(
