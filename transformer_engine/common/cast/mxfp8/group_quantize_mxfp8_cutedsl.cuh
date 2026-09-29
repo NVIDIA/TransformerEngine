@@ -292,9 +292,24 @@ bool mxfp8_group_quantize_cutedsl(const GroupedTensor *input_tensor, const Tenso
     // Leave invalid group sizes to mxfp8::group_quantize, which raises a proper error.
     // Every member gets a descriptor slot in the fixed-size workspace, so the CUDA
     // kernel's descriptor limit applies to the single-tensor representations here too.
-    if (input_tensor->num_tensors == 0 || input_tensor->num_tensors > kMaxGroupTensors) {
-      maybe_warn_cutedsl_not_chosen("the group size ", input_tensor->num_tensors,
-                                    " is not between 1 and ", kMaxGroupTensors, ".");
+    const size_t num_tensors = input_tensor->num_tensors;
+    if (num_tensors == 0 || num_tensors > kMaxGroupTensors) {
+      maybe_warn_cutedsl_not_chosen("the group size ", num_tensors, " is not between 1 and ",
+                                    kMaxGroupTensors, ".");
+      return false;
+    }
+    if (shape_rep == ShapeRepresentation::SAME_BOTH_DIMS) {
+      // The kernel tiles the stacked rows without tensor boundaries, which matches the CUDA
+      // kernel's per-tensor tiling only when every member's rows are a multiple of its
+      // 128-row chunk. mxfp8::group_quantize raises for a non-integral row count.
+      const size_t first_logical_dim = input_tensor->logical_shape.data[0];
+      if (first_logical_dim % num_tensors != 0 || (first_logical_dim / num_tensors) % 128 != 0) {
+        maybe_warn_cutedsl_not_chosen("the rows of each group member are not a multiple of 128.");
+        return false;
+      }
+    } else if (!output_tensor->tensor_offsets.has_data()) {
+      // The varying representations read per-member offsets, as the CUDA kernel does.
+      maybe_warn_cutedsl_not_chosen("the grouped tensor has no tensor offsets.");
       return false;
     }
 
