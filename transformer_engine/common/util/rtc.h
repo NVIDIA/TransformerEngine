@@ -40,6 +40,22 @@ struct Header {
   const char *include_name;
 };
 
+/*! \brief Architecture specificity required by an RTC kernel */
+enum class ArchSpecificity {
+  /*! Compile for a generic architecture, preserving PTX forward compatibility */
+  Generic,
+  /*! Compile for the exact architecture-specific target (e.g. sm_100a) */
+  ArchitectureSpecific,
+};
+
+/*! \brief Architecture requirements for an RTC kernel */
+struct ArchRequirement {
+  /*! Minimum compute capability, encoded as major * 10 + minor */
+  int min_sm_arch = 0;
+  /*! Target-specificity policy for the kernel */
+  ArchSpecificity specificity = ArchSpecificity::Generic;
+};
+
 /*! \brief Wrapper class for a runtime-compiled CUDA kernel */
 class Kernel {
  public:
@@ -145,11 +161,14 @@ class KernelManager {
    *                         primarily for debugging
    * \param[in] extra_options Additional NVRTC compiler options
    * \param[in] extra_headers Additional in-memory headers available to the program
+   * \param[in] arch_requirement Minimum and specificity requirements for the
+   *                            compilation target
    */
   void compile(const std::string &kernel_label, const std::string &kernel_name,
                const std::string &code, const std::string &filename,
                const std::vector<std::string> &extra_options = {},
-               const std::vector<Header> &extra_headers = {});
+               const std::vector<Header> &extra_headers = {},
+               ArchRequirement arch_requirement = {});
 
   /*! \brief Whether CUDA kernel has been compiled for CUDA device
    *
@@ -178,9 +197,11 @@ class KernelManager {
     const int device_id = cuda::current_device();
     const auto key = get_kernel_cache_key(kernel_label, device_id);
     std::shared_lock<std::shared_mutex> lock_guard_(lock_);
-    NVTE_CHECK(kernel_cache_.count(key) > 0, "Attempted to launch RTC kernel before compilation");
-    kernel_cache_.at(key).launch(device_id, grid_dim, block_dim, shared_mem_bytes, stream,
-                                 std::forward<ArgTs>(args)...);
+    const auto kernel_it = kernel_cache_.find(key);
+    NVTE_CHECK(kernel_it != kernel_cache_.end(),
+               "Attempted to launch RTC kernel before compilation");
+    kernel_it->second.launch(device_id, grid_dim, block_dim, shared_mem_bytes, stream,
+                             std::forward<ArgTs>(args)...);
   }
 
   /*! \brief Sets the preferred cache configuration for a function in the context
@@ -208,9 +229,11 @@ class KernelManager {
     const int device_id = cuda::current_device();
     const auto key = get_kernel_cache_key(kernel_label, device_id);
     std::shared_lock<std::shared_mutex> lock_guard_(lock_);
-    NVTE_CHECK(kernel_cache_.count(key) > 0, "Attempted to launch RTC kernel before compilation");
-    kernel_cache_.at(key).launch_cooperative(device_id, grid_dim, block_dim, shared_mem_bytes,
-                                             stream, std::forward<ArgTs>(args)...);
+    const auto kernel_it = kernel_cache_.find(key);
+    NVTE_CHECK(kernel_it != kernel_cache_.end(),
+               "Attempted to launch RTC kernel before compilation");
+    kernel_it->second.launch_cooperative(device_id, grid_dim, block_dim, shared_mem_bytes, stream,
+                                         std::forward<ArgTs>(args)...);
   }
 
  private:

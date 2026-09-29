@@ -53,14 +53,11 @@ std::vector<size_t> getGemmOutputShape(const NVTEShape& A_shape, const bool tran
   std::vector<size_t> ret;
   if (transb) {
     ret.emplace_back(B1);
-  } else if (tp_size == 1) {
+  } else {
     // Unflatten B0
     for (size_t i = 0; i < B_shape.ndim - 1; ++i) {
       ret.emplace_back(B_shape.data[i]);
     }
-  } else {
-    // Keep output tensor in 2D for comm+GEMM overlap
-    ret.emplace_back(B0);
   }
   if (transa) {
     ret.emplace_back(A0);
@@ -75,6 +72,8 @@ std::vector<size_t> getGemmOutputShape(const NVTEShape& A_shape, const bool tran
       ret[0] *= tp_size;
     } else {
       // Inner dim is sharded, comm+GEMM overlap would need to do reduce-scatter
+      NVTE_CHECK(ret[0] % tp_size == 0,
+                 "First output dimension must be divisible by tensor parallel size");
       ret[0] /= tp_size;
     }
   }
@@ -172,16 +171,29 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   size_t tp_size = 1;
   size_t tp_dim = 0;
   if (comm_overlap && !bulk_overlap && comm_overlap->with_cublasmp()) {
+    NVTE_CHECK(comm_type.has_value(), "Comm+GEMM overlap requires a communication type");
     tp_size = comm_overlap->get_tp_size();
     tp_dim = (comm_type.value() == CommOverlapType::AG) ? 0 : 1;
   }
   // Check tensor dimensions
   const auto& A_shape = A_tensor.shape();
   const auto& B_shape = B_tensor.shape();
-  const auto& D_shape =
-      detail::getGemmOutputShape(A_shape, transa, B_shape, transb, tp_size, tp_dim);
   NVTE_CHECK(A_shape.ndim >= 1, "Tensor A needs to have at least 1 dimension");
   NVTE_CHECK(B_shape.ndim >= 1, "Tensor B needs to have at least 1 dimension");
+  if (comm_overlap && !bulk_overlap) {
+    NVTE_CHECK(comm_type.has_value(), "Comm+GEMM overlap requires a communication type");
+    NVTE_CHECK(A_shape.ndim >= 2 && B_shape.ndim >= 2,
+               "Comm+GEMM overlap does not support 1-dimensional operands");
+    if (comm_type.value() == CommOverlapType::RS) {
+      const auto unsharded_shape = detail::getGemmOutputShape(A_shape, transa, B_shape, transb);
+      const auto overlap_tp_size = comm_overlap->get_tp_size();
+      NVTE_CHECK(unsharded_shape[0] % overlap_tp_size == 0, "First output dimension (",
+                 unsharded_shape[0], ") must be divisible by tensor parallel size (",
+                 overlap_tp_size, ") for reduce-scatter overlap");
+    }
+  }
+  const auto D_shape =
+      detail::getGemmOutputShape(A_shape, transa, B_shape, transb, tp_size, tp_dim);
 
   // Check scaling factors
   if (accumulate) {

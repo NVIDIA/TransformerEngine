@@ -25,7 +25,7 @@ by low-precision recipes. Its modules cover attention, linear layers, normalizat
 Highlights
 ==========
 
-* FP8 training on NVIDIA Hopper, Ada, and Blackwell GPUs.
+* FP8 training on NVIDIA Hopper, Ada, Blackwell, and Rubin GPUs.
 * MXFP8 and NVFP4 training on NVIDIA Blackwell GPUs.
 * Optimized attention, GEMM, normalization, quantization, and fused Transformer and MoE modules.
 * PyTorch and JAX APIs with autocast-style contexts and configurable low-precision recipes.
