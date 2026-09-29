@@ -31,6 +31,7 @@
 #include "../../../util/cuda_runtime.h"
 #include "../../../util/math.h"
 #include "../../../util/ptx.cuh"
+#include "../swizzle.cuh"
 
 namespace transformer_engine {
 namespace dispatch {
@@ -447,7 +448,7 @@ __device__ __forceinline__ void load_lut(unsigned char* dst, const void* src, in
 
 // Register-resident tiling: the 32x256 tile stays in registers; only the
 // colwise partials go through shared memory.
-template <bool IS_DACT, bool IS_ACT>
+template <bool IS_DACT, bool IS_ACT, bool WITH_GEMM_SWIZZLED_SCALES>
 __device__ __forceinline__ void quantize_regtile(
     const uint4* __restrict__ input, const uint4* __restrict__ act_input,
     unsigned char* __restrict__ rowwise_out, unsigned char* __restrict__ rowwise_scales,
@@ -655,18 +656,41 @@ __device__ __forceinline__ void quantize_regtile(
         col_amax = abs_max_bf16x2(col_amax, col_amax_partials[w][tid]);
       col_amax &= 0x7fff7fffu;
       const unsigned scale_pair = amax_to_e8m0_2x(bf16_hi(col_amax), bf16_lo(col_amax));
-      *(unsigned short*)(colwise_scales + (size_t)(row0 / 32) * colwise_scale_stride + col0 +
-                         2 * tid) = (unsigned short)scale_pair;
+      if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
+        // The colwise swizzle is the rowwise one with rows and columns swapped,
+        // so the two columns of this pair land in different 16-byte rows.  The
+        // grid covers M exactly: gridDim.y * iters row blocks of 32.
+        const size_t row_block_tiles =
+            DIVUP(static_cast<size_t>(gridDim.y) * iters * kRowsPerMxBlock, size_t{128});
+        const size_t col = col0 + 2 * tid;
+        colwise_scales[swizzle::gemm_swizzled_scale_idx(col, row0 / 32, row_block_tiles)] =
+            static_cast<unsigned char>(scale_pair);
+        colwise_scales[swizzle::gemm_swizzled_scale_idx(col + 1, row0 / 32, row_block_tiles)] =
+            static_cast<unsigned char>(scale_pair >> 8);
+      } else {
+        *(unsigned short*)(colwise_scales + (size_t)(row0 / 32) * colwise_scale_stride + col0 +
+                           2 * tid) = (unsigned short)scale_pair;
+      }
       col_scale_rcp_smem[tid] = e8m0x2_to_bf16x2_reciprocal(__byte_perm(scale_pair, 0, 0x4140));
     }
     auto drain_row_scales = [&]() {
       constexpr int drain_tid_base = C::kDrainTidBase;
       // A row's eight group scales are eight contiguous, 8-byte-aligned bytes of
       // rowwise_scales, so one warp drains a 32-row tile with one STG.64 per lane.
+      // In the GEMM-swizzled layout they are two 4-byte runs in adjacent tiles.
       if (tid >= drain_tid_base && tid < drain_tid_base + kRowsPerMxBlock) {
         const int r = tid - drain_tid_base;
-        *(f32x2*)(rowwise_scales + (size_t)(row0 + r) * rowwise_scale_stride + (col0 >> 5)) =
-            *(const f32x2*)(row_scale_bytes + r * kMxGroupsPerRow);
+        if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
+          constexpr size_t kTileBytes =
+              swizzle::GEMM_SWIZZLED_SCALE_TILE_DIM_X * swizzle::GEMM_SWIZZLED_SCALE_TILE_DIM_Y;
+          const size_t idx = swizzle::gemm_swizzled_scale_idx(row0 + r, col0 >> 5, K / 128);
+          const uint2 bytes = *(const uint2*)(row_scale_bytes + r * kMxGroupsPerRow);
+          *(unsigned*)(rowwise_scales + idx) = bytes.x;
+          *(unsigned*)(rowwise_scales + idx + kTileBytes) = bytes.y;
+        } else {
+          *(f32x2*)(rowwise_scales + (size_t)(row0 + r) * rowwise_scale_stride + (col0 >> 5)) =
+              *(const f32x2*)(row_scale_bytes + r * kMxGroupsPerRow);
+        }
       }
     };
     drain_row_scales();
@@ -694,7 +718,7 @@ __device__ __forceinline__ void quantize_regtile(
   }
 }
 
-template <bool IS_DACT, bool IS_ACT>
+template <bool IS_DACT, bool IS_ACT, bool WITH_GEMM_SWIZZLED_SCALES>
 __global__ void __launch_bounds__(TileConfig<IS_DACT, IS_ACT>::kThreadsPerCta,
                                   TileConfig<IS_DACT, IS_ACT>::kMinBlocksPerSm)
     quantize_mxfp8_kernel(const unsigned* __restrict__ input,
@@ -705,9 +729,9 @@ __global__ void __launch_bounds__(TileConfig<IS_DACT, IS_ACT>::kThreadsPerCta,
                           unsigned char* __restrict__ colwise_scales, int K,
                           int rowwise_scale_stride, int colwise_scale_stride, int iters) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-  quantize_regtile<IS_DACT, IS_ACT>((const uint4*)input, (const uint4*)act_input, rowwise_out,
-                                    rowwise_scales, colwise_out, colwise_scales, K,
-                                    rowwise_scale_stride, colwise_scale_stride, iters);
+  quantize_regtile<IS_DACT, IS_ACT, WITH_GEMM_SWIZZLED_SCALES>(
+      (const uint4*)input, (const uint4*)act_input, rowwise_out, rowwise_scales, colwise_out,
+      colwise_scales, K, rowwise_scale_stride, colwise_scale_stride, iters);
 #endif
 }
 
@@ -733,7 +757,7 @@ static int pick_walk_length(int row_blocks, int grid_cols, long long target,
 // the rest of the unified array goes to L1.
 constexpr int kCarveoutPercentAct = 40;
 
-template <bool IS_DACT, bool IS_ACT>
+template <bool IS_DACT, bool IS_ACT, bool WITH_GEMM_SWIZZLED_SCALES>
 static void set_carveout() {
   constexpr int kPercent = IS_ACT ? kCarveoutPercentAct : 0;
   if constexpr (kPercent > 0) {
@@ -745,9 +769,9 @@ static void set_carveout() {
     std::lock_guard<std::mutex> lock(mutex);
     if (static_cast<size_t>(device) >= done.size()) done.resize(device + 1, false);
     if (!done[device]) {
-      NVTE_CHECK_CUDA(cudaFuncSetAttribute((const void*)quantize_mxfp8_kernel<IS_DACT, IS_ACT>,
-                                           cudaFuncAttributePreferredSharedMemoryCarveout,
-                                           kPercent));
+      NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+          (const void*)quantize_mxfp8_kernel<IS_DACT, IS_ACT, WITH_GEMM_SWIZZLED_SCALES>,
+          cudaFuncAttributePreferredSharedMemoryCarveout, kPercent));
       done[device] = true;
     }
   }
@@ -766,18 +790,19 @@ int walk_length(int M, int K) {
   return iters;
 }
 
-template <bool IS_DACT, bool IS_ACT>
+template <bool IS_DACT, bool IS_ACT, bool WITH_GEMM_SWIZZLED_SCALES>
 static void launch(const void* input, const void* act_input, void* rowwise_out,
                    void* rowwise_scales, void* colwise_out, void* colwise_scales, int M, int K,
                    int rowwise_scale_stride, int colwise_scale_stride, cudaStream_t stream) {
   using C = TileConfig<IS_DACT, IS_ACT>;
-  set_carveout<IS_DACT, IS_ACT>();
+  set_carveout<IS_DACT, IS_ACT, WITH_GEMM_SWIZZLED_SCALES>();
   const int iters = walk_length<IS_DACT, IS_ACT>(M, K);
   dim3 grid(K / kTileCols, M / kRowsPerMxBlock / iters);
-  quantize_mxfp8_kernel<IS_DACT, IS_ACT><<<grid, C::kThreadsPerCta, 0, stream>>>(
-      (const unsigned*)input, (const unsigned*)act_input, (unsigned char*)rowwise_out,
-      (unsigned char*)rowwise_scales, (unsigned char*)colwise_out, (unsigned char*)colwise_scales,
-      K, rowwise_scale_stride, colwise_scale_stride, iters);
+  quantize_mxfp8_kernel<IS_DACT, IS_ACT, WITH_GEMM_SWIZZLED_SCALES>
+      <<<grid, C::kThreadsPerCta, 0, stream>>>(
+          (const unsigned*)input, (const unsigned*)act_input, (unsigned char*)rowwise_out,
+          (unsigned char*)rowwise_scales, (unsigned char*)colwise_out,
+          (unsigned char*)colwise_scales, K, rowwise_scale_stride, colwise_scale_stride, iters);
 }
 
 // The dGeLU table lives in an anonymous namespace, so there is one copy per
@@ -851,10 +876,9 @@ bool can_use(const Tensor& input, const Tensor* act_input, const Tensor& output,
                          is_aligned_ptr(output.scale_inv.dptr, 8) &&
                          is_aligned_ptr(output.columnwise_scale_inv.dptr, 2);
     if (!(transformer_engine::cuda::sm_arch() >= 100 && !use_2d_quantization && output.has_data() &&
-          output.has_columnwise_data() && !output.with_gemm_swizzled_scales &&
-          input.dtype() == DType::kBFloat16 && output.dtype() == DType::kFloat8E4M3 &&
-          output.amax.dptr == nullptr && noop.data.dptr == nullptr && shape_supported(rows, cols) &&
-          aligned)) {
+          output.has_columnwise_data() && input.dtype() == DType::kBFloat16 &&
+          output.dtype() == DType::kFloat8E4M3 && output.amax.dptr == nullptr &&
+          noop.data.dptr == nullptr && shape_supported(rows, cols) && aligned)) {
       return false;
     }
     constexpr size_t kMaxGridY = 65535;
@@ -879,11 +903,13 @@ void quantize(const Tensor& input, const Tensor* act_input, Tensor* output,
     ensure_act_tables(stream);
   }
   const void* act_ptr = IS_DACT ? act_input->data.dptr : input.data.dptr;
-  launch<IS_DACT, IS_ACT>(input.data.dptr, act_ptr, output->data.dptr, output->scale_inv.dptr,
-                          output->columnwise_data.dptr, output->columnwise_scale_inv.dptr,
-                          static_cast<int>(rows), static_cast<int>(cols),
-                          static_cast<int>(output->scale_inv.shape[1]),
-                          static_cast<int>(output->columnwise_scale_inv.shape[1]), stream);
+  TRANSFORMER_ENGINE_SWITCH_CONDITION(
+      output->with_gemm_swizzled_scales, WITH_GEMM_SWIZZLED_SCALES,
+      launch<IS_DACT, IS_ACT, WITH_GEMM_SWIZZLED_SCALES>(
+          input.data.dptr, act_ptr, output->data.dptr, output->scale_inv.dptr,
+          output->columnwise_data.dptr, output->columnwise_scale_inv.dptr, static_cast<int>(rows),
+          static_cast<int>(cols), static_cast<int>(output->scale_inv.shape[1]),
+          static_cast<int>(output->columnwise_scale_inv.shape[1]), stream););
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
