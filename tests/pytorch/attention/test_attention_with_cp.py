@@ -26,6 +26,7 @@ from transformer_engine.common.recipe import (
     Format,
 )
 from transformer_engine.pytorch.attention.dot_product_attention.utils import FlashAttentionUtils
+from transformer_engine.pytorch.constants import CPLoadBalancingStrategy
 
 _current_file = pathlib.Path(__file__).resolve()
 sys.path = [str(_current_file.parent.parent)] + sys.path
@@ -779,26 +780,49 @@ def test_cp_with_fused_attention_no_load_balance(cp_pool):
     )
 
 
-def test_cp_with_flash_attention_no_load_balance(cp_pool):
+@pytest.mark.parametrize("head_dim", (128, 256))
+def test_cp_with_flash_attention_no_load_balance(cp_pool, head_dim):
     """Check the supported unpadded FlashAttention path."""
+    if head_dim == 256 and (
+        get_device_compute_capability() != (10, 0)
+        or not fa4_enabled
+        or not FlashAttentionUtils.v4_is_installed
+        or FlashAttentionUtils.fa4_version < FlashAttentionUtils.v4_0_0_beta31
+        or _deterministic
+    ):
+        pytest.skip("D=256 THD all-gather requires SM100 FA4 b31+ non-deterministic backward.")
     config = copy.deepcopy(model_configs_flash_attn["cp_2_0"])
+    config.head_dim_qk = config.head_dim_v = head_dim
     config.context_parallel = True
     config.cp_comm_type = "all_gather"
     config.attn_mask_type = "padding_causal"
-    available_backends, _, _ = get_available_attention_backends(
+    available_backends, flash_backend, _ = get_available_attention_backends(
         config,
         qkv_dtype=torch.bfloat16,
         qkv_layout="thd_thd_thd",
         pad_between_seqs=False,
         is_training=True,
         deterministic=_deterministic,
+        cp_size=2,
+        load_balancing_strategy=CPLoadBalancingStrategy.NO_LOAD_BALANCE,
     )
-    if not available_backends[0]:
+    if head_dim == 256:
+        assert available_backends[0] and flash_backend is not None and flash_backend.major == 4
+        _, dual_flash_backend, _ = get_available_attention_backends(
+            config,
+            qkv_dtype=torch.bfloat16,
+            qkv_layout="thd_thd_thd",
+            cp_size=2,
+            load_balancing_strategy=CPLoadBalancingStrategy.DUAL_CHUNK_SWAP,
+        )
+        assert dual_flash_backend is None or dual_flash_backend.major != 4
+    elif not available_backends[0]:
         pytest.skip("FlashAttention is unavailable.")
     _submit(
         cp_pool(2),
         dtype="bf16",
         model="cp_2_0",
+        head_dim=head_dim,
         qkv_format="thd",
         kernel_backend="FlashAttention",
         cp_comm_type="all_gather",

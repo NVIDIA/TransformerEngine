@@ -49,7 +49,12 @@ from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8
 from transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 
 from transformer_engine.pytorch.quantization import get_fp8_te_dtype
-from transformer_engine.pytorch.constants import TE_DType, DType, MXFP8_BLOCK_SCALING_SIZE
+from transformer_engine.pytorch.constants import (
+    CPLoadBalancingStrategy,
+    TE_DType,
+    DType,
+    MXFP8_BLOCK_SCALING_SIZE,
+)
 
 
 from transformer_engine.pytorch.utils import (
@@ -264,6 +269,8 @@ class AttentionParams:
         The (total) group size of context parallelism.
     cp_size_a2a : int, default = 1
         The all-to-all subgroup size when `cp_comm_type == "a2a+p2p"`.
+    load_balancing_strategy : CPLoadBalancingStrategy, default = DUAL_CHUNK_SWAP
+        Token partition strategy for context-parallel attention.
     deterministic : bool, default = False
         Whether to run `DotProductAttention` with determinism or not.
     is_training : bool, default = True
@@ -321,6 +328,7 @@ class AttentionParams:
     cp_comm_type: str = "p2p"
     cp_size: int = 1
     cp_size_a2a: int = 1
+    load_balancing_strategy: CPLoadBalancingStrategy = CPLoadBalancingStrategy.DUAL_CHUNK_SWAP
     deterministic: bool = False
     is_training: bool = True
     fp8: bool = False
@@ -513,6 +521,7 @@ def get_attention_backend(
     cp_comm_type = attention_params.cp_comm_type
     cp_size = attention_params.cp_size
     cp_size_a2a = attention_params.cp_size_a2a
+    load_balancing_strategy = attention_params.load_balancing_strategy
     deterministic = attention_params.deterministic
     is_training = attention_params.is_training
     fp8 = attention_params.fp8
@@ -1287,13 +1296,28 @@ def get_attention_backend(
             and head_dim_qk == head_dim_v == 256
             and FlashAttentionUtils.fa4_version < FlashAttentionUtils.v4_0_0_beta31
         ):
-            # Earlier FA4 releases predate the complete D=256 varlen support
-            # needed by THD all-gather CP, so compact metadata can be incorrect.
+            # Earlier FA4 releases cannot use D=256 compact THD all-gather metadata.
             logger.debug(
                 "Disabling FlashAttention 4 for THD all-gather context parallelism with "
                 "head_dim=256 on SM100/SM110 with version %s (requires >= %s)",
                 FlashAttentionUtils.fa4_version,
                 FlashAttentionUtils.v4_0_0_beta31,
+            )
+            use_flash_attention_4 = False
+        elif (
+            qkv_format == "thd"
+            and cp_comm_type == "all_gather"
+            and is_training
+            and (10, 0) <= device_compute_capability < (12, 0)
+            and head_dim_qk == head_dim_v == 256
+            and load_balancing_strategy is CPLoadBalancingStrategy.DUAL_CHUNK_SWAP
+        ):
+            # Dual-chunk all-gather passes seqused_q/k to backward; released FA4
+            # does not support those arguments with the SM100 D=256 kernel yet.
+            # Add a release-version gate once that backward support is published.
+            logger.debug(
+                "Disabling FlashAttention 4 for THD dual-chunk all-gather "
+                "head_dim=256 backward on SM100/SM110."
             )
             use_flash_attention_4 = False
     if context_parallel and (
