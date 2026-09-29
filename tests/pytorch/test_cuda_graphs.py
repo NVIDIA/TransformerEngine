@@ -18,6 +18,7 @@ from transformer_engine.pytorch import (
     MultiheadAttention,
     TransformerLayer,
     autocast,
+    quantization_backward_scope,
     quantized_model_init,
     make_graphed_callables,
     is_fp8_available,
@@ -507,6 +508,76 @@ def test_make_graphed_callables(
     # Check that results match.
     assert_all_equal(outputs, graph_outputs_mode1)
     assert_all_equal(outputs, graph_outputs_mode2)
+
+
+@pytest.mark.skipif(not fp8_available, reason="FP8 is not supported")
+def test_graphed_delayed_scaling_update_respects_backward_scope(monkeypatch) -> None:
+    def amax_compute_algo(amax_history):
+        return torch.max(amax_history, dim=0).values
+
+    fp8_recipe = recipe.DelayedScaling(
+        amax_history_len=4,
+        amax_compute_algo=amax_compute_algo,
+    )
+    model = Linear(128, 128, bias=False, params_dtype=torch.bfloat16).cuda()
+    for param in model.parameters():
+        param.grad = torch.empty_like(param)
+    sample = torch.randn(
+        32,
+        128,
+        device="cuda",
+        dtype=torch.bfloat16,
+        requires_grad=False,
+    )
+    model = make_graphed_callables(
+        model,
+        (sample,),
+        num_warmup_iters=1,
+        enabled=True,
+        recipe=fp8_recipe,
+    )
+
+    update_count = 0
+    original_update = FP8GlobalStateManager.reduce_and_update_quantization_state.__func__
+
+    def counted_update(cls, forward=True):
+        nonlocal update_count
+        if not forward:
+            update_count += 1
+        return original_update(cls, forward=forward)
+
+    monkeypatch.setattr(
+        FP8GlobalStateManager,
+        "reduce_and_update_quantization_state",
+        classmethod(counted_update),
+    )
+    monkeypatch.setattr(
+        FP8GlobalStateManager,
+        "reduce_and_update_fp8_tensors",
+        classmethod(counted_update),
+    )
+
+    bwd_state = model.fp8_meta["scaling_bwd"]
+
+    def run_backward(use_scope):
+        model.zero_grad(set_to_none=False)
+        bwd_state.amax_history.zero_()
+        bwd_state.scale.fill_(1.0)
+        with autocast(enabled=True, recipe=fp8_recipe):
+            out = model(torch.randn_like(sample))
+        if use_scope:
+            with quantization_backward_scope():
+                out.float().sum().backward()
+        else:
+            out.float().sum().backward()
+        assert not bwd_state.amax_history[:-1].any()
+        assert bwd_state.amax_history[-1].any()
+
+    run_backward(use_scope=False)
+    assert update_count == 1
+    run_backward(use_scope=True)
+    assert update_count == 2
+    reset_graphs(model)
 
 
 _test_make_graphed_callables_with_fp8_weight_caching_modules = [
