@@ -330,6 +330,7 @@ def restore_from_saved(
     """
     tensor_objects = []
     index = 0
+    pending_slice = False
     for tensor in tensors:
         if tensor is None or isinstance(tensor, torch.Tensor):
             tensor_objects.append(saved_tensors[index])
@@ -341,16 +342,18 @@ def restore_from_saved(
                 QuantizedTensorStorage.__tensor_unflatten__(inner, tensor.metadata, None, None)
             )
             index += count
+            pending_slice = True
         else:
             # Legacy storage methods consume and may replace the remaining sequence.
-            if index:
+            if index or pending_slice:
                 saved_tensors = saved_tensors[index:]
             saved_tensors = tensor.restore_from_saved(saved_tensors)
             index = 0
+            pending_slice = False
             tensor_objects.append(tensor)
 
     if return_saved_tensors:
-        return tensor_objects, saved_tensors[index:] if index else saved_tensors
+        return tensor_objects, saved_tensors[index:] if index or pending_slice else saved_tensors
     return tensor_objects
 
 

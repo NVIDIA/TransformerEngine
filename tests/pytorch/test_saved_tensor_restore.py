@@ -108,6 +108,27 @@ def test_restore_empty_flattened_and_legacy_tail():
     assert restored[1] is legacy and remaining is tail
 
 
+@pytest.mark.parametrize("with_legacy", [False, True])
+def test_restore_empty_flattened_copies_list_tail(with_legacy):
+    value = torch.empty(1)
+    saved = [value]
+    flattened = _SavedQuantizedTensor(
+        (), {"cls": _RestoredStorage, "is_tensor": False, "nontensor_kwargs": {}}
+    )
+
+    class MutatingStorage:
+        def restore_from_saved(self, tail):
+            assert tail is not saved
+            assert tail.pop() is value
+            return tail
+
+    metadata = [flattened, MutatingStorage()] if with_legacy else [flattened]
+    _, remaining = restore_from_saved(metadata, saved, True)
+    assert saved == [value]
+    assert remaining is not saved
+    assert remaining == ([] if with_legacy else [value])
+
+
 def test_restore_short_saved_sequence():
     with pytest.raises(IndexError):
         restore_from_saved([None, None], [torch.empty(1)])
