@@ -110,12 +110,14 @@ class MXFP8GroupQuantizeConfig:
     """Compile-time config for the grouped MXFP8 quantize kernel."""
 
     def __init__(self, dtype: str, fp8_dtype: str, rowwise: bool, colwise: bool, shape_rep: str):
-        if dtype not in ("fp32", "fp16", "bf16"):
-            raise ValueError(f"unknown input dtype {dtype!r}; expected fp32|fp16|bf16")
+        if dtype not in ("Float32", "Float16", "BFloat16"):
+            raise ValueError(f"unknown input dtype {dtype!r}; expected Float32|Float16|BFloat16")
         self.DTYPE = str_to_cutlass_dtype(dtype)
         self.DTYPE_STR = dtype
-        if fp8_dtype not in ("fp8_e4m3fn", "fp8_e5m2"):
-            raise ValueError(f"unknown FP8 dtype {fp8_dtype!r}; expected fp8_e4m3fn|fp8_e5m2")
+        if fp8_dtype not in ("Float8E4M3", "Float8E5M2"):
+            raise ValueError(
+                f"unknown FP8 dtype {fp8_dtype!r}; expected 'Float8E4M3' or 'Float8E5M2'"
+            )
         self.FP8_DTYPE = str_to_cutlass_dtype(fp8_dtype)
         self.FP8_DTYPE_STR = fp8_dtype
         if not (rowwise or colwise):
@@ -131,7 +133,7 @@ class MXFP8GroupQuantizeConfig:
         # Mirrors `is_single_tensor` in group_quantize_mxfp8.cuh.
         self.IS_SINGLE_TENSOR = shape_rep in (SAME_BOTH_DIMS, VARYING_FIRST_DIM)
         self.MAX_NORM_RCP = (
-            FP8E4M3_MAX_NORM_RCP if fp8_dtype == "fp8_e4m3fn" else FP8E5M2_MAX_NORM_RCP
+            FP8E4M3_MAX_NORM_RCP if fp8_dtype == "Float8E4M3" else FP8E5M2_MAX_NORM_RCP
         )
 
     def __str__(self):
@@ -1020,66 +1022,6 @@ def compile_cutedsl_function_from_cfg(cfg: MXFP8GroupQuantizeConfig):
     )
 
 
-# TEMPORARY (demo only): same as compile_cutedsl_function_from_cfg but with every
-# extent pinned to a compile-time constant, so traced layouts print concrete numbers
-# (e.g. `(384,256):(1@1,1@0)`) instead of `?{div=128}`. Delete once done inspecting.
-def compile_cutedsl_function_from_cfg_static(
-    cfg: MXFP8GroupQuantizeConfig,
-    M_total: int,
-    N: int,
-    num_tensors: int,
-    scale_row_numel: int,
-    scale_col_numel: int,
-):
-    """Compile with fully static shapes. Only accepts inputs of exactly these extents."""
-    logical_shape = (M_total, N)
-
-    def g2d(dtype, align=16):
-        return cute.runtime.make_fake_compact_tensor(
-            dtype,
-            logical_shape,
-            stride_order=(1, 0),
-            memspace=cute.AddressSpace.gmem,
-            assumed_align=align,
-        )
-
-    def g1d(dtype, numel, align=4):
-        return cute.runtime.make_fake_compact_tensor(
-            dtype,
-            (numel,),
-            stride_order=(0,),
-            memspace=cute.AddressSpace.gmem,
-            assumed_align=align,
-        )
-
-    scale_dtype = cutlass.Float8E8M0FNU
-    tensormaps_fake = cute.runtime.make_fake_compact_tensor(
-        cutlass.Int64,
-        (num_tensors, NUM_WORKSPACE_SLOTS, BYTES_PER_TENSORMAP // 8),
-        stride_order=(2, 1, 0),
-        memspace=cute.AddressSpace.gmem,
-        assumed_align=128,
-    )
-
-    from cutlass.utils import HardwareInfo  # pylint: disable=import-outside-toplevel
-
-    sm_count = HardwareInfo().get_device_multiprocessor_count()
-    return cute.compile(
-        MXFP8GroupQuantizeKernel(cfg, sm_count),
-        g2d(cfg.DTYPE),
-        g2d(cfg.FP8_DTYPE),
-        g2d(cfg.FP8_DTYPE),
-        g1d(scale_dtype, scale_row_numel),
-        g1d(scale_dtype, scale_col_numel),
-        g1d(cutlass.Int64, num_tensors + 1, align=8),
-        g1d(cutlass.Int64, num_tensors, align=8),
-        g1d(cutlass.Int64, num_tensors, align=8),
-        tensormaps_fake,
-        cute.runtime.make_fake_stream(),
-        options="--enable-tvm-ffi",
-    )
-
-
 def get_mxfp8_group_quantization_function(
     fn_name: str,
     dtype: str,
@@ -1088,49 +1030,58 @@ def get_mxfp8_group_quantization_function(
     colwise: bool,
     shape_rep: str,
 ) -> bool:
-    """Compile the grouped MXFP8 quantize kernel for this config and register it in the
-    TVM-FFI global registry under EXACTLY `fn_name`. Returns True on success (the C++
-    dispatcher then fetches it with GetGlobal(fn_name)); False if unsupported, so the
-    caller falls back to the CUDA C++ grouped kernel.
+    """Compile the grouped MXFP8 quantize kernel for this config and register it in the TVM-FFI
+    global registry under EXACTLY `fn_name` (the key the C++ dispatcher built; Python treats it as
+    an opaque name). Returns True if a kernel is successfully registered under `fn_name` (the C++
+    side then fetches it with GetGlobal(fn_name)); False if the config is unsupported, so the caller
+    caches the negative result and falls back to the CUDA C++ grouped kernel.
     """
-    if tvm_ffi.get_global_func(fn_name, allow_missing=True) is not None:
-        return True
-
-    major, minor = device_compute_capability()
-    if major < 10:
-        logger.warning(
-            "CuTeDSL MXFP8 backend requires compute capability >= 10.0 (Blackwell), "
-            "but detected %d.%d; falling back to the CUDA C++ kernel.",
-            major,
-            minor,
-        )
-        return False
-
     try:
-        cfg = MXFP8GroupQuantizeConfig(
-            dtype=dtype,
-            fp8_dtype=fp8_dtype,
-            rowwise=rowwise,
-            colwise=colwise,
-            shape_rep=shape_rep,
-        )
-    except ValueError as e:
-        logger.warning(
-            "CuTeDSL grouped MXFP8 backend does not support this config, "
-            "falling back to the CUDA C++ kernel: %s",
-            e,
-        )
-        return False
+        # Already registered (e.g. by a prior call) -> supported.
+        if tvm_ffi.get_global_func(fn_name, allow_missing=True) is not None:
+            return True
 
-    logger.debug("Compiling CuTeDSL grouped MXFP8 quantization kernel for %s", cfg)
-    try:
+        major, minor = device_compute_capability()
+        if major < 10:
+            logger.warning(
+                "CuTeDSL MXFP8 backend requires compute capability >= 10.0 (Blackwell), "
+                "but detected %d.%d; falling back to the CUDA C++ kernel.",
+                major,
+                minor,
+            )
+            return False
+
+        try:
+            cfg = MXFP8GroupQuantizeConfig(
+                dtype=dtype,
+                fp8_dtype=fp8_dtype,
+                rowwise=rowwise,
+                colwise=colwise,
+                shape_rep=shape_rep,
+            )
+        except ValueError as e:
+            logger.warning(
+                "CuTeDSL grouped MXFP8 backend does not support this config, "
+                "falling back to the CUDA C++ kernel: %s",
+                e,
+            )
+            return False
+
+        logger.debug("Compiling CuTeDSL grouped MXFP8 quantization kernel for %s", cfg)
         compiled = compile_cutedsl_function_from_cfg(cfg)
+        # Register the native TVM-FFI function rather than its Python argument-parsing wrapper;
+        # see get_mxfp8_quantization_function for why.
+        native = getattr(compiled, "__tvm_ffi_object__", lambda: None)()
+        tvm_ffi.register_global_func(
+            fn_name, native if native is not None else compiled, override=True
+        )
+        return True
     except Exception as e:  # pylint: disable=broad-exception-caught
         logger.error(
-            "CuTeDSL grouped MXFP8 kernel compilation failed, "
-            "falling back to the CUDA C++ kernel: %s",
+            "CuTeDSL grouped MXFP8 kernel compilation & registration failed, falling back to the"
+            " CUDA C++ kernel: %s",
             e,
         )
+        # Unconditionally fallback to CUDA path because we can't tell if this exception is
+        # transient or permanent.
         return False
-    tvm_ffi.register_global_func(fn_name, compiled, override=True)
-    return True
