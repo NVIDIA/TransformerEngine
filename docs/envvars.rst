@@ -189,21 +189,7 @@ backend-selection overview.
    :Type: ``int`` (0 or 1)
    :Default: ``1``
    :Description: Enable or disable FusedAttention backend (cuDNN-based) for DotProductAttention. When set to ``0``, FusedAttention will not be used.
-
-.. envvar:: NVTE_CUDNN_COMPACT_GQA_BWD
-
-   :Type: ``int`` (0 or 1)
-   :Default: ``0``
-   :Description: Opt in to the experimental cuDNN Frontend compact GQA backward API.
-      Requires SM107, contiguous BF16 THD, eight query heads and one KV head per rank,
-      head dimension 256, and causal self-attention without bias or dropout.
-      Packing offsets must be registered with ``attention.register_cu_seqlens``.
-      Lengths and padding vary at runtime; there is no model or sequence-length list.
-      Unsupported inputs, CUDA graphs, and deterministic mode use stock backward.
-      An eligible call raises a clear error if the optional cuDNN API is missing.
-      Use ``attention.attention_backend_workspace()`` around forward and backward
-      to reuse scratch and release it before refit. Without a scope, scratch is
-      temporary for each call. This option does not change forward selection.
+      ``NVTE_CUDNN_COMPACT_GQA_BWD=1`` enables experimental SM107 compact GQA backward with registered packing metadata (default: ``0``).
 
 .. envvar:: NVTE_UNFUSED_ATTN
 
