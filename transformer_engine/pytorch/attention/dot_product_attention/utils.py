@@ -291,6 +291,11 @@ class AttentionParams:
         Whether a score_mod callback was provided.
     has_score_mod_bprop : bool, default = False
         Whether a score_mod bprop callback was provided.
+    device : Optional[torch.device], default = None
+        Query/key/value device. Defaults to the current CUDA device for standalone queries.
+    requires_backward : bool, default = True
+        Whether this call may require backward, independently of module training mode.
+        Standalone queries conservatively require backward support unless specified otherwise.
     """
 
     qkv_type: Union[torch.Tensor, Float8Tensor] = torch.Tensor
@@ -334,6 +339,8 @@ class AttentionParams:
     checkpoint_core_attention: bool = False
     has_score_mod: bool = False
     has_score_mod_bprop: bool = False
+    device: Optional[torch.device] = None
+    requires_backward: bool = True
 
     def __eq__(self, other):
         """
@@ -543,7 +550,11 @@ def get_attention_backend(
         logger.setLevel(AttentionLogging._log_level)
         if not logger.hasHandlers():
             logger.addHandler(AttentionLogging._stream_handler)
-    device_compute_capability = get_device_compute_capability()
+    device_compute_capability = (
+        get_device_compute_capability()
+        if attention_params.device is None
+        else get_device_compute_capability(attention_params.device)
+    )
     cudnn_version = get_cudnn_version()
     run_config = {
         "transformer_engine_version": te.__version__,
@@ -1758,10 +1769,11 @@ def get_attention_backend(
             )
             use_flash_attention_3 = False
     if use_flash_attention_4 and deterministic and FlashAttentionUtils.v4_is_installed:
-        if is_training and device_compute_capability == (12, 0):
+        # eval() does not disable autograd; only forward-only calls can use this kernel.
+        if attention_params.requires_backward and device_compute_capability[0] == 12:
             logger.debug(
-                "Disabling FlashAttention 4 for deterministic backward on sm120: the CuTe"
-                " SM 12.0 backward kernel does not support deterministic execution."
+                "Disabling FlashAttention 4 for deterministic backward on SM12x: the CuTe"
+                " SM12x backward kernel does not support deterministic execution."
             )
             use_flash_attention_4 = False
     if use_fused_attention and deterministic:
