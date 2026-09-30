@@ -237,11 +237,6 @@ backend-selection overview.
    :Default: ``1``
    :Description: Allow non-deterministic algorithms for Transformer Engine execution. When set to ``0``, only deterministic algorithms are allowed. This is relevant for both PyTorch and JAX attention implementations.
 
-   In PyTorch, deterministic training on SM 12.0 excludes FlashAttention 4 because its
-   backward implementation does not support deterministic execution. Transformer Engine
-   selects another enabled, compatible backend. FlashAttention 4 remains eligible in
-   evaluation mode and when non-deterministic algorithms are allowed.
-
 .. envvar:: NVTE_FUSED_RING_ATTENTION_USE_SCAN
 
    :Type: ``int`` (0 or 1)
