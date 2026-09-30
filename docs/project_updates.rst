@@ -13,7 +13,7 @@ The README highlights only the most recent updates.
 ----
 
 * **[09/2026]** `Transformer Engine v2.19 <https://github.com/NVIDIA/TransformerEngine/releases/tag/v2.19>`_ adds Rubin support, hybrid quantization, MXFP8 EP communication, and expanded FP8 attention support.
-* **[09/2026]** `Accelerating Dropless MoE Training in JAX with NVIDIA Transformer Engine <https://developer.nvidia.com/blog/accelerating-dropless-moe-training-in-jax-with-nvidia-transform-engine/>`_.
+* **[09/2026]** `Accelerating Dropless MoE Training in JAX with NVIDIA Transformer Engine <https://developer.nvidia.com/blog/accelerating-dropless-moe-training-in-jax-with-nvidia-transformer-engine/>`_.
 * **[08/2026]** `Transformer Engine v2.18 <https://github.com/NVIDIA/TransformerEngine/releases/tag/v2.18>`_.
 * **[07/2026]** `Transformer Engine v2.17 <https://github.com/NVIDIA/TransformerEngine/releases/tag/v2.17>`_.
 * **[06/2026]** `Boosting MoE Training Throughput with Advanced Fusion Kernels <https://developer.nvidia.com/blog/boosting-moe-training-throughput-with-advanced-fusion-kernels/>`_.
@@ -53,7 +53,7 @@ The README highlights only the most recent updates.
 * **[03/2024]** `Turbocharged Training: Optimizing the Databricks Mosaic AI Stack with FP8 <https://www.databricks.com/blog/turbocharged-training-optimizing-databricks-mosaic-ai-stack-fp8>`_.
 * **[03/2024]** `FP8 Training Support in SageMaker Model Parallelism Library <https://docs.aws.amazon.com/sagemaker/latest/dg/model-parallel-release-notes.html>`_.
 * **[12/2023]** `New NVIDIA NeMo Framework Features and NVIDIA H200 <https://developer.nvidia.com/blog/new-nvidia-nemo-framework-features-and-nvidia-h200-supercharge-llm-training-performance-and-versatility/>`_.
-* **[11/2023]** `Inflection-2: The Next Step Up <https://inflection.ai/inflection-2>`_.
+* **[11/2023]** Inflection-2: The Next Step Up.
 * **[11/2023]** `Unleashing the Power of Transformers with NVIDIA Transformer Engine <https://lambda.ai/blog/unleashing-the-power-of-transformers-with-nvidia-transformer-engine>`_.
 * **[11/2023]** `Accelerating PyTorch Training Workloads with FP8 <https://towardsdatascience.com/accelerating-pytorch-training-workloads-with-fp8-5a5123aec7d7>`_.
 * **[09/2023]** `Transformer Engine Added to the AWS Deep Learning Container for PyTorch Training <https://github.com/aws/deep-learning-containers/pull/3315>`_.
