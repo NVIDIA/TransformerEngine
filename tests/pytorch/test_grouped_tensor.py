@@ -48,6 +48,14 @@ reason_for_no_fp8_block_scaling_grouped = (
         " (SM90-SM99)."
     )
 )
+# The grouped NVFP4 quantize kernel runs on SM100-SM110 only, while NVFP4 is also reported
+# available on SM120, so add the arch bound for the grouped NVFP4 dequantize tests.
+nvfp4_grouped_available = nvfp4_available and (10, 0) <= _device_cc < (12, 0)
+reason_for_no_nvfp4_grouped = (
+    reason_for_no_nvfp4
+    if not nvfp4_available
+    else "Grouped NVFP4 quantization is only supported on SM100-SM110."
+)
 
 
 def test_mark_grouped_tensor_supports_plain_tensor():
@@ -1655,6 +1663,106 @@ class TestGroupedTensor:
         fresh_quantized = tex.group_quantize(fresh_input, quantizer, num_tensors, first_dims)
         quantized.rowwise_data.copy_(fresh_quantized.rowwise_data)
         quantized.scale_inv.copy_(fresh_quantized.scale_inv)
+
+        graph.replay()
+        torch.cuda.synchronize()
+
+        expected = tex.group_dequantize(quantized, te.DType.kBFloat16)
+        expected_tensors = expected.split_into_quantized_tensors()
+        static_tensors = static_output.split_into_quantized_tensors()
+        for exp, got in zip(expected_tensors, static_tensors):
+            assert torch.equal(got, exp)
+
+    @staticmethod
+    def _make_grouped_nvfp4_quantizer() -> NVFP4Quantizer:
+        # The grouped NVFP4 quantize kernel requires RHT with post-RHT amax.
+        quantizer = NVFP4Quantizer(
+            rowwise=True,
+            columnwise=False,
+            with_rht=True,
+            with_post_rht_amax=True,
+            with_random_sign_mask=False,
+        )
+        return quantizer
+
+    @pytest.mark.parametrize(
+        "shape",
+        [
+            [(512, 1024), (512, 1024)],
+            [(256, 512), (512, 512), (768, 512)],
+            [(256, 512), (0, 512), (384, 512)],
+        ],
+    )
+    @pytest.mark.parametrize("otype", [te.DType.kBFloat16, te.DType.kFloat32], ids=str)
+    @pytest.mark.skipif(not nvfp4_grouped_available, reason=reason_for_no_nvfp4_grouped)
+    def test_group_dequantize_nvfp4(self, shape: List[Tuple[int, int]], otype: te.DType) -> None:
+        """Grouped NVFP4 dequantization matches per-tensor dequantization bitwise."""
+        num_tensors = len(shape)
+        torch_dtype = torch.bfloat16 if otype == te.DType.kBFloat16 else torch.float32
+
+        input_tensors = [torch.randn(s, dtype=torch.bfloat16, device="cuda") for s in shape]
+        grouped_input = torch.cat(input_tensors, dim=0)
+
+        # The grouped NVFP4 quantizer needs first_dims, so this covers the varying-first-dim
+        # layout; the equal-shape layout is covered by test_dequantize_nvfp4_grouped.cu.
+        quantizer = self._make_grouped_nvfp4_quantizer()
+        first_dims = torch.tensor([s[0] for s in shape], dtype=torch.int64, device="cuda")
+        quantized = tex.group_quantize(grouped_input, quantizer, num_tensors, first_dims)
+
+        dequantized = tex.group_dequantize(quantized, otype)
+
+        assert dequantized.num_tensors == num_tensors
+        assert dequantized.logical_shape == quantized.logical_shape
+
+        # Reference: dequantize each tensor of the same grouped storage separately.
+        dequantized_tensors = dequantized.split_into_quantized_tensors()
+        quantized_tensors = quantized.split_into_quantized_tensors()
+        assert len(dequantized_tensors) == num_tensors
+        for orig, qt, deq in zip(input_tensors, quantized_tensors, dequantized_tensors):
+            assert deq.shape == orig.shape
+            if orig.numel() == 0:
+                continue
+            assert torch.equal(deq, qt.dequantize(dtype=torch_dtype))
+
+    @pytest.mark.skipif(not nvfp4_grouped_available, reason=reason_for_no_nvfp4_grouped)
+    def test_group_dequantize_nvfp4_rejects_swizzled_scales(self) -> None:
+        """Grouped NVFP4 dequantization requires compact scales."""
+        shape = [(256, 512), (256, 512)]
+        grouped_input = torch.randn((512, 512), dtype=torch.bfloat16, device="cuda")
+        quantizer = self._make_grouped_nvfp4_quantizer()
+        quantizer.optimize_for_gemm = True
+        first_dims = torch.tensor([s[0] for s in shape], dtype=torch.int64, device="cuda")
+        quantized = tex.group_quantize(grouped_input, quantizer, len(shape), first_dims)
+        assert quantized._with_gemm_swizzled_scales
+        with pytest.raises(RuntimeError, match="compact format"):
+            tex.group_dequantize(quantized, te.DType.kBFloat16)
+
+    @pytest.mark.skipif(not nvfp4_grouped_available, reason=reason_for_no_nvfp4_grouped)
+    def test_group_dequantize_nvfp4_cudagraph_capturable(self) -> None:
+        """Ensure grouped NVFP4 dequantization is CUDA graph capturable."""
+        num_tensors = 2
+        shape = [(512, 1024) for _ in range(num_tensors)]
+        grouped_input = torch.randn((1024, 1024), dtype=torch.bfloat16, device="cuda")
+
+        quantizer = self._make_grouped_nvfp4_quantizer()
+        first_dims = torch.tensor([s[0] for s in shape], dtype=torch.int64, device="cuda")
+        quantized = tex.group_quantize(grouped_input, quantizer, num_tensors, first_dims)
+
+        # Warmup dequantize.
+        torch.cuda.synchronize()
+        _ = tex.group_dequantize(quantized, te.DType.kBFloat16)
+        torch.cuda.synchronize()
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            static_output = tex.group_dequantize(quantized, te.DType.kBFloat16)
+
+        # Replay with different input data, scales and amax.
+        fresh_input = torch.randn((1024, 1024), dtype=torch.bfloat16, device="cuda") * 4
+        fresh_quantized = tex.group_quantize(fresh_input, quantizer, num_tensors, first_dims)
+        quantized.rowwise_data.copy_(fresh_quantized.rowwise_data)
+        quantized.scale_inv.copy_(fresh_quantized.scale_inv)
+        quantized.amax.copy_(fresh_quantized.amax)
 
         graph.replay()
         torch.cuda.synchronize()

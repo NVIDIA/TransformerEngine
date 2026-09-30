@@ -22,6 +22,7 @@ add_executable(test_operator
                test_fused_group_requantize_mxfp8.cu
                test_dequantize_float8blockwise_grouped.cu
                test_dequantize_nvfp4.cu
+               test_dequantize_nvfp4_grouped.cu
                test_transpose.cu
                test_cast_transpose.cu
                test_cast_transpose_current_scaling.cu
