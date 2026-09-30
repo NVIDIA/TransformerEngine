@@ -121,6 +121,7 @@ if get_device_compute_capability(0) < 100:
 from transformer_engine.jax.flax import _MoEBlock as MoEBlock
 from transformer_engine.jax.moe import (
     _ALIGN_SIZE,
+    WeightGather,
     get_moe_recv_capacity_per_rank,
     moe,
     record_ep_bootstrap_signature_for_moe,
@@ -128,7 +129,6 @@ from transformer_engine.jax.moe import (
 from transformer_engine.jax.ep import ep_bootstrap
 from transformer_engine.common.recipe import MXFP8BlockScaling
 from transformer_engine.jax.sharding import MeshResource, global_shard_guard
-
 
 # -----------------------------------------------------------------------------
 # Mesh / shape config
@@ -359,6 +359,7 @@ def _make_block(
     expert_bias_init=None,
     input_axes=("batch", None, None),
     quantization_recipe=None,
+    weight_gather=WeightGather.full_precision(),
 ):
     kwargs = dict(
         num_experts=NUM_EXPERTS,
@@ -372,6 +373,7 @@ def _make_block(
         dtype=DTYPE,
         input_axes=input_axes,
         quantization_recipe=quantization_recipe,
+        weight_gather=weight_gather,
     )
     # Custom expert_bias_init lets tests inject a non-zero expert_bias without
     # poking variables['params'] post-init.
@@ -561,6 +563,50 @@ _QUANTIZATION_CASES = [
 
 if get_device_compute_capability(0) >= 100:
     _QUANTIZATION_CASES.append(pytest.param("mxfp8", id="mxfp8"))
+
+
+def test_weight_gather_policy_axis_resolution(mesh):
+    """The policy resolves FSDP context only when no axis was supplied."""
+    with pytest.raises(ValueError, match="active MeshResource"):
+        WeightGather.quantized()
+    with _ctx(mesh):
+        assert WeightGather.quantized().axis == FSDP_AXIS
+    with global_shard_guard(MeshResource()):
+        assert WeightGather.quantized(axis="custom").axis == "custom"
+        with pytest.raises(ValueError, match="fsdp_resource"):
+            WeightGather.quantized()
+
+
+def test_quantized_weight_gather_matches_full_precision_gather(mesh):
+    """The FP8 weight gather retains forward and backward MoE semantics."""
+    x = _make_inputs(jax.random.PRNGKey(41))
+    baseline = _make_block(quantization_recipe=MXFP8BlockScaling())
+    with _ctx(mesh):
+        gather_policy = WeightGather.quantized()
+    quantized_ag = _make_block(quantization_recipe=MXFP8BlockScaling(), weight_gather=gather_policy)
+    variables, baseline_out, _ = _init_apply(baseline, mesh, x, jax.random.PRNGKey(42))
+    with _ctx(mesh):
+        x_sh = _shard_inputs(x, mesh)
+        quantized_out, _, _ = jax.jit(quantized_ag.apply)(variables, x_sh)
+        quantized_out.block_until_ready()
+    np.testing.assert_allclose(
+        _to_global_numpy(quantized_out, mesh).astype(np.float32),
+        _to_global_numpy(baseline_out, mesh).astype(np.float32),
+        **FWD_TOLERANCE["mxfp8"],
+    )
+    baseline_grads, baseline_dx = _grad_step(baseline, variables, mesh, x)
+    quantized_grads, quantized_dx = _grad_step(quantized_ag, variables, mesh, x)
+    for name in ("wi", "wo"):
+        np.testing.assert_allclose(
+            _to_global_numpy(_unwrap(quantized_grads["params"][name]), mesh).astype(np.float32),
+            _to_global_numpy(_unwrap(baseline_grads["params"][name]), mesh).astype(np.float32),
+            **GRAD_FFN_TOLERANCE["mxfp8"],
+        )
+    np.testing.assert_allclose(
+        _to_global_numpy(quantized_dx, mesh).astype(np.float32),
+        _to_global_numpy(baseline_dx, mesh).astype(np.float32),
+        **GRAD_FFN_TOLERANCE["mxfp8"],
+    )
 
 
 def _reference_kwargs_from_config(config, params_np):

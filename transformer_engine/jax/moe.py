@@ -32,8 +32,9 @@ stateful recipes follow the same update semantics as the other TE MLPs.
 
 import math
 import warnings
+from dataclasses import dataclass
 from functools import partial
-from typing import Any, Optional, Tuple, Union
+from typing import Any, Literal, Optional, Tuple, Union
 
 import flax.struct
 import jax
@@ -42,17 +43,68 @@ from jax.sharding import NamedSharding, PartitionSpec as P
 
 from . import cpp_extensions as tex
 from .quantize import (
+    GroupedScaledTensor1x,
     GroupedQuantizer,
     QuantizerSet,
+    ScaledTensor2x,
     TensorUsage,
     noop_quantizer_set,
     with_sharding_constraint_by_logical_axes,
 )
+from .quantize.dequantizer import _unswizzle_mxfp8_grouped_scale
+from .cpp_extensions.gemm import swizzled_scale
 from .flax.module import _convert_to_activation_function
 from .router import ScoreFunction, _validate_score_function
-from .sharding import _get_mesh
+from .sharding import _get_mesh, global_mesh_resource
 
-__all__ = ["get_moe_recv_capacity_per_rank", "moe"]
+__all__ = ["WeightGather", "get_moe_recv_capacity_per_rank", "moe"]
+
+
+@dataclass(frozen=True)
+class WeightGather:
+    """How MoE expert weights are gathered across a sharding mesh axis.
+
+    The quantization recipe determines the wire format for ``quantized``;
+    this policy only chooses whether quantization precedes the gather.
+    """
+
+    mode: Literal["full_precision", "quantized"] = "full_precision"
+    axis: Optional[str] = None
+
+    def __post_init__(self):
+        if self.mode not in ("full_precision", "quantized"):
+            raise ValueError(f"Unsupported weight gather mode: {self.mode!r}")
+        if self.mode == "quantized" and not self.axis:
+            raise ValueError("Quantized weight gather requires a mesh axis.")
+        if self.mode == "full_precision" and self.axis is not None:
+            raise ValueError("A weight gather axis is only used in quantized mode.")
+
+    @classmethod
+    def full_precision(cls) -> "WeightGather":
+        """Gather weights before quantization (the default behavior)."""
+        return cls()
+
+    @classmethod
+    def quantized(cls, *, axis: Optional[str] = None) -> "WeightGather":
+        """Quantize local shards before gathering data and scales.
+
+        With no explicit axis, use the active ``MeshResource.fsdp_resource``.
+        Passing an axis bypasses the global resource lookup entirely.
+        """
+        if axis is None:
+            try:
+                axis = global_mesh_resource().fsdp_resource
+            except AssertionError as exc:
+                raise ValueError(
+                    "WeightGather.quantized() requires an active MeshResource "
+                    "with fsdp_resource, or an explicit axis."
+                ) from exc
+            if not axis:
+                raise ValueError(
+                    "WeightGather.quantized() requires MeshResource.fsdp_resource "
+                    "or an explicit axis."
+                )
+        return cls(mode="quantized", axis=axis)
 
 
 # Per-expert dispatch-slot alignment fed to ``tex.ep_prepare`` as
@@ -335,6 +387,111 @@ def _validate_moe_quantizer_sets(
                 )
 
 
+def _gather_quantized_weight(tensor, fsdp_axis: str, fsdp_size: int, sharded_axis: int):
+    """Gather an MXFP8 grouped weight without gathering its BF16 source.
+
+    Grouped tensor data and scales are flat, with scales independently padded
+    and swizzled for each expert. Reassemble each expert in logical order,
+    then pad and swizzle its gathered scales for grouped GEMM.
+    """
+    if isinstance(tensor, ScaledTensor2x):
+        return ScaledTensor2x(
+            _gather_quantized_weight(tensor.rowwise_tensor, fsdp_axis, fsdp_size, sharded_axis),
+            _gather_quantized_weight(tensor.colwise_tensor, fsdp_axis, fsdp_size, sharded_axis),
+        )
+    if not isinstance(tensor, GroupedScaledTensor1x):
+        raise TypeError("Quantized FSDP gather requires grouped MXFP8 weight tensors.")
+
+    local_shape = tensor.original_shape
+    num_experts = local_shape[0]
+    # The T layout swaps the two matrix dimensions within each expert.
+    data_axis = 3 - sharded_axis if tensor.data_layout == "T" else sharded_axis
+    global_shape = list(local_shape)
+    global_shape[data_axis] *= fsdp_size
+    global_shape = tuple(global_shape)
+    data = jax.lax.all_gather(
+        tensor.data.reshape(local_shape), fsdp_axis, axis=data_axis, tiled=True
+    ).reshape(-1)
+
+    local_matrix = local_shape[1:]
+    global_matrix = global_shape[1:]
+    # Scales use a block-wise 2D view. The local shape can include padding
+    # that differs from the padding required after the gather.
+    local_scale_shape = tensor.scaling_mode.get_scale_shape(
+        local_matrix,
+        data_layout=tensor.data_layout,
+        is_colwise=tensor.is_colwise,
+        is_padded=True,
+        flatten_axis=tensor.flatten_axis - 1,
+    )
+    local_unpadded_shape = tensor.scaling_mode.get_scale_shape(
+        local_matrix,
+        data_layout=tensor.data_layout,
+        is_colwise=tensor.is_colwise,
+        is_padded=False,
+        flatten_axis=tensor.flatten_axis - 1,
+    )
+    global_unpadded_shape = tensor.scaling_mode.get_scale_shape(
+        global_matrix,
+        data_layout=tensor.data_layout,
+        is_colwise=tensor.is_colwise,
+        is_padded=False,
+        flatten_axis=tensor.flatten_axis - 1,
+    )
+    global_padded_shape = tensor.scaling_mode.get_scale_shape(
+        global_matrix,
+        data_layout=tensor.data_layout,
+        is_colwise=tensor.is_colwise,
+        is_padded=True,
+        flatten_axis=tensor.flatten_axis - 1,
+    )
+    scale_axis = data_axis - 1
+    local_scale_size = math.prod(local_scale_shape)
+    gathered_scales = []
+    for expert in range(num_experts):
+        local_swizzled = jax.lax.dynamic_slice_in_dim(
+            tensor.scale_inv, expert * local_scale_size, local_scale_size
+        )
+        local_plain = _unswizzle_mxfp8_grouped_scale(
+            local_swizzled, local_scale_shape, tensor.is_colwise
+        )
+        local_plain = local_plain[: local_unpadded_shape[0], : local_unpadded_shape[1]]
+        full_plain = jax.lax.all_gather(local_plain, fsdp_axis, axis=scale_axis, tiled=True)
+        assert full_plain.shape == global_unpadded_shape
+        full_padded = jnp.pad(
+            full_plain,
+            (
+                (0, global_padded_shape[0] - global_unpadded_shape[0]),
+                (0, global_padded_shape[1] - global_unpadded_shape[1]),
+            ),
+        )
+        gathered_scales.append(swizzled_scale(full_padded, 1, tensor.is_colwise).reshape(-1))
+    scale_inv = jnp.concatenate(gathered_scales)
+    expected_scale_size = tensor.scaling_mode.get_grouped_scale_shape(
+        global_shape,
+        num_experts,
+        tensor.is_colwise,
+        is_padded=True,
+        flatten_axis=tensor.flatten_axis,
+    )[0]
+    scale_inv = jnp.pad(scale_inv, (0, expected_scale_size - scale_inv.size))
+    return GroupedScaledTensor1x(
+        data=data,
+        scale_inv=scale_inv,
+        amax=tensor.amax,
+        first_dims=None,
+        last_dims=None,
+        scaling_mode=tensor.scaling_mode,
+        dq_dtype=tensor.dq_dtype,
+        _dq_func=tensor._dq_func,
+        is_colwise=tensor.is_colwise,
+        data_layout=tensor.data_layout,
+        flatten_axis=tensor.flatten_axis,
+        original_shape=global_shape,
+        pre_swizzled=True,
+    )
+
+
 def _ffn_fwd_per_shard(
     recv_tokens_local: jnp.ndarray,
     recv_topk_weights_local: jnp.ndarray,
@@ -349,6 +506,8 @@ def _ffn_fwd_per_shard(
     num_local_experts: int,
     activation_type: str,
     apply_topk_weights_early: bool,
+    weight_gather: WeightGather,
+    fsdp_size: int,
 ):
     """Run the grouped FFN on one shard's EP receive buffer."""
     hidden = recv_tokens_local.shape[-1]
@@ -373,6 +532,8 @@ def _ffn_fwd_per_shard(
         flatten_axis=-1,
     )
     casted_wi = tex.grouped_quantize(wi, fc1_quantizer_set.kernel, flatten_axis=-1)
+    if weight_gather.mode == "quantized":
+        casted_wi = _gather_quantized_weight(casted_wi, weight_gather.axis, fsdp_size, 1)
     combined_out = tex.grouped_gemm(
         casted_sorted_x.get_tensor(usage=TensorUsage.LHS),
         casted_wi.get_tensor(usage=TensorUsage.RHS),
@@ -402,6 +563,8 @@ def _ffn_fwd_per_shard(
         flatten_axis=-1,
     )
     casted_wo = tex.grouped_quantize(wo, fc2_quantizer_set.kernel, flatten_axis=-1)
+    if weight_gather.mode == "quantized":
+        casted_wo = _gather_quantized_weight(casted_wo, weight_gather.axis, fsdp_size, 2)
     expert_outputs = tex.grouped_gemm(
         casted_intermediate.get_tensor(usage=TensorUsage.LHS),
         casted_wo.get_tensor(usage=TensorUsage.RHS),
@@ -568,6 +731,7 @@ def _moe_fwd_rule(
     dtype,
     apply_topk_weights_early,
     recv_capacity_per_rank,
+    weight_gather,
 ):
     """Forward: gate -> topk -> ep_dispatch -> FFN -> ep_combine.
 
@@ -598,6 +762,17 @@ def _moe_fwd_rule(
         num_token_groups=dp_size * num_experts,
         num_expert_groups=num_experts,
     )
+    if weight_gather.mode == "quantized":
+        if weight_gather.axis not in data_parallelism_axes:
+            raise ValueError(
+                "Quantized weight all-gather requires its axis in data_parallelism_axes."
+            )
+        if any(quantizer_set.kernel is None for quantizer_set in quantizer_sets):
+            raise ValueError("Quantized weight all-gather requires MXFP8 kernel quantizers.")
+        if wi.shape[1] % (mesh.shape[weight_gather.axis] * 32) or wo.shape[2] % (
+            mesh.shape[weight_gather.axis] * 32
+        ):
+            raise ValueError("FSDP weight shards must be divisible by the MXFP8 block size 32.")
 
     B, S, H = x.shape
     K = num_experts_per_tok
@@ -751,8 +926,14 @@ def _moe_fwd_rule(
     # ---------------- FFN (per-shard via shard_map) ----------------
     has_bias = wi_0_bias is not None
     kernel_spec = P(ep_axis, None, None)
+    wi_input_spec = (
+        P(ep_axis, weight_gather.axis, None) if weight_gather.mode == "quantized" else kernel_spec
+    )
+    wo_input_spec = (
+        P(ep_axis, None, weight_gather.axis) if weight_gather.mode == "quantized" else kernel_spec
+    )
     bias_spec = P(ep_axis, None)
-    ffn_in_specs = (ep3_spec, ep2_spec, ep2_spec, kernel_spec, kernel_spec)
+    ffn_in_specs = (ep3_spec, ep2_spec, ep2_spec, wi_input_spec, wo_input_spec)
     ffn_in_args = [recv_tokens, recv_topk_weights, token_counts, wi, wo]
     if has_bias:
         ffn_in_specs += (bias_spec, bias_spec, bias_spec)
@@ -795,6 +976,8 @@ def _moe_fwd_rule(
             num_local_experts=num_local_experts,
             activation_type=activation_type,
             apply_topk_weights_early=apply_topk_weights_early,
+            weight_gather=weight_gather,
+            fsdp_size=mesh.shape[weight_gather.axis] if weight_gather.axis is not None else 1,
         )
 
     expert_outputs, ffn_residuals = shard_map(
@@ -893,11 +1076,18 @@ def _moe_bwd_rule(
     dtype,
     apply_topk_weights_early,
     recv_capacity_per_rank,
+    weight_gather,
     residuals,
     cotangents,
 ):
     """Backward mirror of :func:`_moe_fwd_rule`."""
-    del num_groups, group_topk, dtype, recv_capacity_per_rank  # captured / unused in bwd
+    del (
+        num_groups,
+        group_topk,
+        dtype,
+        recv_capacity_per_rank,
+        weight_gather,
+    )
     from jax.experimental.shard_map import shard_map
 
     # total_recv_tokens is a non-differentiable output; its cotangent is unused.
@@ -1140,7 +1330,7 @@ def _moe_bwd_rule(
 # =============================================================================
 
 
-@partial(jax.custom_vjp, nondiff_argnums=tuple(range(9, 27)))
+@partial(jax.custom_vjp, nondiff_argnums=tuple(range(9, 28)))
 def _moe(
     x,
     gate_kernel,
@@ -1169,6 +1359,7 @@ def _moe(
     dtype,
     apply_topk_weights_early,
     recv_capacity_per_rank,
+    weight_gather,
 ):
     primal, _ = _moe_fwd_rule(
         x,
@@ -1198,6 +1389,7 @@ def _moe(
         dtype,
         apply_topk_weights_early,
         recv_capacity_per_rank,
+        weight_gather,
     )
     return primal
 
@@ -1237,6 +1429,7 @@ def moe(
     wo_kernel_axes: Tuple[Optional[str], ...] = ("exp", "mlp", "embed"),
     dtype: jnp.dtype = jnp.float32,
     recv_capacity_per_rank: Optional[int] = None,
+    weight_gather: WeightGather = WeightGather.full_precision(),
 ) -> Tuple[jnp.ndarray, Optional[jnp.ndarray], jnp.ndarray]:
     """Run a full MoE block under a single fused custom_vjp on the TE EP path.
 
@@ -1271,6 +1464,12 @@ def moe(
         (default) reserves the dropless aligned worst case. The value must match
         the capacity used by ``ep_bootstrap``. Overflow is reported through
         ``total_recv_tokens`` when bootstrap used ``drop_on_overflow=True``.
+    weight_gather : WeightGather
+        Expert-weight gather policy. ``WeightGather.full_precision()`` gathers
+        weights before quantization (the default). Use
+        ``WeightGather.quantized()`` to quantize local shards and gather their
+        MXFP8 data and scales along the active ``MeshResource.fsdp_resource``;
+        pass ``axis`` to select a physical mesh axis without consulting it.
 
     Note that the per-expert dispatch-slot alignment is fixed internally
     at 128 tokens (``_ALIGN_SIZE``); see that constant's docstring for
@@ -1305,6 +1504,8 @@ def moe(
     surrounding design rationale.
     """
     score_function = _validate_score_function(score_function)
+    if not isinstance(weight_gather, WeightGather):
+        raise TypeError("weight_gather must be a WeightGather policy.")
 
     # Enforce ((outer_dp..., ep), None, None) on inbound activations. The
     # EP comm groups consecutive global ranks (dp_color = rank // ep_size),
@@ -1362,6 +1563,7 @@ def moe(
         dtype,
         apply_topk_weights_early,
         recv_capacity_per_rank,
+        weight_gather,
     )
     if aux_loss_coeff <= 0.0:
         aux_loss = None
