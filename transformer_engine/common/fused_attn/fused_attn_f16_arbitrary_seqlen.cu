@@ -85,7 +85,6 @@ static F16FwdGraphAndTensors create_graph_f16_fwd(const FusedAttnConfig &cfg) {
   const bool is_ragged_q = cfg.is_ragged_q;
   const bool is_ragged_kv = cfg.is_ragged_kv;
   const bool use_cu_seqlens_directly = cfg.uses_cu_seqlens_directly;
-  const auto cudnn_runtime_version = cudnnGetVersion();
   const bool use_ragged_stats = cfg.uses_ragged_stats;
   const DType ragged_offset_type = cfg.ragged_offset_type_fwd;
   const RaggedOffsetMultipliers offset_mults = cfg.ragged_offset_mults;
@@ -177,10 +176,10 @@ static F16FwdGraphAndTensors create_graph_f16_fwd(const FusedAttnConfig &cfg) {
                                                           ? fe::DiagonalAlignment_t::BOTTOM_RIGHT
                                                           : fe::DiagonalAlignment_t::TOP_LEFT;
   sdpa_options.set_diagonal_alignment(diagonal_alignment);
-  if (cudnn_runtime_version >= 90200 && window_size_left != -1) {
+  if (window_size_left != -1) {
     sdpa_options.set_diagonal_band_left_bound(window_size_left + 1);
   }
-  if (cudnn_runtime_version >= 90600 && window_size_right != -1) {
+  if (window_size_right != -1) {
     sdpa_options.set_diagonal_band_right_bound(window_size_right);
   }
   if (is_causal || is_causal_bottom_right) {
@@ -587,7 +586,6 @@ static F16BwdGraphAndTensors create_graph_f16_bwd(const FusedAttnConfig &cfg) {
   const bool is_dropout = cfg.is_dropout;
   const bool is_ragged_q = cfg.is_ragged_q;
   const bool is_ragged_kv = cfg.is_ragged_kv;
-  const auto cudnn_runtime_version = cudnnGetVersion();
   const bool use_ragged_graph = cfg.uses_ragged_graph;
   const bool use_ragged_stats = cfg.uses_ragged_stats;
   const DType ragged_offset_type = cfg.ragged_offset_type_bwd;
@@ -700,19 +698,17 @@ static F16BwdGraphAndTensors create_graph_f16_bwd(const FusedAttnConfig &cfg) {
                                                           : fe::DiagonalAlignment_t::TOP_LEFT;
   sdpa_backward_options.set_diagonal_alignment(diagonal_alignment);
 
-  if (cudnn_runtime_version >= 90200 && window_size_left != -1) {
+  if (window_size_left != -1) {
     sdpa_backward_options.set_diagonal_band_left_bound(window_size_left + 1);
   }
-  if (cudnn_runtime_version >= 90600 && window_size_right != -1) {
+  if (window_size_right != -1) {
     sdpa_backward_options.set_diagonal_band_right_bound(window_size_right);
   }
   if (is_causal || is_causal_bottom_right) {
     sdpa_backward_options.set_diagonal_band_right_bound(0);
   }
 
-  if (cudnn_runtime_version >= 90000) {
-    sdpa_backward_options.set_deterministic_algorithm(deterministic);
-  }
+  sdpa_backward_options.set_deterministic_algorithm(deterministic);
 
   sdpa_backward_options.set_alibi_mask(is_alibi);
 
