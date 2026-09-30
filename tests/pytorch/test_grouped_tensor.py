@@ -715,24 +715,15 @@ class TestGroupedTensor:
             expected_scales = torch.cat(
                 [t._rowwise_scale_inv.reshape(-1) for t in expected_tensors]
             )
-            assert torch.equal(
-                grouped_output.rowwise_data.view(torch.uint8), expected_data.view(torch.uint8)
-            )
-            assert torch.equal(
-                grouped_output.scale_inv.view(torch.uint8), expected_scales.view(torch.uint8)
-            )
+            assert torch.equal(grouped_output.rowwise_data, expected_data)
+            assert torch.equal(grouped_output.scale_inv, expected_scales)
         if columnwise:
             expected_data = torch.cat([t._columnwise_data.reshape(-1) for t in expected_tensors])
             expected_scales = torch.cat(
                 [t._columnwise_scale_inv.reshape(-1) for t in expected_tensors]
             )
-            assert torch.equal(
-                grouped_output.columnwise_data.view(torch.uint8), expected_data.view(torch.uint8)
-            )
-            assert torch.equal(
-                grouped_output.columnwise_scale_inv.view(torch.uint8),
-                expected_scales.view(torch.uint8),
-            )
+            assert torch.equal(grouped_output.columnwise_data, expected_data)
+            assert torch.equal(grouped_output.columnwise_scale_inv, expected_scales)
 
         if output_dbias:
             expected_dbias = torch.stack([t.sum(dim=0) for t in input_tensors])
