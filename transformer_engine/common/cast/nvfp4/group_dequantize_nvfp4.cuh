@@ -19,6 +19,7 @@
 #include "../../common.h"
 #include "../../util/math.h"
 #include "../../utils.cuh"
+#include "../core/grouped_layout.cuh"
 
 #if FP4_TYPE_SUPPORTED
 #include <cuda_fp4.h>
@@ -40,20 +41,7 @@ __device__ __forceinline__ size_t get_row_tensor_id(const size_t row, const size
   if constexpr (SHAPE_REP == ShapeRepresentation::SAME_BOTH_DIMS) {
     return row / rows_per_tensor;
   } else {
-    // offsets holds num_tensors + 1 element offsets; find the last group that
-    // starts at or before this row.
-    const int64_t row_start = static_cast<int64_t>(row * cols);
-    size_t lo = 0;
-    size_t hi = num_tensors - 1;
-    while (lo < hi) {
-      const size_t mid = (lo + hi + 1) / 2;
-      if (offsets[mid] <= row_start) {
-        lo = mid;
-      } else {
-        hi = mid - 1;
-      }
-    }
-    return lo;
+    return common::find_tensor_from_offsets(offsets, num_tensors, row * cols);
   }
 }
 
@@ -67,7 +55,18 @@ __global__ void __launch_bounds__(512)
                                 const float *const amax, const bool amax_per_tensor,
                                 const size_t num_rows, const size_t cols,
                                 const size_t num_scale_cols, const size_t rows_per_tensor,
-                                const size_t num_tensors, const int64_t *const offsets) {
+                                const size_t num_tensors, const int64_t *const offsets,
+                                const int64_t *const first_dims) {
+  if constexpr (SHAPE_REP == ShapeRepresentation::VARYING_FIRST_DIM) {
+    // The dense scale indexing below needs each tensor's first dimension to be a multiple of
+    // 128. Validate every tensor once, in the first block, as group_quantize_mxfp8.cuh does.
+    if (blockIdx.x == 0) {
+      for (size_t t = threadIdx.x; t < num_tensors; t += blockDim.x) {
+        common::get_tensor_rows_num<SHAPE_REP>(t, num_rows, first_dims, num_tensors);
+      }
+    }
+  }
+
   const size_t thread_idx = blockIdx.x * blockDim.x + threadIdx.x;
   const size_t x = thread_idx % num_scale_cols;
   const size_t y = thread_idx / num_scale_cols;
@@ -142,9 +141,11 @@ inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output,
              amax_numel, " for ", num_tensors, " tensors).");
 
   // The grouped NVFP4 quantizer stacks the groups along the first dimension,
-  // so only a shared last dimension is supported. It also assumes every
-  // group's first dimension is a multiple of 128, which makes the padded
-  // per-tensor scale layout identical to one dense [rows, cols / 16] array.
+  // so only a shared last dimension is supported. Every group's first
+  // dimension must be a multiple of 128, which makes the padded per-tensor
+  // scale layout identical to one dense [rows, cols / 16] array. This is
+  // checked here for equal shapes; for a varying first dimension the kernel
+  // reports it through common::get_tensor_rows_num.
   ShapeRepresentation shape_rep = ShapeRepresentation::SAME_BOTH_DIMS;
   if (input->all_same_shape()) {
     shape_rep = ShapeRepresentation::SAME_BOTH_DIMS;
@@ -169,9 +170,9 @@ inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output,
                "Rows per tensor of a grouped NVFP4 tensor should be divisible by 128, but got ",
                rows_per_tensor, ".");
   } else {
-    NVTE_CHECK(input->tensor_offsets.has_data(),
+    NVTE_CHECK(input->tensor_offsets.has_data() && input->first_dims.has_data(),
                "Grouped NVFP4 dequantization with a varying first dimension requires "
-               "tensor_offsets.");
+               "tensor_offsets and first_dims.");
   }
 
   const size_t num_scale_cols = cols / FP4_BLOCK_SIZE;
@@ -184,6 +185,7 @@ inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output,
   const size_t blocks = DIVUP(total, threads);
   const bool amax_per_tensor = amax_numel == num_tensors && num_tensors > 1;
   const int64_t *const offsets_ptr = reinterpret_cast<const int64_t *>(input->tensor_offsets.dptr);
+  const int64_t *const first_dims_ptr = reinterpret_cast<const int64_t *>(input->first_dims.dptr);
   const fp8e4m3 *const scales_ptr = reinterpret_cast<const fp8e4m3 *>(input->scale_inv.dptr);
   const float *const amax_ptr = reinterpret_cast<const float *>(input->amax.dptr);
 
@@ -194,13 +196,13 @@ inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output,
             <<<blocks, threads, 0, stream>>>(
                 input->data.dptr, reinterpret_cast<OType *>(output->data.dptr), scales_ptr,
                 amax_ptr, amax_per_tensor, num_rows, cols, num_scale_cols, rows_per_tensor,
-                num_tensors, offsets_ptr);
+                num_tensors, offsets_ptr, first_dims_ptr);
       } else {
         group_dequantize_fp4_kernel<OType, ShapeRepresentation::VARYING_FIRST_DIM>
             <<<blocks, threads, 0, stream>>>(
                 input->data.dptr, reinterpret_cast<OType *>(output->data.dptr), scales_ptr,
                 amax_ptr, amax_per_tensor, num_rows, cols, num_scale_cols, rows_per_tensor,
-                num_tensors, offsets_ptr);
+                num_tensors, offsets_ptr, first_dims_ptr);
       });  // NOLINT(*)
   NVTE_CHECK_CUDA(cudaGetLastError());
 #else
