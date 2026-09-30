@@ -48,6 +48,7 @@ from transformer_engine.pytorch import (
 
 # Import utility functions
 from utils import (
+    MegatronTrainingHelper,
     assert_close,
     assert_close_grads,
     dtype_tols,
@@ -1706,6 +1707,10 @@ class TestBasicOps:
             op.weight.copy_(w_test)
             del w_test
             op.weight.main_grad = torch.full_like(op.weight, 0.5, dtype=torch.float32)
+        if accumulate_into_main_grad:
+            MegatronTrainingHelper.init_main_grad_buffers(
+                [op.weight], fill_value=0.5, overwrite_main_grad=False, zero_out_wgrad=True
+            )
         with te.autocast(enabled=quantized_compute, recipe=recipe):
             y_test = forward(x_test)
         y_test.backward(dy_test)
@@ -1723,13 +1728,9 @@ class TestBasicOps:
         torch.testing.assert_close(y_test, y_ref, **tols)
         torch.testing.assert_close(dx_test, x_ref.grad, **tols)
         if accumulate_into_main_grad:
-            if op.weight.grad is not None:
-                torch.testing.assert_close(
-                    op.weight.grad,
-                    torch.zeros_like(op.weight.grad),
-                    rtol=0,
-                    atol=0,
-                )
+            MegatronTrainingHelper.verify_main_grad_accumulation(
+                [op.weight], expected_main_grads=[w_ref.grad + 0.5], **tols
+            )
             dw_test = op.weight.main_grad.to(dtype=torch.float64, device="cpu") - 0.5
         else:
             dw_test = op.weight.grad.to(dtype=torch.float64, device="cpu")
