@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from transformer_engine.pytorch.attention import mla_rope
+from transformer_engine.pytorch.module import LayerNormLinear
 
 
 @pytest.mark.parametrize("nope,rope,vdim", [(64, 32, 64), (48, 32, 64), (64, 48, 64), (64, 32, 48)])
@@ -26,11 +27,9 @@ def test_mla_rope_matches_pytorch(nope, rope, vdim):
     grad_v = torch.randn(s, b, h, vdim, device="cuda")
 
     def run(fmt):
-        # non-leaf copies: the Triton q kernel rotates in place
         q, kv, pos = q_leaf * 1.0, kv_leaf * 1.0, pos_leaf * 1.0
         q_out = mla_rope.apply_mla_rope_q(q, cos, sin, nope, rope, fmt)
         k_out, v_out = mla_rope.apply_mla_rope_kv(kv, pos, cos, sin, nope, rope, vdim, fmt)
-        # fresh grad clones: the Triton q backward modifies its input grad in place
         torch.autograd.backward(
             [q_out, k_out, v_out], [grad_q.clone(), grad_k.clone(), grad_v.clone()]
         )
@@ -66,6 +65,104 @@ def test_mla_rope_matches_pytorch(nope, rope, vdim):
     torch.testing.assert_close(grads_t[0], q_leaf.grad, rtol=1e-5, atol=1e-5)
     torch.testing.assert_close(grads_t[1], kv_leaf.grad, rtol=1e-5, atol=1e-5)
     torch.testing.assert_close(grads_t[2], pos_leaf.grad, rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.parametrize("compiled", [False, True])
+def test_mla_rope_q_preserves_input_and_gradient(compiled):
+    if not mla_rope.HAVE_TRITON:
+        pytest.skip("Triton unavailable")
+    s, b, h, nope, rope = 8, 2, 4, 64, 32
+    cos, sin = mla_rope.build_rope_tables(s, rope, device="cuda")
+    q = torch.randn(s, b, h, nope + rope, device="cuda", requires_grad=True)
+    q_before = q.detach().clone()
+    incoming_grad = torch.randn_like(q)
+    grad_before = incoming_grad.clone()
+    apply_rope = lambda x: mla_rope.apply_mla_rope_q(x, cos, sin, nope, rope)
+    if compiled:
+        apply_rope = torch.compile(apply_rope, fullgraph=True)
+
+    aux = (q * q).sum()
+    rotated = apply_rope(q)
+    assert rotated.data_ptr() != q.data_ptr()
+    torch.autograd.backward((rotated, aux), (incoming_grad, torch.ones_like(aux)))
+
+    q_ref = q_before.requires_grad_()
+    rotated_ref = torch.cat(
+        (q_ref[..., :nope], mla_rope._rotate_interleaved_to_neox(q_ref[..., nope:], cos, sin, 0)),
+        dim=-1,
+    )
+    torch.autograd.backward(
+        (rotated_ref, (q_ref * q_ref).sum()), (grad_before, torch.ones_like(aux))
+    )
+    torch.testing.assert_close(q, q_before)
+    torch.testing.assert_close(incoming_grad, grad_before)
+    torch.testing.assert_close(rotated, rotated_ref)
+    torch.testing.assert_close(q.grad, q_ref.grad)
+
+
+def test_mla_rope_q_in_place_eager():
+    if not mla_rope.HAVE_TRITON:
+        pytest.skip("Triton unavailable")
+    s, b, h, nope, rope = 8, 2, 4, 64, 32
+    cos, sin = mla_rope.build_rope_tables(s, rope, device="cuda")
+    leaf = torch.randn(s, b, h, nope + rope, device="cuda", requires_grad=True)
+    q = (leaf * 1).view(s, b, h, nope + rope)
+    q_before = q.detach().clone()
+    incoming_grad = torch.randn_like(q)
+    grad_before = incoming_grad.clone()
+    rotated = mla_rope.apply_mla_rope_q(q, cos, sin, nope, rope, in_place=True)
+    assert rotated.data_ptr() == q.data_ptr()
+    torch.autograd.backward(rotated, incoming_grad)
+
+    q_ref = q_before.requires_grad_()
+    rotated_ref = torch.cat(
+        (q_ref[..., :nope], mla_rope._rotate_interleaved_to_neox(q_ref[..., nope:], cos, sin, 0)),
+        dim=-1,
+    )
+    torch.autograd.backward(rotated_ref, grad_before)
+    torch.testing.assert_close(rotated, rotated_ref)
+    torch.testing.assert_close(incoming_grad, grad_before)
+    torch.testing.assert_close(leaf.grad, q_ref.grad)
+
+
+def test_mla_rope_q_in_place_rejects_compile():
+    if not mla_rope.HAVE_TRITON:
+        pytest.skip("Triton unavailable")
+    s, b, h, nope, rope = 8, 2, 4, 64, 32
+    cos, sin = mla_rope.build_rope_tables(s, rope, device="cuda")
+    q = torch.randn(s, b, h, nope + rope, device="cuda")
+    compiled = torch.compile(
+        lambda x: mla_rope.apply_mla_rope_q(x, cos, sin, nope, rope, in_place=True),
+        fullgraph=True,
+    )
+    with pytest.raises(RuntimeError, match="in_place=True is not supported under torch.compile"):
+        compiled(q)
+
+
+def test_mla_rope_q_layernormlinear_view():
+    if not mla_rope.HAVE_TRITON:
+        pytest.skip("Triton unavailable")
+    s, b, h, nope, rope = 8, 2, 4, 64, 32
+    cos, sin = mla_rope.build_rope_tables(s, rope, device="cuda")
+    projection = LayerNormLinear(
+        64, h * (nope + rope), normalization="RMSNorm", params_dtype=torch.float32, device="cuda"
+    )
+    x = torch.randn(s, b, 64, device="cuda", requires_grad=True)
+    q = projection(x).view(s, b, h, nope + rope)
+    q_before = q.detach().clone()
+    rotated = mla_rope.apply_mla_rope_q(q, cos, sin, nope, rope)
+    rotated.sum().backward()
+
+    rotated_ref = torch.cat(
+        (
+            q_before[..., :nope],
+            mla_rope._rotate_interleaved_to_neox(q_before[..., nope:], cos, sin, 0),
+        ),
+        dim=-1,
+    )
+    torch.testing.assert_close(q, q_before)
+    torch.testing.assert_close(rotated, rotated_ref)
+    assert x.grad is not None
 
 
 def test_rope_tables_yarn():

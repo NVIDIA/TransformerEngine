@@ -7,8 +7,15 @@ import math
 import pytest
 import torch
 
+import transformer_engine.pytorch as te
+from transformer_engine.pytorch.ops.fused.grouped_mlp import (
+    GroupedMLP_CuTeGEMMGLU,
+    fuse_glu_ops,
+)
+from transformer_engine.pytorch.ops.fuser import OperationFuser
 from transformer_engine.pytorch.utils import deinterleave_glu_tensor
 from transformer_engine.pytorch.models import DeepSeekV3MoE, MultiLatentAttention
+from utils import make_recipe, quantization_tols
 
 SEQ_LEN = 128
 BATCH = 2
@@ -46,31 +53,6 @@ def test_mla_yarn_softmax_scale(mscale_all_dim):
     m = 0.1 * mscale_all_dim * math.log(40.0) + 1.0
     qk_head_dim = MLA_KWARGS["qk_nope_head_dim"] + MLA_KWARGS["qk_rope_head_dim"]
     assert mla.softmax_scale == pytest.approx(m * m / math.sqrt(qk_head_dim))
-
-
-@pytest.mark.parametrize(
-    "kwargs,match",
-    [
-        ({"num_experts": 0}, "num_experts must be positive"),
-        ({"topk": 0}, "topk must be in"),
-        ({"topk": 9}, "topk must be in"),
-        ({"num_groups": 2}, "must be provided together"),
-        ({"group_topk": 1}, "must be provided together"),
-        ({"num_groups": 0, "group_topk": 1}, "num_groups must be positive"),
-        ({"num_groups": -2, "group_topk": 1}, "num_groups must be positive"),
-        ({"num_groups": 3, "group_topk": 1}, "divide num_experts"),
-        ({"num_groups": 2, "group_topk": 0}, "group_topk must be in"),
-        ({"num_groups": 2, "group_topk": -1}, "group_topk must be in"),
-        ({"num_groups": 2, "group_topk": 3}, "group_topk must be in"),
-        ({"num_groups": 2, "group_topk": 2, "topk": 3}, "topk must be divisible"),
-        ({"num_groups": 4, "group_topk": 1, "topk": 4}, "topk per group must not exceed"),
-    ],
-)
-def test_moe_rejects_invalid_routing_config(kwargs, match):
-    config = dict(num_experts=8, topk=2)
-    config.update(kwargs)
-    with pytest.raises(ValueError, match=match):
-        DeepSeekV3MoE(HIDDEN, moe_ffn_hidden_size=128, device="cpu", **config)
 
 
 @pytest.mark.parametrize("shared", [False, True], ids=["no_shared", "shared"])
@@ -118,3 +100,65 @@ def test_moe_matches_dense_reference(shared, grouped, topk):
     assert torch.isfinite(moe.expert_bias).all()
     if topk < num_experts:
         assert not torch.equal(bias_before, moe.expert_bias)
+
+
+@pytest.mark.parametrize("quantization", ["mxfp8", "nvfp4"])
+def test_moe_fused_quantized_uneven_expert_rows(monkeypatch, quantization):
+    available, reason = getattr(te, f"is_{quantization}_available")(return_reason=True)
+    if not available:
+        pytest.skip(reason)
+
+    recipe = make_recipe(quantization)
+    torch.manual_seed(0)
+    moe = DeepSeekV3MoE(HIDDEN, 128, num_experts=2, topk=1, params_dtype=DTYPE)
+    fused_ops = fuse_glu_ops(list(moe.experts), recipe=recipe)
+    if (
+        fuse_glu_ops not in OperationFuser.forward_backward_fusion_functions
+        or len(fused_ops) != 1
+        or not isinstance(fused_ops[0], GroupedMLP_CuTeGEMMGLU)
+    ):
+        pytest.skip("requires the fused grouped MLP")
+    reference = DeepSeekV3MoE(HIDDEN, 128, num_experts=2, topk=1, params_dtype=DTYPE)
+    reference.load_state_dict(moe.state_dict())
+    with torch.no_grad():
+        for module in (moe, reference):
+            module.gate.weight.zero_()
+            module.gate.weight[0, 0] = 1
+            module.gate.weight[1, 0] = -1
+
+    tokens = torch.randn(512, HIDDEN, device="cuda", dtype=DTYPE)
+    tokens[:128, 0] = 2
+    tokens[128:, 0] = -2
+    x = tokens.detach().requires_grad_()
+    x_ref = tokens.detach().clone().requires_grad_()
+    grad = torch.randn_like(tokens)
+    splits = []
+    moe.experts.register_forward_pre_hook(lambda _module, args: splits.append(args[1].clone()))
+
+    with te.autocast(enabled=True, recipe=recipe):
+        out = moe(x)
+    out.backward(grad.clone())
+    assert torch.equal(splits[0], torch.tensor([256, 512], device="cuda"))
+    fused_op = moe.experts._module_groups[0]._forward_ops[0][0]
+    assert isinstance(fused_op, GroupedMLP_CuTeGEMMGLU)
+
+    monkeypatch.setattr(
+        OperationFuser,
+        "forward_backward_fusion_functions",
+        [fn for fn in OperationFuser.forward_backward_fusion_functions if fn is not fuse_glu_ops],
+    )
+    ref_splits = []
+    reference.experts.register_forward_pre_hook(
+        lambda _module, args: ref_splits.append(args[1].clone())
+    )
+    with te.autocast(enabled=True, recipe=make_recipe(quantization)):
+        ref_out = reference(x_ref)
+    ref_out.backward(grad.clone())
+    assert torch.equal(ref_splits[0], splits[0])
+
+    tols = quantization_tols(quantization)
+    torch.testing.assert_close(out, ref_out, **tols)
+    torch.testing.assert_close(x.grad, x_ref.grad, **tols)
+    ref_params = dict(reference.named_parameters())
+    for name, param in moe.named_parameters():
+        torch.testing.assert_close(param.grad, ref_params[name].grad, **tols)

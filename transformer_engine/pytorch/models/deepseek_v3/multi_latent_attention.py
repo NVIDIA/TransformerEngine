@@ -54,8 +54,8 @@ class MultiLatentAttention(torch.nn.Module):
     supports the cuDNN fused attention backend.
 
     RoPE uses the fused MLA kernels from
-    :mod:`transformer_engine.pytorch.attention.mla_rope` (in-place on the query
-    rope slice, single-pass key/value assembly); the rope slice follows
+    :mod:`transformer_engine.pytorch.attention.mla_rope` (single-pass key/value
+    assembly); the rope slice follows
     the DeepSeekV3 checkpoint convention (interleaved weights, NeoX output).
 
     Parameters
@@ -229,7 +229,6 @@ class MultiLatentAttention(torch.nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         attn_mask_type: Optional[str] = None,
-        checkpoint_core_attention: bool = False,
     ) -> torch.Tensor:
         """
         Parameters
@@ -240,8 +239,6 @@ class MultiLatentAttention(torch.nn.Module):
                         boolean mask passed to :class:`DotProductAttention`.
         attn_mask_type : str, optional
                         override of the constructor's mask type.
-        checkpoint_core_attention : bool, default = False
-                                   checkpoint the core attention computation.
         """
         seq_dim = 0 if self.qkv_format == "sbhd" else 1
         seq_len = hidden_states.shape[seq_dim]
@@ -253,6 +250,7 @@ class MultiLatentAttention(torch.nn.Module):
         kv_down = self.kv_down_proj(hidden_states)
         kv_latent, k_pos = torch.split(kv_down, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         if self.kv_up_proj.tp_size > 1:
+            # k_pos is shared across TP ranks; its attention gradients must be summed.
             k_pos = _ReduceGrad.apply(k_pos, self.kv_up_proj.tp_group)
         kv = self.kv_up_proj(kv_latent)
         kv = kv.view(*kv.shape[:-1], heads, self.qk_nope_head_dim + self.v_head_dim)
@@ -279,6 +277,5 @@ class MultiLatentAttention(torch.nn.Module):
             attention_mask=attention_mask,
             qkv_format=self.qkv_format,
             attn_mask_type=attn_mask_type,
-            checkpoint_core_attention=checkpoint_core_attention,
         )
         return self.out_proj(context)

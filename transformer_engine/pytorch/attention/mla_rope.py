@@ -4,7 +4,7 @@
 
 """Fused MLA RoPE kernels (DeepSeekV3-style decoupled RoPE/NoPE).
 
-The query kernel rotates the trailing ``head_dim_rope`` slice in place; the KV
+The query kernel rotates the trailing ``head_dim_rope`` slice; the KV
 kernel builds the key (nope | broadcast-rotated shared rope head) and value
 tensors in a single pass. Falls back to pure PyTorch when Triton is unavailable
 or for the ``bshd`` layout.
@@ -395,13 +395,15 @@ if HAVE_TRITON:
         return tensor.stride(1) if tensor.dim() == 4 else tensor.stride(0)
 
     class _MLARoPEQTriton(torch.autograd.Function):
-        """In-place RoPE on the trailing rope slice of q [s, b, h, nope+rope]."""
+        """RoPE on the trailing rope slice of q [s, b, h, nope+rope]."""
 
         @staticmethod
-        def forward(ctx, q, cos, sin, head_dim_nope, head_dim_rope):
-            """Rotate the rope slice of q in place."""
-            if not q.is_contiguous():
-                q = q.contiguous()
+        def forward(ctx, q, cos, sin, head_dim_nope, head_dim_rope, in_place):
+            """Rotate the rope slice of q."""
+            if in_place:
+                ctx.mark_dirty(q)
+            else:
+                q = q.clone(memory_format=torch.contiguous_format)
             s, b, nheads, _ = q.shape
 
             def grid(meta):
@@ -428,11 +430,9 @@ if HAVE_TRITON:
 
         @staticmethod
         def backward(ctx, dq):
-            """Counter-rotate the rope slice of dq (in place on the copy)."""
+            """Counter-rotate the rope slice of dq."""
             cos, sin = ctx.saved_tensors
-            # attention backward may hand over a strided grad; the kernel
-            # assumes a contiguous [s, b, h, d] layout
-            dq = dq.contiguous()
+            dq = dq.clone(memory_format=torch.contiguous_format)
             s, b, nheads, head_dim_nope, head_dim_rope = ctx.dims
 
             def grid(meta):
@@ -453,7 +453,7 @@ if HAVE_TRITON:
                 0,
                 1,
             )
-            return dq, None, None, None, None
+            return dq, None, None, None, None, None
 
     class _MLARoPEKVTriton(torch.autograd.Function):
         """kv [s, b, h, nope+v] + shared rope head [s, b, 1, rope] -> (k, v)."""
@@ -558,6 +558,7 @@ def apply_mla_rope_q(
     head_dim_nope: int,
     head_dim_rope: int,
     tensor_format: str = "sbhd",
+    in_place: bool = False,
 ) -> torch.Tensor:
     """Rotate the trailing query channels, preserving the non-rotary prefix.
 
@@ -573,6 +574,10 @@ def apply_mla_rope_q(
         Number of non-rotary and rotary channels per head.
     tensor_format : {"sbhd", "bshd"}, default = "sbhd"
         Input and output layout.
+    in_place : bool, default = False
+        Rotate ``q`` in place instead of allocating an output. Requires a contiguous
+        ``sbhd`` input and a power-of-two rotary dimension of at least two.
+        Supported in eager mode only.
 
     Returns
     -------
@@ -585,18 +590,25 @@ def apply_mla_rope_q(
     at least two; other supported layouts/dimensions use PyTorch operations.
     The Triton path computes gradients for ``q`` only; treat the tables as constants.
 
-    The Triton path overwrites a contiguous ``q`` in forward and may overwrite a
-    contiguous incoming gradient in backward. Clone inputs or explicitly supplied
-    backward gradients whose original values must be preserved. Noncontiguous
-    queries and incoming gradients are copied to contiguous storage first.
+    The default path leaves ``q`` and incoming backward gradients unchanged.
+    With ``in_place=True``, ``q`` must have no other consumers that need its
+    original values, and PyTorch's usual in-place autograd rules apply. In
+    particular, views of custom autograd Function outputs cannot be mutated.
     """
-    if (
+    use_triton = (
         HAVE_TRITON
         and tensor_format == "sbhd"
         and head_dim_rope >= 2
         and _is_power_of_two(head_dim_rope)
-    ):
-        return _MLARoPEQTriton.apply(q, cos_table, sin_table, head_dim_nope, head_dim_rope)
+    )
+    if in_place and (not use_triton or not q.is_contiguous()):
+        raise ValueError("in_place=True requires contiguous sbhd input and Triton RoPE support")
+    if in_place and torch.compiler.is_compiling():
+        raise RuntimeError("in_place=True is not supported under torch.compile")
+    if use_triton:
+        return _MLARoPEQTriton.apply(
+            q, cos_table, sin_table, head_dim_nope, head_dim_rope, in_place
+        )
     seq_dim = 0 if tensor_format == "sbhd" else 1
     q_rope = _rotate_interleaved_to_neox(q[..., head_dim_nope:], cos_table, sin_table, seq_dim)
     return torch.cat((q[..., :head_dim_nope], q_rope), dim=-1)

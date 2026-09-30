@@ -154,7 +154,6 @@ class DeepSeekV3Layer(torch.nn.Module):
         self,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        checkpoint_core_attention: bool = False,
         ep_buffer=None,
     ) -> torch.Tensor:
         """
@@ -164,15 +163,12 @@ class DeepSeekV3Layer(torch.nn.Module):
                        input of shape ``[sq, b, h]`` (sbhd) or ``[b, sq, h]`` (bshd).
         attention_mask : torch.Tensor, optional
                         boolean attention mask.
-        checkpoint_core_attention : bool, default = False
-                                   checkpoint the core attention computation.
         ep_buffer : EpBuffer, optional
                    forwarded to :meth:`DeepSeekV3MoE.forward` (MoE layers with EP).
         """
         attention_out = self.self_attention(
             self.input_layernorm(hidden_states),
             attention_mask=attention_mask,
-            checkpoint_core_attention=checkpoint_core_attention,
         )
         hidden_states = self._residual_add(attention_out, hidden_states)
 

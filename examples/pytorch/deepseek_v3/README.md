@@ -24,8 +24,6 @@ All variants run the router backward and clear parameter gradients before each s
 | `te`, mxfp8 (unfused grouped GEMM) | 10.28 ms | 12.10 ms |
 | `te`, mxfp8 fused | 9.52 ms | 10.47 ms |
 
-At the small default dims (4 GPUs): `naive` 11.13 ms, `naive_grouped` 7.04 ms, `te` 6.29 ms.
-
 ### TE throughput (`--dsv3`)
 
 | Precision | 4 GPUs · Mtok/s | 8 GPUs · Mtok/s |
@@ -37,18 +35,7 @@ At the small default dims (4 GPUs): `naive` 11.13 ms, `naive_grouped` 7.04 ms, `
 4 GPUs = 1 node / 32 experts; 8 GPUs = 2 nodes / 64 experts.
 Both nodes share one NVLink domain (MNNVL).
 
-### TE at small default dimensions
-
-1 node, 4 GPUs, hidden 2048, 16 heads, expert FFN 1024, 32 experts.
-
-| Precision | ms/iter | Mtok/s |
-|---|---:|---:|
-| BF16 | 6.29 | 2.61 |
-| MXFP8 | 8.13 | 2.02 |
-| MXFP8 fused | 8.62 | 1.90 |
-
 “Fused” enables `NVTE_CUTEDSL_FUSED_GROUPED_MLP=1`.
-At the small dimensions, MXFP8 fused is slower than BF16.
 
 ## Quick start
 
@@ -135,8 +122,7 @@ positive multiple of four. MXFP8 requires `--impl te`.
 | precision | bf16 params and activations; `--recipe mxfp8` = MXFP8 block scaling for the expert GEMMs and dense projections |
 | timing | fwd + bwd, 5 warmup, 10 timed iterations, no CUDA graphs |
 
-Each iteration uses random data. After timing, the script checks the final output and
-gradients on every rank, including the presence of input and router gradients.
+Each iteration uses random data.
 
 ### D. Profiling with nsys
 
@@ -152,9 +138,7 @@ nsys stats --report cuda_gpu_kern_sum results/deepseek_v3_layer_ep_<hostname>.ns
 The launcher wraps `torchrun`, so all local ranks land in one report. For multi-node runs put
 the same `nsys profile ... -o <path>_%q{SLURM_NODEID}` in front of `torchrun` on each node.
 
-At the small default dims MXFP8 is slower than bf16: the fused path launches many small
-quantization kernels and the layer becomes CPU-launch-bound. Running under `nsys` adds
-about 1.5 ms per iteration to these numbers.
+Running under `nsys` adds about 1.5 ms per iteration to these numbers.
 
 ### E. TE kernel breakdown
 
@@ -224,7 +208,6 @@ variants would need per-expert row counts padded to the MXFP8 block size.
 - `ep_bootstrap` must be given the same recv capacity the layer uses:
   `DeepSeekV3MoE.ep_recv_capacity(ep_size, tokens_per_rank, topk, num_local_experts)`.
 - Per-expert zones in the recv buffer are aligned to 256 rows; the fused grouped MLP requires
-  that alignment and reads a little past the last expert, which is why the layer keeps a
-  zeroed margin after the received tokens.
+  that alignment.
 - The recv and grad buffers are allocated uninitialized: NCCL EP zero-fills the alignment
   padding between experts itself.

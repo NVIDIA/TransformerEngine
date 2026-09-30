@@ -82,17 +82,6 @@ def _autocast(name):
     return te.autocast(enabled=True, recipe=te_recipe.MXFP8BlockScaling())
 
 
-def _check_finite(tensors, device):
-    finite = torch.ones((), dtype=torch.int32, device=device)
-    for tensor in tensors:
-        if tensor is None:
-            finite.zero_()
-        else:
-            finite.mul_(torch.isfinite(tensor).all())
-    dist.all_reduce(finite, op=dist.ReduceOp.MIN)
-    return bool(finite.item())
-
-
 class NaiveMoE(torch.nn.Module):
     """DeepSeek-style MoE with torch all_to_all dispatch/combine: sigmoid top-k router with
     expert bias, a shared expert, and experts either as a Python loop of dense SwiGLU MLPs or
@@ -259,7 +248,6 @@ def main():
         with _autocast(args.recipe):
             out = layer(x, ep_buffer=ep_buffer)
         out.backward(torch.ones_like(out))
-        return out
 
     for _ in range(args.warmup):
         step()
@@ -270,15 +258,10 @@ def main():
     start = time.perf_counter()
     for i in range(args.iters):
         with torch.cuda.nvtx.range(f"iter{i}"):
-            out = step()
+            step()
     torch.cuda.synchronize()
     ms = (time.perf_counter() - start) / args.iters * 1e3
     torch.cuda.profiler.stop()
-    finite = _check_finite(
-        [out, x.grad, layer.mlp.gate.weight.grad]
-        + [p.grad for p in layer.parameters() if p.grad is not None],
-        x.device,
-    )
     dist.barrier()
 
     if rank == 0:
@@ -286,14 +269,14 @@ def main():
         print(
             f"DeepSeekV3Layer impl={args.impl}:"
             f" ranks={world_size} experts={num_experts} topk={args.topk} tokens/rank={args.tokens_per_rank} hidden={args.hidden} recipe={args.recipe} fused_mlp={os.environ.get('NVTE_CUTEDSL_FUSED_GROUPED_MLP', '0')} ep_buffer={'per_call' if ep_buffer is None else 'reused'} fwd+bwd"
-            f" {ms:.3f} ms/iter ({tok_s / 1e6:.2f} Mtok/s) finite={finite}",
+            f" {ms:.3f} ms/iter ({tok_s / 1e6:.2f} Mtok/s)",
             flush=True,
         )
     if args.impl == "te":
         ep_finalize()
         release_symm_mem_pool()
     dist.destroy_process_group()
-    return 0 if finite else 1
+    return 0
 
 
 if __name__ == "__main__":

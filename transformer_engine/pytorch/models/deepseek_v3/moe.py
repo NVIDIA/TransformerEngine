@@ -26,7 +26,6 @@ __all__ = ["DeepSeekV3MoE"]
 
 _EP_ALIGNMENT = 256
 _FUSED_MLP_ROWS = 256
-_FUSED_MLP_MARGIN = 1024
 
 
 def _make_swiglu_mlp(hidden_size, ffn_hidden_size, dtype, device, num_experts=None):
@@ -61,7 +60,8 @@ class DeepSeekV3MoE(torch.nn.Module):
     as a grouped GEMM, with the routing probability applied inside the MLP. An
     optional shared expert (dense SwiGLU MLP) is added to every token. On
     hardware that supports it the expert MLP runs as a single fused
-    grouped-GEMM kernel.
+    grouped-GEMM kernel. MXFP8 and NVFP4 pad each expert's token count to a
+    multiple of 256, including unfused execution.
 
     Without ``ep_group`` all experts live on the local device. With
     ``ep_group`` the experts are split across the group and tokens are
@@ -183,10 +183,9 @@ class DeepSeekV3MoE(torch.nn.Module):
     def ep_recv_capacity(
         ep_size: int, max_tokens_per_rank: int, topk: int, num_local_experts: int
     ) -> int:
-        """Recv rows per rank for ``ep_bootstrap``: worst-case routing plus per-expert
-        alignment padding and the fused grouped MLP margin, rounded to its row multiple."""
+        """Worst-case receive capacity including per-expert alignment padding."""
         cap = ep_size * max_tokens_per_rank * topk
-        cap += num_local_experts * _EP_ALIGNMENT + _FUSED_MLP_MARGIN
+        cap += num_local_experts * _EP_ALIGNMENT
         return -(-cap // _FUSED_MLP_ROWS) * _FUSED_MLP_ROWS
 
     def _route(self, logits: torch.Tensor, topk_indices: Optional[torch.Tensor] = None):
@@ -210,7 +209,10 @@ class DeepSeekV3MoE(torch.nn.Module):
         # Quantized grouped GEMMs need every expert's row count aligned.
         align = 1
         if FP8GlobalStateManager.is_fp8_enabled():
-            align = get_align_size_for_quantization(FP8GlobalStateManager.get_fp8_recipe())
+            recipe = FP8GlobalStateManager.get_fp8_recipe()
+            align = get_align_size_for_quantization(recipe)
+            if recipe.mxfp8() or recipe.nvfp4():
+                align = max(align, _FUSED_MLP_ROWS)
         if align > 1:
             permuted, permuted_probs, row_id_map, pad_offsets, tokens_per_expert = (
                 moe_permute_and_pad_with_probs(tokens, probs, routing_map, tokens_per_expert, align)
@@ -262,10 +264,7 @@ class DeepSeekV3MoE(torch.nn.Module):
         ).scatter_add_(0, flat_idx, torch.ones_like(flat_idx))
         topk_weights = probs.gather(1, topk_idx)
 
-        # NCCL EP zero-fills the alignment padding between experts itself, so
-        # the recv/grad buffers can stay uninitialized. The fused grouped MLP
-        # reads up to a tile past the last expert, so zero a margin there
-        # (offsets stay on device: no host sync).
+        # NCCL EP zero-fills the alignment padding between experts.
         cap = buffer.recv_capacity_per_rank
         recv_tokens, recv_weights, tokens_per_expert = ep_dispatch(
             buffer,
@@ -278,12 +277,6 @@ class DeepSeekV3MoE(torch.nn.Module):
             recv_topk_weights=torch.empty((cap,), dtype=torch.float32, device=tokens.device),
         )
         grad_out = torch.empty((cap, self.hidden_size), dtype=tokens.dtype, device=tokens.device)
-        with torch.no_grad():
-            margin = (
-                torch.arange(_FUSED_MLP_MARGIN, device=tokens.device) + tokens_per_expert.sum()
-            ).clamp_(max=cap - 1)
-            for buf in (recv_tokens, recv_weights, grad_out):
-                buf.detach().index_fill_(0, margin, 0)
         expert_out = self.experts(
             recv_tokens, tokens_per_expert, recv_weights.to(tokens.dtype), tokens_per_expert
         )

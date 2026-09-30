@@ -8,8 +8,8 @@ PyTorch
 
 .. autoapiclass:: transformer_engine.pytorch.autocast(enabled=True, calibrating=False, recipe=None, amax_reduction_group=None)
 
-Standard layers
----------------
+General-purpose layers
+----------------------
 
 .. autoapiclass:: transformer_engine.pytorch.Linear(in_features, out_features, **kwargs)
   :members: forward, set_tensor_parallel_group
@@ -45,8 +45,8 @@ Standard layers
 .. autoapiclass:: transformer_engine.pytorch.TransformerLayer(hidden_size, ffn_hidden_size, num_attention_heads, **kwargs)
   :members: forward, set_context_parallel_group, set_tensor_parallel_group
 
-Model-specific layers
----------------------
+Model layers
+------------
 
 DeepSeek-V3
 ^^^^^^^^^^^
