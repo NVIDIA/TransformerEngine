@@ -159,7 +159,7 @@ def ep_bootstrap(
 
     # Materialize the PG's NCCL comm before borrowing its raw handle.
     dist.barrier(group=ep_group, device_ids=[torch.cuda.current_device()])
-    comm_ptr = ep_group._get_backend(torch.device("cuda"))._comm_ptr()
+    comm_ptr = tex.get_nccl_comm_ptr(ep_group)
 
     tex.ep_initialize(
         int(comm_ptr),
