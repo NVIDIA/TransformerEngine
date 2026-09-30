@@ -20,8 +20,9 @@
 #include "../../common.h"
 #include "../../tvm_ffi_bridge.h"
 #include "../../util/cuda_runtime.h"
-#include "../../utils.cuh"          // ShapeRepresentation
-#include "../core/grouped_tma.cuh"  // dispatch::common::MAX_SUPPORTED_TENSOR_DESCRIPTORS
+#include "../../util/cutedsl_utils.h"
+#include "../../utils.cuh"     // ShapeRepresentation
+#include "../core/common.cuh"  // MAX_SUPPORTED_TENSOR_DESCRIPTORS, grouped_reduce_dbias
 
 namespace transformer_engine {
 namespace cutedsl_backend {
@@ -50,20 +51,30 @@ struct MXFP8GroupQuantConfig {
   bool rowwise;                   // If quantize rowwisely
   bool colwise;                   // If quantize columnwisely
   ShapeRepresentation shape_rep;  // How the member shapes vary across the group
+  bool swizzled;                  // If the scales are written in the GEMM-swizzled layout
+  bool with_dbias;                // If the partial dbias is computed (via the workspace tensor)
+  bool with_dact;                 // If an activation derivative operation is fused
+  bool with_act;                  // If an activation operation is fused
+  Activation activation = Activation::kNone;
   uint32_t sm_arch = static_cast<uint32_t>(cuda::sm_arch());
 
   // Bit layout: dtype [3:0] (4 used/reserved), fp8_dtype [7:4] (4 used/reserved),
-  // flags [9:8] (2 used), shape_rep [11:10] (2 used), and SM architecture [20:12]
-  // (9 used/reserved). Bits [31:21] are unused.
+  // flags [13:8] (6 used), shape_rep [15:14] (2 used), activation [21:16] (6 used/reserved),
+  // and SM architecture [30:22] (9 used/reserved). Bit 31 is unused.
   uint32_t to_id() const {
     static_assert(static_cast<uint32_t>(DType::kNumTypes) <= 16,
                   "DType no longer fits in the 4 bits to_id() gives it.");
     static_assert(ShapeRepresentation::VARYING_BOTH_DIMS < 4,
                   "ShapeRepresentation no longer fits in the 2 bits to_id() gives it.");
+    static_assert(static_cast<uint32_t>(Activation::kNumTypes) <= 64,
+                  "Activation no longer fits in the 6 bits to_id() gives it.");
     NVTE_CHECK(sm_arch < 512, "SM architecture no longer fits in the 9 bits to_id() gives it.");
     return static_cast<uint32_t>(dtype) | (static_cast<uint32_t>(fp8_dtype) << 4) |
            (static_cast<uint32_t>(rowwise) << 8) | (static_cast<uint32_t>(colwise) << 9) |
-           (static_cast<uint32_t>(shape_rep) << 10) | (sm_arch << 12);
+           (static_cast<uint32_t>(swizzled) << 10) | (static_cast<uint32_t>(with_dbias) << 11) |
+           (static_cast<uint32_t>(with_dact) << 12) | (static_cast<uint32_t>(with_act) << 13) |
+           (static_cast<uint32_t>(shape_rep) << 14) | (static_cast<uint32_t>(activation) << 16) |
+           (sm_arch << 22);
   }
 
   std::optional<tvm_ffi_bridge::TVMFFIKernel> get_kernel() const {
@@ -75,8 +86,8 @@ struct MXFP8GroupQuantConfig {
   // compiled and registered on a cache miss.
   std::string to_key() const {
     std::string key;
-    key.reserve(
-        80);  // longest: cutedsl_group_mxfp8_smXXX_BFloat16_Float8E4M3_1_1_varying_first_dim
+    // longest: cutedsl_group_mxfp8_smXXX_BFloat16_Float8E4M3_1_1_varying_first_dim_1_1_1_0_dqgelu
+    key.reserve(96);
     key.append("cutedsl_group_mxfp8_sm")
         .append(std::to_string(sm_arch))
         .append("_")
@@ -88,7 +99,17 @@ struct MXFP8GroupQuantConfig {
         .append("_")
         .append(colwise ? "1" : "0")
         .append("_")
-        .append(shape_rep_to_str(shape_rep));
+        .append(shape_rep_to_str(shape_rep))
+        .append("_")
+        .append(swizzled ? "1" : "0")
+        .append("_")
+        .append(with_dbias ? "1" : "0")
+        .append("_")
+        .append(with_dact ? "1" : "0")
+        .append("_")
+        .append(with_act ? "1" : "0")
+        .append("_")
+        .append(activation_to_str(activation));
     return key;
   }
 
@@ -100,15 +121,16 @@ struct MXFP8GroupQuantConfig {
     tvm::ffi::Any result =
         (*entrypoint)(tvm::ffi::String(fn_name), tvm::ffi::String(to_string(dtype)),
                       tvm::ffi::String(to_string(fp8_dtype)), rowwise, colwise,
-                      tvm::ffi::String(shape_rep_to_str(shape_rep)));
+                      tvm::ffi::String(shape_rep_to_str(shape_rep)), swizzled, with_dbias,
+                      with_dact, with_act, tvm::ffi::String(activation_to_str(activation)));
     return result.try_cast<bool>().value_or(false);
   }
 };
 
-// Descriptor slots per group member: input, rowwise output, colwise output, plus one
-// carrying (rows, cols, base_elts). Mirrors NUM_WORKSPACE_SLOTS / BYTES_PER_TENSORMAP in
-// CuTeDSL/cast/mxfp8/group_quantize_mxfp8.py.
-constexpr size_t kGroupTensorMapSlots = 4;
+// Descriptor slots per group member: input, rowwise output, colwise output, activation input,
+// plus one carrying (rows, cols, base_elts). Mirrors NUM_WORKSPACE_SLOTS / BYTES_PER_TENSORMAP
+// in CuTeDSL/cast/mxfp8/group_quantize_mxfp8.py.
+constexpr size_t kGroupTensorMapSlots = 5;
 constexpr size_t kInt64PerTensorMap = 128 / sizeof(int64_t);
 constexpr size_t kMaxGroupTensors =
     static_cast<size_t>(dispatch::common::MAX_SUPPORTED_TENSOR_DESCRIPTORS);
@@ -151,25 +173,29 @@ inline NVTEBasicTensor make_basic_tensor(void *dptr, DType dtype,
                          nvte_make_shape(shape.data(), shape.size())};
 }
 
-// Signature mirrors mxfp8::group_quantize (input, output, stream) for the subset the
-// CuTeDSL kernel covers. Returns false to fall back to the CUDA kernel.
+// Signature mirrors mxfp8::group_quantize (input, act_input, noop, output, dbias, workspace,
+// stream). Returns false to fall back to the CUDA kernel.
 inline bool mxfp8_group_quantize_cutedsl(const MXFP8GroupQuantConfig &config,
                                          const GroupedTensor *input_tensor,
-                                         GroupedTensor *output_tensor, cudaStream_t stream) {
+                                         const GroupedTensor *act_input_tensor,
+                                         const Tensor *noop_tensor, GroupedTensor *output_tensor,
+                                         GroupedTensor *dbias_tensor, Tensor *workspace_tensor,
+                                         cudaStream_t stream) {
   const size_t num_tensors = input_tensor->num_tensors;
   const size_t first_logical_dim = input_tensor->logical_shape.data[0];
   const size_t last_logical_dim = input_tensor->logical_shape.data[1];
 
   // The kernel is compiled with cute.sym_int32(divisibility=...) on both logical extents,
   // so a violating shape would silently mis-tile rather than fail. These mirror sym_M /
-  // sym_N in CuTeDSL/cast/mxfp8/group_quantize_mxfp8.py -- the DSL kernel's own chunk
-  // height and MXFP8 block size, which it tiles independently of the CUDA kernel's
-  // CastTraits<SHAPE_REP>.
+  // sym_N in CuTeDSL/cast/mxfp8/group_quantize_mxfp8.py -- the DSL kernel's chunk height and
+  // the 16-byte TMA row alignment. The logical shape of VARYING_BOTH_DIMS is [1, total].
   constexpr size_t kChunkDimY = 128;
-  constexpr size_t kScaleDimX = 32;
-  if (first_logical_dim % kChunkDimY != 0 || last_logical_dim % kScaleDimX != 0) {
+  constexpr size_t kLastDimAlignment = 16;
+  const bool first_dim_tiles = config.shape_rep == ShapeRepresentation::VARYING_BOTH_DIMS ||
+                               first_logical_dim % kChunkDimY == 0;
+  if (!first_dim_tiles || last_logical_dim % kLastDimAlignment != 0) {
     maybe_warn_cutedsl_not_chosen("the grouped logical shape is not a multiple of (", kChunkDimY,
-                                  ", ", kScaleDimX, ").");
+                                  ", ", kLastDimAlignment, ").");
     return false;
   }
   // The same extents are sym_int32 in the compiled kernel.
@@ -177,6 +203,15 @@ inline bool mxfp8_group_quantize_cutedsl(const MXFP8GroupQuantConfig &config,
       last_logical_dim > static_cast<size_t>(INT32_MAX)) {
     maybe_warn_cutedsl_not_chosen("the grouped logical shape does not fit in int32.");
     return false;
+  }
+
+  // dbias workspace-size query, mirroring mxfp8::group_quantize: the framework first calls
+  // with an unallocated workspace to learn its shape, allocates it, then calls again to run.
+  // The kernel writes one partial-dbias row per 128-row chunk.
+  if (config.with_dbias && workspace_tensor->data.dptr == nullptr) {
+    workspace_tensor->data.shape = {DIVUP(first_logical_dim, kChunkDimY), last_logical_dim};
+    workspace_tensor->data.dtype = DType::kFloat32;
+    return true;
   }
 
   std::optional<tvm_ffi_bridge::TVMFFIKernel> group_quant_func_opt = config.get_kernel();
@@ -188,7 +223,7 @@ inline bool mxfp8_group_quantize_cutedsl(const MXFP8GroupQuantConfig &config,
   GroupDescriptorWorkspace *const workspace = group_descriptor_workspace_ptr();
 
   // Both output directions are handed to the kernel unconditionally: the compiled
-  // signature has no optional tensors, and building a TMA descriptor needs a real
+  // signature has no optional outputs, and building a TMA descriptor needs a real
   // address for each. The disabled direction is never read or written, so it points at
   // the enabled one instead of at a buffer that would have to be allocated.
   const SimpleTensor &data_row =
@@ -233,46 +268,62 @@ inline bool mxfp8_group_quantize_cutedsl(const MXFP8GroupQuantConfig &config,
                         {num_tensors, kGroupTensorMapSlots, kInt64PerTensorMap}),
       false, device_index);
 
-  // stream is a tvm-ffi opaque "handle"; pass it as void*.
+  // Optional inputs: a wrapper over a null buffer packs as TVM-FFI None.
+  DLTensorWrapper mActInput, mWorkspace;
+  if (config.with_dact) {
+    mActInput = DLTensorWrapper(
+        make_basic_tensor(act_input_tensor->data.dptr, act_input_tensor->dtype(), logical_shape),
+        true, device_index);
+  }
+  if (config.with_dbias) {
+    mWorkspace = DLTensorWrapper(workspace_tensor->data, true, device_index);
+  }
+
+  // The cast-noop flag travels as a raw device pointer (not a tensor): it may be null, and the
+  // kernel null-checks it on device, so one compiled kernel serves both cases.
+  void *noop_ptr = (noop_tensor != nullptr) ? noop_tensor->data.dptr : nullptr;
+
+  // noop and stream are tvm-ffi opaque "handles"; pass them as void*.
   (*group_quant_func_opt)(&mX, &mO_row, &mO_col, &mS_row, &mS_col, &mOffsets, &mFirstDims,
-                          &mLastDims, &mTensormaps, static_cast<void *>(stream));
+                          &mLastDims, &mTensormaps, noop_ptr, &mActInput, &mWorkspace,
+                          static_cast<void *>(stream));
+
+  // Reduce the per-chunk partial dbias per member with the CUDA kernel's reduction.
+  if (config.with_dbias) {
+    const float *workspace_ptr = reinterpret_cast<const float *>(workspace_tensor->data.dptr);
+    TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
+        input_tensor->dtype(), IType,
+        dispatch::common::grouped_reduce_dbias<IType>(
+            config.shape_rep, num_tensors, first_logical_dim, last_logical_dim,
+            reinterpret_cast<const int64_t *>(output_tensor->tensor_offsets.dptr),
+            reinterpret_cast<const int64_t *>(output_tensor->first_dims.dptr),
+            reinterpret_cast<const int64_t *>(output_tensor->last_dims.dptr), dbias_tensor,
+            workspace_ptr, kChunkDimY, stream);)  // NOLINT(*)
+  }
   return true;
 }
 
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &)>
-bool mxfp8_group_quantize_cutedsl(const GroupedTensor *input_tensor, const Tensor *noop_tensor,
-                                  GroupedTensor *output_tensor, const bool use_2d_quantization,
+bool mxfp8_group_quantize_cutedsl(const GroupedTensor *input_tensor,
+                                  const GroupedTensor *act_input_tensor, const Tensor *noop_tensor,
+                                  GroupedTensor *output_tensor, GroupedTensor *dbias_tensor,
+                                  Tensor *workspace_tensor, const bool use_2d_quantization,
                                   cudaStream_t stream) {
   if (!tvm_ffi_bridge::TVMFFICentral::getInstance().get_cutedsl_backend_enabled()) {
     maybe_warn_cutedsl_not_chosen("the CuTeDSL backend is disabled.");
     return false;
   }
-  // The CuTeDSL grouped kernel is cast-only: no dbias, no fused (derivative) activation.
-  if constexpr (IS_DBIAS || IS_DACT || IS_ACT || OP != nullptr) {
-    maybe_warn_cutedsl_not_chosen(
-        "grouped quantization with dbias or a fused activation is not supported.");
+  // TODO(kainingz): port 2D quantization to CuTeDSL
+  if (use_2d_quantization) {
+    maybe_warn_cutedsl_not_chosen("2D quantization is not supported.");
+    return false;
+  }
+  constexpr Activation activation = activation_func_to_enum<ParamOP, OP>();
+  if constexpr (activation == Activation::kUnsupported) {
+    maybe_warn_cutedsl_not_chosen("the fused activation is not supported.");
     return false;
   } else {
-    // TODO(kainingz): port 2D quantization to CuTeDSL
-    if (use_2d_quantization) {
-      maybe_warn_cutedsl_not_chosen("2D quantization is not supported.");
-      return false;
-    }
-    // The kernel takes no noop flag, no amax accumulator, and writes compact scales only.
-    if (noop_tensor != nullptr && noop_tensor->data.dptr != nullptr) {
-      maybe_warn_cutedsl_not_chosen("the cast-noop flag is not supported.");
-      return false;
-    }
-    if (output_tensor->amax.dptr != nullptr) {
-      maybe_warn_cutedsl_not_chosen("amax computation is not supported.");
-      return false;
-    }
-    if (output_tensor->with_gemm_swizzled_scales) {
-      maybe_warn_cutedsl_not_chosen("GEMM-swizzled scales are not supported.");
-      return false;
-    }
-
     // Mirrors the shape-representation selection in mxfp8::group_quantize.
     ShapeRepresentation shape_rep = ShapeRepresentation::SAME_BOTH_DIMS;
     if (output_tensor->all_same_shape()) {
@@ -284,11 +335,9 @@ bool mxfp8_group_quantize_cutedsl(const GroupedTensor *input_tensor, const Tenso
     } else if (output_tensor->varying_both_dims()) {
       shape_rep = ShapeRepresentation::VARYING_BOTH_DIMS;
     }
-    if (shape_rep == ShapeRepresentation::VARYING_BOTH_DIMS) {
-      // The logical shape is [1, total], which is not tileable.
-      maybe_warn_cutedsl_not_chosen("groups with both dimensions varying are not supported.");
-      return false;
-    }
+    const bool is_single_tensor = shape_rep == ShapeRepresentation::SAME_BOTH_DIMS ||
+                                  shape_rep == ShapeRepresentation::VARYING_FIRST_DIM;
+
     // Leave invalid group sizes to mxfp8::group_quantize, which raises a proper error.
     // Every member gets a descriptor slot in the fixed-size workspace, so the CUDA
     // kernel's descriptor limit applies to the single-tensor representations here too.
@@ -312,6 +361,11 @@ bool mxfp8_group_quantize_cutedsl(const GroupedTensor *input_tensor, const Tenso
       maybe_warn_cutedsl_not_chosen("the grouped tensor has no tensor offsets.");
       return false;
     }
+    if (IS_DBIAS && !is_single_tensor) {
+      // mxfp8::group_quantize raises a proper error for this.
+      maybe_warn_cutedsl_not_chosen("dbias is only supported for a common last dimension.");
+      return false;
+    }
 
     const bool rowwise = output_tensor->has_data();
     const bool colwise = output_tensor->has_columnwise_data();
@@ -319,9 +373,18 @@ bool mxfp8_group_quantize_cutedsl(const GroupedTensor *input_tensor, const Tenso
       // mxfp8::group_quantize raises a proper error for this.
       return false;
     }
+    const bool swizzled = output_tensor->with_gemm_swizzled_scales;
+    if (swizzled && colwise && !is_single_tensor) {
+      // For these representations the CUDA kernel adds the tensor base to the colwise
+      // swizzled scale index twice, so leave them to it rather than reproduce that.
+      maybe_warn_cutedsl_not_chosen(
+          "GEMM-swizzled colwise scales are only supported for a common last dimension.");
+      return false;
+    }
 
-    checkCuDriverContext(stream);
     // Sanity checks, mirroring mxfp8::group_quantize
+    checkCuDriverContext(stream);
+    CheckNoopTensor(*noop_tensor, "cast_noop");
     if (rowwise) {
       NVTE_CHECK(output_tensor->scale_inv.dptr != nullptr, "Scaling tensor must be allocated");
     }
@@ -333,13 +396,33 @@ bool mxfp8_group_quantize_cutedsl(const GroupedTensor *input_tensor, const Tenso
                "Number of input and output tensors must be same.");
     NVTE_CHECK(input_tensor->has_data(), "Cannot quantize tensor without rowwise data.");
     NVTE_CHECK(is_fp8_dtype(output_tensor->dtype()), "Output must have FP8 type.");
+    if constexpr (IS_DACT) {
+      NVTE_CHECK(act_input_tensor->has_data(), "Activations tensor must have data.");
+      NVTE_CHECK(input_tensor->num_tensors == act_input_tensor->num_tensors,
+                 "Number of grad and activations tensors must be same.");
+      NVTE_CHECK(input_tensor->dtype() == act_input_tensor->dtype(),
+                 "Grad and activations tensors must have the same type.");
+    }
+    if constexpr (IS_DBIAS) {
+      NVTE_CHECK(dbias_tensor->data.dtype == input_tensor->dtype(),
+                 "DBias must have the same type as input_tensor.");
+      const Shape expected_shape_dbias_tensor = {num_tensors, input_tensor->logical_shape.data[1]};
+      NVTE_CHECK(dbias_tensor->data.shape == expected_shape_dbias_tensor, "Wrong shape of DBias.");
+      NVTE_CHECK(workspace_tensor != nullptr, "Workspace must be a tensor.");
+    }
 
     const MXFP8GroupQuantConfig config{/*dtype=*/input_tensor->dtype(),
                                        /*fp8_dtype=*/output_tensor->dtype(),
                                        /*rowwise=*/rowwise,
                                        /*colwise=*/colwise,
-                                       /*shape_rep=*/shape_rep};
-    return mxfp8_group_quantize_cutedsl(config, input_tensor, output_tensor, stream);
+                                       /*shape_rep=*/shape_rep,
+                                       /*swizzled=*/swizzled,
+                                       /*with_dbias=*/IS_DBIAS,
+                                       /*with_dact=*/IS_DACT,
+                                       /*with_act=*/IS_ACT,
+                                       /*activation=*/activation};
+    return mxfp8_group_quantize_cutedsl(config, input_tensor, act_input_tensor, noop_tensor,
+                                        output_tensor, dbias_tensor, workspace_tensor, stream);
   }
 }
 

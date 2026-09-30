@@ -432,6 +432,9 @@ def quantize_colwise_mxfp8(
     # Write 0 to the scales of columns past N instead of skipping them, so the padding of the
     # scale row is zeroed (mirrors group_quantize_mxfp8.cuh).
     ZERO_OOB_SCALES: cutlass.Constexpr[bool] = False,
+    # Running column sum to continue the dbias accumulation from, so that consecutive tiles add
+    # their elements in row order as the CUDA kernel does. Starts from 0 when None.
+    dbias_init: Optional[Float32] = None,
 ):
     """Quantize one SMEM tile colwise to MXFP8 (per-column 32-elt block scales); returns (amax, dbias_partial)."""
     tidx, _, _ = cute.arch.thread_idx()
@@ -452,7 +455,7 @@ def quantize_colwise_mxfp8(
     FUSE_RELU = cutlass.const_expr(ACTIVATION == "relu") and not WITH_DBIAS
     # Keep input in half precision format if possible
     USE_HALF_PRECISION = is_packed16(DTYPE) and (ACTIVATION is None or FUSE_RELU)
-    dbias_partial = Float32(0.0)
+    dbias_partial = Float32(0.0) if cutlass.const_expr(dbias_init is None) else dbias_init
 
     if cutlass.const_expr(USE_HALF_PRECISION):
         max_scalar = max_scalar_f16 if DTYPE is cutlass.Float16 else max_scalar_bf16
@@ -553,10 +556,11 @@ def quantize_colwise_mxfp8(
             else:
                 mS_col_stage[(0, tidx)] = biased_exp_c
         if cutlass.const_expr(ZERO_OOB_SCALES):
-            # Swizzled layouts pad through derive_swizzled_scale_layout instead.
-            assert not SWIZZLE
             if tile_row_start < M and scale_col >= N:
-                mS_col_stage[(0, tidx)] = Uint8(0).bitcast(Float8E8M0FNU)
+                if cutlass.const_expr(SWIZZLE):
+                    mS_col_stage[(0, tidx % 32, tidx // 32)] = Uint8(0).bitcast(Float8E8M0FNU)
+                else:
+                    mS_col_stage[(0, tidx)] = Uint8(0).bitcast(Float8E8M0FNU)
 
     inv_scale_c = exp2f_rcp(biased_exp_c)
     # cvt.rn.satfinite can be vectorized to convert 2 f32 to 2 fp8 in one instruction
