@@ -5,9 +5,12 @@ and MoE with a shared expert. Routed experts are sharded across GPUs using NCCL 
 
 ## Results
 
-GB300 GPUs, 4096 tokens per rank, top-k 8, 8 local experts per GPU.
+GB200 and GB300 GPUs, 4096 tokens per rank, top-k 8, 8 local experts per GPU.
 Times cover one layer's forward + backward; throughput is global, in millions of tokens/s.
-Every number is the median of three runs (spread within 0.3 ms).
+Every number is the median of three independent runs (spread within 0.3 ms).
+Measured on September 30, 2026, at commit
+[`939c9db3`](https://github.com/NVIDIA/TransformerEngine/commit/939c9db36afcdb2617392bab57b4249c7cd4bcb0),
+before the subsequent merge of `main`.
 See [benchmark configuration](#c-benchmark-configuration) for the full setup.
 
 ### TE vs. plain PyTorch (`--dsv3`)
@@ -16,26 +19,30 @@ Same layer and dimensions, BF16 unless noted.
 
 All variants run the router backward and clear parameter gradients before each step.
 
-| MoE implementation | 4 GPUs (32 experts) | 8 GPUs (64 experts) |
-|---|---:|---:|
-| `naive`: all_to_all + loop over experts | 26.97 ms | 27.44 ms |
-| `naive_grouped`: all_to_all + TE grouped GEMM | 16.48 ms | 16.89 ms |
-| `te`: NCCL EP + grouped GEMM | 12.36 ms | 13.99 ms |
-| `te`, mxfp8 (unfused grouped GEMM) | 10.28 ms | 12.10 ms |
-| `te`, mxfp8 fused | 9.52 ms | 10.47 ms |
+| MoE implementation | 4 GB200 (32 experts) | 4 GB300 (32 experts) | 8 GB300 (64 experts) |
+|---|---:|---:|---:|
+| `naive`: all_to_all + loop over experts | 28.61 ms | 27.21 ms | 27.70 ms |
+| `naive_grouped`: all_to_all + TE grouped GEMM | 17.79 ms | 16.72 ms | 17.13 ms |
+| `te`: NCCL EP + grouped GEMM | 13.68 ms | 12.37 ms | 14.09 ms |
+| `te`, mxfp8 (unfused grouped GEMM) | 10.99 ms | 10.32 ms | 12.11 ms |
+| `te`, mxfp8 fused | 10.11 ms | 9.49 ms | 10.45 ms |
 
 ### TE throughput (`--dsv3`)
 
-| Precision | 4 GPUs · Mtok/s | 8 GPUs · Mtok/s |
-|---|---:|---:|
-| BF16 | 1.33 | 2.34 |
-| MXFP8 | 1.59 | 2.71 |
-| MXFP8 fused | 1.72 | 3.13 |
+| Precision | 4 GB200 · Mtok/s | 4 GB300 · Mtok/s | 8 GB300 · Mtok/s |
+|---|---:|---:|---:|
+| BF16 | 1.20 | 1.33 | 2.32 |
+| MXFP8 | 1.49 | 1.59 | 2.71 |
+| MXFP8 fused | 1.62 | 1.73 | 3.14 |
 
 4 GPUs = 1 node / 32 experts; 8 GPUs = 2 nodes / 64 experts.
 Both nodes share one NVLink domain (MNNVL).
 
 “Fused” enables `NVTE_CUTEDSL_FUSED_GROUPED_MLP=1`.
+
+Paired runs on the same hardware and software compared these results with the previous
+MoE alignment policy and its extra 1024-row EP tail margin. The full-layer TE medians
+decreased by 0.1–0.8% across the nine configurations, with no observed slowdown.
 
 ## Quick start
 
@@ -115,14 +122,17 @@ positive multiple of four. MXFP8 requires `--impl te`.
 
 | Setting | Value |
 |---|---|
-| hardware | GB300 (SM103), 4 GPUs per node, both nodes in one NVLink domain (MNNVL) |
-| software | CUDA 13.3, NCCL 2.30.7, PyTorch 2.13.0a0+9186a08b2c (NGC 26.07 build), cuDNN 9.24, Transformer Engine from this PR |
+| hardware | GB200 (SM100), one node; GB300 (SM103), one or two nodes; 4 GPUs per node, both GB300 nodes in one NVLink domain (MNNVL) |
+| software | CUDA 13.3, NCCL 2.30.7, PyTorch 2.13.0a0+9186a08b2c.nv26.07, cuDNN 9.26, cuDNN Frontend 1.29.0, CUTLASS DSL 4.6.2 |
+| NVIDIA driver | GB200: 580.173.02; GB300: 580.173.10 |
 | `--dsv3` dims | hidden 7168, 128 heads, MLA q_lora 1536 / kv_lora 512 / nope 128 / rope 64 / v 128, expert ffn 2048, shared expert ffn 2048 |
 | MoE | 8 local experts per rank (32 on 4 GPUs, 64 on 8), top-k 8, 4096 tokens per rank |
 | precision | bf16 params and activations; `--recipe mxfp8` = MXFP8 block scaling for the expert GEMMs and dense projections |
-| timing | fwd + bwd, 5 warmup, 10 timed iterations, no CUDA graphs |
+| timing | fwd + bwd, 5 warmup, 10 timed iterations per run, median of 3 runs; wall-clock timing with CUDA synchronization, no CUDA graphs or profiler |
+| environment | `OMP_NUM_THREADS=8`, `NVTE_GROUPED_LINEAR_SINGLE_PARAM=0`, `NVTE_ALLOW_NONDETERMINISTIC_ALGO=1`, `NVTE_FLASH_ATTN_V2=1`, `NVTE_FLASH_ATTN_V3=0`, `NVTE_FLASH_ATTN_V4=0`; EP buffer reused |
 
-Each iteration uses random data.
+Each run reuses a normally distributed random input and backpropagates an all-ones
+output gradient. Parameter and input gradients are cleared before each iteration.
 
 ### D. Profiling with nsys
 
@@ -141,6 +151,9 @@ the same `nsys profile ... -o <path>_%q{SLURM_NODEID}` in front of `torchrun` on
 Running under `nsys` adds about 1.5 ms per iteration to these numbers.
 
 ### E. TE kernel breakdown
+
+The profiles in sections E and F predate the September 30 measurements and were not
+regenerated for the results above.
 
 8 GPUs, `--dsv3`, MXFP8 fused. Per GPU and iteration, from `nsys stats --report cuda_gpu_kern_sum`
 on one node (kernel time 10.8 ms; the iteration takes 10.5 ms without the profiler). Profiling adds
@@ -180,7 +193,7 @@ iteration; the rest is host syncs and launch gaps):
 
 8 GPUs, kernel time 17.1 ms of a 17.2 ms iteration. This profile predates the
 router-gradient fix and omits probability-gradient communication. It is retained for
-reference, not for direct comparison with the current profiles or headline timings.
+reference, not for direct comparison with the other profiles or headline timings.
 
 | Group | ms | Details |
 |---|---:|---|
@@ -193,9 +206,9 @@ reference, not for direct comparison with the current profiles or headline timin
 
 #### Interpreting the current results
 
-In the headline BF16 timings, `naive` -> `naive_grouped` reduces iteration time by
+In the headline GB300 BF16 timings, `naive` -> `naive_grouped` reduces iteration time by
 10.5 ms on 4 GPUs and 10.6 ms on 8 GPUs. `naive_grouped` -> `te` saves another
-4.1 ms and 2.9 ms, respectively. These are end-to-end differences between
+4.4 ms and 3.0 ms, respectively. These are end-to-end differences between
 implementations, not isolated measurements of Python-loop or communication overhead.
 
 NCCL EP dispatch and combine write directly into the expert-major layout and zero-fill
