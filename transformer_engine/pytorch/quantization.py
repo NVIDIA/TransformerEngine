@@ -403,7 +403,9 @@ class QuantizationCalibrationConfig:
             self.transformer_engine_calibration_decay < 0.0
             or self.transformer_engine_calibration_decay > 1.0
         ):
-            raise ValueError("transformer_engine_calibration_decay must be non-negative and <= 1.0.")
+            raise ValueError(
+                "transformer_engine_calibration_decay must be non-negative and <= 1.0."
+            )
 
 
 @dataclass(frozen=True, slots=True)

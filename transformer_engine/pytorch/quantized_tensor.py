@@ -5,7 +5,17 @@
 """Pure Python base classes for quantization."""
 
 from __future__ import annotations
-from typing import TYPE_CHECKING, NamedTuple, Optional, Tuple, Iterable, Any, Dict, Union, get_type_hints
+from typing import (
+    TYPE_CHECKING,
+    NamedTuple,
+    Optional,
+    Tuple,
+    Iterable,
+    Any,
+    Dict,
+    Union,
+    get_type_hints,
+)
 import abc
 import warnings
 import math
@@ -595,9 +605,7 @@ class Quantizer(abc.ABC):
         The calibration config controls how observations update persistent metadata.
         """
 
-    def _get_calibration_metadata_buffers(
-        self, tensor_name: str
-    ) -> Dict[str, torch.Tensor]:
+    def _get_calibration_metadata_buffers(self, tensor_name: str) -> Dict[str, torch.Tensor]:
         """Get module-buffer aliases for this quantizer's calibration state."""
         recipe_type = self._get_compatible_recipe()
         if recipe_type is None:

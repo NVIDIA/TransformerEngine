@@ -768,12 +768,12 @@ def _layernorm_mlp_forward_impl(
                 ),
             )
         if fc1_input_quantizer is not None:
-            fc1_input_calibration_buffers = (
-                fc1_input_quantizer._get_calibration_metadata_buffers("fc1_input")
+            fc1_input_calibration_buffers = fc1_input_quantizer._get_calibration_metadata_buffers(
+                "fc1_input"
             )
         if fc1_weight_quantizer is not None:
-            fc1_weight_calibration_buffers = (
-                fc1_weight_quantizer._get_calibration_metadata_buffers("fc1_weight")
+            fc1_weight_calibration_buffers = fc1_weight_quantizer._get_calibration_metadata_buffers(
+                "fc1_weight"
             )
 
     # ------------------------------------------------------

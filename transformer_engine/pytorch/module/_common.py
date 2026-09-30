@@ -30,15 +30,13 @@ def sum_bias_grad(tensor: torch.Tensor) -> torch.Tensor:
 
 def _is_in_activation_recompute_phase() -> bool:
     """Whether a forward is running during activation recomputation."""
-    from ..distributed import in_fp8_activation_recompute_phase
-
     if in_fp8_activation_recompute_phase():
         return True
     # Special hidden PyTorch AutoGrad identifier for activation recompute.
     try:
         current_graph_task_id = getattr(torch._C, "_current_graph_task_id", None)
         return current_graph_task_id() != -1
-    except Exception:
+    except Exception:  # pylint: disable=broad-exception-caught
         _warn_recompute_phase_detection_unavailable()
         return False
 

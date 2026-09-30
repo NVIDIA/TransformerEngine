@@ -27,11 +27,11 @@ from ..quantized_tensor import (
     QuantizedTensorStorage,
     Quantizer,
 )
+from ..dynamo import register_value_opaque_quantizer
+from ._quantization_helpers import _IdentityFunc, safe_quantized_repr
 
 if TYPE_CHECKING:
     from ..quantization import QuantizationCalibrationConfig
-from ..dynamo import register_value_opaque_quantizer
-from ._quantization_helpers import _IdentityFunc, safe_quantized_repr
 
 aten = torch.ops.aten
 
@@ -378,9 +378,7 @@ class NVFP4Quantizer(Quantizer):
             calibration_config=calibration_config,
         )
 
-    def _get_calibration_metadata_buffers(
-        self, tensor_name: str
-    ) -> Dict[str, torch.Tensor]:
+    def _get_calibration_metadata_buffers(self, tensor_name: str) -> Dict[str, torch.Tensor]:
         """Get module-buffer aliases for NVFP4 calibration state."""
         if self.row_scaled_nvfp4:
             raise NotImplementedError(
