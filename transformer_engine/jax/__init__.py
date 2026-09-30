@@ -45,6 +45,7 @@ from .deepseek_v4 import (
     dsa_indexer_batched,
     dsa_sparse_attention,
     dsa_sparse_attention_batched,
+    hca_compressor_batched,
 )
 
 from ..common.utils import deprecate_wrapper
@@ -63,6 +64,7 @@ __all__ = [
     "dsa_indexer_batched",
     "dsa_sparse_attention",
     "dsa_sparse_attention_batched",
+    "hca_compressor_batched",
     "flax",
     "quantize",
 ]
