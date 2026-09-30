@@ -102,9 +102,10 @@ def test_moe_matches_dense_reference(shared, grouped, topk):
         assert not torch.equal(bias_before, moe.expert_bias)
 
 
-@pytest.mark.parametrize("quantization", ["mxfp8", "nvfp4"])
+@pytest.mark.parametrize("quantization", ["mxfp8", "nvfp4_rht"])
 def test_moe_fused_quantized_uneven_expert_rows(monkeypatch, quantization):
-    available, reason = getattr(te, f"is_{quantization}_available")(return_reason=True)
+    available_fn = te.is_mxfp8_available if quantization == "mxfp8" else te.is_nvfp4_available
+    available, reason = available_fn(return_reason=True)
     if not available:
         pytest.skip(reason)
 
@@ -126,12 +127,12 @@ def test_moe_fused_quantized_uneven_expert_rows(monkeypatch, quantization):
             module.gate.weight[0, 0] = 1
             module.gate.weight[1, 0] = -1
 
-    tokens = torch.randn(512, HIDDEN, device="cuda", dtype=DTYPE)
+    tokens = torch.empty(512, HIDDEN, device="cuda", dtype=DTYPE).uniform_(-0.25, 0.25)
     tokens[:128, 0] = 2
     tokens[128:, 0] = -2
     x = tokens.detach().requires_grad_()
     x_ref = tokens.detach().clone().requires_grad_()
-    grad = torch.randn_like(tokens)
+    grad = torch.empty_like(tokens).uniform_(-0.25, 0.25)
     splits = []
     moe.experts.register_forward_pre_hook(lambda _module, args: splits.append(args[1].clone()))
 
