@@ -5,6 +5,7 @@
 """Internal function used by multiple modules."""
 
 import dataclasses
+import math
 import queue
 from typing import Any, Callable, List, Optional, Sequence, Tuple, Union
 
@@ -90,13 +91,12 @@ def can_reconstruct_wgrad_input_from_original(quantizer) -> bool:
     return target.is_requantization_safe()
 
 
-def update_normalization_output_spec(spec: TensorSpec) -> None:
-    """Match the scale layout emitted by the normalization kernel."""
+def update_nvfp4_direct_output_spec(spec: TensorSpec) -> None:
+    """Match the NVFP4 layout emitted without a post-quantize swizzle."""
     quantizer = spec.quantizer
     if not isinstance(quantizer, NVFP4Quantizer) or not quantizer.optimize_for_gemm:
         return
-    # Normalization does not run the standalone quantizer's post-quantize swizzle.
-    rows, cols = spec.shape
+    rows, cols = math.prod(spec.shape[:-1]), spec.shape[-1]
     if not (10, 0) <= get_device_compute_capability() <= (11, 0):
         spec.with_gemm_swizzled_scales = False
     elif quantizer.with_rht:

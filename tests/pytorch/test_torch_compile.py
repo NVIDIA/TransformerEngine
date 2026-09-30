@@ -1971,21 +1971,45 @@ def test_te_modules_compile(module, fp8_recipe, compile_mode):
     _run_module_compile_test(model, fp8_recipe, compile_mode, 64)
 
 
+_non_2d_cases = [
+    pytest.param((64,), None, id="rank1-bf16"),
+    pytest.param((2, 4, 4, 64), None, id="rank4-bf16"),
+    *(
+        pytest.param(
+            (2, 4, 16, 128) if isinstance(r, recipe.Float8BlockScaling) else (2, 4, 4, 64),
+            r,
+            id=f"rank4-{recipe_id(r)}",
+        )
+        for r in _all_recipes
+    ),
+    *(
+        pytest.param((2, 4, 8, 64), r, id=f"rank4-aligned-{recipe_id(r)}")
+        for r in _all_recipes
+        if isinstance(r, recipe.NVFP4BlockScaling) and not r.disable_rht
+    ),
+]
+
+
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
 @pytest.mark.parametrize("compile_mode", _compile_modes)
 @pytest.mark.parametrize("module", _LINEAR_MODULES)
-@pytest.mark.parametrize(
-    "input_shape",
-    [(64,), (2, 4, 4, 64)],
-    ids=["rank1", "rank4"],
-)
-def test_te_modules_compile_non_2d_input(input_shape, module, compile_mode):
+@pytest.mark.parametrize("input_shape, fp8_recipe", _non_2d_cases)
+def test_te_modules_compile_non_2d_input(input_shape, fp8_recipe, module, compile_mode):
     """Compiled modules preserve non-matrix activation shapes and gradients."""
+    if module == "LayerNormMLP" and getattr(fp8_recipe, "backward_override", None) is not None:
+        pytest.skip("LayerNormMLP does not support backward_override, including in eager mode")
     dtype = torch.bfloat16
-    model = _make_linear_module(module, dtype=dtype)
+    if isinstance(fp8_recipe, recipe.Float8BlockScaling):
+        out_features = 256 if module == "LayerNormMLP" else 128
+        model = getattr(te, module)(128, out_features, params_dtype=dtype, device="cuda")
+    else:
+        model = _make_linear_module(module, dtype=dtype)
 
     def fn(inp):
-        return model(inp)
+        if fp8_recipe is None:
+            return model(inp)
+        with te.autocast(recipe=fp8_recipe):
+            return model(inp)
 
     torch._dynamo.reset()
     if compile_mode == "reduce-overhead":

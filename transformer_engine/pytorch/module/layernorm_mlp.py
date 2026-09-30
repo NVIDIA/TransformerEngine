@@ -78,7 +78,7 @@ from ._common import (
     compile_unsupported_quantizer_reason,
     sum_bias_grad,
     apply_normalization,
-    update_normalization_output_spec,
+    update_nvfp4_direct_output_spec,
     check_fp8_reduce_and_update,
     fake_workspace_valid,
     set_quantizer_amax_reduction_group,
@@ -2188,7 +2188,7 @@ def _layernorm_mlp_forward_fake(
         device=device,
     )
     if with_quantized_norm:
-        update_normalization_output_spec(ln_out)
+        update_nvfp4_direct_output_spec(ln_out)
     if args.sequence_parallel and fp8_or_debug:
         args.fc1_input_quantizer.set_usage(rowwise=True, columnwise=False)
     ln_out_return_is_total = args.sequence_parallel and args.return_layernorm_output_gathered
@@ -2296,6 +2296,14 @@ def _layernorm_mlp_forward_fake(
         quantizer=args.fc2_input_quantizer if fp8_or_debug else None,
         device=device,
     )
+    if (
+        args.fp8
+        and not args.debug
+        and not gemm_gelu_fusion
+        and not args.recipe_float8_block_scaling
+        and not args.recipe_custom
+    ):
+        update_nvfp4_direct_output_spec(act_out)
     if args.fc2_output_quantizer is not None:
         args.fc2_output_quantizer.set_usage(rowwise=True, columnwise=False)
 
