@@ -456,9 +456,7 @@ def test_scale_buffer_info_selects_recipe_metadata(
 def test_row_scaled_nvfp4_calibration_and_metadata_buffering_are_unsupported():
     quantizer = _make_test_quantizer(NVFP4Quantizer)
     quantizer.row_scaled_nvfp4 = True
-    tensor = _make_test_quantized_storage(
-        _amax_rowwise=torch.tensor([1344.0], dtype=torch.float32)
-    )
+    tensor = _make_test_quantized_storage(_amax_rowwise=torch.tensor([1344.0], dtype=torch.float32))
 
     with pytest.raises(NotImplementedError, match="Row-wise NVFP4 calibration"):
         quantizer.calibrate(tensor, calibration_config=DEFAULT_CALIBRATION_CONFIG)
@@ -582,9 +580,7 @@ def test_grouped_calibration_applies_decay_only_to_activations():
         [_make_test_quantized_storage(_scale_inv=torch.tensor([1.0]))],
         [input_quantizer],
         [weight_quantizer],
-        calibration_config=QuantizationCalibrationConfig(
-            transformer_engine_calibration_decay=0.5
-        ),
+        calibration_config=QuantizationCalibrationConfig(transformer_engine_calibration_decay=0.5),
     )
 
     torch.testing.assert_close(input_quantizer._calibration_state["scale_inv"], torch.tensor([2.0]))
@@ -640,9 +636,7 @@ def test_activation_scale_buffer_uses_decaying_maximum(observed_scale, expected_
     quantizer._calibration_state = {"scale_inv": initial_buffer}
     quantizer.calibrate(
         _make_test_quantized_storage(_scale_inv=torch.tensor([observed_scale])),
-        calibration_config=QuantizationCalibrationConfig(
-            transformer_engine_calibration_decay=0.5
-        ),
+        calibration_config=QuantizationCalibrationConfig(transformer_engine_calibration_decay=0.5),
     )
     buffers = quantizer._get_calibration_metadata_buffers("fc1_input")
     value = buffers[name]

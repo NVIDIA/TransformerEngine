@@ -438,9 +438,7 @@ class DebugQuantizer(Quantizer):
     ):
         """Delegate calibration to the wrapped quantizer."""
         if self.parent_quantizer is None:
-            raise RuntimeError(
-                "[NVTORCH-INSPECT ERROR] Calibration requires a parent quantizer"
-            )
+            raise RuntimeError("[NVTORCH-INSPECT ERROR] Calibration requires a parent quantizer")
         return self.parent_quantizer.calibrate(
             tensor,
             calibration_config=calibration_config,
