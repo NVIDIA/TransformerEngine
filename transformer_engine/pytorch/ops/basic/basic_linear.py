@@ -65,6 +65,7 @@ class BasicLinearFwdArgs:
     grad_input_quantizer: Optional[Quantizer]
     tensor_parallel_mode: Optional[str]
     tensor_parallel_group: Optional[torch.distributed.ProcessGroup]
+    tensor_parallel_size: int
     sequence_parallel: bool
     bias: Optional[torch.Tensor] = None
 
@@ -86,6 +87,7 @@ class BasicLinearBwdArgs:
     grad_input_quantizer: Optional[Quantizer]
     tensor_parallel_mode: Optional[str]
     tensor_parallel_group: Optional[torch.distributed.ProcessGroup]
+    tensor_parallel_size: int
     sequence_parallel: bool
     grad_weight: Optional[torch.Tensor]
     accumulate_into_grad_weight: bool
@@ -1123,6 +1125,7 @@ class BasicLinear(BasicOperation):
             grad_input_quantizer=prev_op_grad_output_quantizer,
             tensor_parallel_mode=self.tensor_parallel_mode,
             tensor_parallel_group=self.tensor_parallel_group,
+            tensor_parallel_size=self.tensor_parallel_size,
             sequence_parallel=self.sequence_parallel,
         )
 
@@ -1161,11 +1164,10 @@ class BasicLinear(BasicOperation):
         shape = list(args.input_.shape)
         shape[-1] = args.weight.shape[0]
         if args.sequence_parallel:
-            group_size = torch.distributed.get_world_size(args.tensor_parallel_group)
             if args.tensor_parallel_mode == "column":
-                shape[0] *= group_size
+                shape[0] *= args.tensor_parallel_size
             elif args.tensor_parallel_mode == "row":
-                shape[0] //= group_size
+                shape[0] //= args.tensor_parallel_size
         output = TensorSpec(
             shape=tuple(shape),
             dtype=args.dtype,
@@ -1239,6 +1241,7 @@ class BasicLinear(BasicOperation):
             grad_input_quantizer=ctx.grad_input_quantizer,
             tensor_parallel_mode=self.tensor_parallel_mode,
             tensor_parallel_group=self.tensor_parallel_group,
+            tensor_parallel_size=self.tensor_parallel_size,
             sequence_parallel=self.sequence_parallel,
             grad_weight=grad_weight,
             accumulate_into_grad_weight=accumulate_into_grad_weight,
@@ -1278,11 +1281,10 @@ class BasicLinear(BasicOperation):
             shape = list(args.grad_output.shape)
             shape[-1] = args.weight.shape[-1]
             if args.sequence_parallel:
-                group_size = torch.distributed.get_world_size(args.tensor_parallel_group)
                 if args.tensor_parallel_mode == "column":
-                    shape[0] //= group_size
+                    shape[0] //= args.tensor_parallel_size
                 elif args.tensor_parallel_mode == "row":
-                    shape[0] *= group_size
+                    shape[0] *= args.tensor_parallel_size
             dx = TensorSpec(
                 shape=tuple(shape),
                 dtype=args.dtype,
