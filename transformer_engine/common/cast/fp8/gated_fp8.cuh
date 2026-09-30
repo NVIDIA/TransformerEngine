@@ -17,6 +17,7 @@
 #include <transformer_engine/transformer_engine.h>
 
 #include "../../common.h"
+#include "../../util/cuda_runtime.h"
 #include "../../util/math.h"
 #include "../../util/ptx.cuh"
 #include "../../util/vectorized_pointwise.h"
@@ -41,6 +42,9 @@ constexpr size_t SHMEM_DIM_X = BUFFER_DIM_X;  // 128
 constexpr size_t BUFFER_STAGES_NUM = BUFFER_DIM_Y / THREADS_PER_CHUNK_Y;  //  8 =  32 / 4
 constexpr size_t ITERATIONS = CHUNK_DIM_Y / BUFFER_DIM_Y;                 //  4 = 128 / 32
 static_assert(ITERATIONS >= 1);
+
+// Static shared memory of cast_fp8_gated_kernel (one mbarrier per iteration)
+constexpr size_t STATIC_SHMEM_SIZE = ITERATIONS * sizeof(uint64_t);
 
 template <bool IS_BWD, typename ParamOP, float (*ActOP)(float, const ParamOP &),
           float (*DActOP)(float, const ParamOP &), typename IType, typename OType>
@@ -279,6 +283,33 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 }
 }  // namespace kernel
 
+// Dynamic shared memory requested by cast_fp8_gated_kernel. Must match the
+// buffer layout inside the kernel.
+inline size_t cast_gated_tma_dynamic_shmem_size(const bool is_bwd, const DType itype,
+                                                const DType otype) {
+  using namespace kernel;
+  const size_t buff_elems_total = BUFFERS_NUM * SHMEM_DIM_Y * SHMEM_DIM_X;
+  const size_t buff_size_aligned_in =
+      DIVUP_TO_MULTIPLE(buff_elems_total * typeToNumBits(itype) / 8, TMA_SHMEM_ALIGNMENT);
+  const size_t buff_size_aligned_out =
+      DIVUP_TO_MULTIPLE(buff_elems_total * typeToNumBits(otype) / 8, TMA_SHMEM_ALIGNMENT);
+  const size_t grad_mem = (is_bwd ? buff_size_aligned_in : 0);
+  const size_t in_act_mem = buff_size_aligned_in;
+  const size_t in_gate_mem = buff_size_aligned_in;
+  const size_t out_act_mem = buff_size_aligned_out;
+  const size_t out_gate_mem = buff_size_aligned_out;
+  return grad_mem + (in_act_mem + in_gate_mem) + (out_act_mem + out_gate_mem) + TMA_SHMEM_ALIGNMENT;
+}
+
+// Whether cast_fp8_gated_kernel fits in the shared memory of the current device.
+// Devices with compute capability 10.0+ differ in shared memory per block
+// (e.g. SM 12.0 has much less than SM 10.0), so FP32 configurations may not fit.
+inline bool cast_gated_tma_fits_device(const bool is_bwd, const DType itype, const DType otype) {
+  const size_t required =
+      cast_gated_tma_dynamic_shmem_size(is_bwd, itype, otype) + kernel::STATIC_SHMEM_SIZE;
+  return required <= cuda::max_shared_memory_per_block_optin();
+}
+
 template <bool IS_BWD, typename ParamOP, float (*ActOP)(float, const ParamOP &),
           float (*DActOP)(float, const ParamOP &)>
 void cast_gated_tma(const Tensor &gated_input, const Tensor &grad, Tensor *output, ParamOP &p,
@@ -329,19 +360,8 @@ void cast_gated_tma(const Tensor &gated_input, const Tensor &grad, Tensor *outpu
                                SHMEM_DIM_X, tensor_stride_elems, cols,
                                typeToNumBits(output->dtype()));
 
-          const size_t buff_elems_total = BUFFERS_NUM * SHMEM_DIM_Y * SHMEM_DIM_X;
-          const size_t buff_size_aligned_in =
-              DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(IType), TMA_SHMEM_ALIGNMENT);
-          const size_t buff_size_aligned_out =
-              DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(OType), TMA_SHMEM_ALIGNMENT);
-          const size_t grad_mem = (IS_BWD ? buff_size_aligned_in : 0);
-          const size_t in_act_mem = buff_size_aligned_in;
-          const size_t in_gate_mem = buff_size_aligned_in;
-          const size_t out_act_mem = buff_size_aligned_out;
-          const size_t out_gate_mem = buff_size_aligned_out;
-
-          const size_t shmem_size = grad_mem + (in_act_mem + in_gate_mem) +
-                                    (out_act_mem + out_gate_mem) + TMA_SHMEM_ALIGNMENT;
+          const size_t shmem_size =
+              cast_gated_tma_dynamic_shmem_size(IS_BWD, gated_input.dtype(), output->dtype());
 
           auto kernel = cast_fp8_gated_kernel<IS_BWD, ParamOP, ActOP, DActOP, IType, OType>;
           NVTE_CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,

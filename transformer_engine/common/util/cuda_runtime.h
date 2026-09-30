@@ -38,6 +38,18 @@ int sm_arch(int device_id = -1);
  */
 int sm_count(int device_id = -1);
 
+/* \brief Maximum shared memory per block available with opt-in
+ *
+ * This is the upper bound for the static plus dynamic shared memory
+ * of a single thread block, after raising the kernel's
+ * cudaFuncAttributeMaxDynamicSharedMemorySize attribute.
+ *
+ * \param[in] device_id CUDA device (default is current device)
+ *
+ * \return Shared memory size in bytes
+ */
+size_t max_shared_memory_per_block_optin(int device_id = -1);
+
 /* \brief Minimum and maximum stream priorities supported on device
  *
  * \param[in] device_id CUDA device (default is current device)
