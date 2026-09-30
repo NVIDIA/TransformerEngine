@@ -471,14 +471,22 @@ def test_row_scaled_nvfp4_calibration_and_metadata_buffering_are_unsupported():
         quantizer._get_calibration_metadata_buffers("input")
 
 
-@pytest.mark.parametrize("recipe", ("mxfp8", "fp8_block_scaling"))
-def test_scale_buffer_info_skips_non_global_scaling_recipes(recipe):
+def test_mxfp8_calibration_skips_non_global_scaling_metadata():
     tensor = SimpleNamespace(_rowwise_scale_inv=torch.ones(2, 2))
-    quantizer_cls = MXFP8Quantizer if recipe == "mxfp8" else Float8BlockQuantizer
-    quantizer = _make_test_quantizer(quantizer_cls)
+    quantizer = _make_test_quantizer(MXFP8Quantizer)
 
     quantizer.calibrate(tensor, calibration_config=DEFAULT_CALIBRATION_CONFIG)
     assert not quantizer._get_calibration_metadata_buffers("input")
+
+
+def test_float8_blockwise_calibration_is_unsupported():
+    quantizer = _make_test_quantizer(Float8BlockQuantizer)
+
+    with pytest.raises(NotImplementedError, match="does not support calibration"):
+        quantizer.calibrate(
+            torch.ones(1),
+            calibration_config=DEFAULT_CALIBRATION_CONFIG,
+        )
 
 
 def test_custom_quantizer_defaults_to_no_calibration_metadata():
@@ -487,15 +495,17 @@ def test_custom_quantizer_defaults_to_no_calibration_metadata():
     assert not quantizer._get_calibration_metadata_buffers("input")
 
 
-def test_hybrid_quantizer_calibration_is_noop():
+def test_hybrid_quantizer_calibration_is_unsupported():
     quantizer = HybridQuantizer(
         rowwise_quantizer=IdentityQuantizer(),
         columnwise_quantizer=IdentityQuantizer(),
     )
 
-    quantizer.calibrate(torch.ones(1), calibration_config=DEFAULT_CALIBRATION_CONFIG)
-
-    assert not quantizer._calibration_state
+    with pytest.raises(NotImplementedError, match="calibrate\\(\\) is not supported"):
+        quantizer.calibrate(
+            torch.ones(1),
+            calibration_config=DEFAULT_CALIBRATION_CONFIG,
+        )
 
 
 def test_quantizer_calibration_state_is_keyed_by_quantized_metadata():
@@ -642,7 +652,7 @@ def test_activation_scale_buffer_uses_decaying_maximum(observed_scale, expected_
     assert value is quantizer._calibration_state["scale_inv"]
 
 
-def test_zero_decay_keeps_observed_metadata_reference():
+def test_zero_decay_stores_sanitized_metadata_copy():
     observed_scale = torch.tensor([2.0])
     quantizer = _make_test_quantizer(Float8CurrentScalingQuantizer)
 
@@ -652,7 +662,8 @@ def test_zero_decay_keeps_observed_metadata_reference():
     )
 
     calibrated_scale = quantizer._calibration_state["scale_inv"]
-    assert calibrated_scale.data_ptr() == observed_scale.data_ptr()
+    torch.testing.assert_close(calibrated_scale, observed_scale)
+    assert calibrated_scale.data_ptr() != observed_scale.data_ptr()
 
 
 def test_decaying_calibration_rejects_metadata_shape_change():
@@ -668,10 +679,17 @@ def test_decaying_calibration_rejects_metadata_shape_change():
         )
 
 
-@pytest.mark.parametrize("transformer_engine_calibration_decay", (0.0, 0.5))
-@pytest.mark.parametrize("initial_scale", (None, 4.0))
-def test_nan_activation_scale_does_not_update_buffer(
-    transformer_engine_calibration_decay, initial_scale
+@pytest.mark.parametrize(
+    ("transformer_engine_calibration_decay", "initial_scale", "expected_scale"),
+    (
+        (0.0, None, 0.0),
+        (0.0, 4.0, 0.0),
+        (0.5, None, 0.0),
+        (0.5, 4.0, 4.0),
+    ),
+)
+def test_nan_activation_scale_is_sanitized_before_export(
+    transformer_engine_calibration_decay, initial_scale, expected_scale
 ):
     quantizer = _make_test_quantizer(Float8CurrentScalingQuantizer)
     if initial_scale is not None:
@@ -685,12 +703,8 @@ def test_nan_activation_scale_does_not_update_buffer(
     )
     result = quantizer._get_calibration_metadata_buffers("fc1_input")
 
-    if initial_scale is None:
-        assert not result
-        assert not quantizer._calibration_state
-    else:
-        value = result["fc1_input_scale_inv_float8currentscaling_te_ptq_calibrated"]
-        torch.testing.assert_close(value, torch.tensor([initial_scale]))
+    value = result["fc1_input_scale_inv_float8currentscaling_te_ptq_calibrated"]
+    torch.testing.assert_close(value, torch.tensor([expected_scale]))
 
 
 def test_current_scaling_calibrates_from_high_precision_tensor():

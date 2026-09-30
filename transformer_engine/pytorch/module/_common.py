@@ -6,9 +6,9 @@
 
 import dataclasses
 import functools
-import inspect
 import queue
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+import warnings
+from typing import Any, Callable, List, Optional, Tuple, Union
 
 import torch
 
@@ -28,18 +28,6 @@ def sum_bias_grad(tensor: torch.Tensor) -> torch.Tensor:
     return tensor.sum(dim=tuple(range(tensor.ndim - 1)))
 
 
-@functools.lru_cache(maxsize=None)
-def _supports_calibration_decay(quantizer_type: type) -> bool:
-    """Whether a quantizer's calibrate override accepts calibration_decay."""
-    try:
-        parameters = inspect.signature(quantizer_type.calibrate).parameters
-    except (TypeError, ValueError):
-        return False
-    return "calibration_decay" in parameters or any(
-        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
-    )
-
-
 def _is_in_activation_recompute_phase() -> bool:
     """Whether a forward is running during activation recomputation."""
     from ..distributed import in_fp8_activation_recompute_phase
@@ -47,28 +35,23 @@ def _is_in_activation_recompute_phase() -> bool:
     if in_fp8_activation_recompute_phase():
         return True
     # Special hidden PyTorch AutoGrad identifier for activation recompute.
-    current_graph_task_id = getattr(torch._C, "_current_graph_task_id", None)
-    return current_graph_task_id is not None and current_graph_task_id() != -1
+    try:
+        current_graph_task_id = getattr(torch._C, "_current_graph_task_id", None)
+        return current_graph_task_id() != -1
+    except Exception:
+        _warn_recompute_phase_detection_unavailable()
+        return False
 
 
-def _resolve_calibration_quantizer(tensor: Any, quantizer: Any) -> Any:
-    """Get the quantizer that owns calibration state for a tensor."""
-    quantizer = getattr(tensor, "_quantizer", None) or quantizer
-    return getattr(quantizer, "parent_quantizer", quantizer)
-
-
-def _get_calibration_metadata_buffers(tensor_name: str, quantizer: Any) -> Dict[str, torch.Tensor]:
-    """Get checkpoint-buffer aliases from quantizer calibration state."""
-    if quantizer is None:
-        return {}
-    recipe = quantizer.get_quantization_recipe_name()
-    if not recipe:
-        return {}
-    return {
-        # Standard naming for PTQ calibration data.
-        f"{tensor_name}_tensor_{metadata_name}_{recipe}_te_ptq_calibrated": value
-        for metadata_name, value in quantizer._calibration_state.items()
-    }
+@functools.lru_cache(maxsize=1)
+def _warn_recompute_phase_detection_unavailable() -> None:
+    """Warn once when PyTorch activation-recompute detection is unavailable."""
+    warnings.warn(
+        "Unable to determine whether execution is in activation-recompute phase "
+        "from PyTorch (torch._C._current_graph_task_id). Assuming not.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
 
 
 def set_quantizer_amax_reduction_group(quantizer, amax_reduction_group) -> None:

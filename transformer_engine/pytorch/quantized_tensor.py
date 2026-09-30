@@ -643,8 +643,8 @@ class Quantizer(abc.ABC):
             decay_tensor = torch.where(observed_mask, calibration_decay, 1.0)
             torch.maximum(calibration_value * decay_tensor, observed_value, out=calibration_value)
         else:
-            # Without scale history, keep a reference to the current metadata
-            # without allocating or copying a separate buffer.
+            # Without scale history, retain the sanitized current metadata
+            # without allocating an additional persistent history buffer.
             # Requires CUDA graph warmup step, and only access this value
             # at an appropriate time (e.g. checkpointing) if captured by CG.
             calibration_state[metadata_name] = observed_value
