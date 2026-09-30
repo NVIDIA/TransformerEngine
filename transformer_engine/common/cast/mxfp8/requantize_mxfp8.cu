@@ -307,6 +307,7 @@ template <typename Traits, typename IType, typename OType,
           bool OUTPUT_SCALES_SWIZZLED>
 __device__ __forceinline__ void process_fast_math_stage(
     const e8m0_t *const input_scales, e8m0_t *const output_scales,
+    e8m0_t *const output_rowwise_scales,
     const size_t input_scale_base, const size_t output_scale_base,
     const size_t input_scale_stride, const size_t output_scale_stride,
     const size_t output_scale_tiles_x, const size_t rows, const size_t cols,
@@ -363,6 +364,15 @@ __device__ __forceinline__ void process_fast_math_stage(
     const size_t scale_idx =
         input_scale_base + tensor_row * input_scale_stride + scale_col;
     input_scale = input_scales[scale_idx];
+    if constexpr (OUTPUT_SCALES_SWIZZLED) {
+      if (output_rowwise_scales != nullptr) {
+        const size_t output_idx =
+            input_scale_base + swizzle::gemm_swizzled_scale_idx(
+                                   tensor_row, scale_col,
+                                   input_scale_stride / scale_tensor_alignment_X_rowwise);
+        output_rowwise_scales[output_idx] = input_scale;
+      }
+    }
   }
 
   alignas(16) uint4 packed_input[units_per_warp_tile];
@@ -489,6 +499,7 @@ template <typename Traits, typename IType, typename OType, bool USE_FAST_MATH,
 __device__ __forceinline__ void process_chunk(
     const CUtensorMap &tensor_map_input, const CUtensorMap &tensor_map_output,
     const e8m0_t *const input_scales, e8m0_t *const output_scales,
+    e8m0_t *const output_rowwise_scales,
     const size_t input_scale_base, const size_t output_scale_base,
     const size_t rows, const size_t cols, const size_t block_offset_y,
     const size_t block_offset_x, const size_t tma_offset_y,
@@ -579,7 +590,8 @@ __device__ __forceinline__ void process_chunk(
 
     if constexpr (USE_FAST_MATH) {
       process_fast_math_stage<Traits, IType, OType, OUTPUT_SCALES_SWIZZLED>(
-          input_scales, output_scales, input_scale_base, output_scale_base,
+          input_scales, output_scales, output_rowwise_scales,
+          input_scale_base, output_scale_base,
           input_scale_stride, output_scale_stride, output_scale_tiles_x, rows,
           cols, block_offset_y, block_offset_x, stage_offset_y,
           stage_offset_x, stages_y, input_buffer, input_shared, dequantized_shared,
@@ -603,6 +615,15 @@ __device__ __forceinline__ void process_chunk(
           const size_t scale_idx =
               input_scale_base + tensor_row * input_scale_stride + scale_col;
           scale_code = static_cast<int>(input_scales[scale_idx]);
+          if constexpr (OUTPUT_SCALES_SWIZZLED) {
+            if (output_rowwise_scales != nullptr) {
+              const size_t output_idx =
+                  input_scale_base + swizzle::gemm_swizzled_scale_idx(
+                                         tensor_row, scale_col,
+                                         input_scale_stride / scale_tensor_alignment_X_rowwise);
+              output_rowwise_scales[output_idx] = static_cast<e8m0_t>(scale_code);
+            }
+          }
         }
         scale_code = __shfl_sync(0xffffffff, scale_code, lane & ~1);
 
@@ -703,6 +724,7 @@ __global__ void __launch_bounds__(Traits::THREADS_PER_CHUNK)
         const int64_t *const __restrict__ first_dims_ptr,
         const int64_t *const __restrict__ last_dims_ptr,
         const e8m0_t *const __restrict__ input_scales,
+        e8m0_t *const __restrict__ output_rowwise_scales,
         e8m0_t *const __restrict__ output_scales) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   constexpr ShapeRepresentation shape_rep = Traits::SHAPE_REPRESENTATION;
@@ -822,6 +844,7 @@ __global__ void __launch_bounds__(Traits::THREADS_PER_CHUNK)
     process_chunk<Traits, IType, OType, USE_FAST_MATH,
                   OUTPUT_SCALES_SWIZZLED>(
         tensor_map_input, tensor_map_output, input_scales, output_scales,
+        output_rowwise_scales,
         input_scale_base, output_scale_base, rows, cols, block_offset_y,
         block_offset_x, tma_offset_y, input_shared, dequantized_shared,
         output_shared, input_barriers, input_barrier_parity, leading_thread);
@@ -835,6 +858,7 @@ __global__ void __launch_bounds__(Traits::THREADS_PER_CHUNK)
       process_chunk<Traits, IType, OType, USE_FAST_MATH,
                     OUTPUT_SCALES_SWIZZLED>(
           tensor_map_input, tensor_map_output, input_scales, output_scales,
+          output_rowwise_scales,
           input_scale_base, output_scale_base, rows, cols,
           block_y * Traits::CHUNK_DIM_Y, block_x * Traits::CHUNK_DIM_X,
           block_y * Traits::CHUNK_DIM_Y, input_shared, dequantized_shared,
@@ -925,6 +949,9 @@ void launch_group_requantize(
       last_logical_dim, launch_config.same_both_rows, offsets_ptr,
       first_dims_ptr, last_dims_ptr,
       reinterpret_cast<const e8m0_t *>(input.scale_inv.dptr),
+      output->scale_inv.dptr == input.scale_inv.dptr
+          ? nullptr
+          : reinterpret_cast<e8m0_t *>(output->scale_inv.dptr),
       reinterpret_cast<e8m0_t *>(output->columnwise_scale_inv.dptr));
 }
 
@@ -943,13 +970,23 @@ void group_requantize(const GroupedTensor &input, GroupedTensor *output,
   NVTE_CHECK(is_supported_by_CC_100(),
              "Grouped MXFP8 requantization requires Blackwell (SM100+) hardware.");
   CheckInputGroupedTensor(input, "group_requantize_input");
-  CheckOutputGroupedTensor(*output, "group_requantize_output");
+  // The rowwise output is optional, including when its data aliases the input
+  // but no scale copy is requested. Validate the mandatory columnwise output
+  // with the common checker, then validate the optional rowwise fields below.
+  GroupedTensor columnwise_output = *output;
+  columnwise_output.data.clear();
+  columnwise_output.scale_inv.clear();
+  CheckOutputGroupedTensor(columnwise_output, "group_requantize_output");
   NVTE_CHECK(input.has_data() && !input.has_columnwise_data(),
              "Input must contain rowwise MXFP8 data only.");
+  NVTE_CHECK(input.data.dptr != nullptr && input.scale_inv.dptr != nullptr,
+             "Input rowwise MXFP8 data and scales must be allocated.");
   NVTE_CHECK(!input.with_gemm_swizzled_scales,
              "Input rowwise MXFP8 scales must be in compact format.");
-  NVTE_CHECK(!output->has_data() && output->has_columnwise_data(),
-             "Output must contain columnwise MXFP8 data only.");
+  NVTE_CHECK(output->has_columnwise_data() &&
+                 output->columnwise_data.dptr != nullptr &&
+                 output->columnwise_scale_inv.dptr != nullptr,
+             "Output columnwise MXFP8 data and scales must be allocated.");
   NVTE_CHECK(is_fp8_dtype(input.data.dtype),
              "Input rowwise data must have an FP8 type.");
   NVTE_CHECK(output->columnwise_data.dtype == DType::kFloat8E4M3,
@@ -957,6 +994,27 @@ void group_requantize(const GroupedTensor &input, GroupedTensor *output,
   NVTE_CHECK(input.scale_inv.dtype == DType::kFloat8E8M0 &&
                  output->columnwise_scale_inv.dtype == DType::kFloat8E8M0,
              "MXFP8 scaling tensors must have E8M0 type.");
+  NVTE_CHECK(output->data.dptr == nullptr ||
+                 output->data.dptr == input.data.dptr,
+             "Output rowwise data must alias the input rowwise data or be null.");
+  if (output->data.dptr != nullptr) {
+    NVTE_CHECK(output->data.dtype == input.data.dtype &&
+                   output->data.shape.size() == 1 &&
+                   output->data.numel() == input.data.numel(),
+               "Output rowwise data must match the input dtype and flattened shape.");
+  }
+  if (output->scale_inv.dptr != nullptr) {
+    NVTE_CHECK(output->scale_inv.dtype == DType::kFloat8E8M0 &&
+                   output->scale_inv.shape.size() == 1 &&
+                   output->scale_inv.numel() >= input.scale_inv.numel(),
+               "Output rowwise scales must be E8M0 and have input scale capacity.");
+    NVTE_CHECK(output->scale_inv.dptr != output->columnwise_scale_inv.dptr,
+               "Output rowwise and columnwise scales require separate storage.");
+    NVTE_CHECK((output->scale_inv.dptr == input.scale_inv.dptr) ==
+                   (output->with_gemm_swizzled_scales == input.with_gemm_swizzled_scales),
+               "Output rowwise scales must alias input scales when layouts match and use "
+               "separate storage when layouts differ.");
+  }
   NVTE_CHECK(input.num_tensors == output->num_tensors,
              "Input and output must contain the same number of tensors.");
   NVTE_CHECK(input.num_tensors > 0,

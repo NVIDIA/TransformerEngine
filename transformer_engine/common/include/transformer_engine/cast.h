@@ -438,11 +438,17 @@ void nvte_group_dequantize(const NVTEGroupedTensor input, NVTEGroupedTensor outp
  *
  * Input and output must describe the same grouped shapes. Input must contain
  * rowwise FP8 data with compact E8M0 scales. Output must contain columnwise E4M3
- * data and E8M0 scales; its scales may be compact or GEMM-swizzled. Each group
- * must have row and column counts divisible by 128.
+ * data and E8M0 scales; its scales may be compact or GEMM-swizzled. Output
+ * rowwise data is optional and, when present, must alias the input rowwise data.
+ * Output rowwise scales are also optional. When present, they must alias the
+ * input scales if the layouts match. If the layouts differ, they must use a
+ * separate allocation; the kernel swizzles them out of place. No rowwise
+ * data or scale copy is performed. Each group must have row and column counts
+ * divisible by 128.
  *
  *  \param[in]     input          Compact rowwise MXFP8 grouped tensor.
- *  \param[in,out] output         Columnwise MXFP8 E4M3 grouped tensor.
+ *  \param[in,out] output         Columnwise MXFP8 E4M3 grouped tensor with
+ *                                optional rowwise data and scales.
  *  \param[in]     quant_config   Quantization configuration.
  *  \param[in]     stream         CUDA stream used for the operation.
  */

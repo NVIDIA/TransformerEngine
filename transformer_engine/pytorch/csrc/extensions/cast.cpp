@@ -888,9 +888,9 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
              total_tokens, ", ", hidden_dim, ").");
 
   // Fused paths (default; NVTE_FUSED_GROUP_REQUANTIZE=0 recovers the unfused chain)
-  // replace group_dequantize -> group_quantize(columnwise) below. The grouped API
-  // produces the columnwise copy, followed by rowwise-scale swizzling. The older
-  // dense API also fuses that swizzle and optionally returns dequantized values.
+  // replace group_dequantize -> group_quantize(columnwise) -> rowwise-scale
+  // swizzling below. Both fused APIs produce GEMM-ready scales; the older dense
+  // API can also return dequantized values.
   // The BF16 intermediate reproduces the unfused chain's numerics, hence the
   // otype gate; anything neither kernel covers falls through to the unfused chain.
   // The kernel takes the grouped tensor's cached element-based tensor_offsets;
@@ -932,6 +932,7 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
     // Grouped tensors carry data and scales as flat 1D buffers.
     at::Tensor columnwise_data = at::empty({tokens_i64 * hidden_i64}, options);
     at::Tensor columnwise_scale_inv = at::empty({tokens_i64 / 32 * hidden_i64}, options);
+    at::Tensor swizzled_rowwise_scale_inv = at::empty({static_cast<int64_t>(num_scales)}, options);
     if (use_grouped_kernel) {
       const at::Tensor first_dims_i64 =
           first_dims->scalar_type() == at::kLong ? *first_dims : first_dims->to(at::kLong);
@@ -949,6 +950,9 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
       input_nvte.set_tensor_offsets(element_offsets.data_ptr(), DType::kInt64, offsets_shape);
 
       GroupedTensorWrapper output_nvte(num_tensors, grouped_shape, NVTE_MXFP8_1D_SCALING);
+      output_nvte.set_rowwise_data(rowwise_data.data_ptr(), op_dtype, flat_data_shape);
+      output_nvte.set_rowwise_scale_inv(swizzled_rowwise_scale_inv.data_ptr(),
+                                        DType::kFloat8E8M0, scale_shape);
       output_nvte.set_columnwise_data(columnwise_data.data_ptr(), DType::kFloat8E4M3,
                                        flat_data_shape);
       output_nvte.set_columnwise_scale_inv(columnwise_scale_inv.data_ptr(), DType::kFloat8E8M0,
@@ -964,16 +968,13 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
                                 at::cuda::getCurrentCUDAStream());
       });
 
-      // The grouped API writes only the columnwise copy. Swizzle the existing
-      // rowwise scales while grouped_x is still rowwise-only, then attach it.
-      grouped_swizzle_for_gemm(grouped_x, /*rowwise=*/true, /*columnwise=*/false);
-      grouped_x.attr("scale_inv") = grouped_x.attr("scale_inv").attr("reshape")(-1);
+      grouped_x.attr("scale_inv") = swizzled_rowwise_scale_inv;
       grouped_x.attr("columnwise_data") = columnwise_data;
       grouped_x.attr("columnwise_scale_inv") = columnwise_scale_inv;
+      grouped_x.attr("_with_gemm_swizzled_scales") = py::cast(true);
       return py::none();
     }
 
-    at::Tensor swizzled_rowwise_scale_inv = at::empty({static_cast<int64_t>(num_scales)}, options);
     at::Tensor dequantized;
     if (return_dequantized) {
       dequantized =

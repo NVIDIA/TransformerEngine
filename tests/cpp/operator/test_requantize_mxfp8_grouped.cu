@@ -287,6 +287,59 @@ TEST(GroupedRequantizeTest, RejectsUnsupportedScalingModes) {
                std::runtime_error);
 }
 
+TEST(GroupedRequantizeTest, OptionalRowwiseOutputsAndAliasRules) {
+  if (test::getDeviceComputeCapability() < test::blackwellComputeCapability) {
+    GTEST_SKIP();
+  }
+
+  const GroupShapeInfo shape_info = make_shape_info({"Single", {{128, 128}}});
+  const std::vector<size_t> data_shape = {shape_info.total_elements};
+  const std::vector<size_t> scale_shape = {shape_info.rowwise_scale_elements};
+  auto source = make_grouped_tensor(shape_info, DType::kBFloat16,
+                                    NVTE_DELAYED_TENSOR_SCALING,
+                                    /*rowwise=*/true, /*columnwise=*/false);
+  auto input = make_grouped_tensor(shape_info, DType::kFloat8E4M3,
+                                   NVTE_MXFP8_1D_SCALING,
+                                   /*rowwise=*/true, /*columnwise=*/false);
+  fill_source(source, shape_info);
+  nvte_group_quantize(source.data(), input.data(), nullptr, 0);
+
+  auto output = make_grouped_tensor(shape_info, DType::kFloat8E4M3,
+                                    NVTE_MXFP8_1D_SCALING,
+                                    /*rowwise=*/false, /*columnwise=*/true,
+                                    /*swizzled=*/true);
+  // Both rowwise output fields may be absent.
+  nvte_grouped_requantize(input.data(), output.data(), nullptr, 0);
+
+  output.tensor->set_rowwise_data(input.rowwise_data.get(), DType::kFloat8E4M3,
+                                   data_shape);
+  // The data may alias the input even when no rowwise scale output is requested.
+  nvte_grouped_requantize(input.data(), output.data(), nullptr, 0);
+
+  auto unrelated_data = test::cuda_alloc(shape_info.total_elements);
+  output.tensor->set_rowwise_data(unrelated_data.get(), DType::kFloat8E4M3,
+                                   data_shape);
+  EXPECT_THROW(nvte_grouped_requantize(input.data(), output.data(), nullptr, 0),
+               std::runtime_error);
+  output.tensor->set_rowwise_data(input.rowwise_data.get(), DType::kFloat8E4M3,
+                                   data_shape);
+
+  output.tensor->set_rowwise_scale_inv(input.rowwise_scale_inv.get(),
+                                        DType::kFloat8E8M0, scale_shape);
+  EXPECT_THROW(nvte_grouped_requantize(input.data(), output.data(), nullptr, 0),
+               std::runtime_error);
+
+  output.tensor->set_with_gemm_swizzled_scales(false);
+  nvte_grouped_requantize(input.data(), output.data(), nullptr, 0);
+
+  auto unrelated_scales = test::cuda_alloc(shape_info.rowwise_scale_elements);
+  output.tensor->set_rowwise_scale_inv(unrelated_scales.get(),
+                                        DType::kFloat8E8M0, scale_shape);
+  EXPECT_THROW(nvte_grouped_requantize(input.data(), output.data(), nullptr, 0),
+               std::runtime_error);
+  NVTE_CHECK_CUDA(cudaDeviceSynchronize());
+}
+
 TEST_P(GroupedRequantizeMXFP8TestSuite, MatchesDequantizeThenQuantize) {
   if (test::getDeviceComputeCapability() < test::blackwellComputeCapability) {
     GTEST_SKIP();
@@ -318,6 +371,16 @@ TEST_P(GroupedRequantizeMXFP8TestSuite, MatchesDequantizeThenQuantize) {
                                     NVTE_MXFP8_1D_SCALING,
                                     /*rowwise=*/false, /*columnwise=*/true,
                                     output_swizzled);
+  actual.rowwise_scale_bytes = shape_info.rowwise_scale_elements;
+  if (output_swizzled) {
+    actual.rowwise_scale_inv = test::cuda_alloc(actual.rowwise_scale_bytes);
+  }
+  actual.tensor->set_rowwise_data(input.rowwise_data.get(), input_dtype,
+                                   std::vector<size_t>{shape_info.total_elements});
+  actual.tensor->set_rowwise_scale_inv(
+      output_swizzled ? actual.rowwise_scale_inv.get() : input.rowwise_scale_inv.get(),
+      DType::kFloat8E8M0,
+      std::vector<size_t>{shape_info.rowwise_scale_elements});
   fill_output_sentinel(actual);
   QuantizationConfigWrapper quant_config;
   quant_config.set_use_fast_math(use_fast_math);
@@ -359,6 +422,20 @@ TEST_P(GroupedRequantizeMXFP8TestSuite, MatchesDequantizeThenQuantize) {
                                     : reference_compact.columnwise_scale_inv.get();
   expect_bytes_equal("columnwise scales", actual.columnwise_scale_inv.get(),
                      expected_scales, actual.columnwise_scale_bytes);
+  std::unique_ptr<OwnedGroupedTensor> reference_rowwise_swizzled;
+  const void *expected_rowwise_scales = input.rowwise_scale_inv.get();
+  if (output_swizzled) {
+    reference_rowwise_swizzled = std::make_unique<OwnedGroupedTensor>(make_grouped_tensor(
+        shape_info, input_dtype, NVTE_MXFP8_1D_SCALING,
+        /*rowwise=*/true, /*columnwise=*/false, /*swizzled=*/true));
+    fill_output_sentinel(*reference_rowwise_swizzled);
+    nvte_swizzle_grouped_scaling_factors(input.data(),
+                                          reference_rowwise_swizzled->data(), 0);
+    expected_rowwise_scales = reference_rowwise_swizzled->rowwise_scale_inv.get();
+  }
+  expect_bytes_equal("rowwise scales", actual.tensor->get_rowwise_scale_inv().data_ptr,
+                     expected_rowwise_scales, actual.rowwise_scale_bytes);
+  EXPECT_EQ(actual.tensor->get_rowwise_data().data_ptr, input.rowwise_data.get());
   EXPECT_EQ(actual.tensor->get_with_gemm_swizzled_scales(), output_swizzled);
 }
 
