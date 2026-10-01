@@ -881,6 +881,8 @@ def _moe_fwd_rule(
     wi_0_checkpoint_name,
     wi_1_checkpoint_name,
     wo_checkpoint_name,
+    dispatch_checkpoint_name,
+    combine_checkpoint_name,
 ):
     """Forward: gate -> topk -> ep_dispatch -> FFN -> ep_combine.
 
@@ -1071,6 +1073,9 @@ def _moe_fwd_rule(
     recv_tokens, recv_topk_weights = tex.ep_dispatch_fwd(
         cfg, handle_mem, topk_idx_3d, x, topk_w_3d, recv_pr
     )
+    if dispatch_checkpoint_name is not None:
+        recv_tokens = checkpoint_name(recv_tokens, dispatch_checkpoint_name)
+        recv_topk_weights = checkpoint_name(recv_topk_weights, dispatch_checkpoint_name)
     recv_tokens = jax.lax.with_sharding_constraint(
         recv_tokens, NamedSharding(mesh, ep3_spec)
     )
@@ -1165,6 +1170,8 @@ def _moe_fwd_rule(
             num_local_tokens=(B, S),
             out_partition_spec=out_partition_spec,
         )
+    if combine_checkpoint_name is not None:
+        output = checkpoint_name(output, combine_checkpoint_name)
     # output of MLP should be sharded the same way as the activation input
     output = with_sharding_constraint_by_logical_axes(output, input_axes)
 
@@ -1233,6 +1240,8 @@ def _moe_bwd_rule(
     wi_0_checkpoint_name,
     wi_1_checkpoint_name,
     wo_checkpoint_name,
+    dispatch_checkpoint_name,
+    combine_checkpoint_name,
     residuals,
     cotangents,
 ):
@@ -1245,6 +1254,8 @@ def _moe_bwd_rule(
         wi_0_checkpoint_name,
         wi_1_checkpoint_name,
         wo_checkpoint_name,
+        dispatch_checkpoint_name,
+        combine_checkpoint_name,
     )  # captured / unused in bwd
     from jax.experimental.shard_map import shard_map
 
@@ -1505,7 +1516,7 @@ def _moe_bwd_rule(
 # =============================================================================
 
 
-@partial(jax.custom_vjp, nondiff_argnums=tuple(range(9, 31)))
+@partial(jax.custom_vjp, nondiff_argnums=tuple(range(9, 33)))
 def _moe(
     x,
     gate_kernel,
@@ -1538,6 +1549,8 @@ def _moe(
     wi_0_checkpoint_name,
     wi_1_checkpoint_name,
     wo_checkpoint_name,
+    dispatch_checkpoint_name,
+    combine_checkpoint_name,
 ):
     primal, _ = _moe_fwd_rule(
         x,
@@ -1571,6 +1584,8 @@ def _moe(
         wi_0_checkpoint_name,
         wi_1_checkpoint_name,
         wo_checkpoint_name,
+        dispatch_checkpoint_name,
+        combine_checkpoint_name,
     )
     return primal
 
@@ -1613,6 +1628,8 @@ def moe(
     wi_0_checkpoint_name: Optional[str] = None,
     wi_1_checkpoint_name: Optional[str] = None,
     wo_checkpoint_name: Optional[str] = None,
+    dispatch_checkpoint_name: Optional[str] = None,
+    combine_checkpoint_name: Optional[str] = None,
 ) -> Tuple[jnp.ndarray, Optional[jnp.ndarray], jnp.ndarray]:
     """Run a full MoE block under a single fused custom_vjp on the TE EP path.
 
@@ -1657,6 +1674,12 @@ def moe(
         ``None`` leaves the value unnamed.
     wo_checkpoint_name : Optional[str]
         JAX rematerialization checkpoint name for the per-expert down projection output.
+        ``None`` leaves the value unnamed.
+    dispatch_checkpoint_name : Optional[str]
+        JAX rematerialization checkpoint name for the EP dispatch outputs.
+        ``None`` leaves these values unnamed; the opaque prepare handle is never named.
+    combine_checkpoint_name : Optional[str]
+        JAX rematerialization checkpoint name for the EP combine output.
         ``None`` leaves the value unnamed.
 
     Note that the per-expert dispatch-slot alignment is fixed internally
@@ -1782,6 +1805,8 @@ def moe(
         wi_0_checkpoint_name,
         wi_1_checkpoint_name,
         wo_checkpoint_name,
+        dispatch_checkpoint_name,
+        combine_checkpoint_name,
     )
     if aux_loss_coeff <= 0.0:
         aux_loss = None

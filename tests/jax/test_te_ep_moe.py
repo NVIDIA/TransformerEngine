@@ -366,6 +366,8 @@ def _make_block(
     expert_bias_init=None,
     input_axes=("batch", None, None),
     quantization_recipe=None,
+    dispatch_checkpoint_name=None,
+    combine_checkpoint_name=None,
 ):
     kwargs = dict(
         num_experts=NUM_EXPERTS,
@@ -379,6 +381,8 @@ def _make_block(
         dtype=DTYPE,
         input_axes=input_axes,
         quantization_recipe=quantization_recipe,
+        dispatch_checkpoint_name=dispatch_checkpoint_name,
+        combine_checkpoint_name=combine_checkpoint_name,
     )
     # Custom expert_bias_init lets tests inject a non-zero expert_bias without
     # poking variables['params'] post-init.
@@ -699,6 +703,41 @@ class TestTeEpMoeBackward:
         )
 
 
+def test_ep_checkpoint_names(mesh, monkeypatch):
+    if _use_cudnn_cutedsl_fusion_from_env():
+        pytest.skip(
+            "BF16 fallback uses a different EP alignment than the cuDNN bootstrap"
+        )
+    moe_module = importlib.import_module("transformer_engine.jax.moe")
+    named_values = {}
+    original_checkpoint_name = moe_module.checkpoint_name
+
+    def recorded_checkpoint_name(value, name):
+        named_values.setdefault(name, []).append(value)
+        return original_checkpoint_name(value, name)
+
+    monkeypatch.setattr(moe_module, "checkpoint_name", recorded_checkpoint_name)
+    block = _make_block(
+        dispatch_checkpoint_name="saved_dispatch",
+        combine_checkpoint_name="saved_combine",
+    )
+    inputs = _make_inputs(jax.random.PRNGKey(34))
+    variables, output, _ = _init_apply(block, mesh, inputs, jax.random.PRNGKey(35))
+    grads, grad_inputs = _grad_step(block, variables, mesh, inputs)
+
+    assert len(named_values["saved_dispatch"]) >= 2
+    assert len(named_values["saved_combine"]) >= 1
+    assert all(
+        hasattr(value, "shape") for values in named_values.values() for value in values
+    )
+    assert np.all(np.isfinite(_to_global_numpy(output, mesh)))
+    assert np.all(np.isfinite(_to_global_numpy(grad_inputs, mesh)))
+    for name in ("gate_kernel", "wi", "wo"):
+        assert np.all(
+            np.isfinite(_to_global_numpy(_unwrap(grads["params"][name]), mesh))
+        )
+
+
 class TestTeEpMoeCudnnCutedslFusion:
     """End-to-end MXFP8 coverage for cuDNN's grouped GLU JAX APIs."""
 
@@ -861,7 +900,11 @@ class TestTeEpMoeCudnnCutedslFusion:
             return original_moe(*args, **kwargs)
 
         monkeypatch.setattr(flax_moe_module, "moe", checkpointed_moe)
-        block = _make_block(quantization_recipe=MXFP8BlockScaling())
+        block = _make_block(
+            quantization_recipe=MXFP8BlockScaling(),
+            dispatch_checkpoint_name="saved_dispatch",
+            combine_checkpoint_name="saved_combine",
+        )
         inputs = _make_inputs(jax.random.PRNGKey(32))
         variables, output, _ = _init_apply(block, mesh, inputs, jax.random.PRNGKey(33))
         grads, grad_inputs = _grad_step(block, variables, mesh, inputs)
@@ -872,6 +915,8 @@ class TestTeEpMoeCudnnCutedslFusion:
             assert all(hasattr(value, "shape") for value in named_values[label])
         assert len(named_values["moe_mlpwo"]) == len(selected_calls)
         assert all(hasattr(value, "shape") for value in named_values["moe_mlpwo"])
+        assert len(named_values["saved_dispatch"]) >= 2 * len(selected_calls)
+        assert len(named_values["saved_combine"]) >= len(selected_calls)
         assert np.all(np.isfinite(_to_global_numpy(output, mesh)))
         assert np.all(np.isfinite(_to_global_numpy(grad_inputs, mesh)))
         for name in ("gate_kernel", "wi", "wo"):
