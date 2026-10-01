@@ -149,7 +149,9 @@ __device__ __forceinline__ ptx::floatx2 dgelu_2x(const ptx::floatx2 &x) {
   const ptx::floatx2 d3 =
       ptx::fma_2x(ptx::mul_2x(duplicate(0.1070322243f), x), x, duplicate(0.79788456f));
   const ptx::floatx2 f = ptx::mul_2x(ptx::mul_2x(duplicate(-0.5f), x), ptx::mul_2x(c2_neg, d3));
-  // Halving is exact, so this fma rounds like 0.5f * (1 + t).
+  // nvcc rounds util/math.h's product f on its own and contracts the addition with the
+  // 0.5f * (1 + t) multiply instead: fma(1 + t, 0.5f, f). Halving is exact, so that rounds
+  // like this fma followed by the add.
   const ptx::floatx2 h = ptx::fma_2x(duplicate(0.5f), t, duplicate(0.5f));
   return ptx::add_2x(f, h);
 }
