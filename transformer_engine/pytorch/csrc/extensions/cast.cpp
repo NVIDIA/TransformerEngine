@@ -962,11 +962,9 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
       dequantized_nvte.set_rowwise_data(dequantized.data_ptr(), DType::kBFloat16, grouped_shape);
     }
 
-    QuantizationConfigWrapper quant_config;
-    quant_config.set_use_fast_math(true);
     NVTE_SCOPED_GIL_RELEASE({
       nvte_group_requantize(input_nvte.data(), output_nvte.data(),
-                            return_dequantized ? dequantized_nvte.data() : nullptr, quant_config,
+                            return_dequantized ? dequantized_nvte.data() : nullptr, nullptr,
                             at::cuda::getCurrentCUDAStream());
     });
 

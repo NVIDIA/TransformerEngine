@@ -14,7 +14,6 @@
 #include <transformer_engine/cast.h>
 
 #include <algorithm>
-#include <type_traits>
 
 #include "../../common.h"
 #include "../../util/cuda_runtime.h"
@@ -30,10 +29,6 @@
 #endif
 
 namespace transformer_engine {
-namespace requantize {
-void fused_group_requantize(const GroupedTensor &input, GroupedTensor *output, Tensor *dequantized,
-                            const QuantizationConfig *quant_config, cudaStream_t stream);
-}  // namespace requantize
 namespace dispatch {
 namespace mxfp8 {
 namespace group_requantize_kernel {
@@ -219,26 +214,6 @@ __device__ __forceinline__ ptx::bf16x2 dequantize_mxfp8_2x(const ptx::FPx2<IType
   return result;
 }
 
-template <typename OType>
-__device__ __forceinline__ void store_colwise_2x_to_shared(OType *const output,
-                                                           const uint32_t stride_bytes,
-                                                           const uint32_t values) {
-  static_assert(sizeof(OType) == 1);
-  const uint32_t output_ptr = __cvta_generic_to_shared(output);
-  asm volatile(
-      "{\n\t"
-      ".reg.u32 ptr1; \n\t"
-      "mad.lo.u32 ptr1, 1, %1, %0; \n\t"
-      ".reg.b8 value0, value1, unused0, unused1; \n\t"
-      "mov.b32 {value0, value1, unused0, unused1}, %2; \n\t"
-      "st.shared.b8 [%0], value0; \n\t"
-      "st.shared.b8 [ptr1], value1; \n"
-      "}"
-      :
-      : "r"(output_ptr), "r"(stride_bytes), "r"(values)
-      : "memory");
-}
-
 __device__ __forceinline__ void store_scale_cache_unit(e8m0_t *const output,
                                                        const e8m0_t *const cache) {
   constexpr size_t bytes_per_unit = sizeof(uint4);
@@ -300,8 +275,9 @@ __device__ __forceinline__ void requantize_bf16_4x(ptx::FPx4<OType> &output,
 #endif
 }
 
-template <typename Traits, typename IType, typename OType, bool OUTPUT_SCALES_SWIZZLED>
-__device__ __forceinline__ void process_fast_math_stage(
+template <typename Traits, typename IType, typename OType, bool OUTPUT_SCALES_SWIZZLED,
+          bool RETURN_DEQUANTIZED>
+__device__ __forceinline__ void process_bf16_stage(
     const e8m0_t *const input_scales, e8m0_t *const output_scales,
     e8m0_t *const output_rowwise_scales, const size_t input_scale_base,
     const size_t output_scale_base, const size_t input_scale_stride,
@@ -309,7 +285,7 @@ __device__ __forceinline__ void process_fast_math_stage(
     const size_t cols, const size_t block_offset_y, const size_t block_offset_x,
     const size_t stage_offset_y, const size_t stage_offset_x, const int stages_y,
     const int input_buffer, const IType *const input_shared, void *const reduction_shared,
-    OType *const output_shared) {
+    OType *const output_shared, bf16 *const dequantized_out) {
   constexpr size_t warp_tile_dim_x = MXFP8_SCALE_DIM;
   constexpr size_t warps_per_chunk = Traits::THREADS_PER_CHUNK / THREADS_PER_WARP;
   constexpr size_t elements_per_unit = sizeof(uint4) / sizeof(IType);
@@ -377,7 +353,7 @@ __device__ __forceinline__ void process_fast_math_stage(
   }
 
   const auto &input_pairs = *reinterpret_cast<const InputPairs *>(packed_input);
-  alignas(8) ComputePairs compute_values;
+  alignas(16) ComputePairs compute_values;
   unsigned char *const warp_scratch =
       reinterpret_cast<unsigned char *>(reduction_shared) + warp * scratch_bytes_per_warp;
   float *const warp_amax = reinterpret_cast<float *>(warp_scratch);
@@ -395,6 +371,18 @@ __device__ __forceinline__ void process_fast_math_stage(
     ptx::reduce_sync_max_abs_f32(amax.y, values.y);
     if (lane == 0) {
       *reinterpret_cast<float2 *>(&warp_amax[2 * pair_idx]) = make_float2(amax.x, amax.y);
+    }
+  }
+
+  if constexpr (RETURN_DEQUANTIZED) {
+    if (tensor_row < rows && tensor_col < cols) {
+      const auto *const decoded_units = reinterpret_cast<const uint4 *>(compute_values);
+      auto *const dst = reinterpret_cast<uint4 *>(dequantized_out + tensor_row * cols + tensor_col);
+#pragma unroll
+      for (int unit = 0; unit < static_cast<int>(MXFP8_SCALE_DIM * sizeof(bf16) / sizeof(uint4));
+           ++unit) {
+        dst[unit] = decoded_units[unit];
+      }
     }
   }
 
@@ -469,8 +457,8 @@ __device__ __forceinline__ void process_fast_math_stage(
   }
 }
 
-template <typename Traits, typename IType, typename OType, bool USE_FAST_MATH,
-          bool OUTPUT_SCALES_SWIZZLED>
+template <typename Traits, typename IType, typename OType, bool OUTPUT_SCALES_SWIZZLED,
+          bool RETURN_DEQUANTIZED>
 __device__ __forceinline__ void process_chunk(
     const CUtensorMap &tensor_map_input, const CUtensorMap &tensor_map_output,
     const e8m0_t *const input_scales, e8m0_t *const output_scales,
@@ -478,36 +466,16 @@ __device__ __forceinline__ void process_chunk(
     const size_t output_scale_base, const size_t rows, const size_t cols,
     const size_t block_offset_y, const size_t block_offset_x, const size_t tma_offset_y,
     IType *const input_shared, void *const dequantized_shared, OType *const output_shared,
-    uint64_t *const input_barriers, int *const input_barrier_parity, const bool leading_thread) {
-  using TCompute = std::conditional_t<USE_FAST_MATH, bf16, float>;
-
+    uint64_t *const input_barriers, int *const input_barrier_parity, const bool leading_thread,
+    bf16 *const dequantized_out) {
   constexpr size_t tile_dim_x = Traits::TILE_DIM_X;
   constexpr size_t chunk_dim_y = Traits::CHUNK_DIM_Y;
   constexpr size_t chunk_dim_x = Traits::CHUNK_DIM_X;
   constexpr size_t buffs_num = Traits::BUFFS_NUM;
   constexpr size_t buff_dim_y = Traits::BUFF_DIM_Y;
-  constexpr size_t buff_dim_x = Traits::BUFF_DIM_X;
   constexpr size_t buff_dim = Traits::BUFF_DIM;
   constexpr size_t prefetch_stages = Traits::PREFETCH_STAGES;
-  constexpr size_t elements_per_load = 16;
-  constexpr size_t loads_per_row = tile_dim_x / elements_per_load;
-  constexpr size_t rows_per_dequantize_iteration = Traits::THREADS_PER_CHUNK / loads_per_row;
-  constexpr size_t dequantize_iterations = buff_dim_y / rows_per_dequantize_iteration;
-  constexpr size_t padding_per_vector = sizeof(float) / sizeof(TCompute);
-  constexpr size_t dequantized_stride = buff_dim_x + loads_per_row * padding_per_vector;
   constexpr size_t input_buffer_bytes = buff_dim * sizeof(IType);
-  constexpr uint32_t output_stride_bytes = buff_dim_x * sizeof(OType);
-
-  static_assert(rows_per_dequantize_iteration == 16);
-  static_assert(dequantize_iterations == 2);
-  static_assert(dequantized_stride == (USE_FAST_MATH ? 144 : 136));
-
-  using InputShared = IType[buffs_num][buff_dim_y][buff_dim_x];
-  using ComputeShared = TCompute[buff_dim_y][dequantized_stride];
-  using OutputShared = OType[buffs_num][buff_dim_y][buff_dim_x];
-  const auto &s_input = *reinterpret_cast<const InputShared *>(input_shared);
-  auto &s_dequantized = *reinterpret_cast<ComputeShared *>(dequantized_shared);
-  auto &s_output = *reinterpret_cast<OutputShared *>(output_shared);
 
   const size_t input_scale_stride =
       DIVUP_TO_MULTIPLE(DIVUP(cols, static_cast<size_t>(MXFP8_SCALE_DIM)),
@@ -565,97 +533,11 @@ __device__ __forceinline__ void process_chunk(
       ptx::cp_async_bulk_wait_group_read<prefetch_stages>();
     }
 
-    if constexpr (USE_FAST_MATH) {
-      process_fast_math_stage<Traits, IType, OType, OUTPUT_SCALES_SWIZZLED>(
-          input_scales, output_scales, output_rowwise_scales, input_scale_base, output_scale_base,
-          input_scale_stride, output_scale_stride, output_scale_tiles_x, rows, cols, block_offset_y,
-          block_offset_x, stage_offset_y, stage_offset_x, stages_y, input_buffer, input_shared,
-          dequantized_shared, output_shared);
-    } else {
-      const int lane = threadIdx.x % THREADS_PER_WARP;
-#pragma unroll
-      for (int iteration = 0; iteration < static_cast<int>(dequantize_iterations); ++iteration) {
-        const int local_chunk = threadIdx.x % loads_per_row;
-        const int local_row =
-            threadIdx.x / loads_per_row + iteration * rows_per_dequantize_iteration;
-        const int local_col = local_chunk * elements_per_load;
-        const size_t tensor_row = block_offset_y + stage_offset_y + local_row;
-        const size_t tensor_col = block_offset_x + stage_offset_x + local_col;
-        const bool data_is_in_bounds = tensor_row < rows && tensor_col < cols;
-
-        int scale_code = 0;
-        if (data_is_in_bounds && (local_chunk % 2) == 0) {
-          const size_t scale_col = tensor_col / MXFP8_SCALE_DIM;
-          const size_t scale_idx = input_scale_base + tensor_row * input_scale_stride + scale_col;
-          scale_code = static_cast<int>(input_scales[scale_idx]);
-          if constexpr (OUTPUT_SCALES_SWIZZLED) {
-            if (output_rowwise_scales != nullptr) {
-              const size_t output_idx =
-                  input_scale_base +
-                  swizzle::gemm_swizzled_scale_idx(
-                      tensor_row, scale_col, input_scale_stride / scale_tensor_alignment_X_rowwise);
-              output_rowwise_scales[output_idx] = static_cast<e8m0_t>(scale_code);
-            }
-          }
-        }
-        scale_code = __shfl_sync(0xffffffff, scale_code, lane & ~1);
-
-        const int shared_col = local_col + (local_col / elements_per_load) * padding_per_vector;
-        if (data_is_in_bounds) {
-          Vec<IType, elements_per_load> values;
-          values.load_from(&s_input[input_buffer][local_row][local_col]);
-          const float scale = ptx::exp2f(static_cast<e8m0_t>(scale_code));
-#pragma unroll
-          for (int element = 0; element < elements_per_load; ++element) {
-            s_dequantized[local_row][shared_col + element] =
-                scale * static_cast<float>(values.data.elt[element]);
-          }
-        } else {
-#pragma unroll
-          for (int element = 0; element < elements_per_load; ++element) {
-            s_dequantized[local_row][shared_col + element] = 0.0f;
-          }
-        }
-      }
-
-      __syncthreads();
-
-      const int dequantized_col =
-          threadIdx.x + (threadIdx.x / elements_per_load) * padding_per_vector;
-      float thread_amax = 0.0f;
-#pragma unroll
-      for (int row = 0; row < static_cast<int>(MXFP8_SCALE_DIM); ++row) {
-        thread_amax =
-            fmaxf(thread_amax, fabsf(static_cast<float>(s_dequantized[row][dequantized_col])));
-      }
-
-      const e8m0_t output_scale =
-          ptx::float_to_e8m0(thread_amax * Quantized_Limits<OType>::max_norm_rcp);
-      const size_t output_col = block_offset_x + stage_offset_x + threadIdx.x;
-      const size_t output_scale_row = (block_offset_y + stage_offset_y) / MXFP8_SCALE_DIM;
-      size_t output_scale_idx;
-      if constexpr (OUTPUT_SCALES_SWIZZLED) {
-        output_scale_idx =
-            output_scale_base +
-            swizzle::gemm_swizzled_scale_idx(output_col, output_scale_row, output_scale_tiles_x);
-      } else {
-        output_scale_idx = output_scale_base + output_scale_row * output_scale_stride + output_col;
-      }
-      output_scales[output_scale_idx] = output_col < cols ? output_scale : static_cast<e8m0_t>(0);
-
-      const float multiplier = ptx::exp2f_rcp<float>(output_scale);
-      const ptx::floatx2 multiplier_x2 = {multiplier, multiplier};
-#pragma unroll
-      for (int row = 0; row < static_cast<int>(MXFP8_SCALE_DIM); row += 2) {
-        const ptx::floatx2 values = {s_dequantized[row][dequantized_col],
-                                     s_dequantized[row + 1][dequantized_col]};
-        uint32_t result_data = 0;
-        auto &result = *reinterpret_cast<ptx::FPx2<OType> *>(&result_data);
-        ptx::mul_cvt_2x(result, values, multiplier_x2);
-        store_colwise_2x_to_shared(&s_output[input_buffer][row][threadIdx.x], output_stride_bytes,
-                                   result_data);
-      }
-    }
+    process_bf16_stage<Traits, IType, OType, OUTPUT_SCALES_SWIZZLED, RETURN_DEQUANTIZED>(
+        input_scales, output_scales, output_rowwise_scales, input_scale_base, output_scale_base,
+        input_scale_stride, output_scale_stride, output_scale_tiles_x, rows, cols, block_offset_y,
+        block_offset_x, stage_offset_y, stage_offset_x, stages_y, input_buffer, input_shared,
+        dequantized_shared, output_shared, dequantized_out);
 
     ptx::fence_proxy_async_shared_cta();
     __syncthreads();
@@ -677,15 +559,16 @@ __device__ __forceinline__ void process_chunk(
   }
 }
 
-template <typename Traits, typename IType, typename OType, bool USE_FAST_MATH,
-          bool OUTPUT_SCALES_SWIZZLED>
+template <typename Traits, typename IType, typename OType, bool OUTPUT_SCALES_SWIZZLED,
+          bool RETURN_DEQUANTIZED>
 __global__ void __launch_bounds__(Traits::THREADS_PER_CHUNK) group_requantize_mxfp8_kernel(
     const __grid_constant__ CUtensorMap tensor_map_input_static,
     const __grid_constant__ CUtensorMap tensor_map_output_static, const size_t num_tensors,
     const size_t first_logical_dim, const size_t last_logical_dim, const size_t same_both_rows,
     const int64_t *const __restrict__ offsets_ptr, const int64_t *const __restrict__ first_dims_ptr,
     const int64_t *const __restrict__ last_dims_ptr, const e8m0_t *const __restrict__ input_scales,
-    e8m0_t *const __restrict__ output_rowwise_scales, e8m0_t *const __restrict__ output_scales) {
+    e8m0_t *const __restrict__ output_rowwise_scales, e8m0_t *const __restrict__ output_scales,
+    bf16 *const __restrict__ dequantized_out) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   constexpr ShapeRepresentation shape_rep = Traits::SHAPE_REPRESENTATION;
   constexpr bool direct_same = shape_rep == ShapeRepresentation::SAME_BOTH_DIMS;
@@ -696,21 +579,13 @@ __global__ void __launch_bounds__(Traits::THREADS_PER_CHUNK) group_requantize_mx
   constexpr size_t buff_dim = Traits::BUFF_DIM;
   constexpr size_t input_bytes =
       DIVUP_TO_MULTIPLE(buffs_num * buff_dim * sizeof(IType), TMA_SHMEM_ALIGNMENT);
-  using TCompute = std::conditional_t<USE_FAST_MATH, bf16, float>;
-  constexpr size_t padding_per_vector = sizeof(float) / sizeof(TCompute);
-  constexpr size_t dequantized_stride =
-      Traits::BUFF_DIM_X + (Traits::BUFF_DIM_X / 16) * padding_per_vector;
-  constexpr size_t generic_dequantized_bytes = DIVUP_TO_MULTIPLE(
-      Traits::BUFF_DIM_Y * dequantized_stride * sizeof(TCompute), TMA_SHMEM_ALIGNMENT);
-  constexpr size_t fast_reduction_bytes =
-      DIVUP_TO_MULTIPLE(Traits::THREADS_PER_CHUNK * sizeof(float), TMA_SWIZZLE_ALIGNMENT);
   constexpr size_t dequantized_bytes =
-      USE_FAST_MATH ? fast_reduction_bytes : generic_dequantized_bytes;
+      DIVUP_TO_MULTIPLE(Traits::THREADS_PER_CHUNK * sizeof(float), TMA_SWIZZLE_ALIGNMENT);
   constexpr size_t output_bytes =
       DIVUP_TO_MULTIPLE(buffs_num * buff_dim * sizeof(OType), TMA_SHMEM_ALIGNMENT);
 
   extern __shared__ unsigned char dynamic_shared[];
-  constexpr size_t shared_alignment = USE_FAST_MATH ? TMA_SWIZZLE_ALIGNMENT : TMA_SHMEM_ALIGNMENT;
+  constexpr size_t shared_alignment = TMA_SWIZZLE_ALIGNMENT;
   unsigned char *const shared_base = reinterpret_cast<unsigned char *>(
       align_up(reinterpret_cast<char *>(dynamic_shared), shared_alignment));
   IType *const input_shared = reinterpret_cast<IType *>(shared_base);
@@ -805,16 +680,21 @@ __global__ void __launch_bounds__(Traits::THREADS_PER_CHUNK) group_requantize_mx
     output_scale_base = tensor_base / MXFP8_SCALE_DIM;
   }
 
+  bf16 *dequantized_group = nullptr;
+  if constexpr (RETURN_DEQUANTIZED) {
+    dequantized_group = dequantized_out + tensor_base;
+  }
+
   __shared__ uint64_t input_barriers[buffs_num];
   initialize_barriers<buffs_num, 1>(input_barriers, leading_thread);
   int input_barrier_parity[buffs_num] = {0};
 
   if constexpr (direct_mapper) {
-    process_chunk<Traits, IType, OType, USE_FAST_MATH, OUTPUT_SCALES_SWIZZLED>(
+    process_chunk<Traits, IType, OType, OUTPUT_SCALES_SWIZZLED, RETURN_DEQUANTIZED>(
         tensor_map_input, tensor_map_output, input_scales, output_scales, output_rowwise_scales,
         input_scale_base, output_scale_base, rows, cols, block_offset_y, block_offset_x,
         tma_offset_y, input_shared, dequantized_shared, output_shared, input_barriers,
-        input_barrier_parity, leading_thread);
+        input_barrier_parity, leading_thread, dequantized_group);
   } else {
     const size_t blocks_x = DIVUP(cols, static_cast<size_t>(Traits::CHUNK_DIM_X));
     const size_t blocks_y = DIVUP(rows, static_cast<size_t>(Traits::CHUNK_DIM_Y));
@@ -822,11 +702,12 @@ __global__ void __launch_bounds__(Traits::THREADS_PER_CHUNK) group_requantize_mx
     for (size_t block_id = blockIdx.x; block_id < total_blocks; block_id += gridDim.x) {
       const size_t block_y = block_id / blocks_x;
       const size_t block_x = block_id - block_y * blocks_x;
-      process_chunk<Traits, IType, OType, USE_FAST_MATH, OUTPUT_SCALES_SWIZZLED>(
+      process_chunk<Traits, IType, OType, OUTPUT_SCALES_SWIZZLED, RETURN_DEQUANTIZED>(
           tensor_map_input, tensor_map_output, input_scales, output_scales, output_rowwise_scales,
           input_scale_base, output_scale_base, rows, cols, block_y * Traits::CHUNK_DIM_Y,
           block_x * Traits::CHUNK_DIM_X, block_y * Traits::CHUNK_DIM_Y, input_shared,
-          dequantized_shared, output_shared, input_barriers, input_barrier_parity, leading_thread);
+          dequantized_shared, output_shared, input_barriers, input_barrier_parity, leading_thread,
+          dequantized_group);
     }
   }
 
@@ -840,38 +721,28 @@ __global__ void __launch_bounds__(Traits::THREADS_PER_CHUNK) group_requantize_mx
 #endif
 }
 
-template <typename Traits, typename IType, bool USE_FAST_MATH, bool OUTPUT_SCALES_SWIZZLED>
-void launch_group_requantize(const GroupedTensor &input, GroupedTensor *output,
+template <typename Traits, typename IType, bool OUTPUT_SCALES_SWIZZLED, bool RETURN_DEQUANTIZED>
+void launch_group_requantize(const GroupedTensor &input, GroupedTensor *output, Tensor *dequantized,
                              const size_t num_tensors, const size_t first_logical_dim,
                              const size_t last_logical_dim, const size_t total_elements,
                              const int64_t *const offsets_ptr, const int64_t *const first_dims_ptr,
                              const int64_t *const last_dims_ptr,
                              const ShapeRepresentation shape_rep, cudaStream_t stream) {
   using OType = fp8e4m3;
-  using TCompute = std::conditional_t<USE_FAST_MATH, bf16, float>;
   constexpr size_t buffs_num = Traits::BUFFS_NUM;
   constexpr size_t buff_dim = Traits::BUFF_DIM;
-  constexpr size_t padding_per_vector = sizeof(float) / sizeof(TCompute);
-  constexpr size_t dequantized_stride =
-      Traits::BUFF_DIM_X + (Traits::BUFF_DIM_X / 16) * padding_per_vector;
   constexpr size_t input_bytes =
       DIVUP_TO_MULTIPLE(buffs_num * buff_dim * sizeof(IType), TMA_SHMEM_ALIGNMENT);
-  constexpr size_t generic_dequantized_bytes = DIVUP_TO_MULTIPLE(
-      Traits::BUFF_DIM_Y * dequantized_stride * sizeof(TCompute), TMA_SHMEM_ALIGNMENT);
-  constexpr size_t fast_reduction_bytes =
-      DIVUP_TO_MULTIPLE(Traits::THREADS_PER_CHUNK * sizeof(float), TMA_SWIZZLE_ALIGNMENT);
   constexpr size_t dequantized_bytes =
-      USE_FAST_MATH ? fast_reduction_bytes : generic_dequantized_bytes;
+      DIVUP_TO_MULTIPLE(Traits::THREADS_PER_CHUNK * sizeof(float), TMA_SWIZZLE_ALIGNMENT);
   constexpr size_t output_bytes =
       DIVUP_TO_MULTIPLE(buffs_num * buff_dim * sizeof(OType), TMA_SHMEM_ALIGNMENT);
-  constexpr size_t shared_alignment = USE_FAST_MATH ? TMA_SWIZZLE_ALIGNMENT : TMA_SHMEM_ALIGNMENT;
+  constexpr size_t shared_alignment = TMA_SWIZZLE_ALIGNMENT;
   constexpr size_t dynamic_shared_bytes =
       input_bytes + dequantized_bytes + output_bytes + shared_alignment;
-  static_assert(!USE_FAST_MATH || (input_bytes % TMA_SWIZZLE_ALIGNMENT == 0 &&
-                                   output_bytes % TMA_SWIZZLE_ALIGNMENT == 0));
-  constexpr CUtensorMapSwizzle tma_swizzle = USE_FAST_MATH
-                                                 ? CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_128B
-                                                 : CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE;
+  static_assert(input_bytes % TMA_SWIZZLE_ALIGNMENT == 0 &&
+                output_bytes % TMA_SWIZZLE_ALIGNMENT == 0);
+  constexpr CUtensorMapSwizzle tma_swizzle = CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_128B;
 
   const LaunchConfig launch_config =
       get_launch_config<Traits>(first_logical_dim, last_logical_dim, total_elements, num_tensors);
@@ -898,8 +769,8 @@ void launch_group_requantize(const GroupedTensor &input, GroupedTensor *output,
         true, false);
   }
 
-  auto kernel =
-      group_requantize_mxfp8_kernel<Traits, IType, OType, USE_FAST_MATH, OUTPUT_SCALES_SWIZZLED>;
+  auto kernel = group_requantize_mxfp8_kernel<Traits, IType, OType, OUTPUT_SCALES_SWIZZLED,
+                                              RETURN_DEQUANTIZED>;
   NVTE_CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                                        dynamic_shared_bytes));
   kernel<<<launch_config.grid, Traits::THREADS_PER_CHUNK, dynamic_shared_bytes, stream>>>(
@@ -909,13 +780,14 @@ void launch_group_requantize(const GroupedTensor &input, GroupedTensor *output,
       output->scale_inv.dptr == input.scale_inv.dptr
           ? nullptr
           : reinterpret_cast<e8m0_t *>(output->scale_inv.dptr),
-      reinterpret_cast<e8m0_t *>(output->columnwise_scale_inv.dptr));
+      reinterpret_cast<e8m0_t *>(output->columnwise_scale_inv.dptr),
+      RETURN_DEQUANTIZED ? reinterpret_cast<bf16 *>(dequantized->data.dptr) : nullptr);
 }
 
 }  // namespace group_requantize_kernel
 
 void group_requantize(const GroupedTensor &input, GroupedTensor *output, Tensor *dequantized,
-                      const QuantizationConfig *quant_config, cudaStream_t stream) {
+                      cudaStream_t stream) {
   using namespace group_requantize_kernel;
 
   checkCuDriverContext(stream);
@@ -996,10 +868,6 @@ void group_requantize(const GroupedTensor &input, GroupedTensor *output, Tensor 
 
   const bool return_dequantized = dequantized != nullptr && dequantized->data.dptr != nullptr;
   if (return_dequantized) {
-    NVTE_CHECK(input.all_same_last_dim() && output->with_gemm_swizzled_scales &&
-                   output->scale_inv.dptr != nullptr,
-               "Dequantized requantization output requires a common hidden dimension and "
-               "allocated GEMM-swizzled rowwise scales.");
     NVTE_CHECK(dequantized->data.dtype == DType::kBFloat16 &&
                    dequantized->data.shape == std::vector<size_t>({input.logical_shape.data[0],
                                                                    input.logical_shape.data[1]}),
@@ -1019,32 +887,27 @@ void group_requantize(const GroupedTensor &input, GroupedTensor *output, Tensor 
   const int64_t *const offsets_ptr = reinterpret_cast<const int64_t *>(input.tensor_offsets.dptr);
   const int64_t *const first_dims_ptr = reinterpret_cast<const int64_t *>(input.first_dims.dptr);
   const int64_t *const last_dims_ptr = reinterpret_cast<const int64_t *>(input.last_dims.dptr);
-  const bool use_fast_math = quant_config != nullptr && quant_config->use_fast_math;
 
 #ifdef NVTE_WITH_CUTEDSL
-  if (cutedsl_backend::mxfp8_requantize_cutedsl(input, output, dequantized, use_fast_math,
-                                                stream)) {
+  if (cutedsl_backend::mxfp8_requantize_cutedsl(input, output, dequantized, stream)) {
     NVTE_CHECK_CUDA(cudaGetLastError());
     return;
   }
 #endif
 
-  if (return_dequantized) {
-    requantize::fused_group_requantize(input, output, dequantized, quant_config, stream);
-    return;
-  }
-
   TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
       input.data.dtype, IType,
       TRANSFORMER_ENGINE_SWITCH_CONDITION(
-          use_fast_math, USE_FAST_MATH,
+          output->with_gemm_swizzled_scales, OUTPUT_SCALES_SWIZZLED,
           TRANSFORMER_ENGINE_SWITCH_CONDITION(
-              output->with_gemm_swizzled_scales, OUTPUT_SCALES_SWIZZLED,
+              return_dequantized, RETURN_DEQUANTIZED,
               TRANSFORMER_ENGINE_GROUP_TENSOR_SHAPE_REPRESENTATION_SWITCH(shape_rep, SHAPE_REP, {
                 using ActiveTraits = RequantizeTraits<SHAPE_REP>;
-                launch_group_requantize<ActiveTraits, IType, USE_FAST_MATH, OUTPUT_SCALES_SWIZZLED>(
-                    input, output, input.num_tensors, first_logical_dim, last_logical_dim,
-                    total_elements, offsets_ptr, first_dims_ptr, last_dims_ptr, shape_rep, stream);
+                launch_group_requantize<ActiveTraits, IType, OUTPUT_SCALES_SWIZZLED,
+                                        RETURN_DEQUANTIZED>(
+                    input, output, dequantized, input.num_tensors, first_logical_dim,
+                    last_logical_dim, total_elements, offsets_ptr, first_dims_ptr, last_dims_ptr,
+                    shape_rep, stream);
               }););););  // NOLINT(*), readability/fn_size
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
@@ -1054,14 +917,13 @@ void group_requantize(const GroupedTensor &input, GroupedTensor *output, Tensor 
 }  // namespace transformer_engine
 
 void nvte_group_requantize(const NVTEGroupedTensor input, NVTEGroupedTensor output,
-                           NVTETensor dequantized, const NVTEQuantizationConfig quant_config,
+                           NVTETensor dequantized, const NVTEQuantizationConfig /*quant_config*/,
                            cudaStream_t stream) {
   NVTE_API_CALL(nvte_group_requantize);
   using namespace transformer_engine;
   const GroupedTensor *const input_cu = convertNVTEGroupedTensorCheck(input);
   GroupedTensor *const output_cu = convertNVTEGroupedTensorCheck(output);
-  const auto *const quant_config_cu = reinterpret_cast<const QuantizationConfig *>(quant_config);
   dispatch::mxfp8::group_requantize(
       *input_cu, output_cu, dequantized != nullptr ? convertNVTETensorCheck(dequantized) : nullptr,
-      quant_config_cu, stream);
+      stream);
 }

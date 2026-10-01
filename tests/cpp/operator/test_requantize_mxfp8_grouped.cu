@@ -32,6 +32,7 @@ constexpr size_t kMXFP8ScaleDim = 32;
 struct GroupShapeCase {
   std::string name;
   std::vector<std::pair<size_t, size_t>> shapes;
+  size_t capacity_rows = 0;
 };
 
 struct GroupShapeInfo {
@@ -92,6 +93,14 @@ GroupShapeInfo make_shape_info(const GroupShapeCase &test_case) {
     info.logical_shape = {static_cast<size_t>(info.first_dims[0]), total_cols};
   } else {
     info.logical_shape = {1, info.total_elements};
+  }
+
+  if (test_case.capacity_rows != 0) {
+    NVTE_CHECK(info.same_last_dim && test_case.capacity_rows >= info.logical_shape[0],
+               "Capacity requires a common hidden dimension and enough rows.");
+    info.same_first_dim = false;
+    info.logical_shape[0] = test_case.capacity_rows;
+    info.total_elements = test_case.capacity_rows * info.logical_shape[1];
   }
 
   // SAME_BOTH_DIMS and VARYING_FIRST_DIM are represented as one tall tensor by
@@ -172,7 +181,7 @@ OwnedGroupedTensor make_grouped_tensor(const GroupShapeInfo &shape_info, DType d
   result.tensor = std::make_unique<GroupedTensorWrapper>(
       shape_info.num_tensors, shape_info.logical_shape, scaling_mode);
 
-  const std::vector<size_t> flat_data_shape = {shape_info.total_elements};
+  const std::vector<size_t> flat_data_shape = {shape_info.logical_shape[0] * shape_info.logical_shape[1]};
   result.data_bytes = shape_info.total_elements * dtype_size(dtype);
   if (rowwise) {
     result.rowwise_data = test::cuda_alloc(result.data_bytes);
@@ -313,6 +322,13 @@ TEST(GroupedRequantizeTest, OptionalRowwiseOutputsAndAliasRules) {
   TensorWrapper unallocated;
   nvte_group_requantize(input.data(), output.data(), unallocated.data(), nullptr, 0);
 
+  auto dequantized = test::cuda_alloc(shape_info.total_elements * sizeof(bf16));
+  TensorWrapper dequantized_nvte(dequantized.get(), shape_info.logical_shape, DType::kBFloat16);
+  nvte_group_requantize(input.data(), output.data(), dequantized_nvte.data(), nullptr, 0);
+  output.tensor->set_with_gemm_swizzled_scales(false);
+  nvte_group_requantize(input.data(), output.data(), dequantized_nvte.data(), nullptr, 0);
+  output.tensor->set_with_gemm_swizzled_scales(true);
+
   output.tensor->set_rowwise_data(input.rowwise_data.get(), DType::kFloat8E4M3,
                                    data_shape);
   // The data may alias the input even when no rowwise scale output is requested.
@@ -342,6 +358,47 @@ TEST(GroupedRequantizeTest, OptionalRowwiseOutputsAndAliasRules) {
   NVTE_CHECK_CUDA(cudaDeviceSynchronize());
 }
 
+TEST(GroupedRequantizeTest, BF16IntermediateIgnoresFastMath) {
+  if (test::getDeviceComputeCapability() < test::blackwellComputeCapability) {
+    GTEST_SKIP();
+  }
+  const auto shape_info = make_shape_info({"Single", {{128, 128}}});
+  auto input = make_grouped_tensor(shape_info, DType::kFloat8E4M3, NVTE_MXFP8_1D_SCALING,
+                                   /*rowwise=*/true, /*columnwise=*/false);
+  // These decoded values are below half the smallest BF16 subnormal but remain
+  // nonzero in FP32, so this checks the intermediate precision as well as flags.
+  std::vector<fp8e4m3> data(shape_info.total_elements, static_cast<fp8e4m3>(3.0f / 512.0f));
+  NVTE_CHECK_CUDA(cudaMemcpy(input.rowwise_data.get(), data.data(), data.size(),
+                            cudaMemcpyHostToDevice));
+  NVTE_CHECK_CUDA(cudaMemset(input.rowwise_scale_inv.get(), 0, shape_info.rowwise_scale_elements));
+  auto baseline = make_grouped_tensor(shape_info, DType::kFloat8E4M3, NVTE_MXFP8_1D_SCALING,
+                                      /*rowwise=*/false, /*columnwise=*/true);
+  auto dequantized = test::cuda_alloc(shape_info.total_elements * sizeof(bf16));
+  TensorWrapper dequantized_nvte(dequantized.get(), shape_info.logical_shape, DType::kBFloat16);
+  nvte_group_requantize(input.data(), baseline.data(), dequantized_nvte.data(), nullptr, 0);
+  std::vector<bf16> decoded(shape_info.total_elements);
+  NVTE_CHECK_CUDA(cudaMemcpy(decoded.data(), dequantized.get(), decoded.size() * sizeof(bf16),
+                            cudaMemcpyDeviceToHost));
+  for (const auto value : decoded) {
+    ASSERT_EQ(static_cast<float>(value), 0.0f);
+  }
+  for (const bool fast_math : {false, true}) {
+    QuantizationConfigWrapper config;
+    config.set_use_fast_math(fast_math);
+    auto actual = make_grouped_tensor(shape_info, DType::kFloat8E4M3, NVTE_MXFP8_1D_SCALING,
+                                      /*rowwise=*/false, /*columnwise=*/true);
+    for (const bool return_dequantized : {false, true}) {
+      nvte_group_requantize(input.data(), actual.data(),
+                           return_dequantized ? dequantized_nvte.data() : nullptr, config, 0);
+      expect_bytes_equal("columnwise data", actual.columnwise_data.get(),
+                         baseline.columnwise_data.get(), actual.data_bytes);
+      expect_bytes_equal("columnwise scales", actual.columnwise_scale_inv.get(),
+                         baseline.columnwise_scale_inv.get(), actual.columnwise_scale_bytes);
+    }
+  }
+  NVTE_CHECK_CUDA(cudaDeviceSynchronize());
+}
+
 TEST_P(GroupedRequantizeMXFP8TestSuite, MatchesDequantizeThenQuantize) {
   if (test::getDeviceComputeCapability() < test::blackwellComputeCapability) {
     GTEST_SKIP();
@@ -349,10 +406,9 @@ TEST_P(GroupedRequantizeMXFP8TestSuite, MatchesDequantizeThenQuantize) {
 
   const auto &test_case = std::get<0>(GetParam());
   const DType input_dtype = std::get<1>(GetParam());
-  const bool use_fast_math = std::get<2>(GetParam());
+  const bool return_dequantized = std::get<2>(GetParam());
   const bool output_swizzled = std::get<3>(GetParam());
-  const DType intermediate_dtype =
-      use_fast_math ? DType::kBFloat16 : DType::kFloat32;
+  const DType intermediate_dtype = DType::kBFloat16;
   const GroupShapeInfo shape_info = make_shape_info(test_case);
 
   // Build a production-like wire tensor: high precision -> grouped rowwise
@@ -384,20 +440,42 @@ TEST_P(GroupedRequantizeMXFP8TestSuite, MatchesDequantizeThenQuantize) {
       DType::kFloat8E8M0,
       std::vector<size_t>{shape_info.rowwise_scale_elements});
   fill_output_sentinel(actual);
-  QuantizationConfigWrapper quant_config;
-  quant_config.set_use_fast_math(use_fast_math);
-  nvte_group_requantize(input.data(), actual.data(), nullptr, quant_config, 0);
+  test::CudaPtr<> dequantized_out;
+  TensorWrapper dequantized_nvte;
+  if (return_dequantized) {
+    dequantized_out = test::cuda_alloc(shape_info.total_elements * sizeof(bf16));
+    NVTE_CHECK_CUDA(cudaMemset(dequantized_out.get(), 0xA5,
+                              shape_info.total_elements * sizeof(bf16)));
+    dequantized_nvte.set_rowwise_data(dequantized_out.get(), DType::kBFloat16,
+                                    shape_info.logical_shape);
+  }
+  nvte_group_requantize(input.data(), actual.data(),
+                       return_dequantized ? dequantized_nvte.data() : nullptr, nullptr, 0);
 
-  // Exact reference. The intermediate precision is part of the requantize
-  // contract, so fast_math selects BF16 here and the default path selects FP32.
-  auto dequantized = make_grouped_tensor(shape_info, intermediate_dtype,
+  // Reference descriptors delimit the live prefix, while allocations retain
+  // full capacity so byte comparisons also check untouched tails.
+  auto reference_shape_info = shape_info;
+  if (test_case.capacity_rows != 0) {
+    reference_shape_info.logical_shape[0] = shape_info.offsets.back() / shape_info.logical_shape[1];
+  }
+  auto reference_input = make_grouped_tensor(reference_shape_info, input_dtype,
+                                            NVTE_MXFP8_1D_SCALING,
+                                            /*rowwise=*/false, /*columnwise=*/false);
+  reference_input.tensor->set_rowwise_data(
+      input.rowwise_data.get(), input_dtype,
+      std::vector<size_t>{reference_shape_info.logical_shape[0] * reference_shape_info.logical_shape[1]});
+  reference_input.tensor->set_rowwise_scale_inv(input.rowwise_scale_inv.get(), DType::kFloat8E8M0,
+                                               std::vector<size_t>{shape_info.rowwise_scale_elements});
+
+  // Exact reference: requantization uses BF16 regardless of the fast-math setting.
+  auto dequantized = make_grouped_tensor(reference_shape_info, intermediate_dtype,
                                          NVTE_DELAYED_TENSOR_SCALING,
                                          /*rowwise=*/true, /*columnwise=*/false);
   fill_output_sentinel(dequantized);
-  nvte_group_dequantize(input.data(), dequantized.data(), 0);
+  nvte_group_dequantize(reference_input.data(), dequantized.data(), 0);
 
   auto reference_compact = make_grouped_tensor(
-      shape_info, DType::kFloat8E4M3, NVTE_MXFP8_1D_SCALING,
+      reference_shape_info, DType::kFloat8E4M3, NVTE_MXFP8_1D_SCALING,
       /*rowwise=*/false, /*columnwise=*/true, /*swizzled=*/false);
   fill_output_sentinel(reference_compact);
   nvte_group_quantize(dequantized.data(), reference_compact.data(), nullptr, 0);
@@ -405,7 +483,7 @@ TEST_P(GroupedRequantizeMXFP8TestSuite, MatchesDequantizeThenQuantize) {
   std::unique_ptr<OwnedGroupedTensor> reference_swizzled;
   if (output_swizzled) {
     reference_swizzled = std::make_unique<OwnedGroupedTensor>(make_grouped_tensor(
-        shape_info, DType::kFloat8E4M3, NVTE_MXFP8_1D_SCALING,
+        reference_shape_info, DType::kFloat8E4M3, NVTE_MXFP8_1D_SCALING,
         /*rowwise=*/false, /*columnwise=*/true, /*swizzled=*/true));
     fill_output_sentinel(*reference_swizzled);
     nvte_swizzle_grouped_scaling_factors(reference_compact.data(),
@@ -414,6 +492,11 @@ TEST_P(GroupedRequantizeMXFP8TestSuite, MatchesDequantizeThenQuantize) {
 
   NVTE_CHECK_CUDA(cudaDeviceSynchronize());
   ASSERT_EQ(cudaGetLastError(), cudaSuccess);
+
+  if (return_dequantized) {
+    expect_bytes_equal("dequantized data", dequantized_out.get(),
+                       dequantized.rowwise_data.get(), dequantized.data_bytes);
+  }
 
   // Scale layout does not affect FP8 data. Only the scale reference changes
   // when the target requests GEMM-swizzled scales.
@@ -428,10 +511,10 @@ TEST_P(GroupedRequantizeMXFP8TestSuite, MatchesDequantizeThenQuantize) {
   const void *expected_rowwise_scales = input.rowwise_scale_inv.get();
   if (output_swizzled) {
     reference_rowwise_swizzled = std::make_unique<OwnedGroupedTensor>(make_grouped_tensor(
-        shape_info, input_dtype, NVTE_MXFP8_1D_SCALING,
+        reference_shape_info, input_dtype, NVTE_MXFP8_1D_SCALING,
         /*rowwise=*/true, /*columnwise=*/false, /*swizzled=*/true));
     fill_output_sentinel(*reference_rowwise_swizzled);
-    nvte_swizzle_grouped_scaling_factors(input.data(),
+    nvte_swizzle_grouped_scaling_factors(reference_input.data(),
                                           reference_rowwise_swizzled->data(), 0);
     expected_rowwise_scales = reference_rowwise_swizzled->rowwise_scale_inv.get();
   }
@@ -442,6 +525,15 @@ TEST_P(GroupedRequantizeMXFP8TestSuite, MatchesDequantizeThenQuantize) {
 }
 
 const std::vector<GroupShapeCase> kGroupShapeCases = {
+    {"Single", {{1024, 512}}},
+    {"UniformSmall", {{512, 512}, {512, 512}, {512, 512}, {512, 512}}},
+    {"VaryingFirstSmall", {{256, 256}, {1024, 256}, {128, 256}, {640, 256}}},
+    {"EmptyFront", {{0, 512}, {512, 512}, {256, 512}}},
+    {"EmptyAdjacent", {{256, 384}, {0, 384}, {0, 384}, {512, 384}}},
+    {"EmptyEnd", {{512, 512}, {256, 512}, {0, 512}}},
+    {"CapacityTail", {{512, 8192}, {256, 8192}, {512, 8192}}, 2048},
+    {"EmptyGroupsAndTail", {{0, 512}, {512, 512}, {0, 512}, {256, 512}}, 1024},
+    {"UnsupportedCuTeStrideAndTail", {{0, 640}, {384, 640}, {128, 640}}, 1024},
     {"SameBothDims_1024x4096",
      {{1024, 4096}, {1024, 4096}, {1024, 4096}, {1024, 4096}}},
     {"SameBothDims_2048x8192",
@@ -467,12 +559,12 @@ std::string make_test_name(
     const testing::TestParamInfo<GroupedRequantizeMXFP8TestSuite::ParamType> &info) {
   const auto &test_case = std::get<0>(info.param);
   const DType input_dtype = std::get<1>(info.param);
-  const bool use_fast_math = std::get<2>(info.param);
+  const bool return_dequantized = std::get<2>(info.param);
   const bool output_swizzled = std::get<3>(info.param);
 
   std::string name = test_case.name;
   name += input_dtype == DType::kFloat8E4M3 ? "_E4M3" : "_E5M2";
-  name += use_fast_math ? "_FastMath" : "_FP32Math";
+  name += return_dequantized ? "_WithDequantized" : "_WithoutDequantized";
   name += output_swizzled ? "_Swizzled" : "_Compact";
   return name;
 }

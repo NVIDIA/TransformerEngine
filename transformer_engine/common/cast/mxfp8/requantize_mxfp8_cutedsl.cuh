@@ -75,10 +75,9 @@ struct MXFP8RequantConfig {
 };
 
 inline bool mxfp8_requantize_cutedsl(const GroupedTensor &input, GroupedTensor *output,
-                                     Tensor *dequantized, bool use_fast_math, cudaStream_t stream) {
+                                     Tensor *dequantized, cudaStream_t stream) {
   using namespace tvm_ffi_bridge;
-  if (!TVMFFICentral::getInstance().get_cutedsl_backend_enabled() || !use_fast_math ||
-      !input.all_same_last_dim())
+  if (!TVMFFICentral::getInstance().get_cutedsl_backend_enabled() || !input.all_same_last_dim())
     return false;
   const size_t rows = input.logical_shape.data[0];
   const size_t hidden = input.logical_shape.data[1];
