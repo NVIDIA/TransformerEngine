@@ -152,14 +152,6 @@ General
    :Description: Use CuTeDSL kernel implementations when available. This requires that Transformer Engine was built with ``NVTE_WITH_CUTEDSL=1``.
                  It also requires ``apache-tvm-ffi``, ``nvidia-cutlass-dsl`` to be installed and you are using CPython 3.10 or later.
                  If these requirements are not met, Transformer Engine will fall back to using CUDA C++ kernels if possible.
-                 Grouped MXFP8 requantization uses this backend with ``use_fast_math=True``
-                 for a constant hidden dimension. It accepts compact input scales and
-                 emits optional GEMM-swizzled rowwise scales in the same launch. It uses
-                 BF16 intermediates on Blackwell or newer devices. Wide hidden dimensions
-                 must be divisible by 512 for the compact-scale TMA load; dimensions below
-                 512 use a full-width bulk load. Other configurations retain the CUDA C++
-                 implementation, including requests for FP32 intermediates. Compilation
-                 requires a toolchain supporting the scaled FP8-to-BF16 conversion instruction.
 
 .. envvar:: NVTE_WARN_IF_CUTEDSL_BACKEND_NOT_CHOSEN
 
