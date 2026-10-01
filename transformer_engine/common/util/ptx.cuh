@@ -773,6 +773,21 @@ __device__ __forceinline__ floatx2 fma_2x(const floatx2 &a, const floatx2 &b, co
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
+// fma_2x rounding toward negative infinity instead of to nearest.
+__device__ __forceinline__ floatx2 fma_rm_2x(const floatx2 &a, const floatx2 &b, const floatx2 &c) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  floatx2 d;
+  asm("fma.rm.f32x2 %0, %1, %2, %3;"
+      : "=l"(reinterpret_cast<uint64_t &>(d))
+      : "l"(reinterpret_cast<const uint64_t &>(a)), "l"(reinterpret_cast<const uint64_t &>(b)),
+        "l"(reinterpret_cast<const uint64_t &>(c)));
+  return d;
+#else
+  NVTE_DEVICE_ERROR("fma_rm_2x is only supported on SM 10.0+.");
+  return {};
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+}
+
 __device__ __forceinline__ int32_t elect_one_sync(uint32_t mask = 0xFFFFFFFFu) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   int32_t pred = 0;
