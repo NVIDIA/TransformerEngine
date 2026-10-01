@@ -705,3 +705,32 @@ def test_dot_product_attention_score_mod(dtype, qkv_format, score_mod_case, scal
     torch.testing.assert_close(q.grad, q_ref.grad, **tols)
     torch.testing.assert_close(k.grad, k_ref.grad, **tols)
     torch.testing.assert_close(v.grad, v_ref.grad, **tols)
+
+
+@pytest.mark.parametrize("direction", ["fwd", "bwd"])
+def test_score_mod_graph_signatures_stay_aligned(direction):
+    """The cache key, the builder and the getter are splatted from one positional tuple.
+
+    `_get_cudnn_score_mod_*_graph` passes the same `build_args` tuple to the cache key and to the
+    builder, so the three parameter lists have to stay in the same order. Nothing enforced that,
+    and the failure is quiet in the worst direction: a parameter inserted in one signature and not
+    another shifts the rest by one, and a shifted *cache key* is not a crash, it is two different
+    configurations sharing a cached graph.
+
+    No GPU: this reads signatures only.
+    """
+    import inspect
+
+    names = [
+        getattr(flex_attention, "_cudnn_score_mod_%s_cache_key" % direction),
+        getattr(flex_attention, "_build_cudnn_score_mod_%s_graph" % direction),
+        getattr(flex_attention, "_get_cudnn_score_mod_%s_graph" % direction),
+    ]
+    signatures = [list(inspect.signature(fn).parameters) for fn in names]
+    reference = signatures[0]
+    for fn, params in zip(names[1:], signatures[1:]):
+        assert params == reference, (
+            "%s takes %s but _cudnn_score_mod_%s_cache_key takes %s; these are splatted from one"
+            " positional tuple and must stay in the same order"
+            % (fn.__name__, params, direction, reference)
+        )

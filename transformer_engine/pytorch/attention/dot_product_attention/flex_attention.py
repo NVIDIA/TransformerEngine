@@ -22,8 +22,10 @@ _BACKEND = "Flex Attention"
 
 def _import_cudnn_frontend():
     """Import the cuDNN frontend Python package."""
-    # Without the FROST engines: enabling them also ranks them ahead of the backend engines
-    # everywhere, which would change which plan this path runs.
+    # This path does not ask for the FROST engines, but asking is all it controls: the switch is
+    # process-wide, so a FrostAttention call elsewhere in the process, or a user setting
+    # CUDNN_FRONTEND_ENABLE_FROST_ENGINES themselves, still ranks FROST ahead of the backend
+    # engines for the graphs built here.
     return cudnn_pygraph.import_cudnn_frontend(enable_frost_engines=False)
 
 

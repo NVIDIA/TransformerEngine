@@ -360,15 +360,18 @@ def _check_kv_match(k: torch.Tensor, v: torch.Tensor) -> None:
 def _select_frost_plan(graph, token: str, what: str):
     """Select a plan whose name proves a FROST engine was chosen.
 
-    Falling back to whatever plan happens to be first would defeat the purpose: at these head
-    dims the non-FROST plans do not exist, so an unnoticed fallback would either fail obscurely
-    or quietly serve a different shape.
+    Falling back to whatever plan happens to be first would defeat the purpose. A too-old
+    nvidia-cutlass-dsl makes the FROST engines decline silently, and in the forward an ordinary
+    engine may then build and compute something else; the pin turns that into a named error at
+    the first forward rather than a wrong number or a backward that fails later for no visible
+    reason.
     """
     # Both versions, because either floor can cause this and blaming one misdirects. Looked up
     # defensively: this explains a failure, so it must not raise itself.
     def hint():
         return (
-            f"nvidia-cudnn-frontend="
+            f"Wanted the FROST {what} engine."
+            f" nvidia-cudnn-frontend="
             f"{_pkg_version('nvidia-cudnn-frontend', _cudnn)[1] or 'unknown'}"
             f" (floor {_MIN_CUDNN_FRONTEND}),"
             f" nvidia-cutlass-dsl={_pkg_version('nvidia-cutlass-dsl')[1] or 'unknown'}"

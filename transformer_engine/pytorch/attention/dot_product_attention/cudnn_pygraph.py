@@ -23,31 +23,33 @@ import torch
 
 
 _cudnn = None
+_frost_engines_enabled = False
 _handles: Dict[torch.device, Any] = {}
 
 
 def import_cudnn_frontend(enable_frost_engines: bool = False):
-    """Import cuDNN Frontend once, optionally with the FROST engines registered.
+    """Import cuDNN Frontend, enabling the FROST engines if this caller needs them.
 
     ``enable_frost_engines`` is not merely additive: the switch also ranks FROST ahead of the
     backend engines everywhere, so a caller that does not want FROST must not ask for it.
 
-    The switch is set before the import because the engines are documented as registering at
-    import time. Measured on B200 with cuDNN Frontend 1.29.0 the ordering turns out not to
-    matter, but setting it first is what the documentation asks for and costs nothing. Callers
-    that require a FROST engine should verify by plan name rather than rely on the switch, which
-    is what ``finalize_plans(require_plan_token=...)`` does.
+    The enabling is deliberately outside the import memo. Both backends call this, and whichever
+    one reaches it first would otherwise decide for the process: with the flag inside the memo, a
+    flex call would cache the module with FROST off and every later FROST call would get a cuDNN
+    that offers no FROST engine, which surfaces much later as "no cuDNN engine matching ... was
+    offered". Enabling late is sound because the switch is read per graph rather than at import:
+    in cuDNN Frontend 1.29.0 ``engines/manifest.py`` consults the environment inside
+    ``offered_ids()``, reached from ``engines_for(graph)`` on every ``create_execution_plans``.
+
+    Note the switch is process-wide and never unset, so enabling it for FROST also reorders the
+    candidates a concurrent score_mod graph sees. Callers that require a particular engine should
+    verify by plan name rather than rely on the switch, which is what
+    ``finalize_plans(require_plan_token=...)`` does.
     """
-    global _cudnn  # pylint: disable=global-statement
+    global _cudnn, _frost_engines_enabled  # pylint: disable=global-statement
     if _cudnn is None:
-        if enable_frost_engines:
-            os.environ.setdefault("CUDNN_FRONTEND_ENABLE_FROST_ENGINES", "1")
         try:
             import cudnn  # pylint: disable=import-outside-toplevel
-
-            if enable_frost_engines:
-                # pylint: disable=import-outside-toplevel,unused-import
-                import cudnn.sdpa  # noqa: F401
         except ImportError as exc:
             raise ImportError(
                 "cuDNN frontend Python package not found. "
@@ -55,7 +57,20 @@ def import_cudnn_frontend(enable_frost_engines: bool = False):
             ) from exc
 
         _cudnn = cudnn
+
+    if enable_frost_engines and not _frost_engines_enabled:
+        os.environ.setdefault("CUDNN_FRONTEND_ENABLE_FROST_ENGINES", "1")
+        # pylint: disable=import-outside-toplevel,unused-import
+        import cudnn.sdpa  # noqa: F401
+
+        _frost_engines_enabled = True
+
     return _cudnn
+
+
+def frost_engines_enabled() -> bool:
+    """Whether this process has enabled the FROST engines through ``import_cudnn_frontend``."""
+    return _frost_engines_enabled
 
 
 def handle_for(device: torch.device, *, backend_name: str = "cuDNN attention"):
@@ -137,8 +152,11 @@ def diagonal_band_kwargs(cudnn, attn_mask_type: str, window: Tuple[int, int]) ->
     not, so a window of w becomes a left bound of w + 1. Passing it through unconverted silently
     drops one token of context per layer, which no shape-level test would catch.
 
-    These kwargs are mutually exclusive with score_mod: cuDNN rejects a graph carrying both with
-    "Attention score mod enabled and hence other subgraphs are disabled".
+    These kwargs are mutually exclusive with score_mod. cuDNN enforces that in the backward node
+    only ("Attention score mod enabled and hence other subgraphs are disabled"); its forward node
+    composes the two without complaint. Callers must still refuse the pair on both sides, because
+    forward and backward have to carry the same mask or the gradients belong to a different
+    attention than the output does.
     """
     left, right = window
     opts: Dict[str, Any] = {}
@@ -166,12 +184,21 @@ def finalize_plans(
 
     ``require_plan_token`` makes the choice strict: only a plan whose name contains the token is
     acceptable, and anything else raises. That is not a stylistic preference. Without a pin,
-    ``build_plans`` walks the ranked list and finalizes the first plan that builds, so a graph
-    that a specialised engine declines would quietly run on a fallback instead, which for the
-    FROST head-dim range is the wrong kernel rather than a slower one.
+    ``build_plans`` walks the ranked list from index 0 and finalizes the first plan that builds,
+    logging each decline at INFO, so a graph that the intended engine declines runs on whatever
+    cuDNN ranked next with nothing in the return value to say so. At head_dim 512 that matters in
+    the forward, where an ordinary engine may well build and compute a different function from the
+    FROST kernel. The backward is self-limiting, since no non-FROST d512 backward exists, so an
+    unpinned backward would fail loudly on its own.
 
-    The pin must precede ``check_support``: that call is scoped to the *selected* plan, so running
-    it first would answer for whichever plan the heuristic happened to rank at index 0.
+    The token is matched as a substring rather than by equality on purpose: cuDNN has already
+    collapsed per-head-dim engine names (``..._d512`` and friends) into a single row once, and the
+    substring test survived that.
+
+    Pinning also changes what ``check_support`` means. Selecting a plan sets cuDNN's internal
+    ``_plan_pinned``, and only then is a decline fatal; unpinned, cuDNN records the decline and
+    keeps walking. So the pin has to come first both because the check is scoped to the selected
+    plan and because it is what makes the check binding at all.
     """
     cudnn = _cudnn if _cudnn is not None else import_cudnn_frontend()
 
