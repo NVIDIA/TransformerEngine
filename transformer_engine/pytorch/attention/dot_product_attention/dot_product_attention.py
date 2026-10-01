@@ -2792,7 +2792,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                 "cp_comm_type": self.cp_comm_type,
                 "cp_size": cp_size,
                 "cp_size_a2a": cp_size_a2a,
-                "load_balancing_strategy": self.load_balancing_strategy,
                 "deterministic": self.deterministic,
                 "is_training": self.training,
                 "fp8": self.fp8,

@@ -6,7 +6,6 @@
 
 from contextlib import nullcontext
 from dataclasses import dataclass
-import functools
 from importlib.metadata import version as get_pkg_version
 from importlib.metadata import PackageNotFoundError
 import inspect
@@ -103,25 +102,6 @@ _flash_attn_fwd = None
 _flash_attn_bwd = None
 _flash_attn_varlen_fwd = None
 _flash_attn_varlen_bwd = None
-
-
-def _normalize_fa4_window_kwargs(function):
-    """Translate TE's negative unbounded-window sentinel to the FA4 API."""
-
-    @functools.wraps(function)
-    def wrapper(*args, **kwargs):
-        if kwargs.get("window_size") is not None:
-            kwargs["window_size"] = tuple(
-                None if bound == -1 else bound for bound in kwargs["window_size"]
-            )
-        for name in ("window_size_left", "window_size_right"):
-            if kwargs.get(name) == -1:
-                kwargs[name] = None
-        return function(*args, **kwargs)
-
-    return wrapper
-
-
 # Try to import Flash Attention v2
 try:
     fa_utils.version = PkgVersion(get_pkg_version("flash-attn"))
@@ -242,11 +222,6 @@ else:
     else:
         # Unlike versions 2 and 3, FlashAttention 4 registers no custom ops: it builds
         # its kernels through the CUTLASS DSL as it runs. Keep it an eager island.
-        # All FA4 versions accept None for unbounded windows; TE uses -1.
-        _flash_attn_func_v4 = _normalize_fa4_window_kwargs(_flash_attn_func_v4)
-        _flash_attn_varlen_func_v4 = _normalize_fa4_window_kwargs(_flash_attn_varlen_func_v4)
-        _flash_attn_fwd_v4 = _normalize_fa4_window_kwargs(_flash_attn_fwd_v4)
-        _flash_attn_bwd_v4 = _normalize_fa4_window_kwargs(_flash_attn_bwd_v4)
         flash_attn_func_v4 = no_torch_dynamo()(_flash_attn_func_v4)
         flash_attn_varlen_func_v4 = no_torch_dynamo()(_flash_attn_varlen_func_v4)
         _flash_attn_fwd_v4 = no_torch_dynamo()(_flash_attn_fwd_v4)

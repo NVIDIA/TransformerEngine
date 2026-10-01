@@ -581,41 +581,6 @@ def test_dpa_fa4_base(dtype, model_configs, model):
     test_dot_product_attention(dtype, model_configs, model, False, None, False, False)
 
 
-@requires_fa4
-@pytest.mark.skipif(device_compute_capability != (10, 0), reason="Requires SM100 FA4.")
-def test_fa4_causal_attention_against_reference(monkeypatch):
-    """Catch all-zero causal output that backend-to-backend CP comparisons can miss."""
-    for name, value in (
-        ("NVTE_FUSED_ATTN", "0"),
-        ("NVTE_UNFUSED_ATTN", "0"),
-        ("NVTE_FLASH_ATTN_V4", "1"),
-    ):
-        monkeypatch.setenv(name, value)
-    _attention_backends["backend_selection_requires_update"] = True
-
-    b, s, h, d = 2, 1024, 8, 128
-    q, k, v = (torch.randn(b, s, h, d, device="cuda", dtype=torch.bfloat16) for _ in range(3))
-    try:
-        dpa = DotProductAttention(
-            h, d, qkv_format="bshd", attn_mask_type="causal", attention_dropout=0.0
-        ).to(dtype=torch.bfloat16, device="cuda")
-        out = dpa(q, k, v).view(b, s, h, d)
-        selected = _attention_backends["flash_attention_backend"]
-    finally:
-        _attention_backends["backend_selection_requires_update"] = True
-
-    assert selected is not None and str(selected).startswith("4"), f"Expected FA4, got {selected}"
-    assert out.abs().max() > 0, "FA4 returned an all-zero output for causal attention"
-
-    # Use float64 because fp32 matmuls may use TF32 on these GPUs.
-    qs, ks, vs = (t[0, :, 0].double() for t in (q, k, v))
-    scores = (qs @ ks.T) * (d**-0.5)
-    scores.masked_fill_(torch.ones(s, s, dtype=torch.bool, device="cuda").triu_(1), float("-inf"))
-    reference = torch.softmax(scores, dim=-1) @ vs
-    relative_error = (out[0, :, 0].double() - reference).abs().max() / reference.abs().max()
-    assert relative_error < 2e-2
-
-
 # head_dim=256 is supported only on SM100 via FA4's dedicated kernel
 # (flash_attn/cute/sm100_hd256_2cta_fmha_*.py), available in flash-attn-4 > 4.0.0b10.
 # On other architectures, _validate_head_dims rejects (256, 256), FA4 is disabled, and

@@ -20,7 +20,6 @@ import transformer_engine
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch import InferenceParams, QuantizedTensor
 from transformer_engine.pytorch import DType
-from transformer_engine.pytorch.constants import CPLoadBalancingStrategy
 from transformer_engine.pytorch.attention.dot_product_attention import _attention_backends
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     get_attention_backend,
@@ -355,7 +354,6 @@ def get_available_attention_backends(
     score_mod_bprop: bool = False,
     cp_size: int = 1,
     cp_size_a2a: int = 1,
-    load_balancing_strategy: CPLoadBalancingStrategy = CPLoadBalancingStrategy.DUAL_CHUNK_SWAP,
     num_tokens_q: Optional[int] = None,
     num_tokens_kv: Optional[int] = None,
 ) -> Tuple[List, List]:
@@ -435,7 +433,6 @@ def get_available_attention_backends(
             cp_comm_type=config.cp_comm_type,
             cp_size=cp_size,
             cp_size_a2a=cp_size_a2a,
-            load_balancing_strategy=load_balancing_strategy,
             deterministic=deterministic,
             fp8=fp8,
             fp8_meta=fp8_meta,
