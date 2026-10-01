@@ -107,7 +107,7 @@ class _MoeEpResourceManager:
             parallel=moe_ep_api.MoeEpParallelConfig(
                 ep_group=config.ep_group,
                 max_tokens_per_rank=config.max_tokens_per_rank,
-                max_recv_size_per_rank=config.recv_capacity_per_rank,
+                physical_recv_pool_rows=config.recv_capacity_per_rank,
                 drop_on_overflow=config.drop_on_overflow,
                 token_padding_size=128,
                 sf_padding_size=128,
@@ -131,7 +131,7 @@ class _MoeEpResourceManager:
                 token_in_flag_batch=8,
                 group_hint=512,
                 reduce_topk_in_kernel=False,
-                dgrad_optimization="rolling"
+                dgrad_optimization="baseline",
             ),
             training_weight_storage_mode=(moe_ep_api.MoeEpNativeWeightStorageMode.CONTIGUOUS),
             validation_mode="trusted",
@@ -666,7 +666,12 @@ class FusedMoeEp(FusedOperation):
         )
 
     def _make_training_wgrad_workspaces(self):
-        """Allocate caller-owned descriptor workspaces for both FC gradients."""
+        """Return caller-owned descriptor workspaces for both FC gradients.
+
+        Each GroupedLinear owns a persistent workspace. Wgrad kernels without
+        tensormap proxy fences can read stale cached TMA descriptors when a
+        freshly allocated workspace reuses an address with new contents.
+        """
         from cudnn import get_grouped_gemm_wgrad_workspace_size_sm100
 
         workspace_bytes = get_grouped_gemm_wgrad_workspace_size_sm100(
@@ -674,10 +679,19 @@ class FusedMoeEp(FusedOperation):
             output_mode="dense",
             input_order="tensor2d",
         )
-        return (
-            torch.empty(workspace_bytes, dtype=torch.uint8, device=self.fc1.weight.device),
-            torch.empty(workspace_bytes, dtype=torch.uint8, device=self.fc2.weight.device),
-        )
+        workspaces = []
+        for fc_op in (self.fc1, self.fc2):
+            device = fc_op.weight.device
+            workspace = getattr(fc_op, "_cudnn_wgrad_workspace", None)
+            if (
+                workspace is None
+                or workspace.numel() != workspace_bytes
+                or workspace.device != device
+            ):
+                workspace = torch.empty(workspace_bytes, dtype=torch.uint8, device=device)
+                fc_op._cudnn_wgrad_workspace = workspace
+            workspaces.append(workspace)
+        return tuple(workspaces)
 
     @property
     def dispatch(self) -> MoeDispatch:
