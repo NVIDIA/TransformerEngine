@@ -154,19 +154,18 @@ class DeepSeekV3MoE(torch.nn.Module):
         assert num_experts % self.ep_size == 0
         num_local_experts = num_experts // self.ep_size
 
-        self.experts = _make_swiglu_mlp(
+        expert_mlp = _make_swiglu_mlp(
             hidden_size, moe_ffn_hidden_size, dtype, device, num_experts=num_local_experts
         )
 
-        self.shared_expert = None
-        if shared_expert_ffn_hidden_size is not None:
-            self.shared_expert = _make_swiglu_mlp(
-                hidden_size, shared_expert_ffn_hidden_size, dtype, device
-            )
-
         self._ep_buffer_kwargs = None
         if ep_group is not None:
+            from transformer_engine.pytorch.ep import EpConfig, get_ep_drop_on_overflow
+
             assert ep_max_tokens_per_rank is not None, "EP requires ep_max_tokens_per_rank."
+            drop_on_overflow = get_ep_drop_on_overflow()
+            if drop_on_overflow is None:
+                raise RuntimeError("EP requires ep_bootstrap before constructing DeepSeekV3MoE.")
             cap = self.ep_recv_capacity(
                 self.ep_size, ep_max_tokens_per_rank, topk, num_local_experts
             )
@@ -178,6 +177,30 @@ class DeepSeekV3MoE(torch.nn.Module):
                 "recv_capacity_per_rank": cap,
                 "alignment": _EP_ALIGNMENT,
             }
+            config = EpConfig(
+                ep_group=ep_group,
+                drop_on_overflow=drop_on_overflow,
+                **self._ep_buffer_kwargs,
+            )
+            dispatch = te_ops.MoeDispatch(config)
+            combine = te_ops.MoeCombine(config)
+            fc1, activation, fc2 = expert_mlp
+            dispatch.set_extra_output_channel(0, "tokens_per_expert", output_to_caller=False)
+            dispatch.set_extra_output_channel(1, "routing_weights", output_to_caller=False)
+            fc1.set_extra_input_channel(0, "tokens_per_expert")
+            activation.set_extra_input_channel(0, "routing_weights")
+            fc2.set_extra_input_channel(0, "tokens_per_expert")
+            self.experts = te_ops.Sequential(
+                {"dispatch": dispatch, "0": fc1, "1": activation, "2": fc2, "combine": combine}
+            )
+        else:
+            self.experts = expert_mlp
+
+        self.shared_expert = None
+        if shared_expert_ffn_hidden_size is not None:
+            self.shared_expert = _make_swiglu_mlp(
+                hidden_size, shared_expert_ffn_hidden_size, dtype, device
+            )
 
     @staticmethod
     def ep_recv_capacity(
@@ -250,8 +273,6 @@ class DeepSeekV3MoE(torch.nn.Module):
         return EpBuffer(**self._ep_buffer_kwargs, device=device)
 
     def _forward_ep(self, tokens: torch.Tensor, ep_buffer=None) -> torch.Tensor:
-        from transformer_engine.pytorch.ep import ep_dispatch, ep_combine
-
         assert tokens.dtype == torch.bfloat16, "The EP path requires bfloat16 inputs."
         buffer = ep_buffer if ep_buffer is not None else self.make_ep_buffer(tokens.device)
         topk_idx = torch.empty(
@@ -264,23 +285,26 @@ class DeepSeekV3MoE(torch.nn.Module):
         ).scatter_add_(0, flat_idx, torch.ones_like(flat_idx))
         topk_weights = probs.gather(1, topk_idx)
 
-        # NCCL EP zero-fills the alignment padding between experts.
-        cap = buffer.recv_capacity_per_rank
-        recv_tokens, recv_weights, tokens_per_expert = ep_dispatch(
-            buffer,
+        dispatch_kwargs = {"buffer": buffer}
+        combine_kwargs = {"buffer": buffer}
+        if not buffer.eager:
+            cap = buffer.recv_capacity_per_rank
+            dispatch_kwargs["recv_tokens"] = torch.empty(
+                (cap, self.hidden_size), dtype=tokens.dtype, device=tokens.device
+            )
+            dispatch_kwargs["recv_topk_weights"] = torch.empty(
+                (cap,), dtype=torch.float32, device=tokens.device
+            )
+            combine_kwargs["grad_out"] = torch.empty(
+                (cap, self.hidden_size), dtype=tokens.dtype, device=tokens.device
+            )
+        return self.experts(
             tokens,
             topk_idx,
             topk_weights,
-            recv_tokens=torch.empty(
-                (cap, self.hidden_size), dtype=tokens.dtype, device=tokens.device
-            ),
-            recv_topk_weights=torch.empty((cap,), dtype=torch.float32, device=tokens.device),
+            topk_idx,
+            op_kwargs={self.experts[0]: dispatch_kwargs, self.experts[-1]: combine_kwargs},
         )
-        grad_out = torch.empty((cap, self.hidden_size), dtype=tokens.dtype, device=tokens.device)
-        expert_out = self.experts(
-            recv_tokens, tokens_per_expert, recv_weights.to(tokens.dtype), tokens_per_expert
-        )
-        return ep_combine(buffer, expert_out, num_local_tokens=tokens.shape[0], grad_out=grad_out)
 
     def forward(self, hidden_states: torch.Tensor, ep_buffer=None) -> torch.Tensor:
         """

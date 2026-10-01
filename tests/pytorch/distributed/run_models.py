@@ -70,7 +70,7 @@ def _copy_weights(ep_layer: DeepSeekV3Layer, ref: DeepSeekV3Layer, rank: int) ->
         for name, b in ep_layer.named_buffers():
             if name in ref_bufs and b.shape == ref_bufs[name].shape:
                 b.copy_(ref_bufs[name])
-        ep_fc1, _, ep_fc2 = ep_layer.mlp.experts
+        ep_fc1, _, ep_fc2 = ep_layer.mlp.experts[1:4]
         ref_fc1, _, ref_fc2 = ref.mlp.experts
         for local_e in range(NUM_LOCAL_EXPERTS):
             global_e = rank * NUM_LOCAL_EXPERTS + local_e
@@ -118,7 +118,7 @@ def test_layer_ep_matches_local(
     # A local expert's wgrad on its owner rank equals the sum of the
     # reference wgrads over all ranks. all_reduce is collective, so every
     # rank must reduce every expert's grad (in the same order).
-    ep_fc1, _, ep_fc2 = ep_layer.mlp.experts
+    ep_fc1, _, ep_fc2 = ep_layer.mlp.experts[1:4]
     ref_fc1, _, ref_fc2 = ref.mlp.experts
     for ep_fc, ref_fc in ((ep_fc1, ref_fc1), (ep_fc2, ref_fc2)):
         ref_grads = [getattr(ref_fc, f"weight{e}").grad.float().clone() for e in range(num_experts)]
@@ -224,7 +224,7 @@ def main() -> int:
         max_tokens_per_rank=TOKENS_PER_RANK,
         hidden_dim=HIDDEN,
         num_topk=TOP_K,
-        recv_capacity_per_rank=_recv_capacity(ep_size),
+        recv_capacity_per_rank=None if "--eager" in sys.argv else _recv_capacity(ep_size),
     )
     for num_microbatches in (1, 3):
         test_layer_ep_matches_local(rank, ep_size, ep_group, num_microbatches)

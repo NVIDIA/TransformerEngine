@@ -24,9 +24,13 @@ def _has_nvlink() -> bool:
 
 @pytest.mark.skipif(NUM_PROCS < 2, reason="EP requires >= 2 GPUs")
 @pytest.mark.skipif(not _has_nvlink(), reason="NCCL EP requires NVLink")
-def test_deepseek_layer_ep():
+@pytest.mark.parametrize("eager", [False, True], ids=["fixed", "eager"])
+def test_deepseek_layer_ep(eager):
     result = subprocess.run(
-        LAUNCH_CMD + [str(TEST_ROOT / "run_models.py")], env=os.environ, check=False, timeout=300
+        LAUNCH_CMD + [str(TEST_ROOT / "run_models.py")] + (["--eager"] if eager else []),
+        env=os.environ,
+        check=False,
+        timeout=300,
     )
     assert result.returncode == 0
 
