@@ -6,11 +6,16 @@
 
 Registers TE modules' eager forward/backward as ``torch.library`` custom ops so
 ``torch.compile(fullgraph=True)`` traces them as single graph nodes.
-``register_custom_op`` is the entry point; ``module/linear.py`` is the first user.
+``register_custom_op_with_autograd`` is the entry point for a module that
+wires autograd on the op itself (``module/linear.py`` is the first user);
+``register_custom_op`` registers one op without autograd; ``ops/fuser.py`` uses
+separate registrations for forward and backward and drives autograd itself.
 
 A TE forward/backward implementation takes one dataclass argument
 (``fwd_arg_type`` / ``bwd_arg_type``, e.g. ``LinearFwdArgs``) whose fields mix
 tensors, quantized tensors, quantizers, process groups and plain Python values.
+The autograd-free API preserves nested tensor results; the autograd-wired API
+keeps its saved-tensor and context-metadata contract.
 
 A ``torch.library`` custom op is narrower: it only accepts flat schema slots
 (tensors plus opaque objects) and returns a flat ``Tensor[]``.
@@ -41,9 +46,9 @@ on each call. The kinds -- and how each represents its field as op inputs:
     only when its value is trivial (``None`` / all-``None``) at call time.
 
 What runs where. Each op registers a data-free fake (``register_fake``) so it
-traces under ``torch.compile`` without allocating. ``register_custom_op`` returns
-``forward_fn`` -- the drop-in for the eager ``autograd.Function.apply``. A forward
-call through it:
+traces under ``torch.compile`` without allocating.
+``register_custom_op_with_autograd`` returns ``forward_fn`` -- the drop-in for
+the eager ``autograd.Function.apply``. A forward call through it:
 
   * runs the fake ``fwd_fake_impl`` on ``TensorSpec`` descriptors (data-free; see
     ``tensor_spec.py``) and parses its result into an ``_OutputPlan`` -- the
@@ -98,6 +103,7 @@ from typing import (
 import torch
 
 from torch._prims_common import make_contiguous_strides_for
+from torch.utils._pytree import tree_flatten, tree_unflatten
 
 from .tensor_spec import TensorSpec, to_tensor_spec
 from ..quantized_tensor import (
@@ -110,6 +116,7 @@ from ..quantized_tensor import (
 from ..utils import record_compile_disabled
 
 _TE_OP_NAMESPACE = "transformer_engine_compile"
+
 
 # Annotation for an op arg field that may hold a plain tensor, a quantized
 # tensor subclass or a *bare* ``QuantizedTensorStorage`` (the internal-quantizer
@@ -824,14 +831,16 @@ def _pack_fwd_result(result: Any) -> List[torch.Tensor]:
     return flat
 
 
-def _pack_bwd_result(grads: Any, num_grad_inputs: int, op_qualname: str) -> List[torch.Tensor]:
+def _pack_bwd_result(
+    grads: Any, num_grad_inputs: Optional[int], op_qualname: str
+) -> List[torch.Tensor]:
     """Pack a backward-impl return tuple into the op's ``Tensor[]`` payload.
 
-    Each grad occupies exactly one slot (validated against ``num_grad_inputs``);
-    a :class:`TensorSpec` grad is materialized into a single tensor.
+    Each grad occupies exactly one slot (validated against ``num_grad_inputs``
+    when given); a :class:`TensorSpec` grad is materialized into a single tensor.
     """
     grads = list(grads)
-    if len(grads) != num_grad_inputs:
+    if num_grad_inputs is not None and len(grads) != num_grad_inputs:
         raise RuntimeError(
             f"{op_qualname} expected bwd_impl to return {num_grad_inputs} grads "
             f"(one per input_tensors_for_grad entry), got {len(grads)}"
@@ -930,7 +939,7 @@ def _slice_user_grads(
 
 
 # --------------------------------------------------------------------------- #
-# Op registration
+# Op registration: base and wrapper ops, autograd wiring, one op
 # --------------------------------------------------------------------------- #
 
 
@@ -1166,7 +1175,124 @@ def _all_quantized_tensor_subclasses() -> List[type]:
     return found
 
 
+@dataclasses.dataclass(frozen=True)
+class _RegisteredOp:
+    """One registered custom op: its arg plan and the base / wrapper definitions."""
+
+    plan: _ArgPlan
+    base_def: Any
+    base_op: Any
+    wrapper_def: Any
+    wrapper_op: Any
+
+    def __call__(self, args: Any) -> List[torch.Tensor]:
+        """Pack the args dataclass into slots and call the wrapper op."""
+        kwargs = self.plan.pack(args)
+        return self.wrapper_op(*[kwargs[name] for name in self.plan.slot_names])
+
+
+def _register_op(
+    *,
+    name: str,
+    arg_type: type,
+    impl: Callable[[Any], Any],
+    fake_impl: Callable[[Any], Any],
+    pack_result: Callable[[Any], List[torch.Tensor]],
+) -> _RegisteredOp:
+    """Define one two-tier custom op: the base kernel, the wrapper op that lets
+    ``QuantizedTensor`` subclasses be inputs, and the passthrough registrations.
+    """
+    plan = _parse_arg_type(arg_type)
+    schema = f"{plan.schema_str} -> Tensor[]"
+    subclasses = _all_quantized_tensor_subclasses()
+    slot_offsets = plan.tensor_or_quantized_offsets()
+    namespace = getattr(torch.ops, _TE_OP_NAMESPACE)
+
+    for registered_name in (name, f"{name}_base"):
+        if hasattr(namespace, registered_name):
+            raise ValueError(f"Custom op '{_TE_OP_NAMESPACE}::{registered_name}' already exists")
+
+    base_def = _register_base_op(
+        op_name=f"{name}_base",
+        schema_str=schema,
+        plan=plan,
+        impl=impl,
+        fake_impl=fake_impl,
+        pack_result=pack_result,
+    )
+    base_op = getattr(namespace, f"{name}_base")
+    wrapper_def = _register_wrapper_op(
+        wrapper_op_name=name,
+        schema_str=schema,
+        base_op=base_op,
+        slot_offsets=slot_offsets,
+        subclasses=subclasses,
+    )
+    wrapper_op = getattr(namespace, name)
+
+    rule = _make_dispatch_rule(_make_slot_forwarder(base_op, slot_offsets, subclasses))
+    for sub in subclasses:
+        wrapper_def.register_torch_dispatch(sub, rule)
+    _quantized_tensor_passthrough_ops.update((base_op.default, wrapper_op.default))
+
+    return _RegisteredOp(
+        plan=plan,
+        base_def=base_def,
+        base_op=base_op,
+        wrapper_def=wrapper_def,
+        wrapper_op=wrapper_op,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Op registration: a single autograd-free op, and the autograd-wired variant
+# --------------------------------------------------------------------------- #
+
+
 def register_custom_op(
+    *,
+    op_name: str,
+    arg_type: type,
+    impl: Callable[[Any], Any],
+    fake_impl: Callable[[Any], Any],
+) -> Optional[Callable[[Any], Any]]:
+    """Register one custom op without autograd wiring.
+
+    arg_type is a dataclass defining the input schema. Results may be nested
+    tuples/lists of fresh tensors or None; fake_impl mirrors them with TensorSpec.
+    The returned callable takes an args instance and preserves the result structure.
+    Returns None for unsupported registration APIs so callers can fall back to eager.
+    Duplicate operator names raise ValueError.
+    """
+
+    def pack_result(result):
+        values, _ = tree_flatten(result)
+        return [tensor for value in values for tensor in _flatten_value(value)]
+
+    try:
+        op = _register_op(
+            name=op_name,
+            arg_type=arg_type,
+            impl=impl,
+            fake_impl=fake_impl,
+            pack_result=pack_result,
+        )
+    except (ImportError, AttributeError, RuntimeError, TypeError) as e:
+        record_compile_disabled(
+            f"could not register custom op '{op_name}' ({type(e).__name__}: {e})"
+        )
+        return None
+
+    def call(args):
+        spec_args = _spec_view(args, op.plan.tensor_field_names())
+        specs, structure = tree_flatten(fake_impl(spec_args))
+        out_plan = _OutputPlan.parse((*specs, (), None))
+        return tree_unflatten(out_plan.user_outputs(op(args)), structure)
+
+    return call
+
+
+def register_custom_op_with_autograd(
     *,
     op_name: str,
     input_tensors_for_grad: List[str],
@@ -1226,12 +1352,12 @@ def register_custom_op(
     ``bwd_arg_type``.
 
     Registration touches experimental ``torch.library`` / opaque-object APIs
-    that may be missing on older PyTorch. If it fails, this warns once and
-    returns ``None`` instead of raising, so callers can fall back to eager under
-    ``torch.compile`` (a graph break) rather than breaking import.
+    that may be missing on older PyTorch. Unavailable or incompatible APIs cause
+    a warning and return ``None``, allowing eager execution under ``torch.compile``
+    (a graph break). Duplicate operator names raise ``ValueError``.
     """
     try:
-        return _register_custom_op_impl(
+        return _register_custom_op_with_autograd_impl(
             op_name=op_name,
             input_tensors_for_grad=input_tensors_for_grad,
             fwd_arg_type=fwd_arg_type,
@@ -1249,7 +1375,7 @@ def register_custom_op(
         return None
 
 
-def _register_custom_op_impl(
+def _register_custom_op_with_autograd_impl(
     *,
     op_name: str,
     input_tensors_for_grad: List[str],
@@ -1261,7 +1387,7 @@ def _register_custom_op_impl(
     fwd_fake_impl: Callable[[Any], Tuple[Any, ...]],
     bwd_fake_impl: Callable[[Any], Tuple[Any, ...]],
 ) -> Callable[..., Any]:
-    """Body of :func:`register_custom_op`; see it for semantics."""
+    """Body of :func:`register_custom_op_with_autograd`; see it for semantics."""
     # Existence check at the API boundary: every ``input_tensors_for_grad`` name
     # must be an actual field of ``fwd_arg_type`` (differentiability -- whether
     # that field can carry a gradient -- is checked later, in
@@ -1271,96 +1397,39 @@ def _register_custom_op_impl(
     if missing:
         raise ValueError(f"input_tensors_for_grad names not in {fwd_arg_type.__name__}: {missing}")
 
-    wrapper_fwd_name = op_name
-    wrapper_bwd_name = f"{op_name}_backward"
-    base_fwd_name = f"{op_name}_base"
-    base_bwd_name = f"{wrapper_bwd_name}_base"
-    subclass_list = _all_quantized_tensor_subclasses()
-
-    fwd_plan = _parse_arg_type(fwd_arg_type)
-    bwd_plan = _parse_arg_type(bwd_arg_type)
-
-    num_grad_inputs = len(input_tensors_for_grad)
-    grad_targets = fwd_plan.resolve_grad_targets(input_tensors_for_grad)
-
-    fwd_schema = f"{fwd_plan.schema_str} -> Tensor[]"
-    bwd_schema = f"{bwd_plan.schema_str} -> Tensor[]"
-
-    base_bwd_qualname = f"{_TE_OP_NAMESPACE}::{base_bwd_name}"
-
-    base_fwd_def = _register_base_op(
-        op_name=base_fwd_name,
-        schema_str=fwd_schema,
-        plan=fwd_plan,
+    fwd_op = _register_op(
+        name=op_name,
+        arg_type=fwd_arg_type,
         impl=fwd_impl,
         fake_impl=fwd_fake_impl,
         pack_result=_pack_fwd_result,
     )
-    _register_base_op(
-        op_name=base_bwd_name,
-        schema_str=bwd_schema,
-        plan=bwd_plan,
+    bwd_qualname = f"{_TE_OP_NAMESPACE}::{op_name}_backward_base"
+    num_grad_inputs = len(input_tensors_for_grad)
+    bwd_op = _register_op(
+        name=f"{op_name}_backward",
+        arg_type=bwd_arg_type,
         impl=bwd_impl,
         fake_impl=bwd_fake_impl,
-        pack_result=lambda g: _pack_bwd_result(g, num_grad_inputs, base_bwd_qualname),
-    )
-
-    base_fwd_op = getattr(getattr(torch.ops, _TE_OP_NAMESPACE), base_fwd_name)
-    base_bwd_op = getattr(getattr(torch.ops, _TE_OP_NAMESPACE), base_bwd_name)
-
-    fwd_slot_offsets = fwd_plan.tensor_or_quantized_offsets()
-    bwd_slot_offsets = bwd_plan.tensor_or_quantized_offsets()
-
-    wrapper_fwd_def = _register_wrapper_op(
-        wrapper_op_name=wrapper_fwd_name,
-        schema_str=fwd_schema,
-        base_op=base_fwd_op,
-        slot_offsets=fwd_slot_offsets,
-        subclasses=subclass_list,
-    )
-    # Pass-through: a subclass input reaches the base op through the dispatch
-    # rule below, never through the wrapper body.
-    wrapper_bwd_def = _register_wrapper_op(
-        wrapper_op_name=wrapper_bwd_name, schema_str=bwd_schema, base_op=base_bwd_op
+        pack_result=lambda grads: _pack_bwd_result(grads, num_grad_inputs, bwd_qualname),
     )
 
     autograd_common = {
-        "fwd_plan": fwd_plan,
-        "bwd_plan": bwd_plan,
-        "grad_targets": grad_targets,
+        "fwd_plan": fwd_op.plan,
+        "bwd_plan": bwd_op.plan,
+        "grad_targets": fwd_op.plan.resolve_grad_targets(input_tensors_for_grad),
         "setup_context_user": setup_context,
         "fwd_fake_impl": fwd_fake_impl,
     }
-    wrapper_fwd_op = getattr(getattr(torch.ops, _TE_OP_NAMESPACE), wrapper_fwd_name)
-    wrapper_bwd_op = getattr(getattr(torch.ops, _TE_OP_NAMESPACE), wrapper_bwd_name)
-
-    _register_autograd_for_op(fwd_op=base_fwd_def, bwd_op=base_bwd_op, **autograd_common)
-    _register_autograd_for_op(fwd_op=wrapper_fwd_def, bwd_op=wrapper_bwd_op, **autograd_common)
-
-    _fwd_rule = _make_dispatch_rule(
-        _make_slot_forwarder(base_fwd_op, fwd_slot_offsets, subclass_list)
+    _register_autograd_for_op(fwd_op=fwd_op.base_def, bwd_op=bwd_op.base_op, **autograd_common)
+    _register_autograd_for_op(
+        fwd_op=fwd_op.wrapper_def, bwd_op=bwd_op.wrapper_op, **autograd_common
     )
-    _bwd_rule = _make_dispatch_rule(
-        _make_slot_forwarder(base_bwd_op, bwd_slot_offsets, subclass_list)
-    )
-
-    for sub in subclass_list:
-        wrapper_fwd_def.register_torch_dispatch(sub, _fwd_rule)
-        wrapper_bwd_def.register_torch_dispatch(sub, _bwd_rule)
-
-    _quantized_tensor_passthrough_ops.add(wrapper_fwd_op.default)
-    _quantized_tensor_passthrough_ops.add(wrapper_bwd_op.default)
-    _quantized_tensor_passthrough_ops.add(base_fwd_op.default)
-    _quantized_tensor_passthrough_ops.add(base_bwd_op.default)
 
     def forward_fn(fwd_args):
-        spec_obj = _spec_view(fwd_args, fwd_plan.tensor_field_names())
-        out_plan = _OutputPlan.parse(fwd_fake_impl(spec_obj))
-        kwargs = fwd_plan.pack(fwd_args)
-        flat_in = [kwargs[name] for name in fwd_plan.slot_names]
-        result = wrapper_fwd_op(*flat_in)
-
-        outputs = out_plan.user_outputs(result)
+        spec_args = _spec_view(fwd_args, fwd_op.plan.tensor_field_names())
+        out_plan = _OutputPlan.parse(fwd_fake_impl(spec_args))
+        outputs = out_plan.user_outputs(fwd_op(fwd_args))
         if len(outputs) == 1:
             return outputs[0]
         return tuple(outputs)

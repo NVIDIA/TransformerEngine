@@ -87,6 +87,11 @@ def setup_pytorch_extension(
 
     setup_mpi_flags(include_dirs, cxx_flags)
 
+    # ProcessGroupNCCL class declarations are gated on USE_C10D_NCCL. get_nccl_comm_ptr
+    # borrows the raw ncclComm_t from that backend and is used by both NCCL EP and the
+    # cuSolverMp path, so the macro is needed regardless of the NCCL EP gate below.
+    cxx_flags.append("-DUSE_C10D_NCCL")
+
     # Mirror the NCCL EP gate from setup.py / common CMake. When disabled, the
     # ep.cpp source no-ops at the #ifdef boundary; without the define it would
     # produce undefined references to nvte_ep_*.

@@ -9,6 +9,7 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <tuple>
 #include <type_traits>
@@ -22,6 +23,7 @@
 
 #include <transformer_engine/cast.h>
 #include <transformer_engine/activation.h>
+#include <transformer_engine/hadamard_transform.h>
 #include "../test_common.h"
 #include "transformer_engine/transformer_engine.h"
 
@@ -1678,3 +1680,25 @@ TEST(NVFP4UE5M3ReferenceTest, Grouped) {
   }
 }
 #endif
+
+TEST(CastNVFP4RHTTest, RejectsSwizzledScalesOnSM12x) {
+    const int sm_arch = getDeviceComputeCapability();
+    if (sm_arch != 120 && sm_arch != 121) {
+        GTEST_SKIP();
+    }
+
+    Tensor input("input", std::vector<size_t>{128, 128}, DType::kBFloat16);
+    Tensor output("output", std::vector<size_t>{128, 128}, DType::kFloat4E2M1,
+                  false, true, NVTE_NVFP4_1D_SCALING);
+    Tensor hadamard("hadamard", std::vector<size_t>{16, 16}, DType::kBFloat16);
+    output.set_with_gemm_swizzled_scales(true);
+
+    try {
+        nvte_quantize_with_hadamard_transform(input.data(), output.data(), hadamard.data(),
+                                              nullptr, nullptr);
+        FAIL() << "Expected the SM12x RHT path to reject swizzled scales";
+    } catch (const std::runtime_error& e) {
+        EXPECT_NE(std::string(e.what()).find("does not support GEMM-swizzled scales"),
+                  std::string::npos);
+    }
+}

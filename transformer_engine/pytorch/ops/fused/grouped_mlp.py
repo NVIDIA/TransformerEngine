@@ -103,13 +103,7 @@ def _cudnn_frontend_supports_grouped_gemm_srelu_hadamard() -> bool:
 
 @functools.lru_cache(maxsize=None)
 def _cudnn_frontend_supports_grouped_gemm_srelu_tanh() -> bool:
-    """Feature-detect complete cuDNN frontend grouped tanh-SReLU support.
-
-    Both directions are required: a frontend with only the forward clamp would
-    train against an unclamped backward. Detected by signature rather than
-    version so this can be developed against an editable cuDNN FE checkout; a
-    min-version constant can replace it once the feature is in a release.
-    """
+    """Check whether the cuDNN FE grouped SReLU/dSReLU wrappers accept tanh_clamp_scale."""
     try:
         from cudnn import (  # pylint: disable=import-outside-toplevel
             grouped_gemm_dsrelu_wrapper_sm100,
@@ -159,14 +153,86 @@ def _nvidia_cudnn_frontend_supports_wgrad() -> bool:
     return _cudnn_frontend_version_supported()
 
 
+@functools.lru_cache(maxsize=None)
+def _cudnn_wgrad_workspace_size_fn() -> Optional[Callable]:
+    """Workspace size query for the cuDNN wgrad kernel's ``descriptor_workspace``.
+
+    Returns ``None`` if the installed cuDNN frontend does not accept a
+    caller-owned descriptor workspace. Without it, dense-mode wgrad keys its
+    compile cache on the output pointer, so it recompiles whenever the wgrad
+    buffer changes and cannot be captured in a CUDA graph.
+    """
+    try:
+        from cudnn import (  # pylint: disable=import-outside-toplevel,no-name-in-module
+            get_grouped_gemm_wgrad_workspace_size_sm100,
+            grouped_gemm_wgrad_wrapper_sm100,
+        )
+    except ImportError:
+        return None
+    try:
+        if (
+            "descriptor_workspace"
+            not in inspect.signature(grouped_gemm_wgrad_wrapper_sm100).parameters
+        ):
+            return None
+    except (TypeError, ValueError):
+        return None
+    return get_grouped_gemm_wgrad_workspace_size_sm100
+
+
+@functools.lru_cache(maxsize=None)
+def _cudnn_wgrad_workspace(
+    op_name: str,  # pylint: disable=unused-argument
+    num_experts: int,
+    output_mode: str,
+    input_order: str,
+    device: torch.device,
+) -> torch.Tensor:
+    """Persistent cuDNN wgrad descriptor workspace for one GEMM role and kernel configuration.
+
+    The workspace must outlive the backward pass: one allocated per call breaks
+    CUDA-graph replay. FC1 and FC2 need separate workspaces even though their
+    sizes match, so ``op_name`` is part of the key; sharing one corrupts their
+    weight gradients.
+    """
+    workspace_bytes = _cudnn_wgrad_workspace_size_fn()(
+        num_experts,
+        output_mode=output_mode,
+        input_order=input_order,
+    )
+    return torch.empty(workspace_bytes, dtype=torch.uint8, device=device)
+
+
+def _alloc_cudnn_wgrad_workspace(
+    op_name: str,
+    fc_op: GroupedLinear,
+    ctx: OperationContext,
+    wgrad_kernel_fn: Optional[Callable],
+    num_experts: int,
+    use_nvfp4: bool,
+    device: torch.device,
+) -> Optional[torch.Tensor]:
+    """Return the cuDNN wgrad descriptor workspace for one GroupedLinear, if supported."""
+    if (
+        wgrad_kernel_fn is None
+        or _cudnn_wgrad_workspace_size_fn() is None
+        or not ctx.weight_requires_grad
+    ):
+        return None
+    return _cudnn_wgrad_workspace(
+        op_name,
+        num_experts,
+        "dense" if fc_op.single_grouped_weight else "discrete",
+        "tensor_ragged" if use_nvfp4 else "tensor2d",
+        torch.device(device),
+    )
+
+
 def _cudnn_frontend_supports_single_group_runtime_offsets(
     activation_type: type[FusibleOperation],
 ) -> bool:
     """Check cuDNN FE support for single-group runtime offsets."""
-    # The srelu/dsrelu wrappers take no use_single_group_runtime_offsets argument,
-    # so every activation in that family has to be excluded here, not just
-    # ScaledSReLU -- passing it through would raise TypeError on the single-group
-    # (shared expert) path.
+    # The srelu/dsrelu wrappers do not accept use_single_group_runtime_offsets.
     return not issubclass(
         activation_type, (ScaledSReLU, ScaledTanhSReLU)
     ) and _cudnn_frontend_version_at_least("1.27.0")
@@ -591,6 +657,7 @@ def _cudnn_compute_wgrad(
     data_dtype: torch.dtype,
     scale_view_dtype: torch.dtype,
     sf_vec_size: int,
+    descriptor_workspace: Optional[torch.Tensor] = None,
     current_stream=None,
 ):
     """Compute wgrad using the cuDNN CuTe DSL grouped GEMM wgrad kernel.
@@ -686,6 +753,8 @@ def _cudnn_compute_wgrad(
         "accumulate_on_output": accumulate,
         "current_stream": current_stream,
     }
+    if descriptor_workspace is not None:
+        common_wgrad_kwargs["descriptor_workspace"] = descriptor_workspace
     if use_nvfp4:
         num_groups = offsets.shape[0]
         if total_tokens == 0:
@@ -761,6 +830,7 @@ def _compute_grad_params(
     sf_vec_size,
     offsets,
     use_dense_single_group,
+    cudnn_wgrad_workspace=None,
 ):
     """Compute weight gradients and build grad_params for a GroupedLinear layer.
     Returns the grad_params list in parameter registration order.
@@ -852,6 +922,7 @@ def _compute_grad_params(
                 data_dtype=data_dtype,
                 scale_view_dtype=scale_view_dtype,
                 sf_vec_size=sf_vec_size,
+                descriptor_workspace=cudnn_wgrad_workspace,
             )
         else:
             gemm_fn = functools.partial(
@@ -929,11 +1000,11 @@ def validate_grouped_mlp_dims(fc1, activation_op, fc2) -> None:
 
 
 def fuse_grouped_mlp_ops(
-    ops,
+    ops: list[FusibleOperation],
     *,
-    recipe,
-    fused_op_cls,
-    activation_op_types=None,
+    recipe: Optional[Recipe],
+    fused_op_cls: type[_GroupedMLP_CuTeGEMMBase],
+    activation_op_types: tuple[type[FusibleOperation]],
 ):
     """Sliding-window fusion for GroupedLinear + activation + GroupedLinear.
 
@@ -968,12 +1039,6 @@ def fuse_grouped_mlp_ops(
     # MXFP8 kernel assumes E4M3 data, so reject hybrid E4M3/E5M2 data
     if recipe.mxfp8() and get_fp8_torch_dtype(recipe, fprop_tensor=False) != torch.float8_e4m3fn:
         return ops
-
-    if activation_op_types is None:
-        activation_op_types = [ScaledSwiGLU, ScaledClampedQGeGLU]
-        if _cudnn_frontend_supports_grouped_gemm_situglu():
-            activation_op_types.append(ScaledSiTUGLU)
-        activation_op_types = tuple(activation_op_types)
 
     # Check for unsupported NVFP4 recipe configs
     if recipe.nvfp4():
@@ -1161,12 +1226,8 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             self._cudnn_situ_beta1: float = activation.beta1
             self._cudnn_situ_beta2: float = activation.beta2
 
-        # Set unconditionally: the forward/backward paths read this attribute for
-        # every activation, so leaving it undefined would break plain ScaledSReLU.
         self._pass_srelu_tanh_params: bool = isinstance(activation, ScaledTanhSReLU)
         if self._pass_srelu_tanh_params:
-            # Fail at construction rather than silently running unclamped, which
-            # would train a different model than the config asks for.
             if not _cudnn_frontend_supports_grouped_gemm_srelu_tanh():
                 raise RuntimeError(
                     "ScaledTanhSReLU requires a cuDNN frontend whose "
@@ -2083,11 +2144,8 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             mark_grouped_tensor(saved_fc1_x, activation_in, scales, grouped_fc2_x)
             activation_op = self.basic_ops[1]
             cpu_offloading = is_cpu_offload_enabled()
-            # Deliberately ScaledSReLU only for now: ScaledTanhSReLU falls back to
-            # saving fc2_x, which costs memory but stays correct. The cuDNN dsrelu
-            # d_srelu regeneration does honour the clamp, so enabling recompute here
-            # is a viable follow-up rather than a blocker.
-            activation_is_srelu = isinstance(activation_op, ScaledSReLU)
+            # The dSReLU kernel applies the tanh clamp when regenerating fc2_x.
+            activation_is_srelu = isinstance(activation_op, (ScaledSReLU, ScaledTanhSReLU))
             activation_recompute_in_mlp = bool(
                 getattr(activation_op, "activation_recompute_in_mlp", False)
             )
@@ -2175,8 +2233,6 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
 
         # Get basic operations
         fc1_op, activation_op, fc2_op = self.basic_ops
-        # Selects how the NVFP4 fc2 alpha is folded below: the whole dsrelu family
-        # applies alpha once, unlike the gated kernels which need sqrt(product).
         activation_is_srelu = isinstance(activation_op, (ScaledSReLU, ScaledTanhSReLU))
         fc1_ctx, _activation_ctx, fc2_ctx = basic_op_ctxs
 
@@ -2747,6 +2803,9 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             sf_vec_size=sf_vec_size,
             offsets=split_points,
             use_dense_single_group=use_dense_single_group,
+            cudnn_wgrad_workspace=_alloc_cudnn_wgrad_workspace(
+                "FC2", fc2_op, fc2_ctx, wgrad_kernel_fn, split_points.shape[0], use_nvfp4, device
+            ),
         )
 
         # Clear FC2 input tensor if possible
@@ -3008,6 +3067,9 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             sf_vec_size=sf_vec_size,
             offsets=split_points,
             use_dense_single_group=use_dense_single_group,
+            cudnn_wgrad_workspace=_alloc_cudnn_wgrad_workspace(
+                "FC1", fc1_op, fc1_ctx, wgrad_kernel_fn, split_points.shape[0], use_nvfp4, device
+            ),
         )
 
         # Clear FC1 input tensor if possible
@@ -3136,7 +3198,7 @@ class GroupedMLP_CuTeGEMMUnary(_GroupedMLP_CuTeGEMMBase):
             return False
 
 
-def fuse_ops(
+def fuse_glu_ops(
     ops: list[FusibleOperation],
     *,
     recipe: Optional[Recipe] = None,
@@ -3144,14 +3206,30 @@ def fuse_ops(
 ) -> list[FusibleOperation]:
     """Apply joint GroupedLinear + scaled GLU + GroupedLinear fusion."""
 
+    # Determine supported activations
+    activation_op_types = []
+    device_arch = get_device_compute_capability()
+    if device_arch[0] == 10 and device_arch[1] < 7:  # Blackwell
+        activation_op_types.extend((ScaledSwiGLU, ScaledClampedQGeGLU))
+        if _cudnn_frontend_supports_grouped_gemm_situglu():
+            activation_op_types.append(ScaledSiTUGLU)
+    elif device_arch[0] == 10 and device_arch[1] == 7:  # Rubin
+        activation_op_types.append(ScaledSwiGLU)
+        if _cudnn_frontend_version_at_least("1.30.0"):
+            activation_op_types.append(ScaledClampedQGeGLU)
+    else:
+        # Unsupported device arch
+        return ops
+
     return fuse_grouped_mlp_ops(
         ops,
         recipe=recipe,
         fused_op_cls=GroupedMLP_CuTeGEMMGLU,
+        activation_op_types=tuple(activation_op_types),
     )
 
 
-def fuse_srelu_ops(
+def fuse_unary_activation_ops(
     ops: list[FusibleOperation],
     *,
     recipe: Optional[Recipe] = None,
@@ -3159,24 +3237,21 @@ def fuse_srelu_ops(
 ) -> list[FusibleOperation]:
     """Apply joint GroupedLinear + scaled unary activation + GroupedLinear fusion."""
 
-    # ScaledTanhSReLU joins only when the installed cuDNN frontend can actually
-    # clamp. Listing it unconditionally would let the op fuse and then raise from
-    # _GroupedMLP_CuTeGEMMBase.__init__; leaving it out simply declines the fusion
-    # and runs the correct unfused activation instead.
-    activation_op_types: tuple[type[FusibleOperation], ...] = (ScaledSReLU,)
+    # Determine supported activations
+    activation_op_types = [ScaledSReLU]
     if _cudnn_frontend_supports_grouped_gemm_srelu_tanh():
-        activation_op_types += (ScaledTanhSReLU,)
+        activation_op_types.append(ScaledTanhSReLU)
 
     return fuse_grouped_mlp_ops(
         ops,
         recipe=recipe,
         fused_op_cls=GroupedMLP_CuTeGEMMUnary,
-        activation_op_types=activation_op_types,
+        activation_op_types=tuple(activation_op_types),
     )
 
 
 # Register joint fusions if available.
 if GroupedMLP_CuTeGEMMGLU.is_supported():
-    register_forward_backward_fusion(fuse_ops, prepend=True)
+    register_forward_backward_fusion(fuse_glu_ops, prepend=True)
 if GroupedMLP_CuTeGEMMUnary.is_supported():
-    register_forward_backward_fusion(fuse_srelu_ops, prepend=True)
+    register_forward_backward_fusion(fuse_unary_activation_ops, prepend=True)

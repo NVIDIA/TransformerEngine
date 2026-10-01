@@ -13,8 +13,12 @@
 
 #include <transformer_engine/transformer_engine.h>
 
+#include <optional>
+#include <string>
+
 #include "../../common.h"
 #include "../../transpose/cast_transpose.h"
+#include "../../util/cuda_runtime.h"
 #include "../../util/vectorized_pointwise.h"
 #include "../core/common.cuh"
 #include "../fp8/group_quantize_fp8.cuh"
@@ -26,6 +30,10 @@
 #include "../nvfp4/group_quantize_transpose_nvfp4.cuh"
 #include "../nvfp4/quantize_4over6_nvfp4.cuh"
 #include "../nvfp4/quantize_transpose_nvfp4.cuh"
+
+#ifdef NVTE_WITH_CUTEDSL
+#include "../mxfp8/quantize_mxfp8_cutedsl.cuh"
+#endif
 
 namespace transformer_engine {
 namespace dispatch {
@@ -87,9 +95,19 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
       const Tensor *dummy_input_tensor = nullptr;
       Tensor *dummy_dbias_tensor = nullptr;
       Tensor *dummy_workspace_tensor = nullptr;
-      mxfp8::quantize</*IS_DBIAS=*/false, /*IS_DACT=*/false, IS_ACT, ParamOP, OP>(
-          *input_tensor, dummy_input_tensor, noop_tensor, output_tensor, dummy_dbias_tensor,
-          dummy_workspace_tensor, quant_config_cpp.mxfp8_2d_quantization, stream);
+      bool quantized_with_cutedsl = false;
+#ifdef NVTE_WITH_CUTEDSL
+      quantized_with_cutedsl =
+          cutedsl_backend::mxfp8_quantize_cutedsl</*IS_DBIAS=*/false, /*IS_DACT=*/false, IS_ACT,
+                                                  ParamOP, OP>(
+              input_tensor, dummy_input_tensor, noop_tensor, output_tensor, dummy_dbias_tensor,
+              dummy_workspace_tensor, quant_config_cpp.mxfp8_2d_quantization, stream);
+#endif
+      if (!quantized_with_cutedsl) {
+        mxfp8::quantize</*IS_DBIAS=*/false, /*IS_DACT=*/false, IS_ACT, ParamOP, OP>(
+            *input_tensor, dummy_input_tensor, noop_tensor, output_tensor, dummy_dbias_tensor,
+            dummy_workspace_tensor, quant_config_cpp.mxfp8_2d_quantization, stream);
+      }
       break;
     }
     case NVTE_NVFP4_1D_SCALING: {
@@ -128,11 +146,7 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
                 (dtype == DType::kBFloat16 && rows % 32 == 0 && cols % 32 == 0),
             "Row-scaled NVFP4 transpose quantization requires BF16 input and dimensions that are "
             "multiples of 32.");
-        nvfp4::compute_rowwise_amax(*input_tensor, noop_tensor, output_tensor, stream);
-        if (output_tensor->has_columnwise_data() &&
-            output_tensor->columnwise_amax.dptr != nullptr) {
-          nvfp4::compute_columnwise_amax(*input_tensor, noop_tensor, output_tensor, stream);
-        }
+        nvfp4::row_scaled::compute_amaxes(*input_tensor, noop_tensor, output_tensor, stream);
       }
       // Columnwise-only is supported on the optimized path only for 2D scaling; rowwise-only and
       // both-directions keep their existing routing. Columnwise-only 1D and non-bf16 fall back to
@@ -270,9 +284,18 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
       break;
     }
     case NVTE_MXFP8_1D_SCALING: {
-      mxfp8::quantize<IS_DBIAS, IS_DACT, /*IS_ACT=*/false, ParamOP, OP>(
-          *grad_tensor, input_tensor, noop_tensor, output_tensor, dbias_tensor, workspace_tensor,
-          quant_config_cpp.mxfp8_2d_quantization, stream);
+      bool quantized_with_cutedsl = false;
+#ifdef NVTE_WITH_CUTEDSL
+      quantized_with_cutedsl =
+          cutedsl_backend::mxfp8_quantize_cutedsl<IS_DBIAS, IS_DACT, /*IS_ACT=*/false, ParamOP, OP>(
+              grad_tensor, input_tensor, noop_tensor, output_tensor, dbias_tensor, workspace_tensor,
+              quant_config_cpp.mxfp8_2d_quantization, stream);
+#endif
+      if (!quantized_with_cutedsl) {
+        mxfp8::quantize<IS_DBIAS, IS_DACT, /*IS_ACT=*/false, ParamOP, OP>(
+            *grad_tensor, input_tensor, noop_tensor, output_tensor, dbias_tensor, workspace_tensor,
+            quant_config_cpp.mxfp8_2d_quantization, stream);
+      }
       break;
     }
     case NVTE_NVFP4_1D_SCALING: {
@@ -312,11 +335,7 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
                 (dtype == DType::kBFloat16 && rows % 32 == 0 && cols % 32 == 0),
             "Row-scaled NVFP4 transpose quantization requires BF16 input and dimensions that are "
             "multiples of 32.");
-        nvfp4::compute_rowwise_amax(*grad_tensor, noop_tensor, output_tensor, stream);
-        if (output_tensor->has_columnwise_data() &&
-            output_tensor->columnwise_amax.dptr != nullptr) {
-          nvfp4::compute_columnwise_amax(*grad_tensor, noop_tensor, output_tensor, stream);
-        }
+        nvfp4::row_scaled::compute_amaxes(*grad_tensor, noop_tensor, output_tensor, stream);
       }
       // Columnwise-only is supported on the optimized path only for 2D scaling; rowwise-only and
       // both-directions keep their existing routing. Columnwise-only 1D and non-bf16 fall back to

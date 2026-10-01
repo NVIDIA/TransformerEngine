@@ -12,7 +12,7 @@ import torch
 from transformer_engine.pytorch import DotProductAttention, is_bf16_available
 from transformer_engine.pytorch.attention.dot_product_attention import _attention_backends
 import transformer_engine.pytorch.attention.dot_product_attention.flex_attention as flex_attention
-from transformer_engine.pytorch.utils import get_cudnn_version, get_device_compute_capability
+from transformer_engine.pytorch.utils import get_device_compute_capability
 
 _current_file = pathlib.Path(__file__).resolve()
 sys.path = [str(_current_file.parent.parent)] + sys.path
@@ -538,7 +538,6 @@ def _pytorch_softcap_attention(q, k, v, qkv_format, softmax_scale, softcap):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required.")
-@pytest.mark.skipif(get_cudnn_version() < (9, 6, 0), reason="cuDNN 9.6.0+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("qkv_format", ["sbhd", "bshd"])
 @pytest.mark.parametrize(

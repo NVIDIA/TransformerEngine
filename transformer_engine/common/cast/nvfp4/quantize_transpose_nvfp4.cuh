@@ -19,6 +19,7 @@
 #include <type_traits>
 
 #include "../../common.h"
+#include "../../hadamard_transform/hadamard_transform_utils.cuh"
 #include "../../util/math.h"
 #include "../../util/ptx_arch_spec.cuh"
 #include "../../utils.cuh"
@@ -30,7 +31,27 @@ namespace transformer_engine {
 namespace dispatch {
 namespace nvfp4 {
 
-namespace rowwise_amax_kernel {
+__device__ __forceinline__ void load_matrix_b_16x16_from_shared(uint32_t &b0, uint32_t &b1,
+                                                                uint32_t &b2, uint32_t &b3,
+                                                                const void *addr, uint32_t stride) {
+  asm volatile(
+      "wmma.load.b.sync.aligned.row.m16n16k16.shared::cta.bf16 "
+      "{%0,%1,%2,%3}, [%4], %5;\n"
+      : "=r"(b0), "=r"(b1), "=r"(b2), "=r"(b3)
+      : "l"(addr), "r"(stride));
+}
+
+__device__ __forceinline__ void store_matrix_16x16_to_shared(uint32_t c0, uint32_t c1, uint32_t c2,
+                                                             uint32_t c3, void *addr) {
+  const uint32_t smem_addr = static_cast<uint32_t>(__cvta_generic_to_shared(addr));
+  asm volatile(
+      "wmma.store.d.sync.aligned.row.m16n16k16.shared::cta.f16 "
+      "[%0], {%1,%2,%3,%4}, 16;\n"
+      :
+      : "r"(smem_addr), "r"(c0), "r"(c1), "r"(c2), "r"(c3));
+}
+
+namespace row_scaled_amax_kernel {
 
 using namespace ptx;
 
@@ -154,12 +175,12 @@ void launch_compute_columnwise_amax(const int num_rows, const int num_cols, cons
 
 #endif  // FP4_TYPE_SUPPORTED
 
-}  // namespace rowwise_amax_kernel
+}  // namespace row_scaled_amax_kernel
 
 inline void compute_rowwise_amax(const Tensor &input, const Tensor *noop, Tensor *output,
                                  cudaStream_t stream) {
 #if FP4_TYPE_SUPPORTED
-  using namespace rowwise_amax_kernel;
+  using namespace row_scaled_amax_kernel;
 
   const auto [rows, cols] = input.flat_2d_dims();
   NVTE_CHECK(cols % ROWWISE_AMAX_SF_VEC_SIZE == 0,
@@ -197,7 +218,7 @@ inline void compute_rowwise_amax(const Tensor &input, const Tensor *noop, Tensor
 inline void compute_columnwise_amax(const Tensor &input, const Tensor *noop, Tensor *output,
                                     cudaStream_t stream) {
 #if FP4_TYPE_SUPPORTED
-  using namespace rowwise_amax_kernel;
+  using namespace row_scaled_amax_kernel;
 
   const auto [rows, cols] = input.flat_2d_dims();
   auto *amax_ptr = reinterpret_cast<float *>(output->columnwise_amax.dptr);
@@ -227,6 +248,271 @@ inline void compute_columnwise_amax(const Tensor &input, const Tensor *noop, Ten
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
 #endif  // FP4_TYPE_SUPPORTED
 }
+
+namespace row_scaled_amax_kernel {
+
+using namespace ptx;
+
+#if FP4_TYPE_SUPPORTED
+
+constexpr int FA_CHUNK_DIM_Y = 128;
+constexpr int FA_CHUNK_DIM_X = 128;
+constexpr int FA_TILE_DIM_Y = 64;
+constexpr int FA_TILE_DIM_X = 64;
+constexpr int FA_THREADS_NUM = 128;
+constexpr int FA_TILES_Y = FA_CHUNK_DIM_Y / FA_TILE_DIM_Y;
+constexpr int FA_TILES_X = FA_CHUNK_DIM_X / FA_TILE_DIM_X;
+constexpr int FA_STAGES = FA_TILES_Y * FA_TILES_X;
+constexpr int FA_PREFETCH_STAGES = 1;
+constexpr int FA_BUFFS_NUM = FA_PREFETCH_STAGES + 1;
+constexpr int FA_BUFF_IN_SIZE = FA_TILE_DIM_Y * FA_TILE_DIM_X;
+
+static __global__ void fused_amax_zero_kernel(float *row_amax, const int rows, float *col_amax,
+                                              const int cols, const float *noop) {
+  if (noop != nullptr && noop[0] == 1.0f) {
+    return;
+  }
+  const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  const int stride = gridDim.x * blockDim.x;
+  if (row_amax != nullptr) {
+    for (int i = idx; i < rows; i += stride) {
+      row_amax[i] = 0.0f;
+    }
+  }
+  if (col_amax != nullptr) {
+    for (int i = idx; i < cols; i += stride) {
+      col_amax[i] = 0.0f;
+    }
+  }
+}
+
+template <bool DO_ROW, bool DO_COL>
+__global__ void __launch_bounds__(FA_THREADS_NUM)
+    compute_fused_amax_kernel(const __grid_constant__ CUtensorMap tensor_map_input,
+                              float *__restrict__ row_amax_out, float *__restrict__ col_amax_out,
+                              const float *noop, const size_t rows, const size_t cols) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  if (noop != nullptr && noop[0] == 1.0f) {
+    return;
+  }
+
+  using IType = __nv_bfloat16;
+  using IType2 = ptx::FPx2<IType>;
+  using IType3D = IType[FA_BUFFS_NUM][FA_TILE_DIM_Y][FA_TILE_DIM_X];
+
+  const bool leading_thread = (threadIdx.x == 0);
+  const int tid = threadIdx.x;
+  const int block_offset_Y = blockIdx.y * FA_CHUNK_DIM_Y;
+  const int block_offset_X = blockIdx.x * FA_CHUNK_DIM_X;
+
+  constexpr size_t buff_elems_total = FA_BUFFS_NUM * FA_BUFF_IN_SIZE;
+  constexpr size_t buff_size_aligned_in =
+      DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(IType), TMA_SHMEM_ALIGNMENT);
+  constexpr size_t shmem_buff_size = buff_size_aligned_in / FA_BUFFS_NUM;
+
+  extern __shared__ char dynamic_shmem[];
+  char *dshmem = align_up(dynamic_shmem, TMA_SHMEM_ALIGNMENT);
+  auto &sIn = *reinterpret_cast<IType3D *>(dshmem);
+
+  __shared__ alignas(8) uint64_t in_readable_mbar[FA_BUFFS_NUM];
+
+  const int my_row_stage_Y = tid / FA_TILE_DIM_Y;
+  const int my_col_stage_X = tid / FA_TILE_DIM_X;
+  const int my_row_in_subtile = tid % FA_TILE_DIM_Y;
+  const int my_col_in_subtile = tid % FA_TILE_DIM_X;
+
+  float row_partial = 0.0f;
+  float col_partial = 0.0f;
+
+  if (leading_thread) {
+#pragma unroll
+    for (int buff = 0; buff < FA_BUFFS_NUM; ++buff) {
+      ptx::mbarrier_init(&in_readable_mbar[buff], 1);
+    }
+    ptx::fence_proxy_async_shared_cta();
+  }
+  __syncthreads();
+
+#pragma unroll
+  for (int stage = 0; stage < FA_PREFETCH_STAGES; ++stage) {
+    const int buff_in = stage;
+    const int stage_Y = stage / FA_TILES_X;
+    const int stage_X = stage % FA_TILES_X;
+    const int global_offset_Y = block_offset_Y + stage_Y * FA_TILE_DIM_Y;
+    const int global_offset_X = block_offset_X + stage_X * FA_TILE_DIM_X;
+    if (leading_thread) {
+      ptx::mbarrier_arrive_expect_tx(&in_readable_mbar[buff_in], shmem_buff_size);
+      ptx::cp_async_bulk_tensor_2d_global_to_shared(
+          reinterpret_cast<uint64_t *>(&sIn[buff_in]),
+          reinterpret_cast<const uint64_t *>(&tensor_map_input), global_offset_X, global_offset_Y,
+          &in_readable_mbar[buff_in]);
+    }
+  }
+
+  int buff_in = 0;
+  int readable_parity[FA_BUFFS_NUM] = {0, 0};
+
+#pragma unroll
+  for (int stage = 0; stage < FA_STAGES; ++stage) {
+    const int stage_Y = stage / FA_TILES_X;
+    const int stage_X = stage % FA_TILES_X;
+
+    if (stage < FA_STAGES - FA_PREFETCH_STAGES) {
+      const int next_prefetch_buff = (buff_in + FA_PREFETCH_STAGES) % FA_BUFFS_NUM;
+      const int next_prefetch_stage = (stage + FA_PREFETCH_STAGES) % FA_STAGES;
+      const int next_stage_Y = next_prefetch_stage / FA_TILES_X;
+      const int next_stage_X = next_prefetch_stage % FA_TILES_X;
+      const int next_global_offset_Y = block_offset_Y + next_stage_Y * FA_TILE_DIM_Y;
+      const int next_global_offset_X = block_offset_X + next_stage_X * FA_TILE_DIM_X;
+      if (leading_thread) {
+        ptx::mbarrier_arrive_expect_tx(&in_readable_mbar[next_prefetch_buff], shmem_buff_size);
+        ptx::cp_async_bulk_tensor_2d_global_to_shared(
+            reinterpret_cast<uint64_t *>(&sIn[next_prefetch_buff]),
+            reinterpret_cast<const uint64_t *>(&tensor_map_input), next_global_offset_X,
+            next_global_offset_Y, &in_readable_mbar[next_prefetch_buff]);
+      }
+      ptx::fence_proxy_async_shared_cta();
+    }
+
+    // Acquire wait orders the TMA store before the SMEM read; required for buffer reuse.
+    ptx::mbarrier_wait_parity_acquire_cta_shared_cta(&in_readable_mbar[buff_in],
+                                                     readable_parity[buff_in]);
+    readable_parity[buff_in] ^= 1;
+
+    if constexpr (DO_ROW) {
+      if (stage_Y == my_row_stage_Y) {
+        float local_max = row_partial;
+        const int row_bank_group = (my_row_in_subtile >> 2) & 0x7;
+#pragma unroll
+        for (int e_iter = 0; e_iter < FA_TILE_DIM_X / 8; ++e_iter) {
+          const int e = ((e_iter + row_bank_group) & 0x7) << 3;
+          __uint128_t elts_8x = ptx::ld_shared_b128(&sIn[buff_in][my_row_in_subtile][e]);
+          const IType2 *pairs = reinterpret_cast<const IType2 *>(&elts_8x);
+          IType2 amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
+#pragma unroll
+          for (int p = 0; p < 4; ++p) {
+            ptx::abs_max_2x(amax_2x, amax_2x, pairs[p]);
+          }
+          local_max =
+              fmaxf(local_max, static_cast<float>(__hmax(__habs(amax_2x.x), __habs(amax_2x.y))));
+        }
+        row_partial = local_max;
+      }
+    }
+
+    if constexpr (DO_COL) {
+      if (stage_X == my_col_stage_X) {
+        float local_max = col_partial;
+#pragma unroll
+        for (int e = 0; e < FA_TILE_DIM_Y; ++e) {
+          const IType v = sIn[buff_in][e][my_col_in_subtile];
+          local_max = fmaxf(local_max, fabsf(static_cast<float>(v)));
+        }
+        col_partial = local_max;
+      }
+    }
+
+    __syncthreads();
+    buff_in = (buff_in + 1) % FA_BUFFS_NUM;
+  }
+
+  if constexpr (DO_ROW) {
+    atomicMaxFloat(&row_amax_out[block_offset_Y + tid], row_partial);
+  }
+  if constexpr (DO_COL) {
+    atomicMaxFloat(&col_amax_out[block_offset_X + tid], col_partial);
+  }
+
+  if (leading_thread) {
+#pragma unroll
+    for (int buff = 0; buff < FA_BUFFS_NUM; ++buff) {
+      ptx::mbarrier_invalid(&in_readable_mbar[buff]);
+    }
+  }
+#else
+  NVTE_DEVICE_ERROR("Fused amax kernel requires SM 10.0+ (Blackwell).");
+#endif  // __CUDA_ARCH__ >= 1000
+}
+
+#endif  // FP4_TYPE_SUPPORTED
+
+}  // namespace row_scaled_amax_kernel
+
+inline bool fused_amax_supported(const Tensor &input, const Tensor *output) {
+#if FP4_TYPE_SUPPORTED
+  using namespace row_scaled_amax_kernel;
+  const auto [rows, cols] = input.flat_2d_dims();
+  return input.dtype() == DType::kBFloat16 && (rows % FA_CHUNK_DIM_Y == 0) &&
+         (cols % FA_CHUNK_DIM_X == 0) && output->columnwise_amax.dptr != nullptr &&
+         output->amax.dptr != nullptr;
+#else
+  return false;
+#endif  // FP4_TYPE_SUPPORTED
+}
+
+inline void compute_fused_amax(const Tensor &input, const Tensor *noop, Tensor *output,
+                               cudaStream_t stream) {
+#if FP4_TYPE_SUPPORTED
+  using namespace row_scaled_amax_kernel;
+
+  const auto [rows, cols] = input.flat_2d_dims();
+  NVTE_CHECK(input.dtype() == DType::kBFloat16, "Fused amax requires BF16 input.");
+
+  float *const row_amax_ptr = reinterpret_cast<float *>(output->amax.dptr);
+  float *const col_amax_ptr = reinterpret_cast<float *>(output->columnwise_amax.dptr);
+
+  const float *noop_ptr = (noop != nullptr && noop->data.dptr != nullptr)
+                              ? reinterpret_cast<const float *>(noop->data.dptr)
+                              : nullptr;
+
+  {
+    const size_t zero_extent = rows > cols ? rows : cols;
+    const dim3 zero_grid(static_cast<unsigned>(DIVUP(zero_extent, static_cast<size_t>(256))), 1, 1);
+    fused_amax_zero_kernel<<<zero_grid, 256, 0, stream>>>(
+        row_amax_ptr, static_cast<int>(rows), col_amax_ptr, static_cast<int>(cols), noop_ptr);
+    NVTE_CHECK_CUDA(cudaGetLastError());
+  }
+
+  checkCuDriverContext(stream);
+
+  alignas(64) CUtensorMap tensor_map_input{};
+  create_2D_tensor_map(tensor_map_input, input.data, rows, cols, FA_TILE_DIM_Y, FA_TILE_DIM_X, cols,
+                       0, sizeof(__nv_bfloat16) * 8);
+
+  constexpr size_t buff_elems_total = FA_BUFFS_NUM * FA_BUFF_IN_SIZE;
+  constexpr size_t buff_size_aligned_in =
+      DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(__nv_bfloat16), TMA_SHMEM_ALIGNMENT);
+  constexpr size_t dshmem_size = buff_size_aligned_in + TMA_SHMEM_ALIGNMENT;
+
+  const dim3 grid(static_cast<unsigned>(cols / FA_CHUNK_DIM_X),
+                  static_cast<unsigned>(rows / FA_CHUNK_DIM_Y), 1);
+  const dim3 block(FA_THREADS_NUM, 1, 1);
+
+  auto kernel = compute_fused_amax_kernel<true, true>;
+  cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);
+  kernel<<<grid, block, dshmem_size, stream>>>(tensor_map_input, row_amax_ptr, col_amax_ptr,
+                                               noop_ptr, rows, cols);
+  NVTE_CHECK_CUDA(cudaGetLastError());
+#else
+  NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
+#endif  // FP4_TYPE_SUPPORTED
+}
+
+namespace row_scaled {
+
+inline void compute_amaxes(const Tensor &input, const Tensor *noop, Tensor *output,
+                           cudaStream_t stream) {
+  if (output->has_columnwise_data() && fused_amax_supported(input, output)) {
+    compute_fused_amax(input, noop, output, stream);
+  } else {
+    compute_rowwise_amax(input, noop, output, stream);
+    if (output->has_columnwise_data()) {
+      compute_columnwise_amax(input, noop, output, stream);
+    }
+  }
+}
+
+}  // namespace row_scaled
 
 namespace quantize_transpose_kernel {
 
@@ -307,13 +593,85 @@ constexpr size_t TOTAL_BANKS_WIDTH = (32 * 4 * 8) / 4;  // 256
 // Number of threads (rowwise scaling) that span 32 banks (4-byte banks) of shared memory
 constexpr size_t THREADS_PER_BANK = TOTAL_BANKS_WIDTH / SCALE_DIM;  // 8 = 128 / 16
 
+template <typename IType, typename ScaleType, bool USE_STOCHASTIC_ROUNDING>
+__device__ __forceinline__ void quantize_columnwise_rht_stage(
+    IType *in_sh, const IType *rht_sh, IType *rht_result_sh, fp4e2m1x2 *out_t_data_sh,
+    ScaleType *out_colwise_scales_sh, float S_enc_colwise, float S_dec_colwise,
+    size_t buff_offset_in, size_t buff_offset_out_t, size_t stage,
+    transformer_engine::curanddx::detail::philox4x32_native_state<NVTE_BUILD_NUM_PHILOX_ROUNDS>
+        &rng,
+    uint4 &random_uint4, int &rnd_idx) {
+  // SM120/121 have legacy warp MMA but no TMEM. The col-major A load consumes
+  // the transposed TMA input layout directly, avoiding an operand staging copy.
+  constexpr int kWarps = THREADS_NUM / THREADS_PER_WARP;
+  constexpr int kTilesX = BUFF_IN_DIM_X / SCALE_DIM;
+  constexpr int kTilesY = BUFF_DIM_Y / SCALE_DIM;
+  constexpr int kMmaTiles = kTilesX * kTilesY;
+  const int warp = threadIdx.x / THREADS_PER_WARP;
+  uint32_t b_frag[4];
+  load_matrix_b_16x16_from_shared(b_frag[0], b_frag[1], b_frag[2], b_frag[3], rht_sh, SCALE_DIM);
+
+  for (int tile = warp; tile < kMmaTiles; tile += kWarps) {
+    const int tile_y = tile / kTilesX;
+    const int tile_x = tile % kTilesX;
+    uint32_t a_frag[4];
+    uint32_t c_frag[4];
+    uint32_t unused_amax = 0;
+    IType *tile_in =
+        &in_sh[buff_offset_in + tile_y * SCALE_DIM * BUFF_IN_DIM_X + tile_x * SCALE_DIM];
+    load_matrix_16x16_from_shared<true>(a_frag[0], a_frag[1], a_frag[2], a_frag[3], tile_in,
+                                        BUFF_IN_DIM_X);
+    mma_m16_n16_k16_b16_b16_b16_noacc<false>(a_frag[0], a_frag[1], a_frag[2], a_frag[3], b_frag[0],
+                                             b_frag[1], b_frag[2], b_frag[3], c_frag[0], c_frag[1],
+                                             c_frag[2], c_frag[3], unused_amax);
+
+    // WMMA accumulator registers do not follow the packed output's row
+    // order. Store each warp's tile in shared memory, then quantize one
+    // complete transposed-output row per lane.
+    IType *warp_result = rht_result_sh + warp * SCALE_DIM * SCALE_DIM;
+    store_matrix_16x16_to_shared(c_frag[0], c_frag[1], c_frag[2], c_frag[3], warp_result);
+    __syncwarp();
+    const int lane = threadIdx.x % THREADS_PER_WARP;
+    if (lane < SCALE_DIM) {
+      const IType *row = warp_result + lane * SCALE_DIM;
+      float row_amax = 0.0f;
+#pragma unroll
+      for (int i = 0; i < SCALE_DIM; ++i) {
+        row_amax = fmaxf(row_amax, fabsf(static_cast<float>(row[i])));
+      }
+      const ScaleType scale = core::compute_decoding_scaling_factor<ScaleType>(row_amax, S_enc_colwise);
+      const float scale_inverse = fminf(1.0f / (static_cast<float>(scale) * S_dec_colwise),
+                                        detail::TypeExtrema<float>::max);
+      const float2 scale_inverse_2x{scale_inverse, scale_inverse};
+      const int output_row = tile_x * SCALE_DIM + lane;
+      uint8_t *output_bytes = reinterpret_cast<uint8_t *>(out_t_data_sh) + buff_offset_out_t +
+                              output_row * BUFF_OUT_T_DIM_X + tile_y * (SCALE_DIM / 2);
+#pragma unroll
+      for (int i = 0; i < SCALE_DIM; i += 4) {
+        const uint64_t values = *reinterpret_cast<const uint64_t *>(row + i);
+        const uint32_t rbits = get_rbits(rng, random_uint4, rnd_idx);
+        const fp4e2m1x4 packed =
+            ptx::mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(values, scale_inverse_2x, rbits);
+        const uint16_t packed_bits = *reinterpret_cast<const uint16_t *>(&packed);
+        output_bytes[i / 2] = static_cast<uint8_t>(packed_bits);
+        output_bytes[i / 2 + 1] = static_cast<uint8_t>(packed_bits >> 8);
+      }
+      const size_t scale_idx =
+          output_row * SCALES_PER_CHUNK_Y + stage * ITERATIONS_TRANSPOSE + tile_y;
+      out_colwise_scales_sh[scale_idx] = scale;
+    }
+    __syncwarp();
+  }
+}
+
 template <bool COMPUTE_ACTIVATIONS, typename ParamOP, float (*OP)(float, const ParamOP &),
           typename IType, typename ScaleType, bool USE_STOCHASTIC_ROUNDING, bool RETURN_TRANSPOSE,
-          bool ROW_SCALED_NVFP4>
+          bool ROW_SCALED_NVFP4, bool RETURN_ROWWISE = true, bool APPLY_COLUMNWISE_RHT = false>
 __global__ void __launch_bounds__(THREADS_NUM)
     quantize_transpose_nvfp4_kernel(const __grid_constant__ CUtensorMap tensor_map_input,
                                     const __grid_constant__ CUtensorMap tensor_map_output,
                                     const __grid_constant__ CUtensorMap tensor_map_output_t,
+                                    const __grid_constant__ CUtensorMap tensor_map_rht,
                                     ScaleType *const scales_ptr, ScaleType *const scales_t_ptr,
                                     const float *noop, const float *const amax_rowwise_ptr,
                                     const float *const amax_colwise_ptr, const size_t rows,
@@ -399,6 +757,8 @@ __global__ void __launch_bounds__(THREADS_NUM)
   constexpr size_t out_mem_rowwise_data = buff_size_aligned_out;
   constexpr size_t out_mem_colwise_data = buff_size_aligned_out;
   constexpr size_t out_mem_rowwise_scales = 0;
+  constexpr size_t out_mem_colwise_scales =
+      (CHUNK_DIM_Y * CHUNK_DIM_X) / SCALE_DIM * sizeof(ScaleType);
 
   extern __shared__ char dynamic_shmem[];
   // Manually align dynamic SHMEM per TMA requirements using padding
@@ -414,6 +774,10 @@ __global__ void __launch_bounds__(THREADS_NUM)
       reinterpret_cast<ScaleType *>(dshmem + in_mem + out_mem_rowwise_data + out_mem_colwise_data);
   ScaleType *out_colwise_scales_sh = reinterpret_cast<ScaleType *>(
       dshmem + in_mem + out_mem_rowwise_data + out_mem_colwise_data + out_mem_rowwise_scales);
+  IType *rht_sh =
+      reinterpret_cast<IType *>(dshmem + in_mem + out_mem_rowwise_data + out_mem_colwise_data +
+                                out_mem_rowwise_scales + out_mem_colwise_scales);
+  IType *rht_result_sh = rht_sh + SCALE_DIM * SCALE_DIM;
   IType *cached_act_sh = in_sh;  // in_sh is used as a cache buffer
 
   constexpr size_t shmem_buff_size = buff_size_aligned_in / BUFFS_NUM;
@@ -439,8 +803,15 @@ __global__ void __launch_bounds__(THREADS_NUM)
 // Initialize shared memory barrier with the number of threads participating in the barrier.
 #pragma nv_diag_suppress static_var_with_dynamic_init
   __shared__ alignas(8) uint64_t mbar[STAGES];
+  __shared__ alignas(8) uint64_t mbar_rht[1];
 
   initialize_barriers<STAGES, THREADS_NUM>(mbar, is_master_thread);
+
+  if constexpr (APPLY_COLUMNWISE_RHT) {
+    initialize_barriers<1, THREADS_NUM>(mbar_rht, is_master_thread);
+    copy_2d_to_shared(rht_sh, &tensor_map_rht, 0, 0, 16 * 16 * sizeof(IType), &mbar_rht[0],
+                      is_master_thread);
+  }
 
   copy_2d_to_shared(&in_sh[0], &tensor_map_input, block_offset_X, block_offset_Y, shmem_buff_size,
                     &mbar[0], is_master_thread);
@@ -474,11 +845,17 @@ __global__ void __launch_bounds__(THREADS_NUM)
 
     // Wait for the data to have arrived
     ptx::mbarrier_wait_parity(&mbar[stage], 0);
+    if constexpr (APPLY_COLUMNWISE_RHT) {
+      ptx::mbarrier_wait_parity(&mbar_rht[0], 0);
+      quantize_columnwise_rht_stage<IType, USE_STOCHASTIC_ROUNDING>(
+          in_sh, rht_sh, rht_result_sh, out_t_data_sh, out_colwise_scales_sh, S_enc_colwise,
+          S_dec_colwise, buff_offset_in, buff_offset_out_t, stage, rng, random_uint4, rnd_idx);
+    }
 
     float block_amax = 0.0f;
 
     // COLWISE scaling
-    if constexpr (RETURN_TRANSPOSE) {
+    if constexpr (RETURN_TRANSPOSE && !APPLY_COLUMNWISE_RHT) {
 #pragma unroll
       for (size_t it = 0; it < ITERATIONS_TRANSPOSE; ++it) {
         const size_t in_thread_offset_Y = 0 + it * SCALE_DIM;
@@ -553,18 +930,36 @@ __global__ void __launch_bounds__(THREADS_NUM)
         // 3. Scale elements
         fp4e2m1x4 regs[SCALE_DIM / 4];
 
+        if constexpr (APPLY_COLUMNWISE_RHT && NO_ACTIVATIONS_NOT_FP32_INPUT) {
+          uint32_t *regs_8x = reinterpret_cast<uint32_t *>(regs);
 #pragma unroll
-        for (int e = 0; e < SCALE_DIM / 4; ++e) {
-          const uint32_t rbits = get_rbits(rng, random_uint4, rnd_idx);
-          if constexpr (NO_ACTIVATIONS_NOT_FP32_INPUT) {
-            const uint64_t elts = *reinterpret_cast<uint64_t *>(&in_colwise_IType[4 * e]);
-            regs[e] = ptx::mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
-                elts, block_scale_inverse_2x, rbits);
-          } else {
-            const float2 in01 = *reinterpret_cast<float2 *>(&in_compute_colwise[4 * e]);
-            const float2 in23 = *reinterpret_cast<float2 *>(&in_compute_colwise[4 * e + 2]);
-            regs[e] = ptx::mul_cvt_fp32_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
-                in01, in23, block_scale_inverse_2x, rbits);
+          for (int e = 0; e < SCALE_DIM / 8; ++e) {
+            const uint64_t elts03 = *reinterpret_cast<uint64_t *>(&in_colwise_IType[8 * e]);
+            const uint64_t elts47 = *reinterpret_cast<uint64_t *>(&in_colwise_IType[8 * e + 4]);
+            if constexpr (USE_STOCHASTIC_ROUNDING) {
+              const uint32_t rbits03 = get_rbits(rng, random_uint4, rnd_idx);
+              const uint32_t rbits47 = get_rbits(rng, random_uint4, rnd_idx);
+              regs_8x[e] = ptx::mul_cvt_bf16_to_fp4_8x_stochastic_rounding<float>(
+                  elts03, elts47, block_scale_inverse, rbits03, rbits47);
+            } else {
+              regs_8x[e] = ptx::mul_cvt_bf16_to_fp4_8x_round_to_nearest<float>(elts03, elts47,
+                                                                               block_scale_inverse);
+            }
+          }
+        } else {
+#pragma unroll
+          for (int e = 0; e < SCALE_DIM / 4; ++e) {
+            const uint32_t rbits = get_rbits(rng, random_uint4, rnd_idx);
+            if constexpr (NO_ACTIVATIONS_NOT_FP32_INPUT) {
+              const uint64_t elts = *reinterpret_cast<uint64_t *>(&in_colwise_IType[4 * e]);
+              regs[e] = ptx::mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
+                  elts, block_scale_inverse_2x, rbits);
+            } else {
+              const float2 in01 = *reinterpret_cast<float2 *>(&in_compute_colwise[4 * e]);
+              const float2 in23 = *reinterpret_cast<float2 *>(&in_compute_colwise[4 * e + 2]);
+              regs[e] = ptx::mul_cvt_fp32_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
+                  in01, in23, block_scale_inverse_2x, rbits);
+            }
           }
         }
 
@@ -592,7 +987,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
     }
 
     // ROWWISE scaling
-    {
+    if constexpr (RETURN_ROWWISE) {
       const size_t stage_rowwise_scales_offset_Y = stage * BUFF_DIM_Y;
 #pragma unroll
       for (size_t it = 0; it < ITERATIONS_NORMAL; ++it) {
@@ -810,9 +1205,11 @@ __global__ void __launch_bounds__(THREADS_NUM)
       const size_t global_offset_Y_t = block_offset_Y_t;
       const size_t global_offset_X_t = block_offset_X_t + stage_offset_Y;
 
-      ptx::cp_async_bulk_tensor_2d_shared_to_global(
-          reinterpret_cast<const uint64_t *>(&tensor_map_output), global_offset_X, global_offset_Y,
-          reinterpret_cast<uint64_t *>(&out_data_sh[buff_offset_out]));
+      if constexpr (RETURN_ROWWISE) {
+        ptx::cp_async_bulk_tensor_2d_shared_to_global(
+            reinterpret_cast<const uint64_t *>(&tensor_map_output), global_offset_X,
+            global_offset_Y, reinterpret_cast<uint64_t *>(&out_data_sh[buff_offset_out]));
+      }
 
       if constexpr (RETURN_TRANSPOSE) {
         ptx::cp_async_bulk_tensor_2d_shared_to_global(
@@ -845,6 +1242,9 @@ __global__ void __launch_bounds__(THREADS_NUM)
   }
 
   destroy_barriers<STAGES>(mbar, is_master_thread);
+  if constexpr (APPLY_COLUMNWISE_RHT) {
+    destroy_barriers<1>(mbar_rht, is_master_thread);
+  }
 #else
   NVTE_DEVICE_ERROR("sm_100 or higher is required.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
@@ -1409,9 +1809,10 @@ __global__ void __launch_bounds__(THREADS_NUM)
 #endif  // FP4_TYPE_SUPPORTED
 }  // namespace quantize_transpose_kernel
 
-template <typename ScaleType, bool use_2d_quantization>
+template <typename ScaleType, bool use_2d_quantization, bool apply_columnwise_rht>
 void quantize_transpose_impl(const Tensor &input, const Tensor *noop, Tensor *output,
-                             const QuantizationConfig *quant_config, cudaStream_t stream) {
+                             const QuantizationConfig *quant_config, cudaStream_t stream,
+                             const Tensor *rht_matrix = nullptr) {
 #if FP4_TYPE_SUPPORTED
   using namespace quantize_transpose_kernel;
   using namespace ptx;
@@ -1428,6 +1829,14 @@ void quantize_transpose_impl(const Tensor &input, const Tensor *noop, Tensor *ou
   // Columnwise-only (no rowwise output) is supported on the optimized 2D path; the rowwise pass
   // and its store are gated out via the RETURN_ROWWISE template bool.
   const bool return_rowwise = output->has_data();
+  if constexpr (apply_columnwise_rht) {
+    NVTE_CHECK(rht_matrix != nullptr, "Columnwise RHT requires an RHT matrix.");
+    NVTE_CHECK(return_transpose, "Columnwise RHT requires columnwise output.");
+    NVTE_CHECK(rht_matrix->dtype() == DType::kBFloat16, "Columnwise RHT matrix must be BF16.");
+    NVTE_CHECK(
+        rht_matrix->dim() == 2 && rht_matrix->shape()[0] == 16 && rht_matrix->shape()[1] == 16,
+        "Columnwise RHT matrix must have shape [16, 16].");
+  }
 
   if (!use_2d_quantization && (input.dtype() == DType::kBFloat16)) {
     quantize_transpose_tuned_1D<ScaleType>(input, noop, output, quant_config, stream);
@@ -1444,7 +1853,7 @@ void quantize_transpose_impl(const Tensor &input, const Tensor *noop, Tensor *ou
   CheckOutputTensor(*output, "output", false);
 
   NVTE_CHECK(input.has_data(), "Cannot quantize tensor without rowwise data.");
-  NVTE_CHECK(return_rowwise || (return_transpose && use_2d_quantization),
+  NVTE_CHECK(return_rowwise || (return_transpose && (use_2d_quantization || apply_columnwise_rht)),
              "NVFP4 optimized kernel supports rowwise output (1D or 2D), or columnwise-only output "
              "with 2D quantization.");
   if (return_rowwise) {
@@ -1514,6 +1923,7 @@ void quantize_transpose_impl(const Tensor &input, const Tensor *noop, Tensor *ou
   alignas(64) CUtensorMap tensor_map_input{};
   alignas(64) CUtensorMap tensor_map_output{};
   alignas(64) CUtensorMap tensor_map_output_transpose{};
+  alignas(64) CUtensorMap tensor_map_rht{};
 
   create_2D_tensor_map(tensor_map_input, input.data, rows, cols, BUFF_DIM_Y, BUFF_DIM_X, cols, 0,
                        sizeof(IType) * 8);
@@ -1526,6 +1936,10 @@ void quantize_transpose_impl(const Tensor &input, const Tensor *noop, Tensor *ou
     create_2D_tensor_map(tensor_map_output_transpose, output->columnwise_data, cols, rows,
                          BUFF_DIM_X, BUFF_DIM_Y, rows, 0, 4);
   }
+  if constexpr (apply_columnwise_rht) {
+    create_2D_tensor_map(tensor_map_rht, rht_matrix->data, 16, 16, 16, 16, 16, 0,
+                         sizeof(IType) * 8);
+  }
   constexpr size_t buff_elems = BUFF_DIM_Y * BUFF_DIM_X;
   constexpr size_t buff_elems_total = BUFFS_NUM * buff_elems;
   constexpr size_t buff_size_aligned_in =
@@ -1533,6 +1947,9 @@ void quantize_transpose_impl(const Tensor &input, const Tensor *noop, Tensor *ou
   constexpr size_t buff_size_aligned_out =
       DIVUP_TO_MULTIPLE((buff_elems_total * 4) / 8, TMA_SHMEM_ALIGNMENT);
   constexpr size_t buff_size_scales = (CHUNK_DIM_Y * CHUNK_DIM_X) / 16 * sizeof(ScaleType);
+  constexpr size_t rht_matrix_mem = 16 * 16 * sizeof(IType);
+  constexpr size_t rht_mem = DIVUP_TO_MULTIPLE(rht_matrix_mem, TMA_SHMEM_ALIGNMENT);
+  constexpr size_t rht_result_mem = (THREADS_NUM / THREADS_PER_WARP) * 16 * 16 * sizeof(IType);
 
   constexpr size_t in_mem = buff_size_aligned_in;
 
@@ -1542,7 +1959,9 @@ void quantize_transpose_impl(const Tensor &input, const Tensor *noop, Tensor *ou
 
   constexpr size_t out_mem = out_data_mem + out_data_transpose_mem;
 
-  constexpr size_t dshmem_size = in_mem + out_mem + out_scales_transpose_mem + TMA_SHMEM_ALIGNMENT;
+  const size_t dshmem_size = in_mem + out_mem + out_scales_transpose_mem +
+                             (apply_columnwise_rht ? rht_mem + rht_result_mem : 0) +
+                             TMA_SHMEM_ALIGNMENT;
 
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
       use_stochastic_rounding, USE_STOCHASTIC_ROUNDING,
@@ -1550,13 +1969,23 @@ void quantize_transpose_impl(const Tensor &input, const Tensor *noop, Tensor *ou
       TRANSFORMER_ENGINE_SWITCH_CONDITION(row_scaled_nvfp4, ROW_SCALED_NVFP4, {
         TRANSFORMER_ENGINE_SWITCH_CONDITION(return_rowwise, RETURN_ROWWISE, {
           TRANSFORMER_ENGINE_SWITCH_CONDITION(return_transpose, RETURN_TRANSPOSE, {
-            // The 1D kernel always produces rowwise output (no RETURN_ROWWISE); the dispatch only
-            // routes columnwise-only requests here when use_2d_quantization is true.
-            auto kernel = quantize_transpose_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
-                                                          ScaleType, USE_STOCHASTIC_ROUNDING,
-                                                          RETURN_TRANSPOSE, ROW_SCALED_NVFP4>;
-
-            if constexpr (use_2d_quantization) {
+            if constexpr (apply_columnwise_rht) {
+              auto kernel =
+                  quantize_transpose_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
+                                                  ScaleType, USE_STOCHASTIC_ROUNDING,
+                                                  RETURN_TRANSPOSE, ROW_SCALED_NVFP4,
+                                                  RETURN_ROWWISE, /*APPLY_COLUMNWISE_RHT=*/true>;
+              cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                   dshmem_size);
+              kernel<<<grid, block_size, dshmem_size, stream>>>(
+                  tensor_map_input, tensor_map_output, tensor_map_output_transpose, tensor_map_rht,
+                  scales_ptr, scales_transpose_ptr, noop_ptr, amax_rowwise_ptr, amax_colwise_ptr,
+                  rows, cols, scale_stride, scale_stride_transpose, rng_state);
+            } else if constexpr (use_2d_quantization) {
+              auto kernel =
+                  quantize_transpose_nvfp4_2D_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
+                                                     ScaleType, USE_STOCHASTIC_ROUNDING,
+                                                     RETURN_ROWWISE, RETURN_TRANSPOSE, false>;
               if (with_gemm_swizzled_scales) {
                 kernel = quantize_transpose_nvfp4_2D_kernel<
                     COMPUTE_ACTIVATIONS, ParamOP, OP, IType, ScaleType, USE_STOCHASTIC_ROUNDING,
@@ -1566,13 +1995,23 @@ void quantize_transpose_impl(const Tensor &input, const Tensor *noop, Tensor *ou
                     COMPUTE_ACTIVATIONS, ParamOP, OP, IType, ScaleType, USE_STOCHASTIC_ROUNDING,
                     RETURN_ROWWISE, RETURN_TRANSPOSE, /*WITH_GEMM_SWIZZLED_SCALES=*/false>;
               }
+              cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                   dshmem_size);
+              kernel<<<grid, block_size, dshmem_size, stream>>>(
+                  tensor_map_input, tensor_map_output, tensor_map_output_transpose, scales_ptr,
+                  scales_transpose_ptr, noop_ptr, amax_rowwise_ptr, amax_colwise_ptr, rows, cols,
+                  scale_stride, scale_stride_transpose, rng_state);
+            } else {
+              auto kernel = quantize_transpose_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
+                                                            ScaleType, USE_STOCHASTIC_ROUNDING,
+                                                            RETURN_TRANSPOSE, ROW_SCALED_NVFP4>;
+              cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                   dshmem_size);
+              kernel<<<grid, block_size, dshmem_size, stream>>>(
+                  tensor_map_input, tensor_map_output, tensor_map_output_transpose, tensor_map_rht,
+                  scales_ptr, scales_transpose_ptr, noop_ptr, amax_rowwise_ptr, amax_colwise_ptr,
+                  rows, cols, scale_stride, scale_stride_transpose, rng_state);
             }
-
-            cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);
-            kernel<<<grid, block_size, dshmem_size, stream>>>(
-                tensor_map_input, tensor_map_output, tensor_map_output_transpose, scales_ptr,
-                scales_transpose_ptr, noop_ptr, amax_rowwise_ptr, amax_colwise_ptr, rows, cols,
-                scale_stride, scale_stride_transpose, rng_state);
           });
         });
       }););
@@ -1581,7 +2020,7 @@ void quantize_transpose_impl(const Tensor &input, const Tensor *noop, Tensor *ou
 #endif  // FP4_TYPE_SUPPORTED
 }
 
-template <bool use_2d_quantization>
+template <bool use_2d_quantization, bool apply_columnwise_rht = false>
 void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
                         const QuantizationConfig *quant_config, cudaStream_t stream) {
 #if FP4_TYPE_SUPPORTED
@@ -1600,8 +2039,9 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
 
   TRANSFORMER_ENGINE_NVFP4_SCALE_TYPE_SWITCH(
       scale_dtype, ScaleType,
-      quantize_transpose_impl<ScaleType, use_2d_quantization>(input, noop, output, quant_config,
-                                                              stream);)
+      quantize_transpose_impl<ScaleType, use_2d_quantization, apply_columnwise_rht>(
+        input, noop, output, quant_config, stream);
+  )
 #else
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
 #endif  // FP4_TYPE_SUPPORTED
