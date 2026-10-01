@@ -9,9 +9,7 @@ import torch
 
 def rotary_embeddings(seq, ratio, width, theta, device):
     """Return token and compressed-window (cos, sin) pairs in FP32."""
-    inv_freq = theta ** (
-        -torch.arange(0, width, 2, device=device, dtype=torch.float32) / width
-    )
+    inv_freq = theta ** (-torch.arange(0, width, 2, device=device, dtype=torch.float32) / width)
     angles = torch.outer(torch.arange(seq, device=device, dtype=torch.float32), inv_freq)
     cos = angles.cos().repeat_interleave(2, dim=-1)[None, :, None, :]
     sin = angles.sin().repeat_interleave(2, dim=-1)[None, :, None, :]
@@ -47,8 +45,8 @@ class _DSv4RotaryEmbedding(torch.nn.Module):
             )
         n_comp = seq // self.ratio
         return (self.cos[:, :seq], self.sin[:, :seq]), (
-            self.cos[:, :n_comp * self.ratio:self.ratio],
-            self.sin[:, :n_comp * self.ratio:self.ratio],
+            self.cos[:, : n_comp * self.ratio : self.ratio],
+            self.sin[:, : n_comp * self.ratio : self.ratio],
         )
 
 

@@ -15,8 +15,17 @@ class _Compressor(torch.nn.Module):
     """Project KV/gates and normalize the cuDNN-pooled rows."""
 
     def __init__(
-        self, hidden_size, width, ratio, overlap, eps, device, params_dtype,
-        *, fused=False, weight_width=0,
+        self,
+        hidden_size,
+        width,
+        ratio,
+        overlap,
+        eps,
+        device,
+        params_dtype,
+        *,
+        fused=False,
+        weight_width=0,
     ):
         super().__init__()
         projected = width * (2 if overlap else 1)
@@ -40,7 +49,8 @@ class _Compressor(torch.nn.Module):
             projected = self.fused_proj(x)
             widths = (
                 (self.projected, self.projected, self.weight_width)
-                if self.weight_width else (self.projected, self.projected)
+                if self.weight_width
+                else (self.projected, self.projected)
             )
             parts = projected.split(widths, dim=-1)
             kv, gate = parts[:2]

@@ -31,9 +31,7 @@ def test_dsv4_forward_backward(variant, head_dim):
     comp_lengths = [n // ratio for n in lengths]
     total, total_comp = sum(lengths), sum(comp_lengths)
     cu = torch.tensor([0, 256, total], device="cuda", dtype=torch.int32)
-    cu_comp = torch.tensor(
-        [0, comp_lengths[0], total_comp], device="cuda", dtype=torch.int32
-    )
+    cu_comp = torch.tensor([0, comp_lengths[0], total_comp], device="cuda", dtype=torch.int32)
     query = (
         torch.randn(total, 64, head_dim, device="cuda", dtype=torch.bfloat16) * 0.1
     ).requires_grad_()
@@ -80,16 +78,10 @@ def test_dsv4_forward_backward(variant, head_dim):
         if indices is not None:
             comp_mask &= (comp_ids % 2 == 0)[None, :]
         mask = torch.cat((local_mask, comp_mask), dim=-1)
-        logits = torch.einsum("thd,kd->thk", q[start : start + length], kv) * (
-            head_dim**-0.5
-        )
+        logits = torch.einsum("thd,kd->thk", q[start : start + length], kv) * (head_dim**-0.5)
         logits = logits.masked_fill(~mask[:, None, :], float("-inf"))
-        probabilities = torch.cat(
-            (logits, s[None, :, None].expand(length, -1, -1)), -1
-        ).softmax(-1)
-        reference.append(
-            torch.einsum("thk,kd->thd", probabilities[..., :-1], kv[..., :512])
-        )
+        probabilities = torch.cat((logits, s[None, :, None].expand(length, -1, -1)), -1).softmax(-1)
+        reference.append(torch.einsum("thk,kd->thd", probabilities[..., :-1], kv[..., :512]))
         start += length
         comp_start += count
     expected = torch.cat(reference)
@@ -100,9 +92,7 @@ def test_dsv4_forward_backward(variant, head_dim):
     for actual, ref in zip(leaves, reference_leaves):
         assert actual.grad is not None and torch.isfinite(actual.grad).all()
         # Relative L2 error tolerates BF16 reduction rounding near zero entries.
-        relative_error = (
-            actual.grad.float() - ref.grad
-        ).norm() / ref.grad.norm().clamp_min(1e-8)
+        relative_error = (actual.grad.float() - ref.grad).norm() / ref.grad.norm().clamp_min(1e-8)
         assert relative_error < 0.02, relative_error.item()
 
 
