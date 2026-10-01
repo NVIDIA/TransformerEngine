@@ -2407,7 +2407,8 @@ def _assert_close_grouped(fn, compiled, model, base, ref_model=None):
     inp_eager = base.detach().clone().requires_grad_(True)
     ref_model.zero_grad(set_to_none=True)
     out_eager = fn(inp_eager)
-    out_eager.sum().backward()
+    grad_output = torch.randn_like(out_eager)
+    out_eager.backward(grad_output)
     ref_out = out_eager.detach().clone()
     ref_igrad = inp_eager.grad.detach().clone()
     ref_grads = [param.grad.detach().clone() for param in ref_model.parameters()]
@@ -2416,7 +2417,7 @@ def _assert_close_grouped(fn, compiled, model, base, ref_model=None):
     model.zero_grad(set_to_none=True)
     # Clone before a later cuda-graph replay overwrites the static output buffer.
     out_compiled = compiled(inp_compiled).clone()
-    out_compiled.sum().backward()
+    out_compiled.backward(grad_output)
 
     torch.testing.assert_close(out_compiled, ref_out, atol=_EAGER_ATOL, rtol=_EAGER_RTOL)
     torch.testing.assert_close(inp_compiled.grad, ref_igrad, atol=_EAGER_ATOL, rtol=_EAGER_RTOL)
@@ -2426,7 +2427,7 @@ def _assert_close_grouped(fn, compiled, model, base, ref_model=None):
             ref_grad,
             atol=_EAGER_ATOL,
             rtol=_EAGER_RTOL,
-            msg=f"gradient mismatch for {name}",
+            msg=lambda msg: f"gradient mismatch for {name}: {msg}",
         )
 
 
@@ -2445,26 +2446,36 @@ def test_te_grouped_linear_compiles(fp8_recipe, compile_mode):
     """
     dtype = torch.bfloat16
     device = "cuda"
+    if fp8_recipe is not None and fp8_recipe.nvfp4():
+        fp8_recipe = dataclasses.replace(fp8_recipe, disable_stochastic_rounding=True)
+    block_scaled = fp8_recipe is not None and not fp8_recipe.float8_current_scaling()
+    m_splits = [128, 256, 128, 256] if block_scaled else _GROUPED_M_SPLITS
+    in_features, out_features = (128, 128) if block_scaled else (_GROUPED_IN, _GROUPED_OUT)
     model = te.GroupedLinear(
-        _GROUPED_NUM_GEMMS, _GROUPED_IN, _GROUPED_OUT, params_dtype=dtype, device=device
+        _GROUPED_NUM_GEMMS, in_features, out_features, params_dtype=dtype, device=device
     )
+
+    def make_input():
+        return torch.randn(
+            sum(m_splits), in_features, dtype=dtype, device=device, requires_grad=True
+        )
 
     def fn(inp):
         if fp8_recipe is None:
-            return model(inp, _GROUPED_M_SPLITS)
+            return model(inp, m_splits)
         with te.autocast(recipe=fp8_recipe):
-            return model(inp, _GROUPED_M_SPLITS)
+            return model(inp, m_splits)
 
     torch._dynamo.reset()
     if compile_mode == "reduce-overhead":
-        _cudagraph_warmup(fn, _grouped_input(dtype, device, requires_grad=True), backward=True)
+        _cudagraph_warmup(fn, make_input(), backward=True)
         model.zero_grad(set_to_none=True)
     compiled = torch.compile(fn, fullgraph=True, mode=compile_mode)
 
     n_iters = 3 if compile_mode == "reduce-overhead" else 1
     with _assert_no_cudagraph_skips(compile_mode == "reduce-overhead"):
         for _ in range(n_iters):
-            _assert_close_grouped(fn, compiled, model, _grouped_input(dtype, device))
+            _assert_close_grouped(fn, compiled, model, make_input())
 
 
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
@@ -2608,10 +2619,17 @@ def test_te_grouped_linear_m_splits_change():
     m_splits[2:] = [40, 40]
     _assert_close_grouped(fn, compiled, model, _grouped_input(dtype, device))
 
+    m_splits[:] = [24, 40, 32, 32]
+    _assert_close_grouped(fn, compiled, model, _grouped_input(dtype, device))
+    baseline = _dynamo_counter("stats", "unique_graphs")
+    m_splits[:] = [40, 24, 48, 16]
+    _assert_close_grouped(fn, compiled, model, _grouped_input(dtype, device))
+    if baseline:
+        assert _dynamo_counter("stats", "unique_graphs") == baseline
+
 
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
-@pytest.mark.xfail(reason="waiting for a PyTorch fix", strict=False)
 def test_te_grouped_linear_compile_train_eval_switch():
     """train -> eval -> train on the same compiled ``te.GroupedLinear``, vs eager."""
     dtype = torch.bfloat16
@@ -2733,6 +2751,51 @@ def test_te_grouped_linear_compile_save_original_input():
         _assert_close_grouped(fn, compiled, model, _grouped_input(dtype, device))
 
 
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
+@pytest.mark.parametrize("layout", ["flat", "rank4", "strided"])
+@pytest.mark.parametrize("input_grad,weight_grad", [(True, True), (False, True), (True, False)])
+def test_te_grouped_linear_compile_empty_experts(layout, input_grad, weight_grad):
+    """Empty experts and non-2D inputs must match native PyTorch gradients."""
+    torch._dynamo.reset()
+    splits = [32, 0, 64, 32]
+    model = te.GroupedLinear(4, 64, 32, bias=False, params_dtype=torch.bfloat16, device="cuda")
+    model.requires_grad_(weight_grad)
+    # Keep the native reference exact across GEMM implementations.
+    with torch.no_grad():
+        for weight in model.parameters():
+            weight.copy_(torch.randint_like(weight, -1, 2) / 8)
+    x = torch.randint(-1, 2, (128, 64), device="cuda").to(torch.bfloat16) / 8
+    if layout == "rank4":
+        x = x.reshape(2, 4, 16, 64)
+    elif layout == "strided":
+        x = x.t().contiguous().t()
+    x.requires_grad_(input_grad)
+    weights = tuple(model.parameters())
+    ref_x = x.detach().clone().requires_grad_(input_grad)
+    ref_weights = tuple(w.detach().clone().requires_grad_(weight_grad) for w in weights)
+    ref = torch.cat(
+        [
+            torch.nn.functional.linear(part, weight)
+            for part, weight in zip(ref_x.reshape(-1, 64).split(splits), ref_weights)
+        ]
+    ).reshape(*x.shape[:-1], 32)
+    out = torch.compile(lambda inp: model(inp, splits), fullgraph=True)(x)
+    dy = torch.randint_like(out, -1, 2) / 8
+    params = ((x,) if input_grad else ()) + (weights if weight_grad else ())
+    ref_params = ((ref_x,) if input_grad else ()) + (ref_weights if weight_grad else ())
+    actual = out, torch.autograd.grad(out, params, dy)
+    expected = ref, torch.autograd.grad(ref, ref_params, dy)
+    torch.testing.assert_close(actual, expected, atol=_EAGER_ATOL, rtol=_EAGER_RTOL)
+
+
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
+def test_te_grouped_linear_compile_rejects_negative_splits():
+    model = te.GroupedLinear(4, 64, 32, params_dtype=torch.bfloat16, device="cuda")
+    compiled = torch.compile(lambda inp: model(inp, [-8, 136, 0, 0]), fullgraph=True)
+    with pytest.raises(Exception, match="m_splits entries must be non-negative"):
+        compiled(_grouped_input(torch.bfloat16, "cuda"))
+
+
 _fused_grouped_cc_ok = torch.cuda.is_available() and (
     (9, 0) <= torch.cuda.get_device_capability() <= (11, 0)
 )
@@ -2752,7 +2815,8 @@ _fused_grouped_cublas_ok = _fused_grouped_cc_ok and tex.get_cublasLt_version() >
     [None] + ([recipe.Float8CurrentScaling()] if fp8_available else []),
     ids=lambda r: "bf16" if r is None else type(r).__name__,
 )
-def test_te_grouped_linear_fused_compiles(fp8_recipe, compile_mode):
+@pytest.mark.parametrize("save_original_input", [False, True])
+def test_te_grouped_linear_fused_compiles(fp8_recipe, compile_mode, save_original_input):
     """torch.compile(fullgraph=True) of the fused GroupedTensor path
     (``use_grouped_tensor=True``): ``m_splits`` stays a
     device tensor, so changing the split distribution in place reuses the very
@@ -2769,6 +2833,7 @@ def test_te_grouped_linear_fused_compiles(fp8_recipe, compile_mode):
         params_dtype=dtype,
         device=device,
         use_grouped_tensor=True,
+        save_original_input=save_original_input,
     )
     m_splits_dev = torch.tensor(_GROUPED_M_SPLITS, dtype=torch.int64, device=device)
 

@@ -74,6 +74,7 @@ from ..dynamo import (
     is_value_opaque_quantizer,
 )
 from .linear import _fake_workspace_valid
+from ._common import update_nvfp4_direct_output_spec
 from ..constants import GemmParallelModes, dist_group_type
 from ..jit import no_torch_dynamo
 from ..cpu_offload import is_cpu_offload_enabled, mark_not_offload, start_offload
@@ -165,8 +166,8 @@ def is_module_grouped_tensor_path_supported(
     return False
 
 
-@torch.compiler.assume_constant_result
 @functools.lru_cache(maxsize=None)
+@torch.compiler.assume_constant_result
 def _get_cublaslt_version() -> int:
     """Cached, Dynamo-constant cuBLASLt version (the pybind call is untraceable)."""
     return tex.get_cublasLt_version()
@@ -244,8 +245,6 @@ class GroupedLinearFwdArgs:
         if self.fp8_calibration:
             return "fp8_calibration"
         if self.use_grouped_tensor_path:
-            if self.save_original_input:
-                return "save_original_input on the fused grouped-tensor path"
             if self.fp8 and not isinstance(self.input_quantizers[0], Float8CurrentScalingQuantizer):
                 return (
                     "a fused-path FP8 recipe other than per-tensor current scaling "
@@ -669,6 +668,8 @@ def _grouped_linear_forward_fake(
             )
             for i in range(num_gemms)
         ]
+        for inputmat in inputmats:
+            update_nvfp4_direct_output_spec(inputmat)
     else:
         inputmat_full_aliases_inp = inp.dtype == activation_dtype
         inputmat_full = TensorSpec(
@@ -1729,7 +1730,9 @@ def _grouped_linear_fused_forward_impl(args: GroupedLinearFwdArgs) -> Tuple[Any,
         aliases: List[Optional[Tuple]] = [None] * (n_payload + num_gemms)
         gx_payload: List[Optional[torch.Tensor]] = [None] * n_payload
         gx_present = args.weights_requires_grad
-        if gx_present:
+        if gx_present and args.save_original_input:
+            aliases[0] = ("inp",)
+        elif gx_present:
             gx_payload = list(grouped_x.get_data_tensors())
             # first_dims is the split tensor itself and tensor_offsets derives
             # from it: both rebuilt in backward from m_splits_tensor instead of
@@ -1822,7 +1825,9 @@ def _grouped_linear_fused_forward_fake(args: GroupedLinearFwdArgs) -> Tuple[Any,
         aliases: List[Optional[Tuple]] = [None] * (n_payload + num_gemms)
         gx_payload: List[Optional[TensorSpec]] = [None] * n_payload
         gx_present = weight_requires_grad
-        if gx_present:
+        if gx_present and args.save_original_input:
+            aliases[0] = ("inp",)
+        elif gx_present:
             total = tokens * in_features
 
             def _spec(numel, dtype):
@@ -1887,7 +1892,7 @@ def _grouped_linear_fused_backward_impl(
     args.base_split_offsets = tex.splits_to_offsets(args.m_splits_tensor, 1)
     args.input_tensor_offsets = args.base_split_offsets * args.in_features
     args.output_tensor_offsets = args.base_split_offsets * args.out_features
-    args.inputmat = _rebuild_grouped_input(args)
+    args.inputmat = args.gx_payload[0] if args.save_original_input else _rebuild_grouped_input(args)
     return _grouped_linear_fused_backward(args)
 
 
@@ -2287,6 +2292,11 @@ class _GroupedLinear(torch.autograd.Function):
 class GroupedLinear(TransformerEngineBaseModule):
     """Applies linear transformations to the incoming data list
        :math:`y_i = x_iA_i^T + b_i` in a grouped way.
+
+    ``torch.compile(fullgraph=True)`` supports discrete expert parameters with host
+    split lists. The native grouped-tensor path supports CUDA split tensors with
+    BF16/FP16 or FP8 current scaling, including ``save_original_input=True``.
+    Unsupported configurations fall back to eager when graph breaks are allowed.
 
     Parameters
     ----------

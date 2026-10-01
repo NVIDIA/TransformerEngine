@@ -751,6 +751,8 @@ def check_grouped_gemm_dims(
         math.prod(inp.shape[:-1]) == sum(m_splits),
         lambda: "GEMM not possible: m_splits must sum to the input's token count",
     )
+    for split in m_splits:
+        torch._check(split >= 0, lambda: "m_splits entries must be non-negative")
     if fp8:
         torch._check(
             all(m % 8 == 0 for m in m_splits),
