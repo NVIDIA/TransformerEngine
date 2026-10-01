@@ -82,25 +82,6 @@ class TestDistributedSelfAttn:
         is_training = True
         batch, seqlen, num_head, hidden = data_shape
 
-        if not is_fused_attn_kernel_available(
-            is_training,
-            dtype,
-            dtype,
-            QKVLayout.BS3HD,
-            attn_bias_type,
-            attn_mask_type,
-            softmax_type,
-            dropout_prob,
-            num_head,
-            num_head,
-            seqlen,
-            seqlen,
-            hidden,
-            hidden,
-            None,  # no window
-        ):
-            pytest.skip("No FusedAttn backend found")
-
         col_ref = self.generate_collectives_count_ref(
             mesh_shape,
             mesh_axes,
@@ -132,6 +113,7 @@ class TestDistributedSelfAttn:
             mesh_axes=mesh_axes,
             mesh_resource=mesh_resource,
             coll_count_ref=col_ref,
+            doutput_seed=2026,
         )
         runner.test_backward()
 
@@ -234,25 +216,6 @@ class TestDistributedCrossAttn:
 
         batch, seqlen, num_head, hidden = data_shape
 
-        if not is_fused_attn_kernel_available(
-            is_training,
-            dtype,
-            dtype,
-            QKVLayout.BSHD_BS2HD,
-            attn_bias_type,
-            attn_mask_type,
-            softmax_type,
-            dropout_prob,
-            num_head,
-            num_head,
-            seqlen,
-            seqlen,
-            hidden,
-            hidden,
-            None,  # no window
-        ):
-            pytest.skip("No FusedAttn backend found")
-
         col_ref = self.generate_collectives_count_ref()
         runner = FusedAttnRunner(
             batch,
@@ -277,6 +240,7 @@ class TestDistributedCrossAttn:
             mesh_axes=mesh_axes,
             mesh_resource=mesh_resource,
             coll_count_ref=col_ref,
+            doutput_seed=2026,
         )
         runner.test_backward()
 
@@ -308,13 +272,18 @@ class TestDistributedScoreModSelfAttn:
     ):
         ScoreModFusedAttnRunner.require_cudnn_frontend()
         batch, seqlen, num_heads, head_dim = data_shape
-        dp_axis = mesh_resource.dp_resource
+        data_axes = tuple(
+            axis
+            for axis in (mesh_resource.dp_resource, mesh_resource.fsdp_resource)
+            if axis is not None
+        )
         tp_axis = mesh_resource.tpsp_resource
 
-        if dp_axis is not None:
-            dp_size = mesh_shape[mesh_axes.index(dp_axis)]
-            if batch % dp_size != 0:
-                pytest.skip(f"{batch=} must be divisible by {dp_size=}")
+        data_parallel_size = 1
+        for axis in data_axes:
+            data_parallel_size *= mesh_shape[mesh_axes.index(axis)]
+        if batch % data_parallel_size != 0:
+            pytest.skip(f"{batch=} must be divisible by {data_parallel_size=}")
         if tp_axis is not None:
             tp_size = mesh_shape[mesh_axes.index(tp_axis)]
             if num_heads % tp_size != 0:
@@ -486,11 +455,20 @@ class TestDistributedContextParallelSelfAttn:
             mesh_resource=mesh_resource,
             cp_strategy=cp_strategy,
             cp_load_balanced=load_balanced,
+            doutput_seed=None if return_max_logit else 2026,
         )
+
+        # Mirror _FusedAttnCPWithAllGatherHelper.get_adjusted_max_segments_per_seq()
+        runner_segments = runner._get_max_segments_per_sequence()
+        if stripe_size and cp_strategy in (CPStrategy.DEFAULT, CPStrategy.ALL_GATHER):
+            max_segments_per_seq = runner_segments + seqlen // (stripe_size * cp_size)
+        else:
+            max_segments_per_seq = runner_segments
 
         def check_has_backend_for_mask(mask_type):
             return is_fused_attn_kernel_available(
                 is_training,
+                batch,
                 dtype,
                 dtype,
                 qkv_layout,
@@ -504,8 +482,9 @@ class TestDistributedContextParallelSelfAttn:
                 seqlen,
                 hidden,
                 hidden,
-                None,
-            )  # no SWA for CP
+                None,  # no SWA for CP
+                max_segments_per_seq=max_segments_per_seq,
+            )
 
         # For causal masking we depend on having bottom right support also.
         # The API does not check this and instead we rely on lower level checks to raise
