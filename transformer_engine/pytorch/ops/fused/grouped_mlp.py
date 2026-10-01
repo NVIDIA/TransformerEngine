@@ -1048,9 +1048,13 @@ def fuse_grouped_mlp_ops(
         if recipe.row_scaled_activation or recipe.nvfp4_4over6 != "none":
             # 4over6 doesn't used fused kernels
             return ops
-        if recipe.fp8_format == RecipeFormat.UE5M3 and ScaledSReLU in activation_op_types:
+        if recipe.fp8_format == RecipeFormat.UE5M3:
             # cuDNN has no SReLU support for UE5M3 for now
-            return ops
+            activation_op_types = tuple(
+                filter(lambda t: t not in (ScaledSReLU, ScaledTanhSReLU), activation_op_types)
+            )
+            if not activation_op_types:
+                return ops
 
     # Scan ops through with sliding window
     out = []
