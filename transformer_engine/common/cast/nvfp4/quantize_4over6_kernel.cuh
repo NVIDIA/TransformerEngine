@@ -44,6 +44,8 @@ namespace nvfp4 {
 
 namespace quantize_4over6_kernel {
 
+using nvfp4_scale_t = fp8e4m3;
+
 constexpr int kThreads = 128;
 constexpr int kWarpThreads = 32;
 constexpr int kGroupSize = 16;

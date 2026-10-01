@@ -847,7 +847,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
     ptx::mbarrier_wait_parity(&mbar[stage], 0);
     if constexpr (APPLY_COLUMNWISE_RHT) {
       ptx::mbarrier_wait_parity(&mbar_rht[0], 0);
-      quantize_columnwise_rht_stage<IType, USE_STOCHASTIC_ROUNDING>(
+      quantize_columnwise_rht_stage<IType, ScaleType, USE_STOCHASTIC_ROUNDING>(
           in_sh, rht_sh, rht_result_sh, out_t_data_sh, out_colwise_scales_sh, S_enc_colwise,
           S_dec_colwise, buff_offset_in, buff_offset_out_t, stage, rng, random_uint4, rnd_idx);
     }
@@ -1812,7 +1812,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
 template <typename ScaleType, bool use_2d_quantization, bool apply_columnwise_rht>
 void quantize_transpose_impl(const Tensor &input, const Tensor *noop, Tensor *output,
                              const QuantizationConfig *quant_config, cudaStream_t stream,
-                             const Tensor *rht_matrix = nullptr) {
+                             const Tensor *rht_matrix) {
 #if FP4_TYPE_SUPPORTED
   using namespace quantize_transpose_kernel;
   using namespace ptx;
@@ -2022,7 +2022,8 @@ void quantize_transpose_impl(const Tensor &input, const Tensor *noop, Tensor *ou
 
 template <bool use_2d_quantization, bool apply_columnwise_rht = false>
 void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
-                        const QuantizationConfig *quant_config, cudaStream_t stream) {
+                        const QuantizationConfig *quant_config, cudaStream_t stream,
+                        const Tensor *rht_matrix = nullptr) {
 #if FP4_TYPE_SUPPORTED
   const bool return_rowwise = output->has_data();
   const bool return_transpose = output->has_columnwise_data();
@@ -2040,7 +2041,7 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
   TRANSFORMER_ENGINE_NVFP4_SCALE_TYPE_SWITCH(
       scale_dtype, ScaleType,
       quantize_transpose_impl<ScaleType, use_2d_quantization, apply_columnwise_rht>(
-        input, noop, output, quant_config, stream);
+        input, noop, output, quant_config, stream, nullptr);
   )
 #else
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);

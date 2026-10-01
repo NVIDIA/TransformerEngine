@@ -148,13 +148,13 @@ void quantize_4over6(const Tensor &input, const Tensor *noop, Tensor *output,
              "Row-scaled NVFP4 quantization does not produce columnwise output.");
   NVTE_CHECK(!use_2d_quantization || output->has_data(),
              "NVFP4 4over6 2D quantization requires rowwise output.");
-  NVTE_CHECK(scale_dtype == DType::kFloat8E4M3,
-             "NVFP4 4over6 is only supported with FP8E4M3 scales.");
 
   if (output->has_data()) {
     NVTE_CHECK(output->scale_inv.dptr != nullptr, "Scaling tensor must be allocated.");
     NVTE_CHECK(output->amax.dptr != nullptr, "Rowwise amax tensor must be allocated.");
     NVTE_CHECK(is_fp4_dtype(output->data.dtype), "Output must have FP4 type.");
+    NVTE_CHECK(output->scale_inv.dtype == DType::kFloat8E4M3,
+               "NVFP4 4over6 is only supported with FP8E4M3 scales.");
   }
   if (output->has_columnwise_data()) {
     NVTE_CHECK(output->columnwise_scale_inv.dptr != nullptr,
@@ -163,6 +163,8 @@ void quantize_4over6(const Tensor &input, const Tensor *noop, Tensor *output,
                "Transposed output must have FP4 type.");
     NVTE_CHECK(output->columnwise_amax.dptr != nullptr || output->amax.dptr != nullptr,
                "NVFP4 4over6 columnwise quantization requires columnwise amax or rowwise amax.");
+    NVTE_CHECK(output->columnwise_scale_inv.dtype == DType::kFloat8E4M3,
+               "NVFP4 4over6 is only supported with FP8E4M3 scales.");
   }
 
   TRANSFORMER_ENGINE_NVFP4_4OVER6_E4M3_MAX_SWITCH(
