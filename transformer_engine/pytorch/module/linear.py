@@ -55,6 +55,7 @@ from ..utils import (
     check_gemm_dims,
 )
 from ..distributed import (
+    _validate_tp_reduction_dtype,
     set_tensor_model_parallel_attributes,
     get_distributed_world_size,
     allreduce,
@@ -659,7 +660,9 @@ def _linear_forward_impl(
         nvtx_range_push(f"{nvtx_label}.row_parallel_comm")
         out = gemm_out
         if sequence_parallel:
-            out, _ = reduce_scatter_along_first_dim(out, tp_group)
+            out, _ = reduce_scatter_along_first_dim(
+                out, tp_group, reduction_dtype=args.reduction_dtype
+            )
         elif args.tensor_parallel:
             if symmetric_ar_type is not None:
                 out, _ = symmetric_all_reduce(out, tp_group, all_reduce_type=symmetric_ar_type)
@@ -2352,6 +2355,11 @@ class Linear(TransformerEngineBaseModule):
         ----------
         inp : torch.Tensor
              Input tensor.
+        reduction_dtype : torch.dtype, default = None
+                          Communication dtype for the row-parallel forward reduction:
+                          float16, bfloat16, float32 or float64. Output dtype is unchanged.
+                          Applies to all-reduce and sequence-parallel reduce-scatter;
+                          Userbuffers and symmetric all-reduce are not supported.
         is_first_microbatch : {True, False, None}, default = None
                              During training using either gradient accumulation or
                              pipeline parallelism a minibatch of data is further split
@@ -2366,6 +2374,12 @@ class Linear(TransformerEngineBaseModule):
                                first microbatch (since it is the first gradient being
                                produced)
         """
+        _validate_tp_reduction_dtype(
+            reduction_dtype,
+            self.parallel_mode == "row" and self.tp_size > 1,
+            self.ub_overlap_rs_fprop or self.ub_overlap_ag_fprop,
+            self.symmetric_ar_type,
+        )
         is_grad_enabled = torch.is_grad_enabled()
 
         if is_in_onnx_export_mode():
@@ -2397,26 +2411,11 @@ class Linear(TransformerEngineBaseModule):
                 # A break inside the try/finally below would skip the whole frame.
                 warn_compile_eager_fallback(reason)
                 torch._dynamo.graph_break(msg=f"te.Linear falling back to eager: {reason}")
-                return self._forward_eager_fallback(inp, is_first_microbatch, fp8_output, fp8_grad)
+                return self._forward_eager_fallback(
+                    inp, is_first_microbatch, fp8_output, fp8_grad, reduction_dtype
+                )
 
         inp = self.prepare_forward(inp, allow_non_contiguous=isinstance(inp, QuantizedTensor))
-        if reduction_dtype is not None:
-            # Validate before entering the compiled/fallback paths so an unsupported
-            # combination fails loudly instead of silently reducing in BF16.
-            if reduction_dtype != torch.float32:
-                raise ValueError(
-                    f"reduction_dtype must be torch.float32 when set, got {reduction_dtype}."
-                )
-            if self.parallel_mode != "row" or self.tp_size == 1:
-                raise ValueError(
-                    "reduction_dtype is only supported for the tensor-parallel row-parallel "
-                    f"forward path (parallel_mode={self.parallel_mode!r}, tp_size={self.tp_size})."
-                )
-            if self.sequence_parallel or self.ub_overlap_rs_fprop or self.ub_overlap_ag_fprop:
-                raise ValueError(
-                    "reduction_dtype is not supported together with sequence_parallel or "
-                    "Userbuffers communication; those paths keep their existing dtype."
-                )
         try:
             weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
 
@@ -2704,6 +2703,7 @@ class Linear(TransformerEngineBaseModule):
         is_first_microbatch: Optional[bool],
         fp8_output: bool,
         fp8_grad: bool,
+        reduction_dtype: Optional[torch.dtype],
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """Re-run forward outside Dynamo (unsupported-config fallback)."""
         return Linear.forward(
@@ -2712,6 +2712,7 @@ class Linear(TransformerEngineBaseModule):
             is_first_microbatch=is_first_microbatch,
             fp8_output=fp8_output,
             fp8_grad=fp8_grad,
+            reduction_dtype=reduction_dtype,
         )
 
     def _get_weight_and_bias_tensors(self) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:

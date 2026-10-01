@@ -46,6 +46,7 @@ from ..utils import (
     get_nvtx_range_context,
 )
 from ..distributed import (
+    _validate_tp_reduction_dtype,
     set_tensor_model_parallel_attributes,
     get_distributed_world_size,
     allreduce,
@@ -181,6 +182,7 @@ class LayerNormLinearFwdArgs:
     # --- Misc ---
     cpu_offloading: bool
     is_grad_enabled: bool
+    reduction_dtype: Optional[torch.dtype] = None
 
     def any_requires_grad(self) -> bool:
         """Whether any differentiable input requires a gradient."""
@@ -249,6 +251,7 @@ class LayerNormLinearBwdArgs:
     tp_size: int = 1
     tensor_parallel: bool = False
     sequence_parallel: bool = False
+    reduction_dtype: Optional[torch.dtype] = None
 
     # --- Userbuffers (comm + GEMM overlap) ---
     ub_name: Optional[str] = None
@@ -609,12 +612,14 @@ def _layernorm_linear_forward_impl(
         nvtx_range_push(f"{nvtx_label}.row_parallel_comm")
         out = gemm_out
         if sequence_parallel:
-            out, _ = reduce_scatter_along_first_dim(out, tp_group)
+            out, _ = reduce_scatter_along_first_dim(
+                out, tp_group, reduction_dtype=args.reduction_dtype
+            )
         elif args.tensor_parallel:
             if args.symmetric_ar_type is not None:
                 out, _ = symmetric_all_reduce(out, tp_group, all_reduce_type=args.symmetric_ar_type)
             else:
-                out, _ = allreduce(out, tp_group)
+                out, _ = allreduce(out, tp_group, reduction_dtype=args.reduction_dtype)
         nvtx_range_pop(f"{nvtx_label}.row_parallel_comm")
     else:
         out = gemm_out
@@ -804,6 +809,7 @@ def _layernorm_linear_setup_ctx(
     bwd_args.tp_size = fwd_args.tp_size
     bwd_args.tensor_parallel = fwd_args.tensor_parallel
     bwd_args.sequence_parallel = fwd_args.sequence_parallel
+    bwd_args.reduction_dtype = fwd_args.reduction_dtype
 
     # Userbuffers
     bwd_args.ub_name = fwd_args.ub_name
@@ -1181,9 +1187,12 @@ def _layernorm_linear_backward_impl(
                     dgrad,
                     args.tp_group,
                     async_op=True,
+                    reduction_dtype=args.reduction_dtype,
                 )
             else:
-                dgrad, dgrad_work = allreduce(dgrad, args.tp_group, async_op=True)
+                dgrad, dgrad_work = allreduce(
+                    dgrad, args.tp_group, async_op=True, reduction_dtype=args.reduction_dtype
+                )
             nvtx_range_pop(f"{nvtx_label}.column_parallel_comm_dgrad")
         else:
             dgrad = gemm_out
@@ -2029,6 +2038,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         is_first_microbatch: Optional[bool] = None,
         fp8_output: Optional[bool] = False,
         fp8_grad: Optional[bool] = False,
+        reduction_dtype: Optional[torch.dtype] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """
         Apply layer normalization to the input followed by a linear transformation.
@@ -2037,6 +2047,12 @@ class LayerNormLinear(TransformerEngineBaseModule):
         ----------
         inp : torch.Tensor
              Input tensor.
+        reduction_dtype : torch.dtype, default = None
+                          Communication dtype for the column-parallel input-gradient reduction:
+                          float16, bfloat16, float32 or float64. Gradient dtype is unchanged.
+                          Applies to all-reduce and sequence-parallel reduce-scatter.
+                          Userbuffers are not supported. Forward output is unchanged;
+                          this module does not support row parallelism.
         is_first_microbatch : {True, False, None}, default = None
                              During training using either gradient accumulation or
                              pipeline parallelism a minibatch of data is further split
@@ -2051,6 +2067,16 @@ class LayerNormLinear(TransformerEngineBaseModule):
                                first microbatch (since it is the first gradient being
                                produced)
         """
+        _validate_tp_reduction_dtype(
+            reduction_dtype,
+            self.parallel_mode in ("column", "row") and self.tp_size > 1,
+            self.ub_overlap_rs_fprop
+            or self.ub_overlap_ag_fprop
+            or self.ub_overlap_rs_dgrad
+            or self.ub_bulk_dgrad
+            or self.ub_bulk_wgrad,
+            self.symmetric_ar_type,
+        )
         is_grad_enabled = torch.is_grad_enabled()
 
         if is_in_onnx_export_mode():
@@ -2196,6 +2222,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 tensor_parallel=self.tp_size > 1,
                 sequence_parallel=self.sequence_parallel,
                 symmetric_ar_type=self.symmetric_ar_type,
+                reduction_dtype=reduction_dtype,
                 # userbuffers
                 ub_name=self.ub_name,
                 ub_overlap_ag_fprop=ub_overlap_ag_fprop,

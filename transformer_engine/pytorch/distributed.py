@@ -942,13 +942,49 @@ class CudaRNGStatesTracker:
             _set_cuda_rng_state(orig_cuda_rng_state)
 
 
+def _validate_reduction_dtype(reduction_dtype: Optional[torch.dtype]) -> None:
+    if reduction_dtype is not None and reduction_dtype not in (
+        torch.float16,
+        torch.bfloat16,
+        torch.float32,
+        torch.float64,
+    ):
+        raise ValueError(
+            "reduction_dtype must be float16, bfloat16, float32, float64, or None, "
+            f"got {reduction_dtype}."
+        )
+
+
+def _validate_tp_reduction_dtype(
+    reduction_dtype: Optional[torch.dtype],
+    reduction_enabled: bool,
+    userbuffers: bool,
+    symmetric_ar_type: Optional[str],
+) -> None:
+    if reduction_dtype is None:
+        return
+    _validate_reduction_dtype(reduction_dtype)
+    if not reduction_enabled:
+        raise ValueError("reduction_dtype requires a tensor-parallel reduction.")
+    if userbuffers or symmetric_ar_type is not None:
+        raise ValueError(
+            "reduction_dtype is not supported with Userbuffers or symmetric all-reduce."
+        )
+
+
 def reduce_scatter_along_first_dim(
     inp: torch.Tensor,
     tp_group: dist_group_type,
     async_op: bool = False,
     output: torch.Tensor = None,
-) -> Tuple[torch.Tensor, Optional[torch.distributed.Work]]:
-    """Reduce-scatter the input tensor across model parallel group."""
+    reduction_dtype: Optional[torch.dtype] = None,
+) -> Tuple[torch.Tensor, Optional[Union[torch.distributed.Work, _AsyncHandle]]]:
+    """Reduce-scatter along the first dimension, optionally in ``reduction_dtype``.
+
+    The result retains the input dtype, or the supplied output tensor's dtype.
+    For an asynchronous cast, ``handle.wait()`` also copies the result back.
+    """
+    _validate_reduction_dtype(reduction_dtype)
     world_size = get_distributed_world_size(tp_group)
     # Bypass the function if we are using only 1 GPU.
     if world_size == 1:
@@ -966,9 +1002,20 @@ def reduce_scatter_along_first_dim(
 
     if output is None:
         output = torch.empty(dim_size, dtype=inp.dtype, device=torch.cuda.current_device())
+    collective_input = inp.contiguous()
+    collective_output = output
+    if reduction_dtype is not None:
+        collective_input = collective_input.to(reduction_dtype)
+        if output.dtype != reduction_dtype:
+            collective_output = torch.empty_like(output, dtype=reduction_dtype)
     handle = torch.distributed.reduce_scatter_tensor(
-        output, inp.contiguous(), group=tp_group, async_op=async_op
+        collective_output, collective_input, group=tp_group, async_op=async_op
     )
+    if collective_output is not output:
+        if async_op:
+            handle = _AsyncHandle(handle, output.copy_, (collective_output,))
+        else:
+            output.copy_(collective_output)
     return output, handle
 
 
@@ -2111,44 +2158,26 @@ def allreduce(
     tp_group: Optional[dist_group_type] = None,
     async_op: bool = False,
     reduction_dtype: Optional[torch.dtype] = None,
-) -> Tuple[torch.Tensor, Optional[torch.distributed.Work]]:
+) -> Tuple[torch.Tensor, Optional[Union[torch.distributed.Work, _AsyncHandle]]]:
     """All-reduce the input tensor across model parallel group.
 
-    ``reduction_dtype`` opts into reducing in a wider dtype than the tensor itself.
-    Only ``torch.float32`` is accepted: the collective runs over a float32 copy and
-    the result is rounded back into ``inp``, which keeps the original return contract
-    (same object, shape, device and dtype). The synchronous form is required because
-    the cast-back has to happen after the collective completes.
+    ``reduction_dtype`` selects float16, bfloat16, float32, or float64 communication.
+    The result is copied back into ``inp``, preserving its object, shape and dtype.
+    For an asynchronous cast, ``handle.wait()`` also copies the result back.
     """
+    _validate_reduction_dtype(reduction_dtype)
 
     # Bypass the function if we are using only 1 GPU.
     if get_distributed_world_size(tp_group) == 1:
         return inp, None
 
-    if reduction_dtype is not None:
-        if reduction_dtype != torch.float32:
-            raise ValueError(
-                f"reduction_dtype must be torch.float32 when set, got {reduction_dtype}."
-            )
-        if inp.dtype == torch.float32:
-            reduction_dtype = None  # Already float32; widening would be a no-op copy.
-        elif async_op:
-            raise ValueError(
-                "reduction_dtype requires a synchronous collective: the float32 result "
-                "must be cast back into the caller's tensor before it is safe to read. "
-                "Pass async_op=False."
-            )
-
-    if reduction_dtype is not None:
-        work = torch.empty_like(inp, dtype=reduction_dtype)
-        work.copy_(inp)
-        torch.distributed.all_reduce(work, group=tp_group)
-        inp.copy_(work)
-        return inp, None
-
-    # All-reduce.
-    handle = torch.distributed.all_reduce(inp, group=tp_group, async_op=async_op)
-
+    work = inp if reduction_dtype is None else inp.to(reduction_dtype).contiguous()
+    handle = torch.distributed.all_reduce(work, group=tp_group, async_op=async_op)
+    if work is not inp:
+        if async_op:
+            handle = _AsyncHandle(handle, inp.copy_, (work,))
+        else:
+            inp.copy_(work)
     return inp, handle
 
 
