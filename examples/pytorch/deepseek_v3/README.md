@@ -8,9 +8,6 @@ and MoE with a shared expert. Routed experts are sharded across GPUs using NCCL 
 GB200 and GB300 GPUs, 4096 tokens per rank, top-k 8, 8 local experts per GPU.
 Times cover one layer's forward + backward; throughput is global, in millions of tokens/s.
 Every number is the median of three independent runs (spread within 0.3 ms).
-Measured on September 30, 2026, at commit
-[`939c9db3`](https://github.com/NVIDIA/TransformerEngine/commit/939c9db36afcdb2617392bab57b4249c7cd4bcb0),
-before the subsequent merge of `main`.
 See [benchmark configuration](#c-benchmark-configuration) for the full setup.
 
 ### TE vs. plain PyTorch (`--dsv3`)
