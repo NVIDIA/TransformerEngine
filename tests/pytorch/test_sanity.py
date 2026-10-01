@@ -1246,6 +1246,16 @@ def test_sanity_gemm_with_unalignment(N, offset, datatype):
     torch.cuda.synchronize()
 
 
+def test_sanity_general_gemm_non_fp8_bias_dtype_must_match_out():
+    """BF16 bias + FP32 out must raise on the non-FP8/FP4 path (issue 3562)."""
+    E, H, T = 128, 256, 64
+    weight = torch.randn(E, H, dtype=torch.bfloat16, device="cuda")
+    inp = torch.randn(T, H, dtype=torch.bfloat16, device="cuda")
+    bias = torch.randn(E, dtype=torch.bfloat16, device="cuda")
+    with pytest.raises(RuntimeError, match="bias dtype must match output dtype"):
+        general_gemm(weight, inp, torch.float32, layout="TN", bias=bias)
+
+
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 @pytest.mark.parametrize("N", [32])
 @pytest.mark.parametrize("datatype", [torch.float16, torch.bfloat16])
