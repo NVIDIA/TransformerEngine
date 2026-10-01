@@ -68,7 +68,6 @@ def test_fa4_window_sentinel_normalization(sent, expected):
     assert _normalized(sent) == expected
 
 
-
 def _fa4_causal_unavailable():
     """Why this machine cannot exercise FA4 causal attention, or None if it can."""
     if not torch.cuda.is_available():
