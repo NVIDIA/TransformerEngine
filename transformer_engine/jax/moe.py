@@ -543,6 +543,10 @@ def _ffn_fwd_per_shard(
             output_dtype=fc2_quantizer_set.x.q_dtype,
         )
         combined_out = combined_out_3d.reshape(sorted_x.shape[0], wi_for_gemm.shape[-1])
+        if wi_0_checkpoint_name is not None:
+            combined_out = checkpoint_name(combined_out, wi_0_checkpoint_name)
+        if wi_1_checkpoint_name is not None:
+            combined_out = checkpoint_name(combined_out, wi_1_checkpoint_name)
         gate_proj_out, up_proj_out = tex.unpack_swiglu_pair(combined_out)
 
         intermediate_shape = (sorted_x.shape[0], gate_proj_out.shape[-1])
@@ -591,10 +595,11 @@ def _ffn_fwd_per_shard(
             bias=wi_combined_bias,
         )
         gate_proj_out, up_proj_out = jnp.split(combined_out, 2, axis=-1)
-    if wi_0_checkpoint_name is not None:
-        gate_proj_out = checkpoint_name(gate_proj_out, wi_0_checkpoint_name)
-    if wi_1_checkpoint_name is not None:
-        up_proj_out = checkpoint_name(up_proj_out, wi_1_checkpoint_name)
+    if not use_cudnn_jax_fusion:
+        if wi_0_checkpoint_name is not None:
+            gate_proj_out = checkpoint_name(gate_proj_out, wi_0_checkpoint_name)
+        if wi_1_checkpoint_name is not None:
+            up_proj_out = checkpoint_name(up_proj_out, wi_1_checkpoint_name)
 
     # Activation inputs (gate_proj_out, up_proj_out) stay in the wi GEMM
     # output dtype; the activation output (`intermediate`) stays in the
@@ -631,14 +636,7 @@ def _ffn_fwd_per_shard(
         1, expert_outputs.shape[0], expert_outputs.shape[1]
     )
     group_sizes_2d = group_sizes.reshape(1, num_local_experts)
-    if use_cudnn_jax_fusion:
-        ffn_activation_residual = (
-            tex.pack_swiglu_pair(gate_proj_out, up_proj_out)
-            if wi_0_checkpoint_name is not None or wi_1_checkpoint_name is not None
-            else combined_out
-        )
-    else:
-        ffn_activation_residual = gate_proj_out
+    ffn_activation_residual = combined_out if use_cudnn_jax_fusion else gate_proj_out
     residuals = (
         casted_sorted_x.get_tensor(usage=TensorUsage.LHS_TRANS).checkpoint(
             fc1_quantizer_set.x
