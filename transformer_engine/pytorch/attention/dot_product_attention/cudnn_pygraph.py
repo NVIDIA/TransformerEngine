@@ -231,8 +231,19 @@ def finalize_plans(
             f" Candidate plans: {names[:6]}.{(' ' + hint) if hint else ''}"
         )
     graph.select_plan(hits[0])
-    graph.check_support()
-    graph.build_plans()
+    # The engine is pinned, so a decline here is the engine's own verdict on this graph and cuDNN
+    # puts its reason in the exception. Surface that rather than letting it escape bare: a plan
+    # that was offered and then refused is the harder failure to read, and the reason is the only
+    # thing that says which constraint was missed.
+    try:
+        graph.check_support()
+        graph.build_plans()
+    except cudnn.cudnnGraphNotSupportedError as exc:
+        hint = not_found_hint() if callable(not_found_hint) else not_found_hint
+        raise RuntimeError(
+            f"cuDNN engine {names[hits[0]]!r} was offered but declined this graph:"
+            f" {exc}{(' ' + hint) if hint else ''}"
+        ) from exc
     return max(graph.get_workspace_size(), 1), names[hits[0]]
 
 

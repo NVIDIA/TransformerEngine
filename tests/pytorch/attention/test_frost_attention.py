@@ -464,3 +464,56 @@ def test_frost_engines_are_enabled_even_if_flex_imported_cudnn_first():
                 sys.modules.pop(name, None)
             else:
                 sys.modules[name] = module
+
+
+def test_pinned_plan_decline_reports_the_engine_reason():
+    """A pinned engine that refuses the graph must say why, not raise bare.
+
+    The name lookup failing and the engine declining after selection are the two ways the strict
+    path fails, and they read very differently: the second means the engine was there and judged
+    this graph unservable, so cuDNN's own reason is the only thing identifying which constraint
+    was missed. Without this the exception escaped with neither the reason framed nor the version
+    hint attached.
+
+    No GPU: a stub graph stands in, raising the real cuDNN exception type.
+    """
+    from transformer_engine.pytorch.attention.dot_product_attention import cudnn_pygraph
+
+    cudnn = cudnn_pygraph.import_cudnn_frontend()
+
+    class _DeclinedGraph:
+        """Offers the wanted plan, then refuses it at check_support."""
+
+        def validate(self):
+            pass
+
+        def build_operation_graph(self):
+            pass
+
+        def create_execution_plans(self, _heuristics):
+            pass
+
+        def get_execution_plan_count(self):
+            return 1
+
+        def get_plan_name_at_index(self, _i):
+            return "sdpa_fwd_prefill_sm100"
+
+        def select_plan(self, _i):
+            pass
+
+        def check_support(self):
+            raise cudnn.cudnnGraphNotSupportedError("head_dim 512 needs SM100; this is SM90")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        cudnn_pygraph.finalize_plans(
+            _DeclinedGraph(),
+            heuristics=[cudnn.heur_mode.A],
+            require_plan_token="sdpa_fwd_prefill_sm100",
+            not_found_hint="nvidia-cutlass-dsl=4.8.0.",
+        )
+
+    message = str(excinfo.value)
+    assert "sdpa_fwd_prefill_sm100" in message, "the message must name the engine that declined"
+    assert "needs SM100" in message, "cuDNN's own reason must survive"
+    assert "nvidia-cutlass-dsl" in message, "the version hint must be attached here too"
