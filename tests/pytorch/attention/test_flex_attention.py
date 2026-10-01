@@ -851,8 +851,9 @@ def test_frost_switch_does_not_change_what_flex_computes():
 
     frost_ok, frost_reason = is_frost_attention_available()
     if not frost_ok:
-        pytest.skip("the FROST engines must be reachable for this to test anything: %s"
-                    % frost_reason)
+        pytest.skip(
+            "the FROST engines must be reachable for this to test anything: %s" % frost_reason
+        )
 
     env = "CUDNN_FRONTEND_ENABLE_FROST_ENGINES"
     saved = os.environ.get(env)
