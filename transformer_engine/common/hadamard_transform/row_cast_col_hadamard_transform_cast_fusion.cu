@@ -15,6 +15,8 @@
 #include <cuda/barrier>
 #include <cute/tensor.hpp>
 
+#include "common/cast/core/common.cuh"
+#include "common/cast/nvfp4/quantize_transpose_nvfp4.cuh"
 #include "common/common.h"
 #include "common/util/cuda_runtime.h"
 #include "common/util/curanddx.hpp"
@@ -585,7 +587,8 @@ __global__ static void row_col_rht_gemm_device(
 
       mma.accumulate_ = UMMA::ScaleOut::Zero;
 
-      tmem_allocator.allocate(TmemAllocator::Sm100TmemCapacityColumns, &shared_storage.tmem_base_ptr);
+      tmem_allocator.allocate(cute::TMEM::Sm100TmemCapacityColumns,
+                              &shared_storage.tmem_base_ptr);
       __syncwarp();
       tmem_allocation_result_barrier.arrive();
       uint32_t tmem_base_ptr = shared_storage.tmem_base_ptr;
@@ -633,7 +636,7 @@ __global__ static void row_col_rht_gemm_device(
       } while (scheduler.is_valid());
       tmem_allocator.release_allocation_lock();
       accumulator_pipeline.producer_tail(accumulator_pipe_producer_state);
-      tmem_allocator.free(tmem_base_ptr, TmemAllocator::Sm100TmemCapacityColumns);
+      tmem_allocator.free(tmem_base_ptr, cute::TMEM::Sm100TmemCapacityColumns);
     }
   } else if(is_sched_warp) {
     cutlass::arch::warpgroup_reg_dealloc<32>();
@@ -1312,6 +1315,22 @@ void hadamard_transform_cast_fusion(const Tensor &input_, Tensor &output_,
 
   NVTE_CHECK(m % hadamard_dimension == 0, "num_rows must be divisible by hadamard_dimension");
 
+  // SM120/121 do not provide TMEM. Reuse the NVFP4 1D TMA pipeline and perform the
+  // 16-point columnwise RHT in registers, while leaving the SM100/110 UMMA/TMEM path below intact.
+  const int sm_arch = transformer_engine::cuda::sm_arch(transformer_engine::cuda::current_device());
+  if (sm_arch == 120 || sm_arch == 121) {
+    Tensor noop;
+    if (output_.columnwise_data.dptr != nullptr) {
+      dispatch::nvfp4::quantize_transpose<true, true>(input_, &noop, &output_, &quant_config,
+                                                      stream, &hadamard_matrix_);
+    } else {
+      // RHT only affects the columnwise result. Keep rowwise-only quantization on
+      // the regular 1D scaling path rather than accidentally selecting 2D scaling.
+      dispatch::nvfp4::quantize_transpose<false>(input_, &noop, &output_, &quant_config, stream);
+    }
+    return;
+  }
+
   int k_tile_size = 1024;
 
   // Honor the output tensor's GEMM-swizzled-scales flag: when set, emit
@@ -1362,11 +1381,15 @@ void nvte_quantize_with_hadamard_transform(const NVTETensor input, NVTETensor ou
                                            cudaStream_t stream) {
   NVTE_API_CALL(nvte_quantize_with_hadamard_transform);
   using namespace transformer_engine;
+  Tensor &output_cpp = *convertNVTETensorCheck(output);
+  const int sm_arch = transformer_engine::cuda::sm_arch(transformer_engine::cuda::current_device());
+  NVTE_CHECK((sm_arch != 120 && sm_arch != 121) || !output_cpp.with_gemm_swizzled_scales,
+             "NVFP4 RHT quantization on SM120/SM121 does not support GEMM-swizzled scales.");
   QuantizationConfig quant_config_cpp;
   if (quant_config != nullptr) {
     quant_config_cpp = *reinterpret_cast<QuantizationConfig *>(quant_config);
   }
-  hadamard_transform_cast_fusion(*convertNVTETensorCheck(input), *convertNVTETensorCheck(output),
+  hadamard_transform_cast_fusion(*convertNVTETensorCheck(input), output_cpp,
                                  *convertNVTETensorCheck(hadamard_matrix), quant_config_cpp,
                                  stream);
 }

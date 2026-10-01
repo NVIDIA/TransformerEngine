@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Fusible NCCL expert-parallel combine operation."""
+"""Fusible expert-parallel combine operation."""
 
 from __future__ import annotations
 
@@ -15,14 +15,12 @@ from ...ep import (
     EpConfig,
     _ep_combine_bwd,
     _ep_combine_fwd,
-    quantize_for_ep,
 )
-from ...quantization import QuantizerRole
-from ...tensor import MXFP8Quantizer, Quantizer
+from ...tensor import Quantizer
 from .._common import (
+    is_quantized_tensor,
     maybe_dequantize,
     validate_ep_buffer,
-    validate_ep_comms_recipe,
 )
 from ..op import BasicOperation, OperationContext
 
@@ -48,18 +46,37 @@ def _validate_combine_inputs(
     return tuple(input_.shape)
 
 
-class MoeCombine(BasicOperation):
-    """Combine pre-weighted local expert outputs with NCCL EP.
+def _validate_combine_grad_output(grad_output: torch.Tensor) -> None:
+    """Validate the high-precision gradient combined back to the source tokens."""
+    if (
+        not isinstance(grad_output, torch.Tensor)
+        or is_quantized_tensor(grad_output)
+        or grad_output.dtype is not torch.bfloat16
+    ):
+        raise TypeError(
+            "MoeCombine grad_output must be a plain BF16 tensor, "
+            f"got {type(grad_output).__name__} with "
+            f"dtype={getattr(grad_output, 'dtype', None)}."
+        )
 
-    The operation consumes routing state from a runtime :class:`EpBuffer`.
+
+class MoeCombine(BasicOperation):
+    """Combine pre-weighted expert outputs and return them to their source tokens
+
+    The extra input is the routing index tensor that ``MoeDispatch`` consumes.
+    NCCL EP carries the routing state in its ``EpBuffer`` and ignores it, while a
+    backend that holds no communication state reads the expert-major order back
+    out of it.
+
+    The quantization format of the communication is an EP backend detail, so it
+    is configured by ``EpConfig`` rather than this operation's quantizers.
     """
 
-    num_extra_inputs: int = 0
+    num_extra_inputs: int = 1
 
     def __init__(self, config: EpConfig, buffer: Optional[EpBuffer] = None) -> None:
-        # EpBuffer(specific to NCCL EP) is needed by this op. Fused implementation which uses
-        # a different transport mechanism than NCCL EP wont need this buffer to be passed.
-        # For eg. FusedMoeEp fused op uses NVSHMEM.
+        # EpBuffer is specific to NCCL EP. Fused implementations using another communication
+        # backend, such as NVSHMEM, do not need it.
         super().__init__()
         if not isinstance(config, EpConfig):
             raise TypeError(f"config must be an EpConfig, got {type(config).__name__}.")
@@ -67,30 +84,6 @@ class MoeCombine(BasicOperation):
             raise NotImplementedError("MoeCombine does not support zero-copy EP.")
         self.config = config
         self.buffer = buffer
-
-    def num_quantizers(self, mode: str) -> int:
-        return 1 if mode == "backward" else 0
-
-    def get_quantizer_roles(self, mode: str) -> Optional[list[QuantizerRole]]:
-        if mode == "backward":
-            # combine backward dispatches grad_output
-            name = getattr(self, "name", "") or ""
-            return [
-                QuantizerRole(
-                    module_type="combine",
-                    tensor_type="dispatch_grad_output",
-                    name=name,
-                )
-            ]
-        return None
-
-    def pre_fuser_forward(self, *, requires_grad: bool) -> None:
-        super().pre_fuser_forward(requires_grad=requires_grad)
-        quantizer = self.get_quantizer("backward", 0)
-        if quantizer is not None:
-            quantizer.set_usage(rowwise=True, columnwise=False)
-            quantizer.optimize_for_gemm = False
-            quantizer.internal = True
 
     def op_forward(self, *args: Any, **kwargs: Any) -> None:
         raise RuntimeError("MoeCombine uses fuser_forward")
@@ -108,39 +101,24 @@ class MoeCombine(BasicOperation):
         next_op_input_quantizer: Optional[Quantizer],
         basic_op_kwargs: list[dict[str, Any]],
     ) -> tuple[torch.Tensor, list[tuple[()]]]:
-        # Combine's transport format is selected by Combine's own grad-output quantizer.
-        # If the preceding op expects a different gradient quantized format,
-        # it is requantized in that op's backward implementation (e.g., GroupedLinear backward).
+        # NCCL EP reads the routing state from the EpBuffer, so topk_idx is unused.
         del (
             basic_op_extra_inputs,
             prev_op_grad_output_quantizer,
             next_op_input_quantizer,
             basic_op_kwargs,
         )
-        grad_output_quantizer = self.get_quantizer("backward", 0)
-        transport_quantizer = (
-            grad_output_quantizer if isinstance(grad_output_quantizer, MXFP8Quantizer) else None
-        )
-        buffer = validate_ep_buffer("MoeCombine", self.config, self.buffer)
-        validate_ep_comms_recipe(
-            "MoeCombine",
-            grad_output_quantizer,
-            buffer.combine_bwd_quant_recipe,
-        )
         # Only BF16 combine forward is supported for now.
         input_ = maybe_dequantize(input_, torch.bfloat16)
-        _validate_combine_inputs(input_, buffer)
         ctx = basic_op_ctxs[0]
+        buffer = validate_ep_buffer("MoeCombine", self.config, self.buffer)
+        _validate_combine_inputs(input_, buffer)
         result, combine_state = _ep_combine_fwd(
             input_,
             None,
-            handle_mem=buffer.handle_mem,
-            token_counts=buffer.tokens_per_expert,
-            num_local_tokens=buffer.num_local_tokens,
-            hidden_dim=input_.shape[-1],
-            bwd_quant_recipe=transport_quantizer,
-            eager=buffer.eager,
-            zero_copy=False,
+            buffer,
+            buffer.num_local_tokens,
+            buffer.combine_bwd_quant_recipe,
         )
         if ctx.requires_grad:
             ctx.combine_state = combine_state
@@ -160,22 +138,7 @@ class MoeCombine(BasicOperation):
     ]:
         del basic_op_grad_extra_outputs
         ctx = basic_op_ctxs[0]
-        grad_output_quantizer = self.get_quantizer("backward", 0)
-        grad_scale_inv = None
-        # Prepare grad_output (Quantize if necessary)
-        if isinstance(grad_output_quantizer, MXFP8Quantizer):
-            quantized_grad, grad_scale_inv = quantize_for_ep(
-                grad_output,
-                grad_output_quantizer,
-            )
-            grad_output = quantized_grad
-        else:
-            grad_output = maybe_dequantize(grad_output, torch.bfloat16).contiguous()
-            quantized_grad = None
-        grad_input = _ep_combine_bwd(
-            ctx.combine_state,
-            grad_output,
-            quantized_grad,
-            grad_scale_inv,
-        )
-        return grad_input, [()], [()]
+        _validate_combine_grad_output(grad_output)
+        grad_output = grad_output.contiguous()
+        grad_input = _ep_combine_bwd(ctx.combine_state, grad_output)
+        return grad_input, [()], [(None,)]

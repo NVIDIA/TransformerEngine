@@ -26,6 +26,7 @@ from .tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 if TYPE_CHECKING:
     from ..common.recipe import Recipe
     from .quantized_tensor import Quantizer
+    from .tensor.mxfp8_tensor import MXFP8Quantizer
 
 __all__ = [
     "EpConfig",
@@ -92,7 +93,15 @@ _BOOTSTRAP_SETTINGS: Optional[dict[str, object]] = None
 
 @dataclass(frozen=True, slots=True)
 class EpConfig:
-    """Immutable configuration shared by EP MoE operations."""
+    """Immutable configuration shared by EP MoE operations.
+
+    The configuration describes the routing that expert parallelism performs and
+    the format of the data it moves. It describes no particular transport: the
+    ops in ``transformer_engine.pytorch.ops.basic`` accept it whichever backend
+    carries the tokens, and a backend that needs transport settings of its own
+    (an ``EpBuffer``'s receive capacity, alignment, payload dtype, zero-copy and
+    overflow policy) is configured with them directly.
+    """
 
     top_k: int
     hidden_dim: int
@@ -104,6 +113,10 @@ class EpConfig:
     payload_dtype: torch.dtype = torch.bfloat16
     zero_copy: bool = False
     drop_on_overflow: bool = False
+    # Quantization recipes used to move the dispatched tokens forward and the
+    # combined gradient backward; ``None`` moves BF16 both ways.
+    dispatch_fwd_quant_recipe: Optional["Recipe"] = None
+    combine_bwd_quant_recipe: Optional["Recipe"] = None
 
 
 def _atexit_finalize() -> None:
@@ -183,7 +196,7 @@ def ep_bootstrap(
 
     # Materialize the PG's NCCL comm before borrowing its raw handle.
     dist.barrier(group=ep_group, device_ids=[torch.cuda.current_device()])
-    comm_ptr = ep_group._get_backend(torch.device("cuda"))._comm_ptr()
+    comm_ptr = tex.get_nccl_comm_ptr(ep_group)
 
     tex.ep_initialize(
         int(comm_ptr),
@@ -602,18 +615,30 @@ class _DispatchState:
 
 
 def _ep_prepare_and_dispatch_fwd(
-    tokens: torch.Tensor | MXFP8TensorStorage,
+    tokens: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_idx: torch.Tensor,
     buffer: "EpBuffer",
     recv_tokens: Optional[torch.Tensor],
     recv_topk_weights: Optional[torch.Tensor],
-    tokens_scale_inv: Optional[torch.Tensor],
 ):
     """Validate inputs, size/allocate the recv outputs, and run prepare+dispatch. Eager sizes recv
     from the host count; otherwise recv uses the buffer static recv capacity. Returns the recv
     output (a per-expert GroupedTensor for MXFP8, else the raw recv tokens), the recv topk weights,
     and a _DispatchState for backward. No autograd; the caller owns context handling."""
+    _require_bf16("dispatch input", tokens)
+    tokens_scale_inv = None
+    if buffer.dispatch_fwd_quant_recipe is not None:
+        from .tensor.mxfp8_tensor import MXFP8Quantizer
+
+        quantizer = MXFP8Quantizer(
+            DType.kFloat8E4M3,
+            rowwise=True,
+            columnwise=False,
+        )
+        quantizer.internal = True
+        tokens, tokens_scale_inv = quantize_for_ep(tokens, quantizer)
+
     handle_mem = buffer.handle_mem
     tokens_per_expert = buffer.tokens_per_expert
     total_recv_tokens = buffer.total_recv_tokens
@@ -751,7 +776,7 @@ class _EpPrepareAndDispatch(torch.autograd.Function):
     recv-count, so no Python runs between the count read and the dispatch launch; caller-supplied
     buffers and zero-copy are then forbidden. Otherwise the recv outputs are allocated here to the
     static recv capacity (caller-supplied or symm-mem-backed under zero-copy) and passed in. When
-    When MXFP8 is configured, forward quantizes ``tokens`` to lightweight storage locally while
+    MXFP8 is configured, forward quantizes ``tokens`` to lightweight storage locally while
     keeping the high-precision tensor as the autograd operand. The compute lives in
     ``_ep_prepare_and_dispatch_fwd`` / ``_ep_dispatch_bwd``; this wrapper only bridges autograd
     context handling."""
@@ -768,18 +793,6 @@ class _EpPrepareAndDispatch(torch.autograd.Function):
     ):
         """Only tokens and topk_weights are differentiable, so the non-diff buffer tensors ride on
         the buffer object to keep the autograd operand list short."""
-        tokens_scale_inv = None
-        if buffer.dispatch_fwd_quant_recipe is not None:
-            from .tensor.mxfp8_tensor import MXFP8Quantizer
-
-            # Only MXFP8 Quantizer is supported for EP dispatch
-            quantizer = MXFP8Quantizer(
-                DType.kFloat8E4M3,
-                rowwise=True,
-                columnwise=False,
-            )
-            quantizer.internal = True
-            tokens, tokens_scale_inv = quantize_for_ep(tokens, quantizer)
         recv_out, recv_topk_weights, state = _ep_prepare_and_dispatch_fwd(
             tokens,
             topk_weights,
@@ -787,7 +800,6 @@ class _EpPrepareAndDispatch(torch.autograd.Function):
             buffer,
             recv_tokens,
             recv_topk_weights,
-            tokens_scale_inv,
         )
         ctx.state = state
         # Detach so the long-lived buffers aren't tracked as differentiable outputs; autograd
@@ -836,21 +848,18 @@ class _CombineState:
 def _ep_combine_fwd(
     expert_out: torch.Tensor,
     grad_out: Optional[torch.Tensor],
-    *,
-    handle_mem: torch.Tensor,
-    token_counts: torch.Tensor,
+    buffer: "EpBuffer",
     num_local_tokens: int,
-    hidden_dim: int,
     bwd_quant_recipe,
-    eager: bool,
-    zero_copy: bool,
 ):
     """Run combine and return ``(result, _CombineState)``. Eager mode is not graph-capturable, so
     it calls the backend op directly and skips the torch.library dispatch. No autograd; the caller
     owns context handling."""
 
+    handle_mem = buffer.handle_mem
+    eager = buffer.eager
     device = expert_out.device
-    result = torch.empty(num_local_tokens, hidden_dim, dtype=expert_out.dtype, device=device)
+    result = torch.empty(num_local_tokens, buffer.hidden_dim, dtype=expert_out.dtype, device=device)
     if eager:
         tex.ep_combine(handle_mem, expert_out, result)
     else:
@@ -859,30 +868,26 @@ def _ep_combine_fwd(
         handle_mem=handle_mem,
         grad_out=grad_out,
         bwd_quant_recipe=bwd_quant_recipe,
-        token_counts=token_counts,
+        token_counts=buffer.tokens_per_expert,
         expert_out_shape=expert_out.shape,
         expert_out_dtype=expert_out.dtype,
         device=device,
         eager=eager,
-        zero_copy=zero_copy,
+        zero_copy=buffer.zero_copy,
     )
     return result, state
 
 
-def _ep_combine_bwd(
-    state: "_CombineState",
-    g_result: torch.Tensor,
-    quantized_grad: Optional[QuantizedTensorStorage] = None,
-    grad_scale_inv: Optional[torch.Tensor] = None,
-):
+def _ep_combine_bwd(state: "_CombineState", g_result: torch.Tensor):
     """Scatter the result-grad to expert positions and return the expert_out grad. High-precision
     sends the grad as-is; a quantized recipe (MXFP8 today) quantizes it and returns a per-expert
-    GroupedTensor. Optionally pre-mxfp8-quantized grad and scales can be provided."""
-    if quantized_grad is None and not g_result.is_contiguous():
+    GroupedTensor. No autograd; the caller owns context handling."""
+    _require_bf16("combine backward grad_output", g_result)
+    if not g_result.is_contiguous():
         g_result = g_result.contiguous()
     handle_mem = state.handle_mem
 
-    if state.bwd_quant_recipe is None and quantized_grad is None:
+    if state.bwd_quant_recipe is None:
         grad_expert_out = state.grad_out
         if grad_expert_out is None:
             grad_expert_out = _alloc_io(
@@ -893,21 +898,15 @@ def _ep_combine_bwd(
         else:
             torch.ops.transformer_engine_ep.combine_bwd(handle_mem, g_result, grad_expert_out)
     else:
-        if quantized_grad is None:
-            from .tensor.mxfp8_tensor import MXFP8Quantizer
+        from .tensor.mxfp8_tensor import MXFP8Quantizer
 
-            # Only MXFP8 Quantizer is supported for EP combine bwd
-            quantizer = MXFP8Quantizer(
-                DType.kFloat8E4M3,
-                rowwise=True,
-                columnwise=False,
-            )
-            quantizer.internal = True
-            mx, grad_scale_inv = quantize_for_ep(g_result, quantizer)
-        else:
-            mx = quantized_grad
-        if grad_scale_inv is None:
-            raise ValueError("MXFP8 combine backward requires compact rowwise scales.")
+        quantizer = MXFP8Quantizer(
+            DType.kFloat8E4M3,
+            rowwise=True,
+            columnwise=False,
+        )
+        quantizer.internal = True
+        mx, grad_scale_inv = quantize_for_ep(g_result, quantizer)
         g_data = mx._rowwise_data
         recv_pr, hidden = state.expert_out_shape[0], state.expert_out_shape[-1]
         ge_data, ge_scale_inv = _scale_alloc_io(
@@ -957,15 +956,7 @@ class _EpCombine(torch.autograd.Function):
         """Combine fwd; stashes the backward state on ctx. When ``bwd_quant_recipe`` is set, the
         backward sends the result-grad as MXFP8."""
         result, ctx.state = _ep_combine_fwd(
-            expert_out,
-            grad_out,
-            handle_mem=buffer.handle_mem,
-            token_counts=buffer.tokens_per_expert,
-            num_local_tokens=num_local_tokens,
-            hidden_dim=buffer.hidden_dim,
-            bwd_quant_recipe=bwd_quant_recipe,
-            eager=buffer.eager,
-            zero_copy=buffer.zero_copy,
+            expert_out, grad_out, buffer, num_local_tokens, bwd_quant_recipe
         )
         return result
 
@@ -987,10 +978,14 @@ class _EpCombine(torch.autograd.Function):
 
 # NCCL EP inputs are bfloat16; MXFP8 is applied internally via the buffer's dispatch_fwd_quant_recipe.
 def _require_bf16(name: str, t: torch.Tensor) -> None:
-    if t.dtype is not torch.bfloat16:
-        raise NotImplementedError(
-            "NCCL EP currently supports only bfloat16 or MXFP8 payloads; got"
-            f" {name}.dtype={t.dtype}."
+    if (
+        not isinstance(t, torch.Tensor)
+        or isinstance(t, QuantizedTensorStorage)
+        or t.dtype is not torch.bfloat16
+    ):
+        raise TypeError(
+            f"NCCL EP requires {name} to be a plain BF16 tensor, "
+            f"got {type(t).__name__} with dtype={getattr(t, 'dtype', None)}."
         )
 
 
@@ -1018,39 +1013,40 @@ def quantize_for_ep(
     input_: torch.Tensor | QuantizedTensorStorage,
     quantizer: Optional["Quantizer"],
 ) -> tuple[MXFP8TensorStorage, torch.Tensor]:
-    """Return E4M3 MXFP8 storage and compact rowwise scales for EP transport.
-
-    High-precision input is quantized with ``quantizer``; existing MXFP8 storage is accepted
-    as-is. The returned storage owns the FP8 payload in ``_rowwise_data``, while ``scale_inv`` has
-    the compact ``[T, H/block]`` layout routed by the EP backend. EP transports E4M3 in both
-    directions, so other FP8 formats are rejected. GEMM scale-row padding is stripped, and each
-    compact scale row must remain contiguous and 16-byte aligned.
-    """
-    from .constants import MXFP8_BLOCK_SCALING_SIZE
+    """Quantize an EP input with a supported quantizer."""
     from .tensor.mxfp8_tensor import MXFP8Quantizer
 
-    if quantizer is not None:
-        if not isinstance(quantizer, MXFP8Quantizer):
-            raise TypeError(
-                f"EP MXFP8 transport requires MXFP8Quantizer, got {type(quantizer).__name__}."
-            )
-        if quantizer.dtype != DType.kFloat8E4M3:
-            raise NotImplementedError("EP MXFP8 transport supports E4M3 only.")
+    if quantizer is None:
+        raise ValueError("EP quantization requires a quantizer.")
+    if isinstance(quantizer, MXFP8Quantizer):
+        return _quantize_mxfp8(input_, quantizer)
+    raise NotImplementedError(
+        "EP dispatch/combine quantization currently supports only MXFP8; "
+        f"got {type(quantizer).__name__}."
+    )
 
+
+def _quantize_mxfp8(
+    input_: torch.Tensor | QuantizedTensorStorage,
+    quantizer: "MXFP8Quantizer",
+) -> tuple[MXFP8TensorStorage, torch.Tensor]:
+    """Return E4M3 MXFP8 storage and compact rowwise scales for EP."""
+    from .constants import MXFP8_BLOCK_SCALING_SIZE
+
+    if quantizer.dtype != DType.kFloat8E4M3:
+        raise NotImplementedError("EP supports only E4M3 MXFP8 data.")
     if isinstance(input_, MXFP8TensorStorage):
         quantized = input_
     elif isinstance(input_, QuantizedTensorStorage):
-        raise TypeError(f"EP MXFP8 transport requires an MXFP8 input, got {type(input_).__name__}.")
+        raise TypeError(f"EP requires an MXFP8 input, got {type(input_).__name__}.")
     else:
-        if quantizer is None:
-            raise ValueError("An MXFP8 quantizer is required for a non-quantized EP input.")
         if not quantizer.internal:
             quantizer = quantizer.copy()
             quantizer.internal = True
         quantized = quantizer(input_)
 
     if quantized._fp8_dtype != DType.kFloat8E4M3:
-        raise NotImplementedError("EP MXFP8 transport supports E4M3 only.")
+        raise NotImplementedError("EP supports only E4M3 MXFP8 data.")
     if quantized._with_gemm_swizzled_scales:
         raise ValueError("EP requires unswizzled MXFP8 scales.")
     data = quantized._rowwise_data

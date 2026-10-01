@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Fusible NCCL expert-parallel dispatch operation."""
+"""Fusible expert-parallel dispatch operation."""
 
 from __future__ import annotations
 
@@ -15,15 +15,12 @@ from ...ep import (
     EpConfig,
     _ep_dispatch_bwd,
     _ep_prepare_and_dispatch_fwd,
-    quantize_for_ep,
 )
-from ...quantization import QuantizerRole
-from ...tensor import MXFP8Quantizer, Quantizer
+from ...tensor import Quantizer
 from .._common import (
     is_quantized_tensor,
     maybe_dequantize,
     validate_ep_buffer,
-    validate_ep_comms_recipe,
 )
 from ..op import BasicOperation, OperationContext
 
@@ -66,10 +63,13 @@ def _validate_routing_inputs(
 
 
 class MoeDispatch(BasicOperation):
-    """Quantize and dispatch BF16 tokens to local experts with NCCL EP.
+    """Route tokens to experts and distribute them across expert-parallel ranks
 
     The extra inputs are routing indices and FP32 routing weights. The extra
     outputs are local tokens-per-expert and received routing weights.
+
+    The quantization format of the communication is an EP backend detail, so it
+    is configured by ``EpConfig`` rather than this operation's quantizers.
     """
 
     num_extra_inputs: int = 2
@@ -77,9 +77,8 @@ class MoeDispatch(BasicOperation):
     num_extra_outputs: int = 2
 
     def __init__(self, config: EpConfig, buffer: Optional[EpBuffer] = None) -> None:
-        # EpBuffer(specific to NCCL EP) is needed by this op. Fused implementation which uses
-        # a different transport mechanism than NCCL EP wont need this buffer to be passed.
-        # For eg. FusedMoeEp fused op uses NVSHMEM.
+        # EpBuffer is specific to NCCL EP. Fused implementations using another communication
+        # backend, such as NVSHMEM, do not need it.
         super().__init__()
         if not isinstance(config, EpConfig):
             raise TypeError(f"config must be an EpConfig, got {type(config).__name__}.")
@@ -87,32 +86,6 @@ class MoeDispatch(BasicOperation):
             raise NotImplementedError("MoeDispatch does not support zero-copy EP.")
         self.config = config
         self.buffer = buffer
-
-    def num_quantizers(self, mode: str) -> int:
-        # quantized dispatch_bwd/combine is not supported.
-        return 1 if mode == "forward" else 0
-
-    def get_quantizer_roles(self, mode: str) -> Optional[list[QuantizerRole]]:
-        if mode == "forward":
-            name = getattr(self, "name", "") or ""
-            return [
-                QuantizerRole(
-                    module_type="dispatch",
-                    tensor_type="dispatch_input",
-                    name=name,
-                )
-            ]
-        return None
-
-    def pre_fuser_forward(self, *, requires_grad: bool) -> None:
-        super().pre_fuser_forward(requires_grad=requires_grad)
-        quantizer = self.get_quantizer("forward", 0)
-        if quantizer is not None:
-            # We just need data, scales for dispatch, and grouped tensor
-            # will be recreated after dispatch op.
-            quantizer.set_usage(rowwise=True, columnwise=False)
-            quantizer.optimize_for_gemm = False
-            quantizer.internal = True
 
     def op_forward(self, *args: Any, **kwargs: Any) -> None:
         raise RuntimeError("MoeDispatch uses fuser_forward")
@@ -131,16 +104,9 @@ class MoeDispatch(BasicOperation):
         basic_op_kwargs: list[dict[str, Any]],
     ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
         del next_op_input_quantizer, basic_op_kwargs
-        # Dispatch uses unquantized transport without an input quantizer and
-        # MXFP8 transport with an MXFP8 input quantizer.
-        input_quantizer = self.get_quantizer("forward", 0)
         topk_idx, topk_weights = basic_op_extra_inputs[0]
+        ctx = basic_op_ctxs[0]
         buffer = validate_ep_buffer("MoeDispatch", self.config, self.buffer)
-        validate_ep_comms_recipe(
-            "MoeDispatch",
-            input_quantizer,
-            buffer.dispatch_fwd_quant_recipe,
-        )
         input_shape = _validate_dispatch_input(input_, buffer)
         buffer.num_local_tokens = input_shape[0]
         _validate_routing_inputs(
@@ -148,10 +114,6 @@ class MoeDispatch(BasicOperation):
             topk_weights,
             device=buffer.device,
         )
-        # Prepare the input
-        input_scale_inv = None
-        if isinstance(input_quantizer, MXFP8Quantizer):
-            input_, input_scale_inv = quantize_for_ep(input_, input_quantizer)
         output, recv_topk_weights, dispatch_state = _ep_prepare_and_dispatch_fwd(
             input_,
             topk_weights,
@@ -159,13 +121,8 @@ class MoeDispatch(BasicOperation):
             buffer,
             None,
             None,
-            input_scale_inv,
         )
         tokens_per_expert = buffer.tokens_per_expert
-        # If next_op_input_quantizer is different from input_quantizer,
-        # we need to requantize the data, which is handled in grouped_linear anyway.
-        # We won't get any fusion benefit, so don't do it here.
-        ctx = basic_op_ctxs[0]
         if ctx.requires_grad:
             ctx.dispatch_state = dispatch_state
             ctx.prev_op_grad_output_quantizer = prev_op_grad_output_quantizer

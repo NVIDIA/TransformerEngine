@@ -67,9 +67,8 @@ def validate_buffer(
         raise TypeError(f"{name} must have dtype {dtype}, got {buffer.dtype}.")
     if device is not None and buffer.device != device:
         raise ValueError(f"{name} must be on {device}, got {buffer.device}.")
-    if contiguous is not None and buffer.is_contiguous() != contiguous:
-        requirement = "contiguous" if contiguous else "non-contiguous"
-        raise ValueError(f"{name} must be {requirement}.")
+    if contiguous and not buffer.is_contiguous():
+        raise ValueError(f"{name} must be contiguous")
     return buffer.detach()
 
 
@@ -100,6 +99,13 @@ def validate_ep_buffer(
         )
         if getattr(buffer, name) != getattr(expected_config, name)
     }
+    # The communication recipes are backend configuration, so compare the format
+    # they select rather than the recipe instances themselves.
+    for name in ("dispatch_fwd_quant_recipe", "combine_bwd_quant_recipe"):
+        buffer_recipe = getattr(buffer, name)
+        config_recipe = getattr(expected_config, name)
+        if type(buffer_recipe) is not type(config_recipe):
+            mismatches[name] = (buffer_recipe, config_recipe)
     ep_group = get_ep_group()
     if expected_config.ep_group is not ep_group:
         mismatches["ep_group"] = (ep_group, expected_config.ep_group)
@@ -118,27 +124,6 @@ def validate_ep_buffer(
             f"{op_name} buffer config does not match its initialized config: {details}."
         )
     return buffer
-
-
-def validate_ep_comms_recipe(
-    op_name: str,
-    quantizer: Optional[Quantizer],
-    buffer_recipe: object,
-) -> None:
-    """Require the buffer recipe to match the Op's quantizer role."""
-    if isinstance(quantizer, MXFP8Quantizer):
-        from transformer_engine.common.recipe import MXFP8BlockScaling
-
-        if not isinstance(buffer_recipe, MXFP8BlockScaling):
-            raise ValueError(
-                f"{op_name} selected MXFP8 Comms from its quantizer role, but the "
-                "runtime EpBuffer does not have an MXFP8BlockScaling recipe."
-            )
-    elif buffer_recipe is not None:
-        raise ValueError(
-            f"{op_name} selected BF16 Comms from its quantizer role, but the "
-            f"runtime EpBuffer has recipe {type(buffer_recipe).__name__}."
-        )
 
 
 def validate_or_alloc_output(

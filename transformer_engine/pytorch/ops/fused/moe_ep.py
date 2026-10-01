@@ -479,8 +479,18 @@ def _routing_extras_internal(
     )
 
 
-def _megamoe_supported(config, fc2: GroupedLinear) -> bool:
+def _is_mxfp8_comms_recipe(recipe: Optional[Recipe]) -> bool:
+    return recipe is not None and recipe.mxfp8()
+
+
+def _megamoe_supported(config: EpConfig, fc2: GroupedLinear) -> bool:
     """Static MegaMoE capability gates that can be checked before first launch."""
+    # MegaMoE always moves dispatched tokens and combine gradients as MXFP8.
+    if not (
+        _is_mxfp8_comms_recipe(config.dispatch_fwd_quant_recipe)
+        and _is_mxfp8_comms_recipe(config.combine_bwd_quant_recipe)
+    ):
+        return False
     if not _cudnn_megamoe_supported():
         return False
     if _import_cudnn_moe_ep() is None:
@@ -879,7 +889,7 @@ class FusedMoeEp(FusedOperation):
         return (
             grad_input,
             [(), fc1_param_grads, (), fc2_param_grads, ()],
-            [(None, grad_topk_weights.float()), (None,), (None,), (None,), ()],
+            [(None, grad_topk_weights.float()), (None,), (None,), (None,), (None,)],
         )
 
 
