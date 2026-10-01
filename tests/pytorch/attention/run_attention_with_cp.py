@@ -234,6 +234,7 @@ def run_dpa_with_cp(
     fa_pad_between_seqs="False",
     deterministic="False",
     load_balancing_strategy="DUAL_CHUNK_SWAP",
+    head_dim=None,
     softcap="0.0",
     log_level=logging.WARNING,
 ):
@@ -273,6 +274,8 @@ def run_dpa_with_cp(
             config = copy.deepcopy(model_configs_fused_attn[model])
         else:
             assert False, f"{model=} is not a known FusedAttention CP config!"
+    if head_dim is not None:
+        config.head_dim_qk = config.head_dim_v = int(head_dim)
     assert config.attn_mask_type in [
         "causal",
         "no_mask",
