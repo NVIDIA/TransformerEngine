@@ -367,7 +367,6 @@ def _make_block(
     input_axes=("batch", None, None),
     quantization_recipe=None,
     dispatch_checkpoint_name=None,
-    combine_checkpoint_name=None,
 ):
     kwargs = dict(
         num_experts=NUM_EXPERTS,
@@ -382,7 +381,6 @@ def _make_block(
         input_axes=input_axes,
         quantization_recipe=quantization_recipe,
         dispatch_checkpoint_name=dispatch_checkpoint_name,
-        combine_checkpoint_name=combine_checkpoint_name,
     )
     # Custom expert_bias_init lets tests inject a non-zero expert_bias without
     # poking variables['params'] post-init.
@@ -719,14 +717,12 @@ def test_ep_checkpoint_names(mesh, monkeypatch):
     monkeypatch.setattr(moe_module, "checkpoint_name", recorded_checkpoint_name)
     block = _make_block(
         dispatch_checkpoint_name="saved_dispatch",
-        combine_checkpoint_name="saved_combine",
     )
     inputs = _make_inputs(jax.random.PRNGKey(34))
     variables, output, _ = _init_apply(block, mesh, inputs, jax.random.PRNGKey(35))
     grads, grad_inputs = _grad_step(block, variables, mesh, inputs)
 
     assert len(named_values["saved_dispatch"]) >= 2
-    assert len(named_values["saved_combine"]) >= 1
     assert all(
         hasattr(value, "shape") for values in named_values.values() for value in values
     )
@@ -903,7 +899,6 @@ class TestTeEpMoeCudnnCutedslFusion:
         block = _make_block(
             quantization_recipe=MXFP8BlockScaling(),
             dispatch_checkpoint_name="saved_dispatch",
-            combine_checkpoint_name="saved_combine",
         )
         inputs = _make_inputs(jax.random.PRNGKey(32))
         variables, output, _ = _init_apply(block, mesh, inputs, jax.random.PRNGKey(33))
@@ -916,7 +911,6 @@ class TestTeEpMoeCudnnCutedslFusion:
         assert len(named_values["moe_mlpwo"]) == len(selected_calls)
         assert all(hasattr(value, "shape") for value in named_values["moe_mlpwo"])
         assert len(named_values["saved_dispatch"]) >= 2 * len(selected_calls)
-        assert len(named_values["saved_combine"]) >= len(selected_calls)
         assert np.all(np.isfinite(_to_global_numpy(output, mesh)))
         assert np.all(np.isfinite(_to_global_numpy(grad_inputs, mesh)))
         for name in ("gate_kernel", "wi", "wo"):

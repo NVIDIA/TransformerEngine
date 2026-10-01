@@ -105,9 +105,9 @@ class _MoEBlock(TransformerEngineBase):
     recv_capacity_per_rank : Optional[int]
         Exact aligned receive capacity per EP rank. ``None`` reserves the
         dropless worst case.
-    dispatch_checkpoint_name, combine_checkpoint_name : Optional[str]
-        JAX rematerialization checkpoint names for the EP dispatch outputs
-        and combine output, respectively. ``None`` leaves them unnamed.
+    dispatch_checkpoint_name : Optional[str]
+        JAX rematerialization checkpoint name for the EP dispatch outputs.
+        ``None`` leaves them unnamed.
 
     The per-expert dispatch-slot alignment is fixed internally at 128
     tokens (see ``moe._ALIGN_SIZE``) -- the value required by NCCL EP
@@ -155,7 +155,6 @@ class _MoEBlock(TransformerEngineBase):
     apply_topk_weights_early: bool = False
     recv_capacity_per_rank: Optional[int] = None
     dispatch_checkpoint_name: Optional[str] = None
-    combine_checkpoint_name: Optional[str] = None
 
     # Dtypes / init / misc
     dtype: DType = jnp.float32
@@ -317,5 +316,4 @@ class _MoEBlock(TransformerEngineBase):
             wo_kernel_axes=self.wo_kernel_axes,
             dtype=self.dtype,
             dispatch_checkpoint_name=self.dispatch_checkpoint_name,
-            combine_checkpoint_name=self.combine_checkpoint_name,
         )
