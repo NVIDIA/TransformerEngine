@@ -550,11 +550,7 @@ def get_attention_backend(
         logger.setLevel(AttentionLogging._log_level)
         if not logger.hasHandlers():
             logger.addHandler(AttentionLogging._stream_handler)
-    device_compute_capability = (
-        get_device_compute_capability()
-        if attention_params.device is None
-        else get_device_compute_capability(attention_params.device)
-    )
+    device_compute_capability = get_device_compute_capability(attention_params.device)
     cudnn_version = get_cudnn_version()
     run_config = {
         "transformer_engine_version": te.__version__,
