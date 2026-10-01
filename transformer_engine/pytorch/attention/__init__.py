@@ -7,7 +7,11 @@
 from .dot_product_attention import DotProductAttention
 from . import sparse_attention
 from .sparse_attention import DSv4Attention, DSv4HybridAttention
-from .linear_attention import GatedDeltaNetAttention
+from .linear_attention import (
+    GatedDeltaNetAttention,
+    GatedDeltaNet2Attention,
+    GatedDeltaProductAttention,
+)
 from .fused_mla_q_uproj import FusedMLAQUpProjFunction, FusedMLAQUpProjRopeQuant
 from .multi_head_attention import MultiheadAttention
 from .inference import InferenceParams
@@ -19,6 +23,8 @@ __all__ = [
     "DSv4HybridAttention",
     "sparse_attention",
     "GatedDeltaNetAttention",
+    "GatedDeltaNet2Attention",
+    "GatedDeltaProductAttention",
     "FusedMLAQUpProjFunction",
     "FusedMLAQUpProjRopeQuant",
     "MultiheadAttention",

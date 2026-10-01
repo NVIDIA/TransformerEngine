@@ -102,6 +102,19 @@ set(CUTLASS_TOOLS_INCLUDE_DIR
 # Python
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 
+option(NVTE_WITH_CUTEDSL
+       "Build the CuTeDSL quantize backend bridge (requires the apache-tvm-ffi Python package)" OFF)
+if(NVTE_WITH_CUTEDSL)
+  # Building libtransformer_engine.so with CuTeDSL support requires the TVM-FFI headers.
+  if(NOT EXISTS "${TVM_FFI_INCLUDE_DIR}/tvm/ffi/any.h")
+    message(FATAL_ERROR
+            "Could not find the TVM-FFI headers in '${TVM_FFI_INCLUDE_DIR}'. "
+            "Install apache-tvm-ffi and set TVM_FFI_INCLUDE_DIR to its include directory, "
+            "or configure with "
+            "-DNVTE_WITH_CUTEDSL=OFF to build the C++ library without the backend.")
+  endif()
+endif()
+
 find_path(NCCL_INCLUDE_DIR
             NAMES nccl.h
           HINTS "${Python_SITEARCH}/nvidia/nccl"
@@ -184,6 +197,7 @@ list(APPEND transformer_engine_cpp_sources
      cudnn_utils.cpp
      transformer_engine.cpp
      fused_attn/fused_attn.cpp
+     cast/nvfp4/rtc_dispatch.cpp
      fused_attn/config_and_params.cpp
      gemm/config.cpp
      normalization/common.cpp
@@ -201,6 +215,10 @@ list(APPEND transformer_engine_cpp_sources
      comm_gemm_overlap/comm_gemm_overlap.cpp
      newton_schulz/newton_schulz.cpp
      )
+
+if(NVTE_WITH_CUTEDSL)
+  list(APPEND transformer_engine_cpp_sources init_python.cpp)
+endif()
 
 list(APPEND transformer_engine_cuda_sources
      common.cu
@@ -386,6 +404,15 @@ target_link_libraries(transformer_engine PUBLIC
                       CUDNN::cudnn_all)
 target_link_libraries(transformer_engine PRIVATE ${CMAKE_DL_LIBS})
 
+if(NVTE_WITH_CUTEDSL)
+  target_include_directories(transformer_engine PRIVATE ${TVM_FFI_INCLUDE_DIR})
+  target_compile_definitions(
+    transformer_engine PRIVATE
+    NVTE_WITH_CUTEDSL
+    Py_LIMITED_API=0x030A0000)
+  target_link_libraries(transformer_engine PRIVATE Python::Module)
+endif()
+
 target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
 target_include_directories(transformer_engine PRIVATE ${NCCL_INCLUDE_DIR})
@@ -427,12 +454,12 @@ if (NVTE_WITH_CUBLASMP)
                  NAMES nccl libnccl
                  PATH_SUFFIXES lib
                  REQUIRED)
-    # cuBLASMp 0.8 is the first release with CUDA-graph-safe overlap algos,
+    # cuBLASMp 0.8.1 adds MXFP8 support to the CUDA-graph-safe overlap algos,
     # and NCCL 2.30 is the first release with graph-safe one-sided RMA
     # primitives (ncclPutSignal/ncclWaitSignal) that those algos use.
-    if (CUBLASMP_VERSION VERSION_LESS 0.8.0)
+    if (CUBLASMP_VERSION VERSION_LESS 0.8.1)
       message(FATAL_ERROR
-              "NVTE_WITH_CUBLASMP requires cuBLASMp >= 0.8.0, but found cuBLASMp "
+              "NVTE_WITH_CUBLASMP requires cuBLASMp >= 0.8.1, but found cuBLASMp "
               "${CUBLASMP_VERSION} in ${CUBLASMP_INCLUDE_DIR}/cublasmp.h")
     endif()
     if (NCCL_VERSION VERSION_LESS 2.30.0)
@@ -579,6 +606,20 @@ make_string_header_from_file(utils.cuh
 make_string_header_from_file(util/math.h
                              string_code_util_math_h)
 
+# NVFP4 4over6 quantize: NVRTC bundled headers + RTC source file
+make_string_header_from_file(include/transformer_engine/nvfp4/4over6.h
+                             string_code_transformer_engine_nvfp4_4over6_h)
+make_string_header_from_file(util/type_extrema.h
+                             string_code_util_type_extrema_h)
+make_string_header_from_file(util/ptx.cuh
+                             string_code_util_ptx_cuh)
+make_string_header_from_file(cast/nvfp4/core_nvfp4.cuh
+                             string_code_cast_nvfp4_core_nvfp4_cuh)
+make_string_header_from_file(cast/nvfp4/quantize_4over6_kernel.cuh
+                             string_code_cast_nvfp4_quantize_4over6_kernel_cuh)
+make_string_header_from_file(cast/nvfp4/rtc/quantize_4over6.cu
+                             string_code_cast_nvfp4_rtc_quantize_4over6_cu)
+
 # Norm NVRTC bundled headers + RTC source files
 make_string_header_from_file(normalization/kernel_params.h
                              string_code_normalization_kernel_params_h)
@@ -602,6 +643,16 @@ make_string_header_from_file(normalization/rmsnorm/rtc/rmsnorm_bwd_kernel.cu
                              string_code_normalization_rmsnorm_rtc_rmsnorm_bwd_kernel_cu)
 target_include_directories(transformer_engine PRIVATE
                            "${CMAKE_CURRENT_BINARY_DIR}/string_headers")
+
+# Default OFF: the NVFP4 4over6 quantize kernel (384-way fanout) is compiled via
+# NVRTC at runtime. Set ON to additionally statically instantiate it as the
+# fallback selected when NVTE_DISABLE_NVRTC=1.
+option(NVTE_BUILD_LEGACY_STATIC_NVFP4
+       "Also compile the static NVFP4 4over6 quantize kernel for NVTE_DISABLE_NVRTC fallback"
+       OFF)
+target_compile_definitions(transformer_engine
+                           PRIVATE
+                           NVTE_BUILD_LEGACY_STATIC_NVFP4=$<BOOL:${NVTE_BUILD_LEGACY_STATIC_NVFP4}>)
 
 option(NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX
        "Also compile legacy static fused softmax kernels for NVTE_DISABLE_NVRTC fallback"
