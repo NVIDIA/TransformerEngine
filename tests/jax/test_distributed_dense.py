@@ -203,7 +203,6 @@ class TestDistributedDense:
             output = jax.lax.with_sharding_constraint(output, output_sharding)
         return jnp.sum(output)
 
-    @pytest.mark.usefixtures("te_all_reduce_in_fp32")
     @pytest_parametrize_wrapper(
         "device_count,mesh_shape,mesh_axes,mesh_resource",
         generate_configs(),
@@ -222,10 +221,16 @@ class TestDistributedDense:
         input_shape,
         weight_shape,
         partition,
+        request,
     ):
         """Test TE GEMM gradients against JAX dot gradients"""
         devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
         mesh = Mesh(devices, mesh_axes)
+        # A BF16 sum of two partials rounds once, like an FP32 sum. Splitting the batch over more
+        # devices adds BF16 roundings that can exceed tolerance against the FP32 reference.
+        batch_axes = [a for a in (mesh_resource.dp_resource, mesh_resource.fsdp_resource) if a]
+        if np.prod([mesh.shape[a] for a in batch_axes]) > 2:
+            request.getfixturevalue("te_all_reduce_in_fp32")
 
         # Generate inputs
         x, weight, bias = _generate_inputs(input_shape, weight_shape, dtype)
