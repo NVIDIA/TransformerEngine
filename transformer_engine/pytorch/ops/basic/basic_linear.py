@@ -1071,6 +1071,13 @@ class BasicLinear(BasicOperation):
             from ...tensor.localized_nvfp4 import release_nvfp4_vmm_tensor_workspaces
 
             release_nvfp4_vmm_tensor_workspaces(input_)
+        if (
+            os.getenv("NVTE_MXFP8_VMM_LOCALIZATION", "0") == "1"
+            and (not ctx.requires_grad or x_local is None)
+        ):
+            from ...tensor.localized_mxfp8 import release_mxfp8_vmm_tensor_workspaces
+
+            release_mxfp8_vmm_tensor_workspaces(input_)
 
         return output
 
@@ -1123,6 +1130,10 @@ class BasicLinear(BasicOperation):
             from ...tensor.localized_nvfp4 import release_nvfp4_vmm_tensor_workspaces
 
             release_nvfp4_vmm_tensor_workspaces(x_local, grad_output)
+        if os.getenv("NVTE_MXFP8_VMM_LOCALIZATION", "0") == "1":
+            from ...tensor.localized_mxfp8 import release_mxfp8_vmm_tensor_workspaces
+
+            release_mxfp8_vmm_tensor_workspaces(x_local, grad_output)
 
         # Clear input tensor if possible
         clear_tensor_data(x_local)

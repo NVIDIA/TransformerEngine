@@ -111,6 +111,23 @@ class MXFP8Quantizer(Quantizer):
         if not src.is_contiguous():
             src = src.contiguous()
 
+        if (
+            noop_flag is None
+            and os.getenv("NVTE_MXFP8_VMM_LOCALIZATION", "0") == "1"
+            and os.getenv("NVTE_MXFP8_VMM_LOCALIZE_ALL_CASTS", "0") == "1"
+        ):
+            from .localized_mxfp8 import (
+                is_mxfp8_vmm_localization_eligible,
+                is_mxfp8_vmm_workspace_iteration_active,
+                quantize_mxfp8_into_existing_output,
+            )
+
+            if (
+                is_mxfp8_vmm_workspace_iteration_active()
+                and is_mxfp8_vmm_localization_eligible(src, self)
+            ):
+                return quantize_mxfp8_into_existing_output(src, self, dst)
+
         # Launch cast kernel
         tex.quantize(src, self, dst, noop_flag)
 
@@ -128,7 +145,26 @@ class MXFP8Quantizer(Quantizer):
         ):
             from .vmm import is_vmm_tensor
 
-            if is_vmm_tensor(tensor):
+            input_is_vmm = is_vmm_tensor(tensor)
+            localize_all_casts = (
+                os.getenv("NVTE_MXFP8_VMM_LOCALIZE_ALL_CASTS", "0") == "1"
+            )
+            from .localized_mxfp8 import (
+                is_mxfp8_vmm_localization_eligible,
+                is_mxfp8_vmm_workspace_iteration_active,
+            )
+
+            if (
+                (
+                    input_is_vmm
+                    or (
+                        localize_all_casts
+                        and self.internal
+                        and is_mxfp8_vmm_workspace_iteration_active()
+                    )
+                )
+                and is_mxfp8_vmm_localization_eligible(tensor, self)
+            ):
                 from .localized_mxfp8 import (
                     acquire_mxfp8_vmm_workspace,
                     release_mxfp8_vmm_workspace,

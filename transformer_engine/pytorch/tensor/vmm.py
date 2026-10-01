@@ -150,7 +150,15 @@ class VMMRowSplitAllocator:
         return descriptor
 
     def allocate(self, shape: Tuple[int, ...], dtype: torch.dtype) -> torch.Tensor:
-        """Allocate one contiguous tensor with a domain boundary at dim-0 midpoint."""
+        """Allocate one contiguous tensor split approximately at dim-0 midpoint.
+
+        CUDA VMM mappings must start and end on allocation-granularity
+        boundaries. Logical row partitions often do not satisfy that constraint
+        (for example GPT-OSS MXFP8 tensors with hidden size 2880). Map equal,
+        rounded-up physical ranges and expose only the requested logical bytes.
+        At most one granularity unit around the logical midpoint is then backed
+        by domain 0 rather than domain 1.
+        """
         if not shape or shape[0] % 2 != 0:
             raise ValueError(f"Expected an even, non-empty leading dimension, got {shape}")
         element_size = torch.empty((), dtype=dtype).element_size()
@@ -159,14 +167,13 @@ class VMMRowSplitAllocator:
         half_bytes = total_bytes // 2
         if total_bytes == 0 or total_bytes % 2 != 0:
             raise ValueError(f"Allocation size must be positive and even, got {total_bytes}")
-        if half_bytes % self.granularity != 0:
-            raise ValueError(
-                "Each logical row partition must be VMM-granularity aligned "
-                f"(half={half_bytes} bytes, granularity={self.granularity} bytes)"
-            )
+        mapped_half_bytes = (
+            (half_bytes + self.granularity - 1) // self.granularity
+        ) * self.granularity
+        mapped_total_bytes = 2 * mapped_half_bytes
 
         driver = self._driver
-        result = driver.cuMemAddressReserve(total_bytes, self.granularity, 0, 0)
+        result = driver.cuMemAddressReserve(mapped_total_bytes, self.granularity, 0, 0)
         _check_cuda(result[0], "cuMemAddressReserve")
         base = int(result[1])
 
@@ -175,7 +182,7 @@ class VMMRowSplitAllocator:
         try:
             for domain in range(2):
                 result = driver.cuMemCreate(
-                    half_bytes,
+                    mapped_half_bytes,
                     self._allocation_properties(domain),
                     0,
                 )
@@ -198,7 +205,7 @@ class VMMRowSplitAllocator:
                         )
                         _VMM_OOM_CACHE_RETRY_WARNED = True
                     result = driver.cuMemCreate(
-                        half_bytes,
+                        mapped_half_bytes,
                         self._allocation_properties(domain),
                         0,
                     )
@@ -210,7 +217,8 @@ class VMMRowSplitAllocator:
                     microbatch = _VMM_CURRENT_MICROBATCH
                     accumulation_step = None if microbatch is None else microbatch + 1
                     raise RuntimeError(
-                        f"{exc}; requested={half_bytes} bytes for shape={shape}, dtype={dtype}; "
+                        f"{exc}; requested={mapped_half_bytes} bytes "
+                        f"(logical_half={half_bytes}) for shape={shape}, dtype={dtype}; "
                         f"forward_microbatch={microbatch}, "
                         f"accumulation_step={accumulation_step}; "
                         f"device_free={free_bytes}/{total_device_bytes} bytes; "
@@ -223,19 +231,19 @@ class VMMRowSplitAllocator:
                 handles.append(handle)
                 _check_cuda(
                     driver.cuMemMap(
-                        base + domain * half_bytes,
-                        half_bytes,
+                        base + domain * mapped_half_bytes,
+                        mapped_half_bytes,
                         0,
                         handle,
                         0,
                     ),
                     f"cuMemMap(domain={domain})",
                 )
-                mapped_bytes += half_bytes
+                mapped_bytes += mapped_half_bytes
             _check_cuda(
                 driver.cuMemSetAccess(
                     base,
-                    total_bytes,
+                    mapped_total_bytes,
                     [self._access_descriptor()],
                     1,
                 ),
@@ -246,11 +254,11 @@ class VMMRowSplitAllocator:
                 driver.cuMemUnmap(base, mapped_bytes)
             for handle in handles:
                 driver.cuMemRelease(handle)
-            driver.cuMemAddressFree(base, total_bytes)
+            driver.cuMemAddressFree(base, mapped_total_bytes)
             raise
 
-        self._allocations[base] = (total_bytes, (handles[0], handles[1]))
-        _VMM_RANGES.setdefault(self.device_index, {})[base] = total_bytes
+        self._allocations[base] = (mapped_total_bytes, (handles[0], handles[1]))
+        _VMM_RANGES.setdefault(self.device_index, {})[base] = mapped_total_bytes
         if torch.cuda.is_current_stream_capturing():
             _CAPTURED_VMM_ALLOCATORS[id(self)] = self
         storage = torch._C._construct_storage_from_data_pointer(

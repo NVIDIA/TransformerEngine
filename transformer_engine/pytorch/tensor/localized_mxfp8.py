@@ -32,6 +32,32 @@ _VMM_WORKSPACE_POOLS: Dict[str, List[_VMMWorkspaceSlot]] = {}
 _VMM_WORKSPACE_POOL_STAGE: Optional[str] = None
 
 
+def is_mxfp8_vmm_localization_eligible(
+    tensor: torch.Tensor,
+    quantizer: MXFP8Quantizer,
+) -> bool:
+    """Whether a cast-only MXFP8 quantization can be split across two domains."""
+    if (
+        tensor.ndim != 2
+        or tensor.dtype not in (torch.float16, torch.bfloat16)
+        or not tensor.is_cuda
+        or not tensor.is_contiguous()
+        or quantizer.with_2d_quantization
+        or not (quantizer.rowwise_usage or quantizer.columnwise_usage)
+    ):
+        return False
+
+    rows, cols = tensor.shape
+    rows_per_domain = rows // 2
+    if rows % 2 != 0 or rows_per_domain % 32 != 0 or cols % 32 != 0:
+        return False
+    if quantizer.rowwise_usage and not quantizer.columnwise_usage and cols % 128 != 0:
+        return False
+    if quantizer.optimize_for_gemm and rows_per_domain % 128 != 0:
+        return False
+    return True
+
+
 def _get_localization_context(device_index: int):
     context = _LOCALIZATION_CONTEXTS.get(device_index)
     if context is not None:
@@ -317,10 +343,10 @@ class MXFP8VMMWorkspace:
         localized_data_layout: str = "both",
     ) -> "MXFP8VMMWorkspace":
         """Allocate persistent outputs and, unless provided, a VMM input."""
-        if len(shape) != 2 or shape[0] % 256 != 0 or shape[1] % 128 != 0:
+        if len(shape) != 2 or shape[0] % 64 != 0 or shape[1] % 32 != 0:
             raise ValueError(
-                "VMM fused-swizzle prototype requires a 2D shape with "
-                f"rows divisible by 256 and columns divisible by 128, got {shape}"
+                "VMM cast-only quantization requires a 2D shape with "
+                f"rows divisible by 64 and columns divisible by 32, got {shape}"
             )
         if dtype not in (torch.float16, torch.bfloat16):
             raise ValueError(f"Expected FP16 or BF16 input dtype, got {dtype}")
@@ -328,6 +354,16 @@ class MXFP8VMMWorkspace:
             raise ValueError("VMM prototype requires rowwise or columnwise MXFP8")
         if quantizer.with_2d_quantization:
             raise ValueError("VMM prototype does not support 2D quantization")
+        if quantizer.rowwise_usage and not quantizer.columnwise_usage and shape[1] % 128 != 0:
+            raise ValueError(
+                "Rowwise-only cast-only quantization requires columns divisible by 128, "
+                f"got {shape}"
+            )
+        if quantizer.optimize_for_gemm and (shape[0] // 2) % 128 != 0:
+            raise ValueError(
+                "GEMM-swizzled cast-only quantization requires each row partition "
+                f"to be divisible by 128, got {shape}"
+            )
         if localized_data_layout not in ("both", "rowwise", "columnwise"):
             raise ValueError(
                 "localized_data_layout must be 'both', 'rowwise', or 'columnwise', "
@@ -486,6 +522,8 @@ class MXFP8VMMWorkspace:
         cls,
         tensor: torch.Tensor,
         quantizer: MXFP8Quantizer,
+        *,
+        localized_data_layout: str = "both",
     ) -> "MXFP8VMMWorkspace":
         """Consume an ordinary activation and localize only MXFP8 data outputs."""
         return cls.empty(
@@ -494,6 +532,7 @@ class MXFP8VMMWorkspace:
             device=tensor.device,
             quantizer=quantizer,
             input_tensor=tensor,
+            localized_data_layout=localized_data_layout,
         )
 
     def _fork_join_events(self):
@@ -582,14 +621,18 @@ def acquire_mxfp8_vmm_workspace(
     *,
     localized_data_layout: str,
 ) -> MXFP8VMMWorkspace:
-    """Acquire a graph-stable workspace that is not live in another attention."""
+    """Acquire a graph-stable workspace for a VMM or ordinary input tensor."""
+    from .vmm import is_vmm_tensor
+
+    input_is_vmm = is_vmm_tensor(tensor)
     stage = _VMM_WORKSPACE_POOL_STAGE
     if stage is None:
-        return MXFP8VMMWorkspace.from_vmm_input(
-            tensor,
-            quantizer,
-            localized_data_layout=localized_data_layout,
+        constructor = (
+            MXFP8VMMWorkspace.from_vmm_input
+            if input_is_vmm
+            else MXFP8VMMWorkspace.from_unlocalized_input
         )
+        return constructor(tensor, quantizer, localized_data_layout=localized_data_layout)
 
     signature = (
         tuple(tensor.shape),
@@ -600,6 +643,7 @@ def acquire_mxfp8_vmm_workspace(
         quantizer.columnwise_usage,
         quantizer.optimize_for_gemm,
         localized_data_layout,
+        input_is_vmm,
     )
     pool = _VMM_WORKSPACE_POOLS.setdefault(stage, [])
     slot = next(
@@ -607,11 +651,12 @@ def acquire_mxfp8_vmm_workspace(
         None,
     )
     if slot is None:
-        workspace = MXFP8VMMWorkspace.from_vmm_input(
-            tensor,
-            quantizer,
-            localized_data_layout=localized_data_layout,
+        constructor = (
+            MXFP8VMMWorkspace.from_vmm_input
+            if input_is_vmm
+            else MXFP8VMMWorkspace.from_unlocalized_input
         )
+        workspace = constructor(tensor, quantizer, localized_data_layout=localized_data_layout)
         slot = _VMMWorkspaceSlot(signature, workspace, in_use=True)
         pool.append(slot)
     else:
@@ -641,6 +686,101 @@ def release_mxfp8_vmm_tensor_workspaces(*tensors: object) -> None:
         if workspace is not None and id(workspace) not in released:
             release_mxfp8_vmm_workspace(workspace)
             released.add(id(workspace))
+
+
+def quantize_mxfp8_into_existing_output(
+    tensor: torch.Tensor,
+    quantizer: MXFP8Quantizer,
+    output: MXFP8Tensor,
+) -> MXFP8Tensor:
+    """Run a cached-workspace cast on two green streams.
+
+    Cached module-weight workspaces must keep their original addresses, so
+    their storage cannot be replaced by a pooled VMM allocation. This still
+    localizes kernel execution and provides the control needed to distinguish
+    green-context placement from localized output memory.
+    """
+    if not is_mxfp8_vmm_localization_eligible(tensor, quantizer):
+        raise ValueError(
+            f"MXFP8 tensor shape {tuple(tensor.shape)} is not eligible for split quantization"
+        )
+
+    device_index = tensor.device.index
+    if device_index is None:
+        device_index = torch.cuda.current_device()
+    _, _, streams = _get_localization_context(device_index)
+    parent_stream = torch.cuda.current_stream(tensor.device)
+    fork_event = torch.cuda.Event(enable_timing=False)
+    join_events = tuple(torch.cuda.Event(enable_timing=False) for _ in range(2))
+    if torch.cuda.is_current_stream_capturing():
+        retained_events = getattr(output, "_nvte_vmm_capture_events", None)
+        if retained_events is None:
+            retained_events = []
+            output._nvte_vmm_capture_events = retained_events
+        retained_events.extend((fork_event, *join_events))
+
+    rows_per_domain = tensor.shape[0] // 2
+    row_scale_shape = (
+        tuple(quantizer.get_scale_shape(tensor.shape, columnwise=False))
+        if quantizer.rowwise_usage
+        else None
+    )
+    col_scale_shape = (
+        tuple(quantizer.get_scale_shape(tensor.shape, columnwise=True))
+        if quantizer.columnwise_usage
+        else None
+    )
+    fork_event.record(parent_stream)
+    for domain, (stream, join_event) in enumerate(zip(streams, join_events)):
+        row_start = domain * rows_per_domain
+        row_end = row_start + rows_per_domain
+        rowwise_scale_inv = None
+        if output._rowwise_scale_inv is not None:
+            scale_start = domain * (row_scale_shape[0] // 2)
+            scale_end = scale_start + row_scale_shape[0] // 2
+            rowwise_scale_inv = output._rowwise_scale_inv[scale_start:scale_end]
+        columnwise_scale_inv = None
+        if output._columnwise_scale_inv is not None:
+            if quantizer.optimize_for_gemm:
+                columnwise_scale_inv = output._columnwise_scale_inv
+            else:
+                scale_start = domain * (col_scale_shape[0] // 2)
+                scale_end = scale_start + col_scale_shape[0] // 2
+                columnwise_scale_inv = output._columnwise_scale_inv[scale_start:scale_end]
+        partition_output = MXFP8Tensor(
+            shape=(rows_per_domain, tensor.shape[1]),
+            dtype=tensor.dtype,
+            rowwise_data=(
+                output._rowwise_data[row_start:row_end]
+                if output._rowwise_data is not None
+                else None
+            ),
+            rowwise_scale_inv=rowwise_scale_inv,
+            columnwise_data=(
+                output._columnwise_data[row_start:row_end]
+                if output._columnwise_data is not None
+                else None
+            ),
+            columnwise_scale_inv=columnwise_scale_inv,
+            fp8_dtype=quantizer.dtype,
+            quantizer=quantizer,
+            with_gemm_swizzled_scales=quantizer.optimize_for_gemm,
+            device=tensor.device,
+        )
+        stream.wait_event(fork_event)
+        with torch.cuda.stream(stream):
+            tex.quantize_mxfp8_row_partition(
+                tensor[row_start:row_end],
+                quantizer,
+                partition_output,
+                row_start,
+                tensor.shape[0],
+            )
+        join_event.record(stream)
+    for event in join_events:
+        parent_stream.wait_event(event)
+    output._fp8_dtype = quantizer.dtype
+    return output
 
 
 def end_mxfp8_vmm_workspace_iteration(*, validate: bool = True) -> None:

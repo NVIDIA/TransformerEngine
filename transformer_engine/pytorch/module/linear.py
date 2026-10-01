@@ -1719,7 +1719,7 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
     if os.getenv("NVTE_MXFP8_VMM_LOCALIZATION", "0") == "1":
         from ..tensor.localized_mxfp8 import release_mxfp8_vmm_tensor_workspaces
 
-        release_mxfp8_vmm_tensor_workspaces(grad_output)
+        release_mxfp8_vmm_tensor_workspaces(inputmat, weight_fp8, grad_output)
 
     # Scatter fp8 weight buffers
     if bwd_args.fp8 and not bwd_args.is_weight_param_quantized:

@@ -2662,6 +2662,23 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             activation_grad_extra = (None,)
         else:
             activation_grad_extra = (grad_scales,) if grad_scales is not None else ()
+        if os.getenv("NVTE_MXFP8_VMM_LOCALIZATION", "0") == "1":
+            from ...tensor.localized_mxfp8 import release_mxfp8_vmm_tensor_workspaces
+
+            fc1_weight_tensors = (
+                [grouped_fc1_weight]
+                if fc1_op.single_grouped_weight
+                else grouped_fc1_weight
+            )
+            fc2_weight_tensors = (
+                [grouped_fc2_weight]
+                if fc2_op.single_grouped_weight
+                else grouped_fc2_weight
+            )
+            release_mxfp8_vmm_tensor_workspaces(
+                *fc1_weight_tensors,
+                *fc2_weight_tensors,
+            )
         return (
             grad_input,
             [fc1_grad_params, (), fc2_grad_params],

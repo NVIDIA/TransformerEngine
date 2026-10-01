@@ -324,6 +324,103 @@ def test_mxfp8_vmm_columnwise_only_quantize_impl(monkeypatch) -> None:
 
 
 @pytest.mark.skipif(not _localization_available(), reason="CUDA localization is unavailable")
+@pytest.mark.parametrize("shape", [(5760, 2880), (24576, 2880)])
+def test_mxfp8_vmm_localizes_ordinary_cast_only_inputs(shape, monkeypatch) -> None:
+    """GPT-OSS weight and activation casts use localized outputs."""
+    from transformer_engine.pytorch.tensor.localized_mxfp8 import (
+        begin_mxfp8_vmm_workspace_iteration,
+        clear_mxfp8_vmm_workspace_pools,
+        end_mxfp8_vmm_workspace_iteration,
+        release_mxfp8_vmm_tensor_workspaces,
+    )
+    from transformer_engine.pytorch.tensor.vmm import is_vmm_tensor
+
+    tensor = torch.randn(shape, dtype=torch.bfloat16, device="cuda")
+    quantizer = te.MXFP8Quantizer(
+        fp8_dtype=te.DType.kFloat8E4M3,
+        rowwise=True,
+        columnwise=True,
+    )
+    quantizer.internal = True
+    quantizer.optimize_for_gemm = False
+    reference = quantizer(tensor)
+
+    monkeypatch.setenv("NVTE_MXFP8_VMM_LOCALIZATION", "1")
+    monkeypatch.setenv("NVTE_MXFP8_VMM_LOCALIZE_ALL_CASTS", "1")
+    try:
+        begin_mxfp8_vmm_workspace_iteration("test-ordinary-cast")
+        output = quantizer(tensor)
+        torch.cuda.synchronize()
+        assert is_vmm_tensor(output._rowwise_data)
+        assert is_vmm_tensor(output._columnwise_data)
+        for name in (
+            "_rowwise_data",
+            "_rowwise_scale_inv",
+            "_columnwise_data",
+            "_columnwise_scale_inv",
+        ):
+            torch.testing.assert_close(
+                getattr(output, name),
+                getattr(reference, name),
+                atol=0.0,
+                rtol=0.0,
+            )
+        release_mxfp8_vmm_tensor_workspaces(output)
+        end_mxfp8_vmm_workspace_iteration()
+    finally:
+        end_mxfp8_vmm_workspace_iteration(validate=False)
+        clear_mxfp8_vmm_workspace_pools()
+
+
+@pytest.mark.skipif(not _localization_available(), reason="CUDA localization is unavailable")
+def test_mxfp8_vmm_splits_cached_weight_updates(monkeypatch) -> None:
+    """Cached GPT-OSS weight casts preserve their persistent output buffers."""
+    from transformer_engine.pytorch.tensor.localized_mxfp8 import (
+        begin_mxfp8_vmm_workspace_iteration,
+        end_mxfp8_vmm_workspace_iteration,
+    )
+    from transformer_engine.pytorch.tensor.vmm import is_vmm_tensor
+
+    shape = (5760, 2880)
+    tensor = torch.randn(shape, dtype=torch.bfloat16, device="cuda")
+    quantizer = te.MXFP8Quantizer(
+        fp8_dtype=te.DType.kFloat8E4M3,
+        rowwise=True,
+        columnwise=True,
+    )
+    reference = quantizer(tensor)
+    output = quantizer.make_empty(shape, dtype=tensor.dtype, device=tensor.device)
+    rowwise_ptr = output._rowwise_data.data_ptr()
+    columnwise_ptr = output._columnwise_data.data_ptr()
+
+    monkeypatch.setenv("NVTE_MXFP8_VMM_LOCALIZATION", "1")
+    monkeypatch.setenv("NVTE_MXFP8_VMM_LOCALIZE_ALL_CASTS", "1")
+    try:
+        begin_mxfp8_vmm_workspace_iteration("test-cached-weight")
+        quantizer.update_quantized(tensor, output)
+        torch.cuda.synchronize()
+        assert output._rowwise_data.data_ptr() == rowwise_ptr
+        assert output._columnwise_data.data_ptr() == columnwise_ptr
+        assert not is_vmm_tensor(output._rowwise_data)
+        assert not is_vmm_tensor(output._columnwise_data)
+        for name in (
+            "_rowwise_data",
+            "_rowwise_scale_inv",
+            "_columnwise_data",
+            "_columnwise_scale_inv",
+        ):
+            torch.testing.assert_close(
+                getattr(output, name),
+                getattr(reference, name),
+                atol=0.0,
+                rtol=0.0,
+            )
+        end_mxfp8_vmm_workspace_iteration()
+    finally:
+        end_mxfp8_vmm_workspace_iteration(validate=False)
+
+
+@pytest.mark.skipif(not _localization_available(), reason="CUDA localization is unavailable")
 def test_mxfp8_vmm_workspace_pool_reuses_warmup_storage() -> None:
     """Full-iteration capture reuses VMM outputs allocated during eager warmup."""
     from transformer_engine.pytorch.tensor.localized_mxfp8 import (
