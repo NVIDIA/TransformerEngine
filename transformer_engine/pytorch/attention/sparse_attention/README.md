@@ -2,7 +2,7 @@
 
 For stateless, unpadded BF16 CSA/HCA layers, `DSv4HybridAttention` owns the
 DSv4 projections, norms, RoPE, compressors, indexer, sink, and grouped output
-projection. Its input and output are both `[batch, sequence, hidden_size]`:
+projection. Its default input and output are both `[sequence, batch, hidden_size]`:
 
 ```python
 import torch
@@ -15,18 +15,21 @@ attention = DSv4HybridAttention(
     index_n_heads=32, index_topk=32, max_seqlen=2048,
     params_dtype=torch.bfloat16,
 )
-output = attention(hidden_states)  # [B, S, 4096] -> [B, S, 4096]
+output = attention(hidden_states)  # [S, B, 4096] -> [S, B, 4096]
 ```
 
 ```text
-BSD ── TE query/local-KV projections + norms ───────────────┐
-  ├── TE compressor projections/norm ── cuDNN compression ──┼── cuDNN attention ── TE grouped output ── BSD
+SBD ── TE query/local-KV projections + norms ───────────────┐
+  ├── TE compressor projections/norm ── cuDNN compression ──┼── cuDNN attention ── TE grouped output ── SBD
   └── (CSA) TE index projections/norm ── cuDNN compression ── cuDNN selection ──┘
 ```
 
 The high-level layer uses 64 heads of width 512 and defaults to plain interleaved
 partial RoPE with `rope_theta`; callers may inject a `rope` module returning token
 and compressed `(cos, sin)` pairs.
+Use `input_format="bsd"` for batch-major callers. The SBD boundary conversion
+is a view when batch size is one; larger batches require a repack for the current
+cuDNN packed-row contract.
 It supports full sequences starting at position zero, equal unpadded lengths within
 a batch, and at least one complete compression window. Sliding-only layers,
 cache/decode, padding, TP/CP, and FP8 remain outside this first pass. The
@@ -54,7 +57,7 @@ The cuDNN calls used by this layer are:
 | Fused indexer score + top-k | — | Once |
 | Sparse attention forward/backward | Once | Once |
 
-For CSA, `return_indexer_context=True` returns `(BSD_output, context)`; HCA rejects
+For CSA, `return_indexer_context=True` returns `(SBD_output, context)` by default; HCA rejects
 it. The live BF16 index Q/K/W have shapes `[B*S,H,128]`, `[B*S/ratio,128]`, and
 `[B*S,H]`; selected IDs are `[B*S,topk]` global compressed-row IDs. Detached
 attention Q/local KV/compressed KV/sink have shapes `[B*S,64,512]`,

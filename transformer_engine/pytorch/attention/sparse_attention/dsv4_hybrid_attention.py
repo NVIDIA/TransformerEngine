@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Unpadded BSD-to-BSD DSv4 CSA/HCA attention."""
+"""Unpadded DSv4 CSA/HCA attention."""
 
 from typing import Optional
 
@@ -17,7 +17,7 @@ from .dsv4 import DSv4Attention
 
 
 class DSv4HybridAttention(torch.nn.Module):
-    """DSv4 CSA/HCA attention from unpadded ``[B,S,D]`` to ``[B,S,D]``.
+    """DSv4 CSA/HCA attention from unpadded ``[S,B,D]`` to ``[S,B,D]``.
 
     This first-pass layer handles full-sequence BF16 attention forward/backward
     on SM100. By default, projections that share an input use one contiguous
@@ -53,6 +53,7 @@ class DSv4HybridAttention(torch.nn.Module):
         max_seqlen: Optional[int] = None,
         device: str = "cuda",
         params_dtype: torch.dtype = torch.float32,
+        input_format: str = "sbd",
         _fuse_projections: bool = True,
     ):
         super().__init__()
@@ -61,6 +62,8 @@ class DSv4HybridAttention(torch.nn.Module):
         self.index_head_dim = 128
         if layer_type not in ("compressed_sparse_attention", "heavily_compressed_attention"):
             raise ValueError("Only DSv4 CSA and HCA are supported.")
+        if input_format not in ("sbd", "bsd"):
+            raise ValueError("input_format must be 'sbd' or 'bsd'.")
         if head_dim != 512 or rope_head_dim < 2 or rope_head_dim % 2 or rope_head_dim > head_dim:
             raise ValueError("head_dim must be 512; rope_head_dim must be even and fit.")
         if any(
@@ -151,13 +154,18 @@ class DSv4HybridAttention(torch.nn.Module):
         self.compression_ratio = compression_ratio
         self.o_groups, self.o_lora_rank = o_groups, o_lora_rank
         self.is_csa = is_csa
+        self.input_format = input_format
 
     def forward(self, hidden_states: torch.Tensor, *, return_indexer_context: bool = False):
-        """Run BSD-to-BSD attention and optionally expose the CSA loss context."""
+        """Run attention in the selected format and optionally expose CSA context."""
         if hidden_states.ndim != 3 or hidden_states.shape[-1] != self.hidden_size:
-            raise ValueError("hidden_states must have shape [batch, sequence, hidden_size].")
+            raise ValueError("hidden_states must have the selected format and hidden_size.")
         if return_indexer_context and not self.is_csa:
             raise ValueError("Only CSA has an indexer context.")
+        if self.input_format == "sbd":
+            # cuDNN consumes batch-major packed rows. B=1 needs only a view;
+            # larger batches require a physical repack with the current core.
+            hidden_states = hidden_states.transpose(0, 1).contiguous()
         batch, seq, _ = hidden_states.shape
         if return_indexer_context and batch != 1:
             raise ValueError("The CSA indexer context is currently supported for batch=1.")
@@ -229,6 +237,8 @@ class DSv4HybridAttention(torch.nn.Module):
         weight = self.o_a_proj.weight.reshape(self.o_groups, self.o_lora_rank, -1)
         grouped = torch.einsum("bsgd,grd->bsgr", output, weight).flatten(2)
         result = self.o_b_proj(grouped)
+        if self.input_format == "sbd":
+            result = result.transpose(0, 1).contiguous()
         if return_indexer_context:
             return result, {
                 "index_q": index_q,
