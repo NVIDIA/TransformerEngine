@@ -479,7 +479,10 @@ def test_pinned_plan_decline_reports_the_engine_reason():
     """
     from transformer_engine.pytorch.attention.dot_product_attention import cudnn_pygraph
 
-    cudnn = cudnn_pygraph.import_cudnn_frontend()
+    try:
+        cudnn = cudnn_pygraph.import_cudnn_frontend()
+    except ImportError:
+        pytest.skip("cuDNN frontend Python package is required for the decline-reason path.")
 
     class _DeclinedGraph:
         """Offers the wanted plan, then refuses it at check_support."""

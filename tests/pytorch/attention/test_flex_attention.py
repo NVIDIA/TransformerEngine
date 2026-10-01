@@ -764,9 +764,13 @@ def test_score_mod_graph_signatures_stay_aligned(direction):
 def test_mask_spec_translates_to_a_diagonal_band(mask_spec, expected):
     """A mask_spec must become the cuDNN band kwargs, and never a score_mod.
 
-    No GPU: this builds no graph, it checks the kwargs the graph would be given.
+    No GPU: this builds no graph, it checks the kwargs the graph would be given. The frontend is
+    an optional dependency, so skip rather than fail where it is absent.
     """
-    cudnn = flex_attention._import_cudnn_frontend()
+    try:
+        cudnn = flex_attention._import_cudnn_frontend()
+    except ImportError:
+        pytest.skip("cuDNN frontend Python package is required for the diagonal-band kwargs.")
     got = flex_attention._mask_or_score_mod_kwargs(mask_spec, None)
 
     assert "score_mod" not in got and "use_causal_mask" not in got
