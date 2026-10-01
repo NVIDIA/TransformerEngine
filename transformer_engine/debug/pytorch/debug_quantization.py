@@ -674,6 +674,11 @@ class DebugQuantizedTensor(QuantizedTensorStorage):
         """Size of the tensor."""
         return self.rowwise_gemm_tensor.size(*args)
 
+    @property
+    def ndim(self):
+        """Number of dimensions of the tensor."""
+        return len(self.size())
+
     def update_usage(self, rowwise_usage: bool = None, columnwise_usage: bool = None):
         """Update usage of the tensor."""
         if self.rowwise_gemm_tensor is self.columnwise_gemm_tensor:
