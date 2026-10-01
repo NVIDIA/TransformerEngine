@@ -118,6 +118,17 @@ Expert parallelism
 NCCL-based dispatch and combine for experts sharded across ranks. See
 :doc:`Expert parallelism <../features/mixture_of_experts/mixture_of_experts>`.
 
+``MoeDispatch`` and ``MoeCombine`` can wrap the local expert operations in a
+``transformer_engine.pytorch.ops.Sequential``. They share an ``EpConfig`` and
+an ``EpBuffer``; the guide shows how to connect the per-expert counts and
+routing weights through the sequence's extra-tensor channels.
+
+.. autoapiclass:: transformer_engine.pytorch.ops.MoeDispatch
+
+.. autoapiclass:: transformer_engine.pytorch.ops.MoeCombine
+
+.. autoapiclass:: transformer_engine.pytorch.ep.EpConfig
+
 .. autoapifunction:: transformer_engine.pytorch.ep.ep_bootstrap
 
 .. autoapifunction:: transformer_engine.pytorch.ep.ep_finalize

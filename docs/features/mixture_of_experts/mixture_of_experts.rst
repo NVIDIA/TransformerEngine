@@ -8,11 +8,13 @@
 Mixture of Experts
 ===================================
 
-.. note::
+.. warning::
 
-    The MoE building blocks are designed to work with Transformer Engine's
-    low-precision recipes. This support is still being extended, so not every
-    block works with every recipe yet.
+    MoE feature availability depends on the GPU, framework, Transformer Engine
+    and dependency versions, and precision recipe. Not every operation or
+    optimization works in every configuration. This guide explains the building
+    blocks; consult the :doc:`PyTorch API reference </api/pytorch>` and
+    :doc:`JAX API reference </api/jax>` for compatibility and input requirements.
 
 Introduction
 ------------
@@ -88,7 +90,7 @@ routing weights); all other entries are zero.*
 
 Options:
 
-* **Score function:** softmax or sigmoid. With softmax, ``use_pre_softmax``
+* **Score function:** softmax, sigmoid or sqrtsoftplus. With softmax, ``use_pre_softmax``
   selects whether the softmax is applied before or after the top-k.
 * **Grouped routing:** the experts are split into ``num_groups`` equal groups.
   Each group is scored by the sum of its best expert scores, the top
@@ -126,9 +128,14 @@ the loss has a gradient with respect to every expert's logit. The dense scores
 are returned by the router functions shown below; add the scaled loss to the
 training loss.
 
+Count tokens from the original router's ``routing_map``. The auxiliary-score
+helpers ignore expert bias and grouped routing, so their returned maps can
+select different experts. Use the same score function for routing and the
+auxiliary scores.
+
 ``expert_bias`` balances the load without an extra loss term:
 
-* with the sigmoid score function it is added to the scores only for the top-k
+* with sigmoid or sqrtsoftplus it is added to the scores only for the top-k
   selection, so it changes which experts are picked but not the returned
   routing weights;
 * update it between steps: lower it for overloaded experts, raise it for
@@ -350,23 +357,17 @@ token-count argument.
 baseline launches one* ``Linear`` *per expert; the grouped GEMM replaces the
 loop with one call.*
 
-The grouped GEMM works with the :doc:`low-precision training recipes
-</features/low_precision_training/index>` available to ``Linear``: the inputs
-are quantized per expert and the expert GEMMs run in the recipe's precision.
+Grouped GEMMs can use :doc:`low-precision training recipes
+</features/low_precision_training/index>`: the inputs are quantized per expert
+and the expert GEMMs run in the recipe's precision.
 
-There are two execution paths:
+The computation can be implemented in two ways:
 
-* **Per-expert GEMMs.** The per-expert token counts are read on the host, the
-  input is split and quantized per expert, and one cuBLAS GEMM per expert is
-  launched on a pool of CUDA streams. This path supports the broadest range of
-  configurations, but reading the token counts is a device-to-host
-  synchronization, so it cannot be captured in a CUDA graph.
-* **Single grouped GEMM.** The token counts stay on the device and all experts
-  run in one grouped operation, with quantization fused across experts. There
-  is no host synchronization, so the step is CUDA-graph capturable. Support
-  depends on the framework, GPU, data type, recipe, and matrix shapes; an
-  unsupported configuration falls back to per-expert GEMMs. See the framework
-  API reference for the current compatibility details.
+* **Per-expert GEMMs.** The input is split by expert and each expert's matrix
+  multiplication is launched separately.
+* **Single grouped GEMM.** The experts run in one grouped operation. Keeping
+  token counts on the device avoids a host synchronization and helps with
+  CUDA graph capture.
 
 The snippets assume the tokens have already been permuted into
 expert-contiguous order.
@@ -387,16 +388,20 @@ expert-contiguous order.
          :start-after: # START_GROUPED_LINEAR_JAX
          :end-before: # END_GROUPED_LINEAR_JAX
 
+      With MXFP8, pad each expert's token block to a multiple of 128 rows and
+      pass the padded counts in ``group_sizes``. Aligning only the total token
+      buffer is insufficient. The high-level JAX ``moe`` API handles this
+      per-expert padding during dispatch.
+
 .. _moe-grouped-mlp:
 
 Grouped MLP
 -----------
 
-An expert MLP is two grouped GEMMs with an activation between them. On
-Blackwell (SM100) GPUs, Transformer Engine fuses the activation into the FC1
-grouped GEMM using CuTe DSL kernels. Quantization is also fused where the
-recipe supports it. FC2 runs as a separate grouped GEMM, reading the
-intermediate tensor from device memory.
+An expert MLP is two grouped GEMMs with an activation between them. Transformer
+Engine can fuse the activation and quantization into the expert GEMMs. In the
+fused path illustrated below, FC1 includes the activation and FC2 runs as a
+separate grouped GEMM, reading the intermediate tensor from device memory.
 
 .. raw:: html
    :file: img/moe_grouped_mlp.svg
@@ -408,26 +413,43 @@ kernels.*
 The fusion is applied by the :doc:`operation fuser </examples/op_fuser/op_fuser>`:
 a grouped linear, a scaled GLU (or SReLU) activation and another grouped linear
 in sequence are replaced with one fused grouped-MLP operation.
+Fusion requires compatible layer dimensions, activation layout, and precision
+recipe.
+
+For GLU fusion, use ``glu_interleave_size=32``: FC1 must produce alternating
+blocks of 32 gate features and 32 value features. When loading a checkpoint
+whose FC1 outputs store all gate features before all value features, convert
+each expert's FC1 weight and bias with ``te.interleave_glu_tensor(tensor, 32)``.
+``ScaledClampedQGeGLU`` uses the same layout. For ``ScaledSReLU``, FC1 instead
+produces ``ffn_hidden_size`` features, without the GLU's doubled width.
+
+``ScaledSwiGLU`` multiplies the activation output by the routing weights before
+FC2. To weight the entire expert output, FC2 must also scale its bias:
+
+.. math::
+
+   p\,(h W_2 + b_2) = (p\,h) W_2 + p\,b_2,
+
+where :math:`h` is the activation output and :math:`p` is the routing weight.
+Set ``scale_bias=True`` on FC2 and pass the same routing weights to both the
+activation and FC2. With ``bias=False`` on FC2, bias scaling is unnecessary.
 
 .. tabs::
 
    .. tab:: PyTorch
-
-      .. raw:: html
-
-         <div class="code-block-header">
-            Requires SM100 (Blackwell)
-         </div>
 
       .. literalinclude:: grouped_mlp_pytorch.py
          :language: python
          :start-after: # START_GROUPED_MLP_PYTORCH
          :end-before: # END_GROUPED_MLP_PYTORCH
 
+The arguments after ``permuted`` are consumed in operation order: FC1 takes the
+per-expert token counts, the activation takes the routing weights, and FC2 takes
+the counts and the same weights for its bias. ``expert_out`` is already weighted;
+the subsequent combine must not apply the routing weights again.
+
 Set ``NVTE_CUTEDSL_FUSED_GROUPED_MLP=1`` before importing
-``transformer_engine.pytorch`` to enable fusion. It requires Blackwell and a
-supported block-scaled recipe (MXFP8 or NVFP4). When the configuration is not
-supported, the three operations run separately.
+``transformer_engine.pytorch`` to enable fusion for eligible configurations.
 
 .. _moe-putting-it-together:
 
@@ -464,12 +486,6 @@ Every stage is differentiable, so the assembled layer trains end to end.
 
 Expert parallelism
 ------------------
-
-.. note::
-
-    NCCL-based expert parallelism requires Hopper (SM90) or later and NCCL 2.30.4
-    or newer. It is compiled in by default when Transformer Engine is built for
-    these architectures; set ``NVTE_WITH_NCCL_EP=0`` at build time to disable it.
 
 With expert parallelism (EP) the experts are sharded across ranks: every rank
 keeps its own shard of the tokens and holds only a slice of the experts.
@@ -526,16 +542,17 @@ the NCCL EP dispatch writes every token straight into its expert slot.*
 
 **Receive buffer**
 
-The number of tokens a rank receives depends on the routing, so the buffer is
-sized in one of two ways. Local expert blocks are packed consecutively, with
+The number of tokens a rank receives depends on the routing. Local expert
+blocks are packed consecutively, with
 each block optionally padded to the configured alignment. Their offsets are
 the cumulative per-expert counts; any remaining capacity forms an unused tail.
 
 * **Fixed capacity**, ``recv_capacity_per_rank`` (an integer): the total buffer
   size is fixed, while the expert block sizes and offsets depend on the routing.
 
-  * Sizing needs no host synchronization. Reuse caller-owned buffers for
-    CUDA graph capture.
+  * Sizing needs no host synchronization, allowing CUDA graph capture when
+    the expert operations also support it. The low-level zero-copy EP path
+    additionally requires persistent caller-owned receive and gradient buffers.
   * Without per-expert padding, ``ep_size * max_tokens_per_rank * top_k`` is a
     dropless upper bound. With alignment enabled, capacity must also include
     padding for every local expert. For example, counts of 129 and 127 need
@@ -553,65 +570,89 @@ the cumulative per-expert counts; any remaining capacity forms an unused tail.
     including alignment padding; compare it with capacity after the step to
     detect an overflow.
 
-* **Eager**, no capacity given: the buffer is sized from the actual receive
-  count each step.
+* **Eager (PyTorch)**, no capacity given: the buffer is sized from the actual
+  receive count each step.
 
   * This costs a host synchronization per step and is not CUDA-graph
     capturable; ``drop_on_overflow`` does not apply.
 
-**Low precision**
+JAX requires a static receive capacity. In the high-level ``moe`` API,
+``recv_capacity_per_rank=None`` selects an aligned dropless worst-case bound;
+it does not size the buffer from each step's actual receive count. Pass the
+same static capacity to ``ep_bootstrap``.
 
-Dispatch can quantize the tokens before sending them:
-
-* the receive buffer comes back as a quantized ``GroupedTensor`` (one group per
-  local expert) that the fused grouped MLP accepts as is;
-* MXFP8 is supported today; further recipes are in progress.
+**Framework APIs**
 
 .. tabs::
 
    .. tab:: PyTorch
 
-      ``transformer_engine.pytorch.ep`` exposes the primitives with autograd
-      support. In call order:
+      ``te.ops.MoeDispatch`` and ``te.ops.MoeCombine`` compose with the local
+      expert MLP in one ``te.ops.Sequential``. The sequence runs dispatch,
+      grouped linear, scaled activation, grouped linear, and combine, with
+      autograd through both the tokens and routing weights.
 
-      * ``ep_bootstrap(ep_group, ...)`` initializes EP once per process on an
-        existing process group and fixes the group-wide sizes (number of experts,
-        maximum tokens per rank, hidden size, top-k, receive capacity).
-      * ``EpBuffer`` holds the routing state of one dispatch/combine pair (a
-        small ``handle_mem`` buffer and the per-expert token counts), written by
-        dispatch and read by combine and backward. Use one per MoE layer, and one
-        per in-flight microbatch under pipeline parallelism.
-        ``dispatch_fwd_quant_recipe=MXFP8BlockScaling()`` enables the quantized
-        dispatch (see
-        `tests/pytorch/distributed/run_ep.py <https://github.com/NVIDIA/TransformerEngine/blob/main/tests/pytorch/distributed/run_ep.py>`_).
-      * ``ep_dispatch(buffer, tokens, topk_idx, topk_weights)`` allocates the
-        receive buffer ``[recv_capacity_per_rank, hidden_size]`` (or writes into
-        caller-owned ``recv_tokens`` / ``recv_topk_weights``, needed for CUDA
-        graphs) and returns it together with the routing weights of the received
-        tokens and the per-expert row counts, including alignment padding when
-        enabled. The counts determine the consecutive expert block offsets.
-      * The local experts read the receive buffer as their input and produce
-        ``expert_out`` of the same shape; the caller multiplies it by the
-        received routing weights. The snippet clears unused tail rows and
-        weights before multiplication so uninitialized values cannot produce
-        NaNs. NCCL EP zeroes padding between aligned expert blocks, and combine
-        ignores slots without a routed token.
-      * ``ep_combine(buffer, expert_out)`` reads ``expert_out`` in place and
-        returns the summed expert outputs ``[num_tokens, hidden_size]`` in the
-        original token order.
+      Initialize NCCL EP once per process with ``ep_bootstrap(ep_group, ...)``.
+      Both operations take the same immutable ``EpConfig`` and ``EpBuffer``.
+      Their settings must match the bootstrap configuration, including the
+      process group, token limit, receive capacity, and overflow policy.
+      ``EpBuffer`` stores the routing handle and per-expert counts until backward
+      completes; use a separate buffer for each concurrently in-flight layer
+      call, including overlapping pipeline microbatches.
 
-      .. raw:: html
+      Dispatch produces two extra tensors: the per-expert row counts (including
+      alignment padding) and the received routing weights. Named channels pass
+      the counts to both grouped linear operations and the weights to the
+      activation. Bind these channels before constructing or calling the
+      sequence. ``output_to_caller=False`` keeps the metadata internal, so the
+      sequence returns only the combined output.
 
-         <div class="code-block-header">
-            Requires SM90 (Hopper) or later
-         </div>
+      This assembly example assumes an initialized NCCL process group, the
+      current CUDA device set for each rank, and router outputs for the local
+      BF16 tokens. ``num_experts`` must be divisible by the EP group size, and
+      ``max_tokens_per_rank`` must bound each rank's input token count. The
+      expert MLP uses BF16 without bias or per-expert padding.
 
       .. literalinclude:: moe_expert_parallel_pytorch.py
          :language: python
          :start-after: # START_MOE_EXPERT_PARALLEL_PYTORCH
          :end-before: # END_MOE_EXPERT_PARALLEL_PYTORCH
 
+      The public extra arguments follow operation order: dispatch consumes
+      ``topk_idx`` and ``topk_w``, and combine consumes ``topk_idx`` again. The
+      grouped linear and activation inputs come from the internal channels.
+      NCCL EP uses the shared buffer's routing state for combine, but the
+      operation still requires the routing-index argument.
+
+      ``ScaledSwiGLU`` applies the routing weights before the bias-free FC2, so
+      combine only sums the already weighted expert outputs. For an FC2 with
+      bias, set ``scale_bias=True`` and bind its second extra input to the same
+      ``routing_weights`` channel, as described in :ref:`moe-grouped-mlp`.
+
+      PyTorch dispatch can quantize tokens before sending them, reducing
+      communication volume; expert GEMMs can consume the quantized groups.
+      Communication precision is configured separately from the expert GEMMs:
+      set ``dispatch_fwd_quant_recipe`` and ``combine_bwd_quant_recipe`` in both
+      ``EpConfig`` and ``EpBuffer`` for the corresponding communication paths.
+      Use ``te.autocast`` to select the expert-compute recipe, and choose an
+      alignment and receive capacity compatible with both the communication and
+      expert kernels. See the configurations in
+      `tests/pytorch/distributed/run_ep.py <https://github.com/NVIDIA/TransformerEngine/blob/main/tests/pytorch/distributed/run_ep.py>`_.
+
+      The lower-level ``ep_dispatch`` and ``ep_combine`` functions remain
+      available for custom expert code or explicit receive-buffer management.
+      ``ep_dispatch`` returns ``(recv_tokens, recv_topk_weights,
+      tokens_per_expert)``; unlike the operation's extra outputs, the weights
+      precede the counts. Weight the expert outputs before ``ep_combine``, which
+      returns the summed results in the original token order. When operating on
+      a full fixed-capacity buffer, clear unused tail rows and weights before
+      multiplying so uninitialized values cannot introduce NaNs. NCCL EP zeroes
+      alignment padding, and combine ignores slots without a routed token.
+
    .. tab:: JAX
+
+      JAX EP sends BF16 tokens. Low-precision expert computation quantizes the
+      received tokens after dispatch; it does not change communication precision.
 
       JAX offers two levels of API, both experimental:
 
@@ -631,8 +672,9 @@ Dispatch can quantize the tokens before sending them:
         * ``ep_bootstrap(world_size, rank, num_experts, max_tokens_per_rank,
           recv_capacity_per_rank, hidden_dim, ...)`` initializes the EP group
           once per process. It runs inside the active ``Mesh`` and reads the EP
-          axis (and the data-parallel axes) from ``MeshResource``; one process
-          per device is required.
+          axis (and the data-parallel axes) from ``MeshResource``. Multiple local
+          devices per process require TE's support for borrowing the XLA NCCL
+          communicator; the example below uses one process per device.
         * ``EpLayerConfig(top_k, ...)`` is a small per-layer configuration that
           every per-step call takes as its first argument.
         * ``ep_dispatch(cfg, topk_idx, tokens, topk_weights,
@@ -648,12 +690,6 @@ Dispatch can quantize the tokens before sending them:
           ``recv_topk_weights`` before calling it. NCCL EP zeroes alignment
           padding; combine ignores slots without a routed token.
           ``num_local_tokens`` must be static because it fixes the output shape.
-
-      .. raw:: html
-
-         <div class="code-block-header">
-            Requires SM90 (Hopper) or later
-         </div>
 
       .. literalinclude:: moe_expert_parallel_jax.py
          :language: python

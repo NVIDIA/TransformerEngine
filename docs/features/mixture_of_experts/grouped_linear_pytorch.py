@@ -19,8 +19,7 @@ loop_out = torch.cat(
     dim=0,
 )
 
-# Transformer Engine: one grouped linear call. By default one GEMM per expert
-# is launched; m_splits is read on the host.
+# Transformer Engine: one grouped linear call.
 grouped_linear = te.GroupedLinear(
     num_experts,
     hidden_size,
@@ -30,10 +29,7 @@ grouped_linear = te.GroupedLinear(
 ).cuda()
 grouped_out = grouped_linear(x, m_splits)
 
-# Single grouped GEMM with the token counts on the device (no host sync,
-# CUDA-graph capturable): opt in with use_grouped_tensor=True and pass
-# m_splits as a CUDA int64 tensor. Falls back to per-expert GEMMs when the
-# recipe / GPU / cuBLAS version does not support it.
+# Keep token counts on the device with use_grouped_tensor=True.
 grouped_linear = te.GroupedLinear(
     num_experts,
     hidden_size,

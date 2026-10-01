@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 270" width="100%" style="max-width: 820px;">
+<svg class="moe-grouped-mlp-diagram" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 270" width="100%" style="max-width: 820px;">
   <defs>
     <style>
       .label { font: 15px sans-serif; fill: #333; text-anchor: middle; }
@@ -6,11 +6,11 @@
       .moe-op { fill: #e3f2fd; stroke: #1976d2; stroke-width: 1.8; }
       .act { fill: #e8f5e9; stroke: #388e3c; stroke-width: 1.8; }
       .fused-mlp { fill: #f3e5f5; stroke: #7b1fa2; stroke-width: 2.5; }
-      .arrow { stroke: #424242; stroke-width: 2; fill: none; marker-end: url(#ah); }
-      .farrow { stroke: #7b1fa2; stroke-width: 2.2; fill: none; marker-end: url(#ahp); }
+      .moe-grouped-mlp-diagram .arrow { stroke: #424242; stroke-width: 2; fill: none; marker-end: url(#moe-grouped-mlp-diagram-ah); }
+      .moe-grouped-mlp-diagram .farrow { stroke: #7b1fa2; stroke-width: 2.2; fill: none; marker-end: url(#moe-grouped-mlp-diagram-ahp); }
     </style>
-    <marker id="ah" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#424242"/></marker>
-    <marker id="ahp" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto"><polygon points="0 0, 9 3.5, 0 7" fill="#7b1fa2"/></marker>
+    <marker id="moe-grouped-mlp-diagram-ah" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#424242"/></marker>
+    <marker id="moe-grouped-mlp-diagram-ahp" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto"><polygon points="0 0, 9 3.5, 0 7" fill="#7b1fa2"/></marker>
   </defs>
 
   <rect x="110" y="30" width="160" height="54" class="moe-op" rx="6"/>

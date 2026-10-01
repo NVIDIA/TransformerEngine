@@ -10,6 +10,7 @@ from transformer_engine.pytorch.router import fused_topk_with_score_function
 # Select the top-k experts for each token and return their routing weights. The
 # score function and the top-k selection run in a single fused kernel (all math
 # is done in fp32 internally for numerical stability).
+score_function = "softmax"  # "softmax", "sigmoid" or "sqrtsoftplus"
 probs, routing_map = fused_topk_with_score_function(
     logits,
     topk=2,
@@ -17,8 +18,8 @@ probs, routing_map = fused_topk_with_score_function(
     num_groups=None,  # set with group_topk to enable grouped (device-limited) routing
     group_topk=None,
     scaling_factor=None,  # optional scalar multiplied into the returned probs
-    score_function="softmax",  # "softmax", "sigmoid" or "sqrtsoftplus"
-    expert_bias=None,  # [num_experts] selection bias, only with score_function="sigmoid"
+    score_function=score_function,
+    expert_bias=None,  # [num_experts] selection bias for sigmoid or sqrtsoftplus
 )
 
 # probs:       [num_tokens, num_experts], non-zero only at the selected experts.
@@ -34,14 +35,12 @@ from transformer_engine.pytorch.router import (
     fused_moe_aux_loss,
 )
 
-# The load-balancing auxiliary loss is computed from the *dense* scores over all
-# experts (not from the sparse top-k probs above), so its gradient reaches every
-# expert's logit. fused_compute_score_for_moe_aux_loss returns those dense scores
-# together with the same routing map.
-routing_map, scores = fused_compute_score_for_moe_aux_loss(
+# Use dense scores, but keep the actual router's map for counts: this helper
+# does not apply expert bias or grouped routing.
+_, scores = fused_compute_score_for_moe_aux_loss(
     logits,
     topk=2,
-    score_function="softmax",
+    score_function=score_function,
 )
 tokens_per_expert = routing_map.sum(dim=0)  # [num_experts]
 
