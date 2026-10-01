@@ -312,15 +312,9 @@ class Float8CurrentScaling(Recipe):
     backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
 
     def __post_init__(self) -> None:
-        self.fp8_quant_fwd_inp = QParams(
-            power_2_scale=self.use_power_2_scales, amax_epsilon=0.0
-        )
-        self.fp8_quant_fwd_weight = QParams(
-            power_2_scale=self.use_power_2_scales, amax_epsilon=0.0
-        )
-        self.fp8_quant_bwd_grad = QParams(
-            power_2_scale=self.use_power_2_scales, amax_epsilon=0.0
-        )
+        self.fp8_quant_fwd_inp = QParams(power_2_scale=self.use_power_2_scales, amax_epsilon=0.0)
+        self.fp8_quant_fwd_weight = QParams(power_2_scale=self.use_power_2_scales, amax_epsilon=0.0)
+        self.fp8_quant_bwd_grad = QParams(power_2_scale=self.use_power_2_scales, amax_epsilon=0.0)
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
         assert (
             self.backward_override in _BACKWARD_OVERRIDES
@@ -452,15 +446,9 @@ class Float8BlockScaling(Recipe):
     backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
 
     def __post_init__(self) -> None:
-        self.fp8_quant_fwd_inp = QParams(
-            power_2_scale=not self.use_f32_scales, amax_epsilon=0.0
-        )
-        self.fp8_quant_fwd_weight = QParams(
-            power_2_scale=not self.use_f32_scales, amax_epsilon=0.0
-        )
-        self.fp8_quant_bwd_grad = QParams(
-            power_2_scale=not self.use_f32_scales, amax_epsilon=0.0
-        )
+        self.fp8_quant_fwd_inp = QParams(power_2_scale=not self.use_f32_scales, amax_epsilon=0.0)
+        self.fp8_quant_fwd_weight = QParams(power_2_scale=not self.use_f32_scales, amax_epsilon=0.0)
+        self.fp8_quant_bwd_grad = QParams(power_2_scale=not self.use_f32_scales, amax_epsilon=0.0)
         assert self.x_block_scaling_dim in [1, 2], "Only 1D or 2D blocks supported for x"
         assert self.w_block_scaling_dim in [1, 2], "Only 1D or 2D blocks supported for w"
         assert self.grad_block_scaling_dim in [1, 2], "Only 1D or 2D blocks supported for grad"
