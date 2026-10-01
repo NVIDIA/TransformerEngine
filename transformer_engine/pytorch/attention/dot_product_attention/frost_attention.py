@@ -366,12 +366,13 @@ def _select_frost_plan(graph, token: str, what: str):
     the first forward rather than a wrong number or a backward that fails later for no visible
     reason.
     """
+
     # Both versions, because either floor can cause this and blaming one misdirects. Looked up
     # defensively: this explains a failure, so it must not raise itself.
     def hint():
         return (
             f"Wanted the FROST {what} engine."
-            f" nvidia-cudnn-frontend="
+            " nvidia-cudnn-frontend="
             f"{_pkg_version('nvidia-cudnn-frontend', _cudnn)[1] or 'unknown'}"
             f" (floor {_MIN_CUDNN_FRONTEND}),"
             f" nvidia-cutlass-dsl={_pkg_version('nvidia-cutlass-dsl')[1] or 'unknown'}"

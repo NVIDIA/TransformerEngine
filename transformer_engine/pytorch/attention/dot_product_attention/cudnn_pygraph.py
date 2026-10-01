@@ -106,8 +106,9 @@ def io_data_type(cudnn, dtype: torch.dtype, *, backend_name: str = "cuDNN attent
     raise ValueError(f"{backend_name} only supports FP16/BF16 tensors, got {dtype}")
 
 
-def build_pygraph(dtype: torch.dtype, device: torch.device, *,
-                  backend_name: str = "cuDNN attention"):
+def build_pygraph(
+    dtype: torch.dtype, device: torch.device, *, backend_name: str = "cuDNN attention"
+):
     """A cuDNN frontend graph for F16/BF16 SDPA, bound to this device's stream-current handle."""
     cudnn = _cudnn if _cudnn is not None else import_cudnn_frontend()
     return cudnn.pygraph(

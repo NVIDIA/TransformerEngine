@@ -260,9 +260,7 @@ def _execute_cudnn_graph(
     device: torch.device,
 ):
     """Execute a built cuDNN frontend Python graph."""
-    cudnn_pygraph.execute_graph(
-        graph, variant_pack, workspace_size, device, backend_name=_BACKEND
-    )
+    cudnn_pygraph.execute_graph(graph, variant_pack, workspace_size, device, backend_name=_BACKEND)
 
 
 def _cudnn_score_mod_fwd_cache_key(
