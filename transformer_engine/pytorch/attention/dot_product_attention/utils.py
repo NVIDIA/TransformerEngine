@@ -148,11 +148,13 @@ class FlashAttentionUtils:
 
     v4_is_installed = False
     fa4_version = PkgVersion("0")
+    v4_0_0_beta31 = PkgVersion("4.0.0b31")
+    v4_0_0_beta33 = PkgVersion("4.0.0b33")
     use_v4 = False
     # Set by a signature probe in backends.py; fail-closed default.
     fa3_supports_softcap = False
     v4_installation_steps = """\
-pip install flash-attn-4==4.0.0b11 nvidia-cutlass-dsl[cu13]"""
+pip install flash-attn-4==4.0.0b33 nvidia-cutlass-dsl[cu13]==4.7.1"""
     v4_warning_printed = False
     # Set by backends.py if FA4 is installed; calls flash_attn.cute.interface._validate_head_dims
     # which raises AssertionError for unsupported (head_dim, head_dim_v) combinations.
@@ -1286,6 +1288,31 @@ def get_attention_backend(
                 cp_comm_type,
             )
             use_flash_attention_4 = False
+    # SM100/SM110 D=256 gained seqused_q/k support in b31 for forward and b33 for backward.
+    # THD all-gather always passes this metadata; other THD paths pass it only for padding.
+    fa4_uses_seqused = qkv_format == "thd" and (
+        pad_between_seqs or (context_parallel and cp_comm_type == "all_gather")
+    )
+    if (  # pylint: disable=too-many-boolean-expressions
+        use_flash_attention_4
+        and FlashAttentionUtils.v4_is_installed
+        and (10, 0) <= device_compute_capability < (12, 0)
+        and head_dim_qk == head_dim_v == 256
+        and fa4_uses_seqused
+        and (
+            FlashAttentionUtils.fa4_version < FlashAttentionUtils.v4_0_0_beta31
+            or (
+                attention_params.requires_backward
+                and FlashAttentionUtils.fa4_version < FlashAttentionUtils.v4_0_0_beta33
+            )
+        )
+    ):
+        logger.debug(
+            "Disabling FlashAttention 4 for SM100/SM110 head_dim=256 with seqused_q/k: "
+            "version %s does not support the requested execution direction.",
+            FlashAttentionUtils.fa4_version,
+        )
+        use_flash_attention_4 = False
     if context_parallel and (
         use_flash_attention_2 or use_flash_attention_3 or use_flash_attention_4
     ):
@@ -1765,11 +1792,15 @@ def get_attention_backend(
             )
             use_flash_attention_3 = False
     if use_flash_attention_4 and deterministic and FlashAttentionUtils.v4_is_installed:
-        # eval() does not disable autograd; only forward-only calls can use this kernel.
-        if attention_params.requires_backward and device_compute_capability[0] == 12:
+        # eval() does not disable autograd. SM12x backward and SM100/SM110 D=256 backward
+        # reject deterministic execution, so only forward-only calls can use those kernels.
+        if attention_params.requires_backward and (
+            device_compute_capability[0] == 12
+            or ((10, 0) <= device_compute_capability < (12, 0) and head_dim_qk == head_dim_v == 256)
+        ):
             logger.debug(
-                "Disabling FlashAttention 4 for deterministic backward on SM12x: the CuTe"
-                " SM12x backward kernel does not support deterministic execution."
+                "Disabling FlashAttention 4 because the selected backward kernel does not "
+                "support deterministic execution."
             )
             use_flash_attention_4 = False
     if use_fused_attention and deterministic:
