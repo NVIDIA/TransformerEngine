@@ -48,6 +48,7 @@ class DSv4HybridAttention(torch.nn.Module):
         index_n_heads: int = 64,
         index_topk: int = 512,
         rope_theta: float = 160000.0,
+        rope: Optional[torch.nn.Module] = None,
         rms_norm_eps: float = 1e-6,
         max_seqlen: Optional[int] = None,
         device: str = "cuda",
@@ -122,21 +123,29 @@ class DSv4HybridAttention(torch.nn.Module):
             torch.zeros(self.num_heads, device=device, dtype=params_dtype)
         )
         self.core_attention = DSv4Attention(window_size=sliding_window, ratio=compression_ratio)
-        self.rope = _DSv4RotaryEmbedding(
+        # A model can supply its RoPE frequencies (for example YaRN) without
+        # duplicating that policy here. It must return the same token/compressed
+        # (cos, sin) pairs as _DSv4RotaryEmbedding.forward.
+        self.rope = rope if rope is not None else _DSv4RotaryEmbedding(
             compression_ratio, rope_head_dim, rope_theta, device, max_seqlen
         )
         self.hidden_size, self.q_lora_rank = hidden_size, q_lora_rank
         self.fused_projections = _fuse_projections
         self.head_dim, self.rope_head_dim = head_dim, rope_head_dim
-        self.rope_theta, self.rms_norm_eps = rope_theta, rms_norm_eps
+        self.rope_theta = rope_theta if rope is None else None
+        self.rms_norm_eps = rms_norm_eps
         self.compression_ratio = compression_ratio
         self.o_groups, self.o_lora_rank = o_groups, o_lora_rank
         self.is_csa = is_csa
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor, *, return_indexer_context: bool = False):
         if hidden_states.ndim != 3 or hidden_states.shape[-1] != self.hidden_size:
             raise ValueError("hidden_states must have shape [batch, sequence, hidden_size].")
+        if return_indexer_context and not self.is_csa:
+            raise ValueError("Only CSA has an indexer context.")
         batch, seq, _ = hidden_states.shape
+        if return_indexer_context and batch != 1:
+            raise ValueError("The CSA indexer context is currently supported for batch=1.")
         n_comp = seq // self.compression_ratio
         if not n_comp:
             raise ValueError("Sequence must contain at least one complete compression window.")
@@ -175,11 +184,16 @@ class DSv4HybridAttention(torch.nn.Module):
 
         indices = None
         if self.is_csa:
-            # Discrete top-k trains the attention path, but not the indexer
-            # tower; cuDNN's separate score-loss/backward path is not wired here.
-            indices = self.indexer(
-                hidden_states, q_residual, cu, cu_comp, token_rope, compressed_rope,
+            # Megatron trains this tower with a separate loss, without sending
+            # its gradients into the shared hidden/query projections.
+            index_result = self.indexer(
+                hidden_states.detach(), q_residual.detach(), cu, cu_comp,
+                token_rope, compressed_rope, return_context=return_indexer_context,
             )
+            if return_indexer_context:
+                indices, index_q, index_k, index_w = index_result
+            else:
+                indices = index_result
 
         output = self.core_attention(
             q, local_kv, compressed_kv, self.sinks.float(), cu, cu_comp,
@@ -189,7 +203,15 @@ class DSv4HybridAttention(torch.nn.Module):
         output = apply_rotary(output, cos, -sin).reshape(batch, seq, self.o_groups, -1)
         weight = self.o_a_proj.weight.reshape(self.o_groups, self.o_lora_rank, -1)
         grouped = torch.einsum("bsgd,grd->bsgr", output, weight).flatten(2)
-        return self.o_b_proj(grouped)
+        result = self.o_b_proj(grouped)
+        if return_indexer_context:
+            return result, {
+                "index_q": index_q, "index_k": index_k, "index_w": index_w,
+                "indices": indices,
+                "attn_q": q.detach(), "local_kv": local_kv.detach(),
+                "compressed_kv": compressed_kv.detach(), "sink": self.sinks.float().detach(),
+            }
+        return result
 
 
 __all__ = ["DSv4HybridAttention"]

@@ -32,7 +32,10 @@ class _Indexer(torch.nn.Module):
         self.head_dim, self.n_heads = head_dim, n_heads
         self.top_k, self.ratio, self.fused = top_k, ratio, fused
 
-    def forward(self, hidden_states, q_residual, cu, cu_comp, token_rope, compressed_rope):
+    def forward(
+        self, hidden_states, q_residual, cu, cu_comp, token_rope, compressed_rope,
+        *, return_context=False,
+    ):
         batch, seq, _ = hidden_states.shape
         n_comp = seq // self.ratio
         index_compressed = self.compressor(hidden_states, cu, cu_comp)
@@ -49,10 +52,11 @@ class _Indexer(torch.nn.Module):
             batch * seq, self.n_heads, self.head_dim
         ).contiguous()
         # Top-k IDs are discrete; training index projections needs a separate loss.
-        return select_blocks(
+        weights = weights.reshape(batch * seq, self.n_heads).contiguous()
+        indices = select_blocks(
             query,
             key,
-            weights.reshape(batch * seq, self.n_heads).contiguous(),
+            weights,
             cu,
             cu_comp,
             top_k=min(self.top_k, n_comp),
@@ -61,3 +65,4 @@ class _Indexer(torch.nn.Module):
             max_compressed_seqlen=n_comp,
             scale=(self.head_dim * self.n_heads) ** -0.5,
         )
+        return (indices, query, key, weights) if return_context else indices

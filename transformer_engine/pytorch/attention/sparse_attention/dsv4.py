@@ -9,9 +9,14 @@ from typing import Optional
 import torch
 
 from ._dsv4_backend import attention as _attention
-from ._dsv4_backend import compress, select_blocks
+from ._dsv4_backend import (
+    compress, dense_indexer_loss_backward, dense_indexer_loss_scores, select_blocks,
+)
 
-__all__ = ["DSv4Attention", "compress", "select_blocks"]
+__all__ = [
+    "DSv4Attention", "compress", "select_blocks",
+    "dense_indexer_loss_scores", "dense_indexer_loss_backward",
+]
 
 
 class DSv4Attention(torch.nn.Module):

@@ -24,13 +24,14 @@ BSD ── TE query/local-KV projections + norms ──────────�
   └── (CSA) TE index projections/norm ── cuDNN compression ── cuDNN selection ──┘
 ```
 
-The high-level layer uses 64 heads of width 512 and plain interleaved partial
-RoPE with `rope_theta`; it does not implement other RoPE scaling policies. It
-supports full sequences starting at position zero, equal unpadded lengths within
+The high-level layer uses 64 heads of width 512 and defaults to plain interleaved
+partial RoPE with `rope_theta`; callers may inject a `rope` module returning token
+and compressed `(cos, sin)` pairs.
+It supports full sequences starting at position zero, equal unpadded lengths within
 a batch, and at least one complete compression window. Sliding-only layers,
-cache/decode, padding, TP/CP, FP8, and the separate indexer auxiliary loss
-remain outside this first pass.
-In CSA, the language-model loss therefore does not train `indexer.q_proj` or the
+cache/decode, padding, TP/CP, and FP8 remain outside this first pass. The
+indexer auxiliary loss and its attachment remain caller-owned; without one, the
+language-model loss does not train `indexer.q_proj` or the
 index-key/weight slices of `indexer.compressor.fused_proj`: top-k selection has no gradient.
 
 `_dsv4_rope.py` caches FP32 token frequencies (prebuilt when `max_seqlen` is
@@ -53,10 +54,16 @@ The cuDNN calls used by this layer are:
 | Fused indexer score + top-k | — | Once |
 | Sparse attention forward/backward | Once | Once |
 
-cuDNN also offers separate dense indexer scoring/top-k and sparse/dense
-score-recompute plus indexer-backward operations. The first two are alternative
-ways to select blocks; the latter operations train the indexer through a
-separate auxiliary loss. This BSD-only API does not expose that loss.
+For CSA, `return_indexer_context=True` returns `(BSD_output, context)`; HCA rejects
+it. The live BF16 index Q/K/W have shapes `[B*S,H,128]`, `[B*S/ratio,128]`, and
+`[B*S,H]`; selected IDs are `[B*S,topk]` global compressed-row IDs. Detached
+attention Q/local KV/compressed KV/sink have shapes `[B*S,64,512]`,
+`[B*S,512]`, `[B*S/ratio,512]`, and `[64]`. The opt-in context and dense
+helpers currently support B1 BF16; the helpers take BSHD views plus a
+caller-supplied FP32 full LSE `[1,S,64]` (local
+window, all eligible compressed keys, and sink). Score helpers are not autograd
+operations; the caller owns the mean-reduced scalar KL, coefficient, and loss
+attachment. Per-token reduction is untested.
 
 The lower-level `dsv4` calls expose three stages when a model owns its own
 projections, RMSNorm, RoPE, sink, and output projection:

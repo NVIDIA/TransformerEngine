@@ -15,7 +15,10 @@ from typing import Optional
 import torch
 from torch.autograd.function import once_differentiable
 
-__all__ = ["compress", "select_blocks", "attention"]
+__all__ = [
+    "compress", "select_blocks", "attention", "dense_indexer_loss_scores",
+    "dense_indexer_loss_backward",
+]
 
 
 def _namespace(name):
@@ -207,6 +210,69 @@ def select_blocks(
         sm_scale=scale,
     )
     return result["indices"]
+
+
+def _pad_index_heads(query, weights):
+    if query.ndim != 4 or query.shape[0] != 1 or query.shape[2] not in (32, 64):
+        raise ValueError("Dense indexer loss requires B1 [B,S,32 or 64,128] queries.")
+    if query.shape[-1] != 128 or weights.shape != query.shape[:3]:
+        raise ValueError("Dense indexer weights must match B1 index queries.")
+    if query.dtype != torch.bfloat16 or weights.dtype != torch.bfloat16:
+        raise TypeError("Dense indexer Q and weights must be BF16.")
+    pad = 64 - query.shape[2]
+    if pad:
+        return torch.nn.functional.pad(query, (0, 0, 0, pad)), torch.nn.functional.pad(
+            weights, (0, pad)
+        )
+    return query, weights
+
+
+def dense_indexer_loss_scores(
+    index_q, index_k, index_w, attn_q, compressed_kv, full_lse,
+    *, ratio: int, index_scale: float, attention_scale: float,
+):
+    """Return cuDNN dense index/teacher score dictionaries for B1 BF16 prefill.
+
+    full_lse is FP32 [1,S,64] and must include the local window, every eligible
+    compressed key, and the sink. The sparse-attention saved LSE covers only
+    selected keys and excludes the sink, so it cannot serve this dense teacher.
+    """
+    if any(t.dtype != torch.bfloat16 for t in (index_k, attn_q, compressed_kv)):
+        raise TypeError("Dense indexer keys and attention Q/K must be BF16.")
+    if full_lse.dtype != torch.float32 or full_lse.shape != attn_q.shape[:3]:
+        raise ValueError("full_lse must be FP32 [B,S,attention_heads].")
+    padded_q, padded_w = _pad_index_heads(index_q, index_w)
+    index_score = _dsa_op("dense_indexer_score_recompute_wrapper")(
+        padded_q, index_k.unsqueeze(2), padded_w, sm_scale=index_scale, ratio=ratio,
+    )
+    attn_score = _dsa_op("dense_attn_score_recompute_wrapper")(
+        attn_q, compressed_kv.unsqueeze(2), full_lse, attention_scale, ratio=ratio,
+    )
+    return index_score, attn_score
+
+
+def dense_indexer_loss_backward(
+    index_q, index_k, index_w, index_score, attn_score, grad_loss,
+    *, ratio: int, index_scale: float, loss_coeff: float,
+):
+    """Return dQ/dK/dW for B1 BF16 mean-reduced KL, padding H32 at cuDNN.
+
+    The tested scalar grad_loss/loss_coeff contract is Megatron's default
+    calculate_per_token_loss=False reduction; per-token reduction is untested.
+    """
+    padded_q, padded_w = _pad_index_heads(index_q, index_w)
+    result = _dsa_op("dense_indexer_backward_wrapper")(
+        padded_q, padded_w, index_k, attn_score["out"].clone(), attn_score["denom"],
+        index_score["out"].clone(), index_score["denom"],
+        grad_loss=grad_loss.contiguous(), sm_scale=index_scale,
+        loss_coeff=loss_coeff, ratio=ratio,
+    )
+    heads = index_q.shape[2]
+    return (
+        result["d_index_q"][:, :, :heads].contiguous(),
+        result["d_index_k"],
+        result["d_weights"][:, :, :heads].contiguous(),
+    )
 
 
 def _attention_indices(
