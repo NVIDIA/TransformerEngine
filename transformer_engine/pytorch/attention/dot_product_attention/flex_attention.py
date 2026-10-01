@@ -168,9 +168,10 @@ def _mask_or_score_mod_kwargs(
 ) -> Dict[str, Any]:
     """SDPA kwargs for exactly one of a diagonal band or a score_mod.
 
-    cuDNN rejects a graph carrying both ("Attention score mod enabled and hence other subgraphs
-    are disabled"), so this refuses the combination here with a clearer message than the frontend
-    gives, rather than building a graph that cannot be served.
+    cuDNN rejects the pair in its backward node ("Attention score mod enabled and hence other
+    subgraphs are disabled") while its forward node composes both silently. Refusing it here on
+    both sides is deliberate: the backward has to carry the same mask as the forward, or the
+    gradients belong to a different attention than the output does.
     """
     if mask_spec is None:
         return {"use_causal_mask": False, "score_mod": wrapped_score_mod}

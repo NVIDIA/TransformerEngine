@@ -734,3 +734,60 @@ def test_score_mod_graph_signatures_stay_aligned(direction):
             " positional tuple and must stay in the same order"
             % (fn.__name__, params, direction, reference)
         )
+
+
+@pytest.mark.parametrize(
+    "mask_spec,expected",
+    [
+        # Causal: top-left aligned, right bound pinned to the diagonal, no left bound.
+        (("causal", (-1, 0)), {"diagonal_alignment": "TOP_LEFT", "diagonal_band_right_bound": 0}),
+        # Bottom-right causal, which is what KV trimming produces whenever SKV > SQ.
+        (
+            ("causal_bottom_right", (-1, 0)),
+            {"diagonal_alignment": "BOTTOM_RIGHT", "diagonal_band_right_bound": 0},
+        ),
+        # Sliding window. cuDNN's left bound counts the diagonal itself and TE's window_size does
+        # not, so 511 must arrive as 512. Getting this wrong drops one token of context per layer
+        # and no shape-level test would notice.
+        (
+            ("causal", (511, 0)),
+            {
+                "diagonal_alignment": "TOP_LEFT",
+                "diagonal_band_right_bound": 0,
+                "diagonal_band_left_bound": 512,
+            },
+        ),
+        # No mask at all: no alignment, no bounds.
+        (("no_mask", (-1, -1)), {}),
+    ],
+)
+def test_mask_spec_translates_to_a_diagonal_band(mask_spec, expected):
+    """A mask_spec must become the cuDNN band kwargs, and never a score_mod.
+
+    No GPU: this builds no graph, it checks the kwargs the graph would be given.
+    """
+    cudnn = flex_attention._import_cudnn_frontend()
+    got = flex_attention._mask_or_score_mod_kwargs(mask_spec, None)
+
+    assert "score_mod" not in got and "use_causal_mask" not in got
+    for key, want in expected.items():
+        if key == "diagonal_alignment":
+            assert got[key] == getattr(cudnn.diagonal_alignment, want)
+        else:
+            assert got[key] == want
+    assert set(got) == set(expected)
+
+
+def test_mask_spec_and_score_mod_cannot_be_combined():
+    """cuDNN's backward refuses the pair, so flex must refuse it before building the graph."""
+    with pytest.raises(ValueError, match="cannot be combined"):
+        flex_attention._mask_or_score_mod_kwargs(("causal", (-1, 0)), lambda *a, **k: None)
+
+
+def test_no_mask_spec_still_takes_the_score_mod_path():
+    """The default path must be byte-identical to what it was before mask_spec existed."""
+    sentinel = object()
+    assert flex_attention._mask_or_score_mod_kwargs(None, sentinel) == {
+        "use_causal_mask": False,
+        "score_mod": sentinel,
+    }
