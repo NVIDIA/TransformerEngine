@@ -258,9 +258,7 @@ _FROST_PLAN_TOKENS = ("sdpa_fwd_prefill_sm100", "sdpa_bwd_sm100")
 
 def _finalize_cudnn_graph(graph) -> int:
     """Build a cuDNN frontend Python graph and return its workspace size."""
-    workspace_size, _ = cudnn_pygraph.finalize_plans(
-        graph, exclude_plan_tokens=_FROST_PLAN_TOKENS
-    )
+    workspace_size, _ = cudnn_pygraph.finalize_plans(graph, exclude_plan_tokens=_FROST_PLAN_TOKENS)
     return workspace_size
 
 

@@ -857,9 +857,7 @@ def test_frost_switch_does_not_change_what_flex_computes():
         col.set_data_type(cudnn.data_type.INT32)
         bias = score_mod_graph.sub(a=row, b=col, compute_data_type=cudnn.data_type.FLOAT)
         bias.set_data_type(cudnn.data_type.FLOAT)
-        return score_mod_graph.add(
-            a=score_tensor, b=bias, compute_data_type=cudnn.data_type.FLOAT
-        )
+        return score_mod_graph.add(a=score_tensor, b=bias, compute_data_type=cudnn.data_type.FLOAT)
 
     def run():
         flex_attention._cudnn_score_mod_graph_cache.clear()
@@ -882,6 +880,6 @@ def test_frost_switch_does_not_change_what_flex_computes():
     torch.testing.assert_close(
         with_engines,
         without,
-        msg=lambda m: "flex computed something different with the FROST engines enabled, which"
-        " means a FROST plan answered and dropped the score_mod:\n" + m,
+        msg=lambda m: "flex computed something different with the FROST engines enabled, which means a FROST plan answered and dropped the score_mod:\n"
+        + m,
     )
