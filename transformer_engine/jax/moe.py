@@ -1806,6 +1806,7 @@ def moe(
         expert_bias_arg = expert_bias.astype(jnp.float32)
 
     use_cudnn_jax_fusion = False
+    cudnn_native_weight_layout = wi.ndim == 3 and wi.shape[-1] == x.shape[-1]
     if _use_cudnn_cutedsl_fusion_from_env():
         rejection_reasons = _cudnn_jax_fusion_rejection_reasons(
             x,
@@ -1818,6 +1819,12 @@ def moe(
             ep_axis=ep_axis,
         )
         if rejection_reasons:
+            if cudnn_native_weight_layout:
+                raise ValueError(
+                    "cuDNN-native MoE weight layout requires the fused cuDNN grouped-GEMM "
+                    "path, which is unsupported for this moe() call: "
+                    + "; ".join(rejection_reasons)
+                )
             warnings.warn(
                 f"{_CUDNN_JAX_ENV}=1 is unsupported for this moe() call; falling back to "
                 "the regular TE grouped-GEMM path: " + "; ".join(rejection_reasons),
@@ -1826,6 +1833,11 @@ def moe(
             )
         else:
             use_cudnn_jax_fusion = True
+    elif cudnn_native_weight_layout:
+        raise ValueError(
+            "cuDNN-native MoE weight layout requires the fused cuDNN grouped-GEMM path; "
+            f"set {_CUDNN_JAX_ENV}=1."
+        )
 
     output, aux_loss, total_recv_tokens = _moe(
         x,
