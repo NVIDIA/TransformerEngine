@@ -42,6 +42,7 @@ classes:
   main+aux grads stay finite) in two consolidated tests.
 """
 
+import importlib
 import os
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
@@ -817,6 +818,50 @@ class TestTeEpMoeCudnnCutedslFusion:
             **GRAD_FFN_TOLERANCE["mxfp8"],
             err_msg="d_x fused MXFP8 gradient parity breach",
         )
+
+    def test_regular_swiglu_with_checkpoint_names(self, mesh, monkeypatch):
+        if not _use_cudnn_cutedsl_fusion_from_env():
+            pytest.skip("cuDNN grouped GEMM fusion is disabled")
+        if get_device_compute_capability(0) != 107:
+            pytest.skip("Rubin test of the regular cuDNN grouped SwiGLU path")
+
+        from transformer_engine.jax import cpp_extensions as tex
+
+        moe_module = importlib.import_module("transformer_engine.jax.moe")
+        flax_moe_module = importlib.import_module("transformer_engine.jax.flax.moe")
+        monkeypatch.setattr(moe_module, "_is_rubin_device", lambda: False)
+
+        regular_calls = []
+        original_swiglu = tex.grouped_gemm_swiglu
+
+        def checked_swiglu(*args, **kwargs):
+            regular_calls.append(True)
+            return original_swiglu(*args, **kwargs)
+
+        monkeypatch.setattr(tex, "grouped_gemm_swiglu", checked_swiglu)
+        original_moe = flax_moe_module.moe
+
+        def checkpointed_moe(*args, **kwargs):
+            kwargs.update(
+                wi_0_checkpoint_name="moe_mlpwi_0",
+                wi_1_checkpoint_name="moe_mlpwi_1",
+                wo_checkpoint_name="moe_mlpwo",
+            )
+            return original_moe(*args, **kwargs)
+
+        monkeypatch.setattr(flax_moe_module, "moe", checkpointed_moe)
+        block = _make_block(quantization_recipe=MXFP8BlockScaling())
+        inputs = _make_inputs(jax.random.PRNGKey(32))
+        variables, output, _ = _init_apply(block, mesh, inputs, jax.random.PRNGKey(33))
+        grads, grad_inputs = _grad_step(block, variables, mesh, inputs)
+
+        assert regular_calls, "regular cuDNN grouped SwiGLU was not selected"
+        assert np.all(np.isfinite(_to_global_numpy(output, mesh)))
+        assert np.all(np.isfinite(_to_global_numpy(grad_inputs, mesh)))
+        for name in ("gate_kernel", "wi", "wo"):
+            assert np.all(
+                np.isfinite(_to_global_numpy(_unwrap(grads["params"][name]), mesh))
+            )
 
 
 class TestTeEpMoeAuxLoss:
