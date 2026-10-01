@@ -3982,7 +3982,7 @@ _SKIP = _fa4_causal_unavailable()
 def test_fa4_causal_attention_is_not_all_zeros():
     """End to end: FA4 causal through DotProductAttention must match a float64 reference.
 
-    Pins the backend three ways, because every one of them can silently turn this green while
+    Pins the backend four ways, because every one of them can silently turn this green while
     measuring something else: cuDNN FusedAttention wins selection for this shape (the first attempt
     at reproducing the bug measured a correct result for exactly that reason), the unfused path
     would serve it too, and NVTE_FLASH_ATTN_V4=0 is exported by qa/L0_pytorch_unittest -- which
@@ -4001,7 +4001,12 @@ def test_fa4_causal_attention_is_not_all_zeros():
     torch.manual_seed(0)
     q, k, v = (torch.randn(b, s, h, d, device="cuda", dtype=dtype) for _ in range(3))
 
-    pinned = {"NVTE_FUSED_ATTN": "0", "NVTE_UNFUSED_ATTN": "0", "NVTE_FLASH_ATTN_V4": "1"}
+    pinned = {
+        "NVTE_FLASH_ATTN": "1",
+        "NVTE_FUSED_ATTN": "0",
+        "NVTE_UNFUSED_ATTN": "0",
+        "NVTE_FLASH_ATTN_V4": "1",
+    }
     saved = {key: os.environ.get(key) for key in pinned}
     os.environ.update(pinned)
     _attention_backends["backend_selection_requires_update"] = True
