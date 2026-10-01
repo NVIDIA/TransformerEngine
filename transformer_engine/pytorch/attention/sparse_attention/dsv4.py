@@ -10,12 +10,18 @@ import torch
 
 from ._dsv4_backend import attention as _attention
 from ._dsv4_backend import (
-    compress, dense_indexer_loss_backward, dense_indexer_loss_scores, select_blocks,
+    compress,
+    dense_indexer_loss_backward,
+    dense_indexer_loss_scores,
+    select_blocks,
 )
 
 __all__ = [
-    "DSv4Attention", "compress", "select_blocks",
-    "dense_indexer_loss_scores", "dense_indexer_loss_backward",
+    "DSv4Attention",
+    "compress",
+    "select_blocks",
+    "dense_indexer_loss_scores",
+    "dense_indexer_loss_backward",
 ]
 
 
@@ -69,9 +75,7 @@ class DSv4Attention(torch.nn.Module):
         from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 
         if FP8GlobalStateManager.is_fp8_enabled():
-            raise NotImplementedError(
-                "DSv4Attention supports BF16 only; disable TE FP8 autocast."
-            )
+            raise NotImplementedError("DSv4Attention supports BF16 only; disable TE FP8 autocast.")
         return _attention(
             query,
             local_kv,

@@ -17,13 +17,30 @@ class _Indexer(torch.nn.Module):
     """Select compressed rows using the indexer's own Q/K/weight projections."""
 
     def __init__(
-        self, hidden_size, q_lora_rank, head_dim, n_heads, top_k, ratio,
-        eps, device, params_dtype, *, fused,
+        self,
+        hidden_size,
+        q_lora_rank,
+        head_dim,
+        n_heads,
+        top_k,
+        ratio,
+        eps,
+        device,
+        params_dtype,
+        *,
+        fused,
     ):
         super().__init__()
         self.compressor = _Compressor(
-            hidden_size, head_dim, ratio, True, eps, device, params_dtype,
-            fused=fused, weight_width=n_heads if fused else 0,
+            hidden_size,
+            head_dim,
+            ratio,
+            True,
+            eps,
+            device,
+            params_dtype,
+            fused=fused,
+            weight_width=n_heads if fused else 0,
         )
         kw = dict(bias=False, device=device, params_dtype=params_dtype)
         self.q_proj = Linear(q_lora_rank, n_heads * head_dim, **kw)
@@ -33,8 +50,15 @@ class _Indexer(torch.nn.Module):
         self.top_k, self.ratio, self.fused = top_k, ratio, fused
 
     def forward(
-        self, hidden_states, q_residual, cu, cu_comp, token_rope, compressed_rope,
-        *, return_context=False,
+        self,
+        hidden_states,
+        q_residual,
+        cu,
+        cu_comp,
+        token_rope,
+        compressed_rope,
+        *,
+        return_context=False,
     ):
         batch, seq, _ = hidden_states.shape
         n_comp = seq // self.ratio
@@ -44,13 +68,19 @@ class _Indexer(torch.nn.Module):
         else:
             weights = self.weights_proj(hidden_states)
         # The singleton axis is the shared index-key head, not a tunable head count.
-        key = apply_rotary(
-            index_compressed.reshape(batch, n_comp, 1, self.head_dim), *compressed_rope
-        ).reshape(batch * n_comp, self.head_dim).contiguous()
+        key = (
+            apply_rotary(
+                index_compressed.reshape(batch, n_comp, 1, self.head_dim), *compressed_rope
+            )
+            .reshape(batch * n_comp, self.head_dim)
+            .contiguous()
+        )
         query = self.q_proj(q_residual).reshape(batch, seq, self.n_heads, self.head_dim)
-        query = apply_rotary(query, *token_rope).reshape(
-            batch * seq, self.n_heads, self.head_dim
-        ).contiguous()
+        query = (
+            apply_rotary(query, *token_rope)
+            .reshape(batch * seq, self.n_heads, self.head_dim)
+            .contiguous()
+        )
         # Top-k IDs are discrete; training index projections needs a separate loss.
         weights = weights.reshape(batch * seq, self.n_heads).contiguous()
         indices = select_blocks(

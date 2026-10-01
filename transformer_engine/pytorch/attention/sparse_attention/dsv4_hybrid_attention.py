@@ -61,18 +61,17 @@ class DSv4HybridAttention(torch.nn.Module):
         self.index_head_dim = 128
         if layer_type not in ("compressed_sparse_attention", "heavily_compressed_attention"):
             raise ValueError("Only DSv4 CSA and HCA are supported.")
-        if (
-            head_dim != 512
-            or rope_head_dim < 2
-            or rope_head_dim % 2
-            or rope_head_dim > head_dim
-        ):
+        if head_dim != 512 or rope_head_dim < 2 or rope_head_dim % 2 or rope_head_dim > head_dim:
             raise ValueError("head_dim must be 512; rope_head_dim must be even and fit.")
         if any(
             v <= 0
             for v in (
-                hidden_size, q_lora_rank, sliding_window,
-                compression_ratio, o_groups, o_lora_rank,
+                hidden_size,
+                q_lora_rank,
+                sliding_window,
+                compression_ratio,
+                o_groups,
+                o_lora_rank,
             )
         ):
             raise ValueError("DSv4 dimensions, window size and ratio must be positive.")
@@ -80,9 +79,7 @@ class DSv4HybridAttention(torch.nn.Module):
             raise ValueError("o_groups must divide the attention output channels.")
         is_csa = layer_type == "compressed_sparse_attention"
         if is_csa and (
-            index_n_heads not in (32, 64)
-            or index_topk <= 0
-            or rope_head_dim > self.index_head_dim
+            index_n_heads not in (32, 64) or index_topk <= 0 or rope_head_dim > self.index_head_dim
         ):
             raise ValueError(
                 "CSA requires 32 or 64 index heads, positive top-k, and RoPE width <= 128."
@@ -93,7 +90,9 @@ class DSv4HybridAttention(torch.nn.Module):
             # Query-down and local-KV projections read the same hidden states.
             # Keep slices explicit below while one contiguous weight feeds the GEMM.
             self.q_a_kv_proj = Linear(
-                hidden_size, q_lora_rank + head_dim, **kw,
+                hidden_size,
+                q_lora_rank + head_dim,
+                **kw,
             )
         else:
             self.q_a_proj = Linear(hidden_size, q_lora_rank, **kw)
@@ -104,20 +103,31 @@ class DSv4HybridAttention(torch.nn.Module):
             self.kv_proj = Linear(hidden_size, head_dim, **kw)
         self.kv_norm = RMSNorm(head_dim, eps=rms_norm_eps, device=device, dtype=params_dtype)
         self.compressor = _Compressor(
-            hidden_size, head_dim, compression_ratio, is_csa, rms_norm_eps,
-            device, params_dtype, fused=_fuse_projections,
+            hidden_size,
+            head_dim,
+            compression_ratio,
+            is_csa,
+            rms_norm_eps,
+            device,
+            params_dtype,
+            fused=_fuse_projections,
         )
         if is_csa:
             self.indexer = _Indexer(
-                hidden_size, q_lora_rank, self.index_head_dim, index_n_heads,
-                index_topk, compression_ratio, rms_norm_eps, device, params_dtype,
+                hidden_size,
+                q_lora_rank,
+                self.index_head_dim,
+                index_n_heads,
+                index_topk,
+                compression_ratio,
+                rms_norm_eps,
+                device,
+                params_dtype,
                 fused=_fuse_projections,
             )
         # HF/Megatron use one independent block per output group. A normal TE
         # Linear forward mixes groups, so use its weight in the block multiply.
-        self.o_a_proj = Linear(
-            self.num_heads * head_dim // o_groups, o_groups * o_lora_rank, **kw
-        )
+        self.o_a_proj = Linear(self.num_heads * head_dim // o_groups, o_groups * o_lora_rank, **kw)
         self.o_b_proj = Linear(o_groups * o_lora_rank, hidden_size, **kw)
         self.sinks = torch.nn.Parameter(
             torch.zeros(self.num_heads, device=device, dtype=params_dtype)
@@ -126,8 +136,12 @@ class DSv4HybridAttention(torch.nn.Module):
         # A model can supply its RoPE frequencies (for example YaRN) without
         # duplicating that policy here. It must return the same token/compressed
         # (cos, sin) pairs as _DSv4RotaryEmbedding.forward.
-        self.rope = rope if rope is not None else _DSv4RotaryEmbedding(
-            compression_ratio, rope_head_dim, rope_theta, device, max_seqlen
+        self.rope = (
+            rope
+            if rope is not None
+            else _DSv4RotaryEmbedding(
+                compression_ratio, rope_head_dim, rope_theta, device, max_seqlen
+            )
         )
         self.hidden_size, self.q_lora_rank = hidden_size, q_lora_rank
         self.fused_projections = _fuse_projections
@@ -164,20 +178,18 @@ class DSv4HybridAttention(torch.nn.Module):
         q_residual = self.q_a_norm(q_a)
         q = self.q_b_proj(q_residual).reshape(batch, seq, self.num_heads, self.head_dim)
         # Query-up norm is unweighted; TE RMSNorm would add a learned scale.
-        q = q * torch.rsqrt(
-            q.float().square().mean(-1, keepdim=True) + self.rms_norm_eps
-        ).to(q.dtype)
-        q = apply_rotary(q, *token_rope).reshape(
-            batch * seq, self.num_heads, self.head_dim
-        ).contiguous()
-        local_kv = apply_rotary(
-            self.kv_norm(local_kv_projected).unsqueeze(2), *token_rope
+        q = q * torch.rsqrt(q.float().square().mean(-1, keepdim=True) + self.rms_norm_eps).to(
+            q.dtype
         )
+        q = (
+            apply_rotary(q, *token_rope)
+            .reshape(batch * seq, self.num_heads, self.head_dim)
+            .contiguous()
+        )
+        local_kv = apply_rotary(self.kv_norm(local_kv_projected).unsqueeze(2), *token_rope)
         local_kv = local_kv.reshape(batch * seq, self.head_dim).contiguous()
         compressed_kv = apply_rotary(
-            self.compressor(hidden_states, cu, cu_comp).reshape(
-                batch, n_comp, 1, self.head_dim
-            ),
+            self.compressor(hidden_states, cu, cu_comp).reshape(batch, n_comp, 1, self.head_dim),
             *compressed_rope,
         )
         compressed_kv = compressed_kv.reshape(batch * n_comp, self.head_dim).contiguous()
@@ -187,8 +199,13 @@ class DSv4HybridAttention(torch.nn.Module):
             # Megatron trains this tower with a separate loss, without sending
             # its gradients into the shared hidden/query projections.
             index_result = self.indexer(
-                hidden_states.detach(), q_residual.detach(), cu, cu_comp,
-                token_rope, compressed_rope, return_context=return_indexer_context,
+                hidden_states.detach(),
+                q_residual.detach(),
+                cu,
+                cu_comp,
+                token_rope,
+                compressed_rope,
+                return_context=return_indexer_context,
             )
             if return_indexer_context:
                 indices, index_q, index_k, index_w = index_result
@@ -196,8 +213,14 @@ class DSv4HybridAttention(torch.nn.Module):
                 indices = index_result
 
         output = self.core_attention(
-            q, local_kv, compressed_kv, self.sinks.float(), cu, cu_comp,
-            indices=indices, max_compressed_seqlen=None if self.is_csa else n_comp,
+            q,
+            local_kv,
+            compressed_kv,
+            self.sinks.float(),
+            cu,
+            cu_comp,
+            indices=indices,
+            max_compressed_seqlen=None if self.is_csa else n_comp,
         ).reshape(batch, seq, self.num_heads, self.head_dim)
         cos, sin = token_rope
         output = apply_rotary(output, cos, -sin).reshape(batch, seq, self.o_groups, -1)
@@ -206,10 +229,14 @@ class DSv4HybridAttention(torch.nn.Module):
         result = self.o_b_proj(grouped)
         if return_indexer_context:
             return result, {
-                "index_q": index_q, "index_k": index_k, "index_w": index_w,
+                "index_q": index_q,
+                "index_k": index_k,
+                "index_w": index_w,
                 "indices": indices,
-                "attn_q": q.detach(), "local_kv": local_kv.detach(),
-                "compressed_kv": compressed_kv.detach(), "sink": self.sinks.float().detach(),
+                "attn_q": q.detach(),
+                "local_kv": local_kv.detach(),
+                "compressed_kv": compressed_kv.detach(),
+                "sink": self.sinks.float().detach(),
             }
         return result
 

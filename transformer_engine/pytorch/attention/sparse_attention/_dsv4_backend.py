@@ -16,7 +16,10 @@ import torch
 from torch.autograd.function import once_differentiable
 
 __all__ = [
-    "compress", "select_blocks", "attention", "dense_indexer_loss_scores",
+    "compress",
+    "select_blocks",
+    "attention",
+    "dense_indexer_loss_scores",
     "dense_indexer_loss_backward",
 ]
 
@@ -26,8 +29,7 @@ def _namespace(name):
         return getattr(import_module("cudnn"), name)
     except (ImportError, AttributeError) as exc:
         raise ImportError(
-            "DSv4 requires nvidia-cudnn-frontend>=1.29.0 "
-            f"with the cudnn.{name} namespace."
+            f"DSv4 requires nvidia-cudnn-frontend>=1.29.0 with the cudnn.{name} namespace."
         ) from exc
 
 
@@ -67,9 +69,7 @@ def _validate_tensors(reference, bf16, fp32, cu_seqlens, cu_seqlens_comp):
 
 class _Compress(torch.autograd.Function):
     @staticmethod
-    def forward(
-        ctx, kv, score, ape, cu_seqlens, cu_seqlens_comp, ratio, overlap, total_comp
-    ):
+    def forward(ctx, kv, score, ape, cu_seqlens, cu_seqlens_comp, ratio, overlap, total_comp):
         coff = 2 if overlap else 1
         if kv.ndim != 2 or kv.shape[-1] % coff:
             raise ValueError("kv must have shape [tokens, coff * head_dim].")
@@ -188,9 +188,7 @@ def select_blocks(
     if weights.shape != query.shape[:2]:
         raise ValueError("CSA index weights must have shape [T,H].")
     if ratio <= 0 or top_k <= 0 or max_seqlen <= 0 or max_compressed_seqlen <= 0:
-        raise ValueError(
-            "CSA ratio, top_k and maximum sequence lengths must be positive."
-        )
+        raise ValueError("CSA ratio, top_k and maximum sequence lengths must be positive.")
     _validate_tensors(query, (compressed_key, weights), (), cu_seqlens, cu_seqlens_comp)
     if scale is None:
         scale = query.shape[-1] ** -0.5
@@ -228,8 +226,16 @@ def _pad_index_heads(query, weights):
 
 
 def dense_indexer_loss_scores(
-    index_q, index_k, index_w, attn_q, compressed_kv, full_lse,
-    *, ratio: int, index_scale: float, attention_scale: float,
+    index_q,
+    index_k,
+    index_w,
+    attn_q,
+    compressed_kv,
+    full_lse,
+    *,
+    ratio: int,
+    index_scale: float,
+    attention_scale: float,
 ):
     """Return cuDNN dense index/teacher score dictionaries for B1 BF16 prefill.
 
@@ -243,17 +249,33 @@ def dense_indexer_loss_scores(
         raise ValueError("full_lse must be FP32 [B,S,attention_heads].")
     padded_q, padded_w = _pad_index_heads(index_q, index_w)
     index_score = _dsa_op("dense_indexer_score_recompute_wrapper")(
-        padded_q, index_k.unsqueeze(2), padded_w, sm_scale=index_scale, ratio=ratio,
+        padded_q,
+        index_k.unsqueeze(2),
+        padded_w,
+        sm_scale=index_scale,
+        ratio=ratio,
     )
     attn_score = _dsa_op("dense_attn_score_recompute_wrapper")(
-        attn_q, compressed_kv.unsqueeze(2), full_lse, attention_scale, ratio=ratio,
+        attn_q,
+        compressed_kv.unsqueeze(2),
+        full_lse,
+        attention_scale,
+        ratio=ratio,
     )
     return index_score, attn_score
 
 
 def dense_indexer_loss_backward(
-    index_q, index_k, index_w, index_score, attn_score, grad_loss,
-    *, ratio: int, index_scale: float, loss_coeff: float,
+    index_q,
+    index_k,
+    index_w,
+    index_score,
+    attn_score,
+    grad_loss,
+    *,
+    ratio: int,
+    index_scale: float,
+    loss_coeff: float,
 ):
     """Return dQ/dK/dW for B1 BF16 mean-reduced KL, padding H32 at cuDNN.
 
@@ -262,10 +284,17 @@ def dense_indexer_loss_backward(
     """
     padded_q, padded_w = _pad_index_heads(index_q, index_w)
     result = _dsa_op("dense_indexer_backward_wrapper")(
-        padded_q, padded_w, index_k, attn_score["out"].clone(), attn_score["denom"],
-        index_score["out"].clone(), index_score["denom"],
-        grad_loss=grad_loss.contiguous(), sm_scale=index_scale,
-        loss_coeff=loss_coeff, ratio=ratio,
+        padded_q,
+        padded_w,
+        index_k,
+        attn_score["out"].clone(),
+        attn_score["denom"],
+        index_score["out"].clone(),
+        index_score["denom"],
+        grad_loss=grad_loss.contiguous(),
+        sm_scale=index_scale,
+        loss_coeff=loss_coeff,
+        ratio=ratio,
     )
     heads = index_q.shape[2]
     return (
@@ -407,10 +436,7 @@ def attention(
         raise ValueError("attention head dimension must be 512 or 576.")
     if local_kv.ndim != 2 or compressed_kv.ndim != 2:
         raise ValueError("local_kv and compressed_kv must be 2D packed tensors.")
-    if (
-        local_kv.shape[-1] != query.shape[-1]
-        or compressed_kv.shape[-1] != query.shape[-1]
-    ):
+    if local_kv.shape[-1] != query.shape[-1] or compressed_kv.shape[-1] != query.shape[-1]:
         raise ValueError("Q and both KV tensors must have the same QK dimension.")
     if local_kv.shape[0] != query.shape[0]:
         raise ValueError("Full-sequence attention requires one local KV row per query.")
@@ -420,9 +446,7 @@ def attention(
         raise ValueError("window_size and ratio must be positive.")
     if indices is None and (max_compressed_seqlen is None or max_compressed_seqlen < 0):
         raise ValueError("HCA requires a nonnegative max_compressed_seqlen.")
-    _validate_tensors(
-        query, (local_kv, compressed_kv), (sink,), cu_seqlens, cu_seqlens_comp
-    )
+    _validate_tensors(query, (local_kv, compressed_kv), (sink,), cu_seqlens, cu_seqlens_comp)
     if indices is not None:
         if indices.dtype != torch.int32 or indices.device != query.device:
             raise ValueError("CSA indices must be CUDA INT32 on the query device.")
