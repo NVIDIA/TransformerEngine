@@ -42,19 +42,20 @@ def isolated_backends(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "capability,training,backward,deterministic,unfused,expect_flash",
+    "capability,training,backward,deterministic,head_dim,unfused,expect_flash",
     [
-        pytest.param((12, 0), True, True, True, True, False, id="sm120-training"),
-        pytest.param((12, 0), False, True, True, True, False, id="sm120-eval-backward"),
-        pytest.param((12, 1), False, True, True, True, False, id="sm121-eval-backward"),
-        pytest.param((12, 0), False, False, True, True, True, id="forward-only"),
-        pytest.param((12, 0), True, True, False, True, True, id="nondeterministic"),
-        pytest.param((12, 0), True, True, True, False, False, id="no-fallback"),
-        pytest.param((10, 0), True, True, True, True, True, id="sm100-unaffected"),
+        pytest.param((12, 0), True, True, True, 128, True, False, id="sm120-training"),
+        pytest.param((12, 0), False, True, True, 128, True, False, id="sm120-eval-backward"),
+        pytest.param((12, 1), False, True, True, 128, True, False, id="sm121-eval-backward"),
+        pytest.param((12, 0), False, False, True, 128, True, True, id="forward-only"),
+        pytest.param((12, 0), True, True, False, 128, True, True, id="nondeterministic"),
+        pytest.param((12, 0), True, True, True, 128, False, False, id="no-fallback"),
+        pytest.param((10, 0), True, True, True, 128, True, True, id="sm100-d128"),
+        pytest.param((10, 0), True, True, True, 256, True, False, id="sm100-d256"),
     ],
 )
 def test_fa4_deterministic_backend_selection(
-    monkeypatch, capability, training, backward, deterministic, unfused, expect_flash
+    monkeypatch, capability, training, backward, deterministic, head_dim, unfused, expect_flash
 ):
     monkeypatch.setenv("NVTE_UNFUSED_ATTN", str(int(unfused)))
     monkeypatch.setattr(dpa_utils, "get_device_compute_capability", lambda device: capability)
@@ -66,8 +67,8 @@ def test_fa4_deterministic_backend_selection(
         device=torch.device("cuda:0"),
         qkv_dtype=torch.bfloat16,
         qkv_layout="bshd_bshd_bshd",
-        head_dim_qk=128,
-        head_dim_v=128,
+        head_dim_qk=head_dim,
+        head_dim_v=head_dim,
         attn_mask_type="causal",
         window_size=(-1, 0),
         deterministic=deterministic,
@@ -80,6 +81,44 @@ def test_fa4_deterministic_backend_selection(
     assert not fused
     assert bool(selected_unfused) is (unfused and not expect_flash)
     assert available == [expect_flash, False, unfused]
+
+
+@pytest.mark.parametrize(
+    "version,backward,expect_flash",
+    [
+        pytest.param("4.0.0b30", False, False, id="b30-forward"),
+        pytest.param("4.0.0b31", False, True, id="b31-forward"),
+        pytest.param("4.0.0b32", True, False, id="b32-backward"),
+        pytest.param("4.0.0b33", True, True, id="b33-backward"),
+    ],
+)
+@pytest.mark.parametrize("path", ["compact", "padding", "all-gather"])
+def test_fa4_d256_seqused_backend_selection(monkeypatch, version, backward, expect_flash, path):
+    """FA4 D=256 eligibility follows seqused_q/k forward/backward support."""
+    monkeypatch.setenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")
+    monkeypatch.setattr(dpa_utils, "get_device_compute_capability", lambda device: (10, 0))
+    monkeypatch.setattr(dpa_utils, "get_cudnn_version", lambda: (9, 26, 0))
+    monkeypatch.setattr(dpa_utils.FlashAttentionUtils, "v4_is_installed", True)
+    monkeypatch.setattr(dpa_utils.FlashAttentionUtils, "fa4_version", PkgVersion(version))
+    monkeypatch.setattr(dpa_utils.FlashAttentionUtils, "v4_validate_head_dims", None)
+    params = dpa_utils.AttentionParams(
+        device=torch.device("cuda:0"),
+        qkv_dtype=torch.bfloat16,
+        qkv_layout="thd_thd_thd",
+        head_dim_qk=256,
+        head_dim_v=256,
+        attn_mask_type="padding_causal",
+        pad_between_seqs=path == "padding",
+        context_parallel=path == "all-gather",
+        cp_comm_type="all_gather" if path == "all-gather" else "p2p",
+        deterministic=False,
+        requires_backward=backward,
+    )
+    flash, selected_version, _, _, _, available = dpa_utils.get_attention_backend(params)
+    expected = path == "compact" or expect_flash
+    assert bool(flash) is expected
+    assert selected_version == (dpa_utils.FlashAttentionUtils.fa4_version if expected else None)
+    assert bool(available[0]) is expected
 
 
 @pytest.mark.parametrize("changed_field", ["device", "requires_backward"])
