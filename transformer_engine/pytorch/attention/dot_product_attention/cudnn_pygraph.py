@@ -11,7 +11,8 @@ as mutually exclusive, but everything around that node is the same work: importi
 holding one handle per device on PyTorch's current stream, describing an SBHD/BSHD tensor in the
 BHSD form cuDNN wants, finalizing plans, and executing.
 
-This module is that common part. It contains no attention semantics.
+This module is that common part: the plumbing, plus the one piece of shared attention
+vocabulary, translating a TE mask type and window into cuDNN's diagonal band.
 """
 
 from typing import Any, Dict, Optional, Sequence, Tuple
@@ -127,6 +128,30 @@ def bhsd_graph_tensor(graph, tensor: torch.Tensor, tensor_format: str):
     """Create a cuDNN graph tensor with BHSD dims and the tensor's own strides."""
     dim, stride = bhsd_dim_stride(tensor, tensor_format)
     return graph.tensor(dim=dim, stride=stride, data_type=tensor.dtype)
+
+
+def diagonal_band_kwargs(cudnn, attn_mask_type: str, window: Tuple[int, int]) -> Dict[str, Any]:
+    """cuDNN sdpa kwargs for a TE (mask type, window): a diagonal alignment plus a band.
+
+    Note the off-by-one. cuDNN's left bound counts the diagonal itself and TE's window_size does
+    not, so a window of w becomes a left bound of w + 1. Passing it through unconverted silently
+    drops one token of context per layer, which no shape-level test would catch.
+
+    These kwargs are mutually exclusive with score_mod: cuDNN rejects a graph carrying both with
+    "Attention score mod enabled and hence other subgraphs are disabled".
+    """
+    left, right = window
+    opts: Dict[str, Any] = {}
+    if attn_mask_type in ("causal", "causal_bottom_right") or right == 0:
+        opts["diagonal_alignment"] = (
+            cudnn.diagonal_alignment.BOTTOM_RIGHT
+            if attn_mask_type == "causal_bottom_right"
+            else cudnn.diagonal_alignment.TOP_LEFT
+        )
+        opts["diagonal_band_right_bound"] = 0
+    if left != -1:
+        opts["diagonal_band_left_bound"] = left + 1
+    return opts
 
 
 def finalize_plans(

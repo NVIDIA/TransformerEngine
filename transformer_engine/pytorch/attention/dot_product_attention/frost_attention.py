@@ -224,20 +224,7 @@ def _mask_spec(attn_mask_type: str, window_size=None):
 def _mask_options(cudnn, spec):
     """cuDNN sdpa kwargs for a (mask type, window) spec: a diagonal alignment plus a band."""
     attn_mask_type, window = spec
-    left, right = window
-    options = {}
-    if attn_mask_type in ("causal", "causal_bottom_right") or right == 0:
-        options["diagonal_alignment"] = (
-            cudnn.diagonal_alignment.BOTTOM_RIGHT
-            if attn_mask_type == "causal_bottom_right"
-            else cudnn.diagonal_alignment.TOP_LEFT
-        )
-        options["diagonal_band_right_bound"] = 0
-    if left != -1:
-        # cuDNN counts the diagonal itself, TE does not, hence the +1 -- the same convention the
-        # C++ fused path and the Python port both use.
-        options["diagonal_band_left_bound"] = left + 1
-    return options
+    return cudnn_pygraph.diagonal_band_kwargs(cudnn, attn_mask_type, window)
 
 
 def is_frost_attention_supported(

@@ -161,6 +161,26 @@ def _score_mod_bhsd_tensor_metadata(tensor: torch.Tensor, tensor_format: str) ->
     return (dim, stride, tensor.dtype, _score_mod_device_key(tensor.device))
 
 
+def _mask_or_score_mod_kwargs(
+    mask_spec: Optional[Tuple[str, Tuple[int, int]]], wrapped_score_mod
+) -> Dict[str, Any]:
+    """SDPA kwargs for exactly one of a diagonal band or a score_mod.
+
+    cuDNN rejects a graph carrying both ("Attention score mod enabled and hence other subgraphs
+    are disabled"), so this refuses the combination here with a clearer message than the frontend
+    gives, rather than building a graph that cannot be served.
+    """
+    if mask_spec is None:
+        return {"use_causal_mask": False, "score_mod": wrapped_score_mod}
+    if wrapped_score_mod is not None:
+        raise ValueError(
+            "a diagonal-band mask and a score_mod cannot be combined in one cuDNN SDPA graph; "
+            f"got mask_spec={mask_spec!r} alongside a score_mod"
+        )
+    cudnn = _import_cudnn_frontend()
+    return cudnn_pygraph.diagonal_band_kwargs(cudnn, mask_spec[0], mask_spec[1])
+
+
 def _make_cudnn_graph_tensor_dict(graph, tensors: Optional[Dict[str, torch.Tensor]]):
     """Create cuDNN graph tensors matching runtime tensors."""
     if tensors is None:
@@ -254,6 +274,7 @@ def _cudnn_score_mod_fwd_cache_key(
     score_mod_tensors: Optional[Dict[str, torch.Tensor]],
     output_layer: torch.Tensor,
     stats: Optional[torch.Tensor],
+    mask_spec: Optional[Tuple[str, Tuple[int, int]]] = None,
 ) -> Optional[Tuple[Any, ...]]:
     """Pre-build cache key for score_mod fprop execution plans.
 
@@ -276,6 +297,9 @@ def _cudnn_score_mod_fwd_cache_key(
         _score_mod_bhsd_tensor_metadata(output_layer, q_format),
         _score_mod_tensor_metadata(stats) if stats is not None else None,
         _score_mod_tensor_dict_metadata(score_mod_tensors),
+        # The mask belongs in the key. Without it two graphs differing only in mask type collide
+        # and the second silently reuses the first, which is a wrong answer rather than a miss.
+        mask_spec,
     )
 
 
@@ -294,6 +318,7 @@ def _cudnn_score_mod_bwd_cache_key(
     score_mod_tensors: Optional[Dict[str, torch.Tensor]],
     score_mod_bprop_tensors: Optional[Dict[str, torch.Tensor]],
     deterministic: bool,
+    mask_spec: Optional[Tuple[str, Tuple[int, int]]] = None,
 ) -> Optional[Tuple[Any, ...]]:
     """Pre-build cache key for score_mod bprop execution plans."""
     score_mod_key = _score_mod_callback_cache_key(score_mod)
@@ -316,6 +341,7 @@ def _cudnn_score_mod_bwd_cache_key(
         _score_mod_tensor_metadata(stats),
         _score_mod_tensor_dict_metadata(score_mod_tensors),
         _score_mod_tensor_dict_metadata(score_mod_bprop_tensors),
+        mask_spec,
     )
 
 
@@ -331,8 +357,15 @@ def _build_cudnn_score_mod_fwd_graph(
     score_mod_tensors: Optional[Dict[str, torch.Tensor]],
     output_layer: torch.Tensor,
     stats: Optional[torch.Tensor],
+    mask_spec: Optional[Tuple[str, Tuple[int, int]]] = None,
 ) -> _CudnnScoreModFwdGraphEntry:
-    """Build a cached cuDNN frontend graph for score_mod fprop."""
+    """Build a cached cuDNN frontend graph for score_mod fprop.
+
+    ``mask_spec`` is an optional (attn_mask_type, window) pair. When given, the SDPA node carries
+    cuDNN's diagonal band instead of the unmasked default, which is how a backend without a
+    score_mod expresses causal, bottom-right and sliding-window attention. The two are mutually
+    exclusive: cuDNN rejects a graph carrying both.
+    """
     cudnn = _import_cudnn_frontend()
 
     graph = _build_cudnn_pygraph(query_layer.dtype, query_layer.device)
@@ -344,6 +377,7 @@ def _build_cudnn_score_mod_fwd_graph(
     wrapped_score_mod = _wrap_score_mod(score_mod, score_mod_graph_tensors)
 
     output_dim, output_stride = _bhsd_dim_stride(output_layer, q_format)
+    sdpa_kwargs = _mask_or_score_mod_kwargs(mask_spec, wrapped_score_mod)
     output, stats_tensor = graph.sdpa(
         name="te_score_mod_sdpa",
         q=q,
@@ -351,8 +385,7 @@ def _build_cudnn_score_mod_fwd_graph(
         v=v,
         generate_stats=is_training,
         attn_scale=attn_scale,
-        use_causal_mask=False,
-        score_mod=wrapped_score_mod,
+        **sdpa_kwargs,
     )
     output.set_output(True).set_dim(output_dim).set_stride(output_stride)
 
@@ -389,6 +422,7 @@ def _get_cudnn_score_mod_fwd_graph(
     score_mod_tensors: Optional[Dict[str, torch.Tensor]],
     output_layer: torch.Tensor,
     stats: Optional[torch.Tensor],
+    mask_spec: Optional[Tuple[str, Tuple[int, int]]] = None,
 ) -> _CudnnScoreModFwdGraphEntry:
     """Return a cached cuDNN frontend graph for score_mod fprop."""
     build_args = (
@@ -403,6 +437,7 @@ def _get_cudnn_score_mod_fwd_graph(
         score_mod_tensors,
         output_layer,
         stats,
+        mask_spec,
     )
     key = _cudnn_score_mod_fwd_cache_key(*build_args)
     if key is None:
@@ -429,8 +464,11 @@ def _build_cudnn_score_mod_bwd_graph(
     score_mod_tensors: Optional[Dict[str, torch.Tensor]],
     score_mod_bprop_tensors: Optional[Dict[str, torch.Tensor]],
     deterministic: bool,
+    mask_spec: Optional[Tuple[str, Tuple[int, int]]] = None,
 ) -> _CudnnScoreModBwdGraphEntry:
-    """Build a cached cuDNN frontend graph for score_mod bprop."""
+    """Build a cached cuDNN frontend graph for score_mod bprop. See the fprop builder for
+    ``mask_spec``; the backward must carry the same mask as the forward or the gradients are
+    computed against a different attention."""
     graph = _build_cudnn_pygraph(query_layer.dtype, query_layer.device)
     q = _bhsd_graph_tensor(graph, query_layer, q_format)
     k = _bhsd_graph_tensor(graph, key_layer, kv_format)
@@ -463,8 +501,7 @@ def _build_cudnn_score_mod_bwd_graph(
         dO=d_output,
         stats=stats_tensor,
         attn_scale=attn_scale,
-        use_causal_mask=False,
-        score_mod=wrapped_score_mod,
+        **_mask_or_score_mod_kwargs(mask_spec, wrapped_score_mod),
         score_mod_bprop=wrapped_score_mod_bprop,
         use_deterministic_algorithm=deterministic,
     )
@@ -505,6 +542,7 @@ def _get_cudnn_score_mod_bwd_graph(
     score_mod_tensors: Optional[Dict[str, torch.Tensor]],
     score_mod_bprop_tensors: Optional[Dict[str, torch.Tensor]],
     deterministic: bool,
+    mask_spec: Optional[Tuple[str, Tuple[int, int]]] = None,
 ) -> _CudnnScoreModBwdGraphEntry:
     """Return a cached cuDNN frontend graph for score_mod bprop."""
     build_args = (
@@ -522,6 +560,7 @@ def _get_cudnn_score_mod_bwd_graph(
         score_mod_tensors,
         score_mod_bprop_tensors,
         deterministic,
+        mask_spec,
     )
     key = _cudnn_score_mod_bwd_cache_key(*build_args)
     if key is None:
