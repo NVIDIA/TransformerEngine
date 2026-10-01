@@ -443,7 +443,7 @@ def _grouped_linear_forward_impl(
                 update_workspace=update_ws,
                 skip_update_flag=args.skip_fp8_weight_update,
                 workspace_dtype=activation_dtype,
-                cache=args.cache_weight,
+                cache=args.cache_weight and not is_dist_weight,
             )
             weights_fp8.append(weight_fp8)
     else:
@@ -946,6 +946,14 @@ def _grouped_linear_backward_impl(
                 _GroupedLinear._maybe_dequantize(weight, args.activation_dtype)
                 for weight in saved_weights
             ]
+        elif is_dist_weight and args.fp8:
+            weights_for_dgrad = []
+            for idx, weight in enumerate(weights):
+                if not isinstance(weight, QuantizedTensorStorage):
+                    quantizer = args.weight_quantizers[idx]
+                    quantizer.set_usage(rowwise=True, columnwise=True)
+                    weight = quantizer(weight)
+                weights_for_dgrad.append(weight)
         # Make sure weights are available in column-wise format
         # for dgrad computation.
         for weight in weights_for_dgrad:
@@ -965,6 +973,14 @@ def _grouped_linear_backward_impl(
         )
 
     if args.weights_requires_grad:
+        if (
+            is_dist_weight
+            and args.wgrad_store is not None
+            and args.wgrad_store.delay_wgrad_compute()
+        ):
+            raise RuntimeError(
+                "distributed-weight GroupedLinear requires delay_wgrad_compute=False."
+            )
         if args.fuse_wgrad_accumulation:
             wgrad_list = main_grads
         elif args.compiled_op:
@@ -1152,7 +1168,9 @@ class GroupedLinearFusedBwdArgs:
     output_tensor_offsets: Optional[torch.Tensor] = None
     dgrad_out: Optional[torch.Tensor] = None
     input_quantizers: List[Quantizer] = None
+    weight_quantizers: List[Quantizer] = None
     grad_output_quantizers: List[Quantizer] = None
+    is_dist_weight: bool = False
     num_gemms: int = 0
     in_features: int = 0
     out_features: int = 0
@@ -1215,6 +1233,9 @@ def _grouped_linear_fused_forward(args: GroupedLinearFwdArgs) -> Tuple[Any, ...]
     single_grouped_weight = args.single_grouped_weight
     single_grouped_bias = args.single_grouped_bias
     weights = args.weights
+    is_dist_weight = is_distributed_weight(weights[0])
+    if is_dist_weight:
+        weights = materialize_weight_for_forward(weights)
     biases = args.biases
     out = args.out
     m_splits = args.m_splits_tensor
@@ -1276,7 +1297,7 @@ def _grouped_linear_fused_forward(args: GroupedLinearFwdArgs) -> Tuple[Any, ...]
         activation_dtype=activation_dtype,
         is_first_microbatch=is_first_microbatch,
         skip_fp8_weight_update=skip_fp8_weight_update,
-        cache_weight=cache_weight,
+        cache_weight=cache_weight and not is_dist_weight,
     )
 
     out = _GroupedLinear._validate_or_alloc_output(
@@ -1333,6 +1354,9 @@ def _grouped_linear_fused_forward(args: GroupedLinearFwdArgs) -> Tuple[Any, ...]
         if not args.input_requires_grad:
             weights_to_save = [None] * len(weights_to_save)
 
+        if is_dist_weight:
+            weights_to_save = list(args.weights)
+
         # Megatron-LM paged stashing uses this marker to identify the dynamic activation
         # buffers among the tensors saved by the GroupedLinear autograd function. The
         # operation-fuser grouped MLP applies the same marker to its saved activations.
@@ -1354,6 +1378,8 @@ def _grouped_linear_fused_setup(
 ) -> None:
     """Populate grouped backward arguments from the forward configuration."""
     bwd_args.input_quantizers = fwd_args.input_quantizers
+    bwd_args.weight_quantizers = fwd_args.weight_quantizers
+    bwd_args.is_dist_weight = is_distributed_weight(fwd_args.weights[0])
     bwd_args.grad_output_quantizers = fwd_args.grad_output_quantizers
     bwd_args.m_splits_tensor = fwd_args.m_splits_tensor
     bwd_args.num_gemms = fwd_args.num_gemms
@@ -1381,6 +1407,8 @@ def _grouped_linear_fused_setup(
         )
         if hasattr(weights[0], "__fsdp_param__"):
             bwd_args.main_grad_funcs = [weight.get_main_grad for weight in weights]
+        elif bwd_args.is_dist_weight:
+            bwd_args.main_grad_funcs = [weight.grad_buffer for weight in weights]
         else:
             bwd_args.main_grad_funcs = [
                 lambda j=i: weights[j].main_grad for i in range(len(weights))
@@ -1425,7 +1453,28 @@ def _grouped_linear_fused_backward(
     num_weight_args = 1 if args.single_grouped_weight else N
     origin_weights = [None] * num_weight_args
     main_grads = [None] * num_weight_args
-    if args.fuse_wgrad_accumulation and args.weights_requires_grad:
+    is_dist_weight = args.is_dist_weight
+    if is_dist_weight:
+        origin_weights = list(weight_tensors)
+        if args.fuse_wgrad_accumulation and args.weights_requires_grad:
+            main_grads = [main_grad_func() for main_grad_func in args.main_grad_funcs]
+        weight_tensors = materialize_weight_for_backward(origin_weights)
+        weights_for_gemm = None
+        if args.requires_dgrad:
+            weights_for_gemm, _ = _GroupedLinear._prepare_weights_for_grouped_tensor_gemm(
+                weight_tensors,
+                args.weight_quantizers,
+                None,
+                num_gemms=N,
+                single_grouped_weight=args.single_grouped_weight,
+                with_quantized_compute=args.fp8,
+                columnwise_usage=True,
+                activation_dtype=args.activation_dtype,
+                is_first_microbatch=None,
+                skip_fp8_weight_update=None,
+                cache_weight=False,
+            )
+    elif args.fuse_wgrad_accumulation and args.weights_requires_grad:
         origin_weight_refs = args.origin_weight_refs
         args.origin_weight_refs = None
         origin_weights = [ref() if ref is not None else None for ref in origin_weight_refs]
@@ -1520,7 +1569,9 @@ def _grouped_linear_fused_backward(
             use_split_accumulator=args.dgrad_use_split_accumulator,
         )
 
-    if args.is_first_microbatch is not None:
+    if is_dist_weight:
+        accumulate_wgrad_into_param_main_grad = False
+    elif args.is_first_microbatch is not None:
         accumulate_wgrad_into_param_main_grad = (
             args.fuse_wgrad_accumulation and not args.is_first_microbatch
         )
@@ -1528,6 +1579,14 @@ def _grouped_linear_fused_backward(
         accumulate_wgrad_into_param_main_grad = args.fuse_wgrad_accumulation
 
     if args.weights_requires_grad:
+        if (
+            is_dist_weight
+            and args.wgrad_store is not None
+            and args.wgrad_store.delay_wgrad_compute()
+        ):
+            raise RuntimeError(
+                "distributed-weight GroupedLinear requires delay_wgrad_compute=False."
+            )
         if args.fuse_wgrad_accumulation:
             if args.single_grouped_weight:
                 main_grad = main_grads[0]
@@ -1598,10 +1657,13 @@ def _grouped_linear_fused_backward(
         else:
             grouped_gemm_wgrad(grouped_x, grouped_dy, wgrad_output)
 
-        wgrad_list = [
-            _finish_wgrad(weight, main_grad, wgrad, args.fuse_wgrad_accumulation)
-            for weight, main_grad, wgrad in zip(origin_weights, main_grads, wgrad_list)
-        ]
+        if is_dist_weight:
+            wgrad_list = finalize_weight_grads(origin_weights, wgrad_list)
+        else:
+            wgrad_list = [
+                _finish_wgrad(weight, main_grad, wgrad, args.fuse_wgrad_accumulation)
+                for weight, main_grad, wgrad in zip(origin_weights, main_grads, wgrad_list)
+            ]
     else:
         wgrad_list = [None] * num_weight_args
 
