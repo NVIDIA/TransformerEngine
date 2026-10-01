@@ -470,7 +470,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Swap first two tensor dimensions", py::arg("tensor"), py::kw_only(), py::arg("out"),
         py::call_guard<py::gil_scoped_release>());
   m.def("get_fused_attn_backend", &transformer_engine::pytorch::get_fused_attn_backend,
-        "Get Fused Attention backend", py::call_guard<py::gil_scoped_release>());
+        "Get Fused Attention backend", py::arg("fused_attn_params"));
   m.def("compute_amax", &transformer_engine::pytorch::compute_amax,
         "Compute absolute max value in tensor", py::arg("input"), py::arg("amax"),
         py::call_guard<py::gil_scoped_release>());
@@ -705,6 +705,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("multi_tensor_compute_scale_inv_e8m0",
         &transformer_engine::pytorch::multi_tensor_compute_scale_inv_e8m0_cuda,
         "Fused compute E8M0 scale_inv from amax", py::call_guard<py::gil_scoped_release>());
+
+  // Borrow torch's host ncclComm_t from a process group (used by NCCL EP and cuSolverMp).
+  m.def("get_nccl_comm_ptr", &transformer_engine::pytorch::get_nccl_comm_ptr,
+        "Borrow torch's host ncclComm_t from a process group's CUDA backend.",
+        py::arg("process_group"));
 
   // Newton-Schulz (cuSolverMp)
   m.def("cusolvermp_ctx_create", &transformer_engine::pytorch::cusolvermp_ctx_create,
