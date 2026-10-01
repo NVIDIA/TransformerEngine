@@ -1796,10 +1796,7 @@ def get_attention_backend(
         # reject deterministic execution, so only forward-only calls can use those kernels.
         if attention_params.requires_backward and (
             device_compute_capability[0] == 12
-            or (
-                (10, 0) <= device_compute_capability < (12, 0)
-                and head_dim_qk == head_dim_v == 256
-            )
+            or ((10, 0) <= device_compute_capability < (12, 0) and head_dim_qk == head_dim_v == 256)
         ):
             logger.debug(
                 "Disabling FlashAttention 4 because the selected backward kernel does not "
