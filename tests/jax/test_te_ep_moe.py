@@ -819,26 +819,37 @@ class TestTeEpMoeCudnnCutedslFusion:
             err_msg="d_x fused MXFP8 gradient parity breach",
         )
 
-    def test_regular_swiglu_with_checkpoint_names(self, mesh, monkeypatch):
+    @pytest.mark.parametrize("use_regular_swiglu", [False, True])
+    def test_cudnn_fused_with_checkpoint_names(self, mesh, monkeypatch, use_regular_swiglu):
         if not _use_cudnn_cutedsl_fusion_from_env():
             pytest.skip("cuDNN grouped GEMM fusion is disabled")
-        if get_device_compute_capability(0) != 107:
-            pytest.skip("Rubin test of the regular cuDNN grouped SwiGLU path")
+        if not use_regular_swiglu and get_device_compute_capability(0) != 107:
+            pytest.skip("Rubin grouped GLU requires SM107")
 
         from transformer_engine.jax import cpp_extensions as tex
 
         moe_module = importlib.import_module("transformer_engine.jax.moe")
         flax_moe_module = importlib.import_module("transformer_engine.jax.flax.moe")
-        monkeypatch.setattr(moe_module, "_is_rubin_device", lambda: False)
+        if use_regular_swiglu:
+            monkeypatch.setattr(moe_module, "_is_rubin_device", lambda: False)
 
-        regular_calls = []
-        original_swiglu = tex.grouped_gemm_swiglu
+        selected_calls = []
+        fused_op_name = "grouped_gemm_swiglu" if use_regular_swiglu else "grouped_gemm_glu"
+        original_fused_op = getattr(tex, fused_op_name)
 
-        def checked_swiglu(*args, **kwargs):
-            regular_calls.append(True)
-            return original_swiglu(*args, **kwargs)
+        def checked_fused_op(*args, **kwargs):
+            selected_calls.append(True)
+            return original_fused_op(*args, **kwargs)
 
-        monkeypatch.setattr(tex, "grouped_gemm_swiglu", checked_swiglu)
+        monkeypatch.setattr(tex, fused_op_name, checked_fused_op)
+        named_values = {}
+        original_checkpoint_name = moe_module.checkpoint_name
+
+        def recorded_checkpoint_name(value, name):
+            named_values.setdefault(name, []).append(value)
+            return original_checkpoint_name(value, name)
+
+        monkeypatch.setattr(moe_module, "checkpoint_name", recorded_checkpoint_name)
         original_moe = flax_moe_module.moe
 
         def checkpointed_moe(*args, **kwargs):
@@ -855,7 +866,12 @@ class TestTeEpMoeCudnnCutedslFusion:
         variables, output, _ = _init_apply(block, mesh, inputs, jax.random.PRNGKey(33))
         grads, grad_inputs = _grad_step(block, variables, mesh, inputs)
 
-        assert regular_calls, "regular cuDNN grouped SwiGLU was not selected"
+        assert selected_calls, f"{fused_op_name} was not selected"
+        for label in ("moe_mlpwi_0", "moe_mlpwi_1"):
+            assert len(named_values[label]) == 5 * len(selected_calls)
+            assert all(hasattr(value, "shape") for value in named_values[label])
+        assert len(named_values["moe_mlpwo"]) == len(selected_calls)
+        assert all(hasattr(value, "shape") for value in named_values["moe_mlpwo"])
         assert np.all(np.isfinite(_to_global_numpy(output, mesh)))
         assert np.all(np.isfinite(_to_global_numpy(grad_inputs, mesh)))
         for name in ("gate_kernel", "wi", "wo"):

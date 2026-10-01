@@ -573,6 +573,16 @@ def _ffn_fwd_per_shard(
             intermediate_scale_col,
             (0, col_scale_size - intermediate_scale_col.size),
         )
+        for checkpoint_label in (wi_0_checkpoint_name, wi_1_checkpoint_name):
+            if checkpoint_label is not None:
+                intermediate_row = checkpoint_name(intermediate_row, checkpoint_label)
+                intermediate_col = checkpoint_name(intermediate_col, checkpoint_label)
+                intermediate_scale_row = checkpoint_name(
+                    intermediate_scale_row, checkpoint_label
+                )
+                intermediate_scale_col = checkpoint_name(
+                    intermediate_scale_col, checkpoint_label
+                )
         casted_intermediate = ScaledTensorFactory.create(
             data=intermediate_row.reshape(-1),
             scale_inv=intermediate_scale_row,
@@ -1639,9 +1649,11 @@ def moe(
         ``total_recv_tokens`` when bootstrap used ``drop_on_overflow=True``.
     wi_0_checkpoint_name : Optional[str]
         JAX rematerialization checkpoint name for the gate projection output.
+        With cuDNN fusion, also names the shared fused outputs, including its quantized output.
         ``None`` leaves the value unnamed.
     wi_1_checkpoint_name : Optional[str]
         JAX rematerialization checkpoint name for the up projection output.
+        With cuDNN fusion, also names the same fused outputs, including its quantized output.
         ``None`` leaves the value unnamed.
     wo_checkpoint_name : Optional[str]
         JAX rematerialization checkpoint name for the per-expert down projection output.
