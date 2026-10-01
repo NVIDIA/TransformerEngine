@@ -84,7 +84,11 @@ def _import_cudnn():
     also ranks FROST ahead of the backend engines, so only this backend asks for it.
     _select_frost_plan verifies the engine by plan name regardless, rather than trusting the flag.
     """
-    return cudnn_pygraph.import_cudnn_frontend(enable_frost_engines=True)
+    global _cudnn  # pylint: disable=global-statement
+    # Kept bound: _pkg_version falls back to the module's __version__ when distribution metadata
+    # is unavailable, which is how a source or vendored install avoids being misreported.
+    _cudnn = cudnn_pygraph.import_cudnn_frontend(enable_frost_engines=True)
+    return _cudnn
 
 
 def _handle_for(device: torch.device):

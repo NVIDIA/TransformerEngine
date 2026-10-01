@@ -437,14 +437,16 @@ def _get_cudnn_score_mod_fwd_graph(
         score_mod_tensors,
         output_layer,
         stats,
-        mask_spec,
     )
-    key = _cudnn_score_mod_fwd_cache_key(*build_args)
+    # Only when set: an unconditional extra argument would change the call shape for every
+    # existing caller, including the tests that substitute their own builder.
+    extra = {} if mask_spec is None else {"mask_spec": mask_spec}
+    key = _cudnn_score_mod_fwd_cache_key(*build_args, **extra)
     if key is None:
-        return _build_cudnn_score_mod_fwd_graph(*build_args)
+        return _build_cudnn_score_mod_fwd_graph(*build_args, **extra)
     entry = _cudnn_score_mod_graph_cache.get(key)
     if entry is None:
-        entry = _build_cudnn_score_mod_fwd_graph(*build_args)
+        entry = _build_cudnn_score_mod_fwd_graph(*build_args, **extra)
         _cudnn_score_mod_graph_cache[key] = entry
     return entry
 
@@ -560,14 +562,14 @@ def _get_cudnn_score_mod_bwd_graph(
         score_mod_tensors,
         score_mod_bprop_tensors,
         deterministic,
-        mask_spec,
     )
-    key = _cudnn_score_mod_bwd_cache_key(*build_args)
+    extra = {} if mask_spec is None else {"mask_spec": mask_spec}
+    key = _cudnn_score_mod_bwd_cache_key(*build_args, **extra)
     if key is None:
-        return _build_cudnn_score_mod_bwd_graph(*build_args)
+        return _build_cudnn_score_mod_bwd_graph(*build_args, **extra)
     entry = _cudnn_score_mod_graph_cache.get(key)
     if entry is None:
-        entry = _build_cudnn_score_mod_bwd_graph(*build_args)
+        entry = _build_cudnn_score_mod_bwd_graph(*build_args, **extra)
         _cudnn_score_mod_graph_cache[key] = entry
     return entry
 
