@@ -1,15 +1,8 @@
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-# SPDX-License-Identifier: BSD-3-Clause
-# Adapted from cuDNN Frontend (Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES).
-# The adapted implementation is covered by requantize_mxfp8.LICENSE.txt.
 
-"""Grouped MXFP8 requantization adapted from cuDNN Frontend's Mxfp8ColRequant.
-
-Source revision: 347e186e661fef677f78b2a576c9a64cb2e0a8b2, path
-python/cudnn/moe_ep/_megamoe_backend/cutedsl_src/kernel_src/rubin/training/mega/
-fwd_glu/glu_mxfp8_col_requant.py.
+"""Grouped MXFP8 requantization with BF16 intermediates.
 
 The input scales use TE's compact rowwise layout. One TMA pipeline loads both
 payload and scales; consumers decode to BF16, compute columnwise scales and
