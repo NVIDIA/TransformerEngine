@@ -736,6 +736,44 @@ def test_checkpoint_extra_state_policy_classifier_map_covers_all_recipes():
 
 
 @pytest.mark.parametrize(
+    "recipe_cls, option, explicit_value, expected_power_of_two",
+    [
+        (Float8CurrentScaling, "use_power_2_scales", True, True),
+        (Float8CurrentScaling, "use_power_2_scales", False, False),
+        (Float8BlockScaling, "use_f32_scales", True, False),
+        (Float8BlockScaling, "use_f32_scales", False, True),
+    ],
+)
+def test_fp8_recipe_quant_params_follow_instance_options(
+    recipe_cls, option, explicit_value, expected_power_of_two
+):
+    recipe_obj = recipe_cls(**{option: explicit_value})
+
+    assert recipe_obj.fp8_quant_fwd_inp.power_2_scale is expected_power_of_two
+    assert recipe_obj.fp8_quant_fwd_weight.power_2_scale is expected_power_of_two
+    assert recipe_obj.fp8_quant_bwd_grad.power_2_scale is expected_power_of_two
+
+
+@pytest.mark.parametrize(
+    "recipe_cls, option",
+    [
+        (Float8CurrentScaling, "use_power_2_scales"),
+        (Float8BlockScaling, "use_f32_scales"),
+    ],
+)
+def test_fp8_recipe_quant_params_follow_environment_defaults(recipe_cls, option):
+    recipe_obj = recipe_cls()
+    if option == "use_power_2_scales":
+        expected_power_of_two = recipe_obj.use_power_2_scales
+    else:
+        expected_power_of_two = not recipe_obj.use_f32_scales
+
+    assert recipe_obj.fp8_quant_fwd_inp.power_2_scale is expected_power_of_two
+    assert recipe_obj.fp8_quant_fwd_weight.power_2_scale is expected_power_of_two
+    assert recipe_obj.fp8_quant_bwd_grad.power_2_scale is expected_power_of_two
+
+
+@pytest.mark.parametrize(
     "recipe_obj",
     [
         Float8CurrentScaling(),
