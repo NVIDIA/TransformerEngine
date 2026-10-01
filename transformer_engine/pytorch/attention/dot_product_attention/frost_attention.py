@@ -77,17 +77,18 @@ _PLAN_CACHE: dict = {}
 _HANDLES = cudnn_pygraph._handles  # pylint: disable=protected-access
 
 
-def _import_cudnn():
-    """Import cuDNN Frontend with the FROST engines registered.
+def _import_cudnn(enable_frost_engines: bool = True):
+    """Import cuDNN Frontend, registering the FROST engines unless told not to.
 
-    The switch has to be set before the import because the engines register at import time, and it
-    also ranks FROST ahead of the backend engines, so only this backend asks for it.
-    _select_frost_plan verifies the engine by plan name regardless, rather than trusting the flag.
+    The switch is process-wide and ranks FROST ahead of the backend engines for every cuDNN Python
+    graph afterwards, including other backends’ graphs, so it is set only where FROST is actually
+    used. _select_frost_plan verifies the engine by plan name regardless, rather than trusting the
+    flag.
     """
     global _cudnn  # pylint: disable=global-statement
     # Kept bound: _pkg_version falls back to the module's __version__ when distribution metadata
     # is unavailable, which is how a source or vendored install avoids being misreported.
-    _cudnn = cudnn_pygraph.import_cudnn_frontend(enable_frost_engines=True)
+    _cudnn = cudnn_pygraph.import_cudnn_frontend(enable_frost_engines=enable_frost_engines)
     return _cudnn
 
 
@@ -151,7 +152,10 @@ def is_frost_attention_available() -> Tuple[bool, str]:
         major, minor = torch.cuda.get_device_capability()
         return _no(f"cuDNN FROST head_dim>256 kernels are SM100/SM103 only; found sm{major}{minor}")
     try:
-        _import_cudnn()
+        # Without the engines: this only needs the module to read a version off it, and enabling
+        # here would reorder plan selection for the whole process even when the checks below go on
+        # to decline FROST, which is all cost and no benefit. The use sites enable it.
+        _import_cudnn(enable_frost_engines=False)
     except ImportError as exc:
         return _no(f"nvidia-cudnn-frontend not importable: {exc}")
 

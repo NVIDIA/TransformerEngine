@@ -180,6 +180,7 @@ def finalize_plans(
     build_policy: Any = None,
     require_plan_token: Optional[str] = None,
     not_found_hint: Any = "",
+    exclude_plan_tokens: Optional[Sequence[str]] = None,
 ) -> Tuple[int, Optional[str]]:
     """Create plans, optionally pin one by name, build, and return (workspace size, plan name).
 
@@ -195,6 +196,12 @@ def finalize_plans(
     The token is matched as a substring rather than by equality on purpose: cuDNN has already
     collapsed per-head-dim engine names (``..._d512`` and friends) into a single row once, and the
     substring test survived that.
+
+    ``exclude_plan_tokens`` is the opposite instruction, for a caller that must NOT run on a
+    particular engine. It is needed because the FROST engine switch is process-wide: a caller that
+    declines to ask for those engines still gets them ranked first once anything else in the
+    process has enabled them. Measured on B200 at head_dim 64, 128, 256 and 512, a FROST plan
+    ranks at index 0 for a score_mod graph and an unpinned build selects it every time.
 
     Pinning also changes what ``check_support`` means. Selecting a plan sets cuDNN's internal
     ``_plan_pinned``, and only then is a decline fatal; unpinned, cuDNN records the decline and
@@ -212,6 +219,11 @@ def finalize_plans(
     if require_plan_token is None:
         try:
             graph.create_execution_plans(list(heuristics))
+            if exclude_plan_tokens:
+                # Bar the named engines before the walk, so build_plans falls through to the first
+                # entry that is both unbarred and buildable. Inert when those engines are not on
+                # offer, which is every process that has not enabled them.
+                graph.deselect_engines(list(exclude_plan_tokens))
             graph.check_support()
         except cudnn.cudnnGraphNotSupportedError as exc:
             raise RuntimeError(f"cuDNN SDPA graph is not supported: {exc}") from exc

@@ -247,9 +247,20 @@ class _CudnnScoreModBwdGraphEntry:
     workspace_size: int
 
 
+# cuDNN FROST SDPA engine names. These are barred here, not merely left unasked for: the switch
+# that offers them is process-wide, so any FrostAttention call elsewhere in the process, or a user
+# setting CUDNN_FRONTEND_ENABLE_FROST_ENGINES, puts them ahead of the backend engines for these
+# graphs too. They accept a score_mod graph, pass check_support, build, and then compute without
+# the callback. Measured on B200 with cuDNN Frontend 1.29.0: a FROST plan ranks at index 0 at
+# head_dim 64, 128, 256 and 512, and an unpinned build selects it and returns plain attention.
+_FROST_PLAN_TOKENS = ("sdpa_fwd_prefill_sm100", "sdpa_bwd_sm100")
+
+
 def _finalize_cudnn_graph(graph) -> int:
     """Build a cuDNN frontend Python graph and return its workspace size."""
-    workspace_size, _ = cudnn_pygraph.finalize_plans(graph)
+    workspace_size, _ = cudnn_pygraph.finalize_plans(
+        graph, exclude_plan_tokens=_FROST_PLAN_TOKENS
+    )
     return workspace_size
 
 
