@@ -4,10 +4,10 @@
 
 """FlashAttention 4 must never be handed TE's -1 window sentinel.
 
-TE spells an unbounded window side as -1; FA4 spells it None. Since flash-attention #2490 a negative
-bound is honoured arithmetically rather than widened to full attention, so the causal encoding
-(-1, 0) describes the band [row + 1, row] -- empty. FA4 then returns an all-zero output and an
-all -inf LSE and raises nothing, which is a silent wrong answer rather than a crash.
+TE spells an unbounded window side as -1; FA4 spells it None. FA4 widens a window to full
+attention only when both bounds are negative, so the causal encoding (-1, 0) reaches the kernel as
+the band [row + 1, row] -- empty. FA4 then returns an all-zero output and an all -inf LSE and
+raises nothing, which is a wrong answer rather than a crash.
 
 The numerical test below is anchored to a float64 reference rather than to another backend. That
 matters here: the bug survived because tests/pytorch/attention/run_attention_with_cp.py grades a CP
@@ -22,8 +22,15 @@ import pytest
 import torch
 
 from transformer_engine.pytorch.attention.dot_product_attention.backends import (
-    _fa4_normalized_window_kwargs,
+    _fa4_with_none_window_sentinel,
 )
+
+
+def _normalized(kwargs):
+    """Return the kwargs FA4 would actually receive, through the real wrapper."""
+    received = {}
+    _fa4_with_none_window_sentinel(received.update)(**kwargs)
+    return received
 
 
 @pytest.mark.parametrize(
@@ -31,8 +38,8 @@ from transformer_engine.pytorch.attention.dot_product_attention.backends import 
     [
         # TE's causal encoding: the pair that produced zeros.
         ({"window_size": (-1, 0)}, {"window_size": (None, 0)}),
-        # TE's no-mask encoding. FA4 widened this one correctly on its own, since #2490 widens when
-        # both bounds are negative -- it is normalized anyway so one rule covers every case.
+        # TE's no-mask encoding. FA4 already widens this one itself, both bounds being negative,
+        # but rewriting it anyway keeps a single rule for every window TE emits.
         ({"window_size": (-1, -1)}, {"window_size": (None, None)}),
         # A genuine sliding window must survive untouched, bounds and all.
         ({"window_size": (511, 0)}, {"window_size": (511, 0)}),
@@ -57,16 +64,9 @@ from transformer_engine.pytorch.attention.dot_product_attention.backends import 
     ],
 )
 def test_fa4_window_sentinel_normalization(sent, expected):
-    """Every negative bound becomes None; every other value is passed through unchanged."""
-    assert _fa4_normalized_window_kwargs(dict(sent)) == expected
+    """The -1 sentinel becomes None; every other value is passed through unchanged."""
+    assert _normalized(sent) == expected
 
-
-def test_fa4_window_normalization_preserves_other_kwargs():
-    """The normalizer must not disturb anything else it is handed."""
-    kwargs = {"causal": True, "window_size": (-1, 0), "softmax_scale": 0.125, "num_splits": 1}
-    out = _fa4_normalized_window_kwargs(dict(kwargs))
-    assert out["window_size"] == (None, 0)
-    assert out["causal"] is True and out["softmax_scale"] == 0.125 and out["num_splits"] == 1
 
 
 def _fa4_causal_unavailable():

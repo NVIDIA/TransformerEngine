@@ -183,56 +183,33 @@ else:
         fa_utils.fa3_supports_softcap = False
 
 
-def _fa4_normalized_window_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
-    """Replace the -1 "unbounded" window sentinel with the ``None`` FlashAttention 4 expects.
-
-    TE normalizes an unbounded side to ``-1`` (``check_set_window_size``); FA4 spells it ``None``.
-    Since flash-attention #2490 a negative bound is honoured arithmetically instead of being widened
-    to full attention, and ``flash_attn/cute/mask.py`` guards on ``is not None``, so the causal
-    encoding ``(-1, 0)`` describes the band ``[row + 1, row]`` -- empty. The kernel then returns an
-    all-zero output and an all ``-inf`` LSE without raising, which is a silent wrong answer.
-
-    Genuine sliding windows already carry non-negative bounds and pass through untouched.
-
-    Applied unconditionally rather than behind a version gate, because it is inert on releases
-    predating #2490 rather than merely harmless there. Both the old and new
-    ``_resolve_causal_local_window`` reduce ``(None, 0)`` with ``causal=True`` to plain causal via
-    the same ``window_size_left is None and window_size_right == 0`` branch; the old one reaches
-    the identical state from ``(-1, 0)`` by widening. So every window TE emits resolves the same
-    way before the change and correctly after it, and there is no version boundary to track.
-    """
-    window = kwargs.get("window_size")
-    if window is not None:
-        kwargs["window_size"] = tuple(
-            None if bound is not None and bound < 0 else bound for bound in window
-        )
-    for bound_name in ("window_size_left", "window_size_right"):
-        bound = kwargs.get(bound_name)
-        if bound is not None and bound < 0:
-            kwargs[bound_name] = None
-    return kwargs
-
-
 def _fa4_with_none_window_sentinel(func: Callable) -> Callable:
-    """Wrap an FA4 entry point so it can never receive a negative window bound.
+    """Rewrite TE's ``-1`` unbounded-window sentinel to the ``None`` FlashAttention 4 expects.
 
-    Done here rather than at the ~20 call sites that build these kwargs, because those sites are
-    shared with FA2 >= 2.7 and FA3, for which ``-1`` is the correct spelling; rewriting them there
-    would have to fork every one on ``use_flash_attn_4``.
+    TE spells an unbounded side ``-1``; FA4 spells it ``None``. FA4 widens a window to full
+    attention only when *both* bounds are negative, so TE's causal ``(-1, 0)`` reaches the kernel
+    as the band ``[row + 1, row]`` -- empty. The output is then all zeros and the LSE all ``-inf``,
+    with nothing raised: a wrong answer rather than a failure.
 
-    All four entry points are wrapped. The non-CP path calls ``flash_attn_func`` /
-    ``flash_attn_varlen_func`` while context parallelism calls ``_flash_attn_fwd`` /
-    ``_flash_attn_bwd``, so covering only one pair leaves the other returning zeros -- and that is
-    worse than leaving both broken, because ``run_attention_with_cp.py`` grades a CP run against a
-    non-CP run of the same backend. With both sides zero the comparison agrees and passes; correcting
-    one side alone makes the fix present as a regression.
+    Only ``-1`` is rewritten. A lone negative bound is a valid FA4 request for an empty window, so
+    widening every negative here would silently turn one of those into full attention.
 
-    Every TE call site passes these by keyword. A positional caller would bypass this.
+    Wrapped at the entry points rather than at the ~20 call sites that build these kwargs, since
+    those are shared with FA2 >= 2.7 and FA3, where ``-1`` is the correct spelling. All four are
+    wrapped together because ``run_attention_with_cp.py`` grades a CP run against a non-CP run of
+    the same backend: with both sides empty the comparison agrees, so fixing one pair alone would
+    present as a regression. Keyword arguments only; a positional caller bypasses this.
     """
 
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
-        return func(*args, **_fa4_normalized_window_kwargs(kwargs))
+        window = kwargs.get("window_size")
+        if window is not None:
+            kwargs["window_size"] = tuple(None if bound == -1 else bound for bound in window)
+        for bound_name in ("window_size_left", "window_size_right"):
+            if kwargs.get(bound_name) == -1:
+                kwargs[bound_name] = None
+        return func(*args, **kwargs)
 
     return wrapper
 
