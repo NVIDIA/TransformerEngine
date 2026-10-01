@@ -452,9 +452,8 @@ void nvte_group_dequantize(const NVTEGroupedTensor input, NVTEGroupedTensor outp
  *  \param[in]     quant_config   Quantization configuration.
  *  \param[in]     stream         CUDA stream used for the operation.
  */
-void nvte_grouped_requantize(
-    const NVTEGroupedTensor input, NVTEGroupedTensor output,
-    const NVTEQuantizationConfig quant_config, cudaStream_t stream);
+void nvte_grouped_requantize(const NVTEGroupedTensor input, NVTEGroupedTensor output,
+                             const NVTEQuantizationConfig quant_config, cudaStream_t stream);
 
 /*! \brief Fused grouped requantization. Currently only MXFP8 1D scaling is supported.
  *

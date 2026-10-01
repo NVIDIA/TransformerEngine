@@ -908,8 +908,7 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
       op_dtype == DType::kFloat8E4M3 && transformer_engine::cuda::sm_arch() >= 100;
   // The grouped-tensor API builds the columnwise copy. Keep the existing fused
   // API for requests that also need a dequantized output or lack per-group sizes.
-  const bool use_grouped_kernel = use_fused_kernel && first_dims.has_value() &&
-                                  !return_dequantized;
+  const bool use_grouped_kernel = use_fused_kernel && first_dims.has_value() && !return_dequantized;
   if (use_fused_kernel) {
     const auto rowwise_data = rowwise_data_py.cast<at::Tensor>();
     const auto rowwise_scale_inv = rowwise_scale_inv_py.cast<at::Tensor>();
@@ -951,12 +950,12 @@ py::object group_requantize_inplace(py::handle grouped_x, py::handle quantizer,
 
       GroupedTensorWrapper output_nvte(num_tensors, grouped_shape, NVTE_MXFP8_1D_SCALING);
       output_nvte.set_rowwise_data(rowwise_data.data_ptr(), op_dtype, flat_data_shape);
-      output_nvte.set_rowwise_scale_inv(swizzled_rowwise_scale_inv.data_ptr(),
-                                        DType::kFloat8E8M0, scale_shape);
+      output_nvte.set_rowwise_scale_inv(swizzled_rowwise_scale_inv.data_ptr(), DType::kFloat8E8M0,
+                                        scale_shape);
       output_nvte.set_columnwise_data(columnwise_data.data_ptr(), DType::kFloat8E4M3,
-                                       flat_data_shape);
+                                      flat_data_shape);
       output_nvte.set_columnwise_scale_inv(columnwise_scale_inv.data_ptr(), DType::kFloat8E8M0,
-                                            scale_shape);
+                                           scale_shape);
       output_nvte.set_first_dims(first_dims_i64.data_ptr(), DType::kInt64, dims_shape);
       output_nvte.set_tensor_offsets(element_offsets.data_ptr(), DType::kInt64, offsets_shape);
       output_nvte.set_with_gemm_swizzled_scales(true);
