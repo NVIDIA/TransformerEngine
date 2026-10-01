@@ -30,6 +30,10 @@
 #endif
 
 namespace transformer_engine {
+namespace requantize {
+void fused_group_requantize(const GroupedTensor &input, GroupedTensor *output, Tensor *dequantized,
+                            const QuantizationConfig *quant_config, cudaStream_t stream);
+}  // namespace requantize
 namespace dispatch {
 namespace mxfp8 {
 namespace group_requantize_kernel {
@@ -910,7 +914,7 @@ void launch_group_requantize(const GroupedTensor &input, GroupedTensor *output,
 
 }  // namespace group_requantize_kernel
 
-void group_requantize(const GroupedTensor &input, GroupedTensor *output,
+void group_requantize(const GroupedTensor &input, GroupedTensor *output, Tensor *dequantized,
                       const QuantizationConfig *quant_config, cudaStream_t stream) {
   using namespace group_requantize_kernel;
 
@@ -990,6 +994,11 @@ void group_requantize(const GroupedTensor &input, GroupedTensor *output,
     shape_rep = ShapeRepresentation::VARYING_BOTH_DIMS;
   }
 
+  if (dequantized != nullptr && dequantized->data.dptr != nullptr) {
+    requantize::fused_group_requantize(input, output, dequantized, quant_config, stream);
+    return;
+  }
+
   const size_t first_logical_dim = input.logical_shape.data[0];
   const size_t last_logical_dim = input.logical_shape.data[1];
   const size_t total_elements = first_logical_dim * last_logical_dim;
@@ -1029,12 +1038,15 @@ void group_requantize(const GroupedTensor &input, GroupedTensor *output,
 }  // namespace dispatch
 }  // namespace transformer_engine
 
-void nvte_grouped_requantize(const NVTEGroupedTensor input, NVTEGroupedTensor output,
-                             const NVTEQuantizationConfig quant_config, cudaStream_t stream) {
-  NVTE_API_CALL(nvte_grouped_requantize);
+void nvte_group_requantize(const NVTEGroupedTensor input, NVTEGroupedTensor output,
+                           NVTETensor dequantized, const NVTEQuantizationConfig quant_config,
+                           cudaStream_t stream) {
+  NVTE_API_CALL(nvte_group_requantize);
   using namespace transformer_engine;
   const GroupedTensor *const input_cu = convertNVTEGroupedTensorCheck(input);
   GroupedTensor *const output_cu = convertNVTEGroupedTensorCheck(output);
   const auto *const quant_config_cu = reinterpret_cast<const QuantizationConfig *>(quant_config);
-  dispatch::mxfp8::group_requantize(*input_cu, output_cu, quant_config_cu, stream);
+  dispatch::mxfp8::group_requantize(
+      *input_cu, output_cu, dequantized != nullptr ? convertNVTETensorCheck(dequantized) : nullptr,
+      quant_config_cu, stream);
 }

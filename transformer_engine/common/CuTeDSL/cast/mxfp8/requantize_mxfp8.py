@@ -14,7 +14,7 @@ fwd_glu/glu_mxfp8_col_requant.py.
 The input scales use TE's compact rowwise layout. One TMA pipeline loads both
 payload and scales; consumers decode to BF16, compute columnwise scales and
 emit row-major E4M3 payloads. Scale layouts and optional rowwise scale output
-follow nvte_grouped_requantize. No framework is imported by this module.
+follow nvte_group_requantize. No framework is imported by this module.
 """
 
 import logging

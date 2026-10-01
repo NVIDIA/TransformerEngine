@@ -555,6 +555,7 @@ def check_prequantized_requantize_versus_reference(
     N: int,
     split_sections: list[int],
     return_dequantized: bool = True,
+    offsets_only: bool = False,
 ) -> None:
     """Run the pre-quantized requantize path and check both directions against a reference.
 
@@ -614,8 +615,9 @@ def check_prequantized_requantize_versus_reference(
         wire,
         make_op_quantizer(columnwise=True),
         num_groups,
-        split_section_tensor,
+        None if offsets_only else split_section_tensor,
         te.DType.kBFloat16,
+        tensor_offsets=wire.tensor_offsets if offsets_only else None,
         return_dequantized=return_dequantized,
     )
 
@@ -693,8 +695,10 @@ def check_prequantized_requantize_versus_reference(
         (1024, 256, [128, 0, 256, 128]),
     ],
 )
-def test_prequantized_requantize_without_dequantized_output(
-    M: int, N: int, split_sections: list[int]
+@pytest.mark.parametrize("offsets_only", [False, True])
+@pytest.mark.parametrize("return_dequantized", [False, True])
+def test_prequantized_requantize_optional_dequantized_output(
+    M: int, N: int, split_sections: list[int], offsets_only: bool, return_dequantized: bool
 ) -> None:
     """The grouped API path matches the reference with uniform and paged groups."""
     check_prequantized_requantize_versus_reference(
@@ -702,7 +706,8 @@ def test_prequantized_requantize_without_dequantized_output(
         M=M,
         N=N,
         split_sections=split_sections,
-        return_dequantized=False,
+        return_dequantized=return_dequantized,
+        offsets_only=offsets_only,
     )
 
 

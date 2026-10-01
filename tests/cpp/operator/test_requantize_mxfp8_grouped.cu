@@ -281,9 +281,9 @@ TEST(GroupedRequantizeTest, RejectsUnsupportedScalingModes) {
   GroupedTensorWrapper delayed(1, shape, NVTE_DELAYED_TENSOR_SCALING);
   GroupedTensorWrapper mxfp8(1, shape, NVTE_MXFP8_1D_SCALING);
 
-  EXPECT_THROW(nvte_grouped_requantize(delayed.data(), mxfp8.data(), nullptr, 0),
+  EXPECT_THROW(nvte_group_requantize(delayed.data(), mxfp8.data(), nullptr, nullptr, 0),
                std::runtime_error);
-  EXPECT_THROW(nvte_grouped_requantize(mxfp8.data(), delayed.data(), nullptr, 0),
+  EXPECT_THROW(nvte_group_requantize(mxfp8.data(), delayed.data(), nullptr, nullptr, 0),
                std::runtime_error);
 }
 
@@ -308,34 +308,36 @@ TEST(GroupedRequantizeTest, OptionalRowwiseOutputsAndAliasRules) {
                                     NVTE_MXFP8_1D_SCALING,
                                     /*rowwise=*/false, /*columnwise=*/true,
                                     /*swizzled=*/true);
-  // Both rowwise output fields may be absent.
-  nvte_grouped_requantize(input.data(), output.data(), nullptr, 0);
+  // Both rowwise output fields may be absent, including with an unallocated
+  // optional dequantized descriptor (the faster path must still be selected).
+  TensorWrapper unallocated;
+  nvte_group_requantize(input.data(), output.data(), unallocated.data(), nullptr, 0);
 
   output.tensor->set_rowwise_data(input.rowwise_data.get(), DType::kFloat8E4M3,
                                    data_shape);
   // The data may alias the input even when no rowwise scale output is requested.
-  nvte_grouped_requantize(input.data(), output.data(), nullptr, 0);
+  nvte_group_requantize(input.data(), output.data(), nullptr, nullptr, 0);
 
   auto unrelated_data = test::cuda_alloc(shape_info.total_elements);
   output.tensor->set_rowwise_data(unrelated_data.get(), DType::kFloat8E4M3,
                                    data_shape);
-  EXPECT_THROW(nvte_grouped_requantize(input.data(), output.data(), nullptr, 0),
+  EXPECT_THROW(nvte_group_requantize(input.data(), output.data(), nullptr, nullptr, 0),
                std::runtime_error);
   output.tensor->set_rowwise_data(input.rowwise_data.get(), DType::kFloat8E4M3,
                                    data_shape);
 
   output.tensor->set_rowwise_scale_inv(input.rowwise_scale_inv.get(),
                                         DType::kFloat8E8M0, scale_shape);
-  EXPECT_THROW(nvte_grouped_requantize(input.data(), output.data(), nullptr, 0),
+  EXPECT_THROW(nvte_group_requantize(input.data(), output.data(), nullptr, nullptr, 0),
                std::runtime_error);
 
   output.tensor->set_with_gemm_swizzled_scales(false);
-  nvte_grouped_requantize(input.data(), output.data(), nullptr, 0);
+  nvte_group_requantize(input.data(), output.data(), nullptr, nullptr, 0);
 
   auto unrelated_scales = test::cuda_alloc(shape_info.rowwise_scale_elements);
   output.tensor->set_rowwise_scale_inv(unrelated_scales.get(),
                                         DType::kFloat8E8M0, scale_shape);
-  EXPECT_THROW(nvte_grouped_requantize(input.data(), output.data(), nullptr, 0),
+  EXPECT_THROW(nvte_group_requantize(input.data(), output.data(), nullptr, nullptr, 0),
                std::runtime_error);
   NVTE_CHECK_CUDA(cudaDeviceSynchronize());
 }
@@ -355,7 +357,7 @@ TEST_P(GroupedRequantizeMXFP8TestSuite, MatchesDequantizeThenQuantize) {
 
   // Build a production-like wire tensor: high precision -> grouped rowwise
   // MXFP8 with compact scales. This is the only input representation accepted
-  // by nvte_grouped_requantize.
+  // by nvte_group_requantize.
   auto source = make_grouped_tensor(shape_info, DType::kBFloat16,
                                     NVTE_DELAYED_TENSOR_SCALING,
                                     /*rowwise=*/true, /*columnwise=*/false);
@@ -384,7 +386,7 @@ TEST_P(GroupedRequantizeMXFP8TestSuite, MatchesDequantizeThenQuantize) {
   fill_output_sentinel(actual);
   QuantizationConfigWrapper quant_config;
   quant_config.set_use_fast_math(use_fast_math);
-  nvte_grouped_requantize(input.data(), actual.data(), quant_config, 0);
+  nvte_group_requantize(input.data(), actual.data(), nullptr, quant_config, 0);
 
   // Exact reference. The intermediate precision is part of the requantize
   // contract, so fast_math selects BF16 here and the default path selects FP32.

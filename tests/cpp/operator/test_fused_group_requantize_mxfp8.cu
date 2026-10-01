@@ -6,6 +6,7 @@
 
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <gtest/gtest.h>
 #include <limits>
@@ -145,9 +146,36 @@ TEST_P(FusedGroupRequantizeTestSuite, MatchesUnfusedChainReference) {
 
   QuantizationConfigWrapper fused_config;
   fused_config.set_use_fast_math(use_fast_math);
-  nvte_group_requantize(input_mxfp8.data(), actual.data(), tensor_offsets.data(),
-                                    return_dequantized ? dequantized_out.data() : nullptr,
-                                    fused_config, 0);
+  Tensor first_dims("first_dims", std::vector<size_t>{num_groups}, DType::kInt64);
+  for (size_t g = 0; g < num_groups; ++g) {
+    first_dims.rowwise_cpu_dptr<int64>()[g] = splits[g];
+  }
+  first_dims.from_cpu();
+  GroupedTensorWrapper grouped_input(num_groups, shape, NVTE_MXFP8_1D_SCALING);
+  GroupedTensorWrapper grouped_output(num_groups, shape, NVTE_MXFP8_1D_SCALING);
+  const std::vector<size_t> data_shape{num_rows * hidden_size};
+  const std::vector<size_t> scale_shape{num_rows * hidden_size / 32};
+  grouped_input.set_rowwise_data(input_mxfp8.rowwise_dptr(), input_type, data_shape);
+  grouped_input.set_rowwise_scale_inv(nvte_get_tensor_param(input_mxfp8.data(), kNVTERowwiseScaleInv).data_ptr,
+                                      DType::kFloat8E8M0, scale_shape);
+  grouped_output.set_rowwise_data(input_mxfp8.rowwise_dptr(), input_type, data_shape);
+  grouped_output.set_rowwise_scale_inv(actual_rowwise_scales_param.data_ptr,
+                                       DType::kFloat8E8M0, scale_shape);
+  grouped_output.set_columnwise_data(actual.columnwise_dptr(), DType::kFloat8E4M3, data_shape);
+  grouped_output.set_columnwise_scale_inv(actual_colwise_scales_param.data_ptr,
+                                           DType::kFloat8E8M0, scale_shape);
+  grouped_output.set_with_gemm_swizzled_scales(true);
+  const bool uniform_groups = num_live_rows == num_rows &&
+      std::all_of(splits.begin(), splits.end(), [&](size_t rows) { return rows == splits[0]; });
+  for (auto *tensor : {&grouped_input, &grouped_output}) {
+    if (uniform_groups) continue;
+    tensor->set_first_dims(first_dims.rowwise_dptr(), DType::kInt64,
+                            std::vector<size_t>{num_groups});
+    tensor->set_tensor_offsets(tensor_offsets.rowwise_dptr(), DType::kInt64,
+                                std::vector<size_t>{num_groups + 1});
+  }
+  nvte_group_requantize(grouped_input.data(), grouped_output.data(),
+                       return_dequantized ? dequantized_out.data() : nullptr, fused_config, 0);
 
   // Reference intermediate: the unfused chain materializes the dequantized tensor;
   // fast math rounds it to BF16, the default path keeps FP32.

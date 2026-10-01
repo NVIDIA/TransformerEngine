@@ -184,7 +184,8 @@ __global__ void __launch_bounds__(kThreads)
                                   e8m0_t *const rowwise_scale_inv_swizzled,
                                   e8m0_t *const colwise_scale_inv, bf16 *const dequantized_out,
                                   const int64_t *const tensor_offsets, const int num_groups,
-                                  const int num_cols, const int input_scale_stride) {
+                                  const int num_cols, const int input_scale_stride,
+                                  const int uniform_rows) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   using dispatch::mxfp8::swizzle::gemm_swizzled_scale_idx;
   using TCompute = std::conditional_t<kUseFastMath, bf16, float>;
@@ -203,7 +204,7 @@ __global__ void __launch_bounds__(kThreads)
   // branch is CTA-uniform: live rows are 128-aligned like every group, so the
   // boundary cannot split a 32-row tile.
   const int64_t row_element_base = static_cast<int64_t>(row_base) * num_cols;
-  if (row_element_base >= tensor_offsets[num_groups]) {
+  if (tensor_offsets != nullptr && row_element_base >= tensor_offsets[num_groups]) {
     return;
   }
 
@@ -217,18 +218,23 @@ __global__ void __launch_bounds__(kThreads)
   // groups share an offset. Offsets are in elements (row offset x num_cols),
   // exactly the grouped tensor's cached tensor_offsets.
   if (tid == 0) {
-    int lo = 0;
-    int hi = num_groups - 1;
-    while (lo < hi) {
-      const int mid = (lo + hi) / 2;
-      if (row_element_base < tensor_offsets[mid + 1]) {
-        hi = mid;
-      } else {
-        lo = mid + 1;
+    if (tensor_offsets == nullptr) {
+      group_info[0] = row_base / uniform_rows * uniform_rows;
+      group_info[1] = uniform_rows;
+    } else {
+      int lo = 0;
+      int hi = num_groups - 1;
+      while (lo < hi) {
+        const int mid = (lo + hi) / 2;
+        if (row_element_base < tensor_offsets[mid + 1]) {
+          hi = mid;
+        } else {
+          lo = mid + 1;
+        }
       }
+      group_info[0] = static_cast<int>(tensor_offsets[lo] / num_cols);
+      group_info[1] = static_cast<int>((tensor_offsets[lo + 1] - tensor_offsets[lo]) / num_cols);
     }
-    group_info[0] = static_cast<int>(tensor_offsets[lo] / num_cols);
-    group_info[1] = static_cast<int>((tensor_offsets[lo + 1] - tensor_offsets[lo]) / num_cols);
   }
 
   const int rowwise_scale_tiles_x = num_cols / kTileCols;
@@ -410,12 +416,12 @@ void launch_fused_group_requantize(const Tensor &input, Tensor *output,
           reinterpret_cast<e8m0_t *>(output->scale_inv.dptr),
           reinterpret_cast<e8m0_t *>(output->columnwise_scale_inv.dptr), dequantized_ptr,
           reinterpret_cast<const int64_t *>(tensor_offsets.data.dptr), num_groups, num_cols,
-          input_scale_stride);
+          input_scale_stride, tensor_offsets.data.dptr == nullptr ? num_rows / num_groups : 0);
 }
 
 void fused_group_requantize(const Tensor &input, Tensor *output, const Tensor &tensor_offsets,
                             Tensor *dequantized, const QuantizationConfig *quant_config,
-                            cudaStream_t stream) {
+                            const int num_groups, cudaStream_t stream) {
   checkCuDriverContext(stream);
 
   NVTE_CHECK(is_supported_by_CC_100(),
@@ -444,13 +450,6 @@ void fused_group_requantize(const Tensor &input, Tensor *output, const Tensor &t
              "allocated.");
   NVTE_CHECK(output->scale_inv.dtype == DType::kFloat8E8M0,
              "Output rowwise scaling tensor must have E8M0 type.");
-  NVTE_CHECK(tensor_offsets.has_data(), "tensor_offsets must be allocated.");
-  NVTE_CHECK(tensor_offsets.data.dptr != nullptr, "tensor_offsets data must be allocated.");
-  NVTE_CHECK(tensor_offsets.data.dtype == DType::kInt64, "tensor_offsets must have Int64 type.");
-  NVTE_CHECK(tensor_offsets.data.numel() >= 2, "tensor_offsets must hold num_groups + 1 entries.");
-
-  const int num_groups = static_cast<int>(tensor_offsets.data.numel()) - 1;
-
   const auto [num_rows_size_t, num_cols_size_t] = input.flat_2d_dims();
   const auto [output_rows_size_t, output_cols_size_t] = output->flat_2d_dims();
   constexpr size_t kMaxInt = static_cast<size_t>(std::numeric_limits<int>::max());
@@ -533,20 +532,32 @@ void fused_group_requantize(const Tensor &input, Tensor *output, const Tensor &t
 }
 
 }  // namespace
+
+void fused_group_requantize(const GroupedTensor &input, GroupedTensor *output, Tensor *dequantized,
+                            const QuantizationConfig *quant_config, cudaStream_t stream) {
+  NVTE_CHECK(input.all_same_last_dim(),
+             "Dequantized requantization output requires a common hidden dimension.");
+  NVTE_CHECK(output->with_gemm_swizzled_scales,
+             "Dequantized requantization output requires GEMM-swizzled scales.");
+  NVTE_CHECK(input.num_tensors <= static_cast<size_t>(std::numeric_limits<int>::max()),
+             "The number of groups must fit in int32.");
+  const std::vector<size_t> shape{input.logical_shape.data[0], input.logical_shape.data[1]};
+  if (input.all_same_shape()) {
+    NVTE_CHECK(shape[0] % input.num_tensors == 0 && (shape[0] / input.num_tensors) % 128 == 0,
+               "Uniform groups must have row counts divisible by 128.");
+  }
+  Tensor dense_input, dense_output, offsets;
+  dense_input.scaling_mode = input.scaling_mode;
+  dense_input.data = SimpleTensor(input.data.dptr, shape, input.data.dtype);
+  dense_input.scale_inv = input.scale_inv;
+  dense_output.scaling_mode = output->scaling_mode;
+  dense_output.columnwise_data =
+      SimpleTensor(output->columnwise_data.dptr, shape, output->columnwise_data.dtype);
+  dense_output.scale_inv = output->scale_inv;
+  dense_output.columnwise_scale_inv = output->columnwise_scale_inv;
+  offsets.data = input.tensor_offsets;
+  fused_group_requantize(dense_input, &dense_output, offsets, dequantized, quant_config,
+                         static_cast<int>(input.num_tensors), stream);
+}
 }  // namespace requantize
 }  // namespace transformer_engine
-
-void nvte_group_requantize(const NVTETensor input, NVTETensor output,
-                           const NVTETensor tensor_offsets, NVTETensor dequantized,
-                           const NVTEQuantizationConfig quant_config, cudaStream_t stream) {
-  using namespace transformer_engine;
-  NVTE_API_CALL(nvte_group_requantize);
-
-  const Tensor *input_cu = convertNVTETensorCheck(input);
-  Tensor *output_cu = convertNVTETensorCheck(output);
-  const Tensor *tensor_offsets_cu = convertNVTETensorCheck(tensor_offsets);
-  Tensor *dequantized_cu = dequantized != nullptr ? convertNVTETensor(dequantized) : nullptr;
-  const auto *quant_config_cu = reinterpret_cast<const QuantizationConfig *>(quant_config);
-  requantize::fused_group_requantize(*input_cu, output_cu, *tensor_offsets_cu, dequantized_cu,
-                                     quant_config_cu, stream);
-}
