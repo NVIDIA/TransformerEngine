@@ -22,7 +22,7 @@ namespace cutedsl_backend {
 struct MXFP8RequantConfig {
   DType dtype;
   size_t rows, hidden, groups, uniform_rows;
-  bool swizzled, rowwise_output;
+  bool swizzled, rowwise_output, return_dequantized;
   int sm_arch = cuda::sm_arch();
   int sm_count = cuda::sm_count();
 
@@ -30,8 +30,8 @@ struct MXFP8RequantConfig {
     return "cutedsl_mxfp8_requant_" + std::string(to_string(dtype)) + "_" + std::to_string(rows) +
            "_" + std::to_string(hidden) + "_" + std::to_string(groups) + "_" +
            std::to_string(uniform_rows) + "_" + std::to_string(swizzled) + "_" +
-           std::to_string(rowwise_output) + "_" + std::to_string(sm_arch) + "_" +
-           std::to_string(sm_count);
+           std::to_string(rowwise_output) + "_" + std::to_string(return_dequantized) + "_" +
+           std::to_string(sm_arch) + "_" + std::to_string(sm_count);
   }
 
   bool retrieve_func_from_python(const std::string &name) const {
@@ -40,7 +40,7 @@ struct MXFP8RequantConfig {
     return (*entrypoint)(tvm::ffi::String(name), tvm::ffi::String(to_string(dtype)),
                          static_cast<int64_t>(rows), static_cast<int64_t>(hidden),
                          static_cast<int64_t>(groups), static_cast<int64_t>(uniform_rows), swizzled,
-                         rowwise_output, sm_count)
+                         rowwise_output, return_dequantized, sm_count)
         .try_cast<bool>()
         .value_or(false);
   }
@@ -75,7 +75,7 @@ struct MXFP8RequantConfig {
 };
 
 inline bool mxfp8_requantize_cutedsl(const GroupedTensor &input, GroupedTensor *output,
-                                     bool use_fast_math, cudaStream_t stream) {
+                                     Tensor *dequantized, bool use_fast_math, cudaStream_t stream) {
   using namespace tvm_ffi_bridge;
   if (!TVMFFICentral::getInstance().get_cutedsl_backend_enabled() || !use_fast_math ||
       !input.all_same_last_dim())
@@ -103,7 +103,8 @@ inline bool mxfp8_requantize_cutedsl(const GroupedTensor &input, GroupedTensor *
                                   groups,
                                   input.all_same_shape() ? rows / groups : 0,
                                   output->with_gemm_swizzled_scales,
-                                  rowwise};
+                                  rowwise,
+                                  dequantized != nullptr && dequantized->data.dptr != nullptr};
   auto kernel = config.get_kernel();
   if (!kernel) return false;
 
@@ -114,7 +115,7 @@ inline bool mxfp8_requantize_cutedsl(const GroupedTensor &input, GroupedTensor *
   const SimpleTensor col_sf(output->columnwise_scale_inv.dptr, {rows * hidden / 32},
                             DType::kFloat8E8M0);
   DLTensorWrapper mSrc(src, false, device), mSf(sf, false, device), mDst(dst, false, device),
-      mColSf(col_sf, false, device), mOffsets, mRowSf;
+      mColSf(col_sf, false, device), mOffsets, mRowSf, mDequantized;
   if (!input.all_same_shape()) {
     const SimpleTensor offsets(input.tensor_offsets.dptr, {groups + 1}, DType::kInt64);
     mOffsets = DLTensorWrapper(offsets, false, device);
@@ -123,7 +124,12 @@ inline bool mxfp8_requantize_cutedsl(const GroupedTensor &input, GroupedTensor *
     const SimpleTensor row_sf(output->scale_inv.dptr, {rows * hidden / 32}, DType::kFloat8E8M0);
     mRowSf = DLTensorWrapper(row_sf, false, device);
   }
-  (*kernel)(&mSrc, &mSf, &mOffsets, &mDst, &mRowSf, &mColSf, static_cast<void *>(stream));
+  if (config.return_dequantized) {
+    const SimpleTensor decoded(dequantized->data.dptr, {rows, hidden}, DType::kBFloat16);
+    mDequantized = DLTensorWrapper(decoded, false, device);
+  }
+  (*kernel)(&mSrc, &mSf, &mOffsets, &mDst, &mRowSf, &mColSf, &mDequantized,
+            static_cast<void *>(stream));
   return true;
 }
 

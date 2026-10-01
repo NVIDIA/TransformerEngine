@@ -13,7 +13,8 @@ fwd_glu/glu_mxfp8_col_requant.py.
 
 The input scales use TE's compact rowwise layout. One TMA pipeline loads both
 payload and scales; consumers decode to BF16, compute columnwise scales and
-emit row-major E4M3 payloads. Scale layouts and optional rowwise scale output
+emit row-major E4M3 payloads. Optional BF16 output reuses the decoded registers
+without additional shared storage. Scale layouts and optional rowwise scale output
 follow nvte_group_requantize. No framework is imported by this module.
 """
 
@@ -231,6 +232,7 @@ class GroupedRequantize:
         input_dtype=cutlass.Float8E4M3FN,
         swizzled=True,
         rowwise_output=True,
+        return_dequantized=False,
         uniform_rows=0,
         tile_hidden=None,
         stages=2,
@@ -253,8 +255,14 @@ class GroupedRequantize:
         self.sf_dtype = cutlass.Uint8
         self.swizzled = bool(swizzled)
         self.rowwise_output = bool(rowwise_output and swizzled)
+        self.return_dequantized = bool(return_dequantized)
         self.uniform_rows = int(uniform_rows)
-        self.TILE_HID = tile_hidden or (128 if hidden == 128 else 256)
+        # BF16 stores benefit from spreading sparse workloads across more SMs
+        # when the doubled tile count still fits in one wave.
+        narrow_tile = hidden == 128 or (
+            self.return_dequantized and 2 * (capacity // 128) * (hidden // 256) <= sm_count
+        )
+        self.TILE_HID = tile_hidden or (128 if narrow_tile else 256)
         if hidden % self.TILE_HID:
             self.TILE_HID = 128
         self.ColsPerLane = 4
@@ -302,6 +310,7 @@ class GroupedRequantize:
         dst_data: cute.Tensor,
         dst_row_sf: cute.Tensor,
         dst_col_sf: cute.Tensor,
+        dst_dequantized: cute.Tensor,
         stream: cuda.CUstream,
     ):
         tok = cutlass.const_expr(self.TILE_TOK)
@@ -335,6 +344,7 @@ class GroupedRequantize:
             offsets,
             dst_row_sf,
             dst_col_sf,
+            dst_dequantized,
             load_atom,
             load_tensor,
             store_atom,
@@ -355,6 +365,7 @@ class GroupedRequantize:
         offsets: cute.Tensor,
         dst_row_sf: cute.Tensor,
         dst_col_sf: cute.Tensor,
+        dst_dequantized: cute.Tensor,
         load_atom=None,
         load_tensor=None,
         store_atom=None,
@@ -379,6 +390,9 @@ class GroupedRequantize:
         sf_out = smem.allocate_array(cutlass.Uint8, self.smem_sf_out_bytes, byte_alignment=128)
         data = smem.allocate_array(cutlass.Uint8, stages * tok * width, byte_alignment=128)
         row_sf = None
+        dequantized_dst = cutlass.Int64(0)
+        if cutlass.const_expr(self.return_dequantized):
+            dequantized_dst = dst_dequantized.iterator.toint()
         row_dst = cutlass.Int64(0)
         if cutlass.const_expr(self.rowwise_output):
             row_sf = smem.allocate_array(
@@ -434,6 +448,7 @@ class GroupedRequantize:
                 store_tensor,
                 row_sf_base=row_base,
                 row_dst=row_dst,
+                dequantized_dst=dequantized_dst,
             )
 
     @cute.jit
@@ -502,8 +517,8 @@ class GroupedRequantize:
                 cute.arch.mbarrier_arrive_and_expect_tx(full + stage, Int32(tok * width + sf_bytes))
             cute.arch.sync_warp()
             if cutlass.const_expr(self.hidden >= 512):
-                # TMA scale coordinates must be 16-byte aligned. Two adjacent
-                # 256-column data tiles share the same 16-column scale box.
+                # TMA scale coordinates must be 16-byte aligned. Adjacent
+                # data tiles share the same aligned 16-column scale box.
                 source = cute.domain_offset(
                     (token_tile * tok, (hid_begin // 32) // self.scale_stride * self.scale_stride),
                     scale_tensor,
@@ -600,6 +615,7 @@ class GroupedRequantize:
         tma_tensor_st=None,
         row_sf_base=None,
         row_dst=None,
+        dequantized_dst=None,
     ):
         """Decode/requantize and emit TE layouts with shared BF16 registers."""
         # CuTeDSL traces explicit conjunctions; retain these rather than chained comparisons.
@@ -665,6 +681,7 @@ class GroupedRequantize:
                 data_row0,
                 hid_begin,
                 dst_sf_base,
+                dequantized_dst,
             )
             cute.arch.fence_proxy("async.shared", space="cta")
             cute.arch.barrier(barrier_id=self.ConsumerBarrierId, number_of_threads=CONS_THREADS)
@@ -743,6 +760,7 @@ class GroupedRequantize:
         data_row0,
         hid_begin,
         col_sf_base,
+        dequantized_dst,
     ):
         """The single-pass arithmetic for one lane's share of one tile."""
         W = cutlass.const_expr(self.TILE_HID)
@@ -772,6 +790,30 @@ class GroupedRequantize:
                     d[tt][2 * w + 1] = hi
                     acc[2 * w] = max_xorsign_abs_bf16x2(acc[2 * w], lo)
                     acc[2 * w + 1] = max_xorsign_abs_bf16x2(acc[2 * w + 1], hi)
+                if cutlass.const_expr(self.return_dequantized):
+                    # Reuse decoded BF16x2 registers before FP8 conversion. Each
+                    # lane writes contiguous columns; no shared transpose or
+                    # additional pipeline storage is needed.
+                    decoded = cute.make_rmem_tensor((NPc,), cutlass.Int32)
+                    for k in cutlass.range_constexpr(0, NPc, 1):
+                        decoded[k] = d[tt][k]
+                    row = data_row0 + tb * NB + tt
+                    col = hid_begin + seg * SEGW + ch * 32 * LW + lane_idx * LW
+                    address = Int64(dequantized_dst) + (Int64(row) * self.hidden + col) * 2
+                    cute.copy(
+                        cute.make_copy_atom(
+                            cute.nvgpu.CopyUniversalOp(),
+                            cutlass.Int32,
+                            num_bits_per_copy=LW * 16,
+                        ),
+                        decoded,
+                        cute.make_tensor(
+                            cute.make_ptr(
+                                cutlass.Int32, address, AddressSpace.gmem, assumed_align=LW * 2
+                            ),
+                            cute.make_layout((NPc,)),
+                        ),
+                    )
             raws = [None] * LW
             for k in cutlass.range_constexpr(0, NPc, 1):
                 a = acc[k] & Int32(2147450879)
@@ -879,7 +921,16 @@ class GroupedRequantize:
 
 
 def get_mxfp8_requantization_function(
-    fn_name, dtype, rows, hidden, groups, uniform_rows, swizzled, rowwise_output, sm_count
+    fn_name,
+    dtype,
+    rows,
+    hidden,
+    groups,
+    uniform_rows,
+    swizzled,
+    rowwise_output,
+    return_dequantized,
+    sm_count,
 ):
     """Compile/register one common C API specialization, or request CUDA fallback."""
     if tvm_ffi.get_global_func(fn_name, allow_missing=True) is not None:
@@ -894,6 +945,7 @@ def get_mxfp8_requantization_function(
             uniform_rows=uniform_rows,
             swizzled=swizzled,
             rowwise_output=rowwise_output,
+            return_dequantized=return_dequantized,
             sm_count=sm_count,
         )
 
@@ -915,6 +967,7 @@ def get_mxfp8_requantization_function(
             tensor(cutlass.Float8E4M3FN, (rows, hidden)),
             tensor(cutlass.Float8E8M0FNU, (scales,)) if rowwise_output else None,
             tensor(cutlass.Float8E8M0FNU, (scales,)),
+            tensor(cutlass.BFloat16, (rows, hidden)) if return_dequantized else None,
             cute.runtime.make_fake_stream(),
             options="--enable-tvm-ffi",
         )

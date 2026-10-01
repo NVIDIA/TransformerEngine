@@ -33,10 +33,11 @@ def columnwise_reference(values):
     return quantized.reshape(rows, hidden).view(torch.uint8), (exponent + 127).to(torch.uint8)
 
 
+@pytest.mark.parametrize("return_dequantized", [False, True])
 @pytest.mark.parametrize("hidden", [128, 256, 384, 512, 4096, 7168])
 @pytest.mark.parametrize("input_dtype", [torch.float8_e4m3fn, torch.float8_e5m2])
 @pytest.mark.parametrize("layout", ["compact", "column_only", "both", "uniform"])
-def test_compact_input_contract(hidden, input_dtype, layout):
+def test_compact_input_contract(hidden, input_dtype, layout, return_dequantized):
     """Check both scale layouts, optional output, group boundaries and capacity tails."""
     torch.manual_seed(42)
     rows = 1024
@@ -48,6 +49,7 @@ def test_compact_input_contract(hidden, input_dtype, layout):
         torch.bfloat16
     )
     offsets = torch.tensor([0] + sizes, device="cuda", dtype=torch.int64).cumsum(0) * hidden
+    dequantized = torch.full((rows, hidden), -123, device="cuda", dtype=torch.bfloat16)
     dst = torch.full((rows, hidden), 0xA5, device="cuda", dtype=torch.uint8)
     row_sf = torch.full_like(scales.flatten(), 0xA5)
     col_sf = torch.full_like(row_sf, 0xA5)
@@ -61,6 +63,7 @@ def test_compact_input_contract(hidden, input_dtype, layout):
         input_dtype=dtype,
         swizzled=swizzled,
         rowwise_output=row_output,
+        return_dequantized=return_dequantized,
         uniform_rows=256 if layout == "uniform" else 0,
         sm_count=torch.cuda.get_device_properties(
             torch.cuda.current_device()
@@ -73,6 +76,7 @@ def test_compact_input_contract(hidden, input_dtype, layout):
         dst.view(torch.float8_e4m3fn),
         row_sf if row_output else None,
         col_sf,
+        dequantized if return_dequantized else None,
     )
     args = tuple(
         from_dlpack(tensor, assumed_align=16) if tensor is not None else None for tensor in tensors
@@ -99,13 +103,17 @@ def test_compact_input_contract(hidden, input_dtype, layout):
     if row_output:
         expected_row = swizzle_mxfp8_scale(live, hidden, scales[:live], False).flatten()
         torch.testing.assert_close(row_sf[: expected_row.numel()], expected_row, rtol=0, atol=0)
+    if return_dequantized:
+        torch.testing.assert_close(dequantized[:live], decoded[:live], rtol=0, atol=0)
+    assert (dequantized[live if return_dequantized else 0 :] == -123).all()
     assert (dst[live:] == 0xA5).all()
     assert (col_sf[live * hidden // 32 :] == 0xA5).all()
     assert (row_sf[(live * hidden // 32 if row_output else 0) :] == 0xA5).all()
 
 
+@pytest.mark.parametrize("return_dequantized", [False, True])
 @pytest.mark.parametrize("scale", [0, 1, 127, 254, 255])
-def test_extreme_scale_bf16_decode(scale):
+def test_extreme_scale_bf16_decode(scale, return_dequantized):
     """Document tiny-value BF16 rounding and check saturated/NaN scale behavior."""
     hidden, rows = 128, 128
     data = torch.ones((rows, hidden), device="cuda", dtype=torch.uint8).view(torch.float8_e4m3fn)
@@ -113,16 +121,33 @@ def test_extreme_scale_bf16_decode(scale):
     dst = torch.empty_like(data)
     col_sf = torch.empty(rows * hidden // 32, device="cuda", dtype=torch.uint8)
     kernel = GroupedRequantize(
-        hidden, 1, rows, swizzled=False, rowwise_output=False, uniform_rows=rows
+        hidden,
+        1,
+        rows,
+        swizzled=False,
+        rowwise_output=False,
+        uniform_rows=rows,
+        return_dequantized=return_dequantized,
     )
+    dequantized = torch.empty((rows, hidden), device="cuda", dtype=torch.bfloat16)
     args = tuple(
         from_dlpack(tensor, assumed_align=16) if tensor is not None else None
-        for tensor in (data, sf, None, dst, None, col_sf)
+        for tensor in (
+            data,
+            sf,
+            None,
+            dst,
+            None,
+            col_sf,
+            dequantized if return_dequantized else None,
+        )
     ) + (cuda.CUstream(torch.cuda.current_stream().cuda_stream),)
     cute.compile(kernel, *args)(*args)
     decoded = (data.float() * (float("nan") if scale == 255 else 2.0 ** (scale - 127))).to(
         torch.bfloat16
     )
+    if return_dequantized:
+        torch.testing.assert_close(dequantized, decoded, rtol=0, atol=0, equal_nan=True)
     expected, expected_sf = columnwise_reference(decoded)
     torch.testing.assert_close(dst.view(torch.uint8), expected, rtol=0, atol=0)
     torch.testing.assert_close(col_sf, expected_sf.flatten(), rtol=0, atol=0)
@@ -134,7 +159,8 @@ def test_reject_unsupported_scale_stride():
         GroupedRequantize(640, 1, 128)
 
 
-def test_empty_groups_leave_capacity_untouched():
+@pytest.mark.parametrize("return_dequantized", [False, True])
+def test_empty_groups_leave_capacity_untouched(return_dequantized):
     """A device metadata update can select no live rows without touching outputs."""
     rows, hidden = 256, 512
     data = torch.zeros((rows, hidden), device="cuda", dtype=torch.uint8)
@@ -145,12 +171,14 @@ def test_empty_groups_leave_capacity_untouched():
         torch.full_like(sf.flatten(), 0xA5),
         torch.full_like(sf.flatten(), 0xA5),
     ]
-    tensors = (data, sf, offsets, *outputs)
-    args = tuple(from_dlpack(tensor, assumed_align=16) for tensor in tensors) + (
-        cuda.CUstream(torch.cuda.current_stream().cuda_stream),
-    )
-    kernel = GroupedRequantize(hidden, 3, rows)
+    dequantized = torch.full((rows, hidden), -123, device="cuda", dtype=torch.bfloat16)
+    tensors = (data, sf, offsets, *outputs, dequantized if return_dequantized else None)
+    args = tuple(
+        from_dlpack(tensor, assumed_align=16) if tensor is not None else None for tensor in tensors
+    ) + (cuda.CUstream(torch.cuda.current_stream().cuda_stream),)
+    kernel = GroupedRequantize(hidden, 3, rows, return_dequantized=return_dequantized)
     cute.compile(kernel, *args)(*args)
     torch.cuda.synchronize()
     for output in outputs:
         assert (output == 0xA5).all()
+    assert (dequantized == -123).all()

@@ -693,6 +693,8 @@ def check_prequantized_requantize_versus_reference(
     [
         (1024, 256, [256, 256, 256, 256]),
         (1024, 256, [128, 0, 256, 128]),
+        # CuTeDSL rejects this scale stride; the common API must fall back to CUDA.
+        (1024, 640, [256, 256, 256, 256]),
     ],
 )
 @pytest.mark.parametrize("offsets_only", [False, True])

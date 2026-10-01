@@ -994,9 +994,18 @@ void group_requantize(const GroupedTensor &input, GroupedTensor *output, Tensor 
     shape_rep = ShapeRepresentation::VARYING_BOTH_DIMS;
   }
 
-  if (dequantized != nullptr && dequantized->data.dptr != nullptr) {
-    requantize::fused_group_requantize(input, output, dequantized, quant_config, stream);
-    return;
+  const bool return_dequantized = dequantized != nullptr && dequantized->data.dptr != nullptr;
+  if (return_dequantized) {
+    NVTE_CHECK(input.all_same_last_dim() && output->with_gemm_swizzled_scales &&
+                   output->scale_inv.dptr != nullptr,
+               "Dequantized requantization output requires a common hidden dimension and "
+               "allocated GEMM-swizzled rowwise scales.");
+    NVTE_CHECK(dequantized->data.dtype == DType::kBFloat16 &&
+                   dequantized->data.shape == std::vector<size_t>({input.logical_shape.data[0],
+                                                                   input.logical_shape.data[1]}),
+               "The dequantized output must be BF16 with the input logical shape.");
+    NVTE_CHECK(is_aligned_ptr(dequantized->data.dptr, 16),
+               "The dequantized output pointer must be 16B aligned.");
   }
 
   const size_t first_logical_dim = input.logical_shape.data[0];
@@ -1013,11 +1022,17 @@ void group_requantize(const GroupedTensor &input, GroupedTensor *output, Tensor 
   const bool use_fast_math = quant_config != nullptr && quant_config->use_fast_math;
 
 #ifdef NVTE_WITH_CUTEDSL
-  if (cutedsl_backend::mxfp8_requantize_cutedsl(input, output, use_fast_math, stream)) {
+  if (cutedsl_backend::mxfp8_requantize_cutedsl(input, output, dequantized, use_fast_math,
+                                                stream)) {
     NVTE_CHECK_CUDA(cudaGetLastError());
     return;
   }
 #endif
+
+  if (return_dequantized) {
+    requantize::fused_group_requantize(input, output, dequantized, quant_config, stream);
+    return;
+  }
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
       input.data.dtype, IType,
