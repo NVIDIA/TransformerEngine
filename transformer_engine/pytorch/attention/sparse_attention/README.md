@@ -1,0 +1,123 @@
+# DSv4 model integration
+
+For stateless, unpadded BF16 CSA/HCA layers, `DSv4HybridAttention` owns the
+DSv4 projections, norms, RoPE, compressors, indexer, sink, and grouped output
+projection. Its input and output are both `[batch, sequence, hidden_size]`:
+
+```python
+import torch
+from transformer_engine.pytorch.attention.sparse_attention import DSv4HybridAttention
+
+attention = DSv4HybridAttention(
+    hidden_size=4096, q_lora_rank=1536,
+    layer_type="compressed_sparse_attention", head_dim=512, rope_head_dim=64,
+    sliding_window=128, compression_ratio=4, o_groups=8, o_lora_rank=1024,
+    index_n_heads=32, index_topk=32, max_seqlen=2048,
+    params_dtype=torch.bfloat16,
+)
+output = attention(hidden_states)  # [B, S, 4096] -> [B, S, 4096]
+```
+
+```text
+BSD ── TE query/local-KV projections + norms ───────────────┐
+  ├── TE compressor projections/norm ── cuDNN compression ──┼── cuDNN attention ── TE grouped output ── BSD
+  └── (CSA) TE index projections/norm ── cuDNN compression ── cuDNN selection ──┘
+```
+
+The high-level layer uses 64 heads of width 512 and plain interleaved partial
+RoPE with `rope_theta`; it does not implement other RoPE scaling policies. It
+supports full sequences starting at position zero, equal unpadded lengths within
+a batch, and at least one complete compression window. Sliding-only layers,
+cache/decode, padding, TP/CP, FP8, and the separate indexer auxiliary loss
+remain outside this first pass.
+In CSA, the language-model loss therefore does not train `indexer.q_proj` or the
+index-key/weight slices of `indexer.compressor.fused_proj`: top-k selection has no gradient.
+
+`_dsv4_rope.py` caches FP32 token frequencies (prebuilt when `max_seqlen` is
+provided) and shares window-start slices with the CSA `_Indexer`. The indexer
+owns its projections, index-key compressor, and block selection; neither helper
+changes the cuDNN call contracts.
+
+The default projection layout groups operations that read the same input: one
+TE `Linear` for query-down plus local KV, one for compressor KV plus gates, and
+in CSA one for index-compressor KV plus gates plus per-head weights. Each weight
+is contiguous; output slices feed the existing norms and cuDNN calls. The
+current wrapper validates 64 attention heads. `_fuse_projections=False` retains
+separate Linear calls as a comparison path.
+
+The cuDNN calls used by this layer are:
+
+| Stage | HCA | CSA |
+| --- | --- | --- |
+| Compressor forward/backward | Once | Twice: attention KV and index keys |
+| Fused indexer score + top-k | — | Once |
+| Sparse attention forward/backward | Once | Once |
+
+cuDNN also offers separate dense indexer scoring/top-k and sparse/dense
+score-recompute plus indexer-backward operations. The first two are alternative
+ways to select blocks; the latter operations train the indexer through a
+separate auxiliary loss. This BSD-only API does not expose that loss.
+
+The lower-level `dsv4` calls expose three stages when a model owns its own
+projections, RMSNorm, RoPE, sink, and output projection:
+
+```text
+model projected KV + gates ── dsv4.compress ── model norm/RoPE ── compressed KV
+model index projections ───── dsv4.compress ── model norm/RoPE ── index key
+model index query + key + weights ───────────── dsv4.select_blocks ── IDs (CSA)
+model query + local KV + compressed KV + IDs ─ dsv4.DSv4Attention ── head output
+```
+
+The model calls the same stages for HCA, omitting index compression and selection.
+It passes `indices=None` and `max_compressed_seqlen` to attention. CSA calls
+`compress` twice because its attention memory and index keys use separate
+projections. `select_blocks` returns global IDs into the packed **compressed**
+rows; the attention core maps them into its combined local/compressed KV space.
+
+```python
+from transformer_engine.pytorch.attention.sparse_attention import dsv4
+
+# Model code supplies BF16 projected tensors and applies its own norm/RoPE.
+pooled = dsv4.compress(kv, gates, position_bias.float(), cu, cu_comp,
+                       ratio=ratio, overlap=is_csa, total_comp=total_comp)
+compressed_kv = model.finish_compressed(pooled)
+
+indices = None
+if is_csa:
+    index_pooled = dsv4.compress(index_kv, index_gates,
+                                 index_position_bias.float(), cu, cu_comp,
+                                 ratio=ratio, overlap=True, total_comp=total_comp)
+    index_key = model.finish_index_key(index_pooled)
+    indices = dsv4.select_blocks(
+        index_query, index_key, index_weights, cu, cu_comp,
+        top_k=top_k, ratio=ratio, max_seqlen=max_seqlen,
+        max_compressed_seqlen=max_compressed_seqlen,
+        scale=(index_head_dim * index_n_heads) ** -0.5,
+    )
+
+output = dsv4.DSv4Attention(window_size=window_size, ratio=ratio)(
+    query, local_kv, compressed_kv, sink.float(), cu, cu_comp,
+    indices=indices,
+    max_compressed_seqlen=max_compressed_seqlen if indices is None else None,
+)
+output = model.finish_output(output)
+```
+
+This is a wiring sketch: `model.finish_*` are model-owned transforms, not TE APIs.
+The model must apply its own normalization and RoPE to `query`, `local_kv`,
+`compressed_kv`, `index_query`, and `index_key` before their TE calls. `cu` and
+`cu_comp` are CUDA INT32 packed-sequence prefixes; `total_comp` is the valid
+number of compressed rows. All Q/KV tensors passed to these stages are
+contiguous CUDA BF16. For CSA, pass the raw BF16 `index_weights` projection and
+put both positive index scaling factors in `scale` to preserve the FP32 score
+scale without an extra BF16 weight rounding. The cuDNN compressor pools with
+FP32 intermediates and one BF16 output cast, so keys can differ slightly from
+an eager model that rounds its softmax weights or products to BF16.
+
+The current core supports 64 query heads and head width 512 or 576 on SM100;
+the selector supports 32 or 64 index heads of width 128. It handles
+full-sequence prefill starting at position zero, with exact packed row counts
+in the prefix arrays. A model using segment-local compressed IDs must convert
+them to the global packed IDs expected here. Cache/decode, padded-capacity
+attention rows, context parallelism, and the separate indexer auxiliary loss
+are outside this API.

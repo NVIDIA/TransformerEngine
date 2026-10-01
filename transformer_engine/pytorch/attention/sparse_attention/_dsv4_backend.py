@@ -28,13 +28,12 @@ def _namespace(name):
         ) from exc
 
 
-def _sparse_attention_forward():
+def _dsa_op(name):
     try:
-        return getattr(_namespace("DSA"), "sparse_attention_forward_wrapper")
+        return getattr(_namespace("DSA"), name)
     except AttributeError as exc:
         raise ImportError(
-            "DSv4 attention requires cudnn.DSA.sparse_attention_forward_wrapper "
-            "from nvidia-cudnn-frontend>=1.29.0."
+            f"DSv4 requires cudnn.DSA.{name} from nvidia-cudnn-frontend>=1.29.0."
         ) from exc
 
 
@@ -173,10 +172,11 @@ def select_blocks(
     Returns INT32 [T,top_k] indices into compressed_key's global packed rows;
     -1 denotes an invalid slot. These are NOT IDs into local+compressed KV.
 
-    Selection is discrete. Scale defaults to 1/sqrt(index head dim); apply any
-    separate head-reduction scaling to weights before this call. This helper
-    does not implement the separate indexer auxiliary training loss or promise
-    autograd through the selected IDs.
+    Selection is discrete. Scale defaults to 1/sqrt(index head dim). If the
+    model also scales by 1/sqrt(index heads), fold that positive factor into
+    scale and pass raw BF16 projected weights. Scaling in FP32 then rounding
+    weights to BF16 can change close top-k boundaries. This helper does not
+    implement the separate indexer auxiliary loss or autograd through IDs.
     """
     if query.ndim != 3 or query.shape[1] not in (32, 64) or query.shape[2] != 128:
         raise ValueError("CSA index query must have shape [T,32 or 64,128].")
@@ -191,7 +191,7 @@ def select_blocks(
     _validate_tensors(query, (compressed_key, weights), (), cu_seqlens, cu_seqlens_comp)
     if scale is None:
         scale = query.shape[-1] ** -0.5
-    result = _namespace("DSA").indexer_forward_top_k_wrapper(
+    result = _dsa_op("indexer_forward_top_k_wrapper")(
         query,
         compressed_key.unsqueeze(1),
         weights,
@@ -267,10 +267,10 @@ def _attention_indices(
     return torch.cat((local, compressed), dim=1).to(torch.int32).contiguous()
 
 
-class _Attention(torch.autograd.Function):
+class _SparseAttention(torch.autograd.Function):
     @staticmethod
     def forward(ctx, query, kv, indices, sink, scale):
-        result = _sparse_attention_forward()(
+        result = _dsa_op("sparse_attention_forward_wrapper")(
             query,
             kv,
             indices,
@@ -288,7 +288,7 @@ class _Attention(torch.autograd.Function):
     @once_differentiable
     def backward(ctx, grad_out):
         query, kv, out, lse, sink, indices = ctx.saved_tensors
-        result = _namespace("DSA").sparse_attention_backward_wrapper(
+        result = _dsa_op("sparse_attention_backward_wrapper")(
             query,
             kv,
             out,
@@ -372,7 +372,7 @@ def attention(
         indices,
         max_compressed_seqlen,
     )
-    return _Attention.apply(
+    return _SparseAttention.apply(
         query.contiguous(),
         torch.cat((local_kv, compressed_kv), dim=0),
         selected,

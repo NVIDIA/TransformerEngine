@@ -10,5 +10,6 @@ kernels load on execution. Add future variants as siblings of ``dsv4``.
 
 from . import dsv4
 from .dsv4 import DSv4Attention
+from .dsv4_hybrid_attention import DSv4HybridAttention
 
-__all__ = ["dsv4", "DSv4Attention"]
+__all__ = ["dsv4", "DSv4Attention", "DSv4HybridAttention"]
