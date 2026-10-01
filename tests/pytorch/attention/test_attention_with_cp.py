@@ -779,13 +779,23 @@ def test_cp_with_fused_attention_no_load_balance(cp_pool):
     )
 
 
-def test_cp_with_flash_attention_no_load_balance(cp_pool):
+@pytest.mark.parametrize("head_dim", (128, 256))
+def test_cp_with_flash_attention_no_load_balance(cp_pool, head_dim):
     """Check the supported unpadded FlashAttention path."""
+    if head_dim == 256 and (
+        not (10, 0) <= get_device_compute_capability() < (12, 0)
+        or not fa4_enabled
+        or not FlashAttentionUtils.v4_is_installed
+        or FlashAttentionUtils.fa4_version < FlashAttentionUtils.v4_0_0_beta33
+        or _deterministic
+    ):
+        pytest.skip("D=256 THD all-gather requires SM100/SM110 FA4 b33+ non-deterministic.")
     config = copy.deepcopy(model_configs_flash_attn["cp_2_0"])
+    config.head_dim_qk = config.head_dim_v = head_dim
     config.context_parallel = True
     config.cp_comm_type = "all_gather"
     config.attn_mask_type = "padding_causal"
-    available_backends, _, _ = get_available_attention_backends(
+    available_backends, flash_backend, _ = get_available_attention_backends(
         config,
         qkv_dtype=torch.bfloat16,
         qkv_layout="thd_thd_thd",
@@ -793,12 +803,15 @@ def test_cp_with_flash_attention_no_load_balance(cp_pool):
         is_training=True,
         deterministic=_deterministic,
     )
-    if not available_backends[0]:
+    if head_dim == 256:
+        assert available_backends[0] and flash_backend is not None and flash_backend.major == 4
+    elif not available_backends[0]:
         pytest.skip("FlashAttention is unavailable.")
     _submit(
         cp_pool(2),
         dtype="bf16",
         model="cp_2_0",
+        head_dim=head_dim,
         qkv_format="thd",
         kernel_backend="FlashAttention",
         cp_comm_type="all_gather",
