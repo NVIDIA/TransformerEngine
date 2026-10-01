@@ -37,6 +37,8 @@ from typing import Optional, Tuple
 import torch
 from packaging.version import InvalidVersion, Version as PkgVersion
 
+from transformer_engine.pytorch.attention.dot_product_attention import cudnn_pygraph
+
 __all__ = [
     "is_frost_attention_available",
     "is_frost_attention_supported",
@@ -72,52 +74,22 @@ _HEAD_DIM_MULTIPLE = 8
 _cudnn = None
 _availability: Optional[Tuple[bool, str]] = None
 _PLAN_CACHE: dict = {}
-_HANDLES: dict = {}
+_HANDLES = cudnn_pygraph._handles  # pylint: disable=protected-access
 
 
 def _import_cudnn():
-    """Import cuDNN Frontend with FROST engines enabled, once.
+    """Import cuDNN Frontend with the FROST engines registered.
 
-    The switch is set before the import because the documentation describes the engines as
-    registering at import time. Measured on B200 with cuDNN Frontend 1.29.0, the ordering turns
-    out not to matter: importing cudnn and cudnn.sdpa first with the switch unset, then setting
-    it and building a plan, still selects a FROST engine. Setting it first is kept because it is
-    what the documentation asks for and costs nothing, but nothing here depends on winning that
-    race, and _select_frost_plan verifies the engine by plan name regardless.
+    The switch has to be set before the import because the engines register at import time, and it
+    also ranks FROST ahead of the backend engines, so only this backend asks for it.
+    _select_frost_plan verifies the engine by plan name regardless, rather than trusting the flag.
     """
-    global _cudnn
-    if _cudnn is None:
-        # Must be set before the import: the engines are registered at import time.
-        os.environ.setdefault("CUDNN_FRONTEND_ENABLE_FROST_ENGINES", "1")
-        import cudnn  # pylint: disable=import-outside-toplevel
-        import cudnn.sdpa  # noqa: F401  pylint: disable=import-outside-toplevel,unused-import
-
-        _cudnn = cudnn
-    return _cudnn
+    return cudnn_pygraph.import_cudnn_frontend(enable_frost_engines=True)
 
 
 def _handle_for(device: torch.device):
-    """A cuDNN handle for `device`, bound to PyTorch's current stream on it.
-
-    Without this, cuDNN runs on its default handle's stream while the tensors and workspace are
-    allocated on PyTorch's current stream, and nothing orders the two. That is not hypothetical
-    here: the p2p CP ring issues attention inside `with torch.cuda.stream(cp_stream)`, so on
-    alternating ring steps the kernel and its buffers would be on different streams. Re-binding
-    on every call is what flex_attention.py does, and is required because the same cached plan is
-    executed from different streams across ring steps.
-    """
-    if device.type != "cuda":
-        raise ValueError(f"FrostAttention requires CUDA tensors; got device {device}")
-    cudnn = _import_cudnn()
-    if device.index is None:
-        device = torch.device("cuda", torch.cuda.current_device())
-    with torch.cuda.device(device):
-        handle = _HANDLES.get(device)
-        if handle is None:
-            handle = cudnn.create_handle()
-            _HANDLES[device] = handle
-        cudnn.set_stream(handle=handle, stream=torch.cuda.current_stream(device).cuda_stream)
-    return handle
+    """A cuDNN handle for `device`, bound to PyTorch's current stream on every call."""
+    return cudnn_pygraph.handle_for(device, backend_name="FrostAttention")
 
 
 def _device_from_key(device_key) -> torch.device:
@@ -401,29 +373,25 @@ def _select_frost_plan(graph, token: str, what: str):
     dims the non-FROST plans do not exist, so an unnoticed fallback would either fail obscurely
     or quietly serve a different shape.
     """
-    cudnn = _import_cudnn()
-    graph.create_execution_plans([cudnn.heur_mode.A])
-    names = [graph.get_plan_name_at_index(i) for i in range(graph.get_execution_plan_count())]
-    hits = [i for i, n in enumerate(names) if token in n]
-    if not hits:
-        # Both versions, because either floor can cause this and blaming one misdirects. Looked
-        # up defensively: this is the message explaining a failure, so it must not raise itself.
-        raise RuntimeError(
-            f"no cuDNN FROST {what} engine was offered (looked for {token!r}). Candidate plans:"
-            f" {names[:6]}."
-            f" nvidia-cudnn-frontend={_pkg_version('nvidia-cudnn-frontend', _cudnn)[1] or 'unknown'} (floor"
-            f" {_MIN_CUDNN_FRONTEND}),"
-            f" nvidia-cutlass-dsl={_pkg_version('nvidia-cutlass-dsl')[1] or 'unknown'} (floor"
-            f" {_MIN_CUTLASS_DSL})."
+    # Both versions, because either floor can cause this and blaming one misdirects. Looked up
+    # defensively: this explains a failure, so it must not raise itself.
+    def hint():
+        return (
+            f"nvidia-cudnn-frontend="
+            f"{_pkg_version('nvidia-cudnn-frontend', _cudnn)[1] or 'unknown'}"
+            f" (floor {_MIN_CUDNN_FRONTEND}),"
+            f" nvidia-cutlass-dsl={_pkg_version('nvidia-cutlass-dsl')[1] or 'unknown'}"
+            f" (floor {_MIN_CUTLASS_DSL})."
         )
-    # select_plan before check_support, not after: check_support is scoped to the *selected*
-    # plan, so calling it first would answer for whichever plan the heuristic ranked at index 0.
-    # Pinning also makes build_plans strict -- a decline raises instead of walking on to a
-    # non-FROST plan, which is the fallback this selection exists to prevent.
-    graph.select_plan(hits[0])
-    graph.check_support()
-    graph.build_plans()
-    return names[hits[0]]
+
+    cudnn = _import_cudnn()
+    _, name = cudnn_pygraph.finalize_plans(
+        graph,
+        heuristics=[cudnn.heur_mode.A],
+        require_plan_token=token,
+        not_found_hint=hint,
+    )
+    return name
 
 
 def _build_fwd(key) -> dict:
@@ -432,14 +400,10 @@ def _build_fwd(key) -> dict:
     # deterministic is unused here: it selects a backward algorithm. Callers pass False for the
     # forward so the two never split the forward cache.
     *_device, b, hq, hkv, sq, skv, d, dtype, mask, scale, qs, ks, _deterministic = key
-    io_dt = _cudnn_dtype(dtype)
     shq, shkv = [b, hq, sq, d], [b, hkv, skv, d]
 
-    graph = cudnn.pygraph(
-        io_data_type=io_dt,
-        intermediate_data_type=cudnn.data_type.FLOAT,
-        compute_data_type=cudnn.data_type.FLOAT,
-        handle=_handle_for(_device_from_key(_device)),
+    graph = cudnn_pygraph.build_pygraph(
+        dtype, _device_from_key(_device), backend_name="FrostAttention"
     )
     tq = graph.tensor(name="q", dim=shq, stride=list(qs))
     tk = graph.tensor(name="k", dim=shkv, stride=list(ks))
@@ -475,11 +439,8 @@ def _build_bwd(key) -> dict:
     io_dt = _cudnn_dtype(dtype)
     shq, shkv = [b, hq, sq, d], [b, hkv, skv, d]
 
-    graph = cudnn.pygraph(
-        io_data_type=io_dt,
-        intermediate_data_type=cudnn.data_type.FLOAT,
-        compute_data_type=cudnn.data_type.FLOAT,
-        handle=_handle_for(_device_from_key(_device)),
+    graph = cudnn_pygraph.build_pygraph(
+        dtype, _device_from_key(_device), backend_name="FrostAttention"
     )
     handles = {}
     # o and dO share q's layout; k, v and their grads share k's.
