@@ -7,14 +7,13 @@
 MoE FFN is a TE ``Sequential`` of three fusible ops — ``GroupedLinear``
 (gate_up), ``ScaledSwiGLU(glu_interleave_size=32)``, ``GroupedLinear``
 (down) — that the OperationFuser collapses into the fused
-``ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8`` and backward kernels under
-MXFP8. HF gate (``w1``) and up (``w3``) weights are row-interleaved in
+``GroupedMLP_CuTeGEMMGLU`` forward and backward kernels under MXFP8.
+HF gate (``w1``) and up (``w3``) weights are row-interleaved in
 blocks of 32 to match the GLU interleaved layout that fused kernel reads.
 
-Supported grouped-MLP sequences are fused automatically.
-``utils._enable_fused_mxfp8_grouped_mlp()`` provides legacy SM-version /
-cudnn-frontend signature compatibility patches. Requires
-``nvidia-cudnn-frontend >= 1.23.0`` and SM>=10 (Blackwell B100/B200/B300+).
+This example targets the current TE source tree. Supported grouped-MLP
+sequences are fused automatically when the GPU, recipe, and installed
+dependencies support it.
 """
 
 from __future__ import annotations
@@ -163,7 +162,7 @@ class TEMixtralMXFP8SparseMoeBlock(nn.Module):
             device=device,
         )
         # Wrap as TE Sequential to enable forward/backward op fusion
-        # (ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8 / dswiglu).
+        # (GroupedMLP_CuTeGEMMGLU).
         object.__setattr__(
             self,
             "_experts_ffn_op",

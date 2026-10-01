@@ -1282,40 +1282,32 @@ class TestMoeEpSequential(_EpTestCase):
             if recipe is not None
             else nullcontext()
         )
-        previous_single_param = os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM")
-        os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"] = "1"
-        try:
-            with init_ctx:
-                fc1 = te_ops.GroupedLinear(
-                    NUM_LOCAL_EXPERTS,
-                    HIDDEN_DIM,
-                    2 * 256,
-                    bias=False,
-                    device=self.cfg.device,
-                    dtype=torch.bfloat16,
-                    single_grouped_weight=True,
-                    accumulate_into_main_grad=accumulate_into_main_grad,
-                    delay_wgrad_compute=delay_wgrad_compute,
-                )
-                activation = te_ops.ScaledSwiGLU(
-                    glu_interleave_size=glu_interleave_size,
-                )
-                fc2 = te_ops.GroupedLinear(
-                    NUM_LOCAL_EXPERTS,
-                    256,
-                    HIDDEN_DIM,
-                    bias=False,
-                    device=self.cfg.device,
-                    dtype=torch.bfloat16,
-                    single_grouped_weight=True,
-                    accumulate_into_main_grad=accumulate_into_main_grad,
-                    delay_wgrad_compute=delay_wgrad_compute,
-                )
-        finally:
-            if previous_single_param is None:
-                del os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"]
-            else:
-                os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"] = previous_single_param
+        with init_ctx:
+            fc1 = te_ops.GroupedLinear(
+                NUM_LOCAL_EXPERTS,
+                HIDDEN_DIM,
+                2 * 256,
+                bias=False,
+                device=self.cfg.device,
+                dtype=torch.bfloat16,
+                single_grouped_weight=True,
+                accumulate_into_main_grad=accumulate_into_main_grad,
+                delay_wgrad_compute=delay_wgrad_compute,
+            )
+            activation = te_ops.ScaledSwiGLU(
+                glu_interleave_size=glu_interleave_size,
+            )
+            fc2 = te_ops.GroupedLinear(
+                NUM_LOCAL_EXPERTS,
+                256,
+                HIDDEN_DIM,
+                bias=False,
+                device=self.cfg.device,
+                dtype=torch.bfloat16,
+                single_grouped_weight=True,
+                accumulate_into_main_grad=accumulate_into_main_grad,
+                delay_wgrad_compute=delay_wgrad_compute,
+            )
         combine = te_ops.MoeCombine(config, buffer)
         dispatch.set_extra_output_channel(0, "tokens_per_expert", output_to_caller=False)
         dispatch.set_extra_output_channel(1, "routing_weights", output_to_caller=False)

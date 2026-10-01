@@ -134,35 +134,6 @@ Runtime Environment Variables
 
 These environment variables control the behavior of Transformer Engine during execution.
 
-Deprecated Grouped Linear and MLP Controls
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-.. envvar:: NVTE_GROUPED_LINEAR_SINGLE_PARAM
-
-   :Status: **DEPRECATED**. No longer read.
-   :Historical default: ``0`` (before deprecation).
-   :Description: Previously permitted grouped-linear weights and biases to use
-                 a single grouped parameter. This variable is now ignored,
-                 including when set to ``0`` or ``1``.
-   :Migration: Remove this variable from launch scripts. Select the parameter
-               layout with the ``single_grouped_weight`` and
-               ``single_grouped_bias`` constructor arguments; both still
-               default to ``False``.
-
-.. envvar:: NVTE_CUTEDSL_FUSED_GROUPED_MLP
-
-   :Status: **DEPRECATED**. No longer read.
-   :Historical default: ``0`` (before deprecation).
-   :Description: Previously enabled CuTeDSL grouped MLP fusion in the PyTorch
-                 operation fuser. This variable is now ignored, including when
-                 set to ``0`` or ``1``; setting it to ``0`` no longer disables
-                 fusion.
-   :Migration: Remove this variable from launch scripts. The operation fuser
-               automatically selects grouped MLP fusion for compatible
-               operation sequences when the GPU, recipe, and installed
-               dependencies support it. No environment variable needs to be
-               set before importing TE to enable this fusion.
-
 General
 ^^^^^^^
 
