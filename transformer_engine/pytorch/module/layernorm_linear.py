@@ -250,11 +250,6 @@ class _LayerNormLinear(torch.autograd.Function):
             and not custom  # TODO(negvet): and not FP8GlobalStateManager.get_fp8_recipe().custom()
             and not hybrid
             and not identity
-            # The fused normalization path owns its cast launch and cannot
-            # partition it across green contexts. In the all-casts experiment,
-            # materialize BF16 norm output and route the following standalone
-            # MXFP8 cast through the VMM localization path instead.
-            and os.getenv("NVTE_MXFP8_VMM_LOCALIZE_ALL_CASTS", "0") != "1"
         )
 
         # Apply normalization
