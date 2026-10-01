@@ -408,8 +408,6 @@ def _build_fwd(key) -> dict:
     tlse.set_output(True).set_dim([b, hq, sq, 1]).set_stride([hq * sq, sq, 1, 1]).set_data_type(
         cudnn.data_type.FLOAT
     )
-    graph.validate()
-    graph.build_operation_graph()
     plan = _select_frost_plan(graph, _FROST_FWD_PLAN_TOKEN, "forward")
     return {
         "graph": graph,
@@ -459,8 +457,6 @@ def _build_bwd(key) -> dict:
     )
     for tensor, stride in ((tdq, qs), (tdk, ks), (tdv, ks)):
         tensor.set_output(True).set_data_type(io_dt).set_stride(list(stride))
-    graph.validate()
-    graph.build_operation_graph()
     plan = _select_frost_plan(graph, _FROST_BWD_PLAN_TOKEN, "backward")
     handles["dq"], handles["dk"], handles["dv"] = tdq, tdk, tdv
     return {
