@@ -841,6 +841,19 @@ def test_frost_switch_does_not_change_what_flex_computes():
     except ImportError:
         pytest.skip("cuDNN frontend Python package is required for score_mod attention.")
 
+    # Without this the test is vacuous nearly everywhere: where the FROST engines are absent or
+    # decline on arch, both runs get a backend plan and agree no matter what flex does. The
+    # engines themselves are found lazily at planning time, so the switch works whenever it is
+    # set, but they still have to exist.
+    from transformer_engine.pytorch.attention.dot_product_attention.frost_attention import (
+        is_frost_attention_available,
+    )
+
+    frost_ok, frost_reason = is_frost_attention_available()
+    if not frost_ok:
+        pytest.skip("the FROST engines must be reachable for this to test anything: %s"
+                    % frost_reason)
+
     env = "CUDNN_FRONTEND_ENABLE_FROST_ENGINES"
     saved = os.environ.get(env)
     torch.manual_seed(0)
