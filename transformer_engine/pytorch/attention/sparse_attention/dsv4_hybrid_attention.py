@@ -85,7 +85,7 @@ class DSv4HybridAttention(torch.nn.Module):
                 "CSA requires 32 or 64 index heads, positive top-k, and RoPE width <= 128."
             )
 
-        kw = dict(bias=False, device=device, params_dtype=params_dtype)
+        kw = {"bias": False, "device": device, "params_dtype": params_dtype}
         if _fuse_projections:
             # Query-down and local-KV projections read the same hidden states.
             # Keep slices explicit below while one contiguous weight feeds the GEMM.
@@ -153,6 +153,7 @@ class DSv4HybridAttention(torch.nn.Module):
         self.is_csa = is_csa
 
     def forward(self, hidden_states: torch.Tensor, *, return_indexer_context: bool = False):
+        """Run BSD-to-BSD attention and optionally expose the CSA loss context."""
         if hidden_states.ndim != 3 or hidden_states.shape[-1] != self.hidden_size:
             raise ValueError("hidden_states must have shape [batch, sequence, hidden_size].")
         if return_indexer_context and not self.is_csa:
@@ -195,6 +196,7 @@ class DSv4HybridAttention(torch.nn.Module):
         compressed_kv = compressed_kv.reshape(batch * n_comp, self.head_dim).contiguous()
 
         indices = None
+        index_q = index_k = index_w = None
         if self.is_csa:
             # Megatron trains this tower with a separate loss, without sending
             # its gradients into the shared hidden/query projections.

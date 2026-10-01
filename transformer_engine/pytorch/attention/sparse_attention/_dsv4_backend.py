@@ -70,6 +70,7 @@ def _validate_tensors(reference, bf16, fp32, cu_seqlens, cu_seqlens_comp):
 class _Compress(torch.autograd.Function):
     @staticmethod
     def forward(ctx, kv, score, ape, cu_seqlens, cu_seqlens_comp, ratio, overlap, total_comp):
+        """Run cuDNN compression and save its backward inputs."""
         coff = 2 if overlap else 1
         if kv.ndim != 2 or kv.shape[-1] % coff:
             raise ValueError("kv must have shape [tokens, coff * head_dim].")
@@ -92,6 +93,7 @@ class _Compress(torch.autograd.Function):
     @staticmethod
     @once_differentiable
     def backward(ctx, grad_out):
+        """Propagate gradients through cuDNN compression."""
         ratio, head_dim, coff = ctx.config
         # cuDNN owns scratch allocation and dAPE zeroing. Autograd may supply
         # a strided/expanded gradient, while this kernel requires contiguous data.
@@ -306,7 +308,6 @@ def dense_indexer_loss_backward(
 
 def _attention_indices(
     query: torch.Tensor,
-    compressed_kv: torch.Tensor,
     cu_seqlens: torch.Tensor,
     cu_seqlens_comp: torch.Tensor,
     window_size: int,
@@ -365,6 +366,7 @@ def _attention_indices(
 class _SparseAttention(torch.autograd.Function):
     @staticmethod
     def forward(ctx, query, kv, indices, sink, scale):
+        """Run cuDNN sparse prefill and save its backward inputs."""
         result = _dsa_op("sparse_attention_forward_wrapper")(
             query,
             kv,
@@ -382,6 +384,7 @@ class _SparseAttention(torch.autograd.Function):
     @staticmethod
     @once_differentiable
     def backward(ctx, grad_out):
+        """Propagate output gradients through cuDNN sparse attention."""
         query, kv, out, lse, sink, indices = ctx.saved_tensors
         result = _dsa_op("sparse_attention_backward_wrapper")(
             query,
@@ -454,7 +457,6 @@ def attention(
         scale = query.shape[-1] ** -0.5
     selected = _attention_indices(
         query,
-        compressed_kv,
         cu_seqlens,
         cu_seqlens_comp,
         window_size,

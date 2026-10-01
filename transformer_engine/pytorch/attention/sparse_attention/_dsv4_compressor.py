@@ -29,7 +29,7 @@ class _Compressor(torch.nn.Module):
     ):
         super().__init__()
         projected = width * (2 if overlap else 1)
-        kw = dict(bias=False, device=device, params_dtype=params_dtype)
+        kw = {"bias": False, "device": device, "params_dtype": params_dtype}
         if fused:
             # Fuse the KV, gate, and optional index-weight projections of x.
             # Keep one contiguous weight for the shared projection call.
@@ -45,6 +45,7 @@ class _Compressor(torch.nn.Module):
         self.projected, self.weight_width = projected, weight_width
 
     def forward(self, x, cu_seqlens, cu_seqlens_comp):
+        """Project and compress KV rows, returning optional fused index weights."""
         if hasattr(self, "fused_proj"):
             projected = self.fused_proj(x)
             widths = (

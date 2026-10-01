@@ -39,6 +39,7 @@ class _DSv4RotaryEmbedding(torch.nn.Module):
         return self
 
     def forward(self, seq, device):
+        """Return cached token and compressed-window frequency pairs."""
         if self.cos is None or self.cos.shape[1] < seq:
             (self.cos, self.sin), _ = rotary_embeddings(
                 seq, self.ratio, self.width, self.theta, device

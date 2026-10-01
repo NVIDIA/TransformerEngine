@@ -42,7 +42,7 @@ class _Indexer(torch.nn.Module):
             fused=fused,
             weight_width=n_heads if fused else 0,
         )
-        kw = dict(bias=False, device=device, params_dtype=params_dtype)
+        kw = {"bias": False, "device": device, "params_dtype": params_dtype}
         self.q_proj = Linear(q_lora_rank, n_heads * head_dim, **kw)
         if not fused:
             self.weights_proj = Linear(hidden_size, n_heads, **kw)
@@ -60,6 +60,7 @@ class _Indexer(torch.nn.Module):
         *,
         return_context=False,
     ):
+        """Select compressed rows and optionally expose live tensors for the indexer loss."""
         batch, seq, _ = hidden_states.shape
         n_comp = seq // self.ratio
         index_compressed = self.compressor(hidden_states, cu, cu_comp)
