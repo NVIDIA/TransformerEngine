@@ -639,7 +639,8 @@ __device__ __forceinline__ void quantize_columnwise_rht_stage(
       for (int i = 0; i < SCALE_DIM; ++i) {
         row_amax = fmaxf(row_amax, fabsf(static_cast<float>(row[i])));
       }
-      const ScaleType scale = core::compute_decoding_scaling_factor<ScaleType>(row_amax, S_enc_colwise);
+      const ScaleType scale =
+          core::compute_decoding_scaling_factor<ScaleType>(row_amax, S_enc_colwise);
       const float scale_inverse = fminf(1.0f / (static_cast<float>(scale) * S_dec_colwise),
                                         detail::TypeExtrema<float>::max);
       const float2 scale_inverse_2x{scale_inverse, scale_inverse};
@@ -2041,8 +2042,7 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
   TRANSFORMER_ENGINE_NVFP4_SCALE_TYPE_SWITCH(
       scale_dtype, ScaleType,
       quantize_transpose_impl<ScaleType, use_2d_quantization, apply_columnwise_rht>(
-        input, noop, output, quant_config, stream, nullptr);
-  )
+          input, noop, output, quant_config, stream, nullptr);)
 #else
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
 #endif  // FP4_TYPE_SUPPORTED
