@@ -222,6 +222,7 @@ class GroupedLinearBwdArgs:
 
     m_splits: Optional[List[int]] = None
     num_gemms: int = 0
+    num_bias_args: int = 0
     weights_shape_1: int = 0
 
     use_bias: bool = False
@@ -253,7 +254,7 @@ class GroupedLinearBwdArgs:
         self.inputmats = saved[:n]
         self.weights_fp8 = saved[n : 2 * n]
         self.saved_weights = saved[2 * n : 3 * n]
-        self.biases = saved[3 * n : 4 * n]
+        self.biases = saved[3 * n : 3 * n + self.num_bias_args]
 
 
 def _grouped_linear_configure_quantizers(args: GroupedLinearFwdArgs, weights) -> None:
@@ -448,6 +449,7 @@ def _grouped_linear_setup_ctx(
 
     bwd_args.m_splits = fwd_args.m_splits
     bwd_args.num_gemms = num_gemms
+    bwd_args.num_bias_args = len(fwd_args.biases)
     bwd_args.weights_shape_1 = fwd_args.inp.shape[-1]
 
     bwd_args.use_bias = fwd_args.use_bias
@@ -730,7 +732,7 @@ def _grouped_linear_backward_impl(
     if not args.use_bias or (
         args.wgrad_store is not None and args.wgrad_store.delay_wgrad_compute() and not args.fp8
     ):
-        grad_biases = [None] * num_gemms
+        grad_biases = [None] * args.num_bias_args
 
     dgrad_out = None
     if args.requires_dgrad:
@@ -756,6 +758,7 @@ class GroupedLinearGraphSafeBwdArgs:
     grad_output_quantizers: List[Quantizer] = None
     is_dist_weight: bool = False
     num_gemms: int = 0
+    num_bias_args: int = 0
     in_features: int = 0
     out_features: int = 0
     activation_dtype: Optional[torch.dtype] = None
@@ -808,7 +811,6 @@ def _grouped_linear_graph_safe_forward(args: GroupedLinearFwdArgs) -> Tuple[Any,
     is_dist_weight = is_distributed_weight(weights[0])
     if is_dist_weight:
         weights = materialize_weight_for_forward(weights)
-    _grouped_linear_configure_quantizers(args, weights)
     weight_quantizers = args.weight_quantizers
     biases = args.biases
     out = args.out
@@ -847,7 +849,6 @@ def _grouped_linear_graph_safe_forward(args: GroupedLinearFwdArgs) -> Tuple[Any,
             rowwise=True,
             columnwise=(is_grad_enabled and weight_requires_grad and not save_original_input),
         )
-        input_quantizer.optimize_for_gemm = True
         grouped_x = tex.group_quantize(
             x,
             input_quantizer,
@@ -865,7 +866,9 @@ def _grouped_linear_graph_safe_forward(args: GroupedLinearFwdArgs) -> Tuple[Any,
             dtype=activation_dtype,
         )
 
-    columnwise_usage = is_grad_enabled and args.input_requires_grad
+    columnwise_usage = (is_grad_enabled and args.input_requires_grad) or (
+        is_fp8_activation_recompute_enabled() and not in_fp8_activation_recompute_phase()
+    )
     weights_for_gemm, new_workspaces = _GroupedLinear._prepare_weights_for_grouped_tensor_gemm(
         weights,
         weight_quantizers,
@@ -967,6 +970,7 @@ def _grouped_linear_graph_safe_setup(
     bwd_args.grad_output_quantizers = fwd_args.grad_output_quantizers
     bwd_args.m_splits_tensor = fwd_args.m_splits_tensor
     bwd_args.num_gemms = fwd_args.num_gemms
+    bwd_args.num_bias_args = len(fwd_args.biases)
     bwd_args.activation_dtype = fwd_args.activation_dtype
     bwd_args.fp8 = fwd_args.fp8
     bwd_args.use_bias = fwd_args.use_bias
@@ -1078,7 +1082,6 @@ def _grouped_linear_graph_safe_backward(
             rowwise=args.requires_dgrad,
             columnwise=args.weights_requires_grad,
         )
-        grad_output_quantizer.optimize_for_gemm = True
         # The grouped FP8 block-scaling bgrad kernel computes dbias in the rowwise
         # pass, so the fusion needs rowwise output (i.e. dgrad required).
         fuse_bgrad = isinstance(grad_output_quantizer, MXFP8Quantizer) or (
@@ -1118,8 +1121,7 @@ def _grouped_linear_graph_safe_backward(
         else:
             grad_bias_args = [dbias_packed[i].to(dtype=args.activation_dtype) for i in range(N)]
     else:
-        num_bias_args = 1 if args.single_grouped_bias else N
-        grad_bias_args = [None] * num_bias_args
+        grad_bias_args = [None] * args.num_bias_args
 
     dgrad = None
     if args.requires_dgrad:
@@ -1226,7 +1228,7 @@ def _grouped_linear_graph_safe_backward(
                 use_split_accumulator=wgrad_use_split_accumulator,
                 accumulate=accumulate,
             )
-            return None, [None] * N, None
+            return None, (), None
 
         if args.wgrad_store is not None and args.wgrad_store.delay_wgrad_compute():
             args.wgrad_store.put([grouped_x, grouped_dy, wgrad_output], grouped_gemm_wgrad)
@@ -1354,6 +1356,9 @@ class _GroupedLinear(torch.autograd.Function):
                     raise RuntimeError(
                         "Quantized single grouped weights require quantized grouped GEMM compute."
                     )
+                # GroupedTensor is not QuantizedTensorStorage. Its quantizer may be
+                # shared with the module, so train/eval/recompute must still retarget it.
+                weight.quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
                 return weight, new_workspaces
 
             if not with_quantized_compute:
@@ -1433,7 +1438,11 @@ class _GroupedLinear(torch.autograd.Function):
 
         update_ws = is_first_microbatch is None or is_first_microbatch
         for idx, weight in enumerate(weights):
-            weight_quantizer = weight_quantizers[idx]
+            weight_quantizer = (
+                weight._quantizer
+                if isinstance(weight, QuantizedTensorStorage)
+                else weight_quantizers[idx]
+            )
             weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
             weight_fp8, new_workspaces[idx] = quantize_weight(
                 tensor=weight,
@@ -1530,7 +1539,7 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.inp_shape = fwd_args.inp.shape
             ctx.backward_objects = bwd_args
             if fwd_args.fp8 and requires_grad(
-                fwd_args.inp, fwd_args.weights[0], fwd_args.biases[0]
+                fwd_args.inp, fwd_args.weights[0], fwd_args.biases[0] if fwd_args.biases else None
             ):
                 bwd_args.reduce_and_update_bwd_fp8_tensors = (
                     FP8GlobalStateManager.is_first_fp8_module()
@@ -1568,7 +1577,9 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.save_for_backward(*tensors_to_save)
             ctx.tensor_objects = tensor_objects
             ctx.backward_objects = bwd_args
-            if fwd_args.fp8 and requires_grad(inp, fwd_args.weights[0], fwd_args.biases[0]):
+            if fwd_args.fp8 and requires_grad(
+                inp, fwd_args.weights[0], fwd_args.biases[0] if fwd_args.biases else None
+            ):
                 bwd_args.reduce_and_update_bwd_fp8_tensors = (
                     FP8GlobalStateManager.is_first_fp8_module()
                 )
@@ -2282,11 +2293,10 @@ class GroupedLinear(TransformerEngineBaseModule):
                 f"does not match number of GEMMs ({num_gemms})."
             )
 
-        if FP8GlobalStateManager.fp8_graph_capturing():
-            skip_fp8_weight_update = (
-                FP8GlobalStateManager.quantization_state.skip_fp8_weight_update_tensor
-            )
-        else:
+        skip_fp8_weight_update = (
+            FP8GlobalStateManager.quantization_state.skip_fp8_weight_update_tensor
+        )
+        if skip_fp8_weight_update is not None and not FP8GlobalStateManager.fp8_graph_capturing():
             skip_fp8_weight_update = None
         if skip_fp8_weight_update is not None:
             is_first_microbatch = False
@@ -2298,21 +2308,35 @@ class GroupedLinear(TransformerEngineBaseModule):
 
         try:
             weight_tensors = self._get_weight_tensors()
-            bias_tensors = self._get_bias_tensors()
+            bias_tensors = self._get_bias_tensors() if self.apply_bias else []
             use_grouped_bias = self.use_bias and self.single_grouped_bias
 
-            quantizers = self._get_quantizers() if not debug else self._get_debug_quantizers()
-
+            quantizers = None
             if debug:
+                quantizers = self._get_debug_quantizers()
                 if self.no_debug_features_active(list(chain(*quantizers))):
                     debug = False
-                    quantizers = self._get_quantizers()
+                    quantizers = None
             if debug and (self.single_grouped_weight or self.single_grouped_bias):
                 raise RuntimeError(
                     "TE debug features do not support single grouped parameters. DebugQuantizer "
                     "uses the split-quantize path, which only supports discrete parameters. "
                     "Disable single_grouped_weight and single_grouped_bias, or disable TE debug "
                     "features for this GroupedLinear."
+                )
+
+            cpu_offloading = is_cpu_offload_enabled()
+            # Normal module execution does not quantize outputs. Debug supplies per-expert
+            # output quantizers and must retain the full split-path preparation.
+            output_quantizers = quantizers[2] if quantizers is not None else ()
+            grouped_tensor_supported = self._grouped_tensor_path_supported(
+                debug, cpu_offloading, output_quantizers
+            )
+            if quantizers is None:
+                quantizers = (
+                    self._get_grouped_runtime_quantizers()
+                    if grouped_tensor_supported
+                    else self._get_quantizers()
                 )
 
             (
@@ -2383,42 +2407,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                         )
                         save_original_input = False
 
-            cpu_offloading = is_cpu_offload_enabled()
-            use_grouped_tensor_path = False
-            if self.use_grouped_tensor and not (
-                self.fp8_calibration
-                or debug
-                or cpu_offloading
-                or any(q is not None for q in output_quantizers)
-            ):
-                if (
-                    self.fp8
-                    and _recipe.float8_block_scaling()
-                    and (10, 0) <= get_device_compute_capability() <= (11, 0)
-                ):
-                    raise RuntimeError(
-                        "use_grouped_tensor=True does not support the FP8 block-scaling recipe on"
-                        " Blackwell GPUs: the native grouped FP8 block-scaling path is Hopper-only."
-                        " Set use_grouped_tensor=False, or unset"
-                        " NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM if it enabled this path, to"
-                        " use the MXFP8-emulated path on Blackwell."
-                    )
-                use_grouped_tensor_path = is_module_grouped_tensor_path_supported(
-                    _recipe,
-                    self.activation_dtype,
-                )
-            if (
-                self.use_grouped_tensor
-                and not use_grouped_tensor_path
-                and (self.single_grouped_weight or use_grouped_bias)
-            ):
-                raise RuntimeError(
-                    "Single grouped parameters require the native grouped-tensor path, but the"
-                    " active device, cuBLASLt version, quantization recipe, or GroupedLinear"
-                    " feature configuration does not support it. Disable single_grouped_weight and"
-                    " single_grouped_bias to allow the split-quantize fallback."
-                )
-            if use_grouped_tensor_path:
+            if grouped_tensor_supported:
                 if m_splits.device.type != "cuda":
                     raise ValueError(
                         "The native grouped_tensor path requires CUDA m_splits. Pass a CUDA int64 "
@@ -2459,7 +2448,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                 is_first_microbatch=is_first_microbatch,
                 cache_weight=cache_weight,
                 # fused GroupedTensor path
-                use_grouped_tensor_path=use_grouped_tensor_path,
+                use_grouped_tensor_path=grouped_tensor_supported,
                 single_grouped_weight=self.single_grouped_weight,
                 single_grouped_bias=use_grouped_bias,
                 # misc
@@ -2490,6 +2479,9 @@ class GroupedLinear(TransformerEngineBaseModule):
             self.end_forward()
 
         if self.return_bias:
+            # Returned biases have their own autograd edge in the caller. Even bias=False
+            # retains the legacy list of empty tensors, prepared only when requested.
+            bias_tensors = self._get_bias_tensors()
             if use_grouped_bias:
                 return out, bias_tensors[0]
             return out, [cast_if_needed(b, self.activation_dtype) for b in bias_tensors]
@@ -2516,10 +2508,12 @@ class GroupedLinear(TransformerEngineBaseModule):
                 else:
                     for i in range(self.num_gemms):
                         weight_params[i].grad = wgrad_output[i].to(weight_params[i].dtype)
-            has_grad_biases = [
-                grad_bias is not None and grad_bias.numel() != 0 for grad_bias in grad_biases_
-            ]
-            if self.use_bias and any(has_grad_biases):
+            has_grad_biases = (
+                [grad_bias is not None and grad_bias.numel() != 0 for grad_bias in grad_biases_]
+                if self.use_bias
+                else ()
+            )
+            if any(has_grad_biases):
                 if self.use_grouped_tensor:
                     raise RuntimeError(
                         "GroupedLinear(use_grouped_tensor=True) fell back to the split-quantize "
@@ -2609,6 +2603,75 @@ class GroupedLinear(TransformerEngineBaseModule):
         if grouped_bias is not None:
             return [grouped_bias]
         return [getattr(self, f"bias{i}") for i in range(self.num_gemms)]
+
+    def _grouped_tensor_path_supported(self, debug, cpu_offloading, output_quantizers):
+        """Resolve the actual path after prepare_forward installs the active recipe."""
+        recipe = FP8GlobalStateManager.get_fp8_recipe() if self.fp8 else None
+        grouped_tensor_supported = False
+        if self.use_grouped_tensor and not (
+            self.fp8_calibration
+            or debug
+            or cpu_offloading
+            or (output_quantizers and any(q is not None for q in output_quantizers))
+        ):
+            if (
+                self.fp8
+                and recipe.float8_block_scaling()
+                and (10, 0) <= get_device_compute_capability() <= (11, 0)
+            ):
+                raise RuntimeError(
+                    "use_grouped_tensor=True does not support the FP8 block-scaling recipe on "
+                    "Blackwell GPUs: the native grouped FP8 block-scaling path is Hopper-only. "
+                    "Set use_grouped_tensor=False, or unset "
+                    "NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM if it enabled this path, to use "
+                    "the MXFP8-emulated path on Blackwell."
+                )
+            grouped_tensor_supported = is_module_grouped_tensor_path_supported(
+                recipe,
+                self.activation_dtype,
+            )
+        if (
+            self.use_grouped_tensor
+            and not grouped_tensor_supported
+            and (self.single_grouped_weight or (self.use_bias and self.single_grouped_bias))
+        ):
+            raise RuntimeError(
+                "Single grouped parameters require the native grouped-tensor path, but the active "
+                "device, cuBLASLt version, quantization recipe, or GroupedLinear feature "
+                "configuration does not support it. Disable single_grouped_weight and "
+                "single_grouped_bias to allow the split-quantize fallback."
+            )
+        return grouped_tensor_supported
+
+    def _get_grouped_runtime_quantizers(self):
+        """Get only the quantizers consumed by native grouped execution.
+
+        Recipe metadata and initialization still own num_gemms slots per role. Runtime
+        input/dY use the first slot; discrete weights still need one slot per expert.
+        """
+        input_quantizers, grad_output_quantizers = [None], [None]
+        num_weights = 1 if self.single_grouped_weight else self.num_gemms
+        weight_quantizers = [None] * num_weights
+        if self.fp8 or self.primary_weights_in_fp8:
+            weight_quantizers = [
+                self.quantizers["scaling_fwd"][
+                    self._offsets["weight"] + i * self._num_fp8_tensors_per_gemm["fwd"]
+                ]
+                for i in range(num_weights)
+            ]
+            for quantizer in weight_quantizers:
+                quantizer.internal = not self.primary_weights_in_fp8
+        if self.fp8:
+            input_quantizer = self.quantizers["scaling_fwd"][self._offsets["input"]]
+            input_quantizer.internal = True
+            input_quantizer.optimize_for_gemm = True
+            input_quantizers = [input_quantizer]
+            if torch.is_grad_enabled():
+                grad_output_quantizer = self.quantizers["scaling_bwd"][self._offsets["input"]]
+                grad_output_quantizer.internal = True
+                grad_output_quantizer.optimize_for_gemm = True
+                grad_output_quantizers = [grad_output_quantizer]
+        return input_quantizers, weight_quantizers, (), (), (), grad_output_quantizers
 
     def _get_weight_quantizers(self) -> List[Quantizer]:
         """Get the weight quantizers of the module."""
