@@ -1008,7 +1008,7 @@ def _is_grouped_mlp_fusion_candidate(
     recipe: Optional[Recipe],
     activation_op_types: tuple[type[FusibleOperation]],
 ) -> bool:
-    """Check the recipe and operation pattern before probing CUDA or cuDNN."""
+    """Check whether the recipe and operation pattern support grouped MLP fusion."""
     if len(ops) < 3 or recipe is None or not (recipe.mxfp8() or recipe.nvfp4()):
         return False
     # NVFP4 graph-safe grouped quantize currently requires RHT.
@@ -3216,12 +3216,6 @@ def fuse_glu_ops(
 ) -> list[FusibleOperation]:
     """Apply joint GroupedLinear + scaled GLU + GroupedLinear fusion."""
 
-    # Registered at import time; defer CUDA and optional dependency checks until
-    # a block-scaled pipeline can actually use this fusion.
-    if not _is_grouped_mlp_fusion_candidate(
-        ops, recipe, (ScaledSwiGLU, ScaledClampedQGeGLU, ScaledSiTUGLU)
-    ):
-        return ops
     if not torch.cuda.is_available():
         return ops
 
@@ -3256,8 +3250,6 @@ def fuse_unary_activation_ops(
 ) -> list[FusibleOperation]:
     """Apply joint GroupedLinear + scaled unary activation + GroupedLinear fusion."""
 
-    if not _is_grouped_mlp_fusion_candidate(ops, recipe, (ScaledSReLU, ScaledTanhSReLU)):
-        return ops
     if not GroupedMLP_CuTeGEMMUnary.is_supported():
         return ops
 
@@ -3274,7 +3266,5 @@ def fuse_unary_activation_ops(
     )
 
 
-# Register without probing CUDA or importing optional cuDNN kernels. Capability
-# checks run when the fuser encounters a supported quantization recipe.
 register_forward_backward_fusion(fuse_glu_ops, prepend=True)
 register_forward_backward_fusion(fuse_unary_activation_ops, prepend=True)
