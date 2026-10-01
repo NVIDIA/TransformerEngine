@@ -946,10 +946,7 @@ class TestGroupedLinearOp:
             )
         if quantization is None and quantized_weight:
             pytest.skip("quantized_weight requires a quantization recipe")
-        if (
-            quantization in nvfp4_variant_names
-            and dtype != torch.bfloat16
-        ):
+        if quantization in nvfp4_variant_names and dtype != torch.bfloat16:
             pytest.skip("NVFP4 grouped GEMM only supports BF16 output")
         if single_grouped_weight and quantization in nvfp4_variant_names:
             # Currently, split_quantization is used which is not cuda graph safe.
@@ -1254,9 +1251,9 @@ class TestGroupedMLPFusedOp:
         if quantization in ("nvfp4_rht", "nvfp4_rht_ue5m3"):
             if activation == "scaled_swiglu" and (bias or glu_interleave_size != 32):
                 pytest.skip("NVFP4 RHT SwiGLU grouped MLP coverage is limited to no-bias")
-        if (
-            quantization in ("nvfp4_ue5m3", "nvfp4_rht_ue5m3")
-            and activation in ("scaled_srelu", "scaled_tanh_srelu")
+        if quantization in ("nvfp4_ue5m3", "nvfp4_rht_ue5m3") and activation in (
+            "scaled_srelu",
+            "scaled_tanh_srelu",
         ):
             pytest.skip(f"NVFP4 RHT grouped MLP with {activation} does not support UE5M3")
         if (
