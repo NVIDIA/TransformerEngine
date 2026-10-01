@@ -2386,11 +2386,11 @@ class GroupedLinear(TransformerEngineBaseModule):
                     and (10, 0) <= get_device_compute_capability() <= (11, 0)
                 ):
                     raise RuntimeError(
-                        "use_grouped_tensor=True does not support the FP8 block-scaling recipe on "
-                        "Blackwell GPUs: the native grouped FP8 block-scaling path is Hopper-only. "
-                        "Set use_grouped_tensor=False, or unset "
-                        "NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM if it enabled this path, to use "
-                        "the MXFP8-emulated path on Blackwell."
+                        "use_grouped_tensor=True does not support the FP8 block-scaling recipe on"
+                        " Blackwell GPUs: the native grouped FP8 block-scaling path is Hopper-only."
+                        " Set use_grouped_tensor=False, or unset"
+                        " NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM if it enabled this path, to"
+                        " use the MXFP8-emulated path on Blackwell."
                     )
                 use_grouped_tensor_path = is_module_grouped_tensor_path_supported(
                     _recipe,
@@ -2402,10 +2402,10 @@ class GroupedLinear(TransformerEngineBaseModule):
                 and (self.single_grouped_weight or use_grouped_bias)
             ):
                 raise RuntimeError(
-                    "Single grouped parameters require the native grouped-tensor path, but the active "
-                    "device, cuBLASLt version, quantization recipe, or GroupedLinear feature "
-                    "configuration does not support it. Disable single_grouped_weight and "
-                    "single_grouped_bias to allow the split-quantize fallback."
+                    "Single grouped parameters require the native grouped-tensor path, but the"
+                    " active device, cuBLASLt version, quantization recipe, or GroupedLinear"
+                    " feature configuration does not support it. Disable single_grouped_weight and"
+                    " single_grouped_bias to allow the split-quantize fallback."
                 )
             if use_grouped_tensor_path:
                 if m_splits.device.type != "cuda":
