@@ -416,6 +416,11 @@ in sequence are replaced with one fused grouped-MLP operation.
 Fusion requires compatible layer dimensions, activation layout, and precision
 recipe.
 
+Fusion eligibility may change between releases; this guide summarizes the
+requirements, while the implementation contains the current checks. For example,
+see the `fusion eligibility checks in Transformer Engine v2.19
+<https://github.com/NVIDIA/TransformerEngine/blob/5e52befd5262c06289106338c308079d6adb391f/transformer_engine/pytorch/ops/fused/grouped_mlp.py#L789-L868>`_.
+
 For GLU fusion, use ``glu_interleave_size=32``: FC1 must produce alternating
 blocks of 32 gate features and 32 value features. When loading a checkpoint
 whose FC1 outputs store all gate features before all value features, convert
