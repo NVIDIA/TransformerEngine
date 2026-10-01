@@ -182,6 +182,7 @@ def _grouped_gemm_forward(
         norm_const_tensor=norm_const,
         c_dtype=jnp.dtype(compute_dtype),
         d_dtype=jnp.dtype(output_dtype),
+        discrete_col_sfd=True,
     )
     return (
         result["c_tensor"].reshape(rows, combined),
@@ -237,6 +238,7 @@ def grouped_gemm_dswiglu(
         prob_tensor=prob.reshape(rows).astype(jnp.float32),
         norm_const_tensor=norm_const,
         d_dtype=jnp.dtype(output_dtype),
+        discrete_col_sfd=True,
     )
     return (
         result["d_row_tensor"],
