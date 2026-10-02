@@ -875,7 +875,7 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                     //
                     // It is a different kernel from regtile::quantize further down, which
                     // is also register-resident but replaces the generic kernel for fused
-                    // GeLU/dGeLU and has its own requirements (see regtile::can_use).
+                    // activations and has its own requirements (see regtile::can_use).
                     if constexpr (std::is_same_v<IType, bf16> && !WITH_GEMM_SWIZZLED_SCALES) {
                       if (register_resident_supported && rows % 32 == 0 && cols % 256 == 0) {
                         // Both scale arrays must share a layout; this kernel only
@@ -947,18 +947,19 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
               }
 
               // regtile::quantize replaces the generic kernel below for the requests it
-              // implements: bidimensional BF16 -> E4M3 with fused GeLU or dGeLU and no dbias,
-              // rows % 64 == 0, cols % 256 == 0, 16-byte aligned inputs (see
-              // regtile::can_use). Like the specialized cast-only kernels above it keeps
-              // the tile in registers instead of staging it through shared memory, but it is
-              // not specialized: it serves the generic kernel's fused-activation requests and
-              // writes the same output bytes the generic kernel would.
+              // implements: bidimensional BF16 -> E4M3 with fused GeLU, SiLU, dGeLU or dSiLU
+              // and no dbias, rows % 64 == 0, cols % 256 == 0, 16-byte aligned inputs (see
+              // regtile::kImplements and regtile::can_use). Like the specialized cast-only
+              // kernels above it keeps the tile in registers instead of staging it through
+              // shared memory, but it is not specialized: it serves the generic kernel's
+              // fused-activation requests and writes the same output bytes the generic kernel
+              // would.
               if constexpr (std::is_same_v<IType, bf16> && std::is_same_v<OType, fp8e4m3> &&
-                            !IS_DBIAS && IS_ACT != IS_DACT) {
-                if (regtile::can_use<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(
-                        input, act_input, *output, *noop, use_2d_quantization)) {
-                  regtile::quantize<IS_DBIAS, IS_DACT, IS_ACT>(input, act_input, output,
-                                                               use_2d_quantization, stream);
+                            regtile::kImplements<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>) {
+                if (regtile::can_use<IS_DACT, IS_ACT>(input, act_input, *output, *noop,
+                                                      use_2d_quantization)) {
+                  regtile::quantize<IS_DACT, IS_ACT, OP, WITH_GEMM_SWIZZLED_SCALES>(
+                      input, act_input, output, stream);
                   return;
                 }
               }

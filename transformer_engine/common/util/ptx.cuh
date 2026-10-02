@@ -1975,20 +1975,6 @@ __device__ __forceinline__ void prefetch_l2_evict_last(const void *addr) {
   NVTE_DEVICE_ERROR("prefetch_l2_evict_last is only supported on SM 8.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
 }
-
-/*! \brief float_to_e8m0 for two values at once, returned as two packed bytes:
- *         \p hi in the upper byte, \p lo in the lower one.
- */
-__device__ __forceinline__ uint32_t float_to_e8m0_2x(const float hi, const float lo) {
-  uint16_t d = 0;
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-  asm("cvt.rp.satfinite.ue8m0x2.f32 %0, %1, %2;" : "=h"(d) : "f"(hi), "f"(lo));
-#else
-  NVTE_DEVICE_ERROR("float_to_e8m0_2x is only supported on SM 10.0+.");
-#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-  return static_cast<uint32_t>(d);
-}
-
 }  // namespace ptx
 
 namespace {

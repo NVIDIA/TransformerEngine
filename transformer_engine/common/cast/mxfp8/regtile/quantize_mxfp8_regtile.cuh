@@ -5,14 +5,15 @@
  ************************************************************************/
 
 /*! \file quantize_mxfp8_regtile.cuh
- *  \brief Register-resident MXFP8 bidimensional quantize fused with GeLU or dGeLU.
+ *  \brief Register-resident MXFP8 bidimensional quantize fused with GeLU or SiLU, or
+ *         their derivatives.
  *
  *  Rowwise and colwise MX scales need an amax over the same data in two
  *  directions.  The generic kernel stages each tile through shared memory and
  *  walks it twice.  Here a CTA covers whole 32-row bands, the colwise block
  *  height, so the tile is read once into registers and both directions are
  *  quantized from there; shared memory holds only the cross-warp colwise
- *  partials, the row scales and the dGeLU table.
+ *  partials, the row scales and the derivative's table.
  *
  *  It replaces the generic kernel, not the specialized ones: cast-only requests
  *  are served before the generic dispatch by the specialized kernels, one of
@@ -31,11 +32,12 @@
 #include <vector>
 
 #include "../../../common.h"
+#include "../../../util/activation_table.cuh"
 #include "../../../util/cuda_runtime.h"
-#include "../../../util/dgelu_table.cuh"
 #include "../../../util/math.h"
 #include "../../../util/packed_activation.cuh"
 #include "../../../util/ptx.cuh"
+#include "../../../util/ptx_arch_spec.cuh"
 #include "../../../utils.cuh"
 #include "../swizzle.cuh"
 
@@ -59,7 +61,7 @@ __device__ __forceinline__ unsigned abs_max_bf16x2(unsigned a, unsigned b) {
 }
 
 /*! \brief Widen a BF16 pair word to FP32, low half to x.  Same result as ptx::up_cast, whose
- *  volatile asm the compiler cannot schedule as freely in the dGeLU loop. */
+ *  volatile asm the compiler cannot schedule as freely in the derivative loop. */
 __device__ __forceinline__ ptx::floatx2 widen_bf16x2(const unsigned v) {
   return {__uint_as_float(v << 16), __uint_as_float(v & 0xffff0000u)};
 }
@@ -88,21 +90,22 @@ __device__ __forceinline__ unsigned amax_to_e8m0_2x(float amax_hi, float amax_lo
                                fmaxf(amax_lo * kMaxNormRcp, 0.0f));
 }
 
-/*! \brief GeLU on a BF16 pair, returned as a BF16 pair. */
-__device__ __forceinline__ unsigned gelu_bf16x2(unsigned x) {
-  return to_bf16x2(activation_2x<Empty, gelu<float, float>>(widen_bf16x2(x), {}));
+/*! \brief OP on a BF16 pair, returned as a BF16 pair. */
+template <float (*OP)(float, const Empty&)>
+__device__ __forceinline__ unsigned activation_bf16x2(unsigned x) {
+  return to_bf16x2(activation_2x<Empty, OP>(widen_bf16x2(x), {}));
 }
 
-/*! \brief dGeLU of a BF16 pair, by table or by arithmetic.
+/*! \brief The derivative OP of a BF16 pair, by table or by arithmetic.
  *  \tparam USE_TABLE  Which route this (row, word) slot takes; see LutSlot.
  */
-template <bool USE_TABLE>
-__device__ __forceinline__ ptx::floatx2 dgelu_word(unsigned x,
-                                                   const unsigned char* __restrict__ table) {
+template <float (*OP)(float, const Empty&), bool USE_TABLE>
+__device__ __forceinline__ ptx::floatx2 dact_word(unsigned x,
+                                                  const unsigned char* __restrict__ table) {
   if constexpr (USE_TABLE) {
-    return dgelu_table::lookup(x, table);
+    return activation_table::lookup<OP>(x, table);
   } else {
-    return activation_2x<Empty, dgelu<float, float>>(widen_bf16x2(x), {});
+    return activation_2x<Empty, OP>(widen_bf16x2(x), {});
   }
 }
 
@@ -149,14 +152,14 @@ struct LutSlot {
   static constexpr int kArithmeticSlots = kSlots - kTableSlots;
   static constexpr bool value = !((((kSlot + 1) * kArithmeticSlots) % kSlots) < kArithmeticSlots);
 };
-//! Of the eight slots in dGeLU's two-row load group, how many take the table.
+//! Of the eight slots in a derivative's two-row load group, how many take the table.
 constexpr int kLutSlotsDact = 6;
 
 // Minimum resident CTAs per SM, the second __launch_bounds__ argument, capped
-// at what the SM can hold: sm_107 has half the threads per SM of sm_100.
+// at what the SM can hold: sm_75 and sm_107 have half the threads per SM of sm_100.
 constexpr int kMinBlocksAct = 8;
 constexpr int kMinBlocksDact = 6;
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ == 1070)
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ == 750 || __CUDA_ARCH__ == 1070)
 constexpr int kMaxThreadsPerSm = 1024;
 #else
 constexpr int kMaxThreadsPerSm = 2048;
@@ -164,34 +167,33 @@ constexpr int kMaxThreadsPerSm = 2048;
 
 template <bool IS_DACT, bool IS_ACT>
 struct TileConfig {
-  static_assert(IS_ACT != IS_DACT, "Exactly one of GeLU and dGeLU is fused.");
-  static constexpr bool kNarrowTile = IS_ACT && !IS_DACT;
-  static constexpr int kThreadsPerCta = kNarrowTile ? 128 : 256;
+  static_assert(IS_ACT != IS_DACT, "Exactly one of the activation and its derivative is fused.");
+  static constexpr int kThreadsPerCta = IS_DACT ? 256 : 128;
   static constexpr int kWarpsPerCta = kThreadsPerCta / 32;
   static constexpr int kRowsPerWarp = 32 / kWarpsPerCta;
-  static constexpr bool kSlotSplit = IS_DACT || kNarrowTile;
   // The rowwise half is quantized before the cross-warp barrier and the row
   // scales are drained inside the colwise barrier interval, saving one barrier
   // per 32-row tile.  A tile too narrow to leave idle threads hands the drain to
   // the threads that just folded the colwise partials.
   static constexpr int kDrainTidBase =
       (kThreadsPerCta >= kTileCols / 2 + kTileCols / 4) ? kTileCols / 2 : 0;
-  static constexpr int kRowsInFlight = kSlotSplit ? 2 : kRowsPerWarp;
+  static constexpr int kRowsInFlight = 2;
   static constexpr int kSlots = kRowsInFlight * kWordsPerLane;
   static constexpr int kLutSlots = kLutSlotsDact;
   static constexpr int kRequestedMinBlocks = IS_DACT ? kMinBlocksDact : kMinBlocksAct;
   static constexpr int kMinBlocksPerSm = kRequestedMinBlocks < kMaxThreadsPerSm / kThreadsPerCta
                                              ? kRequestedMinBlocks
                                              : kMaxThreadsPerSm / kThreadsPerCta;
-  //! Only dGeLU tabulates; GeLU evaluates its closed form for every word.
+  //! Only the derivatives are tabulated; the activations are computed for every word.
   static constexpr bool kNeedsLut = IS_DACT;
   //! A non-tabulating instantiation still declares the array, at a minimal size.
-  static constexpr int kLutSharedBytes = kNeedsLut ? dgelu_table::kBytes : 16;
+  static constexpr int kLutSharedBytes = kNeedsLut ? activation_table::kMaxBytes : 16;
 };
 
 // Register-resident tiling: the 32x256 tile stays in registers; only the
 // colwise partials go through shared memory.
-template <bool IS_DACT, bool IS_ACT, bool WITH_GEMM_SWIZZLED_SCALES>
+template <bool IS_DACT, bool IS_ACT, float (*OP)(float, const Empty&),
+          bool WITH_GEMM_SWIZZLED_SCALES>
 __device__ __forceinline__ void quantize_regtile(
     const uint4* __restrict__ input, const uint4* __restrict__ act_input,
     unsigned char* __restrict__ rowwise_out, unsigned char* __restrict__ rowwise_scales,
@@ -204,8 +206,8 @@ __device__ __forceinline__ void quantize_regtile(
   __shared__ __align__(16) unsigned col_amax_partials[kWarpsPerCta][kTileCols / 2];
   __shared__ __align__(16) unsigned col_scale_rcp_smem[kTileCols / 2];
   __shared__ __align__(8) unsigned char row_scale_bytes[kRowsPerMxBlock * kMxGroupsPerRow];
-  __shared__ __align__(16) unsigned char dgelu_table_smem[C::kLutSharedBytes];
-  __shared__ __align__(8) uint64_t dgelu_table_barrier;
+  __shared__ __align__(16) unsigned char table_smem[C::kLutSharedBytes];
+  __shared__ __align__(8) uint64_t table_barrier;
 
   const int tid = threadIdx.x;
   const int lane = tid & 31;
@@ -215,8 +217,7 @@ __device__ __forceinline__ void quantize_regtile(
 
   // The table copy overlaps the first input loads; see wait_table below.
   if constexpr (C::kNeedsLut)
-    dgelu_table::load_table_async(dgelu_table_smem, &dgelu_table_barrier, tid);
-  const unsigned char* __restrict__ dgelu_table = dgelu_table_smem;
+    activation_table::load_table_async<OP>(table_smem, &table_barrier, tid);
 
 #pragma unroll 1
   for (int it = 0; it < iters; ++it) {
@@ -247,7 +248,7 @@ __device__ __forceinline__ void quantize_regtile(
             grad_vec[t][n] = input_ptr[(size_t)(h * kRowsInFlight + t) * vecs_per_row + n];
       }
       if constexpr (C::kNeedsLut) {
-        if (it == 0 && h == 0) dgelu_table::wait_table(&dgelu_table_barrier);
+        if (it == 0 && h == 0) activation_table::wait_table(&table_barrier);
       }
       // Convert the load group into the BF16 pairs the epilogue quantizes.
       if constexpr (!IS_DACT) {
@@ -259,18 +260,18 @@ __device__ __forceinline__ void quantize_regtile(
             const int tile_word_base = (h * kRowsInFlight + t) * kWordsPerLane + n * 4;
 #pragma unroll
             for (int m = 0; m < 4; ++m) {
-              tile_words[tile_word_base + m] = gelu_bf16x2(x_words[m]);
+              tile_words[tile_word_base + m] = activation_bf16x2<OP>(x_words[m]);
             }
           }
         }
       } else {
 // Each (row, word) slot takes the table or the arithmetic body per LutSlot.
-#define MXFP8_DACT_WORD(T, M)                                                                   \
-  {                                                                                             \
-    constexpr bool kUseLut = LutSlot<C::kSlots, C::kLutSlots, (T) * 4 + (M) + 2>::value;        \
-    const ptx::floatx2 product =                                                                \
-        ptx::mul_2x(widen_bf16x2(grad_words[M]), dgelu_word<kUseLut>(x_words[M], dgelu_table)); \
-    tile_words[(h * kRowsInFlight + (T)) * kWordsPerLane + (M)] = to_bf16x2(product);           \
+#define MXFP8_DACT_WORD(T, M)                                                                     \
+  {                                                                                               \
+    constexpr bool kUseLut = LutSlot<C::kSlots, C::kLutSlots, (T) * 4 + (M) + 2>::value;          \
+    const ptx::floatx2 product =                                                                  \
+        ptx::mul_2x(widen_bf16x2(grad_words[M]), dact_word<OP, kUseLut>(x_words[M], table_smem)); \
+    tile_words[(h * kRowsInFlight + (T)) * kWordsPerLane + (M)] = to_bf16x2(product);             \
   }
 #define MXFP8_DACT_ROW(T)                                          \
   {                                                                \
@@ -281,11 +282,9 @@ __device__ __forceinline__ void quantize_regtile(
     MXFP8_DACT_WORD(T, 2)                                          \
     MXFP8_DACT_WORD(T, 3)                                          \
   }
+        static_assert(kRowsInFlight == 2, "A load group is two rows.");
         MXFP8_DACT_ROW(0)
-        if constexpr (kRowsInFlight > 1) MXFP8_DACT_ROW(1)
-        if constexpr (kRowsInFlight > 2) {
-          MXFP8_DACT_ROW(2) MXFP8_DACT_ROW(3)
-        }
+        MXFP8_DACT_ROW(1)
 #undef MXFP8_DACT_ROW
 #undef MXFP8_DACT_WORD
       }
@@ -314,7 +313,7 @@ __device__ __forceinline__ void quantize_regtile(
             (unsigned char)scale_byte;
       return e8m0_to_bf16x2_reciprocal(scale_byte);
     };
-    // On the 128-thread GeLU tile, two rows share one butterfly and conversion.
+    // On the 128-thread activation tile, two rows share one butterfly and conversion.
     auto row_amax = [&](const unsigned* row) {
       unsigned amax =
           abs_max_bf16x2(abs_max_bf16x2(row[0], row[1]), abs_max_bf16x2(row[2], row[3]));
@@ -356,9 +355,7 @@ __device__ __forceinline__ void quantize_regtile(
         *(uint4*)(&col_amax_partials[warp][kWordsPerLane * lane + 4 * n]) =
             *(const uint4*)(col_amax + 4 * n);
     };
-    constexpr bool kPairedRowScales =
-        IS_ACT && !IS_DACT && C::kThreadsPerCta == 128 && kRowsPerWarp == 8;
-    if constexpr (kPairedRowScales) {
+    if constexpr (C::kThreadsPerCta == 128) {
       unsigned char* row_out_ptr = rowwise_out + store_offset;
 #pragma unroll
       for (int j = 0; j < kRowsPerWarp; j += 2) {
@@ -465,7 +462,8 @@ __device__ __forceinline__ void quantize_regtile(
   }
 }
 
-template <bool IS_DACT, bool IS_ACT, bool WITH_GEMM_SWIZZLED_SCALES>
+template <bool IS_DACT, bool IS_ACT, float (*OP)(float, const Empty&),
+          bool WITH_GEMM_SWIZZLED_SCALES>
 __global__ void __launch_bounds__(TileConfig<IS_DACT, IS_ACT>::kThreadsPerCta,
                                   TileConfig<IS_DACT, IS_ACT>::kMinBlocksPerSm)
     quantize_mxfp8_kernel(const unsigned* __restrict__ input,
@@ -476,19 +474,19 @@ __global__ void __launch_bounds__(TileConfig<IS_DACT, IS_ACT>::kThreadsPerCta,
                           unsigned char* __restrict__ colwise_scales, int K,
                           int rowwise_scale_stride, int colwise_scale_stride, int iters) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-  quantize_regtile<IS_DACT, IS_ACT, WITH_GEMM_SWIZZLED_SCALES>(
+  quantize_regtile<IS_DACT, IS_ACT, OP, WITH_GEMM_SWIZZLED_SCALES>(
       (const uint4*)input, (const uint4*)act_input, rowwise_out, rowwise_scales, colwise_out,
       colwise_scales, K, rowwise_scale_stride, colwise_scale_stride, iters);
 #endif
 }
 
-// Row blocks per CTA.  A longer walk amortizes the per-CTA dGeLU table copy; a
+// Row blocks per CTA.  A longer walk amortizes the per-CTA table copy; a
 // shorter one keeps the grid deep enough to avoid a residency tail.
 //! Grid size, in CTAs, that the walk length aims for.
 constexpr long long kCtaTargetActivation = 16384;
 //! Minimum walk for the instantiations that copy the table.
 constexpr int kMinWalk = 2;
-//! Maximum walk for dGeLU.
+//! Maximum walk for the derivatives.
 constexpr int kMaxWalkDact = 64;
 
 static int pick_walk_length(int row_blocks, int grid_cols, long long target,
@@ -500,15 +498,16 @@ static int pick_walk_length(int row_blocks, int grid_cols, long long target,
   return walk;
 }
 
-// Shared-memory carveout, in percent, for GeLU, whose footprint leaves room:
+// Shared-memory carveout, in percent, for the activations, whose footprint leaves room:
 // the rest of the unified array goes to L1.
 constexpr int kCarveoutPercentAct = 40;
 
-template <bool IS_DACT, bool IS_ACT, bool WITH_GEMM_SWIZZLED_SCALES>
+template <bool IS_DACT, bool IS_ACT, float (*OP)(float, const Empty&),
+          bool WITH_GEMM_SWIZZLED_SCALES>
 static void set_carveout() {
   constexpr int kPercent = IS_ACT ? kCarveoutPercentAct : 0;
   if constexpr (kPercent > 0) {
-    // Function attributes are per device, like the dGeLU table.
+    // Function attributes are per device, like the tables.
     static std::mutex mutex;
     static std::vector<bool> done;
     int device;
@@ -517,7 +516,7 @@ static void set_carveout() {
     if (static_cast<size_t>(device) >= done.size()) done.resize(device + 1, false);
     if (!done[device]) {
       NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-          (const void*)quantize_mxfp8_kernel<IS_DACT, IS_ACT, WITH_GEMM_SWIZZLED_SCALES>,
+          (const void*)quantize_mxfp8_kernel<IS_DACT, IS_ACT, OP, WITH_GEMM_SWIZZLED_SCALES>,
           cudaFuncAttributePreferredSharedMemoryCarveout, kPercent));
       done[device] = true;
     }
@@ -542,15 +541,16 @@ int walk_length(int M, int K) {
   return iters;
 }
 
-template <bool IS_DACT, bool IS_ACT, bool WITH_GEMM_SWIZZLED_SCALES>
+template <bool IS_DACT, bool IS_ACT, float (*OP)(float, const Empty&),
+          bool WITH_GEMM_SWIZZLED_SCALES>
 static void launch(const void* input, const void* act_input, void* rowwise_out,
                    void* rowwise_scales, void* colwise_out, void* colwise_scales, int M, int K,
                    int rowwise_scale_stride, int colwise_scale_stride, cudaStream_t stream) {
   using C = TileConfig<IS_DACT, IS_ACT>;
-  set_carveout<IS_DACT, IS_ACT, WITH_GEMM_SWIZZLED_SCALES>();
+  set_carveout<IS_DACT, IS_ACT, OP, WITH_GEMM_SWIZZLED_SCALES>();
   const int iters = walk_length<IS_DACT, IS_ACT>(M, K);
   dim3 grid(K / kTileCols, M / kRowsPerMxBlock / iters);
-  quantize_mxfp8_kernel<IS_DACT, IS_ACT, WITH_GEMM_SWIZZLED_SCALES>
+  quantize_mxfp8_kernel<IS_DACT, IS_ACT, OP, WITH_GEMM_SWIZZLED_SCALES>
       <<<grid, C::kThreadsPerCta, 0, stream>>>(
           (const unsigned*)input, (const unsigned*)act_input, (unsigned char*)rowwise_out,
           (unsigned char*)rowwise_scales, (unsigned char*)colwise_out,
@@ -560,73 +560,75 @@ static void launch(const void* input, const void* act_input, void* rowwise_out,
 // The grid is derived by exact division, so columns must tile into 256.  Rows
 // must be a multiple of the generic kernel's 64-row activation tile: on a
 // 32-row tail that kernel writes zero scales into the padding past the last
-// row, which this one does not.
+// row, which this one does not.  Output offsets within a 32-row band are 32-bit.
 constexpr size_t kGenericActivationTileRows = 64;
 
 inline bool shape_supported(size_t rows, size_t cols) {
-  constexpr size_t kMaxDim = std::numeric_limits<int>::max();
-  return rows > 0 && cols > 0 && rows <= kMaxDim && cols <= kMaxDim &&
+  constexpr size_t kMaxRows = std::numeric_limits<int>::max();
+  constexpr size_t kMaxCols = std::numeric_limits<unsigned>::max() / kRowsPerMxBlock;
+  return rows > 0 && cols > 0 && rows <= kMaxRows && cols <= kMaxCols &&
          rows % kGenericActivationTileRows == 0 && cols % kTileCols == 0;
 }
 
+// Under --use_fast_math util/math.h's activations take approximate forms this kernel is not
+// tested against, so those builds keep the generic kernel.
+#ifdef NVTE_USE_FAST_MATH
+constexpr bool kFastMath = true;
+#else
+constexpr bool kFastMath = false;
+#endif
+
 }  // namespace
 
-// Whether this kernel implements the request.  Anything else takes the generic
-// kernel.
+//! Whether this kernel implements the request type: GeLU or SiLU, or the derivative of
+//! either, without dbias.
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP&)>
+constexpr bool kImplements =
+    !kFastMath && !IS_DBIAS &&
+    ((IS_ACT && !IS_DACT &&
+      (packed_activation::is_gelu<ParamOP, OP> || packed_activation::is_silu<ParamOP, OP>)) ||
+     (IS_DACT && !IS_ACT &&
+      (packed_activation::is_dgelu<ParamOP, OP> || packed_activation::is_dsilu<ParamOP, OP>)));
+
+// Whether this kernel takes a request of a type in kImplements, with BF16 input and E4M3
+// output.  Anything else takes the generic kernel.
+template <bool IS_DACT, bool IS_ACT>
 bool can_use(const Tensor& input, const Tensor* act_input, const Tensor& output, const Tensor& noop,
              bool use_2d_quantization) {
-  constexpr bool op_supported =
-      !IS_DBIAS && ((IS_ACT && !IS_DACT && packed_activation::is_gelu<ParamOP, OP>) ||
-                    (IS_DACT && !IS_ACT && packed_activation::is_dgelu<ParamOP, OP>));
-  if constexpr (!op_supported) {
+  const auto [rows, cols] = input.flat_2d_dims();
+  // Vector widths: 16-byte loads of both inputs, 8-byte stores of both outputs
+  // and of each row's scales.
+  const bool aligned = is_aligned_ptr(input.data.dptr, 16) &&
+                       (!IS_DACT || is_aligned_ptr(act_input->data.dptr, 16)) &&
+                       is_aligned_ptr(output.data.dptr, 8) &&
+                       is_aligned_ptr(output.columnwise_data.dptr, 8) &&
+                       is_aligned_ptr(output.scale_inv.dptr, 8) &&
+                       is_aligned_ptr(output.columnwise_scale_inv.dptr, 2);
+  if (!(transformer_engine::cuda::sm_arch() >= 100 && !use_2d_quantization && output.has_data() &&
+        output.has_columnwise_data() && output.amax.dptr == nullptr && noop.data.dptr == nullptr &&
+        shape_supported(rows, cols) && aligned)) {
     return false;
-  } else {
-    const auto [rows, cols] = input.flat_2d_dims();
-    // Vector widths: 16-byte loads of both inputs, 8-byte stores of both outputs
-    // and of each row's scales.
-    const bool aligned = is_aligned_ptr(input.data.dptr, 16) &&
-                         (!IS_DACT || is_aligned_ptr(act_input->data.dptr, 16)) &&
-                         is_aligned_ptr(output.data.dptr, 8) &&
-                         is_aligned_ptr(output.columnwise_data.dptr, 8) &&
-                         is_aligned_ptr(output.scale_inv.dptr, 8) &&
-                         is_aligned_ptr(output.columnwise_scale_inv.dptr, 2);
-    if (!(transformer_engine::cuda::sm_arch() >= 100 && !use_2d_quantization && output.has_data() &&
-          output.has_columnwise_data() && input.dtype() == DType::kBFloat16 &&
-          output.dtype() == DType::kFloat8E4M3 && output.amax.dptr == nullptr &&
-          noop.data.dptr == nullptr && shape_supported(rows, cols) && aligned)) {
-      return false;
-    }
-    constexpr size_t kMaxGridY = 65535;
-    const int M = static_cast<int>(rows);
-    return static_cast<size_t>(M / kRowsPerMxBlock /
-                               walk_length<IS_DACT, IS_ACT>(M, static_cast<int>(cols))) <=
-           kMaxGridY;
   }
+  constexpr size_t kMaxGridY = 65535;
+  const int M = static_cast<int>(rows);
+  return static_cast<size_t>(M / kRowsPerMxBlock /
+                             walk_length<IS_DACT, IS_ACT>(M, static_cast<int>(cols))) <= kMaxGridY;
 }
 
-template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT>
-void quantize(const Tensor& input, const Tensor* act_input, Tensor* output,
-              bool use_2d_quantization, cudaStream_t stream) {
-  static_assert(!IS_DBIAS && IS_ACT != IS_DACT, "Only GeLU and dGeLU without dbias.");
-  using C = TileConfig<IS_DACT, IS_ACT>;
-  NVTE_CHECK(!use_2d_quantization,
-             "Register-resident MXFP8 quantize does not implement 2D block scaling.");
-  const auto [rows, cols] = input.flat_2d_dims();
-  NVTE_CHECK(shape_supported(rows, cols),
-             "Unsupported shape for register-resident MXFP8 quantize.");
-  if constexpr (C::kNeedsLut) {
-    dgelu_table::ensure_table(stream);
+template <bool IS_DACT, bool IS_ACT, float (*OP)(float, const Empty&),
+          bool WITH_GEMM_SWIZZLED_SCALES>
+void quantize(const Tensor& input, const Tensor* act_input, Tensor* output, cudaStream_t stream) {
+  if constexpr (IS_DACT) {
+    activation_table::ensure_table<OP>(stream);
   }
+  const auto [rows, cols] = input.flat_2d_dims();
   const void* act_ptr = IS_DACT ? act_input->data.dptr : input.data.dptr;
-  TRANSFORMER_ENGINE_SWITCH_CONDITION(
-      output->with_gemm_swizzled_scales, WITH_GEMM_SWIZZLED_SCALES,
-      launch<IS_DACT, IS_ACT, WITH_GEMM_SWIZZLED_SCALES>(
-          input.data.dptr, act_ptr, output->data.dptr, output->scale_inv.dptr,
-          output->columnwise_data.dptr, output->columnwise_scale_inv.dptr, static_cast<int>(rows),
-          static_cast<int>(cols), static_cast<int>(output->scale_inv.shape[1]),
-          static_cast<int>(output->columnwise_scale_inv.shape[1]), stream););
+  launch<IS_DACT, IS_ACT, OP, WITH_GEMM_SWIZZLED_SCALES>(
+      input.data.dptr, act_ptr, output->data.dptr, output->scale_inv.dptr,
+      output->columnwise_data.dptr, output->columnwise_scale_inv.dptr, static_cast<int>(rows),
+      static_cast<int>(cols), static_cast<int>(output->scale_inv.shape[1]),
+      static_cast<int>(output->columnwise_scale_inv.shape[1]), stream);
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
