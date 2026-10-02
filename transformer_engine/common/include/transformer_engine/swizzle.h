@@ -102,6 +102,62 @@ void nvte_multi_tensor_unswizzle_scaling_factors(const NVTETensor* inputs, NVTET
  *  */
 void nvte_swizzle_block_scaling_to_mxfp8_scaling_factors(const NVTETensor input, NVTETensor output,
                                                          cudaStream_t stream);
+
+/*! \brief Swizzling FP8 block scaling scaling factors of multiple tensors into mxfp8 interleaved
+ *         layout for GEMM
+ *
+ *  \param[in]     inputs       Input FP8 block-scaled tensors.
+ *  \param[in,out] outputs      Output mxfp8 tensors which host the swizzled scale_inv.
+ *  \param[in]     num_tensors  Number of input and output tensors.
+ *  \param[in]     stream       CUDA stream used for the operation.
+ *
+ *  Multi-tensor variant of nvte_swizzle_block_scaling_to_mxfp8_scaling_factors, with the same
+ *  requirements for each pair of tensors.
+ */
+void nvte_multi_tensor_swizzle_block_scaling_to_mxfp8_scaling_factors(const NVTETensor* inputs,
+                                                                      NVTETensor* outputs,
+                                                                      const size_t num_tensors,
+                                                                      cudaStream_t stream);
+
+/*! \brief Swizzle the FP8 block-scaling scaling factors of a grouped tensor into the MXFP8
+ *         interleaved layout for GEMM (grouped variant of
+ *         nvte_swizzle_block_scaling_to_mxfp8_scaling_factors).
+ *
+ *  \param[in]     input        Input FP8 block-scaled grouped tensor.
+ *  \param[in,out] output       Output MXFP8 grouped tensor which hosts the swizzled scale_inv.
+ *  \param[in]     stream       CUDA stream used for the operation.
+ *
+ *  Used to emulate the FP8 block scaling recipe with MXFP8 grouped GEMM on Blackwell and newer.
+ *  Per-tensor dimensions are read on the device, so the operation is CUDA-graph safe when they
+ *  change between replays.
+ *
+ *  Requirements:
+ *  - input is an FP8 block scaling (1D or 2D) grouped tensor with rowwise data and FP32 rowwise
+ *    scale_inv in the compact per-tensor layout; per-tensor first dims or last dims may vary,
+ *    but not both
+ *  - output is an MXFP8 grouped tensor with the same rowwise data pointer, dims and logical
+ *    shape, with_gemm_swizzled_scales set, and E8M0 rowwise scale_inv. Tensor t with rowwise
+ *    data [f, l] is written at the cumulative offset of
+ *    roundup(f, 128) * ceil(l / 128) * 4 bytes.
+ *  - output scale_inv holds at least
+ *    nvte_get_grouped_block_scaling_to_mxfp8_scale_inv_size(input) bytes
+ *  - 24 * n + 8 bytes (per-tensor offset tables) fit in the device's shared memory per block,
+ *    where n is the number of tensors
+ */
+void nvte_swizzle_grouped_block_scaling_to_mxfp8_scaling_factors(const NVTEGroupedTensor input,
+                                                                 NVTEGroupedTensor output,
+                                                                 cudaStream_t stream);
+
+/*! \brief Size in bytes of the output scale_inv required by
+ *         nvte_swizzle_grouped_block_scaling_to_mxfp8_scaling_factors.
+ *
+ *  \param[in]     input        Input FP8 block-scaled grouped tensor.
+ *
+ *  Depends only on the logical shape and on which per-tensor dims vary, so the output can be
+ *  allocated without reading per-tensor dims from the device.
+ */
+size_t nvte_get_grouped_block_scaling_to_mxfp8_scale_inv_size(const NVTEGroupedTensor input);
+
 /*! \brief Swizzling scaling factors into the required interleaved layout for GEMM (grouped tensor)
  *
  *  \param[in]     input        Input grouped tensor with non-swizzled scale_inv.

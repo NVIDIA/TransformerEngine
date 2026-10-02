@@ -38,6 +38,14 @@ int sm_arch(int device_id = -1);
  */
 int sm_count(int device_id = -1);
 
+/* \brief Maximum dynamic shared memory per block that a kernel can opt into
+ *
+ * \param[in] device_id CUDA device (default is current device)
+ *
+ * \return Number of bytes
+ */
+int max_dynamic_shared_memory_per_block(int device_id = -1);
+
 /* \brief Minimum and maximum stream priorities supported on device
  *
  * \param[in] device_id CUDA device (default is current device)

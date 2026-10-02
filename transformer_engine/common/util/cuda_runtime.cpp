@@ -143,6 +143,21 @@ int sm_count(int device_id) {
   return cache[device_id];
 }
 
+int max_dynamic_shared_memory_per_block(int device_id) {
+  static std::vector<int> cache(num_devices(), -1);
+  static std::vector<std::once_flag> flags(num_devices());
+  if (device_id < 0) {
+    device_id = current_device();
+  }
+  NVTE_CHECK(0 <= device_id && device_id < num_devices(), "invalid CUDA device ID");
+  auto init = [&]() {
+    NVTE_CHECK_CUDA(cudaDeviceGetAttribute(&cache[device_id],
+                                           cudaDevAttrMaxSharedMemoryPerBlockOptin, device_id));
+  };
+  std::call_once(flags[device_id], init);
+  return cache[device_id];
+}
+
 void stream_priority_range(int *low_priority, int *high_priority, int device_id) {
   static std::vector<std::pair<int, int>> cache(num_devices());
   static std::vector<std::once_flag> flags(num_devices());

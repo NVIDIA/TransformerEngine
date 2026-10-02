@@ -7,10 +7,14 @@
 #include <cuda_runtime.h>
 #include <transformer_engine/swizzle.h>
 
+#include <algorithm>
 #include <cstdint>
+#include <mutex>
 #include <type_traits>
+#include <vector>
 
 #include "../common.h"
+#include "../util/cuda_runtime.h"
 #include "../util/logging.h"
 #include "transformer_engine/transformer_engine.h"
 
@@ -67,34 +71,22 @@ uint4 __device__ __forceinline__ broadcast_uint32_t_to_uint4(uint32_t x) {
 struct no_oob_tag_t {};
 constexpr no_oob_tag_t NO_OOB_TAG;
 
+// Converts the scaling factors of one 128x128 data tile. `in` and `out` point at the tensor's
+// compact 1D block scales and its swizzled MXFP8 scales. All lanes of the warp must call this
+// with the same tile coordinates.
 template <typename OOBT>
-void __global__ __launch_bounds__(WARPS_X_PER_TB* WARPS_Y_PER_TB* WARP_SIZE)
-    swizzle_block_scaling_1d_to_mxfp8_scaling_factors_kernel(
-        const void* __restrict__ const in, void* __restrict__ const out, const uint32_t tiles_x,
-        const uint32_t tiles_y, const uint32_t in_y_stride, const uint32_t out_y_stride,
-        OOBT first_oob) {
+__device__ __forceinline__ void swizzle_tile(const void* __restrict__ const in,
+                                             void* __restrict__ const out,
+                                             const uint32_t out_tile_x, const uint32_t out_tile_y,
+                                             const uint32_t tiles_y, const uint32_t in_y_stride,
+                                             const uint32_t out_y_stride, const OOBT first_oob,
+                                             const uint32_t lane) {
   // resolve kernel variant
   constexpr bool no_oob = std::is_same_v<OOBT, no_oob_tag_t>;
   static_assert(no_oob || std::is_same_v<OOBT, uint32_t>);
 
-  // load thread indices
-  const uint32_t lane = threadIdx.x;
-  __builtin_assume(lane < WARP_SIZE);
-  const uint32_t warp_x = threadIdx.z;
-  __builtin_assume(warp_x < WARPS_X_PER_TB);
-  const uint32_t warp_y = threadIdx.y;
-  __builtin_assume(warp_y < WARPS_Y_PER_TB);
-
-  // compute tile indices
-  const uint32_t out_tile_y = blockIdx.y * WARPS_Y_PER_TB + warp_y;
-  const uint32_t out_tile_x = blockIdx.x * WARPS_X_PER_TB + warp_x;
   const uint32_t in_tile_y = out_tile_x;
   const uint32_t in_tile_x = out_tile_y;
-
-  // bounds check; uniform branch
-  if (out_tile_y >= tiles_y || out_tile_x >= tiles_x) {
-    return;
-  }
 
   // calculate this warp's input base pointer
   constexpr uint32_t in_x_stride = WARP_SIZE * sizeof(uint4);
@@ -135,6 +127,33 @@ void __global__ __launch_bounds__(WARPS_X_PER_TB* WARPS_Y_PER_TB* WARP_SIZE)
   reinterpret_cast<uint4*>(warp_dst)[lane] = sf;
 }
 
+template <typename OOBT>
+void __global__ __launch_bounds__(WARPS_X_PER_TB* WARPS_Y_PER_TB* WARP_SIZE)
+    swizzle_block_scaling_1d_to_mxfp8_scaling_factors_kernel(
+        const void* __restrict__ const in, void* __restrict__ const out, const uint32_t tiles_x,
+        const uint32_t tiles_y, const uint32_t in_y_stride, const uint32_t out_y_stride,
+        OOBT first_oob) {
+  // load thread indices
+  const uint32_t lane = threadIdx.x;
+  __builtin_assume(lane < WARP_SIZE);
+  const uint32_t warp_x = threadIdx.z;
+  __builtin_assume(warp_x < WARPS_X_PER_TB);
+  const uint32_t warp_y = threadIdx.y;
+  __builtin_assume(warp_y < WARPS_Y_PER_TB);
+
+  // compute tile indices
+  const uint32_t out_tile_y = blockIdx.y * WARPS_Y_PER_TB + warp_y;
+  const uint32_t out_tile_x = blockIdx.x * WARPS_X_PER_TB + warp_x;
+
+  // bounds check; uniform branch
+  if (out_tile_y >= tiles_y || out_tile_x >= tiles_x) {
+    return;
+  }
+
+  swizzle_tile(in, out, out_tile_x, out_tile_y, tiles_y, in_y_stride, out_y_stride, first_oob,
+               lane);
+}
+
 void launch_kernel(const void* const in, void* const out, uint32_t data_rows, uint32_t data_cols,
                    cudaStream_t stream) {
   NVTE_CHECK(is_aligned_ptr(in, alignof(uint4)), "Input scaling factor pointer must be aligned to ",
@@ -170,28 +189,15 @@ namespace swizzle_kernel_2d {
 constexpr uint32_t WARPS_X_PER_TB = 2;  // configurable
 constexpr uint32_t WARPS_Y_PER_TB = 2;  // configurable
 
-void __global__ __launch_bounds__(WARPS_X_PER_TB* WARPS_Y_PER_TB* WARP_SIZE)
-    swizzle_block_scaling_2d_to_mxfp8_scaling_factors_kernel(
-        const void* __restrict__ const in, void* __restrict__ const out, const uint32_t tiles_x,
-        const uint32_t tiles_y, const uint32_t in_y_stride, const uint32_t out_y_stride) {
-  // load thread indices
-  const uint32_t lane = threadIdx.x;
-  __builtin_assume(lane < WARP_SIZE);
-  const uint32_t warp_x = threadIdx.z;
-  __builtin_assume(warp_x < WARPS_X_PER_TB);
-  const uint32_t warp_y = threadIdx.y;
-  __builtin_assume(warp_y < WARPS_Y_PER_TB);
-
-  // compute tile indices
-  const uint32_t out_tile_y = blockIdx.y * WARPS_Y_PER_TB + warp_y;
-  const uint32_t out_tile_x = blockIdx.x * WARPS_X_PER_TB + warp_x;
+// Converts the scaling factor of one 128x128 data tile. All lanes of the warp must call this
+// with the same tile coordinates.
+__device__ __forceinline__ void swizzle_tile(const void* __restrict__ const in,
+                                             void* __restrict__ const out,
+                                             const uint32_t out_tile_x, const uint32_t out_tile_y,
+                                             const uint32_t in_y_stride,
+                                             const uint32_t out_y_stride, const uint32_t lane) {
   const uint32_t in_tile_y = out_tile_y;
   const uint32_t in_tile_x = out_tile_x;
-
-  // bounds check; uniform branch
-  if (out_tile_y >= tiles_y || out_tile_x >= tiles_x) {
-    return;
-  }
 
   // calculate this warp's input base pointer
   constexpr uint32_t in_x_stride = sizeof(float);
@@ -214,6 +220,30 @@ void __global__ __launch_bounds__(WARPS_X_PER_TB* WARPS_Y_PER_TB* WARP_SIZE)
   void* const warp_dst =
       (reinterpret_cast<uint8_t*>(out) + out_tile_y * out_y_stride + out_tile_x * out_x_stride);
   reinterpret_cast<uint4*>(warp_dst)[lane] = sf4;
+}
+
+void __global__ __launch_bounds__(WARPS_X_PER_TB* WARPS_Y_PER_TB* WARP_SIZE)
+    swizzle_block_scaling_2d_to_mxfp8_scaling_factors_kernel(
+        const void* __restrict__ const in, void* __restrict__ const out, const uint32_t tiles_x,
+        const uint32_t tiles_y, const uint32_t in_y_stride, const uint32_t out_y_stride) {
+  // load thread indices
+  const uint32_t lane = threadIdx.x;
+  __builtin_assume(lane < WARP_SIZE);
+  const uint32_t warp_x = threadIdx.z;
+  __builtin_assume(warp_x < WARPS_X_PER_TB);
+  const uint32_t warp_y = threadIdx.y;
+  __builtin_assume(warp_y < WARPS_Y_PER_TB);
+
+  // compute tile indices
+  const uint32_t out_tile_y = blockIdx.y * WARPS_Y_PER_TB + warp_y;
+  const uint32_t out_tile_x = blockIdx.x * WARPS_X_PER_TB + warp_x;
+
+  // bounds check; uniform branch
+  if (out_tile_y >= tiles_y || out_tile_x >= tiles_x) {
+    return;
+  }
+
+  swizzle_tile(in, out, out_tile_x, out_tile_y, in_y_stride, out_y_stride, lane);
 }
 
 void launch_kernel(const void* const in, void* const out, uint32_t data_rows, uint32_t data_cols,
@@ -239,14 +269,259 @@ void launch_kernel(const void* const in, void* const out, uint32_t data_rows, ui
       in, out, tiles_x, tiles_y, in_y_stride, out_y_stride);
 }
 }  // namespace swizzle_kernel_2d
+namespace swizzle_kernel_tiles {
+constexpr uint32_t WARPS_PER_TB = 4;
+// Edge of the 128x128 data tiles; FP8 block-scaling blocks and swizzled MXFP8 scale tiles both
+// cover whole data tiles.
+constexpr int kBlockLen = 128;
 
-void swizzle_block_scaling_to_mxfp8_scaling_factors(const Tensor* input, Tensor* output,
-                                                    cudaStream_t stream) {
-  // Do nothing if tensor is empty
-  if (input->data.numel() == 0) {
+// Converts the scaling factors of data tile `tile` (row-major over the tensor's tiles) of a tensor
+// with rowwise data [rows, cols]. `in` and `out` point at the tensor's compact FP8 block scales and
+// its swizzled MXFP8 scales. All lanes of the warp must call this with the same tile.
+template <bool kIs2D>
+__device__ __forceinline__ void convert_tile(const float* const in, uint8_t* const out,
+                                             const size_t rows, const size_t cols,
+                                             const uint32_t tile, const uint32_t lane) {
+  const uint32_t tiles_x = static_cast<uint32_t>(DIVUP(cols, static_cast<size_t>(kBlockLen)));
+  const uint32_t out_tile_y = tile / tiles_x;
+  const uint32_t out_tile_x = tile - out_tile_y * tiles_x;
+  // Each data tile corresponds to a 128x4 tile in the output scales.
+  const uint32_t out_y_stride = tiles_x * static_cast<uint32_t>(kBlockLen) * 4;
+  if constexpr (kIs2D) {
+    // Each data tile corresponds to a 1x1 tile in the input scales.
+    const uint32_t in_y_stride =
+        static_cast<uint32_t>(DIVUP_TO_MULTIPLE(tiles_x, 4) * sizeof(float));
+    swizzle_kernel_2d::swizzle_tile(in, out, out_tile_x, out_tile_y, in_y_stride, out_y_stride,
+                                    lane);
+  } else {
+    // Each data tile corresponds to a 128x1 tile in the input scales, which are in transposed
+    // order.
+    const uint32_t tiles_y = static_cast<uint32_t>(DIVUP(rows, static_cast<size_t>(kBlockLen)));
+    const uint32_t in_y_stride = static_cast<uint32_t>(DIVUP_TO_MULTIPLE(rows, 4) * sizeof(float));
+    const uint32_t first_oob = static_cast<uint32_t>((DIVUP_TO_MULTIPLE(rows, 4) % kBlockLen) / 4);
+    if (first_oob == 0) {
+      swizzle_kernel_1d::swizzle_tile(in, out, out_tile_x, out_tile_y, tiles_y, in_y_stride,
+                                      out_y_stride, swizzle_kernel_1d::NO_OOB_TAG, lane);
+    } else {
+      swizzle_kernel_1d::swizzle_tile(in, out, out_tile_x, out_tile_y, tiles_y, in_y_stride,
+                                      out_y_stride, first_oob, lane);
+    }
+  }
+}
+
+// Tensor that `tile` belongs to, given the first tile of each tensor in ascending `tile_start`:
+// the last tensor whose first tile is at or before it. A tensor without tiles shares its first
+// tile with the next tensor, so it is never selected.
+template <typename T>
+__device__ __forceinline__ size_t find_tensor(const T* const tile_start, const size_t num_tensors,
+                                              const T tile) {
+  size_t lo = 0;
+  size_t hi = num_tensors;
+  while (hi - lo > 1) {
+    const size_t mid = (lo + hi) / 2;
+    if (tile_start[mid] <= tile) {
+      lo = mid;
+    } else {
+      hi = mid;
+    }
+  }
+  return lo;
+}
+}  // namespace swizzle_kernel_tiles
+namespace swizzle_kernel_grouped {
+using swizzle_kernel_tiles::kBlockLen;
+using swizzle_kernel_tiles::WARPS_PER_TB;
+constexpr size_t kMaxBlocksPerSM = 8;
+// Each warp converts one 128x128 data tile, writing 128x4 = 512 scale bytes.
+constexpr size_t kTileOutputBytes = 512;
+
+// Per-tensor scale sizes for a tensor with rowwise data [rows, cols]. These must match
+// padded_block_{1d,2d}_scale_inv_floats(.., rowwise=true) and
+// padded_mxfp8_scale_inv_bytes(.., rowwise=true) in gemm/cublaslt_grouped_gemm.cu, which locate
+// each tensor's scales in the same grouped buffers.
+template <bool kIs2D>
+__device__ __forceinline__ size_t input_scale_floats(const size_t rows, const size_t cols) {
+  if constexpr (kIs2D) {
+    return DIVUP(rows, static_cast<size_t>(kBlockLen)) *
+           DIVUP_TO_MULTIPLE(DIVUP(cols, static_cast<size_t>(kBlockLen)), 4);
+  } else {
+    return DIVUP(cols, static_cast<size_t>(kBlockLen)) * DIVUP_TO_MULTIPLE(rows, 4);
+  }
+}
+__device__ __forceinline__ size_t output_scale_bytes(const size_t rows, const size_t cols) {
+  return DIVUP_TO_MULTIPLE(rows, static_cast<size_t>(kBlockLen)) *
+         DIVUP(cols, static_cast<size_t>(kBlockLen)) * 4;
+}
+
+// Shared memory for the per-tensor tables: first tile (num_tensors + 1 entries, the last being the
+// total), first input scale and first output scale of every tensor.
+__host__ __device__ __forceinline__ size_t table_smem_bytes(const size_t num_tensors) {
+  return (3 * num_tensors + 1) * sizeof(size_t);
+}
+
+// Persistent kernel: each CTA tabulates every tensor's first tile and scale offsets in shared
+// memory, then its warps walk 128x128 data tiles across all tensors in the group and find each
+// tile's tensor by binary search. The per-tensor dims are read on the device, so a captured launch
+// stays correct when they change between CUDA graph replays.
+template <bool kIs2D>
+__global__ void __launch_bounds__(WARPS_PER_TB* WARP_SIZE)
+    grouped_swizzle_block_scaling_to_mxfp8_kernel(
+        const float* __restrict__ const in, uint8_t* __restrict__ const out,
+        const int64_t* __restrict__ const first_dims, const int64_t* __restrict__ const last_dims,
+        const size_t uniform_first, const size_t uniform_last, const size_t num_tensors) {
+  extern __shared__ size_t tables[];
+  size_t* const tile_start = tables;
+  size_t* const in_start = tile_start + num_tensors + 1;
+  size_t* const out_start = in_start + num_tensors;
+
+  const uint32_t lane = threadIdx.x % WARP_SIZE;
+  const auto tensor_rows = [=](const size_t t) {
+    return first_dims != nullptr ? static_cast<size_t>(first_dims[t]) : uniform_first;
+  };
+  const auto tensor_cols = [=](const size_t t) {
+    return last_dims != nullptr ? static_cast<size_t>(last_dims[t]) : uniform_last;
+  };
+
+  // Exclusive prefix sums over the tensors, 32 tensors per step.
+  if (threadIdx.x < WARP_SIZE) {
+    constexpr uint32_t kFullMask = 0xFFFFFFFF;
+    size_t tile_carry = 0;
+    size_t in_carry = 0;
+    size_t out_carry = 0;
+    for (size_t base = 0; base < num_tensors; base += WARP_SIZE) {
+      const size_t t = base + lane;
+      size_t tiles = 0;
+      size_t in_size = 0;
+      size_t out_size = 0;
+      if (t < num_tensors) {
+        const size_t rows = tensor_rows(t);
+        const size_t cols = tensor_cols(t);
+        tiles = DIVUP(rows, static_cast<size_t>(kBlockLen)) *
+                DIVUP(cols, static_cast<size_t>(kBlockLen));
+        in_size = input_scale_floats<kIs2D>(rows, cols);
+        out_size = output_scale_bytes(rows, cols);
+      }
+      size_t tiles_sum = tiles;
+      size_t in_sum = in_size;
+      size_t out_sum = out_size;
+#pragma unroll
+      for (uint32_t d = 1; d < WARP_SIZE; d *= 2) {
+        const size_t tiles_up = __shfl_up_sync(kFullMask, tiles_sum, d);
+        const size_t in_up = __shfl_up_sync(kFullMask, in_sum, d);
+        const size_t out_up = __shfl_up_sync(kFullMask, out_sum, d);
+        if (lane >= d) {
+          tiles_sum += tiles_up;
+          in_sum += in_up;
+          out_sum += out_up;
+        }
+      }
+      if (t < num_tensors) {
+        tile_start[t] = tile_carry + tiles_sum - tiles;
+        in_start[t] = in_carry + in_sum - in_size;
+        out_start[t] = out_carry + out_sum - out_size;
+      }
+      tile_carry += __shfl_sync(kFullMask, tiles_sum, WARP_SIZE - 1);
+      in_carry += __shfl_sync(kFullMask, in_sum, WARP_SIZE - 1);
+      out_carry += __shfl_sync(kFullMask, out_sum, WARP_SIZE - 1);
+    }
+    if (lane == 0) {
+      tile_start[num_tensors] = tile_carry;
+    }
+  }
+  __syncthreads();
+
+  const size_t total_tiles = tile_start[num_tensors];
+  const size_t warp_stride = static_cast<size_t>(gridDim.x) * WARPS_PER_TB;
+  for (size_t tile_id = static_cast<size_t>(blockIdx.x) * WARPS_PER_TB + threadIdx.x / WARP_SIZE;
+       tile_id < total_tiles; tile_id += warp_stride) {
+    const size_t t = swizzle_kernel_tiles::find_tensor(tile_start, num_tensors, tile_id);
+    swizzle_kernel_tiles::convert_tile<kIs2D>(in + in_start[t], out + out_start[t], tensor_rows(t),
+                                              tensor_cols(t),
+                                              static_cast<uint32_t>(tile_id - tile_start[t]), lane);
+  }
+}
+
+// Lets the kernel use more than the default 48 KiB of dynamic shared memory when its tables need
+// it. cudaFuncSetAttribute is a host-synchronous driver call, so the limit is raised to the device
+// maximum once per device.
+template <bool kIs2D>
+void enable_table_smem(const size_t smem_bytes, const size_t num_tensors) {
+  constexpr size_t kDefaultMaxSmemBytes = 48 * 1024;
+  if (smem_bytes <= kDefaultMaxSmemBytes) {
     return;
   }
+  const int device = cuda::current_device();
+  const int max_smem_bytes = cuda::max_dynamic_shared_memory_per_block(device);
+  NVTE_CHECK(smem_bytes <= static_cast<size_t>(max_smem_bytes), "Too many tensors (", num_tensors,
+             ") to convert FP8 block scaling to MXFP8 scales: needs ", smem_bytes,
+             " bytes of shared memory, but the device allows ", max_smem_bytes, ".");
+  static std::vector<std::once_flag> flags(cuda::num_devices());
+  std::call_once(flags[device], [&]() {
+    NVTE_CHECK_CUDA(cudaFuncSetAttribute(grouped_swizzle_block_scaling_to_mxfp8_kernel<kIs2D>,
+                                         cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                         max_smem_bytes));
+  });
+}
 
+// Upper bound (bytes) on the swizzled MXFP8 scales of all tensors, from the logical shape [F, L]
+// alone because the per-tensor dims live on the device:
+//   uniform:        n * roundup(F / n, 128) * ceil(L / 128) * 4     (exact)
+//   varying first:  (F + 127 n) * ceil(L / 128) * 4
+//   varying last:   roundup(F, 128) * 4 * (ceil(L / 128) + n)
+size_t grouped_mxfp8_scale_bytes_upper_bound(const GroupedTensor& t) {
+  NVTE_CHECK(t.logical_shape.ndim == 2, "Input grouped tensor must have a 2D logical shape");
+  NVTE_CHECK(!(t.first_dims.has_data() && t.last_dims.has_data()),
+             "Converting FP8 block scaling to MXFP8 scales does not support grouped tensors whose "
+             "first and last dims both vary");
+  const size_t n = t.num_tensors;
+  const size_t F = t.logical_shape.data[0];
+  const size_t L = t.logical_shape.data[1];
+  if (n == 0 || F == 0 || L == 0) {
+    return 0;
+  }
+  if (t.first_dims.has_data()) {
+    return (F + (kBlockLen - 1) * n) * DIVUP(L, static_cast<size_t>(kBlockLen)) * 4;
+  }
+  if (t.last_dims.has_data()) {
+    return DIVUP_TO_MULTIPLE(F, kBlockLen) * 4 * (DIVUP(L, static_cast<size_t>(kBlockLen)) + n);
+  }
+  return n * DIVUP_TO_MULTIPLE(F / n, kBlockLen) * DIVUP(L, static_cast<size_t>(kBlockLen)) * 4;
+}
+}  // namespace swizzle_kernel_grouped
+namespace swizzle_kernel_multi {
+using swizzle_kernel_tiles::WARPS_PER_TB;
+constexpr size_t kMaxTensorsPerKernel = 128;
+
+struct MultiConvertArgs {
+  const float* input[kMaxTensorsPerKernel];
+  uint8_t* output[kMaxTensorsPerKernel];
+  uint32_t rows[kMaxTensorsPerKernel];
+  uint32_t cols[kMaxTensorsPerKernel];
+  // First tile of each tensor; the last entry is the total number of tiles.
+  uint32_t tile_start[kMaxTensorsPerKernel + 1];
+  uint32_t num_tensors;
+};
+static_assert(sizeof(MultiConvertArgs) <= 4096, "Kernel arguments must fit in 4 KiB");
+
+// Each warp converts one 128x128 data tile of one of the tensors.
+template <bool kIs2D>
+__global__ void __launch_bounds__(WARPS_PER_TB* WARP_SIZE)
+    multi_swizzle_block_scaling_to_mxfp8_kernel(const __grid_constant__ MultiConvertArgs args) {
+  const uint32_t tile = blockIdx.x * WARPS_PER_TB + threadIdx.x / WARP_SIZE;
+  if (tile >= args.tile_start[args.num_tensors]) {
+    return;
+  }
+  const size_t t = swizzle_kernel_tiles::find_tensor(args.tile_start, args.num_tensors, tile);
+  swizzle_kernel_tiles::convert_tile<kIs2D>(args.input[t], args.output[t], args.rows[t],
+                                            args.cols[t], tile - args.tile_start[t],
+                                            threadIdx.x % WARP_SIZE);
+}
+}  // namespace swizzle_kernel_multi
+
+namespace {
+
+// Checks one input/output pair of the non-grouped conversion.
+void check_block_scaling_to_mxfp8_tensors(const Tensor* input, const Tensor* output) {
   CheckInputTensor(*input, "block_scaling_scaling_factor_input");
   CheckInputTensor(*output, "mxfp8_scaling_factor_output");
 
@@ -302,9 +577,6 @@ void swizzle_block_scaling_to_mxfp8_scaling_factors(const Tensor* input, Tensor*
     NVTE_CHECK(input_scale_inv_cols == DIVUP<size_t>(data_rows, 4) * 4,
                "Expected the input scaling factor matrix to have ", DIVUP<size_t>(data_rows, 4) * 4,
                " columns, but it has ", input_scale_inv_cols, " columns instead.");
-
-    swizzle_kernel_1d::launch_kernel(input->scale_inv.dptr, output->scale_inv.dptr, data_rows,
-                                     data_cols, stream);
   } else {  // scaling_mode == NVTE_BLOCK_SCALING_2D
     NVTE_CHECK(input_scale_inv_rows == DIVUP<size_t>(data_rows, 128),
                "Expected the input scaling factor matrix to have ", DIVUP<size_t>(data_rows, 128),
@@ -313,10 +585,164 @@ void swizzle_block_scaling_to_mxfp8_scaling_factors(const Tensor* input, Tensor*
                "Expected the input scaling factor matrix to have ",
                DIVUP<size_t>(data_cols, 512) * 4, " columns, but it has ", input_scale_inv_cols,
                " columns instead.");
+  }
+}
 
+}  // namespace
+
+void swizzle_block_scaling_to_mxfp8_scaling_factors(const Tensor* input, Tensor* output,
+                                                    cudaStream_t stream) {
+  // Do nothing if tensor is empty
+  if (input->data.numel() == 0) {
+    return;
+  }
+
+  check_block_scaling_to_mxfp8_tensors(input, output);
+  const NVTEScalingMode scaling_mode = input->scaling_mode;
+  const size_t data_rows = input->data.shape[0];
+  const size_t data_cols = input->data.shape[1];
+  if (scaling_mode == NVTE_BLOCK_SCALING_1D) {
+    swizzle_kernel_1d::launch_kernel(input->scale_inv.dptr, output->scale_inv.dptr, data_rows,
+                                     data_cols, stream);
+  } else {  // scaling_mode == NVTE_BLOCK_SCALING_2D
     swizzle_kernel_2d::launch_kernel(input->scale_inv.dptr, output->scale_inv.dptr, data_rows,
                                      data_cols, stream);
   }
+}
+
+void multi_tensor_swizzle_block_scaling_to_mxfp8_scaling_factors(
+    const std::vector<const Tensor*>& inputs, const std::vector<Tensor*>& outputs,
+    cudaStream_t stream) {
+  using namespace swizzle_kernel_multi;
+  NVTE_CHECK(inputs.size() == outputs.size(),
+             "Expected the same number of input and output tensors");
+
+  // Tensors are batched into launches of up to kMaxTensorsPerKernel tensors with the same
+  // scaling mode.
+  MultiConvertArgs args{};
+  bool is_2d = false;
+  auto launch = [&]() {
+    if (args.num_tensors == 0) {
+      return;
+    }
+    const dim3 grid_dim{DIVUP(args.tile_start[args.num_tensors], WARPS_PER_TB)};
+    const dim3 block_dim{WARPS_PER_TB * WARP_SIZE};
+    if (is_2d) {
+      multi_swizzle_block_scaling_to_mxfp8_kernel<true><<<grid_dim, block_dim, 0, stream>>>(args);
+    } else {
+      multi_swizzle_block_scaling_to_mxfp8_kernel<false><<<grid_dim, block_dim, 0, stream>>>(args);
+    }
+    NVTE_CHECK_CUDA(cudaGetLastError());
+    args.num_tensors = 0;
+  };
+  for (size_t i = 0; i < inputs.size(); ++i) {
+    const Tensor* input = inputs[i];
+    const Tensor* output = outputs[i];
+    // Skip empty tensors
+    if (input->data.numel() == 0) {
+      continue;
+    }
+    check_block_scaling_to_mxfp8_tensors(input, output);
+    const size_t rows = input->data.shape[0];
+    const size_t cols = input->data.shape[1];
+    NVTE_CHECK(rows <= UINT32_MAX && cols <= UINT32_MAX, "Input data is too large");
+    NVTE_CHECK(is_aligned_ptr(output->scale_inv.dptr, alignof(uint4)),
+               "Output scaling factor pointer must be aligned to ", alignof(uint4), " bytes");
+    if (input->scaling_mode == NVTE_BLOCK_SCALING_1D) {
+      NVTE_CHECK(is_aligned_ptr(input->scale_inv.dptr, alignof(uint4)),
+                 "Input scaling factor pointer must be aligned to ", alignof(uint4), " bytes");
+      NVTE_CHECK(rows % 4 == 0, "Input tensor must not have any padding scaling factors");
+    } else {
+      NVTE_CHECK(is_aligned_ptr(input->scale_inv.dptr, alignof(float)),
+                 "Input scaling factor pointer must be aligned to ", alignof(float), " bytes");
+    }
+    const bool tensor_is_2d = input->scaling_mode == NVTE_BLOCK_SCALING_2D;
+    if (args.num_tensors == kMaxTensorsPerKernel ||
+        (args.num_tensors > 0 && tensor_is_2d != is_2d)) {
+      launch();
+    }
+    is_2d = tensor_is_2d;
+    const size_t n = args.num_tensors;
+    args.input[n] = reinterpret_cast<const float*>(input->scale_inv.dptr);
+    args.output[n] = reinterpret_cast<uint8_t*>(output->scale_inv.dptr);
+    args.rows[n] = static_cast<uint32_t>(rows);
+    args.cols[n] = static_cast<uint32_t>(cols);
+    args.tile_start[n + 1] = args.tile_start[n] + static_cast<uint32_t>(DIVUP<size_t>(rows, 128) *
+                                                                        DIVUP<size_t>(cols, 128));
+    args.num_tensors = n + 1;
+  }
+  launch();
+}
+
+void swizzle_grouped_block_scaling_to_mxfp8_scaling_factors(const GroupedTensor* input,
+                                                            GroupedTensor* output,
+                                                            cudaStream_t stream) {
+  using namespace swizzle_kernel_grouped;
+
+  const NVTEScalingMode scaling_mode = input->scaling_mode;
+  NVTE_CHECK(scaling_mode == NVTE_BLOCK_SCALING_1D || scaling_mode == NVTE_BLOCK_SCALING_2D,
+             "Input grouped tensor must be a block scaling tensor");
+  NVTE_CHECK(output->scaling_mode == NVTE_MXFP8_1D_SCALING,
+             "Output grouped tensor must be an mxfp8 tensor");
+  NVTE_CHECK(output->with_gemm_swizzled_scales,
+             "Expected output grouped tensor with scales in GEMM swizzled format.");
+  NVTE_CHECK(input->num_tensors == output->num_tensors,
+             "Input and output grouped tensors must have the same number of tensors");
+  const bool varying_first = input->first_dims.has_data();
+  const bool varying_last = input->last_dims.has_data();
+
+  const size_t bound = grouped_mxfp8_scale_bytes_upper_bound(*input);
+  if (bound == 0) {
+    return;
+  }
+
+  NVTE_CHECK(input->data.dptr != nullptr, "Input must have rowwise data");
+  NVTE_CHECK(output->data.dptr == input->data.dptr, "Output must share data with input");
+  NVTE_CHECK(input->data.dtype == DType::kFloat8E4M3 || input->data.dtype == DType::kFloat8E5M2,
+             "Input data must have FP8E4M3 or FP8E5M2 dtype to be compatible with MXFP8");
+  NVTE_CHECK(output->data.dtype == input->data.dtype,
+             "Output data must have the same dtype as input data");
+  NVTE_CHECK(input->scale_inv.dptr != nullptr && input->scale_inv.dtype == DType::kFloat32,
+             "Input must have FP32 rowwise scaling factors");
+  NVTE_CHECK(output->scale_inv.dptr != nullptr && output->scale_inv.dtype == DType::kFloat8E8M0,
+             "Output must have E8M0 rowwise scaling factors");
+  NVTE_CHECK(output->scale_inv.numel() >= bound, "Output scaling factor buffer holds ",
+             output->scale_inv.numel(), " bytes, but the conversion may write up to ", bound,
+             " bytes.");
+  NVTE_CHECK(is_aligned_ptr(input->scale_inv.dptr, alignof(uint4)),
+             "Input scaling factor pointer must be aligned to ", alignof(uint4), " bytes");
+  NVTE_CHECK(is_aligned_ptr(output->scale_inv.dptr, alignof(uint4)),
+             "Output scaling factor pointer must be aligned to ", alignof(uint4), " bytes");
+
+  const size_t uniform_first = varying_first ? 0 : input->get_common_first_dim();
+  const size_t uniform_last = varying_last ? 0 : input->get_common_last_dim();
+  if (scaling_mode == NVTE_BLOCK_SCALING_1D && !varying_first) {
+    NVTE_CHECK(uniform_first % 4 == 0, "Input tensor must not have any padding scaling factors");
+  }
+  const auto* first_dims =
+      varying_first ? reinterpret_cast<const int64_t*>(input->first_dims.dptr) : nullptr;
+  const auto* last_dims =
+      varying_last ? reinterpret_cast<const int64_t*>(input->last_dims.dptr) : nullptr;
+
+  const size_t max_blocks = DIVUP(DIVUP(bound, kTileOutputBytes), size_t{WARPS_PER_TB});
+  const size_t sm_count = static_cast<size_t>(cuda::sm_count(cuda::current_device()));
+  const dim3 grid_dim{static_cast<uint32_t>(std::min(max_blocks, sm_count * kMaxBlocksPerSM))};
+  const dim3 block_dim{WARPS_PER_TB * WARP_SIZE};
+  const auto* in = reinterpret_cast<const float*>(input->scale_inv.dptr);
+  auto* out = reinterpret_cast<uint8_t*>(output->scale_inv.dptr);
+  const size_t smem_bytes = table_smem_bytes(input->num_tensors);
+  if (scaling_mode == NVTE_BLOCK_SCALING_2D) {
+    enable_table_smem<true>(smem_bytes, input->num_tensors);
+    grouped_swizzle_block_scaling_to_mxfp8_kernel<true>
+        <<<grid_dim, block_dim, smem_bytes, stream>>>(in, out, first_dims, last_dims, uniform_first,
+                                                      uniform_last, input->num_tensors);
+  } else {
+    enable_table_smem<false>(smem_bytes, input->num_tensors);
+    grouped_swizzle_block_scaling_to_mxfp8_kernel<false>
+        <<<grid_dim, block_dim, smem_bytes, stream>>>(in, out, first_dims, last_dims, uniform_first,
+                                                      uniform_last, input->num_tensors);
+  }
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 }  // namespace transformer_engine
@@ -327,4 +753,37 @@ void nvte_swizzle_block_scaling_to_mxfp8_scaling_factors(const NVTETensor input,
   using namespace transformer_engine;
   swizzle_block_scaling_to_mxfp8_scaling_factors(convertNVTETensorCheck(input),
                                                  convertNVTETensorCheck(output), stream);
+}
+
+void nvte_multi_tensor_swizzle_block_scaling_to_mxfp8_scaling_factors(const NVTETensor* inputs,
+                                                                      NVTETensor* outputs,
+                                                                      const size_t num_tensors,
+                                                                      cudaStream_t stream) {
+  NVTE_API_CALL(nvte_multi_tensor_swizzle_block_scaling_to_mxfp8_scaling_factors);
+  using namespace transformer_engine;
+  std::vector<const Tensor*> input_list;
+  std::vector<Tensor*> output_list;
+  input_list.reserve(num_tensors);
+  output_list.reserve(num_tensors);
+  for (size_t i = 0; i < num_tensors; ++i) {
+    input_list.push_back(convertNVTETensorCheck(inputs[i]));
+    output_list.push_back(convertNVTETensorCheck(outputs[i]));
+  }
+  multi_tensor_swizzle_block_scaling_to_mxfp8_scaling_factors(input_list, output_list, stream);
+}
+
+void nvte_swizzle_grouped_block_scaling_to_mxfp8_scaling_factors(const NVTEGroupedTensor input,
+                                                                 NVTEGroupedTensor output,
+                                                                 cudaStream_t stream) {
+  NVTE_API_CALL(nvte_swizzle_grouped_block_scaling_to_mxfp8_scaling_factors);
+  using namespace transformer_engine;
+  swizzle_grouped_block_scaling_to_mxfp8_scaling_factors(
+      convertNVTEGroupedTensorCheck(input), convertNVTEGroupedTensorCheck(output), stream);
+}
+
+size_t nvte_get_grouped_block_scaling_to_mxfp8_scale_inv_size(const NVTEGroupedTensor input) {
+  NVTE_API_CALL(nvte_get_grouped_block_scaling_to_mxfp8_scale_inv_size);
+  using namespace transformer_engine;
+  return swizzle_kernel_grouped::grouped_mxfp8_scale_bytes_upper_bound(
+      *convertNVTEGroupedTensorCheck(input));
 }
