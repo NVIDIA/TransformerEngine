@@ -87,6 +87,7 @@ from ..tensor import (
     HybridQuantizer,
     IdentityQuantizer,
     MXFP8Quantizer,
+    NVFP4Quantizer,
 )
 from ..quantized_tensor import (
     QuantizedTensorStorage,
@@ -245,11 +246,11 @@ class GroupedLinearFwdArgs:
         if self.fp8_calibration:
             return "fp8_calibration"
         if self.use_grouped_tensor_path:
-            if self.fp8 and not isinstance(self.input_quantizers[0], Float8CurrentScalingQuantizer):
-                return (
-                    "a fused-path FP8 recipe other than per-tensor current scaling "
-                    "(grouped scale offsets are per-split host metadata)"
-                )
+            if self.fp8 and not isinstance(
+                self.input_quantizers[0],
+                (Float8CurrentScalingQuantizer, MXFP8Quantizer, NVFP4Quantizer),
+            ):
+                return "a fused-path recipe other than current scaling, MXFP8, or NVFP4"
         elif self.m_splits is None:
             return "m_splits passed as a device tensor inside the compiled region"
         if any(w.requires_grad != self.weights_requires_grad for w in self.weights):
@@ -1699,19 +1700,13 @@ def _rebuild_grouped_input(args: GroupedLinearFusedBwdArgs) -> Optional[GroupedT
     payload = dict(zip(_GX_PAYLOAD_KEYS, args.gx_payload))
     if payload["data"] is not None:
         payload["data"] = payload["data"].reshape(-1)
-    data = payload["data"] if payload["data"] is not None else payload["columnwise_data"]
     payload["first_dims"] = args.m_splits_tensor
     payload["tensor_offsets"] = args.input_tensor_offsets
-    scale_offsets = list(range(args.num_gemms + 1)) if args.fp8 else None
     return GroupedTensorStorage(
-        shape=(data.numel() // args.in_features, args.in_features),
+        shape=(math.prod(args.grad_output.shape[:-1]), args.in_features),
         dtype=args.activation_dtype,
         num_tensors=args.num_gemms,
         quantizer=args.input_quantizers[0] if args.fp8 else None,
-        scale_inv_offsets=scale_offsets if payload["scale_inv"] is not None else None,
-        columnwise_scale_inv_offsets=(
-            scale_offsets if payload["columnwise_scale_inv"] is not None else None
-        ),
         with_gemm_swizzled_scales=args.gx_swizzled,
         **payload,
     )
@@ -1777,11 +1772,7 @@ def _grouped_linear_fused_forward_impl(args: GroupedLinearFwdArgs) -> Tuple[Any,
 
 
 def _grouped_linear_fused_forward_fake(args: GroupedLinearFwdArgs) -> Tuple[Any, ...]:
-    """Shape/metadata-only twin of :func:`_grouped_linear_fused_forward_impl`.
-
-    Only mirrors configs the fused compiled gate admits: bf16/fp16 or FP8
-    per-tensor current scaling.
-    """
+    """Shape/metadata-only twin of :func:`_grouped_linear_fused_forward_impl`."""
     inp = args.inp
     num_gemms = args.num_gemms
     in_features = args.weights[0].shape[-1]
@@ -1797,7 +1788,7 @@ def _grouped_linear_fused_forward_fake(args: GroupedLinearFwdArgs) -> Tuple[Any,
         input_quantizer = args.input_quantizers[0]
         input_quantizer.set_usage(
             rowwise=True,
-            columnwise=is_grad_enabled and weight_requires_grad,
+            columnwise=is_grad_enabled and weight_requires_grad and not args.save_original_input,
         )
         input_quantizer.optimize_for_gemm = True
 
@@ -1838,6 +1829,16 @@ def _grouped_linear_fused_forward_fake(args: GroupedLinearFwdArgs) -> Tuple[Any,
                     aliases[0] = ("inp",)
                 else:
                     gx_payload[0] = _spec(total, activation_dtype)
+            elif isinstance(input_quantizer, (MXFP8Quantizer, NVFP4Quantizer)):
+                is_nvfp4 = isinstance(input_quantizer, NVFP4Quantizer)
+                gx_payload[1] = _spec(total // 2 if is_nvfp4 else total, torch.uint8)
+                gx_payload[3] = _spec(
+                    math.prod(input_quantizer.get_scale_shape((tokens, in_features), True)),
+                    torch.uint8,
+                )
+                if is_nvfp4:
+                    gx_payload[4] = _spec(num_gemms, torch.float32)
+                    gx_payload[5] = _spec(num_gemms, torch.float32)
             else:
                 # FP8 per-tensor current scaling; on Hopper the rowwise data is
                 # freed after the fprop GEMM when a columnwise copy exists.
@@ -1862,7 +1863,9 @@ def _grouped_linear_fused_forward_fake(args: GroupedLinearFwdArgs) -> Tuple[Any,
         ctx_attrs = {
             "saved_tensor_aliases": tuple(aliases),
             "gx_present": gx_present,
-            "gx_swizzled": False,
+            "gx_swizzled": gx_present
+            and not args.save_original_input
+            and isinstance(args.input_quantizers[0], (MXFP8Quantizer, NVFP4Quantizer)),
         }
 
     return (out, *new_workspaces, tensors_to_save, ctx_attrs)
@@ -2295,7 +2298,7 @@ class GroupedLinear(TransformerEngineBaseModule):
 
     ``torch.compile(fullgraph=True)`` supports discrete expert parameters with host
     split lists. The native grouped-tensor path supports CUDA split tensors with
-    BF16/FP16 or FP8 current scaling, including ``save_original_input=True``.
+    BF16/FP16, FP8 current scaling, MXFP8, or NVFP4, including ``save_original_input=True``.
     Unsupported configurations fall back to eager when graph breaks are allowed.
 
     Parameters

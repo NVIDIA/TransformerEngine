@@ -2812,7 +2812,10 @@ _fused_grouped_cublas_ok = _fused_grouped_cc_ok and tex.get_cublasLt_version() >
 @pytest.mark.parametrize("compile_mode", _compile_modes)
 @pytest.mark.parametrize(
     "fp8_recipe",
-    [None] + ([recipe.Float8CurrentScaling()] if fp8_available else []),
+    [None]
+    + ([recipe.Float8CurrentScaling()] if fp8_available else [])
+    + ([recipe.MXFP8BlockScaling()] if mxfp8_available else [])
+    + ([recipe.NVFP4BlockScaling(disable_stochastic_rounding=True)] if nvfp4_available else []),
     ids=lambda r: "bf16" if r is None else type(r).__name__,
 )
 @pytest.mark.parametrize("save_original_input", [False, True])
@@ -2826,16 +2829,24 @@ def test_te_grouped_linear_fused_compiles(fp8_recipe, compile_mode, save_origina
             pytest.skip("FP8 current-scaling fused grouped GEMM on Hopper needs cuBLASLt 13.5+")
     dtype = torch.bfloat16
     device = "cuda"
+    block_scaled = fp8_recipe is not None and not fp8_recipe.float8_current_scaling()
+    m_splits = [128, 256, 128, 256] if block_scaled else _GROUPED_M_SPLITS
+    in_features, out_features = (128, 128) if block_scaled else (_GROUPED_IN, _GROUPED_OUT)
     model = te.GroupedLinear(
         _GROUPED_NUM_GEMMS,
-        _GROUPED_IN,
-        _GROUPED_OUT,
+        in_features,
+        out_features,
         params_dtype=dtype,
         device=device,
         use_grouped_tensor=True,
         save_original_input=save_original_input,
     )
-    m_splits_dev = torch.tensor(_GROUPED_M_SPLITS, dtype=torch.int64, device=device)
+    m_splits_dev = torch.tensor(m_splits, dtype=torch.int64, device=device)
+
+    def make_input():
+        return torch.randn(
+            sum(m_splits), in_features, dtype=dtype, device=device, requires_grad=True
+        )
 
     def fn(inp):
         if fp8_recipe is None:
@@ -2845,7 +2856,7 @@ def test_te_grouped_linear_fused_compiles(fp8_recipe, compile_mode, save_origina
 
     torch._dynamo.reset()
     if compile_mode == "reduce-overhead":
-        _cudagraph_warmup(fn, _grouped_input(dtype, device, requires_grad=True), backward=True)
+        _cudagraph_warmup(fn, make_input(), backward=True)
         model.zero_grad(set_to_none=True)
     compiled = torch.compile(fn, fullgraph=True, mode=compile_mode)
 
@@ -2853,14 +2864,18 @@ def test_te_grouped_linear_fused_compiles(fp8_recipe, compile_mode, save_origina
         # Two warmup calls absorb the one-time recompile from lazily created
         # module attributes.
         for _ in range(2):
-            _assert_close_grouped(fn, compiled, model, _grouped_input(dtype, device))
+            _assert_close_grouped(fn, compiled, model, make_input())
         baseline = _dynamo_counter("stats", "unique_graphs")
 
         # Change the split distribution IN PLACE: same graph, no recompile.
-        m_splits_dev.copy_(torch.tensor([16, 32, 40, 40], dtype=torch.int64, device=device))
-        _assert_close_grouped(fn, compiled, model, _grouped_input(dtype, device))
-        m_splits_dev.copy_(torch.tensor([64, 8, 32, 24], dtype=torch.int64, device=device))
-        _assert_close_grouped(fn, compiled, model, _grouped_input(dtype, device))
+        changed_splits = (
+            [[256, 128, 256, 128], [128, 128, 128, 384]]
+            if block_scaled
+            else [[16, 32, 40, 40], [64, 8, 32, 24]]
+        )
+        for splits in changed_splits:
+            m_splits_dev.copy_(torch.tensor(splits, dtype=torch.int64, device=device))
+            _assert_close_grouped(fn, compiled, model, make_input())
         if baseline:
             assert (
                 _dynamo_counter("stats", "unique_graphs") == baseline
