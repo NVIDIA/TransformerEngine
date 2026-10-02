@@ -750,10 +750,10 @@ std::vector<MXFP82DScalingDirection> scaling_directions_2d_quantize = {
 std::vector<ActivationType> Activation_types = {
     ActivationType::Identity,
     ActivationType::GeLU,
-    // ActivationType::SiLU,
-    // ActivationType::ReLU,
-    // ActivationType::QGeLU,
-    // ActivationType::SReLU,
+    ActivationType::SiLU,
+    ActivationType::ReLU,
+    ActivationType::QGeLU,
+    ActivationType::SReLU,
 };
 
 class FusedCastMXFP8TestSuite : public ::testing::TestWithParam
