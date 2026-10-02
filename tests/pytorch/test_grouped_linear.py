@@ -1795,8 +1795,166 @@ def test_grouped_gemm_grouped_tensor_fp8_block_scaling_mixed_operands_rejected()
     first_dims = torch.full((z,), ms, dtype=torch.int64, device="cuda")
     grouped_B = tex.group_quantize(torch.cat(B, dim=0), mxfp8_quantizer, z, first_dims)
     out = _make_grouped_tensor_from_splits([ms] * z, n, A[0].device, torch.bfloat16)
-    with pytest.raises(RuntimeError, match="FP8 block scaling"):
+    with pytest.raises(RuntimeError, match="Either all tensors or no tensor"):
         general_grouped_gemm_for_grouped_tensor(grouped_A, grouped_B, out, layout="TN")
+
+
+@pytest.mark.parametrize("layout", ["TN", "NN", "NT"])
+@pytest.mark.parametrize("quant_type", ["mxfp8", "fp8_block_scaling"])
+def test_grouped_gemm_grouped_tensor_cuda_graph_changed_splits(quant_type, layout) -> None:
+    """Grouped quantize and GEMM in a CUDA graph, replayed with changed per-expert splits."""
+    if quant_type == "fp8_block_scaling":
+        if not _fp8bs_grouped_gemm_available():
+            pytest.skip("Grouped GEMM with FP8 block scaling is unavailable on this system.")
+    else:
+        # As test_grouped_gemm_grouped_tensor_mxfp8, within the cuBLASLt grouped GEMM window.
+        if tex.get_cublasLt_version() < 130300:
+            pytest.skip("Grouped GEMM requires cuBLAS 13.3+.")
+        if not (10, 0) <= torch.cuda.get_device_capability() <= (11, 0):
+            pytest.skip("Grouped GEMM with MXFP8 requires Blackwell (SM100 to SM110).")
+    if not is_bf16_available():
+        pytest.skip("bfloat16 is required for grouped GEMM test.")
+
+    torch.manual_seed(0)
+    dtype = torch.bfloat16
+    device = torch.device("cuda")
+    z, k, n = 4, 256, 384
+    capacity = 1024
+    # Per-expert token counts: the capture-time splits, then changed splits with zero-token
+    # experts (in the middle and at both ends) and fewer tokens than the capacity. Grouped
+    # quantization requires every count to be a multiple of 128.
+    split_schedule = [
+        [256, 128, 384, 256],
+        [128, 0, 512, 128],
+        [0, 384, 128, 0],
+        [384, 256, 0, 384],
+    ]
+    for splits in split_schedule:
+        assert len(splits) == z and sum(splits) <= capacity
+        assert all(ms % 128 == 0 for ms in splits)
+
+    transa = layout[0] == "T"
+    transb = layout[1] == "T"
+    # A is the weight (uniform [n, k] per expert) for TN and NN, and the input for NT. B is the
+    # input for TN and the grad output for NN and NT (see _fp8bs_reference).
+    a_is_weight = layout != "NT"
+    b_last_dim = k if layout == "TN" else n
+    out_last_dim = n if layout == "TN" else k
+    static_a = torch.empty(z * n if a_is_weight else capacity, k, dtype=dtype, device=device)
+    static_b = torch.empty(capacity, b_last_dim, dtype=dtype, device=device)
+    static_first_dims = torch.zeros(z, dtype=torch.int64, device=device)
+    if layout == "NT":
+        grouped_wgrad = _make_grouped_tensor_uniform(z, n, k, device, dtype)
+        static_out = grouped_wgrad.rowwise_data.view(z * n, k)
+    else:
+        static_out = torch.empty(capacity, out_last_dim, dtype=dtype, device=device)
+
+    def _make_quantizer(*, rowwise, columnwise, is_weight):
+        if quant_type == "mxfp8":
+            quantizer = MXFP8Quantizer(
+                fp8_dtype=tex.DType.kFloat8E4M3, rowwise=rowwise, columnwise=columnwise
+            )
+        else:
+            quantizer = Float8BlockQuantizer(
+                fp8_dtype=tex.DType.kFloat8E4M3,
+                rowwise=rowwise,
+                columnwise=columnwise,
+                force_pow_2_scales=True,
+                amax_epsilon=0.0,
+                block_scaling_dim=2 if is_weight else 1,
+            )
+        # GEMM-ready scales, as GroupedLinear requests (FP8 block scaling keeps compact scales).
+        quantizer.optimize_for_gemm = True
+        return quantizer
+
+    quantizer_a = _make_quantizer(
+        rowwise=transa or a_is_weight, columnwise=not transa, is_weight=a_is_weight
+    )
+    quantizer_b = _make_quantizer(rowwise=not transb, columnwise=transb, is_weight=False)
+
+    def _run():
+        """Quantize both operands and run the grouped GEMM without reading splits on the host."""
+        if a_is_weight:
+            grouped_a = tex.group_quantize(static_a, quantizer_a, z, None)
+        else:
+            grouped_a = tex.group_quantize(
+                static_a,
+                quantizer_a,
+                z,
+                static_first_dims,
+                tensor_offsets=tex.splits_to_offsets(static_first_dims, k),
+            )
+        grouped_b = tex.group_quantize(
+            static_b,
+            quantizer_b,
+            z,
+            static_first_dims,
+            tensor_offsets=tex.splits_to_offsets(static_first_dims, b_last_dim),
+        )
+        if layout == "NT":
+            grouped_out = grouped_wgrad
+        else:
+            grouped_out = _GroupedLinear._make_grouped_tensor(
+                static_out,
+                num_gemms=z,
+                split_sizes=static_first_dims,
+                tensor_offsets=tex.splits_to_offsets(static_first_dims, out_last_dim),
+                last_dim=out_last_dim,
+                dtype=dtype,
+            )
+        general_grouped_gemm_for_grouped_tensor(
+            grouped_a, grouped_b, grouped_out, layout=layout, use_split_accumulator=True
+        )
+        return grouped_a, grouped_b, grouped_out
+
+    def _prepare(splits):
+        """Update the device-side splits and refill every static buffer in place."""
+        static_first_dims.copy_(torch.tensor(splits, dtype=torch.int64))
+        static_a.copy_(_fp8bs_exact_operand(tuple(static_a.shape), dtype))
+        static_b.copy_(_fp8bs_exact_operand(tuple(static_b.shape), dtype))
+        # Values from an earlier run must not survive in the output.
+        static_out.copy_(torch.randn_like(static_out))
+
+    def _check(splits, run_name):
+        bounds = [0]
+        for ms in splits:
+            bounds.append(bounds[-1] + ms)
+        experts = range(z)
+        b_parts = [static_b[bounds[e] : bounds[e + 1]] for e in experts]
+        if a_is_weight:
+            a_parts = [static_a[e * n : (e + 1) * n] for e in experts]
+            results = [static_out[bounds[e] : bounds[e + 1]] for e in experts]
+        else:
+            a_parts = [static_a[bounds[e] : bounds[e + 1]] for e in experts]
+            results = [static_out[e * n : (e + 1) * n] for e in experts]
+        expected = _fp8bs_reference(a_parts, b_parts, [None] * z, layout, False, dtype)
+        # Same tolerances and rationale as _run_fp8bs_grouped_gemm. The operands are also exactly
+        # representable in MXFP8: 1x32 and 32x1 blocks also lie inside a single 128x128 tile.
+        for e in experts:
+            torch.testing.assert_close(
+                results[e],
+                expected[e],
+                rtol=1.6e-2,
+                atol=1e-2,
+                msg=lambda m, e=e: f"{run_name}, splits {splits}, expert {e}: {m}",
+            )
+
+    # Eager warm-up outside the capture: initializes kernels, cuBLASLt and the cached grouped
+    # GEMM workspaces, and separates eager failures from graph-replay failures.
+    _prepare(split_schedule[0])
+    _run()
+    torch.cuda.synchronize()
+    _check(split_schedule[0], "eager")
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured_outputs = _run()  # Keep the captured outputs alive across replays.
+
+    for replay, splits in enumerate(split_schedule):
+        _prepare(splits)
+        graph.replay()
+        torch.cuda.synchronize()
+        _check(splits, f"replay {replay}")
 
 
 @pytest.mark.parametrize(
