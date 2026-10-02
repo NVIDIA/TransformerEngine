@@ -5,6 +5,7 @@
 """Pure Python base classes for quantization."""
 
 from __future__ import annotations
+from collections.abc import Sequence
 from typing import NamedTuple, Optional, Tuple, Iterable, Any, Dict, Union, get_type_hints
 import abc
 import warnings
@@ -287,6 +288,32 @@ class _SavedQuantizedTensor(NamedTuple):
     metadata: Dict[str, Any]
 
 
+class _SavedTensorSequence(Sequence):
+    """A non-copying suffix for storage restorers that consume tensors with ``[n:]``."""
+
+    def __init__(self, tensors, start=0, stop=None):
+        self.tensors = tensors
+        self.start = start
+        self.stop = len(tensors) if stop is None else stop
+
+    def __len__(self):
+        return self.stop - self.start
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            start, stop, step = index.indices(len(self))
+            if step == 1:
+                return _SavedTensorSequence(
+                    self.tensors, self.start + start, self.start + max(start, stop)
+                )
+            return [self[i] for i in range(start, stop, step)]
+        if index < 0:
+            index += len(self)
+        if index < 0 or index >= len(self):
+            raise IndexError("Saved tensor index out of range")
+        return self.tensors[self.start + index]
+
+
 def prepare_for_saving(
     *tensors: Union[torch.Tensor, QuantizedTensorStorage],
 ) -> Tuple[
@@ -308,6 +335,9 @@ def prepare_for_saving(
             tensor_objects_list.append(_SavedQuantizedTensor(tuple(inner_names), metadata))
         else:
             t, t_obj = tensor.prepare_for_saving()
+            # Record the exact buffer count while it is available. Restoring only this
+            # bounded slice avoids both suffix copies and per-element proxy indexing.
+            t_obj._num_saved_tensors = len(t)
             tensor_list.extend(t)
             tensor_objects_list.append(t_obj)
 
@@ -329,23 +359,31 @@ def restore_from_saved(
     Note: please use `restore_from_func_ctx` instead if you are restoring tensors from a function context to make sure tensor_objects is detached and its memory can be freed
     """
     tensor_objects = []
+    cursor = 0
     for tensor in tensors:
         if tensor is None or isinstance(tensor, torch.Tensor):
-            tensor_objects.append(saved_tensors[0])
-            saved_tensors = saved_tensors[1:]
+            tensor_objects.append(saved_tensors[cursor])
+            cursor += 1
         elif isinstance(tensor, _SavedQuantizedTensor):
             count = len(tensor.inner_names)
-            inner = dict(zip(tensor.inner_names, saved_tensors[:count]))
+            inner = dict(zip(tensor.inner_names, saved_tensors[cursor : cursor + count]))
             tensor_objects.append(
                 QuantizedTensorStorage.__tensor_unflatten__(inner, tensor.metadata, None, None)
             )
-            saved_tensors = saved_tensors[count:]
+            cursor += count
         else:
-            saved_tensors = tensor.restore_from_saved(saved_tensors)
+            count = getattr(tensor, "_num_saved_tensors", None)
+            if count is None:
+                # Compatibility with metadata supplied directly by a caller.
+                remaining = tensor.restore_from_saved(_SavedTensorSequence(saved_tensors, cursor))
+                cursor = len(saved_tensors) - len(remaining)
+            else:
+                tensor.restore_from_saved(saved_tensors[cursor : cursor + count])
+                cursor += count
             tensor_objects.append(tensor)
 
     if return_saved_tensors:
-        return tensor_objects, saved_tensors
+        return tensor_objects, saved_tensors[cursor:]
     return tensor_objects
 
 
