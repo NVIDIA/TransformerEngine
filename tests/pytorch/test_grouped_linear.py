@@ -114,9 +114,9 @@ def test_grouped_linear_skip_update_capture_short_circuit(monkeypatch, has_skip,
     original = _GroupedLinear.forward
     seen = []
 
-    def forward(ctx, inp, splits, non_tensor_args, *args):
-        seen.append((non_tensor_args[1], non_tensor_args[18]))
-        return original(ctx, inp, splits, non_tensor_args, *args)
+    def forward(ctx, inp, fwd_args, *args):
+        seen.append((fwd_args.is_first_microbatch, fwd_args.skip_fp8_weight_update))
+        return original(ctx, inp, fwd_args, *args)
 
     monkeypatch.setattr(_GroupedLinear, "forward", forward)
     with torch.no_grad():
@@ -2412,7 +2412,6 @@ def test_grouped_runtime_quantizer_work(monkeypatch, num_gemms, single_weight, p
     fp8_recipe = recipe.MXFP8BlockScaling()
     if not is_module_grouped_tensor_path_supported(fp8_recipe, torch.bfloat16):
         pytest.skip("Native MXFP8 grouped GEMM is unavailable.")
-    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
     FP8GlobalStateManager.reset()
     with quantized_model_init(enabled=primary_fp8, recipe=fp8_recipe):
         module = GroupedLinear(
@@ -2454,9 +2453,9 @@ def test_grouped_runtime_quantizer_work(monkeypatch, num_gemms, single_weight, p
         assert not (name.startswith("bias") and name[4:].isdigit()), name
         return original_getattribute(obj, name)
 
-    def forward(ctx, inp, m_splits, args, out, dgrad_out, *params):
+    def forward(ctx, inp, fwd_args, *params):
         arities.append(len(params))
-        return original_forward(ctx, inp, m_splits, args, out, dgrad_out, *params)
+        return original_forward(ctx, inp, fwd_args, *params)
 
     monkeypatch.setattr(MXFP8Quantizer, "set_usage", set_usage)
     monkeypatch.setattr(GroupedLinear, "__getattribute__", getattribute)
@@ -2481,14 +2480,13 @@ def test_grouped_runtime_quantizer_work(monkeypatch, num_gemms, single_weight, p
 @pytest.mark.skipif(not _mxfp8_available, reason=_reason_for_no_mxfp8)
 @pytest.mark.parametrize("primary_fp8", [False, True])
 @pytest.mark.parametrize("save_original_input", [False, True])
-def test_grouped_runtime_usage_transitions(monkeypatch, primary_fp8, save_original_input):
+def test_grouped_runtime_usage_transitions(primary_fp8, save_original_input):
     """Retarget primary quantizers and rebuild missing columnwise cache after inference."""
     from transformer_engine.pytorch.distributed import activation_recompute_forward
 
     fp8_recipe = recipe.MXFP8BlockScaling()
     if not is_module_grouped_tensor_path_supported(fp8_recipe, torch.bfloat16):
         pytest.skip("Native MXFP8 grouped GEMM is unavailable.")
-    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
     FP8GlobalStateManager.reset()
     with quantized_model_init(enabled=primary_fp8, recipe=fp8_recipe):
         module = GroupedLinear(
@@ -2544,7 +2542,7 @@ def test_grouped_runtime_usage_transitions(monkeypatch, primary_fp8, save_origin
 
 
 @pytest.mark.skipif(not _mxfp8_available, reason=_reason_for_no_mxfp8)
-def test_grouped_runtime_recipe_rebuild(monkeypatch):
+def test_grouped_runtime_recipe_rebuild():
     """Recipe rebuilds replace cached quantizers while preserving saved forwards."""
     recipes = [
         recipe.MXFP8BlockScaling(),
@@ -2553,7 +2551,6 @@ def test_grouped_runtime_recipe_rebuild(monkeypatch):
     ]
     if not all(is_module_grouped_tensor_path_supported(r, torch.bfloat16) for r in recipes):
         pytest.skip("Required native grouped GEMM recipes are unavailable.")
-    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
     FP8GlobalStateManager.reset()
     module = GroupedLinear(
         2,
@@ -2600,7 +2597,6 @@ def test_grouped_runtime_recipe_rebuild(monkeypatch):
 @pytest.mark.parametrize("restriction", ["debug", "calibration", "offload", "output", "override"])
 def test_grouped_runtime_rechecks_support(monkeypatch, single_weight, restriction):
     """Recheck runtime restrictions without allowing a single weight to use the split path."""
-    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
     module = GroupedLinear(
         2,
         128,
@@ -2634,33 +2630,14 @@ def test_grouped_runtime_rechecks_support(monkeypatch, single_weight, restrictio
     assert module._grouped_tensor_path_supported(False, False, ())
 
 
-@pytest.mark.parametrize("use_grouped_tensor", [False, True])
+@pytest.mark.parametrize("use_grouped_tensor,single_bias", [(False, False), (True, False), (True, True)])
 @pytest.mark.parametrize("use_bias", [False, True])
-@pytest.mark.parametrize("single_bias", [False, True])
-def test_grouped_linear_return_bias_autograd_arity(
-    monkeypatch, use_grouped_tensor, use_bias, single_bias
+def test_grouped_linear_return_bias_with_frozen_weights(
+    use_grouped_tensor, single_bias, use_bias
 ):
-    """Returned biases retain their external gradient edge, including the empty-list contract."""
-    if single_bias and not use_grouped_tensor:
-        pytest.skip("Single bias requires native grouped execution.")
+    """A trainable returned bias keeps the output differentiable when input/weight are frozen."""
     if use_grouped_tensor and not is_module_grouped_tensor_path_supported(None, torch.bfloat16):
         pytest.skip("Native grouped GEMM is unavailable.")
-    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
-    if single_bias and not use_bias:
-        # Existing initialization rejects packing empty biases. Preserve this boundary;
-        # bias=False/return_bias=True with discrete empty biases is exercised below.
-        with pytest.raises(ValueError, match="Grouped rowwise buffer size mismatch"):
-            GroupedLinear(
-                2,
-                128,
-                128,
-                bias=False,
-                return_bias=True,
-                params_dtype=torch.bfloat16,
-                single_grouped_bias=True,
-                use_grouped_tensor=True,
-            )
-        return
     module = GroupedLinear(
         2,
         128,
@@ -2668,27 +2645,27 @@ def test_grouped_linear_return_bias_autograd_arity(
         bias=use_bias,
         return_bias=True,
         params_dtype=torch.bfloat16,
+        single_grouped_weight=single_bias,
         single_grouped_bias=single_bias,
         use_grouped_tensor=use_grouped_tensor,
     )
-    x = torch.randn(256, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    for weight in _grouped_linear_weight_params(module):
+        weight.requires_grad_(False)
+    x = torch.randn(256, 128, device="cuda", dtype=torch.bfloat16)
     splits = torch.tensor([128, 128], device="cuda" if use_grouped_tensor else "cpu")
     y, biases = module(x, splits)
-    loss = y.sum()
-    if use_bias:
-        params = [module.bias] if single_bias else [module.bias0, module.bias1]
-        returned = [biases] if single_bias else biases
-        for param, value in zip(params, returned):
-            assert value is param
-            loss = loss + value.sum()
-        loss.backward()
-        for param in params:
-            torch.testing.assert_close(param.grad, torch.ones_like(param.grad), rtol=0, atol=0)
-    else:
+    assert y.requires_grad == use_bias
+    if not use_bias:
         assert isinstance(biases, list) and len(biases) == 2
         assert all(b.numel() == 0 for b in biases)
-        loss.backward()
-    assert x.grad is not None
+        return
+    params = _grouped_linear_bias_params(module)
+    returned = [biases] if single_bias else biases
+    assert len(returned) == len(params)
+    assert all(value is param for value, param in zip(returned, params))
+    (y.sum() + sum(value.sum() for value in returned)).backward()
+    for param in params:
+        torch.testing.assert_close(param.grad, torch.ones_like(param.grad), rtol=0, atol=0)
 
 
 def _clone_outputs(outputs):
