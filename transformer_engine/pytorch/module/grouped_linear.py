@@ -594,6 +594,9 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.single_grouped_weight = single_grouped_weight
             ctx.single_grouped_bias = single_grouped_bias
             ctx.is_dist_weight = is_dist_weight
+            # Same reason as in ``forward``: saved-tensor hooks unpack the saved
+            # DistributedWeight shards as plain tensors, so keep the originals on ctx.
+            ctx.dist_weights = list(origin_weights) if is_dist_weight else None
             ctx.fp8_for_weight_prep = fp8
             if fuse_wgrad_accumulation and ctx.weights_requires_grad:
                 # Weakref the parameters, not the gathered copies: those can be dead by backward.
@@ -974,6 +977,12 @@ class _GroupedLinear(torch.autograd.Function):
             # weight_requires_grad was read from the parameters, before materialization
             # replaced ``weights`` with gathered copies that need not carry requires_grad.
             ctx.weights_requires_grad = weight_requires_grad
+            # DistributedWeight objects must survive to backward as Python objects. They are
+            # also passed through save_for_backward (as saved_weights), but when saved-tensor
+            # hooks are active (e.g. activation offloading) autograd unpacks saved leaves as
+            # fresh plain tensors, dropping the subclass and its ``is_distributed_weight``
+            # marker. Keep the originals on ctx and prefer them in backward.
+            ctx.dist_weights = list(origin_weights) if is_dist_weight else None
             if fuse_wgrad_accumulation and ctx.weights_requires_grad:
                 # Keep weakrefs to weights to preserve attributes like main_grad
                 # when we need to modify the weight python objects. Target the parameters:
@@ -1089,7 +1098,12 @@ class _GroupedLinear(torch.autograd.Function):
         main_grads = [None] * num_weight_args
         is_dist_weight = getattr(ctx, "is_dist_weight", False)
         if is_dist_weight:
-            # Forward saved the shards, not the gathered copies.
+            # Forward saved the shards, not the gathered copies. Prefer the originals kept
+            # on ctx: saved-tensor hooks may have unpacked the shards as plain tensors.
+            dist_weights = getattr(ctx, "dist_weights", None)
+            if dist_weights is not None:
+                weight_tensors = dist_weights
+                ctx.dist_weights = None
             origin_weights = list(weight_tensors)
             if ctx.fuse_wgrad_accumulation and ctx.weights_requires_grad:
                 main_grads = [main_grad_func() for main_grad_func in ctx.main_grad_funcs]
@@ -1351,6 +1365,12 @@ class _GroupedLinear(torch.autograd.Function):
             weights = saved_tensors[N : 2 * N]
             saved_weights = saved_tensors[2 * N : 3 * N]
             biases = saved_tensors[3 * N : 4 * N]
+            dist_weights = getattr(ctx, "dist_weights", None)
+            if dist_weights is not None:
+                # See forward: saved-tensor hooks may have replaced the DistributedWeight
+                # objects with plain aliases; the originals were kept on ctx.
+                saved_weights = dist_weights
+                ctx.dist_weights = None
 
             # Restore from weakrefs to get original weight python objects
             # (preserves attributes like main_grad, grad_added_to_main_grad, etc.)

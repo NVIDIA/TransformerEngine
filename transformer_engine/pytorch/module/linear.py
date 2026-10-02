@@ -291,6 +291,10 @@ class LinearBwdArgs:
     fuse_wgrad_accumulation: bool = False
     wgrad_store: Optional[Any] = None
     origin_weight_ref: Optional[Any] = None
+    # DistributedWeight object kept as a Python reference: saved-tensor hooks (e.g. activation
+    # offloading) make autograd unpack ``saved_weight`` as a fresh plain tensor, dropping the
+    # subclass and its ``is_distributed_weight`` marker.
+    dist_weight: Optional[Any] = None
     origin_weight_overwrites_main_grad: bool = False
     main_grad_func: Optional[Callable[[], torch.Tensor]] = None
 
@@ -1060,6 +1064,7 @@ def _linear_setup_ctx(
     bwd_args.is_first_microbatch = fwd_args.is_first_microbatch
     bwd_args.fuse_wgrad_accumulation = fuse_wgrad_accumulation
     bwd_args.wgrad_store = fwd_args.wgrad_store
+    bwd_args.dist_weight = weight if is_distributed_weight(weight) else None
     if fuse_wgrad_accumulation and fwd_args.weight_requires_grad:
         bwd_args.origin_weight_ref = weakref.ref(weight)
         bwd_args.origin_weight_overwrites_main_grad = getattr(weight, "overwrite_main_grad", False)
@@ -1116,6 +1121,10 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
     inputmat = args.inputmat
     weight_fp8 = args.weight_fp8
     saved_weight = args.saved_weight
+    if args.dist_weight is not None:
+        # Prefer the object kept in forward; see LinearBwdArgs.dist_weight.
+        saved_weight = args.dist_weight
+        args.dist_weight = None
     is_dist_weight = is_distributed_weight(saved_weight)
     bias = args.bias
     input_quantizer = args.input_quantizer
