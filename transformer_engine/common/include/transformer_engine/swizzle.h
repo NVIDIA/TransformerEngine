@@ -102,6 +102,34 @@ void nvte_multi_tensor_unswizzle_scaling_factors(const NVTETensor* inputs, NVTET
  *  */
 void nvte_swizzle_block_scaling_to_mxfp8_scaling_factors(const NVTETensor input, NVTETensor output,
                                                          cudaStream_t stream);
+
+/*! \brief Swizzle the FP8 block-scaling scaling factors of a grouped tensor into the MXFP8
+ *         interleaved layout for GEMM (grouped variant of
+ *         nvte_swizzle_block_scaling_to_mxfp8_scaling_factors).
+ *
+ *  \param[in]     input        Input FP8 block-scaled grouped tensor.
+ *  \param[in,out] output       Output MXFP8 grouped tensor which hosts the swizzled scale_inv.
+ *  \param[in]     stream       CUDA stream used for the operation.
+ *
+ *  Used to emulate the FP8 block scaling recipe with MXFP8 grouped GEMM on Blackwell and newer.
+ *  Per-tensor dimensions are read on the device, so the operation is CUDA-graph safe when they
+ *  change between replays.
+ *
+ *  Requirements:
+ *  - input is an FP8 block scaling (1D or 2D) grouped tensor with rowwise data and FP32 rowwise
+ *    scale_inv in the compact per-tensor layout; per-tensor first dims or last dims may vary,
+ *    but not both
+ *  - output is an MXFP8 grouped tensor with the same rowwise data pointer, dims and logical
+ *    shape, with_gemm_swizzled_scales set, and E8M0 rowwise scale_inv. Tensor t with rowwise
+ *    data [f, l] is written at the cumulative offset of
+ *    roundup(f, 128) * ceil(l / 128) * 4 bytes; the buffer must hold at least the upper bound
+ *    documented in swizzle_block_scaling.cu (grouped_mxfp8_scale_bytes_upper_bound).
+ *  - 24 * n + 8 bytes (per-tensor offset tables) fit in the device's shared memory per block
+ */
+void nvte_swizzle_grouped_block_scaling_to_mxfp8_scaling_factors(const NVTEGroupedTensor input,
+                                                                 NVTEGroupedTensor output,
+                                                                 cudaStream_t stream);
+
 /*! \brief Swizzling scaling factors into the required interleaved layout for GEMM (grouped tensor)
  *
  *  \param[in]     input        Input grouped tensor with non-swizzled scale_inv.
