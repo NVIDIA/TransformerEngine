@@ -57,6 +57,7 @@ if(NVTE_WITH_CUTEDSL)
   # Find the interpreter too so older CMake versions use its version to locate libpython.
   find_package(Python COMPONENTS Interpreter Development.Embed REQUIRED)
   foreach(test_target test_operator test_util)
+    target_compile_definitions(${test_target} PRIVATE NVTE_WITH_CUTEDSL)
     target_link_libraries(${test_target} PRIVATE
                           "-Wl,--no-as-needed"
                           Python::Python

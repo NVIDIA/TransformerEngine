@@ -9,6 +9,11 @@
 #include <cuda_runtime.h>
 #include <gtest/gtest.h>
 
+#ifdef NVTE_WITH_CUTEDSL
+#include <Python.h>
+#include <cstdlib>
+#endif
+
 #include <transformer_engine/cast.h>
 #include <transformer_engine/activation.h>
 #include "../test_common.h"
@@ -1030,3 +1035,57 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::Values(DType::kBFloat16),
         ::testing::Values(DType::kFloat8E4M3)),
     MakeGroupedFusedCastMXFP8TestName);
+
+// Exercise the grouped C API with NVTE_ENABLE_CUTEDSL_BACKEND=1 as well as CUDA.
+// These cases cover both column strips, a final half-width chunk, and every fused
+// activation on all four shape representations against the independent CPU reference.
+INSTANTIATE_TEST_SUITE_P(
+    OperatorTest_GroupedFusedCastMXFP8_MultiChunkActivations,
+    GroupedFusedCastMXFP8TestSuite,
+    ::testing::Combine(
+        ::testing::Values(ProcessingMethod::CAST_ACT, ProcessingMethod::CAST_DACT,
+                          ProcessingMethod::CAST_DBIAS_DACT),
+        ::testing::Values(ActivationKind::GeLU, ActivationKind::SiLU, ActivationKind::ReLU,
+                          ActivationKind::QGeLU, ActivationKind::SReLU),
+        ::testing::ValuesIn(scaling_directions),
+        ::testing::ValuesIn(input_config_multichunk),
+        ::testing::Values(DType::kBFloat16),
+        ::testing::Values(DType::kFloat8E4M3)),
+    MakeGroupedFusedCastMXFP8TestName);
+
+#ifdef NVTE_WITH_CUTEDSL
+TEST(OperatorTest_GroupedFusedCastMXFP8, TestCuTeDSLRegistration) {
+    const char* enabled = std::getenv("NVTE_ENABLE_CUTEDSL_BACKEND");
+    if (enabled == nullptr || enabled[0] == '0' ||
+        getDeviceComputeCapability() < blackwellComputeCapability) {
+        GTEST_SKIP() << "Requires Blackwell and NVTE_ENABLE_CUTEDSL_BACKEND=1";
+    }
+
+    // Cover both column strips and a final half-width chunk. Verify registration
+    // after the C API call so a silent CUDA fallback cannot satisfy this test.
+    const std::vector<size_t> first_dims = {128, 256};
+    const std::vector<size_t> last_dims = {128, 384};
+    const std::vector<size_t> offsets = {0, 128 * 128, 128 * 128 + 256 * 384};
+    performTest<bf16, fp8e4m3>(CAST_ONLY, &identity, VARYING_BOTH_DIMS, 2,
+                              {1, offsets.back()}, first_dims, last_dims, offsets,
+                              /*rowwise=*/true, /*colwise=*/true);
+
+    ASSERT_TRUE(Py_IsInitialized()) << "CuTeDSL did not initialize embedded Python";
+    const std::string key =
+        "cutedsl_group_mxfp8_sm" + std::to_string(getDeviceComputeCapability()) +
+        "_BFloat16_Float8E4M3_1_1_varying_both_dims_0_0_0_0_none";
+    const PyGILState_STATE gil = PyGILState_Ensure();
+    PyObject* module = PyImport_ImportModule("tvm_ffi");
+    PyObject* kernel = module == nullptr ? nullptr :
+        PyObject_CallMethod(module, "get_global_func", "s", key.c_str());
+    const bool registered = kernel != nullptr && kernel != Py_None;
+    if (PyErr_Occurred() != nullptr) {
+        PyErr_Print();
+    }
+    Py_XDECREF(kernel);
+    Py_XDECREF(module);
+    PyGILState_Release(gil);
+    EXPECT_TRUE(registered) << "CuTeDSL kernel not registered for " << key
+                            << "; the grouped C API fell back to CUDA";
+}
+#endif

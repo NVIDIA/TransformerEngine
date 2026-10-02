@@ -381,14 +381,19 @@ def test_dtypes(swizzled, method, act, fp8_dtype, in_dtype):
 # (name, shape representation in the config key, per-member shapes)
 GROUP_CASES = [
     ("same_both", "same_both_dims", [(256, 512)] * 3),
+    ("single_member", "same_both_dims", [(384, 384)]),
     # N is 32- but not 128-divisible, so the rowwise and colwise scales carry zeroed padding.
     ("same_both_n96", "same_both_dims", [(128, 96)] * 2),
     ("varying_first", "varying_first_dim", [(128, 256), (384, 256), (256, 256)]),
     ("varying_first_n160", "varying_first_dim", [(128, 160), (256, 160)]),
-    # N ends in a partial 32-element scale block.
-    ("varying_first_n144", "varying_first_dim", [(128, 144), (384, 144)]),
+    # Partial 32-element blocks (e.g. N=144) are covered by the C++ grouped tests;
+    # the PyTorch MXFP8 quantizer requires dimensions divisible by 32.
     ("varying_last", "varying_last_dim", [(256, 128), (256, 384), (256, 256)]),
     ("varying_both", "varying_both_dims", [(128, 256), (256, 128), (384, 512)]),
+    # Multiple chunks in both dimensions, including a final half-width 128-column strip.
+    ("varying_both_multichunk", "varying_both_dims", [(128, 128), (256, 384), (384, 640)]),
+    ("varying_first_empty", "varying_first_dim", [(128, 256), (0, 256), (384, 256)]),
+    ("varying_both_empty", "varying_both_dims", [(128, 128), (0, 256), (256, 384)]),
 ]
 SINGLE_TENSOR_GROUP_CASES = [
     c for c in GROUP_CASES if c[1] in ("same_both_dims", "varying_first_dim")
@@ -494,7 +499,9 @@ def run_group_test_case(
             cutedsl_output[name], cuda_bytes
         ), f"{tag}: {name} differ between backends"
     if dbias:
-        assert torch.equal(dbias_cutedsl, dbias_cuda), f"{tag}: dbias differs between backends"
+        assert torch.equal(
+            dbias_cutedsl.view(torch.uint8), dbias_cuda.view(torch.uint8)
+        ), f"{tag}: dbias differs between backends"
 
 
 @pytest.mark.parametrize("case", GROUP_CASES, ids=get_group_case_id)
@@ -510,11 +517,6 @@ def test_group_cast_only(fp8_dtype, in_dtype, block_size, case):
 @pytest.mark.parametrize("block_size", BLOCK_SIZES, ids=get_block_id)
 def test_group_swizzled(block_size, case):
     _, shape_rep, members = case
-    if block_size[0] != 1 and shape_rep in ("varying_last_dim", "varying_both_dims"):
-        pytest.skip(
-            "The CUDA kernel's GEMM-swizzled colwise scale index double-counts the tensor base"
-            " for varying last dims; the CuTeDSL backend leaves these configs to it."
-        )
     run_group_test_case(
         members, shape_rep, block_size, torch.bfloat16, tex.DType.kFloat8E4M3, swizzled=True
     )
@@ -522,7 +524,7 @@ def test_group_swizzled(block_size, case):
 
 @pytest.mark.parametrize("case", SINGLE_TENSOR_GROUP_CASES, ids=get_group_case_id)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES, ids=get_block_id)
-@pytest.mark.parametrize("in_dtype", [torch.bfloat16, torch.float32], ids=get_dtype_id)
+@pytest.mark.parametrize("in_dtype", IN_DTYPES, ids=get_dtype_id)
 @pytest.mark.parametrize("swizzled", SWIZZLE_MODES, ids=get_swizzle_id)
 def test_group_dbias(swizzled, in_dtype, block_size, case):
     _, shape_rep, members = case
