@@ -12,6 +12,7 @@ cute = pytest.importorskip("cutlass.cute")
 cuda = pytest.importorskip("cuda.bindings.driver")
 
 from cutlass.cute.runtime import from_dlpack
+from transformer_engine.common.CuTeDSL.cast.mxfp8 import requantize_mxfp8
 from transformer_engine.common.CuTeDSL.cast.mxfp8.requantize_mxfp8 import GroupedRequantize
 from mxfp8_utils import swizzle_mxfp8_scale
 
@@ -19,6 +20,13 @@ pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available() or torch.cuda.get_device_capability() < (10, 0),
     reason="Grouped MXFP8 requantization requires SM100+",
 )
+
+
+@pytest.fixture(params=["auto", "portable"])
+def decode_backend(request, monkeypatch):
+    """Exercise the old-compiler sequence even when the compiler supports PTX 9.2."""
+    if request.param == "portable":
+        monkeypatch.setattr(requantize_mxfp8, "_supports_scaled_bf16_conversion", lambda: False)
 
 
 def columnwise_reference(values):
@@ -37,6 +45,7 @@ def columnwise_reference(values):
 @pytest.mark.parametrize("hidden", [128, 256, 384, 512, 4096, 7168])
 @pytest.mark.parametrize("input_dtype", [torch.float8_e4m3fn, torch.float8_e5m2])
 @pytest.mark.parametrize("layout", ["compact", "column_only", "both", "uniform"])
+@pytest.mark.usefixtures("decode_backend")
 def test_compact_input_contract(hidden, input_dtype, layout, return_dequantized):
     """Check both scale layouts, optional output, group boundaries and capacity tails."""
     torch.manual_seed(42)
@@ -113,17 +122,23 @@ def test_compact_input_contract(hidden, input_dtype, layout, return_dequantized)
 
 @pytest.mark.parametrize("return_dequantized", [False, True])
 @pytest.mark.parametrize("scale", [0, 1, 127, 254, 255])
-def test_extreme_scale_bf16_decode(scale, return_dequantized):
+@pytest.mark.parametrize("input_dtype", [torch.float8_e4m3fn, torch.float8_e5m2])
+@pytest.mark.usefixtures("decode_backend")
+def test_extreme_scale_bf16_decode(scale, return_dequantized, input_dtype):
     """Document tiny-value BF16 rounding and check saturated/NaN scale behavior."""
-    hidden, rows = 128, 128
-    data = torch.ones((rows, hidden), device="cuda", dtype=torch.uint8).view(torch.float8_e4m3fn)
+    hidden, rows = 256, 128
+    # Cover every FP8 encoding, including signed zero, subnormals, NaNs and E5M2 infinities.
+    data = torch.arange(hidden, device="cuda", dtype=torch.uint8).repeat(rows, 1).view(input_dtype)
     sf = torch.full((rows, hidden // 32), scale, device="cuda", dtype=torch.uint8)
-    dst = torch.empty_like(data)
+    dst = torch.empty((rows, hidden), device="cuda", dtype=torch.float8_e4m3fn)
     col_sf = torch.empty(rows * hidden // 32, device="cuda", dtype=torch.uint8)
     kernel = GroupedRequantize(
         hidden,
         1,
         rows,
+        input_dtype=(
+            cutlass.Float8E4M3FN if input_dtype == torch.float8_e4m3fn else cutlass.Float8E5M2
+        ),
         swizzled=False,
         rowwise_output=False,
         uniform_rows=rows,

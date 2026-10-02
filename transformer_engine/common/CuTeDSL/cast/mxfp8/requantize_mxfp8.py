@@ -87,18 +87,54 @@ def _fp8x2_mnemonic(fp8_type) -> str:
     raise TypeError(f"unsupported FP8 type {fp8_type}")
 
 
+def _supports_scaled_bf16_conversion() -> bool:
+    """Query the DSL compiler, rather than the installed CUDA toolkit or driver."""
+    target_version = getattr(cutlass, "target_version", None)
+    # Older DSL releases without this query use the portable instruction sequence.
+    return target_version is not None and target_version(min_version="13.2")
+
+
 @dsl_user_op
-def cvt_scaled_up_bf16x2(pair_b32, scale_b32, half: int, fp8_type, *, loc=None, ip=None) -> Int32:
-    """Two FP8 values + their E8M0 scale -> BF16x2, in one SASS instruction."""
+def cvt_scaled_up_bf16x2(
+    pair_b32, scale_b32, half: int, fp8_type, use_scaled_cvt: bool, *, loc=None, ip=None
+) -> Int32:
+    """Decode two FP8 values with E8M0 scales, using PTX 9.2 only when supported."""
     mn = _fp8x2_mnemonic(fp8_type)
-    asm = (
-        "{\n"
-        " .reg .b16 a0,a1,s0,s1;\n"
-        " mov.b32 {a0,a1}, $1;\n"
-        " mov.b32 {s0,s1}, $2;\n"
-        f" cvt.rn.scaled::n2::ue8m0.bf16x2.{mn} $0, a{half}, s0;\n"
-        "}"
-    )
+    if use_scaled_cvt:
+        asm = (
+            "{\n"
+            " .reg .b16 a0,a1,s0,s1;\n"
+            " mov.b32 {a0,a1}, $1;\n"
+            " mov.b32 {s0,s1}, $2;\n"
+            f" cvt.rn.scaled::n2::ue8m0.bf16x2.{mn} $0, a{half}, s0;\n"
+            "}"
+        )
+    else:
+        # Match dequantize_mxfp8_2x in requantize_mxfp8.cu: FP8 -> FP16 ->
+        # BF16 is exact, then BF16 multiplication rounds the scaled result.
+        # E8M0 code 0 is 2**-127 (a BF16 subnormal); code 255 is NaN.
+        asm = (
+            "{\n"
+            " .reg .b16 a0,a1,f0,f1,b0,b1;\n"
+            " .reg .b32 values_f16x2,values_bf16x2,s,scale_bits,scale_x2;\n"
+            " .reg .pred is_zero,is_nan;\n"
+            " mov.b32 {a0,a1}, $1;\n"
+            " and.b32 s, $2, 0xff;\n"
+            " shl.b32 scale_bits, s, 7;\n"
+            " setp.eq.u32 is_zero, s, 0;\n"
+            " setp.eq.u32 is_nan, s, 255;\n"
+            " selp.b32 scale_bits, 0x0040, scale_bits, is_zero;\n"
+            " selp.b32 scale_bits, 0x7fff, scale_bits, is_nan;\n"
+            " shl.b32 scale_x2, scale_bits, 16;\n"
+            " or.b32 scale_x2, scale_x2, scale_bits;\n"
+            f" cvt.rn.f16x2.{mn} values_f16x2, a{half};\n"
+            " mov.b32 {f0,f1}, values_f16x2;\n"
+            " cvt.rn.bf16.f16 b0, f0;\n"
+            " cvt.rn.bf16.f16 b1, f1;\n"
+            " mov.b32 values_bf16x2, {b0,b1};\n"
+            " mul.rn.bf16x2 $0, values_bf16x2, scale_x2;\n"
+            "}"
+        )
     return Int32(
         llvm.inline_asm(
             T.i32(),
@@ -245,6 +281,7 @@ class GroupedRequantize:
         self.hidden = int(hidden)
         self.num_experts = int(num_groups)
         self.quant_dtype = input_dtype
+        self.use_scaled_cvt = _supports_scaled_bf16_conversion()
         self.sf_dtype = cutlass.Uint8
         self.swizzled = bool(swizzled)
         self.rowwise_output = bool(rowwise_output and swizzled)
@@ -777,8 +814,8 @@ class GroupedRequantize:
                 s16 = raw_sf | raw_sf << Int32(8)
                 for w in cutlass.range_constexpr(0, NWc, 1):
                     qw = Int32(words[w])
-                    lo = cvt_scaled_up_bf16x2(qw, s16, 0, QT)
-                    hi = cvt_scaled_up_bf16x2(qw, s16, 1, QT)
+                    lo = cvt_scaled_up_bf16x2(qw, s16, 0, QT, self.use_scaled_cvt)
+                    hi = cvt_scaled_up_bf16x2(qw, s16, 1, QT, self.use_scaled_cvt)
                     d[tt][2 * w] = lo
                     d[tt][2 * w + 1] = hi
                     acc[2 * w] = max_xorsign_abs_bf16x2(acc[2 * w], lo)
