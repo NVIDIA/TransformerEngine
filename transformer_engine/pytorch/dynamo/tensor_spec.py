@@ -153,6 +153,32 @@ class TensorSpec:
         return self.assemble(self.create_inner_tensors())
 
 
+@dataclass
+class GroupedTensorSpec(TensorSpec):
+    """Grouped buffers and metadata, including unquantized grouped parameters."""
+
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    buffers: Dict[str, TensorSpec] = field(default_factory=dict)
+
+    def inner_names(self) -> Tuple[str, ...]:
+        return tuple(self.buffers)
+
+    def create_metadata(self) -> Dict[str, Any]:
+        return self.metadata
+
+    def create_inner_tensors(self) -> List[torch.Tensor]:
+        return [spec.create_tensor() for spec in self.buffers.values()]
+
+    def assemble(self, inner_tensors: List[torch.Tensor]) -> Any:
+        inner = dict(zip(self.inner_names(), inner_tensors))
+        return self.metadata["cls"].__tensor_unflatten__(
+            inner, self.metadata, self.shape, make_contiguous_strides_for(self.shape)
+        )
+
+    def create_tensor(self) -> Any:
+        return self.assemble(self.create_inner_tensors())
+
+
 def to_tensor_spec(tensor: Any) -> TensorSpec:
     """Build a :class:`TensorSpec` describing ``tensor``.
 
@@ -160,7 +186,24 @@ def to_tensor_spec(tensor: Any) -> TensorSpec:
     ``QuantizedTensor``. A *bare* storage exposes its (fake) dtype via
     ``_dtype`` rather than ``.dtype``.
     """
+    from ..tensor.storage.grouped_tensor_storage import (
+        GroupedTensorStorage,
+    )  # pylint: disable=import-outside-toplevel
+
     requires_grad = bool(getattr(tensor, "requires_grad", False))
+    if isinstance(tensor, GroupedTensorStorage):
+        names, metadata = GroupedTensorStorage.__tensor_flatten__(tensor)
+        buffers = {name: to_tensor_spec(getattr(tensor, name)) for name in names}
+        return GroupedTensorSpec(
+            shape=tuple(tensor.shape if isinstance(tensor, torch.Tensor) else tensor.logical_shape),
+            dtype=tensor.fake_dtype,
+            quantizer=tensor.quantizer,
+            requires_grad=requires_grad,
+            device=next(iter(buffers.values())).device,
+            with_gemm_swizzled_scales=getattr(tensor, "_with_gemm_swizzled_scales"),
+            metadata=metadata,
+            buffers=buffers,
+        )
     dtype = getattr(tensor, "dtype", None)
     if dtype is None:
         dtype = getattr(tensor, "_dtype", None)

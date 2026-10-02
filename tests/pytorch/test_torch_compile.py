@@ -2819,11 +2819,21 @@ _fused_grouped_cublas_ok = _fused_grouped_cc_ok and tex.get_cublasLt_version() >
     ids=lambda r: "bf16" if r is None else type(r).__name__,
 )
 @pytest.mark.parametrize("save_original_input", [False, True])
-def test_te_grouped_linear_fused_compiles(fp8_recipe, compile_mode, save_original_input):
+@pytest.mark.parametrize(
+    "single_weight,single_bias",
+    [(False, False), (True, False), (False, True), (True, True)],
+    ids=["discrete", "grouped-weight", "grouped-bias", "grouped-both"],
+)
+def test_te_grouped_linear_fused_compiles(
+    monkeypatch, fp8_recipe, compile_mode, save_original_input, single_weight, single_bias
+):
     """torch.compile(fullgraph=True) of the fused GroupedTensor path
     (``use_grouped_tensor=True``): ``m_splits`` stays a
     device tensor, so changing the split distribution in place reuses the very
     same graph -- no recompiles, no host sync."""
+    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
+    if single_weight and fp8_recipe is not None and fp8_recipe.nvfp4():
+        pytest.skip("Native NVFP4 grouped GEMM does not support single grouped weights.")
     if fp8_recipe is not None and torch.cuda.get_device_capability() < (10, 0):
         if tex.get_cublasLt_version() < 130500:
             pytest.skip("FP8 current-scaling fused grouped GEMM on Hopper needs cuBLASLt 13.5+")
@@ -2840,6 +2850,8 @@ def test_te_grouped_linear_fused_compiles(fp8_recipe, compile_mode, save_origina
         device=device,
         use_grouped_tensor=True,
         save_original_input=save_original_input,
+        single_grouped_weight=single_weight,
+        single_grouped_bias=single_bias,
     )
     m_splits_dev = torch.tensor(m_splits, dtype=torch.int64, device=device)
 
@@ -2880,6 +2892,139 @@ def test_te_grouped_linear_fused_compiles(fp8_recipe, compile_mode, save_origina
             assert (
                 _dynamo_counter("stats", "unique_graphs") == baseline
             ), "changing device-tensor m_splits values must not recompile"
+
+
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
+@pytest.mark.skipif(not _fused_grouped_cublas_ok, reason="native grouped GEMM unavailable")
+@pytest.mark.parametrize("compile_mode", _compile_modes)
+@pytest.mark.parametrize("primary_quantized", [False, True])
+@pytest.mark.parametrize(
+    "fp8_recipe",
+    ([recipe.Float8CurrentScaling()] if fp8_available else [])
+    + ([recipe.MXFP8BlockScaling()] if mxfp8_available else []),
+    ids=lambda r: type(r).__name__,
+)
+def test_te_grouped_linear_grouped_weight_cache(
+    monkeypatch, compile_mode, primary_quantized, fp8_recipe
+):
+    """Packed primary weights and cached grouped workspaces retain their gradients."""
+    torch._dynamo.reset()
+    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
+    if torch.cuda.get_device_capability() < (10, 0) and tex.get_cublasLt_version() < 130500:
+        pytest.skip("Current scaling grouped GEMM on Hopper needs cuBLASLt 13.5+")
+    models = []
+    for _ in range(2):
+        torch.manual_seed(1234)
+        with te.quantized_model_init(enabled=primary_quantized, recipe=fp8_recipe):
+            models.append(
+                te.GroupedLinear(
+                    2,
+                    256,
+                    256,
+                    params_dtype=torch.bfloat16,
+                    device="cuda",
+                    use_grouped_tensor=True,
+                    single_grouped_weight=True,
+                    single_grouped_bias=True,
+                )
+            )
+    model, reference = models
+    splits = torch.tensor([256, 256], device="cuda", dtype=torch.int64)
+    is_first = None
+
+    def fn(inp):
+        with te.autocast(recipe=fp8_recipe):
+            return model(inp, splits, is_first_microbatch=is_first)
+
+    def ref_fn(inp):
+        with te.autocast(recipe=fp8_recipe):
+            return reference(inp, splits, is_first_microbatch=is_first)
+
+    def make_input():
+        return torch.randn(512, 256, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+
+    fn(make_input()).sum().backward()
+    model.zero_grad(set_to_none=True)
+    is_first = True
+    if compile_mode == "reduce-overhead":
+        _cudagraph_warmup(fn, make_input(), backward=True)
+        model.zero_grad(set_to_none=True)
+    compiled = torch.compile(fn, fullgraph=True, mode=compile_mode)
+    cached = None
+    with _assert_no_cudagraph_skips(compile_mode == "reduce-overhead"):
+        for is_first in [True, False, False, True]:
+            _assert_close_grouped(ref_fn, compiled, model, make_input(), ref_model=reference)
+            if not primary_quantized:
+                workspace = model._fp8_workspaces["weight"]
+                if cached is not None:
+                    assert workspace is cached
+                cached = workspace
+
+
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
+@pytest.mark.skipif(not _fused_grouped_cublas_ok, reason="native grouped GEMM unavailable")
+@pytest.mark.parametrize("input_grad,weight_grad", [(True, True), (False, True), (True, False)])
+@pytest.mark.parametrize("layout", ["rank4", "strided"])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_te_grouped_linear_grouped_parameters_native_reference(
+    monkeypatch, input_grad, weight_grad, layout, dtype
+):
+    """Packed parameter gradients and optimizer updates match independent linears."""
+    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
+    torch._dynamo.reset()
+    splits = [128, 256, 128]
+    model = te.GroupedLinear(
+        3,
+        128,
+        64,
+        params_dtype=dtype,
+        device="cuda",
+        use_grouped_tensor=True,
+        single_grouped_weight=True,
+        single_grouped_bias=True,
+    )
+    model.requires_grad_(weight_grad)
+    with torch.no_grad():
+        for parameter in model.parameters():
+            data = parameter.rowwise_data
+            data.copy_(torch.randint_like(data, -1, 2) / 8)
+    ref_weight = model.weight.rowwise_data.detach().clone().reshape(3, 64, 128)
+    ref_bias = model.bias.rowwise_data.detach().clone().reshape(3, 64)
+    ref_weight.requires_grad_(weight_grad)
+    ref_bias.requires_grad_(weight_grad)
+    x = torch.randint(-1, 2, (512, 128), device="cuda").to(dtype) / 8
+    x = x.reshape(2, 4, 64, 128) if layout == "rank4" else x.t().contiguous().t()
+    x.requires_grad_(input_grad)
+    ref_x = x.detach().clone().requires_grad_(input_grad)
+    reference = torch.cat(
+        [
+            torch.nn.functional.linear(part, weight, bias)
+            for part, weight, bias in zip(
+                ref_x.reshape(-1, 128).split(splits), ref_weight, ref_bias
+            )
+        ]
+    ).reshape(*x.shape[:-1], 64)
+    device_splits = torch.tensor(splits, dtype=torch.int64, device="cuda")
+    output = torch.compile(lambda inp: model(inp, device_splits), fullgraph=True)(x)
+    dy = torch.randint_like(output, -1, 2) / 8
+    output.backward(dy)
+    reference.backward(dy)
+    torch.testing.assert_close(output, reference, rtol=0, atol=0)
+    if input_grad:
+        torch.testing.assert_close(x.grad, ref_x.grad, rtol=0, atol=0)
+    if weight_grad:
+        for param, ref_param in zip(model.parameters(), (ref_weight, ref_bias)):
+            torch.testing.assert_close(param.grad, ref_param.grad, rtol=0, atol=0)
+        torch.optim.SGD(model.parameters(), lr=0.125).step()
+        with torch.no_grad():
+            ref_weight.add_(ref_weight.grad, alpha=-0.125)
+            ref_bias.add_(ref_bias.grad, alpha=-0.125)
+        torch.testing.assert_close(
+            model.weight.rowwise_data.reshape_as(ref_weight), ref_weight, rtol=0, atol=0
+        )
+        torch.testing.assert_close(
+            model.bias.rowwise_data.reshape_as(ref_bias), ref_bias, rtol=0, atol=0
+        )
 
 
 # ---------------------------------------------------------------------------

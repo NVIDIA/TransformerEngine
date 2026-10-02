@@ -362,7 +362,7 @@ def _storage_unflatten(meta: "OpaqueValueBundle", tensors: List[torch.Tensor]) -
     inner = dict(zip(inner_names, tensors))
     outer_shape = meta_dict.get("_outer_shape")
     stride = make_contiguous_strides_for(tuple(outer_shape)) if outer_shape is not None else None
-    return QuantizedTensorStorage.__tensor_unflatten__(inner, meta_dict, outer_shape, stride)
+    return meta_dict["cls"].__tensor_unflatten__(inner, meta_dict, outer_shape, stride)
 
 
 # --------------------------------------------------------------------------- #
@@ -542,6 +542,10 @@ def _is_trivial(value: Any) -> bool:
 
 def _pack_tensor_or_quantized(field: _FieldPlan, value: Any, slots: Dict[str, Any]) -> None:
     """Fill a tensor-or-quantized field's three slots from its runtime value."""
+    from ..tensor.storage.grouped_tensor_storage import (
+        GroupedTensorStorage,
+    )  # pylint: disable=import-outside-toplevel
+
     tensor_slot, inner_slot, meta_slot = (s.name for s in field.slots)
     if value is None:
         slots[tensor_slot] = None
@@ -554,7 +558,7 @@ def _pack_tensor_or_quantized(field: _FieldPlan, value: Any, slots: Dict[str, An
         slots[tensor_slot] = value
         slots[inner_slot] = []
         slots[meta_slot] = OpaqueValueBundle({_TQ_KIND_KEY: _TensorOrQuantizedKind.TENSOR})
-    elif isinstance(value, QuantizedTensorStorage):
+    elif isinstance(value, (QuantizedTensorStorage, GroupedTensorStorage)):
         meta, tensors = _storage_flatten(value, {_TQ_KIND_KEY: _TensorOrQuantizedKind.STORAGE})
         slots[tensor_slot] = None
         slots[inner_slot] = tensors
@@ -562,7 +566,7 @@ def _pack_tensor_or_quantized(field: _FieldPlan, value: Any, slots: Dict[str, An
     else:
         raise TypeError(
             f"field {field.name!r} expected None, torch.Tensor, or "
-            f"QuantizedTensorStorage, got {type(value).__name__}"
+            f"QuantizedTensorStorage / GroupedTensorStorage, got {type(value).__name__}"
         )
 
 
@@ -1292,12 +1296,13 @@ def _register_wrapper_op(
     return op_def
 
 
-def _all_quantized_tensor_subclasses() -> List[type]:
-    """Return every imported ``QuantizedTensor`` wrapper subclass."""
+def _all_tensor_subclasses() -> List[type]:
+    """Return grouped and imported quantized wrapper subclasses."""
     import transformer_engine.pytorch.tensor  # noqa: F401  pylint: disable=import-outside-toplevel,unused-import
+    from ..tensor.grouped_tensor import GroupedTensor  # pylint: disable=import-outside-toplevel
 
     found: List[type] = []
-    stack = list(QuantizedTensor.__subclasses__())
+    stack = [GroupedTensor, *QuantizedTensor.__subclasses__()]
     while stack:
         cls = stack.pop()
         if cls not in found:
@@ -1335,7 +1340,7 @@ def _register_op(
     """
     plan = _parse_arg_type(arg_type)
     schema = f"{plan.schema_str} -> Tensor[]"
-    subclasses = _all_quantized_tensor_subclasses()
+    subclasses = _all_tensor_subclasses()
     slot_offsets = plan.tensor_or_quantized_offsets()
     namespace = getattr(torch.ops, _TE_OP_NAMESPACE)
 
