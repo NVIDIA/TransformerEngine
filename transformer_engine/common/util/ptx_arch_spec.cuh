@@ -103,6 +103,20 @@ __device__ __forceinline__ e8m0_t float_to_e8m0(float val) {
   }
 }
 
+/*! \brief float_to_e8m0 for two values at once, returned as two packed bytes:
+ *         \p hi in the upper byte, \p lo in the lower one.
+ */
+__device__ __forceinline__ uint32_t float_to_e8m0_2x(const float hi, const float lo) {
+  constexpr bool is_blackwell = ARCH_BLACKWELL_FAMILY;
+  if constexpr (is_blackwell) {
+    uint16_t out;
+    asm("cvt.rp.satfinite.ue8m0x2.f32 %0, %1, %2;" : "=h"(out) : "f"(hi), "f"(lo));
+    return out;
+  } else {
+    return (static_cast<uint32_t>(float_to_e8m0(hi)) << 8) | float_to_e8m0(lo);
+  }
+}
+
 __device__ __forceinline__ void reduce_sync_max_abs_f32(float &out, float const &in) {
   constexpr bool is_sm_100f = NVTE_CUDA_ARCH_MATCHES(ptx::FamilySpecific<100>);
   if constexpr (is_sm_100f) {

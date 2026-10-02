@@ -732,6 +732,62 @@ __device__ __forceinline__ void abs_max_2x(fp16x2 &dst, const fp16x2 &p1, const 
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 890)
 }
 
+// Packed FP32x2 arithmetic. Each lane rounds exactly like the scalar .rn operation.
+__device__ __forceinline__ floatx2 add_2x(const floatx2 &a, const floatx2 &b) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  floatx2 d;
+  asm("add.rn.f32x2 %0, %1, %2;"
+      : "=l"(reinterpret_cast<uint64_t &>(d))
+      : "l"(reinterpret_cast<const uint64_t &>(a)), "l"(reinterpret_cast<const uint64_t &>(b)));
+  return d;
+#else
+  NVTE_DEVICE_ERROR("add_2x is only supported on SM 10.0+.");
+  return {};
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+}
+
+__device__ __forceinline__ floatx2 mul_2x(const floatx2 &a, const floatx2 &b) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  floatx2 d;
+  asm("mul.rn.f32x2 %0, %1, %2;"
+      : "=l"(reinterpret_cast<uint64_t &>(d))
+      : "l"(reinterpret_cast<const uint64_t &>(a)), "l"(reinterpret_cast<const uint64_t &>(b)));
+  return d;
+#else
+  NVTE_DEVICE_ERROR("mul_2x is only supported on SM 10.0+.");
+  return {};
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+}
+
+__device__ __forceinline__ floatx2 fma_2x(const floatx2 &a, const floatx2 &b, const floatx2 &c) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  floatx2 d;
+  asm("fma.rn.f32x2 %0, %1, %2, %3;"
+      : "=l"(reinterpret_cast<uint64_t &>(d))
+      : "l"(reinterpret_cast<const uint64_t &>(a)), "l"(reinterpret_cast<const uint64_t &>(b)),
+        "l"(reinterpret_cast<const uint64_t &>(c)));
+  return d;
+#else
+  NVTE_DEVICE_ERROR("fma_2x is only supported on SM 10.0+.");
+  return {};
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+}
+
+// fma_2x rounding toward negative infinity instead of to nearest.
+__device__ __forceinline__ floatx2 fma_rm_2x(const floatx2 &a, const floatx2 &b, const floatx2 &c) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  floatx2 d;
+  asm("fma.rm.f32x2 %0, %1, %2, %3;"
+      : "=l"(reinterpret_cast<uint64_t &>(d))
+      : "l"(reinterpret_cast<const uint64_t &>(a)), "l"(reinterpret_cast<const uint64_t &>(b)),
+        "l"(reinterpret_cast<const uint64_t &>(c)));
+  return d;
+#else
+  NVTE_DEVICE_ERROR("fma_rm_2x is only supported on SM 10.0+.");
+  return {};
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+}
+
 __device__ __forceinline__ int32_t elect_one_sync(uint32_t mask = 0xFFFFFFFFu) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   int32_t pred = 0;
@@ -834,6 +890,17 @@ __device__ __forceinline__ bf16x2 exp2f_rcp_2x(e8m0_t biased_exp) {
   bf16x2 result;
   reinterpret_cast<uint32_t &>(result) = bits;
   return result;
+}
+
+/*! \brief exp2f_rcp<bf16> for two biased exponents at once, one in the low byte of each
+ *         16-bit half of \p biased_exps, returned as a BF16 pair.
+ *
+ *  Exponent 254 gives the subnormal 2^-127, as exp2f_rcp_2x does. Exponent 255 is not handled.
+ */
+__device__ __forceinline__ bf16x2 exp2f_rcp_2x_per_lane(const uint32_t biased_exps) {
+  const uint32_t bits =
+      ((0x00FE00FEu - biased_exps) << 7) | (__vcmpeq2(biased_exps, 0x00FE00FEu) & 0x00400040u);
+  return reinterpret_cast<const bf16x2 &>(bits);
 }
 
 // Scale two BF16 pairs by independent scales and pack the four results into a
