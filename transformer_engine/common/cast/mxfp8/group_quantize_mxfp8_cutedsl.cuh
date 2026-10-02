@@ -137,10 +137,8 @@ constexpr size_t kMaxGroupTensors =
 
 struct alignas(128) GroupDescriptorWorkspace {
   alignas(128) int64_t tensor_maps[kMaxGroupTensors][kGroupTensorMapSlots][kInt64PerTensorMap];
-  // Stand-in for the offsets / first_dims / last_dims arrays a given shape representation
-  // does not carry: the kernel takes all three unconditionally but only dereferences the
-  // ones its representation uses, so the contents are never read. Sized num_tensors + 1
-  // for the CSR offsets array, the longest of the three.
+  // Stand-in for the unused offsets array in SAME_BOTH_DIMS. The kernel takes
+  // offsets unconditionally but does not read them for this representation.
   int64_t unused_dims[kMaxGroupTensors + 1];
 };
 
@@ -222,14 +220,6 @@ inline bool mxfp8_group_quantize_cutedsl(const MXFP8GroupQuantConfig &config,
   const int32_t device_index = transformer_engine::cuda::current_device();
   GroupDescriptorWorkspace *const workspace = group_descriptor_workspace_ptr();
 
-  // Both output directions are handed to the kernel unconditionally: the compiled
-  // signature has no optional outputs, and building a TMA descriptor needs a real
-  // address for each. The disabled direction is never read or written, so it points at
-  // the enabled one instead of at a buffer that would have to be allocated.
-  const SimpleTensor &data_row =
-      config.rowwise ? output_tensor->data : output_tensor->columnwise_data;
-  const SimpleTensor &data_col =
-      config.colwise ? output_tensor->columnwise_data : output_tensor->data;
   const SimpleTensor &scale_row =
       config.rowwise ? output_tensor->scale_inv : output_tensor->columnwise_scale_inv;
   const SimpleTensor &scale_col =
@@ -240,10 +230,17 @@ inline bool mxfp8_group_quantize_cutedsl(const MXFP8GroupQuantConfig &config,
   DLTensorWrapper mX(
       make_basic_tensor(input_tensor->data.dptr, input_tensor->dtype(), logical_shape), true,
       device_index);
-  DLTensorWrapper mO_row(make_basic_tensor(data_row.dptr, data_row.dtype, logical_shape), true,
-                         device_index);
-  DLTensorWrapper mO_col(make_basic_tensor(data_col.dptr, data_col.dtype, logical_shape), true,
-                         device_index);
+  DLTensorWrapper mO_row, mO_col;
+  if (config.rowwise) {
+    mO_row = DLTensorWrapper(
+        make_basic_tensor(output_tensor->data.dptr, output_tensor->data.dtype, logical_shape), true,
+        device_index);
+  }
+  if (config.colwise) {
+    mO_col = DLTensorWrapper(make_basic_tensor(output_tensor->columnwise_data.dptr,
+                                               output_tensor->columnwise_data.dtype, logical_shape),
+                             true, device_index);
+  }
 
   // The kernel only takes the base address of the scale buffers (per-tensor bases and
   // strides are derived from the member shapes), so these stay 1D.
@@ -258,8 +255,19 @@ inline bool mxfp8_group_quantize_cutedsl(const MXFP8GroupQuantConfig &config,
     return DLTensorWrapper(make_basic_tensor(dptr, DType::kInt64, {numel}), false, device_index);
   };
   DLTensorWrapper mOffsets = dims_or_unused(output_tensor->tensor_offsets, num_tensors + 1);
-  DLTensorWrapper mFirstDims = dims_or_unused(output_tensor->first_dims, num_tensors);
-  DLTensorWrapper mLastDims = dims_or_unused(output_tensor->last_dims, num_tensors);
+  DLTensorWrapper mFirstDims, mLastDims;
+  if (config.shape_rep == ShapeRepresentation::VARYING_FIRST_DIM ||
+      config.shape_rep == ShapeRepresentation::VARYING_BOTH_DIMS) {
+    mFirstDims = DLTensorWrapper(
+        make_basic_tensor(output_tensor->first_dims.dptr, DType::kInt64, {num_tensors}),
+        false, device_index);
+  }
+  if (config.shape_rep == ShapeRepresentation::VARYING_LAST_DIM ||
+      config.shape_rep == ShapeRepresentation::VARYING_BOTH_DIMS) {
+    mLastDims = DLTensorWrapper(
+        make_basic_tensor(output_tensor->last_dims.dptr, DType::kInt64, {num_tensors}),
+        false, device_index);
+  }
 
   // The kernel reads num_tensors off this tensor's leading extent, so it must be exactly
   // the group size even on the single-tensor path that leaves the descriptors untouched.
@@ -374,14 +382,6 @@ bool mxfp8_group_quantize_cutedsl(const GroupedTensor *input_tensor,
       return false;
     }
     const bool swizzled = output_tensor->with_gemm_swizzled_scales;
-    if (swizzled && colwise && !is_single_tensor) {
-      // For these representations the CUDA kernel adds the tensor base to the colwise
-      // swizzled scale index twice, so leave them to it rather than reproduce that.
-      maybe_warn_cutedsl_not_chosen(
-          "GEMM-swizzled colwise scales are only supported for a common last dimension.");
-      return false;
-    }
-
     // Sanity checks, mirroring mxfp8::group_quantize
     checkCuDriverContext(stream);
     CheckNoopTensor(*noop_tensor, "cast_noop");
