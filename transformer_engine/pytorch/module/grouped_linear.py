@@ -478,6 +478,7 @@ class _GroupedLinear(torch.autograd.Function):
                 rowwise=True,
                 columnwise=(is_grad_enabled and weight_requires_grad and not save_original_input),
             )
+            input_quantizer.optimize_for_gemm = True
             grouped_x = tex.group_quantize(
                 x,
                 input_quantizer,
@@ -697,6 +698,8 @@ class _GroupedLinear(torch.autograd.Function):
 
         num_gemms = len(m_splits)
         num_weight_args = 1 if single_grouped_weight else num_gemms
+        # Only bias=False omits bias arguments; return_bias=True keeps real parameters
+        # and their autograd edges. Save the actual count for matching backward slots.
         num_bias_args = len(weights_and_biases) - num_weight_args
         if is_grad_enabled:
             ctx.num_bias_args = num_bias_args
@@ -1109,6 +1112,7 @@ class _GroupedLinear(torch.autograd.Function):
                 rowwise=ctx.requires_dgrad,
                 columnwise=ctx.weights_requires_grad,
             )
+            grad_output_quantizer.optimize_for_gemm = True
             # The grouped FP8 block-scaling bgrad kernel computes dbias in the rowwise
             # pass, so the fusion needs rowwise output (i.e. dgrad required).
             fuse_bgrad = isinstance(grad_output_quantizer, MXFP8Quantizer) or (
@@ -2283,7 +2287,9 @@ class GroupedLinear(TransformerEngineBaseModule):
 
         try:
             weight_tensors = self._get_weight_tensors()
-            bias_tensors = self._get_bias_tensors() if self.apply_bias else []
+            # Keep real bias inputs even when returned for the caller to apply: they
+            # preserve the output's autograd dependency when input/weight are frozen.
+            bias_tensors = self._get_bias_tensors() if self.use_bias else []
             use_grouped_bias = self.use_bias and self.single_grouped_bias
 
             quantizers = None
@@ -2396,9 +2402,9 @@ class GroupedLinear(TransformerEngineBaseModule):
             self.end_forward()
 
         if self.return_bias:
-            # Returned biases have their own autograd edge in the caller. Even bias=False
-            # retains the legacy list of empty tensors, prepared only when requested.
-            bias_tensors = self._get_bias_tensors()
+            # bias=False still returns the legacy list of empty tensors when requested.
+            if not self.use_bias:
+                bias_tensors = self._get_bias_tensors()
             if use_grouped_bias:
                 return out, bias_tensors[0]
             return out, [cast_if_needed(b, self.activation_dtype) for b in bias_tensors]

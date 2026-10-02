@@ -866,11 +866,6 @@ class GroupedLinear(BasicOperation):
         self._grad_output_quantizers = tuple(
             self.get_quantizer("backward", i) for i in range(self.num_groups)
         )
-        # Only built-in stateless weight recipes may share one role configuration.
-        # Each quantized output still owns its own scales; roles and ops never share.
-        self._share_grouped_weight_quantizer = recipe is not None and (
-            recipe.mxfp8() or recipe.float8_current_scaling()
-        )
 
     def op_forward(self, *args, **kwargs):
         raise RuntimeError(
@@ -956,16 +951,11 @@ class GroupedLinear(BasicOperation):
         Returns a Python list, which dispatches the GEMM to ``discrete_in`` mode.
         """
         out: list[torch.Tensor] = []
-        shared_quantizer = weight_quantizers[0] if len(weight_quantizers) == 1 else None
-        if with_quantized_compute and shared_quantizer is not None:
-            shared_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
-        for idx, w in enumerate(weight_params):
+        for w, quantizer in zip(weight_params, weight_quantizers):
             if not with_quantized_compute:
                 w = maybe_dequantize(w, dtype)
             elif not is_quantized_tensor(w):
-                quantizer = shared_quantizer or weight_quantizers[idx]
-                if shared_quantizer is None:
-                    quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
+                quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
                 w = quantizer(w)
             out.append(w)
         return out
@@ -1094,9 +1084,7 @@ class GroupedLinear(BasicOperation):
             )
 
         weight_quantizers = self._weight_quantizers
-        if use_grouped_tensor_path and (
-            self.single_grouped_weight or self._share_grouped_weight_quantizer
-        ):
+        if use_grouped_tensor_path and self.single_grouped_weight:
             weight_quantizers = (weight_quantizers[0],)
 
         if use_grouped_tensor_path:
@@ -1924,13 +1912,11 @@ class GroupedLinear(BasicOperation):
                         get_main_grad_from_param(w, op_label="GroupedLinear") for w in weights
                     ]
                     accumulate_into_main_grad = get_accumulate_flag_in_param(weights[0])
-                elif num_groups == 1:
-                    final_weight_grads = [torch.empty(weight_shape, dtype=dtype, device=device)]
                 else:
-                    packed_wgrad = torch.empty(
-                        (num_groups, *weight_shape), dtype=dtype, device=device
-                    )
-                    final_weight_grads = list(packed_wgrad.unbind(0))
+                    final_weight_grads = [
+                        torch.empty(weight_shape, dtype=dtype, device=device)
+                        for _ in range(num_groups)
+                    ]
                 wgrad_output = final_weight_grads
 
         # wgrad GEMM
