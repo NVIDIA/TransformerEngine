@@ -1245,7 +1245,7 @@ def get_attention_backend(
                 softmax_type,
             )
             use_fused_attention = False
-        if context_parallel and cp_comm_type != "a2a":
+        if context_parallel and cp_comm_type not in ("a2a", "p2p"):
             logger.debug(
                 "Disabling FusedAttention for context parallelism with softmax_type = %s and"
                 " cp_comm_type = %s",
