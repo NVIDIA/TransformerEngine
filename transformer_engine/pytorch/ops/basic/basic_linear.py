@@ -341,11 +341,6 @@ class BasicLinear(BasicOperation):
             weight = torch.nn.Parameter(weight)
         self.weight = weight
 
-    def pre_first_fuser_forward(self) -> None:
-        super().pre_first_fuser_forward()
-        if self.weight.device.type == "meta":
-            self.reset_parameters()
-
     def pre_fuser_forward(self, *, requires_grad: bool) -> None:
         super().pre_fuser_forward(requires_grad=requires_grad)
         if FP8GlobalStateManager.is_fp8_enabled():
