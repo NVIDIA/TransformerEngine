@@ -548,7 +548,7 @@ void group_quantize_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTensor 
           cutedsl_backend::mxfp8_group_quantize_cutedsl</*IS_DBIAS=*/false, /*IS_DACT=*/false,
                                                         IS_ACT, ParamOP, OP>(
               input_tensor, activations_tensor, noop_tensor, output_tensor, dbias_tensor,
-              workspace_tensor, quant_config_cpp.mxfp8_2d_quantization, stream);
+              workspace_tensor, &quant_config_cpp, stream);
 #endif
       if (!quantized_with_cutedsl) {
         mxfp8::group_quantize</*IS_DBIAS=*/false, /*IS_DACT=*/false, IS_ACT, ParamOP, OP>(
@@ -653,7 +653,7 @@ void group_quantize_bwd_helper(const NVTEGroupedTensor grad, const NVTEGroupedTe
           cutedsl_backend::mxfp8_group_quantize_cutedsl<IS_DBIAS, IS_DACT, /*IS_ACT=*/false,
                                                         ParamOP, OP>(
               grad_tensor, input_tensor, noop_tensor, output_tensor, dbias_tensor, workspace_tensor,
-              quant_config_cpp.mxfp8_2d_quantization, stream);
+              &quant_config_cpp, stream);
 #endif
       if (!quantized_with_cutedsl) {
         mxfp8::group_quantize<IS_DBIAS, IS_DACT, /*IS_ACT=*/false, ParamOP, OP>(

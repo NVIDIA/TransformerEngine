@@ -320,14 +320,14 @@ template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
 bool mxfp8_group_quantize_cutedsl(const GroupedTensor *input_tensor,
                                   const GroupedTensor *act_input_tensor, const Tensor *noop_tensor,
                                   GroupedTensor *output_tensor, GroupedTensor *dbias_tensor,
-                                  Tensor *workspace_tensor, const bool use_2d_quantization,
+                                  Tensor *workspace_tensor, const QuantizationConfig *quant_config,
                                   cudaStream_t stream) {
   if (!tvm_ffi_bridge::TVMFFICentral::getInstance().get_cutedsl_backend_enabled()) {
     maybe_warn_cutedsl_not_chosen("the CuTeDSL backend is disabled.");
     return false;
   }
   // TODO(kainingz): port 2D quantization to CuTeDSL
-  if (use_2d_quantization) {
+  if (quant_config != nullptr && quant_config->mxfp8_2d_quantization) {
     maybe_warn_cutedsl_not_chosen("2D quantization is not supported.");
     return false;
   }
