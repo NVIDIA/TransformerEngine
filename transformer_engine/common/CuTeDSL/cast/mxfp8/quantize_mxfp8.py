@@ -816,6 +816,50 @@ def quantize_bidimensional_mxfp8_swizzled(
 
 
 @cute.jit
+def reduce_rowwise_dbias(
+    sDbias: cute.Tensor,
+    tidx: Int32,
+    rowwise_dbias_acc: cute.Tensor,
+    TILE_ROWS: cutlass.Constexpr[int],
+    TILE_COLS: cutlass.Constexpr[int],
+    PACK_SIZE: cutlass.Constexpr[int],
+    THREADS_PER_BANK: cutlass.Constexpr[int],
+):
+    """Reduce per-thread rowwise partial sums to one sum per column using shared memory."""
+    _, tv_layout_dbias_write = cute.make_layout_tv(
+        thr_layout=cute.make_layout(
+            (TILE_ROWS, TILE_COLS // MXFP8_BLOCK_SCALING_SIZE),
+            stride=(TILE_COLS // MXFP8_BLOCK_SCALING_SIZE, 1),
+        ),
+        val_layout=cute.make_layout(
+            (1, MXFP8_BLOCK_SCALING_SIZE), stride=(MXFP8_BLOCK_SCALING_SIZE, 1)
+        ),
+    )
+    sDbias_write = cute.composition(sDbias, tv_layout_dbias_write)
+    # Undo the bank-conflict rotation used when accumulating the per-thread sums.
+    bank_group = (tidx % THREADS_PER_WARP) // THREADS_PER_BANK
+    offset = bank_group * PACK_SIZE
+    for w in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE // PACK_SIZE):
+        start = (w * PACK_SIZE + offset) % MXFP8_BLOCK_SCALING_SIZE
+        for i in cutlass.range_constexpr(PACK_SIZE):
+            # All threads write their per-thread partial sum results to the shared buffer.
+            sDbias_write[(tidx, start + i)] = rowwise_dbias_acc[w * PACK_SIZE + i]
+    cute.arch.sync_threads()
+    # All threads reduce the cross-thread partial sums to the per-block partial sum.
+    _, tv_layout_dbias_reduce = cute.make_layout_tv(
+        thr_layout=cute.make_layout((1, TILE_COLS), stride=(TILE_COLS, 1)),
+        val_layout=cute.make_layout((TILE_ROWS, 1), stride=(1, 1)),
+    )
+    sDbias_reduce = cute.composition(sDbias, tv_layout_dbias_reduce)
+    # make_layout_tv yields a (thread, value) layout: thread=tidx -> column tidx,
+    # value=i -> row i. So index [tidx, i] (thread first), summing the column's rows.
+    block_dbias = Float32(0.0)
+    for i in cutlass.range_constexpr(TILE_ROWS):
+        block_dbias += sDbias_reduce[tidx, i]
+    return block_dbias
+
+
+@cute.jit
 def noop_flag_is_set(mNoop: cute.Pointer) -> Boolean:
     """Whether the cast_noop flag says this quantization is a no-op and must be skipped.
 
@@ -1645,41 +1689,15 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
         sDbias = dbias_storage.sDbias.get_tensor(
             cute.make_layout((self._TILE_ROWS, self._TILE_COLS), stride=(DBIAS_BUFF_WIDTH, 1)),
         )
-        _, tv_layout_dbias_write = cute.make_layout_tv(
-            thr_layout=cute.make_layout(
-                (self._TILE_ROWS, self._TILE_COLS // MXFP8_BLOCK_SCALING_SIZE),
-                stride=(self._TILE_COLS // MXFP8_BLOCK_SCALING_SIZE, 1),
-            ),
-            val_layout=cute.make_layout(
-                (1, MXFP8_BLOCK_SCALING_SIZE), stride=(MXFP8_BLOCK_SCALING_SIZE, 1)
-            ),
+        return reduce_rowwise_dbias(
+            sDbias,
+            tidx,
+            rowwise_dbias_acc,
+            self._TILE_ROWS,
+            self._TILE_COLS,
+            self._PACK_SIZE,
+            self._THREADS_PER_BANK,
         )
-        sDbias_write = cute.composition(sDbias, tv_layout_dbias_write)
-        # Each thread start reading from the specfic bank based on its thread ID so they can do their best to access different banks
-        # to avoid bank conflict.
-        bank_group = (tidx % THREADS_PER_WARP) // self._THREADS_PER_BANK
-        # The offset this thread should start reading from based on what's its first bank to access.
-        offset = bank_group * self._PACK_SIZE
-        for w in cutlass.range_constexpr(
-            self._WAVES
-        ):  # Each thread starts from this offset when writing into SMEM to avoid bank conflict
-            start = (w * self._PACK_SIZE + offset) % MXFP8_BLOCK_SCALING_SIZE
-            for i in cutlass.range_constexpr(self._PACK_SIZE):
-                # All threads write their per-thread partial sum results to the shared buffer.
-                sDbias_write[(tidx, start + i)] = rowwise_dbias_acc[w * self._PACK_SIZE + i]
-        cute.arch.sync_threads()
-        # All threads reduce the cross-thread partial sums to the per-block partial sum.
-        _, tv_layout_dbias_reduce = cute.make_layout_tv(
-            thr_layout=cute.make_layout((1, self._TILE_COLS), stride=(self._TILE_COLS, 1)),
-            val_layout=cute.make_layout((self._TILE_ROWS, 1), stride=(1, 1)),
-        )
-        sDbias_reduce = cute.composition(sDbias, tv_layout_dbias_reduce)
-        # make_layout_tv yields a (thread, value) layout: thread=tidx -> column tidx,
-        # value=i -> row i. So index [tidx, i] (thread first), summing the column's rows.
-        block_dbias = Float32(0.0)
-        for i in cutlass.range_constexpr(self._TILE_ROWS):
-            block_dbias += sDbias_reduce[tidx, i]
-        return block_dbias
 
     @cute.jit
     def _amax_epilogue(
