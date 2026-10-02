@@ -28,6 +28,23 @@ size_t get_size(transformer_engine::pytorch::MaybeTensor tensor, int dim) {
   return 0;
 }
 
+// Whether FP8 block scaling must be emulated with MXFP8 for these operands: on Blackwell and
+// newer, cuBLASLt has no native FP8 block-scaling (grouped) GEMM. All operands must agree.
+bool needs_fp8_block_scaling_emulation(const std::vector<NVTEScalingMode>& modes) {
+  if (transformer_engine::cuda::sm_arch() < 100) {
+    return false;
+  }
+  bool any = false;
+  bool all = true;
+  for (const auto mode : modes) {
+    const bool fp8_block = mode == NVTE_BLOCK_SCALING_1D || mode == NVTE_BLOCK_SCALING_2D;
+    any = any || fp8_block;
+    all = all && fp8_block;
+  }
+  NVTE_CHECK(!any || all, "Either all tensors or no tensor must be FP8 block scaling tensors");
+  return any;
+}
+
 }  // namespace
 
 namespace transformer_engine::pytorch {
@@ -605,14 +622,10 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
       NVTE_CHECK(!exists_tensor_not_using_fp8_block_scaling,
                  "Either all tensors or no tensor must be FP8 block scaling tensors");
       // Convert tensors to mxfp8 and swizzle their scaling factors
-      for (TensorWrapper& A_tensor : te_A_wrappers) {
-        swizzled_scale_inverses_list.emplace_back(
-            convert_block_scaling_to_mxfp8_tensor(A_tensor, transa));
-      }
-      for (TensorWrapper& B_tensor : te_B_wrappers) {
-        swizzled_scale_inverses_list.emplace_back(
-            convert_block_scaling_to_mxfp8_tensor(B_tensor, !transb));
-      }
+      swizzled_scale_inverses_list.emplace_back(
+          convert_block_scaling_to_mxfp8_tensors(te_A_wrappers, transa));
+      swizzled_scale_inverses_list.emplace_back(
+          convert_block_scaling_to_mxfp8_tensors(te_B_wrappers, !transb));
       // Use TN GEMM to avoid having to transpose data.
       transa = true;
       transb = false;
@@ -680,6 +693,20 @@ py::object te_general_grouped_gemm_for_grouped_tensor(
       maybe_swizzle_grouped_tensor(grouped_A, transa, !transa);
   [[maybe_unused]] auto swizzled_scales_B =
       maybe_swizzle_grouped_tensor(grouped_B, transb, !transb);
+
+  // Emulate the FP8 block scaling recipe with MXFP8 on Blackwell and newer as it is not
+  // natively supported by cublasLt grouped GEMM (mirrors generic_gemm).
+  // Keep the converted scaling factor tensors alive during the GEMM.
+  std::vector<at::Tensor> mxfp8_emulation_scales;
+  if (needs_fp8_block_scaling_emulation({grouped_A.scaling_mode(), grouped_B.scaling_mode()})) {
+    mxfp8_emulation_scales.emplace_back(
+        convert_grouped_block_scaling_to_mxfp8_tensor(grouped_A, transa));
+    mxfp8_emulation_scales.emplace_back(
+        convert_grouped_block_scaling_to_mxfp8_tensor(grouped_B, !transb));
+    // Use TN GEMM to avoid having to transpose data.
+    transa = true;
+    transb = false;
+  }
 
   NVTE_SCOPED_GIL_RELEASE({
     nvte_grouped_gemm(grouped_A.data(), transa, grouped_B.data(), transb, grouped_D.data(),
@@ -757,6 +784,28 @@ py::object te_general_grouped_gemm_for_discrete_in(py::handle A, bool transa, py
   [[maybe_unused]] auto swizzled_scales_B =
       maybe_swizzle_grouped_tensor(grouped_B, transb, !transb);
 
+  // Emulate the FP8 block scaling recipe with MXFP8 on Blackwell and newer as it is not
+  // natively supported by cublasLt grouped GEMM (mirrors generic_gemm).
+  std::vector<NVTEScalingMode> operand_modes{grouped_B.scaling_mode()};
+  for (const auto& A_tensor : te_A_wrappers) {
+    operand_modes.push_back(A_tensor.scaling_mode());
+  }
+  // Keep the converted scaling factor tensors alive during the GEMM.
+  std::vector<at::Tensor> mxfp8_emulation_scales;
+  if (needs_fp8_block_scaling_emulation(operand_modes)) {
+    mxfp8_emulation_scales.emplace_back(
+        convert_block_scaling_to_mxfp8_tensors(te_A_wrappers, transa));
+    mxfp8_emulation_scales.emplace_back(
+        convert_grouped_block_scaling_to_mxfp8_tensor(grouped_B, !transb));
+    // The wrappers were replaced in place, so refresh the raw handles passed to the GEMM.
+    for (size_t i = 0; i < te_A_wrappers.size(); ++i) {
+      te_A_vector[i] = te_A_wrappers[i].data();
+    }
+    // Use TN GEMM to avoid having to transpose data.
+    transa = true;
+    transb = false;
+  }
+
   NVTE_SCOPED_GIL_RELEASE({
     nvte_grouped_gemm_with_discrete_inputA(
         te_A_vector.data(), num_tensors, transa, grouped_B.data(), transb, grouped_D.data(),
@@ -833,6 +882,20 @@ py::object te_general_grouped_gemm_for_discrete_out(py::handle A, bool transa, p
       maybe_swizzle_grouped_tensor(grouped_A, transa, !transa);
   [[maybe_unused]] auto swizzled_scales_B =
       maybe_swizzle_grouped_tensor(grouped_B, transb, !transb);
+
+  // Emulate the FP8 block scaling recipe with MXFP8 on Blackwell and newer as it is not
+  // natively supported by cublasLt grouped GEMM (mirrors generic_gemm).
+  // Keep the converted scaling factor tensors alive during the GEMM.
+  std::vector<at::Tensor> mxfp8_emulation_scales;
+  if (needs_fp8_block_scaling_emulation({grouped_A.scaling_mode(), grouped_B.scaling_mode()})) {
+    mxfp8_emulation_scales.emplace_back(
+        convert_grouped_block_scaling_to_mxfp8_tensor(grouped_A, transa));
+    mxfp8_emulation_scales.emplace_back(
+        convert_grouped_block_scaling_to_mxfp8_tensor(grouped_B, !transb));
+    // Use TN GEMM to avoid having to transpose data.
+    transa = true;
+    transb = false;
+  }
 
   NVTE_SCOPED_GIL_RELEASE({
     nvte_grouped_gemm_with_discrete_out(
