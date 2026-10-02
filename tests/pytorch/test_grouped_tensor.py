@@ -4,7 +4,6 @@
 
 """Tests for GroupedTensor class"""
 
-import os
 from types import SimpleNamespace
 from typing import List, Optional, Tuple
 
@@ -1944,8 +1943,6 @@ class TestGroupedTensor:
         in_features = 64
         out_features = 32
         dtype = torch.float32
-        if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0":
-            pytest.skip("single_grouped_weight requires NVTE_GROUPED_LINEAR_SINGLE_PARAM=1")
         src = te.GroupedLinear(
             num_gemms=num_gemms,
             in_features=in_features,
@@ -1996,8 +1993,6 @@ class TestGroupedTensor:
 
     def test_grouped_linear_load_state_dict_single_to_multi_param(self, tmp_path) -> None:
         """Load grouped-parameter checkpoint from disk into per-GEMM parameter format."""
-        if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0":
-            pytest.skip("single_grouped_weight requires NVTE_GROUPED_LINEAR_SINGLE_PARAM=1")
         num_gemms = 3
         in_features = 64
         out_features = 32
