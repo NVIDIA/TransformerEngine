@@ -94,6 +94,12 @@ from transformer_engine.pytorch import export
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
 from transformer_engine.pytorch.graph import is_graph_capturing
 
+from transformer_engine.pytorch.attention.packed_sequence import (
+    _AttentionBackendWorkspace,
+    _get_attention_backend_workspace,
+)
+from .compact_gqa import compact_gqa_enabled, try_compact_gqa_backward
+
 # Global vars for flash attn v2
 flash_attn_cuda_bwd = None
 flash_attn_func = None
@@ -1572,6 +1578,8 @@ class FusedAttnFwdArgs:
 class FusedAttnBwdArgs:
     """Single-argument bag for the backward path of :class:`FusedAttnFunc`."""
 
+    backend_workspace: Optional[_AttentionBackendWorkspace] = None
+
     # --- Saved / restored tensors (populated at backward entry) ---
     grad_output: Optional[torch.Tensor] = None
     q_fp8: Optional[TensorOrQuantized] = None
@@ -1991,6 +1999,8 @@ def _fused_attn_setup_ctx(
     out = fwd_outputs[0]
     fp8 = ctx_attrs["fp8"]
 
+    if compact_gqa_enabled() and not torch.compiler.is_compiling() and not is_graph_capturing():
+        bwd_args.backend_workspace = _get_attention_backend_workspace()
     bwd_args.fp8 = fp8
     bwd_args.is_input_fp8 = ctx_attrs["is_input_fp8"]
     # assume fwd and bwd always use the same high precision, i.e. torch.float16 or torch.bfloat16
@@ -2118,6 +2128,9 @@ def _fused_attn_backward_impl(
 
     if not aux_ctx_tensors[0].is_contiguous():
         aux_ctx_tensors[0] = aux_ctx_tensors[0].contiguous()
+    compact_grads = try_compact_gqa_backward(args, d_out, aux_ctx_tensors[0])
+    if compact_grads is not None:
+        return (*compact_grads, None, None)
     rest = [None]
     if args.use_FAv2_bwd:
         softmax_lse, rng_state = aux_ctx_tensors
