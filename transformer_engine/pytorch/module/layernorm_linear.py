@@ -1009,6 +1009,8 @@ def _layernorm_linear_backward_impl(
 
         # Prepare grad output tensor
         # Note: Cast to expected dtype and perform tensor-parallel communication
+        # Keep the original gradient for the cuBLASMp wgrad re-gather.
+        grad_output_arg = grad_output
         nvtx_range_push(f"{nvtx_label}.grad_output_preprocess")
         (
             grad_output,
@@ -1198,6 +1200,10 @@ def _layernorm_linear_backward_impl(
         ):
             if args.grad_output_quantizer is not None:
                 set_quantizer_usage_for_wgrad_all_gather(args.grad_output_quantizer)
+            if isinstance(args.grad_output_quantizer, HybridQuantizer):
+                # Quantize the original gradient so the columnwise operand is not
+                # requantized from the rowwise data.
+                grad_output = grad_output_arg.reshape(-1, grad_output_arg.shape[-1]).contiguous()
             grad_output, _ = gather_along_first_dim(
                 grad_output,
                 args.tp_group,

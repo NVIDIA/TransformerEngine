@@ -148,6 +148,7 @@ def is_module_grouped_tensor_path_supported(
             device_capability >= (10, 0)
             and not recipe.disable_rht
             and not recipe.row_scaled_activation
+            and not recipe.dgrad_mxfp8
         )
     return False
 

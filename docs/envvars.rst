@@ -370,7 +370,7 @@ Kernel Configuration
 
    :Type: ``str`` (``none``, ``weights``, ``activations``, or ``all``)
    :Default: ``all``
-   :Description: Select NVFP4 4over6 quantizers that use 256 instead of 448 as the global E4M3 scale bound. By default, all 4over6 quantizers use 256. Set the env var to ``none`` (or set ``NVFP4BlockScaling(nvfp4_4over6_e4m3_use_256="none")``) to use the standard NVFP4 448 bound for all 4over6 quantizers. This option is only meaningful for tensor roles that also enable :envvar:`NVTE_NVFP4_4OVER6`.
+   :Description: Select NVFP4 4over6 quantizers that use 256 instead of 448 as the global E4M3 scale bound. By default, all 4over6 quantizers use 256. Set the env var to ``none`` (or set ``NVFP4BlockScaling(nvfp4_4over6_e4m3_use_256="none")``) to use the standard NVFP4 448 bound for all 4over6 quantizers. This option is only meaningful for tensor roles that also enable :envvar:`NVTE_NVFP4_4OVER6` or :envvar:`NVTE_NVFP4_4OVER6_GRAD`. Gradient 4over6 quantizers use 256 only when this option is ``all``.
 
 .. envvar:: NVTE_NVFP4_4OVER6_ERR_MODE
 
@@ -383,6 +383,18 @@ Kernel Configuration
    :Type: ``int`` (0 or 1)
    :Default: ``0``
    :Description: Use the faster NVFP4 4over6 candidate error path that compares candidates in the E4M3-scaled domain after the E2M1 x E4M3 product is rounded to FP16. Error differences and accumulation remain FP32. By default, 4over6 error comparison uses the original input-domain path; ``NVTE_USE_FAST_MATH`` does not control this error-comparison path.
+
+.. envvar:: NVTE_NVFP4_4OVER6_GRAD
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Apply 4over6 adaptive NVFP4 block scaling to gradient quantizers in the ``NVFP4BlockScaling`` recipe. When set to ``1`` (or when ``NVFP4BlockScaling(nvfp4_4over6_grad=True)`` is used), gradient blocks use the same map-to-4 versus map-to-6 candidate selection as :envvar:`NVTE_NVFP4_4OVER6`. Requires RHT and stochastic rounding to be disabled for gradient quantizers (``NVTE_NVFP4_DISABLE_RHT=1`` and ``NVTE_NVFP4_DISABLE_STOCHASTIC_ROUNDING=1``, or ``disable_rht=True`` and ``disable_stochastic_rounding=True``).
+
+.. envvar:: NVTE_NVFP4_DGRAD_MXFP8
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Run the dgrad GEMM of the ``NVFP4BlockScaling`` recipe with MXFP8 operands while the fprop and wgrad GEMMs keep NVFP4 operands. When set to ``1`` (or when ``NVFP4BlockScaling(dgrad_mxfp8=True)`` is used), the weight quantizer emits NVFP4 rowwise data for fprop and MXFP8 columnwise data for dgrad, and the ``grad_output`` quantizer emits MXFP8 rowwise data for dgrad and NVFP4 columnwise data for wgrad. Cannot be combined with ``NVTE_BACKWARD_OVERRIDE`` or with quantized primary weights.
 
 Torch Compilation and Fusion
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

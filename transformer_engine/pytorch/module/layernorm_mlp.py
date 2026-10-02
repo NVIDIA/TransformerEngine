@@ -1712,11 +1712,12 @@ def _layernorm_mlp_backward_impl(
                 )  # activation in high precision
 
             if args.fp8:
-                # TODO float8 blockwise current scaling (as well as custom quantizers) has no bgrad fusion for now
+                # TODO: float8 blockwise current scaling, identity, hybrid, and custom
+                # quantizers have no bgrad fusion for now
                 if (
                     isinstance(
                         args.fc1_grad_output_quantizer,
-                        (Float8BlockQuantizer, IdentityQuantizer),
+                        (Float8BlockQuantizer, HybridQuantizer, IdentityQuantizer),
                     )
                     or args.fp8_recipe.custom()
                 ):

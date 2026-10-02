@@ -923,12 +923,18 @@ def quantized_model_init(
              This functionality is *EXPERIMENTAL*.
     """
 
+    recipe = get_default_fp8_recipe() if recipe is None else recipe
+    if enabled and recipe.nvfp4() and recipe.dgrad_mxfp8:
+        raise ValueError(
+            "quantized_model_init does not support NVFP4BlockScaling(dgrad_mxfp8=True)."
+        )
+
     qstate = FP8GlobalStateManager.quantization_state
     _fp8_parameters = qstate.fp8_parameters
     _fp8_recipe = qstate.fp8_recipe
     _high_precision_init_val = qstate.high_precision_init_val
     qstate.fp8_parameters = enabled
-    qstate.fp8_recipe = get_default_fp8_recipe() if recipe is None else recipe
+    qstate.fp8_recipe = recipe
     qstate.high_precision_init_val = preserve_high_precision_init_val
     try:
         yield
@@ -1668,7 +1674,7 @@ class NVFP4BlockScalingRecipeState(RecipeState):
             device = torch.device("cuda")
 
     def make_quantizers(self) -> list:
-        """Build one ``NVFP4Quantizer`` per slot, dispatched by tensor type.
+        """Build one quantizer per slot, dispatched by tensor type.
 
         Per-slot behavior, resolved via :meth:`RecipeState._slot_tensor_type`:
 
@@ -1677,9 +1683,11 @@ class NVFP4BlockScalingRecipeState(RecipeState):
           ``recipe.fp4_quant_fwd_inp``.
         * ``"grad_output"`` / ``"grad_input"`` -> ``recipe.fp4_quant_bwd_grad``.
         * NVFP4 4over6 is applied to non-gradient slots selected by
-          ``recipe.nvfp4_4over6``. Gradient slots always use standard NVFP4,
-          which lets gradient RHT and stochastic rounding follow the base
-          recipe.
+          ``recipe.nvfp4_4over6`` and to gradient slots if
+          ``recipe.nvfp4_4over6_grad`` is set.
+        * If ``recipe.dgrad_mxfp8`` is set, the ``"weight"`` and
+          ``"grad_output"`` slots use ``HybridQuantizer`` instances whose dgrad
+          operands (weight columnwise, grad_output rowwise) are MXFP8.
 
         When the owning module/op provides a role list via
         ``get_quantizer_roles``, the per-slot ``tensor_type`` drives dispatch.
@@ -1688,6 +1696,8 @@ class NVFP4BlockScalingRecipeState(RecipeState):
         layout slot ``idx % 3 == 1`` is always weight and the rest fall into
         the input config, matching the legacy index-based behavior.
         """
+        from .tensor.hybrid_tensor import HybridQuantizer
+        from .tensor.mxfp8_tensor import MXFP8Quantizer
         from .tensor.nvfp4_tensor import NVFP4Quantizer
 
         def _qparams(tensor_type: str):
@@ -1707,6 +1717,8 @@ class NVFP4BlockScalingRecipeState(RecipeState):
                     nvfp4_use_4over6 = tensor_type == "weight"
                 elif self.recipe.nvfp4_4over6 == "activations":
                     nvfp4_use_4over6 = tensor_type != "weight"
+            else:
+                nvfp4_use_4over6 = self.recipe.nvfp4_4over6_grad
             nvfp4_e4m3_max = 448
             if nvfp4_use_4over6:
                 # Current 4over6 kernels target RL and post-training quantization paths.
@@ -1723,7 +1735,7 @@ class NVFP4BlockScalingRecipeState(RecipeState):
                     if tensor_type == "weight":
                         nvfp4_e4m3_max = 256
                 elif self.recipe.nvfp4_4over6_e4m3_use_256 == "activations":
-                    if tensor_type != "weight":
+                    if tensor_type not in ("weight", "grad_output", "grad_input"):
                         nvfp4_e4m3_max = 256
                 elif self.recipe.nvfp4_4over6_e4m3_use_256 == "none":
                     nvfp4_e4m3_max = 448
@@ -1745,10 +1757,29 @@ class NVFP4BlockScalingRecipeState(RecipeState):
                 nvfp4_4over6_err_mode=self.recipe.nvfp4_4over6_err_mode,
             )
 
+        def _make_slot(tensor_type: str) -> Union[NVFP4Quantizer, HybridQuantizer]:
+            quantizer = _make(tensor_type)
+            if not self.recipe.dgrad_mxfp8:
+                return quantizer
+            if tensor_type == "weight":
+                # Derive the MXFP8 dgrad weight from the quantized NVFP4 fprop weight.
+                return HybridQuantizer(
+                    rowwise_quantizer=quantizer,
+                    columnwise_quantizer=MXFP8Quantizer(fp8_dtype=DType.kFloat8E4M3),
+                    columnwise_source="rowwise_dequantized",
+                )
+            if tensor_type == "grad_output":
+                return HybridQuantizer(
+                    rowwise_quantizer=MXFP8Quantizer(fp8_dtype=DType.kFloat8E4M3),
+                    columnwise_quantizer=quantizer,
+                    columnwise_source="original",
+                )
+            return quantizer
+
         if self.mode not in ("forward", "backward"):
             raise RuntimeError(f"Unexpected recipe mode ({self.mode})")
 
-        return [_make(self._slot_tensor_type(idx)) for idx in range(self.num_quantizers)]
+        return [_make_slot(self._slot_tensor_type(idx)) for idx in range(self.num_quantizers)]
 
 
 def _handle_delayed_scaling_requests(
