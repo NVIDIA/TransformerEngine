@@ -2247,7 +2247,9 @@ def test_grouped_runtime_rechecks_support(monkeypatch, single_weight, restrictio
     assert module._grouped_tensor_path_supported(False, False, ())
 
 
-@pytest.mark.parametrize("use_grouped_tensor,single_bias", [(False, False), (True, False), (True, True)])
+@pytest.mark.parametrize(
+    "use_grouped_tensor,single_bias", [(False, False), (True, False), (True, True)]
+)
 @pytest.mark.parametrize("use_bias", [False, True])
 def test_grouped_linear_return_bias_with_frozen_weights(
     monkeypatch, use_grouped_tensor, single_bias, use_bias

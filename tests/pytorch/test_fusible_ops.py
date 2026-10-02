@@ -5494,7 +5494,9 @@ class TestTrainingLoops:
 @pytest.mark.parametrize("num_groups", [1, 8, 32])
 @pytest.mark.parametrize("recompute", [False, True])
 @pytest.mark.parametrize("single_grouped_weight", [False, True])
-def test_basic_grouped_runtime_quantizers(monkeypatch, num_groups, recompute, single_grouped_weight):
+def test_basic_grouped_runtime_quantizers(
+    monkeypatch, num_groups, recompute, single_grouped_weight
+):
     """Reuse cached references while configuring each consumed weight quantizer."""
     fp8_recipe = transformer_engine.common.recipe.MXFP8BlockScaling()
     if not is_op_fuser_grouped_tensor_path_supported(fp8_recipe, torch.bfloat16):
