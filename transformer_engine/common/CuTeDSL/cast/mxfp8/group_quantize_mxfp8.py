@@ -90,6 +90,7 @@ from transformer_engine.common.CuTeDSL.cast.mxfp8.quantize_mxfp8 import (
     SUPPORTED_DACTIVATIONS,
     derive_swizzled_scale_layout,
     noop_flag_is_set,
+    reduce_rowwise_dbias,
     quantize_rowwise_mxfp8,
     quantize_colwise_mxfp8,
 )
@@ -922,6 +923,7 @@ class MXFP8GroupQuantizeKernel:
                 if cutlass.const_expr(cfg.ROWWISE):
                     row_scales = self._rowwise_scales(mS_row, Int64(0), tensor_rows, tensor_cols)
 
+                # Colwise scales require special handling for swizzled scales
                 col_scales = None
                 col_scale_row_start = job_start_row
                 col_scale_rows = tensor_rows
@@ -959,16 +961,15 @@ class MXFP8GroupQuantizeKernel:
 
                 cute.arch.sync_threads()
 
-                self._process_job_strip(
+                self._process_job(
                     job_start_row,
-                    job_id_X,
+                    job_id_X * self.TILE_COLS,
                     tensor_rows,
                     tensor_cols,
                     row_scales,
                     col_scales,
                     col_scale_row_start,
                     col_scale_rows,
-                    job_start_row // (self.TILE_ROWS * self.NUM_TILES_Y),
                     mWorkspace,
                     sDbias,
                     descs,
@@ -1025,68 +1026,32 @@ class MXFP8GroupQuantizeKernel:
                     job_start_row_in_tensor = job_id_Y_in_tensor * (
                         self.TILE_ROWS * self.NUM_TILES_Y
                     )
-                    if cutlass.const_expr(self.NUM_TILES_X == 1):
-                        self._process_job_strip(
-                            job_start_row_in_tensor,
-                            job_id_X_in_tensor,
-                            tensor_rows,
-                            tensor_cols,
-                            row_scales,
-                            col_scales,
-                            job_start_row_in_tensor,
-                            tensor_rows,
-                            Int32(0),  # dbias is only supported for single-tensor reps
-                            mWorkspace,
-                            sDbias,
-                            descs,
-                            tmap,
-                            warp_idx,
-                            tidx,
-                            sX,
-                            sActInput,
-                            sO_row,
-                            sO_col,
-                            partitions,
-                            atoms,
-                            mainloop_pipeline,
-                            prod_state,
-                            cons_state,
-                        )
-                    else:
-                        # The job's column tiles in order, stopping at the tensor's last
-                        # column like the CUDA kernel's stages_X = DIVUP(chunk_cols, TILE_DIM_X).
-                        job_start_col = job_id_X_in_tensor * (self.TILE_COLS * self.NUM_TILES_X)
-                        tiles_X = cutlass.min(
-                            Int32(self.NUM_TILES_X),
-                            cute.ceil_div(tensor_cols - job_start_col, self.TILE_COLS),
-                        )
-                        for stage_X in cutlass.range(tiles_X, unroll=1):
-                            self._process_job_strip(
-                                job_start_row_in_tensor,
-                                job_id_X_in_tensor * self.NUM_TILES_X + stage_X,
-                                tensor_rows,
-                                tensor_cols,
-                                row_scales,
-                                col_scales,
-                                job_start_row_in_tensor,
-                                tensor_rows,
-                                Int32(0),  # dbias is only supported for single-tensor reps
-                                mWorkspace,
-                                sDbias,
-                                descs,
-                                tmap,
-                                warp_idx,
-                                tidx,
-                                sX,
-                                sActInput,
-                                sO_row,
-                                sO_col,
-                                partitions,
-                                atoms,
-                                mainloop_pipeline,
-                                prod_state,
-                                cons_state,
-                            )
+                    job_start_col = job_id_X_in_tensor * (self.TILE_COLS * self.NUM_TILES_X)
+                    self._process_job(
+                        job_start_row_in_tensor,
+                        job_start_col,
+                        tensor_rows,
+                        tensor_cols,
+                        row_scales,
+                        col_scales,
+                        job_start_row_in_tensor,
+                        tensor_rows,
+                        mWorkspace,
+                        sDbias,
+                        descs,
+                        tmap,
+                        warp_idx,
+                        tidx,
+                        sX,
+                        sActInput,
+                        sO_row,
+                        sO_col,
+                        partitions,
+                        atoms,
+                        mainloop_pipeline,
+                        prod_state,
+                        cons_state,
+                    )
                     # Find the next job to process
                     job_id = job_id + job_stride
                     if job_id >= jobs_in_tensor:
@@ -1144,17 +1109,16 @@ class MXFP8GroupQuantizeKernel:
         pipeline_obj.producer_commit(prod_state)
 
     @cute.jit
-    def _process_job_strip(
+    def _process_job(
         self,
         job_start_row,  # Row offset of this job (global for single-tensor, else tensor-local)
-        column_tile_id,  # Column-tile index within the tensor
+        job_start_col,  # Column offset of this job within the tensor
         rows,  # Rows of the rowwise-scale view (the group for single-tensor, else the tensor)
         cols,  # Number of columns in this tensor
         row_scales,  # Rowwise scales tiled per stage, rows counted like job_start_row
         col_scales,  # Colwise scales tiled per stage
         col_scale_row_start,  # Row of this job in the colwise-scale view
         col_scale_rows,  # Rows of the colwise-scale view
-        dbias_row,  # Row of the dbias workspace this job reduces into
         mWorkspace,  # f32 partial dbias workspace (WITH_DBIAS)
         sDbias,  # SMEM buffer for the rowwise dbias reduction (rowwise-only dbias)
         descs,  # Per-tensor descriptors (x, act, out_row, out_col), None if single-tensor
@@ -1171,30 +1135,19 @@ class MXFP8GroupQuantizeKernel:
         prod_state,
         cons_state,
     ):
-        """Quantize NUM_TILES_Y vertically stacked tiles in one column strip of a job."""
+        """Quantize a job with one continuous pipeline across its column and row tiles."""
         cfg = self.cfg
         _, _, tma_atom_out_row, tma_atom_out_col = atoms
         _, _, _, _, tXsO_row, tXgO_row, tXsO_col, tXgO_col = partitions
         _, _, desc_out_row, desc_out_col = descs
-        job_start_col = column_tile_id * self.TILE_COLS
 
-        # This job's coordinates in the tile grid (32x128 TMA boxes, not elements).
-        tile_id_Y = job_start_row // self.TILE_ROWS
-        tile_id_X = column_tile_id
+        job_tile_Y = job_start_row // self.TILE_ROWS
+        job_tile_X = job_start_col // self.TILE_COLS
         col_scale_tile_Y = col_scale_row_start // self.TILE_ROWS
-
-        # Per-job dbias accumulators, in the CUDA kernel's summation order: a running
-        # column sum over the job's rows (colwise), or per-thread partial sums over its
-        # stages that the whole CTA reduces afterwards (rowwise-only).
-        dbias_col = Float32(0.0)
-        dbias_row_acc = None
-        if cutlass.const_expr(self.DBIAS_IN_ROWWISE):
-            dbias_row_acc = cute.make_rmem_tensor(
-                layout_or_shape=cute.make_layout((MXFP8_BLOCK_SCALING_SIZE,), stride=(1,)),
-                dtype=Float32,
-            )
-            for c in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
-                dbias_row_acc[c] = Float32(0.0)
+        tiles_X = cutlass.min(
+            Int32(self.NUM_TILES_X), cute.ceil_div(cols - job_start_col, self.TILE_COLS)
+        )
+        num_tiles = tiles_X * self.NUM_TILES_Y
 
         # Fill every buffer up front, then issue one more each time a stage is consumed.
         for prologue_stage in cutlass.range_constexpr(self.PIPELINE_DEPTH):
@@ -1202,8 +1155,8 @@ class MXFP8GroupQuantizeKernel:
                 self._issue_load(
                     mainloop_pipeline,
                     prod_state,
-                    tile_id_Y + prologue_stage,
-                    tile_id_X,
+                    job_tile_Y + prologue_stage % self.NUM_TILES_Y,
+                    job_tile_X + prologue_stage // self.NUM_TILES_Y,
                     atoms,
                     partitions,
                     tmap,
@@ -1211,159 +1164,159 @@ class MXFP8GroupQuantizeKernel:
                 )
             prod_state.advance()
 
-        for stage in cutlass.range_constexpr(self.NUM_TILES_Y):
-            # Wait for at most DEPTH-1 iters on the fly, which means the the last DEPTH iter has finished
-            # so we can reuse its SMEM output buffer
-            # (input buffer is managed by the producer and consumer pipeline states)
-            if warp_idx == 0:
-                cute.arch.cp_async_bulk_wait_group(self.PIPELINE_DEPTH - 1, read=True)
-            # Wait for this stage's input buffer to be filled by the producer
-            mainloop_pipeline.consumer_wait(cons_state)
-            cute.arch.sync_threads()
-            sX_tile = sX[(None, cons_state.index)]
-            sAct_tile = None
-            if cutlass.const_expr(cfg.WITH_DACT):
-                sAct_tile = sActInput[(None, cons_state.index)]
-            row_tile = tile_id_Y + stage
-
-            if cutlass.const_expr(cfg.COLWISE):
-                _, dbias_col = quantize_colwise_mxfp8(
-                    sX_tile,
-                    sAct_tile,
-                    sO_col[(None, cons_state.index)],
-                    cute.flatten(col_scales[(None, (col_scale_tile_Y + stage, tile_id_X))]),
-                    cfg.MAX_NORM_RCP,
-                    (col_scale_tile_Y + stage) * self.TILE_ROWS,
-                    job_start_col,
-                    col_scale_rows,
-                    cols,
-                    ACTIVATION=cfg.ACTIVATION,
-                    DTYPE=cfg.DTYPE,
-                    FP8_DTYPE=cfg.FP8_DTYPE,
-                    SWIZZLE=cfg.WITH_GEMM_SWIZZLED_SCALES,
-                    TILE_X=self.TILE_COLS,
-                    TILE_Y=self.TILE_ROWS,
-                    WITH_ACT=cfg.WITH_ACT,
-                    WITH_DACT=cfg.WITH_DACT,
-                    WITH_DBIAS=self.DBIAS_IN_COLWISE,
-                    CACHE_ACTIVATION=self.CACHE_ACTIVATION,
-                    ZERO_OOB_SCALES=True,
-                    dbias_init=dbias_col,
-                )
-            if cutlass.const_expr(self.CACHE_ACTIVATION):
-                # The rowwise pass reads the activation the colwise pass cached in sX.
-                cute.arch.sync_threads()
-            if cutlass.const_expr(cfg.ROWWISE):
-                quantize_rowwise_mxfp8(
-                    sX_tile,
-                    None if self.CACHE_ACTIVATION else sAct_tile,
-                    sO_row[(None, cons_state.index)],
-                    cute.flatten(row_scales[(None, (row_tile, tile_id_X))]),
-                    cfg.MAX_NORM_RCP,
-                    row_tile * self.TILE_ROWS,
-                    job_start_col,
-                    rows,
-                    cols,
-                    ACTIVATION=None if self.CACHE_ACTIVATION else cfg.ACTIVATION,
-                    DTYPE=cfg.DTYPE,
-                    FP8_DTYPE=cfg.FP8_DTYPE,
-                    TILE_X=self.TILE_COLS,
-                    TILE_Y=self.TILE_ROWS,
-                    WAVES=self.WAVES,
-                    THREADS_PER_BANK=self.THREADS_PER_BANK,
-                    PACK_SIZE=self.PACK_SIZE,
-                    WITH_ACT=cfg.WITH_ACT and not self.CACHE_ACTIVATION,
-                    WITH_DACT=cfg.WITH_DACT and not self.CACHE_ACTIVATION,
-                    WITH_DBIAS=self.DBIAS_IN_ROWWISE,
-                    dbias_acc=dbias_row_acc,
-                    ZERO_OOB_SCALES=True,
-                )
-
-            # Force consumer's write to SMEM to be visible to TMA stores later
-            cute.arch.fence_proxy("async.shared", space="cta")
-            # Only after everyone finishes computation then this stage can be considered as "consumed"
-            cute.arch.sync_threads()
-            # I'm done with my input SMEM buffer, so the producer can write the next stage's data into it
-            mainloop_pipeline.consumer_release(cons_state)
-
-            # I just freed my input SMEM buffer (stage), so the producer now can use it for writing
-            # (stage+DEPTH) stage's data if that stage exists
-            if cutlass.const_expr(stage + self.PIPELINE_DEPTH < self.NUM_TILES_Y):
-                if warp_idx == 0:
-                    self._issue_load(
-                        mainloop_pipeline,
-                        prod_state,
-                        tile_id_Y + stage + self.PIPELINE_DEPTH,
-                        tile_id_X,
-                        atoms,
-                        partitions,
-                        tmap,
-                        descs,
-                    )
-                prod_state.advance()
-
-            # Write result to GMEM via TMA
-            if warp_idx == 0:
-                stores = []
-                if cutlass.const_expr(cfg.ROWWISE):
-                    stores.append((tma_atom_out_row, tXsO_row, tXgO_row, desc_out_row))
-                if cutlass.const_expr(cfg.COLWISE):
-                    stores.append((tma_atom_out_col, tXsO_col, tXgO_col, desc_out_col))
-                for atom, tXs, tXg, desc in stores:
-                    if cutlass.const_expr(cfg.IS_SINGLE_TENSOR):
-                        cute.copy(
-                            atom,
-                            tXs[(None, cons_state.index)],
-                            tXg[(None, (row_tile, tile_id_X))],
-                        )
-                    else:
-                        cute.copy(
-                            atom,
-                            tXs[(None, cons_state.index)],
-                            tXg[(None, (row_tile, tile_id_X))],
-                            tma_desc_ptr=tmap.get_tensormap_ptr(desc, cute.AddressSpace.generic),
-                        )
-                # Commit all TMA operations of this iteration
-                cute.arch.cp_async_bulk_commit_group()
-
-            cons_state.advance()
-
-        if cutlass.const_expr(cfg.WITH_DBIAS):
+        for tile_X in cutlass.range(tiles_X, unroll=1):
+            tile_id_X = job_tile_X + tile_X
+            tile_start_col = job_start_col + tile_X * self.TILE_COLS
+            partial_dbias = Float32(0.0)
+            dbias_row_acc = None
             if cutlass.const_expr(self.DBIAS_IN_ROWWISE):
-                dbias_col = self._reduce_rowwise_dbias(sDbias, tidx, dbias_row_acc)
-            # One partial-dbias row per job, as in the CUDA kernel's dbias_workspace.
-            dbias_x = job_start_col + tidx
-            if dbias_x < cols:
-                mWorkspace[(dbias_row, dbias_x)] = dbias_col
+                dbias_row_acc = cute.make_rmem_tensor(
+                    layout_or_shape=cute.make_layout((MXFP8_BLOCK_SCALING_SIZE,), stride=(1,)),
+                    dtype=Float32,
+                )
+                for c in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE):
+                    dbias_row_acc[c] = Float32(0.0)
 
-    @cute.jit
-    def _reduce_rowwise_dbias(self, sDbias, tidx, dbias_row_acc):
-        """Reduce the per-thread rowwise partial sums to one sum per column, in the order of the
-        CUDA kernel's partial_dbias_rowwise reduction."""
-        _, tv_write = cute.make_layout_tv(
-            thr_layout=cute.make_layout(
-                (self.THREADS_Y, self.THREADS_X), stride=(self.THREADS_X, 1)
-            ),
-            val_layout=cute.make_layout(
-                (1, MXFP8_BLOCK_SCALING_SIZE), stride=(MXFP8_BLOCK_SCALING_SIZE, 1)
-            ),
-        )
-        sDbias_write = cute.composition(sDbias, tv_write)
-        bank_group = (tidx % THREADS_PER_WARP) // self.THREADS_PER_BANK
-        offset = bank_group * self.PACK_SIZE
-        for w in cutlass.range_constexpr(self.WAVES):
-            # Undo the bank-conflict rotation quantize_rowwise_mxfp8 accumulated in.
-            start = (w * self.PACK_SIZE + offset) % MXFP8_BLOCK_SCALING_SIZE
-            for i in cutlass.range_constexpr(self.PACK_SIZE):
-                sDbias_write[(tidx, start + i)] = dbias_row_acc[w * self.PACK_SIZE + i]
-        cute.arch.sync_threads()
-        # Thread tidx sums column tidx over the THREADS_Y partial rows.
-        dbias = Float32(0.0)
-        for i in cutlass.range_constexpr(self.THREADS_Y):
-            dbias += sDbias[(i, tidx)]
-        # The buffer is rewritten by the next job.
-        cute.arch.sync_threads()
-        return dbias
+            for tile_Y in cutlass.range_constexpr(self.NUM_TILES_Y):
+                stage = tile_X * self.NUM_TILES_Y + tile_Y
+                # Wait for at most DEPTH-1 iters on the fly, which means the the last DEPTH iter has finished
+                # so we can reuse its SMEM output buffer
+                # (input buffer is managed by the producer and consumer pipeline states)
+                if warp_idx == 0:
+                    cute.arch.cp_async_bulk_wait_group(self.PIPELINE_DEPTH - 1, read=True)
+                # Wait for this stage's input buffer to be filled by the producer
+                mainloop_pipeline.consumer_wait(cons_state)
+                cute.arch.sync_threads()
+                sX_tile = sX[(None, cons_state.index)]
+                sAct_tile = None
+                if cutlass.const_expr(cfg.WITH_DACT):
+                    sAct_tile = sActInput[(None, cons_state.index)]
+                row_tile = job_tile_Y + tile_Y
+
+                if cutlass.const_expr(cfg.COLWISE):
+                    _, partial_dbias = quantize_colwise_mxfp8(
+                        sX_tile,
+                        sAct_tile,
+                        sO_col[(None, cons_state.index)],
+                        cute.flatten(col_scales[(None, (col_scale_tile_Y + tile_Y, tile_id_X))]),
+                        cfg.MAX_NORM_RCP,
+                        (col_scale_tile_Y + tile_Y) * self.TILE_ROWS,
+                        tile_start_col,
+                        col_scale_rows,
+                        cols,
+                        ACTIVATION=cfg.ACTIVATION,
+                        DTYPE=cfg.DTYPE,
+                        FP8_DTYPE=cfg.FP8_DTYPE,
+                        SWIZZLE=cfg.WITH_GEMM_SWIZZLED_SCALES,
+                        TILE_X=self.TILE_COLS,
+                        TILE_Y=self.TILE_ROWS,
+                        WITH_ACT=cfg.WITH_ACT,
+                        WITH_DACT=cfg.WITH_DACT,
+                        WITH_DBIAS=self.DBIAS_IN_COLWISE,
+                        CACHE_ACTIVATION=self.CACHE_ACTIVATION,
+                        ZERO_OOB_SCALES=True,
+                        dbias_init=partial_dbias,
+                    )
+                if cutlass.const_expr(self.CACHE_ACTIVATION):
+                    # The rowwise pass reads the activation the colwise pass cached in sX.
+                    cute.arch.sync_threads()
+
+                if cutlass.const_expr(cfg.ROWWISE):
+                    quantize_rowwise_mxfp8(
+                        sX_tile,
+                        None if self.CACHE_ACTIVATION else sAct_tile,
+                        sO_row[(None, cons_state.index)],
+                        cute.flatten(row_scales[(None, (row_tile, tile_id_X))]),
+                        cfg.MAX_NORM_RCP,
+                        row_tile * self.TILE_ROWS,
+                        tile_start_col,
+                        rows,
+                        cols,
+                        ACTIVATION=None if self.CACHE_ACTIVATION else cfg.ACTIVATION,
+                        DTYPE=cfg.DTYPE,
+                        FP8_DTYPE=cfg.FP8_DTYPE,
+                        TILE_X=self.TILE_COLS,
+                        TILE_Y=self.TILE_ROWS,
+                        WAVES=self.WAVES,
+                        THREADS_PER_BANK=self.THREADS_PER_BANK,
+                        PACK_SIZE=self.PACK_SIZE,
+                        WITH_ACT=cfg.WITH_ACT and not self.CACHE_ACTIVATION,
+                        WITH_DACT=cfg.WITH_DACT and not self.CACHE_ACTIVATION,
+                        WITH_DBIAS=self.DBIAS_IN_ROWWISE,
+                        dbias_acc=dbias_row_acc,
+                        ZERO_OOB_SCALES=True,
+                    )
+
+                # Force consumer's write to SMEM to be visible to TMA stores later
+                cute.arch.fence_proxy("async.shared", space="cta")
+                # Only after everyone finishes computation then this stage can be considered as "consumed"
+                cute.arch.sync_threads()
+                # I'm done with my input SMEM buffer, so the producer can write the next stage's data into it
+                mainloop_pipeline.consumer_release(cons_state)
+
+                # I just freed my input SMEM buffer (stage), so the producer now can use it for writing
+                # (stage+DEPTH) stage's data if that stage exists
+                if stage + self.PIPELINE_DEPTH < num_tiles:
+                    if warp_idx == 0:
+                        self._issue_load(
+                            mainloop_pipeline,
+                            prod_state,
+                            job_tile_Y + (stage + self.PIPELINE_DEPTH) % self.NUM_TILES_Y,
+                            job_tile_X + (stage + self.PIPELINE_DEPTH) // self.NUM_TILES_Y,
+                            atoms,
+                            partitions,
+                            tmap,
+                            descs,
+                        )
+                    prod_state.advance()
+
+                # Write result to GMEM via TMA
+                if warp_idx == 0:
+                    stores = []
+                    if cutlass.const_expr(cfg.ROWWISE):
+                        stores.append((tma_atom_out_row, tXsO_row, tXgO_row, desc_out_row))
+                    if cutlass.const_expr(cfg.COLWISE):
+                        stores.append((tma_atom_out_col, tXsO_col, tXgO_col, desc_out_col))
+                    for atom, tXs, tXg, desc in stores:
+                        if cutlass.const_expr(cfg.IS_SINGLE_TENSOR):
+                            cute.copy(
+                                atom,
+                                tXs[(None, cons_state.index)],
+                                tXg[(None, (row_tile, tile_id_X))],
+                            )
+                        else:
+                            cute.copy(
+                                atom,
+                                tXs[(None, cons_state.index)],
+                                tXg[(None, (row_tile, tile_id_X))],
+                                tma_desc_ptr=tmap.get_tensormap_ptr(
+                                    desc, cute.AddressSpace.generic
+                                ),
+                            )
+                    # Commit all TMA operations of this iteration
+                    cute.arch.cp_async_bulk_commit_group()
+
+                cons_state.advance()
+
+            if cutlass.const_expr(cfg.WITH_DBIAS):
+                if cutlass.const_expr(self.DBIAS_IN_ROWWISE):
+                    partial_dbias = reduce_rowwise_dbias(
+                        sDbias,
+                        tidx,
+                        dbias_row_acc,
+                        self.TILE_ROWS,
+                        self.TILE_COLS,
+                        self.PACK_SIZE,
+                        self.THREADS_PER_BANK,
+                    )
+                    # All threads must finish reading before the next job rewrites the buffer.
+                    cute.arch.sync_threads()
+
+                # A job has TILE_ROWS * NUM_TILES_Y rows, and dbias reduces them to one row
+                dbias_row = job_start_row // (self.TILE_ROWS * self.NUM_TILES_Y)
+                dbias_col = tile_start_col + tidx
+                if dbias_col < cols:
+                    mWorkspace[(dbias_row, dbias_col)] = partial_dbias
 
 
 def compile_cutedsl_function_from_cfg(cfg: MXFP8GroupQuantizeConfig):
