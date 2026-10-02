@@ -752,6 +752,75 @@ def test_dpa_fa4_hdim256(dtype, model_configs, model):
     )
 
 
+@requires_fa4
+@pytest.mark.parametrize("qkv_format", ["bshd", "thd"])
+def test_dpa_fa4_unlimited_causal_window(qkv_format, monkeypatch):
+    """FA4 causal attention agrees with PyTorch when TE specifies an unlimited left window."""
+    for name, value in {
+        "NVTE_FLASH_ATTN": "1",
+        "NVTE_FLASH_ATTN_V2": "0",
+        "NVTE_FLASH_ATTN_V3": "0",
+        "NVTE_FLASH_ATTN_V4": "1",
+        "NVTE_FUSED_ATTN": "0",
+        "NVTE_UNFUSED_ATTN": "0",
+    }.items():
+        monkeypatch.setenv(name, value)
+    _attention_backends["backend_selection_requires_update"] = True
+
+    batch_size, seq_len, num_heads, head_dim = 2, 64, 4, 128
+    torch.manual_seed(7)
+    q, k, v = (
+        torch.randn(batch_size, seq_len, num_heads, head_dim, device="cuda", dtype=torch.bfloat16)
+        for _ in range(3)
+    )
+    q_ref, k_ref, v_ref = (tensor.detach().clone().requires_grad_() for tensor in (q, k, v))
+    if qkv_format == "thd":
+        q, k, v = (tensor.reshape(-1, num_heads, head_dim) for tensor in (q, k, v))
+        cu_seqlens = torch.arange(
+            0, (batch_size + 1) * seq_len, seq_len, device="cuda", dtype=torch.int32
+        )
+        kwargs = {
+            "cu_seqlens_q": cu_seqlens,
+            "cu_seqlens_kv": cu_seqlens,
+            "max_seqlen_q": seq_len,
+            "max_seqlen_kv": seq_len,
+        }
+    else:
+        kwargs = {}
+    q, k, v = (tensor.detach().clone().requires_grad_() for tensor in (q, k, v))
+
+    try:
+        attention = DotProductAttention(
+            num_heads,
+            head_dim,
+            qkv_format=qkv_format,
+            attn_mask_type="padding_causal" if qkv_format == "thd" else "causal",
+        ).to(device="cuda", dtype=torch.bfloat16)
+        output = attention(q, k, v, **kwargs).reshape(batch_size, seq_len, num_heads, head_dim)
+        assert _attention_backends["flash_attention_backend"].major == 4
+
+        reference = torch.nn.functional.scaled_dot_product_attention(
+            q_ref.permute(0, 2, 1, 3),
+            k_ref.permute(0, 2, 1, 3),
+            v_ref.permute(0, 2, 1, 3),
+            is_causal=True,
+        ).permute(0, 2, 1, 3)
+        torch.testing.assert_close(output, reference, atol=2e-2, rtol=2e-2)
+
+        dout = torch.randn_like(reference)
+        output.backward(dout)
+        reference.backward(dout)
+        for actual, expected in zip((q, k, v), (q_ref, k_ref, v_ref)):
+            torch.testing.assert_close(
+                actual.grad.reshape(batch_size, seq_len, num_heads, head_dim),
+                expected.grad,
+                atol=2e-2,
+                rtol=2e-2,
+            )
+    finally:
+        _attention_backends["backend_selection_requires_update"] = True
+
+
 # cuDNN FusedAttention D=256 bprop is supported on sm10x by the dedicated deterministic
 # SDPA bprop kernel. BSHD support starts with cuDNN FE 1.24 / BE 9.23; THD support starts
 # with cuDNN FE 1.26 / BE 9.25. The kernel supports d_qk == d_v == 256 only, vanilla softmax only,
