@@ -215,7 +215,7 @@ def _te_ep_assert_compatible_bootstrap(
         or hidden_dim != b_hidden
         or ep_size != b_ep_size
         or max_tokens_per_rank > b_max_tpr
-        or recv_capacity_per_rank > b_recv_pr
+        or recv_capacity_per_rank != b_recv_pr
     ):
         raise ValueError(
             "TE EP was already bootstrapped with signature"
