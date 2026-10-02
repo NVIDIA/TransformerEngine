@@ -283,3 +283,70 @@ def test_dtypes(method, act_type, act_desc, fp8_dtype, in_dtype):
         in_dtype,
         fp8_dtype,
     )
+
+
+# JAX's V2 grouped quantize emits GEMM-swizzled scales and supports common last
+# dimensions, represented by device row counts even for equal-size groups.
+# Varying last dimensions and grouped fused activations are covered
+# through the C API / PyTorch, since JAX has no wrappers for those operations.
+# (name, shape representation, input shape, optional device-resident row counts)
+GROUP_CASES = [
+    ("single_member", "varying_first_dim", (1, 128, 128), None),
+    ("same_both_multichunk", "varying_first_dim", (3, 384, 384), None),
+    ("varying_first", "varying_first_dim", (768, 256), (128, 384, 256)),
+    ("varying_first_multichunk", "varying_first_dim", (1024, 384), (128, 256, 384, 256)),
+    ("varying_first_empty", "varying_first_dim", (512, 256), (128, 0, 384)),
+]
+GROUP_Q_LAYOUTS = [QuantizeLayout.ROWWISE, QuantizeLayout.COLWISE, QuantizeLayout.ROWWISE_COLWISE]
+
+
+def get_group_cfg_key(shape_rep, in_dtype, fp8_dtype, q_layout):
+    """Registry key for the grouped V2 kernel (swizzled, without dbias or activation)."""
+    major, minor = device_compute_capability()
+    return (
+        f"cutedsl_group_mxfp8_sm{major * 10 + minor}_{DTYPE_TO_STR[in_dtype]}_"
+        f"{FP8_TO_KEY[fp8_dtype]}_{int(q_layout.has_rowwise)}_{int(q_layout.has_colwise)}_"
+        f"{shape_rep}_1_0_0_0_none"
+    )
+
+
+@pytest.mark.parametrize("case", GROUP_CASES, ids=lambda c: c[0])
+@pytest.mark.parametrize("q_layout", GROUP_Q_LAYOUTS, ids=lambda l: l.name.lower())
+@pytest.mark.parametrize("in_dtype", IN_DTYPES, ids=get_dtype_id)
+@pytest.mark.parametrize("fp8_dtype", FP8_DTYPES, ids=get_fp8_id)
+def test_group_cast_only(case, q_layout, in_dtype, fp8_dtype):
+    """Compare every grouped data/scale byte, including swizzled scales, across backends."""
+    name, shape_rep, shape, row_counts = case
+    x, _ = generate_inputs(int(np.prod(shape[:-1])), shape[-1], in_dtype)
+    x = x.reshape(shape)
+    group_sizes = None if row_counts is None else jnp.asarray(row_counts, dtype=jnp.int32)
+    n_groups = shape[0] if row_counts is None else len(row_counts)
+    quantizer = QuantizerFactory.create(
+        scaling_mode=ScalingMode.MXFP8_1D_SCALING,
+        q_dtype=fp8_dtype,
+        q_layout=q_layout,
+        n_groups=n_groups,
+    )
+
+    def run():
+        out = tex.grouped_quantize(x, quantizer=quantizer, group_sizes=group_sizes)
+        # Host materialization completes the FFI call before changing the backend flag.
+        return extract_quantized_output(out, None)[0]
+
+    set_cutedsl_backend(False)
+    cuda_output = run()
+    set_cutedsl_backend(True)
+    try:
+        cutedsl_output = run()
+    finally:
+        set_cutedsl_backend(False)
+
+    key = get_group_cfg_key(shape_rep, in_dtype, fp8_dtype, q_layout)
+    assert (
+        tvm_ffi.get_global_func(key, allow_missing=True) is not None
+    ), f"CuTeDSL kernel not registered for {key}; grouped quantization fell back to CUDA"
+    for part, cuda_bytes in cuda_output.items():
+        assert np.array_equal(cutedsl_output[part], cuda_bytes), (
+            f"group/{name}/{get_dtype_id(in_dtype)}/{get_fp8_id(fp8_dtype)}/{q_layout.name}: "
+            f"{part} differ between backends"
+        )
