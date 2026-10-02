@@ -25,6 +25,7 @@ from transformer_engine.pytorch import (
     QuantizedTensor,
 )
 
+from transformer_engine.pytorch.quantized_tensor import prepare_for_saving, restore_from_saved
 from transformer_engine.pytorch.utils import is_non_tn_fp8_gemm_supported
 
 from references.ref_per_tensor_cs import ref_per_tensor_cs_cast
@@ -1187,3 +1188,65 @@ def test_skip_quantization_with_noop_flag(
         assert torch.equal(
             buf_without_noop, buf_with_noop
         ), f"{quantization}/{usage}: noop flag fails to take effect because {attr} changed."
+
+
+@pytest.mark.parametrize("num_groups", [1, 8, 32, 256])
+@pytest.mark.parametrize("return_tail", [False, True])
+@pytest.mark.parametrize("known_counts", [False, True])
+def test_restore_saved_tensor_reference_copies(num_groups, return_tail, known_counts):
+    """Mixed tensors/storage restorers copy no growing suffix, including nested restorers."""
+    class CountedList(list):
+        copied = 0
+
+        def __getitem__(self, index):
+            out = super().__getitem__(index)
+            if isinstance(index, slice):
+                self.copied += len(out)
+            return out
+
+    class Pair:
+        def restore_from_saved(self, tensors):
+            self.values = (tensors[0], tensors[1])
+            return tensors[2:]
+
+    class Nested:
+        def __init__(self):
+            self.first, self.second = Pair(), Pair()
+
+        def restore_from_saved(self, tensors):
+            return self.second.restore_from_saved(self.first.restore_from_saved(tensors))
+
+    values = CountedList(torch.tensor(i) for i in range(num_groups * 5 + 2))
+    objects = [obj for _ in range(num_groups) for obj in (None, Nested())]
+    if known_counts:
+        for obj in objects[1::2]:
+            obj._num_saved_tensors = 4
+    result = restore_from_saved(objects, values, return_saved_tensors=return_tail)
+    restored, tail = result if return_tail else (result, None)
+    for i in range(num_groups):
+        assert restored[2 * i] is values[5 * i]
+        assert restored[2 * i + 1].first.values[0] is values[5 * i + 1]
+        assert restored[2 * i + 1].second.values[1] is values[5 * i + 4]
+    if return_tail:
+        assert len(tail) == 2 and tail[0] is values[-2]
+    assert values.copied <= (4 * num_groups if known_counts else 0) + 2
+
+
+
+@pytest.mark.parametrize("compiled_metadata", [False, True])
+def test_restore_real_quantized_storage(monkeypatch, compiled_metadata):
+    """Restore actual MXFP8 buffers and None/plain tensor slots with either metadata form."""
+    if not te.is_mxfp8_available():
+        pytest.skip("MXFP8 is unavailable.")
+    q = MXFP8Quantizer(te.DType.kFloat8E4M3, rowwise=True, columnwise=True)
+    q.internal = True
+    x = torch.randn(128, 128, device="cuda", dtype=torch.bfloat16)
+    quantized = q(x)
+    expected = quantized.dequantize().clone()
+    with monkeypatch.context() as context:
+        context.setattr(torch.compiler, "is_compiling", lambda: compiled_metadata)
+        saved, objects = prepare_for_saving(x, quantized, None)
+    restored, tail = restore_from_saved(objects, tuple(saved) + (x,), return_saved_tensors=True)
+    assert restored[0] is x and restored[2] is None
+    assert isinstance(tail, tuple) and tail[0] is x
+    torch.testing.assert_close(restored[1].dequantize(), expected, rtol=0, atol=0)
