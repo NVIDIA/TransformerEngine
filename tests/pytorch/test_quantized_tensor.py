@@ -1192,9 +1192,8 @@ def test_skip_quantization_with_noop_flag(
 
 @pytest.mark.parametrize("num_groups", [1, 8, 32, 256])
 @pytest.mark.parametrize("return_tail", [False, True])
-@pytest.mark.parametrize("known_counts", [False, True])
-def test_restore_saved_tensor_reference_copies(num_groups, return_tail, known_counts):
-    """Mixed tensors/storage restorers copy no growing suffix, including nested restorers."""
+def test_restore_saved_tensor_reference_copies(num_groups, return_tail):
+    """Plain tensor/None slots restore without repeatedly copying the remaining suffix."""
 
     class CountedList(list):
         copied = 0
@@ -1205,32 +1204,41 @@ def test_restore_saved_tensor_reference_copies(num_groups, return_tail, known_co
                 self.copied += len(out)
             return out
 
-    class Pair:
-        def restore_from_saved(self, tensors):
-            self.values = (tensors[0], tensors[1])
-            return tensors[2:]
-
-    class Nested:
-        def __init__(self):
-            self.first, self.second = Pair(), Pair()
-
-        def restore_from_saved(self, tensors):
-            return self.second.restore_from_saved(self.first.restore_from_saved(tensors))
-
-    values = CountedList(torch.tensor(i) for i in range(num_groups * 5 + 2))
-    objects = [obj for _ in range(num_groups) for obj in (None, Nested())]
-    if known_counts:
-        for obj in objects[1::2]:
-            obj._num_saved_tensors = 4
+    values = CountedList(torch.tensor(i) for i in range(num_groups * 2 + 2))
+    objects = [None if i % 2 == 0 else values[i] for i in range(num_groups * 2)]
     result = restore_from_saved(objects, values, return_saved_tensors=return_tail)
     restored, tail = result if return_tail else (result, None)
-    for i in range(num_groups):
-        assert restored[2 * i] is values[5 * i]
-        assert restored[2 * i + 1].first.values[0] is values[5 * i + 1]
-        assert restored[2 * i + 1].second.values[1] is values[5 * i + 4]
+    assert all(value is values[i] for i, value in enumerate(restored))
     if return_tail:
         assert len(tail) == 2 and tail[0] is values[-2]
-    assert values.copied <= (4 * num_groups if known_counts else 0) + 2
+    assert values.copied <= 2
+
+
+@pytest.mark.parametrize("container_type", [list, tuple])
+def test_saved_storage_protocol(monkeypatch, container_type):
+    """Preserve custom metadata, pass the full suffix, and use the returned remainder."""
+    value, tail, replacement = (torch.tensor(i) for i in range(3))
+    remainder = container_type([replacement, tail])
+
+    class Storage:
+        __slots__ = ()
+
+        def prepare_for_saving(self):
+            return [value], self
+
+        def restore_from_saved(self, tensors):
+            assert type(tensors) is container_type
+            assert len(tensors) == 2 and tensors[0] is value and tensors[1] is tail
+            return remainder
+
+    monkeypatch.setattr(torch.compiler, "is_compiling", lambda: False)
+    storage = Storage()
+    saved, objects = prepare_for_saving(value, storage)
+    restored, remaining = restore_from_saved(
+        objects + [None], container_type(saved + [tail]), return_saved_tensors=True
+    )
+    assert restored[0] is value and restored[1] is storage and restored[2] is replacement
+    assert type(remaining) is container_type and len(remaining) == 1 and remaining[0] is tail
 
 
 @pytest.mark.parametrize("compiled_metadata", [False, True])

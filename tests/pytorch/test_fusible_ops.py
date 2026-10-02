@@ -5518,13 +5518,23 @@ class TestTrainingLoops:
 
 @pytest.mark.parametrize("num_groups", [1, 8, 32])
 @pytest.mark.parametrize("recompute", [False, True])
-def test_basic_grouped_runtime_quantizers(monkeypatch, num_groups, recompute):
-    """Steady-state getter/configuration counts do not grow with expert count."""
+@pytest.mark.parametrize("single_grouped_weight", [False, True])
+def test_basic_grouped_runtime_quantizers(monkeypatch, num_groups, recompute, single_grouped_weight):
+    """Reuse cached references while configuring each consumed weight quantizer."""
     fp8_recipe = transformer_engine.common.recipe.MXFP8BlockScaling()
     if not is_op_fuser_grouped_tensor_path_supported(fp8_recipe, torch.bfloat16):
         pytest.skip("Native MXFP8 grouped GEMM is unavailable.")
     FP8GlobalStateManager.reset()
-    op = te_ops.GroupedLinear(num_groups, 128, 128, bias=False, dtype=torch.bfloat16, device="cuda")
+    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
+    op = te_ops.GroupedLinear(
+        num_groups,
+        128,
+        128,
+        bias=False,
+        dtype=torch.bfloat16,
+        device="cuda",
+        single_grouped_weight=single_grouped_weight,
+    )
     model = te_ops.Sequential(op)
     x = torch.randn(num_groups * 128, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
     splits = torch.full((num_groups,), 128, device="cuda", dtype=torch.int64)
@@ -5542,14 +5552,21 @@ def test_basic_grouped_runtime_quantizers(monkeypatch, num_groups, recompute):
     original = MXFP8Quantizer.set_usage
 
     def set_usage(q, **kwargs):
-        counts["usage"] += 1
+        counts[id(q)] += 1
         return original(q, **kwargs)
 
     monkeypatch.setattr(MXFP8Quantizer, "set_usage", set_usage)
     original_getter = op.get_quantizer
     monkeypatch.setattr(op, "get_quantizer", Mock(side_effect=AssertionError("runtime getter")))
     step()
-    assert counts["usage"] == (7 if recompute else 4)
+    forwards = 2 if recompute else 1
+    assert counts[id(op._input_quantizers[0])] == forwards
+    assert counts[id(op._grad_output_quantizers[0])] == forwards + 1
+    for i, quantizer in enumerate(op._weight_quantizers):
+        expected = forwards if not single_grouped_weight or i == 0 else 0
+        assert counts[id(quantizer)] == expected
+    assert all(counts[id(q)] == 0 for q in op._input_quantizers[1:])
+    assert all(counts[id(q)] == 0 for q in op._grad_output_quantizers[1:])
     assert len(op._input_quantizers) == num_groups
     assert len(op._weight_quantizers) == num_groups
     assert len(op._grad_output_quantizers) == num_groups
@@ -5562,7 +5579,6 @@ def test_basic_grouped_runtime_quantizers(monkeypatch, num_groups, recompute):
         op.reset_recipe_state(recipe=transformer_engine.common.recipe.DelayedScaling())
     assert op._input_quantizers[0] is not old_input
     assert len({id(q) for q in op._input_quantizers}) == num_groups
-    assert not op._share_grouped_weight_quantizer
 
 
 @pytest.mark.parametrize(
@@ -5572,22 +5588,34 @@ def test_basic_grouped_runtime_quantizers(monkeypatch, num_groups, recompute):
         transformer_engine.common.recipe.Float8CurrentScaling(),
     ],
 )
-def test_grouped_weight_quantizer_keeps_output_scales(fp8_recipe):
-    """A shared role quantizer preserves primary tensors and independent output scales."""
+def test_grouped_discrete_weight_quantizers(fp8_recipe):
+    """Discrete weights use their own quantizers and preserve already quantized tensors."""
     if not is_op_fuser_grouped_tensor_path_supported(fp8_recipe, torch.bfloat16):
         pytest.skip("Native grouped GEMM is unavailable.")
     FP8GlobalStateManager.reset()
     op = te_ops.GroupedLinear(3, 128, 128, bias=False, dtype=torch.bfloat16, device="cuda")
     with te.autocast(enabled=True, recipe=fp8_recipe):
         op.reset_recipe_state(recipe=fp8_recipe)
-    q = op._weight_quantizers[0]
-    q.set_usage(rowwise=True, columnwise=True)
+    quantizers = op._weight_quantizers
+    assert len({id(q) for q in quantizers}) == 3
+    for q in quantizers:
+        q.set_usage(rowwise=True, columnwise=True)
     weights = [torch.randn(128, 128, device="cuda", dtype=torch.bfloat16) for _ in range(3)]
-    reference = [q(w) for w in weights]
+    reference = [q(w) for w, q in zip(weights, quantizers)]
     weights[1] = reference[1]
+    quantizer_spies = [Mock(wraps=q) for q in quantizers]
     outputs = op._get_discrete_weights_for_gemm(
-        weights, (q,), columnwise_usage=True, with_quantized_compute=True, dtype=torch.bfloat16
+        weights,
+        quantizer_spies,
+        columnwise_usage=True,
+        with_quantized_compute=True,
+        dtype=torch.bfloat16,
     )
+    for i in (0, 2):
+        quantizer_spies[i].assert_called_once_with(weights[i])
+        quantizer_spies[i].set_usage.assert_called_once_with(rowwise=True, columnwise=True)
+    quantizer_spies[1].assert_not_called()
+    quantizer_spies[1].set_usage.assert_not_called()
     assert outputs[1] is weights[1]
     for output, ref in zip(outputs, reference):
         torch.testing.assert_close(output.dequantize(), ref.dequantize(), rtol=0, atol=0)
@@ -5598,8 +5626,8 @@ def test_grouped_weight_quantizer_keeps_output_scales(fp8_recipe):
 @pytest.mark.parametrize("num_groups", [1, 8])
 @pytest.mark.parametrize("fused", [False, True])
 @pytest.mark.parametrize("delayed", [False, True])
-def test_basic_grouped_packed_wgrad_and_hooks(monkeypatch, fused, delayed, num_groups):
-    """Packed wgrad views own ordinary PyTorch storage; external buffers and hooks survive."""
+def test_basic_grouped_wgrad_storage_and_hooks(monkeypatch, fused, delayed, num_groups):
+    """Unfused wgrads own independent storage; external buffers and hooks retain their contract."""
     from transformer_engine.pytorch.ops.basic import grouped_linear as gl
 
     if not is_op_fuser_grouped_tensor_path_supported(None, torch.bfloat16):
@@ -5634,10 +5662,13 @@ def test_basic_grouped_packed_wgrad_and_hooks(monkeypatch, fused, delayed, num_g
     def gemm(a, b, out, **kwargs):
         if kwargs.get("layout") == "NT":
             assert len(out) == num_groups
-            assert len({g.untyped_storage().data_ptr() for g in out}) == 1
+            num_storages = len({g.untyped_storage().data_ptr() for g in out})
+            assert num_storages == (1 if fused else num_groups)
             assert len({g.data_ptr() for g in out}) == num_groups
             if fused:
                 assert out[0].data_ptr() == flat.data_ptr()
+            else:
+                assert all(g._base is None for g in out)
             seen.append(out)
         return original(a, b, out, **kwargs)
 
