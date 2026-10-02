@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Tensor class with NVFP4 data"""
+
 from __future__ import annotations
 from collections.abc import Iterable
 import math
@@ -17,6 +18,7 @@ from transformer_engine.common.recipe import NVFP4BlockScaling, Recipe
 from ..constants import NVFP4_BLOCK_SCALING_SIZE, dist_group_type, DType
 from ..utils import (
     canonicalize_process_group,
+    ceil_div,
     devices_match,
     round_up_to_nearest_multiple,
 )
@@ -258,15 +260,20 @@ class NVFP4Quantizer(Quantizer):
         """NVFP4 quantization is replay-safe unless stochastic rounding is enabled."""
         return not self.stochastic_rounding
 
-    def is_quantizable(self, inp: torch.Tensor) -> bool:
-        """Returns whether or not given inp can be quantized"""
+    def supports_quantized_allgather(self, inp: torch.Tensor) -> bool:
+        """Whether tensor shape supports quantized all-gather.
+
+        For distributed all-gather with columnwise scaling, the first
+        dimension must be aligned to the block size so that no scaling
+        block spans across GPU boundaries.
+        """
         if self.row_scaled_nvfp4:
             return False
         if inp.ndim < 2:
             return False
-        if inp.shape[-1] % NVFP4_BLOCK_SCALING_SIZE != 0:
+        if inp.shape[-1] % 32 != 0:
             return False
-        if math.prod(inp.shape[:-1]) % NVFP4_BLOCK_SCALING_SIZE != 0:
+        if self.columnwise_usage and math.prod(inp.shape[:-1]) % NVFP4_BLOCK_SCALING_SIZE != 0:
             return False
         return True
 
@@ -299,11 +306,11 @@ class NVFP4Quantizer(Quantizer):
 
         if columnwise:
             outer = round_up_to_nearest_multiple(K, 128)
-            inner = round_up_to_nearest_multiple(math.ceil(M / NVFP4_BLOCK_SCALING_SIZE), 4)
+            inner = round_up_to_nearest_multiple(ceil_div(M, NVFP4_BLOCK_SCALING_SIZE), 4)
             return (outer, inner)
         # rowwise
         outer = round_up_to_nearest_multiple(M, 128)
-        inner = round_up_to_nearest_multiple(math.ceil(K / NVFP4_BLOCK_SCALING_SIZE), 4)
+        inner = round_up_to_nearest_multiple(ceil_div(K, NVFP4_BLOCK_SCALING_SIZE), 4)
         return (outer, inner)
 
     @staticmethod
@@ -336,6 +343,8 @@ class NVFP4Quantizer(Quantizer):
     def convert_shape_for_fp4(shape: Iterable[int]) -> Tuple[int, ...]:
         """Convert shape for FP4 data by dividing the last dimension by 2"""
         shape = list(shape)
+        if shape[-1] % 2 != 0:
+            raise ValueError(f"FP4 packing requires an even last dimension, got shape {shape}")
         shape[-1] = shape[-1] // 2
         return tuple(shape)
 

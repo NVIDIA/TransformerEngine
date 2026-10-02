@@ -632,13 +632,15 @@ class Quantizer(abc.ABC):
         """
         return False
 
-    def is_quantizable(self, inp: torch.Tensor) -> bool:  # pylint: disable=unused-argument
-        """Whether tensor supports quantized all-gather
+    # pylint: disable-next=unused-argument
+    def supports_quantized_allgather(self, inp: torch.Tensor) -> bool:
+        """Whether tensor shape supports quantized all-gather.
 
-        Consider a less misleading function name.
-
+        When False, the distributed all-gather falls back to gathering
+        in high precision and quantizing afterward. This is needed when
+        the quantizer does not support gathering its packed data directly.
         """
-        return True
+        return False
 
     def get_usages(self) -> Dict[str, bool]:
         """Get the usage of the quantizer"""

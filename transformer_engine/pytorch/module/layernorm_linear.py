@@ -32,7 +32,6 @@ from .base import (
 )
 from ..quantization import FP8GlobalStateManager, QuantizerRole
 from ..utils import (
-    assert_dim_for_fp8_exec,
     cast_if_needed,
     clear_tensor_data,
     divide,
@@ -350,8 +349,6 @@ def _layernorm_linear_forward_impl(
     inp_shape = inp.shape
     assert inp_shape[-1] == in_features, "GEMM not possible"
     inputmat = inp
-    if fp8:
-        assert_dim_for_fp8_exec(inputmat, weight)
 
     # Cast for native AMP
     nvtx_range_push(f"{nvtx_label}.norm_input_cast")

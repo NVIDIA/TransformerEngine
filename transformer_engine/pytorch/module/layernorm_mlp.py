@@ -43,7 +43,6 @@ from ..utils import (
     get_default_init_method,
     init_method_constant,
     cast_if_needed,
-    assert_dim_for_fp8_exec,
     clear_tensor_data,
     needs_quantized_gemm,
     get_nvtx_range_context,
@@ -533,8 +532,6 @@ def _layernorm_mlp_forward_impl(
     in_features, inp_shape = ln_weight.numel(), inp.shape
     assert inp_shape[-1] == in_features, "GEMM not possible"
     inputmat = inp
-    if fp8:
-        assert_dim_for_fp8_exec(inputmat, fc1_weight, fc2_weight)
 
     activation_func = _act_func(
         activation, FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
