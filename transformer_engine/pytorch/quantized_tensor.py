@@ -329,23 +329,35 @@ def restore_from_saved(
     Note: please use `restore_from_func_ctx` instead if you are restoring tensors from a function context to make sure tensor_objects is detached and its memory can be freed
     """
     tensor_objects = []
+    index = 0
+    pending_slice = False
     for tensor in tensors:
         if tensor is None or isinstance(tensor, torch.Tensor):
-            tensor_objects.append(saved_tensors[0])
-            saved_tensors = saved_tensors[1:]
+            tensor_objects.append(saved_tensors[index])
+            index += 1
         elif isinstance(tensor, _SavedQuantizedTensor):
+            # Reconstruction invokes a storage constructor, which may observe aliases.
+            if index or pending_slice:
+                saved_tensors = saved_tensors[index:]
+                index = 0
             count = len(tensor.inner_names)
             inner = dict(zip(tensor.inner_names, saved_tensors[:count]))
             tensor_objects.append(
                 QuantizedTensorStorage.__tensor_unflatten__(inner, tensor.metadata, None, None)
             )
-            saved_tensors = saved_tensors[count:]
+            index = count
+            pending_slice = True
         else:
+            # Legacy storage methods consume and may replace the remaining sequence.
+            if index or pending_slice:
+                saved_tensors = saved_tensors[index:]
             saved_tensors = tensor.restore_from_saved(saved_tensors)
+            index = 0
+            pending_slice = False
             tensor_objects.append(tensor)
 
     if return_saved_tensors:
-        return tensor_objects, saved_tensors
+        return tensor_objects, saved_tensors[index:] if index or pending_slice else saved_tensors
     return tensor_objects
 
 
