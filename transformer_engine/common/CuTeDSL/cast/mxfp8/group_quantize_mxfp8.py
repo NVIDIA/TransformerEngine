@@ -8,16 +8,16 @@ Strategy-aligned port of group_quantize_mxfp8.cuh. The scheduling, descriptor
 management and per-tensor scale addressing mirror the CUDA kernel one-for-one:
 
   * `is_single_tensor` reps (SAME_BOTH_DIMS, VARYING_FIRST_DIM) launch ONE CTA per
-    128x128 chunk and address the group through ONE static TMA descriptor with
-    global block offsets -- the CUDA `tensor_map_*_static` "direct mapper" path.
+    128x128 job and address the group through ONE static TMA descriptor with
+    global job offsets -- the CUDA `tensor_map_*_static` "direct mapper" path.
     For SAME_BOTH_DIMS the CUDA grid is linearized per tensor (X, Y-in-tensor,
     tensor) while this kernel linearizes it flat over the stacked rows; both
     require every member's row count to be a multiple of 128, and under
-    that precondition the two decode to the identical (block_start_row, block_id_X)
-    for every block index.
+    that precondition the two decode to the identical (job_start_row, job_id_X)
+    for every job index.
   * the other reps launch grid=(workers_per_tensor, num_tensors) and bind
     tensor_id to blockIdx.y, so a CTA grid-strides only within its own tensor and
-    never re-resolves which tensor a chunk belongs to. They get per-tensor
+    never re-resolves which tensor a job belongs to. They get per-tensor
     descriptors written by a prologue kernel (the CuTeDSL analog of
     update_tma_descriptors filling g_tensor_maps) and acquired with a tensormap
     proxy fence.
@@ -31,7 +31,7 @@ per-tensor grid above is what replaced it on both sides.
 
 Mechanics that provably yield the same bytes may differ: the mbarrier pipeline is
 expressed with PipelineTmaAsync instead of hand-rolled mbarriers. As in CUDA, the
-scales of out-of-bounds columns in a chunk (the scale-row padding) are written as 0.
+scales of out-of-bounds columns in a job (the scale-row padding) are written as 0.
 
 Scope: everything group_quantize_mxfp8.cuh covers except 2D block scaling -- the
 cast-noop flag, fused activation (IS_ACT) and activation derivative (IS_DACT), dbias,
@@ -206,7 +206,7 @@ class MXFP8GroupQuantizeKernel:
     """Grouped MXFP8 quantize mirroring group_quantize_mxfp8_kernel's strategy."""
 
     # Target persistent CTA count per SM for sizing the grid
-    STATIC_PERSISTENT_WORK_UNITS_PER_SM = 24
+    STATIC_PERSISTENT_WORKERS_PER_SM = 24
     # The shape of one pipeline stage processed by a CTA
     TILE_ROWS = 32
     TILE_COLS = 128
@@ -379,49 +379,43 @@ class MXFP8GroupQuantizeKernel:
 
         if cutlass.const_expr(cfg.IS_SINGLE_TENSOR):
             # How many CTAs does the grouped tensor have in both directions
-            work_blocks_Y = cute.ceil_div(
-                Int32(first_logical_dim), (self.TILE_ROWS * self.NUM_TILES_Y)
-            )
-            work_blocks_X = cute.ceil_div(
-                Int32(last_logical_dim), self.TILE_COLS * self.NUM_TILES_X
-            )
+            jobs_Y = cute.ceil_div(Int32(first_logical_dim), (self.TILE_ROWS * self.NUM_TILES_Y))
+            jobs_X = cute.ceil_div(Int32(last_logical_dim), self.TILE_COLS * self.NUM_TILES_X)
             # Flatten it to an 1D grid
-            grid = [work_blocks_X * work_blocks_Y, 1, 1]
+            grid = [jobs_X * jobs_Y, 1, 1]
         else:
             # A placeholder for the kernel signature only; we won't use it in non-single tensor cases
-            work_blocks_X = None
-            # Estimate how many CTA work unit we need to do, where one work unit is NUM_TILES_X * NUM_TILES_Y tiles
+            jobs_X = None
+            # Estimate the total jobs across the group; each job has NUM_TILES_X * NUM_TILES_Y tiles
             if cutlass.const_expr(cfg.SHAPE_REP == VARYING_BOTH_DIMS):
                 # Note: when VARYING_BOTH_DIMS, the first_logical_dim must be 1
-                estimated_work_units = cute.ceil_div(
+                estimated_jobs = cute.ceil_div(
                     Int32(first_logical_dim) * Int32(last_logical_dim), self.ELTS_PER_CTA
                 )
             elif cutlass.const_expr(cfg.SHAPE_REP == VARYING_LAST_DIM):
                 # Same as VARYING_BOTH_DIMS but we divide 128 before multiplying to avoid overflowing Int32
                 # because the first logical dimension is always 128-aligned when not VARYING_BOTH_DIMS
                 # so they are equivalent
-                estimated_work_units = cute.ceil_div(
+                estimated_jobs = cute.ceil_div(
                     (Int32(first_logical_dim) // 128) * Int32(last_logical_dim),
                     self.ELTS_PER_CTA // 128,
                 )
             else:
                 raise ValueError(f"unexpected shape representation {cfg.SHAPE_REP!r}")
 
-            # All SMs can do SM_COUNT * STATIC_PERSISTENT_WORK_UNITS_PER_SM units of work, which are distributed evenly
-            # to all tensors in the group.
-            # If there are more tensors than work units, we will launch one CTA per tensor since we have enough parallelism here
+            # Divide the persistent worker budget evenly across tensors, with at least
+            # one worker per tensor. Each worker may process several jobs.
             requested_CTAs_per_tensor = cutlass.max(
                 Int32(1),
-                Int32(self.SM_COUNT * self.STATIC_PERSISTENT_WORK_UNITS_PER_SM)
-                // Int32(num_tensors),
+                Int32(self.SM_COUNT * self.STATIC_PERSISTENT_WORKERS_PER_SM) // Int32(num_tensors),
             )
-            # In average how many work units per tensor (only an average, the actual work units per tensor may vary)
-            average_work_units_per_tensor = cutlass.max(
-                Int32(1), cute.ceil_div(estimated_work_units, Int32(num_tensors))
+            # In average how many jobs per tensor (only an average, the actual jobs per tensor may vary)
+            average_jobs_per_tensor = cutlass.max(
+                Int32(1), cute.ceil_div(estimated_jobs, Int32(num_tensors))
             )
-            # Don't launch more CTAs than the average work units per tensor in case
-            # STATIC_PERSISTENT_WORK_UNITS_PER_SM causes redundancy
-            CTAs_per_tensor = cutlass.min(requested_CTAs_per_tensor, average_work_units_per_tensor)
+            # Don't launch more CTAs than the average jobs per tensor in case
+            # STATIC_PERSISTENT_WORKERS_PER_SM causes redundancy
+            CTAs_per_tensor = cutlass.min(requested_CTAs_per_tensor, average_jobs_per_tensor)
             grid = [CTAs_per_tensor, Int32(num_tensors), 1]
 
         # Only the multi-tensor representations need per-tensor descriptors.
@@ -455,7 +449,7 @@ class MXFP8GroupQuantizeKernel:
             first_logical_dim,
             last_logical_dim,
             num_tensors,
-            work_blocks_X,
+            jobs_X,
             mX.element_type,
             tma_atom_x,
             tma_src,
@@ -720,7 +714,7 @@ class MXFP8GroupQuantizeKernel:
         first_logical_dim,
         last_logical_dim,
         num_tensors,
-        work_blocks_X,
+        jobs_X,
         dtype: cutlass.Constexpr[Type[cutlass.Numeric]],
         tma_atom_x,
         tma_src,
@@ -746,7 +740,7 @@ class MXFP8GroupQuantizeKernel:
                 first_logical_dim,
                 last_logical_dim,
                 num_tensors,
-                work_blocks_X,
+                jobs_X,
                 dtype,
                 tma_atom_x,
                 tma_src,
@@ -770,7 +764,7 @@ class MXFP8GroupQuantizeKernel:
         first_logical_dim,
         last_logical_dim,
         num_tensors,
-        work_units_X,
+        jobs_X,
         dtype: cutlass.Constexpr[Type[cutlass.Numeric]],
         tma_atom_x,
         tma_src,
@@ -857,37 +851,37 @@ class MXFP8GroupQuantizeKernel:
 
         # If the CTA has work to do
         has_work = Boolean(True)
-        # Metadata of the tensor that owns this block
+        # Metadata of the tensor that owns this job
         tensor_rows = Int32(0)
         tensor_cols = Int32(0)
         # Element offset of this tensor within the group: Int64 (CUDA uses size_t), since a
         # group can exceed 2^31 elements even when every individual extent is small.
         tensor_base = Int64(0)
-        # Block's offset and id in this individual tensor / global single tensor
-        block_start_row = Int32(0)
-        block_id_X = Int32(0)
+        # Job's starting row and id in this individual tensor / global single tensor
+        job_start_row = Int32(0)
+        job_id_X = Int32(0)
 
-        first_block_id = Int32(0)
-        units_in_tensor = Int32(1)
-        block_stride = Int32(1)
-        units_X_in_tensor = Int32(1)
+        first_job_id = Int32(0)
+        jobs_in_tensor = Int32(1)
+        job_stride = Int32(1)
+        jobs_X_in_tensor = Int32(1)
 
         if cutlass.const_expr(cfg.IS_SINGLE_TENSOR):
-            # grid = [work_units_X * work_units_Y, 1, 1]
-            block_id_Y = Int32(bidx) // work_units_X
-            block_id_X = Int32(bidx) % work_units_X
+            # grid = [jobs_X * jobs_Y, 1, 1]
+            job_id_Y = Int32(bidx) // jobs_X
+            job_id_X = Int32(bidx) % jobs_X
             # View the grouped tensor as a single tensor of shape (first_logical_dim, last_logical_dim)
             tensor_rows = Int32(first_logical_dim)
             tensor_cols = Int32(last_logical_dim)
-            # Which row does this block start from
-            block_start_row = block_id_Y * (self.TILE_ROWS * self.NUM_TILES_Y)
+            # Which row does this job start from
+            job_start_row = job_id_Y * (self.TILE_ROWS * self.NUM_TILES_Y)
             if cutlass.const_expr(cfg.SHAPE_REP == VARYING_FIRST_DIM):
                 total_elts = Int64(mOffsets[mOffsets.shape[0] - 1])
                 # If the starting element is already beyond the last element of the group, this CTA can stop
-                if Int64(block_start_row) * Int64(last_logical_dim) >= total_elts:
+                if Int64(job_start_row) * Int64(last_logical_dim) >= total_elts:
                     has_work = Boolean(False)
             # When SAME_BOTH_DIM, M is always divisible by 128, which is exactly TILE_ROWS * NUM_TILES_Y,
-            # so no need to check for the last block's starting row being beyond the last row of the tensor.
+            # so no need to check for the last job's starting row being beyond the last row of the tensor.
         else:
             # grid = [workers_per_tensor, Int32(num_tensors), 1]
             tensor_id = Int32(bidy)
@@ -897,17 +891,17 @@ class MXFP8GroupQuantizeKernel:
             tensor_cols = Int32(meta[1])
             tensor_base = Int64(meta[2])
             if tensor_rows > 0 and tensor_cols > 0:
-                # How many work units does this tensor have in both directions
-                units_X_in_tensor = cute.ceil_div(tensor_cols, (self.TILE_COLS * self.NUM_TILES_X))
-                units_Y_in_tensor = cute.ceil_div(tensor_rows, (self.TILE_ROWS * self.NUM_TILES_Y))
-                # How many work units does this tensor have
-                units_in_tensor = units_X_in_tensor * units_Y_in_tensor
-                # Which work unit (1D index) does this CTA start from, which is also their worker ID
-                first_block_id = Int32(bidx)
+                # How many jobs does this tensor have in both directions
+                jobs_X_in_tensor = cute.ceil_div(tensor_cols, (self.TILE_COLS * self.NUM_TILES_X))
+                jobs_Y_in_tensor = cute.ceil_div(tensor_rows, (self.TILE_ROWS * self.NUM_TILES_Y))
+                # How many jobs does this tensor have
+                jobs_in_tensor = jobs_X_in_tensor * jobs_Y_in_tensor
+                # Which job (1D index) does this CTA start from, which is also their worker ID
+                first_job_id = Int32(bidx)
                 # gdx is how many CTAs are assigned to this tensor
-                block_stride = Int32(gdx)
-                # If my first work unit is already beyond the tensor's last work unit, I have no work to do
-                if first_block_id >= units_in_tensor:
+                job_stride = Int32(gdx)
+                # If my first job is already beyond the tensor's last job, I have no work to do
+                if first_job_id >= jobs_in_tensor:
                     has_work = Boolean(False)
             else:
                 # This tensor is empty, so this CTA has no work to do
@@ -917,7 +911,7 @@ class MXFP8GroupQuantizeKernel:
         atoms = (tma_atom_x, tma_atom_act, tma_atom_out_row, tma_atom_out_col)
 
         if has_work:
-            # For single tensor case, each CTA only processes one work unit
+            # For single tensor case, each CTA only processes one job
             if cutlass.const_expr(cfg.IS_SINGLE_TENSOR):
                 # For single tensor case we don't use tensor descriptors
                 descs = (None, None, None, None)
@@ -929,33 +923,35 @@ class MXFP8GroupQuantizeKernel:
                     row_scales = self._rowwise_scales(mS_row, Int64(0), tensor_rows, tensor_cols)
 
                 col_scales = None
-                col_scale_row_start = block_start_row
+                col_scale_row_start = job_start_row
                 col_scale_rows = tensor_rows
                 if cutlass.const_expr(cfg.COLWISE):
                     col_scale_base = Int64(0)
                     if cutlass.const_expr(cfg.WITH_GEMM_SWIZZLED_SCALES):
                         # Colwise swizzled scale indices restart at each member and depend
                         # on its rows (process_colwise_stage), so address the member that
-                        # owns this chunk.
+                        # owns this job.
                         member_rows = Int32(0)
-                        member_row0 = Int32(0)
+                        member_row_start = Int32(0)
                         if cutlass.const_expr(cfg.SHAPE_REP == SAME_BOTH_DIMS):
                             member_rows = tensor_rows // Int32(num_tensors)
-                            member_row0 = block_start_row // member_rows * member_rows
+                            member_row_start = job_start_row // member_rows * member_rows
                         else:
                             member_id = self._find_tensor_from_offsets(
                                 mOffsets,
                                 num_tensors,
-                                Int64(block_start_row) * Int64(tensor_cols),
+                                Int64(job_start_row) * Int64(tensor_cols),
                             )
                             member_rows = Int32(mFirstDims[member_id])
-                            member_row0 = Int32(Int64(mOffsets[member_id]) // Int64(tensor_cols))
+                            member_row_start = Int32(
+                                Int64(mOffsets[member_id]) // Int64(tensor_cols)
+                            )
                         col_scale_base = (
-                            Int64(member_row0)
+                            Int64(member_row_start)
                             * Int64(cute.round_up(tensor_cols, 128))
                             // MXFP8_BLOCK_SCALING_SIZE
                         )
-                        col_scale_row_start = block_start_row - member_row0
+                        col_scale_row_start = job_start_row - member_row_start
                         col_scale_rows = member_rows
                     col_scales = self._colwise_scales(
                         mS_col, col_scale_base, col_scale_rows, tensor_cols
@@ -963,16 +959,16 @@ class MXFP8GroupQuantizeKernel:
 
                 cute.arch.sync_threads()
 
-                self._process_block(
-                    block_start_row,
-                    block_id_X,
+                self._process_job_strip(
+                    job_start_row,
+                    job_id_X,
                     tensor_rows,
                     tensor_cols,
                     row_scales,
                     col_scales,
                     col_scale_row_start,
                     col_scale_rows,
-                    block_start_row // (self.TILE_ROWS * self.NUM_TILES_Y),
+                    job_start_row // (self.TILE_ROWS * self.NUM_TILES_Y),
                     mWorkspace,
                     sDbias,
                     descs,
@@ -990,7 +986,7 @@ class MXFP8GroupQuantizeKernel:
                     cons_state,
                 )
             else:
-                # For non-single tensor case, we use persistent kernel so each CTA keeps processing work units until none is left
+                # For non-single tensor case, we use persistent kernel so each CTA keeps processing jobs until none is left
                 desc_x = tmap.get_tensormap_ptr(mTensormaps[(tensor_id, 0, None)].iterator)
                 desc_out_row = tmap.get_tensormap_ptr(mTensormaps[(tensor_id, 1, None)].iterator)
                 desc_out_col = tmap.get_tensormap_ptr(mTensormaps[(tensor_id, 2, None)].iterator)
@@ -1017,27 +1013,27 @@ class MXFP8GroupQuantizeKernel:
                 if cutlass.const_expr(cfg.COLWISE):
                     col_scales = self._colwise_scales(mS_col, scale_base, tensor_rows, tensor_cols)
 
-                # Make sure all threads see the updated descriptors and scales before processing any blocks.
+                # Make sure all threads see the updated descriptors and scales before processing any jobs.
                 cute.arch.sync_threads()
 
-                # Grid-stride over this tensor's own chunks; the descriptors never change.
-                block_id = first_block_id
+                # Grid-stride over this tensor's own jobs; the descriptors never change.
+                job_id = first_job_id
                 job_finished = Boolean(False)
                 while not job_finished:
-                    block_id_Y_in_tensor = block_id // units_X_in_tensor
-                    block_id_X_in_tensor = block_id % units_X_in_tensor
-                    block_start_row_in_tensor = block_id_Y_in_tensor * (
+                    job_id_Y_in_tensor = job_id // jobs_X_in_tensor
+                    job_id_X_in_tensor = job_id % jobs_X_in_tensor
+                    job_start_row_in_tensor = job_id_Y_in_tensor * (
                         self.TILE_ROWS * self.NUM_TILES_Y
                     )
                     if cutlass.const_expr(self.NUM_TILES_X == 1):
-                        self._process_block(
-                            block_start_row_in_tensor,
-                            block_id_X_in_tensor,
+                        self._process_job_strip(
+                            job_start_row_in_tensor,
+                            job_id_X_in_tensor,
                             tensor_rows,
                             tensor_cols,
                             row_scales,
                             col_scales,
-                            block_start_row_in_tensor,
+                            job_start_row_in_tensor,
                             tensor_rows,
                             Int32(0),  # dbias is only supported for single-tensor reps
                             mWorkspace,
@@ -1057,22 +1053,22 @@ class MXFP8GroupQuantizeKernel:
                             cons_state,
                         )
                     else:
-                        # The chunk's column tiles in order, stopping at the tensor's last
+                        # The job's column tiles in order, stopping at the tensor's last
                         # column like the CUDA kernel's stages_X = DIVUP(chunk_cols, TILE_DIM_X).
-                        chunk_col0 = block_id_X_in_tensor * (self.TILE_COLS * self.NUM_TILES_X)
+                        job_start_col = job_id_X_in_tensor * (self.TILE_COLS * self.NUM_TILES_X)
                         tiles_X = cutlass.min(
                             Int32(self.NUM_TILES_X),
-                            cute.ceil_div(tensor_cols - chunk_col0, self.TILE_COLS),
+                            cute.ceil_div(tensor_cols - job_start_col, self.TILE_COLS),
                         )
                         for stage_X in cutlass.range(tiles_X, unroll=1):
-                            self._process_block(
-                                block_start_row_in_tensor,
-                                block_id_X_in_tensor * self.NUM_TILES_X + stage_X,
+                            self._process_job_strip(
+                                job_start_row_in_tensor,
+                                job_id_X_in_tensor * self.NUM_TILES_X + stage_X,
                                 tensor_rows,
                                 tensor_cols,
                                 row_scales,
                                 col_scales,
-                                block_start_row_in_tensor,
+                                job_start_row_in_tensor,
                                 tensor_rows,
                                 Int32(0),  # dbias is only supported for single-tensor reps
                                 mWorkspace,
@@ -1091,9 +1087,9 @@ class MXFP8GroupQuantizeKernel:
                                 prod_state,
                                 cons_state,
                             )
-                    # Find the next block to process
-                    block_id = block_id + block_stride
-                    if block_id >= units_in_tensor:
+                    # Find the next job to process
+                    job_id = job_id + job_stride
+                    if job_id >= jobs_in_tensor:
                         job_finished = Boolean(True)
 
         # Drain every TMA store before the CTA releases its shared-memory source buffers.
@@ -1148,17 +1144,17 @@ class MXFP8GroupQuantizeKernel:
         pipeline_obj.producer_commit(prod_state)
 
     @cute.jit
-    def _process_block(
+    def _process_job_strip(
         self,
-        block_start_row,  # Row offset of this chunk (global for single-tensor, else tensor-local)
-        block_id_X,  # Column-chunk index within the tensor
+        job_start_row,  # Row offset of this job (global for single-tensor, else tensor-local)
+        column_tile_id,  # Column-tile index within the tensor
         rows,  # Rows of the rowwise-scale view (the group for single-tensor, else the tensor)
         cols,  # Number of columns in this tensor
-        row_scales,  # Rowwise scales tiled per stage, rows counted like block_start_row
+        row_scales,  # Rowwise scales tiled per stage, rows counted like job_start_row
         col_scales,  # Colwise scales tiled per stage
-        col_scale_row_start,  # Row of this chunk in the colwise-scale view
+        col_scale_row_start,  # Row of this job in the colwise-scale view
         col_scale_rows,  # Rows of the colwise-scale view
-        dbias_row,  # Row of the dbias workspace this chunk reduces into
+        dbias_row,  # Row of the dbias workspace this job reduces into
         mWorkspace,  # f32 partial dbias workspace (WITH_DBIAS)
         sDbias,  # SMEM buffer for the rowwise dbias reduction (rowwise-only dbias)
         descs,  # Per-tensor descriptors (x, act, out_row, out_col), None if single-tensor
@@ -1175,20 +1171,20 @@ class MXFP8GroupQuantizeKernel:
         prod_state,
         cons_state,
     ):
-        """Quantize NUM_TILES_Y vertically stacked tiles in one column strip of a work item."""
+        """Quantize NUM_TILES_Y vertically stacked tiles in one column strip of a job."""
         cfg = self.cfg
         _, _, tma_atom_out_row, tma_atom_out_col = atoms
         _, _, _, _, tXsO_row, tXgO_row, tXsO_col, tXgO_col = partitions
         _, _, desc_out_row, desc_out_col = descs
-        block_offset_X = block_id_X * self.TILE_COLS
+        job_start_col = column_tile_id * self.TILE_COLS
 
-        # This chunk's coordinates in the tile grid (32x128 TMA boxes, not elements).
-        tile_id_Y = block_start_row // self.TILE_ROWS
-        tile_id_X = block_id_X
+        # This job's coordinates in the tile grid (32x128 TMA boxes, not elements).
+        tile_id_Y = job_start_row // self.TILE_ROWS
+        tile_id_X = column_tile_id
         col_scale_tile_Y = col_scale_row_start // self.TILE_ROWS
 
-        # Per-chunk dbias accumulators, in the CUDA kernel's summation order: a running
-        # column sum over the chunk's rows (colwise), or per-thread partial sums over its
+        # Per-job dbias accumulators, in the CUDA kernel's summation order: a running
+        # column sum over the job's rows (colwise), or per-thread partial sums over its
         # stages that the whole CTA reduces afterwards (rowwise-only).
         dbias_col = Float32(0.0)
         dbias_row_acc = None
@@ -1238,7 +1234,7 @@ class MXFP8GroupQuantizeKernel:
                     cute.flatten(col_scales[(None, (col_scale_tile_Y + stage, tile_id_X))]),
                     cfg.MAX_NORM_RCP,
                     (col_scale_tile_Y + stage) * self.TILE_ROWS,
-                    block_offset_X,
+                    job_start_col,
                     col_scale_rows,
                     cols,
                     ACTIVATION=cfg.ACTIVATION,
@@ -1265,7 +1261,7 @@ class MXFP8GroupQuantizeKernel:
                     cute.flatten(row_scales[(None, (row_tile, tile_id_X))]),
                     cfg.MAX_NORM_RCP,
                     row_tile * self.TILE_ROWS,
-                    block_offset_X,
+                    job_start_col,
                     rows,
                     cols,
                     ACTIVATION=None if self.CACHE_ACTIVATION else cfg.ACTIVATION,
@@ -1335,8 +1331,8 @@ class MXFP8GroupQuantizeKernel:
         if cutlass.const_expr(cfg.WITH_DBIAS):
             if cutlass.const_expr(self.DBIAS_IN_ROWWISE):
                 dbias_col = self._reduce_rowwise_dbias(sDbias, tidx, dbias_row_acc)
-            # One partial-dbias row per chunk, as in the CUDA kernel's dbias_workspace.
-            dbias_x = block_offset_X + tidx
+            # One partial-dbias row per job, as in the CUDA kernel's dbias_workspace.
+            dbias_x = job_start_col + tidx
             if dbias_x < cols:
                 mWorkspace[(dbias_row, dbias_x)] = dbias_col
 
@@ -1365,7 +1361,7 @@ class MXFP8GroupQuantizeKernel:
         dbias = Float32(0.0)
         for i in cutlass.range_constexpr(self.THREADS_Y):
             dbias += sDbias[(i, tidx)]
-        # The buffer is rewritten by the next chunk.
+        # The buffer is rewritten by the next job.
         cute.arch.sync_threads()
         return dbias
 
