@@ -83,8 +83,8 @@ constexpr float get_scale_max(int scale_max = 0) {
       scale_max = 114688;
     }
     return static_cast<float>(scale_max);
-#endif
   }
+#endif
   return 0.f;
 }
 
