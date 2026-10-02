@@ -4,6 +4,7 @@
 
 add_executable(test_util
                test_nvrtc.cpp
+               test_packed_activation.cu
                test_string.cpp
                ../test_common.cu)
 

@@ -19,6 +19,7 @@
 #include "../../common.h"
 #include "../../util/cuda_runtime.h"
 #include "../../util/math.h"
+#include "../../util/packed_activation.cuh"
 #include "../../util/ptx_arch_spec.cuh"
 #include "../../utils.cuh"
 #include "../core/common.cuh"
@@ -122,14 +123,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
   const size_t thread_offset_Y_rowwise = tid_Y_rowwise;
   const size_t thread_offset_X_rowwise = tid_X_rowwise * SCALE_DIM_X;
-  const size_t thread_offset_Y_colwise = tid_Y_colwise;
-  const size_t thread_offset_X_colwise = tid_X_colwise;
 
   const size_t row_base_rowwise = block_offset_Y + thread_offset_Y_rowwise;
-  const size_t row_base_colwise = block_offset_Y + thread_offset_Y_colwise;
-  const size_t col_base_colwise = block_offset_X + thread_offset_X_colwise;
-
-  const bool col_out_of_bounds_colwise = (col_base_colwise >= cols);
 
   const size_t scales_offset_Y_rowwise = scales_block_offset_Y_rowwise + tid_Y_rowwise;
   const size_t scales_offset_X_rowwise = scales_block_offset_X_rowwise + tid_X_rowwise;
@@ -236,56 +231,64 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     if constexpr (COLWISE_SCALING) {
       const size_t shmem_offset_base_colwise = buff * BUFF_DIM + tid_X_colwise;
       thread_amax = 0.0f;
-      float in_compute_colwise[BUFF_DIM_Y];
-      IType in_colwise_IType[BUFF_DIM_Y];
+      // Elements between the AMAX and scaling steps, in pairs of rows, truncated to IType
+      IType2 in_colwise[BUFF_DIM_Y / 2];
 
       // 1. Read/Compute elements. Find MXFP8-block AMAX
       if constexpr (USE_HALF_PRECISION) {
         IType thread_amax_f16 = static_cast<IType>(0.0f);
 #pragma unroll
-        for (int i = 0; i < BUFF_DIM_Y; ++i) {
+        for (int i = 0; i < BUFF_DIM_Y; i += 2) {
           const size_t shmem_offset_colwise = shmem_offset_base_colwise + i * BUFF_DIM_X;
-          in_colwise_IType[i] = in_sh[shmem_offset_colwise];
-          thread_amax_f16 = __hmax(thread_amax_f16, __habs(in_colwise_IType[i]));
+          in_colwise[i / 2] = {in_sh[shmem_offset_colwise],
+                               in_sh[shmem_offset_colwise + BUFF_DIM_X]};
+          thread_amax_f16 = __hmax(thread_amax_f16, __habs(in_colwise[i / 2].x));
+          thread_amax_f16 = __hmax(thread_amax_f16, __habs(in_colwise[i / 2].y));
         }
         thread_amax = static_cast<float>(thread_amax_f16);
       } else {
+        IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
 #pragma unroll
-        for (int i = 0; i < BUFF_DIM_Y; ++i) {
+        for (int i = 0; i < BUFF_DIM_Y; i += 2) {
           const size_t shmem_offset_colwise = shmem_offset_base_colwise + i * BUFF_DIM_X;
+          const size_t shmem_offset_colwise_next = shmem_offset_colwise + BUFF_DIM_X;
 
-          float elt = static_cast<float>(in_sh[shmem_offset_colwise]);
+          ptx::floatx2 elt = {static_cast<float>(in_sh[shmem_offset_colwise]),
+                              static_cast<float>(in_sh[shmem_offset_colwise_next])};
           if constexpr (IS_ACT) {
-            elt = OP(elt, {});
+            elt = activation_2x<ParamOP, OP>(elt, {});
           }
           if constexpr (IS_DACT) {
-            float act_in_elt = static_cast<float>(act_in_sh[shmem_offset_colwise]);
-            elt *= OP(act_in_elt, {});
+            const ptx::floatx2 act_in_elt = {
+                static_cast<float>(act_in_sh[shmem_offset_colwise]),
+                static_cast<float>(act_in_sh[shmem_offset_colwise_next])};
+            elt = ptx::mul_2x(elt, activation_2x<ParamOP, OP>(act_in_elt, {}));
           }
           if constexpr (DBIAS_REDUCTION_IN_COLWISE) {
             // Accumulate before the truncation below so the partial sums stay full precision
-            partial_dbias_colwise += elt;
+            partial_dbias_colwise += elt.x;
+            partial_dbias_colwise += elt.y;
           }
-          // Numerical truncation: Downcast to IType (BF16/FP16), then upcast it back to FP32
-          if constexpr (!std::is_same_v<IType, float>) {
-            elt = static_cast<float>(static_cast<IType>(elt));
-          }
+          // Numerical truncation: Downcast to IType (BF16/FP16)
+          in_colwise[i / 2] = {static_cast<IType>(elt.x), static_cast<IType>(elt.y)};
           // Cache computed activations to avoid computing them again in the 2nd pass along another dimension
           if constexpr (IS_CACHED_ACT_OP) {
-            cached_act_sh[shmem_offset_colwise] = static_cast<IType>(elt);
+            cached_act_sh[shmem_offset_colwise] = in_colwise[i / 2].x;
+            cached_act_sh[shmem_offset_colwise_next] = in_colwise[i / 2].y;
           }
 
-          if constexpr (COMPUTE_ACTIVATIONS) {
-            const bool row_out_of_bounds_colwise = (row_base_colwise + stage_offset_Y + i >= rows);
-            const bool out_of_bounds = (col_out_of_bounds_colwise || row_out_of_bounds_colwise);
-            if (!out_of_bounds) {
-              thread_amax = fmaxf(thread_amax, fabsf(elt));
-            }
+          // Elements past the tensor edge hold the TMA zero fill, and every activation maps 0 to 0
+          // (dact: 0 * dOP(0)), so they cannot raise the AMAX.
+          if constexpr (std::is_same_v<IType, float>) {
+            thread_amax = fmaxf(thread_amax, fabsf(in_colwise[i / 2].x));
+            thread_amax = fmaxf(thread_amax, fabsf(in_colwise[i / 2].y));
           } else {
-            // If no activation, elt is 0 so we can safely do this
-            thread_amax = fmaxf(thread_amax, fabsf(elt));
+            ptx::abs_max_2x(thread_amax_2x, thread_amax_2x, in_colwise[i / 2]);
           }
-          in_compute_colwise[i] = elt;
+        }
+        if constexpr (!std::is_same_v<IType, float>) {
+          thread_amax =
+              static_cast<float>(__hmax(__habs(thread_amax_2x.x), __habs(thread_amax_2x.y)));
         }
       }
 
@@ -310,24 +313,21 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       const float block_scale_inverse = ptx::exp2f_rcp<float>(biased_exponent);
       const ptx::floatx2 block_scale_inverse_2x = {block_scale_inverse, block_scale_inverse};
 
-// 3. Scale elements
+      // 3. Scale elements
 #pragma unroll
-      for (int i = 0; i < SCALE_DIM_Y; ++i) {
-        float in;
-        if constexpr (USE_HALF_PRECISION) {
-          in = static_cast<float>(in_colwise_IType[i]);
-        } else {
-          in = in_compute_colwise[i];
-        }
+      for (int i = 0; i < SCALE_DIM_Y; i += 2) {
+        const IType2 &in = in_colwise[i / 2];
         // On the half-precision path the read loop kept the elements in IType, so dbias is
-        // accumulated here instead, reusing the FP32 value the cvt needs anyway.
+        // accumulated here instead.
         if constexpr (DBIAS_REDUCTION_IN_COLWISE && USE_HALF_PRECISION) {
-          partial_dbias_colwise += in;
+          partial_dbias_colwise += static_cast<float>(in.x);
+          partial_dbias_colwise += static_cast<float>(in.y);
         }
-        const float scaled_out = in * block_scale_inverse;
-
+        OType2 out_pair;
+        ptx::mul_cvt_2x(out_pair, in, block_scale_inverse_2x);
         const size_t shmem_offset_elt = shmem_offset_base_colwise + i * BUFF_DIM_X;
-        out_colwise_data_sh[shmem_offset_elt] = static_cast<OType>(scaled_out);
+        out_colwise_data_sh[shmem_offset_elt] = out_pair.x;
+        out_colwise_data_sh[shmem_offset_elt + BUFF_DIM_X] = out_pair.y;
       }
     }
 
@@ -337,21 +337,27 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     if constexpr (DBIAS_REDUCTION_COLWISE_ONLY) {
       const size_t shmem_offset_base_colwise = buff * BUFF_DIM + tid_X_colwise;
 #pragma unroll
-      for (int i = 0; i < BUFF_DIM_Y; ++i) {
+      for (int i = 0; i < BUFF_DIM_Y; i += 2) {
         const size_t shmem_offset_colwise = shmem_offset_base_colwise + i * BUFF_DIM_X;
+        const size_t shmem_offset_colwise_next = shmem_offset_colwise + BUFF_DIM_X;
 
-        float elt = static_cast<float>(in_sh[shmem_offset_colwise]);
+        ptx::floatx2 elt = {static_cast<float>(in_sh[shmem_offset_colwise]),
+                            static_cast<float>(in_sh[shmem_offset_colwise_next])};
         if constexpr (IS_ACT) {
-          elt = OP(elt, {});
+          elt = activation_2x<ParamOP, OP>(elt, {});
         }
         if constexpr (IS_DACT) {
-          const float act_in_elt = static_cast<float>(act_in_sh[shmem_offset_colwise]);
-          elt *= OP(act_in_elt, {});
+          const ptx::floatx2 act_in_elt = {
+              static_cast<float>(act_in_sh[shmem_offset_colwise]),
+              static_cast<float>(act_in_sh[shmem_offset_colwise_next])};
+          elt = ptx::mul_2x(elt, activation_2x<ParamOP, OP>(act_in_elt, {}));
         }
-        partial_dbias_colwise += elt;
+        partial_dbias_colwise += elt.x;
+        partial_dbias_colwise += elt.y;
         // Cache computed activations to avoid computing them again in the rowwise pass
         if constexpr (IS_CACHED_ACT_OP) {
-          cached_act_sh[shmem_offset_colwise] = static_cast<IType>(elt);
+          cached_act_sh[shmem_offset_colwise] = static_cast<IType>(elt.x);
+          cached_act_sh[shmem_offset_colwise_next] = static_cast<IType>(elt.y);
         }
       }
     }
@@ -436,39 +442,46 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             act_in.load_from(&act_in_sh[shmem_offset_rowwise]);
           }
 #pragma unroll
-          for (int e = 0; e < PACK_SIZE; ++e) {
-            const int j = w * PACK_SIZE + e;
-            // Compute element
-            float elt = static_cast<float>(in.data.elt[e]);
+          for (int e = 0; e < PACK_SIZE; e += 2) {
+            // Compute a pair of elements
+            ptx::floatx2 elt2 = {static_cast<float>(in.data.elt[e]),
+                                 static_cast<float>(in.data.elt[e + 1])};
             if constexpr (IS_ACT) {
-              elt = OP(elt, {});
+              elt2 = activation_2x<ParamOP, OP>(elt2, {});
             }
             if constexpr (IS_DACT) {
-              float act_in_elt = static_cast<float>(act_in.data.elt[e]);
-              elt *= OP(act_in_elt, {});
+              const ptx::floatx2 act_in_elt = {static_cast<float>(act_in.data.elt[e]),
+                                               static_cast<float>(act_in.data.elt[e + 1])};
+              elt2 = ptx::mul_2x(elt2, activation_2x<ParamOP, OP>(act_in_elt, {}));
             }
+#pragma unroll
+            for (int k = 0; k < 2; ++k) {
+              const int j = w * PACK_SIZE + e + k;
+              float elt = (k == 0) ? elt2.x : elt2.y;
 
-            // If DBIAS was computed in the 1st pass (COLWISE) then no need to compute it again
-            if constexpr (DBIAS_REDUCTION_IN_ROWWISE) {
-              thread_dbias_rowwise[j] += elt;
-            }
-            // Numerical truncation: Downcast to IType (BF16/FP16), then upcast it back to FP32
-            if constexpr (!std::is_same_v<IType, float>) {
-              elt = static_cast<float>(static_cast<IType>(elt));
-            }
-            if constexpr (COMPUTE_ACTIVATIONS) {
-              const bool row_out_of_bounds_rowwise = (row_base_rowwise + stage_offset_Y >= rows);
-              const bool swizzled_col_out_of_bounds =
-                  (block_offset_X + swizzled_thread_idx >= cols);
-              const bool out_of_bounds = (row_out_of_bounds_rowwise || swizzled_col_out_of_bounds);
-              if (!out_of_bounds) {
+              // If DBIAS was computed in the 1st pass (COLWISE) then no need to compute it again
+              if constexpr (DBIAS_REDUCTION_IN_ROWWISE) {
+                thread_dbias_rowwise[j] += elt;
+              }
+              // Numerical truncation: Downcast to IType (BF16/FP16), then upcast it back to FP32
+              if constexpr (!std::is_same_v<IType, float>) {
+                elt = static_cast<float>(static_cast<IType>(elt));
+              }
+              if constexpr (COMPUTE_ACTIVATIONS) {
+                const bool row_out_of_bounds_rowwise = (row_base_rowwise + stage_offset_Y >= rows);
+                const bool swizzled_col_out_of_bounds =
+                    (block_offset_X + swizzled_thread_idx >= cols);
+                const bool out_of_bounds =
+                    (row_out_of_bounds_rowwise || swizzled_col_out_of_bounds);
+                if (!out_of_bounds) {
+                  thread_amax = fmaxf(thread_amax, fabsf(elt));
+                }
+              } else {
+                // If no activation, elt is 0 so we can safely do this
                 thread_amax = fmaxf(thread_amax, fabsf(elt));
               }
-            } else {
-              // If no activation, elt is 0 so we can safely do this
-              thread_amax = fmaxf(thread_amax, fabsf(elt));
+              in_compute_rowwise[j] = elt;
             }
-            in_compute_rowwise[j] = elt;
           }
         }
       }

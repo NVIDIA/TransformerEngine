@@ -723,6 +723,12 @@ foreach(cuda_source IN LISTS nvte_sources_with_fast_math)
     APPEND
     PROPERTY
     COMPILE_OPTIONS "--use_fast_math")
+  # nvcc defines no macro for --use_fast_math, so tell the code explicitly.
+  set_property(
+    SOURCE ${cuda_source}
+    APPEND
+    PROPERTY
+    COMPILE_DEFINITIONS NVTE_USE_FAST_MATH)
 endforeach()
 
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
