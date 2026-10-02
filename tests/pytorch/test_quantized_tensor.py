@@ -1195,6 +1195,7 @@ def test_skip_quantization_with_noop_flag(
 @pytest.mark.parametrize("known_counts", [False, True])
 def test_restore_saved_tensor_reference_copies(num_groups, return_tail, known_counts):
     """Mixed tensors/storage restorers copy no growing suffix, including nested restorers."""
+
     class CountedList(list):
         copied = 0
 
@@ -1230,7 +1231,6 @@ def test_restore_saved_tensor_reference_copies(num_groups, return_tail, known_co
     if return_tail:
         assert len(tail) == 2 and tail[0] is values[-2]
     assert values.copied <= (4 * num_groups if known_counts else 0) + 2
-
 
 
 @pytest.mark.parametrize("compiled_metadata", [False, True])
