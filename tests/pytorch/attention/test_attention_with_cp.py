@@ -12,6 +12,7 @@ import threading
 import pathlib
 import logging
 import copy
+from collections.abc import Callable
 from collections import deque
 import pytest
 import torch
@@ -104,8 +105,9 @@ class PoolWorker:
     _STDERR_BUFFER_LINES = 200  # ring cap (~40 KB ceiling)
     _STDERR_TAIL_CHARS = 4000  # how much to attach to the AssertionError
 
-    def __init__(self, world_size: int):
+    def __init__(self, world_size: int, reset_all_pools: Callable[[], None]):
         self.world_size = world_size
+        self._reset_all_pools = reset_all_pools
         self.proc: subprocess.Popen | None = None
         self._stderr_buf: deque[str] = deque(maxlen=self._STDERR_BUFFER_LINES)
 
@@ -221,10 +223,13 @@ class PoolWorker:
                         sys.stderr.flush()
                     raise
                 first_err = e
+                # Pools with different world sizes can occupy the same GPUs. Reset
+                # all pools so the retry starts without leftover CUDA/NCCL state.
+                self._reset_all_pools()
                 sys.stderr.write(
                     f"[POOL-RETRY] status=retrying test={test_id!r} "
                     f"world_size={self.world_size} attempt={attempt + 1} "
-                    f"error={msg_head!r}; respawning pool and retrying\n"
+                    f"error={msg_head!r}; reset all pools and retrying\n"
                 )
                 sys.stderr.flush()
         raise first_err  # unreachable; loop either returns or raises
@@ -297,11 +302,15 @@ def cp_pool():
     """Returns a callable: cp_pool(world_size) -> PoolWorker."""
     pools: dict[int, PoolWorker] = {}
 
+    def _reset_all_pools() -> None:
+        for pool in pools.values():
+            pool.shutdown()
+
     def _get(world_size: int) -> PoolWorker:
         if world_size > torch.cuda.device_count():
             pytest.skip(f"Test requires {world_size} GPUs, but found {torch.cuda.device_count()}")
         if world_size not in pools:
-            pools[world_size] = PoolWorker(world_size)
+            pools[world_size] = PoolWorker(world_size, _reset_all_pools)
         return pools[world_size]
 
     yield _get
