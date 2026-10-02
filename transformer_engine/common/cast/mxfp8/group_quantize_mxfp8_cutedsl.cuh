@@ -139,7 +139,7 @@ struct alignas(128) GroupDescriptorWorkspace {
   alignas(128) int64_t tensor_maps[kMaxGroupTensors][kGroupTensorMapSlots][kInt64PerTensorMap];
   // Stand-in for the unused offsets array in SAME_BOTH_DIMS. The kernel takes
   // offsets unconditionally but does not read them for this representation.
-  int64_t unused_dims[kMaxGroupTensors + 1];
+  int64_t unused_offsets[kMaxGroupTensors + 1];
 };
 
 // Like `g_tensor_maps` on the CUDA path, this has internal linkage, so every translation
@@ -250,20 +250,24 @@ inline bool mxfp8_group_quantize_cutedsl(const MXFP8GroupQuantConfig &config,
                          false, device_index);
 
   // Offsets and member dims are read from the output, as in mxfp8::group_quantize.
-  auto dims_or_unused = [&](const SimpleTensor &t, size_t numel) {
-    void *dptr = t.has_data() ? t.dptr : static_cast<void *>(workspace->unused_dims);
+  auto offsets_or_unused = [&](const SimpleTensor &t, size_t numel) {
+    void *dptr = t.has_data() ? t.dptr : static_cast<void *>(workspace->unused_offsets);
     return DLTensorWrapper(make_basic_tensor(dptr, DType::kInt64, {numel}), false, device_index);
   };
-  DLTensorWrapper mOffsets = dims_or_unused(output_tensor->tensor_offsets, num_tensors + 1);
+  DLTensorWrapper mOffsets = offsets_or_unused(output_tensor->tensor_offsets, num_tensors + 1);
   DLTensorWrapper mFirstDims, mLastDims;
   if (config.shape_rep == ShapeRepresentation::VARYING_FIRST_DIM ||
       config.shape_rep == ShapeRepresentation::VARYING_BOTH_DIMS) {
+    NVTE_CHECK(output_tensor->first_dims.has_data(), "Grouped MXFP8 quantization with ",
+               shape_rep_to_str(config.shape_rep), " requires an allocated first_dims buffer.");
     mFirstDims = DLTensorWrapper(
         make_basic_tensor(output_tensor->first_dims.dptr, DType::kInt64, {num_tensors}), false,
         device_index);
   }
   if (config.shape_rep == ShapeRepresentation::VARYING_LAST_DIM ||
       config.shape_rep == ShapeRepresentation::VARYING_BOTH_DIMS) {
+    NVTE_CHECK(output_tensor->last_dims.has_data(), "Grouped MXFP8 quantization with ",
+               shape_rep_to_str(config.shape_rep), " requires an allocated last_dims buffer.");
     mLastDims = DLTensorWrapper(
         make_basic_tensor(output_tensor->last_dims.dptr, DType::kInt64, {num_tensors}), false,
         device_index);
