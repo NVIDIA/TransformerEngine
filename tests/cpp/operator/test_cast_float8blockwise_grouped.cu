@@ -74,9 +74,12 @@ template <typename InputType, typename OutputType>
 void perform_test(ShapeRep shape_rep, BlockDim block_dim, ScalingDir dir,
                   const std::vector<size_t>& first_dims_h, size_t K,
                   bool force_pow_2_scales, float epsilon) {
-  if (getDeviceComputeCapability() < hopperComputeCapability ||
-      getDeviceComputeCapability() >= blackwellComputeCapability) {
+  if (getDeviceComputeCapability() < hopperComputeCapability) {
     GTEST_SKIP();
+  }
+  if (!force_pow_2_scales && getDeviceComputeCapability() >= blackwellComputeCapability) {
+    GTEST_SKIP() << "Non-power-of-2 FP8 block scales are rejected on Blackwell and newer "
+                    "(covered by GroupedFP8BlockwiseBlackwell.RejectsNonPow2Scales).";
   }
 
   DType itype = TypeInfo<InputType>::dtype;
@@ -417,5 +420,49 @@ std::string make_name(const ::testing::TestParamInfo<TestConfig>& info) {
 
 INSTANTIATE_TEST_SUITE_P(GroupedFP8Blockwise, GroupedFP8BlockwiseTestSuite,
                          ::testing::ValuesIn(make_configs()), make_name);
+
+// On Blackwell and newer, FP8 block scaling is emulated with MXFP8 GEMM, whose E8M0 scales can
+// only represent powers of 2, so grouped quantize must reject non-power-of-2 scales.
+TEST(GroupedFP8BlockwiseBlackwell, RejectsNonPow2Scales) {
+  if (getDeviceComputeCapability() < blackwellComputeCapability) {
+    GTEST_SKIP();
+  }
+  constexpr size_t num_tensors = 2, M = 128, K = 128;
+  const size_t numel = num_tensors * M * K;
+  bf16* input_d = nullptr;
+  fp8e4m3* output_d = nullptr;
+  float* scale_inv_d = nullptr;
+  const size_t scale_floats = num_tensors * per_expert_scale_floats(BlockDim::ONE_D, false, M, K);
+  cudaMalloc(&input_d, numel * sizeof(bf16));
+  cudaMemset(input_d, 0, numel * sizeof(bf16));
+  cudaMalloc(&output_d, numel);
+  cudaMalloc(&scale_inv_d, scale_floats * sizeof(float));
+
+  std::vector<size_t> logical_shape_vec = {num_tensors * M, K};
+  const NVTEShape logical_shape =
+      nvte_make_shape(logical_shape_vec.data(), logical_shape_vec.size());
+  NVTEGroupedTensor in_gt =
+      nvte_create_grouped_tensor(NVTE_DELAYED_TENSOR_SCALING, num_tensors, logical_shape);
+  NVTEGroupedTensor out_gt =
+      nvte_create_grouped_tensor(NVTE_BLOCK_SCALING_1D, num_tensors, logical_shape);
+  NVTEBasicTensor in_data = {input_d, kNVTEBFloat16, logical_shape};
+  nvte_set_grouped_tensor_param(in_gt, kNVTEGroupedRowwiseData, &in_data, sizeof(in_data));
+  NVTEBasicTensor out_data = {output_d, kNVTEFloat8E4M3, logical_shape};
+  nvte_set_grouped_tensor_param(out_gt, kNVTEGroupedRowwiseData, &out_data, sizeof(out_data));
+  std::vector<size_t> scale_shape_vec = {scale_floats};
+  NVTEBasicTensor scale_bt = {scale_inv_d, kNVTEFloat32,
+                              nvte_make_shape(scale_shape_vec.data(), scale_shape_vec.size())};
+  nvte_set_grouped_tensor_param(out_gt, kNVTEGroupedRowwiseScaleInv, &scale_bt, sizeof(scale_bt));
+
+  QuantizationConfigWrapper quant_config;
+  quant_config.set_force_pow_2_scales(false);
+  EXPECT_THROW(nvte_group_quantize(in_gt, out_gt, quant_config, 0), std::runtime_error);
+
+  nvte_destroy_grouped_tensor(in_gt);
+  nvte_destroy_grouped_tensor(out_gt);
+  cudaFree(input_d);
+  cudaFree(output_d);
+  cudaFree(scale_inv_d);
+}
 
 }  // namespace
