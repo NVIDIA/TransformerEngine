@@ -746,7 +746,6 @@ std::vector<MXFP82DScalingDirection> scaling_directions_2d_quantize = {
     MXFP82DScalingDirection::Bidirectional,
 };
 
-// Only GeLU activation tests are supported
 std::vector<ActivationType> Activation_types = {
     ActivationType::Identity,
     ActivationType::GeLU,
