@@ -1616,8 +1616,15 @@ def _fp8bs_grouped_gemm_available() -> bool:
 
 def _fp8bs_exact_operand(shape, dtype) -> torch.Tensor:
     """Random operand exactly representable in FP8 block scaling with power-of-2 scales."""
-    x = torch.randn(shape, device="cuda", dtype=torch.float32)
-    return x.to(torch.float8_e4m3fn).to(dtype)
+    rows, cols = shape
+    x = torch.randn(shape, device="cuda", dtype=torch.float32).to(torch.float8_e4m3fn).float()
+    # Scale each 128x128 tile by its own power of 2 so block scales differ across tiles. Every
+    # quantization block lies inside one tile, so its power-of-2 scale absorbs the factor exactly.
+    pow2 = torch.tensor([2.0**e for e in range(-3, 4)], dtype=torch.float32, device="cuda")
+    tile_grid = ((rows + 127) // 128, (cols + 127) // 128)
+    factors = pow2[torch.randint(0, pow2.numel(), tile_grid, device="cuda")]
+    factors = factors.repeat_interleave(128, dim=0).repeat_interleave(128, dim=1)
+    return (x * factors[:rows, :cols]).to(dtype)
 
 
 def _quantize_fp8bs(tensors, *, rowwise, columnwise, block_scaling_dim, grouped, is_weight):
