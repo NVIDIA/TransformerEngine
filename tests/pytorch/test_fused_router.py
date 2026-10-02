@@ -1123,8 +1123,6 @@ def test_fused_moe_aux_loss(dtype, num_tokens, num_experts, topk, expert_multipl
 def test_fused_moe_aux_loss_rejects_int_offset_overflow(path):
     num_rows, num_cols = 8_388_609, 256  # Above INT_MAX elements.
     bytes_needed = num_rows * num_cols * 2
-    if not torch.cuda.is_available():
-        pytest.skip("Requires a CUDA GPU")
     torch.cuda.empty_cache()
     free_bytes, _ = torch.cuda.mem_get_info()
     if free_bytes < bytes_needed + (1 << 30):
