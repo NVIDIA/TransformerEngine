@@ -617,6 +617,8 @@ def general_grouped_gemm_for_grouped_tensor(
         # so force it on and intentionally override any caller-supplied value. This
         # matches the Float8BlockScaling recipe, which fixes use_split_accumulator=True
         # for all of fprop/dgrad/wgrad, so no user-configurable setting is discarded.
+        # On Blackwell and newer the binding emulates this GEMM with MXFP8 (as for
+        # non-grouped GEMM); the setting is passed through unchanged.
         use_split_accumulator = True
 
     if is_discrete_out:

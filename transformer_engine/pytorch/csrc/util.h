@@ -65,6 +65,14 @@ std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor(GroupedTensorW
  */
 at::Tensor convert_block_scaling_to_mxfp8_tensor(TensorWrapper& input, bool rowwise);
 
+/*! \brief Convert an FP8 block-scaling grouped tensor to an MXFP8 grouped tensor in-place.
+ *
+ *  If rowwise==false, the (transposed) columnwise data is viewed as rowwise data of the
+ *  transposed tensors, with first and last dims swapped, so the GEMM must use the TN layout.
+ *  Returns the swizzled scaling factors, which must be kept alive during the GEMM.
+ */
+at::Tensor convert_grouped_block_scaling_to_mxfp8_tensor(GroupedTensorWrapper& input, bool rowwise);
+
 }  // namespace pytorch
 }  // namespace transformer_engine
 
