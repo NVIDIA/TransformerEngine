@@ -175,6 +175,9 @@ def quantize_rowwise_mxfp8(
     WITH_DACT: cutlass.Constexpr[bool] = False,
     WITH_DBIAS: cutlass.Constexpr[bool] = False,
     dbias_acc: Optional[cute.Tensor] = None,  #  only needed when WITH_DBIAS is True
+    # Write 0 to the scales of col-blocks past N instead of skipping them, so the padding of the
+    # scale row is zeroed (mirrors group_quantize_mxfp8.cuh).
+    ZERO_OOB_SCALES: cutlass.Constexpr[bool] = False,
 ):
     """Quantize one SMEM tile rowwise to MXFP8 (per-row 32-elt block scales); returns the tile amax."""
     tidx, _, _ = cute.arch.thread_idx()
@@ -375,6 +378,11 @@ def quantize_rowwise_mxfp8(
         scale_col_first_elt = tile_col_start + (tidx % CTA_THREADS_X) * MXFP8_BLOCK_SCALING_SIZE
         if scale_row < M and scale_col_first_elt < N:
             mS_row_stage[(tidx // CTA_THREADS_X, tidx % CTA_THREADS_X)] = biased_exp_r
+        if cutlass.const_expr(ZERO_OOB_SCALES):
+            if scale_row < M and scale_col_first_elt >= N:
+                mS_row_stage[(tidx // CTA_THREADS_X, tidx % CTA_THREADS_X)] = Uint8(0).bitcast(
+                    Float8E8M0FNU
+                )
 
     inv_scale_r = exp2f_rcp(biased_exp_r)  # f32 reciprocal of the scale
     scale_2x = pack_f32x2(inv_scale_r, inv_scale_r)
@@ -421,6 +429,12 @@ def quantize_colwise_mxfp8(
     WITH_DACT: cutlass.Constexpr[bool] = False,
     WITH_DBIAS: cutlass.Constexpr[bool] = False,
     CACHE_ACTIVATION: cutlass.Constexpr[bool] = False,  # cache post-activation values to sX_tile
+    # Write 0 to the scales of columns past N instead of skipping them, so the padding of the
+    # scale row is zeroed (mirrors group_quantize_mxfp8.cuh).
+    ZERO_OOB_SCALES: cutlass.Constexpr[bool] = False,
+    # Running column sum to continue the dbias accumulation from, so that consecutive tiles add
+    # their elements in row order as the CUDA kernel does. Starts from 0 when None.
+    dbias_init: Optional[Float32] = None,
 ):
     """Quantize one SMEM tile colwise to MXFP8 (per-column 32-elt block scales); returns (amax, dbias_partial)."""
     tidx, _, _ = cute.arch.thread_idx()
@@ -441,7 +455,7 @@ def quantize_colwise_mxfp8(
     FUSE_RELU = cutlass.const_expr(ACTIVATION == "relu") and not WITH_DBIAS
     # Keep input in half precision format if possible
     USE_HALF_PRECISION = is_packed16(DTYPE) and (ACTIVATION is None or FUSE_RELU)
-    dbias_partial = Float32(0.0)
+    dbias_partial = Float32(0.0) if cutlass.const_expr(dbias_init is None) else dbias_init
 
     if cutlass.const_expr(USE_HALF_PRECISION):
         max_scalar = max_scalar_f16 if DTYPE is cutlass.Float16 else max_scalar_bf16
@@ -541,6 +555,12 @@ def quantize_colwise_mxfp8(
                 mS_col_stage[(0, tidx % 32, tidx // 32)] = biased_exp_c
             else:
                 mS_col_stage[(0, tidx)] = biased_exp_c
+        if cutlass.const_expr(ZERO_OOB_SCALES):
+            if tile_row_start < M and scale_col >= N:
+                if cutlass.const_expr(SWIZZLE):
+                    mS_col_stage[(0, tidx % 32, tidx // 32)] = Uint8(0).bitcast(Float8E8M0FNU)
+                else:
+                    mS_col_stage[(0, tidx)] = Uint8(0).bitcast(Float8E8M0FNU)
 
     inv_scale_c = exp2f_rcp(biased_exp_c)
     # cvt.rn.satfinite can be vectorized to convert 2 f32 to 2 fp8 in one instruction
@@ -793,6 +813,50 @@ def quantize_bidimensional_mxfp8_swizzled(
             )
         cute.autovec_copy(rO_row, tXsO_row)
         cute.autovec_copy(rO_col, tXsO_col)
+
+
+@cute.jit
+def reduce_rowwise_dbias(
+    sDbias: cute.Tensor,
+    tidx: Int32,
+    rowwise_dbias_acc: cute.Tensor,
+    TILE_ROWS: cutlass.Constexpr[int],
+    TILE_COLS: cutlass.Constexpr[int],
+    PACK_SIZE: cutlass.Constexpr[int],
+    THREADS_PER_BANK: cutlass.Constexpr[int],
+):
+    """Reduce per-thread rowwise partial sums to one sum per column using shared memory."""
+    _, tv_layout_dbias_write = cute.make_layout_tv(
+        thr_layout=cute.make_layout(
+            (TILE_ROWS, TILE_COLS // MXFP8_BLOCK_SCALING_SIZE),
+            stride=(TILE_COLS // MXFP8_BLOCK_SCALING_SIZE, 1),
+        ),
+        val_layout=cute.make_layout(
+            (1, MXFP8_BLOCK_SCALING_SIZE), stride=(MXFP8_BLOCK_SCALING_SIZE, 1)
+        ),
+    )
+    sDbias_write = cute.composition(sDbias, tv_layout_dbias_write)
+    # Undo the bank-conflict rotation used when accumulating the per-thread sums.
+    bank_group = (tidx % THREADS_PER_WARP) // THREADS_PER_BANK
+    offset = bank_group * PACK_SIZE
+    for w in cutlass.range_constexpr(MXFP8_BLOCK_SCALING_SIZE // PACK_SIZE):
+        start = (w * PACK_SIZE + offset) % MXFP8_BLOCK_SCALING_SIZE
+        for i in cutlass.range_constexpr(PACK_SIZE):
+            # All threads write their per-thread partial sum results to the shared buffer.
+            sDbias_write[(tidx, start + i)] = rowwise_dbias_acc[w * PACK_SIZE + i]
+    cute.arch.sync_threads()
+    # All threads reduce the cross-thread partial sums to the per-block partial sum.
+    _, tv_layout_dbias_reduce = cute.make_layout_tv(
+        thr_layout=cute.make_layout((1, TILE_COLS), stride=(TILE_COLS, 1)),
+        val_layout=cute.make_layout((TILE_ROWS, 1), stride=(1, 1)),
+    )
+    sDbias_reduce = cute.composition(sDbias, tv_layout_dbias_reduce)
+    # make_layout_tv yields a (thread, value) layout: thread=tidx -> column tidx,
+    # value=i -> row i. So index [tidx, i] (thread first), summing the column's rows.
+    block_dbias = Float32(0.0)
+    for i in cutlass.range_constexpr(TILE_ROWS):
+        block_dbias += sDbias_reduce[tidx, i]
+    return block_dbias
 
 
 @cute.jit
@@ -1625,41 +1689,15 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
         sDbias = dbias_storage.sDbias.get_tensor(
             cute.make_layout((self._TILE_ROWS, self._TILE_COLS), stride=(DBIAS_BUFF_WIDTH, 1)),
         )
-        _, tv_layout_dbias_write = cute.make_layout_tv(
-            thr_layout=cute.make_layout(
-                (self._TILE_ROWS, self._TILE_COLS // MXFP8_BLOCK_SCALING_SIZE),
-                stride=(self._TILE_COLS // MXFP8_BLOCK_SCALING_SIZE, 1),
-            ),
-            val_layout=cute.make_layout(
-                (1, MXFP8_BLOCK_SCALING_SIZE), stride=(MXFP8_BLOCK_SCALING_SIZE, 1)
-            ),
+        return reduce_rowwise_dbias(
+            sDbias,
+            tidx,
+            rowwise_dbias_acc,
+            self._TILE_ROWS,
+            self._TILE_COLS,
+            self._PACK_SIZE,
+            self._THREADS_PER_BANK,
         )
-        sDbias_write = cute.composition(sDbias, tv_layout_dbias_write)
-        # Each thread start reading from the specfic bank based on its thread ID so they can do their best to access different banks
-        # to avoid bank conflict.
-        bank_group = (tidx % THREADS_PER_WARP) // self._THREADS_PER_BANK
-        # The offset this thread should start reading from based on what's its first bank to access.
-        offset = bank_group * self._PACK_SIZE
-        for w in cutlass.range_constexpr(
-            self._WAVES
-        ):  # Each thread starts from this offset when writing into SMEM to avoid bank conflict
-            start = (w * self._PACK_SIZE + offset) % MXFP8_BLOCK_SCALING_SIZE
-            for i in cutlass.range_constexpr(self._PACK_SIZE):
-                # All threads write their per-thread partial sum results to the shared buffer.
-                sDbias_write[(tidx, start + i)] = rowwise_dbias_acc[w * self._PACK_SIZE + i]
-        cute.arch.sync_threads()
-        # All threads reduce the cross-thread partial sums to the per-block partial sum.
-        _, tv_layout_dbias_reduce = cute.make_layout_tv(
-            thr_layout=cute.make_layout((1, self._TILE_COLS), stride=(self._TILE_COLS, 1)),
-            val_layout=cute.make_layout((self._TILE_ROWS, 1), stride=(1, 1)),
-        )
-        sDbias_reduce = cute.composition(sDbias, tv_layout_dbias_reduce)
-        # make_layout_tv yields a (thread, value) layout: thread=tidx -> column tidx,
-        # value=i -> row i. So index [tidx, i] (thread first), summing the column's rows.
-        block_dbias = Float32(0.0)
-        for i in cutlass.range_constexpr(self._TILE_ROWS):
-            block_dbias += sDbias_reduce[tidx, i]
-        return block_dbias
 
     @cute.jit
     def _amax_epilogue(
