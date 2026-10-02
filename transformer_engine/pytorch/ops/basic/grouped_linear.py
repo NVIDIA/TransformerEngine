@@ -87,8 +87,8 @@ def is_op_fuser_grouped_tensor_path_supported(
       through ``tex.group_quantize`` and cuBLASLt grouped GEMM with per-batch
       scalar FP8 scaling. It is supported on Hopper and Blackwell, with
       cuBLASLt 13.5+ required on Hopper.
-    * FP8 block scaling uses the grouped-tensor path only on Hopper with
-      cuBLASLt 13.6+. On other architectures or older cuBLAS versions it
+    * FP8 block scaling uses the grouped-tensor path wherever MXFP8 does
+      (power-of-2 scales only) and on Hopper with cuBLASLt 13.6+. Otherwise it
       falls back to the split-quantize path for discrete parameters.
     * Custom recipes are unsupported because they may assign different
       quantizers to input, weight, and grad-output roles. This predicate
@@ -119,8 +119,10 @@ def is_op_fuser_grouped_tensor_path_supported(
     if recipe.float8_current_scaling():
         return device_capability >= (10, 0) or cublaslt_version >= 130500
     if recipe.float8_block_scaling():
-        # cuBLASLt 13.6 fixes Hopper grouped GEMM algo selection for block-scaled FP8.
-        return device_capability < (10, 0) and cublaslt_version >= 130600
+        # Blackwell and newer emulate FP8 block scaling with MXFP8 grouped GEMM, so it is
+        # supported wherever MXFP8 is. On Hopper, cuBLASLt 13.6 fixes grouped GEMM algo
+        # selection for block-scaled FP8.
+        return device_capability >= (10, 0) or cublaslt_version >= 130600
     if recipe.mxfp8():
         return device_capability >= (10, 0)
     if recipe.nvfp4():
