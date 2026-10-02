@@ -305,7 +305,6 @@ def test_gathered_weights_are_transient(
     fp8_recipe = MXFP8BlockScaling() if quantized else None
     if not is_module_grouped_tensor_path_supported(fp8_recipe, DTYPE):
         pytest.skip("Requested native grouped GEMM is unavailable.")
-    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
     te.quantization.FP8GlobalStateManager.reset()
     module = te.GroupedLinear(
         2,
