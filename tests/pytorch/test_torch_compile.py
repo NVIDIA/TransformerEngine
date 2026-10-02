@@ -3157,11 +3157,29 @@ if _opaque_available:
         bwd_fake_impl=_toy_list_bwd_fake,
     )
 
+    _toy_grad_ops = {}
+    for _grad_fields in [("inp",), ("weights",), ()]:
+        _indices = tuple(("inp", "weights").index(name) for name in _grad_fields)
+        _toy_grad_ops[_grad_fields] = register_custom_op_with_autograd(
+            op_name="toy_grad_returns_" + ("_".join(_grad_fields) or "none"),
+            input_tensors_for_grad=list(_grad_fields),
+            fwd_arg_type=_ToyListFwdArgs,
+            fwd_impl=_toy_list_fwd,
+            fwd_fake_impl=_toy_list_fwd_fake,
+            setup_context=_toy_list_setup_ctx,
+            bwd_arg_type=_ToyListBwdArgs,
+            bwd_impl=lambda args, indices=_indices: tuple(_toy_list_bwd(args)[i] for i in indices),
+            bwd_fake_impl=lambda args, indices=_indices: tuple(
+                _toy_list_bwd_fake(args)[i] for i in indices
+            ),
+        )
+
 
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
 @pytest.mark.parametrize("split_metadata", [[], [4, 4]])
 @pytest.mark.parametrize("saved_hooks", [False, True])
-def test_custom_op_tensor_list_grads(split_metadata, saved_hooks):
+@pytest.mark.parametrize("empty_weights", [False, True])
+def test_custom_op_tensor_list_grads(split_metadata, saved_hooks, empty_weights):
     """A toy op with a ``List[Optional[Tensor]]`` input (including a ``None``
     entry riding the sentinel) compiles fullgraph and routes one gradient per
     list element."""
@@ -3186,11 +3204,16 @@ def test_custom_op_tensor_list_grads(split_metadata, saved_hooks):
 
     def fn(inp, w0, w2):
         args = _ToyListFwdArgs(
-            inp=inp, weights=[w0, None, w2], scales=scales, split_metadata=split_metadata
+            inp=inp,
+            weights=[] if empty_weights else [w0, None, w2],
+            scales=scales,
+            split_metadata=split_metadata,
         )
         return _toy_list_op(args)
 
     def ref_fn(inp, w0, w2):
+        if empty_weights:
+            return (inp * 0).exp()
         return (inp * w0 * scales[0] + inp * w2 * scales[2]).exp()
 
     torch._dynamo.reset()
@@ -3209,6 +3232,32 @@ def test_custom_op_tensor_list_grads(split_metadata, saved_hooks):
     torch.testing.assert_close(igrad_e, igrad_ref)
     torch.testing.assert_close(w0grad_e, w0grad_ref)
     torch.testing.assert_close(w2grad_e, w2grad_ref)
+
+
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
+@pytest.mark.parametrize("grad_fields", [("inp",), ("weights",), ()])
+@pytest.mark.parametrize("compile_op", [False, True])
+def test_custom_op_single_gradient_return(grad_fields, compile_op):
+    """Zero or one gradient field keeps scalar/list schema returns unambiguous."""
+    torch._dynamo.reset()
+    op = _toy_grad_ops[grad_fields]
+    assert op is not None
+    inp = torch.randn(8, 4, device="cuda", requires_grad=True)
+    weight = torch.randn_like(inp, requires_grad=True)
+
+    def fn(x, w):
+        return op(_ToyListFwdArgs(x, [None, w], (0.0, 0.25), []))
+
+    reference = (inp * weight * 0.25).exp()
+    expected = torch.autograd.grad(reference.sum(), (inp, weight))
+    actual = (torch.compile(fn, fullgraph=True) if compile_op else fn)(inp, weight)
+    torch.testing.assert_close(actual, reference)
+    actual.sum().backward()
+    for name, tensor, grad in zip(("inp", "weights"), (inp, weight), expected):
+        if name in grad_fields:
+            torch.testing.assert_close(tensor.grad, grad)
+        else:
+            assert tensor.grad is None
 
 
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
