@@ -420,8 +420,8 @@ __global__ void __launch_bounds__(WARPS_PER_TB* WARP_SIZE)
 
 // Host-computable upper bound (bytes) on the swizzled MXFP8 scales of all tensors, from the
 // logical shape alone (per-tensor dims live on the device). The PyTorch binding
-// (convert_grouped_block_scaling_to_mxfp8_tensor) allocates exactly this many bytes, so keep the
-// two in sync.
+// (convert_grouped_block_scaling_to_mxfp8_tensor) allocates exactly this many bytes and the
+// public header (swizzle.h) documents these formulas, so keep all three in sync.
 //   uniform:        n * roundup(F / n, 128) * ceil(L / 128) * 4     (exact)
 //   varying first:  (F + 127 n) * ceil(L / 128) * 4
 //   varying last:   roundup(F, 128) * 4 * (ceil(L / 128) + n)
@@ -541,6 +541,11 @@ void swizzle_grouped_block_scaling_to_mxfp8_scaling_factors(const GroupedTensor*
   NVTE_CHECK(!(varying_first && varying_last),
              "Converting FP8 block scaling to MXFP8 scales does not support grouped tensors whose "
              "first and last dims both vary");
+  // The kernel reads the per-tensor dims as int64.
+  NVTE_CHECK(!varying_first || input->first_dims.dtype == DType::kInt64,
+             "Grouped tensor first_dims must have int64 dtype");
+  NVTE_CHECK(!varying_last || input->last_dims.dtype == DType::kInt64,
+             "Grouped tensor last_dims must have int64 dtype");
 
   const size_t bound = grouped_mxfp8_scale_bytes_upper_bound(*input);
   if (bound == 0) {

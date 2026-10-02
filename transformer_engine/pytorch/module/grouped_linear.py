@@ -111,6 +111,9 @@ def is_module_grouped_tensor_path_supported(
       13.5+ required for FP8 per-tensor current scaling on Hopper, and 13.6+
       required for FP8 block scaling on Hopper.
     * FP32 is unsupported by the cuBLASLt grouped GEMM.
+    * With MXFP8 or FP8 block scaling, every split size must be a multiple of
+      128. This is checked only on the device, so other split sizes can produce
+      incorrect results.
 
     Runtime-only restrictions such as debug mode, CPU offloading, calibration,
     output quantization, and backend selection are checked separately by
@@ -1684,6 +1687,9 @@ class GroupedLinear(TransformerEngineBaseModule):
                        The native path requires CUDA ``m_splits``. ``None`` preserves the deprecated
                        ``NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM`` environment-variable
                        selection for compatibility. New callers should pass a boolean explicitly.
+                       With MXFP8 or FP8 block scaling, the native path requires every
+                       ``m_splits`` entry to be a multiple of 128. This is checked only on the
+                       device, so other split sizes can produce incorrect results.
 
     Notes
     -----

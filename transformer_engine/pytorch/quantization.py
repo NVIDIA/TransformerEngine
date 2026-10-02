@@ -246,8 +246,9 @@ def check_recipe_support(recipe: Recipe) -> None:
                 unsupported_reason = (
                     "On Blackwell and newer, the FP8 block scaling recipe is emulated with MXFP8,"
                     " which requires power-of-2 scaling factors, but the recipe disables"
-                    " power_2_scale. Unset NVTE_FP8_BLOCK_SCALING_FP32_SCALES or use"
-                    " power_2_scale=True."
+                    " power_2_scale. Use power_2_scale=True, or unset"
+                    " NVTE_FP8_BLOCK_SCALING_FP32_SCALES before importing Transformer Engine"
+                    " (the recipe defaults read it at import time)."
                 )
     elif isinstance(recipe, MXFP8BlockScaling):
         recipe_supported, unsupported_reason = check_mxfp8_support()

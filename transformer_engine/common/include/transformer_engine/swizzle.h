@@ -117,13 +117,18 @@ void nvte_swizzle_block_scaling_to_mxfp8_scaling_factors(const NVTETensor input,
  *
  *  Requirements:
  *  - input is an FP8 block scaling (1D or 2D) grouped tensor with rowwise data and FP32 rowwise
- *    scale_inv in the compact per-tensor layout; per-tensor first dims or last dims may vary,
- *    but not both
+ *    scale_inv in the compact per-tensor layout; per-tensor first dims or last dims (int64) may
+ *    vary, but not both
  *  - output is an MXFP8 grouped tensor with the same rowwise data pointer, dims and logical
  *    shape, with_gemm_swizzled_scales set, and E8M0 rowwise scale_inv. Tensor t with rowwise
  *    data [f, l] is written at the cumulative offset of
- *    roundup(f, 128) * ceil(l / 128) * 4 bytes; the buffer must hold at least the upper bound
- *    documented in swizzle_block_scaling.cu (grouped_mxfp8_scale_bytes_upper_bound).
+ *    roundup(f, 128) * ceil(l / 128) * 4 bytes.
+ *  - output scale_inv holds at least the following number of bytes, where [F, L] is the logical
+ *    shape and n the number of tensors (0 bytes if F * L == 0). The bound depends only on the
+ *    logical shape, so the buffer can be sized without reading per-tensor dims:
+ *    - uniform dims:        n * roundup(F / n, 128) * ceil(L / 128) * 4
+ *    - varying first dims:  (F + 127 * n) * ceil(L / 128) * 4
+ *    - varying last dims:   roundup(F, 128) * 4 * (ceil(L / 128) + n)
  *  - 24 * n + 8 bytes (per-tensor offset tables) fit in the device's shared memory per block
  */
 void nvte_swizzle_grouped_block_scaling_to_mxfp8_scaling_factors(const NVTEGroupedTensor input,
