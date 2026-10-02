@@ -33,6 +33,13 @@ from transformer_engine.pytorch.ep import (
     _ep_combine_raw,
     _ep_dispatch_raw,
 )
+from transformer_engine.pytorch.ops.fused.moe_ep import (
+    FusedMoeEp,
+    _cudnn_megamoe_supported,
+    _get_megamoe_combine_format,
+    finalize_moe_ep_resources,
+    is_moe_fusion_supported,
+)
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
 
 ZERO_COPY = os.environ.get("NVTE_EP_ZERO_COPY", "0") == "1"
@@ -1214,6 +1221,19 @@ class TestMoeEpSequential(_EpTestCase):
         with self.assertRaisesRegex(ValueError, "combine_bwd_quant_recipe"):
             te_ops.MoeCombine(config, mxfp8_buffer)(expert_out, topk_idx)
 
+    def test_megamoe_combine_format_env(self):
+        old_value = os.environ.get("NVTE_MEGAMOE_MXFP8_COMBINE")
+        try:
+            os.environ["NVTE_MEGAMOE_MXFP8_COMBINE"] = "0"
+            self.assertEqual(_get_megamoe_combine_format(), "bf16")
+            os.environ["NVTE_MEGAMOE_MXFP8_COMBINE"] = "1"
+            self.assertEqual(_get_megamoe_combine_format(), "mxfp8")
+        finally:
+            if old_value is None:
+                os.environ.pop("NVTE_MEGAMOE_MXFP8_COMBINE", None)
+            else:
+                os.environ["NVTE_MEGAMOE_MXFP8_COMBINE"] = old_value
+
     def _run_dispatch_combine_identity(self, *, mxfp8):
         """Route, apply top-k weights, and combine back to local token order."""
         recipe = MXFP8BlockScaling() if mxfp8 else None
@@ -1336,16 +1356,42 @@ class TestMoeEpSequential(_EpTestCase):
 
     @_mxfp8_align_test
     def test_megamoe_mxfp8_cuda_graph_matches_eager(self):
-        """Unfused Sequential forward/backward graph replay matches eager execution."""
-        self._run_megamoe_mxfp8_cuda_graph_matches_eager()
+        """Fused Sequential forward/backward graph replay matches eager execution."""
+        if torch.cuda.get_device_capability() != (10, 7):
+            self.skipTest("FusedMoeEp CUDA graph test requires SM107")
+        if not _cudnn_megamoe_supported():
+            self.skipTest("installed cuDNN frontend does not provide stateless training")
+        self._run_megamoe_mxfp8_cuda_graph_matches_eager(
+            glu_interleave_size=32,
+            expect_fused=True,
+        )
 
-    def _run_megamoe_mxfp8_cuda_graph_matches_eager(self):
+    @_mxfp8_align_test
+    def test_unfused_megamoe_mxfp8_cuda_graph_matches_eager(self):
+        """Unfused Sequential forward/backward graph replay matches eager execution."""
+        self._run_megamoe_mxfp8_cuda_graph_matches_eager(
+            glu_interleave_size=None,
+            expect_fused=False,
+        )
+
+    def _run_megamoe_mxfp8_cuda_graph_matches_eager(
+        self,
+        *,
+        glu_interleave_size,
+        expect_fused,
+    ):
         recipe = MXFP8BlockScaling()
         graph_model, graph_fc1, graph_fc2, _ = self._make_megamoe_model(
             recipe=recipe,
+            glu_interleave_size=glu_interleave_size,
         )
+        fusion_supported = is_moe_fusion_supported(tuple(graph_model), recipe)
+        if expect_fused and not fusion_supported:
+            self.skipTest("current configuration does not support FusedMoeEp")
+        self.assertEqual(fusion_supported, expect_fused)
         eager_model, eager_fc1, eager_fc2, _ = self._make_megamoe_model(
             recipe=recipe,
+            glu_interleave_size=glu_interleave_size,
         )
         eager_model.load_state_dict(graph_model.state_dict())
 
@@ -1373,6 +1419,17 @@ class TestMoeEpSequential(_EpTestCase):
             torch.cuda.synchronize()
 
         self.addCleanup(reset_graphed_model)
+
+        forward_ops = graph_model._module_groups[0]._forward_ops
+        backward_ops = graph_model._module_groups[0]._backward_ops
+        fused_ops = [op for op, _ in forward_ops if isinstance(op, FusedMoeEp)]
+        if expect_fused:
+            self.assertEqual(len(forward_ops), 1)
+            self.assertEqual(len(backward_ops), 1)
+            self.assertEqual(len(fused_ops), 1)
+            self.assertIs(backward_ops[0][0], fused_ops[0])
+        else:
+            self.assertFalse(fused_ops)
 
         # Replace the capture-time contents while retaining captured addresses.
         with torch.no_grad():
@@ -1414,6 +1471,14 @@ class TestMoeEpSequential(_EpTestCase):
                 eager_topk_weights,
                 static_topk_idx,
             )
+        if expect_fused:
+            eager_fused_ops = [
+                op
+                for op, _ in eager_model._module_groups[0]._forward_ops
+                if isinstance(op, FusedMoeEp)
+            ]
+            self.assertEqual(len(eager_fused_ops), 1)
+            self.assertIs(fused_ops[0]._resource, eager_fused_ops[0]._resource)
         tolerances = {"rtol": 0.125, "atol": 0.25}
         torch.testing.assert_close(graph_out_snapshot, eager_out, **tolerances)
 
@@ -1471,12 +1536,12 @@ class TestMoeEpSequential(_EpTestCase):
             delay_wgrad_compute=True,
         )
 
-    @_eager_test_include
     @_mxfp8_align_test
     def test_megamoe_delayed_wgrad(self):
         self._run_megamoe_vs_reference(
             quantization="mxfp8",
             delay_wgrad_compute=True,
+            require_fused=True,
         )
 
     @_eager_test_include
@@ -1487,13 +1552,13 @@ class TestMoeEpSequential(_EpTestCase):
             delay_wgrad_compute=True,
         )
 
-    @_eager_test_include
     @_mxfp8_align_test
     def test_megamoe_delayed_main_grad(self):
         self._run_megamoe_vs_reference(
             quantization="mxfp8",
             accumulate_into_main_grad=True,
             delay_wgrad_compute=True,
+            require_fused=True,
         )
 
     def _run_megamoe_vs_reference(
@@ -1503,12 +1568,15 @@ class TestMoeEpSequential(_EpTestCase):
         accumulate_into_main_grad=False,
         overwrite_main_grad=False,
         delay_wgrad_compute=False,
+        require_fused=False,
     ):
         """Compare the five-op MoE sequence with the PyTorch EP reference.
 
         The fuser selects MegaMoE when its runtime gates pass. Otherwise this
         exercises the same sequence as separate NCCL EP and grouped-MLP ops.
         """
+        if require_fused and not _cudnn_megamoe_supported():
+            self.skipTest("FusedMoeEp is unavailable in the current environment")
         recipe = MXFP8BlockScaling() if quantization == "mxfp8" else None
         model, fc1, fc2, _ = self._make_megamoe_model(
             recipe=recipe,
@@ -1567,11 +1635,19 @@ class TestMoeEpSequential(_EpTestCase):
                 topk_idx,
             )
 
+        forward_ops = model._module_groups[0]._forward_ops
+        fused = len(forward_ops) == 1 and isinstance(forward_ops[0][0], FusedMoeEp)
+        if require_fused:
+            self.assertTrue(fused, "delay_wgrad_compute test must exercise FusedMoeEp")
+        if fused:
+            self.assertTrue(_cudnn_megamoe_supported())
+        else:
+            self.assertFalse(any(isinstance(op, FusedMoeEp) for op, _ in forward_ops))
         self.assertEqual(seq_out.dtype, torch.bfloat16)
 
         fc1_weight = self._reference_weights(fc1)
         fc2_weight = self._reference_weights(fc2)
-        emulate_mxfp8 = quantization == "mxfp8"
+        emulate_mxfp8 = fused or quantization == "mxfp8"
         reference = MoeEpReference(
             num_experts=self.cfg.num_experts,
             hidden_size=HIDDEN_DIM,
@@ -1580,16 +1656,20 @@ class TestMoeEpSequential(_EpTestCase):
             ep_group=self.ep_group,
             max_tokens_per_rank=TOKENS_PER_RANK,
             output_format=MoeFormat.BF16,
-            combine_format=MoeFormat.BF16,
+            combine_format=(
+                MoeFormat.MXFP8
+                if fused and os.environ.get("NVTE_MEGAMOE_MXFP8_COMBINE", "0") == "1"
+                else MoeFormat.BF16
+            ),
             apply_topk_in_fc1=True,
             generate_c=True,
             intermediate_format=MoeFormat.MXFP8 if emulate_mxfp8 else None,
-            backward_operand_format=MoeFormat.MXFP8 if emulate_mxfp8 else None,
+            backward_operand_format=MoeFormat.MXFP8 if emulate_mxfp8 and not fused else None,
             backward_wgrad_mode="operands",
             token_padding_size=256,
             weight_interleave_size=32 if quantization == "mxfp8" else None,
         )
-        if emulate_mxfp8:
+        if emulate_mxfp8 and not fused:
             reference_activation = quantize_blockwise(
                 tokens.detach(),
                 MoeFormat.MXFP8,
@@ -1624,8 +1704,17 @@ class TestMoeEpSequential(_EpTestCase):
         ).to(torch.bfloat16)
         seq_out.backward(dy)
         if delay_wgrad_compute:
+            if fused:
+                self.assertEqual(fc1.wgrad_store.context.qsize(), 1)
+                self.assertEqual(fc2.wgrad_store.context.qsize(), 1)
+                if accumulate_into_main_grad:
+                    for op in (fc1, fc2):
+                        self.assertTrue(torch.all(op.weight.main_grad == main_grad_sentinel).item())
             fc1.backward_dw()
             fc2.backward_dw()
+            if fused:
+                self.assertTrue(fc1.wgrad_store.context.empty())
+                self.assertTrue(fc2.wgrad_store.context.empty())
         grad_tokens, grad_topk_weights, wgrad_operands = reference.backward(
             dy,
             fc1_weight,
@@ -1699,6 +1788,7 @@ if __name__ == "__main__":
     runner = unittest.TextTestRunner(stream=sys.stdout, verbosity=2)
     result = runner.run(suite)
     dist.barrier()
+    finalize_moe_ep_resources()
     ep_finalize()
     # Deregister symm-mem windows while the comm is still valid.
     release_symm_mem_pool()
