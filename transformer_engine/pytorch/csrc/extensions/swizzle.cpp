@@ -355,6 +355,93 @@ at::Tensor convert_block_scaling_to_mxfp8_tensor(transformer_engine::TensorWrapp
   return swizzled_scale_inv;
 }
 
+at::Tensor convert_grouped_block_scaling_to_mxfp8_tensor(GroupedTensorWrapper &input,
+                                                         bool rowwise) {
+  const NVTEScalingMode scaling_mode = input.scaling_mode();
+  NVTE_CHECK(scaling_mode == NVTE_BLOCK_SCALING_1D || scaling_mode == NVTE_BLOCK_SCALING_2D,
+             "Input grouped tensor must be a block scaling tensor");
+  const size_t num_tensors = input.num_tensors();
+  const NVTEBasicTensor data = rowwise ? input.get_rowwise_data() : input.get_columnwise_data();
+  const NVTEBasicTensor scale_inv =
+      rowwise ? input.get_rowwise_scale_inv() : input.get_columnwise_scale_inv();
+  NVTEBasicTensor first_dims = input.get_first_dims();
+  NVTEBasicTensor last_dims = input.get_last_dims();
+  const NVTEBasicTensor tensor_offsets = input.get_tensor_offsets();
+  NVTE_CHECK(first_dims.data_ptr == nullptr || last_dims.data_ptr == nullptr,
+             "FP8 block scaling grouped GEMM does not support grouped tensors whose first and "
+             "last dims both vary");
+  const NVTEShape logical_shape = input.logical_shape();
+  NVTE_CHECK(logical_shape.ndim == 2, "Grouped tensor must have a 2D logical shape");
+
+  // Columnwise FP8 block-scaling data is stored transposed, so view it as rowwise data of the
+  // transposed tensors: swap the per-tensor dims and the logical shape.
+  std::vector<size_t> view_shape{logical_shape.data[0], logical_shape.data[1]};
+  if (!rowwise) {
+    std::swap(first_dims, last_dims);
+    if (first_dims.data_ptr == nullptr && last_dims.data_ptr == nullptr) {
+      view_shape = {num_tensors * logical_shape.data[1], logical_shape.data[0] / num_tensors};
+    } else {
+      view_shape = {logical_shape.data[1], logical_shape.data[0]};
+    }
+  }
+  const bool varying_first = first_dims.data_ptr != nullptr;
+  const bool varying_last = last_dims.data_ptr != nullptr;
+  const size_t F = view_shape[0];
+  const size_t L = view_shape[1];
+
+  // Upper bound on the swizzled scale bytes, from the logical shape alone because per-tensor
+  // dims live on the device. Keep in sync with grouped_mxfp8_scale_bytes_upper_bound in
+  // common/swizzle/swizzle_block_scaling.cu, which rejects smaller buffers.
+  size_t scale_bytes = 0;
+  if (F != 0 && L != 0) {
+    if (varying_first) {
+      scale_bytes = (F + 127 * num_tensors) * ceildiv(L, 128) * 4;
+    } else if (varying_last) {
+      scale_bytes = ceildiv(F, 128) * 128 * 4 * (ceildiv(L, 128) + num_tensors);
+    } else {
+      scale_bytes = num_tensors * ceildiv(F / num_tensors, 128) * 128 * ceildiv(L, 128) * 4;
+    }
+    NVTE_CHECK(data.data_ptr != nullptr, "FP8 block scaling grouped tensor is missing ",
+               rowwise ? "row-wise" : "column-wise", " data required by this GEMM layout");
+  }
+
+  auto make_view = [&](NVTEScalingMode mode) {
+    GroupedTensorWrapper view(num_tensors, view_shape, mode);
+    view.set_rowwise_data(data.data_ptr, static_cast<DType>(data.dtype), data.shape);
+    if (varying_first) {
+      view.set_first_dims(first_dims.data_ptr, static_cast<DType>(first_dims.dtype),
+                          first_dims.shape);
+    }
+    if (varying_last) {
+      view.set_last_dims(last_dims.data_ptr, static_cast<DType>(last_dims.dtype), last_dims.shape);
+    }
+    if (tensor_offsets.data_ptr != nullptr) {
+      view.set_tensor_offsets(tensor_offsets.data_ptr, static_cast<DType>(tensor_offsets.dtype),
+                              tensor_offsets.shape);
+    }
+    return view;
+  };
+  GroupedTensorWrapper input_cu = make_view(scaling_mode);
+  input_cu.set_rowwise_scale_inv(scale_inv.data_ptr, static_cast<DType>(scale_inv.dtype),
+                                 scale_inv.shape);
+  GroupedTensorWrapper output_cu = make_view(NVTE_MXFP8_1D_SCALING);
+  at::Tensor swizzled_scale_inv =
+      allocateSpace(std::vector<size_t>{scale_bytes}, DType::kByte, false);
+  output_cu.set_rowwise_scale_inv(getDataPtr(swizzled_scale_inv, 0), DType::kFloat8E8M0,
+                                  std::vector<size_t>{scale_bytes});
+  output_cu.set_with_gemm_swizzled_scales(true);
+  if (scale_bytes > 0) {
+    NVTE_SCOPED_GIL_RELEASE({
+      nvte_swizzle_grouped_block_scaling_to_mxfp8_scaling_factors(input_cu.data(), output_cu.data(),
+                                                                  at::cuda::getCurrentCUDAStream());
+    });
+  }
+
+  // Replace the input with the MXFP8 view; the returned scales must stay alive during the GEMM.
+  input = std::move(output_cu);
+  return swizzled_scale_inv;
+}
+
 std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor(GroupedTensorWrapper &input,
                                                                   bool rowwise_usage,
                                                                   bool columnwise_usage) {
