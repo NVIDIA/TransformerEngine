@@ -2896,6 +2896,44 @@ def test_te_grouped_linear_fused_compiles(
 
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
 @pytest.mark.skipif(not _fused_grouped_cublas_ok, reason="native grouped GEMM unavailable")
+@pytest.mark.parametrize(
+    "fp8_recipe", [None] + ([recipe.MXFP8BlockScaling()] if mxfp8_available else [])
+)
+@pytest.mark.parametrize("save_original_input", [False, True])
+def test_te_grouped_linear_fused_dynamic_input(fp8_recipe, save_original_input):
+    model = te.GroupedLinear(
+        2,
+        128,
+        128,
+        params_dtype=torch.bfloat16,
+        device="cuda",
+        use_grouped_tensor=True,
+        single_grouped_weight=False,
+        single_grouped_bias=False,
+        save_original_input=save_original_input,
+    )
+    splits = torch.tensor([128, 128], dtype=torch.int64, device="cuda")
+
+    def fn(inp):
+        if fp8_recipe is None:
+            return model(inp, splits)
+        with te.autocast(recipe=fp8_recipe):
+            return model(inp, splits)
+
+    torch._dynamo.reset()
+    compiled = torch.compile(fn, fullgraph=True, dynamic=True)
+    for rows in (256, 256, 512, 768):
+        splits.fill_(rows // 2)
+        inp = torch.randn(rows, 128, device="cuda", dtype=torch.bfloat16)
+        _assert_close_grouped(fn, compiled, model, inp)
+        if rows == 256:
+            baseline = _dynamo_counter("stats", "unique_graphs")
+    if baseline:
+        assert _dynamo_counter("stats", "unique_graphs") == baseline
+
+
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
+@pytest.mark.skipif(not _fused_grouped_cublas_ok, reason="native grouped GEMM unavailable")
 @pytest.mark.parametrize("compile_mode", _compile_modes)
 @pytest.mark.parametrize("primary_quantized", [False, True])
 @pytest.mark.parametrize(
@@ -3037,6 +3075,8 @@ if _opaque_available:
     from typing import List, Optional, Tuple
 
     from transformer_engine.pytorch.dynamo import register_custom_op_with_autograd
+    from transformer_engine.pytorch.dynamo.custom_op import SavedTensorRef
+    from transformer_engine.pytorch.quantized_tensor import restore_from_func_ctx
 
     @dataclass
     class _ToyListFwdArgs:
@@ -3049,15 +3089,29 @@ if _opaque_available:
     class _ToyListBwdArgs:
         grad_output: Optional[torch.Tensor] = None
         inp: Optional[torch.Tensor] = None
+        output: Optional[torch.Tensor] = None
         weights: List[Optional[torch.Tensor]] = None
         scales: Tuple[float, ...] = ()
+
+        def setup_saved_tensors(self, ctx):
+            self.inp, self.output, *self.weights = restore_from_func_ctx(ctx)
+
+    def _toy_list_saved(args):
+        return (
+            SavedTensorRef("inp"),
+            SavedTensorRef(None, 0),
+            *(
+                SavedTensorRef("weights", i) if w is not None else None
+                for i, w in enumerate(args.weights)
+            ),
+        )
 
     def _toy_list_fwd(args):
         out = torch.zeros_like(args.inp)
         for w, s in zip(args.weights, args.scales):
             if w is not None:
                 out = out + args.inp * w * s
-        return (out, None, None)
+        return (out.exp(), _toy_list_saved(args), None)
 
     def _toy_list_fwd_fake(args):
         out = TensorSpec(
@@ -3066,24 +3120,23 @@ if _opaque_available:
             requires_grad=True,
             device=args.inp.device,
         )
-        return (out, None, None)
+        return (out, _toy_list_saved(args), None)
 
     def _toy_list_setup_ctx(bwd_args, fwd_args, outputs, ctx_attrs, saved):
-        del outputs, ctx_attrs, saved
-        bwd_args.inp = fwd_args.inp
-        bwd_args.weights = fwd_args.weights
+        del outputs, ctx_attrs
         bwd_args.scales = fwd_args.scales
-        return ()
+        return saved
 
     def _toy_list_bwd(args):
+        grad = args.grad_output * args.output
         dgrad = torch.zeros_like(args.inp)
         wgrads = []
         for w, s in zip(args.weights, args.scales):
             if w is None:
                 wgrads.append(None)
                 continue
-            dgrad = dgrad + args.grad_output * w * s
-            wgrads.append(args.grad_output * args.inp * s)
+            dgrad = dgrad + grad * w * s
+            wgrads.append(grad * args.inp * s)
         return (dgrad, wgrads)
 
     def _toy_list_bwd_fake(args):
@@ -3107,7 +3160,8 @@ if _opaque_available:
 
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
 @pytest.mark.parametrize("split_metadata", [[], [4, 4]])
-def test_custom_op_tensor_list_grads(split_metadata):
+@pytest.mark.parametrize("saved_hooks", [False, True])
+def test_custom_op_tensor_list_grads(split_metadata, saved_hooks):
     """A toy op with a ``List[Optional[Tensor]]`` input (including a ``None``
     entry riding the sentinel) compiles fullgraph and routes one gradient per
     list element."""
@@ -3117,11 +3171,17 @@ def test_custom_op_tensor_list_grads(split_metadata):
 
     def run(fn):
         torch.manual_seed(7)
-        inp = torch.randn(8, 4, device=device, requires_grad=True)
-        w0 = torch.randn(8, 4, device=device, requires_grad=True)
-        w2 = torch.randn(8, 4, device=device, requires_grad=True)
-        out = fn(inp, w0, w2)
-        out.sum().backward()
+        inp = (0.1 * torch.randn(8, 4, device=device)).requires_grad_()
+        w0 = (0.1 * torch.randn(8, 4, device=device)).requires_grad_()
+        w2 = (0.1 * torch.randn(8, 4, device=device)).requires_grad_()
+        hooks = (
+            torch.autograd.graph.saved_tensors_hooks(lambda t: t.clone(), lambda t: t)
+            if saved_hooks
+            else contextlib.nullcontext()
+        )
+        with hooks:
+            out = fn(inp, w0, w2)
+            out.sum().backward()
         return out.detach().clone(), inp.grad, w0.grad, w2.grad
 
     def fn(inp, w0, w2):
@@ -3131,7 +3191,7 @@ def test_custom_op_tensor_list_grads(split_metadata):
         return _toy_list_op(args)
 
     def ref_fn(inp, w0, w2):
-        return inp * w0 * scales[0] + inp * w2 * scales[2]
+        return (inp * w0 * scales[0] + inp * w2 * scales[2]).exp()
 
     torch._dynamo.reset()
     compiled = torch.compile(fn, fullgraph=True)
@@ -3149,6 +3209,19 @@ def test_custom_op_tensor_list_grads(split_metadata):
     torch.testing.assert_close(igrad_e, igrad_ref)
     torch.testing.assert_close(w0grad_e, w0grad_ref)
     torch.testing.assert_close(w2grad_e, w2grad_ref)
+
+
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
+@pytest.mark.parametrize("changed_tensor", ["inp", "weight", "output"])
+def test_custom_op_saved_refs_version_check(changed_tensor):
+    inp = torch.randn(4, device="cuda", requires_grad=True)
+    weight = torch.randn_like(inp, requires_grad=True)
+    out = _toy_list_op(_ToyListFwdArgs(inp, [weight], (1.0,), []))
+    tensor = {"inp": inp, "weight": weight, "output": out}[changed_tensor]
+    with torch.no_grad():
+        tensor.add_(1)
+    with pytest.raises(RuntimeError, match="modified by an inplace operation"):
+        out.sum().backward()
 
 
 # --------------------------------------------------------------------------- #

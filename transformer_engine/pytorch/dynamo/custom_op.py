@@ -838,22 +838,35 @@ def _spec_view(obj: Any, tensor_field_names: Sequence[str]) -> Any:
 # --------------------------------------------------------------------------- #
 
 
-def _spec_slot_count(spec: Optional[TensorSpec]) -> int:
+@dataclasses.dataclass(frozen=True)
+class SavedTensorRef:
+    """Saved input field, or user output when ``source`` is None."""
+
+    source: Optional[str]
+    index: Optional[int] = None
+
+    def resolve(self, args, outputs):
+        """Resolve the reference before saving through autograd."""
+        value = outputs if self.source is None else getattr(args, self.source)
+        return value if self.index is None else value[self.index]
+
+
+def _spec_slot_count(spec: Optional[Union[TensorSpec, SavedTensorRef]]) -> int:
     """Flat ``Tensor[]`` slots the value for ``spec`` occupies."""
-    if spec is None:
+    if spec is None or isinstance(spec, SavedTensorRef):
         return 1
     return len(spec.inner_names())
 
 
 def _flatten_value(
-    value: Optional[Union[torch.Tensor, QuantizedTensorStorage, TensorSpec]],
+    value: Optional[Union[torch.Tensor, QuantizedTensorStorage, TensorSpec, SavedTensorRef]],
 ) -> List[torch.Tensor]:
     """Return the flat ``Tensor[]`` slots that represent one op output ``value``.
 
     Pack-side inverse of :meth:`_OutputPlan.user_outputs`; the slot count
     matches :func:`_spec_slot_count`.
     """
-    if value is None:
+    if value is None or isinstance(value, SavedTensorRef):
         return [_encode_none(None)]
     if isinstance(value, TensorSpec):
         return [_encode_none(t) for t in value.create_inner_tensors()]
@@ -950,7 +963,7 @@ class _OutputPlan:
     """
 
     user_specs: Tuple[Optional[TensorSpec], ...]
-    saved_specs: Tuple[Optional[TensorSpec], ...]
+    saved_specs: Tuple[Optional[Union[TensorSpec, SavedTensorRef]], ...]
     ctx_attrs: Dict[str, Any]
     user_ranges: Tuple[Tuple[int, int], ...]
     saved_start: int
@@ -992,13 +1005,17 @@ class _OutputPlan:
             for spec, (start, stop) in zip(self.user_specs, self.user_ranges)
         ]
 
-    def saved_tensors(self, flat: Sequence[Optional[torch.Tensor]]) -> List[Any]:
+    def saved_tensors(self, flat: Sequence[Optional[torch.Tensor]], args, outputs) -> List[Any]:
         """Rebuild the saved-for-backward tensors from the op's flat return."""
         values: List[Any] = []
         cursor = self.saved_start
         for spec in self.saved_specs:
             n = _spec_slot_count(spec)
-            values.append(self._assemble(spec, flat, cursor, cursor + n))
+            values.append(
+                spec.resolve(args, outputs)
+                if isinstance(spec, SavedTensorRef)
+                else self._assemble(spec, flat, cursor, cursor + n)
+            )
             cursor += n
         return values
 
@@ -1120,7 +1137,7 @@ def _register_autograd_for_op(
 
         out_plan = _OutputPlan.parse(fwd_fake_impl(spec_obj))
         user_outputs = out_plan.user_outputs(output)
-        saved_list = out_plan.saved_tensors(output)
+        saved_list = out_plan.saved_tensors(output, fwd_obj, user_outputs)
 
         bwd_obj = bwd_plan.arg_type()
         tensors_to_save_from_setup = setup_context_user(
@@ -1458,7 +1475,8 @@ def register_custom_op_with_autograd(
 
     * ``fwd_impl(fwd_args) -> (*user_outputs, tensors_to_save, ctx_attrs)`` -- the
       real forward. ``user_outputs``: op outputs (tensor / quantized / ``None``);
-      ``tensors_to_save``: list/tuple (or ``None``) of tensors for backward;
+      ``tensors_to_save``: list/tuple (or ``None``) of tensors or
+      :class:`SavedTensorRef` entries, resolved before ``setup_context``;
       ``ctx_attrs``: dict (or ``None``) of plain metadata for ``setup_context``.
       The trailing two slots are fixed (``_FWD_TRAILING_SLOTS``); everything
       before them is a user output.

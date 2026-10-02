@@ -73,7 +73,8 @@ from ..dynamo import (
     register_custom_op_with_autograd,
     is_value_opaque_quantizer,
 )
-from ..dynamo.tensor_spec import GroupedTensorSpec
+from ..dynamo.tensor_spec import GroupedTensorSpec, to_tensor_spec
+from ..dynamo.custom_op import SavedTensorRef
 from .linear import _fake_workspace_valid
 from ._common import update_nvfp4_direct_output_spec
 from ..constants import GemmParallelModes, dist_group_type
@@ -484,21 +485,12 @@ def _grouped_linear_forward_impl(
         mark_not_offload(*weights_fp8, *weights)
 
     tensors_to_save = None
-    ctx_attrs = None
     if is_grad_enabled:
-        # Saved-tensor layout: ``(inputmat_full, *inputmats, *weights_fp8,
-        # *saved_weights, *biases)`` -- 1 + 4N slots. Slots that alias a forward
-        # input or another op return are deduped through name-based alias tags
-        # (rebuilt in ``_grouped_linear_setup_ctx``): a custom op may not return
-        # aliasing tensors.
-        aliases: List[Optional[Tuple]] = [None] * (1 + 4 * num_gemms)
-
         # TODO: update after #1638 is merged. # pylint: disable=fixme
         if weight_requires_grad:
             if save_original_input:
-                inputmat_full = None
+                inputmat_full = SavedTensorRef("inp") if args.compiled_op else inp
                 inputmats = [None] * num_gemms
-                aliases[0] = ("inp",)
             else:
                 for inputmat in inputmats:
                     if isinstance(inputmat, QuantizedTensorStorage):
@@ -513,8 +505,7 @@ def _grouped_linear_forward_impl(
                     inputmats = [None] * num_gemms
                     if inputmat_full is inp_view:
                         # No-op cast: inp_view is inp itself or a view of it.
-                        inputmat_full = None
-                        aliases[0] = ("inp",)
+                        inputmat_full = SavedTensorRef("inp") if args.compiled_op else inp
         else:
             inputmat_full = None
             inputmats = [None] * num_gemms
@@ -523,50 +514,30 @@ def _grouped_linear_forward_impl(
         # used for fused wgrad accumulation serve a different purpose: restoring
         # Python parameter attributes without keeping the parameter alive here.
         save_origin_weights = backward_override == "high_precision" and args.input_requires_grad
-        saved_weights = [None] * num_gemms
-        wt_saves = list(weights_fp8)
-        for i in range(num_gemms):
-            slot = 1 + num_gemms + i
-            if wt_saves[i] is weights[i]:
-                aliases[slot] = ("weights", i)
-                wt_saves[i] = None
-            elif new_workspaces[i] is not None and wt_saves[i] is new_workspaces[i]:
-                aliases[slot] = ("new_weight_workspaces", i)
-                wt_saves[i] = None
-            elif (
-                args.weight_workspaces
-                and args.weight_workspaces[i] is not None
-                and wt_saves[i] is args.weight_workspaces[i]
-            ):
-                aliases[slot] = ("weight_workspaces", i)
-                wt_saves[i] = None
-            if save_origin_weights:
-                aliases[1 + 2 * num_gemms + i] = ("weights", i)
+        saved_weights = list(args.weights) if save_origin_weights else [None] * num_gemms
         if is_dist_weight:
-            # GTP: gathered workspace is transient (re-gathered in backward), don't save it.
-            wt_saves = [None] * num_gemms
-            for i in range(num_gemms):
-                aliases[1 + num_gemms + i] = None
-                aliases[1 + 2 * num_gemms + i] = ("weights", i)
-
-        saved_biases = list(biases)
-        for i in range(num_gemms):
-            if saved_biases[i] is not None and saved_biases[i] is args.biases[i]:
-                aliases[1 + 3 * num_gemms + i] = ("biases", i)
-                saved_biases[i] = None
+            weights_fp8 = [None] * num_gemms
+            saved_weights = list(args.weights)
+        if args.compiled_op:
+            weights_fp8 = _saved_grouped_weights(args, new_workspaces, weights_fp8)
+            if save_origin_weights:
+                saved_weights = [SavedTensorRef("weights", i) for i in range(num_gemms)]
+            biases = [
+                SavedTensorRef("biases", i) if bias is not None and bias is args.biases[i] else bias
+                for i, bias in enumerate(biases)
+            ]
 
         tensors_to_save = (
             inputmat_full,
             *inputmats,
-            *wt_saves,
+            *weights_fp8,
             *saved_weights,
-            *saved_biases,
+            *biases,
         )
-        ctx_attrs = {"saved_tensor_aliases": tuple(aliases)}
 
     # [*, in_features] -> [*, out_features]
     out = out.view(-1, *inp.shape[1:-1], out.shape[-1])
-    return (out, *new_workspaces, tensors_to_save, ctx_attrs)
+    return (out, *new_workspaces, tensors_to_save, None)
 
 
 def _fake_single_grouped_weight(weight, quantizer, dtype, num_gemms, cache_weight):
@@ -644,12 +615,11 @@ def _fake_grouped_weights(args: GroupedLinearFwdArgs, weight_quantizers):
     """Describe weight casts, quantization and workspace aliases for either path."""
     new_workspaces = [None] * len(args.weights)
     saved_weights = [None] * len(args.weights)
-    aliases = [None] * len(args.weights)
     for i, weight in enumerate(args.weights):
         if (args.fp8 and weight.is_quantized) or (
             not args.fp8 and weight.dtype == args.activation_dtype
         ):
-            aliases[i] = ("weights", i)
+            saved_weights[i] = weight
             continue
         quantizer = weight_quantizers[i] if args.fp8 else None
         workspace = args.weight_workspaces[i] if args.fp8 else None
@@ -668,7 +638,7 @@ def _fake_grouped_weights(args: GroupedLinearFwdArgs, weight_quantizers):
         else:
             workspace_valid = workspace is not None and _fake_workspace_valid(workspace, quantizer)
         if workspace_valid:
-            aliases[i] = ("weight_workspaces", i)
+            saved_weights[i] = workspace
             continue
         if args.single_grouped_weight:
             weightmat = _fake_single_grouped_weight(
@@ -685,10 +655,8 @@ def _fake_grouped_weights(args: GroupedLinearFwdArgs, weight_quantizers):
             if weightmat.quantizer is not None:
                 weightmat.quantizer.internal = False
             new_workspaces[i] = weightmat
-            aliases[i] = ("new_weight_workspaces", i)
-        else:
-            saved_weights[i] = weightmat
-    return new_workspaces, saved_weights, aliases
+        saved_weights[i] = weightmat
+    return new_workspaces, _saved_grouped_weights(args, new_workspaces, saved_weights)
 
 
 def _grouped_linear_forward_fake(
@@ -767,20 +735,19 @@ def _grouped_linear_forward_fake(
             device=inp.device,
         )
 
-    new_workspaces, weights_fp8, weight_aliases = _fake_grouped_weights(args, weight_quantizers)
+    new_workspaces, weights_fp8 = _fake_grouped_weights(args, weight_quantizers)
 
     # Bias pipeline.
     bias_dtype = activation_dtype
     if fp8 and activation_dtype == torch.float32:
         bias_dtype = torch.bfloat16
-    saved_biases: List[Optional[TensorSpec]] = [None] * num_gemms
-    bias_aliases: List[Optional[Tuple]] = [None] * num_gemms
+    saved_biases = [None] * num_gemms
     for i in range(num_gemms):
         bias = args.biases[i]
         if bias is None:
             continue
         if not args.use_bias or bias.dtype == bias_dtype:
-            bias_aliases[i] = ("biases", i)
+            saved_biases[i] = SavedTensorRef("biases", i)
         else:
             saved_biases[i] = TensorSpec(
                 shape=tuple(bias.shape), dtype=bias_dtype, device=bias.device
@@ -796,14 +763,11 @@ def _grouped_linear_forward_fake(
     )
 
     tensors_to_save = None
-    ctx_attrs = None
     if is_grad_enabled:
-        aliases: List[Optional[Tuple]] = [None] * (1 + 4 * num_gemms)
         if weight_requires_grad:
             if save_original_input:
-                inputmat_full = None
+                inputmat_full = SavedTensorRef("inp")
                 inputmats = [None] * num_gemms
-                aliases[0] = ("inp",)
             else:
                 if fp8:
                     for inputmat in inputmats:
@@ -812,19 +776,15 @@ def _grouped_linear_forward_fake(
                         else:
                             inputmat.update_usage(rowwise_usage=False, columnwise_usage=True)
                 elif inputmat_full_aliases_inp:
-                    inputmat_full = None
-                    aliases[0] = ("inp",)
+                    inputmat_full = SavedTensorRef("inp")
         else:
             inputmat_full = None
             inputmats = [None] * num_gemms
 
-        saved_weights = [None] * num_gemms
         save_origin_weights = backward_override == "high_precision" and args.input_requires_grad
-        for i in range(num_gemms):
-            aliases[1 + num_gemms + i] = weight_aliases[i]
-            if save_origin_weights:
-                aliases[1 + 2 * num_gemms + i] = ("weights", i)
-            aliases[1 + 3 * num_gemms + i] = bias_aliases[i]
+        saved_weights = [
+            SavedTensorRef("weights", i) if save_origin_weights else None for i in range(num_gemms)
+        ]
 
         tensors_to_save = (
             inputmat_full,
@@ -833,23 +793,25 @@ def _grouped_linear_forward_fake(
             *saved_weights,
             *saved_biases,
         )
-        ctx_attrs = {"saved_tensor_aliases": tuple(aliases)}
 
-    return (out, *new_workspaces, tensors_to_save, ctx_attrs)
+    return (out, *new_workspaces, tensors_to_save, None)
 
 
-def _restore_saved_aliases(fwd_args, fwd_outputs, ctx_attrs, tensors_to_save):
-    """Restore op inputs and workspaces omitted from the saved output payload."""
-    saved = list(tensors_to_save)
-    for slot, alias in enumerate(ctx_attrs["saved_tensor_aliases"]):
-        if alias is not None:
-            value = (
-                fwd_outputs[1:]
-                if alias[0] == "new_weight_workspaces"
-                else getattr(fwd_args, alias[0])
-            )
-            saved[slot] = value[alias[1]] if len(alias) == 2 else value
-    return tuple(saved)
+def _saved_grouped_weights(args, new_workspaces, weights):
+    """Return fresh weights once and refer to existing inputs or cache outputs."""
+    saved = []
+    for i, weight in enumerate(weights):
+        if weight is None:
+            saved.append(None)
+        elif weight is args.weights[i]:
+            saved.append(SavedTensorRef("weights", i))
+        elif weight is new_workspaces[i]:
+            saved.append(SavedTensorRef(None, 1 + i))
+        elif args.weight_workspaces and weight is args.weight_workspaces[i]:
+            saved.append(SavedTensorRef("weight_workspaces", i))
+        else:
+            saved.append(weight)
+    return saved
 
 
 def _grouped_linear_setup_ctx(
@@ -859,8 +821,8 @@ def _grouped_linear_setup_ctx(
     ctx_attrs: Dict,
     tensors_to_save_from_forward: Tuple[Any, ...],
 ) -> Tuple[Any, ...]:
-    """Populate ``bwd_args`` from forward state and return the tensors to persist
-    (alias-tagged slots rebuilt from ``fwd_args`` / ``fwd_outputs``)."""
+    """Populate backward configuration and pass through its saved tensors."""
+    del fwd_outputs, ctx_attrs
     num_gemms = fwd_args.num_gemms
 
     weights = fwd_args.weights
@@ -919,7 +881,7 @@ def _grouped_linear_setup_ctx(
         bwd_args.grad_weight_quantizers = [None] * num_gemms
         bwd_args.grad_output_quantizers = [None] * num_gemms
 
-    return _restore_saved_aliases(fwd_args, fwd_outputs, ctx_attrs, tensors_to_save_from_forward)
+    return tensors_to_save_from_forward
 
 
 def _finish_wgrad(weight, main_grad, wgrad, fuse_wgrad_accumulation):
@@ -1258,7 +1220,7 @@ class GroupedLinearFusedBwdArgs:
     """Backward configuration and saved grouped operands."""
 
     grad_output: Optional[torch.Tensor] = None
-    inputmat: Any = None
+    inputmat: Union[torch.Tensor, QuantizedTensorStorage] = None
     weights_fp8: List[Union[torch.Tensor, QuantizedTensorStorage]] = None
     m_splits_tensor: Optional[torch.Tensor] = None
     base_split_offsets: Optional[torch.Tensor] = None
@@ -1290,22 +1252,16 @@ class GroupedLinearFusedBwdArgs:
     wgrad_store: Optional[WeightGradStore] = None
     reduce_and_update_bwd_fp8_tensors: bool = False
 
-    gx_payload: List[torch.Tensor] = None
-    gx_present: bool = False
-    gx_swizzled: bool = False
     compiled_op: bool = False
 
     def setup_saved_tensors(self, ctx: torch.autograd.function.FunctionCtx) -> None:
         """Restore the grouped operands and split metadata."""
         saved = restore_from_func_ctx(ctx)
         n = 1 if self.single_grouped_weight else self.num_gemms
-        if self.compiled_op:
-            n_payload = len(_GX_PAYLOAD_KEYS)
-            self.gx_payload = list(saved[:n_payload])
-            self.weights_fp8 = list(saved[n_payload : n_payload + n])
-            return
         self.inputmat = saved[0]
         self.weights_fp8 = list(saved[1 : 1 + n])
+        if self.compiled_op:
+            return
         (
             self.m_splits_tensor,
             self.base_split_offsets,
@@ -1774,110 +1730,87 @@ def _grouped_linear_fused_backward(
 # Fused GroupedTensor path under torch.compile
 # --------------------------------------------------------------------------- #
 
-# GroupedTensorStorage payload slots, in ``prepare_for_saving`` order.
-_GX_PAYLOAD_KEYS = (
-    "data",
-    "columnwise_data",
-    "scale_inv",
-    "columnwise_scale_inv",
-    "amax",
-    "columnwise_amax",
-    "scale",
-    "first_dims",
-    "last_dims",
-    "tensor_offsets",
-)
-
-
-def _rebuild_grouped_input(args: GroupedLinearFusedBwdArgs) -> Optional[GroupedTensorStorage]:
-    """Rebuild the saved grouped input storage from its flat payload."""
-    if not args.gx_present:
-        return None
-    payload = dict(zip(_GX_PAYLOAD_KEYS, args.gx_payload))
-    if payload["data"] is not None:
-        payload["data"] = payload["data"].reshape(-1)
-    payload["first_dims"] = args.m_splits_tensor
-    payload["tensor_offsets"] = args.input_tensor_offsets
-    return GroupedTensorStorage(
-        shape=(math.prod(args.grad_output.shape[:-1]), args.in_features),
-        dtype=args.activation_dtype,
-        num_tensors=args.num_gemms,
-        quantizer=args.input_quantizers[0] if args.fp8 else None,
-        with_gemm_swizzled_scales=args.gx_swizzled,
-        **payload,
-    )
-
 
 def _grouped_linear_fused_forward_impl(args: GroupedLinearFwdArgs) -> Tuple[Any, ...]:
     """Encode the shared grouped forward's saved tensors without aliases."""
     out, new_workspaces, saved = _grouped_linear_fused_forward(args)
-    num_weights = len(args.weights)
-    grouped_x = saved[0] if saved is not None else None
-    weights_to_save = list(saved[1 : 1 + num_weights]) if saved is not None else []
     tensors_to_save = None
-    ctx_attrs = None
-    if args.is_grad_enabled:
-        n_payload = len(_GX_PAYLOAD_KEYS)
-        aliases: List[Optional[Tuple]] = [None] * (n_payload + num_weights)
-        gx_payload: List[Optional[torch.Tensor]] = [None] * n_payload
-        gx_present = args.weights_requires_grad
-        if gx_present and args.save_original_input:
-            aliases[0] = ("inp",)
-        elif gx_present:
-            gx_payload = list(grouped_x.get_data_tensors())
-            # first_dims is the split tensor itself and tensor_offsets derives
-            # from it: both rebuilt in backward from m_splits_tensor instead of
-            # being saved (they may alias the op input).
-            gx_payload[7] = None
-            gx_payload[9] = None
-            if (
-                not args.fp8
-                and gx_payload[0] is not None
-                and args.inp.dtype == args.activation_dtype
+    if saved is not None:
+        inputmat = saved[0]
+        if inputmat is not None:
+            if args.save_original_input or (
+                not args.fp8 and args.inp.dtype == args.activation_dtype
             ):
-                # No-op cast: the packed data aliases the op input.
-                gx_payload[0] = None
-                aliases[0] = ("inp",)
+                inputmat = SavedTensorRef("inp")
+            elif not args.fp8:
+                inputmat = inputmat.rowwise_data
+            else:
+                # Dynamic rows and split metadata are restored inside backward.
+                inputmat.logical_shape = (0, args.weights[0].shape[-1])
+                inputmat.first_dims = None
+                inputmat.tensor_offsets = None
+        weights = _saved_grouped_weights(args, new_workspaces, saved[1 : 1 + len(args.weights)])
+        tensors_to_save = (inputmat, *weights)
+    return (out, *new_workspaces, tensors_to_save, None)
 
-        for i in range(num_weights):
-            slot = n_payload + i
-            if weights_to_save[i] is None:
-                continue
-            if weights_to_save[i] is args.weights[i]:
-                aliases[slot] = ("weights", i)
-                weights_to_save[i] = None
-            elif new_workspaces[i] is not None and weights_to_save[i] is new_workspaces[i]:
-                aliases[slot] = ("new_weight_workspaces", i)
-                weights_to_save[i] = None
-            elif (
-                args.weight_workspaces
-                and args.weight_workspaces[i] is not None
-                and weights_to_save[i] is args.weight_workspaces[i]
-            ):
-                aliases[slot] = ("weight_workspaces", i)
-                weights_to_save[i] = None
 
-        tensors_to_save = (*gx_payload, *weights_to_save)
-        ctx_attrs = {
-            "saved_tensor_aliases": tuple(aliases),
-            "gx_present": gx_present,
-            "gx_swizzled": bool(getattr(grouped_x, "_with_gemm_swizzled_scales", False)),
-        }
+def _fake_grouped_input(args):
+    """Describe the saved grouped activation using the storage's own layout."""
+    if not args.weights_requires_grad:
+        return None
+    if args.save_original_input or (not args.fp8 and args.inp.dtype == args.activation_dtype):
+        return SavedTensorRef("inp")
+    tokens = math.prod(args.inp.shape[:-1])
+    in_features = args.weights[0].shape[-1]
+    total = tokens * in_features
 
-    return (out, *new_workspaces, tensors_to_save, ctx_attrs)
+    def spec(numel, dtype):
+        return TensorSpec(shape=(numel,), dtype=dtype, device=args.inp.device)
+
+    if not args.fp8:
+        return spec(total, args.activation_dtype)
+    quantizer = args.input_quantizers[0]
+    block_scaled = isinstance(quantizer, (MXFP8Quantizer, NVFP4Quantizer))
+    buffers = {}
+    if block_scaled:
+        is_nvfp4 = isinstance(quantizer, NVFP4Quantizer)
+        buffers["columnwise_data"] = spec(total // 2 if is_nvfp4 else total, torch.uint8)
+        buffers["columnwise_scale_inv"] = spec(
+            math.prod(quantizer.get_scale_shape((tokens, in_features), True)), torch.uint8
+        )
+        if is_nvfp4:
+            buffers["amax"] = spec(args.num_gemms, torch.float32)
+            buffers["columnwise_amax"] = spec(args.num_gemms, torch.float32)
+    else:
+        # Hopper retains the columnwise operand; Blackwell reuses rowwise data.
+        if is_non_tn_fp8_gemm_supported():
+            buffers["data"] = spec(total, torch.uint8)
+            buffers["scale_inv"] = spec(args.num_gemms, torch.float32)
+        else:
+            buffers["columnwise_data"] = spec(total, torch.uint8)
+            buffers["columnwise_scale_inv"] = spec(args.num_gemms, torch.float32)
+        buffers["amax"] = spec(args.num_gemms, torch.float32)
+        buffers["scale"] = spec(args.num_gemms, torch.float32)
+    return to_tensor_spec(
+        GroupedTensorStorage(
+            shape=(0, in_features),
+            dtype=args.activation_dtype,
+            num_tensors=args.num_gemms,
+            quantizer=quantizer,
+            with_gemm_swizzled_scales=block_scaled,
+            **buffers,
+        )
+    )
 
 
 def _grouped_linear_fused_forward_fake(args: GroupedLinearFwdArgs) -> Tuple[Any, ...]:
     """Shape/metadata-only twin of :func:`_grouped_linear_fused_forward_impl`."""
     inp = args.inp
-    num_gemms = args.num_gemms
-    in_features = args.weights[0].shape[-1]
     out_features = args.weights[0].shape[-2]
     activation_dtype = args.activation_dtype
     fp8 = args.fp8
     is_grad_enabled = args.is_grad_enabled
     weight_requires_grad = args.weights_requires_grad
-    tokens = math.prod(inp.shape[:-1])
     device = inp.device
 
     if fp8:
@@ -1893,9 +1826,7 @@ def _grouped_linear_fused_forward_fake(args: GroupedLinearFwdArgs) -> Tuple[Any,
             quantizer.set_usage(
                 rowwise=True, columnwise=is_grad_enabled and args.input_requires_grad
             )
-    new_workspaces, weights_saved, weight_aliases = _fake_grouped_weights(
-        args, args.weight_quantizers
-    )
+    new_workspaces, weights_saved = _fake_grouped_weights(args, args.weight_quantizers)
 
     out = TensorSpec(
         shape=(*tuple(inp.shape[:-1]), out_features),
@@ -1906,65 +1837,11 @@ def _grouped_linear_fused_forward_fake(args: GroupedLinearFwdArgs) -> Tuple[Any,
     )
 
     tensors_to_save = None
-    ctx_attrs = None
     if is_grad_enabled:
-        n_payload = len(_GX_PAYLOAD_KEYS)
-        aliases: List[Optional[Tuple]] = [None] * (n_payload + len(args.weights))
-        gx_payload: List[Optional[TensorSpec]] = [None] * n_payload
-        gx_present = weight_requires_grad
-        if gx_present and args.save_original_input:
-            aliases[0] = ("inp",)
-        elif gx_present:
-            total = tokens * in_features
-
-            def _spec(numel, dtype):
-                return TensorSpec(shape=(numel,), dtype=dtype, device=device)
-
-            if not fp8:
-                if inp.dtype == activation_dtype:
-                    aliases[0] = ("inp",)
-                else:
-                    gx_payload[0] = _spec(total, activation_dtype)
-            elif isinstance(input_quantizer, (MXFP8Quantizer, NVFP4Quantizer)):
-                is_nvfp4 = isinstance(input_quantizer, NVFP4Quantizer)
-                gx_payload[1] = _spec(total // 2 if is_nvfp4 else total, torch.uint8)
-                gx_payload[3] = _spec(
-                    math.prod(input_quantizer.get_scale_shape((tokens, in_features), True)),
-                    torch.uint8,
-                )
-                if is_nvfp4:
-                    gx_payload[4] = _spec(num_gemms, torch.float32)
-                    gx_payload[5] = _spec(num_gemms, torch.float32)
-            else:
-                # FP8 per-tensor current scaling; on Hopper the rowwise data is
-                # freed after the fprop GEMM when a columnwise copy exists.
-                has_columnwise = is_grad_enabled and weight_requires_grad
-                keep_rowwise = not has_columnwise or is_non_tn_fp8_gemm_supported()
-                if keep_rowwise:
-                    gx_payload[0] = _spec(total, torch.uint8)  # data
-                    gx_payload[2] = _spec(num_gemms, torch.float32)  # scale_inv
-                if has_columnwise and not is_non_tn_fp8_gemm_supported():
-                    gx_payload[1] = _spec(total, torch.uint8)  # columnwise_data
-                    gx_payload[3] = _spec(num_gemms, torch.float32)  # columnwise_scale_inv
-                gx_payload[4] = _spec(num_gemms, torch.float32)  # amax
-                gx_payload[6] = _spec(num_gemms, torch.float32)  # scale
-
-        for i in range(len(args.weights)):
-            if args.input_requires_grad:
-                aliases[n_payload + i] = weight_aliases[i]
-            else:
-                weights_saved[i] = None
-
-        tensors_to_save = (*gx_payload, *weights_saved)
-        ctx_attrs = {
-            "saved_tensor_aliases": tuple(aliases),
-            "gx_present": gx_present,
-            "gx_swizzled": gx_present
-            and not args.save_original_input
-            and isinstance(args.input_quantizers[0], (MXFP8Quantizer, NVFP4Quantizer)),
-        }
-
-    return (out, *new_workspaces, tensors_to_save, ctx_attrs)
+        if not args.input_requires_grad:
+            weights_saved = [None] * len(args.weights)
+        tensors_to_save = (_fake_grouped_input(args), *weights_saved)
+    return (out, *new_workspaces, tensors_to_save, None)
 
 
 def _grouped_linear_fused_setup_ctx(
@@ -1974,13 +1851,11 @@ def _grouped_linear_fused_setup_ctx(
     ctx_attrs: Dict,
     tensors_to_save_from_forward: Tuple[Any, ...],
 ) -> Tuple[Any, ...]:
-    """Populate the fused backward args and rebuild alias-deduped save slots."""
+    """Populate the fused backward args and pass through its saved tensors."""
+    del fwd_outputs, ctx_attrs
     _grouped_linear_fused_setup(bwd_args, fwd_args)
-    bwd_args.gx_present = ctx_attrs["gx_present"]
-    bwd_args.gx_swizzled = ctx_attrs["gx_swizzled"]
     bwd_args.compiled_op = fwd_args.compiled_op
-
-    return _restore_saved_aliases(fwd_args, fwd_outputs, ctx_attrs, tensors_to_save_from_forward)
+    return tensors_to_save_from_forward
 
 
 def _grouped_linear_fused_backward_impl(
@@ -1991,7 +1866,20 @@ def _grouped_linear_fused_backward_impl(
     args.base_split_offsets = tex.splits_to_offsets(args.m_splits_tensor, 1)
     args.input_tensor_offsets = args.base_split_offsets * args.in_features
     args.output_tensor_offsets = args.base_split_offsets * args.out_features
-    args.inputmat = args.gx_payload[0] if args.save_original_input else _rebuild_grouped_input(args)
+    if args.inputmat is not None and not args.save_original_input:
+        if args.fp8:
+            args.inputmat.logical_shape = (math.prod(args.grad_output.shape[:-1]), args.in_features)
+            args.inputmat.first_dims = args.m_splits_tensor
+            args.inputmat.tensor_offsets = args.input_tensor_offsets
+        else:
+            args.inputmat = _GroupedLinear._make_grouped_tensor(
+                args.inputmat.reshape(-1, args.in_features),
+                num_gemms=args.num_gemms,
+                split_sizes=args.m_splits_tensor,
+                tensor_offsets=args.input_tensor_offsets,
+                last_dim=args.in_features,
+                dtype=args.activation_dtype,
+            )
     return _grouped_linear_fused_backward(args)
 
 
