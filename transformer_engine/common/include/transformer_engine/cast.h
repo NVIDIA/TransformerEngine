@@ -421,8 +421,12 @@ void nvte_dequantize(const NVTETensor input, NVTETensor output, cudaStream_t str
 /*! \brief Casts input grouped tensor from reduced to higher precision.
  *         In case of the MXFP8 dequantization, the dequantized values are stored to the rowwise
  *         data of the output tensor, regardless of whether the row- or columnwise scaling is used.
+ *         NVFP4 dequantization reads the rowwise data. It requires compact (non-swizzled) E4M3
+ *         scales, an FP32 amax with one entry or one entry per tensor, and tensors that share
+ *         the last dimension. The last dimension and each tensor's first dimension must be
+ *         divisible by 128.
  *
- *  \param[in]     input     Input grouped FP8/MXFP8 tensor to be cast.
+ *  \param[in]     input     Input grouped FP8/MXFP8/NVFP4 tensor to be cast.
  *  \param[in,out] output    Output grouped tensor.
  *  \param[in]     stream    CUDA stream used for the operation.
  */
