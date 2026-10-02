@@ -187,9 +187,7 @@ class DSv4HybridAttention(torch.nn.Module):
         q_residual = self.q_a_norm(q_a)
         q = self.q_b_proj(q_residual).reshape(batch, seq, self.num_heads, self.head_dim)
         # Query-up norm is unweighted; TE RMSNorm would add a learned scale.
-        q = q * torch.rsqrt(q.float().square().mean(-1, keepdim=True) + self.rms_norm_eps).to(
-            q.dtype
-        )
+        q = torch.nn.functional.rms_norm(q, (self.head_dim,), eps=self.rms_norm_eps)
         q = (
             apply_rotary(q, *token_rope)
             .reshape(batch * seq, self.num_heads, self.head_dim)
