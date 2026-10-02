@@ -259,14 +259,14 @@ inline bool mxfp8_group_quantize_cutedsl(const MXFP8GroupQuantConfig &config,
   if (config.shape_rep == ShapeRepresentation::VARYING_FIRST_DIM ||
       config.shape_rep == ShapeRepresentation::VARYING_BOTH_DIMS) {
     mFirstDims = DLTensorWrapper(
-        make_basic_tensor(output_tensor->first_dims.dptr, DType::kInt64, {num_tensors}),
-        false, device_index);
+        make_basic_tensor(output_tensor->first_dims.dptr, DType::kInt64, {num_tensors}), false,
+        device_index);
   }
   if (config.shape_rep == ShapeRepresentation::VARYING_LAST_DIM ||
       config.shape_rep == ShapeRepresentation::VARYING_BOTH_DIMS) {
     mLastDims = DLTensorWrapper(
-        make_basic_tensor(output_tensor->last_dims.dptr, DType::kInt64, {num_tensors}),
-        false, device_index);
+        make_basic_tensor(output_tensor->last_dims.dptr, DType::kInt64, {num_tensors}), false,
+        device_index);
   }
 
   // The kernel reads num_tensors off this tensor's leading extent, so it must be exactly
