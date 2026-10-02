@@ -459,6 +459,16 @@ def test_cp_with_flash_attention_softcap(cp_pool, cp_comm_type):
     )
 
 
+# cuDNN FROST: symmetric head_dim in (256, 512] on SM100/SM103, the range no other backend
+# serves together with context parallelism. Shapes are Gemma-4 global layers, which is what
+# motivated the backend. seqlen must stay divisible by cp_size * 2 for causal load balancing.
+model_configs_frost_attn = {
+    #   test:         ModelConfig(b, sq, hq, dqk)
+    "cp_hd512_0": ModelConfig(2, 4096, 8, 512, num_gqa_groups=4, attn_mask_type="causal"),
+    "cp_hd512_1": ModelConfig(2, 4096, 8, 512, num_gqa_groups=4, attn_mask_type="no_mask"),
+    "cp_hd512_2": ModelConfig(2, 2048, 8, 512, num_gqa_groups=8, attn_mask_type="causal"),
+}
+
 model_configs_fused_attn = {
     # test: ModelConfig(b, sq, hq, dqk)
     "cp_1_0": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal", return_max_logit=True),  # MHA
@@ -743,6 +753,99 @@ def test_cp_with_fused_attention(
         f16_O=f16_O,
         is_training=is_training,
         deterministic=_deterministic,
+        log_level=pytest_logging_level,
+    )
+
+
+def _frost_availability():
+    """Why FrostAttention cannot run here, or None if it can.
+
+    The backend needs cuDNN Frontend >= 1.29.0 and, less obviously,
+    nvidia-cutlass-dsl >= 4.7.0: cudnn-frontend only declares >= 4.6.2, and below the FROST floor
+    every FROST engine silently declines and ordinary backend plans are returned with no error.
+    Reporting the reason as a skip keeps that distinguishable from a real failure.
+    """
+    if get_device_compute_capability() not in ((10, 0), (10, 3)):
+        return "FrostAttention requires SM100/SM103 (the cuDNN d512 backward is Blackwell-only)."
+    from transformer_engine.pytorch.attention.dot_product_attention.frost_attention import (
+        is_frost_attention_available,
+    )
+
+    ok, reason = is_frost_attention_available()
+    return None if ok else reason
+
+
+@pytest.mark.parametrize("model", model_configs_frost_attn.keys())
+@pytest.mark.parametrize("qkv_format", ["bshd", "sbhd"])
+@pytest.mark.parametrize("cp_comm_type", ["p2p", "all_gather", "a2a", "a2a+p2p"])
+def test_cp_with_frost_attention(cp_pool, model, qkv_format, cp_comm_type):
+    """Context parallelism at head_dim 512, which no other backend serves.
+
+    thd is excluded because the backend declines it: it needs varlen support that is not
+    implemented.
+
+    a2a+p2p needs four ranks rather than two -- an a2a subgroup crossed with a p2p subgroup -- and
+    exercises no new attention code: it dispatches to the same AttnFuncWithCPAndKVP2P as plain p2p,
+    with an a2a communication stage on either side of the ring. It is covered here so that claim is
+    measured rather than assumed.
+    """
+    reason = _frost_availability()
+    if reason is not None:
+        pytest.skip(reason)
+
+    config = model_configs_frost_attn[model]
+    config.context_parallel = True
+    config.cp_comm_type = cp_comm_type
+
+    # a2a requires num_heads and num_gqa_groups divisible by the a2a subgroup size; every config
+    # here satisfies that, but assert rather than rely on it staying true.
+    if cp_comm_type == "a2a+p2p":
+        assert config.num_heads % 2 == 0 and config.num_gqa_groups % 2 == 0, (
+            f"cp_comm_type=a2a+p2p needs num_heads ({config.num_heads}) and num_gqa_groups"
+            f" ({config.num_gqa_groups}) divisible by the a2a subgroup size"
+        )
+
+    pool = cp_pool(4 if cp_comm_type == "a2a+p2p" else 2)
+
+    _submit(
+        pool,
+        dtype="bf16",
+        model=model,
+        qkv_format=qkv_format,
+        kernel_backend="FrostAttention",
+        cp_comm_type=cp_comm_type,
+        is_training=True,
+        log_level=pytest_logging_level,
+    )
+
+
+@pytest.mark.parametrize("cp_comm_type", ["p2p", "all_gather", "a2a"])
+def test_cp_with_frost_attention_fp16(cp_pool, cp_comm_type):
+    """One fp16 arm per comm type, since the matrix above is bf16 throughout.
+
+    The backend serves BF16 and FP16, but every context-parallel configuration was covered in bf16
+    only. fp16 has a far narrower exponent range, and the ring correction exponentiates a difference
+    of log-sum-exp values across steps, so a range problem would surface here rather than in the
+    non-CP numerics. One model and one layout keeps the cost to three cases rather than doubling
+    the matrix; a2a+p2p is omitted because it would need a second four-rank pool for a dtype that
+    exercises no additional code path.
+    """
+    reason = _frost_availability()
+    if reason is not None:
+        pytest.skip(reason)
+
+    config = model_configs_frost_attn["cp_hd512_0"]
+    config.context_parallel = True
+    config.cp_comm_type = cp_comm_type
+
+    _submit(
+        cp_pool(2),
+        dtype="fp16",
+        model="cp_hd512_0",
+        qkv_format="bshd",
+        kernel_backend="FrostAttention",
+        cp_comm_type=cp_comm_type,
+        is_training=True,
         log_level=pytest_logging_level,
     )
 

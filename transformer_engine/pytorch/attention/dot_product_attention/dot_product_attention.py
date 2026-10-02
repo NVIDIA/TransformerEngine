@@ -65,6 +65,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.backends import 
     UnfusedDotProductAttention,
     FusedAttention,
     FlashAttention,
+    FrostAttention,
 )
 
 
@@ -79,6 +80,7 @@ _attention_backends = {
     "use_fused_attention": None,
     "fused_attention_backend": None,
     "use_unfused_attention": None,
+    "use_frost_attention": None,
     "backend_selection_requires_update": False,
 }
 
@@ -156,6 +158,7 @@ def _get_thd_policy_attention_backend(
         use_fused_attention,
         fused_attention_backend,
         use_unfused_attention,
+        use_frost_attention,
         _,
     ) = selection
     _attention_backends.update(
@@ -166,6 +169,7 @@ def _get_thd_policy_attention_backend(
             "use_fused_attention": use_fused_attention,
             "fused_attention_backend": fused_attention_backend,
             "use_unfused_attention": use_unfused_attention,
+            "use_frost_attention": use_frost_attention,
             "backend_selection_requires_update": False,
         }
     )
@@ -994,6 +998,16 @@ class DotProductAttention(TransformerEngineBaseModule):
             **attn_kwargs,
             softmax_type=self.softmax_type,
             return_max_logit=self.return_max_logit,
+        )
+
+        # Only selectable for symmetric head_dim in (256, 512] on SM100/SM103, where no other
+        # backend can run at all. Cheap to construct, so instantiate unconditionally like the rest.
+        self.frost_attention = FrostAttention(
+            softmax_scale,
+            attention_type=attention_type,
+            layer_number=layer_number,
+            deterministic=self.deterministic,
+            **attn_kwargs,
         )
 
         self.unfused_attention = UnfusedDotProductAttention(
@@ -2844,6 +2858,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                 use_flash_attention = False
                 use_fused_attention = False
                 use_unfused_attention = True
+                # Bound here too: the availability check below reads all four flags at this
+                # scope, and this branch never calls get_attention_backend.
+                use_frost_attention = False
             else:
                 if (
                     _attention_backends["attention_params"] is None
@@ -2858,6 +2875,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         use_fused_attention,
                         fused_attention_backend,
                         use_unfused_attention,
+                        use_frost_attention,
                         _,
                     ) = dpa_utils.get_attention_backend(attention_params)
                     # Set global _attention_backends var using return value
@@ -2867,6 +2885,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     _attention_backends["use_fused_attention"] = use_fused_attention
                     _attention_backends["fused_attention_backend"] = fused_attention_backend
                     _attention_backends["use_unfused_attention"] = use_unfused_attention
+                    _attention_backends["use_frost_attention"] = use_frost_attention
                     _attention_backends["backend_selection_requires_update"] = False
                     # logging.Logger methods graph-break under torch.compile, so
                     # selection is only logged in eager -- as in
@@ -2885,6 +2904,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                             "Running with FusedAttention backend (sub-backend %s)",
                             int(fused_attention_backend),
                         )
+                    elif use_frost_attention:
+                        logger.info("Running with FrostAttention backend (cuDNN FROST)")
                     elif use_unfused_attention:
                         logger.info("Running with UnfusedDotProductAttention backend")
                 else:
@@ -2893,9 +2914,20 @@ class DotProductAttention(TransformerEngineBaseModule):
                     use_fused_attention = _attention_backends["use_fused_attention"]
                     fused_attention_backend = _attention_backends["fused_attention_backend"]
                     use_unfused_attention = _attention_backends["use_unfused_attention"]
+                    use_frost_attention = _attention_backends["use_frost_attention"]
 
             # raise exception if no backend is available
-            if sum([use_flash_attention, use_fused_attention, use_unfused_attention]) == 0:
+            if (
+                sum(
+                    [
+                        use_flash_attention,
+                        use_fused_attention,
+                        use_unfused_attention,
+                        use_frost_attention,
+                    ]
+                )
+                == 0
+            ):
                 raise ValueError(
                     "No dot product attention backend is available for the provided inputs. Please"
                     " run with NVTE_DEBUG=1 NVTE_DEBUG_LEVEL=2 to find out the reasons for"
@@ -3056,6 +3088,27 @@ class DotProductAttention(TransformerEngineBaseModule):
                     packed_qkv=qkv_layer,
                     packed_kv=kv_layer,
                     bf16_backward=bf16_backward,
+                )
+
+            if use_frost_attention:
+                return self.frost_attention(
+                    query_layer,
+                    key_layer,
+                    value_layer,
+                    qkv_format=qkv_format,
+                    cu_seqlens_q=cu_seqlens_q,
+                    cu_seqlens_kv=cu_seqlens_kv,
+                    max_seqlen_q=max_seqlen_q,
+                    max_seqlen_kv=max_seqlen_kv,
+                    cu_seqlens_q_padded=cu_seqlens_q_padded,
+                    cu_seqlens_kv_padded=cu_seqlens_kv_padded,
+                    attn_mask_type=attn_mask_type,
+                    window_size=window_size,
+                    cp_group=self.cp_group,
+                    cp_global_ranks=self.cp_global_ranks,
+                    cp_stream=self.cp_stream,
+                    cp_comm_type=self.cp_comm_type,
+                    load_balancing_strategy=self.load_balancing_strategy,
                 )
 
             if use_unfused_attention:

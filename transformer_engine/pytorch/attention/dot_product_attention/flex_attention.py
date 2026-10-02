@@ -5,52 +5,42 @@
 """cuDNN-backed Flex Attention helpers."""
 
 from dataclasses import dataclass
-import importlib
 import inspect
 from typing import Any, Callable, Dict, Optional, Tuple
 
 import torch
 
-_cudnn_score_mod_handles: Dict[torch.device, Any] = {}
+from transformer_engine.pytorch.attention.dot_product_attention import cudnn_pygraph
+
+# The handle cache lives in cudnn_pygraph now; the alias keeps the old name working.
+_cudnn_score_mod_handles = cudnn_pygraph._handles  # pylint: disable=protected-access
 _cudnn_score_mod_graph_cache: Dict[Tuple[Any, ...], Any] = {}
 _SCORE_MOD_UNCACHEABLE = object()
+
+_BACKEND = "Flex Attention"
 
 
 def _import_cudnn_frontend():
     """Import the cuDNN frontend Python package."""
-    try:
-        return importlib.import_module("cudnn")
-    except ImportError as exc:
-        raise ImportError(
-            "cuDNN frontend Python package not found. "
-            "Install it with: pip install nvidia-cudnn-frontend"
-        ) from exc
+    # This path does not ask for the FROST engines, but asking is all it controls: the switch is
+    # process-wide, so a FrostAttention call elsewhere in the process, or a user setting
+    # CUDNN_FRONTEND_ENABLE_FROST_ENGINES themselves, still ranks FROST ahead of the backend
+    # engines for the graphs built here.
+    return cudnn_pygraph.import_cudnn_frontend(enable_frost_engines=False)
 
 
 def _bhsd_dim_stride(
     tensor: torch.Tensor, tensor_format: str
 ) -> Tuple[Tuple[int, ...], Tuple[int, ...]]:
     """Describe an SBHD/BSHD tensor as cuDNN frontend's logical BHSD format."""
-    if tensor_format == "sbhd":
-        return (
-            (tensor.shape[1], tensor.shape[2], tensor.shape[0], tensor.shape[3]),
-            (tensor.stride(1), tensor.stride(2), tensor.stride(0), tensor.stride(3)),
-        )
-    if tensor_format == "bshd":
-        return (
-            (tensor.shape[0], tensor.shape[2], tensor.shape[1], tensor.shape[3]),
-            (tensor.stride(0), tensor.stride(2), tensor.stride(1), tensor.stride(3)),
-        )
-    raise ValueError(f"Flex Attention only supports SBHD/BSHD tensor formats, got {tensor_format}.")
+    return cudnn_pygraph.bhsd_dim_stride(tensor, tensor_format)
 
 
 def _bhsd_graph_tensor(graph, tensor: torch.Tensor, tensor_format: str):
     """Create a cuDNN graph tensor with BHSD dims and TE-layout strides."""
-    dim, stride = _bhsd_dim_stride(tensor, tensor_format)
-    return graph.tensor(dim=dim, stride=stride, data_type=tensor.dtype)
+    return cudnn_pygraph.bhsd_graph_tensor(graph, tensor, tensor_format)
 
 
-# score_mod graph cache helpers.
 def _freeze_score_mod_cache_key(value: Any) -> Any:
     """Convert a user-provided score_mod graph key into a hashable structure."""
     if isinstance(value, torch.Tensor):
@@ -173,6 +163,27 @@ def _score_mod_bhsd_tensor_metadata(tensor: torch.Tensor, tensor_format: str) ->
     return (dim, stride, tensor.dtype, _score_mod_device_key(tensor.device))
 
 
+def _mask_or_score_mod_kwargs(
+    mask_spec: Optional[Tuple[str, Tuple[int, int]]], wrapped_score_mod
+) -> Dict[str, Any]:
+    """SDPA kwargs for exactly one of a diagonal band or a score_mod.
+
+    cuDNN rejects the pair in its backward node ("Attention score mod enabled and hence other
+    subgraphs are disabled") while its forward node composes both silently. Refusing it here on
+    both sides is deliberate: the backward has to carry the same mask as the forward, or the
+    gradients belong to a different attention than the output does.
+    """
+    if mask_spec is None:
+        return {"use_causal_mask": False, "score_mod": wrapped_score_mod}
+    if wrapped_score_mod is not None:
+        raise ValueError(
+            "a diagonal-band mask and a score_mod cannot be combined in one cuDNN SDPA graph; "
+            f"got mask_spec={mask_spec!r} alongside a score_mod"
+        )
+    cudnn = _import_cudnn_frontend()
+    return cudnn_pygraph.diagonal_band_kwargs(cudnn, mask_spec[0], mask_spec[1])
+
+
 def _make_cudnn_graph_tensor_dict(graph, tensors: Optional[Dict[str, torch.Tensor]]):
     """Create cuDNN graph tensors matching runtime tensors."""
     if tensors is None:
@@ -194,40 +205,13 @@ def _wrap_score_mod(score_mod: Optional[Callable], graph_tensors: Dict[str, Any]
 
 def _get_cudnn_current_stream_handle(cudnn, device: torch.device):
     """Return a cuDNN handle for device, bound to PyTorch's current stream."""
-    if device.type != "cuda":
-        raise ValueError(f"Flex Attention only supports CUDA tensors, got device {device}.")
-    if device.index is None:
-        device = torch.device("cuda", torch.cuda.current_device())
-
-    handle = _cudnn_score_mod_handles.get(device)
-    with torch.cuda.device(device):
-        if handle is None:
-            handle = cudnn.create_handle()
-            _cudnn_score_mod_handles[device] = handle
-
-        stream = torch.cuda.current_stream(device).cuda_stream
-        cudnn.set_stream(handle=handle, stream=stream)
-    return handle
+    del cudnn  # the shared helper resolves the module itself
+    return cudnn_pygraph.handle_for(device, backend_name=_BACKEND)
 
 
 def _build_cudnn_pygraph(dtype: torch.dtype, device: torch.device):
     """Create a cuDNN frontend Python graph for F16/BF16 SDPA."""
-    cudnn = _import_cudnn_frontend()
-
-    if dtype == torch.float16:
-        io_data_type = cudnn.data_type.HALF
-    elif dtype == torch.bfloat16:
-        io_data_type = cudnn.data_type.BFLOAT16
-    else:
-        raise ValueError(f"Flex Attention only supports FP16/BF16 tensors, got {dtype}.")
-
-    graph = cudnn.pygraph(
-        io_data_type=io_data_type,
-        intermediate_data_type=cudnn.data_type.FLOAT,
-        compute_data_type=cudnn.data_type.FLOAT,
-        handle=_get_cudnn_current_stream_handle(cudnn, device),
-    )
-    return graph
+    return cudnn_pygraph.build_pygraph(dtype, device, backend_name=_BACKEND)
 
 
 @dataclass
@@ -263,19 +247,19 @@ class _CudnnScoreModBwdGraphEntry:
     workspace_size: int
 
 
+# cuDNN FROST SDPA engine names. These are barred here, not merely left unasked for: the switch
+# that offers them is process-wide, so any FrostAttention call elsewhere in the process, or a user
+# setting CUDNN_FRONTEND_ENABLE_FROST_ENGINES, puts them ahead of the backend engines for these
+# graphs too. They accept a score_mod graph, pass check_support, build, and then compute without
+# the callback. Measured on B200 with cuDNN Frontend 1.29.0: a FROST plan ranks at index 0 at
+# head_dim 64, 128, 256 and 512, and an unpinned build selects it and returns plain attention.
+_FROST_PLAN_TOKENS = ("sdpa_fwd_prefill_sm100", "sdpa_bwd_sm100")
+
+
 def _finalize_cudnn_graph(graph) -> int:
     """Build a cuDNN frontend Python graph and return its workspace size."""
-    cudnn = _import_cudnn_frontend()
-
-    graph.validate()
-    graph.build_operation_graph()
-    try:
-        graph.create_execution_plans([cudnn.heur_mode.A, cudnn.heur_mode.FALLBACK])
-        graph.check_support()
-    except cudnn.cudnnGraphNotSupportedError as exc:
-        raise RuntimeError(f"cuDNN Flex Attention SDPA graph is not supported: {exc}") from exc
-    graph.build_plans(cudnn.build_plan_policy.HEURISTICS_CHOICE)
-    return max(graph.get_workspace_size(), 1)
+    workspace_size, _ = cudnn_pygraph.finalize_plans(graph, exclude_plan_tokens=_FROST_PLAN_TOKENS)
+    return workspace_size
 
 
 def _execute_cudnn_graph(
@@ -285,20 +269,7 @@ def _execute_cudnn_graph(
     device: torch.device,
 ):
     """Execute a built cuDNN frontend Python graph."""
-    cudnn = _import_cudnn_frontend()
-
-    if device.type == "cuda" and device.index is None:
-        device = torch.device("cuda", torch.cuda.current_device())
-    workspace = torch.empty(
-        workspace_size,
-        device=device,
-        dtype=torch.uint8,
-    )
-    graph.execute(
-        variant_pack,
-        workspace,
-        handle=_get_cudnn_current_stream_handle(cudnn, device),
-    )
+    cudnn_pygraph.execute_graph(graph, variant_pack, workspace_size, device, backend_name=_BACKEND)
 
 
 def _cudnn_score_mod_fwd_cache_key(
@@ -313,6 +284,7 @@ def _cudnn_score_mod_fwd_cache_key(
     score_mod_tensors: Optional[Dict[str, torch.Tensor]],
     output_layer: torch.Tensor,
     stats: Optional[torch.Tensor],
+    mask_spec: Optional[Tuple[str, Tuple[int, int]]] = None,
 ) -> Optional[Tuple[Any, ...]]:
     """Pre-build cache key for score_mod fprop execution plans.
 
@@ -335,6 +307,9 @@ def _cudnn_score_mod_fwd_cache_key(
         _score_mod_bhsd_tensor_metadata(output_layer, q_format),
         _score_mod_tensor_metadata(stats) if stats is not None else None,
         _score_mod_tensor_dict_metadata(score_mod_tensors),
+        # The mask belongs in the key. Without it two graphs differing only in mask type collide
+        # and the second silently reuses the first, which is a wrong answer rather than a miss.
+        mask_spec,
     )
 
 
@@ -353,6 +328,7 @@ def _cudnn_score_mod_bwd_cache_key(
     score_mod_tensors: Optional[Dict[str, torch.Tensor]],
     score_mod_bprop_tensors: Optional[Dict[str, torch.Tensor]],
     deterministic: bool,
+    mask_spec: Optional[Tuple[str, Tuple[int, int]]] = None,
 ) -> Optional[Tuple[Any, ...]]:
     """Pre-build cache key for score_mod bprop execution plans."""
     score_mod_key = _score_mod_callback_cache_key(score_mod)
@@ -375,6 +351,7 @@ def _cudnn_score_mod_bwd_cache_key(
         _score_mod_tensor_metadata(stats),
         _score_mod_tensor_dict_metadata(score_mod_tensors),
         _score_mod_tensor_dict_metadata(score_mod_bprop_tensors),
+        mask_spec,
     )
 
 
@@ -390,8 +367,15 @@ def _build_cudnn_score_mod_fwd_graph(
     score_mod_tensors: Optional[Dict[str, torch.Tensor]],
     output_layer: torch.Tensor,
     stats: Optional[torch.Tensor],
+    mask_spec: Optional[Tuple[str, Tuple[int, int]]] = None,
 ) -> _CudnnScoreModFwdGraphEntry:
-    """Build a cached cuDNN frontend graph for score_mod fprop."""
+    """Build a cached cuDNN frontend graph for score_mod fprop.
+
+    ``mask_spec`` is an optional (attn_mask_type, window) pair. When given, the SDPA node carries
+    cuDNN's diagonal band instead of the unmasked default, which is how a backend without a
+    score_mod expresses causal, bottom-right and sliding-window attention. The two are mutually
+    exclusive: cuDNN rejects a graph carrying both.
+    """
     cudnn = _import_cudnn_frontend()
 
     graph = _build_cudnn_pygraph(query_layer.dtype, query_layer.device)
@@ -403,6 +387,7 @@ def _build_cudnn_score_mod_fwd_graph(
     wrapped_score_mod = _wrap_score_mod(score_mod, score_mod_graph_tensors)
 
     output_dim, output_stride = _bhsd_dim_stride(output_layer, q_format)
+    sdpa_kwargs = _mask_or_score_mod_kwargs(mask_spec, wrapped_score_mod)
     output, stats_tensor = graph.sdpa(
         name="te_score_mod_sdpa",
         q=q,
@@ -410,8 +395,7 @@ def _build_cudnn_score_mod_fwd_graph(
         v=v,
         generate_stats=is_training,
         attn_scale=attn_scale,
-        use_causal_mask=False,
-        score_mod=wrapped_score_mod,
+        **sdpa_kwargs,
     )
     output.set_output(True).set_dim(output_dim).set_stride(output_stride)
 
@@ -448,6 +432,7 @@ def _get_cudnn_score_mod_fwd_graph(
     score_mod_tensors: Optional[Dict[str, torch.Tensor]],
     output_layer: torch.Tensor,
     stats: Optional[torch.Tensor],
+    mask_spec: Optional[Tuple[str, Tuple[int, int]]] = None,
 ) -> _CudnnScoreModFwdGraphEntry:
     """Return a cached cuDNN frontend graph for score_mod fprop."""
     build_args = (
@@ -463,12 +448,15 @@ def _get_cudnn_score_mod_fwd_graph(
         output_layer,
         stats,
     )
-    key = _cudnn_score_mod_fwd_cache_key(*build_args)
+    # Only when set: an unconditional extra argument would change the call shape for every
+    # existing caller, including the tests that substitute their own builder.
+    extra = {} if mask_spec is None else {"mask_spec": mask_spec}
+    key = _cudnn_score_mod_fwd_cache_key(*build_args, **extra)
     if key is None:
-        return _build_cudnn_score_mod_fwd_graph(*build_args)
+        return _build_cudnn_score_mod_fwd_graph(*build_args, **extra)
     entry = _cudnn_score_mod_graph_cache.get(key)
     if entry is None:
-        entry = _build_cudnn_score_mod_fwd_graph(*build_args)
+        entry = _build_cudnn_score_mod_fwd_graph(*build_args, **extra)
         _cudnn_score_mod_graph_cache[key] = entry
     return entry
 
@@ -488,8 +476,11 @@ def _build_cudnn_score_mod_bwd_graph(
     score_mod_tensors: Optional[Dict[str, torch.Tensor]],
     score_mod_bprop_tensors: Optional[Dict[str, torch.Tensor]],
     deterministic: bool,
+    mask_spec: Optional[Tuple[str, Tuple[int, int]]] = None,
 ) -> _CudnnScoreModBwdGraphEntry:
-    """Build a cached cuDNN frontend graph for score_mod bprop."""
+    """Build a cached cuDNN frontend graph for score_mod bprop. See the fprop builder for
+    ``mask_spec``; the backward must carry the same mask as the forward or the gradients are
+    computed against a different attention."""
     graph = _build_cudnn_pygraph(query_layer.dtype, query_layer.device)
     q = _bhsd_graph_tensor(graph, query_layer, q_format)
     k = _bhsd_graph_tensor(graph, key_layer, kv_format)
@@ -522,8 +513,7 @@ def _build_cudnn_score_mod_bwd_graph(
         dO=d_output,
         stats=stats_tensor,
         attn_scale=attn_scale,
-        use_causal_mask=False,
-        score_mod=wrapped_score_mod,
+        **_mask_or_score_mod_kwargs(mask_spec, wrapped_score_mod),
         score_mod_bprop=wrapped_score_mod_bprop,
         use_deterministic_algorithm=deterministic,
     )
@@ -564,6 +554,7 @@ def _get_cudnn_score_mod_bwd_graph(
     score_mod_tensors: Optional[Dict[str, torch.Tensor]],
     score_mod_bprop_tensors: Optional[Dict[str, torch.Tensor]],
     deterministic: bool,
+    mask_spec: Optional[Tuple[str, Tuple[int, int]]] = None,
 ) -> _CudnnScoreModBwdGraphEntry:
     """Return a cached cuDNN frontend graph for score_mod bprop."""
     build_args = (
@@ -582,12 +573,13 @@ def _get_cudnn_score_mod_bwd_graph(
         score_mod_bprop_tensors,
         deterministic,
     )
-    key = _cudnn_score_mod_bwd_cache_key(*build_args)
+    extra = {} if mask_spec is None else {"mask_spec": mask_spec}
+    key = _cudnn_score_mod_bwd_cache_key(*build_args, **extra)
     if key is None:
-        return _build_cudnn_score_mod_bwd_graph(*build_args)
+        return _build_cudnn_score_mod_bwd_graph(*build_args, **extra)
     entry = _cudnn_score_mod_graph_cache.get(key)
     if entry is None:
-        entry = _build_cudnn_score_mod_bwd_graph(*build_args)
+        entry = _build_cudnn_score_mod_bwd_graph(*build_args, **extra)
         _cudnn_score_mod_graph_cache[key] = entry
     return entry
 
