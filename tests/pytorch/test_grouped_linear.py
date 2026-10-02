@@ -72,6 +72,7 @@ def test_grouped_gemm_capability_cache_tracks_current_device(monkeypatch):
     properties = Mock(side_effect=lambda index: SimpleNamespace(major=9 + index, minor=0))
     monkeypatch.setattr(torch.cuda, "current_device", lambda: device_index)
     monkeypatch.setattr(torch.cuda, "get_device_properties", properties)
+
     def scalar(n, device):
         return SimpleNamespace(is_cuda=True, numel=lambda: n)
 
@@ -2028,11 +2029,15 @@ def test_grouped_runtime_quantizer_work(monkeypatch, num_gemms, single_weight, p
     FP8GlobalStateManager.reset()
     with quantized_model_init(enabled=primary_fp8, recipe=fp8_recipe):
         module = GroupedLinear(
-            num_gemms, 128, 128, bias=False, params_dtype=torch.bfloat16,
-            single_grouped_weight=single_weight, use_grouped_tensor=True,
+            num_gemms,
+            128,
+            128,
+            bias=False,
+            params_dtype=torch.bfloat16,
+            single_grouped_weight=single_weight,
+            use_grouped_tensor=True,
         )
-    x = torch.randn(num_gemms * 128, 128, device="cuda", dtype=torch.bfloat16,
-                    requires_grad=True)
+    x = torch.randn(num_gemms * 128, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
     splits = torch.full((num_gemms,), 128, device="cuda", dtype=torch.int64)
     with autocast(enabled=True, recipe=fp8_recipe):
         module(x, splits).sum().backward()
@@ -2100,8 +2105,13 @@ def test_grouped_runtime_usage_transitions(monkeypatch, primary_fp8, save_origin
     FP8GlobalStateManager.reset()
     with quantized_model_init(enabled=primary_fp8, recipe=fp8_recipe):
         module = GroupedLinear(
-            2, 128, 128, bias=False, params_dtype=torch.bfloat16,
-            single_grouped_weight=True, use_grouped_tensor=True,
+            2,
+            128,
+            128,
+            bias=False,
+            params_dtype=torch.bfloat16,
+            single_grouped_weight=True,
+            use_grouped_tensor=True,
             save_original_input=save_original_input,
         )
     splits = torch.tensor([128, 128], device="cuda")
@@ -2150,18 +2160,30 @@ def test_grouped_runtime_usage_transitions(monkeypatch, primary_fp8, save_origin
 def test_grouped_runtime_recipe_rebuild(monkeypatch):
     """Recipe rebuilds replace cached quantizers while preserving saved forwards."""
     recipes = [
-        recipe.MXFP8BlockScaling(), recipe.Float8CurrentScaling(), recipe.MXFP8BlockScaling()
+        recipe.MXFP8BlockScaling(),
+        recipe.Float8CurrentScaling(),
+        recipe.MXFP8BlockScaling(),
     ]
     if not all(is_module_grouped_tensor_path_supported(r, torch.bfloat16) for r in recipes):
         pytest.skip("Required native grouped GEMM recipes are unavailable.")
     monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
     FP8GlobalStateManager.reset()
     module = GroupedLinear(
-        2, 128, 128, bias=False, params_dtype=torch.bfloat16,
-        single_grouped_weight=True, use_grouped_tensor=True,
+        2,
+        128,
+        128,
+        bias=False,
+        params_dtype=torch.bfloat16,
+        single_grouped_weight=True,
+        use_grouped_tensor=True,
     )
     reference = GroupedLinear(
-        2, 128, 128, bias=False, params_dtype=torch.bfloat16, use_grouped_tensor=True,
+        2,
+        128,
+        128,
+        bias=False,
+        params_dtype=torch.bfloat16,
+        use_grouped_tensor=True,
     )
     reference.load_state_dict(module.state_dict())
     x = torch.randn(256, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
@@ -2193,8 +2215,13 @@ def test_grouped_runtime_rechecks_support(monkeypatch, single_weight, restrictio
     """Recheck runtime restrictions without allowing a single weight to use the split path."""
     monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
     module = GroupedLinear(
-        2, 128, 128, bias=False, params_dtype=torch.bfloat16,
-        single_grouped_weight=single_weight, use_grouped_tensor=True,
+        2,
+        128,
+        128,
+        bias=False,
+        params_dtype=torch.bfloat16,
+        single_grouped_weight=single_weight,
+        use_grouped_tensor=True,
     )
     module.activation_dtype = torch.bfloat16
     module.fp8 = True
@@ -2237,13 +2264,25 @@ def test_grouped_linear_return_bias_autograd_arity(
         # bias=False/return_bias=True with discrete empty biases is exercised below.
         with pytest.raises(ValueError, match="Grouped rowwise buffer size mismatch"):
             GroupedLinear(
-                2, 128, 128, bias=False, return_bias=True, params_dtype=torch.bfloat16,
-                single_grouped_bias=True, use_grouped_tensor=True,
+                2,
+                128,
+                128,
+                bias=False,
+                return_bias=True,
+                params_dtype=torch.bfloat16,
+                single_grouped_bias=True,
+                use_grouped_tensor=True,
             )
         return
     module = GroupedLinear(
-        2, 128, 128, bias=use_bias, return_bias=True, params_dtype=torch.bfloat16,
-        single_grouped_bias=single_bias, use_grouped_tensor=use_grouped_tensor,
+        2,
+        128,
+        128,
+        bias=use_bias,
+        return_bias=True,
+        params_dtype=torch.bfloat16,
+        single_grouped_bias=single_bias,
+        use_grouped_tensor=use_grouped_tensor,
     )
     x = torch.randn(256, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
     splits = torch.tensor([128, 128], device="cuda" if use_grouped_tensor else "cpu")

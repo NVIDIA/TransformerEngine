@@ -309,8 +309,14 @@ def test_gathered_weights_are_transient(
     monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
     te.quantization.FP8GlobalStateManager.reset()
     module = te.GroupedLinear(
-        2, IN_F, OUT_F, bias=False, params_dtype=DTYPE, device=DEVICE,
-        single_grouped_weight=single_weight, use_grouped_tensor=True,
+        2,
+        IN_F,
+        OUT_F,
+        bias=False,
+        params_dtype=DTYPE,
+        device=DEVICE,
+        single_grouped_weight=single_weight,
+        use_grouped_tensor=True,
         fuse_wgrad_accumulation=fused,
     )
     weights = [module.weight] if single_weight else [module.weight0, module.weight1]
@@ -324,8 +330,10 @@ def test_gathered_weights_are_transient(
         calls.append(phase)
         if single_weight:
             copy = GroupedTensor.make_grouped_tensor_from_rowwise_data(
-                num_tensors=2, tensor_shape=(OUT_F, IN_F),
-                rowwise_data=weights[0].rowwise_data.detach().clone(), dtype=DTYPE,
+                num_tensors=2,
+                tensor_shape=(OUT_F, IN_F),
+                rowwise_data=weights[0].rowwise_data.detach().clone(),
+                dtype=DTYPE,
             )
             copies = [copy]
         else:
