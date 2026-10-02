@@ -769,13 +769,13 @@ class GroupedLinear(BasicOperation):
             # The adjacent activation may consume these before our own forward/backward.
             # Weight usage is only needed when preparing the GEMM operand.
             weight = self.weight if self.single_grouped_weight else self.weight0
-            dtype = torch.get_autocast_dtype("cuda") if torch.is_autocast_enabled() else weight.dtype
+            dtype = (
+                torch.get_autocast_dtype("cuda") if torch.is_autocast_enabled() else weight.dtype
+            )
             grouped = is_op_fuser_grouped_tensor_path_supported(
                 FP8GlobalStateManager.get_fp8_recipe(), dtype
             )
-            input_quantizers = (
-                (self._input_quantizers[0],) if grouped else self._input_quantizers
-            )
+            input_quantizers = (self._input_quantizers[0],) if grouped else self._input_quantizers
             grad_output_quantizers = (
                 (self._grad_output_quantizers[0],) if grouped else self._grad_output_quantizers
             )

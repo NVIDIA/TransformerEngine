@@ -5,9 +5,6 @@
 from __future__ import annotations
 
 
-
-
-
 from collections import Counter
 from collections.abc import Iterable, Sequence
 from unittest.mock import Mock
@@ -5583,8 +5580,14 @@ def test_basic_grouped_packed_wgrad_and_hooks(monkeypatch, fused, delayed, num_g
     if not is_op_fuser_grouped_tensor_path_supported(None, torch.bfloat16):
         pytest.skip("Native grouped GEMM is unavailable.")
     op = te_ops.GroupedLinear(
-        num_groups, 128, 128, bias=False, device="cuda", dtype=torch.bfloat16,
-        accumulate_into_main_grad=fused, delay_wgrad_compute=delayed,
+        num_groups,
+        128,
+        128,
+        bias=False,
+        device="cuda",
+        dtype=torch.bfloat16,
+        accumulate_into_main_grad=fused,
+        delay_wgrad_compute=delayed,
     )
     model = te_ops.Sequential(op)
     flat = torch.full((num_groups, 128, 128), 0.25, device="cuda", dtype=torch.float32)
@@ -5596,8 +5599,9 @@ def test_basic_grouped_packed_wgrad_and_hooks(monkeypatch, fused, delayed, num_g
             weight.main_grad = flat[i]
             weight.overwrite_main_grad = False
             weight.grad_added_to_main_grad = False
-    x = torch.full((num_groups * 128, 128), 0.125, device="cuda", dtype=torch.bfloat16,
-                   requires_grad=True)
+    x = torch.full(
+        (num_groups * 128, 128), 0.125, device="cuda", dtype=torch.bfloat16, requires_grad=True
+    )
     splits = torch.full((num_groups,), 128, device="cuda", dtype=torch.int64)
     seen = []
     original = gl.general_grouped_gemm_for_grouped_tensor
@@ -5625,6 +5629,8 @@ def test_basic_grouped_packed_wgrad_and_hooks(monkeypatch, fused, delayed, num_g
     assert len(seen) == 1
     for i, weight in enumerate(weights):
         grad = weight.main_grad if fused else weight.grad
-        torch.testing.assert_close(grad, torch.full_like(grad, 8.25 if fused else 8), rtol=0, atol=0)
+        torch.testing.assert_close(
+            grad, torch.full_like(grad, 8.25 if fused else 8), rtol=0, atol=0
+        )
         if fused:
             assert grad.data_ptr() == flat[i].data_ptr()
