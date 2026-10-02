@@ -882,8 +882,7 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
         DIVUP_TO_MULTIPLE(DIVUP(cols, static_cast<size_t>(SCALE_DIM_X)), scale_alignment_X_rowwise);
     const size_t scale_stride_colwise = DIVUP_TO_MULTIPLE(cols, scale_alignment_X_colwise);
 
-    // Non-single-tensor scale pointers already include the member offset.
-    const size_t tensor_base_for_scales = is_single_tensor ? tensor_start_offset : 0;
+    const size_t tensor_base_for_scales = is_single_tensor ? tensor_start_offset : tensor_base;
     e8m0_t *const scales_rowwise =
         scales_rowwise_ptr + (is_single_tensor ? 0 : tensor_base / SCALE_DIM_X);
     e8m0_t *const scales_colwise =
