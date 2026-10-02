@@ -4,6 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <gtest/gtest.h>
 
@@ -15,27 +16,42 @@
 
 namespace {
 
-constexpr int kNumBf16Values = 1 << 16;
+// Inputs: every BF16 bit pattern, then every FP16 bit pattern.
+constexpr int kNumInputs = 2 << 16;
+constexpr int kNumOps = 4;
+const char *const kOpNames[kNumOps] = {"gelu", "dgelu", "silu", "dsilu"};
 
-// For every BF16 bit pattern x: util/math.h's scalar GeLU/dGeLU, and the packed
-// forms with x in the low lane and in the high lane of the pair (the other lane
-// holds a different value).
-__global__ void packed_activation_kernel(float *ref_gelu, float *ref_dgelu, float *packed_gelu_lo,
-                                         float *packed_gelu_hi, float *packed_dgelu_lo,
-                                         float *packed_dgelu_hi) {
+__device__ float input_value(unsigned i) {
+  if (i < (1u << 16)) return __uint_as_float(i << 16);
+  return __half2float(__ushort_as_half(static_cast<unsigned short>(i - (1u << 16))));
+}
+
+// For every input x and every op: util/math.h's scalar result, and the packed form with x in
+// the low lane and in the high lane of the pair (the other lane holds a different value).
+// out is laid out as [op][ref, low lane, high lane][input].
+__global__ void packed_activation_kernel(float *out, int *ran) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000
-  const unsigned i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i >= kNumBf16Values) return;
-  const float x = __uint_as_float(i << 16);
-  const float other = __uint_as_float(((i * 40503u) & 0xffffu) << 16);
   namespace te = transformer_engine;
   namespace pa = te::packed_activation;
-  ref_gelu[i] = te::gelu<float, float>(x, te::Empty{});
-  ref_dgelu[i] = te::dgelu<float, float>(x, te::Empty{});
-  packed_gelu_lo[i] = pa::gelu_2x({x, other}).x;
-  packed_gelu_hi[i] = pa::gelu_2x({other, x}).y;
-  packed_dgelu_lo[i] = pa::dgelu_2x({x, other}).x;
-  packed_dgelu_hi[i] = pa::dgelu_2x({other, x}).y;
+  const unsigned i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i == 0) *ran = 1;
+  if (i >= kNumInputs) return;
+  const float x = input_value(i);
+  const float other = input_value((i * 40503u) % kNumInputs);
+  float *o = out + i;
+  const te::Empty e{};
+  o[0 * kNumInputs] = te::gelu<float, float>(x, e);
+  o[1 * kNumInputs] = pa::gelu_2x({x, other}).x;
+  o[2 * kNumInputs] = pa::gelu_2x({other, x}).y;
+  o[3 * kNumInputs] = te::dgelu<float, float>(x, e);
+  o[4 * kNumInputs] = pa::dgelu_2x({x, other}).x;
+  o[5 * kNumInputs] = pa::dgelu_2x({other, x}).y;
+  o[6 * kNumInputs] = te::silu<float, float>(x, e);
+  o[7 * kNumInputs] = pa::silu_2x({x, other}).x;
+  o[8 * kNumInputs] = pa::silu_2x({other, x}).y;
+  o[9 * kNumInputs] = te::dsilu<float, float>(x, e);
+  o[10 * kNumInputs] = pa::dsilu_2x({x, other}).x;
+  o[11 * kNumInputs] = pa::dsilu_2x({other, x}).y;
 #endif
 }
 
@@ -49,8 +65,8 @@ bool same_value(float a, float b) {
 
 }  // namespace
 
-// The quantize kernels use the packed forms in place of util/math.h's gelu and
-// dgelu, so they must round identically for every BF16 input.
+// The quantize kernels use the packed forms in place of util/math.h's activations, so they must
+// round identically for every BF16 and FP16 input.
 TEST(UtilTest, PackedActivationMatchesScalar) {
   cudaDeviceProp prop;
   ASSERT_EQ(cudaGetDeviceProperties(&prop, 0), cudaSuccess);
@@ -58,38 +74,42 @@ TEST(UtilTest, PackedActivationMatchesScalar) {
     GTEST_SKIP() << "Packed FP32x2 arithmetic requires compute capability 10.0 or newer";
   }
 
-  constexpr int kNumOutputs = 6;
-  float *device_buffer = nullptr;
-  ASSERT_EQ(cudaMalloc(&device_buffer, kNumOutputs * kNumBf16Values * sizeof(float)), cudaSuccess);
-  float *out[kNumOutputs];
-  for (int k = 0; k < kNumOutputs; ++k) out[k] = device_buffer + k * kNumBf16Values;
-  packed_activation_kernel<<<kNumBf16Values / 256, 256>>>(out[0], out[1], out[2], out[3], out[4],
-                                                          out[5]);
+  constexpr int kNumOutputs = 3 * kNumOps;
+  float *out = nullptr;
+  int *ran = nullptr;
+  ASSERT_EQ(cudaMalloc(&out, kNumOutputs * kNumInputs * sizeof(float)), cudaSuccess);
+  ASSERT_EQ(cudaMalloc(&ran, sizeof(int)), cudaSuccess);
+  ASSERT_EQ(cudaMemset(ran, 0, sizeof(int)), cudaSuccess);
+  packed_activation_kernel<<<kNumInputs / 256, 256>>>(out, ran);
   ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
-  std::vector<float> host(kNumOutputs * kNumBf16Values);
-  ASSERT_EQ(
-      cudaMemcpy(host.data(), device_buffer, host.size() * sizeof(float), cudaMemcpyDeviceToHost),
-      cudaSuccess);
-  cudaFree(device_buffer);
+  int ran_host = 0;
+  std::vector<float> host(kNumOutputs * kNumInputs);
+  ASSERT_EQ(cudaMemcpy(&ran_host, ran, sizeof(int), cudaMemcpyDeviceToHost), cudaSuccess);
+  ASSERT_EQ(cudaMemcpy(host.data(), out, host.size() * sizeof(float), cudaMemcpyDeviceToHost),
+            cudaSuccess);
+  cudaFree(out);
+  cudaFree(ran);
+  if (ran_host == 0) {
+    GTEST_SKIP() << "Test kernel was not compiled for compute capability 10.0 or newer";
+  }
 
-  const float *ref_gelu = host.data();
-  const float *ref_dgelu = ref_gelu + kNumBf16Values;
-  const float *packed[4] = {ref_gelu + 2 * kNumBf16Values, ref_gelu + 3 * kNumBf16Values,
-                            ref_gelu + 4 * kNumBf16Values, ref_gelu + 5 * kNumBf16Values};
-  const char *names[4] = {"gelu (low lane)", "gelu (high lane)", "dgelu (low lane)",
-                          "dgelu (high lane)"};
-  for (int k = 0; k < 4; ++k) {
-    const float *ref = k < 2 ? ref_gelu : ref_dgelu;
-    int mismatches = 0;
-    for (int i = 0; i < kNumBf16Values; ++i) {
-      if (!same_value(ref[i], packed[k][i])) {
-        if (mismatches == 0) {
-          ADD_FAILURE() << names[k] << " differs for BF16 input 0x" << std::hex << i << std::dec
-                        << ": scalar " << ref[i] << ", packed " << packed[k][i];
+  for (int op = 0; op < kNumOps; ++op) {
+    const float *ref = host.data() + (3 * op) * kNumInputs;
+    for (int lane = 0; lane < 2; ++lane) {
+      const float *packed = ref + (1 + lane) * kNumInputs;
+      int mismatches = 0;
+      for (int i = 0; i < kNumInputs; ++i) {
+        if (!same_value(ref[i], packed[i])) {
+          if (mismatches == 0) {
+            ADD_FAILURE() << kOpNames[op] << (lane == 0 ? " (low lane)" : " (high lane)")
+                          << " differs for " << (i < (1 << 16) ? "BF16" : "FP16") << " input 0x"
+                          << std::hex << (i & 0xffff) << std::dec << ": scalar " << ref[i]
+                          << ", packed " << packed[i];
+          }
+          ++mismatches;
         }
-        ++mismatches;
       }
+      EXPECT_EQ(mismatches, 0) << kOpNames[op] << (lane == 0 ? " low lane" : " high lane");
     }
-    EXPECT_EQ(mismatches, 0) << names[k];
   }
 }

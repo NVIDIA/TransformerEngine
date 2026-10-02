@@ -12,9 +12,11 @@ add_executable(test_operator
                test_cast_mxfp8_gated_swiglu.cu
                test_qdq.cu
                test_cast_mxfp8.cu
+               test_cast_mxfp8_act_exact.cu
                test_cast_mxfp8_grouped.cu
                test_cast_mxfp8_grouped_scaled_swiglu.cu
                test_cast_nvfp4_transpose.cu
+               test_row_scaled_nvfp4_grouped_amax.cu
                test_cast_float8blockwise.cu
                test_cast_float8blockwise_grouped.cu
                test_dequantize_mxfp8.cu
