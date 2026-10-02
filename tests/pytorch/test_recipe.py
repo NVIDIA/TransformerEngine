@@ -802,3 +802,19 @@ def test_float8_block_scaling_quant_params_follow_constructor(use_f32_scales):
         recipe.fp8_quant_bwd_grad,
     ):
         assert qparams.power_2_scale == (not use_f32_scales)
+
+
+@pytest.mark.parametrize(
+    "recipe",
+    [Float8CurrentScaling(use_power_2_scales=True), Float8BlockScaling(use_f32_scales=True)],
+    ids=["current_scaling", "block_scaling"],
+)
+def test_fp8_recipe_unpickle_rebuilds_missing_quant_params(recipe):
+    state = dict(recipe.__dict__)
+    for name in ("fp8_quant_fwd_inp", "fp8_quant_fwd_weight", "fp8_quant_bwd_grad"):
+        del state[name]
+    restored = recipe.__class__.__new__(recipe.__class__)
+    restored.__setstate__(state)
+    assert restored.fp8_quant_fwd_inp.power_2_scale == recipe.fp8_quant_fwd_inp.power_2_scale
+    assert restored.fp8_quant_fwd_weight.power_2_scale == recipe.fp8_quant_fwd_weight.power_2_scale
+    assert restored.fp8_quant_bwd_grad.power_2_scale == recipe.fp8_quant_bwd_grad.power_2_scale

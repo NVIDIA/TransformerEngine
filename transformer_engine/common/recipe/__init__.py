@@ -317,6 +317,11 @@ class Float8CurrentScaling(Recipe):
         self.fp8_quant_fwd_weight = QParams(power_2_scale=self.use_power_2_scales, amax_epsilon=0.0)
         self.fp8_quant_bwd_grad = QParams(power_2_scale=self.use_power_2_scales, amax_epsilon=0.0)
 
+    def __setstate__(self, state) -> None:
+        self.__dict__.update(state)
+        if "fp8_quant_fwd_inp" not in state:
+            self.__post_init__()
+
     def _make_repr(self) -> str:
         return (
             f"recipe_type={self.__class__.__name__}, "
@@ -465,6 +470,11 @@ class Float8BlockScaling(Recipe):
         self.fp8_quant_fwd_inp = QParams(power_2_scale=not self.use_f32_scales, amax_epsilon=0.0)
         self.fp8_quant_fwd_weight = QParams(power_2_scale=not self.use_f32_scales, amax_epsilon=0.0)
         self.fp8_quant_bwd_grad = QParams(power_2_scale=not self.use_f32_scales, amax_epsilon=0.0)
+
+    def __setstate__(self, state) -> None:
+        self.__dict__.update(state)
+        if "fp8_quant_fwd_inp" not in state:
+            self.__post_init__()
 
     def _make_repr(self) -> str:
         return (
