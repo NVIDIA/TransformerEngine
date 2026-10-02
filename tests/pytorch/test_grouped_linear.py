@@ -3150,22 +3150,23 @@ def test_grouped_linear_fused_path_cuda_graph_safe(fp8_recipe, bias, monkeypatch
         torch.testing.assert_close(graph_grad.float(), param.grad.float(), **tols)
 
 
-@pytest.mark.skipif(not _fp8_block_scaling_available, reason=_reason_for_no_fp8_block_scaling)
-@pytest.mark.skipif(
-    not (10, 0) <= torch.cuda.get_device_capability() <= (11, 0),
-    reason="Error path only triggers on Blackwell (SM100/SM110).",
-)
-def test_grouped_linear_fused_path_fp8_block_scaling_blackwell_error(monkeypatch):
-    """FP8BS + fused env var on Blackwell must raise, not silently fall back."""
-    monkeypatch.setenv(_FUSED_GROUPED_GEMM_ENV, "1")
-    FP8GlobalStateManager.reset()
+def test_fp8_block_scaling_grouped_tensor_path_matches_mxfp8_support():
+    """FP8 block scaling takes the grouped-tensor path wherever MXFP8 does, and on Hopper."""
+    from transformer_engine.pytorch.ops.basic.grouped_linear import (
+        is_op_fuser_grouped_tensor_path_supported,
+    )
+
     dtype = torch.bfloat16
-    grouped_linear = GroupedLinear(2, 128, 128, bias=False, params_dtype=dtype, device="cuda")
-    x = torch.randn(256, 128, device="cuda", dtype=dtype, requires_grad=True)
-    m_splits = torch.tensor([128, 128], dtype=torch.int64, device="cuda")
-    with pytest.raises(RuntimeError, match="Hopper-only"):
-        with autocast(enabled=True, recipe=recipe.Float8BlockScaling()):
-            grouped_linear(x, m_splits)
+    cc = torch.cuda.get_device_capability()
+    for predicate in (
+        is_module_grouped_tensor_path_supported,
+        is_op_fuser_grouped_tensor_path_supported,
+    ):
+        fp8bs = predicate(recipe.Float8BlockScaling(), dtype)
+        if cc >= (10, 0):
+            assert fp8bs == predicate(recipe.MXFP8BlockScaling(), dtype), predicate.__name__
+        elif cc >= (9, 0):
+            assert fp8bs == (tex.get_cublasLt_version() >= 130600), predicate.__name__
 
 
 @pytest.mark.parametrize("swizzle_type", ["mxfp8_rowwise", "mxfp8_columnwise", "nvfp4"])
