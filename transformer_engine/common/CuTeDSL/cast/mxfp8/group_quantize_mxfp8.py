@@ -2,63 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Grouped MXFP8 quantization kernel implemented in CuTeDSL.
-
-Strategy-aligned port of group_quantize_mxfp8.cuh. The scheduling, descriptor
-management and per-tensor scale addressing mirror the CUDA kernel one-for-one:
-
-  * `is_single_tensor` reps (SAME_BOTH_DIMS, VARYING_FIRST_DIM) launch ONE CTA per
-    128x128 job and address the group through ONE static TMA descriptor with
-    global job offsets -- the CUDA `tensor_map_*_static` "direct mapper" path.
-    For SAME_BOTH_DIMS the CUDA grid is linearized per tensor (X, Y-in-tensor,
-    tensor) while this kernel linearizes it flat over the stacked rows; both
-    require every member's row count to be a multiple of 128, and under
-    that precondition the two decode to the identical (job_start_row, job_id_X)
-    for every job index.
-  * the other reps launch grid=(workers_per_tensor, num_tensors) and bind
-    tensor_id to blockIdx.y, so a CTA grid-strides only within its own tensor and
-    never re-resolves which tensor a job belongs to. They get per-tensor
-    descriptors written by a prologue kernel (the CuTeDSL analog of
-    update_tma_descriptors filling g_tensor_maps) and acquired with a tensormap
-    proxy fence.
-  * per-tensor scale bases/strides follow the CUDA formulas:
-        scales_* += is_single_tensor ? 0 : tensor_base / 32
-        stride_rowwise = roundup(cols/32, 4)   stride_colwise = roundup(cols, 128)
-
-Both kernels dropped the older flat persistent grid that strided across tensor
-boundaries (CUDA's decode_job / advance_to_next_job, removed in #3483); the
-per-tensor grid above is what replaced it on both sides.
-
-Mechanics that provably yield the same bytes may differ: the mbarrier pipeline is
-expressed with PipelineTmaAsync instead of hand-rolled mbarriers. As in CUDA, the
-scales of out-of-bounds columns in a job (the scale-row padding) are written as 0.
-
-Scope: everything group_quantize_mxfp8.cuh covers except 2D block scaling -- the
-cast-noop flag, fused activation (IS_ACT) and activation derivative (IS_DACT), dbias,
-compact and GEMM-swizzled scales, rowwise and/or colwise, and all four shape
-representations. Differences from CUDA:
-  * the grouped amax pointer is accepted and left untouched, as the CUDA kernel does;
-  * dbias partial sums are accumulated in the CUDA kernel's order (a running column sum
-    with colwise output, otherwise per-thread sums reduced across the CTA), and the C++
-    bridge reduces the workspace with the same grouped_reduce_dbias.
-
-Like the CUDA kernel, every member's first dim must be a multiple of 128 (and, for the
-varying-last reps, its last dim too). The kernel prints the same diagnostics as
-get_tensor_rows_num / get_tensor_cols_num when a group violates this and, like
-NVTE_DEVICE_ERROR in a release build, carries on.
-
-Measured, deliberately NOT changed:
-  - sO_row and sO_col are both allocated unconditionally, where CUDA sizes only the
-    direction in use. Sizing them conditionally does work -- ncu confirms the shared-memory
-    occupancy limit goes 6 -> 9 CTAs/SM for a single-direction bf16 config -- but it is a
-    small LOSS on GB200, not a win: rep_med_sbd bf16 colwise 54.9 -> 56.1 us, rowwise
-    56.5 -> 57.0 us (fp32 rowwise gains ~1%). The kernel is DRAM-bandwidth-bound at
-    ~6.3 TB/s, so extra resident CTAs only add contention. Verified by a control that kept
-    the conditional code but padded SMEM back to the old size: timings returned exactly to
-    the unconditional numbers, so the effect is the occupancy, not codegen. Revisit if a
-    future variant (dbias / activation) makes this kernel latency- rather than
-    bandwidth-bound.
-"""
+"""Grouped MXFP8 quantization kernel implemented in CuTeDSL."""
 
 # pylint: disable=missing-class-docstring
 
@@ -72,8 +16,8 @@ from cutlass import pipeline
 from cutlass import Boolean, Float32, Int32, Int64, Float8E8M0FNU
 from cutlass.cute.nvgpu import cpasync
 from cutlass.cute.testing import assert_ as runtime_assert
-from cutlass.utils import TensorMapManager, TensorMapUpdateMode
-from cutlass.utils import HardwareInfo
+from cutlass.utils import TensorMapUpdateMode, HardwareInfo
+from cutlass.tensor_utils import TensorMapManager
 from cuda.bindings.driver import CUstream  # pylint: disable=no-name-in-module
 import tvm_ffi
 
@@ -226,7 +170,7 @@ class MXFP8GroupQuantizeKernel:
     # How many threads per bank -- for avoiding bank conflicts
     THREADS_PER_BANK = (32 * 4) // MXFP8_BLOCK_SCALING_SIZE  # 4
 
-    def __init__(self, cfg: MXFP8GroupQuantizeConfig, SM_COUNT: int):
+    def __init__(self, cfg: MXFP8GroupQuantizeConfig, SM_COUNT: int) -> None:
         self.cfg = cfg
         self.SM_COUNT = SM_COUNT
         # A CTA processes (NUM_TILES_Y, NUM_TILES_X) tiles, NUM_STAGES tiles in total
@@ -249,7 +193,9 @@ class MXFP8GroupQuantizeKernel:
         self.DBIAS_IN_ROWWISE = cfg.WITH_DBIAS and not cfg.COLWISE
 
     @cute.jit
-    def _find_tensor_from_offsets(self, mOffsets, num_tensors, offset: Int64):
+    def _find_tensor_from_offsets(
+        self, mOffsets: cute.Tensor, num_tensors: Int32, offset: Int64
+    ) -> Int32:
         """Index of the tensor whose element range holds `offset` (find_tensor_from_offsets)."""
         low = Int32(1)
         hi = Int32(num_tensors)
@@ -264,7 +210,7 @@ class MXFP8GroupQuantizeKernel:
         return low - 1
 
     @cute.jit
-    def _scale_tensor(self, mS, base: Int64, layout):
+    def _scale_tensor(self, mS: cute.Tensor, base: Int64, layout: cute.Layout) -> cute.Tensor:
         """View the scale buffer from element `base` on with `layout`."""
         return cute.make_tensor(
             cute.make_ptr(
@@ -277,7 +223,9 @@ class MXFP8GroupQuantizeKernel:
         )
 
     @cute.jit
-    def _rowwise_scales(self, mS_row, base: Int64, rows, cols):
+    def _rowwise_scales(
+        self, mS_row: cute.Tensor, base: Int64, rows: Int32, cols: Int32
+    ) -> cute.Tensor:
         """Rowwise scales of a (rows, cols) tensor at `base`, tiled per 32x128 stage."""
         if cutlass.const_expr(self.cfg.WITH_GEMM_SWIZZLED_SCALES):
             mS_t, _ = derive_swizzled_scale_layout(
@@ -294,7 +242,9 @@ class MXFP8GroupQuantizeKernel:
         )
 
     @cute.jit
-    def _colwise_scales(self, mS_col, base: Int64, rows, cols):
+    def _colwise_scales(
+        self, mS_col: cute.Tensor, base: Int64, rows: Int32, cols: Int32
+    ) -> cute.Tensor:
         """Colwise scales of a (rows, cols) tensor at `base`, tiled per 32x128 stage."""
         if cutlass.const_expr(self.cfg.WITH_GEMM_SWIZZLED_SCALES):
             _, mS_t = derive_swizzled_scale_layout(
@@ -332,7 +282,7 @@ class MXFP8GroupQuantizeKernel:
         mActInput: Optional[cute.Tensor],  # activation input, only with WITH_DACT
         mWorkspace: Optional[cute.Tensor],  # f32 partial dbias, only with WITH_DBIAS
         stream: CUstream,
-    ):
+    ) -> None:
         if cutlass.const_expr(CUTEDSL_DEBUG_LOGGING):
             cute.printf(f"[CuTeDSL] MXFP8GroupQuantizeKernel.__call__() cfg: {self.cfg}\n")
 
@@ -469,22 +419,22 @@ class MXFP8GroupQuantizeKernel:
     @cute.kernel
     def _update_descriptors_kernel(
         self,
-        mX,
-        mO_row,
-        mO_col,
-        mActInput,
-        mOffsets,
-        mFirstDims,
-        mLastDims,
-        mTensormaps,
-        first_logical_dim,
-        last_logical_dim,
+        mX: cute.Tensor,
+        mO_row: Optional[cute.Tensor],
+        mO_col: Optional[cute.Tensor],
+        mActInput: Optional[cute.Tensor],
+        mOffsets: cute.Tensor,
+        mFirstDims: Optional[cute.Tensor],
+        mLastDims: Optional[cute.Tensor],
+        mTensormaps: cute.Tensor,
+        first_logical_dim: Int32,
+        last_logical_dim: Int32,
         dtype: cutlass.Constexpr[Type[cutlass.Numeric]],
-        tma_atom_x,
-        tma_atom_orow,
-        tma_atom_ocol,
-        tma_atom_act,
-    ):
+        tma_atom_x: cute.CopyAtom,
+        tma_atom_orow: Optional[cute.CopyAtom],
+        tma_atom_ocol: Optional[cute.CopyAtom],
+        tma_atom_act: Optional[cute.CopyAtom],
+    ) -> None:
         """Update the per-tensor TMA descriptors for the group quantization kernel.
 
         mTensormaps: int64[num_tensors, NUM_WORKSPACE_SLOTS, 16], where the slots are:
@@ -543,7 +493,7 @@ class MXFP8GroupQuantizeKernel:
         if rows > 0 and cols > 0:
             member_layout = cute.make_layout((rows, cols), stride=(cols, 1))
 
-            def member_view(tensor, elt_dtype):
+            def member_view(tensor: cute.Tensor, elt_dtype: Type[cutlass.Numeric]) -> cute.Tensor:
                 return cute.make_tensor(
                     cute.make_ptr(
                         elt_dtype,
@@ -586,9 +536,16 @@ class MXFP8GroupQuantizeKernel:
     @cute.jit
     def _make_shared_storage(
         self,
-        smem: cutlass.Constexpr,
+        smem: cutlass.Constexpr[cutlass.utils.SmemAllocator],
         dtype: cutlass.Constexpr[Type[cutlass.Numeric]],
-    ):
+    ) -> tuple[
+        cute.Pointer,
+        cute.Tensor,
+        Optional[cute.Tensor],
+        Optional[cute.Tensor],
+        Optional[cute.Tensor],
+        Optional[cute.Tensor],
+    ]:
         """Allocate pipeline buffers and optional activation input and dbias storage."""
         FP8_DTYPE = self.cfg.FP8_DTYPE
         tile_layout = cute.make_layout(
@@ -705,27 +662,27 @@ class MXFP8GroupQuantizeKernel:
     @cute.kernel
     def kernel(
         self,
-        mS_row,
-        mS_col,
-        mOffsets,
-        mFirstDims,
-        mTensormaps,
-        mNoop,
-        mWorkspace,
-        first_logical_dim,
-        last_logical_dim,
-        num_tensors,
-        jobs_X,
+        mS_row: cute.Tensor,
+        mS_col: cute.Tensor,
+        mOffsets: cute.Tensor,
+        mFirstDims: Optional[cute.Tensor],
+        mTensormaps: cute.Tensor,
+        mNoop: cute.Pointer,
+        mWorkspace: Optional[cute.Tensor],
+        first_logical_dim: Int32,
+        last_logical_dim: Int32,
+        num_tensors: Int32,
+        jobs_X: Optional[Int32],
         dtype: cutlass.Constexpr[Type[cutlass.Numeric]],
-        tma_atom_x,
-        tma_src,
-        tma_atom_act,
-        tma_src_act,
-        tma_atom_out_row,
-        tma_dst_out_row,
-        tma_atom_out_col,
-        tma_dst_out_col,
-    ):
+        tma_atom_x: cute.CopyAtom,
+        tma_src: cute.Tensor,
+        tma_atom_act: Optional[cute.CopyAtom],
+        tma_src_act: Optional[cute.Tensor],
+        tma_atom_out_row: Optional[cute.CopyAtom],
+        tma_dst_out_row: Optional[cute.Tensor],
+        tma_atom_out_col: Optional[cute.CopyAtom],
+        tma_dst_out_col: Optional[cute.Tensor],
+    ) -> None:
         """No-op the CTA when the noop flag is set, else run the quantize main loop."""
         skip_execution = Boolean(False)
         if cutlass.const_expr(self.CHECK_NOOP_FLAG):
@@ -756,26 +713,26 @@ class MXFP8GroupQuantizeKernel:
     @cute.jit
     def _kernel_main(
         self,
-        mS_row,
-        mS_col,
-        mOffsets,
-        mFirstDims,
-        mTensormaps,
-        mWorkspace,
-        first_logical_dim,
-        last_logical_dim,
-        num_tensors,
-        jobs_X,
+        mS_row: cute.Tensor,
+        mS_col: cute.Tensor,
+        mOffsets: cute.Tensor,
+        mFirstDims: Optional[cute.Tensor],
+        mTensormaps: cute.Tensor,
+        mWorkspace: Optional[cute.Tensor],
+        first_logical_dim: Int32,
+        last_logical_dim: Int32,
+        num_tensors: Int32,
+        jobs_X: Optional[Int32],
         dtype: cutlass.Constexpr[Type[cutlass.Numeric]],
-        tma_atom_x,
-        tma_src,
-        tma_atom_act,
-        tma_src_act,
-        tma_atom_out_row,
-        tma_dst_out_row,
-        tma_atom_out_col,
-        tma_dst_out_col,
-    ):
+        tma_atom_x: cute.CopyAtom,
+        tma_src: cute.Tensor,
+        tma_atom_act: Optional[cute.CopyAtom],
+        tma_src_act: Optional[cute.Tensor],
+        tma_atom_out_row: Optional[cute.CopyAtom],
+        tma_dst_out_row: Optional[cute.Tensor],
+        tma_atom_out_col: Optional[cute.CopyAtom],
+        tma_dst_out_col: Optional[cute.Tensor],
+    ) -> None:
         cfg = self.cfg
         FP8_DTYPE = cfg.FP8_DTYPE
         tidx, _, _ = cute.arch.thread_idx()
@@ -1064,15 +1021,15 @@ class MXFP8GroupQuantizeKernel:
 
     def _issue_load(
         self,
-        pipeline_obj,
-        prod_state,
-        tile_y,
-        tile_x,
-        atoms,
-        partitions,
-        tmap,
-        descs,
-    ):
+        pipeline_obj: pipeline.PipelineTmaAsync,
+        prod_state: pipeline.PipelineState,
+        tile_y: Int32,
+        tile_x: Int32,
+        atoms: tuple[Optional[cute.CopyAtom], ...],
+        partitions: tuple[Optional[cute.Tensor], ...],
+        tmap: TensorMapManager,
+        descs: tuple[Optional[cute.Pointer], ...],
+    ) -> None:
         """Emit the 32x128 TMA load(s) of one stage into the current pipeline buffer.
 
         Caller gates this on warp 0 and advances `prod_state` afterwards -- the advance
@@ -1111,30 +1068,36 @@ class MXFP8GroupQuantizeKernel:
     @cute.jit
     def _process_job(
         self,
-        job_start_row,  # Row offset of this job (global for single-tensor, else tensor-local)
-        job_start_col,  # Column offset of this job within the tensor
-        rows,  # Rows of the rowwise-scale view (the group for single-tensor, else the tensor)
-        cols,  # Number of columns in this tensor
-        row_scales,  # Rowwise scales tiled per stage, rows counted like job_start_row
-        col_scales,  # Colwise scales tiled per stage
-        col_scale_row_start,  # Row of this job in the colwise-scale view
-        col_scale_rows,  # Rows of the colwise-scale view
-        mWorkspace,  # f32 partial dbias workspace (WITH_DBIAS)
-        sDbias,  # SMEM buffer for the rowwise dbias reduction (rowwise-only dbias)
-        descs,  # Per-tensor descriptors (x, act, out_row, out_col), None if single-tensor
-        tmap,  # TensorMapManager for managing TMA descriptors
-        warp_idx,
-        tidx,
-        sX,  # SMEM input ring
-        sActInput,  # SMEM activation input ring (WITH_DACT)
-        sO_row,  # SMEM rowwise output ring
-        sO_col,  # SMEM colwise output ring
-        partitions,  # TMA partitions (x, act, out_row, out_col)
-        atoms,  # TMA atoms (x, act, out_row, out_col)
+        job_start_row: Int32,  # Row offset of this job (global for single-tensor, else tensor-local)
+        job_start_col: Int32,  # Column offset of this job within the tensor
+        rows: Int32,  # Rows of the rowwise-scale view (the group for single-tensor, else the tensor)
+        cols: Int32,  # Number of columns in this tensor
+        row_scales: Optional[
+            cute.Tensor
+        ],  # Rowwise scales tiled per stage, rows counted like job_start_row
+        col_scales: Optional[cute.Tensor],  # Colwise scales tiled per stage
+        col_scale_row_start: Int32,  # Row of this job in the colwise-scale view
+        col_scale_rows: Int32,  # Rows of the colwise-scale view
+        mWorkspace: Optional[cute.Tensor],  # f32 partial dbias workspace (WITH_DBIAS)
+        sDbias: Optional[
+            cute.Tensor
+        ],  # SMEM buffer for the rowwise dbias reduction (rowwise-only dbias)
+        descs: tuple[
+            Optional[cute.Pointer], ...
+        ],  # Per-tensor descriptors (x, act, out_row, out_col), None if single-tensor
+        tmap: TensorMapManager,  # TensorMapManager for managing TMA descriptors
+        warp_idx: Int32,
+        tidx: Int32,
+        sX: cute.Tensor,  # SMEM input ring
+        sActInput: Optional[cute.Tensor],  # SMEM activation input ring (WITH_DACT)
+        sO_row: Optional[cute.Tensor],  # SMEM rowwise output ring
+        sO_col: Optional[cute.Tensor],  # SMEM colwise output ring
+        partitions: tuple[Optional[cute.Tensor], ...],  # TMA partitions (x, act, out_row, out_col)
+        atoms: tuple[Optional[cute.CopyAtom], ...],  # TMA atoms (x, act, out_row, out_col)
         mainloop_pipeline: cutlass.pipeline.PipelineTmaAsync,
-        prod_state,
-        cons_state,
-    ):
+        prod_state: pipeline.PipelineState,
+        cons_state: pipeline.PipelineState,
+    ) -> None:
         """Quantize a job with one continuous pipeline across its column and row tiles."""
         cfg = self.cfg
         _, _, tma_atom_out_row, tma_atom_out_col = atoms
