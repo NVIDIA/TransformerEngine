@@ -6,6 +6,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <iomanip>
@@ -21,6 +22,7 @@
 
 #include "../test_common.h"
 #include "transformer_engine/transformer_engine.h"
+#include "util/cuda_runtime.h"
 
 using namespace transformer_engine;
 
@@ -641,6 +643,28 @@ INSTANTIATE_TEST_SUITE_P(
     return "VariableShapes_" + std::to_string(info.index) + "_N" + std::to_string(info.param.size());
   }
 );
+
+// NVTE_GROUPED_QUANTIZE_SM_MARGIN applies to both uniform and variable shapes.
+TEST(OperatorTest, GroupedSwizzleSMMarginWithinRangeSucceeds) {
+  setenv("NVTE_GROUPED_QUANTIZE_SM_MARGIN", "4", 1);
+  performTestGroupedSwizzleMXFP8Variable(
+      std::vector<std::pair<size_t, size_t>>{{128, 128}, {256, 256}});
+}
+
+TEST(OperatorTest, GroupedSwizzleSMMarginRejectsOutOfRangeValue) {
+  const int device_sm_count = transformer_engine::cuda::sm_count();
+  setenv("NVTE_GROUPED_QUANTIZE_SM_MARGIN", std::to_string(device_sm_count).c_str(), 1);
+  EXPECT_THROW(
+      performTestGroupedSwizzleMXFP8Variable(
+          std::vector<std::pair<size_t, size_t>>{{128, 128}, {256, 256}}),
+      std::runtime_error);
+}
+
+// Same mechanism, exercised against uniform shapes.
+TEST(OperatorTest, GroupedSwizzleUniformShapeSMMarginWithinRangeSucceeds) {
+  setenv("NVTE_GROUPED_QUANTIZE_SM_MARGIN", "4", 1);
+  performTestGroupedSwizzleMXFP8(2, 128, 128);
+}
 
 class SwizzleGroupedTestSuite
     : public ::testing::TestWithParam<std::tuple<int, size_t, size_t>> {};

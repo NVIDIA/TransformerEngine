@@ -209,6 +209,7 @@ list(APPEND transformer_engine_cpp_sources
      util/cuda_runtime.cpp
      util/multi_stream.cpp
      util/rtc.cpp
+     util/sm_carveout.cpp
      comm_gemm/comm_gemm.cpp
      comm_gemm_overlap/userbuffers/ipcsocket.cc
      comm_gemm_overlap/userbuffers/userbuffers-host.cpp

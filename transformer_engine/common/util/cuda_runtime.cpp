@@ -127,6 +127,13 @@ int sm_arch(int device_id) {
   return cache[device_id];
 }
 
+int grouped_quantize_sm_margin() {
+  // Cached to avoid a getenv() on every grouped-quantize/grouped-swizzle call; the env var
+  // is expected to be set once before use, matching sm_carveout.h's own per-device caching.
+  static const int margin = transformer_engine::getenv<int>("NVTE_GROUPED_QUANTIZE_SM_MARGIN", 0);
+  return margin;
+}
+
 int sm_count(int device_id) {
   static std::vector<int> cache(num_devices(), -1);
   static std::vector<std::once_flag> flags(num_devices());

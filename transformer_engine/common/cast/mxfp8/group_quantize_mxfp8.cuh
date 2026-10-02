@@ -20,6 +20,7 @@
 #include "../../util/cuda_runtime.h"
 #include "../../util/math.h"
 #include "../../util/ptx_arch_spec.cuh"
+#include "../../util/sm_carveout.h"
 #include "../../utils.cuh"
 #include "../core/common.cuh"
 #include "swizzle.cuh"
@@ -176,6 +177,8 @@ LaunchConfig get_launch_config(const size_t first_logical_dim, const size_t last
     // kernel derives exact tensor-local work grids.
     config.work_blocks_X = DIVUP(elts_total, CHUNK_DIM_Y * TILE_DIM_X);
 
+    // NVTE_GROUPED_QUANTIZE_SM_MARGIN is enforced via a green-context stream below (see
+    // sm_carveout.h), not by shrinking this grid, since occupancy isn't 1 block/SM here.
     const size_t sm_num = static_cast<size_t>(transformer_engine::cuda::sm_count());
     const size_t static_grid_size = sm_num * CastTraits::STATIC_PERSISTENT_BLOCKS_PER_SM;
     NVTE_CHECK(static_grid_size > 0, "Static persistent grid size must be greater than zero.");
@@ -1298,6 +1301,12 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
                         const size_t out_mem = out_rowwise_mem + out_colwise_mem;
                         const size_t dshmem_size = in_mem + out_mem + TMA_SHMEM_ALIGNMENT;
 
+                        // Applies NVTE_GROUPED_QUANTIZE_SM_MARGIN, if any, to both kernels below.
+                        const int sm_margin =
+                            transformer_engine::cuda::grouped_quantize_sm_margin();
+                        const cudaStream_t launch_stream =
+                            transformer_engine::cuda::sm_carveout_stream_begin(stream, sm_margin);
+
                         // Update tensor descriptors before launching the kernel
                         if (!is_single_tensor) {
                           const IType *const input_dptr =
@@ -1313,7 +1322,7 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
                                   ? reinterpret_cast<OType *>(output->columnwise_data.dptr)
                                   : nullptr;
                           update_tma_descriptors<IType, OType>
-                              <<<num_tensors, THREADS_PER_WARP, 0, stream>>>(
+                              <<<num_tensors, THREADS_PER_WARP, 0, launch_stream>>>(
                                   tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
                                   tensor_map_output_colwise, input_dptr, act_input_dptr,
                                   output_rowwise_dptr, output_colwise_dptr, shape_rep, num_tensors,
@@ -1332,7 +1341,8 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
                                   kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                                   dshmem_size));
 
-                              kernel<<<launch_config.grid, block_size, dshmem_size, stream>>>(
+                              kernel<<<launch_config.grid, block_size, dshmem_size,
+                                       launch_stream>>>(
                                   tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
                                   tensor_map_output_colwise, num_tensors, first_logical_dim,
                                   last_logical_dim, launch_config.same_both_rows, offsets_ptr,
@@ -1340,6 +1350,9 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
                                   scales_colwise_ptr, noop_ptr, workspace_ptr, amax_ptr,
                                   launch_config.work_blocks_X, launch_config.work_blocks_Y);
                             });
+
+                        transformer_engine::cuda::sm_carveout_stream_end(stream, launch_stream,
+                                                                         sm_margin);
 
                         if constexpr (IS_DBIAS) {
                           common::grouped_reduce_dbias<IType>(
