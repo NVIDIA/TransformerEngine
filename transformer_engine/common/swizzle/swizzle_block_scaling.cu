@@ -690,6 +690,11 @@ void swizzle_grouped_block_scaling_to_mxfp8_scaling_factors(const GroupedTensor*
              "Input and output grouped tensors must have the same number of tensors");
   const bool varying_first = input->first_dims.has_data();
   const bool varying_last = input->last_dims.has_data();
+  // The kernel reads the per-tensor dims as int64.
+  NVTE_CHECK(!varying_first || input->first_dims.dtype == DType::kInt64,
+             "Grouped tensor first_dims must have int64 dtype");
+  NVTE_CHECK(!varying_last || input->last_dims.dtype == DType::kInt64,
+             "Grouped tensor last_dims must have int64 dtype");
 
   const size_t bound = grouped_mxfp8_scale_bytes_upper_bound(*input);
   if (bound == 0) {

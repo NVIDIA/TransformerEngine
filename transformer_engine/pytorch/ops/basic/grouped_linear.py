@@ -90,6 +90,9 @@ def is_op_fuser_grouped_tensor_path_supported(
     * FP8 block scaling uses the grouped-tensor path wherever MXFP8 does
       (power-of-2 scales only) and on Hopper with cuBLASLt 13.6+. Otherwise it
       falls back to the split-quantize path for discrete parameters.
+    * With MXFP8 or FP8 block scaling, every split size must be a multiple of
+      128. This is checked only on the device, so other split sizes can produce
+      incorrect results.
     * Custom recipes are unsupported because they may assign different
       quantizers to input, weight, and grad-output roles. This predicate
       currently supports only built-in recipes with known uniform layouts.
@@ -143,6 +146,12 @@ class GroupedLinear(BasicOperation):
     This is equivalent to splitting the input tensor along its first
     dimension, applying a separate ``torch.nn.Linear`` to each split,
     and concatenating along the first dimension.
+
+    The grouped-tensor path is selected automatically where it is
+    supported (see ``is_op_fuser_grouped_tensor_path_supported``). With
+    MXFP8 or FP8 block scaling, it requires every split size to be a
+    multiple of 128. This is checked only on the device, so other split
+    sizes can produce incorrect results.
 
     Parameters
     ----------
