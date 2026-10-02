@@ -29,6 +29,7 @@ class TensorSpec:
     quantizer: Optional[Any] = None
     requires_grad: bool = False
     device: Optional[torch.device] = field(default=None)
+    with_gemm_swizzled_scales: Optional[bool] = None
 
     def __post_init__(self) -> None:
         # Own a private copy of the quantizer so usage changes (update_usage)
@@ -37,6 +38,10 @@ class TensorSpec:
         if self.quantizer is not None:
             q = self.quantizer
             self.quantizer = q.copy() if hasattr(q, "copy") else _copy.copy(q)
+            if self.with_gemm_swizzled_scales is None:
+                self.with_gemm_swizzled_scales = self.quantizer.storage_metadata(self.dtype)[
+                    "nontensor_kwargs"
+                ].get("with_gemm_swizzled_scales")
 
     @property
     def is_quantized(self) -> bool:
@@ -94,9 +99,12 @@ class TensorSpec:
                 "dtype": self.dtype,
                 "requires_grad": self.requires_grad,
             }
-        return self.quantizer.create_metadata(
+        meta = self.quantizer.create_metadata(
             tuple(self.shape), dtype=self.dtype, requires_grad=self.requires_grad
         )
+        if self.with_gemm_swizzled_scales is not None:
+            meta["nontensor_kwargs"]["with_gemm_swizzled_scales"] = self.with_gemm_swizzled_scales
+        return meta
 
     def create_inner_tensors(self) -> List[torch.Tensor]:
         """Materialize the flat inner tensors (in :meth:`inner_names` order).
@@ -145,6 +153,32 @@ class TensorSpec:
         return self.assemble(self.create_inner_tensors())
 
 
+@dataclass
+class GroupedTensorSpec(TensorSpec):
+    """Grouped buffers and metadata, including unquantized grouped parameters."""
+
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    buffers: Dict[str, TensorSpec] = field(default_factory=dict)
+
+    def inner_names(self) -> Tuple[str, ...]:
+        return tuple(self.buffers)
+
+    def create_metadata(self) -> Dict[str, Any]:
+        return self.metadata
+
+    def create_inner_tensors(self) -> List[torch.Tensor]:
+        return [spec.create_tensor() for spec in self.buffers.values()]
+
+    def assemble(self, inner_tensors: List[torch.Tensor]) -> Any:
+        inner = dict(zip(self.inner_names(), inner_tensors))
+        return self.metadata["cls"].__tensor_unflatten__(
+            inner, self.metadata, self.shape, make_contiguous_strides_for(self.shape)
+        )
+
+    def create_tensor(self) -> Any:
+        return self.assemble(self.create_inner_tensors())
+
+
 def to_tensor_spec(tensor: Any) -> TensorSpec:
     """Build a :class:`TensorSpec` describing ``tensor``.
 
@@ -152,7 +186,24 @@ def to_tensor_spec(tensor: Any) -> TensorSpec:
     ``QuantizedTensor``. A *bare* storage exposes its (fake) dtype via
     ``_dtype`` rather than ``.dtype``.
     """
+    from ..tensor.storage.grouped_tensor_storage import (
+        GroupedTensorStorage,
+    )  # pylint: disable=import-outside-toplevel
+
     requires_grad = bool(getattr(tensor, "requires_grad", False))
+    if isinstance(tensor, GroupedTensorStorage):
+        names, metadata = GroupedTensorStorage.__tensor_flatten__(tensor)
+        buffers = {name: to_tensor_spec(getattr(tensor, name)) for name in names}
+        return GroupedTensorSpec(
+            shape=tuple(tensor.shape if isinstance(tensor, torch.Tensor) else tensor.logical_shape),
+            dtype=tensor.fake_dtype,
+            quantizer=tensor.quantizer,
+            requires_grad=requires_grad,
+            device=next(iter(buffers.values())).device,
+            with_gemm_swizzled_scales=getattr(tensor, "_with_gemm_swizzled_scales"),
+            metadata=metadata,
+            buffers=buffers,
+        )
     dtype = getattr(tensor, "dtype", None)
     if dtype is None:
         dtype = getattr(tensor, "_dtype", None)
@@ -162,4 +213,5 @@ def to_tensor_spec(tensor: Any) -> TensorSpec:
         quantizer=getattr(tensor, "_quantizer", None),
         requires_grad=requires_grad,
         device=tensor.device,
+        with_gemm_swizzled_scales=getattr(tensor, "_with_gemm_swizzled_scales", None),
     )

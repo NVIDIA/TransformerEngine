@@ -5,6 +5,7 @@
 """Internal function used by multiple modules."""
 
 import dataclasses
+import math
 import queue
 from typing import Any, Callable, List, Optional, Tuple, Union
 
@@ -13,10 +14,32 @@ import torch
 from .. import cpp_extensions as tex
 from ..constants import TE_DType
 from ..distributed import in_fp8_activation_recompute_phase
+from ..dynamo import TensorSpec
 from ..export import is_in_onnx_export_mode
 from ..quantization import FP8GlobalStateManager
 from ..tensor.hybrid_tensor import HybridQuantizer
-from ..utils import get_default_init_method
+from ..tensor.nvfp4_tensor import NVFP4Quantizer
+from ..utils import get_default_init_method, get_device_compute_capability
+
+
+def update_nvfp4_direct_output_spec(spec: TensorSpec) -> None:
+    """Match the NVFP4 layout emitted without a post-quantize swizzle."""
+    quantizer = spec.quantizer
+    if not isinstance(quantizer, NVFP4Quantizer) or not quantizer.optimize_for_gemm:
+        return
+    rows, cols = math.prod(spec.shape[:-1]), spec.shape[-1]
+    if not (10, 0) <= get_device_compute_capability() <= (11, 0):
+        spec.with_gemm_swizzled_scales = False
+    elif quantizer.with_rht:
+        spec.with_gemm_swizzled_scales = bool(rows % 64 == 0 and cols % 128 == 0)
+    else:
+        spec.with_gemm_swizzled_scales = bool(
+            quantizer.with_2d_quantization
+            and not quantizer.row_scaled_nvfp4
+            and not quantizer.nvfp4_use_4over6
+            and rows % 128 == 0
+            and cols % 128 == 0
+        )
 
 
 def sum_bias_grad(tensor: torch.Tensor) -> torch.Tensor:

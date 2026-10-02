@@ -738,6 +738,28 @@ def check_gemm_dims(inp: torch.Tensor, weight: torch.Tensor, fp8: bool) -> None:
         )
 
 
+def check_grouped_gemm_dims(
+    inp: torch.Tensor,
+    weight: torch.Tensor,
+    m_splits: Sequence[int],
+    fp8: bool,
+) -> None:
+    """Check compiled grouped GEMM dimensions and host split sizes."""
+    # pylint: disable=protected-access
+    check_gemm_dims(inp, weight, fp8)
+    torch._check(
+        math.prod(inp.shape[:-1]) == sum(m_splits),
+        lambda: "GEMM not possible: m_splits must sum to the input's token count",
+    )
+    for split in m_splits:
+        torch._check(split >= 0, lambda: "m_splits entries must be non-negative")
+    if fp8:
+        torch._check(
+            all(m % 8 == 0 for m in m_splits),
+            lambda: "FP8 execution requires every m_splits entry to be divisible by 8",
+        )
+
+
 def is_bf16_compatible() -> bool:
     """Replaces torch.cuda.is_bf16_compatible() with an explicit
     check on device compute capability to enforce sm_80 or higher.

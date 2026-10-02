@@ -4,7 +4,7 @@
 
 """Grouped tensor storage class for handling collections of tensors with different shapes"""
 from __future__ import annotations
-from typing import Optional, Tuple, List, Union
+from typing import Any, Dict, Optional, Tuple, List, Union
 import math
 
 import torch
@@ -342,6 +342,60 @@ class GroupedTensorStorage:
     @nvfp4_e4m3_max.setter
     def nvfp4_e4m3_max(self, nvfp4_e4m3_max: int) -> None:
         self._nvfp4_e4m3_max = nvfp4_e4m3_max
+
+    _INNER_TENSORS = (
+        ("rowwise_data", "data"),
+        ("columnwise_data", "columnwise_data"),
+        ("scale_inv", "scale_inv"),
+        ("columnwise_scale_inv", "columnwise_scale_inv"),
+        ("amax", "amax"),
+        ("columnwise_amax", "columnwise_amax"),
+        ("scale", "scale"),
+        ("first_dims", "first_dims"),
+        ("last_dims", "last_dims"),
+        ("tensor_offsets", "tensor_offsets"),
+    )
+
+    def __tensor_flatten__(self) -> Tuple[List[str], Dict[str, Any]]:
+        """Separate grouped buffers from their reconstruction metadata."""
+        names = [name for name, _ in self._INNER_TENSORS if getattr(self, name) is not None]
+        shared_scale = self.scale_inv is not None and self.columnwise_scale_inv is self.scale_inv
+        if shared_scale:
+            names.remove("columnwise_scale_inv")
+        return names, {
+            "cls": type(self),
+            "is_tensor": isinstance(self, torch.Tensor),
+            "requires_grad": getattr(self, "requires_grad", False),
+            "shared_scale": shared_scale,
+            "nontensor_kwargs": {
+                "shape": self.logical_shape,
+                "dtype": self.fake_dtype,
+                "num_tensors": self.num_tensors,
+                "shapes": self.tensor_shapes,
+                "quantizer": self.quantizer,
+                "offsets": self.offsets,
+                "scale_inv_offsets": self.scale_inv_offsets,
+                "columnwise_scale_inv_offsets": self.columnwise_scale_inv_offsets,
+                "with_gemm_swizzled_scales": self._with_gemm_swizzled_scales,
+                "row_scaled_nvfp4": self.row_scaled_nvfp4,
+                "nvfp4_use_4over6": self.nvfp4_use_4over6,
+                "nvfp4_e4m3_max": self.nvfp4_e4m3_max,
+            },
+        }
+
+    @staticmethod
+    def __tensor_unflatten__(inner_tensors, metadata, outer_size, outer_stride):
+        """Rebuild a grouped storage or tensor without copying its buffers."""
+        del outer_size
+        cls = metadata["cls"]
+        kwargs = dict(metadata["nontensor_kwargs"])
+        kwargs.update({kwarg: inner_tensors.get(name) for name, kwarg in cls._INNER_TENSORS})
+        if metadata.get("shared_scale", False):
+            kwargs["columnwise_scale_inv"] = kwargs["scale_inv"]
+        if metadata["is_tensor"]:
+            kwargs["requires_grad"] = metadata["requires_grad"]
+            kwargs["stride"] = outer_stride
+        return cls(**kwargs)
 
     def prepare_for_saving(
         self,
