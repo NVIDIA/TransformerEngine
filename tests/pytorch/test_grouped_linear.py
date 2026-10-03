@@ -3129,8 +3129,197 @@ def test_grouped_linear_grouped_tensor_path_skips_non_rht_nvfp4():
         )
 
 
-def test_grouped_linear_delay_wgrad_rejects_implicit_fallback(monkeypatch):
+@pytest.mark.parametrize(
+    "use_grouped_tensor,single_weight,single_bias",
+    [
+        (False, False, False),
+        (True, False, False),
+        (True, True, False),
+        (True, False, True),
+        (True, True, True),
+    ],
+    ids=["split", "grouped-discrete", "single-weight", "single-bias", "single-both"],
+)
+@pytest.mark.parametrize(
+    "recipe_name", ["bf16", "delayed", "current", "mxfp8", "high_precision", "dequantized"]
+)
+@pytest.mark.parametrize("input_requires_grad", [False, True])
+@pytest.mark.parametrize("delay_wgrad", [False, True])
+@pytest.mark.parametrize("grad_storage", ["grad", "preallocated_grad", "main_grad"])
+def test_grouped_linear_bias_gradient_accumulation(
+    monkeypatch,
+    use_grouped_tensor,
+    single_weight,
+    single_bias,
+    recipe_name,
+    input_requires_grad,
+    delay_wgrad,
+    grad_storage,
+):
+    """Bias gradients accumulate during main backward with immediate or deferred wgrad."""
+    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
+    if recipe_name == "bf16":
+        fp8_recipe = None
+    elif recipe_name == "delayed":
+        fp8_recipe = recipe.DelayedScaling()
+    elif recipe_name == "current":
+        fp8_recipe = recipe.Float8CurrentScaling()
+        # Use exact power-of-two scales for the analytical FP32 main_grad reference.
+        fp8_recipe.fp8_quant_fwd_inp = recipe.QParams(power_2_scale=True)
+        fp8_recipe.fp8_quant_fwd_weight = recipe.QParams(power_2_scale=True)
+        fp8_recipe.fp8_quant_bwd_grad = recipe.QParams(power_2_scale=True)
+    else:
+        if not mxfp8_available:
+            pytest.skip(reason_for_no_mxfp8)
+        fp8_recipe = recipe.MXFP8BlockScaling(
+            backward_override=None if recipe_name == "mxfp8" else recipe_name
+        )
+    if fp8_recipe is not None and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+    if use_grouped_tensor and not is_module_grouped_tensor_path_supported(
+        fp8_recipe, torch.bfloat16
+    ):
+        pytest.skip("Recipe is unsupported by the native grouped-tensor path")
+
+    FP8GlobalStateManager.reset()
+    module = GroupedLinear(
+        2,
+        128,
+        128,
+        bias=True,
+        params_dtype=torch.bfloat16,
+        use_grouped_tensor=use_grouped_tensor,
+        single_grouped_weight=single_weight,
+        single_grouped_bias=single_bias,
+        delay_wgrad_compute=delay_wgrad,
+        fuse_wgrad_accumulation=grad_storage == "main_grad",
+    )
+    weights = _grouped_linear_weight_params(module)
+    biases = _grouped_linear_bias_params(module)
+    with torch.no_grad():
+        for param in weights:
+            data = param.rowwise_data if isinstance(param, GroupedTensor) else param
+            data.fill_(0.125)
+        for param in biases:
+            data = param.rowwise_data if isinstance(param, GroupedTensor) else param
+            data.fill_(0.5)
+
+    hook_calls = {id(param): 0 for param in module.parameters()}
+    flat_main_grad = torch.zeros(2 * 128 * 128, device="cuda", dtype=torch.float32)
+    weight_views = flat_main_grad.view(2, 128, 128)
+    weight_views = [weight_views] if single_weight else list(weight_views.unbind())
+    main_grad_ptrs = []
+    if grad_storage == "main_grad":
+        # Model MCore's ownership: weight GEMM accumulates into an external flat buffer,
+        # while parameter hooks move unfused grads to main_grad and clear the handoff.
+        for param, view in zip(weights, weight_views):
+            param.main_grad = view
+            param.grad_added_to_main_grad = False
+            param.overwrite_main_grad = False
+            main_grad_ptrs.append(view.data_ptr())
+        for param in biases:
+            param.main_grad = torch.zeros(param.shape, device="cuda", dtype=torch.float32)
+            param.grad_added_to_main_grad = False
+
+        def accumulate(param):
+            hook_calls[id(param)] += 1
+            if param.grad is not None and not param.grad_added_to_main_grad:
+                param.main_grad.add_(param.grad)
+            param.grad = None
+
+        for param in module.parameters():
+            if getattr(param, "skip_backward_post_hook", False):
+                module.register_wgrad_accumulation_and_reduce_hooks(
+                    lambda param=param: accumulate(param)
+                )
+            else:
+                param.register_post_accumulate_grad_hook(accumulate)
+    elif grad_storage == "preallocated_grad":
+        for param in biases:
+            param.grad = torch.zeros(param.shape, device="cuda", dtype=param.dtype)
+
+    splits = torch.tensor([128, 128], dtype=torch.int64, device="cuda")
+    total_scale = 0
+    try:
+        # Decreasing dY avoids delayed-scaling overflow from a larger second amax.
+        # Powers of two make output and gradients exactly representable in all tested recipes.
+        for step, scale in enumerate((2, 1)):
+            total_scale += scale
+            for param in weights:
+                param.grad = None
+            x = torch.full(
+                (256, 128),
+                0.25,
+                device="cuda",
+                dtype=torch.bfloat16,
+                requires_grad=input_requires_grad,
+            )
+            with autocast(enabled=fp8_recipe is not None, recipe=fp8_recipe):
+                y = module(x, splits, is_first_microbatch=step == 0)
+            torch.testing.assert_close(y, torch.full_like(y, 4.5), rtol=0, atol=0)
+            y.backward(torch.full_like(y, scale))
+            if input_requires_grad:
+                torch.testing.assert_close(
+                    x.grad, torch.full_like(x.grad, 16 * scale), rtol=0, atol=0
+                )
+            else:
+                assert x.grad is None
+
+            def check_bias_grads():
+                for param in biases:
+                    grad = param.main_grad if grad_storage == "main_grad" else param.grad
+                    assert grad is not None, "bias gradient was not returned by main backward"
+                    torch.testing.assert_close(
+                        grad, torch.full_like(grad, 128 * total_scale), rtol=0, atol=0
+                    )
+                    if grad_storage == "main_grad":
+                        assert param.grad is None
+                        assert hook_calls[id(param)] == step + 1
+
+            check_bias_grads()
+            if delay_wgrad:
+                module.backward_dw()
+                check_bias_grads()  # Deferred weight hooks must not add dbias a second time.
+            for param in weights:
+                grad = param.main_grad if grad_storage == "main_grad" else param.grad
+                assert grad is not None
+                expected = 32 * (total_scale if grad_storage == "main_grad" else scale)
+                torch.testing.assert_close(grad, torch.full_like(grad, expected), rtol=0, atol=0)
+            if grad_storage == "main_grad":
+                assert [param.main_grad.data_ptr() for param in weights] == main_grad_ptrs
+    finally:
+        FP8GlobalStateManager.reset()
+
+
+@pytest.mark.parametrize("device", ["cuda", "meta"])
+@pytest.mark.parametrize("single_weight", [False, True])
+@pytest.mark.parametrize("single_bias", [False, True])
+def test_grouped_linear_delayed_wgrad_hook_ownership(
+    monkeypatch, device, single_weight, single_bias
+):
+    """Only weight hooks are deferred, including before meta parameters are materialized."""
+    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
+    module = GroupedLinear(
+        2,
+        128,
+        128,
+        bias=True,
+        device=device,
+        params_dtype=torch.bfloat16,
+        use_grouped_tensor=True,
+        single_grouped_weight=single_weight,
+        single_grouped_bias=single_bias,
+        delay_wgrad_compute=True,
+    )
+    for name, param in module.named_parameters():
+        assert getattr(param, "skip_backward_post_hook", False) == name.startswith("weight")
+
+
+@pytest.mark.parametrize("backward_override", [None, "high_precision", "dequantized"])
+def test_grouped_linear_delay_wgrad_rejects_implicit_fallback(monkeypatch, backward_override):
     """Delayed wgrad reports when a grouped-tensor request used the legacy path."""
+    if backward_override is not None and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
     monkeypatch.setattr(
         "transformer_engine.pytorch.module.grouped_linear.is_module_grouped_tensor_path_supported",
         lambda *_args, **_kwargs: False,
@@ -3145,10 +3334,14 @@ def test_grouped_linear_delay_wgrad_rejects_implicit_fallback(monkeypatch):
         delay_wgrad_compute=True,
         use_grouped_tensor=True,
     )
-    x = torch.randn(16, 64, dtype=torch.bfloat16, device="cuda", requires_grad=True)
-    m_splits = torch.tensor([8, 8], dtype=torch.int64, device="cuda")
+    x = torch.randn(64, 64, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+    m_splits = torch.tensor([32, 32], dtype=torch.int64, device="cuda")
 
-    grouped_linear(x, m_splits).sum().backward()
+    with autocast(
+        enabled=backward_override is not None,
+        recipe=recipe.MXFP8BlockScaling(backward_override=backward_override),
+    ):
+        grouped_linear(x, m_splits).sum().backward()
     with pytest.raises(
         RuntimeError,
         match="implicit fallback is unsupported with delay_wgrad_compute=True",

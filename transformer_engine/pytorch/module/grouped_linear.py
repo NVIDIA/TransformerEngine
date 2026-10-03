@@ -1355,6 +1355,10 @@ class _GroupedLinear(torch.autograd.Function):
 
             # Preprocess grad output
             grad_output_view = grad_output.contiguous().view(-1, grad_output.shape[-1])
+            delay_wgrad = ctx.wgrad_store is not None and ctx.wgrad_store.delay_wgrad_compute()
+            # Return dbias in the main backward even when the weight GEMM is deferred.
+            # Keep fused BF16 wgrad+dbias for immediate wgrad.
+            compute_dbias = ctx.use_bias and (ctx.fp8 or ctx.debug or delay_wgrad)
             grad_output_reference = ctx.grad_output_quantizers[0]
             if ctx.fp8 and isinstance(grad_output_reference, HybridQuantizer):
                 # Usage is a runtime decision, not part of generation validation.
@@ -1371,7 +1375,7 @@ class _GroupedLinear(torch.autograd.Function):
                 ctx.grad_output_quantizers,
                 ctx.activation_dtype,
                 with_quantized_output=ctx.fp8 or ctx.debug,
-                compute_dbias=(ctx.fp8 or ctx.debug) and ctx.use_bias,
+                compute_dbias=compute_dbias,
                 disable_bulk_allocation=(
                     ctx.cpu_offloading
                     and isinstance(grad_output_reference, HybridQuantizer)
@@ -1456,11 +1460,7 @@ class _GroupedLinear(torch.autograd.Function):
                 )
 
             if ctx.weights_requires_grad:
-                if (
-                    is_dist_weight
-                    and ctx.wgrad_store is not None
-                    and ctx.wgrad_store.delay_wgrad_compute()
-                ):
+                if is_dist_weight and delay_wgrad:
                     raise RuntimeError(
                         "distributed-weight GroupedLinear requires delay_wgrad_compute=False."
                     )
@@ -1523,7 +1523,9 @@ class _GroupedLinear(torch.autograd.Function):
                     layout="NT",
                     grad=True,
                     m_splits=ctx.m_splits,
-                    use_bias=ctx.use_bias if grad_biases[0] is None else None,
+                    # Preserve the high-precision GEMM epilogue and algorithm selection,
+                    # including when delayed wgrad no longer owns bias accumulation.
+                    use_bias=ctx.use_bias and not (ctx.fp8 or ctx.debug),
                     bias=biases,
                     use_split_accumulator=wgrad_gemm_use_split_accumulator,
                     accumulate=(
@@ -1534,14 +1536,12 @@ class _GroupedLinear(torch.autograd.Function):
                     ),
                 )
                 # WGRAD
-                if ctx.wgrad_store is not None and ctx.wgrad_store.delay_wgrad_compute():
+                if delay_wgrad:
                     ctx.wgrad_store.put([inputmats, grad_output, wgrad_list], grouped_gemm_wgrad)
                 else:
                     _, grad_biases_, _ = grouped_gemm_wgrad(inputmats, grad_output, wgrad_list)
-
-                    for i in range(ctx.num_gemms):
-                        if grad_biases[i] is None:
-                            grad_biases[i] = grad_biases_[i]
+                    if not compute_dbias:
+                        grad_biases = grad_biases_
                     del grad_biases_
 
                     # Deallocate input tensor
@@ -1581,11 +1581,7 @@ class _GroupedLinear(torch.autograd.Function):
             else:
                 wgrad_list = [None] * ctx.num_gemms
 
-            if not ctx.use_bias or (
-                ctx.wgrad_store is not None
-                and ctx.wgrad_store.delay_wgrad_compute()
-                and not ctx.fp8
-            ):
+            if not ctx.use_bias:
                 grad_biases = [None] * ctx.num_bias_args
 
         if ctx.reduce_and_update_bwd_fp8_tensors:
@@ -1649,7 +1645,8 @@ class GroupedLinear(TransformerEngineBaseModule):
                   the model is trained with lower precision and the original FP32 parameters
                   would not fit in GPU memory.
     delay_wgrad_compute : bool, default = False
-                         Whether to delay weight gradient computation
+                         Whether to delay weight gradient computation until ``backward_dw()``.
+                         Bias gradients are computed and accumulated during the main backward.
     save_original_input : bool, default = False
                        If set to ``True``, always saves the original input tensor rather than the
                        cast tensor. In some scenarios, the input tensor is used by multiple modules,
@@ -1847,13 +1844,13 @@ class GroupedLinear(TransformerEngineBaseModule):
         self.reset_parameters(defer_init=is_meta)
 
         if self.wgrad_store.delay_wgrad_compute():
-            for name, param in self.named_parameters():
-                if name in ("weight", "bias"):
-                    param.skip_backward_post_hook = True
-                    continue
+            # Only weights are deferred. Biases use normal autograd accumulation hooks.
+            grouped_weight = getattr(self, "weight", None)
+            if grouped_weight is not None:
+                grouped_weight.skip_backward_post_hook = True
+            else:
                 for i in range(self.num_gemms):
-                    if name in (f"weight{i}", f"bias{i}"):
-                        param.skip_backward_post_hook = True
+                    getattr(self, f"weight{i}").skip_backward_post_hook = True
 
     def set_meta_tensor(self, fwd: bool, recipe: Recipe) -> None:
         """Init scales and amaxes for fwd | bwd."""
@@ -2421,7 +2418,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         if self.wgrad_store.context is None or self.wgrad_store.context.empty():
             return
         with get_nvtx_range_context("_GroupedLinear_wgrad"):
-            (_, grad_biases_, _), tensor_list = self.wgrad_store.pop()
+            (_, grad_biases, _), tensor_list = self.wgrad_store.pop()
             wgrad_output = tensor_list[2]
             weight_params = self._get_weight_tensors()
             if not self.fuse_wgrad_accumulation:
@@ -2432,25 +2429,21 @@ class GroupedLinear(TransformerEngineBaseModule):
                 else:
                     for i in range(self.num_gemms):
                         weight_params[i].grad = wgrad_output[i].to(weight_params[i].dtype)
-            has_grad_biases = (
-                [grad_bias is not None and grad_bias.numel() != 0 for grad_bias in grad_biases_]
-                if self.use_bias
-                else ()
-            )
-            if any(has_grad_biases):
-                if self.use_grouped_tensor:
-                    raise RuntimeError(
-                        "GroupedLinear(use_grouped_tensor=True) fell back to the split-quantize "
-                        "path, which produced per-expert bias gradients during delayed wgrad. "
-                        "This implicit fallback is unsupported with delay_wgrad_compute=True. "
-                        "Use a configuration supported by the grouped-tensor path, or set "
-                        "use_grouped_tensor=False to select the legacy path explicitly."
-                    )
-                bias_params = [getattr(self, f"bias{i}") for i in range(self.num_gemms)]
-                for i in range(self.num_gemms):
-                    if has_grad_biases[i] and bias_params[i].grad is None:
-                        bias_params[i].grad = grad_biases_[i].to(bias_params[i].dtype)
-            del grad_biases_
+            if (
+                self.use_grouped_tensor
+                and self.apply_bias
+                and any(
+                    grad_bias is not None and grad_bias.numel() != 0 for grad_bias in grad_biases
+                )
+            ):
+                raise RuntimeError(
+                    "GroupedLinear(use_grouped_tensor=True) fell back to the split-quantize "
+                    "path, which produced per-expert bias gradients during delayed wgrad. "
+                    "This implicit fallback is unsupported with delay_wgrad_compute=True. "
+                    "Use a configuration supported by the grouped-tensor path, or set "
+                    "use_grouped_tensor=False to select the legacy path explicitly."
+                )
+            del grad_biases
             del wgrad_output
             del tensor_list
             self._trigger_wgrad_accumulation_and_reduce_hooks()
