@@ -193,7 +193,7 @@ class ScoreModFusedAttnRunner(FusedAttnRunner):
     WINDOW_SIZE = None
     SEQ_DESC_FORMAT = SeqDescFormat.Mask
     CP_LOAD_BALANCED = False
-    DOUTPUT_SEED = None
+    DOUTPUT_SEED = 2026
     RTOL = 5e-2
     ATOL = 5e-2
 

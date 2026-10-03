@@ -7,6 +7,7 @@
 #include <ATen/ATen.h>
 #include <pybind11/pybind11.h>
 
+#include <numeric>
 #include <utility>
 #include <vector>
 
@@ -18,6 +19,21 @@
 
 namespace transformer_engine {
 namespace pytorch {
+
+namespace {
+
+// Sum token dimensions directly; no ATen reshape/view is needed for N-D input.
+void sum_bias_grad(at::Tensor &bias, const at::Tensor &input) {
+  if (input.dim() == 1) {
+    bias.copy_(input);
+  } else {
+    std::vector<int64_t> dims(input.dim() - 1);
+    std::iota(dims.begin(), dims.end(), 0);
+    at::sum_out(bias, input, dims);
+  }
+}
+
+}  // namespace
 
 std::vector<py::object> bgrad_quantize(const at::Tensor &grad_output, py::handle quantizer) {
   using namespace transformer_engine::pytorch::detail;
@@ -39,7 +55,7 @@ std::vector<py::object> bgrad_quantize(const at::Tensor &grad_output, py::handle
     if (product(shape) == 0) {
       grad_bias_torch.zero_();
     } else {
-      at::sum_out(grad_bias_torch, grad_output_torch.reshape({-1, bias_size}), {0});
+      sum_bias_grad(grad_bias_torch, grad_output_torch);
     }
     return {py::cast(std::move(grad_bias_torch)), py::cast(std::move(grad_output_torch))};
   }
@@ -73,7 +89,7 @@ std::vector<py::object> bgrad_quantize(const at::Tensor &grad_output, py::handle
 
   // Apply unfused impl if fused kernel is not supported
   if (!with_fused_kernel) {
-    at::sum_out(grad_bias_torch, grad_output_torch.reshape({-1, bias_size}), {0});
+    sum_bias_grad(grad_bias_torch, grad_output_torch);
     quantizer_cpp->quantize(grad_output_nvte, grad_input_nvte);
     return {py::cast(std::move(grad_bias_torch)), std::move(grad_input_py)};
   }
@@ -173,7 +189,7 @@ std::vector<py::object> dact_dbias(
           dact_func(grad_output_nvte.data(), act_input_nvte.data(), temp_nvte.data(), stream);
         });
         const auto temp_torch = temp_py.cast<at::Tensor>();
-        at::sum_out(grad_bias_torch, temp_torch.reshape({-1, bias_size}), {0});
+        sum_bias_grad(grad_bias_torch, temp_torch);
         quantizer_cpp->quantize(temp_nvte, grad_input_nvte);
         break;
       }
@@ -215,7 +231,7 @@ std::vector<py::object> dact_dbias(
           dact_func(grad_output_nvte.data(), act_input_nvte.data(), temp_nvte.data(), stream);
         });
         const auto temp_torch = temp_py.cast<at::Tensor>();
-        at::sum_out(grad_bias_torch, temp_torch.reshape({-1, bias_size}), {0});
+        sum_bias_grad(grad_bias_torch, temp_torch);
         fp8_quantizer_cpp->quantize_with_amax(temp_nvte, grad_input_nvte, amax_buf);
         break;
       }
@@ -232,7 +248,7 @@ std::vector<py::object> dact_dbias(
           dact_func(grad_output_nvte.data(), act_input_nvte.data(), temp_nvte.data(), stream);
         });
         const auto temp_torch = temp_py.cast<at::Tensor>();
-        at::sum_out(grad_bias_torch, temp_torch.reshape({-1, bias_size}), {0});
+        sum_bias_grad(grad_bias_torch, temp_torch);
         nvfp4_quantizer_cpp->quantize_with_amax(temp_nvte, grad_input_nvte);
         break;
       }

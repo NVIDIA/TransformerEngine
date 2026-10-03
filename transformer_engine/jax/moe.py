@@ -38,6 +38,7 @@ from typing import Any, Optional, Tuple, Union
 import flax.struct
 import jax
 import jax.numpy as jnp
+from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import NamedSharding, PartitionSpec as P
 
 from . import cpp_extensions as tex
@@ -349,6 +350,9 @@ def _ffn_fwd_per_shard(
     num_local_experts: int,
     activation_type: str,
     apply_topk_weights_early: bool,
+    wi_0_checkpoint_name: Optional[str],
+    wi_1_checkpoint_name: Optional[str],
+    wo_checkpoint_name: Optional[str],
 ):
     """Run the grouped FFN on one shard's EP receive buffer."""
     hidden = recv_tokens_local.shape[-1]
@@ -380,6 +384,10 @@ def _ffn_fwd_per_shard(
         bias=wi_combined_bias,
     )
     gate_proj_out, up_proj_out = jnp.split(combined_out, 2, axis=-1)
+    if wi_0_checkpoint_name is not None:
+        gate_proj_out = checkpoint_name(gate_proj_out, wi_0_checkpoint_name)
+    if wi_1_checkpoint_name is not None:
+        up_proj_out = checkpoint_name(up_proj_out, wi_1_checkpoint_name)
 
     # Activation inputs (gate_proj_out, up_proj_out) stay in the wi GEMM
     # output dtype; the activation output (`intermediate`) stays in the
@@ -408,6 +416,8 @@ def _ffn_fwd_per_shard(
         contracting_dims=((1,), (1,)),
         bias=wo_bias,
     )
+    if wo_checkpoint_name is not None:
+        expert_outputs = checkpoint_name(expert_outputs, wo_checkpoint_name)
     expert_outputs_3d = expert_outputs.reshape(1, expert_outputs.shape[0], expert_outputs.shape[1])
     group_sizes_2d = group_sizes.reshape(1, num_local_experts)
     residuals = (
@@ -568,6 +578,9 @@ def _moe_fwd_rule(
     dtype,
     apply_topk_weights_early,
     recv_capacity_per_rank,
+    wi_0_checkpoint_name,
+    wi_1_checkpoint_name,
+    wo_checkpoint_name,
 ):
     """Forward: gate -> topk -> ep_dispatch -> FFN -> ep_combine.
 
@@ -795,6 +808,9 @@ def _moe_fwd_rule(
             num_local_experts=num_local_experts,
             activation_type=activation_type,
             apply_topk_weights_early=apply_topk_weights_early,
+            wi_0_checkpoint_name=wi_0_checkpoint_name,
+            wi_1_checkpoint_name=wi_1_checkpoint_name,
+            wo_checkpoint_name=wo_checkpoint_name,
         )
 
     expert_outputs, ffn_residuals = shard_map(
@@ -893,11 +909,22 @@ def _moe_bwd_rule(
     dtype,
     apply_topk_weights_early,
     recv_capacity_per_rank,
+    wi_0_checkpoint_name,
+    wi_1_checkpoint_name,
+    wo_checkpoint_name,
     residuals,
     cotangents,
 ):
     """Backward mirror of :func:`_moe_fwd_rule`."""
-    del num_groups, group_topk, dtype, recv_capacity_per_rank  # captured / unused in bwd
+    del (
+        num_groups,
+        group_topk,
+        dtype,
+        recv_capacity_per_rank,
+        wi_0_checkpoint_name,
+        wi_1_checkpoint_name,
+        wo_checkpoint_name,
+    )  # captured / unused in bwd
     from jax.experimental.shard_map import shard_map
 
     # total_recv_tokens is a non-differentiable output; its cotangent is unused.
@@ -1140,7 +1167,7 @@ def _moe_bwd_rule(
 # =============================================================================
 
 
-@partial(jax.custom_vjp, nondiff_argnums=tuple(range(9, 27)))
+@partial(jax.custom_vjp, nondiff_argnums=tuple(range(9, 30)))
 def _moe(
     x,
     gate_kernel,
@@ -1169,6 +1196,9 @@ def _moe(
     dtype,
     apply_topk_weights_early,
     recv_capacity_per_rank,
+    wi_0_checkpoint_name,
+    wi_1_checkpoint_name,
+    wo_checkpoint_name,
 ):
     primal, _ = _moe_fwd_rule(
         x,
@@ -1198,6 +1228,9 @@ def _moe(
         dtype,
         apply_topk_weights_early,
         recv_capacity_per_rank,
+        wi_0_checkpoint_name,
+        wi_1_checkpoint_name,
+        wo_checkpoint_name,
     )
     return primal
 
@@ -1237,6 +1270,9 @@ def moe(
     wo_kernel_axes: Tuple[Optional[str], ...] = ("exp", "mlp", "embed"),
     dtype: jnp.dtype = jnp.float32,
     recv_capacity_per_rank: Optional[int] = None,
+    wi_0_checkpoint_name: Optional[str] = None,
+    wi_1_checkpoint_name: Optional[str] = None,
+    wo_checkpoint_name: Optional[str] = None,
 ) -> Tuple[jnp.ndarray, Optional[jnp.ndarray], jnp.ndarray]:
     """Run a full MoE block under a single fused custom_vjp on the TE EP path.
 
@@ -1271,6 +1307,15 @@ def moe(
         (default) reserves the dropless aligned worst case. The value must match
         the capacity used by ``ep_bootstrap``. Overflow is reported through
         ``total_recv_tokens`` when bootstrap used ``drop_on_overflow=True``.
+    wi_0_checkpoint_name : Optional[str]
+        JAX rematerialization checkpoint name for the gate projection output.
+        ``None`` leaves the value unnamed.
+    wi_1_checkpoint_name : Optional[str]
+        JAX rematerialization checkpoint name for the up projection output.
+        ``None`` leaves the value unnamed.
+    wo_checkpoint_name : Optional[str]
+        JAX rematerialization checkpoint name for the per-expert down projection output.
+        ``None`` leaves the value unnamed.
 
     Note that the per-expert dispatch-slot alignment is fixed internally
     at 128 tokens (``_ALIGN_SIZE``); see that constant's docstring for
@@ -1362,6 +1407,9 @@ def moe(
         dtype,
         apply_topk_weights_early,
         recv_capacity_per_rank,
+        wi_0_checkpoint_name,
+        wi_1_checkpoint_name,
+        wo_checkpoint_name,
     )
     if aux_loss_coeff <= 0.0:
         aux_loss = None

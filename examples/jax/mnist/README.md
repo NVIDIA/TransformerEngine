@@ -13,7 +13,7 @@ This example uses MNIST training to demonstrate the Transformer Engine usage. Th
 5. Evaluating process: The evaluating process is the same as the training process. Need to ensure FP8 metadata is inside var_collect and fill it into loss function.
 
 6. Additional options: The `te.autocast` context manager has additional options
-   * FP8 Recipe: control FP8 training behavior. See the [FP8 tutorial](https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/examples/fp8_primer.html) for a detailed explanation of FP8 recipes and the supported options.
+   * FP8 Recipe: control FP8 training behavior. See the [FP8 tutorial](https://docs.nvidia.com/deeplearning/transformer-engine/examples/fp8_primer.html) for a detailed explanation of FP8 recipes and the supported options.
 
 ## Run ##
 

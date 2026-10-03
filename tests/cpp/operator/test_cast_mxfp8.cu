@@ -978,6 +978,31 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::ValuesIn(input_scenarios)),
     test_name_generator);
 
+// Exceptional inputs, on one small aligned shape.
+//
+// maxNorm_to_inf is the only scenario that drives a block amax to Inf or NaN,
+// which is where the E8M0 encoding stops being a plain exponent subtraction:
+// code 254 needs a subnormal reciprocal and 255 is NaN, and both have to be
+// supplied rather than derived.  Two bugs of exactly that kind reached review,
+// so keep at least one shape covering it.
+//
+// 256x512 is chosen so the cast-only path reaches the register-resident
+// kernels: rows % 32 == 0 and cols % 256 == 0 for the bidimensional one,
+// cols % 128 == 0 for the rowwise one.  Both block sizes are listed so the
+// rowwise-only and bidimensional kernels are each exercised.
+INSTANTIATE_TEST_SUITE_P(
+    OperatorTest_FusedCastMXFP8_ExceptionalInputs,
+    FusedCastMXFP8TestSuite,
+    ::testing::Combine(
+        ::testing::ValuesIn(processing_methods),
+        ::testing::ValuesIn(Activation_types),
+        ::testing::Values(std::vector<size_t>{256, 512}),
+        ::testing::Values(std::pair<size_t, size_t>{1, 32}, std::pair<size_t, size_t>{32, 32}),
+        ::testing::Values(DType::kBFloat16),
+        ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2),
+        ::testing::Values(InputsFillCase::maxNorm_to_inf)),
+    test_name_generator);
+
 // Test cases with varying dtypes
 INSTANTIATE_TEST_SUITE_P(
     OperatorTest_FusedCastMXFP8_Dtypes,

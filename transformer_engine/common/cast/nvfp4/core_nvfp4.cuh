@@ -11,6 +11,7 @@
 #ifndef TRANSFORMER_ENGINE_CORE_NVFP4_CUH_
 #define TRANSFORMER_ENGINE_CORE_NVFP4_CUH_
 
+#if !defined(__CUDACC_RTC__)
 #include <cuda.h>
 #include <cudaTypedefs.h>
 #include <cuda_runtime.h>
@@ -22,10 +23,27 @@
 #include "../../util/math.h"
 #include "../../util/ptx.cuh"
 #include "../../utils.cuh"
+#else
+// NVRTC build: common.h (host-only: cuDNN/cutlass) cannot be parsed by NVRTC.
+// utils.cuh, util/math.h and ptx.cuh are injected as in-memory headers by the
+// RTC dispatch and already provide the integer typedefs, detail::is_same, and
+// the fp8 element types. util/type_extrema.h (also injected) provides the
+// transformer_engine-namespace fp4 aliases and detail::TypeExtrema
+// specializations that would otherwise come from common.h.
+#include "ptx.cuh"
+#include "util/math.h"
+#include "utils.cuh"
+#endif  // __CUDACC_RTC__
 
 #if FP4_TYPE_SUPPORTED
 #include <cuda_fp4.h>
 #endif  // FP4_TYPE_SUPPORTED
+
+#if defined(__CUDACC_RTC__)
+namespace transformer_engine {
+#include "util/type_extrema.h"
+}  // namespace transformer_engine
+#endif  // __CUDACC_RTC__
 
 namespace transformer_engine {
 namespace dispatch {
@@ -94,6 +112,8 @@ __device__ __forceinline__ float compute_global_encode_scaling_factor_FP4(const 
   return global_encode_scale;
 }
 
+#if !defined(__CUDACC_RTC__)
+// The RTC 4over6 path rejects stochastic rounding; static transpose kernels use this helper.
 __device__ __forceinline__ uint32_t get_rbits(
     transformer_engine::curanddx::detail::philox4x32_native_state<NVTE_BUILD_NUM_PHILOX_ROUNDS>
         &rng,
@@ -108,6 +128,7 @@ __device__ __forceinline__ uint32_t get_rbits(
   const uint32_t rbits = rbits_arr[rnd_idx++];
   return rbits;
 }
+#endif  // !__CUDACC_RTC__
 
 #endif  // FP4_TYPE_SUPPORTED
 

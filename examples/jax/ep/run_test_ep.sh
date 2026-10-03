@@ -91,4 +91,35 @@ else
   echo "... ep_moe PASSED"
 fi
 rm -f stdout_rank_*.txt
+
+echo
+echo "*** Executing ep_moe.py --single-process across $NUM_GPUS local GPUs ***"
+# --single-process drives every local GPU from one process; no coordinator/rank
+# loop needed. Pin to exactly NUM_GPUS devices so the default (2,2) mesh applies
+# even on larger boxes, matching the multi-process run above. Take the first
+# NUM_GPUS entries of the caller's existing CUDA_VISIBLE_DEVICES (Slurm/k8s/CI
+# may have bound specific physical GPUs); only fall back to raw ordinals
+# 0..NUM_GPUS-1 if nothing was set.
+if [ -n "${CUDA_VISIBLE_DEVICES:-}" ]; then
+  SINGLE_PROCESS_DEVICES=$(echo "$CUDA_VISIBLE_DEVICES" | cut -d',' -f"1-${NUM_GPUS}")
+else
+  SINGLE_PROCESS_DEVICES=$(seq -s, 0 $((NUM_GPUS - 1)))
+fi
+timeout --foreground --signal=KILL "${TEST_TIMEOUT_S}" \
+  env CUDA_VISIBLE_DEVICES="$SINGLE_PROCESS_DEVICES" python -u "$SCRIPT" --single-process \
+    $EXTRA_ARGS 2>&1 | tee stdout_single_process.txt
+
+if grep -qE "FAILED|Traceback|ERROR" stdout_single_process.txt; then
+  echo "... ep_moe --single-process FAILED"
+  HAS_FAILURE=1
+elif grep -q "SKIPPED" stdout_single_process.txt; then
+  echo "... ep_moe --single-process SKIPPED"
+elif ! grep -qE "\[ep_moe\]" stdout_single_process.txt; then
+  echo "... ep_moe --single-process INVALID (no summary line)"
+  HAS_FAILURE=1
+else
+  echo "... ep_moe --single-process PASSED"
+fi
+rm -f stdout_single_process.txt
+
 exit $HAS_FAILURE

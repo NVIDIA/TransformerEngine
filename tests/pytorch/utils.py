@@ -524,6 +524,31 @@ def assert_close_grads(
     assert_close(actual.grad, expected.grad, **kwargs)
 
 
+def assert_close_rms(
+    actual: torch.Tensor,
+    expected: torch.Tensor,
+    *,
+    rtol: float,
+) -> None:
+    """Assert that the RMS of ``actual - expected`` is within ``rtol`` of the RMS of ``expected``.
+
+    Unlike an elementwise check, this is not dominated by the few elements that land in a
+    different quantization bin, which makes it suitable for comparing quantized results.
+
+    """
+    if isinstance(actual, QuantizedTensor):
+        actual = actual.dequantize()
+    if isinstance(expected, QuantizedTensor):
+        expected = expected.dequantize()
+    actual = actual.double()
+    expected = expected.double()
+    error_rms = (actual - expected).square().mean().sqrt().item()
+    expected_rms = expected.square().mean().sqrt().item()
+    assert (
+        error_rms <= rtol * expected_rms
+    ), f"RMS error {error_rms:.4g} exceeds {rtol} * RMS of expected ({expected_rms:.4g})"
+
+
 def run_distributed(
     args: Sequence[str],
     *,

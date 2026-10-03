@@ -3,6 +3,8 @@
 # See LICENSE for license information.
 """Multi-process PyTorch EP tests, launched via torchrun (one process per GPU)."""
 
+from contextlib import nullcontext
+from dataclasses import replace
 import os
 import sys
 import unittest
@@ -11,11 +13,17 @@ import numpy as np
 import torch
 import torch.distributed as dist
 
+from ep_reference import BlockScaledTensor, MoeEpReference, MoeFormat, quantize_blockwise
+import transformer_engine.pytorch as te
+from transformer_engine.pytorch import ops as te_ops
 from transformer_engine.common.recipe import MXFP8BlockScaling
 from transformer_engine.pytorch.ep import (
     EpBuffer,
+    EpConfig,
     ep_bootstrap,
     ep_finalize,
+    get_ep_drop_on_overflow,
+    get_ep_group,
     ep_prepare,
     ep_dispatch,
     ep_combine,
@@ -25,10 +33,14 @@ from transformer_engine.pytorch.ep import (
     _ep_combine_raw,
     _ep_dispatch_raw,
 )
+from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
 
 ZERO_COPY = os.environ.get("NVTE_EP_ZERO_COPY", "0") == "1"
 EAGER = os.environ.get("NVTE_EP_EAGER", "0") == "1"
 OVERFLOW = os.environ.get("NVTE_EP_OVERFLOW", "0") == "1"
+# Fused prepare+dispatch (caller-supplied recv buffers) is opt-in on the C++ side; the tests
+# that exercise it only run when the same env var is set so they match the active dispatch path.
+FUSED_COUNT = os.environ.get("NVTE_EP_FUSED_PREPARE_DISPATCH", "0") == "1"
 
 # Must come after the transformer_engine import so libtransformer_engine.so is loaded.
 import transformer_engine_torch as tex  # noqa: F401
@@ -136,6 +148,45 @@ def _make_identity_inputs(rank, ep_size, device="cuda"):
     )
 
 
+def _make_moe_inputs(rank, ep_size, device="cuda"):
+    """Deterministic BF16 activations and FP32 top-k router weights."""
+    generator = torch.Generator(device=device)
+    generator.manual_seed(2026 + rank)
+    tokens = (
+        torch.randn(
+            TOKENS_PER_RANK,
+            HIDDEN_DIM,
+            generator=generator,
+            dtype=torch.float32,
+            device=device,
+        )
+        * 0.25
+    ).to(torch.bfloat16)
+    router_logits = torch.randn(
+        TOKENS_PER_RANK,
+        ep_size * NUM_LOCAL_EXPERTS,
+        generator=generator,
+        dtype=torch.float32,
+        device=device,
+    )
+    topk_logits, topk_idx = torch.topk(router_logits, TOP_K, dim=-1)
+    return topk_idx, tokens, torch.softmax(topk_logits, dim=-1)
+
+
+def _make_skewed_routing(rank, ep_size, device="cuda"):
+    """Routing whose per-expert and per-rank totals differ from the identity routing's uniform
+    distribution: every token's first top-k slot lands on this rank's own expert. A replay that
+    reuses stale counts from an identity-routed capture would then fail the count comparison."""
+    T = TOKENS_PER_RANK
+    E = ep_size * NUM_LOCAL_EXPERTS
+    topk_idx = np.empty((T, TOP_K), dtype=np.int64)
+    for t in range(T):
+        topk_idx[t, 0] = rank % E
+        for k in range(1, TOP_K):
+            topk_idx[t, k] = (rank % E + t * TOP_K + k) % E
+    return torch.from_numpy(topk_idx).to(device)
+
+
 def _degroup_mxfp8(recv_grouped, valid_counts=None):
     """Dequantize a per-expert MXFP8 GroupedTensor to a dense tensor in expert-major order.
     With ``valid_counts`` keep only the first ``valid_counts[e]`` rows of each padded expert
@@ -173,16 +224,21 @@ def _make_cfg() -> _Cfg:
     return cfg
 
 
-class TestEP(unittest.TestCase):
+class _EpTestCase(unittest.TestCase):
+    """Shared NCCL EP process state and pass selection."""
+
     cfg: _Cfg
     ep_group: dist.ProcessGroup
 
     @classmethod
     def setUpClass(cls):
+        # unittest invokes this fixture for each concrete subclass, but EP is process-global.
+        if hasattr(_EpTestCase, "cfg"):
+            return
         if _device_sm() < 90:
             raise unittest.SkipTest(f"NCCL EP requires SM>=90 (got SM{_device_sm()})")
-        cls.cfg = _make_cfg()
-        cls.ep_group = _build_ep_group()
+        _EpTestCase.cfg = _make_cfg()
+        _EpTestCase.ep_group = _build_ep_group()
         ep_bootstrap(
             cls.ep_group,
             num_experts=cls.cfg.num_experts,
@@ -220,6 +276,41 @@ class TestEP(unittest.TestCase):
         ):
             self.skipTest("not exercised in overflow mode")
 
+    def _make_config(
+        self,
+        alignment=0,
+        top_k=TOP_K,
+        dispatch_fwd_quant_recipe=None,
+        combine_bwd_quant_recipe=None,
+    ):
+        return EpConfig(
+            top_k=top_k,
+            max_tokens_per_rank=TOKENS_PER_RANK,
+            hidden_dim=HIDDEN_DIM,
+            num_local_experts=NUM_LOCAL_EXPERTS,
+            recv_capacity_per_rank=None if EAGER else self.cfg.recv_capacity_per_rank,
+            ep_group=self.ep_group,
+            alignment=alignment,
+            zero_copy=ZERO_COPY,
+            drop_on_overflow=OVERFLOW,
+            dispatch_fwd_quant_recipe=dispatch_fwd_quant_recipe,
+            combine_bwd_quant_recipe=combine_bwd_quant_recipe,
+        )
+
+    def _make_buffer_from_config(self, config):
+        """Build the NCCL EP buffer that a config describes, recipes included."""
+        return EpBuffer(
+            top_k=config.top_k,
+            max_tokens_per_rank=config.max_tokens_per_rank,
+            hidden_dim=config.hidden_dim,
+            num_local_experts=config.num_local_experts,
+            recv_capacity_per_rank=config.recv_capacity_per_rank,
+            alignment=config.alignment,
+            payload_dtype=config.payload_dtype,
+            dispatch_fwd_quant_recipe=config.dispatch_fwd_quant_recipe,
+            combine_bwd_quant_recipe=config.combine_bwd_quant_recipe,
+        )
+
     def _make_buffer(
         self,
         alignment=0,
@@ -227,16 +318,28 @@ class TestEP(unittest.TestCase):
         dispatch_fwd_quant_recipe=None,
         combine_bwd_quant_recipe=None,
     ):
-        return EpBuffer(
-            top_k=top_k,
-            max_tokens_per_rank=TOKENS_PER_RANK,
-            hidden_dim=HIDDEN_DIM,
-            num_local_experts=NUM_LOCAL_EXPERTS,
-            recv_capacity_per_rank=None if EAGER else self.cfg.recv_capacity_per_rank,
+        config = self._make_config(
             alignment=alignment,
+            top_k=top_k,
             dispatch_fwd_quant_recipe=dispatch_fwd_quant_recipe,
             combine_bwd_quant_recipe=combine_bwd_quant_recipe,
         )
+        return self._make_buffer_from_config(config)
+
+    def _require_mxfp8_shapes(self):
+        if HIDDEN_DIM % 512 != 0 or TOKENS_PER_RANK % 32 != 0:
+            self.skipTest(
+                "MXFP8 needs HIDDEN_DIM % 512 == 0 and TOKENS_PER_RANK % 32 == 0 "
+                "(set NVTE_EP_HIDDEN_DIM / NVTE_EP_TOKENS_PER_RANK)"
+            )
+
+
+class TestEP(_EpTestCase):
+    """NCCL EP tests inherited from nvidia_origin/main."""
+
+    def test_bootstrap_accessors(self):
+        self.assertIs(get_ep_group(), self.ep_group)
+        self.assertEqual(get_ep_drop_on_overflow(), OVERFLOW)
 
     def _expert_out(self, expert_out):
         """Stage the combine input into symm-mem under zero-copy (combine requires it)."""
@@ -424,23 +527,22 @@ class TestEP(unittest.TestCase):
 
         return MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=False)
 
-    def _require_mxfp8_shapes(self):
-        if HIDDEN_DIM % 512 != 0 or TOKENS_PER_RANK % 32 != 0:
-            self.skipTest(
-                "MXFP8 needs HIDDEN_DIM % 512 == 0 and TOKENS_PER_RANK % 32 == 0 "
-                "(set NVTE_EP_HIDDEN_DIM / NVTE_EP_TOKENS_PER_RANK)"
-            )
-
     def _assert_mxfp8_matches_bf16(self, recv_mx, tokens, topk_idx, w, tc):
-        """Dequantized MXFP8 recv matches a bf16 dispatch of the same tokens. Both share the
-        alignment=128 padded expert-major layout, so compare the full prefix [0:sum(padded)]."""
+        """Dequantized MXFP8 recv matches a bf16 dispatch of the same tokens, per expert. Row
+        order within an expert's block can differ between the two dispatch kernels, so compare
+        by sorted row sums (order-tolerant) instead of position."""
         ref_tokens = self._mxfp8_quantizer().quantize(tokens).dequantize()
         ref_recv, _rw, _tc = ep_dispatch(self._make_buffer(alignment=128), ref_tokens, topk_idx, w)
         torch.cuda.synchronize()
-        n = int(tc.sum())
-        torch.testing.assert_close(
-            _degroup_mxfp8(recv_mx).float(), ref_recv.float()[:n], atol=1e-2, rtol=1e-2
-        )
+        got = _degroup_mxfp8(recv_mx).float()
+        cum = [0] + tc.cumsum(0).tolist()
+        for lo, hi in zip(cum[:-1], cum[1:]):
+            torch.testing.assert_close(
+                got[lo:hi].sum(dim=1).sort().values,
+                ref_recv[lo:hi].float().sum(dim=1).sort().values,
+                atol=1e-1,
+                rtol=1e-1,
+            )
 
     @_eager_test_include
     @_zero_copy_test_include
@@ -710,6 +812,193 @@ class TestEP(unittest.TestCase):
         torch.cuda.synchronize()
         torch.testing.assert_close(result.float(), ref.float(), atol=0, rtol=0)
 
+    def _capture(self, step):
+        """Warm up ``step`` on a side stream then capture it into a CUDA graph. Returns
+        the graph; the caller replays it. With NVTE_EP_FUSED_PREPARE_DISPATCH set, dispatch
+        under capture takes the fused count-mode path that derives the counts from the
+        dispatch scan."""
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            for _ in range(3):
+                step()
+        torch.cuda.current_stream().wait_stream(s)
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            step()
+        return graph
+
+    def _caller_recv(self):
+        """A persistent recv token + weight buffer pair sized to recv_capacity_per_rank, for
+        capturing a caller-provided-recv dispatch."""
+        rc = self.cfg.recv_capacity_per_rank
+        return (
+            torch.empty(rc, HIDDEN_DIM, dtype=torch.bfloat16, device=self.cfg.device),
+            torch.empty(rc, dtype=torch.float32, device=self.cfg.device),
+        )
+
+    def test_fused_count_mode_parity(self):
+        """Under CUDA graph capture with a caller recv buffer, dispatch derives
+        tokens_per_expert / total_recv_tokens from the fused count scan instead of the
+        AllGather prepare. Zeroing the counts before replay forces the replayed graph to
+        repopulate them; the result must match the AllGather counts for the same routing."""
+        if not FUSED_COUNT:
+            self.skipTest("fused count-mode dispatch not enabled")
+        if EAGER:
+            self.skipTest("fused count mode requires non-eager static recv capacity")
+        topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+
+        # Reference counts via the AllGather prepare path.
+        ref_buf = self._make_buffer()
+        ref_tokens_per_expert = ep_prepare(ref_buf, topk_idx).clone()
+        torch.cuda.synchronize()
+        ref_total = int(ref_buf.total_recv_tokens.item())
+
+        # Fused path: capture a caller-recv dispatch, clear the counts, then replay so the
+        # replayed graph is the sole source of the counts.
+        buf = self._make_buffer()
+        rbuf_t, rbuf_w = self._caller_recv()
+        graph = self._capture(
+            lambda: ep_dispatch(
+                buf, tokens, topk_idx, w, recv_tokens=rbuf_t, recv_topk_weights=rbuf_w
+            )
+        )
+        buf.tokens_per_expert.zero_()
+        buf.total_recv_tokens.zero_()
+        graph.replay()
+        torch.cuda.synchronize()
+
+        torch.testing.assert_close(buf.tokens_per_expert, ref_tokens_per_expert, atol=0, rtol=0)
+        self.assertEqual(int(buf.total_recv_tokens.item()), ref_total)
+
+    def test_fused_count_mode_changing_routing(self):
+        """Routing may differ between graph replays. Each replay must re-derive its counts from
+        its own routing rather than reuse the captured step's values (stale-count guard)."""
+        if not FUSED_COUNT:
+            self.skipTest("fused count-mode dispatch not enabled")
+        if EAGER:
+            self.skipTest("fused count mode requires non-eager static recv capacity")
+        idx_a, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+        idx_b = _make_skewed_routing(self.cfg.rank, self.cfg.ep_size)  # skews expert/rank totals
+
+        buf = self._make_buffer()
+        topk_idx, rbuf_t, rbuf_w = idx_a.clone(), *self._caller_recv()
+        graph = self._capture(
+            lambda: ep_dispatch(
+                buf, tokens, topk_idx, w, recv_tokens=rbuf_t, recv_topk_weights=rbuf_w
+            )
+        )
+
+        ref_tpes = []
+        for routing in (idx_b, idx_a):
+            # Reference counts for this routing via the AllGather prepare path.
+            ref_buf = self._make_buffer()
+            ref_tpe = ep_prepare(ref_buf, routing).clone()
+            torch.cuda.synchronize()
+            ref_tpes.append(ref_tpe)
+
+            topk_idx.copy_(routing)
+            buf.tokens_per_expert.zero_()
+            buf.total_recv_tokens.zero_()
+            graph.replay()
+            torch.cuda.synchronize()
+
+            torch.testing.assert_close(buf.tokens_per_expert, ref_tpe, atol=0, rtol=0)
+            self.assertEqual(
+                int(buf.total_recv_tokens.item()), int(ref_buf.total_recv_tokens.item())
+            )
+
+        # Guard the guard: if the two routings happen to produce identical counts, reusing a
+        # stale copy would pass unnoticed and this test would stop detecting the bug.
+        self.assertFalse(torch.equal(ref_tpes[0], ref_tpes[1]))
+
+    @_overflow_test_include
+    def test_fused_count_mode_overflow(self):
+        """Fused count-mode dispatch under capture reports the pre-drop recv total and caps the
+        per-expert counts at recv_capacity, matching the AllGather prepare overflow semantics."""
+        if not FUSED_COUNT:
+            self.skipTest("fused count-mode dispatch not enabled")
+        if not OVERFLOW:
+            self.skipTest("overflow-only assertions")
+        if EAGER:
+            self.skipTest("fused count mode requires non-eager static recv capacity")
+        topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+        expected_recv = TOKENS_PER_RANK * TOP_K
+        self.assertGreater(expected_recv, self.cfg.recv_capacity_per_rank)
+
+        buf = self._make_buffer()
+        rbuf_t, rbuf_w = self._caller_recv()
+        graph = self._capture(
+            lambda: ep_dispatch(
+                buf, tokens, topk_idx, w, recv_tokens=rbuf_t, recv_topk_weights=rbuf_w
+            )
+        )
+        buf.tokens_per_expert.zero_()
+        buf.total_recv_tokens.zero_()
+        graph.replay()
+        torch.cuda.synchronize()
+
+        self.assertEqual(int(buf.total_recv_tokens.item()), expected_recv)
+        self.assertEqual(int(buf.tokens_per_expert.sum().item()), self.cfg.recv_capacity_per_rank)
+
+    @_mxfp8_align_test
+    def test_dispatch_mxfp8_fused_capture(self):
+        """Fused count-mode MXFP8 dispatch with a caller recv buffer. The returned GroupedTensor
+        views the caller buffer's data then scale regions; counts, payload/weights (per-expert,
+        order-tolerant), and total must match the AllGather prepare."""
+        if not FUSED_COUNT:
+            self.skipTest("fused count-mode dispatch not enabled")
+        if EAGER:
+            self.skipTest("fused count mode requires non-eager static recv capacity")
+        self._require_mxfp8_shapes()
+        from transformer_engine.pytorch.constants import MXFP8_BLOCK_SCALING_SIZE
+
+        rc = self.cfg.recv_capacity_per_rank
+        cols = HIDDEN_DIM // MXFP8_BLOCK_SCALING_SIZE
+        nbytes = rc * (HIDDEN_DIM + cols)  # fp8 data + e8m0 scales, one byte per element
+        recv_buf = torch.empty(nbytes, dtype=torch.uint8, device=self.cfg.device)
+        rbuf_w = torch.empty(rc, dtype=torch.float32, device=self.cfg.device)
+        buf = self._make_buffer(dispatch_fwd_quant_recipe=MXFP8BlockScaling(), alignment=128)
+        topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+
+        # Reference counts via the AllGather prepare path (alignment=128, no quant).
+        ref_tokens_per_expert = ep_prepare(self._make_buffer(alignment=128), topk_idx).clone()
+        torch.cuda.synchronize()
+
+        out = {}
+
+        def step():
+            out["recv_mx"], out["rw"], _tc = ep_dispatch(
+                buf, tokens, topk_idx, w, recv_tokens=recv_buf, recv_topk_weights=rbuf_w
+            )
+
+        graph = self._capture(step)
+        buf.tokens_per_expert.zero_()
+        buf.total_recv_tokens.zero_()
+        graph.replay()
+        torch.cuda.synchronize()
+
+        # The returned GroupedTensor views the caller buffer's data then scale regions, and the
+        # replayed fused scan repopulates the per-expert counts to match the AllGather path.
+        recv_mx = out["recv_mx"]
+        self.assertEqual(recv_mx.rowwise_data.data_ptr(), recv_buf.data_ptr())
+        self.assertEqual(recv_mx.scale_inv.data_ptr(), recv_buf.data_ptr() + rc * HIDDEN_DIM)
+        torch.testing.assert_close(buf.tokens_per_expert, ref_tokens_per_expert, atol=0, rtol=0)
+
+        # Replayed payload correctness: received tokens/scales, weights, and total count must
+        # come from the replay's own dispatch, not a stale copy from the captured step.
+        self._assert_mxfp8_matches_bf16(recv_mx, tokens, topk_idx, w, buf.tokens_per_expert)
+        ref_buf = self._make_buffer(alignment=128)
+        _ref_recv, ref_rw, _ref_tc = ep_dispatch(ref_buf, tokens, topk_idx, w)
+        torch.cuda.synchronize()
+        cum = [0] + buf.tokens_per_expert.cumsum(0).tolist()
+        for lo, hi in zip(cum[:-1], cum[1:]):
+            torch.testing.assert_close(
+                out["rw"][lo:hi].sort().values, ref_rw[lo:hi].sort().values, atol=0, rtol=0
+            )
+        self.assertEqual(int(buf.total_recv_tokens.item()), int(ref_buf.total_recv_tokens.item()))
+
     # PP-1F1B handle isolation
 
     @_zero_copy_test_include
@@ -829,6 +1118,561 @@ class TestEP(unittest.TestCase):
         torch.testing.assert_close(tokens_p.grad.float(), tokens.float(), atol=5e-2, rtol=5e-2)
 
 
+class TestMoeEpSequential(_EpTestCase):
+    """Integration tests for Dispatch -> expert MLP -> Combine sequences."""
+
+    @staticmethod
+    def _reference_weights(op):
+        """Pack GroupedLinear weights into MoeEpReference ``(E, in, out)`` layout."""
+        weight = op.weight
+        num_groups = op.num_groups
+        out_features = op.out_features
+        in_features = op.in_features
+        data = weight.rowwise_data.view(
+            num_groups,
+            out_features,
+            in_features,
+        ).permute(0, 2, 1)
+        if weight.quantizer is None:
+            return data.detach()
+        scale = (
+            weight.scale_inv.view(
+                num_groups,
+                out_features,
+                in_features // 32,
+            )
+            .view(torch.float8_e8m0fnu)
+            .permute(0, 2, 1)
+        )
+        return BlockScaledTensor(
+            data=data.view(torch.float8_e4m3fn).detach(),
+            scale=scale.detach(),
+            format="mxfp8",
+            logical_shape=tuple(data.shape),
+            axis=1,
+        )
+
+    def test_runtime_buffer_config_mismatch(self):
+        config = self._make_config()
+        buffer = self._make_buffer_from_config(config)
+        topk_idx, tokens, topk_weights = _make_identity_inputs(
+            self.cfg.rank,
+            self.cfg.ep_size,
+        )
+        dispatch = te_ops.MoeDispatch(config, buffer)
+        replacements = {
+            "top_k": config.top_k + 1,
+            "hidden_dim": config.hidden_dim + 1,
+            "num_local_experts": config.num_local_experts + 1,
+            "max_tokens_per_rank": config.max_tokens_per_rank + 1,
+            "recv_capacity_per_rank": config.recv_capacity_per_rank + 1,
+            "alignment": 1,
+            "payload_dtype": torch.float16,
+            "zero_copy": not config.zero_copy,
+        }
+        for field_name, wrong_value in replacements.items():
+            with self.subTest(field_name=field_name):
+                original = getattr(buffer, field_name)
+                setattr(buffer, field_name, wrong_value)
+                try:
+                    with self.assertRaisesRegex(ValueError, field_name):
+                        dispatch(tokens, topk_idx, topk_weights)
+                finally:
+                    setattr(buffer, field_name, original)
+
+        wrong_config = replace(config, drop_on_overflow=not config.drop_on_overflow)
+        with self.assertRaisesRegex(ValueError, "drop_on_overflow"):
+            te_ops.MoeDispatch(wrong_config, buffer)(tokens, topk_idx, topk_weights)
+        with self.assertRaisesRegex(ValueError, "ep_group"):
+            te_ops.MoeDispatch(replace(config, ep_group=None), buffer)(
+                tokens, topk_idx, topk_weights
+            )
+        expert_out = torch.empty(
+            self.cfg.recv_capacity_per_rank,
+            HIDDEN_DIM,
+            dtype=torch.bfloat16,
+            device=self.cfg.device,
+        )
+        with self.assertRaisesRegex(ValueError, "buffer config"):
+            original = buffer.hidden_dim
+            buffer.hidden_dim += 1
+            try:
+                te_ops.MoeCombine(config, buffer)(expert_out, topk_idx)
+            finally:
+                buffer.hidden_dim = original
+
+        # The communication recipes are backend configuration, so a config that
+        # disagrees with the buffer about the transport format is rejected.
+        mxfp8_config = replace(
+            config,
+            dispatch_fwd_quant_recipe=MXFP8BlockScaling(),
+            combine_bwd_quant_recipe=MXFP8BlockScaling(),
+        )
+        mxfp8_buffer = self._make_buffer_from_config(mxfp8_config)
+        with self.assertRaisesRegex(ValueError, "dispatch_fwd_quant_recipe"):
+            te_ops.MoeDispatch(config, mxfp8_buffer)(tokens, topk_idx, topk_weights)
+        with self.assertRaisesRegex(ValueError, "combine_bwd_quant_recipe"):
+            te_ops.MoeCombine(config, mxfp8_buffer)(expert_out, topk_idx)
+
+    def _run_dispatch_combine_identity(self, *, mxfp8):
+        """Route, apply top-k weights, and combine back to local token order."""
+        recipe = MXFP8BlockScaling() if mxfp8 else None
+        if mxfp8:
+            self._require_mxfp8_shapes()
+        config = self._make_config(
+            alignment=128 if mxfp8 else 0,
+            dispatch_fwd_quant_recipe=recipe,
+            combine_bwd_quant_recipe=recipe,
+        )
+        buffer = self._make_buffer_from_config(config)
+        dispatch = te_ops.MoeDispatch(config, buffer)
+        combine = te_ops.MoeCombine(config, buffer)
+        topk_idx, tokens, topk_weights = _make_identity_inputs(
+            self.cfg.rank,
+            self.cfg.ep_size,
+        )
+        recv_tokens, tokens_per_expert, recv_weights = dispatch(
+            tokens,
+            topk_idx,
+            topk_weights,
+        )
+        if mxfp8:
+            # Convert to BF16 since combine only supports BF16 in NCCL EP
+            # for now. dequantizing to mxfp8 below changes its overall shape
+            # to sum(tokens_per_expert).
+            recv_tokens = _degroup_mxfp8(recv_tokens)
+            recv_weights = recv_weights[: recv_tokens.shape[0]]
+        weighted_expert_output = (recv_tokens.float() * recv_weights.float().unsqueeze(-1)).to(
+            torch.bfloat16
+        )
+        output = combine(weighted_expert_output, topk_idx)
+        torch.cuda.synchronize()
+        torch.testing.assert_close(output, tokens, atol=5e-2, rtol=5e-2)
+        self.assertEqual(tokens_per_expert.data_ptr(), buffer.tokens_per_expert.data_ptr())
+
+    @_eager_test_include
+    def test_dispatch_combine_identity_bf16(self):
+        """MoeDispatch and MoeCombine basic ops form an identity in BF16."""
+        self._run_dispatch_combine_identity(mxfp8=False)
+
+    @_eager_test_include
+    @_mxfp8_align_test
+    def test_dispatch_combine_identity_mxfp8(self):
+        """MoeDispatch and MoeCombine basic ops form an identity with MXFP8 transport."""
+        self._run_dispatch_combine_identity(mxfp8=True)
+
+    def _make_megamoe_model(
+        self,
+        *,
+        recipe,
+        accumulate_into_main_grad=False,
+        delay_wgrad_compute=False,
+        glu_interleave_size=None,
+    ):
+        """Build the exact five-op sequence recognized by MegaMoE fusion."""
+        config = self._make_config(
+            alignment=128 if recipe is not None else 0,
+            dispatch_fwd_quant_recipe=recipe,
+            combine_bwd_quant_recipe=recipe,
+        )
+        buffer = self._make_buffer_from_config(config)
+        dispatch = te_ops.MoeDispatch(config, buffer)
+        init_ctx = (
+            te.quantized_model_init(enabled=True, recipe=recipe)
+            if recipe is not None
+            else nullcontext()
+        )
+        previous_single_param = os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM")
+        os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"] = "1"
+        try:
+            with init_ctx:
+                fc1 = te_ops.GroupedLinear(
+                    NUM_LOCAL_EXPERTS,
+                    HIDDEN_DIM,
+                    2 * 256,
+                    bias=False,
+                    device=self.cfg.device,
+                    dtype=torch.bfloat16,
+                    single_grouped_weight=True,
+                    accumulate_into_main_grad=accumulate_into_main_grad,
+                    delay_wgrad_compute=delay_wgrad_compute,
+                )
+                activation = te_ops.ScaledSwiGLU(
+                    glu_interleave_size=glu_interleave_size,
+                )
+                fc2 = te_ops.GroupedLinear(
+                    NUM_LOCAL_EXPERTS,
+                    256,
+                    HIDDEN_DIM,
+                    bias=False,
+                    device=self.cfg.device,
+                    dtype=torch.bfloat16,
+                    single_grouped_weight=True,
+                    accumulate_into_main_grad=accumulate_into_main_grad,
+                    delay_wgrad_compute=delay_wgrad_compute,
+                )
+        finally:
+            if previous_single_param is None:
+                del os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"]
+            else:
+                os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"] = previous_single_param
+        combine = te_ops.MoeCombine(config, buffer)
+        dispatch.set_extra_output_channel(0, "tokens_per_expert", output_to_caller=False)
+        dispatch.set_extra_output_channel(1, "routing_weights", output_to_caller=False)
+        fc1.set_extra_input_channel(0, "tokens_per_expert")
+        activation.set_extra_input_channel(0, "routing_weights")
+        fc2.set_extra_input_channel(0, "tokens_per_expert")
+        model = te_ops.Sequential(dispatch, fc1, activation, fc2, combine)
+        return model, fc1, fc2, buffer
+
+    @_eager_test_include
+    def test_megamoe_bf16_numerics(self):
+        self._run_megamoe_vs_reference(quantization="bf16")
+
+    @_eager_test_include
+    @_mxfp8_align_test
+    def test_megamoe_mxfp8_numerics(self):
+        self._run_megamoe_vs_reference(quantization="mxfp8")
+
+    @_mxfp8_align_test
+    def test_megamoe_mxfp8_cuda_graph_matches_eager(self):
+        """Unfused Sequential forward/backward graph replay matches eager execution."""
+        self._run_megamoe_mxfp8_cuda_graph_matches_eager()
+
+    def _run_megamoe_mxfp8_cuda_graph_matches_eager(self):
+        recipe = MXFP8BlockScaling()
+        graph_model, graph_fc1, graph_fc2, _ = self._make_megamoe_model(
+            recipe=recipe,
+        )
+        eager_model, eager_fc1, eager_fc2, _ = self._make_megamoe_model(
+            recipe=recipe,
+        )
+        eager_model.load_state_dict(graph_model.state_dict())
+
+        topk_idx, tokens, topk_weights = _make_moe_inputs(
+            self.cfg.rank,
+            self.cfg.ep_size,
+            self.cfg.device,
+        )
+
+        static_tokens = tokens.requires_grad_(True)
+        static_topk_idx = topk_idx
+        static_topk_weights = topk_weights.requires_grad_(True)
+        static_dy = torch.randn_like(static_tokens)
+        graphed_model = te.make_graphed_callables(
+            graph_model,
+            (static_tokens, static_topk_idx, static_topk_weights, static_topk_idx),
+            num_warmup_iters=3,
+            enabled=True,
+            recipe=recipe,
+        )
+
+        def reset_graphed_model():
+            # Release captured NCCL work before the process group is destroyed.
+            graphed_model.reset()
+            torch.cuda.synchronize()
+
+        self.addCleanup(reset_graphed_model)
+
+        # Replace the capture-time contents while retaining captured addresses.
+        with torch.no_grad():
+            static_tokens.copy_(torch.randn_like(static_tokens))
+            static_topk_weights.copy_(torch.rand_like(static_topk_weights))
+            static_dy.copy_(torch.randn_like(static_dy))
+
+        for parameter in graph_model.parameters():
+            parameter.grad = torch.zeros_like(parameter)
+        if static_tokens.grad is not None:
+            static_tokens.grad.zero_()
+        if static_topk_weights.grad is not None:
+            static_topk_weights.grad.zero_()
+        with te.autocast(enabled=True, recipe=recipe):
+            graph_out = graphed_model(
+                static_tokens,
+                static_topk_idx,
+                static_topk_weights,
+                static_topk_idx,
+            )
+        graph_out_snapshot = graph_out.detach().clone()
+        graph_out.backward(static_dy)
+        torch.cuda.synchronize()
+        graph_grad_results = (
+            static_tokens.grad.detach().clone(),
+            static_topk_weights.grad.detach().clone(),
+            graph_fc1.weight.grad.detach().clone(),
+            graph_fc2.weight.grad.detach().clone(),
+        )
+
+        eager_tokens = static_tokens.detach().clone().requires_grad_(True)
+        eager_topk_weights = static_topk_weights.detach().clone().requires_grad_(True)
+        for parameter in eager_model.parameters():
+            parameter.grad = torch.zeros_like(parameter)
+        with te.autocast(enabled=True, recipe=recipe):
+            eager_out = eager_model(
+                eager_tokens,
+                static_topk_idx,
+                eager_topk_weights,
+                static_topk_idx,
+            )
+        tolerances = {"rtol": 0.125, "atol": 0.25}
+        torch.testing.assert_close(graph_out_snapshot, eager_out, **tolerances)
+
+        eager_out.backward(static_dy)
+        torch.cuda.synchronize()
+        eager_grad_results = (
+            eager_tokens.grad,
+            eager_topk_weights.grad,
+            eager_fc1.weight.grad,
+            eager_fc2.weight.grad,
+        )
+
+        for graph_result, eager_result in zip(
+            graph_grad_results,
+            eager_grad_results,
+        ):
+            torch.testing.assert_close(graph_result, eager_result, **tolerances)
+
+    @_eager_test_include
+    def test_megamoe_main_grad_accumulation_bf16(self):
+        self._run_megamoe_vs_reference(
+            quantization="bf16",
+            accumulate_into_main_grad=True,
+        )
+
+    @_eager_test_include
+    @_mxfp8_align_test
+    def test_megamoe_main_grad_accumulation(self):
+        self._run_megamoe_vs_reference(
+            quantization="mxfp8",
+            accumulate_into_main_grad=True,
+        )
+
+    @_eager_test_include
+    def test_megamoe_main_grad_overwrite_bf16(self):
+        self._run_megamoe_vs_reference(
+            quantization="bf16",
+            accumulate_into_main_grad=True,
+            overwrite_main_grad=True,
+        )
+
+    @_eager_test_include
+    @_mxfp8_align_test
+    def test_megamoe_main_grad_overwrite(self):
+        self._run_megamoe_vs_reference(
+            quantization="mxfp8",
+            accumulate_into_main_grad=True,
+            overwrite_main_grad=True,
+        )
+
+    @_eager_test_include
+    def test_megamoe_delayed_wgrad_bf16(self):
+        self._run_megamoe_vs_reference(
+            quantization="bf16",
+            delay_wgrad_compute=True,
+        )
+
+    @_eager_test_include
+    @_mxfp8_align_test
+    def test_megamoe_delayed_wgrad(self):
+        self._run_megamoe_vs_reference(
+            quantization="mxfp8",
+            delay_wgrad_compute=True,
+        )
+
+    @_eager_test_include
+    def test_megamoe_delayed_main_grad_bf16(self):
+        self._run_megamoe_vs_reference(
+            quantization="bf16",
+            accumulate_into_main_grad=True,
+            delay_wgrad_compute=True,
+        )
+
+    @_eager_test_include
+    @_mxfp8_align_test
+    def test_megamoe_delayed_main_grad(self):
+        self._run_megamoe_vs_reference(
+            quantization="mxfp8",
+            accumulate_into_main_grad=True,
+            delay_wgrad_compute=True,
+        )
+
+    def _run_megamoe_vs_reference(
+        self,
+        *,
+        quantization,
+        accumulate_into_main_grad=False,
+        overwrite_main_grad=False,
+        delay_wgrad_compute=False,
+    ):
+        """Compare the five-op MoE sequence with the PyTorch EP reference.
+
+        The fuser selects MegaMoE when its runtime gates pass. Otherwise this
+        exercises the same sequence as separate NCCL EP and grouped-MLP ops.
+        """
+        recipe = MXFP8BlockScaling() if quantization == "mxfp8" else None
+        model, fc1, fc2, _ = self._make_megamoe_model(
+            recipe=recipe,
+            accumulate_into_main_grad=accumulate_into_main_grad,
+            delay_wgrad_compute=delay_wgrad_compute,
+            glu_interleave_size=32 if quantization == "mxfp8" else None,
+        )
+        generator = torch.Generator(device=self.cfg.device)
+        generator.manual_seed(3100 + self.cfg.rank)
+        with torch.no_grad():
+            for op in (fc1, fc2):
+                weights = op.weight.quantized_tensors
+                if weights is None:
+                    weights = op.weight.split_into_quantized_tensors()
+                for expert in range(NUM_LOCAL_EXPERTS):
+                    weight = (
+                        torch.randn(
+                            weights[expert].shape,
+                            generator=generator,
+                            dtype=torch.float32,
+                            device=self.cfg.device,
+                        )
+                        * 0.1
+                    ).to(torch.bfloat16)
+                    weights[expert].copy_(weight)
+                    if quantization == "mxfp8":
+                        self.assertIsInstance(weights[expert], MXFP8Tensor)
+
+        topk_idx, tokens, topk_weights = _make_moe_inputs(
+            self.cfg.rank,
+            self.cfg.ep_size,
+            self.cfg.device,
+        )
+        seq_tokens = tokens.requires_grad_(True)
+        seq_topk_weights = topk_weights.requires_grad_(True)
+        main_grad_sentinel = 0.5
+        if accumulate_into_main_grad:
+            for op in (fc1, fc2):
+                op.weight.main_grad = torch.full(
+                    op.weight.size(),
+                    main_grad_sentinel,
+                    dtype=torch.float32,
+                    device=op.weight.device,
+                )
+                op.weight.overwrite_main_grad = overwrite_main_grad
+                op.weight.zero_out_wgrad = False
+                op.weight.grad_added_to_main_grad = False
+        autocast_ctx = (
+            te.autocast(enabled=True, recipe=recipe) if recipe is not None else nullcontext()
+        )
+        with autocast_ctx:
+            seq_out = model(
+                seq_tokens,
+                topk_idx,
+                seq_topk_weights,
+                topk_idx,
+            )
+
+        self.assertEqual(seq_out.dtype, torch.bfloat16)
+
+        fc1_weight = self._reference_weights(fc1)
+        fc2_weight = self._reference_weights(fc2)
+        emulate_mxfp8 = quantization == "mxfp8"
+        reference = MoeEpReference(
+            num_experts=self.cfg.num_experts,
+            hidden_size=HIDDEN_DIM,
+            intermediate_size=256,
+            top_k=TOP_K,
+            ep_group=self.ep_group,
+            max_tokens_per_rank=TOKENS_PER_RANK,
+            output_format=MoeFormat.BF16,
+            combine_format=MoeFormat.BF16,
+            apply_topk_in_fc1=True,
+            generate_c=True,
+            intermediate_format=MoeFormat.MXFP8 if emulate_mxfp8 else None,
+            backward_operand_format=MoeFormat.MXFP8 if emulate_mxfp8 else None,
+            backward_wgrad_mode="operands",
+            token_padding_size=256,
+            weight_interleave_size=32 if quantization == "mxfp8" else None,
+        )
+        if emulate_mxfp8:
+            reference_activation = quantize_blockwise(
+                tokens.detach(),
+                MoeFormat.MXFP8,
+                axis=1,
+            )
+        else:
+            reference_activation = tokens.detach()
+        if emulate_mxfp8 and not isinstance(fc1_weight, BlockScaledTensor):
+            fc1_weight = quantize_blockwise(fc1_weight, MoeFormat.MXFP8, axis=1)
+        if emulate_mxfp8 and not isinstance(fc2_weight, BlockScaledTensor):
+            fc2_weight = quantize_blockwise(fc2_weight, MoeFormat.MXFP8, axis=1)
+        reference_outputs = reference(
+            reference_activation,
+            fc1_weight,
+            fc2_weight,
+            topk_idx,
+            topk_weights.detach(),
+        )
+        ref_out, fc1_c, route_metadata, wgrad_forward_stash = reference_outputs
+
+        tolerances = {"rtol": 0.125, "atol": 0.25}
+        torch.testing.assert_close(seq_out, ref_out, **tolerances)
+
+        dy = (
+            torch.randn(
+                seq_out.shape,
+                generator=generator,
+                dtype=torch.float32,
+                device=self.cfg.device,
+            )
+            * 0.1
+        ).to(torch.bfloat16)
+        seq_out.backward(dy)
+        if delay_wgrad_compute:
+            fc1.backward_dw()
+            fc2.backward_dw()
+        grad_tokens, grad_topk_weights, wgrad_operands = reference.backward(
+            dy,
+            fc1_weight,
+            fc2_weight,
+            topk_idx,
+            topk_weights.detach(),
+            fc1_c,
+            route_metadata,
+            wgrad_forward_stash=wgrad_forward_stash,
+        )
+        grad_fc1, grad_fc2 = wgrad_operands.dense_wgrads()
+        reference_wgrads = (grad_fc1, grad_fc2)
+
+        torch.cuda.synchronize()
+        torch.testing.assert_close(
+            seq_tokens.grad,
+            grad_tokens.to(dtype=seq_tokens.dtype),
+            **tolerances,
+        )
+        torch.testing.assert_close(seq_topk_weights.grad, grad_topk_weights.float(), **tolerances)
+        for op, ref_grad in zip((fc1, fc2), reference_wgrads):
+            expected_grad = ref_grad.transpose(1, 2)
+            if accumulate_into_main_grad:
+                if not overwrite_main_grad:
+                    expected_grad = expected_grad + main_grad_sentinel
+                torch.testing.assert_close(
+                    op.weight.main_grad,
+                    expected_grad.to(dtype=op.weight.main_grad.dtype),
+                    **tolerances,
+                )
+                self.assertTrue(op.weight.grad_added_to_main_grad)
+                self.assertIsNotNone(op.weight.grad)
+                continue
+            seq_grad = op.weight.grad
+            self.assertEqual(seq_grad.dtype, torch.bfloat16)
+            self.assertEqual(
+                tuple(seq_grad.shape),
+                (NUM_LOCAL_EXPERTS, op.out_features, op.in_features),
+            )
+            self.assertTrue(seq_grad.is_contiguous())
+            torch.testing.assert_close(
+                seq_grad,
+                expected_grad.to(dtype=seq_grad.dtype),
+                **tolerances,
+            )
+
+
 def _init_distributed():
     dist.init_process_group(backend="nccl")
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
@@ -846,7 +1690,12 @@ if __name__ == "__main__":
     name_filter = os.environ.get("NVTE_EP_TEST_FILTER")
     if name_filter:
         loader.testMethodPrefix = name_filter
-    suite = loader.loadTestsFromTestCase(TestEP)
+    suite = unittest.TestSuite(
+        (
+            loader.loadTestsFromTestCase(TestEP),
+            loader.loadTestsFromTestCase(TestMoeEpSequential),
+        )
+    )
     runner = unittest.TextTestRunner(stream=sys.stdout, verbosity=2)
     result = runner.run(suite)
     dist.barrier()
