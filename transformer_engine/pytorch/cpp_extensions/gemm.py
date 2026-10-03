@@ -10,7 +10,7 @@ import functools
 import torch
 import transformer_engine_torch as tex
 from ..constants import TE_DType, DType
-from ..utils import get_sm_count, _empty_tensor
+from ..utils import get_device_compute_capability, get_sm_count, _empty_tensor
 
 from ..quantized_tensor import QuantizedTensorStorage, Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
@@ -644,7 +644,7 @@ def general_grouped_gemm_for_grouped_tensor(
 
     # Hopper (SM90) uses a single shared alpha/beta scalar;
     # Blackwell+ (SM100) supports per-group alpha/beta arrays.
-    per_group = torch.cuda.get_device_capability() >= (10, 0)
+    per_group = get_device_compute_capability() >= (10, 0)
     num_alphabeta = num_tensors if per_group else 1
 
     if alpha is None:

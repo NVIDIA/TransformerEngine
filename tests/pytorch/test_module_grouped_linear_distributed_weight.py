@@ -20,6 +20,9 @@ fake that applies a distinct, observable scale in each materialize hook: a wirin
 a specific assertion rather than drifting numerically.
 """
 
+import gc
+import weakref
+
 import pytest
 import torch
 
@@ -284,3 +287,94 @@ def test_single_grouped_weight_dispatches(monkeypatch):
 
     assert calls == ["fwd", "bwd", "finalize"], f"unexpected hook dispatch: {calls}"
     assert torch.count_nonzero(weight.wgrad_scratch) > 0, "wgrad never reached grad_buffer"
+
+
+@pytest.mark.parametrize("single_weight", [False, True])
+@pytest.mark.parametrize("quantized", [False, True])
+@pytest.mark.parametrize("fused", [False, True])
+@pytest.mark.parametrize("requires_dgrad", [False, True])
+def test_gathered_weights_are_transient(
+    monkeypatch, single_weight, quantized, fused, requires_dgrad
+):
+    """No gathered copy survives forward; backward must gather even when dgrad is disabled."""
+    from transformer_engine.pytorch.module.grouped_linear import (
+        _GroupedLinear,
+        is_module_grouped_tensor_path_supported,
+    )
+    from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
+
+    fp8_recipe = MXFP8BlockScaling() if quantized else None
+    if not is_module_grouped_tensor_path_supported(fp8_recipe, DTYPE):
+        pytest.skip("Requested native grouped GEMM is unavailable.")
+    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
+    te.quantization.FP8GlobalStateManager.reset()
+    module = te.GroupedLinear(
+        2,
+        IN_F,
+        OUT_F,
+        bias=False,
+        params_dtype=DTYPE,
+        device=DEVICE,
+        single_grouped_weight=single_weight,
+        use_grouped_tensor=True,
+        fuse_wgrad_accumulation=fused,
+    )
+    weights = [module.weight] if single_weight else [module.weight0, module.weight1]
+    for weight in weights:
+        weight.main_grad = torch.zeros(weight.shape, device=DEVICE, dtype=torch.float32)
+        weight.wgrad_scratch = torch.zeros_like(weight.main_grad)
+        weight.grad_buffer = lambda w=weight: w.wgrad_scratch
+    gathered_refs, calls = [], []
+
+    def gather(phase):
+        calls.append(phase)
+        if single_weight:
+            copy = GroupedTensor.make_grouped_tensor_from_rowwise_data(
+                num_tensors=2,
+                tensor_shape=(OUT_F, IN_F),
+                rowwise_data=weights[0].rowwise_data.detach().clone(),
+                dtype=DTYPE,
+            )
+            copies = [copy]
+        else:
+            copies = [w.detach().clone() for w in weights]
+        assert all(not w.requires_grad for w in copies)
+        gathered_refs.extend(weakref.ref(w) for w in copies)
+        return copies
+
+    def finalize(grads, **kwargs):
+        calls.append("finalize")
+        grads = [grads] if single_weight else grads
+        if fused:
+            for weight, grad in zip(weights, grads):
+                assert grad.data_ptr() == weight.wgrad_scratch.data_ptr()
+                weight.main_grad.add_(grad)
+            return [None] * len(weights)
+        return list(grads)
+
+    leader = weights[0]
+    leader.is_distributed_weight = True
+    leader.materialize_group_for_forward = lambda: gather("fwd")
+    leader.materialize_group_for_backward = lambda **kw: gather("bwd")
+    leader.finalize_group_grads = finalize
+    prep = []
+    original = _GroupedLinear._prepare_weights_for_grouped_tensor_gemm
+
+    def prepare(*args, **kwargs):
+        prep.append(kwargs["cache_weight"])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(_GroupedLinear, "_prepare_weights_for_grouped_tensor_gemm", prepare)
+    splits, x = _inputs(2)
+    x.requires_grad_(requires_dgrad)
+    with te.autocast(enabled=quantized, recipe=fp8_recipe):
+        y = module(x, splits, is_first_microbatch=True)
+    gc.collect()
+    assert not module._fp8_workspaces
+    assert all(ref() is None for ref in gathered_refs)
+    y.sum().backward()
+    assert calls == ["fwd", "bwd", "finalize"]
+    assert prep == [False] * (1 + int(requires_dgrad))
+    for weight in weights:
+        grad = weight.main_grad if fused else weight.grad
+        assert grad is not None and torch.count_nonzero(grad) > 0
