@@ -77,7 +77,7 @@ struct MXFP8GroupQuantConfig {
            (sm_arch << 22);
   }
 
-  std::optional<tvm_ffi_bridge::TVMFFIKernel> get_kernel() const {
+  std::optional<tvm::ffi::Function> get_kernel() const {
     static TVMFFIConfigCache &cache = TVMFFIConfigCache::create();
     return cache.get_or_load(*this);
   }
@@ -212,7 +212,7 @@ inline bool mxfp8_group_quantize_cutedsl(const MXFP8GroupQuantConfig &config,
     return true;
   }
 
-  std::optional<tvm_ffi_bridge::TVMFFIKernel> group_quant_func_opt = config.get_kernel();
+  std::optional<tvm::ffi::Function> group_quant_func_opt = config.get_kernel();
   if (!group_quant_func_opt.has_value()) {
     return false;
   }
