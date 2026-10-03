@@ -936,13 +936,6 @@ std::string mxfp8_2d_quantization_test_name_generator(
     return name;
 }
 
-// Regression test for https://github.com/NVIDIA/TransformerEngine/issues/3550:
-// the amax reduction of the half-precision MXFP8 rowwise/bidimensional kernels
-// used max.xorsign.abs (NaN-ignoring), so a NaN input element was dropped
-// before the exceptional-value handling and its block was quantized with a
-// finite scale.  Every 32-element block containing NaN must take the
-// exceptional E8M0 scale (255), NaN-free blocks must keep the finite scale,
-// and the cast payload must preserve NaN.
 TEST(CastMXFP8NaNScaling, RowwiseAndBidimNaNBlocksTakeExceptionalScale) {
     // Regression test for https://github.com/NVIDIA/TransformerEngine/issues/3550:
     // the amax reduction of the half-precision MXFP8 rowwise/bidimensional kernels
@@ -966,7 +959,7 @@ TEST(CastMXFP8NaNScaling, RowwiseAndBidimNaNBlocksTakeExceptionalScale) {
     constexpr size_t kRowwiseBlockCols = 128;  // specialized rowwise kernel eligibility
     constexpr size_t kRowBlockCols = 32;       // MXFP8 block width along a row
 
-    Tensor input("input", {rows, cols}, DType::kBFloat16);
+    Tensor input("input", std::vector<size_t>{rows, cols}, DType::kBFloat16);
     {
         // NaN lanes sit at j % 8 == 7 in every row except rows with i % 4 == 3,
         // which stay NaN-free.  Rowwise blocks (one 128-column stretch of one
@@ -1018,12 +1011,15 @@ TEST(CastMXFP8NaNScaling, RowwiseAndBidimNaNBlocksTakeExceptionalScale) {
     };
 
     // ---- rowwise kernel (MXFP8 1D scaling, rowwise-only layout) ------------
-    Tensor output_rowwise("output_rowwise", {rows, cols}, DType::kFloat8E4M3,
+    Tensor output_rowwise("output_rowwise", std::vector<size_t>{rows, cols}, DType::kFloat8E4M3,
                           /*rowwise=*/true, /*colwise=*/false, NVTE_MXFP8_1D_SCALING);
     nvte_quantize(input.data(), output_rowwise.data(), 0);
     cudaDeviceSynchronize();
     ASSERT_EQ(cudaGetLastError(), cudaSuccess);
 
+    // rowwise_cpu_dptr()/columnwise_cpu_dptr() hand back the host mirror without
+    // copying, so the D2H copy has to be requested first.
+    output_rowwise.to_cpu();
     const fp8e8m0 *scales_rowwise = output_rowwise.rowwise_cpu_scale_inv_ptr<fp8e8m0>();
     const OutputType *out_rowwise = output_rowwise.rowwise_cpu_dptr<OutputType>();
     for (size_t i = 0; i < rows; ++i) {
@@ -1046,12 +1042,13 @@ TEST(CastMXFP8NaNScaling, RowwiseAndBidimNaNBlocksTakeExceptionalScale) {
     }
 
     // ---- bidimensional kernel (rowwise + colwise layouts) ------------------
-    Tensor output_bidim("output_bidim", {rows, cols}, DType::kFloat8E4M3,
+    Tensor output_bidim("output_bidim", std::vector<size_t>{rows, cols}, DType::kFloat8E4M3,
                         /*rowwise=*/true, /*colwise=*/true, NVTE_MXFP8_1D_SCALING);
     nvte_quantize(input.data(), output_bidim.data(), 0);
     cudaDeviceSynchronize();
     ASSERT_EQ(cudaGetLastError(), cudaSuccess);
 
+    output_bidim.to_cpu();
     const fp8e8m0 *scales_bidim_rowwise = output_bidim.rowwise_cpu_scale_inv_ptr<fp8e8m0>();
     const fp8e8m0 *scales_bidim_colwise = output_bidim.columnwise_cpu_scale_inv_ptr<fp8e8m0>();
     const OutputType *out_bidim_rowwise = output_bidim.rowwise_cpu_dptr<OutputType>();
