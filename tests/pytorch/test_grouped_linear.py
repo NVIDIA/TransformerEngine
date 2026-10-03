@@ -2634,9 +2634,7 @@ def test_grouped_runtime_rechecks_support(monkeypatch, single_weight, restrictio
     "use_grouped_tensor,single_bias", [(False, False), (True, False), (True, True)]
 )
 @pytest.mark.parametrize("use_bias", [False, True])
-def test_grouped_linear_return_bias_with_frozen_weights(
-    use_grouped_tensor, single_bias, use_bias
-):
+def test_grouped_linear_return_bias_with_frozen_weights(use_grouped_tensor, single_bias, use_bias):
     """A trainable returned bias keeps the output differentiable when input/weight are frozen."""
     if use_grouped_tensor and not is_module_grouped_tensor_path_supported(None, torch.bfloat16):
         pytest.skip("Native grouped GEMM is unavailable.")
@@ -3519,21 +3517,21 @@ def test_grouped_linear_grouped_tensor_path_skips_non_rht_nvfp4():
 @pytest.mark.parametrize(
     "recipe_name", ["bf16", "delayed", "current", "mxfp8", "high_precision", "dequantized"]
 )
+@pytest.mark.parametrize("freeze_weight", [False, True])
 @pytest.mark.parametrize("input_requires_grad", [False, True])
 @pytest.mark.parametrize("delay_wgrad", [False, True])
 @pytest.mark.parametrize("grad_storage", ["grad", "preallocated_grad", "main_grad"])
 def test_grouped_linear_bias_gradient_accumulation(
-    monkeypatch,
     use_grouped_tensor,
     single_weight,
     single_bias,
     recipe_name,
+    freeze_weight,
     input_requires_grad,
     delay_wgrad,
     grad_storage,
 ):
-    """Bias gradients accumulate during main backward with immediate or deferred wgrad."""
-    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
+    """Bias gradients accumulate during main backward, independently of deferred/frozen weights."""
     if recipe_name == "bf16":
         fp8_recipe = None
     elif recipe_name == "delayed":
@@ -3576,6 +3574,7 @@ def test_grouped_linear_bias_gradient_accumulation(
         for param in weights:
             data = param.rowwise_data if isinstance(param, GroupedTensor) else param
             data.fill_(0.125)
+            param.requires_grad_(not freeze_weight)
         for param in biases:
             data = param.rowwise_data if isinstance(param, GroupedTensor) else param
             data.fill_(0.5)
@@ -3604,6 +3603,8 @@ def test_grouped_linear_bias_gradient_accumulation(
             param.grad = None
 
         for param in module.parameters():
+            if not param.requires_grad:
+                continue
             if getattr(param, "skip_backward_post_hook", False):
                 module.register_wgrad_accumulation_and_reduce_hooks(
                     lambda param=param: accumulate(param)
@@ -3657,6 +3658,9 @@ def test_grouped_linear_bias_gradient_accumulation(
                 module.backward_dw()
                 check_bias_grads()  # Deferred weight hooks must not add dbias a second time.
             for param in weights:
+                if freeze_weight:
+                    assert param.grad is None
+                    continue
                 grad = param.main_grad if grad_storage == "main_grad" else param.grad
                 assert grad is not None
                 expected = 32 * (total_scale if grad_storage == "main_grad" else scale)
@@ -3670,11 +3674,8 @@ def test_grouped_linear_bias_gradient_accumulation(
 @pytest.mark.parametrize("device", ["cuda", "meta"])
 @pytest.mark.parametrize("single_weight", [False, True])
 @pytest.mark.parametrize("single_bias", [False, True])
-def test_grouped_linear_delayed_wgrad_hook_ownership(
-    monkeypatch, device, single_weight, single_bias
-):
+def test_grouped_linear_delayed_wgrad_hook_ownership(device, single_weight, single_bias):
     """Only weight hooks are deferred, including before meta parameters are materialized."""
-    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
     module = GroupedLinear(
         2,
         128,
