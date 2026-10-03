@@ -16,11 +16,17 @@ from transformer_engine.pytorch.quantized_tensor import (
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockwiseQTensor
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
+from transformer_engine.pytorch.chunk_padding import (
+    moe_sort_chunks_and_pad,
+    moe_unpad_and_restore_chunks,
+)
 
 __all__ = [
     "moe_permute",
     "moe_unpermute",
     "moe_sort_chunks_by_index",
+    "moe_sort_chunks_and_pad",
+    "moe_unpad_and_restore_chunks",
 ]
 
 
