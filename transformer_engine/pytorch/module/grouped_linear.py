@@ -553,9 +553,11 @@ def _grouped_linear_backward_impl(
     out_features = grad_output.shape[-1]
     grad_output_view = grad_output.contiguous().view(-1, out_features)
     delay_wgrad = args.wgrad_store is not None and args.wgrad_store.delay_wgrad_compute()
-    # Return dbias in the main backward even when the weight GEMM is deferred.
-    # Keep fused BF16 wgrad+dbias for immediate wgrad.
-    compute_dbias = args.use_bias and (args.fp8 or args.debug or delay_wgrad)
+    # Bias gradients belong to the main backward even when weights are frozen
+    # or their GEMM is deferred. Keep fused BF16 wgrad+dbias for immediate wgrad.
+    compute_dbias = args.use_bias and (
+        args.fp8 or args.debug or not args.weights_requires_grad or delay_wgrad
+    )
     grad_output_reference = args.grad_output_quantizers[0]
     if args.fp8 and isinstance(grad_output_reference, HybridQuantizer):
         # Usage is a runtime decision, not part of generation validation.
@@ -1075,7 +1077,9 @@ def _grouped_linear_graph_safe_backward(
     grad_output_view = grad_output.contiguous().view(-1, grad_output.shape[-1])
     dy_2d = cast_if_needed(grad_output_view, args.activation_dtype)
     dbias_packed = None
-    if args.fp8:
+    grouped_dy = None
+    needs_grouped_dy = args.requires_dgrad or args.weights_requires_grad
+    if args.fp8 and needs_grouped_dy:
         grad_output_quantizer = args.grad_output_quantizers[0]
         grad_output_quantizer.set_usage(
             rowwise=args.requires_dgrad,
@@ -1103,7 +1107,7 @@ def _grouped_linear_graph_safe_backward(
                 split_sizes,
                 tensor_offsets=output_tensor_offsets,
             )
-    else:
+    elif needs_grouped_dy:
         grouped_dy = _GroupedLinear._make_grouped_tensor(
             dy_2d,
             num_gemms=N,
