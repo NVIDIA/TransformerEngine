@@ -3143,6 +3143,7 @@ def test_grouped_linear_grouped_tensor_path_skips_non_rht_nvfp4():
 @pytest.mark.parametrize(
     "recipe_name", ["bf16", "delayed", "current", "mxfp8", "high_precision", "dequantized"]
 )
+@pytest.mark.parametrize("freeze_weight", [False, True])
 @pytest.mark.parametrize("input_requires_grad", [False, True])
 @pytest.mark.parametrize("delay_wgrad", [False, True])
 @pytest.mark.parametrize("grad_storage", ["grad", "preallocated_grad", "main_grad"])
@@ -3152,11 +3153,12 @@ def test_grouped_linear_bias_gradient_accumulation(
     single_weight,
     single_bias,
     recipe_name,
+    freeze_weight,
     input_requires_grad,
     delay_wgrad,
     grad_storage,
 ):
-    """Bias gradients accumulate during main backward with immediate or deferred wgrad."""
+    """Bias gradients accumulate during main backward, independently of deferred/frozen weights."""
     monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
     if recipe_name == "bf16":
         fp8_recipe = None
@@ -3200,6 +3202,7 @@ def test_grouped_linear_bias_gradient_accumulation(
         for param in weights:
             data = param.rowwise_data if isinstance(param, GroupedTensor) else param
             data.fill_(0.125)
+            param.requires_grad_(not freeze_weight)
         for param in biases:
             data = param.rowwise_data if isinstance(param, GroupedTensor) else param
             data.fill_(0.5)
@@ -3228,6 +3231,8 @@ def test_grouped_linear_bias_gradient_accumulation(
             param.grad = None
 
         for param in module.parameters():
+            if not param.requires_grad:
+                continue
             if getattr(param, "skip_backward_post_hook", False):
                 module.register_wgrad_accumulation_and_reduce_hooks(
                     lambda param=param: accumulate(param)
@@ -3281,6 +3286,9 @@ def test_grouped_linear_bias_gradient_accumulation(
                 module.backward_dw()
                 check_bias_grads()  # Deferred weight hooks must not add dbias a second time.
             for param in weights:
+                if freeze_weight:
+                    assert param.grad is None
+                    continue
                 grad = param.main_grad if grad_storage == "main_grad" else param.grad
                 assert grad is not None
                 expected = 32 * (total_scale if grad_storage == "main_grad" else scale)

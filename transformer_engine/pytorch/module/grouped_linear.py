@@ -1107,7 +1107,9 @@ class _GroupedLinear(torch.autograd.Function):
         grad_output_view = grad_output.contiguous().view(-1, grad_output.shape[-1])
         dy_2d = cast_if_needed(grad_output_view, ctx.activation_dtype)
         dbias_packed = None
-        if ctx.fp8:
+        grouped_dy = None
+        needs_grouped_dy = ctx.requires_dgrad or ctx.weights_requires_grad
+        if ctx.fp8 and needs_grouped_dy:
             grad_output_quantizer = ctx.grad_output_quantizers[0]
             grad_output_quantizer.set_usage(
                 rowwise=ctx.requires_dgrad,
@@ -1135,7 +1137,7 @@ class _GroupedLinear(torch.autograd.Function):
                     split_sizes,
                     tensor_offsets=output_tensor_offsets,
                 )
-        else:
+        elif needs_grouped_dy:
             grouped_dy = _GroupedLinear._make_grouped_tensor(
                 dy_2d,
                 num_gemms=N,
@@ -1356,9 +1358,11 @@ class _GroupedLinear(torch.autograd.Function):
             # Preprocess grad output
             grad_output_view = grad_output.contiguous().view(-1, grad_output.shape[-1])
             delay_wgrad = ctx.wgrad_store is not None and ctx.wgrad_store.delay_wgrad_compute()
-            # Return dbias in the main backward even when the weight GEMM is deferred.
-            # Keep fused BF16 wgrad+dbias for immediate wgrad.
-            compute_dbias = ctx.use_bias and (ctx.fp8 or ctx.debug or delay_wgrad)
+            # Bias gradients belong to the main backward even when weights are frozen
+            # or their GEMM is deferred. Keep fused BF16 wgrad+dbias for immediate wgrad.
+            compute_dbias = ctx.use_bias and (
+                ctx.fp8 or ctx.debug or not ctx.weights_requires_grad or delay_wgrad
+            )
             grad_output_reference = ctx.grad_output_quantizers[0]
             if ctx.fp8 and isinstance(grad_output_reference, HybridQuantizer):
                 # Usage is a runtime decision, not part of generation validation.
