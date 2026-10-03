@@ -4,28 +4,31 @@
 
 """Python interface for GEMM extensions"""
 
-from typing import Iterable, Literal, Optional, Tuple, Union, List
-import os
 import functools
+import os
+from typing import Iterable, List, Literal, Optional, Tuple, Union
+
 import torch
 import transformer_engine_torch as tex
-from ..constants import TE_DType, DType
-from ..utils import get_sm_count, _empty_tensor
 
+from ...debug.pytorch.debug_quantization import DebugQuantizedTensor, DebugQuantizer
+from ..constants import DType, TE_DType
+from ..custom_recipes.gemm import custom_gemm
 from ..quantized_tensor import QuantizedTensorStorage, Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.nvfp4_tensor import NVFP4Quantizer
-from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
+from ..tensor.storage.float8_blockwise_tensor_storage import (
+    Float8BlockwiseQTensorStorage,
+)
 from ..tensor.storage.float8_tensor_storage import Float8TensorStorage
 from ..tensor.storage.grouped_tensor_storage import GroupedTensorStorage
 from ..tensor.storage.hybrid_tensor_storage import HybridQuantizedTensorStorage
 from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 from ..tensor.utils import is_custom
-from ..custom_recipes.gemm import custom_gemm
-from ...debug.pytorch.debug_quantization import DebugQuantizedTensor, DebugQuantizer
+from ..utils import _empty_tensor, get_sm_count
 
 __all__ = [
     "general_gemm",
@@ -566,6 +569,119 @@ def _get_grouped_cublas_workspace(device: int, layout: str) -> torch.Tensor:
     return torch.empty(get_cublas_workspace_size_bytes(), dtype=torch.uint8, device=device)
 
 
+@torch.no_grad()
+def _pytorch_grouped_gemm(A, B, out, *, layout, bias, bias_scale, accumulate, alpha, beta) -> None:
+    """Run CUTLASS for packed BF16 GEMMs, writing into ``out``.
+
+    Raises:
+        NotImplementedError: The configuration requires TE's existing backend.
+    """
+    # PyTorch returns a BF16 product, so a separate add would lose the precision
+    # of TE's fused accumulation. Leave that case on the existing backend.
+    if os.getenv("NVTE_USE_CUTLASS_GROUPED_GEMM", "0") != "1":
+        raise NotImplementedError("PyTorch CUTLASS grouped GEMM is disabled.")
+    if torch.cuda.get_device_capability() != (10, 0):
+        raise NotImplementedError("PyTorch CUTLASS grouped GEMM requires SM100.")
+    if accumulate:
+        raise NotImplementedError("PyTorch CUTLASS grouped GEMM does not support accumulation.")
+    if alpha is not None:
+        raise NotImplementedError("PyTorch CUTLASS grouped GEMM does not support explicit alpha.")
+    if beta is not None:
+        raise NotImplementedError("PyTorch CUTLASS grouped GEMM does not support explicit beta.")
+
+    for tensor in [
+        *(A if isinstance(A, list) else [A]),
+        B,
+        *(out if isinstance(out, list) else [out]),
+    ]:
+        # Quantized wrappers can report a logical BF16 dtype.
+        if isinstance(tensor, QuantizedTensorStorage):
+            raise NotImplementedError("Quantized inputs and outputs are not supported.")
+        if isinstance(tensor, GroupedTensorStorage):
+            tensor = tensor.rowwise_data
+        if tensor is None:
+            raise NotImplementedError("Inputs and outputs must have rowwise data.")
+        if tensor.dtype != torch.bfloat16:
+            raise NotImplementedError("Inputs and outputs must have BF16 dtype.")
+    if not B.all_same_last_dim():
+        raise NotImplementedError("B tensors must have the same last dimension.")
+    if isinstance(A, list):
+        if any(tensor.shape[-1] != A[0].shape[-1] for tensor in A):
+            raise NotImplementedError("A tensors must have the same last dimension.")
+    elif not A.all_same_last_dim():
+        raise NotImplementedError("A tensors must have the same last dimension.")
+    # Older PyTorch builds use CUTLASS directly and do not expose this preference.
+    if getattr(torch.backends.cuda.matmul, "prefer_cublaslt_grouped_gemm", False):
+        raise RuntimeError(
+            "Set torch.backends.cuda.matmul.prefer_cublaslt_grouped_gemm = False "
+            "before using NVTE_USE_CUTLASS_GROUPED_GEMM on SM100."
+        )
+
+    groups = B.num_tensors
+    if B.first_dims is None:
+        offsets = torch.arange(1, groups + 1, device=B.rowwise_data.device, dtype=torch.int32)
+        offsets *= B.get_common_first_dim()
+    else:
+        offsets = torch.cumsum(B.first_dims, dim=0, dtype=torch.int32)
+
+    # The layout letters describe A, then B: T means transpose, N means unchanged.
+    # TE multiplies B by A after applying those transposes:
+    #   TN: B @ A.T (forward)
+    #   NN: B @ A   (input gradient)
+    #   NT: B.T @ A (weight gradient)
+    a = torch.cat(A) if isinstance(A, list) else A.rowwise_data.view(-1, A.get_common_last_dim())
+    b = B.rowwise_data.view(-1, B.get_common_last_dim())
+    match layout:
+        case "TN":
+            if isinstance(out, list):
+                raise NotImplementedError("TN requires a packed output buffer.")
+            if isinstance(A, list):
+                if any(tensor.shape != A[0].shape for tensor in A):
+                    raise NotImplementedError("TN requires A tensors with matching shapes.")
+            elif not A.all_same_shape():
+                raise NotImplementedError("TN requires A tensors with matching shapes.")
+            a = a.view(groups, -1, a.size(-1))
+            result = torch._grouped_mm(b, a.mT, offs=offsets)
+        case "NN":
+            if isinstance(out, list):
+                raise NotImplementedError("NN requires a packed output buffer.")
+            if isinstance(A, list):
+                if any(tensor.shape != A[0].shape for tensor in A):
+                    raise NotImplementedError("NN requires A tensors with matching shapes.")
+            elif not A.all_same_shape():
+                raise NotImplementedError("NN requires A tensors with matching shapes.")
+            a = a.view(groups, -1, a.size(-1))
+            result = torch._grouped_mm(b, a, offs=offsets)
+        case "NT":
+            result = torch._grouped_mm(b.T, a, offs=offsets)
+        case _:
+            raise NotImplementedError(f"Unsupported GEMM layout: {layout}.")
+
+    rows = torch.arange(result.size(0), device=result.device) if layout != "NT" else None
+    if bias is not None:
+        bias_data = bias.rowwise_data.view(groups, -1).float()
+        if layout == "NT":
+            bias_data = bias_data[:, None, :]
+        else:
+            # Exclude the final boundary so unused capacity maps to the last group.
+            bias_data = bias_data[torch.bucketize(rows, offsets[:-1], right=True)]
+        if bias_scale is not None:
+            bias_data = bias_data * bias_scale[:, None]
+        result = (result.float() + bias_data).to(result.dtype)
+
+    if isinstance(out, list):
+        for dst, src in zip(out, result):
+            dst.copy_(src)
+        return
+
+    destination = out.rowwise_data.view_as(result)
+    if layout == "NT":
+        destination.copy_(result)
+    else:
+        # Preserve caller-owned capacity beyond the final expert's rows.
+        torch.where(rows[:, None] < offsets[-1], result, destination, out=destination)
+
+
 def general_grouped_gemm_for_grouped_tensor(
     A,
     B,
@@ -588,6 +704,8 @@ def general_grouped_gemm_for_grouped_tensor(
     The caller must ensure that GroupedTensor metadata is already compatible with the
     underlying GEMM implementation (e.g., aligned offsets and output metadata layout).
     """
+    if not isinstance(B, GroupedTensorStorage):
+        raise TypeError(f"B must be a GroupedTensorStorage, got {type(B).__name__}.")
     assert layout in ("TN", "NN", "NT"), f"GEMM layout {layout} not supported."
     if grad:
         raise NotImplementedError("grad is not supported for grouped_tensor GEMM yet.")
@@ -600,7 +718,7 @@ def general_grouped_gemm_for_grouped_tensor(
 
     if isinstance(A, GroupedTensorStorage) and A.row_scaled_nvfp4:
         raise NotImplementedError("Row-scaled NVFP4 GroupedTensor GEMM is not supported yet.")
-    if isinstance(B, GroupedTensorStorage) and B.row_scaled_nvfp4:
+    if B.row_scaled_nvfp4:
         raise NotImplementedError("Row-scaled NVFP4 GroupedTensor GEMM is not supported yet.")
     if isinstance(out, GroupedTensorStorage) and out.row_scaled_nvfp4:
         raise NotImplementedError("Row-scaled NVFP4 GroupedTensor GEMM is not supported yet.")
@@ -637,6 +755,23 @@ def general_grouped_gemm_for_grouped_tensor(
 
     if bias_scale is not None and bias is None:
         raise ValueError("bias_scale requires bias to be provided.")
+
+    try:
+        _pytorch_grouped_gemm(
+            A,
+            B,
+            out,
+            layout=layout,
+            bias=bias,
+            bias_scale=bias_scale,
+            accumulate=accumulate,
+            alpha=alpha,
+            beta=beta,
+        )
+    except NotImplementedError:
+        pass  # Fall back to TE's existing backend for unsupported configurations.
+    else:
+        return out
 
     num_tensors = B.num_tensors
     rowwise = B.rowwise_data
