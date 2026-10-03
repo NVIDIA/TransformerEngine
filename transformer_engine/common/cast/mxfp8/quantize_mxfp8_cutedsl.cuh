@@ -61,7 +61,7 @@ struct MXFP8QuantConfig {
            (static_cast<uint32_t>(activation) << 16) | (sm_arch << 22);
   }
 
-  std::optional<tvm_ffi_bridge::TVMFFIKernel> get_kernel() const {
+  std::optional<tvm::ffi::Function> get_kernel() const {
     static TVMFFIConfigCache &cache = TVMFFIConfigCache::create();
     return cache.get_or_load(*this);
   }
@@ -142,7 +142,7 @@ inline bool mxfp8_quantize_cutedsl(const MXFP8QuantConfig &config, const Tensor 
     return true;
   }
 
-  std::optional<tvm_ffi_bridge::TVMFFIKernel> mxfp8_quant_func_opt = config.get_kernel();
+  std::optional<tvm::ffi::Function> mxfp8_quant_func_opt = config.get_kernel();
   if (!mxfp8_quant_func_opt.has_value()) {
     return false;
   }
