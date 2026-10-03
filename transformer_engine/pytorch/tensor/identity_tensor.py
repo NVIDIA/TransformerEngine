@@ -14,13 +14,20 @@ FP32 specifically.
 """
 
 from __future__ import annotations
-from typing import Any, Iterable, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Iterable, Optional, Tuple, Union
 
 import torch
 from torch.ops import aten
 
 from .storage.identity_tensor_storage import IdentityTensorStorage
-from ..quantized_tensor import QuantizedTensor, QuantizedTensorStorage, Quantizer
+from ..quantized_tensor import (
+    QuantizedTensor,
+    QuantizedTensorStorage,
+    Quantizer,
+)
+
+if TYPE_CHECKING:
+    from ..quantization import QuantizationCalibrationConfig
 
 
 class IdentityQuantizer(Quantizer):
@@ -162,9 +169,13 @@ class IdentityQuantizer(Quantizer):
         dst._dtype = data.dtype
         return dst
 
-    def calibrate(self, tensor: torch.Tensor) -> None:
-        # No state to calibrate.
-        return
+    def calibrate(
+        self,
+        tensor: torch.Tensor,
+        *,
+        calibration_config: QuantizationCalibrationConfig,
+    ) -> None:
+        """No-op since identity quantization has no calibration state."""
 
     def _get_compatible_recipe(self):
         # Only reachable via CustomRecipe (qfactory returns IdentityQuantizer).

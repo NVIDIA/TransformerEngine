@@ -9,7 +9,7 @@ These wrappers add logic related to debugging, using the nvdlfw_inspect package.
 """
 
 from __future__ import annotations
-from typing import Optional, Tuple, Iterable, Union, List
+from typing import TYPE_CHECKING, Optional, Tuple, Iterable, Union, List
 import torch
 
 import transformer_engine_torch as tex
@@ -23,6 +23,9 @@ from transformer_engine.pytorch.quantized_tensor import (
     restore_from_saved,
 )
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
+
+if TYPE_CHECKING:
+    from transformer_engine.pytorch.quantization import QuantizationCalibrationConfig
 
 aten = torch.ops.aten
 
@@ -429,9 +432,25 @@ class DebugQuantizer(Quantizer):
                 return True
         return False
 
-    def calibrate(self, tensor: torch.Tensor):
-        """Calibration override, should not be invoked."""
-        raise RuntimeError("[NVTORCH-INSPECT ERROR] Calibration with debug is not supported")
+    def calibrate(
+        self,
+        tensor: torch.Tensor,
+        *,
+        calibration_config: QuantizationCalibrationConfig,
+    ):
+        """Delegate calibration to the wrapped quantizer."""
+        if self.parent_quantizer is None:
+            raise RuntimeError("[NVTORCH-INSPECT ERROR] Calibration requires a parent quantizer")
+        return self.parent_quantizer.calibrate(
+            tensor,
+            calibration_config=calibration_config,
+        )
+
+    def _get_calibration_metadata_buffers(self, tensor_name: str):
+        """Get calibration metadata from the wrapped quantizer."""
+        if self.parent_quantizer is None:
+            return {}
+        return self.parent_quantizer._get_calibration_metadata_buffers(tensor_name)
 
     def update_quantized(
         self,

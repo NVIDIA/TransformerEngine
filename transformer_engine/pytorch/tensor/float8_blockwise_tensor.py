@@ -7,7 +7,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 import math
 import warnings
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple, Union
 
 import torch
 import transformer_engine_torch as tex
@@ -21,6 +21,9 @@ from ..dynamo import register_value_opaque_quantizer
 from ._quantization_helpers import _IdentityFunc, safe_quantized_repr
 from ..constants import DType
 from ..utils import devices_match, round_up_to_nearest_multiple
+
+if TYPE_CHECKING:
+    from ..quantization import QuantizationCalibrationConfig
 
 aten = torch.ops.aten
 
@@ -243,10 +246,21 @@ class Float8BlockQuantizer(Quantizer):
             return False
         return True
 
-    def calibrate(self, tensor: torch.Tensor) -> None:
-        # NOTE: This interface is specific to requirements like delayed scaling
-        # where state from an estimator influences distribution parameters.
-        pass
+    def calibrate(
+        self,
+        tensor: torch.Tensor,
+        *,
+        calibration_config: QuantizationCalibrationConfig,
+    ) -> None:
+        """Float8BlockQuantizer does not yet support calibration."""
+        # NOTE(@cspades): Currently, PTQ calibration requirements don't need
+        # non-global / blockwise scaling factors, which are usually computed
+        # on-the-fly during inference. Implement this interface for future
+        # applications of blockwise FP8 calibration.
+        raise NotImplementedError(
+            "Float8BlockQuantizer does not support calibrating block scales, "
+            "which are computed online to accurately invert the quantization."
+        )
 
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
         return Float8BlockScaling

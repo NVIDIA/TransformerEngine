@@ -5,13 +5,20 @@
 """Tensor and quantizer classes for composed rowwise and columnwise representations."""
 
 from __future__ import annotations
-from typing import Any, Dict, Iterable, Literal, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, Iterable, Literal, Optional, Tuple, Union
 
 import torch
 
 from .storage.hybrid_tensor_storage import HybridQuantizedTensorStorage
 from .storage.identity_tensor_storage import IdentityTensorStorage
-from ..quantized_tensor import QuantizedTensor, QuantizedTensorStorage, Quantizer
+from ..quantized_tensor import (
+    QuantizedTensor,
+    QuantizedTensorStorage,
+    Quantizer,
+)
+
+if TYPE_CHECKING:
+    from ..quantization import QuantizationCalibrationConfig
 
 aten = torch.ops.aten
 
@@ -156,6 +163,15 @@ class HybridQuantizer(Quantizer):
         quantizer.internal = self.internal
         quantizer.optimize_for_gemm = self.optimize_for_gemm
         return quantizer
+
+    def calibrate(
+        self,
+        tensor: torch.Tensor,
+        *,
+        calibration_config: QuantizationCalibrationConfig,
+    ) -> None:
+        """HybridQuantizer calibrate() has not yet been implemented."""
+        raise NotImplementedError("HybridQuantizer calibrate() is not supported.")
 
     @property
     def with_amax_reduction(self) -> bool:

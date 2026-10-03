@@ -5,7 +5,9 @@
 """Internal function used by multiple modules."""
 
 import dataclasses
+import functools
 import queue
+import warnings
 from typing import Any, Callable, List, Optional, Tuple, Union
 
 import torch
@@ -24,6 +26,30 @@ def sum_bias_grad(tensor: torch.Tensor) -> torch.Tensor:
     if tensor.ndim == 1:
         return tensor.clone()
     return tensor.sum(dim=tuple(range(tensor.ndim - 1)))
+
+
+def _is_in_activation_recompute_phase() -> bool:
+    """Whether a forward is running during activation recomputation."""
+    if in_fp8_activation_recompute_phase():
+        return True
+    # Special hidden PyTorch AutoGrad identifier for activation recompute.
+    try:
+        current_graph_task_id = getattr(torch._C, "_current_graph_task_id", None)
+        return current_graph_task_id() != -1
+    except Exception:  # pylint: disable=broad-exception-caught
+        _warn_recompute_phase_detection_unavailable()
+        return False
+
+
+@functools.lru_cache(maxsize=1)
+def _warn_recompute_phase_detection_unavailable() -> None:
+    """Warn once when PyTorch activation-recompute detection is unavailable."""
+    warnings.warn(
+        "Unable to determine whether execution is in activation-recompute phase "
+        "from PyTorch (torch._C._current_graph_task_id). Assuming not.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
 
 
 def set_quantizer_amax_reduction_group(quantizer, amax_reduction_group) -> None:

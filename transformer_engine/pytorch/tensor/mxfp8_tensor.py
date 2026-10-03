@@ -6,7 +6,7 @@
 from __future__ import annotations
 from collections.abc import Iterable
 import math
-from typing import Optional, Tuple, Union, Any, Dict
+from typing import TYPE_CHECKING, Optional, Tuple, Union, Any, Dict
 import warnings
 
 import torch
@@ -20,6 +20,9 @@ from .storage.mxfp8_tensor_storage import MXFP8TensorStorage, _FromMXFP8Func
 from ..quantized_tensor import QuantizedTensor, Quantizer
 from ..dynamo import register_value_opaque_quantizer
 from ._quantization_helpers import _IdentityFunc, safe_quantized_repr
+
+if TYPE_CHECKING:
+    from ..quantization import QuantizationCalibrationConfig
 
 aten = torch.ops.aten
 
@@ -132,9 +135,17 @@ class MXFP8Quantizer(Quantizer):
             return False
         return True
 
-    def calibrate(self, tensor: torch.Tensor) -> None:
-        # TODO(ksivamani): No calibration needed for mxfp8?
-        pass
+    def calibrate(
+        self,
+        tensor: torch.Tensor,
+        *,
+        calibration_config: QuantizationCalibrationConfig,
+    ) -> None:
+        """Calibrate an MXFP8 tensor."""
+        # NOTE(@cspades): Currently, PTQ calibration requirements don't need
+        # non-global / blockwise scaling factors, which are usually computed
+        # on-the-fly during inference. Implement this interface for future
+        # applications of MXFP8 calibration.
 
     def get_scale_shape(
         self,
