@@ -457,9 +457,13 @@ __device__ void quantize_stage_rowwise(const IType *tile, fp4e2m1x2 *output, nvf
       block_amax = reduce_group_max_16(group_amax);
     }
 
-    float global_amax = amax[0];
-    if constexpr (ROW_SCALED_NVFP4) {
-      global_amax = amax[global_row];
+    float global_amax = static_cast<float>(E4M3_MAX * detail::TypeExtrema<fp4e2m1>::max);
+    if (amax != nullptr) {
+      if constexpr (ROW_SCALED_NVFP4) {
+        global_amax = amax[global_row];
+      } else {
+        global_amax = amax[0];
+      }
     }
 
     const ScalePair scale_pair = compute_scale_pair<E4M3_MAX>(block_amax, global_amax);
@@ -508,7 +512,11 @@ __device__ void quantize_stage_colwise(const IType *tile, fp4e2m1x2 *output_t,
       block_amax = reduce_group_max_16(group_amax);
     }
 
-    const float global_amax = amax[0];
+    float global_amax = static_cast<float>(E4M3_MAX * detail::TypeExtrema<fp4e2m1>::max);
+    if (amax != nullptr) {
+      global_amax = amax[0];
+    }
+
     const ScalePair scale_pair = compute_scale_pair<E4M3_MAX>(block_amax, global_amax);
     CandidatePair candidates = make_candidates<Cfg, E4M3_MAX>(x0, x1, scale_pair, global_amax);
 

@@ -144,6 +144,8 @@ void quantize_4over6(const Tensor &input, const Tensor *noop, Tensor *output,
              ".");
   NVTE_CHECK(!output->row_scaled_nvfp4 || !use_2d_quantization,
              "Row-scaled NVFP4 quantization does not support 2D quantization.");
+  NVTE_CHECK(!output->row_scaled_nvfp4 || output->amax.dptr != nullptr,
+             "Row-scaled NVFP4 does not support disabling second-level scaling.");
   NVTE_CHECK(!output->row_scaled_nvfp4 || !output->has_columnwise_data(),
              "Row-scaled NVFP4 quantization does not produce columnwise output.");
   NVTE_CHECK(!use_2d_quantization || output->has_data(),
@@ -151,7 +153,6 @@ void quantize_4over6(const Tensor &input, const Tensor *noop, Tensor *output,
 
   if (output->has_data()) {
     NVTE_CHECK(output->scale_inv.dptr != nullptr, "Scaling tensor must be allocated.");
-    NVTE_CHECK(output->amax.dptr != nullptr, "Rowwise amax tensor must be allocated.");
     NVTE_CHECK(is_fp4_dtype(output->data.dtype), "Output must have FP4 type.");
     NVTE_CHECK(output->scale_inv.dtype == DType::kFloat8E4M3,
                "NVFP4 4over6 is only supported with FP8E4M3 scales.");
@@ -161,14 +162,12 @@ void quantize_4over6(const Tensor &input, const Tensor *noop, Tensor *output,
                "Transposed scaling tensor must be allocated.");
     NVTE_CHECK(is_fp4_dtype(output->columnwise_data.dtype),
                "Transposed output must have FP4 type.");
-    NVTE_CHECK(output->columnwise_amax.dptr != nullptr || output->amax.dptr != nullptr,
-               "NVFP4 4over6 columnwise quantization requires columnwise amax or rowwise amax.");
     NVTE_CHECK(output->columnwise_scale_inv.dtype == DType::kFloat8E4M3,
                "NVFP4 4over6 is only supported with FP8E4M3 scales.");
   }
 
   TRANSFORMER_ENGINE_NVFP4_4OVER6_E4M3_MAX_SWITCH(
-      output->nvfp4_e4m3_max, E4M3_MAX,
+      output->get_nvfp4_scale_max(), E4M3_MAX,
       TRANSFORMER_ENGINE_NVFP4_4OVER6_MODE_SWITCH(
           quant_config->nvfp4_4over6_mode, MODE,
           TRANSFORMER_ENGINE_SWITCH_CONDITION(
