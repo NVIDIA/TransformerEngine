@@ -290,6 +290,7 @@ void nvte_fp8_block_scaling_partial_cast(const NVTETensor inp, NVTETensor out,
  *  \param[in]     input            Input tensor (continuous segment of flattened original tensor).
  *  \param[in,out] amax_rowwise     Output tensor for row-wise maximum absolute values.
  *  \param[in,out] amax_colwise     Output tensor for column-wise maximum absolute values.
+ *                                Shape [0, 0] skips column-wise computation.
  *  \param[in]     rows             Number of rows in the logical tensor.
  *  \param[in]     cols             Number of columns in the logical tensor.
  *  \param[in]     start_offset     Starting offset in the flattened tensor.
@@ -303,7 +304,8 @@ void nvte_mxfp8_scaling_compute_partial_amax(const NVTETensor input, NVTETensor 
  *
  *  This function casts the input tensor to MXFP8 format, producing both row-wise and
  *  column-wise scaled outputs. input contains a continuous segment from the flattened
- *  original tensor.
+ *  original tensor. To skip column-wise computation, pass output_colwise with shape [0]
+ *  and scale_inv_colwise with shape [0, 0]. Row-wise outputs remain required.
  *
  *  \param[in]     input               Input (continuous segment of flattened original tensor).
  *  \param[out]    output_rowwise      Output tensor with row-wise scaling (MXFP8 format).
