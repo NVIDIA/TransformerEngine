@@ -487,6 +487,8 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
 
     if (warp_idx == 2 && elect_one_sync()) {
       cute::initialize_barrier(shared_storage.tma_barrier[0], /* num_threads */ 1);
+      // Publish this separately initialized barrier before TMA can complete against it.
+      cutlass::arch::fence_barrier_init();
     }
     __syncthreads();
 

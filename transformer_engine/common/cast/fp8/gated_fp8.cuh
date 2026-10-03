@@ -247,8 +247,15 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       // Wait for TMA transfer to have finished reading shared memory.
       ptx::cp_async_bulk_wait_group_read<BUFFERS_NUM - 1>();
     }
+    // The bulk async-group is owned by the issuing thread. Hand its completion
+    // off to all cooperative writers before the output ring can be reused.
+    if (next_it < ITERATIONS && next_it >= BUFFERS_NUM) {
+      __syncthreads();
+    }
   }
-  ptx::cp_async_bulk_wait_group_read<0>();
+  if (is_master_thread) {
+    ptx::cp_async_bulk_wait_group();
+  }
   __syncthreads();
 
   if (amax_ptr != nullptr) {
