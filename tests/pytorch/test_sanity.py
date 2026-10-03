@@ -35,6 +35,7 @@ from transformer_engine.pytorch import (
     is_bf16_available,
 )
 from transformer_engine.common import recipe
+from transformer_engine.pytorch.models import DeepSeekV3Layer
 from transformer_engine.pytorch.cpp_extensions import general_gemm
 from transformer_engine.pytorch.tensor.utils import replace_raw_data
 from transformer_engine.pytorch.module import (
@@ -858,6 +859,39 @@ def test_sanity_logical_activation_shapes(kind, shape, noncontiguous, monkeypatc
     assert {"TN", "NN", "NT"}.issubset(seen_gemm_layouts)
     if kind != "linear":
         assert set(seen_norm_stages) == {"fwd", "bwd"}
+
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes, ids=recipe_id)
+@pytest.mark.parametrize("moe", all_boolean, ids=["dense", "moe"])
+def test_sanity_deepseek_v3_layer(dtype, fp8_recipe, moe):
+    config = model_configs["small"]
+
+    if fp8_recipe is not None:
+        if not is_fp8_supported(config):
+            pytest.skip("Model config does not support FP8")
+        if fp8_recipe.nvfp4() and dtype == torch.float16:
+            pytest.skip("FP16 output for NVFP4 not supported")
+
+    mlp_kwargs = (
+        dict(num_experts=4, topk=2, moe_ffn_hidden_size=32, shared_expert_ffn_hidden_size=32)
+        if moe
+        else dict(ffn_hidden_size=4 * config.hidden_size)
+    )
+    block = DeepSeekV3Layer(
+        config.hidden_size,
+        config.num_heads,
+        q_lora_rank=16,
+        kv_lora_rank=16,
+        qk_nope_head_dim=16,
+        qk_rope_head_dim=16,
+        v_head_dim=16,
+        params_dtype=dtype,
+        device="cuda",
+        **mlp_kwargs,
+    )
+
+    _test_sanity_e2e(block, dtype, config, fp8_recipe, skip_wgrad=False)
 
 
 @pytest.mark.parametrize("dtype", param_types)
