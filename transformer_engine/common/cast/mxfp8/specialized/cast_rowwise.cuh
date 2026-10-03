@@ -134,14 +134,14 @@ __device__ __forceinline__ ptx::bf16x2 block_half_amax(const uint32_t (&words)[k
   ptx::bf16x2 level[kInWordsPerLane / 2];
 #pragma unroll
   for (int32_t i = 0; i < kInWordsPerLane / 2; ++i) {
-    ptx::abs_max_2x(level[i], pairs[2 * i], pairs[2 * i + 1]);
+    ptx::abs_max_nan_2x(level[i], pairs[2 * i], pairs[2 * i + 1]);
   }
 #pragma unroll
   for (int32_t i = 0; i < kInWordsPerLane / 4; ++i) {
-    ptx::abs_max_2x(level[i], level[i], level[i + kInWordsPerLane / 4]);
+    ptx::abs_max_nan_2x(level[i], level[i], level[i + kInWordsPerLane / 4]);
   }
   ptx::bf16x2 result;
-  ptx::abs_max_2x(result, level[0], level[1]);
+  ptx::abs_max_nan_2x(result, level[0], level[1]);
   return result;
 }
 
@@ -161,7 +161,7 @@ __device__ __forceinline__ float pair_amax_to_float(ptx::bf16x2 pair) {
   reinterpret_cast<uint32_t &>(a) = bits;
   reinterpret_cast<uint32_t &>(b) = folded;
   ptx::bf16x2 wide;
-  ptx::abs_max_2x(wide, a, b);
+  ptx::abs_max_nan_2x(wide, a, b);
   const uint32_t magnitude = reinterpret_cast<const uint32_t &>(wide) & 0x7FFFu;
   return __int_as_float(magnitude << 16);
 }
@@ -366,7 +366,7 @@ __global__ void __launch_bounds__(THREADS_PER_CTA)
     reinterpret_cast<uint32_t &>(partner) =
         __shfl_xor_sync(0xFFFFFFFFu, reinterpret_cast<const uint32_t &>(half_amax), /*laneMask=*/1);
     ptx::bf16x2 block_amax;
-    ptx::abs_max_2x(block_amax, half_amax, partner);
+    ptx::abs_max_nan_2x(block_amax, half_amax, partner);
 
     const e8m0_t biased_exponent =
         ptx::float_to_e8m0(pair_amax_to_float(block_amax) * Quantized_Limits<OType>::max_norm_rcp);

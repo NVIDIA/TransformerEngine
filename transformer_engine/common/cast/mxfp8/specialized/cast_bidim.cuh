@@ -193,7 +193,7 @@ __device__ __forceinline__ uint32_t fold_pair_magnitude(uint32_t pair) {
   ptx::bf16x2 lo, hi, folded;
   reinterpret_cast<uint32_t &>(lo) = pair;
   reinterpret_cast<uint32_t &>(hi) = __byte_perm(pair, pair, 0x1032);
-  ptx::abs_max_2x(folded, lo, hi);
+  ptx::abs_max_nan_2x(folded, lo, hi);
   return reinterpret_cast<const uint32_t &>(folded) & kBf16MagnitudeMask;
 }
 
@@ -364,7 +364,7 @@ __global__ __launch_bounds__(kThreadsPerCta, MIN_BLOCKS_PER_SM) void quantize_bi
     reinterpret_cast<uint32_t &>(amax) = tile[i][0];
 #pragma unroll
     for (int32_t k = 1; k < kWordsPerLane; ++k) {
-      ptx::abs_max_2x(amax, amax, reinterpret_cast<const ptx::bf16x2 &>(tile[i][k]));
+      ptx::abs_max_nan_2x(amax, amax, reinterpret_cast<const ptx::bf16x2 &>(tile[i][k]));
     }
     // Butterfly across the lanes that share this 32-column block.
 #pragma unroll
@@ -372,7 +372,7 @@ __global__ __launch_bounds__(kThreadsPerCta, MIN_BLOCKS_PER_SM) void quantize_bi
       ptx::bf16x2 partner;
       reinterpret_cast<uint32_t &>(partner) =
           __shfl_xor_sync(0xFFFFFFFFu, reinterpret_cast<const uint32_t &>(amax), d);
-      ptx::abs_max_2x(amax, amax, partner);
+      ptx::abs_max_nan_2x(amax, amax, partner);
     }
 
     const uint32_t reciprocal =
@@ -403,7 +403,7 @@ __global__ __launch_bounds__(kThreadsPerCta, MIN_BLOCKS_PER_SM) void quantize_bi
     reinterpret_cast<uint32_t &>(acc) = tile[0][k];
 #pragma unroll
     for (int32_t i = 1; i < kRowsPerWarp; ++i) {
-      ptx::abs_max_2x(acc, acc, reinterpret_cast<const ptx::bf16x2 &>(tile[i][k]));
+      ptx::abs_max_nan_2x(acc, acc, reinterpret_cast<const ptx::bf16x2 &>(tile[i][k]));
     }
     column_partial[k] = reinterpret_cast<const uint32_t &>(acc);
   }
@@ -423,16 +423,17 @@ __global__ __launch_bounds__(kThreadsPerCta, MIN_BLOCKS_PER_SM) void quantize_bi
     reinterpret_cast<uint32_t &>(acc) = column[0];
 #pragma unroll
     for (int32_t w = 1; w < kWarpsPerCta; ++w) {
-      ptx::abs_max_2x(acc, acc, reinterpret_cast<const ptx::bf16x2 &>(column[w * kColumnSlots]));
+      ptx::abs_max_nan_2x(acc, acc,
+                          reinterpret_cast<const ptx::bf16x2 &>(column[w * kColumnSlots]));
     }
     const uint32_t amax_pair = reinterpret_cast<const uint32_t &>(acc);
 
     uint32_t reciprocal_pair;
-    // Test both halves directly rather than folding them first: the fold uses
-    // max.xorsign.abs, which returns the *other* operand when one is NaN, so a
-    // NaN column paired with a finite one would slip into the packed path.
-    // magnitude + 0x0080 sets bit 15 exactly when magnitude >= 0x7F80, and the
-    // sum cannot carry between halves.
+    // Test both halves directly rather than folding them first: the packed
+    // helper below cannot represent Inf/NaN reciprocals, and columns holding
+    // exceptional values (preserved by the NaN-propagating reductions) must
+    // take the per-half path.  magnitude + 0x0080 sets bit 15 exactly when
+    // magnitude >= 0x7F80, and the sum cannot carry between halves.
     const uint32_t exceptional = ((amax_pair & kMagnitudeMaskPair) + kInfProbePair) & 0x80008000u;
     if (__builtin_expect(exceptional == 0u, 1)) {
       reciprocal_pair = mx_scale_reciprocal_x2<OType>(amax_pair);
