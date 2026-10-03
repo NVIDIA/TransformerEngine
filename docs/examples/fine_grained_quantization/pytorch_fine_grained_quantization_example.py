@@ -53,7 +53,7 @@ from typing import Optional
 import torch
 
 import transformer_engine.pytorch as te
-from transformer_engine.common.recipe import CustomRecipe
+from transformer_engine.common.recipe import CustomRecipe, quantizer_factory
 from transformer_engine.pytorch.custom_recipes.quantizer_factories import (
     mxfp8_factory,
     nvfp4_factory,
@@ -65,8 +65,12 @@ HIGH_PRECISION_MODULE = "demo.fc2"
 BASE_FACTORY = mxfp8_factory
 
 
-def quantizer_factory(role: Optional[te.QuantizerRole]):
+@quantizer_factory(key=("fine_grained_quantization_example", 1))
+def demo_quantizer_factory(role: Optional[te.QuantizerRole]):
     """Return a fresh quantizer for every role, including ``None``.
+
+    The key stands in for this factory's behavior: bump its revision whenever the
+    body changes, so quantizers built from the previous behavior are rebuilt.
 
     ``BASE_FACTORY`` makes the factory total: unknown roles, future role values,
     and untargeted modules all retain valid MXFP8 behavior.
@@ -111,7 +115,7 @@ model = torch.nn.Sequential(
     te.Linear(256, 128, name="demo.output", **linear_options),
 )
 inputs = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-recipe = CustomRecipe(qfactory=quantizer_factory)
+recipe = CustomRecipe(qfactory=demo_quantizer_factory)
 
 with te.autocast(enabled=True, recipe=recipe):
     outputs = model(inputs)

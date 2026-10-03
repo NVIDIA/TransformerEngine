@@ -8,7 +8,7 @@ Common API
 
 .. autoapiclass:: transformer_engine.common.recipe.Format
 
-.. autoapiclass:: transformer_engine.common.recipe.DelayedScaling(margin=0, fp8_format=Format.HYBRID, amax_history_len=1024, amax_compute_algo="max", scaling_factor_compute_algo=None)
+.. autoapiclass:: transformer_engine.common.recipe.DelayedScaling(margin=0, fp8_format=Format.HYBRID, amax_history_len=1024, amax_compute_algo="max", scaling_factor_compute_algo=None, reduce_amax=True, fp8_dpa=False, fp8_mha=False, backward_override=None, amax_compute_algo_key=None, scaling_factor_compute_algo_key=None)
 
 .. autoapiclass:: transformer_engine.common.recipe.MXFP8BlockScaling(fp8_format=Format.E4M3)
 
@@ -18,4 +18,6 @@ Common API
 
 .. autoapiclass:: transformer_engine.common.recipe.Float8BlockScaling(fp8_format=Format.E4M3)
 
-.. autoapiclass:: transformer_engine.common.recipe.CustomRecipe(qfactory, fp8_dpa=False, fp8_mha=False)
+.. autoapifunction:: transformer_engine.common.recipe.quantizer_factory
+
+.. autoapiclass:: transformer_engine.common.recipe.CustomRecipe(qfactory, fp8_dpa=False, fp8_mha=False, qfactory_key=None)

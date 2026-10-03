@@ -2,6 +2,8 @@
 #
 # See LICENSE for license information.
 
+from dataclasses import replace
+
 import pytest
 import torch
 
@@ -44,6 +46,32 @@ from transformer_engine.pytorch.custom_recipes.reference_nvfp4 import (
 from transformer_engine.pytorch.custom_recipes.reference_current_scaling import (
     current_scaling_ref_factory,
 )
+
+
+@pytest.mark.parametrize(
+    "qfactory",
+    [
+        current_scaling_factory,
+        mxfp8_factory,
+        float8_block_scaling_factory,
+        nvfp4_factory,
+        delayed_scaling_factory,
+        high_precision_factory,
+        mxfp8_fwd_nvfp4_bwd_factory,
+        nvfp4_ref_rht_2d_factory,
+    ],
+)
+def test_first_party_qfactories_have_canonical_qfactory_keys(qfactory):
+    """First-party factories can be used without repeating qfactory_key in CustomRecipe."""
+    qfactory_key = getattr(qfactory, "qfactory_key")
+    hash(qfactory_key)
+    assert isinstance(qfactory_key, tuple)
+    assert len(qfactory_key) == 2
+    assert isinstance(qfactory_key[0], str) and qfactory_key[0]
+    assert isinstance(qfactory_key[1], int) and qfactory_key[1] > 0
+    custom_recipe = recipe.CustomRecipe(qfactory=qfactory)
+    assert custom_recipe.qfactory_key is None
+    assert dict(custom_recipe.quantizer_config())["qfactory_key"] == qfactory_key
 
 
 @pytest.mark.parametrize("module_type", ["Linear", "LayerNormLinear", "OpsLinear"])
@@ -113,6 +141,7 @@ def test_custom_recipe_sanity(module_type):
     inp = torch.randn(batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True)
 
     # Single factory: map roles to quantizers
+    @recipe.quantizer_factory(key=("test_current_scaling_sanity", 1))
     def quantizer_factory(role):
         if role is None:
             return Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda")
@@ -210,6 +239,7 @@ def test_custom_recipe_grouped_linear_matches_current_scaling():
     scale[1] = 1e-8
     (out_ref.float() * scale.view(1, -1)).sum().backward()
 
+    @recipe.quantizer_factory(key=("test_current_scaling_grouped_linear", 1))
     def quantizer_factory(role):
         if role is None:
             return Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda")
@@ -282,6 +312,7 @@ def test_custom_recipe_matches_current_scaling():
     loss_ref.backward()
 
     # Custom: single factory returning quantizers per role to match Float8CurrentScaling
+    @recipe.quantizer_factory(key=("test_current_scaling_parity", 1))
     def quantizer_factory(role):
         if role is None:
             return Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda")
@@ -339,6 +370,7 @@ def test_custom_recipe_ops_linear_2_1_layout():
     op = te_ops.Linear(in_features, out_features, device="cuda", dtype=torch.bfloat16)
     inp = torch.randn(batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True)
 
+    @recipe.quantizer_factory(key=("test_current_scaling_ops_linear", 1))
     def quantizer_factory(role):
         if role is None:
             return Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda")
@@ -382,6 +414,7 @@ def test_custom_recipe_factory_invocation_counts_and_cycling():
         None: 0,
     }
 
+    @recipe.quantizer_factory(key=("test_factory_invocation_counts", 1))
     def quantizer_factory(role):
         if role is None:
             counts[None] += 1
@@ -683,6 +716,7 @@ def test_custom_recipe_quantization_targets():
     # ------------------------------------------------------------------
     recorded_roles = []
 
+    @recipe.quantizer_factory(key=("test_per_module_targeting", 1))
     def targeting_factory(role):
         recorded_roles.append(role)
 
@@ -840,6 +874,7 @@ def test_grouped_linear_module_type_dispatch():
 
     recorded_roles = []
 
+    @recipe.quantizer_factory(key=("test_grouped_linear_role_recording", 1))
     def recording_factory(role):
         recorded_roles.append(role)
         return Float8CurrentScalingQuantizer(te.DType.kFloat8E4M3, device="cuda")
@@ -880,6 +915,7 @@ def test_delayed_scaling_request_wiring():
     from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
     from transformer_engine.common.recipe import Format
 
+    @recipe.quantizer_factory(key=("test_delayed_scaling_request", 1))
     def ds_factory(role):
         return DelayedScalingRequest(fp8_format=Format.HYBRID, amax_history_len=16)
 
@@ -940,6 +976,7 @@ def test_custom_recipe_mixed_ds_and_stateless():
     from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
     from transformer_engine.common.recipe import Format
 
+    @recipe.quantizer_factory(key=("test_mixed_delayed_current_scaling", 1))
     def mixed_factory(role):
         # Only weight gets delayed scaling, rest get current scaling
         if role is not None and role.tensor_type == "weight":
@@ -984,6 +1021,7 @@ def test_custom_recipe_ds_multi_step():
     from transformer_engine.pytorch.quantization import DelayedScalingRequest
     from transformer_engine.common.recipe import Format
 
+    @recipe.quantizer_factory(key=("test_delayed_scaling_multi_step", 1))
     def ds_factory(role):
         return DelayedScalingRequest(fp8_format=Format.HYBRID)
 
@@ -1017,29 +1055,18 @@ def test_custom_recipe_ds_multi_step():
 
 
 # ----------------------------------------------------------------------
-# State preservation across role-driven rebuilds
+# Stateful recipe boundary for role-driven updates
 # ----------------------------------------------------------------------
 #
 # Setting ``output_quantizer_role`` / ``grad_input_quantizer_role`` to a
-# different value flips ``fp8_meta_tensors_initialized = False`` so the
-# next ``set_meta_tensor`` call rebuilds the recipe state and quantizers
-# with up-to-date roles. That rebuild MUST preserve persistent training
-# buffers (delayed scaling's ``scale`` / ``amax_history``); otherwise
-# checkpointed amax history is silently destroyed on the first forward
-# pass after ``load_state_dict`` (when MHA wires boundary roles for the
-# first time on the freshly-loaded module). The buffers must also be
-# preserved by tensor-object identity, not just by value: the
-# ``FP8GlobalStateManager`` reduction buffer holds a direct reference to
-# the tensor created at first init, so any rebuild that allocates fresh
-# tensors would break amax all-reduce.
+# different value advances the requested role revision without mutating the
+# active runtime. Stateless recipes rebuild on the next update. Delayed-scaling
+# runtimes are frozen in round one, so the update must reject and leave all
+# persistent buffers and global registration references untouched.
 
 
-def test_role_change_preserves_delayed_scaling_state():
-    """Built-in DelayedScaling: role-driven rebuild preserves scale / amax_history.
-
-    Stashes sentinel values into the buffers, forces a rebuild via the role
-    setter, and verifies values + tensor-object identity survive.
-    """
+def test_role_change_rejects_delayed_scaling_runtime_update():
+    """Built-in DelayedScaling rejects a role-driven runtime rebuild."""
     available, reason = te.is_fp8_available(return_reason=True)
     if not torch.cuda.is_available() or not available:
         pytest.skip(f"FP8 unsupported: {reason}")
@@ -1062,41 +1089,35 @@ def test_role_change_preserves_delayed_scaling_state():
     scale_data_ptr = state_before.scale.data_ptr()
     amax_data_ptr = state_before.amax_history.data_ptr()
 
-    # Trigger role-driven invalidation. Setting a non-None role flips
-    # ``fp8_meta_tensors_initialized = False`` so the next ``set_meta_tensor``
-    # falls through and creates a fresh ``RecipeState``.
+    # Change the requested role. The active compatibility views remain live
+    # until the next runtime update commits a complete replacement.
+    runtime_before = model._quantization_runtime
+    role_revision_before = model._role_revision
     model.output_quantizer_role = QuantizerRole(
         module_type="dpa", tensor_type="qkv", name="downstream"
     )
-    assert not model.fp8_meta_tensors_initialized
+    assert model.fp8_meta_tensors_initialized
+    assert model._quantization_runtime is runtime_before
+    assert model._role_revision == role_revision_before + 1
+    assert model.fp8_meta["scaling_fwd"] is state_before
 
-    # Trigger the rebuild directly (no forward, so we can compare buffers exactly).
-    model.init_fp8_meta_tensors(fp8_recipe)
+    with pytest.raises(RuntimeError, match="do not support delayed scaling"):
+        model.init_fp8_meta_tensors(fp8_recipe)
     assert model.fp8_meta_tensors_initialized
 
     state_after = model.fp8_meta["scaling_fwd"]
-    assert state_after is not state_before, "state should have been rebuilt"
-    # Tensor objects must be inherited (not freshly allocated) so the
-    # FP8GlobalStateManager reduction buffer's reference stays valid.
-    assert (
-        id(state_after.scale) == scale_obj_id
-    ), "scale tensor object replaced by rebuild; global reduction buffer would dangle"
+    assert model._quantization_runtime is runtime_before
+    assert state_after is state_before
+    assert id(state_after.scale) == scale_obj_id
     assert id(state_after.amax_history) == amax_obj_id
     assert state_after.scale.data_ptr() == scale_data_ptr
     assert state_after.amax_history.data_ptr() == amax_data_ptr
-    # Sentinel values must be preserved.
-    assert state_after.scale.eq(3.14).all(), "scale was wiped by role-driven rebuild"
-    assert state_after.amax_history.eq(2.71).all(), "amax_history was wiped"
+    assert state_after.scale.eq(3.14).all()
+    assert state_after.amax_history.eq(2.71).all()
 
 
-def test_role_change_preserves_custom_delayed_scaling_state():
-    """CustomRecipe + DelayedScalingRequest: role-driven rebuild preserves inner DSRS.
-
-    Same property as the built-in case, but for the
-    ``CustomRecipeState`` -> composed ``DelayedScalingRecipeState`` path.
-    The inner DS state must be re-used across the rebuild so its
-    accumulated buffers (and any external references to them) survive.
-    """
+def test_role_change_rejects_custom_delayed_scaling_runtime_update():
+    """CustomRecipe with delayed requests rejects a role-driven rebuild."""
     available, reason = te.is_fp8_available(return_reason=True)
     if not torch.cuda.is_available() or not available:
         pytest.skip(f"FP8 unsupported: {reason}")
@@ -1107,6 +1128,7 @@ def test_role_change_preserves_custom_delayed_scaling_state():
     )
     from transformer_engine.common.recipe import Format
 
+    @recipe.quantizer_factory(key=("test_delayed_scaling_role_rebuild", 1))
     def ds_factory(role):
         return DelayedScalingRequest(fp8_format=Format.HYBRID, amax_history_len=8)
 
@@ -1129,26 +1151,28 @@ def test_role_change_preserves_custom_delayed_scaling_state():
     scale_obj_id = id(inner_before.scale)
     amax_obj_id = id(inner_before.amax_history)
 
-    # Trigger role-driven invalidation.
+    # Change the requested role without invalidating the active runtime.
+    runtime_before = model._quantization_runtime
+    role_revision_before = model._role_revision
     model.output_quantizer_role = QuantizerRole(
         module_type="dpa", tensor_type="qkv", name="downstream"
     )
-    assert not model.fp8_meta_tensors_initialized
+    assert model.fp8_meta_tensors_initialized
+    assert model._quantization_runtime is runtime_before
+    assert model._role_revision == role_revision_before + 1
+    assert model.fp8_meta["scaling_fwd"] is state_before
 
-    # Rebuild.
-    model.init_fp8_meta_tensors(custom_recipe)
+    with pytest.raises(RuntimeError, match="do not support delayed scaling"):
+        model.init_fp8_meta_tensors(custom_recipe)
     assert model.fp8_meta_tensors_initialized
 
     state_after = model.fp8_meta["scaling_fwd"]
     assert isinstance(state_after, CustomRecipeState)
-    assert state_after is not state_before, "outer CustomRecipeState should have been rebuilt"
-    assert state_after._has_delayed_scaling, "rebuild lost the inner DS state"
+    assert model._quantization_runtime is runtime_before
+    assert state_after is state_before
+    assert state_after._has_delayed_scaling
     inner_after = state_after._ds_state
-    # Inner DSRS object identity is preserved (we reuse the existing inner state),
-    # which means its buffers' tensor objects are also preserved.
-    assert (
-        inner_after is inner_before
-    ), "inner DSRS replaced; FP8GlobalStateManager reduction buffer would dangle"
+    assert inner_after is inner_before
     assert id(inner_after.scale) == scale_obj_id
     assert id(inner_after.amax_history) == amax_obj_id
     # Sentinel values preserved.
@@ -1356,6 +1380,7 @@ def test_custom_recipe_dpa_mxfp8():
 
     custom_recipe = recipe.CustomRecipe(
         qfactory=_nvfp4_linear_mxfp8_dpa_factory,
+        qfactory_key=("test_nvfp4_linear_mxfp8_dpa", 1),
         fp8_dpa=True,
     )
 
@@ -1669,6 +1694,156 @@ def test_fp8block_recipe_state_unknown_or_none_role_falls_back_positionally():
     assert quantizers[2].block_scaling_dim == fp8_recipe.x_block_scaling_dim
 
 
+def test_fp8block_recipe_state_per_slot_qparams_are_honoured():
+    """Each slot reads its own qparams, not just its own block-scaling dim.
+
+    The recipe defaults give every slot the same ``amax_epsilon`` /
+    ``power_2_scale``, so the dispatch tests above cannot tell a correct
+    per-slot mapping from a uniform one. Distinct values per slot can.
+    """
+    available, reason = te.is_fp8_block_scaling_available(return_reason=True)
+    if not torch.cuda.is_available() or not available:
+        pytest.skip(f"FP8 block scaling unsupported: {reason}")
+
+    from transformer_engine.pytorch.quantization import Float8BlockScalingRecipeState
+
+    fp8_recipe = recipe.Float8BlockScaling()
+    fp8_recipe.fp8_quant_fwd_inp = replace(
+        fp8_recipe.fp8_quant_fwd_inp, amax_epsilon=0.125, power_2_scale=True
+    )
+    fp8_recipe.fp8_quant_fwd_weight = replace(
+        fp8_recipe.fp8_quant_fwd_weight, amax_epsilon=0.25, power_2_scale=False
+    )
+    fp8_recipe.fp8_quant_bwd_grad = replace(
+        fp8_recipe.fp8_quant_bwd_grad, amax_epsilon=0.5, power_2_scale=True
+    )
+
+    forward = Float8BlockScalingRecipeState(
+        fp8_recipe,
+        mode="forward",
+        num_quantizers=3,
+        device=torch.device("cpu"),
+        roles=[
+            _fp8block_role("input"),
+            _fp8block_role("weight"),
+            _fp8block_role("output"),
+        ],
+    ).make_quantizers()
+    # input, then weight, then the output boundary slot mirroring input.
+    assert [q.amax_epsilon for q in forward] == [0.125, 0.25, 0.125]
+    assert [q.force_pow_2_scales for q in forward] == [True, False, True]
+
+    backward = Float8BlockScalingRecipeState(
+        fp8_recipe,
+        mode="backward",
+        num_quantizers=2,
+        device=torch.device("cpu"),
+        roles=[
+            _fp8block_role("grad_output"),
+            _fp8block_role("grad_input"),
+        ],
+    ).make_quantizers()
+    assert [q.amax_epsilon for q in backward] == [0.5, 0.5]
+    assert [q.force_pow_2_scales for q in backward] == [True, True]
+
+
+# ----------------------------------------------------------------------
+# Role-aware dispatch in the current-scaling recipe state
+# ----------------------------------------------------------------------
+
+
+def _current_scaling_role(tensor_type):
+    """QuantizerRole helper for current-scaling tests."""
+    return QuantizerRole(module_type="linear", tensor_type=tensor_type, name="t")
+
+
+def test_current_scaling_custom_qparams_are_honoured():
+    """Input, weight and grad-output slots each carry their own customized qparams."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+
+    from transformer_engine.pytorch.quantization import Float8CurrentScalingRecipeState
+
+    cs_recipe = recipe.Float8CurrentScaling()
+    # Assigned after any shorthand flag so the per-slot values are what survives.
+    cs_recipe.fp8_quant_fwd_inp = replace(
+        cs_recipe.fp8_quant_fwd_inp, amax_epsilon=0.125, power_2_scale=True
+    )
+    cs_recipe.fp8_quant_fwd_weight = replace(
+        cs_recipe.fp8_quant_fwd_weight, amax_epsilon=0.25, power_2_scale=False
+    )
+    cs_recipe.fp8_quant_bwd_grad = replace(
+        cs_recipe.fp8_quant_bwd_grad, amax_epsilon=0.5, power_2_scale=True
+    )
+
+    forward = Float8CurrentScalingRecipeState(
+        cs_recipe,
+        mode="forward",
+        num_quantizers=2,
+        roles=[
+            _current_scaling_role("input"),
+            _current_scaling_role("weight"),
+        ],
+    ).make_quantizers()
+    assert [q.amax_epsilon for q in forward] == [0.125, 0.25]
+    assert [q.force_pow_2_scales for q in forward] == [True, False]
+
+    backward = Float8CurrentScalingRecipeState(
+        cs_recipe,
+        mode="backward",
+        num_quantizers=1,
+        roles=[_current_scaling_role("grad_output")],
+    ).make_quantizers()
+    assert backward[0].amax_epsilon == 0.5
+    assert backward[0].force_pow_2_scales is True
+
+
+def test_current_scaling_boundary_slots_keep_constructor_defaults():
+    """``output`` / ``grad_input`` do not borrow a neighboring slot's qparams.
+
+    Current scaling differs from the block-scaling states here: a boundary slot
+    falls back to ``use_power_2_scales`` and ``amax_epsilon=0.0`` rather than
+    reusing the input or gradient configuration.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+
+    from transformer_engine.pytorch.quantization import Float8CurrentScalingRecipeState
+
+    cs_recipe = recipe.Float8CurrentScaling(use_power_2_scales=False)
+    cs_recipe.fp8_quant_fwd_inp = replace(
+        cs_recipe.fp8_quant_fwd_inp, amax_epsilon=0.125, power_2_scale=True
+    )
+    cs_recipe.fp8_quant_bwd_grad = replace(
+        cs_recipe.fp8_quant_bwd_grad, amax_epsilon=0.5, power_2_scale=True
+    )
+
+    output_slot = Float8CurrentScalingRecipeState(
+        cs_recipe,
+        mode="forward",
+        num_quantizers=3,
+        roles=[
+            _current_scaling_role("input"),
+            _current_scaling_role("weight"),
+            _current_scaling_role("output"),
+        ],
+    ).make_quantizers()[2]
+    assert output_slot.amax_epsilon == 0.0
+    assert output_slot.force_pow_2_scales is False
+
+    grad_input_slot = Float8CurrentScalingRecipeState(
+        cs_recipe,
+        mode="backward",
+        num_quantizers=2,
+        roles=[
+            _current_scaling_role("grad_output"),
+            _current_scaling_role("grad_input"),
+        ],
+    ).make_quantizers()[1]
+    assert grad_input_slot.amax_epsilon == 0.0
+    assert grad_input_slot.force_pow_2_scales is False
+
+
 def _nvfp4_role(tensor_type):
     return QuantizerRole(module_type="linear", tensor_type=tensor_type, name="t")
 
@@ -1976,6 +2151,7 @@ def test_custom_recipe_quantization_alignment_contract():
     """The alignment contract is safe, configurable, and does not invoke qfactory."""
     calls = []
 
+    @recipe.quantizer_factory(key=("test_quantization_alignment", 1))
     def qfactory(role):
         calls.append(role)
         return current_scaling_factory(role)

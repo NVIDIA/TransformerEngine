@@ -20,6 +20,7 @@ from .op import (
     FusibleOperation,
     FusedOperation,
     OperationContext,
+    _is_preserved_fusible_recipe_transition,
 )
 
 
@@ -576,6 +577,7 @@ class OperationFuser:
 
         # Cache and detect change of state relevant for fusing operations
         self.recipe_type = None
+        self.recipe_config = None
         self.backward_override = None
         self._last_amax_history_len = 0
 
@@ -672,6 +674,24 @@ class OperationFuser:
         # Check if recipe parameters don't match cached values. In this case,
         # the recipe state in the basic ops might be invalid, so reset it.
         recipe_type = type(recipe)
+        recipe_config = recipe.quantizer_config() if recipe is not None else None
+        if (
+            recipe_type is self.recipe_type
+            and self.recipe_config != recipe_config
+            # A pipeline whose ops build no quantizers holds nothing a recipe change
+            # could invalidate. Evaluated only on the rare mismatch path. Interim
+            # form; WP8 folds it into the transition check with the op-level guard.
+            and any(op._builds_quantizers() for op in self._basic_ops)
+            and not _is_preserved_fusible_recipe_transition(
+                recipe,
+                self.recipe_config,
+                recipe_config,
+            )
+        ):
+            raise RuntimeError(
+                "Mid-training recipe updates are not supported for fusible operations. "
+                "Recreate the fusible operation or operation pipeline with the new recipe."
+            )
         need_to_reset_recipe_state = self.recipe_type != recipe_type
 
         backward_override = recipe.backward_override if recipe is not None else None
@@ -697,6 +717,7 @@ class OperationFuser:
                     op.pre_first_fuser_forward()
 
             self.recipe_type = recipe_type
+            self.recipe_config = recipe_config
 
         # Training and inference may support different fusions. Keep the
         # backward boundary in the key, but pay construction cost only once for

@@ -753,6 +753,56 @@ def test_make_graphed_callables_with_kwargs(
     assert_all_equal(outputs, graph_outputs)
 
 
+@pytest.mark.skipif(not fp8_available, reason="FP8 is not available")
+def test_graphed_callable_rejects_changed_quantization_recipe() -> None:
+    """Accept replays under an equal configuration and reject changed ones."""
+    model_config = model_configs["small"]
+    dtype = torch.bfloat16
+    captured_recipe = recipe.Float8CurrentScaling()
+    equal_recipe = copy.deepcopy(captured_recipe)
+    model = Linear(
+        model_config.hidden_size,
+        model_config.hidden_size,
+        device="cuda",
+        params_dtype=dtype,
+    )
+    for param in model.parameters():
+        param.grad = torch.empty_like(param)
+    model = make_graphed_callables(
+        model,
+        (generate_data(model_config, dtype, warmup=True),),
+        enabled=True,
+        recipe=captured_recipe,
+    )
+
+    def replay():
+        output = model(generate_data(model_config, dtype))
+        output.backward(generate_data(model_config, dtype, requires_grad=False))
+
+    try:
+        # An equal but independent recipe replays, in this scope and a later one.
+        for _ in range(2):
+            with autocast(enabled=True, recipe=equal_recipe):
+                for _ in range(2):
+                    replay()
+
+        # Mutating and reusing the caller-owned recipe must not mutate the
+        # immutable semantic configuration saved at capture time.
+        captured_recipe.fp8_quant_fwd_inp = recipe.QParams(amax_epsilon=0.25)
+        with autocast(enabled=True, recipe=captured_recipe):
+            with pytest.raises(RuntimeError, match="Recapture the graph with the new recipe"):
+                model(generate_data(model_config, dtype))
+
+        # A manager reset cannot make a different recipe look like the captured
+        # one: the check compares configurations, not a recyclable counter.
+        FP8GlobalStateManager.reset()
+        with autocast(enabled=True, recipe=recipe.Float8CurrentScaling(use_power_2_scales=True)):
+            with pytest.raises(RuntimeError, match="Recapture the graph with the new recipe"):
+                model(generate_data(model_config, dtype))
+    finally:
+        reset_graphs(model)
+
+
 def test_make_graphed_callables_returns_owned_parameter_grads() -> None:
     """Parameter grads returned from graph replay must not alias static graph buffers."""
     reset_rng_states()

@@ -110,6 +110,15 @@ def get_nvfp4_quantizer_factory(
             with_rht=with_rht,
         )
 
+    @recipe.quantizer_factory(
+        key=(
+            "nvfp4_module_exact_reference",
+            1,
+            ("with_rht", with_rht),
+            ("with_2d_quantization", with_2d_quantization),
+            ("row_scaled", row_scaled),
+        )
+    )
     def factory(role):
         if role is None:
             return _default_quantizer()
@@ -135,6 +144,29 @@ def get_nvfp4_quantizer_factory(
         return _default_quantizer()
 
     return factory
+
+
+def test_nvfp4_reference_factory_semantic_keys(monkeypatch):
+    """Factory keys are stable, capture all behavior, and require no factory probe."""
+
+    def unexpected_factory_invocation(*_args, **_kwargs):
+        pytest.fail("Creating semantic recipe configuration invoked the quantizer factory")
+
+    monkeypatch.setattr(reference_nvfp4, "NVFP4QuantizerRef", unexpected_factory_invocation)
+    flags = (
+        (False, False, False),
+        (False, False, False),
+        (True, False, False),
+        (False, True, False),
+        (False, False, True),
+    )
+    factories = [get_nvfp4_quantizer_factory(*values) for values in flags]
+    configs = [recipe.CustomRecipe(qfactory=factory).quantizer_config() for factory in factories]
+
+    assert factories[0].qfactory_key == factories[1].qfactory_key
+    assert configs[0] == configs[1]
+    assert len({factory.qfactory_key for factory in factories[1:]}) == 4
+    assert len(set(configs[1:])) == 4
 
 
 def reset_rng_states():
