@@ -50,6 +50,18 @@ int sm_count(int device_id = -1);
  */
 size_t max_shared_memory_per_block_optin(int device_id = -1);
 
+/* \brief Static shared memory used by a compiled kernel on the current device
+ *
+ * Size of the kernel's fixed-size __shared__ arrays, including those
+ * declared in device functions it calls, as reported by
+ * cudaFuncGetAttributes. The result is cached per kernel and device.
+ *
+ * \param[in] kernel Pointer to the __global__ function
+ *
+ * \return Shared memory size in bytes
+ */
+size_t static_shared_memory_size(const void *kernel);
+
 /* \brief Minimum and maximum stream priorities supported on device
  *
  * \param[in] device_id CUDA device (default is current device)

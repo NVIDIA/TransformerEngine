@@ -48,7 +48,8 @@ void quantize_gated_fwd_helper(const NVTETensor nvte_input, NVTETensor nvte_outp
     case NVTE_DELAYED_TENSOR_SCALING: {
       const bool use_tma_kernels =
           (cols % 32 == 0) && is_supported_by_CC_100() &&
-          fp8::cast_gated_tma_fits_device(/*is_bwd=*/false, input.dtype(), output->dtype());
+          fp8::cast_gated_tma_fits_device</*IS_BWD=*/false, ParamOP, ActOP, nullptr>(
+              input.dtype(), output->dtype());
       if (use_tma_kernels) {
         Tensor dummy_grad_tensor;
         fp8::cast_gated_tma</*IS_BWD=*/false, ParamOP, ActOP, nullptr>(input, dummy_grad_tensor,
@@ -141,7 +142,8 @@ void quantize_gated_bwd_helper(const NVTETensor nvte_grad, const NVTETensor nvte
     case NVTE_DELAYED_TENSOR_SCALING: {
       const bool use_tma_kernels =
           (cols % 32 == 0) && is_supported_by_CC_100() &&
-          fp8::cast_gated_tma_fits_device(/*is_bwd=*/true, gated_input.dtype(), output->dtype());
+          fp8::cast_gated_tma_fits_device</*IS_BWD=*/true, ParamOP, ActOP, DActOP>(
+              gated_input.dtype(), output->dtype());
       if (use_tma_kernels) {
         fp8::cast_gated_tma</*IS_BWD=*/true, ParamOP, ActOP, DActOP>(gated_input, grad, output, p,
                                                                      stream);

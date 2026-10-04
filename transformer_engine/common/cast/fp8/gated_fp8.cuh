@@ -43,9 +43,6 @@ constexpr size_t BUFFER_STAGES_NUM = BUFFER_DIM_Y / THREADS_PER_CHUNK_Y;  //  8 
 constexpr size_t ITERATIONS = CHUNK_DIM_Y / BUFFER_DIM_Y;                 //  4 = 128 / 32
 static_assert(ITERATIONS >= 1);
 
-// Static shared memory of cast_fp8_gated_kernel (one mbarrier per iteration)
-constexpr size_t STATIC_SHMEM_SIZE = ITERATIONS * sizeof(uint64_t);
-
 template <bool IS_BWD, typename ParamOP, float (*ActOP)(float, const ParamOP &),
           float (*DActOP)(float, const ParamOP &), typename IType, typename OType>
 __global__ void __launch_bounds__(THREADS_PER_CHUNK)
@@ -304,9 +301,21 @@ inline size_t cast_gated_tma_dynamic_shmem_size(const bool is_bwd, const DType i
 // Whether cast_fp8_gated_kernel fits in the shared memory of the current device.
 // Devices with compute capability 10.0+ differ in shared memory per block
 // (e.g. SM 12.0 has much less than SM 10.0), so FP32 configurations may not fit.
-inline bool cast_gated_tma_fits_device(const bool is_bwd, const DType itype, const DType otype) {
+// The static shared memory is read from the compiled kernel so that __shared__
+// arrays in the device functions it calls (e.g. reduce_max) are included.
+template <bool IS_BWD, typename ParamOP, float (*ActOP)(float, const ParamOP &),
+          float (*DActOP)(float, const ParamOP &)>
+bool cast_gated_tma_fits_device(const DType itype, const DType otype) {
+  using namespace kernel;
+  size_t static_shmem_size = 0;
+  TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
+      itype, IType,
+      TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
+          otype, OType,
+          static_shmem_size = cuda::static_shared_memory_size(reinterpret_cast<const void *>(
+              &cast_fp8_gated_kernel<IS_BWD, ParamOP, ActOP, DActOP, IType, OType>));););
   const size_t required =
-      cast_gated_tma_dynamic_shmem_size(is_bwd, itype, otype) + kernel::STATIC_SHMEM_SIZE;
+      cast_gated_tma_dynamic_shmem_size(IS_BWD, itype, otype) + static_shmem_size;
   return required <= cuda::max_shared_memory_per_block_optin();
 }
 
