@@ -604,6 +604,16 @@ int64_t nvte_comm_gemm_numroc(NVTECommGemmCtx* ctx, int64_t global_size) {
 
 void* nvte_comm_gemm_workspace(NVTECommGemmCtx* ctx, size_t* size) {
   NVTE_API_CALL(nvte_comm_gemm_workspace);
+  // The loaded library decides the workspace layout: cuBLASMp 0.11.0 and newer start it with the
+  // gathered B.
+  static const bool gathered_b_first = [] {
+    int version = 0;
+    return cublasMpGetVersion(&version) == CUBLASMP_STATUS_SUCCESS && version >= 1100;
+  }();
+  if (!gathered_b_first) {
+    *size = 0;
+    return nullptr;
+  }
   *size = ctx->workspace_size;
   return ctx->workspace;
 }

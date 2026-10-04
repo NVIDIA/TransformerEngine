@@ -156,11 +156,12 @@ int64_t nvte_comm_gemm_numroc(NVTECommGemmCtx* ctx, int64_t global_size);
  *  After nvte_all_gather_gemm with transb = false completes on its stream, the workspace begins
  *  with the gathered B: the local B of every rank, in rank order, which together form the
  *  gathered (N, K) tensor. The data remains valid until the next operation with the context on
- *  any rank, since the other ranks write into the workspace.
+ *  any rank, since the other ranks write into the workspace. cuBLASMp versions before 0.11.0 keep
+ *  the gathered B elsewhere, so with those this function returns nullptr.
  *
  *  \param[in]  ctx   Comm-GEMM context.
- *  \param[out] size  Workspace size in bytes (0 before the first operation).
- *  \return Workspace pointer, or nullptr before the first operation.
+ *  \param[out] size  Workspace size in bytes (0 when the function returns nullptr).
+ *  \return Workspace pointer, or nullptr before the first operation or with cuBLASMp before 0.11.0.
  */
 void* nvte_comm_gemm_workspace(NVTECommGemmCtx* ctx, size_t* size);
 

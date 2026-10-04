@@ -325,9 +325,12 @@ at::Tensor cublasmp_get_buffer(NVTECommGemmCtx *ctx, int tp_rank, int tp_size,
   const size_t offset = local_chunk ? bytes * tp_rank : 0;
   size_t workspace_size = 0;
   char *workspace = static_cast<char *>(nvte_comm_gemm_workspace(ctx, &workspace_size));
-  NVTE_CHECK(workspace != nullptr && offset + bytes <= workspace_size,
-             "Requested buffer (shape=", *shape, ", local_chunk=", local_chunk,
-             ") exceeds the cuBLASMp workspace (", workspace_size, " bytes)");
+  NVTE_CHECK(workspace != nullptr,
+             "No gathered input in the cuBLASMp workspace (requires cuBLASMp 0.11.0 or newer and a "
+             "previous all-gather GEMM)");
+  NVTE_CHECK(offset + bytes <= workspace_size, "Requested buffer (shape=", *shape,
+             ", local_chunk=", local_chunk, ") exceeds the cuBLASMp workspace (", workspace_size,
+             " bytes)");
   return torch::from_blob(workspace + offset, *shape, at::dtype(dtype).device(torch::kCUDA));
 }
 

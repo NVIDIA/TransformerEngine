@@ -815,8 +815,9 @@ def get_cublasmp_all_gather_output(
     GEMM.
 
     Returns ``None`` for formats that wgrad cannot use as gathered
-    (anything but unquantized and per-tensor FP8 data); callers
-    all-gather those separately.
+    (anything but unquantized and per-tensor FP8 data) and with
+    cuBLASMp versions before 0.11.0, which keep the gathered input
+    elsewhere; callers all-gather those separately.
 
     """
     if isinstance(local_tensor, Float8TensorStorage):
@@ -829,7 +830,12 @@ def get_cublasmp_all_gather_output(
         return None
     global_shape = list(local_data.size())
     global_shape[0] *= torch.distributed.get_world_size(process_group)
-    global_data = comm.get_buffer(shape=global_shape)
+    try:
+        global_data = comm.get_buffer(shape=global_shape)
+    except RuntimeError as e:
+        if "No gathered input in the cuBLASMp workspace" not in str(e):
+            raise
+        return None
     if global_data.dtype != local_data.dtype:
         return None
     if not isinstance(local_tensor, Float8TensorStorage):
