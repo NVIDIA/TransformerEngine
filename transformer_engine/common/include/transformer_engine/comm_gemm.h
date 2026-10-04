@@ -151,6 +151,19 @@ void nvte_gemm_all_reduce(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_t k,
  */
 int64_t nvte_comm_gemm_numroc(NVTECommGemmCtx* ctx, int64_t global_size);
 
+/*! \brief Get the device workspace of a comm-gemm context.
+ *
+ *  After nvte_all_gather_gemm with transb = false completes on its stream, the workspace begins
+ *  with the gathered B: the local B of every rank, in rank order, which together form the
+ *  gathered (N, K) tensor. The data remains valid until the next operation with the context on
+ *  any rank, since the other ranks write into the workspace.
+ *
+ *  \param[in]  ctx   Comm-GEMM context.
+ *  \param[out] size  Workspace size in bytes (0 before the first operation).
+ *  \return Workspace pointer, or nullptr before the first operation.
+ */
+void* nvte_comm_gemm_workspace(NVTECommGemmCtx* ctx, size_t* size);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

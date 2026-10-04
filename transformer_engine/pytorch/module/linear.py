@@ -18,6 +18,7 @@ from transformer_engine.pytorch.torch_version import torch_version
 
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
+    get_cublasmp_all_gather_output,
     get_dummy_wgrad,
     get_ub,
     get_ub_is_fp8,
@@ -1465,9 +1466,11 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
         # Grad input tensor has been computed...
         # --------------------------------------------------
 
-        # cuBLASMp's AG+GEMM consumes the gathered grad_output inline and does
-        # not preserve it for wgrad. Userbuffers leaves the gathered tensor in
-        # its persistent buffer; cuBLASMp does not, so we gather here. Route
+        # cuBLASMp's AG+GEMM leaves the gathered grad_output at the start of
+        # its workspace, as Userbuffers leaves it in its persistent buffer, so
+        # wgrad reuses it for unquantized and per-tensor FP8 data. A delayed
+        # wgrad runs after the workspace is reused, and other formats need
+        # data the dgrad GEMM did not gather, so those gather here. Route
         # through the same FP8-aware all-gather as the non-overlap path in
         # ``TransformerEngineBaseModule.grad_output_preprocess`` by passing the
         # grad_output quantizer. Per-tensor FP8 can reconstruct columnwise
@@ -1479,15 +1482,29 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
             and bwd_args.ub_obj_gradout is not None
             and bwd_args.ub_obj_gradout.with_cublasmp()
         ):
-            if grad_output_quantizer is not None:
-                set_quantizer_usage_for_wgrad_all_gather(grad_output_quantizer)
-            if isinstance(grad_output_quantizer, MXFP8Quantizer):
-                grad_output = grad_output_arg.reshape(-1, grad_output_arg.shape[-1]).contiguous()
-            grad_output, _ = gather_along_first_dim(
-                grad_output,
-                bwd_args.tp_group,
-                quantizer=grad_output_quantizer,
-            )
+            grad_output_total = None
+            if bwd_args.requires_dgrad and not (
+                bwd_args.wgrad_store is not None and bwd_args.wgrad_store.delay_wgrad_compute()
+            ):
+                grad_output_total = get_cublasmp_all_gather_output(
+                    bwd_args.ub_obj_gradout,
+                    grad_output,
+                    grad_output_quantizer,
+                    bwd_args.tp_group,
+                )
+            if grad_output_total is None:
+                if grad_output_quantizer is not None:
+                    set_quantizer_usage_for_wgrad_all_gather(grad_output_quantizer)
+                if isinstance(grad_output_quantizer, MXFP8Quantizer):
+                    grad_output = grad_output_arg.reshape(
+                        -1, grad_output_arg.shape[-1]
+                    ).contiguous()
+                grad_output_total, _ = gather_along_first_dim(
+                    grad_output,
+                    bwd_args.tp_group,
+                    quantizer=grad_output_quantizer,
+                )
+            grad_output = grad_output_total
 
         # --------------------------------------------------
         # Compute grad weight

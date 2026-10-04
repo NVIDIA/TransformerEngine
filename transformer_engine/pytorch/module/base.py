@@ -799,6 +799,50 @@ def fill_userbuffers_buffer_for_all_gather(
     raise ValueError(f"Unsupported quantizer for Userbuffers ({quantizer})")
 
 
+def get_cublasmp_all_gather_output(
+    comm,
+    local_tensor: torch.Tensor | QuantizedTensorStorage,
+    quantizer: Optional[Quantizer],
+    process_group,
+) -> Optional[torch.Tensor | QuantizedTensorStorage]:
+    """Get the tensor gathered by the last cuBLASMp all-gather GEMM
+
+    cuBLASMp leaves the gathered input at the start of its workspace,
+    which ``comm.get_buffer`` views. As with the Userbuffers buffer of
+    ``fill_userbuffers_buffer_for_all_gather``, the returned tensor
+    uses that memory and is overwritten by the next operation with
+    ``comm`` on any rank. ``local_tensor`` must be the input of that
+    GEMM.
+
+    Returns ``None`` for formats that wgrad cannot use as gathered
+    (anything but unquantized and per-tensor FP8 data); callers
+    all-gather those separately.
+
+    """
+    if isinstance(local_tensor, Float8TensorStorage):
+        local_data = local_tensor._data
+    elif isinstance(local_tensor, QuantizedTensorStorage):
+        return None
+    else:
+        local_data = local_tensor
+    if local_data is None:
+        return None
+    global_shape = list(local_data.size())
+    global_shape[0] *= torch.distributed.get_world_size(process_group)
+    global_data = comm.get_buffer(shape=global_shape)
+    if global_data.dtype != local_data.dtype:
+        return None
+    if not isinstance(local_tensor, Float8TensorStorage):
+        return global_data
+    return Float8TensorStorage(
+        data=global_data,
+        fp8_scale_inv=local_tensor._scale_inv,
+        fp8_dtype=local_tensor._fp8_dtype,
+        fake_dtype=local_tensor._dtype,
+        quantizer=quantizer,
+    )
+
+
 def _is_weight_workspace_valid(
     workspace: QuantizedTensorStorage,
     quantizer: Quantizer,
