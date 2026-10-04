@@ -2291,11 +2291,11 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             q_inputs[i % 2] = q_part
                             if use_frost_attention:
                                 (
-                                    out_per_step[i],
-                                    softmax_lse_per_step[i],
+                                    out_per_step[i % 2],
+                                    softmax_lse_per_step[i % 2],
                                     rng_states[i],
                                     attn_biases[i],
-                                    max_logit_per_step[i],
+                                    max_logit_per_step[i % 2],
                                 ) = cp_p2p_fwd_frost_attn(
                                     *frost_attn_inputs, *prepare_outputs, section
                                 )
@@ -2330,11 +2330,11 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             q_inputs[i % 2] = q_part
                             if use_frost_attention:
                                 (
-                                    out_per_step[i],
-                                    softmax_lse_per_step[i],
+                                    out_per_step[i % 2],
+                                    softmax_lse_per_step[i % 2],
                                     rng_states[i],
                                     attn_biases[i],
-                                    max_logit_per_step[i],
+                                    max_logit_per_step[i % 2],
                                 ) = cp_p2p_fwd_frost_attn(
                                     *frost_attn_inputs, *prepare_outputs, section
                                 )
@@ -2369,11 +2369,11 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             q_inputs[i % 2] = q_part
                             if use_frost_attention:
                                 (
-                                    out_per_step[i],
-                                    softmax_lse_per_step[i],
+                                    out_per_step[i % 2],
+                                    softmax_lse_per_step[i % 2],
                                     rng_states[i],
                                     attn_biases[i],
-                                    max_logit_per_step[i],
+                                    max_logit_per_step[i % 2],
                                 ) = cp_p2p_fwd_frost_attn(
                                     *frost_attn_inputs, *prepare_outputs, section
                                 )
@@ -2409,11 +2409,11 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         q_inputs[i % 2] = q_part
                         if use_frost_attention:
                             (
-                                out_per_step[i],
-                                softmax_lse_per_step[i],
+                                out_per_step[i % 2],
+                                softmax_lse_per_step[i % 2],
                                 rng_states[i],
                                 attn_biases[i],
-                                max_logit_per_step[i],
+                                max_logit_per_step[i % 2],
                             ) = cp_p2p_fwd_frost_attn(*frost_attn_inputs, *prepare_outputs, section)
                         elif use_fused_attention:
                             (
