@@ -122,6 +122,4 @@ To build the C++ extensions with debug symbols, e.g. with the `-g` flag:
 
   NVTE_BUILD_DEBUG=1 pip3 install --no-build-isolation .
 
-.. include:: ../README.rst
-   :start-after: troubleshooting-begin-marker-do-not-remove
-   :end-before: troubleshooting-end-marker-do-not-remove
+.. include:: troubleshooting.rst

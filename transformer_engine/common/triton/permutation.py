@@ -367,6 +367,9 @@ def _unpermute_kernel(
             tl.store(
                 unpermuted_probs_ptr + unpermuted_prob_off, 0.0, mask=map_load_off < num_experts
             )
+            # Zeroing and routed stores are distributed across warps.
+            # Synchronize before any warp enters the routed-write loop.
+            tl.debug_barrier()
     accumulator = tl.zeros((BLOCK_SIZE,), dtype=compute_type)
     n_routed = tl.load(
         row_id_map_ptr
@@ -465,6 +468,9 @@ def _unpermute_bwd_with_merging_probs_kernel(
         pid * stride_merging_probs_grad_token + stride_merging_probs_grad_expert * map_load_off
     )
     tl.store(merging_probs_grad_ptr + token_probs_grad_off, 0.0, mask=map_load_off < num_experts)
+    # Zeroing and routed stores are distributed across warps.
+    # Synchronize before any warp enters the routed-write loop.
+    tl.debug_barrier()
     n_routed = tl.load(
         row_id_map_ptr + pid * stride_row_id_map_token + num_experts * 2 * stride_row_id_map_expert
     )

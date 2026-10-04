@@ -93,11 +93,26 @@ Optional Dependencies
    :Default: ``0``
    :Description: Enable NVSHMEM support. When set to ``1``, requires ``NVSHMEM_HOME`` to be set to the NVSHMEM installation directory.
 
+.. envvar:: NVTE_WITH_CUTEDSL
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Enable CuTeDSL support when building ``libtransformer_engine.so``. When set to ``1``, requires
+                 CPython Stable ABIs from Python 3.10 and above, and ``apache-tvm-ffi`` installed.
+                 Note: when linking ``libtransformer_engine.so`` built with ``NVTE_WITH_CUTEDSL=1`` to a standalone C++ executable,
+                 you must provide the definition of these CPython symbols. See ``tests/cpp/CMakeLists.txt`` for an example.
+
 .. envvar:: NVTE_BUILD_ACTIVATION_WITH_FAST_MATH
 
    :Type: CMake option
    :Default: ``OFF``
    :Description: Compile activation kernels (GELU, ReLU, SwiGLU) with the ``--use_fast_math`` CUDA compiler flag for improved performance at the cost of some precision.
+
+.. envvar:: NVTE_BUILD_LEGACY_STATIC_NVFP4
+
+   :Type: CMake option
+   :Default: ``OFF``
+   :Description: Additionally compile the legacy static NVFP4 4over6 quantization kernel. Enable this option to provide a static fallback when runtime compilation is disabled with :envvar:`NVTE_DISABLE_NVRTC`. Enabling it increases build time because the NVFP4 4over6 template specializations are instantiated at build time.
 
 CUDA Configuration
 ^^^^^^^^^^^^^^^^^^
@@ -129,6 +144,20 @@ General
    :Description: Size in MiB of the internal ``NVTETensor`` handle pool. Increase this
                  value if an application legitimately creates more tensor handles than
                  the default pool can hold.
+
+.. envvar:: NVTE_ENABLE_CUTEDSL_BACKEND
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Use CuTeDSL kernel implementations when available. This requires that Transformer Engine was built with ``NVTE_WITH_CUTEDSL=1``.
+                 It also requires ``apache-tvm-ffi``, ``nvidia-cutlass-dsl`` to be installed and you are using CPython 3.10 or later.
+                 If these requirements are not met, Transformer Engine will fall back to using CUDA C++ kernels if possible.
+
+.. envvar:: NVTE_WARN_IF_CUTEDSL_BACKEND_NOT_CHOSEN
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Warn when TE falls back to the CUDA C++ kernels instead of dispatching to available CuTeDSL kernels. Useful to verify if the CuTeDSL path is taken.
 
 .. envvar:: NVTE_GROUPED_TENSOR_HANDLE_POOL_SIZE_MB
 
@@ -314,13 +343,13 @@ Kernel Configuration
 
    :Type: ``int`` (0 or 1)
    :Default: ``0``
-   :Description: Enable fast math optimizations in runtime-compiled (NVRTC) kernels. This trades numerical accuracy for performance. These optimizations are experimental and inconsistently implemented.
+   :Description: Enable fast math optimizations in runtime-compiled (NVRTC / CuTeDSL) kernels. This trades numerical accuracy for performance. These optimizations are experimental and inconsistently implemented.
 
 .. envvar:: NVTE_DISABLE_NVRTC
 
    :Type: ``int`` (0 or 1)
    :Default: ``0``
-   :Description: Disable NVRTC (CUDA Runtime Compilation) support. When set to ``1``, runtime kernel compilation is disabled. Existing transpose operations select their static fallback automatically. Fused softmax and normalization paths require their corresponding ``NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX`` or ``NVTE_BUILD_LEGACY_STATIC_NORM`` CMake option to have been enabled when the library was built; otherwise no static fallback is available.
+   :Description: Disable NVRTC (CUDA Runtime Compilation) support. When set to ``1``, runtime kernel compilation is disabled. Existing transpose operations select their static fallback automatically. NVFP4 4over6 quantization, fused softmax, and normalization paths require their corresponding ``NVTE_BUILD_LEGACY_STATIC_NVFP4``, ``NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX``, or ``NVTE_BUILD_LEGACY_STATIC_NORM`` CMake option to have been enabled when the library was built; otherwise no static fallback is available.
 
 .. envvar:: NVTE_USE_CUTLASS_GROUPED_GEMM
 
