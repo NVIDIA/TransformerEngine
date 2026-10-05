@@ -49,16 +49,13 @@ def get_cublas_workspace_size_bytes() -> None:
 
 
 def get_cublas_workspace(device: int, ub: bool, grouped_gemm: bool) -> torch.Tensor:
-    """Returns workspace for cublas GEMM on the current CUDA stream."""
-    stream = torch.cuda.current_stream(device).cuda_stream
-    return _get_cublas_workspace_for_stream(device, ub, grouped_gemm, stream)
+    """Allocate cuBLAS scratch for one invocation on the current CUDA stream.
 
-
-@functools.lru_cache(maxsize=None)
-def _get_cublas_workspace_for_stream(
-    device: int, ub: bool, grouped_gemm: bool, _stream: int
-) -> torch.Tensor:
-    """Cache by stream so concurrent GEMMs do not overwrite each other's scratch space."""
+    The caching allocator safely reuses eager allocations on their stream. During
+    capture, the graph's private pool owns the allocation until the graph is
+    destroyed. Keeping the tensor in a Python cache would bypass that ownership
+    on later captures, including graphs replayed on different streams.
+    """
     assert not (ub and grouped_gemm), "UB is unsupported for grouped GEMM."
 
     if ub:

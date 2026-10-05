@@ -1893,6 +1893,49 @@ def test_to_tensor_spec_quantized(factory, shape):
 
 
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
+def test_te_linear_cublas_workspace_graph_generations(monkeypatch):
+    """Compiled forward/backward scratch follows graph generations, not a Python cache."""
+    import weakref
+    from transformer_engine.pytorch.cpp_extensions import gemm
+
+    original = gemm.get_cublas_workspace
+    captured_workspaces = []
+
+    def allocate(*args, **kwargs):
+        workspace = original(*args, **kwargs)
+        if torch.cuda.is_current_stream_capturing():
+            captured_workspaces.append(weakref.ref(workspace))
+        return workspace
+
+    monkeypatch.setattr(gemm, "get_cublas_workspace", allocate)
+    model = te.Linear(4096, 128, bias=False, params_dtype=torch.bfloat16, device="cuda")
+    with torch.no_grad():
+        model.weight.fill_(1)
+    torch._dynamo.reset()
+    compiled = torch.compile(model, fullgraph=True, mode="reduce-overhead", dynamic=False)
+    with _assert_no_cudagraph_skips(True):
+        for batch, value in [(128, 1), (256, 2), (128, 3)]:
+            for _ in range(3):
+                torch.compiler.cudagraph_mark_step_begin()
+                model.zero_grad(set_to_none=True)
+                inp = torch.full(
+                    (batch, 4096), value, dtype=torch.bfloat16, device="cuda", requires_grad=True
+                )
+                out = compiled(inp)
+                out.sum().backward()
+                torch.testing.assert_close(out, torch.full_like(out, 4096 * value), rtol=0, atol=0)
+                torch.testing.assert_close(inp.grad, torch.full_like(inp, 128), rtol=0, atol=0)
+                torch.testing.assert_close(
+                    model.weight.grad, torch.full_like(model.weight, batch * value), rtol=0, atol=0
+                )
+                del out, inp
+    assert len(captured_workspaces) >= 2, "Expected CUDA graph captures for different shapes"
+    assert all(ref() is None for ref in captured_workspaces)
+    del compiled
+    torch._dynamo.reset()
+
+
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
 @pytest.mark.parametrize("compile_mode", _compile_modes)
 @pytest.mark.parametrize(
     "fp8_recipe",
