@@ -538,7 +538,7 @@ def _pack_grouped_linear_bias_for_cudnn(linear_op: GroupedLinear) -> Optional[to
 @functools.lru_cache(maxsize=1)
 def _grouped_gemm_dsrelu_backward_supported() -> bool:
     """Whether the cuDNN FE grouped GEMM dSReLU backward wrapper is available."""
-    if not torch.cuda.is_available() or get_device_compute_capability()[0] != 10:
+    if get_device_compute_capability()[0] != 10:
         return False
     if not _cudnn_frontend_supports_grouped_gemm_srelu():
         return False
@@ -1188,7 +1188,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
     @functools.lru_cache(maxsize=None)
     def is_supported(cls) -> bool:
         """Whether this fused operation is supported on the current system."""
-        if not torch.cuda.is_available() or get_device_compute_capability()[0] != 10:
+        if get_device_compute_capability()[0] != 10:
             return False
         if not _cudnn_frontend_version_supported():
             return False
@@ -3215,9 +3215,6 @@ def fuse_glu_ops(
     **unused,  # pylint: disable=unused-argument
 ) -> list[FusibleOperation]:
     """Apply joint GroupedLinear + scaled GLU + GroupedLinear fusion."""
-
-    if not torch.cuda.is_available():
-        return ops
 
     # Determine supported activations
     activation_op_types = []
