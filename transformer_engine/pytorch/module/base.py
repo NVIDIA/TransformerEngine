@@ -46,6 +46,7 @@ from ..distributed import (
     _fsdp_gather_tensors,
 )
 from ..constants import dist_group_type
+from ..dynamo.tensor_spec import TensorSpec
 from ..cpp_extensions.gemm import _NUM_MAX_UB_STREAMS
 from ..quantized_tensor import QuantizedTensor, QuantizedTensorStorage, Quantizer
 from ..tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
@@ -1322,7 +1323,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     def _enable_weight_preswizzle(
         self,
         quantizer: Quantizer,
-        weight: torch.Tensor,
+        weight: Union[torch.Tensor, TensorSpec],
     ) -> bool:
         """Whether to fuse scale-factor swizzling into weight quantization.
 
@@ -1339,7 +1340,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if isinstance(quantizer, MXFP8Quantizer):
             return True
         if isinstance(quantizer, NVFP4Quantizer):
-            rows, cols = weight.numel() // weight.shape[-1], weight.shape[-1]
+            rows, cols = math.prod(weight.shape[:-1]), weight.shape[-1]
             arch_supported = get_device_compute_capability() >= (10, 0)
             if quantizer.with_rht:
                 return arch_supported and rows % 64 == 0 and cols % 128 == 0

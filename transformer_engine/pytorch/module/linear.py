@@ -84,7 +84,7 @@ from ..quantized_tensor import (
     Quantizer,
     prepare_for_saving,
 )
-from ..dynamo.concatenated_tensor import ConcatenatedTensor, restore_from_func_ctx
+from ..dynamo.deferred_cat import DeferredCat, restore_from_func_ctx
 from ..dynamo import (
     TensorSpec,
     TensorOrQuantized,
@@ -111,9 +111,9 @@ class LinearFwdArgs:
     """Single-argument bag for the forward path of :class:`_Linear`."""
 
     # --- Differentiable tensors (also passed positionally to autograd) ---
-    weight: Union[TensorOrQuantized, ConcatenatedTensor]
+    weight: Union[TensorOrQuantized, DeferredCat]
     inp: torch.Tensor
-    bias: Optional[Union[torch.Tensor, ConcatenatedTensor]]
+    bias: Optional[Union[torch.Tensor, DeferredCat]]
 
     # --- Non-differentiable cached tensors ---
     # TensorOrQuantized so a cached quantized workspace can cross the op boundary.
@@ -239,9 +239,9 @@ class LinearBwdArgs:
     # --- Saved / restored tensors (populated at backward entry) ---
     grad_output: Optional[torch.Tensor] = None
     inputmat: Optional[TensorOrQuantized] = None
-    weight_fp8: Optional[Union[TensorOrQuantized, ConcatenatedTensor]] = None
-    saved_weight: Optional[Union[TensorOrQuantized, ConcatenatedTensor]] = None
-    bias: Optional[Union[torch.Tensor, ConcatenatedTensor]] = None
+    weight_fp8: Optional[Union[TensorOrQuantized, DeferredCat]] = None
+    saved_weight: Optional[Union[TensorOrQuantized, DeferredCat]] = None
+    bias: Optional[Union[torch.Tensor, DeferredCat]] = None
 
     # --- Quantizers ---
     input_quantizer: Optional[Quantizer] = None
@@ -2403,6 +2403,12 @@ class Linear(TransformerEngineBaseModule):
             weight_tensor, bias_tensor = self._get_weight_and_bias_tensors(
                 defer_concatenation=torch.compiler.is_compiling() and _linear_op is not None
             )
+            weight_meta = (
+                weight_tensor.to_spec() if isinstance(weight_tensor, DeferredCat) else weight_tensor
+            )
+            bias_meta = (
+                bias_tensor.to_spec() if isinstance(bias_tensor, DeferredCat) else bias_tensor
+            )
 
             quantizers = (
                 self._get_quantizers(fp8_output, fp8_grad, is_grad_enabled)
@@ -2424,7 +2430,7 @@ class Linear(TransformerEngineBaseModule):
             ) = quantizers
             if weight_quantizer is not None and not debug:
                 weight_quantizer.optimize_for_gemm = self._enable_weight_preswizzle(
-                    weight_quantizer, weight_tensor
+                    weight_quantizer, weight_meta
                 )
 
             use_compiled_op = torch.compiler.is_compiling() and _linear_op is not None
@@ -2454,7 +2460,7 @@ class Linear(TransformerEngineBaseModule):
                 backward_override = None
             custom = is_custom(input_quantizer) or is_custom(weight_quantizer)
             backward_input_needs_gather = (
-                weight_tensor.requires_grad
+                weight_meta.requires_grad
                 and self.parallel_mode == "column"
                 and self.sequence_parallel
             )
@@ -2487,9 +2493,9 @@ class Linear(TransformerEngineBaseModule):
                 weight_workspace=weight_workspace,
                 # requires_grad flags
                 input_requires_grad=inp.requires_grad,
-                weight_requires_grad=weight_tensor.requires_grad,
+                weight_requires_grad=weight_meta.requires_grad,
                 bias_requires_grad=(
-                    linear_bias_tensor.requires_grad if linear_bias_tensor is not None else False
+                    bias_meta.requires_grad if linear_bias_tensor is not None else False
                 ),
                 # quantizers
                 input_quantizer=input_quantizer,
@@ -2557,7 +2563,7 @@ class Linear(TransformerEngineBaseModule):
                     fwd_args.bias = linear_bias_tensor
 
             if use_compiled_op:
-                check_gemm_dims(inp, weight_tensor, self.fp8)
+                check_gemm_dims(inp.shape, weight_meta.shape, self.fp8)
                 out, new_weight_workspace = _linear_op(fwd_args)
             else:
                 out, new_weight_workspace = _linear_eager(
@@ -2705,19 +2711,24 @@ class Linear(TransformerEngineBaseModule):
     def _get_weight_and_bias_tensors(self, defer_concatenation=False):
         weights = self._get_weight_tensors()
         weight_tensor = (
-            ConcatenatedTensor(weights)
-            if defer_concatenation and len(weights) > 1
+            DeferredCat(weights)
+            if defer_concatenation
+            and len(weights) > 1
+            and all(not isinstance(w, (QuantizedTensor, QuantizedTensorStorage)) for w in weights)
             else noop_cat(weights)
         )
         bias_tensor = None
         if self.use_bias:
             biases = [getattr(self, name) for name in self.bias_names]
             bias_tensor = (
-                ConcatenatedTensor(biases)
+                DeferredCat(biases)
                 if defer_concatenation
                 and len(biases) > 1
                 and self.apply_bias
                 and not self.gemm_bias_unfused_add
+                and all(
+                    not isinstance(b, (QuantizedTensor, QuantizedTensorStorage)) for b in biases
+                )
                 else noop_cat(biases)
             )
         return weight_tensor, bias_tensor

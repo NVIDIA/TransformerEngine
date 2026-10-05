@@ -2857,8 +2857,8 @@ def test_te_split_parameters_saved_versions():
 @pytest.mark.parametrize(
     "layout", ["adjacent", "offset", "disjoint", "strided", "singleton", "negative", "conjugate"]
 )
-def test_concatenated_tensor_storage(layout):
-    from transformer_engine.pytorch.dynamo.concatenated_tensor import ConcatenatedTensor
+def test_deferred_cat_storage(layout):
+    from transformer_engine.pytorch.dynamo.deferred_cat import DeferredCat
 
     storage = torch.arange(128, device="cuda").view(16, 8)
     if layout == "offset":
@@ -2874,12 +2874,50 @@ def test_concatenated_tensor_storage(layout):
     parts = list(storage.split([1, storage.shape[0] - 3, 2]))
     if layout == "disjoint":
         parts[1] = parts[1].clone()
-    result = ConcatenatedTensor(parts).materialize()
+    result = DeferredCat(parts).materialize()
     torch.testing.assert_close(result, torch.cat(parts), rtol=0, atol=0)
     if layout in ("adjacent", "offset"):
         assert result.data_ptr() == parts[0].data_ptr()
     else:
         assert result.untyped_storage().data_ptr() != parts[0].untyped_storage().data_ptr()
+
+
+@pytest.mark.parametrize("fake", [False, True], ids=["eager", "fake"])
+@pytest.mark.parametrize("mixed_dtype", [False, True])
+def test_deferred_cat_spec(fake, mixed_dtype):
+    from transformer_engine.pytorch.dynamo.deferred_cat import DeferredCat
+
+    with FakeTensorMode() if fake else contextlib.nullcontext():
+        parts = [
+            torch.empty(3, 8, device="cuda", dtype=torch.bfloat16),
+            torch.empty(
+                5,
+                8,
+                device="cuda",
+                dtype=torch.float32 if mixed_dtype else torch.bfloat16,
+                requires_grad=True,
+            ),
+        ]
+        expected = torch.cat(parts)
+        spec = DeferredCat(parts).to_spec()
+        assert spec.shape == tuple(expected.shape)
+        assert spec.dtype == expected.dtype
+        assert spec.device == expected.device
+        assert spec.requires_grad == expected.requires_grad
+        assert not spec.is_quantized
+
+
+@pytest.mark.parametrize("internal", [False, True])
+def test_deferred_cat_rejects_quantized_parts(internal):
+    from transformer_engine.pytorch.dynamo.deferred_cat import DeferredCat
+
+    quantizer = _current_scaling()
+    quantizer.internal = internal
+    tensor = TensorSpec(
+        shape=(4, 8), dtype=torch.bfloat16, quantizer=quantizer, device=torch.device("cpu")
+    ).create_tensor()
+    with pytest.raises(TypeError, match="non-quantized tensors"):
+        DeferredCat([tensor, tensor])
 
 
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")

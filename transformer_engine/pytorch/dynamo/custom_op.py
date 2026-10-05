@@ -37,9 +37,9 @@ on each call. The kinds -- and how each represents its field as op inputs:
   * ``TENSOR_OR_QUANTIZED`` -- a field that may be a plain tensor, a bare
     quantized storage, or ``None``: three slots (the tensor, its flat inner
     buffers, and a ``__kind__`` tag) so a quantized tensor crosses as its buffers.
-    Unions including ``ConcatenatedTensor`` also accept deferred row concatenations:
+    Unions including ``DeferredCat`` also accept deferred row concatenations:
     all parts cross in the buffer list, with full gradients split outside the op.
-    Saved parts use ``concatenated_tensor.restore_from_func_ctx`` in the backward
+    Saved parts use ``deferred_cat.restore_from_func_ctx`` in the backward
     container; reconstruction of the full view happens only in the real kernel.
   * ``SIMPLE`` -- every remaining simple value (scalars, enums, sizes,
     quantizers -- value-opaque constants baked into the graph -- and nested
@@ -110,7 +110,7 @@ from torch._prims_common import make_contiguous_strides_for
 from torch.utils._pytree import tree_flatten, tree_unflatten
 
 from .tensor_spec import TensorSpec, to_tensor_spec
-from .concatenated_tensor import ConcatenatedTensor
+from .deferred_cat import DeferredCat
 from ..quantized_tensor import (
     QuantizedTensor,
     QuantizedTensorStorage,
@@ -452,8 +452,8 @@ def _is_tensor_storage_union(annot: Any) -> bool:
     members = frozenset(a for a in get_args(annot) if a is not type(None))
     return members in (
         _TQ_MEMBERS,
-        _TQ_MEMBERS | {ConcatenatedTensor},
-        frozenset((torch.Tensor, ConcatenatedTensor)),
+        _TQ_MEMBERS | {DeferredCat},
+        frozenset((torch.Tensor, DeferredCat)),
     )
 
 
@@ -497,7 +497,7 @@ def _parse_field(name: str, annot: Any) -> _FieldPlan:
             _SlotSpec(name + "__meta", _OPAQUE_VALUE_BUNDLE_TYPE_NAME),
         )
         return _FieldPlan(
-            name, _FieldKind.TENSOR_OR_QUANTIZED, slots, ConcatenatedTensor in get_args(annot)
+            name, _FieldKind.TENSOR_OR_QUANTIZED, slots, DeferredCat in get_args(annot)
         )
     stripped, is_optional = _strip_optional(annot)
     if stripped is torch.Tensor:
@@ -539,11 +539,11 @@ def _pack_tensor_or_quantized(field: _FieldPlan, value: Any, slots: Dict[str, An
         slots[tensor_slot] = None
         slots[inner_slot] = []
         slots[meta_slot] = OpaqueValueBundle({_TQ_KIND_KEY: _TensorOrQuantizedKind.NONE})
-    elif isinstance(value, ConcatenatedTensor):
+    elif isinstance(value, DeferredCat):
         if not field.allows_concatenation:
-            raise TypeError(f"field {field.name!r} does not accept ConcatenatedTensor")
+            raise TypeError(f"field {field.name!r} does not accept DeferredCat")
         slots[tensor_slot] = None
-        slots[inner_slot] = value.tensors
+        slots[inner_slot] = value.parts
         slots[meta_slot] = OpaqueValueBundle({_TQ_KIND_KEY: _TensorOrQuantizedKind.CONCATENATED})
     elif isinstance(value, torch.Tensor):
         # Plain tensor *and* subclass (e.g. Float8Tensor) pass through the
@@ -574,7 +574,7 @@ def _unpack_tensor_or_quantized(field: _FieldPlan, slots: Dict[str, Any]) -> Any
     if kind == _TensorOrQuantizedKind.TENSOR:
         return slots[tensor_slot]
     if kind == _TensorOrQuantizedKind.CONCATENATED:
-        return ConcatenatedTensor(slots[inner_slot])
+        return DeferredCat(slots[inner_slot])
     return _storage_unflatten(meta, slots[inner_slot])
 
 
@@ -761,7 +761,9 @@ def _spec_view(obj: Any, tensor_field_names: Sequence[str]) -> Any:
     overrides: Dict[str, Any] = {}
     for name in tensor_field_names:
         value = getattr(obj, name, None)
-        if value is not None and not isinstance(value, TensorSpec):
+        if isinstance(value, DeferredCat):
+            overrides[name] = value.to_spec()
+        elif value is not None and not isinstance(value, TensorSpec):
             overrides[name] = to_tensor_spec(value)
     if not overrides:
         return obj
@@ -1010,7 +1012,7 @@ def _register_base_op(
         obj = plan.unpack(dict(zip(plan.slot_names, flat)))
         for name in concatenated_fields:
             value = getattr(obj, name)
-            if isinstance(value, ConcatenatedTensor):
+            if isinstance(value, DeferredCat):
                 setattr(obj, name, value.materialize())
         return pack_result(impl(obj))
 
@@ -1068,9 +1070,9 @@ def _register_autograd_for_op(
         saved = []
         ctx.concatenated_saved_lengths = []
         for value in tensors_to_save_from_setup or ():
-            if isinstance(value, ConcatenatedTensor):
-                ctx.concatenated_saved_lengths.append(len(value.tensors))
-                saved.extend(value.tensors)
+            if isinstance(value, DeferredCat):
+                ctx.concatenated_saved_lengths.append(len(value.parts))
+                saved.extend(value.parts)
             else:
                 ctx.concatenated_saved_lengths.append(None)
                 saved.append(value)
