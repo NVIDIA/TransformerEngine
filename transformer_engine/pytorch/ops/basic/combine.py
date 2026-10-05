@@ -108,13 +108,10 @@ class MoeCombine(BasicOperation):
         ctx = basic_op_ctxs[0]
         kwargs = basic_op_kwargs[0]
         buffer = validate_ep_buffer("MoeCombine", self.config, kwargs.get("buffer", self.buffer))
-        grad_out = kwargs.get("grad_out")
-        if buffer.eager and grad_out is not None:
-            raise ValueError("MoeCombine eager mode cannot use caller-supplied grad_out.")
         _validate_combine_inputs(input_, buffer)
         result, combine_state = _ep_combine_fwd(
             input_,
-            grad_out,
+            None,
             buffer,
             buffer.num_local_tokens,
             buffer.combine_bwd_quant_recipe,

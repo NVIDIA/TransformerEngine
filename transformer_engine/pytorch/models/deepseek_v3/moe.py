@@ -285,25 +285,12 @@ class DeepSeekV3MoE(torch.nn.Module):
         ).scatter_add_(0, flat_idx, torch.ones_like(flat_idx))
         topk_weights = probs.gather(1, topk_idx)
 
-        dispatch_kwargs = {"buffer": buffer}
-        combine_kwargs = {"buffer": buffer}
-        if not buffer.eager:
-            cap = buffer.recv_capacity_per_rank
-            dispatch_kwargs["recv_tokens"] = torch.empty(
-                (cap, self.hidden_size), dtype=tokens.dtype, device=tokens.device
-            )
-            dispatch_kwargs["recv_topk_weights"] = torch.empty(
-                (cap,), dtype=torch.float32, device=tokens.device
-            )
-            combine_kwargs["grad_out"] = torch.empty(
-                (cap, self.hidden_size), dtype=tokens.dtype, device=tokens.device
-            )
         return self.experts(
             tokens,
             topk_idx,
             topk_weights,
             topk_idx,
-            op_kwargs={self.experts[0]: dispatch_kwargs, self.experts[-1]: combine_kwargs},
+            op_kwargs={self.experts[0]: {"buffer": buffer}, self.experts[-1]: {"buffer": buffer}},
         )
 
     def forward(self, hidden_states: torch.Tensor, ep_buffer=None) -> torch.Tensor:

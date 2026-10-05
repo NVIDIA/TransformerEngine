@@ -108,10 +108,6 @@ class MoeDispatch(BasicOperation):
         ctx = basic_op_ctxs[0]
         kwargs = basic_op_kwargs[0]
         buffer = validate_ep_buffer("MoeDispatch", self.config, kwargs.get("buffer", self.buffer))
-        recv_tokens = kwargs.get("recv_tokens")
-        recv_topk_weights = kwargs.get("recv_topk_weights")
-        if buffer.eager and (recv_tokens is not None or recv_topk_weights is not None):
-            raise ValueError("MoeDispatch eager mode cannot use caller-supplied recv buffers.")
         input_shape = _validate_dispatch_input(input_, buffer)
         buffer.num_local_tokens = input_shape[0]
         _validate_routing_inputs(
@@ -124,8 +120,8 @@ class MoeDispatch(BasicOperation):
             topk_weights,
             topk_idx,
             buffer,
-            recv_tokens,
-            recv_topk_weights,
+            None,
+            None,
         )
         tokens_per_expert = buffer.tokens_per_expert
         if ctx.requires_grad:
