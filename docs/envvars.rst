@@ -167,6 +167,15 @@ General
                  this value if an application legitimately creates more grouped tensor
                  handles than the default pool can hold.
 
+.. envvar:: NVTE_EP_HANDLE_CACHE_SIZE
+
+   :Type: ``int``
+   :Default: ``4096``
+   :Description: Maximum number of expert-parallel handles cached by ``handle_mem`` address
+                 (least-recently-used eviction). ``-1`` means unlimited; ``0`` is invalid.
+                 Not used when the EP group is bootstrapped with ``volatile_handle_mem``
+                 (always the case under JAX), where handles are never cached.
+
 Attention Backend Selection
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 

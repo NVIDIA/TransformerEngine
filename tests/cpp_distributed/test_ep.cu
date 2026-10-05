@@ -332,7 +332,7 @@ TYPED_TEST(EPDispatchTest, PrepareAndDispatch) {
   ASSERT_NO_THROW(nvte_ep_dispatch(t.handle_mem.data(), t.topk_idx.data(),
                                    t.tokens.data(), NVTECommWindow{}, t.topk_weights.data(),
                                    NVTECommWindow{}, t.recv_tokens.data(), NVTECommWindow{},
-                                   t.recv_topk_weights.data(), NVTECommWindow{}, stream));
+                                   t.recv_topk_weights.data(), NVTECommWindow{}, nullptr, stream));
   NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
 
   // 1. Per-expert counts.
@@ -457,7 +457,7 @@ TEST_F(EpOpTestBase, MXFP8DispatchScales) {
   ASSERT_NO_THROW(nvte_ep_dispatch(t.handle_mem.data(), t.topk_idx.data(),
                                    tokens.data(), NVTECommWindow{}, t.topk_weights.data(),
                                    NVTECommWindow{}, recv_tokens.data(), NVTECommWindow{},
-                                   t.recv_topk_weights.data(), NVTECommWindow{}, stream));
+                                   t.recv_topk_weights.data(), NVTECommWindow{}, nullptr, stream));
   NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
 
   std::vector<int32_t> counts(num_local_experts_);
@@ -528,9 +528,9 @@ TYPED_TEST(EPCombineTest, Combine) {
   ASSERT_NO_THROW(nvte_ep_dispatch(t.handle_mem.data(), t.topk_idx.data(),
                                    t.tokens.data(), NVTECommWindow{}, t.topk_weights.data(),
                                    NVTECommWindow{}, t.recv_tokens.data(), NVTECommWindow{},
-                                   t.recv_topk_weights.data(), NVTECommWindow{}, stream));
+                                   t.recv_topk_weights.data(), NVTECommWindow{}, nullptr, stream));
   ASSERT_NO_THROW(nvte_ep_combine(t.handle_mem.data(), t.recv_tokens.data(), NVTECommWindow{},
-                                  t.result.data(), stream));
+                                  t.result.data(), nullptr, stream));
   NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
 
   std::vector<Tok> h_result(num_tokens_ * hidden_dim_);
@@ -575,9 +575,9 @@ TYPED_TEST(EPCombineBwdTest, CombineBwdCheck) {
   ASSERT_NO_THROW(nvte_ep_dispatch(t.handle_mem.data(), t.topk_idx.data(),
                                    t.tokens.data(), NVTECommWindow{}, t.topk_weights.data(),
                                    NVTECommWindow{}, t.recv_tokens.data(), NVTECommWindow{},
-                                   t.recv_topk_weights.data(), NVTECommWindow{}, stream));
+                                   t.recv_topk_weights.data(), NVTECommWindow{}, nullptr, stream));
   ASSERT_NO_THROW(nvte_ep_combine(t.handle_mem.data(), t.recv_tokens.data(), NVTECommWindow{},
-                                  t.result.data(), stream));
+                                  t.result.data(), nullptr, stream));
 
   std::vector<Tok> h_grad_r(num_tokens_ * hidden_dim_, tok_from_float<Tok>(0.1f));
   NVTE_CHECK_CUDA(cudaMemcpyAsync(buf.grad_result.get(), h_grad_r.data(),
@@ -586,7 +586,7 @@ TYPED_TEST(EPCombineBwdTest, CombineBwdCheck) {
   NVTE_CHECK_CUDA(cudaMemsetAsync(buf.grad_expert.get(), 0, buf.grad_expert.bytes(), stream));
 
   ASSERT_NO_THROW(nvte_ep_combine_bwd(t.handle_mem.data(), t.grad_result.data(), NVTECommWindow{},
-                                      t.grad_expert.data(), NVTECommWindow{}, stream));
+                                      t.grad_expert.data(), NVTECommWindow{}, nullptr, stream));
   NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
 
   int total_recv = this->template read_total_recv<Tok>(buf);
@@ -644,9 +644,9 @@ TYPED_TEST(EPDispatchBwdTest, DispatchBwdCheck) {
   ASSERT_NO_THROW(nvte_ep_dispatch(t.handle_mem.data(), t.topk_idx.data(),
                                    t.tokens.data(), NVTECommWindow{}, t.topk_weights.data(),
                                    NVTECommWindow{}, t.recv_tokens.data(), NVTECommWindow{},
-                                   t.recv_topk_weights.data(), NVTECommWindow{}, stream));
+                                   t.recv_topk_weights.data(), NVTECommWindow{}, nullptr, stream));
   ASSERT_NO_THROW(nvte_ep_combine(t.handle_mem.data(), t.recv_tokens.data(), NVTECommWindow{},
-                                  t.result.data(), stream));
+                                  t.result.data(), nullptr, stream));
 
   std::vector<Tok> h_grad(num_tokens_ * hidden_dim_, tok_from_float<Tok>(0.1f));
   NVTE_CHECK_CUDA(cudaMemcpyAsync(buf.grad_result.get(), h_grad.data(),
@@ -657,10 +657,10 @@ TYPED_TEST(EPDispatchBwdTest, DispatchBwdCheck) {
   NVTE_CHECK_CUDA(cudaMemsetAsync(buf.grad_topk_weights.get(),   0, buf.grad_topk_weights.bytes(),   stream));
 
   ASSERT_NO_THROW(nvte_ep_combine_bwd(t.handle_mem.data(), t.grad_result.data(), NVTECommWindow{},
-                                      t.grad_expert.data(), NVTECommWindow{}, stream));
+                                      t.grad_expert.data(), NVTECommWindow{}, nullptr, stream));
   ASSERT_NO_THROW(nvte_ep_dispatch_bwd(t.handle_mem.data(), t.grad_expert.data(), NVTECommWindow{},
                                        t.g_recv_topk_weights.data(), NVTECommWindow{},
-                                       t.grad_tokens.data(), t.grad_topk_weights.data(), stream));
+                                       t.grad_tokens.data(), t.grad_topk_weights.data(), nullptr, stream));
   NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
 
   std::vector<Tok> h_gt(num_tokens_ * hidden_dim_);
@@ -714,7 +714,7 @@ TYPED_TEST(EPDispatchBwdGradWeightsTest, RoundTrip) {
   ASSERT_NO_THROW(nvte_ep_dispatch(t.handle_mem.data(), t.topk_idx.data(),
                                    t.tokens.data(), NVTECommWindow{}, t.topk_weights.data(),
                                    NVTECommWindow{}, t.recv_tokens.data(), NVTECommWindow{},
-                                   t.recv_topk_weights.data(), NVTECommWindow{}, stream));
+                                   t.recv_topk_weights.data(), NVTECommWindow{}, nullptr, stream));
 
   // Sentinel: NaN so any (t, k) the bwd kernel fails to write is immediately visible.
   std::vector<float> h_nan(num_tokens_ * top_k_,
@@ -729,7 +729,7 @@ TYPED_TEST(EPDispatchBwdGradWeightsTest, RoundTrip) {
                                    std::vector<size_t>{buf.recv_capacity}, DType::kFloat32);
   ASSERT_NO_THROW(nvte_ep_dispatch_bwd(t.handle_mem.data(), t.grad_expert.data(),
                                        NVTECommWindow{}, g_recv_t.data(), NVTECommWindow{},
-                                       t.grad_tokens.data(), t.grad_topk_weights.data(), stream));
+                                       t.grad_tokens.data(), t.grad_topk_weights.data(), nullptr, stream));
   NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
 
   std::vector<float> h_grad_w(num_tokens_ * top_k_);
@@ -783,9 +783,9 @@ class EPPipelineTest : public EpOpTestBase, public ::testing::WithParamInterface
     ASSERT_NO_THROW(nvte_ep_dispatch(t.handle_mem.data(), t.topk_idx.data(),
                                      t.tokens.data(), NVTECommWindow{}, t.topk_weights.data(),
                                      NVTECommWindow{}, t.recv_tokens.data(), NVTECommWindow{},
-                                     t.recv_topk_weights.data(), NVTECommWindow{}, stream));
+                                     t.recv_topk_weights.data(), NVTECommWindow{}, nullptr, stream));
     ASSERT_NO_THROW(nvte_ep_combine(t.handle_mem.data(), t.recv_tokens.data(), NVTECommWindow{},
-                                    t.result.data(), stream));
+                                    t.result.data(), nullptr, stream));
 
     std::vector<Tok> h_grad(num_tokens_ * hidden_dim_, tok_from_float<Tok>(0.1f));
     NVTE_CHECK_CUDA(cudaMemcpyAsync(buf.grad_result.get(), h_grad.data(),
@@ -796,10 +796,10 @@ class EPPipelineTest : public EpOpTestBase, public ::testing::WithParamInterface
     NVTE_CHECK_CUDA(cudaMemsetAsync(buf.grad_topk_weights.get(),   0, buf.grad_topk_weights.bytes(),   stream));
 
     ASSERT_NO_THROW(nvte_ep_combine_bwd(t.handle_mem.data(), t.grad_result.data(), NVTECommWindow{},
-                                        t.grad_expert.data(), NVTECommWindow{}, stream));
+                                        t.grad_expert.data(), NVTECommWindow{}, nullptr, stream));
     ASSERT_NO_THROW(nvte_ep_dispatch_bwd(t.handle_mem.data(), t.grad_expert.data(), NVTECommWindow{},
                                          t.g_recv_topk_weights.data(), NVTECommWindow{},
-                                         t.grad_tokens.data(), t.grad_topk_weights.data(), stream));
+                                         t.grad_tokens.data(), t.grad_topk_weights.data(), nullptr, stream));
     NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
 
     ASSERT_TRUE(check_no_nan_inf<Tok>(buf.result.get(),      num_tokens_ * hidden_dim_, "result"));
@@ -909,9 +909,9 @@ TYPED_TEST(EPZeroCopyTest, IdentityAllSymm) {
   ASSERT_NO_THROW(nvte_ep_dispatch(ref_t.handle_mem.data(), ref_t.topk_idx.data(),
                                    ref_t.tokens.data(), NVTECommWindow{}, ref_t.topk_weights.data(),
                                    NVTECommWindow{}, ref_t.recv_tokens.data(), NVTECommWindow{},
-                                   ref_t.recv_topk_weights.data(), NVTECommWindow{}, stream));
+                                   ref_t.recv_topk_weights.data(), NVTECommWindow{}, nullptr, stream));
   ASSERT_NO_THROW(nvte_ep_combine(ref_t.handle_mem.data(), ref_t.recv_tokens.data(), NVTECommWindow{},
-                                  ref_t.result.data(), stream));
+                                  ref_t.result.data(), nullptr, stream));
   NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
 
   std::vector<Tok> ref_result(num_tokens_ * hidden_dim_);
@@ -948,9 +948,9 @@ TYPED_TEST(EPZeroCopyTest, IdentityAllSymm) {
                                    sym_t.tokens.data(), symm_window(sym_tokens),
                                    sym_t.topk_weights.data(), NVTECommWindow{},
                                    sym_t.recv_tokens.data(), symm_window(sym_recv),
-                                   sym_t.recv_topk_weights.data(), NVTECommWindow{}, stream));
+                                   sym_t.recv_topk_weights.data(), NVTECommWindow{}, nullptr, stream));
   ASSERT_NO_THROW(nvte_ep_combine(sym_t.handle_mem.data(), sym_t.recv_tokens.data(),
-                                  symm_window(sym_recv), sym_t.result.data(), stream));
+                                  symm_window(sym_recv), sym_t.result.data(), nullptr, stream));
   NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
 
   std::vector<Tok> sym_result(num_tokens_ * hidden_dim_);

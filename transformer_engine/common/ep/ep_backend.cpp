@@ -116,6 +116,24 @@ inline void* handle_mem_ptr(NVTETensor handle_mem) {
   return p;
 }
 
+// Destroys an owned (imported or freshly-opened) handle on scope exit, including on exceptions.
+// Safe right after enqueueing stream work: the handle does not own the caller's handle_mem, so
+// destroy frees host state only. No-op for cache-owned handles (owned=false).
+class ScopedHandle {
+ public:
+  ScopedHandle(ncclEpHandle_t handle, bool owned) : handle_(handle), owned_(owned) {}
+  ~ScopedHandle() {
+    if (owned_ && handle_ != nullptr) nccl_ep::handle_destroy(handle_);
+  }
+  ScopedHandle(const ScopedHandle&) = delete;
+  ScopedHandle& operator=(const ScopedHandle&) = delete;
+  ncclEpHandle_t get() const { return handle_; }
+
+ private:
+  ncclEpHandle_t handle_;
+  bool owned_;
+};
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -245,7 +263,7 @@ void EPBackend::shutdown_locked() {
   }
   lru_.clear();
   index_.clear();
-  fallback_layer_cfg_.reset();
+  evicted_.clear();
   // ncclEpGroupDestroy reads from ep_comm_; destroy group while comm is still alive.
   if (ep_group_ != nullptr) {
     nccl_ep::group_destroy(ep_group_);
@@ -265,10 +283,72 @@ ncclEpHandle_t EPBackend::open_handle(void* handle_mem, size_t handle_mem_size, 
   routing_desc.sizes = hm_sizes;
   ncclEpHandleConfig_t hcfg = NCCL_EP_HANDLE_CONFIG_INIT;
   hcfg.dispatch_output_per_expert_alignment = dispatch_output_per_expert_alignment;
+  size_t required = 0;
+  NVTE_CHECK_NCCL(
+      nccl_ep::handle_mem_size(ep_group_, NCCL_EP_LAYOUT_EXPERT_MAJOR, &hcfg, &required, num_topk));
+  NVTE_CHECK(handle_mem_size >= required, "handle_mem buffer is too small: ", handle_mem_size,
+             " bytes, requires ", required);
   ncclEpHandle_t handle;
   NVTE_CHECK_NCCL(nccl_ep::init_handle(&handle, ep_group_, NCCL_EP_LAYOUT_EXPERT_MAJOR, &hcfg,
                                        num_topk, &routing_desc));
   return handle;
+}
+
+ncclEpHandle_t EPBackend::import_handle_locked(void* handle_mem, size_t handle_mem_size,
+                                               int num_tokens, NVTEEpLayerConfig layer_cfg,
+                                               cudaStream_t stream) {
+  size_t hm_sizes[1] = {handle_mem_size};
+  ncclEpTensor_t routing_desc = NCCL_EP_TENSOR_INIT;
+  routing_desc.ndim = 1;
+  routing_desc.datatype = ncclUint8;
+  routing_desc.data = handle_mem;
+  routing_desc.sizes = hm_sizes;
+  ncclEpHandleConfig_t hcfg = NCCL_EP_HANDLE_CONFIG_INIT;
+  hcfg.dispatch_output_per_expert_alignment = layer_cfg.dispatch_output_per_expert_alignment;
+  ncclEpHandleState_t state = NCCL_EP_HANDLE_STATE_INIT;
+  state.num_tokens = num_tokens;
+  state.num_topk = layer_cfg.top_k;
+  state.topk_idx_datatype = te_dtype_to_nccl_dtype(layer_cfg.topk_idx_dtype);
+  ncclEpHandle_t handle;
+  NVTE_CHECK_NCCL(nccl_ep::import_handle(&handle, ep_group_, NCCL_EP_LAYOUT_EXPERT_MAJOR, &hcfg,
+                                         &state, &routing_desc, stream));
+  return handle;
+}
+
+ncclEpHandle_t EPBackend::acquire_step_handle_locked(void* handle_mem, size_t handle_mem_size,
+                                                     int num_tokens,
+                                                     const NVTEEpLayerConfig* layer_cfg,
+                                                     bool* owned, cudaStream_t stream) {
+  if (group_config_.volatile_handle_mem) {
+    NVTE_CHECK(layer_cfg != nullptr,
+               "EP op: layer_cfg is required when the backend was bootstrapped with "
+               "NVTEEpGroupConfig::volatile_handle_mem set");
+    NVTE_CHECK(index_.empty(),
+               "EP: handle cache is populated but volatile_handle_mem is set; "
+               "cached and imported handles cannot be mixed");
+    *owned = true;
+    return import_handle_locked(handle_mem, handle_mem_size, num_tokens, *layer_cfg, stream);
+  }
+  *owned = false;
+  if (index_.find(handle_mem) == index_.end()) {
+    auto ev = evicted_.find(handle_mem);
+    if (ev != evicted_.end()) {
+      HandleEntry entry = ev->second;
+      evicted_.erase(ev);
+      entry.handle =
+          import_handle_locked(handle_mem, handle_mem_size, num_tokens, entry.layer_cfg, stream);
+      insert_entry_locked(entry);
+    }
+  }
+  ncclEpHandle_t h = lookup_handle_locked(handle_mem, handle_mem_size);
+  if (layer_cfg != nullptr) {
+    const NVTEEpLayerConfig& cached = index_.find(handle_mem)->second->layer_cfg;
+    NVTE_CHECK(
+        layer_cfg->top_k == cached.top_k && layer_cfg->dispatch_output_per_expert_alignment ==
+                                                cached.dispatch_output_per_expert_alignment,
+        "EP op: layer_cfg does not match the config handle_mem was prepared with");
+  }
+  return h;
 }
 
 // ---------------------------------------------------------------------------
@@ -282,7 +362,6 @@ EPBackend::~EPBackend() {
   if (!initialized_) return;
   lru_.clear();
   index_.clear();
-  fallback_layer_cfg_.reset();
   ep_group_ = nullptr;
   ep_comm_ = nullptr;
   initialized_ = false;
@@ -345,8 +424,7 @@ size_t EPBackend::cache_cap_locked() {
     if (cap_env != nullptr) {
       const int64_t v = static_cast<int64_t>(std::atol(cap_env));
       if (v < 0) {
-        // Unlimited cache. WAR for JAX until XLA fixes handle_mem
-        // reloc between runs.
+        // Unlimited cache; only meaningful when volatile_handle_mem is unset.
         handle_cache_cap_ = SIZE_MAX;
       } else {
         NVTE_CHECK(v > 0,
@@ -361,32 +439,40 @@ size_t EPBackend::cache_cap_locked() {
   return handle_cache_cap_;
 }
 
+void EPBackend::insert_entry_locked(HandleEntry entry) {
+  lru_.push_front(entry);
+  index_.emplace(entry.handle_mem, lru_.begin());
+  while (lru_.size() > cache_cap_locked()) {
+    HandleEntry& victim = lru_.back();
+    if (victim.handle != nullptr) nccl_ep::handle_destroy(victim.handle);
+    index_.erase(victim.handle_mem);
+    victim.handle = nullptr;
+    evicted_[victim.handle_mem] = victim;
+    lru_.pop_back();
+  }
+}
+
 ncclEpHandle_t EPBackend::prepare_handle_locked(void* handle_mem, size_t handle_mem_size,
                                                 NVTEEpLayerConfig layer_cfg) {
-  // Update this device's fallback cfg so dispatch/combine/_bwd can
-  // reconstruct the handle on a pointer-cache miss (WAR for XLA buffer reloc
-  // between runs; one cfg per device). Remove this once XLA preserves the
-  // handle_mem device pointer across runs.
-  if (fallback_layer_cfg_.has_value()) {
-    NVTE_CHECK(fallback_layer_cfg_->top_k == layer_cfg.top_k, "EP prepare top_k=", layer_cfg.top_k,
-               " disagrees with this device's cached top_k=", fallback_layer_cfg_->top_k);
-    NVTE_CHECK(fallback_layer_cfg_->dispatch_output_per_expert_alignment ==
-                   layer_cfg.dispatch_output_per_expert_alignment,
-               "EP prepare alignment=", layer_cfg.dispatch_output_per_expert_alignment,
-               " disagrees with this device's cached alignment=",
-               fallback_layer_cfg_->dispatch_output_per_expert_alignment);
-  } else {
-    fallback_layer_cfg_ = layer_cfg;
-  }
-
   auto it = index_.find(handle_mem);
   if (it != index_.end()) {
-    NVTE_CHECK(handle_mem_size >= it->second->handle_mem_size,
-               "handle_mem buffer is too small: ", handle_mem_size, " bytes, requires ",
-               it->second->handle_mem_size);
-    lru_.splice(lru_.begin(), lru_, it->second);
-    return it->second->handle;
+    const NVTEEpLayerConfig& cached = it->second->layer_cfg;
+    const bool same_cfg =
+        cached.top_k == layer_cfg.top_k && cached.dispatch_output_per_expert_alignment ==
+                                               layer_cfg.dispatch_output_per_expert_alignment;
+    if (same_cfg) {
+      NVTE_CHECK(handle_mem_size >= it->second->handle_mem_size,
+                 "handle_mem buffer is too small: ", handle_mem_size, " bytes, requires ",
+                 it->second->handle_mem_size);
+      lru_.splice(lru_.begin(), lru_, it->second);
+      return it->second->handle;
+    }
+    // Same address, new config (buffer reused across lifetimes): drop the stale handle.
+    if (it->second->handle != nullptr) nccl_ep::handle_destroy(it->second->handle);
+    lru_.erase(it->second);
+    index_.erase(it);
   }
+  evicted_.erase(handle_mem);
   ncclEpHandleConfig_t hcfg = NCCL_EP_HANDLE_CONFIG_INIT;
   hcfg.dispatch_output_per_expert_alignment = layer_cfg.dispatch_output_per_expert_alignment;
   size_t hm_size = 0;
@@ -396,14 +482,7 @@ ncclEpHandle_t EPBackend::prepare_handle_locked(void* handle_mem, size_t handle_
              " bytes, requires ", hm_size);
   ncclEpHandle_t h = open_handle(handle_mem, handle_mem_size, layer_cfg.top_k,
                                  layer_cfg.dispatch_output_per_expert_alignment);
-  lru_.push_front(HandleEntry{handle_mem, h, layer_cfg, hm_size});
-  index_.emplace(handle_mem, lru_.begin());
-  while (lru_.size() > cache_cap_locked()) {
-    HandleEntry& victim = lru_.back();
-    if (victim.handle != nullptr) nccl_ep::handle_destroy(victim.handle);
-    index_.erase(victim.handle_mem);
-    lru_.pop_back();
-  }
+  insert_entry_locked(HandleEntry{handle_mem, h, layer_cfg, hm_size});
   return h;
 }
 
@@ -416,14 +495,16 @@ ncclEpHandle_t EPBackend::lookup_handle_locked(void* handle_mem, size_t handle_m
     lru_.splice(lru_.begin(), lru_, it->second);
     return it->second->handle;
   }
-  // Miss: reconstruct from the process-wide cached cfg. XLA may relocate
-  // handle_mem between runs, breaking the pointer key; the fallback cfg lets
-  // us open a fresh handle on the new buffer. Drop this branch once XLA
-  // preserves buffer pointers.
+  // Miss: this handle_mem was never prepared (or its cache entry was evicted).
+  // No fallback reconstruction -- the cache is keyed by pointer, so guessing
+  // at a handle for an unrecognized address would silently misinterpret
+  // whatever this buffer actually holds. Callers whose handle_mem address is
+  // not stable across calls should bootstrap with
+  // NVTEEpGroupConfig::volatile_handle_mem instead of relying on this cache.
   const uintptr_t hm_addr = reinterpret_cast<uintptr_t>(handle_mem);
-  NVTE_CHECK(fallback_layer_cfg_.has_value(), "ep op on handle_mem=0x", hm_addr,
-             " with no cached entry and no prior nvte_ep_prepare; call prepare first.");
-  return prepare_handle_locked(handle_mem, handle_mem_size, *fallback_layer_cfg_);
+  NVTE_ERROR("ep op on handle_mem=0x", hm_addr,
+             " with no cached entry; call nvte_ep_prepare first.");
+  return nullptr;  // unreachable
 }
 
 // ---------------------------------------------------------------------------
@@ -488,6 +569,17 @@ void EPBackend::prepare(NVTETensor handle_mem, const NVTETensor topk_idx,
 
   std::lock_guard<std::mutex> lock(mutex_);
   NVTE_CHECK(initialized_, "EPBackend not initialized");
+  if (group_config_.volatile_handle_mem) {
+    // handle_mem's address is not stable across calls (see
+    // NVTEEpGroupConfig::volatile_handle_mem) -- don't cache; every later
+    // dispatch/combine/_bwd on this handle_mem re-binds via ncclEpImportHandle.
+    ScopedHandle guard(open_handle(hm_ptr, nvte_tensor_size_bytes(handle_mem), layer_cfg.top_k,
+                                   layer_cfg.dispatch_output_per_expert_alignment),
+                       /*owned=*/true);
+    NVTE_CHECK_NCCL(nccl_ep::update_handle(guard.get(), &nccl_topk_idx, &layout_info, stream));
+    return;
+  }
+  layer_cfg.topk_idx_dtype = nvte_tensor_type(topk_idx);
   ncclEpHandle_t h = prepare_handle_locked(hm_ptr, nvte_tensor_size_bytes(handle_mem), layer_cfg);
   NVTE_CHECK_NCCL(nccl_ep::update_handle(h, &nccl_topk_idx, &layout_info, stream));
 }
@@ -606,11 +698,16 @@ void EPBackend::dispatch(NVTETensor handle_mem, const NVTETensor topk_idx, const
                          const NVTECommWindow& tokens_win, const NVTETensor topk_weights,
                          const NVTECommWindow& topk_weights_win, NVTETensor recv_tokens,
                          const NVTECommWindow& recv_tokens_win, NVTETensor recv_topk_weights,
-                         const NVTECommWindow& recv_topk_weights_win, cudaStream_t stream) {
+                         const NVTECommWindow& recv_topk_weights_win,
+                         const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream) {
   void* hm_ptr = handle_mem_ptr(handle_mem);
+  const int num_tokens = static_cast<int>(nvte_tensor_shape(tokens).data[0]);
   std::lock_guard<std::mutex> lock(mutex_);
   NVTE_CHECK(initialized_, "EPBackend not initialized");
-  ncclEpHandle_t h = lookup_handle_locked(hm_ptr, nvte_tensor_size_bytes(handle_mem));
+  bool owned = false;
+  ncclEpHandle_t h = acquire_step_handle_locked(hm_ptr, nvte_tensor_size_bytes(handle_mem),
+                                                num_tokens, layer_cfg, &owned, stream);
+  ScopedHandle guard(h, owned);
   issue_dispatch_locked(h, topk_idx, tokens, tokens_win, topk_weights, topk_weights_win,
                         recv_tokens, recv_tokens_win, recv_topk_weights, recv_topk_weights_win,
                         /*recv_tokens_per_expert=*/nullptr,
@@ -636,6 +733,20 @@ void EPBackend::prepare_and_dispatch(
   // fused path stays active, then wire both tensors into the dispatch below.
   std::lock_guard<std::mutex> lock(mutex_);
   NVTE_CHECK(initialized_, "EPBackend not initialized");
+  if (group_config_.volatile_handle_mem) {
+    // Fused call: the same freshly-opened handle serves both UpdateHandle and
+    // the dispatch below, so there's nothing to import -- just don't cache it.
+    ScopedHandle guard(open_handle(hm_ptr, nvte_tensor_size_bytes(handle_mem), layer_cfg.top_k,
+                                   layer_cfg.dispatch_output_per_expert_alignment),
+                       /*owned=*/true);
+    NVTE_CHECK_NCCL(
+        nccl_ep::update_handle(guard.get(), &nccl_topk_idx, /*layout_info=*/nullptr, stream));
+    issue_dispatch_locked(guard.get(), topk_idx, tokens, tokens_win, topk_weights, topk_weights_win,
+                          recv_tokens, recv_tokens_win, recv_topk_weights, recv_topk_weights_win,
+                          recv_tokens_per_expert, total_recv_tokens_per_rank, stream);
+    return;
+  }
+  layer_cfg.topk_idx_dtype = nvte_tensor_type(topk_idx);
   ncclEpHandle_t h = prepare_handle_locked(hm_ptr, nvte_tensor_size_bytes(handle_mem), layer_cfg);
   NVTE_CHECK_NCCL(nccl_ep::update_handle(h, &nccl_topk_idx, /*layout_info=*/nullptr, stream));
   issue_dispatch_locked(h, topk_idx, tokens, tokens_win, topk_weights, topk_weights_win,
@@ -645,10 +756,11 @@ void EPBackend::prepare_and_dispatch(
 
 void EPBackend::combine(NVTETensor handle_mem, const NVTETensor expert_out,
                         const NVTECommWindow& expert_out_win, NVTETensor result,
-                        cudaStream_t stream) {
+                        const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream) {
   void* hm_ptr = handle_mem_ptr(handle_mem);
   NVTE_CHECK(nvte_tensor_shape(expert_out).ndim == 2, "expert_out must be 2D [recv_T, hidden_dim]");
   NVTE_CHECK(nvte_tensor_shape(result).ndim == 2, "result must be 2D [T, hidden_dim]");
+  const int num_tokens = static_cast<int>(nvte_tensor_shape(result).data[0]);
 
   NVTEShape expert_out_shape, result_shape;
   ncclEpTensor_t nccl_expert_in = make_nccl_ep_tensor(expert_out, expert_out_shape, expert_out_win);
@@ -662,15 +774,20 @@ void EPBackend::combine(NVTETensor handle_mem, const NVTETensor expert_out,
 
   std::lock_guard<std::mutex> lock(mutex_);
   NVTE_CHECK(initialized_, "EPBackend not initialized");
-  ncclEpHandle_t h = lookup_handle_locked(hm_ptr, nvte_tensor_size_bytes(handle_mem));
+  bool owned = false;
+  ncclEpHandle_t h = acquire_step_handle_locked(hm_ptr, nvte_tensor_size_bytes(handle_mem),
+                                                num_tokens, layer_cfg, &owned, stream);
+  ScopedHandle guard(h, owned);
   NVTE_CHECK_NCCL(nccl_ep::combine(h, &in_struct, &out_struct, /*config=*/nullptr, stream));
 }
 
 void EPBackend::dispatch_bwd(NVTETensor handle_mem, const NVTETensor grad,
                              const NVTECommWindow& grad_win, const NVTETensor g_recv_topk_weights,
                              const NVTECommWindow& g_recv_topk_weights_win, NVTETensor grad_tokens,
-                             NVTETensor grad_topk_weights, cudaStream_t stream) {
+                             NVTETensor grad_topk_weights, const NVTEEpLayerConfig* layer_cfg,
+                             cudaStream_t stream) {
   void* hm_ptr = handle_mem_ptr(handle_mem);
+  const int num_tokens = static_cast<int>(nvte_tensor_shape(grad_tokens).data[0]);
   NVTE_CHECK(nvte_tensor_shape(grad).ndim == 2, "grad must be 2D [recv_capacity, hidden_dim]");
   NVTE_CHECK(nvte_tensor_shape(grad_tokens).ndim == 2, "grad_tokens must be 2D [T, hidden_dim]");
 
@@ -700,18 +817,23 @@ void EPBackend::dispatch_bwd(NVTETensor handle_mem, const NVTETensor grad,
 
   std::lock_guard<std::mutex> lock(mutex_);
   NVTE_CHECK(initialized_, "EPBackend not initialized");
-  ncclEpHandle_t h = lookup_handle_locked(hm_ptr, nvte_tensor_size_bytes(handle_mem));
+  bool owned = false;
+  ncclEpHandle_t h = acquire_step_handle_locked(hm_ptr, nvte_tensor_size_bytes(handle_mem),
+                                                num_tokens, layer_cfg, &owned, stream);
+  ScopedHandle guard(h, owned);
   NVTE_CHECK_NCCL(nccl_ep::combine(h, &in_struct, &out_struct, &cfg, stream));
 }
 
 void EPBackend::combine_bwd(NVTETensor handle_mem, const NVTETensor grad,
                             const NVTECommWindow& grad_win, NVTETensor grad_expert_out,
-                            const NVTECommWindow& grad_expert_out_win, cudaStream_t stream) {
+                            const NVTECommWindow& grad_expert_out_win,
+                            const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream) {
   // Backward of combine = reverse-direction dispatch.
   dispatch(handle_mem, /*topk_idx=*/nullptr, grad, grad_win,
            /*topk_weights=*/nullptr, /*topk_weights_win=*/NVTECommWindow{}, grad_expert_out,
            grad_expert_out_win,
-           /*recv_topk_weights=*/nullptr, /*recv_topk_weights_win=*/NVTECommWindow{}, stream);
+           /*recv_topk_weights=*/nullptr, /*recv_topk_weights_win=*/NVTECommWindow{}, layer_cfg,
+           stream);
 }
 
 }  // namespace ep

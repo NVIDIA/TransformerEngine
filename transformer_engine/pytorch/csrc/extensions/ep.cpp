@@ -369,9 +369,12 @@ void ep_dispatch(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens,
     recv_tokens_win.scale_window = rsi_win.window;
     recv_tokens_win.scale_offset = rsi_win.offset;
   }
+  // layer_cfg is only needed when the backend was bootstrapped with
+  // NVTEEpGroupConfig::volatile_handle_mem (PyTorch does not use that); the
+  // cached handle from ep_prepare already carries top_k/topk_idx_dtype.
   nvte_ep_dispatch(handle_mem_te.data(), topk_idx_te.data(), tokens_te.data(), tokens_win,
                    topk_w_te.data(), topk_w_win, recv_tokens_te.data(), recv_tokens_win,
-                   recv_topk_w_te.data(), recv_topk_w_win, stream);
+                   recv_topk_w_te.data(), recv_topk_w_win, /*layer_cfg=*/nullptr, stream);
 }
 
 namespace {
@@ -579,7 +582,7 @@ void ep_combine(at::Tensor handle_mem, at::Tensor expert_out, at::Tensor result)
 
   NVTECommWindow expert_out_win = maybe_make_window(expert_out);
   nvte_ep_combine(handle_mem_te.data(), expert_out_te.data(), expert_out_win, result_te.data(),
-                  stream);
+                  /*layer_cfg=*/nullptr, stream);
 }
 
 void ep_dispatch_bwd(at::Tensor handle_mem, at::Tensor grad, at::Tensor g_recv_topk_weights,
@@ -621,7 +624,8 @@ void ep_dispatch_bwd(at::Tensor handle_mem, at::Tensor grad, at::Tensor g_recv_t
   NVTECommWindow grad_win = maybe_make_window(grad);
   NVTECommWindow g_recv_w_win = maybe_make_window(g_recv_topk_weights);
   nvte_ep_dispatch_bwd(handle_mem_te.data(), grad_te.data(), grad_win, g_recv_w_te.data(),
-                       g_recv_w_win, grad_tokens_te.data(), grad_topk_w_te.data(), stream);
+                       g_recv_w_win, grad_tokens_te.data(), grad_topk_w_te.data(),
+                       /*layer_cfg=*/nullptr, stream);
 }
 
 void ep_combine_bwd(at::Tensor handle_mem, at::Tensor grad, at::Tensor grad_expert_out,
@@ -691,7 +695,7 @@ void ep_combine_bwd(at::Tensor handle_mem, at::Tensor grad, at::Tensor grad_expe
     grad_expert_out_win.scale_offset = gesi_win.offset;
   }
   nvte_ep_combine_bwd(handle_mem_te.data(), grad_te.data(), grad_win, grad_expert_out_te.data(),
-                      grad_expert_out_win, stream);
+                      grad_expert_out_win, /*layer_cfg=*/nullptr, stream);
 }
 
 void register_ep_bindings(pybind11::module_& m) {
