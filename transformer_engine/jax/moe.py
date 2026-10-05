@@ -38,6 +38,7 @@ from functools import partial
 from typing import Any, Literal, Optional, Tuple, Union
 
 import flax.struct
+import flax.linen as nn
 import jax
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
@@ -619,7 +620,8 @@ def _gather_quantized_weight(tensor, fsdp_axis: str, fsdp_size: int, sharded_axi
 
     Grouped tensor data and scales are flat, with scales independently padded
     and swizzled for each expert. Reassemble each expert in logical order,
-    then pad and swizzle its gathered scales for grouped GEMM.
+    then pad and swizzle its gathered scales for grouped GEMM. Whole-expert
+    shards can instead concatenate their already-swizzled scale blocks.
     """
     if isinstance(tensor, ScaledTensor2x):
         return ScaledTensor2x(
@@ -632,7 +634,9 @@ def _gather_quantized_weight(tensor, fsdp_axis: str, fsdp_size: int, sharded_axi
     local_shape = tensor.original_shape
     num_experts = local_shape[0]
     # The T layout swaps the two matrix dimensions within each expert.
-    data_axis = 3 - sharded_axis if tensor.data_layout == "T" else sharded_axis
+    data_axis = (
+        3 - sharded_axis if tensor.data_layout == "T" and sharded_axis != 0 else sharded_axis
+    )
     global_shape = list(local_shape)
     global_shape[data_axis] *= fsdp_size
     global_shape = tuple(global_shape)
@@ -651,6 +655,48 @@ def _gather_quantized_weight(tensor, fsdp_axis: str, fsdp_size: int, sharded_axi
         is_padded=True,
         flatten_axis=tensor.flatten_axis - 1,
     )
+    if sharded_axis == 0:
+        # The grouped allocation includes a worst-case padding tail. Gather
+        # only actual expert scale blocks, then allocate the gathered tail.
+        local_scale_size = math.prod(local_scale_shape)
+        scale_inv = jax.lax.all_gather(
+            tensor.scale_inv[: num_experts * local_scale_size],
+            fsdp_axis,
+            axis=0,
+            tiled=True,
+        )
+    else:
+        scale_inv = _gather_quantized_matrix_scales(
+            tensor, fsdp_axis, data_axis, local_scale_shape, global_matrix
+        )
+    expected_scale_size = tensor.scaling_mode.get_grouped_scale_shape(
+        global_shape,
+        global_shape[0],
+        tensor.is_colwise,
+        is_padded=True,
+        flatten_axis=tensor.flatten_axis,
+    )[0]
+    scale_inv = jnp.pad(scale_inv, (0, expected_scale_size - scale_inv.size))
+    return GroupedScaledTensor1x(
+        data=data,
+        scale_inv=scale_inv,
+        amax=tensor.amax,
+        first_dims=None,
+        last_dims=None,
+        scaling_mode=tensor.scaling_mode,
+        dq_dtype=tensor.dq_dtype,
+        _dq_func=tensor._dq_func,
+        is_colwise=tensor.is_colwise,
+        data_layout=tensor.data_layout,
+        flatten_axis=tensor.flatten_axis,
+        original_shape=global_shape,
+        pre_swizzled=True,
+    )
+
+
+def _gather_quantized_matrix_scales(tensor, fsdp_axis, data_axis, local_scale_shape, global_matrix):
+    """Reassemble scales when FSDP splits each expert's matrix dimension."""
+    local_matrix = tensor.original_shape[1:]
     local_unpadded_shape = tensor.scaling_mode.get_scale_shape(
         local_matrix,
         data_layout=tensor.data_layout,
@@ -675,7 +721,7 @@ def _gather_quantized_weight(tensor, fsdp_axis: str, fsdp_size: int, sharded_axi
     scale_axis = data_axis - 1
     local_scale_size = math.prod(local_scale_shape)
     gathered_scales = []
-    for expert in range(num_experts):
+    for expert in range(tensor.original_shape[0]):
         local_swizzled = jax.lax.dynamic_slice_in_dim(
             tensor.scale_inv, expert * local_scale_size, local_scale_size
         )
@@ -693,29 +739,18 @@ def _gather_quantized_weight(tensor, fsdp_axis: str, fsdp_size: int, sharded_axi
             ),
         )
         gathered_scales.append(swizzled_scale(full_padded, 1, tensor.is_colwise).reshape(-1))
-    scale_inv = jnp.concatenate(gathered_scales)
-    expected_scale_size = tensor.scaling_mode.get_grouped_scale_shape(
-        global_shape,
-        num_experts,
-        tensor.is_colwise,
-        is_padded=True,
-        flatten_axis=tensor.flatten_axis,
-    )[0]
-    scale_inv = jnp.pad(scale_inv, (0, expected_scale_size - scale_inv.size))
-    return GroupedScaledTensor1x(
-        data=data,
-        scale_inv=scale_inv,
-        amax=tensor.amax,
-        first_dims=None,
-        last_dims=None,
-        scaling_mode=tensor.scaling_mode,
-        dq_dtype=tensor.dq_dtype,
-        _dq_func=tensor._dq_func,
-        is_colwise=tensor.is_colwise,
-        data_layout=tensor.data_layout,
-        flatten_axis=tensor.flatten_axis,
-        original_shape=global_shape,
-        pre_swizzled=True,
+    return jnp.concatenate(gathered_scales)
+
+
+def _weight_fsdp_axis(spec, fsdp_axis):
+    """Find the tensor dimension partitioned by the physical FSDP resource."""
+    return next(
+        (
+            i
+            for i, axes in enumerate(spec)
+            if fsdp_axis in (axes if isinstance(axes, tuple) else (axes,))
+        ),
+        None,
     )
 
 
@@ -741,6 +776,8 @@ def _ffn_fwd_per_shard(
     quant_before_fsdp_ag: bool,
     fsdp_axis: Optional[str],
     fsdp_size: int,
+    wi_fsdp_axis: Optional[int],
+    wo_fsdp_axis: Optional[int],
 ):
     """Run the grouped FFN on one shard's EP receive buffer."""
     hidden = recv_tokens_local.shape[-1]
@@ -779,12 +816,12 @@ def _ffn_fwd_per_shard(
         flatten_axis=-1,
     )
     casted_wi = tex.grouped_quantize(wi_for_gemm, fc1_quantizer_set.kernel, flatten_axis=-1)
-    if quant_before_fsdp_ag:
+    if quant_before_fsdp_ag and wi_fsdp_axis is not None:
         casted_wi = _gather_quantized_weight(
             casted_wi,
             fsdp_axis,
             fsdp_size,
-            2 if cudnn_native_weight_layout else 1,
+            wi_fsdp_axis,
         )
     casted_intermediate = None
     if use_cudnn_jax_fusion:
@@ -911,8 +948,8 @@ def _ffn_fwd_per_shard(
             flatten_axis=-1,
         )
     casted_wo = tex.grouped_quantize(wo, fc2_quantizer_set.kernel, flatten_axis=-1)
-    if quant_before_fsdp_ag:
-        casted_wo = _gather_quantized_weight(casted_wo, fsdp_axis, fsdp_size, 2)
+    if quant_before_fsdp_ag and wo_fsdp_axis is not None:
+        casted_wo = _gather_quantized_weight(casted_wo, fsdp_axis, fsdp_size, wo_fsdp_axis)
     expert_outputs = tex.grouped_gemm(
         casted_intermediate.get_tensor(usage=TensorUsage.LHS),
         casted_wo.get_tensor(usage=TensorUsage.RHS),
@@ -1174,7 +1211,7 @@ def _moe_fwd_rule(
     """
     with global_shard_guard(mesh_resource):
         ep_axis, data_parallelism_axes = _moe_mesh_axes(mesh_resource)
-        del gate_kernel_axes, wi_kernel_axes, wo_kernel_axes  # used in bwd only
+        del gate_kernel_axes  # used in bwd only
         from jax.experimental.shard_map import shard_map
 
         x = with_sharding_constraint_by_logical_axes(x, input_axes)
@@ -1201,17 +1238,37 @@ def _moe_fwd_rule(
         B, S, H = x.shape
         K = num_experts_per_tok
         cudnn_native_weight_layout = wi.ndim == 3 and wi.shape[-1] == H
-        wi_hidden_axis = 2 if cudnn_native_weight_layout else 1
+        kernel_spec = P(ep_axis, None, None)
+        wi_input_spec = wo_input_spec = kernel_spec
+        wi_fsdp_axis = wo_fsdp_axis = None
         if quant_before_fsdp_ag:
+            # Logical axes describe parameter storage even under Auto mode,
+            # where tracer types do not expose the physical input sharding.
+            if nn.get_logical_axis_rules():
+                wi_input_spec = nn.logical_to_mesh_axes(wi_kernel_axes)
+                wo_input_spec = nn.logical_to_mesh_axes(wo_kernel_axes)
+            else:
+                # Preserve the existing no-Flax-rules convention.
+                wi_input_spec = (
+                    P(ep_axis, None, mesh_resource.fsdp_resource)
+                    if cudnn_native_weight_layout
+                    else P(ep_axis, mesh_resource.fsdp_resource, None)
+                )
+                wo_input_spec = P(ep_axis, None, mesh_resource.fsdp_resource)
+            wi_fsdp_axis = _weight_fsdp_axis(wi_input_spec, mesh_resource.fsdp_resource)
+            wo_fsdp_axis = _weight_fsdp_axis(wo_input_spec, mesh_resource.fsdp_resource)
             if mesh_resource.fsdp_resource not in data_parallelism_axes:
                 raise ValueError(
                     "Quantized weight all-gather requires its FSDP axis among the outer batch axes."
                 )
             if any(quantizer_set.kernel is None for quantizer_set in quantizer_sets):
                 raise ValueError("Quantized weight all-gather requires MXFP8 kernel quantizers.")
-            if wi.shape[wi_hidden_axis] % (
-                mesh.shape[mesh_resource.fsdp_resource] * 32
-            ) or wo.shape[2] % (mesh.shape[mesh_resource.fsdp_resource] * 32):
+            if any(
+                axis is not None
+                and axis != 0
+                and weight.shape[axis] % (mesh.shape[mesh_resource.fsdp_resource] * 32)
+                for weight, axis in ((wi, wi_fsdp_axis), (wo, wo_fsdp_axis))
+            ):
                 raise ValueError("FSDP weight shards must be divisible by the MXFP8 block size 32.")
 
         if B % num_procs != 0:
@@ -1369,19 +1426,6 @@ def _moe_fwd_rule(
 
         # ---------------- FFN (per-shard via shard_map) ----------------
         has_bias = wi_0_bias is not None
-        kernel_spec = P(ep_axis, None, None)
-        wi_input_spec = (
-            (
-                P(ep_axis, None, mesh_resource.fsdp_resource)
-                if cudnn_native_weight_layout
-                else P(ep_axis, mesh_resource.fsdp_resource, None)
-            )
-            if quant_before_fsdp_ag
-            else kernel_spec
-        )
-        wo_input_spec = (
-            P(ep_axis, None, mesh_resource.fsdp_resource) if quant_before_fsdp_ag else kernel_spec
-        )
         bias_spec = P(ep_axis, None)
         ffn_in_specs = (ep3_spec, ep2_spec, ep2_spec, wi_input_spec, wo_input_spec)
         ffn_in_args = [recv_tokens, recv_topk_weights, token_counts, wi, wo]
@@ -1438,6 +1482,8 @@ def _moe_fwd_rule(
                     if mesh_resource.fsdp_resource is not None
                     else 1
                 ),
+                wi_fsdp_axis=wi_fsdp_axis,
+                wo_fsdp_axis=wo_fsdp_axis,
             )
 
         expert_outputs, ffn_residuals = shard_map(
@@ -1981,7 +2027,9 @@ def moe(
         Quantize expert-weight shards before gathering their MXFP8 data and
         scales on ``mesh_resource.fsdp_resource``. Default ``False`` gathers
         full-precision weights first. ``True`` requires an FSDP resource and
-        MXFP8 kernel quantizers.
+        MXFP8 kernel quantizers. With active Flax logical-axis rules, the weight
+        input specs follow ``wi_kernel_axes`` and ``wo_kernel_axes``; FSDP may
+        shard whole experts or a matrix dimension within each expert.
     ep_axis, data_parallelism_axes, weight_gather : deprecated
         Compatibility arguments converted into a MeshResource and boolean,
         with a DeprecationWarning. Conflicting old and new arguments raise.

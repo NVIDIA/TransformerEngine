@@ -90,6 +90,14 @@ all-gathering their MXFP8 data and scales on the resource's FSDP axis.
 It requires an FSDP resource and MXFP8 kernel quantizers. The default
 gathers full-precision weights before quantization.
 
+With active Flax logical-axis rules, ``wi_kernel_axes`` and ``wo_kernel_axes``
+also select the forward FFN weight input specs when quantized gathering is
+enabled. FSDP can shard complete experts together with EP on the first weight
+dimension, or split a matrix dimension within each expert. Complete-expert
+gathering concatenates the quantized matrices and their existing scale blocks;
+matrix-shard gathering reconstructs each expert's scale blocks. These specs
+are resolved at trace time and do not require JAX Explicit sharding mode.
+
 The old ``ep_axis``, ``data_parallelism_axes`` and ``weight_gather`` arguments
 remain accepted with a ``DeprecationWarning``. They are translated into a
 resource and the boolean before calling the new API. Conflicting old and

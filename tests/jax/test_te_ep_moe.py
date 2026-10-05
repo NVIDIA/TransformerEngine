@@ -148,6 +148,7 @@ NUM_DEVICES_REQUIRED = EP_SIZE * FSDP_SIZE
 
 LOGICAL_AXIS_RULES = (
     ("exp", EP_AXIS),
+    ("expert_weight_fsdp", (EP_AXIS, FSDP_AXIS)),
     ("embed", FSDP_AXIS),
     ("mlp", None),
     ("batch", (FSDP_AXIS, EP_AXIS)),
@@ -586,26 +587,35 @@ def test_weight_gather_policy_axis_resolution(mesh):
 
 
 @pytest.mark.parametrize("native_weight_layout", [False, True])
+@pytest.mark.parametrize("expert_fsdp", [False, True])
 def test_quantized_weight_gather_matches_full_precision_gather(
-    mesh, monkeypatch, native_weight_layout
+    mesh, monkeypatch, native_weight_layout, expert_fsdp
 ):
     """The FP8 weight gather retains forward and backward MoE semantics."""
     if native_weight_layout:
         if not _use_cudnn_cutedsl_fusion_from_env():
             pytest.skip("Native weight layout requires cuDNN grouped GEMM fusion")
+    if native_weight_layout or expert_fsdp:
         from transformer_engine.jax import cpp_extensions as tex
 
         flax_moe_module = importlib.import_module("transformer_engine.jax.flax.moe")
         original_moe = flax_moe_module.moe
 
-        def native_moe(*args, **kwargs):
+        def layout_moe(*args, **kwargs):
             args = list(args)
-            gate, up = jnp.split(args[2], 2, axis=-1)
-            args[2] = tex.pack_swiglu_pair(gate, up).transpose(0, 2, 1)
-            kwargs["wi_kernel_axes"] = ("exp", "mlp", "embed")
+            if native_weight_layout:
+                gate, up = jnp.split(args[2], 2, axis=-1)
+                args[2] = tex.pack_swiglu_pair(gate, up).transpose(0, 2, 1)
+                kwargs["wi_kernel_axes"] = ("exp", "mlp", "embed")
+            if expert_fsdp:
+                kwargs["wi_kernel_axes"] = ("expert_weight_fsdp", None, None)
+                kwargs["wo_kernel_axes"] = ("expert_weight_fsdp", None, None)
+                spec = P((EP_AXIS, FSDP_AXIS), None, None)
+                args[2] = jax.lax.with_sharding_constraint(args[2], NamedSharding(mesh, spec))
+                args[3] = jax.lax.with_sharding_constraint(args[3], NamedSharding(mesh, spec))
             return original_moe(*args, **kwargs)
 
-        monkeypatch.setattr(flax_moe_module, "moe", native_moe)
+        monkeypatch.setattr(flax_moe_module, "moe", layout_moe)
     x = _make_inputs(jax.random.PRNGKey(41))
     baseline = _make_block(quantization_recipe=MXFP8BlockScaling())
     quantized_ag = _make_block(quantization_recipe=MXFP8BlockScaling(), quant_before_fsdp_ag=True)
