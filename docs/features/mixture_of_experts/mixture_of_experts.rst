@@ -72,10 +72,19 @@ The router decides which experts each token is sent to. It applies a score
 function to the gating logits, selects the top-k experts per token, and produces
 the two tensors that drive the rest of the layer:
 
-* ``routing_map`` - a ``[num_tokens, num_experts]`` mask marking the selected
-  experts. Token dispatch uses it to lay the tokens out by expert.
+* ``routing_map`` - by default, a ``[num_tokens, num_experts]`` mask marking
+  the selected experts. Token dispatch uses it to lay the tokens out by expert.
 * ``probs`` - the routing weight of each selected expert. Token combine uses
   these as merging weights when a token was routed to more than one expert.
+
+In PyTorch, passing a preallocated ``topk_indices`` buffer of shape
+``[num_tokens, topk]`` to ``fused_topk_with_score_function`` selects a compact
+list of expert indices instead. The function fills this buffer and returns it
+as its second output without materializing the routing mask. The ``probs``
+output still has shape ``[num_tokens, num_experts]``. The JAX router does not
+currently expose this index-output option. Both frontends also support a
+bit-packed mask through ``routing_map_format="bitmap_u8"``. The examples and
+figure below use the default mask format.
 
 ``fused_topk_with_score_function`` runs the score function and the top-k
 selection in a single differentiable kernel. All internal math runs in FP32,
