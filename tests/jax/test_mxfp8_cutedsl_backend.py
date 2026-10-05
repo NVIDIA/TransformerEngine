@@ -291,11 +291,11 @@ def test_dtypes(method, act_type, act_desc, fp8_dtype, in_dtype):
 # through the C API / PyTorch, since JAX has no wrappers for those operations.
 # (name, shape representation, input shape, optional device-resident row counts)
 GROUP_CASES = [
-    ("single_member", "varying_first_dim", (1, 128, 128), None),
-    ("same_both_multichunk", "varying_first_dim", (3, 384, 384), None),
-    ("varying_first", "varying_first_dim", (768, 256), (128, 384, 256)),
-    ("varying_first_multichunk", "varying_first_dim", (1024, 384), (128, 256, 384, 256)),
-    ("varying_first_empty", "varying_first_dim", (512, 256), (128, 0, 384)),
+    ("single_member", "vfd", (1, 128, 128), None),
+    ("same_both_multichunk", "vfd", (3, 384, 384), None),
+    ("varying_first", "vfd", (768, 256), (128, 384, 256)),
+    ("varying_first_multichunk", "vfd", (1024, 384), (128, 256, 384, 256)),
+    ("varying_first_empty", "vfd", (512, 256), (128, 0, 384)),
 ]
 GROUP_Q_LAYOUTS = [QuantizeLayout.ROWWISE, QuantizeLayout.COLWISE, QuantizeLayout.ROWWISE_COLWISE]
 

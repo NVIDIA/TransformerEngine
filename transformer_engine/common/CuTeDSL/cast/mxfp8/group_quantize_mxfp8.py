@@ -53,10 +53,10 @@ META_SLOT = NUM_TENSORMAPS
 NUM_WORKSPACE_SLOTS = NUM_TENSORMAPS + 1
 
 # Shape representations, mirroring ShapeRepresentation in common/utils.cuh.
-SAME_BOTH_DIMS = "same_both_dims"
-VARYING_FIRST_DIM = "varying_first_dim"
-VARYING_LAST_DIM = "varying_last_dim"
-VARYING_BOTH_DIMS = "varying_both_dims"
+SAME_BOTH_DIMS = "sbd"
+VARYING_FIRST_DIM = "vfd"
+VARYING_LAST_DIM = "vld"
+VARYING_BOTH_DIMS = "vbd"
 SUPPORTED_SHAPE_REPS = (SAME_BOTH_DIMS, VARYING_FIRST_DIM, VARYING_LAST_DIM, VARYING_BOTH_DIMS)
 
 # Upper bound on the group size (MAX_SUPPORTED_TENSOR_DESCRIPTORS in grouped_tma.cuh); sizes
@@ -270,7 +270,7 @@ class MXFP8GroupQuantizeKernel:
         mO_col: Optional[cute.Tensor],
         mS_row: cute.Tensor,
         mS_col: cute.Tensor,
-        mOffsets: cute.Tensor,  # int64[num_tensors + 1], CSR element offsets
+        mOffsets: Optional[cute.Tensor],  # int64[num_tensors + 1], CSR element offsets
         mFirstDims: Optional[
             cute.Tensor
         ],  # int64[num_tensors] (VARYING_FIRST_DIM / VARYING_BOTH_DIMS)
@@ -664,7 +664,7 @@ class MXFP8GroupQuantizeKernel:
         self,
         mS_row: cute.Tensor,
         mS_col: cute.Tensor,
-        mOffsets: cute.Tensor,
+        mOffsets: Optional[cute.Tensor],
         mFirstDims: Optional[cute.Tensor],
         mTensormaps: cute.Tensor,
         mNoop: cute.Pointer,
@@ -715,7 +715,7 @@ class MXFP8GroupQuantizeKernel:
         self,
         mS_row: cute.Tensor,
         mS_col: cute.Tensor,
-        mOffsets: cute.Tensor,
+        mOffsets: Optional[cute.Tensor],
         mFirstDims: Optional[cute.Tensor],
         mTensormaps: cute.Tensor,
         mWorkspace: Optional[cute.Tensor],
@@ -1381,6 +1381,18 @@ def compile_cutedsl_function_from_cfg(cfg: MXFP8GroupQuantizeConfig):
         else None
     )
 
+    offsets_fake = (
+        cute.runtime.make_fake_compact_tensor(
+            cutlass.Int64,
+            (cute.sym_int32(),),
+            stride_order=(0,),
+            memspace=cute.AddressSpace.gmem,
+            assumed_align=8,
+        )
+        if cfg.SHAPE_REP != SAME_BOTH_DIMS
+        else None
+    )
+
     sm_count = HardwareInfo().get_device_multiprocessor_count()
     kernel_obj = MXFP8GroupQuantizeKernel(cfg, sm_count)
     return cute.compile(
@@ -1408,13 +1420,7 @@ def compile_cutedsl_function_from_cfg(cfg: MXFP8GroupQuantizeConfig):
             memspace=cute.AddressSpace.gmem,
             assumed_align=4,
         ),
-        cute.runtime.make_fake_compact_tensor(  # mOffsets
-            cutlass.Int64,
-            (cute.sym_int32(),),
-            stride_order=(0,),
-            memspace=cute.AddressSpace.gmem,
-            assumed_align=8,
-        ),
+        offsets_fake,  # mOffsets
         first_dims_fake,  # mFirstDims
         last_dims_fake,  # mLastDims
         tensormaps_fake,  # mTensormaps

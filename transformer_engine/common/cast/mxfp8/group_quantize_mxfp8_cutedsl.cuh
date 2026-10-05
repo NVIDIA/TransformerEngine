@@ -33,13 +33,13 @@ using namespace tvm_ffi_bridge;
 inline const char *shape_rep_to_str(ShapeRepresentation shape_rep) {
   switch (shape_rep) {
     case ShapeRepresentation::SAME_BOTH_DIMS:
-      return "same_both_dims";
+      return "sbd";
     case ShapeRepresentation::VARYING_FIRST_DIM:
-      return "varying_first_dim";
+      return "vfd";
     case ShapeRepresentation::VARYING_LAST_DIM:
-      return "varying_last_dim";
+      return "vld";
     default:
-      return "varying_both_dims";
+      return "vbd";
   }
 }
 
@@ -86,7 +86,7 @@ struct MXFP8GroupQuantConfig {
   // compiled and registered on a cache miss.
   std::string to_key() const {
     std::string key;
-    // longest: cutedsl_group_mxfp8_smXXX_BFloat16_Float8E4M3_1_1_varying_first_dim_1_1_1_0_dqgelu
+    // longest: cutedsl_group_mxfp8_smXXX_BFloat16_Float8E4M3_1_1_vfd_1_1_1_0_dqgelu
     key.reserve(96);
     key.append("cutedsl_group_mxfp8_sm")
         .append(std::to_string(sm_arch))
@@ -127,48 +127,33 @@ struct MXFP8GroupQuantConfig {
   }
 };
 
-// Descriptor slots per group member: input, rowwise output, colwise output, activation input,
-// plus one carrying (rows, cols, base_elts). Mirrors NUM_WORKSPACE_SLOTS / BYTES_PER_TENSORMAP
-// in CuTeDSL/cast/mxfp8/group_quantize_mxfp8.py.
+// kGroupTensorMapSlots is 5 slots for: input, rowwise output, colwise output, activation input,
+// plus one carrying the metadata of tensor -- (rows, cols, base_elts)
 constexpr size_t kGroupTensorMapSlots = 5;
 constexpr size_t kInt64PerTensorMap = 128 / sizeof(int64_t);
 constexpr size_t kMaxGroupTensors =
     static_cast<size_t>(dispatch::common::MAX_SUPPORTED_TENSOR_DESCRIPTORS);
 
-struct alignas(128) GroupDescriptorWorkspace {
+// We need to use int64_t here instead of CUtensorMap so we can pass this through tvm-ffi boundary
+struct alignas(128) TensorMapStorage {
   alignas(128) int64_t tensor_maps[kMaxGroupTensors][kGroupTensorMapSlots][kInt64PerTensorMap];
-  // Stand-in for the unused offsets array in SAME_BOTH_DIMS. The kernel takes
-  // offsets unconditionally but does not read them for this representation.
-  int64_t unused_offsets[kMaxGroupTensors + 1];
 };
+static __device__ TensorMapStorage g_group_descriptor_workspace;
 
-// Like `g_tensor_maps` on the CUDA path, this has internal linkage, so every translation
-// unit including this header gets its own copy. It shares that path's caveat that two
-// grouped quantize calls in flight on different streams would overwrite each other's
-// descriptors.
-static __device__ GroupDescriptorWorkspace g_group_descriptor_workspace;
-
-// Device address of this translation unit's workspace on the current device. The address
-// is per device (each device context loads its own copy of the module), so it is cached
-// per device. `static` rather than `inline`: it refers to the internal-linkage symbol above,
-// so each translation unit needs its own definition and cache.
-static GroupDescriptorWorkspace *group_descriptor_workspace_ptr() {
-  static std::vector<GroupDescriptorWorkspace *> cache(cuda::num_devices(), nullptr);
+static TensorMapStorage *group_descriptor_workspace_ptr() {
+  // Each device has its own workspace for descriptors
+  static std::vector<TensorMapStorage *> cache(cuda::num_devices(), nullptr);
   static std::vector<std::once_flag> flags(cuda::num_devices());
   const int device_id = cuda::current_device();
   NVTE_CHECK(0 <= device_id && device_id < cuda::num_devices(), "invalid CUDA device ID");
+  // Copy the device symbol address on the current device into the cache on its first use only
   std::call_once(flags[device_id], [&]() {
     void *p = nullptr;
     NVTE_CHECK_CUDA(cudaGetSymbolAddress(&p, g_group_descriptor_workspace));
-    cache[device_id] = static_cast<GroupDescriptorWorkspace *>(p);
+    cache[device_id] = static_cast<TensorMapStorage *>(p);
   });
+  // Return the cached device pointer for the current device to the host
   return cache[device_id];
-}
-
-inline NVTEBasicTensor make_basic_tensor(void *dptr, DType dtype,
-                                         const std::vector<size_t> &shape) {
-  return NVTEBasicTensor{dptr, static_cast<NVTEDType>(dtype),
-                         nvte_make_shape(shape.data(), shape.size())};
 }
 
 // Signature mirrors mxfp8::group_quantize (input, act_input, noop, output, dbias, workspace,
@@ -183,19 +168,16 @@ inline bool mxfp8_group_quantize_cutedsl(const MXFP8GroupQuantConfig &config,
   const size_t first_logical_dim = input_tensor->logical_shape.data[0];
   const size_t last_logical_dim = input_tensor->logical_shape.data[1];
 
-  // The kernel is compiled with cute.sym_int32(divisibility=...) on both logical extents,
-  // so a violating shape would silently mis-tile rather than fail. These mirror sym_M /
-  // sym_N in CuTeDSL/cast/mxfp8/group_quantize_mxfp8.py -- the DSL kernel's chunk height and
-  // the 16-byte TMA row alignment. The logical shape of VARYING_BOTH_DIMS is [1, total].
-  constexpr size_t kChunkDimY = 128;
-  constexpr size_t kLastDimAlignment = 16;
-  const bool first_dim_tiles = config.shape_rep == ShapeRepresentation::VARYING_BOTH_DIMS ||
-                               first_logical_dim % kChunkDimY == 0;
-  if (!first_dim_tiles || last_logical_dim % kLastDimAlignment != 0) {
-    maybe_warn_cutedsl_not_chosen("the grouped logical shape is not a multiple of (", kChunkDimY,
-                                  ", ", kLastDimAlignment, ").");
+  // Match the symbolic divisibility checks in group_quantize_mxfp8.py.
+  if (config.shape_rep != ShapeRepresentation::VARYING_BOTH_DIMS && first_logical_dim % 128 != 0) {
+    maybe_warn_cutedsl_not_chosen("the first logical dimension is not divisible by 128 for a non-varying both dimensions tensor.");
     return false;
   }
+  if (last_logical_dim % 16 != 0) {
+    maybe_warn_cutedsl_not_chosen("the last logical dimension is not divisible by 16.");
+    return false;
+  }
+
   // The same extents are sym_int32 in the compiled kernel.
   if (first_logical_dim > static_cast<size_t>(INT32_MAX) ||
       last_logical_dim > static_cast<size_t>(INT32_MAX)) {
@@ -203,11 +185,11 @@ inline bool mxfp8_group_quantize_cutedsl(const MXFP8GroupQuantConfig &config,
     return false;
   }
 
-  // dbias workspace-size query, mirroring mxfp8::group_quantize: the framework first calls
-  // with an unallocated workspace to learn its shape, allocates it, then calls again to run.
-  // The kernel writes one partial-dbias row per 128-row chunk.
+  // How many rows a job processes (see the CuTeDSL kernel)
+  constexpr size_t kRowsPerJob = 128;
+  // For dbias workspace-size query
   if (config.with_dbias && workspace_tensor->data.dptr == nullptr) {
-    workspace_tensor->data.shape = {DIVUP(first_logical_dim, kChunkDimY), last_logical_dim};
+    workspace_tensor->data.shape = {DIVUP(first_logical_dim, kRowsPerJob), last_logical_dim};
     workspace_tensor->data.dtype = DType::kFloat32;
     return true;
   }
@@ -218,7 +200,7 @@ inline bool mxfp8_group_quantize_cutedsl(const MXFP8GroupQuantConfig &config,
   }
 
   const int32_t device_index = transformer_engine::cuda::current_device();
-  GroupDescriptorWorkspace *const workspace = group_descriptor_workspace_ptr();
+  TensorMapStorage *const workspace = group_descriptor_workspace_ptr();
 
   const SimpleTensor &scale_row =
       config.rowwise ? output_tensor->scale_inv : output_tensor->columnwise_scale_inv;
@@ -230,6 +212,7 @@ inline bool mxfp8_group_quantize_cutedsl(const MXFP8GroupQuantConfig &config,
   DLTensorWrapper mX(
       make_basic_tensor(input_tensor->data.dptr, input_tensor->dtype(), logical_shape), true,
       device_index);
+
   DLTensorWrapper mO_row, mO_col;
   if (config.rowwise) {
     mO_row = DLTensorWrapper(
@@ -250,12 +233,14 @@ inline bool mxfp8_group_quantize_cutedsl(const MXFP8GroupQuantConfig &config,
                          false, device_index);
 
   // Offsets and member dims are read from the output, as in mxfp8::group_quantize.
-  auto offsets_or_unused = [&](const SimpleTensor &t, size_t numel) {
-    void *dptr = t.has_data() ? t.dptr : static_cast<void *>(workspace->unused_offsets);
-    return DLTensorWrapper(make_basic_tensor(dptr, DType::kInt64, {numel}), false, device_index);
-  };
-  DLTensorWrapper mOffsets = offsets_or_unused(output_tensor->tensor_offsets, num_tensors + 1);
-  DLTensorWrapper mFirstDims, mLastDims;
+  DLTensorWrapper mOffsets, mFirstDims, mLastDims;
+  if (config.shape_rep != ShapeRepresentation::SAME_BOTH_DIMS) {
+    NVTE_CHECK(output_tensor->tensor_offsets.has_data(), "Grouped MXFP8 quantization with ",
+               shape_rep_to_str(config.shape_rep), " requires an allocated tensor_offsets buffer.");
+    mOffsets = DLTensorWrapper(
+        make_basic_tensor(output_tensor->tensor_offsets.dptr, DType::kInt64, {num_tensors + 1}),
+        false, device_index);
+  }
   if (config.shape_rep == ShapeRepresentation::VARYING_FIRST_DIM ||
       config.shape_rep == ShapeRepresentation::VARYING_BOTH_DIMS) {
     NVTE_CHECK(output_tensor->first_dims.has_data(), "Grouped MXFP8 quantization with ",
@@ -273,8 +258,7 @@ inline bool mxfp8_group_quantize_cutedsl(const MXFP8GroupQuantConfig &config,
         device_index);
   }
 
-  // The kernel reads num_tensors off this tensor's leading extent, so it must be exactly
-  // the group size even on the single-tensor path that leaves the descriptors untouched.
+  // Pass tensormaps as a 3D tensor of int64_t
   DLTensorWrapper mTensormaps(
       make_basic_tensor(static_cast<void *>(workspace->tensor_maps), DType::kInt64,
                         {num_tensors, kGroupTensorMapSlots, kInt64PerTensorMap}),
@@ -291,11 +275,8 @@ inline bool mxfp8_group_quantize_cutedsl(const MXFP8GroupQuantConfig &config,
     mWorkspace = DLTensorWrapper(workspace_tensor->data, true, device_index);
   }
 
-  // The cast-noop flag travels as a raw device pointer (not a tensor): it may be null, and the
-  // kernel null-checks it on device, so one compiled kernel serves both cases.
   void *noop_ptr = (noop_tensor != nullptr) ? noop_tensor->data.dptr : nullptr;
 
-  // noop and stream are tvm-ffi opaque "handles"; pass them as void*.
   (*group_quant_func_opt)(&mX, &mO_row, &mO_col, &mS_row, &mS_col, &mOffsets, &mFirstDims,
                           &mLastDims, &mTensormaps, noop_ptr, &mActInput, &mWorkspace,
                           static_cast<void *>(stream));
@@ -359,6 +340,7 @@ bool mxfp8_group_quantize_cutedsl(const GroupedTensor *input_tensor,
                                     kMaxGroupTensors, ".");
       return false;
     }
+
     if (shape_rep == ShapeRepresentation::SAME_BOTH_DIMS) {
       // The kernel tiles the stacked rows without tensor boundaries, which matches the CUDA
       // kernel's per-tensor tiling only when every member's rows are a multiple of its
@@ -373,6 +355,7 @@ bool mxfp8_group_quantize_cutedsl(const GroupedTensor *input_tensor,
       maybe_warn_cutedsl_not_chosen("the grouped tensor has no tensor offsets.");
       return false;
     }
+
     if (IS_DBIAS && !is_single_tensor) {
       // mxfp8::group_quantize raises a proper error for this.
       maybe_warn_cutedsl_not_chosen("dbias is only supported for a common last dimension.");
@@ -381,12 +364,13 @@ bool mxfp8_group_quantize_cutedsl(const GroupedTensor *input_tensor,
 
     const bool rowwise = output_tensor->has_data();
     const bool colwise = output_tensor->has_columnwise_data();
+    const bool swizzled = output_tensor->with_gemm_swizzled_scales;
+
+    // Some Sanity checks
     if (!rowwise && !colwise) {
-      // mxfp8::group_quantize raises a proper error for this.
+      maybe_warn_cutedsl_not_chosen("the grouped tensor has neither rowwise nor columnwise data.");
       return false;
     }
-    const bool swizzled = output_tensor->with_gemm_swizzled_scales;
-    // Sanity checks, mirroring mxfp8::group_quantize
     checkCuDriverContext(stream);
     CheckNoopTensor(*noop_tensor, "cast_noop");
     if (rowwise) {

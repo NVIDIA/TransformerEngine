@@ -138,8 +138,7 @@ def set_cutedsl_backend(enabled):
 
 def test_enable_cutedsl_backend_after_import():
     """Test if we can manually enable the CuTeDSL backend without enabling CuTeDSL backend in the beginning."""
-    script = textwrap.dedent(
-        """
+    script = textwrap.dedent("""
         import ctypes
 
         import transformer_engine.pytorch  # pylint: disable=unused-import
@@ -157,8 +156,7 @@ def test_enable_cutedsl_backend_after_import():
         setter(1)
 
         assert tvm_ffi.get_global_func(entrypoint, allow_missing=True) is not None
-        """
-    )
+        """)
     env = os.environ.copy()
     env["NVTE_ENABLE_CUTEDSL_BACKEND"] = "0"
     result = subprocess.run(
@@ -380,24 +378,22 @@ def test_dtypes(swizzled, method, act, fp8_dtype, in_dtype):
 # NVTE_ENABLE_CUTEDSL_BACKEND=1.
 # (name, shape representation in the config key, per-member shapes)
 GROUP_CASES = [
-    ("same_both", "same_both_dims", [(256, 512)] * 3),
-    ("single_member", "same_both_dims", [(384, 384)]),
+    ("same_both", "sbd", [(256, 512)] * 3),
+    ("single_member", "sbd", [(384, 384)]),
     # N is 32- but not 128-divisible, so the rowwise and colwise scales carry zeroed padding.
-    ("same_both_n96", "same_both_dims", [(128, 96)] * 2),
-    ("varying_first", "varying_first_dim", [(128, 256), (384, 256), (256, 256)]),
-    ("varying_first_n160", "varying_first_dim", [(128, 160), (256, 160)]),
+    ("same_both_n96", "sbd", [(128, 96)] * 2),
+    ("varying_first", "vfd", [(128, 256), (384, 256), (256, 256)]),
+    ("varying_first_n160", "vfd", [(128, 160), (256, 160)]),
     # Partial 32-element blocks (e.g. N=144) are covered by the C++ grouped tests;
     # the PyTorch MXFP8 quantizer requires dimensions divisible by 32.
-    ("varying_last", "varying_last_dim", [(256, 128), (256, 384), (256, 256)]),
-    ("varying_both", "varying_both_dims", [(128, 256), (256, 128), (384, 512)]),
+    ("varying_last", "vld", [(256, 128), (256, 384), (256, 256)]),
+    ("varying_both", "vbd", [(128, 256), (256, 128), (384, 512)]),
     # Multiple chunks in both dimensions, including a final half-width 128-column strip.
-    ("varying_both_multichunk", "varying_both_dims", [(128, 128), (256, 384), (384, 640)]),
-    ("varying_first_empty", "varying_first_dim", [(128, 256), (0, 256), (384, 256)]),
-    ("varying_both_empty", "varying_both_dims", [(128, 128), (0, 256), (256, 384)]),
+    ("varying_both_multichunk", "vbd", [(128, 128), (256, 384), (384, 640)]),
+    ("varying_first_empty", "vfd", [(128, 256), (0, 256), (384, 256)]),
+    ("varying_both_empty", "vbd", [(128, 128), (0, 256), (256, 384)]),
 ]
-SINGLE_TENSOR_GROUP_CASES = [
-    c for c in GROUP_CASES if c[1] in ("same_both_dims", "varying_first_dim")
-]
+SINGLE_TENSOR_GROUP_CASES = [c for c in GROUP_CASES if c[1] in ("sbd", "vfd")]
 get_group_case_id = lambda c: c[0]
 
 
@@ -563,7 +559,7 @@ def test_group_noop(cutedsl):
         set_cutedsl_backend(False)
     if cutedsl:
         assert_group_cutedsl_registered(
-            "same_both_dims", torch.bfloat16, tex.DType.kFloat8E4M3, True, True, False, False
+            "sbd", torch.bfloat16, tex.DType.kFloat8E4M3, True, True, False, False
         )
     for name, first_bytes in first.items():
         assert torch.equal(skipped[name], first_bytes), f"{name} changed under a set noop flag"
