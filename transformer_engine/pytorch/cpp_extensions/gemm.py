@@ -48,9 +48,17 @@ def get_cublas_workspace_size_bytes() -> None:
     return 4_194_304
 
 
-@functools.lru_cache(maxsize=None)
 def get_cublas_workspace(device: int, ub: bool, grouped_gemm: bool) -> torch.Tensor:
-    """Returns workspace for cublas GEMM."""
+    """Returns workspace for cublas GEMM on the current CUDA stream."""
+    stream = torch.cuda.current_stream(device).cuda_stream
+    return _get_cublas_workspace_for_stream(device, ub, grouped_gemm, stream)
+
+
+@functools.lru_cache(maxsize=None)
+def _get_cublas_workspace_for_stream(
+    device: int, ub: bool, grouped_gemm: bool, _stream: int
+) -> torch.Tensor:
+    """Cache by stream so concurrent GEMMs do not overwrite each other's scratch space."""
     assert not (ub and grouped_gemm), "UB is unsupported for grouped GEMM."
 
     if ub:
