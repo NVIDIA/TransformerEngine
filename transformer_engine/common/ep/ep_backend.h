@@ -22,7 +22,6 @@
 #include <list>
 #include <memory>
 #include <mutex>
-#include <optional>
 #include <unordered_map>
 
 namespace transformer_engine {
@@ -53,12 +52,16 @@ class EPBackend {
                NVTETensor total_recv_tokens_per_rank, NVTEEpLayerConfig layer_cfg,
                cudaStream_t stream);
 
-  // Per-step ops below require a prior prepare().
+  // Per-step ops below require a prior prepare(). When group_config_.volatile_handle_mem
+  // is set, layer_cfg is required (top_k/topk_idx_dtype, to bind a fresh handle via
+  // ncclEpImportHandle on every call); otherwise it is unused and may be null (the
+  // pointer-keyed cache supplies this state instead).
   void dispatch(NVTETensor handle_mem, const NVTETensor topk_idx, const NVTETensor tokens,
                 const NVTECommWindow& tokens_win, const NVTETensor topk_weights,
                 const NVTECommWindow& topk_weights_win, NVTETensor recv_tokens,
                 const NVTECommWindow& recv_tokens_win, NVTETensor recv_topk_weights,
-                const NVTECommWindow& recv_topk_weights_win, cudaStream_t stream);
+                const NVTECommWindow& recv_topk_weights_win, const NVTEEpLayerConfig* layer_cfg,
+                cudaStream_t stream);
 
   // Fused prepare + dispatch: seeds routing then dispatches in one call. Routing writes the
   // per-expert recv counts to recv_tokens_per_expert and the scalar pre-drop per-rank recv total
@@ -74,17 +77,19 @@ class EPBackend {
                             cudaStream_t stream);
 
   void combine(NVTETensor handle_mem, const NVTETensor expert_out,
-               const NVTECommWindow& expert_out_win, NVTETensor result, cudaStream_t stream);
+               const NVTECommWindow& expert_out_win, NVTETensor result,
+               const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream);
 
   // g_recv_topk_weights: 1D [recv_capacity] f32; grad_topk_weights: 2D [T, top_k] f32.
   void dispatch_bwd(NVTETensor handle_mem, const NVTETensor grad, const NVTECommWindow& grad_win,
                     const NVTETensor g_recv_topk_weights,
                     const NVTECommWindow& g_recv_topk_weights_win, NVTETensor grad_tokens,
-                    NVTETensor grad_topk_weights, cudaStream_t stream);
+                    NVTETensor grad_topk_weights, const NVTEEpLayerConfig* layer_cfg,
+                    cudaStream_t stream);
 
   void combine_bwd(NVTETensor handle_mem, const NVTETensor grad, const NVTECommWindow& grad_win,
                    NVTETensor grad_expert_out, const NVTECommWindow& grad_expert_out_win,
-                   cudaStream_t stream);
+                   const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream);
 
   ~EPBackend();
 
@@ -123,13 +128,32 @@ class EPBackend {
   std::list<HandleEntry> lru_;
   std::unordered_map<void*, std::list<HandleEntry>::iterator> index_;
   size_t handle_cache_cap_{0};  // set lazily from NVTE_EP_HANDLE_CACHE_SIZE
-  std::optional<NVTEEpLayerConfig> fallback_layer_cfg_;
+  // Metadata of evicted entries (handle == nullptr), so a later op on a still-valid handle_mem
+  // can re-import its handle instead of failing.
+  std::unordered_map<void*, HandleEntry> evicted_;
 
   // Caller must hold mutex_.
   ncclEpHandle_t prepare_handle_locked(void* handle_mem, size_t handle_mem_size,
                                        NVTEEpLayerConfig layer_cfg);
   ncclEpHandle_t lookup_handle_locked(void* handle_mem, size_t handle_mem_size);
+  // Insert a new entry at the LRU front and evict past the cap. Caller must hold mutex_.
+  void insert_entry_locked(HandleEntry entry);
   size_t cache_cap_locked();
+
+  // Bind a fresh handle to handle_mem's already-prepared contents via ncclEpImportHandle.
+  // Never touches lru_/index_; the caller owns the returned handle (destroy via ScopedHandle).
+  // `stream` orders ncclEpImportHandle's async geometry check ahead of the op issued on the
+  // returned handle. Caller must hold mutex_.
+  ncclEpHandle_t import_handle_locked(void* handle_mem, size_t handle_mem_size, int num_tokens,
+                                      NVTEEpLayerConfig layer_cfg, cudaStream_t stream);
+
+  // Per-step handle acquisition: the pointer-keyed cache (*owned = false, caller must not
+  // destroy) when group_config_.volatile_handle_mem is unset, or a fresh import_handle_locked()
+  // (*owned = true, caller destroys via ScopedHandle) when it is set (layer_cfg is then
+  // required). Caller must hold mutex_.
+  ncclEpHandle_t acquire_step_handle_locked(void* handle_mem, size_t handle_mem_size,
+                                            int num_tokens, const NVTEEpLayerConfig* layer_cfg,
+                                            bool* owned, cudaStream_t stream);
 
   // Build the dispatch in/out structs and issue ncclEpDispatch on the resolved
   // handle. When recv_tokens_per_expert != nullptr (count mode), it is wired to
