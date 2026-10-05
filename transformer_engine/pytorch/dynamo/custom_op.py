@@ -37,6 +37,10 @@ on each call. The kinds -- and how each represents its field as op inputs:
   * ``TENSOR_OR_QUANTIZED`` -- a field that may be a plain tensor, a bare
     quantized storage, or ``None``: three slots (the tensor, its flat inner
     buffers, and a ``__kind__`` tag) so a quantized tensor crosses as its buffers.
+    Unions including ``ConcatenatedTensor`` also accept deferred row concatenations:
+    all parts cross in the buffer list, with full gradients split outside the op.
+    Saved parts use ``concatenated_tensor.restore_from_func_ctx`` in the backward
+    container; reconstruction of the full view happens only in the real kernel.
   * ``SIMPLE`` -- every remaining simple value (scalars, enums, sizes,
     quantizers -- value-opaque constants baked into the graph -- and nested
     collections of them), gathered into one shared ``OpaqueValueBundle`` slot.
@@ -106,6 +110,7 @@ from torch._prims_common import make_contiguous_strides_for
 from torch.utils._pytree import tree_flatten, tree_unflatten
 
 from .tensor_spec import TensorSpec, to_tensor_spec
+from .concatenated_tensor import ConcatenatedTensor
 from ..quantized_tensor import (
     QuantizedTensor,
     QuantizedTensorStorage,
@@ -408,13 +413,13 @@ class _TensorOrQuantizedKind(Enum):
     NONE = "none"
     TENSOR = "tensor"
     STORAGE = "storage"
+    CONCATENATED = "concatenated"
 
 
 _TQ_KIND_KEY = "__kind__"
 _SIMPLE_META_SLOT = "_simple_meta"
 
-# Matched by exact member set, so a bare quantized annotation or an accidental
-# extra union member is rejected rather than silently taken as tensor-or-quantized.
+# Tensor unions are matched by exact member sets.
 _TQ_MEMBERS = frozenset(get_args(TensorOrQuantized))
 
 
@@ -437,14 +442,19 @@ class _FieldPlan:
     name: str
     kind: _FieldKind
     slots: Tuple[_SlotSpec, ...]
+    allows_concatenation: bool = False
 
 
 def _is_tensor_storage_union(annot: Any) -> bool:
-    """Whether ``annot`` is exactly the tensor-or-quantized union."""
+    """Whether a tensor union can use the tensor / buffers / metadata slots."""
     if not _is_union(annot):
         return False
     members = frozenset(a for a in get_args(annot) if a is not type(None))
-    return members == _TQ_MEMBERS
+    return members in (
+        _TQ_MEMBERS,
+        _TQ_MEMBERS | {ConcatenatedTensor},
+        frozenset((torch.Tensor, ConcatenatedTensor)),
+    )
 
 
 def _is_process_group_annot(annot: Any) -> bool:
@@ -486,7 +496,9 @@ def _parse_field(name: str, annot: Any) -> _FieldPlan:
             _SlotSpec(name + "__tensors", "Tensor[]"),
             _SlotSpec(name + "__meta", _OPAQUE_VALUE_BUNDLE_TYPE_NAME),
         )
-        return _FieldPlan(name, _FieldKind.TENSOR_OR_QUANTIZED, slots)
+        return _FieldPlan(
+            name, _FieldKind.TENSOR_OR_QUANTIZED, slots, ConcatenatedTensor in get_args(annot)
+        )
     stripped, is_optional = _strip_optional(annot)
     if stripped is torch.Tensor:
         slot = _SlotSpec(name, "Tensor?" if is_optional else "Tensor")
@@ -527,6 +539,12 @@ def _pack_tensor_or_quantized(field: _FieldPlan, value: Any, slots: Dict[str, An
         slots[tensor_slot] = None
         slots[inner_slot] = []
         slots[meta_slot] = OpaqueValueBundle({_TQ_KIND_KEY: _TensorOrQuantizedKind.NONE})
+    elif isinstance(value, ConcatenatedTensor):
+        if not field.allows_concatenation:
+            raise TypeError(f"field {field.name!r} does not accept ConcatenatedTensor")
+        slots[tensor_slot] = None
+        slots[inner_slot] = value.tensors
+        slots[meta_slot] = OpaqueValueBundle({_TQ_KIND_KEY: _TensorOrQuantizedKind.CONCATENATED})
     elif isinstance(value, torch.Tensor):
         # Plain tensor *and* subclass (e.g. Float8Tensor) pass through the
         # ``Tensor?`` slot; subclass flattening (if any) is done by the
@@ -555,6 +573,8 @@ def _unpack_tensor_or_quantized(field: _FieldPlan, slots: Dict[str, Any]) -> Any
         return None
     if kind == _TensorOrQuantizedKind.TENSOR:
         return slots[tensor_slot]
+    if kind == _TensorOrQuantizedKind.CONCATENATED:
+        return ConcatenatedTensor(slots[inner_slot])
     return _storage_unflatten(meta, slots[inner_slot])
 
 
@@ -984,8 +1004,14 @@ def _register_base_op(
     ``pack_result``.
     """
 
+    concatenated_fields = tuple(f.name for f in plan.fields if f.allows_concatenation)
+
     def _impl(*flat: Any) -> List[torch.Tensor]:
         obj = plan.unpack(dict(zip(plan.slot_names, flat)))
+        for name in concatenated_fields:
+            value = getattr(obj, name)
+            if isinstance(value, ConcatenatedTensor):
+                setattr(obj, name, value.materialize())
         return pack_result(impl(obj))
 
     def _fake(*flat: Any) -> List[torch.Tensor]:
@@ -1039,7 +1065,16 @@ def _register_autograd_for_op(
             out_plan.ctx_attrs,
             tuple(saved_list),
         )
-        tensors_to_save, tensor_objects = prepare_for_saving(*(tensors_to_save_from_setup or ()))
+        saved = []
+        ctx.concatenated_saved_lengths = []
+        for value in tensors_to_save_from_setup or ():
+            if isinstance(value, ConcatenatedTensor):
+                ctx.concatenated_saved_lengths.append(len(value.tensors))
+                saved.extend(value.tensors)
+            else:
+                ctx.concatenated_saved_lengths.append(None)
+                saved.append(value)
+        tensors_to_save, tensor_objects = prepare_for_saving(*saved)
         ctx.tensor_objects = tensor_objects
         ctx.save_for_backward(*tensors_to_save)
         ctx.backward_objects = bwd_obj
@@ -1047,6 +1082,13 @@ def _register_autograd_for_op(
         # Input shapes for the grad slots (SymInt-safe on ctx): a bwd impl may
         # rederive shapes lossily (e.g. rank-1 inputs come back rank-2), so the
         # returned grads are viewed back to the true input shapes below.
+        ctx.concatenated_grad_shapes = {
+            pos: [tensor.shape for tensor in inputs[pos + 1]]
+            for pos in grad_targets
+            if pos in fwd_plan.tensor_or_quantized_offsets()
+            and inputs[pos] is None
+            and inputs[pos + 2][_TQ_KIND_KEY] == _TensorOrQuantizedKind.CONCATENATED
+        }
         ctx.grad_input_shapes = {
             pos: inputs[pos].shape for pos in grad_targets if isinstance(inputs[pos], torch.Tensor)
         }
@@ -1073,12 +1115,18 @@ def _register_autograd_for_op(
         for pos, length in ctx.fwd_tensor_list_lengths.items():
             out[pos] = [None] * length
         for pos, g in zip(grad_targets, grads):
+            if pos in ctx.concatenated_grad_shapes:
+                shapes = ctx.concatenated_grad_shapes[pos]
+                if g is not None:
+                    out[pos + 1] = list(torch.split(g, [shape[0] for shape in shapes], dim=0))
+                continue
             if g is not None:
                 shape = ctx.grad_input_shapes.get(pos)
                 if shape is not None and g.shape != shape:
                     g = g.view(shape)
             out[pos] = g
         ctx.grad_input_shapes = None
+        ctx.concatenated_grad_shapes = None
         return tuple(out)
 
     fwd_op.register_autograd(_autograd_backward, setup_context=_setup_context)

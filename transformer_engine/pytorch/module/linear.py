@@ -33,6 +33,7 @@ from ._common import (
     can_reconstruct_wgrad_input_from_original,
     check_fp8_reduce_and_update,
     noop_cat,
+    sum_bias_grad,
     set_quantizer_amax_reduction_group,
     set_quantizer_usage_for_wgrad_all_gather,
     WeightGradStore,
@@ -82,8 +83,8 @@ from ..quantized_tensor import (
     QuantizedTensorStorage,
     Quantizer,
     prepare_for_saving,
-    restore_from_func_ctx,
 )
+from ..dynamo.concatenated_tensor import ConcatenatedTensor, restore_from_func_ctx
 from ..dynamo import (
     TensorSpec,
     TensorOrQuantized,
@@ -110,9 +111,9 @@ class LinearFwdArgs:
     """Single-argument bag for the forward path of :class:`_Linear`."""
 
     # --- Differentiable tensors (also passed positionally to autograd) ---
-    weight: TensorOrQuantized
+    weight: Union[TensorOrQuantized, ConcatenatedTensor]
     inp: torch.Tensor
-    bias: Optional[torch.Tensor]
+    bias: Optional[Union[torch.Tensor, ConcatenatedTensor]]
 
     # --- Non-differentiable cached tensors ---
     # TensorOrQuantized so a cached quantized workspace can cross the op boundary.
@@ -238,9 +239,9 @@ class LinearBwdArgs:
     # --- Saved / restored tensors (populated at backward entry) ---
     grad_output: Optional[torch.Tensor] = None
     inputmat: Optional[TensorOrQuantized] = None
-    weight_fp8: Optional[TensorOrQuantized] = None
-    saved_weight: Optional[TensorOrQuantized] = None
-    bias: Optional[torch.Tensor] = None
+    weight_fp8: Optional[Union[TensorOrQuantized, ConcatenatedTensor]] = None
+    saved_weight: Optional[Union[TensorOrQuantized, ConcatenatedTensor]] = None
+    bias: Optional[Union[torch.Tensor, ConcatenatedTensor]] = None
 
     # --- Quantizers ---
     input_quantizer: Optional[Quantizer] = None
@@ -1263,6 +1264,8 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
             grad_output_quantizer,
         )
         nvtx_range_pop(f"{nvtx_label}.grad_output_preprocess")
+        if bwd_args.use_bias and grad_bias is None and not bwd_args.requires_wgrad:
+            grad_bias = sum_bias_grad(grad_output)
 
         # --------------------------------------------------
         # Grad output tensor is ready for computing grad input...
@@ -1775,11 +1778,7 @@ def _linear_backward_fake(
         )
 
     grad_bias = None
-    # FP8 backward computes bgrad in grad_output_preprocess whenever bias is
-    # used; in high precision it is fused into the wgrad GEMM, so it only
-    # exists when wgrad runs.
-    fp8_bwd = args.fp8 and args.backward_override is None
-    if args.use_bias and (args.requires_wgrad or fp8_bwd):
+    if args.use_bias:
         grad_bias = TensorSpec(
             shape=(out_features,), dtype=out_dtype, device=args.grad_output.device
         )
@@ -1931,7 +1930,9 @@ class Linear(TransformerEngineBaseModule):
                       (preferably an OrderedDict) is provided, the keys are used as names and
                       values as split sizes along dim 0. The resulting parameters will have
                       names that end in ``_weight`` or ``_bias``, so trailing underscores are
-                      stripped from any provided names.
+                      stripped from any provided names. Under ``torch.compile``, adjacent
+                      parts sharing storage are consumed without a concatenation copy.
+                      Disjoint parts and returned split biases still require concatenation.
     device : Union[torch.device, str], default = "cuda"
           The device on which the parameters of the model will be allocated. It is the user's
           responsibility to ensure all parameters are moved to the GPU before running the
@@ -2399,7 +2400,9 @@ class Linear(TransformerEngineBaseModule):
 
         inp = self.prepare_forward(inp, allow_non_contiguous=isinstance(inp, QuantizedTensor))
         try:
-            weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
+            weight_tensor, bias_tensor = self._get_weight_and_bias_tensors(
+                defer_concatenation=torch.compiler.is_compiling() and _linear_op is not None
+            )
 
             quantizers = (
                 self._get_quantizers(fp8_output, fp8_grad, is_grad_enabled)
@@ -2546,6 +2549,12 @@ class Linear(TransformerEngineBaseModule):
                         msg=f"te.Linear falling back to eager: {fallback_reason}"
                     )
                     use_compiled_op = False
+                    weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
+                    linear_bias_tensor = (
+                        bias_tensor if self.apply_bias and not self.gemm_bias_unfused_add else None
+                    )
+                    fwd_args.weight = weight_tensor
+                    fwd_args.bias = linear_bias_tensor
 
             if use_compiled_op:
                 check_gemm_dims(inp, weight_tensor, self.fp8)
@@ -2693,14 +2702,24 @@ class Linear(TransformerEngineBaseModule):
             fp8_grad=fp8_grad,
         )
 
-    def _get_weight_and_bias_tensors(self) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        # Get concatenated weight and bias tensors
-        unfused_weights = self._get_weight_tensors()
-        weight_tensor = noop_cat(unfused_weights)
+    def _get_weight_and_bias_tensors(self, defer_concatenation=False):
+        weights = self._get_weight_tensors()
+        weight_tensor = (
+            ConcatenatedTensor(weights)
+            if defer_concatenation and len(weights) > 1
+            else noop_cat(weights)
+        )
+        bias_tensor = None
         if self.use_bias:
-            bias_tensor = noop_cat([getattr(self, name) for name in self.bias_names])
-        else:
-            bias_tensor = None
+            biases = [getattr(self, name) for name in self.bias_names]
+            bias_tensor = (
+                ConcatenatedTensor(biases)
+                if defer_concatenation
+                and len(biases) > 1
+                and self.apply_bias
+                and not self.gemm_bias_unfused_add
+                else noop_cat(biases)
+            )
         return weight_tensor, bias_tensor
 
     def onnx_forward(
