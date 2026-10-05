@@ -2048,7 +2048,7 @@ def test_te_linear_compile_with_fp8_output(compile_mode):
             )
 
 
-# Configs rejected by LinearFwdArgs.compile_unsupported_reason() that a
+# Configs rejected by Linear._compile_eager_fallback_reason() that a
 # single-GPU unit test can construct. Distributed-only reasons (fsdp_group,
 # DistributedWeight) and CPU offloading need machinery this file doesn't have;
 # delayed scaling is a hard error (check_recipe_support), tested separately.
@@ -2782,6 +2782,7 @@ def test_te_split_parameters_compile(compile_mode, dtype, equal_splits):
 @pytest.mark.parametrize("fp8_recipe", [None, *_all_recipes], ids=recipe_id)
 @pytest.mark.parametrize("bias_mode", ["fused", "none", "returned"])
 def test_te_split_parameters_recipes(fp8_recipe, bias_mode):
+    autocast_recipe = fp8_recipe or recipe.Float8CurrentScaling()
     options = dict(bias=bias_mode != "none", return_bias=bias_mode == "returned")
     model = te.Linear(
         128,
@@ -2792,7 +2793,7 @@ def test_te_split_parameters_recipes(fp8_recipe, bias_mode):
     )
 
     def fn(inp):
-        with te.autocast(enabled=fp8_recipe is not None, recipe=fp8_recipe):
+        with te.autocast(enabled=fp8_recipe is not None, recipe=autocast_recipe):
             out = model(inp)
         if bias_mode == "returned":
             out, bias = out
@@ -2854,11 +2855,73 @@ def test_te_split_parameters_saved_versions():
         out.sum().backward()
 
 
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
+def test_te_split_parameters_saved_hooks():
+    import copy
+
+    model = te.Linear(64, 128, parameters_split=dict(q=64, k=32, v=32), params_dtype=torch.bfloat16)
+    reference = copy.deepcopy(model)
+    compiled = torch.compile(model, fullgraph=True, backend="aot_eager")
+    inp = torch.randn(16, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    ref_inp = inp.detach().clone().requires_grad_()
+    with torch.autograd.graph.saved_tensors_hooks(lambda t: t.clone(), lambda t: t):
+        out = compiled(inp)
+        out.sum().backward()
+    expected = reference(ref_inp)
+    expected.sum().backward()
+    torch.testing.assert_close(out, expected, rtol=0, atol=0)
+    torch.testing.assert_close(inp.grad, ref_inp.grad, rtol=0, atol=0)
+    for actual, target in zip(model.parameters(), reference.parameters()):
+        torch.testing.assert_close(actual.grad, target.grad, rtol=0, atol=0)
+
+
+def test_te_split_parameters_fallback_check(monkeypatch):
+    model = te.Linear(64, 128, parameters_split=dict(q=64, k=32, v=32))
+    inp = torch.empty(16, 64, device="cuda")
+
+    def unexpected_materialization(*args, **kwargs):
+        raise AssertionError("Fallback eligibility must not concatenate parameters")
+
+    monkeypatch.setattr(model, "_get_weight_and_bias_tensors", unexpected_materialization)
+    assert model._compile_eager_fallback_reason(inp, None, False, False, True, False) is None
+    assert (
+        model._compile_eager_fallback_reason(inp, None, True, False, True, False)
+        == "differentiable fp8_output=True"
+    )
+
+
+@pytest.mark.parametrize("defer", [False, True])
+def test_concat_input_single_tensor(defer):
+    from transformer_engine.pytorch.module._common import concat_input
+
+    tensor = torch.nn.Parameter(torch.randn(4, 8, device="cuda"))
+    assert concat_input([tensor], defer=defer) is tensor
+
+
+@pytest.mark.parametrize("disjoint", [False, True])
+def test_concat_input_eager_gradients(disjoint):
+    from transformer_engine.pytorch.module._common import concat_input
+
+    parts = [torch.nn.Parameter(t) for t in torch.randn(8, 8, device="cuda").split((3, 5))]
+    if disjoint:
+        parts[1] = torch.nn.Parameter(parts[1].detach().clone())
+    result = concat_input(parts)
+    expected = torch.cat(parts)
+    grad = torch.randn_like(result)
+    torch.testing.assert_close(result, expected, rtol=0, atol=0)
+    torch.testing.assert_close(
+        torch.autograd.grad(result, parts, grad),
+        torch.autograd.grad(expected, parts, grad),
+        rtol=0,
+        atol=0,
+    )
+
+
 @pytest.mark.parametrize(
     "layout", ["adjacent", "offset", "disjoint", "strided", "singleton", "negative", "conjugate"]
 )
-def test_deferred_cat_storage(layout):
-    from transformer_engine.pytorch.dynamo.deferred_cat import DeferredCat
+def test_parameter_parts_storage(layout):
+    from transformer_engine.pytorch.dynamo.parameter_parts import ParameterParts
 
     storage = torch.arange(128, device="cuda").view(16, 8)
     if layout == "offset":
@@ -2874,7 +2937,7 @@ def test_deferred_cat_storage(layout):
     parts = list(storage.split([1, storage.shape[0] - 3, 2]))
     if layout == "disjoint":
         parts[1] = parts[1].clone()
-    result = DeferredCat(parts).materialize()
+    result = ParameterParts(parts).materialize()
     torch.testing.assert_close(result, torch.cat(parts), rtol=0, atol=0)
     if layout in ("adjacent", "offset"):
         assert result.data_ptr() == parts[0].data_ptr()
@@ -2884,8 +2947,8 @@ def test_deferred_cat_storage(layout):
 
 @pytest.mark.parametrize("fake", [False, True], ids=["eager", "fake"])
 @pytest.mark.parametrize("mixed_dtype", [False, True])
-def test_deferred_cat_spec(fake, mixed_dtype):
-    from transformer_engine.pytorch.dynamo.deferred_cat import DeferredCat
+def test_parameter_parts_spec(fake, mixed_dtype):
+    from transformer_engine.pytorch.dynamo.parameter_parts import ParameterParts
 
     with FakeTensorMode() if fake else contextlib.nullcontext():
         parts = [
@@ -2899,7 +2962,7 @@ def test_deferred_cat_spec(fake, mixed_dtype):
             ),
         ]
         expected = torch.cat(parts)
-        spec = DeferredCat(parts).to_spec()
+        spec = ParameterParts(parts).to_spec()
         assert spec.shape == tuple(expected.shape)
         assert spec.dtype == expected.dtype
         assert spec.device == expected.device
@@ -2908,8 +2971,9 @@ def test_deferred_cat_spec(fake, mixed_dtype):
 
 
 @pytest.mark.parametrize("internal", [False, True])
-def test_deferred_cat_rejects_quantized_parts(internal):
-    from transformer_engine.pytorch.dynamo.deferred_cat import DeferredCat
+def test_parameter_parts_rejects_quantized_parts(internal):
+    from transformer_engine.pytorch.dynamo.parameter_parts import ParameterParts
+    from transformer_engine.pytorch.module._common import concat_input
 
     quantizer = _current_scaling()
     quantizer.internal = internal
@@ -2917,7 +2981,8 @@ def test_deferred_cat_rejects_quantized_parts(internal):
         shape=(4, 8), dtype=torch.bfloat16, quantizer=quantizer, device=torch.device("cpu")
     ).create_tensor()
     with pytest.raises(TypeError, match="non-quantized tensors"):
-        DeferredCat([tensor, tensor])
+        ParameterParts([tensor, tensor])
+    assert concat_input([tensor], defer=True) is tensor
 
 
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")

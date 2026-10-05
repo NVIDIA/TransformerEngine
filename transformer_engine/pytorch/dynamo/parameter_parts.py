@@ -5,7 +5,7 @@
 """Deferred row concatenation for tensors consumed inside a custom op."""
 
 from dataclasses import dataclass
-from typing import List
+from typing import Tuple, TypeVar, Union
 
 import torch
 from torch._prims_common import make_contiguous_strides_for
@@ -14,25 +14,25 @@ from .tensor_spec import TensorSpec
 from ..quantized_tensor import (
     QuantizedTensor,
     QuantizedTensorStorage,
-    restore_from_func_ctx as restore_tensor_ctx,
 )
 
 
-@dataclass
-class DeferredCat:
+@dataclass(frozen=True, slots=True)
+class ParameterParts:
     """Keep every parameter visible to autograd until the opaque consumer runs."""
 
-    parts: List[torch.Tensor]
+    parts: Tuple[torch.Tensor, ...]
 
     def __post_init__(self):
+        object.__setattr__(self, "parts", tuple(self.parts))
         if not self.parts:
-            raise ValueError("DeferredCat requires at least one tensor")
+            raise ValueError("ParameterParts requires at least one tensor")
         if any(
             not isinstance(part, torch.Tensor)
             or isinstance(part, (QuantizedTensor, QuantizedTensorStorage))
             for part in self.parts
         ):
-            raise TypeError("DeferredCat only supports non-quantized tensors")
+            raise TypeError("ParameterParts only supports non-quantized tensors")
 
     def to_spec(self) -> TensorSpec:
         """Describe the concatenation without accessing its storage."""
@@ -74,20 +74,5 @@ class DeferredCat:
         return first.as_strided(shape, make_contiguous_strides_for(shape))
 
 
-def restore_from_func_ctx(ctx):
-    """Restore original split parameters saved by the custom-op framework."""
-    tensors = restore_tensor_ctx(ctx)
-    lengths = getattr(ctx, "concatenated_saved_lengths", None)
-    if lengths is None:
-        return tensors
-    restored = []
-    offset = 0
-    for length in lengths:
-        if length is None:
-            restored.append(tensors[offset])
-            offset += 1
-        else:
-            restored.append(DeferredCat(list(tensors[offset : offset + length])))
-            offset += length
-    ctx.concatenated_saved_lengths = None
-    return restored
+_TensorT = TypeVar("_TensorT")
+ConcatInput = Union[_TensorT, ParameterParts]
