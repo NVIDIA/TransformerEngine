@@ -285,7 +285,7 @@ def build_nccl_ep_submodule() -> str:
     if bolt_linker_flags:
         nvcc_linker_flags.extend(["-Xlinker=--emit-relocs", "-Xlinker=-z", "-Xlinker=now"])
         if "-mno-fix-cortex-a53-843419" in bolt_linker_flags:
-            nvcc_linker_flags.append("-Xlinker=--no-fix-cortex-a53-843419")
+            nvcc_linker_flags.append("-Xcompiler=-mno-fix-cortex-a53-843419")
 
     def append_env_flags(name: str, flags: List[str]) -> None:
         if flags:
