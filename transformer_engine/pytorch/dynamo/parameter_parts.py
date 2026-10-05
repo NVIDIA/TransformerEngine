@@ -14,6 +14,7 @@ from .tensor_spec import TensorSpec
 from ..quantized_tensor import (
     QuantizedTensor,
     QuantizedTensorStorage,
+    restore_from_func_ctx as restore_tensor_ctx,
 )
 
 
@@ -76,3 +77,22 @@ class ParameterParts:
 
 _TensorT = TypeVar("_TensorT")
 ConcatInput = Union[_TensorT, ParameterParts]
+
+
+def restore_from_func_ctx(ctx):
+    """Restore original split parameters saved by the custom-op framework."""
+    tensors = restore_tensor_ctx(ctx)
+    lengths = getattr(ctx, "concatenated_saved_lengths", None)
+    if lengths is None:
+        return tensors
+    restored = []
+    offset = 0
+    for length in lengths:
+        if length is None:
+            restored.append(tensors[offset])
+            offset += 1
+        else:
+            restored.append(ParameterParts(tuple(tensors[offset : offset + length])))
+            offset += length
+    ctx.concatenated_saved_lengths = None
+    return restored

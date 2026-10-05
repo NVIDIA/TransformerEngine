@@ -299,8 +299,8 @@ class FusedMLAQUpProjRopeQuant:
         bwd_args = LinearBwdArgs(
             grad_output=grad_output,
             inputmat=x_saved,
-            weight_for_dgrad=w_q,
-            original_weight=w_q,
+            weight_fp8=w_q,
+            saved_weight=w_q,
             grad_output_quantizer=grad_output_quantizer,
             inp_shape=x_saved.shape,
             activation_dtype=act_dtype,

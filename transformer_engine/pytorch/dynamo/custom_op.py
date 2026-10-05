@@ -39,7 +39,8 @@ on each call. The kinds -- and how each represents its field as op inputs:
     buffers, and a ``__kind__`` tag) so a quantized tensor crosses as its buffers.
     Unions including ``ParameterParts`` also accept deferred row concatenations:
     all parts cross in the buffer list, with full gradients split outside the op.
-    The adapter saves/restores the parts; only the real kernel materializes them.
+    Saved parts use ``parameter_parts.restore_from_func_ctx`` in the backward
+    container; reconstruction of the full view happens only in the real kernel.
   * ``SIMPLE`` -- every remaining simple value (scalars, enums, sizes,
     quantizers -- value-opaque constants baked into the graph -- and nested
     collections of them), gathered into one shared ``OpaqueValueBundle`` slot.
@@ -71,7 +72,7 @@ Autograd, registered on the op, drives backward:
   * on ``backward()`` the incoming flat grads are sliced per user output from the
     stashed plan (a ``grad_outputs`` field on the backward args receives the
     whole tuple; otherwise ``grad_output`` receives the first output's grad),
-    the container's optional ``set_saved_tensors`` hook receives the restored
+    the container's optional ``setup_saved_tensors`` hook restores the saved
     tensors, then the *backward op* runs the real ``bwd_impl`` and returns the
     flat grads (``bwd_fake_impl`` is its data-free fake).
 
@@ -116,7 +117,6 @@ from ..quantized_tensor import (
     Quantizer,
     _quantized_tensor_passthrough_ops,
     prepare_for_saving,
-    restore_from_func_ctx,
 )
 from ..utils import record_compile_disabled
 
@@ -413,7 +413,7 @@ class _TensorOrQuantizedKind(Enum):
     NONE = "none"
     TENSOR = "tensor"
     STORAGE = "storage"
-    PARTS = "parts"
+    CONCATENATED = "concatenated"
 
 
 _TQ_KIND_KEY = "__kind__"
@@ -544,7 +544,7 @@ def _pack_tensor_or_quantized(field: _FieldPlan, value: Any, slots: Dict[str, An
             raise TypeError(f"field {field.name!r} does not accept ParameterParts")
         slots[tensor_slot] = None
         slots[inner_slot] = list(value.parts)
-        slots[meta_slot] = OpaqueValueBundle({_TQ_KIND_KEY: _TensorOrQuantizedKind.PARTS})
+        slots[meta_slot] = OpaqueValueBundle({_TQ_KIND_KEY: _TensorOrQuantizedKind.CONCATENATED})
     elif isinstance(value, torch.Tensor):
         # Plain tensor *and* subclass (e.g. Float8Tensor) pass through the
         # ``Tensor?`` slot; subclass flattening (if any) is done by the
@@ -564,9 +564,7 @@ def _pack_tensor_or_quantized(field: _FieldPlan, value: Any, slots: Dict[str, An
         )
 
 
-def _unpack_tensor_or_quantized(
-    field: _FieldPlan, slots: Dict[str, Any], *, materialize_parts: bool = False
-) -> Any:
+def _unpack_tensor_or_quantized(field: _FieldPlan, slots: Dict[str, Any]) -> Any:
     """Inverse of :func:`_pack_tensor_or_quantized`."""
     tensor_slot, inner_slot, meta_slot = (s.name for s in field.slots)
     meta = slots[meta_slot]
@@ -575,9 +573,8 @@ def _unpack_tensor_or_quantized(
         return None
     if kind == _TensorOrQuantizedKind.TENSOR:
         return slots[tensor_slot]
-    if kind == _TensorOrQuantizedKind.PARTS:
-        parts = ParameterParts(tuple(slots[inner_slot]))
-        return parts.materialize() if materialize_parts else parts
+    if kind == _TensorOrQuantizedKind.CONCATENATED:
+        return ParameterParts(tuple(slots[inner_slot]))
     return _storage_unflatten(meta, slots[inner_slot])
 
 
@@ -679,7 +676,7 @@ class _ArgPlan:
             slots[_SIMPLE_META_SLOT] = OpaqueValueBundle(simple)
         return slots
 
-    def unpack(self, slots: Dict[str, Any], *, materialize_parts: bool = False) -> Any:
+    def unpack(self, slots: Dict[str, Any]) -> Any:
         """Rebuild a fresh ``arg_type`` instance from the op's flat slot dict.
 
         Inverse of :meth:`pack`.
@@ -691,9 +688,7 @@ class _ArgPlan:
                 case _FieldKind.TENSOR:
                     kwargs[field.name] = slots[field.slots[0].name]
                 case _FieldKind.TENSOR_OR_QUANTIZED:
-                    kwargs[field.name] = _unpack_tensor_or_quantized(
-                        field, slots, materialize_parts=materialize_parts
-                    )
+                    kwargs[field.name] = _unpack_tensor_or_quantized(field, slots)
                 case _FieldKind.PROCESS_GROUP:
                     if bundle is not None:
                         name = bundle[field.name]
@@ -1011,8 +1006,14 @@ def _register_base_op(
     ``pack_result``.
     """
 
+    concatenated_fields = tuple(f.name for f in plan.fields if f.allows_concatenation)
+
     def _impl(*flat: Any) -> List[torch.Tensor]:
-        obj = plan.unpack(dict(zip(plan.slot_names, flat)), materialize_parts=True)
+        obj = plan.unpack(dict(zip(plan.slot_names, flat)))
+        for name in concatenated_fields:
+            value = getattr(obj, name)
+            if isinstance(value, ParameterParts):
+                setattr(obj, name, value.materialize())
         return pack_result(impl(obj))
 
     def _fake(*flat: Any) -> List[torch.Tensor]:
@@ -1026,32 +1027,6 @@ def _register_base_op(
     op.register_fake(_fake)
     _mark_effectful(op)
     return op
-
-
-def _flatten_saved_parameter_parts(ctx, tensors):
-    lengths = [len(t.parts) if isinstance(t, ParameterParts) else None for t in tensors]
-    ctx.parameter_parts_lengths = lengths if any(n is not None for n in lengths) else None
-    if ctx.parameter_parts_lengths is None:
-        return tensors
-    return [part for t in tensors for part in (t.parts if isinstance(t, ParameterParts) else (t,))]
-
-
-def _restore_saved_tensors(ctx):
-    tensors = restore_from_func_ctx(ctx)
-    lengths = getattr(ctx, "parameter_parts_lengths", None)
-    if lengths is None:
-        return tensors
-    restored = []
-    offset = 0
-    for length in lengths:
-        if length is None:
-            restored.append(tensors[offset])
-            offset += 1
-        else:
-            restored.append(ParameterParts(tuple(tensors[offset : offset + length])))
-            offset += length
-    ctx.parameter_parts_lengths = None
-    return restored
 
 
 def _register_autograd_for_op(
@@ -1072,9 +1047,6 @@ def _register_autograd_for_op(
     the plan on ``ctx`` so backward can slice its grads per user output.
     """
     bwd_takes_grad_tuple = any(f.name == "grad_outputs" for f in bwd_plan.fields)
-    supports_parts = any(f.allows_concatenation for f in fwd_plan.fields)
-    tensor_storage_offsets = frozenset(fwd_plan.tensor_or_quantized_offsets())
-    set_saved_tensors = getattr(bwd_plan.arg_type, "set_saved_tensors", None)
 
     def _setup_context(ctx, inputs, output):
         ctx.fwd_tensor_list_lengths = {
@@ -1095,9 +1067,15 @@ def _register_autograd_for_op(
             out_plan.ctx_attrs,
             tuple(saved_list),
         )
-        saved = tensors_to_save_from_setup or ()
-        if supports_parts:
-            saved = _flatten_saved_parameter_parts(ctx, saved)
+        saved = []
+        ctx.concatenated_saved_lengths = []
+        for value in tensors_to_save_from_setup or ():
+            if isinstance(value, ParameterParts):
+                ctx.concatenated_saved_lengths.append(len(value.parts))
+                saved.extend(value.parts)
+            else:
+                ctx.concatenated_saved_lengths.append(None)
+                saved.append(value)
         tensors_to_save, tensor_objects = prepare_for_saving(*saved)
         ctx.tensor_objects = tensor_objects
         ctx.save_for_backward(*tensors_to_save)
@@ -1106,12 +1084,12 @@ def _register_autograd_for_op(
         # Input shapes for the grad slots (SymInt-safe on ctx): a bwd impl may
         # rederive shapes lossily (e.g. rank-1 inputs come back rank-2), so the
         # returned grads are viewed back to the true input shapes below.
-        ctx.parameter_parts_grad_shapes = {
+        ctx.concatenated_grad_shapes = {
             pos: [tensor.shape for tensor in inputs[pos + 1]]
             for pos in grad_targets
-            if pos in tensor_storage_offsets
+            if pos in fwd_plan.tensor_or_quantized_offsets()
             and inputs[pos] is None
-            and inputs[pos + 2][_TQ_KIND_KEY] == _TensorOrQuantizedKind.PARTS
+            and inputs[pos + 2][_TQ_KIND_KEY] == _TensorOrQuantizedKind.CONCATENATED
         }
         ctx.grad_input_shapes = {
             pos: inputs[pos].shape for pos in grad_targets if isinstance(inputs[pos], torch.Tensor)
@@ -1119,9 +1097,7 @@ def _register_autograd_for_op(
 
     def _autograd_backward(ctx, *grad_outputs):
         bwd_obj = ctx.backward_objects
-        if set_saved_tensors is not None:
-            set_saved_tensors(bwd_obj, _restore_saved_tensors(ctx))
-        elif hasattr(bwd_obj, "setup_saved_tensors"):
+        if hasattr(bwd_obj, "setup_saved_tensors"):
             bwd_obj.setup_saved_tensors(ctx)
         ctx.tensor_objects = None
         user_grads = _slice_user_grads(ctx.output_ranges, grad_outputs[0])
@@ -1141,8 +1117,8 @@ def _register_autograd_for_op(
         for pos, length in ctx.fwd_tensor_list_lengths.items():
             out[pos] = [None] * length
         for pos, g in zip(grad_targets, grads):
-            if pos in ctx.parameter_parts_grad_shapes:
-                shapes = ctx.parameter_parts_grad_shapes[pos]
+            if pos in ctx.concatenated_grad_shapes:
+                shapes = ctx.concatenated_grad_shapes[pos]
                 if g is not None:
                     out[pos + 1] = list(torch.split(g, [shape[0] for shape in shapes], dim=0))
                 continue
@@ -1152,7 +1128,7 @@ def _register_autograd_for_op(
                     g = g.view(shape)
             out[pos] = g
         ctx.grad_input_shapes = None
-        ctx.parameter_parts_grad_shapes = None
+        ctx.concatenated_grad_shapes = None
         return tuple(out)
 
     fwd_op.register_autograd(_autograd_backward, setup_context=_setup_context)
@@ -1411,17 +1387,15 @@ def register_custom_op_with_autograd(
       non-differentiable input).
     * ``bwd_fake_impl(bwd_args)`` -- data-free twin of ``bwd_impl`` returning
       :class:`TensorSpec` grads.
-    * ``bwd_arg_type.set_saved_tensors(tensors)`` -- optional hook receiving
-      restored tensors, storage objects or parameter parts in forward save order.
-      Otherwise, the legacy ``setup_saved_tensors(ctx)`` hook is used if present.
+    * ``bwd_arg_type.setup_saved_tensors(ctx)`` -- optional hook; skipped if
+      absent.
 
     How the backward container is populated: ``setup_context`` fills the
     ``bwd_arg_type`` instance's non-tensor fields (quantizers, config) from
     forward state and returns the tensors to persist; the framework saves them
     via ``ctx.save_for_backward``. Before ``bwd_impl`` runs, the framework
     restores them into the container's tensor fields through the
-    ``set_saved_tensors`` (or legacy ``setup_saved_tensors``) hook and sets the
-    incoming gradient directly --
+    ``setup_saved_tensors`` hook and sets the incoming gradient directly --
     into a ``grad_outputs`` field (tuple, one grad per user output) if
     ``bwd_arg_type`` declares one, else into ``grad_output`` (the first user
     output's grad) -- so ``bwd_impl`` receives a fully-populated
