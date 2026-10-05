@@ -79,11 +79,22 @@ the two tensors that drive the rest of the layer:
 
 In PyTorch, passing a preallocated ``topk_indices`` buffer of shape
 ``[num_tokens, topk]`` to ``fused_topk_with_score_function`` selects a compact
-list of expert indices instead. The function fills this buffer and returns it
-as its second output without materializing the routing mask. The ``probs``
-output still has shape ``[num_tokens, num_experts]``. The JAX router does not
-currently expose this index-output option. Both frontends also support a
-bit-packed mask through ``routing_map_format="bitmap_u8"``. The examples and
+list of expert indices instead. The buffer must be a contiguous CUDA tensor on
+the same device as ``logits``, with dtype ``torch.int16``, ``torch.int32`` or
+``torch.int64``. For example:
+
+.. code-block:: python
+
+   topk_indices = torch.empty(
+       (num_tokens, topk), dtype=torch.int32, device=logits.device
+   )
+
+Pass this buffer as ``topk_indices=topk_indices`` and leave
+``routing_map_format`` at its default value. The function fills the buffer and
+returns it as its second output without materializing the routing mask. The
+``probs`` output still has shape ``[num_tokens, num_experts]``. The JAX router
+does not currently expose this index-output option. Both frontends also support
+a bit-packed mask through ``routing_map_format="bitmap_u8"``. The examples and
 figure below use the default mask format.
 
 ``fused_topk_with_score_function`` runs the score function and the top-k
