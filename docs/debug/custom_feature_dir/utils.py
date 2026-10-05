@@ -4,7 +4,6 @@
 
 """Utils for plotting stats in the tutorial"""
 
-
 import os
 import re
 import matplotlib.pyplot as plt

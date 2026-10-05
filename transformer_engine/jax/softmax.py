@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 """JAX softmax modules"""
+
 from enum import Enum
 from functools import partial
 from typing import Optional
@@ -53,7 +54,7 @@ def _softmax_fwd_rule(logits, mask, scale_factor, softmax_fusion_type):
 
 
 def _softmax_bwd_rule(scale_factor, softmax_fusion_type, ctx, dz):
-    (softmax_output, logits, mask) = ctx
+    softmax_output, logits, mask = ctx
 
     if softmax_fusion_type is SoftmaxFusionType.SCALED_MASKED:
         dgrad = tex.scaled_masked_softmax_bwd(dz, softmax_output, logits, mask, scale_factor)

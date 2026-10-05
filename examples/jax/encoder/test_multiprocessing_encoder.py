@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 """Encoder training with multi-GPU, multiprocessing, and tensor parallelism"""
+
 import argparse
 import os
 import unittest
@@ -104,7 +105,7 @@ def shard_array_wrapper(dataset, batch_size, mesh, pspec, enable_partition=False
     inputs = jnp.asarray(dataset)
     total_input_size = len(inputs)
 
-    (dp_size, tp_size) = mesh.device_ids.shape
+    dp_size, tp_size = mesh.device_ids.shape
     valid_input_size, global_batch_size, num_steps, tp_group_id = valid_shard_size(
         total_input_size, batch_size, dp_size, tp_size
     )
@@ -156,7 +157,7 @@ def train_epoch(
     """Train for a single epoch."""
 
     total_batch_size = len(train_ds["sentence"])
-    (dp_size, tp_size) = mesh.device_ids.shape
+    dp_size, tp_size = mesh.device_ids.shape
     valid_size, _, num_steps, tp_group_id = valid_shard_size(
         total_batch_size, batch_size, dp_size, tp_size
     )

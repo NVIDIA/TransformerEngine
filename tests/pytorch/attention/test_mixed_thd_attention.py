@@ -21,7 +21,6 @@ from test_attention import (
     run_dot_product_attention,
 )
 
-
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 
 MODEL_CONFIG = ModelConfig(

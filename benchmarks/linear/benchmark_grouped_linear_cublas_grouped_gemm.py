@@ -65,7 +65,6 @@ from transformer_engine.pytorch.module import (
 )
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 
-
 QWEN_NUM_EXPERTS = 512
 QWEN_TOP_K = 10
 QWEN_SEQUENCE_LENGTH = 4096
@@ -497,7 +496,7 @@ def main() -> None:
                             mode=args.mode,
                             time_ms=timing_ms,
                         ),
-                        "speedup_vs_multistream": (1.0 if path.name == "multistream" else speedup),
+                        "speedup_vs_multistream": 1.0 if path.name == "multistream" else speedup,
                     }
                 )
 

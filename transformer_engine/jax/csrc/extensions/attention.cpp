@@ -350,8 +350,8 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
       .set_head_dim_v(v_head_dim)                                                             \
       .set_max_seqlen_q(q_max_seqlen)                                                         \
       .set_max_seqlen_kv(kv_max_seqlen)                                                       \
-      .set_num_tokens_q(is_ragged ? input_batch *q_max_seqlen : 0)                            \
-      .set_num_tokens_kv(is_ragged ? input_batch *kv_max_seqlen : 0)                          \
+      .set_num_tokens_q(is_ragged ? input_batch * q_max_seqlen : 0)                           \
+      .set_num_tokens_kv(is_ragged ? input_batch * kv_max_seqlen : 0)                         \
       .set_bias_batch_size(bias_batch)                                                        \
       .set_bias_num_heads(bias_heads)                                                         \
       .set_bias_seqlen_q(bias_seqlen_q)                                                       \

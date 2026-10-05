@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 """JAX multi-head attention modules"""
+
 from __future__ import annotations
 from enum import Enum
 from functools import partial

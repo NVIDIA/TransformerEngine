@@ -15,7 +15,6 @@ from transformer_engine.pytorch.optimizers.newton_schulz import (
     newton_schulz_tp,
 )
 
-
 __all__ = [
     "CoeffIterMode",
     "CoeffT",

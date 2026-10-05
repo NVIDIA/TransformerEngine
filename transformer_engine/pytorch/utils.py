@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Utility functions for Transformer Engine modules"""
+
 from __future__ import annotations
 import functools
 import logging
@@ -17,7 +18,6 @@ import torch
 from .torch_version import torch_version
 from ..common import decode_cudnn_version
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
-
 
 __all__ = [
     "get_device_compute_capability",

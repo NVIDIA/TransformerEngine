@@ -8,6 +8,7 @@ This module provides tensor classes for handling quantized tensors in JAX, inclu
 both single-scale (1x) and double-scale (2x) quantization schemes. It supports
 rowwise and colwise quantization modes with proper scaling and dequantization.
 """
+
 import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass

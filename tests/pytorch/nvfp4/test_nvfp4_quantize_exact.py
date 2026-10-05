@@ -15,7 +15,6 @@ from transformer_engine.pytorch.custom_recipes.reference_nvfp4 import NVFP4Quant
 from transformer_engine.pytorch.custom_recipes import reference_utils
 from transformer_engine.common.recipe import NVFP4BlockScaling
 
-
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
 ue5m3_available, reason_for_no_ue5m3 = te.is_fp8_ue5m3_available(return_reason=True)
 NVFP4_E4M3_AMAX_FOR_UNIT_GLOBAL_SCALE = 448.0 * 6.0

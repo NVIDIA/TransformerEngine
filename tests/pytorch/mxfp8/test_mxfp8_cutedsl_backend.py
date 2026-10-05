@@ -138,8 +138,7 @@ def set_cutedsl_backend(enabled):
 
 def test_enable_cutedsl_backend_after_import():
     """Test if we can manually enable the CuTeDSL backend without enabling CuTeDSL backend in the beginning."""
-    script = textwrap.dedent(
-        """
+    script = textwrap.dedent("""
         import ctypes
 
         import transformer_engine.pytorch  # pylint: disable=unused-import
@@ -157,8 +156,7 @@ def test_enable_cutedsl_backend_after_import():
         setter(1)
 
         assert tvm_ffi.get_global_func(entrypoint, allow_missing=True) is not None
-        """
-    )
+        """)
     env = os.environ.copy()
     env["NVTE_ENABLE_CUTEDSL_BACKEND"] = "0"
     result = subprocess.run(

@@ -59,7 +59,6 @@ from transformer_engine.pytorch.custom_recipes.quantizer_factories import (
     nvfp4_factory,
 )
 
-
 THREE_FORMAT_MODULE = "demo.fc1"
 HIGH_PRECISION_MODULE = "demo.fc2"
 BASE_FACTORY = mxfp8_factory

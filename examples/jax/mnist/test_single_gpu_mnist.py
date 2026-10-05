@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 """MNIST training on single GPU"""
+
 import argparse
 import math
 import unittest

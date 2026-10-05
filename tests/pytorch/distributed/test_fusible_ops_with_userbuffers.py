@@ -35,7 +35,6 @@ from transformer_engine.pytorch import (
     Float8Tensor,
 )
 
-
 # Import utility functions
 _current_file = pathlib.Path(__file__).resolve()
 # Prepend so installed packages with a top-level utils module cannot shadow the test helpers.

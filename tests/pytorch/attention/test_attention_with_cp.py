@@ -377,8 +377,7 @@ def test_cp_with_flash_attention(cp_pool, dtype, model, qkv_format, cp_comm_type
     if (
         config.window_size != (-1, 0)
         and config.window_size != (-1, -1)
-        and cp_comm_type
-        in [
+        and cp_comm_type in [
             "p2p",
             "a2a+p2p",
         ]

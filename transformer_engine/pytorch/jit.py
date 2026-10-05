@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """NVFuser functions and JIT utilities"""
+
 import inspect
 import os
 import warnings

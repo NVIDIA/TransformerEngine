@@ -129,7 +129,6 @@ from transformer_engine.jax.ep import ep_bootstrap
 from transformer_engine.common.recipe import MXFP8BlockScaling
 from transformer_engine.jax.sharding import MeshResource, global_shard_guard
 
-
 # -----------------------------------------------------------------------------
 # Mesh / shape config
 # -----------------------------------------------------------------------------

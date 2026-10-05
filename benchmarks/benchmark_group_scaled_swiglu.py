@@ -74,7 +74,6 @@ import transformer_engine.pytorch.ops as te_ops
 import transformer_engine_torch as tex
 import torch
 
-
 BF16_BYTES = 2
 FP8_BYTES = 1
 # One e8m0 exponent per 32-row block of every column.

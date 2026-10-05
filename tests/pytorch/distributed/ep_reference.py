@@ -910,12 +910,14 @@ class MoeEpReference:
                     raise RuntimeError("wgrad forward staging was not built")
                 valid_counts = tuple(
                     int(value)
-                    for value in torch.bincount(
-                        recv_expert,
-                        minlength=self.experts_per_rank,
+                    for value in (
+                        torch.bincount(
+                            recv_expert,
+                            minlength=self.experts_per_rank,
+                        )
+                        .cpu()
+                        .tolist()
                     )
-                    .cpu()
-                    .tolist()
                 )
                 padded_ends = []
                 total = 0

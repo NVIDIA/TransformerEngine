@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for quantization"""
+
 import operator
 from functools import reduce
 from typing import Tuple, Optional, Union
@@ -47,7 +48,6 @@ from ..quantize import (
     get_rht_matrix,
     QuantizeLayout,
 )
-
 
 __all__ = ["quantize", "quantize_dbias", "grouped_quantize", "grouped_dbias"]
 

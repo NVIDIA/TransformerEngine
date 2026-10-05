@@ -14,7 +14,6 @@ from transformer_engine.pytorch.custom_recipes import reference_utils
 from transformer_engine.pytorch.constants import DType
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage, Quantizer
 
-
 NVFP4_FP4_MAX = 6.0
 NVFP4_E4M3_SCALE_MAX = 448.0
 NVFP4_UE5M3_SCALE_MAX = 114688.0
