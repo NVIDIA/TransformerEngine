@@ -106,48 +106,75 @@ def test_graph_workspaces_survive_replay_and_are_released(ub, grouped_gemm):
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("execution", ["eager", "graph"])
-def test_concurrent_gemms_match_exact_reference(dtype, execution):
-    """Large reductions exercise cuBLAS algorithms that use scratch for partial sums."""
+@pytest.mark.parametrize("layout", ["NT", "NN"])
+def test_concurrent_gemms_match_exact_reference(dtype, execution, layout):
+    """Concurrent router wgrad and dgrad must own scratch in eager and graph execution."""
     streams = [torch.cuda.Stream(), torch.cuda.Stream()]
-    reduction, hidden, experts = 16384, 4096, 128
-    inputs = [
-        torch.full((reduction, hidden), value, dtype=dtype, device="cuda") for value in (1.0, 2.0)
-    ]
+    hidden, experts = 4096, 128
+    if layout == "NT":
+        # wgrad = grad_output.T @ input; reduce over tokens.
+        tokens = reduction = 16384
+        input_shape, output_shape = (tokens, hidden), (experts, hidden)
+    else:
+        # dgrad = grad_output @ weight; match the router's NN [8192, 128, 4096] GEMM.
+        tokens, reduction = 8192, experts
+        input_shape, output_shape = (experts, hidden), (tokens, hidden)
+    inputs = [torch.full(input_shape, value, dtype=dtype, device="cuda") for value in (1.0, 2.0)]
     gradients = [
-        torch.full((reduction, experts), value, dtype=dtype, device="cuda") for value in (1.0, 3.0)
+        torch.full((tokens, experts), value, dtype=dtype, device="cuda") for value in (1.0, 3.0)
     ]
+    # Both operands and these analytic results are exactly representable in either dtype.
+    expected = [reduction, reduction * 6]
     ready = torch.cuda.Event()
     ready.record()
     for stream in streams:
         stream.wait_event(ready)
 
-    outputs, graphs = [], []
+    outputs, graphs, checks = [], [], []
     if execution == "graph":
         capture_stream = torch.cuda.Stream()
         capture_stream.wait_event(ready)
         for inp, grad in zip(inputs, gradients):
             with torch.cuda.stream(capture_stream):
-                general_gemm(inp, grad, dtype, layout="NT", grad=True)
+                general_gemm(inp, grad, dtype, layout=layout, grad=True)
             capture_stream.synchronize()
+            # Separate private pools, captured on one stream and replayed on two others.
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph, stream=capture_stream):
-                out, *_ = general_gemm(inp, grad, dtype, layout="NT", grad=True)
+                out, *_ = general_gemm(inp, grad, dtype, layout=layout, grad=True)
+            assert out.shape == output_shape
+            assert out.dtype == dtype
             graphs.append(graph)
             outputs.append(out)
+            del out
     for _ in range(8):
         for index, (stream, inp, grad) in enumerate(zip(streams, inputs, gradients)):
             with torch.cuda.stream(stream):
                 if execution == "graph":
                     graphs[index].replay()
                 else:
-                    out, *_ = general_gemm(inp, grad, dtype, layout="NT", grad=True)
+                    out, *_ = general_gemm(inp, grad, dtype, layout=layout, grad=True)
+                    assert out.shape == output_shape
+                    assert out.dtype == dtype
                     outputs.append(out)
+                    del out
+        if execution == "eager":
+            # Submit both GEMMs before the checks. Keep only this pair of large NN outputs.
+            for index, (stream, out) in enumerate(zip(streams, outputs)):
+                with torch.cuda.stream(stream):
+                    checks.append(torch.all(out == expected[index]))
+            del out
+            outputs.clear()
     for stream in streams:
         stream.synchronize()
-    # Both operands and the result are exactly representable in either dtype.
     for index, out in enumerate(outputs):
-        expected = torch.full_like(out, reduction * (1 if index % 2 == 0 else 6))
-        torch.testing.assert_close(out, expected, rtol=0, atol=0)
+        checks.append(torch.all(out == expected[index]))
+    torch.testing.assert_close(
+        torch.stack(checks),
+        torch.ones(len(checks), dtype=torch.bool, device="cuda"),
+        rtol=0,
+        atol=0,
+    )
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
