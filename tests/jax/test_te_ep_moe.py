@@ -124,6 +124,7 @@ from transformer_engine.jax.moe import (
     _ALIGN_SIZE,
     _CUDNN_JAX_ALIGN_SIZE,
     _use_cudnn_cutedsl_fusion_from_env,
+    WeightGather,
     get_moe_recv_capacity_per_rank,
     moe,
     record_ep_bootstrap_signature_for_moe,
@@ -131,7 +132,6 @@ from transformer_engine.jax.moe import (
 from transformer_engine.jax.ep import ep_bootstrap
 from transformer_engine.common.recipe import MXFP8BlockScaling
 from transformer_engine.jax.sharding import MeshResource, global_shard_guard
-
 
 # -----------------------------------------------------------------------------
 # Mesh / shape config
@@ -208,9 +208,7 @@ def mesh():
     # Worst-case recv capacity per rank
     # TODO(jberchtold) support configurations other than worst-case by refactoring tests
     # but if possible avoid bootstrap/teardown for each test
-    alignment = (
-        _CUDNN_JAX_ALIGN_SIZE if _use_cudnn_cutedsl_fusion_from_env() else _ALIGN_SIZE
-    )
+    alignment = _CUDNN_JAX_ALIGN_SIZE if _use_cudnn_cutedsl_fusion_from_env() else _ALIGN_SIZE
     recv_capacity_per_rank = get_moe_recv_capacity_per_rank(
         num_experts=NUM_EXPERTS,
         num_experts_per_tok=TOPK,
@@ -367,6 +365,7 @@ def _make_block(
     input_axes=("batch", None, None),
     quantization_recipe=None,
     dispatch_checkpoint_name=None,
+    weight_gather=WeightGather.full_precision(),
 ):
     kwargs = dict(
         num_experts=NUM_EXPERTS,
@@ -381,6 +380,7 @@ def _make_block(
         input_axes=input_axes,
         quantization_recipe=quantization_recipe,
         dispatch_checkpoint_name=dispatch_checkpoint_name,
+        weight_gather=weight_gather,
     )
     # Custom expert_bias_init lets tests inject a non-zero expert_bias without
     # poking variables['params'] post-init.
@@ -572,6 +572,69 @@ if get_device_compute_capability(0) >= 100:
     _QUANTIZATION_CASES.append(pytest.param("mxfp8", id="mxfp8"))
 
 
+def test_weight_gather_policy_axis_resolution(mesh):
+    """The policy resolves FSDP context only when no axis was supplied."""
+    with pytest.raises(ValueError, match="active MeshResource"):
+        WeightGather.quantized()
+    with _ctx(mesh):
+        assert WeightGather.quantized().axis == FSDP_AXIS
+    with global_shard_guard(MeshResource()):
+        assert WeightGather.quantized(axis="custom").axis == "custom"
+        with pytest.raises(ValueError, match="fsdp_resource"):
+            WeightGather.quantized()
+
+
+@pytest.mark.parametrize("native_weight_layout", [False, True])
+def test_quantized_weight_gather_matches_full_precision_gather(
+    mesh, monkeypatch, native_weight_layout
+):
+    """The FP8 weight gather retains forward and backward MoE semantics."""
+    if native_weight_layout:
+        if not _use_cudnn_cutedsl_fusion_from_env():
+            pytest.skip("Native weight layout requires cuDNN grouped GEMM fusion")
+        from transformer_engine.jax import cpp_extensions as tex
+
+        flax_moe_module = importlib.import_module("transformer_engine.jax.flax.moe")
+        original_moe = flax_moe_module.moe
+
+        def native_moe(*args, **kwargs):
+            args = list(args)
+            gate, up = jnp.split(args[2], 2, axis=-1)
+            args[2] = tex.pack_swiglu_pair(gate, up).transpose(0, 2, 1)
+            kwargs["wi_kernel_axes"] = ("exp", "mlp", "embed")
+            return original_moe(*args, **kwargs)
+
+        monkeypatch.setattr(flax_moe_module, "moe", native_moe)
+    x = _make_inputs(jax.random.PRNGKey(41))
+    baseline = _make_block(quantization_recipe=MXFP8BlockScaling())
+    with _ctx(mesh):
+        gather_policy = WeightGather.quantized()
+    quantized_ag = _make_block(quantization_recipe=MXFP8BlockScaling(), weight_gather=gather_policy)
+    variables, baseline_out, _ = _init_apply(baseline, mesh, x, jax.random.PRNGKey(42))
+    with _ctx(mesh):
+        x_sh = _shard_inputs(x, mesh)
+        quantized_out, _, _ = jax.jit(quantized_ag.apply)(variables, x_sh)
+        quantized_out.block_until_ready()
+    np.testing.assert_allclose(
+        _to_global_numpy(quantized_out, mesh).astype(np.float32),
+        _to_global_numpy(baseline_out, mesh).astype(np.float32),
+        **FWD_TOLERANCE["mxfp8"],
+    )
+    baseline_grads, baseline_dx = _grad_step(baseline, variables, mesh, x)
+    quantized_grads, quantized_dx = _grad_step(quantized_ag, variables, mesh, x)
+    for name in ("wi", "wo"):
+        np.testing.assert_allclose(
+            _to_global_numpy(_unwrap(quantized_grads["params"][name]), mesh).astype(np.float32),
+            _to_global_numpy(_unwrap(baseline_grads["params"][name]), mesh).astype(np.float32),
+            **GRAD_FFN_TOLERANCE["mxfp8"],
+        )
+    np.testing.assert_allclose(
+        _to_global_numpy(quantized_dx, mesh).astype(np.float32),
+        _to_global_numpy(baseline_dx, mesh).astype(np.float32),
+        **GRAD_FFN_TOLERANCE["mxfp8"],
+    )
+
+
 def _reference_kwargs_from_config(config, params_np):
     """Pick out the reference-relevant pieces of a parametrize config."""
     return dict(
@@ -703,9 +766,7 @@ class TestTeEpMoeBackward:
 
 def test_ep_checkpoint_names(mesh, monkeypatch):
     if _use_cudnn_cutedsl_fusion_from_env():
-        pytest.skip(
-            "BF16 fallback uses a different EP alignment than the cuDNN bootstrap"
-        )
+        pytest.skip("BF16 fallback uses a different EP alignment than the cuDNN bootstrap")
     moe_module = importlib.import_module("transformer_engine.jax.moe")
     named_values = {}
     original_checkpoint_name = moe_module.checkpoint_name
@@ -723,15 +784,11 @@ def test_ep_checkpoint_names(mesh, monkeypatch):
     grads, grad_inputs = _grad_step(block, variables, mesh, inputs)
 
     assert len(named_values["saved_dispatch"]) >= 2
-    assert all(
-        hasattr(value, "shape") for values in named_values.values() for value in values
-    )
+    assert all(hasattr(value, "shape") for values in named_values.values() for value in values)
     assert np.all(np.isfinite(_to_global_numpy(output, mesh)))
     assert np.all(np.isfinite(_to_global_numpy(grad_inputs, mesh)))
     for name in ("gate_kernel", "wi", "wo"):
-        assert np.all(
-            np.isfinite(_to_global_numpy(_unwrap(grads["params"][name]), mesh))
-        )
+        assert np.all(np.isfinite(_to_global_numpy(_unwrap(grads["params"][name]), mesh)))
 
 
 class TestTeEpMoeCudnnCutedslFusion:
@@ -741,8 +798,7 @@ class TestTeEpMoeCudnnCutedslFusion:
     def test_mxfp8_forward_and_backward(self, mesh, apply_topk_weights_early, monkeypatch):
         if not _use_cudnn_cutedsl_fusion_from_env():
             pytest.skip(
-                "run separately with "
-                "NVTE_JAX_TEMP_FLAG_FOR_ABHINAV_CUDNN_GROUPED_GEMM_FUSION=1"
+                "run separately with " "NVTE_JAX_TEMP_FLAG_FOR_ABHINAV_CUDNN_GROUPED_GEMM_FUSION=1"
             )
         rubin_calls = []
         if get_device_compute_capability(0) == 107:
@@ -804,7 +860,9 @@ class TestTeEpMoeCudnnCutedslFusion:
                 )
                 np.testing.assert_allclose(
                     _to_global_numpy(_unwrap(grads["params"][name]), mesh).astype(np.float32),
-                    _to_global_numpy(_unwrap(baseline_grads["params"][name]), mesh).astype(np.float32),
+                    _to_global_numpy(_unwrap(baseline_grads["params"][name]), mesh).astype(
+                        np.float32
+                    ),
                     **tolerance,
                     err_msg=f"Rubin GLU {name} gradient differs from dedicated SwiGLU",
                 )
@@ -914,9 +972,7 @@ class TestTeEpMoeCudnnCutedslFusion:
         assert np.all(np.isfinite(_to_global_numpy(output, mesh)))
         assert np.all(np.isfinite(_to_global_numpy(grad_inputs, mesh)))
         for name in ("gate_kernel", "wi", "wo"):
-            assert np.all(
-                np.isfinite(_to_global_numpy(_unwrap(grads["params"][name]), mesh))
-            )
+            assert np.all(np.isfinite(_to_global_numpy(_unwrap(grads["params"][name]), mesh)))
 
 
 class TestTeEpMoeAuxLoss:

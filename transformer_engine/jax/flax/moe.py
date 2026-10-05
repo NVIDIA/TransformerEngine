@@ -34,7 +34,7 @@ import jax.numpy as jnp
 from flax import linen as nn
 
 from transformer_engine.common.recipe import Recipe
-from ..moe import moe
+from ..moe import WeightGather, moe
 from ..quantize import QuantizerSet
 from ..router import ScoreFunction
 from ..sharding import _get_mesh, get_active_resource_axis
@@ -108,6 +108,10 @@ class _MoEBlock(TransformerEngineBase):
     dispatch_checkpoint_name : Optional[str]
         JAX rematerialization checkpoint name for the EP dispatch outputs.
         ``None`` leaves them unnamed.
+    weight_gather : WeightGather
+        Expert-weight gather policy. Defaults to a full-precision gather.
+        For MXFP8 gather, use ``WeightGather.quantized()`` to select the
+        active ``MeshResource.fsdp_resource``, or pass ``axis`` explicitly.
 
     The per-expert dispatch-slot alignment is fixed internally at 128
     tokens (see ``moe._ALIGN_SIZE``) -- the value required by NCCL EP
@@ -155,6 +159,7 @@ class _MoEBlock(TransformerEngineBase):
     apply_topk_weights_early: bool = False
     recv_capacity_per_rank: Optional[int] = None
     dispatch_checkpoint_name: Optional[str] = None
+    weight_gather: WeightGather = WeightGather.full_precision()
 
     # Dtypes / init / misc
     dtype: DType = jnp.float32
@@ -308,6 +313,7 @@ class _MoEBlock(TransformerEngineBase):
             apply_topk_weights_early=self.apply_topk_weights_early,
             quantizer_sets=quantizer_sets,
             recv_capacity_per_rank=self.recv_capacity_per_rank,
+            weight_gather=self.weight_gather,
             ep_axis=ep_axis,
             data_parallelism_axes=self.data_parallelism_axes,
             input_axes=self.input_axes,
