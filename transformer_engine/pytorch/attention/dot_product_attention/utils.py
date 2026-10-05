@@ -1889,8 +1889,23 @@ def get_attention_backend(
         bool(available_backends[2]),
     )
 
-    # Select FusedAttention for performance
-    if use_flash_attention and use_fused_attention and device_compute_capability >= (9, 0):
+    # Prefer FA2 for THD training with dropout on SM100/103, where FusedAttention has a known
+    # performance issue. At this point use_flash_attention_2 confirms a usable installation.
+    is_slow_fused_thd_dropout = (
+        is_training
+        and qkv_format == "thd"
+        and attention_dropout != 0.0
+        and device_compute_capability in ((10, 0), (10, 3))
+    )
+    if is_slow_fused_thd_dropout and use_flash_attention_2 and use_fused_attention:
+        logger.debug(
+            "Disabling FusedAttention to give FlashAttention 2 preference for THD with dropout"
+            " on SM100/103"
+        )
+        use_fused_attention = False
+        fused_attention_backend = None
+    # Select FusedAttention for performance in all other Hopper+ configurations.
+    elif use_flash_attention and use_fused_attention and device_compute_capability >= (9, 0):
         logger.debug(
             "Disabling FlashAttention to give FusedAttention preference on Hopper+ "
             "for performance reasons"
@@ -1924,11 +1939,26 @@ def get_attention_backend(
 
 @torch.no_grad()
 def get_thd_padding_mask(num_tokens, cu_seqlens, cu_seqlens_padded):
-    """Identify inter-sequence padding in a flattened packed THD buffer."""
+    """Return a boolean mask identifying padding token positions in a THD buffer.
+
+    ``num_tokens`` is the full physical buffer capacity, which may exceed
+    ``cu_seqlens_padded[-1]``. ``cu_seqlens`` describes cumulative valid token
+    counts, while ``cu_seqlens_padded`` describes physical sequence boundaries.
+    Inter-sequence gaps and all positions at or beyond the final padded boundary
+    are marked True. For example, a 16-token buffer with ``cu_seqlens=[0, 3, 8]``
+    and ``cu_seqlens_padded=[0, 4, 12]`` includes tail padding at positions [12, 16).
+
+    This helper is shared by non-CP and CP attention. Its operations stay on
+    device so that padding cleanup remains CUDA-graph-capturable in both paths.
+    """
     rows = torch.arange(num_tokens, device=cu_seqlens_padded.device)
     sequence = torch.searchsorted(cu_seqlens_padded[1:], rows, right=True)
-    valid_end = cu_seqlens_padded[sequence] + cu_seqlens[sequence + 1] - cu_seqlens[sequence]
-    return rows >= valid_end
+    valid_ends = cu_seqlens_padded[:-1] + cu_seqlens[1:] - cu_seqlens[:-1]
+    # Tail token positions map to sequence == batch_size. Append a zero-length sequence
+    # at the final physical boundary so that index is valid, even for an empty
+    # batch. All operations stay on device for CUDA Graph capture and replay.
+    valid_ends = torch.cat((valid_ends, cu_seqlens_padded[-1:]))
+    return rows >= valid_ends[sequence]
 
 
 @torch.no_grad()
