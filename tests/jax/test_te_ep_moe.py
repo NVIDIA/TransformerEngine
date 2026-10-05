@@ -365,13 +365,14 @@ def _make_block(
     input_axes=("batch", None, None),
     quantization_recipe=None,
     dispatch_checkpoint_name=None,
-    weight_gather=WeightGather.full_precision(),
+    quant_before_fsdp_ag=False,
+    mesh_resource=None,
 ):
     kwargs = dict(
         num_experts=NUM_EXPERTS,
         num_experts_per_tok=TOPK,
         intermediate_size=INTER,
-        data_parallelism_axes=(FSDP_AXIS,),
+        mesh_resource=mesh_resource,
         apply_topk_weights_early=apply_topk_weights_early,
         aux_loss_coeff=aux_loss_coeff,
         use_expert_routing_bias=use_expert_routing_bias,
@@ -380,7 +381,7 @@ def _make_block(
         input_axes=input_axes,
         quantization_recipe=quantization_recipe,
         dispatch_checkpoint_name=dispatch_checkpoint_name,
-        weight_gather=weight_gather,
+        quant_before_fsdp_ag=quant_before_fsdp_ag,
     )
     # Custom expert_bias_init lets tests inject a non-zero expert_bias without
     # poking variables['params'] post-init.
@@ -607,9 +608,7 @@ def test_quantized_weight_gather_matches_full_precision_gather(
         monkeypatch.setattr(flax_moe_module, "moe", native_moe)
     x = _make_inputs(jax.random.PRNGKey(41))
     baseline = _make_block(quantization_recipe=MXFP8BlockScaling())
-    with _ctx(mesh):
-        gather_policy = WeightGather.quantized()
-    quantized_ag = _make_block(quantization_recipe=MXFP8BlockScaling(), weight_gather=gather_policy)
+    quantized_ag = _make_block(quantization_recipe=MXFP8BlockScaling(), quant_before_fsdp_ag=True)
     variables, baseline_out, _ = _init_apply(baseline, mesh, x, jax.random.PRNGKey(42))
     with _ctx(mesh):
         x_sh = _shard_inputs(x, mesh)
@@ -630,6 +629,70 @@ def test_quantized_weight_gather_matches_full_precision_gather(
         )
     np.testing.assert_allclose(
         _to_global_numpy(quantized_dx, mesh).astype(np.float32),
+        _to_global_numpy(baseline_dx, mesh).astype(np.float32),
+        **GRAD_FFN_TOLERANCE["mxfp8"],
+    )
+
+
+@pytest.mark.parametrize("quant_before_fsdp_ag", [False, True])
+@pytest.mark.parametrize("api", ["explicit", "legacy"])
+def test_mesh_resource_api_forward_and_backward(mesh, quant_before_fsdp_ag, api):
+    """Explicit resources need no global context; legacy calls retain numerical semantics."""
+    baseline = _make_block(
+        quantization_recipe=MXFP8BlockScaling(), quant_before_fsdp_ag=quant_before_fsdp_ag
+    )
+    if api == "explicit":
+        candidate = baseline.clone(
+            mesh_resource=MeshResource(ep_resource=EP_AXIS, fsdp_resource=FSDP_AXIS)
+        )
+    else:
+        candidate = baseline.clone(
+            data_parallelism_axes=(FSDP_AXIS,),
+            quant_before_fsdp_ag=False,
+            weight_gather=(
+                WeightGather.quantized(axis=FSDP_AXIS)
+                if quant_before_fsdp_ag
+                else WeightGather.full_precision()
+            ),
+        )
+    x = _make_inputs(jax.random.PRNGKey(51))
+    variables, baseline_out, _ = _init_apply(baseline, mesh, x, jax.random.PRNGKey(52))
+    baseline_grads, baseline_dx = _grad_step(baseline, variables, mesh, x)
+    with jax.set_mesh(mesh), nn_partitioning.axis_rules(LOGICAL_AXIS_RULES):
+        resource = None if api == "explicit" else MeshResource(ep_resource=EP_AXIS)
+        with global_shard_guard(resource):
+            x_sh = _shard_inputs(x, mesh)
+            if api == "legacy":
+                with pytest.warns(DeprecationWarning, match="deprecated for TE MoE"):
+                    candidate_out, _, _ = jax.jit(candidate.apply)(variables, x_sh)
+            else:
+                candidate_out, _, _ = jax.jit(candidate.apply)(variables, x_sh)
+
+            def loss_fn(variables, inputs):
+                output, _, _ = candidate.apply(variables, inputs)
+                return jnp.mean(output.astype(jnp.float32) ** 2)
+
+            candidate_grads, candidate_dx = jax.jit(jax.grad(loss_fn, argnums=(0, 1)))(
+                variables, x_sh
+            )
+            jax.block_until_ready((candidate_out, candidate_grads, candidate_dx))
+    np.testing.assert_allclose(
+        _to_global_numpy(candidate_out, mesh).astype(np.float32),
+        _to_global_numpy(baseline_out, mesh).astype(np.float32),
+        **FWD_TOLERANCE["mxfp8"],
+    )
+    for name in ("gate_kernel", "wi", "wo"):
+        np.testing.assert_allclose(
+            _to_global_numpy(_unwrap(candidate_grads["params"][name]), mesh).astype(np.float32),
+            _to_global_numpy(_unwrap(baseline_grads["params"][name]), mesh).astype(np.float32),
+            **(
+                GRAD_GATE_TOLERANCE["mxfp8"]
+                if name == "gate_kernel"
+                else GRAD_FFN_TOLERANCE["mxfp8"]
+            ),
+        )
+    np.testing.assert_allclose(
+        _to_global_numpy(candidate_dx, mesh).astype(np.float32),
         _to_global_numpy(baseline_dx, mesh).astype(np.float32),
         **GRAD_FFN_TOLERANCE["mxfp8"],
     )
@@ -798,7 +861,7 @@ class TestTeEpMoeCudnnCutedslFusion:
     def test_mxfp8_forward_and_backward(self, mesh, apply_topk_weights_early, monkeypatch):
         if not _use_cudnn_cutedsl_fusion_from_env():
             pytest.skip(
-                "run separately with " "NVTE_JAX_TEMP_FLAG_FOR_ABHINAV_CUDNN_GROUPED_GEMM_FUSION=1"
+                "run separately with NVTE_JAX_TEMP_FLAG_FOR_ABHINAV_CUDNN_GROUPED_GEMM_FUSION=1"
             )
         rubin_calls = []
         if get_device_compute_capability(0) == 107:

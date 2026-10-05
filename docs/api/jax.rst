@@ -59,3 +59,39 @@ Modules
   :members: __call__
 
 .. autoapifunction:: transformer_engine.jax.flax.extend_logical_axis_rules
+
+MoE parallelism resources
+-------------------------
+
+The experimental ``transformer_engine.jax.moe.moe`` function and Flax
+``_MoEBlock`` accept ``mesh_resource=None`` and ``quant_before_fsdp_ag=False``.
+Pass a ``MeshResource`` explicitly, or provide one through
+``global_shard_guard``. An explicit resource takes precedence; a missing
+resource raises ``ValueError``. The resource must name an EP axis. DP and
+FSDP are outer batch-sharding axes, in that order, with EP innermost.
+Unset outer axes are omitted, and a shared DP/FSDP axis is included once.
+
+For example, with an active physical mesh containing ``dp``, ``fsdp`` and
+``ep`` axes::
+
+    from transformer_engine.jax.flax import _MoEBlock
+    from transformer_engine.jax.sharding import MeshResource
+
+    block = _MoEBlock(
+        mesh_resource=MeshResource(
+            dp_resource="dp", fsdp_resource="fsdp", ep_resource="ep"
+        ),
+        quant_before_fsdp_ag=True,
+        # Supply an MXFP8 quantization recipe and the model dimensions.
+    )
+
+``quant_before_fsdp_ag=True`` quantizes local expert-weight shards before
+all-gathering their MXFP8 data and scales on the resource's FSDP axis.
+It requires an FSDP resource and MXFP8 kernel quantizers. The default
+gathers full-precision weights before quantization.
+
+The old ``ep_axis``, ``data_parallelism_axes`` and ``weight_gather`` arguments
+remain accepted with a ``DeprecationWarning``. They are translated into a
+resource and the boolean before calling the new API. Conflicting old and
+new arguments raise ``ValueError``. ``WeightGather`` remains available only
+for this compatibility path; new callers should use the boolean.
