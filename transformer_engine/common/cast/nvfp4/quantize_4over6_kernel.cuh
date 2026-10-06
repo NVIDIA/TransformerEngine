@@ -102,22 +102,35 @@ __device__ __forceinline__ float compute_error_rn(const float diff) {
   }
 }
 
+// Global encode scale S_enc and its inverse S_dec. Uniform per tensor (or per row for
+// row-scaled NVFP4), so callers can compute it once and reuse it across blocks.
+struct GlobalScales {
+  float S_enc;
+  float S_dec;
+};
+
 template <int E4M3_MAX>
-__device__ __forceinline__ ScalePair compute_scale_pair(const float block_amax,
-                                                        const float global_amax) {
+__device__ __forceinline__ GlobalScales compute_global_scales(const float global_amax) {
   static_assert(E4M3_MAX == 448 || E4M3_MAX == 256, "Unsupported NVFP4 E4M3 max.");
+  GlobalScales g;
+  g.S_enc = core::compute_global_encode_scaling_factor_FP4<nvfp4_scale_t, E4M3_MAX>(global_amax);
+  g.S_dec = 1.0f / g.S_enc;
+  return g;
+}
+
+__device__ __forceinline__ ScalePair compute_scale_pair(const float block_amax,
+                                                        const GlobalScales &global) {
   constexpr float fp4_max = detail::TypeExtrema<fp4e2m1>::max;  // 6.0f
   constexpr float fp8_max = detail::TypeExtrema<fp8e4m3>::max;  // 448.0f
   constexpr float expand_to_map4 = 1.5f;
-  const float S_enc =
-      core::compute_global_encode_scaling_factor_FP4<nvfp4_scale_t, E4M3_MAX>(global_amax);
+  const float S_enc = global.S_enc;
   const float base = block_amax / fp4_max * S_enc;
 
   ScalePair scales;
   scales.map4 = static_cast<nvfp4_scale_t>(fminf(base * expand_to_map4, fp8_max));
   scales.map6 = static_cast<nvfp4_scale_t>(fminf(base, fp8_max));
 
-  const float S_dec = 1.0f / S_enc;
+  const float S_dec = global.S_dec;
   scales.inv_map4 =
       fminf(1.0f / (static_cast<float>(scales.map4) * S_dec), detail::TypeExtrema<float>::max);
   scales.inv_map6 =
@@ -238,11 +251,52 @@ __device__ __forceinline__ void accumulate_fp16_scaled_error_pair(const uint32_t
   *err = __fadd_rn(*err, compute_error_rn<Cfg::mode>(diff1));
 }
 
+// Strict candidate error terms RN(RN(RN(q * sf) * amax) / denom) - x with two divisions per
+// candidate instead of one per element. E2M1 magnitudes are 2^k * u with u in {1, 1.5}, and
+// q * sf is exact, so the dequantized value equals 2^k * D_u with D_u = RN(RN(u * sf * amax) /
+// denom) whenever the scaled values stay normal and finite (checked per candidate; otherwise
+// the per-element path below is used). Results are bit-identical to the per-element form.
+struct StrictErrorBases {
+  float d1;
+  float d15;
+  bool exact;
+};
+
+template <int E4M3_MAX>
+__device__ __forceinline__ StrictErrorBases compute_strict_error_bases(const float sf,
+                                                                       const float global_amax) {
+  constexpr float fp4_max = detail::TypeExtrema<fp4e2m1>::max;  // 6.0f
+  constexpr float err_denom = fp4_max * static_cast<float>(E4M3_MAX);
+  const float p1 = __fmul_rn(sf, global_amax);
+  const float p15 = __fmul_rn(__fmul_rn(1.5f, sf), global_amax);
+  StrictErrorBases bases;
+  bases.d1 = __fdiv_rn(p1, err_denom);
+  bases.d15 = __fdiv_rn(p15, err_denom);
+  bases.exact = bases.d1 >= 0x1p-125f && p15 < 0x1p125f;
+  return bases;
+}
+
+template <typename Cfg>
+__device__ __forceinline__ void accumulate_dequant_error_pair_pow2(const uint32_t dequant_bits,
+                                                                   const float x0, const float x1,
+                                                                   const StrictErrorBases &bases,
+                                                                   float *err) {
+  // Clearing the f16 mantissa MSB maps 1.5 * 2^k to 2^k; that bit selects D_1.5 over D_1.
+  const uint32_t pow2_bits = dequant_bits & 0xFDFFFDFFu;
+  const float q0 = __half2float(__ushort_as_half(static_cast<uint16_t>(pow2_bits & 0xFFFFu)));
+  const float q1 = __half2float(__ushort_as_half(static_cast<uint16_t>(pow2_bits >> 16)));
+  const float base0 = (dequant_bits & 0x00000200u) ? bases.d15 : bases.d1;
+  const float base1 = (dequant_bits & 0x02000000u) ? bases.d15 : bases.d1;
+  // q * base is exact, so the FMA rounds the same way as (dequant - x).
+  *err = __fadd_rn(*err, compute_error_rn<Cfg::mode>(__fmaf_rn(q0, base0, -x0)));
+  *err = __fadd_rn(*err, compute_error_rn<Cfg::mode>(__fmaf_rn(q1, base1, -x1)));
+}
+
 template <typename Cfg, int E4M3_MAX>
 __device__ __forceinline__ uint32_t cvt_fp32_to_fp4_8x_with_error(
     const float (&x)[8], const float block_scale_inverse, const nvfp4_scale_t sf,
     const uint32_t fp16_error_scale, const float global_amax, const float global_encode_scale,
-    float *err) {
+    const StrictErrorBases &strict_bases, float *err) {
   uint32_t out = 0;
   uint32_t out_dequant_1 = 0;
   uint32_t out_dequant_2 = 0;
@@ -285,6 +339,11 @@ __device__ __forceinline__ uint32_t cvt_fp32_to_fp4_8x_with_error(
                                            global_encode_scale, err);
     accumulate_fp16_scaled_error_pair<Cfg>(out_dequant_4, x[6], x[7], fp16_error_scale,
                                            global_encode_scale, err);
+  } else if (strict_bases.exact) {
+    accumulate_dequant_error_pair_pow2<Cfg>(out_dequant_1, x[0], x[1], strict_bases, err);
+    accumulate_dequant_error_pair_pow2<Cfg>(out_dequant_2, x[2], x[3], strict_bases, err);
+    accumulate_dequant_error_pair_pow2<Cfg>(out_dequant_3, x[4], x[5], strict_bases, err);
+    accumulate_dequant_error_pair_pow2<Cfg>(out_dequant_4, x[6], x[7], strict_bases, err);
   } else {
     const float sf_float = static_cast<float>(sf);
     accumulate_dequant_error<Cfg, E4M3_MAX, 0>(out_dequant_1, x[0], sf_float, global_amax, err);
@@ -307,21 +366,28 @@ __device__ __forceinline__ CandidatePair make_candidates(const float (&x0)[8], c
   candidates.map4.err = 0.0f;
   candidates.map6.err = 0.0f;
   FP16ErrorScalePair fp16_error_scales{};
+  StrictErrorBases strict_bases4{};
+  StrictErrorBases strict_bases6{};
   if constexpr (Cfg::err_use_fast_math) {
     fp16_error_scales = compute_fp16_error_scales(scales);
+  } else {
+    strict_bases4 =
+        compute_strict_error_bases<E4M3_MAX>(static_cast<float>(scales.map4), global_amax);
+    strict_bases6 =
+        compute_strict_error_bases<E4M3_MAX>(static_cast<float>(scales.map6), global_amax);
   }
   candidates.map4.packed[0] = cvt_fp32_to_fp4_8x_with_error<Cfg, E4M3_MAX>(
       x0, scales.inv_map4, scales.map4, fp16_error_scales.map4, global_amax,
-      scales.global_encode_scale, &candidates.map4.err);
+      scales.global_encode_scale, strict_bases4, &candidates.map4.err);
   candidates.map6.packed[0] = cvt_fp32_to_fp4_8x_with_error<Cfg, E4M3_MAX>(
       x0, scales.inv_map6, scales.map6, fp16_error_scales.map6, global_amax,
-      scales.global_encode_scale, &candidates.map6.err);
+      scales.global_encode_scale, strict_bases6, &candidates.map6.err);
   candidates.map4.packed[1] = cvt_fp32_to_fp4_8x_with_error<Cfg, E4M3_MAX>(
       x1, scales.inv_map4, scales.map4, fp16_error_scales.map4, global_amax,
-      scales.global_encode_scale, &candidates.map4.err);
+      scales.global_encode_scale, strict_bases4, &candidates.map4.err);
   candidates.map6.packed[1] = cvt_fp32_to_fp4_8x_with_error<Cfg, E4M3_MAX>(
       x1, scales.inv_map6, scales.map6, fp16_error_scales.map6, global_amax,
-      scales.global_encode_scale, &candidates.map6.err);
+      scales.global_encode_scale, strict_bases6, &candidates.map6.err);
   return candidates;
 }
 
@@ -437,9 +503,21 @@ __device__ void quantize_stage_rowwise(const IType *tile, fp4e2m1x2 *output, nvf
                                        const size_t stage_row, const size_t tile_col,
                                        const size_t scale_stride) {
   constexpr int groups = kStageRows * kTileColGroups;
+  // Without an amax, the global amax defaults to E4M3_MAX * fp4_max (encode scale 1).
+  float tensor_amax = static_cast<float>(E4M3_MAX * detail::TypeExtrema<fp4e2m1>::max);
+  GlobalScales tensor_scales{};
+  if constexpr (!ROW_SCALED_NVFP4) {
+    if (amax != nullptr) {
+      tensor_amax = amax[0];
+    }
+    tensor_scales = compute_global_scales<E4M3_MAX>(tensor_amax);
+  }
   for (int group = threadIdx.x; group < groups; group += blockDim.x) {
-    const int local_row = group % kStageRows;
-    const int local_col_group = group / kStageRows;
+    // 2D quantization reduces over 16 consecutive lanes holding 16 consecutive rows, so it keeps
+    // the row-fastest mapping. 1D maps consecutive lanes to consecutive groups of a row instead:
+    // each warp then stores whole 32 B sectors and its shared memory reads conflict 2-way, not 8.
+    const int local_row = USE_2D_QUANTIZATION ? group % kStageRows : group / kTileColGroups;
+    const int local_col_group = USE_2D_QUANTIZATION ? group / kStageRows : group % kTileColGroups;
     const int local_col = local_col_group * kGroupSize;
     const size_t global_row = stage_row + local_row;
     const size_t global_col = tile_col + local_col;
@@ -457,16 +535,16 @@ __device__ void quantize_stage_rowwise(const IType *tile, fp4e2m1x2 *output, nvf
       block_amax = reduce_group_max_16(group_amax);
     }
 
-    float global_amax = static_cast<float>(E4M3_MAX * detail::TypeExtrema<fp4e2m1>::max);
-    if (amax != nullptr) {
-      if constexpr (ROW_SCALED_NVFP4) {
+    float global_amax = tensor_amax;
+    GlobalScales global_scales = tensor_scales;
+    if constexpr (ROW_SCALED_NVFP4) {
+      if (amax != nullptr) {
         global_amax = amax[global_row];
-      } else {
-        global_amax = amax[0];
       }
+      global_scales = compute_global_scales<E4M3_MAX>(global_amax);
     }
 
-    const ScalePair scale_pair = compute_scale_pair<E4M3_MAX>(block_amax, global_amax);
+    const ScalePair scale_pair = compute_scale_pair(block_amax, global_scales);
     CandidatePair candidates = make_candidates<Cfg, E4M3_MAX>(x0, x1, scale_pair, global_amax);
 
     float err_map4 = candidates.map4.err;
@@ -492,6 +570,12 @@ __device__ void quantize_stage_colwise(const IType *tile, fp4e2m1x2 *output_t,
                                        const size_t rows, const size_t cols, const size_t stage_row,
                                        const size_t tile_col, const size_t scale_stride_t) {
   constexpr int groups = kStageRowGroups * kTileCols;
+  // Without an amax, the global amax defaults to E4M3_MAX * fp4_max (encode scale 1).
+  float global_amax = static_cast<float>(E4M3_MAX * detail::TypeExtrema<fp4e2m1>::max);
+  if (amax != nullptr) {
+    global_amax = amax[0];
+  }
+  const GlobalScales global_scales = compute_global_scales<E4M3_MAX>(global_amax);
   for (int group = threadIdx.x; group < groups; group += blockDim.x) {
     const int local_row_group = group / kTileCols;
     const int local_col = group - local_row_group * kTileCols;
@@ -512,12 +596,7 @@ __device__ void quantize_stage_colwise(const IType *tile, fp4e2m1x2 *output_t,
       block_amax = reduce_group_max_16(group_amax);
     }
 
-    float global_amax = static_cast<float>(E4M3_MAX * detail::TypeExtrema<fp4e2m1>::max);
-    if (amax != nullptr) {
-      global_amax = amax[0];
-    }
-
-    const ScalePair scale_pair = compute_scale_pair<E4M3_MAX>(block_amax, global_amax);
+    const ScalePair scale_pair = compute_scale_pair(block_amax, global_scales);
     CandidatePair candidates = make_candidates<Cfg, E4M3_MAX>(x0, x1, scale_pair, global_amax);
 
     float err_map4 = candidates.map4.err;
