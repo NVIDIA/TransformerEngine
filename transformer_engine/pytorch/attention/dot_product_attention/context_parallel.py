@@ -1109,8 +1109,10 @@ def cp_p2p_fwd_fused_attn(
         softmax_lse_per_step, rng_states, *rest = aux_ctx_tensors
         attn_bias = rest[0] if len(rest) > 0 else None
 
+    # Indexed rather than starred: callers unpack exactly five, and a starred tail lets a
+    # backend whose return length is statically known collapse it to four.
     if return_max_logit:
-        return out_per_step, softmax_lse_per_step, rng_states, attn_bias, *max_logit
+        return out_per_step, softmax_lse_per_step, rng_states, attn_bias, max_logit[0]
     return out_per_step, softmax_lse_per_step, rng_states, attn_bias, None
 
 
