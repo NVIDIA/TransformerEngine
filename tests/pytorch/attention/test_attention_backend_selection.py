@@ -248,7 +248,7 @@ def test_fa4_window_sentinel_normalization(sent, expected):
     assert _fa4_normalized_kwargs(sent) == expected
 
 
-def test_fa4_causal_attention_is_not_all_zeros(monkeypatch):
+def test_fa4_causal_attention_matches_reference(monkeypatch):
     """Compare selected FA4 causal attention with an independent float64 reference."""
     if not torch.cuda.is_available():
         pytest.skip("Requires CUDA")
@@ -272,8 +272,6 @@ def test_fa4_causal_attention_is_not_all_zeros(monkeypatch):
     assert selected is not None and str(selected).startswith(
         "4"
     ), f"expected FlashAttention 4 to serve this config, got {selected}"
-    assert out.abs().max() > 0, "FA4 returned an all-zero output for causal attention"
-
     qs, ks, vs = (t.double().transpose(1, 2) for t in (q, k, v))
     scores = (qs @ ks.transpose(-1, -2)) * (d**-0.5)
     scores = scores.masked_fill(

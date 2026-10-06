@@ -221,21 +221,10 @@ else:
 
 
 def _fa4_with_none_window_sentinel(func: Callable) -> Callable:
-    """Rewrite TE's ``-1`` unbounded-window sentinel to the ``None`` FlashAttention 4 expects.
+    """Translate TE's ``-1`` unbounded-window sentinel to FA4's ``None``.
 
-    TE spells an unbounded side ``-1``; FA4 spells it ``None``. FA4 widens a window to full
-    attention only when *both* bounds are negative, so TE's causal ``(-1, 0)`` reaches the kernel
-    as the band ``[row + 1, row]`` -- empty. The output is then all zeros and the LSE all ``-inf``,
-    with nothing raised: a wrong answer rather than a failure.
-
-    Only ``-1`` is rewritten. A lone negative bound is a valid FA4 request for an empty window, so
-    widening every negative here would silently turn one of those into full attention.
-
-    Wrapped at the entry points rather than at the ~20 call sites that build these kwargs, since
-    those are shared with FA2 >= 2.7 and FA3, where ``-1`` is the correct spelling. All four are
-    wrapped together because ``run_attention_with_cp.py`` grades a CP run against a non-CP run of
-    the same backend: with both sides empty the comparison agrees, so fixing one pair alone would
-    present as a regression. Keyword arguments only; a positional caller bypasses this.
+    Preserve other negative offsets, which can represent empty windows. Adapt the FA4 entry
+    points because shared FA2/FA3 callers still use ``-1``.
     """
 
     @functools.wraps(func)
