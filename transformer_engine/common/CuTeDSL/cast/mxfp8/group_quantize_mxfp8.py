@@ -43,14 +43,12 @@ CUTEDSL_DEBUG_LOGGING = os.environ.get("CUTEDSL_DEBUG_LOGGING", "0") == "1"
 logger = logging.getLogger("transformer_engine.cutedsl.mxfp8")
 
 THREADS_PER_WARP = 32
-BYTES_PER_TENSORMAP = 128
-# Descriptor slots per tensor: input, rowwise output, colwise output, activation input.
+# CUDA stores four descriptor arrays: input, act_input, output_rowwise, output_colwise.
 NUM_TENSORMAPS = 4
-ACT_INPUT_SLOT = 3
-# One extra slot holds per-tensor (rows, cols, base_elts), so the main kernel never has to
-# binary-search the offsets array. Mirrors TensorMapStorage::rows/cols/offsets upstream.
-META_SLOT = NUM_TENSORMAPS
-NUM_WORKSPACE_SLOTS = NUM_TENSORMAPS + 1
+INPUT_SLOT = 0
+ACT_INPUT_SLOT = 1
+ROWWISE_OUTPUT_SLOT = 2
+COLWISE_OUTPUT_SLOT = 3
 
 # Shape representations, mirroring ShapeRepresentation in common/utils.cuh.
 SAME_BOTH_DIMS = "sbd"
@@ -62,6 +60,15 @@ SUPPORTED_SHAPE_REPS = (SAME_BOTH_DIMS, VARYING_FIRST_DIM, VARYING_LAST_DIM, VAR
 # Upper bound on the group size (MAX_SUPPORTED_TENSOR_DESCRIPTORS in grouped_tma.cuh); sizes
 # the fixed binary search over the offsets.
 MAX_SUPPORTED_TENSORS = 64
+# How many bytes is a TensorMap
+BYTES_PER_TENSORMAP = 128
+INT64_PER_TENSORMAP = BYTES_PER_TENSORMAP // 8
+# The byte offset of fields in the TensorMap struct
+ROWS_OFFSET = NUM_TENSORMAPS * MAX_SUPPORTED_TENSORS * INT64_PER_TENSORMAP
+COLS_OFFSET = ROWS_OFFSET + MAX_SUPPORTED_TENSORS
+OFFSETS_OFFSET = COLS_OFFSET + MAX_SUPPORTED_TENSORS
+# Size of the TensorMap struct in int64
+TENSOR_MAP_STORAGE_INT64_COUNT = OFFSETS_OFFSET + MAX_SUPPORTED_TENSORS
 
 
 class MXFP8GroupQuantizeConfig:
@@ -224,7 +231,7 @@ class MXFP8GroupQuantizeKernel:
 
     @cute.jit
     def _rowwise_scales(
-        self, mS_row: cute.Tensor, base: Int64, rows: Int32, cols: Int32
+        self, mS_row: cute.Tensor, base: Int64, rows: Int64, cols: Int64
     ) -> cute.Tensor:
         """Rowwise scales of a (rows, cols) tensor at `base`, tiled per 32x128 stage."""
         if cutlass.const_expr(self.cfg.WITH_GEMM_SWIZZLED_SCALES):
@@ -243,7 +250,7 @@ class MXFP8GroupQuantizeKernel:
 
     @cute.jit
     def _colwise_scales(
-        self, mS_col: cute.Tensor, base: Int64, rows: Int32, cols: Int32
+        self, mS_col: cute.Tensor, base: Int64, rows: Int64, cols: Int64
     ) -> cute.Tensor:
         """Colwise scales of a (rows, cols) tensor at `base`, tiled per 32x128 stage."""
         if cutlass.const_expr(self.cfg.WITH_GEMM_SWIZZLED_SCALES):
@@ -277,7 +284,8 @@ class MXFP8GroupQuantizeKernel:
         mLastDims: Optional[
             cute.Tensor
         ],  # int64[num_tensors] (VARYING_LAST_DIM / VARYING_BOTH_DIMS)
-        mTensormaps: cute.Tensor,  # int64[num_tensors, NUM_WORKSPACE_SLOTS, 16]
+        mTensormaps: Optional[cute.Tensor],  # flat int64 view of CUDA TensorMapStorage
+        num_tensors: Int32,
         mNoop: cute.Pointer,  # f32 cast_noop flag; may be null, checked on device
         mActInput: Optional[cute.Tensor],  # activation input, only with WITH_DACT
         mWorkspace: Optional[cute.Tensor],  # f32 partial dbias, only with WITH_DBIAS
@@ -294,7 +302,6 @@ class MXFP8GroupQuantizeKernel:
                 first_logical_dim == 1, "VARYING_BOTH_DIMS requires logical shape [1, total]"
             )
 
-        num_tensors = mTensormaps.shape[0]
         runtime_assert(num_tensors > 0, "Grouped quantization requires at least one tensor")
 
         # A TMA atom copies a TILE at a time
@@ -330,44 +337,32 @@ class MXFP8GroupQuantizeKernel:
 
         if cutlass.const_expr(cfg.IS_SINGLE_TENSOR):
             # How many CTAs does the grouped tensor have in both directions
-            jobs_Y = cute.ceil_div(Int32(first_logical_dim), (self.TILE_ROWS * self.NUM_TILES_Y))
-            jobs_X = cute.ceil_div(Int32(last_logical_dim), self.TILE_COLS * self.NUM_TILES_X)
+            jobs_Y = cute.ceil_div(Int64(first_logical_dim), (self.TILE_ROWS * self.NUM_TILES_Y))
+            jobs_X = cute.ceil_div(Int64(last_logical_dim), self.TILE_COLS * self.NUM_TILES_X)
             # Flatten it to an 1D grid
             grid = [jobs_X * jobs_Y, 1, 1]
         else:
             # A placeholder for the kernel signature only; we won't use it in non-single tensor cases
             jobs_X = None
             # Estimate the total jobs across the group; each job has NUM_TILES_X * NUM_TILES_Y tiles
-            if cutlass.const_expr(cfg.SHAPE_REP == VARYING_BOTH_DIMS):
-                # Note: when VARYING_BOTH_DIMS, the first_logical_dim must be 1
-                estimated_jobs = cute.ceil_div(
-                    Int32(first_logical_dim) * Int32(last_logical_dim), self.ELTS_PER_CTA
-                )
-            elif cutlass.const_expr(cfg.SHAPE_REP == VARYING_LAST_DIM):
-                # Same as VARYING_BOTH_DIMS but we divide 128 before multiplying to avoid overflowing Int32
-                # because the first logical dimension is always 128-aligned when not VARYING_BOTH_DIMS
-                # so they are equivalent
-                estimated_jobs = cute.ceil_div(
-                    (Int32(first_logical_dim) // 128) * Int32(last_logical_dim),
-                    self.ELTS_PER_CTA // 128,
-                )
-            else:
-                raise ValueError(f"unexpected shape representation {cfg.SHAPE_REP!r}")
+            estimated_jobs = cute.ceil_div(
+                Int64(first_logical_dim) * Int64(last_logical_dim), self.ELTS_PER_CTA
+            )
 
             # Divide the persistent worker budget evenly across tensors, with at least
             # one worker per tensor. Each worker may process several jobs.
             requested_CTAs_per_tensor = cutlass.max(
-                Int32(1),
-                Int32(self.SM_COUNT * self.STATIC_PERSISTENT_WORKERS_PER_SM) // Int32(num_tensors),
+                Int64(1),
+                Int64(self.SM_COUNT * self.STATIC_PERSISTENT_WORKERS_PER_SM) // Int64(num_tensors),
             )
             # In average how many jobs per tensor (only an average, the actual jobs per tensor may vary)
             average_jobs_per_tensor = cutlass.max(
-                Int32(1), cute.ceil_div(estimated_jobs, Int32(num_tensors))
+                Int64(1), cute.ceil_div(estimated_jobs, Int64(num_tensors))
             )
             # Don't launch more CTAs than the average jobs per tensor in case
             # STATIC_PERSISTENT_WORKERS_PER_SM causes redundancy
             CTAs_per_tensor = cutlass.min(requested_CTAs_per_tensor, average_jobs_per_tensor)
-            grid = [CTAs_per_tensor, Int32(num_tensors), 1]
+            grid = [Int32(CTAs_per_tensor), num_tensors, 1]
 
         # Only the multi-tensor representations need per-tensor descriptors.
         if cutlass.const_expr(not cfg.IS_SINGLE_TENSOR):
@@ -427,8 +422,8 @@ class MXFP8GroupQuantizeKernel:
         mFirstDims: Optional[cute.Tensor],
         mLastDims: Optional[cute.Tensor],
         mTensormaps: cute.Tensor,
-        first_logical_dim: Int32,
-        last_logical_dim: Int32,
+        first_logical_dim: Int64,
+        last_logical_dim: Int64,
         dtype: cutlass.Constexpr[Type[cutlass.Numeric]],
         tma_atom_x: cute.CopyAtom,
         tma_atom_orow: Optional[cute.CopyAtom],
@@ -437,12 +432,8 @@ class MXFP8GroupQuantizeKernel:
     ) -> None:
         """Update the per-tensor TMA descriptors for the group quantization kernel.
 
-        mTensormaps: int64[num_tensors, NUM_WORKSPACE_SLOTS, 16], where the slots are:
-        - 0: input tensor
-        - 1: rowwise output tensor
-        - 2: colwise output tensor
-        - 3: activation input tensor (only with WITH_DACT)
-        - 4: metadata (rows, cols, base_offset)
+        mTensormaps is a flat int64 view of CUDA's TensorMapStorage: four descriptor
+        arrays followed by the rows, cols, and offsets arrays.
         """
         cfg = self.cfg
 
@@ -450,13 +441,13 @@ class MXFP8GroupQuantizeKernel:
         tensor_id, _, _ = cute.arch.block_idx()
         # Figure out how many rows and columns this tensor has, and where its first element is in the group.
         if cutlass.const_expr(cfg.SHAPE_REP in (VARYING_FIRST_DIM, VARYING_BOTH_DIMS)):
-            rows = Int32(mFirstDims[tensor_id])
+            rows = Int64(mFirstDims[tensor_id])
         else:
-            rows = Int32(first_logical_dim)
+            rows = Int64(first_logical_dim)
         if cutlass.const_expr(cfg.SHAPE_REP in (VARYING_LAST_DIM, VARYING_BOTH_DIMS)):
-            cols = Int32(mLastDims[tensor_id])
+            cols = Int64(mLastDims[tensor_id])
         else:
-            cols = Int32(last_logical_dim)
+            cols = Int64(last_logical_dim)
         base_offset = Int64(mOffsets[tensor_id])
 
         # Same diagnostics as get_tensor_rows_num / get_tensor_cols_num. Like NVTE_DEVICE_ERROR
@@ -476,17 +467,28 @@ class MXFP8GroupQuantizeKernel:
                     tensor_id,
                 )
 
-        meta = mTensormaps[(tensor_id, META_SLOT, None)]
-        meta[0] = Int64(rows)
-        meta[1] = Int64(cols)
-        meta[2] = base_offset
+        mTensormaps[ROWS_OFFSET + tensor_id] = Int64(rows)
+        mTensormaps[COLS_OFFSET + tensor_id] = Int64(cols)
+        mTensormaps[OFFSETS_OFFSET + tensor_id] = base_offset
 
         tmap = TensorMapManager(TensorMapUpdateMode.GMEM, BYTES_PER_TENSORMAP)
         # Obtain the pointers of these descriptors
-        desc_x = tmap.get_tensormap_ptr(mTensormaps[(tensor_id, 0, None)].iterator)
-        desc_orow = tmap.get_tensormap_ptr(mTensormaps[(tensor_id, 1, None)].iterator)
-        desc_ocol = tmap.get_tensormap_ptr(mTensormaps[(tensor_id, 2, None)].iterator)
-        desc_act = tmap.get_tensormap_ptr(mTensormaps[(tensor_id, ACT_INPUT_SLOT, None)].iterator)
+        desc_x = tmap.get_tensormap_ptr(
+            mTensormaps.iterator
+            + (INPUT_SLOT * MAX_SUPPORTED_TENSORS + tensor_id) * INT64_PER_TENSORMAP
+        )
+        desc_orow = tmap.get_tensormap_ptr(
+            mTensormaps.iterator
+            + (ROWWISE_OUTPUT_SLOT * MAX_SUPPORTED_TENSORS + tensor_id) * INT64_PER_TENSORMAP
+        )
+        desc_ocol = tmap.get_tensormap_ptr(
+            mTensormaps.iterator
+            + (COLWISE_OUTPUT_SLOT * MAX_SUPPORTED_TENSORS + tensor_id) * INT64_PER_TENSORMAP
+        )
+        desc_act = tmap.get_tensormap_ptr(
+            mTensormaps.iterator
+            + (ACT_INPUT_SLOT * MAX_SUPPORTED_TENSORS + tensor_id) * INT64_PER_TENSORMAP
+        )
 
         # Zero-sized groups: creating a descriptor with a zero extent is invalid,
         # so skip (the main kernel skips these tensors as well).
@@ -666,13 +668,13 @@ class MXFP8GroupQuantizeKernel:
         mS_col: cute.Tensor,
         mOffsets: Optional[cute.Tensor],
         mFirstDims: Optional[cute.Tensor],
-        mTensormaps: cute.Tensor,
+        mTensormaps: Optional[cute.Tensor],
         mNoop: cute.Pointer,
         mWorkspace: Optional[cute.Tensor],
-        first_logical_dim: Int32,
-        last_logical_dim: Int32,
+        first_logical_dim: Int64,
+        last_logical_dim: Int64,
         num_tensors: Int32,
-        jobs_X: Optional[Int32],
+        jobs_X: Optional[Int64],
         dtype: cutlass.Constexpr[Type[cutlass.Numeric]],
         tma_atom_x: cute.CopyAtom,
         tma_src: cute.Tensor,
@@ -717,12 +719,12 @@ class MXFP8GroupQuantizeKernel:
         mS_col: cute.Tensor,
         mOffsets: Optional[cute.Tensor],
         mFirstDims: Optional[cute.Tensor],
-        mTensormaps: cute.Tensor,
+        mTensormaps: Optional[cute.Tensor],
         mWorkspace: Optional[cute.Tensor],
-        first_logical_dim: Int32,
-        last_logical_dim: Int32,
+        first_logical_dim: Int64,
+        last_logical_dim: Int64,
         num_tensors: Int32,
-        jobs_X: Optional[Int32],
+        jobs_X: Optional[Int64],
         dtype: cutlass.Constexpr[Type[cutlass.Numeric]],
         tma_atom_x: cute.CopyAtom,
         tma_src: cute.Tensor,
@@ -810,27 +812,27 @@ class MXFP8GroupQuantizeKernel:
         # If the CTA has work to do
         has_work = Boolean(True)
         # Metadata of the tensor that owns this job
-        tensor_rows = Int32(0)
-        tensor_cols = Int32(0)
+        tensor_rows = Int64(0)
+        tensor_cols = Int64(0)
         # Element offset of this tensor within the group: Int64 (CUDA uses size_t), since a
         # group can exceed 2^31 elements even when every individual extent is small.
         tensor_base = Int64(0)
         # Job's starting row and id in this individual tensor / global single tensor
-        job_start_row = Int32(0)
-        job_id_X = Int32(0)
+        job_start_row = Int64(0)
+        job_id_X = Int64(0)
 
-        first_job_id = Int32(0)
-        jobs_in_tensor = Int32(1)
-        job_stride = Int32(1)
-        jobs_X_in_tensor = Int32(1)
+        first_job_id = Int64(0)
+        jobs_in_tensor = Int64(1)
+        job_stride = Int64(1)
+        jobs_X_in_tensor = Int64(1)
 
         if cutlass.const_expr(cfg.IS_SINGLE_TENSOR):
             # grid = [jobs_X * jobs_Y, 1, 1]
-            job_id_Y = Int32(bidx) // jobs_X
-            job_id_X = Int32(bidx) % jobs_X
+            job_id_Y = Int64(bidx) // jobs_X
+            job_id_X = Int64(bidx) % jobs_X
             # View the grouped tensor as a single tensor of shape (first_logical_dim, last_logical_dim)
-            tensor_rows = Int32(first_logical_dim)
-            tensor_cols = Int32(last_logical_dim)
+            tensor_rows = Int64(first_logical_dim)
+            tensor_cols = Int64(last_logical_dim)
             # Which row does this job start from
             job_start_row = job_id_Y * (self.TILE_ROWS * self.NUM_TILES_Y)
             if cutlass.const_expr(cfg.SHAPE_REP == VARYING_FIRST_DIM):
@@ -841,13 +843,12 @@ class MXFP8GroupQuantizeKernel:
             # When SAME_BOTH_DIM, M is always divisible by 128, which is exactly TILE_ROWS * NUM_TILES_Y,
             # so no need to check for the last job's starting row being beyond the last row of the tensor.
         else:
-            # grid = [workers_per_tensor, Int32(num_tensors), 1]
+            # grid = [workers_per_tensor, num_tensors, 1]
             tensor_id = Int32(bidy)
             # Extract tensor's metadata
-            meta = mTensormaps[(tensor_id, META_SLOT, None)]
-            tensor_rows = Int32(meta[0])
-            tensor_cols = Int32(meta[1])
-            tensor_base = Int64(meta[2])
+            tensor_rows = Int64(mTensormaps[ROWS_OFFSET + tensor_id])
+            tensor_cols = Int64(mTensormaps[COLS_OFFSET + tensor_id])
+            tensor_base = Int64(mTensormaps[OFFSETS_OFFSET + tensor_id])
             if tensor_rows > 0 and tensor_cols > 0:
                 # How many jobs does this tensor have in both directions
                 jobs_X_in_tensor = cute.ceil_div(tensor_cols, (self.TILE_COLS * self.NUM_TILES_X))
@@ -855,9 +856,9 @@ class MXFP8GroupQuantizeKernel:
                 # How many jobs does this tensor have
                 jobs_in_tensor = jobs_X_in_tensor * jobs_Y_in_tensor
                 # Which job (1D index) does this CTA start from, which is also their worker ID
-                first_job_id = Int32(bidx)
+                first_job_id = Int64(bidx)
                 # gdx is how many CTAs are assigned to this tensor
-                job_stride = Int32(gdx)
+                job_stride = Int64(gdx)
                 # If my first job is already beyond the tensor's last job, I have no work to do
                 if first_job_id >= jobs_in_tensor:
                     has_work = Boolean(False)
@@ -890,10 +891,10 @@ class MXFP8GroupQuantizeKernel:
                         # Colwise swizzled scale indices restart at each member and depend
                         # on its rows (process_colwise_stage), so address the member that
                         # owns this job.
-                        member_rows = Int32(0)
-                        member_row_start = Int32(0)
+                        member_rows = Int64(0)
+                        member_row_start = Int64(0)
                         if cutlass.const_expr(cfg.SHAPE_REP == SAME_BOTH_DIMS):
-                            member_rows = tensor_rows // Int32(num_tensors)
+                            member_rows = tensor_rows // Int64(num_tensors)
                             member_row_start = job_start_row // member_rows * member_rows
                         else:
                             member_id = self._find_tensor_from_offsets(
@@ -901,8 +902,8 @@ class MXFP8GroupQuantizeKernel:
                                 num_tensors,
                                 Int64(job_start_row) * Int64(tensor_cols),
                             )
-                            member_rows = Int32(mFirstDims[member_id])
-                            member_row_start = Int32(
+                            member_rows = Int64(mFirstDims[member_id])
+                            member_row_start = Int64(
                                 Int64(mOffsets[member_id]) // Int64(tensor_cols)
                             )
                         col_scale_base = (
@@ -945,11 +946,23 @@ class MXFP8GroupQuantizeKernel:
                 )
             else:
                 # For non-single tensor case, we use persistent kernel so each CTA keeps processing jobs until none is left
-                desc_x = tmap.get_tensormap_ptr(mTensormaps[(tensor_id, 0, None)].iterator)
-                desc_out_row = tmap.get_tensormap_ptr(mTensormaps[(tensor_id, 1, None)].iterator)
-                desc_out_col = tmap.get_tensormap_ptr(mTensormaps[(tensor_id, 2, None)].iterator)
+                desc_x = tmap.get_tensormap_ptr(
+                    mTensormaps.iterator
+                    + (INPUT_SLOT * MAX_SUPPORTED_TENSORS + tensor_id) * INT64_PER_TENSORMAP
+                )
+                desc_out_row = tmap.get_tensormap_ptr(
+                    mTensormaps.iterator
+                    + (ROWWISE_OUTPUT_SLOT * MAX_SUPPORTED_TENSORS + tensor_id)
+                    * INT64_PER_TENSORMAP
+                )
+                desc_out_col = tmap.get_tensormap_ptr(
+                    mTensormaps.iterator
+                    + (COLWISE_OUTPUT_SLOT * MAX_SUPPORTED_TENSORS + tensor_id)
+                    * INT64_PER_TENSORMAP
+                )
                 desc_act = tmap.get_tensormap_ptr(
-                    mTensormaps[(tensor_id, ACT_INPUT_SLOT, None)].iterator
+                    mTensormaps.iterator
+                    + (ACT_INPUT_SLOT * MAX_SUPPORTED_TENSORS + tensor_id) * INT64_PER_TENSORMAP
                 )
 
                 if tidx == 0:
@@ -1023,8 +1036,8 @@ class MXFP8GroupQuantizeKernel:
         self,
         pipeline_obj: pipeline.PipelineTmaAsync,
         prod_state: pipeline.PipelineState,
-        tile_y: Int32,
-        tile_x: Int32,
+        tile_y: Int64,
+        tile_x: Int64,
         atoms: tuple[Optional[cute.CopyAtom], ...],
         partitions: tuple[Optional[cute.Tensor], ...],
         tmap: TensorMapManager,
@@ -1068,16 +1081,16 @@ class MXFP8GroupQuantizeKernel:
     @cute.jit
     def _process_job(
         self,
-        job_start_row: Int32,  # Row offset of this job (global for single-tensor, else tensor-local)
-        job_start_col: Int32,  # Column offset of this job within the tensor
-        rows: Int32,  # Rows of the rowwise-scale view (the group for single-tensor, else the tensor)
-        cols: Int32,  # Number of columns in this tensor
+        job_start_row: Int64,  # Row offset of this job (global for single-tensor, else tensor-local)
+        job_start_col: Int64,  # Column offset of this job within the tensor
+        rows: Int64,  # Rows of the rowwise-scale view (the group for single-tensor, else the tensor)
+        cols: Int64,  # Number of columns in this tensor
         row_scales: Optional[
             cute.Tensor
         ],  # Rowwise scales tiled per stage, rows counted like job_start_row
         col_scales: Optional[cute.Tensor],  # Colwise scales tiled per stage
-        col_scale_row_start: Int32,  # Row of this job in the colwise-scale view
-        col_scale_rows: Int32,  # Rows of the colwise-scale view
+        col_scale_row_start: Int64,  # Row of this job in the colwise-scale view
+        col_scale_rows: Int64,  # Rows of the colwise-scale view
         mWorkspace: Optional[cute.Tensor],  # f32 partial dbias workspace (WITH_DBIAS)
         sDbias: Optional[
             cute.Tensor
@@ -1108,7 +1121,7 @@ class MXFP8GroupQuantizeKernel:
         job_tile_X = job_start_col // self.TILE_COLS
         col_scale_tile_Y = col_scale_row_start // self.TILE_ROWS
         tiles_X = cutlass.min(
-            Int32(self.NUM_TILES_X), cute.ceil_div(cols - job_start_col, self.TILE_COLS)
+            Int64(self.NUM_TILES_X), cute.ceil_div(cols - job_start_col, self.TILE_COLS)
         )
         num_tiles = tiles_X * self.NUM_TILES_Y
 
@@ -1289,10 +1302,10 @@ def compile_cutedsl_function_from_cfg(cfg: MXFP8GroupQuantizeConfig):
     # [1, total]. The last dim only needs the 16-byte TMA row alignment; a partial 32-element
     # scale block at the end of a row is zero-filled by TMA, as in the CUDA kernel.
     if cfg.SHAPE_REP == VARYING_BOTH_DIMS:
-        sym_M = cute.sym_int32()
+        sym_M = cute.sym_int64()
     else:
-        sym_M = cute.sym_int32(divisibility=128)
-    sym_N = cute.sym_int32(divisibility=SYM_N_DIVISIBILITY)
+        sym_M = cute.sym_int64(divisibility=128)
+    sym_N = cute.sym_int64(divisibility=SYM_N_DIVISIBILITY)
     logical_shape = (sym_M, sym_N)
 
     out_dtype = cfg.FP8_DTYPE
@@ -1324,12 +1337,17 @@ def compile_cutedsl_function_from_cfg(cfg: MXFP8GroupQuantizeConfig):
 
     # The kernel only takes the base address of the scale buffers (per-tensor strides
     # are derived from cols), so their fake shape is a flat 1D byte run.
-    tensormaps_fake = cute.runtime.make_fake_compact_tensor(
-        cutlass.Int64,
-        (cute.sym_int32(), NUM_WORKSPACE_SLOTS, BYTES_PER_TENSORMAP // 8),
-        stride_order=(2, 1, 0),
-        memspace=cute.AddressSpace.gmem,
-        assumed_align=128,
+    # One compact view covers CUDA's descriptor and metadata arrays in their native order.
+    tensormaps_fake = (
+        cute.runtime.make_fake_compact_tensor(
+            cutlass.Int64,
+            (TENSOR_MAP_STORAGE_INT64_COUNT,),
+            stride_order=(0,),
+            memspace=cute.AddressSpace.gmem,
+            assumed_align=128,
+        )
+        if not cfg.IS_SINGLE_TENSOR
+        else None
     )
     # The cast-noop flag is an always-present f32 pointer instead of an optional tensor, so
     # that one compiled kernel serves both an absent and a present flag (noop_flag_is_set).
@@ -1348,7 +1366,7 @@ def compile_cutedsl_function_from_cfg(cfg: MXFP8GroupQuantizeConfig):
     workspace_fake = (
         cute.runtime.make_fake_compact_tensor(
             Float32,
-            (cute.sym_int32(), cute.sym_int32()),
+            (cute.sym_int64(), cute.sym_int64()),
             stride_order=(1, 0),
             memspace=cute.AddressSpace.gmem,
             assumed_align=4,
@@ -1408,14 +1426,14 @@ def compile_cutedsl_function_from_cfg(cfg: MXFP8GroupQuantizeConfig):
         out_col_fake,  # mO_col
         cute.runtime.make_fake_compact_tensor(  # mS_row
             scale_dtype,
-            (cute.sym_int32(),),
+            (cute.sym_int64(),),
             stride_order=(0,),
             memspace=cute.AddressSpace.gmem,
             assumed_align=4,
         ),
         cute.runtime.make_fake_compact_tensor(  # mS_col
             scale_dtype,
-            (cute.sym_int32(),),
+            (cute.sym_int64(),),
             stride_order=(0,),
             memspace=cute.AddressSpace.gmem,
             assumed_align=4,
@@ -1424,6 +1442,7 @@ def compile_cutedsl_function_from_cfg(cfg: MXFP8GroupQuantizeConfig):
         first_dims_fake,  # mFirstDims
         last_dims_fake,  # mLastDims
         tensormaps_fake,  # mTensormaps
+        Int32(1),  # num_tensors, supplied at runtime
         noop_fake,  # mNoop
         act_input_fake,  # mActInput
         workspace_fake,  # mWorkspace

@@ -21,8 +21,9 @@
 #include "../../tvm_ffi_bridge.h"
 #include "../../util/cuda_runtime.h"
 #include "../../util/cutedsl_utils.h"
-#include "../../utils.cuh"     // ShapeRepresentation
-#include "../core/common.cuh"  // MAX_SUPPORTED_TENSOR_DESCRIPTORS, grouped_reduce_dbias
+#include "../../utils.cuh"          // ShapeRepresentation
+#include "../core/common.cuh"       // grouped_reduce_dbias
+#include "../core/grouped_tma.cuh"  // TensorMapStorage
 
 namespace transformer_engine {
 namespace cutedsl_backend {
@@ -127,32 +128,41 @@ struct MXFP8GroupQuantConfig {
   }
 };
 
-// kGroupTensorMapSlots is 5 slots for: input, rowwise output, colwise output, activation input,
-// plus one carrying the metadata of tensor -- (rows, cols, base_elts)
-constexpr size_t kGroupTensorMapSlots = 5;
-constexpr size_t kInt64PerTensorMap = 128 / sizeof(int64_t);
-constexpr size_t kMaxGroupTensors =
-    static_cast<size_t>(dispatch::common::MAX_SUPPORTED_TENSOR_DESCRIPTORS);
+using dispatch::common::TensorMapStorage;
+constexpr size_t kGroupTensorMapSlots = 4;
+constexpr size_t kMaxGroupTensors = dispatch::common::MAX_SUPPORTED_TENSOR_DESCRIPTORS;
 
-// We need to use int64_t here instead of CUtensorMap so we can pass this through tvm-ffi boundary
-struct alignas(128) TensorMapStorage {
-  alignas(128) int64_t tensor_maps[kMaxGroupTensors][kGroupTensorMapSlots][kInt64PerTensorMap];
-};
-static __device__ TensorMapStorage g_group_descriptor_workspace;
+// Make sure TensorMapStorage from grouped_tma.cuh still works with CuTeDSL.
+// If someone modified that, they need to fix how the CuTeDSL path uses it too.
+static_assert(sizeof(CUtensorMap) == 128);
+static_assert(sizeof(size_t) == sizeof(int64_t));
+static_assert(offsetof(TensorMapStorage, act_input) == kMaxGroupTensors * sizeof(CUtensorMap));
+static_assert(offsetof(TensorMapStorage, output_rowwise) ==
+              2 * kMaxGroupTensors * sizeof(CUtensorMap));
+static_assert(offsetof(TensorMapStorage, output_colwise) ==
+              3 * kMaxGroupTensors * sizeof(CUtensorMap));
+static_assert(offsetof(TensorMapStorage, rows) ==
+              kGroupTensorMapSlots * kMaxGroupTensors * sizeof(CUtensorMap));
+static_assert(sizeof(TensorMapStorage) ==
+              kGroupTensorMapSlots * kMaxGroupTensors * sizeof(CUtensorMap) +
+                  3 * kMaxGroupTensors * sizeof(size_t));
+static_assert(offsetof(TensorMapStorage, cols) - offsetof(TensorMapStorage, rows) ==
+              kMaxGroupTensors * sizeof(size_t));
+static_assert(offsetof(TensorMapStorage, offsets) - offsetof(TensorMapStorage, rows) ==
+              2 * kMaxGroupTensors * sizeof(size_t));
 
-static TensorMapStorage *group_descriptor_workspace_ptr() {
-  // Each device has its own workspace for descriptors
+// Cache the address of CUDA's device workspace once per device. Internal linkage
+// keeps this cache paired with the translation unit's static g_tensor_maps symbol.
+static TensorMapStorage *group_tensor_map_storage_ptr() {
   static std::vector<TensorMapStorage *> cache(cuda::num_devices(), nullptr);
   static std::vector<std::once_flag> flags(cuda::num_devices());
   const int device_id = cuda::current_device();
   NVTE_CHECK(0 <= device_id && device_id < cuda::num_devices(), "invalid CUDA device ID");
-  // Copy the device symbol address on the current device into the cache on its first use only
   std::call_once(flags[device_id], [&]() {
-    void *p = nullptr;
-    NVTE_CHECK_CUDA(cudaGetSymbolAddress(&p, g_group_descriptor_workspace));
-    cache[device_id] = static_cast<TensorMapStorage *>(p);
+    void *ptr = nullptr;
+    NVTE_CHECK_CUDA(cudaGetSymbolAddress(&ptr, dispatch::common::g_tensor_maps));
+    cache[device_id] = static_cast<TensorMapStorage *>(ptr);
   });
-  // Return the cached device pointer for the current device to the host
   return cache[device_id];
 }
 
@@ -170,18 +180,13 @@ inline bool mxfp8_group_quantize_cutedsl(const MXFP8GroupQuantConfig &config,
 
   // Match the symbolic divisibility checks in group_quantize_mxfp8.py.
   if (config.shape_rep != ShapeRepresentation::VARYING_BOTH_DIMS && first_logical_dim % 128 != 0) {
-    maybe_warn_cutedsl_not_chosen("the first logical dimension is not divisible by 128 for a non-varying both dimensions tensor.");
+    maybe_warn_cutedsl_not_chosen(
+        "the first logical dimension is not divisible by 128 for a non-varying both dimensions "
+        "tensor.");
     return false;
   }
   if (last_logical_dim % 16 != 0) {
     maybe_warn_cutedsl_not_chosen("the last logical dimension is not divisible by 16.");
-    return false;
-  }
-
-  // The same extents are sym_int32 in the compiled kernel.
-  if (first_logical_dim > static_cast<size_t>(INT32_MAX) ||
-      last_logical_dim > static_cast<size_t>(INT32_MAX)) {
-    maybe_warn_cutedsl_not_chosen("the grouped logical shape does not fit in int32.");
     return false;
   }
 
@@ -200,7 +205,6 @@ inline bool mxfp8_group_quantize_cutedsl(const MXFP8GroupQuantConfig &config,
   }
 
   const int32_t device_index = transformer_engine::cuda::current_device();
-  TensorMapStorage *const workspace = group_descriptor_workspace_ptr();
 
   const SimpleTensor &scale_row =
       config.rowwise ? output_tensor->scale_inv : output_tensor->columnwise_scale_inv;
@@ -258,11 +262,18 @@ inline bool mxfp8_group_quantize_cutedsl(const MXFP8GroupQuantConfig &config,
         device_index);
   }
 
-  // Pass tensormaps as a 3D tensor of int64_t
-  DLTensorWrapper mTensormaps(
-      make_basic_tensor(static_cast<void *>(workspace->tensor_maps), DType::kInt64,
-                        {num_tensors, kGroupTensorMapSlots, kInt64PerTensorMap}),
-      false, device_index);
+  DLTensorWrapper mTensormaps;
+  const bool is_single_tensor = config.shape_rep == ShapeRepresentation::SAME_BOTH_DIMS ||
+                                config.shape_rep == ShapeRepresentation::VARYING_FIRST_DIM;
+  if (!is_single_tensor) {
+    TensorMapStorage *const ptr = group_tensor_map_storage_ptr();
+
+    // Keep CUDA's native layout: input, activation input, rowwise output, colwise output,
+    // then rows, cols, and offsets. CuTeDSL accesses these arrays by their int64 offsets.
+    mTensormaps = DLTensorWrapper(make_basic_tensor(static_cast<void *>(ptr), DType::kInt64,
+                                                    {sizeof(TensorMapStorage) / sizeof(int64_t)}),
+                                  false, device_index);
+  }
 
   // Optional inputs: a wrapper over a null buffer packs as TVM-FFI None.
   DLTensorWrapper mActInput, mWorkspace;
@@ -278,8 +289,8 @@ inline bool mxfp8_group_quantize_cutedsl(const MXFP8GroupQuantConfig &config,
   void *noop_ptr = (noop_tensor != nullptr) ? noop_tensor->data.dptr : nullptr;
 
   (*group_quant_func_opt)(&mX, &mO_row, &mO_col, &mS_row, &mS_col, &mOffsets, &mFirstDims,
-                          &mLastDims, &mTensormaps, noop_ptr, &mActInput, &mWorkspace,
-                          static_cast<void *>(stream));
+                          &mLastDims, &mTensormaps, static_cast<int32_t>(num_tensors), noop_ptr,
+                          &mActInput, &mWorkspace, static_cast<void *>(stream));
 
   // Reduce the per-chunk partial dbias per member with the CUDA kernel's reduction.
   if (config.with_dbias) {
@@ -291,7 +302,7 @@ inline bool mxfp8_group_quantize_cutedsl(const MXFP8GroupQuantConfig &config,
             reinterpret_cast<const int64_t *>(output_tensor->tensor_offsets.dptr),
             reinterpret_cast<const int64_t *>(output_tensor->first_dims.dptr),
             reinterpret_cast<const int64_t *>(output_tensor->last_dims.dptr), dbias_tensor,
-            workspace_ptr, kChunkDimY, stream);)  // NOLINT(*)
+            workspace_ptr, kRowsPerJob, stream);)  // NOLINT(*)
   }
   return true;
 }
@@ -332,8 +343,7 @@ bool mxfp8_group_quantize_cutedsl(const GroupedTensor *input_tensor,
                                   shape_rep == ShapeRepresentation::VARYING_FIRST_DIM;
 
     // Leave invalid group sizes to mxfp8::group_quantize, which raises a proper error.
-    // Every member gets a descriptor slot in the fixed-size workspace, so the CUDA
-    // kernel's descriptor limit applies to the single-tensor representations here too.
+    // Keep the same group-size limit as the CUDA implementation.
     const size_t num_tensors = input_tensor->num_tensors;
     if (num_tensors == 0 || num_tensors > kMaxGroupTensors) {
       maybe_warn_cutedsl_not_chosen("the group size ", num_tensors, " is not between 1 and ",

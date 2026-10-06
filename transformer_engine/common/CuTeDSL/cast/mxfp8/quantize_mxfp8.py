@@ -115,8 +115,8 @@ SUPPORTED_DACTIVATIONS = {
 
 @cute.jit
 def derive_swizzled_scale_layout(
-    M: Int32,
-    N: Int32,
+    M: Int32 | Int64,
+    N: Int32 | Int64,
     ROWWISE: cutlass.Constexpr[bool],
     COLWISE: cutlass.Constexpr[bool],
     mS_row: Optional[cute.Tensor],
@@ -157,10 +157,10 @@ def quantize_rowwise_mxfp8(
     sO_row_tile: cute.Tensor,  # (TILE_Y, TILE_X) fp8 smem view (rowwise FP8 output)
     mS_row_stage: cute.Tensor,  # rowwise scale tensor (1D swizzled, or 2D linear)
     MAX_NORM_RCP: cutlass.Constexpr[float],
-    tile_row_start: Int32,  # global row index of this stage's row 0
-    tile_col_start: Int32,  # global col index of this CTA's col 0
-    M: Int32,
-    N: Int32,
+    tile_row_start: Int32 | Int64,  # global row index of this stage's row 0
+    tile_col_start: Int32 | Int64,  # global col index of this CTA's col 0
+    M: Int32 | Int64,
+    N: Int32 | Int64,
     ACTIVATION: cutlass.Constexpr[str | None],
     DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
     FP8_DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
@@ -413,10 +413,10 @@ def quantize_colwise_mxfp8(
     sO_col_tile: cute.Tensor,  # (TILE_Y, TILE_X) fp8 smem view (colwise FP8 output)
     mS_col_stage: cute.Tensor,  # colwise scale tensor (1D swizzled, or 2D linear)
     MAX_NORM_RCP: cutlass.Constexpr[float],
-    tile_row_start: Int32,  # global row index of this stage's row 0
-    tile_col_start: Int32,  # global col index of this CTA's col 0
-    M: Int32,
-    N: Int32,
+    tile_row_start: Int32 | Int64,  # global row index of this stage's row 0
+    tile_col_start: Int32 | Int64,  # global col index of this CTA's col 0
+    M: Int32 | Int64,
+    N: Int32 | Int64,
     ACTIVATION: cutlass.Constexpr[str | None],
     DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
     FP8_DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
