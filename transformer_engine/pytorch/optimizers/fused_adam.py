@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Fused Adam optimizer."""
+
 from __future__ import annotations
 from collections.abc import Iterable
 from copy import deepcopy
@@ -17,7 +18,6 @@ from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensor
 from ..constants import DType
 from .multi_tensor_apply import multi_tensor_applier
-
 
 # Bound temporary NVTETensor handles created before the CUDA launcher chunks its metadata.
 _MAX_TENSORS_PER_MULTI_TENSOR_ADAM_CALL = 1024

@@ -36,7 +36,6 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
 from transformer_engine.pytorch.cpp_extensions.fused_attn import FusedAttnBackend
 from transformer_engine.pytorch.module.base import get_dummy_wgrad
 
-
 # NVFP4 recipe names
 nvfp4_variant_names: Tuple[str, ...] = (
     "nvfp4",

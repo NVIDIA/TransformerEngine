@@ -61,7 +61,6 @@ from transformer_engine.jax.version_utils import (
     is_xla_ffi_collectives_supported,
 )
 
-
 # ── Test config ─────────────────────────────────────────────────────────────
 # NCCL EP requires NUM_LOCAL_EXPERTS*ep % 4 == 0 (TMA alignment in
 # device/hybridep_adapter.cu:511). With NUM_LOCAL_EXPERTS=2, ep must be even.

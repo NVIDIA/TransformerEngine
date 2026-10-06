@@ -23,7 +23,6 @@ from transformer_engine.pytorch.newton_schulz import (
     newton_schulz_tp,
 )
 
-
 DTYPES = ("float32", "bfloat16")
 COEFFICIENT_CONFIGS = ((5, "quintic"), (8, "polar_express"))
 

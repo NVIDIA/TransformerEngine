@@ -11,7 +11,6 @@ from typing import Any, Dict, Tuple, get_type_hints
 from ..constants import DType
 from ..utils import record_compile_disabled
 
-
 # Qualnames of the registered quantizer classes. The set holds strings rather
 # than the classes themselves so that ``is_value_opaque_quantizer`` can be
 # called inside a ``torch.compile``'d function without a graph break: Dynamo

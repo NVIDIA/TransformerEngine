@@ -50,7 +50,6 @@ import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.common.recipe import MXFP8BlockScaling
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 
-
 MXFP8_AVAILABLE, REASON_FOR_NO_MXFP8 = FP8GlobalStateManager.is_mxfp8_available()
 
 

@@ -64,7 +64,6 @@ from ...triton.grouped_dbias_dscales import (
     compute_grouped_dbias_dscales,
 )
 
-
 # Keys for passing caller-provided output and grad-input buffers to a grouped
 # linear (or fused grouped MLP) through Sequential's ``op_kwargs``.
 OUTPUT_BUFFER_KEY = "output"

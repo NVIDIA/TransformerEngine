@@ -16,7 +16,6 @@ from transformer_engine.pytorch.quantization import (
     QuantizerRole,
 )
 
-
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
 MXFP8_BLOCK_SIZE = 32
 FP8_E4M3_MAX = 448.0
@@ -193,9 +192,7 @@ def test_mxfp8_2d_quantize_scales_match_known_block_amax(columnwise: bool) -> No
             x[
                 row_start : row_start + MXFP8_BLOCK_SIZE,
                 col_start : col_start + MXFP8_BLOCK_SIZE,
-            ] = (
-                amax * 0.5
-            )
+            ] = amax * 0.5
             x[row_start, col_start] = amax
 
     quantizer = MXFP8Quantizer(

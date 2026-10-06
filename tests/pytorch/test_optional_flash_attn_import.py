@@ -24,8 +24,7 @@ from pathlib import Path
 
 import pytest
 
-PROBE = textwrap.dedent(
-    """
+PROBE = textwrap.dedent("""
     import sys
 
     import transformer_engine.pytorch  # noqa: F401  (the import under test)
@@ -43,8 +42,7 @@ PROBE = textwrap.dedent(
     else:
         raise ValueError(f"Unexpected FlashAttention distribution: {sys.argv[1]}")
     print("PROBE_OK")
-    """
-)
+    """)
 
 
 def _fake_broken_dist(root: Path, name: str, version: str, module: str, message: str) -> None:

@@ -12,7 +12,6 @@ import torch.distributed as dist
 
 import transformer_engine_torch as tex
 
-
 _COEFFICIENT_SETS = {
     # Values are rounded to closest representable in single precision.
     "simple": [

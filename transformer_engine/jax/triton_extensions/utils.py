@@ -57,7 +57,6 @@ from ..version_utils import (
     jax_version_meet_requirement,
 )
 
-
 # Placeholder package version on PyPI that should never be used
 _PYTORCH_TRITON_PLACEHOLDER_VERSION = "0.0.1"
 

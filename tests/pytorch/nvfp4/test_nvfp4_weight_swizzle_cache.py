@@ -17,7 +17,6 @@ import torch
 import transformer_engine.pytorch as te
 from transformer_engine.common.recipe import NVFP4BlockScaling
 
-
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
 
 pytestmark = pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)

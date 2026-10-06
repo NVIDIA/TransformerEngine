@@ -74,7 +74,6 @@ from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 from transformer_engine.pytorch.tensor import GroupedTensor, GroupedTensorStorage
 import transformer_engine_torch as tex
 
-
 QWEN_NUM_EXPERTS = 512
 QWEN_TOP_K = 10
 QWEN_SEQUENCE_LENGTH = 4096
@@ -556,9 +555,7 @@ def main() -> None:
                         "n": spec.n,
                         "time_ms": time_ms,
                         "tflops": _gemm_tflops(spec, total_rows, time_ms),
-                        "speedup_vs_multistream": (
-                            speedup if path == "cublas_grouped_gemm" else 1.0
-                        ),
+                        "speedup_vs_multistream": speedup if path == "cublas_grouped_gemm" else 1.0,
                     }
                 )
 

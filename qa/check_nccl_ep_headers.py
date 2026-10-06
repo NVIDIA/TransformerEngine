@@ -8,7 +8,6 @@ import re
 import sys
 from pathlib import Path
 
-
 _INCLUDE_PATTERN = re.compile(r'^\s*#\s*include\s*"([^"]+)"')
 _EXTERNAL_HEADERS = {"nccl.h", "nccl_device.h"}
 _HEADER_SUFFIXES = {".cuh", ".h", ".hh", ".hpp", ".inc", ".inl"}

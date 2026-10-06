@@ -26,6 +26,7 @@ Protocol (line-delimited JSON over rank-0 stdio):
     response: {"ok": true}
               {"ok": false, "error": "first failing rank's traceback"}
 """
+
 import json
 import os
 import sys

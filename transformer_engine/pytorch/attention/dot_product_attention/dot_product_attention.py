@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Attention."""
+
 from contextlib import nullcontext
 import math
 import os
@@ -66,7 +67,6 @@ from transformer_engine.pytorch.attention.dot_product_attention.backends import 
     FusedAttention,
     FlashAttention,
 )
-
 
 # Setup Attention Logging
 attn_log.setup_logging()
@@ -2770,8 +2770,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                 "num_gqa_groups": num_gqa_groups,
                 "max_seqlen_q": max_seqlen_q,
                 "max_seqlen_kv": max_seqlen_kv,
-                "num_tokens_q": (query_layer.shape[0] if q_format == "thd" else 0),
-                "num_tokens_kv": (key_layer.shape[0] if kv_format == "thd" else 0),
+                "num_tokens_q": query_layer.shape[0] if q_format == "thd" else 0,
+                "num_tokens_kv": key_layer.shape[0] if kv_format == "thd" else 0,
                 "head_dim_qk": head_dim_qk,
                 "head_dim_v": head_dim_v,
                 "softcap": softcap,

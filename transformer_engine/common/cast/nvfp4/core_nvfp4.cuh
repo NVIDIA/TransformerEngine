@@ -55,7 +55,9 @@ namespace nvfp4 {
   switch (SCALE_DTYPE) {                                                                  \
     case DType::kFloat8E4M3: {                                                            \
       using SCALE_TYPE = fp8e4m3;                                                         \
-      { __VA_ARGS__ }                                                                     \
+      {                                                                                   \
+        __VA_ARGS__                                                                       \
+      }                                                                                   \
     } break;                                                                              \
       SWITCH_FP8UE5M3_TYPE_HANDLE(SCALE_TYPE, __VA_ARGS__)                                \
     default: {                                                                            \

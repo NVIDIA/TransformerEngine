@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Functions for CUDA Graphs support in FP8"""
+
 from collections.abc import Iterable
 import contextlib
 import gc

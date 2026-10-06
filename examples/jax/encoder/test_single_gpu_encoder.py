@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 """Encoder training on single GPU"""
+
 import argparse
 import unittest
 from functools import partial

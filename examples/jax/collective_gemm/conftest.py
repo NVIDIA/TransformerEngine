@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """config for collective_gemm tests"""
+
 import pytest
 
 import transformer_engine.jax  # noqa: F401 - must load libtransformer_engine.so before transformer_engine_jax

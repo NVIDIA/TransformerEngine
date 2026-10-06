@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """LayerNormLinear API"""
+
 import os
 import warnings
 import weakref
@@ -1300,7 +1301,7 @@ def _layernorm_linear_backward_impl(
                 ),
                 "layout": "NT",
                 "out": main_grad if args.fuse_wgrad_accumulation else None,
-                "bias": (bias if (grad_bias is None and not args.fp8) else None),
+                "bias": bias if (grad_bias is None and not args.fp8) else None,
                 "use_split_accumulator": use_split_accumulator,
                 "grad": True,
                 "ub": ub_obj_wgrad,

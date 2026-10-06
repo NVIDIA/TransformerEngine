@@ -171,8 +171,9 @@ def _cudnn_wgrad_workspace_size_fn() -> Optional[Callable]:
         return None
     try:
         if (
-            "descriptor_workspace"
-            not in inspect.signature(grouped_gemm_wgrad_wrapper_sm100).parameters
+            "descriptor_workspace" not in inspect.signature(
+                grouped_gemm_wgrad_wrapper_sm100
+            ).parameters
         ):
             return None
     except (TypeError, ValueError):

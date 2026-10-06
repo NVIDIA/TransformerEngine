@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Grouped tensor class for handling collections of tensors with different shapes"""
+
 from __future__ import annotations
 
 from typing import List, Optional, Tuple

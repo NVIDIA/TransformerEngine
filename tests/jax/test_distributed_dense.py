@@ -20,7 +20,6 @@ from transformer_engine.jax import autocast
 from transformer_engine.jax.cpp_extensions.misc import is_all_reduce_in_float32
 from transformer_engine.jax.dense import dense
 
-
 DTYPES = [jnp.bfloat16]
 
 GEMM_INPUT_SHAPES = [[256, 128, 256]]  # [batch, seq_len, hidden_in]
