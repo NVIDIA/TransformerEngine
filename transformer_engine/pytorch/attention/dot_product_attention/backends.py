@@ -2609,10 +2609,9 @@ class FusedAttention(torch.nn.Module):
                         )
 
         if context_parallel:
-            assert (
-                fp8
-                or fused_attention_backend
-                in (FusedAttnBackend["F16_arbitrary_seqlen"], FusedAttnBackend["FROST"])
+            assert fp8 or fused_attention_backend in (
+                FusedAttnBackend["F16_arbitrary_seqlen"],
+                FusedAttnBackend["FROST"],
             ), f"{fused_attention_backend} does not work with context parallelism!"
             assert core_attention_bias_type not in [
                 "alibi"

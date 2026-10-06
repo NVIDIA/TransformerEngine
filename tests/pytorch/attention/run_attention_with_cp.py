@@ -615,6 +615,7 @@ def run_dpa_with_cp(
             from transformer_engine.pytorch.attention.dot_product_attention.dot_product_attention import (  # pylint: disable=import-outside-toplevel
                 _attention_backends,
             )
+
             # pylint: disable-next=import-outside-toplevel
             from transformer_engine.pytorch.cpp_extensions.fused_attn import FusedAttnBackend
 
