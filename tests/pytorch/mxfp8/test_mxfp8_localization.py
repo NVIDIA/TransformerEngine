@@ -1282,19 +1282,44 @@ def test_mxfp8_qwen35_grouped_gemm_localization_performance(
             rowwise=True,
             columnwise=False,
         )
-        quantizer.optimize_for_gemm = False
+        quantizer.optimize_for_gemm = True
         source = torch.full(
-            (num_groups * rows, cols),
+            (rows, cols),
             0.015625,
             dtype=dtype,
             device=device,
         )
-        grouped = tex.group_quantize(source, quantizer, num_groups, None)
+        quantized = quantizer(source)
         del source
-        if not grouped._with_gemm_swizzled_scales:
-            tex.grouped_swizzle_for_gemm(grouped, rowwise=True, columnwise=False)
-        assert grouped._with_gemm_swizzled_scales
-        return grouped
+        assert quantized._with_gemm_swizzled_scales
+
+        elements_per_group = rows * cols
+        scales_per_group = quantized._rowwise_scale_inv.numel()
+        first_dims = torch.full((num_groups,), rows, dtype=torch.int64, device=device)
+        last_dims = torch.full((num_groups,), cols, dtype=torch.int64, device=device)
+        tensor_offsets = (
+            torch.arange(num_groups + 1, dtype=torch.int64, device=device)
+            * elements_per_group
+        )
+        return GroupedTensor(
+            shape=(1, num_groups * elements_per_group),
+            dtype=dtype,
+            num_tensors=num_groups,
+            shapes=[(rows, cols)] * num_groups,
+            quantizer=quantizer,
+            data=quantized._rowwise_data.view(-1).repeat(num_groups),
+            columnwise_data=None,
+            scale_inv=quantized._rowwise_scale_inv.view(-1).repeat(num_groups),
+            columnwise_scale_inv=None,
+            first_dims=first_dims,
+            last_dims=last_dims,
+            tensor_offsets=tensor_offsets,
+            offsets=[index * elements_per_group for index in range(num_groups + 1)],
+            scale_inv_offsets=[
+                index * scales_per_group for index in range(num_groups + 1)
+            ],
+            with_gemm_swizzled_scales=True,
+        )
 
     def grouped_mxfp8_alias(
         source: GroupedTensor,
@@ -1304,8 +1329,10 @@ def test_mxfp8_qwen35_grouped_gemm_localization_performance(
         scale_inv: torch.Tensor,
     ) -> GroupedTensor:
         rows, cols = member_shape
+        elements_per_group = rows * cols
+        scales_per_group = scale_inv.numel() // num_groups
         return GroupedTensor(
-            shape=(num_groups * rows, cols),
+            shape=(1, num_groups * elements_per_group),
             dtype=source.fake_dtype,
             num_tensors=num_groups,
             shapes=[member_shape] * num_groups,
@@ -1314,10 +1341,32 @@ def test_mxfp8_qwen35_grouped_gemm_localization_performance(
             columnwise_data=None,
             scale_inv=scale_inv.view(-1),
             columnwise_scale_inv=None,
-            first_dims=None,
-            last_dims=None,
-            tensor_offsets=None,
-            offsets=[index * rows * cols for index in range(num_groups + 1)],
+            first_dims=torch.full(
+                (num_groups,),
+                rows,
+                dtype=torch.int64,
+                device=rowwise_data.device,
+            ),
+            last_dims=torch.full(
+                (num_groups,),
+                cols,
+                dtype=torch.int64,
+                device=rowwise_data.device,
+            ),
+            tensor_offsets=(
+                torch.arange(
+                    num_groups + 1,
+                    dtype=torch.int64,
+                    device=rowwise_data.device,
+                )
+                * elements_per_group
+            ),
+            offsets=[
+                index * elements_per_group for index in range(num_groups + 1)
+            ],
+            scale_inv_offsets=[
+                index * scales_per_group for index in range(num_groups + 1)
+            ],
             with_gemm_swizzled_scales=True,
         )
 
