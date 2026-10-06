@@ -553,16 +553,23 @@ def _get_grouped_gemm_setup_workspace(device: int, num_tensors: int) -> torch.Te
 
 
 @functools.lru_cache(maxsize=None)
-def _get_grouped_cublas_workspace(device: int, layout: str) -> torch.Tensor:
-    """Persistent cuBLAS workspace for the grouped-tensor GEMM path, one per GEMM layout.
+def _get_grouped_cublas_workspace(
+    device: int,
+    layout: str,
+    workspace_slot: int = 0,
+) -> torch.Tensor:
+    """Persistent cuBLAS workspace for grouped-tensor GEMM, keyed by layout and slot.
 
     Grouped cuBlasLt GEMM kernels in cuBLAS versions <= 13.7 leave behind stale descriptors in the
     workspace that cause back-to-back GEMM kernels to crash/deadlock on 2nd CUDA-graph replay. As a
     workaround, we allocate a different workspace for each GEMM layout (TN, NN, NT) to avoid
     contamination between subsequent GEMM calls (when there is no other graph node between GEMM
-    kernels).
+    kernels). ``workspace_slot`` additionally allows independent grouped GEMMs to execute
+    concurrently without racing on the same workspace.
     """
     assert layout in ("TN", "NN", "NT"), f"unexpected grouped GEMM layout {layout}"
+    if workspace_slot < 0:
+        raise ValueError(f"workspace_slot must be non-negative, got {workspace_slot}")
     return torch.empty(get_cublas_workspace_size_bytes(), dtype=torch.uint8, device=device)
 
 
@@ -579,6 +586,7 @@ def general_grouped_gemm_for_grouped_tensor(
     grad: bool = False,
     alpha: Optional[torch.Tensor] = None,
     beta: Optional[torch.Tensor] = None,
+    workspace_slot: int = 0,
 ) -> Union[torch.Tensor, List[torch.Tensor]]:
     """
     Grouped GEMM using GroupedTensor inputs.
@@ -663,7 +671,7 @@ def general_grouped_gemm_for_grouped_tensor(
     # GEMMs sharing one workspace can deadlock under CUDA-graph replay (see
     # _get_grouped_cublas_workspace). wgrad (NT) is the case seen in TE; fprop (TN) and
     # dgrad (NN) have also been reported to conflict, so all three layouts are isolated.
-    workspace_cublas = _get_grouped_cublas_workspace(device.index, layout)
+    workspace_cublas = _get_grouped_cublas_workspace(device.index, layout, workspace_slot)
 
     sm_count = get_sm_count()
     sm_count = sm_count - int(os.getenv("NVTE_EXT_MARGIN_SM", str(sm_count)))

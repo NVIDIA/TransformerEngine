@@ -1221,3 +1221,385 @@ def test_mxfp8_vmm_layernorm_quant_localization_performance(
     )
 
     allocator.close()
+
+
+@pytest.mark.skipif(not _localization_available(), reason="CUDA localization is unavailable")
+@pytest.mark.skipif(
+    os.getenv("RUN_BENCHMARK_TESTS") != "1",
+    reason="Benchmark test - run with RUN_BENCHMARK_TESTS=1",
+)
+@pytest.mark.parametrize(
+    ("layer_name", "output_size", "input_size"),
+    [
+        ("FC1", 2048, 4096),
+        ("FC2", 4096, 1024),
+    ],
+    ids=["fc1", "fc2"],
+)
+def test_mxfp8_qwen35_grouped_gemm_localization_performance(
+    layer_name: str,
+    output_size: int,
+    input_size: int,
+    monkeypatch,
+) -> None:
+    """Measure standalone Qwen3.5 EP8 MXFP8 expert GEMMs with split-batch localization."""
+    import transformer_engine_torch as tex_cpp
+    from transformer_engine.pytorch.cpp_extensions import (
+        general_grouped_gemm_for_grouped_tensor,
+    )
+    from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
+    from transformer_engine.pytorch.tensor.localized_mxfp8 import (
+        _get_localization_context,
+    )
+    from transformer_engine.pytorch.tensor.vmm import VMMRowSplitAllocator
+
+    if tex_cpp.get_cublasLt_version() < 130300:
+        pytest.skip("MXFP8 GroupedTensor GEMM requires cuBLASLt 13.3+.")
+    if torch.cuda.get_device_capability() < (10, 0):
+        pytest.skip("MXFP8 GroupedTensor GEMM requires SM100 or newer.")
+
+    num_experts = 64
+    experts_per_domain = num_experts // 2
+    dtype = torch.bfloat16
+    device = torch.device("cuda")
+    m_values_string = os.getenv(
+        "NVTE_GROUPED_GEMM_LOCALIZATION_M_SWEEP",
+        "1,2,3,5,10,20,30,40",
+    )
+    try:
+        m_values = [int(value.strip()) for value in m_values_string.split(",") if value.strip()]
+    except ValueError as exc:
+        pytest.fail(
+            "NVTE_GROUPED_GEMM_LOCALIZATION_M_SWEEP must be a comma-separated "
+            f"list of integers, got {m_values_string!r}: {exc}"
+        )
+    if not m_values or any(value <= 0 for value in m_values):
+        pytest.fail("NVTE_GROUPED_GEMM_LOCALIZATION_M_SWEEP must contain positive integers")
+
+    def quantize_uniform_group(num_groups: int, rows: int, cols: int) -> GroupedTensor:
+        quantizer = te.MXFP8Quantizer(
+            fp8_dtype=te.DType.kFloat8E4M3,
+            rowwise=True,
+            columnwise=False,
+        )
+        quantizer.optimize_for_gemm = False
+        source = torch.full(
+            (num_groups * rows, cols),
+            0.015625,
+            dtype=dtype,
+            device=device,
+        )
+        grouped = tex.group_quantize(source, quantizer, num_groups, None)
+        del source
+        if not grouped._with_gemm_swizzled_scales:
+            tex.grouped_swizzle_for_gemm(grouped, rowwise=True, columnwise=False)
+        assert grouped._with_gemm_swizzled_scales
+        return grouped
+
+    def grouped_mxfp8_alias(
+        source: GroupedTensor,
+        num_groups: int,
+        member_shape: tuple[int, int],
+        rowwise_data: torch.Tensor,
+        scale_inv: torch.Tensor,
+    ) -> GroupedTensor:
+        rows, cols = member_shape
+        return GroupedTensor(
+            shape=(num_groups * rows, cols),
+            dtype=source.fake_dtype,
+            num_tensors=num_groups,
+            shapes=[member_shape] * num_groups,
+            quantizer=source.quantizer,
+            data=rowwise_data.view(-1),
+            columnwise_data=None,
+            scale_inv=scale_inv.view(-1),
+            columnwise_scale_inv=None,
+            first_dims=None,
+            last_dims=None,
+            tensor_offsets=None,
+            offsets=[index * rows * cols for index in range(num_groups + 1)],
+            with_gemm_swizzled_scales=True,
+        )
+
+    def split_grouped_mxfp8(
+        source: GroupedTensor,
+        member_shape: tuple[int, int],
+    ) -> tuple[GroupedTensor, GroupedTensor]:
+        data_partitions = source.rowwise_data.view(-1).chunk(2)
+        scale_partitions = source.scale_inv.view(-1).chunk(2)
+        return tuple(
+            grouped_mxfp8_alias(
+                source,
+                experts_per_domain,
+                member_shape,
+                data_partitions[domain],
+                scale_partitions[domain],
+            )
+            for domain in range(2)
+        )
+
+    def localize_grouped_mxfp8(
+        source_domains: tuple[GroupedTensor, GroupedTensor],
+        member_shape: tuple[int, int],
+        allocator: VMMRowSplitAllocator,
+    ) -> tuple[GroupedTensor, GroupedTensor]:
+        outputs = []
+        for domain, source in enumerate(source_domains):
+            data = allocator.allocate_in_domain(
+                tuple(source.rowwise_data.shape),
+                source.rowwise_data.dtype,
+                domain,
+            )
+            scale_inv = allocator.allocate_in_domain(
+                tuple(source.scale_inv.shape),
+                source.scale_inv.dtype,
+                domain,
+            )
+            data.copy_(source.rowwise_data)
+            scale_inv.copy_(source.scale_inv)
+            outputs.append(
+                grouped_mxfp8_alias(
+                    source,
+                    experts_per_domain,
+                    member_shape,
+                    data,
+                    scale_inv,
+                )
+            )
+        return outputs[0], outputs[1]
+
+    def grouped_output(
+        num_groups: int,
+        member_shape: tuple[int, int],
+        data: torch.Tensor,
+    ) -> GroupedTensor:
+        return GroupedTensor.make_grouped_tensor_from_rowwise_data(
+            num_tensors=num_groups,
+            tensor_shape=member_shape,
+            rowwise_data=data,
+            dtype=dtype,
+        )
+
+    weight = quantize_uniform_group(num_experts, output_size, input_size)
+    ordinary_weight_domains = split_grouped_mxfp8(
+        weight,
+        (output_size, input_size),
+    )
+    weight_allocator = VMMRowSplitAllocator(device)
+    localized_weight_domains = localize_grouped_mxfp8(
+        ordinary_weight_domains,
+        (output_size, input_size),
+        weight_allocator,
+    )
+
+    _, _, green_streams = _get_localization_context(torch.cuda.current_device())
+    ordinary_streams = tuple(torch.cuda.Stream(device=device) for _ in range(2))
+    total_sms = torch.cuda.get_device_properties(device).multi_processor_count
+    sms_per_domain = total_sms // 2
+    localized_sm_margin = total_sms - sms_per_domain
+    use_cuda_graph = os.getenv("MXFP8_LOCALIZATION_USE_CUDA_GRAPH") == "1"
+
+    for m_exp in m_values:
+        iteration_allocator = VMMRowSplitAllocator(device)
+        grouped_input = quantize_uniform_group(num_experts, m_exp, input_size)
+        ordinary_input_domains = split_grouped_mxfp8(
+            grouped_input,
+            (m_exp, input_size),
+        )
+        localized_input_domains = localize_grouped_mxfp8(
+            ordinary_input_domains,
+            (m_exp, input_size),
+            iteration_allocator,
+        )
+
+        output_shape = (num_experts, m_exp, output_size)
+        baseline_output = grouped_output(
+            num_experts,
+            (m_exp, output_size),
+            torch.empty(output_shape, dtype=dtype, device=device),
+        )
+        split_output_buffer = torch.empty(output_shape, dtype=dtype, device=device)
+        green_output_buffer = torch.empty(output_shape, dtype=dtype, device=device)
+        split_outputs = tuple(
+            grouped_output(
+                experts_per_domain,
+                (m_exp, output_size),
+                partition,
+            )
+            for partition in split_output_buffer.chunk(2, dim=0)
+        )
+        green_outputs = tuple(
+            grouped_output(
+                experts_per_domain,
+                (m_exp, output_size),
+                partition,
+            )
+            for partition in green_output_buffer.chunk(2, dim=0)
+        )
+        localized_outputs = tuple(
+            grouped_output(
+                experts_per_domain,
+                (m_exp, output_size),
+                iteration_allocator.allocate_in_domain(
+                    (experts_per_domain, m_exp, output_size),
+                    dtype,
+                    domain,
+                ),
+            )
+            for domain in range(2)
+        )
+
+        def launch_grouped_gemm(
+            local_weight: GroupedTensor,
+            local_input: GroupedTensor,
+            output: GroupedTensor,
+            workspace_slot: int,
+        ) -> None:
+            general_grouped_gemm_for_grouped_tensor(
+                local_weight,
+                local_input,
+                output,
+                layout="TN",
+                workspace_slot=workspace_slot,
+            )
+
+        def baseline() -> None:
+            launch_grouped_gemm(weight, grouped_input, baseline_output, 0)
+
+        eager_events = {
+            key: (
+                torch.cuda.Event(enable_timing=False),
+                tuple(torch.cuda.Event(enable_timing=False) for _ in range(2)),
+            )
+            for key in ("split", "green", "localized")
+        }
+        capture_events = []
+
+        def partitioned(
+            weights,
+            inputs,
+            outputs,
+            launch_streams,
+            workspace_slots,
+            event_key: str,
+        ) -> None:
+            parent_stream = torch.cuda.current_stream(device)
+            if torch.cuda.is_current_stream_capturing():
+                fork_event = torch.cuda.Event(enable_timing=False)
+                join_events = tuple(torch.cuda.Event(enable_timing=False) for _ in range(2))
+                capture_events.extend((fork_event, *join_events))
+            else:
+                fork_event, join_events = eager_events[event_key]
+            fork_event.record(parent_stream)
+            for domain, stream in enumerate(launch_streams):
+                stream.wait_event(fork_event)
+                with torch.cuda.stream(stream):
+                    launch_grouped_gemm(
+                        weights[domain],
+                        inputs[domain],
+                        outputs[domain],
+                        workspace_slots[domain],
+                    )
+                join_events[domain].record(stream)
+            for event in join_events:
+                parent_stream.wait_event(event)
+
+        def split_ordinary() -> None:
+            partitioned(
+                ordinary_weight_domains,
+                ordinary_input_domains,
+                split_outputs,
+                ordinary_streams,
+                (1, 2),
+                "split",
+            )
+
+        def green_ordinary() -> None:
+            partitioned(
+                ordinary_weight_domains,
+                ordinary_input_domains,
+                green_outputs,
+                green_streams,
+                (3, 4),
+                "green",
+            )
+
+        def green_localized() -> None:
+            partitioned(
+                localized_weight_domains,
+                localized_input_domains,
+                localized_outputs,
+                green_streams,
+                (5, 6),
+                "localized",
+            )
+
+        monkeypatch.delenv("NVTE_EXT_MARGIN_SM", raising=False)
+        if use_cuda_graph:
+            baseline_fn = _capture_cuda_graph(baseline).replay
+        else:
+            baseline_fn = baseline
+        baseline_ms = _benchmark_ms(baseline_fn)
+
+        monkeypatch.setenv("NVTE_EXT_MARGIN_SM", str(localized_sm_margin))
+        if use_cuda_graph:
+            split_fn = _capture_cuda_graph(split_ordinary).replay
+            green_fn = _capture_cuda_graph(green_ordinary).replay
+            localized_fn = _capture_cuda_graph(green_localized).replay
+        else:
+            split_fn = split_ordinary
+            green_fn = green_ordinary
+            localized_fn = green_localized
+        split_ms = _benchmark_ms(split_fn)
+        green_ms = _benchmark_ms(green_fn)
+        localized_ms = _benchmark_ms(localized_fn)
+
+        split_fn()
+        green_fn()
+        localized_fn()
+        torch.cuda.synchronize()
+        reference = baseline_output.rowwise_data.view(output_shape)
+        for name, outputs in (
+            ("split ordinary", split_outputs),
+            ("green ordinary", green_outputs),
+            ("green localized", localized_outputs),
+        ):
+            candidate = torch.cat(
+                [
+                    output.rowwise_data.view(
+                        experts_per_domain,
+                        m_exp,
+                        output_size,
+                    )
+                    for output in outputs
+                ],
+                dim=0,
+            )
+            torch.testing.assert_close(
+                candidate,
+                reference,
+                atol=0.25,
+                rtol=0.05,
+                msg=f"{layer_name} M_exp={m_exp} {name} mismatch",
+            )
+
+        execution = "CUDA Graph" if use_cuda_graph else "eager"
+        print(
+            f"\nQwen3.5 EP8 MXFP8 grouped GEMM {layer_name} "
+            f"E=512/64, M_exp={m_exp}, N={output_size}, K={input_size} "
+            f"({execution}):"
+            f"\n  full ordinary:                 {baseline_ms:.3f} ms"
+            f"\n  split ordinary experts:        {split_ms:.3f} ms"
+            f"\n  green ordinary memory:         {green_ms:.3f} ms"
+            f"\n  green localized A/B/output:    {localized_ms:.3f} ms"
+            f"\n  split-launch speedup:          {baseline_ms / split_ms:.3f}x"
+            f"\n  green-context contribution:    {split_ms / green_ms:.3f}x"
+            f"\n  memory-locality contribution:  {green_ms / localized_ms:.3f}x"
+            f"\n  overall speedup:               {baseline_ms / localized_ms:.3f}x"
+        )
+
+        del baseline_fn, split_fn, green_fn, localized_fn
+        torch.cuda.synchronize()
+        iteration_allocator.close()
+
+    weight_allocator.close()
