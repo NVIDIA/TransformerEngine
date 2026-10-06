@@ -1775,6 +1775,7 @@ class TestGroupedMLPFusedOp:
         kernels = {
             "grouped_gemm_activation_kernel": fused_cls.grouped_gemm_activation_kernel(),
             "grouped_gemm_quant_kernel": fused_cls.grouped_gemm_quant_kernel(),
+            "grouped_gemm_dactivation_kernel": fused_cls.grouped_gemm_dactivation_kernel(),
         }
         if not all(
             getattr(kernel, "supports_canonical_layouts", False) for kernel in kernels.values()
@@ -1807,7 +1808,16 @@ class TestGroupedMLPFusedOp:
         splits = torch.full((4,), 256, dtype=torch.int64, device="cuda")
         dy = torch.randn(1024, 256, device="cuda", dtype=torch.bfloat16)
 
-        operands = ("a_tensor", "b_tensor", "sfa_tensor", "sfb_tensor", "prob_tensor", "d_tensor")
+        operands = (
+            "a_tensor",
+            "b_tensor",
+            "c_tensor",
+            "sfa_tensor",
+            "sfb_tensor",
+            "prob_tensor",
+            "dprob_tensor",
+            "d_tensor",
+        )
 
         def run(canonical):
             layouts = []
@@ -1849,12 +1859,16 @@ class TestGroupedMLPFusedOp:
 
         legacy, _ = run(canonical=False)
         canonical, layouts = run(canonical=True)
-        # The forward FC1 and FC2 calls get every operand as its natural contiguous buffer.
-        for call in layouts[:2]:
+        # FC1 GLU, FC2 quant, FC2 dGLU, and FC1 dgrad quant get every operand as its
+        # natural contiguous buffer.
+        assert len(layouts) == 4
+        for call in layouts:
             assert all(contiguous for _, contiguous in call.values())
             assert call["a_tensor"][0] == 2 and call["b_tensor"][0] == 3
+            assert call.get("c_tensor", (2,))[0] == 2
             assert call.get("prob_tensor", (1,))[0] == 1
-        assert layouts[1]["d_tensor"][0] == 2
+            assert call.get("dprob_tensor", (1,))[0] == 1
+        assert layouts[1]["d_tensor"][0] == 2 and layouts[3]["d_tensor"][0] == 2
         for actual, expected in zip(canonical, legacy):
             torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 

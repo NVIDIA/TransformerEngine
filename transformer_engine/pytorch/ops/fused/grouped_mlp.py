@@ -1117,7 +1117,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
     caller output/grad_input buffers are provided, the GEMMs write into them
     directly. When the front-end wrappers advertise ``supports_canonical_layouts``,
     MXFP8 operands are passed in their natural layouts instead of kernel-facing
-    views.
+    views, in the forward and, with a supporting dGLU wrapper, the backward.
 
     """
 
@@ -2610,6 +2610,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             fc2_w_data = fc2_w_data.view(num_groups, fc2_weight_shape[0], fc2_weight_k)
             fc2_w_scales = fc2_weight_for_gemm.columnwise_scale_inv.view(dtype=scale_view_dtype)
             if canonical:
+                # The column-wise weight is (num_groups, k, n): an n-major B for this GEMM.
                 fc2_dactivation_kwargs["b_major"] = "n"
             else:
                 fc2_w_data = (
@@ -3066,6 +3067,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                         dtype=torch.float8_e8m0fnu
                     )
                     if canonical:
+                        # The column-wise weight is (num_groups, k, n): an n-major B for this GEMM.
                         fc1_dgrad_kwargs["b_major"] = "n"
                     else:
                         fc1_w_data = fc1_w_data.permute(2, 1, 0)
