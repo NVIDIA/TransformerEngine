@@ -31,6 +31,7 @@ from transformer_engine.common.recipe import (
     Format,
     MMParams,
     MXFP8BlockScaling,
+    NVFP4BlockScaling,
 )
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -178,7 +179,7 @@ def _parse_args(argv=None, namespace=None):
         "--quantization",
         type=str.lower,
         default="none",
-        choices=["none", "fp8_delayed_scaling", "fp8_current_scaling", "mxfp8"],
+        choices=["none", "fp8_delayed_scaling", "fp8_current_scaling", "mxfp8", "nvfp4"],
         help="Quantization recipe",
     )
     parser.add_argument(
@@ -530,6 +531,8 @@ def _train(opts):
         fp8_recipe = Float8CurrentScaling(fp8_format=fp8_format)
     elif opts.quantization == "mxfp8":
         fp8_recipe = MXFP8BlockScaling()
+    elif opts.quantization == "nvfp4":
+        fp8_recipe = NVFP4BlockScaling()
 
     if opts.fp8:
         fp8_recipe.fp8_gemm_fprop = MMParams(use_split_accumulator=True)
@@ -548,8 +551,9 @@ def _train(opts):
         for i in range(opts.num_layers)
     ]
 
-    # Prepare random input tensors
-    test_x = torch.randn(input_shape, dtype=torch.float32, device="cuda", requires_grad=True)
+    # Prepare random input tensors. The NVFP4 random Hadamard transform requires BF16 input.
+    input_dtype = torch.bfloat16 if opts.quantization == "nvfp4" else torch.float32
+    test_x = torch.randn(input_shape, dtype=input_dtype, device="cuda", requires_grad=True)
     test_x.retain_grad()
     ref_x = torch.empty_like(test_x).requires_grad_(True)
     with torch.no_grad():
