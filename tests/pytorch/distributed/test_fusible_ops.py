@@ -35,7 +35,7 @@ import transformer_engine.pytorch.ops as te_ops
 _current_file = pathlib.Path(__file__).resolve()
 # Prepend so installed packages with a top-level utils module cannot shadow the test helpers.
 sys.path = [str(_current_file.parent.parent)] + sys.path
-from utils import dtype_tols, make_recipe, quantization_tols
+from utils import assert_close, dtype_tols, make_recipe, quantization_tols
 
 
 # Check what quantization schemes are supported
@@ -331,7 +331,6 @@ def _test_basic_linear(
     quantized_weight: bool = False,
     tensor_parallel_mode: str = "column",
     sequence_parallel: bool = False,
-    bias: bool = False,
     compile_model: bool = False,
 ) -> None:
 
@@ -380,19 +379,12 @@ def _test_basic_linear(
         requires_grad=False,
     )
 
-    b_ref, b_test = None, None
-    if bias:
-        b_ref, b_test = make_reference_and_test_tensors(
-            (out_features,), test_dtype=dtype, test_device=device
-        )
-
     # Plain PyTorch implementation
-    y_ref = torch.nn.functional.linear(x_ref, w_ref, b_ref)
+    y_ref = torch.nn.functional.linear(x_ref, w_ref)
     y_ref.backward(dy_ref)
 
     # Convert to distributed tensors
     with torch.no_grad():
-        db_ref = b_ref.grad if bias else None
         dw_ref = w_ref.grad
         dx_ref = x_ref.grad
         if tensor_parallel_mode == "column":
@@ -401,9 +393,6 @@ def _test_basic_linear(
                 rank * local_out_features,
                 (rank + 1) * local_out_features,
             )
-            if bias:
-                b_test = b_test[local_slice]
-                db_ref = db_ref[local_slice]
             w_ref = w_ref[local_slice, :]
             dw_ref = dw_ref[local_slice, :]
             w_test = w_test[local_slice, :]
@@ -436,8 +425,6 @@ def _test_basic_linear(
                 y_ref = y_ref[local_slice, ...]
                 dy_ref = dy_ref[local_slice, ...]
                 dy_test = dy_test[local_slice, ...].clone()
-                if bias:
-                    db_ref = dy_ref.sum(dim=0)
     x_test.requires_grad_()
 
     # Implementation with fusible operation
@@ -458,10 +445,6 @@ def _test_basic_linear(
         op.weight.copy_(w_test)
         del w_test
     model = te_ops.Sequential(op)
-    if bias:
-        model.append(te_ops.Bias(local_out_features, device=device, dtype=dtype))
-        with torch.no_grad():
-            model[1].bias.copy_(b_test)
 
     def forward(x):
         if not quantized_compute:
@@ -486,11 +469,9 @@ def _test_basic_linear(
         x_test.grad = None
         y_test = forward(x_test)
         y_test.backward(dy_test)
-        torch.testing.assert_close(y_test.double().cpu(), y_ref, **tols)
-        torch.testing.assert_close(x_test.grad.double().cpu(), dx_ref, **tols)
-        torch.testing.assert_close(op.weight.grad.double().cpu(), dw_ref, **tols)
-        if bias:
-            torch.testing.assert_close(model[1].bias.grad.double().cpu(), db_ref, **tols)
+        assert_close(y_test, y_ref, **tols)
+        assert_close(x_test.grad, dx_ref, **tols)
+        assert_close(op.weight.grad, dw_ref, **tols)
 
 
 def _test_linear(
@@ -504,6 +485,7 @@ def _test_linear(
     quantized_weight: bool = False,
     tensor_parallel_mode: str = "column",
     sequence_parallel: bool = False,
+    compile_model: bool = False,
 ) -> None:
 
     # Skip invalid configurations
@@ -626,6 +608,8 @@ def _test_linear(
 
     # Implementation with fusible operation
     recipe = make_recipe(quantization)
+    if compile_model and recipe is not None:
+        recipe.backward_override = None
     with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
         model = te_ops.Sequential(
             te_ops.Linear(
@@ -645,9 +629,16 @@ def _test_linear(
             model[0].bias.copy_(b_test)
         del w_test
         del b_test
-    with te.autocast(enabled=quantized_compute, recipe=recipe):
-        y_test = model(x_test)
-    y_test.backward(dy_test)
+
+    def forward(x):
+        if not quantized_compute:
+            return model(x)
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
+            return model(x)
+
+    if compile_model:
+        torch._dynamo.reset()
+        forward = torch.compile(forward, fullgraph=True)
 
     # Expected numerical error
     tols = dtype_tols(dtype)
@@ -656,16 +647,16 @@ def _test_linear(
     if quantized_compute:
         tols = quantization_tols(quantization)
 
-    # Check results
-    y_test = y_test.to(dtype=torch.float64, device="cpu")
-    dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
-    dw_test = model[0].weight.grad.to(dtype=torch.float64, device="cpu")
-    torch.testing.assert_close(y_test, y_ref, **tols)
-    torch.testing.assert_close(dx_test, dx_ref, **tols)
-    torch.testing.assert_close(dw_test, dw_ref, **tols)
-    if bias:
-        db_test = model[0].bias.grad.to(dtype=torch.float64, device="cpu")
-        torch.testing.assert_close(db_test, db_ref, **tols)
+    for _ in range(3 if compile_model else 1):
+        model.zero_grad(set_to_none=True)
+        x_test.grad = None
+        y_test = forward(x_test)
+        y_test.backward(dy_test)
+        assert_close(y_test, y_ref, **tols)
+        assert_close(x_test.grad, dx_ref, **tols)
+        assert_close(model[0].weight.grad, dw_ref, **tols)
+        if bias:
+            assert_close(model[0].bias.grad, db_ref, **tols)
 
 
 def _test_mlp(
@@ -1069,19 +1060,30 @@ def run_parallel_tests() -> None:
 def run_compile_parallel_tests() -> None:
     """Compile the existing TP numerical test, including the Linear+Bias fusion."""
     quantizations = [None, "fp8_current_scaling"] if fp8_available else [None]
-    for quantization, mode, sp, bias in itertools.product(
-        quantizations, ("column", "row"), (False, True), (False, True)
+    for quantization, mode, sp in itertools.product(
+        quantizations, ("column", "row"), (False, True)
     ):
         if torch.distributed.get_rank(world_group()) == 0:
-            print(f"Compile BasicLinear: {quantization=}, {mode=}, {sp=}, {bias=}", flush=True)
+            print(f"Compile BasicLinear: {quantization=}, {mode=}, {sp=}", flush=True)
         _test_basic_linear(
             dtype=torch.bfloat16,
             quantization=quantization,
             tensor_parallel_mode=mode,
             sequence_parallel=sp,
-            bias=bias,
             compile_model=True,
         )
+        # Row-parallel Linear uses standalone collectives without compile support.
+        if mode == "column":
+            if torch.distributed.get_rank(world_group()) == 0:
+                print(f"Compile Linear: {quantization=}, {mode=}, {sp=}", flush=True)
+            _test_linear(
+                bias=True,
+                dtype=torch.bfloat16,
+                quantization=quantization,
+                tensor_parallel_mode=mode,
+                sequence_parallel=sp,
+                compile_model=True,
+            )
 
 
 # Parallel job sizes
