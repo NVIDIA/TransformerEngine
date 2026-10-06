@@ -330,6 +330,19 @@ def test_frost_declines_unsupported_configs():
         # selector contract rather than an internal detail.
         (dict(window_size_right=5), "a right window past the diagonal"),
         (dict(window_size_left=-2, window_size_right=0), "a left window below -1"),
+        # A right-bounded window on a non-causal mask takes its anchor only from
+        # bottom_right_diagonal; the all-gather ring measures its window bottom-right. Those
+        # differ exactly when the lengths do.
+        (
+            dict(
+                attn_mask_type=AttnMaskType["no_mask"],
+                window_size_left=128,
+                window_size_right=0,
+                max_seqlen_q=512,
+                max_seqlen_kv=640,
+            ),
+            "an ambiguous diagonal anchor",
+        ),
         # The engine pads head_dim to a multiple of 8, so an in-range but unpadded dim has to be
         # declined here rather than failing later at plan selection.
         (dict(head_dim_qk=260, head_dim_v=260), "head_dim not a multiple of 8"),
@@ -337,6 +350,24 @@ def test_frost_declines_unsupported_configs():
         backend, reason = is_frost_attention_supported(_frost_params(**override))
         assert backend == FusedAttnBackend.No_Backend, "%s must be declined" % why
         assert reason, "a decline must explain itself"
+
+
+@requires_frost
+def test_frost_serves_an_unambiguous_window_on_a_non_causal_mask():
+    """The anchor is only ambiguous when the q and kv lengths differ; equal lengths must serve."""
+    from transformer_engine.pytorch.attention.dot_product_attention.frost_attention import (
+        is_frost_attention_supported,
+    )
+    from transformer_engine.pytorch.cpp_extensions.fused_attn import AttnMaskType, FusedAttnBackend
+
+    params = _frost_params(
+        attn_mask_type=AttnMaskType["no_mask"],
+        window_size_left=128,
+        window_size_right=0,
+        max_seqlen_q=4096,
+        max_seqlen_kv=4096,
+    )
+    assert is_frost_attention_supported(params)[0] == FusedAttnBackend.FROST
 
 
 @requires_frost

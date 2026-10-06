@@ -370,13 +370,26 @@ def is_frost_attention_supported(params) -> Tuple[int, str]:
     if attn_mask_type is None:
         return no_backend, f"FROST got an unrecognised attn_mask_type {params.attn_mask_type}"
     try:
-        _te_mask_spec(
+        mask_for_band, _ = _te_mask_spec(
             attn_mask_type,
             (params.window_size_left, params.window_size_right),
             params.bottom_right_diagonal,
         )
     except NotImplementedError as exc:
         return no_backend, str(exc)
+    if (
+        mask_for_band == "causal"
+        and "causal" not in attn_mask_type
+        and params.max_seqlen_q != params.max_seqlen_kv
+    ):
+        # A right-bounded window on a non-causal mask takes its anchor only from
+        # bottom_right_diagonal, which defaults to top-left, while the all-gather ring trims KV
+        # and measures its window against the bottom-right diagonal. Those differ exactly when
+        # the q and kv lengths do, so decline rather than guess which one was meant.
+        return no_backend, (
+            "FROST declines a right-bounded window on a non-causal mask with max_seqlen_q !="
+            " max_seqlen_kv, where the diagonal anchor is ambiguous"
+        )
 
     return int(FusedAttnBackend.FROST), ""
 
