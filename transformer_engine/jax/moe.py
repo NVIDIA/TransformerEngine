@@ -629,6 +629,25 @@ def _validate_moe_quantizer_sets(
                 )
 
 
+def _with_grouped_weight_buffers(tensor, data, scale_inv, original_shape):
+    """Rebuild a dense grouped weight while preserving its quantization metadata."""
+    return GroupedScaledTensor1x(
+        data=data,
+        scale_inv=scale_inv,
+        amax=tensor.amax,
+        first_dims=None,
+        last_dims=None,
+        scaling_mode=tensor.scaling_mode,
+        dq_dtype=tensor.dq_dtype,
+        _dq_func=tensor._dq_func,
+        is_colwise=tensor.is_colwise,
+        data_layout=tensor.data_layout,
+        flatten_axis=tensor.flatten_axis,
+        original_shape=original_shape,
+        pre_swizzled=True,
+    )
+
+
 def _gather_quantized_weight(tensor, fsdp_axis: str, fsdp_size: int, sharded_axis: int):
     """Gather an MXFP8 grouped weight without gathering its BF16 source.
 
@@ -691,68 +710,51 @@ def _gather_quantized_weight(tensor, fsdp_axis: str, fsdp_size: int, sharded_axi
         flatten_axis=tensor.flatten_axis,
     )[0]
     scale_inv = jnp.pad(scale_inv, (0, expected_scale_size - scale_inv.size))
-    return GroupedScaledTensor1x(
-        data=data,
-        scale_inv=scale_inv,
-        amax=tensor.amax,
-        first_dims=None,
-        last_dims=None,
-        scaling_mode=tensor.scaling_mode,
-        dq_dtype=tensor.dq_dtype,
-        _dq_func=tensor._dq_func,
-        is_colwise=tensor.is_colwise,
-        data_layout=tensor.data_layout,
-        flatten_axis=tensor.flatten_axis,
-        original_shape=global_shape,
-        pre_swizzled=True,
+    return _with_grouped_weight_buffers(tensor, data, scale_inv, global_shape)
+
+
+def _weight_scale_shapes(tensor, matrix_shape):
+    """Return padded and active per-expert MXFP8 scale shapes."""
+    kwargs = {
+        "data_layout": tensor.data_layout,
+        "is_colwise": tensor.is_colwise,
+        "flatten_axis": tensor.flatten_axis - 1,
+    }
+    return (
+        tensor.scaling_mode.get_scale_shape(matrix_shape, is_padded=True, **kwargs),
+        tensor.scaling_mode.get_scale_shape(matrix_shape, is_padded=False, **kwargs),
     )
+
+
+def _read_weight_scale(tensor, expert, padded_shape, plain_shape):
+    """Read one expert's active scales in matrix order."""
+    scale_size = math.prod(padded_shape)
+    swizzled = jax.lax.dynamic_slice_in_dim(tensor.scale_inv, expert * scale_size, scale_size)
+    plain = _unswizzle_mxfp8_grouped_scale(swizzled, padded_shape, tensor.is_colwise)
+    return plain[: plain_shape[0], : plain_shape[1]]
+
+
+def _swizzle_weight_scale(plain, padded_shape, is_colwise):
+    """Pad and swizzle one expert's scale matrix for grouped GEMM."""
+    padded = jnp.pad(
+        plain, ((0, padded_shape[0] - plain.shape[0]), (0, padded_shape[1] - plain.shape[1]))
+    )
+    return swizzled_scale(padded, 1, is_colwise).reshape(-1)
 
 
 def _gather_quantized_matrix_scales(tensor, fsdp_axis, data_axis, local_scale_shape, global_matrix):
     """Reassemble scales when FSDP splits each expert's matrix dimension."""
-    local_matrix = tensor.original_shape[1:]
-    local_unpadded_shape = tensor.scaling_mode.get_scale_shape(
-        local_matrix,
-        data_layout=tensor.data_layout,
-        is_colwise=tensor.is_colwise,
-        is_padded=False,
-        flatten_axis=tensor.flatten_axis - 1,
-    )
-    global_unpadded_shape = tensor.scaling_mode.get_scale_shape(
-        global_matrix,
-        data_layout=tensor.data_layout,
-        is_colwise=tensor.is_colwise,
-        is_padded=False,
-        flatten_axis=tensor.flatten_axis - 1,
-    )
-    global_padded_shape = tensor.scaling_mode.get_scale_shape(
-        global_matrix,
-        data_layout=tensor.data_layout,
-        is_colwise=tensor.is_colwise,
-        is_padded=True,
-        flatten_axis=tensor.flatten_axis - 1,
-    )
+    _, local_unpadded_shape = _weight_scale_shapes(tensor, tensor.original_shape[1:])
+    global_padded_shape, global_unpadded_shape = _weight_scale_shapes(tensor, global_matrix)
     scale_axis = data_axis - 1
-    local_scale_size = math.prod(local_scale_shape)
     gathered_scales = []
     for expert in range(tensor.original_shape[0]):
-        local_swizzled = jax.lax.dynamic_slice_in_dim(
-            tensor.scale_inv, expert * local_scale_size, local_scale_size
-        )
-        local_plain = _unswizzle_mxfp8_grouped_scale(
-            local_swizzled, local_scale_shape, tensor.is_colwise
-        )
-        local_plain = local_plain[: local_unpadded_shape[0], : local_unpadded_shape[1]]
+        local_plain = _read_weight_scale(tensor, expert, local_scale_shape, local_unpadded_shape)
         full_plain = jax.lax.all_gather(local_plain, fsdp_axis, axis=scale_axis, tiled=True)
         assert full_plain.shape == global_unpadded_shape
-        full_padded = jnp.pad(
-            full_plain,
-            (
-                (0, global_padded_shape[0] - global_unpadded_shape[0]),
-                (0, global_padded_shape[1] - global_unpadded_shape[1]),
-            ),
+        gathered_scales.append(
+            _swizzle_weight_scale(full_plain, global_padded_shape, tensor.is_colwise)
         )
-        gathered_scales.append(swizzled_scale(full_padded, 1, tensor.is_colwise).reshape(-1))
     return jnp.concatenate(gathered_scales)
 
 
@@ -785,6 +787,81 @@ def _weight_fsdp_axis(spec, fsdp_axis):
         ),
         None,
     )
+
+
+def _swiglu_column_indices(width, interleave):
+    """Map contiguous gate/up halves to 32-column pairs, or undo that mapping."""
+    if width % 64:
+        raise ValueError("The global gated dimension must be divisible by 64")
+    blocks = jnp.arange(width // 32)
+    blocks = (
+        blocks.reshape(2, -1).T.reshape(-1) if interleave else blocks.reshape(-1, 2).T.reshape(-1)
+    )
+    columns = (blocks[:, None] * 32 + jnp.arange(32)[None, :]).reshape(-1)
+    return blocks, columns
+
+
+def _reorder_quantized_swiglu_weight(tensor, *, interleave):
+    """Permute gathered MXFP8 columns and their scales without requantization.
+
+    Input logical storage is [E,K,2N]. Both rowwise and colwise copies may use
+    physical N or T layout. Gate/up boundaries and permutations are 32-aligned,
+    so each quantization block keeps its original data and inverse scale.
+    """
+    if isinstance(tensor, ScaledTensor2x):
+        return ScaledTensor2x(
+            _reorder_quantized_swiglu_weight(tensor.rowwise_tensor, interleave=interleave),
+            _reorder_quantized_swiglu_weight(tensor.colwise_tensor, interleave=interleave),
+        )
+    if not isinstance(tensor, GroupedScaledTensor1x):
+        raise TypeError("SwiGLU weight reordering requires grouped MXFP8 tensors")
+    if tensor.scaling_mode != ScalingMode.MXFP8_1D_SCALING or not tensor.pre_swizzled:
+        raise ValueError("SwiGLU weight reordering requires pre-swizzled MXFP8 scales")
+
+    shape = tensor.original_shape
+    data_axis = 1 if tensor.data_layout == "T" else 2
+    block_indices, column_indices = _swiglu_column_indices(shape[data_axis], interleave)
+    data = jnp.take(tensor.data.reshape(shape), column_indices, axis=data_axis).reshape(-1)
+    padded_shape, plain_shape = _weight_scale_shapes(tensor, shape[1:])
+    scale_axis = data_axis - 1
+    # Rowwise scales cover 32 columns; colwise scales have one entry per column.
+    scale_indices = (
+        block_indices if plain_shape[scale_axis] == shape[data_axis] // 32 else column_indices
+    )
+    reordered_scales = []
+    for expert in range(shape[0]):
+        plain = _read_weight_scale(tensor, expert, padded_shape, plain_shape)
+        reordered = jnp.take(plain, scale_indices, axis=scale_axis)
+        reordered_scales.append(_swizzle_weight_scale(reordered, padded_shape, tensor.is_colwise))
+    scale_inv = jnp.concatenate(reordered_scales)
+    scale_inv = jnp.pad(scale_inv, (0, tensor.scale_inv.size - scale_inv.size))
+    return _with_grouped_weight_buffers(tensor, data, scale_inv, shape)
+
+
+def _prepare_fc1_weight(
+    wi, quantizer, *, fused, native_layout, quant_before_fsdp_ag, fsdp_axis, fsdp_size, sharded_axis
+):
+    """Convert FC1 storage and gather quantized shards in the correct logical order."""
+    gated_axis = 1 if native_layout else 2
+    convert_layout = bool(fused) != native_layout
+    convert_after_gather = convert_layout and quant_before_fsdp_ag and sharded_axis == gated_axis
+    if native_layout and not fused:
+        wi = wi.transpose(0, 2, 1)
+        if sharded_axis in (1, 2):
+            sharded_axis = 3 - sharded_axis
+        if not convert_after_gather:
+            gate, up = tex.unpack_swiglu_pair(wi)
+            wi = jnp.concatenate((gate, up), axis=-1)
+    elif fused and not native_layout and not convert_after_gather:
+        gate, up = jnp.split(wi, 2, axis=-1)
+        wi = tex.pack_swiglu_pair(gate, up)
+
+    casted = tex.grouped_quantize(wi, quantizer, flatten_axis=-1)
+    if quant_before_fsdp_ag and sharded_axis is not None:
+        casted = _gather_quantized_weight(casted, fsdp_axis, fsdp_size, sharded_axis)
+    if convert_after_gather:
+        casted = _reorder_quantized_swiglu_weight(casted, interleave=bool(fused))
+    return casted
 
 
 def _ffn_fwd_per_shard(
@@ -821,24 +898,6 @@ def _ffn_fwd_per_shard(
     wi = wi.astype(sorted_x.dtype)
     wo = wo.astype(sorted_x.dtype)
 
-    # The cuDNN-native parameter is persistent [E,2N,K] storage with alternating
-    # 32-column gate/up blocks. Standard TE storage is [E,K,2N] with contiguous
-    # gate/up halves. Keep conversion only as a compatibility fallback.
-    if use_cudnn_jax_fusion:
-        if cudnn_native_weight_layout:
-            wi_for_gemm = wi
-        else:
-            wi_gate, wi_up = jnp.split(wi, 2, axis=-1)
-            wi_for_gemm = tex.pack_swiglu_pair(wi_gate, wi_up)
-    else:
-        if cudnn_native_weight_layout:
-            wi_interleaved = wi.transpose(0, 2, 1)
-            wi_gate, wi_up = tex.unpack_swiglu_pair(wi_interleaved)
-            wi_for_gemm = jnp.concatenate((wi_gate, wi_up), axis=-1)
-            if wi_fsdp_axis in (1, 2):
-                wi_fsdp_axis = 3 - wi_fsdp_axis
-        else:
-            wi_for_gemm = wi
     wi_combined_bias = (
         jnp.concatenate([wi_0_bias, wi_1_bias], axis=-1) if wi_0_bias is not None else None
     )
@@ -850,14 +909,16 @@ def _ffn_fwd_per_shard(
         group_sizes,
         flatten_axis=-1,
     )
-    casted_wi = tex.grouped_quantize(wi_for_gemm, fc1_quantizer_set.kernel, flatten_axis=-1)
-    if quant_before_fsdp_ag and wi_fsdp_axis is not None:
-        casted_wi = _gather_quantized_weight(
-            casted_wi,
-            fsdp_axis,
-            fsdp_size,
-            wi_fsdp_axis,
-        )
+    casted_wi = _prepare_fc1_weight(
+        wi,
+        fc1_quantizer_set.kernel,
+        fused=use_cudnn_jax_fusion,
+        native_layout=cudnn_native_weight_layout,
+        quant_before_fsdp_ag=quant_before_fsdp_ag,
+        fsdp_axis=fsdp_axis,
+        fsdp_size=fsdp_size,
+        sharded_axis=wi_fsdp_axis,
+    )
     casted_intermediate = None
     if use_cudnn_jax_fusion:
         casted_sorted_x_lhs = casted_sorted_x.get_tensor(usage=TensorUsage.LHS)
@@ -2092,7 +2153,10 @@ def moe(
         full-precision weights first. ``True`` requires an FSDP resource and
         MXFP8 kernel quantizers. With active Flax logical-axis rules, the weight
         input specs follow ``wi_kernel_axes`` and ``wo_kernel_axes``; FSDP may
-        shard whole experts or a matrix dimension within each expert.
+        shard whole experts or a matrix dimension within each expert. When
+        FSDP shards the gated dimension, layout conversion permutes gathered
+        FP8 data and inverse scales, preserving global gate/up pairing without
+        gathering or requantizing full-precision weights.
     ep_axis, data_parallelism_axes, weight_gather : deprecated
         Compatibility arguments converted into a MeshResource and boolean,
         with a DeprecationWarning. Conflicting old and new arguments raise.

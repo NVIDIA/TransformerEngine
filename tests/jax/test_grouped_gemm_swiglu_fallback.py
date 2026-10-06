@@ -260,6 +260,13 @@ def test_forward_uses_selected_kernel(monkeypatch, path, native_layout, gather_g
         return quantize(jnp.concatenate([data, data], axis=sharded_axis))
 
     monkeypatch.setattr(moe, "_gather_quantized_weight", gather)
+
+    def reorder(tensor, *, interleave):
+        assert interleave and gather_gated_dimension and not native_layout
+        gate, up = jnp.split(tensor.get_tensor().data, 2, axis=-1)
+        return quantize(moe.tex.pack_swiglu_pair(gate, up))
+
+    monkeypatch.setattr(moe, "_reorder_quantized_swiglu_weight", reorder)
     quantizers = SimpleNamespace(x=SimpleNamespace(q_dtype=jnp.float8_e4m3fn), kernel=None)
     kwargs = dict.fromkeys(inspect.signature(moe._ffn_fwd_per_shard).parameters)
     combined = 128 if gather_gated_dimension else 256

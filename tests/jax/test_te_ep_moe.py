@@ -158,6 +158,7 @@ NUM_DEVICES_REQUIRED = EP_SIZE * FSDP_SIZE
 LOGICAL_AXIS_RULES = (
     ("exp", EP_AXIS),
     ("expert_weight_fsdp", (EP_AXIS, FSDP_AXIS)),
+    ("gated_weight_fsdp", FSDP_AXIS),
     ("embed", FSDP_AXIS),
     ("mlp", None),
     ("batch", (FSDP_AXIS, EP_AXIS)),
@@ -598,15 +599,12 @@ def test_weight_gather_policy_axis_resolution(mesh):
 
 
 @pytest.mark.parametrize("native_weight_layout", [False, True])
-@pytest.mark.parametrize("expert_fsdp", [False, True])
+@pytest.mark.parametrize("fsdp_dimension", ["k", "gated", "expert"])
 def test_quantized_weight_gather_matches_full_precision_gather(
-    mesh, monkeypatch, native_weight_layout, expert_fsdp
+    mesh, monkeypatch, native_weight_layout, fsdp_dimension
 ):
     """The FP8 weight gather retains forward and backward MoE semantics."""
-    if native_weight_layout:
-        if not _USE_CUDNN_FUSION:
-            pytest.skip("Native weight layout requires cuDNN grouped GEMM fusion")
-    if native_weight_layout or expert_fsdp:
+    if native_weight_layout or fsdp_dimension != "k":
         from transformer_engine.jax import cpp_extensions as tex
 
         flax_moe_module = importlib.import_module("transformer_engine.jax.flax.moe")
@@ -618,7 +616,20 @@ def test_quantized_weight_gather_matches_full_precision_gather(
                 gate, up = jnp.split(args[2], 2, axis=-1)
                 args[2] = tex.pack_swiglu_pair(gate, up).transpose(0, 2, 1)
                 kwargs["wi_kernel_axes"] = ("exp", "mlp", "embed")
-            if expert_fsdp:
+                kwargs["cudnn_native_weight_layout"] = True
+            if fsdp_dimension == "gated":
+                kwargs["wi_kernel_axes"] = (
+                    ("exp", "gated_weight_fsdp", None)
+                    if native_weight_layout
+                    else ("exp", None, "gated_weight_fsdp")
+                )
+                spec = (
+                    P(EP_AXIS, FSDP_AXIS, None)
+                    if native_weight_layout
+                    else P(EP_AXIS, None, FSDP_AXIS)
+                )
+                args[2] = jax.lax.with_sharding_constraint(args[2], NamedSharding(mesh, spec))
+            if fsdp_dimension == "expert":
                 kwargs["wi_kernel_axes"] = ("expert_weight_fsdp", None, None)
                 kwargs["wo_kernel_axes"] = ("expert_weight_fsdp", None, None)
                 spec = P((EP_AXIS, FSDP_AXIS), None, None)
@@ -899,6 +910,7 @@ def test_explicitly_disabled_fusion_with_native_weights(mesh, monkeypatch):
         gate, up = jnp.split(args[2], 2, axis=-1)
         args[2] = tex.pack_swiglu_pair(gate, up).transpose(0, 2, 1)
         kwargs["wi_kernel_axes"] = ("exp", "mlp", "embed")
+        kwargs["cudnn_native_weight_layout"] = True
         return original_moe(*args, **kwargs)
 
     monkeypatch.setattr(flax_moe, "moe", native_moe)
@@ -944,6 +956,7 @@ class TestTeEpMoeCudnnCutedslFusion:
                 gate, up = jnp.split(args[2], 2, axis=-1)
                 args[2] = tex.pack_swiglu_pair(gate, up).transpose(0, 2, 1)
                 kwargs["wi_kernel_axes"] = ("exp", "mlp", "embed")
+                kwargs["cudnn_native_weight_layout"] = True
                 return original_moe(*args, **kwargs)
 
             monkeypatch.setattr(flax_moe, "moe", native_moe)
@@ -966,9 +979,7 @@ class TestTeEpMoeCudnnCutedslFusion:
     @pytest.mark.parametrize("apply_topk_weights_early", [False, True])
     def test_mxfp8_forward_and_backward(self, mesh, apply_topk_weights_early, monkeypatch):
         if not _USE_CUDNN_FUSION:
-            pytest.skip(
-                "run separately with --use-cudnn-fusion=1"
-            )
+            pytest.skip("run separately with --use-cudnn-fusion=1")
         rubin_calls = []
         if get_device_compute_capability(0) == 107:
             from transformer_engine.jax import cpp_extensions as tex
