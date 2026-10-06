@@ -34,4 +34,5 @@ register_backward_fusion(BackwardAddRMSNorm.fuse_backward_ops)
 from .grouped_mlp import (  # pylint: disable=wrong-import-position
     GroupedMLP_CuTeGEMMGLU,
     GroupedMLP_CuTeGEMMUnary,
+    GroupedMLP_CuTeGEMMGLUBf16,
 )

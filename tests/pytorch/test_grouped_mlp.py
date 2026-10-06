@@ -1301,8 +1301,20 @@ class TestGroupedMLPFusedOp:
         maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
         if dtype == torch.bfloat16 and not is_bf16_available():
             pytest.skip("BF16 requires SM 8.0+")
-        if single_grouped_weight and quantization != "mxfp8":
-            pytest.skip("single_grouped_weight is only supported for MXFP8 quantization")
+        # ``None`` is included because the BF16 fused grouped MLP
+        # (GroupedMLP_CuTeGEMMGLUBf16) drives packed weights through the same
+        # cuDNN dense-B path, so the unquantized case is real coverage rather
+        # than a fallback-only run.
+        if single_grouped_weight and quantization not in ("mxfp8", None):
+            pytest.skip("single_grouped_weight is only supported for MXFP8 or BF16")
+        if (
+            single_grouped_weight
+            and quantization is None
+            and not is_op_fuser_grouped_tensor_path_supported(None, dtype)
+        ):
+            # Single grouped parameters intentionally have no split-quantize
+            # fallback, and unquantized grouped-tensor GEMMs need Hopper or newer.
+            pytest.skip("Single grouped parameters require the native grouped-tensor path")
         if single_grouped_bias and not bias:
             pytest.skip("single_grouped_bias requires bias=True")
         if with_quantization and dtype not in (torch.bfloat16, torch.float16):
@@ -1569,6 +1581,7 @@ class TestGroupedMLPFusedOp:
                 grouped_mlp_callbacks = {
                     grouped_mlp_module.fuse_glu_ops,
                     grouped_mlp_module.fuse_unary_activation_ops,
+                    grouped_mlp_module.fuse_bf16_ops,
                 }
                 fusion_patch.setattr(
                     OperationFuser,
@@ -1660,6 +1673,33 @@ class TestGroupedMLPFusedOp:
                     fused_cls,
                 )
                 assert backward_ops[0][0] is forward_ops[0][0]
+        # Unquantized BF16 runs fuse through GroupedMLP_CuTeGEMMGLUBf16 on
+        # Blackwell. Assert the selection so these cases cannot silently pass on
+        # the unfused path. FC2's scale_bias (set when bias=True above) and the
+        # custom GeGLU clamp/alpha have no BF16 kernel, so those correctly decline,
+        # as does all GeGLU while cuDNN's BF16 dGeGLU is wrong.
+        bf16_fused_cls = te.ops.fused.GroupedMLP_CuTeGEMMGLUBf16
+        if (
+            enable_fusion
+            and quantization is None
+            and split_alignment % 256 == 0
+            and dtype == torch.bfloat16
+            and (
+                activation == "scaled_swiglu"
+                or (
+                    activation == "scaled_clamped_qgeglu"
+                    and grouped_mlp_module._cudnn_bf16_dgeglu_supported()
+                )
+            )
+            and not bias
+            and bf16_fused_cls.is_supported()
+            and torch.cuda.get_device_capability() < (10, 7)
+        ):
+            forward_ops = module._module_groups[0]._forward_ops
+            backward_ops = module._module_groups[0]._backward_ops
+            assert len(forward_ops) == 1
+            assert isinstance(forward_ops[0][0], bf16_fused_cls)
+            assert backward_ops[0][0] is forward_ops[0][0]
         if strict_fusion is False:
             forward_ops = module._module_groups[0]._forward_ops
             backward_ops = module._module_groups[0]._backward_ops
@@ -3889,6 +3929,25 @@ class TestGroupedMLPDeterminism:
         torch.use_deterministic_algorithms(torch_flag)
         assert grouped_mlp_module._deterministic_algorithms_required() is expected
 
+    def test_bf16_refuses_determinism(self, monkeypatch) -> None:
+        """The BF16 dGLU sums ``dprob`` with atomics, so a determinism request must fail loudly."""
+        fused_cls = grouped_mlp_module.GroupedMLP_CuTeGEMMGLUBf16
+        if not fused_cls.is_supported():
+            pytest.skip("BF16 fused grouped MLP is not supported on this system")
+        if torch.cuda.get_device_capability() >= (10, 7):
+            pytest.skip("BF16 fused grouped MLP declines on Rubin")
+
+        monkeypatch.setenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "0")
+        with pytest.raises(RuntimeError, match="dprob"):
+            TestGroupedMLPFusedOp().test_grouped_mlp(
+                enable_fusion=True,
+                bias=False,
+                hidden_size=128,
+                quantization=None,
+                single_grouped_weight=False,
+                activation="scaled_swiglu",
+            )
+
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
     @pytest.mark.parametrize(
         "activation,fused_cls",
@@ -4195,3 +4254,301 @@ def test_grouped_gemm_quant_cute_matches_mxfp8_quantized() -> None:
         d_cute = d_cute.squeeze(-1)
     tols = dtype_tols(torch.bfloat16)
     assert_close(d_cute[:total_m].float(), ref, **tols)
+
+
+# ---------------------------------------------------------------------------
+# BF16 fused grouped MLP (GroupedMLP_CuTeGEMMGLUBf16)
+# ---------------------------------------------------------------------------
+#
+# These exercise the fusion matcher and its guards only: they monkeypatch
+# ``is_supported`` and never launch a kernel, so they run on any CUDA device
+# rather than requiring SM100. Numerical coverage comes from the shared
+# ``test_grouped_mlp`` cases, which already parametrize ``quantization=None``
+# with BF16 and therefore exercise the fused BF16 path whenever both
+# GroupedLinear ops declare ``split_alignment=256``.
+
+
+def _bf16_mlp_ops(
+    *,
+    num_groups: int = 1,
+    in_features: int = 64,
+    ffn_hidden: int = 128,
+    activation=None,
+    bias: bool = False,
+    dtype: torch.dtype = torch.bfloat16,
+):
+    """Build a GroupedLinear + GLU + GroupedLinear triple for matcher tests."""
+    fc1 = te.ops.GroupedLinear(
+        num_groups,
+        in_features,
+        2 * ffn_hidden,
+        bias=bias,
+        device="cuda",
+        dtype=dtype,
+        split_alignment=256,
+    )
+    if activation is None:
+        activation = te.ops.ScaledSwiGLU(glu_interleave_size=32)
+    fc2 = te.ops.GroupedLinear(
+        num_groups,
+        ffn_hidden,
+        in_features,
+        bias=bias,
+        device="cuda",
+        dtype=dtype,
+        split_alignment=256,
+    )
+    return [fc1, activation, fc2]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
+class TestGroupedMLPBf16FusedOp:
+    """Fusion-matcher tests for the BF16 fused grouped MLP."""
+
+    @staticmethod
+    def _fuse(monkeypatch, ops, recipe):
+        fused_cls = grouped_mlp_module.GroupedMLP_CuTeGEMMGLUBf16
+        monkeypatch.setattr(fused_cls, "is_supported", classmethod(lambda cls: True))
+        return (
+            grouped_mlp_module.fuse_bf16_grouped_mlp_ops(
+                ops, recipe=recipe, fused_op_cls=fused_cls
+            ),
+            fused_cls,
+        )
+
+    @staticmethod
+    def _assert_declined(fused, ops, fused_cls, msg="") -> None:
+        """The window was left alone: same ops, same order, nothing fused.
+
+        Compares contents rather than identity: like ``fuse_grouped_mlp_ops``,
+        the matcher returns a new list when it walks windows without fusing;
+        only the recipe early-return hands back ``ops`` itself.
+        """
+        assert list(fused) == list(ops), msg
+        assert not any(isinstance(op, fused_cls) for op in fused), msg
+
+    @pytest.mark.parametrize(
+        "version_ok,has_flag,expected",
+        (
+            (True, True, True),
+            # cuDNN frontend older than the canonical-layout release.
+            (False, True, False),
+            # A develop build that reports 1.32.0 but predates the canonical layouts.
+            (True, False, False),
+        ),
+    )
+    def test_requires_canonical_layout_cudnn_frontend(
+        self, monkeypatch, *, version_ok: bool, has_flag: bool, expected: bool
+    ) -> None:
+        """Support needs both the minimum version and the wrappers' capability flag."""
+        fused_cls = grouped_mlp_module.GroupedMLP_CuTeGEMMGLUBf16
+        monkeypatch.setattr(grouped_mlp_module, "get_device_compute_capability", lambda: (10, 0))
+        monkeypatch.setattr(
+            grouped_mlp_module,
+            "_cudnn_frontend_version_at_least",
+            lambda v: (
+                version_ok if v == grouped_mlp_module._BF16_MIN_CUDNN_FRONTEND_VERSION else True
+            ),
+        )
+
+        def wrapper(*args, **kwargs):
+            raise AssertionError("support detection must not launch a kernel")
+
+        if has_flag:
+            wrapper.supports_bf16_canonical_layouts = True
+        for getter in (
+            "grouped_gemm_kernel",
+            "grouped_gemm_activation_kernel",
+            "grouped_gemm_dactivation_kernel",
+            "grouped_gemm_wgrad_kernel",
+        ):
+            monkeypatch.setattr(fused_cls, getter, classmethod(lambda cls: wrapper))
+        fused_cls.is_supported.cache_clear()
+        try:
+            assert fused_cls.is_supported() is expected
+        finally:
+            # The result was computed under stubs; drop it so later tests re-detect.
+            fused_cls.is_supported.cache_clear()
+
+    def test_claims_unquantized_recipes_only(self, monkeypatch) -> None:
+        """BF16 fuses without a quantization recipe, and only then.
+
+        Under a recipe the BF16 kernels would silently drop the requested
+        quantization. A custom recipe can also enable the block-scaled fusion, and
+        the BF16 matcher runs first, so claiming it would silently replace that.
+        """
+        from transformer_engine.common import recipe as te_recipe
+
+        ops = _bf16_mlp_ops()
+        fused, fused_cls = self._fuse(monkeypatch, ops, None)
+        assert len(fused) == 1 and isinstance(fused[0], fused_cls)
+        assert list(fused[0].basic_ops) == ops
+
+        custom = te_recipe.CustomRecipe(qfactory=lambda role: None)
+        custom.enable_cutedsl_fused_grouped_mlp = True
+        for recipe in (
+            te_recipe.MXFP8BlockScaling(fp8_format=te_recipe.Format.E4M3),
+            te_recipe.NVFP4BlockScaling(),
+            te_recipe.DelayedScaling(),
+            te_recipe.Float8CurrentScaling(),
+            te_recipe.Float8BlockScaling(),
+            custom,
+        ):
+            declined, _ = self._fuse(monkeypatch, ops, recipe)
+            assert declined is ops, f"BF16 matcher must decline {type(recipe).__name__}"
+            assert grouped_mlp_module.fuse_bf16_ops(ops, recipe=recipe) is ops
+
+    def test_declines_non_bf16_dtype(self, monkeypatch) -> None:
+        """FP16/FP32 weights have no BF16 kernel and must fall back."""
+        for dtype in (torch.float16, torch.float32):
+            ops = _bf16_mlp_ops(dtype=dtype)
+            fused, fused_cls = self._fuse(monkeypatch, ops, None)
+            self._assert_declined(fused, ops, fused_cls, f"BF16 matcher must decline {dtype}")
+
+    @pytest.mark.parametrize(
+        "activation_factory,should_fuse",
+        (
+            (lambda: te.ops.ScaledSwiGLU(glu_interleave_size=32), True),
+            # Declined while cuDNN's BF16 dGeGLU backward is wrong; see
+            # _cudnn_bf16_dgeglu_supported.
+            (lambda: te.ops.ScaledClampedQGeGLU(glu_interleave_size=32), False),
+            # The BF16 GLU kernel hardwires clamp=+/-7.0 and alpha=1.702, so a
+            # custom limit cannot be honoured and must decline rather than
+            # silently train different numerics.
+            (lambda: te.ops.ScaledClampedQGeGLU(glu_interleave_size=32, limit=5.0), False),
+            (lambda: te.ops.ScaledClampedQGeGLU(glu_interleave_size=32, alpha=1.0), False),
+            # No BF16 kernel exists for these at all.
+            (lambda: te.ops.ScaledSiTUGLU(glu_interleave_size=32), False),
+            (lambda: te.ops.ScaledSReLU(), False),
+        ),
+    )
+    def test_activation_coverage(self, monkeypatch, activation_factory, should_fuse) -> None:
+        """Only SwiGLU and default-parameter GeGLU are serviceable in BF16."""
+        ops = _bf16_mlp_ops(activation=activation_factory())
+        fused, fused_cls = self._fuse(monkeypatch, ops, None)
+        if should_fuse:
+            assert len(fused) == 1 and isinstance(fused[0], fused_cls)
+        else:
+            self._assert_declined(fused, ops, fused_cls)
+
+    def test_geglu_declines_while_cudnn_dgeglu_is_wrong(self) -> None:
+        """Default-parameter GeGLU must decline until cuDNN's BF16 dGeGLU is fixed.
+
+        Fusing it would silently train with wrong FC1 gradients: the cuDNN
+        frontend 1.30 BF16 dGeGLU returns ``x * grad`` (clamp mask applied as a
+        value). Falling back to the unfused ops keeps the numerics correct.
+        """
+        assert not grouped_mlp_module._cudnn_bf16_dgeglu_supported()
+        activation = te.ops.ScaledClampedQGeGLU(glu_interleave_size=32)
+        assert grouped_mlp_module._bf16_glu_act_funcs(activation) is None
+
+    def test_geglu_mapping_once_cudnn_dgeglu_is_fixed(self, monkeypatch) -> None:
+        """With a correct dGeGLU, only non-default clamp/alpha would decline.
+
+        Keeps the GeGLU mapping covered so re-enabling it is a one-line change.
+        """
+        monkeypatch.setattr(grouped_mlp_module, "_cudnn_bf16_dgeglu_supported", lambda: True)
+        # The BF16 kernel hardwires clamp=+/-7.0 and alpha=1.702.
+        for kwargs in ({"limit": 5.0}, {"alpha": 1.0}):
+            activation = te.ops.ScaledClampedQGeGLU(glu_interleave_size=32, **kwargs)
+            assert grouped_mlp_module._bf16_glu_act_funcs(activation) is None
+        # linear_offset is a genuine runtime argument, so it must NOT decline.
+        offset_activation = te.ops.ScaledClampedQGeGLU(
+            glu_interleave_size=32, glu_linear_offset=0.5
+        )
+        act_funcs = grouped_mlp_module._bf16_glu_act_funcs(offset_activation)
+        assert act_funcs is not None
+        assert act_funcs[0] == "geglu" and act_funcs[1] == "dgeglu"
+        assert act_funcs[2] == pytest.approx(0.5)
+
+    def test_swiglu_act_func_mapping(self) -> None:
+        """SwiGLU maps to the swiglu/dswiglu pair with a zero linear offset."""
+        act_funcs = grouped_mlp_module._bf16_glu_act_funcs(
+            te.ops.ScaledSwiGLU(glu_interleave_size=32)
+        )
+        assert act_funcs == ("swiglu", "dswiglu", 0.0)
+
+    def test_declines_misaligned_dimensions(self, monkeypatch) -> None:
+        """Dimensions the fused op would reject must decline, not raise.
+
+        The matcher runs the same ``validate_grouped_mlp_dims`` as the
+        constructor, which requires every FC1/FC2 dimension to be a multiple of
+        64. A window it accepted but the constructor rejected would raise during
+        fusion instead of falling back to the unfused ops.
+        """
+        # ffn_hidden=96: fc1.out_features=192 is 64-aligned, but
+        # fc2.in_features=96 is not.
+        ops = _bf16_mlp_ops(ffn_hidden=96)
+        fused, fused_cls = self._fuse(monkeypatch, ops, None)
+        self._assert_declined(fused, ops, fused_cls)
+
+        # in_features=96 is not a multiple of 64.
+        ops = _bf16_mlp_ops(in_features=96)
+        fused, fused_cls = self._fuse(monkeypatch, ops, None)
+        self._assert_declined(fused, ops, fused_cls)
+
+    def test_declines_wrong_glu_interleave_size(self, monkeypatch) -> None:
+        """The GLU epilogue only understands 32-wide gate/up interleaving."""
+        ops = _bf16_mlp_ops(activation=te.ops.ScaledSwiGLU(glu_interleave_size=64))
+        fused, fused_cls = self._fuse(monkeypatch, ops, None)
+        self._assert_declined(fused, ops, fused_cls)
+
+    def test_declines_split_alignment_below_256(self, monkeypatch) -> None:
+        """Both GroupedLinear ops must promise 256-aligned splits, as the kernels require."""
+        ops = _bf16_mlp_ops()
+        ops[0].split_alignment = 128
+        with pytest.warns(UserWarning, match="split_alignment.*divisible by 256"):
+            fused, fused_cls = self._fuse(monkeypatch, ops, None)
+        self._assert_declined(fused, ops, fused_cls)
+
+    def test_forward_rejects_unaligned_token_count(self, monkeypatch) -> None:
+        """A token count that is not 256-aligned is a clear error, not silent truncation."""
+        fused_cls = grouped_mlp_module.GroupedMLP_CuTeGEMMGLUBf16
+        monkeypatch.setattr(fused_cls, "is_supported", classmethod(lambda cls: True))
+        op = fused_cls.__new__(fused_cls)
+        with pytest.raises(ValueError, match="256"):
+            op._check_token_alignment(300)
+        op._check_token_alignment(512)  # must not raise
+
+    @pytest.mark.parametrize("accumulate", (False, True))
+    def test_wgrad_passes_only_bf16_backend_kwargs(self, accumulate: bool) -> None:
+        """Pin the kwargs the BF16 wgrad sends to the cuDNN wgrad wrapper.
+
+        cuDNN frontend >= 1.30 raises if ``descriptor_workspace`` reaches the
+        BF16 wgrad backend, and any scale-factor tensor would select the
+        block-scaled backend instead. The kernel itself needs SM100, so a fake
+        records the call; this runs on any CUDA device. Also checks that the
+        accumulate flag decided by ``_compute_grad_params`` (main_grad fusion)
+        is forwarded rather than overwritten.
+        """
+        captured = {}
+
+        def fake_wgrad_kernel(**kwargs):
+            captured.update(kwargs)
+
+        num_groups, out_features, in_features, tokens = 2, 64, 32, 512
+        x = torch.randn(tokens, in_features, dtype=torch.bfloat16, device="cuda")
+        dy = torch.randn(tokens, out_features, dtype=torch.bfloat16, device="cuda")
+        wgrad = types.SimpleNamespace(
+            rowwise_data=torch.empty(
+                num_groups * out_features * in_features, dtype=torch.bfloat16, device="cuda"
+            )
+        )
+        offsets = torch.tensor([256, 512], dtype=torch.int32, device="cuda")
+        factory = grouped_mlp_module._bf16_wgrad_fn_factory(
+            weight_shape=(out_features, in_features),
+            offsets=offsets,
+            wgrad_kernel_fn=fake_wgrad_kernel,
+            single_grouped_weight=True,
+            num_groups=num_groups,
+            current_stream=0,
+        )
+        factory(accumulate)(x, dy, wgrad)
+
+        assert "descriptor_workspace" not in captured
+        assert captured["sfa_tensor"] is None and captured["sfb_tensor"] is None
+        assert captured["accumulate_on_output"] is accumulate
+        assert captured["output_mode"] == "dense"
+        assert tuple(captured["a_tensor"].shape) == (out_features, tokens)
+        assert tuple(captured["b_tensor"].shape) == (tokens, in_features)
+        assert tuple(captured["wgrad_tensor"].shape) == (num_groups, out_features, in_features)
