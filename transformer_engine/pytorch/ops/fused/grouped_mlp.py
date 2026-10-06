@@ -1050,8 +1050,6 @@ def fuse_grouped_mlp_ops(
     list of FusibleOperation
         Updated operations with matched triples replaced by fused ops.
     """
-    if not _is_grouped_mlp_fusion_candidate(ops, recipe, activation_op_types):
-        return ops
     if not fused_op_cls.is_supported():
         return ops
 
@@ -3216,6 +3214,12 @@ def fuse_glu_ops(
 ) -> list[FusibleOperation]:
     """Apply joint GroupedLinear + scaled GLU + GroupedLinear fusion."""
 
+    # Keep capability probes out of tracing for unrelated operation sequences.
+    if not _is_grouped_mlp_fusion_candidate(
+        ops, recipe, (ScaledSwiGLU, ScaledClampedQGeGLU, ScaledSiTUGLU)
+    ):
+        return ops
+
     # Determine supported activations
     activation_op_types = []
     device_arch = get_device_compute_capability()
@@ -3246,6 +3250,10 @@ def fuse_unary_activation_ops(
     **unused,  # pylint: disable=unused-argument
 ) -> list[FusibleOperation]:
     """Apply joint GroupedLinear + scaled unary activation + GroupedLinear fusion."""
+
+    # Keep capability probes out of tracing for unrelated operation sequences.
+    if not _is_grouped_mlp_fusion_candidate(ops, recipe, (ScaledSReLU, ScaledTanhSReLU)):
+        return ops
 
     if not GroupedMLP_CuTeGEMMUnary.is_supported():
         return ops
