@@ -1125,9 +1125,21 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         raise NotImplementedError
 
     @classmethod
+    @functools.lru_cache(maxsize=None)
     def grouped_gemm_dactivation_is_deterministic(cls) -> bool:
-        """Whether this op's dactivation kernel can produce a bit-exact ``dprob``."""
-        return False
+        """Whether this op's dactivation kernel can produce a bit-exact ``dprob``.
+
+        Feature-detects the wrapper's ``deterministic`` argument: dSReLU from cuDNN FE 1.28.0,
+        dGLU additionally gated on the release that ships discrete weights (see the GLU override).
+        """
+        try:
+            kernel = cls.grouped_gemm_dactivation_kernel()
+        except ImportError:
+            return False
+        try:
+            return "deterministic" in inspect.signature(kernel).parameters
+        except (TypeError, ValueError):
+            return False
 
     @classmethod
     @functools.lru_cache(maxsize=None)
@@ -2458,8 +2470,9 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     " (NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 or"
                     " torch.use_deterministic_algorithms), but the scale gradient (dprob) is"
                     " accumulated with nondeterministic atomics on this configuration."
-                    " A bit-exact dprob requires the scaled-SReLU activation,"
-                    " nvidia-cudnn-frontend 1.28.0 or later, and an FC2 without scale_bias."
+                    " A bit-exact dprob requires a cuDNN front-end whose dactivation wrapper"
+                    " accepts `deterministic` (dSReLU: 1.28.0 or later; dGLU: 1.31.0 or later)"
+                    " and an FC2 without scale_bias."
                 )
         scales_f32 = None
         scales_tensor = None
@@ -3146,6 +3159,17 @@ class GroupedMLP_CuTeGEMMGLU(_GroupedMLP_CuTeGEMMBase):
 
         return grouped_gemm_dglu_wrapper_sm100
 
+    @classmethod
+    @functools.lru_cache(maxsize=None)
+    def grouped_gemm_dactivation_is_deterministic(cls) -> bool:
+        """The dGLU wrapper's ``deterministic`` covers dense weights from cudnn-frontend#1319, but
+        discrete weights (the default here) only from #1414. The signature cannot tell the two
+        apart, so also require the release that ships both."""
+        return (
+            _cudnn_frontend_version_at_least("1.31.0")
+            and super().grouped_gemm_dactivation_is_deterministic()
+        )
+
 
 class GroupedMLP_CuTeGEMMUnary(_GroupedMLP_CuTeGEMMBase):
     """Joint fused op for block-scaled GroupedLinear + scaled unary activation + GroupedLinear."""
@@ -3187,19 +3211,6 @@ class GroupedMLP_CuTeGEMMUnary(_GroupedMLP_CuTeGEMMBase):
         from cudnn import grouped_gemm_dsrelu_wrapper_sm100  # pylint: disable=no-name-in-module
 
         return grouped_gemm_dsrelu_wrapper_sm100
-
-    @classmethod
-    @functools.lru_cache(maxsize=None)
-    def grouped_gemm_dactivation_is_deterministic(cls) -> bool:
-        """Feature-detect the dSReLU wrapper's ``deterministic`` argument (cuDNN FE 1.28.0+)."""
-        try:
-            kernel = cls.grouped_gemm_dactivation_kernel()
-        except ImportError:
-            return False
-        try:
-            return "deterministic" in inspect.signature(kernel).parameters
-        except (TypeError, ValueError):
-            return False
 
 
 def fuse_glu_ops(

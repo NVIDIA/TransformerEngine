@@ -7,6 +7,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 import contextlib
 import functools
+import inspect
 import os
 import math
 import random
@@ -3097,8 +3098,9 @@ class TestGroupedMLPFusedOp:
 class TestGroupedMLPDeterminism:
     """Determinism coverage for the CuTe DSL fused grouped MLP.
 
-    Only the dSReLU wrapper can make ``dprob`` bit-exact, and only from cuDNN FE 1.28.0 on.
-    Anything else must refuse a determinism request rather than run non-deterministically.
+    The dSReLU and dGLU wrappers can make ``dprob`` bit-exact when the installed cuDNN FE
+    accepts ``deterministic``. Anything else must refuse a determinism request rather than run
+    non-deterministically.
     """
 
     @pytest.fixture
@@ -3136,12 +3138,22 @@ class TestGroupedMLPDeterminism:
         torch.use_deterministic_algorithms(torch_flag)
         assert grouped_mlp_module._deterministic_algorithms_required() is expected
 
-    def test_only_the_srelu_path_can_be_deterministic(self) -> None:
+    @pytest.mark.parametrize(
+        "fused_cls",
+        (grouped_mlp_module.GroupedMLP_CuTeGEMMGLU, grouped_mlp_module.GroupedMLP_CuTeGEMMUnary),
+    )
+    def test_capability_follows_the_wrapper(self, *, fused_cls) -> None:
         """The capability belongs to the wrapper, not the environment. Needs no GPU."""
-        glu = grouped_mlp_module.GroupedMLP_CuTeGEMMGLU
-        unary = grouped_mlp_module.GroupedMLP_CuTeGEMMUnary
-        assert glu.grouped_gemm_dactivation_is_deterministic() is False
-        assert isinstance(unary.grouped_gemm_dactivation_is_deterministic(), bool)
+        try:
+            kernel = fused_cls.grouped_gemm_dactivation_kernel()
+        except ImportError:
+            pytest.skip("cuDNN front-end is not installed")
+        expected = "deterministic" in inspect.signature(kernel).parameters
+        if fused_cls is grouped_mlp_module.GroupedMLP_CuTeGEMMGLU:
+            # Discrete-weight dGLU determinism (cudnn-frontend#1414) is not visible in the
+            # signature, so GLU additionally requires the release that ships it.
+            expected = expected and grouped_mlp_module._cudnn_frontend_version_at_least("1.31.0")
+        assert fused_cls.grouped_gemm_dactivation_is_deterministic() is expected
 
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
     @pytest.mark.parametrize(
@@ -3199,17 +3211,23 @@ class TestGroupedMLPDeterminism:
             )
 
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
-    def test_dprob_is_bit_exact_across_runs(self, monkeypatch) -> None:
+    @pytest.mark.parametrize(
+        "activation,fused_cls",
+        (
+            ("scaled_srelu", grouped_mlp_module.GroupedMLP_CuTeGEMMUnary),
+            ("scaled_swiglu", grouped_mlp_module.GroupedMLP_CuTeGEMMGLU),
+        ),
+    )
+    def test_dprob_is_bit_exact_across_runs(self, monkeypatch, *, activation, fused_cls) -> None:
         """Repeated identical runs must give a bit-identical ``dprob``.
 
         An ulp of reordering passes every tolerance in this file, so only an exact
         comparison across runs can see it.
         """
-        fused_cls = grouped_mlp_module.GroupedMLP_CuTeGEMMUnary
         if not fused_cls.is_supported():
             pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
         if not fused_cls.grouped_gemm_dactivation_is_deterministic():
-            pytest.skip("dSReLU determinism needs cuDNN frontend 1.28.0 or later")
+            pytest.skip("the installed cuDNN frontend cannot make this dactivation deterministic")
 
         monkeypatch.setenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "0")
 
@@ -3240,14 +3258,29 @@ class TestGroupedMLPDeterminism:
         probs = _rand(num_tokens)
 
         # No bias, or probs.grad comes from the Triton dbias kernel instead of cuDNN.
+        # GLU's FC1 produces both gate halves. GLU uses one grouped weight (dense), which
+        # cudnn-frontend#1319 already supports; discrete weights need cudnn-frontend#1414.
+        is_glu = activation == "scaled_swiglu"
         with te.quantized_model_init(enabled=True, recipe=recipe):
             module = te.ops.Sequential(
                 te.ops.GroupedLinear(
-                    group_size, hidden_size, hidden_size, bias=False, device=device, dtype=dtype
+                    group_size,
+                    hidden_size,
+                    2 * hidden_size if is_glu else hidden_size,
+                    bias=False,
+                    single_grouped_weight=is_glu,
+                    device=device,
+                    dtype=dtype,
                 ),
-                te.ops.ScaledSReLU(),
+                _make_scaled_activation(activation, glu_interleave_size=32 if is_glu else None),
                 te.ops.GroupedLinear(
-                    group_size, hidden_size, hidden_size, bias=False, device=device, dtype=dtype
+                    group_size,
+                    hidden_size,
+                    hidden_size,
+                    bias=False,
+                    single_grouped_weight=is_glu,
+                    device=device,
+                    dtype=dtype,
                 ),
             )
 
