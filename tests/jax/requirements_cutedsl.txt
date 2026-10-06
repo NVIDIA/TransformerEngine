@@ -1,6 +1,0 @@
-# Dependencies for the cuDNN JAX grouped-SwiGLU MoE path.
-jax[cuda13]>=0.9.1
-nvidia-cutlass-dsl[cu13]>=4.6.2
-
-# Install the sibling cuDNN-FE checkout separately:
-#   pip install ../cudnn-frontend
