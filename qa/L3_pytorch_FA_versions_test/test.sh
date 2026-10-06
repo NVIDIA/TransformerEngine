@@ -135,6 +135,14 @@ do
     fi
     NVTE_TORCH_COMPILE=0 NVTE_ALLOW_UNSAFE_PICKLE_EXTRA_STATE=1 python3 -m pytest -v -s --junitxml=$XML_ATTN $TE_PATH/tests/pytorch/attention/test_attention.py || test_fail "test_attention.py (FA $fa_version)"
   fi
+
+  if [[ "${fa_version}" == 4.* ]]; then
+    XML_BACKEND="$XML_LOG_DIR/pytest_test_attention_backend_selection_fa${fa_tag}.xml"
+    NVTE_TORCH_COMPILE=0 python3 -m pytest -v -s --junitxml="$XML_BACKEND" \
+      "$TE_PATH/tests/pytorch/attention/test_attention_backend_selection.py::test_fa4_window_sentinel_normalization" \
+      "$TE_PATH/tests/pytorch/attention/test_attention_backend_selection.py::test_fa4_causal_attention_is_not_all_zeros" \
+      || test_fail "FA4 window sentinel tests (FA $fa_version)"
+  fi
 done
 
 if [ "$RET" -ne 0 ]; then

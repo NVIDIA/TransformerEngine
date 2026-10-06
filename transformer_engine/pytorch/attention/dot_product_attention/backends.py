@@ -8,6 +8,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from importlib.metadata import version as get_pkg_version
 from importlib.metadata import PackageNotFoundError
+import functools
 import inspect
 import os
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -218,6 +219,38 @@ else:
         except (ValueError, TypeError):
             fa_utils.fa3_supports_softcap = False
 
+
+def _fa4_with_none_window_sentinel(func: Callable) -> Callable:
+    """Rewrite TE's ``-1`` unbounded-window sentinel to the ``None`` FlashAttention 4 expects.
+
+    TE spells an unbounded side ``-1``; FA4 spells it ``None``. FA4 widens a window to full
+    attention only when *both* bounds are negative, so TE's causal ``(-1, 0)`` reaches the kernel
+    as the band ``[row + 1, row]`` -- empty. The output is then all zeros and the LSE all ``-inf``,
+    with nothing raised: a wrong answer rather than a failure.
+
+    Only ``-1`` is rewritten. A lone negative bound is a valid FA4 request for an empty window, so
+    widening every negative here would silently turn one of those into full attention.
+
+    Wrapped at the entry points rather than at the ~20 call sites that build these kwargs, since
+    those are shared with FA2 >= 2.7 and FA3, where ``-1`` is the correct spelling. All four are
+    wrapped together because ``run_attention_with_cp.py`` grades a CP run against a non-CP run of
+    the same backend: with both sides empty the comparison agrees, so fixing one pair alone would
+    present as a regression. Keyword arguments only; a positional caller bypasses this.
+    """
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        window = kwargs.get("window_size")
+        if window is not None:
+            kwargs["window_size"] = tuple(None if bound == -1 else bound for bound in window)
+        for bound_name in ("window_size_left", "window_size_right"):
+            if kwargs.get(bound_name) == -1:
+                kwargs[bound_name] = None
+        return func(*args, **kwargs)
+
+    return wrapper
+
+
 # Try to import Flash Attention v4
 try:
     fa_utils.fa4_version = PkgVersion(get_pkg_version("flash-attn-4"))
@@ -259,10 +292,12 @@ else:
     else:
         # Unlike versions 2 and 3, FlashAttention 4 registers no custom ops: it builds
         # its kernels through the CUTLASS DSL as it runs. Keep it an eager island.
-        flash_attn_func_v4 = no_torch_dynamo()(_flash_attn_func_v4)
-        flash_attn_varlen_func_v4 = no_torch_dynamo()(_flash_attn_varlen_func_v4)
-        _flash_attn_fwd_v4 = no_torch_dynamo()(_flash_attn_fwd_v4)
-        _flash_attn_bwd_v4 = no_torch_dynamo()(_flash_attn_bwd_v4)
+        flash_attn_func_v4 = no_torch_dynamo()(_fa4_with_none_window_sentinel(_flash_attn_func_v4))
+        flash_attn_varlen_func_v4 = no_torch_dynamo()(
+            _fa4_with_none_window_sentinel(_flash_attn_varlen_func_v4)
+        )
+        _flash_attn_fwd_v4 = no_torch_dynamo()(_fa4_with_none_window_sentinel(_flash_attn_fwd_v4))
+        _flash_attn_bwd_v4 = no_torch_dynamo()(_fa4_with_none_window_sentinel(_flash_attn_bwd_v4))
 
         fa_utils.v4_validate_head_dims = _fa4_validate_head_dims
         fa_utils.set_flash_attention_4_params()
