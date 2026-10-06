@@ -344,11 +344,13 @@ class MXFP8GroupQuantizeKernel:
         else:
             # A placeholder for the kernel signature only; we won't use it in non-single tensor cases
             jobs_X = None
+
+            # Below is just some heuristic to decide how many CTAs we should use per tensor
+
             # Estimate the total jobs across the group; each job has NUM_TILES_X * NUM_TILES_Y tiles
             estimated_jobs = cute.ceil_div(
                 Int64(first_logical_dim) * Int64(last_logical_dim), self.ELTS_PER_CTA
             )
-
             # Divide the persistent worker budget evenly across tensors, with at least
             # one worker per tensor. Each worker may process several jobs.
             requested_CTAs_per_tensor = cutlass.max(
@@ -812,11 +814,11 @@ class MXFP8GroupQuantizeKernel:
         # If the CTA has work to do
         has_work = Boolean(True)
         # Metadata of the tensor that owns this job
-        tensor_rows = Int64(0)
-        tensor_cols = Int64(0)
+        member_rows = Int64(0)
+        member_cols = Int64(0)
         # Element offset of this tensor within the group: Int64 (CUDA uses size_t), since a
         # group can exceed 2^31 elements even when every individual extent is small.
-        tensor_base = Int64(0)
+        member_base = Int64(0)
         # Job's starting row and id in this individual tensor / global single tensor
         job_start_row = Int64(0)
         job_id_X = Int64(0)
@@ -830,9 +832,8 @@ class MXFP8GroupQuantizeKernel:
             # grid = [jobs_X * jobs_Y, 1, 1]
             job_id_Y = Int64(bidx) // jobs_X
             job_id_X = Int64(bidx) % jobs_X
-            # View the grouped tensor as a single tensor of shape (first_logical_dim, last_logical_dim)
-            tensor_rows = Int64(first_logical_dim)
-            tensor_cols = Int64(last_logical_dim)
+            # All members share the stacked tensor's column count.
+            member_cols = Int64(last_logical_dim)
             # Which row does this job start from
             job_start_row = job_id_Y * (self.TILE_ROWS * self.NUM_TILES_Y)
             if cutlass.const_expr(cfg.SHAPE_REP == VARYING_FIRST_DIM):
@@ -846,13 +847,13 @@ class MXFP8GroupQuantizeKernel:
             # grid = [workers_per_tensor, num_tensors, 1]
             tensor_id = Int32(bidy)
             # Extract tensor's metadata
-            tensor_rows = Int64(mTensormaps[ROWS_OFFSET + tensor_id])
-            tensor_cols = Int64(mTensormaps[COLS_OFFSET + tensor_id])
-            tensor_base = Int64(mTensormaps[OFFSETS_OFFSET + tensor_id])
-            if tensor_rows > 0 and tensor_cols > 0:
+            member_rows = Int64(mTensormaps[ROWS_OFFSET + tensor_id])
+            member_cols = Int64(mTensormaps[COLS_OFFSET + tensor_id])
+            member_base = Int64(mTensormaps[OFFSETS_OFFSET + tensor_id])
+            if member_rows > 0 and member_cols > 0:
                 # How many jobs does this tensor have in both directions
-                jobs_X_in_tensor = cute.ceil_div(tensor_cols, (self.TILE_COLS * self.NUM_TILES_X))
-                jobs_Y_in_tensor = cute.ceil_div(tensor_rows, (self.TILE_ROWS * self.NUM_TILES_Y))
+                jobs_X_in_tensor = cute.ceil_div(member_cols, (self.TILE_COLS * self.NUM_TILES_X))
+                jobs_Y_in_tensor = cute.ceil_div(member_rows, (self.TILE_ROWS * self.NUM_TILES_Y))
                 # How many jobs does this tensor have
                 jobs_in_tensor = jobs_X_in_tensor * jobs_Y_in_tensor
                 # Which job (1D index) does this CTA start from, which is also their worker ID
@@ -875,59 +876,50 @@ class MXFP8GroupQuantizeKernel:
                 # For single tensor case we don't use tensor descriptors
                 descs = (None, None, None, None)
 
-                # Rowwise scales span the whole group: members are stacked on 128-row
-                # boundaries, so each member's swizzled tiles follow the previous member's.
-                row_scales = None
-                if cutlass.const_expr(cfg.ROWWISE):
-                    row_scales = self._rowwise_scales(mS_row, Int64(0), tensor_rows, tensor_cols)
-
-                # Colwise scales require special handling for swizzled scales
-                col_scales = None
-                col_scale_row_start = job_start_row
-                col_scale_rows = tensor_rows
-                if cutlass.const_expr(cfg.COLWISE):
-                    col_scale_base = Int64(0)
-                    if cutlass.const_expr(cfg.WITH_GEMM_SWIZZLED_SCALES):
-                        # Colwise swizzled scale indices restart at each member and depend
-                        # on its rows (process_colwise_stage), so address the member that
-                        # owns this job.
-                        member_rows = Int64(0)
-                        member_row_start = Int64(0)
-                        if cutlass.const_expr(cfg.SHAPE_REP == SAME_BOTH_DIMS):
-                            member_rows = tensor_rows // Int64(num_tensors)
-                            member_row_start = job_start_row // member_rows * member_rows
-                        else:
-                            member_id = self._find_tensor_from_offsets(
-                                mOffsets,
-                                num_tensors,
-                                Int64(job_start_row) * Int64(tensor_cols),
-                            )
-                            member_rows = Int64(mFirstDims[member_id])
-                            member_row_start = Int64(
-                                Int64(mOffsets[member_id]) // Int64(tensor_cols)
-                            )
-                        col_scale_base = (
-                            Int64(member_row_start)
-                            * Int64(cute.round_up(tensor_cols, 128))
-                            // MXFP8_BLOCK_SCALING_SIZE
-                        )
-                        col_scale_row_start = job_start_row - member_row_start
-                        col_scale_rows = member_rows
-                    col_scales = self._colwise_scales(
-                        mS_col, col_scale_base, col_scale_rows, tensor_cols
+                # Find how many rows this tensor member has and which row the member starts from
+                if cutlass.const_expr(cfg.SHAPE_REP == SAME_BOTH_DIMS):
+                    member_rows = Int64(first_logical_dim) // Int64(num_tensors)
+                    member_start_row = job_start_row - job_start_row % member_rows
+                elif cutlass.const_expr(cfg.SHAPE_REP == VARYING_FIRST_DIM):
+                    member_id = self._find_tensor_from_offsets(
+                        mOffsets, num_tensors, job_start_row * member_cols
+                    )
+                    member_rows = Int64(mFirstDims[member_id])
+                    member_start_row = Int64(mOffsets[member_id]) // member_cols
+                else:
+                    raise RuntimeError(
+                        "is_single_tensor requires SAME_BOTH_DIMS or VARYING_FIRST_DIM"
                     )
 
+                # The starting offset for this tensor member's scale
+                member_scale_base = (
+                    member_start_row * cute.round_up(member_cols, 128) // MXFP8_BLOCK_SCALING_SIZE
+                )
+
+                row_scales = None
+                # Starting data row of this job relative to the member
+                job_start_row_from_member = job_start_row - member_start_row
+                job_start_col_from_member = job_id_X * self.TILE_COLS
+                if cutlass.const_expr(cfg.ROWWISE):
+                    row_scales = self._rowwise_scales(
+                        mS_row, member_scale_base, member_rows, member_cols
+                    )
+
+                col_scales = None
+                if cutlass.const_expr(cfg.COLWISE):
+                    col_scales = self._colwise_scales(
+                        mS_col, member_scale_base, member_rows, member_cols
+                    )
                 cute.arch.sync_threads()
 
                 self._process_job(
-                    job_start_row,
-                    job_id_X * self.TILE_COLS,
-                    tensor_rows,
-                    tensor_cols,
+                    member_start_row,
+                    job_start_row_from_member,
+                    job_start_col_from_member,
+                    member_rows,
+                    member_cols,  # all tensors have the same last dimension in single tensor case
                     row_scales,
                     col_scales,
-                    col_scale_row_start,
-                    col_scale_rows,
                     mWorkspace,
                     sDbias,
                     descs,
@@ -975,14 +967,18 @@ class MXFP8GroupQuantizeKernel:
                         tmap.fence_tensormap_update(desc_out_col)
                 descs = (desc_x, desc_act, desc_out_row, desc_out_col)
 
-                # This tensor's scales start at tensor_base / 32 in both directions.
-                scale_base = tensor_base // Int64(MXFP8_BLOCK_SCALING_SIZE)
+                # This member's scales start at member_base / 32 in both directions.
+                member_scale_base = member_base // Int64(MXFP8_BLOCK_SCALING_SIZE)
                 row_scales = None
                 if cutlass.const_expr(cfg.ROWWISE):
-                    row_scales = self._rowwise_scales(mS_row, scale_base, tensor_rows, tensor_cols)
+                    row_scales = self._rowwise_scales(
+                        mS_row, member_scale_base, member_rows, member_cols
+                    )
                 col_scales = None
                 if cutlass.const_expr(cfg.COLWISE):
-                    col_scales = self._colwise_scales(mS_col, scale_base, tensor_rows, tensor_cols)
+                    col_scales = self._colwise_scales(
+                        mS_col, member_scale_base, member_rows, member_cols
+                    )
 
                 # Make sure all threads see the updated descriptors and scales before processing any jobs.
                 cute.arch.sync_threads()
@@ -993,19 +989,20 @@ class MXFP8GroupQuantizeKernel:
                 while not job_finished:
                     job_id_Y_in_tensor = job_id // jobs_X_in_tensor
                     job_id_X_in_tensor = job_id % jobs_X_in_tensor
-                    job_start_row_in_tensor = job_id_Y_in_tensor * (
+                    job_start_row_from_member = job_id_Y_in_tensor * (
                         self.TILE_ROWS * self.NUM_TILES_Y
                     )
-                    job_start_col = job_id_X_in_tensor * (self.TILE_COLS * self.NUM_TILES_X)
+                    job_start_col_from_member = job_id_X_in_tensor * (
+                        self.TILE_COLS * self.NUM_TILES_X
+                    )
                     self._process_job(
-                        job_start_row_in_tensor,
-                        job_start_col,
-                        tensor_rows,
-                        tensor_cols,
+                        Int64(0),  # For non-single tensor case, each TMA loads one member
+                        job_start_row_from_member,
+                        job_start_col_from_member,
+                        member_rows,
+                        member_cols,
                         row_scales,
                         col_scales,
-                        job_start_row_in_tensor,
-                        tensor_rows,
                         mWorkspace,
                         sDbias,
                         descs,
@@ -1081,16 +1078,13 @@ class MXFP8GroupQuantizeKernel:
     @cute.jit
     def _process_job(
         self,
-        job_start_row: Int64,  # Row offset of this job (global for single-tensor, else tensor-local)
-        job_start_col: Int64,  # Column offset of this job within the tensor
-        rows: Int64,  # Rows of the rowwise-scale view (the group for single-tensor, else the tensor)
-        cols: Int64,  # Number of columns in this tensor
-        row_scales: Optional[
-            cute.Tensor
-        ],  # Rowwise scales tiled per stage, rows counted like job_start_row
+        member_start_row: Int64,  # Which row the member starts from the tensor loaded by TMA
+        job_start_row_from_member: Int64,  # Rows between this job and the start of this member
+        job_start_col_from_member: Int64,  # Columns between this job and the start of this member
+        member_rows: Int64,  # Number of data rows in this member
+        member_cols: Int64,  # Number of columns in this member
+        row_scales: Optional[cute.Tensor],  # Member-local rowwise scales tiled per stage
         col_scales: Optional[cute.Tensor],  # Colwise scales tiled per stage
-        col_scale_row_start: Int64,  # Row of this job in the colwise-scale view
-        col_scale_rows: Int64,  # Rows of the colwise-scale view
         mWorkspace: Optional[cute.Tensor],  # f32 partial dbias workspace (WITH_DBIAS)
         sDbias: Optional[
             cute.Tensor
@@ -1117,11 +1111,13 @@ class MXFP8GroupQuantizeKernel:
         _, _, _, _, tXsO_row, tXgO_row, tXsO_col, tXgO_col = partitions
         _, _, desc_out_row, desc_out_col = descs
 
+        job_start_row = member_start_row + job_start_row_from_member
         job_tile_Y = job_start_row // self.TILE_ROWS
-        job_tile_X = job_start_col // self.TILE_COLS
-        col_scale_tile_Y = col_scale_row_start // self.TILE_ROWS
+        job_tile_X = job_start_col_from_member // self.TILE_COLS
+        member_tile_Y = job_start_row_from_member // self.TILE_ROWS
         tiles_X = cutlass.min(
-            Int64(self.NUM_TILES_X), cute.ceil_div(cols - job_start_col, self.TILE_COLS)
+            Int64(self.NUM_TILES_X),
+            cute.ceil_div(member_cols - job_start_col_from_member, self.TILE_COLS),
         )
         num_tiles = tiles_X * self.NUM_TILES_Y
 
@@ -1142,7 +1138,7 @@ class MXFP8GroupQuantizeKernel:
 
         for tile_X in cutlass.range(tiles_X, unroll=1):
             tile_id_X = job_tile_X + tile_X
-            tile_start_col = job_start_col + tile_X * self.TILE_COLS
+            tile_start_col = job_start_col_from_member + tile_X * self.TILE_COLS
             partial_dbias = Float32(0.0)
             dbias_row_acc = None
             if cutlass.const_expr(self.DBIAS_IN_ROWWISE):
@@ -1174,12 +1170,12 @@ class MXFP8GroupQuantizeKernel:
                         sX_tile,
                         sAct_tile,
                         sO_col[(None, cons_state.index)],
-                        cute.flatten(col_scales[(None, (col_scale_tile_Y + tile_Y, tile_id_X))]),
+                        cute.flatten(col_scales[(None, (member_tile_Y + tile_Y, tile_id_X))]),
                         cfg.MAX_NORM_RCP,
-                        (col_scale_tile_Y + tile_Y) * self.TILE_ROWS,
+                        (member_tile_Y + tile_Y) * self.TILE_ROWS,
                         tile_start_col,
-                        col_scale_rows,
-                        cols,
+                        member_rows,
+                        member_cols,
                         ACTIVATION=cfg.ACTIVATION,
                         DTYPE=cfg.DTYPE,
                         FP8_DTYPE=cfg.FP8_DTYPE,
@@ -1202,12 +1198,12 @@ class MXFP8GroupQuantizeKernel:
                         sX_tile,
                         None if self.CACHE_ACTIVATION else sAct_tile,
                         sO_row[(None, cons_state.index)],
-                        cute.flatten(row_scales[(None, (row_tile, tile_id_X))]),
+                        cute.flatten(row_scales[(None, (member_tile_Y + tile_Y, tile_id_X))]),
                         cfg.MAX_NORM_RCP,
-                        row_tile * self.TILE_ROWS,
+                        (member_tile_Y + tile_Y) * self.TILE_ROWS,
                         tile_start_col,
-                        rows,
-                        cols,
+                        member_rows,
+                        member_cols,
                         ACTIVATION=None if self.CACHE_ACTIVATION else cfg.ACTIVATION,
                         DTYPE=cfg.DTYPE,
                         FP8_DTYPE=cfg.FP8_DTYPE,
@@ -1291,7 +1287,7 @@ class MXFP8GroupQuantizeKernel:
                 # A job has TILE_ROWS * NUM_TILES_Y rows, and dbias reduces them to one row
                 dbias_row = job_start_row // (self.TILE_ROWS * self.NUM_TILES_Y)
                 dbias_col = tile_start_col + tidx
-                if dbias_col < cols:
+                if dbias_col < member_cols:
                     mWorkspace[(dbias_row, dbias_col)] = partial_dbias
 
 
