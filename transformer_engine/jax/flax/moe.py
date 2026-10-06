@@ -34,7 +34,7 @@ import jax.numpy as jnp
 from flax import linen as nn
 
 from transformer_engine.common.recipe import Recipe
-from ..moe import WeightGather, _moe_mesh_axes, _resolve_moe_mesh_resource, moe
+from ..moe import _moe_mesh_axes, _resolve_moe_mesh_resource, moe
 from ..quantize import QuantizerSet
 from ..router import ScoreFunction
 from ..sharding import MeshResource, _get_mesh, global_shard_guard
@@ -100,8 +100,8 @@ class _MoEBlock(TransformerEngineBase):
     quant_before_fsdp_ag : bool
         Quantize MXFP8 weight shards before their FSDP all-gather. Defaults to
         ``False``; ``True`` requires ``mesh_resource.fsdp_resource``.
-    ep_axis, data_parallelism_axes, weight_gather : deprecated
-        Compatibility arguments converted into MeshResource and the boolean
+    ep_axis, data_parallelism_axes : deprecated
+        Compatibility axis arguments converted into MeshResource
         with a DeprecationWarning.
     use_cudnn_fusion : bool
         Defaults to ``True``: try Rubin fused GLU, then generic Blackwell+ fused
@@ -168,7 +168,6 @@ class _MoEBlock(TransformerEngineBase):
     apply_topk_weights_early: bool = False
     recv_capacity_per_rank: Optional[int] = None
     dispatch_checkpoint_name: Optional[str] = None
-    weight_gather: Optional[WeightGather] = None
 
     # Dtypes / init / misc
     dtype: DType = jnp.float32
@@ -214,7 +213,6 @@ class _MoEBlock(TransformerEngineBase):
             self.quant_before_fsdp_ag,
             self.ep_axis,
             self.data_parallelism_axes,
-            self.weight_gather,
         )
         _, data_parallelism_axes = _moe_mesh_axes(mesh_resource)
         assert (

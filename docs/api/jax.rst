@@ -98,8 +98,6 @@ gathering concatenates the quantized matrices and their existing scale blocks;
 matrix-shard gathering reconstructs each expert's scale blocks. These specs
 are resolved at trace time and do not require JAX Explicit sharding mode.
 
-The old ``ep_axis``, ``data_parallelism_axes`` and ``weight_gather`` arguments
-remain accepted with a ``DeprecationWarning``. They are translated into a
-resource and the boolean before calling the new API. Conflicting old and
-new arguments raise ``ValueError``. ``WeightGather`` remains available only
-for this compatibility path; new callers should use the boolean.
+The old ``ep_axis`` and ``data_parallelism_axes`` arguments remain accepted
+with a ``DeprecationWarning``. They are translated into a resource before
+calling the new API. Conflicting old and new arguments raise ``ValueError``.

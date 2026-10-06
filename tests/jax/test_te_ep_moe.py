@@ -133,7 +133,6 @@ from transformer_engine.jax.flax import _MoEBlock as MoEBlock
 from transformer_engine.jax.moe import (
     _ALIGN_SIZE,
     _CUDNN_JAX_ALIGN_SIZE,
-    WeightGather,
     get_moe_recv_capacity_per_rank,
     moe,
     record_ep_bootstrap_signature_for_moe,
@@ -586,18 +585,6 @@ if get_device_compute_capability(0) >= 100:
     _QUANTIZATION_CASES.append(pytest.param("mxfp8", id="mxfp8"))
 
 
-def test_weight_gather_policy_axis_resolution(mesh):
-    """The policy resolves FSDP context only when no axis was supplied."""
-    with pytest.raises(ValueError, match="active MeshResource"):
-        WeightGather.quantized()
-    with _ctx(mesh):
-        assert WeightGather.quantized().axis == FSDP_AXIS
-    with global_shard_guard(MeshResource()):
-        assert WeightGather.quantized(axis="custom").axis == "custom"
-        with pytest.raises(ValueError, match="fsdp_resource"):
-            WeightGather.quantized()
-
-
 @pytest.mark.parametrize("native_weight_layout", [False, True])
 @pytest.mark.parametrize("fsdp_dimension", ["k", "gated", "expert"])
 def test_quantized_weight_gather_matches_full_precision_gather(
@@ -680,12 +667,6 @@ def test_mesh_resource_api_forward_and_backward(mesh, quant_before_fsdp_ag, api)
     else:
         candidate = baseline.clone(
             data_parallelism_axes=(FSDP_AXIS,),
-            quant_before_fsdp_ag=False,
-            weight_gather=(
-                WeightGather.quantized(axis=FSDP_AXIS)
-                if quant_before_fsdp_ag
-                else WeightGather.full_precision()
-            ),
         )
     x = _make_inputs(jax.random.PRNGKey(51))
     variables, baseline_out, _ = _init_apply(baseline, mesh, x, jax.random.PRNGKey(52))

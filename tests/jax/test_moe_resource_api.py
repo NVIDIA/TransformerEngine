@@ -15,7 +15,7 @@ import pytest
 from jax.sharding import Mesh
 
 from transformer_engine.jax.flax import _MoEBlock
-from transformer_engine.jax.moe import WeightGather, _moe_mesh_axes, _resolve_moe_mesh_resource
+from transformer_engine.jax.moe import _moe_mesh_axes, _resolve_moe_mesh_resource
 from transformer_engine.jax.sharding import MeshResource, global_mesh_resource, global_shard_guard
 
 
@@ -87,11 +87,13 @@ def test_bool_and_resource_types():
 
 
 def test_legacy_preserves_arbitrary_outer_axis_order():
-    with pytest.warns(DeprecationWarning):
+    with global_shard_guard(MeshResource(fsdp_resource="fsdp", ep_resource="ep")), pytest.warns(
+        DeprecationWarning
+    ):
         resource, quantize = _resolve_moe_mesh_resource(
             ep_axis="ep",
             data_parallelism_axes=("outer", "fsdp", "replica"),
-            weight_gather=WeightGather.quantized(axis="fsdp"),
+            quant_before_fsdp_ag=True,
         )
     assert _moe_mesh_axes(resource) == ("ep", ("outer", "fsdp", "replica"))
     assert resource.fsdp_resource == "fsdp"
@@ -110,7 +112,6 @@ def test_legacy_defaults_to_no_outer_axes():
     [
         ({"ep_axis": "other"}, "ep_axis conflicts"),
         ({"data_parallelism_axes": ("other",)}, "data_parallelism_axes conflicts"),
-        ({"weight_gather": WeightGather.quantized(axis="other")}, "weight_gather axis conflicts"),
     ],
 )
 def test_conflicting_old_and_new_args(kwargs, error):
@@ -122,7 +123,8 @@ def test_conflicting_old_and_new_args(kwargs, error):
 
 
 @pytest.mark.parametrize("legacy", [False, True])
-def test_public_api_delegates_with_selected_resource(monkeypatch, legacy):
+@pytest.mark.parametrize("quantize", [False, True])
+def test_public_api_delegates_with_selected_resource(monkeypatch, legacy, quantize):
     module = importlib.import_module("transformer_engine.jax.moe")
     original_moe = module.moe
     signature = inspect.signature(module._moe)
@@ -146,12 +148,12 @@ def test_public_api_delegates_with_selected_resource(monkeypatch, legacy):
         kwargs.update(
             ep_axis="ep",
             data_parallelism_axes=("dp", "fsdp"),
-            weight_gather=WeightGather.quantized(axis="fsdp"),
+            quant_before_fsdp_ag=quantize,
         )
     else:
         kwargs.update(
             mesh_resource=MeshResource(dp_resource="dp", fsdp_resource="fsdp", ep_resource="ep"),
-            quant_before_fsdp_ag=True,
+            quant_before_fsdp_ag=quantize,
         )
     with jax.set_mesh(mesh), warnings.catch_warnings(record=True) as recorded:
         warnings.simplefilter("always", DeprecationWarning)
@@ -164,7 +166,31 @@ def test_public_api_delegates_with_selected_resource(monkeypatch, legacy):
         )
     assert any("deprecated for TE MoE" in str(w.message) for w in recorded) == legacy
     assert _moe_mesh_axes(captured["mesh_resource"]) == ("ep", ("dp", "fsdp"))
-    assert captured["quant_before_fsdp_ag"] is True
+    assert captured["quant_before_fsdp_ag"] is quantize
     assert "ep_axis" not in captured
     with pytest.raises(AssertionError, match="Global mesh resource is not set"):
         global_mesh_resource()
+
+
+@pytest.mark.parametrize("quantize", [False, True])
+def test_flax_block_forwards_boolean(monkeypatch, quantize):
+    module = importlib.import_module("transformer_engine.jax.flax.moe")
+    resource = MeshResource(fsdp_resource="fsdp", ep_resource="ep")
+    captured = {}
+
+    def fake_moe(inputs, *args, **kwargs):
+        captured.update(kwargs)
+        return inputs, None, jnp.zeros((1,), jnp.int32)
+
+    monkeypatch.setattr(module, "moe", fake_moe)
+    mesh = Mesh(np.asarray(jax.devices()[:1]).reshape(1, 1), ("fsdp", "ep"))
+    block = _MoEBlock(
+        num_experts=2,
+        intermediate_size=4,
+        mesh_resource=resource,
+        quant_before_fsdp_ag=quantize,
+    )
+    with jax.set_mesh(mesh):
+        block.init(jax.random.PRNGKey(0), jnp.ones((1, 1, 4)))
+    assert captured["quant_before_fsdp_ag"] is quantize
+    assert _moe_mesh_axes(captured["mesh_resource"]) == ("ep", ("fsdp",))

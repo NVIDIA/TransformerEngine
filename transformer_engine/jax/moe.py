@@ -34,7 +34,7 @@ import math
 import warnings
 from dataclasses import dataclass, fields, replace
 from functools import partial
-from typing import Any, Literal, Optional, Tuple, Union
+from typing import Any, Optional, Tuple, Union
 
 import flax.struct
 import flax.linen as nn
@@ -61,56 +61,7 @@ from .flax.module import _convert_to_activation_function
 from .router import ScoreFunction, _validate_score_function
 from .sharding import MeshResource, _get_mesh, global_mesh_resource, global_shard_guard
 
-__all__ = ["WeightGather", "get_moe_recv_capacity_per_rank", "moe"]
-
-
-@dataclass(frozen=True)
-class WeightGather:
-    """Deprecated compatibility policy; use ``quant_before_fsdp_ag`` instead.
-
-    How MoE expert weights are gathered across a sharding mesh axis.
-
-    The quantization recipe determines the wire format for ``quantized``;
-    this policy only chooses whether quantization precedes the gather.
-    """
-
-    mode: Literal["full_precision", "quantized"] = "full_precision"
-    axis: Optional[str] = None
-
-    def __post_init__(self):
-        if self.mode not in ("full_precision", "quantized"):
-            raise ValueError(f"Unsupported weight gather mode: {self.mode!r}")
-        if self.mode == "quantized" and not self.axis:
-            raise ValueError("Quantized weight gather requires a mesh axis.")
-        if self.mode == "full_precision" and self.axis is not None:
-            raise ValueError("A weight gather axis is only used in quantized mode.")
-
-    @classmethod
-    def full_precision(cls) -> "WeightGather":
-        """Gather weights before quantization (the default behavior)."""
-        return cls()
-
-    @classmethod
-    def quantized(cls, *, axis: Optional[str] = None) -> "WeightGather":
-        """Quantize local shards before gathering data and scales.
-
-        With no explicit axis, use the active ``MeshResource.fsdp_resource``.
-        Passing an axis bypasses the global resource lookup entirely.
-        """
-        if axis is None:
-            try:
-                axis = global_mesh_resource().fsdp_resource
-            except AssertionError as exc:
-                raise ValueError(
-                    "WeightGather.quantized() requires an active MeshResource "
-                    "with fsdp_resource, or an explicit axis."
-                ) from exc
-            if not axis:
-                raise ValueError(
-                    "WeightGather.quantized() requires MeshResource.fsdp_resource "
-                    "or an explicit axis."
-                )
-        return cls(mode="quantized", axis=axis)
+__all__ = ["get_moe_recv_capacity_per_rank", "moe"]
 
 
 @dataclass
@@ -144,9 +95,8 @@ def _resolve_moe_mesh_resource(
     quant_before_fsdp_ag=False,
     ep_axis=None,
     data_parallelism_axes=None,
-    weight_gather=None,
 ):
-    """Resolve the canonical API and adapt deprecated axes/gather arguments."""
+    """Resolve the canonical API and adapt deprecated axis arguments."""
     if not isinstance(quant_before_fsdp_ag, bool):
         raise TypeError("quant_before_fsdp_ag must be a bool.")
     if mesh_resource is not None and not isinstance(mesh_resource, MeshResource):
@@ -158,20 +108,14 @@ def _resolve_moe_mesh_resource(
         except AssertionError:
             mesh_resource = None
 
-    legacy = ep_axis is not None or data_parallelism_axes is not None or weight_gather is not None
+    legacy = ep_axis is not None or data_parallelism_axes is not None
     if legacy:
         warnings.warn(
-            "ep_axis, data_parallelism_axes, and weight_gather are deprecated for TE MoE; "
+            "ep_axis and data_parallelism_axes are deprecated for TE MoE; "
             "pass mesh_resource=MeshResource(...) and quant_before_fsdp_ag instead.",
             DeprecationWarning,
             stacklevel=3,
         )
-        if weight_gather is not None and not isinstance(weight_gather, WeightGather):
-            raise TypeError("weight_gather must be a WeightGather policy.")
-        if weight_gather is not None:
-            if quant_before_fsdp_ag and weight_gather.mode != "quantized":
-                raise ValueError("quant_before_fsdp_ag conflicts with weight_gather.")
-            quant_before_fsdp_ag = weight_gather.mode == "quantized"
         if explicit_resource:
             if ep_axis is not None and ep_axis != mesh_resource.ep_resource:
                 raise ValueError("ep_axis conflicts with mesh_resource.ep_resource.")
@@ -180,28 +124,10 @@ def _resolve_moe_mesh_resource(
                 and tuple(data_parallelism_axes) != _moe_mesh_axes(mesh_resource)[1]
             ):
                 raise ValueError("data_parallelism_axes conflicts with mesh_resource.")
-            if (
-                weight_gather is not None
-                and weight_gather.axis is not None
-                and weight_gather.axis != mesh_resource.fsdp_resource
-            ):
-                raise ValueError("weight_gather axis conflicts with mesh_resource.fsdp_resource.")
-        elif ep_axis is not None or data_parallelism_axes is not None:
+        else:
             # The old functional API defaulted to no outer axes even in a global context.
             axes = tuple(data_parallelism_axes or ())
-            fsdp_axis = (
-                weight_gather.axis
-                if weight_gather is not None and weight_gather.axis is not None
-                else getattr(mesh_resource, "fsdp_resource", None)
-            )
-            if (
-                weight_gather is not None
-                and weight_gather.axis is not None
-                and weight_gather.axis not in axes
-            ):
-                raise ValueError(
-                    "Quantized weight all-gather requires its FSDP axis among the outer batch axes."
-                )
+            fsdp_axis = getattr(mesh_resource, "fsdp_resource", None)
             if fsdp_axis not in axes:
                 fsdp_axis = axes[-1] if axes else None
             dp_axes = tuple(axis for axis in axes if axis != fsdp_axis)
@@ -220,8 +146,6 @@ def _resolve_moe_mesh_resource(
                 **resources,
                 _legacy_data_parallelism_axes=axes,
             )
-        elif weight_gather.axis is not None and mesh_resource is not None:
-            mesh_resource = replace(mesh_resource, fsdp_resource=weight_gather.axis)
 
     if mesh_resource is None:
         raise ValueError(
@@ -2090,7 +2014,6 @@ def moe(
     wi_1_checkpoint_name: Optional[str] = None,
     wo_checkpoint_name: Optional[str] = None,
     dispatch_checkpoint_name: Optional[str] = None,
-    weight_gather: Optional[WeightGather] = None,
     use_cudnn_fusion: bool = True,
     cudnn_native_weight_layout: Optional[bool] = None,
 ) -> Tuple[jnp.ndarray, Optional[jnp.ndarray], jnp.ndarray]:
@@ -2157,8 +2080,8 @@ def moe(
         FSDP shards the gated dimension, layout conversion permutes gathered
         FP8 data and inverse scales, preserving global gate/up pairing without
         gathering or requantizing full-precision weights.
-    ep_axis, data_parallelism_axes, weight_gather : deprecated
-        Compatibility arguments converted into a MeshResource and boolean,
+    ep_axis, data_parallelism_axes : deprecated
+        Compatibility axis arguments converted into a MeshResource,
         with a DeprecationWarning. Conflicting old and new arguments raise.
     Per-expert dispatch-slot alignment defaults to 128 tokens (``_ALIGN_SIZE``).
     Requesting cuDNN fusion reserves 256 tokens, also when falling back, to
@@ -2188,16 +2111,15 @@ def moe(
     """
     if not isinstance(use_cudnn_fusion, bool):
         raise TypeError("use_cudnn_fusion must be a bool")
-    if ep_axis is not None or data_parallelism_axes is not None or weight_gather is not None:
+    if ep_axis is not None or data_parallelism_axes is not None:
         call_args = locals().copy()
         resource, quantize = _resolve_moe_mesh_resource(
             mesh_resource,
             quant_before_fsdp_ag,
             ep_axis,
             data_parallelism_axes,
-            weight_gather,
         )
-        for name in ("ep_axis", "data_parallelism_axes", "weight_gather"):
+        for name in ("ep_axis", "data_parallelism_axes"):
             call_args.pop(name)
         call_args.update(mesh_resource=resource, quant_before_fsdp_ag=quantize)
         return moe(**call_args)
