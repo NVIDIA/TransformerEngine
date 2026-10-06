@@ -705,3 +705,118 @@ def test_dot_product_attention_score_mod(dtype, qkv_format, score_mod_case, scal
     torch.testing.assert_close(q.grad, q_ref.grad, **tols)
     torch.testing.assert_close(k.grad, k_ref.grad, **tols)
     torch.testing.assert_close(v.grad, v_ref.grad, **tols)
+
+
+def test_flex_bars_the_frost_engines():
+    """flex must tell cuDNN not to use a FROST engine, not merely decline to ask for them.
+
+    The switch that offers those engines is process-wide, so another caller in the process, or a
+    user setting CUDNN_FRONTEND_ENABLE_FROST_ENGINES, puts them ahead of the backend engines for
+    these graphs too. They accept a score_mod graph, pass check_support, build, and then compute
+    without the callback.
+
+    No GPU: this checks the instruction is passed, not what cuDNN does with it.
+    """
+    barred = []
+
+    class FakeGraph:
+        """Records the engines flex bars, and stops at the first call it cannot serve."""
+
+        def validate(self):
+            pass
+
+        def build_operation_graph(self):
+            pass
+
+        def create_execution_plans(self, _heuristics):
+            pass
+
+        def deselect_engines(self, names):
+            barred.extend(names)
+
+        def check_support(self):
+            pass
+
+        def build_plans(self, _policy):
+            pass
+
+        def get_workspace_size(self):
+            return 4096
+
+    try:
+        flex_attention._import_cudnn_frontend()
+    except ImportError:
+        pytest.skip("cuDNN frontend Python package is required for score_mod attention.")
+
+    assert flex_attention._finalize_cudnn_graph(FakeGraph()) == 4096
+    assert barred, "flex did not ask cuDNN to exclude any engine"
+    assert "sdpa_fwd_prefill_sm100" in barred and "sdpa_bwd_sm100" in barred, barred
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required.")
+def test_frost_switch_does_not_change_what_flex_computes():
+    """Enabling the FROST engines must not change flex's output.
+
+    This is the property the silent drop violates: with the engines on, an unpinned build selects
+    a FROST plan at every head dim measured on B200, and that plan returns plain attention with
+    the score_mod discarded. Comparing flex against itself across the switch needs no reference
+    and no knowledge of which plan ran; if the two differ, a different kernel answered.
+    """
+    try:
+        flex_attention._import_cudnn_frontend()
+    except ImportError:
+        pytest.skip("cuDNN frontend Python package is required for score_mod attention.")
+    # Without this the test is vacuous: if the engines are absent, decline on arch, or sit below
+    # their version floors, both runs get a backend plan and agree no matter what flex does.
+    from transformer_engine.pytorch.attention.dot_product_attention.frost_attention import (
+        is_frost_attention_available,
+    )
+
+    frost_ok, frost_reason = is_frost_attention_available()
+    if not frost_ok:
+        pytest.skip("the FROST engines must be reachable to test anything: %s" % frost_reason)
+
+    env = "CUDNN_FRONTEND_ENABLE_FROST_ENGINES"
+    saved = os.environ.get(env)
+    torch.manual_seed(0)
+    b, h, s, d = 2, 4, 512, 64
+    dtype = torch.bfloat16 if is_bf16_available() else torch.float16
+    q, k, v = (torch.randn(b, s, h, d, device="cuda", dtype=dtype) for _ in range(3))
+
+    def bias_score_mod(score_mod_graph, score_tensor, _tensors):
+        """score += (row - col). Self-contained, and large enough that dropping it is obvious."""
+        cudnn = flex_attention._import_cudnn_frontend()
+        row = score_mod_graph.gen_index(input=score_tensor, axis=2)
+        row.set_data_type(cudnn.data_type.INT32)
+        col = score_mod_graph.gen_index(input=score_tensor, axis=3)
+        col.set_data_type(cudnn.data_type.INT32)
+        bias = score_mod_graph.sub(a=row, b=col, compute_data_type=cudnn.data_type.FLOAT)
+        bias.set_data_type(cudnn.data_type.FLOAT)
+        return score_mod_graph.add(a=score_tensor, b=bias, compute_data_type=cudnn.data_type.FLOAT)
+
+    def run():
+        flex_attention._cudnn_score_mod_graph_cache.clear()
+        return flex_attention.FusedAttentionWithScoreModFunc.apply(
+            False, q, k, v, "bshd", "bshd", d**-0.5, bias_score_mod, None, None, None, False
+        )
+
+    try:
+        os.environ.pop(env, None)
+        without = run()
+        os.environ[env] = "1"
+        with_engines = run()
+    finally:
+        flex_attention._cudnn_score_mod_graph_cache.clear()
+        if saved is None:
+            os.environ.pop(env, None)
+        else:
+            os.environ[env] = saved
+
+    torch.testing.assert_close(
+        with_engines,
+        without,
+        msg=lambda m: (
+            "flex computed something different with the FROST engines enabled, which means a"
+            " FROST plan answered and dropped the score_mod:\n" + m
+        ),
+    )
