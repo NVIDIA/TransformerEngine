@@ -82,6 +82,8 @@ class HybridQuantizer(Quantizer):
     columnwise_quantizer: Quantizer
     columnwise_source: Literal["original", "rowwise_dequantized"]
 
+    supports_output_dtype = True
+
     def __init__(
         self,
         *,
@@ -157,6 +159,15 @@ class HybridQuantizer(Quantizer):
         quantizer.optimize_for_gemm = self.optimize_for_gemm
         return quantizer
 
+    def with_output_dtype(self, dtype):
+        """Bind a compute dtype only on children that opt into that contract."""
+        quantizer = self.copy()
+        for name in ("rowwise_quantizer", "columnwise_quantizer"):
+            child = getattr(quantizer, name)
+            if child.supports_output_dtype:
+                setattr(quantizer, name, child.with_output_dtype(dtype))
+        return quantizer
+
     @property
     def with_amax_reduction(self) -> bool:
         """Whether either sub-quantizer has cross-rank amax reduction enabled."""
@@ -198,37 +209,50 @@ class HybridQuantizer(Quantizer):
         self,
         tensor: torch.Tensor,
         rowwise_result: Optional[Any],
+        *,
+        rowwise_quantizer=None,
+        dtype=None,
     ) -> torch.Tensor:
         if rowwise_result is None:
-            rowwise_result = self.rowwise_quantizer.quantize(tensor)
+            quantizer = rowwise_quantizer or self.rowwise_quantizer
+            rowwise_result = quantizer.quantize(tensor, dtype=dtype)
+        # Decode into the source dtype, preserving any prior Identity/QDQ rounding.
         return rowwise_result.dequantize(dtype=tensor.dtype)
 
-    def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
-        # Gate each sub-quantizer call on the parent usage flag. Sub-quantizers
-        # are pinned to one direction in ``__init__``; the parent flag decides
-        # whether to invoke them.
-        rowwise_result = self.rowwise_quantizer.quantize(tensor) if self.rowwise_usage else None
+    def quantize_impl(self, tensor: torch.Tensor, *, dtype=None) -> QuantizedTensor:
+        # A result owns the child configuration needed to reconstruct an absent
+        # rowwise source during updates. No dtype state is kept on the parent.
+        quantizer = self if dtype is None else self.with_output_dtype(dtype)
+        rowwise_result = (
+            quantizer.rowwise_quantizer.quantize(tensor, dtype=dtype)
+            if self.rowwise_usage
+            else None
+        )
         columnwise_src = tensor
         if self.columnwise_usage and self.columnwise_source == "rowwise_dequantized":
-            columnwise_src = self._columnwise_src_from_rowwise(tensor, rowwise_result)
+            columnwise_src = quantizer._columnwise_src_from_rowwise(
+                tensor, rowwise_result, dtype=dtype
+            )
         columnwise_result = (
-            self.columnwise_quantizer.quantize(columnwise_src) if self.columnwise_usage else None
+            quantizer.columnwise_quantizer.quantize(columnwise_src, dtype=dtype)
+            if self.columnwise_usage
+            else None
         )
 
         if self.internal:
             return HybridQuantizedTensorStorage(
                 rowwise_storage=rowwise_result,
                 columnwise_storage=columnwise_result,
-                quantizer=self,
-                fake_dtype=tensor.dtype,
+                quantizer=quantizer,
+                fake_dtype=dtype or tensor.dtype,
             )
 
         return HybridQuantizedTensor(
             shape=tensor.shape,
-            dtype=tensor.dtype,
+            dtype=dtype or tensor.dtype,
             rowwise_storage=rowwise_result,
             columnwise_storage=columnwise_result,
-            quantizer=self,
+            quantizer=quantizer,
         )
 
     def make_empty(
@@ -240,19 +264,18 @@ class HybridQuantizer(Quantizer):
         requires_grad: bool = False,
         pin_memory: bool = False,
     ) -> Union["HybridQuantizedTensor", HybridQuantizedTensorStorage]:
-        # Mirror ``quantize_impl``: invoke each sub-quantizer with its own
-        # ``internal`` setting (no toggle), so the produced sub-storages have
-        # the same type that ``quantize_impl`` would produce via
-        # ``sub_quantizer.quantize(tensor)``.
+        # Bind the same child defaults as quantize(..., dtype=dtype), including
+        # a rowwise child that is absent but needed as a columnwise source.
+        quantizer = self.with_output_dtype(dtype)
         rowwise_empty = (
-            self.rowwise_quantizer.make_empty(
+            quantizer.rowwise_quantizer.make_empty(
                 shape, dtype=dtype, device=device, pin_memory=pin_memory
             )
             if self.rowwise_usage
             else None
         )
         columnwise_empty = (
-            self.columnwise_quantizer.make_empty(
+            quantizer.columnwise_quantizer.make_empty(
                 shape, dtype=dtype, device=device, pin_memory=pin_memory
             )
             if self.columnwise_usage
@@ -263,7 +286,7 @@ class HybridQuantizer(Quantizer):
             return HybridQuantizedTensorStorage(
                 rowwise_storage=rowwise_empty,
                 columnwise_storage=columnwise_empty,
-                quantizer=self,
+                quantizer=quantizer,
                 fake_dtype=dtype,
             )
 
@@ -274,7 +297,7 @@ class HybridQuantizer(Quantizer):
             device=device,
             rowwise_storage=rowwise_empty,
             columnwise_storage=columnwise_empty,
-            quantizer=self,
+            quantizer=quantizer,
         )
 
     def update_quantized(
@@ -302,7 +325,9 @@ class HybridQuantizer(Quantizer):
             columnwise_src = src
             if self.columnwise_source == "rowwise_dequantized":
                 columnwise_src = self._columnwise_src_from_rowwise(
-                    src, rowwise_result_for_columnwise
+                    src,
+                    rowwise_result_for_columnwise,
+                    rowwise_quantizer=dst._get_quantizer().rowwise_quantizer,
                 )
             self.columnwise_quantizer.update_quantized(
                 columnwise_src, dst._columnwise_storage, noop_flag=noop_flag

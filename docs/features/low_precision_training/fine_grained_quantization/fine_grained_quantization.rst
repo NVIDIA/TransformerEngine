@@ -288,6 +288,31 @@ Note that in the second example the columnwise direction is high precision but
 holds the value reconstructed from MXFP8, not the original input — see
 `Choosing the columnwise source`_ above.
 
+Output dtype and workspace updates
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Output-dtype handling is opt-in through ``Quantizer.supports_output_dtype``,
+which defaults to ``False``. Identity and Hybrid opt in; native quantizers
+continue to ignore output-dtype requests, even inside a custom recipe.
+
+``IdentityQuantizer.quantize(x, dtype=...)`` selects the held output dtype
+without changing the quantizer's default or adding an autograd edge to its
+stored data. ``HybridQuantizer`` passes a compute-dtype request to its children;
+children that support output-dtype binding retain it for later reconstruction.
+Native quantizers keep their existing behavior, including ignoring this
+argument. Their encodings and default dequantization metadata are unchanged.
+
+Hybrid's ``rowwise_dequantized`` source is still explicitly decoded into the
+source tensor's dtype. This preserves existing native compositions, including
+internal storage. If a high-precision child already rounded into BF16, widening
+that value to an FP32 source does not recover the discarded precision.
+
+In-place Identity updates preserve the destination buffer, dtype, shape and
+device. An explicit conflicting ``dtype`` with ``out=`` raises an error for
+Identity and Hybrid. Module weight caches rebuild these workspaces when an
+explicit compute dtype changes. ``HybridQuantizer.make_empty(..., dtype=...)``
+binds the requested dtype on participating custom children just as quantize does.
+
 Example: one format per GEMM
 ----------------------------
 
