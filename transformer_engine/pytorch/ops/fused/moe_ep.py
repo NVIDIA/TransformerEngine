@@ -93,6 +93,11 @@ class _MoeEpResourceManager:
             )
 
         forward_group_hint = 768 if combine_format == "mxfp8" else 1024
+        # DeepSeek-V4-Pro expert shape measured faster with a smaller backward group hint.
+        is_dsv4_pro_shape = (
+            config.hidden_dim == 7168 and intermediate_size == 3072 and config.top_k == 6
+        )
+        backward_group_hint = 256 if is_dsv4_pro_shape else 512
         resolved_combine_format = (
             moe_ep_api.MoeFormat.MXFP8 if combine_format == "mxfp8" else moe_ep_api.MoeFormat.BF16
         )
@@ -129,7 +134,7 @@ class _MoeEpResourceManager:
                 token_back_mode="epi_warps",
                 epi_flag_batch=(2, 2),
                 token_in_flag_batch=8,
-                group_hint=512,
+                group_hint=backward_group_hint,
                 reduce_topk_in_kernel=False,
                 dgrad_optimization="baseline",
             ),
