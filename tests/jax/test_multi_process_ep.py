@@ -437,6 +437,13 @@ class TestEP(unittest.TestCase):
         expected = padded.sum(axis=-1, keepdims=True)
         np.testing.assert_array_equal(np.asarray(trt).astype(np.int64), expected)
 
+    def test_primitive_prepare_rejects_topk_idx_dtype_mismatch(self):
+        """Reject a topk_idx dtype that differs from EpLayerConfig.topk_idx_dtype."""
+        _T, topk_idx, _tokens, _w = self._make_identity_inputs()
+        cfg = EpLayerConfig(top_k=TOP_K, topk_idx_dtype=int(TEDType.kInt64))
+        with self.assertRaisesRegex(ValueError, "does not match EpLayerConfig.topk_idx_dtype"):
+            ep_prepare(cfg, topk_idx)
+
     def test_primitive_prepare_rejects_undersized_handle(self):
         """Reject an undersized handle before NCCL EP writes routing state."""
         import transformer_engine_jax
@@ -1015,6 +1022,8 @@ class TestEPOverflowDrop(unittest.TestCase):
     total_recv_tokens still reports the pre-drop demand.
     """
 
+    USE_BORROWED_COMM = False
+
     ALIGN = 16
     # Each EP group routes all OVF_TOKENS_PER_DP_SHARD top-1 slots to expert 0,
     # whose padded count then exceeds the recv capacity. HT mode requires the
@@ -1534,9 +1543,7 @@ def _ep_test_cases():
         test_cases = tuple(all_test_cases[name] for name in requested)
     else:
         test_cases = (TestEP, TestEPOverflowDrop, TestEpScanHandleRelocation, TestEpDomainGrouping)
-    if any(c in test_cases for c in (TestEPBorrowedComm, TestEpSingleProcessMultiDomain)) and any(
-        c in test_cases for c in (TestEP, TestEPOverflowDrop)
-    ):
+    if len({c.USE_BORROWED_COMM for c in test_cases if hasattr(c, "USE_BORROWED_COMM")}) > 1:
         raise ValueError("Run borrowed-comm and self-hosted EP tests in separate processes.")
     return test_cases
 

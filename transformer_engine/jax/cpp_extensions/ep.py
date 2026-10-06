@@ -26,7 +26,7 @@ from jax.sharding import NamedSharding, PartitionSpec
 
 import transformer_engine_jax
 from .base import BasePrimitive, register_primitive
-from .misc import TEDType
+from .misc import TEDType, jax_dtype_to_te_dtype
 from ..sharding import global_mesh_resource, get_mesh_axis_size
 from ..version_utils import is_collective_stream_supported, is_xla_ffi_collectives_supported
 
@@ -189,7 +189,7 @@ class EpLayerConfig:
 
     top_k: int
     dispatch_output_per_expert_alignment: int = 0
-    topk_idx_dtype: int = int(TEDType.kInt64)
+    topk_idx_dtype: int = int(TEDType.kInt32)
 
 
 def ep_handle_mem_size(cfg: EpLayerConfig) -> int:
@@ -1066,6 +1066,10 @@ def ep_prepare(cfg: EpLayerConfig, topk_idx):
     """Exchange routing metadata for ``cfg``; return
     ``(token_counts, total_recv_tokens, handle_mem)``. ``total_recv_tokens`` is
     the per-rank pre-drop recv-slot total (includes tokens dropped on overflow)."""
+    if int(jax_dtype_to_te_dtype(topk_idx.dtype)) != int(cfg.topk_idx_dtype):
+        raise ValueError(
+            f"topk_idx dtype {topk_idx.dtype} does not match EpLayerConfig.topk_idx_dtype"
+        )
     return EpPreparePrimitive.outer_primitive.bind(
         topk_idx,
         top_k=int(cfg.top_k),
