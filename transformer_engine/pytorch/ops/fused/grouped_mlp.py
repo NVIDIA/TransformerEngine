@@ -1110,7 +1110,9 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
 
     MXFP8 uses CuTe DSL grouped-GEMM kernels via the cuDNN front-end. When
     caller output/grad_input buffers are provided, the GEMMs write into them
-    directly.
+    directly. When the front-end wrappers advertise ``supports_canonical_layouts``,
+    MXFP8 operands are passed in their natural layouts instead of kernel-facing
+    views.
 
     """
 
@@ -1195,6 +1197,8 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             self.grouped_gemm_dactivation_kernel()
             raise RuntimeError(f"{self.__class__.__name__} is not supported on this system.")
         validate_grouped_mlp_dims(fc1, activation, fc2)
+        # Newer cuDNN front-ends accept natural operand layouts, so the forward can
+        # skip building the 3-D/6-D kernel-facing views on every call.
         self._cudnn_canonical_layouts = getattr(
             self.grouped_gemm_activation_kernel(), "supports_canonical_layouts", False
         ) and getattr(self.grouped_gemm_quant_kernel(), "supports_canonical_layouts", False)
