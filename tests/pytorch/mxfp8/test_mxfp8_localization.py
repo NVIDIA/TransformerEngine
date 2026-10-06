@@ -1283,8 +1283,9 @@ def test_mxfp8_qwen35_grouped_gemm_localization_performance(
             columnwise=False,
         )
         quantizer.optimize_for_gemm = True
+        padded_rows = ((rows + 31) // 32) * 32
         source = torch.full(
-            (rows, cols),
+            (padded_rows, cols),
             0.015625,
             dtype=dtype,
             device=device,
@@ -1293,7 +1294,7 @@ def test_mxfp8_qwen35_grouped_gemm_localization_performance(
         del source
         assert quantized._with_gemm_swizzled_scales
 
-        elements_per_group = rows * cols
+        elements_per_group = padded_rows * cols
         scales_per_group = quantized._rowwise_scale_inv.numel()
         first_dims = torch.full((num_groups,), rows, dtype=torch.int64, device=device)
         last_dims = torch.full((num_groups,), cols, dtype=torch.int64, device=device)
@@ -1329,7 +1330,7 @@ def test_mxfp8_qwen35_grouped_gemm_localization_performance(
         scale_inv: torch.Tensor,
     ) -> GroupedTensor:
         rows, cols = member_shape
-        elements_per_group = rows * cols
+        elements_per_group = rowwise_data.numel() // num_groups
         scales_per_group = scale_inv.numel() // num_groups
         return GroupedTensor(
             shape=(1, num_groups * elements_per_group),
