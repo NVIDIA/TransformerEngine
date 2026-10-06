@@ -3194,7 +3194,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             attn_dbias,
             None,
             None,
-            None,
+            None,  # fused_attention_backend
             None,
             None,
             None,
@@ -4561,7 +4561,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             None,
             None,
             None,
-            None,
+            None,  # fused_attention_backend
             None,
             None,
             None,
@@ -5416,6 +5416,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             d_bias,
             None,
             None,
+            None,  # fused_attention_backend
             None,
             None,
             None,
@@ -5429,7 +5430,6 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             None,
             None,
             d_softmax_offset,
-            None,
             None,
         )
 
