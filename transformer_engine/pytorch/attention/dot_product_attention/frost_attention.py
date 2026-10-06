@@ -386,9 +386,12 @@ def is_frost_attention_supported(params) -> Tuple[int, str]:
         # bottom_right_diagonal, which defaults to top-left, while the all-gather ring trims KV
         # and measures its window against the bottom-right diagonal. Those differ exactly when
         # the q and kv lengths do, so decline rather than guess which one was meant.
-        return no_backend, (
-            "FROST declines a right-bounded window on a non-causal mask with max_seqlen_q !="
-            " max_seqlen_kv, where the diagonal anchor is ambiguous"
+        return (
+            no_backend,
+            (
+                "FROST declines a right-bounded window on a non-causal mask with max_seqlen_q !="
+                " max_seqlen_kv, where the diagonal anchor is ambiguous"
+            ),
         )
 
     return int(FusedAttnBackend.FROST), ""
