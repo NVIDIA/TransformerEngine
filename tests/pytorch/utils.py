@@ -468,7 +468,11 @@ def get_available_attention_backends(
         _attention_backends["backend_selection_requires_update"] = False
         return available_backends, flash_attention_backend, fused_attention_backend
 
-    backends = {1: "F16_arbitrary_seqlen", 2: "FP8"}
+    # Every fused sub-backend this helper is willing to count as comparable. FROST has to be
+    # here: it serves head_dim in (256, 512], where it is the only backward-capable fused
+    # sub-backend, so omitting it makes those configs look like they have one backend and
+    # the caller skips instead of comparing.
+    backends = {1: "F16_arbitrary_seqlen", 2: "FP8", 3: "FROST"}
     if AttentionLogging._is_logging_setup is False:
         AttentionLogging.setup_logging()
 
