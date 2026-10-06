@@ -99,6 +99,16 @@ def _read_mp_options():
     return num, pid
 
 
+def _read_cudnn_fusion_option() -> bool:
+    for index, argument in enumerate(sys.argv):
+        if argument.startswith("--use-cudnn-fusion="):
+            return argument.split("=", 1)[1] == "1"
+        if argument == "--use-cudnn-fusion" and index + 1 < len(sys.argv):
+            return sys.argv[index + 1] == "1"
+    return True
+
+
+_USE_CUDNN_FUSION = _read_cudnn_fusion_option()
 _MP_NUM_PROCESS, _MP_PROCESS_ID = _read_mp_options()
 _MP_ACTIVE = _init_distributed(_MP_NUM_PROCESS, _MP_PROCESS_ID)
 
@@ -123,7 +133,6 @@ from transformer_engine.jax.flax import _MoEBlock as MoEBlock
 from transformer_engine.jax.moe import (
     _ALIGN_SIZE,
     _CUDNN_JAX_ALIGN_SIZE,
-    _use_cudnn_cutedsl_fusion_from_env,
     WeightGather,
     get_moe_recv_capacity_per_rank,
     moe,
@@ -209,7 +218,7 @@ def mesh():
     # Worst-case recv capacity per rank
     # TODO(jberchtold) support configurations other than worst-case by refactoring tests
     # but if possible avoid bootstrap/teardown for each test
-    alignment = _CUDNN_JAX_ALIGN_SIZE if _use_cudnn_cutedsl_fusion_from_env() else _ALIGN_SIZE
+    alignment = _CUDNN_JAX_ALIGN_SIZE if _USE_CUDNN_FUSION else _ALIGN_SIZE
     recv_capacity_per_rank = get_moe_recv_capacity_per_rank(
         num_experts=NUM_EXPERTS,
         num_experts_per_tok=TOPK,
@@ -368,6 +377,7 @@ def _make_block(
     dispatch_checkpoint_name=None,
     quant_before_fsdp_ag=False,
     mesh_resource=None,
+    use_cudnn_fusion=_USE_CUDNN_FUSION,
 ):
     kwargs = dict(
         num_experts=NUM_EXPERTS,
@@ -383,6 +393,7 @@ def _make_block(
         quantization_recipe=quantization_recipe,
         dispatch_checkpoint_name=dispatch_checkpoint_name,
         quant_before_fsdp_ag=quant_before_fsdp_ag,
+        use_cudnn_fusion=use_cudnn_fusion,
     )
     # Custom expert_bias_init lets tests inject a non-zero expert_bias without
     # poking variables['params'] post-init.
@@ -593,7 +604,7 @@ def test_quantized_weight_gather_matches_full_precision_gather(
 ):
     """The FP8 weight gather retains forward and backward MoE semantics."""
     if native_weight_layout:
-        if not _use_cudnn_cutedsl_fusion_from_env():
+        if not _USE_CUDNN_FUSION:
             pytest.skip("Native weight layout requires cuDNN grouped GEMM fusion")
     if native_weight_layout or expert_fsdp:
         from transformer_engine.jax import cpp_extensions as tex
@@ -838,7 +849,7 @@ class TestTeEpMoeBackward:
 
 
 def test_ep_checkpoint_names(mesh, monkeypatch):
-    if _use_cudnn_cutedsl_fusion_from_env():
+    if _USE_CUDNN_FUSION:
         pytest.skip("BF16 fallback uses a different EP alignment than the cuDNN bootstrap")
     moe_module = importlib.import_module("transformer_engine.jax.moe")
     named_values = {}
@@ -864,13 +875,55 @@ def test_ep_checkpoint_names(mesh, monkeypatch):
         assert np.all(np.isfinite(_to_global_numpy(_unwrap(grads["params"][name]), mesh)))
 
 
+def test_explicitly_disabled_fusion_with_native_weights(mesh, monkeypatch):
+    """Disabling fusion bypasses dependency probing and preserves native gradients."""
+    if _USE_CUDNN_FUSION:
+        pytest.skip("Requires the ordinary 128-token EP bootstrap")
+    from transformer_engine.jax import cpp_extensions as tex
+
+    moe_module = importlib.import_module("transformer_engine.jax.moe")
+
+    def unexpected_selection(*args, **kwargs):
+        raise AssertionError("Explicitly disabled fusion must not probe cuDNN")
+
+    monkeypatch.setattr(moe_module, "_select_cudnn_jax_fusion", unexpected_selection)
+    block = _make_block(quantization_recipe=MXFP8BlockScaling(), use_cudnn_fusion=False)
+    x = _make_inputs(jax.random.PRNGKey(53))
+    variables, baseline_output, _ = _init_apply(block, mesh, x, jax.random.PRNGKey(54))
+    baseline_grads, baseline_dx = _grad_step(block, variables, mesh, x)
+    flax_moe = importlib.import_module("transformer_engine.jax.flax.moe")
+    original_moe = flax_moe.moe
+
+    def native_moe(*args, **kwargs):
+        args = list(args)
+        gate, up = jnp.split(args[2], 2, axis=-1)
+        args[2] = tex.pack_swiglu_pair(gate, up).transpose(0, 2, 1)
+        kwargs["wi_kernel_axes"] = ("exp", "mlp", "embed")
+        return original_moe(*args, **kwargs)
+
+    monkeypatch.setattr(flax_moe, "moe", native_moe)
+    with _ctx(mesh):
+        output, _, _ = jax.jit(block.apply)(variables, _shard_inputs(x, mesh))
+        output.block_until_ready()
+    grads, dx = _grad_step(block, variables, mesh, x)
+    np.testing.assert_array_equal(
+        _to_global_numpy(output, mesh), _to_global_numpy(baseline_output, mesh)
+    )
+    np.testing.assert_array_equal(_to_global_numpy(dx, mesh), _to_global_numpy(baseline_dx, mesh))
+    for name in ("gate_kernel", "wi", "wo"):
+        np.testing.assert_array_equal(
+            _to_global_numpy(_unwrap(grads["params"][name]), mesh),
+            _to_global_numpy(_unwrap(baseline_grads["params"][name]), mesh),
+        )
+
+
 class TestTeEpMoeCudnnCutedslFusion:
     """End-to-end MXFP8 coverage for cuDNN's grouped GLU JAX APIs."""
 
     @pytest.mark.parametrize("native_layout", [False, True])
     def test_missing_apis_unfused_forward_and_backward(self, mesh, monkeypatch, native_layout):
         """Unfused fallback retains bootstrap capacity and native-layout gradients."""
-        if not _use_cudnn_cutedsl_fusion_from_env():
+        if not _USE_CUDNN_FUSION:
             pytest.skip("Requires fusion requested at bootstrap")
         import cudnn.jax as cudnn_jax
         from transformer_engine.jax import cpp_extensions as tex
@@ -912,9 +965,9 @@ class TestTeEpMoeCudnnCutedslFusion:
 
     @pytest.mark.parametrize("apply_topk_weights_early", [False, True])
     def test_mxfp8_forward_and_backward(self, mesh, apply_topk_weights_early, monkeypatch):
-        if not _use_cudnn_cutedsl_fusion_from_env():
+        if not _USE_CUDNN_FUSION:
             pytest.skip(
-                "run separately with NVTE_JAX_TEMP_FLAG_FOR_ABHINAV_CUDNN_GROUPED_GEMM_FUSION=1"
+                "run separately with --use-cudnn-fusion=1"
             )
         rubin_calls = []
         if get_device_compute_capability(0) == 107:
@@ -1043,7 +1096,7 @@ class TestTeEpMoeCudnnCutedslFusion:
 
     @pytest.mark.parametrize("use_regular_swiglu", [False, True])
     def test_cudnn_fused_with_checkpoint_names(self, mesh, monkeypatch, use_regular_swiglu):
-        if not _use_cudnn_cutedsl_fusion_from_env():
+        if not _USE_CUDNN_FUSION:
             pytest.skip("cuDNN grouped GEMM fusion is disabled")
         if not use_regular_swiglu and get_device_compute_capability(0) != 107:
             pytest.skip("Rubin grouped GLU requires SM107")

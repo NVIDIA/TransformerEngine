@@ -161,12 +161,15 @@ def test_installed_frontend_contract():
         assert available or reason
 
 
+@pytest.mark.parametrize("request_fusion", [None, True, False])
 @pytest.mark.parametrize("native_layout", [False, True])
 @pytest.mark.parametrize(
     "missing,expected",
     [(None, "rubin"), ("grouped_gemm_glu", "blackwell"), ("grouped_gemm_dswiglu", False)],
 )
-def test_public_moe_passes_selected_path(frontend, monkeypatch, native_layout, missing, expected):
+def test_public_moe_passes_selected_path(
+    frontend, monkeypatch, native_layout, missing, expected, request_fusion
+):
     import jax
     import jax.numpy as jnp
     import numpy as np
@@ -175,7 +178,6 @@ def test_public_moe_passes_selected_path(frontend, monkeypatch, native_layout, m
 
     if missing:
         delattr(frontend, missing)
-    monkeypatch.setenv(moe._CUDNN_JAX_ENV, "1")
     monkeypatch.setattr(transformer_engine_jax, "get_device_compute_capability", lambda _: 107)
     monkeypatch.setattr(moe, "_cudnn_jax_fusion_rejection_reasons", lambda *args, **kwargs: [])
     mesh = Mesh(np.asarray(jax.devices()[:1]), ("ep",))
@@ -185,12 +187,17 @@ def test_public_moe_passes_selected_path(frontend, monkeypatch, native_layout, m
     signature = inspect.signature(moe._moe)
 
     def execute(*args):
-        received.append(signature.bind(*args).arguments["use_cudnn_jax_fusion"])
+        bound = signature.bind(*args).arguments
+        assert bound["use_cudnn_fusion"] is (request_fusion is not False)
+        received.append(bound["use_cudnn_jax_fusion"])
         return args[0], None, jnp.asarray(0)
 
     monkeypatch.setattr(moe, "_moe", execute)
     x = jnp.ones((1, 1, 128), jnp.bfloat16)
     wi = jnp.ones((2, 256, 128) if native_layout else (2, 128, 256), jnp.bfloat16)
+    kwargs = {} if request_fusion is None else {"use_cudnn_fusion": request_fusion}
+    if request_fusion is False:
+        expected = False
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         output, _, _ = moe.moe(
@@ -201,10 +208,11 @@ def test_public_moe_passes_selected_path(frontend, monkeypatch, native_layout, m
             num_experts=2,
             num_experts_per_tok=1,
             mesh_resource=MeshResource(ep_resource="ep"),
+            **kwargs,
         )
     assert received == [expected]
     assert output is x
-    assert len(caught) == (0 if expected == "rubin" else 1)
+    assert len(caught) == (0 if request_fusion is False or expected == "rubin" else 1)
 
 
 @pytest.mark.parametrize("path", ["rubin", "blackwell"])
@@ -249,3 +257,58 @@ def test_forward_uses_selected_kernel(monkeypatch, path):
     )
     with pytest.raises(SelectedKernel):
         moe._ffn_fwd_per_shard(**kwargs)
+
+
+@pytest.mark.parametrize("request_fusion", [None, True, False])
+def test_flax_forwards_fusion_bool(monkeypatch, request_fusion):
+    import jax
+    import jax.numpy as jnp
+    from transformer_engine.jax.flax import _MoEBlock
+    from transformer_engine.jax.sharding import MeshResource
+
+    flax_moe = importlib.import_module("transformer_engine.jax.flax.moe")
+    received = []
+
+    def execute(inputs, *args, **kwargs):
+        received.append(kwargs["use_cudnn_fusion"])
+        return inputs, None, jnp.asarray(0)
+
+    monkeypatch.setattr(flax_moe, "moe", execute)
+    kwargs = {} if request_fusion is None else {"use_cudnn_fusion": request_fusion}
+    block = _MoEBlock(
+        num_experts=2, intermediate_size=32, mesh_resource=MeshResource(ep_resource="ep"), **kwargs
+    )
+    block.init(jax.random.PRNGKey(0), jnp.ones((1, 1, 32)))
+    assert received == [request_fusion is not False]
+
+
+@pytest.mark.parametrize("request_fusion", [True, False])
+def test_capacity_follows_explicit_fusion_bool(request_fusion):
+    kwargs = dict(num_experts=8, num_experts_per_tok=2, max_tokens_per_rank=64, ep_size=2)
+    alignment = moe._CUDNN_JAX_ALIGN_SIZE if request_fusion else moe._ALIGN_SIZE
+    expected = moe.get_moe_recv_capacity_per_rank(**kwargs, alignment=alignment)
+    assert moe.get_moe_recv_capacity_per_rank(**kwargs, use_cudnn_fusion=request_fusion) == expected
+    if request_fusion:
+        assert moe.get_moe_recv_capacity_per_rank(**kwargs) == expected
+
+
+@pytest.mark.parametrize("invalid", [0, 1, None, "true"])
+def test_fusion_argument_requires_bool(invalid):
+    with pytest.raises(TypeError, match="use_cudnn_fusion must be a bool"):
+        moe.moe(
+            None, None, None, None, num_experts=2, num_experts_per_tok=1, use_cudnn_fusion=invalid
+        )
+    with pytest.raises(TypeError, match="use_cudnn_fusion must be a bool"):
+        moe.get_moe_recv_capacity_per_rank(
+            num_experts=2,
+            num_experts_per_tok=1,
+            max_tokens_per_rank=16,
+            ep_size=1,
+            use_cudnn_fusion=invalid,
+        )
+
+
+def test_vjp_bool_is_static_and_defaults_to_true():
+    assert inspect.signature(moe._moe).parameters["use_cudnn_fusion"].default is True
+    assert inspect.signature(moe.moe).parameters["use_cudnn_fusion"].default is True
+    assert 32 in moe._moe.nondiff_argnums

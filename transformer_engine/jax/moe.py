@@ -31,7 +31,6 @@ stateful recipes follow the same update semantics as the other TE MLPs.
 """
 
 import math
-import os
 import warnings
 from dataclasses import dataclass, fields, replace
 from functools import partial
@@ -244,14 +243,6 @@ def _resolve_moe_mesh_resource(
 # same 128-token tile, so a single constant covers every supported path.
 _ALIGN_SIZE = 128
 _CUDNN_JAX_ALIGN_SIZE = 256
-_CUDNN_JAX_ENV = "NVTE_JAX_TEMP_FLAG_FOR_ABHINAV_CUDNN_GROUPED_GEMM_FUSION"
-
-
-def _use_cudnn_cutedsl_fusion_from_env() -> bool:
-    value = os.getenv(_CUDNN_JAX_ENV, "0")
-    if value not in ("0", "1"):
-        raise ValueError(f"{_CUDNN_JAX_ENV} must be '0' or '1', got {value!r}")
-    return value == "1"
 
 
 def _select_cudnn_jax_fusion(rejection_reasons: list[str]) -> str | bool:
@@ -286,7 +277,7 @@ def _select_cudnn_jax_fusion(rejection_reasons: list[str]) -> str | bool:
     if reasons:
         destination = "generic Blackwell+ fused kernel" if path else "unfused TE grouped-GEMM path"
         warnings.warn(
-            f"{_CUDNN_JAX_ENV}=1: falling back to the {destination}: "
+            f"use_cudnn_fusion=True: falling back to the {destination}: "
             + "; ".join(reasons)
             + ". Install cuDNN Frontend with compatible JAX APIs (TE's signatures match "
             "cuDNN Frontend 1.31.0) and CuTeDSL JAX support; use supported GPU hardware.",
@@ -365,6 +356,7 @@ def get_moe_recv_capacity_per_rank(
     ep_size: int,
     recv_capacity_factor: Optional[float] = None,
     alignment: Optional[int] = None,
+    use_cudnn_fusion: bool = True,
 ) -> int:
     """Return the aligned receive capacity for one EP rank.
 
@@ -372,12 +364,14 @@ def get_moe_recv_capacity_per_rank(
     factor >= 1 scales the capacity needed by perfectly balanced routing and
     is capped at the worst case. The balanced baseline includes the independent
     per-local-expert alignment required by NCCL EP. When ``alignment`` is not
-    supplied, it follows the active MoE implementation: 256 for the cuDNN
-    grouped-SwiGLU fusion and 128 for the regular TE grouped GEMM. This keeps
+    supplied, ``use_cudnn_fusion=True`` (default) reserves 256-token alignment,
+    including fallbacks; ``False`` reserves 128 for regular TE grouped GEMM. This keeps
     eager bootstrap callers in sync with the later compiled ``moe()`` call.
     """
+    if not isinstance(use_cudnn_fusion, bool):
+        raise TypeError("use_cudnn_fusion must be a bool")
     if alignment is None:
-        alignment = _CUDNN_JAX_ALIGN_SIZE if _use_cudnn_cutedsl_fusion_from_env() else _ALIGN_SIZE
+        alignment = _CUDNN_JAX_ALIGN_SIZE if use_cudnn_fusion else _ALIGN_SIZE
     if num_experts <= 0 or num_experts_per_tok <= 0 or max_tokens_per_rank <= 0:
         raise ValueError(
             "num_experts, num_experts_per_tok, and max_tokens_per_rank must be positive"
@@ -1222,6 +1216,7 @@ def _moe_fwd_rule(
     wo_checkpoint_name,
     dispatch_checkpoint_name,
     quant_before_fsdp_ag,
+    use_cudnn_fusion: bool = True,
 ):
     """Forward: gate -> topk -> ep_dispatch -> FFN -> ep_combine.
 
@@ -1297,11 +1292,7 @@ def _moe_fwd_rule(
         max_tokens_per_rank = (B // num_procs) * S
         # Keep capacity and alignment consistent with an EP bootstrap sized
         # for requested fusion, even when API/hardware checks choose unfused.
-        dispatch_alignment = (
-            _CUDNN_JAX_ALIGN_SIZE
-            if use_cudnn_jax_fusion or _use_cudnn_cutedsl_fusion_from_env()
-            else _ALIGN_SIZE
-        )
+        dispatch_alignment = _CUDNN_JAX_ALIGN_SIZE if use_cudnn_fusion else _ALIGN_SIZE
         worst_case_recv_pr = get_moe_recv_capacity_per_rank(
             num_experts=num_experts,
             num_experts_per_tok=K,
@@ -1615,6 +1606,7 @@ def _moe_bwd_rule(
     wo_checkpoint_name,
     dispatch_checkpoint_name,
     quant_before_fsdp_ag,
+    use_cudnn_fusion,
     residuals,
     cotangents,
 ):
@@ -1631,6 +1623,7 @@ def _moe_bwd_rule(
             wo_checkpoint_name,
             dispatch_checkpoint_name,
             quant_before_fsdp_ag,
+            use_cudnn_fusion,
         )  # captured / unused in bwd
         from jax.experimental.shard_map import shard_map
 
@@ -1880,7 +1873,7 @@ def _moe_bwd_rule(
 # =============================================================================
 
 
-@partial(jax.custom_vjp, nondiff_argnums=tuple(range(9, 32)))
+@partial(jax.custom_vjp, nondiff_argnums=tuple(range(9, 33)))
 def _moe(
     x,
     gate_kernel,
@@ -1914,6 +1907,7 @@ def _moe(
     wo_checkpoint_name,
     dispatch_checkpoint_name,
     quant_before_fsdp_ag,
+    use_cudnn_fusion: bool = True,
 ):
     primal, _ = _moe_fwd_rule(
         x,
@@ -1948,6 +1942,7 @@ def _moe(
         wo_checkpoint_name,
         dispatch_checkpoint_name,
         quant_before_fsdp_ag,
+        use_cudnn_fusion,
     )
     return primal
 
@@ -1994,6 +1989,7 @@ def moe(
     wo_checkpoint_name: Optional[str] = None,
     dispatch_checkpoint_name: Optional[str] = None,
     weight_gather: Optional[WeightGather] = None,
+    use_cudnn_fusion: bool = True,
 ) -> Tuple[jnp.ndarray, Optional[jnp.ndarray], jnp.ndarray]:
     """Run a full MoE block under a single fused custom_vjp on the TE EP path.
 
@@ -2062,11 +2058,11 @@ def moe(
     Requesting cuDNN fusion reserves 256 tokens, also when falling back, to
     preserve compatibility with EP bootstrap buffer sizing.
 
-    Set ``NVTE_JAX_TEMP_FLAG_FOR_ABHINAV_CUDNN_GROUPED_GEMM_FUSION=1`` to use cuDNN's
-    JAX grouped MXFP8 APIs: Rubin GLU first, then generic SM100+ SwiGLU.
-    Ineligible calls warn
-    and fall back to TE's regular grouped-GEMM implementation. API signatures
-    and GPU capability determine support; fallbacks emit an actionable warning.
+    use_cudnn_fusion : bool
+        Defaults to ``True``: try cuDNN's JAX grouped MXFP8 APIs, Rubin GLU first,
+        then generic SM100+ SwiGLU. ``False`` uses unfused TE grouped GEMM.
+        Ineligible calls warn and fall back to TE's regular grouped-GEMM
+        implementation. API signatures and GPU capability determine support.
 
     MeshResource fields name physical mesh axes, not Flax logical axes.
     ``input_axes``, ``gate_kernel_axes``, ``wi_kernel_axes`` and
@@ -2077,6 +2073,8 @@ def moe(
     See module docstring for the rest of the parameter semantics and the
     surrounding design rationale.
     """
+    if not isinstance(use_cudnn_fusion, bool):
+        raise TypeError("use_cudnn_fusion must be a bool")
     if ep_axis is not None or data_parallelism_axes is not None or weight_gather is not None:
         call_args = locals().copy()
         resource, quantize = _resolve_moe_mesh_resource(
@@ -2128,8 +2126,7 @@ def moe(
             expert_bias_arg = expert_bias.astype(jnp.float32)
 
         use_cudnn_jax_fusion = False
-        cudnn_native_weight_layout = wi.ndim == 3 and wi.shape[-1] == x.shape[-1]
-        if _use_cudnn_cutedsl_fusion_from_env():
+        if use_cudnn_fusion:
             rejection_reasons = _cudnn_jax_fusion_rejection_reasons(
                 x,
                 wi,
@@ -2141,11 +2138,6 @@ def moe(
                 ep_axis=ep_axis,
             )
             use_cudnn_jax_fusion = _select_cudnn_jax_fusion(rejection_reasons)
-        elif cudnn_native_weight_layout:
-            raise ValueError(
-                "cuDNN-native MoE weight layout requires the fused cuDNN grouped-GEMM path; "
-                f"set {_CUDNN_JAX_ENV}=1."
-            )
 
         output, aux_loss, total_recv_tokens = _moe(
             x,
@@ -2180,6 +2172,7 @@ def moe(
             wo_checkpoint_name,
             dispatch_checkpoint_name,
             quant_before_fsdp_ag,
+            use_cudnn_fusion,
         )
         if aux_loss_coeff <= 0.0:
             aux_loss = None

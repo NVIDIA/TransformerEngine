@@ -67,7 +67,7 @@ trap cleanup EXIT INT TERM
 
 run_phase() {
     local phase_name="$1"
-    local fusion_env="$2"
+    local use_cudnn_fusion="$2"
     shift 2
     local -a phase_args=("$@")
     local phase_log_dir="$LOG_DIR/$phase_name"
@@ -78,7 +78,7 @@ run_phase() {
     echo
     echo "============================================================"
     echo "Phase: $phase_name"
-    echo "  NVTE_JAX_TEMP_FLAG_FOR_ABHINAV_CUDNN_GROUPED_GEMM_FUSION=$fusion_env"
+    echo "  use_cudnn_fusion=$use_cudnn_fusion"
     echo "  phase pytest args : ${phase_args[*]:-<none>}"
     echo "  logs              : $phase_log_dir"
     echo "============================================================"
@@ -92,15 +92,14 @@ run_phase() {
             -v -s
             --num-process="$NUM_GPUS"
             --process-id="$i"
+            --use-cudnn-fusion="$use_cudnn_fusion"
             "${phase_args[@]}"
         )
         if [ "$i" -eq 0 ]; then
             echo "=== Live output from process 0 ($phase_name) ==="
-            env NVTE_JAX_TEMP_FLAG_FOR_ABHINAV_CUDNN_GROUPED_GEMM_FUSION="$fusion_env" \
-                "${pytest_cmd[@]}" 2>&1 | tee "$log_file" &
+            "${pytest_cmd[@]}" 2>&1 | tee "$log_file" &
         else
-            env NVTE_JAX_TEMP_FLAG_FOR_ABHINAV_CUDNN_GROUPED_GEMM_FUSION="$fusion_env" \
-                "${pytest_cmd[@]}" > "$log_file" 2>&1 &
+            "${pytest_cmd[@]}" > "$log_file" 2>&1 &
         fi
         PIDS+=("$!")
     done
@@ -136,15 +135,10 @@ run_phase() {
     fi
 }
 
-if [ "${NVTE_JAX_TEMP_FLAG_FOR_ABHINAV_CUDNN_GROUPED_GEMM_FUSION:-0}" = "1" ]; then
-    # Keep ordinary CUDA C++ and cuDNN JAX coverage in separate Python process
-    # groups. TE EP/NCCL caches layer alignment process-wide, so 128-token and
-    # 256-token dispatch-alignment tests cannot safely share one interpreter.
-    run_phase "ordinary" "0" -k "not TestTeEpMoeCudnnCutedslFusion" "$@"
-    run_phase "cutedsl" "1" -k "TestTeEpMoeCudnnCutedslFusion" "$@"
-else
-    run_phase "ordinary" "0" "$@"
-fi
+# Keep ordinary CUDA C++ and cuDNN JAX coverage in separate process groups.
+# TE EP/NCCL caches alignment process-wide; these use 128 and 256 respectively.
+run_phase "ordinary" "0" -k "not TestTeEpMoeCudnnCutedslFusion" "$@"
+run_phase "cutedsl" "1" -k "TestTeEpMoeCudnnCutedslFusion" "$@"
 
 echo
 if [ "$PHASE_FAILED" -eq 0 ]; then

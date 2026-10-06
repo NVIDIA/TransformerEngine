@@ -103,6 +103,11 @@ class _MoEBlock(TransformerEngineBase):
     ep_axis, data_parallelism_axes, weight_gather : deprecated
         Compatibility arguments converted into MeshResource and the boolean
         with a DeprecationWarning.
+    use_cudnn_fusion : bool
+        Defaults to ``True``: try Rubin fused GLU, then generic Blackwell+ fused
+        SwiGLU, then unfused TE grouped GEMM. Unsupported fused paths warn.
+        ``False`` selects unfused execution. Use the same value when calculating
+        EP bootstrap receive capacity with ``get_moe_recv_capacity_per_rank``.
     apply_topk_weights_early : bool
         If ``True``, multiply expert outputs by their top-k weights
         *inside* each shard before ``ep_combine`` (saves one global
@@ -114,10 +119,8 @@ class _MoEBlock(TransformerEngineBase):
         JAX rematerialization checkpoint name for the EP dispatch outputs.
         ``None`` leaves them unnamed.
 
-    The per-expert dispatch-slot alignment is fixed internally at 128
-    tokens (see ``moe._ALIGN_SIZE``) -- the value required by NCCL EP
-    HT and satisfied by every current TE grouped-GEMM recipe -- and is
-    therefore not exposed as a per-instance knob.
+    Per-expert dispatch-slot alignment is 256 tokens when fusion is requested,
+    including fallbacks, and 128 tokens with ``use_cudnn_fusion=False``.
 
     dtype : jnp.dtype
         Compute / parameter dtype.
@@ -161,6 +164,7 @@ class _MoEBlock(TransformerEngineBase):
     data_parallelism_axes: Optional[Tuple[str, ...]] = None
 
     # MoE knobs forwarded to ``moe()``
+    use_cudnn_fusion: bool = True
     apply_topk_weights_early: bool = False
     recv_capacity_per_rank: Optional[int] = None
     dispatch_checkpoint_name: Optional[str] = None
@@ -324,6 +328,7 @@ class _MoEBlock(TransformerEngineBase):
                 group_topk=self.group_topk,
                 scaling_factor=self.scaling_factor,
                 aux_loss_coeff=self.aux_loss_coeff,
+                use_cudnn_fusion=self.use_cudnn_fusion,
                 apply_topk_weights_early=self.apply_topk_weights_early,
                 quantizer_sets=quantizer_sets,
                 recv_capacity_per_rank=self.recv_capacity_per_rank,

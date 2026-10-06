@@ -98,7 +98,12 @@ def pytest_addoption(parser):
     """
     parser.addoption("--num-process", action="store", default=0)
     parser.addoption("--process-id", action="store", default=0)
-
+    parser.addoption(
+        "--use-cudnn-fusion",
+        choices=("0", "1"),
+        default="1",
+        help="Pass use_cudnn_fusion to MoE blocks and EP capacity calculation",
+    )
 
 def pytest_configure(config):
     config.addinivalue_line(
