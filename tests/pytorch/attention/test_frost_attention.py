@@ -468,15 +468,16 @@ def test_frost_rejects_mismatched_kv():
         frost_attn_fwd(q, k, k.to(torch.float32))
 
 
-def test_frost_engines_are_enabled_even_if_flex_imported_cudnn_first():
-    """Enabling the FROST engines must not depend on which backend touched cuDNN first.
+def test_frost_engines_are_enabled_even_if_cudnn_was_imported_without_them():
+    """Enabling the FROST engines must not depend on who imported cuDNN first.
 
-    flex_attention and frost_attention share one cuDNN import in cudnn_pygraph. flex asks for the
-    import without the FROST engines and frost asks with them, so if the enabling sat inside the
-    "already imported?" memo, a process that ran a score_mod layer first would leave FROST with a
-    cuDNN that offers it no engine. That surfaces far from its cause, as "no cuDNN engine matching
-    'sdpa_fwd_prefill_sm100' was offered" on the first head_dim 512 forward, with a hint pointing
-    at package versions that are in fact fine.
+    is_frost_attention_available imports cuDNN WITHOUT the engines, because enabling them reorders
+    plan selection for every cuDNN consumer in the process and the checks after it may still
+    decline. So the enabling cannot sit inside the "already imported?" memo: a process that
+    probed availability first would otherwise leave FROST with a cuDNN that offers it no engine.
+    That surfaces far from its cause, as "no cuDNN engine matching 'sdpa_fwd_prefill_sm100' was
+    offered" on the first head_dim 512 forward, with a hint pointing at package versions that are
+    in fact fine.
 
     No GPU and no real cuDNN: a stub stands in for the package, because what is under test is the
     order-dependence of our own wrapper. It also has to run in-process with the globals reset,
@@ -485,12 +486,12 @@ def test_frost_engines_are_enabled_even_if_flex_imported_cudnn_first():
     import sys
     import types
 
-    from transformer_engine.pytorch.attention.dot_product_attention import cudnn_pygraph
+    from transformer_engine.pytorch.attention.dot_product_attention import frost_attention
 
     env = "CUDNN_FRONTEND_ENABLE_FROST_ENGINES"
     saved = (
-        cudnn_pygraph._cudnn,
-        cudnn_pygraph._frost_engines_enabled,
+        frost_attention._cudnn,
+        frost_attention._frost_engines_enabled,
         os.environ.get(env),
         sys.modules.get("cudnn"),
         sys.modules.get("cudnn.sdpa"),
@@ -500,23 +501,24 @@ def test_frost_engines_are_enabled_even_if_flex_imported_cudnn_first():
         stub.sdpa = types.ModuleType("cudnn.sdpa")
         sys.modules["cudnn"] = stub
         sys.modules["cudnn.sdpa"] = stub.sdpa
-        cudnn_pygraph._cudnn = None
-        cudnn_pygraph._frost_engines_enabled = False
+        frost_attention._cudnn = None
+        frost_attention._frost_engines_enabled = False
         os.environ.pop(env, None)
 
-        # flex first, which must not enable anything.
-        cudnn_pygraph.import_cudnn_frontend(enable_frost_engines=False)
+        # The availability probe first, which must not enable anything.
+        frost_attention._import_cudnn_frontend(enable_frost_engines=False)
         assert env not in os.environ, "the non-FROST caller must not set the switch"
-        assert not cudnn_pygraph.frost_engines_enabled()
+        assert not frost_attention._frost_engines_enabled
 
-        # frost second, on an already-imported cuDNN. This is the case that used to be skipped.
-        cudnn_pygraph.import_cudnn_frontend(enable_frost_engines=True)
+        # A use site second, on an already-imported cuDNN. This is the case that used to be
+        # skipped.
+        frost_attention._import_cudnn_frontend(enable_frost_engines=True)
         assert os.environ.get(env) == "1", "FROST was requested after the import and not enabled"
-        assert cudnn_pygraph.frost_engines_enabled()
+        assert frost_attention._frost_engines_enabled
     finally:
         (
-            cudnn_pygraph._cudnn,
-            cudnn_pygraph._frost_engines_enabled,
+            frost_attention._cudnn,
+            frost_attention._frost_engines_enabled,
             prior_env,
             prior_cudnn,
             prior_sdpa,
@@ -543,10 +545,10 @@ def test_pinned_plan_decline_reports_the_engine_reason():
 
     No GPU: a stub graph stands in, raising the real cuDNN exception type.
     """
-    from transformer_engine.pytorch.attention.dot_product_attention import cudnn_pygraph
+    from transformer_engine.pytorch.attention.dot_product_attention import frost_attention
 
     try:
-        cudnn = cudnn_pygraph.import_cudnn_frontend()
+        cudnn = frost_attention._import_cudnn_frontend()
     except ImportError:
         pytest.skip("cuDNN frontend Python package is required for the decline-reason path.")
 
@@ -575,7 +577,7 @@ def test_pinned_plan_decline_reports_the_engine_reason():
             raise cudnn.cudnnGraphNotSupportedError("head_dim 512 needs SM100; this is SM90")
 
     with pytest.raises(RuntimeError) as excinfo:
-        cudnn_pygraph.finalize_plans(
+        frost_attention._finalize_plans(
             _DeclinedGraph(),
             heuristics=[cudnn.heur_mode.A],
             require_plan_token="sdpa_fwd_prefill_sm100",

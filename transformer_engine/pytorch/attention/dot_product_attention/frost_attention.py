@@ -32,12 +32,10 @@ from __future__ import annotations
 import contextlib
 import os
 from importlib.metadata import PackageNotFoundError, version as get_pkg_version
-from typing import Optional, Tuple
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 import torch
 from packaging.version import InvalidVersion, Version as PkgVersion
-
-from transformer_engine.pytorch.attention.dot_product_attention import cudnn_pygraph
 
 __all__ = [
     "is_frost_attention_available",
@@ -74,29 +72,191 @@ _MIN_HEAD_DIM = 257  # below this the existing cuDNN/flash backends already serv
 _HEAD_DIM_MULTIPLE = 8
 
 _cudnn = None
+_frost_engines_enabled = False
 _availability: Optional[Tuple[bool, str]] = None
 _PLAN_CACHE: dict = {}
-_HANDLES = cudnn_pygraph._handles  # pylint: disable=protected-access
+_HANDLES: Dict[torch.device, Any] = {}
 
 
-def _import_cudnn(enable_frost_engines: bool = True):
-    """Import cuDNN Frontend, registering the FROST engines unless told not to.
+def _import_cudnn_frontend(enable_frost_engines: bool = True):
+    """Import cuDNN Frontend, enabling the FROST engines if this caller needs them.
 
-    The switch is process-wide and ranks FROST ahead of the backend engines for every cuDNN Python
-    graph afterwards, including other backends’ graphs, so it is set only where FROST is actually
-    used. _select_frost_plan verifies the engine by plan name regardless, rather than trusting the
-    flag.
+    ``enable_frost_engines`` is not merely additive: the switch also ranks FROST ahead of the
+    backend engines everywhere, so a caller that does not want FROST must not ask for it.
+
+    The enabling is deliberately outside the import memo. Both backends call this, and whichever
+    one reaches it first would otherwise decide for the process: with the flag inside the memo, a
+    flex call would cache the module with FROST off and every later FROST call would get a cuDNN
+    that offers no FROST engine, which surfaces much later as "no cuDNN engine matching ... was
+    offered". Enabling late is sound because the switch is read per graph rather than at import:
+    in cuDNN Frontend 1.29.0 ``engines/manifest.py`` consults the environment inside
+    ``offered_ids()``, reached from ``engines_for(graph)`` on every ``create_execution_plans``.
+
+    Note the switch is process-wide and never unset, so enabling it for FROST also reorders the
+    candidates a concurrent score_mod graph sees. Callers that require a particular engine should
+    verify by plan name rather than rely on the switch, which is what
+    ``_finalize_plans(require_plan_token=...)`` does.
     """
-    global _cudnn  # pylint: disable=global-statement
-    # Kept bound: _pkg_version falls back to the module's __version__ when distribution metadata
-    # is unavailable, which is how a source or vendored install avoids being misreported.
-    _cudnn = cudnn_pygraph.import_cudnn_frontend(enable_frost_engines=enable_frost_engines)
+    global _cudnn, _frost_engines_enabled  # pylint: disable=global-statement
+    if _cudnn is None:
+        try:
+            import cudnn  # pylint: disable=import-outside-toplevel
+        except ImportError as exc:
+            raise ImportError(
+                "cuDNN frontend Python package not found. "
+                "Install it with: pip install nvidia-cudnn-frontend"
+            ) from exc
+
+        _cudnn = cudnn
+
+    if enable_frost_engines and not _frost_engines_enabled:
+        os.environ.setdefault("CUDNN_FRONTEND_ENABLE_FROST_ENGINES", "1")
+        # pylint: disable=import-outside-toplevel,unused-import
+        import cudnn.sdpa  # noqa: F401
+
+        _frost_engines_enabled = True
+
     return _cudnn
 
 
-def _handle_for(device: torch.device):
-    """A cuDNN handle for `device`, bound to PyTorch's current stream on every call."""
-    return cudnn_pygraph.handle_for(device, backend_name="FrostAttention")
+def _handle_for(device: torch.device, *, backend_name: str = "FrostAttention"):
+    """A cuDNN handle for ``device``, rebound to PyTorch's current stream on every call.
+
+    Without the rebinding, cuDNN runs on its handle's own stream while the tensors and workspace
+    are allocated on PyTorch's current stream, and nothing orders the two. That is not
+    hypothetical: the p2p context-parallel ring issues attention inside
+    ``with torch.cuda.stream(cp_stream)``, so on alternating ring steps the kernel and its buffers
+    would otherwise be on different streams. The same cached plan is executed from different
+    streams across steps, so this has to happen per call rather than once per handle.
+    """
+    if device.type != "cuda":
+        raise ValueError(f"{backend_name} requires CUDA tensors; got device {device}")
+    cudnn = _cudnn if _cudnn is not None else _import_cudnn_frontend()
+    if device.index is None:
+        device = torch.device("cuda", torch.cuda.current_device())
+    with torch.cuda.device(device):
+        handle = _HANDLES.get(device)
+        if handle is None:
+            handle = cudnn.create_handle()
+            _HANDLES[device] = handle
+        cudnn.set_stream(handle=handle, stream=torch.cuda.current_stream(device).cuda_stream)
+    return handle
+
+
+def _build_pygraph(
+    dtype: torch.dtype, device: torch.device, *, backend_name: str = "FrostAttention"
+):
+    """A cuDNN frontend graph for F16/BF16 SDPA, bound to this device's stream-current handle."""
+    cudnn = _cudnn if _cudnn is not None else _import_cudnn_frontend()
+    return cudnn.pygraph(
+        io_data_type=_cudnn_dtype(dtype),
+        intermediate_data_type=cudnn.data_type.FLOAT,
+        compute_data_type=cudnn.data_type.FLOAT,
+        handle=_handle_for(device, backend_name=backend_name),
+    )
+
+
+def _diagonal_band_kwargs(cudnn, attn_mask_type: str, window: Tuple[int, int]) -> Dict[str, Any]:
+    """cuDNN sdpa kwargs for a TE (mask type, window): a diagonal alignment plus a band.
+
+    Note the off-by-one. cuDNN's left bound counts the diagonal itself and TE's window_size does
+    not, so a window of w becomes a left bound of w + 1. Passing it through unconverted silently
+    drops one token of context per layer, which no shape-level test would catch.
+
+    These kwargs are mutually exclusive with score_mod. cuDNN enforces that in the backward node
+    only ("Attention score mod enabled and hence other subgraphs are disabled"); its forward node
+    composes the two without complaint. Callers must still refuse the pair on both sides, because
+    forward and backward have to carry the same mask or the gradients belong to a different
+    attention than the output does.
+    """
+    left, right = window
+    opts: Dict[str, Any] = {}
+    if attn_mask_type in ("causal", "causal_bottom_right") or right == 0:
+        opts["diagonal_alignment"] = (
+            cudnn.diagonal_alignment.BOTTOM_RIGHT
+            if attn_mask_type == "causal_bottom_right"
+            else cudnn.diagonal_alignment.TOP_LEFT
+        )
+        opts["diagonal_band_right_bound"] = 0
+    if left != -1:
+        opts["diagonal_band_left_bound"] = left + 1
+    return opts
+
+
+def _finalize_plans(
+    graph,
+    *,
+    heuristics: Optional[Sequence[Any]] = None,
+    build_policy: Any = None,
+    require_plan_token: Optional[str] = None,
+    not_found_hint: Any = "",
+) -> Tuple[int, Optional[str]]:
+    """Create plans, optionally pin one by name, build, and return (workspace size, plan name).
+
+    ``require_plan_token`` makes the choice strict: only a plan whose name contains the token is
+    acceptable, and anything else raises. That is not a stylistic preference. Without a pin,
+    ``build_plans`` walks the ranked list from index 0 and finalizes the first plan that builds,
+    logging each decline at INFO, so a graph that the intended engine declines runs on whatever
+    cuDNN ranked next with nothing in the return value to say so. At head_dim 512 that matters in
+    the forward, where an ordinary engine may well build and compute a different function from the
+    FROST kernel. The backward is self-limiting, since no non-FROST d512 backward exists, so an
+    unpinned backward would fail loudly on its own.
+
+    The token is matched as a substring rather than by equality on purpose: cuDNN has already
+    collapsed per-head-dim engine names (``..._d512`` and friends) into a single row once, and the
+    substring test survived that.
+
+
+    Pinning also changes what ``check_support`` means. Selecting a plan sets cuDNN's internal
+    ``_plan_pinned``, and only then is a decline fatal; unpinned, cuDNN records the decline and
+    keeps walking. So the pin has to come first both because the check is scoped to the selected
+    plan and because it is what makes the check binding at all.
+    """
+    cudnn = _cudnn if _cudnn is not None else _import_cudnn_frontend()
+
+    graph.validate()
+    graph.build_operation_graph()
+
+    if heuristics is None:
+        heuristics = [cudnn.heur_mode.A, cudnn.heur_mode.FALLBACK]
+
+    if require_plan_token is None:
+        try:
+            graph.create_execution_plans(list(heuristics))
+            graph.check_support()
+        except cudnn.cudnnGraphNotSupportedError as exc:
+            raise RuntimeError(f"cuDNN SDPA graph is not supported: {exc}") from exc
+        if build_policy is None:
+            build_policy = cudnn.build_plan_policy.HEURISTICS_CHOICE
+        graph.build_plans(build_policy)
+        return max(graph.get_workspace_size(), 1), None
+
+    graph.create_execution_plans(list(heuristics))
+    names = [graph.get_plan_name_at_index(i) for i in range(graph.get_execution_plan_count())]
+    hits = [i for i, n in enumerate(names) if require_plan_token in n]
+    if not hits:
+        # Callable hints are resolved only here: a caller may want to look up package versions to
+        # explain the failure, and that work should not happen on the success path.
+        hint = not_found_hint() if callable(not_found_hint) else not_found_hint
+        raise RuntimeError(
+            f"no cuDNN engine matching {require_plan_token!r} was offered."
+            f" Candidate plans: {names[:6]}.{(' ' + hint) if hint else ''}"
+        )
+    graph.select_plan(hits[0])
+    # The engine is pinned, so a decline here is the engine's own verdict on this graph and cuDNN
+    # puts its reason in the exception. Surface that rather than letting it escape bare: a plan
+    # that was offered and then refused is the harder failure to read, and the reason is the only
+    # thing that says which constraint was missed.
+    try:
+        graph.check_support()
+        graph.build_plans()
+    except cudnn.cudnnGraphNotSupportedError as exc:
+        hint = not_found_hint() if callable(not_found_hint) else not_found_hint
+        raise RuntimeError(
+            f"cuDNN engine {names[hits[0]]!r} was offered but declined this graph:"
+            f" {exc}{(' ' + hint) if hint else ''}"
+        ) from exc
+    return max(graph.get_workspace_size(), 1), names[hits[0]]
 
 
 def _device_from_key(device_key) -> torch.device:
@@ -157,7 +317,7 @@ def is_frost_attention_available() -> Tuple[bool, str]:
         # Without the engines: this only needs the module to read a version off it, and enabling
         # here would reorder plan selection for the whole process even when the checks below go on
         # to decline FROST, which is all cost and no benefit. The use sites enable it.
-        _import_cudnn(enable_frost_engines=False)
+        _import_cudnn_frontend(enable_frost_engines=False)
     except ImportError as exc:
         return _no(f"nvidia-cudnn-frontend not importable: {exc}")
 
@@ -234,7 +394,7 @@ def _mask_spec(attn_mask_type: str, window_size=None):
 def _mask_options(cudnn, spec):
     """cuDNN sdpa kwargs for a (mask type, window) spec: a diagonal alignment plus a band."""
     attn_mask_type, window = spec
-    return cudnn_pygraph.diagonal_band_kwargs(cudnn, attn_mask_type, window)
+    return _diagonal_band_kwargs(cudnn, attn_mask_type, window)
 
 
 _SUPPORTED_QKV_FORMATS = ("bshd", "sbhd")
@@ -426,7 +586,7 @@ def from_frost_layout(t: torch.Tensor, qkv_format: str) -> torch.Tensor:
 
 
 def _cudnn_dtype(dtype: torch.dtype):
-    cudnn = _import_cudnn()
+    cudnn = _import_cudnn_frontend()
     return {
         torch.bfloat16: cudnn.data_type.BFLOAT16,
         torch.float16: cudnn.data_type.HALF,
@@ -499,8 +659,8 @@ def _select_frost_plan(graph, token: str, what: str):
             f" (floor {_MIN_CUTLASS_DSL})."
         )
 
-    cudnn = _import_cudnn()
-    _, name = cudnn_pygraph.finalize_plans(
+    cudnn = _import_cudnn_frontend()
+    _, name = _finalize_plans(
         graph,
         heuristics=[cudnn.heur_mode.A],
         require_plan_token=token,
@@ -511,13 +671,13 @@ def _select_frost_plan(graph, token: str, what: str):
 
 def _build_fwd(key) -> dict:
     """Build (and JIT-compile) a forward graph. Expensive; always reached through the cache."""
-    cudnn = _import_cudnn()
+    cudnn = _import_cudnn_frontend()
     # deterministic is unused here: it selects a backward algorithm. Callers pass False for the
     # forward so the two never split the forward cache.
     *_device, b, hq, hkv, sq, skv, d, dtype, mask, scale, qs, ks, _deterministic = key
     shq, shkv = [b, hq, sq, d], [b, hkv, skv, d]
 
-    graph = cudnn_pygraph.build_pygraph(
+    graph = _build_pygraph(
         dtype, _device_from_key(_device), backend_name="FrostAttention"
     )
     tq = graph.tensor(name="q", dim=shq, stride=list(qs))
@@ -547,12 +707,12 @@ def _build_fwd(key) -> dict:
 
 def _build_bwd(key) -> dict:
     """Build (and JIT-compile) a backward graph. Expensive; always reached through the cache."""
-    cudnn = _import_cudnn()
+    cudnn = _import_cudnn_frontend()
     *_device, b, hq, hkv, sq, skv, d, dtype, mask, scale, qs, ks, deterministic = key
     io_dt = _cudnn_dtype(dtype)
     shq, shkv = [b, hq, sq, d], [b, hkv, skv, d]
 
-    graph = cudnn_pygraph.build_pygraph(
+    graph = _build_pygraph(
         dtype, _device_from_key(_device), backend_name="FrostAttention"
     )
     handles = {}
