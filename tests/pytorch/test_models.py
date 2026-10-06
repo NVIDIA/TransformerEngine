@@ -58,8 +58,13 @@ def test_mla_yarn_softmax_scale(mscale_all_dim):
 @pytest.mark.parametrize("shared", [False, True], ids=["no_shared", "shared"])
 @pytest.mark.parametrize("grouped", [False, True], ids=["ungrouped", "grouped"])
 @pytest.mark.parametrize("topk", [2, 4])
-def test_moe_matches_dense_reference(shared, grouped, topk):
+@pytest.mark.parametrize("quantization", [None, "fp8_block_scaling"])
+def test_moe_matches_dense_reference(shared, grouped, topk, quantization):
     """Routed output must equal the prob-weighted sum of the selected expert MLPs."""
+    if quantization is not None:
+        available, reason = te.is_fp8_block_scaling_available(return_reason=True)
+        if not available:
+            pytest.skip(reason)
     torch.manual_seed(0)
     num_experts = 4
     moe = DeepSeekV3MoE(
@@ -73,10 +78,16 @@ def test_moe_matches_dense_reference(shared, grouped, topk):
         params_dtype=DTYPE,
     )
     x = _input()
-    out = moe(x)
+    with te.autocast(enabled=quantization is not None, recipe=make_recipe(quantization)):
+        out = moe(x)
     assert out.shape == x.shape
+    assert torch.isfinite(out).all()
     out.sum().backward()
     assert torch.isfinite(x.grad).all()
+    for name, parameter in moe.named_parameters():
+        if parameter.requires_grad:
+            assert parameter.grad is not None, name
+            assert torch.isfinite(parameter.grad).all(), name
 
     tokens = x.detach().reshape(-1, HIDDEN)
     probs, _ = moe._route(moe.gate(tokens).float())
@@ -84,15 +95,33 @@ def test_moe_matches_dense_reference(shared, grouped, topk):
     assert moe._last_tokens_per_expert.sum().item() == tokens.shape[0] * topk
 
     fc1, _, fc2 = moe.experts
+    quantizers = [
+        te.Float8BlockQuantizer(
+            fp8_dtype=te.DType.kFloat8E4M3,
+            rowwise=True,
+            columnwise=False,
+            block_scaling_dim=dim,
+        )
+        for dim in (1, 2)
+    ]
+
+    def qdq(tensor, block_dim):
+        if quantization is None:
+            return tensor
+        return quantizers[block_dim - 1](tensor).dequantize(dtype=DTYPE)
+
+    ref_tokens = qdq(tokens, 1)
     ref = torch.zeros_like(tokens)
     for e in range(num_experts):
-        w1 = deinterleave_glu_tensor(getattr(fc1, f"weight{e}"), 32)
-        w2 = getattr(fc2, f"weight{e}")
-        gate_part, lin_part = (tokens @ w1.t()).chunk(2, dim=-1)
+        w1 = deinterleave_glu_tensor(qdq(getattr(fc1, f"weight{e}"), 2), 32)
+        w2 = qdq(getattr(fc2, f"weight{e}"), 2)
+        gate_part, lin_part = (ref_tokens @ w1.t()).chunk(2, dim=-1)
         act = torch.nn.functional.silu(gate_part.float()) * lin_part.float()
-        ref += (act.to(DTYPE) * probs[:, e : e + 1].to(DTYPE)) @ w2.t()
+        act = qdq(act.to(DTYPE) * probs[:, e : e + 1].to(DTYPE), 1)
+        ref += act @ w2.t()
     if shared:
-        ref += moe.shared_expert(tokens)
+        with te.autocast(enabled=quantization is not None, recipe=make_recipe(quantization)):
+            ref += moe.shared_expert(tokens)
     torch.testing.assert_close(out.reshape(-1, HIDDEN), ref, rtol=0.05, atol=0.05)
 
     bias_before = moe.expert_bias.clone()

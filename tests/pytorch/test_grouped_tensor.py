@@ -5,6 +5,9 @@
 """Tests for GroupedTensor class"""
 
 import os
+import subprocess
+import sys
+import textwrap
 from types import SimpleNamespace
 from typing import List, Optional, Tuple
 
@@ -48,6 +51,39 @@ reason_for_no_fp8_block_scaling_grouped = (
         " (SM90-SM99)."
     )
 )
+
+
+@pytest.mark.parametrize("block_scaling_dim", [1, 2])
+@pytest.mark.skipif(
+    not fp8_block_scaling_grouped_available, reason=reason_for_no_fp8_block_scaling_grouped
+)
+def test_group_quantize_fp8_blockwise_rejects_unaligned_rows(block_scaling_dim):
+    # A device error invalidates the CUDA context, so run it in a separate process.
+    code = textwrap.dedent(
+        f"""
+        import torch
+        from transformer_engine.pytorch import Float8BlockQuantizer
+        import transformer_engine_torch as tex
+
+        x = torch.ones(128, 128, dtype=torch.bfloat16, device="cuda")
+        splits = torch.tensor([16, 112], dtype=torch.int64, device="cuda")
+        quantizer = Float8BlockQuantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            rowwise=True,
+            columnwise=False,
+            block_scaling_dim={block_scaling_dim},
+        )
+        tex.group_quantize(x, quantizer, 2, splits)
+        torch.cuda.synchronize()
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=False, timeout=120
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode != 0, output
+    assert "multiple of 128" in output, output
+    assert "CUDA error" in output, output
 
 
 def test_mark_grouped_tensor_supports_plain_tensor():

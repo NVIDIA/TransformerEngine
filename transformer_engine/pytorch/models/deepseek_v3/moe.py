@@ -61,7 +61,7 @@ class DeepSeekV3MoE(torch.nn.Module):
     optional shared expert (dense SwiGLU MLP) is added to every token. On
     hardware that supports it the expert MLP runs as a single fused
     grouped-GEMM kernel. MXFP8 and NVFP4 pad each expert's token count to a
-    multiple of 256, including unfused execution.
+    multiple of 256, including unfused execution; FP8 block scaling uses 128.
 
     Without ``ep_group`` all experts live on the local device. With
     ``ep_group`` the experts are split across the group and tokens are
@@ -236,6 +236,8 @@ class DeepSeekV3MoE(torch.nn.Module):
             align = get_align_size_for_quantization(recipe)
             if recipe.mxfp8() or recipe.nvfp4():
                 align = max(align, _FUSED_MLP_ROWS)
+            elif recipe.float8_block_scaling():
+                align = max(align, 128)
         if align > 1:
             permuted, permuted_probs, row_id_map, pad_offsets, tokens_per_expert = (
                 moe_permute_and_pad_with_probs(tokens, probs, routing_map, tokens_per_expert, align)
