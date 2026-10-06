@@ -447,7 +447,7 @@ if(NVTE_TARGET_IS_ARM64)
   target_link_options(
     transformer_engine
     PRIVATE
-    "LINKER:--no-fix-cortex-a53-843419"
+    "-mno-fix-cortex-a53-843419"
   )
 endif()
 
