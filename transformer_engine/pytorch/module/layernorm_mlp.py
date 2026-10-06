@@ -79,6 +79,7 @@ from ._common import (
     sum_bias_grad,
     apply_normalization,
     update_nvfp4_direct_output_spec,
+    update_normalization_output_spec,
     check_fp8_reduce_and_update,
     fake_workspace_valid,
     set_quantizer_amax_reduction_group,
@@ -2188,7 +2189,7 @@ def _layernorm_mlp_forward_fake(
         device=device,
     )
     if with_quantized_norm:
-        update_nvfp4_direct_output_spec(ln_out)
+        update_normalization_output_spec(ln_out)
     if args.sequence_parallel and fp8_or_debug:
         args.fc1_input_quantizer.set_usage(rowwise=True, columnwise=False)
     ln_out_return_is_total = args.sequence_parallel and args.return_layernorm_output_gathered
@@ -2328,11 +2329,7 @@ def _layernorm_mlp_forward_fake(
     ln_out_for_return = None
     if args.return_layernorm_output:
         ln_leading = inp_leading
-        if (
-            args.return_layernorm_output_gathered
-            and args.sequence_parallel
-            and args.set_parallel_mode
-        ):
+        if ln_out_return_is_total:
             ln_leading = inp_leading * args.tp_size
         ln_out_for_return = TensorSpec(
             shape=(

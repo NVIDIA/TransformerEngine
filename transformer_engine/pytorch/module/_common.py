@@ -6,6 +6,7 @@
 
 import dataclasses
 import math
+import os
 import queue
 from typing import Any, Callable, List, Optional, Sequence, Tuple, Union
 
@@ -19,6 +20,7 @@ from ..export import is_in_onnx_export_mode
 from ..quantization import FP8GlobalStateManager
 from ..quantized_tensor import Quantizer
 from ..tensor.hybrid_tensor import HybridQuantizer
+from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.nvfp4_tensor import NVFP4Quantizer
 from ..utils import get_default_init_method, get_device_compute_capability
 
@@ -89,6 +91,18 @@ def can_reconstruct_wgrad_input_from_original(quantizer) -> bool:
             return True
         return target.rowwise_quantizer.is_requantization_safe()
     return target.is_requantization_safe()
+
+
+def update_normalization_output_spec(spec: TensorSpec) -> None:
+    """Match the scale layout emitted by the normalization binding."""
+    update_nvfp4_direct_output_spec(spec)
+    if (
+        isinstance(spec.quantizer, MXFP8Quantizer)
+        and int(os.getenv("NVTE_NORM_FWD_USE_CUDNN", "0") or "0")
+        and math.prod(spec.shape[:-1]) % 128 == 0
+        and spec.shape[-1] % 128 == 0
+    ):
+        spec.with_gemm_swizzled_scales = False
 
 
 def update_nvfp4_direct_output_spec(spec: TensorSpec) -> None:

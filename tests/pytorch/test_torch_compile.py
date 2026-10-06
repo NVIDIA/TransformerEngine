@@ -2556,6 +2556,95 @@ def test_te_layernorm_mlp_compile_fp8_gemm_gelu(dtype, bias, compile_mode):
 
 
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
+@pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+@pytest.mark.parametrize("module", ["LayerNormLinear", "LayerNormMLP"])
+@pytest.mark.parametrize("normalization", ["LayerNorm", "RMSNorm"])
+@pytest.mark.parametrize(
+    "use_cudnn,input_shape,return_layernorm_output",
+    [
+        (False, (128, 128), False),
+        (True, (128, 128), False),
+        (True, (64, 128), False),
+        (True, (2, 64, 128), False),
+        (True, (128, 128), True),
+    ],
+)
+def test_te_layernorm_compile_mxfp8_scale_layout(
+    monkeypatch, module, normalization, use_cudnn, input_shape, return_layernorm_output
+):
+    """Saved normalization scales retain their layout through compiled backward."""
+    monkeypatch.setenv("NVTE_NORM_FWD_USE_CUDNN", str(int(use_cudnn)))
+    model = getattr(te, module)(
+        128,
+        128,
+        params_dtype=torch.bfloat16,
+        device="cuda",
+        normalization=normalization,
+        return_layernorm_output=return_layernorm_output,
+    )
+    fp8_recipe = recipe.MXFP8BlockScaling()
+
+    def fn(inp):
+        with te.autocast(recipe=fp8_recipe):
+            return model(inp)
+
+    torch._dynamo.reset()
+    compiled = torch.compile(fn, fullgraph=True)
+    base = torch.randn(input_shape, dtype=torch.bfloat16, device="cuda")
+    _assert_close_eager_compiled(fn, compiled, model, base)
+
+
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
+@pytest.mark.parametrize("sequence_parallel", [False, True])
+@pytest.mark.parametrize("gathered", [False, True])
+@pytest.mark.parametrize("input_shape", [(128, 128), (2, 64, 128)])
+def test_te_layernorm_mlp_fake_gathered_output(
+    monkeypatch, sequence_parallel, gathered, input_shape
+):
+    """The normalization gather is independent of set_parallel_mode."""
+    from transformer_engine.pytorch.dynamo.custom_op import _parse_arg_type, _spec_view
+
+    module = layernorm_mlp_module
+    real_impl = module._layernorm_mlp_forward_impl
+    checked = []
+
+    def checked_impl(args):
+        args = dataclasses.replace(
+            args,
+            sequence_parallel=sequence_parallel,
+            tp_size=2,
+            return_layernorm_output_gathered=gathered,
+        )
+        spec_args = _spec_view(args, _parse_arg_type(type(args)).tensor_field_names())
+        expected = module._layernorm_mlp_forward_fake(spec_args)
+        actual = real_impl(args)
+        for spec, tensor in zip(expected[:2], actual[:2]):
+            assert tuple(spec.shape) == tuple(tensor.shape)
+        checked.append(True)
+        return actual
+
+    # Emulate a two-rank gather while exercising the real normalization and GEMMs.
+    monkeypatch.setattr(module, "get_distributed_world_size", lambda group: 2)
+    monkeypatch.setattr(
+        module,
+        "gather_along_first_dim",
+        lambda tensor, group, quantizer=None: (torch.cat([tensor, tensor]), None),
+    )
+    monkeypatch.setattr(module, "_layernorm_mlp_forward_impl", checked_impl)
+    model = te.LayerNormMLP(
+        128,
+        128,
+        params_dtype=torch.bfloat16,
+        device="cuda",
+        set_parallel_mode=False,
+        return_layernorm_output=True,
+    )
+    with torch.no_grad():
+        model(torch.randn(input_shape, dtype=torch.bfloat16, device="cuda"))
+    assert checked == [True]
+
+
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
 @pytest.mark.parametrize("normalization", ["LayerNorm", "RMSNorm"])
 @pytest.mark.parametrize("return_layernorm_output", [False, True])
 @pytest.mark.parametrize("zero_centered_gamma", [False, True])
