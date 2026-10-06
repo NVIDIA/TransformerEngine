@@ -103,7 +103,7 @@ class FusedAttnBackend(IntEnum):
     """Fused attention sub-backends.
 
     This is the canonical fused-attention backend enum for
-    ``transformer_engine.pytorch``. It mirrors the backend
+    ``transformer_engine.pytorch``. It mirrors every member of the backend
     ``transformer_engine_torch.NVTE_Fused_Attn_Backend`` (pybind11) enum
     value-for-value, and instances of the two enums compare equal when they
     share the same integer value. Unlike the pybind enum, a plain-python
@@ -119,6 +119,10 @@ class FusedAttnBackend(IntEnum):
     No_Backend = int(NVTE_Fused_Attn_Backend.NVTE_No_Backend)
     F16_arbitrary_seqlen = int(NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen)
     FP8 = int(NVTE_Fused_Attn_Backend.NVTE_FP8)
+    # Python-only: cuDNN FROST runs through the cuDNN Frontend python API rather than the C++
+    # fused-attention path, so it has no NVTE_Fused_Attn_Backend counterpart. fused_attn_fwd/bwd
+    # route it to frost_attention.py before any C++ call, so this value never reaches pybind.
+    FROST = 3
 
     @classmethod
     def cast(
@@ -153,9 +157,14 @@ class FusedAttnBackend(IntEnum):
         return int.__hash__(self)
 
 
+# Members with no C++ counterpart; excluded from the sync check below.
+_PYTHON_ONLY_FUSED_ATTN_BACKENDS = frozenset({FusedAttnBackend.FROST})
+
 # Fail fast at import time if a new enumerator is added on the C++ side
 # without being mirrored above.
-assert {f"NVTE_{m.name}" for m in FusedAttnBackend} == set(NVTE_Fused_Attn_Backend.__members__), (
+assert {
+    f"NVTE_{m.name}" for m in FusedAttnBackend if m not in _PYTHON_ONLY_FUSED_ATTN_BACKENDS
+} == set(NVTE_Fused_Attn_Backend.__members__), (
     "FusedAttnBackend in python is out of sync with"
     " transformer_engine_torch.NVTE_Fused_Attn_Backend defined on the C++ side."
     " Please make sure TE C++ and python are in sync."
@@ -345,6 +354,46 @@ def fused_attn_fwd(
 
     # Accept the pybind enum for backward compatibility.
     fused_attention_backend = FusedAttnBackend.cast(fused_attention_backend)
+    if fused_attention_backend == FusedAttnBackend["FROST"]:
+        # FROST runs through the cuDNN Frontend python API rather than the C++ fused path.
+        # Imported here so a process that never selects FROST never imports cuDNN Frontend.
+        # pylint: disable-next=import-outside-toplevel
+        from ..attention.dot_product_attention import frost_attention
+
+        return frost_attention.fused_attn_fwd(
+            is_training,
+            max_seqlen_q,
+            max_seqlen_kv,
+            cu_seqlens_q,
+            cu_seqlens_kv,
+            q,
+            k,
+            v,
+            fake_dtype,
+            fused_attention_backend,
+            attn_bias=attn_bias,
+            cu_seqlens_q_padded=cu_seqlens_q_padded,
+            cu_seqlens_kv_padded=cu_seqlens_kv_padded,
+            page_table_k=page_table_k,
+            page_table_v=page_table_v,
+            s_quantizer=s_quantizer,
+            o_quantizer=o_quantizer,
+            attn_scale=attn_scale,
+            dropout=dropout,
+            fast_zero_fill=fast_zero_fill,
+            qkv_layout=qkv_layout,
+            o_format=o_format,
+            qkv_scale_inv_format=qkv_scale_inv_format,
+            attn_bias_type=attn_bias_type,
+            attn_mask_type=attn_mask_type,
+            softmax_type=softmax_type,
+            window_size=window_size,
+            bottom_right_diagonal=bottom_right_diagonal,
+            rng_gen=rng_gen,
+            softmax_offset=softmax_offset,
+            return_max_logit=return_max_logit,
+            cuda_graph=cuda_graph,
+        )
     if fused_attention_backend == FusedAttnBackend["No_Backend"]:
         raise ValueError(
             "Fused attention does not support this input combination:"
@@ -600,6 +649,46 @@ def fused_attn_bwd(
 
     # Accept the pybind enum for backward compatibility.
     fused_attention_backend = FusedAttnBackend.cast(fused_attention_backend)
+    if fused_attention_backend == FusedAttnBackend["FROST"]:
+        # See the matching branch in fused_attn_fwd.
+        # pylint: disable-next=import-outside-toplevel
+        from ..attention.dot_product_attention import frost_attention
+
+        return frost_attention.fused_attn_bwd(
+            max_seqlen_q,
+            max_seqlen_kv,
+            cu_seqlens_q,
+            cu_seqlens_kv,
+            q,
+            k,
+            v,
+            o,
+            d_o,
+            fake_dtype,
+            aux_ctx_tensors,
+            fused_attention_backend,
+            cu_seqlens_q_padded=cu_seqlens_q_padded,
+            cu_seqlens_kv_padded=cu_seqlens_kv_padded,
+            s_quantizer=s_quantizer,
+            dp_quantizer=dp_quantizer,
+            dqkv_quantizer=dqkv_quantizer,
+            attn_scale=attn_scale,
+            dropout=dropout,
+            fast_zero_fill=fast_zero_fill,
+            qkv_layout=qkv_layout,
+            o_format=o_format,
+            do_format=do_format,
+            dqkv_layout=dqkv_layout,
+            qkv_scale_inv_format=qkv_scale_inv_format,
+            do_scale_inv_format=do_scale_inv_format,
+            attn_bias_type=attn_bias_type,
+            attn_mask_type=attn_mask_type,
+            softmax_type=softmax_type,
+            window_size=window_size,
+            bottom_right_diagonal=bottom_right_diagonal,
+            deterministic=deterministic,
+            cuda_graph=cuda_graph,
+        )
     if fused_attention_backend == FusedAttnBackend["No_Backend"]:
         raise ValueError(
             "Fused attention backward does not support this input combination:"

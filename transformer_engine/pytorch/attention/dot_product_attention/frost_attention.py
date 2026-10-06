@@ -42,6 +42,8 @@ from transformer_engine.pytorch.attention.dot_product_attention import cudnn_pyg
 __all__ = [
     "is_frost_attention_available",
     "is_frost_attention_supported",
+    "fused_attn_fwd",
+    "fused_attn_bwd",
     "frost_attn_fwd",
     "frost_attn_bwd",
     "to_frost_layout",
@@ -235,50 +237,148 @@ def _mask_options(cudnn, spec):
     return cudnn_pygraph.diagonal_band_kwargs(cudnn, attn_mask_type, window)
 
 
-def is_frost_attention_supported(
-    head_dim_qk: int,
-    head_dim_v: int,
-    qkv_dtype: torch.dtype,
-    attn_mask_type: str,
-    dropout: float = 0.0,
-    attn_bias_type: str = "no_bias",
-    window_size: Optional[Tuple[int, int]] = None,
-) -> Tuple[bool, str]:
-    """Whether this specific attention configuration should route to FROST.
+_SUPPORTED_QKV_FORMATS = ("bshd", "sbhd")
 
-    Shape and dtype are checked before availability, and the ordering is deliberate rather than
-    stylistic. Probing availability imports cuDNN Frontend and sets
-    CUDNN_FRONTEND_ENABLE_FROST_ENGINES, which registers extra engines process-wide and so is
-    visible to every other cuDNN consumer in the process. This function runs for every attention
-    config on the machine, the vast majority of which are nowhere near head_dim 512, and none of
-    them should pay that cost or have their engine pool changed underneath them.
+
+def _qkv_format_from_layout(qkv_layout: str) -> str:
+    """The single qkv_format a TE qkv_layout names, e.g. 'bshd_bshd_bshd' -> 'bshd'."""
+    formats = {
+        "".join(c for c in part if c.isalpha())
+        for part in qkv_layout.replace("paged_kv_", "").split("_")
+    }
+    if len(formats) != 1:
+        raise NotImplementedError(
+            f"FROST attention needs q, k and v in one format; got qkv_layout {qkv_layout!r}"
+        )
+    return formats.pop()
+
+
+def _te_mask_spec(attn_mask_type: str, window_size, bottom_right_diagonal: bool):
+    """Fold TE's (mask type, window, diagonal anchor) into the spec the plan is keyed on.
+
+    TE carries the anchor in its own flag, so normalise it into the mask type before building the
+    band: diagonal_band_kwargs reads the anchor off the name, and taking it from the name alone
+    would quietly give a top-left band where the caller asked for bottom-right.
     """
+    if "padding" in attn_mask_type:
+        raise NotImplementedError(
+            f"FROST attention does not support a padding mask; got {attn_mask_type!r}"
+        )
+    left, right = _NO_WINDOW if window_size is None else tuple(window_size)
+    if "causal" in attn_mask_type and right == -1:
+        right = 0
+    if right == 0:
+        attn_mask_type = "causal_bottom_right" if bottom_right_diagonal else "causal"
+    else:
+        attn_mask_type = "no_mask"
+    return _mask_spec(attn_mask_type, (left, right))
+
+
+def _name_for(table, value, default=None):
+    """Reverse a cpp_extensions str-to-enum table."""
+    for name, enum_value in table.items():
+        if enum_value == value:
+            return name
+    return default
+
+
+def is_frost_attention_supported(params) -> Tuple[int, str]:
+    """Whether this fused-attention config should run on the FROST sub-backend.
+
+    Takes a FusedAttentionParams and returns (sub-backend value, reject message), the same shape
+    as tex.get_fused_attn_backend, so get_attention_backend can fall through to it when the C++
+    backends decline.
+
+    Deliberately does not probe availability. That imports cuDNN Frontend with the FROST engines
+    enabled, which changes the engine pool for every cuDNN consumer in the process, and this runs
+    for every attention config on the machine. get_attention_backend checks availability once at
+    the end, the way it checks flash-attn versions.
+    """
+    # pylint: disable-next=import-outside-toplevel
+    from ...cpp_extensions.fused_attn import (
+        AttnBiasType,
+        AttnMaskType,
+        FusedAttnBackend,
+        QKVFormat,
+        QKVLayout,
+        SoftmaxType,
+        TORCH_DType,
+    )
+
+    no_backend = int(FusedAttnBackend.No_Backend)
+
+    if int(os.environ.get("NVTE_FROST_ATTN", "1")) == 0:
+        return no_backend, "FROST is disabled by NVTE_FROST_ATTN=0"
+
+    head_dim_qk, head_dim_v = params.head_dim_qk, params.head_dim_v
     if head_dim_qk != head_dim_v:
-        return False, f"FROST path requires symmetric head_dim; got {head_dim_qk}/{head_dim_v}"
+        return no_backend, f"FROST requires symmetric head_dim; got {head_dim_qk}/{head_dim_v}"
     if not _MIN_HEAD_DIM <= head_dim_qk <= _MAX_HEAD_DIM:
-        return False, f"FROST path covers head_dim in (256, 512]; got {head_dim_qk}"
+        return no_backend, f"FROST covers head_dim in (256, 512]; got {head_dim_qk}"
     if head_dim_qk % _HEAD_DIM_MULTIPLE != 0:
         return (
-            False,
-            (
-                f"FROST path needs head_dim to be a multiple of {_HEAD_DIM_MULTIPLE}; got"
-                f" {head_dim_qk}"
-            ),
+            no_backend,
+            f"FROST needs head_dim to be a multiple of {_HEAD_DIM_MULTIPLE}; got {head_dim_qk}",
         )
+
+    qkv_dtype = TORCH_DType.get(params.qkv_dtype)
     if qkv_dtype not in (torch.bfloat16, torch.float16):
-        return False, f"FROST path supports bf16/fp16; got {qkv_dtype}"
-    if dropout != 0.0:
-        return False, "FROST path does not support dropout"
-    if attn_bias_type != "no_bias":
-        return False, "FROST path does not support attention bias"
+        return no_backend, f"FROST supports bf16/fp16; got {params.qkv_dtype}"
+    if params.dropout != 0.0:
+        return no_backend, "FROST does not support dropout"
+    if _name_for(AttnBiasType, params.bias_type) != "no_bias":
+        return no_backend, "FROST does not support attention bias"
+    if _name_for(SoftmaxType, params.softmax_type) != "vanilla":
+        return no_backend, "FROST only supports vanilla softmax"
+    if params.num_pages_k != 0 or params.num_pages_v != 0:
+        return no_backend, "FROST does not support paged KV"
+    if params.return_max_logit:
+        return no_backend, "FROST does not return max_logit"
+    if params.cuda_graph:
+        return no_backend, "FROST graphs are built lazily and cannot be captured"
+    if params.deterministic and params.is_training:
+        # The backward uses an atomic dQ accumulation whose order is not fixed, so repeat runs
+        # differ in the last bits. Nothing selects a deterministic variant, so decline instead.
+        return no_backend, "FROST does not have a deterministic backward"
+
+    qkv_layout = _name_for(QKVLayout, params.qkv_layout)
+    if qkv_layout is None:
+        return no_backend, f"FROST got an unrecognised qkv_layout {params.qkv_layout}"
     try:
-        _mask_spec(attn_mask_type, window_size)
+        qkv_format = _qkv_format_from_layout(qkv_layout)
     except NotImplementedError as exc:
-        return False, str(exc)
-    ok, reason = is_frost_attention_available()
-    if not ok:
-        return False, reason
-    return True, ""
+        return no_backend, str(exc)
+    if qkv_format not in _SUPPORTED_QKV_FORMATS:
+        return (
+            no_backend,
+            f"FROST supports qkv_format in {_SUPPORTED_QKV_FORMATS}; got {qkv_format}",
+        )
+    # The kernels write O and dQKV with q's strides, so any format that differs from the input
+    # would need a copy the fused path does not make. Nothing asks for one today.
+    for name, value in (
+        ("o_format", _name_for(QKVFormat, params.o_format)),
+        ("do_format", _name_for(QKVFormat, params.do_format)),
+        ("dqkv_layout", _name_for(QKVLayout, params.dqkv_layout)),
+    ):
+        if value is None:
+            continue
+        value = _qkv_format_from_layout(value) if name == "dqkv_layout" else value
+        if value != qkv_format:
+            return no_backend, f"FROST needs {name} to match qkv_format; got {value}/{qkv_format}"
+
+    attn_mask_type = _name_for(AttnMaskType, params.attn_mask_type)
+    if attn_mask_type is None:
+        return no_backend, f"FROST got an unrecognised attn_mask_type {params.attn_mask_type}"
+    try:
+        _te_mask_spec(
+            attn_mask_type,
+            (params.window_size_left, params.window_size_right),
+            params.bottom_right_diagonal,
+        )
+    except NotImplementedError as exc:
+        return no_backend, str(exc)
+
+    return int(FusedAttnBackend.FROST), ""
 
 
 def to_frost_layout(t: torch.Tensor, qkv_format: str) -> torch.Tensor:
@@ -647,3 +747,156 @@ def frost_attn_bwd(
         handle=_handle_for(q.device),
     )
     return dq, dk, dv
+
+
+def _frost_only(**unsupported):
+    """Raise if any feature the selector should have declined reached the kernels anyway."""
+    for name, value in unsupported.items():
+        if value:
+            raise NotImplementedError(f"FROST attention does not support {name}")
+
+
+def fused_attn_fwd(
+    is_training,
+    max_seqlen_q,
+    max_seqlen_kv,
+    cu_seqlens_q,
+    cu_seqlens_kv,
+    q,
+    k,
+    v,
+    fake_dtype,
+    fused_attention_backend,
+    attn_bias=None,
+    cu_seqlens_q_padded=None,
+    cu_seqlens_kv_padded=None,
+    page_table_k=None,
+    page_table_v=None,
+    s_quantizer=None,
+    o_quantizer=None,
+    attn_scale=None,
+    dropout=0.0,
+    fast_zero_fill=True,
+    qkv_layout="sbh3d",
+    o_format="sbhd",
+    qkv_scale_inv_format=None,
+    attn_bias_type="no_bias",
+    attn_mask_type="padding",
+    softmax_type="vanilla",
+    window_size=(-1, -1),
+    bottom_right_diagonal=None,
+    rng_gen=None,
+    softmax_offset=None,
+    return_max_logit=False,
+    cuda_graph=False,
+):  # pylint: disable=unused-argument
+    """FROST forward behind the cpp_extensions.fused_attn_fwd signature.
+
+    Mirrors that signature so FusedAttnFunc and the context-parallel ring reach these kernels
+    without knowing which sub-backend they got. Returns (out, aux_ctx_tensors) with
+    aux_ctx_tensors = [softmax_lse, rng_state]; softmax_lse is [b, h, s] fp32 natural-log
+    logsumexp, which is what the ring correction consumes.
+
+    cu_seqlens and the padded variants are ignored: they carry thd offsets, and thd is declined
+    at selection.
+    """
+    _frost_only(
+        dropout=dropout != 0.0,
+        attention_bias=attn_bias_type != "no_bias",
+        paged_kv=page_table_k is not None or page_table_v is not None,
+        fp8=s_quantizer is not None or o_quantizer is not None,
+        sink_attention=softmax_type != "vanilla",
+        max_logit=return_max_logit,
+        cuda_graph_capture=cuda_graph,
+    )
+    qkv_format = _qkv_format_from_layout(qkv_layout)
+    if o_format != qkv_format:
+        raise NotImplementedError(
+            f"FROST attention needs o_format to match qkv_format; got {o_format}/{qkv_format}"
+        )
+    mask_type, window = _te_mask_spec(attn_mask_type, window_size, bool(bottom_right_diagonal))
+
+    out, softmax_lse = frost_attn_fwd(
+        to_frost_layout(q.contiguous(), qkv_format),
+        to_frost_layout(k.contiguous(), qkv_format),
+        to_frost_layout(v.contiguous(), qkv_format),
+        attn_scale=attn_scale,
+        attn_mask_type=mask_type,
+        window_size=window,
+    )
+    # A real tensor rather than None: it is saved for backward and handed to the activation
+    # offload hooks alongside softmax_lse, neither of which accepts None. FROST has no dropout,
+    # so nothing reads it.
+    rng_state = torch.empty(2, dtype=torch.int64, device=q.device)
+    return from_frost_layout(out, qkv_format), [softmax_lse, rng_state]
+
+
+def fused_attn_bwd(
+    max_seqlen_q,
+    max_seqlen_kv,
+    cu_seqlens_q,
+    cu_seqlens_kv,
+    q,
+    k,
+    v,
+    o,
+    d_o,
+    fake_dtype,
+    aux_ctx_tensors,
+    fused_attention_backend,
+    cu_seqlens_q_padded=None,
+    cu_seqlens_kv_padded=None,
+    s_quantizer=None,
+    dp_quantizer=None,
+    dqkv_quantizer=None,
+    attn_scale=None,
+    dropout=0.0,
+    fast_zero_fill=True,
+    qkv_layout="sbh3d",
+    o_format="sbhd",
+    do_format="sbhd",
+    dqkv_layout="sbh3d",
+    qkv_scale_inv_format=None,
+    do_scale_inv_format=None,
+    attn_bias_type="no_bias",
+    attn_mask_type="padding",
+    softmax_type="vanilla",
+    window_size=(-1, -1),
+    bottom_right_diagonal=None,
+    deterministic=False,
+    cuda_graph=False,
+):  # pylint: disable=unused-argument
+    """FROST backward behind the cpp_extensions.fused_attn_bwd signature.
+
+    Returns (dq, dk, dv, dbias) with dbias always None, matching what the fused path returns for
+    a no_bias config.
+    """
+    _frost_only(
+        dropout=dropout != 0.0,
+        attention_bias=attn_bias_type != "no_bias",
+        fp8=s_quantizer is not None or dqkv_quantizer is not None,
+        sink_attention=softmax_type != "vanilla",
+        cuda_graph_capture=cuda_graph,
+    )
+    qkv_format = _qkv_format_from_layout(qkv_layout)
+    mask_type, window = _te_mask_spec(attn_mask_type, window_size, bool(bottom_right_diagonal))
+    softmax_lse = aux_ctx_tensors[0]
+
+    dq, dk, dv = frost_attn_bwd(
+        to_frost_layout(q.contiguous(), qkv_format),
+        to_frost_layout(k.contiguous(), qkv_format),
+        to_frost_layout(v.contiguous(), qkv_format),
+        to_frost_layout(o.contiguous(), o_format),
+        softmax_lse,
+        to_frost_layout(d_o.contiguous(), do_format),
+        attn_scale=attn_scale,
+        attn_mask_type=mask_type,
+        deterministic=deterministic,
+        window_size=window,
+    )
+    return (
+        from_frost_layout(dq, qkv_format),
+        from_frost_layout(dk, qkv_format),
+        from_frost_layout(dv, qkv_format),
+        None,
+    )

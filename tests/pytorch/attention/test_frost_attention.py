@@ -263,39 +263,97 @@ def test_frost_backward_matches_reference(shape, mask, window, dtype):
         )
 
 
+def _frost_params(**overrides):
+    """A FusedAttentionParams for a config FROST serves, with fields overridable by name."""
+    from transformer_engine.pytorch.attention.dot_product_attention.utils import (
+        FusedAttentionParams,
+    )
+    from transformer_engine.pytorch.cpp_extensions.fused_attn import (
+        AttnBiasType,
+        AttnMaskType,
+        QKVFormat,
+        QKVLayout,
+        SoftmaxType,
+    )
+    from transformer_engine.pytorch.constants import TE_DType
+
+    fields = dict(
+        head_dim_qk=512,
+        head_dim_v=512,
+        qkv_dtype=TE_DType[torch.bfloat16],
+        attn_mask_type=AttnMaskType["causal"],
+        bias_type=AttnBiasType["no_bias"],
+        softmax_type=SoftmaxType["vanilla"],
+        qkv_layout=QKVLayout["bshd_bshd_bshd"],
+        o_format=QKVFormat["bshd"],
+        window_size_left=-1,
+        window_size_right=-1,
+        bottom_right_diagonal=False,
+    )
+    fields.update(overrides)
+    return FusedAttentionParams(**fields)
+
+
 @requires_frost
 def test_frost_declines_unsupported_configs():
     """The selector must decline what the kernels do not serve, rather than computing wrongly."""
     from transformer_engine.pytorch.attention.dot_product_attention.frost_attention import (
         is_frost_attention_supported,
     )
+    from transformer_engine.pytorch.cpp_extensions.fused_attn import (
+        AttnBiasType,
+        AttnMaskType,
+        FusedAttnBackend,
+        QKVFormat,
+        QKVLayout,
+    )
+    from transformer_engine.pytorch.constants import TE_DType
 
-    base = dict(head_dim_qk=512, head_dim_v=512, qkv_dtype=torch.bfloat16, attn_mask_type="causal")
-    assert is_frost_attention_supported(**base)[0], "the supported case must be accepted"
+    assert (
+        is_frost_attention_supported(_frost_params())[0] == FusedAttnBackend.FROST
+    ), "the supported case must be accepted"
 
     for override, why in (
         (dict(head_dim_qk=256, head_dim_v=256), "head_dim at the exclusive lower bound"),
         (dict(head_dim_v=256), "asymmetric head_dim"),
-        (dict(qkv_dtype=torch.float32), "fp32"),
+        (dict(qkv_dtype=TE_DType[torch.float32]), "fp32"),
         (dict(dropout=0.1), "dropout"),
-        (dict(attn_bias_type="post_scale_bias"), "attention bias"),
-        (dict(attn_mask_type="padding_causal"), "padding mask"),
-        (dict(attn_mask_type="arbitrary"), "arbitrary mask"),
-        # window_size reaches _mask_spec through is_frost_attention_supported, so its validation
-        # is part of the selector contract rather than an internal detail.
-        (dict(window_size=(-1, 5)), "a right window past the diagonal"),
-        (dict(window_size=(128,)), "a malformed window pair"),
-        (dict(window_size=(-2, 0)), "a left window below -1"),
-        (dict(window_size=7), "a non-iterable window"),
+        (dict(bias_type=AttnBiasType["post_scale_bias"]), "attention bias"),
+        (dict(attn_mask_type=AttnMaskType["padding_causal"]), "padding mask"),
+        (dict(qkv_layout=QKVLayout["thd_thd_thd"], o_format=QKVFormat["thd"]), "thd layout"),
+        (dict(o_format=QKVFormat["sbhd"]), "an output format that differs from the input"),
+        (dict(num_pages_k=4, num_pages_v=4), "paged KV"),
+        (dict(return_max_logit=True), "max_logit"),
+        (dict(cuda_graph=True), "CUDA graph capture"),
+        (dict(deterministic=True, is_training=True), "a deterministic backward"),
+        # window_size reaches _mask_spec through the selector, so its validation is part of the
+        # selector contract rather than an internal detail.
+        (dict(window_size_right=5), "a right window past the diagonal"),
+        (dict(window_size_left=-2, window_size_right=0), "a left window below -1"),
         # The engine pads head_dim to a multiple of 8, so an in-range but unpadded dim has to be
         # declined here rather than failing later at plan selection.
         (dict(head_dim_qk=260, head_dim_v=260), "head_dim not a multiple of 8"),
     ):
-        cfg = dict(base)
-        cfg.update(override)
-        ok, reason = is_frost_attention_supported(**cfg)
-        assert not ok, "%s must be declined" % why
+        backend, reason = is_frost_attention_supported(_frost_params(**override))
+        assert backend == FusedAttnBackend.No_Backend, "%s must be declined" % why
         assert reason, "a decline must explain itself"
+
+
+@requires_frost
+def test_frost_mask_spec_rejects_malformed_windows():
+    """_mask_spec is the only validation between a caller-supplied window and a built band."""
+    from transformer_engine.pytorch.attention.dot_product_attention.frost_attention import (
+        _mask_spec,
+    )
+
+    for window, why in (
+        ((128,), "a malformed window pair"),
+        (7, "a non-iterable window"),
+        ((-1, 5), "a right window past the diagonal"),
+        ((-2, 0), "a left window below -1"),
+    ):
+        with pytest.raises(NotImplementedError):
+            _mask_spec("causal", window), why
 
 
 @requires_frost
@@ -339,14 +397,17 @@ def test_frost_sliding_window_selection_by_cp_comm_type(cp_comm_type, window, ex
         cp_comm_type=cp_comm_type,
         is_training=True,
     )
-    use_frost = get_attention_backend(params)[5]
+    from transformer_engine.pytorch.cpp_extensions.fused_attn import FusedAttnBackend
+
+    use_fused, fused_backend = get_attention_backend(params)[2:4]
+    use_frost = bool(use_fused) and fused_backend == FusedAttnBackend.FROST
     assert (
-        bool(use_frost) == expect_frost
-    ), "cp_comm_type=%s window=%s: expected use_frost_attention=%s, got %s" % (
+        use_frost == expect_frost
+    ), "cp_comm_type=%s window=%s: expected the FROST sub-backend=%s, got %s" % (
         cp_comm_type,
         window,
         expect_frost,
-        bool(use_frost),
+        use_frost,
     )
 
 
@@ -374,32 +435,6 @@ def test_frost_rejects_mismatched_kv():
         frost_attn_fwd(q, k, v_odd)
     with pytest.raises(ValueError, match="match q"):
         frost_attn_fwd(q, k, k.to(torch.float32))
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
-def test_dot_product_attention_runs_in_onnx_export_mode():
-    """The ONNX-export branch must bind every backend flag the availability check reads.
-
-    Deliberately not gated on FROST: that branch skips get_attention_backend entirely and sets the
-    flags by hand, so leaving use_frost_attention unbound there raised UnboundLocalError for every
-    user on every GPU, whether or not FROST could run. A plain head_dim-64 config reproduces it --
-    the failure is in the selector bookkeeping, not in any kernel.
-    """
-    from transformer_engine.pytorch import DotProductAttention
-    from transformer_engine.pytorch.export import onnx_export
-
-    b, h, s, d = 2, 4, 128, 64
-    dtype = torch.bfloat16
-    qkv = [torch.randn(s, b, h, d, device="cuda", dtype=dtype) for _ in range(3)]
-    block = DotProductAttention(
-        h, d, qkv_format="sbhd", attn_mask_type="causal", attention_dropout=0.0
-    ).to(dtype=dtype, device="cuda")
-
-    with onnx_export(enabled=True):
-        out = block(*qkv)
-
-    assert out.numel() == s * b * h * d
-    assert torch.isfinite(out).all()
 
 
 def test_frost_engines_are_enabled_even_if_flex_imported_cudnn_first():

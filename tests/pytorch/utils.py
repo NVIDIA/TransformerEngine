@@ -452,7 +452,6 @@ def get_available_attention_backends(
             use_fused_attention,
             fused_attention_backend,
             use_unfused_attention,
-            _use_frost_attention,
             available_backends,
         ) = get_attention_backend(attention_params)
         # Check if FA3 is an available backend when num_splits != 1
@@ -466,7 +465,6 @@ def get_available_attention_backends(
         _attention_backends["flash_attention_backend"] = flash_attention_backend
         _attention_backends["fused_attention_backend"] = fused_attention_backend
         _attention_backends["use_unfused_attention"] = use_unfused_attention
-        _attention_backends["use_frost_attention"] = _use_frost_attention
         _attention_backends["backend_selection_requires_update"] = False
         return available_backends, flash_attention_backend, fused_attention_backend
 

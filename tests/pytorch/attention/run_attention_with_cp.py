@@ -278,8 +278,9 @@ def run_dpa_with_cp(
         else:
             assert False, f"{model=} is not a known FusedAttention CP config!"
     if kernel_backend == "FrostAttention":
-        # Leave NVTE_FLASH_ATTN and NVTE_FUSED_ATTN at 0: FROST is the only backend that serves
-        # head_dim > 256, so get_attention_backend selects it on its own.
+        # FROST is a sub-backend of FusedAttention, so NVTE_FUSED_ATTN has to stay on. Flash is
+        # left off; nothing else serves head_dim > 256, so the selector reaches FROST on its own.
+        os.environ["NVTE_FUSED_ATTN"] = "1"
         os.environ["NVTE_FROST_ATTN"] = "1"
         if model in model_configs_frost_attn:
             config = copy.deepcopy(model_configs_frost_attn[model])
@@ -606,18 +607,20 @@ def run_dpa_with_cp(
             fp8_output=fp8_mha,
         )
         if kernel_backend == "FrostAttention":
-            # Assert the backend actually used, not just the one requested. FROST is currently
-            # the only selectable backend for these configs -- flash and fused are env-gated off
+            # Assert the sub-backend actually used, not just the one requested. FROST is
+            # currently the only selectable backend for these configs -- flash is env-gated off
             # and CP disables unfused -- so a silent substitution is impossible today and this
             # would pass by construction. It is here so it stops passing if that stops being
             # true, rather than quietly testing some other kernel.
             from transformer_engine.pytorch.attention.dot_product_attention.dot_product_attention import (  # pylint: disable=import-outside-toplevel
                 _attention_backends,
             )
+            # pylint: disable-next=import-outside-toplevel
+            from transformer_engine.pytorch.cpp_extensions.fused_attn import FusedAttnBackend
 
-            assert _attention_backends[
-                "use_frost_attention"
-            ], "expected FrostAttention to be selected, got %s" % (_attention_backends,)
+            assert (
+                _attention_backends["fused_attention_backend"] == FusedAttnBackend.FROST
+            ), "expected the FROST sub-backend to be selected, got %s" % (_attention_backends,)
         if config.return_max_logit:
             out_, max_logit_ = out_
         if is_training:

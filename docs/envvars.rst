@@ -178,10 +178,9 @@ Then it applies a performance-based preference order among the remaining eligibl
 In PyTorch, the broad preference order is ``FlashAttention > FusedAttention >
 UnfusedDotProductAttention`` on supported pre-Hopper GPUs such as Ampere/Ada, and
 ``FusedAttention > FlashAttention > UnfusedDotProductAttention`` on Hopper and newer GPUs,
-including Blackwell. On Blackwell SM100/SM103 the order is ``FusedAttention > FlashAttention >
-FrostAttention > UnfusedDotProductAttention``; FrostAttention only becomes eligible for
-symmetric ``head_dim`` in (256, 512], which flash and fused attention do not serve, so the
-backend it can displace is UnfusedDotProductAttention. In JAX, Transformer Engine uses cuDNN
+including Blackwell. On Blackwell SM100/SM103, FusedAttention has an extra sub-backend, FROST,
+which is selected only for symmetric ``head_dim`` in (256, 512] and only when the cuDNN
+sub-backends decline; it does not change the order above. In JAX, Transformer Engine uses cuDNN
 fused attention when ``NVTE_FUSED_ATTN=1`` and an eligible cuDNN kernel is available; otherwise
 it falls back to the JAX-native implementation. See :doc:`examples/attention/attention` for a
 longer backend-selection overview.
@@ -220,7 +219,7 @@ longer backend-selection overview.
 
    :Type: ``int`` (0 or 1)
    :Default: ``1``
-   :Description: Enable or disable FrostAttention backend (the cuDNN FROST CuTe-DSL SDPA kernels in cuDNN Frontend) for DotProductAttention. **This backend is experimental and subject to change**, including the possibility of being folded into FusedAttention; the underlying cuDNN FROST engines are themselves experimental. When set to ``0``, FrostAttention will not be used. From released components it is the only backend serving symmetric ``head_dim`` in (256, 512] together with context parallelism; without context parallelism UnfusedDotProductAttention also covers that range, and FrostAttention is preferred over it where both are eligible. It is limited to SM100/SM103 with BF16/FP16 inputs, a ``head_dim`` that is a multiple of 8, and ``nvidia-cudnn-frontend>=1.29.0`` and ``nvidia-cutlass-dsl>=4.7.0`` installed. It supports context parallelism with ``cp_comm_type`` of ``p2p``, ``all_gather``, ``a2a`` or ``a2a+p2p``, and sliding-window attention with ``all_gather`` or ``a2a`` (declined with ``p2p`` and ``a2a+p2p``, whose ring shards KV across steps). It declines FP8, ``thd`` layouts, dropout, attention bias, softcap, KV caching, ``max_logit``, and deterministic execution, the last because cuDNN offers no deterministic backward for these kernels.
+   :Description: Enable or disable the FROST sub-backend of FusedAttention for DotProductAttention. FROST wraps the cuDNN FROST CuTe-DSL SDPA kernels through the cuDNN Frontend python API, rather than the C++ fused-attention path the other sub-backends use. **It is experimental and subject to change**, as the underlying cuDNN FROST engines are. When set to ``0``, FROST will not be used. It is selected only where the cuDNN sub-backends decline and is the only released backend serving symmetric ``head_dim`` in (256, 512] together with context parallelism. It is limited to SM100/SM103 with BF16/FP16 inputs, a ``head_dim`` that is a multiple of 8, and ``nvidia-cudnn-frontend>=1.29.0`` and ``nvidia-cutlass-dsl>=4.7.0`` installed. It declines FP8, ``thd`` layouts, dropout, attention bias, KV caching, ``max_logit``, CUDA graph capture, and deterministic execution, the last because cuDNN offers no deterministic backward for these kernels.
 
 .. envvar:: NVTE_UNFUSED_ATTN
 
