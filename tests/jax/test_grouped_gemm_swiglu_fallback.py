@@ -163,12 +163,17 @@ def test_installed_frontend_contract():
 
 @pytest.mark.parametrize("request_fusion", [None, True, False])
 @pytest.mark.parametrize("native_layout", [False, True])
+@pytest.mark.parametrize("square", [False, True])
 @pytest.mark.parametrize(
     "missing,expected",
-    [(None, "rubin"), ("grouped_gemm_glu", "blackwell"), ("grouped_gemm_dswiglu", False)],
+    [
+        (None, "rubin"),
+        ("grouped_gemm_glu", "blackwell"),
+        ("grouped_gemm_dswiglu", False),
+    ],
 )
 def test_public_moe_passes_selected_path(
-    frontend, monkeypatch, native_layout, missing, expected, request_fusion
+    frontend, monkeypatch, native_layout, square, missing, expected, request_fusion
 ):
     import jax
     import jax.numpy as jnp
@@ -189,6 +194,7 @@ def test_public_moe_passes_selected_path(
     def execute(*args):
         bound = signature.bind(*args).arguments
         assert bound["use_cudnn_fusion"] is (request_fusion is not False)
+        assert bound["cudnn_native_weight_layout"] is native_layout
         received.append(bound["use_cudnn_jax_fusion"])
         return args[0], None, jnp.asarray(0)
 
@@ -196,6 +202,9 @@ def test_public_moe_passes_selected_path(
     x = jnp.ones((1, 1, 128), jnp.bfloat16)
     wi = jnp.ones((2, 256, 128) if native_layout else (2, 128, 256), jnp.bfloat16)
     kwargs = {} if request_fusion is None else {"use_cudnn_fusion": request_fusion}
+    if square:
+        wi = jnp.ones((2, 128, 128), jnp.bfloat16)
+        kwargs["cudnn_native_weight_layout"] = native_layout
     if request_fusion is False:
         expected = False
     with warnings.catch_warnings(record=True) as caught:
@@ -216,13 +225,16 @@ def test_public_moe_passes_selected_path(
 
 
 @pytest.mark.parametrize("path", ["rubin", "blackwell"])
-def test_forward_uses_selected_kernel(monkeypatch, path):
+@pytest.mark.parametrize("native_layout", [False, True])
+@pytest.mark.parametrize("gather_gated_dimension", [False, True])
+def test_forward_uses_selected_kernel(monkeypatch, path, native_layout, gather_gated_dimension):
     import jax.numpy as jnp
 
     class SelectedKernel(Exception):
         pass
 
     def selected(*args, **kwargs):
+        assert args[1].shape == (1, 256, 128)
         raise SelectedKernel
 
     def rejected(*args, **kwargs):
@@ -241,19 +253,30 @@ def test_forward_uses_selected_kernel(monkeypatch, path):
         )
 
     monkeypatch.setattr(moe.tex, "grouped_quantize", quantize)
+
+    def gather(tensor, fsdp_axis, fsdp_size, sharded_axis):
+        data = tensor.get_tensor().data
+        assert sharded_axis == (1 if native_layout else 2)
+        return quantize(jnp.concatenate([data, data], axis=sharded_axis))
+
+    monkeypatch.setattr(moe, "_gather_quantized_weight", gather)
     quantizers = SimpleNamespace(x=SimpleNamespace(q_dtype=jnp.float8_e4m3fn), kernel=None)
     kwargs = dict.fromkeys(inspect.signature(moe._ffn_fwd_per_shard).parameters)
+    combined = 128 if gather_gated_dimension else 256
     kwargs.update(
         recv_tokens_local=jnp.ones((1, 256, 128), jnp.bfloat16),
         recv_topk_weights_local=jnp.ones((1, 256)),
         token_counts_local=jnp.asarray([256]),
-        wi=jnp.ones((1, 128, 256), jnp.bfloat16),
+        wi=jnp.ones((1, combined, 128) if native_layout else (1, 128, combined), jnp.bfloat16),
         wo=jnp.ones((1, 128, 128), jnp.bfloat16),
         quantizer_sets=(quantizers, quantizers),
         num_local_experts=1,
         use_cudnn_jax_fusion=path,
-        cudnn_native_weight_layout=False,
-        quant_before_fsdp_ag=False,
+        cudnn_native_weight_layout=native_layout,
+        quant_before_fsdp_ag=gather_gated_dimension,
+        wi_fsdp_axis=(1 if native_layout else 2),
+        fsdp_axis="fsdp",
+        fsdp_size=2,
     )
     with pytest.raises(SelectedKernel):
         moe._ffn_fwd_per_shard(**kwargs)
@@ -276,7 +299,10 @@ def test_flax_forwards_fusion_bool(monkeypatch, request_fusion):
     monkeypatch.setattr(flax_moe, "moe", execute)
     kwargs = {} if request_fusion is None else {"use_cudnn_fusion": request_fusion}
     block = _MoEBlock(
-        num_experts=2, intermediate_size=32, mesh_resource=MeshResource(ep_resource="ep"), **kwargs
+        num_experts=2,
+        intermediate_size=32,
+        mesh_resource=MeshResource(ep_resource="ep"),
+        **kwargs,
     )
     block.init(jax.random.PRNGKey(0), jnp.ones((1, 1, 32)))
     assert received == [request_fusion is not False]
@@ -296,7 +322,13 @@ def test_capacity_follows_explicit_fusion_bool(request_fusion):
 def test_fusion_argument_requires_bool(invalid):
     with pytest.raises(TypeError, match="use_cudnn_fusion must be a bool"):
         moe.moe(
-            None, None, None, None, num_experts=2, num_experts_per_tok=1, use_cudnn_fusion=invalid
+            None,
+            None,
+            None,
+            None,
+            num_experts=2,
+            num_experts_per_tok=1,
+            use_cudnn_fusion=invalid,
         )
     with pytest.raises(TypeError, match="use_cudnn_fusion must be a bool"):
         moe.get_moe_recv_capacity_per_rank(

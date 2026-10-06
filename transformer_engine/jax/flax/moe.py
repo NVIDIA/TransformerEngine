@@ -329,6 +329,7 @@ class _MoEBlock(TransformerEngineBase):
                 scaling_factor=self.scaling_factor,
                 aux_loss_coeff=self.aux_loss_coeff,
                 use_cudnn_fusion=self.use_cudnn_fusion,
+                cudnn_native_weight_layout=False,
                 apply_topk_weights_early=self.apply_topk_weights_early,
                 quantizer_sets=quantizer_sets,
                 recv_capacity_per_rank=self.recv_capacity_per_rank,

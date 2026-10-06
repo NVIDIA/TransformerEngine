@@ -286,6 +286,7 @@ def _select_cudnn_jax_fusion(rejection_reasons: list[str]) -> str | bool:
         )
     return path
 
+
 def _cudnn_jax_fusion_rejection_reasons(
     x,
     wi,
@@ -755,6 +756,25 @@ def _gather_quantized_matrix_scales(tensor, fsdp_axis, data_axis, local_scale_sh
     return jnp.concatenate(gathered_scales)
 
 
+def _resolve_cudnn_native_weight_layout(wi, hidden, layout=None):
+    """Resolve FC1 parameter storage using its global shape or an explicit flag."""
+    if layout is not None and not isinstance(layout, bool):
+        raise TypeError("cudnn_native_weight_layout must be a bool or None")
+    standard = wi.ndim == 3 and wi.shape[1] == hidden and wi.shape[2] % 2 == 0
+    native = wi.ndim == 3 and wi.shape[2] == hidden and wi.shape[1] % 64 == 0
+    if layout is None:
+        if standard and native:
+            raise ValueError(
+                "Ambiguous square FC1 weight layout; pass cudnn_native_weight_layout="
+                "False for standard [E,K,2N] or True for native [E,2N,K] storage."
+            )
+        if standard or native:
+            return native
+    elif native if layout else standard:
+        return layout
+    raise ValueError(f"Invalid FC1 weight shape {wi.shape} for K={hidden} and layout={layout}")
+
+
 def _weight_fsdp_axis(spec, fsdp_axis):
     """Find the tensor dimension partitioned by the physical FSDP resource."""
     return next(
@@ -815,6 +835,8 @@ def _ffn_fwd_per_shard(
             wi_interleaved = wi.transpose(0, 2, 1)
             wi_gate, wi_up = tex.unpack_swiglu_pair(wi_interleaved)
             wi_for_gemm = jnp.concatenate((wi_gate, wi_up), axis=-1)
+            if wi_fsdp_axis in (1, 2):
+                wi_fsdp_axis = 3 - wi_fsdp_axis
         else:
             wi_for_gemm = wi
     wi_combined_bias = (
@@ -842,7 +864,8 @@ def _ffn_fwd_per_shard(
         casted_wi_rhs = casted_wi.get_tensor(
             usage=TensorUsage.LHS if cudnn_native_weight_layout else TensorUsage.RHS
         )
-        combined = wi_for_gemm.shape[-2] if cudnn_native_weight_layout else wi_for_gemm.shape[-1]
+        # Quantized gathering may have expanded the gated dimension since packing.
+        combined = casted_wi_rhs.data.size // (num_local_experts * hidden)
         padded_offsets = jnp.cumsum(group_sizes, dtype=jnp.int32)
         prob = (
             recv_w_flat[:, None, None]
@@ -1136,7 +1159,10 @@ def _ffn_bwd_per_shard(
     d_sorted_x = tex.grouped_gemm(
         casted_d_combined.get_tensor(usage=TensorUsage.LHS),
         casted_wi_rhs_trans,
-        contracting_dims=((1,), (1 if use_cudnn_jax_fusion and cudnn_native_weight_layout else 2,)),
+        contracting_dims=(
+            (1,),
+            (1 if use_cudnn_jax_fusion and cudnn_native_weight_layout else 2,),
+        ),
     )
     if use_cudnn_jax_fusion and cudnn_native_weight_layout:
         # dY^T @ X directly produces [E,2N,K], matching the persistent native
@@ -1217,6 +1243,7 @@ def _moe_fwd_rule(
     dispatch_checkpoint_name,
     quant_before_fsdp_ag,
     use_cudnn_fusion: bool = True,
+    cudnn_native_weight_layout: Optional[bool] = None,
 ):
     """Forward: gate -> topk -> ep_dispatch -> FFN -> ep_combine.
 
@@ -1251,7 +1278,9 @@ def _moe_fwd_rule(
         )
         B, S, H = x.shape
         K = num_experts_per_tok
-        cudnn_native_weight_layout = wi.ndim == 3 and wi.shape[-1] == H
+        cudnn_native_weight_layout = _resolve_cudnn_native_weight_layout(
+            wi, H, cudnn_native_weight_layout
+        )
         kernel_spec = P(ep_axis, None, None)
         wi_input_spec = wo_input_spec = kernel_spec
         wi_fsdp_axis = wo_fsdp_axis = None
@@ -1607,6 +1636,7 @@ def _moe_bwd_rule(
     dispatch_checkpoint_name,
     quant_before_fsdp_ag,
     use_cudnn_fusion,
+    cudnn_native_weight_layout,
     residuals,
     cotangents,
 ):
@@ -1624,6 +1654,7 @@ def _moe_bwd_rule(
             dispatch_checkpoint_name,
             quant_before_fsdp_ag,
             use_cudnn_fusion,
+            cudnn_native_weight_layout,
         )  # captured / unused in bwd
         from jax.experimental.shard_map import shard_map
 
@@ -1741,7 +1772,15 @@ def _moe_bwd_rule(
                 bias_spec,
             )
         else:
-            bwd_out_specs = (ep3_spec, ep2_spec, kernel_spec, kernel_spec, None, None, None)
+            bwd_out_specs = (
+                ep3_spec,
+                ep2_spec,
+                kernel_spec,
+                kernel_spec,
+                None,
+                None,
+                None,
+            )
 
         (
             d_sorted_x,
@@ -1873,7 +1912,7 @@ def _moe_bwd_rule(
 # =============================================================================
 
 
-@partial(jax.custom_vjp, nondiff_argnums=tuple(range(9, 33)))
+@partial(jax.custom_vjp, nondiff_argnums=tuple(range(9, 34)))
 def _moe(
     x,
     gate_kernel,
@@ -1908,6 +1947,7 @@ def _moe(
     dispatch_checkpoint_name,
     quant_before_fsdp_ag,
     use_cudnn_fusion: bool = True,
+    cudnn_native_weight_layout: Optional[bool] = None,
 ):
     primal, _ = _moe_fwd_rule(
         x,
@@ -1943,6 +1983,7 @@ def _moe(
         dispatch_checkpoint_name,
         quant_before_fsdp_ag,
         use_cudnn_fusion,
+        cudnn_native_weight_layout,
     )
     return primal
 
@@ -1990,6 +2031,7 @@ def moe(
     dispatch_checkpoint_name: Optional[str] = None,
     weight_gather: Optional[WeightGather] = None,
     use_cudnn_fusion: bool = True,
+    cudnn_native_weight_layout: Optional[bool] = None,
 ) -> Tuple[jnp.ndarray, Optional[jnp.ndarray], jnp.ndarray]:
     """Run a full MoE block under a single fused custom_vjp on the TE EP path.
 
@@ -2064,6 +2106,13 @@ def moe(
         Ineligible calls warn and fall back to TE's regular grouped-GEMM
         implementation. API signatures and GPU capability determine support.
 
+    cudnn_native_weight_layout : Optional[bool]
+        ``False`` selects standard contiguous gate/up [E,K,2N] storage;
+        ``True`` selects native [E,2N,K] storage with alternating 32-column
+        gate/up blocks. Defaults to ``None``, inferring storage from the global
+        shape. Ambiguous square shapes require an explicit flag. This option
+        describes parameter storage independently of the selected execution path.
+
     MeshResource fields name physical mesh axes, not Flax logical axes.
     ``input_axes``, ``gate_kernel_axes``, ``wi_kernel_axes`` and
     ``wo_kernel_axes`` remain logical-axis tuples resolved through the active
@@ -2078,7 +2127,11 @@ def moe(
     if ep_axis is not None or data_parallelism_axes is not None or weight_gather is not None:
         call_args = locals().copy()
         resource, quantize = _resolve_moe_mesh_resource(
-            mesh_resource, quant_before_fsdp_ag, ep_axis, data_parallelism_axes, weight_gather
+            mesh_resource,
+            quant_before_fsdp_ag,
+            ep_axis,
+            data_parallelism_axes,
+            weight_gather,
         )
         for name in ("ep_axis", "data_parallelism_axes", "weight_gather"):
             call_args.pop(name)
@@ -2116,6 +2169,10 @@ def moe(
                 stacklevel=2,
             )
         x = _with_sharding_constraint_cast_bwd(x, NamedSharding(mesh, expected_spec))
+
+        cudnn_native_weight_layout = _resolve_cudnn_native_weight_layout(
+            wi, x.shape[-1], cudnn_native_weight_layout
+        )
 
         # custom_vjp can't trace through None args; lower expert_bias to an
         # empty shape-(0,) tensor that fused_topk_with_score_function treats
@@ -2173,6 +2230,7 @@ def moe(
             dispatch_checkpoint_name,
             quant_before_fsdp_ag,
             use_cudnn_fusion,
+            cudnn_native_weight_layout,
         )
         if aux_loss_coeff <= 0.0:
             aux_loss = None
