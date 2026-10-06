@@ -119,9 +119,8 @@ class FusedAttnBackend(IntEnum):
     No_Backend = int(NVTE_Fused_Attn_Backend.NVTE_No_Backend)
     F16_arbitrary_seqlen = int(NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen)
     FP8 = int(NVTE_Fused_Attn_Backend.NVTE_FP8)
-    # Python-only: cuDNN FROST runs through the cuDNN Frontend python API rather than the C++
-    # fused-attention path, so it has no NVTE_Fused_Attn_Backend counterpart. fused_attn_fwd/bwd
-    # route it to frost_attention.py before any C++ call, so this value never reaches pybind.
+    # Python-only: FROST runs through the cuDNN Frontend python API, so it has no
+    # NVTE_Fused_Attn_Backend counterpart and never reaches pybind.
     FROST = 3
 
     @classmethod
@@ -355,7 +354,6 @@ def fused_attn_fwd(
     # Accept the pybind enum for backward compatibility.
     fused_attention_backend = FusedAttnBackend.cast(fused_attention_backend)
     if fused_attention_backend == FusedAttnBackend["FROST"]:
-        # FROST runs through the cuDNN Frontend python API rather than the C++ fused path.
         # Imported here so a process that never selects FROST never imports cuDNN Frontend.
         # pylint: disable-next=import-outside-toplevel
         from ..attention.dot_product_attention import frost_attention

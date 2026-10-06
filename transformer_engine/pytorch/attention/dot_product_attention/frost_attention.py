@@ -11,20 +11,6 @@ Why a separate Python backend rather than teaching the existing C++ fused path: 
 registered at Python import time behind CUDNN_FRONTEND_ENABLE_FROST_ENGINES and require the
 nvidia-cutlass-dsl Python package, while TE's C++ builds against cuDNN Frontend headers only.
 Reaching them requires a Python graph, which is what this module is.
-
-Three properties of these kernels were verified on Blackwell, and each constrains the code:
-
-1. cuDNN's causal masking is TOP_LEFT aligned unless bottom-right is requested. The two coincide
-   when SQ == SKV, so the distinction is invisible in square tests and decisive for all_gather,
-   which trims KV. Masking is built as a diagonal band so causal, bottom-right and sliding window
-   come from one mechanism.
-
-2. Plan building must be cached. It dominates an execute even after cuDNN has cached the JIT, so a
-   per-call build would leave training build-bound. Hence `_PLAN_CACHE`.
-
-3. The forward LSE is natural-log logsumexp in fp32, shaped [b, h, s, 1]. Squeezed to [b, h, s] it
-   is what the CP ring correction in context_parallel.py consumes, which is what makes ring
-   attention over these kernels valid at all.
 """
 
 from __future__ import annotations
@@ -49,26 +35,22 @@ __all__ = [
 ]
 
 
-# FROST engines are opt-in inside cuDNN Frontend, and they additionally require a newer
-# nvidia-cutlass-dsl than cudnn-frontend itself declares. cudnn-frontend requires >= 4.6.2 while
-# FROST enforces >= 4.7.0 at plan-build time; with 4.6.2 installed every FROST engine silently
-# declines and ordinary cuDNN backend plans are returned with no error at all. We therefore check
-# the selected plan by NAME rather than trusting that the engine was used.
+# cudnn-frontend declares cutlass-dsl >= 4.6.2 but FROST enforces >= 4.7.0 at plan-build time.
+# Below that floor every FROST engine declines silently and backend plans come back instead, so
+# the selected plan is checked by NAME rather than trusting that the engine was used.
 _FROST_FWD_PLAN_TOKEN = "sdpa_fwd_prefill_sm100"
 _FROST_BWD_PLAN_TOKEN = "sdpa_bwd_sm100"
 _MIN_CUTLASS_DSL = PkgVersion("4.7.0")
 
-# 1.29.0 is the first release carrying the head_dim=512 BACKWARD (bprop_d512_f16_sm100). 1.28.0
-# ships the forward only, and the repo's own pin allows it, so without this check training would
-# build a forward plan and then raise on the first backward.
+# 1.29.0 is the first release carrying the head_dim=512 backward. 1.28.0 ships the forward only,
+# so without this check training would build a forward plan and raise on the first backward.
 _MIN_CUDNN_FRONTEND = PkgVersion("1.29.0")
 
 _SUPPORTED_ARCHS = ((10, 0), (10, 3))
 _MAX_HEAD_DIM = 512
 _MIN_HEAD_DIM = 257  # below this the existing cuDNN/flash backends already serve the shape
-# The engine pads head_dim to a multiple of 8, so 260 is not servable even though it is in range.
-# Without this it passes the gate and then fails at plan selection with a message about missing
-# engines, instead of declining cleanly here.
+# The engine pads head_dim to a multiple of 8, so 260 is in range but not servable. Declined
+# here rather than failing later at plan selection.
 _HEAD_DIM_MULTIPLE = 8
 
 _cudnn = None
@@ -243,10 +225,8 @@ def _finalize_plans(
             f" Candidate plans: {names[:6]}.{(' ' + hint) if hint else ''}"
         )
     graph.select_plan(hits[0])
-    # The engine is pinned, so a decline here is the engine's own verdict on this graph and cuDNN
-    # puts its reason in the exception. Surface that rather than letting it escape bare: a plan
-    # that was offered and then refused is the harder failure to read, and the reason is the only
-    # thing that says which constraint was missed.
+    # The engine is pinned, so a decline here is its own verdict and cuDNN puts the reason in the
+    # exception. Surface it: a plan offered and then refused is the harder failure to read.
     try:
         graph.check_support()
         graph.build_plans()
@@ -314,16 +294,14 @@ def is_frost_attention_available() -> Tuple[bool, str]:
         major, minor = torch.cuda.get_device_capability()
         return _no(f"cuDNN FROST head_dim>256 kernels are SM100/SM103 only; found sm{major}{minor}")
     try:
-        # Without the engines: this only needs the module to read a version off it, and enabling
-        # here would reorder plan selection for the whole process even when the checks below go on
-        # to decline FROST, which is all cost and no benefit. The use sites enable it.
+        # Without the engines: this only reads a version, and enabling reorders plan selection
+        # process-wide even when the checks below decline. The use sites enable it.
         _import_cudnn_frontend(enable_frost_engines=False)
     except ImportError as exc:
         return _no(f"nvidia-cudnn-frontend not importable: {exc}")
 
-    # Decline on positive evidence that FROST cannot work: a version below a floor, or a package
-    # that is absent outright. A version that is present but unparseable is NOT evidence, so it
-    # defers to _select_frost_plan, which checks the plan by name and reports both versions.
+    # Decline only on positive evidence: a version below a floor, or a package absent outright.
+    # An unparseable version defers to _select_frost_plan, which checks the plan by name.
     frontend, frontend_raw = _pkg_version("nvidia-cudnn-frontend", _cudnn)
     if frontend is not None and frontend < _MIN_CUDNN_FRONTEND:
         return _no(
@@ -346,17 +324,9 @@ def is_frost_attention_available() -> Tuple[bool, str]:
     return _availability
 
 
-# TE mask types this backend serves. cuDNN expresses causal, bottom-right and sliding-window
-# masking as ONE mechanism -- a diagonal alignment plus a two-sided band -- rather than three
-# separate flags, so that is what _mask_options builds. The legacy spellings desugar into exactly
-# that: pygraph/sdpa.cpp maps use_causal_mask to (TOP_LEFT, right_bound=0) and
-# use_causal_mask_bottom_right to (BOTTOM_RIGHT, right_bound=0), and refuses to combine either
-# with an explicit right bound. Building the band directly is equivalent for those two and
-# additionally expresses a left bound, which is what a sliding window is.
-#
-# Both alignments are needed. The p2p ring produces square diagonal tiles, where top-left and
-# bottom-right coincide, while all_gather trims KV and relies on bottom-right alignment, where
-# the two differ completely.
+# cuDNN expresses causal, bottom-right and sliding-window masking as one mechanism, a diagonal
+# alignment plus a two-sided band, which is what _mask_options builds. Both alignments are needed:
+# the p2p ring produces square tiles where they coincide, while all_gather trims KV so they differ.
 _SUPPORTED_MASKS = ("no_mask", "causal", "causal_bottom_right")
 
 # Sliding window as TE spells it: (left, right), -1 meaning unbounded on that side.
@@ -542,10 +512,9 @@ def is_frost_attention_supported(params) -> Tuple[int, str]:
         and "causal" not in attn_mask_type
         and params.max_seqlen_q != params.max_seqlen_kv
     ):
-        # A right-bounded window on a non-causal mask takes its anchor only from
-        # bottom_right_diagonal, which defaults to top-left, while the all-gather ring trims KV
-        # and measures its window against the bottom-right diagonal. Those differ exactly when
-        # the q and kv lengths do, so decline rather than guess which one was meant.
+        # Such a window takes its anchor only from bottom_right_diagonal, which defaults to
+        # top-left, while the all-gather ring measures its window bottom-right. Decline rather
+        # than guess which was meant.
         return (
             no_backend,
             (
@@ -757,9 +726,8 @@ def _cached(kind: str, key):
     cache_key = (kind,) + key
     entry = _PLAN_CACHE.get(cache_key)
     if entry is None:
-        # Build under the device the key names, not merely with that device's handle: the plans
-        # are CuTe-DSL JIT-compiled, and a compile path is far more likely to read the ambient
-        # CUDA context than the handle. Free to do, and removes the question entirely.
+        # Build under the device the key names, not merely with its handle: the plans are
+        # JIT-compiled, and a compile path may read the ambient CUDA context rather than the handle.
         device = _device_from_key(key[:2])
         with torch.cuda.device(device) if device.type == "cuda" else contextlib.nullcontext():
             entry = _build_fwd(key) if kind == "fwd" else _build_bwd(key)
@@ -769,9 +737,8 @@ def _cached(kind: str, key):
 
 def _key(q, k, mask, scale, deterministic=False):
     return (
-        # The graph is built under whichever device was current, so it must not be reused on
-        # another one. Matches the C++ fused-attn cache, which keys on device_id for the same
-        # reason. Type is included too, so a CPU tensor cannot alias cuda:0.
+        # Built under whichever device was current, so it must not be reused on another. Matches
+        # the C++ fused-attn cache, which keys on device_id. Type too, so CPU cannot alias cuda:0.
         q.device.type,
         q.device.index,
         q.shape[0],
@@ -828,10 +795,8 @@ def frost_attn_fwd(
     tq, tk, tv, tout, tlse = entry["handles"]
 
     b, hq, sq, _ = q.shape
-    # Allocate per call: the cache holds only the compiled plan, never output buffers, so that
-    # concurrent or nested uses cannot alias each other. empty_strided rather than empty_like:
-    # the latter does not preserve an arbitrary permuted stride, and the graph was built for
-    # q's exact strides.
+    # Allocated per call so concurrent uses cannot alias; the cache holds only the plan.
+    # empty_strided, not empty_like: the latter does not preserve an arbitrary permuted stride.
     out = torch.empty_strided(q.shape, q.stride(), device=q.device, dtype=q.dtype)
     lse = torch.empty(b, hq, sq, 1, device=q.device, dtype=torch.float32)
     workspace = torch.empty(entry["workspace"], device=q.device, dtype=torch.uint8)
@@ -886,9 +851,8 @@ def frost_attn_bwd(
         softmax_lse = softmax_lse.unsqueeze(-1)
     softmax_lse = softmax_lse.contiguous()
 
-    # The graph expects o and dO in q's layout. A caller may hand us either with different
-    # strides (dO in particular comes from autograd), so restride rather than silently reading
-    # the wrong elements.
+    # The graph expects o and dO in q's layout, and dO comes from autograd with strides we do
+    # not control, so restride rather than silently reading the wrong elements.
     def _as(t, ref):
         if tuple(t.stride()) == tuple(ref.stride()):
             return t
@@ -996,9 +960,8 @@ def fused_attn_fwd(
         attn_mask_type=mask_type,
         window_size=window,
     )
-    # A real tensor rather than None: it is saved for backward and handed to the activation
-    # offload hooks alongside softmax_lse, neither of which accepts None. FROST has no dropout,
-    # so nothing reads it.
+    # A real tensor, not None: it is saved for backward and handed to the activation offload
+    # hooks, neither of which accepts None. FROST has no dropout, so nothing reads it.
     rng_state = torch.empty(2, dtype=torch.int64, device=q.device)
     return from_frost_layout(out, qkv_format), [softmax_lse, rng_state]
 
