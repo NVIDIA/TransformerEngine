@@ -15,6 +15,7 @@ if torch.cuda.device_count() < 2:
 
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
+nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
 
 RNG_SEED: int = 42
 SEQ_LENGTH: int = 1024
@@ -40,6 +41,8 @@ COMM_GEMM_QUANTIZATION_PARAMS = [
     pytest.param(True, "none", id="cublasmp-bf16"),
     pytest.param(True, "fp8", id="cublasmp-fp8"),
     pytest.param(True, "mxfp8", id="cublasmp-mxfp8"),
+    # Userbuffers does not support NVFP4
+    pytest.param(True, "nvfp4", id="cublasmp-nvfp4"),
 ]
 
 TEST_ROOT = Path(__file__).parent.resolve()
@@ -99,6 +102,8 @@ def _run_gemm_with_overlap(
             pytest.skip(reason_for_no_fp8)
         if quantization == "mxfp8" and not mxfp8_available:
             pytest.skip(reason_for_no_mxfp8)
+        if quantization == "nvfp4" and not nvfp4_available:
+            pytest.skip(reason_for_no_nvfp4)
         test_cmd.append(f"--quantization={quantization}")
         if p2p:
             test_cmd.append("--p2p")
@@ -158,6 +163,11 @@ def _run_layer_with_overlap(
             pytest.skip(reason_for_no_fp8)
         if quantization == "mxfp8" and not mxfp8_available:
             pytest.skip(reason_for_no_mxfp8)
+        if quantization == "nvfp4":
+            if not nvfp4_available:
+                pytest.skip(reason_for_no_nvfp4)
+            if not use_cublasmp:
+                pytest.skip("Userbuffers does not support NVFP4.")
         test_cmd.append("--fp8")
         test_cmd.append(f"--quantization={quantization}")
 
@@ -333,7 +343,7 @@ def test_linear_with_overlap_compile(
 @pytest.mark.parametrize("use_cublasmp", (False, True))
 @pytest.mark.parametrize(
     "quantization",
-    ["fp8_delayed_scaling", "fp8_current_scaling", "mxfp8"],
+    ["fp8_delayed_scaling", "fp8_current_scaling", "mxfp8", "nvfp4"],
 )
 @pytest.mark.parametrize(
     "layer_type,linear_parallel_mode,overlap_rs_dgrad",
@@ -443,7 +453,7 @@ def test_multi_layer_with_overlap_bf16(
 @pytest.mark.parametrize("use_cublasmp", (False, True))
 @pytest.mark.parametrize(
     "quantization",
-    ["fp8_delayed_scaling", "fp8_current_scaling", "mxfp8"],
+    ["fp8_delayed_scaling", "fp8_current_scaling", "mxfp8", "nvfp4"],
 )
 @pytest.mark.parametrize(
     "num_layers",
