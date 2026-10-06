@@ -112,7 +112,7 @@ class EPBackend {
   ncclEpHandle_t open_handle(void* handle_mem, size_t handle_mem_size, int num_topk,
                              size_t dispatch_output_per_expert_alignment);
 
-  // LRU cache: most-recently-used at the front of lru_, evict from the back.
+  // Pointer-keyed handle cache, capped at NVTE_EP_HANDLE_CACHE_SIZE live handles.
   struct HandleEntry {
     void* handle_mem;
     ncclEpHandle_t handle;
@@ -128,16 +128,11 @@ class EPBackend {
   std::list<HandleEntry> lru_;
   std::unordered_map<void*, std::list<HandleEntry>::iterator> index_;
   size_t handle_cache_cap_{0};  // set lazily from NVTE_EP_HANDLE_CACHE_SIZE
-  // Metadata of evicted entries (handle == nullptr), so a later op on a still-valid handle_mem
-  // can re-import its handle instead of failing.
-  std::unordered_map<void*, HandleEntry> evicted_;
 
   // Caller must hold mutex_.
   ncclEpHandle_t prepare_handle_locked(void* handle_mem, size_t handle_mem_size,
                                        NVTEEpLayerConfig layer_cfg);
   ncclEpHandle_t lookup_handle_locked(void* handle_mem, size_t handle_mem_size);
-  // Insert a new entry at the LRU front and evict past the cap. Caller must hold mutex_.
-  void insert_entry_locked(HandleEntry entry);
   size_t cache_cap_locked();
 
   // Bind a fresh handle to handle_mem's already-prepared contents via ncclEpImportHandle.
