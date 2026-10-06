@@ -387,3 +387,35 @@ API reference
 See the :doc:`PyTorch API <../../../api/pytorch>` for ``QuantizerRole``,
 ``HybridQuantizer``, ``IdentityQuantizer``, and their returned tensor types.
 See the :doc:`Common API <../../../api/common>` for ``CustomRecipe``.
+
+Experimental NVFP4 weight QDQ
+-----------------------------
+
+``custom_recipes.qdq.NVFP4QDQQuantizer`` is useful for experiments with
+``X[BF16] x W[NVFP4]``: it quantizes weights to NVFP4, then dequantizes them
+into a high-precision ``IdentityTensor`` for BF16 forward GEMMs. This preserves
+NVFP4 weight rounding error while using BF16 GEMM arithmetic.
+
+The following factory supports ``Linear`` and ``GroupedLinear`` with discrete
+expert parameters. Forward uses high-precision inputs and QDQ weights;
+MXFP8 backward uses the original inputs and QDQ weights::
+
+    from transformer_engine.common.recipe import CustomRecipe
+    from transformer_engine.pytorch.custom_recipes.quantizer_factory_zoo import (
+        nvfp4_qdq_weight_fwd_mxfp8_bwd_factory,
+    )
+
+    recipe = CustomRecipe(qfactory=nvfp4_qdq_weight_fwd_mxfp8_bwd_factory)
+
+Output defaults to the source dtype; a module compute-dtype override changes
+only the decoded dtype. ``backend="auto"`` fuses plain 1D E2M1/E4M3 QDQ on
+SM100 for contiguous, 16-byte-aligned BF16/FP16 tensors with matching output
+dtype and flattened matrix dimensions divisible by 16, with ordinary fast math
+disabled. Other native-valid modes, including 4over6, 2D scaling, distributed
+amax reduction, and mixed dtypes, use native ``quantize().dequantize()``.
+``backend="reference"`` forces that composition; ``backend="fused"`` rejects
+unsupported cases. Current weight amax is computed when quantization runs.
+
+Configure ``backend`` or ``nvfp4_options`` on the factory with
+``functools.partial``. Existing Hybrid limitations still apply, and RL
+convergence has not been validated.

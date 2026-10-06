@@ -502,6 +502,8 @@ at::Tensor scaled_aligned_causal_masked_softmax_backward(at::Tensor output_grads
  * FP8 recipe
  **************************************************************************************************/
 
+void nvfp4_qdq(const at::Tensor &input, at::Tensor output, at::Tensor amax,
+               std::optional<at::Tensor> noop, bool compute_amax);
 void compute_amax(const at::Tensor &tensor, at::Tensor &amax);
 
 void fused_amax_and_scale_update_after_reduction(const at::Tensor &amax_reduction_buffer,
