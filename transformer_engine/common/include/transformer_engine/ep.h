@@ -11,7 +11,7 @@
  *  Per layer: call nvte_ep_handle_mem_size(layer_cfg) for the buffer size;
  *  allocate handle_mem as a kByte NVTETensor. Per step: nvte_ep_prepare seeds
  *  routing, then nvte_ep_dispatch / nvte_ep_combine / _bwd consume it.
- *  Cache cap: NVTE_EP_HANDLE_CACHE_SIZE (default 4096; -1 disables eviction).
+ *  Max live handles: NVTE_EP_HANDLE_CACHE_SIZE (default 4096; -1 = unlimited).
  */
 
 #ifndef TRANSFORMER_ENGINE_EP_H_

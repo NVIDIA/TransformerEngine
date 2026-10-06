@@ -280,6 +280,10 @@ ncclResult_t init_handle(ncclEpHandle_t* handle, ncclEpGroup_t ep_group, ncclEpL
                                         num_topk, handle_mem);
 }
 
+ncclResult_t export_handle(ncclEpHandle_t handle, ncclEpHandleState_t* state, cudaStream_t stream) {
+  return call_symbol<&ncclEpExportHandle>("ncclEpExportHandle", handle, state, stream);
+}
+
 ncclResult_t import_handle(ncclEpHandle_t* handle, ncclEpGroup_t ep_group, ncclEpLayout_t layout,
                            const ncclEpHandleConfig_t* config, const ncclEpHandleState_t* state,
                            const ncclEpTensor_t* handle_mem, cudaStream_t stream) {

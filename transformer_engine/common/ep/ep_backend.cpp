@@ -263,7 +263,6 @@ void EPBackend::shutdown_locked() {
   }
   lru_.clear();
   index_.clear();
-  evicted_.clear();
   // ncclEpGroupDestroy reads from ep_comm_; destroy group while comm is still alive.
   if (ep_group_ != nullptr) {
     nccl_ep::group_destroy(ep_group_);
@@ -330,16 +329,6 @@ ncclEpHandle_t EPBackend::acquire_step_handle_locked(void* handle_mem, size_t ha
     return import_handle_locked(handle_mem, handle_mem_size, num_tokens, *layer_cfg, stream);
   }
   *owned = false;
-  if (index_.find(handle_mem) == index_.end()) {
-    auto ev = evicted_.find(handle_mem);
-    if (ev != evicted_.end()) {
-      HandleEntry entry = ev->second;
-      evicted_.erase(ev);
-      entry.handle =
-          import_handle_locked(handle_mem, handle_mem_size, num_tokens, entry.layer_cfg, stream);
-      insert_entry_locked(entry);
-    }
-  }
   ncclEpHandle_t h = lookup_handle_locked(handle_mem, handle_mem_size);
   if (layer_cfg != nullptr) {
     const NVTEEpLayerConfig& cached = index_.find(handle_mem)->second->layer_cfg;
@@ -439,19 +428,6 @@ size_t EPBackend::cache_cap_locked() {
   return handle_cache_cap_;
 }
 
-void EPBackend::insert_entry_locked(HandleEntry entry) {
-  lru_.push_front(entry);
-  index_.emplace(entry.handle_mem, lru_.begin());
-  while (lru_.size() > cache_cap_locked()) {
-    HandleEntry& victim = lru_.back();
-    if (victim.handle != nullptr) nccl_ep::handle_destroy(victim.handle);
-    index_.erase(victim.handle_mem);
-    victim.handle = nullptr;
-    evicted_[victim.handle_mem] = victim;
-    lru_.pop_back();
-  }
-}
-
 ncclEpHandle_t EPBackend::prepare_handle_locked(void* handle_mem, size_t handle_mem_size,
                                                 NVTEEpLayerConfig layer_cfg) {
   auto it = index_.find(handle_mem);
@@ -472,7 +448,8 @@ ncclEpHandle_t EPBackend::prepare_handle_locked(void* handle_mem, size_t handle_
     lru_.erase(it->second);
     index_.erase(it);
   }
-  evicted_.erase(handle_mem);
+  NVTE_CHECK(lru_.size() < cache_cap_locked(), "EP: live handle limit (", cache_cap_locked(),
+             ") reached; raise NVTE_EP_HANDLE_CACHE_SIZE");
   ncclEpHandleConfig_t hcfg = NCCL_EP_HANDLE_CONFIG_INIT;
   hcfg.dispatch_output_per_expert_alignment = layer_cfg.dispatch_output_per_expert_alignment;
   size_t hm_size = 0;
@@ -482,7 +459,8 @@ ncclEpHandle_t EPBackend::prepare_handle_locked(void* handle_mem, size_t handle_
              " bytes, requires ", hm_size);
   ncclEpHandle_t h = open_handle(handle_mem, handle_mem_size, layer_cfg.top_k,
                                  layer_cfg.dispatch_output_per_expert_alignment);
-  insert_entry_locked(HandleEntry{handle_mem, h, layer_cfg, hm_size});
+  lru_.push_front(HandleEntry{handle_mem, h, layer_cfg, hm_size});
+  index_.emplace(handle_mem, lru_.begin());
   return h;
 }
 
@@ -495,7 +473,7 @@ ncclEpHandle_t EPBackend::lookup_handle_locked(void* handle_mem, size_t handle_m
     lru_.splice(lru_.begin(), lru_, it->second);
     return it->second->handle;
   }
-  // Miss: this handle_mem was never prepared (or its cache entry was evicted).
+  // Miss: this handle_mem was never prepared.
   // No fallback reconstruction -- the cache is keyed by pointer, so guessing
   // at a handle for an unrecognized address would silently misinterpret
   // whatever this buffer actually holds. Callers whose handle_mem address is
@@ -577,6 +555,9 @@ void EPBackend::prepare(NVTETensor handle_mem, const NVTETensor topk_idx,
                                    layer_cfg.dispatch_output_per_expert_alignment),
                        /*owned=*/true);
     NVTE_CHECK_NCCL(nccl_ep::update_handle(guard.get(), &nccl_topk_idx, &layout_info, stream));
+    // Stamp handle_mem so later ops can import it.
+    ncclEpHandleState_t state = NCCL_EP_HANDLE_STATE_INIT;
+    NVTE_CHECK_NCCL(nccl_ep::export_handle(guard.get(), &state, stream));
     return;
   }
   layer_cfg.topk_idx_dtype = nvte_tensor_type(topk_idx);
@@ -741,6 +722,9 @@ void EPBackend::prepare_and_dispatch(
                        /*owned=*/true);
     NVTE_CHECK_NCCL(
         nccl_ep::update_handle(guard.get(), &nccl_topk_idx, /*layout_info=*/nullptr, stream));
+    // Stamp handle_mem so later combine/_bwd ops can import it.
+    ncclEpHandleState_t state = NCCL_EP_HANDLE_STATE_INIT;
+    NVTE_CHECK_NCCL(nccl_ep::export_handle(guard.get(), &state, stream));
     issue_dispatch_locked(guard.get(), topk_idx, tokens, tokens_win, topk_weights, topk_weights_win,
                           recv_tokens, recv_tokens_win, recv_topk_weights, recv_topk_weights_win,
                           recv_tokens_per_expert, total_recv_tokens_per_rank, stream);
