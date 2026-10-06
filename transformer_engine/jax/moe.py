@@ -254,12 +254,46 @@ def _use_cudnn_cutedsl_fusion_from_env() -> bool:
     return value == "1"
 
 
-def _is_rubin_device() -> bool:
-    """SM107 is reported as 107 by TransformerEngine's CUDA utility."""
+def _select_cudnn_jax_fusion(rejection_reasons: list[str]) -> str | bool:
+    """Select Rubin GLU, generic Blackwell+ SwiGLU, or unfused TE, in order."""
     from transformer_engine_jax import get_device_compute_capability
 
-    return get_device_compute_capability(0) == 107
-
+    reasons = list(rejection_reasons)
+    path = False
+    try:
+        capability = get_device_compute_capability(0)
+    except RuntimeError as exc:
+        reasons.append(f"could not query GPU compute capability: {exc}")
+    else:
+        if not reasons:
+            for candidate, supported in (
+                ("rubin", capability == 107),
+                ("blackwell", capability >= 100),
+            ):
+                if not supported:
+                    requirement = "SM107" if candidate == "rubin" else "SM100+"
+                    reasons.append(
+                        f"{candidate} fused kernel requires {requirement}, got SM{capability}"
+                    )
+                    continue
+                available, error = tex.grouped_gemm_swiglu_dependencies_available(
+                    rubin=candidate == "rubin"
+                )
+                if available:
+                    path = candidate
+                    break
+                reasons.append(f"{candidate} fused API is incompatible: {error}")
+    if reasons:
+        destination = "generic Blackwell+ fused kernel" if path else "unfused TE grouped-GEMM path"
+        warnings.warn(
+            f"{_CUDNN_JAX_ENV}=1: falling back to the {destination}: "
+            + "; ".join(reasons)
+            + ". Install cuDNN Frontend with compatible JAX APIs (TE's signatures match "
+            "cuDNN Frontend 1.31.0) and CuTeDSL JAX support; use supported GPU hardware.",
+            UserWarning,
+            stacklevel=2,
+        )
+    return path
 
 def _cudnn_jax_fusion_rejection_reasons(
     x,
@@ -273,17 +307,7 @@ def _cudnn_jax_fusion_rejection_reasons(
     ep_axis,
 ) -> list[str]:
     """Return reasons this call cannot use cuDNN's grouped SwiGLU JAX API."""
-    from transformer_engine_jax import get_device_compute_capability
-
     errors = []
-    compute_capability = None
-    try:
-        compute_capability = get_device_compute_capability(0)
-    except RuntimeError as exc:
-        errors.append(f"could not query GPU compute capability: {exc}")
-    else:
-        if compute_capability < 100:
-            errors.append(f"requires an SM100+ GPU, got SM{compute_capability}")
     if str(activation_type).lower() != "silu":
         errors.append("requires activation_type='silu'")
     if wi_0_bias is not None or wi_1_bias is not None:
@@ -330,11 +354,6 @@ def _cudnn_jax_fusion_rejection_reasons(
         if num_local_experts > 1024:
             errors.append(f"requires at most 1024 local experts, got {num_local_experts}")
 
-    dependencies_available, dependency_error = tex.grouped_gemm_swiglu_dependencies_available(
-        rubin=compute_capability == 107
-    )
-    if not dependencies_available:
-        errors.append(f"could not load cuDNN's grouped SwiGLU JAX API: {dependency_error}")
     return errors
 
 
@@ -768,7 +787,7 @@ def _ffn_fwd_per_shard(
     num_local_experts: int,
     activation_type: str,
     apply_topk_weights_early: bool,
-    use_cudnn_jax_fusion: bool,
+    use_cudnn_jax_fusion: str | bool,
     wi_0_checkpoint_name: Optional[str],
     wi_1_checkpoint_name: Optional[str],
     wo_checkpoint_name: Optional[str],
@@ -842,7 +861,7 @@ def _ffn_fwd_per_shard(
             intermediate_col,
             intermediate_scale_row,
             intermediate_scale_col,
-        ) = (tex.grouped_gemm_glu if _is_rubin_device() else tex.grouped_gemm_swiglu)(
+        ) = (tex.grouped_gemm_glu if use_cudnn_jax_fusion == "rubin" else tex.grouped_gemm_swiglu)(
             casted_sorted_x_lhs.data.reshape(sorted_x.shape[0], hidden, 1),
             (
                 casted_wi_rhs.data.reshape(num_local_experts, combined, hidden)
@@ -994,7 +1013,7 @@ def _ffn_bwd_per_shard(
     activation_type: str,
     apply_topk_weights_early: bool,
     has_bias: bool,
-    use_cudnn_jax_fusion: bool,
+    use_cudnn_jax_fusion: str | bool,
     cudnn_native_weight_layout: bool,
 ):
     """Backward mirror of :func:`_ffn_fwd_per_shard`."""
@@ -1123,9 +1142,9 @@ def _ffn_bwd_per_shard(
     d_sorted_x = tex.grouped_gemm(
         casted_d_combined.get_tensor(usage=TensorUsage.LHS),
         casted_wi_rhs_trans,
-        contracting_dims=((1,), (1 if cudnn_native_weight_layout else 2,)),
+        contracting_dims=((1,), (1 if use_cudnn_jax_fusion and cudnn_native_weight_layout else 2,)),
     )
-    if cudnn_native_weight_layout:
+    if use_cudnn_jax_fusion and cudnn_native_weight_layout:
         # dY^T @ X directly produces [E,2N,K], matching the persistent native
         # parameter, without a post-GEMM transpose or de-interleave/repack.
         d_wi_combined = tex.grouped_gemm(
@@ -1276,7 +1295,13 @@ def _moe_fwd_rule(
 
         # Per-rank send capacity: B/num_procs rows x S tokens per rank.
         max_tokens_per_rank = (B // num_procs) * S
-        dispatch_alignment = _CUDNN_JAX_ALIGN_SIZE if use_cudnn_jax_fusion else _ALIGN_SIZE
+        # Keep capacity and alignment consistent with an EP bootstrap sized
+        # for requested fusion, even when API/hardware checks choose unfused.
+        dispatch_alignment = (
+            _CUDNN_JAX_ALIGN_SIZE
+            if use_cudnn_jax_fusion or _use_cudnn_cutedsl_fusion_from_env()
+            else _ALIGN_SIZE
+        )
         worst_case_recv_pr = get_moe_recv_capacity_per_rank(
             num_experts=num_experts,
             num_experts_per_tok=K,
@@ -2033,14 +2058,15 @@ def moe(
     ep_axis, data_parallelism_axes, weight_gather : deprecated
         Compatibility arguments converted into a MeshResource and boolean,
         with a DeprecationWarning. Conflicting old and new arguments raise.
-    Note that the per-expert dispatch-slot alignment is fixed internally
-    at 128 tokens (``_ALIGN_SIZE``); see that constant's docstring for
-    rationale and how to extend if a future recipe needs >128.
+    Per-expert dispatch-slot alignment defaults to 128 tokens (``_ALIGN_SIZE``).
+    Requesting cuDNN fusion reserves 256 tokens, also when falling back, to
+    preserve compatibility with EP bootstrap buffer sizing.
 
     Set ``NVTE_JAX_TEMP_FLAG_FOR_ABHINAV_CUDNN_GROUPED_GEMM_FUSION=1`` to use cuDNN's
-    dedicated JAX grouped MXFP8 GEMM + SwiGLU API for eligible SM100 calls.
-    The fused path uses 256-token expert alignment. Ineligible calls warn
-    and fall back to TE's regular grouped-GEMM implementation.
+    JAX grouped MXFP8 APIs: Rubin GLU first, then generic SM100+ SwiGLU.
+    Ineligible calls warn
+    and fall back to TE's regular grouped-GEMM implementation. API signatures
+    and GPU capability determine support; fallbacks emit an actionable warning.
 
     MeshResource fields name physical mesh axes, not Flax logical axes.
     ``input_axes``, ``gate_kernel_axes``, ``wi_kernel_axes`` and
@@ -2114,22 +2140,7 @@ def moe(
                 activation_type=activation_type,
                 ep_axis=ep_axis,
             )
-            if rejection_reasons:
-                if cudnn_native_weight_layout:
-                    raise ValueError(
-                        "cuDNN-native MoE weight layout requires the fused cuDNN grouped-GEMM "
-                        "path, which is unsupported for this moe() call: "
-                        + "; ".join(rejection_reasons)
-                    )
-                warnings.warn(
-                    f"{_CUDNN_JAX_ENV}=1 is unsupported for this moe() call; falling back to "
-                    "the regular TE grouped-GEMM path: "
-                    + "; ".join(rejection_reasons),
-                    UserWarning,
-                    stacklevel=2,
-                )
-            else:
-                use_cudnn_jax_fusion = True
+            use_cudnn_jax_fusion = _select_cudnn_jax_fusion(rejection_reasons)
         elif cudnn_native_weight_layout:
             raise ValueError(
                 "cuDNN-native MoE weight layout requires the fused cuDNN grouped-GEMM path; "

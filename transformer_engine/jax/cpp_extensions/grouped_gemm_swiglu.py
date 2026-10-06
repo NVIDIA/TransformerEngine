@@ -1,9 +1,12 @@
-# Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """cuDNN Frontend JAX API adapter for fused grouped GEMM + SwiGLU."""
 
 from __future__ import annotations
+
+import importlib
+import inspect
 
 import jax
 import jax.numpy as jnp
@@ -70,21 +73,53 @@ def _compact_sf(scale: jax.Array, shape: tuple[int, ...], name: str) -> jax.Arra
     return scale.reshape(-1)[:size].reshape(shape)
 
 
+# These contracts match cuDNN Frontend 1.31.0. Probe APIs rather than the version:
+# newer optional parameters are compatible, but TE must supply every required one.
+_FORWARD_ARGS = (
+    "a_tensor",
+    "b_tensor",
+    "sfa_tensor",
+    "sfb_tensor",
+    "padded_offsets",
+    "alpha_tensor",
+    "prob_tensor",
+    "norm_const_tensor",
+    "c_dtype",
+    "d_dtype",
+    "discrete_col_sfd",
+)
+_BACKWARD_ARGS = tuple(arg for arg in _FORWARD_ARGS if arg != "c_dtype") + (
+    "c_tensor",
+    "beta_tensor",
+)
+
+
 def grouped_gemm_swiglu_dependencies_available(rubin: bool = False) -> tuple[bool, str]:
-    """Check the public cuDNN JAX API without compiling a kernel."""
+    """Check that the selected forward and shared backward accept TE's keywords."""
     try:
-        import cutlass.jax
-        from cudnn.jax import (  # noqa: F401
-            grouped_gemm_dswiglu,
-            grouped_gemm_swiglu,
-        )
-
-        if rubin:
-            from cudnn.jax import grouped_gemm_glu  # noqa: F401
-
-        if not cutlass.jax.is_available():
+        cutlass_jax = importlib.import_module("cutlass.jax")
+        cudnn_jax = importlib.import_module("cudnn.jax")
+        if not cutlass_jax.is_available():
             return False, "CuTeDSL JAX support is unavailable"
-    except (ImportError, ModuleNotFoundError, RuntimeError, AttributeError) as exc:
+        forward = "grouped_gemm_glu" if rubin else "grouped_gemm_swiglu"
+        for name, arguments in (
+            (forward, _FORWARD_ARGS),
+            ("grouped_gemm_dswiglu", _BACKWARD_ARGS),
+        ):
+            api = getattr(cudnn_jax, name, None)
+            if not callable(api):
+                return False, f"cudnn.jax.{name} is unavailable"
+            signature = inspect.signature(api)
+            missing = set(arguments) - signature.parameters.keys()
+            if missing:
+                return (
+                    False,
+                    f"cudnn.jax.{name} is missing parameters: {', '.join(sorted(missing))}",
+                )
+            # Binding detects missing/renamed keywords, positional-only arguments,
+            # and new mandatory arguments, while allowing new optional arguments.
+            signature.bind(**dict.fromkeys(arguments))
+    except (ImportError, RuntimeError, AttributeError, TypeError, ValueError) as exc:
         return False, str(exc)
     return True, ""
 
@@ -111,7 +146,9 @@ def grouped_gemm_swiglu(
     if b.ndim != 3:
         raise ValueError(f"Expected physical B[E,N,K], got {b.shape}")
 
-    from cudnn.jax import grouped_gemm_swiglu as cudnn_grouped_gemm_swiglu
+    cudnn_grouped_gemm_swiglu = getattr(
+        importlib.import_module("cudnn.jax"), "grouped_gemm_swiglu"
+    )
 
     return _grouped_gemm_forward(
         cudnn_grouped_gemm_swiglu,
@@ -138,7 +175,9 @@ def grouped_gemm_glu(
     output_dtype,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     """Run the Rubin cuDNN grouped MXFP8 GEMM + SwiGLU kernel."""
-    from cudnn.jax import grouped_gemm_glu as cudnn_grouped_gemm_glu
+    cudnn_grouped_gemm_glu = getattr(
+        importlib.import_module("cudnn.jax"), "grouped_gemm_glu"
+    )
 
     return _grouped_gemm_forward(
         cudnn_grouped_gemm_glu,
@@ -212,7 +251,9 @@ def grouped_gemm_dswiglu(
     if c.ndim != 2:
         raise ValueError(f"Expected C[M,2N], got {c.shape}")
 
-    from cudnn.jax import grouped_gemm_dswiglu as cudnn_grouped_gemm_dswiglu
+    cudnn_grouped_gemm_dswiglu = getattr(
+        importlib.import_module("cudnn.jax"), "grouped_gemm_dswiglu"
+    )
 
     rows, hidden = a.shape
     experts, intermediate, b_hidden = b.shape

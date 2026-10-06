@@ -867,6 +867,49 @@ def test_ep_checkpoint_names(mesh, monkeypatch):
 class TestTeEpMoeCudnnCutedslFusion:
     """End-to-end MXFP8 coverage for cuDNN's grouped GLU JAX APIs."""
 
+    @pytest.mark.parametrize("native_layout", [False, True])
+    def test_missing_apis_unfused_forward_and_backward(self, mesh, monkeypatch, native_layout):
+        """Unfused fallback retains bootstrap capacity and native-layout gradients."""
+        if not _use_cudnn_cutedsl_fusion_from_env():
+            pytest.skip("Requires fusion requested at bootstrap")
+        import cudnn.jax as cudnn_jax
+        from transformer_engine.jax import cpp_extensions as tex
+
+        monkeypatch.setattr(cudnn_jax, "grouped_gemm_glu", None)
+        monkeypatch.setattr(cudnn_jax, "grouped_gemm_swiglu", None)
+        block = _make_block(quantization_recipe=MXFP8BlockScaling())
+        x = _make_inputs(jax.random.PRNGKey(51))
+        variables, baseline_output, _ = _init_apply(block, mesh, x, jax.random.PRNGKey(52))
+        baseline_grads, baseline_dx = _grad_step(block, variables, mesh, x)
+
+        if native_layout:
+            flax_moe = importlib.import_module("transformer_engine.jax.flax.moe")
+            original_moe = flax_moe.moe
+
+            def native_moe(*args, **kwargs):
+                args = list(args)
+                gate, up = jnp.split(args[2], 2, axis=-1)
+                args[2] = tex.pack_swiglu_pair(gate, up).transpose(0, 2, 1)
+                kwargs["wi_kernel_axes"] = ("exp", "mlp", "embed")
+                return original_moe(*args, **kwargs)
+
+            monkeypatch.setattr(flax_moe, "moe", native_moe)
+        with _ctx(mesh):
+            output, _, _ = jax.jit(block.apply)(variables, _shard_inputs(x, mesh))
+            output.block_until_ready()
+        grads, dx = _grad_step(block, variables, mesh, x)
+        np.testing.assert_array_equal(
+            _to_global_numpy(output, mesh), _to_global_numpy(baseline_output, mesh)
+        )
+        np.testing.assert_array_equal(
+            _to_global_numpy(dx, mesh), _to_global_numpy(baseline_dx, mesh)
+        )
+        for name in ("gate_kernel", "wi", "wo"):
+            np.testing.assert_array_equal(
+                _to_global_numpy(_unwrap(grads["params"][name]), mesh),
+                _to_global_numpy(_unwrap(baseline_grads["params"][name]), mesh),
+            )
+
     @pytest.mark.parametrize("apply_topk_weights_early", [False, True])
     def test_mxfp8_forward_and_backward(self, mesh, apply_topk_weights_early, monkeypatch):
         if not _use_cudnn_cutedsl_fusion_from_env():
@@ -913,12 +956,25 @@ class TestTeEpMoeCudnnCutedslFusion:
             # The dedicated SwiGLU path is the reference for this kernel
             # substitution. Its MXFP8 gradients can differ from pure JAX by
             # more than the strict unfused test threshold on Rubin.
-            monkeypatch.setattr(tex, "grouped_gemm_glu", tex.grouped_gemm_swiglu)
+            import cudnn.jax as cudnn_jax
+
+            # Simulate a frontend without the Rubin API. Selection must fall
+            # back to generic SwiGLU even though the GPU itself is Rubin.
+            monkeypatch.setattr(cudnn_jax, "grouped_gemm_glu", None)
+            generic_calls = []
+            original_swiglu = tex.grouped_gemm_swiglu
+
+            def checked_swiglu(*args, **kwargs):
+                generic_calls.append(True)
+                return original_swiglu(*args, **kwargs)
+
+            monkeypatch.setattr(tex, "grouped_gemm_swiglu", checked_swiglu)
             with _ctx(mesh):
                 x_sh = _shard_inputs(x, mesh)
                 baseline_output, _, _ = jax.jit(block.apply)(variables, x_sh)
                 baseline_output.block_until_ready()
             baseline_grads, baseline_grad_x = _grad_step(block, variables, mesh, x)
+            assert generic_calls, "Missing Rubin API did not select generic SwiGLU"
             np.testing.assert_allclose(
                 output_np,
                 _to_global_numpy(baseline_output, mesh).astype(np.float32),
@@ -997,7 +1053,9 @@ class TestTeEpMoeCudnnCutedslFusion:
         moe_module = importlib.import_module("transformer_engine.jax.moe")
         flax_moe_module = importlib.import_module("transformer_engine.jax.flax.moe")
         if use_regular_swiglu:
-            monkeypatch.setattr(moe_module, "_is_rubin_device", lambda: False)
+            import cudnn.jax as cudnn_jax
+
+            monkeypatch.setattr(cudnn_jax, "grouped_gemm_glu", None)
 
         selected_calls = []
         fused_op_name = "grouped_gemm_swiglu" if use_regular_swiglu else "grouped_gemm_glu"
