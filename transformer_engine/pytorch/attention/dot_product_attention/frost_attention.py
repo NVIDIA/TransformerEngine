@@ -677,9 +677,7 @@ def _build_fwd(key) -> dict:
     *_device, b, hq, hkv, sq, skv, d, dtype, mask, scale, qs, ks, _deterministic = key
     shq, shkv = [b, hq, sq, d], [b, hkv, skv, d]
 
-    graph = _build_pygraph(
-        dtype, _device_from_key(_device), backend_name="FrostAttention"
-    )
+    graph = _build_pygraph(dtype, _device_from_key(_device), backend_name="FrostAttention")
     tq = graph.tensor(name="q", dim=shq, stride=list(qs))
     tk = graph.tensor(name="k", dim=shkv, stride=list(ks))
     tv = graph.tensor(name="v", dim=shkv, stride=list(ks))
@@ -712,9 +710,7 @@ def _build_bwd(key) -> dict:
     io_dt = _cudnn_dtype(dtype)
     shq, shkv = [b, hq, sq, d], [b, hkv, skv, d]
 
-    graph = _build_pygraph(
-        dtype, _device_from_key(_device), backend_name="FrostAttention"
-    )
+    graph = _build_pygraph(dtype, _device_from_key(_device), backend_name="FrostAttention")
     handles = {}
     # o and dO share q's layout; k, v and their grads share k's.
     for name, shape, stride in (
