@@ -38,6 +38,12 @@ int sm_arch(int device_id = -1);
  */
 int sm_count(int device_id = -1);
 
+/* \brief Number of SMs to reserve (not use) for grouped-quantize and grouped-swizzle kernels.
+ *  Controlled by NVTE_GROUPED_QUANTIZE_SM_MARGIN (default 0). See sm_carveout.h for how this
+ *  is enforced.
+ */
+int grouped_quantize_sm_margin();
+
 /* \brief Minimum and maximum stream priorities supported on device
  *
  * \param[in] device_id CUDA device (default is current device)

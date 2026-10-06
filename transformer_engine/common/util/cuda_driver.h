@@ -23,7 +23,7 @@ namespace cuda_driver {
 /*! \brief Get pointer corresponding to symbol in CUDA driver library */
 void *get_symbol(const char *symbol, int cuda_version = 12010);
 
-/*! \brief Call function in CUDA driver library
+/*! \brief Call function in CUDA driver library, resolved against a given CUDA version
  *
  * The CUDA driver library (libcuda.so.1 on Linux) may be different at
  * compile-time and run-time. In particular, the CUDA Toolkit provides
@@ -33,29 +33,44 @@ void *get_symbol(const char *symbol, int cuda_version = 12010);
  *
  * Symbol pointers are cached to avoid repeated lookups.
  *
- * \param[in] symbol Function name
- * \param[in] args   Function arguments
+ * \param[in] symbol      Function name
+ * \param[in] cuda_version CUDA version the symbol's ABI was introduced or last changed in
+ * \param[in] args        Function arguments
  */
 template <typename... ArgTs>
-inline CUresult call(const char *symbol, ArgTs... args) {
+inline CUresult call_versioned(const char *symbol, int cuda_version, ArgTs... args) {
   using FuncT = CUresult(ArgTs...);
 
+  // Cache key includes cuda_version: a name-only key could serve the wrong ABI's pointer.
   static std::unordered_map<std::string, void *> symbol_cache;
   static std::mutex cache_mutex;
+  const std::string cache_key = std::string(symbol) + "@" + std::to_string(cuda_version);
   FuncT *func;
 
   {
     std::lock_guard<std::mutex> lock(cache_mutex);
-    auto it = symbol_cache.find(symbol);
+    auto it = symbol_cache.find(cache_key);
     if (it == symbol_cache.end()) {
-      void *ptr = get_symbol(symbol);
-      symbol_cache[symbol] = ptr;
+      void *ptr = get_symbol(symbol, cuda_version);
+      symbol_cache[cache_key] = ptr;
       func = reinterpret_cast<FuncT *>(ptr);
     } else {
       func = reinterpret_cast<FuncT *>(it->second);
     }
   }
   return (*func)(args...);
+}
+
+/*! \brief Call function in CUDA driver library
+ *
+ * Equivalent to call_versioned() with the driver's oldest supported ABI (CUDA 12.1).
+ *
+ * \param[in] symbol Function name
+ * \param[in] args   Function arguments
+ */
+template <typename... ArgTs>
+inline CUresult call(const char *symbol, ArgTs... args) {
+  return call_versioned(symbol, 12010, args...);
 }
 
 /*! \brief Ensure that the calling thread has a CUDA context
@@ -84,6 +99,12 @@ void ensure_context_exists();
 #define NVTE_CALL_CHECK_CUDA_DRIVER(symbol, ...)                                           \
   do {                                                                                     \
     NVTE_CHECK_CUDA_DRIVER(::transformer_engine::cuda_driver::call(#symbol, __VA_ARGS__)); \
+  } while (false)
+
+#define NVTE_CALL_CHECK_CUDA_DRIVER_VERSIONED(symbol, cuda_version, ...)                        \
+  do {                                                                                          \
+    NVTE_CHECK_CUDA_DRIVER(                                                                     \
+        ::transformer_engine::cuda_driver::call_versioned(#symbol, cuda_version, __VA_ARGS__)); \
   } while (false)
 
 #endif  // TRANSFORMER_ENGINE_COMMON_UTIL_CUDA_DRIVER_H_

@@ -436,6 +436,18 @@ LayerNorm/RMSNorm SM Margins
    :Default: ``0``
    :Description: Number of SMs to reserve during inference LayerNorm/RMSNorm operations.
 
+Grouped Quantize/Swizzle SM Margin
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. envvar:: NVTE_GROUPED_QUANTIZE_SM_MARGIN
+
+   :Type: ``int``
+   :Default: ``0``
+   :Description: Number of SMs to reserve (not use) during grouped quantize and grouped scale
+                 swizzle operations. Must satisfy ``0 <= margin < device SM count``. Requires
+                 CUDA 12.4+ and driver support for CUDA green contexts; otherwise the margin is
+                 ignored with a warning.
+
 GEMM Configuration
 ^^^^^^^^^^^^^^^^^^
 

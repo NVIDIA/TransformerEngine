@@ -16,6 +16,7 @@
 #include "../common.h"
 #include "../util/cuda_runtime.h"
 #include "../util/logging.h"
+#include "../util/sm_carveout.h"
 #include "transformer_engine/transformer_engine.h"
 
 namespace transformer_engine {
@@ -2203,6 +2204,10 @@ void swizzle_grouped_scaling_factors(const GroupedTensor* input, GroupedTensor* 
     constexpr int SF_TILE_DIM_K = 4;
     const dim3 block_size(TB_DIM, TB_DIM);
 
+    // Applies NVTE_GROUPED_QUANTIZE_SM_MARGIN, if any.
+    const int sm_margin = cuda::grouped_quantize_sm_margin();
+    const cudaStream_t launch_stream = cuda::sm_carveout_stream_begin(stream, sm_margin);
+
     auto launch_grouped_swizzle = [&](bool rowwise) {
       const size_t m = rowwise ? first_dim : last_dim;
       const size_t k = rowwise ? last_dim : first_dim;
@@ -2286,7 +2291,7 @@ void swizzle_grouped_scaling_factors(const GroupedTensor* input, GroupedTensor* 
               grouped_swizzle_row_scaling_uniform_shape_kernel<LType, SF_TILE_DIM_M, SF_TILE_DIM_K>,
               cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
           grouped_swizzle_row_scaling_uniform_shape_kernel<LType, SF_TILE_DIM_M, SF_TILE_DIM_K>
-              <<<num_blocks, block_size, slm_size, stream>>>(
+              <<<num_blocks, block_size, slm_size, launch_stream>>>(
                   input_ptr, output_ptr, padded_m, padded_k, original_M, original_K,
                   input_stride_bytes, output_stride_bytes);
         });
@@ -2296,7 +2301,7 @@ void swizzle_grouped_scaling_factors(const GroupedTensor* input, GroupedTensor* 
               grouped_swizzle_col_scaling_uniform_shape_kernel<LType, SF_TILE_DIM_M, SF_TILE_DIM_K>,
               cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
           grouped_swizzle_col_scaling_uniform_shape_kernel<LType, SF_TILE_DIM_M, SF_TILE_DIM_K>
-              <<<num_blocks, block_size, slm_size, stream>>>(
+              <<<num_blocks, block_size, slm_size, launch_stream>>>(
                   input_ptr, output_ptr, padded_m, padded_k, original_M, original_K,
                   input_stride_bytes, output_stride_bytes);
         });
@@ -2310,6 +2315,7 @@ void swizzle_grouped_scaling_factors(const GroupedTensor* input, GroupedTensor* 
     if (has_columnwise_scale_inv) {
       launch_grouped_swizzle(false);
     }
+    cuda::sm_carveout_stream_end(stream, launch_stream, sm_margin);
   } else {
     // Variable shape implementation using Device-Side Block Scheduler
     size_t num_tensors = input->num_tensors;
@@ -2329,6 +2335,10 @@ void swizzle_grouped_scaling_factors(const GroupedTensor* input, GroupedTensor* 
         cudaFuncAttributeMaxDynamicSharedMemorySize, dynamic_smem_size));
 
     const int device_id = cuda::current_device();
+    // Applies NVTE_GROUPED_QUANTIZE_SM_MARGIN, if any.
+    const int sm_margin = cuda::grouped_quantize_sm_margin();
+    const cudaStream_t launch_stream = cuda::sm_carveout_stream_begin(stream, sm_margin);
+
     const int num_SMs = cuda::sm_count(device_id);
     const int max_active_blocks_per_sm =
         grouped_swizzle_variable_max_active_blocks_per_sm<SF_TILE_DIM_M, SF_TILE_DIM_K>(device_id);
@@ -2343,7 +2353,7 @@ void swizzle_grouped_scaling_factors(const GroupedTensor* input, GroupedTensor* 
       void* output_ptr = rowwise ? output->scale_inv.dptr : output->columnwise_scale_inv.dptr;
 
       grouped_swizzle_scaling_variable_shape_kernel<SF_TILE_DIM_M, SF_TILE_DIM_K>
-          <<<num_blocks, block_size, dynamic_smem_size, stream>>>(
+          <<<num_blocks, block_size, dynamic_smem_size, launch_stream>>>(
               input_ptr, output_ptr, m_array, k_array, num_tensors, rowwise, scale_elem_size,
               common_m, common_k);
 
@@ -2356,6 +2366,7 @@ void swizzle_grouped_scaling_factors(const GroupedTensor* input, GroupedTensor* 
     if (has_columnwise_scale_inv) {
       launch_grouped_swizzle_variable(false);
     }
+    cuda::sm_carveout_stream_end(stream, launch_stream, sm_margin);
   }
 }
 
