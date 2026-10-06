@@ -1,6 +1,7 @@
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
+import ctypes
 import os
 import subprocess
 from pathlib import Path
@@ -16,6 +17,23 @@ if torch.cuda.device_count() < 2:
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
 nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
+
+
+def _loaded_cublasmp_version() -> int:
+    """Version of the cuBLASMp library loaded by Transformer Engine, or 0 if there is none."""
+    if not tex.nvte_built_with_cublasmp():
+        return 0
+    try:
+        version = ctypes.c_int(0)
+        ctypes.CDLL("libcublasmp.so.0").cublasMpGetVersion(ctypes.byref(version))
+    except (OSError, AttributeError):
+        return 0
+    return version.value
+
+
+# NVFP4 with cuBLASMp applies the global scales through a device-side alpha (cuBLASMp 0.11.0+)
+cublasmp_nvfp4_available = _loaded_cublasmp_version() >= 1100
+reason_for_no_cublasmp_nvfp4 = "NVFP4 with cuBLASMp requires cuBLASMp 0.11.0 or newer."
 
 RNG_SEED: int = 42
 SEQ_LENGTH: int = 1024
@@ -116,6 +134,8 @@ def _run_gemm_with_overlap(
         if use_cublasmp:
             if not tex.nvte_built_with_cublasmp():
                 pytest.skip("Transformer Engine not built with cuBLASMp (NVTE_WITH_CUBLASMP=0).")
+            if quantization == "nvfp4" and not cublasmp_nvfp4_available:
+                pytest.skip(reason_for_no_cublasmp_nvfp4)
             if comm_type == "RS" and not p2p and not tex.device_supports_multicast():
                 pytest.skip(
                     "cuBLASMp non-P2P reduce-scatter requires NVSwitch (multicast support)."
@@ -174,6 +194,8 @@ def _run_layer_with_overlap(
     if use_cublasmp:
         if not tex.nvte_built_with_cublasmp():
             pytest.skip("Transformer Engine not built with cuBLASMp (NVTE_WITH_CUBLASMP=0).")
+        if fp8 and quantization == "nvfp4" and not cublasmp_nvfp4_available:
+            pytest.skip(reason_for_no_cublasmp_nvfp4)
         test_cmd.append("--use-cublasmp")
 
     test_env = os.environ.copy()
