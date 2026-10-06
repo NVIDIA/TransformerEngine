@@ -265,7 +265,10 @@ __global__ void fused_topk_forward_simple_kernel(
     // Postprocess: revert bias, softmax, normalization
     if (expert_bias && (score_function == 0 || score_function == 2)) {
       for (int i = lane_id; i < topk; i += kThreadsPerWarp) {
-        topk_scores[i] = topk_scores[i] - static_cast<CompType>(expert_bias[topk_indices[i]]);
+        // Recover sigmoid scores directly: subtracting the bias can erase tiny scores.
+        topk_scores[i] = score_function == 0
+                             ? intermediate_output[pos_offset + topk_indices[i]]
+                             : topk_scores[i] - static_cast<CompType>(expert_bias[topk_indices[i]]);
       }
       __syncwarp();
     }
@@ -593,7 +596,10 @@ __global__ void fused_topk_with_score_function_forward_kernel(
     if constexpr (ScoreFunc == 0 || ScoreFunc == 2) {
       if (expert_bias) {
         for (int i = lane_id; i < topk; i += kThreadsPerWarp) {
-          topk_scores[i] = topk_scores[i] - static_cast<CompType>(expert_bias[topk_indices[i]]);
+          // Sigmoid intermediates contain raw scores; sqrtsoftplus intermediates are logits.
+          topk_scores[i] =
+              ScoreFunc == 0 ? intermediate_output[pos_offset + topk_indices[i]]
+                             : topk_scores[i] - static_cast<CompType>(expert_bias[topk_indices[i]]);
         }
         __syncwarp();
       }
