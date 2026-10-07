@@ -760,7 +760,7 @@ class TestTeEpMoeHashRouting:
         np.testing.assert_array_equal(np.asarray(jax.device_get(expert_counts)), expected_counts)
 
         # Use a slightly larger tolerance as the numerical difference is just over 1e-7.
-        grad_ffn_tolerance_bf16 = 2e-7
+        grad_ffn_tolerance_bf16 = {"atol": 2e-7, "rtol": 1e-7}
 
         for name in ("gate_kernel", "wi", "wo"):
             np.testing.assert_allclose(
