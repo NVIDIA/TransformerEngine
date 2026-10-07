@@ -18,6 +18,7 @@ handle per device -- and giving it two owners is how this code has produced bugs
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import os
 from typing import Any, Dict, Optional, Sequence, Tuple
@@ -163,6 +164,52 @@ def bhsd_graph_tensor(
     """Create a cuDNN graph tensor with BHSD dims and TE-layout strides."""
     dim, stride = bhsd_dim_stride(tensor, tensor_format, backend_name=backend_name)
     return graph.tensor(dim=dim, stride=stride, data_type=tensor.dtype)
+
+
+def device_key(device: torch.device) -> Tuple[Any, ...]:
+    """Normalize a device for a cache key.
+
+    ``index is None`` is resolved to the current device, so ``cuda`` and ``cuda:0`` cannot key
+    two entries for one physical device. The type is part of the key too, so CPU cannot alias it.
+    """
+    if device.type == "cuda" and device.index is None:
+        return ("cuda", torch.cuda.current_device())
+    return (device.type, device.index)
+
+
+def tensor_key(
+    tensor: torch.Tensor, tensor_format: str, *, backend_name: str = "cuDNN attention"
+) -> Tuple[Any, ...]:
+    """A tensor as the graph will see it: BHSD dims, BHSD strides, dtype.
+
+    Strides belong in the key because the graph is built for this exact layout -- that is what
+    lets bshd and sbhd run without a transpose -- and the dtype because every node is declared
+    with one. Two formats that produce the same description are the same graph and should share
+    a plan, which is why the format itself is not keyed.
+    """
+    dim, stride = bhsd_dim_stride(tensor, tensor_format, backend_name=backend_name)
+    return (tuple(dim), tuple(stride), tensor.dtype)
+
+
+def cached_graph(cache: Dict[Any, Any], key: Optional[Any], build, *, device=None):
+    """Memoize a built graph. ``key=None`` means uncacheable: build and return without storing.
+
+    The build runs under ``device`` when one is given, not merely with its handle: the plans are
+    JIT-compiled, and a compile path may read the ambient CUDA context rather than the handle.
+    """
+    if key is None:
+        return build()
+    entry = cache.get(key)
+    if entry is None:
+        scope = (
+            torch.cuda.device(device)
+            if device is not None and device.type == "cuda"
+            else contextlib.nullcontext()
+        )
+        with scope:
+            entry = build()
+        cache[key] = entry
+    return entry
 
 
 def finalize_plans(

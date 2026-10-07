@@ -128,12 +128,7 @@ def _score_mod_callback_cache_key(callback: Optional[Callable]) -> Any:
 
 def _score_mod_device_key(device: torch.device) -> Tuple[Any, ...]:
     """Normalize a tensor device for graph cache keys."""
-    if device.type == "cuda":
-        index = device.index
-        if index is None:
-            index = torch.cuda.current_device()
-        return (device.type, index)
-    return (device.type, device.index)
+    return cudnn_pygraph.device_key(device)
 
 
 def _score_mod_tensor_metadata(tensor: torch.Tensor) -> Tuple[Any, ...]:
@@ -157,8 +152,9 @@ def _score_mod_tensor_dict_metadata(
 
 def _score_mod_bhsd_tensor_metadata(tensor: torch.Tensor, tensor_format: str) -> Tuple[Any, ...]:
     """Describe an SBHD/BSHD runtime tensor as a cuDNN BHSD graph tensor."""
-    dim, stride = _bhsd_dim_stride(tensor, tensor_format)
-    return (dim, stride, tensor.dtype, _score_mod_device_key(tensor.device))
+    return cudnn_pygraph.tensor_key(tensor, tensor_format, backend_name=_BACKEND_NAME) + (
+        cudnn_pygraph.device_key(tensor.device),
+    )
 
 
 def _make_cudnn_graph_tensor_dict(graph, tensors: Optional[Dict[str, torch.Tensor]]):
@@ -415,14 +411,12 @@ def _get_cudnn_score_mod_fwd_graph(
         output_layer,
         stats,
     )
-    key = _cudnn_score_mod_fwd_cache_key(*build_args)
-    if key is None:
-        return _build_cudnn_score_mod_fwd_graph(*build_args)
-    entry = _cudnn_score_mod_graph_cache.get(key)
-    if entry is None:
-        entry = _build_cudnn_score_mod_fwd_graph(*build_args)
-        _cudnn_score_mod_graph_cache[key] = entry
-    return entry
+    return cudnn_pygraph.cached_graph(
+        _cudnn_score_mod_graph_cache,
+        _cudnn_score_mod_fwd_cache_key(*build_args),
+        lambda: _build_cudnn_score_mod_fwd_graph(*build_args),
+        device=query_layer.device,
+    )
 
 
 def _build_cudnn_score_mod_bwd_graph(
@@ -534,14 +528,12 @@ def _get_cudnn_score_mod_bwd_graph(
         score_mod_bprop_tensors,
         deterministic,
     )
-    key = _cudnn_score_mod_bwd_cache_key(*build_args)
-    if key is None:
-        return _build_cudnn_score_mod_bwd_graph(*build_args)
-    entry = _cudnn_score_mod_graph_cache.get(key)
-    if entry is None:
-        entry = _build_cudnn_score_mod_bwd_graph(*build_args)
-        _cudnn_score_mod_graph_cache[key] = entry
-    return entry
+    return cudnn_pygraph.cached_graph(
+        _cudnn_score_mod_graph_cache,
+        _cudnn_score_mod_bwd_cache_key(*build_args),
+        lambda: _build_cudnn_score_mod_bwd_graph(*build_args),
+        device=query_layer.device,
+    )
 
 
 class FusedAttentionWithScoreModFunc(torch.autograd.Function):

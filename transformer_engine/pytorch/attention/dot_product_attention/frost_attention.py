@@ -15,7 +15,6 @@ Reaching them requires a Python graph, which is what this module is.
 
 from __future__ import annotations
 
-import contextlib
 import os
 from importlib.metadata import PackageNotFoundError, version as get_pkg_version
 from typing import Any, Dict, Optional, Sequence, Tuple
@@ -91,12 +90,6 @@ def _diagonal_band_kwargs(cudnn, attn_mask_type: str, window: Tuple[int, int]) -
     if left != -1:
         opts["diagonal_band_left_bound"] = left + 1
     return opts
-
-
-def _device_from_key(device_key) -> torch.device:
-    """Rebuild the torch.device that _key recorded, for building under the right device."""
-    kind, index = device_key
-    return torch.device(kind) if index is None else torch.device(kind, index)
 
 
 def _pkg_version(name: str, module=None) -> Tuple[Optional[PkgVersion], Optional[str]]:
@@ -503,21 +496,19 @@ def _select_frost_plan(graph, token: str, what: str):
     return name
 
 
-def _build_fwd(key) -> dict:
+def _build_fwd(key, device) -> dict:
     """Build (and JIT-compile) a forward graph. Expensive; always reached through the cache."""
     cudnn = _import_cudnn_frontend()
     # deterministic is unused here: it selects a backward algorithm. Callers pass False for the
     # forward so the two never split the forward cache.
-    *_device, b, hq, hkv, sq, skv, d, d_v, dtype, mask, scale, qs, ks, vs, _deterministic = key
-    shq, shk, shv = [b, hq, sq, d], [b, hkv, skv, d], [b, hkv, skv, d_v]
-    sho, o_stride = _o_shape_stride([b, hq, sq, d], d_v, qs)
+    _dev, (shq, qs, dtype), (shk, ks, _), (shv, vs, _), mask, scale, _deterministic = key
+    b, hq, sq = shq[0], shq[1], shq[2]
+    sho, o_stride = _o_shape_stride(shq, shv[3], qs)
 
-    graph = cudnn_pygraph.build_pygraph(
-        dtype, _device_from_key(_device), backend_name=_BACKEND_NAME
-    )
-    tq = graph.tensor(name="q", dim=shq, stride=list(qs))
-    tk = graph.tensor(name="k", dim=shk, stride=list(ks))
-    tv = graph.tensor(name="v", dim=shv, stride=list(vs))
+    graph = cudnn_pygraph.build_pygraph(dtype, device, backend_name=_BACKEND_NAME)
+    tq = graph.tensor(name="q", dim=list(shq), stride=list(qs))
+    tk = graph.tensor(name="k", dim=list(shk), stride=list(ks))
+    tv = graph.tensor(name="v", dim=list(shv), stride=list(vs))
     tout, tlse = graph.sdpa(
         name="frost_fwd",
         q=tq,
@@ -540,17 +531,15 @@ def _build_fwd(key) -> dict:
     }
 
 
-def _build_bwd(key) -> dict:
+def _build_bwd(key, device) -> dict:
     """Build (and JIT-compile) a backward graph. Expensive; always reached through the cache."""
     cudnn = _import_cudnn_frontend()
-    *_device, b, hq, hkv, sq, skv, d, d_v, dtype, mask, scale, qs, ks, vs, deterministic = key
+    _dev, (shq, qs, dtype), (shk, ks, _), (shv, vs, _), mask, scale, deterministic = key
     io_dt = cudnn_pygraph.io_data_type(cudnn, dtype, backend_name=_BACKEND_NAME)
-    shq, shk, shv = [b, hq, sq, d], [b, hkv, skv, d], [b, hkv, skv, d_v]
-    sho, o_stride = _o_shape_stride([b, hq, sq, d], d_v, qs)
+    b, hq, sq = shq[0], shq[1], shq[2]
+    sho, o_stride = _o_shape_stride(shq, shv[3], qs)
 
-    graph = cudnn_pygraph.build_pygraph(
-        dtype, _device_from_key(_device), backend_name=_BACKEND_NAME
-    )
+    graph = cudnn_pygraph.build_pygraph(dtype, device, backend_name=_BACKEND_NAME)
     handles = {}
     # Each grad is declared with the layout of the tensor it differentiates.
     for name, shape, stride in (
@@ -560,7 +549,7 @@ def _build_bwd(key) -> dict:
         ("o", sho, o_stride),
         ("do", sho, o_stride),
     ):
-        handles[name] = graph.tensor(name=name, dim=shape, stride=list(stride))
+        handles[name] = graph.tensor(name=name, dim=list(shape), stride=list(stride))
     handles["stats"] = graph.tensor(
         name="stats",
         dim=[b, hq, sq, 1],
@@ -591,19 +580,13 @@ def _build_bwd(key) -> dict:
     }
 
 
-def _cached(kind: str, key):
+def _cached(kind: str, key, device):
     """Plan cache. See module docstring: building dominates executing even once the JIT is
     cached, so this is required rather than an optimisation."""
-    cache_key = (kind,) + key
-    entry = _PLAN_CACHE.get(cache_key)
-    if entry is None:
-        # Build under the device the key names, not merely with its handle: the plans are
-        # JIT-compiled, and a compile path may read the ambient CUDA context rather than the handle.
-        device = _device_from_key(key[:2])
-        with torch.cuda.device(device) if device.type == "cuda" else contextlib.nullcontext():
-            entry = _build_fwd(key) if kind == "fwd" else _build_bwd(key)
-        _PLAN_CACHE[cache_key] = entry
-    return entry
+    build = _build_fwd if kind == "fwd" else _build_bwd
+    return cudnn_pygraph.cached_graph(
+        _PLAN_CACHE, (kind,) + key, lambda: build(key, device), device=device
+    )
 
 
 def _validate_qkv(q, k, v, qkv_format):
@@ -636,32 +619,24 @@ def _bhsd(t: torch.Tensor, qkv_format: str):
 
 
 def _key(q, k, v, qkv_format, mask, scale, deterministic=False):
-    qd, qs = _bhsd(q, qkv_format)
-    kd, ks = _bhsd(k, qkv_format)
-    vd, vs = _bhsd(v, qkv_format)
+    """The plan cache key.
+
+    Structured per tensor rather than flattened, so the builders destructure it by name instead
+    of by position, and so the per-tensor fragment is the same one flex_attention keys on.
+    """
+
+    def described(t):
+        return cudnn_pygraph.tensor_key(t, qkv_format, backend_name=_BACKEND_NAME)
+
     return (
         # Built under whichever device was current, so it must not be reused on another. Matches
-        # the C++ fused-attn cache, which keys on device_id. Type too, so CPU cannot alias cuda:0.
-        q.device.type,
-        q.device.index,
-        qd[0],
-        qd[1],
-        kd[1],
-        qd[2],
-        kd[2],
-        qd[3],
-        # v carries its own head_dim and strides, the way flex_attention keys each tensor
-        # separately. Without them an asymmetric v would reuse a plan built for k's shape.
-        vd[3],
-        q.dtype,
+        # the C++ fused-attn cache, which keys on device_id.
+        cudnn_pygraph.device_key(q.device),
+        described(q),
+        described(k),
+        described(v),
         mask,
         float(scale),
-        # Strides are part of the plan: the graph is built for this exact layout, which is what
-        # lets bshd and sbhd both run without a transpose. qkv_format does not need its own key
-        # entry, since two formats producing the same BHSD description are the same graph.
-        tuple(qs),
-        tuple(ks),
-        tuple(vs),
         # The deterministic backward is a different algorithm, not a flag on the same one, so a
         # plan built either way must not be handed to a call that asked for the other.
         bool(deterministic),
@@ -741,7 +716,7 @@ def fused_attn_fwd(
     q, k, v = q.contiguous(), k.contiguous(), v.contiguous()
     qd, _, vd = _validate_qkv(q, k, v, qkv_format)
     scale = attn_scale if attn_scale is not None else qd[3] ** -0.5
-    entry = _cached("fwd", _key(q, k, v, qkv_format, mask, scale))
+    entry = _cached("fwd", _key(q, k, v, qkv_format, mask, scale), q.device)
     tq, tk, tv, tout, tlse = entry["handles"]
 
     # Allocated per call so concurrent uses cannot alias; the cache holds only the plan.
@@ -845,7 +820,7 @@ def fused_attn_bwd(
         )
 
     scale = attn_scale if attn_scale is not None else qd[3] ** -0.5
-    entry = _cached("bwd", _key(q, k, v, qkv_format, mask, scale, deterministic))
+    entry = _cached("bwd", _key(q, k, v, qkv_format, mask, scale, deterministic), q.device)
     h = entry["handles"]
 
     if softmax_lse.dim() == 3:
