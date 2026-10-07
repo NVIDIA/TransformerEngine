@@ -377,6 +377,10 @@ std::vector<std::tuple<int, size_t, size_t, bool>> multi_tensor_test_cases = {
     {3, 256, 4096, false},
     {2, 128, 8192, true},
     {2, 128, 8192, false},
+    // Rowwise num_tiles_k = 34 selects vec_load_size = 2 (int2 kernel)
+    {2, 128, 4352, true},
+    // Colwise num_tiles_k = 512 / 32 / 4 = 4 selects vec_load_size = 4 (int4 kernel)
+    {2, 512, 4096, false},
 };
 
 }  // namespace
