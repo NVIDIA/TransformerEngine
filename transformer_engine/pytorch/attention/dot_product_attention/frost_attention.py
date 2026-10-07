@@ -175,6 +175,29 @@ _SUPPORTED_MASKS = ("no_mask", "causal", "causal_bottom_right")
 _NO_WINDOW = (-1, -1)
 
 
+def _window_pair(window_size) -> Tuple[int, int]:
+    """Normalise window_size to a (left, right) pair, declining anything that is not one.
+
+    Its own function because _te_mask_spec unpacks the window before _mask_spec ever sees it, so
+    leaving these two guards inside _mask_spec left them dead on the fused path. Raised as
+    NotImplementedError so the selector declines, that being the only thing
+    is_frost_attention_supported catches; a TypeError would escape backend selection instead.
+    """
+    if window_size is None:
+        return _NO_WINDOW
+    try:
+        window = tuple(window_size)
+    except TypeError:
+        raise NotImplementedError(
+            f"window_size must be a (left, right) pair; got {window_size!r}"
+        ) from None
+    if len(window) != 2 or not all(isinstance(bound, int) for bound in window):
+        raise NotImplementedError(
+            f"window_size must be a pair of ints (left, right); got {window!r}"
+        )
+    return window
+
+
 def _mask_spec(attn_mask_type: str, window_size=None):
     """Validate a TE mask type and window, returning the hashable spec the plan is keyed on."""
     if attn_mask_type not in _SUPPORTED_MASKS:
@@ -182,16 +205,7 @@ def _mask_spec(attn_mask_type: str, window_size=None):
             f"FROST attention supports attn_mask_type in {str(_SUPPORTED_MASKS)}; got"
             f" {attn_mask_type!r}"
         )
-    try:
-        window = _NO_WINDOW if window_size is None else tuple(window_size)
-    except TypeError:
-        # Raised as NotImplementedError so the selector declines instead of propagating out of
-        # backend selection, which is the only thing is_frost_attention_supported catches.
-        raise NotImplementedError(
-            f"window_size must be a (left, right) pair; got {window_size!r}"
-        ) from None
-    if len(window) != 2:
-        raise NotImplementedError(f"window_size must be a (left, right) pair; got {window!r}")
+    window = _window_pair(window_size)
     if window[0] < -1:
         # cuDNN's left bound must be >= 1, so a left of -2 would build diagonal_band_left_bound=-1
         # and fail at plan build rather than declining here.
@@ -243,7 +257,7 @@ def _te_mask_spec(attn_mask_type: str, window_size, bottom_right_diagonal: bool)
         raise NotImplementedError(
             f"FROST attention does not support a padding mask; got {attn_mask_type!r}"
         )
-    left, right = _NO_WINDOW if window_size is None else tuple(window_size)
+    left, right = _window_pair(window_size)
     if "causal" in attn_mask_type and right == -1:
         right = 0
     if right == 0:
@@ -773,7 +787,13 @@ def fused_attn_bwd(
     # o and dO used to carry their own format into the permute; they now share qkv_format, so a
     # divergence would silently describe them with the wrong strides. The selector already
     # declines it, but this is reached directly too.
-    for name, fmt in (("o_format", o_format), ("do_format", do_format)):
+    # dqkv_layout joins them: the grads go back through qkv_format, so a divergence would return
+    # them in a layout the caller did not ask for, with nothing raised.
+    for name, fmt in (
+        ("o_format", o_format),
+        ("do_format", do_format),
+        ("dqkv_layout", _qkv_format_from_layout(dqkv_layout)),
+    ):
         if fmt != qkv_format:
             raise NotImplementedError(
                 f"FROST attention needs {name} to match qkv_format; got {fmt}/{qkv_format}"
