@@ -324,8 +324,7 @@ class TestEP(unittest.TestCase):
 
     def test_two_handle_mems_no_aliasing(self):
         """Two ``ep_prepare`` calls in one jit must produce distinct handle_mem
-        buffers; the pointer-keyed C++ cache must not alias HandleEntries
-        across distinct logical layers."""
+        buffers so distinct logical layers never share prepared state."""
         _T, topk_idx, _tokens, _w = self._make_identity_inputs()
         layer_cfg_kwargs = dict(
             top_k=TOP_K, dispatch_output_per_expert_alignment=16, topk_idx_dtype=TOPK_IDX_DTYPE
