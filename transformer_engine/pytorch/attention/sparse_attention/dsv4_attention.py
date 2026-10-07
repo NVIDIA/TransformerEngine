@@ -11,7 +11,7 @@ import torch
 from transformer_engine.pytorch.module import Linear, RMSNorm
 
 from .compressor import _Compressor
-from .dsa_cudnn_kernels import attention as _attention
+from .dsa_cudnn import attention as _attention
 from .dsa_rope import _DSv4RotaryEmbedding, apply_rotary
 from .indexer import _Indexer
 
@@ -22,7 +22,7 @@ class DSv4Attention(torch.nn.Module):
     """Experimental causal joint local + compressed attention for DSv4.
 
     Parameter-free core: the caller owns projections, compression, normalization,
-    RoPE, and the learned sink. Use :mod:`dsa_cudnn_kernels` for gated pooling
+    RoPE, and the learned sink. Use :mod:`dsa_cudnn` for gated pooling
     and CSA selection. Pass selected indices for CSA; omit them and supply
     ``max_compressed_seqlen`` for HCA.
 

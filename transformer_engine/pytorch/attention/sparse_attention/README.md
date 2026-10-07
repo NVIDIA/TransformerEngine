@@ -68,14 +68,14 @@ window, all eligible compressed keys, and sink). Score helpers are not autograd
 operations; the caller owns the mean-reduced scalar KL, coefficient, and loss
 attachment. Per-token reduction is untested.
 
-The lower-level `dsa_cudnn_kernels` calls expose compression and selection when
+The lower-level `dsa_cudnn` calls expose compression and selection when
 a model owns its own projections, RMSNorm, RoPE, sink, and output projection.
 `DSv4Attention` owns the parameter-free attention call:
 
 ```text
-model projected KV + gates ── dsa_cudnn_kernels.compress ── model norm/RoPE ── compressed KV
-model index projections ───── dsa_cudnn_kernels.compress ── model norm/RoPE ── index key
-model index query + key + weights ───────────── dsa_cudnn_kernels.select_blocks ── IDs (CSA)
+model projected KV + gates ── dsa_cudnn.compress ── model norm/RoPE ── compressed KV
+model index projections ───── dsa_cudnn.compress ── model norm/RoPE ── index key
+model index query + key + weights ───────────── dsa_cudnn.select_blocks ── IDs (CSA)
 model query + local KV + compressed KV + IDs ─ dsv4_attention.DSv4Attention ── head output
 ```
 
@@ -87,12 +87,12 @@ rows; the attention core maps them into its combined local/compressed KV space.
 
 ```python
 from transformer_engine.pytorch.attention.sparse_attention import (
-    dsa_cudnn_kernels,
+    dsa_cudnn,
     dsv4_attention,
 )
 
 # Model code supplies BF16 projected tensors and applies its own norm/RoPE.
-pooled = dsa_cudnn_kernels.compress(
+pooled = dsa_cudnn.compress(
     kv, gates, position_bias.float(), cu, cu_comp,
     ratio=ratio, overlap=is_csa, total_comp=total_comp,
 )
@@ -100,12 +100,12 @@ compressed_kv = model.finish_compressed(pooled)
 
 indices = None
 if is_csa:
-    index_pooled = dsa_cudnn_kernels.compress(
+    index_pooled = dsa_cudnn.compress(
         index_kv, index_gates, index_position_bias.float(), cu, cu_comp,
         ratio=ratio, overlap=True, total_comp=total_comp,
     )
     index_key = model.finish_index_key(index_pooled)
-    indices = dsa_cudnn_kernels.select_blocks(
+    indices = dsa_cudnn.select_blocks(
         index_query, index_key, index_weights, cu, cu_comp,
         top_k=top_k, ratio=ratio, max_seqlen=max_seqlen,
         max_compressed_seqlen=max_compressed_seqlen,

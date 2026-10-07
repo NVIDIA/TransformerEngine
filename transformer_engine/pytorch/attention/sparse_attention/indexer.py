@@ -9,7 +9,7 @@ import torch
 from transformer_engine.pytorch.module import Linear
 
 from .compressor import _Compressor
-from .dsa_cudnn_kernels import select_blocks
+from .dsa_cudnn import select_blocks
 from .dsa_rope import apply_rotary
 
 

@@ -8,11 +8,11 @@ Each variant owns its tensor/index contract and preparation helpers. Optional
 kernels load on execution. Add future variants as sibling modules.
 """
 
-from . import dsa_cudnn_kernels, dsv4_attention
+from . import dsa_cudnn, dsv4_attention
 from .dsv4_attention import DSv4Attention, DSv4HybridAttention
 
 __all__ = [
-    "dsa_cudnn_kernels",
+    "dsa_cudnn",
     "dsv4_attention",
     "DSv4Attention",
     "DSv4HybridAttention",
