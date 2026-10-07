@@ -2584,12 +2584,20 @@ class GroupedLinear(TransformerEngineBaseModule):
             weight_params = self._get_weight_tensors()
             if not self.fuse_wgrad_accumulation:
                 if self.single_grouped_weight:
-                    weight_params[0].grad = wgrad_output.rowwise_data.view(
+                    wgrad = wgrad_output.rowwise_data.view(
                         self.num_gemms, self.out_features, self.in_features
                     ).to(weight_params[0].dtype)
+                    if weight_params[0].grad is None:
+                        weight_params[0].grad = wgrad
+                    else:
+                        weight_params[0].grad.add_(wgrad)
                 else:
                     for i in range(self.num_gemms):
-                        weight_params[i].grad = wgrad_output[i].to(weight_params[i].dtype)
+                        wgrad = wgrad_output[i].to(weight_params[i].dtype)
+                        if weight_params[i].grad is None:
+                            weight_params[i].grad = wgrad
+                        else:
+                            weight_params[i].grad.add_(wgrad)
             if (
                 self.use_grouped_tensor
                 and self.apply_bias
