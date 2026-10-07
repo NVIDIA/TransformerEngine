@@ -8,7 +8,7 @@ import torch
 
 from transformer_engine.pytorch.module import Linear, RMSNorm
 
-from .dsv4 import compress
+from .dsa_cudnn_kernels import compress
 
 
 class _Compressor(torch.nn.Module):

@@ -8,9 +8,9 @@ import torch
 
 from transformer_engine.pytorch.module import Linear
 
-from ._dsv4_compressor import _Compressor
-from ._dsv4_rope import apply_rotary
-from .dsv4 import select_blocks
+from .compressor import _Compressor
+from .dsa_cudnn_kernels import select_blocks
+from .dsa_rope import apply_rotary
 
 
 class _Indexer(torch.nn.Module):

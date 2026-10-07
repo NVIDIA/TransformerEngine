@@ -7,7 +7,7 @@
 import pytest
 import torch
 
-from transformer_engine.pytorch.attention.sparse_attention import dsv4
+from transformer_engine.pytorch.attention.sparse_attention import dsv4_attention
 
 
 @pytest.mark.parametrize("variant", ["hca", "csa"])
@@ -59,7 +59,7 @@ def test_dsv4_forward_backward(variant, head_dim):
             start += length
             comp_start += count
 
-    output = dsv4.DSv4Attention(window_size=32, ratio=ratio)(
+    output = dsv4_attention.DSv4Attention(window_size=32, ratio=ratio)(
         *leaves,
         cu,
         cu_comp,
@@ -98,7 +98,7 @@ def test_dsv4_forward_backward(variant, head_dim):
 
 def test_dsv4_rejects_unsupported_metadata():
     with pytest.raises(ValueError, match="positive"):
-        dsv4.DSv4Attention(window_size=0, ratio=4)
-    core = dsv4.DSv4Attention(window_size=32, ratio=4)
+        dsv4_attention.DSv4Attention(window_size=0, ratio=4)
+    core = dsv4_attention.DSv4Attention(window_size=32, ratio=4)
     with pytest.raises(ValueError, match="query"):
         core(torch.empty(1, 4, 512), None, None, None, None, None)

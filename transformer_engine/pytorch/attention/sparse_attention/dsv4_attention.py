@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Unpadded DSv4 CSA/HCA attention."""
+"""DSv4 attention core and unpadded CSA/HCA attention layer."""
 
 from typing import Optional
 
@@ -10,10 +10,78 @@ import torch
 
 from transformer_engine.pytorch.module import Linear, RMSNorm
 
-from ._dsv4_compressor import _Compressor
-from ._dsv4_indexer import _Indexer
-from ._dsv4_rope import _DSv4RotaryEmbedding, apply_rotary
-from .dsv4 import DSv4Attention
+from .compressor import _Compressor
+from .dsa_cudnn_kernels import attention as _attention
+from .dsa_rope import _DSv4RotaryEmbedding, apply_rotary
+from .indexer import _Indexer
+
+__all__ = ["DSv4Attention", "DSv4HybridAttention"]
+
+
+class DSv4Attention(torch.nn.Module):
+    """Experimental causal joint local + compressed attention for DSv4.
+
+    Parameter-free core: the caller owns projections, compression, normalization,
+    RoPE, and the learned sink. Use :mod:`dsa_cudnn_kernels` for gated pooling
+    and CSA selection. Pass selected indices for CSA; omit them and supply
+    ``max_compressed_seqlen`` for HCA.
+
+    Inputs are contiguous CUDA BF16 query [T,64,D], local KV [T,D], compressed
+    KV [Tc,D], FP32 sink [64], and CUDA INT32 sequence prefixes [B+1]. D is 512
+    or 576; values use the first 512 KV channels. Output is [T,64,512], retaining
+    the head axis for DSv4's output unrotation. Prefixes start at zero and end
+    at valid row counts; compressed lengths are floor(sequence length / ratio).
+    CSA indices are distinct global packed compressed-row IDs, or -1 for padding.
+
+    Only full sequences with positions starting at zero are supported. Local
+    keys satisfy max(0,q-window_size+1) <= k <= q. Compressed block j becomes
+    visible when (j+1)*ratio <= q+1. All visible local and compressed entries
+    share one softmax with the sink; its value contribution is zero.
+
+    Requires SM100 and cuDNN Frontend 1.29.0. Forward and first-order backward
+    use cuDNN's DSA namespace. No dropout, arbitrary masks, cache/decode, FP8,
+    distributed attention, or higher-order gradients. This module does not use
+    DPA backend-selection flags. cuDNN operations are loaded on execution.
+    """
+
+    def __init__(self, *, window_size: int, ratio: int):
+        super().__init__()
+        if window_size <= 0 or ratio <= 0:
+            raise ValueError("window_size and ratio must be positive.")
+        self.window_size = window_size
+        self.ratio = ratio
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        local_kv: torch.Tensor,
+        compressed_kv: torch.Tensor,
+        sink: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        cu_seqlens_comp: torch.Tensor,
+        *,
+        indices: Optional[torch.Tensor] = None,
+        scale: Optional[float] = None,
+        max_compressed_seqlen: Optional[int] = None,
+    ) -> torch.Tensor:
+        """Evaluate the joint attention, with scale defaulting to D**-0.5."""
+        from transformer_engine.pytorch.quantization import FP8GlobalStateManager
+
+        if FP8GlobalStateManager.is_fp8_enabled():
+            raise NotImplementedError("DSv4Attention supports BF16 only; disable TE FP8 autocast.")
+        return _attention(
+            query,
+            local_kv,
+            compressed_kv,
+            sink,
+            cu_seqlens,
+            cu_seqlens_comp,
+            window_size=self.window_size,
+            ratio=self.ratio,
+            indices=indices,
+            scale=scale,
+            max_compressed_seqlen=max_compressed_seqlen,
+        )
 
 
 class DSv4HybridAttention(torch.nn.Module):
@@ -249,6 +317,3 @@ class DSv4HybridAttention(torch.nn.Module):
                 "sink": self.sinks.float().detach(),
             }
         return result
-
-
-__all__ = ["DSv4HybridAttention"]

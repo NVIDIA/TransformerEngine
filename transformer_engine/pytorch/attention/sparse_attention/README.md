@@ -37,7 +37,7 @@ indexer auxiliary loss and its attachment remain caller-owned; without one, the
 language-model loss does not train `indexer.q_proj` or the
 index-key/weight slices of `indexer.compressor.fused_proj`: top-k selection has no gradient.
 
-`_dsv4_rope.py` caches FP32 token frequencies (prebuilt when `max_seqlen` is
+`dsa_rope.py` caches FP32 token frequencies (prebuilt when `max_seqlen` is
 provided) and shares window-start slices with the CSA `_Indexer`. The indexer
 owns its projections, index-key compressor, and block selection; neither helper
 changes the cuDNN call contracts.
@@ -68,14 +68,15 @@ window, all eligible compressed keys, and sink). Score helpers are not autograd
 operations; the caller owns the mean-reduced scalar KL, coefficient, and loss
 attachment. Per-token reduction is untested.
 
-The lower-level `dsv4` calls expose three stages when a model owns its own
-projections, RMSNorm, RoPE, sink, and output projection:
+The lower-level `dsa_cudnn_kernels` calls expose compression and selection when
+a model owns its own projections, RMSNorm, RoPE, sink, and output projection.
+`DSv4Attention` owns the parameter-free attention call:
 
 ```text
-model projected KV + gates ── dsv4.compress ── model norm/RoPE ── compressed KV
-model index projections ───── dsv4.compress ── model norm/RoPE ── index key
-model index query + key + weights ───────────── dsv4.select_blocks ── IDs (CSA)
-model query + local KV + compressed KV + IDs ─ dsv4.DSv4Attention ── head output
+model projected KV + gates ── dsa_cudnn_kernels.compress ── model norm/RoPE ── compressed KV
+model index projections ───── dsa_cudnn_kernels.compress ── model norm/RoPE ── index key
+model index query + key + weights ───────────── dsa_cudnn_kernels.select_blocks ── IDs (CSA)
+model query + local KV + compressed KV + IDs ─ dsv4_attention.DSv4Attention ── head output
 ```
 
 The model calls the same stages for HCA, omitting index compression and selection.
@@ -85,27 +86,33 @@ projections. `select_blocks` returns global IDs into the packed **compressed**
 rows; the attention core maps them into its combined local/compressed KV space.
 
 ```python
-from transformer_engine.pytorch.attention.sparse_attention import dsv4
+from transformer_engine.pytorch.attention.sparse_attention import (
+    dsa_cudnn_kernels,
+    dsv4_attention,
+)
 
 # Model code supplies BF16 projected tensors and applies its own norm/RoPE.
-pooled = dsv4.compress(kv, gates, position_bias.float(), cu, cu_comp,
-                       ratio=ratio, overlap=is_csa, total_comp=total_comp)
+pooled = dsa_cudnn_kernels.compress(
+    kv, gates, position_bias.float(), cu, cu_comp,
+    ratio=ratio, overlap=is_csa, total_comp=total_comp,
+)
 compressed_kv = model.finish_compressed(pooled)
 
 indices = None
 if is_csa:
-    index_pooled = dsv4.compress(index_kv, index_gates,
-                                 index_position_bias.float(), cu, cu_comp,
-                                 ratio=ratio, overlap=True, total_comp=total_comp)
+    index_pooled = dsa_cudnn_kernels.compress(
+        index_kv, index_gates, index_position_bias.float(), cu, cu_comp,
+        ratio=ratio, overlap=True, total_comp=total_comp,
+    )
     index_key = model.finish_index_key(index_pooled)
-    indices = dsv4.select_blocks(
+    indices = dsa_cudnn_kernels.select_blocks(
         index_query, index_key, index_weights, cu, cu_comp,
         top_k=top_k, ratio=ratio, max_seqlen=max_seqlen,
         max_compressed_seqlen=max_compressed_seqlen,
         scale=(index_head_dim * index_n_heads) ** -0.5,
     )
 
-output = dsv4.DSv4Attention(window_size=window_size, ratio=ratio)(
+output = dsv4_attention.DSv4Attention(window_size=window_size, ratio=ratio)(
     query, local_kv, compressed_kv, sink.float(), cu, cu_comp,
     indices=indices,
     max_compressed_seqlen=max_compressed_seqlen if indices is None else None,
