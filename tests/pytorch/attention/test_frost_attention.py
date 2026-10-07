@@ -59,19 +59,16 @@ requires_frost = pytest.mark.skipif(_SKIP is not None, reason=str(_SKIP))
 # head_dim 512 is the whole point of the backend; 320 checks the interior of the (256, 512] range
 # rather than only its endpoint.
 _SHAPES = [
-    # b, hq, hkv, sq, skv, d, d_v
-    (2, 8, 4, 1024, 1024, 512, 512),  # Gemma-4 global layer, GQA
-    (2, 8, 8, 512, 512, 512, 512),  # MHA
-    (1, 4, 4, 256, 512, 512, 512),  # sq != skv, which is where mask alignment matters
-    (2, 4, 4, 512, 512, 320, 320),  # interior head_dim
-    # d_v != d_qk. O and the O-shaped grads take q's layout with v's head_dim, so this is the
-    # case that catches a plan or an allocation still built from q's trailing dimension.
-    (2, 8, 4, 512, 512, 512, 320),
+    # b, hq, hkv, sq, skv, d
+    (2, 8, 4, 1024, 1024, 512),  # Gemma-4 global layer, GQA
+    (2, 8, 8, 512, 512, 512),  # MHA
+    (1, 4, 4, 256, 512, 512),  # sq != skv, which is where mask alignment matters
+    (2, 4, 4, 512, 512, 320),  # interior head_dim
 ]
 
 
 def _shape_id(s):
-    return "b%d_hq%d_hkv%d_sq%d_skv%d_d%d_dv%d" % s
+    return "b%d_hq%d_hkv%d_sq%d_skv%d_d%d" % s
 
 
 def _fwd(q, k, v, mask, scale, window=None):
@@ -198,12 +195,12 @@ def _floor(q32, k32, v32, scale, mask, dtype, window=None):
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 def test_frost_forward_matches_reference(shape, mask, dtype):
     """Forward output and LSE against an independent float64 reference."""
-    b, hq, hkv, sq, skv, d, d_v = shape
+    b, hq, hkv, sq, skv, d = shape
     torch.manual_seed(0)
     # Generate in fp32 so there is a true high-precision original to measure against, then cast
     # for the kernel. bshd is what the backend takes now: it is never permuted, only described.
     mk = lambda s_, h_, d_: torch.randn(b, s_, h_, d_, device="cuda")
-    q32, k32, v32 = mk(sq, hq, d), mk(skv, hkv, d), mk(skv, hkv, d_v)
+    q32, k32, v32 = mk(sq, hq, d), mk(skv, hkv, d), mk(skv, hkv, d)
     q, k, v = q32.to(dtype), k32.to(dtype), v32.to(dtype)
     scale = 1.0 / math.sqrt(d)
 
@@ -284,10 +281,10 @@ def test_frost_backward_matches_reference(shape, mask, window, dtype):
     that would show first -- the gradient of a softmax involves a subtraction of similarly sized
     terms, so a range problem surfaces there before it surfaces in the forward.
     """
-    b, hq, hkv, sq, skv, d, d_v = shape
+    b, hq, hkv, sq, skv, d = shape
     torch.manual_seed(0)
     mk = lambda s_, h_, d_: torch.randn(b, s_, h_, d_, device="cuda")
-    q32, k32, v32 = mk(sq, hq, d), mk(skv, hkv, d), mk(skv, hkv, d_v)
+    q32, k32, v32 = mk(sq, hq, d), mk(skv, hkv, d), mk(skv, hkv, d)
     q, k, v = q32.to(dtype), k32.to(dtype), v32.to(dtype)
     scale = 1.0 / math.sqrt(d)
 
@@ -368,13 +365,13 @@ def test_frost_declines_unsupported_configs():
     assert (
         is_frost_attention_supported(_frost_params())[0] == FusedAttnBackend.FROST
     ), "the supported case must be accepted"
-    assert (
-        is_frost_attention_supported(_frost_params(head_dim_v=320))[0] == FusedAttnBackend.FROST
-    ), "an asymmetric head_dim pair inside the range must be accepted"
 
     for override, why in (
         (dict(head_dim_qk=256, head_dim_v=256), "head_dim at the exclusive lower bound"),
         (dict(head_dim_v=256), "head_dim_v below the range"),
+        # The forward serves an asymmetric pair and the backward does not, so the selector
+        # declines it rather than accepting a config whose backward cannot build.
+        (dict(head_dim_v=320), "asymmetric head_dim"),
         (dict(qkv_dtype=TE_DType[torch.float32]), "fp32"),
         (dict(dropout=0.1), "dropout"),
         (dict(bias_type=AttnBiasType["post_scale_bias"]), "attention bias"),
@@ -515,43 +512,6 @@ def test_frost_rejects_mismatched_kv():
         _fwd(q, k, mk(h * 2), "no_mask", 1.0)
     with pytest.raises(ValueError, match="match q"):
         _fwd(q, k, k.to(torch.float32), "no_mask", 1.0)
-
-
-@requires_frost
-def test_frost_serves_v_with_its_own_head_dim_and_layout():
-    """v is keyed and declared separately, the way flex_attention keys each tensor.
-
-    Both halves of that are exercised: v carries its own head_dim, and its strides differ from
-    k's because it is a non-contiguous slice of a wider buffer rather than a fresh allocation.
-    A plan built from k alone would compute either case wrongly without raising.
-
-    v cannot differ from k in qkv_format: one format describes all three, which is what the
-    fused path produces and what the selector enforces.
-    """
-    b, h, s, d, d_v = 2, 4, 512, 512, 320
-    dtype = torch.bfloat16
-    torch.manual_seed(0)
-    q32 = torch.randn(b, s, h, d, device="cuda")
-    k32 = torch.randn(b, s, h, d, device="cuda")
-    # A slice of a wider buffer, so v's strides are its own rather than k's shape re-derived.
-    v32 = torch.randn(b, s, h, d_v + 64, device="cuda")[..., :d_v]
-    q, k, v = q32.to(dtype), k32.to(dtype), v32.to(dtype)
-    assert v.stride()[:3] != k.stride()[:3], "v must not share k's strides here"
-    assert v.stride(3) == 1, "the head dim must stay contiguous"
-    scale = 1.0 / math.sqrt(d)
-
-    out, lse = _fwd(q, k, v, "causal", scale)
-    out = _bhsd(out)
-
-    floor_o, floor_l, ref_o, ref_lse = _floor(
-        _bhsd(q32), _bhsd(k32), _bhsd(v32), scale, "causal", dtype
-    )
-    assert out.shape == (b, h, s, d_v), "out takes v's head_dim; got %s" % (tuple(out.shape),)
-    assert out.stride(3) == 1, "out must stay head-contiguous; got stride %s" % (out.stride(),)
-    err_o = (out.double() - ref_o).abs().max().item()
-    err_l = (lse.double() - ref_lse).abs().max().item()
-    assert err_o <= 2 * floor_o + 1e-3, "out err %.3e exceeds 2x the floor %.3e" % (err_o, floor_o)
-    assert err_l <= 2 * floor_l + 1e-3, "lse err %.3e exceeds 2x the floor %.3e" % (err_l, floor_l)
 
 
 def test_frost_engines_are_enabled_even_if_cudnn_was_imported_without_them():

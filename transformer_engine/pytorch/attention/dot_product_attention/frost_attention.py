@@ -297,8 +297,18 @@ def is_frost_attention_supported(params) -> Tuple[int, str]:
     if int(os.environ.get("NVTE_FROST_ATTN", "1")) == 0:
         return no_backend, "FROST is disabled by NVTE_FROST_ATTN=0"
 
-    # Each head_dim is checked on its own: q/k and v get separate graph nodes, so an
-    # asymmetric pair is served as long as both dims land in the range.
+    if params.head_dim_qk != params.head_dim_v:
+        # Measured on B200 with cuDNN Frontend 1.29.0: the forward serves an asymmetric pair, the
+        # backward does not. Its d_qk > 128 path covers only 192/128 and 256/256, and nothing
+        # proposes a plan otherwise. Declined outright rather than for training alone, because
+        # is_training is module.training and eval() does not disable autograd, so it is no
+        # guarantee that no backward follows.
+        return (
+            no_backend,
+            f"FROST requires symmetric head_dim; got {params.head_dim_qk}/{params.head_dim_v}",
+        )
+    # Still checked per dimension: v has its own graph node and its own cache-key entry, so the
+    # range applies to each rather than to one standing in for both.
     for name, head_dim in (
         ("head_dim_qk", params.head_dim_qk),
         ("head_dim_v", params.head_dim_v),
