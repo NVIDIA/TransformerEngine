@@ -196,10 +196,10 @@ def cached_graph(cache: Dict[Any, Any], key: Optional[Any], build, *, device=Non
 
     The build runs under ``device`` when one is given, not merely with its handle: the plans are
     JIT-compiled, and a compile path may read the ambient CUDA context rather than the handle.
+    That applies to the uncacheable path too, which is why there is one build site rather than
+    one per branch -- a second would be free to forget the scope.
     """
-    if key is None:
-        return build()
-    entry = cache.get(key)
+    entry = None if key is None else cache.get(key)
     if entry is None:
         scope = (
             torch.cuda.device(device)
@@ -208,7 +208,8 @@ def cached_graph(cache: Dict[Any, Any], key: Optional[Any], build, *, device=Non
         )
         with scope:
             entry = build()
-        cache[key] = entry
+        if key is not None:
+            cache[key] = entry
     return entry
 
 
