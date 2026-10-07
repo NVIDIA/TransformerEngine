@@ -23,6 +23,8 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 import torch
 from packaging.version import InvalidVersion, Version as PkgVersion
 
+from . import cudnn_pygraph
+
 __all__ = [
     "is_frost_attention_available",
     "is_frost_attention_supported",
@@ -53,89 +55,19 @@ _MIN_HEAD_DIM = 257  # below this the existing cuDNN/flash backends already serv
 # here rather than failing later at plan selection.
 _HEAD_DIM_MULTIPLE = 8
 
-_cudnn = None
-_frost_engines_enabled = False
+_BACKEND_NAME = "FrostAttention"
 _availability: Optional[Tuple[bool, str]] = None
 _PLAN_CACHE: dict = {}
-_HANDLES: Dict[torch.device, Any] = {}
 
 
 def _import_cudnn_frontend(enable_frost_engines: bool = True):
-    """Import cuDNN Frontend, enabling the FROST engines if this caller needs them.
+    """Import cuDNN Frontend with the FROST engines on, which is what this backend needs.
 
-    ``enable_frost_engines`` is not merely additive: the switch also ranks FROST ahead of the
-    backend engines everywhere, so a caller that does not want FROST must not ask for it.
-
-    The enabling is deliberately outside the import memo. Both backends call this, and whichever
-    one reaches it first would otherwise decide for the process: with the flag inside the memo, a
-    flex call would cache the module with FROST off and every later FROST call would get a cuDNN
-    that offers no FROST engine, which surfaces much later as "no cuDNN engine matching ... was
-    offered". Enabling late is sound because the switch is read per graph rather than at import:
-    in cuDNN Frontend 1.29.0 ``engines/manifest.py`` consults the environment inside
-    ``offered_ids()``, reached from ``engines_for(graph)`` on every ``create_execution_plans``.
-
-    Note the switch is process-wide and never unset, so enabling it for FROST also reorders the
-    candidates a concurrent score_mod graph sees. Callers that require a particular engine should
-    verify by plan name rather than rely on the switch, which is what
-    ``_finalize_plans(require_plan_token=...)`` does.
+    The default differs from the shared module's, where it is off. Every use site here wants the
+    engines; a caller that does not must not ask for them, because the switch is process-wide.
+    See ``cudnn_pygraph.import_cudnn_frontend`` for why the enabling sits outside the import memo.
     """
-    global _cudnn, _frost_engines_enabled  # pylint: disable=global-statement
-    if _cudnn is None:
-        try:
-            import cudnn  # pylint: disable=import-outside-toplevel
-        except ImportError as exc:
-            raise ImportError(
-                "cuDNN frontend Python package not found. "
-                "Install it with: pip install nvidia-cudnn-frontend"
-            ) from exc
-
-        _cudnn = cudnn
-
-    if enable_frost_engines and not _frost_engines_enabled:
-        os.environ.setdefault("CUDNN_FRONTEND_ENABLE_FROST_ENGINES", "1")
-        # pylint: disable=import-outside-toplevel,unused-import
-        import cudnn.sdpa  # noqa: F401
-
-        _frost_engines_enabled = True
-
-    return _cudnn
-
-
-def _handle_for(device: torch.device, *, backend_name: str = "FrostAttention"):
-    """A cuDNN handle for ``device``, rebound to PyTorch's current stream on every call.
-
-    Without the rebinding, cuDNN runs on its handle's own stream while the tensors and workspace
-    are allocated on PyTorch's current stream, and nothing orders the two. That is not
-    hypothetical: the p2p context-parallel ring issues attention inside
-    ``with torch.cuda.stream(cp_stream)``, so on alternating ring steps the kernel and its buffers
-    would otherwise be on different streams. The same cached plan is executed from different
-    streams across steps, so this has to happen per call rather than once per handle.
-    """
-    if device.type != "cuda":
-        raise ValueError(f"{backend_name} requires CUDA tensors; got device {device}")
-    cudnn = _cudnn if _cudnn is not None else _import_cudnn_frontend()
-    if device.index is None:
-        device = torch.device("cuda", torch.cuda.current_device())
-    with torch.cuda.device(device):
-        handle = _HANDLES.get(device)
-        if handle is None:
-            handle = cudnn.create_handle()
-            _HANDLES[device] = handle
-        cudnn.set_stream(handle=handle, stream=torch.cuda.current_stream(device).cuda_stream)
-    return handle
-
-
-def _build_pygraph(
-    dtype: torch.dtype, device: torch.device, *, backend_name: str = "FrostAttention"
-):
-    """A cuDNN frontend graph for F16/BF16 SDPA, bound to this device's stream-current handle."""
-    cudnn = _cudnn if _cudnn is not None else _import_cudnn_frontend()
-    return cudnn.pygraph(
-        io_data_type=_cudnn_dtype(dtype),
-        intermediate_data_type=cudnn.data_type.FLOAT,
-        compute_data_type=cudnn.data_type.FLOAT,
-        handle=_handle_for(device, backend_name=backend_name),
-    )
+    return cudnn_pygraph.import_cudnn_frontend(enable_frost_engines=enable_frost_engines)
 
 
 def _diagonal_band_kwargs(cudnn, attn_mask_type: str, window: Tuple[int, int]) -> Dict[str, Any]:
@@ -163,80 +95,6 @@ def _diagonal_band_kwargs(cudnn, attn_mask_type: str, window: Tuple[int, int]) -
     if left != -1:
         opts["diagonal_band_left_bound"] = left + 1
     return opts
-
-
-def _finalize_plans(
-    graph,
-    *,
-    heuristics: Optional[Sequence[Any]] = None,
-    build_policy: Any = None,
-    require_plan_token: Optional[str] = None,
-    not_found_hint: Any = "",
-) -> Tuple[int, Optional[str]]:
-    """Create plans, optionally pin one by name, build, and return (workspace size, plan name).
-
-    ``require_plan_token`` makes the choice strict: only a plan whose name contains the token is
-    acceptable, and anything else raises. That is not a stylistic preference. Without a pin,
-    ``build_plans`` walks the ranked list from index 0 and finalizes the first plan that builds,
-    logging each decline at INFO, so a graph that the intended engine declines runs on whatever
-    cuDNN ranked next with nothing in the return value to say so. At head_dim 512 that matters in
-    the forward, where an ordinary engine may well build and compute a different function from the
-    FROST kernel. The backward is self-limiting, since no non-FROST d512 backward exists, so an
-    unpinned backward would fail loudly on its own.
-
-    The token is matched as a substring rather than by equality on purpose: cuDNN has already
-    collapsed per-head-dim engine names (``..._d512`` and friends) into a single row once, and the
-    substring test survived that.
-
-
-    Pinning also changes what ``check_support`` means. Selecting a plan sets cuDNN's internal
-    ``_plan_pinned``, and only then is a decline fatal; unpinned, cuDNN records the decline and
-    keeps walking. So the pin has to come first both because the check is scoped to the selected
-    plan and because it is what makes the check binding at all.
-    """
-    cudnn = _cudnn if _cudnn is not None else _import_cudnn_frontend()
-
-    graph.validate()
-    graph.build_operation_graph()
-
-    if heuristics is None:
-        heuristics = [cudnn.heur_mode.A, cudnn.heur_mode.FALLBACK]
-
-    if require_plan_token is None:
-        try:
-            graph.create_execution_plans(list(heuristics))
-            graph.check_support()
-        except cudnn.cudnnGraphNotSupportedError as exc:
-            raise RuntimeError(f"cuDNN SDPA graph is not supported: {exc}") from exc
-        if build_policy is None:
-            build_policy = cudnn.build_plan_policy.HEURISTICS_CHOICE
-        graph.build_plans(build_policy)
-        return max(graph.get_workspace_size(), 1), None
-
-    graph.create_execution_plans(list(heuristics))
-    names = [graph.get_plan_name_at_index(i) for i in range(graph.get_execution_plan_count())]
-    hits = [i for i, n in enumerate(names) if require_plan_token in n]
-    if not hits:
-        # Callable hints are resolved only here: a caller may want to look up package versions to
-        # explain the failure, and that work should not happen on the success path.
-        hint = not_found_hint() if callable(not_found_hint) else not_found_hint
-        raise RuntimeError(
-            f"no cuDNN engine matching {require_plan_token!r} was offered."
-            f" Candidate plans: {names[:6]}.{(' ' + hint) if hint else ''}"
-        )
-    graph.select_plan(hits[0])
-    # The engine is pinned, so a decline here is its own verdict and cuDNN puts the reason in the
-    # exception. Surface it: a plan offered and then refused is the harder failure to read.
-    try:
-        graph.check_support()
-        graph.build_plans()
-    except cudnn.cudnnGraphNotSupportedError as exc:
-        hint = not_found_hint() if callable(not_found_hint) else not_found_hint
-        raise RuntimeError(
-            f"cuDNN engine {names[hits[0]]!r} was offered but declined this graph:"
-            f" {exc}{(' ' + hint) if hint else ''}"
-        ) from exc
-    return max(graph.get_workspace_size(), 1), names[hits[0]]
 
 
 def _device_from_key(device_key) -> torch.device:
@@ -302,7 +160,7 @@ def is_frost_attention_available() -> Tuple[bool, str]:
 
     # Decline only on positive evidence: a version below a floor, or a package absent outright.
     # An unparseable version defers to _select_frost_plan, which checks the plan by name.
-    frontend, frontend_raw = _pkg_version("nvidia-cudnn-frontend", _cudnn)
+    frontend, frontend_raw = _pkg_version("nvidia-cudnn-frontend", cudnn_pygraph.cudnn_module())
     if frontend is not None and frontend < _MIN_CUDNN_FRONTEND:
         return _no(
             f"nvidia-cudnn-frontend {frontend_raw} registers no sm100 backward engine; >="
@@ -569,14 +427,6 @@ def from_frost_layout(t: torch.Tensor, qkv_format: str) -> torch.Tensor:
     )
 
 
-def _cudnn_dtype(dtype: torch.dtype):
-    cudnn = _import_cudnn_frontend()
-    return {
-        torch.bfloat16: cudnn.data_type.BFLOAT16,
-        torch.float16: cudnn.data_type.HALF,
-    }[dtype]
-
-
 def _check_layout(name: str, t: torch.Tensor) -> None:
     """Validate a [b, h, s, d] view.
 
@@ -658,15 +508,16 @@ def _select_frost_plan(graph, token: str, what: str):
         return (
             f"Wanted the FROST {what} engine."
             " nvidia-cudnn-frontend="
-            f"{_pkg_version('nvidia-cudnn-frontend', _cudnn)[1] or 'unknown'}"
+            f"{_pkg_version('nvidia-cudnn-frontend', cudnn_pygraph.cudnn_module())[1] or 'unknown'}"
             f" (floor {_MIN_CUDNN_FRONTEND}),"
             f" nvidia-cutlass-dsl={_pkg_version('nvidia-cutlass-dsl')[1] or 'unknown'}"
             f" (floor {_MIN_CUTLASS_DSL})."
         )
 
     cudnn = _import_cudnn_frontend()
-    _, name = _finalize_plans(
+    _, name = cudnn_pygraph.finalize_plans(
         graph,
+        backend_name=_BACKEND_NAME,
         heuristics=[cudnn.heur_mode.A],
         require_plan_token=token,
         not_found_hint=hint,
@@ -683,7 +534,9 @@ def _build_fwd(key) -> dict:
     shq, shk, shv = [b, hq, sq, d], [b, hkv, skv, d], [b, hkv, skv, d_v]
     sho, o_stride = _o_shape_stride(b, hq, sq, d, d_v, qs)
 
-    graph = _build_pygraph(dtype, _device_from_key(_device), backend_name="FrostAttention")
+    graph = cudnn_pygraph.build_pygraph(
+        dtype, _device_from_key(_device), backend_name=_BACKEND_NAME
+    )
     tq = graph.tensor(name="q", dim=shq, stride=list(qs))
     tk = graph.tensor(name="k", dim=shk, stride=list(ks))
     tv = graph.tensor(name="v", dim=shv, stride=list(vs))
@@ -713,11 +566,13 @@ def _build_bwd(key) -> dict:
     """Build (and JIT-compile) a backward graph. Expensive; always reached through the cache."""
     cudnn = _import_cudnn_frontend()
     *_device, b, hq, hkv, sq, skv, d, d_v, dtype, mask, scale, qs, ks, vs, deterministic = key
-    io_dt = _cudnn_dtype(dtype)
+    io_dt = cudnn_pygraph.io_data_type(cudnn, dtype, backend_name=_BACKEND_NAME)
     shq, shk, shv = [b, hq, sq, d], [b, hkv, skv, d], [b, hkv, skv, d_v]
     sho, o_stride = _o_shape_stride(b, hq, sq, d, d_v, qs)
 
-    graph = _build_pygraph(dtype, _device_from_key(_device), backend_name="FrostAttention")
+    graph = cudnn_pygraph.build_pygraph(
+        dtype, _device_from_key(_device), backend_name=_BACKEND_NAME
+    )
     handles = {}
     # Each grad is declared with the layout of the tensor it differentiates.
     for name, shape, stride in (
@@ -845,7 +700,9 @@ def frost_attn_fwd(
     lse = torch.empty(b, hq, sq, 1, device=q.device, dtype=torch.float32)
     workspace = torch.empty(entry["workspace"], device=q.device, dtype=torch.uint8)
     entry["graph"].execute(
-        {tq: q, tk: k, tv: v, tout: out, tlse: lse}, workspace, handle=_handle_for(q.device)
+        {tq: q, tk: k, tv: v, tout: out, tlse: lse},
+        workspace,
+        handle=cudnn_pygraph.handle_for(q.device, backend_name=_BACKEND_NAME),
     )
     return out, lse.squeeze(-1)
 
@@ -925,7 +782,7 @@ def frost_attn_bwd(
             h["dv"]: dv,
         },
         workspace,
-        handle=_handle_for(q.device),
+        handle=cudnn_pygraph.handle_for(q.device, backend_name=_BACKEND_NAME),
     )
     return dq, dk, dv
 
