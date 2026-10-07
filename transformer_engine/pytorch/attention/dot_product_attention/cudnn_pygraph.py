@@ -25,6 +25,17 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 
 import torch
 
+# The cuDNN FROST SDPA engines, named once so the two opposite instructions about them cannot
+# drift: frost pins one of these by name, flex bars both. cuDNN has already renamed this family
+# once (collapsing the per-head-dim ``..._d512`` rows), and if these strings stopped matching,
+# frost would fail loudly while flex failed silently.
+FROST_FWD_PLAN_TOKEN = "sdpa_fwd_prefill_sm100"
+FROST_BWD_PLAN_TOKEN = "sdpa_bwd_sm100"
+FROST_PLAN_TOKENS = (FROST_FWD_PLAN_TOKEN, FROST_BWD_PLAN_TOKEN)
+
+# Distinguishes "the caller said nothing" from "the caller asked for no exclusions at all".
+_BAR_FROST_BY_DEFAULT = object()
+
 _cudnn = None
 _frost_engines_enabled = False
 _HANDLES: Dict[Tuple[str, torch.device], Any] = {}
@@ -221,6 +232,7 @@ def finalize_plans(
     build_policy: Any = None,
     require_plan_token: Optional[str] = None,
     not_found_hint: Any = "",
+    exclude_plan_tokens: Any = _BAR_FROST_BY_DEFAULT,
 ) -> Tuple[int, Optional[str]]:
     """Create plans, optionally pin one by name, build, and return (workspace size, plan name).
 
@@ -241,6 +253,15 @@ def finalize_plans(
     ``_plan_pinned``, and only then is a decline fatal; unpinned, cuDNN records the decline and
     keeps walking. So the pin has to come first both because the check is scoped to the selected
     plan and because it is what makes the check binding at all.
+
+    ``exclude_plan_tokens`` is the opposite instruction, and it defaults to barring the FROST
+    engines. That default is deliberate: the switch offering them is process-wide, so a caller
+    that merely declines to ask for them still gets them ranked first once anything else in the
+    process has enabled them, and those engines accept a score_mod graph and then compute without
+    it. Forgetting to exclude gives silently wrong numbers; excluding wrongly gives a slower plan
+    or a loud decline, so the burden belongs on the caller that wants them rather than the one
+    that does not. A caller pinning by name has already said which engine it wants, so exclusion
+    is skipped there rather than contradicting the pin. Pass an explicit value to override.
     """
     cudnn = _cudnn if _cudnn is not None else import_cudnn_frontend()
 
@@ -251,11 +272,27 @@ def finalize_plans(
         heuristics = [cudnn.heur_mode.A, cudnn.heur_mode.FALLBACK]
 
     if require_plan_token is None:
+        if exclude_plan_tokens is _BAR_FROST_BY_DEFAULT:
+            exclude_plan_tokens = FROST_PLAN_TOKENS
         try:
             graph.create_execution_plans(list(heuristics))
+            # Bar the named engines before the walk, so build_plans falls through to the first
+            # entry that is both unbarred and buildable. Inert where they are not on offer, which
+            # is every process that has not enabled them. getattr so a frontend predating
+            # deselect_engines degrades rather than raising.
+            deselect = getattr(graph, "deselect_engines", None)
+            if exclude_plan_tokens and deselect is not None:
+                deselect(list(exclude_plan_tokens))
             graph.check_support()
         except cudnn.cudnnGraphNotSupportedError as exc:
-            raise RuntimeError(f"cuDNN {backend_name} SDPA graph is not supported: {exc}") from exc
+            # Name the bar in the message: if it removed the only viable plan, the graph is not
+            # what was unsupported.
+            barred = (
+                f" (barred engines: {list(exclude_plan_tokens)})" if exclude_plan_tokens else ""
+            )
+            raise RuntimeError(
+                f"cuDNN {backend_name} SDPA graph is not supported: {exc}{barred}"
+            ) from exc
         if build_policy is None:
             build_policy = cudnn.build_plan_policy.HEURISTICS_CHOICE
         graph.build_plans(build_policy)

@@ -35,8 +35,10 @@ __all__ = [
 # cudnn-frontend declares cutlass-dsl >= 4.6.2 but FROST enforces >= 4.7.0 at plan-build time.
 # Below that floor every FROST engine declines silently and backend plans come back instead, so
 # the selected plan is checked by NAME rather than trusting that the engine was used.
-_FROST_FWD_PLAN_TOKEN = "sdpa_fwd_prefill_sm100"
-_FROST_BWD_PLAN_TOKEN = "sdpa_bwd_sm100"
+# Defined in cudnn_pygraph so the pin here and the bar in flex_attention cannot name different
+# engines: one of them failing loudly and the other silently is exactly the drift to avoid.
+_FROST_FWD_PLAN_TOKEN = cudnn_pygraph.FROST_FWD_PLAN_TOKEN
+_FROST_BWD_PLAN_TOKEN = cudnn_pygraph.FROST_BWD_PLAN_TOKEN
 _MIN_CUTLASS_DSL = PkgVersion("4.7.0")
 
 # 1.29.0 is the first release carrying the head_dim=512 backward. 1.28.0 ships the forward only,
