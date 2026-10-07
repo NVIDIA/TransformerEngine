@@ -404,6 +404,18 @@ def _te_mask_spec(attn_mask_type: str, window_size, bottom_right_diagonal: bool)
     return _mask_spec(attn_mask_type, (left, right))
 
 
+def _bottom_right_diagonal(attn_mask_type: str, bottom_right_diagonal) -> bool:
+    """Resolve the anchor flag the same way cpp_extensions.fused_attn does.
+
+    ``None`` means "read it off the mask name". The dispatcher resolves it before calling in,
+    so this only matters for a direct call, where ``bool(None)`` would quietly give a top-left
+    band to a caller that asked for bottom-right.
+    """
+    if bottom_right_diagonal is None:
+        return attn_mask_type in {"causal_bottom_right", "padding_causal_bottom_right"}
+    return bool(bottom_right_diagonal)
+
+
 def _name_for(table, value, default=None):
     """Reverse a cpp_extensions str-to-enum table."""
     for name, enum_value in table.items():
@@ -983,7 +995,9 @@ def fused_attn_fwd(
         raise NotImplementedError(
             f"FROST attention needs o_format to match qkv_format; got {o_format}/{qkv_format}"
         )
-    mask_type, window = _te_mask_spec(attn_mask_type, window_size, bool(bottom_right_diagonal))
+    mask_type, window = _te_mask_spec(
+        attn_mask_type, window_size, _bottom_right_diagonal(attn_mask_type, bottom_right_diagonal)
+    )
 
     out, softmax_lse = frost_attn_fwd(
         to_frost_layout(q.contiguous(), qkv_format),
@@ -1047,7 +1061,9 @@ def fused_attn_bwd(
         cuda_graph_capture=cuda_graph,
     )
     qkv_format = _qkv_format_from_layout(qkv_layout)
-    mask_type, window = _te_mask_spec(attn_mask_type, window_size, bool(bottom_right_diagonal))
+    mask_type, window = _te_mask_spec(
+        attn_mask_type, window_size, _bottom_right_diagonal(attn_mask_type, bottom_right_diagonal)
+    )
     softmax_lse = aux_ctx_tensors[0]
 
     dq, dk, dv = frost_attn_bwd(
