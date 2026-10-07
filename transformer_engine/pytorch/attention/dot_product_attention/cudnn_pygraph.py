@@ -44,22 +44,14 @@ _HANDLES: Dict[Tuple[str, torch.device], Any] = {}
 def import_cudnn_frontend(enable_frost_engines: bool = False):
     """Import cuDNN Frontend, enabling the FROST engines if this caller needs them.
 
-    ``enable_frost_engines`` is not merely additive: the switch also ranks FROST ahead of the
-    backend engines everywhere, so a caller that does not want FROST must not ask for it. Hence
-    the default is off, and FROST asks explicitly.
+    The switch ranks FROST ahead of the backend engines process-wide, so it defaults off and
+    FROST asks explicitly. A caller needing a particular engine should verify by plan name rather
+    than trust the switch, which is what ``finalize_plans(require_plan_token=...)`` does.
 
-    The enabling is deliberately outside the import memo. Both backends call this, and whichever
-    one reaches it first would otherwise decide for the process: with the flag inside the memo, a
-    flex call would cache the module with FROST off and every later FROST call would get a cuDNN
-    that offers no FROST engine, which surfaces much later as "no cuDNN engine matching ... was
-    offered". Enabling late is sound because the switch is read per graph rather than at import:
-    in cuDNN Frontend 1.29.0 ``engines/manifest.py`` consults the environment inside
-    ``offered_ids()``, reached from ``engines_for(graph)`` on every ``create_execution_plans``.
-
-    Note the switch is process-wide and never unset, so enabling it for FROST also reorders the
-    candidates a concurrent score_mod graph sees. Callers that require a particular engine should
-    verify by plan name rather than rely on the switch, which is what
-    ``finalize_plans(require_plan_token=...)`` does.
+    The enabling sits outside the import memo deliberately. Inside it, whichever backend imported
+    cuDNN first would decide for the process, and a flex-first import would leave every later
+    FROST call with no engine on offer. Enabling late works because cuDNN re-reads the environment
+    per graph, inside ``offered_ids()`` on every ``create_execution_plans``.
     """
     global _cudnn, _frost_engines_enabled  # pylint: disable=global-statement
     if _cudnn is None:
@@ -82,8 +74,7 @@ def import_cudnn_frontend(enable_frost_engines: bool = False):
 def cudnn_module():
     """The imported frontend, or None if nothing has imported it yet.
 
-    For callers that want to inspect the module without triggering an import, such as a version
-    probe that must not enable anything as a side effect.
+    For a caller that must inspect it without triggering an import, such as a version probe.
     """
     return _cudnn
 
@@ -96,16 +87,13 @@ def frost_engines_enabled() -> bool:
 def handle_for(device: torch.device, *, backend_name: str = "cuDNN attention"):
     """A cuDNN handle for ``device``, rebound to PyTorch's current stream on every call.
 
-    Without the rebinding, cuDNN runs on its handle's own stream while the tensors and workspace
-    are allocated on PyTorch's current stream, and nothing orders the two. That is not
-    hypothetical: the p2p context-parallel ring issues attention inside
-    ``with torch.cuda.stream(cp_stream)``, so on alternating ring steps the kernel and its buffers
-    would otherwise be on different streams. The same cached plan is executed from different
-    streams across steps, so this has to happen per call rather than once per handle.
+    Without the rebinding cuDNN runs on its handle's own stream while the tensors and workspace
+    sit on PyTorch's, with nothing ordering the two. The p2p context-parallel ring issues
+    attention inside ``with torch.cuda.stream(cp_stream)``, and executes one cached plan from
+    different streams across ring steps, so this is per call rather than per handle.
 
-    Keyed on ``(backend_name, device)`` rather than on the device alone. A cuDNN handle is not
-    thread-safe and ``set_stream`` mutates it, so one handle shared by two backends widens an
-    existing within-backend race into a cross-backend one for no benefit.
+    Keyed on ``(backend_name, device)``: a cuDNN handle is not thread-safe and ``set_stream``
+    mutates it, so one handle shared by two backends widens an existing race for no benefit.
     """
     if device.type != "cuda":
         raise ValueError(f"{backend_name} only supports CUDA tensors, got device {device}.")
@@ -125,8 +113,7 @@ def handle_for(device: torch.device, *, backend_name: str = "cuDNN attention"):
 def io_data_type(cudnn, dtype: torch.dtype, *, backend_name: str = "cuDNN attention"):
     """Map a torch dtype to the cuDNN enum these SDPA graphs are declared with.
 
-    Takes ``cudnn`` rather than importing it, so a dtype lookup cannot import the frontend or
-    flip the FROST switch as a side effect.
+    Takes ``cudnn`` rather than importing it, so a dtype lookup cannot flip the FROST switch.
     """
     if dtype == torch.float16:
         return cudnn.data_type.HALF
@@ -153,8 +140,8 @@ def bhsd_dim_stride(
 ) -> Tuple[Tuple[int, ...], Tuple[int, ...]]:
     """Describe an SBHD/BSHD tensor as cuDNN frontend's logical BHSD format.
 
-    The tensor is never permuted. cuDNN takes dims and strides, so reordering the descriptors
-    says the same thing as permuting the tensor and costs nothing.
+    The tensor is never permuted: cuDNN takes dims and strides, so reordering the descriptors
+    says the same thing and costs nothing.
     """
     if tensor_format == "sbhd":
         return (
@@ -178,11 +165,7 @@ def bhsd_graph_tensor(
 
 
 def device_key(device: torch.device) -> Tuple[Any, ...]:
-    """Normalize a device for a cache key.
-
-    ``index is None`` is resolved to the current device, so ``cuda`` and ``cuda:0`` cannot key
-    two entries for one physical device. The type is part of the key too, so CPU cannot alias it.
-    """
+    """Normalize a device for a cache key, so ``cuda`` and ``cuda:0`` cannot key two entries."""
     if device.type == "cuda" and device.index is None:
         return ("cuda", torch.cuda.current_device())
     return (device.type, device.index)
@@ -193,22 +176,20 @@ def tensor_key(
 ) -> Tuple[Any, ...]:
     """A tensor as the graph will see it: BHSD dims, BHSD strides, dtype.
 
-    Strides belong in the key because the graph is built for this exact layout -- that is what
-    lets bshd and sbhd run without a transpose -- and the dtype because every node is declared
-    with one. Two formats that produce the same description are the same graph and should share
-    a plan, which is why the format itself is not keyed.
+    Strides are keyed because the graph is built for this exact layout, which is what lets bshd
+    and sbhd run without a transpose. The format itself is not: two formats giving the same
+    description are the same graph.
     """
     dim, stride = bhsd_dim_stride(tensor, tensor_format, backend_name=backend_name)
     return (tuple(dim), tuple(stride), tensor.dtype)
 
 
 def cached_graph(cache: Dict[Any, Any], key: Optional[Any], build, *, device=None):
-    """Memoize a built graph. ``key=None`` means uncacheable: build and return without storing.
+    """Memoize a built graph. ``key=None`` means uncacheable: build, return, do not store.
 
-    The build runs under ``device`` when one is given, not merely with its handle: the plans are
-    JIT-compiled, and a compile path may read the ambient CUDA context rather than the handle.
-    That applies to the uncacheable path too, which is why there is one build site rather than
-    one per branch -- a second would be free to forget the scope.
+    The build runs under ``device`` rather than merely with its handle, because the plans are
+    JIT-compiled and a compile path may read the ambient CUDA context. One build site, not one
+    per branch: a second is free to forget that.
     """
     entry = None if key is None else cache.get(key)
     if entry is None:
@@ -236,32 +217,19 @@ def finalize_plans(
 ) -> Tuple[int, Optional[str]]:
     """Create plans, optionally pin one by name, build, and return (workspace size, plan name).
 
-    ``require_plan_token`` makes the choice strict: only a plan whose name contains the token is
-    acceptable, and anything else raises. That is not a stylistic preference. Without a pin,
-    ``build_plans`` walks the ranked list from index 0 and finalizes the first plan that builds,
-    logging each decline at INFO, so a graph that the intended engine declines runs on whatever
-    cuDNN ranked next with nothing in the return value to say so. At head_dim 512 that matters in
-    the forward, where an ordinary engine may well build and compute a different function from the
-    FROST kernel. The backward is self-limiting, since no non-FROST d512 backward exists, so an
-    unpinned backward would fail loudly on its own.
+    ``require_plan_token`` makes the choice strict: a plan whose name lacks the token raises.
+    Unpinned, ``build_plans`` walks the ranked list and finalizes the first that builds, so a
+    graph the intended engine declines runs on whatever cuDNN ranked next with nothing in the
+    return value saying so. The token is matched as a substring because cuDNN has already
+    collapsed per-head-dim engine names into one row once. The pin has to precede
+    ``check_support``: selecting a plan sets cuDNN's ``_plan_pinned``, and only then is a decline
+    fatal rather than recorded.
 
-    The token is matched as a substring rather than by equality on purpose: cuDNN has already
-    collapsed per-head-dim engine names (``..._d512`` and friends) into a single row once, and the
-    substring test survived that.
-
-    Pinning also changes what ``check_support`` means. Selecting a plan sets cuDNN's internal
-    ``_plan_pinned``, and only then is a decline fatal; unpinned, cuDNN records the decline and
-    keeps walking. So the pin has to come first both because the check is scoped to the selected
-    plan and because it is what makes the check binding at all.
-
-    ``exclude_plan_tokens`` is the opposite instruction, and it defaults to barring the FROST
-    engines. That default is deliberate: the switch offering them is process-wide, so a caller
-    that merely declines to ask for them still gets them ranked first once anything else in the
-    process has enabled them, and those engines accept a score_mod graph and then compute without
-    it. Forgetting to exclude gives silently wrong numbers; excluding wrongly gives a slower plan
-    or a loud decline, so the burden belongs on the caller that wants them rather than the one
-    that does not. A caller pinning by name has already said which engine it wants, so exclusion
-    is skipped there rather than contradicting the pin. Pass an explicit value to override.
+    ``exclude_plan_tokens`` is the opposite instruction, defaulting to barring the FROST engines,
+    which accept a score_mod graph and then compute without it. The switch offering them is
+    process-wide, so declining to ask is not enough. Forgetting to exclude is silently wrong while
+    excluding wrongly costs a slower plan or a loud decline, so the default favours the caller
+    that does not want them; it is skipped when a plan is pinned, which has already named one.
     """
     cudnn = _cudnn if _cudnn is not None else import_cudnn_frontend()
 

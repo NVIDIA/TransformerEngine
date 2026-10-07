@@ -60,9 +60,8 @@ _PLAN_CACHE: dict = {}
 def _import_cudnn_frontend(enable_frost_engines: bool = True):
     """Import cuDNN Frontend with the FROST engines on, which is what this backend needs.
 
-    The default differs from the shared module's, where it is off. Every use site here wants the
-    engines; a caller that does not must not ask for them, because the switch is process-wide.
-    See ``cudnn_pygraph.import_cudnn_frontend`` for why the enabling sits outside the import memo.
+    The shared default is off; every use site here wants them. See
+    ``cudnn_pygraph.import_cudnn_frontend``.
     """
     return cudnn_pygraph.import_cudnn_frontend(enable_frost_engines=enable_frost_engines)
 
@@ -95,13 +94,7 @@ def _diagonal_band_kwargs(cudnn, attn_mask_type: str, window: Tuple[int, int]) -
 
 
 def _pkg_version(name: str, module=None) -> Tuple[Optional[PkgVersion], Optional[str]]:
-    """(parsed version, raw string) for a package. Either element is None if undeterminable.
-
-    Distribution metadata first, matching the sibling check in fused_mla_q_uproj.py, with the
-    module attribute as a fallback so a source or vendored install is not misreported as absent.
-    The raw string is returned separately so callers can tell "not installed" from "installed but
-    unparseable"; those warrant different answers, and conflating them declines valid installs.
-    """
+    """A package's version, or None when it is absent or unparseable, with the raw string."""
     raw = None
     for candidate in (lambda: get_pkg_version(name), lambda: getattr(module, "__version__", None)):
         try:
@@ -261,11 +254,9 @@ def _te_mask_spec(attn_mask_type: str, window_size, bottom_right_diagonal: bool)
 
 
 def _bottom_right_diagonal(attn_mask_type: str, bottom_right_diagonal) -> bool:
-    """Resolve the anchor flag the same way cpp_extensions.fused_attn does.
+    """Resolve the anchor flag the way cpp_extensions.fused_attn does.
 
-    ``None`` means "read it off the mask name". The dispatcher resolves it before calling in,
-    so this only matters for a direct call, where ``bool(None)`` would quietly give a top-left
-    band to a caller that asked for bottom-right.
+    ``None`` means read it off the mask name. Only a direct call sees it unresolved.
     """
     if bottom_right_diagonal is None:
         return attn_mask_type in {"causal_bottom_right", "padding_causal_bottom_right"}
@@ -283,14 +274,12 @@ def _name_for(table, value, default=None):
 def is_frost_attention_supported(params) -> Tuple[int, str]:
     """Whether this fused-attention config should run on the FROST sub-backend.
 
-    Takes a FusedAttentionParams and returns (sub-backend value, reject message), the same shape
-    as tex.get_fused_attn_backend, so get_attention_backend can fall through to it when the C++
-    backends decline.
+    Returns (sub-backend value, reject message) like tex.get_fused_attn_backend, so
+    get_attention_backend can fall through to it when the C++ backends decline.
 
-    Deliberately does not probe availability. That imports cuDNN Frontend with the FROST engines
+    Deliberately does not probe availability: that imports cuDNN Frontend with the FROST engines
     enabled, which changes the engine pool for every cuDNN consumer in the process, and this runs
-    for every attention config on the machine. get_attention_backend checks availability once at
-    the end, the way it checks flash-attn versions.
+    for every attention config. get_attention_backend checks availability once at the end.
     """
     # pylint: disable-next=import-outside-toplevel
     from ...cpp_extensions.fused_attn import (
@@ -398,12 +387,7 @@ def is_frost_attention_supported(params) -> Tuple[int, str]:
 
 
 def _check_layout(name: str, t: torch.Tensor) -> None:
-    """Validate a [b, h, s, d] view.
-
-    The graphs are built from each tensor's ACTUAL strides rather than one fixed layout, so bshd
-    and sbhd are both served without a transpose. The only hard requirement is that the head
-    dimension is contiguous, which the kernels assume.
-    """
+    """Validate a 4D view whose head dimension is contiguous, which the kernels assume."""
     if t.dim() != 4:
         raise ValueError(f"{name} must be 4D [b, h, s, d]; got {tuple(t.shape)}")
     if t.stride(3) != 1:
@@ -416,9 +400,7 @@ def _check_layout(name: str, t: torch.Tensor) -> None:
 def _check_dtype(name: str, t: torch.Tensor, expected: torch.dtype) -> None:
     """Require a tensor to carry the dtype its graph node was declared with.
 
-    Every node but `stats` is declared from q's dtype, and execute() binds raw pointers, so a
-    tensor of another dtype would have its bits reinterpreted with no error at all. `dout`
-    matters most: it arrives from autograd and is not this module's to control.
+    ``dout`` matters most: it arrives from autograd and is not this module's to control.
     """
     if t.dtype != expected:
         raise ValueError(f"{name} must be {expected} to match q; got {t.dtype}")
@@ -427,9 +409,8 @@ def _check_dtype(name: str, t: torch.Tensor, expected: torch.dtype) -> None:
 def _check_kv_match(k: torch.Tensor, v: torch.Tensor) -> None:
     """Require v to agree with k on batch, heads and sequence length.
 
-    head_dim is free: v has its own graph node and its own cache-key entry, so an asymmetric
-    pair builds its own plan. The other three index the same KV positions as k by definition,
-    and a mismatch would bind a differently shaped buffer with no error at all.
+    head_dim is free, since v has its own graph node and its own cache-key entry. The other
+    three index the same KV positions as k by definition.
     """
     if tuple(k.shape[:3]) != tuple(v.shape[:3]):
         raise ValueError(
@@ -438,12 +419,7 @@ def _check_kv_match(k: torch.Tensor, v: torch.Tensor) -> None:
 
 
 def _head_dim_strides(shape: Sequence[int], ref_strides: Sequence[int]) -> list:
-    """Dense strides for ``shape`` in the memory order ``ref_strides`` describes.
-
-    O, dO and the O-shaped grads follow q's layout but carry v's head_dim, so when the two head
-    dims differ they cannot reuse q's strides. The graph node and the allocation both go through
-    here so they cannot drift apart.
-    """
+    """Dense strides for ``shape`` in the memory order ``ref_strides`` describes."""
     order = sorted(range(len(shape)), key=lambda i: ref_strides[i], reverse=True)
     strides = [0] * len(shape)
     acc = 1
@@ -456,10 +432,9 @@ def _head_dim_strides(shape: Sequence[int], ref_strides: Sequence[int]) -> list:
 def _o_shape_stride(shape, d_v, ref_strides):
     """Shape and strides for an O-shaped tensor: ``shape``'s layout carrying v's head_dim.
 
-    Works in either space. The head dim is last in both TE's bshd/sbhd and cuDNN's BHSD, and the
-    rule only reorders by stride magnitude, so the graph node and the allocation can each apply it
-    in their own space and still agree. Equal head dims keep the reference strides untouched,
-    which preserves a caller's non-dense view.
+    Works in either space, since the head dim is last in both TE's bshd/sbhd and cuDNN's BHSD and
+    the rule only reorders by stride magnitude. Equal head dims keep the reference strides, which
+    preserves a caller's non-dense view.
     """
     out = list(shape[:3]) + [d_v]
     return out, (list(ref_strides) if d_v == shape[3] else _head_dim_strides(out, ref_strides))
@@ -468,11 +443,9 @@ def _o_shape_stride(shape, d_v, ref_strides):
 def _select_frost_plan(graph, token: str, what: str):
     """Select a plan whose name proves a FROST engine was chosen.
 
-    Falling back to whatever plan happens to be first would defeat the purpose. A too-old
-    nvidia-cutlass-dsl makes the FROST engines decline silently, and in the forward an ordinary
-    engine may then build and compute something else; the pin turns that into a named error at
-    the first forward rather than a wrong number or a backward that fails later for no visible
-    reason.
+    A too-old nvidia-cutlass-dsl makes the FROST engines decline silently, and in the forward an
+    ordinary engine may then build and compute something else. The pin turns that into a named
+    error at the first forward rather than a wrong number.
     """
 
     # Both versions, because either floor can cause this and blaming one misdirects. Looked up
@@ -621,10 +594,9 @@ def _bhsd(t: torch.Tensor, qkv_format: str):
 
 
 def _key(q, k, v, qkv_format, mask, scale, deterministic=False):
-    """The plan cache key.
+    """The plan cache key, structured per tensor rather than flattened.
 
-    Structured per tensor rather than flattened, so the builders destructure it by name instead
-    of by position, and so the per-tensor fragment is the same one flex_attention keys on.
+    The builders destructure it by name, and the per-tensor fragment is the one flex keys on.
     """
 
     def described(t):
