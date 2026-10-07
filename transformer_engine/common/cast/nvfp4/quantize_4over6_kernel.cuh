@@ -102,8 +102,8 @@ __device__ __forceinline__ float compute_error_rn(const float diff) {
   }
 }
 
-// Global encode scale S_enc and its inverse S_dec. Uniform per tensor (or per row for
-// row-scaled NVFP4), so callers can compute it once and reuse it across blocks.
+// Global encode scale S_enc and its inverse S_dec. They depend only on the tensor amax (the row
+// amax for row-scaled NVFP4), so they are computed once and shared by all blocks it covers.
 struct GlobalScales {
   float S_enc;
   float S_dec;
@@ -251,11 +251,12 @@ __device__ __forceinline__ void accumulate_fp16_scaled_error_pair(const uint32_t
   *err = __fadd_rn(*err, compute_error_rn<Cfg::mode>(diff1));
 }
 
-// Strict candidate error terms RN(RN(RN(q * sf) * amax) / denom) - x with two divisions per
-// candidate instead of one per element. E2M1 magnitudes are 2^k * u with u in {1, 1.5}, and
-// q * sf is exact, so the dequantized value equals 2^k * D_u with D_u = RN(RN(u * sf * amax) /
-// denom) whenever the scaled values stay normal and finite (checked per candidate; otherwise
-// the per-element path below is used). Results are bit-identical to the per-element form.
+// Strict candidate error terms are RN(RN(RN(q * sf) * amax) / denom) - x. Nonzero E2M1
+// magnitudes are 2^k * u with u in {1, 1.5}, and q * sf is exact. Scaling by 2^k commutes with
+// rounding while values stay normal and finite, so the dequantized value is 2^k * D_u with
+// D_u = RN(RN(u * sf * amax) / denom). Precomputing D_1 and D_1.5 takes two divisions per
+// candidate rather than one per element. `exact` records whether the range condition holds;
+// when it does not, the formula is evaluated per element.
 struct StrictErrorBases {
   float d1;
   float d15;
@@ -267,12 +268,19 @@ __device__ __forceinline__ StrictErrorBases compute_strict_error_bases(const flo
                                                                        const float global_amax) {
   constexpr float fp4_max = detail::TypeExtrema<fp4e2m1>::max;  // 6.0f
   constexpr float err_denom = fp4_max * static_cast<float>(E4M3_MAX);
+  // u for E2M1 magnitudes with the mantissa bit set (1.5, 3, 6).
+  constexpr float e2m1_mantissa_factor = 1.5f;
+  // The 2^k factors of nonzero E2M1 magnitudes range from 2^-1 (0.5) to 2^2 (4 and 6).
+  // Scaling by 2^-1 keeps every result normal when D_1 >= 2^-125 (FP32 normal min is 2^-126).
+  constexpr float min_exact_d1 = 0x1p-125f;
+  // Scaling by 2^2 keeps every product below 2^127, well under the FP32 max of ~2^128.
+  constexpr float max_exact_p15 = 0x1p125f;
   const float p1 = __fmul_rn(sf, global_amax);
-  const float p15 = __fmul_rn(__fmul_rn(1.5f, sf), global_amax);
+  const float p15 = __fmul_rn(__fmul_rn(e2m1_mantissa_factor, sf), global_amax);
   StrictErrorBases bases;
   bases.d1 = __fdiv_rn(p1, err_denom);
   bases.d15 = __fdiv_rn(p15, err_denom);
-  bases.exact = bases.d1 >= 0x1p-125f && p15 < 0x1p125f;
+  bases.exact = bases.d1 >= min_exact_d1 && p15 < max_exact_p15;
   return bases;
 }
 
@@ -281,13 +289,23 @@ __device__ __forceinline__ void accumulate_dequant_error_pair_pow2(const uint32_
                                                                    const float x0, const float x1,
                                                                    const StrictErrorBases &bases,
                                                                    float *err) {
-  // Clearing the f16 mantissa MSB maps 1.5 * 2^k to 2^k; that bit selects D_1.5 over D_1.
-  const uint32_t pow2_bits = dequant_bits & 0xFDFFFDFFu;
-  const float q0 = __half2float(__ushort_as_half(static_cast<uint16_t>(pow2_bits & 0xFFFFu)));
-  const float q1 = __half2float(__ushort_as_half(static_cast<uint16_t>(pow2_bits >> 16)));
-  const float base0 = (dequant_bits & 0x00000200u) ? bases.d15 : bases.d1;
-  const float base1 = (dequant_bits & 0x02000000u) ? bases.d15 : bases.d1;
-  // q * base is exact, so the FMA rounds the same way as (dequant - x).
+  // dequant_bits packs two FP16 values (1 sign, 5 exponent, 10 mantissa bits): x0's in the low
+  // half, x1's in the high half.
+  constexpr int fp16_bits = 16;
+  constexpr uint32_t fp16_low_half_mask = 0xFFFFu;
+  constexpr int fp16_mantissa_bits = 10;
+  // Top FP16 mantissa bit. Among E2M1 magnitudes it is set exactly for 1.5 * 2^k (1.5, 3, 6),
+  // and clearing it maps 1.5 * 2^k to 2^k.
+  constexpr uint32_t mantissa_msb_lo = 1u << (fp16_mantissa_bits - 1);
+  constexpr uint32_t mantissa_msb_hi = mantissa_msb_lo << fp16_bits;
+  // That bit selects D_1.5 over D_1; clearing it in both halves leaves the 2^k factors.
+  const uint32_t pow2_bits = dequant_bits & ~(mantissa_msb_lo | mantissa_msb_hi);
+  const float q0 =
+      __half2float(__ushort_as_half(static_cast<uint16_t>(pow2_bits & fp16_low_half_mask)));
+  const float q1 = __half2float(__ushort_as_half(static_cast<uint16_t>(pow2_bits >> fp16_bits)));
+  const float base0 = (dequant_bits & mantissa_msb_lo) ? bases.d15 : bases.d1;
+  const float base1 = (dequant_bits & mantissa_msb_hi) ? bases.d15 : bases.d1;
+  // q * base is exact, so the FMA's single rounding is that of the difference from x.
   *err = __fadd_rn(*err, compute_error_rn<Cfg::mode>(__fmaf_rn(q0, base0, -x0)));
   *err = __fadd_rn(*err, compute_error_rn<Cfg::mode>(__fmaf_rn(q1, base1, -x1)));
 }
@@ -513,9 +531,10 @@ __device__ void quantize_stage_rowwise(const IType *tile, fp4e2m1x2 *output, nvf
     tensor_scales = compute_global_scales<E4M3_MAX>(tensor_amax);
   }
   for (int group = threadIdx.x; group < groups; group += blockDim.x) {
-    // 2D quantization reduces over 16 consecutive lanes holding 16 consecutive rows, so it keeps
-    // the row-fastest mapping. 1D maps consecutive lanes to consecutive groups of a row instead:
-    // each warp then stores whole 32 B sectors and its shared memory reads conflict 2-way, not 8.
+    // 1D: consecutive lanes take consecutive groups of a row, so each warp stores whole 32 B
+    // output sectors and its shared memory reads are at most 2-way conflicted for 16-bit inputs.
+    // 2D: the 16x16 block reductions shuffle across 16 consecutive lanes, which must therefore
+    // hold 16 consecutive rows of the same column group.
     const int local_row = USE_2D_QUANTIZATION ? group % kStageRows : group / kTileColGroups;
     const int local_col_group = USE_2D_QUANTIZATION ? group / kStageRows : group % kTileColGroups;
     const int local_col = local_col_group * kGroupSize;
