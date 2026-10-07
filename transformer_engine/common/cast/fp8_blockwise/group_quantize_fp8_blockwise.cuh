@@ -145,8 +145,6 @@ __device__ __forceinline__ size_t find_tensor_id_by_block_y(
         NVTE_DEVICE_ERROR(
             "Grouped FP8 block-scaling quantize: each tensor's first dimension must be a "
             "multiple of 128 (VARYING_FIRST_DIM).");
-        // Device asserts may be disabled in release builds.
-        __trap();
       }
     }
   }
