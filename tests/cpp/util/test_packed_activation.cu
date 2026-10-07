@@ -16,14 +16,19 @@
 
 namespace {
 
-// Inputs: every BF16 bit pattern, then every FP16 bit pattern.
-constexpr int kNumInputs = 2 << 16;
+// Inputs: every BF16 and FP16 bit pattern, then FP32 prefixes with low bits 0 and 0xffff.
+constexpr int kNumInputs = 4 << 16;
 constexpr int kNumOps = 4;
 const char *const kOpNames[kNumOps] = {"gelu", "dgelu", "silu", "dsilu"};
 
 __device__ float input_value(unsigned i) {
   if (i < (1u << 16)) return __uint_as_float(i << 16);
-  return __half2float(__ushort_as_half(static_cast<unsigned short>(i - (1u << 16))));
+  if (i < (2u << 16)) {
+    return __half2float(__ushort_as_half(static_cast<unsigned short>(i - (1u << 16))));
+  }
+  const unsigned prefix = (i - (2u << 16)) & 0xffffu;
+  const unsigned suffix = i < (3u << 16) ? 0u : 0xffffu;
+  return __uint_as_float((prefix << 16) | suffix);
 }
 
 // For every input x and every op: util/math.h's scalar result, and the packed form with x in
@@ -66,7 +71,7 @@ bool same_value(float a, float b) {
 }  // namespace
 
 // The quantize kernels use the packed forms in place of util/math.h's activations, so they must
-// round identically for every BF16 and FP16 input.
+// round identically for every BF16 and FP16 input and sampled FP32 mantissas.
 TEST(UtilTest, PackedActivationMatchesScalar) {
   cudaDeviceProp prop;
   ASSERT_EQ(cudaGetDeviceProperties(&prop, 0), cudaSuccess);
@@ -102,8 +107,10 @@ TEST(UtilTest, PackedActivationMatchesScalar) {
         if (!same_value(ref[i], packed[i])) {
           if (mismatches == 0) {
             ADD_FAILURE() << kOpNames[op] << (lane == 0 ? " (low lane)" : " (high lane)")
-                          << " differs for " << (i < (1 << 16) ? "BF16" : "FP16") << " input 0x"
-                          << std::hex << (i & 0xffff) << std::dec << ": scalar " << ref[i]
+                          << " differs for "
+                          << (i < (1 << 16) ? "BF16" : i < (2 << 16) ? "FP16" : "FP32")
+                          << " input 0x" << std::hex << (i & 0xffff) << std::dec << ": scalar "
+                          << ref[i]
                           << ", packed " << packed[i];
           }
           ++mismatches;

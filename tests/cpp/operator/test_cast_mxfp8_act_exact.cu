@@ -18,9 +18,11 @@
 #include <transformer_engine/activation.h>
 #include <transformer_engine/cast.h>
 
+#include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
-#include <random>
+#include <limits>
 #include <string>
 #include <type_traits>
 #include <vector>
@@ -86,31 +88,91 @@ __global__ void scalar_activation_kernel(const Mode mode, const IType *x, const 
   y[i] = static_cast<IType>(v);
 }
 
-enum class Fill { Normal, AllBitPatterns };
+enum class Fill { Typical, OrderedInputs, Specials };
 
-// Normal: x and grad drawn from N(0, 1), which keeps every output sensitive to the last bit of
-// the activation. AllBitPatterns: every 16-bit pattern (Inf and NaN included) cycles through x in
-// a shuffled order, FP32 getting those patterns with random low mantissa bits.
 template <typename T>
-void fill_inputs(const Fill fill, Tensor *x, Tensor *grad, std::mt19937 &gen) {
+T from_bits(const uint32_t bits) {
+  if constexpr (std::is_same_v<T, float>) {
+    return reinterpret_cast<const float &>(bits);
+  } else {
+    const uint16_t half_bits = static_cast<uint16_t>(bits);
+    return reinterpret_cast<const T &>(half_bits);
+  }
+}
+
+// Enumerate the entire 16-bit format in numerical order: -Inf, negative finite values, -0,
+// +0, positive finite values, +Inf, then both signs of NaN (which have no numerical order).
+// For FP32, enumerate the BF16 exponent/mantissa prefixes and vary the low mantissa bits.
+template <typename T>
+uint32_t ordered_bits(const size_t i, const size_t n) {
+  // The high 16 bits select a format encoding; the low 16 sample FP32 mantissas.
+  const uint32_t position = static_cast<uint32_t>((static_cast<uint64_t>(i) << 32) / n);
+  const uint32_t rank = position >> 16;
+  const uint32_t pos_inf = std::is_same_v<T, fp16> ? 0x7c00u : 0x7f80u;
+  const uint32_t non_nan_count = 2 * (pos_inf + 1);
+  uint32_t high;
+  if (rank <= pos_inf) {
+    high = 0x8000u | (pos_inf - rank);
+  } else if (rank < non_nan_count) {
+    high = rank - pos_inf - 1;
+  } else {
+    const uint32_t nan_rank = rank - non_nan_count;
+    const uint32_t nan_count_per_sign = 0x7fffu - pos_inf;
+    high = nan_rank < nan_count_per_sign
+               ? 0x8000u | (pos_inf + 1 + nan_rank)
+               : pos_inf + 1 + nan_rank - nan_count_per_sign;
+  }
+  if constexpr (std::is_same_v<T, float>) {
+    const uint32_t fraction = position & 0xffffu;
+    const uint32_t low = (high & 0x8000u) ? 0xffffu - fraction : fraction;
+    return (high << 16) | ((high & 0x7fffu) == pos_inf ? 0u : low);
+  } else {
+    return high;
+  }
+}
+
+// Exactly representable edge cases in each input format, ordered except for the final NaNs.
+template <typename T>
+std::array<T, 14> special_values() {
+  const float inf = Numeric_Traits<T>::artifInf;
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+  const float max_normal = Numeric_Traits<T>::maxNorm;
+  const float min_normal = Numeric_Traits<T>::minNorm;
+  const float min_subnormal = Numeric_Traits<T>::minSubnorm;
+  return {static_cast<T>(-inf),           static_cast<T>(-max_normal),
+          static_cast<T>(-1.0f),          static_cast<T>(-min_normal),
+          static_cast<T>(-min_subnormal), static_cast<T>(-0.0f),
+          static_cast<T>(0.0f),           static_cast<T>(min_subnormal),
+          static_cast<T>(min_normal),     static_cast<T>(1.0f),
+          static_cast<T>(max_normal),     static_cast<T>(inf),
+          static_cast<T>(-nan),           static_cast<T>(nan)};
+}
+
+// Typical activations range over [-16, 16] and gradients over [-4, 4]. The ordered sweep
+// covers every BF16/FP16 bit pattern, including subnormals, infinities, and NaNs. The special
+// case set guarantees exact FP32 boundary values that a sampled mantissa sweep may miss.
+template <typename T>
+void fill_inputs(const Fill fill, Tensor *x, Tensor *grad) {
   const size_t n = product(x->rowwise_shape());
   T *xp = x->rowwise_cpu_dptr<T>();
   T *gp = grad->rowwise_cpu_dptr<T>();
-  std::normal_distribution<float> normal(0.0f, 1.0f);
-  std::uniform_int_distribution<uint32_t> low_bits(0, 0xffff);
+  const auto specials = special_values<T>();
   for (size_t i = 0; i < n; ++i) {
-    gp[i] = static_cast<T>(normal(gen));
-    if (fill == Fill::Normal) {
-      xp[i] = static_cast<T>(normal(gen));
-      continue;
-    }
-    const uint32_t pattern = static_cast<uint32_t>((i * 40503u) & 0xffffu);
-    if constexpr (sizeof(T) == 2) {
-      const uint16_t bits = static_cast<uint16_t>(pattern);
-      std::memcpy(&xp[i], &bits, 2);
-    } else {
-      const uint32_t bits = (pattern << 16) | low_bits(gen);
-      std::memcpy(&xp[i], &bits, 4);
+    switch (fill) {
+      case Fill::Typical:
+        xp[i] = static_cast<T>(-16.0f + 32.0f * static_cast<float>(i) / (n - 1));
+        gp[i] = static_cast<T>(-4.0f + 8.0f * static_cast<float>(i % 257) / 256.0f);
+        break;
+      case Fill::OrderedInputs:
+        xp[i] = from_bits<T>(ordered_bits<T>(i, n));
+        gp[i] = static_cast<T>(-4.0f + 8.0f * static_cast<float>(i % 257) / 256.0f);
+        break;
+      case Fill::Specials: {
+        const size_t index = i * specials.size() / n;
+        xp[i] = specials[index];
+        gp[i] = specials[(index + 4) % specials.size()];
+        break;
+      }
     }
   }
   x->from_cpu();
@@ -140,7 +202,9 @@ std::vector<float> reference_dbias(const std::vector<float> &z, const size_t row
           partial += thread_sum;
         }
       } else {
-        for (size_t r = r0; r < r0 + kTileRows; ++r) partial += at(r, c);
+        for (size_t r = r0; r < r0 + kTileRows; ++r) {
+          partial += at(r, c);
+        }
       }
       total += partial;
     }
@@ -165,15 +229,16 @@ void run_case(const Mode mode, const Fill fill, const size_t rows, const size_t 
 
   Tensor x("x", shape, itype);
   Tensor grad("grad", shape, itype);
-  std::mt19937 gen(static_cast<uint32_t>(rows * 131 + cols));
-  fill_inputs<IType>(fill, &x, &grad, gen);
+  fill_inputs<IType>(fill, &x, &grad);
 
   // Reference: scalar activation on the GPU, then the generic cast-only quantize.
   Tensor y("y", shape, itype);
   float *z_dev = nullptr;
   ASSERT_EQ(cudaMalloc(&z_dev, n * sizeof(float)), cudaSuccess);
+  constexpr int block_size = 256;
+  const size_t grid_size = divide_round_up(n, block_size);
   scalar_activation_kernel<IType>
-      <<<(n + 255) / 256, 256>>>(mode, static_cast<const IType *>(x.rowwise_dptr()),
+      <<<grid_size, block_size>>>(mode, static_cast<const IType *>(x.rowwise_dptr()),
                                  static_cast<const IType *>(grad.rowwise_dptr()),
                                  static_cast<IType *>(y.rowwise_dptr()), z_dev, n);
   ASSERT_EQ(cudaGetLastError(), cudaSuccess);
@@ -248,7 +313,9 @@ void run_case(const Mode mode, const Fill fill, const size_t rows, const size_t 
     size_t mismatches = 0;
     for (size_t c = 0; c < cols; ++c) {
       const IType e = static_cast<IType>(expected[c]);
-      mismatches += std::memcmp(&e, &got[c], sizeof(IType)) != 0;
+      mismatches += std::memcmp(&e, &got[c], sizeof(IType)) != 0 &&
+                    !(std::isnan(static_cast<float>(e)) &&
+                      std::isnan(static_cast<float>(got[c])));
     }
     EXPECT_EQ(mismatches, 0u) << "dbias";
   }
@@ -265,7 +332,7 @@ TEST_P(CastMXFP8ActExactTestSuite, MatchesScalarActivationThenCast) {
   cudaDeviceProp prop;
   ASSERT_EQ(cudaGetDeviceProperties(&prop, 0), cudaSuccess);
   if (prop.major < 10) {
-    GTEST_SKIP() << "MXFP8 quantization requires compute capability 10.0 or newer";
+    GTEST_SKIP() << "This MXFP8 quantize kernel requires compute capability 10.0 or newer";
   }
   const auto [mode, fill, itype, layout, swizzled, dims] = GetParam();
   const bool rowwise = layout != 1;
@@ -280,7 +347,8 @@ namespace {
 std::string case_name(const testing::TestParamInfo<Params> &info) {
   const char *layouts[] = {"Rowwise", "Colwise", "Both"};
   const auto [mode, fill, itype, layout, swizzled, dims] = info.param;
-  return std::string(mode_name(mode)) + (fill == Fill::Normal ? "XNormal" : "XAllBitPatterns") +
+  const char *fills[] = {"XTypical", "XOrderedInputs", "XSpecials"};
+  return std::string(mode_name(mode)) + fills[static_cast<int>(fill)] +
          "X" + test::typeName(itype) + "X" + layouts[layout] +
          (swizzled ? "XSwizzled" : "XCompact") + "X" + std::to_string(dims.first) + "X" +
          std::to_string(dims.second);
@@ -292,9 +360,19 @@ INSTANTIATE_TEST_SUITE_P(
     OperatorTest, CastMXFP8ActExactTestSuite,
     ::testing::Combine(::testing::Values(Mode::GeLU, Mode::DGeLU, Mode::DBiasDGeLU, Mode::SiLU,
                                          Mode::DSiLU, Mode::DBiasDSiLU),
-                       ::testing::Values(Fill::Normal, Fill::AllBitPatterns),
+                       ::testing::Values(Fill::Typical, Fill::OrderedInputs),
                        ::testing::Values(DType::kBFloat16, DType::kFloat16, DType::kFloat32),
                        ::testing::Values(0, 1, 2), ::testing::Bool(),
-                       ::testing::Values(std::make_pair<size_t, size_t>(512, 1024),
-                                         std::make_pair<size_t, size_t>(96, 1056))),
+                       ::testing::Values(std::make_pair<size_t, size_t>(1024, 2048),
+                                         std::make_pair<size_t, size_t>(544, 2080))),
+    case_name);
+
+INSTANTIATE_TEST_SUITE_P(
+    SpecialValues, CastMXFP8ActExactTestSuite,
+    ::testing::Combine(::testing::Values(Mode::GeLU, Mode::DGeLU, Mode::DBiasDGeLU, Mode::SiLU,
+                                         Mode::DSiLU, Mode::DBiasDSiLU),
+                       ::testing::Values(Fill::Specials),
+                       ::testing::Values(DType::kBFloat16, DType::kFloat16, DType::kFloat32),
+                       ::testing::Values(0, 1, 2), ::testing::Bool(),
+                       ::testing::Values(std::make_pair<size_t, size_t>(64, 128))),
     case_name);

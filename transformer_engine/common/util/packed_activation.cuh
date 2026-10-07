@@ -29,9 +29,10 @@
 namespace transformer_engine {
 namespace packed_activation {
 
-// Under --use_fast_math (NVTE_USE_FAST_MATH, set by CMakeLists.txt), util/math.h uses the
-// approximate tanhf and flushes denormals, which the packed forms do not reproduce, so every
-// activation falls back to the scalar OP.
+// FP32x2 add/mul/fma instructions in ptx.cuh require SM 10.0+. On older targets the
+// activation falls back to the scalar OP. Under --use_fast_math (NVTE_USE_FAST_MATH, set by
+// CMakeLists.txt), util/math.h uses the approximate tanhf and flushes denormals, which the
+// packed forms do not reproduce, so every activation also falls back to the scalar OP.
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000) && !(defined NVTE_USE_FAST_MATH)
 constexpr bool kEnabled = true;
 #else

@@ -7,6 +7,7 @@
 #pragma once
 
 #include <array>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <random>
@@ -436,6 +437,30 @@ struct Numeric_Traits<fp8e5m2> {
     static constexpr int maxBiasedExponentAsFP32 = 15 + FP32_EXPONENT_BIAS;
     static constexpr int maxUnbiasedExponentAsFP32 = 15;
     static constexpr int maxExpNorm    = 1 << maxUnbiasedExponentAsFP32;
+};
+
+template <>
+struct Numeric_Traits<fp16> {
+    static constexpr double minSubnorm = 0x1p-24;
+    static constexpr double maxSubnorm = 0x1p-14 - minSubnorm;
+    static constexpr double minNorm    = 0x1p-14;
+    static constexpr double maxNorm    = 0x1.ffcp15;
+    static constexpr double artifInf   = std::numeric_limits<fp32>::infinity();
+    static constexpr int maxBiasedExponentAsFP32 = 15 + FP32_EXPONENT_BIAS;
+    static constexpr int maxUnbiasedExponentAsFP32 = 15;
+    static constexpr int maxExpNorm = 1 << maxUnbiasedExponentAsFP32;
+};
+
+template <>
+struct Numeric_Traits<bf16> {
+    static constexpr double minSubnorm = 0x1p-133;
+    static constexpr double maxSubnorm = 0x1p-126 - minSubnorm;
+    static constexpr double minNorm    = 0x1p-126;
+    static constexpr double maxNorm    = 0x1.fep127;
+    static constexpr double artifInf   = std::numeric_limits<fp32>::infinity();
+    static constexpr int maxBiasedExponentAsFP32 = 127 + FP32_EXPONENT_BIAS;
+    static constexpr int maxUnbiasedExponentAsFP32 = 127;
+    static constexpr double maxExpNorm = 0x1p127;
 };
 
 template <>
