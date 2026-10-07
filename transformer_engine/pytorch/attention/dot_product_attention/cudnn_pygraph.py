@@ -4,10 +4,9 @@
 
 """Mechanics of driving cuDNN Frontend's Python graph API from PyTorch.
 
-Importing the frontend, holding one stream-current handle per device, translating TE's tensor
-and mask vocabulary into cuDNN's, and creating, selecting and building plans. It holds no backend
-policy and no knowledge of any backend's cache-key layout: what it knows is how to say a thing to
-cuDNN, not which thing to say.
+Importing the frontend, holding one stream-current handle per device, describing TE tensors in
+cuDNN's logical BHSD form, and creating, selecting and building plans. No attention semantics, and
+no knowledge of any backend's cache-key layout.
 
 ``flex_attention.py`` and ``frost_attention.py`` both drive cuDNN through this API. They share
 this module for ownership rather than for line count: the state below is process-global -- one
@@ -163,33 +162,6 @@ def bhsd_graph_tensor(
     """Create a cuDNN graph tensor with BHSD dims and TE-layout strides."""
     dim, stride = bhsd_dim_stride(tensor, tensor_format, backend_name=backend_name)
     return graph.tensor(dim=dim, stride=stride, data_type=tensor.dtype)
-
-
-def diagonal_band_kwargs(cudnn, attn_mask_type: str, window: Tuple[int, int]) -> Dict[str, Any]:
-    """cuDNN sdpa kwargs for a TE (mask type, window): a diagonal alignment plus a band.
-
-    Note the off-by-one. cuDNN's left bound counts the diagonal itself and TE's window_size does
-    not, so a window of w becomes a left bound of w + 1. Passing it through unconverted silently
-    drops one token of context per layer, which no shape-level test would catch.
-
-    These kwargs are mutually exclusive with score_mod. cuDNN enforces that in the backward node
-    only ("Attention score mod enabled and hence other subgraphs are disabled"); its forward node
-    composes the two without complaint. Callers must still refuse the pair on both sides, because
-    forward and backward have to carry the same mask or the gradients belong to a different
-    attention than the output does.
-    """
-    left, right = window
-    opts: Dict[str, Any] = {}
-    if attn_mask_type in ("causal", "causal_bottom_right") or right == 0:
-        opts["diagonal_alignment"] = (
-            cudnn.diagonal_alignment.BOTTOM_RIGHT
-            if attn_mask_type == "causal_bottom_right"
-            else cudnn.diagonal_alignment.TOP_LEFT
-        )
-        opts["diagonal_band_right_bound"] = 0
-    if left != -1:
-        opts["diagonal_band_left_bound"] = left + 1
-    return opts
 
 
 def device_key(device: torch.device) -> Tuple[Any, ...]:
