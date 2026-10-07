@@ -72,14 +72,14 @@ def _overflow_test_include(fn):
     return fn
 
 
-# MXFP8 grouped dispatch needs a per-expert alignment of 128, but the EP backend caches a single
-# alignment per process, so alignment=128 tests cannot share a process with the alignment=0 tests.
+# Grouped MLP fusion needs a per-expert alignment of 256, but the EP backend caches a single
+# alignment per process, so alignment=256 tests cannot share a process with the alignment=0 tests.
 # They run in a dedicated pass (NVTE_EP_MXFP8_PASS=1) instead.
 MXFP8_PASS = os.environ.get("NVTE_EP_MXFP8_PASS", "0") == "1"
 
 
 def _mxfp8_align_test(fn):
-    """Mark a test that dispatches with alignment=128; runs only in the MXFP8 pass."""
+    """Mark a test that dispatches with alignment=256; runs only in the MXFP8 pass."""
     fn._mxfp8_align_test = True
     return fn
 
@@ -252,13 +252,13 @@ class _EpTestCase(unittest.TestCase):
         )
 
     def setUp(self):
-        # alignment=128 MXFP8 tests run only in the dedicated MXFP8 pass; everything else skips
+        # alignment=256 MXFP8 tests run only in the dedicated MXFP8 pass; everything else skips
         # there (and the MXFP8 tests skip outside it) since the backend pins one alignment/process.
         is_mxfp8_align = getattr(getattr(self, self._testMethodName), "_mxfp8_align_test", False)
         if MXFP8_PASS and not is_mxfp8_align:
-            self.skipTest("only alignment=128 MXFP8 tests run in the MXFP8 pass")
+            self.skipTest("only alignment=256 MXFP8 tests run in the MXFP8 pass")
         if not MXFP8_PASS and is_mxfp8_align:
-            self.skipTest("alignment=128 MXFP8 tests run in the dedicated MXFP8 pass")
+            self.skipTest("alignment=256 MXFP8 tests run in the dedicated MXFP8 pass")
         # MXFP8 quantization requires Blackwell (SM 10.0) or newer.
         if is_mxfp8_align and torch.cuda.get_device_capability() < (10, 0):
             self.skipTest("MXFP8 EP tests require Blackwell (SM 10.0) or newer")
@@ -283,6 +283,8 @@ class _EpTestCase(unittest.TestCase):
         dispatch_fwd_quant_recipe=None,
         combine_bwd_quant_recipe=None,
     ):
+        # Primitive/count/overflow tests explicitly cover the unpadded path.
+        # The MXFP8 pass overrides this with alignment=256 for grouped MLP fusion.
         return EpConfig(
             top_k=top_k,
             max_tokens_per_rank=TOKENS_PER_RANK,
@@ -532,7 +534,7 @@ class TestEP(_EpTestCase):
         order within an expert's block can differ between the two dispatch kernels, so compare
         by sorted row sums (order-tolerant) instead of position."""
         ref_tokens = self._mxfp8_quantizer().quantize(tokens).dequantize()
-        ref_recv, _rw, _tc = ep_dispatch(self._make_buffer(alignment=128), ref_tokens, topk_idx, w)
+        ref_recv, _rw, _tc = ep_dispatch(self._make_buffer(alignment=256), ref_tokens, topk_idx, w)
         torch.cuda.synchronize()
         got = _degroup_mxfp8(recv_mx).float()
         cum = [0] + tc.cumsum(0).tolist()
@@ -553,7 +555,7 @@ class TestEP(_EpTestCase):
         scales are symm-mem backed."""
         self._require_mxfp8_shapes()
         topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
-        buf = self._make_buffer(dispatch_fwd_quant_recipe=MXFP8BlockScaling(), alignment=128)
+        buf = self._make_buffer(dispatch_fwd_quant_recipe=MXFP8BlockScaling(), alignment=256)
         recv_mx, _rw, tc = ep_dispatch(buf, tokens, topk_idx, w)
         if ZERO_COPY:
             self.assertTrue(is_symm_backed(recv_mx.rowwise_data))
@@ -569,7 +571,7 @@ class TestEP(_EpTestCase):
         self._require_mxfp8_shapes()
         topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
         tokens_p = tokens.detach().clone().requires_grad_(True)
-        buf = self._make_buffer(dispatch_fwd_quant_recipe=MXFP8BlockScaling(), alignment=128)
+        buf = self._make_buffer(dispatch_fwd_quant_recipe=MXFP8BlockScaling(), alignment=256)
         recv_mx, _rw, _tc = ep_dispatch(buf, tokens_p, topk_idx, w)
         g_recv = torch.ones(recv_mx.shape, dtype=torch.bfloat16, device=self.cfg.device)
         torch.autograd.backward(recv_mx, grad_tensors=g_recv)
@@ -596,7 +598,7 @@ class TestEP(_EpTestCase):
             recv_buf = symm_mem_alloc((nbytes,), torch.uint8, self.ep_group)
         else:
             recv_buf = torch.empty(nbytes, dtype=torch.uint8, device=self.cfg.device)
-        buf = self._make_buffer(dispatch_fwd_quant_recipe=MXFP8BlockScaling(), alignment=128)
+        buf = self._make_buffer(dispatch_fwd_quant_recipe=MXFP8BlockScaling(), alignment=256)
         topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
         recv_mx, _rw, tc = ep_dispatch(buf, tokens, topk_idx, w, recv_tokens=recv_buf)
         # the returned GroupedTensor views the caller buffer's data then scale regions
@@ -670,7 +672,7 @@ class TestEP(_EpTestCase):
             .to(torch.bfloat16)
         )
         # MXFP8 combine backward writes into one caller buffer (data then e8m0 scales)
-        buf_mx = self._make_buffer(combine_bwd_quant_recipe=MXFP8BlockScaling(), alignment=128)
+        buf_mx = self._make_buffer(combine_bwd_quant_recipe=MXFP8BlockScaling(), alignment=256)
         _recv, _rw, tc = ep_dispatch(buf_mx, tokens, topk_idx, w)  # seeds the routing
         nbytes = rc * (HIDDEN_DIM + cols)
         if ZERO_COPY:
@@ -684,7 +686,7 @@ class TestEP(_EpTestCase):
         self.assertEqual(g_mx.rowwise_data.data_ptr(), grad_buf.data_ptr())
         self.assertEqual(g_mx.scale_inv.data_ptr(), grad_buf.data_ptr() + rc * HIDDEN_DIM)
         # bf16 reference combine backward on the same routing
-        buf_bf = self._make_buffer(alignment=128)
+        buf_bf = self._make_buffer(alignment=256)
         ep_dispatch(buf_bf, tokens, topk_idx, w)
         src_bf = eo_vals.detach().clone().requires_grad_(True)
         out_bf = ep_combine(buf_bf, self._expert_out(src_bf))
@@ -705,7 +707,7 @@ class TestEP(_EpTestCase):
         """
         self._require_mxfp8_shapes()
         topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
-        buf_mx = self._make_buffer(combine_bwd_quant_recipe=MXFP8BlockScaling(), alignment=128)
+        buf_mx = self._make_buffer(combine_bwd_quant_recipe=MXFP8BlockScaling(), alignment=256)
         _recv, _rw, tc = ep_dispatch(buf_mx, tokens, topk_idx, w)  # seeds the routing
         # Combine input rows match the recv total (per-step in eager, capacity otherwise).
         rows = int(buf_mx.total_recv_tokens.item()) if EAGER else self.cfg.recv_capacity_per_rank
@@ -719,7 +721,7 @@ class TestEP(_EpTestCase):
         (0.5 * (out_mx.float() ** 2).sum()).backward()
         g_mx = src_mx.grad  # per-expert GroupedTensor
         # bf16 reference combine backward on the same routing
-        buf_bf = self._make_buffer(alignment=128)
+        buf_bf = self._make_buffer(alignment=256)
         ep_dispatch(buf_bf, tokens, topk_idx, w)
         src_bf = eo_vals.detach().clone().requires_grad_(True)
         out_bf = ep_combine(buf_bf, self._expert_out(src_bf))
@@ -959,11 +961,11 @@ class TestEP(_EpTestCase):
         nbytes = rc * (HIDDEN_DIM + cols)  # fp8 data + e8m0 scales, one byte per element
         recv_buf = torch.empty(nbytes, dtype=torch.uint8, device=self.cfg.device)
         rbuf_w = torch.empty(rc, dtype=torch.float32, device=self.cfg.device)
-        buf = self._make_buffer(dispatch_fwd_quant_recipe=MXFP8BlockScaling(), alignment=128)
+        buf = self._make_buffer(dispatch_fwd_quant_recipe=MXFP8BlockScaling(), alignment=256)
         topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
 
-        # Reference counts via the AllGather prepare path (alignment=128, no quant).
-        ref_tokens_per_expert = ep_prepare(self._make_buffer(alignment=128), topk_idx).clone()
+        # Reference counts via the AllGather prepare path (alignment=256, no quant).
+        ref_tokens_per_expert = ep_prepare(self._make_buffer(alignment=256), topk_idx).clone()
         torch.cuda.synchronize()
 
         out = {}
@@ -989,7 +991,7 @@ class TestEP(_EpTestCase):
         # Replayed payload correctness: received tokens/scales, weights, and total count must
         # come from the replay's own dispatch, not a stale copy from the captured step.
         self._assert_mxfp8_matches_bf16(recv_mx, tokens, topk_idx, w, buf.tokens_per_expert)
-        ref_buf = self._make_buffer(alignment=128)
+        ref_buf = self._make_buffer(alignment=256)
         _ref_recv, ref_rw, _ref_tc = ep_dispatch(ref_buf, tokens, topk_idx, w)
         torch.cuda.synchronize()
         cum = [0] + buf.tokens_per_expert.cumsum(0).tolist()
@@ -1220,7 +1222,7 @@ class TestMoeEpSequential(_EpTestCase):
         if mxfp8:
             self._require_mxfp8_shapes()
         config = self._make_config(
-            alignment=128 if mxfp8 else 0,
+            alignment=256 if mxfp8 else 0,
             dispatch_fwd_quant_recipe=recipe,
             combine_bwd_quant_recipe=recipe,
         )
@@ -1271,7 +1273,7 @@ class TestMoeEpSequential(_EpTestCase):
     ):
         """Build the exact five-op sequence recognized by MegaMoE fusion."""
         config = self._make_config(
-            alignment=128 if recipe is not None else 0,
+            alignment=256 if recipe is not None else 0,
             dispatch_fwd_quant_recipe=recipe,
             combine_bwd_quant_recipe=recipe,
         )
