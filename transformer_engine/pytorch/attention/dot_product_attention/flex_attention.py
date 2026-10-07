@@ -263,11 +263,6 @@ class _CudnnScoreModBwdGraphEntry:
     workspace_size: int
 
 
-# These engines accept a score_mod graph and then compute without it, and the switch that offers
-# them is process-wide, so declining to ask for them is not enough.
-_FROST_PLAN_TOKENS = ("sdpa_fwd_prefill_sm100", "sdpa_bwd_sm100")
-
-
 def _finalize_cudnn_graph(graph) -> int:
     """Build a cuDNN frontend Python graph and return its workspace size."""
     cudnn = _import_cudnn_frontend()
@@ -276,7 +271,6 @@ def _finalize_cudnn_graph(graph) -> int:
     graph.build_operation_graph()
     try:
         graph.create_execution_plans([cudnn.heur_mode.A, cudnn.heur_mode.FALLBACK])
-        graph.deselect_engines(list(_FROST_PLAN_TOKENS))
         graph.check_support()
     except cudnn.cudnnGraphNotSupportedError as exc:
         raise RuntimeError(f"cuDNN Flex Attention SDPA graph is not supported: {exc}") from exc
