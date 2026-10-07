@@ -24,7 +24,7 @@ namespace {
 
 enum ShapeRepresentation { SAME_BOTH_DIMS = 0, VARYING_FIRST_DIM = 1 };
 
-enum AmaxMode { SHARED_AMAX = 0, PER_TENSOR_AMAX = 1 };
+enum AmaxMode { SHARED_AMAX = 0, PER_TENSOR_AMAX = 1, NO_AMAX = 2 };
 
 constexpr size_t kBlockSize = 16;
 
@@ -48,7 +48,8 @@ void performTest(const ShapeRepresentation shape_rep, const size_t num_tensors,
   const size_t data_bytes = elts_num / 2;
   const size_t scale_cols = cols / kBlockSize;
   const size_t total_scales = rows * scale_cols;
-  const size_t amax_num = (amax_mode == PER_TENSOR_AMAX) ? num_tensors : 1;
+  const size_t amax_num =
+      (amax_mode == NO_AMAX) ? 0 : (amax_mode == PER_TENSOR_AMAX) ? num_tensors : 1;
 
   // Generate random FP4 data, E4M3 scales and amax values
   std::vector<uint8_t> in_data_h(data_bytes);
@@ -111,7 +112,9 @@ void performTest(const ShapeRepresentation shape_rep, const size_t num_tensors,
   GroupedTensorWrapper in_group(num_tensors, logical_shape_vec, NVTE_NVFP4_1D_SCALING);
   in_group.set_rowwise_data(in_data_d, DType::kFloat4E2M1, data_shape);
   in_group.set_rowwise_scale_inv(in_scales_d, DType::kFloat8E4M3, scales_shape);
-  in_group.set_amax(amax_d, DType::kFloat32, amax_shape);
+  if (amax_mode != NO_AMAX) {
+    in_group.set_amax(amax_d, DType::kFloat32, amax_shape);
+  }
 
   GroupedTensorWrapper out_group(num_tensors, logical_shape_vec);
   out_group.set_rowwise_data(out_grouped_d, otype, data_shape);
@@ -155,7 +158,8 @@ void performTest(const ShapeRepresentation shape_rep, const size_t num_tensors,
     cudaMalloc((void **)&single_scales_d, single_scales_size);
     cudaMalloc((void **)&single_amax_d, sizeof(float));
 
-    const float tensor_amax = amax_h[(amax_mode == PER_TENSOR_AMAX) ? t : 0];
+    const float tensor_amax =
+        (amax_mode == NO_AMAX) ? 0.0f : amax_h[(amax_mode == PER_TENSOR_AMAX) ? t : 0];
     cudaMemcpy(single_in_d, in_data_h.data() + data_offset / 2, single_data_bytes,
                cudaMemcpyHostToDevice);
     cudaMemcpy(single_scales_d, in_scales_h.data() + row_offset * scale_cols, single_scales_size,
@@ -170,7 +174,9 @@ void performTest(const ShapeRepresentation shape_rep, const size_t num_tensors,
     TensorWrapper input_w(NVTE_NVFP4_1D_SCALING);
     input_w.set_rowwise_data(single_in_d, DType::kFloat4E2M1, single_shape);
     input_w.set_rowwise_scale_inv(single_scales_d, DType::kFloat8E4M3, scale_shape_vec);
-    input_w.set_amax(single_amax_d, DType::kFloat32, single_amax_shape);
+    if (amax_mode != NO_AMAX) {
+      input_w.set_amax(single_amax_d, DType::kFloat32, single_amax_shape);
+    }
 
     TensorWrapper output_w;
     output_w.set_rowwise_data(single_out_d, otype, single_shape);
@@ -231,6 +237,7 @@ std::vector<std::vector<size_t>> input_configs = {
 std::vector<AmaxMode> amax_modes = {
     AmaxMode::SHARED_AMAX,
     AmaxMode::PER_TENSOR_AMAX,
+    AmaxMode::NO_AMAX,
 };
 
 }  // namespace
@@ -289,6 +296,9 @@ INSTANTIATE_TEST_SUITE_P(
           break;
         case AmaxMode::PER_TENSOR_AMAX:
           name += "PER_TENSOR_AMAX_";
+          break;
+        case AmaxMode::NO_AMAX:
+          name += "NO_AMAX_";
           break;
       }
 

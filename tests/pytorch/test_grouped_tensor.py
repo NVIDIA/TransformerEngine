@@ -1674,7 +1674,9 @@ class TestGroupedTensor:
             assert torch.equal(got, exp)
 
     @staticmethod
-    def _make_grouped_nvfp4_quantizer() -> NVFP4Quantizer:
+    def _make_grouped_nvfp4_quantizer(
+        disable_second_level_scale: bool = False,
+    ) -> NVFP4Quantizer:
         # The grouped NVFP4 quantize kernel requires RHT with post-RHT amax.
         quantizer = NVFP4Quantizer(
             rowwise=True,
@@ -1682,6 +1684,7 @@ class TestGroupedTensor:
             with_rht=True,
             with_post_rht_amax=True,
             with_random_sign_mask=False,
+            disable_second_level_scale=disable_second_level_scale,
         )
         return quantizer
 
@@ -1695,9 +1698,14 @@ class TestGroupedTensor:
     )
     @pytest.mark.parametrize("otype", [te.DType.kBFloat16, te.DType.kFloat32], ids=str)
     @pytest.mark.parametrize("nvfp4_e4m3_max", [0, 448])
+    @pytest.mark.parametrize("disable_second_level_scale", [False, True])
     @pytest.mark.skipif(not nvfp4_grouped_available, reason=reason_for_no_nvfp4_grouped)
     def test_group_dequantize_nvfp4(
-        self, shape: List[Tuple[int, int]], otype: te.DType, nvfp4_e4m3_max: int
+        self,
+        shape: List[Tuple[int, int]],
+        otype: te.DType,
+        nvfp4_e4m3_max: int,
+        disable_second_level_scale: bool,
     ) -> None:
         """Grouped NVFP4 dequantization matches per-tensor dequantization bitwise."""
         num_tensors = len(shape)
@@ -1708,10 +1716,11 @@ class TestGroupedTensor:
 
         # The grouped NVFP4 quantizer needs first_dims, so this covers the varying-first-dim
         # layout; the equal-shape layout is covered by test_dequantize_nvfp4_grouped.cu.
-        quantizer = self._make_grouped_nvfp4_quantizer()
+        quantizer = self._make_grouped_nvfp4_quantizer(disable_second_level_scale)
         quantizer.nvfp4_e4m3_max = nvfp4_e4m3_max
         first_dims = torch.tensor([s[0] for s in shape], dtype=torch.int64, device="cuda")
         quantized = tex.group_quantize(grouped_input, quantizer, num_tensors, first_dims)
+        assert (quantized.amax is None) == disable_second_level_scale
 
         dequantized = tex.group_dequantize(quantized, otype)
 

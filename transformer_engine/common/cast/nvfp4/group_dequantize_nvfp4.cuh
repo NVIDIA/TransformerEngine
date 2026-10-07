@@ -96,8 +96,14 @@ __global__ void __launch_bounds__(512)
   fp4vec value;
   value.vec = input_vectorized[my_index];
   const fp8e4m3 scale = scales[my_index];
-  const float tensor_amax = amax_per_tensor ? amax[tensor_id] : amax[0];
-  constexpr float factor_inv = 1.0f / (6.0f * 448.0f);
+  // Without an amax (second-level scaling disabled) the global scale is 1, as in
+  // dequantize_nvfp4.cuh.
+  constexpr float unit_global_scale_amax = 6.0f * 448.0f;
+  float tensor_amax = unit_global_scale_amax;
+  if (amax != nullptr) {
+    tensor_amax = amax_per_tensor ? amax[tensor_id] : amax[0];
+  }
+  constexpr float factor_inv = 1.0f / unit_global_scale_amax;
   const float final_scale = static_cast<float>(scale) * tensor_amax * factor_inv;
 #pragma unroll
   for (int i = 0; i < 4; i++) {
@@ -133,12 +139,16 @@ inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output,
              "Grouped NVFP4 dequantization requires E4M3 scales.");
 
   const size_t num_tensors = input->num_tensors;
-  NVTE_CHECK(input->amax.has_data() && input->amax.dtype == DType::kFloat32,
-             "Grouped NVFP4 dequantization requires an FP32 amax.");
-  const size_t amax_numel = input->amax.numel();
-  NVTE_CHECK(amax_numel == 1 || amax_numel == num_tensors,
-             "Grouped NVFP4 dequantization requires one amax or one amax per tensor (got ",
-             amax_numel, " for ", num_tensors, " tensors).");
+  // A missing amax means second-level scaling is disabled.
+  const bool has_amax = input->amax.has_data();
+  const size_t amax_numel = has_amax ? input->amax.numel() : 0;
+  if (has_amax) {
+    NVTE_CHECK(input->amax.dtype == DType::kFloat32,
+               "Grouped NVFP4 dequantization requires an FP32 amax.");
+    NVTE_CHECK(amax_numel == 1 || amax_numel == num_tensors,
+               "Grouped NVFP4 dequantization requires one amax or one amax per tensor (got ",
+               amax_numel, " for ", num_tensors, " tensors).");
+  }
 
   // The grouped NVFP4 quantizer stacks the groups along the first dimension,
   // so only a shared last dimension is supported. Every group's first
@@ -187,7 +197,8 @@ inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output,
   const int64_t *const offsets_ptr = reinterpret_cast<const int64_t *>(input->tensor_offsets.dptr);
   const int64_t *const first_dims_ptr = reinterpret_cast<const int64_t *>(input->first_dims.dptr);
   const fp8e4m3 *const scales_ptr = reinterpret_cast<const fp8e4m3 *>(input->scale_inv.dptr);
-  const float *const amax_ptr = reinterpret_cast<const float *>(input->amax.dptr);
+  const float *const amax_ptr =
+      has_amax ? reinterpret_cast<const float *>(input->amax.dptr) : nullptr;
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
       output->dtype(), OType,
