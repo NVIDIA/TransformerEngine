@@ -30,8 +30,6 @@ __all__ = [
     "is_frost_attention_supported",
     "fused_attn_fwd",
     "fused_attn_bwd",
-    "frost_attn_fwd",
-    "frost_attn_bwd",
 ]
 
 
@@ -608,6 +606,30 @@ def _cached(kind: str, key):
     return entry
 
 
+def _validate_qkv(q, k, v, qkv_format):
+    """Check the tensors the graph will bind, and return their BHSD descriptions.
+
+    These are not stylistic guards. ``execute`` binds raw pointers, so a tensor whose shape,
+    dtype or layout disagrees with the node it is bound to is reinterpreted rather than rejected.
+    The context-parallel ring calls the backward outside autograd, so neither direction may
+    assume the other ran first.
+    """
+    for name, tensor in (("q", q), ("k", k), ("v", v)):
+        _check_layout(name, tensor)
+        _check_dtype(name, tensor, q.dtype)
+    _check_kv_match(k, v)
+    qd, _ = _bhsd(q, qkv_format)
+    kd, _ = _bhsd(k, qkv_format)
+    vd, _ = _bhsd(v, qkv_format)
+    if kd[0] != qd[0] or kd[3] != qd[3]:
+        # The graph declares k and v with q's batch and head_dim, so a mismatch would bind a
+        # differently shaped buffer to that node and read the wrong elements silently.
+        raise ValueError(f"k must match q in batch and head_dim; got q {qd} and k {kd} in BHSD")
+    if qd[1] % kd[1] != 0:
+        raise ValueError(f"num_heads must be divisible by num_gqa_groups; got {qd[1]} and {kd[1]}")
+    return qd, kd, vd
+
+
 def _bhsd(t: torch.Tensor, qkv_format: str):
     """``t`` described in cuDNN's logical BHSD, without permuting it."""
     return cudnn_pygraph.bhsd_dim_stride(t, qkv_format, backend_name=_BACKEND_NAME)
@@ -644,148 +666,6 @@ def _key(q, k, v, qkv_format, mask, scale, deterministic=False):
         # plan built either way must not be handed to a call that asked for the other.
         bool(deterministic),
     )
-
-
-def frost_attn_fwd(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    qkv_format: str = "bshd",
-    attn_scale: Optional[float] = None,
-    attn_mask_type: str = "causal",
-    window_size: Optional[Tuple[int, int]] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Forward attention via cuDNN FROST.
-
-    q, k, v are in TE's ``qkv_format`` and are never permuted: cuDNN takes dims and strides, so
-    the descriptors are reordered into its logical BHSD instead. That is what serves bshd and
-    sbhd alike without a transpose. GQA is supported directly (h_kv may differ from h_q), SQ need
-    not equal SKV, which is what lets a CP ring step use this, and v may carry its own head_dim,
-    in which case out follows q's layout with v's head_dim. ``out`` comes back in ``qkv_format``;
-    softmax_lse is [b, h, s] fp32 natural-log logsumexp, the layout and convention the CP ring
-    correction expects, and is BHSD regardless of the input format.
-    """
-    for name, tensor in (("q", q), ("k", k), ("v", v)):
-        _check_layout(name, tensor)
-        _check_dtype(name, tensor, q.dtype)
-    _check_kv_match(k, v)
-    qd, _ = _bhsd(q, qkv_format)
-    kd, _ = _bhsd(k, qkv_format)
-    vd, _ = _bhsd(v, qkv_format)
-    if kd[0] != qd[0] or kd[3] != qd[3]:
-        # The graph declares k and v with q's batch and head_dim, so a mismatch would bind a
-        # differently shaped buffer to that node and read the wrong elements silently.
-        raise ValueError(f"k must match q in batch and head_dim; got q {qd} and k {kd} in BHSD")
-    if qd[1] % kd[1] != 0:
-        raise ValueError(f"num_heads must be divisible by num_gqa_groups; got {qd[1]} and {kd[1]}")
-
-    mask = _mask_spec(attn_mask_type, window_size)
-    scale = attn_scale if attn_scale is not None else qd[3] ** -0.5
-    entry = _cached("fwd", _key(q, k, v, qkv_format, mask, scale))
-    tq, tk, tv, tout, tlse = entry["handles"]
-
-    b, hq, sq = qd[0], qd[1], qd[2]
-    # Allocated in the caller's format, so no permute is needed on the way out either.
-    out_shape, out_stride = _o_shape_stride(q.shape, vd[3], q.stride())
-    # Allocated per call so concurrent uses cannot alias; the cache holds only the plan.
-    # empty_strided, not empty_like: the latter does not preserve an arbitrary permuted stride.
-    out = torch.empty_strided(out_shape, out_stride, device=q.device, dtype=q.dtype)
-    lse = torch.empty(b, hq, sq, 1, device=q.device, dtype=torch.float32)
-    workspace = torch.empty(entry["workspace"], device=q.device, dtype=torch.uint8)
-    entry["graph"].execute(
-        {tq: q, tk: k, tv: v, tout: out, tlse: lse},
-        workspace,
-        handle=cudnn_pygraph.handle_for(q.device, backend_name=_BACKEND_NAME),
-    )
-    return out, lse.squeeze(-1)
-
-
-def frost_attn_bwd(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    out: torch.Tensor,
-    softmax_lse: torch.Tensor,
-    dout: torch.Tensor,
-    qkv_format: str = "bshd",
-    attn_scale: Optional[float] = None,
-    attn_mask_type: str = "causal",
-    deterministic: bool = False,
-    window_size: Optional[Tuple[int, int]] = None,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Backward attention via cuDNN FROST.
-
-    Tensors are in TE's ``qkv_format``, as in the forward. ``softmax_lse`` is [b, h, s] BHSD, as
-    the forward returned it. The gradients come back in ``qkv_format``.
-    """
-    for name, tensor in (("q", q), ("k", k), ("v", v), ("out", out), ("dout", dout)):
-        _check_layout(name, tensor)
-        _check_dtype(name, tensor, q.dtype)
-    _check_kv_match(k, v)
-    # The same shape assumptions the forward makes, plus o/dO, which the graph declares with q's
-    # shape. The forward runs first in autograd, but the CP ring calls this directly.
-    qd, _ = _bhsd(q, qkv_format)
-    kd, _ = _bhsd(k, qkv_format)
-    vd, _ = _bhsd(v, qkv_format)
-    if kd[0] != qd[0] or kd[3] != qd[3]:
-        raise ValueError(f"k must match q in batch and head_dim; got q {qd} and k {kd} in BHSD")
-    if qd[1] % kd[1] != 0:
-        raise ValueError(f"num_heads must be divisible by num_gqa_groups; got {qd[1]} and {kd[1]}")
-    o_shape, o_stride = _o_shape_stride(q.shape, vd[3], q.stride())
-    for name, tensor in (("out", out), ("dout", dout)):
-        if list(tensor.shape) != o_shape:
-            raise ValueError(f"{name} must be shaped {o_shape}; got {list(tensor.shape)}")
-    if softmax_lse.dtype != torch.float32:
-        raise ValueError(f"softmax_lse must be fp32; got {softmax_lse.dtype}")
-    # Compared against the BHSD description, not against q's own shape: the LSE is always
-    # [b, h, s] whatever format the tensors arrived in.
-    if tuple(softmax_lse.shape[:3]) != tuple(qd[:3]):
-        raise ValueError(
-            f"softmax_lse must be [b, h, s] matching q; got {tuple(softmax_lse.shape)} and"
-            f" {tuple(qd[:3])}"
-        )
-
-    mask = _mask_spec(attn_mask_type, window_size)
-    scale = attn_scale if attn_scale is not None else qd[3] ** -0.5
-    entry = _cached("bwd", _key(q, k, v, qkv_format, mask, scale, deterministic))
-    h = entry["handles"]
-
-    if softmax_lse.dim() == 3:
-        softmax_lse = softmax_lse.unsqueeze(-1)
-    softmax_lse = softmax_lse.contiguous()
-
-    # The graph expects o and dO in the layout the forward wrote, and dO comes from autograd
-    # with strides we do not control, so restride rather than silently reading the wrong elements.
-    def _as(t, stride):
-        if list(t.stride()) == list(stride):
-            return t
-        buf = torch.empty_strided(t.shape, stride, device=t.device, dtype=t.dtype)
-        buf.copy_(t)
-        return buf
-
-    out = _as(out, o_stride)
-    dout = _as(dout, o_stride)
-
-    dq = torch.empty_strided(q.shape, q.stride(), device=q.device, dtype=q.dtype)
-    dk = torch.empty_strided(k.shape, k.stride(), device=k.device, dtype=k.dtype)
-    dv = torch.empty_strided(v.shape, v.stride(), device=v.device, dtype=v.dtype)
-    workspace = torch.empty(entry["workspace"], device=q.device, dtype=torch.uint8)
-    entry["graph"].execute(
-        {
-            h["q"]: q,
-            h["k"]: k,
-            h["v"]: v,
-            h["o"]: out,
-            h["do"]: dout,
-            h["stats"]: softmax_lse,
-            h["dq"]: dq,
-            h["dk"]: dk,
-            h["dv"]: dv,
-        },
-        workspace,
-        handle=cudnn_pygraph.handle_for(q.device, backend_name=_BACKEND_NAME),
-    )
-    return dq, dk, dv
 
 
 def _frost_only(**unsupported):
@@ -853,23 +733,34 @@ def fused_attn_fwd(
         raise NotImplementedError(
             f"FROST attention needs o_format to match qkv_format; got {o_format}/{qkv_format}"
         )
-    mask_type, window = _te_mask_spec(
+    # _te_mask_spec validates as it normalises, so what it returns is the spec the plan keys on.
+    mask = _te_mask_spec(
         attn_mask_type, window_size, _bottom_right_diagonal(attn_mask_type, bottom_right_diagonal)
     )
 
-    out, softmax_lse = frost_attn_fwd(
-        q.contiguous(),
-        k.contiguous(),
-        v.contiguous(),
-        qkv_format,
-        attn_scale=attn_scale,
-        attn_mask_type=mask_type,
-        window_size=window,
+    q, k, v = q.contiguous(), k.contiguous(), v.contiguous()
+    qd, _, vd = _validate_qkv(q, k, v, qkv_format)
+    scale = attn_scale if attn_scale is not None else qd[3] ** -0.5
+    entry = _cached("fwd", _key(q, k, v, qkv_format, mask, scale))
+    tq, tk, tv, tout, tlse = entry["handles"]
+
+    # Allocated per call so concurrent uses cannot alias; the cache holds only the plan.
+    # empty_strided, not empty_like: the latter does not preserve an arbitrary permuted stride.
+    # The output takes the caller's format with v's head_dim, so nothing is converted on the way
+    # out; the LSE is BHSD whatever the inputs were, which is what the ring correction expects.
+    out_shape, out_stride = _o_shape_stride(q.shape, vd[3], q.stride())
+    out = torch.empty_strided(out_shape, out_stride, device=q.device, dtype=q.dtype)
+    lse = torch.empty(qd[0], qd[1], qd[2], 1, device=q.device, dtype=torch.float32)
+    workspace = torch.empty(entry["workspace"], device=q.device, dtype=torch.uint8)
+    entry["graph"].execute(
+        {tq: q, tk: k, tv: v, tout: out, tlse: lse},
+        workspace,
+        handle=cudnn_pygraph.handle_for(q.device, backend_name=_BACKEND_NAME),
     )
     # A real tensor, not None: it is saved for backward and handed to the activation offload
     # hooks, neither of which accepts None. FROST has no dropout, so nothing reads it.
     rng_state = torch.empty(2, dtype=torch.int64, device=q.device)
-    return out, [softmax_lse, rng_state]
+    return out, [lse.squeeze(-1), rng_state]
 
 
 def fused_attn_bwd(
@@ -928,22 +819,66 @@ def fused_attn_bwd(
             raise NotImplementedError(
                 f"FROST attention needs {name} to match qkv_format; got {fmt}/{qkv_format}"
             )
-    mask_type, window = _te_mask_spec(
+    mask = _te_mask_spec(
         attn_mask_type, window_size, _bottom_right_diagonal(attn_mask_type, bottom_right_diagonal)
     )
     softmax_lse = aux_ctx_tensors[0]
 
-    dq, dk, dv = frost_attn_bwd(
-        q.contiguous(),
-        k.contiguous(),
-        v.contiguous(),
-        o.contiguous(),
-        softmax_lse,
-        d_o.contiguous(),
-        qkv_format,
-        attn_scale=attn_scale,
-        attn_mask_type=mask_type,
-        deterministic=deterministic,
-        window_size=window,
+    q, k, v = q.contiguous(), k.contiguous(), v.contiguous()
+    o, d_o = o.contiguous(), d_o.contiguous()
+    qd, _, vd = _validate_qkv(q, k, v, qkv_format)
+    for name, tensor in (("o", o), ("d_o", d_o)):
+        _check_layout(name, tensor)
+        _check_dtype(name, tensor, q.dtype)
+    o_shape, o_stride = _o_shape_stride(q.shape, vd[3], q.stride())
+    for name, tensor in (("o", o), ("d_o", d_o)):
+        if list(tensor.shape) != o_shape:
+            raise ValueError(f"{name} must be shaped {o_shape}; got {list(tensor.shape)}")
+    if softmax_lse.dtype != torch.float32:
+        raise ValueError(f"softmax_lse must be fp32; got {softmax_lse.dtype}")
+    # Compared against the BHSD description, not q's own shape: the LSE is always [b, h, s]
+    # whatever format the tensors arrived in.
+    if tuple(softmax_lse.shape[:3]) != tuple(qd[:3]):
+        raise ValueError(
+            f"softmax_lse must be [b, h, s] matching q; got {tuple(softmax_lse.shape)} and"
+            f" {tuple(qd[:3])}"
+        )
+
+    scale = attn_scale if attn_scale is not None else qd[3] ** -0.5
+    entry = _cached("bwd", _key(q, k, v, qkv_format, mask, scale, deterministic))
+    h = entry["handles"]
+
+    if softmax_lse.dim() == 3:
+        softmax_lse = softmax_lse.unsqueeze(-1)
+    softmax_lse = softmax_lse.contiguous()
+
+    # The graph expects o and dO in the layout the forward wrote, and dO comes from autograd
+    # with strides we do not control, so restride rather than silently reading the wrong elements.
+    def _as(t, stride):
+        if list(t.stride()) == list(stride):
+            return t
+        buf = torch.empty_strided(t.shape, stride, device=t.device, dtype=t.dtype)
+        buf.copy_(t)
+        return buf
+
+    o, d_o = _as(o, o_stride), _as(d_o, o_stride)
+    dq = torch.empty_strided(q.shape, q.stride(), device=q.device, dtype=q.dtype)
+    dk = torch.empty_strided(k.shape, k.stride(), device=k.device, dtype=k.dtype)
+    dv = torch.empty_strided(v.shape, v.stride(), device=v.device, dtype=v.dtype)
+    workspace = torch.empty(entry["workspace"], device=q.device, dtype=torch.uint8)
+    entry["graph"].execute(
+        {
+            h["q"]: q,
+            h["k"]: k,
+            h["v"]: v,
+            h["o"]: o,
+            h["do"]: d_o,
+            h["stats"]: softmax_lse,
+            h["dq"]: dq,
+            h["dk"]: dk,
+            h["dv"]: dv,
+        },
+        workspace,
+        handle=cudnn_pygraph.handle_for(q.device, backend_name=_BACKEND_NAME),
     )
     return dq, dk, dv, None

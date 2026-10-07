@@ -74,6 +74,66 @@ def _shape_id(s):
     return "b%d_hq%d_hkv%d_sq%d_skv%d_d%d_dv%d" % s
 
 
+def _fwd(q, k, v, mask, scale, window=None):
+    """The forward through the fused signature, which is the only entry point the backend has.
+
+    Everything is bshd here, because the shim derives one qkv_format and makes the tensors
+    contiguous; that is exactly what the dispatcher hands it in production.
+    """
+    from transformer_engine.pytorch.attention.dot_product_attention.frost_attention import (
+        fused_attn_fwd,
+    )
+
+    out, aux = fused_attn_fwd(
+        True,
+        q.shape[1],
+        k.shape[1],
+        None,
+        None,
+        q,
+        k,
+        v,
+        None,
+        None,
+        attn_scale=scale,
+        qkv_layout="bshd_bshd_bshd",
+        o_format="bshd",
+        attn_mask_type=mask,
+        window_size=(-1, -1) if window is None else window,
+    )
+    return out, aux[0]
+
+
+def _bwd(q, k, v, out, lse, dout, mask, scale, window=None):
+    """The backward through the fused signature. aux_ctx_tensors is what the forward returned."""
+    from transformer_engine.pytorch.attention.dot_product_attention.frost_attention import (
+        fused_attn_bwd,
+    )
+
+    dq, dk, dv, _ = fused_attn_bwd(
+        q.shape[1],
+        k.shape[1],
+        None,
+        None,
+        q,
+        k,
+        v,
+        out,
+        dout,
+        None,
+        [lse, torch.empty(2, dtype=torch.int64, device=q.device)],
+        None,
+        attn_scale=scale,
+        qkv_layout="bshd_bshd_bshd",
+        o_format="bshd",
+        do_format="bshd",
+        dqkv_layout="bshd_bshd_bshd",
+        attn_mask_type=mask,
+        window_size=(-1, -1) if window is None else window,
+    )
+    return dq, dk, dv
+
+
 def _bhsd(t):
     """A [b, h, s, d] view of a bshd tensor. The reference works in that order; the kernel does
     not, since it takes TE's format and reorders the cuDNN descriptors instead."""
@@ -138,10 +198,6 @@ def _floor(q32, k32, v32, scale, mask, dtype, window=None):
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 def test_frost_forward_matches_reference(shape, mask, dtype):
     """Forward output and LSE against an independent float64 reference."""
-    from transformer_engine.pytorch.attention.dot_product_attention.frost_attention import (
-        frost_attn_fwd,
-    )
-
     b, hq, hkv, sq, skv, d, d_v = shape
     torch.manual_seed(0)
     # Generate in fp32 so there is a true high-precision original to measure against, then cast
@@ -151,7 +207,7 @@ def test_frost_forward_matches_reference(shape, mask, dtype):
     q, k, v = q32.to(dtype), k32.to(dtype), v32.to(dtype)
     scale = 1.0 / math.sqrt(d)
 
-    out, lse = frost_attn_fwd(q, k, v, "bshd", attn_scale=scale, attn_mask_type=mask)
+    out, lse = _fwd(q, k, v, mask, scale)
 
     floor_o, floor_l, ref_o, ref_lse = _floor(
         _bhsd(q32), _bhsd(k32), _bhsd(v32), scale, mask, dtype
@@ -189,10 +245,6 @@ def test_frost_sliding_window_matches_reference(mask, window, sq, skv):
     is worth its own test because a left bound that is off by one, or silently dropped, still
     produces finite plausible-looking output -- the reference is the only thing that catches it.
     """
-    from transformer_engine.pytorch.attention.dot_product_attention.frost_attention import (
-        frost_attn_fwd,
-    )
-
     # The rectangular case is the one that matters for alignment: top-left and bottom-right
     # coincide when sq == skv, so a swapped alignment is invisible in square shapes.
     b, hq, hkv, d = 2, 8, 4, 512
@@ -203,9 +255,7 @@ def test_frost_sliding_window_matches_reference(mask, window, sq, skv):
     q, k, v = q32.to(dtype), k32.to(dtype), v32.to(dtype)
     scale = 1.0 / math.sqrt(d)
 
-    out, _ = frost_attn_fwd(
-        q, k, v, "bshd", attn_scale=scale, attn_mask_type=mask, window_size=window
-    )
+    out, _ = _fwd(q, k, v, mask, scale, window)
 
     floor_o, _, ref_o, _ = _floor(_bhsd(q32), _bhsd(k32), _bhsd(v32), scale, mask, dtype, window)
     err = (_bhsd(out).double() - ref_o).abs().max().item()
@@ -218,7 +268,7 @@ def test_frost_sliding_window_matches_reference(mask, window, sq, skv):
 
     # A window must actually change the result; if the bound were dropped this would match the
     # unwindowed output and the check above would still pass.
-    full, _ = frost_attn_fwd(q, k, v, "bshd", attn_scale=scale, attn_mask_type=mask)
+    full, _ = _fwd(q, k, v, mask, scale)
     assert not torch.equal(out, full), "window %s produced the same output as no window" % (window,)
 
 
@@ -234,11 +284,6 @@ def test_frost_backward_matches_reference(shape, mask, window, dtype):
     that would show first -- the gradient of a softmax involves a subtraction of similarly sized
     terms, so a range problem surfaces there before it surfaces in the forward.
     """
-    from transformer_engine.pytorch.attention.dot_product_attention.frost_attention import (
-        frost_attn_bwd,
-        frost_attn_fwd,
-    )
-
     b, hq, hkv, sq, skv, d, d_v = shape
     torch.manual_seed(0)
     mk = lambda s_, h_, d_: torch.randn(b, s_, h_, d_, device="cuda")
@@ -246,13 +291,9 @@ def test_frost_backward_matches_reference(shape, mask, window, dtype):
     q, k, v = q32.to(dtype), k32.to(dtype), v32.to(dtype)
     scale = 1.0 / math.sqrt(d)
 
-    out, lse = frost_attn_fwd(
-        q, k, v, "bshd", attn_scale=scale, attn_mask_type=mask, window_size=window
-    )
+    out, lse = _fwd(q, k, v, mask, scale, window)
     dout = torch.randn_like(out)
-    dq, dk, dv = frost_attn_bwd(
-        q, k, v, out, lse, dout, "bshd", attn_scale=scale, attn_mask_type=mask, window_size=window
-    )
+    dq, dk, dv = _bwd(q, k, v, out, lse, dout, mask, scale, window)
 
     # The reference works in [b, h, s, d], so it takes views and returns grads in that order.
     qr = _bhsd(q32).detach().clone().requires_grad_(True)
@@ -465,19 +506,15 @@ def test_frost_sliding_window_selection_by_cp_comm_type(cp_comm_type, window, ex
 @requires_frost
 def test_frost_rejects_mismatched_kv():
     """v must index the same KV positions as k. head_dim is free; the rest is not."""
-    from transformer_engine.pytorch.attention.dot_product_attention.frost_attention import (
-        frost_attn_fwd,
-    )
-
     b, h, s, d = 2, 4, 512, 512
     dtype = torch.bfloat16
     mk = lambda hh: torch.randn(b, s, hh, d, device="cuda", dtype=dtype)
     q, k = mk(h), mk(h)
 
     with pytest.raises(ValueError, match="batch, heads and seqlen"):
-        frost_attn_fwd(q, k, mk(h * 2), "bshd")
+        _fwd(q, k, mk(h * 2), "no_mask", 1.0)
     with pytest.raises(ValueError, match="match q"):
-        frost_attn_fwd(q, k, k.to(torch.float32), "bshd")
+        _fwd(q, k, k.to(torch.float32), "no_mask", 1.0)
 
 
 @requires_frost
@@ -491,10 +528,6 @@ def test_frost_serves_v_with_its_own_head_dim_and_layout():
     v cannot differ from k in qkv_format: one format describes all three, which is what the
     fused path produces and what the selector enforces.
     """
-    from transformer_engine.pytorch.attention.dot_product_attention.frost_attention import (
-        frost_attn_fwd,
-    )
-
     b, h, s, d, d_v = 2, 4, 512, 512, 320
     dtype = torch.bfloat16
     torch.manual_seed(0)
@@ -507,7 +540,7 @@ def test_frost_serves_v_with_its_own_head_dim_and_layout():
     assert v.stride(3) == 1, "the head dim must stay contiguous"
     scale = 1.0 / math.sqrt(d)
 
-    out, lse = frost_attn_fwd(q, k, v, "bshd", attn_scale=scale, attn_mask_type="causal")
+    out, lse = _fwd(q, k, v, "causal", scale)
     out = _bhsd(out)
 
     floor_o, floor_l, ref_o, ref_lse = _floor(
