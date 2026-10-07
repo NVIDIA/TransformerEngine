@@ -249,6 +249,12 @@ def _deterministic_algorithms_required() -> bool:
     )
 
 
+_DETERMINISM_REQUESTED = (
+    "Deterministic execution was requested (NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 or"
+    " torch.use_deterministic_algorithms)"
+)
+
+
 def _wrap_single_quantized_as_grouped(
     tensor: torch.Tensor,
     quantized: MXFP8Tensor | NVFP4Tensor | NVFP4TensorStorage,
@@ -1127,11 +1133,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
     @classmethod
     @functools.lru_cache(maxsize=None)
     def grouped_gemm_dactivation_is_deterministic(cls) -> bool:
-        """Whether this op's dactivation kernel can produce a bit-exact ``dprob``.
-
-        Feature-detects the wrapper's ``deterministic`` argument: dSReLU from cuDNN FE 1.28.0,
-        dGLU additionally gated on the release that ships discrete weights (see the GLU override).
-        """
+        """Whether this op's dactivation wrapper accepts ``deterministic`` (feature-detected)."""
         try:
             kernel = cls.grouped_gemm_dactivation_kernel()
         except ImportError:
@@ -2466,13 +2468,10 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             )
             if not dprob_is_deterministic:
                 raise RuntimeError(
-                    "Deterministic execution was requested"
-                    " (NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 or"
-                    " torch.use_deterministic_algorithms), but the scale gradient (dprob) is"
-                    " accumulated with nondeterministic atomics on this configuration."
-                    " A bit-exact dprob requires a cuDNN front-end whose dactivation wrapper"
-                    " accepts `deterministic` (dSReLU: 1.28.0 or later; dGLU: 1.31.0 or later)"
-                    " and an FC2 without scale_bias."
+                    f"{_DETERMINISM_REQUESTED}, but the scale gradient (dprob) is accumulated"
+                    " with nondeterministic atomics on this configuration. A bit-exact dprob"
+                    " requires a cuDNN front-end whose dactivation wrapper accepts"
+                    " `deterministic`, and an FC2 without scale_bias."
                 )
         scales_f32 = None
         scales_tensor = None
@@ -2654,7 +2653,17 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 fc2_dactivation_kwargs["b_dtype"] = data_dtype
                 fc2_dactivation_kwargs["b_major"] = "k" if use_nvfp4 else "n"
 
-        fc2_dgrad_kernel_out = dactivation_kernel(**fc2_dactivation_kwargs)
+        try:
+            fc2_dgrad_kernel_out = dactivation_kernel(**fc2_dactivation_kwargs)
+        except NotImplementedError as e:
+            if not deterministic_dactivation:
+                raise
+            # cuDNN decides which configurations it can make deterministic; report its refusal
+            # as TE's error instead of mirroring cuDNN's rules here.
+            raise RuntimeError(
+                f"{_DETERMINISM_REQUESTED}, but the cuDNN front-end refused this configuration"
+                f" with `deterministic=True`: {e}"
+            ) from e
 
         if use_nvfp4:
             fc1_dy_bf16 = fc2_dgrad_kernel_out["d_row_tensor"]
@@ -3158,17 +3167,6 @@ class GroupedMLP_CuTeGEMMGLU(_GroupedMLP_CuTeGEMMBase):
         from cudnn import grouped_gemm_dglu_wrapper_sm100  # pylint: disable=no-name-in-module
 
         return grouped_gemm_dglu_wrapper_sm100
-
-    @classmethod
-    @functools.lru_cache(maxsize=None)
-    def grouped_gemm_dactivation_is_deterministic(cls) -> bool:
-        """The dGLU wrapper's ``deterministic`` covers dense weights from cudnn-frontend#1319, but
-        discrete weights (the default here) only from #1414. The signature cannot tell the two
-        apart, so also require the release that ships both."""
-        return (
-            _cudnn_frontend_version_at_least("1.31.0")
-            and super().grouped_gemm_dactivation_is_deterministic()
-        )
 
 
 class GroupedMLP_CuTeGEMMUnary(_GroupedMLP_CuTeGEMMBase):
