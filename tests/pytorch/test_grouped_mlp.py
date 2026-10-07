@@ -53,6 +53,7 @@ from utils import (
     dtype_tols,
     make_recipe,
     MegatronTrainingHelper,
+    nvfp4_variant_names,
     quantization_tols,
     reset_rng_states,
 )
@@ -61,6 +62,7 @@ from utils import (
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
 nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
+fp8_ue5m3_available, reason_for_no_fp8_ue5m3 = te.is_fp8_ue5m3_available(return_reason=True)
 
 # Device arch
 device_arch = get_device_compute_capability()
@@ -129,6 +131,8 @@ if mxfp8_available:
     _grouped_mlp_quantization_list.append("mxfp8")
 if nvfp4_available:
     _grouped_mlp_quantization_list.append("nvfp4_rht")
+    if fp8_ue5m3_available:
+        _grouped_mlp_quantization_list.append("nvfp4_rht_ue5m3")
 
 
 @pytest.fixture(autouse=True, scope="function")
@@ -296,11 +300,10 @@ def maybe_skip_quantization(
         pytest.skip(reason_for_no_fp8)
     if quantization == "mxfp8" and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
-    if (
-        quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6", "nvfp4_rht")
-        and not nvfp4_available
-    ):
+    if quantization in nvfp4_variant_names and not nvfp4_available:
         pytest.skip(reason_for_no_nvfp4)
+    if quantization in ("nvfp4_ue5m3", "nvfp4_rht_ue5m3") and not fp8_ue5m3_available:
+        pytest.skip(reason_for_no_fp8_ue5m3)
 
     # Check dims
     if dims is not None:
@@ -312,16 +315,13 @@ def maybe_skip_quantization(
         elif quantization == "mxfp8":
             if math.prod(dims[:-1]) % 32 != 0 or dims[-1] % 32 != 0:
                 pytest.skip("MXFP8 GEMMs require dims that are divisible by 32")
-        elif quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6", "nvfp4_rht"):
+        elif quantization in nvfp4_variant_names:
             if math.prod(dims[:-1]) % 16 != 0 or dims[-1] % 16 != 0:
                 pytest.skip("NVFP4 GEMMs require dims that are divisible by 16")
 
     # Check dtype
     if dtype is not None:
-        if (
-            quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6", "nvfp4_rht")
-            and dtype != torch.bfloat16
-        ):
+        if quantization in nvfp4_variant_names and dtype != torch.bfloat16:
             pytest.skip("NVFP4 quantization is only supported with BF16 data")
 
 
@@ -377,17 +377,31 @@ def make_reference_and_test_tensors(
         test = quantizer(test)
     elif quantization == "mxfp8":
         test = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3)(test)
-    elif quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_rht"):
+    elif quantization in (
+        "nvfp4",
+        "nvfp4_row_scaled",
+        "nvfp4_rht",
+        "nvfp4_ue5m3",
+        "nvfp4_rht_ue5m3",
+    ):
         tensor_type = "input"
         if quantizer_role is not None:
             tensor_type = quantizer_role.tensor_type
-        with_rht = quantization == "nvfp4_rht" and tensor_type != "weight"
+        with_rht = quantization in ("nvfp4_rht", "nvfp4_rht_ue5m3") and tensor_type != "weight"
+        scale_dtype = (
+            te.DType.kFloat8UE5M3
+            if quantization in ("nvfp4_ue5m3", "nvfp4_rht_ue5m3")
+            else te.DType.kFloat8E4M3
+        )
+        disable_second_level_scale = scale_dtype == te.DType.kFloat8UE5M3 and tensor_type == "input"
         test = NVFP4Quantizer(
+            scale_dtype=scale_dtype,
             with_rht=with_rht,
             with_post_rht_amax=with_rht,
             with_2d_quantization=False,
             stochastic_rounding=False,
             with_random_sign_mask=False,
+            disable_second_level_scale=disable_second_level_scale,
         )(test)
     elif quantization == "nvfp4_4over6":
         tensor_type = "input"
@@ -932,13 +946,9 @@ class TestGroupedLinearOp:
             )
         if quantization is None and quantized_weight:
             pytest.skip("quantized_weight requires a quantization recipe")
-        if (
-            quantization is not None
-            and quantization.startswith("nvfp4")
-            and dtype != torch.bfloat16
-        ):
+        if quantization in nvfp4_variant_names and dtype != torch.bfloat16:
             pytest.skip("NVFP4 grouped GEMM only supports BF16 output")
-        if single_grouped_weight and quantization is not None and quantization.startswith("nvfp4"):
+        if single_grouped_weight and quantization in nvfp4_variant_names:
             # Currently, split_quantization is used which is not cuda graph safe.
             # We should either support grouped weight quantization without rht or need to do
             # inplace per tensor weight quantization to make this use-case cuda graphable if needed.
@@ -1226,7 +1236,7 @@ class TestGroupedMLPFusedOp:
             pytest.skip("single_grouped_bias requires bias=True")
         if with_quantization and dtype not in (torch.bfloat16, torch.float16):
             pytest.skip("Quantized group GEMM is only supported with BF16/FP16")
-        if not activation_is_glu and quantization not in ("mxfp8", "nvfp4", "nvfp4_rht"):
+        if not activation_is_glu and quantization not in ["mxfp8"] + list(nvfp4_variant_names):
             pytest.skip("Scaled unary grouped MLP is only supported with MXFP8 or NVFP4")
         if not activation_is_glu and glu_interleave_size is not None:
             pytest.skip("Unary activations do not use GLU interleaving")
@@ -1234,25 +1244,21 @@ class TestGroupedMLPFusedOp:
             pytest.skip("NVFP4 4over6 grouped quantization is not supported")
         if (
             activation in ("scaled_srelu", "scaled_tanh_srelu")
-            and quantization in ("nvfp4", "nvfp4_rht")
+            and quantization in nvfp4_variant_names
             and bias
         ):
             pytest.skip("NVFP4 SReLU grouped MLP coverage is limited to no-bias")
-        if quantization == "nvfp4_rht":
+        if quantization in ("nvfp4_rht", "nvfp4_rht_ue5m3"):
             if activation == "scaled_swiglu" and (bias or glu_interleave_size != 32):
                 pytest.skip("NVFP4 RHT SwiGLU grouped MLP coverage is limited to no-bias")
-            if activation not in (
-                "scaled_swiglu",
-                "scaled_situglu",
-                "scaled_srelu",
-                "scaled_tanh_srelu",
-            ):
-                pytest.skip(
-                    "NVFP4 RHT grouped MLP coverage is limited to SwiGLU, SiTU-GLU, and SReLU"
-                )
+        if quantization in ("nvfp4_ue5m3", "nvfp4_rht_ue5m3") and activation in (
+            "scaled_srelu",
+            "scaled_tanh_srelu",
+        ):
+            pytest.skip(f"NVFP4 RHT grouped MLP with {activation} does not support UE5M3")
         if (
             with_quantization
-            and quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6", "nvfp4_rht")
+            and quantization in nvfp4_variant_names
             and activation.startswith("scaled_clamped_qgeglu")
             and bias
         ):
@@ -1536,7 +1542,7 @@ class TestGroupedMLPFusedOp:
                 )
             )
             or (
-                quantization == "nvfp4_rht"
+                quantization in ("nvfp4_rht", "nvfp4_rht_ue5m3")
                 and dtype == torch.bfloat16
                 and (
                     (not activation_is_glu and glu_interleave_size is None)
@@ -1572,7 +1578,7 @@ class TestGroupedMLPFusedOp:
 
         # Loose tols for sanity checking
         tols = {"rtol": 0.125, "atol": 0.25}
-        if quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6", "nvfp4_rht"):
+        if quantization in nvfp4_variant_names:
             tols = {"rtol": 0.25, "atol": 0.5}
 
         # Check values
@@ -2572,7 +2578,7 @@ class TestGroupedMLPFusedOp:
         """Caller-provided output/grad_input buffers on the fused MXFP8/NVFP4 grouped MLP."""
         if quantization == "mxfp8" and not mxfp8_available:
             pytest.skip(reason_for_no_mxfp8)
-        if quantization == "nvfp4_rht" and not nvfp4_available:
+        if quantization in nvfp4_variant_names and not nvfp4_available:
             pytest.skip(reason_for_no_nvfp4)
         if not te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
             pytest.skip("Fused grouped MLP is not supported on this system")
