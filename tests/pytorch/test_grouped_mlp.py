@@ -3193,7 +3193,7 @@ class TestGroupedMLPDeterminism:
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
     def test_glu_fc1_bias_refuses(self, monkeypatch) -> None:
         """cuDNN's deterministic dGLU has no deterministic dbias, so with an FC1 bias (and no FC2
-        bias) its refusal must surface as TE's determinism error."""
+        bias) the request must fail with TE's determinism error, whatever the front-end version."""
         fused_cls = grouped_mlp_module.GroupedMLP_CuTeGEMMGLU
         if not fused_cls.is_supported():
             pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
@@ -3221,10 +3221,11 @@ class TestGroupedMLPDeterminism:
             y = module(x, split_sizes, probs, split_sizes)
         forward_ops = module._module_groups[0]._forward_ops
         assert len(forward_ops) == 1 and isinstance(forward_ops[0][0], fused_cls)
-        with pytest.raises(
-            RuntimeError, match="refused this configuration with `deterministic=True`"
-        ):
+        with pytest.raises(RuntimeError) as excinfo:
             y.backward(torch.randn_like(y))
+        # TE's error either way: its early check (front-end without `deterministic`) or cuDNN's
+        # refusal re-raised. cuDNN's own NotImplementedError would lack this prefix.
+        assert grouped_mlp_module._DETERMINISM_REQUESTED in str(excinfo.value)
 
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
     def test_scale_bias_refuses_under_the_torch_flag(
