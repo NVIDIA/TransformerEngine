@@ -84,7 +84,7 @@ run_pass "default" 0
 run_pass "zero_copy" 1
 run_pass "eager" 0 1
 run_pass "overflow" 0 0 1
-# MXFP8 grouped dispatch pins the per-expert alignment to 128, which the backend caches
+# The MXFP8 pass uses per-expert alignment 256 for grouped MLP fusion. The backend caches it
 # process-wide, so its tests get their own passes (normal + zero-copy + eager IO). mxfp8 is the
 # 5th arg; eager is the 3rd.
 run_pass "mxfp8" 0 0 0 1
