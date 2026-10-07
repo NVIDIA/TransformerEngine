@@ -569,6 +569,74 @@ class TestFusedAdam(TestFusedOptimizer):
             master_atol=2e-3,
         )
 
+    def test_fp64_exp_avg_sq_no_master(self):
+        self.gen_precision_aware_test(
+            use_fp8_params=False,
+            param_dtype=torch.float32,
+            use_master_weights=False,
+            master_weight_dtype=torch.float32,
+            grad_dtype=torch.float32,
+            exp_avg_dtype=torch.float32,
+            exp_avg_sq_dtype=torch.float64,
+        )
+
+    @pytest.mark.skipif(not is_bf16_available(), reason="bf16 if not supported")
+    def test_fp64_exp_avg_sq_master(self):
+        self.gen_precision_aware_test(
+            use_fp8_params=False,
+            param_dtype=torch.bfloat16,
+            use_master_weights=True,
+            master_weight_dtype=torch.float32,
+            grad_dtype=torch.float32,
+            exp_avg_dtype=torch.float32,
+            exp_avg_sq_dtype=torch.float64,
+        )
+
+    def test_fp64_exp_avg_sq_is_updated_in_fp64(self):
+        """The second moment must match an FP64 recurrence, not an FP32 one rounded to FP64."""
+        torch.manual_seed(0)
+        param = torch.nn.Parameter(torch.randn(4099, device="cuda"))
+        betas = (0.9, 0.95)
+        optim = te.optimizers.FusedAdam(
+            [param],
+            lr=1e-3,
+            betas=betas,
+            eps=1e-16,
+            weight_decay=0.0,
+            exp_avg_sq_dtype=torch.float64,
+        )
+        # The kernel receives beta2 and computes (1 - beta2) in FP32 before widening to FP64.
+        beta2 = torch.tensor(betas[1], dtype=torch.float32)
+        one_minus_beta2 = (1 - beta2).double().item()
+        beta2 = beta2.double().item()
+        reference = torch.zeros(param.numel(), dtype=torch.float64, device="cuda")
+        for _ in range(5):
+            # Tiny gradients: their squares lose precision in an FP32 second moment.
+            param.grad = torch.randn_like(param) * 1e-9
+            optim.step()
+            grad = param.grad.double()
+            reference = beta2 * reference + one_minus_beta2 * grad * grad
+        exp_avg_sq = optim.state[param]["exp_avg_sq"]
+        assert exp_avg_sq.dtype == torch.float64
+        assert optim.state[param]["exp_avg"].dtype == torch.float32
+        torch.testing.assert_close(exp_avg_sq, reference, rtol=1e-12, atol=0)
+
+    def test_fp64_exp_avg_sq_rejects_unsupported_options(self):
+        param = torch.nn.Parameter(torch.randn(16, device="cuda"))
+        with pytest.raises(RuntimeError, match="only with fp32 exp_avg"):
+            te.optimizers.FusedAdam(
+                [param], exp_avg_dtype=torch.bfloat16, exp_avg_sq_dtype=torch.float64
+            )
+        with pytest.raises(RuntimeError, match="store_param_remainders"):
+            te.optimizers.FusedAdam(
+                [param],
+                master_weights=True,
+                store_param_remainders=True,
+                exp_avg_sq_dtype=torch.float64,
+            )
+        with pytest.raises(RuntimeError, match="Capturable mode"):
+            te.optimizers.FusedAdam([param], capturable=True, exp_avg_sq_dtype=torch.float64)
+
     @pytest.mark.skipif(not is_bf16_available(), reason="bf16 if not supported")
     def test_bf16_exp_avg_and_exp_avg_sq(self):
         self.gen_precision_aware_test(
