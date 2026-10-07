@@ -66,33 +66,6 @@ def _import_cudnn_frontend(enable_frost_engines: bool = True):
     return cudnn_pygraph.import_cudnn_frontend(enable_frost_engines=enable_frost_engines)
 
 
-def _diagonal_band_kwargs(cudnn, attn_mask_type: str, window: Tuple[int, int]) -> Dict[str, Any]:
-    """cuDNN sdpa kwargs for a TE (mask type, window): a diagonal alignment plus a band.
-
-    Note the off-by-one. cuDNN's left bound counts the diagonal itself and TE's window_size does
-    not, so a window of w becomes a left bound of w + 1. Passing it through unconverted silently
-    drops one token of context per layer, which no shape-level test would catch.
-
-    These kwargs are mutually exclusive with score_mod. cuDNN enforces that in the backward node
-    only ("Attention score mod enabled and hence other subgraphs are disabled"); its forward node
-    composes the two without complaint. Callers must still refuse the pair on both sides, because
-    forward and backward have to carry the same mask or the gradients belong to a different
-    attention than the output does.
-    """
-    left, right = window
-    opts: Dict[str, Any] = {}
-    if attn_mask_type in ("causal", "causal_bottom_right") or right == 0:
-        opts["diagonal_alignment"] = (
-            cudnn.diagonal_alignment.BOTTOM_RIGHT
-            if attn_mask_type == "causal_bottom_right"
-            else cudnn.diagonal_alignment.TOP_LEFT
-        )
-        opts["diagonal_band_right_bound"] = 0
-    if left != -1:
-        opts["diagonal_band_left_bound"] = left + 1
-    return opts
-
-
 def _pkg_version(name: str, module=None) -> Tuple[Optional[PkgVersion], Optional[str]]:
     """A package's version, or None when it is absent or unparseable, with the raw string."""
     raw = None
@@ -167,7 +140,7 @@ def is_frost_attention_available() -> Tuple[bool, str]:
 
 
 # cuDNN expresses causal, bottom-right and sliding-window masking as one mechanism, a diagonal
-# alignment plus a two-sided band, which is what _mask_options builds. Both alignments are needed:
+# alignment plus a two-sided band, which is what diagonal_band_kwargs builds. Both alignments are needed:
 # the p2p ring produces square tiles where they coincide, while all_gather trims KV so they differ.
 _SUPPORTED_MASKS = ("no_mask", "causal", "causal_bottom_right")
 
@@ -215,12 +188,6 @@ def _mask_spec(attn_mask_type: str, window_size=None):
         # type asks for it, so decline rather than guess the intent.
         raise NotImplementedError(f"FROST attention does not support a right window {window!r}")
     return attn_mask_type, window
-
-
-def _mask_options(cudnn, spec):
-    """cuDNN sdpa kwargs for a (mask type, window) spec: a diagonal alignment plus a band."""
-    attn_mask_type, window = spec
-    return _diagonal_band_kwargs(cudnn, attn_mask_type, window)
 
 
 _SUPPORTED_QKV_FORMATS = ("bshd", "sbhd")
@@ -515,7 +482,7 @@ def _build_fwd(key, device) -> dict:
         v=tv,
         generate_stats=True,  # the CP ring needs the LSE, and it is cheap
         attn_scale=scale,
-        **_mask_options(cudnn, mask),
+        **cudnn_pygraph.diagonal_band_kwargs(cudnn, *mask),
     )
     tout.set_output(True).set_dim(sho).set_stride(list(o_stride))  # out: q's layout, v's head_dim
     tlse.set_output(True).set_dim([b, hq, sq, 1]).set_stride([hq * sq, sq, 1, 1]).set_data_type(
@@ -565,7 +532,7 @@ def _build_bwd(key, device) -> dict:
         stats=handles["stats"],
         attn_scale=scale,
         use_deterministic_algorithm=deterministic,
-        **_mask_options(cudnn, mask),
+        **cudnn_pygraph.diagonal_band_kwargs(cudnn, *mask),
     )
     for tensor, stride in ((tdq, qs), (tdk, ks), (tdv, vs)):
         tensor.set_output(True).set_data_type(io_dt).set_stride(list(stride))
