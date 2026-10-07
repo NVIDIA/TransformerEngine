@@ -3896,21 +3896,9 @@ class Custom_MHA_FP8(TransformerEngineBaseModule):
         return out
 
 
-# ----------------------------------------------------------------------------------------------
-# FlashAttention 4 must never be handed TE's -1 window sentinel.
-#
-# TE spells an unbounded window side as -1; FA4 spells it None. FA4 widens a window to full
-# attention only when both bounds are negative, so the causal encoding (-1, 0) reaches the kernel
-# as the band [row + 1, row] -- empty. FA4 then returns an all-zero output and an all -inf LSE and
-# raises nothing, which is a wrong answer rather than a crash.
-#
-# The numerical test is anchored to a float64 reference rather than to another backend. That
-# matters here: the bug survived because run_attention_with_cp.py grades a CP run against a non-CP
-# run *of the same backend*, so an error present on both sides cancels and the comparison passes
-# while measuring nothing. float64 and not float32 -- torch computes fp32 matmuls in TF32 on
-# Ampere and newer, whose significand is 11 bits, the same as fp16, so an fp32 reference cannot
-# judge a bf16 kernel.
-# ----------------------------------------------------------------------------------------------
+# FlashAttention 4 must never be handed TE's -1 window sentinel: FA4 widens a window only when
+# both bounds are negative, so causal (-1, 0) reaches the kernel as an empty band and returns an
+# all-zero output with nothing raised.
 
 
 from transformer_engine.pytorch.attention.dot_product_attention.backends import (
@@ -3930,10 +3918,10 @@ def _fa4_normalized_kwargs(kwargs):
     [
         # TE's causal encoding: the pair that produced zeros.
         ({"window_size": (-1, 0)}, {"window_size": (None, 0)}),
-        # TE's no-mask encoding. FA4 already widens this one itself, both bounds being negative,
-        # but rewriting it anyway keeps a single rule for every window TE emits.
+        # TE's no-mask encoding. FA4 widens this one itself, but one rule for every window is
+        # simpler to reason about.
         ({"window_size": (-1, -1)}, {"window_size": (None, None)}),
-        # A genuine sliding window must survive untouched, bounds and all.
+        # A genuine sliding window must survive untouched.
         ({"window_size": (511, 0)}, {"window_size": (511, 0)}),
         ({"window_size": (511, -1)}, {"window_size": (511, None)}),
         # The private entry points take the bounds separately.
@@ -3982,12 +3970,10 @@ _SKIP = _fa4_causal_unavailable()
 def test_fa4_causal_attention_is_not_all_zeros():
     """End to end: FA4 causal through DotProductAttention must match a float64 reference.
 
-    Pins the backend four ways, because every one of them can silently turn this green while
-    measuring something else: cuDNN FusedAttention wins selection for this shape (the first attempt
-    at reproducing the bug measured a correct result for exactly that reason), the unfused path
-    would serve it too, and NVTE_FLASH_ATTN_V4=0 is exported by qa/L0_pytorch_unittest -- which
-    would leave FA2 answering a test named for FA4. The selected backend is asserted afterwards
-    rather than assumed, so a future lane cannot quietly opt this out again.
+    All four backend switches are pinned, since each can turn this green while measuring something
+    else: cuDNN FusedAttention wins selection for this shape, unfused would serve it too, and
+    qa/L0_pytorch_unittest exports NVTE_FLASH_ATTN_V4=0, which would leave FA2 answering a test
+    named for FA4. The selected backend is asserted afterwards rather than assumed.
     """
     import os
 
