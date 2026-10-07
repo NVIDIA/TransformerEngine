@@ -125,7 +125,7 @@ class EPBackend {
   NVTEEpGroupConfig group_config_{};
   std::atomic<bool> initialized_{false};
   std::mutex mutex_;
-  std::list<HandleEntry> lru_;
+  std::list<HandleEntry> handles_;
   std::unordered_map<void*, std::list<HandleEntry>::iterator> index_;
   size_t handle_cache_cap_{0};  // set lazily from NVTE_EP_HANDLE_CACHE_SIZE
 
@@ -136,11 +136,10 @@ class EPBackend {
   size_t cache_cap_locked();
 
   // Bind a fresh handle to handle_mem's already-prepared contents via ncclEpImportHandle.
-  // Never touches lru_/index_; the caller owns the returned handle (destroy via ScopedHandle).
-  // `stream` orders ncclEpImportHandle's async geometry check ahead of the op issued on the
-  // returned handle. Caller must hold mutex_.
+  // Never touches handles_/index_; the caller owns the returned handle (destroy via ScopedHandle).
+  // Caller must hold mutex_.
   ncclEpHandle_t import_handle_locked(void* handle_mem, size_t handle_mem_size, int num_tokens,
-                                      NVTEEpLayerConfig layer_cfg, cudaStream_t stream);
+                                      NVTEEpLayerConfig layer_cfg);
 
   // Per-step handle acquisition: the pointer-keyed cache (*owned = false, caller must not
   // destroy) when group_config_.volatile_handle_mem is unset, or a fresh import_handle_locked()
@@ -148,7 +147,7 @@ class EPBackend {
   // required). Caller must hold mutex_.
   ncclEpHandle_t acquire_step_handle_locked(void* handle_mem, size_t handle_mem_size,
                                             int num_tokens, const NVTEEpLayerConfig* layer_cfg,
-                                            bool* owned, cudaStream_t stream);
+                                            bool* owned);
 
   // Build the dispatch in/out structs and issue ncclEpDispatch on the resolved
   // handle. When recv_tokens_per_expert != nullptr (count mode), it is wired to
