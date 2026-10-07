@@ -3148,36 +3148,31 @@ class LayerNormMLP(TransformerEngineBaseModule):
         return [fc1_weight_quantizer, fc2_weight_quantizer]
 
     def backward_dw(self):
-        """
-        Execute the delayed weight gradient computation.
-        This method is called after the main backward pass to compute weight gradients.
-        """
+        """Execute delayed weight-gradient GEMMs and accumulate their contributions."""
         if not self.need_backward_dw():
             return
         with get_nvtx_range_context("_LayerNormMLP_wgrad"):
-            (fc2_wgrad, fc2_bias_grad_, *_), tensor_list_fc2 = self.wgrad_store.pop()
-            if self.use_bias and self.fc1_bias.grad is None:
-                (fc1_wgrad, fc1_bias_grad, *_), _ = self.wgrad_store.pop()
-            else:
-                (fc1_wgrad, *_), _ = self.wgrad_store.pop()
-                fc1_bias_grad = None
+            (fc2_wgrad, fc2_bias_grad_, *_), _ = self.wgrad_store.pop()
+            (fc1_wgrad, fc1_bias_grad, *_), _ = self.wgrad_store.pop()
             if self.use_bias:
-                if self.fc2_bias.grad is None:
-                    if (
-                        self.fp8
-                        and FP8GlobalStateManager.get_fp8_recipe().float8_block_scaling()
-                        and self.apply_bias
-                        and not self.gemm_bias_unfused_add
-                    ):
-                        act_out = tensor_list_fc2[0]
-                        # BGRAD not fused with GEMM for float8 blockwise gemm.
-                        fc2_bias_grad_ = act_out.view(-1, act_out.shape[-1]).sum(dim=0)
-                    self.fc2_bias.grad = fc2_bias_grad_.to(self.fc2_bias.dtype)
-                if self.fc1_bias.grad is None:
-                    self.fc1_bias.grad = fc1_bias_grad.to(self.fc1_bias.dtype)
+                # Unfused bias gradients are already returned by the main backward.
+                for bias, bgrad in (
+                    (self.fc2_bias, fc2_bias_grad_),
+                    (self.fc1_bias, fc1_bias_grad),
+                ):
+                    if bgrad is not None and bgrad.numel() != 0:
+                        bgrad = bgrad.to(bias.dtype)
+                        if bias.grad is None:
+                            bias.grad = bgrad
+                        else:
+                            bias.grad.add_(bgrad)
             if not self.fuse_wgrad_accumulation:
-                self.fc2_weight.grad = fc2_wgrad.to(self.fc2_weight.dtype)
-                self.fc1_weight.grad = fc1_wgrad.to(self.fc1_weight.dtype)
+                for weight, wgrad in ((self.fc2_weight, fc2_wgrad), (self.fc1_weight, fc1_wgrad)):
+                    wgrad = wgrad.to(weight.dtype)
+                    if weight.grad is None:
+                        weight.grad = wgrad
+                    else:
+                        weight.grad.add_(wgrad)
             del fc2_bias_grad_
             del fc2_wgrad
             del fc1_wgrad

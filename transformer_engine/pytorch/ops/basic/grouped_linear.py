@@ -363,17 +363,25 @@ class GroupedLinear(BasicOperation):
             return
         if self.single_grouped_weight:
             if isinstance(grad_weights, list):
-                self.weight.grad = torch.stack(grad_weights, dim=0).to(self.weight.dtype)
+                wgrad = torch.stack(grad_weights, dim=0).to(self.weight.dtype)
             else:
-                self.weight.grad = grad_weights.rowwise_data.view(
+                wgrad = grad_weights.rowwise_data.view(
                     self.num_groups,
                     self.out_features,
                     self.in_features,
                 ).to(self.weight.dtype)
+            if self.weight.grad is None:
+                self.weight.grad = wgrad
+            else:
+                self.weight.grad.add_(wgrad)
         else:
             for group_idx in range(self.num_groups):
                 w = getattr(self, f"weight{group_idx}")
-                w.grad = grad_weights[group_idx].to(w.dtype)
+                wgrad = grad_weights[group_idx].to(w.dtype)
+                if w.grad is None:
+                    w.grad = wgrad
+                else:
+                    w.grad.add_(wgrad)
         self._trigger_wgrad_accumulation_and_reduce_hooks()
 
     def _get_discrete_bias_tensors(self, dtype: torch.dtype) -> list[torch.Tensor]:

@@ -1961,17 +1961,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if not self.fuse_wgrad_accumulation:
                 weight_tensor = noop_cat(self._get_weight_tensors())
                 wgrad = wgrad.to(weight_tensor.dtype)
-                # Multiple modules can share one Parameter (tied weights), and each
-                # of them pops its own delayed wgrad. Assigning would let the last
-                # module overwrite the contributions of the earlier ones, so
-                # accumulate instead: initialise on the first contribution of the
-                # step and add on every later one.
-                #
-                # The first contribution is assigned only when zero_grad left grad as
-                # None, which is what set_to_none=True does. set_to_none=False leaves a
-                # zeroed tensor instead, so that same contribution takes the add path and
-                # lands on the same value; nothing here needs grad to be None to start a
-                # step.
+                # Tied parameters and microbatches contribute to the same gradient.
                 if weight_tensor.grad is None:
                     weight_tensor.grad = wgrad
                 else:
@@ -1979,9 +1969,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if self.use_bias and bgrad is not None and bgrad.numel() != 0:
                 bias_tensor = noop_cat([getattr(self, name) for name in self.bias_names])
                 bgrad = bgrad.to(bias_tensor.dtype)
-                # Same reasoning as for the weight above. A tied bias is shared,
-                # and a module whose delayed bgrad is (numerically) zero must not
-                # overwrite the contribution another module already wrote.
                 if bias_tensor.grad is None:
                     bias_tensor.grad = bgrad
                 else:
