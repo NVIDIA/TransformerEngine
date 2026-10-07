@@ -74,6 +74,12 @@ def _shape_id(s):
     return "b%d_hq%d_hkv%d_sq%d_skv%d_d%d_dv%d" % s
 
 
+def _bhsd(t):
+    """A [b, h, s, d] view of a bshd tensor. The reference works in that order; the kernel does
+    not, since it takes TE's format and reorders the cuDNN descriptors instead."""
+    return t.permute(0, 2, 1, 3)
+
+
 def _reference(q, k, v, scale, mask, window=None):
     """Attention in float64, computed independently of TE and of cuDNN.
 
@@ -139,19 +145,18 @@ def test_frost_forward_matches_reference(shape, mask, dtype):
     b, hq, hkv, sq, skv, d, d_v = shape
     torch.manual_seed(0)
     # Generate in fp32 so there is a true high-precision original to measure against, then cast
-    # for the kernel. [b, h, s, d] views over bshd-contiguous memory is what the backend consumes.
-    # A bshd VIEW, which is what the backend receives: to_frost_layout permutes a bshd-contiguous
-    # tensor and hands the result over without a copy. Materialising with .contiguous() here would
-    # produce bhsd strides instead and leave the stride-keyed plan cache untested.
-    mk = lambda s_, h_, d_: torch.randn(b, s_, h_, d_, device="cuda").permute(0, 2, 1, 3)
+    # for the kernel. bshd is what the backend takes now: it is never permuted, only described.
+    mk = lambda s_, h_, d_: torch.randn(b, s_, h_, d_, device="cuda")
     q32, k32, v32 = mk(sq, hq, d), mk(skv, hkv, d), mk(skv, hkv, d_v)
     q, k, v = q32.to(dtype), k32.to(dtype), v32.to(dtype)
     scale = 1.0 / math.sqrt(d)
 
-    out, lse = frost_attn_fwd(q, k, v, attn_scale=scale, attn_mask_type=mask)
+    out, lse = frost_attn_fwd(q, k, v, "bshd", attn_scale=scale, attn_mask_type=mask)
 
-    floor_o, floor_l, ref_o, ref_lse = _floor(q32, k32, v32, scale, mask, dtype)
-    err_o = (out.double() - ref_o).abs().max().item()
+    floor_o, floor_l, ref_o, ref_lse = _floor(
+        _bhsd(q32), _bhsd(k32), _bhsd(v32), scale, mask, dtype
+    )
+    err_o = (_bhsd(out).double() - ref_o).abs().max().item()
     err_l = (lse.double() - ref_lse).abs().max().item()
 
     assert torch.isfinite(out).all(), "forward produced non-finite values"
@@ -193,18 +198,17 @@ def test_frost_sliding_window_matches_reference(mask, window, sq, skv):
     b, hq, hkv, d = 2, 8, 4, 512
     dtype = torch.bfloat16
     torch.manual_seed(0)
-    # A bshd VIEW, which is what the backend receives: to_frost_layout permutes a bshd-contiguous
-    # tensor and hands the result over without a copy. Materialising with .contiguous() here would
-    # produce bhsd strides instead and leave the stride-keyed plan cache untested.
-    mk = lambda s_, h_: torch.randn(b, s_, h_, d, device="cuda").permute(0, 2, 1, 3)
+    mk = lambda s_, h_: torch.randn(b, s_, h_, d, device="cuda")
     q32, k32, v32 = mk(sq, hq), mk(skv, hkv), mk(skv, hkv)
     q, k, v = q32.to(dtype), k32.to(dtype), v32.to(dtype)
     scale = 1.0 / math.sqrt(d)
 
-    out, _ = frost_attn_fwd(q, k, v, attn_scale=scale, attn_mask_type=mask, window_size=window)
+    out, _ = frost_attn_fwd(
+        q, k, v, "bshd", attn_scale=scale, attn_mask_type=mask, window_size=window
+    )
 
-    floor_o, _, ref_o, _ = _floor(q32, k32, v32, scale, mask, dtype, window)
-    err = (out.double() - ref_o).abs().max().item()
+    floor_o, _, ref_o, _ = _floor(_bhsd(q32), _bhsd(k32), _bhsd(v32), scale, mask, dtype, window)
+    err = (_bhsd(out).double() - ref_o).abs().max().item()
     assert torch.isfinite(out).all(), "sliding-window forward produced non-finite values"
     assert err <= 2 * floor_o + 1e-3, "out err %.3e exceeds 2x the floor %.3e for window %s" % (
         err,
@@ -214,7 +218,7 @@ def test_frost_sliding_window_matches_reference(mask, window, sq, skv):
 
     # A window must actually change the result; if the bound were dropped this would match the
     # unwindowed output and the check above would still pass.
-    full, _ = frost_attn_fwd(q, k, v, attn_scale=scale, attn_mask_type=mask)
+    full, _ = frost_attn_fwd(q, k, v, "bshd", attn_scale=scale, attn_mask_type=mask)
     assert not torch.equal(out, full), "window %s produced the same output as no window" % (window,)
 
 
@@ -237,27 +241,31 @@ def test_frost_backward_matches_reference(shape, mask, window, dtype):
 
     b, hq, hkv, sq, skv, d, d_v = shape
     torch.manual_seed(0)
-    # A bshd VIEW, which is what the backend receives: to_frost_layout permutes a bshd-contiguous
-    # tensor and hands the result over without a copy. Materialising with .contiguous() here would
-    # produce bhsd strides instead and leave the stride-keyed plan cache untested.
-    mk = lambda s_, h_, d_: torch.randn(b, s_, h_, d_, device="cuda").permute(0, 2, 1, 3)
+    mk = lambda s_, h_, d_: torch.randn(b, s_, h_, d_, device="cuda")
     q32, k32, v32 = mk(sq, hq, d), mk(skv, hkv, d), mk(skv, hkv, d_v)
     q, k, v = q32.to(dtype), k32.to(dtype), v32.to(dtype)
     scale = 1.0 / math.sqrt(d)
 
-    out, lse = frost_attn_fwd(q, k, v, attn_scale=scale, attn_mask_type=mask, window_size=window)
+    out, lse = frost_attn_fwd(
+        q, k, v, "bshd", attn_scale=scale, attn_mask_type=mask, window_size=window
+    )
     dout = torch.randn_like(out)
     dq, dk, dv = frost_attn_bwd(
-        q, k, v, out, lse, dout, attn_scale=scale, attn_mask_type=mask, window_size=window
+        q, k, v, out, lse, dout, "bshd", attn_scale=scale, attn_mask_type=mask, window_size=window
     )
 
-    qr = q32.detach().clone().requires_grad_(True)
-    kr = k32.detach().clone().requires_grad_(True)
-    vr = v32.detach().clone().requires_grad_(True)
+    # The reference works in [b, h, s, d], so it takes views and returns grads in that order.
+    qr = _bhsd(q32).detach().clone().requires_grad_(True)
+    kr = _bhsd(k32).detach().clone().requires_grad_(True)
+    vr = _bhsd(v32).detach().clone().requires_grad_(True)
     ref_o, _ = _reference(qr, kr, vr, scale, mask, window)
-    ref_o.backward(dout.double())
+    ref_o.backward(_bhsd(dout).double())
 
-    for name, got, want in (("dq", dq, qr.grad), ("dk", dk, kr.grad), ("dv", dv, vr.grad)):
+    for name, got, want in (
+        ("dq", _bhsd(dq), qr.grad),
+        ("dk", _bhsd(dk), kr.grad),
+        ("dv", _bhsd(dv), vr.grad),
+    ):
         assert torch.isfinite(got).all(), "%s has non-finite values" % name
         assert got.shape == want.shape, "%s shape %s != %s" % (name, got.shape, want.shape)
         err = (got.double() - want).abs().max().item()
@@ -463,22 +471,25 @@ def test_frost_rejects_mismatched_kv():
 
     b, h, s, d = 2, 4, 512, 512
     dtype = torch.bfloat16
-    mk = lambda hh: torch.randn(b, s, hh, d, device="cuda", dtype=dtype).permute(0, 2, 1, 3)
-    q, k = mk(h).contiguous(), mk(h).contiguous()
+    mk = lambda hh: torch.randn(b, s, hh, d, device="cuda", dtype=dtype)
+    q, k = mk(h), mk(h)
 
     with pytest.raises(ValueError, match="batch, heads and seqlen"):
-        frost_attn_fwd(q, k, mk(h * 2).contiguous())
+        frost_attn_fwd(q, k, mk(h * 2), "bshd")
     with pytest.raises(ValueError, match="match q"):
-        frost_attn_fwd(q, k, k.to(torch.float32))
+        frost_attn_fwd(q, k, k.to(torch.float32), "bshd")
 
 
 @requires_frost
 def test_frost_serves_v_with_its_own_head_dim_and_layout():
     """v is keyed and declared separately, the way flex_attention keys each tensor.
 
-    Checked against the float64 reference rather than against another FROST call: a v whose
-    head_dim AND stride order both differ from k's is exactly the case that a plan built from
-    k alone would compute wrongly without raising.
+    Both halves of that are exercised: v carries its own head_dim, and its strides differ from
+    k's because it is a non-contiguous slice of a wider buffer rather than a fresh allocation.
+    A plan built from k alone would compute either case wrongly without raising.
+
+    v cannot differ from k in qkv_format: one format describes all three, which is what the
+    fused path produces and what the selector enforces.
     """
     from transformer_engine.pytorch.attention.dot_product_attention.frost_attention import (
         frost_attn_fwd,
@@ -487,17 +498,21 @@ def test_frost_serves_v_with_its_own_head_dim_and_layout():
     b, h, s, d, d_v = 2, 4, 512, 512, 320
     dtype = torch.bfloat16
     torch.manual_seed(0)
-    q32 = torch.randn(b, s, h, d, device="cuda").permute(0, 2, 1, 3)
-    k32 = torch.randn(b, s, h, d, device="cuda").permute(0, 2, 1, 3)
-    # sbhd rather than bshd, so v's stride order differs from k's as well as its head_dim.
-    v32 = torch.randn(s, b, h, d_v, device="cuda").permute(1, 2, 0, 3)
+    q32 = torch.randn(b, s, h, d, device="cuda")
+    k32 = torch.randn(b, s, h, d, device="cuda")
+    # A slice of a wider buffer, so v's strides are its own rather than k's shape re-derived.
+    v32 = torch.randn(b, s, h, d_v + 64, device="cuda")[..., :d_v]
     q, k, v = q32.to(dtype), k32.to(dtype), v32.to(dtype)
-    assert v.stride()[:3] != k.stride()[:3], "v must not share k's stride order here"
+    assert v.stride()[:3] != k.stride()[:3], "v must not share k's strides here"
+    assert v.stride(3) == 1, "the head dim must stay contiguous"
     scale = 1.0 / math.sqrt(d)
 
-    out, lse = frost_attn_fwd(q, k, v, attn_scale=scale, attn_mask_type="causal")
+    out, lse = frost_attn_fwd(q, k, v, "bshd", attn_scale=scale, attn_mask_type="causal")
+    out = _bhsd(out)
 
-    floor_o, floor_l, ref_o, ref_lse = _floor(q32, k32, v32, scale, "causal", dtype)
+    floor_o, floor_l, ref_o, ref_lse = _floor(
+        _bhsd(q32), _bhsd(k32), _bhsd(v32), scale, "causal", dtype
+    )
     assert out.shape == (b, h, s, d_v), "out takes v's head_dim; got %s" % (tuple(out.shape),)
     assert out.stride(3) == 1, "out must stay head-contiguous; got stride %s" % (out.stride(),)
     err_o = (out.double() - ref_o).abs().max().item()
