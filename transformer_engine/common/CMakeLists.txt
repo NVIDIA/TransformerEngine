@@ -15,6 +15,71 @@ endif()
 # Transformer Engine library
 project(transformer_engine LANGUAGES CUDA CXX)
 
+# Enable BOLT-compatible builds. ARM64 targets require additional compiler flags.
+string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" _nvte_system_processor)
+set(NVTE_TARGET_IS_ARM64 OFF)
+if(_nvte_system_processor MATCHES "^(aarch64|arm64)$")
+  set(NVTE_TARGET_IS_ARM64 ON)
+endif()
+unset(_nvte_system_processor)
+
+include(CheckCXXCompilerFlag)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  check_cxx_compiler_flag("-fno-reorder-blocks-and-partition"
+                          NVTE_CXX_SUPPORTS_FNO_REORDER_BLOCKS_AND_PARTITION)
+endif()
+check_cxx_compiler_flag("-fno-jump-tables"
+                        NVTE_CXX_SUPPORTS_FNO_JUMP_TABLES)
+if(NVTE_TARGET_IS_ARM64)
+  check_cxx_compiler_flag("-mno-fix-cortex-a53-835769"
+                          NVTE_CXX_SUPPORTS_MNO_FIX_CORTEX_A53_835769)
+  check_cxx_compiler_flag("-mno-fix-cortex-a53-843419"
+                          NVTE_CXX_SUPPORTS_MNO_FIX_CORTEX_A53_843419)
+endif()
+if((CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
+    AND NOT NVTE_CXX_SUPPORTS_FNO_REORDER_BLOCKS_AND_PARTITION)
+    OR NOT NVTE_CXX_SUPPORTS_FNO_JUMP_TABLES
+    OR (NVTE_TARGET_IS_ARM64
+        AND (NOT NVTE_CXX_SUPPORTS_MNO_FIX_CORTEX_A53_835769
+            OR NOT NVTE_CXX_SUPPORTS_MNO_FIX_CORTEX_A53_843419)))
+  message(FATAL_ERROR
+          "The host C++ compiler does not support the flags required for "
+          "BOLT-compatible builds")
+endif()
+
+# BOLT consumes the regular symbol table and emitted relocations. Shadow the
+# cached strip tool for this configure without changing it for later builds.
+set(CMAKE_STRIP "")
+
+function(nvte_enable_bolt_compatible_compile_options TARGET_NAME)
+  target_compile_options(
+    ${TARGET_NAME}
+    PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:-fno-jump-tables>
+    $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fno-jump-tables>
+  )
+
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(
+      ${TARGET_NAME}
+      PRIVATE
+      $<$<COMPILE_LANGUAGE:CXX>:-fno-reorder-blocks-and-partition>
+      $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fno-reorder-blocks-and-partition>
+    )
+  endif()
+
+  if(NVTE_TARGET_IS_ARM64)
+    target_compile_options(
+      ${TARGET_NAME}
+      PRIVATE
+      $<$<COMPILE_LANGUAGE:CXX>:-mno-fix-cortex-a53-835769>
+      $<$<COMPILE_LANGUAGE:CXX>:-mno-fix-cortex-a53-843419>
+      $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-mno-fix-cortex-a53-835769>
+      $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-mno-fix-cortex-a53-843419>
+    )
+  endif()
+endfunction()
+
 # CUDA Toolkit
 find_package(CUDAToolkit REQUIRED)
 if (CUDAToolkit_VERSION VERSION_LESS 12.1)
@@ -101,6 +166,19 @@ set(CUTLASS_TOOLS_INCLUDE_DIR
 
 # Python
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
+
+option(NVTE_WITH_CUTEDSL
+       "Build the CuTeDSL quantize backend bridge (requires the apache-tvm-ffi Python package)" OFF)
+if(NVTE_WITH_CUTEDSL)
+  # Building libtransformer_engine.so with CuTeDSL support requires the TVM-FFI headers.
+  if(NOT EXISTS "${TVM_FFI_INCLUDE_DIR}/tvm/ffi/any.h")
+    message(FATAL_ERROR
+            "Could not find the TVM-FFI headers in '${TVM_FFI_INCLUDE_DIR}'. "
+            "Install apache-tvm-ffi and set TVM_FFI_INCLUDE_DIR to its include directory, "
+            "or configure with "
+            "-DNVTE_WITH_CUTEDSL=OFF to build the C++ library without the backend.")
+  endif()
+endif()
 
 find_path(NCCL_INCLUDE_DIR
             NAMES nccl.h
@@ -202,6 +280,10 @@ list(APPEND transformer_engine_cpp_sources
      comm_gemm_overlap/comm_gemm_overlap.cpp
      newton_schulz/newton_schulz.cpp
      )
+
+if(NVTE_WITH_CUTEDSL)
+  list(APPEND transformer_engine_cpp_sources init_python.cpp)
+endif()
 
 list(APPEND transformer_engine_cuda_sources
      common.cu
@@ -346,6 +428,7 @@ foreach(cuda_source IN LISTS transformer_engine_cuda_arch_specific_sources)
 endforeach()
 
 add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
+nvte_enable_bolt_compatible_compile_options(transformer_engine)
 
 # This is TE-specific and should not apply to all targets
 target_link_options(
@@ -353,6 +436,20 @@ target_link_options(
   PRIVATE
   "LINKER:--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version"
 )
+target_link_options(
+  transformer_engine
+  PRIVATE
+  "LINKER:--emit-relocs"
+  "LINKER:-z,now"
+)
+if(NVTE_TARGET_IS_ARM64)
+  # The Cortex-A53 843419 workaround is applied by the linker.
+  target_link_options(
+    transformer_engine
+    PRIVATE
+    "-mno-fix-cortex-a53-843419"
+  )
+endif()
 
 # Disable CMake's automatic architecture flag injection.
 # All architectures are handled explicitly via per-source COMPILE_OPTIONS
@@ -387,6 +484,15 @@ target_link_libraries(transformer_engine PUBLIC
                       CUDNN::cudnn_all)
 target_link_libraries(transformer_engine PRIVATE ${CMAKE_DL_LIBS})
 
+if(NVTE_WITH_CUTEDSL)
+  target_include_directories(transformer_engine PRIVATE ${TVM_FFI_INCLUDE_DIR})
+  target_compile_definitions(
+    transformer_engine PRIVATE
+    NVTE_WITH_CUTEDSL
+    Py_LIMITED_API=0x030A0000)
+  target_link_libraries(transformer_engine PRIVATE Python::Module)
+endif()
+
 target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
 target_include_directories(transformer_engine PRIVATE ${NCCL_INCLUDE_DIR})
@@ -409,6 +515,7 @@ endif()
 option(NVTE_ENABLE_NVSHMEM "Compile with NVSHMEM library" OFF)
 if (NVTE_ENABLE_NVSHMEM)
     add_subdirectory(nvshmem_api)
+    nvte_enable_bolt_compatible_compile_options(nvshmemapi)
     target_link_libraries(transformer_engine PUBLIC nvshmemapi)
     target_include_directories(transformer_engine PUBLIC ${NVSHMEMAPI_INCLUDE_DIR})
 endif()
