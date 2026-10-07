@@ -180,6 +180,49 @@ def mul_f32x4_cvt_f32x4_to_fp8x4(fp8_dtype, relu: bool = False) -> Callable[...,
     return _build_mul_f32x4_cvt_f32x4_to_fp8x4(fp8_dtype, relu)
 
 
+def mul_bf16x2x2_cvt_bf16x4_to_fp8x4(fp8_dtype) -> Callable[..., Uint32]:
+    """Return a multiply/cast for two BF16 pairs, producing four packed FP8 bytes.
+
+    CUDA 13.1+ supports direct BF16-to-FP8 conversion. Older compilers use
+    FP32 fused multiply-add, matching the corresponding ptx::mul_cvt_4x overload.
+    """
+    out_op = "e5m2x2" if fp8_dtype is Float8E5M2 else "e4m3x2"
+    if cutlass.target_version(min_version="13.1"):
+        body = (
+            ".reg.b32 y0, y1;\n\t"
+            "mul.rn.bf16x2 y0, {$r0}, {$r1};\n\t"
+            "mul.rn.bf16x2 y1, {$r2}, {$r3};\n\t"
+            f"cvt.rn.satfinite.{out_op}.bf16x2 z0, y0;\n\t"
+            f"cvt.rn.satfinite.{out_op}.bf16x2 z1, y1;\n\t"
+        )
+    else:
+        body = (
+            ".reg.b16 x0,x1,x2,x3,s0,s1,s2,s3;\n\t"
+            ".reg.f32 y0,y1,y2,y3;\n\t"
+            "mov.b32 {x0,x1}, {$r0};\n\t"
+            "mov.b32 {s0,s1}, {$r1};\n\t"
+            "mov.b32 {x2,x3}, {$r2};\n\t"
+            "mov.b32 {s2,s3}, {$r3};\n\t"
+            "fma.rn.f32.bf16 y0, x0, s0, 0f00000000;\n\t"
+            "fma.rn.f32.bf16 y1, x1, s1, 0f00000000;\n\t"
+            "fma.rn.f32.bf16 y2, x2, s2, 0f00000000;\n\t"
+            "fma.rn.f32.bf16 y3, x3, s3, 0f00000000;\n\t"
+            f"cvt.rn.satfinite.{out_op}.f32 z0, y1, y0;\n\t"
+            f"cvt.rn.satfinite.{out_op}.f32 z1, y3, y2;\n\t"
+        )
+    asm = "{\n.reg.b16 z0,z1;\n\t" + body + "mov.b32 {$w0}, {z0,z1};\n}"
+
+    @cute.jit
+    def fn(in0: Int32, scale0: Uint32, in1: Int32, scale1: Uint32) -> Uint32:
+        return cute.arch.inline_ptx(
+            asm,
+            write_only_types=[Uint32],
+            read_only_args=[in0, scale0, in1, scale1],
+        )
+
+    return fn
+
+
 def _build_mul_f32x2_cvt_packed16x4_to_fp8x4(
     in_dtype, fp8_dtype, relu: bool = False
 ) -> Callable[..., Uint32]:

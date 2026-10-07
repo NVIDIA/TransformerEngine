@@ -84,6 +84,15 @@ def exp2f_rcp(scale_e8m0) -> Float32:
 
 
 @cute.jit
+def exp2_bf16x2_rcp(scale_e8m0) -> Uint32:
+    """Pack two BF16 copies of the E8M0 reciprocal computed by exp2f_rcp."""
+    # These reciprocal powers of two are exact in BF16. Taking the upper bits
+    # also preserves exp2f_rcp's chosen subnormal and NaN encodings.
+    bf16_bits = exp2f_rcp(scale_e8m0).bitcast(Uint32) >> Uint32(16)
+    return bf16_bits | (bf16_bits << Uint32(16))
+
+
+@cute.jit
 def pack_f32x2(lo: Float32, hi: Float32) -> Int64:
     """Pack two f32 scalars into a single 64-bit register (`floatx2` layout).
 
@@ -258,3 +267,14 @@ def truncate_f32_f16(val: Float32) -> Float32:
 def is_packed16(dtype) -> bool:
     """True if `dtype` is one of the 16-bit packed input formats."""
     return dtype is cutlass.BFloat16 or dtype is cutlass.Float16
+
+
+@cute.jit
+def create_l2_policy(evict_last: cutlass.Constexpr[bool], fraction: Float32 = 1.0) -> Int64:
+    """Create the L2 eviction policy used by register-resident casts."""
+    priority = "evict_last" if evict_last else "evict_first"
+    return cute.arch.inline_ptx(
+        f"createpolicy.fractional.L2::{priority}.b64 {{$w0}}, {{$r0}};",
+        write_only_types=[Int64],
+        read_only_args=[Float32(fraction)],
+    )
