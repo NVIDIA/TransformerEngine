@@ -459,7 +459,7 @@ def test_cp_with_flash_attention_softcap(cp_pool, cp_comm_type):
     )
 
 
-# cuDNN FROST: symmetric head_dim in (256, 512] on SM100/SM103, the range no other backend
+# cuDNN FROST: head_dim in (256, 512] on SM100/SM103, the range no other backend
 # serves together with context parallelism. Shapes are Gemma-4 global layers, which is what
 # motivated the backend. seqlen must stay divisible by cp_size * 2 for causal load balancing.
 model_configs_frost_attn = {

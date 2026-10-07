@@ -59,12 +59,19 @@ requires_frost = pytest.mark.skipif(_SKIP is not None, reason=str(_SKIP))
 # head_dim 512 is the whole point of the backend; 320 checks the interior of the (256, 512] range
 # rather than only its endpoint.
 _SHAPES = [
-    # b, hq, hkv, sq, skv, d
-    (2, 8, 4, 1024, 1024, 512),  # Gemma-4 global layer, GQA
-    (2, 8, 8, 512, 512, 512),  # MHA
-    (1, 4, 4, 256, 512, 512),  # sq != skv, which is where mask alignment matters
-    (2, 4, 4, 512, 512, 320),  # interior head_dim
+    # b, hq, hkv, sq, skv, d, d_v
+    (2, 8, 4, 1024, 1024, 512, 512),  # Gemma-4 global layer, GQA
+    (2, 8, 8, 512, 512, 512, 512),  # MHA
+    (1, 4, 4, 256, 512, 512, 512),  # sq != skv, which is where mask alignment matters
+    (2, 4, 4, 512, 512, 320, 320),  # interior head_dim
+    # d_v != d_qk. O and the O-shaped grads take q's layout with v's head_dim, so this is the
+    # case that catches a plan or an allocation still built from q's trailing dimension.
+    (2, 8, 4, 512, 512, 512, 320),
 ]
+
+
+def _shape_id(s):
+    return "b%d_hq%d_hkv%d_sq%d_skv%d_d%d_dv%d" % s
 
 
 def _reference(q, k, v, scale, mask, window=None):
@@ -120,7 +127,7 @@ def _floor(q32, k32, v32, scale, mask, dtype, window=None):
 
 
 @requires_frost
-@pytest.mark.parametrize("shape", _SHAPES, ids=lambda s: "b%d_hq%d_hkv%d_sq%d_skv%d_d%d" % s)
+@pytest.mark.parametrize("shape", _SHAPES, ids=_shape_id)
 @pytest.mark.parametrize("mask", ["no_mask", "causal", "causal_bottom_right"])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 def test_frost_forward_matches_reference(shape, mask, dtype):
@@ -129,15 +136,15 @@ def test_frost_forward_matches_reference(shape, mask, dtype):
         frost_attn_fwd,
     )
 
-    b, hq, hkv, sq, skv, d = shape
+    b, hq, hkv, sq, skv, d, d_v = shape
     torch.manual_seed(0)
     # Generate in fp32 so there is a true high-precision original to measure against, then cast
     # for the kernel. [b, h, s, d] views over bshd-contiguous memory is what the backend consumes.
     # A bshd VIEW, which is what the backend receives: to_frost_layout permutes a bshd-contiguous
     # tensor and hands the result over without a copy. Materialising with .contiguous() here would
     # produce bhsd strides instead and leave the stride-keyed plan cache untested.
-    mk = lambda s_, h_: torch.randn(b, s_, h_, d, device="cuda").permute(0, 2, 1, 3)
-    q32, k32, v32 = mk(sq, hq), mk(skv, hkv), mk(skv, hkv)
+    mk = lambda s_, h_, d_: torch.randn(b, s_, h_, d_, device="cuda").permute(0, 2, 1, 3)
+    q32, k32, v32 = mk(sq, hq, d), mk(skv, hkv, d), mk(skv, hkv, d_v)
     q, k, v = q32.to(dtype), k32.to(dtype), v32.to(dtype)
     scale = 1.0 / math.sqrt(d)
 
@@ -212,7 +219,7 @@ def test_frost_sliding_window_matches_reference(mask, window, sq, skv):
 
 
 @requires_frost
-@pytest.mark.parametrize("shape", _SHAPES[:2], ids=lambda s: "b%d_hq%d_hkv%d_sq%d_skv%d_d%d" % s)
+@pytest.mark.parametrize("shape", _SHAPES[:2] + _SHAPES[-1:], ids=_shape_id)
 @pytest.mark.parametrize("mask", ["no_mask", "causal"])
 @pytest.mark.parametrize("window", [None, (128, 0)], ids=["nowin", "win128"])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
@@ -228,13 +235,13 @@ def test_frost_backward_matches_reference(shape, mask, window, dtype):
         frost_attn_fwd,
     )
 
-    b, hq, hkv, sq, skv, d = shape
+    b, hq, hkv, sq, skv, d, d_v = shape
     torch.manual_seed(0)
     # A bshd VIEW, which is what the backend receives: to_frost_layout permutes a bshd-contiguous
     # tensor and hands the result over without a copy. Materialising with .contiguous() here would
     # produce bhsd strides instead and leave the stride-keyed plan cache untested.
-    mk = lambda s_, h_: torch.randn(b, s_, h_, d, device="cuda").permute(0, 2, 1, 3)
-    q32, k32, v32 = mk(sq, hq), mk(skv, hkv), mk(skv, hkv)
+    mk = lambda s_, h_, d_: torch.randn(b, s_, h_, d_, device="cuda").permute(0, 2, 1, 3)
+    q32, k32, v32 = mk(sq, hq, d), mk(skv, hkv, d), mk(skv, hkv, d_v)
     q, k, v = q32.to(dtype), k32.to(dtype), v32.to(dtype)
     scale = 1.0 / math.sqrt(d)
 
@@ -312,10 +319,13 @@ def test_frost_declines_unsupported_configs():
     assert (
         is_frost_attention_supported(_frost_params())[0] == FusedAttnBackend.FROST
     ), "the supported case must be accepted"
+    assert (
+        is_frost_attention_supported(_frost_params(head_dim_v=320))[0] == FusedAttnBackend.FROST
+    ), "an asymmetric head_dim pair inside the range must be accepted"
 
     for override, why in (
         (dict(head_dim_qk=256, head_dim_v=256), "head_dim at the exclusive lower bound"),
-        (dict(head_dim_v=256), "asymmetric head_dim"),
+        (dict(head_dim_v=256), "head_dim_v below the range"),
         (dict(qkv_dtype=TE_DType[torch.float32]), "fp32"),
         (dict(dropout=0.1), "dropout"),
         (dict(bias_type=AttnBiasType["post_scale_bias"]), "attention bias"),
@@ -346,6 +356,8 @@ def test_frost_declines_unsupported_configs():
         # The engine pads head_dim to a multiple of 8, so an in-range but unpadded dim has to be
         # declined here rather than failing later at plan selection.
         (dict(head_dim_qk=260, head_dim_v=260), "head_dim not a multiple of 8"),
+        # Each dim is checked on its own, so v has to be covered as well as q.
+        (dict(head_dim_v=260), "head_dim_v not a multiple of 8"),
     ):
         backend, reason = is_frost_attention_supported(_frost_params(**override))
         assert backend == FusedAttnBackend.No_Backend, "%s must be declined" % why
@@ -444,7 +456,7 @@ def test_frost_sliding_window_selection_by_cp_comm_type(cp_comm_type, window, ex
 
 @requires_frost
 def test_frost_rejects_mismatched_kv():
-    """k and v must agree: the graphs declare v with k's shape and stride."""
+    """v must index the same KV positions as k. head_dim is free; the rest is not."""
     from transformer_engine.pytorch.attention.dot_product_attention.frost_attention import (
         frost_attn_fwd,
     )
@@ -454,18 +466,44 @@ def test_frost_rejects_mismatched_kv():
     mk = lambda hh: torch.randn(b, s, hh, d, device="cuda", dtype=dtype).permute(0, 2, 1, 3)
     q, k = mk(h).contiguous(), mk(h).contiguous()
 
-    with pytest.raises(ValueError, match="same shape"):
+    with pytest.raises(ValueError, match="batch, heads and seqlen"):
         frost_attn_fwd(q, k, mk(h * 2).contiguous())
-    with pytest.raises(ValueError, match="same layout"):
-        # Same shape, different stride order: a cache hit would otherwise run a graph built for
-        # k's layout over v's memory and read the wrong elements silently. Build it as sbhd and
-        # permute, so the strides genuinely differ -- a [b, h, s, d] contiguous tensor would come
-        # out with exactly k's strides and prove nothing.
-        v_odd = torch.randn(s, b, h, d, device="cuda", dtype=dtype).permute(1, 2, 0, 3)
-        assert v_odd.shape == k.shape and v_odd.stride() != k.stride()
-        frost_attn_fwd(q, k, v_odd)
     with pytest.raises(ValueError, match="match q"):
         frost_attn_fwd(q, k, k.to(torch.float32))
+
+
+@requires_frost
+def test_frost_serves_v_with_its_own_head_dim_and_layout():
+    """v is keyed and declared separately, the way flex_attention keys each tensor.
+
+    Checked against the float64 reference rather than against another FROST call: a v whose
+    head_dim AND stride order both differ from k's is exactly the case that a plan built from
+    k alone would compute wrongly without raising.
+    """
+    from transformer_engine.pytorch.attention.dot_product_attention.frost_attention import (
+        frost_attn_fwd,
+    )
+
+    b, h, s, d, d_v = 2, 4, 512, 512, 320
+    dtype = torch.bfloat16
+    torch.manual_seed(0)
+    q32 = torch.randn(b, s, h, d, device="cuda").permute(0, 2, 1, 3)
+    k32 = torch.randn(b, s, h, d, device="cuda").permute(0, 2, 1, 3)
+    # sbhd rather than bshd, so v's stride order differs from k's as well as its head_dim.
+    v32 = torch.randn(s, b, h, d_v, device="cuda").permute(1, 2, 0, 3)
+    q, k, v = q32.to(dtype), k32.to(dtype), v32.to(dtype)
+    assert v.stride()[:3] != k.stride()[:3], "v must not share k's stride order here"
+    scale = 1.0 / math.sqrt(d)
+
+    out, lse = frost_attn_fwd(q, k, v, attn_scale=scale, attn_mask_type="causal")
+
+    floor_o, floor_l, ref_o, ref_lse = _floor(q32, k32, v32, scale, "causal", dtype)
+    assert out.shape == (b, h, s, d_v), "out takes v's head_dim; got %s" % (tuple(out.shape),)
+    assert out.stride(3) == 1, "out must stay head-contiguous; got stride %s" % (out.stride(),)
+    err_o = (out.double() - ref_o).abs().max().item()
+    err_l = (lse.double() - ref_lse).abs().max().item()
+    assert err_o <= 2 * floor_o + 1e-3, "out err %.3e exceeds 2x the floor %.3e" % (err_o, floor_o)
+    assert err_l <= 2 * floor_l + 1e-3, "lse err %.3e exceeds 2x the floor %.3e" % (err_l, floor_l)
 
 
 def test_frost_engines_are_enabled_even_if_cudnn_was_imported_without_them():

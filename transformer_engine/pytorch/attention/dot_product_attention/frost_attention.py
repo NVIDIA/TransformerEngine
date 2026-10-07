@@ -440,16 +440,19 @@ def is_frost_attention_supported(params) -> Tuple[int, str]:
     if int(os.environ.get("NVTE_FROST_ATTN", "1")) == 0:
         return no_backend, "FROST is disabled by NVTE_FROST_ATTN=0"
 
-    head_dim_qk, head_dim_v = params.head_dim_qk, params.head_dim_v
-    if head_dim_qk != head_dim_v:
-        return no_backend, f"FROST requires symmetric head_dim; got {head_dim_qk}/{head_dim_v}"
-    if not _MIN_HEAD_DIM <= head_dim_qk <= _MAX_HEAD_DIM:
-        return no_backend, f"FROST covers head_dim in (256, 512]; got {head_dim_qk}"
-    if head_dim_qk % _HEAD_DIM_MULTIPLE != 0:
-        return (
-            no_backend,
-            f"FROST needs head_dim to be a multiple of {_HEAD_DIM_MULTIPLE}; got {head_dim_qk}",
-        )
+    # Each head_dim is checked on its own: q/k and v get separate graph nodes, so an
+    # asymmetric pair is served as long as both dims land in the range.
+    for name, head_dim in (
+        ("head_dim_qk", params.head_dim_qk),
+        ("head_dim_v", params.head_dim_v),
+    ):
+        if not _MIN_HEAD_DIM <= head_dim <= _MAX_HEAD_DIM:
+            return no_backend, f"FROST covers head_dim in (256, 512]; got {name}={head_dim}"
+        if head_dim % _HEAD_DIM_MULTIPLE != 0:
+            return (
+                no_backend,
+                f"FROST needs {name} to be a multiple of {_HEAD_DIM_MULTIPLE}; got {head_dim}",
+            )
 
     qkv_dtype = TORCH_DType.get(params.qkv_dtype)
     if qkv_dtype not in (torch.bfloat16, torch.float16):
@@ -590,20 +593,41 @@ def _check_dtype(name: str, t: torch.Tensor, expected: torch.dtype) -> None:
 
 
 def _check_kv_match(k: torch.Tensor, v: torch.Tensor) -> None:
-    """Require v to match k in both shape and layout.
+    """Require v to agree with k on batch, heads and sequence length.
 
-    Both graphs declare v with k's shape and stride, and _key records only q's and k's, so a v
-    that differs would hit a cached plan built for k's layout and read the wrong elements with no
-    error at all. Callers in TE always split k and v from one QKV tensor, so this costs nothing
-    and is purely a guard against a silent wrong answer.
+    head_dim is free: v has its own graph node and its own cache-key entry, so an asymmetric
+    pair builds its own plan. The other three index the same KV positions as k by definition,
+    and a mismatch would bind a differently shaped buffer with no error at all.
     """
-    if k.shape != v.shape:
-        raise ValueError(f"k and v must have the same shape; got {k.shape} and {v.shape}")
-    if k.stride() != v.stride():
+    if tuple(k.shape[:3]) != tuple(v.shape[:3]):
         raise ValueError(
-            f"k and v must have the same layout; got strides {tuple(k.stride())} and"
-            f" {tuple(v.stride())}"
+            f"k and v must agree on batch, heads and seqlen; got {k.shape} and {v.shape}"
         )
+
+
+def _head_dim_strides(shape: Sequence[int], ref_strides: Sequence[int]) -> list:
+    """Dense strides for ``shape`` in the memory order ``ref_strides`` describes.
+
+    O, dO and the O-shaped grads follow q's layout but carry v's head_dim, so when the two head
+    dims differ they cannot reuse q's strides. The graph node and the allocation both go through
+    here so they cannot drift apart.
+    """
+    order = sorted(range(len(shape)), key=lambda i: ref_strides[i], reverse=True)
+    strides = [0] * len(shape)
+    acc = 1
+    for i in reversed(order):
+        strides[i] = acc
+        acc *= shape[i]
+    return strides
+
+
+def _o_shape_stride(b, hq, sq, d, d_v, qs):
+    """Shape and strides for an O-shaped tensor: q's layout, v's head_dim.
+
+    Symmetric head dims keep q's exact strides, which preserves a caller's non-dense view.
+    """
+    shape = [b, hq, sq, d_v]
+    return shape, (list(qs) if d_v == d else _head_dim_strides(shape, qs))
 
 
 def _select_frost_plan(graph, token: str, what: str):
@@ -643,13 +667,14 @@ def _build_fwd(key) -> dict:
     cudnn = _import_cudnn_frontend()
     # deterministic is unused here: it selects a backward algorithm. Callers pass False for the
     # forward so the two never split the forward cache.
-    *_device, b, hq, hkv, sq, skv, d, dtype, mask, scale, qs, ks, _deterministic = key
-    shq, shkv = [b, hq, sq, d], [b, hkv, skv, d]
+    *_device, b, hq, hkv, sq, skv, d, d_v, dtype, mask, scale, qs, ks, vs, _deterministic = key
+    shq, shk, shv = [b, hq, sq, d], [b, hkv, skv, d], [b, hkv, skv, d_v]
+    sho, o_stride = _o_shape_stride(b, hq, sq, d, d_v, qs)
 
     graph = _build_pygraph(dtype, _device_from_key(_device), backend_name="FrostAttention")
     tq = graph.tensor(name="q", dim=shq, stride=list(qs))
-    tk = graph.tensor(name="k", dim=shkv, stride=list(ks))
-    tv = graph.tensor(name="v", dim=shkv, stride=list(ks))
+    tk = graph.tensor(name="k", dim=shk, stride=list(ks))
+    tv = graph.tensor(name="v", dim=shv, stride=list(vs))
     tout, tlse = graph.sdpa(
         name="frost_fwd",
         q=tq,
@@ -659,7 +684,7 @@ def _build_fwd(key) -> dict:
         attn_scale=scale,
         **_mask_options(cudnn, mask),
     )
-    tout.set_output(True).set_dim(shq).set_stride(list(qs))  # out mirrors q
+    tout.set_output(True).set_dim(sho).set_stride(list(o_stride))  # out: q's layout, v's head_dim
     tlse.set_output(True).set_dim([b, hq, sq, 1]).set_stride([hq * sq, sq, 1, 1]).set_data_type(
         cudnn.data_type.FLOAT
     )
@@ -675,19 +700,20 @@ def _build_fwd(key) -> dict:
 def _build_bwd(key) -> dict:
     """Build (and JIT-compile) a backward graph. Expensive; always reached through the cache."""
     cudnn = _import_cudnn_frontend()
-    *_device, b, hq, hkv, sq, skv, d, dtype, mask, scale, qs, ks, deterministic = key
+    *_device, b, hq, hkv, sq, skv, d, d_v, dtype, mask, scale, qs, ks, vs, deterministic = key
     io_dt = _cudnn_dtype(dtype)
-    shq, shkv = [b, hq, sq, d], [b, hkv, skv, d]
+    shq, shk, shv = [b, hq, sq, d], [b, hkv, skv, d], [b, hkv, skv, d_v]
+    sho, o_stride = _o_shape_stride(b, hq, sq, d, d_v, qs)
 
     graph = _build_pygraph(dtype, _device_from_key(_device), backend_name="FrostAttention")
     handles = {}
-    # o and dO share q's layout; k, v and their grads share k's.
+    # Each grad is declared with the layout of the tensor it differentiates.
     for name, shape, stride in (
         ("q", shq, qs),
-        ("k", shkv, ks),
-        ("v", shkv, ks),
-        ("o", shq, qs),
-        ("do", shq, qs),
+        ("k", shk, ks),
+        ("v", shv, vs),
+        ("o", sho, o_stride),
+        ("do", sho, o_stride),
     ):
         handles[name] = graph.tensor(name=name, dim=shape, stride=list(stride))
     handles["stats"] = graph.tensor(
@@ -708,7 +734,7 @@ def _build_bwd(key) -> dict:
         use_deterministic_algorithm=deterministic,
         **_mask_options(cudnn, mask),
     )
-    for tensor, stride in ((tdq, qs), (tdk, ks), (tdv, ks)):
+    for tensor, stride in ((tdq, qs), (tdk, ks), (tdv, vs)):
         tensor.set_output(True).set_data_type(io_dt).set_stride(list(stride))
     plan = _select_frost_plan(graph, _FROST_BWD_PLAN_TOKEN, "backward")
     handles["dq"], handles["dk"], handles["dv"] = tdq, tdk, tdv
@@ -735,7 +761,7 @@ def _cached(kind: str, key):
     return entry
 
 
-def _key(q, k, mask, scale, deterministic=False):
+def _key(q, k, v, mask, scale, deterministic=False):
     return (
         # Built under whichever device was current, so it must not be reused on another. Matches
         # the C++ fused-attn cache, which keys on device_id. Type too, so CPU cannot alias cuda:0.
@@ -747,6 +773,9 @@ def _key(q, k, mask, scale, deterministic=False):
         q.shape[2],
         k.shape[2],
         q.shape[3],
+        # v carries its own head_dim and strides, the way flex_attention keys each tensor
+        # separately. Without them an asymmetric v would reuse a plan built for k's shape.
+        v.shape[3],
         q.dtype,
         mask,
         float(scale),
@@ -754,6 +783,7 @@ def _key(q, k, mask, scale, deterministic=False):
         # lets bshd and sbhd both run without a transpose.
         tuple(q.stride()),
         tuple(k.stride()),
+        tuple(v.stride()),
         # The deterministic backward is a different algorithm, not a flag on the same one, so a
         # plan built either way must not be handed to a call that asked for the other.
         bool(deterministic),
@@ -771,8 +801,9 @@ def frost_attn_fwd(
     """Forward attention via cuDNN FROST.
 
     q, k, v are [b, h, s, d] views; bshd and sbhd are both served, since the graph is built from
-    each tensor's actual strides. GQA is supported directly (h_kv may differ from h_q) and SQ
-    need not equal SKV, which is what lets a CP ring step use this. Returns (out, softmax_lse)
+    each tensor's actual strides. GQA is supported directly (h_kv may differ from h_q), SQ need
+    not equal SKV, which is what lets a CP ring step use this, and v may carry its own head_dim,
+    in which case out follows q's layout with v's head_dim. Returns (out, softmax_lse)
     with softmax_lse as [b, h, s] fp32 natural-log logsumexp, the layout and convention the CP
     ring correction expects.
     """
@@ -791,13 +822,14 @@ def frost_attn_fwd(
 
     mask = _mask_spec(attn_mask_type, window_size)
     scale = attn_scale if attn_scale is not None else q.shape[-1] ** -0.5
-    entry = _cached("fwd", _key(q, k, mask, scale))
+    entry = _cached("fwd", _key(q, k, v, mask, scale))
     tq, tk, tv, tout, tlse = entry["handles"]
 
-    b, hq, sq, _ = q.shape
+    b, hq, sq, d = q.shape
+    out_shape, out_stride = _o_shape_stride(b, hq, sq, d, v.shape[3], q.stride())
     # Allocated per call so concurrent uses cannot alias; the cache holds only the plan.
     # empty_strided, not empty_like: the latter does not preserve an arbitrary permuted stride.
-    out = torch.empty_strided(q.shape, q.stride(), device=q.device, dtype=q.dtype)
+    out = torch.empty_strided(out_shape, out_stride, device=q.device, dtype=q.dtype)
     lse = torch.empty(b, hq, sq, 1, device=q.device, dtype=torch.float32)
     workspace = torch.empty(entry["workspace"], device=q.device, dtype=torch.uint8)
     entry["graph"].execute(
@@ -831,9 +863,10 @@ def frost_attn_bwd(
         raise ValueError(
             f"num_heads must be divisible by num_gqa_groups; got {q.shape[1]} and {k.shape[1]}"
         )
+    o_shape, o_stride = _o_shape_stride(*q.shape, v.shape[3], q.stride())
     for name, tensor in (("out", out), ("dout", dout)):
-        if tensor.shape != q.shape:
-            raise ValueError(f"{name} must have q's shape; got {tensor.shape} and {q.shape}")
+        if list(tensor.shape) != o_shape:
+            raise ValueError(f"{name} must be shaped {o_shape}; got {list(tensor.shape)}")
     if softmax_lse.dtype != torch.float32:
         raise ValueError(f"softmax_lse must be fp32; got {softmax_lse.dtype}")
     if tuple(softmax_lse.shape[:3]) != tuple(q.shape[:3]):
@@ -844,24 +877,24 @@ def frost_attn_bwd(
 
     mask = _mask_spec(attn_mask_type, window_size)
     scale = attn_scale if attn_scale is not None else q.shape[-1] ** -0.5
-    entry = _cached("bwd", _key(q, k, mask, scale, deterministic))
+    entry = _cached("bwd", _key(q, k, v, mask, scale, deterministic))
     h = entry["handles"]
 
     if softmax_lse.dim() == 3:
         softmax_lse = softmax_lse.unsqueeze(-1)
     softmax_lse = softmax_lse.contiguous()
 
-    # The graph expects o and dO in q's layout, and dO comes from autograd with strides we do
-    # not control, so restride rather than silently reading the wrong elements.
-    def _as(t, ref):
-        if tuple(t.stride()) == tuple(ref.stride()):
+    # The graph expects o and dO in the layout the forward wrote, and dO comes from autograd
+    # with strides we do not control, so restride rather than silently reading the wrong elements.
+    def _as(t, stride):
+        if list(t.stride()) == list(stride):
             return t
-        buf = torch.empty_strided(t.shape, ref.stride(), device=t.device, dtype=t.dtype)
+        buf = torch.empty_strided(t.shape, stride, device=t.device, dtype=t.dtype)
         buf.copy_(t)
         return buf
 
-    out = _as(out, q)
-    dout = _as(dout, q)
+    out = _as(out, o_stride)
+    dout = _as(dout, o_stride)
 
     dq = torch.empty_strided(q.shape, q.stride(), device=q.device, dtype=q.dtype)
     dk = torch.empty_strided(k.shape, k.stride(), device=k.device, dtype=k.dtype)
