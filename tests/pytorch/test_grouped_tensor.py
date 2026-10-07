@@ -1694,8 +1694,11 @@ class TestGroupedTensor:
         ],
     )
     @pytest.mark.parametrize("otype", [te.DType.kBFloat16, te.DType.kFloat32], ids=str)
+    @pytest.mark.parametrize("nvfp4_e4m3_max", [0, 448])
     @pytest.mark.skipif(not nvfp4_grouped_available, reason=reason_for_no_nvfp4_grouped)
-    def test_group_dequantize_nvfp4(self, shape: List[Tuple[int, int]], otype: te.DType) -> None:
+    def test_group_dequantize_nvfp4(
+        self, shape: List[Tuple[int, int]], otype: te.DType, nvfp4_e4m3_max: int
+    ) -> None:
         """Grouped NVFP4 dequantization matches per-tensor dequantization bitwise."""
         num_tensors = len(shape)
         torch_dtype = torch.bfloat16 if otype == te.DType.kBFloat16 else torch.float32
@@ -1706,6 +1709,7 @@ class TestGroupedTensor:
         # The grouped NVFP4 quantizer needs first_dims, so this covers the varying-first-dim
         # layout; the equal-shape layout is covered by test_dequantize_nvfp4_grouped.cu.
         quantizer = self._make_grouped_nvfp4_quantizer()
+        quantizer.nvfp4_e4m3_max = nvfp4_e4m3_max
         first_dims = torch.tensor([s[0] for s in shape], dtype=torch.int64, device="cuda")
         quantized = tex.group_quantize(grouped_input, quantizer, num_tensors, first_dims)
 

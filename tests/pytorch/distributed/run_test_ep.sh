@@ -71,6 +71,15 @@ run_pass() {
   if [ -z "${KEEP_EP_LOGS:-}" ]; then rm -f "${log}"; fi
 }
 
+# Opt-in via NVTE_TEST_EP_CLASSIC_PG=1: cover only the classic ProcessGroupNCCL
+# comm-borrow branch. Recent torch defaults the "nccl" backend to ProcessGroupNCCL2,
+# which the passes below exercise; forcing the classic backend covers the other
+# get_nccl_comm_ptr branch.
+if [ "${NVTE_TEST_EP_CLASSIC_PG:-0}" = "1" ]; then
+  TORCH_DIST_USE_NCCL2=0 run_pass "classic_pg" 0
+  exit $RET
+fi
+
 run_pass "default" 0
 run_pass "zero_copy" 1
 run_pass "eager" 0 1
