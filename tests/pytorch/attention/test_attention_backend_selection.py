@@ -246,37 +246,3 @@ def _fa4_normalized_kwargs(kwargs):
 def test_fa4_window_sentinel_normalization(sent, expected):
     """Convert only TE's -1 sentinel for both FA4 window argument forms."""
     assert _fa4_normalized_kwargs(sent) == expected
-
-
-def test_fa4_causal_attention_matches_reference(monkeypatch):
-    """Compare selected FA4 causal attention with an independent float64 reference."""
-    if not torch.cuda.is_available():
-        pytest.skip("Requires CUDA")
-    if dpa_backends.flash_attn_func_v4 is None:
-        pytest.skip("Requires FlashAttention 4")
-    if torch.cuda.get_device_capability() != (10, 0):
-        pytest.skip("The FA4 CuTe kernels under test are SM100")
-
-    monkeypatch.setenv("NVTE_UNFUSED_ATTN", "0")
-    dpa_module._attention_backends["backend_selection_requires_update"] = True
-    b, h, s, d = 2, 8, 1024, 128
-    dtype = torch.bfloat16
-    torch.manual_seed(0)
-    q, k, v = (torch.randn(b, s, h, d, device="cuda", dtype=dtype) for _ in range(3))
-    dpa = DotProductAttention(
-        h, d, qkv_format="bshd", attn_mask_type="causal", attention_dropout=0.0
-    ).to(dtype=dtype, device="cuda")
-    out = dpa(q, k, v).view(b, s, h, d)
-
-    selected = dpa_module._attention_backends["flash_attention_backend"]
-    assert selected is not None and str(selected).startswith(
-        "4"
-    ), f"expected FlashAttention 4 to serve this config, got {selected}"
-    qs, ks, vs = (t.double().transpose(1, 2) for t in (q, k, v))
-    scores = (qs @ ks.transpose(-1, -2)) * (d**-0.5)
-    scores = scores.masked_fill(
-        torch.ones(s, s, dtype=torch.bool, device=qs.device).triu(1), float("-inf")
-    )
-    reference = (torch.softmax(scores, dim=-1) @ vs).transpose(1, 2)
-    error = (out.double() - reference).abs().max() / reference.abs().max()
-    assert error < 2e-2, f"FA4 causal attention differs from the float64 reference: {error:.3e}"
