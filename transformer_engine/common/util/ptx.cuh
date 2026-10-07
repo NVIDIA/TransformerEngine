@@ -1858,7 +1858,8 @@ __device__ __forceinline__ void ld_global_nc_b32x8(uint32_t (&dst)[8], const voi
 
 // As above, but streaming the lines past L2 rather than letting them displace
 // resident data.  Equivalent to tagging the load with a `create_l2_policy_
-// evict_first(1.0)` hint, without needing to materialise the policy token.
+// evict_first(1.0)` hint; the 256-bit form does so without needing to
+// materialise the policy token.
 __device__ __forceinline__ void ld_global_nc_evict_first_b32x8(uint32_t (&dst)[8],
                                                                const void *src) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000) && (defined CUDA_VERSION) && \
@@ -1868,13 +1869,16 @@ __device__ __forceinline__ void ld_global_nc_evict_first_b32x8(uint32_t (&dst)[8
                  "=r"(dst[6]), "=r"(dst[7])
                : "l"(src));
 #elif (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+  // The `.L2::evict_first` load qualifier is only valid on 256-bit accesses,
+  // so the 128-bit fallback expresses the same hint through an L2 policy.
+  const uint64_t policy = create_l2_policy_evict_first(1.0f);
   const uint8_t *bytes = reinterpret_cast<const uint8_t *>(src);
-  asm volatile("ld.global.nc.L2::evict_first.v4.b32 {%0,%1,%2,%3}, [%4];"
+  asm volatile("ld.global.nc.L2::cache_hint.v4.b32 {%0,%1,%2,%3}, [%4], %5;"
                : "=r"(dst[0]), "=r"(dst[1]), "=r"(dst[2]), "=r"(dst[3])
-               : "l"(bytes));
-  asm volatile("ld.global.nc.L2::evict_first.v4.b32 {%0,%1,%2,%3}, [%4];"
+               : "l"(bytes), "l"(policy));
+  asm volatile("ld.global.nc.L2::cache_hint.v4.b32 {%0,%1,%2,%3}, [%4], %5;"
                : "=r"(dst[4]), "=r"(dst[5]), "=r"(dst[6]), "=r"(dst[7])
-               : "l"(bytes + 16));
+               : "l"(bytes + 16), "l"(policy));
 #else
   NVTE_DEVICE_ERROR("ld_global_nc_evict_first_b32x8 is only supported on SM 8.0+.");
 #endif
