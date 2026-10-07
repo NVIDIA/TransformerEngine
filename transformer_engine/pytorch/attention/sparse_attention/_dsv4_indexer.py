@@ -93,7 +93,9 @@ class _Indexer(torch.nn.Module):
             top_k=min(self.top_k, n_comp),
             ratio=self.ratio,
             max_seqlen=seq,
-            max_compressed_seqlen=n_comp,
+            # cuDNN's compile bound covers the partial trailing ratio even
+            # though cu_comp contains only complete compressed blocks.
+            max_compressed_seqlen=(seq + self.ratio - 1) // self.ratio,
             scale=(self.head_dim * self.n_heads) ** -0.5,
         )
         return (indices, query, key, weights) if return_context else indices

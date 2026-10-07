@@ -182,6 +182,9 @@ def select_blocks(
     scale and pass raw BF16 projected weights. Scaling in FP32 then rounding
     weights to BF16 can change close top-k boundaries. This helper does not
     implement the separate indexer auxiliary loss or autograd through IDs.
+    max_compressed_seqlen is a compile bound and must cover the partial final
+    ratio; use ceil(max_seqlen / ratio) even though prefixes count only complete
+    compressed blocks.
     """
     if query.ndim != 3 or query.shape[1] not in (32, 64) or query.shape[2] != 128:
         raise ValueError("CSA index query must have shape [T,32 or 64,128].")
