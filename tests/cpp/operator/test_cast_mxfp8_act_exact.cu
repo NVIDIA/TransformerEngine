@@ -88,15 +88,19 @@ __global__ void scalar_activation_kernel(const Mode mode, const IType *x, const 
   y[i] = static_cast<IType>(v);
 }
 
-enum class Fill { Typical, OrderedInputs, Specials };
+enum class Fill { Typical, OrderedInputs, Specials, TinyGradients };
 
 template <typename T>
 T from_bits(const uint32_t bits) {
   if constexpr (std::is_same_v<T, float>) {
-    return reinterpret_cast<const float &>(bits);
+    float value;
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
   } else {
     const uint16_t half_bits = static_cast<uint16_t>(bits);
-    return reinterpret_cast<const T &>(half_bits);
+    T value;
+    std::memcpy(&value, &half_bits, sizeof(value));
+    return value;
   }
 }
 
@@ -118,9 +122,8 @@ uint32_t ordered_bits(const size_t i, const size_t n) {
   } else {
     const uint32_t nan_rank = rank - non_nan_count;
     const uint32_t nan_count_per_sign = 0x7fffu - pos_inf;
-    high = nan_rank < nan_count_per_sign
-               ? 0x8000u | (pos_inf + 1 + nan_rank)
-               : pos_inf + 1 + nan_rank - nan_count_per_sign;
+    high = nan_rank < nan_count_per_sign ? 0x8000u | (pos_inf + 1 + nan_rank)
+                                         : pos_inf + 1 + nan_rank - nan_count_per_sign;
   }
   if constexpr (std::is_same_v<T, float>) {
     const uint32_t fraction = position & 0xffffu;
@@ -167,6 +170,17 @@ void fill_inputs(const Fill fill, Tensor *x, Tensor *grad) {
         xp[i] = from_bits<T>(ordered_bits<T>(i, n));
         gp[i] = static_cast<T>(-4.0f + 8.0f * static_cast<float>(i % 257) / 256.0f);
         break;
+      case Fill::TinyGradients: {
+        // At x=0 both derivatives are 0.5. Cover subnormal gradients and a normal
+        // gradient whose product is subnormal, including both signs.
+        const float tiny_gradients[] = {static_cast<float>(2 * Numeric_Traits<T>::minSubnorm),
+                                        static_cast<float>(Numeric_Traits<T>::maxSubnorm),
+                                        static_cast<float>(Numeric_Traits<T>::minNorm)};
+        xp[i] = static_cast<T>(0.0f);
+        const float magnitude = tiny_gradients[(i / 2) % 3];
+        gp[i] = static_cast<T>(i % 2 == 0 ? magnitude : -magnitude);
+        break;
+      }
       case Fill::Specials: {
         const size_t index = i * specials.size() / n;
         xp[i] = specials[index];
@@ -239,8 +253,8 @@ void run_case(const Mode mode, const Fill fill, const size_t rows, const size_t 
   const size_t grid_size = divide_round_up(n, block_size);
   scalar_activation_kernel<IType>
       <<<grid_size, block_size>>>(mode, static_cast<const IType *>(x.rowwise_dptr()),
-                                 static_cast<const IType *>(grad.rowwise_dptr()),
-                                 static_cast<IType *>(y.rowwise_dptr()), z_dev, n);
+                                  static_cast<const IType *>(grad.rowwise_dptr()),
+                                  static_cast<IType *>(y.rowwise_dptr()), z_dev, n);
   ASSERT_EQ(cudaGetLastError(), cudaSuccess);
   std::vector<float> z(n);
   ASSERT_EQ(cudaMemcpy(z.data(), z_dev, n * sizeof(float), cudaMemcpyDeviceToHost), cudaSuccess);
@@ -314,8 +328,7 @@ void run_case(const Mode mode, const Fill fill, const size_t rows, const size_t 
     for (size_t c = 0; c < cols; ++c) {
       const IType e = static_cast<IType>(expected[c]);
       mismatches += std::memcmp(&e, &got[c], sizeof(IType)) != 0 &&
-                    !(std::isnan(static_cast<float>(e)) &&
-                      std::isnan(static_cast<float>(got[c])));
+                    !(std::isnan(static_cast<float>(e)) && std::isnan(static_cast<float>(got[c])));
     }
     EXPECT_EQ(mismatches, 0u) << "dbias";
   }
@@ -347,11 +360,10 @@ namespace {
 std::string case_name(const testing::TestParamInfo<Params> &info) {
   const char *layouts[] = {"Rowwise", "Colwise", "Both"};
   const auto [mode, fill, itype, layout, swizzled, dims] = info.param;
-  const char *fills[] = {"XTypical", "XOrderedInputs", "XSpecials"};
-  return std::string(mode_name(mode)) + fills[static_cast<int>(fill)] +
-         "X" + test::typeName(itype) + "X" + layouts[layout] +
-         (swizzled ? "XSwizzled" : "XCompact") + "X" + std::to_string(dims.first) + "X" +
-         std::to_string(dims.second);
+  const char *fills[] = {"XTypical", "XOrderedInputs", "XSpecials", "XTinyGradients"};
+  return std::string(mode_name(mode)) + fills[static_cast<int>(fill)] + "X" +
+         test::typeName(itype) + "X" + layouts[layout] + (swizzled ? "XSwizzled" : "XCompact") +
+         "X" + std::to_string(dims.first) + "X" + std::to_string(dims.second);
 }
 
 }  // namespace
@@ -363,8 +375,8 @@ INSTANTIATE_TEST_SUITE_P(
                        ::testing::Values(Fill::Typical, Fill::OrderedInputs),
                        ::testing::Values(DType::kBFloat16, DType::kFloat16, DType::kFloat32),
                        ::testing::Values(0, 1, 2), ::testing::Bool(),
-                       ::testing::Values(std::make_pair<size_t, size_t>(1024, 2048),
-                                         std::make_pair<size_t, size_t>(544, 2080))),
+                       ::testing::Values(std::pair<size_t, size_t>{1024, 2048},
+                                         std::pair<size_t, size_t>{544, 2080})),
     case_name);
 
 INSTANTIATE_TEST_SUITE_P(
@@ -374,5 +386,15 @@ INSTANTIATE_TEST_SUITE_P(
                        ::testing::Values(Fill::Specials),
                        ::testing::Values(DType::kBFloat16, DType::kFloat16, DType::kFloat32),
                        ::testing::Values(0, 1, 2), ::testing::Bool(),
-                       ::testing::Values(std::make_pair<size_t, size_t>(64, 128))),
+                       ::testing::Values(std::pair<size_t, size_t>{64, 128})),
     case_name);
+
+INSTANTIATE_TEST_SUITE_P(TinyGradients, CastMXFP8ActExactTestSuite,
+                         ::testing::Combine(::testing::Values(Mode::DGeLU, Mode::DBiasDGeLU,
+                                                              Mode::DSiLU, Mode::DBiasDSiLU),
+                                            ::testing::Values(Fill::TinyGradients),
+                                            ::testing::Values(DType::kBFloat16, DType::kFloat16,
+                                                              DType::kFloat32),
+                                            ::testing::Values(0, 1, 2), ::testing::Bool(),
+                                            ::testing::Values(std::pair<size_t, size_t>{64, 128})),
+                         case_name);
