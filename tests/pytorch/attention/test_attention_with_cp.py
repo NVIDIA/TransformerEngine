@@ -815,7 +815,9 @@ def test_cp_with_frost_attention_a2a_p2p(cp_pool):
     if reason is not None:
         pytest.skip(reason)
 
-    config = model_configs_frost_attn["cp_hd512_0"]
+    # The shortest model, since this is the only four-rank case and so the only one that would
+    # take all of a2a+p2p down with it if it timed out.
+    config = model_configs_frost_attn["cp_hd512_2"]
     config.context_parallel = True
     config.cp_comm_type = "a2a+p2p"
     # The a2a stage shards heads across its subgroup, so both counts must divide by it.
@@ -827,7 +829,7 @@ def test_cp_with_frost_attention_a2a_p2p(cp_pool):
     _submit(
         cp_pool(4),
         dtype="bf16",
-        model="cp_hd512_0",
+        model="cp_hd512_2",
         qkv_format="bshd",
         kernel_backend="FrostAttention",
         cp_comm_type="a2a+p2p",
