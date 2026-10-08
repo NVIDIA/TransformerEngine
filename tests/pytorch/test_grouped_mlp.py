@@ -3161,9 +3161,11 @@ class TestGroupedMLPDeterminism:
                 activation=activation,
             )
         except RuntimeError as e:
-            # A refusal must be TE's own error, not cuDNN's (whose NotImplementedError
-            # subclasses RuntimeError but lacks TE's prefix).
-            assert grouped_mlp_module._DETERMINISM_REQUESTED in str(e)
+            # Refused loudly: TE's own check, or cuDNN declining `deterministic=True` for this
+            # configuration (NotImplementedError, e.g. no Rubin kernel). Anything else is a bug.
+            assert isinstance(e, NotImplementedError) or (
+                grouped_mlp_module._DETERMINISM_REQUESTED in str(e)
+            )
             return
         assert fused_cls.grouped_gemm_dactivation_is_deterministic()
 
