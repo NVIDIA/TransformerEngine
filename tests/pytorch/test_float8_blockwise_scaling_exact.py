@@ -377,6 +377,62 @@ def test_quantization_block_tiling_extrema_versus_reference(
     )
 
 
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("use_f32_scales", [False, True])
+def test_default_backward_quantizer_handles_zero_blocks(use_f32_scales):
+    """The default backward recipe must quantize zero E5M2 blocks with finite scales."""
+    if recipe_emulated and use_f32_scales:
+        pytest.skip("Blackwell FP8 block scaling emulation requires power-of-two scales")
+
+    from transformer_engine.common.recipe import Format
+    from transformer_engine.pytorch.quantization import Float8BlockScalingRecipeState
+
+    recipe = Float8BlockScaling(fp8_format=Format.HYBRID, use_f32_scales=use_f32_scales)
+    quantizer = Float8BlockScalingRecipeState(
+        recipe, mode="backward", num_quantizers=1
+    ).make_quantizers()[0]
+    assert quantizer.amax_epsilon == 1e-12
+    assert quantizer.force_pow_2_scales == (not use_f32_scales)
+
+    grad = torch.zeros((128, 128), dtype=torch.bfloat16, device="cuda")
+    quantized = quantizer.update_quantized(
+        grad, quantizer.make_empty(grad.shape, dtype=grad.dtype, device=grad.device)
+    )
+    assert not torch.any(quantized._rowwise_data)
+    assert torch.isfinite(quantized._rowwise_scale_inv).all()
+    assert torch.all(quantized._rowwise_scale_inv > 0)
+
+    # Nonzero blocks keep the pre-change quantization result.
+    old_quantizer = Float8BlockQuantizer(
+        fp8_dtype=TE_DType[torch.float8_e5m2],
+        rowwise=True,
+        columnwise=True,
+        amax_epsilon=0.0,
+        force_pow_2_scales=not use_f32_scales,
+        block_scaling_dim=recipe.grad_block_scaling_dim,
+    )
+    grad.fill_(1)
+    quantized = quantizer.update_quantized(
+        grad, quantizer.make_empty(grad.shape, dtype=grad.dtype, device=grad.device)
+    )
+    old_quantized = old_quantizer.update_quantized(
+        grad, old_quantizer.make_empty(grad.shape, dtype=grad.dtype, device=grad.device)
+    )
+    assert torch.equal(quantized._rowwise_data, old_quantized._rowwise_data)
+    assert torch.equal(quantized._rowwise_scale_inv, old_quantized._rowwise_scale_inv)
+
+    # A zero upstream gradient must give finite, zero weight and input gradients.
+    linear = te.Linear(128, 128, bias=False, params_dtype=torch.bfloat16, device="cuda")
+    grad_input = torch.ones_like(grad, requires_grad=True)
+    with te.autocast(recipe=recipe):
+        output = linear(grad_input)
+    output.backward(torch.zeros_like(output))
+    assert torch.isfinite(linear.weight.grad).all()
+    assert torch.isfinite(grad_input.grad).all()
+    assert not torch.any(linear.weight.grad)
+    assert not torch.any(grad_input.grad)
+
+
 # FP8 per tesnor current scaling
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 class TestFP8BlockScalingRecipeLinear(TestFP8RecipeLinearBase):

@@ -804,6 +804,9 @@ def test_float8_block_scaling_quant_params_follow_constructor(use_f32_scales):
         recipe.fp8_quant_bwd_grad,
     ):
         assert qparams.power_2_scale == (not use_f32_scales)
+    assert recipe.fp8_quant_fwd_inp.amax_epsilon == 0.0
+    assert recipe.fp8_quant_fwd_weight.amax_epsilon == 0.0
+    assert recipe.fp8_quant_bwd_grad.amax_epsilon == 1e-12
 
 
 @pytest.mark.parametrize(
