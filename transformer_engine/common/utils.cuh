@@ -24,10 +24,16 @@ using uint8_t = unsigned char;
 using uint16_t = unsigned short int;  // NOLINT(*)
 using uint32_t = unsigned int;
 using uint64_t = unsigned long long int;  // NOLINT(*)
+using int16_t = short int;                // NOLINT(*)
+using int32_t = int;
+using int64_t = long long int;  // NOLINT(*)
 static_assert(sizeof(uint8_t) == 1);
 static_assert(sizeof(uint16_t) == 2);
 static_assert(sizeof(uint32_t) == 4);
 static_assert(sizeof(uint64_t) == 8);
+static_assert(sizeof(int16_t) == 2);
+static_assert(sizeof(int32_t) == 4);
+static_assert(sizeof(int64_t) == 8);
 #endif
 
 // Minimal subset of <type_traits> used by RTC kernel headers. Keep these in a
@@ -1012,6 +1018,9 @@ __device__ __forceinline__ T warp_allreduce_sum(T x) {
 using fp8e4m3 = __nv_fp8_e4m3;
 using fp8e5m2 = __nv_fp8_e5m2;
 using e8m0_t = uint8_t;
+#if CUDA_VERSION >= 13040
+using fp8ue5m3 = __nv_fp8_ue5m3;
+#endif
 
 enum ScalingType { ROWWISE = 0, COLWISE = 1, BIDIMENSIONAL = 2 };
 

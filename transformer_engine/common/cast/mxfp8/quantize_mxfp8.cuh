@@ -17,10 +17,13 @@
 #include <transformer_engine/transformer_engine.h>
 
 #include "../../common.h"
+#include "../../util/cuda_runtime.h"
 #include "../../util/math.h"
 #include "../../util/ptx_arch_spec.cuh"
 #include "../../utils.cuh"
 #include "../core/common.cuh"
+#include "specialized/cast_bidim.cuh"
+#include "specialized/cast_rowwise.cuh"
 #include "specialized/quantize_mxfp8.cuh"
 #include "swizzle.cuh"
 
@@ -790,6 +793,13 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                   (scaling_type == ScalingType::BIDIMENSIONAL && has_full_bidimensional_chunks &&
                    bidimensional_specialized_grid_fits);
 
+              // The register-resident kernels issue 256-bit loads, which need sm_100
+              // or later and a 32-byte aligned base pointer.  Everything that fails
+              // either test falls through to the staged kernels below.
+              const bool register_resident_supported =
+                  (transformer_engine::cuda::sm_arch() >= 100) &&
+                  is_aligned_ptr(input.data.dptr, 32);
+
               // Specialized cast-only kernels do not consume the device noop flag.
               // Preserve cached outputs by keeping noop-aware calls on the generic path.
               if (noop_ptr == nullptr &&
@@ -797,6 +807,26 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                   !use_2d_quantization && scaling_type_has_specialized_support) {
                 switch (scaling_type) {
                   case ScalingType::ROWWISE: {
+                    // The register-resident kernel supersedes the staged one below
+                    // wherever it applies.
+                    // hasSpec has already established cast-only, leaving the input
+                    // type and the scale layout.
+                    //
+                    // It emits both scale layouts.  The GEMM-swizzled one packs a
+                    // 512-byte tile as 128 rows x 4 scale columns, so a CTA covers
+                    // four sub-rows 32 rows apart and their scale bytes meet in a
+                    // few hundred bytes of shared memory; each warp still reads one
+                    // contiguous run, and the payload never touches shared memory.
+                    if constexpr (std::is_same_v<IType, bf16>) {
+                      if (register_resident_supported) {
+                        specialized::launch_cast_rowwise<OType, WITH_GEMM_SWIZZLED_SCALES>(
+                            input.data.dptr, output->data.dptr,
+                            reinterpret_cast<void *>(scales_rowwise_ptr), static_cast<int>(rows),
+                            static_cast<int>(cols), static_cast<int>(scale_stride_rowwise), stream);
+                        break;
+                      }
+                    }
+
                     using traits = specialized::CastTraits<IType, OType, true, false,
                                                            WITH_GEMM_SWIZZLED_SCALES>;
                     auto kernel = specialized::quantize_mxfp8_kernel_cast_only<traits>;
@@ -817,6 +847,34 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                     break;
                   }
                   case ScalingType::BIDIMENSIONAL: {
+                    // The register-resident kernel supersedes the TMA one below
+                    // wherever it applies: it reads its 32-row tile once and drives
+                    // both the rowwise and colwise passes from registers.  hasSpec has
+                    // already established cast-only, leaving the input type, the
+                    // scale layout, and the tile alignment.
+                    // Gated per path: the colwise scale axis is transposed under the
+                    // GEMM swizzle, so this kernel does not handle it yet.
+                    if constexpr (std::is_same_v<IType, bf16> && !WITH_GEMM_SWIZZLED_SCALES) {
+                      if (register_resident_supported && rows % 32 == 0 && cols % 256 == 0) {
+                        // Both scale arrays must share a layout; this kernel only
+                        // writes the packed one.  The template gate above should
+                        // already have excluded swizzled tensors, so this catches
+                        // the two disagreeing.
+                        NVTE_CHECK(!with_gemm_swizzled_scales,
+                                   "Specialized bidimensional MXFP8 cast cannot emit GEMM-swizzled "
+                                   "scales; the colwise direction is unimplemented and a "
+                                   "half-swizzled tensor would be unreadable.");
+                        specialized::launch_cast_bidim<OType>(
+                            input.data.dptr, output->data.dptr,
+                            reinterpret_cast<void *>(scales_rowwise_ptr),
+                            output->columnwise_data.dptr,
+                            reinterpret_cast<void *>(scales_colwise_ptr), static_cast<int>(rows),
+                            static_cast<int>(cols), static_cast<int>(scale_stride_rowwise),
+                            static_cast<int>(scale_stride_colwise), stream);
+                        break;
+                      }
+                    }
+
                     using traits =
                         specialized::CastTraitsSwizzle<IType, OType,
                                                        /*NumStages=*/2, /*IterM=*/1, /*IterN=*/4,

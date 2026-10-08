@@ -13,7 +13,10 @@ from transformer_engine.pytorch.attention.dot_product_attention.context_parallel
     get_cu_seqlens_on_cp_rank,
     get_thd_partitioned_indices,
 )
-from transformer_engine.pytorch.attention.dot_product_attention.utils import combine_and_quantize
+from transformer_engine.pytorch.attention.dot_product_attention.utils import (
+    combine_and_quantize,
+    get_thd_padding_mask,
+)
 from transformer_engine.pytorch import DType
 from test_attention_with_cp import (
     model_configs_flash_attn,
@@ -234,6 +237,7 @@ def run_dpa_with_cp(
     fa_pad_between_seqs="False",
     deterministic="False",
     load_balancing_strategy="DUAL_CHUNK_SWAP",
+    softcap="0.0",
     log_level=logging.WARNING,
 ):
     """Test DotProductAttention module with context parallelism"""
@@ -281,6 +285,7 @@ def run_dpa_with_cp(
             config.attn_mask_type = "padding_causal"
         else:
             config.attn_mask_type = "padding"
+    config.softcap = float(softcap)
 
     # set up distributed group
     rank = int(os.getenv("RANK", "0"))
@@ -342,6 +347,7 @@ def run_dpa_with_cp(
         qkv_format=qkv_format,
         attn_mask_type=config.attn_mask_type,
         window_size=config.window_size,
+        softcap=config.softcap,
         softmax_type=config.softmax_type,
         return_max_logit=config.return_max_logit,
     ).cuda()
@@ -487,7 +493,7 @@ def run_dpa_with_cp(
         for x in [q_orig, k_orig, v_orig, dout_orig] + ([] if bias is None else [bias])
     ]
     bias_ = rest[0] if len(rest) else None
-    if qkv_format == "bshd" or qkv_format == "sbhd":
+    if qkv_format in ("bshd", "sbhd"):
         seq_dim = qkv_format.index("s")
         q_, k_, v_, dout_ = [
             x.view(
@@ -631,7 +637,7 @@ def run_dpa_with_cp(
     out, dq, dk, dv, dbias, out_, dq_, dk_, dv_, dbias_ = tensors
 
     ############  compare results between CP and no-CP ############
-    if qkv_format == "bshd" or qkv_format == "sbhd":
+    if qkv_format in ("bshd", "sbhd"):
         if is_training:
             dq, dk, dv, out = [
                 x.view(
@@ -696,11 +702,18 @@ def run_dpa_with_cp(
             num_pads_kv = (cu_seqlens_kv_padded - cu_seqlens_kv)[1:] - (
                 cu_seqlens_kv_padded - cu_seqlens_kv
             )[:-1]
-            # FA3 leaves garbage at padding positions despite seqused_q/k (tile spillover).
-            # Forward out_ can't be pre-zeroed because FA3's custom op returns out_ as an
-            # output rather than mutating it in-place, triggering PyTorch's aliasing constraint.
-            # Backward dq/dk/dv CAN be pre-zeroed because FA3 marks them as mutated inputs.
+            # FA3/FA4 kernels may leave physically padded rows unwritten. The CP
+            # implementation must clean them after partial-output/gradient merges.
             if fa_pad_between_seqs == "True":
+                out_padding_mask = get_thd_padding_mask(
+                    out_.shape[0], cu_seqlens_q, cu_seqlens_q_padded
+                )
+                nnz = torch.count_nonzero(out_[out_padding_mask]).item()
+                assert nnz == 0, (
+                    f"out_ has {nnz} nonzero values in THD padding — "
+                    "context_parallel.py should zero padding positions"
+                )
+
                 # out_ is a view inside the CP custom autograd Function, so in-place
                 # zeroing is blocked by PyTorch. Clone to break the view relationship.
                 out_ = out_.clone()

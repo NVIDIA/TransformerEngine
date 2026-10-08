@@ -1,12 +1,16 @@
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
+import collections
 import logging
 import os
+import re
+import subprocess
 import sys
 import pathlib
 import copy
-from typing import Any, Dict, Tuple, Union
+from dataclasses import replace
+from typing import Any, Dict, List, NamedTuple, Tuple, Union
 
 from packaging.version import Version as PkgVersion
 import pytest
@@ -29,14 +33,21 @@ from transformer_engine.pytorch.attention.dot_product_attention import (
     _attention_backends,
 )
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
+    AttentionParams,
     FlashAttentionUtils,
+    FusedAttentionParams,
     _get_supported_versions,
     check_set_window_size,
+    get_attention_backend,
+    get_fused_attn_spec,
+    get_thd_padding_mask,
 )
 from transformer_engine.pytorch.attention import RotaryPositionEmbedding
 import transformer_engine.pytorch.cpp_extensions as ext
 from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     FusedAttnBackend,
+    QKVFormat,
+    QKVLayout,
     fused_attn_bwd,
     fused_attn_fwd,
 )
@@ -129,6 +140,222 @@ def test_flash_attention_supported_version_message():
     )
 
 
+def test_fused_attn_backend_message():
+    """Test the error messaging of the fused attention backend query."""
+    baseline = FusedAttentionParams(
+        qkv_layout=tex.NVTE_QKV_Layout.NVTE_BSHD_BSHD_BSHD,
+        dqkv_layout=tex.NVTE_QKV_Layout.NVTE_BSHD_BSHD_BSHD,
+        o_format=tex.NVTE_QKV_Format.NVTE_BSHD,
+        do_format=tex.NVTE_QKV_Format.NVTE_BSHD,
+        batch_size=2,
+        num_attn_heads=8,
+        num_gqa_groups=8,
+        head_dim_qk=64,
+        head_dim_v=64,
+        max_seqlen_q=128,
+        max_seqlen_kv=128,
+        attn_scale=0.125,
+    )
+
+    # One of TE's rules is violated and the error message is surfaced
+    backend, message = tex.get_fused_attn_backend(
+        replace(baseline, bias_type=tex.NVTE_Bias_Type.NVTE_PRE_SCALE_BIAS)
+    )
+    assert backend == tex.NVTE_Fused_Attn_Backend.NVTE_No_Backend
+    assert message == "Fused attention does not support pre-scale bias."
+
+    # No error message if supported; otherwise skip the test
+    backend, message = tex.get_fused_attn_backend(baseline)
+    if backend == tex.NVTE_Fused_Attn_Backend.NVTE_No_Backend:
+        pytest.skip(f"FusedAttention does not support the baseline config: {message}")
+    assert message == ""
+
+    # All TE rules have cleared; now gets rejected by cuDNN's support check
+    # cuDNN's error message might change across cuDNN versions, so only verify the presence of the string
+    backend, message = tex.get_fused_attn_backend(
+        replace(baseline, head_dim_qk=1024, head_dim_v=1024)
+    )
+    assert backend == tex.NVTE_Fused_Attn_Backend.NVTE_No_Backend
+    assert message != ""
+
+    if not fp8_attn_available:
+        return
+
+    # The same checks in FP8; the dtypes, formats and scaling mode come from get_fused_attn_spec so
+    # that the config matches what FusedAttnFunc feeds the kernels for this recipe
+    fp8_recipe = recipe.DelayedScaling(fp8_format=recipe.Format.HYBRID, fp8_dpa=True)
+    spec = get_fused_attn_spec(fp8_recipe, torch.float8_e4m3fn, "bshd_bshd_bshd", cs_o_in_f16=True)
+    fp8_baseline = replace(
+        baseline,
+        scaling_mode=spec.scaling_mode,
+        qkv_dtype=spec.qkv,
+        o_dtype=spec.o,
+        do_dtype=spec.do,
+        dqkv_dtype=spec.dqkv,
+        qkv_layout=QKVLayout[spec.qkv_layout],
+        o_format=QKVFormat[spec.o_format],
+        do_format=QKVFormat[spec.do_format],
+        dqkv_layout=QKVLayout[spec.dqkv_layout],
+        qkv_scale_inv_format=QKVFormat[spec.scale_inv_format],
+        do_scale_inv_format=QKVFormat[spec.scale_inv_format],
+    )
+
+    # No error message if supported; otherwise skip the test
+    backend, message = tex.get_fused_attn_backend(fp8_baseline)
+    if backend == tex.NVTE_Fused_Attn_Backend.NVTE_No_Backend:
+        pytest.skip(f"FusedAttention does not support the baseline FP8 config: {message}")
+    assert backend == tex.NVTE_Fused_Attn_Backend.NVTE_FP8
+    assert message == ""
+
+    # All TE FP8 rules have cleared; now gets rejected by cuDNN's FP8 support check
+    backend, message = tex.get_fused_attn_backend(
+        replace(fp8_baseline, head_dim_qk=1024, head_dim_v=1024)
+    )
+    assert backend == tex.NVTE_Fused_Attn_Backend.NVTE_No_Backend
+    assert message != ""
+
+
+@pytest.mark.parametrize(
+    "cu_seqlens,cu_seqlens_padded,expected",
+    [
+        ([0, 3, 8], [0, 4, 12], [False] * 3 + [True] + [False] * 5 + [True] * 3),
+        ([0, 3, 8], [0, 4, 12], [False] * 3 + [True] + [False] * 5 + [True] * 7),
+        ([0, 3, 8], [0, 3, 8], [False] * 8 + [True] * 4),
+        ([0, 0, 3, 3, 5], [0, 0, 4, 4, 8], [False] * 3 + [True] + [False] * 2 + [True] * 4),
+    ],
+)
+def test_thd_padding_mask_capacity(cu_seqlens, cu_seqlens_padded, expected):
+    """Cover sequence gaps, reserved buffer tails, and zero-length sequences."""
+    actual = get_thd_padding_mask(
+        len(expected),
+        torch.tensor(cu_seqlens, dtype=torch.int32, device="cuda"),
+        torch.tensor(cu_seqlens_padded, dtype=torch.int32, device="cuda"),
+    )
+    torch.testing.assert_close(actual, torch.tensor(expected, dtype=torch.bool, device="cuda"))
+
+
+@pytest.mark.parametrize("fa_version", [3, 4])
+def test_dpa_flash_thd_padding_capacity_cuda_graph(fa_version, monkeypatch):
+    """Check padded outputs and gradients, including buffer tails, without CP.
+
+    This regression exercises eager execution and raw CUDA Graph capture. CP graph
+    capture uses TE's make_graphed_callables and is outside this test's scope.
+    """
+    for key, value in {
+        "NVTE_FLASH_ATTN": "1",
+        "NVTE_FUSED_ATTN": "0",
+        "NVTE_UNFUSED_ATTN": "0",
+        "NVTE_FLASH_ATTN_V2": "0",
+        "NVTE_FLASH_ATTN_V3": str(int(fa_version == 3)),
+        "NVTE_FLASH_ATTN_V4": str(int(fa_version == 4)),
+    }.items():
+        monkeypatch.setenv(key, value)
+    use_flash_attention, flash_attention_backend, *_ = get_attention_backend(
+        AttentionParams(
+            qkv_dtype=torch.bfloat16,
+            qkv_layout="thd_thd_thd",
+            batch_size=2,
+            num_heads=4,
+            num_gqa_groups=4,
+            max_seqlen_q=128,
+            max_seqlen_kv=128,
+            num_tokens_q=128,
+            num_tokens_kv=192,
+            head_dim_qk=64,
+            head_dim_v=64,
+            attn_mask_type="padding",
+            window_size=(-1, -1),
+            core_attention_bias_requires_grad=False,
+            pad_between_seqs=True,
+            attention_dropout=0.0,
+            context_parallel=False,
+            deterministic=_deterministic,
+            is_training=True,
+            cuda_graph=True,
+            softmax_scale=0.125,
+        )
+    )
+    if not use_flash_attention:
+        pytest.skip(f"FlashAttention {fa_version} does not support this CUDA Graph configuration.")
+    assert flash_attention_backend.major == fa_version
+    # Restore the complete backend cache along with the environment at test teardown.
+    for key, value in _attention_backends.items():
+        monkeypatch.setitem(_attention_backends, key, value)
+    _attention_backends["backend_selection_requires_update"] = True
+    reset_rng_states()
+    cu_q, cu_kv, padded_q, padded_kv = [
+        torch.tensor(offsets, dtype=torch.int32, device="cuda")
+        for offsets in ([0, 61, 96], [0, 45, 118], [0, 64, 112], [0, 64, 160])
+    ]
+    # Expected valid token positions are independent of get_thd_padding_mask.
+    q_rows = torch.tensor(list(range(61)) + list(range(64, 99)), device="cuda")
+    kv_rows = torch.tensor(list(range(45)) + list(range(64, 137)), device="cuda")
+    qkv = [
+        torch.randn(tokens, 4, 64, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+        for tokens in (128, 192, 192)
+    ]
+    grad_output = torch.randn(128, 256, dtype=torch.bfloat16, device="cuda")
+    block = DotProductAttention(
+        4,
+        64,
+        qkv_format="thd",
+        attn_mask_type="padding",
+        attention_type="cross",
+        attention_dropout=0.0,
+    ).cuda()
+
+    def run(inputs, grad, padded):
+        """Run the selected FlashAttention backend and differentiate Q/K/V."""
+        output = block(
+            *inputs,
+            cu_seqlens_q=cu_q,
+            cu_seqlens_kv=cu_kv,
+            cu_seqlens_q_padded=padded_q if padded else None,
+            cu_seqlens_kv_padded=padded_kv if padded else None,
+            max_seqlen_q=128,
+            max_seqlen_kv=128,
+            pad_between_seqs=padded,
+        )
+        assert _attention_backends["use_flash_attention"]
+        assert _attention_backends["flash_attention_backend"].major == fa_version
+        assert not _attention_backends["use_fused_attention"]
+        assert not _attention_backends["use_unfused_attention"]
+        return (output, *torch.autograd.grad(output, inputs, grad))
+
+    def check(actual):
+        """Compare valid token positions with compact attention and require exact-zero padding."""
+        compact_qkv = [
+            tensor.detach()[rows].requires_grad_()
+            for tensor, rows in zip(qkv, (q_rows, kv_rows, kv_rows))
+        ]
+        expected = run(compact_qkv, grad_output[q_rows], False)
+        for tensor, reference, rows in zip(actual, expected, (q_rows, q_rows, kv_rows, kv_rows)):
+            assert tensor.shape[0] == (128 if rows is q_rows else 192)
+            torch.testing.assert_close(tensor[rows], reference, atol=1.5e-2, rtol=1.5e-2)
+            padding = torch.ones(tensor.shape[0], dtype=torch.bool, device="cuda")
+            padding[rows] = False
+            assert torch.count_nonzero(tensor[padding]).item() == 0
+
+    check(run(qkv, grad_output, True))
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        for _ in range(3):
+            run(qkv, grad_output, True)
+    torch.cuda.current_stream().wait_stream(stream)
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        captured = run(qkv, grad_output, True)
+    for _ in range(2):
+        # Replays must consume fresh inputs and upstream gradients at the same addresses.
+        with torch.no_grad():
+            for tensor in (*qkv, grad_output):
+                tensor.normal_()
+        graph.replay()
+        check(captured)
+
+
 # Define F16 data types to test
 param_types = [torch.float16]
 if is_bf16_available():
@@ -152,7 +379,6 @@ model_configs_base = {
 }
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("model_configs", [model_configs_base])
 @pytest.mark.parametrize("model", model_configs_base.keys())
@@ -170,6 +396,7 @@ def test_dot_product_attention(
     pad_between_seqs,
     declarative_packed=False,
     is_training=True,
+    fwd_only_without_fused_attn=True,
 ):
     """Test DotProductAttention module"""
 
@@ -212,6 +439,13 @@ def test_dot_product_attention(
             "Setting is_training to False as cuDNN does not support dbias for"
             f" {config.bias_shape=} "
         )
+    # Generate token counts for THD so the support query and execution will use the same values
+    num_tokens_q, num_tokens_kv = None, None
+    if qkv_format == "thd":
+        reset_rng_states()
+        seqlens = _generate_seqlens(config, qkv_format, pad_between_seqs)
+        num_tokens_q = int(seqlens.cu_q_after_pad[-1])
+        num_tokens_kv = int(seqlens.cu_kv_after_pad[-1])
     available_backends, _, fused_attn_backends = get_available_attention_backends(
         config,
         qkv_dtype=dtype,
@@ -219,10 +453,16 @@ def test_dot_product_attention(
         pad_between_seqs=pad_between_seqs,
         is_training=is_training,
         deterministic=_deterministic,
+        num_tokens_q=num_tokens_q,
+        num_tokens_kv=num_tokens_kv,
     )
     flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
 
-    if not fused_attn_supported:
+    # Some backends are only available in inference mode, so when FusedAttention cannot train this
+    # config the query is repeated forward-only to recover enough backends to compare. Callers
+    # whose backward-capable pair does not include FusedAttention -- softcap, where
+    # get_attention_backend always disables FusedAttention -- opt out to keep dgrad coverage.
+    if not fused_attn_supported and fwd_only_without_fused_attn:
         is_training = False
         available_backends, _, fused_attn_backends = get_available_attention_backends(
             config,
@@ -231,6 +471,8 @@ def test_dot_product_attention(
             pad_between_seqs=pad_between_seqs,
             is_training=is_training,
             deterministic=_deterministic,
+            num_tokens_q=num_tokens_q,
+            num_tokens_kv=num_tokens_kv,
         )
         flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
 
@@ -297,7 +539,96 @@ def test_dot_product_attention(
             torch.testing.assert_close(fused_attn_bwd[i], flash_attn_bwd[i], **tols)
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
+_CACHE_EVENT = re.compile(
+    r"\[FUSED-ATTN-CACHE\]\s+(?:rank=\d+\s+\|\s+)?tid=\d+\s+dev=-?\d+\s+\|\s+"
+    r"(?P<backend>f16|fp8)\s+(?P<pass>fwd|bwd)\s+"
+    r"(?P<event>CREATE_GRAPH|CACHE_GRAPH|BUILD_PLANS|EXECUTE|MISS|HIT)\b(?P<rest>.*)"
+)
+_CACHE_PHASE = re.compile(r"\[CACHE-TEST\] phase=(?P<name>\w+)")
+
+
+def test_fused_attn_graph_cache():
+    """Test FusedAttention graph cache with level 2 diagnostics. It runs a subprocess
+    to avoid contamination from other tests as the counters are process-wide.
+    """
+    worker = _current_file.parent / "run_graph_cache.py"
+    result = subprocess.run(
+        [sys.executable, str(worker)],
+        env={
+            **os.environ,
+            "NVTE_FUSED_ATTN_CACHE_DEBUG": "2",
+            "PYTHONUNBUFFERED": "1",
+        },
+        capture_output=True,
+        text=True,
+        timeout=900,
+        check=False,
+    )
+    assert result.returncode == 0, f"Graph cache worker exited with {result.returncode}."
+    if "[CACHE-TEST] fused=1" not in result.stdout:
+        pytest.skip("No FusedAttention backend for the graph cache test config.")
+
+    # Group the cache diagnostics:
+    # events[phase][(pass, event)] = count of events
+    # miss_keys[phase][pass] = set of distinct cache keys that missed
+    events = collections.defaultdict(collections.Counter)
+    miss_keys = collections.defaultdict(lambda: collections.defaultdict(set))
+    phase = None
+    for line in result.stderr.splitlines():
+        phase_match = _CACHE_PHASE.search(line)
+        if phase_match is not None:
+            phase = phase_match.group("name")
+            continue
+        event_match = _CACHE_EVENT.search(line)
+        if event_match is None or phase is None:
+            continue
+        event_pass, event = event_match.group("pass"), event_match.group("event")
+        events[phase][(event_pass, event)] += 1
+        if event == "MISS":
+            miss_keys[phase][event_pass].add(event_match.group("rest").split("|")[-1].strip())
+
+    context = f"\n--- stderr ---\n{result.stderr[-8000:]}"
+
+    for pass_name in ("fwd", "bwd"):
+
+        def expect(phase, event, expected, reason, actual=None, pass_name=pass_name):
+            if actual is None:
+                actual = events[phase][(pass_name, event)]
+            ok = actual >= 1 if expected == "1+" else actual == expected
+            assert (
+                ok
+            ), f"{pass_name} {phase}: expected {event}={expected}, got {actual} ({reason}){context}"
+
+        expect("query", "MISS", 1, "expected one cold miss")
+        expect("query", "CREATE_GRAPH", 1, "expected one build")
+        expect("query", "CACHE_GRAPH", 1, "build was not cached")
+        expect("query", "BUILD_PLANS", 0, "query compiled kernels")
+
+        expect("requery", "MISS", 0, "repeated query missed")
+        expect("requery", "CREATE_GRAPH", 0, "repeated query rebuilt")
+        expect("requery", "HIT", "1+", "repeated query never looked")
+
+        expect("exec", "MISS", 0, "execution missed the query's graph")
+        expect("exec", "CREATE_GRAPH", 0, "execution rebuilt the graph")
+        expect("exec", "EXECUTE", "1+", "fused attention never ran")
+        expect("exec", "BUILD_PLANS", 1, "expected one plan build")
+
+        expect("rescale", "MISS", 0, "attn_scale changed the key")
+        expect("rescale", "CREATE_GRAPH", 0, "attn_scale forced a build")
+        expect("rescale", "BUILD_PLANS", 0, "attn_scale recompiled")
+        expect("rescale", "EXECUTE", "1+", "rescaled run did not execute")
+
+        expect("reshape", "MISS", 1, "expected one miss")
+        expect("reshape", "CREATE_GRAPH", 1, "expected one build")
+        expect(
+            "reshape",
+            "MISS keys",
+            1,
+            "more than one new cache key",
+            actual=len(miss_keys["reshape"][pass_name]),
+        )
+
+
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("model_configs", [model_configs_base])
 @pytest.mark.parametrize("model", ["base_1_1", "base_2_1"])
@@ -321,7 +652,6 @@ model_configs_max_logit = {
 }
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("model_configs", [model_configs_max_logit])
 @pytest.mark.parametrize("model", model_configs_max_logit.keys())
@@ -340,7 +670,6 @@ model_configs_num_splits = {
 }
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("model_configs", [model_configs_num_splits])
 @pytest.mark.parametrize("model", model_configs_num_splits.keys())
@@ -627,7 +956,6 @@ model_configs_softmax = {
 }
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("model_configs", [model_configs_softmax])
 @pytest.mark.parametrize("model", model_configs_softmax.keys())
@@ -642,7 +970,390 @@ def test_dpa_softmax(dtype, model_configs, model):
 @pytest.mark.parametrize("model", model_configs_softmax.keys())
 def test_dpa_softmax_thd(dtype, model_configs, model):
     """Test DotProductAttention module with different softmax types"""
+    config = model_configs[model]
+    if "padding" not in config.attn_mask_type:
+        promoted = dict(vars(config))
+        promoted["attn_mask_type"] = (
+            "padding" if config.attn_mask_type == "no_mask" else "padding_" + config.attn_mask_type
+        )
+        if any(name != model and vars(other) == promoted for name, other in model_configs.items()):
+            pytest.skip("Duplicate test to others with THD and padding mask.")
     test_dot_product_attention(dtype, model_configs, model, True, "thd_thd_thd", False, False)
+
+
+model_configs_softcap = {
+    # test: ModelConfig(b, sq, hq, dqk)
+    # High cap, no padding -> flash_attn_func.
+    "softcap_1_0": ModelConfig(4, 128, 16, 64, softcap=50.0),
+    # Low cap, padding -> flash_attn_varlen_func. The shared harness feeds 0.1 * randn, putting
+    # logits at O(1e-2) whatever the head dim, so tanh is numerically linear at a Gemma-sized
+    # cap. A cap of 0.01 is the one regime these inputs can distinguish. Softcapping in tanh's
+    # saturating region is covered by test_dpa_softcap_vs_reference, which uses its own inputs.
+    # head_dim 128 rather than 64: FA2 and FA3 compile a separate softcap kernel per head_dim,
+    # and the logit scale above is head_dim invariant since softmax_scale cancels the sqrt(d).
+    "softcap_3_1": ModelConfig(2, 512, 16, 128, attn_mask_type="padding_causal", softcap=0.01),
+}
+
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("model_configs", [model_configs_softcap])
+@pytest.mark.parametrize("model", model_configs_softcap.keys())
+def test_dpa_softcap(dtype, model_configs, model):
+    """Test DotProductAttention module with tanh logit softcapping"""
+    test_dot_product_attention(
+        dtype,
+        model_configs,
+        model,
+        False,
+        "bshd_bshd_bshd",
+        False,
+        False,
+        fwd_only_without_fused_attn=False,
+    )
+
+
+@pytest.mark.parametrize("dtype", param_types_lean)
+@pytest.mark.parametrize("model_configs", [model_configs_softcap])
+@pytest.mark.parametrize("model", ["softcap_1_0"])
+def test_dpa_softcap_zero_backend_selection(dtype, model_configs, model):
+    """Test that softcap=0.0 leaves backend selection untouched.
+
+    The softcap filter in get_attention_backend disables FusedAttention (and FA4) whenever the
+    cap is nonzero. If it also fired at 0.0, those backends would silently drop out of every
+    other test in this file rather than failing one, so assert both halves here.
+
+    Whether FusedAttention is available at all is arch- and mode-dependent (cuDNN support,
+    NVTE_ALLOW_NONDETERMINISTIC_ALGO=0), and is not what this test is about, so that half is a
+    skip rather than an assert.
+    """
+    config = copy.deepcopy(model_configs[model])
+    query = dict(
+        qkv_dtype=dtype,
+        qkv_layout="bshd_bshd_bshd",
+        is_training=True,
+        deterministic=_deterministic,
+    )
+
+    config.softcap = 0.0
+    (_, fused_off, unfused_off), _, _ = get_available_attention_backends(config, **query)
+    config.softcap = 50.0
+    (_, fused_on, unfused_on), _, _ = get_available_attention_backends(config, **query)
+
+    if not fused_off:
+        pytest.skip(
+            "FusedAttention is unavailable for this config irrespective of softcap (no cuDNN"
+            " support for this arch/shape, or deterministic mode), so the softcap filter has"
+            " nothing to disable and the comparison below would be vacuous."
+        )
+    assert not fused_on, "a nonzero softcap must disable FusedAttention"
+    assert unfused_off and unfused_on, "UnfusedDotProductAttention must support softcap"
+
+
+def _softcap_reference_attention(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    softmax_scale: float,
+    softcap: float,
+    causal: bool,
+    bias: torch.Tensor = None,
+    cap_includes_bias: bool = False,
+) -> torch.Tensor:
+    """Closed-form softcapped attention in bshd layout, computed in fp32.
+
+    scores = softcap * tanh(Q @ K^T * softmax_scale / softcap), with the tanh skipped entirely
+    when softcap == 0.0, so this doubles as the reference for the no-op claim. GQA is supported.
+    An additive `bias` lands outside the tanh unless `cap_includes_bias`, which builds the
+    reference an implementation that capped the bias along with the logits would produce.
+    """
+    q, k, v = (x.transpose(1, 2).float() for x in (q, k, v))
+    if q.shape[1] != k.shape[1]:
+        repeats = q.shape[1] // k.shape[1]
+        k = k.repeat_interleave(repeats, dim=1)
+        v = v.repeat_interleave(repeats, dim=1)
+    scores = torch.matmul(q, k.transpose(-2, -1)) * softmax_scale
+    if bias is not None and cap_includes_bias:
+        scores = scores + bias.float()
+    if softcap != 0.0:
+        scores = softcap * torch.tanh(scores / softcap)
+    if bias is not None and not cap_includes_bias:
+        scores = scores + bias.float()
+    if causal:
+        max_seqlen_q, max_seqlen_kv = scores.shape[-2], scores.shape[-1]
+        mask = torch.triu(
+            torch.ones(max_seqlen_q, max_seqlen_kv, dtype=torch.bool, device=scores.device),
+            diagonal=1 + max_seqlen_kv - max_seqlen_q,
+        )
+        scores = scores.masked_fill(mask, float("-inf"))
+    return torch.matmul(torch.softmax(scores, dim=-1), v).transpose(1, 2)
+
+
+model_configs_softcap_reference = {
+    # test: ModelConfig(b, sq, hq, dqk)
+    "softcap_ref_1_0": ModelConfig(2, 128, 8, 64),
+    "softcap_ref_2_0": ModelConfig(2, 128, 8, 64, num_gqa_groups=2, attn_mask_type="causal"),
+}
+
+# "plain" checks the cap itself. The other two pin down *where* the cap is applied inside
+# UnfusedDotProductAttention, so they run on that backend only, at a cap that saturates.
+_SOFTCAP_BACKEND_ENV = ("NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN")
+
+softcap_variants = ["plain", "bias_outside_cap", "qk_layer_scaling"]
+
+# Large enough that a cap of softcap * layer_number is far from a cap of softcap for O(1)
+# logits; at layer_number=3 the two references differ by less than the tolerance below.
+_SOFTCAP_QK_LAYER_NUMBER = 8
+
+
+def _softcap_variant_spec(variant, config, dtype, softcap, softmax_scale, q, k, v):
+    """Return (dpa_kwargs, forward_kwargs, right_fn, wrong_fn) for one softcap variant.
+
+    `wrong_fn` is the reference that an implementation carrying the bug this variant guards
+    against would produce, or None when there is no distinguishable wrong answer.
+    """
+    causal = "causal" in config.attn_mask_type
+
+    def _ref(cap, **kwargs):
+        return _softcap_reference_attention(q, k, v, softmax_scale, cap, causal, **kwargs)
+
+    if variant == "plain":
+        # A backend that ignored the cap entirely would land on the uncapped reference.
+        wrong_fn = None if softcap == 0.0 else (lambda: _ref(0.0))
+        return dict(layer_number=1), {}, (lambda: _ref(softcap)), wrong_fn
+
+    if variant == "bias_outside_cap":
+        # O(1) against the cap, so capping the bias too is visible in the output while the
+        # softmax stays well conditioned; a larger bias only sharpens fp16 rounding.
+        bias = torch.randn(
+            1,
+            config.num_heads,
+            config.max_seqlen_q,
+            config.max_seqlen_kv,
+            dtype=dtype,
+            device="cuda",
+        )
+        forward_kwargs = dict(core_attention_bias_type="post_scale_bias", core_attention_bias=bias)
+        return (
+            dict(layer_number=1),
+            forward_kwargs,
+            (lambda: _ref(softcap, bias=bias)),
+            (lambda: _ref(softcap, bias=bias, cap_includes_bias=True)),
+        )
+
+    if variant == "qk_layer_scaling":
+        # Omitting the cap / layer_number division caps the reduced logits instead, which after
+        # the softmax's layer_number factor is exactly a softcap * layer_number cap.
+        layer_number = _SOFTCAP_QK_LAYER_NUMBER
+        return (
+            dict(layer_number=layer_number),
+            {},
+            (lambda: _ref(softcap)),
+            (lambda: _ref(softcap * layer_number)),
+        )
+
+    raise ValueError(f"Unknown softcap variant {variant}!")
+
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("model_configs", [model_configs_softcap_reference])
+@pytest.mark.parametrize("model", model_configs_softcap_reference.keys())
+@pytest.mark.parametrize("softcap", [0.0, 0.5])
+@pytest.mark.parametrize("backend", ["UnfusedDotProductAttention", "FlashAttention"])
+@pytest.mark.parametrize("variant", softcap_variants)
+def test_dpa_softcap_vs_reference(dtype, model_configs, model, softcap, backend, variant):
+    """Test softcap against a closed-form reference, one backend and one variant at a time.
+
+    This needs only one TE backend, so UnfusedDotProductAttention -- the reference
+    implementation for every other softcap test -- stays covered on machines without
+    flash-attn. softcap=0.0 checks against a reference that never applies tanh, which is the
+    numerical half of the no-op claim. Every variant with a distinguishable wrong answer
+    asserts the two references are further apart than the tolerance, so a backend that
+    implemented the wrong one could not pass.
+    """
+    config = copy.deepcopy(model_configs[model])
+    causal = "causal" in config.attn_mask_type
+    if variant != "plain":
+        # These pin down UnfusedDotProductAttention's own arithmetic and need one saturating
+        # cap on one mask type; "plain" carries the backend and mask coverage.
+        if backend != "UnfusedDotProductAttention" or softcap == 0.0 or causal:
+            pytest.skip(f"{variant} is covered once, on the non-causal config with a nonzero cap")
+        if variant == "qk_layer_scaling" and dtype != torch.float16:
+            pytest.skip("qk layer scaling is gated on fp16 keys")
+
+    config.softcap = softcap
+    available_backends, _, _ = get_available_attention_backends(
+        config,
+        qkv_dtype=dtype,
+        qkv_layout="bshd_bshd_bshd",
+        is_training=True,
+        deterministic=_deterministic,
+    )
+    supported = dict(
+        zip(["FlashAttention", "FusedAttention", "UnfusedDotProductAttention"], available_backends)
+    )
+    if not supported[backend]:
+        pytest.skip(f"{backend} is unavailable for this config.")
+
+    reset_rng_states()
+    os.environ["NVTE_FLASH_ATTN"] = "1" if backend == "FlashAttention" else "0"
+    os.environ["NVTE_FUSED_ATTN"] = "0"
+    os.environ["NVTE_UNFUSED_ATTN"] = "1" if backend == "UnfusedDotProductAttention" else "0"
+    if variant == "qk_layer_scaling":
+        os.environ["NVTE_APPLY_QK_LAYER_SCALING"] = "1"
+    _attention_backends["backend_selection_requires_update"] = True
+
+    softmax_scale = 1.0 / config.head_dim_qk**0.5
+    q_shape = (config.batch_size, config.max_seqlen_q, config.num_heads, config.head_dim_qk)
+    k_shape = (config.batch_size, config.max_seqlen_kv, config.num_gqa_groups, config.head_dim_qk)
+    v_shape = (config.batch_size, config.max_seqlen_kv, config.num_gqa_groups, config.head_dim_v)
+    out_shape = (config.batch_size, config.max_seqlen_q, config.num_heads, config.head_dim_v)
+    # randn puts the logits at O(1), so a cap of 0.5 lands in tanh's saturating region and moves
+    # the output by O(1). The shared harness uses 0.1 * randn, where the logits are O(1e-2) and
+    # no cap value is distinguishable from no cap at all.
+    q, k, v = (
+        torch.randn(shape, dtype=dtype, device="cuda").requires_grad_()
+        for shape in (q_shape, k_shape, v_shape)
+    )
+    q_ref, k_ref, v_ref = (x.detach().clone().requires_grad_() for x in (q, k, v))
+    # DotProductAttention merges the head and head-dim axes of its output.
+    d_out = torch.randn(out_shape, dtype=dtype, device="cuda")
+
+    dpa_kwargs, forward_kwargs, right_fn, wrong_fn = _softcap_variant_spec(
+        variant, config, dtype, softcap, softmax_scale, q_ref, k_ref, v_ref
+    )
+
+    try:
+        block = DotProductAttention(
+            config.num_heads,
+            (config.head_dim_qk, config.head_dim_v),
+            num_gqa_groups=config.num_gqa_groups,
+            qkv_format="bshd",
+            attn_mask_type=config.attn_mask_type,
+            softmax_scale=softmax_scale,
+            softcap=softcap,
+            **dpa_kwargs,
+        ).to(dtype=dtype, device="cuda")
+        out = block(q, k, v, **forward_kwargs).view(out_shape)
+    finally:
+        os.environ["NVTE_APPLY_QK_LAYER_SCALING"] = "0"
+        _attention_backends["backend_selection_requires_update"] = True
+
+    out_ref = right_fn()
+
+    tols = dict(atol=2e-2, rtol=2e-2)
+    if dtype == torch.bfloat16:
+        tols = dict(atol=4e-2, rtol=4e-2)
+
+    if wrong_fn is not None:
+        # Without this the test could be vacuous: the right and wrong references have to be
+        # distinguishable at this cap for the comparison below to mean anything.
+        variant_effect = (out_ref.detach() - wrong_fn().detach()).abs().max().item()
+        assert variant_effect > 10 * tols["atol"], (
+            f"{variant} moves the reference output by only {variant_effect:.2e}; this config"
+            " would pass even if the backend implemented the wrong variant"
+        )
+
+    torch.testing.assert_close(out.float(), out_ref, **tols)
+
+    if variant == "plain":
+        out.backward(d_out)
+        out_ref.backward(d_out.float())
+        torch.testing.assert_close(q.grad.float(), q_ref.grad.float(), **tols)
+        torch.testing.assert_close(k.grad.float(), k_ref.grad.float(), **tols)
+        torch.testing.assert_close(v.grad.float(), v_ref.grad.float(), **tols)
+
+
+@pytest.mark.parametrize("softcap", (-1.0, float("inf"), float("nan")))
+def test_dpa_softcap_rejects_invalid(softcap):
+    """A cap that is negative or non-finite must raise rather than diverge by backend.
+
+    The backends disagree about these values: unfused applies a negative cap as its
+    absolute value and returns NaN for a non-finite one, while flash caps only when
+    softcap > 0 and so drops both silently.
+    """
+    block = DotProductAttention(4, 64, qkv_format="bshd", softcap=softcap).to(device="cuda")
+    q, k, v = (torch.randn(2, 32, 4, 64, dtype=torch.float16, device="cuda") for _ in range(3))
+
+    with pytest.raises(ValueError, match="softcap"):
+        block(q, k, v)
+
+    # A forward override is validated on the same path as the constructor value.
+    ok = DotProductAttention(4, 64, qkv_format="bshd").to(device="cuda")
+    with pytest.raises(ValueError, match="softcap"):
+        ok(q, k, v, softcap=softcap)
+
+
+@pytest.mark.parametrize("dtype", param_types)
+def test_transformer_layer_softcap_plumbing(dtype):
+    """Test that TransformerLayer forwards softcap to both of its attention modules.
+
+    Numerics are covered above; this only checks the value arrives. Cross-attention is
+    reached through a separate call site, so a refactor can drop the cap there while
+    self-attention keeps working and nothing else in the suite would notice.
+    """
+    hidden_size, num_heads, seqlen, batch_size = 256, 4, 32, 2
+    seen = {}
+
+    def _record(name):
+        def hook(_module, _args, kwargs):
+            seen[name] = kwargs.get("softcap")
+
+        return hook
+
+    # Set explicitly rather than inheriting: the tests above leave these set, and a stale
+    # NVTE_UNFUSED_ATTN=0 would leave no eligible backend once softcap drops the fused ones.
+    # Restored in the finally below so this test does not do to others what they did to it.
+    backend_env = {k: os.environ.get(k) for k in _SOFTCAP_BACKEND_ENV}
+    reset_rng_states()
+    os.environ["NVTE_FLASH_ATTN"] = "1"
+    os.environ["NVTE_FUSED_ATTN"] = "0"
+    os.environ["NVTE_UNFUSED_ATTN"] = "1"
+    _attention_backends["backend_selection_requires_update"] = True
+
+    try:
+        block = TransformerLayer(
+            hidden_size,
+            4 * hidden_size,
+            num_heads,
+            layer_type="decoder",
+            softcap=50.0,
+            params_dtype=dtype,
+            device="cuda",
+        )
+        block.self_attention.core_attention.register_forward_pre_hook(
+            _record("self"), with_kwargs=True
+        )
+        block.inter_attention.core_attention.register_forward_pre_hook(
+            _record("cross"), with_kwargs=True
+        )
+
+        hidden_states = torch.randn(
+            seqlen, batch_size, hidden_size, dtype=dtype, device="cuda", requires_grad=True
+        )
+        forward_kwargs = dict(
+            encoder_output=hidden_states,
+            enc_dec_attn_mask=torch.zeros(
+                batch_size, 1, 1, seqlen, dtype=torch.bool, device="cuda"
+            ),
+        )
+
+        # The constructor value reaches both attention modules.
+        block(hidden_states, **forward_kwargs)
+        assert seen["self"] == 50.0, f"self-attention saw softcap={seen['self']}, expected 50.0"
+        assert seen["cross"] == 50.0, f"cross-attention saw softcap={seen['cross']}, expected 50.0"
+
+        # A forward override wins over the constructor, for both.
+        seen.clear()
+        block(hidden_states, softcap=10.0, **forward_kwargs)
+        assert seen["self"] == 10.0, f"self-attention saw softcap={seen['self']}, expected 10.0"
+        assert seen["cross"] == 10.0, f"cross-attention saw softcap={seen['cross']}, expected 10.0"
+    finally:
+        for key, value in backend_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        _attention_backends["backend_selection_requires_update"] = True
 
 
 model_configs_mla = {
@@ -665,7 +1376,6 @@ model_configs_mla = {
 }
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("model_configs", [model_configs_mla])
 @pytest.mark.parametrize("model", model_configs_mla.keys())
@@ -720,7 +1430,6 @@ model_configs_mask = {
 }
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_mask])
 @pytest.mark.parametrize("model", model_configs_mask.keys())
@@ -826,7 +1535,6 @@ model_configs_bias = {
 }
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_bias])
 @pytest.mark.parametrize("model", model_configs_bias.keys())
@@ -865,7 +1573,6 @@ model_configs_bias_shapes = {
 }
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_bias_shapes])
 @pytest.mark.parametrize("model", model_configs_bias_shapes.keys())
@@ -912,6 +1619,9 @@ model_configs_swa = {
 @pytest.mark.parametrize("qkv_layout", ["thd_thd_thd", "sbhd_sbhd_sbhd"])
 def test_dpa_sliding_window(dtype, model_configs, model, qkv_layout):
     """Test DotProductAttention module with sliding window attention"""
+    config = model_configs[model]
+    if qkv_layout == "thd_thd_thd" and "padding" not in config.attn_mask_type:
+        pytest.skip("Duplicate test to others with THD and padding mask.")
     test_dot_product_attention(dtype, model_configs, model, False, qkv_layout, True, False)
 
 
@@ -1006,7 +1716,6 @@ model_configs_layout = {
 }
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 5), reason="cuDNN 8.9.5+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_layout])
 @pytest.mark.parametrize("model", model_configs_layout.keys())
@@ -1019,7 +1728,6 @@ def test_dpa_qkv_layout(dtype, model_configs, model, qkv_layout):
 qkv_layouts_packed = [l for l in qkv_layouts if any(c.isdigit() for c in l)]
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 5), reason="cuDNN 8.9.5+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_layout])
 @pytest.mark.parametrize("model", ["layout_1_1", "layout_1_2"])
@@ -1092,7 +1800,6 @@ model_configs_layout_thd = {
 }
 
 
-@pytest.mark.skipif(get_cudnn_version() < (9, 0, 0), reason="cuDNN 9.0.0+ is required.")
 @pytest.mark.skipif(
     get_device_compute_capability() < (9, 0), reason="THD is only supported on Hopper+."
 )
@@ -1117,26 +1824,23 @@ def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout, declarative
         pad_between_seqs,
         declarative_packed=declarative_packed,
     )
-    if get_cudnn_version() >= (9, 3, 0):
-        logging.info("[test_dpa_qkv_layout_thd]: pad_between_seqs = False")
-        # cuDNN 9.3.0+ is required to run pad_between_seqs = False/True in the same run
-        pad_between_seqs = False
-        test_dot_product_attention(
-            dtype,
-            model_configs,
-            model,
-            False,
-            qkv_layout,
-            False,
-            pad_between_seqs,
-            declarative_packed=declarative_packed,
-        )
+    logging.info("[test_dpa_qkv_layout_thd]: pad_between_seqs = False")
+    pad_between_seqs = False
+    test_dot_product_attention(
+        dtype,
+        model_configs,
+        model,
+        False,
+        qkv_layout,
+        False,
+        pad_between_seqs,
+        declarative_packed=declarative_packed,
+    )
 
 
 qkv_layouts_thd_packed = [l for l in qkv_layouts_thd if any(c.isdigit() for c in l)]
 
 
-@pytest.mark.skipif(get_cudnn_version() < (9, 0, 0), reason="cuDNN 9.0.0+ is required.")
 @pytest.mark.skipif(
     get_device_compute_capability() < (9, 0), reason="THD is only supported on Hopper+."
 )
@@ -1181,6 +1885,7 @@ def make_dot_product_attention(
         attention_type=config.attn_type if attention_type is None else attention_type,
         softmax_type=config.softmax_type,
         return_max_logit=config.return_max_logit,
+        softcap=config.softcap,
     ).to(dtype=dtype, device="cuda")
     if not is_training:
         block = block.eval()
@@ -1189,38 +1894,26 @@ def make_dot_product_attention(
     return block
 
 
-def run_dot_product_attention(
-    dtype: torch.dtype,
+class _Seqlens(NamedTuple):
+    """Sequence lengths for one test case, before and after inter-sequence padding."""
+
+    q: torch.Tensor
+    kv: torch.Tensor
+    cu_q: torch.Tensor
+    cu_kv: torch.Tensor
+    q_after_pad: torch.Tensor
+    kv_after_pad: torch.Tensor
+    cu_q_after_pad: torch.Tensor
+    cu_kv_after_pad: torch.Tensor
+    pad_len: Union[List[int], torch.Tensor]
+
+
+def _generate_seqlens(
     config: ModelConfig,
-    backend: str,
-    ckpt_attn: bool,
-    qkv_layout: str,
+    qkv_format: str,
     pad_between_seqs: bool,
-    is_training: bool,
-    declarative_packed: bool = False,
-    forward_kwargs: Dict[str, Any] = None,
-) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
-    """Run DotProductAttention module with one forward pass and one backward pass.
-
-    With declarative_packed=True (packed qkv_layout only), the packed buffer is
-    passed to DotProductAttention directly via qkv_layer/kv_layer instead of
-    slicing it into q/k/v views, and input gradients are read off the packed
-    buffer itself."""
-    # Set RNG and environment varables
-    reset_rng_states()
-    os.environ["NVTE_FLASH_ATTN"] = "0"
-    os.environ["NVTE_FUSED_ATTN"] = "0"
-    os.environ["NVTE_UNFUSED_ATTN"] = "0"
-    if backend == "FlashAttention":
-        os.environ["NVTE_FLASH_ATTN"] = "1"
-    if backend == "FusedAttention":
-        os.environ["NVTE_FUSED_ATTN"] = "1"
-    if backend == "UnfusedDotProductAttention":
-        os.environ["NVTE_UNFUSED_ATTN"] = "1"
-    _attention_backends["backend_selection_requires_update"] = True
-
-    # Create seqlens
-    qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
+) -> _Seqlens:
+    """Draw the sequence lengths for one test case."""
     if "padding" in config.attn_mask_type or qkv_format == "thd":
         if config.attn_type == "self":
             seqlens_q = torch.randint(
@@ -1259,6 +1952,63 @@ def run_dot_product_attention(
         seqlens_kv_after_pad = seqlens_kv + pad_len
         cu_seqlens_q_after_pad[1:] = torch.cumsum(seqlens_q_after_pad, dim=0)
         cu_seqlens_kv_after_pad[1:] = torch.cumsum(seqlens_kv_after_pad, dim=0)
+
+    return _Seqlens(
+        seqlens_q,
+        seqlens_kv,
+        cu_seqlens_q,
+        cu_seqlens_kv,
+        seqlens_q_after_pad,
+        seqlens_kv_after_pad,
+        cu_seqlens_q_after_pad,
+        cu_seqlens_kv_after_pad,
+        pad_len,
+    )
+
+
+def run_dot_product_attention(
+    dtype: torch.dtype,
+    config: ModelConfig,
+    backend: str,
+    ckpt_attn: bool,
+    qkv_layout: str,
+    pad_between_seqs: bool,
+    is_training: bool,
+    declarative_packed: bool = False,
+    forward_kwargs: Dict[str, Any] = None,
+) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    """Run DotProductAttention module with one forward pass and one backward pass.
+
+    With declarative_packed=True (packed qkv_layout only), the packed buffer is
+    passed to DotProductAttention directly via qkv_layer/kv_layer instead of
+    slicing it into q/k/v views, and input gradients are read off the packed
+    buffer itself."""
+    # Set RNG and environment varables
+    reset_rng_states()
+    os.environ["NVTE_FLASH_ATTN"] = "0"
+    os.environ["NVTE_FUSED_ATTN"] = "0"
+    os.environ["NVTE_UNFUSED_ATTN"] = "0"
+    if backend == "FlashAttention":
+        os.environ["NVTE_FLASH_ATTN"] = "1"
+    if backend == "FusedAttention":
+        os.environ["NVTE_FUSED_ATTN"] = "1"
+    if backend == "UnfusedDotProductAttention":
+        os.environ["NVTE_UNFUSED_ATTN"] = "1"
+    _attention_backends["backend_selection_requires_update"] = True
+
+    # Create seqlens
+    qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
+    (
+        seqlens_q,
+        seqlens_kv,
+        cu_seqlens_q,
+        cu_seqlens_kv,
+        seqlens_q_after_pad,
+        seqlens_kv_after_pad,
+        cu_seqlens_q_after_pad,
+        cu_seqlens_kv_after_pad,
+        pad_len,
+    ) = _generate_seqlens(config, qkv_format, pad_between_seqs)
 
     # Create attention mask if padding
     attention_mask = None
@@ -1560,6 +2310,22 @@ def run_dot_product_attention(
 
     if backend in ["UnfusedDotProductAttention"]:
         return out, max_logit, (q_grad, k_grad, v_grad, d_softmax_offset)
+    if backend == "FlashAttention" and qkv_format == "thd" and pad_between_seqs:
+        tensors_and_boundaries = [("out", out, cu_seqlens_q, cu_seqlens_q_after_pad)]
+        if is_training:
+            tensors_and_boundaries.extend(
+                [
+                    ("dq", q_grad, cu_seqlens_q, cu_seqlens_q_after_pad),
+                    ("dk", k_grad, cu_seqlens_kv, cu_seqlens_kv_after_pad),
+                    ("dv", v_grad, cu_seqlens_kv, cu_seqlens_kv_after_pad),
+                ]
+            )
+        for tensor_name, tensor, cu_seqlens, cu_seqlens_padded in tensors_and_boundaries:
+            padding_mask = get_thd_padding_mask(tensor.shape[0], cu_seqlens, cu_seqlens_padded)
+            assert (
+                torch.count_nonzero(tensor[padding_mask]).item() == 0
+            ), f"{backend} left nonzero values in {tensor_name} padding"
+
     if backend in ["FusedAttention", "FlashAttention"]:
         if qkv_format == "thd" and pad_between_seqs:
             out_orig = torch.Tensor([]).to(device="cuda", dtype=dtype)
@@ -1620,7 +2386,6 @@ model_configs_te_layer = {
 }
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("model_configs", [model_configs_te_layer])
 @pytest.mark.parametrize("model", model_configs_te_layer.keys())
@@ -1639,6 +2404,13 @@ def test_transformer_layer(
 
     # Test backend availability
     is_training = True
+    # Get the token counts for THD and use them for both support query and actual execution
+    num_tokens_q, num_tokens_kv = None, None
+    if qkv_format == "thd":
+        reset_rng_states()
+        seqlens = _generate_seqlens(config, qkv_format, pad_between_seqs=False)
+        num_tokens_q = int(seqlens.cu_q[-1])
+        num_tokens_kv = int(seqlens.cu_kv[-1])
     available_backends, _, fused_attn_backends = get_available_attention_backends(
         config,
         qkv_dtype=dtype,
@@ -1647,6 +2419,8 @@ def test_transformer_layer(
         ),
         is_training=is_training,
         deterministic=_deterministic,
+        num_tokens_q=num_tokens_q,
+        num_tokens_kv=num_tokens_kv,
     )
     flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
     if not fused_attn_supported:
@@ -1661,6 +2435,8 @@ def test_transformer_layer(
             ),
             is_training=is_training,
             deterministic=_deterministic,
+            num_tokens_q=num_tokens_q,
+            num_tokens_kv=num_tokens_kv,
         )
         flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
 
@@ -1725,7 +2501,6 @@ def test_transformer_layer(
         torch.testing.assert_close(fused_attn_bwd, flash_attn_bwd, **tols)
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_te_layer])
 @pytest.mark.parametrize("model", ["te_1_2", "te_2_0"])
@@ -1740,7 +2515,6 @@ def test_te_layer_misc(dtype, model_configs, model, qkv_format):
     )
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_te_layer])
 @pytest.mark.parametrize("model", ["te_2_0", "te_2_1", "te_2_2"])
@@ -1971,7 +2745,6 @@ model_configs_fp8_extra_state = {
 
 
 @pytest.mark.skipif(not fp8_attn_available, reason=reason_for_no_fp8_attn)
-@pytest.mark.skipif(get_cudnn_version() < (9, 3, 0), reason="cuDNN 9.3.0+ is required.")
 @pytest.mark.parametrize("model", ["large"])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_dpa_fp8_extra_state(model, dtype):
@@ -1979,12 +2752,24 @@ def test_dpa_fp8_extra_state(model, dtype):
     config = model_configs_fp8_extra_state[model]
     # Test backend availability
     is_training = True
+    fp8_recipe = recipe.DelayedScaling(
+        margin=0,
+        fp8_format=recipe.Format.HYBRID,
+        amax_history_len=1,
+        amax_compute_algo="most_recent",
+        fp8_dpa=True,
+    )
+    fp8_meta = {}
+    fp8_meta["recipe"] = fp8_recipe
     available_backends, _, fused_attn_backends = get_available_attention_backends(
         config,
         qkv_dtype=torch.float8_e4m3fn,
+        nominal_dtype=dtype,
         qkv_layout="sb3hd",
         is_training=is_training,
         deterministic=_deterministic,
+        fp8=True,
+        fp8_meta=fp8_meta,
     )
     flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
     if not fused_attn_supported and not flash_attn_supported:
@@ -2171,7 +2956,70 @@ def _get_fp8_vs_f16_config(model, qkv_layout):
     return config
 
 
-@pytest.mark.skipif(get_cudnn_version() < (9, 2, 1), reason="cuDNN 9.2.1+ is required.")
+def _dpa_fp8_vs_f16_seqlens(config, qkv_format):
+    """Draw the sequence lengths for one test_dpa_fp8_vs_f16 case."""
+    if "padding" in config.attn_mask_type or qkv_format == "thd":
+        if config.attn_type == "self":
+            seqlens_q = torch.randint(
+                1, config.max_seqlen_q, [config.batch_size], dtype=torch.int32, device="cuda"
+            )
+            seqlens_kv = seqlens_q
+        if config.attn_type == "cross":
+            seqlens_q = torch.randint(
+                1, config.max_seqlen_q, [config.batch_size], dtype=torch.int32, device="cuda"
+            )
+            seqlens_kv = torch.randint(
+                1, config.max_seqlen_kv, [config.batch_size], dtype=torch.int32, device="cuda"
+            )
+    else:
+        seqlens_q = torch.full(
+            [config.batch_size], config.max_seqlen_q, dtype=torch.int32, device="cuda"
+        )
+        seqlens_kv = torch.full(
+            [config.batch_size], config.max_seqlen_kv, dtype=torch.int32, device="cuda"
+        )
+    return seqlens_q, seqlens_kv
+
+
+def _mha_fp8_vs_f16_seqlens(config, qkv_format):
+    """Draw the sequence lengths for one test_mha_fp8_vs_f16 case.
+
+    These come from a dedicated generator rather than the default one, because the module the run
+    builds beforehand consumes randomness the backend probe cannot replay."""
+    gen = torch.Generator(device="cuda")
+    gen.manual_seed(seed)
+
+    def draw(high, count):
+        return torch.randint(1, high, [count], dtype=torch.int32, device="cuda", generator=gen)
+
+    if "padding" in config.attn_mask_type or qkv_format == "thd":
+
+        def random_seqlens(max_seqlen):
+            if qkv_format != "thd":
+                return draw(max_seqlen, config.batch_size)
+            # Reserve seven positions so total-token alignment only increases the final length.
+            return torch.cat((draw(max_seqlen, config.batch_size - 1), draw(max_seqlen - 6, 1)))
+
+        if config.attn_type == "self":
+            seqlens_q = random_seqlens(config.max_seqlen_q)
+            seqlens_kv = seqlens_q
+        if config.attn_type == "cross":
+            seqlens_q = random_seqlens(config.max_seqlen_q)
+            seqlens_kv = random_seqlens(config.max_seqlen_kv)
+    else:
+        seqlens_q = torch.full(
+            [config.batch_size], config.max_seqlen_q, dtype=torch.int32, device="cuda"
+        )
+        seqlens_kv = torch.full(
+            [config.batch_size], config.max_seqlen_kv, dtype=torch.int32, device="cuda"
+        )
+    if qkv_format == "thd":
+        # FP8 Linear flattens THD input to [t, h*d], so align total tokens for cuBLAS.
+        seqlens_q[-1] += -seqlens_q.sum() % 8
+        seqlens_kv[-1] += -seqlens_kv.sum() % 8
+    return seqlens_q, seqlens_kv
+
+
 @pytest.mark.skipif(not fp8_attn_available, reason=reason_for_no_fp8_attn)
 @pytest.mark.parametrize("dtype", param_types_fp8_vs_f16)
 @pytest.mark.parametrize("model", model_configs_fp8_vs_f16.keys())
@@ -2192,6 +3040,9 @@ def test_mha_fp8_vs_f16(
     scaling_mode,
 ):
     """Test MultiHeadAttention module in FP8"""
+    if not is_training and fp8_dpa_bwd:
+        pytest.skip("fp8_dpa_bwd=True not applicable for inference")
+
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
     config = _get_fp8_vs_f16_config(model, qkv_format)
 
@@ -2219,14 +3070,23 @@ def test_mha_fp8_vs_f16(
         )
     fp8_meta = {}
     fp8_meta["recipe"] = fp8_recipe
+    # Get the token counts for THD and use them for both support query and actual execution
+    num_tokens_q, num_tokens_kv = None, None
+    if qkv_format == "thd":
+        seqlens_q, seqlens_kv = _mha_fp8_vs_f16_seqlens(config, qkv_format)
+        num_tokens_q = int(seqlens_q.sum())
+        num_tokens_kv = int(seqlens_kv.sum())
     available_backends, _, _ = get_available_attention_backends(
         config,
         qkv_dtype=torch.float8_e4m3fn,
+        nominal_dtype=dtype,
         qkv_layout=qkv_format.replace("hd", "h3d"),
         fp8=True,
         fp8_meta=fp8_meta,
         is_training=is_training,
         deterministic=_deterministic,
+        num_tokens_q=num_tokens_q,
+        num_tokens_kv=num_tokens_kv,
     )
     flash_attn_supported, fused_attn_supported_fp8, unfused_attn_supported = available_backends
     available_backends, _, fused_attn_backends = get_available_attention_backends(
@@ -2235,6 +3095,8 @@ def test_mha_fp8_vs_f16(
         qkv_layout=qkv_format.replace("hd", "h3d"),
         is_training=is_training,
         deterministic=_deterministic,
+        num_tokens_q=num_tokens_q,
+        num_tokens_kv=num_tokens_kv,
     )
     _, fused_attn_supported_f16, _ = available_backends
     if flash_attn_supported + fused_attn_supported_fp8 < 1:
@@ -2349,47 +3211,13 @@ def _run_mha_fp8_vs_f16(
             attention_type="self",
             qkv_weight_interleaved=True,
             qkv_format=qkv_format,
+            window_size=config.window_size,
+            softmax_type=config.softmax_type,
         ).to(dtype=dtype, device="cuda")
         if not is_training:
             mha = mha.eval()
 
-    def random_seqlens(max_seqlen):
-        if qkv_format != "thd":
-            return torch.randint(
-                1, max_seqlen, [config.batch_size], dtype=torch.int32, device="cuda"
-            )
-        # Reserve seven positions so total-token alignment only increases the final length.
-        return torch.cat(
-            (
-                torch.randint(
-                    1,
-                    max_seqlen,
-                    [config.batch_size - 1],
-                    dtype=torch.int32,
-                    device="cuda",
-                ),
-                torch.randint(1, max_seqlen - 6, [1], dtype=torch.int32, device="cuda"),
-            )
-        )
-
-    if "padding" in config.attn_mask_type or qkv_format == "thd":
-        if config.attn_type == "self":
-            seqlens_q = random_seqlens(config.max_seqlen_q)
-            seqlens_kv = seqlens_q
-        if config.attn_type == "cross":
-            seqlens_q = random_seqlens(config.max_seqlen_q)
-            seqlens_kv = random_seqlens(config.max_seqlen_kv)
-    else:
-        seqlens_q = torch.full(
-            [config.batch_size], config.max_seqlen_q, dtype=torch.int32, device="cuda"
-        )
-        seqlens_kv = torch.full(
-            [config.batch_size], config.max_seqlen_kv, dtype=torch.int32, device="cuda"
-        )
-    if qkv_format == "thd":
-        # FP8 Linear flattens THD input to [t, h*d], so align total tokens for cuBLAS.
-        seqlens_q[-1] += -seqlens_q.sum() % 8
-        seqlens_kv[-1] += -seqlens_kv.sum() % 8
+    seqlens_q, seqlens_kv = _mha_fp8_vs_f16_seqlens(config, qkv_format)
     cu_seqlens_q = torch.zeros(config.batch_size + 1, dtype=torch.int32, device="cuda")
     cu_seqlens_kv = torch.zeros(config.batch_size + 1, dtype=torch.int32, device="cuda")
     cu_seqlens_q[1:] = torch.cumsum(seqlens_q, dim=0)
@@ -2446,7 +3274,6 @@ def _run_mha_fp8_vs_f16(
     return out, param_names, tuple(None for x in params)
 
 
-@pytest.mark.skipif(get_cudnn_version() < (9, 2, 1), reason="cuDNN 9.2.1+ is required.")
 @pytest.mark.skipif(not fp8_attn_available, reason=reason_for_no_fp8_attn)
 @pytest.mark.parametrize("dtype", param_types_fp8_vs_f16)
 @pytest.mark.parametrize("model", model_configs_fp8_vs_f16.keys())
@@ -2457,6 +3284,10 @@ def _run_mha_fp8_vs_f16(
 def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scaling_mode):
     """Test DotProductAttention module in FP8"""
     config = _get_fp8_vs_f16_config(model, qkv_layout)
+    if config.num_heads != config.num_gqa_groups and "3" in qkv_layout:
+        pytest.skip("qkv_layout not applicable for MQA/GQA")
+    if not is_training and fp8_dpa_bwd:
+        pytest.skip("fp8_dpa_bwd=True not applicable for inference")
 
     # TODO(cyang): think of another way to verify dropout results
     # test cuDNN FP8 dropout
@@ -2493,14 +3324,25 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
         )
     fp8_meta = {}
     fp8_meta["recipe"] = fp8_recipe
+    # Get the token counts for THD and use them for both support query and actual execution
+    qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
+    num_tokens_q, num_tokens_kv = None, None
+    if qkv_format == "thd":
+        reset_rng_states()
+        seqlens_q, seqlens_kv = _dpa_fp8_vs_f16_seqlens(config, qkv_format)
+        num_tokens_q = int(seqlens_q.sum())
+        num_tokens_kv = int(seqlens_kv.sum())
     available_backends, _, _ = get_available_attention_backends(
         config,
         qkv_dtype=torch.float8_e4m3fn,
+        nominal_dtype=dtype,
         qkv_layout=qkv_layout,
         fp8=True,
         fp8_meta=fp8_meta,
         is_training=is_training,
         deterministic=_deterministic,
+        num_tokens_q=num_tokens_q,
+        num_tokens_kv=num_tokens_kv,
     )
     flash_attn_supported, fused_attn_supported_fp8, unfused_attn_supported = available_backends
     available_backends, _, _ = get_available_attention_backends(
@@ -2509,14 +3351,14 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
         qkv_layout=qkv_layout,
         is_training=is_training,
         deterministic=_deterministic,
+        num_tokens_q=num_tokens_q,
+        num_tokens_kv=num_tokens_kv,
     )
     _, fused_attn_supported_f16, _ = available_backends
     if flash_attn_supported + fused_attn_supported_fp8 < 1:
         pytest.skip("No FP8 attention backend available.")
     if not fused_attn_supported_f16:
         pytest.skip("No reference backend available.")
-    if config.num_heads != config.num_gqa_groups and "3" in qkv_layout:
-        pytest.skip("qkv_layout not applicable for MQA/GQA")
 
     if flash_attn_supported:
         os.environ["NVTE_FLASH_ATTN"] = "1"
@@ -2666,26 +3508,7 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout, is_training, fp8_rec
         if not is_training:
             dpa = dpa.eval()
 
-    if "padding" in config.attn_mask_type or qkv_format == "thd":
-        if config.attn_type == "self":
-            seqlens_q = torch.randint(
-                1, config.max_seqlen_q, [config.batch_size], dtype=torch.int32, device="cuda"
-            )
-            seqlens_kv = seqlens_q
-        if config.attn_type == "cross":
-            seqlens_q = torch.randint(
-                1, config.max_seqlen_q, [config.batch_size], dtype=torch.int32, device="cuda"
-            )
-            seqlens_kv = torch.randint(
-                1, config.max_seqlen_kv, [config.batch_size], dtype=torch.int32, device="cuda"
-            )
-    else:
-        seqlens_q = torch.full(
-            [config.batch_size], config.max_seqlen_q, dtype=torch.int32, device="cuda"
-        )
-        seqlens_kv = torch.full(
-            [config.batch_size], config.max_seqlen_kv, dtype=torch.int32, device="cuda"
-        )
+    seqlens_q, seqlens_kv = _dpa_fp8_vs_f16_seqlens(config, qkv_format)
     cu_seqlens_q = torch.zeros(config.batch_size + 1, dtype=torch.int32, device="cuda")
     cu_seqlens_kv = torch.zeros(config.batch_size + 1, dtype=torch.int32, device="cuda")
     cu_seqlens_q[1:] = torch.cumsum(seqlens_q, dim=0)
@@ -2788,10 +3611,6 @@ model_configs_fp8 = {
 param_types_fp8 = [torch.float16, torch.bfloat16]
 
 
-@pytest.mark.skipif(
-    get_cudnn_version() < (9, 2, 1),
-    reason="cuDNN 9.2.1+ is required for FP8 fused attention.",
-)
 @pytest.mark.skipif(not fp8_attn_available, reason=reason_for_no_fp8_attn)
 @pytest.mark.parametrize("dtype", param_types_fp8)
 @pytest.mark.parametrize("model", model_configs_fp8)
@@ -2806,10 +3625,22 @@ def test_custom_mha_fp8_vs_f16(dtype, model):
 
     # Test backend availability
     is_training = True
+    fp8_meta = {}
+    fp8_recipe = recipe.DelayedScaling(
+        margin=0,
+        fp8_format=recipe.Format.HYBRID,
+        amax_history_len=1,
+        amax_compute_algo="most_recent",
+        fp8_dpa=True,
+    )
+    fp8_meta["recipe"] = fp8_recipe
     available_backends, _, fused_attn_backends = get_available_attention_backends(
         config,
         qkv_dtype=torch.float8_e4m3fn,
+        nominal_dtype=dtype,
         qkv_layout="bs3hd",
+        fp8=True,
+        fp8_meta=fp8_meta,
         is_training=is_training,
         deterministic=_deterministic,
     )
@@ -2887,6 +3718,7 @@ def _run_custom_mha_fp8(dtype, config, backend):
         fp8_format=recipe.Format.HYBRID,
         amax_history_len=1,
         amax_compute_algo="most_recent",
+        fp8_dpa=True,
     )
 
     mha = Custom_MHA_FP8(config).to(dtype=dtype, device="cuda")

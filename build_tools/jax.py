@@ -5,6 +5,7 @@
 """JAX related extensions."""
 
 import os
+import warnings
 from pathlib import Path
 from packaging import version
 
@@ -15,6 +16,7 @@ from .utils import (
     all_files_in_dir,
     cudnn_frontend_include_path,
     debug_build_enabled,
+    get_bolt_build_flags,
     setup_mpi_flags,
     nccl_include_path,
     nccl_lib_path,
@@ -25,7 +27,7 @@ from typing import List
 
 def install_requirements() -> List[str]:
     """Install dependencies for TE/JAX extensions."""
-    return ["jax", "flax>=0.7.1", "nvidia-cudnn-frontend>=1.25.0"]
+    return ["jax", "flax>=0.7.1", "nvidia-cudnn-frontend>=1.25.0", "triton"]
 
 
 def test_requirements() -> List[str]:
@@ -95,15 +97,23 @@ def setup_jax_extension(
     if (discovered_nccl_include_path := nccl_include_path()) is not None:
         include_dirs.append(discovered_nccl_include_path)
     include_dirs.append(cudnn_frontend_include_path())
+    xla_include_path = xla_path()
     include_dirs.extend(
         [
             common_header_files,
             common_header_files / "common",
             common_header_files / "common" / "include",
             csrc_header_files,
-            xla_path(),
+            xla_include_path,
         ]
     )
+
+    # Match the borrowed-comm path's compile-time header check.
+    if not (Path(xla_include_path) / "xla/ffi/api/collectives_c_api.h").is_file():
+        warnings.warn(
+            f"XLA headers in {xla_include_path} do not include "
+            "xla/ffi/api/collectives_c_api.h; the EP borrowed-comm path will not be built."
+        )
 
     # Compile flags
     cxx_flags = ["-O3"]
@@ -112,6 +122,9 @@ def setup_jax_extension(
         cxx_flags.append("-UNDEBUG")
     else:
         cxx_flags.append("-g0")
+
+    bolt_cxx_flags, linker_flags = get_bolt_build_flags()
+    cxx_flags.extend(bolt_cxx_flags)
 
     setup_mpi_flags(include_dirs, cxx_flags)
 
@@ -135,5 +148,6 @@ def setup_jax_extension(
         sources=[str(path) for path in sources],
         include_dirs=[str(path) for path in include_dirs],
         extra_compile_args=cxx_flags,
+        extra_link_args=linker_flags,
         **kwargs,
     )
