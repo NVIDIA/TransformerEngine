@@ -261,9 +261,9 @@ TEST_P(NormTestSuite, TestNorm) {
   const bool cudnn_zero_centered_gamma_in_weight_dtype = std::get<6>(GetParam());
   const bool fused_bwd_add = std::get<7>(GetParam());
 
-  TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(input_type, InputType,
-    TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(output_type, OutputType,
-      performTest<InputType, OutputType>(
+  TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(input_type, InputType,
+    if (output_type == DType::kFloat8E4M3) {
+      performTest<InputType, fp8e4m3>(
         size.first,
         size.second,
         zero_centered_gamma,
@@ -272,7 +272,20 @@ TEST_P(NormTestSuite, TestNorm) {
         cudnn_zero_centered_gamma_in_weight_dtype,
         fused_bwd_add
       );
-    );
+    } else {
+      TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(
+        output_type, OutputType,
+        performTest<InputType, OutputType>(
+          size.first,
+          size.second,
+          zero_centered_gamma,
+          norm_type,
+          use_cudnn,
+          cudnn_zero_centered_gamma_in_weight_dtype,
+          fused_bwd_add
+        );
+      );
+    }
   );
 }
 

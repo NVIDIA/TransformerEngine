@@ -30,6 +30,8 @@ from transformer_engine.pytorch.module import destroy_ub
 from transformer_engine.pytorch.module import UserBufferQuantizationMode
 from transformer_engine.pytorch.attention import DotProductAttention
 from transformer_engine.pytorch.attention import GatedDeltaNetAttention
+from transformer_engine.pytorch.attention import GatedDeltaNet2Attention
+from transformer_engine.pytorch.attention import GatedDeltaProductAttention
 from transformer_engine.pytorch.attention import FusedMLAQUpProjFunction, FusedMLAQUpProjRopeQuant
 from transformer_engine.pytorch.attention import MultiheadAttention
 from transformer_engine.pytorch.attention import InferenceParams
@@ -51,6 +53,7 @@ from transformer_engine.pytorch.quantization import is_fp8_available
 from transformer_engine.pytorch.quantization import is_mxfp8_available
 from transformer_engine.pytorch.quantization import is_fp8_block_scaling_available
 from transformer_engine.pytorch.quantization import is_nvfp4_available
+from transformer_engine.pytorch.quantization import is_fp8_ue5m3_available
 from transformer_engine.pytorch.quantization import get_default_recipe
 from transformer_engine.pytorch.quantization import QuantizerRole
 from transformer_engine.pytorch.quantization import QuantizerRequest

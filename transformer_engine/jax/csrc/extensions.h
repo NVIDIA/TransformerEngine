@@ -132,16 +132,22 @@ pybind11::tuple GetDBiasQuantizeWorkspaceSizes(size_t batch_size, size_t hidden_
 
 // Softmax
 XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledSoftmaxForwardHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledSoftmaxForwardInitializeHandler);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledSoftmaxBackwardHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledSoftmaxBackwardInitializeHandler);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledMaskedSoftmaxForwardHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledMaskedSoftmaxForwardInitializeHandler);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledMaskedSoftmaxBackwardHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledMaskedSoftmaxBackwardInitializeHandler);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledUpperTriangMaskedSoftmaxForwardHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledUpperTriangMaskedSoftmaxForwardInitializeHandler);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledUpperTriangMaskedSoftmaxBackwardHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledUpperTriangMaskedSoftmaxBackwardInitializeHandler);
 
 // Attention
 XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnForwardHandler);
@@ -207,8 +213,11 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedMoEAuxLossBackwardHandler);
 void SetEpBootstrapParams(pybind11::bytes unique_id_bytes, int ep_size, int rank_within_group,
                           int num_experts, int max_tokens_per_rank, int max_recv_tokens_per_rank,
                           int hidden_dim, int max_num_sms, int max_token_dtype,
-                          bool drop_on_overflow);
+                          bool drop_on_overflow, bool borrowed_comm);
 void ReleaseEpResources();
+// Atexit-safe variant of ReleaseEpResources; never shuts down a borrowed
+// backend (see definition).
+void ReleaseEpResourcesAtExit();
 // Return the handle_mem byte size for a layer config.
 size_t EpHandleMemSize(int top_k, size_t dispatch_output_per_expert_alignment);
 
@@ -223,6 +232,11 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(EpDispatchHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(EpCombineHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(EpDispatchBwdHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(EpCombineBwdHandler);
+
+// EP-specific execute stage of the borrowed-comm bootstrap op (see
+// tex.ep.use_nccl_comm_from_xla). The prepare stage is the generic
+// FfiRequestCliqueHandler in extensions/ffi_collectives.h.
+XLA_FFI_DECLARE_HANDLER_SYMBOL(EpBootstrapBorrowedCommHandler);
 
 // TopK
 XLA_FFI_DECLARE_HANDLER_SYMBOL(TopkHandler);
