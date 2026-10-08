@@ -291,6 +291,11 @@ class AttentionParams:
         Whether a score_mod callback was provided.
     has_score_mod_bprop : bool, default = False
         Whether a score_mod bprop callback was provided.
+    device : Optional[torch.device], default = None
+        Query/key/value device. Defaults to the current CUDA device for standalone queries.
+    requires_backward : bool, default = True
+        Whether this call may require backward, independently of module training mode.
+        Standalone queries conservatively require backward support unless specified otherwise.
     """
 
     qkv_type: Union[torch.Tensor, Float8Tensor] = torch.Tensor
@@ -334,6 +339,8 @@ class AttentionParams:
     checkpoint_core_attention: bool = False
     has_score_mod: bool = False
     has_score_mod_bprop: bool = False
+    device: Optional[torch.device] = None
+    requires_backward: bool = True
 
     def __eq__(self, other):
         """
@@ -543,7 +550,7 @@ def get_attention_backend(
         logger.setLevel(AttentionLogging._log_level)
         if not logger.hasHandlers():
             logger.addHandler(AttentionLogging._stream_handler)
-    device_compute_capability = get_device_compute_capability()
+    device_compute_capability = get_device_compute_capability(attention_params.device)
     cudnn_version = get_cudnn_version()
     run_config = {
         "transformer_engine_version": te.__version__,
@@ -1768,6 +1775,14 @@ def get_attention_backend(
                 head_dim_v,
             )
             use_flash_attention_3 = False
+    if use_flash_attention_4 and deterministic and FlashAttentionUtils.v4_is_installed:
+        # eval() does not disable autograd; only forward-only calls can use this kernel.
+        if attention_params.requires_backward and device_compute_capability[0] == 12:
+            logger.debug(
+                "Disabling FlashAttention 4 for deterministic backward on SM12x: the CuTe"
+                " SM12x backward kernel does not support deterministic execution."
+            )
+            use_flash_attention_4 = False
     if use_fused_attention and deterministic:
         if softmax_type != "vanilla":
             logger.debug(
@@ -1792,11 +1807,7 @@ def get_attention_backend(
         if (
             fused_attention_backend == FusedAttnBackend.F16_arbitrary_seqlen.value
             and is_training
-            and (
-                device_compute_capability < (9, 0)
-                or core_attention_bias_requires_grad
-                or cudnn_version < (8, 9, 5)
-            )
+            and (device_compute_capability < (9, 0) or core_attention_bias_requires_grad)
         ):
             logger.debug("Disabling FusedAttention for determinism reasons with post_scale_bias")
             use_fused_attention = False
@@ -1904,8 +1915,23 @@ def get_attention_backend(
         bool(available_backends[2]),
     )
 
-    # Select FusedAttention for performance
-    if use_flash_attention and use_fused_attention and device_compute_capability >= (9, 0):
+    # Prefer FA2 for THD training with dropout on SM100/103, where FusedAttention has a known
+    # performance issue. At this point use_flash_attention_2 confirms a usable installation.
+    is_slow_fused_thd_dropout = (
+        is_training
+        and qkv_format == "thd"
+        and attention_dropout != 0.0
+        and device_compute_capability in ((10, 0), (10, 3))
+    )
+    if is_slow_fused_thd_dropout and use_flash_attention_2 and use_fused_attention:
+        logger.debug(
+            "Disabling FusedAttention to give FlashAttention 2 preference for THD with dropout"
+            " on SM100/103"
+        )
+        use_fused_attention = False
+        fused_attention_backend = None
+    # Select FusedAttention for performance in all other Hopper+ configurations.
+    elif use_flash_attention and use_fused_attention and device_compute_capability >= (9, 0):
         logger.debug(
             "Disabling FlashAttention to give FusedAttention preference on Hopper+ "
             "for performance reasons"
@@ -1939,11 +1965,26 @@ def get_attention_backend(
 
 @torch.no_grad()
 def get_thd_padding_mask(num_tokens, cu_seqlens, cu_seqlens_padded):
-    """Identify inter-sequence padding in a flattened packed THD buffer."""
+    """Return a boolean mask identifying padding token positions in a THD buffer.
+
+    ``num_tokens`` is the full physical buffer capacity, which may exceed
+    ``cu_seqlens_padded[-1]``. ``cu_seqlens`` describes cumulative valid token
+    counts, while ``cu_seqlens_padded`` describes physical sequence boundaries.
+    Inter-sequence gaps and all positions at or beyond the final padded boundary
+    are marked True. For example, a 16-token buffer with ``cu_seqlens=[0, 3, 8]``
+    and ``cu_seqlens_padded=[0, 4, 12]`` includes tail padding at positions [12, 16).
+
+    This helper is shared by non-CP and CP attention. Its operations stay on
+    device so that padding cleanup remains CUDA-graph-capturable in both paths.
+    """
     rows = torch.arange(num_tokens, device=cu_seqlens_padded.device)
     sequence = torch.searchsorted(cu_seqlens_padded[1:], rows, right=True)
-    valid_end = cu_seqlens_padded[sequence] + cu_seqlens[sequence + 1] - cu_seqlens[sequence]
-    return rows >= valid_end
+    valid_ends = cu_seqlens_padded[:-1] + cu_seqlens[1:] - cu_seqlens[:-1]
+    # Tail token positions map to sequence == batch_size. Append a zero-length sequence
+    # at the final physical boundary so that index is valid, even for an empty
+    # batch. All operations stay on device for CUDA Graph capture and replay.
+    valid_ends = torch.cat((valid_ends, cu_seqlens_padded[-1:]))
+    return rows >= valid_ends[sequence]
 
 
 @torch.no_grad()

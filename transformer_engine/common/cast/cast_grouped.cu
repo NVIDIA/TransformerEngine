@@ -10,6 +10,8 @@
 #include <transformer_engine/cast.h>
 #include <transformer_engine/recipe.h>
 
+#include <vector>
+
 #include "../common.h"
 #include "dispatch/dequantize.cuh"
 #include "dispatch/quantize.cuh"
@@ -94,4 +96,21 @@ void nvte_group_nvfp4_quantize_with_amax(const NVTETensor input, NVTETensor *out
 
   dispatch::group_quantize_fwd_host_aware_helper<IS_ACT, Empty, nullptr>(
       input, outputs, split_sections, num_tensors, quant_config, stream);
+}
+
+void nvte_group_nvfp4_compute_amax(const NVTETensor input, NVTETensor *outputs,
+                                   const size_t *split_sections, const size_t num_tensors,
+                                   cudaStream_t stream) {
+  NVTE_API_CALL(nvte_group_nvfp4_compute_amax);
+  using namespace transformer_engine;
+
+  const Tensor *input_tensor = convertNVTETensorCheck(input);
+  std::vector<Tensor *> output_tensors;
+  output_tensors.reserve(num_tensors);
+  for (size_t i = 0; i < num_tensors; ++i) {
+    output_tensors.push_back(convertNVTETensorCheck(outputs[i]));
+  }
+
+  dispatch::nvfp4::group_compute_fused_amax(*input_tensor, /*noop=*/nullptr, output_tensors,
+                                            split_sections, num_tensors, stream);
 }

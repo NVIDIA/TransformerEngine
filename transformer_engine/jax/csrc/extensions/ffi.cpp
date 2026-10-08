@@ -11,7 +11,7 @@ namespace transformer_engine {
 namespace jax {
 
 // For XLA_FFI_DataType Enum Reference: https://github.com/openxla/xla/blob/d054e8366c4e8807726961feeb28b1cdba681888/xla/ffi/api/c_api.h#L163-L186
-DType convert_ffi_datatype_to_te_dtype(const xla::ffi::DataType &type) {
+DType convert_ffi_datatype_to_te_dtype(const xla::ffi::DataType& type) {
   switch (type) {
     // Using this for E8M0
     case xla::ffi::DataType::U8:
@@ -59,6 +59,10 @@ Error_Type ffi_with_cuda_error_check() {
                       std::string("CUDA error: ") + cudaGetErrorString(last_error));
   }
   return Error_Type::Success();
+}
+
+Error_Type ffi_internal_error(const std::string& context, const std::exception& e) {
+  return Error_Type::Internal(context + e.what());
 }
 
 }  // namespace jax

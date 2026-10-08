@@ -791,7 +791,8 @@ __global__ void __launch_bounds__(TB_DIM* TB_DIM)
 }
 
 template <typename LType, int SF_TILE_DIM_M, int SF_TILE_DIM_K>
-__global__ void multi_tensor_unswizzle_row_scaling_kernel(MultiSwizzleArgs kernel_args) {
+__global__ void __launch_bounds__(TB_DIM* TB_DIM)
+    multi_tensor_unswizzle_row_scaling_kernel(MultiSwizzleArgs kernel_args) {
   const int bid = blockIdx.x;
   int tensor_id = 0;
   while (kernel_args.block_range[tensor_id + 1] <= bid) {
@@ -818,7 +819,8 @@ __global__ void multi_tensor_unswizzle_row_scaling_kernel(MultiSwizzleArgs kerne
 }
 
 template <typename LType, int SF_TILE_DIM_M, int SF_TILE_DIM_K>
-__global__ void multi_tensor_unswizzle_col_scaling_kernel(MultiSwizzleArgs kernel_args) {
+__global__ void __launch_bounds__(TB_DIM* TB_DIM)
+    multi_tensor_unswizzle_col_scaling_kernel(MultiSwizzleArgs kernel_args) {
   const int bid = blockIdx.x;
   int tensor_id = 0;
   while (kernel_args.block_range[tensor_id + 1] <= bid) {
@@ -844,7 +846,8 @@ __global__ void multi_tensor_unswizzle_col_scaling_kernel(MultiSwizzleArgs kerne
 }
 
 template <typename LType, int SF_TILE_DIM_M, int SF_TILE_DIM_K>
-__global__ void multi_tensor_swizzle_row_scaling_kernel(MultiSwizzleArgs kernel_args) {
+__global__ void __launch_bounds__(TB_DIM* TB_DIM)
+    multi_tensor_swizzle_row_scaling_kernel(MultiSwizzleArgs kernel_args) {
   // Find tensor corresponding to block
   const int bid = blockIdx.x;
   int tensor_id = 0;
@@ -878,7 +881,8 @@ __global__ void multi_tensor_swizzle_row_scaling_kernel(MultiSwizzleArgs kernel_
 }
 
 template <typename LType, int SF_TILE_DIM_M, int SF_TILE_DIM_K>
-__global__ void multi_tensor_swizzle_col_scaling_kernel(MultiSwizzleArgs kernel_args) {
+__global__ void __launch_bounds__(TB_DIM* TB_DIM)
+    multi_tensor_swizzle_col_scaling_kernel(MultiSwizzleArgs kernel_args) {
   // Find tensor corresponding to block
   const int bid = blockIdx.x;
   int tensor_id = 0;

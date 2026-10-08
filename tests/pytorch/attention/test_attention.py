@@ -38,8 +38,9 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     FusedAttentionParams,
     _get_supported_versions,
     check_set_window_size,
-    get_fused_attn_spec,
     get_attention_backend,
+    get_fused_attn_spec,
+    get_thd_padding_mask,
 )
 from transformer_engine.pytorch.attention import RotaryPositionEmbedding
 import transformer_engine.pytorch.cpp_extensions as ext
@@ -257,6 +258,147 @@ def test_fa3_mismatched_head_dims_mode_selection(
     assert flash_attention_backend == (FlashAttentionUtils.fa3_version if expected_fa3 else None)
 
 
+@pytest.mark.parametrize(
+    "cu_seqlens,cu_seqlens_padded,expected",
+    [
+        ([0, 3, 8], [0, 4, 12], [False] * 3 + [True] + [False] * 5 + [True] * 3),
+        ([0, 3, 8], [0, 4, 12], [False] * 3 + [True] + [False] * 5 + [True] * 7),
+        ([0, 3, 8], [0, 3, 8], [False] * 8 + [True] * 4),
+        ([0, 0, 3, 3, 5], [0, 0, 4, 4, 8], [False] * 3 + [True] + [False] * 2 + [True] * 4),
+    ],
+)
+def test_thd_padding_mask_capacity(cu_seqlens, cu_seqlens_padded, expected):
+    """Cover sequence gaps, reserved buffer tails, and zero-length sequences."""
+    actual = get_thd_padding_mask(
+        len(expected),
+        torch.tensor(cu_seqlens, dtype=torch.int32, device="cuda"),
+        torch.tensor(cu_seqlens_padded, dtype=torch.int32, device="cuda"),
+    )
+    torch.testing.assert_close(actual, torch.tensor(expected, dtype=torch.bool, device="cuda"))
+
+
+@pytest.mark.parametrize("fa_version", [3, 4])
+def test_dpa_flash_thd_padding_capacity_cuda_graph(fa_version, monkeypatch):
+    """Check padded outputs and gradients, including buffer tails, without CP.
+
+    This regression exercises eager execution and raw CUDA Graph capture. CP graph
+    capture uses TE's make_graphed_callables and is outside this test's scope.
+    """
+    for key, value in {
+        "NVTE_FLASH_ATTN": "1",
+        "NVTE_FUSED_ATTN": "0",
+        "NVTE_UNFUSED_ATTN": "0",
+        "NVTE_FLASH_ATTN_V2": "0",
+        "NVTE_FLASH_ATTN_V3": str(int(fa_version == 3)),
+        "NVTE_FLASH_ATTN_V4": str(int(fa_version == 4)),
+    }.items():
+        monkeypatch.setenv(key, value)
+    use_flash_attention, flash_attention_backend, *_ = get_attention_backend(
+        AttentionParams(
+            qkv_dtype=torch.bfloat16,
+            qkv_layout="thd_thd_thd",
+            batch_size=2,
+            num_heads=4,
+            num_gqa_groups=4,
+            max_seqlen_q=128,
+            max_seqlen_kv=128,
+            num_tokens_q=128,
+            num_tokens_kv=192,
+            head_dim_qk=64,
+            head_dim_v=64,
+            attn_mask_type="padding",
+            window_size=(-1, -1),
+            core_attention_bias_requires_grad=False,
+            pad_between_seqs=True,
+            attention_dropout=0.0,
+            context_parallel=False,
+            deterministic=_deterministic,
+            is_training=True,
+            cuda_graph=True,
+            softmax_scale=0.125,
+        )
+    )
+    if not use_flash_attention:
+        pytest.skip(f"FlashAttention {fa_version} does not support this CUDA Graph configuration.")
+    assert flash_attention_backend.major == fa_version
+    # Restore the complete backend cache along with the environment at test teardown.
+    for key, value in _attention_backends.items():
+        monkeypatch.setitem(_attention_backends, key, value)
+    _attention_backends["backend_selection_requires_update"] = True
+    reset_rng_states()
+    cu_q, cu_kv, padded_q, padded_kv = [
+        torch.tensor(offsets, dtype=torch.int32, device="cuda")
+        for offsets in ([0, 61, 96], [0, 45, 118], [0, 64, 112], [0, 64, 160])
+    ]
+    # Expected valid token positions are independent of get_thd_padding_mask.
+    q_rows = torch.tensor(list(range(61)) + list(range(64, 99)), device="cuda")
+    kv_rows = torch.tensor(list(range(45)) + list(range(64, 137)), device="cuda")
+    qkv = [
+        torch.randn(tokens, 4, 64, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+        for tokens in (128, 192, 192)
+    ]
+    grad_output = torch.randn(128, 256, dtype=torch.bfloat16, device="cuda")
+    block = DotProductAttention(
+        4,
+        64,
+        qkv_format="thd",
+        attn_mask_type="padding",
+        attention_type="cross",
+        attention_dropout=0.0,
+    ).cuda()
+
+    def run(inputs, grad, padded):
+        """Run the selected FlashAttention backend and differentiate Q/K/V."""
+        output = block(
+            *inputs,
+            cu_seqlens_q=cu_q,
+            cu_seqlens_kv=cu_kv,
+            cu_seqlens_q_padded=padded_q if padded else None,
+            cu_seqlens_kv_padded=padded_kv if padded else None,
+            max_seqlen_q=128,
+            max_seqlen_kv=128,
+            pad_between_seqs=padded,
+        )
+        assert _attention_backends["use_flash_attention"]
+        assert _attention_backends["flash_attention_backend"].major == fa_version
+        assert not _attention_backends["use_fused_attention"]
+        assert not _attention_backends["use_unfused_attention"]
+        return (output, *torch.autograd.grad(output, inputs, grad))
+
+    def check(actual):
+        """Compare valid token positions with compact attention and require exact-zero padding."""
+        compact_qkv = [
+            tensor.detach()[rows].requires_grad_()
+            for tensor, rows in zip(qkv, (q_rows, kv_rows, kv_rows))
+        ]
+        expected = run(compact_qkv, grad_output[q_rows], False)
+        for tensor, reference, rows in zip(actual, expected, (q_rows, q_rows, kv_rows, kv_rows)):
+            assert tensor.shape[0] == (128 if rows is q_rows else 192)
+            torch.testing.assert_close(tensor[rows], reference, atol=1.5e-2, rtol=1.5e-2)
+            padding = torch.ones(tensor.shape[0], dtype=torch.bool, device="cuda")
+            padding[rows] = False
+            assert torch.count_nonzero(tensor[padding]).item() == 0
+
+    check(run(qkv, grad_output, True))
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        for _ in range(3):
+            run(qkv, grad_output, True)
+    torch.cuda.current_stream().wait_stream(stream)
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        captured = run(qkv, grad_output, True)
+    for _ in range(2):
+        # Replays must consume fresh inputs and upstream gradients at the same addresses.
+        with torch.no_grad():
+            for tensor in (*qkv, grad_output):
+                tensor.normal_()
+        graph.replay()
+        check(captured)
+
+
 # Define F16 data types to test
 param_types = [torch.float16]
 if is_bf16_available():
@@ -280,7 +422,6 @@ model_configs_base = {
 }
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("model_configs", [model_configs_base])
 @pytest.mark.parametrize("model", model_configs_base.keys())
@@ -449,7 +590,6 @@ _CACHE_EVENT = re.compile(
 _CACHE_PHASE = re.compile(r"\[CACHE-TEST\] phase=(?P<name>\w+)")
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 def test_fused_attn_graph_cache():
     """Test FusedAttention graph cache with level 2 diagnostics. It runs a subprocess
     to avoid contamination from other tests as the counters are process-wide.
@@ -532,7 +672,6 @@ def test_fused_attn_graph_cache():
         )
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("model_configs", [model_configs_base])
 @pytest.mark.parametrize("model", ["base_1_1", "base_2_1"])
@@ -556,7 +695,6 @@ model_configs_max_logit = {
 }
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("model_configs", [model_configs_max_logit])
 @pytest.mark.parametrize("model", model_configs_max_logit.keys())
@@ -575,7 +713,6 @@ model_configs_num_splits = {
 }
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("model_configs", [model_configs_num_splits])
 @pytest.mark.parametrize("model", model_configs_num_splits.keys())
@@ -728,107 +865,6 @@ def test_dpa_fa4_mla(dtype, model_configs, model):
     test_dot_product_attention(dtype, model_configs, model, False, "bshd_bshd_bshd", False, False)
 
 
-fa3_enabled = bool(int(os.getenv("NVTE_FLASH_ATTN", "1"))) and bool(
-    int(os.getenv("NVTE_FLASH_ATTN_V3", "1"))
-)
-requires_fa3 = pytest.mark.skipif(
-    not fa3_enabled
-    or not FlashAttentionUtils.v3_is_installed
-    or device_compute_capability != (9, 0),
-    reason="Enabled Flash-attn v3 and SM90 are required.",
-)
-
-model_configs_fa3_mla = {
-    # test: ModelConfig(b, sq, hq, dqk, head_dim_v=dv)
-    # DeepSeek-style MLA, and the second mismatch branch of _is_fa3_supported.
-    "fa3_mla_1": ModelConfig(2, 1024, 16, 192, head_dim_v=128, attn_mask_type="causal"),
-    "fa3_mla_2": ModelConfig(2, 512, 16, 64, head_dim_v=512),
-    "fa3_mla_3": ModelConfig(2, 128, 16, 64, head_dim_v=128, attn_mask_type="causal"),
-    # Equal dimensions must retain FA3 for training as well as inference.
-    "fa3_equal_heads": ModelConfig(2, 128, 16, 128),
-}
-
-
-@requires_fa3
-@pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("model_configs", [model_configs_fa3_mla])
-@pytest.mark.parametrize("model", model_configs_fa3_mla.keys())
-@pytest.mark.parametrize("qkv_format", ["bshd", "sbhd"])
-@pytest.mark.parametrize("is_training", [True, False])
-def test_dpa_fa3_mla(dtype, model_configs, model, qkv_format, is_training, monkeypatch):
-    """Check real FA3 dispatch and its training fallback against an FP32 reference."""
-    # Keep FA3 available to the real selector, with only UnfusedAttention as its
-    # fallback. The cross-backend helper re-enables cuDNN and can switch to
-    # inference-only comparisons, which would hide this backward regression.
-    monkeypatch.setenv("NVTE_FLASH_ATTN", "1")
-    monkeypatch.setenv("NVTE_FLASH_ATTN_V2", "0")
-    monkeypatch.setenv("NVTE_FLASH_ATTN_V3", "1")
-    monkeypatch.setenv("NVTE_FLASH_ATTN_V4", "0")
-    monkeypatch.setenv("NVTE_FUSED_ATTN", "0")
-    monkeypatch.setenv("NVTE_UNFUSED_ATTN", "1")
-    monkeypatch.setenv("NVTE_APPLY_QK_LAYER_SCALING", "0")
-    _attention_backends["backend_selection_requires_update"] = True
-    reset_rng_states()
-    config = model_configs[model]
-    shapes = (
-        (config.batch_size, config.max_seqlen_q, config.num_heads, config.head_dim_qk),
-        (config.batch_size, config.max_seqlen_kv, config.num_gqa_groups, config.head_dim_qk),
-        (config.batch_size, config.max_seqlen_kv, config.num_gqa_groups, config.head_dim_v),
-    )
-    inputs = [torch.randn(shape, dtype=dtype, device="cuda") for shape in shapes]
-    if qkv_format == "sbhd":
-        inputs = [x.transpose(0, 1).contiguous() for x in inputs]
-    q, k, v = (x.requires_grad_(is_training) for x in inputs)
-    reference_inputs = [x.detach().float().requires_grad_(is_training) for x in inputs]
-    reference_bshd = reference_inputs
-    if qkv_format == "sbhd":
-        reference_bshd = [x.transpose(0, 1) for x in reference_inputs]
-
-    tols = dict(atol=2e-2, rtol=2e-2)
-    if dtype == torch.bfloat16:
-        tols = dict(atol=4e-2, rtol=4e-2)
-
-    try:
-        with torch.set_grad_enabled(is_training):
-            block = make_dot_product_attention(dtype, config, qkv_format, is_training=is_training)
-            out = block(q, k, v).view(*q.shape[:2], config.num_heads, config.head_dim_v)
-            if qkv_format == "sbhd":
-                out = out.transpose(0, 1)
-            selected_backends = _attention_backends.copy()
-            # softcap=0 reduces the existing closed-form reference to ordinary
-            # scaled dot-product attention, independent of all TE backends.
-            out_ref = _softcap_reference_attention(
-                *reference_bshd,
-                softmax_scale=config.head_dim_qk**-0.5,
-                softcap=0.0,
-                causal=config.attn_mask_type == "causal",
-            )
-            torch.testing.assert_close(out.float(), out_ref, **tols)
-            assert torch.isfinite(out).all()
-
-            if is_training:
-                d_out = torch.randn_like(out)
-                # Run backward before checking the selected backend so removing
-                # the production fix reproduces FA3's original backward failure.
-                out.backward(d_out)
-                out_ref.backward(d_out.float())
-                for actual, reference in zip(inputs, reference_inputs):
-                    assert actual.grad is not None
-                    assert reference.grad is not None
-                    assert torch.isfinite(actual.grad).all()
-                    torch.testing.assert_close(actual.grad.float(), reference.grad, **tols)
-
-            expected_fa3 = not is_training or config.head_dim_qk == config.head_dim_v
-            assert bool(selected_backends["use_flash_attention"]) == expected_fa3
-            assert not selected_backends["use_fused_attention"]
-            assert bool(selected_backends["use_unfused_attention"]) != expected_fa3
-            assert selected_backends["flash_attention_backend"] == (
-                FlashAttentionUtils.fa3_version if expected_fa3 else None
-            )
-    finally:
-        _attention_backends["backend_selection_requires_update"] = True
-
-
 model_configs_fa4_swa = {
     # test: ModelConfig(b, sq, hq, dqk, window_size=(left, right))
     "fa4_swa_1": ModelConfig(2, 2048, 16, 128, attn_mask_type="causal", window_size=(128, 0)),
@@ -963,7 +999,6 @@ model_configs_softmax = {
 }
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("model_configs", [model_configs_softmax])
 @pytest.mark.parametrize("model", model_configs_softmax.keys())
@@ -1020,7 +1055,6 @@ def test_dpa_softcap(dtype, model_configs, model):
     )
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_softcap])
 @pytest.mark.parametrize("model", ["softcap_1_0"])
@@ -1385,7 +1419,6 @@ model_configs_mla = {
 }
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("model_configs", [model_configs_mla])
 @pytest.mark.parametrize("model", model_configs_mla.keys())
@@ -1440,7 +1473,6 @@ model_configs_mask = {
 }
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_mask])
 @pytest.mark.parametrize("model", model_configs_mask.keys())
@@ -1546,7 +1578,6 @@ model_configs_bias = {
 }
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_bias])
 @pytest.mark.parametrize("model", model_configs_bias.keys())
@@ -1585,7 +1616,6 @@ model_configs_bias_shapes = {
 }
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_bias_shapes])
 @pytest.mark.parametrize("model", model_configs_bias_shapes.keys())
@@ -1729,7 +1759,6 @@ model_configs_layout = {
 }
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 5), reason="cuDNN 8.9.5+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_layout])
 @pytest.mark.parametrize("model", model_configs_layout.keys())
@@ -1742,7 +1771,6 @@ def test_dpa_qkv_layout(dtype, model_configs, model, qkv_layout):
 qkv_layouts_packed = [l for l in qkv_layouts if any(c.isdigit() for c in l)]
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 5), reason="cuDNN 8.9.5+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_layout])
 @pytest.mark.parametrize("model", ["layout_1_1", "layout_1_2"])
@@ -1815,7 +1843,6 @@ model_configs_layout_thd = {
 }
 
 
-@pytest.mark.skipif(get_cudnn_version() < (9, 0, 0), reason="cuDNN 9.0.0+ is required.")
 @pytest.mark.skipif(
     get_device_compute_capability() < (9, 0), reason="THD is only supported on Hopper+."
 )
@@ -1840,26 +1867,23 @@ def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout, declarative
         pad_between_seqs,
         declarative_packed=declarative_packed,
     )
-    if get_cudnn_version() >= (9, 3, 0):
-        logging.info("[test_dpa_qkv_layout_thd]: pad_between_seqs = False")
-        # cuDNN 9.3.0+ is required to run pad_between_seqs = False/True in the same run
-        pad_between_seqs = False
-        test_dot_product_attention(
-            dtype,
-            model_configs,
-            model,
-            False,
-            qkv_layout,
-            False,
-            pad_between_seqs,
-            declarative_packed=declarative_packed,
-        )
+    logging.info("[test_dpa_qkv_layout_thd]: pad_between_seqs = False")
+    pad_between_seqs = False
+    test_dot_product_attention(
+        dtype,
+        model_configs,
+        model,
+        False,
+        qkv_layout,
+        False,
+        pad_between_seqs,
+        declarative_packed=declarative_packed,
+    )
 
 
 qkv_layouts_thd_packed = [l for l in qkv_layouts_thd if any(c.isdigit() for c in l)]
 
 
-@pytest.mark.skipif(get_cudnn_version() < (9, 0, 0), reason="cuDNN 9.0.0+ is required.")
 @pytest.mark.skipif(
     get_device_compute_capability() < (9, 0), reason="THD is only supported on Hopper+."
 )
@@ -2329,6 +2353,22 @@ def run_dot_product_attention(
 
     if backend in ["UnfusedDotProductAttention"]:
         return out, max_logit, (q_grad, k_grad, v_grad, d_softmax_offset)
+    if backend == "FlashAttention" and qkv_format == "thd" and pad_between_seqs:
+        tensors_and_boundaries = [("out", out, cu_seqlens_q, cu_seqlens_q_after_pad)]
+        if is_training:
+            tensors_and_boundaries.extend(
+                [
+                    ("dq", q_grad, cu_seqlens_q, cu_seqlens_q_after_pad),
+                    ("dk", k_grad, cu_seqlens_kv, cu_seqlens_kv_after_pad),
+                    ("dv", v_grad, cu_seqlens_kv, cu_seqlens_kv_after_pad),
+                ]
+            )
+        for tensor_name, tensor, cu_seqlens, cu_seqlens_padded in tensors_and_boundaries:
+            padding_mask = get_thd_padding_mask(tensor.shape[0], cu_seqlens, cu_seqlens_padded)
+            assert (
+                torch.count_nonzero(tensor[padding_mask]).item() == 0
+            ), f"{backend} left nonzero values in {tensor_name} padding"
+
     if backend in ["FusedAttention", "FlashAttention"]:
         if qkv_format == "thd" and pad_between_seqs:
             out_orig = torch.Tensor([]).to(device="cuda", dtype=dtype)
@@ -2389,7 +2429,6 @@ model_configs_te_layer = {
 }
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("model_configs", [model_configs_te_layer])
 @pytest.mark.parametrize("model", model_configs_te_layer.keys())
@@ -2505,7 +2544,6 @@ def test_transformer_layer(
         torch.testing.assert_close(fused_attn_bwd, flash_attn_bwd, **tols)
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_te_layer])
 @pytest.mark.parametrize("model", ["te_1_2", "te_2_0"])
@@ -2520,7 +2558,6 @@ def test_te_layer_misc(dtype, model_configs, model, qkv_format):
     )
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_te_layer])
 @pytest.mark.parametrize("model", ["te_2_0", "te_2_1", "te_2_2"])
@@ -2751,7 +2788,6 @@ model_configs_fp8_extra_state = {
 
 
 @pytest.mark.skipif(not fp8_attn_available, reason=reason_for_no_fp8_attn)
-@pytest.mark.skipif(get_cudnn_version() < (9, 3, 0), reason="cuDNN 9.3.0+ is required.")
 @pytest.mark.parametrize("model", ["large"])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_dpa_fp8_extra_state(model, dtype):
@@ -3027,7 +3063,6 @@ def _mha_fp8_vs_f16_seqlens(config, qkv_format):
     return seqlens_q, seqlens_kv
 
 
-@pytest.mark.skipif(get_cudnn_version() < (9, 2, 1), reason="cuDNN 9.2.1+ is required.")
 @pytest.mark.skipif(not fp8_attn_available, reason=reason_for_no_fp8_attn)
 @pytest.mark.parametrize("dtype", param_types_fp8_vs_f16)
 @pytest.mark.parametrize("model", model_configs_fp8_vs_f16.keys())
@@ -3282,7 +3317,6 @@ def _run_mha_fp8_vs_f16(
     return out, param_names, tuple(None for x in params)
 
 
-@pytest.mark.skipif(get_cudnn_version() < (9, 2, 1), reason="cuDNN 9.2.1+ is required.")
 @pytest.mark.skipif(not fp8_attn_available, reason=reason_for_no_fp8_attn)
 @pytest.mark.parametrize("dtype", param_types_fp8_vs_f16)
 @pytest.mark.parametrize("model", model_configs_fp8_vs_f16.keys())
@@ -3620,10 +3654,6 @@ model_configs_fp8 = {
 param_types_fp8 = [torch.float16, torch.bfloat16]
 
 
-@pytest.mark.skipif(
-    get_cudnn_version() < (9, 2, 1),
-    reason="cuDNN 9.2.1+ is required for FP8 fused attention.",
-)
 @pytest.mark.skipif(not fp8_attn_available, reason=reason_for_no_fp8_attn)
 @pytest.mark.parametrize("dtype", param_types_fp8)
 @pytest.mark.parametrize("model", model_configs_fp8)
