@@ -13,6 +13,7 @@ import random
 import sys
 import types
 from typing import Optional
+import warnings
 
 import pytest
 
@@ -173,6 +174,70 @@ def test_cudnn_frontend_situglu_feature_detection(monkeypatch, unsupported_wrapp
         assert not _cudnn_frontend_supports_grouped_gemm_situglu()
     finally:
         _cudnn_frontend_supports_grouped_gemm_situglu.cache_clear()
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ("unsupported_system", "unsupported_recipe", "unsupported_dims", "unsupported_device"),
+)
+def test_grouped_mlp_fallback_warning(monkeypatch, reason: str) -> None:
+    """Warn with the cause of a grouped MLP fallback, only when requested."""
+    from transformer_engine.common.recipe import Format, MXFP8BlockScaling
+
+    fused_op_cls = grouped_mlp_module.GroupedMLP_CuTeGEMMGLU
+    monkeypatch.setattr(
+        fused_op_cls, "is_supported", classmethod(lambda cls: reason != "unsupported_system")
+    )
+    monkeypatch.setattr(
+        fused_op_cls, "_unsupported_reason", classmethod(lambda cls: "broken cutlass-dsl")
+    )
+    if reason == "unsupported_device":
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(grouped_mlp_module, "get_device_compute_capability", lambda: (9, 0))
+
+    in_features = 96 if reason == "unsupported_dims" else 128
+    fc1 = te.ops.GroupedLinear(2, in_features, 256, bias=False, device="meta")
+    activation = te.ops.ScaledSwiGLU(glu_interleave_size=32)
+    fc2 = te.ops.GroupedLinear(2, 128, in_features, bias=False, device="meta")
+    recipe = None if reason == "unsupported_recipe" else MXFP8BlockScaling(fp8_format=Format.E4M3)
+    expected = {
+        "unsupported_system": "broken cutlass-dsl",
+        "unsupported_recipe": "requires an MXFP8 or NVFP4 recipe",
+        "unsupported_dims": "Unsupported dims for FC1",
+        "unsupported_device": "unsupported compute capability 9.0",
+    }[reason]
+
+    def fuse(ops):
+        if reason == "unsupported_device":
+            return grouped_mlp_module.fuse_glu_ops(ops, recipe=recipe)
+        return grouped_mlp_module.fuse_grouped_mlp_ops(
+            ops,
+            recipe=recipe,
+            fused_op_cls=fused_op_cls,
+            activation_op_types=(te.ops.ScaledSwiGLU,),
+        )
+
+    ops = [fc1, activation, fc2]
+    grouped_mlp_module._warn_grouped_mlp_fallback.cache_clear()
+    try:
+        monkeypatch.delenv("NVTE_CUTEDSL_FUSED_GROUPED_MLP_WARN_FALLBACK", raising=False)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            assert fuse(ops) == ops
+
+        monkeypatch.setenv("NVTE_CUTEDSL_FUSED_GROUPED_MLP_WARN_FALLBACK", "1")
+        with pytest.warns(
+            UserWarning, match=f"ScaledSwiGLU .* GroupedMLP_CuTeGEMMGLU .*{expected}"
+        ):
+            assert fuse(ops) == ops
+
+        # Ops without a grouped MLP pattern never warn
+        grouped_mlp_module._warn_grouped_mlp_fallback.cache_clear()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            assert fuse([fc1, fc2]) == [fc1, fc2]
+    finally:
+        grouped_mlp_module._warn_grouped_mlp_fallback.cache_clear()
 
 
 def _clear_grouped_glu_kernel_caches() -> None:
@@ -459,10 +524,8 @@ class _InjectGrad(torch.autograd.Function):
 class TestGroupedLinearOp:
     """Tests for advanced features with grouped linear basic op"""
 
-    def test_meta_single_grouped_weight_with_delayed_wgrad(self, monkeypatch) -> None:
+    def test_meta_single_grouped_weight_with_delayed_wgrad(self) -> None:
         """A deferred op shell must not access its grouped parent before it is attached."""
-        monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
-
         op = te.ops.GroupedLinear(
             2,
             16,
@@ -486,9 +549,8 @@ class TestGroupedLinearOp:
 
         assert grouped_weight.skip_backward_post_hook
 
-    def test_single_grouped_bias_uses_registered_packed_storage(self, monkeypatch) -> None:
+    def test_single_grouped_bias_uses_registered_packed_storage(self) -> None:
         """The grouped bias compute view must alias the registered trainable parent."""
-        monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
         op = te.ops.GroupedLinear(
             2,
             128,
@@ -535,13 +597,6 @@ class TestGroupedLinearOp:
         single_grouped_bias: bool,
     ) -> None:
         """Grouped GEMM"""
-        if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0" and (
-            single_grouped_weight or single_grouped_bias
-        ):
-            pytest.skip(
-                "single_grouped_weight/single_grouped_bias requires"
-                " NVTE_GROUPED_LINEAR_SINGLE_PARAM=1"
-            )
         # Split sizes
         split_sizes = [split_alignment * i for i in range(group_size)]
         random.shuffle(split_sizes)
@@ -937,13 +992,6 @@ class TestGroupedLinearOp:
         """
 
         # Skip invalid configurations
-        if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0" and (
-            single_grouped_weight
-        ):
-            pytest.skip(
-                "single_grouped_weight/single_grouped_bias requires"
-                " NVTE_GROUPED_LINEAR_SINGLE_PARAM=1"
-            )
         if quantization is None and quantized_weight:
             pytest.skip("quantized_weight requires a quantization recipe")
         if quantization in nvfp4_variant_names and dtype != torch.bfloat16:
@@ -1223,13 +1271,6 @@ class TestGroupedMLPFusedOp:
         maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
         if dtype == torch.bfloat16 and not is_bf16_available():
             pytest.skip("BF16 requires SM 8.0+")
-        if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0" and (
-            single_grouped_weight or single_grouped_bias
-        ):
-            pytest.skip(
-                "single_grouped_weight/single_grouped_bias requires"
-                " NVTE_GROUPED_LINEAR_SINGLE_PARAM=1"
-            )
         if single_grouped_weight and quantization != "mxfp8":
             pytest.skip("single_grouped_weight is only supported for MXFP8 quantization")
         if single_grouped_bias and not bias:
@@ -1713,8 +1754,6 @@ class TestGroupedMLPFusedOp:
         assert fused_cls.is_supported()
         # FC2 bias-gradient accumulation uses an atomic Triton reduction.
         monkeypatch.setenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")
-        if single_grouped_weight:
-            monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
 
         self.test_grouped_mlp(
             group_size=4,
@@ -2188,8 +2227,6 @@ class TestGroupedMLPFusedOp:
     ) -> None:
         """single_grouped_weight=True/False should match exactly for fused MXFP8 grouped MLP."""
 
-        if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0":
-            pytest.skip("single_grouped_weight requires NVTE_GROUPED_LINEAR_SINGLE_PARAM=1")
         if not te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
             pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
         if activation == "scaled_clamped_qgeglu":
@@ -2694,8 +2731,6 @@ class TestGroupedMLPFusedOp:
         that read ``.grad`` don't see stale bytes from the cached dummy).
         """
 
-        if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0" and single_grouped_weight:
-            pytest.skip("single_grouped_weight requires NVTE_GROUPED_LINEAR_SINGLE_PARAM=1")
         if not te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
             pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
 
@@ -2827,8 +2862,6 @@ class TestGroupedMLPFusedOp:
     ) -> None:
         """Grouped MLP forward+backward should be CUDA graph capturable (MXFP8)."""
 
-        if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0" and single_grouped_weight:
-            pytest.skip("single_grouped_weight requires NVTE_GROUPED_LINEAR_SINGLE_PARAM=1")
         if not te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
             pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
         if dtype not in (torch.bfloat16, torch.float16):

@@ -35,7 +35,6 @@ import os
 
 os.environ.setdefault("CUDA_DEVICE_MAX_CONNECTIONS", "1")
 os.environ.setdefault("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")
-os.environ.setdefault("NVTE_CUTEDSL_FUSED_GROUPED_MLP", "1")
 os.environ.setdefault("CUDNN_FE_GROUPED_GEMM_DYNAMIC_MNKL", "1")
 
 import argparse
@@ -318,7 +317,6 @@ def main() -> None:
     for name in (
         "CUDA_DEVICE_MAX_CONNECTIONS",
         "NVTE_ALLOW_NONDETERMINISTIC_ALGO",
-        "NVTE_CUTEDSL_FUSED_GROUPED_MLP",
         "CUDNN_FE_GROUPED_GEMM_DYNAMIC_MNKL",
     ):
         print(f"  {name}={os.environ.get(name)}")
