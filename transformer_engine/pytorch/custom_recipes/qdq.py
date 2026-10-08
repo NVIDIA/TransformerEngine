@@ -71,9 +71,7 @@ class QDQQuantizer(Quantizer):
         if self.selected_backend(tensor, dtype) == "reference":
             data = self._reference(tensor, dtype)
             return self._wrap(data)
-        result = self._wrap(
-            torch.empty(tensor.shape, dtype=dtype, device=tensor.device)
-        )
+        result = self._wrap(torch.empty(tensor.shape, dtype=dtype, device=tensor.device))
         self._compute(tensor, result._hp_data, backend="fused")
         return result
 
@@ -96,9 +94,7 @@ class QDQQuantizer(Quantizer):
 
     def _wrap(self, data, requires_grad=False):
         if self.internal:
-            return IdentityTensorStorage(
-                hp_data=data, fake_dtype=data.dtype, quantizer=self
-            )
+            return IdentityTensorStorage(hp_data=data, fake_dtype=data.dtype, quantizer=self)
         return IdentityTensor(
             data.shape,
             data.dtype,
@@ -110,9 +106,7 @@ class QDQQuantizer(Quantizer):
 
     def update_quantized(self, src, dst, *, noop_flag=None):
         if not isinstance(dst, IdentityTensorStorage) or dst._hp_data is None:
-            raise TypeError(
-                f"{type(self).__name__} requires allocated IdentityTensorStorage"
-            )
+            raise TypeError(f"{type(self).__name__} requires allocated IdentityTensorStorage")
         if src.shape != dst._hp_data.shape or src.device != dst._hp_data.device:
             raise ValueError(
                 f"{type(self).__name__} source and destination must have matching shape/device"
@@ -138,12 +132,8 @@ class MXFP8QDQQuantizer(QDQQuantizer):
     block_size = 32
 
     def __init__(self, *, dtype=None, backend="auto", rowwise=True, columnwise=True):
-        super().__init__(
-            dtype=dtype, backend=backend, rowwise=rowwise, columnwise=columnwise
-        )
-        self.mxfp8_quantizer = MXFP8Quantizer(
-            DType.kFloat8E4M3, rowwise=True, columnwise=False
-        )
+        super().__init__(dtype=dtype, backend=backend, rowwise=rowwise, columnwise=columnwise)
+        self.mxfp8_quantizer = MXFP8Quantizer(DType.kFloat8E4M3, rowwise=True, columnwise=False)
         self.mxfp8_quantizer.internal = True
 
     def copy(self):
@@ -169,9 +159,7 @@ class MXFP8QDQQuantizer(QDQQuantizer):
             and os.getenv("NVTE_USE_FAST_MATH", "0") == "0"
         )
         if self.backend == "fused" and not eligible:
-            raise ValueError(
-                "Forced fused MXFP8 QDQ does not support this input/configuration"
-            )
+            raise ValueError("Forced fused MXFP8 QDQ does not support this input/configuration")
         return "fused" if eligible and self.backend != "reference" else "reference"
 
     def _reference(self, tensor, dtype):
@@ -218,14 +206,10 @@ class NVFP4QDQQuantizer(QDQQuantizer):
         rowwise=True,
         columnwise=True,
     ):
-        super().__init__(
-            dtype=dtype, backend=backend, rowwise=rowwise, columnwise=columnwise
-        )
+        super().__init__(dtype=dtype, backend=backend, rowwise=rowwise, columnwise=columnwise)
         if quantizer is not None and not isinstance(quantizer, NVFP4Quantizer):
             raise TypeError("quantizer must be an NVFP4Quantizer")
-        self.nvfp4_quantizer = (
-            quantizer.copy() if quantizer is not None else NVFP4Quantizer()
-        )
+        self.nvfp4_quantizer = quantizer.copy() if quantizer is not None else NVFP4Quantizer()
         self.nvfp4_quantizer.set_usage(rowwise=True, columnwise=False)
         self.nvfp4_quantizer.internal = True
 
@@ -294,9 +278,7 @@ class NVFP4QDQQuantizer(QDQQuantizer):
             and os.getenv("NVTE_USE_FAST_MATH", "0") == "0"
         )
         if self.backend == "fused" and not eligible:
-            raise ValueError(
-                "Forced fused NVFP4 QDQ does not support this input/configuration"
-            )
+            raise ValueError("Forced fused NVFP4 QDQ does not support this input/configuration")
         return "fused" if eligible and self.backend != "reference" else "reference"
 
     def _reference(self, tensor, dtype):

@@ -135,9 +135,7 @@ def test_noncontiguous_and_output_dtype_fallback():
 def test_scale_boundaries_and_extremes(dtype):
     # Adjacent representable values straddling E8M0 scale transitions.
     exponents = range(-120, 119, 13) if dtype == torch.bfloat16 else range(-20, 7, 2)
-    thresholds = torch.tensor(
-        [448.0 * 2.0**e for e in exponents], device="cuda", dtype=dtype
-    )
+    thresholds = torch.tensor([448.0 * 2.0**e for e in exponents], device="cuda", dtype=dtype)
     maxima = torch.cat(
         (
             torch.nextafter(thresholds, torch.zeros_like(thresholds)),
@@ -290,9 +288,7 @@ def test_hybrid_backward_source(source):
     native = MXFP8Quantizer(tex.DType.kFloat8E4M3, rowwise=False, columnwise=True)
     expected = native(x if source == "original" else decoded)
     for name in ("_columnwise_data", "_columnwise_scale_inv"):
-        assert torch.equal(
-            getattr(y._columnwise_storage, name), getattr(expected, name)
-        )
+        assert torch.equal(getattr(y._columnwise_storage, name), getattr(expected, name))
 
 
 @pytest.mark.parametrize("backend", ["reference", "fused"])
@@ -362,8 +358,6 @@ def test_custom_qdq_base_lifecycle():
     torch.testing.assert_close(workspace.dequantize(), y.dequantize())
     flag.zero_()
     q.update_quantized(x + 2, workspace, noop_flag=flag)
-    torch.testing.assert_close(
-        workspace.dequantize(), (x.detach() + 2).round().bfloat16()
-    )
+    torch.testing.assert_close(workspace.dequantize(), (x.detach() + 2).round().bfloat16())
     q.internal = True
     assert q(x)._hp_data.dtype == torch.bfloat16
