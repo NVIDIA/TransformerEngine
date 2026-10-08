@@ -232,8 +232,10 @@ def finalize_plans(
     that does not want them; it is skipped when a plan is pinned, which has already named one.
 
     Remove the default once cuDNN is fixed: the gate that should decline these graphs reads a key
-    ``sdpa()`` never writes, so it never fires. The bar is not self-verifying either, matching
-    engine names by a substring that a rename would silently break.
+    ``sdpa()`` never writes, so it never fires. The match is on a substring of the engine name, so
+    a rename would break it; what catches that is the end-to-end test comparing flex's output
+    across the switch, not anything here. Measured: deselect marks rather than removes, so the
+    plan list still names a barred engine afterwards and cannot be asserted on.
     """
     cudnn = _cudnn if _cudnn is not None else import_cudnn_frontend()
 
