@@ -2036,14 +2036,7 @@ def _fused_attn_setup_ctx(
     bwd_args.softmax_type = fwd_args.softmax_type
     bwd_args.window_size = fwd_args.window_size
     bwd_args.bottom_right_diagonal = fwd_args.bottom_right_diagonal
-    # FROST has to survive this: it is a python sub-backend, so re-deriving F16_arbitrary_seqlen
-    # here would send its backward to the C++ path, which does not serve these head dims.
-    saved_fused_attention_backend = ctx_attrs["fused_attention_backend"]
-    bwd_args.fused_attention_backend = (
-        saved_fused_attention_backend
-        if fp8 or saved_fused_attention_backend == FusedAttnBackend["FROST"]
-        else FusedAttnBackend["F16_arbitrary_seqlen"]
-    )
+    bwd_args.fused_attention_backend = ctx_attrs["fused_attention_backend"]
     bwd_args.use_FAv2_bwd = fwd_args.use_FAv2_bwd
     bwd_args.deterministic = fwd_args.deterministic
 

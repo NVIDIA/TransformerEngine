@@ -2,18 +2,18 @@
 #
 # See LICENSE for license information.
 
-"""Mechanics of driving cuDNN Frontend's Python graph API from PyTorch.
+"""Shared helpers for driving cuDNN frontend's Python graph API from PyTorch.
 
-Importing the frontend, holding one stream-current handle per device, describing TE tensors in
-cuDNN's logical BHSD form, and creating, selecting and building plans. No attention semantics, and
-no knowledge of any backend's cache-key layout.
+Covers importing the frontend, keeping one stream-current handle per device, describing TE
+tensors in cuDNN's logical BHSD form, building the SDPA forward and backward graphs, and
+creating, selecting and building their plans. What a backend wants from a graph -- a mask, a
+score_mod, which engine to pin or bar -- is passed in rather than decided here.
 
-``flex_attention.py`` and ``frost_attention.py`` both drive cuDNN through this API. They share
-this module for ownership rather than for line count: the state below is process-global -- one
-``cudnn`` module, one ``CUDNN_FRONTEND_ENABLE_FROST_ENGINES`` switch, one engine ranking, one
-handle per device -- and giving it two owners is how this code has produced bugs before.
+``flex_attention.py`` and ``frost_attention.py`` both build their graphs through this module. Its
+state is process-global -- the ``cudnn`` module, the ``CUDNN_FRONTEND_ENABLE_FROST_ENGINES``
+switch and the per-device handles -- so it is set up in one place instead of twice.
 
-``backend_name`` is threaded through purely so a failure still says which backend was driving.
+``backend_name`` is passed through so an error says which backend was running.
 """
 
 from __future__ import annotations
@@ -296,6 +296,176 @@ def finalize_plans(
             f" {exc}{(' ' + hint) if hint else ''}"
         ) from exc
     return max(graph.get_workspace_size(), 1), names[hits[0]]
+
+
+def _declare_tensor(graph, name: str, spec: Any):
+    """Declare one graph input.
+
+    ``spec`` is a ``torch.Tensor``, described with ``tensor_like``, or a ``(dim, stride)`` /
+    ``(dim, stride, data_type)`` descriptor. Omitting ``data_type`` lets the tensor inherit the
+    graph's ``io_data_type``.
+    """
+    if isinstance(spec, torch.Tensor):
+        return graph.tensor_like(spec)
+    kwargs: Dict[str, Any] = {"name": name, "dim": list(spec[0]), "stride": list(spec[1])}
+    if len(spec) > 2 and spec[2] is not None:
+        kwargs["data_type"] = spec[2]
+    return graph.tensor(**kwargs)
+
+
+def _mark_output(tensor, spec: Any):
+    """Mark a graph output and apply whichever of dim/stride/data_type ``spec`` supplies.
+
+    Each field is optional because the backends specify different subsets, and setting one a
+    caller left out would be describing the tensor for it rather than from it.
+    """
+    tensor.set_output(True)
+    if spec[0] is not None:
+        tensor.set_dim(list(spec[0]))
+    if spec[1] is not None:
+        tensor.set_stride(list(spec[1]))
+    if len(spec) > 2 and spec[2] is not None:
+        tensor.set_data_type(spec[2])
+    return tensor
+
+
+def _declare_aux(graph, aux_tensors):
+    """Declare the auxiliary runtime tensors an sdpa callback reads, grouped by role."""
+    return {
+        group: {name: graph.tensor_like(t) for name, t in tensors.items()}
+        for group, tensors in (aux_tensors or {}).items()
+    }
+
+
+def _resolve_sdpa_kwargs(sdpa_kwargs, aux):
+    """Extra ``sdpa``/``sdpa_backward`` arguments, as a dict or a callable taking ``aux``.
+
+    The callable form exists because a score_mod closes over graph tensors that cannot be built
+    until the graph is, so the caller gets them handed back here rather than building its own.
+    """
+    return sdpa_kwargs(aux) if callable(sdpa_kwargs) else dict(sdpa_kwargs or {})
+
+
+def build_fwd(
+    *,
+    dtype: torch.dtype,
+    device: torch.device,
+    backend_name: str,
+    name: str,
+    q: Any,
+    k: Any,
+    v: Any,
+    out: Any,
+    attn_scale: float,
+    stats: Any = None,
+    aux_tensors: Optional[Dict[str, Dict[str, torch.Tensor]]] = None,
+    sdpa_kwargs: Any = None,
+    heuristics: Optional[Sequence[Any]] = None,
+    require_plan_token: Optional[str] = None,
+    not_found_hint: Any = "",
+    exclude_plan_tokens: Any = _BAR_FROST_BY_DEFAULT,
+) -> Dict[str, Any]:
+    """Build and plan an SDPA forward graph.
+
+    ``stats`` is the LSE output descriptor, or ``None`` to skip generating it. Everything
+    backend-specific -- a mask, a score_mod, which engine to pin or bar -- arrives through
+    ``sdpa_kwargs`` and the plan arguments, which are passed to :func:`finalize_plans`.
+    """
+    graph = build_pygraph(dtype, device, backend_name=backend_name)
+    tq = _declare_tensor(graph, "q", q)
+    tk = _declare_tensor(graph, "k", k)
+    tv = _declare_tensor(graph, "v", v)
+    aux = _declare_aux(graph, aux_tensors)
+    tout, tstats = graph.sdpa(
+        name=name,
+        q=tq,
+        k=tk,
+        v=tv,
+        generate_stats=stats is not None,
+        attn_scale=attn_scale,
+        **_resolve_sdpa_kwargs(sdpa_kwargs, aux),
+    )
+    _mark_output(tout, out)
+    if stats is None:
+        tstats = None
+    else:
+        _mark_output(tstats, stats)
+    workspace, plan = finalize_plans(
+        graph,
+        backend_name=backend_name,
+        heuristics=heuristics,
+        require_plan_token=require_plan_token,
+        not_found_hint=not_found_hint,
+        exclude_plan_tokens=exclude_plan_tokens,
+    )
+    return {
+        "graph": graph,
+        "q": tq,
+        "k": tk,
+        "v": tv,
+        "out": tout,
+        "stats": tstats,
+        "aux": aux,
+        "workspace": workspace,
+        "plan": plan,
+    }
+
+
+def build_bwd(
+    *,
+    dtype: torch.dtype,
+    device: torch.device,
+    backend_name: str,
+    name: str,
+    q: Any,
+    k: Any,
+    v: Any,
+    o: Any,
+    do: Any,
+    stats: Any,
+    dq: Any,
+    dk: Any,
+    dv: Any,
+    attn_scale: float,
+    deterministic: bool = False,
+    aux_tensors: Optional[Dict[str, Dict[str, torch.Tensor]]] = None,
+    sdpa_kwargs: Any = None,
+    heuristics: Optional[Sequence[Any]] = None,
+    require_plan_token: Optional[str] = None,
+    not_found_hint: Any = "",
+    exclude_plan_tokens: Any = _BAR_FROST_BY_DEFAULT,
+) -> Dict[str, Any]:
+    """Build and plan an SDPA backward graph. The counterpart of :func:`build_fwd`."""
+    graph = build_pygraph(dtype, device, backend_name=backend_name)
+    handles = {
+        n: _declare_tensor(graph, n, spec)
+        for n, spec in (("q", q), ("k", k), ("v", v), ("o", o), ("do", do), ("stats", stats))
+    }
+    aux = _declare_aux(graph, aux_tensors)
+    tdq, tdk, tdv = graph.sdpa_backward(
+        name=name,
+        q=handles["q"],
+        k=handles["k"],
+        v=handles["v"],
+        o=handles["o"],
+        dO=handles["do"],
+        stats=handles["stats"],
+        attn_scale=attn_scale,
+        use_deterministic_algorithm=deterministic,
+        **_resolve_sdpa_kwargs(sdpa_kwargs, aux),
+    )
+    for handle, spec in ((tdq, dq), (tdk, dk), (tdv, dv)):
+        _mark_output(handle, spec)
+    workspace, plan = finalize_plans(
+        graph,
+        backend_name=backend_name,
+        heuristics=heuristics,
+        require_plan_token=require_plan_token,
+        not_found_hint=not_found_hint,
+        exclude_plan_tokens=exclude_plan_tokens,
+    )
+    handles.update({"dq": tdq, "dk": tdk, "dv": tdv})
+    return {"graph": graph, "aux": aux, "workspace": workspace, "plan": plan, **handles}
 
 
 def execute_graph(

@@ -2,15 +2,12 @@
 #
 # See LICENSE for license information.
 
-"""cuDNN FROST attention backend for head_dim in (256, 512] on SM100/SM103.
+"""cuDNN FROST attention. This feature is **experimental and subject to change**.
 
-**Experimental and subject to change.** The engines this wraps are themselves experimental in
-cuDNN Frontend, and if the fused path gains these shapes this backend may be folded into it.
-
-Why a separate Python backend rather than teaching the existing C++ fused path: FROST engines are
-registered at Python import time behind CUDNN_FRONTEND_ENABLE_FROST_ENGINES and require the
-nvidia-cutlass-dsl Python package, while TE's C++ builds against cuDNN Frontend headers only.
-Reaching them requires a Python graph, which is what this module is.
+FROST runs through cudnn-frontend's Python API and is registered behind the
+CUDNN_FRONTEND_ENABLE_FROST_ENGINES=1 flag. Different from FusedAttnBackend.F16_arbitrary_seqlen
+and FusedAttnBackend.FP8, FusedAttnBackend.FROST is Python only and requires the Python
+installation of cudnn-frontend, not just its C++ header files.
 """
 
 from __future__ import annotations
@@ -130,7 +127,7 @@ def is_frost_attention_available() -> Tuple[bool, str]:
         return _no("no CUDA device")
     if os.environ.get("CUDNN_FRONTEND_ENABLE_FROST_ENGINES", "1") == "0":
         # Explicitly switched off. Declining here is the difference between falling back cleanly
-        # and raising from _select_frost_plan once a plan is built.
+        # and raising from _frost_plan_args once a plan is built.
         return _no("CUDNN_FRONTEND_ENABLE_FROST_ENGINES=0 disables the FROST engines")
     if torch.cuda.get_device_capability() not in _SUPPORTED_ARCHS:
         major, minor = torch.cuda.get_device_capability()
@@ -143,7 +140,7 @@ def is_frost_attention_available() -> Tuple[bool, str]:
         return _no(f"nvidia-cudnn-frontend not importable: {exc}")
 
     # Decline only on positive evidence: a version below a floor, or a package absent outright.
-    # An unparseable version defers to _select_frost_plan, which checks the plan by name.
+    # An unparseable version defers to _frost_plan_args, which checks the plan by name.
     frontend, frontend_raw = _pkg_version("nvidia-cudnn-frontend", cudnn_pygraph.cudnn_module())
     if frontend is not None and frontend < _MIN_CUDNN_FRONTEND:
         return _no(
@@ -311,18 +308,8 @@ def is_frost_attention_supported(params) -> Tuple[int, str]:
     if int(os.environ.get("NVTE_FROST_ATTN", "1")) == 0:
         return no_backend, "FROST is disabled by NVTE_FROST_ATTN=0"
 
-    if params.head_dim_qk != params.head_dim_v:
-        # Measured on B200 with cuDNN Frontend 1.29.0: the forward serves an asymmetric pair, the
-        # backward does not. Its d_qk > 128 path covers only 192/128 and 256/256, and nothing
-        # proposes a plan otherwise. Declined outright rather than for training alone, because
-        # is_training is module.training and eval() does not disable autograd, so it is no
-        # guarantee that no backward follows.
-        return (
-            no_backend,
-            f"FROST requires symmetric head_dim; got {params.head_dim_qk}/{params.head_dim_v}",
-        )
-    # Still checked per dimension: v has its own graph node and its own cache-key entry, so the
-    # range applies to each rather than to one standing in for both.
+    # Checked per dimension: v has its own graph node and its own cache-key entry, so the range
+    # applies to each rather than to one standing in for both.
     for name, head_dim in (
         ("head_dim_qk", params.head_dim_qk),
         ("head_dim_v", params.head_dim_v),
@@ -334,6 +321,17 @@ def is_frost_attention_supported(params) -> Tuple[int, str]:
                 no_backend,
                 f"FROST needs {name} to be a multiple of {_HEAD_DIM_MULTIPLE}; got {head_dim}",
             )
+    # Reached only once both dims are in range, which is the point: cuDNN's backward does plan
+    # asymmetric pairs below it (dqk192/dv128), so widening the range must revisit this rule.
+    if params.head_dim_qk != params.head_dim_v:
+        # Measured on B200 with cuDNN Frontend 1.29.0: above d_qk=128 the backward serves only
+        # 192/128 and 256/256, so no asymmetric pair in (256, 512] has a plan. Declined for both
+        # directions, since is_training follows module.training and eval() leaves autograd on.
+        return (
+            no_backend,
+            "FROST requires symmetric head_dim in (256, 512]; got"
+            f" {params.head_dim_qk}/{params.head_dim_v}",
+        )
 
     qkv_dtype = TORCH_DType.get(params.qkv_dtype)
     if qkv_dtype not in (torch.bfloat16, torch.float16):
@@ -464,8 +462,8 @@ def _o_shape_stride(shape, d_v, ref_strides):
     return out, (list(ref_strides) if d_v == shape[3] else _head_dim_strides(out, ref_strides))
 
 
-def _select_frost_plan(graph, token: str, what: str):
-    """Select a plan whose name proves a FROST engine was chosen.
+def _frost_plan_args(token: str, what: str) -> dict:
+    """Plan arguments that pin an engine whose name proves FROST was chosen.
 
     A too-old nvidia-cutlass-dsl makes the FROST engines decline silently, and in the forward an
     ordinary engine may then build and compute something else. The pin turns that into a named
@@ -485,14 +483,11 @@ def _select_frost_plan(graph, token: str, what: str):
         )
 
     cudnn = _import_cudnn_frontend()
-    _, name = cudnn_pygraph.finalize_plans(
-        graph,
-        backend_name=_BACKEND_NAME,
-        heuristics=[cudnn.heur_mode.A],
-        require_plan_token=token,
-        not_found_hint=hint,
-    )
-    return name
+    return {
+        "heuristics": [cudnn.heur_mode.A],
+        "require_plan_token": token,
+        "not_found_hint": hint,
+    }
 
 
 def _build_fwd(key, device) -> dict:
@@ -503,31 +498,21 @@ def _build_fwd(key, device) -> dict:
     _dev, (shq, qs, dtype), (shk, ks, _), (shv, vs, _), mask, scale, _deterministic = key
     b, hq, sq = shq[0], shq[1], shq[2]
     sho, o_stride = _o_shape_stride(shq, shv[3], qs)
-
-    graph = cudnn_pygraph.build_pygraph(dtype, device, backend_name=_BACKEND_NAME)
-    tq = graph.tensor(name="q", dim=list(shq), stride=list(qs))
-    tk = graph.tensor(name="k", dim=list(shk), stride=list(ks))
-    tv = graph.tensor(name="v", dim=list(shv), stride=list(vs))
-    tout, tlse = graph.sdpa(
+    return cudnn_pygraph.build_fwd(
+        dtype=dtype,
+        device=device,
+        backend_name=_BACKEND_NAME,
         name="frost_fwd",
-        q=tq,
-        k=tk,
-        v=tv,
-        generate_stats=True,  # the CP ring needs the LSE, and it is cheap
+        q=(shq, qs),
+        k=(shk, ks),
+        v=(shv, vs),
+        out=(sho, o_stride),  # out: q's layout, v's head_dim
+        # the CP ring needs the LSE, and it is cheap
+        stats=([b, hq, sq, 1], [hq * sq, sq, 1, 1], cudnn.data_type.FLOAT),
         attn_scale=scale,
-        **_mask_options(cudnn, mask),
+        sdpa_kwargs=_mask_options(cudnn, mask),
+        **_frost_plan_args(_FROST_FWD_PLAN_TOKEN, "forward"),
     )
-    tout.set_output(True).set_dim(sho).set_stride(list(o_stride))  # out: q's layout, v's head_dim
-    tlse.set_output(True).set_dim([b, hq, sq, 1]).set_stride([hq * sq, sq, 1, 1]).set_data_type(
-        cudnn.data_type.FLOAT
-    )
-    plan = _select_frost_plan(graph, _FROST_FWD_PLAN_TOKEN, "forward")
-    return {
-        "graph": graph,
-        "handles": (tq, tk, tv, tout, tlse),
-        "workspace": max(graph.get_workspace_size(), 1),
-        "plan": plan,
-    }
 
 
 def _build_bwd(key, device) -> dict:
@@ -537,46 +522,26 @@ def _build_bwd(key, device) -> dict:
     io_dt = cudnn_pygraph.io_data_type(cudnn, dtype, backend_name=_BACKEND_NAME)
     b, hq, sq = shq[0], shq[1], shq[2]
     sho, o_stride = _o_shape_stride(shq, shv[3], qs)
-
-    graph = cudnn_pygraph.build_pygraph(dtype, device, backend_name=_BACKEND_NAME)
-    handles = {}
-    # Each grad is declared with the layout of the tensor it differentiates.
-    for name, shape, stride in (
-        ("q", shq, qs),
-        ("k", shk, ks),
-        ("v", shv, vs),
-        ("o", sho, o_stride),
-        ("do", sho, o_stride),
-    ):
-        handles[name] = graph.tensor(name=name, dim=list(shape), stride=list(stride))
-    handles["stats"] = graph.tensor(
-        name="stats",
-        dim=[b, hq, sq, 1],
-        stride=[hq * sq, sq, 1, 1],
-        data_type=cudnn.data_type.FLOAT,
-    )
-    tdq, tdk, tdv = graph.sdpa_backward(
+    return cudnn_pygraph.build_bwd(
+        dtype=dtype,
+        device=device,
+        backend_name=_BACKEND_NAME,
         name="frost_bwd",
-        q=handles["q"],
-        k=handles["k"],
-        v=handles["v"],
-        o=handles["o"],
-        dO=handles["do"],
-        stats=handles["stats"],
+        q=(shq, qs),
+        k=(shk, ks),
+        v=(shv, vs),
+        o=(sho, o_stride),
+        do=(sho, o_stride),
+        stats=([b, hq, sq, 1], [hq * sq, sq, 1, 1], cudnn.data_type.FLOAT),
+        # Each grad is declared with the layout of the tensor it differentiates.
+        dq=(None, qs, io_dt),
+        dk=(None, ks, io_dt),
+        dv=(None, vs, io_dt),
         attn_scale=scale,
-        use_deterministic_algorithm=deterministic,
-        **_mask_options(cudnn, mask),
+        deterministic=deterministic,
+        sdpa_kwargs=_mask_options(cudnn, mask),
+        **_frost_plan_args(_FROST_BWD_PLAN_TOKEN, "backward"),
     )
-    for tensor, stride in ((tdq, qs), (tdk, ks), (tdv, vs)):
-        tensor.set_output(True).set_data_type(io_dt).set_stride(list(stride))
-    plan = _select_frost_plan(graph, _FROST_BWD_PLAN_TOKEN, "backward")
-    handles["dq"], handles["dk"], handles["dv"] = tdq, tdk, tdv
-    return {
-        "graph": graph,
-        "handles": handles,
-        "workspace": max(graph.get_workspace_size(), 1),
-        "plan": plan,
-    }
 
 
 def _cached(kind: str, key, device):
@@ -715,7 +680,7 @@ def fused_attn_fwd(
     qd, _, vd = _validate_qkv(q, k, v, qkv_format)
     scale = attn_scale if attn_scale is not None else qd[3] ** -0.5
     entry = _cached("fwd", _key(q, k, v, qkv_format, mask, scale), q.device)
-    tq, tk, tv, tout, tlse = entry["handles"]
+    tq, tk, tv, tout, tlse = (entry[n] for n in ("q", "k", "v", "out", "stats"))
 
     # Allocated per call so concurrent uses cannot alias; the cache holds only the plan.
     # empty_strided, not empty_like: the latter does not preserve an arbitrary permuted stride.
@@ -826,7 +791,7 @@ def fused_attn_bwd(
 
     scale = attn_scale if attn_scale is not None else qd[3] ** -0.5
     entry = _cached("bwd", _key(q, k, v, qkv_format, mask, scale, deterministic), q.device)
-    h = entry["handles"]
+    h = entry
 
     if softmax_lse.dim() == 3:
         softmax_lse = softmax_lse.unsqueeze(-1)

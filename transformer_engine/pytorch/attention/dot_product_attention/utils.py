@@ -452,8 +452,6 @@ def _get_fused_attn_backend(**fused_attn_kwargs):
     params = FusedAttentionParams(**fused_attn_kwargs)
     fused_attention_backend, reject_message = tex.get_fused_attn_backend(params)
     if fused_attention_backend == FusedAttnBackend.No_Backend:
-        # A python sub-backend, invisible to the C++ selector. Availability is checked at the
-        # end of get_attention_backend, the way flash-attn's version is.
         from .frost_attention import (  # pylint: disable=import-outside-toplevel
             is_frost_attention_supported,
         )
@@ -461,7 +459,7 @@ def _get_fused_attn_backend(**fused_attn_kwargs):
         frost_backend, frost_reject = is_frost_attention_supported(params)
         if frost_backend != FusedAttnBackend.No_Backend:
             return int(frost_backend), frost_reject
-        reject_message = f"{reject_message} {frost_reject}"
+        reject_message = f"{reject_message.rstrip('. ')}. {frost_reject}"
     return int(fused_attention_backend), reject_message
 
 
@@ -1878,8 +1876,6 @@ def get_attention_backend(
         use_flash_attention_4 = False
     use_flash_attention = use_flash_attention_2 or use_flash_attention_3 or use_flash_attention_4
     if use_fused_attention and fused_attention_backend == FusedAttnBackend.FROST.value:
-        # Deferred to here: probing imports cuDNN Frontend with the engines enabled, which
-        # changes the engine pool for every cuDNN consumer in the process.
         from .frost_attention import (  # pylint: disable=import-outside-toplevel
             is_frost_attention_available,
         )
