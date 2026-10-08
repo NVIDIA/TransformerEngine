@@ -15,16 +15,19 @@
  *  Two kernels: a pre-pass computes rsigma per row (one warp per row), then one CTA per
  *  32x128 tile normalizes the tile, quantizes it and writes its scaling factors. A tile
  *  only sees 128 columns of a row, so it cannot reduce the row itself; doing so with whole
- *  rows per CTA would limit the grid to rows / 32 CTAs.
+ *  rows per CTA would limit the grid to rows / 32 CTAs. When the caller reserves SMs for other
+ *  work, both kernels are launched over chunks of rows that fit on the remaining SMs.
  */
 
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <limits>
 #include <type_traits>
 
 #include "../../cast/mxfp8/swizzle.cuh"
 #include "../../common.h"
+#include "../../util/cuda_runtime.h"
 #include "../../util/ptx_arch_spec.cuh"
 #include "../../utils.cuh"
 #include "../common.h"
@@ -287,9 +290,24 @@ bool is_aligned_to(const void *ptr, size_t alignment) {
   return reinterpret_cast<uintptr_t>(ptr) % alignment == 0;
 }
 
+// Rows per launch of a kernel with grid rows of grid_cols CTAs, each grid row covering cta_rows
+// rows: all rows, unless the caller reserves SMs for other work. Then a launch runs at most as
+// many CTAs as fit on the remaining num_sms SMs, in multiples of 128 rows (at least 128).
+template <typename Kernel>
+int rows_per_launch(Kernel kernel, const int threads, const int num_sms, const int rows,
+                    const int cta_rows, const int grid_cols) {
+  if (num_sms <= 0 || num_sms >= cuda::sm_count()) {
+    return rows;
+  }
+  int ctas_per_sm = 0;
+  NVTE_CHECK_CUDA(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&ctas_per_sm, kernel, threads, 0));
+  const int grid_rows = std::max(ctas_per_sm, 1) * num_sms / grid_cols;
+  return std::min(rows, std::max(grid_rows * cta_rows / 128 * 128, 128));
+}
+
 template <typename IType, typename WType, typename OType>
 void launch_rmsnorm_fwd_mxfp8(const Tensor &x, const Tensor &gamma, const float epsilon, Tensor *z,
-                              Tensor *rsigma, const bool zero_centered_gamma,
+                              Tensor *rsigma, const int num_sms, const bool zero_centered_gamma,
                               const bool gamma_in_weight_dtype, cudaStream_t stream) {
   const auto [rows_size_t, cols_size_t] = x.flat_2d_dims();
   const int rows = static_cast<int>(rows_size_t);
@@ -322,39 +340,68 @@ void launch_rmsnorm_fwd_mxfp8(const Tensor &x, const Tensor &gamma, const float 
                        (!rowwise || is_aligned_to(args.rowwise_data, 4)) &&
                        (!colwise || is_aligned_to(args.colwise_data, 4));
 
-  TRANSFORMER_ENGINE_SWITCH_CONDITION(
-      aligned, kAligned,
-      rmsnorm_mxfp8_rsigma_kernel<IType, kAligned>
-      <<<DIVUP(rows, kRsigmaRowsPerCTA), kRsigmaRowsPerCTA * THREADS_PER_WARP, 0, stream>>>(
-          x_ptr, rsigma_ptr, rows, cols, epsilon););  // NOLINT(*)
+  TRANSFORMER_ENGINE_SWITCH_CONDITION(aligned, kAligned, {
+    const auto kernel = rmsnorm_mxfp8_rsigma_kernel<IType, kAligned>;
+    constexpr int threads = kRsigmaRowsPerCTA * THREADS_PER_WARP;
+    const int launch_rows = rows_per_launch(kernel, threads, num_sms, rows, kRsigmaRowsPerCTA, 1);
+    for (int row = 0; row < rows; row += launch_rows) {
+      const int n = std::min(launch_rows, rows - row);
+      kernel<<<DIVUP(n, kRsigmaRowsPerCTA), threads, 0, stream>>>(
+          x_ptr + static_cast<size_t>(row) * cols, rsigma_ptr + row, n, cols, epsilon);
+    }
+  });  // NOLINT(*)
   NVTE_CHECK_CUDA(cudaGetLastError());
 
-  const dim3 grid(rows / kTileRows, cols / kTileCols);
+  // Arguments for the rows from row on, a multiple of 128. The scaling factors of these rows
+  // start at a fixed offset in each layout: row-wise, after row rows of scales (swizzled: row /
+  // 128 rows of 128x4 tiles, the same bytes); column-wise, after row / 32 rows of scales
+  // (swizzled: row / 128 tiles into each column of tiles).
+  const auto args_from = [&](const int row) {
+    QuantizeArgs a = args;
+    const size_t data_offset = static_cast<size_t>(row) * cols;
+    if (rowwise) {
+      a.rowwise_data = static_cast<uint8_t *>(args.rowwise_data) + data_offset;
+      a.rowwise_scale_inv += static_cast<size_t>(row) * z->scale_inv.shape.back();
+    }
+    if (colwise) {
+      a.colwise_data = static_cast<uint8_t *>(args.colwise_data) + data_offset;
+      a.colwise_scale_inv +=
+          swizzled ? static_cast<size_t>(row / 128) * 512
+                   : static_cast<size_t>(row / kScaleBlock) * z->columnwise_scale_inv.shape.back();
+    }
+    return a;
+  };
+  const auto launch = [&](auto kernel) {
+    const int launch_rows =
+        rows_per_launch(kernel, kThreads, num_sms, rows, kTileRows, cols / kTileCols);
+    for (int row = 0; row < rows; row += launch_rows) {
+      const int n = std::min(launch_rows, rows - row);
+      kernel<<<dim3(n / kTileRows, cols / kTileCols), kThreads, 0, stream>>>(
+          x_ptr + static_cast<size_t>(row) * cols, gamma_ptr, rsigma_ptr + row, args_from(row),
+          cols, zero_centered_gamma, gamma_in_weight_dtype);
+    }
+  };
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
       aligned, kAligned,
       TRANSFORMER_ENGINE_SWITCH_CONDITION(
           swizzled, kSwizzled,
           if (rowwise && colwise) {
-            rmsnorm_mxfp8_quantize_kernel<IType, WType, OType, true, true, kSwizzled, kAligned>
-                <<<grid, kThreads, 0, stream>>>(x_ptr, gamma_ptr, rsigma_ptr, args, cols,
-                                                zero_centered_gamma, gamma_in_weight_dtype);
+            launch(rmsnorm_mxfp8_quantize_kernel<IType, WType, OType, true, true, kSwizzled,
+                                                 kAligned>);
           } else if (rowwise) {
-            rmsnorm_mxfp8_quantize_kernel<IType, WType, OType, true, false, kSwizzled, kAligned>
-                <<<grid, kThreads, 0, stream>>>(x_ptr, gamma_ptr, rsigma_ptr, args, cols,
-                                                zero_centered_gamma, gamma_in_weight_dtype);
+            launch(rmsnorm_mxfp8_quantize_kernel<IType, WType, OType, true, false, kSwizzled,
+                                                 kAligned>);
           } else {
-            rmsnorm_mxfp8_quantize_kernel<IType, WType, OType, false, true, kSwizzled, kAligned>
-                <<<grid, kThreads, 0, stream>>>(x_ptr, gamma_ptr, rsigma_ptr, args, cols,
-                                                zero_centered_gamma, gamma_in_weight_dtype);
+            launch(rmsnorm_mxfp8_quantize_kernel<IType, WType, OType, false, true, kSwizzled,
+                                                 kAligned>);
           }););  // NOLINT(*)
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 }  // namespace
 
-bool use_te_rmsnorm_fwd_mxfp8(const Tensor &x, const Tensor &gamma, const Tensor &z) {
-  if (!is_mxfp8_scaling(z.scaling_mode) || use_cudnn_norm_fwd_mxfp8() ||
-      !is_supported_by_CC_100()) {
+bool is_supported_by_te_rmsnorm_fwd_mxfp8(const Tensor &x, const Tensor &gamma, const Tensor &z) {
+  if (!is_mxfp8_scaling(z.scaling_mode) || !is_supported_by_CC_100()) {
     return false;
   }
   const bool rowwise = z.has_data();
@@ -390,7 +437,8 @@ bool use_te_rmsnorm_fwd_mxfp8(const Tensor &x, const Tensor &gamma, const Tensor
 }
 
 void rmsnorm_fwd_mxfp8(const Tensor &x, const Tensor &gamma, const float epsilon, Tensor *z,
-                       Tensor *rsigma, const bool zero_centered_gamma, cudaStream_t stream) {
+                       Tensor *rsigma, const int multiprocessorCount,
+                       const bool zero_centered_gamma, cudaStream_t stream) {
   const DType otype = z->has_data() ? z->data.dtype : z->columnwise_data.dtype;
   const bool gamma_in_weight_dtype = use_zero_centered_gamma_in_weight_dtype();
   TRANSFORMER_ENGINE_TYPE_SWITCH_FLOAT(
@@ -400,8 +448,8 @@ void rmsnorm_fwd_mxfp8(const Tensor &x, const Tensor &gamma, const float epsilon
           TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
               otype, OType,
               launch_rmsnorm_fwd_mxfp8<IType, WType, OType>(
-                  x, gamma, epsilon, z, rsigma, zero_centered_gamma, gamma_in_weight_dtype,
-                  stream););););  // NOLINT(*)
+                  x, gamma, epsilon, z, rsigma, multiprocessorCount, zero_centered_gamma,
+                  gamma_in_weight_dtype, stream););););  // NOLINT(*)
 }
 
 }  // namespace normalization

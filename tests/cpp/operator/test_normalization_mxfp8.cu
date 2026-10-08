@@ -103,7 +103,7 @@ void dequantize_2x(Tensor& input, Tensor& output, bool is_training)
 
 template <typename InputType, typename OutputType>
 void performTest(const size_t N, const size_t H, const bool zero_centered_gamma, NormType norm_type, bool is_training, const bool zero_centered_gamma_in_weight_dtype,
-                 const bool use_cudnn_mxfp8) {
+                 const bool use_cudnn) {
 
   cudaDeviceProp prop;
   cudaGetDeviceProperties(&prop, 0);
@@ -137,7 +137,7 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
   }
   // RMSNorm shapes that are multiples of 128 use Transformer Engine's fused MXFP8 kernel
   // unless cuDNN is requested.
-  nvte_enable_cudnn_norm_fwd_mxfp8(use_cudnn_mxfp8);
+  nvte_enable_cudnn_norm_fwd(use_cudnn);
 
   // Forward kernel
   float epsilon = 1e-5;
@@ -167,7 +167,7 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
   if (zero_centered_gamma_in_weight_dtype) {
     nvte_enable_zero_centered_gamma_in_weight_dtype(false);
   }
-  nvte_enable_cudnn_norm_fwd_mxfp8(false);
+  nvte_enable_cudnn_norm_fwd(false);
 
   Tensor dequantized_output("dequantized_output", std::vector<size_t>{ N, H }, DType::kFloat32, true, true);
 
@@ -248,6 +248,8 @@ size_t swizzled_scale_idx(size_t i, size_t j, size_t num_tiles_j) {
 
 // RMSNorm with MXFP8 output written with GEMM-swizzled scaling factors must give the same
 // data as with compact scaling factors, and the compact scaling factors in swizzled order.
+// The swizzled output is computed on a single SM, as with an SM margin, which launches the
+// kernels over chunks of rows.
 template <typename InputType, typename OutputType>
 void performSwizzledScalesTest(const size_t N, const size_t H, const bool is_training) {
   if (getDeviceComputeCapability() < blackwellComputeCapability) {
@@ -261,6 +263,7 @@ void performSwizzledScalesTest(const size_t N, const size_t H, const bool is_tra
   Tensor input("input", std::vector<size_t>{ N, H }, itype);
   Tensor gamma("gamma", std::vector<size_t>{ H }, itype);
   Tensor rsigma("rsigma", std::vector<size_t>{ N }, DType::kFloat32);
+  Tensor rsigma_swizzled("rsigma_swizzled", std::vector<size_t>{ N }, DType::kFloat32);
   Tensor z("z", std::vector<size_t>{ N, H }, otype, true, is_training, NVTE_MXFP8_1D_SCALING);
   Tensor z_swizzled("z_swizzled", std::vector<size_t>{ N, H }, otype, true, is_training,
                     NVTE_MXFP8_1D_SCALING);
@@ -268,19 +271,23 @@ void performSwizzledScalesTest(const size_t N, const size_t H, const bool is_tra
   fillUniform(&input);
   fillUniform(&gamma);
 
-  for (Tensor *out : {&z, &z_swizzled}) {
+  const auto run = [&](Tensor &out, Tensor &rs, const int sm_count) {
     Tensor workspace;
-    nvte_rmsnorm_fwd(input.data(), gamma.data(), 1e-5f, out->data(), rsigma.data(),
-                     workspace.data(), prop.multiProcessorCount, false, 0);
+    nvte_rmsnorm_fwd(input.data(), gamma.data(), 1e-5f, out.data(), rs.data(),
+                     workspace.data(), sm_count, false, 0);
     workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
-    nvte_rmsnorm_fwd(input.data(), gamma.data(), 1e-5f, out->data(), rsigma.data(),
-                     workspace.data(), prop.multiProcessorCount, false, 0);
-  }
+    nvte_rmsnorm_fwd(input.data(), gamma.data(), 1e-5f, out.data(), rs.data(),
+                     workspace.data(), sm_count, false, 0);
+  };
+  run(z, rsigma, prop.multiProcessorCount);
+  run(z_swizzled, rsigma_swizzled, 1);
   cudaDeviceSynchronize();
   auto err = cudaGetLastError();
   ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
   z.to_cpu();
   z_swizzled.to_cpu();
+  rsigma.to_cpu();
+  compareResults("rsigma", rsigma_swizzled, rsigma.rowwise_cpu_dptr<float>(), true, 0, 0);
 
   const auto bytes = [](const OutputType *p) { return reinterpret_cast<const uint8_t *>(p); };
   compareResults("rowwise_data", bytes(z_swizzled.rowwise_cpu_dptr<OutputType>()),
@@ -346,15 +353,15 @@ TEST_P(MxNormTestSuite, TestMxNorm) {
   const bool zero_centered_gamma = std::get<4>(GetParam());
   const bool is_training = std::get<5>(GetParam());
   const bool zero_centered_gamma_in_weight_dtype = std::get<6>(GetParam());
-  const bool use_cudnn_mxfp8 = std::get<7>(GetParam());
-  if (norm_type == NormType::LayerNorm && use_cudnn_mxfp8) {
+  const bool use_cudnn = std::get<7>(GetParam());
+  if (norm_type == NormType::LayerNorm && use_cudnn) {
     GTEST_SKIP() << "LayerNorm with MXFP8 output always uses cuDNN";
   }
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(input_type, InputType,
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP8_ONLY(output_type, OutputType,
       performTest<InputType, OutputType>(size.first, size.second, zero_centered_gamma, norm_type, is_training, zero_centered_gamma_in_weight_dtype,
-                                         use_cudnn_mxfp8);
+                                         use_cudnn);
     );
   );
 }

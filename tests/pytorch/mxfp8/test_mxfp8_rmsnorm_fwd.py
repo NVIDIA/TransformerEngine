@@ -21,7 +21,7 @@ recipe_available, reason_for_no_recipe = te.is_mxfp8_available(return_reason=Tru
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 @pytest.mark.skipif(
-    os.getenv("NVTE_NORM_FWD_MXFP8_USE_CUDNN", "0") == "1",
+    os.getenv("NVTE_NORM_FWD_USE_CUDNN", "0") == "1",
     reason="Tests Transformer Engine's fused kernel, not cuDNN",
 )
 @pytest.mark.parametrize("shape", [(128, 128), (256, 1024), (384, 7168)])
@@ -68,3 +68,65 @@ def test_rmsnorm_fwd_mxfp8(shape, dtype, fp8_dtype, zero_centered_gamma, optimiz
         if optimize_for_gemm:
             expected = swizzle_mxfp8_scale(rows, cols, expected, columnwise=columnwise)
         torch.testing.assert_close(getattr(out, attr), expected, atol=0, rtol=0, msg=attr)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.skipif(
+    os.getenv("NVTE_NORM_FWD_USE_CUDNN", "0") == "1",
+    reason="Tests Transformer Engine's fused kernel, not cuDNN",
+)
+@pytest.mark.parametrize("optimize_for_gemm", [False, True])
+def test_rmsnorm_fwd_mxfp8_sm_margin(optimize_for_gemm):
+    """With all SMs but one reserved, the kernels run over chunks of rows with the same output."""
+    torch.manual_seed(1234)
+    x = torch.randn(1024, 7168, dtype=torch.bfloat16, device="cuda")
+    weight = torch.randn(7168, dtype=torch.bfloat16, device="cuda")
+    sm_count = torch.cuda.get_device_properties(x.device).multi_processor_count
+
+    outputs = []
+    for sm_margin in (0, sm_count - 1):
+        quantizer = MXFP8Quantizer(tex.DType.kFloat8E4M3)
+        quantizer.optimize_for_gemm = optimize_for_gemm
+        outputs.append(
+            tex.rmsnorm_fwd(x, weight, 1e-5, None, quantizer, TE_DType[x.dtype], sm_margin, False)
+        )
+    (out, _, rsigma), (out_margin, _, rsigma_margin) = outputs
+    torch.testing.assert_close(rsigma_margin, rsigma, atol=0, rtol=0)
+    for attr in (
+        "_rowwise_data",
+        "_columnwise_data",
+        "_rowwise_scale_inv",
+        "_columnwise_scale_inv",
+    ):
+        torch.testing.assert_close(
+            getattr(out_margin, attr), getattr(out, attr), atol=0, rtol=0, msg=attr
+        )
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_rmsnorm_fwd_mxfp8_2d_quantization(dtype):
+    """The fused kernels quantize 1D blocks, so with 2D quantization the forward normalizes and
+    then quantizes 32x32 blocks."""
+    torch.manual_seed(1234)
+    x = torch.randn(256, 1024, dtype=dtype, device="cuda")
+    weight = torch.randn(1024, dtype=dtype, device="cuda")
+
+    quantizer = MXFP8Quantizer(tex.DType.kFloat8E4M3, with_2d_quantization=True)
+    out, _, _ = tex.rmsnorm_fwd(x, weight, 1e-5, None, quantizer, TE_DType[dtype], 0, False)
+
+    y, _, _ = tex.rmsnorm_fwd(x, weight, 1e-5, None, None, TE_DType[dtype], 0, False)
+    ref = MXFP8Quantizer(tex.DType.kFloat8E4M3, with_2d_quantization=True)(y)
+    for attr in (
+        "_rowwise_data",
+        "_columnwise_data",
+        "_rowwise_scale_inv",
+        "_columnwise_scale_inv",
+    ):
+        torch.testing.assert_close(
+            getattr(out, attr).view(torch.uint8),
+            getattr(ref, attr).view(torch.uint8),
+            atol=0,
+            rtol=0,
+            msg=attr,
+        )
