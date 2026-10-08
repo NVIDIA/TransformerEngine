@@ -21,6 +21,8 @@ from typing import Optional, Union
 import torch
 import transformer_engine_torch as tex
 
+from .constants import TE_DType_To_Torch
+
 # Re-export the C++ enum NVTERoutingMapFormat under a friendlier Python name.
 # Members:
 #   RoutingMapFormat.BYTEMAP   — bool[num_tokens, num_experts]
@@ -468,16 +470,18 @@ def fused_compute_score_for_moe_aux_loss(
 
 
 @functools.lru_cache(maxsize=None)
-def _get_moe_aux_loss_workspace_size() -> int:
-    """Maximum FP32 scratch capacity, queried once from the CUDA implementation."""
-    return tex.get_moe_aux_loss_workspace_size()
+def _get_moe_aux_loss_workspace_config() -> tuple[tuple[int, ...], torch.dtype]:
+    """Scratch metadata, queried once through the common forward operation."""
+    shape, dtype = tex.get_moe_aux_loss_workspace_config()
+    return tuple(shape), TE_DType_To_Torch[dtype]
 
 
 @functools.lru_cache(maxsize=None)
-def _get_cached_moe_aux_loss_workspace(device_index: int, stream_handle: int) -> torch.Tensor:
+def _get_cached_moe_aux_loss_workspace(device_index: int, _stream_handle: int) -> torch.Tensor:
     """Persistent scratch for eager calls, with independent storage for each stream."""
-    # stream_handle is part of the cache key: concurrent streams must not share scratch.
-    return torch.empty(_get_moe_aux_loss_workspace_size(), dtype=torch.float32, device=device_index)
+    # _stream_handle is part of the cache key: concurrent streams must not share scratch.
+    shape, dtype = _get_moe_aux_loss_workspace_config()
+    return torch.empty(shape, dtype=dtype, device=device_index)
 
 
 def _get_moe_aux_loss_workspace(device: torch.device) -> torch.Tensor:
@@ -486,9 +490,8 @@ def _get_moe_aux_loss_workspace(device: torch.device) -> torch.Tensor:
         if torch.cuda.is_current_stream_capturing():
             # Allocate only during capture, never on replay. Do not cache graph-pool
             # storage: a graph may replay concurrently with eager work or another graph.
-            return torch.empty(
-                _get_moe_aux_loss_workspace_size(), dtype=torch.float32, device=device
-            )
+            shape, dtype = _get_moe_aux_loss_workspace_config()
+            return torch.empty(shape, dtype=dtype, device=device)
         stream = torch.cuda.current_stream(device)
         return _get_cached_moe_aux_loss_workspace(stream.device.index, stream.cuda_stream)
 

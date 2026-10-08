@@ -328,15 +328,6 @@ void nvte_fused_moe_aux_loss_forward_graph_safe(const NVTETensor probs,
                                                 NVTETensor aux_loss, NVTETensor Const_buf,
                                                 cudaStream_t stream);
 
-/*! \brief Return the maximum workspace size in bytes for deterministic auxiliary loss.
- *
- *  The capacity covers all input shapes. This host-only query does not allocate
- *  memory or launch kernels. Divide by sizeof(float) to allocate FP32 elements.
- *
- *  \return Maximum required workspace size in bytes.
- */
-size_t nvte_get_moe_aux_loss_workspace_size();
-
 /*! \brief Deterministic forward pass for auxiliary loss, with a host token count.
  *
  *  Each CTA writes an FP32 partial sum into workspace, then a second kernel
@@ -344,12 +335,15 @@ size_t nvte_get_moe_aux_loss_workspace_size();
  *  inputs on the same hardware and software is bitwise reproducible; equality
  *  to other reduction implementations is not guaranteed.
  *
- *  Provide an FP32 workspace with capacity in bytes given by
- *  :c:func:`nvte_get_moe_aux_loss_workspace_size`. Its contents are overwritten
- *  and need no initialization. Workspace must remain valid through the queued
- *  forward kernels, but does not need to be saved for backward.
+ *  To query workspace requirements, pass a valid workspace tensor whose data
+ *  pointer is nullptr. The call populates its shape and dtype and returns without
+ *  launching kernels or accessing other tensors, which may be nullptr during
+ *  this query. The reported capacity covers all input shapes. Allocate storage
+ *  with the reported metadata, then call again to execute the operation.
+ *  Workspace contents are overwritten and need no initialization. Storage must
+ *  remain valid through the queued forward kernels, but is not saved for backward.
  *
- *  \param[in,out] workspace  Preallocated temporary FP32 buffer.
+ *  \param[in,out] workspace  Temporary buffer, or an empty tensor to query its metadata.
  *  Other parameters as in :c:func:`nvte_fused_moe_aux_loss_forward`.
  */
 void nvte_fused_moe_aux_loss_forward_v2(const NVTETensor probs, const NVTETensor tokens_per_expert,
