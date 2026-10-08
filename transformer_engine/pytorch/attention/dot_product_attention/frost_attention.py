@@ -552,10 +552,15 @@ def _validate_qkv(q, k, v, qkv_format):
     context-parallel ring calls the backward outside autograd, so neither direction may assume
     the other ran first.
 
-    Rank and head-dim contiguity are not checked here: cuDNN's frost_sdpa families register
-    _sdpa_validate.validate_graph, which enforces both in graph.validate().
+    Rank is checked here because cuDNN cannot: _sdpa_validate inspects the descriptor this
+    module builds, and bhsd_dim_stride reads dims 0-3, so a higher-rank tensor is described as
+    4D with its trailing dims dropped rather than rejected. The head-dim stride does reach the
+    descriptor, and _sdpa_validate rejects a non-unit one in graph.validate(), so it is not
+    repeated here.
     """
     for name, tensor in (("q", q), ("k", k), ("v", v)):
+        if tensor.dim() != 4:
+            raise ValueError(f"{name} must be 4D; got shape {tuple(tensor.shape)}")
         _check_dtype(name, tensor, q.dtype)
     _check_kv_match(k, v)
     qd, _ = _bhsd(q, qkv_format)
