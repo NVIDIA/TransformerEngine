@@ -12,10 +12,16 @@ from transformer_engine.pytorch.module import Linear, RMSNorm
 
 from .compressor import _Compressor
 from .dsa_cudnn import attention as _attention
-from .dsa_rope import _DSv4RotaryEmbedding, apply_rotary
+from .dsa_rope import _apply_rotary_query, _DSv4RotaryEmbedding, apply_rotary
 from .indexer import _Indexer
 
 __all__ = ["DSv4Attention", "DSv4HybridAttention"]
+
+
+@torch.compile
+def _compiled_q_rms_norm(q: torch.Tensor, eps: float) -> torch.Tensor:
+    """Compile DSv4's weightless per-head query normalization."""
+    return torch.nn.functional.rms_norm(q, (q.shape[-1],), eps=eps)
 
 
 class DSv4Attention(torch.nn.Module):
@@ -255,17 +261,18 @@ class DSv4HybridAttention(torch.nn.Module):
         q_residual = self.q_a_norm(q_a)
         q = self.q_b_proj(q_residual).reshape(batch, seq, self.num_heads, self.head_dim)
         # Query-up norm is unweighted; TE RMSNorm would add a learned scale.
-        q = torch.nn.functional.rms_norm(q, (self.head_dim,), eps=self.rms_norm_eps)
+        q = _compiled_q_rms_norm(q, self.rms_norm_eps)
         q = (
-            apply_rotary(q, *token_rope)
+            _apply_rotary_query(q, *token_rope, cu)
             .reshape(batch * seq, self.num_heads, self.head_dim)
             .contiguous()
         )
-        local_kv = apply_rotary(self.kv_norm(local_kv_projected).unsqueeze(2), *token_rope)
+        local_kv = apply_rotary(self.kv_norm(local_kv_projected).unsqueeze(2), *token_rope, cu)
         local_kv = local_kv.reshape(batch * seq, self.head_dim).contiguous()
         compressed_kv = apply_rotary(
             self.compressor(hidden_states, cu, cu_comp).reshape(batch, n_comp, 1, self.head_dim),
             *compressed_rope,
+            cu_comp,
         )
         compressed_kv = compressed_kv.reshape(batch * n_comp, self.head_dim).contiguous()
 
@@ -299,7 +306,7 @@ class DSv4HybridAttention(torch.nn.Module):
             max_compressed_seqlen=None if self.is_csa else n_comp,
         ).reshape(batch, seq, self.num_heads, self.head_dim)
         cos, sin = token_rope
-        output = apply_rotary(output, cos, -sin).reshape(batch, seq, self.o_groups, -1)
+        output = apply_rotary(output, cos, -sin, cu).reshape(batch, seq, self.o_groups, -1)
         weight = self.o_a_proj.weight.reshape(self.o_groups, self.o_lora_rank, -1)
         grouped = torch.einsum("bsgd,grd->bsgr", output, weight).flatten(2)
         result = self.o_b_proj(grouped)

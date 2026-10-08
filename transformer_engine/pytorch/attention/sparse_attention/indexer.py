@@ -71,14 +71,16 @@ class _Indexer(torch.nn.Module):
         # The singleton axis is the shared index-key head, not a tunable head count.
         key = (
             apply_rotary(
-                index_compressed.reshape(batch, n_comp, 1, self.head_dim), *compressed_rope
+                index_compressed.reshape(batch, n_comp, 1, self.head_dim),
+                *compressed_rope,
+                cu_comp,
             )
             .reshape(batch * n_comp, self.head_dim)
             .contiguous()
         )
         query = self.q_proj(q_residual).reshape(batch, seq, self.n_heads, self.head_dim)
         query = (
-            apply_rotary(query, *token_rope)
+            apply_rotary(query, *token_rope, cu)
             .reshape(batch * seq, self.n_heads, self.head_dim)
             .contiguous()
         )

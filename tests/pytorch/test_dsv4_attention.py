@@ -4,10 +4,12 @@
 
 """DSv4 core against a dense oracle, including packed sequence boundaries."""
 
+import os
+
 import pytest
 import torch
 
-from transformer_engine.pytorch.attention.sparse_attention import dsv4_attention
+from transformer_engine.pytorch.attention.sparse_attention import dsa_rope, dsv4_attention
 
 
 @pytest.mark.parametrize("variant", ["hca", "csa"])
@@ -102,3 +104,55 @@ def test_dsv4_rejects_unsupported_metadata():
     core = dsv4_attention.DSv4Attention(window_size=32, ratio=4)
     with pytest.raises(ValueError, match="query"):
         core(torch.empty(1, 4, 512), None, None, None, None, None)
+
+
+def test_dsv4_cute_rope_batched_forward_backward(monkeypatch):
+    """The packed CuTe bridge must reset positions at each BSHD sequence."""
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (10, 0):
+        pytest.skip("CuTe DSv4 RoPE requires SM100")
+    if dsa_rope._cute_rope_module() is None:
+        pytest.skip("CuTe DSL is unavailable")
+    if os.environ.get("NVTE_ENABLE_CUTEDSL_BACKEND", "0") == "0":
+        pytest.skip("native CuTe DSL dispatch is disabled")
+
+    torch.manual_seed(23)
+    batch, seq, heads, dim, width = 2, 17, 64, 512, 64
+    x = torch.randn(batch, seq, heads, dim, device="cuda", dtype=torch.bfloat16)
+    (cos, sin), _ = dsa_rope.rotary_embeddings(seq, 4, width, 160000.0, x.device)
+    cu = torch.arange(batch + 1, device=x.device, dtype=torch.int32) * seq
+    gradient = torch.randn_like(x)
+
+    module = dsa_rope._cute_rope_module()
+    monkeypatch.setattr(
+        module,
+        "forward_inplace",
+        lambda *_: pytest.fail("native forward fell back to its Python launcher"),
+    )
+    monkeypatch.setattr(
+        module,
+        "backward_inplace",
+        lambda *_: pytest.fail("native backward fell back to its Python launcher"),
+    )
+    candidate_input = x.detach().requires_grad_()
+    candidate = dsa_rope.apply_rotary(candidate_input, cos, sin, cu)
+    candidate_grad = torch.autograd.grad(candidate, candidate_input, gradient)[0]
+
+    reference_input = x.detach().requires_grad_()
+    reference = dsa_rope._apply_rotary_eager(reference_input, cos, sin)
+    reference_grad = torch.autograd.grad(reference, reference_input, gradient)[0]
+
+    assert candidate.data_ptr() != candidate_input.data_ptr()
+    torch.testing.assert_close(candidate, reference, atol=2e-2, rtol=2e-2)
+    grad_delta = candidate_grad.float() - reference_grad.float()
+    assert grad_delta.abs().max() <= 0.03125
+    assert grad_delta.norm() / reference_grad.float().norm() < 0.002
+
+    query_source = x.detach().requires_grad_()
+    query_input = query_source.clone()
+    query_ptr = query_input.data_ptr()
+    query = dsa_rope._apply_rotary_query(query_input, cos, sin, cu)
+    query_grad = torch.autograd.grad(query, query_source, gradient)[0]
+
+    assert query.data_ptr() == query_ptr
+    torch.testing.assert_close(query, reference, atol=2e-2, rtol=2e-2)
+    torch.testing.assert_close(query_grad, reference_grad, atol=0.03125, rtol=0.002)

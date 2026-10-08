@@ -9,6 +9,34 @@
 
 namespace transformer_engine::pytorch {
 
+bool dsv4_rope_cutedsl_(at::Tensor input, const at::Tensor &cos, const at::Tensor &sin,
+                        const at::Tensor &cu_seqlens, const bool backward) {
+  TORCH_CHECK(input.is_cuda() && cos.is_cuda() && sin.is_cuda() && cu_seqlens.is_cuda(),
+              "DSv4 CuTe RoPE tensors must be on CUDA.");
+  TORCH_CHECK(input.device() == cos.device() && input.device() == sin.device() &&
+                  input.device() == cu_seqlens.device(),
+              "DSv4 CuTe RoPE tensors must share one device.");
+  TORCH_CHECK(input.dim() == 3 && cos.dim() == 2 && sin.sizes() == cos.sizes() &&
+                  cu_seqlens.dim() == 1,
+              "Expected input [T,H,D], COS/SIN [P,R], and cu_seqlens [B+1].");
+  TORCH_CHECK(input.is_contiguous() && cos.is_contiguous() && sin.is_contiguous() &&
+                  cu_seqlens.is_contiguous(),
+              "DSv4 CuTe RoPE tensors must be contiguous.");
+  TORCH_CHECK(input.scalar_type() == at::ScalarType::BFloat16 &&
+                  cos.scalar_type() == at::ScalarType::Float &&
+                  sin.scalar_type() == at::ScalarType::Float &&
+                  cu_seqlens.scalar_type() == at::ScalarType::Int,
+              "DSv4 CuTe RoPE expects BF16 input, FP32 tables, and int32 prefixes.");
+
+  auto input_cu = makeTransformerEngineTensor(input);
+  auto cos_cu = makeTransformerEngineTensor(cos);
+  auto sin_cu = makeTransformerEngineTensor(sin);
+  auto cu_seqlens_cu = makeTransformerEngineTensor(cu_seqlens);
+  return nvte_dsv4_rope_cutedsl(input_cu.data(), cos_cu.data(), sin_cu.data(),
+                                cu_seqlens_cu.data(), backward,
+                                at::cuda::getCurrentCUDAStream());
+}
+
 at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
                               const std::optional<at::Tensor> start_positions,
                               const NVTE_QKV_Format qkv_format, const bool interleaved,

@@ -76,6 +76,15 @@ void nvte_fused_rope_backward(const NVTETensor output_grads, const NVTETensor cu
                               const int stride_s_or_t, const int stride_b, const int stride_h,
                               const int stride_d, cudaStream_t stream);
 
+/*! \brief Apply DSv4's trailing-channel RoPE in place with the optional CuTe DSL backend.
+ *
+ *  Returns false when the backend or input configuration is unsupported so the
+ *  caller can use its existing implementation.
+ */
+bool nvte_dsv4_rope_cutedsl(NVTETensor input, const NVTETensor cos, const NVTETensor sin,
+                            const NVTETensor cu_seqlens, const bool backward,
+                            cudaStream_t stream);
+
 /*! \brief Apply rotary positional embedding to the combined QKV input tensor.
  *
  *  \param[in]     qkv_input       Combined QKV input tensor for fused rope.
