@@ -63,8 +63,18 @@ def world_group() -> torch.distributed.ProcessGroup:
         init_method=f"file://{os.environ['NVTE_TEST_RDZV_PATH']}",
         world_size=world_size,
         rank=rank,
+        device_id=torch.device("cuda", rank),
     )
     return group
+
+
+def destroy_world_group() -> None:
+    """Destroy NCCL process group"""
+    process_group = world_group()
+    torch.distributed.barrier(process_group)
+    torch.cuda.synchronize()
+    torch.distributed.destroy_process_group(process_group)
+    world_group.cache_clear()
 
 
 def reset_rng(seed: int = 1234) -> None:
@@ -1032,6 +1042,9 @@ def run_parallel_tests() -> None:
         if rank == 0:
             print(f"Running _test_fp8_scale_update")
         _test_fp8_scale_update()
+
+    # Make sure NCCL shuts down cleanly
+    destroy_world_group()
 
 
 # Parallel job sizes
