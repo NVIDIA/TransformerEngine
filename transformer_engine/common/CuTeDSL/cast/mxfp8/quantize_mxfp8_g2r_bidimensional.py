@@ -21,7 +21,6 @@ from transformer_engine.common.CuTeDSL.utils import (
 from transformer_engine.common.CuTeDSL.utils_fp8 import mul_bf16x2x2_cvt_bf16x4_to_fp8x4
 from .quantize_mxfp8_common import (
     MXFP8_BLOCK_SCALING_SIZE,
-    THREADS_PER_WARP,
     MXFP8QuantizeConfig,
     MXFP8QuantizeKernelBase,
     bf16_pair_magnitude,
@@ -101,14 +100,13 @@ def quantize_bidimensional_mxfp8_g2r(
             1,
         ),
     )
+    # If CTA_THREADS_Y // THREADS_Y_PER_MX_BLOCK == 1, this will help compiler derive alignment
+    # Otherwise coalesce will not do anything which is still fine
+    tv_col_scale = cute.coalesce(tv_col_scale, target_profile=(1, 1))
     gS_col_thread = cute.composition(gS_col_tile, tv_col_scale)[tidx, None]
 
     # Input fragment contains all rows it handles; output fragment contains only one row and we write it back row by row
     rX = cute.make_rmem_tensor((ELEMENTS_X_PER_THREAD, ELEMENTS_Y_PER_THREAD), cfg.DTYPE)
-    rO = cute.make_rmem_tensor((ELEMENTS_X_PER_THREAD,), cfg.FP8_DTYPE)
-
-    # For rowwise scales, we write one row at a time
-    rS_row = cute.make_rmem_tensor((1,), SCALE_DTYPE)
 
     load_atom = cute.make_copy_atom(
         cute.nvgpu.CopyG2ROp(),
@@ -131,7 +129,9 @@ def quantize_bidimensional_mxfp8_g2r(
 
     # Copy all rows a thread sweeps into the RMEM fragment at once
     for row_idx in cutlass.range_constexpr(ELEMENTS_Y_PER_THREAD):
-        cute.copy(load_atom, gX_thread[None, row_idx], rX[None, row_idx], cache_policy=cache_policy)
+        cute.copy(
+            load_atom, gX_thread[(None, row_idx),], rX[None, row_idx], cache_policy=cache_policy
+        )
 
     @cute.jit
     def extract_mx_block_amax(values_i32: cute.Tensor) -> Uint32:
@@ -143,23 +143,25 @@ def quantize_bidimensional_mxfp8_g2r(
             amax = abs_max_x2_bf16(amax, cute.arch.shuffle_sync_bfly(amax, 1 << stage))
         return bf16_pair_magnitude(amax)
 
-    # Rowwise pass: produce each row's rowwise scales and quantized outputs, and write them back to GMEM immediately.
-    rO_u32 = cute.recast_tensor(rO, Uint32)
+    rS_row = cute.make_rmem_tensor((1,), SCALE_DTYPE)
+    rO_row = cute.make_rmem_tensor((ELEMENTS_X_PER_THREAD,), cfg.FP8_DTYPE)
+    rO_row_u32 = cute.recast_tensor(rO_row, Uint32)
+
     # Only one thread from threads that share the MXFP8 block writes the rowwise scale
     is_writer_thread = tidx % THREADS_X_PER_MX_BLOCK == 0
     for row_idx in cutlass.range_constexpr(ELEMENTS_Y_PER_THREAD):
         rX_row_i32 = cute.recast_tensor(rX[None, row_idx], Int32)
         reciprocal = bf16_mx_scale_reciprocal(extract_mx_block_amax(rX_row_i32), MAX_EXPONENT)
         reciprocal_packed = reciprocal | (reciprocal << Uint32(16))
-        for pack_idx in cutlass.range_constexpr(cute.size(rO_u32)):
-            rO_u32[pack_idx] = scale_and_pack(
+        for pack_idx in cutlass.range_constexpr(cute.size(rO_row_u32)):
+            rO_row_u32[pack_idx] = scale_and_pack(
                 rX_row_i32[2 * pack_idx],
                 reciprocal_packed,
                 rX_row_i32[2 * pack_idx + 1],
                 reciprocal_packed,
             )
-        # rO_u32 and rO share the same memory
-        cute.copy(store_atom, rO, gO_row_thread[None, row_idx], cache_policy=cache_policy)
+        # rO_row_u32 and rO_row share the same memory
+        cute.copy(store_atom, rO_row, gO_row_thread[(None, row_idx),], cache_policy=cache_policy)
         if is_writer_thread:
             rS_row[0] = Uint8(bf16_mx_scale_bytes_pair(reciprocal_packed)).bitcast(SCALE_DTYPE)
             cute.copy(
@@ -169,7 +171,6 @@ def quantize_bidimensional_mxfp8_g2r(
                 cache_policy=cache_policy,
             )
 
-    # Columnwise pass: only produce the colwise scale.
     # We first reduce each thread's rows into one maximum per column before reduce across different threads in the CTA
     rAmax_col = cute.make_rmem_tensor((ELEMENTS_X_PER_THREAD,), cfg.DTYPE)
 
@@ -184,91 +185,100 @@ def quantize_bidimensional_mxfp8_g2r(
 
     # Threads that process a columnwise MXFP8 block don't belong to the same warp so we have to use SMEM to reduce the scale
     allocator = cutlass.memory.SmemAllocator()
+
+    if cutlass.const_expr(ELEMENTS_X_PER_THREAD == 16):
+        scratch_swizzle = cute.make_swizzle(3, 1, 5)
+    else:
+        scratch_swizzle = cute.make_swizzle(2, 1, 5)
+
     sAmaxs_col_scratch_layout = cute.zipped_product(
         rAmax_col.layout,
-        thread_layout,
+        # Store fragments in flat thread-ID order while keeping the same shape.
+        cute.make_layout(thread_layout.shape),
+    )
+    sAmaxs_col_scratch_layout = cute.make_composed_layout(
+        scratch_swizzle, 0, sAmaxs_col_scratch_layout
     )
     sAmaxs_col_scratch = allocator.allocate_tensor(
         cfg.DTYPE, sAmaxs_col_scratch_layout, byte_alignment=16
     )
-    sAmaxs_col_scratch_i32 = cute.recast_tensor(sAmaxs_col_scratch, Int32)
-    sS_col_reduction_scratch = allocator.allocate_tensor(
-        cfg.DTYPE, (CTA_THREADS_Y, CTA_THREADS_X), byte_alignment=16
-    )
-    sS_col_reduction_scratch_u32 = cute.recast_tensor(sS_col_reduction_scratch, Uint32)
 
-    # Every thread copies the RMEM fragment to SMEM scratch space for reduction across warps later
-    cute.autovec_copy(
-        rAmax_col,
-        sAmaxs_col_scratch[None, tidx],
+    # RMEM buffer for the reciprocal of the columnwise scale to calculate the quantized output
+    rS_col_rcp = cute.make_rmem_tensor((ELEMENTS_X_PER_THREAD,), cfg.DTYPE)
+    # SMEM buffer for colwise scale reduction
+    sS_col_reduction_scratch_layout = cute.zipped_product(
+        rS_col_rcp.layout,
+        cute.make_layout(CTA_THREADS_X),
     )
+    sS_col_reduction_scratch_layout = cute.make_composed_layout(
+        scratch_swizzle, 0, sS_col_reduction_scratch_layout
+    )
+    sRcp_col_reduction_scratch = allocator.allocate_tensor(
+        cfg.DTYPE, sS_col_reduction_scratch_layout, byte_alignment=16
+    )
+    sRcp_col_thread = cute.composition(sRcp_col_reduction_scratch, tv_col_scale)[tidx, None]
 
-    # Reduce thread read amaxes from SMEM then calculate & write the columnwise scale to SMEM scratch space
-    is_reduce_thread = tidx < CTA_THREADS_X
-    if is_reduce_thread:
-        amaxX2 = sAmaxs_col_scratch_i32[0, tidx]
-        for scratch_row in cutlass.range_constexpr(CTA_THREADS_Y):
-            amaxX2 = abs_max_x2_bf16(amaxX2, sAmaxs_col_scratch_i32[scratch_row, tidx])
-        sS_col_reduction_scratch_u32[tidx] = bf16_mx_scale_reciprocal(amaxX2, MAX_EXPONENT)
+    # Every thread writes its partial maxima using its flat thread ID.
+    cute.autovec_copy(rAmax_col, sAmaxs_col_scratch[None, tidx])
     cute.arch.sync_threads()
 
-    # Let the reduction threads write the RMEM columnwise scales back to GMEM
-    if is_reduce_thread:
-        rS_col_u32 = cute.recast_tensor(rS_col, Uint32)
-        for packed_idx in cutlass.range_constexpr(cute.size(rS_col_u32)):
-            rS_col_u32[packed_idx] = bf16_mx_scale_bytes_pair(rS_col_u32[2 * packed_idx]) | (
-                bf16_mx_scale_bytes_pair(rS_col_u32[2 * packed_idx + 1]) << Uint32(16)
-            )
-        cute.copy(col_scale_atom, rS_col, gS_col_thread, cache_policy=cache_policy)
+    sAmaxs_col_scratch_i32 = cute.recast_tensor(sAmaxs_col_scratch, Int32)
+    
+    # The layout of sAmaxs_col_scratch_i32 is a zipped product of thread layout (CTA_THREADS_Y, CTA_THREADS_X)
+    # and each thread's value layout from rAmax_col (ELEMENTS_X_PER_THREAD,)
+    # And we let each thread here reduce two full column (2 bf16 as a packed i32) of CTA_THREADS_Y elements,
+    # so we have CTA_THREADS_X * ELEMENT_X_PER_THREAD reduction threads
+    reduction_threads_num = CTA_THREADS_X * ELEMENTS_X_PER_THREAD // 2
+    is_reduction_thread = tidx < reduction_threads_num
 
-    # Every thread reads the reduced columnwise scales from SMEM to RMEM
-    rS_col = cute.make_rmem_tensor((ELEMENTS_X_PER_THREAD,), cfg.DTYPE)
-    cute.autovec_copy(
-        sS_col_reduction_scratch[tidx],
-        rS_col
+    # And apply the colwise amax reduction layout to the SMEM buffer
+    tv_col_reduce_layout = cute.make_layout_tv(
+        thr_layout=cute.make_layout((reduction_threads_num,), stride=(1,)),
+        val_layout=cute.make_layout((CTA_THREADS_Y,), stride=(1,)),
     )
 
-    # And then every thread uses the columnwise scales to calculate quantized outputs and writes it to GMEM
-    
-    
+    rS_col_rcp_u32 = cute.recast_tensor(rS_col_rcp, Uint32)
+    if is_reduction_thread:
+        rAmaxs_col_i32 = cute.composition(sAmaxs_col_scratch_i32, tv_col_reduce_layout)[tidx, None]
+        # Find the amax for all columns by comparing each row's partial amax
+        for bf16x2_idx in cutlass.range_constexpr(cute.size(rS_col_rcp_u32)):
+            amaxX2 = rAmaxs_col_i32[bf16x2_idx]
+            for scratch_row in cutlass.range_constexpr(1, CTA_THREADS_Y):
+                peer_thread = thread_layout((scratch_row, tidx))
+                amaxX2 = abs_max_x2_bf16(amaxX2, rAmaxs_col_i32[bf16x2_idx, peer_thread])
+            # Get the reciprocal directly from the amax
+            rS_col_rcp_u32[bf16x2_idx] = bf16_mx_scale_reciprocal_pair(amaxX2, MAX_EXPONENT)
+        # Write the reciprocal to the SMEM scratch buffer so that all threads can use it to quantize their columns
+        cute.autovec_copy(rS_col_rcp, sRcp_col_thread)
 
+        rS_col = cute.make_rmem_tensor((ELEMENTS_X_PER_THREAD,), SCALE_DTYPE)
+        rS_col_u32 = cute.recast_tensor(rS_col, Uint32)
+        # Get the colwise scale from the reciprocal
+        for packed_idx in cutlass.range_constexpr(cute.size(rS_col_u32)):
+            rS_col_u32[packed_idx] = bf16_mx_scale_bytes_pair(rS_col_rcp_u32[2 * packed_idx]) | (
+                bf16_mx_scale_bytes_pair(rS_col_rcp_u32[2 * packed_idx + 1]) << Uint32(16)
+            )
+        # Use RMEM buffer to stash the columnwise scale in packed bytes and flush it to GMEM using vectorized store at once
+        cute.copy(col_scale_atom, rS_col, gS_col_thread, cache_policy=cache_policy)
+    cute.arch.sync_threads()
 
-    # # One thread reduces each column pair across all warps (all 32 tile rows).
-    # if tidx < cute.size(sColumnScales) // 2:
-    #     sColumnAmaxs_i32 = cute.recast_tensor(sColumnAmaxs, Int32)
-    #     sColumnScales_u32 = cute.recast_tensor(sColumnScales, Uint32)
-    #     amax = sColumnAmaxs_i32[0, tidx]
-    #     for warp_idx in cutlass.range_constexpr(1, CTA_THREADS_Y):
-    #         amax = abs_max_x2_bf16(amax, sColumnAmaxs_i32[warp_idx, tidx])
-    #     sColumnScales_u32[tidx] = bf16_mx_scale_reciprocal_pair(amax, MAX_EXPONENT)
-    # cute.arch.sync_threads()
+    # All warps read the same reciprocals for their columns through the overlapping TV layout.
+    cute.autovec_copy(sRcp_col_thread, rS_col_rcp)
 
-    # # The same layout returns the reciprocals to each lane's original columns.
-    # for half_idx in cutlass.range_constexpr(2):
-    #     cute.autovec_copy(
-    #         cute.local_tile(sColumnScale_thread, (cute.size(rColumnScales) // 2,), (half_idx,)),
-    #         cute.local_tile(rColumnScales, (cute.size(rColumnScales) // 2,), (half_idx,)),
-    #     )
+    rO_col = cute.make_rmem_tensor((ELEMENTS_X_PER_THREAD,), cfg.FP8_DTYPE)
+    rO_col_u32 = cute.recast_tensor(rO_col, Uint32)
 
-    # rColumnScales_u32 = cute.recast_tensor(rColumnScales, Uint32)
-    # if warp == 0:
-    #     rS_col_u32 = cute.recast_tensor(rS_col, Uint32)
-    #     for pack_idx in cutlass.range_constexpr(cute.size(rS_col_u32)):
-    #         rS_col_u32[pack_idx] = bf16_mx_scale_bytes_pair(rColumnScales_u32[2 * pack_idx]) | (
-    #             bf16_mx_scale_bytes_pair(rColumnScales_u32[2 * pack_idx + 1]) << Uint32(16)
-    #         )
-    #     cute.copy(col_scale_atom, rS_col, gS_col_thread, cache_policy=cache_policy)
-
-    # for row_idx in cutlass.range_constexpr(ELEMENTS_Y_PER_THREAD):
-    #     rX_row_i32 = cute.recast_tensor(rX[None, row_idx], Int32)
-    #     for pack_idx in cutlass.range_constexpr(cute.size(rO_u32)):
-    #         rO_u32[pack_idx] = scale_and_pack(
-    #             rX_row_i32[2 * pack_idx],
-    #             rColumnScales_u32[2 * pack_idx],
-    #             rX_row_i32[2 * pack_idx + 1],
-    #             rColumnScales_u32[2 * pack_idx + 1],
-    #         )
-    #     cute.copy(store_atom, rO, gO_col_thread[None, row_idx], cache_policy=cache_policy)
+    # Each thread quantizes its own rows with the columnwise reciprocals and write its output to GMEM.
+    for row_idx in cutlass.range_constexpr(ELEMENTS_Y_PER_THREAD):
+        rX_row_i32 = cute.recast_tensor(rX[None, row_idx], Int32)
+        for packed_idx in cutlass.range_constexpr(cute.size(rO_col_u32)):
+            rO_col_u32[packed_idx] = scale_and_pack(
+                rX_row_i32[2 * packed_idx],
+                rS_col_rcp_u32[2 * packed_idx],
+                rX_row_i32[2 * packed_idx + 1],
+                rS_col_rcp_u32[2 * packed_idx + 1],
+            )
+        cute.copy(store_atom, rO_col, gO_col_thread[(None, row_idx),], cache_policy=cache_policy)
 
 
 class MXFP8QuantizeRegisterBidimensionalKernel(MXFP8QuantizeKernelBase):
