@@ -46,14 +46,11 @@ def _frost_availability():
 
 
 _SKIP = _frost_availability()
-# Mirrors NVTE_GDN_TEST_REQUIRED in test_gdn_attention.py. These tests skip on any machine that
-# cannot reach the backend, which on most CI hardware is every machine; setting this on a lane
-# that is supposed to cover FROST turns a silent skip into a loud failure.
+# Mirrors NVTE_GDN_TEST_REQUIRED: these skip on any machine that cannot reach the backend.
 if os.getenv("NVTE_FROST_TEST_REQUIRED", "0") == "1" and _SKIP is not None:
     raise RuntimeError("NVTE_FROST_TEST_REQUIRED=1, but FrostAttention is unavailable: %s" % _SKIP)
-# Applied per test rather than as a module-level pytestmark: the ONNX-export regression
-# below guards a code path that runs on every GPU, so gating it on Blackwell would skip it
-# exactly where the bug it covers can still occur.
+# Per test, not a module-level pytestmark: the ONNX-export regression below runs on every GPU, so
+# gating it on Blackwell would skip it exactly where its bug can still occur.
 requires_frost = pytest.mark.skipif(_SKIP is not None, reason=str(_SKIP))
 
 # head_dim 512 is the whole point of the backend; 320 checks the interior of the (256, 512] range
