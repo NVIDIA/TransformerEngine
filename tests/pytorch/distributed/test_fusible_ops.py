@@ -1066,7 +1066,17 @@ def main() -> None:
     parser.add_argument("--parallel", action="store_true", help="Run parallel tests")
     args = parser.parse_args()
     if args.parallel:
-        run_parallel_tests()
+        try:
+            run_parallel_tests()
+            # Ensure every rank has finished its CUDA/NCCL work before any rank
+            # starts tearing down the communicator and CUDA runtime.
+            torch.distributed.barrier(
+                group=world_group(),
+                device_ids=[torch.cuda.current_device()],
+            )
+        finally:
+            if torch.distributed.is_initialized():
+                torch.distributed.destroy_process_group()
 
 
 if __name__ == "__main__":
