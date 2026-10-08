@@ -2,18 +2,12 @@
 #
 # See LICENSE for license information.
 
-"""Shared helpers for driving cuDNN frontend's Python graph API from PyTorch.
+"""Helpers for driving cuDNN frontend's Python graph API from PyTorch.
 
-Covers importing the frontend, keeping one stream-current handle per device, describing TE
-tensors in cuDNN's logical BHSD form, building the SDPA forward and backward graphs, and
-creating, selecting and building their plans. What a backend wants from a graph -- a mask, a
-score_mod, which engine to pin or bar -- is passed in rather than decided here.
-
-``flex_attention.py`` and ``frost_attention.py`` both build their graphs through this module. Its
-state is process-global -- the ``cudnn`` module, the ``CUDNN_FRONTEND_ENABLE_FROST_ENGINES``
-switch and the per-device handles -- so it is set up in one place instead of twice.
-
-``backend_name`` is passed through so an error says which backend was running.
+Shared by flex_attention.py and frost_attention.py: importing the frontend, holding a handle per
+device, describing tensors in cuDNN's BHSD form, and building and planning the SDPA forward and
+backward graphs. Anything specific to one backend, such as a mask, a score_mod or which engine
+to pin, is passed in by the caller.
 """
 
 from __future__ import annotations
