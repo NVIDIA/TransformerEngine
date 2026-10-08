@@ -1091,11 +1091,11 @@ def get_attention_backend(
             )
             use_flash_attention_3 = False
 
-        if use_flash_attention_3 and is_training and head_dim_qk != head_dim_v:
+        # FA3 forward supports V dimensions up to 512, but backward is limited to 256.
+        if use_flash_attention_3 and is_training and head_dim_v > 256:
             logger.debug(
-                "Disabling FlashAttention 3 for training with head_dim_qk != head_dim_v, "
-                "as its backward pass does not support it "
-                "(Dao-AILab/flash-attention#1487). "
+                "Disabling FlashAttention 3 for training with head_dim_v > 256, "
+                "as its backward pass only supports head dimensions up to 256. "
                 "Found: head_dim_qk = %s, head_dim_v = %s.",
                 head_dim_qk,
                 head_dim_v,
