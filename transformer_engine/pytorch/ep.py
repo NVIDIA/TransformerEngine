@@ -38,6 +38,7 @@ __all__ = [
     "ep_finalize",
     "ep_dispatch",
     "ep_combine",
+    "nvfp4_group_row_scaled_cast",
     "symm_mem_alloc",
     "release_symm_mem_pool",
     "is_symm_backed",
@@ -1124,6 +1125,48 @@ def _make_grouped_mxfp8(data, scale_inv, token_counts, fp8_dtype, fake_dtype):
         scale_inv=scale_inv.reshape(-1).detach(),
         first_dims=token_counts,
         tensor_offsets=tex.splits_to_offsets(token_counts, hidden),
+    )
+
+
+def nvfp4_group_row_scaled_cast(
+    tokens: torch.Tensor,
+    tokens_per_expert: torch.Tensor,
+    *,
+    fp4_dtype: DType = DType.kFloat4E2M1,
+    scale_dtype: DType = DType.kFloat8E4M3,
+):
+    """Graph-safe grouped row-scaled NVFP4 cast (amax + cast) from device routing.
+
+    ``tokens`` is a packed (capacity, hidden) bfloat16 buffer; ``tokens_per_expert``
+    (int64 [num_experts]) is the 128-aligned per-expert row count. Routing stays on
+    device, so the cast can be captured and replayed. Returns a row-scaled NVFP4
+    ``GroupedTensor``.
+    """
+    from .tensor.nvfp4_tensor import NVFP4Quantizer
+
+    if tokens.dim() != 2:
+        raise ValueError("tokens must be 2D [capacity_rows, hidden].")
+    if tokens.dtype is not torch.bfloat16:
+        raise TypeError(f"tokens must be bfloat16; got dtype={tokens.dtype}.")
+    if tokens_per_expert.dtype is not torch.int64:
+        raise TypeError(f"tokens_per_expert must be int64; got dtype={tokens_per_expert.dtype}.")
+
+    _, hidden = tokens.shape
+    num_tensors = tokens_per_expert.numel()
+    quantizer = NVFP4Quantizer(
+        fp4_dtype=fp4_dtype,
+        scale_dtype=scale_dtype,
+        rowwise=True,
+        columnwise=False,
+        row_scaled_nvfp4=True,
+    )
+    tensor_offsets = tex.splits_to_offsets(tokens_per_expert, hidden)
+    return tex.nvfp4_group_row_scaled_cast_graph_safe(
+        tokens,
+        quantizer,
+        num_tensors,
+        tokens_per_expert,
+        tensor_offsets,
     )
 
 

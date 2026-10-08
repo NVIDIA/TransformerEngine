@@ -514,6 +514,74 @@ void nvte_group_nvfp4_compute_amax(const NVTETensor input, NVTETensor *outputs,
                                    const size_t *split_sections, size_t num_tensors,
                                    cudaStream_t stream);
 
+/*! \brief Casts a grouped row-scaled NVFP4 input to FP4 in a single kernel launch.
+ *
+ *  Single-launch counterpart of the per-expert row-scaled NVFP4 cast. The input
+ *  is one packed (sum_M, K) BF16 buffer; `split_sections` gives the per-expert
+ *  row counts (each a multiple of 128) and K must be a multiple of 128. The
+ *  per-expert rowwise amax [M_i] and (when the columnwise/transpose output is
+ *  allocated) columnwise amax [K] must already be populated, e.g. by
+ *  nvte_group_nvfp4_compute_amax. For expert i the rowwise FP4 data and E4M3
+ *  scales are written to `outputs[i]`, and the transpose counterpart to
+ *  `outputs[i]`'s columnwise buffers when present. The output is byte-identical
+ *  to quantizing each expert independently.
+ *
+ *  \param[in]      input           Packed grouped input tensor (BF16).
+ *  \param[in,out]  outputs         Per-expert output tensors (amax pre-populated).
+ *  \param[in]      split_sections  Per-expert row counts (each a multiple of 128).
+ *  \param[in]      num_tensors     Number of output tensors.
+ *  \param[in]      quant_config    (Optional) Quantization configurations.
+ *  \param[in]      stream          CUDA stream used for the operation.
+ */
+void nvte_group_nvfp4_row_scaled_cast_with_amax(const NVTETensor input, NVTETensor *outputs,
+                                                const size_t *split_sections, size_t num_tensors,
+                                                const NVTEQuantizationConfig quant_config,
+                                                cudaStream_t stream);
+
+/*! \brief CUDA-graph-safe grouped row-scaled NVFP4 fused amax.
+ *
+ *  Device-metadata counterpart of nvte_group_nvfp4_compute_amax. Instead of host
+ *  `split_sections`, the per-expert offsets are read from the output grouped
+ *  tensor's device `tensor_offsets`, so a dynamic-routing MoE amax can be
+ *  captured once and replayed with different routing.
+ *
+ *  The input is one packed (capacity, K) BF16 buffer. The rowwise amax [sum_M]
+ *  is written to the contiguous `output->amax` and the columnwise amax
+ *  [num_tensors * K] to `output->columnwise_amax`, whichever are allocated. Only
+ *  the const-last-dimension layout (VARYING_FIRST_DIM: common K) is supported;
+ *  K must be a multiple of 128 and each per-expert row count a multiple of 128.
+ *
+ *  \param[in]      input    Packed grouped input tensor (BF16) with device metadata.
+ *  \param[in,out]  output   Grouped output tensor receiving the amax vectors.
+ *  \param[in]      stream   CUDA stream used for the operation.
+ */
+void nvte_group_nvfp4_compute_amax_graph_safe(const NVTEGroupedTensor input,
+                                              NVTEGroupedTensor output, cudaStream_t stream);
+
+/*! \brief CUDA-graph-safe grouped row-scaled NVFP4 cast.
+ *
+ *  Device-metadata counterpart of nvte_group_nvfp4_row_scaled_cast_with_amax.
+ *  Instead of host `split_sections`, the per-expert row counts and offsets are
+ *  read from the input/output grouped tensors' device `first_dims` and
+ *  `tensor_offsets`, so a dynamic-routing MoE cast can be captured once and
+ *  replayed with different routing without rebaking kernel parameters.
+ *
+ *  Both tensors use the single-buffer grouped layout: the input is one packed
+ *  (capacity, K) BF16 buffer, and the output carries contiguous rowwise data /
+ *  E4M3 scales (and, when allocated, columnwise data / E4M3 scales) plus the
+ *  pre-populated rowwise amax [sum_M] and columnwise amax [num_tensors * K].
+ *  Only the const-last-dimension layout (VARYING_FIRST_DIM: common K, per-expert
+ *  row count) is supported; each per-expert row count must be a multiple of 128
+ *  and K a multiple of 128. The output is byte-identical to the host-split cast.
+ *
+ *  \param[in]      input    Packed grouped input tensor (BF16) with device metadata.
+ *  \param[in,out]  output   Grouped output tensor (amax pre-populated) with device metadata.
+ *  \param[in]      stream   CUDA stream used for the operation.
+ */
+void nvte_group_nvfp4_row_scaled_cast_with_amax_graph_safe(const NVTEGroupedTensor input,
+                                                           NVTEGroupedTensor output,
+                                                           cudaStream_t stream);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif
