@@ -329,8 +329,10 @@ def is_frost_attention_supported(params) -> Tuple[int, str]:
         # directions, since is_training follows module.training and eval() leaves autograd on.
         return (
             no_backend,
-            "FROST requires symmetric head_dim in (256, 512]; got"
-            f" {params.head_dim_qk}/{params.head_dim_v}",
+            (
+                "FROST requires symmetric head_dim in (256, 512]; got"
+                f" {params.head_dim_qk}/{params.head_dim_v}"
+            ),
         )
 
     qkv_dtype = TORCH_DType.get(params.qkv_dtype)
