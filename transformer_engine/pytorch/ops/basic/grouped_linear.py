@@ -666,10 +666,6 @@ class GroupedLinear(BasicOperation):
     def pre_first_fuser_forward(self) -> None:
         super().pre_first_fuser_forward()
 
-        # Initialize params if needed
-        if any(param.device.type == "meta" for param in self.parameters()):
-            self.reset_parameters()
-
         # Check that all weight params are consistent
         if not self.single_grouped_weight:
             dtype = self.weight0.dtype

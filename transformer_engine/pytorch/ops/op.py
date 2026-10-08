@@ -120,8 +120,17 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
     def is_fused_op(self) -> bool:
         """Whether this op is the fusion of one or more basic ops"""
 
+    def reset_parameters(self) -> None:
+        """Initialize parameter buffers and values"""
+
     def pre_first_fuser_forward(self) -> None:
         """Preprocessing before first fuser forward pass"""
+        for name, param in self.named_parameters():
+            if param.device.type == "meta":
+                raise RuntimeError(
+                    f"{self.__class__.__name__} has parameter {name} on the meta device. "
+                    "Call reset_parameters() before the first forward pass."
+                )
 
     def pre_fuser_forward(
         self,
@@ -987,6 +996,10 @@ class FusedOperation(FusibleOperation):
 
     def get_grad_output_quantizer(self) -> Optional[Quantizer]:
         return self.basic_ops[-1].get_grad_output_quantizer()
+
+    def reset_parameters(self) -> None:
+        for op in self.basic_ops:
+            op.reset_parameters()
 
     def pre_first_fuser_forward(self) -> None:
         for op in self.basic_ops:

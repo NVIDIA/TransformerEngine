@@ -1365,6 +1365,156 @@ class TestFuser:
             assert x.grad.dtype == model_dtype
             assert op.weight.grad.dtype == model_dtype
 
+    @staticmethod
+    def _make_op(
+        op_type: str,
+        *,
+        size: int,
+        num_groups: int,
+        dtype: torch.dtype,
+        device: torch.device | str,
+    ) -> torch.nn.Module:
+        """Construct an op for the deferred initialization tests"""
+        kwargs = {"device": device, "dtype": dtype}
+        if op_type == "basic_linear":
+            return te_ops.BasicLinear(size, size, **kwargs)
+        if op_type == "bias":
+            return te_ops.Bias(size, **kwargs)
+        if op_type == "layer_norm":
+            return te_ops.LayerNorm(size, **kwargs)
+        if op_type == "rmsnorm":
+            return te_ops.RMSNorm(size, **kwargs)
+        if op_type == "grouped_linear":
+            return te_ops.GroupedLinear(num_groups, size, size, bias=True, **kwargs)
+        if op_type == "linear":
+            return te_ops.Linear(size, size, bias=True, **kwargs)
+        if op_type == "sequential":
+            return te_ops.Sequential(
+                te_ops.LayerNorm(size, **kwargs),
+                te_ops.GELU(),
+                te_ops.Linear(size, size, bias=True, **kwargs),
+            )
+        raise ValueError(f"Unsupported op type ({op_type})")
+
+    @staticmethod
+    def _reset_parameters(op: torch.nn.Module, *, submodules: bool) -> None:
+        """Initialize params in an op or in each of its submodules"""
+        if not submodules:
+            op.reset_parameters()
+            return
+        for module in op.modules():
+            if isinstance(module, (te_ops.FusibleOperation, te_ops.Sequential)):
+                module.reset_parameters()
+
+    @pytest.mark.parametrize(
+        "op_type",
+        ("basic_linear", "bias", "layer_norm", "rmsnorm", "grouped_linear", "linear", "sequential"),
+    )
+    @pytest.mark.parametrize("reset_submodules", (False, True))
+    def test_deferred_param_init(
+        self,
+        *,
+        op_type: str,
+        reset_submodules: bool,
+        size: int = 32,
+        num_groups: int = 2,
+        dtype: torch.dtype = torch.bfloat16,
+        device: torch.device = "cuda",
+    ) -> None:
+        """Test op constructed on meta device"""
+
+        # Inputs
+        in_shape = (size, size)
+        extra_inputs = []
+        if op_type == "grouped_linear":
+            in_shape = (size * num_groups, size)
+            extra_inputs.append(torch.full((num_groups,), size, dtype=torch.int, device=device))
+        x = torch.randn(in_shape, dtype=dtype, device=device, requires_grad=True)
+        x_ref = x.detach().clone().requires_grad_()
+
+        # Construct op on meta device
+        op_kwargs = {"size": size, "num_groups": num_groups, "dtype": dtype}
+        op = self._make_op(op_type, device="meta", **op_kwargs)
+        with pytest.raises(RuntimeError, match="reset_parameters"):
+            op(x, *extra_inputs)
+
+        # Materialize params
+        self._reset_parameters(op, submodules=reset_submodules)
+        params = dict(op.named_parameters())
+        for name, param in params.items():
+            assert param.device.type == device, f"{name} is on {param.device}"
+
+        # Reference op constructed on device with same param values
+        ref_op = self._make_op(op_type, device=device, **op_kwargs)
+        ref_params = dict(ref_op.named_parameters())
+        assert params.keys() == ref_params.keys()
+        with torch.no_grad():
+            for name, ref_param in ref_params.items():
+                ref_param.copy_(params[name])
+
+        # Forward and backward pass
+        y = op(x, *extra_inputs)
+        dy = torch.randn_like(y)
+        y.backward(dy)
+        y_ref = ref_op(x_ref, *extra_inputs)
+        y_ref.backward(dy)
+
+        # Check results
+        tols = dtype_tols(dtype)
+        assert_close(y, y_ref, **tols)
+        assert_close_grads(x, x_ref, **tols)
+        for name, param in params.items():
+            assert_close_grads(param, ref_params[name], **tols)
+
+    @pytest.mark.parametrize("op_type", ("linear", "grouped_linear"))
+    @pytest.mark.parametrize("quantization", _quantization_list)
+    @pytest.mark.parametrize("reset_submodules", (False, True))
+    def test_deferred_param_init_quantized(
+        self,
+        *,
+        op_type: str,
+        quantization: Optional[str],
+        reset_submodules: bool,
+        size: int = 128,
+        num_groups: int = 2,
+        dtype: torch.dtype = torch.bfloat16,
+        device: torch.device = "cuda",
+    ) -> None:
+        """Test op with quantized params constructed on meta device"""
+
+        # Skip invalid configurations
+        in_shape = (size, size)
+        extra_inputs = []
+        if op_type == "grouped_linear":
+            in_shape = (size * num_groups, size)
+            extra_inputs.append(torch.full((num_groups,), size, dtype=torch.int, device=device))
+        if quantization is None:
+            pytest.skip("Quantization scheme is not specified")
+        if op_type == "grouped_linear" and quantization == "nvfp4_4over6":
+            pytest.skip("NVFP4 4over6 grouped quantization is not supported")
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
+
+        # Construct op on meta device and materialize params
+        recipe = make_recipe(quantization)
+        with te.quantized_model_init(recipe=recipe):
+            op = self._make_op(
+                op_type, size=size, num_groups=num_groups, dtype=dtype, device="meta"
+            )
+        self._reset_parameters(op, submodules=reset_submodules)
+        for name, param in op.named_parameters():
+            assert param.device.type == device, f"{name} is on {param.device}"
+            if "weight" in name:
+                assert isinstance(param, QuantizedTensor), f"{name} is not quantized"
+
+        # Forward and backward pass
+        x = torch.randn(in_shape, dtype=dtype, device=device, requires_grad=True)
+        with te.autocast(recipe=recipe):
+            y = op(x, *extra_inputs)
+        y.backward(torch.randn_like(y))
+        assert x.grad is not None
+        for name, param in op.named_parameters():
+            assert param.grad is not None, f"{name} has no grad"
+
 
 class TestBasicOps:
     """Tests for individual operations"""

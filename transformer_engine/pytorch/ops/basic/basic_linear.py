@@ -334,17 +334,16 @@ class BasicLinear(BasicOperation):
             )
             quantizer.internal = False
             with torch.no_grad():
+                if is_quantized_tensor(self.weight):
+                    # Keep param, which other modules may reference
+                    self.weight.quantize_(weight)
+                    return
                 weight = quantizer(weight)
 
         # Save updated parameter
         if not isinstance(weight, torch.nn.Parameter):
             weight = torch.nn.Parameter(weight)
         self.weight = weight
-
-    def pre_first_fuser_forward(self) -> None:
-        super().pre_first_fuser_forward()
-        if self.weight.device.type == "meta":
-            self.reset_parameters()
 
     def pre_fuser_forward(self, *, requires_grad: bool) -> None:
         super().pre_fuser_forward(requires_grad=requires_grad)
