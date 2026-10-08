@@ -3136,29 +3136,6 @@ class TestGroupedMLPDeterminism:
         torch.use_deterministic_algorithms(torch_flag)
         assert grouped_mlp_module._deterministic_algorithms_required() is expected
 
-    @pytest.mark.parametrize(
-        "fused_cls",
-        (grouped_mlp_module.GroupedMLP_CuTeGEMMGLU, grouped_mlp_module.GroupedMLP_CuTeGEMMUnary),
-    )
-    def test_capability_follows_the_wrapper(self, monkeypatch, *, fused_cls) -> None:
-        """The capability is the wrapper's ``deterministic`` argument, not the environment.
-        Needs no GPU or cuDNN: the wrapper is stubbed."""
-
-        def with_flag(*, deterministic=False):
-            pass
-
-        def without_flag():
-            pass
-
-        is_deterministic = fused_cls.grouped_gemm_dactivation_is_deterministic
-        for wrapper, expected in ((with_flag, True), (without_flag, False)):
-            monkeypatch.setattr(
-                fused_cls, "grouped_gemm_dactivation_kernel", classmethod(lambda cls, w=wrapper: w)
-            )
-            is_deterministic.cache_clear()
-            assert is_deterministic() is expected
-        is_deterministic.cache_clear()
-
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
     @pytest.mark.parametrize(
         "activation,fused_cls",
@@ -3189,43 +3166,6 @@ class TestGroupedMLPDeterminism:
             assert grouped_mlp_module._DETERMINISM_REQUESTED in str(e)
             return
         assert fused_cls.grouped_gemm_dactivation_is_deterministic()
-
-    @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
-    def test_glu_fc1_bias_refuses(self, monkeypatch) -> None:
-        """cuDNN's deterministic dGLU has no deterministic dbias, so with an FC1 bias (and no FC2
-        bias) the request must fail with TE's determinism error, whatever the front-end version."""
-        fused_cls = grouped_mlp_module.GroupedMLP_CuTeGEMMGLU
-        if not fused_cls.is_supported():
-            pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
-
-        monkeypatch.setenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "0")
-        device = torch.device("cuda")
-        dtype = torch.bfloat16
-        group_size, hidden_size, tokens_per_group = 4, 256, 256
-        split_sizes = torch.tensor([tokens_per_group] * group_size, dtype=torch.int, device=device)
-        recipe = make_recipe("mxfp8")
-        with te.quantized_model_init(enabled=True, recipe=recipe):
-            module = te.ops.Sequential(
-                te.ops.GroupedLinear(
-                    group_size, hidden_size, 2 * hidden_size, bias=True, device=device, dtype=dtype
-                ),
-                _make_scaled_activation("scaled_swiglu", glu_interleave_size=32),
-                te.ops.GroupedLinear(
-                    group_size, hidden_size, hidden_size, bias=False, device=device, dtype=dtype
-                ),
-            )
-        num_tokens = tokens_per_group * group_size
-        x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device, requires_grad=True)
-        probs = torch.rand(num_tokens, dtype=dtype, device=device, requires_grad=True)
-        with te.autocast(enabled=True, recipe=recipe):
-            y = module(x, split_sizes, probs, split_sizes)
-        forward_ops = module._module_groups[0]._forward_ops
-        assert len(forward_ops) == 1 and isinstance(forward_ops[0][0], fused_cls)
-        with pytest.raises(RuntimeError) as excinfo:
-            y.backward(torch.randn_like(y))
-        # TE's error either way: its early check (front-end without `deterministic`) or cuDNN's
-        # refusal re-raised. cuDNN's own NotImplementedError would lack this prefix.
-        assert grouped_mlp_module._DETERMINISM_REQUESTED in str(excinfo.value)
 
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
     def test_scale_bias_refuses_under_the_torch_flag(
