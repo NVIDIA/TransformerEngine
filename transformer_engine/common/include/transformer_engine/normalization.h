@@ -181,16 +181,6 @@ void nvte_enable_cudnn_norm_fwd(bool enable);
  */
 void nvte_enable_cudnn_norm_bwd(bool enable);
 
-/*! \brief Set whether RMSNorm forward with MXFP8 output uses cuDNN.
- *
- *  By default, RMSNorm forward with MXFP8 output uses Transformer Engine's fused kernel
- *  whenever both dimensions are multiples of 128; it can also write GEMM-swizzled scaling
- *  factors. Otherwise, and when enabled here, the cuDNN backend is used.
- *
- *  \param[in]  enable  Whether to use cuDNN for RMSNorm forward with MXFP8 output.
- */
-void nvte_enable_cudnn_norm_fwd_mxfp8(bool enable);
-
 /*! \brief Control whether norm computes `gamma += 1.0` for zero-centered gamma
  *  in weight dtype. If set to false, it will compute in compute dtype.
  *
