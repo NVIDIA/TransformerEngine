@@ -4,6 +4,7 @@
 
 """Experimental quantize/dequantize quantizers with high-precision storage."""
 
+from abc import abstractmethod
 from functools import lru_cache
 import os
 
@@ -14,6 +15,7 @@ from ..constants import DType
 from ..quantized_tensor import Quantizer
 from ..tensor.identity_tensor import IdentityTensor
 from ..tensor.storage.identity_tensor_storage import IdentityTensorStorage
+from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.nvfp4_tensor import NVFP4Quantizer
 
 
@@ -23,7 +25,176 @@ def _supports_fused_device(device_index):
     return torch.cuda.get_device_capability(device_index) == (10, 0)
 
 
-class NVFP4QDQQuantizer(Quantizer):
+class QDQQuantizer(Quantizer):
+    """Experimental base for quantize/dequantize with high-precision storage.
+
+    Subclasses implement ``selected_backend``, ``_reference``, and ``_compute``.
+    The reference returns decoded values in the requested dtype without casting
+    the quantization input. Compute writes into caller-owned output, honoring
+    ``noop_flag == 1`` and an optional preselected backend. Subclasses also
+    implement ``copy`` and ``is_requantization_safe`` for their format's state.
+    Storage hooks must not build autograd graphs; Python implementations can
+    use ``torch.no_grad()`` because the wrapper supplies the gradient.
+
+    The shared lifecycle supplies IdentityTensor storage, dtype overrides, and
+    straight-through gradients. This extension interface is experimental.
+    """
+
+    # Unknown to native fused quantization producers; outputs use native HP GEMM.
+    custom = True
+    supports_output_dtype = True
+
+    def __init__(self, *, dtype=None, backend="auto", rowwise=True, columnwise=True):
+        super().__init__(rowwise=rowwise, columnwise=columnwise)
+        if backend not in ("auto", "reference", "fused"):
+            raise ValueError("backend must be auto, reference, or fused")
+        self.dtype = dtype
+        self.backend = backend
+
+    @abstractmethod
+    def selected_backend(self, tensor, dtype=None):
+        """Return reference or fused, rejecting unsupported forced backends."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def _reference(self, tensor, dtype):
+        """Return materialized Q+DQ in dtype, preserving the input precision."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def _compute(self, tensor, output, noop_flag=None, *, backend=None):
+        """Write QDQ into output; a noop flag equal to one preserves output."""
+        raise NotImplementedError
+
+    def quantize_impl(self, tensor, *, dtype=None):
+        dtype = dtype or self.dtype or tensor.dtype
+        if self.selected_backend(tensor, dtype) == "reference":
+            data = self._reference(tensor, dtype)
+            return self._wrap(data)
+        result = self._wrap(
+            torch.empty(tensor.shape, dtype=dtype, device=tensor.device)
+        )
+        self._compute(tensor, result._hp_data, backend="fused")
+        return result
+
+    def make_empty(
+        self,
+        shape,
+        *,
+        dtype=torch.float32,
+        device=None,
+        requires_grad=False,
+        pin_memory=False,
+    ):
+        data = torch.empty(
+            tuple(shape),
+            dtype=self.dtype or dtype,
+            device=device or "cuda",
+            pin_memory=pin_memory,
+        )
+        return self._wrap(data, requires_grad=requires_grad)
+
+    def _wrap(self, data, requires_grad=False):
+        if self.internal:
+            return IdentityTensorStorage(
+                hp_data=data, fake_dtype=data.dtype, quantizer=self
+            )
+        return IdentityTensor(
+            data.shape,
+            data.dtype,
+            hp_data=data,
+            quantizer=self,
+            requires_grad=requires_grad,
+            device=data.device,
+        )
+
+    def update_quantized(self, src, dst, *, noop_flag=None):
+        if not isinstance(dst, IdentityTensorStorage) or dst._hp_data is None:
+            raise TypeError(
+                f"{type(self).__name__} requires allocated IdentityTensorStorage"
+            )
+        if src.shape != dst._hp_data.shape or src.device != dst._hp_data.device:
+            raise ValueError(
+                f"{type(self).__name__} source and destination must have matching shape/device"
+            )
+        self._compute(src, dst._hp_data, noop_flag)
+        return dst
+
+    def _get_compatible_recipe(self):
+        from transformer_engine.common.recipe import CustomRecipe
+
+        return CustomRecipe
+
+
+class MXFP8QDQQuantizer(QDQQuantizer):
+    """Rowwise E4M3/block-32 E8M0 QDQ held in high-precision storage.
+
+    ``reference`` explicitly invokes native Q then DQ. ``fused`` keeps both
+    encodings in registers and requires contiguous matching BF16/FP16 on SM100.
+    ``auto`` selects the fused implementation where supported. The decoded
+    buffer can be consumed in either GEMM orientation; quantization is rowwise.
+    """
+
+    block_size = 32
+
+    def __init__(self, *, dtype=None, backend="auto", rowwise=True, columnwise=True):
+        super().__init__(
+            dtype=dtype, backend=backend, rowwise=rowwise, columnwise=columnwise
+        )
+        self.mxfp8_quantizer = MXFP8Quantizer(
+            DType.kFloat8E4M3, rowwise=True, columnwise=False
+        )
+        self.mxfp8_quantizer.internal = True
+
+    def copy(self):
+        """Copy options and isolate the native reference quantizer state."""
+        result = object.__new__(type(self))
+        result.__dict__ = self.__dict__.copy()
+        result.mxfp8_quantizer = self.mxfp8_quantizer.copy()
+        return result
+
+    def selected_backend(self, tensor, dtype=None):
+        """Select fused execution, or reject an unsupported forced backend."""
+        output_dtype = dtype or self.dtype or tensor.dtype
+        eligible = (
+            tensor.is_cuda
+            and tensor.is_contiguous()
+            and tensor.ndim >= 2
+            and tensor.numel() > 0
+            and tensor.shape[-1] % 32 == 0
+            and tensor.data_ptr() % 16 == 0
+            and tensor.dtype in (torch.bfloat16, torch.float16)
+            and output_dtype == tensor.dtype
+            and _supports_fused_device(tensor.device.index)
+            and os.getenv("NVTE_USE_FAST_MATH", "0") == "0"
+        )
+        if self.backend == "fused" and not eligible:
+            raise ValueError(
+                "Forced fused MXFP8 QDQ does not support this input/configuration"
+            )
+        return "fused" if eligible and self.backend != "reference" else "reference"
+
+    def _reference(self, tensor, dtype):
+        # Native MXFP8 launch geometry does not support empty tensors.
+        if tensor.numel() == 0:
+            return torch.empty_like(tensor, dtype=dtype)
+        return self.mxfp8_quantizer.quantize(tensor).dequantize(dtype=dtype)
+
+    def _compute(self, tensor, output, noop_flag=None, *, backend=None):
+        if (backend or self.selected_backend(tensor, output.dtype)) == "fused":
+            tex.mxfp8_qdq(tensor, output, noop_flag)
+        else:
+            data = self._reference(tensor, output.dtype)
+            if noop_flag is None:
+                output.copy_(data)
+            else:
+                torch.where(noop_flag != 1, data, output, out=output)
+
+    def is_requantization_safe(self):
+        return True
+
+
+class NVFP4QDQQuantizer(QDQQuantizer):
     """Store native rowwise NVFP4 Q+DQ values in an IdentityTensor.
 
     ``quantizer`` supplies native NVFP4 options and is copied with rowwise-only
@@ -38,11 +209,6 @@ class NVFP4QDQQuantizer(Quantizer):
     This experimental API is subject to change.
     """
 
-    # Unknown to native fused quantization producers; outputs use native HP GEMM.
-    custom = True
-
-    supports_output_dtype = True
-
     def __init__(
         self,
         quantizer=None,
@@ -52,16 +218,16 @@ class NVFP4QDQQuantizer(Quantizer):
         rowwise=True,
         columnwise=True,
     ):
-        super().__init__(rowwise=rowwise, columnwise=columnwise)
-        if backend not in ("auto", "reference", "fused"):
-            raise ValueError("backend must be auto, reference, or fused")
+        super().__init__(
+            dtype=dtype, backend=backend, rowwise=rowwise, columnwise=columnwise
+        )
         if quantizer is not None and not isinstance(quantizer, NVFP4Quantizer):
             raise TypeError("quantizer must be an NVFP4Quantizer")
-        self.nvfp4_quantizer = quantizer.copy() if quantizer is not None else NVFP4Quantizer()
+        self.nvfp4_quantizer = (
+            quantizer.copy() if quantizer is not None else NVFP4Quantizer()
+        )
         self.nvfp4_quantizer.set_usage(rowwise=True, columnwise=False)
         self.nvfp4_quantizer.internal = True
-        self.dtype = dtype
-        self.backend = backend
 
     def copy(self):
         """Copy options without sharing mutable native quantizer state."""
@@ -128,7 +294,9 @@ class NVFP4QDQQuantizer(Quantizer):
             and os.getenv("NVTE_USE_FAST_MATH", "0") == "0"
         )
         if self.backend == "fused" and not eligible:
-            raise ValueError("Forced fused NVFP4 QDQ does not support this input/configuration")
+            raise ValueError(
+                "Forced fused NVFP4 QDQ does not support this input/configuration"
+            )
         return "fused" if eligible and self.backend != "reference" else "reference"
 
     def _reference(self, tensor, dtype):
@@ -147,56 +315,5 @@ class NVFP4QDQQuantizer(Quantizer):
             else:
                 torch.where(noop_flag != 1, data, output, out=output)
 
-    def quantize_impl(self, tensor, *, dtype=None):
-        dtype = dtype or self.dtype or tensor.dtype
-        if self.selected_backend(tensor, dtype) == "reference":
-            data = self._reference(tensor, dtype)
-            return self._wrap(data)
-        result = self._wrap(torch.empty(tensor.shape, dtype=dtype, device=tensor.device))
-        self._compute(tensor, result._hp_data, backend="fused")
-        return result
-
-    def make_empty(
-        self,
-        shape,
-        *,
-        dtype=torch.float32,
-        device=None,
-        requires_grad=False,
-        pin_memory=False,
-    ):
-        data = torch.empty(
-            tuple(shape),
-            dtype=self.dtype or dtype,
-            device=device or "cuda",
-            pin_memory=pin_memory,
-        )
-        return self._wrap(data, requires_grad=requires_grad)
-
-    def _wrap(self, data, requires_grad=False):
-        if self.internal:
-            return IdentityTensorStorage(hp_data=data, fake_dtype=data.dtype, quantizer=self)
-        return IdentityTensor(
-            data.shape,
-            data.dtype,
-            hp_data=data,
-            quantizer=self,
-            requires_grad=requires_grad,
-            device=data.device,
-        )
-
-    def update_quantized(self, src, dst, *, noop_flag=None):
-        if not isinstance(dst, IdentityTensorStorage) or dst._hp_data is None:
-            raise TypeError("NVFP4 QDQ requires allocated IdentityTensorStorage")
-        if src.shape != dst._hp_data.shape or src.device != dst._hp_data.device:
-            raise ValueError("NVFP4 QDQ source and destination must have matching shape/device")
-        self._compute(src, dst._hp_data, noop_flag)
-        return dst
-
     def is_requantization_safe(self):
         return self.nvfp4_quantizer.is_requantization_safe()
-
-    def _get_compatible_recipe(self):
-        from transformer_engine.common.recipe import CustomRecipe
-
-        return CustomRecipe

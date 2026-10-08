@@ -388,27 +388,54 @@ See the :doc:`PyTorch API <../../../api/pytorch>` for ``QuantizerRole``,
 ``HybridQuantizer``, ``IdentityQuantizer``, and their returned tensor types.
 See the :doc:`Common API <../../../api/common>` for ``CustomRecipe``.
 
-Experimental NVFP4 weight QDQ
------------------------------
+Experimental QDQ
+----------------
 
-``custom_recipes.qdq.NVFP4QDQQuantizer`` is useful for experiments with
-``X[BF16] x W[NVFP4]``: it quantizes weights to NVFP4, then dequantizes them
-into a high-precision ``IdentityTensor`` for BF16 forward GEMMs. This preserves
-NVFP4 weight rounding error while using BF16 GEMM arithmetic.
+QDQ quantizers model low-precision rounding by quantizing operands and then
+dequantizing them into high-precision ``IdentityTensor`` storage. The decoded
+operands use high-precision GEMMs; QDQ models quantization error for convergence
+experiments, not mixed-format hardware performance.
 
-The following factory supports ``Linear`` and ``GroupedLinear`` with discrete
-expert parameters. Forward uses high-precision inputs and QDQ weights;
-MXFP8 backward uses the original inputs and QDQ weights::
+Forward and backward examples
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The following factories support ``Linear`` and ``GroupedLinear`` with discrete
+expert parameters. With BF16 module compute precision:
+
+* ``nvfp4_qdq_weight_fwd_bf16_bwd_factory`` models ``X[BF16] x W[NVFP4]``
+  forward and uses BF16 backward. Backward consumes the original inputs and
+  the decoded forward QDQ weights.
+* ``mxfp8_nvfp4_qdq_fwd_mxfp8_bwd_factory`` models ``X[MXFP8] x W[NVFP4]``
+  forward and uses native MXFP8 backward. Input QDQ uses block-32 E4M3/E8M0;
+  weight QDQ uses block-16 E2M1/E4M3 with a tensor scale. Backward quantizes
+  the original inputs and the decoded forward QDQ weights to MXFP8.
+
+For example::
 
     from transformer_engine.common.recipe import CustomRecipe
     from transformer_engine.pytorch.custom_recipes.quantizer_factory_zoo import (
-        nvfp4_qdq_weight_fwd_mxfp8_bwd_factory,
+        nvfp4_qdq_weight_fwd_bf16_bwd_factory,
+        mxfp8_nvfp4_qdq_fwd_mxfp8_bwd_factory,
     )
 
-    recipe = CustomRecipe(qfactory=nvfp4_qdq_weight_fwd_mxfp8_bwd_factory)
+    recipe = CustomRecipe(qfactory=mxfp8_nvfp4_qdq_fwd_mxfp8_bwd_factory)
+
+To use BF16 inputs while retaining MXFP8 backward, replace the second factory's
+input rowwise ``MXFP8QDQQuantizer`` with ``IdentityQuantizer``. The input
+columnwise quantizer and its ``columnwise_source="original"`` stay unchanged.
+Both examples use ``columnwise_source="rowwise_dequantized"`` for weights.
+Other module roles use ``IdentityQuantizer``. High-precision arithmetic follows
+the module compute dtype; select BF16 compute for the BF16 example.
+
+Configure ``backend`` or ``nvfp4_options`` with ``functools.partial``. Existing
+Hybrid limitations still apply, and RL convergence has not been validated.
+
+Backends and custom QDQ formats
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Output defaults to the source dtype; a module compute-dtype override changes
-only the decoded dtype. ``backend="auto"`` fuses plain 1D E2M1/E4M3 QDQ on
+only the decoded dtype. For ``NVFP4QDQQuantizer``, ``backend="auto"`` fuses
+plain 1D E2M1/E4M3 QDQ on
 SM100 for contiguous, 16-byte-aligned BF16/FP16 tensors with matching output
 dtype and flattened matrix dimensions divisible by 16, with ordinary fast math
 disabled. Other native-valid modes, including 4over6, 2D scaling, distributed
@@ -416,6 +443,31 @@ amax reduction, and mixed dtypes, use native ``quantize().dequantize()``.
 ``backend="reference"`` forces that composition; ``backend="fused"`` rejects
 unsupported cases. Current weight amax is computed when quantization runs.
 
-Configure ``backend`` or ``nvfp4_options`` on the factory with
-``functools.partial``. Existing Hybrid limitations still apply, and RL
-convergence has not been validated.
+``custom_recipes.qdq.MXFP8QDQQuantizer`` provides the corresponding rowwise
+E4M3/block-32 E8M0 QDQ operation. Its ``reference`` backend calls native
+``MXFP8Quantizer.quantize().dequantize()``. Its ``fused`` backend supports
+contiguous, 16-byte-aligned BF16/FP16 tensors on SM100, with a matching output
+dtype, rows divisible by 32, and ordinary fast math disabled. ``auto`` falls
+back to the reference when these requirements are not met.
+The fused kernel preserves signed zero. Native specialized FP16 quantization
+may canonicalize negative zero; the decoded values remain numerically equal.
+
+Both QDQ classes return high-precision storage with straight-through
+gradients. Use them as rowwise children of ``HybridQuantizer`` to select the
+backward format independently. ``columnwise_source="rowwise_dequantized"``
+requantizes the forward reconstruction for backward; ``"original"`` uses
+the original input. QDQ models quantization error for convergence studies;
+the high-precision GEMM does not model mixed-format hardware performance.
+
+Both formats inherit the experimental ``custom_recipes.qdq.QDQQuantizer``
+base, which supplies allocation, IdentityTensor wrapping, dtype overrides,
+update validation, and straight-through gradients. Custom QDQ subclasses
+implement ``selected_backend(tensor, dtype)``, ``_reference(tensor, dtype)``,
+and ``_compute(tensor, output, noop_flag=None, *, backend=None)``. The reference
+must quantize the original input before decoding to the requested dtype.
+Compute must write into the supplied output, preserving it when the no-op flag
+is one, and honor an explicitly selected backend. Subclasses must also provide
+format-appropriate ``copy()`` and ``is_requantization_safe()`` implementations.
+Storage hooks should not build autograd graphs; Python implementations can
+use ``torch.no_grad()`` since the wrapper supplies the straight-through gradient.
+The base and its extension hooks are experimental and subject to change.

@@ -29,6 +29,13 @@ extern "C" {
 void nvte_nvfp4_qdq(const NVTETensor input, NVTETensor output, const NVTETensor amax,
                     const NVTETensor noop, cudaStream_t stream);
 
+/*! \brief Rowwise block-32 E4M3/E8M0 MXFP8 QDQ into matching BF16/FP16 output.
+ * Input and output are contiguous, with rows divisible by 32. An optional scalar
+ * FP32 noop skips writes when equal to 1. All buffers are caller-owned.
+ */
+void nvte_mxfp8_qdq(const NVTETensor input, NVTETensor output, const NVTETensor noop,
+                    cudaStream_t stream);
+
 /*  Quantize the tensor
  *
  *  The type of quantized tensor in the output depends on the scaling mode of the output

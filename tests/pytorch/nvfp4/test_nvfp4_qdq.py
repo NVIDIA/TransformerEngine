@@ -15,7 +15,8 @@ from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 from transformer_engine.pytorch.custom_recipes.qdq import NVFP4QDQQuantizer
 from transformer_engine.pytorch.custom_recipes.quantizer_factory_zoo import (
-    nvfp4_qdq_weight_fwd_mxfp8_bwd_factory,
+    mxfp8_nvfp4_qdq_fwd_mxfp8_bwd_factory,
+    nvfp4_qdq_weight_fwd_bf16_bwd_factory,
 )
 
 pytestmark = pytest.mark.skipif(
@@ -83,7 +84,9 @@ def test_plain_exact(dtype, shape, distribution, monkeypatch):
 def test_4over6_fallback(mode, maximum, fast_error, monkeypatch):
     monkeypatch.setenv("NVTE_NVFP4_4OVER6_ERR_USE_FAST_MATH", fast_error)
     x = torch.randn(128, 256, device="cuda", dtype=torch.bfloat16)
-    options = dict(nvfp4_use_4over6=True, nvfp4_e4m3_max=maximum, nvfp4_4over6_err_mode=mode)
+    options = dict(
+        nvfp4_use_4over6=True, nvfp4_e4m3_max=maximum, nvfp4_4over6_err_mode=mode
+    )
     q = NVFP4QDQQuantizer(NVFP4Quantizer(**options))
     assert q.selected_backend(x) == "reference"
     assert_bits(q(x).dequantize(), native_qdq(x, **options))
@@ -157,19 +160,30 @@ def test_ste_and_rng():
 
 
 def mx_value(x, *, columnwise=False):
-    q = MXFP8Quantizer(tex.DType.kFloat8E4M3, rowwise=not columnwise, columnwise=columnwise)
+    q = MXFP8Quantizer(
+        tex.DType.kFloat8E4M3, rowwise=not columnwise, columnwise=columnwise
+    )
     return q(x).dequantize()
 
 
 @pytest.mark.parametrize("backend", ["reference", "fused"])
 @pytest.mark.parametrize("grouped", [False, True])
 @pytest.mark.parametrize("params_dtype", [torch.bfloat16, torch.float32])
-def test_module_operands(backend, grouped, params_dtype, nvfp4_options=None):
+@pytest.mark.parametrize("mixed", [False, True])
+def test_module_operands(
+    backend, grouped, params_dtype, mixed, nvfp4_options=None
+):
     if backend == "fused" and params_dtype == torch.float32:
         pytest.skip("Mixed FP32 source/BF16 decode intentionally uses native fallback")
     torch.manual_seed(12)
-    factory = nvfp4_qdq_weight_fwd_mxfp8_bwd_factory
-    recipe = CustomRecipe(qfactory=partial(factory, backend=backend, nvfp4_options=nvfp4_options))
+    factory = (
+        mxfp8_nvfp4_qdq_fwd_mxfp8_bwd_factory
+        if mixed
+        else nvfp4_qdq_weight_fwd_bf16_bwd_factory
+    )
+    recipe = CustomRecipe(
+        qfactory=partial(factory, backend=backend, nvfp4_options=nvfp4_options)
+    )
     kwargs = dict(bias=True, params_dtype=params_dtype, device="cuda")
     layer = (
         te.GroupedLinear(2, 128, 128, single_grouped_weight=False, **kwargs)
@@ -177,21 +191,31 @@ def test_module_operands(backend, grouped, params_dtype, nvfp4_options=None):
         else te.Linear(128, 128, **kwargs)
     )
     splits = [32, 64] if grouped else [96]
-    x = torch.randn(sum(splits), 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    x = torch.randn(
+        sum(splits), 128, device="cuda", dtype=torch.bfloat16, requires_grad=True
+    )
     dy = torch.randn_like(x)
-    weights = [getattr(layer, f"weight{i}") for i in range(2)] if grouped else [layer.weight]
+    weights = (
+        [getattr(layer, f"weight{i}") for i in range(2)] if grouped else [layer.weight]
+    )
     biases = [getattr(layer, f"bias{i}") for i in range(2)] if grouped else [layer.bias]
     with te.autocast(recipe=recipe), torch.autocast("cuda", dtype=torch.bfloat16):
         y = layer(x, splits) if grouped else layer(x)
     y.backward(dy)
     expected_y, expected_dx = [], []
-    for w, b, xs, gs in zip(weights, biases, x.detach().split(splits), dy.split(splits)):
+    for w, b, xs, gs in zip(
+        weights, biases, x.detach().split(splits), dy.split(splits)
+    ):
         wh = native_qdq(w.detach(), torch.bfloat16, **(nvfp4_options or {}))
-        expected_y.append(torch.nn.functional.linear(xs, wh, b.detach().to(torch.bfloat16)))
-        bw = mx_value(wh, columnwise=True)
-        bx = mx_value(xs, columnwise=True)
-        grow = mx_value(gs)
-        gcol = mx_value(gs, columnwise=True)
+        expected_y.append(
+            torch.nn.functional.linear(
+                mx_value(xs) if mixed else xs, wh, b.detach().to(torch.bfloat16)
+            )
+        )
+        bw = mx_value(wh, columnwise=True) if mixed else wh
+        bx = mx_value(xs, columnwise=True) if mixed else xs
+        grow = mx_value(gs) if mixed else gs
+        gcol = mx_value(gs, columnwise=True) if mixed else gs
         expected_dx.append(grow @ bw)
         dw = gcol.T @ bx
         torch.testing.assert_close(w.grad.float(), dw.float(), rtol=0.016, atol=0.002)
@@ -209,10 +233,12 @@ def test_weight_workspace_dtype_and_reuse():
     from transformer_engine.pytorch.module.base import quantize_weight
     from transformer_engine.pytorch.quantization import QuantizerRole
 
-    factory = nvfp4_qdq_weight_fwd_mxfp8_bwd_factory
+    factory = mxfp8_nvfp4_qdq_fwd_mxfp8_bwd_factory
     q = factory(QuantizerRole(module_type="linear", tensor_type="weight"))
     w = torch.randn(128, 256, device="cuda", dtype=torch.float32)
-    out, cache = quantize_weight(tensor=w, quantizer=q, workspace_dtype=torch.bfloat16, cache=True)
+    out, cache = quantize_weight(
+        tensor=w, quantizer=q, workspace_dtype=torch.bfloat16, cache=True
+    )
     expected = native_qdq(w, torch.bfloat16)
     assert_bits(out._rowwise_storage.dequantize(), expected)
     pointer = out._rowwise_storage._hp_data.data_ptr()
@@ -249,8 +275,13 @@ def test_weight_workspace_dtype_and_reuse():
         workspace_dtype=torch.float32,
         cache=True,
     )
-    assert cache3 is not cache and out3._rowwise_storage.dequantize().dtype == torch.float32
-    torch.testing.assert_close(out3._rowwise_storage.dequantize(), native_qdq(w), rtol=0, atol=0)
+    assert (
+        cache3 is not cache
+        and out3._rowwise_storage.dequantize().dtype == torch.float32
+    )
+    torch.testing.assert_close(
+        out3._rowwise_storage.dequantize(), native_qdq(w), rtol=0, atol=0
+    )
 
 
 def test_noncontiguous_and_fast_math_fallback(monkeypatch):
@@ -304,11 +335,13 @@ def test_copy_preserves_runtime_reduction_state():
 
 
 @pytest.mark.parametrize("grouped", [False, True])
-def test_4over6_modules(grouped):
+@pytest.mark.parametrize("mixed", [False, True])
+def test_4over6_modules(grouped, mixed):
     test_module_operands(
         "reference",
         grouped,
         torch.bfloat16,
+        mixed=mixed,
         nvfp4_options={
             "nvfp4_use_4over6": True,
             "nvfp4_e4m3_max": 448,
@@ -338,7 +371,7 @@ def test_qdq_columnwise_only_workspace_dtype(empty):
     """A transient forward QDQ source must round to the requested compute dtype."""
     from transformer_engine.pytorch.quantization import QuantizerRole
 
-    q = nvfp4_qdq_weight_fwd_mxfp8_bwd_factory(
+    q = mxfp8_nvfp4_qdq_fwd_mxfp8_bwd_factory(
         QuantizerRole(module_type="linear", tensor_type="weight")
     )
     q.set_usage(rowwise=False, columnwise=True)
@@ -354,5 +387,7 @@ def test_qdq_columnwise_only_workspace_dtype(empty):
     expected = mx_value(native_qdq(x, torch.bfloat16).float(), columnwise=True)
     # Native make_empty honors its allocation dtype; native quantize retains
     # the FP32 source dtype. Preserve both behaviors and compare equal decodes.
-    assert out._columnwise_storage._dtype == (torch.bfloat16 if empty else torch.float32)
+    assert out._columnwise_storage._dtype == (
+        torch.bfloat16 if empty else torch.float32
+    )
     assert_bits(out._columnwise_storage.dequantize(dtype=torch.float32), expected)
