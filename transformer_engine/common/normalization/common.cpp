@@ -578,12 +578,24 @@ bool use_cudnn_mxfp8_norm_output_in_input_dtype() {
   return flag;
 }
 
+bool& _cudnn_norm_fwd_mxfp8_flag() {
+  static bool flag = transformer_engine::getenv<bool>("NVTE_NORM_FWD_MXFP8_USE_CUDNN");
+  return flag;
+}
+
+bool use_cudnn_norm_fwd_mxfp8() { return _cudnn_norm_fwd_mxfp8_flag(); }
+
 }  //  namespace normalization
 }  // namespace transformer_engine
 
 void nvte_enable_cudnn_norm_fwd(bool enable) {
   NVTE_API_CALL(nvte_enable_cudnn_norm_fwd);
   transformer_engine::normalization::_cudnn_norm_fwd_flag() = enable;
+}
+
+void nvte_enable_cudnn_norm_fwd_mxfp8(bool enable) {
+  NVTE_API_CALL(nvte_enable_cudnn_norm_fwd_mxfp8);
+  transformer_engine::normalization::_cudnn_norm_fwd_mxfp8_flag() = enable;
 }
 
 void nvte_enable_cudnn_norm_bwd(bool enable) {

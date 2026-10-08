@@ -418,6 +418,18 @@ LayerNorm/RMSNorm SM Margins
                  BF16 input and normalization-output datatypes. When set to ``0``, or with an
                  earlier cuDNN version, the virtual normalization output uses FP32.
 
+.. envvar:: NVTE_NORM_FWD_MXFP8_USE_CUDNN
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Use cuDNN for RMSNorm forward with MXFP8 output. By default, when both dimensions
+                 of the input are multiples of 128, Transformer Engine's fused kernel normalizes,
+                 quantizes the FP32 normalized values, and writes the scaling factors in the layout
+                 of the output tensor, including the GEMM-swizzled layout. When set to ``1``, and
+                 for other shapes, the forward uses cuDNN's fused kernel when
+                 ``NVTE_NORM_FWD_USE_CUDNN=1`` and otherwise normalizes and quantizes in separate
+                 kernels.
+
 .. envvar:: NVTE_FWD_LAYERNORM_SM_MARGIN
 
    :Type: ``int``

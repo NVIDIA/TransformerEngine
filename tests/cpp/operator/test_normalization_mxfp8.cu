@@ -102,7 +102,8 @@ void dequantize_2x(Tensor& input, Tensor& output, bool is_training)
 }
 
 template <typename InputType, typename OutputType>
-void performTest(const size_t N, const size_t H, const bool zero_centered_gamma, NormType norm_type, bool is_training, const bool zero_centered_gamma_in_weight_dtype) {
+void performTest(const size_t N, const size_t H, const bool zero_centered_gamma, NormType norm_type, bool is_training, const bool zero_centered_gamma_in_weight_dtype,
+                 const bool use_cudnn_mxfp8) {
 
   cudaDeviceProp prop;
   cudaGetDeviceProperties(&prop, 0);
@@ -134,6 +135,9 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
   } else {
     nvte_enable_zero_centered_gamma_in_weight_dtype(false);
   }
+  // RMSNorm shapes that are multiples of 128 use Transformer Engine's fused MXFP8 kernel
+  // unless cuDNN is requested.
+  nvte_enable_cudnn_norm_fwd_mxfp8(use_cudnn_mxfp8);
 
   // Forward kernel
   float epsilon = 1e-5;
@@ -163,6 +167,7 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
   if (zero_centered_gamma_in_weight_dtype) {
     nvte_enable_zero_centered_gamma_in_weight_dtype(false);
   }
+  nvte_enable_cudnn_norm_fwd_mxfp8(false);
 
   Tensor dequantized_output("dequantized_output", std::vector<size_t>{ N, H }, DType::kFloat32, true, true);
 
@@ -197,7 +202,7 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
                      nullptr, // amax
                      1.f, // scale
                      zero_centered_gamma,
-                     true, // CuDNN is the only MXFP8 backend currently
+                     true, // The MXFP8 backends add 1 to a zero-centered gamma as cuDNN does
                      zero_centered_gamma_in_weight_dtype);
 
   cudaDeviceSynchronize();
@@ -235,6 +240,88 @@ std::vector<std::pair<size_t, size_t>> test_cases = {
   {2048, 12288},
 };
 
+// Index of compact scaling factor (i, j) in the GEMM-swizzled layout: 128x4 tiles of i x j,
+// num_tiles_j tiles along j.
+size_t swizzled_scale_idx(size_t i, size_t j, size_t num_tiles_j) {
+  return ((i / 128) * num_tiles_j + j / 4) * 512 + (i % 32) * 16 + ((i % 128) / 32) * 4 + j % 4;
+}
+
+// RMSNorm with MXFP8 output written with GEMM-swizzled scaling factors must give the same
+// data as with compact scaling factors, and the compact scaling factors in swizzled order.
+template <typename InputType, typename OutputType>
+void performSwizzledScalesTest(const size_t N, const size_t H, const bool is_training) {
+  if (getDeviceComputeCapability() < blackwellComputeCapability) {
+    GTEST_SKIP();
+  }
+  cudaDeviceProp prop;
+  cudaGetDeviceProperties(&prop, 0);
+
+  const DType itype = TypeInfo<InputType>::dtype;
+  const DType otype = TypeInfo<OutputType>::dtype;
+  Tensor input("input", std::vector<size_t>{ N, H }, itype);
+  Tensor gamma("gamma", std::vector<size_t>{ H }, itype);
+  Tensor rsigma("rsigma", std::vector<size_t>{ N }, DType::kFloat32);
+  Tensor z("z", std::vector<size_t>{ N, H }, otype, true, is_training, NVTE_MXFP8_1D_SCALING);
+  Tensor z_swizzled("z_swizzled", std::vector<size_t>{ N, H }, otype, true, is_training,
+                    NVTE_MXFP8_1D_SCALING);
+  z_swizzled.set_with_gemm_swizzled_scales(true);
+  fillUniform(&input);
+  fillUniform(&gamma);
+
+  for (Tensor *out : {&z, &z_swizzled}) {
+    Tensor workspace;
+    nvte_rmsnorm_fwd(input.data(), gamma.data(), 1e-5f, out->data(), rsigma.data(),
+                     workspace.data(), prop.multiProcessorCount, false, 0);
+    workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
+    nvte_rmsnorm_fwd(input.data(), gamma.data(), 1e-5f, out->data(), rsigma.data(),
+                     workspace.data(), prop.multiProcessorCount, false, 0);
+  }
+  cudaDeviceSynchronize();
+  auto err = cudaGetLastError();
+  ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
+  z.to_cpu();
+  z_swizzled.to_cpu();
+
+  const auto bytes = [](const OutputType *p) { return reinterpret_cast<const uint8_t *>(p); };
+  compareResults("rowwise_data", bytes(z_swizzled.rowwise_cpu_dptr<OutputType>()),
+                 bytes(z.rowwise_cpu_dptr<OutputType>()), N * H);
+  const NVTEShape row_shape = z.rowwise_scale_inv_shape();
+  const size_t row_dim0 = row_shape.data[0], row_dim1 = row_shape.data[1];
+  std::vector<uint8_t> ref(row_dim0 * row_dim1);
+  const uint8_t *compact = z.rowwise_cpu_scale_inv_ptr<uint8_t>();
+  for (size_t i = 0; i < row_dim0; ++i) {
+    for (size_t j = 0; j < row_dim1; ++j) {
+      ref[swizzled_scale_idx(i, j, row_dim1 / 4)] = compact[i * row_dim1 + j];
+    }
+  }
+  compareResults("rowwise_scales", z_swizzled.rowwise_cpu_scale_inv_ptr<uint8_t>(), ref.data(),
+                 ref.size());
+
+  if (is_training) {
+    compareResults("colwise_data", bytes(z_swizzled.columnwise_cpu_dptr<OutputType>()),
+                   bytes(z.columnwise_cpu_dptr<OutputType>()), N * H);
+    // Compact column-wise scaling factors are [rows / 32, cols]; the swizzled layout tiles
+    // columns by 128 and scale rows by 4.
+    const NVTEShape col_shape = z.columnwise_scale_inv_shape();
+    const size_t col_dim0 = col_shape.data[0], col_dim1 = col_shape.data[1];
+    ref.assign(col_dim0 * col_dim1, 0);
+    compact = z.columnwise_cpu_scale_inv_ptr<uint8_t>();
+    for (size_t i = 0; i < col_dim0; ++i) {
+      for (size_t j = 0; j < col_dim1; ++j) {
+        ref[swizzled_scale_idx(j, i, col_dim0 / 4)] = compact[i * col_dim1 + j];
+      }
+    }
+    compareResults("colwise_scales", z_swizzled.columnwise_cpu_scale_inv_ptr<uint8_t>(),
+                   ref.data(), ref.size());
+  }
+}
+
+std::vector<std::pair<size_t, size_t>> swizzled_scales_test_cases = {
+  {128, 128},
+  {768, 2304},
+  {256, 7168},
+};
+
 std::vector<NormType> norms = {
   NormType::LayerNorm,
   NormType::RMSNorm
@@ -246,7 +333,7 @@ class MxNormTestSuite : public ::testing::TestWithParam< std::tuple<NormType,
                                                                     transformer_engine::DType,
                                                                     transformer_engine::DType,
                                                                     std::pair<size_t, size_t>,
-                                                                    bool, bool, bool>> {};
+                                                                    bool, bool, bool, bool>> {};
 
 TEST_P(MxNormTestSuite, TestMxNorm) {
   using namespace transformer_engine;
@@ -259,10 +346,15 @@ TEST_P(MxNormTestSuite, TestMxNorm) {
   const bool zero_centered_gamma = std::get<4>(GetParam());
   const bool is_training = std::get<5>(GetParam());
   const bool zero_centered_gamma_in_weight_dtype = std::get<6>(GetParam());
+  const bool use_cudnn_mxfp8 = std::get<7>(GetParam());
+  if (norm_type == NormType::LayerNorm && use_cudnn_mxfp8) {
+    GTEST_SKIP() << "LayerNorm with MXFP8 output always uses cuDNN";
+  }
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(input_type, InputType,
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP8_ONLY(output_type, OutputType,
-      performTest<InputType, OutputType>(size.first, size.second, zero_centered_gamma, norm_type, is_training, zero_centered_gamma_in_weight_dtype);
+      performTest<InputType, OutputType>(size.first, size.second, zero_centered_gamma, norm_type, is_training, zero_centered_gamma_in_weight_dtype,
+                                         use_cudnn_mxfp8);
     );
   );
 }
@@ -277,7 +369,8 @@ INSTANTIATE_TEST_SUITE_P(
     ::testing::ValuesIn(test_cases),
     ::testing::Values(true, false),
     ::testing::Values(true, false),
-    ::testing::Values(true, false)),
+    ::testing::Values(true, false),
+    ::testing::Values(false, true)),
   [](const testing::TestParamInfo<MxNormTestSuite::ParamType>& info) {
     std::string name = normToString.at(std::get<0>(info.param)) + "_" +
       test::typeName(std::get<1>(info.param)) + "X" +
@@ -286,6 +379,44 @@ INSTANTIATE_TEST_SUITE_P(
       std::to_string(std::get<3>(info.param).second) + "X" +
       std::to_string(std::get<4>(info.param)) + "out" +
       std::to_string(int(std::get<5>(info.param)) + 1) + "x" +
-      std::to_string(std::get<6>(info.param));
+      std::to_string(std::get<6>(info.param)) +
+      (std::get<7>(info.param) ? "Xcudnn" : "");
     return name;
+  });
+
+class MxNormSwizzledScalesTestSuite
+    : public ::testing::TestWithParam<std::tuple<transformer_engine::DType,
+                                                 transformer_engine::DType,
+                                                 std::pair<size_t, size_t>, bool>> {};
+
+TEST_P(MxNormSwizzledScalesTestSuite, TestMxRMSNormSwizzledScales) {
+  using namespace transformer_engine;
+  using namespace test;
+
+  const DType input_type = std::get<0>(GetParam());
+  const DType output_type = std::get<1>(GetParam());
+  const auto size = std::get<2>(GetParam());
+  const bool is_training = std::get<3>(GetParam());
+
+  TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(input_type, InputType,
+    TRANSFORMER_ENGINE_TYPE_SWITCH_FP8_ONLY(output_type, OutputType,
+      performSwizzledScalesTest<InputType, OutputType>(size.first, size.second, is_training);
+    );
+  );
+}
+
+INSTANTIATE_TEST_SUITE_P(
+  OperatorTest,
+  MxNormSwizzledScalesTestSuite,
+  ::testing::Combine(
+    ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
+    ::testing::Values(DType::kFloat8E5M2, DType::kFloat8E4M3),
+    ::testing::ValuesIn(swizzled_scales_test_cases),
+    ::testing::Values(true, false)),
+  [](const testing::TestParamInfo<MxNormSwizzledScalesTestSuite::ParamType>& info) {
+    return test::typeName(std::get<0>(info.param)) + "X" +
+           test::typeName(std::get<1>(info.param)) + "X" +
+           std::to_string(std::get<2>(info.param).first) + "X" +
+           std::to_string(std::get<2>(info.param).second) + "X" +
+           std::to_string(int(std::get<3>(info.param)) + 1) + "x";
   });
