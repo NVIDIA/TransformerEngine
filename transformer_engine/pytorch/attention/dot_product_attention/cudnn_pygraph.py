@@ -230,6 +230,10 @@ def finalize_plans(
     process-wide, so declining to ask is not enough. Forgetting to exclude is silently wrong while
     excluding wrongly costs a slower plan or a loud decline, so the default favours the caller
     that does not want them; it is skipped when a plan is pinned, which has already named one.
+
+    Remove the default once cuDNN is fixed: the gate that should decline these graphs reads a key
+    ``sdpa()`` never writes, so it never fires. The bar is not self-verifying either, matching
+    engine names by a substring that a rename would silently break.
     """
     cudnn = _cudnn if _cudnn is not None else import_cudnn_frontend()
 
