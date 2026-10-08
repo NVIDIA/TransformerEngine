@@ -33,6 +33,7 @@ add_executable(test_operator
                test_scaled_activation.cu
                test_normalization.cu
                test_normalization_mxfp8.cu
+               test_fused_moe_aux_loss.cpp
                test_memset.cu
                test_splits_to_offsets.cu
                test_multi_cast_transpose.cu

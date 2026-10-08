@@ -417,9 +417,14 @@ void fused_score_for_moe_aux_loss_bwd(at::Tensor intermediate_output, at::Tensor
       at::cuda::getCurrentCUDAStream());
 }
 
-size_t get_moe_aux_loss_workspace_size() {
-  // Python allocates FP32 elements; the common API returns bytes.
-  return nvte_get_moe_aux_loss_workspace_size() / sizeof(float);
+std::pair<std::vector<size_t>, DType> get_moe_aux_loss_workspace_config() {
+  TensorWrapper workspace;
+  // Query the operation with an empty workspace, then let Python own the
+  // allocation and its per-stream or CUDA Graph lifetime.
+  nvte_fused_moe_aux_loss_forward_v2(nullptr, nullptr, 0, 0, 0, 0, 0, 0.0f, nullptr, nullptr,
+                                     workspace.data(), nullptr);
+  const auto shape = workspace.shape();
+  return {std::vector<size_t>(shape.data, shape.data + shape.ndim), workspace.dtype()};
 }
 
 static TensorWrapper make_aux_loss_workspace(const std::optional<at::Tensor> &workspace,

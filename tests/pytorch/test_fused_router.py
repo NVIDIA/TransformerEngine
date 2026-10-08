@@ -1261,6 +1261,7 @@ def test_fused_moe_aux_loss_deterministic_dispatch(monkeypatch, tensor_total, de
 def test_fused_moe_aux_loss_workspace_reuse():
     """Eager calls share scratch only when ordered on the same device/stream."""
     device = torch.device("cuda", torch.cuda.current_device())
+    shape, dtype = te_router._get_moe_aux_loss_workspace_config()
     workspaces = []
     streams = [torch.cuda.Stream(), torch.cuda.Stream()]
     for stream in streams:
@@ -1268,9 +1269,51 @@ def test_fused_moe_aux_loss_workspace_reuse():
             workspace = te_router._get_moe_aux_loss_workspace(device)
             again = te_router._get_moe_aux_loss_workspace(device)
         assert workspace.data_ptr() == again.data_ptr()
-        assert workspace.device == device and workspace.dtype == torch.float32
+        assert workspace.device == device and workspace.dtype == dtype
+        assert tuple(workspace.shape) == shape
         workspaces.append(workspace)
     assert workspaces[0].data_ptr() != workspaces[1].data_ptr()
+
+
+@pytest.mark.parametrize("device_total", [False, True], ids=["host_total", "device_total"])
+@pytest.mark.parametrize(
+    "workspace_kind,match",
+    [
+        ("missing", "requires a workspace"),
+        ("empty", "must not be empty"),
+        ("undersized", "needs at least"),
+        ("wrong_dtype", "contiguous FP32"),
+        ("noncontiguous", "contiguous FP32"),
+        ("cpu", "same CUDA device"),
+    ],
+)
+def test_fused_moe_aux_loss_invalid_workspace(device_total, workspace_kind, match):
+    """Reject unsafe scratch before either forward variant launches kernels."""
+    num_tokens, num_experts = 257, 8
+    probs = torch.ones(num_tokens, num_experts, device="cuda")
+    counts = torch.ones(num_experts, dtype=torch.int32, device="cuda")
+    shape, dtype = te_router._get_moe_aux_loss_workspace_config()
+    workspace = torch.empty(shape, dtype=dtype, device="cuda")
+    if workspace_kind == "missing":
+        workspace = None
+    elif workspace_kind == "empty":
+        workspace = workspace[:0]
+    elif workspace_kind == "undersized":
+        workspace = workspace[:1]
+    elif workspace_kind == "wrong_dtype":
+        workspace = workspace.half()
+    elif workspace_kind == "noncontiguous":
+        workspace = workspace.repeat_interleave(2)[::2]
+    elif workspace_kind == "cpu":
+        workspace = torch.empty(shape, dtype=dtype)
+    total = (
+        torch.tensor(num_tokens, dtype=torch.int64, device="cuda") if device_total else num_tokens
+    )
+    forward = tex.fused_moe_aux_loss_fwd_graph_safe if device_total else tex.fused_moe_aux_loss_fwd
+    with pytest.raises(RuntimeError, match=match):
+        forward(
+            probs, counts, total, num_experts, num_tokens, num_experts, 1, 0.01, True, workspace
+        )
 
 
 def test_fused_moe_aux_loss_cuda_graph_workspace_isolation(monkeypatch):
