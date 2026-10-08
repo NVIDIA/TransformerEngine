@@ -43,6 +43,8 @@ _MIN_CUTLASS_DSL = PkgVersion("4.7.0")
 _MIN_CUDNN_FRONTEND = PkgVersion("1.29.0")
 
 _SUPPORTED_ARCHS = ((10, 0), (10, 3))
+# These mirror sdpa_bwd_sm100's declared envelope: d_envelope_floor=256, d={512},
+# d_pad_multiple=8.
 _MAX_HEAD_DIM = 512
 _MIN_HEAD_DIM = 257  # below this the existing cuDNN/flash backends already serve the shape
 # The engine pads head_dim to a multiple of 8, so 260 is in range but not servable. Declined
@@ -321,12 +323,12 @@ def is_frost_attention_supported(params) -> Tuple[int, str]:
                 no_backend,
                 f"FROST needs {name} to be a multiple of {_HEAD_DIM_MULTIPLE}; got {head_dim}",
             )
-    # Reached only once both dims are in range, which is the point: cuDNN's backward does plan
-    # asymmetric pairs below it (dqk192/dv128), so widening the range must revisit this rule.
+    # Scoped to this range deliberately. sdpa_bwd_sm100 is the only f16 FROST backward on
+    # SM100/SM103 and leaves dqk_ge_dv unset, which cuDNN reads as requiring d_qk == d_v; its
+    # sm80 and sm120 siblings do set it and serve rectangular pairs such as 192/128.
     if params.head_dim_qk != params.head_dim_v:
-        # Measured on B200 with cuDNN Frontend 1.29.0: above d_qk=128 the backward serves only
-        # 192/128 and 256/256, so no asymmetric pair in (256, 512] has a plan. Declined for both
-        # directions, since is_training follows module.training and eval() leaves autograd on.
+        # Declined for both directions, since is_training follows module.training and eval()
+        # leaves autograd on, so an eval-mode call is no promise that no backward follows.
         return (
             no_backend,
             (
