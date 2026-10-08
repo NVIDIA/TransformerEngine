@@ -35,12 +35,12 @@ using fp8e4m3 = __nv_fp8_e4m3;
 template <typename VAR_T>
 using VarMath = std::conditional_t<std::is_same_v<VAR_T, double>, double, MATH_T>;
 
-// sqrt(v_hat) + eps, with an FP64 second moment computed in FP64 and rounded once.
+// Keep sqrt(v_hat) + eps in the second moment's math type until the update is rounded.
 template <typename V_MATH_T>
-__device__ __forceinline__ MATH_T adam_denominator(const V_MATH_T next_v_unbiased,
-                                                   const float epsilon) {
+__device__ __forceinline__ V_MATH_T adam_denominator(const V_MATH_T next_v_unbiased,
+                                                     const float epsilon) {
   if constexpr (std::is_same_v<V_MATH_T, double>) {
-    return static_cast<MATH_T>(sqrt(next_v_unbiased) + static_cast<double>(epsilon));
+    return sqrt(next_v_unbiased) + static_cast<double>(epsilon);
   } else {
     return sqrtf(next_v_unbiased) + epsilon;
   }
@@ -150,7 +150,7 @@ struct AdamFunctorMaster {
                         static_cast<VarMath<VAR_T>>(r_g[ii]);
           MATH_T next_m_unbiased = r_m[ii] / beta1_correction;
           VarMath<VAR_T> next_v_unbiased = r_v[ii] / beta2_correction;
-          MATH_T denom = adam_denominator(next_v_unbiased, epsilon);
+          VarMath<VAR_T> denom = adam_denominator(next_v_unbiased, epsilon);
           MATH_T update = next_m_unbiased / denom;
           r_p[ii] = r_p[ii] - (lr * update);
         } else {  // weight decay
@@ -160,7 +160,7 @@ struct AdamFunctorMaster {
                         static_cast<VarMath<VAR_T>>(r_g[ii]);
           MATH_T next_m_unbiased = r_m[ii] / beta1_correction;
           VarMath<VAR_T> next_v_unbiased = r_v[ii] / beta2_correction;
-          MATH_T denom = adam_denominator(next_v_unbiased, epsilon);
+          VarMath<VAR_T> denom = adam_denominator(next_v_unbiased, epsilon);
           MATH_T update = (next_m_unbiased / denom) + (decay * r_p[ii]);
           r_p[ii] = r_p[ii] - (lr * update);
         }
@@ -381,7 +381,7 @@ struct AdamFunctor {
                         static_cast<VarMath<VAR_T>>(r_g[ii]);
           MATH_T next_m_unbiased = r_m[ii] / beta1_correction;
           VarMath<VAR_T> next_v_unbiased = r_v[ii] / beta2_correction;
-          MATH_T denom = adam_denominator(next_v_unbiased, epsilon);
+          VarMath<VAR_T> denom = adam_denominator(next_v_unbiased, epsilon);
           MATH_T update = next_m_unbiased / denom;
           r_p[ii] = r_p[ii] - (lr * update);
         } else {  // weight decay
@@ -391,7 +391,7 @@ struct AdamFunctor {
                         static_cast<VarMath<VAR_T>>(r_g[ii]);
           MATH_T next_m_unbiased = r_m[ii] / beta1_correction;
           VarMath<VAR_T> next_v_unbiased = r_v[ii] / beta2_correction;
-          MATH_T denom = adam_denominator(next_v_unbiased, epsilon);
+          VarMath<VAR_T> denom = adam_denominator(next_v_unbiased, epsilon);
           MATH_T update = (next_m_unbiased / denom) + (decay * r_p[ii]);
           r_p[ii] = r_p[ii] - (lr * update);
         }

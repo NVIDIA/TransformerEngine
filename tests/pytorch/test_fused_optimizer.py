@@ -621,6 +621,69 @@ class TestFusedAdam(TestFusedOptimizer):
         assert optim.state[param]["exp_avg"].dtype == torch.float32
         torch.testing.assert_close(exp_avg_sq, reference, rtol=1e-12, atol=0)
 
+    @pytest.mark.parametrize("master_weights", [False, True])
+    def test_fp64_exp_avg_sq_checkpoint_preserves_precision(self, master_weights):
+        param_dtype = torch.float16 if master_weights else torch.float32
+        param = torch.nn.Parameter(torch.zeros(3, dtype=param_dtype, device="cuda"))
+        options = {
+            "lr": 1e-3,
+            "betas": (0.9, 0.95),
+            "master_weights": master_weights,
+            "exp_avg_sq_dtype": torch.float64,
+            "use_decoupled_grad": True,
+        }
+        optim = te.optimizers.FusedAdam([param], **options)
+        # Cover FP64 low bits, squares below FP32's range, and squares above it.
+        grad = torch.tensor([1e-7, 1e-23, 1e21], dtype=torch.float32, device="cuda")
+        param.decoupled_grad = grad
+        optim.step()
+
+        checkpoint = optim.state_dict()
+        restored_param = torch.nn.Parameter(param.detach().clone())
+        restored_optim = te.optimizers.FusedAdam([restored_param], **options)
+        restored_optim.load_state_dict(checkpoint)
+        restored_v = restored_optim.state[restored_param]["exp_avg_sq"]
+        assert restored_v.dtype == torch.float64
+        torch.testing.assert_close(restored_v, optim.state[param]["exp_avg_sq"], rtol=0, atol=0)
+
+        # A resumed step must follow the same trajectory as uninterrupted training.
+        restored_param.decoupled_grad = grad.clone()
+        optim.step()
+        restored_optim.step()
+        for name in optim.state[param]:
+            torch.testing.assert_close(
+                restored_optim.state[restored_param][name], optim.state[param][name], rtol=0, atol=0
+            )
+        torch.testing.assert_close(restored_param, param, rtol=0, atol=0)
+
+    @pytest.mark.parametrize("master_weights", [False, True])
+    @pytest.mark.parametrize("adam_w_mode", [False, True])
+    def test_fp64_exp_avg_sq_update_rounded_once(self, master_weights, adam_w_mode):
+        param_dtype = torch.float16 if master_weights else torch.float32
+        grad = torch.tensor([1e-7, 1e-6, 1e-5], dtype=torch.float32, device="cuda")
+        param = torch.nn.Parameter(torch.zeros_like(grad, dtype=param_dtype))
+        eps = 1e-8
+        optim = te.optimizers.FusedAdam(
+            [param],
+            lr=1.0,
+            betas=(0.0, 0.0),
+            eps=eps,
+            weight_decay=0.0,
+            adam_w_mode=adam_w_mode,
+            master_weights=master_weights,
+            exp_avg_sq_dtype=torch.float64,
+            use_decoupled_grad=True,
+        )
+        param.decoupled_grad = grad
+        optim.step()
+
+        # Match the FP32 epsilon passed to the kernel, then keep the entire quotient in FP64.
+        epsilon = torch.tensor(eps, dtype=torch.float32, device="cuda").double()
+        denominator = grad.double().square().sqrt() + epsilon
+        expected = -(grad.double() / denominator).float()
+        actual = optim.get_unscaled_state(param, "master_param") if master_weights else param
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
     def test_fp64_exp_avg_sq_rejects_unsupported_options(self):
         param = torch.nn.Parameter(torch.randn(16, device="cuda"))
         with pytest.raises(RuntimeError, match="only with fp32 exp_avg"):

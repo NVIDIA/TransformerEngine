@@ -337,8 +337,8 @@ class FusedAdam(torch.optim.Optimizer):
 
         Returns:
             torch.Tensor: The unscaled state. Note that if the state is in BF16, the returned
-            tensor is still in BF16 because it doesn't require to be "unscaled", otherwise it
-            will be unscaled to FP32.
+            tensor is still in BF16 because it doesn't require to be "unscaled". FP64 second
+            moments retain their dtype; other floating-point states are unscaled to FP32.
         """
         state = self.state[param]
         dtype = self.name_to_dtype_map[state_name]
@@ -378,14 +378,14 @@ class FusedAdam(torch.optim.Optimizer):
     def set_scaled_state(self, param, state_name, unscaled_state):
         """Set the optimizer state.
 
-        If the dtype of the corresponding optimizer state is not FP32,
+        If the dtype of the corresponding optimizer state is not FP32 or FP64,
         it will do scaling automatically.
 
         Arguments:
             param (torch.nn.Parameter): One of parameters in this optimizer.
             state_name (string): Name of optimizer states, can be one of 'exp_avg', 'exp_avg_sq',
                 and 'master_param`.
-            unscaled_state (torch.Tensor): The original high-precision (FP32) state.
+            unscaled_state (torch.Tensor): The original high-precision (FP32 or FP64) state.
         """
 
         store_param_remainders = (
@@ -502,8 +502,8 @@ class FusedAdam(torch.optim.Optimizer):
                 self.set_scaled_state(param, "master_param", master)
 
     def state_dict(self):
-        """Override the state_dict() of pytorch. Before returning the state_dict, cast all
-        non-fp32 states to fp32.
+        """Override the state_dict() of pytorch. Unscale low-precision states before returning
+        the state_dict, preserving FP64 second moments.
         """
         state_dict = super().state_dict()
 
@@ -566,6 +566,8 @@ class FusedAdam(torch.optim.Optimizer):
                     ):
                         self.set_scaled_state(param, name, state)
                         assert state.dtype == torch.int16
+                    elif self.name_to_dtype_map[name] == torch.float64:
+                        self.set_scaled_state(param, name, state.double())
                     else:
                         self.set_scaled_state(param, name, state.float())
 
