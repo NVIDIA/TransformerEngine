@@ -323,9 +323,9 @@ def is_frost_attention_supported(params) -> Tuple[int, str]:
                 no_backend,
                 f"FROST needs {name} to be a multiple of {_HEAD_DIM_MULTIPLE}; got {head_dim}",
             )
-    # Scoped to this range deliberately. sdpa_bwd_sm100 is the only f16 FROST backward on
-    # SM100/SM103 and leaves dqk_ge_dv unset, which cuDNN reads as requiring d_qk == d_v; its
-    # sm80 and sm120 siblings do set it and serve rectangular pairs such as 192/128.
+    # The rule is the backward engine's, not this range's. sdpa_bwd_sm100 is the only f16 FROST
+    # backward on SM100/SM103 and leaves dqk_ge_dv unset, which cuDNN reads as requiring
+    # d_qk == d_v at every head dim. The forward serves 192/128 here, so only the backward binds.
     if params.head_dim_qk != params.head_dim_v:
         # Declined for both directions, since is_training follows module.training and eval()
         # leaves autograd on, so an eval-mode call is no promise that no backward follows.
@@ -555,10 +555,10 @@ def _validate_qkv(q, k, v, qkv_format):
     the other ran first.
 
     Rank is checked here because cuDNN cannot: _sdpa_validate inspects the descriptor this
-    module builds, and bhsd_dim_stride reads dims 0-3, so a higher-rank tensor is described as
-    4D with its trailing dims dropped rather than rejected. The head-dim stride does reach the
-    descriptor, and _sdpa_validate rejects a non-unit one in graph.validate(), so it is not
-    repeated here.
+    module builds, and bhsd_dim_stride reads dims 0-3, so a rank-5 tensor is described as 4D.
+    The plan cache key carries strides but not rank, so such a tensor can even reuse a valid 4D
+    plan and be bound by pointer. The head-dim stride does reach the descriptor, so
+    _sdpa_validate rejects a non-unit one in graph.validate() and it is not repeated here.
     """
     for name, tensor in (("q", q), ("k", k), ("v", v)):
         if tensor.dim() != 4:
@@ -782,10 +782,13 @@ def fused_attn_bwd(
         raise ValueError(f"softmax_lse must be fp32; got {softmax_lse.dtype}")
     # Compared against the BHSD description, not q's own shape: the LSE is always [b, h, s]
     # whatever format the tensors arrived in.
-    if tuple(softmax_lse.shape[:3]) != tuple(qd[:3]):
+    # The whole shape, not just the leading dims: the stats node is declared [b, h, s, 1], so a
+    # trailing dim of any other size would be bound by pointer and read with strides that do not
+    # describe it. Same hole the rank check on q/k/v closes.
+    lse_shape = tuple(softmax_lse.shape)
+    if lse_shape not in (tuple(qd[:3]), tuple(qd[:3]) + (1,)):
         raise ValueError(
-            f"softmax_lse must be [b, h, s] matching q; got {tuple(softmax_lse.shape)} and"
-            f" {tuple(qd[:3])}"
+            f"softmax_lse must be [b, h, s] or [b, h, s, 1] matching q; got {lse_shape}"
         )
 
     scale = attn_scale if attn_scale is not None else qd[3] ** -0.5
