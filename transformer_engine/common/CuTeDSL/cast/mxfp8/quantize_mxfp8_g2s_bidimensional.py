@@ -446,7 +446,7 @@ class MXFP8QuantizeSpecializedBidimensionalKernel(MXFP8QuantizeKernelBase):
                 cute.struct.MemRange[Float8E8M0FNU, self._NUM_TILES * self._TILE_COLS], 16
             ]
 
-        smem = cutlass.utils.SmemAllocator()
+        smem = cutlass.memory.SmemAllocator()
         storage = smem.allocate(SharedStorage)
 
         tile_layout = cute.make_layout(

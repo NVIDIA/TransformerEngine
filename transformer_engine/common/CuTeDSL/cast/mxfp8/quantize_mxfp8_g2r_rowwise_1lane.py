@@ -177,7 +177,7 @@ class MXFP8QuantizeG2RRowwise1LaneKernel(MXFP8QuantizeKernelBase):
             class SharedStorage:
                 buf: cute.struct.Align[cute.struct.MemRange[Float8E8M0FNU, CTA_Y * CTA_X], 16]
 
-            storage = cutlass.utils.SmemAllocator().allocate(SharedStorage)
+            storage = cutlass.memory.SmemAllocator().allocate(SharedStorage)
             sScale = storage.buf.get_tensor(cute.make_layout((CTA_Y, CTA_X), stride=(CTA_X, 1)))
             # sScale is (CTA_Y, CTA_X):(CTA_X, 1), which is the same layout as tv_layout_scale
             # so sS_thread is really just a 1-element e8m0 buffer for this thread's scale.

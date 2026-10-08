@@ -867,7 +867,7 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
                 ]
                 sAmax: cute.struct.MemRange[Float32, self._NUM_WARPS]
 
-        smem = cutlass.utils.SmemAllocator()
+        smem = cutlass.memory.SmemAllocator()
         storage = smem.allocate(SharedStorage)
         # Apply the layout to the allocated shared memory buffers so the first rank is the tile (nested layout)
         # and the second rank is the pipeline stage
@@ -1220,7 +1220,7 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
 
     @cute.jit
     def _dbias_reduction_rowwise_epilouge(
-        self, smem: cutlass.utils.SmemAllocator, tidx: Int32, rowwise_dbias_acc: cute.Tensor
+        self, smem: cutlass.memory.SmemAllocator, tidx: Int32, rowwise_dbias_acc: cute.Tensor
     ):
         # Pad the buffer to avoid bank conflicts. The logical shape is still the same. Only the stride is different.
         DBIAS_BUFF_WIDTH = (

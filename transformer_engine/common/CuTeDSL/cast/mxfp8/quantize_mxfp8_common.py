@@ -43,9 +43,6 @@ MXFP8_BLOCK_SCALING_SIZE = 32
 # How many threads are in one warp
 THREADS_PER_WARP = 32
 
-# Prefer the current allocator API while retaining compatibility with older DSL releases.
-_SmemAllocator = getattr(cutlass, "memory", cutlass.utils).SmemAllocator
-
 # FP8E4M3 max representable value
 FP8E4M3_MAX_NORM = 448.0
 FP8E4M3_MAX_NORM_RCP = 1.0 / FP8E4M3_MAX_NORM

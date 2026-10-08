@@ -109,7 +109,7 @@ def quantize_rowwise_mxfp8_g2r(
             cute.copy(load_atom, gX_thread, rX[None, tile_idx], cache_policy=input_policy)
 
     @cute.jit
-    def extract_tile_amax(values_i32: cute.Tensor) -> Float32:
+    def extract_mx_block_amax(values_i32: cute.Tensor) -> Float32:
         """Return the 32-value MXFP8 block amax shared by two adjacent threads.
 
         Balanced eight-pair tree, followed by one butterfly between lane partners.
@@ -134,7 +134,7 @@ def quantize_rowwise_mxfp8_g2r(
         # Reinterpret the native tensors only for the packed BF16/FP8 instructions.
         rX_tile_i32 = cute.recast_tensor(rX[None, tile_idx], Int32)
         rO_u32 = cute.recast_tensor(rO, Uint32)
-        amax = extract_tile_amax(rX_tile_i32)
+        amax = extract_mx_block_amax(rX_tile_i32)
         exponent = cvt_f32_to_fp8e8m0fnu(amax * cfg.MAX_NORM_RCP)
 
         # Collect 4 scale bytes and write them using one thread
@@ -306,63 +306,87 @@ class MXFP8QuantizeG2RRowwise2LaneKernel(MXFP8QuantizeKernelBase):
         NUM_TILES: cutlass.Constexpr[int],
         CHECK_BOUNDS: cutlass.Constexpr[bool],
     ):
-        """Check the noop flag before selecting or accessing any GMEM tile."""
+        """Skip the CTA when the noop flag is set; otherwise run the kernel body."""
         if not noop_flag_is_set(mNoop):
-            # Dispatch checks 32-byte input alignment before selecting this kernel.
-            gX = cute.make_tensor(mX.iterator.align(32), mX.layout)
-            # CUDA's x/y axes hold row/column tiles in the same order as local_tile.
-            cta_coord = cute.arch.block_idx()[:2]
-            M, N = mX.shape
-            TILE_ROWS = CTA_THREADS_Y
-            TILE_COLS = CTA_THREADS_X * self._ELEMENTS_PER_THREAD
-            CTA_ROWS = TILE_ROWS
-            CTA_COLS = TILE_COLS * NUM_TILES
-
-            gS = mS
-            # Apply the swizzled scale layout if requested
-            if cutlass.const_expr(self.cfg.WITH_GEMM_SWIZZLED_SCALES):
-                mS_swizzled, _ = derive_swizzled_scale_layout(M, N, True, False, mS, None)
-                gS = cute.composition(mS_swizzled, (cute.make_layout(M), cute.make_layout(N // 32)))
-
-            # CTA_TILER is the block that a CTA processes in total, which consists of NUM_TILES horizontal tiles
-            CTA_TILER = (CTA_ROWS, CTA_COLS)
-            CTA_SCALE_TILER = (CTA_ROWS, CTA_COLS // 32)
-            gX_cta = cute.local_tile(gX, CTA_TILER, cta_coord)
-            gO_cta = cute.local_tile(mO, CTA_TILER, cta_coord)
-            gS_cta = cute.local_tile(gS, CTA_SCALE_TILER, cta_coord)
-
-            fraction = Float32(1.0)
-            if cutlass.const_expr(self._L2_CACHED_CTA_PERCENT > 0):
-                fraction = Float32(0.0)
-                # A linear index is needed only for the L2 policy split.
-                cta_id = cute.crd2idx(
-                    (Int64(cta_coord[0]), Int64(cta_coord[1])), cute.arch.grid_dim()[:2]
-                )
-                if cta_id >= first_streaming_cta:
-                    fraction = Float32(1.0)
-            input_policy = create_l2_policy(False, fraction)
-            output_policy = create_l2_policy(True)
-
-            # Divide CTA_TILER to multiple TILER shape TILES
-            TILER = (TILE_ROWS, TILE_COLS)
-            SCALE_TILER = (TILE_ROWS, TILE_COLS // 32)
-            # Mode 1's first index is 0 because CTA_ROWS == TILE_ROWS (there is only 1 tile on the row dimension).
-            gX_tiles = cute.local_tile(gX_cta, TILER, (0, None))
-            gO_tiles = cute.local_tile(gO_cta, TILER, (0, None))
-            mS_tiles = cute.local_tile(gS_cta, SCALE_TILER, (0, None))
-
-            quantize_rowwise_mxfp8_g2r(
-                gX_tiles,
-                gO_tiles,
-                mS_tiles,
-                self.cfg,
-                M,
-                N,
+            self._kernel_main(
+                mX,
+                mO,
+                mS,
+                first_streaming_cta,
                 CTA_THREADS_Y=CTA_THREADS_Y,
                 CTA_THREADS_X=CTA_THREADS_X,
-                ELEMENTS_PER_THREAD=self._ELEMENTS_PER_THREAD,
                 NUM_TILES=NUM_TILES,
                 CHECK_BOUNDS=CHECK_BOUNDS,
-                input_policy=input_policy,
-                output_policy=output_policy,
             )
+
+    @cute.jit
+    def _kernel_main(
+        self,
+        mX: cute.Tensor,
+        mO: cute.Tensor,
+        mS: cute.Tensor,
+        first_streaming_cta: Int64,
+        CTA_THREADS_Y: cutlass.Constexpr[int],
+        CTA_THREADS_X: cutlass.Constexpr[int],
+        NUM_TILES: cutlass.Constexpr[int],
+        CHECK_BOUNDS: cutlass.Constexpr[bool],
+    ):
+        """Construct CTA tile views and run the specialized quantization."""
+        # Dispatch checks 32-byte input alignment before selecting this kernel.
+        gX = cute.make_tensor(mX.iterator.align(32), mX.layout)
+        # CUDA's x/y axes hold row/column tiles in the same order as local_tile.
+        cta_coord = cute.arch.block_idx()[:2]
+        M, N = mX.shape
+        TILE_ROWS = CTA_THREADS_Y
+        TILE_COLS = CTA_THREADS_X * self._ELEMENTS_PER_THREAD
+        CTA_ROWS = TILE_ROWS
+        CTA_COLS = TILE_COLS * NUM_TILES
+
+        gS = mS
+        # Apply the swizzled scale layout if requested
+        if cutlass.const_expr(self.cfg.WITH_GEMM_SWIZZLED_SCALES):
+            mS_swizzled, _ = derive_swizzled_scale_layout(M, N, True, False, mS, None)
+            gS = cute.composition(mS_swizzled, (cute.make_layout(M), cute.make_layout(N // 32)))
+
+        # CTA_TILER is the block that a CTA processes in total, which consists of NUM_TILES horizontal tiles
+        CTA_TILER = (CTA_ROWS, CTA_COLS)
+        CTA_SCALE_TILER = (CTA_ROWS, CTA_COLS // 32)
+        gX_cta = cute.local_tile(gX, CTA_TILER, cta_coord)
+        gO_cta = cute.local_tile(mO, CTA_TILER, cta_coord)
+        gS_cta = cute.local_tile(gS, CTA_SCALE_TILER, cta_coord)
+
+        fraction = Float32(1.0)
+        if cutlass.const_expr(self._L2_CACHED_CTA_PERCENT > 0):
+            fraction = Float32(0.0)
+            # A linear index is needed only for the L2 policy split.
+            cta_id = cute.crd2idx(
+                (Int64(cta_coord[0]), Int64(cta_coord[1])), cute.arch.grid_dim()[:2]
+            )
+            if cta_id >= first_streaming_cta:
+                fraction = Float32(1.0)
+        input_policy = create_l2_policy(False, fraction)
+        output_policy = create_l2_policy(True)
+
+        # Divide CTA_TILER to multiple TILER shape TILES
+        TILER = (TILE_ROWS, TILE_COLS)
+        SCALE_TILER = (TILE_ROWS, TILE_COLS // 32)
+        # Mode 1's first index is 0 because CTA_ROWS == TILE_ROWS (there is only 1 tile on the row dimension).
+        gX_tiles = cute.local_tile(gX_cta, TILER, (0, None))
+        gO_tiles = cute.local_tile(gO_cta, TILER, (0, None))
+        mS_tiles = cute.local_tile(gS_cta, SCALE_TILER, (0, None))
+
+        quantize_rowwise_mxfp8_g2r(
+            gX_tiles,
+            gO_tiles,
+            mS_tiles,
+            self.cfg,
+            M,
+            N,
+            CTA_THREADS_Y=CTA_THREADS_Y,
+            CTA_THREADS_X=CTA_THREADS_X,
+            ELEMENTS_PER_THREAD=self._ELEMENTS_PER_THREAD,
+            NUM_TILES=NUM_TILES,
+            CHECK_BOUNDS=CHECK_BOUNDS,
+            input_policy=input_policy,
+            output_policy=output_policy,
+        )

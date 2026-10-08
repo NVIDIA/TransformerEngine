@@ -93,6 +93,52 @@ def exp2_bf16x2_rcp(scale_e8m0) -> Uint32:
 
 
 @cute.jit
+def bf16_mx_scale_reciprocal(magnitude: Uint32, MAX_EXPONENT: cutlass.Constexpr[int]) -> Uint32:
+    """Exact BF16 reciprocal scale bits, including E8M0 zero, Inf and NaN cases."""
+    rounded = (magnitude + Uint32(31)) & Uint32(0x7F80)
+    if rounded < Uint32(MAX_EXPONENT << 7):  # pylint: disable=consider-using-max-builtin
+        rounded = Uint32(MAX_EXPONENT << 7)
+    reciprocal = Uint32((254 + MAX_EXPONENT) << 7) - rounded
+    if magnitude >= Uint32(0x7F80):
+        reciprocal = Uint32(0x0040)
+        if magnitude != Uint32(0x7F80):
+            reciprocal = Uint32(0x7FFF)
+    return reciprocal
+
+
+@cute.jit
+def bf16_mx_scale_reciprocal_pair(pair: Int32, MAX_EXPONENT: cutlass.Constexpr[int]) -> Uint32:
+    """Compute two reciprocal scales without borrowing across packed BF16 halves."""
+    magnitudes = Uint32(pair) & Uint32(0x7FFF7FFF)
+    rounded = (magnitudes + Uint32(0x001F001F)) & Uint32(0xFF80FF80)
+    floor = (MAX_EXPONENT << 23) | (MAX_EXPONENT << 7)
+    # Packed BF16 max accepts registers, so materialize the constant inside PTX.
+    clamped = cute.arch.inline_ptx(
+        "{ .reg.b32 floor_pair; "
+        f"mov.b32 floor_pair, {floor}; "
+        "max.xorsign.abs.bf16x2 {$w0}, {$r0}, floor_pair; }",
+        write_only_types=[Int32],
+        read_only_args=[rounded.bitcast(Int32)],
+    )
+    bias = ((254 + MAX_EXPONENT) << 23) | ((254 + MAX_EXPONENT) << 7)
+    reciprocal = Uint32(bias) - Uint32(clamped)
+    if ((magnitudes + Uint32(0x00800080)) & Uint32(0x80008000)) != Uint32(0):
+        lo = bf16_mx_scale_reciprocal(magnitudes & Uint32(0x7FFF), MAX_EXPONENT)
+        hi = bf16_mx_scale_reciprocal(magnitudes >> Uint32(16), MAX_EXPONENT)
+        reciprocal = lo | (hi << Uint32(16))
+    return reciprocal
+
+
+@cute.jit
+def bf16_mx_scale_bytes_pair(reciprocal: Uint32) -> Uint32:
+    """Gather the E8M0 bytes of two packed BF16 reciprocals into the low half."""
+    bytes_pair = (Uint32(0x01FE01FE) - ((reciprocal >> Uint32(7)) & Uint32(0x00FF00FF))) & Uint32(
+        0x00FF00FF
+    )
+    return (bytes_pair & Uint32(0xFF)) | ((bytes_pair >> Uint32(8)) & Uint32(0xFF00))
+
+
+@cute.jit
 def pack_f32x2(lo: Float32, hi: Float32) -> Int64:
     """Pack two f32 scalars into a single 64-bit register (`floatx2` layout).
 
@@ -269,6 +315,7 @@ def is_packed16(dtype) -> bool:
     return dtype is cutlass.BFloat16 or dtype is cutlass.Float16
 
 
+# TODO(kainingz): remove this once https://github.com/NVIDIA/cutlass/pull/3717 is merged and released
 @cute.jit
 def create_l2_policy(evict_last: cutlass.Constexpr[bool], fraction: Float32 = 1.0) -> Int64:
     """Create the L2 eviction policy used by register-resident casts."""
