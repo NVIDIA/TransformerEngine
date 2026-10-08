@@ -577,6 +577,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Fused Apply RoPE FWD", py::call_guard<py::gil_scoped_release>());
   m.def("fused_rope_backward", &transformer_engine::pytorch::fused_rope_backward,
         "Fused Apply RoPE BWD", py::call_guard<py::gil_scoped_release>());
+  m.def("dsv4_rope_cutedsl_", &transformer_engine::pytorch::dsv4_rope_cutedsl_,
+        "In-place DSv4 CuTe DSL RoPE", py::call_guard<py::gil_scoped_release>());
   m.def("fused_qkv_rope_forward", &transformer_engine::pytorch::fused_qkv_rope_forward,
         "Fused Apply QKV RoPE FWD", py::call_guard<py::gil_scoped_release>());
   m.def("fused_qkv_rope_backward", &transformer_engine::pytorch::fused_qkv_rope_backward,
