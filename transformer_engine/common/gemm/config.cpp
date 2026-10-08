@@ -67,6 +67,9 @@ void nvte_get_matmul_config_attribute(NVTEMatmulConfig config, NVTEMatmulConfigA
     case kNVTEMatmulConfigSMCount:
       *reinterpret_cast<int32_t *>(buf) = static_cast<int32_t>(config_.sm_count);
       break;
+    case kNVTEMatmulConfigAlphaBetaOnDevice:
+      bool_to_uint8(config_.alpha_beta_on_device, buf);
+      break;
     default:
       NVTE_ERROR("Unsupported NVTEMatmulConfigAttribute (got ", static_cast<int>(attr), ")");
   }
@@ -115,6 +118,9 @@ void nvte_set_matmul_config_attribute(NVTEMatmulConfig config, NVTEMatmulConfigA
       break;
     case kNVTEMatmulConfigSMCount:
       config_.sm_count = static_cast<int>(*reinterpret_cast<const int32_t *>(buf));
+      break;
+    case kNVTEMatmulConfigAlphaBetaOnDevice:
+      uint8_to_bool(buf, config_.alpha_beta_on_device);
       break;
     default:
       NVTE_ERROR("Unsupported NVTEMatmulConfigAttribute (got ", static_cast<int>(attr), ")");

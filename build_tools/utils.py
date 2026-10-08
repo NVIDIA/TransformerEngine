@@ -9,6 +9,7 @@ import glob
 import importlib
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -41,6 +42,72 @@ if sys.version_info < min_python_version():
 def debug_build_enabled() -> bool:
     """Whether to build with a debug configuration"""
     return bool(int(os.getenv("NVTE_BUILD_DEBUG", "0")))
+
+
+@functools.lru_cache(maxsize=None)
+def _cxx_compiler_predefined_macros() -> Tuple[str, ...]:
+    """Predefined macros from the configured C++ compiler."""
+    cxx = shlex.split(os.getenv("CXX", "c++"))
+    if not cxx:
+        return ()
+    try:
+        result = subprocess.run(
+            [*cxx, "-dM", "-E", "-x", "c++", "-"],
+            input="",
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return ()
+    if result.returncode != 0:
+        return ()
+    return tuple(
+        fields[1]
+        for line in result.stdout.splitlines()
+        if len(fields := line.split(maxsplit=2)) >= 2 and fields[0] == "#define"
+    )
+
+
+@functools.lru_cache(maxsize=None)
+def cxx_compiler_supports_flag(flag: str) -> bool:
+    """Whether the configured C++ compiler accepts a command-line flag."""
+    cxx = shlex.split(os.getenv("CXX", "c++"))
+    if not cxx:
+        return False
+    try:
+        result = subprocess.run(
+            [*cxx, flag, "-x", "c++", "-fsyntax-only", "-"],
+            input="",
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return False
+    return result.returncode == 0
+
+
+def cxx_compiler_targets_arm64() -> bool:
+    """Whether the configured C++ compiler targets Arm64."""
+    macros = _cxx_compiler_predefined_macros()
+    return any(macro in macros for macro in ("__aarch64__", "__arm64__", "_M_ARM64"))
+
+
+def get_bolt_build_flags() -> Tuple[List[str], List[str]]:
+    """BOLT-compatible host compiler and linker flags."""
+    compiler_flags = ["-fno-jump-tables"]
+    if cxx_compiler_supports_flag("-fno-reorder-blocks-and-partition"):
+        compiler_flags.append("-fno-reorder-blocks-and-partition")
+    linker_flags = ["-Wl,--emit-relocs", "-Wl,-z,now"]
+    if cxx_compiler_targets_arm64():
+        compiler_flags.extend(
+            [
+                "-mno-fix-cortex-a53-835769",
+                "-mno-fix-cortex-a53-843419",
+            ]
+        )
+        # The Cortex-A53 843419 workaround is applied by the linker.
+        linker_flags.append("-mno-fix-cortex-a53-843419")
+    return compiler_flags, linker_flags
 
 
 @functools.lru_cache(maxsize=None)
