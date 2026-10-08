@@ -158,9 +158,11 @@ def _get_device_compute_capability(device: torch.device) -> Tuple[int, int]:
 
 
 @torch.compiler.assume_constant_result
-def get_device_compute_capability() -> Tuple[int, int]:
-    """CUDA compute capability of current GPU"""
-    return _get_device_compute_capability(torch.cuda.current_device())
+def get_device_compute_capability(device: Optional[torch.device] = None) -> Tuple[int, int]:
+    """CUDA compute capability of ``device`` (the current GPU when unspecified)."""
+    if device is None or device.index is None:
+        device = torch.cuda.current_device()
+    return _get_device_compute_capability(device)
 
 
 def deinterleave_glu_tensor(tensor: torch.Tensor, interleave_size: int) -> torch.Tensor:

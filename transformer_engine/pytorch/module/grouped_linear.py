@@ -17,7 +17,7 @@ import torch
 
 import transformer_engine_torch as tex
 
-from transformer_engine.common.recipe import Recipe
+from transformer_engine.common.recipe import Recipe, Format as RecipeFormat
 from transformer_engine.pytorch.tensor.grouped_tensor import (
     GroupedTensor,
     GroupedTensorStorage,
@@ -165,6 +165,7 @@ def is_module_grouped_tensor_path_supported(
             device_capability >= (10, 0)
             and not recipe.disable_rht
             and not recipe.row_scaled_activation
+            and recipe.fp8_format == RecipeFormat.E4M3
         )
     return False
 
@@ -838,7 +839,7 @@ def _grouped_linear_setup_ctx(
 
     bwd_args.m_splits = fwd_args.m_splits
     bwd_args.num_gemms = num_gemms
-    bwd_args.weights_shape_1 = weights[0].shape[1]
+    bwd_args.weights_shape_1 = fwd_args.inp.shape[-1]
 
     bwd_args.use_bias = fwd_args.use_bias
     bwd_args.requires_dgrad = fwd_args.input_requires_grad
@@ -1297,6 +1298,11 @@ def _grouped_linear_fused_forward(args: GroupedLinearFwdArgs) -> Tuple[Any, ...]
     device = inp.device
     in_features = weights[0].size(-1)
     out_features = weights[0].size(-2)
+    if inp.size(-1) != in_features:
+        raise ValueError(
+            f"Input tensor (shape={tuple(inp.size())}) is not compatible with "
+            f"weight tensor (shape={tuple(weights[0].size())})"
+        )
     weight_requires_grad = args.weights_requires_grad
     save_original_input = save_original_input and weight_requires_grad
 
@@ -1429,6 +1435,7 @@ def _grouped_linear_fused_forward(args: GroupedLinearFwdArgs) -> Tuple[Any, ...]
 def _grouped_linear_fused_setup(
     bwd_args: GroupedLinearFusedBwdArgs,
     fwd_args: GroupedLinearFwdArgs,
+    out_features: int,
 ) -> None:
     """Populate grouped backward arguments from the forward configuration."""
     bwd_args.input_quantizers = fwd_args.input_quantizers
@@ -1448,8 +1455,8 @@ def _grouped_linear_fused_setup(
     bwd_args.fuse_wgrad_accumulation = fwd_args.fuse_wgrad_accumulation
     bwd_args.wgrad_store = fwd_args.wgrad_store
     bwd_args.dgrad_out = fwd_args.dgrad_out
-    bwd_args.in_features = fwd_args.weights[0].shape[-1]
-    bwd_args.out_features = fwd_args.weights[0].shape[-2]
+    bwd_args.in_features = fwd_args.inp.shape[-1]
+    bwd_args.out_features = out_features
     bwd_args.requires_dgrad = fwd_args.input_requires_grad
     bwd_args.weights_requires_grad = fwd_args.weights_requires_grad
     bwd_args.save_original_input = fwd_args.save_original_input and fwd_args.weights_requires_grad
@@ -1694,6 +1701,7 @@ def _grouped_linear_fused_backward(
             if not getattr(args, "origin_weights_overwrite_main_grad", False)
             else False
         )
+        wgrad_use_split_accumulator = args.wgrad_use_split_accumulator
 
         def grouped_gemm_wgrad(inputmats, grad_output_mats, grad_weights):
             general_grouped_gemm_for_grouped_tensor(
@@ -1701,7 +1709,7 @@ def _grouped_linear_fused_backward(
                 grad_output_mats,
                 grad_weights,
                 layout="NT",
-                use_split_accumulator=args.wgrad_use_split_accumulator,
+                use_split_accumulator=wgrad_use_split_accumulator,
                 accumulate=accumulate,
             )
             return None, [None] * N, None
@@ -1852,8 +1860,8 @@ def _grouped_linear_fused_setup_ctx(
     tensors_to_save_from_forward: Tuple[Any, ...],
 ) -> Tuple[Any, ...]:
     """Populate the fused backward args and pass through its saved tensors."""
-    del fwd_outputs, ctx_attrs
-    _grouped_linear_fused_setup(bwd_args, fwd_args)
+    del ctx_attrs
+    _grouped_linear_fused_setup(bwd_args, fwd_args, fwd_outputs[0].shape[-1])
     bwd_args.compiled_op = fwd_args.compiled_op
     return tensors_to_save_from_forward
 
@@ -2195,7 +2203,7 @@ class _GroupedLinear(torch.autograd.Function):
         out, new_workspaces, saved = _grouped_linear_fused_forward(fwd_args)
         if ctx is not None:
             bwd_args = GroupedLinearFusedBwdArgs()
-            _grouped_linear_fused_setup(bwd_args, fwd_args)
+            _grouped_linear_fused_setup(bwd_args, fwd_args, out.shape[-1])
             tensors_to_save, tensor_objects = prepare_for_saving(*saved)
             ctx.save_for_backward(*tensors_to_save)
             ctx.tensor_objects = tensor_objects
@@ -3142,12 +3150,6 @@ class GroupedLinear(TransformerEngineBaseModule):
                         "The native grouped_tensor path requires CUDA m_splits. Pass a CUDA int64 "
                         "tensor, or set use_grouped_tensor=False."
                     )
-            wgrad_store = (
-                self.wgrad_store
-                if self.wgrad_store is not None and self.wgrad_store.delay_wgrad_compute()
-                else None
-            )
-
             fwd_args = GroupedLinearFwdArgs(
                 # tensors
                 inp=inp,
@@ -3192,7 +3194,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                 # misc
                 use_bias=self.apply_bias,
                 fuse_wgrad_accumulation=self.fuse_wgrad_accumulation,
-                wgrad_store=wgrad_store,
+                wgrad_store=self.wgrad_store,
                 cpu_offloading=cpu_offloading,
                 is_grad_enabled=is_grad_enabled,
             )
