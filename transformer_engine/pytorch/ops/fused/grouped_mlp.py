@@ -2653,17 +2653,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 fc2_dactivation_kwargs["b_dtype"] = data_dtype
                 fc2_dactivation_kwargs["b_major"] = "k" if use_nvfp4 else "n"
 
-        try:
-            fc2_dgrad_kernel_out = dactivation_kernel(**fc2_dactivation_kwargs)
-        except NotImplementedError as e:
-            if not deterministic_dactivation:
-                raise
-            # cuDNN decides which configurations it can make deterministic; report its refusal
-            # as TE's error instead of mirroring cuDNN's rules here.
-            raise RuntimeError(
-                f"{_DETERMINISM_REQUESTED}, but the cuDNN front-end refused this configuration"
-                f" with `deterministic=True`: {e}"
-            ) from e
+        fc2_dgrad_kernel_out = dactivation_kernel(**fc2_dactivation_kwargs)
 
         if use_nvfp4:
             fc1_dy_bf16 = fc2_dgrad_kernel_out["d_row_tensor"]
