@@ -10,7 +10,7 @@ from typing import List, Optional, Tuple
 import torch
 from torch.utils._pytree import tree_map
 
-from ..quantized_tensor import QuantizedTensorStorage, Quantizer
+from ..quantized_tensor import QuantizedTensorStorage, Quantizer, _quantized_tensor_passthrough_ops
 from .storage.grouped_tensor_storage import GroupedTensorStorage
 from ..constants import DType
 
@@ -181,6 +181,9 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
         """Dispatch by dequantizing grouped members, then requantizing writes."""
         if kwargs is None:
             kwargs = {}
+
+        if func in _quantized_tensor_passthrough_ops:
+            return super().__torch_dispatch__(func, types, args, kwargs)
 
         def copy_grouped_storage_metadata(dst: GroupedTensor, src: GroupedTensor) -> None:
             """Shallow-copy grouped-storage metadata onto wrapper outputs."""
