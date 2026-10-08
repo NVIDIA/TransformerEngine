@@ -23,6 +23,29 @@ from utils import (  # pylint: disable=wrong-import-position
     get_available_attention_backends,
 )
 
+
+def _flex_availability():
+    """Why the cuDNN score_mod path cannot run here, or None if it can."""
+    if not torch.cuda.is_available():
+        return "no CUDA device"
+    try:
+        flex_attention._import_cudnn_frontend()
+    except ImportError as exc:
+        return "nvidia-cudnn-frontend not importable: %s" % exc
+    return None
+
+
+_SKIP = _flex_availability()
+# Mirrors NVTE_GDN_TEST_REQUIRED in test_gdn_attention.py. Most tests here run on CPU with the
+# builder monkeypatched; the two that reach cuDNN -- the numerical one and the FROST-switch one --
+# skip silently wherever the frontend package is absent, so a lane meant to cover them can be
+# green having never run them. That matters more than usual: the switch test is what verifies the
+# engine bar in cudnn_pygraph, which cannot be checked from the plan list.
+#
+# Deliberately not set in qa/L0_pytorch_unittest, which cannot be assumed to carry the package.
+if os.getenv("NVTE_FLEX_TEST_REQUIRED", "0") == "1" and _SKIP is not None:
+    raise RuntimeError("NVTE_FLEX_TEST_REQUIRED=1, but flex attention is unavailable: %s" % _SKIP)
+
 param_types = [torch.float16]
 if torch.cuda.is_available() and is_bf16_available():
     param_types.append(torch.bfloat16)
