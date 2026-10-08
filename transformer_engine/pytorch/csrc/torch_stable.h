@@ -22,7 +22,7 @@
 /* Compatibility layer for the incremental migration to the torch stable ABI.
  * Migrated code is written against this surface, which is restricted to what
  * torch::stable provides. With NVTE_WITH_TORCH_STABLE it maps to torch::stable
- * (requires torch >= 2.14); without it (the default) it maps to the full torch
+ * (requires torch >= 2.15); without it (the default) it maps to the full torch
  * ABI, keeping support for older torch versions intact. */
 namespace transformer_engine::pytorch::torch_stable {
 
