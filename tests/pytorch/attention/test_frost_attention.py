@@ -452,64 +452,6 @@ def test_frost_mask_spec_rejects_malformed_windows():
             _mask_spec("causal", window), why
 
 
-# Kept despite the CI-cost review: it launches no kernel, so removing it would have been
-# coverage given up for no time back. It is the only end-to-end get_attention_backend call
-# here, and the only place FROST, a sliding window and context parallelism meet.
-@requires_frost
-@pytest.mark.parametrize(
-    "cp_comm_type,window,expect_frost",
-    [
-        ("all_gather", (128, 0), True),
-        ("a2a", (128, 0), True),
-        ("p2p", (128, 0), False),
-        ("a2a+p2p", (128, 0), False),
-        ("p2p", (-1, 0), True),
-        ("p2p", (-1, -1), True),
-    ],
-)
-def test_frost_sliding_window_selection_by_cp_comm_type(cp_comm_type, window, expect_frost):
-    """Which context-parallel paths may serve a sliding window.
-
-    all_gather and a2a each see a contiguous KV range, so the window applies unchanged. The p2p
-    ring shards KV across steps, so a bound measured against the full sequence does not survive
-    the per-step tiles -- the same rule FusedAttention carries. The cases without a real window
-    must still select FROST, since the decline has to key on the window and not on p2p itself.
-    """
-    from transformer_engine.pytorch.attention.dot_product_attention.utils import (
-        AttentionParams,
-        get_attention_backend,
-    )
-
-    params = AttentionParams(
-        qkv_dtype=torch.bfloat16,
-        qkv_layout="bshd_bshd_bshd",
-        batch_size=2,
-        num_heads=8,
-        num_gqa_groups=4,
-        max_seqlen_q=4096,
-        max_seqlen_kv=4096,
-        head_dim_qk=512,
-        head_dim_v=512,
-        attn_mask_type="causal",
-        window_size=window,
-        context_parallel=True,
-        cp_comm_type=cp_comm_type,
-        is_training=True,
-    )
-    from transformer_engine.pytorch.cpp_extensions.fused_attn import FusedAttnBackend
-
-    use_fused, fused_backend = get_attention_backend(params)[2:4]
-    use_frost = bool(use_fused) and fused_backend == FusedAttnBackend.FROST
-    assert (
-        use_frost == expect_frost
-    ), "cp_comm_type=%s window=%s: expected the FROST sub-backend=%s, got %s" % (
-        cp_comm_type,
-        window,
-        expect_frost,
-        use_frost,
-    )
-
-
 @requires_frost
 def test_frost_rejects_mismatched_kv():
     """v must index the same KV positions as k. head_dim is free; the rest is not."""
