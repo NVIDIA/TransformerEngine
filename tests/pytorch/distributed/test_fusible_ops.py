@@ -68,15 +68,6 @@ def world_group() -> torch.distributed.ProcessGroup:
     return group
 
 
-def destroy_world_group() -> None:
-    """Destroy NCCL process group"""
-    process_group = world_group()
-    torch.distributed.barrier(process_group)
-    torch.cuda.synchronize()
-    torch.distributed.destroy_process_group(process_group)
-    world_group.cache_clear()
-
-
 def reset_rng(seed: int = 1234) -> None:
     """Reset random number generators"""
     torch.manual_seed(seed)
@@ -1043,9 +1034,6 @@ def run_parallel_tests() -> None:
             print(f"Running _test_fp8_scale_update")
         _test_fp8_scale_update()
 
-    # Make sure NCCL shuts down cleanly
-    destroy_world_group()
-
 
 # Parallel job sizes
 _world_sizes = [torch.cuda.device_count()]
@@ -1079,7 +1067,16 @@ def main() -> None:
     parser.add_argument("--parallel", action="store_true", help="Run parallel tests")
     args = parser.parse_args()
     if args.parallel:
-        run_parallel_tests()
+        try:
+            run_parallel_tests()
+        finally:
+            # Synchronize GPUs
+            torch.distributed.barrier(world_group())
+            torch.cuda.synchronize()
+
+            # Tear down NCCL
+            if torch.distributed.is_initialized():
+                torch.distributed.destroy_process_group()
 
 
 if __name__ == "__main__":
