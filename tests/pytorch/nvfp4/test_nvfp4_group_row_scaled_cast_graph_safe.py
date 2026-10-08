@@ -152,3 +152,86 @@ def test_capture_once_replay_changed_routing() -> None:
     graph.replay()
     torch.cuda.synchronize()
     _assert_matches_reference(grouped, _host_split_reference(x_b, splits_b), splits_b, N)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize(
+    "split_sections, N",
+    [
+        ([128, 128], 64),
+        ([128] * 65, 128),
+    ],
+)
+def test_split_quantize_falls_back_to_per_expert(split_sections: list[int], N: int) -> None:
+    """Shapes the grouped kernel rejects (last dim not 128-aligned, >64 experts) cast per-expert."""
+    sum_m = sum(split_sections)
+    torch.manual_seed(3)
+    x = torch.randn((sum_m, N), dtype=torch.bfloat16, device="cuda")
+
+    outputs = tex.split_quantize(
+        x, split_sections, [_row_scaled_quantizer() for _ in split_sections]
+    )
+
+    assert len(outputs) == len(split_sections)
+    for out, m in zip(outputs, split_sections):
+        assert tuple(out.shape) == (m, N)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+def test_split_quantize_empty_routing() -> None:
+    """Empty row-scaled routing returns without launching grouped work."""
+    split_sections = [0, 0]
+    x = torch.empty((0, 128), dtype=torch.bfloat16, device="cuda")
+
+    outputs = tex.split_quantize(
+        x, split_sections, [_row_scaled_quantizer() for _ in split_sections]
+    )
+
+    assert len(outputs) == len(split_sections)
+    for out in outputs:
+        assert tuple(out.shape) == (0, 128)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+def test_non_contiguous_input_matches_contiguous() -> None:
+    """A non-contiguous input is made contiguous before the graph-safe cast."""
+    split_sections = [128, 128]
+    N = 256
+    sum_m = sum(split_sections)
+    torch.manual_seed(4)
+    x_t = torch.randn((N, sum_m), dtype=torch.bfloat16, device="cuda").t()
+    assert not x_t.is_contiguous()
+    tokens_per_expert = torch.tensor(split_sections, dtype=torch.int64, device="cuda")
+
+    grouped = nvfp4_group_row_scaled_cast(x_t, tokens_per_expert)
+    reference = _host_split_reference(x_t.contiguous(), split_sections)
+
+    _assert_matches_reference(grouped, reference, split_sections, N)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+def test_rejects_unsupported_quantizer_settings() -> None:
+    """with_2d_quantization is rejected on both the host-split and graph-safe row-scaled paths."""
+
+    def _quantizer_with_2d() -> NVFP4Quantizer:
+        return NVFP4Quantizer(
+            fp4_dtype=te.DType.kFloat4E2M1,
+            rowwise=True,
+            columnwise=False,
+            row_scaled_nvfp4=True,
+            with_2d_quantization=True,
+        )
+
+    split_sections = [128, 128]
+    N = 128
+    x = torch.randn((sum(split_sections), N), dtype=torch.bfloat16, device="cuda")
+
+    with pytest.raises(RuntimeError):
+        tex.split_quantize(x, split_sections, [_quantizer_with_2d() for _ in split_sections])
+
+    tokens_per_expert = torch.tensor(split_sections, dtype=torch.int64, device="cuda")
+    tensor_offsets = tex.splits_to_offsets(tokens_per_expert, N)
+    with pytest.raises(RuntimeError):
+        tex.nvfp4_group_row_scaled_cast_graph_safe(
+            x, _quantizer_with_2d(), len(split_sections), tokens_per_expert, tensor_offsets
+        )

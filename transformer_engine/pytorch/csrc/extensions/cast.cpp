@@ -662,9 +662,21 @@ py::object nvfp4_group_row_scaled_cast_graph_safe(const at::Tensor &tensor, py::
   NVFP4Quantizer *nvfp4_quantizer_cpp = static_cast<NVFP4Quantizer *>(quantizer_cpp.get());
   NVTE_CHECK(nvfp4_quantizer_cpp->row_scaled_nvfp4,
              "Graph-safe grouped cast requires a row-scaled NVFP4 quantizer.");
+  NVTE_CHECK(!nvfp4_quantizer_cpp->with_rht,
+             "Graph-safe grouped row-scaled NVFP4 cast does not support RHT.");
+  NVTE_CHECK(!nvfp4_quantizer_cpp->with_2d_quantization,
+             "Graph-safe grouped row-scaled NVFP4 cast does not support 2D quantization.");
+  NVTE_CHECK(!nvfp4_quantizer_cpp->stochastic_rounding,
+             "Graph-safe grouped row-scaled NVFP4 cast does not support stochastic rounding.");
+  NVTE_CHECK(!nvfp4_quantizer_cpp->with_amax_reduction,
+             "Graph-safe grouped row-scaled NVFP4 cast does not support amax reduction.");
+  NVTE_CHECK(nvfp4_quantizer_cpp->nvfp4_4over6_mode == kNVTENVFP44Over6Disabled,
+             "Graph-safe grouped row-scaled NVFP4 cast does not support 4over6.");
+
+  auto input_contiguous = tensor.contiguous();
 
   std::vector<size_t> logical_shape;
-  for (const auto &d : tensor.sizes()) {
+  for (const auto &d : input_contiguous.sizes()) {
     logical_shape.push_back(d);
   }
   const auto logical_first_dim = logical_shape[0];  // capacity (rows)
@@ -675,15 +687,16 @@ py::object nvfp4_group_row_scaled_cast_graph_safe(const at::Tensor &tensor, py::
   std::optional<at::Tensor> tensor_offsets_opt = tensor_offsets;
 
   auto grouped_input_tensor = GroupedTensorWrapper(num_tensors, logical_shape);
-  grouped_input_tensor.set_rowwise_data(
-      tensor.data_ptr(), GetTransformerEngineDType(tensor.scalar_type()), getTensorShape(tensor));
+  grouped_input_tensor.set_rowwise_data(input_contiguous.data_ptr(),
+                                        GetTransformerEngineDType(input_contiguous.scalar_type()),
+                                        getTensorShape(input_contiguous));
   grouped_input_tensor.set_first_dims(first_dims.data_ptr(), DType::kInt64,
                                       getTensorShape(first_dims));
   grouped_input_tensor.set_tensor_offsets(tensor_offsets.data_ptr(), DType::kInt64,
                                           getTensorShape(tensor_offsets));
 
   auto [grouped_output_tensor_cpp, grouped_output_py] = quantizer_cpp->create_grouped_tensor(
-      num_tensors, logical_shape, GetTransformerEngineDType(tensor.scalar_type()),
+      num_tensors, logical_shape, GetTransformerEngineDType(input_contiguous.scalar_type()),
       py::reinterpret_borrow<py::object>(quantizer), first_dims_opt, last_dims_opt,
       tensor_offsets_opt, logical_first_dim, logical_last_dim);
 
@@ -2034,9 +2047,17 @@ void split_quantize_nvfp4_row_scaled_impl(const TensorWrapper &input,
                                           const std::vector<size_t> &split_sections,
                                           const std::vector<NVFP4Quantizer *> &quantizers) {
   const size_t num_tensors = input_list.size();
+  if (num_tensors == 0 || input.numel() == 0) {
+    return;
+  }
   const auto &quantizer = *quantizers.front();
   NVTE_CHECK(!quantizer.stochastic_rounding,
              "Row-scaled NVFP4 quantization does not support stochastic rounding.");
+  NVTE_CHECK(!quantizer.with_rht, "Row-scaled NVFP4 quantization does not support RHT.");
+  NVTE_CHECK(!quantizer.with_2d_quantization,
+             "Row-scaled NVFP4 quantization does not support 2D quantization.");
+  NVTE_CHECK(!quantizer.with_amax_reduction,
+             "Row-scaled NVFP4 quantization does not support amax reduction.");
 
   std::vector<NVTETensor> nvte_tensor_output_list;
   nvte_tensor_output_list.reserve(num_tensors);
@@ -2226,11 +2247,12 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
                         return static_cast<NVFP4Quantizer *>(quantizer.get())->row_scaled_nvfp4;
                       });
       if (has_row_scaled_nvfp4) {
-        // The grouped row-scaled cast requires every split to be 128-aligned (a
-        // 128-row chunk must stay inside one expert) and does not cover the
-        // 4over6 path; otherwise fall back to the per-expert path.
+        // Grouped kernels need 128-aligned splits and last dim, <= 64 experts, and
+        // no 4over6; otherwise fall back to the per-expert path.
         const bool all_splits_128 = std::all_of(split_sections.begin(), split_sections.end(),
                                                 [](size_t s) { return s % 128 == 0; });
+        const bool last_dim_128 = input_shape.back() % 128 == 0;
+        const bool within_expert_cap = num_splits <= 64;
         const bool any_4over6 = std::any_of(
             quantizer_cpp_list.begin(), quantizer_cpp_list.end(),
             [](const std::unique_ptr<Quantizer> &quantizer) {
@@ -2239,8 +2261,8 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
             });
         const bool grouped_row_scaled_cast =
             transformer_engine::getenv<bool>("NVTE_NVFP4_GROUPED_ROW_SCALED_CAST", true);
-        quantization_method = (grouped_row_scaled_cast && all_splits_128 && !any_4over6 &&
-                               input_dtype == DType::kBFloat16)
+        quantization_method = (grouped_row_scaled_cast && all_splits_128 && last_dim_128 &&
+                               within_expert_cap && !any_4over6 && input_dtype == DType::kBFloat16)
                                   ? QuantizationMethod::FUSED_NVFP4_ROW_SCALED
                                   : QuantizationMethod::UNFUSED;
       } else {
