@@ -96,7 +96,7 @@ class FusedAdam(torch.optim.Optimizer):
             the optimizer will create a FP32 scalar scaling factor to ensure
             precision. torch.float64 requires a torch.float32 exp_avg; the second
             moment is then updated in FP64 and used unscaled. It is not supported
-            with capturable, store_param_remainders or FP8 model weights.
+            with capturable, store_param_remainders or delayed-scaling FP8 model weights.
             (default: torch.float32)
         use_decoupled_grad (bool, optional): Whether to use ".decoupled_grad"
             instead of ".grad" for reading gradients. It's useful when the dtypes
@@ -714,7 +714,8 @@ class FusedAdam(torch.optim.Optimizer):
                 ):
                     if self.exp_avg_sq_dtype == torch.float64:
                         raise RuntimeError(
-                            "FusedAdam does not support fp64 exp_avg_sq with FP8 model weights."
+                            "FusedAdam does not support fp64 exp_avg_sq with delayed-scaling FP8"
+                            " model weights."
                         )
                     out_dtype = local_p._fp8_dtype
                     p_fp8_model.append(local_p._data.data)
