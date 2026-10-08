@@ -101,18 +101,19 @@ def is_module_grouped_tensor_path_supported(
     * Hopper (CC 9.0): BF16/FP16, FP8 per-tensor current scaling, and FP8
       block scaling.
     * Blackwell (CC 10.x and 11.0): BF16/FP16, FP8 per-tensor current scaling,
-      MXFP8, and NVFP4 with RHT.
+      MXFP8, NVFP4 with RHT, and FP8 block scaling (power-of-2 scales only).
     * Custom recipes are unsupported because they may assign different
       quantizers to input, weight, and grad-output roles. This predicate
       currently supports only built-in recipes with known uniform layouts.
     * FP8 delayed scaling is unsupported because the required grouped
       quantization kernels are unavailable.
-    * FP8 block scaling is unsupported by this path on Blackwell because it
-      does not implement the legacy path's MXFP8-broadcast emulation.
     * Grouped GEMM requires cuBLASLt 13.3+, with 13.4+ required on Hopper,
       13.5+ required for FP8 per-tensor current scaling on Hopper, and 13.6+
       required for FP8 block scaling on Hopper.
     * FP32 is unsupported by the cuBLASLt grouped GEMM.
+    * With MXFP8 or FP8 block scaling, every split size must be a multiple of
+      128. This is checked only on the device, so other split sizes can produce
+      incorrect results.
 
     Runtime-only restrictions such as debug mode, CPU offloading, calibration,
     output quantization, and backend selection are checked separately by
@@ -139,8 +140,10 @@ def is_module_grouped_tensor_path_supported(
     if recipe.float8_current_scaling():
         return device_capability >= (10, 0) or cublaslt_version >= 130500
     if recipe.float8_block_scaling():
-        # cuBLASLt 13.6 fixes Hopper grouped GEMM algo selection for block-scaled FP8.
-        return device_capability < (10, 0) and cublaslt_version >= 130600
+        # Blackwell and newer emulate FP8 block scaling with MXFP8 grouped GEMM, so it is
+        # supported wherever MXFP8 is. On Hopper, cuBLASLt 13.6 fixes grouped GEMM algo
+        # selection for block-scaled FP8.
+        return device_capability >= (10, 0) or cublaslt_version >= 130600
     if recipe.mxfp8():
         return device_capability >= (10, 0)
     if recipe.nvfp4():
@@ -777,18 +780,6 @@ class _GroupedLinear(torch.autograd.Function):
             or cpu_offloading
             or any(q is not None for q in output_quantizers)
         ):
-            if (
-                fp8
-                and recipe.float8_block_scaling()
-                and (10, 0) <= get_device_compute_capability() <= (11, 0)
-            ):
-                raise RuntimeError(
-                    "use_grouped_tensor=True does not support the FP8 block-scaling recipe on "
-                    "Blackwell GPUs: the native grouped FP8 block-scaling path is Hopper-only. "
-                    "Set use_grouped_tensor=False, or unset "
-                    "NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM if it enabled this path, to use "
-                    "the MXFP8-emulated path on Blackwell."
-                )
             grouped_tensor_supported = is_module_grouped_tensor_path_supported(
                 recipe,
                 activation_dtype,
@@ -1697,6 +1688,9 @@ class GroupedLinear(TransformerEngineBaseModule):
                        The native path requires CUDA ``m_splits``. ``None`` preserves the deprecated
                        ``NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM`` environment-variable
                        selection for compatibility. New callers should pass a boolean explicitly.
+                       With MXFP8 or FP8 block scaling, the native path requires every
+                       ``m_splits`` entry to be a multiple of 128. This is checked only on the
+                       device, so other split sizes can produce incorrect results.
 
     Notes
     -----

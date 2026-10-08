@@ -252,6 +252,23 @@ def check_recipe_support(recipe: Recipe) -> None:
         recipe_supported, unsupported_reason = check_fp8_support()
     elif isinstance(recipe, Float8BlockScaling):
         recipe_supported, unsupported_reason = check_fp8_block_scaling_support()
+        if recipe_supported and get_device_compute_capability() >= (10, 0):
+            # Blackwell and newer emulate FP8 block scaling with MXFP8, whose E8M0 scales can
+            # only represent powers of 2.
+            qparams = (
+                recipe.fp8_quant_fwd_inp,
+                recipe.fp8_quant_fwd_weight,
+                recipe.fp8_quant_bwd_grad,
+            )
+            if not all(q.power_2_scale for q in qparams):
+                recipe_supported = False
+                unsupported_reason = (
+                    "On Blackwell and newer, the FP8 block scaling recipe is emulated with MXFP8,"
+                    " which requires power-of-2 scaling factors, but the recipe disables"
+                    " power_2_scale. Use power_2_scale=True, or unset"
+                    " NVTE_FP8_BLOCK_SCALING_FP32_SCALES before importing Transformer Engine"
+                    " (the recipe defaults read it at import time)."
+                )
     elif isinstance(recipe, MXFP8BlockScaling):
         recipe_supported, unsupported_reason = check_mxfp8_support()
     if not recipe_supported:

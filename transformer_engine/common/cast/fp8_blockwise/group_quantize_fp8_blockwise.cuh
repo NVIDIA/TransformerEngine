@@ -286,7 +286,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 4) group_block_scaled_2d_tma
     const size_t total_row_blocks, const size_t blocks_X, const size_t scale_stride_y,
     const float epsilon, const bool pow_2_scales, const float* __restrict__ noop_ptr,
     float* __restrict__ dbias_workspace) {
-#if __CUDA_ARCH__ >= 900 && __CUDA_ARCH__ < 1000
+#if __CUDA_ARCH__ >= 900
   // Skipping is only safe without dbias: the grouped_reduce_dbias launch is unconditional, so an
   // early return would leave it reducing a workspace this kernel never wrote.
   if (dbias_workspace == nullptr && noop_ptr != nullptr && noop_ptr[0] == 1.0f) return;
@@ -461,7 +461,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 4) group_block_scaled_2d_tma
       }
     }
   }
-#endif  // __CUDA_ARCH__ >= 900 && __CUDA_ARCH__ < 1000
+#endif  // __CUDA_ARCH__ >= 900
 }
 
 // ----- 1D block scaling rowwise-only kernel ----------------------------------------------------
@@ -478,7 +478,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
                                     const size_t K, const size_t total_row_blocks,
                                     const size_t R_total, const float epsilon,
                                     const bool pow_2_scales, const float* __restrict__ noop_ptr) {
-#if __CUDA_ARCH__ >= 900 && __CUDA_ARCH__ < 1000
+#if __CUDA_ARCH__ >= 900
   if (noop_ptr != nullptr && noop_ptr[0] == 1.0f) return;
 
   const size_t tile_x = blockIdx.x;
@@ -557,7 +557,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
       }
     }
   }
-#endif  // __CUDA_ARCH__ >= 900 && __CUDA_ARCH__ < 1000
+#endif  // __CUDA_ARCH__ >= 900
 }
 
 // ----- 1D block scaling kernel with TMA input ------------------------------------------------
@@ -575,7 +575,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) group_block_scaled_1d_tma_ke
     const size_t total_row_blocks, const size_t blocks_X, const size_t scale_t_stride_aligned_K,
     const size_t R_total, const float epsilon, const bool pow_2_scales,
     const float* __restrict__ noop_ptr, float* __restrict__ dbias_workspace) {
-#if __CUDA_ARCH__ >= 900 && __CUDA_ARCH__ < 1000
+#if __CUDA_ARCH__ >= 900
   // Skipping is only safe without dbias: the grouped_reduce_dbias launch is unconditional, so an
   // early return would leave it reducing a workspace this kernel never wrote.
   if (dbias_workspace == nullptr && noop_ptr != nullptr && noop_ptr[0] == 1.0f) return;
@@ -759,7 +759,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) group_block_scaled_1d_tma_ke
     drain_smem_t_to_gmem<false, OType, kSMemTRowStride>(
         smem_T, output_t_base, global_col_base, global_row_base, tensor_row_base, tensor_M, K, tid);
   }
-#endif  // __CUDA_ARCH__ >= 900 && __CUDA_ARCH__ < 1000
+#endif  // __CUDA_ARCH__ >= 900
 }
 
 // ----- Host-side dispatchers --------------------------------------------------------------------
@@ -819,10 +819,12 @@ inline void group_quantize_blockwise_2d(const GroupedTensor* input, GroupedTenso
                                         GroupedTensor* dbias = nullptr,
                                         Tensor* workspace = nullptr) {
   const int sm = transformer_engine::cuda::sm_arch();
-  NVTE_CHECK(sm >= 90 && sm < 100,
-             "Grouped FP8 block-scaling quantize is only supported on Hopper (SM90-SM99); "
-             "use MXFP8 on Blackwell (SM100) or newer. Got SM",
-             sm, ".");
+  NVTE_CHECK(sm >= 90, "Grouped FP8 block-scaling quantize requires SM90 or newer. Got SM", sm,
+             ".");
+  if (sm >= 100) {
+    NVTE_CHECK(pow_2_scales, "On Blackwell and newer, the FP8 block scaling recipe is emulated ",
+               "with MXFP8, which requires using power of two scaling factors.");
+  }
   const bool use_rowwise = output->has_data();
   const bool use_colwise = output->has_columnwise_data();
   NVTE_CHECK(use_rowwise || use_colwise,
@@ -913,10 +915,12 @@ inline void group_quantize_blockwise_1d(const GroupedTensor* input, GroupedTenso
                                         GroupedTensor* dbias = nullptr,
                                         Tensor* workspace = nullptr) {
   const int sm = transformer_engine::cuda::sm_arch();
-  NVTE_CHECK(sm >= 90 && sm < 100,
-             "Grouped FP8 block-scaling quantize is only supported on Hopper (SM90-SM99); "
-             "use MXFP8 on Blackwell (SM100) or newer. Got SM",
-             sm, ".");
+  NVTE_CHECK(sm >= 90, "Grouped FP8 block-scaling quantize requires SM90 or newer. Got SM", sm,
+             ".");
+  if (sm >= 100) {
+    NVTE_CHECK(pow_2_scales, "On Blackwell and newer, the FP8 block scaling recipe is emulated ",
+               "with MXFP8, which requires using power of two scaling factors.");
+  }
   const bool use_rowwise = output->has_data();
   const bool use_colwise = output->has_columnwise_data();
   NVTE_CHECK(use_rowwise || use_colwise,
