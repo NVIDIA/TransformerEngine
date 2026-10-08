@@ -38,8 +38,7 @@ struct DSv4RopeConfig {
   }
 
   std::optional<tvm_ffi_bridge::TVMFFIKernel> get_kernel() const {
-    static tvm_ffi_bridge::TVMFFIConfigCache &cache =
-        tvm_ffi_bridge::TVMFFIConfigCache::create();
+    static tvm_ffi_bridge::TVMFFIConfigCache &cache = tvm_ffi_bridge::TVMFFIConfigCache::create();
     return cache.get_or_load(*this);
   }
 
@@ -934,8 +933,7 @@ void nvte_fused_rope_backward(const NVTETensor output_grads, const NVTETensor cu
 }
 
 bool nvte_dsv4_rope_cutedsl(NVTETensor input, const NVTETensor cos, const NVTETensor sin,
-                            const NVTETensor cu_seqlens, const bool backward,
-                            cudaStream_t stream) {
+                            const NVTETensor cu_seqlens, const bool backward, cudaStream_t stream) {
   NVTE_API_CALL(nvte_dsv4_rope_cutedsl);
 #ifdef NVTE_WITH_CUTEDSL
   using namespace transformer_engine;

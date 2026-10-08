@@ -82,8 +82,7 @@ void nvte_fused_rope_backward(const NVTETensor output_grads, const NVTETensor cu
  *  caller can use its existing implementation.
  */
 bool nvte_dsv4_rope_cutedsl(NVTETensor input, const NVTETensor cos, const NVTETensor sin,
-                            const NVTETensor cu_seqlens, const bool backward,
-                            cudaStream_t stream);
+                            const NVTETensor cu_seqlens, const bool backward, cudaStream_t stream);
 
 /*! \brief Apply rotary positional embedding to the combined QKV input tensor.
  *
