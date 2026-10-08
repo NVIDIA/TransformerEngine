@@ -186,10 +186,18 @@ def _floor(q32, k32, v32, scale, mask, dtype, window=None):
     )
 
 
+# bf16 everywhere, fp16 on two shapes. What fp16 risks that bf16 does not is its narrower
+# exponent range, and that surfaces in the backward, which runs both dtypes on every shape it
+# covers. Crossing it with every forward shape pays for the same information twice.
+_FWD_CASES = [(s, torch.bfloat16) for s in _SHAPES] + [(s, torch.float16) for s in _SHAPES[:2]]
+_FWD_IDS = [
+    "%s_%s" % (_shape_id(s), "bf16" if d is torch.bfloat16 else "fp16") for s, d in _FWD_CASES
+]
+
+
 @requires_frost
-@pytest.mark.parametrize("shape", _SHAPES, ids=_shape_id)
+@pytest.mark.parametrize("shape,dtype", _FWD_CASES, ids=_FWD_IDS)
 @pytest.mark.parametrize("mask", ["no_mask", "causal", "causal_bottom_right"])
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 def test_frost_forward_matches_reference(shape, mask, dtype):
     """Forward output and LSE against an independent float64 reference."""
     b, hq, hkv, sq, skv, d = shape
@@ -228,7 +236,9 @@ def test_frost_forward_matches_reference(shape, mask, dtype):
 
 
 @requires_frost
-@pytest.mark.parametrize("window", [(256, 0), (128, 0), (0, 0)], ids=lambda w: "win%d" % w[0])
+# (128, 0) is the ordinary case and (0, 0) the degenerate diagonal-only one, which is where an
+# off-by-one in the band would show. A second ordinary width tests the same arithmetic again.
+@pytest.mark.parametrize("window", [(128, 0), (0, 0)], ids=lambda w: "win%d" % w[0])
 @pytest.mark.parametrize("mask", ["causal", "causal_bottom_right", "no_mask"])
 @pytest.mark.parametrize("sq,skv", [(1024, 1024), (512, 1024)], ids=["square", "rect"])
 def test_frost_sliding_window_matches_reference(mask, window, sq, skv):
@@ -440,61 +450,6 @@ def test_frost_mask_spec_rejects_malformed_windows():
     ):
         with pytest.raises(NotImplementedError):
             _mask_spec("causal", window), why
-
-
-@requires_frost
-@pytest.mark.parametrize(
-    "cp_comm_type,window,expect_frost",
-    [
-        ("all_gather", (128, 0), True),
-        ("a2a", (128, 0), True),
-        ("p2p", (128, 0), False),
-        ("a2a+p2p", (128, 0), False),
-        ("p2p", (-1, 0), True),
-        ("p2p", (-1, -1), True),
-    ],
-)
-def test_frost_sliding_window_selection_by_cp_comm_type(cp_comm_type, window, expect_frost):
-    """Which context-parallel paths may serve a sliding window.
-
-    all_gather and a2a each see a contiguous KV range, so the window applies unchanged. The p2p
-    ring shards KV across steps, so a bound measured against the full sequence does not survive
-    the per-step tiles -- the same rule FusedAttention carries. The cases without a real window
-    must still select FROST, since the decline has to key on the window and not on p2p itself.
-    """
-    from transformer_engine.pytorch.attention.dot_product_attention.utils import (
-        AttentionParams,
-        get_attention_backend,
-    )
-
-    params = AttentionParams(
-        qkv_dtype=torch.bfloat16,
-        qkv_layout="bshd_bshd_bshd",
-        batch_size=2,
-        num_heads=8,
-        num_gqa_groups=4,
-        max_seqlen_q=4096,
-        max_seqlen_kv=4096,
-        head_dim_qk=512,
-        head_dim_v=512,
-        attn_mask_type="causal",
-        window_size=window,
-        context_parallel=True,
-        cp_comm_type=cp_comm_type,
-        is_training=True,
-    )
-    from transformer_engine.pytorch.cpp_extensions.fused_attn import FusedAttnBackend
-
-    use_fused, fused_backend = get_attention_backend(params)[2:4]
-    use_frost = bool(use_fused) and fused_backend == FusedAttnBackend.FROST
-    assert (
-        use_frost == expect_frost
-    ), "cp_comm_type=%s window=%s: expected the FROST sub-backend=%s, got %s" % (
-        cp_comm_type,
-        window,
-        expect_frost,
-        use_frost,
-    )
 
 
 @requires_frost

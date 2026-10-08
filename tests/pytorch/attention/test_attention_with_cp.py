@@ -461,11 +461,14 @@ def test_cp_with_flash_attention_softcap(cp_pool, cp_comm_type):
 
 # cuDNN FROST: head_dim in (256, 512] on SM100/SM103, the range no other backend
 # serves together with context parallelism. Shapes are Gemma-4 global layers, which is what
-# motivated the backend. seqlen must stay divisible by cp_size * 2 for causal load balancing.
+# motivated the backend. seqlen must stay divisible by cp_size * 2 for causal load balancing,
+# and is otherwise the cheapest axis there is: attention is O(s^2) and the ring does the same
+# work per step whatever the length, so 2048 exercises every path 4096 would at a quarter the
+# cost. These are d512, four times the head_dim of the fused and flash configs beside them.
 model_configs_frost_attn = {
     #   test:         ModelConfig(b, sq, hq, dqk)
-    "cp_hd512_0": ModelConfig(2, 4096, 8, 512, num_gqa_groups=4, attn_mask_type="causal"),
-    "cp_hd512_1": ModelConfig(2, 4096, 8, 512, num_gqa_groups=4, attn_mask_type="no_mask"),
+    "cp_hd512_0": ModelConfig(2, 2048, 8, 512, num_gqa_groups=4, attn_mask_type="causal"),
+    "cp_hd512_1": ModelConfig(2, 2048, 8, 512, num_gqa_groups=4, attn_mask_type="no_mask"),
     "cp_hd512_2": ModelConfig(2, 2048, 8, 512, num_gqa_groups=8, attn_mask_type="causal"),
 }
 
@@ -777,17 +780,12 @@ def _frost_availability():
 
 @pytest.mark.parametrize("model", model_configs_frost_attn.keys())
 @pytest.mark.parametrize("qkv_format", ["bshd", "sbhd"])
-@pytest.mark.parametrize("cp_comm_type", ["p2p", "all_gather", "a2a", "a2a+p2p"])
+@pytest.mark.parametrize("cp_comm_type", ["p2p", "all_gather", "a2a"])
 def test_cp_with_frost_attention(cp_pool, model, qkv_format, cp_comm_type):
     """Context parallelism at head_dim 512, which no other backend serves.
 
     thd is excluded because the backend declines it: it needs varlen support that is not
-    implemented.
-
-    a2a+p2p needs four ranks rather than two -- an a2a subgroup crossed with a p2p subgroup -- and
-    exercises no new attention code: it dispatches to the same AttnFuncWithCPAndKVP2P as plain p2p,
-    with an a2a communication stage on either side of the ring. It is covered here so that claim is
-    measured rather than assumed.
+    implemented. a2a+p2p is covered separately below, since it needs four ranks.
     """
     reason = _frost_availability()
     if reason is not None:
@@ -797,23 +795,45 @@ def test_cp_with_frost_attention(cp_pool, model, qkv_format, cp_comm_type):
     config.context_parallel = True
     config.cp_comm_type = cp_comm_type
 
-    # a2a requires num_heads and num_gqa_groups divisible by the a2a subgroup size; every config
-    # here satisfies that, but assert rather than rely on it staying true.
-    if cp_comm_type == "a2a+p2p":
-        assert config.num_heads % 2 == 0 and config.num_gqa_groups % 2 == 0, (
-            f"cp_comm_type=a2a+p2p needs num_heads ({config.num_heads}) and num_gqa_groups"
-            f" ({config.num_gqa_groups}) divisible by the a2a subgroup size"
-        )
-
-    pool = cp_pool(4 if cp_comm_type == "a2a+p2p" else 2)
-
     _submit(
-        pool,
+        cp_pool(2),
         dtype="bf16",
         model=model,
         qkv_format=qkv_format,
         kernel_backend="FrostAttention",
         cp_comm_type=cp_comm_type,
+        is_training=True,
+        log_level=pytest_logging_level,
+    )
+
+
+def test_cp_with_frost_attention_a2a_p2p(cp_pool):
+    """One case, because a2a+p2p composes rather than adding a path.
+
+    It dispatches to the same AttnFuncWithCPAndKVP2P as plain p2p, with an a2a communication stage
+    on either side of the ring, and it needs four ranks rather than two. One case says the
+    composition works; six would pay four-rank prices to re-cover p2p.
+    """
+    reason = _frost_availability()
+    if reason is not None:
+        pytest.skip(reason)
+
+    config = model_configs_frost_attn["cp_hd512_0"]
+    config.context_parallel = True
+    config.cp_comm_type = "a2a+p2p"
+    # The a2a stage shards heads across its subgroup, so both counts must divide by it.
+    assert config.num_heads % 2 == 0 and config.num_gqa_groups % 2 == 0, (
+        f"a2a+p2p needs num_heads ({config.num_heads}) and num_gqa_groups"
+        f" ({config.num_gqa_groups}) divisible by the a2a subgroup size"
+    )
+
+    _submit(
+        cp_pool(4),
+        dtype="bf16",
+        model="cp_hd512_0",
+        qkv_format="bshd",
+        kernel_backend="FrostAttention",
+        cp_comm_type="a2a+p2p",
         is_training=True,
         log_level=pytest_logging_level,
     )
