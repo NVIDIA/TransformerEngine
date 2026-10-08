@@ -724,11 +724,12 @@ def fused_attn_fwd(
     out_shape, out_stride = _o_shape_stride(q.shape, vd[3], q.stride())
     out = torch.empty_strided(out_shape, out_stride, device=q.device, dtype=q.dtype)
     lse = torch.empty(qd[0], qd[1], qd[2], 1, device=q.device, dtype=torch.float32)
-    workspace = torch.empty(entry["workspace"], device=q.device, dtype=torch.uint8)
-    entry["graph"].execute(
+    cudnn_pygraph.execute_graph(
+        entry["graph"],
         {tq: q, tk: k, tv: v, tout: out, tlse: lse},
-        workspace,
-        handle=cudnn_pygraph.handle_for(q.device, backend_name=_BACKEND_NAME),
+        entry["workspace"],
+        q.device,
+        backend_name=_BACKEND_NAME,
     )
     # A real tensor, not None: it is saved for backward and handed to the activation offload
     # hooks, neither of which accepts None. FROST has no dropout, so nothing reads it.
@@ -844,8 +845,8 @@ def fused_attn_bwd(
     dq = torch.empty_strided(q.shape, q.stride(), device=q.device, dtype=q.dtype)
     dk = torch.empty_strided(k.shape, k.stride(), device=k.device, dtype=k.dtype)
     dv = torch.empty_strided(v.shape, v.stride(), device=v.device, dtype=v.dtype)
-    workspace = torch.empty(entry["workspace"], device=q.device, dtype=torch.uint8)
-    entry["graph"].execute(
+    cudnn_pygraph.execute_graph(
+        entry["graph"],
         {
             h["q"]: q,
             h["k"]: k,
@@ -857,7 +858,8 @@ def fused_attn_bwd(
             h["dk"]: dk,
             h["dv"]: dv,
         },
-        workspace,
-        handle=cudnn_pygraph.handle_for(q.device, backend_name=_BACKEND_NAME),
+        entry["workspace"],
+        q.device,
+        backend_name=_BACKEND_NAME,
     )
     return dq, dk, dv, None

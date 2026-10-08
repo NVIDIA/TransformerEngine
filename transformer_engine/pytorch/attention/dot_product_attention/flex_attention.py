@@ -176,12 +176,6 @@ def _wrap_score_mod(score_mod: Optional[Callable], graph_tensors: Dict[str, Any]
     return _wrapped_score_mod
 
 
-def _get_cudnn_current_stream_handle(cudnn, device: torch.device):
-    """Return a cuDNN handle for device, bound to PyTorch's current stream."""
-    del cudnn  # the shared module owns the import
-    return cudnn_pygraph.handle_for(device, backend_name=_BACKEND_NAME)
-
-
 def _build_cudnn_pygraph(dtype: torch.dtype, device: torch.device):
     """Create a cuDNN frontend Python graph for F16/BF16 SDPA."""
     return cudnn_pygraph.build_pygraph(dtype, device, backend_name=_BACKEND_NAME)
@@ -233,19 +227,8 @@ def _execute_cudnn_graph(
     device: torch.device,
 ):
     """Execute a built cuDNN frontend Python graph."""
-    cudnn = _import_cudnn_frontend()
-
-    if device.type == "cuda" and device.index is None:
-        device = torch.device("cuda", torch.cuda.current_device())
-    workspace = torch.empty(
-        workspace_size,
-        device=device,
-        dtype=torch.uint8,
-    )
-    graph.execute(
-        variant_pack,
-        workspace,
-        handle=_get_cudnn_current_stream_handle(cudnn, device),
+    cudnn_pygraph.execute_graph(
+        graph, variant_pack, workspace_size, device, backend_name=_BACKEND_NAME
     )
 
 

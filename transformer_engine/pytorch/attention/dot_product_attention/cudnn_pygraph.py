@@ -290,3 +290,22 @@ def finalize_plans(
             f" {exc}{(' ' + hint) if hint else ''}"
         ) from exc
     return max(graph.get_workspace_size(), 1), names[hits[0]]
+
+
+def execute_graph(
+    graph,
+    variant_pack: Dict[Any, torch.Tensor],
+    workspace_size: int,
+    device: torch.device,
+    *,
+    backend_name: str = "cuDNN attention",
+):
+    """Allocate a built graph's workspace and run it on the device's current stream.
+
+    The handle is resolved here rather than by the caller so it is always rebound immediately
+    before ``execute``, which is what keeps cuDNN on the same stream as the tensors.
+    """
+    if device.type == "cuda" and device.index is None:
+        device = torch.device("cuda", torch.cuda.current_device())
+    workspace = torch.empty(workspace_size, device=device, dtype=torch.uint8)
+    graph.execute(variant_pack, workspace, handle=handle_for(device, backend_name=backend_name))
