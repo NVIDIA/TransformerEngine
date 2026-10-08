@@ -11,7 +11,6 @@ import torch
 import torch.distributed as dist
 
 import transformer_engine_torch as tex
-from transformer_engine import te_device_type
 
 
 _COEFFICIENT_SETS = {
