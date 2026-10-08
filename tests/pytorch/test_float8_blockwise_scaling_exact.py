@@ -380,7 +380,7 @@ def test_quantization_block_tiling_extrema_versus_reference(
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 @pytest.mark.parametrize("use_f32_scales", [False, True])
 def test_default_backward_quantizer_handles_zero_blocks(use_f32_scales):
-    """The default backward recipe must quantize zero E5M2 blocks with finite scales."""
+    """Zero E5M2 blocks must use the backward epsilon in both scaling modes."""
     if recipe_emulated and use_f32_scales:
         pytest.skip("Blackwell FP8 block scaling emulation requires power-of-two scales")
 
@@ -399,8 +399,17 @@ def test_default_backward_quantizer_handles_zero_blocks(use_f32_scales):
         grad, quantizer.make_empty(grad.shape, dtype=grad.dtype, device=grad.device)
     )
     assert not torch.any(quantized._rowwise_data)
-    assert torch.isfinite(quantized._rowwise_scale_inv).all()
-    assert torch.all(quantized._rowwise_scale_inv > 0)
+    scale = torch.finfo(torch.float8_e5m2).max / 1e-12
+    if not use_f32_scales:
+        scale = 2.0 ** math.floor(math.log2(scale))
+    expected_scale_inv = 1.0 / scale
+    for scale_inv in (quantized._rowwise_scale_inv, quantized._columnwise_scale_inv):
+        torch.testing.assert_close(
+            scale_inv,
+            torch.full_like(scale_inv, expected_scale_inv),
+            rtol=1e-6,
+            atol=0.0,
+        )
 
     # Nonzero blocks keep the pre-change quantization result.
     old_quantizer = Float8BlockQuantizer(
