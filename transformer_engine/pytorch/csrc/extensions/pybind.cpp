@@ -137,12 +137,20 @@ void init_router_bindings(pybind11::module &m) {
   pybind11::enum_<NVTERoutingMapFormat>(m, "NVTERoutingMapFormat", pybind11::module_local())
       .value("BYTEMAP", NVTE_ROUTING_MAP_FORMAT_BYTEMAP)
       .value("BITMAP_U8", NVTE_ROUTING_MAP_FORMAT_BITMAP_U8);
+  pybind11::enum_<NVTEQBHistogramMode>(m, "NVTEQBHistogramMode", pybind11::module_local())
+      .value("TWO_KERNEL", NVTE_QB_HISTOGRAM_TWO_KERNEL)
+      .value("FUSED_ATOMIC", NVTE_QB_HISTOGRAM_FUSED_ATOMIC);
   m.def("fused_topk_with_score_function_fwd", &fused_topk_with_score_function_fwd,
         py::arg("logits"), py::arg("topk"), py::arg("use_pre_softmax"), py::arg("num_groups"),
         py::arg("group_topk"), py::arg("scaling_factor"), py::arg("score_function"),
         py::arg("expert_bias"),
         py::arg("routing_map_format") = static_cast<int>(NVTE_ROUTING_MAP_FORMAT_BYTEMAP),
         py::arg("topk_indices") = std::nullopt, "Fused topk with score function fwd");
+  m.def("fused_topk_with_score_function_qb_fwd", &fused_topk_with_score_function_qb_fwd,
+        py::arg("logits"), py::arg("topk"), py::arg("scaling_factor"), py::arg("expert_bias"),
+        py::arg("routing_map_format"), py::arg("topk_indices"), py::arg("histogram"),
+        py::arg("bin_bounds"), py::arg("histogram_mode"), py::arg("bin_bounds_validated") = false,
+        "Kimi K3 QB fused topk with histogram accumulation");
   m.def("fused_topk_with_score_function_bwd", &fused_topk_with_score_function_bwd,
         py::arg("routing_map"), py::arg("intermediate_output"), py::arg("grad_probs"),
         py::arg("grad_logits"), py::arg("topk"), py::arg("use_pre_softmax"),
@@ -209,13 +217,30 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("group_quantize", transformer_engine::pytorch::group_quantize, py::arg("tensor"),
         py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"),
         py::arg("last_dims") = py::none(), py::arg("tensor_offsets") = py::none(),
-        py::arg("noop_flag") = py::none());
+        py::arg("noop_flag") = py::none(), py::arg("output") = py::none());
+  m.def("group_scaled_swiglu", transformer_engine::pytorch::group_scaled_swiglu,
+        "Grouped scaled SwiGLU recompute fused with columnwise MXFP8 quantization",
+        py::arg("input_2h"), py::arg("prob"), py::arg("quantizer"), py::arg("num_tensors"),
+        py::arg("first_dims") = py::none(), py::arg("last_dims") = py::none(),
+        py::arg("tensor_offsets") = py::none());
+  m.def("group_scaled_clamped_swiglu", transformer_engine::pytorch::group_scaled_clamped_swiglu,
+        "Grouped scaled clamped-SwiGLU recompute fused with columnwise MXFP8 quantization",
+        py::arg("input_2h"), py::arg("prob"), py::arg("quantizer"), py::arg("num_tensors"),
+        py::arg("limit"), py::arg("alpha") = 1.702f, py::arg("glu_linear_offset") = 1.0f,
+        py::arg("first_dims") = py::none(), py::arg("last_dims") = py::none(),
+        py::arg("tensor_offsets") = py::none());
   transformer_engine::pytorch::bind_quantize_with_amax_extensions(m);
   m.def("group_dequantize", transformer_engine::pytorch::group_dequantize,
         "Dequantize group tensor", py::arg("input"), py::arg("otype"));
   m.def("bgrad_group_quantize", transformer_engine::pytorch::bgrad_group_quantize,
         py::arg("tensor"), py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"),
         py::arg("last_dims") = py::none(), py::arg("tensor_offsets") = py::none());
+  m.def("group_requantize_inplace", transformer_engine::pytorch::group_requantize_inplace,
+        "Rebuild the columnwise copy of a rowwise-prequantized MXFP8 grouped tensor and swizzle "
+        "its rowwise scales for GEMM, in place",
+        py::arg("grouped_x"), py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"),
+        py::arg("otype"), py::arg("tensor_offsets") = py::none(),
+        py::arg("return_dequantized") = false);
   m.def("bgrad_quantize", transformer_engine::pytorch::bgrad_quantize,
         "Compute bias gradient and quantize", py::arg("input"), py::arg("quantizer"));
   m.def("generic_gemm", transformer_engine::pytorch::gemm, "Compute GEMM (matrix-matrix multiply)",
@@ -252,6 +277,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("quantizer"));
   m.def("swiglu", transformer_engine::pytorch::swiglu, "SwiGLU activation", py::arg("input"),
         py::arg("quantizer"));
+  m.def("situglu", transformer_engine::pytorch::situglu, "SiTU-GLU activation", py::arg("input"),
+        py::arg("quantizer"), py::arg("beta1") = 4.0f, py::arg("beta2") = 25.0f);
   m.def("clamped_swiglu", transformer_engine::pytorch::clamped_swiglu,
         "SwiGLU activation used in GPT OSS", py::arg("input"), py::arg("quantizer"),
         py::arg("limit") = 7.0f, py::arg("alpha") = 1.702f, py::arg("glu_linear_offset") = 1.0f);
@@ -281,10 +308,41 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("fwd_input"), py::arg("quantizer"));
   m.def("dswiglu", transformer_engine::pytorch::dswiglu, "Backward of SwiGLU", py::arg("grad"),
         py::arg("fwd_input"), py::arg("quantizer"));
+  m.def("dsituglu", transformer_engine::pytorch::dsituglu, "Backward of SiTU-GLU", py::arg("grad"),
+        py::arg("fwd_input"), py::arg("quantizer"), py::arg("beta1") = 4.0f,
+        py::arg("beta2") = 25.0f);
   m.def("clamped_dswiglu", transformer_engine::pytorch::clamped_dswiglu,
         "Backward of SwiGLU used in GPT OSS", py::arg("grad"), py::arg("fwd_input"),
         py::arg("quantizer"), py::arg("limit") = 7.0f, py::arg("alpha") = 1.702f,
         py::arg("glu_linear_offset") = 1.0f);
+  /* Scaled activation */
+  m.def("scaled_swiglu", transformer_engine::pytorch::scaled_swiglu, "Scaled SwiGLU activation",
+        py::arg("input"), py::arg("act_scales"), py::arg("quantizer"),
+        py::arg("glu_interleave_size") = 0);
+  m.def("scaled_situglu", transformer_engine::pytorch::scaled_situglu, "Scaled SiTU-GLU activation",
+        py::arg("input"), py::arg("act_scales"), py::arg("quantizer"), py::arg("beta1") = 4.0f,
+        py::arg("beta2") = 25.0f, py::arg("glu_interleave_size") = 0);
+  m.def("scaled_clamped_swiglu", transformer_engine::pytorch::scaled_clamped_swiglu,
+        "Scaled clamped SwiGLU activation", py::arg("input"), py::arg("act_scales"),
+        py::arg("quantizer"), py::arg("limit") = 7.0f, py::arg("alpha") = 1.702f,
+        py::arg("glu_linear_offset") = 1.0f, py::arg("glu_interleave_size") = 0);
+  m.def("scaled_srelu", transformer_engine::pytorch::scaled_srelu, "Scaled SReLU activation",
+        py::arg("input"), py::arg("act_scales"), py::arg("quantizer"));
+  m.def("scaled_dswiglu", transformer_engine::pytorch::scaled_dswiglu, "Scaled SwiGLU backward",
+        py::arg("grad"), py::arg("fwd_input"), py::arg("act_scales"), py::arg("quantizer"),
+        py::arg("glu_interleave_size") = 0, py::arg("compute_scale_grad") = true);
+  m.def("scaled_dsituglu", transformer_engine::pytorch::scaled_dsituglu, "Scaled SiTU-GLU backward",
+        py::arg("grad"), py::arg("fwd_input"), py::arg("act_scales"), py::arg("quantizer"),
+        py::arg("beta1") = 4.0f, py::arg("beta2") = 25.0f, py::arg("glu_interleave_size") = 0,
+        py::arg("compute_scale_grad") = true);
+  m.def("scaled_clamped_dswiglu", transformer_engine::pytorch::scaled_clamped_dswiglu,
+        "Scaled clamped SwiGLU backward", py::arg("grad"), py::arg("fwd_input"),
+        py::arg("act_scales"), py::arg("quantizer"), py::arg("limit") = 7.0f,
+        py::arg("alpha") = 1.702f, py::arg("glu_linear_offset") = 1.0f,
+        py::arg("glu_interleave_size") = 0, py::arg("compute_scale_grad") = true);
+  m.def("scaled_dsrelu", transformer_engine::pytorch::scaled_dsrelu, "Scaled SReLU backward",
+        py::arg("grad"), py::arg("fwd_input"), py::arg("act_scales"), py::arg("quantizer"),
+        py::arg("compute_scale_grad") = true);
   /* DBias + DAct fusions*/
   m.def("dbias_dgelu", transformer_engine::pytorch::dbias_dgelu, "DGeLU + DBias + Quantize",
         py::arg("grad"), py::arg("fwd_input"), py::arg("quantizer"));
@@ -379,21 +437,26 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       py::arg("input"), py::arg("output"), py::arg("M_tiles"), py::arg("K_tiles"),
       py::call_guard<py::gil_scoped_release>());
   m.def("nvfp4_expand_scale_to_fp8", &transformer_engine::pytorch::nvfp4_expand_scale_to_fp8,
-        "Expand tile-level scales to row-level scales and convert to FP8 E4M3", py::arg("input"),
+        "Expand tile-level scales to row-level scales and convert to FP8", py::arg("input"),
         py::arg("output"), py::arg("tile_rows"), py::arg("tile_cols"), py::arg("rows_padded"),
-        py::arg("block_len"), py::call_guard<py::gil_scoped_release>());
+        py::arg("block_len"), py::arg("scale_dtype") = transformer_engine::DType::kFloat8E4M3);
   m.def("nvfp4_compute_per_block_scale",
         &transformer_engine::pytorch::nvfp4_compute_per_block_scale,
         "Compute per-block decode scale from block amax and global amax", py::arg("block_amax"),
-        py::arg("scale"), py::arg("global_amax"), py::call_guard<py::gil_scoped_release>());
+        py::arg("scale"), py::arg("global_amax"),
+        py::arg("scale_dtype") = transformer_engine::DType::kFloat8E4M3,
+        py::call_guard<py::gil_scoped_release>());
   m.def("nvfp4_compute_global_scale", &transformer_engine::pytorch::nvfp4_compute_global_scale,
         "Compute global encode scale from global amax", py::arg("global_amax"),
-        py::arg("global_scale"), py::call_guard<py::gil_scoped_release>());
+        py::arg("global_scale"), py::arg("scale_dtype") = transformer_engine::DType::kFloat8E4M3,
+        py::call_guard<py::gil_scoped_release>());
   m.def("nvfp4_fused_scale", &transformer_engine::pytorch::nvfp4_fused_scale,
         "Fused kernel: compute per-block decode scale, copy global amax, expand to row-level FP8",
         py::arg("block_amax"), py::arg("global_amax"), py::arg("per_block_scale"),
         py::arg("target_scale"), py::arg("target_amax"), py::arg("tile_rows"), py::arg("tile_cols"),
-        py::arg("rows_padded"), py::arg("block_len"), py::call_guard<py::gil_scoped_release>());
+        py::arg("rows_padded"), py::arg("block_len"),
+        py::arg("scale_dtype") = transformer_engine::DType::kFloat8E4M3,
+        py::call_guard<py::gil_scoped_release>());
   m.def("nvfp4_multi_tensor_fused_scale",
         &transformer_engine::pytorch::nvfp4_multi_tensor_fused_scale,
         "Batched fused scale: compute per-block decode scale, copy global amax, expand to FP8 for "
@@ -401,6 +464,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("block_amax_list"), py::arg("global_amax_list"), py::arg("per_block_scale_list"),
         py::arg("target_scale_list"), py::arg("target_amax_list"), py::arg("tile_rows_list"),
         py::arg("tile_cols_list"), py::arg("rows_padded_list"), py::arg("block_len"),
+        py::arg("scale_dtype") = transformer_engine::DType::kFloat8E4M3,
         py::call_guard<py::gil_scoped_release>());
   m.def("nvfp4_2d_multi_tensor_transpose",
         &transformer_engine::pytorch::nvfp4_2d_multi_tensor_transpose,
@@ -412,7 +476,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Swap first two tensor dimensions", py::arg("tensor"), py::kw_only(), py::arg("out"),
         py::call_guard<py::gil_scoped_release>());
   m.def("get_fused_attn_backend", &transformer_engine::pytorch::get_fused_attn_backend,
-        "Get Fused Attention backend", py::call_guard<py::gil_scoped_release>());
+        "Get Fused Attention backend", py::arg("fused_attn_params"));
   m.def("compute_amax", &transformer_engine::pytorch::compute_amax,
         "Compute absolute max value in tensor", py::arg("input"), py::arg("amax"),
         py::call_guard<py::gil_scoped_release>());
@@ -447,12 +511,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Partial cast from master weights for NVFP4 2D", py::arg("inp"), py::arg("out"),
         py::arg("scale"), py::arg("global_scale"), py::arg("h"), py::arg("w"),
         py::arg("start_offset"), py::arg("block_len") = 16,
+        py::arg("scale_dtype") = transformer_engine::DType::kFloat8E4M3,
         py::call_guard<py::gil_scoped_release>());
   m.def("nvfp4_multi_tensor_2d_partial_cast",
         &transformer_engine::pytorch::nvfp4_multi_tensor_2d_partial_cast,
         "Batched partial cast from master weights for NVFP4 2D", py::arg("inp_list"),
         py::arg("out_list"), py::arg("scale_list"), py::arg("global_scale_list"), py::arg("h_list"),
         py::arg("w_list"), py::arg("start_offset_list"), py::arg("block_len") = 16,
+        py::arg("scale_dtype") = transformer_engine::DType::kFloat8E4M3,
         py::call_guard<py::gil_scoped_release>());
   m.def("mxfp8_scaling_compute_partial_amax",
         &transformer_engine::pytorch::mxfp8_scaling_compute_partial_amax,
@@ -647,6 +713,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("multi_tensor_compute_scale_inv_e8m0",
         &transformer_engine::pytorch::multi_tensor_compute_scale_inv_e8m0_cuda,
         "Fused compute E8M0 scale_inv from amax", py::call_guard<py::gil_scoped_release>());
+
+  // Borrow torch's host ncclComm_t from a process group (used by NCCL EP and cuSolverMp).
+  m.def("get_nccl_comm_ptr", &transformer_engine::pytorch::get_nccl_comm_ptr,
+        "Borrow torch's host ncclComm_t from a process group's CUDA backend.",
+        py::arg("process_group"));
 
   // Newton-Schulz (cuSolverMp)
   m.def("cusolvermp_ctx_create", &transformer_engine::pytorch::cusolvermp_ctx_create,

@@ -180,6 +180,37 @@ Blackwell and later (SM >= 10.0) – the recipe is emulated with MXFP8. Note tha
 
 ----
 
+
+Quantizer
+---------
+
+.. tabs::
+
+   .. tab:: PyTorch
+
+      Blockwise scaling uses
+      :class:`~transformer_engine.pytorch.Float8BlockQuantizer`. Each block of
+      the tensor gets its own power-of-two scale: ``block_scaling_dim=1``
+      scales 1x128 blocks, ``block_scaling_dim=2`` (the default) scales
+      128x128 blocks. This recipe is not available in TE/JAX.
+
+      .. code-block:: python
+
+         import torch
+         import transformer_engine.pytorch as te
+
+         tensor = torch.randn(256, 256, device="cuda", dtype=torch.bfloat16)
+
+         quantizer = te.Float8BlockQuantizer(
+             fp8_dtype=te.DType.kFloat8E4M3,
+             rowwise=True,
+             columnwise=True,
+             block_scaling_dim=1,
+         )
+
+         qtensor = quantizer(tensor)
+         roundtrip = qtensor.dequantize()
+
 Developer Notes
 ---------------
 

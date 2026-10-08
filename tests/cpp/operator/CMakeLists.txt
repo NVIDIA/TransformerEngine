@@ -13,11 +13,14 @@ add_executable(test_operator
                test_qdq.cu
                test_cast_mxfp8.cu
                test_cast_mxfp8_grouped.cu
+               test_cast_mxfp8_grouped_scaled_swiglu.cu
                test_cast_nvfp4_transpose.cu
+               test_row_scaled_nvfp4_grouped_amax.cu
                test_cast_float8blockwise.cu
                test_cast_float8blockwise_grouped.cu
                test_dequantize_mxfp8.cu
                test_dequantize_mxfp8_grouped.cu
+               test_fused_group_requantize_mxfp8.cu
                test_dequantize_float8blockwise_grouped.cu
                test_dequantize_nvfp4.cu
                test_transpose.cu
@@ -50,5 +53,7 @@ list(APPEND test_operator_LINKER_LIBS CUDA::cudart GTest::gtest_main ${TE_LIB} C
 target_link_libraries(test_operator PUBLIC ${test_operator_LINKER_LIBS} OpenMP::OpenMP_CXX)
 target_compile_options(test_operator PRIVATE -O2 -fopenmp)
 
-include(GoogleTest)
-gtest_discover_tests(test_operator DISCOVERY_TIMEOUT 600)
+# Keep all operator tests in one process so CUDA initialization and, when enabled,
+# the embedded Python interpreter and CuTeDSL kernel cache are initialized only once.
+# TODO(kainingz): This will only use 1 CPU and 1 GPU. Make it able to utilize all CPUs and GPUs later
+add_test(NAME test_operator COMMAND test_operator)

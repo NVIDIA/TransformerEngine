@@ -473,6 +473,11 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
     amax_reduction_group: Optional[dist_group_type] = None
 
     def __repr__(self, *, tensor_contents=None):
+        # Data-free repr for a fake/meta scale_inv (exact class check: fake /
+        # functional tensors subclass Tensor); materializing it under tracing
+        # would leak an unbacked symbol into the ShapeEnv.
+        if self._scale_inv.__class__ is not torch.Tensor or self._scale_inv.is_meta:
+            return safe_quantized_repr(self, "Float8Tensor")
         try:
             return (
                 "Float8Tensor("
@@ -518,10 +523,6 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         if isinstance(tensor, QuantizedTensor):
             return self.quantize_(tensor.dequantize(), noop_flag=noop_flag)
         return super().quantize_(tensor, noop_flag=noop_flag)
-
-    def detach(self) -> Float8Tensor:
-        # pylint: disable=missing-function-docstring
-        return Float8Tensor.make_like(self)
 
     def clone(self) -> Float8Tensor:
         # pylint: disable=missing-function-docstring

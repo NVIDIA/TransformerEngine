@@ -37,6 +37,13 @@ from transformer_engine.pytorch import (
 from transformer_engine.common import recipe
 from transformer_engine.pytorch.cpp_extensions import general_gemm
 from transformer_engine.pytorch.tensor.utils import replace_raw_data
+from transformer_engine.pytorch.module import (
+    _common as module_common,
+    is_module_grouped_tensor_path_supported,
+    layernorm_linear,
+    layernorm_mlp,
+    linear,
+)
 from utils import ModelConfig, recipe_id, skip_unsupported_backward_override
 
 # Only run FP8 tests on supported devices.
@@ -86,11 +93,11 @@ model_configs = {
 
 
 def nvfp4_vanilla():
-    nvfp4_recipe = recipe.NVFP4BlockScaling()
-    nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
-    nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams()
-    nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams()
-    return nvfp4_recipe
+    return recipe.NVFP4BlockScaling(
+        disable_rht=True,
+        disable_stochastic_rounding=True,
+        disable_2d_quantization=True,
+    )
 
 
 def nvfp4_row_scaled():
@@ -123,7 +130,7 @@ fp8_recipes = []
 if mxfp8_available:
     fp8_recipes.append(recipe.MXFP8BlockScaling())
 if nvfp4_available:
-    fp8_recipes.append(nvfp4_vanilla())  # TODO: fix check for this
+    fp8_recipes.append(nvfp4_vanilla())
     fp8_recipes.append(nvfp4_4over6())
 if fp8_block_scaling_available:
     fp8_recipes.append(recipe.Float8BlockScaling())
@@ -563,6 +570,7 @@ def test_sanity_linear_with_zero_tokens(
         out = te_linear(inp_hidden_states)
     loss = out.sum()
     loss.backward()
+    torch.cuda.synchronize()
     assert out.shape == (num_tokens, ffn_hidden_size)
 
 
@@ -603,17 +611,34 @@ def test_sanity_grouped_linear(
     if fp8_recipe is not None:
         fp8_recipe = copy.deepcopy(fp8_recipe)
         fp8_recipe.backward_override = backward_override
+    if single_param and not is_module_grouped_tensor_path_supported(
+        fp8_recipe,
+        dtype,
+    ):
+        pytest.skip("Single grouped parameters require the native grouped-tensor path")
+    if single_param:
+        # Single grouped parameters intentionally have no split-quantize fallback, so this
+        # test must satisfy the native grouped kernels' shape contract. MCore pads each
+        # expert's token count to 256; TE requires at least 128-row alignment. Weight K must
+        # be 64-aligned.
+        tokens_per_nonempty_expert = bs * config.max_seqlen_q
+        if tokens_per_nonempty_expert % 128 != 0:
+            pytest.skip("Single grouped parameters require each nonempty m_split to be 128-aligned")
+        k_alignment = 64
+        if config.hidden_size % k_alignment != 0:
+            pytest.skip(f"Single grouped parameters require GEMM K to be {k_alignment}-aligned")
 
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
             pytest.skip("Model config does not support FP8")
         if fp8_recipe.nvfp4():
-            if not getattr(fp8_recipe, "row_scaled_activation", False):
-                pytest.skip("NVFP4 not supported for grouped linear")
-            if single_param:
-                pytest.skip("Row-scaled NVFP4 does not support GroupedTensor grouped linear")
-            if dtype == torch.float16:
-                pytest.skip("FP16 output for NVFP4 not supported")
+            if dtype != torch.bfloat16:
+                pytest.skip("NVFP4 GroupedLinear requires BF16")
+            if single_param and not fp8_model_params:
+                pytest.skip(
+                    "NVFP4 single grouped BF16 primary weights require unsupported non-RHT "
+                    "grouped weight quantization; enable quantized model initialization"
+                )
 
     use_fp8 = fp8_recipe is not None
     with quantized_model_init(enabled=use_fp8 and fp8_model_params, recipe=fp8_recipe):
@@ -625,6 +650,7 @@ def test_sanity_grouped_linear(
             params_dtype=dtype,
             single_grouped_weight=single_param,
             single_grouped_bias=single_param,
+            use_grouped_tensor=single_param,
         ).cuda()
 
     # Verify grouped linear exposes a single grouped weight parameter(and bias when applicable).
@@ -644,11 +670,25 @@ def test_sanity_grouped_linear(
         m_splits[-1] = 0
     elif empty_split == "middle":
         m_splits[num_gemms // 2] = 0
+    if single_param:
+        m_splits = torch.tensor(m_splits, dtype=torch.int64, device="cuda")
+
+    if NVTE_TEST_NVINSPECT_ENABLED and single_param:
+        # DebugQuantizer operates on per-GEMM tensors, while single grouped parameters
+        # intentionally have no split-quantize fallback.
+        with pytest.raises(
+            RuntimeError,
+            match="TE debug features do not support single grouped parameters",
+        ):
+            with autocast(enabled=use_fp8, recipe=fp8_recipe):
+                te_grouped_linear(inp_hidden_states, m_splits)
+        return
 
     with autocast(enabled=use_fp8, recipe=fp8_recipe):
         out = te_grouped_linear(inp_hidden_states, m_splits)
     loss = out.sum()
     loss.backward()
+    torch.cuda.synchronize()
     assert out.shape == (num_tokens, ffn_hidden_size)
 
 
@@ -700,6 +740,124 @@ def test_sanity_layernorm_mlp(
         checkpoint=checkpoint,
     )
     _test_sanity_common(block, dtype, config, fp8_recipe, skip_wgrad, skip_dgrad, microbatching)
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ["linear", "lnlinear", "rmslinear", "mlp_gelu", "rmsmlp_swiglu"],
+)
+@pytest.mark.parametrize(
+    "shape,noncontiguous",
+    [
+        ((128,), False),
+        ((2, 4, 4, 128), False),
+        ((2, 4, 4, 128), True),
+    ],
+)
+def test_sanity_logical_activation_shapes(kind, shape, noncontiguous, monkeypatch):
+    """Modules preserve unusual logical shapes without restoration views."""
+    kwargs = dict(device="cuda", params_dtype=torch.bfloat16, bias=True)
+    if kind == "linear":
+        module = Linear(128, 256, **kwargs)
+        reference_module = Linear(128, 256, **kwargs)
+        module_impl = linear
+        output_bias = module.bias
+    elif kind.endswith("linear"):
+        module_kwargs = dict(
+            normalization="RMSNorm" if kind == "rmslinear" else "LayerNorm",
+            return_layernorm_output=True,
+        )
+        module = LayerNormLinear(128, 256, **module_kwargs, **kwargs)
+        reference_module = LayerNormLinear(128, 256, **module_kwargs, **kwargs)
+        module_impl = layernorm_linear
+        output_bias = module.bias
+    else:
+        module_kwargs = dict(
+            normalization="RMSNorm" if kind.startswith("rms") else "LayerNorm",
+            activation="gelu" if kind == "mlp_gelu" else "swiglu",
+            return_layernorm_output=True,
+        )
+        module = LayerNormMLP(128, 256, **module_kwargs, **kwargs)
+        reference_module = LayerNormMLP(128, 256, **module_kwargs, **kwargs)
+        module_impl = layernorm_mlp
+        output_bias = module.fc2_bias
+    reference_module.load_state_dict(module.state_dict())
+
+    storage_shape = (*shape[:-1], shape[-1] * 2) if noncontiguous else shape
+    x = torch.randn(storage_shape, device="cuda", dtype=torch.bfloat16)
+    if noncontiguous:
+        x = x[..., ::2]
+        assert not x.is_contiguous()
+    x = x.detach().requires_grad_()
+    reference_x = x.detach().reshape(-1, x.shape[-1]).clone().requires_grad_()
+
+    seen_gemm_layouts = []
+    general_gemm_ = module_impl.general_gemm
+    check_logical_shapes = True
+
+    def checked_gemm(a, b, *args, **kwargs):
+        # Fprop and dgrad retain activation rank; wgrad contracts token dimensions.
+        out = general_gemm_(a, b, *args, **kwargs)
+        if check_logical_shapes:
+            assert b.ndim == len(shape)
+            if kwargs.get("layout", "TN") != "NT":
+                assert out[0].ndim == len(shape)
+            seen_gemm_layouts.append(kwargs.get("layout", "TN"))
+        return out
+
+    monkeypatch.setattr(module_impl, "general_gemm", checked_gemm)
+
+    seen_norm_stages = []
+    if kind != "linear":
+        norm = "rmsnorm" if kind.startswith("rms") else "layernorm"
+        for suffix in ("fwd", "bwd"):
+            tex = module_common.tex if suffix == "fwd" else module_impl.tex
+            norm_ = getattr(tex, f"{norm}_{suffix}")
+
+            def checked_norm(*args, _norm=norm_, _suffix=suffix, **kwargs):
+                if check_logical_shapes:
+                    assert args[0].ndim == len(shape)
+                    seen_norm_stages.append(_suffix)
+                return _norm(*args, **kwargs)
+
+            monkeypatch.setattr(tex, f"{norm}_{suffix}", checked_norm)
+
+    outputs = module(x)
+    outputs = outputs if isinstance(outputs, tuple) else (outputs,)
+    for output in outputs:
+        assert output.shape[:-1] == shape[:-1]
+        assert output._base is None
+    sum(output.sum() for output in outputs).backward()
+
+    check_logical_shapes = False
+    reference_outputs = reference_module(reference_x)
+    reference_outputs = (
+        reference_outputs if isinstance(reference_outputs, tuple) else (reference_outputs,)
+    )
+    sum(output.sum() for output in reference_outputs).backward()
+
+    assert x.grad is not None and x.grad.shape == x.shape
+    assert len(outputs) == len(reference_outputs)
+    for output, reference_output in zip(outputs, reference_outputs):
+        reference_output = reference_output.reshape(*shape[:-1], reference_output.shape[-1])
+        torch.testing.assert_close(output, reference_output, rtol=0, atol=0)
+    torch.testing.assert_close(x.grad, reference_x.grad.reshape(shape), rtol=0, atol=0)
+    for (name, parameter), (reference_name, reference_parameter) in zip(
+        module.named_parameters(), reference_module.named_parameters()
+    ):
+        assert name == reference_name
+        assert parameter.grad is not None and parameter.grad.shape == parameter.shape
+        torch.testing.assert_close(parameter.grad, reference_parameter.grad, rtol=0, atol=0)
+    num_tokens = x.numel() // x.shape[-1]
+    torch.testing.assert_close(
+        output_bias.grad,
+        torch.full_like(output_bias, num_tokens),
+        rtol=0,
+        atol=0,
+    )
+    assert {"TN", "NN", "NT"}.issubset(seen_gemm_layouts)
+    if kind != "linear":
+        assert set(seen_norm_stages) == {"fwd", "bwd"}
 
 
 @pytest.mark.parametrize("dtype", param_types)
@@ -1052,6 +1210,16 @@ def test_sanity_gemm_with_unalignment(N, offset, datatype):
 
     _ = general_gemm(A=weight, B=inp)
     torch.cuda.synchronize()
+
+
+def test_sanity_general_gemm_non_fp8_bias_dtype_must_match_out():
+    """BF16 bias + FP32 out must raise on the non-FP8/FP4 path (issue 3562)."""
+    E, H, T = 128, 256, 64
+    weight = torch.randn(E, H, dtype=torch.bfloat16, device="cuda")
+    inp = torch.randn(T, H, dtype=torch.bfloat16, device="cuda")
+    bias = torch.randn(E, dtype=torch.bfloat16, device="cuda")
+    with pytest.raises(RuntimeError, match="bias dtype must match output dtype"):
+        general_gemm(weight, inp, torch.float32, layout="TN", bias=bias)
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)

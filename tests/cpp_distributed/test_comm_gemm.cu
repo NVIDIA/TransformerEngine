@@ -10,6 +10,7 @@
 #include <mpi.h>
 #include <nccl.h>
 #include <transformer_engine/comm_gemm.h>
+#include <transformer_engine/comm_gemm_overlap.h>
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/transformer_engine.h>
 
@@ -56,9 +57,20 @@ using transformer_engine::TypeInfo;
     }                                                           \
   } while (false)
 
+class CublasMpEnvironment final : public ::testing::Environment {
+ public:
+  void SetUp() override {
+    if (!nvte_built_with_cublasmp()) {
+      GTEST_SKIP() << "test_comm_gemm requires TE/Common to be built with "
+                      "NVTE_WITH_CUBLASMP=1.";
+    }
+  }
+};
+
 int main(int argc, char* argv[]) {
   ::testing::InitGoogleTest(&argc, argv);
   CHECK_MPI(MPI_Init(&argc, &argv));
+  ::testing::AddGlobalTestEnvironment(new CublasMpEnvironment);
   auto ret = RUN_ALL_TESTS();
   CHECK_MPI(MPI_Finalize());
   return ret;

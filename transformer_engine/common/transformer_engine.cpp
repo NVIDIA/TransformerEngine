@@ -25,6 +25,9 @@
 #include "common.h"
 #include "common/util/cuda_runtime.h"
 #include "common/util/logging.h"
+#ifdef NVTE_WITH_CUTEDSL
+#include "tvm_ffi_bridge.h"
+#endif
 
 namespace transformer_engine {
 
@@ -36,6 +39,11 @@ size_t typeToNumBits(const DType type) {
 size_t typeToSize(const DType type) {
   NVTE_CHECK(type != DType::kFloat4E2M1, "typeToSize() Does not support FP4 data type.");
   return typeToNumBits(type) / 8;
+}
+
+float typeToMax(const DType type) {
+  TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(type, T,
+                                     return TypeInfo<T>::max_finite_value;);  // NOLINT(*)
 }
 
 std::string to_string(const NVTEScalingMode &mode) {
@@ -173,18 +181,21 @@ void CheckInputTensor(const Tensor &t, std::string_view name, bool check_scale_i
     if (t.has_data()) {
       NVTE_CHECK(t.scale_inv.has_data(), "FP4 scaling factor input ", name,
                  "_scale_inverse must be allocated");
-      NVTE_CHECK(t.scale_inv.dtype == DType::kFloat8E4M3, "FP4 scaling factor input ", name,
-                 "_scale_inverse has invalid dtype "
-                 "(expected DType::kFloat8E4M3, got ",
-                 to_string(t.scale_inv.dtype), ")");
+      NVTE_CHECK(
+          t.scale_inv.dtype == DType::kFloat8E4M3 || t.scale_inv.dtype == DType::kFloat8UE5M3,
+          "FP4 scaling factor input ", name,
+          "_scale_inverse has invalid dtype "
+          "(expected Float8E4M3 or Float8UE5M3, got ",
+          to_string(t.scale_inv.dtype), ")");
     }
     if (t.has_columnwise_data()) {
       NVTE_CHECK(t.columnwise_scale_inv.has_data(), "FP4 scaling factor input ", name,
                  "_columnwise_scale_inverse must be allocated");
-      NVTE_CHECK(t.columnwise_scale_inv.dtype == DType::kFloat8E4M3, "FP8 scaling factor input ",
-                 name,
+      NVTE_CHECK(t.columnwise_scale_inv.dtype == DType::kFloat8E4M3 ||
+                     t.columnwise_scale_inv.dtype == DType::kFloat8UE5M3,
+                 "FP8 scaling factor input ", name,
                  "_columnwise_scale_inverse has invalid dtype "
-                 "(expected DType::kFloat8E4M3, got ",
+                 "(expected Float8E4M3 or Float8UE5M3, got ",
                  to_string(t.columnwise_scale_inv.dtype), ")");
     }
   } else {
@@ -234,18 +245,21 @@ void CheckOutputTensor(const Tensor &t, std::string_view name, bool allow_empty)
     if (t.has_data()) {
       NVTE_CHECK(t.scale_inv.has_data(), "FP4 scaling factor output ", name,
                  "_scale_inverse must be allocated");
-      NVTE_CHECK(t.scale_inv.dtype == DType::kFloat8E4M3, "FP4 scaling factor output ", name,
-                 "_scale_inverse has invalid dtype "
-                 "(expected Float8E4M3, got ",
-                 to_string(t.scale_inv.dtype), ")");
+      NVTE_CHECK(
+          t.scale_inv.dtype == DType::kFloat8E4M3 || t.scale_inv.dtype == DType::kFloat8UE5M3,
+          "FP4 scaling factor output ", name,
+          "_scale_inverse has invalid dtype "
+          "(expected Float8E4M3 or Float8UE5M3, got ",
+          to_string(t.scale_inv.dtype), ")");
     }
     if (t.has_columnwise_data()) {
       NVTE_CHECK(t.columnwise_scale_inv.has_data(), "FP4 scaling factor output ", name,
                  "_columnwise_scale_inverse must be allocated");
-      NVTE_CHECK(t.columnwise_scale_inv.dtype == DType::kFloat8E4M3, "FP4 scaling factor output ",
-                 name,
+      NVTE_CHECK(t.columnwise_scale_inv.dtype == DType::kFloat8E4M3 ||
+                     t.columnwise_scale_inv.dtype == DType::kFloat8UE5M3,
+                 "FP4 scaling factor output ", name,
                  "_columnwise_scale_inverse has invalid dtype "
-                 "(expected Float8E4M3, got ",
+                 "(expected Float8E4M3 or Float8UE5M3, got ",
                  to_string(t.columnwise_scale_inv.dtype), ")");
     }
   } else {
@@ -361,7 +375,26 @@ static void CheckGroupedScaleInv(const GroupedTensor &t, std::string_view name, 
   } else if (is_mxfp8_scaling(t.scaling_mode)) {
     check_scales(DType::kFloat8E8M0);
   } else if (is_nvfp4_scaling(t.scaling_mode)) {
-    check_scales(DType::kFloat8E4M3);
+    if (t.has_data()) {
+      NVTE_CHECK(t.scale_inv.has_data(), tensor_type, " ", name,
+                 " rowwise scale_inv must be allocated");
+      NVTE_CHECK(
+          t.scale_inv.dtype == DType::kFloat8E4M3 || t.scale_inv.dtype == DType::kFloat8UE5M3,
+          tensor_type, " ", name,
+          " rowwise scale_inv has invalid dtype "
+          "(expected Float8E4M3 or Float8UE5M3, got ",
+          to_string(t.scale_inv.dtype), ")");
+    }
+    if (t.has_columnwise_data()) {
+      NVTE_CHECK(t.columnwise_scale_inv.has_data(), tensor_type, " ", name,
+                 " columnwise scale_inv must be allocated");
+      NVTE_CHECK(t.columnwise_scale_inv.dtype == DType::kFloat8E4M3 ||
+                     t.columnwise_scale_inv.dtype == DType::kFloat8UE5M3,
+                 tensor_type, " ", name,
+                 " columnwise scale_inv has invalid dtype "
+                 "(expected Float8E4M3 or Float8UE5M3, got ",
+                 to_string(t.columnwise_scale_inv.dtype), ")");
+    }
   } else {
     // Non-quantized types should not have scale/scale_inv
     NVTE_CHECK(!t.scale_inv.has_data(), "Scale_inv not supported for non-quantized ", tensor_type,
@@ -898,8 +931,10 @@ void nvte_set_tensor_param_v2(NVTETensor tensor, NVTETensorParam param, const vo
       break;
     case kNVTENVFP4E4M3Max:
       std::memcpy(&t.nvfp4_e4m3_max, buf, attr_size);
-      NVTE_CHECK(t.nvfp4_e4m3_max == 448 || t.nvfp4_e4m3_max == 256,
-                 "Unsupported NVFP4 E4M3 max (got ", t.nvfp4_e4m3_max, ")");
+      // Need to rename this to nvfp4_scale_type_max
+      NVTE_CHECK(t.nvfp4_e4m3_max == 0 || t.nvfp4_e4m3_max == 448 || t.nvfp4_e4m3_max == 256 ||
+                     t.nvfp4_e4m3_max == 114688,
+                 "Unsupported NVFP4 scale type max (got ", t.nvfp4_e4m3_max, ")");
       break;
     default:
       NVTE_ERROR("Unsupported tensor parameter (", static_cast<int>(param), ")");
@@ -984,9 +1019,10 @@ void nvte_get_tensor_param_v2(const NVTETensor tensor, NVTETensorParam param, vo
     case kNVTERowScaledNVFP4:
       *reinterpret_cast<uint8_t *>(buf) = static_cast<uint8_t>(t->row_scaled_nvfp4);
       break;
-    case kNVTENVFP4E4M3Max:
-      std::memcpy(buf, &t->nvfp4_e4m3_max, attr_size);
-      break;
+    case kNVTENVFP4E4M3Max: {
+      int val = t->get_nvfp4_scale_max();
+      std::memcpy(buf, &val, attr_size);
+    } break;
     default:
       NVTE_ERROR("Unsupported tensor parameter (", static_cast<int>(param), ")");
   }
@@ -1104,6 +1140,9 @@ void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
     case kNVTEQuantizationConfigNVFP44Over6ErrUseFastMath:
       bool_to_uint8(config_.nvfp4_4over6_err_use_fast_math, buf);
       break;
+    case kNVTEQuantizationConfigMXFP82DQuantization:
+      bool_to_uint8(config_.mxfp8_2d_quantization, buf);
+      break;
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
   }
@@ -1170,6 +1209,9 @@ void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
     }
     case kNVTEQuantizationConfigNVFP44Over6ErrUseFastMath:
       uint8_to_bool(buf, config_.nvfp4_4over6_err_use_fast_math);
+      break;
+    case kNVTEQuantizationConfigMXFP82DQuantization:
+      uint8_to_bool(buf, config_.mxfp8_2d_quantization);
       break;
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
@@ -1414,4 +1456,25 @@ NVTEShape nvte_get_grouped_tensor_logical_shape(const NVTEGroupedTensor tensor) 
   }
   const auto &t = *transformer_engine::convertNVTEGroupedTensorCheck(tensor);
   return t.logical_shape;
+}
+
+extern "C" __attribute__((visibility("default"))) void nvte_set_cutedsl_backend(int enabled) {
+  // Runtime toggle of the CuTeDSL quantize backend, overriding the
+  // NVTE_ENABLE_CUTEDSL_BACKEND env default.
+  // Used for tests to compare the result of CuTeDSL and the original CUDA implementation.
+#ifdef NVTE_WITH_CUTEDSL
+  transformer_engine::tvm_ffi_bridge::TVMFFICentral::getInstance().set_cutedsl_backend_enabled(
+      enabled != 0);
+#else
+  (void)enabled;
+#endif
+}
+
+extern "C" __attribute__((visibility("default"))) int nvte_is_cutedsl_backend_built() {
+  // Used to check if the CuTeDSL backend is built into the library.
+#ifdef NVTE_WITH_CUTEDSL
+  return 1;
+#else
+  return 0;
+#endif
 }

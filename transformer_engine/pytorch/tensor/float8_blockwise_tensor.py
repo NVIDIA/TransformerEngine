@@ -360,10 +360,6 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
             return _FromFloat8BlockwiseFunc.apply(self, dequant_dtype)
         return _FromFloat8BlockwiseFunc.forward(None, self, dequant_dtype)
 
-    def detach(self) -> Float8BlockwiseQTensor:
-        # pylint: disable=missing-function-docstring
-        return Float8BlockwiseQTensor.make_like(self)
-
     def clone(self) -> Float8BlockwiseQTensor:
         # pylint: disable=missing-function-docstring
         rowwise_data = None

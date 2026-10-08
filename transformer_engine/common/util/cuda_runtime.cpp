@@ -14,6 +14,7 @@
 
 #include "../common.h"
 #include "../util/cuda_driver.h"
+#include "../util/shared_lib_wrapper.h"
 #include "../util/system.h"
 #include "common/util/cuda_runtime.h"
 
@@ -25,6 +26,64 @@ namespace {
 
 // String with build-time CUDA include path
 #include "string_path_cuda_include.h"
+
+std::string runtime_cuda_major_version() {
+  int runtime_version = 0;
+  // Header discovery is best-effort, so do not throw if the runtime cannot
+  // report its version.
+  if (cudaRuntimeGetVersion(&runtime_version) != cudaSuccess || runtime_version <= 0) {
+    return {};
+  }
+
+  return std::to_string(runtime_version / 1000);
+}
+
+std::filesystem::path python_cuda_directory() {
+  using Path = std::filesystem::path;
+
+  // Find the Python package root from the installed Transformer Engine package. Do not
+  // assume that the root is named site-packages or dist-packages since valid installs
+  // may use an arbitrary target directory.
+  static const char library_anchor = 0;
+  Path te_package_directory =
+      transformer_engine::shared_library_directory(static_cast<const void *>(&library_anchor));
+  while (true) {
+    if (te_package_directory.filename() == "transformer_engine") {
+      break;
+    }
+
+    const Path parent = te_package_directory.parent_path();
+    if (parent == te_package_directory) {
+      // Root directory reached
+      return {};
+    }
+
+    te_package_directory = parent;
+  }
+
+  const Path nvidia_directory = te_package_directory.parent_path() / "nvidia";
+  const auto cuda_major_version = runtime_cuda_major_version();
+  if (cuda_major_version.empty()) {
+    return {};
+  }
+
+  std::error_code error;
+  const Path cuda_directory = nvidia_directory / ("cu" + cuda_major_version);
+  if (std::filesystem::is_directory(cuda_directory, error)) {
+    return cuda_directory;
+  }
+
+  // CUDA 12 Python wheels use the older nvidia/cuda_runtime layout.
+  if (cuda_major_version == "12") {
+    error.clear();
+    const Path legacy_cuda_directory = nvidia_directory / "cuda_runtime";
+    if (std::filesystem::is_directory(legacy_cuda_directory, error)) {
+      return legacy_cuda_directory;
+    }
+  }
+
+  return {};
+}
 
 }  // namespace
 
@@ -152,6 +211,7 @@ const std::string &include_directory(bool required) {
     std::vector<std::pair<std::string, Path>> search_paths = {{"NVTE_CUDA_INCLUDE_DIR", ""},
                                                               {"CUDA_HOME", ""},
                                                               {"CUDA_DIR", ""},
+                                                              {"", python_cuda_directory()},
                                                               {"", string_path_cuda_include},
                                                               {"", "/usr/local/cuda"}};
     for (auto &[env, p] : search_paths) {
