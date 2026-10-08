@@ -528,18 +528,17 @@ class _ScaledGLU(BasicOperation):
             )
 
         extra_input = basic_op_extra_inputs[0][0]
-
         # Determine compute dtype
         if torch.is_autocast_enabled():
             dtype = torch.get_autocast_dtype(te_device_type())
-        elif isinstance(input_, torch.Tensor):
-            dtype = input_.dtype
+            extra_input_dtype = dtype
         else:
-            dtype = extra_input.dtype
+            dtype = input_.dtype
+            extra_input_dtype = extra_input.dtype
 
-        # Make sure inputs are in correct dtype
+        # Prepare the activation input in the compute dtype.
         input_ = maybe_dequantize(input_, dtype)
-        scales = maybe_dequantize(extra_input, dtype)
+        scales = maybe_dequantize(extra_input, extra_input_dtype)
         out = self._scaled_glu_forward(input_, scales)
 
         # Save state for backward pass
@@ -548,6 +547,7 @@ class _ScaledGLU(BasicOperation):
             if is_cpu_offload_enabled():
                 mark_activation_offload(input_)
             ctx.input_requires_grad = True
+            ctx.extra_input_dtype = extra_input_dtype
             ctx.extra_input_requires_grad = extra_input.requires_grad
             ctx.dtype = dtype
             ctx.save_for_backward(
@@ -578,7 +578,7 @@ class _ScaledGLU(BasicOperation):
         input_, scales = ctx.saved_tensors
         input_ = maybe_dequantize(input_, ctx.dtype)
         if scales is not None:
-            scales = maybe_dequantize(scales, ctx.dtype)
+            scales = maybe_dequantize(scales, ctx.extra_input_dtype)
         grad_output = maybe_dequantize(grad_output, ctx.dtype)
 
         grad_input, grad_extra_input = self._scaled_glu_backward(

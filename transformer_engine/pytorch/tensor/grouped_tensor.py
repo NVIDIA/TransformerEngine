@@ -12,6 +12,7 @@ from torch.utils._pytree import tree_map
 
 from ..quantized_tensor import QuantizedTensorStorage, Quantizer
 from .storage.grouped_tensor_storage import GroupedTensorStorage
+from ..constants import DType
 from transformer_engine import te_device_type
 
 
@@ -95,7 +96,8 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
         with_gemm_swizzled_scales: bool = False,
         row_scaled_nvfp4: bool = False,
         nvfp4_use_4over6: bool = False,
-        nvfp4_e4m3_max: int = 448,
+        nvfp4_e4m3_max: int = 0,
+        scale_inv_dtype: Optional[DType] = None,
     ):
         if (
             shapes is not None
@@ -171,6 +173,7 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
             row_scaled_nvfp4=row_scaled_nvfp4,
             nvfp4_use_4over6=nvfp4_use_4over6,
             nvfp4_e4m3_max=nvfp4_e4m3_max,
+            scale_inv_dtype=scale_inv_dtype,
         )
         return instance
 
@@ -205,6 +208,7 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
             dst.row_scaled_nvfp4 = src.row_scaled_nvfp4
             dst.nvfp4_use_4over6 = src.nvfp4_use_4over6
             dst.nvfp4_e4m3_max = src.nvfp4_e4m3_max
+            dst.scale_inv_dtype = src._scale_inv_dtype
 
         def make_wrapper_like(src: GroupedTensor, requires_grad: bool) -> GroupedTensor:
             """Create a wrapper of the same type and tensor metadata as src."""
