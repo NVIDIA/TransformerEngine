@@ -410,17 +410,6 @@ def is_frost_attention_supported(params) -> Tuple[int, str]:
     return int(FusedAttnBackend.FROST), ""
 
 
-def _check_layout(name: str, t: torch.Tensor) -> None:
-    """Validate a 4D view whose head dimension is contiguous, which the kernels assume."""
-    if t.dim() != 4:
-        raise ValueError(f"{name} must be 4D [b, h, s, d]; got {tuple(t.shape)}")
-    if t.stride(3) != 1:
-        raise ValueError(
-            f"{name} must have a contiguous head dimension; got shape {tuple(t.shape)} stride"
-            f" {tuple(t.stride())}"
-        )
-
-
 def _check_dtype(name: str, t: torch.Tensor, expected: torch.dtype) -> None:
     """Require a tensor to carry the dtype its graph node was declared with.
 
@@ -558,13 +547,15 @@ def _cached(kind: str, key, device):
 def _validate_qkv(q, k, v, qkv_format):
     """Check the tensors the graph will bind, and return their BHSD descriptions.
 
-    These are not stylistic guards. ``execute`` binds raw pointers, so a tensor whose shape,
-    dtype or layout disagrees with the node it is bound to is reinterpreted rather than rejected.
-    The context-parallel ring calls the backward outside autograd, so neither direction may
-    assume the other ran first.
+    These are not stylistic guards. ``execute`` binds raw pointers, so a tensor whose shape or
+    dtype disagrees with the node it is bound to is reinterpreted rather than rejected. The
+    context-parallel ring calls the backward outside autograd, so neither direction may assume
+    the other ran first.
+
+    Rank and head-dim contiguity are not checked here: cuDNN's frost_sdpa families register
+    _sdpa_validate.validate_graph, which enforces both in graph.validate().
     """
     for name, tensor in (("q", q), ("k", k), ("v", v)):
-        _check_layout(name, tensor)
         _check_dtype(name, tensor, q.dtype)
     _check_kv_match(k, v)
     qd, _ = _bhsd(q, qkv_format)
@@ -775,7 +766,6 @@ def fused_attn_bwd(
     o, d_o = o.contiguous(), d_o.contiguous()
     qd, _, vd = _validate_qkv(q, k, v, qkv_format)
     for name, tensor in (("o", o), ("d_o", d_o)):
-        _check_layout(name, tensor)
         _check_dtype(name, tensor, q.dtype)
     o_shape, o_stride = _o_shape_stride(q.shape, vd[3], q.stride())
     for name, tensor in (("o", o), ("d_o", d_o)):
