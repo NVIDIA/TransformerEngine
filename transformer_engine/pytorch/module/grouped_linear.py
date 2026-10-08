@@ -186,9 +186,7 @@ class GroupedLinearFwdArgs:
     fp8_calibration: bool
     save_original_input: bool
     backward_override: Optional[str]
-    fprop_use_split_accumulator: bool
-    dgrad_use_split_accumulator: bool
-    wgrad_use_split_accumulator: bool
+    fp8_recipe: Optional[Recipe]
     debug: bool
 
     is_first_microbatch: Optional[bool]
@@ -233,8 +231,7 @@ class GroupedLinearBwdArgs:
     activation_dtype: Optional[torch.dtype] = None
     fp8: bool = False
     backward_override: Optional[str] = None
-    dgrad_use_split_accumulator: bool = _2X_ACC_DGRAD
-    wgrad_use_split_accumulator: bool = _2X_ACC_WGRAD
+    fp8_recipe: Optional[Recipe] = None
     save_original_input: bool = False
     debug: bool = False
 
@@ -259,6 +256,38 @@ class GroupedLinearBwdArgs:
         self.biases = list(saved[3 * n : 4 * n])
 
 
+def _grouped_linear_configure_quantizers(args: GroupedLinearFwdArgs, weights) -> None:
+    """Configure operand usage after materializing weights."""
+    if args.input_quantizers[0] is not None:
+        for input_quantizer in args.input_quantizers:
+            input_quantizer.set_usage(
+                rowwise=True,
+                columnwise=(
+                    args.is_grad_enabled
+                    and args.weights_requires_grad
+                    and not args.save_original_input
+                    and args.backward_override is None
+                ),
+            )
+        columnwise_usage = args.is_grad_enabled and args.input_requires_grad
+        if args.backward_override is not None:
+            columnwise_usage = False
+        if not columnwise_usage:
+            columnwise_usage = (
+                is_fp8_activation_recompute_enabled() and not in_fp8_activation_recompute_phase()
+            )
+        if args.weight_quantizers[0] is not None and (
+            not isinstance(weights[0], QuantizedTensorStorage) or args.debug
+        ):
+            for weight_quantizer in args.weight_quantizers:
+                weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
+        elif isinstance(weights[0], QuantizedTensorStorage):
+            args.weight_quantizers = [weight._quantizer for weight in weights]
+    if args.output_quantizers[0] is not None:
+        for output_quantizer in args.output_quantizers:
+            output_quantizer.set_usage(rowwise=True, columnwise=False)
+
+
 def _grouped_linear_forward_impl(
     args: GroupedLinearFwdArgs,
 ) -> Tuple[Any, ...]:
@@ -269,7 +298,6 @@ def _grouped_linear_forward_impl(
     num_gemms = args.num_gemms
     m_splits = list(args.m_splits)
     input_quantizers = args.input_quantizers
-    weight_quantizers = args.weight_quantizers
     output_quantizers = args.output_quantizers
     activation_dtype = args.activation_dtype
     fp8 = args.fp8
@@ -286,38 +314,8 @@ def _grouped_linear_forward_impl(
     if is_dist_weight:
         weights = materialize_weight_for_forward(weights)
 
-    # Configure quantizers
-    if input_quantizers[0] is not None:
-        for input_quantizer in input_quantizers:
-            input_quantizer.set_usage(
-                rowwise=True,
-                columnwise=(
-                    is_grad_enabled
-                    and weight_requires_grad
-                    and not save_original_input
-                    and backward_override is None
-                ),
-            )
-        columnwise_usage = is_grad_enabled and args.input_requires_grad
-        if backward_override is not None:
-            columnwise_usage = False
-        if not columnwise_usage:
-            columnwise_usage = (
-                is_fp8_activation_recompute_enabled() and not in_fp8_activation_recompute_phase()
-            )
-        # No need to set the quantizer states if weight is already quantized
-        # for debug mode we create quantizer every iteration, thus we need to set the quantizer states
-        if weight_quantizers[0] is not None and (
-            not isinstance(weights[0], QuantizedTensorStorage) or debug
-        ):
-            for weight_quantizer in weight_quantizers:
-                weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
-        elif isinstance(weights[0], QuantizedTensorStorage):
-            # If weights are already quantized, no need to set quantizer states
-            weight_quantizers = [weight._quantizer for weight in weights]
-    if output_quantizers[0] is not None:
-        for output_quantizer in output_quantizers:
-            output_quantizer.set_usage(rowwise=True, columnwise=False)
+    _grouped_linear_configure_quantizers(args, weights)
+    weight_quantizers = args.weight_quantizers
 
     # Initialize input tensors
     in_features = weights[0].size(-1)
@@ -375,6 +373,9 @@ def _grouped_linear_forward_impl(
     )
 
     # Perform GEMM
+    fprop_use_split_accumulator = _2X_ACC_FPROP
+    if fp8 and hasattr(args.fp8_recipe, "fp8_gemm_fprop"):
+        fprop_use_split_accumulator = args.fp8_recipe.fp8_gemm_fprop.use_split_accumulator
     general_grouped_gemm(
         weights_fp8,
         inputmats,
@@ -385,7 +386,7 @@ def _grouped_linear_forward_impl(
         m_splits=m_splits,
         bias=biases,
         use_bias=use_bias,
-        use_split_accumulator=args.fprop_use_split_accumulator,
+        use_split_accumulator=fprop_use_split_accumulator,
     )
 
     if args.fp8_calibration:
@@ -439,12 +440,8 @@ def _grouped_linear_setup_ctx(
     """Populate backward arguments from the forward configuration."""
     num_gemms = fwd_args.num_gemms
     weights = fwd_args.weights
-    weight_quantizers = fwd_args.weight_quantizers
-    if isinstance(weights[0], QuantizedTensorStorage) and not fwd_args.debug:
-        weight_quantizers = [weight._quantizer for weight in weights]
-
     bwd_args.input_quantizers = fwd_args.input_quantizers
-    bwd_args.weight_quantizers = weight_quantizers
+    bwd_args.weight_quantizers = fwd_args.weight_quantizers
     bwd_args.grad_input_quantizers = fwd_args.grad_input_quantizers
     bwd_args.grad_weight_quantizers = fwd_args.grad_weight_quantizers
     bwd_args.grad_output_quantizers = fwd_args.grad_output_quantizers
@@ -460,8 +457,7 @@ def _grouped_linear_setup_ctx(
     bwd_args.activation_dtype = fwd_args.activation_dtype
     bwd_args.fp8 = fwd_args.fp8
     bwd_args.backward_override = fwd_args.backward_override
-    bwd_args.dgrad_use_split_accumulator = fwd_args.dgrad_use_split_accumulator
-    bwd_args.wgrad_use_split_accumulator = fwd_args.wgrad_use_split_accumulator
+    bwd_args.fp8_recipe = fwd_args.fp8_recipe
     bwd_args.save_original_input = fwd_args.save_original_input
     bwd_args.debug = fwd_args.debug
 
@@ -567,8 +563,12 @@ def _grouped_linear_backward_impl(
         args.grad_output_quantizers,
         args.activation_dtype,
         with_quantized_output=args.fp8 or args.debug,
-        compute_dbias=(args.fp8 or args.debug) and (args.use_bias or args.debug),
-        disable_bulk_allocation=args.cpu_offloading,
+        compute_dbias=(args.fp8 or args.debug) and args.use_bias,
+        disable_bulk_allocation=(
+            args.cpu_offloading
+            and isinstance(grad_output_reference, HybridQuantizer)
+            and not _split_quantization._uses_identity_quantizer(grad_output_reference)
+        ),
     )
     if grad_biases is None:
         grad_biases = [None] * num_gemms
@@ -586,6 +586,9 @@ def _grouped_linear_backward_impl(
         weights = materialize_weight_for_backward(origin_weights)
 
     if args.requires_dgrad:
+        dgrad_use_split_accumulator = _2X_ACC_DGRAD
+        if (args.fp8 or args.debug) and hasattr(args.fp8_recipe, "fp8_gemm_dgrad"):
+            dgrad_use_split_accumulator = args.fp8_recipe.fp8_gemm_dgrad.use_split_accumulator
         dgrad = _GroupedLinear._validate_or_alloc_output(
             args.dgrad_out,
             sum(m_splits),
@@ -627,7 +630,7 @@ def _grouped_linear_backward_impl(
             layout="NN",
             m_splits=m_splits,
             grad=True,
-            use_split_accumulator=args.dgrad_use_split_accumulator,
+            use_split_accumulator=dgrad_use_split_accumulator,
         )
 
     if args.weights_requires_grad:
@@ -639,6 +642,9 @@ def _grouped_linear_backward_impl(
             raise RuntimeError(
                 "distributed-weight GroupedLinear requires delay_wgrad_compute=False."
             )
+        wgrad_use_split_accumulator = _2X_ACC_WGRAD
+        if args.fp8 and hasattr(args.fp8_recipe, "fp8_gemm_wgrad"):
+            wgrad_use_split_accumulator = args.fp8_recipe.fp8_gemm_wgrad.use_split_accumulator
         if args.fuse_wgrad_accumulation:
             wgrad_list = main_grads
         else:
@@ -688,7 +694,7 @@ def _grouped_linear_backward_impl(
             m_splits=m_splits,
             use_bias=args.use_bias if grad_biases[0] is None else None,
             bias=biases,
-            use_split_accumulator=args.wgrad_use_split_accumulator,
+            use_split_accumulator=wgrad_use_split_accumulator,
             accumulate=(
                 accumulate_wgrad_into_param_main_grad
                 if not is_dist_weight and not args.origin_weights_overwrite_main_grad
@@ -758,8 +764,7 @@ class GroupedLinearFusedBwdArgs:
     single_grouped_weight: bool = False
     single_grouped_bias: bool = False
     is_first_microbatch: Optional[bool] = None
-    dgrad_use_split_accumulator: bool = _2X_ACC_DGRAD
-    wgrad_use_split_accumulator: bool = _2X_ACC_WGRAD
+    fp8_recipe: Optional[Recipe] = None
     fuse_wgrad_accumulation: bool = False
     origin_weight_refs: Optional[Any] = None
     origin_weights_overwrite_main_grad: bool = False
@@ -788,7 +793,6 @@ def _grouped_linear_fused_forward(args: GroupedLinearFwdArgs) -> Tuple[Any, ...]
     is_first_microbatch = args.is_first_microbatch
     fp8 = args.fp8
     input_quantizers = args.input_quantizers
-    weight_quantizers = args.weight_quantizers
     activation_dtype = args.activation_dtype
     is_grad_enabled = args.is_grad_enabled
     weight_workspaces = args.weight_workspaces
@@ -801,6 +805,8 @@ def _grouped_linear_fused_forward(args: GroupedLinearFwdArgs) -> Tuple[Any, ...]
     is_dist_weight = is_distributed_weight(weights[0])
     if is_dist_weight:
         weights = materialize_weight_for_forward(weights)
+    _grouped_linear_configure_quantizers(args, weights)
+    weight_quantizers = args.weight_quantizers
     biases = args.biases
     out = args.out
     m_splits = args.m_splits_tensor
@@ -896,13 +902,16 @@ def _grouped_linear_fused_forward(args: GroupedLinearFwdArgs) -> Tuple[Any, ...]
             dtype=activation_dtype,
         )
 
+    fprop_use_split_accumulator = _2X_ACC_FPROP
+    if fp8 and hasattr(args.fp8_recipe, "fp8_gemm_fprop"):
+        fprop_use_split_accumulator = args.fp8_recipe.fp8_gemm_fprop.use_split_accumulator
     general_grouped_gemm_for_grouped_tensor(
         weights_for_gemm,
         grouped_x,
         grouped_out,
         layout="TN",
         bias=grouped_bias,
-        use_split_accumulator=args.fprop_use_split_accumulator,
+        use_split_accumulator=fprop_use_split_accumulator,
     )
 
     tensors_to_save = None
@@ -960,8 +969,7 @@ def _grouped_linear_fused_setup(
     bwd_args.single_grouped_weight = fwd_args.single_grouped_weight
     bwd_args.single_grouped_bias = fwd_args.single_grouped_bias
     bwd_args.is_first_microbatch = fwd_args.is_first_microbatch
-    bwd_args.dgrad_use_split_accumulator = fwd_args.dgrad_use_split_accumulator
-    bwd_args.wgrad_use_split_accumulator = fwd_args.wgrad_use_split_accumulator
+    bwd_args.fp8_recipe = fwd_args.fp8_recipe
     bwd_args.fuse_wgrad_accumulation = fwd_args.fuse_wgrad_accumulation
     bwd_args.wgrad_store = fwd_args.wgrad_store
     bwd_args.dgrad_out = fwd_args.dgrad_out
@@ -1111,6 +1119,9 @@ def _grouped_linear_fused_backward(
 
     dgrad = None
     if args.requires_dgrad:
+        dgrad_use_split_accumulator = _2X_ACC_DGRAD
+        if args.fp8 and hasattr(args.fp8_recipe, "fp8_gemm_dgrad"):
+            dgrad_use_split_accumulator = args.fp8_recipe.fp8_gemm_dgrad.use_split_accumulator
         for weight in weight_tensors:
             if isinstance(weight, QuantizedTensorStorage):
                 weight.update_usage(columnwise_usage=True)
@@ -1134,7 +1145,7 @@ def _grouped_linear_fused_backward(
             grouped_dy,
             grouped_dgrad,
             layout="NN",
-            use_split_accumulator=args.dgrad_use_split_accumulator,
+            use_split_accumulator=dgrad_use_split_accumulator,
         )
 
     if is_dist_weight:
@@ -1155,6 +1166,9 @@ def _grouped_linear_fused_backward(
             raise RuntimeError(
                 "distributed-weight GroupedLinear requires delay_wgrad_compute=False."
             )
+        wgrad_use_split_accumulator = _2X_ACC_WGRAD
+        if args.fp8 and hasattr(args.fp8_recipe, "fp8_gemm_wgrad"):
+            wgrad_use_split_accumulator = args.fp8_recipe.fp8_gemm_wgrad.use_split_accumulator
         if args.fuse_wgrad_accumulation:
             if args.single_grouped_weight:
                 main_grad = main_grads[0]
@@ -1198,7 +1212,6 @@ def _grouped_linear_fused_backward(
             if not getattr(args, "origin_weights_overwrite_main_grad", False)
             else False
         )
-        wgrad_use_split_accumulator = args.wgrad_use_split_accumulator
 
         def grouped_gemm_wgrad(inputmats, grad_output_mats, grad_weights):
             general_grouped_gemm_for_grouped_tensor(
@@ -2330,18 +2343,9 @@ class GroupedLinear(TransformerEngineBaseModule):
                 )
 
             weight_requires_grad = weight_tensors[0].requires_grad
-            fprop_use_split_accumulator = _2X_ACC_FPROP
-            dgrad_use_split_accumulator = _2X_ACC_DGRAD
-            wgrad_use_split_accumulator = _2X_ACC_WGRAD
             if self.fp8:
                 _recipe = FP8GlobalStateManager.get_fp8_recipe()
                 backward_override = _recipe.backward_override
-                if hasattr(_recipe, "fp8_gemm_fprop"):
-                    fprop_use_split_accumulator = _recipe.fp8_gemm_fprop.use_split_accumulator
-                if hasattr(_recipe, "fp8_gemm_dgrad"):
-                    dgrad_use_split_accumulator = _recipe.fp8_gemm_dgrad.use_split_accumulator
-                if hasattr(_recipe, "fp8_gemm_wgrad"):
-                    wgrad_use_split_accumulator = _recipe.fp8_gemm_wgrad.use_split_accumulator
             else:
                 _recipe = None
                 backward_override = None
@@ -2450,9 +2454,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                 fp8_calibration=self.fp8_calibration,
                 save_original_input=save_original_input,
                 backward_override=backward_override,
-                fprop_use_split_accumulator=fprop_use_split_accumulator,
-                dgrad_use_split_accumulator=dgrad_use_split_accumulator,
-                wgrad_use_split_accumulator=wgrad_use_split_accumulator,
+                fp8_recipe=_recipe,
                 debug=debug,
                 # weight-workspace caching
                 is_first_microbatch=is_first_microbatch,
