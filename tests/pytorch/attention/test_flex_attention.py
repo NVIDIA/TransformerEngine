@@ -36,13 +36,7 @@ def _flex_availability():
 
 
 _SKIP = _flex_availability()
-# Mirrors NVTE_GDN_TEST_REQUIRED in test_gdn_attention.py. Most tests here run on CPU with the
-# builder monkeypatched; the two that reach cuDNN -- the numerical one and the FROST-switch one --
-# skip silently wherever the frontend package is absent, so a lane meant to cover them can be
-# green having never run them. That matters more than usual: the switch test is what verifies the
-# engine bar in cudnn_pygraph, which cannot be checked from the plan list.
-#
-# Deliberately not set in qa/L0_pytorch_unittest, which cannot be assumed to carry the package.
+# Mirrors NVTE_GDN_TEST_REQUIRED: the tests that reach cuDNN skip silently without the frontend.
 if os.getenv("NVTE_FLEX_TEST_REQUIRED", "0") == "1" and _SKIP is not None:
     raise RuntimeError("NVTE_FLEX_TEST_REQUIRED=1, but flex attention is unavailable: %s" % _SKIP)
 
