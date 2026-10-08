@@ -13,7 +13,7 @@ from typing import Any, Optional
 
 import torch
 
-from ...cpp_extensions import general_gemm, get_cublas_workspace
+from ...cpp_extensions import general_gemm
 from ...dynamo import TensorOrQuantized, TensorSpec
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...distributed import (
@@ -411,23 +411,6 @@ class BasicLinear(BasicOperation):
         if not isinstance(weight, torch.nn.Parameter):
             weight = torch.nn.Parameter(weight)
         self.weight = weight
-        self._prealloc_cublas_workspace()
-
-    def _apply(self, *args, **kwargs):
-        out = super()._apply(*args, **kwargs)
-        self._prealloc_cublas_workspace()
-        return out
-
-    def _prealloc_cublas_workspace(self) -> None:
-        """Keep the cached GEMM workspace outside CUDA graph private pools."""
-        # pylint: disable=import-outside-toplevel
-        from torch._guards import detect_fake_mode
-        from torch._subclasses.fake_tensor import is_fake
-
-        weight = self.weight
-        if weight.device.type != "cuda" or is_fake(weight) or detect_fake_mode():
-            return
-        get_cublas_workspace(weight.device.index, False, False)
 
     def pre_first_fuser_forward(self) -> None:
         super().pre_first_fuser_forward()

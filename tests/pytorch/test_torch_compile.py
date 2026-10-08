@@ -2959,16 +2959,17 @@ def test_te_ops_linear_saved_fp8_dtype_with_autocast(input_dtype, weight_dtype):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_te_ops_linear_workspace_fake_mode(monkeypatch):
     def unexpected_allocation(*args, **kwargs):
-        pytest.fail("Fake initialization must not populate the real workspace cache")
+        pytest.fail("Fake initialization must not allocate a real cuBLAS workspace")
 
     monkeypatch.setattr(
-        "transformer_engine.pytorch.ops.basic.basic_linear.get_cublas_workspace",
+        "transformer_engine.pytorch.cpp_extensions.gemm.get_cublas_workspace",
         unexpected_allocation,
     )
     with FakeTensorMode():
         te.ops.BasicLinear(32, 64, device="cuda", dtype=torch.bfloat16)
 
 
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("training", [False, True])
 @pytest.mark.parametrize("initial_device", ["cuda", "cpu", "meta"])
@@ -2978,23 +2979,33 @@ def test_te_ops_linear_bias_cold_cudagraphs(training, initial_device):
         """
         import contextlib
         import sys
+        import weakref
         import torch
         import transformer_engine.pytorch as te
-        from transformer_engine.pytorch.cpp_extensions.gemm import get_cublas_workspace
+        from transformer_engine.pytorch.cpp_extensions import gemm
         from torch._dynamo.utils import counters
 
         training, initial_device = sys.argv[1:]
         training = training == "True"
-        assert get_cublas_workspace.cache_info().currsize == 0
+        workspaces, captured_workspaces = [], []
+        allocate_workspace = gemm.get_cublas_workspace
+
+        def allocate(*args, **kwargs):
+            workspace = allocate_workspace(*args, **kwargs)
+            ref = weakref.ref(workspace)
+            workspaces.append(ref)
+            if torch.cuda.is_current_stream_capturing():
+                captured_workspaces.append(ref)
+            return workspace
+
+        gemm.get_cublas_workspace = allocate
         linear = te.ops.BasicLinear(32, 64, device=initial_device, dtype=torch.bfloat16)
         if initial_device == "cpu":
-            assert get_cublas_workspace.cache_info().currsize == 0
             linear.cuda()
         elif initial_device == "meta":
-            assert get_cublas_workspace.cache_info().currsize == 0
             linear.to_empty(device="cuda")
             linear.reset_parameters()
-        assert get_cublas_workspace.cache_info().currsize > 0
+        assert not workspaces, "Module initialization must not allocate GEMM scratch"
         model = te.ops.Sequential(linear, te.ops.Bias(64, dtype=torch.bfloat16))
         x = torch.randn(32, 32, device="cuda", dtype=torch.bfloat16, requires_grad=training)
         targets = (x, *model.parameters())
@@ -3020,6 +3031,8 @@ def test_te_ops_linear_bias_cold_cudagraphs(training, initial_device):
                     del grads, expected_grads
                 del actual, expected
         torch.cuda.synchronize()
+        assert captured_workspaces, "Expected workspace allocations during CUDA graph capture"
+        assert all(ref() is None for ref in workspaces), "Invocations must release workspace tensors"
         assert not counters["inductor"]["cudagraph_skips"], counters["inductor"]
         assert counters["inductor"]["cudagraph_recorded_non_static_inputs"] > 0, dict(
             counters["inductor"]
