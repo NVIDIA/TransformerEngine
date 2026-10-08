@@ -41,6 +41,7 @@ __global__ void fused_moe_aux_loss_forward_kernel(const DataType* probs,
     CompType col_sum = CompType(0);
 
     // Accumulate probs over the rows assigned to this CTA (grid-stride).
+#pragma unroll 4
     for (int64_t row = blockIdx.x; row < num_rows; row += gridDim.x) {
       col_sum += CompType(probs[row * num_cols + col]);
     }
@@ -146,6 +147,7 @@ __global__ void fused_moe_aux_loss_forward_kernel_graph_safe(
   CompType thread_sum = CompType(0);
   for (int64_t col = threadIdx.x; col < num_cols; col += blockDim.x) {
     CompType col_sum = CompType(0);
+#pragma unroll 4
     for (int64_t row = blockIdx.x; row < num_rows; row += gridDim.x) {
       col_sum += CompType(probs[row * num_cols + col]);
     }
