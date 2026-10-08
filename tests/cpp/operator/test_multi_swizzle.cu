@@ -387,6 +387,8 @@ std::vector<std::tuple<int, size_t, size_t, bool>> multi_tensor_test_cases = {
     {80, 128, 128, false},
     {20, 16384, 128, true},
     {20, 128, 8192, false},
+    // A full 128-row column-wise chunk and a clipped last one (132 scale rows)
+    {20, 4224, 2048, false},
 };
 
 }  // namespace
