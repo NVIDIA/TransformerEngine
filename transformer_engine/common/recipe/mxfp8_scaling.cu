@@ -23,7 +23,7 @@ constexpr int kColsPerTile = 128;  // Columns each block processes
 
 constexpr int kThreadsPerBlock = 128;
 
-template <typename IType>
+template <typename IType, bool kWithColumnwise>
 __global__ void __launch_bounds__(kThreadsPerBlock)
     mxfp8_scaling_compute_partial_amax_kernel(const IType *input, IType *amax_rowwise,
                                               IType *amax_colwise, int amax_rowwise_stride,
@@ -47,7 +47,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
     if (r < rows && c < cols && idx >= start_offset && idx < end_offset) {
       float abs_input = fabs(static_cast<float>(input_minus_offset[idx]));
       row_amax = fmaxf(row_amax, abs_input);
-      if (amax_colwise != nullptr) col_amax = fmaxf(col_amax, abs_input);
+      if constexpr (kWithColumnwise) col_amax = fmaxf(col_amax, abs_input);
     }
 
 #pragma unroll
@@ -63,7 +63,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
     r++;
   }
 
-  if (amax_colwise != nullptr) {
+  if constexpr (kWithColumnwise) {
     amax_colwise[blockIdx.y * amax_colwise_stride + c] = static_cast<IType>(col_amax);
   }
 
@@ -76,7 +76,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   amax_rowwise[r * amax_rowwise_stride + c] = static_cast<IType>(smem_amax_rowwise[r_][c_]);
 }
 
-template <typename IType, typename OType>
+template <typename IType, typename OType, bool kWithColumnwise>
 __global__ void __launch_bounds__(kThreadsPerBlock)
     mxfp8_scaling_partial_cast_kernel(const IType *input, OType *output_rowwise,
                                       OType *output_colwise, const e8m0_t *scale_inv_rowwise,
@@ -97,7 +97,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   }
 
   // Load scales_colwise
-  if (output_colwise != nullptr) {
+  if constexpr (kWithColumnwise) {
     int c_ = threadIdx.x;
     int r = blockIdx.y * kRowsPerTile / 32;
     int c = blockIdx.x * kColsPerTile + c_;
@@ -110,8 +110,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   size_t end_offset = start_offset + len;
   const IType *input_minus_offset = input - start_offset;
   OType *output_rowwise_minus_offset = output_rowwise - start_offset;
-  OType *output_colwise_minus_offset =
-      output_colwise != nullptr ? output_colwise - start_offset : nullptr;
+  OType *output_colwise_minus_offset = kWithColumnwise ? output_colwise - start_offset : nullptr;
   int warp_idx = threadIdx.x / 32;
   // int lane_idx = threadIdx.x % 32;
   int c = blockIdx.x * kColsPerTile + threadIdx.x;
@@ -125,7 +124,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
       float inp = static_cast<float>(input_minus_offset[idx]);
       OType out_rowwise = static_cast<OType>(inp * smem_scales_rowwise[i][warp_idx]);
       output_rowwise_minus_offset[idx] = out_rowwise;
-      if (output_colwise != nullptr) {
+      if constexpr (kWithColumnwise) {
         OType out_colwise = static_cast<OType>(inp * smem_scales_colwise[threadIdx.x]);
         output_colwise_minus_offset[idx] = out_colwise;
       }
@@ -154,10 +153,7 @@ void mxfp8_scaling_compute_partial_amax(const Tensor input, Tensor amax_rowwise,
   NVTE_CHECK(amax_rowwise.data.shape[1] >= cols / 32, "Invalid cols");
   NVTE_CHECK(amax_rowwise.dtype() == input.dtype(), "Wrong dtype of amax_rowwise");
 
-  // Empty views can have a non-null data pointer: use shape to detect omission.
-  const bool with_columnwise =
-      !(amax_colwise.data.shape.size() == 2 && amax_colwise.data.shape[0] == 0 &&
-        amax_colwise.data.shape[1] == 0);
+  const bool with_columnwise = amax_colwise.has_data();
   if (with_columnwise) {
     NVTE_CHECK(amax_colwise.data.shape.size() == 2, "amax_colwise must be a 2D tensor");
     NVTE_CHECK(amax_colwise.data.shape[0] % colwise_row_padding == 0,
@@ -175,12 +171,15 @@ void mxfp8_scaling_compute_partial_amax(const Tensor input, Tensor amax_rowwise,
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
       input.dtype(), IType,
-      mxfp8_scaling_compute_partial_amax_kernel<IType><<<grid, kColsPerTile, 0, stream>>>(
-          reinterpret_cast<const IType *>(input.data.dptr),
-          reinterpret_cast<IType *>(amax_rowwise.data.dptr),
-          with_columnwise ? reinterpret_cast<IType *>(amax_colwise.data.dptr) : nullptr,
-          amax_rowwise.data.shape[1], with_columnwise ? amax_colwise.data.shape[1] : 0, rows, cols,
-          start_offset, input.data.shape[0]);)
+      TRANSFORMER_ENGINE_SWITCH_CONDITION(
+          with_columnwise, kWithColumnwise,
+          mxfp8_scaling_compute_partial_amax_kernel<IType, kWithColumnwise>
+          <<<grid, kColsPerTile, 0, stream>>>(
+              reinterpret_cast<const IType *>(input.data.dptr),
+              reinterpret_cast<IType *>(amax_rowwise.data.dptr),
+              with_columnwise ? reinterpret_cast<IType *>(amax_colwise.data.dptr) : nullptr,
+              amax_rowwise.data.shape[1], with_columnwise ? amax_colwise.data.shape[1] : 0, rows,
+              cols, start_offset, input.data.shape[0]);))
 }
 
 void mxfp8_scaling_partial_cast(const Tensor input, Tensor output_rowwise, Tensor output_colwise,
@@ -199,11 +198,8 @@ void mxfp8_scaling_partial_cast(const Tensor input, Tensor output_rowwise, Tenso
 
   NVTE_CHECK(output_rowwise.dtype() == DType::kFloat8E4M3 || output_rowwise.dtype() == DType::kByte,
              "output_rowwise should be e4m3 or uint8");
-  const bool with_columnwise =
-      !(scale_inv_colwise.data.shape.size() == 2 && scale_inv_colwise.data.shape[0] == 0 &&
-        scale_inv_colwise.data.shape[1] == 0);
-  NVTE_CHECK(with_columnwise ||
-                 (output_colwise.data.shape.size() == 1 && output_colwise.data.shape[0] == 0),
+  const bool with_columnwise = scale_inv_colwise.has_data();
+  NVTE_CHECK(with_columnwise || !output_colwise.has_data(),
              "Omitted columnwise scales require an empty columnwise output");
   if (with_columnwise) {
     NVTE_CHECK(output_colwise.data.shape.size() == 1, "output_colwise must be a 1D tensor");
@@ -242,14 +238,19 @@ void mxfp8_scaling_partial_cast(const Tensor input, Tensor output_rowwise, Tenso
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
       input.dtype(), IType,
-      mxfp8_scaling_partial_cast_kernel<IType, fp8e4m3><<<grid, kColsPerTile, 0, stream>>>(
-          reinterpret_cast<const IType *>(input.data.dptr),
-          reinterpret_cast<fp8e4m3 *>(output_rowwise.data.dptr),
-          with_columnwise ? reinterpret_cast<fp8e4m3 *>(output_colwise.data.dptr) : nullptr,
-          reinterpret_cast<const e8m0_t *>(scale_inv_rowwise.data.dptr),
-          with_columnwise ? reinterpret_cast<const e8m0_t *>(scale_inv_colwise.data.dptr) : nullptr,
-          scale_inv_rowwise.data.shape[1], with_columnwise ? scale_inv_colwise.data.shape[1] : 0,
-          rows, cols, start_offset, input.data.shape[0]);)
+      TRANSFORMER_ENGINE_SWITCH_CONDITION(
+          with_columnwise, kWithColumnwise,
+          mxfp8_scaling_partial_cast_kernel<IType, fp8e4m3, kWithColumnwise>
+          <<<grid, kColsPerTile, 0, stream>>>(
+              reinterpret_cast<const IType *>(input.data.dptr),
+              reinterpret_cast<fp8e4m3 *>(output_rowwise.data.dptr),
+              with_columnwise ? reinterpret_cast<fp8e4m3 *>(output_colwise.data.dptr) : nullptr,
+              reinterpret_cast<const e8m0_t *>(scale_inv_rowwise.data.dptr),
+              with_columnwise ? reinterpret_cast<const e8m0_t *>(scale_inv_colwise.data.dptr)
+                              : nullptr,
+              scale_inv_rowwise.data.shape[1],
+              with_columnwise ? scale_inv_colwise.data.shape[1] : 0, rows, cols, start_offset,
+              input.data.shape[0]);))
 }
 
 }  // namespace mxfp8_scaling_recipe
