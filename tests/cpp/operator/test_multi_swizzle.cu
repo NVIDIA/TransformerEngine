@@ -381,6 +381,12 @@ std::vector<std::tuple<int, size_t, size_t, bool>> multi_tensor_test_cases = {
     {2, 128, 4352, true},
     // Colwise num_tiles_k = 512 / 32 / 4 = 4 selects vec_load_size = 4 (int4 kernel)
     {2, 512, 4096, false},
+    // MXFP8 swizzle: more tensors than one launch takes, several row-wise tiles per CTA,
+    // and 128-row column-wise chunks
+    {80, 128, 128, true},
+    {80, 128, 128, false},
+    {20, 16384, 128, true},
+    {20, 128, 8192, false},
 };
 
 }  // namespace

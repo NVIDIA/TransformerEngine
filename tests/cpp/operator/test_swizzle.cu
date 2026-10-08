@@ -1004,6 +1004,7 @@ std::vector<std::pair<int, int>> num_tiles = {
   {8, 1},     // narrow_m with 8 M-tiles
   {31, 1},    // narrow_m at boundary (31 < TB_DIM=32)
   {1, 31},    // narrow_k at boundary (31 < TB_DIM=32)
+  {1600, 1},  // MXFP8: more row-wise tiles than one CTA per tile allows
 };
 
 // Raw {M, K} data shapes for unswizzle tests. Includes aligned cases (scale dims
