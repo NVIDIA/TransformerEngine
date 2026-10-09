@@ -130,3 +130,22 @@ target_link_libraries(test_ep PUBLIC ${EP_TEST_COMMON_LIBS})
 # Do NOT use gtest_discover_tests - these binaries require multi-process
 # launch via run_test_ep.sh, not direct single-process execution.
 message(STATUS "EP distributed tests enabled (NCCL EP loaded from libnccl_ep.so at runtime)")
+
+# -- CuTeDSL -------------------------------------------------------------------
+# Must match how libtransformer_engine.so was built, hence the env var default.
+option(NVTE_WITH_CUTEDSL
+       "Link the tests against libpython, required when libtransformer_engine.so was built with NVTE_WITH_CUTEDSL=ON"
+       "$ENV{NVTE_WITH_CUTEDSL}")
+
+if(NVTE_WITH_CUTEDSL)
+  # Executables that link libtransformer_engine.so must also link to the Python::Python to provide
+  # the definitions of these CPython symbols at runtime via dynamic linking.
+  # Find the interpreter too so older CMake versions use its version to locate libpython.
+  find_package(Python COMPONENTS Interpreter Development.Embed REQUIRED)
+  foreach(test_target test_comm_gemm test_ep)
+    target_link_libraries(${test_target} PRIVATE
+                          "-Wl,--no-as-needed"
+                          Python::Python
+                          "-Wl,--as-needed")
+  endforeach()
+endif()
