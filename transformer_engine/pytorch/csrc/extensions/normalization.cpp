@@ -389,6 +389,8 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
       // FP8 has no special logic to optimize for GEMM, MXFP8 cuDNN
       // kernel does not support GEMM swizzled scales
       quantizer_cpp->optimize_for_gemm = false;
+    if (impl == Impl::FUSED_NORM_QUANT_UNSWIZZLED) {
+        quantizer_cpp->optimize_for_gemm = false;
     }
     std::tie(out_nvte, out) = quantizer_cpp->create_tensor(shape, out_dtype);
   } else {
