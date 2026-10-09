@@ -11,7 +11,9 @@
  *  Per layer: call nvte_ep_handle_mem_size(layer_cfg) for the buffer size;
  *  allocate handle_mem as a kByte NVTETensor. Per step: nvte_ep_prepare seeds
  *  routing, then nvte_ep_dispatch / nvte_ep_combine / _bwd consume it.
- *  Cache cap: NVTE_EP_HANDLE_CACHE_SIZE (default 4096; -1 disables eviction).
+ *  Max live handles: NVTE_EP_HANDLE_CACHE_SIZE (default 4096; -1 = unlimited; 0 disables
+ *  the cache, so handle_mem may be relocated between calls). The *_v2 ops take the layer
+ *  config explicitly, bind from handle_mem, and are required when the cache is disabled.
  */
 
 #ifndef TRANSFORMER_ENGINE_EP_H_
@@ -67,9 +69,8 @@ typedef struct {
   int drop_on_overflow;
 } NVTEEpGroupConfig;
 
-/*! \brief Per-layer configuration consumed by nvte_ep_handle_mem_size and
- *         nvte_ep_prepare. Reserved for future per-call options (fp8 scale,
- *         overflow policy, ...).
+/*! \brief Per-layer configuration consumed by nvte_ep_handle_mem_size,
+ *         nvte_ep_prepare and the *_v2 per-step ops.
  */
 typedef struct {
   /*! Struct size in bytes, or 0 for the base layout. Set to
@@ -81,6 +82,9 @@ typedef struct {
    *  When > 1, each expert's slab in recv_tokens is zero-padded up to a
    *  multiple of this for downstream per-expert GEMM alignment. */
   size_t dispatch_output_per_expert_alignment;
+  /*! topk_idx dtype used at prepare (kNVTEInt32 or kNVTEInt64). Read only by the
+   *  *_v2 ops. */
+  NVTEDType topk_idx_dtype;
 } NVTEEpLayerConfig;
 
 /* Zero-init a config with struct_size set to the current layout:
@@ -116,7 +120,7 @@ void nvte_ep_shutdown(void);
  *
  *  handle_mem is a per-layer kByte routing-state buffer; allocate once and
  *  thread the same pointer through every prepare/dispatch/combine/_bwd call
- *  for that layer (the backend keys its cache on the pointer). Host-only;
+ *  for that layer (the handle cache, when enabled, keys on the pointer). Host-only;
  *  returns the maximum required size across initialized local devices. Size
  *  is stable while the initialized groups and layer config remain unchanged.
  *
@@ -178,6 +182,19 @@ void nvte_ep_dispatch(NVTETensor handle_mem, NVTETensor topk_idx, NVTETensor tok
                       NVTECommWindow recv_tokens_win, NVTETensor recv_topk_weights,
                       NVTECommWindow recv_topk_weights_win, cudaStream_t stream);
 
+/*! \brief nvte_ep_dispatch with an explicit layer configuration.
+ *
+ *  \param[in] layer_cfg  Required; must match the config used at nvte_ep_prepare.
+ *
+ *  Other parameters are as in nvte_ep_dispatch.
+ */
+void nvte_ep_dispatch_v2(NVTETensor handle_mem, NVTETensor topk_idx, NVTETensor tokens,
+                         NVTECommWindow tokens_win, NVTETensor topk_weights,
+                         NVTECommWindow topk_weights_win, NVTETensor recv_tokens,
+                         NVTECommWindow recv_tokens_win, NVTETensor recv_topk_weights,
+                         NVTECommWindow recv_topk_weights_win, const NVTEEpLayerConfig* layer_cfg,
+                         cudaStream_t stream);
+
 /*! \brief Fused prepare + dispatch.
  *
  *  Seeds handle_mem with this step's routing (as nvte_ep_prepare) and then
@@ -227,6 +244,10 @@ void nvte_ep_prepare_and_dispatch(NVTETensor handle_mem, NVTETensor topk_idx, NV
 void nvte_ep_combine(NVTETensor handle_mem, NVTETensor expert_out, NVTECommWindow expert_out_win,
                      NVTETensor result, cudaStream_t stream);
 
+/*! \brief nvte_ep_combine with an explicit layer configuration (see nvte_ep_dispatch_v2). */
+void nvte_ep_combine_v2(NVTETensor handle_mem, NVTETensor expert_out, NVTECommWindow expert_out_win,
+                        NVTETensor result, const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream);
+
 /*! \brief Backward of dispatch: route per-recv-slot grads back to source.
  *
  *  Sums the top_k recv-slot grads into grad_tokens[t]; scatters per-slot
@@ -247,6 +268,12 @@ void nvte_ep_dispatch_bwd(NVTETensor handle_mem, NVTETensor grad, NVTECommWindow
                           NVTETensor grad_tokens, NVTETensor grad_topk_weights,
                           cudaStream_t stream);
 
+/*! \brief nvte_ep_dispatch_bwd with an explicit layer configuration (see nvte_ep_dispatch_v2). */
+void nvte_ep_dispatch_bwd_v2(NVTETensor handle_mem, NVTETensor grad, NVTECommWindow grad_win,
+                             NVTETensor g_recv_topk_weights, NVTECommWindow g_recv_topk_weights_win,
+                             NVTETensor grad_tokens, NVTETensor grad_topk_weights,
+                             const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream);
+
 /*! \brief Backward of combine: replicate each source-token grad to its recv
  *         slots from the forward.
  *
@@ -263,6 +290,11 @@ void nvte_ep_dispatch_bwd(NVTETensor handle_mem, NVTETensor grad, NVTECommWindow
 void nvte_ep_combine_bwd(NVTETensor handle_mem, NVTETensor grad, NVTECommWindow grad_win,
                          NVTETensor grad_expert_out, NVTECommWindow grad_expert_out_win,
                          cudaStream_t stream);
+
+/*! \brief nvte_ep_combine_bwd with an explicit layer configuration (see nvte_ep_dispatch_v2). */
+void nvte_ep_combine_bwd_v2(NVTETensor handle_mem, NVTETensor grad, NVTECommWindow grad_win,
+                            NVTETensor grad_expert_out, NVTECommWindow grad_expert_out_win,
+                            const NVTEEpLayerConfig* layer_cfg, cudaStream_t stream);
 
 #ifdef __cplusplus
 }

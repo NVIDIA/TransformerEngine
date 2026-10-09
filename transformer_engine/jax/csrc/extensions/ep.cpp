@@ -13,6 +13,7 @@
 #include <array>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -48,6 +49,8 @@ struct EpBootstrapParams {
 };
 
 static NVTEEpGroupConfig MakeEpGroupConfig(const EpBootstrapParams& p) {
+  // XLA may relocate handle_mem between calls (e.g. under lax.scan), so disable the handle cache.
+  setenv("NVTE_EP_HANDLE_CACHE_SIZE", "0", /*overwrite=*/1);
   return NVTEEpGroupConfig{.struct_size = sizeof(NVTEEpGroupConfig),
                            .ep_size = p.ep_size,
                            .num_experts = p.num_experts,
@@ -175,13 +178,12 @@ std::shared_ptr<EpResources> AcquireEpResources() {
 
 }  // namespace
 
-// top_k and dispatch_output_per_expert_alignment are baked as static FFI
-// attributes; prepare passes them to the C API as NVTEEpLayerConfig, and the
-// per-step ops carry top_k only to validate the topk_idx last dim.
-
+// top_k, dispatch_output_per_expert_alignment, and topk_idx_dtype are baked as static
+// FFI attributes; every op passes them to the *_v2 C API as NVTEEpLayerConfig.
 struct EpConfig {
   int64_t top_k;
   int64_t dispatch_output_per_expert_alignment;
+  int64_t topk_idx_dtype;
 };
 
 // ── Bootstrap helpers ─────────────────────────────────────────────────────────
@@ -330,7 +332,8 @@ Error_Type EpPrepareFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_T
   NVTEEpLayerConfig layer_cfg{.struct_size = sizeof(NVTEEpLayerConfig),
                               .top_k = static_cast<int>(config.top_k),
                               .dispatch_output_per_expert_alignment =
-                                  static_cast<size_t>(config.dispatch_output_per_expert_alignment)};
+                                  static_cast<size_t>(config.dispatch_output_per_expert_alignment),
+                              .topk_idx_dtype = static_cast<NVTEDType>(config.topk_idx_dtype)};
   nvte_ep_prepare(handle_mem_.data(), topk_idx_.data(), recv_tokens_per_expert_.data(),
                   total_recv_tokens_.data(), &layer_cfg, stream);
   return ffi_with_cuda_error_check();
@@ -405,9 +408,14 @@ Error_Type EpDispatchFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_
       TensorWrapper(recv_topk_weights->untyped_data(), recv_w_shape, DType::kFloat32);
 
   NVTECommWindow no_win{nullptr, 0};
-  nvte_ep_dispatch(handle_mem_.data(), topk_idx_.data(), tokens_.data(), no_win,
-                   topk_weights_.data(), no_win, recv_tokens_.data(), no_win,
-                   recv_topk_weights_.data(), no_win, stream);
+  NVTEEpLayerConfig layer_cfg{.struct_size = sizeof(NVTEEpLayerConfig),
+                              .top_k = static_cast<int>(config.top_k),
+                              .dispatch_output_per_expert_alignment =
+                                  static_cast<size_t>(config.dispatch_output_per_expert_alignment),
+                              .topk_idx_dtype = static_cast<NVTEDType>(config.topk_idx_dtype)};
+  nvte_ep_dispatch_v2(handle_mem_.data(), topk_idx_.data(), tokens_.data(), no_win,
+                      topk_weights_.data(), no_win, recv_tokens_.data(), no_win,
+                      recv_topk_weights_.data(), no_win, &layer_cfg, stream);
 
   return ffi_with_cuda_error_check();
 }
@@ -451,7 +459,13 @@ Error_Type EpCombineFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_T
   auto result_ = TensorWrapper(result->untyped_data(), res_shape, eo_dtype);
 
   NVTECommWindow no_win{nullptr, 0};
-  nvte_ep_combine(handle_mem_.data(), expert_out_.data(), no_win, result_.data(), stream);
+  NVTEEpLayerConfig layer_cfg{.struct_size = sizeof(NVTEEpLayerConfig),
+                              .top_k = static_cast<int>(config.top_k),
+                              .dispatch_output_per_expert_alignment =
+                                  static_cast<size_t>(config.dispatch_output_per_expert_alignment),
+                              .topk_idx_dtype = static_cast<NVTEDType>(config.topk_idx_dtype)};
+  nvte_ep_combine_v2(handle_mem_.data(), expert_out_.data(), no_win, result_.data(), &layer_cfg,
+                     stream);
 
   return ffi_with_cuda_error_check();
 }
@@ -518,8 +532,14 @@ Error_Type EpDispatchBwdFFI(cudaStream_t stream, EpInstanceState* ep_state, Buff
       TensorWrapper(grad_topk_weights->untyped_data(), gtw_shape, DType::kFloat32);
 
   NVTECommWindow no_win{nullptr, 0};
-  nvte_ep_dispatch_bwd(handle_mem_.data(), grad_.data(), no_win, g_recv_topk_weights_.data(),
-                       no_win, grad_tokens_.data(), grad_topk_weights_.data(), stream);
+  NVTEEpLayerConfig layer_cfg{.struct_size = sizeof(NVTEEpLayerConfig),
+                              .top_k = static_cast<int>(config.top_k),
+                              .dispatch_output_per_expert_alignment =
+                                  static_cast<size_t>(config.dispatch_output_per_expert_alignment),
+                              .topk_idx_dtype = static_cast<NVTEDType>(config.topk_idx_dtype)};
+  nvte_ep_dispatch_bwd_v2(handle_mem_.data(), grad_.data(), no_win, g_recv_topk_weights_.data(),
+                          no_win, grad_tokens_.data(), grad_topk_weights_.data(), &layer_cfg,
+                          stream);
 
   return ffi_with_cuda_error_check();
 }
@@ -564,8 +584,13 @@ Error_Type EpCombineBwdFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffe
   auto grad_expert_out_ = TensorWrapper(grad_expert_out->untyped_data(), out_shape, g_dtype);
 
   NVTECommWindow no_win{nullptr, 0};
-  nvte_ep_combine_bwd(handle_mem_.data(), grad_.data(), no_win, grad_expert_out_.data(), no_win,
-                      stream);
+  NVTEEpLayerConfig layer_cfg{.struct_size = sizeof(NVTEEpLayerConfig),
+                              .top_k = static_cast<int>(config.top_k),
+                              .dispatch_output_per_expert_alignment =
+                                  static_cast<size_t>(config.dispatch_output_per_expert_alignment),
+                              .topk_idx_dtype = static_cast<NVTEDType>(config.topk_idx_dtype)};
+  nvte_ep_combine_bwd_v2(handle_mem_.data(), grad_.data(), no_win, grad_expert_out_.data(), no_win,
+                         &layer_cfg, stream);
 
   return ffi_with_cuda_error_check();
 }
@@ -636,6 +661,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpBootstrapBorrowedCommHandler, EpBootstrapBorrowe
 
 XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
     transformer_engine::jax::EpConfig, ::xla::ffi::StructMember<int64_t>("top_k"),
-    ::xla::ffi::StructMember<int64_t>("dispatch_output_per_expert_alignment"));
+    ::xla::ffi::StructMember<int64_t>("dispatch_output_per_expert_alignment"),
+    ::xla::ffi::StructMember<int64_t>("topk_idx_dtype"));
 
 #endif  // NVTE_WITH_NCCL_EP

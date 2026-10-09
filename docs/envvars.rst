@@ -167,6 +167,16 @@ General
                  this value if an application legitimately creates more grouped tensor
                  handles than the default pool can hold.
 
+.. envvar:: NVTE_EP_HANDLE_CACHE_SIZE
+
+   :Type: ``int``
+   :Default: ``4096``
+   :Description: Maximum number of live expert-parallel handles cached by ``handle_mem``
+                 address; preparing one more raises an error. Entries are released by
+                 ``ep_finalize``. ``-1`` means unlimited; ``0`` disables the cache so
+                 ``handle_mem`` may be relocated between calls, which requires the
+                 ``*_v2`` ops. JAX sets this to ``0``.
+
 Attention Backend Selection
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 

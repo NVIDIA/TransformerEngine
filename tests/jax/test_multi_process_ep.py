@@ -56,6 +56,7 @@ from transformer_engine.jax.cpp_extensions.ep import (
     is_ep_borrowed_comm_built,
     use_nccl_comm_from_xla,
 )
+from transformer_engine.jax.cpp_extensions.misc import TEDType
 from transformer_engine.jax.version_utils import (
     is_collective_stream_supported,
     is_xla_ffi_collectives_supported,
@@ -70,6 +71,9 @@ NUM_LOCAL_EXPERTS = 2  # per-rank → num_experts = NLE * EP
 HIDDEN_DIM = 32
 TOP_K = 2
 TOKENS_PER_DP_SHARD = 4  # per device along dp
+# EpLayerConfig.topk_idx_dtype must match this file's topk_idx arrays (always int32):
+# ncclEpImportHandle consumes it on every dispatch/combine/_bwd call.
+TOPK_IDX_DTYPE = int(TEDType.kInt32)
 
 
 def _factor_dp_ep(num_procs):
@@ -179,7 +183,9 @@ class TestEP(unittest.TestCase):
         assert get_ep_config().num_ep_groups == cls.dp
         # One layer config shared by all single-layer tests below; non-zero
         # alignment exercises dispatch_output_per_expert_alignment end-to-end.
-        cls.hk = EpLayerConfig(top_k=TOP_K, dispatch_output_per_expert_alignment=16)
+        cls.hk = EpLayerConfig(
+            top_k=TOP_K, dispatch_output_per_expert_alignment=16, topk_idx_dtype=TOPK_IDX_DTYPE
+        )
 
     @classmethod
     def setUpClass(cls):
@@ -318,13 +324,12 @@ class TestEP(unittest.TestCase):
 
     def test_two_handle_mems_no_aliasing(self):
         """Two ``ep_prepare`` calls in one jit must produce distinct handle_mem
-        buffers; the pointer-keyed C++ cache must not alias HandleEntries
-        across distinct logical layers."""
+        buffers so distinct logical layers never share prepared state."""
         _T, topk_idx, _tokens, _w = self._make_identity_inputs()
-        ka, kb = (
-            EpLayerConfig(top_k=TOP_K, dispatch_output_per_expert_alignment=16),
-            EpLayerConfig(top_k=TOP_K, dispatch_output_per_expert_alignment=16),
+        layer_cfg_kwargs = dict(
+            top_k=TOP_K, dispatch_output_per_expert_alignment=16, topk_idx_dtype=TOPK_IDX_DTYPE
         )
+        ka, kb = EpLayerConfig(**layer_cfg_kwargs), EpLayerConfig(**layer_cfg_kwargs)
         dp_spec = PartitionSpec(("dp", "ep"), None)
         with self.mesh, global_shard_guard(self.mr):
             idx_s = jax.lax.with_sharding_constraint(topk_idx, NamedSharding(self.mesh, dp_spec))
@@ -349,10 +354,10 @@ class TestEP(unittest.TestCase):
         state. A->B data edge forces XLA to order the collectives sequentially."""
         T_global, topk_idx, tokens, topk_w = self._make_identity_inputs(nonuniform=False)
         tokens_b = (tokens.astype(jnp.float32) * -1.0 + 0.25).astype(tokens.dtype)
-        ka, kb = (
-            EpLayerConfig(top_k=TOP_K, dispatch_output_per_expert_alignment=16),
-            EpLayerConfig(top_k=TOP_K, dispatch_output_per_expert_alignment=16),
+        layer_cfg_kwargs = dict(
+            top_k=TOP_K, dispatch_output_per_expert_alignment=16, topk_idx_dtype=TOPK_IDX_DTYPE
         )
+        ka, kb = EpLayerConfig(**layer_cfg_kwargs), EpLayerConfig(**layer_cfg_kwargs)
         dp_spec = PartitionSpec(("dp", "ep"), None)
         ep_spec_3d = PartitionSpec(("dp", "ep"), None, None)
         ep_spec_2d = PartitionSpec(("dp", "ep"), None)
@@ -430,6 +435,13 @@ class TestEP(unittest.TestCase):
         padded = ((np.asarray(tc).astype(np.int64) + align - 1) // align) * align
         expected = padded.sum(axis=-1, keepdims=True)
         np.testing.assert_array_equal(np.asarray(trt).astype(np.int64), expected)
+
+    def test_primitive_prepare_rejects_topk_idx_dtype_mismatch(self):
+        """Reject a topk_idx dtype that differs from EpLayerConfig.topk_idx_dtype."""
+        _T, topk_idx, _tokens, _w = self._make_identity_inputs()
+        cfg = EpLayerConfig(top_k=TOP_K, topk_idx_dtype=int(TEDType.kInt64))
+        with self.assertRaisesRegex(ValueError, "does not match EpLayerConfig.topk_idx_dtype"):
+            ep_prepare(cfg, topk_idx)
 
     def test_primitive_prepare_rejects_undersized_handle(self):
         """Reject an undersized handle before NCCL EP writes routing state."""
@@ -1009,6 +1021,8 @@ class TestEPOverflowDrop(unittest.TestCase):
     total_recv_tokens still reports the pre-drop demand.
     """
 
+    USE_BORROWED_COMM = False
+
     ALIGN = 16
     # Each EP group routes all OVF_TOKENS_PER_DP_SHARD top-1 slots to expert 0,
     # whose padded count then exceeds the recv capacity. HT mode requires the
@@ -1045,7 +1059,11 @@ class TestEPOverflowDrop(unittest.TestCase):
                 hidden_dim=HIDDEN_DIM,
                 drop_on_overflow=True,
             )
-        cls.hk = EpLayerConfig(top_k=TOP_K, dispatch_output_per_expert_alignment=cls.ALIGN)
+        cls.hk = EpLayerConfig(
+            top_k=TOP_K,
+            dispatch_output_per_expert_alignment=cls.ALIGN,
+            topk_idx_dtype=TOPK_IDX_DTYPE,
+        )
 
     @classmethod
     def tearDownClass(cls):
@@ -1111,6 +1129,251 @@ class TestEPOverflowDrop(unittest.TestCase):
         np.testing.assert_array_equal(trt_prep, trt_disp)
         # The rank owning expert 0 demands more than it can receive.
         self.assertGreater(int(trt_prep.max()), self.recv_capacity_per_rank)
+
+
+# lax.scan handle_mem relocation
+
+
+class TestEpScanHandleRelocation(TestEP):
+    """Regression test for handle_mem address relocation under ``lax.scan``.
+
+    XLA may reuse the same ``handle_mem`` address for a different prepared
+    routing state at each forward step, and independently restore each
+    backward step's saved state at its own address. EPBackend never caches
+    handles by address for JAX (``NVTE_EP_HANDLE_CACHE_SIZE=0``):
+    every dispatch/combine/_bwd call rebinds a fresh handle from
+    ``handle_mem``'s own contents via ``ncclEpImportHandle``, so the address
+    is irrelevant.
+
+    Runs several EP-MoE-style layers, each with a different per-layer routing
+    pattern so consecutive scan steps genuinely prepare distinct state, via
+    ``lax.scan`` and cross-checks against the same computation unrolled as a
+    plain Python loop (no loop-carried buffer for XLA to alias). If handle
+    binding ever breaks again, the two diverge or the scanned path errors.
+    """
+
+    NUM_LAYERS = 3
+
+    def _make_layered_inputs(self):
+        """Per-layer routing that differs across layers/steps, so consecutive
+        scan steps genuinely prepare distinct handle_mem state (the condition
+        under which stale/misattributed handle reuse would be visible)."""
+        T_global = TOKENS_PER_DP_SHARD * self.dp
+        E = self.num_experts
+        idx = np.empty((self.NUM_LAYERS, T_global, TOP_K), dtype=np.int32)
+        for layer in range(self.NUM_LAYERS):
+            for t in range(T_global):
+                for k in range(TOP_K):
+                    idx[layer, t, k] = (t * TOP_K + k + layer * 7) % E
+        topk_idx_stack = jnp.asarray(idx)
+        topk_weights = jnp.full((T_global, TOP_K), 1.0 / TOP_K, dtype=jnp.float32)
+        tokens = jnp.asarray(
+            np.linspace(0.1, 0.9, T_global * HIDDEN_DIM, dtype=np.float32).reshape(
+                T_global, HIDDEN_DIM
+            ),
+            dtype=jnp.bfloat16,
+        )
+        return T_global, topk_idx_stack, tokens, topk_weights
+
+    def _layer_step(self, dp_spec, ep_spec_3d, ep_spec_2d, T_global, tokens, topk_idx_layer, w):
+        """One EP-MoE-style layer: dispatch, an identity "expert" (the round
+        trip itself), and combine. Returns the combined output, which a
+        deterministic routing with per-token top-k weights summing to 1
+        recovers as ``tokens`` regardless of which experts were chosen."""
+        tokens = jax.lax.with_sharding_constraint(tokens, NamedSharding(self.mesh, dp_spec))
+        topk_idx_layer = jax.lax.with_sharding_constraint(
+            topk_idx_layer, NamedSharding(self.mesh, dp_spec)
+        )
+        w = jax.lax.with_sharding_constraint(w, NamedSharding(self.mesh, dp_spec))
+        recv_t, recv_w, hm, tc, _trt = ep_dispatch(
+            self.hk, topk_idx_layer, tokens, w, self.recv_capacity_per_rank
+        )
+        recv_t = jax.lax.with_sharding_constraint(recv_t, NamedSharding(self.mesh, ep_spec_3d))
+        recv_w = jax.lax.with_sharding_constraint(recv_w, NamedSharding(self.mesh, ep_spec_2d))
+        weighted = self._preweight_expert_out(recv_t, recv_w)
+        out = ep_combine(self.hk, hm, tc, weighted, T_global, out_sharding=(("dp", "ep"), None))
+        return jax.lax.with_sharding_constraint(out, NamedSharding(self.mesh, dp_spec))
+
+    def test_scan_matches_unrolled_forward(self):
+        """lax.scan over layers with distinct per-step routing == the unrolled loop."""
+        T_global, topk_idx_stack, tokens, topk_w = self._make_layered_inputs()
+        dp_spec = PartitionSpec(("dp", "ep"), None)
+        ep_spec_3d = PartitionSpec(("dp", "ep"), None, None)
+        ep_spec_2d = PartitionSpec(("dp", "ep"), None)
+
+        with self.mesh, global_shard_guard(self.mr):
+
+            def step(carry, idx_layer):
+                out = self._layer_step(
+                    dp_spec, ep_spec_3d, ep_spec_2d, T_global, carry, idx_layer, topk_w
+                )
+                return out, None
+
+            @jax.jit
+            def scanned(toks, idx_stack):
+                final, _ = jax.lax.scan(step, toks, idx_stack)
+                return final
+
+            @jax.jit
+            def unrolled(toks, idx_stack):
+                carry = toks
+                # Plain Python loop: fully unrolled at trace time, no
+                # loop-carried buffer for XLA to alias across "steps".
+                for layer in range(self.NUM_LAYERS):
+                    carry, _ = step(carry, idx_stack[layer])
+                return carry
+
+            out_scan = scanned(tokens, topk_idx_stack)
+            out_unroll = unrolled(tokens, topk_idx_stack)
+            out_scan.block_until_ready()
+            out_unroll.block_until_ready()
+            scan_g = jmu.process_allgather(out_scan, tiled=True)
+            unroll_g = jmu.process_allgather(out_unroll, tiled=True)
+
+        if self.rank == 0:
+            # Primary regression signal: scan and unrolled run the identical
+            # math with different XLA buffer scheduling -- they must agree.
+            np.testing.assert_allclose(
+                np.asarray(scan_g.astype(jnp.float32)),
+                np.asarray(unroll_g.astype(jnp.float32)),
+                atol=5e-2,
+                rtol=5e-2,
+            )
+            # Secondary sanity check: N identity-routing layers recover tokens.
+            np.testing.assert_allclose(
+                np.asarray(scan_g.astype(jnp.float32)),
+                np.asarray(tokens.astype(jnp.float32)),
+                atol=5e-2,
+                rtol=5e-2,
+            )
+
+    def test_scan_matches_unrolled_backward(self):
+        """Gradients through lax.scan (fwd+bwd relocation) == the unrolled loop.
+
+        Each scan step's backward re-imports handle_mem at whatever address
+        XLA restored that step's saved (forward) state to, which may differ
+        from the forward address and from every other step's.
+        """
+        T_global, topk_idx_stack, tokens, topk_w = self._make_layered_inputs()
+        dp_spec = PartitionSpec(("dp", "ep"), None)
+        ep_spec_3d = PartitionSpec(("dp", "ep"), None, None)
+        ep_spec_2d = PartitionSpec(("dp", "ep"), None)
+
+        with self.mesh, global_shard_guard(self.mr):
+
+            def step(carry, idx_layer):
+                out = self._layer_step(
+                    dp_spec, ep_spec_3d, ep_spec_2d, T_global, carry, idx_layer, topk_w
+                )
+                return out, None
+
+            def loss_scan(toks, idx_stack):
+                final, _ = jax.lax.scan(step, toks, idx_stack)
+                return 0.5 * (final.astype(jnp.float32) ** 2).sum()
+
+            def loss_unrolled(toks, idx_stack):
+                carry = toks
+                for layer in range(self.NUM_LAYERS):
+                    carry, _ = step(carry, idx_stack[layer])
+                return 0.5 * (carry.astype(jnp.float32) ** 2).sum()
+
+            grad_scan = jax.jit(jax.grad(loss_scan))(tokens, topk_idx_stack)
+            grad_unroll = jax.jit(jax.grad(loss_unrolled))(tokens, topk_idx_stack)
+            grad_scan.block_until_ready()
+            grad_unroll.block_until_ready()
+            grad_scan_g = jmu.process_allgather(grad_scan, tiled=True)
+            grad_unroll_g = jmu.process_allgather(grad_unroll, tiled=True)
+
+        if self.rank == 0:
+            np.testing.assert_allclose(
+                np.asarray(grad_scan_g.astype(jnp.float32)),
+                np.asarray(grad_unroll_g.astype(jnp.float32)),
+                atol=5e-2,
+                rtol=5e-2,
+            )
+            self.assertTrue(np.all(np.isfinite(np.asarray(grad_scan_g))))
+
+    # scan without remat, checked against a routing-sensitive reference
+
+    def _make_routed_weights(self, T_global):
+        """Per-layer non-uniform top-k weights (rows sum to 1)."""
+        w = np.empty((self.NUM_LAYERS, T_global, TOP_K), dtype=np.float32)
+        for layer in range(self.NUM_LAYERS):
+            for t in range(T_global):
+                row = np.asarray([1.0 + k + (t + layer) % 3 for k in range(TOP_K)])
+                w[layer, t] = row / row.sum()
+        return w
+
+    def _routed_layer_step(self, T_global, tokens, idx_layer, w_layer):
+        """EP layer whose expert scales its input by a factor that depends on the
+        destination ep rank, so the output changes if routing state is misattributed."""
+        dp_spec = PartitionSpec(("dp", "ep"), None)
+        ep_spec_3d = PartitionSpec(("dp", "ep"), None, None)
+        ep_spec_2d = PartitionSpec(("dp", "ep"), None)
+        tokens = jax.lax.with_sharding_constraint(tokens, NamedSharding(self.mesh, dp_spec))
+        idx_layer = jax.lax.with_sharding_constraint(idx_layer, NamedSharding(self.mesh, dp_spec))
+        w_layer = jax.lax.with_sharding_constraint(w_layer, NamedSharding(self.mesh, dp_spec))
+        recv_t, recv_w, hm, tc, _trt = ep_dispatch(
+            self.hk, idx_layer, tokens, w_layer, self.recv_capacity_per_rank
+        )
+        recv_t = jax.lax.with_sharding_constraint(recv_t, NamedSharding(self.mesh, ep_spec_3d))
+        recv_w = jax.lax.with_sharding_constraint(recv_w, NamedSharding(self.mesh, ep_spec_2d))
+        rank_in_ep = jax.lax.broadcasted_iota(jnp.int32, recv_t.shape, 0) % self.ep
+        scale = (rank_in_ep + self.ep).astype(jnp.float32) / (2 * self.ep)
+        scaled = (recv_t.astype(jnp.float32) * scale).astype(recv_t.dtype)
+        weighted = self._preweight_expert_out(scaled, recv_w)
+        out = ep_combine(self.hk, hm, tc, weighted, T_global, out_sharding=(("dp", "ep"), None))
+        return jax.lax.with_sharding_constraint(out, NamedSharding(self.mesh, dp_spec))
+
+    def _routed_reference(self, tokens, idx_stack, w_stack):
+        """Numpy reference: per-token coefficient of each layer and the final output."""
+        x = np.asarray(tokens.astype(jnp.float32))
+        coefs = []
+        for layer in range(self.NUM_LAYERS):
+            dest = idx_stack[layer] // NUM_LOCAL_EXPERTS
+            scale = (dest + self.ep).astype(np.float32) / (2 * self.ep)
+            coef = (w_stack[layer] * scale).sum(-1)
+            coefs.append(coef)
+            x = x * coef[:, None]
+        return x, np.prod(coefs, axis=0)
+
+    def test_scan_no_remat_matches_reference(self):
+        """lax.scan (no jax.checkpoint, so handle_mem is a saved residual) forward and
+        token gradients match an independent routing-aware numpy reference."""
+        T_global, topk_idx_stack, tokens, _ = self._make_layered_inputs()
+        w_stack = self._make_routed_weights(T_global)
+
+        with self.mesh, global_shard_guard(self.mr):
+
+            def step(carry, xs):
+                idx_layer, w_layer = xs
+                return self._routed_layer_step(T_global, carry, idx_layer, w_layer), None
+
+            def fwd(toks, idx_stack, w_stk):
+                final, _ = jax.lax.scan(step, toks, (idx_stack, w_stk))
+                return final
+
+            def loss(toks, idx_stack, w_stk):
+                return 0.5 * (fwd(toks, idx_stack, w_stk).astype(jnp.float32) ** 2).sum()
+
+            w_j = jnp.asarray(w_stack)
+            out = jax.jit(fwd)(tokens, topk_idx_stack, w_j)
+            grad = jax.jit(jax.grad(loss))(tokens, topk_idx_stack, w_j)
+            out.block_until_ready()
+            grad.block_until_ready()
+            out_g = jmu.process_allgather(out, tiled=True)
+            grad_g = jmu.process_allgather(grad, tiled=True)
+
+        if self.rank == 0:
+            ref_out, ref_coef = self._routed_reference(tokens, np.asarray(topk_idx_stack), w_stack)
+            # d(0.5 * sum(out^2))/dx = out * prod(coef) = x * prod(coef)^2
+            ref_grad = ref_out * ref_coef[:, None]
+            np.testing.assert_allclose(
+                np.asarray(out_g.astype(jnp.float32)), ref_out, atol=2e-3, rtol=5e-2
+            )
+            np.testing.assert_allclose(
+                np.asarray(grad_g.astype(jnp.float32)), ref_grad, atol=2e-3, rtol=5e-2
+            )
 
 
 # ── EP domain grouping (single-process; runs under plain pytest) ─────────────
@@ -1262,6 +1525,7 @@ def _ep_test_cases():
             TestEP,
             TestEPBorrowedComm,
             TestEPOverflowDrop,
+            TestEpScanHandleRelocation,
             TestEpDomainGrouping,
             TestEpSingleProcessMultiDomain,
         )
@@ -1277,10 +1541,8 @@ def _ep_test_cases():
             )
         test_cases = tuple(all_test_cases[name] for name in requested)
     else:
-        test_cases = (TestEP, TestEPOverflowDrop, TestEpDomainGrouping)
-    if any(c in test_cases for c in (TestEPBorrowedComm, TestEpSingleProcessMultiDomain)) and any(
-        c in test_cases for c in (TestEP, TestEPOverflowDrop)
-    ):
+        test_cases = (TestEP, TestEPOverflowDrop, TestEpScanHandleRelocation, TestEpDomainGrouping)
+    if len({c.USE_BORROWED_COMM for c in test_cases if hasattr(c, "USE_BORROWED_COMM")}) > 1:
         raise ValueError("Run borrowed-comm and self-hosted EP tests in separate processes.")
     return test_cases
 
@@ -1312,6 +1574,7 @@ if __name__ == "__main__":
                 TestEP,
                 TestEPBorrowedComm,
                 TestEPOverflowDrop,
+                TestEpScanHandleRelocation,
                 TestEpDomainGrouping,
                 TestEpSingleProcessMultiDomain,
             )
