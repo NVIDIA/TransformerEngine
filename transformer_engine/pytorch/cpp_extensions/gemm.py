@@ -1145,6 +1145,16 @@ def general_grouped_gemm_for_grouped_tensor(
     def _is_row_scaled(operand) -> bool:
         return isinstance(operand, GroupedTensorStorage) and operand.row_scaled_nvfp4
 
+    def _list_has_row_scaled(operand) -> bool:
+        return isinstance(operand, (list, tuple)) and any(
+            getattr(t, "_row_scaled_nvfp4", False) for t in operand
+        )
+
+    if _list_has_row_scaled(A) or _list_has_row_scaled(B):
+        raise NotImplementedError(
+            "Row-scaled NVFP4 operands passed as a list are not supported; pass a GroupedTensor."
+        )
+
     row_scaled = _is_row_scaled(A) or _is_row_scaled(B)
     row_scaled_accumulate = accumulate
     post_scale_rows = None  # per-row outer scale -> output rows (from B)
@@ -1152,6 +1162,10 @@ def general_grouped_gemm_for_grouped_tensor(
     if row_scaled:
         if bias is not None:
             raise NotImplementedError("Row-scaled NVFP4 grouped GEMM does not support fused bias.")
+        if beta is not None:
+            raise NotImplementedError(
+                "Row-scaled NVFP4 grouped GEMM does not support explicit beta; use accumulate."
+            )
         # A's scale lands on output columns, B's on output rows; rowwise amax for an
         # untransposed operand, columnwise for a transposed one (see
         # _nvfp4_row_scaled_gemm_inputs).
@@ -1285,23 +1299,37 @@ def general_grouped_gemm_for_grouped_tensor(
             dst.copy_(src.to(dst.dtype))
 
     if is_discrete_out:
+        # Slice the per-row/per-column scales by each output's actual shape so uneven
+        # per-expert row/column counts are handled correctly.
+        row_offset = 0
+        col_offset = 0
         for i in range(num_tensors):
             scaled = scratch[i]
+            rows = scaled.shape[-2]
+            cols = scaled.shape[-1]
             if post_scale_rows is not None:
-                rows = scaled.shape[-2]
-                row_scale_i = post_scale_rows.view(num_tensors, rows)[i]
+                row_scale_i = post_scale_rows[row_offset : row_offset + rows]
                 scaled = scaled.mul_(row_scale_i.reshape((1,) * (scaled.dim() - 2) + (rows, 1)))
             if post_scale_cols is not None:
-                cols = scaled.shape[-1]
-                col_scale_i = post_scale_cols.view(num_tensors, cols)[i]
+                col_scale_i = post_scale_cols[col_offset : col_offset + cols]
                 scaled = scaled.mul_(col_scale_i.reshape((1,) * (scaled.dim() - 1) + (cols,)))
             _store(out[i], scaled)
+            row_offset += rows
+            col_offset += cols
     else:
         last_dim = out.logical_shape[-1]
         flat = scratch.rowwise_data.view(-1, last_dim)
         if post_scale_rows is not None:
+            # Per output row; handles uneven per-expert row counts directly.
             flat.mul_(post_scale_rows.view(-1, 1))
         if post_scale_cols is not None:
+            # Per-expert, per-column. Only set for wgrad, where every expert has the
+            # same output row count, so an equal split over num_tensors is exact.
+            total_rows = flat.shape[0]
+            if total_rows % num_tensors != 0:
+                raise NotImplementedError(
+                    "Row-scaled column post-scale requires a uniform per-expert output row count."
+                )
             flat.view(num_tensors, -1, last_dim).mul_(
                 post_scale_cols.view(num_tensors, 1, last_dim)
             )

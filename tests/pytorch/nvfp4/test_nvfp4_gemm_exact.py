@@ -1093,3 +1093,39 @@ def test_nvfp4_row_scaled_grouped_tensor_gemm_wgrad(
         tols = dict(atol=1e-4, rtol=1e-4)
     for got, ref in zip(actual, expected):
         torch.testing.assert_close(got, ref, **tols)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.skipif(
+    not row_scaled_grouped_cast_available, reason=reason_for_no_row_scaled_grouped_cast
+)
+@pytest.mark.parametrize("m_splits, k, n", [([256, 128, 384], 512, 256)])
+def test_nvfp4_row_scaled_grouped_tensor_gemm_wgrad_discrete_out(
+    m_splits: list[int], k: int, n: int
+) -> None:
+    """Weight-gradient (NT) grouped-tensor GEMM into a list output exercises the discrete-out
+    post-scale path (per-expert row/column slices) against a per-expert dense GEMM.
+    """
+    if not _row_scaled_grouped_tensor_gemm_supported():
+        pytest.skip(_reason_for_no_grouped_tensor_gemm)
+
+    torch.manual_seed(17)
+    device = torch.device("cuda")
+    num_gemms = len(m_splits)
+    out_dtype = torch.float32
+
+    x = _make_row_scaled_grouped_activation(m_splits, k, columnwise=True)
+    dy = _make_row_scaled_grouped_activation(m_splits, n, columnwise=True)
+    x_splits = x.split_into_quantized_tensors()
+    dy_splits = dy.split_into_quantized_tensors()
+
+    expected = [
+        general_gemm(x_splits[i], dy_splits[i], out_dtype=out_dtype, layout="NT")[0]
+        for i in range(num_gemms)
+    ]
+
+    out_list = [torch.empty(n, k, dtype=out_dtype, device=device) for _ in range(num_gemms)]
+    general_grouped_gemm_for_grouped_tensor(x, dy, out_list, layout="NT")
+
+    for got, ref in zip(out_list, expected):
+        torch.testing.assert_close(got, ref, atol=1e-4, rtol=1e-4)
