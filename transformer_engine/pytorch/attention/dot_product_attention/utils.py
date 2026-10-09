@@ -154,7 +154,7 @@ class FlashAttentionUtils:
     # Set by a signature probe in backends.py; fail-closed default.
     fa3_supports_softcap = False
     v4_installation_steps = """\
-pip install flash-attn-4==4.0.0b33 nvidia-cutlass-dsl[cu13]==4.7.1"""
+pip install flash-attn-4==4.0.0b33 nvidia-cutlass-dsl[cu13]==4.8.0"""
     v4_warning_printed = False
     # Set by backends.py if FA4 is installed; calls flash_attn.cute.interface._validate_head_dims
     # which raises AssertionError for unsupported (head_dim, head_dim_v) combinations.
@@ -1289,7 +1289,8 @@ def get_attention_backend(
             )
             use_flash_attention_4 = False
     # SM100/SM110 D=256 gained seqused_q/k support in b31 for forward and b33 for backward.
-    # THD all-gather always passes this metadata; other THD paths pass it only for padding.
+    # THD all-gather always passes this metadata; other THD paths pass it only
+    # when pad_between_seqs=True.
     fa4_uses_seqused = qkv_format == "thd" and (
         pad_between_seqs or (context_parallel and cp_comm_type == "all_gather")
     )

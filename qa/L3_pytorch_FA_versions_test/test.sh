@@ -66,13 +66,13 @@ do
   elif [[ "${fa_version}" == 4.* ]]
   then
     export NVTE_FLASH_ATTN_V4=1
-    # FA4 is intentionally last in every version array. Its b33 test pin needs
-    # CUTLASS DSL 4.7.1, so replace the image-matched stack only for this final
+    # FA4 is intentionally last in every version array. CUTLASS DSL 4.8.0 supports
+    # SM107, so replace the image-matched stack only for this final
     # iteration; later iterations would otherwise need that stack restored.
     pip3 uninstall -y nvidia-cutlass-dsl nvidia-cutlass-dsl-libs-base \
       nvidia-cutlass-dsl-libs-cu12 nvidia-cutlass-dsl-libs-cu13 \
       || error_exit "Failed to isolate CUTLASS DSL for Flash Attention $fa_version"
-    pip3 install flash-attn-4==${fa_version} nvidia-cutlass-dsl[cu13]==4.7.1 \
+    pip3 install flash-attn-4==${fa_version} nvidia-cutlass-dsl[cu13]==4.8.0 \
       --no-build-isolation || error_exit "Failed to install Flash Attention $fa_version"
   else
     export NVTE_FLASH_ATTN_V3=1
@@ -139,9 +139,8 @@ do
   if [[ "${fa_version}" == 4.* ]]; then
     XML_BACKEND="$XML_LOG_DIR/pytest_test_attention_backend_selection_fa${fa_tag}.xml"
     NVTE_TORCH_COMPILE=0 python3 -m pytest -v -s --junitxml="$XML_BACKEND" \
-      "$TE_PATH/tests/pytorch/attention/test_attention_backend_selection.py::test_fa4_window_sentinel_normalization" \
-      "$TE_PATH/tests/pytorch/attention/test_attention_backend_selection.py::test_fa4_causal_attention_matches_reference" \
-      || test_fail "FA4 window sentinel tests (FA $fa_version)"
+      "$TE_PATH/tests/pytorch/attention/test_attention_backend_selection.py" \
+      || test_fail "FA4 backend-selection tests (FA $fa_version)"
   fi
 done
 
