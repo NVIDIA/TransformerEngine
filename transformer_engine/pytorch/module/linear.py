@@ -2235,8 +2235,8 @@ class Linear(TransformerEngineBaseModule):
         self.reset_parameters(defer_init=device == "meta")
 
         # For RPL, bias has to be added after TP collectives
-        # So it cannot be fused with the GEMM
-        if self.parallel_mode == "row" and self.apply_bias:
+        # So it cannot be fused with the GEMM unless there is no TP
+        if self.parallel_mode == "row" and self.apply_bias and self.tp_size > 1:
             self.gemm_bias_unfused_add = True
         else:
             self.gemm_bias_unfused_add = False
