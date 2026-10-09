@@ -172,9 +172,17 @@ class InferenceParams:
                 max_sequence_length % page_size == 0
             ), "Paged KV cache requires max_sequence_length % page_size = 0."
             max_pages_per_seq = max_sequence_length // page_size
-            assert (
-                total_num_pages == self.max_batch_size * max_pages_per_seq
-            ), "Paged KV cache requires total_num_pages = max_batch_size * max_pages_per_seq."
+            # ``total_num_pages`` is the *physical* page budget of the pool, while
+            # ``max_batch_size * max_pages_per_seq`` is only the number of logical
+            # page slots the page table can address. Requiring them to be equal
+            # stops a custom manager from running a deliberately smaller physical
+            # pool, so require only that the pool can hold one full-length sequence.
+            # Callers that need more than the pool allows get the existing clean
+            # capacity error from the manager instead of an out-of-pool page index.
+            assert total_num_pages >= max_pages_per_seq, (
+                "Paged KV cache requires total_num_pages >= max_sequence_length // page_size "
+                f"({max_pages_per_seq}), got {total_num_pages}."
+            )
             self.total_num_pages = total_num_pages
 
             cache_manager = (
