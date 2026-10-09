@@ -101,3 +101,10 @@ are resolved at trace time and do not require JAX Explicit sharding mode.
 The old ``ep_axis`` and ``data_parallelism_axes`` arguments remain accepted
 with a ``DeprecationWarning``. They are translated into a resource before
 calling the new API. Conflicting old and new arguments raise ``ValueError``.
+
+The cuDNN fused MoE path uses ``cudnn.grouped_gemm_glu_wrapper_sm100`` with JAX
+dispatch, ``act_func="swiglu"``, ``sf_vec_size=32``, and
+``generate_c=True`` to retain the pre-activation residual for its custom VJP.
+It requires the shared GLU JAX API and ``cudnn.jax.grouped_gemm_dswiglu``
+for backward. The shared forward API selects the Rubin kernel on SM107
+and the Blackwell kernel on other supported SM100+ devices.

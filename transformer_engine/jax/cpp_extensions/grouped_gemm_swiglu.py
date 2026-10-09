@@ -26,9 +26,7 @@ def pack_swiglu_pair(gate: jax.Array, up: jax.Array) -> jax.Array:
     if gate.shape != up.shape:
         raise ValueError(f"gate shape {gate.shape} must match up shape {up.shape}")
     if gate.shape[-1] % 32:
-        raise ValueError(
-            f"SwiGLU intermediate dimension {gate.shape[-1]} must be divisible by 32"
-        )
+        raise ValueError(f"SwiGLU intermediate dimension {gate.shape[-1]} must be divisible by 32")
     blocks = gate.shape[-1] // 32
     return jnp.stack(
         (
@@ -73,7 +71,8 @@ def _compact_sf(scale: jax.Array, shape: tuple[int, ...], name: str) -> jax.Arra
     return scale.reshape(-1)[:size].reshape(shape)
 
 
-# These contracts match cuDNN Frontend 1.31.0. Probe APIs rather than the version:
+# These contracts use cuDNN Frontend's shared GLU API with JAX dispatch.
+# Probe APIs rather than the version:
 # newer optional parameters are compatible, but TE must supply every required one.
 _FORWARD_ARGS = (
     "a_tensor",
@@ -92,6 +91,7 @@ _BACKWARD_ARGS = tuple(arg for arg in _FORWARD_ARGS if arg != "c_dtype") + (
     "c_tensor",
     "beta_tensor",
 )
+_FORWARD_ARGS += ("sf_vec_size", "act_func", "generate_c")
 
 
 def grouped_gemm_swiglu_dependencies_available(rubin: bool = False) -> tuple[bool, str]:
@@ -101,20 +101,20 @@ def grouped_gemm_swiglu_dependencies_available(rubin: bool = False) -> tuple[boo
         cudnn_jax = importlib.import_module("cudnn.jax")
         if not cutlass_jax.is_available():
             return False, "CuTeDSL JAX support is unavailable"
-        forward = "grouped_gemm_glu" if rubin else "grouped_gemm_swiglu"
-        for name, arguments in (
-            (forward, _FORWARD_ARGS),
-            ("grouped_gemm_dswiglu", _BACKWARD_ARGS),
+        cudnn = importlib.import_module("cudnn")
+        for module, name, arguments in (
+            (cudnn, "grouped_gemm_glu_wrapper_sm100", _FORWARD_ARGS),
+            (cudnn_jax, "grouped_gemm_dswiglu", _BACKWARD_ARGS),
         ):
-            api = getattr(cudnn_jax, name, None)
+            api = getattr(module, name, None)
             if not callable(api):
-                return False, f"cudnn.jax.{name} is unavailable"
+                return False, f"{module.__name__}.{name} is unavailable"
             signature = inspect.signature(api)
             missing = set(arguments) - signature.parameters.keys()
             if missing:
                 return (
                     False,
-                    f"cudnn.jax.{name} is missing parameters: {', '.join(sorted(missing))}",
+                    f"{module.__name__}.{name} is missing parameters: {', '.join(sorted(missing))}",
                 )
             # Binding detects missing/renamed keywords, positional-only arguments,
             # and new mandatory arguments, while allowing new optional arguments.
@@ -135,7 +135,7 @@ def grouped_gemm_swiglu(
     compute_dtype,
     output_dtype,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
-    """Run cuDNN's dedicated JAX grouped MXFP8 GEMM + SwiGLU API.
+    """Run cuDNN's shared GLU API in JAX MXFP8 SwiGLU mode.
 
     TE owns conservative flat scale allocations for ragged grouped operations.
     cuDNN's JAX API accepts the compact physical atom layout, so this adapter
@@ -147,7 +147,7 @@ def grouped_gemm_swiglu(
         raise ValueError(f"Expected physical B[E,N,K], got {b.shape}")
 
     cudnn_grouped_gemm_swiglu = getattr(
-        importlib.import_module("cudnn.jax"), "grouped_gemm_swiglu"
+        importlib.import_module("cudnn"), "grouped_gemm_glu_wrapper_sm100"
     )
 
     return _grouped_gemm_forward(
@@ -176,7 +176,7 @@ def grouped_gemm_glu(
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     """Run the Rubin cuDNN grouped MXFP8 GEMM + SwiGLU kernel."""
     cudnn_grouped_gemm_glu = getattr(
-        importlib.import_module("cudnn.jax"), "grouped_gemm_glu"
+        importlib.import_module("cudnn"), "grouped_gemm_glu_wrapper_sm100"
     )
 
     return _grouped_gemm_forward(
@@ -222,6 +222,9 @@ def _grouped_gemm_forward(
         c_dtype=jnp.dtype(compute_dtype),
         d_dtype=jnp.dtype(output_dtype),
         discrete_col_sfd=True,
+        sf_vec_size=32,
+        act_func="swiglu",
+        generate_c=True,
     )
     return (
         result["c_tensor"].reshape(rows, combined),
@@ -270,9 +273,7 @@ def grouped_gemm_dswiglu(
         b_tensor=b,
         c_tensor=c,
         sfa_tensor=_compact_sf(sfa, _sf_atom_shape(1, rows, hidden), "sfa"),
-        sfb_tensor=_compact_sf(
-            sfb, _sf_atom_shape(experts, intermediate, hidden), "sfb"
-        ),
+        sfb_tensor=_compact_sf(sfb, _sf_atom_shape(experts, intermediate, hidden), "sfb"),
         padded_offsets=padded_offsets.astype(jnp.int32),
         alpha_tensor=alpha,
         beta_tensor=beta,

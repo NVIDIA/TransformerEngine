@@ -204,7 +204,8 @@ def _select_cudnn_jax_fusion(rejection_reasons: list[str]) -> str | bool:
             f"use_cudnn_fusion=True: falling back to the {destination}: "
             + "; ".join(reasons)
             + ". Install cuDNN Frontend with compatible JAX APIs (TE's signatures match "
-            "cuDNN Frontend 1.31.0) and CuTeDSL JAX support; use supported GPU hardware.",
+            "the shared grouped_gemm_glu API with JAX dispatch) and CuTeDSL JAX support; "
+            "use supported GPU hardware.",
             UserWarning,
             stacklevel=2,
         )

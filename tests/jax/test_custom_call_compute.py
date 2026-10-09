@@ -2176,14 +2176,14 @@ class TestGroupedGemmSwigluFallback:
     @pytest.fixture
     def frontend(self, monkeypatch):
         module = SimpleNamespace(
-            grouped_gemm_glu=self._api(_swiglu_adapter._FORWARD_ARGS),
-            grouped_gemm_swiglu=self._api(_swiglu_adapter._FORWARD_ARGS),
+            __name__="cudnn",
+            grouped_gemm_glu_wrapper_sm100=self._api(_swiglu_adapter._FORWARD_ARGS),
             grouped_gemm_dswiglu=self._api(_swiglu_adapter._BACKWARD_ARGS),
         )
         original = importlib.import_module
 
         def import_module(name, package=None):
-            if name == "cudnn.jax":
+            if name in ("cudnn", "cudnn.jax"):
                 return module
             if name == "cutlass.jax":
                 return SimpleNamespace(is_available=lambda: True)
@@ -2208,9 +2208,7 @@ class TestGroupedGemmSwigluFallback:
     )
     def test_api_signature(self, frontend, rubin, operation, change):
         name = (
-            ("grouped_gemm_glu" if rubin else "grouped_gemm_swiglu")
-            if operation == "forward"
-            else "grouped_gemm_dswiglu"
+            "grouped_gemm_glu_wrapper_sm100" if operation == "forward" else "grouped_gemm_dswiglu"
         )
         args = (
             _swiglu_adapter._FORWARD_ARGS
@@ -2232,21 +2230,22 @@ class TestGroupedGemmSwigluFallback:
     @pytest.mark.parametrize("capability", [90, 100, 103, 107, 120])
     @pytest.mark.parametrize(
         "missing",
-        [None, "grouped_gemm_glu", "grouped_gemm_swiglu", "grouped_gemm_dswiglu", "all"],
+        [None, "grouped_gemm_glu_wrapper_sm100", "grouped_gemm_dswiglu", "all"],
     )
     def test_ordered_fallback(self, frontend, monkeypatch, capability, missing):
         if missing == "all":
-            vars(frontend).clear()
+            frontend.grouped_gemm_glu_wrapper_sm100 = None
+            frontend.grouped_gemm_dswiglu = None
         elif missing:
             delattr(frontend, missing)
         monkeypatch.setattr(
             transformer_engine_jax, "get_device_compute_capability", lambda _: capability
         )
         expected = False
-        if capability >= 100 and missing not in ("grouped_gemm_dswiglu", "all"):
-            if capability == 107 and missing != "grouped_gemm_glu":
+        if capability >= 100 and missing is None:
+            if capability == 107:
                 expected = "rubin"
-            elif missing != "grouped_gemm_swiglu":
+            else:
                 expected = "blackwell"
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
@@ -2256,10 +2255,10 @@ class TestGroupedGemmSwigluFallback:
         else:
             assert len(caught) == 1
             message = str(caught[0].message)
-            assert "falling back" in message and "1.31.0" in message
+            assert "falling back" in message and "shared grouped_gemm_glu API" in message
             assert ("generic Blackwell+ fused" if expected else "unfused TE") in message
 
-    @pytest.mark.parametrize("name", ["cudnn.jax", "cutlass.jax"])
+    @pytest.mark.parametrize("name", ["cudnn", "cudnn.jax", "cutlass.jax"])
     def test_missing_dependency(self, monkeypatch, name):
         original = importlib.import_module
 
@@ -2296,7 +2295,7 @@ class TestGroupedGemmSwigluFallback:
         "missing,expected",
         [
             (None, "rubin"),
-            ("grouped_gemm_glu", "blackwell"),
+            ("grouped_gemm_glu_wrapper_sm100", False),
             ("grouped_gemm_dswiglu", False),
         ],
     )

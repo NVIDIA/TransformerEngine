@@ -918,11 +918,10 @@ class TestTeEpMoeCudnnCutedslFusion:
         """Unfused fallback retains bootstrap capacity and native-layout gradients."""
         if not _USE_CUDNN_FUSION:
             pytest.skip("Requires fusion requested at bootstrap")
-        import cudnn.jax as cudnn_jax
+        import cudnn
         from transformer_engine.jax import cpp_extensions as tex
 
-        monkeypatch.setattr(cudnn_jax, "grouped_gemm_glu", None)
-        monkeypatch.setattr(cudnn_jax, "grouped_gemm_swiglu", None)
+        monkeypatch.setattr(cudnn, "grouped_gemm_glu_wrapper_sm100", None)
         block = _make_block(quantization_recipe=MXFP8BlockScaling())
         x = _make_inputs(jax.random.PRNGKey(51))
         variables, baseline_output, _ = _init_apply(block, mesh, x, jax.random.PRNGKey(52))
@@ -998,14 +997,20 @@ class TestTeEpMoeCudnnCutedslFusion:
         assert np.any(grad_x_np != 0)
 
         if get_device_compute_capability(0) == 107:
-            # The dedicated SwiGLU path is the reference for this kernel
+            # The generic TE adapter is the reference for this adapter
             # substitution. Its MXFP8 gradients can differ from pure JAX by
             # more than the strict unfused test threshold on Rubin.
-            import cudnn.jax as cudnn_jax
-
-            # Simulate a frontend without the Rubin API. Selection must fall
-            # back to generic SwiGLU even though the GPU itself is Rubin.
-            monkeypatch.setattr(cudnn_jax, "grouped_gemm_glu", None)
+            # Exercise the generic TE adapter using the shared cuDNN GLU API.
+            dependencies_available = tex.grouped_gemm_swiglu_dependencies_available
+            monkeypatch.setattr(
+                tex,
+                "grouped_gemm_swiglu_dependencies_available",
+                lambda rubin=False: (
+                    (False, "Rubin path disabled for test")
+                    if rubin
+                    else dependencies_available(rubin=False)
+                ),
+            )
             generic_calls = []
             original_swiglu = tex.grouped_gemm_swiglu
 
@@ -1098,9 +1103,16 @@ class TestTeEpMoeCudnnCutedslFusion:
         moe_module = importlib.import_module("transformer_engine.jax.moe")
         flax_moe_module = importlib.import_module("transformer_engine.jax.flax.moe")
         if use_regular_swiglu:
-            import cudnn.jax as cudnn_jax
-
-            monkeypatch.setattr(cudnn_jax, "grouped_gemm_glu", None)
+            dependencies_available = tex.grouped_gemm_swiglu_dependencies_available
+            monkeypatch.setattr(
+                tex,
+                "grouped_gemm_swiglu_dependencies_available",
+                lambda rubin=False: (
+                    (False, "Rubin path disabled for test")
+                    if rubin
+                    else dependencies_available(rubin=False)
+                ),
+            )
 
         selected_calls = []
         fused_op_name = "grouped_gemm_swiglu" if use_regular_swiglu else "grouped_gemm_glu"
