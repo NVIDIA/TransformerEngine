@@ -785,14 +785,14 @@ def test_cp_with_fused_attention_no_load_balance(cp_pool):
 def test_cp_with_flash_attention_no_load_balance(cp_pool, model):
     """Check the supported unpadded FlashAttention path."""
     config = copy.deepcopy(model_configs_flash_attn[model])
-    if config.head_dim_qk == 256 and (
-        not (10, 0) <= get_device_compute_capability() < (12, 0)
-        or not fa4_enabled
-        or not FlashAttentionUtils.v4_is_installed
-        or FlashAttentionUtils.fa4_version < FlashAttentionUtils.v4_0_0_beta33
-        or _deterministic
-    ):
-        pytest.skip("D=256 THD all-gather requires SM100/SM110 FA4 b33+ non-deterministic.")
+    fa4_expected = (
+        config.head_dim_qk == 256
+        and (10, 0) <= get_device_compute_capability() < (12, 0)
+        and fa4_enabled
+        and FlashAttentionUtils.v4_is_installed
+        and FlashAttentionUtils.fa4_version >= FlashAttentionUtils.v4_0_0_beta33
+        and not _deterministic
+    )
     config.context_parallel = True
     config.cp_comm_type = "all_gather"
     config.attn_mask_type = "padding_causal"
@@ -804,9 +804,11 @@ def test_cp_with_flash_attention_no_load_balance(cp_pool, model):
         is_training=True,
         deterministic=_deterministic,
     )
-    if config.head_dim_qk == 256:
+    if fa4_expected:
         assert available_backends[0] and flash_backend is not None and flash_backend.major == 4
-    elif not available_backends[0]:
+    elif config.head_dim_qk == 256:
+        pytest.skip("D=256 THD all-gather requires SM100/SM110 FA4 b33+ non-deterministic.")
+    if not available_backends[0]:
         pytest.skip("FlashAttention is unavailable.")
     _submit(
         cp_pool(2),
