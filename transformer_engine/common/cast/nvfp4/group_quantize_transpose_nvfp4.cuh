@@ -26,6 +26,7 @@
 #include "../core/grouped_layout.cuh"
 #include "core_nvfp4.cuh"
 #include "specialized/quantize_transpose_nvfp4_tuned_1D.cuh"
+#include "swizzle.cuh"
 
 namespace transformer_engine {
 namespace dispatch {
@@ -1410,7 +1411,8 @@ __device__ __forceinline__ int GetTensorId(const GroupedRowScaledCastArgs &args,
 // grouped row-scaled cast kernels. The two kernels differ only in how they
 // resolve the per-expert bases (host-baked args vs device metadata); everything
 // from the SMEM layout onward is identical.
-template <typename ScaleType, bool USE_FAST_MATH, bool RETURN_TRANSPOSE>
+template <typename ScaleType, bool USE_FAST_MATH, bool RETURN_TRANSPOSE,
+          bool WITH_GEMM_SWIZZLED_SCALES>
 __device__ __forceinline__ void group_row_scaled_cast_body(
     const CUtensorMap &tensor_map_input, uint8_t *const q_row_base, ScaleType *const s_dec_row_base,
     const float *const row_amax_base, uint8_t *const q_col_base, ScaleType *const s_dec_col_base,
@@ -1590,8 +1592,20 @@ __device__ __forceinline__ void group_row_scaled_cast_body(
          row += THREADS_NUM) {
       ScalesVec &scales_vec = *reinterpret_cast<ScalesVec *>(sSFrowwise[row]);
       const size_t local_row = static_cast<size_t>(local_row_base) + row;
-      const size_t scale_idx = local_row * scale_stride_row + scales_block_offset_X_rowwise;
-      scales_vec.store_to_elts(&s_dec_row_base[scale_idx], 0, SCALES_PER_CHUNK_X);
+      if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
+        // gemm_swizzled_scale_idx takes the compact scale column count
+        // (scale_stride_row = K / SCALE_DIM); local_row is expert-local.
+        const ScaleType *scales = reinterpret_cast<const ScaleType *>(&scales_vec);
+#pragma unroll
+        for (int k = 0; k < SCALES_PER_CHUNK_X; ++k) {
+          const size_t col = scales_block_offset_X_rowwise + k;
+          s_dec_row_base[swizzle::gemm_swizzled_scale_idx(local_row, col, scale_stride_row)] =
+              scales[k];
+        }
+      } else {
+        const size_t scale_idx = local_row * scale_stride_row + scales_block_offset_X_rowwise;
+        scales_vec.store_to_elts(&s_dec_row_base[scale_idx], 0, SCALES_PER_CHUNK_X);
+      }
     }
   }
   if constexpr (RETURN_TRANSPOSE) {
@@ -1602,8 +1616,19 @@ __device__ __forceinline__ void group_row_scaled_cast_body(
          row_tr += THREADS_NUM) {
       ScalesVec &scales_vec = *reinterpret_cast<ScalesVec *>(sSFcolwise[row_tr]);
       const size_t global_col = static_cast<size_t>(block_offset_X) + row_tr;
-      const size_t scale_idx = global_col * scale_stride_col + local_block_offset_M;
-      scales_vec.store_to_elts(&s_dec_col_base[scale_idx], 0, SCALES_PER_CHUNK_Y);
+      if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
+        // Columnwise counterpart: column count is scale_stride_col = M_t / SCALE_DIM,
+        // and global_col indexes the K rows.
+        const ScaleType *scales = reinterpret_cast<const ScaleType *>(&scales_vec);
+#pragma unroll
+        for (int k = 0; k < SCALES_PER_CHUNK_Y; ++k) {
+          s_dec_col_base[swizzle::gemm_swizzled_scale_idx(global_col, local_block_offset_M + k,
+                                                          scale_stride_col)] = scales[k];
+        }
+      } else {
+        const size_t scale_idx = global_col * scale_stride_col + local_block_offset_M;
+        scales_vec.store_to_elts(&s_dec_col_base[scale_idx], 0, SCALES_PER_CHUNK_Y);
+      }
     }
   }
 
@@ -1619,7 +1644,8 @@ __device__ __forceinline__ void group_row_scaled_cast_body(
 }
 
 // Host-split kernel: per-expert bases come from the host-baked GroupedRowScaledCastArgs.
-template <typename ScaleType, bool USE_FAST_MATH, bool RETURN_TRANSPOSE>
+template <typename ScaleType, bool USE_FAST_MATH, bool RETURN_TRANSPOSE,
+          bool WITH_GEMM_SWIZZLED_SCALES>
 __global__ void __launch_bounds__(THREADS_NUM)
     group_row_scaled_cast_nvfp4_kernel(const __grid_constant__ CUtensorMap tensor_map_input,
                                        const __grid_constant__ GroupedRowScaledCastArgs args,
@@ -1653,7 +1679,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
   const size_t scale_stride_col =
       RETURN_TRANSPOSE ? static_cast<size_t>(args.scale_stride_col[tensor_id]) : 0;
 
-  group_row_scaled_cast_body<ScaleType, USE_FAST_MATH, RETURN_TRANSPOSE>(
+  group_row_scaled_cast_body<ScaleType, USE_FAST_MATH, RETURN_TRANSPOSE, WITH_GEMM_SWIZZLED_SCALES>(
       tensor_map_input, q_row_base, s_dec_row_base, row_amax_base, q_col_base, s_dec_col_base,
       col_amax_base, scale_stride_col, M_t, local_row_base, ctaid_X, ctaid_Y, cols,
       scale_stride_row);
@@ -1664,7 +1690,8 @@ __global__ void __launch_bounds__(THREADS_NUM)
 
 // Graph-safe kernel: per-expert bases derived on device from offsets / first_dims;
 // grid covers the input capacity, CTAs past the live row sum noop.
-template <typename ScaleType, bool USE_FAST_MATH, bool RETURN_TRANSPOSE>
+template <typename ScaleType, bool USE_FAST_MATH, bool RETURN_TRANSPOSE,
+          bool WITH_GEMM_SWIZZLED_SCALES>
 __global__ void __launch_bounds__(THREADS_NUM) group_row_scaled_cast_nvfp4_graph_safe_kernel(
     const __grid_constant__ CUtensorMap tensor_map_input, uint8_t *const q_row_all,
     ScaleType *const s_dec_row_all, const float *const row_amax_all, uint8_t *const q_col_all,
@@ -1704,7 +1731,7 @@ __global__ void __launch_bounds__(THREADS_NUM) group_row_scaled_cast_nvfp4_graph
       RETURN_TRANSPOSE ? s_dec_col_all + (cols / SCALE_DIM) * row_start : nullptr;
   const float *const col_amax_base = RETURN_TRANSPOSE ? col_amax_all + tensor_id * cols : nullptr;
 
-  group_row_scaled_cast_body<ScaleType, USE_FAST_MATH, RETURN_TRANSPOSE>(
+  group_row_scaled_cast_body<ScaleType, USE_FAST_MATH, RETURN_TRANSPOSE, WITH_GEMM_SWIZZLED_SCALES>(
       tensor_map_input, q_row_base, s_dec_row_base, row_amax_base, q_col_base, s_dec_col_base,
       col_amax_base, scale_stride_col, M_t, local_row_base, ctaid_X, ctaid_Y, cols,
       scale_stride_row);
@@ -1756,6 +1783,7 @@ inline void group_row_scaled_cast(const Tensor &input, const Tensor *noop,
   NVTE_CHECK(first_output != nullptr, "No non-empty output tensor found.");
   const bool return_transpose = first_output->has_columnwise_data();
   const size_t scale_stride_row = first_output->scale_inv.shape[1];
+  const bool with_gemm_swizzled = first_output->with_gemm_swizzled_scales;
 
   GroupedRowScaledCastArgs args;
   args.num_tensors = 0;
@@ -1818,19 +1846,22 @@ inline void group_row_scaled_cast(const Tensor &input, const Tensor *noop,
 
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
       use_fast_math, USE_FAST_MATH,
-      TRANSFORMER_ENGINE_SWITCH_CONDITION(return_transpose, RETURN_TRANSPOSE, {
-        const int out_mem_colwise_data = RETURN_TRANSPOSE ? buff_size_aligned_out_t : 0;
-        const int out_scales_transpose_mem = RETURN_TRANSPOSE ? buff_size_scales_transpose : 0;
-        const int dshmem_size = buff_size_aligned_in + buff_size_aligned_out +
-                                out_mem_colwise_data + buff_size_scales + out_scales_transpose_mem +
-                                TMA_SHMEM_ALIGNMENT;
-        auto kernel =
-            group_row_scaled_cast_nvfp4_kernel<ScaleType, USE_FAST_MATH, RETURN_TRANSPOSE>;
-        NVTE_CHECK_CUDA(
-            cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
-        kernel<<<grid, block, dshmem_size, stream>>>(tensor_map_input, args, noop_ptr, rows, cols,
-                                                     scale_stride_row);
-      }));
+      TRANSFORMER_ENGINE_SWITCH_CONDITION(
+          return_transpose, RETURN_TRANSPOSE,
+          TRANSFORMER_ENGINE_SWITCH_CONDITION(with_gemm_swizzled, WITH_GEMM_SWIZZLED_SCALES, {
+            const int out_mem_colwise_data = RETURN_TRANSPOSE ? buff_size_aligned_out_t : 0;
+            const int out_scales_transpose_mem = RETURN_TRANSPOSE ? buff_size_scales_transpose : 0;
+            const int dshmem_size =
+                buff_size_aligned_in + buff_size_aligned_out + out_mem_colwise_data +
+                buff_size_scales + out_scales_transpose_mem + TMA_SHMEM_ALIGNMENT;
+            auto kernel = group_row_scaled_cast_nvfp4_kernel<ScaleType, USE_FAST_MATH,
+                                                             RETURN_TRANSPOSE,
+                                                             WITH_GEMM_SWIZZLED_SCALES>;
+            NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+                kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
+            kernel<<<grid, block, dshmem_size, stream>>>(tensor_map_input, args, noop_ptr, rows,
+                                                         cols, scale_stride_row);
+          })));
   NVTE_CHECK_CUDA(cudaGetLastError());
 #else
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
@@ -1872,6 +1903,7 @@ inline void group_row_scaled_cast_graph_safe(const GroupedTensor *input, const T
              TunableConfig::CHUNK_DIM_Y, " (got ", capacity_rows, ").");
 
   const bool return_transpose = output->has_columnwise_data();
+  const bool with_gemm_swizzled = output->with_gemm_swizzled_scales;
   NVTE_CHECK(output->scale_inv.dptr != nullptr, "Graph-safe cast requires rowwise scales.");
   NVTE_CHECK(output->amax.dptr != nullptr, "Graph-safe cast requires rowwise amax.");
   // Per-row scale stride, from a 2D [rows, stride] scale or a flat 1D buffer.
@@ -1932,21 +1964,25 @@ inline void group_row_scaled_cast_graph_safe(const GroupedTensor *input, const T
 
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
       use_fast_math, USE_FAST_MATH,
-      TRANSFORMER_ENGINE_SWITCH_CONDITION(return_transpose, RETURN_TRANSPOSE, {
-        const int out_mem_colwise_data = RETURN_TRANSPOSE ? buff_size_aligned_out_t : 0;
-        const int out_scales_transpose_mem = RETURN_TRANSPOSE ? buff_size_scales_transpose : 0;
-        const int dshmem_size = buff_size_aligned_in + buff_size_aligned_out +
-                                out_mem_colwise_data + buff_size_scales + out_scales_transpose_mem +
-                                TMA_SHMEM_ALIGNMENT;
-        auto kernel = group_row_scaled_cast_nvfp4_graph_safe_kernel<ScaleType, USE_FAST_MATH,
-                                                                    RETURN_TRANSPOSE>;
-        NVTE_CHECK_CUDA(
-            cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
-        kernel<<<grid, block, dshmem_size, stream>>>(tensor_map_input, q_row_all, s_dec_row_all,
-                                                     row_amax_all, q_col_all, s_dec_col_all,
-                                                     col_amax_all, offsets_ptr, first_dims_ptr,
-                                                     num_tensors, noop_ptr, cols, scale_stride_row);
-      }));
+      TRANSFORMER_ENGINE_SWITCH_CONDITION(
+          return_transpose, RETURN_TRANSPOSE,
+          TRANSFORMER_ENGINE_SWITCH_CONDITION(with_gemm_swizzled, WITH_GEMM_SWIZZLED_SCALES, {
+            const int out_mem_colwise_data = RETURN_TRANSPOSE ? buff_size_aligned_out_t : 0;
+            const int out_scales_transpose_mem = RETURN_TRANSPOSE ? buff_size_scales_transpose : 0;
+            const int dshmem_size =
+                buff_size_aligned_in + buff_size_aligned_out + out_mem_colwise_data +
+                buff_size_scales + out_scales_transpose_mem + TMA_SHMEM_ALIGNMENT;
+            auto kernel =
+                group_row_scaled_cast_nvfp4_graph_safe_kernel<ScaleType, USE_FAST_MATH,
+                                                              RETURN_TRANSPOSE,
+                                                              WITH_GEMM_SWIZZLED_SCALES>;
+            NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+                kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
+            kernel<<<grid, block, dshmem_size, stream>>>(
+                tensor_map_input, q_row_all, s_dec_row_all, row_amax_all, q_col_all, s_dec_col_all,
+                col_amax_all, offsets_ptr, first_dims_ptr, num_tensors, noop_ptr, cols,
+                scale_stride_row);
+          })));
   NVTE_CHECK_CUDA(cudaGetLastError());
 #else
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
