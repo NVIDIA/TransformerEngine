@@ -74,6 +74,23 @@ _print_rank = int(os.getenv("NVTE_PRINT_RANK", "0"))
 _cu_seqlens_cache = {}
 
 
+def fa4_window_size(
+    window_size: Optional[Tuple[int, int]],
+) -> Optional[Tuple[Optional[int], Optional[int]]]:
+    """Convert TE's unlimited-window sentinel to the FA4 API convention."""
+    if window_size is None:
+        return None
+    left, right = window_size
+    return None if left == -1 else left, None if right == -1 else right
+
+
+def normalize_fa4_window_kwargs(kwargs: Dict[str, Any]) -> None:
+    """Map unlimited left and right windows before a raw FA4 call."""
+    for key in ("window_size_left", "window_size_right"):
+        if kwargs.get(key) == -1:
+            kwargs[key] = None
+
+
 class AttentionLogging:
     """
     Manage logging for attention module

@@ -1316,7 +1316,7 @@ class FlashAttention(torch.nn.Module):
                         fa_optional_forward_args_thd.append(max_seqlen_kv)
                 if use_flash_attn_4:
                     fa_4_optional_forward_kwargs = {
-                        "window_size": window_size,
+                        "window_size": dpa_utils.fa4_window_size(window_size),
                         "num_splits": num_splits,
                     }
                     if inference_params is None:
