@@ -173,8 +173,9 @@ General
    :Default: ``4096``
    :Description: Maximum number of live expert-parallel handles cached by ``handle_mem``
                  address; preparing one more raises an error. Entries are released by
-                 ``ep_finalize``. ``-1`` means unlimited; ``0`` is invalid.
-                 Not used under JAX, where handles are never cached.
+                 ``ep_finalize``. ``-1`` means unlimited; ``0`` disables the cache so
+                 ``handle_mem`` may be relocated between calls, which requires the
+                 ``*_v2`` ops. JAX sets this to ``0``.
 
 Attention Backend Selection
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^

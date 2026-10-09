@@ -315,26 +315,15 @@ ncclEpHandle_t EPBackend::acquire_step_handle_locked(void* handle_mem, size_t ha
                                                      int num_tokens,
                                                      const NVTEEpLayerConfig* layer_cfg,
                                                      bool* owned) {
-  if (group_config_.volatile_handle_mem) {
-    NVTE_CHECK(layer_cfg != nullptr,
-               "EP op: layer_cfg is required when the backend was bootstrapped with "
-               "NVTEEpGroupConfig::volatile_handle_mem set");
-    NVTE_CHECK(index_.empty(),
-               "EP: handle cache is populated but volatile_handle_mem is set; "
-               "cached and imported handles cannot be mixed");
+  if (layer_cfg != nullptr) {
     *owned = true;
     return import_handle_locked(handle_mem, handle_mem_size, num_tokens, *layer_cfg);
   }
+  NVTE_CHECK(cache_cap_locked() > 0,
+             "EP op without layer_cfg requires the handle cache; use the *_v2 ops when "
+             "NVTE_EP_HANDLE_CACHE_SIZE=0");
   *owned = false;
-  ncclEpHandle_t h = lookup_handle_locked(handle_mem, handle_mem_size);
-  if (layer_cfg != nullptr) {
-    const NVTEEpLayerConfig& cached = index_.find(handle_mem)->second->layer_cfg;
-    NVTE_CHECK(
-        layer_cfg->top_k == cached.top_k && layer_cfg->dispatch_output_per_expert_alignment ==
-                                                cached.dispatch_output_per_expert_alignment,
-        "EP op: layer_cfg does not match the config handle_mem was prepared with");
-  }
-  return h;
+  return lookup_handle_locked(handle_mem, handle_mem_size);
 }
 
 // ---------------------------------------------------------------------------
@@ -405,16 +394,14 @@ void EPBackend::init(ncclComm_t ep_comm, NVTEEpGroupConfig group_config) {
 // ---------------------------------------------------------------------------
 
 size_t EPBackend::cache_cap_locked() {
-  if (handle_cache_cap_ == 0) {
+  if (!handle_cache_cap_set_) {
+    handle_cache_cap_set_ = true;
     const char* cap_env = std::getenv("NVTE_EP_HANDLE_CACHE_SIZE");
     if (cap_env != nullptr) {
       const int64_t v = static_cast<int64_t>(std::atol(cap_env));
       if (v < 0) {
         handle_cache_cap_ = SIZE_MAX;
       } else {
-        NVTE_CHECK(v > 0,
-                   "NVTE_EP_HANDLE_CACHE_SIZE=0 is invalid; use -1 for unlimited or a positive "
-                   "cap.");
         handle_cache_cap_ = static_cast<size_t>(v);
       }
     } else {
@@ -465,8 +452,8 @@ ncclEpHandle_t EPBackend::lookup_handle_locked(void* handle_mem, size_t handle_m
                it->second->handle_mem_size);
     return it->second->handle;
   }
-  // Callers whose handle_mem address is not stable should set
-  // NVTEEpGroupConfig::volatile_handle_mem instead of relying on this cache.
+  // Callers whose handle_mem address is not stable should use the *_v2 ops with
+  // NVTE_EP_HANDLE_CACHE_SIZE=0 instead of relying on this cache.
   const uintptr_t hm_addr = reinterpret_cast<uintptr_t>(handle_mem);
   NVTE_ERROR("ep op on handle_mem=0x", hm_addr,
              " with no cached entry; call nvte_ep_prepare first.");
@@ -535,8 +522,8 @@ void EPBackend::prepare(NVTETensor handle_mem, const NVTETensor topk_idx,
 
   std::lock_guard<std::mutex> lock(mutex_);
   NVTE_CHECK(initialized_, "EPBackend not initialized");
-  if (group_config_.volatile_handle_mem) {
-    // volatile_handle_mem: do not cache; later ops rebind via ncclEpImportHandle.
+  if (cache_cap_locked() == 0) {
+    // Cache disabled: later ops rebind via ncclEpImportHandle.
     ScopedHandle guard(open_handle(hm_ptr, nvte_tensor_size_bytes(handle_mem), layer_cfg.top_k,
                                    layer_cfg.dispatch_output_per_expert_alignment),
                        /*owned=*/true);
@@ -696,8 +683,8 @@ void EPBackend::prepare_and_dispatch(
   // fused path stays active, then wire both tensors into the dispatch below.
   std::lock_guard<std::mutex> lock(mutex_);
   NVTE_CHECK(initialized_, "EPBackend not initialized");
-  if (group_config_.volatile_handle_mem) {
-    // volatile_handle_mem: use a fresh uncached handle for both steps.
+  if (cache_cap_locked() == 0) {
+    // Cache disabled: use a fresh uncached handle for both steps.
     ScopedHandle guard(open_handle(hm_ptr, nvte_tensor_size_bytes(handle_mem), layer_cfg.top_k,
                                    layer_cfg.dispatch_output_per_expert_alignment),
                        /*owned=*/true);
