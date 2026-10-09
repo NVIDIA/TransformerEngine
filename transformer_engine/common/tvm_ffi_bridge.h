@@ -64,6 +64,12 @@ inline DLDataType convert_to_dltype(NVTEDType type) {
   }
 }
 
+inline NVTEBasicTensor make_basic_tensor(void *dptr, DType dtype,
+                                         const std::vector<size_t> &shape) {
+  return NVTEBasicTensor{dptr, static_cast<NVTEDType>(dtype),
+                         nvte_make_shape(shape.data(), shape.size())};
+}
+
 class DLTensorWrapper : public DLTensor {
  public:
   static constexpr int kMaxNDim = sizeof(NVTEShape::data) / sizeof(NVTEShape::data[0]);

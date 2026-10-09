@@ -32,6 +32,7 @@
 #include "../nvfp4/quantize_transpose_nvfp4.cuh"
 
 #ifdef NVTE_WITH_CUTEDSL
+#include "../mxfp8/group_quantize_mxfp8_cutedsl.cuh"
 #include "../mxfp8/quantize_mxfp8_cutedsl.cuh"
 #endif
 
@@ -541,9 +542,19 @@ void group_quantize_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTensor 
       break;
     }
     case NVTE_MXFP8_1D_SCALING: {
-      mxfp8::group_quantize</*IS_DBIAS=*/false, /*IS_DACT=*/false, IS_ACT, ParamOP, OP>(
-          input_tensor, activations_tensor, noop_tensor, output_tensor, dbias_tensor,
-          workspace_tensor, &quant_config_cpp, stream);
+      bool quantized_with_cutedsl = false;
+#ifdef NVTE_WITH_CUTEDSL
+      quantized_with_cutedsl =
+          cutedsl_backend::mxfp8_group_quantize_cutedsl</*IS_DBIAS=*/false, /*IS_DACT=*/false,
+                                                        IS_ACT, ParamOP, OP>(
+              input_tensor, activations_tensor, noop_tensor, output_tensor, dbias_tensor,
+              workspace_tensor, &quant_config_cpp, stream);
+#endif
+      if (!quantized_with_cutedsl) {
+        mxfp8::group_quantize</*IS_DBIAS=*/false, /*IS_DACT=*/false, IS_ACT, ParamOP, OP>(
+            input_tensor, activations_tensor, noop_tensor, output_tensor, dbias_tensor,
+            workspace_tensor, &quant_config_cpp, stream);
+      }
       break;
     }
     case NVTE_BLOCK_SCALING_1D: {
@@ -636,9 +647,19 @@ void group_quantize_bwd_helper(const NVTEGroupedTensor grad, const NVTEGroupedTe
   // Dispatch to quantization kernel depending on data format
   switch (scaling_mode) {
     case NVTE_MXFP8_1D_SCALING: {
-      mxfp8::group_quantize<IS_DBIAS, IS_DACT, /*IS_ACT=*/false, ParamOP, OP>(
-          grad_tensor, input_tensor, noop_tensor, output_tensor, dbias_tensor, workspace_tensor,
-          &quant_config_cpp, stream);
+      bool quantized_with_cutedsl = false;
+#ifdef NVTE_WITH_CUTEDSL
+      quantized_with_cutedsl =
+          cutedsl_backend::mxfp8_group_quantize_cutedsl<IS_DBIAS, IS_DACT, /*IS_ACT=*/false,
+                                                        ParamOP, OP>(
+              grad_tensor, input_tensor, noop_tensor, output_tensor, dbias_tensor, workspace_tensor,
+              &quant_config_cpp, stream);
+#endif
+      if (!quantized_with_cutedsl) {
+        mxfp8::group_quantize<IS_DBIAS, IS_DACT, /*IS_ACT=*/false, ParamOP, OP>(
+            grad_tensor, input_tensor, noop_tensor, output_tensor, dbias_tensor, workspace_tensor,
+            &quant_config_cpp, stream);
+      }
       break;
     }
     case NVTE_BLOCK_SCALING_1D:
