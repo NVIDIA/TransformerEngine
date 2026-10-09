@@ -68,20 +68,20 @@ def _quantize_rowwise(
     for row_idx in cutlass.range_constexpr(ELEMENTS_Y_PER_THREAD):
         rX_row_i32 = cute.recast_tensor(rX[None, row_idx], Int32)
         reciprocal = bf16_mx_scale_reciprocal(extract_mx_block_amax(rX_row_i32), MAX_EXPONENT)
-        reciprocal_packed = reciprocal | (reciprocal << Uint32(16))
-        for pack_idx in cutlass.range_constexpr(cute.size(rO_row_u32)):
+        reciprocal_pair = reciprocal | (reciprocal << Uint32(16))
+        for pack_idx in cutlass.range_constexpr(cute.size(rO_row_u32)): # 4 output bytes in one pack
             rO_row_u32[pack_idx] = scale_and_pack(
                 rX_row_i32[2 * pack_idx],
-                reciprocal_packed,
+                reciprocal_pair,
                 rX_row_i32[2 * pack_idx + 1],
-                reciprocal_packed,
+                reciprocal_pair,
             )
         # rO_row_u32 and rO_row share the same memory
         cute.copy(
             output_store_atom, rO_row, gO_row_thread[(None, row_idx),], cache_policy=cache_policy
         )
         if is_writer_thread:
-            rS_row[0] = Uint8(bf16_mx_scale_bytes_pair(reciprocal_packed)).bitcast(SCALE_DTYPE)
+            rS_row[0] = Uint8(bf16_mx_scale_bytes_pair(reciprocal_pair)).bitcast(SCALE_DTYPE)
             cute.copy(
                 row_scale_store_atom,
                 rS_row,
@@ -120,10 +120,9 @@ def _gather_partial_colwise_amaxes(
             amax = abs_max_x2_bf16(amax, rX_i32[bf16x2_idx, row_idx])
         rAmax_col_i32[bf16x2_idx] = amax
 
-    if cutlass.const_expr(ELEMENTS_X_PER_THREAD == 16):
-        scratch_swizzle = cute.make_swizzle(3, 1, 5)
-    else:
-        scratch_swizzle = cute.make_swizzle(2, 1, 5)
+    # Keep eight BF16 values (16 bytes) contiguous. XOR BF16 offset bit 6 into
+    # bit 3 so each 128-bit warp transaction uses all 32 banks without overlap.
+    scratch_swizzle = cute.make_swizzle(1, 3, 3)
 
     # Prepare amax reduction scratch space in SMEM.
     sAmaxs_col_scratch_layout = cute.make_composed_layout(
@@ -131,7 +130,7 @@ def _gather_partial_colwise_amaxes(
         0,
         cute.zipped_product(
             rAmax_col.layout,  # Each thread contributes (ELEMENTS_X_PER_THREAD,)
-            cute.make_layout((CTA_THREADS_Y, CTA_THREADS_X)), # Total threads in the CTA
+            cute.make_layout((CTA_THREADS_Y, CTA_THREADS_X)),  # Total threads in the CTA
         ),
     )
     allocator = cutlass.memory.SmemAllocator()
@@ -156,11 +155,10 @@ def _reduce_partial_colwise_amaxes(
     ELEMENTS_X_PER_THREAD: cutlass.Constexpr[int],
     DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
     FP8_DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
-) -> None:
+) -> cute.Tensor:
     """
     sAmaxs_col_scratch: the SMEM buffer of layout (ELEMENTS_X_PER_THREAD, (CTA_THREADS_Y, CTA_THREADS_X))
         that contains each threads' own columnwise amax of its ELEMENTS_X_PER_THREAD columns
-    rS_col_rcp: the RMEM fragment of this thread's columnwise scale reciprocals with shape (ELEMENTS_X_PER_THREAD,)
 
     This function reduces the partial amax buffer of layout (ELEMENTS_X_PER_THREAD, (CTA_THREADS_Y, CTA_THREADS_X))
     along the Y axis, to a single columnwise scale SMEM buffer of layout (ELEMENTS_X_PER_THREAD * CTA_THREADS_X),
@@ -175,13 +173,11 @@ def _reduce_partial_colwise_amaxes(
     REDUCTION_THREADS_NUM = CTA_THREADS_X * ELEMENTS_X_PER_THREAD // 2
     is_reduction_thread = tidx < REDUCTION_THREADS_NUM
     # How many bf16x2 pairs we need to reduce
-    REDUCTION_i32_PACKS = TILE_COLS // REDUCTION_THREADS_NUM // 2
+    REDUCTION_i32_PAIRS = TILE_COLS // REDUCTION_THREADS_NUM // 2
 
-    # Allocate colwise scale SMEM buffer with swizzling
-    if cutlass.const_expr(ELEMENTS_X_PER_THREAD == 16):
-        scratch_swizzle = cute.make_swizzle(3, 1, 5)
-    else:
-        scratch_swizzle = cute.make_swizzle(2, 1, 5)
+    # Use the same 16-byte swizzle as the partial-max scratch. Consecutive
+    # column-pair reducers still access distinct banks through this layout.
+    scratch_swizzle = cute.make_swizzle(1, 3, 3)
     # SMEM buffer for colwise scale reduction where mode 0 is how many reciprocals a thread has,
     # and mode 1 is how many threads we have in X axis, and the layout size is just TILE_COLS
     sS_col_layout = cute.make_composed_layout(
@@ -196,22 +192,22 @@ def _reduce_partial_colwise_amaxes(
     sS_col = allocator.allocate_tensor(DTYPE, sS_col_layout, byte_alignment=16)
     sS_col_i32 = cute.recast_tensor(sS_col, Int32)
 
-    # Colwise amaxes layout: each reduction thread owns CTA_THREADS_Y rows, with REDUCTION_i32_PACKS column packs
+    # Colwise amaxes layout: each reduction thread owns CTA_THREADS_Y rows, with REDUCTION_i32_PAIRS column pairs
     _, tv_col_amaxes_layout = cute.make_layout_tv(
         thr_layout=cute.make_layout((REDUCTION_THREADS_NUM, 1), stride=(1, REDUCTION_THREADS_NUM)),
         val_layout=cute.make_layout(
-            (REDUCTION_i32_PACKS, CTA_THREADS_Y), stride=(1, REDUCTION_i32_PACKS)
+            (REDUCTION_i32_PAIRS, CTA_THREADS_Y), stride=(1, REDUCTION_i32_PAIRS)
         ),
     )
-    # Colwise rcp layout: each reduction thread owns only 1 row, with REDUCTION_i32_PACKS column packs
+    # Colwise rcp layout: each reduction thread owns only 1 row, with REDUCTION_i32_PAIRS column pairs
     _, tv_col_rcp_layout = cute.make_layout_tv(
         thr_layout=cute.make_layout((REDUCTION_THREADS_NUM, 1), stride=(1, REDUCTION_THREADS_NUM)),
-        val_layout=cute.make_layout((REDUCTION_i32_PACKS, 1), stride=(1, REDUCTION_i32_PACKS)),
+        val_layout=cute.make_layout((REDUCTION_i32_PAIRS, 1), stride=(1, REDUCTION_i32_PAIRS)),
     )
-    
+
     sS_col_i32 = cute.composition(sS_col_i32, tv_col_rcp_layout)
 
-    # Each reduction process `REDUCTION_i32_PACKS` bf16x2 packs by visiting all rows (CTA_THREADS_Y)
+    # Each reduction process `REDUCTION_i32_PAIRS` bf16x2 pairs by visiting all rows (CTA_THREADS_Y)
     # to extract the amax of that column
     sAmaxs_col_scratch_i32 = cute.recast_tensor(sAmaxs_col_scratch, Int32)
     MAX_EXPONENT = 8 if FP8_DTYPE is cutlass.Float8E4M3FN else 15
@@ -222,23 +218,21 @@ def _reduce_partial_colwise_amaxes(
         # Expose the thread's value mode as (partial rows, column pairs).
         sAmaxs_col_frag_i32 = cute.composition(
             sAmaxs_col_frag_i32,
-            cute.make_layout((CTA_THREADS_Y, REDUCTION_i32_PACKS), stride=(REDUCTION_i32_PACKS, 1)),
+            cute.make_layout((CTA_THREADS_Y, REDUCTION_i32_PAIRS), stride=(REDUCTION_i32_PAIRS, 1)),
         )
 
-        # Iterative over all packed columns
-        for pack_idx in cutlass.range_constexpr(REDUCTION_i32_PACKS):
-            # Select the packed column
-            sAmaxs_col_frag_i32_rows = sAmaxs_col_frag_i32[None, pack_idx]
+        # Iterative over all column pairs
+        for pair_idx in cutlass.range_constexpr(REDUCTION_i32_PAIRS):
+            # Select the pair column
+            sAmaxs_col_frag_i32_rows = sAmaxs_col_frag_i32[None, pair_idx]
 
-            # Reduce across all rows' partial amaxes to obtain the columnwise amax for this column pack
+            # Reduce across all rows' partial amaxes to obtain the columnwise amax for this column pair
             amaxX2 = sAmaxs_col_frag_i32_rows[0]
             for scratch_row_idx in cutlass.range_constexpr(1, CTA_THREADS_Y):
                 amaxX2 = abs_max_x2_bf16(amaxX2, sAmaxs_col_frag_i32_rows[scratch_row_idx])
 
-            # Obtain the columnwise scale reciprocal for this column pack
-            sS_col_i32[tidx, pack_idx] = bf16_mx_scale_reciprocal_pair(
-                amaxX2, MAX_EXPONENT
-            )
+            # Obtain the columnwise scale reciprocal for this column pair
+            sS_col_i32[tidx, pair_idx] = bf16_mx_scale_reciprocal_pair(amaxX2, MAX_EXPONENT)
     cute.arch.sync_threads()
 
     return sS_col
@@ -273,12 +267,11 @@ def _write_colwise_scale(
         rS_col = cute.make_rmem_tensor((ELEMENTS_X_PER_THREAD,), SCALE_DTYPE)
         rS_col_u32 = cute.recast_tensor(rS_col, Uint32)
         # Get the colwise scale from the reciprocal
-        for packed_idx in cutlass.range_constexpr(cute.size(rS_col_u32)):
-            rS_col_u32[packed_idx] = bf16_mx_scale_bytes_pair(rS_col_rcp_u32[2 * packed_idx]) | (
-                bf16_mx_scale_bytes_pair(rS_col_rcp_u32[2 * packed_idx + 1]) << Uint32(16)
+        for pack_idx in cutlass.range_constexpr(cute.size(rS_col_u32)): # 4 output bytes in one pack
+            rS_col_u32[pack_idx] = bf16_mx_scale_bytes_pair(rS_col_rcp_u32[2 * pack_idx]) | (
+                bf16_mx_scale_bytes_pair(rS_col_rcp_u32[2 * pack_idx + 1]) << Uint32(16)
             )
-        # Use RMEM buffer to stash the columnwise scale in packed bytes and flush it to GMEM
-        # using vectorized store at once
+        # Use RMEM buffer to stash the columnwise scale and flush it to GMEM using vectorized store at once
         cute.copy(col_scale_atom, rS_col, gS_col_thread, cache_policy=cache_policy)
 
 
@@ -313,12 +306,12 @@ def _quantize_colwise(
     # Each thread quantizes its own rows with the columnwise reciprocals and write its output to GMEM.
     for row_idx in cutlass.range_constexpr(ELEMENTS_Y_PER_THREAD):
         rX_row_i32 = cute.recast_tensor(rX[None, row_idx], Int32)
-        for packed_idx in cutlass.range_constexpr(cute.size(rO_col_u32)): # 4 values in one pack
-            rO_col_u32[packed_idx] = scale_and_pack(
-                rX_row_i32[2 * packed_idx],
-                rS_col_rcp_u32[2 * packed_idx],
-                rX_row_i32[2 * packed_idx + 1],
-                rS_col_rcp_u32[2 * packed_idx + 1],
+        for pack_idx in cutlass.range_constexpr(cute.size(rO_col_u32)):  # 4 output bytes in one pack
+            rO_col_u32[pack_idx] = scale_and_pack(
+                rX_row_i32[2 * pack_idx],
+                rS_col_rcp_u32[2 * pack_idx],
+                rX_row_i32[2 * pack_idx + 1],
+                rS_col_rcp_u32[2 * pack_idx + 1],
             )
         cute.copy(store_atom, rO_col, gO_col_thread[(None, row_idx),], cache_policy=cache_policy)
 
@@ -451,7 +444,6 @@ def quantize_bidimensional_mxfp8_g2r(
     )
 
     sS_col = _reduce_partial_colwise_amaxes(
-        rS_col_rcp,
         sAmaxs_col_scratch,
         CTA_THREADS_Y=CTA_THREADS_Y,
         CTA_THREADS_X=CTA_THREADS_X,
