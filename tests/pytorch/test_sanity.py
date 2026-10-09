@@ -605,8 +605,6 @@ def test_sanity_grouped_linear(
     # Small batch size used to catch bug from https://github.com/NVIDIA/TransformerEngine/pull/1527.
     bs = bs * 16
     num_tokens = bs * config.max_seqlen_q * (num_gemms - 1)
-    if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0" and single_param:
-        pytest.skip("single parameter grouped linear requires NVTE_GROUPED_LINEAR_SINGLE_PARAM=1")
     skip_unsupported_backward_override("grouped_linear", fp8_recipe, backward_override)
     if fp8_recipe is not None:
         fp8_recipe = copy.deepcopy(fp8_recipe)
@@ -1358,9 +1356,8 @@ def test_quantized_param_attrs_survive_apply(move):
 
 
 @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
-def test_grouped_linear_single_param_preserves_high_precision_init(monkeypatch):
+def test_grouped_linear_single_param_preserves_high_precision_init():
     """Grouped MXFP8 and discrete weights produce identical FP32 master initialization."""
-    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
     num_gemms = 3
 
     def make_module(single_grouped_weight):
@@ -1411,9 +1408,8 @@ def test_grouped_linear_single_param_preserves_high_precision_init(monkeypatch):
 
 
 @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
-def test_grouped_linear_rejects_partial_high_precision_init(monkeypatch):
+def test_grouped_linear_rejects_partial_high_precision_init():
     """Packing fails rather than mixing preserved and dequantized initialization."""
-    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
     with quantized_model_init(
         enabled=True,
         recipe=recipe.MXFP8BlockScaling(),

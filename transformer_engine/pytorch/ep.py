@@ -101,6 +101,10 @@ class EpConfig:
     carries the tokens, and a backend that needs transport settings of its own
     (an ``EpBuffer``'s receive capacity, alignment, payload dtype, zero-copy and
     overflow policy) is configured with them directly.
+
+    ``alignment`` defaults to 256 tokens per expert to support grouped MLP
+    fusion. Configure the backend with the same alignment and include padding
+    in ``recv_capacity_per_rank``.
     """
 
     top_k: int
@@ -109,7 +113,7 @@ class EpConfig:
     max_tokens_per_rank: int
     recv_capacity_per_rank: Optional[int]
     ep_group: dist.ProcessGroup
-    alignment: int = 0
+    alignment: int = 256
     payload_dtype: torch.dtype = torch.bfloat16
     zero_copy: bool = False
     drop_on_overflow: bool = False
@@ -306,6 +310,8 @@ class EpBuffer:
     """Per-microbatch EP layer state: handle_mem, tokens_per_expert, and shape/dtype config.
 
     Use one EpBuffer per concurrently-in-flight call (e.g. per PP-1F1B microbatch).
+    ``alignment`` defaults to 256 tokens per expert to support grouped MLP
+    fusion. ``recv_capacity_per_rank`` must accommodate the padded token counts.
     """
 
     __slots__ = (
@@ -334,7 +340,7 @@ class EpBuffer:
         hidden_dim: int,
         num_local_experts: int,
         recv_capacity_per_rank: Optional[int] = None,
-        alignment: int = 0,
+        alignment: int = 256,
         payload_dtype: torch.dtype = torch.bfloat16,
         device: Optional[torch.device] = None,
         dispatch_fwd_quant_recipe: Optional["Recipe"] = None,

@@ -1124,10 +1124,15 @@ def main() -> None:
     if args.compile and not args.parallel:
         parser.error("--compile requires --parallel")
     if args.parallel:
-        if args.compile:
-            run_compile_parallel_tests()
-        else:
-            run_parallel_tests()
+        try:
+            if args.compile:
+                run_compile_parallel_tests()
+            else:
+                run_parallel_tests()
+        finally:
+            # Stop NCCL background work before the CUDA runtime shuts down.
+            if torch.distributed.is_initialized():
+                torch.distributed.destroy_process_group()
 
 
 if __name__ == "__main__":

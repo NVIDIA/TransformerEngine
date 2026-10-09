@@ -538,8 +538,6 @@ def _pack_grouped_linear_bias_for_cudnn(linear_op: GroupedLinear) -> Optional[to
 @functools.lru_cache(maxsize=1)
 def _grouped_gemm_dsrelu_backward_supported() -> bool:
     """Whether the cuDNN FE grouped GEMM dSReLU backward wrapper is available."""
-    if int(os.environ.get("NVTE_CUTEDSL_FUSED_GROUPED_MLP", "0")) <= 0:
-        return False
     if get_device_compute_capability()[0] != 10:
         return False
     if not _cudnn_frontend_supports_grouped_gemm_srelu():
@@ -1005,6 +1003,29 @@ def validate_grouped_mlp_dims(fc1, activation_op, fc2) -> None:
         )
 
 
+def _is_grouped_mlp_fusion_candidate(
+    ops: list[FusibleOperation],
+    recipe: Optional[Recipe],
+    activation_op_types: tuple[type[FusibleOperation]],
+) -> bool:
+    """Check whether the recipe and operation pattern support grouped MLP fusion."""
+    if len(ops) < 3 or recipe is None or not (recipe.mxfp8() or recipe.nvfp4()):
+        return False
+    # NVFP4 graph-safe grouped quantize currently requires RHT.
+    if recipe.nvfp4() and recipe.disable_rht:
+        return False
+    # The fused MXFP8 backward reinterprets grad-output storage as E4M3. It
+    # cannot consume E5M2 gradients from Format.HYBRID. NVFP4 has separate formats.
+    if recipe.mxfp8() and get_fp8_torch_dtype(recipe, fprop_tensor=False) != torch.float8_e4m3fn:
+        return False
+    return any(
+        isinstance(fc1, GroupedLinear)
+        and isinstance(activation, activation_op_types)
+        and isinstance(fc2, GroupedLinear)
+        for fc1, activation, fc2 in zip(ops, ops[1:], ops[2:])
+    )
+
+
 def fuse_grouped_mlp_ops(
     ops: list[FusibleOperation],
     *,
@@ -1030,20 +1051,6 @@ def fuse_grouped_mlp_ops(
         Updated operations with matched triples replaced by fused ops.
     """
     if not fused_op_cls.is_supported():
-        return ops
-
-    # Fused kernels are only supported for MXFP8 and NVFP4
-    if recipe is None:
-        return ops
-    if recipe.custom():
-        # Check if custom recipe explicitly enables fusion
-        if not getattr(recipe, "enable_cutedsl_fused_grouped_mlp", False):
-            return ops
-    elif not (recipe.mxfp8() or recipe.nvfp4()):
-        return ops
-
-    # MXFP8 kernel assumes E4M3 data, so reject hybrid E4M3/E5M2 data
-    if recipe.mxfp8() and get_fp8_torch_dtype(recipe, fprop_tensor=False) != torch.float8_e4m3fn:
         return ops
 
     # Check for unsupported NVFP4 recipe configs
@@ -1179,8 +1186,6 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
     @functools.lru_cache(maxsize=None)
     def is_supported(cls) -> bool:
         """Whether this fused operation is supported on the current system."""
-        if int(os.environ.get("NVTE_CUTEDSL_FUSED_GROUPED_MLP", "0")) <= 0:
-            return False
         if get_device_compute_capability()[0] != 10:
             return False
         if not _cudnn_frontend_version_supported():
@@ -3209,6 +3214,12 @@ def fuse_glu_ops(
 ) -> list[FusibleOperation]:
     """Apply joint GroupedLinear + scaled GLU + GroupedLinear fusion."""
 
+    # Keep capability probes out of tracing for unrelated operation sequences.
+    if not _is_grouped_mlp_fusion_candidate(
+        ops, recipe, (ScaledSwiGLU, ScaledClampedQGeGLU, ScaledSiTUGLU)
+    ):
+        return ops
+
     # Determine supported activations
     activation_op_types = []
     device_arch = get_device_compute_capability()
@@ -3240,6 +3251,13 @@ def fuse_unary_activation_ops(
 ) -> list[FusibleOperation]:
     """Apply joint GroupedLinear + scaled unary activation + GroupedLinear fusion."""
 
+    # Keep capability probes out of tracing for unrelated operation sequences.
+    if not _is_grouped_mlp_fusion_candidate(ops, recipe, (ScaledSReLU, ScaledTanhSReLU)):
+        return ops
+
+    if not GroupedMLP_CuTeGEMMUnary.is_supported():
+        return ops
+
     # Determine supported activations
     activation_op_types = [ScaledSReLU]
     if _cudnn_frontend_supports_grouped_gemm_srelu_tanh():
@@ -3253,8 +3271,5 @@ def fuse_unary_activation_ops(
     )
 
 
-# Register joint fusions if available.
-if GroupedMLP_CuTeGEMMGLU.is_supported():
-    register_forward_backward_fusion(fuse_glu_ops, prepend=True)
-if GroupedMLP_CuTeGEMMUnary.is_supported():
-    register_forward_backward_fusion(fuse_unary_activation_ops, prepend=True)
+register_forward_backward_fusion(fuse_glu_ops, prepend=True)
+register_forward_backward_fusion(fuse_unary_activation_ops, prepend=True)
