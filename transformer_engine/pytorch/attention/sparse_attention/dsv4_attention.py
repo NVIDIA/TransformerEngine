@@ -24,6 +24,30 @@ def _compiled_q_rms_norm(q: torch.Tensor, eps: float) -> torch.Tensor:
     return torch.nn.functional.rms_norm(q, (q.shape[-1],), eps=eps)
 
 
+def _packed_prefixes(hidden_states, cu_seqlens, max_seqlen, ratio):
+    """Lower packed metadata to complete-block prefixes and a safe row capacity."""
+    if (
+        not isinstance(cu_seqlens, torch.Tensor)
+        or cu_seqlens.dtype != torch.int32
+        or cu_seqlens.ndim != 1
+        or cu_seqlens.numel() < 2
+        or not cu_seqlens.is_contiguous()
+        or cu_seqlens.device != hidden_states.device
+    ):
+        raise ValueError("THD requires contiguous INT32 cu_seqlens_q [B+1] on the input device.")
+    if not isinstance(max_seqlen, int) or max_seqlen < ratio:
+        raise ValueError("THD requires integer max_seqlen_q >= compression_ratio.")
+    # The sum of per-sequence floors can be smaller than floor(T / ratio).
+    # Allocate that safe capacity without reading CUDA prefix contents on host;
+    # cuDNN uses the true device prefix to exclude unused trailing rows.
+    lengths = cu_seqlens[1:] - cu_seqlens[:-1]
+    cu_comp = torch.cat((cu_seqlens.new_zeros(1), (lengths // ratio).cumsum(0, dtype=torch.int32)))
+    total_comp = hidden_states.shape[0] // ratio
+    if not total_comp:
+        raise ValueError("Sequences must contain at least one complete compression window.")
+    return cu_comp, total_comp, max_seqlen
+
+
 class DSv4Attention(torch.nn.Module):
     """Experimental causal joint local + compressed attention for DSv4.
 
@@ -91,20 +115,21 @@ class DSv4Attention(torch.nn.Module):
 
 
 class DSv4HybridAttention(torch.nn.Module):
-    """DSv4 CSA/HCA attention from unpadded ``[S,B,D]`` to ``[S,B,D]``.
+    """DSv4 CSA/HCA attention in ``sbd``, ``bsd``, or packed ``thd`` format.
 
     This first-pass layer handles full-sequence BF16 attention forward/backward
     on SM100. By default, projections that share an input use one contiguous
     TE Linear weight and split its output before the separate DSv4 operations.
     It uses TE Linear/RMSNorm, the cuDNN DSv4 compressor and selector, and the
     existing parameter-free cuDNN attention core. Sequences in a batch have
-    the same length and start at position zero. The model has 64 heads of width
+    the same length in dense formats; THD accepts unequal lengths as ``[T,D]``.
+    Every sequence starts at position zero. The model has 64 heads of width
     512; CSA index heads have width 128, matching the current cuDNN kernels.
     The low-level core's 576-wide Q/K mode returns only 512 value channels,
     which has no verified output-unrotation contract here. Cache/decode,
-    padding, TP/CP, FP8, sliding-only attention, and the indexer auxiliary
-    loss are unsupported. In CSA, top-k is discrete; the indexer projections
-    do not receive gradients from the returned hidden states alone.
+    physical inter-sequence padding, TP/SP/CP, FP8, sliding-only attention, and
+    the indexer auxiliary loss are unsupported. In CSA, top-k is discrete;
+    the indexer projections do not receive gradients from the returned hidden states alone.
     """
 
     def __init__(
@@ -136,8 +161,8 @@ class DSv4HybridAttention(torch.nn.Module):
         self.index_head_dim = 128
         if layer_type not in ("compressed_sparse_attention", "heavily_compressed_attention"):
             raise ValueError("Only DSv4 CSA and HCA are supported.")
-        if input_format not in ("sbd", "bsd"):
-            raise ValueError("input_format must be 'sbd' or 'bsd'.")
+        if input_format not in ("sbd", "bsd", "thd"):
+            raise ValueError("input_format must be 'sbd', 'bsd', or 'thd'.")
         if head_dim != 512 or rope_head_dim < 2 or rope_head_dim % 2 or rope_head_dim > head_dim:
             raise ValueError("head_dim must be 512; rope_head_dim must be even and fit.")
         if any(
@@ -230,9 +255,28 @@ class DSv4HybridAttention(torch.nn.Module):
         self.is_csa = is_csa
         self.input_format = input_format
 
-    def forward(self, hidden_states: torch.Tensor, *, return_indexer_context: bool = False):
-        """Run attention in the selected format and optionally expose CSA context."""
-        if hidden_states.ndim != 3 or hidden_states.shape[-1] != self.hidden_size:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        *,
+        cu_seqlens_q: Optional[torch.Tensor] = None,
+        max_seqlen_q: Optional[int] = None,
+        return_indexer_context: bool = False,
+    ):
+        """Run full self-attention and optionally expose single-sequence CSA context.
+
+        THD input/output is ``[T,D]`` and requires contiguous INT32 ``cu_seqlens_q``
+        of shape ``[B+1]`` on the input device. Prefixes start at zero and end at
+        T, without physical padding or global offsets. ``max_seqlen_q`` is a
+        required upper bound covering every sequence. Prefix contents are a caller
+        contract and are not copied to the host for validation. Dense formats
+        do not accept these metadata arguments.
+        """
+        packed = self.input_format == "thd"
+        if (
+            hidden_states.ndim != (2 if packed else 3)
+            or hidden_states.shape[-1] != self.hidden_size
+        ):
             raise ValueError("hidden_states must have the selected format and hidden_size.")
         if return_indexer_context and not self.is_csa:
             raise ValueError("Only CSA has an indexer context.")
@@ -240,14 +284,29 @@ class DSv4HybridAttention(torch.nn.Module):
             # cuDNN consumes batch-major packed rows. B=1 needs only a view;
             # larger batches require a physical repack with the current core.
             hidden_states = hidden_states.transpose(0, 1).contiguous()
-        batch, seq, _ = hidden_states.shape
+        if packed:
+            cu = cu_seqlens_q
+            cu_comp, total_comp, seq = _packed_prefixes(
+                hidden_states, cu, max_seqlen_q, self.compression_ratio
+            )
+            batch = cu.numel() - 1
+            comp_shape = (total_comp,)
+        else:
+            if cu_seqlens_q is not None or max_seqlen_q is not None:
+                raise ValueError("cu_seqlens_q and max_seqlen_q are only supported with THD input.")
+            batch, seq, _ = hidden_states.shape
+            n_comp = seq // self.compression_ratio
+            if not n_comp:
+                raise ValueError("Sequence must contain at least one complete compression window.")
+            cu = torch.arange(batch + 1, device=hidden_states.device, dtype=torch.int32) * seq
+            cu_comp = (
+                torch.arange(batch + 1, device=hidden_states.device, dtype=torch.int32) * n_comp
+            )
+            total_comp = batch * n_comp
+            comp_shape = (batch, n_comp)
         if return_indexer_context and batch != 1:
             raise ValueError("The CSA indexer context is currently supported for batch=1.")
-        n_comp = seq // self.compression_ratio
-        if not n_comp:
-            raise ValueError("Sequence must contain at least one complete compression window.")
-        cu = torch.arange(batch + 1, device=hidden_states.device, dtype=torch.int32) * seq
-        cu_comp = torch.arange(batch + 1, device=hidden_states.device, dtype=torch.int32) * n_comp
+        token_shape = hidden_states.shape[:-1]
 
         token_rope, compressed_rope = self.rope(seq, hidden_states.device)
 
@@ -259,22 +318,24 @@ class DSv4HybridAttention(torch.nn.Module):
             q_a = self.q_a_proj(hidden_states)
             local_kv_projected = self.kv_proj(hidden_states)
         q_residual = self.q_a_norm(q_a)
-        q = self.q_b_proj(q_residual).reshape(batch, seq, self.num_heads, self.head_dim)
+        q = self.q_b_proj(q_residual).reshape(*token_shape, self.num_heads, self.head_dim)
         # Query-up norm is unweighted; TE RMSNorm would add a learned scale.
         q = _compiled_q_rms_norm(q, self.rms_norm_eps)
         q = (
             _apply_rotary_query(q, *token_rope, cu)
-            .reshape(batch * seq, self.num_heads, self.head_dim)
+            .reshape(-1, self.num_heads, self.head_dim)
             .contiguous()
         )
-        local_kv = apply_rotary(self.kv_norm(local_kv_projected).unsqueeze(2), *token_rope, cu)
-        local_kv = local_kv.reshape(batch * seq, self.head_dim).contiguous()
+        local_kv = apply_rotary(self.kv_norm(local_kv_projected).unsqueeze(-2), *token_rope, cu)
+        local_kv = local_kv.reshape(-1, self.head_dim).contiguous()
         compressed_kv = apply_rotary(
-            self.compressor(hidden_states, cu, cu_comp).reshape(batch, n_comp, 1, self.head_dim),
+            self.compressor(hidden_states, cu, cu_comp, total_comp=total_comp).reshape(
+                *comp_shape, 1, self.head_dim
+            ),
             *compressed_rope,
             cu_comp,
         )
-        compressed_kv = compressed_kv.reshape(batch * n_comp, self.head_dim).contiguous()
+        compressed_kv = compressed_kv.reshape(total_comp, self.head_dim).contiguous()
 
         indices = None
         index_q = index_k = index_w = None
@@ -288,6 +349,8 @@ class DSv4HybridAttention(torch.nn.Module):
                 cu_comp,
                 token_rope,
                 compressed_rope,
+                total_comp=total_comp,
+                max_seqlen=seq,
                 return_context=return_indexer_context,
             )
             if return_indexer_context:
@@ -303,12 +366,12 @@ class DSv4HybridAttention(torch.nn.Module):
             cu,
             cu_comp,
             indices=indices,
-            max_compressed_seqlen=None if self.is_csa else n_comp,
-        ).reshape(batch, seq, self.num_heads, self.head_dim)
+            max_compressed_seqlen=None if self.is_csa else seq // self.compression_ratio,
+        ).reshape(*token_shape, self.num_heads, self.head_dim)
         cos, sin = token_rope
-        output = apply_rotary(output, cos, -sin, cu).reshape(batch, seq, self.o_groups, -1)
+        output = apply_rotary(output, cos, -sin, cu).reshape(*token_shape, self.o_groups, -1)
         weight = self.o_a_proj.weight.reshape(self.o_groups, self.o_lora_rank, -1)
-        grouped = torch.einsum("bsgd,grd->bsgr", output, weight).flatten(2)
+        grouped = torch.einsum("...gd,grd->...gr", output, weight).flatten(-2)
         result = self.o_b_proj(grouped)
         if self.input_format == "sbd":
             result = result.transpose(0, 1).contiguous()
