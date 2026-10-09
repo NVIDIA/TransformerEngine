@@ -1391,10 +1391,14 @@ def _layernorm_mlp_backward_impl(
         if args.fc2_grad_output_quantizer is not None:
             quantizer = args.fc2_grad_output_quantizer
             quantizer.set_usage(rowwise=True, columnwise=True)
-            if args.ub_overlap_ag:
+            if args.ub_overlap_ag and not (
+                using_cublasmp_backend() and isinstance(quantizer, NVFP4Quantizer)
+            ):
                 # Userbuffers only supports communication for one
                 # tensor usage at a time. Configure quantizer with
-                # usage for only dgrad GEMM.
+                # usage for only dgrad GEMM. cuBLASMp all-gathers only
+                # the row-wise data, so NVFP4 keeps its column-wise
+                # data for wgrad.
                 quantizer.set_usage(columnwise=False)
             # Amax reduction group for FC2 grad output (row-parallel sequence parallel)
             set_quantizer_amax_reduction_group(
@@ -1530,6 +1534,7 @@ def _layernorm_mlp_backward_impl(
         # the grad_output quantizer. Per-tensor FP8 can reconstruct columnwise
         # data from the gathered rowwise data; MXFP8 must instead quantize
         # the original gradient columnwise to avoid double quantization.
+        # NVFP4 gathers the columnwise data quantized with the rowwise data.
         if (
             args.fc2_weight_requires_grad
             and args.ub_overlap_ag

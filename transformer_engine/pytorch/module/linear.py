@@ -92,6 +92,7 @@ from ..dynamo import (
 )
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
+from ..tensor.nvfp4_tensor import NVFP4Quantizer
 from ..tensor.utils import clear_columnwise_cache, is_custom
 from ..export import is_in_onnx_export_mode, assert_warmed_up
 from ..cpu_offload import (
@@ -1228,10 +1229,14 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
         if grad_output_quantizer is not None:
             quantizer = grad_output_quantizer
             quantizer.set_usage(rowwise=True, columnwise=True)
-            if bwd_args.ub_overlap_ag:
+            if bwd_args.ub_overlap_ag and not (
+                bwd_args.ub_obj_gradout.with_cublasmp() and isinstance(quantizer, NVFP4Quantizer)
+            ):
                 # Userbuffers only supports communication for one
                 # tensor usage at a time. Configure quantizer with
-                # usage for only dgrad GEMM.
+                # usage for only dgrad GEMM. cuBLASMp all-gathers only
+                # the row-wise data, so NVFP4 keeps its column-wise
+                # data for wgrad.
                 quantizer.set_usage(columnwise=False)
 
         # Adjust the quantization direction approach depending
@@ -1473,6 +1478,7 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
         # grad_output quantizer. Per-tensor FP8 can reconstruct columnwise
         # data from the gathered rowwise data; MXFP8 must instead quantize
         # the original gradient columnwise to avoid double quantization.
+        # NVFP4 gathers the columnwise data quantized with the rowwise data.
         if (
             bwd_args.requires_wgrad
             and bwd_args.ub_overlap_ag

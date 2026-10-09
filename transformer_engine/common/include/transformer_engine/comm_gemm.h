@@ -18,6 +18,10 @@
  *  - `D = GELU(AB + bias)` if both `bias` and `pre_gelu_out` are not empty tensors
  *
  *  Functions differ in matrix distribution patterns
+ *
+ *  NVFP4 inputs require cuBLASMp 0.11.0 or newer. Each rank applies the global scales
+ *  (amaxes) of its local A and B, so the all-gathered operand of nvte_all_gather_gemm must
+ *  have the same amax on all ranks.
  */
 
 #ifndef TRANSFORMER_ENGINE_COMMON_COMM_GEMM_H_

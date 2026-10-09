@@ -22,6 +22,7 @@ from transformer_engine.pytorch import (
     Float8Tensor,
     Float8Quantizer,
     MXFP8Quantizer,
+    NVFP4Quantizer,
 )
 import transformer_engine.pytorch.cpp_extensions as tex
 from transformer_engine.pytorch.cpp_extensions.gemm import get_cublas_workspace_size_bytes
@@ -64,7 +65,7 @@ def _parse_args(argv=None, namespace=None):
         "--quantization",
         type=str.lower,
         default="none",
-        choices=["none", "fp8", "mxfp8"],
+        choices=["none", "fp8", "mxfp8", "nvfp4"],
         help="Quantization recipe",
     )
     parser.add_argument(
@@ -585,6 +586,16 @@ def _main(opts):
         elif ub_obj2 is not None:
             inp2_quantizer = MXFP8Quantizer(fp8_dtype, columnwise=False)
             ker2_quantizer = MXFP8Quantizer(fp8_dtype)
+    elif opts.quantization == "nvfp4":
+        # All ranks must share the global scale of the all-gathered input. The reduce-scatter
+        # inputs keep their own global scales, which each rank applies to its partial GEMM.
+        is_ag = opts.comm_type == tex.CommOverlapType.AG
+        inp_quantizer = NVFP4Quantizer(
+            columnwise=False,
+            with_amax_reduction=is_ag,
+            amax_reduction_group=tp_group if is_ag else None,
+        )
+        ker_quantizer = NVFP4Quantizer()
 
     # Quantize tensors
     if with_quantized_compute:
@@ -627,6 +638,18 @@ def _main(opts):
                     rtol=0.125,
                     atol=0.0675,
                 )
+
+        # NVFP4 quantization error would dominate a comparison with the unquantized reference, so
+        # compare with the GEMM of the dequantized operands. This also checks the global scales,
+        # which the GEMM applies through alpha.
+        if opts.quantization == "nvfp4" and opts.check_numerics:
+            inp_dq = inp_fp8.dequantize(dtype=torch.float32)
+            if opts.comm_type == tex.CommOverlapType.AG:
+                inp_dq = te.distributed.gather_along_first_dim(inp_dq, tp_group)[0]
+            ker_dq = kernel_t_fp8.dequantize(dtype=torch.float32)
+            ref_g = torch.matmul(inp_dq.double(), ker_dq.double().t())
+            if opts.comm_type == tex.CommOverlapType.RS:
+                ref_g = te.distributed.reduce_scatter_along_first_dim(ref_g, tp_group)[0]
 
     # Set up comm/compute buffers
     ag_out = None
@@ -879,12 +902,14 @@ def _main(opts):
         abs_err = diff[m].item()
         rel_err = abs_err / max(abs(ref_out.flatten()[m].item()), 1e-5)
         rtol = (
-            opts.rtol if opts.rtol is not None else (0.02 if opts.quantization == "none" else 0.125)
+            opts.rtol
+            if opts.rtol is not None
+            else (0.02 if opts.quantization in ("none", "nvfp4") else 0.125)
         )
         atol = (
             opts.atol
             if opts.atol is not None
-            else (0.002 if opts.quantization == "none" else 0.0625)
+            else (0.002 if opts.quantization in ("none", "nvfp4") else 0.0625)
         )
         if rel_err > rtol and abs_err > atol:
             numerics_failed = True
