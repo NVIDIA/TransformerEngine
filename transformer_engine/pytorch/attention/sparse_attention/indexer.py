@@ -58,12 +58,14 @@ class _Indexer(torch.nn.Module):
         token_rope,
         compressed_rope,
         *,
+        total_comp,
+        max_seqlen,
         return_context=False,
     ):
         """Select compressed rows and optionally expose live tensors for the indexer loss."""
-        batch, seq, _ = hidden_states.shape
-        n_comp = seq // self.ratio
-        index_compressed = self.compressor(hidden_states, cu, cu_comp)
+        n_comp = max_seqlen // self.ratio
+        comp_shape = (total_comp,) if hidden_states.ndim == 2 else (hidden_states.shape[0], n_comp)
+        index_compressed = self.compressor(hidden_states, cu, cu_comp, total_comp=total_comp)
         if self.fused:
             index_compressed, weights = index_compressed
         else:
@@ -71,21 +73,23 @@ class _Indexer(torch.nn.Module):
         # The singleton axis is the shared index-key head, not a tunable head count.
         key = (
             apply_rotary(
-                index_compressed.reshape(batch, n_comp, 1, self.head_dim),
+                index_compressed.reshape(*comp_shape, 1, self.head_dim),
                 *compressed_rope,
                 cu_comp,
             )
-            .reshape(batch * n_comp, self.head_dim)
+            .reshape(total_comp, self.head_dim)
             .contiguous()
         )
-        query = self.q_proj(q_residual).reshape(batch, seq, self.n_heads, self.head_dim)
+        query = self.q_proj(q_residual).reshape(
+            *hidden_states.shape[:-1], self.n_heads, self.head_dim
+        )
         query = (
             apply_rotary(query, *token_rope, cu)
-            .reshape(batch * seq, self.n_heads, self.head_dim)
+            .reshape(-1, self.n_heads, self.head_dim)
             .contiguous()
         )
         # Top-k IDs are discrete; training index projections needs a separate loss.
-        weights = weights.reshape(batch * seq, self.n_heads).contiguous()
+        weights = weights.reshape(-1, self.n_heads).contiguous()
         indices = select_blocks(
             query,
             key,
@@ -94,10 +98,10 @@ class _Indexer(torch.nn.Module):
             cu_comp,
             top_k=min(self.top_k, n_comp),
             ratio=self.ratio,
-            max_seqlen=seq,
+            max_seqlen=max_seqlen,
             # cuDNN's compile bound covers the partial trailing ratio even
             # though cu_comp contains only complete compressed blocks.
-            max_compressed_seqlen=(seq + self.ratio - 1) // self.ratio,
+            max_compressed_seqlen=(max_seqlen + self.ratio - 1) // self.ratio,
             scale=(self.head_dim * self.n_heads) ** -0.5,
         )
         return (indices, query, key, weights) if return_context else indices

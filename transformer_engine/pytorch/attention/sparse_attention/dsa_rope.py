@@ -54,8 +54,17 @@ class _DSv4RotaryEmbedding(torch.nn.Module):
         )
 
 
-def _apply_rotary_eager(x, cos, sin):
+def _apply_rotary_eager(x, cos, sin, cu_seqlens=None):
     """Rotate trailing interleaved pairs in FP32, then restore input dtype."""
+    if x.ndim == 3:
+        if cu_seqlens is None:
+            raise ValueError("Packed RoPE requires cu_seqlens.")
+        rows = torch.arange(x.shape[0], device=x.device)
+        sequences = torch.bucketize(rows, cu_seqlens[1:], right=True)
+        positions = rows - cu_seqlens[sequences]
+        # Compressed tensors may have unused capacity past the final prefix.
+        positions = torch.where(rows < cu_seqlens[-1], positions, 0)
+        cos, sin = cos[0, positions], sin[0, positions]
     width = cos.shape[-1]
     tail = x[..., -width:]
     pair = torch.stack((-tail[..., 1::2], tail[..., 0::2]), -1).flatten(-2)
@@ -79,7 +88,7 @@ def _can_use_cute(x, cos, sin, cu_seqlens):
         cu_seqlens is not None
         and x.is_cuda
         and torch.cuda.get_device_capability(x.device) == (10, 0)
-        and x.ndim == 4
+        and x.ndim in (3, 4)
         and x.stride(-1) == 1
         and cos.shape == sin.shape
         and cos.shape[-1] % 4 == 0
@@ -165,7 +174,7 @@ class _CuTeQueryRotary(torch.autograd.Function):
 def _apply_rotary_query(query, cos, sin, cu_seqlens):
     """Use the fresh query tensor as CuTe output when its native path is available."""
     if not _can_use_cute(query, cos, sin, cu_seqlens):
-        return _apply_rotary_eager(query, cos, sin)
+        return _apply_rotary_eager(query, cos, sin, cu_seqlens)
     module = _cute_rope_module()
     return _CuTeQueryRotary.apply(query, _rope_tables(cos), _rope_tables(sin), cu_seqlens, module)
 
@@ -174,4 +183,4 @@ def apply_rotary(x, cos, sin, cu_seqlens=None):
     """Rotate trailing interleaved pairs, using CuTe when its contract is satisfied."""
     if _can_use_cute(x, cos, sin, cu_seqlens):
         return _apply_rotary_cute(x, cos, sin, cu_seqlens)
-    return _apply_rotary_eager(x, cos, sin)
+    return _apply_rotary_eager(x, cos, sin, cu_seqlens)
