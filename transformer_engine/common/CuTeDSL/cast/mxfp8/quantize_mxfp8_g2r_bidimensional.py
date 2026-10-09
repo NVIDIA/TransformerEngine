@@ -69,7 +69,9 @@ def _quantize_rowwise(
         rX_row_i32 = cute.recast_tensor(rX[None, row_idx], Int32)
         reciprocal = bf16_mx_scale_reciprocal(extract_mx_block_amax(rX_row_i32), MAX_EXPONENT)
         reciprocal_pair = reciprocal | (reciprocal << Uint32(16))
-        for pack_idx in cutlass.range_constexpr(cute.size(rO_row_u32)): # 4 output bytes in one pack
+        for pack_idx in cutlass.range_constexpr(
+            cute.size(rO_row_u32)
+        ):  # 4 output bytes in one pack
             rO_row_u32[pack_idx] = scale_and_pack(
                 rX_row_i32[2 * pack_idx],
                 reciprocal_pair,
@@ -267,7 +269,9 @@ def _write_colwise_scale(
         rS_col = cute.make_rmem_tensor((ELEMENTS_X_PER_THREAD,), SCALE_DTYPE)
         rS_col_u32 = cute.recast_tensor(rS_col, Uint32)
         # Get the colwise scale from the reciprocal
-        for pack_idx in cutlass.range_constexpr(cute.size(rS_col_u32)): # 4 output bytes in one pack
+        for pack_idx in cutlass.range_constexpr(
+            cute.size(rS_col_u32)
+        ):  # 4 output bytes in one pack
             rS_col_u32[pack_idx] = bf16_mx_scale_bytes_pair(rS_col_rcp_u32[2 * pack_idx]) | (
                 bf16_mx_scale_bytes_pair(rS_col_rcp_u32[2 * pack_idx + 1]) << Uint32(16)
             )
@@ -306,7 +310,9 @@ def _quantize_colwise(
     # Each thread quantizes its own rows with the columnwise reciprocals and write its output to GMEM.
     for row_idx in cutlass.range_constexpr(ELEMENTS_Y_PER_THREAD):
         rX_row_i32 = cute.recast_tensor(rX[None, row_idx], Int32)
-        for pack_idx in cutlass.range_constexpr(cute.size(rO_col_u32)):  # 4 output bytes in one pack
+        for pack_idx in cutlass.range_constexpr(
+            cute.size(rO_col_u32)
+        ):  # 4 output bytes in one pack
             rO_col_u32[pack_idx] = scale_and_pack(
                 rX_row_i32[2 * pack_idx],
                 rS_col_rcp_u32[2 * pack_idx],
