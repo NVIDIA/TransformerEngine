@@ -187,7 +187,7 @@ def onnx_cs_quantize_fp8_op(tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.T
 @onnx_cs_quantize_fp8_op.register_fake
 def _(tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     return torch.empty(tensor.shape, dtype=torch.uint8, device=tensor.device), torch.ones(
-        1, dtype=torch.float32, device=tensor.device
+        (), dtype=torch.float32, device=tensor.device
     )
 
 
