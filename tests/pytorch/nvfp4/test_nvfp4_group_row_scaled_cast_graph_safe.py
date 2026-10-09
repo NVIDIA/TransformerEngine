@@ -210,6 +210,45 @@ def test_split_quantize_non_grouped_shapes_fall_back(
         offset += m
 
 
+def _tensor_scaled_quantizer() -> NVFP4Quantizer:
+    return NVFP4Quantizer(
+        fp4_dtype=te.DType.kFloat4E2M1,
+        rowwise=True,
+        columnwise=False,
+        with_rht=False,
+        with_post_rht_amax=False,
+        row_scaled_nvfp4=False,
+    )
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+def test_split_quantize_mixed_row_scaled_falls_back() -> None:
+    """A split_quantize that mixes tensor-scaled and row-scaled NVFP4 quantizers casts each split
+    per-expert rather than taking the grouped row-scaled path (whose bulk amax, sized from the
+    first quantizer, would be overrun by the row-scaled kernel)."""
+    split_sections = [128, 128]
+    N = 128
+    torch.manual_seed(7)
+    x = torch.randn((sum(split_sections), N), dtype=torch.bfloat16, device="cuda")
+
+    quantizers = [_tensor_scaled_quantizer(), _row_scaled_quantizer()]
+    outputs = tex.split_quantize(x, split_sections, quantizers)
+
+    assert len(outputs) == len(split_sections)
+    offset = 0
+    for out, m, make_q in zip(
+        outputs, split_sections, [_tensor_scaled_quantizer, _row_scaled_quantizer]
+    ):
+        ref = make_q()(x[offset : offset + m])
+        torch.testing.assert_close(
+            out._rowwise_data.reshape(-1).view(torch.uint8),
+            ref._rowwise_data.reshape(-1).view(torch.uint8),
+            atol=0,
+            rtol=0,
+        )
+        offset += m
+
+
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 def test_split_quantize_empty_routing() -> None:
     """Empty row-scaled routing returns without launching grouped work."""

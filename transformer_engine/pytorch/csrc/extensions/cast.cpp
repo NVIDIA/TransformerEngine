@@ -2245,12 +2245,21 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
                              return detail::IsNVFP4Quantizers(quantizer.ptr());
                            })) {
       allocation_method = AllocationMethod::BULK_NVFP4;
-      const bool has_row_scaled_nvfp4 =
-          std::any_of(quantizer_cpp_list.begin(), quantizer_cpp_list.end(),
-                      [](const std::unique_ptr<Quantizer> &quantizer) {
-                        return static_cast<NVFP4Quantizer *>(quantizer.get())->row_scaled_nvfp4;
-                      });
-      if (has_row_scaled_nvfp4) {
+      auto is_row_scaled = [](const std::unique_ptr<Quantizer> &quantizer) {
+        return static_cast<NVFP4Quantizer *>(quantizer.get())->row_scaled_nvfp4;
+      };
+      const bool all_row_scaled =
+          std::all_of(quantizer_cpp_list.begin(), quantizer_cpp_list.end(), is_row_scaled);
+      const bool any_row_scaled =
+          std::any_of(quantizer_cpp_list.begin(), quantizer_cpp_list.end(), is_row_scaled);
+      if (any_row_scaled && !all_row_scaled) {
+        // Mixed row-scaled and tensor-scaled NVFP4 quantizers can't share the bulk NVFP4
+        // allocation: its amax is sized from the first quantizer's row-scale setting, so a
+        // grouped cast would write per-row amax into a per-tensor buffer. Cast each split
+        // on its own instead.
+        allocation_method = AllocationMethod::UNFUSED;
+        quantization_method = QuantizationMethod::UNFUSED;
+      } else if (all_row_scaled) {
         // Grouped kernels need 128-aligned splits and last dim, <= 64 experts, and
         // no 4over6; otherwise fall back to the per-expert path.
         const bool all_splits_128 = std::all_of(split_sections.begin(), split_sections.end(),
