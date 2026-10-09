@@ -60,6 +60,7 @@ model_configs_flash_attn = {
     "cp_2_1": ModelConfig(2, 4096, 12, 128, num_gqa_groups=2),  # GQA
     "cp_2_2": ModelConfig(2, 4096, 32, 128, attn_mask_type="causal", window_size=(128, 0)),  # GQA
     "cp_2_3": ModelConfig(2, 4096, 12, 128, num_gqa_groups=2, window_size=(512, 512)),  # GQA
+    "cp_2_4": ModelConfig(2, 4096, 32, 256, num_gqa_groups=4, attn_mask_type="causal"),  # GQA
     "cp_3_0": ModelConfig(2, 4096, 128, 192, attn_mask_type="causal", head_dim_v=128),  # MLA
     "cp_3_1": ModelConfig(2, 4096, 12, 192, head_dim_v=128),  # MLA
     "cp_3_2": ModelConfig(
@@ -320,7 +321,7 @@ dtypes = ["bf16", "fp16"]
 qkv_formats = ["bshd", "sbhd", "thd"]
 cp_comm_types = ["p2p", "all_gather", "a2a", "a2a+p2p"]
 if test_essential:
-    configs = ["cp_2_0", "cp_2_2", "cp_3_0", "cp_3_3"]
+    configs = ["cp_2_0", "cp_2_2", "cp_2_4", "cp_3_0", "cp_3_3"]
     model_configs_flash_attn = {k: model_configs_flash_attn[k] for k in configs}
     dtypes = ["bf16"]
     qkv_formats = ["sbhd", "thd"]
@@ -336,7 +337,8 @@ if test_essential:
 )
 @pytest.mark.skipif(get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
 @pytest.mark.parametrize("dtype", dtypes)
-@pytest.mark.parametrize("model", model_configs_flash_attn.keys())
+# The D=256 model is covered by the focused no-load-balance test, not this broad matrix.
+@pytest.mark.parametrize("model", [m for m in model_configs_flash_attn if m != "cp_2_4"])
 @pytest.mark.parametrize("qkv_format", qkv_formats)
 @pytest.mark.parametrize("cp_comm_type", cp_comm_types)
 @pytest.mark.parametrize("pad_between_seqs", [False, True])
@@ -779,10 +781,11 @@ def test_cp_with_fused_attention_no_load_balance(cp_pool):
     )
 
 
-@pytest.mark.parametrize("head_dim", (128, 256))
-def test_cp_with_flash_attention_no_load_balance(cp_pool, head_dim):
+@pytest.mark.parametrize("model", ("cp_2_0", "cp_2_4"))
+def test_cp_with_flash_attention_no_load_balance(cp_pool, model):
     """Check the supported unpadded FlashAttention path."""
-    if head_dim == 256 and (
+    config = copy.deepcopy(model_configs_flash_attn[model])
+    if config.head_dim_qk == 256 and (
         not (10, 0) <= get_device_compute_capability() < (12, 0)
         or not fa4_enabled
         or not FlashAttentionUtils.v4_is_installed
@@ -790,8 +793,6 @@ def test_cp_with_flash_attention_no_load_balance(cp_pool, head_dim):
         or _deterministic
     ):
         pytest.skip("D=256 THD all-gather requires SM100/SM110 FA4 b33+ non-deterministic.")
-    config = copy.deepcopy(model_configs_flash_attn["cp_2_0"])
-    config.head_dim_qk = config.head_dim_v = head_dim
     config.context_parallel = True
     config.cp_comm_type = "all_gather"
     config.attn_mask_type = "padding_causal"
@@ -803,15 +804,14 @@ def test_cp_with_flash_attention_no_load_balance(cp_pool, head_dim):
         is_training=True,
         deterministic=_deterministic,
     )
-    if head_dim == 256:
+    if config.head_dim_qk == 256:
         assert available_backends[0] and flash_backend is not None and flash_backend.major == 4
     elif not available_backends[0]:
         pytest.skip("FlashAttention is unavailable.")
     _submit(
         cp_pool(2),
         dtype="bf16",
-        model="cp_2_0",
-        head_dim=head_dim,
+        model=model,
         qkv_format="thd",
         kernel_backend="FlashAttention",
         cp_comm_type="all_gather",
