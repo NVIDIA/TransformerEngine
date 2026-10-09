@@ -1323,15 +1323,20 @@ def general_grouped_gemm_for_grouped_tensor(
             # Per output row; handles uneven per-expert row counts directly.
             flat.mul_(post_scale_rows.view(-1, 1))
         if post_scale_cols is not None:
-            # Per-expert, per-column. Only set for wgrad, where every expert has the
-            # same output row count, so an equal split over num_tensors is exact.
-            total_rows = flat.shape[0]
-            if total_rows % num_tensors != 0:
-                raise NotImplementedError(
-                    "Row-scaled column post-scale requires a uniform per-expert output row count."
-                )
-            flat.view(num_tensors, -1, last_dim).mul_(
-                post_scale_cols.view(num_tensors, 1, last_dim)
-            )
+            # Per-expert, per-column: apply each group's scale over its actual rows.
+            # Uniform-construction exposes host tensor_shapes; varying-dim tensors carry
+            # first_dims and are never built under graph capture, so reading them is safe.
+            if scratch.tensor_shapes:
+                row_counts = [s[0] for s in scratch.tensor_shapes]
+            elif out.first_dims is None:
+                row_counts = [flat.shape[0] // num_tensors] * num_tensors
+            else:
+                row_counts = out.first_dims.tolist()
+            col_scales = post_scale_cols.view(num_tensors, last_dim)
+            row_offset = 0
+            for i in range(num_tensors):
+                rows = row_counts[i]
+                flat[row_offset : row_offset + rows].mul_(col_scales[i].unsqueeze(0))
+                row_offset += rows
         _store(out.rowwise_data.view(-1, last_dim), flat)
     return out

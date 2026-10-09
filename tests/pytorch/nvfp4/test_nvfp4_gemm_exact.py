@@ -1129,3 +1129,41 @@ def test_nvfp4_row_scaled_grouped_tensor_gemm_wgrad_discrete_out(
 
     for got, ref in zip(out_list, expected):
         torch.testing.assert_close(got, ref, atol=1e-4, rtol=1e-4)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.skipif(
+    not row_scaled_grouped_cast_available, reason=reason_for_no_row_scaled_grouped_cast
+)
+@pytest.mark.parametrize("m_splits, k, n", [([128, 256, 128], 256, 256)])
+def test_nvfp4_row_scaled_grouped_tensor_gemm_uneven_colscale(
+    m_splits: list[int], k: int, n: int
+) -> None:
+    """TN grouped-tensor GEMM with both operands row-scaled and uneven output rows exercises the
+    grouped-out column post-scale over each group's actual rows (not an equal split).
+    """
+    if not _row_scaled_grouped_tensor_gemm_supported():
+        pytest.skip(_reason_for_no_grouped_tensor_gemm)
+
+    torch.manual_seed(23)
+    device = torch.device("cuda")
+    num_gemms = len(m_splits)
+    out_dtype = torch.float32
+
+    # A (weights): uniform [n, k] per expert; B (activation): uneven [m_i, k].
+    weights = _make_row_scaled_grouped_activation([n] * num_gemms, k, columnwise=False)
+    activation = _make_row_scaled_grouped_activation(m_splits, k, columnwise=False)
+    w_splits = weights.split_into_quantized_tensors()
+    act_splits = activation.split_into_quantized_tensors()
+
+    expected = [
+        general_gemm(w_splits[i], act_splits[i], out_dtype=out_dtype, layout="TN")[0]
+        for i in range(num_gemms)
+    ]
+
+    grouped_out = _make_output_grouped_tensor(m_splits, n, device, out_dtype)
+    general_grouped_gemm_for_grouped_tensor(weights, activation, grouped_out, layout="TN")
+    actual = grouped_out.split_into_quantized_tensors()
+
+    for got, ref in zip(actual, expected):
+        torch.testing.assert_close(got, ref, atol=1e-4, rtol=1e-4)
