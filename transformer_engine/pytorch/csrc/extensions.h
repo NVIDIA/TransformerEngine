@@ -552,9 +552,6 @@ at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor 
                                const std::optional<at::Tensor> cu_seqlens, const int cp_size,
                                const int cp_rank);
 
-bool dsv4_rope_cutedsl_(at::Tensor input, const at::Tensor &cos, const at::Tensor &sin,
-                        const at::Tensor &cu_seqlens, bool backward);
-
 std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_qkv_rope_forward(
     const at::Tensor &qkv_input, const at::Tensor &q_freqs, const at::Tensor &k_freqs,
     const std::optional<at::Tensor> start_positions, const std::vector<int> &qkv_split_arg_list,

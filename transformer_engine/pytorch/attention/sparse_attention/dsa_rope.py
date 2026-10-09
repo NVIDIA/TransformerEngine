@@ -7,7 +7,6 @@
 from functools import lru_cache
 
 import torch
-import transformer_engine_torch as tex
 
 
 def rotary_embeddings(seq, ratio, width, theta, device):
@@ -73,60 +72,76 @@ def _apply_rotary_eager(x, cos, sin, cu_seqlens=None):
 
 
 @lru_cache(maxsize=1)
-def _cute_rope_module():
-    """Load the optional CuTe DSL implementation only when DSv4 can use it."""
+def _triton_rope_module():
+    """Load the optional Triton implementation only when DSv4 can use it."""
     try:
-        from . import _dsa_rope_cute
+        from transformer_engine.common.triton import dsa_rope
     except ImportError:
         return None
-    return _dsa_rope_cute
+    return dsa_rope
 
 
-def _can_use_cute(x, cos, sin, cu_seqlens):
+def _can_use_triton(x, cos, sin, cu_seqlens):
     """Keep unsupported inputs on the behaviorally identical eager path."""
     return (
         cu_seqlens is not None
         and x.is_cuda
-        and torch.cuda.get_device_capability(x.device) == (10, 0)
         and x.ndim in (3, 4)
         and x.stride(-1) == 1
         and cos.shape == sin.shape
         and cos.shape[-1] % 4 == 0
         and not cos.requires_grad
         and not sin.requires_grad
-        and _cute_rope_module() is not None
+        and _triton_rope_module() is not None
     )
 
 
 def _rope_tables(table):
-    """Convert TE's repeated pairs to the CuTe kernel's duplicated-half tables."""
+    """Convert TE's repeated pairs to the Triton kernel's duplicated-half tables."""
     pairs = table[0, :, 0, ::2]
     return torch.cat((pairs, pairs), dim=-1)
 
 
-def _apply_rotary_cute(x, cos, sin, cu_seqlens):
-    """Apply CuTe RoPE out of place so callers retain the eager aliasing contract."""
-    module = _cute_rope_module()
+def _apply_rotary_triton(x, cos, sin, cu_seqlens):
+    """Apply Triton RoPE out of place so callers retain the eager aliasing contract."""
+    module = _triton_rope_module()
     if module is None:
-        raise RuntimeError("CuTe DSL RoPE is unavailable.")
-    return _CuTeRotary.apply(x, _rope_tables(cos), _rope_tables(sin), cu_seqlens, module)
+        raise RuntimeError("Triton RoPE is unavailable.")
+    return _TritonRotary.apply(x, _rope_tables(cos), _rope_tables(sin), cu_seqlens, module)
 
 
-def _launch_cute(packed, cos, sin, cu_seqlens, module, backward):
-    native = (
-        packed.dtype == torch.bfloat16
-        and cos.dtype == torch.float32
-        and cu_seqlens.dtype == torch.int32
-        and tex.dsv4_rope_cutedsl_(packed, cos, sin, cu_seqlens, backward)
+def _launch_triton(packed, cos, sin, cu_seqlens, module, backward):
+    kernel = (
+        module._autotuned_mla_rope_bwd_inplace_kernel
+        if backward
+        else module._autotuned_mla_rope_fwd_inplace_kernel
     )
-    if not native:
-        (module.backward_inplace if backward else module.forward_inplace)(
-            packed, cos, sin, cu_seqlens
-        )
+    heads, dim = packed.shape[-2:]
+    grid = lambda meta: (packed.shape[0], module.triton.cdiv(heads, meta["BLOCK_H"]))
+    kernel[grid](
+        packed,
+        cos,
+        sin,
+        dim - cos.shape[-1],
+        cos.shape[-1],
+        heads,
+        1,
+        cu_seqlens.numel() - 1,
+        cu_seqlens,
+        None,
+        packed.stride(0),
+        packed.stride(1),
+        cos.stride(0),
+        sin.stride(0),
+        0,
+        1,
+        INVERSE=False,
+        REMOVE_INTERLEAVING=True,
+    )
 
 
-class _CuTeRotary(torch.autograd.Function):
-    """Pair the retained in-place CuTe kernels behind an out-of-place autograd API."""
+class _TritonRotary(torch.autograd.Function):
+    """Pair the retained in-place Triton kernels behind an out-of-place autograd API."""
 
     @staticmethod
     def forward(ctx, x, cos, sin, cu_seqlens, module):
@@ -134,7 +149,7 @@ class _CuTeRotary(torch.autograd.Function):
         # apply_rotary's established out-of-place contract for every call site.
         output = x.clone(memory_format=torch.contiguous_format)
         packed = output.reshape(-1, x.shape[-2], x.shape[-1])
-        _launch_cute(packed, cos, sin, cu_seqlens, module, False)
+        _launch_triton(packed, cos, sin, cu_seqlens, module, False)
         ctx.save_for_backward(cos, sin, cu_seqlens)
         ctx.module = module
         ctx.shape = x.shape
@@ -145,17 +160,17 @@ class _CuTeRotary(torch.autograd.Function):
         cos, sin, cu_seqlens = ctx.saved_tensors
         grad_input = grad_output.clone(memory_format=torch.contiguous_format)
         packed = grad_input.reshape(-1, ctx.shape[-2], ctx.shape[-1])
-        _launch_cute(packed, cos, sin, cu_seqlens, ctx.module, True)
+        _launch_triton(packed, cos, sin, cu_seqlens, ctx.module, True)
         return grad_input, None, None, None, None
 
 
-class _CuTeQueryRotary(torch.autograd.Function):
+class _TritonQueryRotary(torch.autograd.Function):
     """Rotate the fresh normalized query in place; keep backward out of place."""
 
     @staticmethod
     def forward(ctx, query, cos, sin, cu_seqlens, module):
         packed = query.reshape(-1, query.shape[-2], query.shape[-1])
-        _launch_cute(packed, cos, sin, cu_seqlens, module, False)
+        _launch_triton(packed, cos, sin, cu_seqlens, module, False)
         ctx.save_for_backward(cos, sin, cu_seqlens)
         ctx.module = module
         ctx.shape = query.shape
@@ -167,20 +182,20 @@ class _CuTeQueryRotary(torch.autograd.Function):
         cos, sin, cu_seqlens = ctx.saved_tensors
         grad_input = grad_output.clone(memory_format=torch.contiguous_format)
         packed = grad_input.reshape(-1, ctx.shape[-2], ctx.shape[-1])
-        _launch_cute(packed, cos, sin, cu_seqlens, ctx.module, True)
+        _launch_triton(packed, cos, sin, cu_seqlens, ctx.module, True)
         return grad_input, None, None, None, None
 
 
 def _apply_rotary_query(query, cos, sin, cu_seqlens):
-    """Use the fresh query tensor as CuTe output when its native path is available."""
-    if not _can_use_cute(query, cos, sin, cu_seqlens):
+    """Use the fresh query tensor as Triton output when its native path is available."""
+    if not _can_use_triton(query, cos, sin, cu_seqlens):
         return _apply_rotary_eager(query, cos, sin, cu_seqlens)
-    module = _cute_rope_module()
-    return _CuTeQueryRotary.apply(query, _rope_tables(cos), _rope_tables(sin), cu_seqlens, module)
+    module = _triton_rope_module()
+    return _TritonQueryRotary.apply(query, _rope_tables(cos), _rope_tables(sin), cu_seqlens, module)
 
 
 def apply_rotary(x, cos, sin, cu_seqlens=None):
-    """Rotate trailing interleaved pairs, using CuTe when its contract is satisfied."""
-    if _can_use_cute(x, cos, sin, cu_seqlens):
-        return _apply_rotary_cute(x, cos, sin, cu_seqlens)
+    """Rotate trailing interleaved pairs, using Triton when its contract is satisfied."""
+    if _can_use_triton(x, cos, sin, cu_seqlens):
+        return _apply_rotary_triton(x, cos, sin, cu_seqlens)
     return _apply_rotary_eager(x, cos, sin, cu_seqlens)

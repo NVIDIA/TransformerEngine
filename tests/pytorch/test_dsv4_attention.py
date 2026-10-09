@@ -4,8 +4,6 @@
 
 """DSv4 core against a dense oracle, including packed sequence boundaries."""
 
-import os
-
 import pytest
 import torch
 
@@ -110,39 +108,32 @@ def test_dsv4_rejects_unsupported_metadata():
         core(torch.empty(1, 4, 512), None, None, None, None, None)
 
 
-def test_dsv4_cute_rope_batched_forward_backward(monkeypatch):
-    """The packed CuTe bridge must reset positions at each BSHD sequence."""
-    if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (10, 0):
-        pytest.skip("CuTe DSv4 RoPE requires SM100")
-    if dsa_rope._cute_rope_module() is None:
-        pytest.skip("CuTe DSL is unavailable")
-    if os.environ.get("NVTE_ENABLE_CUTEDSL_BACKEND", "0") == "0":
-        pytest.skip("native CuTe DSL dispatch is disabled")
-
+@pytest.mark.parametrize("heads", [1, 64])
+def test_dsv4_triton_rope_batched_forward_backward(monkeypatch, heads):
+    """The packed Triton kernels must reset positions at each BSHD sequence."""
+    if not torch.cuda.is_available():
+        pytest.skip("Triton DSv4 RoPE requires CUDA")
+    if dsa_rope._triton_rope_module() is None:
+        pytest.skip("Triton DSL is unavailable")
     torch.manual_seed(23)
-    batch, seq, heads, dim, width = 2, 17, 64, 512, 64
+    batch, seq, dim, width = 2, 17, 512, 64
     x = torch.randn(batch, seq, heads, dim, device="cuda", dtype=torch.bfloat16)
     (cos, sin), _ = dsa_rope.rotary_embeddings(seq, 4, width, 160000.0, x.device)
     cu = torch.arange(batch + 1, device=x.device, dtype=torch.int32) * seq
     gradient = torch.randn_like(x)
 
-    module = dsa_rope._cute_rope_module()
+    eager = dsa_rope._apply_rotary_eager
     monkeypatch.setattr(
-        module,
-        "forward_inplace",
-        lambda *_: pytest.fail("native forward fell back to its Python launcher"),
-    )
-    monkeypatch.setattr(
-        module,
-        "backward_inplace",
-        lambda *_: pytest.fail("native backward fell back to its Python launcher"),
+        dsa_rope,
+        "_apply_rotary_eager",
+        lambda *_: pytest.fail("Triton dispatch fell back to eager RoPE"),
     )
     candidate_input = x.detach().requires_grad_()
     candidate = dsa_rope.apply_rotary(candidate_input, cos, sin, cu)
     candidate_grad = torch.autograd.grad(candidate, candidate_input, gradient)[0]
 
     reference_input = x.detach().requires_grad_()
-    reference = dsa_rope._apply_rotary_eager(reference_input, cos, sin)
+    reference = eager(reference_input, cos, sin)
     reference_grad = torch.autograd.grad(reference, reference_input, gradient)[0]
 
     assert candidate.data_ptr() != candidate_input.data_ptr()
