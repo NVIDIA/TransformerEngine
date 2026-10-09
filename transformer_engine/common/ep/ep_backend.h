@@ -47,13 +47,13 @@ class EPBackend {
   // Returns the maximum across initialized local devices.
   static size_t handle_mem_size(NVTEEpLayerConfig layer_cfg);
 
-  // Seeds the cache for handle_mem with layer_cfg and runs the routing AllGather.
+  // Runs the routing AllGather into handle_mem; seeds the handle cache with layer_cfg when enabled.
   void prepare(NVTETensor handle_mem, const NVTETensor topk_idx, NVTETensor recv_tokens_per_expert,
                NVTETensor total_recv_tokens_per_rank, NVTEEpLayerConfig layer_cfg,
                cudaStream_t stream);
 
-  // Per-step ops below require a prior prepare(). layer_cfg is required when
-  // group_config_.volatile_handle_mem is set; otherwise it may be null.
+  // Per-step ops below require a prior prepare(). A non-null layer_cfg binds the handle from
+  // handle_mem; null uses the handle cache (NVTE_EP_HANDLE_CACHE_SIZE != 0).
   void dispatch(NVTETensor handle_mem, const NVTETensor topk_idx, const NVTETensor tokens,
                 const NVTECommWindow& tokens_win, const NVTETensor topk_weights,
                 const NVTECommWindow& topk_weights_win, NVTETensor recv_tokens,
@@ -125,7 +125,8 @@ class EPBackend {
   std::mutex mutex_;
   std::list<HandleEntry> handles_;
   std::unordered_map<void*, std::list<HandleEntry>::iterator> index_;
-  size_t handle_cache_cap_{0};  // set lazily from NVTE_EP_HANDLE_CACHE_SIZE
+  size_t handle_cache_cap_{0};  // set lazily from NVTE_EP_HANDLE_CACHE_SIZE; 0 disables
+  bool handle_cache_cap_set_{false};
 
   // Caller must hold mutex_.
   ncclEpHandle_t prepare_handle_locked(void* handle_mem, size_t handle_mem_size,
@@ -138,8 +139,8 @@ class EPBackend {
   ncclEpHandle_t import_handle_locked(void* handle_mem, size_t handle_mem_size, int num_tokens,
                                       NVTEEpLayerConfig layer_cfg);
 
-  // Per-step handle: cached (*owned = false) or freshly imported when volatile_handle_mem is
-  // set (*owned = true, layer_cfg required). Caller must hold mutex_.
+  // Per-step handle: imported when layer_cfg is set (*owned = true), else cached (*owned =
+  // false). Caller must hold mutex_.
   ncclEpHandle_t acquire_step_handle_locked(void* handle_mem, size_t handle_mem_size,
                                             int num_tokens, const NVTEEpLayerConfig* layer_cfg,
                                             bool* owned);

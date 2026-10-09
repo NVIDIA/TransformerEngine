@@ -13,6 +13,7 @@
 #include <array>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -48,6 +49,8 @@ struct EpBootstrapParams {
 };
 
 static NVTEEpGroupConfig MakeEpGroupConfig(const EpBootstrapParams& p) {
+  // XLA may relocate handle_mem between calls (e.g. under lax.scan), so disable the handle cache.
+  setenv("NVTE_EP_HANDLE_CACHE_SIZE", "0", /*overwrite=*/1);
   return NVTEEpGroupConfig{.struct_size = sizeof(NVTEEpGroupConfig),
                            .ep_size = p.ep_size,
                            .num_experts = p.num_experts,
@@ -57,9 +60,7 @@ static NVTEEpGroupConfig MakeEpGroupConfig(const EpBootstrapParams& p) {
                            .num_comm_sms = p.max_num_sms,
                            .max_token_dtype = p.max_token_dtype,
                            .zero_copy = 0,
-                           .drop_on_overflow = p.drop_on_overflow,
-                           // XLA may relocate handle_mem between calls (e.g. under lax.scan).
-                           .volatile_handle_mem = 1};
+                           .drop_on_overflow = p.drop_on_overflow};
 }
 
 class EpResources {

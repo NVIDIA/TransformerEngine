@@ -11,9 +11,9 @@
  *  Per layer: call nvte_ep_handle_mem_size(layer_cfg) for the buffer size;
  *  allocate handle_mem as a kByte NVTETensor. Per step: nvte_ep_prepare seeds
  *  routing, then nvte_ep_dispatch / nvte_ep_combine / _bwd consume it.
- *  Max live handles: NVTE_EP_HANDLE_CACHE_SIZE (default 4096; -1 = unlimited).
- *  The *_v2 ops take the layer config explicitly and are required when
- *  NVTEEpGroupConfig::volatile_handle_mem is set.
+ *  Max live handles: NVTE_EP_HANDLE_CACHE_SIZE (default 4096; -1 = unlimited; 0 disables
+ *  the cache, so handle_mem may be relocated between calls). The *_v2 ops take the layer
+ *  config explicitly, bind from handle_mem, and are required when the cache is disabled.
  */
 
 #ifndef TRANSFORMER_ENGINE_EP_H_
@@ -67,10 +67,6 @@ typedef struct {
   /*! Recv overflow policy. Nonzero drops tokens past max_recv_tokens_per_rank
    *  and continues; 0 (default) traps. Not supported in eager mode. */
   int drop_on_overflow;
-  /*! Nonzero: handle_mem may be relocated between calls (e.g. JAX under
-   *  lax.scan), so per-step ops rebuild the handle from handle_mem on every
-   *  call and require the *_v2 ops. 0 (default): handles are cached by address. */
-  int volatile_handle_mem;
 } NVTEEpGroupConfig;
 
 /*! \brief Per-layer configuration consumed by nvte_ep_handle_mem_size,
@@ -124,7 +120,7 @@ void nvte_ep_shutdown(void);
  *
  *  handle_mem is a per-layer kByte routing-state buffer; allocate once and
  *  thread the same pointer through every prepare/dispatch/combine/_bwd call
- *  for that layer (the backend keys its cache on the pointer). Host-only;
+ *  for that layer (the handle cache, when enabled, keys on the pointer). Host-only;
  *  returns the maximum required size across initialized local devices. Size
  *  is stable while the initialized groups and layer config remain unchanged.
  *

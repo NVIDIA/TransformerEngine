@@ -1140,7 +1140,7 @@ class TestEpScanHandleRelocation(TestEP):
     XLA may reuse the same ``handle_mem`` address for a different prepared
     routing state at each forward step, and independently restore each
     backward step's saved state at its own address. EPBackend never caches
-    handles by address for JAX (``NVTEEpGroupConfig.volatile_handle_mem``):
+    handles by address for JAX (``NVTE_EP_HANDLE_CACHE_SIZE=0``):
     every dispatch/combine/_bwd call rebinds a fresh handle from
     ``handle_mem``'s own contents via ``ncclEpImportHandle``, so the address
     is irrelevant.
