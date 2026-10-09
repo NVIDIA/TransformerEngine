@@ -91,9 +91,12 @@ class FusedAdam(torch.optim.Optimizer):
             a FP32 scalar scaling factor to ensure precision.
             (default: torch.float32)
         exp_avg_sq_dtype (torch.dtype, optional): The dtype of exp_avg_sq. It
-            can be one of [torch.float32, torch.float16, torch.uint8], where
-            torch.uint8 represents FP8. If it's not torch.float32, the optimizer
-            will create a FP32 scalar scaling factor to ensure precision.
+            can be one of [torch.float32, torch.float64, torch.float16, torch.uint8],
+            where torch.uint8 represents FP8. If it's torch.float16 or torch.uint8,
+            the optimizer will create a FP32 scalar scaling factor to ensure
+            precision. torch.float64 requires a torch.float32 exp_avg; the second
+            moment is then updated in FP64 and used unscaled. It is not supported
+            with capturable, store_param_remainders or delayed-scaling FP8 model weights.
             (default: torch.float32)
         use_decoupled_grad (bool, optional): Whether to use ".decoupled_grad"
             instead of ".grad" for reading gradients. It's useful when the dtypes
@@ -142,8 +145,21 @@ class FusedAdam(torch.optim.Optimizer):
             raise RuntimeError("FusedAdam only supports fp32/fp16 master weights.")
         if exp_avg_dtype not in [torch.float32, torch.float16, torch.bfloat16, torch.uint8]:
             raise RuntimeError("FusedAdam only supports fp32/fp16/bf16/fp8 exp_avg.")
-        if exp_avg_sq_dtype not in [torch.float32, torch.float16, torch.bfloat16, torch.uint8]:
-            raise RuntimeError("FusedAdam only supports fp32/fp16/bf16/fp8 exp_avg_sq.")
+        if exp_avg_sq_dtype not in [
+            torch.float32,
+            torch.float64,
+            torch.float16,
+            torch.bfloat16,
+            torch.uint8,
+        ]:
+            raise RuntimeError("FusedAdam only supports fp32/fp64/fp16/bf16/fp8 exp_avg_sq.")
+        if exp_avg_sq_dtype == torch.float64:
+            if exp_avg_dtype != torch.float32:
+                raise RuntimeError("FusedAdam supports fp64 exp_avg_sq only with fp32 exp_avg.")
+            if store_param_remainders:
+                raise RuntimeError(
+                    "FusedAdam does not support fp64 exp_avg_sq with store_param_remainders."
+                )
 
         # Capturable mode requires fp32 master weights, and optimizer states (exp_avg/exp_avg_sq)
         # must both be fp32 or both be bf16. This is because master weights in non-fp32 dtypes
@@ -321,8 +337,8 @@ class FusedAdam(torch.optim.Optimizer):
 
         Returns:
             torch.Tensor: The unscaled state. Note that if the state is in BF16, the returned
-            tensor is still in BF16 because it doesn't require to be "unscaled", otherwise it
-            will be unscaled to FP32.
+            tensor is still in BF16 because it doesn't require to be "unscaled". FP64 second
+            moments retain their dtype; other floating-point states are unscaled to FP32.
         """
         state = self.state[param]
         dtype = self.name_to_dtype_map[state_name]
@@ -351,21 +367,25 @@ class FusedAdam(torch.optim.Optimizer):
                 unscaled = unscaled_local_state
             else:
                 unscaled = unscaled_local_state.float()
+        elif dtype == torch.float64:
+            # Only exp_avg_sq can be FP64; it is updated in FP64 and never scaled.
+            assert unscaled_local_state.dtype == torch.float64
+            unscaled = unscaled_local_state
         else:
-            raise RuntimeError(f"Dtype of {state_name} can only be fp8/fp16/bf16/fp32.")
+            raise RuntimeError(f"Dtype of {state_name} can only be fp8/fp16/bf16/fp32/fp64.")
         return unscaled
 
     def set_scaled_state(self, param, state_name, unscaled_state):
         """Set the optimizer state.
 
-        If the dtype of the corresponding optimizer state is not FP32,
+        If the dtype of the corresponding optimizer state is not FP32 or FP64,
         it will do scaling automatically.
 
         Arguments:
             param (torch.nn.Parameter): One of parameters in this optimizer.
             state_name (string): Name of optimizer states, can be one of 'exp_avg', 'exp_avg_sq',
                 and 'master_param`.
-            unscaled_state (torch.Tensor): The original high-precision (FP32) state.
+            unscaled_state (torch.Tensor): The original high-precision (FP32 or FP64) state.
         """
 
         store_param_remainders = (
@@ -374,8 +394,11 @@ class FusedAdam(torch.optim.Optimizer):
             and param.dtype == torch.bfloat16
         )
 
+        dtype = self.name_to_dtype_map[state_name]
         if store_param_remainders:
             assert unscaled_state.dtype == torch.int16
+        elif dtype == torch.float64:
+            assert unscaled_state.dtype in (torch.float32, torch.float64)
         else:
             assert unscaled_state.dtype == torch.float32
         state = self.state[param]
@@ -387,8 +410,7 @@ class FusedAdam(torch.optim.Optimizer):
         if isinstance(local_state, DTensor):
             local_state = local_state._local_tensor
 
-        dtype = self.name_to_dtype_map[state_name]
-        if dtype != torch.float32:
+        if dtype not in (torch.float32, torch.float64):
             scale = self._scales[param]
             self._apply_scale(state_name, unscaled_state, local_state, scale[state_name])
         else:
@@ -446,7 +468,7 @@ class FusedAdam(torch.optim.Optimizer):
             )
 
         # Create scale if necessary.
-        if dtype != torch.float32:
+        if dtype not in (torch.float32, torch.float64):
             if param not in self._scales:
                 self._scales[param] = {}
             self._scales[param][state_name] = torch.ones(
@@ -480,8 +502,8 @@ class FusedAdam(torch.optim.Optimizer):
                 self.set_scaled_state(param, "master_param", master)
 
     def state_dict(self):
-        """Override the state_dict() of pytorch. Before returning the state_dict, cast all
-        non-fp32 states to fp32.
+        """Override the state_dict() of pytorch. Unscale low-precision states before returning
+        the state_dict, preserving FP64 second moments.
         """
         state_dict = super().state_dict()
 
@@ -544,6 +566,8 @@ class FusedAdam(torch.optim.Optimizer):
                     ):
                         self.set_scaled_state(param, name, state)
                         assert state.dtype == torch.int16
+                    elif self.name_to_dtype_map[name] == torch.float64:
+                        self.set_scaled_state(param, name, state.double())
                     else:
                         self.set_scaled_state(param, name, state.float())
 
@@ -671,7 +695,11 @@ class FusedAdam(torch.optim.Optimizer):
                                 p, name, skip_unscale=self.fuse_unscale
                             )
                             unscaled_state[name] = unscaled
-                        if self.name_to_dtype_map[name] != torch.float32:
+                        if self.name_to_dtype_map[name] == torch.float64:
+                            # Updated in place in FP64. TE has no FP64 dtype, so the kernel
+                            # receives an Int64 view of the same storage.
+                            unscaled_state[name] = unscaled.view(torch.int64)
+                        elif self.name_to_dtype_map[name] != torch.float32:
                             unscaled_lists[name].append(unscaled)
                             scaled_lists[name].append(state_tensor)
                             state_scales[name].append(self._scales[p][name])
@@ -684,6 +712,11 @@ class FusedAdam(torch.optim.Optimizer):
                 if isinstance(local_p, Float8Tensor) and isinstance(
                     local_p._quantizer, Float8Quantizer
                 ):
+                    if self.exp_avg_sq_dtype == torch.float64:
+                        raise RuntimeError(
+                            "FusedAdam does not support fp64 exp_avg_sq with delayed-scaling FP8"
+                            " model weights."
+                        )
                     out_dtype = local_p._fp8_dtype
                     p_fp8_model.append(local_p._data.data)
                     scale, amax, scale_inv = get_fp8_meta(local_p)
