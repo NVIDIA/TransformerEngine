@@ -9,92 +9,10 @@
 #include <transformer_engine/fused_rope.h>
 
 #include "../common.h"
-#ifdef NVTE_WITH_CUTEDSL
-#include "../tvm_ffi_bridge.h"
-#endif
 #include "../util/logging.h"
 #include "../utils.cuh"
 
 namespace transformer_engine {
-
-#ifdef NVTE_WITH_CUTEDSL
-namespace {
-
-struct DSv4RopeConfig {
-  static constexpr const char *kEntrypointName = "get_dsv4_rope_function";
-
-  uint32_t heads;
-  uint32_t head_dim;
-  uint32_t rope_dim;
-  uint32_t batch_size;
-  bool backward;
-
-  uint32_t to_id() const {
-    NVTE_CHECK(heads < 256 && head_dim % 4 == 0 && head_dim / 4 < 256 && rope_dim % 4 == 0 &&
-                   rope_dim / 4 < 64 && batch_size < 256,
-               "DSv4 RoPE configuration is too large for its CuTe DSL cache key.");
-    return static_cast<uint32_t>(backward) | (heads << 1) | ((head_dim / 4) << 9) |
-           ((rope_dim / 4) << 17) | (batch_size << 23);
-  }
-
-  std::optional<tvm_ffi_bridge::TVMFFIKernel> get_kernel() const {
-    static tvm_ffi_bridge::TVMFFIConfigCache &cache = tvm_ffi_bridge::TVMFFIConfigCache::create();
-    return cache.get_or_load(*this);
-  }
-
-  std::string to_key() const {
-    return std::string("cutedsl_dsv4_rope_sm100_h") + std::to_string(heads) + "_d" +
-           std::to_string(head_dim) + "_r" + std::to_string(rope_dim) + "_b" +
-           std::to_string(batch_size) + (backward ? "_bwd" : "_fwd");
-  }
-
-  bool retrieve_func_from_python(const std::string &fn_name) const {
-    auto entrypoint = tvm::ffi::Function::GetGlobal(kEntrypointName);
-    if (!entrypoint.has_value()) return false;
-    tvm::ffi::Any result =
-        (*entrypoint)(tvm::ffi::String(fn_name), heads, head_dim, rope_dim, batch_size, backward);
-    return result.try_cast<bool>().value_or(false);
-  }
-};
-
-bool dsv4_rope_cutedsl(const Tensor &input, const Tensor &cos, const Tensor &sin,
-                       const Tensor &cu_seqlens, const bool backward, cudaStream_t stream) {
-  if (!tvm_ffi_bridge::TVMFFICentral::getInstance().get_cutedsl_backend_enabled() ||
-      cuda::sm_arch() != 100 || input.data.dtype != DType::kBFloat16 ||
-      cos.data.dtype != DType::kFloat32 || sin.data.dtype != DType::kFloat32 ||
-      cu_seqlens.data.dtype != DType::kInt32 || input.data.shape.size() != 3 ||
-      cos.data.shape.size() != 2 || sin.data.shape != cos.data.shape ||
-      cu_seqlens.data.shape.size() != 1 || input.data.shape[0] == 0 ||
-      cu_seqlens.data.shape[0] < 2) {
-    return false;
-  }
-
-  const DSv4RopeConfig config{/*heads=*/static_cast<uint32_t>(input.data.shape[1]),
-                              /*head_dim=*/static_cast<uint32_t>(input.data.shape[2]),
-                              /*rope_dim=*/static_cast<uint32_t>(cos.data.shape[1]),
-                              /*batch_size=*/static_cast<uint32_t>(cu_seqlens.data.shape[0] - 1),
-                              backward};
-  if (config.rope_dim == 0 || config.rope_dim > config.head_dim || config.head_dim % 4 != 0 ||
-      config.rope_dim % 4 != 0 || config.heads >= 256 || config.head_dim / 4 >= 256 ||
-      config.rope_dim / 4 >= 64 || config.batch_size == 0 || config.batch_size >= 256) {
-    return false;
-  }
-
-  checkCuDriverContext(stream);
-  auto kernel = config.get_kernel();
-  if (!kernel.has_value()) return false;
-
-  const int32_t device = cuda::current_device();
-  tvm_ffi_bridge::DLTensorWrapper q(input.data, false, device);
-  tvm_ffi_bridge::DLTensorWrapper cos_table(cos.data, false, device);
-  tvm_ffi_bridge::DLTensorWrapper sin_table(sin.data, false, device);
-  tvm_ffi_bridge::DLTensorWrapper prefixes(cu_seqlens.data, false, device);
-  (*kernel)(&q, &cos_table, &sin_table, &prefixes, static_cast<void *>(stream));
-  return true;
-}
-
-}  // namespace
-#endif
 
 // Returns the largest sequence index `b` such that
 // `cu_seqlens[b] / cp_size <= t_id`. Used by the linear-grid THD kernels to
@@ -930,19 +848,6 @@ void nvte_fused_rope_backward(const NVTETensor output_grads, const NVTETensor cu
                       *convertNVTETensorCheck(freqs), *convertNVTETensorCheck(start_positions),
                       convertNVTETensorCheck(input_grads), qkv_format, interleaved, cp_size,
                       cp_rank, s, b, h, d, d2, stride_s_or_t, stride_b, stride_h, stride_d, stream);
-}
-
-bool nvte_dsv4_rope_cutedsl(NVTETensor input, const NVTETensor cos, const NVTETensor sin,
-                            const NVTETensor cu_seqlens, const bool backward, cudaStream_t stream) {
-  NVTE_API_CALL(nvte_dsv4_rope_cutedsl);
-#ifdef NVTE_WITH_CUTEDSL
-  using namespace transformer_engine;
-  return dsv4_rope_cutedsl(*convertNVTETensorCheck(input), *convertNVTETensorCheck(cos),
-                           *convertNVTETensorCheck(sin), *convertNVTETensorCheck(cu_seqlens),
-                           backward, stream);
-#else
-  return false;
-#endif
 }
 
 void nvte_fused_qkv_rope_forward(const NVTETensor qkv_input, const NVTETensor q_freqs,
