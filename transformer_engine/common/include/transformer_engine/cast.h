@@ -429,44 +429,29 @@ void nvte_dequantize(const NVTETensor input, NVTETensor output, cudaStream_t str
 void nvte_group_dequantize(const NVTEGroupedTensor input, NVTEGroupedTensor output,
                            cudaStream_t stream);
 
-/*! \brief Fused grouped requantization. Currently only MXFP8 1D scaling is supported.
+/*! \brief Requantizes a grouped tensor. Currently supports MXFP8 1D scaling only.
  *
- * Makes a rowwise-only grouped MXFP8 tensor GEMM-ready in one kernel:
- * dequantizes, builds the columnwise MXFP8 copy with GEMM-swizzled per-group
- * scales, and re-emits the rowwise scales at their GEMM-swizzled addresses.
- * Optionally also materializes the BF16 dequantized values. Replaces the
- * separate group_dequantize -> group_quantize(columnwise) ->
- * grouped_swizzle(rowwise scales) chain.
+ * Equivalent to grouped MXFP8 dequantization followed by columnwise quantization,
+ * using BF16 intermediates, with optional BF16 dequantized output.
  *
- * Requirements: SM100+, MXFP8 1D scaling, the hidden dim and (caller contract,
- * offsets are device-resident) every group's row count multiples of 128. Rows
- * at or past tensor_offsets[num_groups] (capacity-mode / paged-stash tail) are
- * left untouched, matching the unfused chain. On return the output tensor's
- * with_gemm_swizzled_scales metadata is set.
+ * Input and output must describe the same grouped shapes. Input must contain
+ * rowwise FP8 data with compact E8M0 scales. Output must contain columnwise E4M3
+ * data with compact or GEMM-swizzled E8M0 scales. Optional output rowwise data
+ * must alias the input. Optional output rowwise scales must alias the input
+ * scales for matching layouts, or use separate storage for different layouts.
+ * Each group's row and column counts must be divisible by 128.
  *
- *  \param[in]     input           Rowwise MXFP8 tensor with compact (unswizzled)
- *                                 E8M0 scales; groups stacked along the first dim.
- *  \param[in,out] output          Destination: columnwise E4M3 data +
- *                                 columnwise_scale_inv (per-group GEMM-swizzled)
- *                                 and scale_inv (the GEMM-swizzled copy of the
- *                                 input's rowwise scales). Rowwise data is not
- *                                 written; the GEMM keeps consuming the input's.
- *  \param[in]     tensor_offsets  Int64 device tensor of num_groups + 1 exclusive
- *                                 ELEMENT offsets, offsets[g] = row offset x cols
- *                                 (the grouped tensor's cached tensor_offsets;
- *                                 offsets[0] = 0, offsets[num_groups] = live rows
- *                                 x cols, which may be less than the allocated
- *                                 rows x cols).
- *  \param[out]    dequantized     Optional BF16 [rows, cols] tensor; pass NULL
- *                                 (or an unallocated tensor) to skip it.
- *  \param[in]     quant_config    Quantization options. `use_fast_math` selects a
- *                                 BF16 intermediate instead of the default FP32
- *                                 path.
- *  \param[in]     stream          CUDA stream used for the operation.
+ *  \param[in]     input          Compact rowwise MXFP8 grouped tensor.
+ *  \param[in,out] output         Columnwise MXFP8 E4M3 grouped tensor with
+ *                                optional rowwise data and scales.
+ *  \param[out]    dequantized    Optional BF16 tensor with the input logical shape;
+ *                                pass NULL or an unallocated tensor to skip it.
+ *  \param[in]     quant_config   Unused; may be NULL.
+ *  \param[in]     stream         CUDA stream used for the operation.
  */
-void nvte_group_requantize(const NVTETensor input, NVTETensor output,
-                           const NVTETensor tensor_offsets, NVTETensor dequantized,
-                           const NVTEQuantizationConfig quant_config, cudaStream_t stream);
+void nvte_group_requantize(const NVTEGroupedTensor input, NVTEGroupedTensor output,
+                           NVTETensor dequantized, const NVTEQuantizationConfig quant_config,
+                           cudaStream_t stream);
 
 /*! \brief Casts multiple input tensors to quantized output tensors.
  *
