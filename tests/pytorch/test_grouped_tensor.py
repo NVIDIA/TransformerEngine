@@ -304,6 +304,127 @@ class TestGroupedTensor:
         torch.manual_seed(seed)
         torch.cuda.manual_seed(seed)
 
+    def test_autograd_identity_supports_varying_shapes(self) -> None:
+        """An identity autograd node should preserve grouped storage and metadata."""
+
+        class Identity(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, tensor):
+                return tensor
+
+            @staticmethod
+            def backward(ctx, grad_output):
+                return grad_output
+
+        first_dims = torch.tensor([1, 2], dtype=torch.int64, device="cuda")
+        tensor_offsets = torch.tensor([0, 4, 12], dtype=torch.int64, device="cuda")
+        grouped_tensor = GroupedTensor(
+            shape=(3, 4),
+            dtype=torch.float32,
+            num_tensors=2,
+            data=torch.randn(12, device="cuda"),
+            first_dims=first_dims,
+            tensor_offsets=tensor_offsets,
+            requires_grad=True,
+        )
+
+        result = Identity.apply(grouped_tensor)
+
+        assert isinstance(result, GroupedTensor)
+        assert result is not grouped_tensor
+        assert result._base is grouped_tensor
+        assert result.grad_fn is not None
+        assert result.rowwise_data is grouped_tensor.rowwise_data
+        assert result.first_dims is grouped_tensor.first_dims
+        assert result.tensor_offsets is grouped_tensor.tensor_offsets
+
+    def test_record_stream_tracks_grouped_buffers(self, monkeypatch) -> None:
+        """record_stream should reach every allocation owned by the wrapper."""
+        first_dims = torch.tensor([1, 2], dtype=torch.int64, device="cuda")
+        tensor_offsets = torch.tensor([0, 4, 12], dtype=torch.int64, device="cuda")
+        grouped_tensor = GroupedTensor(
+            shape=(3, 4),
+            dtype=torch.float32,
+            num_tensors=2,
+            data=torch.randn(12, device="cuda"),
+            scale_inv=torch.ones(2, device="cuda"),
+            first_dims=first_dims,
+            tensor_offsets=tensor_offsets,
+        )
+        buffers = [
+            tensor
+            for tensor in grouped_tensor.get_data_tensors()
+            if isinstance(tensor, torch.Tensor)
+        ]
+        recorded = []
+        original_record_stream = torch.Tensor.record_stream
+
+        def record_stream(tensor, stream):
+            recorded.append(tensor)
+            return original_record_stream(tensor, stream)
+
+        monkeypatch.setattr(torch.Tensor, "record_stream", record_stream)
+        grouped_tensor.record_stream(torch.cuda.Stream())
+
+        assert all(any(record is buffer for record in recorded) for buffer in buffers)
+
+    def test_untyped_storage_resizes_payload_storages(self) -> None:
+        """resize_(0) should resize data/scales but preserve metadata storages."""
+        first_dims = torch.tensor([1, 2], dtype=torch.int64, device="cuda")
+        last_dims = torch.tensor([4, 4], dtype=torch.int64, device="cuda")
+        tensor_offsets = torch.tensor([0, 4, 12], dtype=torch.int64, device="cuda")
+        amax = torch.ones(2, device="cuda")
+        grouped_tensor = GroupedTensor(
+            shape=(3, 4),
+            dtype=torch.float32,
+            num_tensors=2,
+            data=torch.randn(12, device="cuda"),
+            columnwise_data=torch.randn(12, device="cuda"),
+            scale_inv=torch.ones(2, device="cuda"),
+            columnwise_scale_inv=torch.ones(2, device="cuda"),
+            amax=amax,
+            first_dims=first_dims,
+            last_dims=last_dims,
+            tensor_offsets=tensor_offsets,
+            requires_grad=True,
+        )
+        detached = grouped_tensor.detach()
+        viewed = grouped_tensor.view_as(grouped_tensor)
+        aliased = torch.ops.aten.alias.default(grouped_tensor)
+        expanded = grouped_tensor.expand(grouped_tensor.shape)
+        expanded_as = grouped_tensor.expand_as(grouped_tensor)
+        data_alias = grouped_tensor.data
+        saved_data = grouped_tensor.rowwise_data
+        saved_columnwise_data = grouped_tensor.columnwise_data
+        saved_scale = grouped_tensor.scale_inv
+        saved_columnwise_scale = grouped_tensor.columnwise_scale_inv
+
+        storage = grouped_tensor.untyped_storage()
+        aliases = (grouped_tensor, detached, viewed, aliased, expanded, expanded_as, data_alias)
+        assert all(storage is alias.untyped_storage() for alias in aliases)
+        storage.resize_(0)
+
+        for alias in aliases:
+            assert alias.rowwise_data.untyped_storage().nbytes() == 0
+            assert alias.columnwise_data.untyped_storage().nbytes() == 0
+            assert alias.scale_inv.untyped_storage().nbytes() == 0
+            assert alias.columnwise_scale_inv.untyped_storage().nbytes() == 0
+        assert grouped_tensor.logical_shape == (3, 4)
+        assert grouped_tensor.num_tensors == 2
+        assert grouped_tensor.first_dims is first_dims
+        assert grouped_tensor.last_dims is last_dims
+        assert grouped_tensor.tensor_offsets is tensor_offsets
+        assert first_dims.untyped_storage().nbytes() > 0
+        assert last_dims.untyped_storage().nbytes() > 0
+        assert tensor_offsets.untyped_storage().nbytes() > 0
+        assert amax.untyped_storage().nbytes() > 0
+        assert saved_data.untyped_storage().nbytes() == 0
+        assert saved_columnwise_data.untyped_storage().nbytes() == 0
+        assert saved_scale.untyped_storage().nbytes() == 0
+        assert saved_columnwise_scale.untyped_storage().nbytes() == 0
+        with pytest.raises(RuntimeError, match=r"only supports resize_\(0\)"):
+            storage.resize_(1)
+
     def test_basic_construction_all_same_shape(self) -> None:
         """Test GroupedTensor construction with all tensors having same shape"""
         num_tensors = 4

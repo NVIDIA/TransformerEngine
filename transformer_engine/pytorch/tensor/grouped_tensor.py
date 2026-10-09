@@ -5,6 +5,7 @@
 """Grouped tensor class for handling collections of tensors with different shapes"""
 from __future__ import annotations
 
+import weakref
 from typing import List, Optional, Tuple
 
 import torch
@@ -64,6 +65,48 @@ BANNED_SHAPE_OPS = {
     torch.ops.aten.cat.default,
     torch.ops.aten.stack.default,
 }
+
+
+class GroupedTensorUntypedStorage(torch.UntypedStorage):
+    """Storage facade that resizes grouped data and scale storages."""
+
+    def __new__(cls, owner: "GroupedTensor"):
+        instance = super().__new__(cls, 0, device=owner.device)
+        instance._aliases = []
+        instance.register_alias(owner)
+        return instance
+
+    def register_alias(self, tensor: "GroupedTensor") -> None:
+        """Register a wrapper that shares this storage's payload allocations."""
+        self._aliases.append(weakref.ref(tensor))
+
+    def resize_(self, size: int):
+        """Resize grouped payload storages when pseudo-deallocated by a scheduler."""
+        if size != 0:
+            raise RuntimeError(
+                f"GroupedTensor untyped storage only supports resize_(0), got resize_({size})"
+            )
+        resized_storages = set()
+        live_aliases = []
+        for alias_ref in self._aliases:
+            alias = alias_ref()
+            if alias is not None:
+                live_aliases.append(alias_ref)
+                for tensor in (
+                    alias.rowwise_data,
+                    alias.columnwise_data,
+                    alias.scale_inv,
+                    alias.columnwise_scale_inv,
+                ):
+                    if not isinstance(tensor, torch.Tensor):
+                        continue
+                    storage = tensor.untyped_storage()
+                    storage_id = storage._cdata
+                    if storage_id not in resized_storages:
+                        storage.resize_(0)
+                        resized_storages.add(storage_id)
+        self._aliases = live_aliases
+        return self
 
 
 class GroupedTensor(GroupedTensorStorage, torch.Tensor):
@@ -174,6 +217,7 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
             nvfp4_e4m3_max=nvfp4_e4m3_max,
             scale_inv_dtype=scale_inv_dtype,
         )
+        instance._untyped_storage = GroupedTensorUntypedStorage(instance)
         return instance
 
     @classmethod
@@ -208,8 +252,10 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
             dst.nvfp4_use_4over6 = src.nvfp4_use_4over6
             dst.nvfp4_e4m3_max = src.nvfp4_e4m3_max
             dst.scale_inv_dtype = src._scale_inv_dtype
+            dst._untyped_storage = src._untyped_storage
+            dst._untyped_storage.register_alias(dst)
 
-        def make_wrapper_like(src: GroupedTensor, requires_grad: bool) -> GroupedTensor:
+        def make_wrapper_like(src: GroupedTensor) -> GroupedTensor:
             """Create a wrapper of the same type and tensor metadata as src."""
             out = torch.Tensor._make_wrapper_subclass(
                 type(src),
@@ -218,7 +264,7 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
                 storage_offset=src.storage_offset(),
                 dtype=src.dtype,
                 layout=src.layout,
-                requires_grad=requires_grad,
+                requires_grad=False,
                 device=src.device,
             )
             copy_grouped_storage_metadata(out, src)
@@ -229,9 +275,24 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
             src = args[0]
             if not isinstance(src, GroupedTensor):
                 raise TypeError(f"Expected GroupedTensor, got {type(src).__name__}")
-            if func == torch.ops.aten.detach.default:
-                return make_wrapper_like(src, requires_grad=False)
-            return make_wrapper_like(src, requires_grad=src.requires_grad)
+            return make_wrapper_like(src)
+
+        # The wrapper has no allocation of its own. Propagate CUDA allocator
+        # stream tracking to every tensor that backs the grouped representation.
+        if func == torch.ops.aten.record_stream.default:
+            src, stream = args
+            if not isinstance(src, GroupedTensor):
+                raise TypeError(f"Expected GroupedTensor, got {type(src).__name__}")
+            recorded = set()
+            for tensor in src.get_data_tensors():
+                if (
+                    isinstance(tensor, torch.Tensor)
+                    and tensor.is_cuda
+                    and id(tensor) not in recorded
+                ):
+                    tensor.record_stream(stream)
+                    recorded.add(id(tensor))
+            return None
 
         # Parameter construction may invoke aten.expand on tensor subclasses.
         # Handle this explicitly so grouped parameters can be created safely.
@@ -246,7 +307,7 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
                     src_shape[i] if dim == -1 else dim for i, dim in enumerate(expanded_shape)
                 )
                 if normalized_shape == src_shape:
-                    return make_wrapper_like(src, requires_grad=src.requires_grad)
+                    return make_wrapper_like(src)
             return super().__torch_dispatch__(func, types, args, kwargs)
 
         # DDP and mcore use expand_as(self) to build a dummy autograd node and
@@ -259,7 +320,7 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
             if other is src:
                 return _GroupedIdentityFunc.apply(src)
             if tuple(other.shape) == tuple(src.shape):
-                return make_wrapper_like(src, requires_grad=src.requires_grad)
+                return make_wrapper_like(src)
             return super().__torch_dispatch__(func, types, args, kwargs)
 
         # Distributed optimizer flattens detached parameters via
@@ -270,6 +331,14 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
             if not isinstance(src, GroupedTensor):
                 raise TypeError(f"Expected GroupedTensor, got {type(src).__name__}")
             target_shape = tuple(args[1])
+            # Autograd Functions that return an input unchanged create a
+            # shape-preserving view to track the output alias. Preserve the
+            # grouped layout and share its backing buffers in that case.
+            if target_shape == tuple(src.shape):
+                # Autograd attaches the differentiable-view metadata after
+                # __torch_dispatch__ returns, so the fresh wrapper must not
+                # already require gradients.
+                return make_wrapper_like(src)
             if target_shape in ((-1,), (src.numel(),)):
                 if src.rowwise_data is not None:
                     return src.rowwise_data.view(-1)
@@ -364,6 +433,10 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
             kwargs = {}
         # Do not force GroupedTensor on outputs.
         return torch._C._disabled_torch_function_impl(func, types, args, kwargs)
+
+    def untyped_storage(self) -> torch.UntypedStorage:
+        """Return the shared storage facade used for scheduler pseudo-deallocation."""
+        return self._untyped_storage
 
     def expand_as(self, other: torch.Tensor) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
