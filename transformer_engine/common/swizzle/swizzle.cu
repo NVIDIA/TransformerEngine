@@ -24,20 +24,6 @@ namespace {
 constexpr int MXFP8_BLOCK_SIZE = 32;
 constexpr int NVFP4_BLOCK_SIZE = 16;
 
-int get_max_dynamic_smem(int device_id = -1) {
-  static std::vector<int> cache(cuda::num_devices(), -1);
-  static std::vector<std::once_flag> flags(cuda::num_devices());
-  if (device_id < 0) {
-    device_id = cuda::current_device();
-  }
-  auto init = [&]() {
-    NVTE_CHECK_CUDA(cudaDeviceGetAttribute(&cache[device_id],
-                                           cudaDevAttrMaxSharedMemoryPerBlockOptin, device_id));
-  };
-  std::call_once(flags[device_id], init);
-  return cache[device_id];
-}
-
 constexpr __device__ __host__ int TB_DIM = 32;
 constexpr __device__ __host__ int NEW_SF_TILE_DIM_K = 16;
 constexpr __device__ __host__ int N_SF_PER_TD_PER_TILE = 4;
@@ -1392,7 +1378,8 @@ void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t s
                                     original_K};
     if (scaling_mode == NVTE_MXFP8_1D_SCALING && tile_supported(tile_desc, true)) {
       tile_launch(&tile_desc, 1, true, stream);
-    } else if (num_tiles_k < TB_DIM && narrow_k_slm_size <= get_max_dynamic_smem()) {
+    } else if (num_tiles_k < TB_DIM && static_cast<size_t>(narrow_k_slm_size) <=
+                                           cuda::max_shared_memory_per_block_optin()) {
       // Narrow-K: batch TB_DIM M-tiles per block, fully utilizing all threads.
       dim3 num_blocks_narrow(DIVUP(num_tiles_m, TB_DIM));
       NVTE_CHECK_CUDA(
@@ -1457,7 +1444,8 @@ void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t s
                                     original_K};
     if (tile_supported(tile_desc, false)) {
       tile_launch(&tile_desc, 1, false, stream);
-    } else if (num_tiles_m < TB_DIM && narrow_m_slm_size <= get_max_dynamic_smem()) {
+    } else if (num_tiles_m < TB_DIM && static_cast<size_t>(narrow_m_slm_size) <=
+                                           cuda::max_shared_memory_per_block_optin()) {
       // Narrow-M: batch TB_DIM K-tiles per block, fully utilizing all threads.
       dim3 num_blocks_narrow(DIVUP(num_tiles_k, TB_DIM));
       NVTE_CHECK_CUDA(
@@ -1864,7 +1852,8 @@ void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
       const int narrow_k_slm =
           TB_DIM * num_tiles_k * SF_TILE_DIM_M * SF_TILE_DIM_K * static_cast<int>(sizeof(int8_t));
       all_narrow_k =
-          all_narrow_k && (num_tiles_k < TB_DIM) && (narrow_k_slm <= get_max_dynamic_smem());
+          all_narrow_k && (num_tiles_k < TB_DIM) &&
+          (static_cast<size_t>(narrow_k_slm) <= cuda::max_shared_memory_per_block_optin());
       int vec_load_size_i = (num_tiles_k - 1) % 4 + 1;
       // We use the minimum vec_load_size across all tensors.
       // TODO(zhongbo): fix vec_load_size for NVFP4
@@ -1936,7 +1925,8 @@ void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
       const int narrow_m_slm =
           TB_DIM * num_tiles_m * SF_TILE_DIM_M * SF_TILE_DIM_K * static_cast<int>(sizeof(int8_t));
       all_narrow_m =
-          all_narrow_m && (num_tiles_m < TB_DIM) && (narrow_m_slm <= get_max_dynamic_smem());
+          all_narrow_m && (num_tiles_m < TB_DIM) &&
+          (static_cast<size_t>(narrow_m_slm) <= cuda::max_shared_memory_per_block_optin());
       int vec_load_size_i = (num_tiles_k - 1) % 4 + 1;
       // We use the minimum vec_load_size across all tensors.
       vec_load_size = std::min(vec_load_size, vec_load_size_i);
