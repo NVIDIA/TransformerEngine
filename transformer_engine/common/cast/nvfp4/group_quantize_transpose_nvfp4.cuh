@@ -1851,12 +1851,12 @@ inline void group_row_scaled_cast(const Tensor &input, const Tensor *noop,
           TRANSFORMER_ENGINE_SWITCH_CONDITION(with_gemm_swizzled, WITH_GEMM_SWIZZLED_SCALES, {
             const int out_mem_colwise_data = RETURN_TRANSPOSE ? buff_size_aligned_out_t : 0;
             const int out_scales_transpose_mem = RETURN_TRANSPOSE ? buff_size_scales_transpose : 0;
-            const int dshmem_size =
-                buff_size_aligned_in + buff_size_aligned_out + out_mem_colwise_data +
-                buff_size_scales + out_scales_transpose_mem + TMA_SHMEM_ALIGNMENT;
-            auto kernel = group_row_scaled_cast_nvfp4_kernel<ScaleType, USE_FAST_MATH,
-                                                             RETURN_TRANSPOSE,
-                                                             WITH_GEMM_SWIZZLED_SCALES>;
+            const int dshmem_size = buff_size_aligned_in + buff_size_aligned_out +
+                                    out_mem_colwise_data + buff_size_scales +
+                                    out_scales_transpose_mem + TMA_SHMEM_ALIGNMENT;
+            auto kernel =
+                group_row_scaled_cast_nvfp4_kernel<ScaleType, USE_FAST_MATH, RETURN_TRANSPOSE,
+                                                   WITH_GEMM_SWIZZLED_SCALES>;
             NVTE_CHECK_CUDA(cudaFuncSetAttribute(
                 kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
             kernel<<<grid, block, dshmem_size, stream>>>(tensor_map_input, args, noop_ptr, rows,
@@ -1969,13 +1969,11 @@ inline void group_row_scaled_cast_graph_safe(const GroupedTensor *input, const T
           TRANSFORMER_ENGINE_SWITCH_CONDITION(with_gemm_swizzled, WITH_GEMM_SWIZZLED_SCALES, {
             const int out_mem_colwise_data = RETURN_TRANSPOSE ? buff_size_aligned_out_t : 0;
             const int out_scales_transpose_mem = RETURN_TRANSPOSE ? buff_size_scales_transpose : 0;
-            const int dshmem_size =
-                buff_size_aligned_in + buff_size_aligned_out + out_mem_colwise_data +
-                buff_size_scales + out_scales_transpose_mem + TMA_SHMEM_ALIGNMENT;
-            auto kernel =
-                group_row_scaled_cast_nvfp4_graph_safe_kernel<ScaleType, USE_FAST_MATH,
-                                                              RETURN_TRANSPOSE,
-                                                              WITH_GEMM_SWIZZLED_SCALES>;
+            const int dshmem_size = buff_size_aligned_in + buff_size_aligned_out +
+                                    out_mem_colwise_data + buff_size_scales +
+                                    out_scales_transpose_mem + TMA_SHMEM_ALIGNMENT;
+            auto kernel = group_row_scaled_cast_nvfp4_graph_safe_kernel<
+                ScaleType, USE_FAST_MATH, RETURN_TRANSPOSE, WITH_GEMM_SWIZZLED_SCALES>;
             NVTE_CHECK_CUDA(cudaFuncSetAttribute(
                 kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
             kernel<<<grid, block, dshmem_size, stream>>>(
