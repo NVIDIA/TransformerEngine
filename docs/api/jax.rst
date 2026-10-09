@@ -98,9 +98,10 @@ gathering concatenates the quantized matrices and their existing scale blocks;
 matrix-shard gathering reconstructs each expert's scale blocks. These specs
 are resolved at trace time and do not require JAX Explicit sharding mode.
 
-The old ``ep_axis`` and ``data_parallelism_axes`` arguments remain accepted
-with a ``DeprecationWarning``. They are translated into a resource before
-calling the new API. Conflicting old and new arguments raise ``ValueError``.
+MoE parallelism is configured through ``MeshResource``. The former
+``ep_axis`` and ``data_parallelism_axes`` arguments are no longer accepted.
+Set ``dp_resource``, ``fsdp_resource``, and ``ep_resource`` to physical mesh
+axis names. Outer batch axes follow DP then FSDP, with EP innermost.
 
 The cuDNN fused MoE path uses ``cudnn.grouped_gemm_glu_wrapper_sm100`` with JAX
 dispatch, ``act_func="swiglu"``, ``sf_vec_size=32``, and

@@ -100,12 +100,9 @@ class _MoEBlock(TransformerEngineBase):
     quant_before_fsdp_ag : bool
         Quantize MXFP8 weight shards before their FSDP all-gather. Defaults to
         ``False``; ``True`` requires ``mesh_resource.fsdp_resource``.
-    ep_axis, data_parallelism_axes : deprecated
-        Compatibility axis arguments converted into MeshResource
-        with a DeprecationWarning.
     use_cudnn_fusion : bool
-        Defaults to ``True``: try Rubin fused GLU, then generic Blackwell+ fused
-        SwiGLU, then unfused TE grouped GEMM. Unsupported fused paths warn.
+        Defaults to ``True``: try shared cuDNN GLU/dGLU fusion on SM100+ GPUs.
+        Ineligible calls warn and use unfused TE grouped GEMM.
         ``False`` selects unfused execution. Use the same value when calculating
         EP bootstrap receive capacity with ``get_moe_recv_capacity_per_rank``.
     apply_topk_weights_early : bool
@@ -159,9 +156,6 @@ class _MoEBlock(TransformerEngineBase):
     # Parallelism
     mesh_resource: Optional[MeshResource] = None
     quant_before_fsdp_ag: bool = False
-    # Deprecated compatibility arguments.
-    ep_axis: Optional[str] = None
-    data_parallelism_axes: Optional[Tuple[str, ...]] = None
 
     # MoE knobs forwarded to ``moe()``
     use_cudnn_fusion: bool = True
@@ -211,8 +205,6 @@ class _MoEBlock(TransformerEngineBase):
         mesh_resource, quant_before_fsdp_ag = _resolve_moe_mesh_resource(
             self.mesh_resource,
             self.quant_before_fsdp_ag,
-            self.ep_axis,
-            self.data_parallelism_axes,
         )
         _, data_parallelism_axes = _moe_mesh_axes(mesh_resource)
         assert (

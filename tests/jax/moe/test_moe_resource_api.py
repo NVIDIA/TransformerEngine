@@ -2,11 +2,10 @@
 #
 # See LICENSE for license information.
 
-"""MoE resource resolution and deprecated API compatibility without EP kernels."""
+"""MoE resource resolution and MeshResource-only API without EP kernels."""
 
 import importlib
 import inspect
-import warnings
 
 import jax
 import jax.numpy as jnp
@@ -86,47 +85,9 @@ def test_bool_and_resource_types():
         _resolve_moe_mesh_resource("ep")
 
 
-def test_legacy_preserves_arbitrary_outer_axis_order():
-    with global_shard_guard(MeshResource(fsdp_resource="fsdp", ep_resource="ep")), pytest.warns(
-        DeprecationWarning
-    ):
-        resource, quantize = _resolve_moe_mesh_resource(
-            ep_axis="ep",
-            data_parallelism_axes=("outer", "fsdp", "replica"),
-            quant_before_fsdp_ag=True,
-        )
-    assert _moe_mesh_axes(resource) == ("ep", ("outer", "fsdp", "replica"))
-    assert resource.fsdp_resource == "fsdp"
-    assert quantize is True
-
-
-def test_legacy_defaults_to_no_outer_axes():
-    with global_shard_guard(MeshResource(dp_resource="dp", fsdp_resource="fsdp", ep_resource="ep")):
-        with pytest.warns(DeprecationWarning):
-            resource, _ = _resolve_moe_mesh_resource(ep_axis="ep")
-    assert _moe_mesh_axes(resource) == ("ep", ())
-
-
-@pytest.mark.parametrize(
-    "kwargs,error",
-    [
-        ({"ep_axis": "other"}, "ep_axis conflicts"),
-        ({"data_parallelism_axes": ("other",)}, "data_parallelism_axes conflicts"),
-    ],
-)
-def test_conflicting_old_and_new_args(kwargs, error):
-    with pytest.warns(DeprecationWarning):
-        with pytest.raises(ValueError, match=error):
-            _resolve_moe_mesh_resource(
-                MeshResource(fsdp_resource="fsdp", ep_resource="ep"), **kwargs
-            )
-
-
-@pytest.mark.parametrize("legacy", [False, True])
 @pytest.mark.parametrize("quantize", [False, True])
-def test_public_api_delegates_with_selected_resource(monkeypatch, legacy, quantize):
+def test_public_api_uses_selected_resource(monkeypatch, quantize):
     module = importlib.import_module("transformer_engine.jax.moe")
-    original_moe = module.moe
     signature = inspect.signature(module._moe)
     captured = {}
 
@@ -135,36 +96,22 @@ def test_public_api_delegates_with_selected_resource(monkeypatch, legacy, quanti
         assert global_mesh_resource().ep_resource == "ep"
         return args[0], None, jnp.zeros((1,), jnp.int32)
 
-    def delegated_moe(*args, **kwargs):
-        assert "mesh_resource" in kwargs
-        assert not {"ep_axis", "data_parallelism_axes", "weight_gather"}.intersection(kwargs)
-        return original_moe(*args, **kwargs)
-
     monkeypatch.setattr(module, "_moe", fake_vjp)
-    monkeypatch.setattr(module, "moe", delegated_moe)
     mesh = Mesh(np.asarray(jax.devices()[:1]).reshape(1, 1, 1), ("dp", "fsdp", "ep"))
-    kwargs = dict(num_experts=2, num_experts_per_tok=1)
-    if legacy:
-        kwargs.update(
-            ep_axis="ep",
-            data_parallelism_axes=("dp", "fsdp"),
-            quant_before_fsdp_ag=quantize,
-        )
-    else:
-        kwargs.update(
-            mesh_resource=MeshResource(dp_resource="dp", fsdp_resource="fsdp", ep_resource="ep"),
-            quant_before_fsdp_ag=quantize,
-        )
-    with jax.set_mesh(mesh), warnings.catch_warnings(record=True) as recorded:
-        warnings.simplefilter("always", DeprecationWarning)
-        original_moe(
+    kwargs = dict(
+        num_experts=2,
+        num_experts_per_tok=1,
+        mesh_resource=MeshResource(dp_resource="dp", fsdp_resource="fsdp", ep_resource="ep"),
+        quant_before_fsdp_ag=quantize,
+    )
+    with jax.set_mesh(mesh):
+        module.moe(
             jnp.ones((1, 1, 4)),
             jnp.ones((4, 2)),
             jnp.ones((2, 4, 8)),
             jnp.ones((2, 4, 4)),
             **kwargs,
         )
-    assert any("deprecated for TE MoE" in str(w.message) for w in recorded) == legacy
     assert _moe_mesh_axes(captured["mesh_resource"]) == ("ep", ("dp", "fsdp"))
     assert captured["quant_before_fsdp_ag"] is quantize
     assert "ep_axis" not in captured

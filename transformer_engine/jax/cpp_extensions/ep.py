@@ -199,13 +199,11 @@ def ep_handle_mem_size(cfg: EpLayerConfig) -> int:
 def _capture_ep_resource_axes():
     """Capture physical axes at bind time for asynchronous SPMD partitioning."""
     resource = global_mesh_resource()
-    outer_axes = getattr(resource, "_legacy_data_parallelism_axes", None)
-    if outer_axes is None:
-        outer_axes = tuple(
-            dict.fromkeys(
-                axis for axis in (resource.dp_resource, resource.fsdp_resource) if axis is not None
-            )
+    outer_axes = tuple(
+        dict.fromkeys(
+            axis for axis in (resource.dp_resource, resource.fsdp_resource) if axis is not None
         )
+    )
     return resource.ep_resource, outer_axes
 
 

@@ -654,32 +654,21 @@ def test_quantized_weight_gather_matches_full_precision_gather(
 
 
 @pytest.mark.parametrize("quant_before_fsdp_ag", [False, True])
-@pytest.mark.parametrize("api", ["explicit", "legacy"])
-def test_mesh_resource_api_forward_and_backward(mesh, quant_before_fsdp_ag, api):
-    """Explicit resources need no global context; legacy calls retain numerical semantics."""
+def test_mesh_resource_api_forward_and_backward(mesh, quant_before_fsdp_ag):
+    """Explicit and global resources give identical forward and backward results."""
     baseline = _make_block(
         quantization_recipe=MXFP8BlockScaling(), quant_before_fsdp_ag=quant_before_fsdp_ag
     )
-    if api == "explicit":
-        candidate = baseline.clone(
-            mesh_resource=MeshResource(ep_resource=EP_AXIS, fsdp_resource=FSDP_AXIS)
-        )
-    else:
-        candidate = baseline.clone(
-            data_parallelism_axes=(FSDP_AXIS,),
-        )
+    candidate = baseline.clone(
+        mesh_resource=MeshResource(ep_resource=EP_AXIS, fsdp_resource=FSDP_AXIS)
+    )
     x = _make_inputs(jax.random.PRNGKey(51))
     variables, baseline_out, _ = _init_apply(baseline, mesh, x, jax.random.PRNGKey(52))
     baseline_grads, baseline_dx = _grad_step(baseline, variables, mesh, x)
     with jax.set_mesh(mesh), nn_partitioning.axis_rules(LOGICAL_AXIS_RULES):
-        resource = None if api == "explicit" else MeshResource(ep_resource=EP_AXIS)
-        with global_shard_guard(resource):
+        with global_shard_guard(None):
             x_sh = _shard_inputs(x, mesh)
-            if api == "legacy":
-                with pytest.warns(DeprecationWarning, match="deprecated for TE MoE"):
-                    candidate_out, _, _ = jax.jit(candidate.apply)(variables, x_sh)
-            else:
-                candidate_out, _, _ = jax.jit(candidate.apply)(variables, x_sh)
+            candidate_out, _, _ = jax.jit(candidate.apply)(variables, x_sh)
 
             def loss_fn(variables, inputs):
                 output, _, _ = candidate.apply(variables, inputs)

@@ -32,7 +32,7 @@ stateful recipes follow the same update semantics as the other TE MLPs.
 
 import math
 import warnings
-from dataclasses import dataclass, fields, replace
+from dataclasses import replace
 from functools import partial
 from typing import Any, Optional, Tuple, Union
 
@@ -64,28 +64,18 @@ from .sharding import MeshResource, _get_mesh, global_mesh_resource, global_shar
 __all__ = ["get_moe_recv_capacity_per_rank", "moe"]
 
 
-@dataclass
-class _LegacyMoEMeshResource(MeshResource):
-    """Preserve arbitrary ordered outer axes accepted by the deprecated API."""
-
-    _legacy_data_parallelism_axes: Tuple[str, ...] = ()
-
-
 def _moe_mesh_axes(resource: MeshResource):
     """Resolve physical MoE axes, keeping EP innermost in the batch shard."""
     if not isinstance(resource.ep_resource, str) or not resource.ep_resource:
         raise ValueError("TE MoE requires MeshResource.ep_resource to name a physical mesh axis.")
-    if isinstance(resource, _LegacyMoEMeshResource):
-        outer_axes = resource._legacy_data_parallelism_axes
-    else:
-        outer_axes = tuple(
-            dict.fromkeys(
-                axis for axis in (resource.dp_resource, resource.fsdp_resource) if axis is not None
-            )
+    outer_axes = tuple(
+        dict.fromkeys(
+            axis for axis in (resource.dp_resource, resource.fsdp_resource) if axis is not None
         )
+    )
     if any(not isinstance(axis, str) or not axis for axis in outer_axes):
         raise ValueError("TE MoE DP and FSDP resources must name physical mesh axes.")
-    if resource.ep_resource in outer_axes or len(set(outer_axes)) != len(outer_axes):
+    if resource.ep_resource in outer_axes:
         raise ValueError("TE MoE EP and outer data-parallel axes must be distinct.")
     return resource.ep_resource, outer_axes
 
@@ -93,59 +83,17 @@ def _moe_mesh_axes(resource: MeshResource):
 def _resolve_moe_mesh_resource(
     mesh_resource=None,
     quant_before_fsdp_ag=False,
-    ep_axis=None,
-    data_parallelism_axes=None,
 ):
-    """Resolve the canonical API and adapt deprecated axis arguments."""
+    """Resolve and snapshot the explicit or active mesh resource."""
     if not isinstance(quant_before_fsdp_ag, bool):
         raise TypeError("quant_before_fsdp_ag must be a bool.")
     if mesh_resource is not None and not isinstance(mesh_resource, MeshResource):
         raise TypeError("mesh_resource must be a MeshResource or None.")
-    explicit_resource = mesh_resource is not None
     if mesh_resource is None:
         try:
             mesh_resource = global_mesh_resource()
         except AssertionError:
             mesh_resource = None
-
-    legacy = ep_axis is not None or data_parallelism_axes is not None
-    if legacy:
-        warnings.warn(
-            "ep_axis and data_parallelism_axes are deprecated for TE MoE; "
-            "pass mesh_resource=MeshResource(...) and quant_before_fsdp_ag instead.",
-            DeprecationWarning,
-            stacklevel=3,
-        )
-        if explicit_resource:
-            if ep_axis is not None and ep_axis != mesh_resource.ep_resource:
-                raise ValueError("ep_axis conflicts with mesh_resource.ep_resource.")
-            if (
-                data_parallelism_axes is not None
-                and tuple(data_parallelism_axes) != _moe_mesh_axes(mesh_resource)[1]
-            ):
-                raise ValueError("data_parallelism_axes conflicts with mesh_resource.")
-        else:
-            # The old functional API defaulted to no outer axes even in a global context.
-            axes = tuple(data_parallelism_axes or ())
-            fsdp_axis = getattr(mesh_resource, "fsdp_resource", None)
-            if fsdp_axis not in axes:
-                fsdp_axis = axes[-1] if axes else None
-            dp_axes = tuple(axis for axis in axes if axis != fsdp_axis)
-            resources = {
-                field.name: getattr(mesh_resource, field.name, None)
-                for field in fields(MeshResource)
-            }
-            resources.update(
-                ep_resource=(
-                    ep_axis if ep_axis is not None else getattr(mesh_resource, "ep_resource", None)
-                ),
-                dp_resource=dp_axes[0] if dp_axes else None,
-                fsdp_resource=fsdp_axis,
-            )
-            mesh_resource = _LegacyMoEMeshResource(
-                **resources,
-                _legacy_data_parallelism_axes=axes,
-            )
 
     if mesh_resource is None:
         raise ValueError(
@@ -1988,8 +1936,6 @@ def moe(
     ),
     mesh_resource: Optional[MeshResource] = None,
     quant_before_fsdp_ag: bool = False,
-    ep_axis: Optional[str] = None,
-    data_parallelism_axes: Optional[Tuple[str, ...]] = None,
     input_axes: Tuple[Optional[str], ...] = (),
     gate_kernel_axes: Tuple[Optional[str], ...] = (),
     wi_kernel_axes: Tuple[Optional[str], ...] = ("exp", "embed", "mlp"),
@@ -2066,9 +2012,6 @@ def moe(
         FSDP shards the gated dimension, layout conversion permutes gathered
         FP8 data and inverse scales, preserving global gate/up pairing without
         gathering or requantizing full-precision weights.
-    ep_axis, data_parallelism_axes : deprecated
-        Compatibility axis arguments converted into a MeshResource,
-        with a DeprecationWarning. Conflicting old and new arguments raise.
     Per-expert dispatch-slot alignment defaults to 128 tokens (``_ALIGN_SIZE``).
     Requesting cuDNN fusion reserves 256 tokens, also when falling back, to
     preserve compatibility with EP bootstrap buffer sizing.
@@ -2097,19 +2040,6 @@ def moe(
     """
     if not isinstance(use_cudnn_fusion, bool):
         raise TypeError("use_cudnn_fusion must be a bool")
-    if ep_axis is not None or data_parallelism_axes is not None:
-        call_args = locals().copy()
-        resource, quantize = _resolve_moe_mesh_resource(
-            mesh_resource,
-            quant_before_fsdp_ag,
-            ep_axis,
-            data_parallelism_axes,
-        )
-        for name in ("ep_axis", "data_parallelism_axes"):
-            call_args.pop(name)
-        call_args.update(mesh_resource=resource, quant_before_fsdp_ag=quantize)
-        return moe(**call_args)
-
     mesh_resource, quant_before_fsdp_ag = _resolve_moe_mesh_resource(
         mesh_resource, quant_before_fsdp_ag
     )
