@@ -17,6 +17,25 @@
 extern "C" {
 #endif
 
+/*! \brief Plain rowwise 1x16 NVFP4 QDQ into matching BF16/FP16 output.
+ *
+ * Input/output are contiguous, 16-byte aligned, rank >= 2, with both flattened
+ * dimensions divisible by 16. E2M1 values and E4M3 scales (maximum 448) are
+ * rounded as native quantization with fast math disabled. No packed output is
+ * materialized. Caller supplies the current scalar FP32 absolute maximum in
+ * amax's data buffer. Optional scalar FP32 noop skips writes when equal to 1.
+ * All buffers are caller-owned and must remain alive until stream completion.
+ */
+void nvte_nvfp4_qdq(const NVTETensor input, NVTETensor output, const NVTETensor amax,
+                    const NVTETensor noop, cudaStream_t stream);
+
+/*! \brief Rowwise block-32 E4M3/E8M0 MXFP8 QDQ into matching BF16/FP16 output.
+ * Input and output are contiguous, with rows divisible by 32. An optional scalar
+ * FP32 noop skips writes when equal to 1. All buffers are caller-owned.
+ */
+void nvte_mxfp8_qdq(const NVTETensor input, NVTETensor output, const NVTETensor noop,
+                    cudaStream_t stream);
+
 /*  Quantize the tensor
  *
  *  The type of quantized tensor in the output depends on the scaling mode of the output

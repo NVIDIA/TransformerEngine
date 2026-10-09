@@ -7704,3 +7704,123 @@ class TestHybridActivationRecompute:
         leftover = saved_obj.restore_from_saved(list(saved_tensors))
         assert leftover == [], "restore_from_saved should consume every element"
         torch.testing.assert_close(saved_obj.dequantize(), expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("internal", [False, True])
+@pytest.mark.parametrize("rowwise", [False, True])
+@pytest.mark.parametrize("requested_dtype", [None, torch.bfloat16, torch.float32])
+def test_hybrid_output_dtype_lifecycle(internal, rowwise, requested_dtype):
+    """Reconstructing an absent row preserves its resolved child configuration."""
+    q = HybridQuantizer(
+        rowwise_quantizer=IdentityQuantizer(dtype=torch.float16),
+        columnwise_quantizer=IdentityQuantizer(),
+        columnwise_source="rowwise_dequantized",
+    )
+    q.internal = internal
+    q.rowwise_quantizer.internal = internal
+    q.columnwise_quantizer.internal = internal
+    q.set_usage(rowwise=rowwise, columnwise=True)
+    x = torch.randn(32, 64, device="cuda", dtype=torch.float32, requires_grad=True)
+    out = q.quantize(x, dtype=requested_dtype)
+    assert q.rowwise_quantizer.dtype == torch.float16
+    assert q.columnwise_quantizer.dtype is None
+    assert not hasattr(q, "_output_dtype")
+    row_dtype = requested_dtype or torch.float16
+    col_dtype = requested_dtype or x.dtype
+    expected = x.detach().to(row_dtype).to(col_dtype)
+    torch.testing.assert_close(out._columnwise_storage.dequantize(), expected, rtol=0, atol=0)
+    if not internal and rowwise:
+        out.sum().backward()
+        torch.testing.assert_close(x.grad, torch.ones_like(x), rtol=0, atol=0)
+    # Exercise both the original quantizer and the result's attached quantizer.
+    for multiplier, update in [(3, lambda src: q.update_quantized(src, out)), (5, out.quantize_)]:
+        updated = x.detach() * multiplier
+        update(updated)
+        expected = updated.to(row_dtype).to(col_dtype)
+        torch.testing.assert_close(out._columnwise_storage.dequantize(), expected, rtol=0, atol=0)
+        if rowwise:
+            torch.testing.assert_close(
+                out._rowwise_storage.dequantize(), updated.to(row_dtype), rtol=0, atol=0
+            )
+    with pytest.raises(ValueError, match="dtype does not match"):
+        q.quantize(x, out=out, dtype=torch.float16)
+
+
+@pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+@pytest.mark.parametrize("internal", [False, True])
+@pytest.mark.parametrize("source_dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("native_format", ["mxfp8", "nvfp4"])
+def test_hybrid_native_dtype_override_preserves_encoding(internal, source_dtype, native_format):
+    """Native children ignore output requests and keep the old decode-source dtype."""
+    x = torch.randn(128, 256, device="cuda", dtype=source_dtype)
+    if native_format == "nvfp4" and not nvfp4_available:
+        pytest.skip(reason_for_no_nvfp4)
+    quantizer_type = MXFP8Quantizer if native_format == "mxfp8" else NVFP4Quantizer
+    options = {"fp8_dtype": tex.DType.kFloat8E4M3} if native_format == "mxfp8" else {}
+    row = quantizer_type(**options, rowwise=True, columnwise=False)
+    col = quantizer_type(**options, rowwise=False, columnwise=True)
+    row.internal = col.internal = internal
+    q = HybridQuantizer(
+        rowwise_quantizer=row,
+        columnwise_quantizer=col,
+        columnwise_source="rowwise_dequantized",
+    )
+    q.internal = internal
+    requested_dtype = torch.float32 if source_dtype == torch.bfloat16 else torch.bfloat16
+    assert not row.supports_output_dtype
+    assert row.with_output_dtype(requested_dtype) is row
+    expected_row = row.quantize(x)
+    direct_override = row.quantize(x, dtype=requested_dtype)
+    _assert_storage_data_exact(direct_override, expected_row, context="native dtype override")
+    assert direct_override._dtype == expected_row._dtype
+    expected_col = col.quantize(expected_row.dequantize(dtype=source_dtype))
+    actual = q.quantize(x, dtype=requested_dtype)
+    _assert_storage_data_exact(actual._rowwise_storage, expected_row, context="rowwise encoding")
+    _assert_storage_data_exact(
+        actual._columnwise_storage, expected_col, context="columnwise encoding"
+    )
+    assert actual._rowwise_storage._dtype == expected_row._dtype
+    assert actual._columnwise_storage._dtype == expected_col._dtype
+
+    # Native out= and module caches still ignore conflicting output requests.
+    from transformer_engine.pytorch.module.base import quantize_weight
+
+    assert row.is_compatible_output(expected_row, dtype=requested_dtype)
+    # Native update_quantized requires a public tensor destination.
+    public_row = row.copy()
+    public_row.internal = False
+    destination = public_row.quantize(x)
+    expected_destination = public_row.quantize(x)
+    assert public_row.quantize(x, out=destination, dtype=requested_dtype) is destination
+    _assert_storage_data_exact(
+        destination, expected_destination, context="native out dtype override"
+    )
+    assert destination._dtype == direct_override._dtype
+    reused, new_cache = quantize_weight(
+        tensor=x,
+        quantizer=row,
+        workspace=expected_row,
+        workspace_dtype=requested_dtype,
+        cache=True,
+        update_workspace=False,
+    )
+    assert reused is expected_row and new_cache is None
+
+
+@pytest.mark.parametrize("internal", [False, True])
+@pytest.mark.parametrize("rowwise", [False, True])
+def test_hybrid_empty_dtype_update(internal, rowwise):
+    q = HybridQuantizer(
+        rowwise_quantizer=IdentityQuantizer(),
+        columnwise_quantizer=IdentityQuantizer(),
+        columnwise_source="rowwise_dequantized",
+    )
+    q.internal = internal
+    q.set_usage(rowwise=rowwise, columnwise=True)
+    out = q.make_empty((32, 64), dtype=torch.bfloat16, device="cuda")
+    x = torch.randn(32, 64, device="cuda", dtype=torch.float32)
+    q.update_quantized(x, out)
+    for child in (out._rowwise_storage, out._columnwise_storage):
+        if child is None:
+            continue
+        torch.testing.assert_close(child.dequantize(), x.bfloat16(), rtol=0, atol=0)

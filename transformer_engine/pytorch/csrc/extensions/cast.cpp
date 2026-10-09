@@ -52,6 +52,54 @@ void allreduce_nvfp4_amax_tensors(NVFP4Quantizer *nvfp4_quantizer_cpp,
 
 }  // namespace
 
+void nvfp4_qdq(const at::Tensor &input, at::Tensor output, at::Tensor amax,
+               std::optional<at::Tensor> noop, bool compute_amax) {
+  TORCH_CHECK(input.is_cuda() && output.is_cuda() && amax.is_cuda(),
+              "NVFP4 QDQ requires CUDA tensors");
+  TORCH_CHECK(input.device() == output.device() && input.device() == amax.device(),
+              "NVFP4 QDQ tensors must share a device");
+  at::cuda::CUDAGuard guard(input.device());
+  TORCH_CHECK(input.is_contiguous() && output.is_contiguous() && amax.is_contiguous(),
+              "NVFP4 QDQ requires contiguous tensors");
+  TORCH_CHECK(at::cuda::getCurrentDeviceProperties()->major == 10 &&
+                  at::cuda::getCurrentDeviceProperties()->minor == 0,
+              "NVFP4 QDQ currently supports SM100");
+  TORCH_CHECK(
+      !noop || (noop->is_cuda() && noop->device() == input.device() && noop->is_contiguous()),
+      "Invalid QDQ noop device/layout");
+  auto in = makeTransformerEngineTensor(input);
+  auto out = makeTransformerEngineTensor(output);
+  auto amax_cpp = makeTransformerEngineTensor(amax);
+  std::optional<TensorWrapper> noop_cpp;
+  if (noop) noop_cpp = makeTransformerEngineTensor(*noop);
+  const auto stream = at::cuda::getCurrentCUDAStream();
+  if (compute_amax) {
+    TORCH_CHECK(amax.scalar_type() == at::kFloat && amax.numel() == 1,
+                "QDQ amax must be scalar FP32");
+    TensorWrapper reduction_output(nullptr, in.shape(), DType::kFloat32, amax.data_ptr<float>());
+    nvte_compute_amax(in.data(), reduction_output.data(), stream);
+  }
+  nvte_nvfp4_qdq(in.data(), out.data(), amax_cpp.data(), noop_cpp ? noop_cpp->data() : nullptr,
+                 stream);
+}
+
+void mxfp8_qdq(const at::Tensor &input, at::Tensor output, std::optional<at::Tensor> noop) {
+  TORCH_CHECK(input.is_cuda() && output.is_cuda() && input.device() == output.device(),
+              "MXFP8 QDQ requires tensors on the same CUDA device");
+  at::cuda::CUDAGuard guard(input.device());
+  TORCH_CHECK(input.is_contiguous() && output.is_contiguous(),
+              "MXFP8 QDQ requires contiguous tensors");
+  TORCH_CHECK(
+      !noop || (noop->is_cuda() && noop->device() == input.device() && noop->is_contiguous()),
+      "Invalid QDQ noop device/layout");
+  auto in = makeTransformerEngineTensor(input);
+  auto out = makeTransformerEngineTensor(output);
+  std::optional<TensorWrapper> noop_cpp;
+  if (noop) noop_cpp = makeTransformerEngineTensor(*noop);
+  nvte_mxfp8_qdq(in.data(), out.data(), noop_cpp ? noop_cpp->data() : nullptr,
+                 at::cuda::getCurrentCUDAStream());
+}
+
 py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::object &output,
                     std::optional<at::Tensor> noop_flag) {
   // Convert quantizer to C++ object

@@ -863,7 +863,7 @@ def quantize_weight(
     fsdp_group: dist_group_type, optional
         FSDP process group the weights are distributed over.
     workspace_dtype: torch.dtype, optional
-        High-precision dtype for debug quantization workspaces.
+        Requested compute dtype for high-precision quantization workspaces.
     cache: bool, default = False
         If ``True`` and a new workspace is created, it will be returned
         as the second element so the caller can store it.
@@ -893,6 +893,11 @@ def quantize_weight(
     if workspace is not None and quantizer is not None:
         if not _is_weight_workspace_valid(workspace, quantizer):
             workspace = None
+        elif workspace_dtype is not None:
+            # Custom quantizers may honor a compute dtype. Native quantizers
+            # retain their existing dtype and cache behavior.
+            if not quantizer.is_compatible_output(workspace, dtype=workspace_dtype):
+                workspace = None
 
     # FSDP gather on cached workspace
     if (

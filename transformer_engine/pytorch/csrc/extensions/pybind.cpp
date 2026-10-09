@@ -477,6 +477,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::call_guard<py::gil_scoped_release>());
   m.def("get_fused_attn_backend", &transformer_engine::pytorch::get_fused_attn_backend,
         "Get Fused Attention backend", py::arg("fused_attn_params"));
+  m.def("nvfp4_qdq", &transformer_engine::pytorch::nvfp4_qdq, "Plain rowwise NVFP4 QDQ",
+        py::arg("input"), py::arg("output"), py::arg("amax"), py::arg("noop") = py::none(),
+        py::arg("compute_amax") = true, py::call_guard<py::gil_scoped_release>());
+  m.def("mxfp8_qdq", &transformer_engine::pytorch::mxfp8_qdq, "Rowwise block-32 MXFP8 QDQ",
+        py::arg("input"), py::arg("output"), py::arg("noop") = py::none(),
+        py::call_guard<py::gil_scoped_release>());
   m.def("compute_amax", &transformer_engine::pytorch::compute_amax,
         "Compute absolute max value in tensor", py::arg("input"), py::arg("amax"),
         py::call_guard<py::gil_scoped_release>());

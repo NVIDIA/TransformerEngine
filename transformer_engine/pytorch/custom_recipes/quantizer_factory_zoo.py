@@ -348,6 +348,80 @@ def nvfp4_row_scaled_fwd_high_precision_bwd_factory(
     return _plain_nvfp4_quantizer()
 
 
+def nvfp4_qdq_weight_fwd_bf16_bwd_factory(
+    role: Optional[QuantizerRole], *, backend="auto", nvfp4_options=None
+):
+    """High-precision X and NVFP4-QDQ W forward; BF16 backward.
+
+    Applies to Linear and GroupedLinear. The module compute
+    dtype determines high-precision arithmetic (BF16 for BF16 compute).
+    Backward uses original inputs and decoded QDQ weights. Other roles use
+    Identity. Use functools.partial to select backend or native NVFP4 options,
+    including 4over6 (reference fallback).
+    """
+    from ..tensor.hybrid_tensor import HybridQuantizer
+    from ..tensor.identity_tensor import IdentityQuantizer
+    from ..tensor.nvfp4_tensor import NVFP4Quantizer
+    from .qdq import NVFP4QDQQuantizer
+
+    if role is None or role.module_type not in ("linear", "grouped_linear"):
+        return IdentityQuantizer()
+    if role.tensor_type == "input":
+        return HybridQuantizer(
+            rowwise_quantizer=IdentityQuantizer(),
+            columnwise_quantizer=IdentityQuantizer(),
+            columnwise_source="original",
+        )
+    if role.tensor_type == "weight":
+        return HybridQuantizer(
+            rowwise_quantizer=NVFP4QDQQuantizer(
+                NVFP4Quantizer(**(nvfp4_options or {})), backend=backend
+            ),
+            columnwise_quantizer=IdentityQuantizer(),
+            columnwise_source="rowwise_dequantized",
+        )
+    if role.tensor_type == "grad_output":
+        return IdentityQuantizer()
+    return IdentityQuantizer()
+
+
+def mxfp8_nvfp4_qdq_fwd_mxfp8_bwd_factory(
+    role: Optional[QuantizerRole], *, backend="auto", nvfp4_options=None
+):
+    """MXFP8-QDQ X and NVFP4-QDQ W forward; native MXFP8 backward.
+
+    Applies to Linear and GroupedLinear. The module compute
+    dtype determines decoded forward precision. Backward uses original
+    inputs and decoded QDQ weights. Other roles use Identity. Use
+    functools.partial to select backend or native NVFP4 options, including
+    4over6 (reference fallback).
+    """
+    from ..tensor.hybrid_tensor import HybridQuantizer
+    from ..tensor.identity_tensor import IdentityQuantizer
+    from ..tensor.nvfp4_tensor import NVFP4Quantizer
+    from .qdq import MXFP8QDQQuantizer, NVFP4QDQQuantizer
+
+    if role is None or role.module_type not in ("linear", "grouped_linear"):
+        return IdentityQuantizer()
+    if role.tensor_type == "input":
+        return HybridQuantizer(
+            rowwise_quantizer=MXFP8QDQQuantizer(backend=backend),
+            columnwise_quantizer=mxfp8_factory(role),
+            columnwise_source="original",
+        )
+    if role.tensor_type == "weight":
+        return HybridQuantizer(
+            rowwise_quantizer=NVFP4QDQQuantizer(
+                NVFP4Quantizer(**(nvfp4_options or {})), backend=backend
+            ),
+            columnwise_quantizer=mxfp8_factory(role),
+            columnwise_source="rowwise_dequantized",
+        )
+    if role.tensor_type == "grad_output":
+        return mxfp8_factory(role)
+    return IdentityQuantizer()
+
+
 # -----------------------------------------------------------------------------
 # Linear + Attention Recipes
 # -----------------------------------------------------------------------------
