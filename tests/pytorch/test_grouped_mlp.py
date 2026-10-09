@@ -1762,6 +1762,89 @@ class TestGroupedMLPFusedOp:
         ]
         assert traced_cudnn_grouped_glu_wrappers == expected_calls
 
+    def test_grouped_mlp_canonical_layouts_match_legacy(self, monkeypatch) -> None:
+        """Natural cuDNN operand layouts give bitwise-identical results to the legacy views."""
+        from transformer_engine.common.recipe import Format, MXFP8BlockScaling
+
+        maybe_skip_quantization("mxfp8")
+        monkeypatch.setenv("NVTE_CUTEDSL_FUSED_GROUPED_MLP", "1")
+        monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
+        fused_cls = te.ops.fused.GroupedMLP_CuTeGEMMGLU
+        if not fused_cls.is_supported():
+            pytest.skip("cuDNN fused grouped MLP is not supported")
+        kernels = {
+            "grouped_gemm_activation_kernel": fused_cls.grouped_gemm_activation_kernel(),
+            "grouped_gemm_quant_kernel": fused_cls.grouped_gemm_quant_kernel(),
+        }
+        if not all(
+            getattr(kernel, "supports_canonical_layouts", False) for kernel in kernels.values()
+        ):
+            pytest.skip("Installed cuDNN frontend lacks canonical grouped GEMM layouts")
+
+        recipe = MXFP8BlockScaling(fp8_format=Format.E4M3)
+        with te.quantized_model_init(enabled=True, recipe=recipe):
+            fc1 = te.ops.GroupedLinear(
+                4,
+                256,
+                512,
+                bias=False,
+                device="cuda",
+                dtype=torch.bfloat16,
+                single_grouped_weight=True,
+            )
+            fc2 = te.ops.GroupedLinear(
+                4,
+                256,
+                256,
+                bias=False,
+                device="cuda",
+                dtype=torch.bfloat16,
+                single_grouped_weight=True,
+            )
+        activation = te.ops.ScaledSwiGLU(glu_interleave_size=32)
+        x = torch.randn(1024, 256, device="cuda", dtype=torch.bfloat16)
+        probs = torch.rand(1024, device="cuda", dtype=torch.bfloat16)
+        splits = torch.full((4,), 256, dtype=torch.int64, device="cuda")
+        dy = torch.randn(1024, 256, device="cuda", dtype=torch.bfloat16)
+
+        def run(canonical):
+            a_ranks = []
+
+            def wrap(kernel):
+                # Hiding the capability attributes selects the legacy views.
+                if not canonical:
+                    return lambda **kwargs: kernel(**kwargs)
+
+                @functools.wraps(kernel)
+                def traced(**kwargs):
+                    a_ranks.append(kwargs["a_tensor"].dim())
+                    return kernel(**kwargs)
+
+                return traced
+
+            with monkeypatch.context() as patch:
+                for name, kernel in kernels.items():
+                    wrapped = wrap(kernel)
+                    patch.setattr(
+                        fused_cls, name, classmethod(lambda cls, wrapped=wrapped: wrapped)
+                    )
+                model = te.ops.Sequential(fc1, activation, fc2)
+                x_ = x.clone().requires_grad_()
+                probs_ = probs.clone().requires_grad_()
+                fc1.weight.grad = fc2.weight.grad = None
+                with te.autocast(enabled=True, recipe=recipe):
+                    y = model(x_, splits, probs_, splits)
+                y.backward(dy)
+                forward_ops = model._module_groups[0]._forward_ops
+                assert len(forward_ops) == 1 and isinstance(forward_ops[0][0], fused_cls)
+            return [y, x_.grad, probs_.grad, fc1.weight.grad, fc2.weight.grad], a_ranks
+
+        legacy, _ = run(canonical=False)
+        canonical, a_ranks = run(canonical=True)
+        assert a_ranks[:2] == [2, 2]
+        for actual, expected in zip(canonical, legacy):
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
     @pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4)
     @pytest.mark.parametrize("situ_betas", ((4.0, 25.0), (2.0, 8.0)))
     def test_grouped_mlp_situglu_nvfp4_real_cudnn_hadamard_fusion(
