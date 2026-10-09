@@ -8,7 +8,7 @@ from typing import Optional
 
 import cutlass
 from cutlass import cute
-from cutlass import Boolean, Float32, Int32, Int64, Uint32, Uint8
+from cutlass import Boolean, Float32, Int32, Int64, Uint32
 from cuda.bindings.driver import CUstream
 
 from transformer_engine.common.CuTeDSL.utils import (
@@ -44,6 +44,8 @@ def quantize_rowwise_mxfp8_g2r(
     CHECK_BOUNDS: cutlass.Constexpr[bool],
     input_policy: Int64,
     output_policy: Int64,
+    cta_row: Int32,
+    cta_col: Int32,
 ):
     """Quantize a CTA's (TILE_ROWS, TILE_COLS, NUM_TILES) GMEM tiles.
 
@@ -97,7 +99,6 @@ def quantize_rowwise_mxfp8_g2r(
         gX_thread = cute.composition(gX_tile, tv_payload)[tidx, None]
         valid = Boolean(True)
         if cutlass.const_expr(CHECK_BOUNDS):
-            cta_row, cta_col, _ = cute.arch.block_idx()
             row = cta_row * TILE_ROWS + tidx // CTA_THREADS_X
             col = (cta_col * NUM_TILES + tile_idx) * TILE_COLS + (
                 tidx % CTA_THREADS_X
@@ -137,16 +138,14 @@ def quantize_rowwise_mxfp8_g2r(
         amax = extract_mx_block_amax(rX_tile_i32)
         exponent = cvt_f32_to_fp8e8m0fnu(amax * cfg.MAX_NORM_RCP)
 
-        # Collect 4 scale bytes and write them using one thread
-        byte = Uint32(exponent.bitcast(Uint8))
-        c1 = cute.arch.shuffle_sync_down(byte, 2)
-        c2 = cute.arch.shuffle_sync_down(byte, 4)
-        c3 = cute.arch.shuffle_sync_down(byte, 6)
-        if tidx % 8 == 0 and tile_valid_flags[tile_idx]:
-            scale_word = cute.make_tensor(
-                cute.recast_ptr(mS_thread.iterator, dtype=Uint32), cute.make_layout(1)
-            )
-            scale_word[0] = byte | (c1 << Uint32(8)) | (c2 << Uint32(16)) | (c3 << Uint32(24))
+        # The even lane of each pair stores its block's scale byte, as cast_rowwise.cuh does.
+        # A warp's stores coalesce in either layout: one 16-byte run when packed, four
+        # 4-byte runs when GEMM-swizzled. Gathering the bytes into 32-bit words first
+        # touches the same sectors but adds shuffles and a branch (+12% instructions).
+        # TODO(kainingz): not using vectorized word store seems to be faster in CuTeDSL.
+        # Check if we should port this to CUDA
+        if tidx % 2 == 0 and tile_valid_flags[tile_idx]:
+            mS_thread[0] = exponent
 
         # Compute and write the quantized MXFP8 values to GMEM
         reciprocal_packed = exp2_bf16x2_rcp(exponent)
@@ -164,14 +163,17 @@ class MXFP8QuantizeG2RRowwise2LaneKernel(MXFP8QuantizeKernelBase):
     One CTA tile has TILE_ROWS = CTA_THREADS_Y and
     TILE_COLS = CTA_THREADS_X * _ELEMENTS_PER_THREAD. The CTA
     processes NUM_TILES = 1 or 2 in the original input matrix. Both scale
-    formats use the same payload tiling; a composed layout maps swizzled scales.
+    formats use the same payload tiling; swizzled scale offsets are computed directly.
     _L2_CACHED_CTA_PERCENT tunes the share of CTAs whose input loads use normal
     L2 retention: 0 streams all input and 100 caches all input normally.
     """
 
     _CTA_THREADS_X = 32
     _ELEMENTS_PER_THREAD = 16
+    # cast_rowwise.cuh's tier table: the two smaller tiers stream all of their input.
     _L2_CACHED_CTA_PERCENT = 40
+    _SMALL_TIER_CACHED_PERCENT = 0
+    _MAX_GRID_Y = 65535
 
     def __init__(self, cfg: MXFP8QuantizeConfig):
         self.cfg = cfg
@@ -201,6 +203,7 @@ class MXFP8QuantizeG2RRowwise2LaneKernel(MXFP8QuantizeKernelBase):
                 CTA_THREADS_Y=8,
                 CTA_THREADS_X=self._CTA_THREADS_X,
                 NUM_TILES=1,
+                L2_CACHED_CTA_PERCENT=self._SMALL_TIER_CACHED_PERCENT,
             )
         elif output_bytes <= 48 << 20:
             self._launch(
@@ -212,6 +215,7 @@ class MXFP8QuantizeG2RRowwise2LaneKernel(MXFP8QuantizeKernelBase):
                 CTA_THREADS_Y=8,
                 CTA_THREADS_X=self._CTA_THREADS_X,
                 NUM_TILES=2,
+                L2_CACHED_CTA_PERCENT=self._SMALL_TIER_CACHED_PERCENT,
             )
         elif output_bytes <= 96 << 20:
             self._launch(
@@ -223,6 +227,7 @@ class MXFP8QuantizeG2RRowwise2LaneKernel(MXFP8QuantizeKernelBase):
                 CTA_THREADS_Y=4,
                 CTA_THREADS_X=self._CTA_THREADS_X,
                 NUM_TILES=2,
+                L2_CACHED_CTA_PERCENT=self._L2_CACHED_CTA_PERCENT,
             )
         else:
             self._launch(
@@ -234,6 +239,7 @@ class MXFP8QuantizeG2RRowwise2LaneKernel(MXFP8QuantizeKernelBase):
                 CTA_THREADS_Y=8,
                 CTA_THREADS_X=self._CTA_THREADS_X,
                 NUM_TILES=2,
+                L2_CACHED_CTA_PERCENT=self._L2_CACHED_CTA_PERCENT,
             )
 
     @cute.jit
@@ -247,8 +253,9 @@ class MXFP8QuantizeG2RRowwise2LaneKernel(MXFP8QuantizeKernelBase):
         CTA_THREADS_Y: cutlass.Constexpr[int],
         CTA_THREADS_X: cutlass.Constexpr[int],
         NUM_TILES: cutlass.Constexpr[int],
+        L2_CACHED_CTA_PERCENT: cutlass.Constexpr[int],
     ):
-        assert 0 <= self._L2_CACHED_CTA_PERCENT <= 100
+        assert 0 <= L2_CACHED_CTA_PERCENT <= 100
         assert self._ELEMENTS_PER_THREAD == 16
         assert CTA_THREADS_X % 8 == 0
         assert CTA_THREADS_Y * CTA_THREADS_X % 32 == 0
@@ -265,8 +272,15 @@ class MXFP8QuantizeG2RRowwise2LaneKernel(MXFP8QuantizeKernelBase):
         grid_cols = cute.ceil_div(N, CTA_COLS)
         check_bounds = M % CTA_ROWS != 0 or N % CTA_COLS != 0
         grid = Int64(grid_rows) * grid_cols
-        first_streaming_cta = grid * self._L2_CACHED_CTA_PERCENT // 100
+        first_streaming_cta = grid * L2_CACHED_CTA_PERCENT // 100
 
+        # Column tiles vary fastest, so consecutive CTAs read consecutive memory along a
+        # row, as cast_rowwise.cuh's flat grid does. Putting row tiles on x instead
+        # sends concurrent CTAs down a column strip, one 2 KiB piece per row, and costs
+        # up to 9% at large shapes. Row tiles past grid.y's limit spill into grid.z.
+        grid_y = cutlass.min(grid_rows, self._MAX_GRID_Y)
+        grid_z = cute.ceil_div(grid_rows, self._MAX_GRID_Y)
+        launch_grid = [grid_cols, grid_y, grid_z]
         if grid > 0:
             if check_bounds:
                 self.kernel(
@@ -278,8 +292,9 @@ class MXFP8QuantizeG2RRowwise2LaneKernel(MXFP8QuantizeKernelBase):
                     CTA_THREADS_Y=CTA_THREADS_Y,
                     CTA_THREADS_X=CTA_THREADS_X,
                     NUM_TILES=NUM_TILES,
+                    L2_CACHED_CTA_PERCENT=L2_CACHED_CTA_PERCENT,
                     CHECK_BOUNDS=True,
-                ).launch(grid=[grid_rows, grid_cols], block=[THREADS_PER_CTA], stream=stream)
+                ).launch(grid=launch_grid, block=[THREADS_PER_CTA], stream=stream)
             else:
                 self.kernel(
                     mX,
@@ -290,8 +305,9 @@ class MXFP8QuantizeG2RRowwise2LaneKernel(MXFP8QuantizeKernelBase):
                     CTA_THREADS_Y=CTA_THREADS_Y,
                     CTA_THREADS_X=CTA_THREADS_X,
                     NUM_TILES=NUM_TILES,
+                    L2_CACHED_CTA_PERCENT=L2_CACHED_CTA_PERCENT,
                     CHECK_BOUNDS=False,
-                ).launch(grid=[grid_rows, grid_cols], block=[THREADS_PER_CTA], stream=stream)
+                ).launch(grid=launch_grid, block=[THREADS_PER_CTA], stream=stream)
 
     @cute.kernel
     def kernel(
@@ -304,6 +320,7 @@ class MXFP8QuantizeG2RRowwise2LaneKernel(MXFP8QuantizeKernelBase):
         CTA_THREADS_Y: cutlass.Constexpr[int],
         CTA_THREADS_X: cutlass.Constexpr[int],
         NUM_TILES: cutlass.Constexpr[int],
+        L2_CACHED_CTA_PERCENT: cutlass.Constexpr[int],
         CHECK_BOUNDS: cutlass.Constexpr[bool],
     ):
         """Skip the CTA when the noop flag is set; otherwise run the kernel body."""
@@ -316,6 +333,7 @@ class MXFP8QuantizeG2RRowwise2LaneKernel(MXFP8QuantizeKernelBase):
                 CTA_THREADS_Y=CTA_THREADS_Y,
                 CTA_THREADS_X=CTA_THREADS_X,
                 NUM_TILES=NUM_TILES,
+                L2_CACHED_CTA_PERCENT=L2_CACHED_CTA_PERCENT,
                 CHECK_BOUNDS=CHECK_BOUNDS,
             )
 
@@ -329,13 +347,16 @@ class MXFP8QuantizeG2RRowwise2LaneKernel(MXFP8QuantizeKernelBase):
         CTA_THREADS_Y: cutlass.Constexpr[int],
         CTA_THREADS_X: cutlass.Constexpr[int],
         NUM_TILES: cutlass.Constexpr[int],
+        L2_CACHED_CTA_PERCENT: cutlass.Constexpr[int],
         CHECK_BOUNDS: cutlass.Constexpr[bool],
     ):
         """Construct CTA tile views and run the specialized quantization."""
         # Dispatch checks 32-byte input alignment before selecting this kernel.
         gX = cute.make_tensor(mX.iterator.align(32), mX.layout)
-        # CUDA's x/y axes hold row/column tiles in the same order as local_tile.
-        cta_coord = cute.arch.block_idx()[:2]
+        # grid.x walks column tiles; grid.y and grid.z together walk row tiles.
+        bidx, bidy, bidz = cute.arch.block_idx()
+        cta_row = bidz * self._MAX_GRID_Y + bidy
+        cta_coord = (cta_row, bidx)
         M, N = mX.shape
         TILE_ROWS = CTA_THREADS_Y
         TILE_COLS = CTA_THREADS_X * self._ELEMENTS_PER_THREAD
@@ -343,10 +364,11 @@ class MXFP8QuantizeG2RRowwise2LaneKernel(MXFP8QuantizeKernelBase):
         CTA_COLS = TILE_COLS * NUM_TILES
 
         gS = mS
-        # Apply the swizzled scale layout if requested
+        # Use the swizzled layout as is. Composing it with (M, N // 32) layouts to flatten
+        # its shape made CuTe emit runtime integer div/mod on every scale address,
+        # about 7x this kernel's instruction count.
         if cutlass.const_expr(self.cfg.WITH_GEMM_SWIZZLED_SCALES):
-            mS_swizzled, _ = derive_swizzled_scale_layout(M, N, True, False, mS, None)
-            gS = cute.composition(mS_swizzled, (cute.make_layout(M), cute.make_layout(N // 32)))
+            gS, _ = derive_swizzled_scale_layout(M, N, True, False, mS, None)
 
         # CTA_TILER is the block that a CTA processes in total, which consists of NUM_TILES horizontal tiles
         CTA_TILER = (CTA_ROWS, CTA_COLS)
@@ -356,12 +378,12 @@ class MXFP8QuantizeG2RRowwise2LaneKernel(MXFP8QuantizeKernelBase):
         gS_cta = cute.local_tile(gS, CTA_SCALE_TILER, cta_coord)
 
         fraction = Float32(1.0)
-        if cutlass.const_expr(self._L2_CACHED_CTA_PERCENT > 0):
+        if cutlass.const_expr(L2_CACHED_CTA_PERCENT > 0):
             fraction = Float32(0.0)
-            # A linear index is needed only for the L2 policy split.
-            cta_id = cute.crd2idx(
-                (Int64(cta_coord[0]), Int64(cta_coord[1])), cute.arch.grid_dim()[:2]
-            )
+            # A linear index is needed only for the L2 policy split. It follows launch
+            # order, so the cached CTAs are the first ones scheduled.
+            gdx, _, _ = cute.arch.grid_dim()
+            cta_id = Int64(cta_row) * gdx + bidx
             if cta_id >= first_streaming_cta:
                 fraction = Float32(1.0)
         input_policy = create_l2_policy(False, fraction)
@@ -375,18 +397,22 @@ class MXFP8QuantizeG2RRowwise2LaneKernel(MXFP8QuantizeKernelBase):
         gO_tiles = cute.local_tile(gO_cta, TILER, (0, None))
         mS_tiles = cute.local_tile(gS_cta, SCALE_TILER, (0, None))
 
-        quantize_rowwise_mxfp8_g2r(
-            gX_tiles,
-            gO_tiles,
-            mS_tiles,
-            self.cfg,
-            M,
-            N,
-            CTA_THREADS_Y=CTA_THREADS_Y,
-            CTA_THREADS_X=CTA_THREADS_X,
-            ELEMENTS_PER_THREAD=self._ELEMENTS_PER_THREAD,
-            NUM_TILES=NUM_TILES,
-            CHECK_BOUNDS=CHECK_BOUNDS,
-            input_policy=input_policy,
-            output_policy=output_policy,
-        )
+        # The last grid.z slice can overshoot the row tiles; those CTAs have no work.
+        if cta_row * CTA_ROWS < M:
+            quantize_rowwise_mxfp8_g2r(
+                gX_tiles,
+                gO_tiles,
+                mS_tiles,
+                self.cfg,
+                M,
+                N,
+                CTA_THREADS_Y=CTA_THREADS_Y,
+                CTA_THREADS_X=CTA_THREADS_X,
+                ELEMENTS_PER_THREAD=self._ELEMENTS_PER_THREAD,
+                NUM_TILES=NUM_TILES,
+                CHECK_BOUNDS=CHECK_BOUNDS,
+                input_policy=input_policy,
+                output_policy=output_policy,
+                cta_row=cta_coord[0],
+                cta_col=cta_coord[1],
+            )

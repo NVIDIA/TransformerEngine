@@ -329,15 +329,9 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
                 scale_stride_matches = Boolean(True)
                 if cutlass.const_expr(not self.cfg.WITH_GEMM_SWIZZLED_SCALES):
                     scale_stride_matches = mS_row.shape[1] == N // 32
-                # Column tiles use CUDA's grid.y axis. Inputs this wide always use two tiles.
-                grid_cols_fit = (
-                    N
-                    <= 65535
-                    * self.g2r_rowwise_2lane._CTA_THREADS_X
-                    * self.g2r_rowwise_2lane._ELEMENTS_PER_THREAD
-                    * 2
-                )
-                if N % 128 == 0 and input_is_aligned and scale_stride_matches and grid_cols_fit:
+                # Column tiles use grid.x and row tiles spill from grid.y into grid.z, so
+                # no shape exceeds the grid limits.
+                if N % 128 == 0 and input_is_aligned and scale_stride_matches:
                     dispatched_to_specialized = True
                     self.g2r_rowwise_2lane(
                         mX,
