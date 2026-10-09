@@ -385,7 +385,7 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
   TensorWrapper out_nvte;
   if (out.is_none()) {
     if (impl == Impl::FUSED_NORM_QUANT_UNSWIZZLED) {
-        quantizer_cpp->optimize_for_gemm = false;
+      quantizer_cpp->optimize_for_gemm = false;
     }
     std::tie(out_nvte, out) = quantizer_cpp->create_tensor(shape, out_dtype);
   } else {
