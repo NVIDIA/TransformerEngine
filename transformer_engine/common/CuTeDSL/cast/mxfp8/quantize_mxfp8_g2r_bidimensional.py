@@ -404,7 +404,9 @@ def quantize_bidimensional_mxfp8_g2r(
         cute.nvgpu.CopyG2ROp(),
         cfg.DTYPE,
         num_bits_per_copy=ELEMENTS_X_PER_THREAD * cfg.DTYPE.width,
-        invariant=True,
+        # TODO(kainingz): due to https://github.com/NVIDIA/cutlass/issues/3726 using
+        # invariant=True here will drop the cache policy
+        invariant=False,
     )
     store_atom = cute.make_copy_atom(
         cute.nvgpu.CopyR2GOp(),

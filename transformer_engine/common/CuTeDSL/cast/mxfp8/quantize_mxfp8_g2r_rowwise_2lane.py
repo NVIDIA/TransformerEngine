@@ -82,7 +82,9 @@ def quantize_rowwise_mxfp8_g2r(
         cute.nvgpu.CopyG2ROp(),
         cfg.DTYPE,
         num_bits_per_copy=LOAD_WIDTH,
-        invariant=True,  # hint that data being read stays unchanged during the kernel
+        # TODO(kainingz): due to https://github.com/NVIDIA/cutlass/issues/3726 using
+        # invariant=True here will drop the cache policy
+        invariant=False,
     )
     store_atom = cute.make_copy_atom(
         cute.nvgpu.CopyR2GOp(),
