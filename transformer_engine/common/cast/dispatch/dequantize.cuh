@@ -19,6 +19,7 @@
 #include "../mxfp8/dequantize_mxfp8.cuh"
 #include "../mxfp8/group_dequantize_mxfp8.cuh"
 #include "../nvfp4/dequantize_nvfp4.cuh"
+#include "../nvfp4/group_dequantize_nvfp4.cuh"
 
 namespace transformer_engine {
 namespace dispatch {
@@ -73,6 +74,10 @@ inline void group_dequantize_helper(const GroupedTensor &input, GroupedTensor *o
     case NVTE_BLOCK_SCALING_1D:
     case NVTE_BLOCK_SCALING_2D: {
       fp8_blockwise::group_dequantize(&input, output, stream);
+      break;
+    }
+    case NVTE_NVFP4_1D_SCALING: {
+      nvfp4::group_dequantize(&input, output, stream);
       break;
     }
     default:
