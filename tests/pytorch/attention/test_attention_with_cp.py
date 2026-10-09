@@ -320,9 +320,10 @@ def _submit(pool: PoolWorker, **kwargs) -> None:
 dtypes = ["bf16", "fp16"]
 qkv_formats = ["bshd", "sbhd", "thd"]
 cp_comm_types = ["p2p", "all_gather", "a2a", "a2a+p2p"]
+essential_model_configs_flash_attn = model_configs_flash_attn
 if test_essential:
-    configs = ["cp_2_0", "cp_2_2", "cp_2_4", "cp_3_0", "cp_3_3"]
-    model_configs_flash_attn = {k: model_configs_flash_attn[k] for k in configs}
+    configs = ["cp_2_0", "cp_2_2", "cp_3_0", "cp_3_3"]
+    essential_model_configs_flash_attn = {k: model_configs_flash_attn[k] for k in configs}
     dtypes = ["bf16"]
     qkv_formats = ["sbhd", "thd"]
 
@@ -337,8 +338,7 @@ if test_essential:
 )
 @pytest.mark.skipif(get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
 @pytest.mark.parametrize("dtype", dtypes)
-# The D=256 model is covered by the focused no-load-balance test, not this broad matrix.
-@pytest.mark.parametrize("model", [m for m in model_configs_flash_attn if m != "cp_2_4"])
+@pytest.mark.parametrize("model", essential_model_configs_flash_attn.keys())
 @pytest.mark.parametrize("qkv_format", qkv_formats)
 @pytest.mark.parametrize("cp_comm_type", cp_comm_types)
 @pytest.mark.parametrize("pad_between_seqs", [False, True])
@@ -554,6 +554,7 @@ model_configs_fused_attn = {
 dtypes = ["bf16", "fp16", "fp8"]
 qkv_formats = ["bshd", "sbhd", "thd"]
 cp_comm_types = ["p2p", "all_gather", "a2a", "a2a+p2p"]
+essential_model_configs_fused_attn = model_configs_fused_attn
 if test_essential:
     configs = [
         "cp_1_0",
@@ -569,14 +570,14 @@ if test_essential:
         "cp_5_0",
         "cp_5_1",
     ]
-    model_configs_fused_attn = {k: model_configs_fused_attn[k] for k in configs}
+    essential_model_configs_fused_attn = {k: model_configs_fused_attn[k] for k in configs}
     dtypes = ["bf16", "fp8"]
     qkv_formats = ["sbhd", "thd"]
 
 
 @pytest.mark.skipif(get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
 @pytest.mark.parametrize("dtype", dtypes)
-@pytest.mark.parametrize("model", model_configs_fused_attn.keys())
+@pytest.mark.parametrize("model", essential_model_configs_fused_attn.keys())
 @pytest.mark.parametrize("qkv_format", qkv_formats)
 @pytest.mark.parametrize("cp_comm_type", cp_comm_types)
 @pytest.mark.parametrize("fp8_bwd", [True, False])
