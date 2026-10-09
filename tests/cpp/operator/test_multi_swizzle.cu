@@ -300,14 +300,22 @@ void performTestMultiTensorRoundtrip(const int num_tensors, const size_t M, cons
 // Test suites
 // ===================================================================
 
+// Sets NVTE_MXFP8_PER_TILE_SWIZZLE while it lives, so that MXFP8 swizzles use the per-tile
+// kernels (enable) or the default ones.
+class PerTileSwizzle {
+ public:
+  explicit PerTileSwizzle(bool enable) {
+    setenv("NVTE_MXFP8_PER_TILE_SWIZZLE", enable ? "1" : "0", 1);
+  }
+  ~PerTileSwizzle() { unsetenv("NVTE_MXFP8_PER_TILE_SWIZZLE"); }
+};
+
 class MultiTensorSwizzleTestSuite
-    : public ::testing::TestWithParam<std::tuple<int, size_t, size_t, bool>> {};
+    : public ::testing::TestWithParam<std::tuple<std::tuple<int, size_t, size_t, bool>, bool>> {};
 
 TEST_P(MultiTensorSwizzleTestSuite, TestMultiTensorSwizzle) {
-  const auto num_tensors = std::get<0>(GetParam());
-  const auto M = std::get<1>(GetParam());
-  const auto K = std::get<2>(GetParam());
-  const auto rowwise = std::get<3>(GetParam());
+  const auto& [num_tensors, M, K, rowwise] = std::get<0>(GetParam());
+  const PerTileSwizzle per_tile_swizzle(std::get<1>(GetParam()));
   performTestMultiTensorSwizzle(num_tensors, M, K, rowwise);
 }
 
@@ -396,12 +404,14 @@ std::vector<std::tuple<int, size_t, size_t, bool>> multi_tensor_test_cases = {
 INSTANTIATE_TEST_SUITE_P(
     OperatorTest,
     MultiTensorSwizzleTestSuite,
-    ::testing::ValuesIn(multi_tensor_test_cases),
+    ::testing::Combine(::testing::ValuesIn(multi_tensor_test_cases), ::testing::Values(false, true)),
     [](const testing::TestParamInfo<MultiTensorSwizzleTestSuite::ParamType>& info) {
-      return "n" + std::to_string(std::get<0>(info.param)) +
-             "_M" + std::to_string(std::get<1>(info.param)) +
-             "_K" + std::to_string(std::get<2>(info.param)) +
-             (std::get<3>(info.param) ? "_row" : "_col");
+      const auto& test_case = std::get<0>(info.param);
+      return "n" + std::to_string(std::get<0>(test_case)) +
+             "_M" + std::to_string(std::get<1>(test_case)) +
+             "_K" + std::to_string(std::get<2>(test_case)) +
+             (std::get<3>(test_case) ? "_row" : "_col") +
+             (std::get<1>(info.param) ? "_per_tile" : "");
     });
 
 INSTANTIATE_TEST_SUITE_P(
