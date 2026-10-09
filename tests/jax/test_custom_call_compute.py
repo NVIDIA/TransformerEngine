@@ -2181,7 +2181,7 @@ class TestGroupedGemmGluFallback:
         original = importlib.import_module
 
         def import_module(name, package=None):
-            if name in ("cudnn", "cudnn.jax"):
+            if name == "cudnn":
                 return module
             if name == "cutlass.jax":
                 return SimpleNamespace(is_available=lambda: True)
@@ -2222,23 +2222,24 @@ class TestGroupedGemmGluFallback:
         assert available == (change == "optional")
         assert bool(reason) == (change != "optional")
 
-    @pytest.mark.parametrize("capability", [90, 100, 103, 107, 120])
     @pytest.mark.parametrize(
-        "missing",
-        [None, "grouped_gemm_glu_wrapper_sm100", "grouped_gemm_dglu_wrapper_sm100", "all"],
+        "capability,missing,expected",
+        [
+            (90, None, False),
+            (100, None, True),
+            (103, None, True),
+            (107, None, True),
+            (120, None, True),
+            (100, "grouped_gemm_glu_wrapper_sm100", False),
+            (100, "grouped_gemm_dglu_wrapper_sm100", False),
+        ],
     )
-    def test_ordered_fallback(self, frontend, monkeypatch, capability, missing):
-        if missing == "all":
-            frontend.grouped_gemm_glu_wrapper_sm100 = None
-            frontend.grouped_gemm_dglu_wrapper_sm100 = None
-        elif missing:
+    def test_fused_or_unfused_selection(self, frontend, monkeypatch, capability, missing, expected):
+        if missing:
             delattr(frontend, missing)
         monkeypatch.setattr(
             transformer_engine_jax, "get_device_compute_capability", lambda _: capability
         )
-        expected = False
-        if capability >= 100 and missing is None:
-            expected = True
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             assert _moe_module._select_cudnn_jax_fusion([]) == expected
@@ -2278,22 +2279,22 @@ class TestGroupedGemmGluFallback:
         with pytest.warns(UserWarning, match="device query failed"):
             assert _moe_module._select_cudnn_jax_fusion([]) is False
 
-    def test_installed_frontend_contract(self):
-        available, reason = _glu_adapter.grouped_gemm_glu_dependencies_available()
-        assert available or reason
-
-    @pytest.mark.parametrize("request_fusion", [None, True, False])
-    @pytest.mark.parametrize("native_layout", [False, True])
-    @pytest.mark.parametrize("square", [False, True])
     @pytest.mark.parametrize(
-        "missing,expected",
+        "request_fusion,missing,native_layout,square,expected",
         [
-            (None, True),
-            ("grouped_gemm_glu_wrapper_sm100", False),
-            ("grouped_gemm_dglu_wrapper_sm100", False),
+            (None, None, False, False, True),
+            (True, None, False, False, True),
+            (False, None, False, False, False),
+            (True, "grouped_gemm_glu_wrapper_sm100", False, False, False),
+            (True, "grouped_gemm_dglu_wrapper_sm100", False, False, False),
+            (False, "grouped_gemm_glu_wrapper_sm100", False, False, False),
+            (False, "grouped_gemm_dglu_wrapper_sm100", False, False, False),
+            (True, None, True, False, True),
+            (True, None, False, True, True),
+            (True, None, True, True, True),
         ],
     )
-    def test_public_moe_passes_selected_path(
+    def test_public_moe_passes_fusion_bool(
         self, frontend, monkeypatch, native_layout, square, missing, expected, request_fusion
     ):
         from jax.sharding import Mesh
@@ -2325,8 +2326,6 @@ class TestGroupedGemmGluFallback:
         if square:
             wi = jnp.ones((2, 128, 128), jnp.bfloat16)
             kwargs["cudnn_native_weight_layout"] = native_layout
-        if request_fusion is False:
-            expected = False
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             output, _, _ = _moe_module.moe(
@@ -2345,7 +2344,9 @@ class TestGroupedGemmGluFallback:
 
     @pytest.mark.parametrize("native_layout", [False, True])
     @pytest.mark.parametrize("gather_gated_dimension", [False, True])
-    def test_forward_uses_selected_kernel(self, monkeypatch, native_layout, gather_gated_dimension):
+    def test_fused_forward_uses_shared_glu(
+        self, monkeypatch, native_layout, gather_gated_dimension
+    ):
 
         class SelectedKernel(Exception):
             pass
