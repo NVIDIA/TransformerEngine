@@ -178,6 +178,39 @@ def test_split_quantize_falls_back_to_per_expert(split_sections: list[int], N: i
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize(
+    "input_shape, split_sections",
+    [
+        ((256, 2, 128), [128, 128]),  # higher-rank: not a 2D [rows, last_dim] input
+        ((512, 128), [128, 128]),  # partial: splits cover 256 of 512 rows
+    ],
+)
+def test_split_quantize_non_grouped_shapes_fall_back(
+    input_shape, split_sections: list[int]
+) -> None:
+    """Higher-rank inputs and partial splits bypass the 2D grouped kernel and cast per-expert,
+    matching an individual quantize of each split region."""
+    torch.manual_seed(6)
+    x = torch.randn(input_shape, dtype=torch.bfloat16, device="cuda")
+
+    outputs = tex.split_quantize(
+        x, split_sections, [_row_scaled_quantizer() for _ in split_sections]
+    )
+
+    assert len(outputs) == len(split_sections)
+    offset = 0
+    for out, m in zip(outputs, split_sections):
+        ref = _row_scaled_quantizer()(x[offset : offset + m])
+        torch.testing.assert_close(
+            out._rowwise_data.reshape(-1).view(torch.uint8),
+            ref._rowwise_data.reshape(-1).view(torch.uint8),
+            atol=0,
+            rtol=0,
+        )
+        offset += m
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 def test_split_quantize_empty_routing() -> None:
     """Empty row-scaled routing returns without launching grouped work."""
     split_sections = [0, 0]
@@ -205,6 +238,26 @@ def test_non_contiguous_input_matches_contiguous() -> None:
 
     grouped = nvfp4_group_row_scaled_cast(x_t, tokens_per_expert)
     reference = _host_split_reference(x_t.contiguous(), split_sections)
+
+    _assert_matches_reference(grouped, reference, split_sections, N)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+def test_strided_first_dims_matches_contiguous() -> None:
+    """A strided first_dims view is made contiguous before the cast, so it is not misread."""
+    split_sections = [256, 128]
+    N = 128
+    sum_m = sum(split_sections)
+    torch.manual_seed(5)
+    x = torch.randn((sum_m, N), dtype=torch.bfloat16, device="cuda")
+
+    # [256, 0, 128, 0][::2] == [256, 128] but strided; a raw data_ptr read would see [256, 0].
+    strided = torch.tensor([256, 0, 128, 0], dtype=torch.int64, device="cuda")[::2]
+    assert not strided.is_contiguous()
+    assert strided.tolist() == split_sections
+
+    grouped = nvfp4_group_row_scaled_cast(x, strided)
+    reference = _host_split_reference(x, split_sections)
 
     _assert_matches_reference(grouped, reference, split_sections, N)
 

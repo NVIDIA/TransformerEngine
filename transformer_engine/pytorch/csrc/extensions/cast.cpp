@@ -674,6 +674,10 @@ py::object nvfp4_group_row_scaled_cast_graph_safe(const at::Tensor &tensor, py::
              "Graph-safe grouped row-scaled NVFP4 cast does not support 4over6.");
 
   auto input_contiguous = tensor.contiguous();
+  // The kernels read num_tensors consecutive int64 entries from these buffers, so a
+  // strided view (e.g. a slice) would be misread. Make them contiguous before use.
+  auto first_dims_contiguous = first_dims.contiguous();
+  auto tensor_offsets_contiguous = tensor_offsets.contiguous();
 
   std::vector<size_t> logical_shape;
   for (const auto &d : input_contiguous.sizes()) {
@@ -682,18 +686,18 @@ py::object nvfp4_group_row_scaled_cast_graph_safe(const at::Tensor &tensor, py::
   const auto logical_first_dim = logical_shape[0];  // capacity (rows)
   const auto logical_last_dim = logical_shape[1];   // K (common last dim)
 
-  std::optional<at::Tensor> first_dims_opt = first_dims;
+  std::optional<at::Tensor> first_dims_opt = first_dims_contiguous;
   std::optional<at::Tensor> last_dims_opt = std::nullopt;
-  std::optional<at::Tensor> tensor_offsets_opt = tensor_offsets;
+  std::optional<at::Tensor> tensor_offsets_opt = tensor_offsets_contiguous;
 
   auto grouped_input_tensor = GroupedTensorWrapper(num_tensors, logical_shape);
   grouped_input_tensor.set_rowwise_data(input_contiguous.data_ptr(),
                                         GetTransformerEngineDType(input_contiguous.scalar_type()),
                                         getTensorShape(input_contiguous));
-  grouped_input_tensor.set_first_dims(first_dims.data_ptr(), DType::kInt64,
-                                      getTensorShape(first_dims));
-  grouped_input_tensor.set_tensor_offsets(tensor_offsets.data_ptr(), DType::kInt64,
-                                          getTensorShape(tensor_offsets));
+  grouped_input_tensor.set_first_dims(first_dims_contiguous.data_ptr(), DType::kInt64,
+                                      getTensorShape(first_dims_contiguous));
+  grouped_input_tensor.set_tensor_offsets(tensor_offsets_contiguous.data_ptr(), DType::kInt64,
+                                          getTensorShape(tensor_offsets_contiguous));
 
   auto [grouped_output_tensor_cpp, grouped_output_py] = quantizer_cpp->create_grouped_tensor(
       num_tensors, logical_shape, GetTransformerEngineDType(input_contiguous.scalar_type()),
@@ -2253,6 +2257,13 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
                                                 [](size_t s) { return s % 128 == 0; });
         const bool last_dim_128 = input_shape.back() % 128 == 0;
         const bool within_expert_cap = num_splits <= 64;
+        // The grouped kernels treat the input as 2D [rows, last_dim] and index rows by
+        // split_sections, so they require a 2D input whose splits cover every row. For
+        // higher-rank or partially-split inputs, fall back to the per-expert path.
+        const bool input_2d = input_shape.size() == 2;
+        size_t split_sum = 0;
+        for (size_t s : split_sections) split_sum += s;
+        const bool splits_cover_input = input_2d && split_sum == input_shape[0];
         const bool any_4over6 = std::any_of(
             quantizer_cpp_list.begin(), quantizer_cpp_list.end(),
             [](const std::unique_ptr<Quantizer> &quantizer) {
@@ -2262,7 +2273,8 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
         const bool grouped_row_scaled_cast =
             transformer_engine::getenv<bool>("NVTE_NVFP4_GROUPED_ROW_SCALED_CAST", true);
         quantization_method = (grouped_row_scaled_cast && all_splits_128 && last_dim_128 &&
-                               within_expert_cap && !any_4over6 && input_dtype == DType::kBFloat16)
+                               within_expert_cap && input_2d && splits_cover_input && !any_4over6 &&
+                               input_dtype == DType::kBFloat16)
                                   ? QuantizationMethod::FUSED_NVFP4_ROW_SCALED
                                   : QuantizationMethod::UNFUSED;
       } else {
