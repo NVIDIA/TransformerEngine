@@ -874,6 +874,9 @@ class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOve
   // Keeps the cuBLASMp NCCL communicator alive for the lifetime of this
   // instance, independent of the CommOverlapHelper that created it.
   CommOverlapHelper::NcclCommSharedPtr _nccl_comm;
+  // cuBLASMp: shape and dtype of the buffer view returned by get_buffer()
+  std::vector<size_t> _cublasmp_buffer_shape;
+  at::ScalarType _cublasmp_buffer_dtype{at::kByte};
 
  public:
   CommOverlap(const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
@@ -887,6 +890,8 @@ class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOve
   // the construction-time warmup matmul that primes cuBLASMp's lazy NCCL
   // window registrations and workspace allocation so subsequent matmuls
   // (including those captured in CUDA graphs) avoid the unsafe lazy paths.
+  // get_buffer() returns a view of cuBLASMp's workspace with `buffer_shape`
+  // and `buffer_dtype`: after an all-gather GEMM, it holds the gathered input.
   CommOverlap(CommOverlapHelper *helper, int tp_rank, int tp_size,
               transformer_engine::CommOverlapType comm_type,
               const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
@@ -909,6 +914,9 @@ class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::Comm
   // Keeps the cuBLASMp NCCL communicator alive for the lifetime of this
   // instance, independent of the CommOverlapHelper that created it.
   CommOverlapHelper::NcclCommSharedPtr _nccl_comm;
+  // cuBLASMp: shape and dtype of the buffer view returned by get_buffer()
+  std::vector<size_t> _cublasmp_buffer_shape;
+  at::ScalarType _cublasmp_buffer_dtype{at::kByte};
 
  public:
   CommOverlapP2P(const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
