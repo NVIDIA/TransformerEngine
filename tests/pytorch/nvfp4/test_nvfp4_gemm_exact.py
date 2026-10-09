@@ -1167,3 +1167,62 @@ def test_nvfp4_row_scaled_grouped_tensor_gemm_uneven_colscale(
 
     for got, ref in zip(actual, expected):
         torch.testing.assert_close(got, ref, atol=1e-4, rtol=1e-4)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.skipif(
+    not row_scaled_grouped_cast_available, reason=reason_for_no_row_scaled_grouped_cast
+)
+@pytest.mark.parametrize("m_splits, k, n", [([128, 256, 128], 256, 256)])
+def test_nvfp4_row_scaled_grouped_tensor_gemm_colscale_cudagraph(
+    m_splits: list[int], k: int, n: int
+) -> None:
+    """The grouped-out column post-scale (two row-scaled operands, uneven rows) is CUDA-graph
+    capturable: the device per-expert row counts drive the column-scale expansion with no host
+    sync, so a captured GEMM replayed after refreshing both operands matches an eager recompute.
+    """
+    if not _row_scaled_grouped_tensor_gemm_supported():
+        pytest.skip(_reason_for_no_grouped_tensor_gemm)
+
+    torch.manual_seed(29)
+    device = torch.device("cuda")
+    num_gemms = len(m_splits)
+    out_dtype = torch.float32
+
+    static_w = torch.randn(n * num_gemms, k, dtype=torch.bfloat16, device=device)
+    static_act = torch.randn(sum(m_splits), k, dtype=torch.bfloat16, device=device)
+    weights = _make_row_scaled_grouped_activation(
+        [n] * num_gemms, k, columnwise=False, tokens=static_w
+    )
+    activation = _make_row_scaled_grouped_activation(
+        m_splits, k, columnwise=False, tokens=static_act
+    )
+    grouped_out = _make_output_grouped_tensor(m_splits, n, device, out_dtype)
+
+    def _run():
+        general_grouped_gemm_for_grouped_tensor(weights, activation, grouped_out, layout="TN")
+
+    torch.cuda.synchronize()
+    _run()
+    torch.cuda.synchronize()
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        _run()
+
+    # Refresh both operands in place with freshly cast values, then replay.
+    fresh_w = _make_row_scaled_grouped_activation([n] * num_gemms, k, columnwise=False)
+    fresh_act = _make_row_scaled_grouped_activation(m_splits, k, columnwise=False)
+    for dst, src in ((weights, fresh_w), (activation, fresh_act)):
+        dst.rowwise_data.copy_(src.rowwise_data)
+        dst.scale_inv.copy_(src.scale_inv)
+        dst.amax.copy_(src.amax)
+    graph.replay()
+    torch.cuda.synchronize()
+    replayed = [t.clone() for t in grouped_out.split_into_quantized_tensors()]
+
+    _run()
+    torch.cuda.synchronize()
+    expected = grouped_out.split_into_quantized_tensors()
+    for got, ref in zip(replayed, expected):
+        torch.testing.assert_close(got, ref, atol=0.0, rtol=0.0)

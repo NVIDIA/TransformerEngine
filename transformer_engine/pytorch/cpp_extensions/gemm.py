@@ -1317,26 +1317,28 @@ def general_grouped_gemm_for_grouped_tensor(
             row_offset += rows
             col_offset += cols
     else:
+        # Single packed output. A varying per-expert output width would need per-expert
+        # slicing over mismatched column counts; the per-column scale expansion below
+        # assumes one shared width.
+        if out.last_dims is not None:
+            raise NotImplementedError(
+                "Row-scaled grouped GEMM does not support a varying per-expert output width."
+            )
         last_dim = out.logical_shape[-1]
         flat = scratch.rowwise_data.view(-1, last_dim)
         if post_scale_rows is not None:
-            # Per output row; handles uneven per-expert row counts directly.
+            # One scale per output row.
             flat.mul_(post_scale_rows.view(-1, 1))
         if post_scale_cols is not None:
-            # Per-expert, per-column: apply each group's scale over its actual rows.
-            # Uniform-construction exposes host tensor_shapes; varying-dim tensors carry
-            # first_dims and are never built under graph capture, so reading them is safe.
-            if scratch.tensor_shapes:
-                row_counts = [s[0] for s in scratch.tensor_shapes]
-            elif out.first_dims is None:
-                row_counts = [flat.shape[0] // num_tensors] * num_tensors
-            else:
-                row_counts = out.first_dims.tolist()
+            # Per-expert, per-column. Expand each group's column scale over its rows from
+            # the device per-expert row counts. Passing output_size keeps repeat_interleave
+            # from syncing the counts to host, so this stays valid under CUDA-graph capture.
             col_scales = post_scale_cols.view(num_tensors, last_dim)
-            row_offset = 0
-            for i in range(num_tensors):
-                rows = row_counts[i]
-                flat[row_offset : row_offset + rows].mul_(col_scales[i].unsqueeze(0))
-                row_offset += rows
+            if out.first_dims is None:
+                rows = flat.shape[0] // num_tensors
+                repeats = torch.full((num_tensors,), rows, dtype=torch.int64, device=flat.device)
+            else:
+                repeats = out.first_dims
+            flat.mul_(col_scales.repeat_interleave(repeats, dim=0, output_size=flat.shape[0]))
         _store(out.rowwise_data.view(-1, last_dim), flat)
     return out
