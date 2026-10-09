@@ -181,7 +181,7 @@ class UserbuffersBackwardLinear(FusedOperation):
             else:
                 device = grad_output.device
         device = canonicalize_device(device)
-        if device.type != "cuda":
+        if device.type != te_device_type():
             raise ValueError(f"Only CUDA devices are supported (got {device})")
 
         # Check datatype

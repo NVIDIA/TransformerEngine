@@ -20,6 +20,7 @@ from .cpu_offload import mark_not_offload
 from .distributed import symm_mem_alloc, release_symm_mem_pool
 from .quantized_tensor import QuantizedTensor, QuantizedTensorStorage
 from .tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
+from transformer_engine import te_device_type
 
 # Type-hint-only import; keeps the ``Recipe`` annotation without a runtime import of
 # common.recipe (the concrete recipe classes are imported lazily where used).
@@ -343,7 +344,7 @@ class EpBuffer:
         if not _BOOTSTRAPPED:
             raise RuntimeError("EpBuffer requires ep_bootstrap() to be called first.")
         if device is None:
-            device = torch.device("cuda", torch.cuda.current_device())
+            device = torch.device(te_device_type(), torch.cuda.current_device())
         alignment = int(alignment)
         if alignment > 1 and (alignment & (alignment - 1)) != 0:
             raise ValueError(f"alignment must be 0, 1, or a power of two (got {alignment}).")
