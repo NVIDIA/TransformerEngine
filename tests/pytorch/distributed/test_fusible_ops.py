@@ -1130,12 +1130,9 @@ def main() -> None:
                 run_compile_parallel_tests()
             else:
                 run_parallel_tests()
-        finally:
-            # Synchronize GPUs
             torch.distributed.barrier(world_group())
             torch.cuda.synchronize()
-
-            # Tear down NCCL
+        finally:
             if torch.distributed.is_initialized():
                 torch.distributed.destroy_process_group()
 
