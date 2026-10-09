@@ -48,9 +48,14 @@ def get_cublas_workspace_size_bytes() -> None:
     return 4_194_304
 
 
-@functools.lru_cache(maxsize=None)
 def get_cublas_workspace(device: int, ub: bool, grouped_gemm: bool) -> torch.Tensor:
-    """Returns workspace for cublas GEMM."""
+    """Allocate cuBLAS scratch for one invocation on the current CUDA stream.
+
+    The caching allocator safely reuses eager allocations on their stream. During
+    capture, the graph's private pool owns the allocation until the graph is
+    destroyed. Keeping the tensor in a Python cache would bypass that ownership
+    on later captures, including graphs replayed on different streams.
+    """
     assert not (ub and grouped_gemm), "UB is unsupported for grouped GEMM."
 
     if ub:
