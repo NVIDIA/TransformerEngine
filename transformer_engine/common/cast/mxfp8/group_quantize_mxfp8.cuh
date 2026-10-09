@@ -625,7 +625,8 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
     const int64_t *const __restrict__ last_dims_ptr, e8m0_t *const __restrict__ scales_rowwise_ptr,
     e8m0_t *const __restrict__ scales_colwise_ptr, const float *__restrict__ noop,
     float *const __restrict__ dbias_workspace, float *const __restrict__ amax_ptr,
-    const size_t work_blocks_X, const size_t work_blocks_Y) {
+    const size_t work_blocks_X, const size_t work_blocks_Y,
+    const GroupedTmaStorageView storage) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   constexpr uint SCALE_DIM_Y = CastTraits::SCALE_DIM_Y;
   constexpr uint SCALE_DIM_X = CastTraits::SCALE_DIM_X;
@@ -654,6 +655,19 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
     }
   }
 
+  const size_t *const rows_map = storage.rows != nullptr ? storage.rows : g_tensor_maps.rows;
+  const size_t *const cols_map = storage.cols != nullptr ? storage.cols : g_tensor_maps.cols;
+  const size_t *const offsets_map =
+      storage.offsets != nullptr ? storage.offsets : g_tensor_maps.offsets;
+  const CUtensorMap *const input_maps =
+      storage.input != nullptr ? storage.input : g_tensor_maps.input;
+  const CUtensorMap *const act_input_maps =
+      storage.act_input != nullptr ? storage.act_input : g_tensor_maps.act_input;
+  const CUtensorMap *const rowwise_maps =
+      storage.output_rowwise != nullptr ? storage.output_rowwise : g_tensor_maps.output_rowwise;
+  const CUtensorMap *const colwise_maps =
+      storage.output_colwise != nullptr ? storage.output_colwise : g_tensor_maps.output_colwise;
+
   constexpr bool ROWWISE_SCALING =
       (SCALING_TYPE == ScalingType::ROWWISE) || (SCALING_TYPE == ScalingType::BIDIMENSIONAL);
   constexpr bool COLWISE_SCALING =
@@ -671,15 +685,12 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
   __shared__ DirectVaryingFirstMapperStorage direct_mapper_storage;
 
   if constexpr (use_direct_varying_first_mapper) {
-    static_assert(CastTraits::THREADS_PER_CHUNK >= MAX_SUPPORTED_TENSOR_DESCRIPTORS,
-                  "The first CTA must have enough threads to validate every tensor.");
-    // The direct mapper relies on every tensor boundary being TILE_DIM_Y-aligned. The legacy
-    // mapper validated this while decoding each job, but the direct path no longer calls it.
-    // Validate all per-tensor row counts once, using the first CTA. num_tensors is bounded by
-    // MAX_SUPPORTED_TENSOR_DESCRIPTORS (64), which is smaller than the CTA size.
-    if (blockIdx.x == 0 && threadIdx.x < num_tensors) {
-      get_tensor_rows_num<ShapeRepresentation::VARYING_FIRST_DIM>(threadIdx.x, first_logical_dim,
-                                                                  first_dims_ptr, num_tensors);
+    // Validate every tensor boundary, including groups larger than one CTA.
+    if (blockIdx.x == 0) {
+      for (size_t tensor_id = threadIdx.x; tensor_id < num_tensors; tensor_id += blockDim.x) {
+        get_tensor_rows_num<ShapeRepresentation::VARYING_FIRST_DIM>(
+            tensor_id, first_logical_dim, first_dims_ptr, num_tensors);
+      }
     }
   }
 
@@ -785,9 +796,9 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
       if (fixed_tensor_id >= num_tensors) {
         return;
       }
-      fixed_rows = g_tensor_maps.rows[fixed_tensor_id];
-      fixed_cols = g_tensor_maps.cols[fixed_tensor_id];
-      fixed_tensor_base = g_tensor_maps.offsets[fixed_tensor_id];
+      fixed_rows = rows_map[fixed_tensor_id];
+      fixed_cols = cols_map[fixed_tensor_id];
+      fixed_tensor_base = offsets_map[fixed_tensor_id];
       if (fixed_rows == 0 || fixed_cols == 0) {
         return;
       }
@@ -907,15 +918,15 @@ __global__ void __launch_bounds__(CastTraits::THREADS_PER_CHUNK) group_quantize_
     const size_t dbias_offset_Y = block_offset_Y / TILE_DIM_Y;
 
     const CUtensorMap &tensor_map_input =
-        is_single_tensor ? tensor_map_input_static : g_tensor_maps.input[tensor_id];
+        is_single_tensor ? tensor_map_input_static : input_maps[tensor_id];
     const CUtensorMap &tensor_map_act_input =
-        is_single_tensor ? tensor_map_act_input_static : g_tensor_maps.act_input[tensor_id];
+        is_single_tensor ? tensor_map_act_input_static : act_input_maps[tensor_id];
     const CUtensorMap &tensor_map_output_rowwise = is_single_tensor
                                                        ? tensor_map_output_rowwise_static
-                                                       : g_tensor_maps.output_rowwise[tensor_id];
+                                                       : rowwise_maps[tensor_id];
     const CUtensorMap &tensor_map_output_colwise = is_single_tensor
                                                        ? tensor_map_output_colwise_static
-                                                       : g_tensor_maps.output_colwise[tensor_id];
+                                                       : colwise_maps[tensor_id];
 
     if (leading_thread && (!is_single_tensor) && (last_acquired_tensor_id != tensor_id)) {
       fence_acquire_tensormap(&tensor_map_input);
@@ -1127,7 +1138,7 @@ template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
 void group_quantize(const GroupedTensor *input, const GroupedTensor *activations,
                     const Tensor *noop, GroupedTensor *output, GroupedTensor *dbias,
                     Tensor *workspace, const QuantizationConfig *quant_config,
-                    cudaStream_t stream) {
+                    cudaStream_t stream, NVTEResourceHandle handle = nullptr) {
   using namespace group_quantize_kernel;
 
   checkCuDriverContext(stream);
@@ -1177,9 +1188,10 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
   const size_t elts_total = first_logical_dim * last_logical_dim;
 
   const size_t num_tensors = input->num_tensors;
-  NVTE_CHECK(num_tensors > 0 && num_tensors <= MAX_SUPPORTED_TENSOR_DESCRIPTORS,
+  NVTE_CHECK(num_tensors > 0 &&
+                 (handle != nullptr || num_tensors <= MAX_SUPPORTED_TENSOR_DESCRIPTORS),
              "Number of tensors in a group must be between 1 and ",
-             MAX_SUPPORTED_TENSOR_DESCRIPTORS, ".");
+             MAX_SUPPORTED_TENSOR_DESCRIPTORS, " without a resource handle.");
 
   const bool with_gemm_swizzled_scales = output->with_gemm_swizzled_scales;
   const bool use_2d_quantization = quant_config != nullptr && quant_config->mxfp8_2d_quantization;
@@ -1228,6 +1240,10 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
       return;
     }
   }
+
+  const GroupedTmaStorageView storage =
+      is_single_tensor ? GroupedTmaStorageView{}
+                       : get_grouped_tma_storage(handle, num_tensors, stream);
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
       input->dtype(), IType,
@@ -1324,7 +1340,8 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
                                   tensor_map_output_colwise, input_dptr, act_input_dptr,
                                   output_rowwise_dptr, output_colwise_dptr, shape_rep, num_tensors,
                                   first_logical_dim, last_logical_dim, offsets_ptr, first_dims_ptr,
-                                  last_dims_ptr, use_rowwise_scaling, use_colwise_scaling, IS_DACT);
+                                  last_dims_ptr, use_rowwise_scaling, use_colwise_scaling, IS_DACT,
+                                  storage);
                         }
 
                         TRANSFORMER_ENGINE_SWITCH_CONDITION(
@@ -1344,7 +1361,8 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
                                   last_logical_dim, launch_config.same_both_rows, offsets_ptr,
                                   first_dims_ptr, last_dims_ptr, scales_rowwise_ptr,
                                   scales_colwise_ptr, noop_ptr, workspace_ptr, amax_ptr,
-                                  launch_config.work_blocks_X, launch_config.work_blocks_Y);
+                                  launch_config.work_blocks_X, launch_config.work_blocks_Y,
+                                  storage);
                             });
 
                         if constexpr (IS_DBIAS) {

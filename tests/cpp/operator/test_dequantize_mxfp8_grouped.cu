@@ -41,7 +41,8 @@ template <typename InputType, typename OutputType>
 void performTest(const ShapeRepresentation shape_rep, const size_t num_tensors,
                  const std::vector<size_t> &logical_shape_vec,
                  const std::vector<size_t> &first_dims_h, const std::vector<size_t> &last_dims_h,
-                 const std::vector<size_t> &offsets_h, const bool rowwise) {
+                 const std::vector<size_t> &offsets_h, const bool rowwise,
+                 const bool use_handle = false) {
   DType itype = TypeInfo<InputType>::dtype;
   DType otype = TypeInfo<OutputType>::dtype;
 
@@ -229,10 +230,19 @@ void performTest(const ShapeRepresentation shape_rep, const size_t num_tensors,
                                   &offsets_tensor, sizeof(offsets_tensor));
   }
 
-  // Run grouped dequantize
-  nvte_group_dequantize(in_group_tensor, out_group_tensor, 0);
+  // Cover lazy allocation, growth, and reuse of the descriptor buffer.
+  NVTEResourceHandle handle = use_handle ? nvte_create_resource_handle() : nullptr;
+  if (use_handle) {
+    nvte_group_dequantize_with_handle(in_group_tensor, out_group_tensor, 0, handle);
+    nvte_resource_handle_reserve_grouped_tma(handle, num_tensors + 1, 0);
+    nvte_group_dequantize_with_handle(in_group_tensor, out_group_tensor, 0, handle);
+    nvte_group_dequantize_with_handle(in_group_tensor, out_group_tensor, 0, handle);
+  } else {
+    nvte_group_dequantize(in_group_tensor, out_group_tensor, 0);
+  }
   cudaDeviceSynchronize();
   auto err = cudaGetLastError();
+  nvte_destroy_resource_handle(handle);
   ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
 
   // Copy grouped output to host
@@ -445,6 +455,25 @@ TEST_P(GroupedDequantizeMXFP8TestSuite, TestGroupedDequantizeMXFP8) {
           output_type, OutputType,
           performTest<InputType, OutputType>(shape_rep, num_tensors, logical_shape, first_dims,
                                             last_dims, offsets, rowwise);););
+}
+
+TEST(OperatorTest_GroupedDequantizeMXFP8, ResourceHandleMoreThan64Descriptors) {
+  if (getDeviceComputeCapability() < blackwellComputeCapability) {
+    GTEST_SKIP();
+  }
+
+  constexpr size_t num_tensors = 65;
+  std::vector<size_t> first_dims(num_tensors, 128);
+  std::vector<size_t> last_dims(num_tensors, 128);
+  first_dims.front() = 256;
+  last_dims.back() = 256;
+  std::vector<size_t> offsets(num_tensors + 1, 0);
+  for (size_t i = 0; i < num_tensors; ++i) {
+    offsets[i + 1] = offsets[i] + first_dims[i] * last_dims[i];
+  }
+  performTest<fp8e4m3, bf16>(VARYING_BOTH_DIMS, num_tensors, {1, offsets.back()},
+                             first_dims, last_dims, offsets, /*rowwise=*/true,
+                             /*use_handle=*/true);
 }
 
 INSTANTIATE_TEST_SUITE_P(

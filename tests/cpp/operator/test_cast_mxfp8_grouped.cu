@@ -263,7 +263,8 @@ void performTest(const ProcessingMethod processing_method,
                  const std::vector<size_t>& offsets_h,
                  const bool rowwise,
                  const bool colwise,
-                 const bool use_2d_quantization = false) {
+                 const bool use_2d_quantization = false,
+                 const bool use_handle = false) {
     using namespace test;
 
     DType itype = TypeInfo<InputType>::dtype;
@@ -526,9 +527,23 @@ void performTest(const ProcessingMethod processing_method,
 
     // GPU
     Tensor workspace;
+    NVTEResourceHandle handle = use_handle ? nvte_create_resource_handle() : nullptr;
     switch (processing_method) {
         case ProcessingMethod::CAST_ONLY: {
-            nvte_group_quantize(in_group_tensor, out_group_tensor, quant_config, 0);
+            if (use_handle) {
+                nvte_group_quantize_with_handle(in_group_tensor, out_group_tensor,
+                                                quant_config, 0, handle);
+                if (shape_rep == VARYING_LAST_DIM || shape_rep == VARYING_BOTH_DIMS) {
+                    nvte_resource_handle_reserve_grouped_tma(handle, num_tensors + 1, 0);
+                }
+                nvte_group_quantize_with_handle(in_group_tensor, out_group_tensor,
+                                                quant_config, 0, handle);
+                // Reuse the grown descriptor allocation.
+                nvte_group_quantize_with_handle(in_group_tensor, out_group_tensor,
+                                                quant_config, 0, handle);
+            } else {
+                nvte_group_quantize(in_group_tensor, out_group_tensor, quant_config, 0);
+            }
             break;
         }
         case ProcessingMethod::CAST_DBIAS: {
@@ -572,6 +587,7 @@ void performTest(const ProcessingMethod processing_method,
     }
     cudaDeviceSynchronize();
     auto err = cudaGetLastError();
+    nvte_destroy_resource_handle(handle);
     ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
 
     auto [atol, rtol] = getTolerances(otype);
@@ -889,6 +905,47 @@ TEST(OperatorTest_GroupedFusedCastMXFP8, Test2DQuantization) {
             colwise,
             /*use_2d_quantization=*/true);
     }
+}
+
+TEST(OperatorTest_GroupedFusedCastMXFP8, ResourceHandleMoreThanOneCtaOfGroups) {
+    if (getDeviceComputeCapability() < blackwellComputeCapability) {
+        GTEST_SKIP();
+    }
+
+    constexpr size_t num_tensors = 129;
+    std::vector<size_t> first_dims(num_tensors, 128);
+    first_dims.front() = 256;
+    std::vector<size_t> last_dims(num_tensors, 128);
+    std::vector<size_t> offsets(num_tensors + 1, 0);
+    for (size_t i = 0; i < num_tensors; ++i) {
+        offsets[i + 1] = offsets[i] + first_dims[i] * last_dims[i];
+    }
+    performTest<bf16, fp8e4m3>(
+        ProcessingMethod::CAST_ONLY, &identity, ShapeRepresentation::VARYING_FIRST_DIM,
+        num_tensors, {offsets.back() / 128, 128}, first_dims, last_dims, offsets,
+        /*rowwise=*/true, /*colwise=*/false, /*use_2d_quantization=*/false,
+        /*use_handle=*/true);
+}
+
+TEST(OperatorTest_GroupedFusedCastMXFP8, ResourceHandleMoreThan64Descriptors) {
+    if (getDeviceComputeCapability() < blackwellComputeCapability) {
+        GTEST_SKIP();
+    }
+
+    constexpr size_t num_tensors = 65;
+    std::vector<size_t> first_dims(num_tensors, 128);
+    std::vector<size_t> last_dims(num_tensors, 128);
+    first_dims.front() = 256;
+    last_dims.back() = 256;
+    std::vector<size_t> offsets(num_tensors + 1, 0);
+    for (size_t i = 0; i < num_tensors; ++i) {
+        offsets[i + 1] = offsets[i] + first_dims[i] * last_dims[i];
+    }
+    performTest<bf16, fp8e4m3>(
+        ProcessingMethod::CAST_ONLY, &identity, ShapeRepresentation::VARYING_BOTH_DIMS,
+        num_tensors, {1, offsets.back()}, first_dims, last_dims, offsets,
+        /*rowwise=*/true, /*colwise=*/true, /*use_2d_quantization=*/false,
+        /*use_handle=*/true);
 }
 
 std::string to_string(const ProcessingMethod method) {

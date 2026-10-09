@@ -23,6 +23,7 @@
 #include <transformer_engine/transformer_engine.h>
 
 #include "../../common.h"
+#include "../../resource_handle.h"
 #include "../../util/ptx.cuh"
 #include "../../utils.cuh"
 #include "grouped_layout.cuh"
@@ -119,17 +120,28 @@ __global__ void __launch_bounds__(THREADS_PER_WARP)
                            const int64_t *const __restrict__ offsets_ptr,
                            const int64_t *const __restrict__ first_dims_ptr,
                            const int64_t *const __restrict__ last_dims_ptr, const bool rowwise,
-                           const bool colwise, const bool compute_dactivations) {
+                           const bool colwise, const bool compute_dactivations,
+                           const GroupedTmaStorageView storage) {
   const size_t tensor_id = blockIdx.x;
+  size_t *const rows_map = storage.rows != nullptr ? storage.rows : g_tensor_maps.rows;
+  size_t *const cols_map = storage.cols != nullptr ? storage.cols : g_tensor_maps.cols;
+  size_t *const offsets_map = storage.offsets != nullptr ? storage.offsets : g_tensor_maps.offsets;
+  CUtensorMap *const input_maps = storage.input != nullptr ? storage.input : g_tensor_maps.input;
+  CUtensorMap *const act_input_maps =
+      storage.act_input != nullptr ? storage.act_input : g_tensor_maps.act_input;
+  CUtensorMap *const rowwise_maps =
+      storage.output_rowwise != nullptr ? storage.output_rowwise : g_tensor_maps.output_rowwise;
+  CUtensorMap *const colwise_maps =
+      storage.output_colwise != nullptr ? storage.output_colwise : g_tensor_maps.output_colwise;
   const size_t rows =
       get_tensor_rows_num(tensor_id, shape_rep, first_logical_dim, first_dims_ptr, num_tensors);
   const size_t cols = get_tensor_cols_num(tensor_id, shape_rep, last_logical_dim, last_dims_ptr);
 
   const size_t offset_elts = offsets_ptr[tensor_id];
   if (threadIdx.x == 0) {
-    g_tensor_maps.rows[tensor_id] = rows;
-    g_tensor_maps.cols[tensor_id] = cols;
-    g_tensor_maps.offsets[tensor_id] = offset_elts;
+    rows_map[tensor_id] = rows;
+    cols_map[tensor_id] = cols;
+    offsets_map[tensor_id] = offset_elts;
   }
 
   // Zero-sized groups: skip TMA descriptor update. The main kernel already returns
@@ -141,27 +153,27 @@ __global__ void __launch_bounds__(THREADS_PER_WARP)
 
   if (tensor_id < num_tensors) {
     {
-      CUtensorMap *modified_tensor_map_input = &g_tensor_maps.input[tensor_id];
+      CUtensorMap *modified_tensor_map_input = &input_maps[tensor_id];
       const uintptr_t global_data_ptr = reinterpret_cast<uintptr_t>(input_data_ptr + offset_elts);
       modify_base_tensor_map(base_tensor_map_input, modified_tensor_map_input, global_data_ptr,
                              rows, cols, sizeof(IType));
     }
     if (compute_dactivations) {
-      CUtensorMap *modified_tensor_map_act_input = &g_tensor_maps.act_input[tensor_id];
+      CUtensorMap *modified_tensor_map_act_input = &act_input_maps[tensor_id];
       const uintptr_t global_data_ptr =
           reinterpret_cast<uintptr_t>(act_input_data_ptr + offset_elts);
       modify_base_tensor_map(base_tensor_map_act_input, modified_tensor_map_act_input,
                              global_data_ptr, rows, cols, sizeof(IType));
     }
     if (rowwise) {
-      CUtensorMap *modified_tensor_map_output_rowwise = &g_tensor_maps.output_rowwise[tensor_id];
+      CUtensorMap *modified_tensor_map_output_rowwise = &rowwise_maps[tensor_id];
       const uintptr_t global_data_ptr =
           reinterpret_cast<uintptr_t>(output_rowwise_data_ptr + offset_elts);
       modify_base_tensor_map(base_tensor_map_output_rowwise, modified_tensor_map_output_rowwise,
                              global_data_ptr, rows, cols, sizeof(OType));
     }
     if (colwise) {
-      CUtensorMap *modified_tensor_map_output_colwise = &g_tensor_maps.output_colwise[tensor_id];
+      CUtensorMap *modified_tensor_map_output_colwise = &colwise_maps[tensor_id];
       const uintptr_t global_data_ptr =
           reinterpret_cast<uintptr_t>(output_colwise_data_ptr + offset_elts);
       modify_base_tensor_map(base_tensor_map_output_colwise, modified_tensor_map_output_colwise,

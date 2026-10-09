@@ -57,14 +57,14 @@ inline void dequantize_helper(const Tensor &input, Tensor *output, cudaStream_t 
 }
 
 inline void group_dequantize_helper(const GroupedTensor &input, GroupedTensor *output,
-                                    cudaStream_t stream) {
+                                    cudaStream_t stream, NVTEResourceHandle handle = nullptr) {
   CheckInputGroupedTensor(input, "group_dequantize_input");
   CheckOutputGroupedTensor(*output, "group_dequantize_output");
 
   switch (input.scaling_mode) {
     case NVTE_MXFP8_1D_SCALING: {
       if (is_supported_by_CC_100()) {
-        mxfp8::group_dequantize(&input, output, stream);
+        mxfp8::group_dequantize(&input, output, stream, handle);
       } else {
         NVTE_ERROR("MXFP8 Grouped Dequantization is NOT supported by architectures < 10.0");
       }

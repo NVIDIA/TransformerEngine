@@ -505,7 +505,8 @@ void group_quantize_fwd_host_aware_helper(const NVTETensor input, NVTETensor *ou
 
 template <bool IS_ACT, typename ParamOP, float (*OP)(float, const ParamOP &)>
 void group_quantize_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTensor output,
-                               const NVTEQuantizationConfig quant_config, cudaStream_t stream) {
+                               const NVTEQuantizationConfig quant_config, cudaStream_t stream,
+                               NVTEResourceHandle handle = nullptr) {
   using namespace detail;
 
   NVTEScalingMode scaling_mode = nvte_grouped_tensor_scaling_mode(output);
@@ -543,7 +544,7 @@ void group_quantize_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTensor 
     case NVTE_MXFP8_1D_SCALING: {
       mxfp8::group_quantize</*IS_DBIAS=*/false, /*IS_DACT=*/false, IS_ACT, ParamOP, OP>(
           input_tensor, activations_tensor, noop_tensor, output_tensor, dbias_tensor,
-          workspace_tensor, &quant_config_cpp, stream);
+          workspace_tensor, &quant_config_cpp, stream, handle);
       break;
     }
     case NVTE_BLOCK_SCALING_1D: {
