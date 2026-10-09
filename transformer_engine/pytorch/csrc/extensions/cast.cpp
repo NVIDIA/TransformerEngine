@@ -2272,11 +2272,11 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
             });
         const bool grouped_row_scaled_cast =
             transformer_engine::getenv<bool>("NVTE_NVFP4_GROUPED_ROW_SCALED_CAST", true);
-        quantization_method = (grouped_row_scaled_cast && all_splits_128 && last_dim_128 &&
-                               within_expert_cap && input_2d && splits_cover_input && !any_4over6 &&
-                               input_dtype == DType::kBFloat16)
-                                  ? QuantizationMethod::FUSED_NVFP4_ROW_SCALED
-                                  : QuantizationMethod::UNFUSED;
+        quantization_method =
+            (grouped_row_scaled_cast && all_splits_128 && last_dim_128 && within_expert_cap &&
+             input_2d && splits_cover_input && !any_4over6 && input_dtype == DType::kBFloat16)
+                ? QuantizationMethod::FUSED_NVFP4_ROW_SCALED
+                : QuantizationMethod::UNFUSED;
       } else {
         quantization_method = QuantizationMethod::FUSED_NVFP4;
       }
