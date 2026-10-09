@@ -52,10 +52,8 @@ class EPBackend {
                NVTETensor total_recv_tokens_per_rank, NVTEEpLayerConfig layer_cfg,
                cudaStream_t stream);
 
-  // Per-step ops below require a prior prepare(). When group_config_.volatile_handle_mem
-  // is set, layer_cfg is required (top_k/topk_idx_dtype, to bind a fresh handle via
-  // ncclEpImportHandle on every call); otherwise it is unused and may be null (the
-  // pointer-keyed cache supplies this state instead).
+  // Per-step ops below require a prior prepare(). layer_cfg is required when
+  // group_config_.volatile_handle_mem is set; otherwise it may be null.
   void dispatch(NVTETensor handle_mem, const NVTETensor topk_idx, const NVTETensor tokens,
                 const NVTECommWindow& tokens_win, const NVTETensor topk_weights,
                 const NVTECommWindow& topk_weights_win, NVTETensor recv_tokens,
@@ -136,15 +134,12 @@ class EPBackend {
   size_t cache_cap_locked();
 
   // Bind a fresh handle to handle_mem's already-prepared contents via ncclEpImportHandle.
-  // Never touches handles_/index_; the caller owns the returned handle (destroy via ScopedHandle).
-  // Caller must hold mutex_.
+  // The caller owns the returned handle. Caller must hold mutex_.
   ncclEpHandle_t import_handle_locked(void* handle_mem, size_t handle_mem_size, int num_tokens,
                                       NVTEEpLayerConfig layer_cfg);
 
-  // Per-step handle acquisition: the pointer-keyed cache (*owned = false, caller must not
-  // destroy) when group_config_.volatile_handle_mem is unset, or a fresh import_handle_locked()
-  // (*owned = true, caller destroys via ScopedHandle) when it is set (layer_cfg is then
-  // required). Caller must hold mutex_.
+  // Per-step handle: cached (*owned = false) or freshly imported when volatile_handle_mem is
+  // set (*owned = true, layer_cfg required). Caller must hold mutex_.
   ncclEpHandle_t acquire_step_handle_locked(void* handle_mem, size_t handle_mem_size,
                                             int num_tokens, const NVTEEpLayerConfig* layer_cfg,
                                             bool* owned);

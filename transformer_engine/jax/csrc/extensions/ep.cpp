@@ -58,10 +58,7 @@ static NVTEEpGroupConfig MakeEpGroupConfig(const EpBootstrapParams& p) {
                            .max_token_dtype = p.max_token_dtype,
                            .zero_copy = 0,
                            .drop_on_overflow = p.drop_on_overflow,
-                           // Under lax.scan, XLA may reuse the same handle_mem address for a
-                           // different prepared state at each step (and vice versa), so
-                           // EPBackend's pointer-keyed handle cache is unsound here: every
-                           // per-step op re-binds a fresh handle from handle_mem's own contents.
+                           // XLA may relocate handle_mem between calls (e.g. under lax.scan).
                            .volatile_handle_mem = 1};
 }
 
@@ -181,8 +178,7 @@ std::shared_ptr<EpResources> AcquireEpResources() {
 }  // namespace
 
 // top_k, dispatch_output_per_expert_alignment, and topk_idx_dtype are baked as static
-// FFI attributes; every op passes them to the C API as NVTEEpLayerConfig, required
-// on every call since MakeEpGroupConfig bootstraps with volatile_handle_mem set.
+// FFI attributes; every op passes them to the *_v2 C API as NVTEEpLayerConfig.
 struct EpConfig {
   int64_t top_k;
   int64_t dispatch_output_per_expert_alignment;
@@ -416,9 +412,9 @@ Error_Type EpDispatchFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_
                               .dispatch_output_per_expert_alignment =
                                   static_cast<size_t>(config.dispatch_output_per_expert_alignment),
                               .topk_idx_dtype = static_cast<NVTEDType>(config.topk_idx_dtype)};
-  nvte_ep_dispatch(handle_mem_.data(), topk_idx_.data(), tokens_.data(), no_win,
-                   topk_weights_.data(), no_win, recv_tokens_.data(), no_win,
-                   recv_topk_weights_.data(), no_win, &layer_cfg, stream);
+  nvte_ep_dispatch_v2(handle_mem_.data(), topk_idx_.data(), tokens_.data(), no_win,
+                      topk_weights_.data(), no_win, recv_tokens_.data(), no_win,
+                      recv_topk_weights_.data(), no_win, &layer_cfg, stream);
 
   return ffi_with_cuda_error_check();
 }
@@ -467,8 +463,8 @@ Error_Type EpCombineFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_T
                               .dispatch_output_per_expert_alignment =
                                   static_cast<size_t>(config.dispatch_output_per_expert_alignment),
                               .topk_idx_dtype = static_cast<NVTEDType>(config.topk_idx_dtype)};
-  nvte_ep_combine(handle_mem_.data(), expert_out_.data(), no_win, result_.data(), &layer_cfg,
-                  stream);
+  nvte_ep_combine_v2(handle_mem_.data(), expert_out_.data(), no_win, result_.data(), &layer_cfg,
+                     stream);
 
   return ffi_with_cuda_error_check();
 }
@@ -540,8 +536,9 @@ Error_Type EpDispatchBwdFFI(cudaStream_t stream, EpInstanceState* ep_state, Buff
                               .dispatch_output_per_expert_alignment =
                                   static_cast<size_t>(config.dispatch_output_per_expert_alignment),
                               .topk_idx_dtype = static_cast<NVTEDType>(config.topk_idx_dtype)};
-  nvte_ep_dispatch_bwd(handle_mem_.data(), grad_.data(), no_win, g_recv_topk_weights_.data(),
-                       no_win, grad_tokens_.data(), grad_topk_weights_.data(), &layer_cfg, stream);
+  nvte_ep_dispatch_bwd_v2(handle_mem_.data(), grad_.data(), no_win, g_recv_topk_weights_.data(),
+                          no_win, grad_tokens_.data(), grad_topk_weights_.data(), &layer_cfg,
+                          stream);
 
   return ffi_with_cuda_error_check();
 }
@@ -591,8 +588,8 @@ Error_Type EpCombineBwdFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffe
                               .dispatch_output_per_expert_alignment =
                                   static_cast<size_t>(config.dispatch_output_per_expert_alignment),
                               .topk_idx_dtype = static_cast<NVTEDType>(config.topk_idx_dtype)};
-  nvte_ep_combine_bwd(handle_mem_.data(), grad_.data(), no_win, grad_expert_out_.data(), no_win,
-                      &layer_cfg, stream);
+  nvte_ep_combine_bwd_v2(handle_mem_.data(), grad_.data(), no_win, grad_expert_out_.data(), no_win,
+                         &layer_cfg, stream);
 
   return ffi_with_cuda_error_check();
 }

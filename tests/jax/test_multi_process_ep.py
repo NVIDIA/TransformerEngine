@@ -1131,7 +1131,7 @@ class TestEPOverflowDrop(unittest.TestCase):
         self.assertGreater(int(trt_prep.max()), self.recv_capacity_per_rank)
 
 
-# ── lax.scan handle_mem relocation ───────────────────────────────────────────
+# lax.scan handle_mem relocation
 
 
 class TestEpScanHandleRelocation(TestEP):
@@ -1293,7 +1293,7 @@ class TestEpScanHandleRelocation(TestEP):
             )
             self.assertTrue(np.all(np.isfinite(np.asarray(grad_scan_g))))
 
-    # ── scan, no remat, routing-sensitive reference ──────────────────────
+    # scan without remat, checked against a routing-sensitive reference
 
     def _make_routed_weights(self, T_global):
         """Per-layer non-uniform top-k weights (rows sum to 1)."""

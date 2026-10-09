@@ -116,9 +116,7 @@ inline void* handle_mem_ptr(NVTETensor handle_mem) {
   return p;
 }
 
-// Destroys an owned (imported or freshly-opened) handle on scope exit, including on exceptions.
-// Safe right after enqueueing stream work: the handle does not own the caller's handle_mem, so
-// destroy frees host state only. No-op for cache-owned handles (owned=false).
+// Destroys an owned handle on scope exit. No-op for cache-owned handles (owned=false).
 class ScopedHandle {
  public:
   ScopedHandle(ncclEpHandle_t handle, bool owned) : handle_(handle), owned_(owned) {}
@@ -412,7 +410,6 @@ size_t EPBackend::cache_cap_locked() {
     if (cap_env != nullptr) {
       const int64_t v = static_cast<int64_t>(std::atol(cap_env));
       if (v < 0) {
-        // Unlimited cache; only meaningful when volatile_handle_mem is unset.
         handle_cache_cap_ = SIZE_MAX;
       } else {
         NVTE_CHECK(v > 0,
@@ -441,7 +438,7 @@ ncclEpHandle_t EPBackend::prepare_handle_locked(void* handle_mem, size_t handle_
                  it->second->handle_mem_size);
       return it->second->handle;
     }
-    // Same address, new config (buffer reused across lifetimes): drop the stale handle.
+    // Same address with a new config: replace the stale handle.
     if (it->second->handle != nullptr) nccl_ep::handle_destroy(it->second->handle);
     handles_.erase(it->second);
     index_.erase(it);
@@ -468,11 +465,7 @@ ncclEpHandle_t EPBackend::lookup_handle_locked(void* handle_mem, size_t handle_m
                it->second->handle_mem_size);
     return it->second->handle;
   }
-  // Miss: this handle_mem was never prepared.
-  // No fallback reconstruction -- the cache is keyed by pointer, so guessing
-  // at a handle for an unrecognized address would silently misinterpret
-  // whatever this buffer actually holds. Callers whose handle_mem address is
-  // not stable across calls should bootstrap with
+  // Callers whose handle_mem address is not stable should set
   // NVTEEpGroupConfig::volatile_handle_mem instead of relying on this cache.
   const uintptr_t hm_addr = reinterpret_cast<uintptr_t>(handle_mem);
   NVTE_ERROR("ep op on handle_mem=0x", hm_addr,
@@ -543,9 +536,7 @@ void EPBackend::prepare(NVTETensor handle_mem, const NVTETensor topk_idx,
   std::lock_guard<std::mutex> lock(mutex_);
   NVTE_CHECK(initialized_, "EPBackend not initialized");
   if (group_config_.volatile_handle_mem) {
-    // handle_mem's address is not stable across calls (see
-    // NVTEEpGroupConfig::volatile_handle_mem) -- don't cache; every later
-    // dispatch/combine/_bwd on this handle_mem re-binds via ncclEpImportHandle.
+    // volatile_handle_mem: do not cache; later ops rebind via ncclEpImportHandle.
     ScopedHandle guard(open_handle(hm_ptr, nvte_tensor_size_bytes(handle_mem), layer_cfg.top_k,
                                    layer_cfg.dispatch_output_per_expert_alignment),
                        /*owned=*/true);
@@ -706,8 +697,7 @@ void EPBackend::prepare_and_dispatch(
   std::lock_guard<std::mutex> lock(mutex_);
   NVTE_CHECK(initialized_, "EPBackend not initialized");
   if (group_config_.volatile_handle_mem) {
-    // Fused call: the same freshly-opened handle serves both UpdateHandle and
-    // the dispatch below, so there's nothing to import -- just don't cache it.
+    // volatile_handle_mem: use a fresh uncached handle for both steps.
     ScopedHandle guard(open_handle(hm_ptr, nvte_tensor_size_bytes(handle_mem), layer_cfg.top_k,
                                    layer_cfg.dispatch_output_per_expert_alignment),
                        /*owned=*/true);
