@@ -1317,15 +1317,20 @@ def general_grouped_gemm_for_grouped_tensor(
             row_offset += rows
             col_offset += cols
     else:
-        # Single packed output. A varying per-expert output width would need per-expert
-        # slicing over mismatched column counts; the per-column scale expansion below
-        # assumes one shared width.
+        # Single packed output. Groups are stacked along rows (uniform or varying first
+        # dim) and share one output width, so the scales below index the buffer by row.
+        # A varying per-expert output width packs groups along columns instead, which this
+        # row-wise expansion cannot represent; no TE caller produces such an output, since
+        # grouped GEMM outputs share the non-contracted free dimension.
         if out.last_dims is not None:
             raise NotImplementedError(
                 "Row-scaled grouped GEMM does not support a varying per-expert output width."
             )
         last_dim = out.logical_shape[-1]
-        flat = scratch.rowwise_data.view(-1, last_dim)
+        # logical_shape[0] is the live row count (host int). Restrict to it so a buffer
+        # carrying extra capacity rows does not misalign with the per-row/per-group scales.
+        live_rows = out.logical_shape[0]
+        flat = scratch.rowwise_data.view(-1, last_dim)[:live_rows]
         if post_scale_rows is not None:
             # One scale per output row.
             flat.mul_(post_scale_rows.view(-1, 1))
@@ -1335,10 +1340,10 @@ def general_grouped_gemm_for_grouped_tensor(
             # from syncing the counts to host, so this stays valid under CUDA-graph capture.
             col_scales = post_scale_cols.view(num_tensors, last_dim)
             if out.first_dims is None:
-                rows = flat.shape[0] // num_tensors
+                rows = live_rows // num_tensors
                 repeats = torch.full((num_tensors,), rows, dtype=torch.int64, device=flat.device)
             else:
                 repeats = out.first_dims
-            flat.mul_(col_scales.repeat_interleave(repeats, dim=0, output_size=flat.shape[0]))
-        _store(out.rowwise_data.view(-1, last_dim), flat)
+            flat.mul_(col_scales.repeat_interleave(repeats, dim=0, output_size=live_rows))
+        _store(out.rowwise_data.view(-1, last_dim)[:live_rows], flat)
     return out

@@ -856,11 +856,13 @@ def _row_scaled_grouped_tensor_gemm_supported() -> bool:
         return False
     if torch.cuda.get_device_capability() < (10, 0):
         return False
-    return tex.get_cublasLt_version() >= 130300
+    # cuBLAS enables grouped NVFP4 GEMM at 13.4 (CUBLAS_NVFP4_GROUPED_GEMM_VERSION 130400);
+    # below that the GEMM rejects the call, so skip rather than fail the version check.
+    return tex.get_cublasLt_version() >= 130400
 
 
 _reason_for_no_grouped_tensor_gemm = (
-    "Row-scaled grouped-tensor NVFP4 GEMM requires Blackwell (SM100) and cuBLAS 13.3+."
+    "Row-scaled grouped-tensor NVFP4 GEMM requires Blackwell (SM100) and cuBLAS 13.4+."
 )
 
 
@@ -1226,3 +1228,67 @@ def test_nvfp4_row_scaled_grouped_tensor_gemm_colscale_cudagraph(
     expected = grouped_out.split_into_quantized_tensors()
     for got, ref in zip(replayed, expected):
         torch.testing.assert_close(got, ref, atol=0.0, rtol=0.0)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.skipif(
+    not row_scaled_grouped_cast_available, reason=reason_for_no_row_scaled_grouped_cast
+)
+@pytest.mark.parametrize("m_splits, k, n", [([128, 256, 128], 256, 256)])
+def test_nvfp4_row_scaled_grouped_tensor_gemm_output_capacity(
+    m_splits: list[int], k: int, n: int
+) -> None:
+    """A grouped output whose backing buffer carries extra capacity rows beyond the live region
+    is scaled only over the live rows. The post-scale restricts itself to logical_shape[0]
+    instead of the full buffer, so the extra rows neither break the per-row multiply nor change
+    the result, which still matches a per-expert dense GEMM.
+    """
+    if not _row_scaled_grouped_tensor_gemm_supported():
+        pytest.skip(_reason_for_no_grouped_tensor_gemm)
+
+    torch.manual_seed(31)
+    device = torch.device("cuda")
+    num_gemms = len(m_splits)
+    out_dtype = torch.float32
+
+    activation = _make_row_scaled_grouped_activation(m_splits, k, columnwise=False)
+    activation_splits = activation.split_into_quantized_tensors()
+
+    w_quantizer = NVFP4Quantizer(
+        fp4_dtype=te.DType.kFloat4E2M1,
+        rowwise=True,
+        columnwise=True,
+        with_amax_reduction=False,
+        amax_reduction_group=None,
+        with_rht=False,
+        with_post_rht_amax=False,
+    )
+    w_quantizer.optimize_for_gemm = True
+    weights = []
+    expected = []
+    for i in range(num_gemms):
+        w_nvfp4 = w_quantizer(torch.randn(n, k, dtype=torch.bfloat16, device=device))
+        weights.append(w_nvfp4)
+        expected.append(
+            general_gemm(w_nvfp4, activation_splits[i], out_dtype=out_dtype, layout="TN")[0]
+        )
+
+    grouped_out = _make_output_grouped_tensor(m_splits, n, device, out_dtype)
+    # Enlarge the backing buffer past the live region (logical_shape keeps the live size), as a
+    # capacity-padded output would. Groups are still written at their live offsets; without the
+    # live-row slice the per-row multiply would hit the extra rows and misalign.
+    live_numel = grouped_out.rowwise_data.numel()
+    padded = torch.full(
+        (live_numel + 128 * n,),
+        float("nan"),
+        dtype=grouped_out.rowwise_data.dtype,
+        device=device,
+    )
+    padded[:live_numel].copy_(grouped_out.rowwise_data)
+    grouped_out.rowwise_data = padded
+
+    general_grouped_gemm_for_grouped_tensor(weights, activation, grouped_out, layout="TN")
+    actual = grouped_out.split_into_quantized_tensors()
+
+    for got, ref in zip(actual, expected):
+        torch.testing.assert_close(got, ref, atol=1e-4, rtol=1e-4)
