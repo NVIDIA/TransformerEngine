@@ -36,8 +36,8 @@ export FLASH_ATTN_CUDA_ARCHS=$sm_arch
 CP_FA_VERSION=""
 if [ $sm_arch -gt 90 ]
 then
-  FA_versions=(4.0.0b11)
-  CP_FA_VERSION="4.0.0b11"
+  FA_versions=(4.0.0b33)
+  CP_FA_VERSION="4.0.0b33"
 elif [ $sm_arch -eq 90 ]
 then
   FA_versions=(3.0.0b1)
@@ -66,13 +66,13 @@ do
   elif [[ "${fa_version}" == 4.* ]]
   then
     export NVTE_FLASH_ATTN_V4=1
-    # FA4 is intentionally last in every version array. Its b11 test pin needs
-    # CUTLASS DSL 4.4.2, so replace the image-matched stack only for this final
+    # FA4 is intentionally last in every version array. CUTLASS DSL 4.8.0 supports
+    # SM107, so replace the image-matched stack only for this final
     # iteration; later iterations would otherwise need that stack restored.
     pip3 uninstall -y nvidia-cutlass-dsl nvidia-cutlass-dsl-libs-base \
       nvidia-cutlass-dsl-libs-cu12 nvidia-cutlass-dsl-libs-cu13 \
       || error_exit "Failed to isolate CUTLASS DSL for Flash Attention $fa_version"
-    pip3 install flash-attn-4==${fa_version} nvidia-cutlass-dsl[cu13]==4.4.2 \
+    pip3 install flash-attn-4==${fa_version} nvidia-cutlass-dsl[cu13]==4.8.0 \
       --no-build-isolation || error_exit "Failed to install Flash Attention $fa_version"
   else
     export NVTE_FLASH_ATTN_V3=1
@@ -134,6 +134,13 @@ do
       echo "CP tests are not scheduled for the FA generation on sm$sm_arch"
     fi
     NVTE_TORCH_COMPILE=0 NVTE_ALLOW_UNSAFE_PICKLE_EXTRA_STATE=1 python3 -m pytest -v -s --junitxml=$XML_ATTN $TE_PATH/tests/pytorch/attention/test_attention.py || test_fail "test_attention.py (FA $fa_version)"
+  fi
+
+  if [[ "${fa_version}" == 4.* ]]; then
+    XML_BACKEND="$XML_LOG_DIR/pytest_test_attention_backend_selection_fa${fa_tag}.xml"
+    NVTE_TORCH_COMPILE=0 python3 -m pytest -v -s --junitxml="$XML_BACKEND" \
+      "$TE_PATH/tests/pytorch/attention/test_attention_backend_selection.py" \
+      || test_fail "FA4 backend-selection tests (FA $fa_version)"
   fi
 done
 
