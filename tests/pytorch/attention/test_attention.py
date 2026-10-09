@@ -36,12 +36,15 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     AttentionParams,
     FlashAttentionUtils,
     FusedAttentionParams,
+    _check_fa3_backward_support,
+    _get_fa3_backward_support,
     _get_supported_versions,
     check_set_window_size,
     get_attention_backend,
     get_fused_attn_spec,
     get_thd_padding_mask,
 )
+from transformer_engine.pytorch.attention.dot_product_attention.backends import flash_attn_func_v3
 from transformer_engine.pytorch.attention import RotaryPositionEmbedding
 import transformer_engine.pytorch.cpp_extensions as ext
 from transformer_engine.pytorch.cpp_extensions.fused_attn import (
@@ -227,16 +230,27 @@ def test_fused_attn_backend_message():
     ],
 )
 @pytest.mark.parametrize("is_training", [True, False])
+@pytest.mark.parametrize("installed_mla_backward", [True, False])
 def test_fa3_mismatched_head_dims_mode_selection(
-    monkeypatch, head_dim_qk, head_dim_v, fa3_supports_backward, is_training
+    monkeypatch, head_dim_qk, head_dim_v, fa3_supports_backward, is_training, installed_mla_backward
 ):
-    """Retain supported FA3 training and restrict oversized V dimensions to inference."""
+    """Keep supported FA3 paths and fall back for legacy backward or oversized V."""
     monkeypatch.setattr(
         "transformer_engine.pytorch.attention.dot_product_attention.utils.get_device_compute_capability",
         lambda device=None: (9, 0),
     )
     monkeypatch.setattr(FlashAttentionUtils, "v3_is_installed", True)
     monkeypatch.setattr(FlashAttentionUtils, "fa3_version", PkgVersion("3.0.0b1"))
+    probes = []
+
+    def backward_support(*args):
+        probes.append(args)
+        return installed_mla_backward, "legacy FA3 backward" if not installed_mla_backward else ""
+
+    monkeypatch.setattr(
+        "transformer_engine.pytorch.attention.dot_product_attention.utils._get_fa3_backward_support",
+        backward_support,
+    )
     monkeypatch.setenv("NVTE_FLASH_ATTN", "1")
     monkeypatch.setenv("NVTE_FLASH_ATTN_V2", "0")
     monkeypatch.setenv("NVTE_FLASH_ATTN_V3", "1")
@@ -261,12 +275,23 @@ def test_fa3_mismatched_head_dims_mode_selection(
         )
     )
 
-    expected_fa3 = not is_training or fa3_supports_backward
+    expected_fa3 = not is_training or (
+        fa3_supports_backward and (head_dim_qk == head_dim_v or installed_mla_backward)
+    )
     assert bool(use_flash_attention) == expected_fa3
     assert bool(available_backends[0]) == expected_fa3
     assert not use_fused_attention
     assert bool(use_unfused_attention) != expected_fa3
     assert flash_attention_backend == (FlashAttentionUtils.fa3_version if expected_fa3 else None)
+    assert len(probes) == int(is_training and head_dim_qk != head_dim_v and fa3_supports_backward)
+
+
+def test_fa3_backward_unavailable(monkeypatch):
+    """An unavailable backward implementation must not be treated as capable."""
+    monkeypatch.setattr(FlashAttentionUtils, "fa3_backward", None)
+    supported, reason = _get_fa3_backward_support(192, 128, torch.bfloat16)
+    assert not supported
+    assert "unavailable" in reason
 
 
 @pytest.mark.parametrize(
@@ -899,6 +924,62 @@ model_configs_fa3_mla = {
 }
 
 
+def _fa3_accepts_nonempty_backward(dtype, head_dim_qk, head_dim_v):
+    """Independently exercise FA3 autograd to distinguish current and legacy builds."""
+    inputs = [
+        torch.zeros((1, 16, 1, dim), dtype=dtype, device="cuda", requires_grad=True)
+        for dim in (head_dim_qk, head_dim_qk, head_dim_v)
+    ]
+    out = flash_attn_func_v3(*inputs)
+    if isinstance(out, (tuple, list)):
+        out = out[0]
+    try:
+        grads = torch.autograd.grad(out, inputs, torch.ones_like(out))
+    except RuntimeError as error:
+        # Pre-#1604 FA3 checks out against the QK dimension instead of V.
+        # Unexpected CUDA, API, or numerical failures must still fail the test.
+        if "out must have shape" not in str(error):
+            raise
+        return False
+    assert all(grad.shape == tensor.shape for grad, tensor in zip(grads, inputs))
+    return True
+
+
+@requires_fa3
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("head_dim_qk,head_dim_v", [(192, 128), (64, 128), (64, 256)])
+@pytest.mark.parametrize("mode", ["eager", "compile", "cuda_graph"])
+def test_fa3_backward_capability_query(dtype, head_dim_qk, head_dim_v, mode):
+    """A cold capability query must agree with real backward and preserve execution state."""
+    expected = _fa3_accepts_nonempty_backward(dtype, head_dim_qk, head_dim_v)
+    device = torch.device("cuda", torch.cuda.current_device())
+    value = torch.ones(8, device=device)
+    rng_state = torch.cuda.get_rng_state().clone()
+    _check_fa3_backward_support.cache_clear()
+
+    def query(tensor):
+        supported, _ = _get_fa3_backward_support(head_dim_qk, head_dim_v, dtype, device)
+        return tensor + int(supported)
+
+    try:
+        if mode == "eager":
+            output = query(value)
+        elif mode == "compile":
+            output = torch.compile(query, backend="eager", fullgraph=True, dynamic=False)(value)
+        else:
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                output = query(value)
+            graph.replay()
+        torch.testing.assert_close(output, value + int(expected))
+        assert torch.equal(rng_state, torch.cuda.get_rng_state())
+        assert _check_fa3_backward_support.cache_info().misses == 1
+        assert _get_fa3_backward_support(head_dim_qk, head_dim_v, dtype, device)[0] == expected
+        assert _check_fa3_backward_support.cache_info().hits == 1
+    finally:
+        _check_fa3_backward_support.cache_clear()
+
+
 @requires_fa3
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("model_configs", [model_configs_fa3_mla])
@@ -932,6 +1013,10 @@ def test_dpa_fa3_mla(
     _attention_backends["backend_selection_requires_update"] = True
     reset_rng_states()
     config = model_configs[model]
+    if is_training and config.head_dim_qk != config.head_dim_v and fa3_supports_backward:
+        fa3_supports_backward = _fa3_accepts_nonempty_backward(
+            dtype, config.head_dim_qk, config.head_dim_v
+        )
     shapes = (
         (config.batch_size, config.max_seqlen_q, config.num_heads, config.head_dim_qk),
         (config.batch_size, config.max_seqlen_kv, config.num_gqa_groups, config.head_dim_qk),

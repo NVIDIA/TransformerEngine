@@ -169,6 +169,7 @@ else:
         )
 
 # Try to import Flash Attention v3
+fa_utils.fa3_backward = None
 try:
     fa_utils.fa3_version = PkgVersion(PkgVersion(get_pkg_version("flash-attn-3")).public)
 except PackageNotFoundError:
@@ -205,6 +206,7 @@ else:
         )
     else:
         fa_utils.set_flash_attention_3_params()
+        fa_utils.fa3_backward = _flash_attn_bwd_v3
 
         # Older FA3 releases expose no `softcap` kwarg, so probe the API rather than the version.
         # This cannot see a FLASHATTENTION_DISABLE_SOFTCAP build: that still exposes the kwarg and

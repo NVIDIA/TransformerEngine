@@ -201,6 +201,18 @@ backend-selection overview.
    :Default: ``1``
    :Description: Enable or disable FlashAttention 3 (the ``flash-attn-3`` package) for DotProductAttention, without affecting FlashAttention 2 or 4. When set to ``0``, FlashAttention 3 will not be used even if it is installed.
 
+   FA3 training requires value head dimensions of at most 256. For unequal QK/V
+   head dimensions, Transformer Engine also checks the loaded backward
+   implementation using empty sequences and caches the result per implementation,
+   device, dtype, and dimension pair. Older FA3 implementations that reject these
+   dimensions fall back to another eligible backend. Inference retains the
+   forward-supported configurations.
+
+   Unequal-dimension backward support was added in
+   `flash-attention#1604 <https://github.com/Dao-AILab/flash-attention/pull/1604>`__
+   and is present in the ``v2.8.3/hopper`` source. The ``flash-attn-3`` package
+   version alone does not distinguish implementations with and without that change.
+
 .. envvar:: NVTE_FLASH_ATTN_V4
 
    :Type: ``int`` (0 or 1)
