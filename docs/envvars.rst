@@ -174,8 +174,7 @@ General
    :Description: Maximum number of live expert-parallel handles cached by ``handle_mem``
                  address; preparing one more raises an error. Entries are released by
                  ``ep_finalize``. ``-1`` means unlimited; ``0`` is invalid.
-                 Not used when the EP group is bootstrapped with ``volatile_handle_mem``
-                 (always the case under JAX), where handles are never cached.
+                 Not used under JAX, where handles are never cached.
 
 Attention Backend Selection
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^

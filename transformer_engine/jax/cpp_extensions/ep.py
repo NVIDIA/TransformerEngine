@@ -179,11 +179,9 @@ def reset_ep_config() -> None:
 class EpLayerConfig:
     """Per-layer EP config; mirrors C ``NVTEEpLayerConfig``.
 
-    Threaded through every per-step op. JAX always bootstraps EPBackend with
-    volatile_handle_mem, so each op rebinds a fresh handle from handle_mem's
-    contents via ncclEpImportHandle rather than using the pointer-keyed C++
-    cache; top_k/topk_idx_dtype are required for that, since combine,
-    dispatch_bwd, and combine_bwd don't otherwise see topk_idx directly.
+    Threaded through every per-step op so each can rebind its handle from
+    handle_mem, which XLA may relocate between calls. topk_idx_dtype must match
+    the dtype of topk_idx passed to ep_prepare.
     Reserved for future per-call fields (fp8 scale, overflow policy, ...).
     """
 
