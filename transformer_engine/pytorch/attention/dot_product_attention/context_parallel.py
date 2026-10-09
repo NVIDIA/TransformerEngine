@@ -10,6 +10,7 @@ import transformer_engine_torch as tex
 
 from transformer_engine.pytorch.utils import (
     get_cudnn_version,
+    get_nvtx_range_context,
     nvtx_range_pop,
     nvtx_range_push,
     get_device_compute_capability,
@@ -59,6 +60,12 @@ _softmax_offset_chunk_ids_cache = {}
 
 # Float8CurrentScaling: fused_attn_bwd takes O in FP8 by default, this flag allows it in F16
 _dpa_fp8_cs_o_in_f16 = os.getenv("NVTE_DPA_FP8CS_O_in_F16", "1") == "1"
+
+
+def _nvtx_call(label, function, *args, **kwargs):
+    """Run one profiled operation without changing its synchronization semantics."""
+    with get_nvtx_range_context(label):
+        return function(*args, **kwargs)
 
 
 def _reject_custom_recipe_under_cp(fp8, fp8_recipe):
@@ -547,15 +554,21 @@ def flash_attn_a2a_communicate(
     a2a_inputs = [a2a_inputs] if not isinstance(a2a_inputs, list) else a2a_inputs
     a2a_outputs, a2a_reqs = [None] * len(a2a_inputs), [None] * len(a2a_inputs)
     _, _, head_dim = get_bsh_dims(qkv_format)
+    phase = "before_attention" if before_attn else "after_attention"
     if before_attn:
         for i in range(len(a2a_inputs) + 2):
             if 0 < i < len(a2a_inputs) + 1:
-                a2a_outputs[i - 1] = torch.empty_like(a2a_inputs[i - 1])
-                a2a_reqs[i - 1] = torch.distributed.all_to_all_single(
-                    a2a_outputs[i - 1], a2a_inputs[i - 1], group=cp_group, async_op=True
-                )
+                name = a2a_input_names[i - 1]
+                with get_nvtx_range_context(f"transformer_engine.cp.a2a.{phase}.{name}.launch"):
+                    a2a_outputs[i - 1] = torch.empty_like(a2a_inputs[i - 1])
+                    a2a_reqs[i - 1] = torch.distributed.all_to_all_single(
+                        a2a_outputs[i - 1], a2a_inputs[i - 1], group=cp_group, async_op=True
+                    )
             if i > 1:
-                with torch.cuda.stream(cp_stream):
+                name = a2a_input_names[i - 2]
+                with torch.cuda.stream(cp_stream), get_nvtx_range_context(
+                    f"transformer_engine.cp.a2a.{phase}.{name}.wait_and_reorder"
+                ):
                     a2a_reqs[i - 2].wait()
                     x = a2a_outputs[i - 2]
                     if qkv_format in ["bshd", "sbhd", "bhsd"]:
@@ -583,52 +596,61 @@ def flash_attn_a2a_communicate(
                         )
 
             if i < len(a2a_inputs):
-                x = a2a_inputs[i]
-                # [b, s, h, d] -> [b, s, cp, h//cp, d]
-                # [s, b, h, d] -> [s, b, cp, h//cp, d]
-                # [b, h, s, d] -> [b, cp, h//cp, s, d]
-                # [t, h, d] -> [t, cp, h//cp, d]
-                x = x.view(
-                    *x.shape[:head_dim],
-                    cp_size,
-                    x.shape[head_dim] // cp_size,
-                    *x.shape[head_dim + 1 :],
-                )
-                # [b, s, cp, h//cp, d] -> [cp, b, s, h//cp, d]
-                # [s, b, cp, h//cp, d] -> [cp, s, b, h//cp, d]
-                # [b, cp, h//cp, s, d] -> [cp, b, h//cp, s, d]
-                # [t, cp, h//cp, d] -> [cp, t, h//cp, d]
-                a2a_inputs[i] = x.movedim(head_dim, 0).contiguous()
+                name = a2a_input_names[i]
+                with get_nvtx_range_context(f"transformer_engine.cp.a2a.{phase}.{name}.pack"):
+                    x = a2a_inputs[i]
+                    # [b, s, h, d] -> [b, s, cp, h//cp, d]
+                    # [s, b, h, d] -> [s, b, cp, h//cp, d]
+                    # [b, h, s, d] -> [b, cp, h//cp, s, d]
+                    # [t, h, d] -> [t, cp, h//cp, d]
+                    x = x.view(
+                        *x.shape[:head_dim],
+                        cp_size,
+                        x.shape[head_dim] // cp_size,
+                        *x.shape[head_dim + 1 :],
+                    )
+                    # [b, s, cp, h//cp, d] -> [cp, b, s, h//cp, d]
+                    # [s, b, cp, h//cp, d] -> [cp, s, b, h//cp, d]
+                    # [b, cp, h//cp, s, d] -> [cp, b, h//cp, s, d]
+                    # [t, cp, h//cp, d] -> [cp, t, h//cp, d]
+                    a2a_inputs[i] = x.movedim(head_dim, 0).contiguous()
     else:
         for i in range(len(a2a_inputs) + 2):
             if 0 < i < len(a2a_inputs) + 1:
-                a2a_outputs[i - 1] = torch.empty_like(a2a_inputs[i - 1])
-                a2a_reqs[i - 1] = torch.distributed.all_to_all_single(
-                    a2a_outputs[i - 1], a2a_inputs[i - 1], group=cp_group, async_op=True
-                )
+                name = a2a_input_names[i - 1]
+                with get_nvtx_range_context(f"transformer_engine.cp.a2a.{phase}.{name}.launch"):
+                    a2a_outputs[i - 1] = torch.empty_like(a2a_inputs[i - 1])
+                    a2a_reqs[i - 1] = torch.distributed.all_to_all_single(
+                        a2a_outputs[i - 1], a2a_inputs[i - 1], group=cp_group, async_op=True
+                    )
             if i < len(a2a_inputs):
-                x = a2a_inputs[i]
-                if qkv_format in ["bshd", "sbhd", "bhsd"]:
-                    # [b, cp*s, h//cp, d] -> [b, cp*2, s//2, h//cp, d]
-                    # [cp*s, b, h//cp, d] -> [cp*2, s//2, b, h//cp, d]
-                    # [b, h//cp, cp*s, d] -> [b, h//cp, cp*2, s//2, d]
-                    x = x.view(*x.shape[:seq_dim], cp_size * 2, -1, *x.shape[(seq_dim + 1) :])
-                    # reorder the sequence chunks
-                    a2a_inputs[i] = reorder_seq_chunks_for_a2a_after_attn(
-                        x, chunk_ids_for_a2a, seq_dim, cp_size
-                    )
-                else:  # qkv_format == "thd"
-                    cu_seqlens_padded = (
-                        cu_seqlens_q_padded
-                        if a2a_input_names[i] in ["q", "out", "dout", "dq"]
-                        else cu_seqlens_kv_padded
-                    )
-                    # reorder the sequence chunks
-                    x = thd_sequence_order_to_cp_rank_order(x, cu_seqlens_padded, cp_size)
-                    # [cp*t, h//cp, d] -> [cp, t, h//cp, d]
-                    a2a_inputs[i] = x.view(cp_size, -1, *x.shape[-2:])
+                name = a2a_input_names[i]
+                with get_nvtx_range_context(f"transformer_engine.cp.a2a.{phase}.{name}.pack"):
+                    x = a2a_inputs[i]
+                    if qkv_format in ["bshd", "sbhd", "bhsd"]:
+                        # [b, cp*s, h//cp, d] -> [b, cp*2, s//2, h//cp, d]
+                        # [cp*s, b, h//cp, d] -> [cp*2, s//2, b, h//cp, d]
+                        # [b, h//cp, cp*s, d] -> [b, h//cp, cp*2, s//2, d]
+                        x = x.view(*x.shape[:seq_dim], cp_size * 2, -1, *x.shape[(seq_dim + 1) :])
+                        # reorder the sequence chunks
+                        a2a_inputs[i] = reorder_seq_chunks_for_a2a_after_attn(
+                            x, chunk_ids_for_a2a, seq_dim, cp_size
+                        )
+                    else:  # qkv_format == "thd"
+                        cu_seqlens_padded = (
+                            cu_seqlens_q_padded
+                            if a2a_input_names[i] in ["q", "out", "dout", "dq"]
+                            else cu_seqlens_kv_padded
+                        )
+                        # reorder the sequence chunks
+                        x = thd_sequence_order_to_cp_rank_order(x, cu_seqlens_padded, cp_size)
+                        # [cp*t, h//cp, d] -> [cp, t, h//cp, d]
+                        a2a_inputs[i] = x.view(cp_size, -1, *x.shape[-2:])
             if i > 1:
-                with torch.cuda.stream(cp_stream):
+                name = a2a_input_names[i - 2]
+                with torch.cuda.stream(cp_stream), get_nvtx_range_context(
+                    f"transformer_engine.cp.a2a.{phase}.{name}.wait_and_reorder"
+                ):
                     a2a_reqs[i - 2].wait()
                     x = a2a_outputs[i - 2]
                     # [cp, 2, b, s//2, h//cp, d] -> [2, b, s//2, cp, h//cp, d]
@@ -1077,7 +1099,9 @@ def cp_p2p_fwd_fused_attn(
         fp8_meta_kwargs["s_quantizer"] = S_quantizer_per_step
         fp8_meta_kwargs["o_quantizer"] = O_quantizer_per_step
 
-    out_per_step, aux_ctx_tensors, *max_logit = fused_attn_fwd(
+    out_per_step, aux_ctx_tensors, *max_logit = _nvtx_call(
+        f"transformer_engine.cp.p2p.fwd.attention.{section}",
+        fused_attn_fwd,
         is_training,
         max_seqlen_q_,
         max_seqlen_kv_,
@@ -1171,7 +1195,9 @@ def cp_p2p_fwd_flash_attn(
             cu_seqlens_q_ = cu_seqlens_q_padded // 2
 
     if use_flash_attn_4:
-        fa_outputs = flash_attn_fwd(
+        fa_outputs = _nvtx_call(
+            f"transformer_engine.cp.p2p.fwd.attention.{section}",
+            flash_attn_fwd,
             q_part,
             k_part,
             v_part,
@@ -1202,7 +1228,9 @@ def cp_p2p_fwd_flash_attn(
             seqused_q=seqused_q,
             seqused_k=seqused_k,
         )
-        fa_outputs = flash_attn_fwd(
+        fa_outputs = _nvtx_call(
+            f"transformer_engine.cp.p2p.fwd.attention.{section}",
+            flash_attn_fwd,
             q_part,
             k_part,
             v_part,
@@ -1399,7 +1427,9 @@ def cp_p2p_bwd_fused_attn(
         fp8_meta_kwargs["dp_quantizer"] = dP_quantizer_per_step
         fp8_meta_kwargs["dqkv_quantizer"] = dQKV_quantizer_per_step
 
-    dq, dk, dv, dbias, *_ = fused_attn_bwd(
+    dq, dk, dv, dbias, *_ = _nvtx_call(
+        f"transformer_engine.cp.p2p.bwd.attention.{section}",
+        fused_attn_bwd,
         max_seqlen_q_,
         max_seqlen_kv_,
         cu_seqlens_q_per_step[cp_size - step - 1],
@@ -1548,7 +1578,9 @@ def cp_p2p_bwd_flash_attn(
     else:
         fa_backward_kwargs["causal"] = causal_
     if use_flash_attn_4:
-        dq, dk, dv = flash_attn_bwd(
+        dq, dk, dv = _nvtx_call(
+            f"transformer_engine.cp.p2p.bwd.attention.{section}",
+            flash_attn_bwd,
             q_part,
             k_part,
             v_part,
@@ -1558,7 +1590,9 @@ def cp_p2p_bwd_flash_attn(
             **fa_backward_kwargs,
         )
     else:
-        flash_attn_bwd(
+        _nvtx_call(
+            f"transformer_engine.cp.p2p.bwd.attention.{section}",
+            flash_attn_bwd,
             dout_part,
             q_part,
             k_part,
@@ -1924,22 +1958,32 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         second_half_lse_seqlen = None
         for i in range(cp_size + 1):
             if i < cp_size:
-                with torch.cuda.stream(flash_attn_streams[i % 2]):
+                with torch.cuda.stream(flash_attn_streams[i % 2]), get_nvtx_range_context(
+                    f"transformer_engine.cp.p2p.fwd.step_{i}.compute"
+                ):
                     # wait until KV is received
-                    for req in send_recv_reqs[(i + 1) % 2]:
-                        req.wait()
+                    with get_nvtx_range_context(
+                        f"transformer_engine.cp.p2p.fwd.step_{i}.recv_wait"
+                    ):
+                        for req in send_recv_reqs[(i + 1) % 2]:
+                            req.wait()
 
                     if i < (cp_size - 1):
-                        p2p_comm_buffers[(i + 1) % 2] = torch.empty_like(p2p_comm_buffers[i % 2])
-                        send_recv_reqs[i % 2] = flash_attn_p2p_communicate(
-                            rank,
-                            p2p_comm_buffers[i % 2],
-                            send_dst,
-                            p2p_comm_buffers[(i + 1) % 2],
-                            recv_src,
-                            cp_group,
-                            batch_p2p_comm,
-                        )
+                        with get_nvtx_range_context(
+                            f"transformer_engine.cp.p2p.fwd.step_{i}.send_recv_launch"
+                        ):
+                            p2p_comm_buffers[(i + 1) % 2] = torch.empty_like(
+                                p2p_comm_buffers[i % 2]
+                            )
+                            send_recv_reqs[i % 2] = flash_attn_p2p_communicate(
+                                rank,
+                                p2p_comm_buffers[i % 2],
+                                send_dst,
+                                p2p_comm_buffers[(i + 1) % 2],
+                                recv_src,
+                                cp_group,
+                                batch_p2p_comm,
+                            )
 
                     kv_inputs[i % 2] = p2p_comm_buffers[i % 2]
                     k_part = kv_inputs[i % 2][:k_numel].view(*k_shape)
@@ -2144,7 +2188,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 if i > 1:
                     flash_attn_streams[(i - 1) % 2].wait_event(fwd_results_correction_done)
 
-                with torch.cuda.stream(flash_attn_streams[(i - 1) % 2]):
+                with torch.cuda.stream(flash_attn_streams[(i - 1) % 2]), get_nvtx_range_context(
+                    f"transformer_engine.cp.p2p.fwd.step_{i - 1}.result_merge"
+                ):
                     if use_fused_attention:
                         # [b, h, sq, 1] -> [b, h, sq] or [t, h, 1] -> [t, h]
                         softmax_lse_per_step[(i - 1) % 2].squeeze_(-1)
@@ -2246,9 +2292,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
         torch.cuda.current_stream().wait_stream(flash_attn_streams[1])
         if return_max_logit:
-            torch.distributed.all_reduce(
-                max_logit, op=torch.distributed.ReduceOp.MAX, group=cp_group
-            )
+            with get_nvtx_range_context("transformer_engine.cp.p2p.fwd.max_logit_all_reduce"):
+                torch.distributed.all_reduce(
+                    max_logit, op=torch.distributed.ReduceOp.MAX, group=cp_group
+                )
 
         # Save the rank-local output for backward before restoring the A2A layout.
         out = out.view(post_a2a_o_shape)
@@ -2696,14 +2743,18 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         send_recv_reqs = []
         for i in range(cp_size):
             # wait until KV is received
-            for req in send_recv_reqs:
-                req.wait()
+            with get_nvtx_range_context(f"transformer_engine.cp.p2p.bwd.step_{i}.recv_wait"):
+                for req in send_recv_reqs:
+                    req.wait()
 
             send_tensor = p2p_comm_buffers[i % 2]
             recv_tensor = p2p_comm_buffers[(i + 1) % 2]
+            exchange_label = f"transformer_engine.cp.p2p.bwd.step_{i}.gradient_exchange_launch"
             if ctx.fp8:
                 if i < cp_size - 1:
-                    send_recv_reqs = flash_attn_p2p_communicate(
+                    send_recv_reqs = _nvtx_call(
+                        exchange_label,
+                        flash_attn_p2p_communicate,
                         rank,
                         send_tensor[0],
                         send_dst,
@@ -2713,7 +2764,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         batch_p2p_comm,
                     )
                 else:
-                    dkv_a2a_req = torch.distributed.all_to_all_single(
+                    dkv_a2a_req = _nvtx_call(
+                        exchange_label,
+                        torch.distributed.all_to_all_single,
                         dkv_send_buffer,
                         dkv_recv_buffer,
                         group=ctx.cp_group,
@@ -2727,8 +2780,16 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 if i == (cp_size - 1):
                     send_tensor = send_tensor[1]
                     recv_tensor = recv_tensor[1]
-                send_recv_reqs = flash_attn_p2p_communicate(
-                    rank, send_tensor, send_dst, recv_tensor, recv_src, ctx.cp_group, batch_p2p_comm
+                send_recv_reqs = _nvtx_call(
+                    exchange_label,
+                    flash_attn_p2p_communicate,
+                    rank,
+                    send_tensor,
+                    send_dst,
+                    recv_tensor,
+                    recv_src,
+                    ctx.cp_group,
+                    batch_p2p_comm,
                 )
 
             kv = p2p_comm_buffers[i % 2][0]
@@ -2953,8 +3014,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     attn_dbias_[..., 1, :, (2 * cp_size - idx - 1), :].copy_(dbias_[..., 1, :])
 
             # wait until dKV is received
-            for req in send_recv_reqs:
-                req.wait()
+            with get_nvtx_range_context(f"transformer_engine.cp.p2p.bwd.step_{i}.dkv_recv_wait"):
+                for req in send_recv_reqs:
+                    req.wait()
 
             # dkv correction
             if ctx.fp8 and ctx.fp8_recipe.delayed():
@@ -3461,24 +3523,50 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
 
         # AllGather K/V across CP ranks
         # gather along s or t: [s, b, h, d] -> [cp, s, b, h, d] or [t, h, d] -> [cp*t, h, d]
-        k_ag, _ = gather_along_first_dim(k, cp_group)
-        v_ag, _ = gather_along_first_dim(v, cp_group)
+        k_ag, _ = _nvtx_call(
+            "transformer_engine.cp.all_gather.fwd.k_gather", gather_along_first_dim, k, cp_group
+        )
+        v_ag, _ = _nvtx_call(
+            "transformer_engine.cp.all_gather.fwd.v_gather", gather_along_first_dim, v, cp_group
+        )
 
         if qkv_format == "thd":
             # [cp*t, h, d] -> reorder to sequence order -> [t_full, h, d]
-            k_ag = restore_thd_gathered_kv(
-                k_ag, cu_seqlens_kv_padded, cp_size, load_balancing_strategy
+            k_ag = _nvtx_call(
+                "transformer_engine.cp.all_gather.fwd.k_reorder",
+                restore_thd_gathered_kv,
+                k_ag,
+                cu_seqlens_kv_padded,
+                cp_size,
+                load_balancing_strategy,
             )
-            v_ag = restore_thd_gathered_kv(
-                v_ag, cu_seqlens_kv_padded, cp_size, load_balancing_strategy
+            v_ag = _nvtx_call(
+                "transformer_engine.cp.all_gather.fwd.v_reorder",
+                restore_thd_gathered_kv,
+                v_ag,
+                cu_seqlens_kv_padded,
+                cp_size,
+                load_balancing_strategy,
             )
         else:
             # [cp, s, b, h, d] -> [cp*2, s//2, b, h, d]
             k_ag = k_ag.view(2 * cp_size, k.shape[0] // 2, *k.shape[1:])
             v_ag = v_ag.view(2 * cp_size, v.shape[0] // 2, *v.shape[1:])
             chunk_ids_for_kv_ag = get_seq_chunk_ids_for_reordering_before_attn(cp_size, k.device)
-            k_ag = torch.index_select(k_ag, dim=0, index=chunk_ids_for_kv_ag)
-            v_ag = torch.index_select(v_ag, dim=0, index=chunk_ids_for_kv_ag)
+            k_ag = _nvtx_call(
+                "transformer_engine.cp.all_gather.fwd.k_reorder",
+                torch.index_select,
+                k_ag,
+                dim=0,
+                index=chunk_ids_for_kv_ag,
+            )
+            v_ag = _nvtx_call(
+                "transformer_engine.cp.all_gather.fwd.v_reorder",
+                torch.index_select,
+                v_ag,
+                dim=0,
+                index=chunk_ids_for_kv_ag,
+            )
             # [cp*2, s//2, b, h, d] -> [cp*s, b, h, d]
             k_ag = k_ag.view(-1, *k.shape[1:])
             v_ag = v_ag.view(-1, *v.shape[1:])
@@ -3623,7 +3711,9 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                 # do not overlap. FusedAttention keeps the existing per-step overlap.
                 if i > 0 and (use_flash_attn_3 or use_flash_attn_4):
                     flash_attn_streams[i].wait_stream(flash_attn_streams[i - 1])
-                with torch.cuda.stream(flash_attn_streams[i]):
+                with torch.cuda.stream(flash_attn_streams[i]), get_nvtx_range_context(
+                    f"transformer_engine.cp.all_gather.fwd.step_{i}.compute"
+                ):
                     new_qkv_layout = qkv_layout
                     qkv_scale_inv_format = None
                     if qkv_format in ["bshd", "sbhd"]:
@@ -3708,7 +3798,9 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             out_per_step[i],
                             aux_ctx_tensors,
                             *max_logit_,
-                        ) = fused_attn_fwd(
+                        ) = _nvtx_call(
+                            f"transformer_engine.cp.all_gather.fwd.step_{i}.attention",
+                            fused_attn_fwd,
                             is_training,
                             max_seqlen_q,
                             max_seqlen_kv_,
@@ -3769,7 +3861,9 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             fa_forward_kwargs["window_size_left"] = window_size_per_step[i][0]
                             fa_forward_kwargs["window_size_right"] = window_size_per_step[i][1]
                         if use_flash_attn_4:
-                            fa_outputs = flash_attn_fwd(
+                            fa_outputs = _nvtx_call(
+                                f"transformer_engine.cp.all_gather.fwd.step_{i}.attention",
+                                flash_attn_fwd,
                                 q_part,
                                 k_part,
                                 v_part,
@@ -3800,7 +3894,9 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                                 seqused_q=seqused_q,
                                 seqused_k=seqused_k,
                             )
-                            fa_outputs = flash_attn_fwd(
+                            fa_outputs = _nvtx_call(
+                                f"transformer_engine.cp.all_gather.fwd.step_{i}.attention",
+                                flash_attn_fwd,
                                 q_part,
                                 k_part,
                                 v_part,
@@ -3828,7 +3924,9 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             if return_max_logit and i == 0:
                 max_logit = torch.clone(max_logit_per_step[0])
             if i > 0:
-                with torch.cuda.stream(flash_attn_streams[i - 1]):
+                with torch.cuda.stream(flash_attn_streams[i - 1]), get_nvtx_range_context(
+                    f"transformer_engine.cp.all_gather.fwd.step_{i - 1}.result_merge"
+                ):
                     if o_format == "bshd":
                         out_f16[:, i - 1].copy_(out_per_step[i - 1])
                     elif o_format == "sbhd":
@@ -3856,9 +3954,12 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
 
         # all reduce max_logit across ranks
         if return_max_logit:
-            torch.distributed.all_reduce(
-                max_logit, op=torch.distributed.ReduceOp.MAX, group=cp_group
-            )
+            with get_nvtx_range_context(
+                "transformer_engine.cp.all_gather.fwd.max_logit_all_reduce"
+            ):
+                torch.distributed.all_reduce(
+                    max_logit, op=torch.distributed.ReduceOp.MAX, group=cp_group
+                )
 
         if qkv_format == "thd":
             out_f16 = out
@@ -4107,18 +4208,38 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         dkv_update_done = torch.cuda.Event()
 
         # gather k and v along s or t: [s, b, h, d] -> [cp, s, b, h, d] or [t, h, d] -> [cp*t, h, d]
-        k_ag, _ = gather_along_first_dim(k, ctx.cp_group)
-        v_ag, _ = gather_along_first_dim(v, ctx.cp_group)
+        k_ag, _ = _nvtx_call(
+            "transformer_engine.cp.all_gather.bwd.k_gather",
+            gather_along_first_dim,
+            k,
+            ctx.cp_group,
+        )
+        v_ag, _ = _nvtx_call(
+            "transformer_engine.cp.all_gather.bwd.v_gather",
+            gather_along_first_dim,
+            v,
+            ctx.cp_group,
+        )
 
         if ctx.qkv_format == "thd":
             cu_seqlens_kv_padded = ctx.cu_seqlens_kv_padded
             thd_cu_seqlens_q_per_step = ctx.thd_cu_seqlens_q_per_step
             # [cp*t, h, d] -> reorder to sequence order
-            k_ag = restore_thd_gathered_kv(
-                k_ag, cu_seqlens_kv_padded, cp_size, ctx.load_balancing_strategy
+            k_ag = _nvtx_call(
+                "transformer_engine.cp.all_gather.bwd.k_reorder",
+                restore_thd_gathered_kv,
+                k_ag,
+                cu_seqlens_kv_padded,
+                cp_size,
+                ctx.load_balancing_strategy,
             )
-            v_ag = restore_thd_gathered_kv(
-                v_ag, cu_seqlens_kv_padded, cp_size, ctx.load_balancing_strategy
+            v_ag = _nvtx_call(
+                "transformer_engine.cp.all_gather.bwd.v_reorder",
+                restore_thd_gathered_kv,
+                v_ag,
+                cu_seqlens_kv_padded,
+                cp_size,
+                ctx.load_balancing_strategy,
             )
 
             thd_cu_seqlens_q_padded_per_step = ctx.thd_cu_seqlens_q_padded_per_step
@@ -4128,8 +4249,20 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             v_ag = v_ag.view(2 * cp_size, v.shape[0] // 2, *v.shape[1:])
             # select appropriate chunks for each rank
             chunk_ids_for_kv_ag = get_seq_chunk_ids_for_reordering_before_attn(cp_size, k.device)
-            k_ag = torch.index_select(k_ag, dim=0, index=chunk_ids_for_kv_ag)
-            v_ag = torch.index_select(v_ag, dim=0, index=chunk_ids_for_kv_ag)
+            k_ag = _nvtx_call(
+                "transformer_engine.cp.all_gather.bwd.k_reorder",
+                torch.index_select,
+                k_ag,
+                dim=0,
+                index=chunk_ids_for_kv_ag,
+            )
+            v_ag = _nvtx_call(
+                "transformer_engine.cp.all_gather.bwd.v_reorder",
+                torch.index_select,
+                v_ag,
+                dim=0,
+                index=chunk_ids_for_kv_ag,
+            )
             # flatten: [cp*2, s//2, b, h, d] -> [cp*s, b, h, d]
             k_ag = k_ag.view(-1, *k.shape[1:])
             v_ag = v_ag.view(-1, *v.shape[1:])
@@ -4194,7 +4327,9 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                 # per-step overlap.
                 if i > 0 and (ctx.use_flash_attn_3 or ctx.use_flash_attn_4):
                     flash_attn_streams[i].wait_stream(flash_attn_streams[i - 1])
-                with torch.cuda.stream(flash_attn_streams[i]):
+                with torch.cuda.stream(flash_attn_streams[i]), get_nvtx_range_context(
+                    f"transformer_engine.cp.all_gather.bwd.step_{i}.compute"
+                ):
                     if ctx.qkv_format == "thd":
                         # THD passes full Q/dout; per-step cu_seqlens select chunks.
                         q_part = q
@@ -4295,7 +4430,9 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                                     [(dout_part, ctx.dO_quantizer)],
                                     do_format,
                                 )
-                        dq_per_step[i], dk_per_step[i], dv_per_step[i], *_ = fused_attn_bwd(
+                        dq_per_step[i], dk_per_step[i], dv_per_step[i], *_ = _nvtx_call(
+                            f"transformer_engine.cp.all_gather.bwd.step_{i}.attention",
+                            fused_attn_bwd,
                             ctx.max_seqlen_q,
                             max_seqlen_kv,
                             cu_seqlens_q_,
@@ -4419,7 +4556,9 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                                 dq_per_step[i],
                                 dk_per_step[i],
                                 dv_per_step[i],
-                            ) = flash_attn_bwd(
+                            ) = _nvtx_call(
+                                f"transformer_engine.cp.all_gather.bwd.step_{i}.attention",
+                                flash_attn_bwd,
                                 q_part,
                                 k_part,
                                 v_part,
@@ -4429,7 +4568,9 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                                 **fa_backward_kwargs,
                             )
                         else:
-                            flash_attn_bwd(
+                            _nvtx_call(
+                                f"transformer_engine.cp.all_gather.bwd.step_{i}.attention",
+                                flash_attn_bwd,
                                 dout_part,
                                 q_part,
                                 k_part,
@@ -4442,7 +4583,9 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
 
             if i > 0:
                 # dq/dk/dv, dq_per_step/dk_per_step/dv_per_step: ctx.fwd_nominal_dtype
-                with torch.cuda.stream(flash_attn_streams[i - 1]):
+                with torch.cuda.stream(flash_attn_streams[i - 1]), get_nvtx_range_context(
+                    f"transformer_engine.cp.all_gather.bwd.step_{i - 1}.gradient_merge"
+                ):
                     if ctx.qkv_format == "thd":
                         # dQ: copy every sequence's valid token range from this split's dQ.
                         tex.thd_copy_valid_tokens_from_per_split_to_rank_local(
@@ -4492,29 +4635,62 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         if ctx.qkv_format == "thd":
             # Reorder dK/dV from sequence order back to dual-chunk CP rank order,
             # then reduce-scatter across CP ranks.
-            dk = unrestore_thd_gathered_kv(
-                dk, cu_seqlens_kv_padded, cp_size, ctx.load_balancing_strategy
+            dk = _nvtx_call(
+                "transformer_engine.cp.all_gather.bwd.dk_reorder",
+                unrestore_thd_gathered_kv,
+                dk,
+                cu_seqlens_kv_padded,
+                cp_size,
+                ctx.load_balancing_strategy,
             )
-            dv = unrestore_thd_gathered_kv(
-                dv, cu_seqlens_kv_padded, cp_size, ctx.load_balancing_strategy
+            dv = _nvtx_call(
+                "transformer_engine.cp.all_gather.bwd.dv_reorder",
+                unrestore_thd_gathered_kv,
+                dv,
+                cu_seqlens_kv_padded,
+                cp_size,
+                ctx.load_balancing_strategy,
             )
-            dk, _ = reduce_scatter_along_first_dim(dk, ctx.cp_group)
-            dv, _ = reduce_scatter_along_first_dim(dv, ctx.cp_group)
+            dk, _ = _nvtx_call(
+                "transformer_engine.cp.all_gather.bwd.dk_reduce_scatter",
+                reduce_scatter_along_first_dim,
+                dk,
+                ctx.cp_group,
+            )
+            dv, _ = _nvtx_call(
+                "transformer_engine.cp.all_gather.bwd.dv_reduce_scatter",
+                reduce_scatter_along_first_dim,
+                dv,
+                ctx.cp_group,
+            )
             # dQ is already [t_rank, h, d], no reshape needed
         else:
             # split s:[cp*s, b, h, d] -> [cp*2, s//2, b, h, d]
-            dk = dk.view(2 * cp_size, -1, *dk.shape[-3:])
-            dv = dv.view(2 * cp_size, -1, *dv.shape[-3:])
-            # put back together the right chunks for each rank
-            chunk_ids_for_kv_ag = get_seq_chunk_ids_for_reordering_after_attn(cp_size, dk.device)
-            dk = torch.index_select(dk, dim=0, index=chunk_ids_for_kv_ag)
-            dv = torch.index_select(dv, dim=0, index=chunk_ids_for_kv_ag)
-            # flatten: [cp*2, s//2, b, h, d] -> [cp*s, b, h, d]
-            dk = dk.view(-1, *dk.shape[-3:])
-            dv = dv.view(-1, *dv.shape[-3:])
+            with get_nvtx_range_context("transformer_engine.cp.all_gather.bwd.dkv_reorder"):
+                dk = dk.view(2 * cp_size, -1, *dk.shape[-3:])
+                dv = dv.view(2 * cp_size, -1, *dv.shape[-3:])
+                # put back together the right chunks for each rank
+                chunk_ids_for_kv_ag = get_seq_chunk_ids_for_reordering_after_attn(
+                    cp_size, dk.device
+                )
+                dk = torch.index_select(dk, dim=0, index=chunk_ids_for_kv_ag)
+                dv = torch.index_select(dv, dim=0, index=chunk_ids_for_kv_ag)
+                # flatten: [cp*2, s//2, b, h, d] -> [cp*s, b, h, d]
+                dk = dk.view(-1, *dk.shape[-3:])
+                dv = dv.view(-1, *dv.shape[-3:])
             # reduce scatter: [cp*s, b, h, d] -> [s, b, h, d]
-            dk, _ = reduce_scatter_along_first_dim(dk, ctx.cp_group)
-            dv, _ = reduce_scatter_along_first_dim(dv, ctx.cp_group)
+            dk, _ = _nvtx_call(
+                "transformer_engine.cp.all_gather.bwd.dk_reduce_scatter",
+                reduce_scatter_along_first_dim,
+                dk,
+                ctx.cp_group,
+            )
+            dv, _ = _nvtx_call(
+                "transformer_engine.cp.all_gather.bwd.dv_reduce_scatter",
+                reduce_scatter_along_first_dim,
+                dv,
+                ctx.cp_group,
+            )
 
             # reshape to original format:
             # dq: [b, 2, s//2, h, d] or [2, s//2, b, h, d] -> [b, s, h, d] or [s, b, h, d]
@@ -4746,26 +4922,28 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         # [s//cp, b, h, d] -> [s, b, h//cp, d]
         # [t//cp, h, d] -> [t, h//cp, d]
         chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_before_attn(cp_size, q.device)
-        q, k, v = flash_attn_a2a_communicate(
-            [q, k, v],
-            chunk_ids_for_a2a,
-            seq_dim_qkv,
-            cp_size,
-            cp_group,
-            cp_stream,
-            before_attn=True,
-            qkv_format=qkv_format,
-            cu_seqlens_q_padded=cu_seqlens_q_padded,
-            cu_seqlens_kv_padded=cu_seqlens_kv_padded,
-            a2a_input_names=["q", "k", "v"],
-        )
+        with get_nvtx_range_context("transformer_engine.cp.a2a.fwd.qkv_exchange"):
+            q, k, v = flash_attn_a2a_communicate(
+                [q, k, v],
+                chunk_ids_for_a2a,
+                seq_dim_qkv,
+                cp_size,
+                cp_group,
+                cp_stream,
+                before_attn=True,
+                qkv_format=qkv_format,
+                cu_seqlens_q_padded=cu_seqlens_q_padded,
+                cu_seqlens_kv_padded=cu_seqlens_kv_padded,
+                a2a_input_names=["q", "k", "v"],
+            )
 
         # softmax_offset: split h
         # [1, h, 1, 1] -> [1, h//cp, 1, 1]
         if softmax_type != "vanilla":
-            softmax_offset = flash_attn_a2a_communicate_softmax_offset(
-                softmax_offset, 1, cp_size, cp_group, cp_stream, True
-            )
+            with get_nvtx_range_context("transformer_engine.cp.a2a.fwd.softmax_offset_exchange"):
+                softmax_offset = flash_attn_a2a_communicate_softmax_offset(
+                    softmax_offset, 1, cp_size, cp_group, cp_stream, True
+                )
 
         # _part: inputs to attention kernel and saved for backward
         # note: they have post a2a shapes
@@ -4807,7 +4985,9 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                         Float8Tensor.make_like(x, data=y, dtype=fwd_nominal_dtype)
                         for x, y in zip([q_fp8, k_fp8, v_fp8], [q_part, k_part, v_part])
                     ]
-            out_, aux_ctx_tensors, *max_logit = fused_attn_fwd(
+            out_, aux_ctx_tensors, *max_logit = _nvtx_call(
+                "transformer_engine.cp.a2a.fwd.attention",
+                fused_attn_fwd,
                 is_training,
                 max_seqlen_q,
                 max_seqlen_kv,
@@ -4858,7 +5038,9 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 fa_cu_seqlens_q = cu_seqlens_q_padded
                 fa_cu_seqlens_kv = cu_seqlens_kv_padded
             if use_flash_attn_4:
-                fa_outputs = flash_attn_fwd(
+                fa_outputs = _nvtx_call(
+                    "transformer_engine.cp.a2a.fwd.attention",
+                    flash_attn_fwd,
                     q_part,
                     k_part,
                     v_part,
@@ -4889,7 +5071,9 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                     seqused_q=seqused_q,
                     seqused_k=seqused_k,
                 )
-                fa_outputs = flash_attn_fwd(
+                fa_outputs = _nvtx_call(
+                    "transformer_engine.cp.a2a.fwd.attention",
+                    flash_attn_fwd,
                     q_part,
                     k_part,
                     v_part,
@@ -4920,18 +5104,19 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         if isinstance(out_, Float8TensorStorage):
             out_ = out_._data
         chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_after_attn(cp_size, out_.device)
-        out_ = flash_attn_a2a_communicate(
-            out_,
-            chunk_ids_for_a2a,
-            seq_dim_o,
-            cp_size,
-            cp_group,
-            cp_stream,
-            before_attn=False,
-            qkv_format=o_format,
-            cu_seqlens_q_padded=cu_seqlens_q_padded,
-            a2a_input_names=["out"],
-        )
+        with get_nvtx_range_context("transformer_engine.cp.a2a.fwd.output_exchange"):
+            out_ = flash_attn_a2a_communicate(
+                out_,
+                chunk_ids_for_a2a,
+                seq_dim_o,
+                cp_size,
+                cp_group,
+                cp_stream,
+                before_attn=False,
+                qkv_format=o_format,
+                cu_seqlens_q_padded=cu_seqlens_q_padded,
+                a2a_input_names=["out"],
+            )
         # [b*s//cp, h, d] -> [b, s//cp, h, d]
         # [s//cp*b, h, d] -> [s//cp, b, h, d]
         # [t//cp, h, d] -> [t//cp, h, d]
@@ -4957,9 +5142,10 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
 
         # all gather max logit
         if return_max_logit:
-            max_logit = flash_attn_a2a_communicate_softmax_offset(
-                *max_logit, 0, cp_size, cp_group, cp_stream, False
-            )
+            with get_nvtx_range_context("transformer_engine.cp.a2a.fwd.max_logit_exchange"):
+                max_logit = flash_attn_a2a_communicate_softmax_offset(
+                    *max_logit, 0, cp_size, cp_group, cp_stream, False
+                )
 
         ctx.qkv_layout = qkv_layout
         ctx.o_format = o_format
@@ -5114,18 +5300,19 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         # [s//cp, b, h, d] -> [s, b, h//cp, d]
         # [t//cp, h, d] -> [t, h//cp, d]
         chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_before_attn(cp_size, dout.device)
-        dout = flash_attn_a2a_communicate(
-            dout,
-            chunk_ids_for_a2a,
-            seq_dim_do,
-            cp_size,
-            ctx.cp_group,
-            ctx.cp_stream,
-            before_attn=True,
-            qkv_format=ctx.o_format,
-            cu_seqlens_q_padded=cu_seqlens_q_padded,
-            a2a_input_names=["dout"],
-        )
+        with get_nvtx_range_context("transformer_engine.cp.a2a.bwd.dout_exchange"):
+            dout = flash_attn_a2a_communicate(
+                dout,
+                chunk_ids_for_a2a,
+                seq_dim_do,
+                cp_size,
+                ctx.cp_group,
+                ctx.cp_stream,
+                before_attn=True,
+                qkv_format=ctx.o_format,
+                cu_seqlens_q_padded=cu_seqlens_q_padded,
+                a2a_input_names=["dout"],
+            )
 
         flash_attn_bwd = None
         if not ctx.use_fused_attention:
@@ -5195,7 +5382,9 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                         [(dout, ctx.dO_quantizer)],
                         do_format,
                     )
-            dq, dk, dv, *rest = fused_attn_bwd(
+            dq, dk, dv, *rest = _nvtx_call(
+                "transformer_engine.cp.a2a.bwd.attention",
+                fused_attn_bwd,
                 ctx.max_seqlen_q,
                 ctx.max_seqlen_kv,
                 cu_seqlens_q,
@@ -5290,7 +5479,9 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 fa_backward_kwargs["is_causal"] = causal
 
             if ctx.use_flash_attn_4:
-                dq, dk, dv = flash_attn_bwd(
+                dq, dk, dv = _nvtx_call(
+                    "transformer_engine.cp.a2a.bwd.attention",
+                    flash_attn_bwd,
                     q,
                     k,
                     v,
@@ -5300,7 +5491,9 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                     **fa_backward_kwargs,
                 )
             else:
-                flash_attn_bwd(
+                _nvtx_call(
+                    "transformer_engine.cp.a2a.bwd.attention",
+                    flash_attn_bwd,
                     dout,
                     q,
                     k,
@@ -5324,19 +5517,20 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         # [s//cp, b, h, d] -> [s, b, h//cp, d]
         # [t//cp, h, d] -> [t, h//cp, d]
         chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_after_attn(cp_size, dq.device)
-        dq, dk, dv = flash_attn_a2a_communicate(
-            [dq, dk, dv],
-            chunk_ids_for_a2a,
-            seq_dim_dqkv,
-            cp_size,
-            ctx.cp_group,
-            ctx.cp_stream,
-            before_attn=False,
-            qkv_format=ctx.dqkv_format,
-            cu_seqlens_q_padded=cu_seqlens_q_padded,
-            cu_seqlens_kv_padded=cu_seqlens_kv_padded,
-            a2a_input_names=["dq", "dk", "dv"],
-        )
+        with get_nvtx_range_context("transformer_engine.cp.a2a.bwd.dqkv_exchange"):
+            dq, dk, dv = flash_attn_a2a_communicate(
+                [dq, dk, dv],
+                chunk_ids_for_a2a,
+                seq_dim_dqkv,
+                cp_size,
+                ctx.cp_group,
+                ctx.cp_stream,
+                before_attn=False,
+                qkv_format=ctx.dqkv_format,
+                cu_seqlens_q_padded=cu_seqlens_q_padded,
+                cu_seqlens_kv_padded=cu_seqlens_kv_padded,
+                a2a_input_names=["dq", "dk", "dv"],
+            )
         dq, dk, dv = [
             x.view(y)
             for x, y in zip([dq, dk, dv], [ctx.orig_q_shape, ctx.orig_k_shape, ctx.orig_v_shape])
@@ -5350,9 +5544,12 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 d_bias = rest[0]
             if ctx.softmax_type != "vanilla":
                 d_softmax_offset = rest[1]
-                d_softmax_offset = flash_attn_a2a_communicate_softmax_offset(
-                    d_softmax_offset, 1, cp_size, ctx.cp_group, ctx.cp_stream, False
-                )
+                with get_nvtx_range_context(
+                    "transformer_engine.cp.a2a.bwd.softmax_offset_exchange"
+                ):
+                    d_softmax_offset = flash_attn_a2a_communicate_softmax_offset(
+                        d_softmax_offset, 1, cp_size, ctx.cp_group, ctx.cp_stream, False
+                    )
 
         # convert dq, dk, dv to appropriate types
         if ctx.fp8:
