@@ -960,26 +960,31 @@ class TestTeEpMoeCudnnCutedslFusion:
     def test_mxfp8_forward_and_backward(self, mesh, apply_topk_weights_early, monkeypatch):
         if not _USE_CUDNN_FUSION:
             pytest.skip("run separately with --use-cudnn-fusion=1")
-        rubin_calls = []
-        if get_device_compute_capability(0) == 107:
-            from transformer_engine.jax import cpp_extensions as tex
+        from transformer_engine.jax import cpp_extensions as tex
 
-            original_glu = tex.grouped_gemm_glu
+        shared_calls = []
+        original_glu = tex.grouped_gemm_glu
+        original_dglu = tex.grouped_gemm_dglu
 
-            def checked_glu(*args, **kwargs):
-                rubin_calls.append(True)
-                return original_glu(*args, **kwargs)
+        def checked_glu(*args, **kwargs):
+            shared_calls.append("glu")
+            return original_glu(*args, **kwargs)
 
-            monkeypatch.setattr(tex, "grouped_gemm_glu", checked_glu)
+        def checked_dglu(*args, **kwargs):
+            shared_calls.append("dglu")
+            return original_dglu(*args, **kwargs)
+
+        monkeypatch.setattr(tex, "grouped_gemm_glu", checked_glu)
+        monkeypatch.setattr(tex, "grouped_gemm_dglu", checked_dglu)
         block = _make_block(
             apply_topk_weights_early=apply_topk_weights_early,
             quantization_recipe=MXFP8BlockScaling(),
         )
         x = _make_inputs(jax.random.PRNGKey(30))
         variables, output, aux = _init_apply(block, mesh, x, jax.random.PRNGKey(31))
-        if get_device_compute_capability(0) == 107:
-            assert rubin_calls, "Rubin MoE did not select the cuDNN GLU JAX API"
+        assert "glu" in shared_calls, "MoE did not select the shared cuDNN GLU JAX API"
         grads, grad_x = _grad_step(block, variables, mesh, x)
+        assert "dglu" in shared_calls, "MoE VJP did not select the shared cuDNN dGLU JAX API"
 
         assert output.shape == x.shape
         assert output.dtype == x.dtype
@@ -995,63 +1000,6 @@ class TestTeEpMoeCudnnCutedslFusion:
         grad_x_np = _to_global_numpy(grad_x, mesh).astype(np.float32)
         assert np.all(np.isfinite(grad_x_np))
         assert np.any(grad_x_np != 0)
-
-        if get_device_compute_capability(0) == 107:
-            # The generic TE adapter is the reference for this adapter
-            # substitution. Its MXFP8 gradients can differ from pure JAX by
-            # more than the strict unfused test threshold on Rubin.
-            # Exercise the generic TE adapter using the shared cuDNN GLU API.
-            dependencies_available = tex.grouped_gemm_swiglu_dependencies_available
-            monkeypatch.setattr(
-                tex,
-                "grouped_gemm_swiglu_dependencies_available",
-                lambda rubin=False: (
-                    (False, "Rubin path disabled for test")
-                    if rubin
-                    else dependencies_available(rubin=False)
-                ),
-            )
-            generic_calls = []
-            original_swiglu = tex.grouped_gemm_swiglu
-
-            def checked_swiglu(*args, **kwargs):
-                generic_calls.append(True)
-                return original_swiglu(*args, **kwargs)
-
-            monkeypatch.setattr(tex, "grouped_gemm_swiglu", checked_swiglu)
-            with _ctx(mesh):
-                x_sh = _shard_inputs(x, mesh)
-                baseline_output, _, _ = jax.jit(block.apply)(variables, x_sh)
-                baseline_output.block_until_ready()
-            baseline_grads, baseline_grad_x = _grad_step(block, variables, mesh, x)
-            assert generic_calls, "Missing Rubin API did not select generic SwiGLU"
-            np.testing.assert_allclose(
-                output_np,
-                _to_global_numpy(baseline_output, mesh).astype(np.float32),
-                **FWD_TOLERANCE["mxfp8"],
-                err_msg="Rubin GLU forward differs from dedicated SwiGLU",
-            )
-            for name in ("gate_kernel", "wi", "wo"):
-                tolerance = (
-                    GRAD_GATE_TOLERANCE["mxfp8"]
-                    if name == "gate_kernel"
-                    else GRAD_FFN_TOLERANCE["mxfp8"]
-                )
-                np.testing.assert_allclose(
-                    _to_global_numpy(_unwrap(grads["params"][name]), mesh).astype(np.float32),
-                    _to_global_numpy(_unwrap(baseline_grads["params"][name]), mesh).astype(
-                        np.float32
-                    ),
-                    **tolerance,
-                    err_msg=f"Rubin GLU {name} gradient differs from dedicated SwiGLU",
-                )
-            np.testing.assert_allclose(
-                grad_x_np,
-                _to_global_numpy(baseline_grad_x, mesh).astype(np.float32),
-                **GRAD_FFN_TOLERANCE["mxfp8"],
-                err_msg="Rubin GLU input gradient differs from dedicated SwiGLU",
-            )
-            return
 
         params_np = _params_global_numpy(variables, mesh)
         x_np = np.asarray(jax.device_get(x))
@@ -1091,31 +1039,15 @@ class TestTeEpMoeCudnnCutedslFusion:
             err_msg="d_x fused MXFP8 gradient parity breach",
         )
 
-    @pytest.mark.parametrize("use_regular_swiglu", [False, True])
-    def test_cudnn_fused_with_checkpoint_names(self, mesh, monkeypatch, use_regular_swiglu):
+    def test_cudnn_fused_with_checkpoint_names(self, mesh, monkeypatch):
         if not _USE_CUDNN_FUSION:
             pytest.skip("cuDNN grouped GEMM fusion is disabled")
-        if not use_regular_swiglu and get_device_compute_capability(0) != 107:
-            pytest.skip("Rubin grouped GLU requires SM107")
-
         from transformer_engine.jax import cpp_extensions as tex
 
         moe_module = importlib.import_module("transformer_engine.jax.moe")
         flax_moe_module = importlib.import_module("transformer_engine.jax.flax.moe")
-        if use_regular_swiglu:
-            dependencies_available = tex.grouped_gemm_swiglu_dependencies_available
-            monkeypatch.setattr(
-                tex,
-                "grouped_gemm_swiglu_dependencies_available",
-                lambda rubin=False: (
-                    (False, "Rubin path disabled for test")
-                    if rubin
-                    else dependencies_available(rubin=False)
-                ),
-            )
-
         selected_calls = []
-        fused_op_name = "grouped_gemm_swiglu" if use_regular_swiglu else "grouped_gemm_glu"
+        fused_op_name = "grouped_gemm_glu"
         original_fused_op = getattr(tex, fused_op_name)
 
         def checked_fused_op(*args, **kwargs):

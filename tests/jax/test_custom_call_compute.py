@@ -57,9 +57,7 @@ from transformer_engine.jax.layernorm_dense import layernorm_dense
 from transformer_engine.jax.cpp_extensions.topk import topk
 import transformer_engine_jax
 
-_swiglu_adapter = importlib.import_module(
-    "transformer_engine.jax.cpp_extensions.grouped_gemm_swiglu"
-)
+_glu_adapter = importlib.import_module("transformer_engine.jax.cpp_extensions.grouped_gemm_glu")
 _moe_module = importlib.import_module("transformer_engine.jax.moe")
 
 GEMM_CASES = [
@@ -2142,7 +2140,7 @@ class TestTopK:
         assert_allclose(prim_gathered, ref_gathered, dtype=dtype)
 
 
-class TestGroupedGemmSwigluFallback:
+class TestGroupedGemmGluFallback:
     """MoE API compatibility and dispatch with mocked kernels on one JAX device."""
 
     @staticmethod
@@ -2177,8 +2175,8 @@ class TestGroupedGemmSwigluFallback:
     def frontend(self, monkeypatch):
         module = SimpleNamespace(
             __name__="cudnn",
-            grouped_gemm_glu_wrapper_sm100=self._api(_swiglu_adapter._FORWARD_ARGS),
-            grouped_gemm_dswiglu=self._api(_swiglu_adapter._BACKWARD_ARGS),
+            grouped_gemm_glu_wrapper_sm100=self._api(_glu_adapter._FORWARD_ARGS),
+            grouped_gemm_dglu_wrapper_sm100=self._api(_glu_adapter._BACKWARD_ARGS),
         )
         original = importlib.import_module
 
@@ -2189,10 +2187,9 @@ class TestGroupedGemmSwigluFallback:
                 return SimpleNamespace(is_available=lambda: True)
             return original(name, package)
 
-        monkeypatch.setattr(_swiglu_adapter.importlib, "import_module", import_module)
+        monkeypatch.setattr(_glu_adapter.importlib, "import_module", import_module)
         return module
 
-    @pytest.mark.parametrize("rubin", [False, True])
     @pytest.mark.parametrize("operation", ["forward", "backward"])
     @pytest.mark.parametrize(
         "change",
@@ -2206,15 +2203,13 @@ class TestGroupedGemmSwigluFallback:
             "opaque",
         ],
     )
-    def test_api_signature(self, frontend, rubin, operation, change):
+    def test_api_signature(self, frontend, operation, change):
         name = (
-            "grouped_gemm_glu_wrapper_sm100" if operation == "forward" else "grouped_gemm_dswiglu"
-        )
-        args = (
-            _swiglu_adapter._FORWARD_ARGS
+            "grouped_gemm_glu_wrapper_sm100"
             if operation == "forward"
-            else _swiglu_adapter._BACKWARD_ARGS
+            else "grouped_gemm_dglu_wrapper_sm100"
         )
+        args = _glu_adapter._FORWARD_ARGS if operation == "forward" else _glu_adapter._BACKWARD_ARGS
         if change == "missing":
             delattr(frontend, name)
         elif change == "not_callable":
@@ -2223,19 +2218,19 @@ class TestGroupedGemmSwigluFallback:
             setattr(frontend, name, lambda **kwargs: None)
         else:
             setattr(frontend, name, self._api(args, change))
-        available, reason = _swiglu_adapter.grouped_gemm_swiglu_dependencies_available(rubin)
+        available, reason = _glu_adapter.grouped_gemm_glu_dependencies_available()
         assert available == (change == "optional")
         assert bool(reason) == (change != "optional")
 
     @pytest.mark.parametrize("capability", [90, 100, 103, 107, 120])
     @pytest.mark.parametrize(
         "missing",
-        [None, "grouped_gemm_glu_wrapper_sm100", "grouped_gemm_dswiglu", "all"],
+        [None, "grouped_gemm_glu_wrapper_sm100", "grouped_gemm_dglu_wrapper_sm100", "all"],
     )
     def test_ordered_fallback(self, frontend, monkeypatch, capability, missing):
         if missing == "all":
             frontend.grouped_gemm_glu_wrapper_sm100 = None
-            frontend.grouped_gemm_dswiglu = None
+            frontend.grouped_gemm_dglu_wrapper_sm100 = None
         elif missing:
             delattr(frontend, missing)
         monkeypatch.setattr(
@@ -2243,22 +2238,22 @@ class TestGroupedGemmSwigluFallback:
         )
         expected = False
         if capability >= 100 and missing is None:
-            if capability == 107:
-                expected = "rubin"
-            else:
-                expected = "blackwell"
+            expected = True
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             assert _moe_module._select_cudnn_jax_fusion([]) == expected
-        if expected == "rubin":
+        if expected:
             assert not caught
         else:
             assert len(caught) == 1
             message = str(caught[0].message)
-            assert "falling back" in message and "shared grouped_gemm_glu API" in message
-            assert ("generic Blackwell+ fused" if expected else "unfused TE") in message
+            assert (
+                "falling back" in message
+                and "shared grouped_gemm_glu/grouped_gemm_dglu JAX APIs" in message
+            )
+            assert "unfused TE" in message
 
-    @pytest.mark.parametrize("name", ["cudnn", "cudnn.jax", "cutlass.jax"])
+    @pytest.mark.parametrize("name", ["cudnn", "cutlass.jax"])
     def test_missing_dependency(self, monkeypatch, name):
         original = importlib.import_module
 
@@ -2267,8 +2262,8 @@ class TestGroupedGemmSwigluFallback:
                 raise ModuleNotFoundError(f"No module named {module}")
             return original(module, package)
 
-        monkeypatch.setattr(_swiglu_adapter.importlib, "import_module", import_module)
-        available, reason = _swiglu_adapter.grouped_gemm_swiglu_dependencies_available()
+        monkeypatch.setattr(_glu_adapter.importlib, "import_module", import_module)
+        available, reason = _glu_adapter.grouped_gemm_glu_dependencies_available()
         assert not available and name in reason
 
     def test_ineligible_call_and_device_query_failure(self, frontend, monkeypatch):
@@ -2284,9 +2279,8 @@ class TestGroupedGemmSwigluFallback:
             assert _moe_module._select_cudnn_jax_fusion([]) is False
 
     def test_installed_frontend_contract(self):
-        for rubin in (False, True):
-            available, reason = _swiglu_adapter.grouped_gemm_swiglu_dependencies_available(rubin)
-            assert available or reason
+        available, reason = _glu_adapter.grouped_gemm_glu_dependencies_available()
+        assert available or reason
 
     @pytest.mark.parametrize("request_fusion", [None, True, False])
     @pytest.mark.parametrize("native_layout", [False, True])
@@ -2294,9 +2288,9 @@ class TestGroupedGemmSwigluFallback:
     @pytest.mark.parametrize(
         "missing,expected",
         [
-            (None, "rubin"),
+            (None, True),
             ("grouped_gemm_glu_wrapper_sm100", False),
-            ("grouped_gemm_dswiglu", False),
+            ("grouped_gemm_dglu_wrapper_sm100", False),
         ],
     )
     def test_public_moe_passes_selected_path(
@@ -2347,14 +2341,11 @@ class TestGroupedGemmSwigluFallback:
             )
         assert received == [expected]
         assert output is x
-        assert len(caught) == (0 if request_fusion is False or expected == "rubin" else 1)
+        assert len(caught) == (0 if request_fusion is False or expected else 1)
 
-    @pytest.mark.parametrize("path", ["rubin", "blackwell"])
     @pytest.mark.parametrize("native_layout", [False, True])
     @pytest.mark.parametrize("gather_gated_dimension", [False, True])
-    def test_forward_uses_selected_kernel(
-        self, monkeypatch, path, native_layout, gather_gated_dimension
-    ):
+    def test_forward_uses_selected_kernel(self, monkeypatch, native_layout, gather_gated_dimension):
 
         class SelectedKernel(Exception):
             pass
@@ -2363,15 +2354,7 @@ class TestGroupedGemmSwigluFallback:
             assert args[1].shape == (1, 256, 128)
             raise SelectedKernel
 
-        def rejected(*args, **kwargs):
-            raise AssertionError("Forward ignored the selected fallback")
-
-        monkeypatch.setattr(
-            _moe_module.tex, "grouped_gemm_glu", selected if path == "rubin" else rejected
-        )
-        monkeypatch.setattr(
-            _moe_module.tex, "grouped_gemm_swiglu", selected if path == "blackwell" else rejected
-        )
+        monkeypatch.setattr(_moe_module.tex, "grouped_gemm_glu", selected)
 
         def quantize(data, *args, **kwargs):
             return SimpleNamespace(
@@ -2406,7 +2389,7 @@ class TestGroupedGemmSwigluFallback:
             wo=jnp.ones((1, 128, 128), jnp.bfloat16),
             quantizer_sets=(quantizers, quantizers),
             num_local_experts=1,
-            use_cudnn_jax_fusion=path,
+            use_cudnn_jax_fusion=True,
             cudnn_native_weight_layout=native_layout,
             quant_before_fsdp_ag=gather_gated_dimension,
             wi_fsdp_axis=(1 if native_layout else 2),

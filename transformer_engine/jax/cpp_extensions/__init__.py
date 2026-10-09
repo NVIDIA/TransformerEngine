@@ -10,7 +10,7 @@ from .normalization import *
 from .quantization import *
 from .softmax import *
 from .gemm import *
-from .grouped_gemm_swiglu import *
+from .grouped_gemm_glu import *
 from .router import *
 from .ep import *
 from .topk import *

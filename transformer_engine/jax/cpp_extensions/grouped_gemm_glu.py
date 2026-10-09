@@ -1,7 +1,7 @@
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-"""cuDNN Frontend JAX API adapter for fused grouped GEMM + SwiGLU."""
+"""cuDNN Frontend JAX API adapters for shared grouped GEMM + GLU/dGLU."""
 
 from __future__ import annotations
 
@@ -12,10 +12,9 @@ import jax
 import jax.numpy as jnp
 
 __all__ = [
-    "grouped_gemm_dswiglu",
+    "grouped_gemm_dglu",
     "grouped_gemm_glu",
-    "grouped_gemm_swiglu",
-    "grouped_gemm_swiglu_dependencies_available",
+    "grouped_gemm_glu_dependencies_available",
     "pack_swiglu_pair",
     "unpack_swiglu_pair",
 ]
@@ -90,21 +89,23 @@ _FORWARD_ARGS = (
 _BACKWARD_ARGS = tuple(arg for arg in _FORWARD_ARGS if arg != "c_dtype") + (
     "c_tensor",
     "beta_tensor",
+    "dprob_tensor",
+    "sf_vec_size",
+    "act_func",
 )
 _FORWARD_ARGS += ("sf_vec_size", "act_func", "generate_c")
 
 
-def grouped_gemm_swiglu_dependencies_available(rubin: bool = False) -> tuple[bool, str]:
+def grouped_gemm_glu_dependencies_available() -> tuple[bool, str]:
     """Check that the selected forward and shared backward accept TE's keywords."""
     try:
         cutlass_jax = importlib.import_module("cutlass.jax")
-        cudnn_jax = importlib.import_module("cudnn.jax")
         if not cutlass_jax.is_available():
             return False, "CuTeDSL JAX support is unavailable"
         cudnn = importlib.import_module("cudnn")
         for module, name, arguments in (
             (cudnn, "grouped_gemm_glu_wrapper_sm100", _FORWARD_ARGS),
-            (cudnn_jax, "grouped_gemm_dswiglu", _BACKWARD_ARGS),
+            (cudnn, "grouped_gemm_dglu_wrapper_sm100", _BACKWARD_ARGS),
         ):
             api = getattr(module, name, None)
             if not callable(api):
@@ -124,45 +125,6 @@ def grouped_gemm_swiglu_dependencies_available(rubin: bool = False) -> tuple[boo
     return True, ""
 
 
-def grouped_gemm_swiglu(
-    a: jax.Array,
-    b: jax.Array,
-    sfa: jax.Array,
-    sfb: jax.Array,
-    padded_offsets: jax.Array,
-    prob: jax.Array,
-    *,
-    compute_dtype,
-    output_dtype,
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
-    """Run cuDNN's shared GLU API in JAX MXFP8 SwiGLU mode.
-
-    TE owns conservative flat scale allocations for ragged grouped operations.
-    cuDNN's JAX API accepts the compact physical atom layout, so this adapter
-    exposes the used prefix with a zero-copy reshape before making the call.
-    """
-    if a.ndim != 3 or a.shape[-1] != 1:
-        raise ValueError(f"Expected A[M,K,1], got {a.shape}")
-    if b.ndim != 3:
-        raise ValueError(f"Expected physical B[E,N,K], got {b.shape}")
-
-    cudnn_grouped_gemm_swiglu = getattr(
-        importlib.import_module("cudnn"), "grouped_gemm_glu_wrapper_sm100"
-    )
-
-    return _grouped_gemm_forward(
-        cudnn_grouped_gemm_swiglu,
-        a,
-        b,
-        sfa,
-        sfb,
-        padded_offsets,
-        prob,
-        compute_dtype=compute_dtype,
-        output_dtype=output_dtype,
-    )
-
-
 def grouped_gemm_glu(
     a: jax.Array,
     b: jax.Array,
@@ -174,7 +136,7 @@ def grouped_gemm_glu(
     compute_dtype,
     output_dtype,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
-    """Run the Rubin cuDNN grouped MXFP8 GEMM + SwiGLU kernel."""
+    """Run cuDNN's shared grouped MXFP8 GLU API in SwiGLU mode."""
     cudnn_grouped_gemm_glu = getattr(
         importlib.import_module("cudnn"), "grouped_gemm_glu_wrapper_sm100"
     )
@@ -235,7 +197,7 @@ def _grouped_gemm_forward(
     )
 
 
-def grouped_gemm_dswiglu(
+def grouped_gemm_dglu(
     a: jax.Array,
     b: jax.Array,
     c: jax.Array,
@@ -246,7 +208,7 @@ def grouped_gemm_dswiglu(
     *,
     output_dtype,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
-    """Run cuDNN's grouped MXFP8 GEMM + dSwiGLU + MXFP8 quantization API."""
+    """Run cuDNN's shared grouped MXFP8 dGLU API in dSwiGLU mode."""
     if a.ndim != 2:
         raise ValueError(f"Expected A[M,K], got {a.shape}")
     if b.ndim != 3:
@@ -254,8 +216,8 @@ def grouped_gemm_dswiglu(
     if c.ndim != 2:
         raise ValueError(f"Expected C[M,2N], got {c.shape}")
 
-    cudnn_grouped_gemm_dswiglu = getattr(
-        importlib.import_module("cudnn.jax"), "grouped_gemm_dswiglu"
+    cudnn_grouped_gemm_dglu = getattr(
+        importlib.import_module("cudnn"), "grouped_gemm_dglu_wrapper_sm100"
     )
 
     rows, hidden = a.shape
@@ -268,7 +230,7 @@ def grouped_gemm_dswiglu(
     alpha = jnp.ones((experts,), dtype=jnp.float32)
     beta = jnp.ones((experts,), dtype=jnp.float32)
     norm_const = jnp.ones((1,), dtype=jnp.float32)
-    result = cudnn_grouped_gemm_dswiglu(
+    result = cudnn_grouped_gemm_dglu(
         a_tensor=a,
         b_tensor=b,
         c_tensor=c,
@@ -281,6 +243,9 @@ def grouped_gemm_dswiglu(
         norm_const_tensor=norm_const,
         d_dtype=jnp.dtype(output_dtype),
         discrete_col_sfd=True,
+        dprob_tensor=None,
+        sf_vec_size=32,
+        act_func="dswiglu",
     )
     return (
         result["d_row_tensor"],

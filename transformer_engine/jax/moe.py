@@ -169,47 +169,32 @@ _ALIGN_SIZE = 128
 _CUDNN_JAX_ALIGN_SIZE = 256
 
 
-def _select_cudnn_jax_fusion(rejection_reasons: list[str]) -> str | bool:
-    """Select Rubin GLU, generic Blackwell+ SwiGLU, or unfused TE, in order."""
+def _select_cudnn_jax_fusion(rejection_reasons: list[str]) -> bool:
+    """Select shared cuDNN GLU/dGLU fusion or the unfused TE path."""
     from transformer_engine_jax import get_device_compute_capability
 
     reasons = list(rejection_reasons)
-    path = False
     try:
         capability = get_device_compute_capability(0)
     except RuntimeError as exc:
         reasons.append(f"could not query GPU compute capability: {exc}")
     else:
+        if capability < 100:
+            reasons.append(f"fused kernels require SM100+, got SM{capability}")
         if not reasons:
-            for candidate, supported in (
-                ("rubin", capability == 107),
-                ("blackwell", capability >= 100),
-            ):
-                if not supported:
-                    requirement = "SM107" if candidate == "rubin" else "SM100+"
-                    reasons.append(
-                        f"{candidate} fused kernel requires {requirement}, got SM{capability}"
-                    )
-                    continue
-                available, error = tex.grouped_gemm_swiglu_dependencies_available(
-                    rubin=candidate == "rubin"
-                )
-                if available:
-                    path = candidate
-                    break
-                reasons.append(f"{candidate} fused API is incompatible: {error}")
-    if reasons:
-        destination = "generic Blackwell+ fused kernel" if path else "unfused TE grouped-GEMM path"
-        warnings.warn(
-            f"use_cudnn_fusion=True: falling back to the {destination}: "
-            + "; ".join(reasons)
-            + ". Install cuDNN Frontend with compatible JAX APIs (TE's signatures match "
-            "the shared grouped_gemm_glu API with JAX dispatch) and CuTeDSL JAX support; "
-            "use supported GPU hardware.",
-            UserWarning,
-            stacklevel=2,
-        )
-    return path
+            available, error = tex.grouped_gemm_glu_dependencies_available()
+            if available:
+                return True
+            reasons.append(f"shared fused API is incompatible: {error}")
+    warnings.warn(
+        "use_cudnn_fusion=True: falling back to the unfused TE grouped-GEMM path: "
+        + "; ".join(reasons)
+        + ". Install cuDNN Frontend with shared grouped_gemm_glu/grouped_gemm_dglu "
+        "JAX APIs and CuTeDSL JAX support; use supported GPU hardware.",
+        UserWarning,
+        stacklevel=2,
+    )
+    return False
 
 
 def _cudnn_jax_fusion_rejection_reasons(
@@ -223,7 +208,7 @@ def _cudnn_jax_fusion_rejection_reasons(
     activation_type,
     ep_axis,
 ) -> list[str]:
-    """Return reasons this call cannot use cuDNN's grouped SwiGLU JAX API."""
+    """Return reasons this call cannot use cuDNN's shared grouped GLU/dGLU JAX APIs."""
     errors = []
     if str(activation_type).lower() != "silu":
         errors.append("requires activation_type='silu'")
@@ -803,7 +788,7 @@ def _ffn_fwd_per_shard(
     num_local_experts: int,
     activation_type: str,
     apply_topk_weights_early: bool,
-    use_cudnn_jax_fusion: str | bool,
+    use_cudnn_jax_fusion: bool,
     wi_0_checkpoint_name: Optional[str],
     wi_1_checkpoint_name: Optional[str],
     wo_checkpoint_name: Optional[str],
@@ -864,7 +849,7 @@ def _ffn_fwd_per_shard(
             intermediate_col,
             intermediate_scale_row,
             intermediate_scale_col,
-        ) = (tex.grouped_gemm_glu if use_cudnn_jax_fusion == "rubin" else tex.grouped_gemm_swiglu)(
+        ) = tex.grouped_gemm_glu(
             casted_sorted_x_lhs.data.reshape(sorted_x.shape[0], hidden, 1),
             (
                 casted_wi_rhs.data.reshape(num_local_experts, combined, hidden)
@@ -1016,7 +1001,7 @@ def _ffn_bwd_per_shard(
     activation_type: str,
     apply_topk_weights_early: bool,
     has_bias: bool,
-    use_cudnn_jax_fusion: str | bool,
+    use_cudnn_jax_fusion: bool,
     cudnn_native_weight_layout: bool,
 ):
     """Backward mirror of :func:`_ffn_fwd_per_shard`."""
@@ -1056,7 +1041,7 @@ def _ffn_bwd_per_shard(
             dprob,
             d_combined_scale_row,
             d_combined_scale_col,
-        ) = tex.grouped_gemm_dswiglu(
+        ) = tex.grouped_gemm_dglu(
             _casted_d_eo_lhs.data.reshape(rows, hidden),
             casted_wo_rhs_trans.data.reshape(num_local_experts, intermediate, hidden),
             combined_out,
@@ -2089,8 +2074,8 @@ def moe(
     preserve compatibility with EP bootstrap buffer sizing.
 
     use_cudnn_fusion : bool
-        Defaults to ``True``: try cuDNN's JAX grouped MXFP8 APIs, Rubin GLU first,
-        then generic SM100+ SwiGLU. ``False`` uses unfused TE grouped GEMM.
+        Defaults to ``True``: try cuDNN's shared JAX grouped MXFP8 GLU/dGLU APIs
+        on SM100+ GPUs; cuDNN selects the architecture-specific kernels. ``False`` uses unfused TE grouped GEMM.
         Ineligible calls warn and fall back to TE's regular grouped-GEMM
         implementation. API signatures and GPU capability determine support.
 
