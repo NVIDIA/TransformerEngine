@@ -1610,9 +1610,8 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
 
         fc1_prob_tensor = None
         if not unit_activation_scale:
-            fc1_prob_tensor = (
-                scales.detach().to(dtype=torch.float32 if use_nvfp4 else dtype).reshape(-1, 1, 1)
-            )
+            # Match the FP32 probabilities used by activation recomputation in backward.
+            fc1_prob_tensor = scales.detach().to(dtype=torch.float32).reshape(-1, 1, 1)
         if use_nvfp4:
             # cuDNN receives NVFP4 block-scaled inputs without TE's per-group
             # global scale factors, so alpha supplies the product of the two
@@ -2752,7 +2751,8 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 fc2_bias_grads = [fc2_dbias_packed[idx] for idx in range(num_groups)]
 
         if grad_scales is not None:
-            grad_scales = grad_scales.to(dtype=dtype)
+            # Preserve the FP32 reduction when the original router probabilities are FP32.
+            grad_scales = grad_scales.to(dtype=scales.dtype)
 
         fc1_bias_grads: Optional[list[Optional[torch.Tensor]]] = None
         fc1_bias_grad_packed: Optional[torch.Tensor] = None

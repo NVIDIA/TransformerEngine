@@ -1121,6 +1121,147 @@ class TestGroupedLinearOp:
 class TestGroupedMLPFusedOp:
     """Tests for grouped MLP fused op"""
 
+    @pytest.mark.parametrize("quantization", ("mxfp8", "nvfp4_rht"))
+    @pytest.mark.parametrize("activation", ("scaled_srelu", "scaled_tanh_srelu", "scaled_swiglu"))
+    def test_grouped_mlp_fp32_router_probabilities(
+        self, quantization: str, activation: str
+    ) -> None:
+        """Check real forward and backward numerics with BF16 operands and FP32 routing."""
+        maybe_skip_quantization(quantization, device="cuda", dtype=torch.bfloat16)
+        fused_cls = (
+            te.ops.fused.GroupedMLP_CuTeGEMMGLU
+            if activation == "scaled_swiglu"
+            else te.ops.fused.GroupedMLP_CuTeGEMMUnary
+        )
+        if not fused_cls.is_supported():
+            pytest.skip("Joint grouped MLP requires supported SM100 cuDNN kernels")
+        if activation == "scaled_tanh_srelu":
+            if not grouped_mlp_module._cudnn_frontend_supports_grouped_gemm_srelu_tanh():
+                pytest.skip("Installed cuDNN frontend lacks tanh-SReLU")
+        self.test_grouped_mlp(
+            group_size=2,
+            bias=False,
+            hidden_size=128,
+            quantization=quantization,
+            single_grouped_weight=False,
+            activation=activation,
+            strict_fusion=True,
+            probs_dtype=torch.float32,
+        )
+
+    @pytest.mark.parametrize("quantization", ("mxfp8", "nvfp4_rht"))
+    @pytest.mark.parametrize("activation", ("scaled_srelu", "scaled_tanh_srelu", "scaled_swiglu"))
+    @pytest.mark.parametrize("probs_dtype", (torch.float32, torch.bfloat16))
+    @pytest.mark.parametrize("bias", (False, True))
+    def test_router_probability_precision(
+        self, monkeypatch, quantization: str, activation: str, probs_dtype: torch.dtype, bias: bool
+    ) -> None:
+        """Keep FP32 router values across the joint cuDNN wrapper boundary.
+
+        Inject closely spaced dprob values after the real dactivation kernel to isolate
+        the return cast from GEMM/activation approximation. The ordinary accuracy tests
+        cover the actual kernel reduction. A final FP32 gradient dtype alone cannot
+        detect an intermediate FP32 -> BF16 -> FP32 conversion.
+        """
+        maybe_skip_quantization(quantization, device="cuda", dtype=torch.bfloat16)
+        if bias and quantization == "nvfp4_rht":
+            pytest.skip("NVFP4 grouped MLP does not support bias")
+        if activation == "scaled_tanh_srelu":
+            if not grouped_mlp_module._cudnn_frontend_supports_grouped_gemm_srelu_tanh():
+                pytest.skip("Installed cuDNN frontend lacks tanh-SReLU")
+        fused_cls = (
+            te.ops.fused.GroupedMLP_CuTeGEMMGLU
+            if activation == "scaled_swiglu"
+            else te.ops.fused.GroupedMLP_CuTeGEMMUnary
+        )
+        if not fused_cls.is_supported():
+            pytest.skip("Joint grouped MLP requires supported SM100 cuDNN kernels")
+        monkeypatch.setenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")
+
+        num_groups, rows_per_group, hidden_size = 2, 256, 128
+        num_rows = num_groups * rows_per_group
+        splits = torch.full((num_groups,), rows_per_group, device="cuda", dtype=torch.int64)
+        x = torch.randn(num_rows, hidden_size, device="cuda", dtype=torch.bfloat16)
+        # FP32 inputs differ from their BF16 representations in the forward too.
+        probs = torch.linspace(0.5001, 0.501, num_rows, device="cuda", dtype=torch.float32)
+        probs = probs.to(probs_dtype).requires_grad_(True)
+        injected_dprob = torch.linspace(1.0001, 1.002, num_rows, device="cuda", dtype=torch.float32)
+        assert torch.unique(injected_dprob.to(torch.bfloat16)).numel() == 1
+        calls = []
+        activation_kernel = fused_cls.grouped_gemm_activation_kernel()
+        dactivation_kernel = fused_cls.grouped_gemm_dactivation_kernel()
+
+        def trace_forward(kernel):
+            def traced_forward(**kwargs):
+                assert kwargs["prob_tensor"].dtype == torch.float32
+                torch.testing.assert_close(
+                    kwargs["prob_tensor"].view(-1), probs.detach().float(), rtol=0, atol=0
+                )
+                calls.append("forward")
+                return kernel(**kwargs)
+
+            return traced_forward
+
+        def injected_backward(**kwargs):
+            assert kwargs["prob_tensor"].dtype == torch.float32
+            assert kwargs["dprob_tensor"].dtype == torch.float32
+            result = dactivation_kernel(**kwargs)
+            result["dprob_tensor"].view(-1).copy_(injected_dprob)
+            calls.append("backward")
+            return result
+
+        forward = trace_forward(activation_kernel)
+        monkeypatch.setattr(
+            fused_cls, "grouped_gemm_activation_kernel", staticmethod(lambda: forward)
+        )
+        for getter in (
+            "grouped_gemm_act_hadamard_kernel",
+            "grouped_gemm_act_hadamard_quant_kernel",
+        ):
+            kernel = getattr(fused_cls, getter)()
+            if kernel is not None:
+                traced = trace_forward(kernel)
+                monkeypatch.setattr(fused_cls, getter, staticmethod(lambda traced=traced: traced))
+        monkeypatch.setattr(
+            fused_cls, "grouped_gemm_dactivation_kernel", staticmethod(lambda: injected_backward)
+        )
+        recipe = make_recipe(quantization)
+        with te.quantized_model_init(enabled=True, recipe=recipe):
+            fc1 = te.ops.GroupedLinear(
+                num_groups,
+                hidden_size,
+                2 * hidden_size if activation == "scaled_swiglu" else hidden_size,
+                bias=bias,
+                device="cuda",
+                dtype=torch.bfloat16,
+            )
+            fc2 = te.ops.GroupedLinear(
+                num_groups,
+                hidden_size,
+                hidden_size,
+                bias=bias,
+                scale_bias=bias,
+                device="cuda",
+                dtype=torch.bfloat16,
+            )
+        # Zero FC2 bias leaves the injected dprob unchanged through bias accumulation.
+        if bias:
+            with torch.no_grad():
+                for idx in range(num_groups):
+                    getattr(fc2, f"bias{idx}").zero_()
+        act = _make_scaled_activation(
+            activation, glu_interleave_size=32 if activation == "scaled_swiglu" else None
+        )
+        module = te.ops.Sequential(fc1, act, fc2)
+        with te.autocast(enabled=True, recipe=recipe):
+            fc2_extra = (splits, probs) if bias else (splits,)
+            y = module(x, splits, probs, *fc2_extra)
+        y.backward(torch.ones_like(y))
+        assert calls == ["forward", "backward"]
+        assert isinstance(module._module_groups[0]._forward_ops[0][0], fused_cls)
+        assert probs.grad.dtype == probs_dtype
+        torch.testing.assert_close(probs.grad, injected_dprob.to(probs_dtype), rtol=0, atol=0)
+
     def test_fusion_requires_supported_grad_output_format(self, monkeypatch) -> None:
         """Fuse E4M3 MXFP8 and NVFP4, but decline MXFP8 with an E5M2 backward."""
         from transformer_engine.common.recipe import Format, MXFP8BlockScaling, NVFP4BlockScaling
@@ -1191,6 +1332,7 @@ class TestGroupedMLPFusedOp:
         activation: str,
         situ_betas: tuple[float, float] = (4.0, 25.0),
         strict_fusion: Optional[bool] = None,
+        probs_dtype: Optional[torch.dtype] = None,
     ) -> None:
         """GroupedLinear + scaled activation + GroupedLinear"""
 
@@ -1294,7 +1436,7 @@ class TestGroupedMLPFusedOp:
         )
         probs_ref, probs_test = make_reference_and_test_tensors(
             (in_shape[0],),
-            test_dtype=dtype,
+            test_dtype=dtype if probs_dtype is None else probs_dtype,
             test_device=device,
         )
         fc1_ws_ref, fc1_ws_test = [], []
@@ -1737,7 +1879,7 @@ class TestGroupedMLPFusedOp:
                 "a_dtype": torch.float8_e4m3fn,
                 "b_dtype": torch.float8_e4m3fn,
                 "alpha_dtype": torch.bfloat16,
-                "prob_dtype": torch.bfloat16,
+                "prob_dtype": torch.float32,
                 "c_dtype": torch.bfloat16,
                 "d_dtype": torch.float8_e4m3fn,
                 "act_func": act_func,
