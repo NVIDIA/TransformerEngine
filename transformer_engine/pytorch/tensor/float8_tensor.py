@@ -22,9 +22,6 @@ from ..quantized_tensor import (
     QuantizedTensorStorage,
     Quantizer,
 )
-
-if TYPE_CHECKING:
-    from ..quantization import QuantizationCalibrationConfig
 from ..dynamo import register_value_opaque_quantizer
 from ._quantization_helpers import (
     _IdentityFunc,
@@ -32,6 +29,9 @@ from ._quantization_helpers import (
     safe_quantized_repr,
 )
 from ..constants import dist_group_type, DType, TE_DType_To_Torch
+
+if TYPE_CHECKING:
+    from ..quantization import QuantizationCalibrationConfig
 
 aten = torch.ops.aten
 

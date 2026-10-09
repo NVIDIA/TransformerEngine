@@ -258,7 +258,7 @@ class Float8BlockQuantizer(Quantizer):
         # on-the-fly during inference. Implement this interface for future
         # applications of blockwise FP8 calibration.
         raise NotImplementedError(
-            "Float8BlockQuantizer does not support calibrating block scales, "
+            "Float8BlockQuantizer does not support calibration of block scales, "
             "which are computed online to accurately invert the quantization."
         )
 

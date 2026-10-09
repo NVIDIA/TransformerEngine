@@ -27,11 +27,11 @@ from ..quantized_tensor import (
     QuantizedTensorStorage,
     Quantizer,
 )
+from ..dynamo import register_value_opaque_quantizer
+from ._quantization_helpers import _IdentityFunc, safe_quantized_repr
 
 if TYPE_CHECKING:
     from ..quantization import QuantizationCalibrationConfig
-from ..dynamo import register_value_opaque_quantizer
-from ._quantization_helpers import _IdentityFunc, safe_quantized_repr
 
 aten = torch.ops.aten
 

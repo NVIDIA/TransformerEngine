@@ -608,6 +608,8 @@ class Quantizer(abc.ABC):
 
     def _get_calibration_metadata_buffers(self, tensor_name: str) -> Dict[str, torch.Tensor]:
         """Get module-buffer aliases for this quantizer's calibration state."""
+        if not self._calibration_state:
+            return {}
         recipe_type = self._get_compatible_recipe()
         if recipe_type is None:
             return {}

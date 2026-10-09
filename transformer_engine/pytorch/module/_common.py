@@ -13,8 +13,8 @@ from typing import Any, Callable, List, Optional, Tuple, Union
 import torch
 
 from .. import cpp_extensions as tex
+from .. import distributed as te_distributed
 from ..constants import TE_DType
-from ..distributed import in_fp8_activation_recompute_phase
 from ..export import is_in_onnx_export_mode
 from ..quantization import FP8GlobalStateManager
 from ..tensor.hybrid_tensor import HybridQuantizer
@@ -30,15 +30,13 @@ def sum_bias_grad(tensor: torch.Tensor) -> torch.Tensor:
 
 def _is_in_activation_recompute_phase() -> bool:
     """Whether a forward is running during activation recomputation."""
-    from ..distributed import in_fp8_activation_recompute_phase
-
-    if in_fp8_activation_recompute_phase():
+    if te_distributed.in_fp8_activation_recompute_phase():
         return True
     # Special hidden PyTorch AutoGrad identifier for activation recompute.
     try:
         current_graph_task_id = getattr(torch._C, "_current_graph_task_id", None)
         return current_graph_task_id() != -1
-    except Exception:
+    except Exception:  # pylint: disable=broad-exception-caught
         _warn_recompute_phase_detection_unavailable()
         return False
 
@@ -368,6 +366,6 @@ def check_fp8_reduce_and_update(restore_first_module: bool = False) -> bool:
     qstate = FP8GlobalStateManager.quantization_state
     first_fp8_module = qstate.is_first_fp8_module
     result = FP8GlobalStateManager.is_first_fp8_module()
-    if restore_first_module or in_fp8_activation_recompute_phase():
+    if restore_first_module or te_distributed.in_fp8_activation_recompute_phase():
         qstate.is_first_fp8_module = first_fp8_module
     return result
