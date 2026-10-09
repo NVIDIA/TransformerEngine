@@ -341,8 +341,9 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 4) group_block_scaled_2d_tma
         static_cast<uint32_t>(global_col_base), static_cast<uint32_t>(global_row_base), &tma_mbar);
   }
   ptx::mbarrier_wait_parity(&tma_mbar, 0);
-  if (leading_thread) ptx::mbarrier_invalid(&tma_mbar);
+  // Every thread must finish waiting before the leader invalidates the barrier.
   __syncthreads();
+  if (leading_thread) ptx::mbarrier_invalid(&tma_mbar);
 
   // ---- Optional dbias: per-tile column sum of the high-precision input (smem-resident) ----
   if (dbias_workspace != nullptr) {
@@ -628,8 +629,9 @@ __global__ void __launch_bounds__(kThreadsPerBlock) group_block_scaled_1d_tma_ke
         static_cast<uint32_t>(global_col_base), static_cast<uint32_t>(global_row_base), &tma_mbar);
   }
   ptx::mbarrier_wait_parity(&tma_mbar, 0);
-  if (leading_thread) ptx::mbarrier_invalid(&tma_mbar);
+  // Every thread must finish waiting before the leader invalidates the barrier.
   __syncthreads();
+  if (leading_thread) ptx::mbarrier_invalid(&tma_mbar);
 
   // ---- Optional dbias: per-tile column sum of the high-precision input (smem-resident) ----
   if (dbias_workspace != nullptr) {
