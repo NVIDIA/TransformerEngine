@@ -23,6 +23,8 @@ from transformer_engine.debug.pytorch.debug_state import TEDebugState
 from transformer_engine.debug.features.utils.stats_computation import (
     compute_max_blockwise_dynamic_range,
     BlockwiseDynamicRangeStat,
+    STATS,
+    stats_to_num,
 )
 import math
 
@@ -61,6 +63,7 @@ bare_stats = [
     "underflows%",
     "scale_inv_min",
     "scale_inv_max",
+    "scale_inv_std",
     "mse",
 ]
 
@@ -248,6 +251,11 @@ def test_log_quantized_stats_numerics(fp8_recipe, feature_dirs):
         debug_api.step()
 
         dequantized_tensor = quantized_tensor.dequantize()
+        if hasattr(quantized_tensor, "_scale_inv"):
+            scale_inv_rowwise = quantized_tensor._scale_inv.float()
+        else:
+            scale_inv_rowwise = quantized_tensor._rowwise_scale_inv.float()
+        scale_inv_rowwise = scale_inv_rowwise[scale_inv_rowwise != 0]
         output = read_log(log_dir)
 
     for line in output.splitlines():
@@ -267,6 +275,17 @@ def test_log_quantized_stats_numerics(fp8_recipe, feature_dirs):
                 (abs(dequantized_tensor) > abs(tensor)).sum() / dequantized_tensor.numel() * 100
             )
             assert overflows == pytest.approx(expected.cpu(), abs=1e-4)
+        # Rowwise scale_inv stats only; logger formats with {:.4f} so abs<1e-4.
+        if "scale_inv_min" in line and "_columnwise" not in line:
+            value = float(line.split("value=")[1])
+            assert value == pytest.approx(scale_inv_rowwise.min().cpu().item(), abs=1e-4)
+        if "scale_inv_max" in line and "_columnwise" not in line:
+            value = float(line.split("value=")[1])
+            assert value == pytest.approx(scale_inv_rowwise.max().cpu().item(), abs=1e-4)
+        if "scale_inv_std" in line and "_columnwise" not in line:
+            value = float(line.split("value=")[1])
+            expected = torch.std(scale_inv_rowwise, unbiased=False).cpu().item()
+            assert value == pytest.approx(expected, abs=1e-4)
 
 
 LOG_HIGH_PRECISION_CONFIG = """
@@ -370,6 +389,121 @@ def test_log_stats_numerics(feature_dirs, tensor_name):
     assert found_dynamic_range, "dynamic_range not found in output"
 
 
+def test_stats_computation_microbatch_reduction():
+    """Reducing per-microbatch stats must equal computing them over the concatenation.
+
+    Sweeps every aux-free (high precision) stat in the registry, using its own
+    compute/combine fns, with microbatches of different means and unequal sizes to
+    stress the parallel variance combine that uniform ~N(0,1) tests miss.
+    """
+    torch.manual_seed(0)
+    microbatches = [
+        0.5 * torch.randn(4, 4).cuda() + 0.0,
+        0.5 * torch.randn(8, 4).cuda() + 8.0,
+        0.5 * torch.randn(6, 4).cuda() - 6.0,
+    ]
+    full = torch.cat([mb.flatten() for mb in microbatches])
+
+    # Aux-free stats compute from the tensor alone; the rest need aux_dict
+    # (quantized tensors) and raise on {}, so they are out of scope here.
+    def is_aux_free(stat):
+        if isinstance(stat, BlockwiseDynamicRangeStat):
+            return False  # parametrized stat, covered by its own direct test
+        try:
+            STATS[stat][0](full, {})
+            return True
+        except Exception:  # pylint: disable=broad-except
+            return False
+
+    aux_free = [stat for stat in stats_to_num if is_aux_free(stat)]
+
+    # Fill a [num_microbatches, num_stats] buffer exactly like _Buffer would, then
+    # check every combinator against its own compute fn over the concatenation.
+    buffers = torch.zeros(len(microbatches), len(stats_to_num)).cuda()
+    for i, mb in enumerate(microbatches):
+        for stat in aux_free:
+            buffers[i, stats_to_num[stat]] = float(STATS[stat][0](mb, {}))
+
+    for stat in aux_free:
+        reduced = float(STATS[stat][1](buffers))
+        expected = float(STATS[stat][0](full, {}))
+        assert reduced == pytest.approx(
+            expected, rel=1e-4, abs=1e-4
+        ), f"{stat}: reduced {reduced}, expected {expected}"
+
+
+@pytest.mark.parametrize(
+    "fp8_recipe, recipe_name",
+    [
+        pytest.param(recipe.DelayedScaling(), "fp8_delayed_scaling", id="delayed"),
+        pytest.param(recipe.Float8CurrentScaling(), "fp8_current_scaling", id="current"),
+        pytest.param(recipe.MXFP8BlockScaling(), "mxfp8", id="mxfp8"),
+        pytest.param(recipe.Float8BlockScaling(), "fp8_block_scaling", id="fp8_block_scaling"),
+        pytest.param(recipe.NVFP4BlockScaling(), "nvfp4", id="nvfp4"),
+    ],
+)
+@pytest.mark.parametrize("columnwise", [False, True])
+@pytest.mark.parametrize("padded", [False, True])
+def test_scale_inv_std_microbatch_reduction(fp8_recipe, recipe_name, columnwise, padded):
+    """Scale statistics exclude padding and combine across unequal microbatches."""
+    if not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+    if recipe_name == "mxfp8" and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+    if recipe_name == "fp8_block_scaling" and not fp8_block_scaling_available:
+        pytest.skip(reason_for_no_fp8_block_scaling)
+    if recipe_name == "nvfp4" and not nvfp4_available:
+        pytest.skip(reason_for_no_nvfp4)
+    if columnwise and recipe_name in ["fp8_delayed_scaling", "fp8_current_scaling"]:
+        pytest.skip("Per-tensor recipes have no columnwise scale statistics")
+    if padded and recipe_name not in ["mxfp8", "nvfp4"]:
+        pytest.skip("Only MXFP8 and NVFP4 scale buffers need padding")
+
+    torch.manual_seed(0)
+    shapes = [(160, 288), (288, 160), (96, 416)] if padded else [(256, 1024), (512, 1024)]
+    suffix = "_columnwise" if columnwise else ""
+    names = {
+        stat: f"{recipe_name}_scale_inv_{stat}{suffix}"
+        for stat in ("min", "max", "std", "variance", "numel", "sum")
+    }
+    buffers = torch.zeros(len(shapes), len(stats_to_num)).cuda()
+    scale_invs = []
+    for i, shape in enumerate(shapes):
+        tensor = (i + 1) * torch.randn(shape, device="cuda", dtype=torch.bfloat16) + 8 * i
+        recipe_state = RecipeState.create(fp8_recipe, mode="forward", num_quantizers=1)
+        quantizer = recipe_state.make_quantizers()[0]
+        quantized_tensor = quantizer(tensor)
+        if hasattr(quantized_tensor, "_scale_inv"):
+            scales = quantized_tensor._scale_inv
+        else:
+            scales = (
+                quantized_tensor._columnwise_scale_inv
+                if columnwise
+                else quantized_tensor._rowwise_scale_inv
+            )
+        scales = scales.float().flatten()
+        if padded:
+            assert torch.any(scales == 0), "Expected zero-padded scale storage"
+        scales = scales[scales != 0]
+        scale_invs.append(scales)
+        aux_dict = {recipe_name: quantized_tensor}
+        for stat in names.values():
+            buffers[i, stats_to_num[stat]] = STATS[stat][0](tensor, aux_dict)
+        assert float(buffers[i, stats_to_num[names["std"]]]) == pytest.approx(
+            float(torch.std(scales, unbiased=False)), rel=1e-4, abs=1e-4
+        )
+
+    scales = torch.cat(scale_invs)
+    for stat, expected in (
+        ("min", scales.min()),
+        ("max", scales.max()),
+        ("std", torch.std(scales, unbiased=False)),
+        ("numel", scales.numel()),
+    ):
+        reduced = float(STATS[names[stat]][1](buffers))
+        assert reduced == pytest.approx(float(expected), rel=1e-4, abs=1e-4), names[stat]
+
+
 @pytest.mark.parametrize("layer", ["linear", "transformer"])
 def test_log_every_3_or_5_layers(layer, configs_dir, feature_dirs):
     if not fp8_available:
@@ -403,7 +537,8 @@ def test_log_every_3_or_5_layers(layer, configs_dir, feature_dirs):
 
         with open(
             os.path.join(
-                temp_dir, "nvdlfw_inspect_statistics_logs/nvdlfw_inspect_globalrank-0.log"
+                temp_dir,
+                "nvdlfw_inspect_statistics_logs/nvdlfw_inspect_globalrank-0.log",
             ),
             "r",
         ) as f:
@@ -443,7 +578,14 @@ def test_nvfp4_numeric(feature_dirs):
     if not nvfp4_available:
         pytest.skip(reason_for_no_nvfp4)
 
-    log_nvfp4_config = LOG_NVFP4_CONFIG_BASE.format(stats="underflows%, mse")
+    scale_stats = [
+        f"scale_inv_{stat}{suffix}"
+        for stat in ("min", "max", "std")
+        for suffix in ("", "_columnwise")
+    ]
+    log_nvfp4_config = LOG_NVFP4_CONFIG_BASE.format(
+        stats=", ".join(["underflows%", "mse"] + scale_stats)
+    )
 
     with debug_session(log_nvfp4_config, feature_dirs) as log_dir:
         recipe_state = RecipeState.create(
@@ -476,7 +618,24 @@ def test_nvfp4_numeric(feature_dirs):
         dequantized_tensor = quantized_tensor.dequantize()
         output = read_log(log_dir)
 
-    # Validate both stats are present
+    values = {
+        line.split("nvfp4_", 1)[1].split()[0]: float(line.split("value=")[1].split()[0])
+        for line in output.splitlines()
+        if "nvfp4_scale_inv_" in line and "value=" in line
+    }
+    for suffix, scale_inv in (
+        ("", quantized_tensor._rowwise_scale_inv),
+        ("_columnwise", quantized_tensor._columnwise_scale_inv),
+    ):
+        scales = scale_inv.float()
+        scales = scales[scales != 0]
+        for stat, expected in (
+            ("min", scales.min()),
+            ("max", scales.max()),
+            ("std", torch.std(scales, unbiased=False)),
+        ):
+            assert values[f"scale_inv_{stat}{suffix}"] == pytest.approx(float(expected), abs=1e-4)
+
     assert "nvfp4_underflows%" in output, "underflows% stat missing"
     assert "nvfp4_mse" in output, "mse stat missing"
 
@@ -508,29 +667,36 @@ def test_nvfp4_numeric(feature_dirs):
     assert mse_value == pytest.approx(expected_mse.cpu().item(), abs=1e-4)
 
 
-def test_fp8_stats_allows_nvfp4_with_recipe_prefix(feature_dirs):
-    """Test that LogFp8TensorStats allows recipe-prefixed stats with NVFP4 for what-if analysis."""
+@pytest.mark.parametrize("fp8_stats", ["mxfp8_mse", "scale_inv_std, mxfp8_mse", "scale_inv_std"])
+def test_fp8_stats_allows_nvfp4_with_recipe_prefix(feature_dirs, fp8_stats):
+    """FP8 what-if and NVFP4 logging can share a layer selection."""
     if not nvfp4_available:
         pytest.skip(reason_for_no_nvfp4)
 
-    # Use recipe-prefixed stat with NVFP4 - should work (computes MXFP8 separately)
-    log_fp8_config = LOG_QUANTIZED_CONFIG_BASE.format(stats="mxfp8_mse")
+    log_fp8_config = LOG_QUANTIZED_CONFIG_BASE.format(stats=fp8_stats)
+    log_fp8_config += LOG_NVFP4_CONFIG_BASE.format(stats="scale_inv_std").split(
+        "  transformer_engine:\n", 1
+    )[1]
 
     with debug_session(log_fp8_config, feature_dirs) as log_dir:
         model = te.Linear(128, 128, params_dtype=torch.bfloat16)
         inp = torch.randn(128, 128, dtype=torch.bfloat16).cuda()
 
-        # Should work - recipe-prefixed stats compute MXFP8 separately for comparison
-        for _ in range(2):
-            with te.autocast(recipe=recipe.NVFP4BlockScaling()):
-                output = model(inp)
-            loss = output.sum()
-            loss.backward()
-            debug_api.step()
+        warning_context = (
+            pytest.warns(UserWarning, match="Skipping stats .*layer uses NVFP4")
+            if "scale_inv_std" in fp8_stats
+            else contextlib.nullcontext()
+        )
+        with warning_context:
+            for _ in range(2):
+                with te.autocast(recipe=recipe.NVFP4BlockScaling()):
+                    output = model(inp)
+                output.sum().backward()
+                debug_api.step()
 
         output = read_log(log_dir)
-        # Should have logged MXFP8 MSE stat (what-if scenario)
-        assert "mxfp8_mse" in output
+        assert "nvfp4_scale_inv_std" in output
+        assert ("mxfp8_mse" in output) == ("mxfp8_mse" in fp8_stats)
 
 
 def test_log_grouped_gemm(feature_dirs):
