@@ -184,6 +184,11 @@ void bind_quantize_with_amax_extensions(py::module_ &m) {
         py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"),
         py::arg("last_dims") = py::none(), py::arg("rowwise_amax"), py::arg("columnwise_amax"),
         py::arg("tensor_offsets") = py::none());
+  m.def("nvfp4_group_row_scaled_cast_graph_safe",
+        transformer_engine::pytorch::nvfp4_group_row_scaled_cast_graph_safe, py::arg("tensor"),
+        py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"),
+        py::arg("tensor_offsets"),
+        "CUDA-graph-safe grouped row-scaled NVFP4 cast (amax + cast) from device routing");
 }
 
 }  // namespace transformer_engine::pytorch

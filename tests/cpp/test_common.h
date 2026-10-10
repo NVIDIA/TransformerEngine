@@ -108,11 +108,15 @@ struct TypeInfo {
     struct Helper {
         constexpr static DType getType() {
             constexpr int i = static_cast<int>(current);
-            if (std::is_same<U, typename std::tuple_element<i, types>::type>::value) {
-                return current;
-            } else {
-                return Helper<U, static_cast<DType>(i + 1)>::getType();
+            // The DType enum carries values (e.g. kFloat8UE5M3) whose type is only
+            // added to ``types`` on CUDA >= 13.4, so guard the tuple access to keep
+            // the enum walk from indexing past the tuple on older toolkits.
+            if constexpr (i < static_cast<int>(std::tuple_size<types>::value)) {
+                if (std::is_same<U, typename std::tuple_element<i, types>::type>::value) {
+                    return current;
+                }
             }
+            return Helper<U, static_cast<DType>(i + 1)>::getType();
         }
     };
 
