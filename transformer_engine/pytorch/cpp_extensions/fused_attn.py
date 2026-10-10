@@ -103,13 +103,14 @@ class FusedAttnBackend(IntEnum):
     """Fused attention sub-backends.
 
     This is the canonical fused-attention backend enum for
-    ``transformer_engine.pytorch``. It mirrors every member of the backend
-    ``transformer_engine_torch.NVTE_Fused_Attn_Backend`` (pybind11) enum
-    value-for-value, and instances of the two enums compare equal when they
-    share the same integer value. Unlike the pybind enum, a plain-python
-    ``IntEnum`` is traceable by ``torch.compile``: comparisons against a member
-    constant-fold cleanly. Lookup by name (``FusedAttnBackend["FP8"]``) works
-    the same way as with the dict this used to be.
+    ``transformer_engine.pytorch``: the C++ backends from
+    ``transformer_engine_torch.NVTE_Fused_Attn_Backend`` (pybind11), mirrored
+    value-for-value so instances of the two enums compare equal, plus
+    ``FROST``, which runs through the cuDNN Frontend python API and so has no
+    C++ counterpart. Unlike the pybind enum, a plain-python ``IntEnum`` is
+    traceable by ``torch.compile``: comparisons against a member constant-fold
+    cleanly. Lookup by name (``FusedAttnBackend["FP8"]``) works the same way as
+    with the dict this used to be.
 
     Members do not survive a graph break, though, so ``get_attention_backend``
     returns the sub-backend as a plain int and ``cast`` turns it back into a
@@ -120,8 +121,9 @@ class FusedAttnBackend(IntEnum):
     F16_arbitrary_seqlen = int(NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen)
     FP8 = int(NVTE_Fused_Attn_Backend.NVTE_FP8)
     # Python-only: FROST runs through the cuDNN Frontend python API, so it has no
-    # NVTE_Fused_Attn_Backend counterpart and never reaches pybind.
-    FROST = 3
+    # NVTE_Fused_Attn_Backend counterpart and never reaches pybind. Derived rather than
+    # hardcoded so a new C++ enumerator shifts it instead of colliding with it.
+    FROST = max(int(v) for v in NVTE_Fused_Attn_Backend.__members__.values()) + 1
 
     @classmethod
     def cast(
