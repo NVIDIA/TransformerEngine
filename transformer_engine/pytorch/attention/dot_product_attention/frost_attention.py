@@ -605,8 +605,8 @@ def fused_attn_fwd(
 
     Mirrors that signature so FusedAttnFunc and the context-parallel ring reach these kernels
     without knowing which sub-backend they got. Returns (out, aux_ctx_tensors) with
-    aux_ctx_tensors = [softmax_lse, rng_state]; softmax_lse is [b, h, s] fp32 natural-log
-    logsumexp, which is what the ring correction consumes.
+    aux_ctx_tensors = [softmax_lse, rng_state]; softmax_lse is [b, h, s, 1] fp32 natural-log
+    logsumexp, matching the C++ fused_attn_fwd, which the ring correction squeezes itself.
 
     cu_seqlens and the padded variants are ignored: they carry thd offsets, and thd is declined
     at selection.
@@ -653,7 +653,7 @@ def fused_attn_fwd(
     # A real tensor, not None: it is saved for backward and handed to the activation offload
     # hooks, neither of which accepts None. FROST has no dropout, so nothing reads it.
     rng_state = torch.empty(2, dtype=torch.int64, device=q.device)
-    return out, [lse.squeeze(-1), rng_state]
+    return out, [lse, rng_state]
 
 
 def fused_attn_bwd(
@@ -783,4 +783,4 @@ def fused_attn_bwd(
         q.device,
         backend_name=_BACKEND_NAME,
     )
-    return dq, dk, dv, None
+    return dq, dk, dv, None, None

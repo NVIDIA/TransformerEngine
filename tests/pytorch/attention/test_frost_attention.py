@@ -82,7 +82,7 @@ def _bwd(q, k, v, out, lse, dout, mask, scale, window=None):
         fused_attn_bwd,
     )
 
-    dq, dk, dv, _ = fused_attn_bwd(
+    dq, dk, dv, *_ = fused_attn_bwd(
         q.shape[1],
         k.shape[1],
         None,
@@ -260,13 +260,13 @@ def test_frost_matches_reference(shape, mask, window, dtype):
     )
     # The LSE convention is what the CP ring correction depends on, so check it explicitly: a
     # log2-based or unscaled LSE would still give a plausible-looking output above.
-    err_l = (lse.double() - exact_lse).abs().max().item()
+    err_l = (lse.squeeze(-1).double() - exact_lse).abs().max().item()
     assert err_l <= 2 * floor_l + 1e-3, "lse err %.3e exceeds 2x the %s floor %.3e" % (
         err_l,
         dtype,
         floor_l,
     )
-    assert lse.shape == (b, hq, sq), "lse must be [b, h, s]; got %s" % (tuple(lse.shape),)
+    assert lse.shape == (b, hq, sq, 1), "lse must be [b, h, s, 1]; got %s" % (tuple(lse.shape),)
     assert lse.dtype == torch.float32, "lse must be fp32; got %s" % lse.dtype
 
     ref_o.backward(_bhsd(dout).double())
@@ -314,7 +314,7 @@ def test_frost_bottom_right_forward_matches_reference():
     assert torch.isfinite(out).all(), "forward produced non-finite values"
     err_o = (_bhsd(out).double() - ref_o).abs().max().item()
     assert err_o <= 2 * floor_o + 1e-3, "out err %.3e exceeds 2x the floor %.3e" % (err_o, floor_o)
-    err_l = (lse.double() - ref_lse).abs().max().item()
+    err_l = (lse.squeeze(-1).double() - ref_lse).abs().max().item()
     assert err_l <= 2 * floor_l + 1e-3, "lse err %.3e exceeds 2x the floor %.3e" % (err_l, floor_l)
 
 
