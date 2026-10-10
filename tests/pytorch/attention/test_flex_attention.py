@@ -839,6 +839,7 @@ def test_frost_switch_does_not_change_what_flex_computes():
         without,
         msg=lambda m: (
             "flex computed something different with the FROST engines enabled, which means a"
-            " FROST plan answered and dropped the score_mod:\n" + m
+            " FROST plan answered and dropped the score_mod:\n"
+            + m
         ),
     )

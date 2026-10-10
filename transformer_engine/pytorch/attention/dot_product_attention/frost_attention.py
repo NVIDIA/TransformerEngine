@@ -423,11 +423,10 @@ def _frost_plan_args(token: str, what: str) -> dict:
     def hint():
         return (
             f"Wanted the FROST {what} engine."
-            " nvidia-cudnn-frontend="
-            f"{cudnn_pygraph.pkg_version('nvidia-cudnn-frontend', cudnn_pygraph.cudnn_module())[1] or 'unknown'}"
-            f" (floor {_MIN_CUDNN_FRONTEND}),"
-            f" nvidia-cutlass-dsl={cudnn_pygraph.pkg_version('nvidia-cutlass-dsl')[1] or 'unknown'}"
-            f" (floor {_MIN_CUTLASS_DSL})."
+            f" nvidia-cudnn-frontend={cudnn_pygraph.pkg_version('nvidia-cudnn-frontend', cudnn_pygraph.cudnn_module())[1] or 'unknown'} (floor"
+            f" {_MIN_CUDNN_FRONTEND}),"
+            f" nvidia-cutlass-dsl={cudnn_pygraph.pkg_version('nvidia-cutlass-dsl')[1] or 'unknown'} (floor"
+            f" {_MIN_CUTLASS_DSL})."
         )
 
     cudnn = _import_cudnn_frontend()
