@@ -139,6 +139,8 @@ class FlashAttentionUtils:
     fa3_version = PkgVersion("0")
     v3_0_0_beta = False
     use_v3 = False
+    # Set by backends.py after importing the active FA3 implementation.
+    fa3_backward: Optional[Callable] = None
     # FA3 from FA 2.7.3+/hopper has different APIs than FA3 from 2.7.2/hopper
     # Please follow these instructions to install FA3
     v3_installation_steps = """\
@@ -195,6 +197,60 @@ pip install flash-attn-4==4.0.0b11 nvidia-cutlass-dsl[cu13]"""
         Setup version info for FA v4.x
         """
         FlashAttentionUtils.v4_is_installed = True
+
+
+@functools.lru_cache(maxsize=128)
+def _check_fa3_backward_support(backward, head_dim_qk, head_dim_v, dtype, device_index):
+    """Check the loaded FA3 backward's shape contract without launching kernels.
+
+    FA3 builds before and after Dao-AILab/flash-attention#1604 share the same
+    package version and Python signature. Empty dense sequences still execute
+    the native shape checks, but skip backward kernels and allocate no CUDA storage.
+    Cache by callable, device, dtype, and dimensions; never retain tensors.
+    """
+    with torch.cuda.device(device_index), torch.inference_mode():
+        q = torch.empty((1, 0, 1, head_dim_qk), dtype=dtype, device="cuda")
+        v = torch.empty((1, 0, 1, head_dim_v), dtype=dtype, device="cuda")
+        lse = torch.empty((1, 1, 0), dtype=torch.float32, device="cuda")
+        try:
+            dq, dk, dv, *_ = backward(
+                v,
+                q,
+                q,
+                v,
+                v,
+                lse,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                head_dim_qk**-0.5,
+                False,
+            )
+        except (RuntimeError, TypeError, ValueError) as error:
+            return False, str(error)
+        if dq.shape != q.shape or dk.shape != q.shape or dv.shape != v.shape:
+            return False, "FA3 backward returned incompatible gradient shapes"
+    return True, ""
+
+
+@torch.compiler.assume_constant_result
+def _get_fa3_backward_support(head_dim_qk, head_dim_v, dtype, device=None):
+    """Constant-foldable capability query for the active FA3 backward implementation."""
+    backward = FlashAttentionUtils.fa3_backward
+    if backward is None:
+        return False, "FA3 backward is unavailable"
+    device_index = (
+        device.index
+        if device is not None and device.index is not None
+        else torch.cuda.current_device()
+    )
+    return _check_fa3_backward_support(backward, head_dim_qk, head_dim_v, dtype, device_index)
 
 
 @dataclass(eq=True)
@@ -1090,6 +1146,32 @@ def get_attention_backend(
                 qkv_dtype,
             )
             use_flash_attention_3 = False
+
+        # FA3 forward supports V dimensions up to 512, but backward is limited to 256.
+        if use_flash_attention_3 and is_training and head_dim_v > 256:
+            logger.debug(
+                "Disabling FlashAttention 3 for training with head_dim_v > 256, "
+                "as its backward pass only supports head dimensions up to 256. "
+                "Found: head_dim_qk = %s, head_dim_v = %s.",
+                head_dim_qk,
+                head_dim_v,
+            )
+            use_flash_attention_3 = False
+
+        if use_flash_attention_3 and is_training and head_dim_qk != head_dim_v:
+            supports_backward, backward_reason = _get_fa3_backward_support(
+                head_dim_qk, head_dim_v, qkv_dtype, attention_params.device
+            )
+            if not supports_backward:
+                logger.debug(
+                    "Disabling FlashAttention 3 for training with unequal QK/V dimensions: "
+                    "the installed backward implementation does not accept them (%s). "
+                    "Found: head_dim_qk = %s, head_dim_v = %s.",
+                    backward_reason,
+                    head_dim_qk,
+                    head_dim_v,
+                )
+                use_flash_attention_3 = False
 
     if (
         use_flash_attention_4
