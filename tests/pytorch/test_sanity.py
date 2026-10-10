@@ -35,6 +35,7 @@ from transformer_engine.pytorch import (
     is_bf16_available,
 )
 from transformer_engine.common import recipe
+from transformer_engine.pytorch.models import DeepSeekV3Layer
 from transformer_engine.pytorch.cpp_extensions import general_gemm
 from transformer_engine.pytorch.tensor.utils import replace_raw_data
 from transformer_engine.pytorch.module import (
@@ -285,7 +286,7 @@ def _test_sanity_e2e_gradient_accumulation_fusion(block, dtype, config, fp8_reci
     ), f"grad_added_to_main_grad not set to True for {failed_grad_added_flags}."
 
 
-def _test_sanity_e2e(block, dtype, config, fp8_recipe, skip_wgrad):
+def _test_sanity_e2e(block, dtype, config, fp8_recipe, skip_wgrad, *, check_finite=False):
     te_inp_hidden_states = torch.randn(
         (config.max_seqlen_q, config.batch_size, config.hidden_size),
         dtype=dtype,
@@ -302,6 +303,14 @@ def _test_sanity_e2e(block, dtype, config, fp8_recipe, skip_wgrad):
     loss = te_out.sum()
     loss.backward()
     torch.cuda.synchronize()
+
+    if check_finite:
+        assert torch.isfinite(te_out).all(), "Non-finite output"
+        assert torch.isfinite(te_inp_hidden_states.grad).all(), "Non-finite input gradient"
+        for name, parameter in block.named_parameters():
+            if parameter.requires_grad:
+                assert parameter.grad is not None, name
+                assert torch.isfinite(parameter.grad).all(), name
 
 
 def _test_sanity_e2e_bert(block, dtype, config, fp8_recipe, skip_wgrad):
@@ -858,6 +867,41 @@ def test_sanity_logical_activation_shapes(kind, shape, noncontiguous, monkeypatc
     assert {"TN", "NN", "NT"}.issubset(seen_gemm_layouts)
     if kind != "linear":
         assert set(seen_norm_stages) == {"fwd", "bwd"}
+
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes, ids=recipe_id)
+@pytest.mark.parametrize("moe", all_boolean, ids=["moe", "dense"])
+def test_sanity_deepseek_v3_layer(dtype, fp8_recipe, moe):
+    config = model_configs["small"]
+
+    if fp8_recipe is not None:
+        if not is_fp8_supported(config):
+            pytest.skip("Model config does not support FP8")
+        if fp8_recipe.nvfp4() and dtype == torch.float16:
+            pytest.skip("FP16 output for NVFP4 not supported")
+        if fp8_recipe.nvfp4() and moe and dtype != torch.bfloat16:
+            pytest.skip("NVFP4 GroupedLinear requires BF16")
+
+    mlp_kwargs = (
+        dict(num_experts=4, topk=2, moe_ffn_hidden_size=64, shared_expert_ffn_hidden_size=64)
+        if moe
+        else dict(ffn_hidden_size=4 * config.hidden_size)
+    )
+    block = DeepSeekV3Layer(
+        config.hidden_size,
+        config.num_heads,
+        q_lora_rank=64,
+        kv_lora_rank=64,
+        qk_nope_head_dim=32,
+        qk_rope_head_dim=32,
+        v_head_dim=32,
+        params_dtype=dtype,
+        device="cuda",
+        **mlp_kwargs,
+    )
+
+    _test_sanity_e2e(block, dtype, config, fp8_recipe, skip_wgrad=False, check_finite=True)
 
 
 @pytest.mark.parametrize("dtype", param_types)

@@ -103,10 +103,11 @@ class MoeDispatch(BasicOperation):
         next_op_input_quantizer: Optional[Quantizer],
         basic_op_kwargs: list[dict[str, Any]],
     ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
-        del next_op_input_quantizer, basic_op_kwargs
+        del next_op_input_quantizer
         topk_idx, topk_weights = basic_op_extra_inputs[0]
         ctx = basic_op_ctxs[0]
-        buffer = validate_ep_buffer("MoeDispatch", self.config, self.buffer)
+        kwargs = basic_op_kwargs[0]
+        buffer = validate_ep_buffer("MoeDispatch", self.config, kwargs.get("buffer", self.buffer))
         input_shape = _validate_dispatch_input(input_, buffer)
         buffer.num_local_tokens = input_shape[0]
         _validate_routing_inputs(
