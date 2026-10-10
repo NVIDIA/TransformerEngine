@@ -2430,12 +2430,20 @@ class GroupedLinear(TransformerEngineBaseModule):
             weight_params = self._get_weight_tensors()
             if not self.fuse_wgrad_accumulation:
                 if self.single_grouped_weight:
-                    weight_params[0].grad = wgrad_output.rowwise_data.view(
+                    wgrad = wgrad_output.rowwise_data.view(
                         self.num_gemms, self.out_features, self.in_features
                     ).to(weight_params[0].dtype)
+                    if weight_params[0].grad is None:
+                        weight_params[0].grad = wgrad
+                    else:
+                        weight_params[0].grad.add_(wgrad)
                 else:
                     for i in range(self.num_gemms):
-                        weight_params[i].grad = wgrad_output[i].to(weight_params[i].dtype)
+                        wgrad = wgrad_output[i].to(weight_params[i].dtype)
+                        if weight_params[i].grad is None:
+                            weight_params[i].grad = wgrad
+                        else:
+                            weight_params[i].grad.add_(wgrad)
             has_grad_biases = [
                 grad_bias is not None and grad_bias.numel() != 0 for grad_bias in grad_biases_
             ]
@@ -2450,8 +2458,12 @@ class GroupedLinear(TransformerEngineBaseModule):
                     )
                 bias_params = [getattr(self, f"bias{i}") for i in range(self.num_gemms)]
                 for i in range(self.num_gemms):
-                    if has_grad_biases[i] and bias_params[i].grad is None:
-                        bias_params[i].grad = grad_biases_[i].to(bias_params[i].dtype)
+                    if has_grad_biases[i]:
+                        bgrad = grad_biases_[i].to(bias_params[i].dtype)
+                        if bias_params[i].grad is None:
+                            bias_params[i].grad = bgrad
+                        else:
+                            bias_params[i].grad.add_(bgrad)
             del grad_biases_
             del wgrad_output
             del tensor_list
