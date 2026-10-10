@@ -29,6 +29,7 @@ class TensorSpec:
     quantizer: Optional[Any] = None
     requires_grad: bool = False
     device: Optional[torch.device] = field(default=None)
+    with_gemm_swizzled_scales: Optional[bool] = None
 
     def __post_init__(self) -> None:
         # Own a private copy of the quantizer so usage changes (update_usage)
@@ -37,6 +38,10 @@ class TensorSpec:
         if self.quantizer is not None:
             q = self.quantizer
             self.quantizer = q.copy() if hasattr(q, "copy") else _copy.copy(q)
+            if self.with_gemm_swizzled_scales is None:
+                self.with_gemm_swizzled_scales = self.quantizer.storage_metadata(self.dtype)[
+                    "nontensor_kwargs"
+                ].get("with_gemm_swizzled_scales")
 
     @property
     def is_quantized(self) -> bool:
@@ -94,9 +99,12 @@ class TensorSpec:
                 "dtype": self.dtype,
                 "requires_grad": self.requires_grad,
             }
-        return self.quantizer.create_metadata(
+        meta = self.quantizer.create_metadata(
             tuple(self.shape), dtype=self.dtype, requires_grad=self.requires_grad
         )
+        if self.with_gemm_swizzled_scales is not None:
+            meta["nontensor_kwargs"]["with_gemm_swizzled_scales"] = self.with_gemm_swizzled_scales
+        return meta
 
     def create_inner_tensors(self) -> List[torch.Tensor]:
         """Materialize the flat inner tensors (in :meth:`inner_names` order).
@@ -162,4 +170,5 @@ def to_tensor_spec(tensor: Any) -> TensorSpec:
         quantizer=getattr(tensor, "_quantizer", None),
         requires_grad=requires_grad,
         device=tensor.device,
+        with_gemm_swizzled_scales=getattr(tensor, "_with_gemm_swizzled_scales", None),
     )
