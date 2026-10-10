@@ -186,55 +186,6 @@ def _floor(q32, k32, v32, scale, mask, dtype, window=None):
     )
 
 
-# bf16 everywhere, fp16 on two shapes. What fp16 risks that bf16 does not is its narrower
-# exponent range, and that surfaces in the backward, which runs both dtypes on every shape it
-# covers. Crossing it with every forward shape pays for the same information twice.
-_FWD_CASES = [(s, torch.bfloat16) for s in _SHAPES] + [(s, torch.float16) for s in _SHAPES[:2]]
-_FWD_IDS = [
-    "%s_%s" % (_shape_id(s), "bf16" if d is torch.bfloat16 else "fp16") for s, d in _FWD_CASES
-]
-
-
-@requires_frost
-@pytest.mark.parametrize("shape,dtype", _FWD_CASES, ids=_FWD_IDS)
-@pytest.mark.parametrize("mask", ["no_mask", "causal", "causal_bottom_right"])
-def test_frost_forward_matches_reference(shape, mask, dtype):
-    """Forward output and LSE against an independent float64 reference."""
-    b, hq, hkv, sq, skv, d = shape
-    torch.manual_seed(0)
-    # Generate in fp32 so there is a true high-precision original to measure against, then cast
-    # for the kernel. bshd is what the backend takes now: it is never permuted, only described.
-    mk = lambda s_, h_, d_: torch.randn(b, s_, h_, d_, device="cuda")
-    q32, k32, v32 = mk(sq, hq, d), mk(skv, hkv, d), mk(skv, hkv, d)
-    q, k, v = q32.to(dtype), k32.to(dtype), v32.to(dtype)
-    scale = 1.0 / math.sqrt(d)
-
-    out, lse = _fwd(q, k, v, mask, scale)
-
-    floor_o, floor_l, ref_o, ref_lse = _floor(
-        _bhsd(q32), _bhsd(k32), _bhsd(v32), scale, mask, dtype
-    )
-    err_o = (_bhsd(out).double() - ref_o).abs().max().item()
-    err_l = (lse.double() - ref_lse).abs().max().item()
-
-    assert torch.isfinite(out).all(), "forward produced non-finite values"
-    # A floor of exactly zero would make the ratio meaningless; guard with a small absolute term.
-    assert err_o <= 2 * floor_o + 1e-3, "out err %.3e exceeds 2x the %s floor %.3e" % (
-        err_o,
-        dtype,
-        floor_o,
-    )
-    # The LSE convention is what the CP ring correction depends on, so check it explicitly: a
-    # log2-based or unscaled LSE would still give a plausible-looking output above.
-    assert err_l <= 2 * floor_l + 1e-3, "lse err %.3e exceeds 2x the %s floor %.3e" % (
-        err_l,
-        dtype,
-        floor_l,
-    )
-    assert lse.shape == (b, hq, sq), "lse must be [b, h, s]; got %s" % (tuple(lse.shape),)
-    assert lse.dtype == torch.float32, "lse must be fp32; got %s" % lse.dtype
-
-
 @requires_frost
 # (128, 0) is the ordinary case and (0, 0) the degenerate diagonal-only one, which is where an
 # off-by-one in the band would show. A second ordinary width tests the same arithmetic again.
@@ -281,8 +232,8 @@ def test_frost_sliding_window_matches_reference(mask, window, sq, skv):
 @pytest.mark.parametrize("mask", ["no_mask", "causal"])
 @pytest.mark.parametrize("window", [None, (128, 0)], ids=["nowin", "win128"])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
-def test_frost_backward_matches_reference(shape, mask, window, dtype):
-    """dq/dk/dv against autograd on the same independent float64 reference.
+def test_frost_matches_reference(shape, mask, window, dtype):
+    """Forward output, LSE and dq/dk/dv against one independent float64 reference.
 
     Both dtypes, not just bf16: fp16 has a much narrower exponent range, and the backward is where
     that would show first -- the gradient of a softmax involves a subtraction of similarly sized
@@ -300,10 +251,46 @@ def test_frost_backward_matches_reference(shape, mask, window, dtype):
     dq, dk, dv = _bwd(q, k, v, out, lse, dout, mask, scale, window)
 
     # The reference works in [b, h, s, d], so it takes views and returns grads in that order.
+    # One evaluation serves both halves: its outputs are the exact forward answer, and it is
+    # also what autograd differentiates for the gradients below.
     qr = _bhsd(q32).detach().clone().requires_grad_(True)
     kr = _bhsd(k32).detach().clone().requires_grad_(True)
     vr = _bhsd(v32).detach().clone().requires_grad_(True)
-    ref_o, _ = _reference(qr, kr, vr, scale, mask, window)
+    ref_o, ref_lse = _reference(qr, kr, vr, scale, mask, window)
+
+    # The error dtype inputs alone cause, which is the bar the forward is measured against. The
+    # reference works in [b, h, s, d], so these are the same views qr/kr/vr were built from.
+    lossy_o, lossy_lse = _reference(
+        _bhsd(q32).to(dtype).double(),
+        _bhsd(k32).to(dtype).double(),
+        _bhsd(v32).to(dtype).double(),
+        scale,
+        mask,
+        window,
+    )
+    exact_o, exact_lse = ref_o.detach(), ref_lse.detach()
+    floor_o = (exact_o - lossy_o).abs().max().item()
+    floor_l = (exact_lse - lossy_lse).abs().max().item()
+
+    assert torch.isfinite(out).all(), "forward produced non-finite values"
+    # A floor of exactly zero would make the ratio meaningless; guard with a small absolute term.
+    err_o = (_bhsd(out).double() - exact_o).abs().max().item()
+    assert err_o <= 2 * floor_o + 1e-3, "out err %.3e exceeds 2x the %s floor %.3e" % (
+        err_o,
+        dtype,
+        floor_o,
+    )
+    # The LSE convention is what the CP ring correction depends on, so check it explicitly: a
+    # log2-based or unscaled LSE would still give a plausible-looking output above.
+    err_l = (lse.double() - exact_lse).abs().max().item()
+    assert err_l <= 2 * floor_l + 1e-3, "lse err %.3e exceeds 2x the %s floor %.3e" % (
+        err_l,
+        dtype,
+        floor_l,
+    )
+    assert lse.shape == (b, hq, sq), "lse must be [b, h, s]; got %s" % (tuple(lse.shape),)
+    assert lse.dtype == torch.float32, "lse must be fp32; got %s" % lse.dtype
+
     ref_o.backward(_bhsd(dout).double())
 
     for name, got, want in (
