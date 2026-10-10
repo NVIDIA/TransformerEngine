@@ -310,6 +310,36 @@ def test_frost_matches_reference(shape, mask, window, dtype):
         )
 
 
+@requires_frost
+def test_frost_bottom_right_forward_matches_reference():
+    """Unwindowed bottom-right alignment on a rectangular shape, output and LSE.
+
+    Neither of the tests above reaches this. The folded one parametrises no_mask and causal on
+    square shapes, and the sliding-window one covers causal_bottom_right on a rectangular shape
+    but always with a window, and discards the LSE. Top-left and bottom-right coincide when
+    sq == skv, so a swapped anchor is invisible anywhere else, and the LSE is what the
+    context-parallel correction consumes.
+    """
+    b, hq, hkv, sq, skv, d = _SHAPES[2]
+    dtype = torch.bfloat16
+    torch.manual_seed(0)
+    mk = lambda s_, h_: torch.randn(b, s_, h_, d, device="cuda")
+    q32, k32, v32 = mk(sq, hq), mk(skv, hkv), mk(skv, hkv)
+    q, k, v = q32.to(dtype), k32.to(dtype), v32.to(dtype)
+    scale = 1.0 / math.sqrt(d)
+
+    out, lse = _fwd(q, k, v, "causal_bottom_right", scale)
+
+    floor_o, floor_l, ref_o, ref_lse = _floor(
+        _bhsd(q32), _bhsd(k32), _bhsd(v32), scale, "causal_bottom_right", dtype
+    )
+    assert torch.isfinite(out).all(), "forward produced non-finite values"
+    err_o = (_bhsd(out).double() - ref_o).abs().max().item()
+    assert err_o <= 2 * floor_o + 1e-3, "out err %.3e exceeds 2x the floor %.3e" % (err_o, floor_o)
+    err_l = (lse.double() - ref_lse).abs().max().item()
+    assert err_l <= 2 * floor_l + 1e-3, "lse err %.3e exceeds 2x the floor %.3e" % (err_l, floor_l)
+
+
 def _frost_params(**overrides):
     """A FusedAttentionParams for a config FROST serves, with fields overridable by name."""
     from transformer_engine.pytorch.attention.dot_product_attention.utils import (
