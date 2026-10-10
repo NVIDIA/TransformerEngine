@@ -178,9 +178,7 @@ Then it applies a performance-based preference order among the remaining eligibl
 In PyTorch, the broad preference order is ``FlashAttention > FusedAttention >
 UnfusedDotProductAttention`` on supported pre-Hopper GPUs such as Ampere/Ada, and
 ``FusedAttention > FlashAttention > UnfusedDotProductAttention`` on Hopper and newer GPUs,
-including Blackwell. On Blackwell SM100/SM103, FusedAttention has an extra sub-backend, FROST,
-which is selected only for symmetric ``head_dim`` in (256, 512] and only when the cuDNN
-sub-backends decline; it does not change the order above. In JAX, Transformer Engine uses cuDNN
+including Blackwell. In JAX, Transformer Engine uses cuDNN
 fused attention when ``NVTE_FUSED_ATTN=1`` and an eligible cuDNN kernel is available; otherwise
 it falls back to the JAX-native implementation. See :doc:`examples/attention/attention` for a
 longer backend-selection overview.

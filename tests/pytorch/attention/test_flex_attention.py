@@ -805,21 +805,21 @@ def test_frost_switch_does_not_change_what_flex_computes():
     dtype = torch.bfloat16 if is_bf16_available() else torch.float16
     q, k, v = (torch.randn(b, s, h, d, device="cuda", dtype=dtype) for _ in range(3))
 
-    def bias_score_mod(score_mod_graph, score_tensor, _tensors):
-        """score += (row - col). Self-contained, and large enough that dropping it is obvious."""
-        cudnn = flex_attention._import_cudnn_frontend()
-        row = score_mod_graph.gen_index(input=score_tensor, axis=2)
-        row.set_data_type(cudnn.data_type.INT32)
-        col = score_mod_graph.gen_index(input=score_tensor, axis=3)
-        col.set_data_type(cudnn.data_type.INT32)
-        bias = score_mod_graph.sub(a=row, b=col, compute_data_type=cudnn.data_type.FLOAT)
-        bias.set_data_type(cudnn.data_type.FLOAT)
-        return score_mod_graph.add(a=score_tensor, b=bias, compute_data_type=cudnn.data_type.FLOAT)
-
     def run():
         flex_attention._cudnn_score_mod_graph_cache.clear()
         return flex_attention.FusedAttentionWithScoreModFunc.apply(
-            False, q, k, v, "bshd", "bshd", d**-0.5, bias_score_mod, None, None, None, False
+            False,
+            q,
+            k,
+            v,
+            "bshd",
+            "bshd",
+            d**-0.5,
+            _score_mod_post_scale_bias,
+            None,
+            None,
+            None,
+            False,
         )
 
     try:
@@ -839,7 +839,6 @@ def test_frost_switch_does_not_change_what_flex_computes():
         without,
         msg=lambda m: (
             "flex computed something different with the FROST engines enabled, which means a"
-            " FROST plan answered and dropped the score_mod:\n"
-            + m
+            " FROST plan answered and dropped the score_mod:\n" + m
         ),
     )

@@ -758,15 +758,7 @@ def test_cp_with_fused_attention(
 
 
 def _frost_availability():
-    """Why FrostAttention cannot run here, or None if it can.
-
-    The backend needs cuDNN Frontend >= 1.29.0 and, less obviously,
-    nvidia-cutlass-dsl >= 4.7.0: cudnn-frontend only declares >= 4.6.2, and below the FROST floor
-    every FROST engine silently declines and ordinary backend plans are returned with no error.
-    Reporting the reason as a skip keeps that distinguishable from a real failure.
-    """
-    if get_device_compute_capability() not in ((10, 0), (10, 3)):
-        return "FrostAttention requires SM100/SM103 (the cuDNN d512 backward is Blackwell-only)."
+    """Why FrostAttention cannot run here, or None if it can."""
     from transformer_engine.pytorch.attention.dot_product_attention.frost_attention import (
         is_frost_attention_available,
     )
@@ -805,12 +797,7 @@ def test_cp_with_frost_attention(cp_pool, model, qkv_format, cp_comm_type):
 
 
 def test_cp_with_frost_attention_a2a_p2p(cp_pool):
-    """One case, because a2a+p2p composes rather than adding a path.
-
-    It dispatches to the same AttnFuncWithCPAndKVP2P as plain p2p, with an a2a communication stage
-    on either side of the ring, and it needs four ranks rather than two. One case says the
-    composition works; six would pay four-rank prices to re-cover p2p.
-    """
+    """One case, because a2a+p2p composes rather than adding a path."""
     reason = _frost_availability()
     if reason is not None:
         pytest.skip(reason)

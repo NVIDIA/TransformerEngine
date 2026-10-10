@@ -12,7 +12,7 @@ import torch
 
 from . import cudnn_pygraph
 
-_BACKEND_NAME = "Flex Attention"
+_BACKEND_NAME = "FlexAttention"
 _cudnn_score_mod_graph_cache: Dict[Tuple[Any, ...], Any] = {}
 _SCORE_MOD_UNCACHEABLE = object()
 

@@ -456,10 +456,13 @@ def _get_fused_attn_backend(**fused_attn_kwargs):
             is_frost_attention_supported,
         )
 
-        frost_backend, frost_reject = is_frost_attention_supported(params)
+        frost_backend, frost_reject_message = is_frost_attention_supported(params)
         if frost_backend != FusedAttnBackend.No_Backend:
-            return int(frost_backend), frost_reject
-        reject_message = f"{reject_message.rstrip('. ')}. {frost_reject}"
+            return int(frost_backend), frost_reject_message
+        reject_message = (
+            f"[CPP sub-backends] {reject_message.rstrip('. ')}."
+            f" [Python sub-backends] {frost_reject_message.rstrip('. ')}."
+        )
     return int(fused_attention_backend), reject_message
 
 

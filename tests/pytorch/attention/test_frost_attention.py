@@ -4,13 +4,6 @@
 
 """Numerical tests for the cuDNN FROST attention backend.
 
-These exist because the CP tests cannot catch what this backend is most likely to get wrong.
-run_attention_with_cp.py compares a context-parallel run against a non-CP run *of the same
-backend*, which validates the ring plumbing and nothing about the kernel: a systematic error --
-a wrong softmax scale, a causal mask anchored to the wrong corner, an LSE in the wrong log base
--- appears identically on both sides and cancels. Everything here is anchored to an independent
-float64 reference instead.
-
 The pass criterion is the one FlashAttention applies to itself: the kernel's error against that
 reference must stay within 2x the error the reference itself incurs from reduced-precision
 inputs. That floor is measured per case rather than hard-coded, so the bar tracks the shape and
@@ -28,15 +21,9 @@ import os
 import pytest
 import torch
 
-from transformer_engine.pytorch import get_device_compute_capability
-
 
 def _frost_availability():
     """Why FrostAttention cannot run here, or None if it can."""
-    if not torch.cuda.is_available():
-        return "no CUDA device"
-    if get_device_compute_capability() not in ((10, 0), (10, 3)):
-        return "FrostAttention requires SM100/SM103 (the cuDNN d512 backward is Blackwell-only)."
     from transformer_engine.pytorch.attention.dot_product_attention.frost_attention import (
         is_frost_attention_available,
     )
@@ -46,15 +33,10 @@ def _frost_availability():
 
 
 _SKIP = _frost_availability()
-# Mirrors NVTE_GDN_TEST_REQUIRED: these skip on any machine that cannot reach the backend.
 if os.getenv("NVTE_FROST_TEST_REQUIRED", "0") == "1" and _SKIP is not None:
     raise RuntimeError("NVTE_FROST_TEST_REQUIRED=1, but FrostAttention is unavailable: %s" % _SKIP)
-# Per test, not a module-level pytestmark: the ONNX-export regression below runs on every GPU, so
-# gating it on Blackwell would skip it exactly where its bug can still occur.
 requires_frost = pytest.mark.skipif(_SKIP is not None, reason=str(_SKIP))
 
-# head_dim 512 is the whole point of the backend; 320 checks the interior of the (256, 512] range
-# rather than only its endpoint.
 _SHAPES = [
     # b, hq, hkv, sq, skv, d
     (2, 8, 4, 1024, 1024, 512),  # Gemma-4 global layer, GQA
@@ -69,11 +51,7 @@ def _shape_id(s):
 
 
 def _fwd(q, k, v, mask, scale, window=None):
-    """The forward through the fused signature, which is the only entry point the backend has.
-
-    Everything is bshd here, because the shim derives one qkv_format and makes the tensors
-    contiguous; that is exactly what the dispatcher hands it in production.
-    """
+    """The forward through the fused signature, which is the only entry point the backend has."""
     from transformer_engine.pytorch.attention.dot_product_attention.frost_attention import (
         fused_attn_fwd,
     )
@@ -390,6 +368,20 @@ def test_frost_declines_unsupported_configs():
         is_frost_attention_supported(_frost_params())[0] == FusedAttnBackend.FROST
     ), "the supported case must be accepted"
 
+    # The window anchor is only ambiguous when the q and kv lengths differ; equal lengths serve.
+    assert (
+        is_frost_attention_supported(
+            _frost_params(
+                attn_mask_type=AttnMaskType["no_mask"],
+                window_size_left=128,
+                window_size_right=0,
+                max_seqlen_q=4096,
+                max_seqlen_kv=4096,
+            )
+        )[0]
+        == FusedAttnBackend.FROST
+    ), "an unambiguous window on a non-causal mask must be served"
+
     for override, why in (
         (dict(head_dim_qk=256, head_dim_v=256), "head_dim at the exclusive lower bound"),
         (dict(head_dim_v=256), "head_dim_v below the range"),
@@ -432,24 +424,6 @@ def test_frost_declines_unsupported_configs():
         backend, reason = is_frost_attention_supported(_frost_params(**override))
         assert backend == FusedAttnBackend.No_Backend, "%s must be declined" % why
         assert reason, "a decline must explain itself"
-
-
-@requires_frost
-def test_frost_serves_an_unambiguous_window_on_a_non_causal_mask():
-    """The anchor is only ambiguous when the q and kv lengths differ; equal lengths must serve."""
-    from transformer_engine.pytorch.attention.dot_product_attention.frost_attention import (
-        is_frost_attention_supported,
-    )
-    from transformer_engine.pytorch.cpp_extensions.fused_attn import AttnMaskType, FusedAttnBackend
-
-    params = _frost_params(
-        attn_mask_type=AttnMaskType["no_mask"],
-        window_size_left=128,
-        window_size_right=0,
-        max_seqlen_q=4096,
-        max_seqlen_kv=4096,
-    )
-    assert is_frost_attention_supported(params)[0] == FusedAttnBackend.FROST
 
 
 @requires_frost

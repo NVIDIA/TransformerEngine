@@ -7,17 +7,16 @@
 FROST runs through cudnn-frontend's Python API and is registered behind the
 CUDNN_FRONTEND_ENABLE_FROST_ENGINES=1 flag. Different from FusedAttnBackend.F16_arbitrary_seqlen
 and FusedAttnBackend.FP8, FusedAttnBackend.FROST is Python only and requires the Python
-installation of cudnn-frontend, not just its C++ header files.
+installation of cudnn-frontend, not only its C++ header files.
 """
 
 from __future__ import annotations
 
 import os
-from importlib.metadata import PackageNotFoundError, version as get_pkg_version
-from typing import Any, Dict, Optional, Sequence, Tuple
+from typing import Optional, Sequence, Tuple
 
 import torch
-from packaging.version import InvalidVersion, Version as PkgVersion
+from packaging.version import Version as PkgVersion
 
 from . import cudnn_pygraph
 
@@ -65,52 +64,6 @@ def _import_cudnn_frontend(enable_frost_engines: bool = True):
     return cudnn_pygraph.import_cudnn_frontend(enable_frost_engines=enable_frost_engines)
 
 
-def _diagonal_band_kwargs(cudnn, attn_mask_type: str, window: Tuple[int, int]) -> Dict[str, Any]:
-    """cuDNN sdpa kwargs for a TE (mask type, window): a diagonal alignment plus a band.
-
-    Note the off-by-one. cuDNN's left bound counts the diagonal itself and TE's window_size does
-    not, so a window of w becomes a left bound of w + 1. Passing it through unconverted silently
-    drops one token of context per layer, which no shape-level test would catch.
-
-    These kwargs are mutually exclusive with score_mod. cuDNN enforces that in the backward node
-    only ("Attention score mod enabled and hence other subgraphs are disabled"); its forward node
-    composes the two without complaint. Callers must still refuse the pair on both sides, because
-    forward and backward have to carry the same mask or the gradients belong to a different
-    attention than the output does.
-    """
-    left, right = window
-    opts: Dict[str, Any] = {}
-    if attn_mask_type in ("causal", "causal_bottom_right") or right == 0:
-        opts["diagonal_alignment"] = (
-            cudnn.diagonal_alignment.BOTTOM_RIGHT
-            if attn_mask_type == "causal_bottom_right"
-            else cudnn.diagonal_alignment.TOP_LEFT
-        )
-        opts["diagonal_band_right_bound"] = 0
-    if left != -1:
-        opts["diagonal_band_left_bound"] = left + 1
-    return opts
-
-
-def _pkg_version(name: str, module=None) -> Tuple[Optional[PkgVersion], Optional[str]]:
-    """A package's version, or None when it is absent or unparseable, with the raw string."""
-    raw = None
-    for candidate in (lambda: get_pkg_version(name), lambda: getattr(module, "__version__", None)):
-        try:
-            raw = candidate()
-        except PackageNotFoundError:
-            raw = None
-        if isinstance(raw, str):
-            break
-        raw = None
-    if raw is None:
-        return None, None
-    try:
-        return PkgVersion(raw), raw
-    except InvalidVersion:
-        return None, raw
-
-
 def is_frost_attention_available() -> Tuple[bool, str]:
     """Whether the FROST kernels can be used at all, with a reason when they cannot.
 
@@ -143,7 +96,9 @@ def is_frost_attention_available() -> Tuple[bool, str]:
 
     # Decline only on positive evidence: a version below a floor, or a package absent outright.
     # An unparseable version defers to _frost_plan_args, which checks the plan by name.
-    frontend, frontend_raw = _pkg_version("nvidia-cudnn-frontend", cudnn_pygraph.cudnn_module())
+    frontend, frontend_raw = cudnn_pygraph.pkg_version(
+        "nvidia-cudnn-frontend", cudnn_pygraph.cudnn_module()
+    )
     if frontend is not None and frontend < _MIN_CUDNN_FRONTEND:
         return _no(
             f"nvidia-cudnn-frontend {frontend_raw} registers no sm100 backward engine; >="
@@ -151,7 +106,7 @@ def is_frost_attention_available() -> Tuple[bool, str]:
             " otherwise raise on the first backward rather than here)"
         )
 
-    cutlass, cutlass_raw = _pkg_version("nvidia-cutlass-dsl")
+    cutlass, cutlass_raw = cudnn_pygraph.pkg_version("nvidia-cutlass-dsl")
     if cutlass_raw is None:
         return _no(f"nvidia-cutlass-dsl not installed (FROST requires >= {_MIN_CUTLASS_DSL})")
     if cutlass is not None and cutlass < _MIN_CUTLASS_DSL:
@@ -219,7 +174,7 @@ def _mask_spec(attn_mask_type: str, window_size=None):
 def _mask_options(cudnn, spec):
     """cuDNN sdpa kwargs for a (mask type, window) spec: a diagonal alignment plus a band."""
     attn_mask_type, window = spec
-    return _diagonal_band_kwargs(cudnn, attn_mask_type, window)
+    return cudnn_pygraph.diagonal_band_kwargs(cudnn, attn_mask_type, window)
 
 
 _SUPPORTED_QKV_FORMATS = ("bshd", "sbhd")
@@ -469,9 +424,9 @@ def _frost_plan_args(token: str, what: str) -> dict:
         return (
             f"Wanted the FROST {what} engine."
             " nvidia-cudnn-frontend="
-            f"{_pkg_version('nvidia-cudnn-frontend', cudnn_pygraph.cudnn_module())[1] or 'unknown'}"
+            f"{cudnn_pygraph.pkg_version('nvidia-cudnn-frontend', cudnn_pygraph.cudnn_module())[1] or 'unknown'}"
             f" (floor {_MIN_CUDNN_FRONTEND}),"
-            f" nvidia-cutlass-dsl={_pkg_version('nvidia-cutlass-dsl')[1] or 'unknown'}"
+            f" nvidia-cutlass-dsl={cudnn_pygraph.pkg_version('nvidia-cutlass-dsl')[1] or 'unknown'}"
             f" (floor {_MIN_CUTLASS_DSL})."
         )
 

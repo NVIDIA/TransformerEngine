@@ -13,16 +13,16 @@ to pin, is passed in by the caller.
 from __future__ import annotations
 
 import contextlib
+from importlib.metadata import PackageNotFoundError, version as get_pkg_version
 import importlib
 import os
 from typing import Any, Dict, Optional, Sequence, Tuple
 
 import torch
+from packaging.version import InvalidVersion, Version as PkgVersion
 
 # The cuDNN FROST SDPA engines, named once so the two opposite instructions about them cannot
-# drift: frost pins one of these by name, flex bars both. cuDNN has already renamed this family
-# once (collapsing the per-head-dim ``..._d512`` rows), and if these strings stopped matching,
-# frost would fail loudly while flex failed silently.
+# drift: frost pins one of these by name, flex bars both.
 FROST_FWD_PLAN_TOKEN = "sdpa_fwd_prefill_sm100"
 FROST_BWD_PLAN_TOKEN = "sdpa_bwd_sm100"
 FROST_PLAN_TOKENS = (FROST_FWD_PLAN_TOKEN, FROST_BWD_PLAN_TOKEN)
@@ -114,6 +114,52 @@ def io_data_type(cudnn, dtype: torch.dtype, *, backend_name: str = "cuDNN attent
     if dtype == torch.bfloat16:
         return cudnn.data_type.BFLOAT16
     raise ValueError(f"{backend_name} only supports FP16/BF16 tensors, got {dtype}.")
+
+
+def pkg_version(name: str, module=None) -> Tuple[Optional[PkgVersion], Optional[str]]:
+    """A package's version, or None when it is absent or unparseable, with the raw string."""
+    raw = None
+    for candidate in (lambda: get_pkg_version(name), lambda: getattr(module, "__version__", None)):
+        try:
+            raw = candidate()
+        except PackageNotFoundError:
+            raw = None
+        if isinstance(raw, str):
+            break
+        raw = None
+    if raw is None:
+        return None, None
+    try:
+        return PkgVersion(raw), raw
+    except InvalidVersion:
+        return None, raw
+
+
+def diagonal_band_kwargs(cudnn, attn_mask_type: str, window: Tuple[int, int]) -> Dict[str, Any]:
+    """cuDNN sdpa kwargs for a TE (mask type, window): a diagonal alignment plus a band.
+
+    Note the off-by-one. cuDNN's left bound counts the diagonal itself and TE's window_size does
+    not, so a window of w becomes a left bound of w + 1. Passing it through unconverted silently
+    drops one token of context per layer, which no shape-level test would catch.
+
+    These kwargs are mutually exclusive with score_mod. cuDNN enforces that in the backward node
+    only ("Attention score mod enabled and hence other subgraphs are disabled"); its forward node
+    composes the two without complaint. Callers must still refuse the pair on both sides, because
+    forward and backward have to carry the same mask or the gradients belong to a different
+    attention than the output does.
+    """
+    left, right = window
+    opts: Dict[str, Any] = {}
+    if attn_mask_type in ("causal", "causal_bottom_right") or right == 0:
+        opts["diagonal_alignment"] = (
+            cudnn.diagonal_alignment.BOTTOM_RIGHT
+            if attn_mask_type == "causal_bottom_right"
+            else cudnn.diagonal_alignment.TOP_LEFT
+        )
+        opts["diagonal_band_right_bound"] = 0
+    if left != -1:
+        opts["diagonal_band_left_bound"] = left + 1
+    return opts
 
 
 def build_pygraph(

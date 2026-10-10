@@ -607,11 +607,8 @@ def run_dpa_with_cp(
             fp8_output=fp8_mha,
         )
         if kernel_backend == "FrostAttention":
-            # Assert the sub-backend actually used, not just the one requested. FROST is
-            # currently the only selectable backend for these configs -- flash is env-gated off
-            # and CP disables unfused -- so a silent substitution is impossible today and this
-            # would pass by construction. It is here so it stops passing if that stops being
-            # true, rather than quietly testing some other kernel.
+            # Assert the sub-backend actually used, not the one requested, so this stops
+            # passing if a silent substitution ever becomes possible.
             from transformer_engine.pytorch.attention.dot_product_attention.dot_product_attention import (  # pylint: disable=import-outside-toplevel
                 _attention_backends,
             )
