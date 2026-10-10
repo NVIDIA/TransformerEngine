@@ -49,6 +49,7 @@ from ..utils import (
     get_nvtx_range_context,
 )
 from ..distributed import (
+    _validate_tp_reduction_dtype,
     set_tensor_model_parallel_attributes,
     get_distributed_world_size,
     allreduce,
@@ -271,6 +272,7 @@ class LayerNormMLPFwdArgs:
     # --- Misc ---
     cpu_offloading: bool
     is_grad_enabled: bool
+    reduction_dtype: Optional[torch.dtype] = None
 
     def any_requires_grad(self) -> bool:
         """Whether any differentiable input requires a gradient."""
@@ -897,14 +899,16 @@ def _layernorm_mlp_forward_impl(
                 else reduce_scatter_out
             )
         elif set_parallel_mode and sequence_parallel:
-            fc2_out, _ = reduce_scatter_along_first_dim(gemm_out, tp_group)
+            fc2_out, _ = reduce_scatter_along_first_dim(
+                gemm_out, tp_group, reduction_dtype=args.reduction_dtype
+            )
         elif set_parallel_mode and tensor_parallel:
             if args.symmetric_ar_type is not None:
                 fc2_out, _ = symmetric_all_reduce(
                     gemm_out, tp_group, all_reduce_type=args.symmetric_ar_type
                 )
             else:
-                fc2_out, _ = allreduce(gemm_out, tp_group)
+                fc2_out, _ = allreduce(gemm_out, tp_group, reduction_dtype=args.reduction_dtype)
         else:
             fc2_out = gemm_out
 
@@ -2603,6 +2607,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self,
         inp: torch.Tensor,
         is_first_microbatch: Optional[bool] = None,
+        reduction_dtype: Optional[torch.dtype] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """
         Apply layer normalization to the input followed by a feedforward network (MLP Block).
@@ -2611,6 +2616,11 @@ class LayerNormMLP(TransformerEngineBaseModule):
         ----------
         inp : torch.Tensor
              Input tensor.
+        reduction_dtype : torch.dtype, default = None
+                          Communication dtype for the FC2 forward reduction:
+                          float16, bfloat16, float32 or float64. Output dtype is unchanged.
+                          Applies to all-reduce and sequence-parallel reduce-scatter;
+                          Userbuffers and symmetric all-reduce are not supported.
         is_first_microbatch : {True, False, None}, default = None
                              During training using either gradient accumulation or
                              pipeline parallelism a minibatch of data is further split
@@ -2625,6 +2635,12 @@ class LayerNormMLP(TransformerEngineBaseModule):
                                first microbatch (since it is the first gradient being
                                produced)
         """
+        _validate_tp_reduction_dtype(
+            reduction_dtype,
+            self.set_parallel_mode and self.tp_size > 1,
+            self.ub_overlap_ag or self.ub_overlap_rs,
+            self.symmetric_ar_type,
+        )
         is_grad_enabled = torch.is_grad_enabled()
 
         if is_in_onnx_export_mode():
@@ -2811,6 +2827,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 tensor_parallel=self.tp_size > 1,
                 sequence_parallel=self.sequence_parallel,
                 symmetric_ar_type=self.symmetric_ar_type,
+                reduction_dtype=reduction_dtype,
                 # userbuffers
                 ub_overlap_ag=ub_overlap_ag,
                 ub_overlap_rs=ub_overlap_rs,

@@ -6,6 +6,43 @@
 PyTorch
 =======
 
+Tensor-parallel reduction dtype
+-------------------------------
+
+``reduction_dtype`` selects ``torch.float16``, ``torch.bfloat16``,
+``torch.float32`` or ``torch.float64`` for the NCCL sum. ``None`` preserves
+native communication. The result is cast back to the original tensor dtype;
+this does not change GEMM accumulation or retain a wider output.
+
+Pass this keyword to ``Linear.forward`` for its row-parallel output reduction
+and to ``LayerNormMLP.forward`` for its FC2 output reduction. For
+``ops.Linear``, set it in the constructor. Sequence parallelism uses the same
+option for reduce-scatter. These forward options leave backward unchanged.
+
+``LayerNormLinear`` supports column parallelism and rejects row parallelism.
+Its ``forward`` keyword selects the input-gradient reduction in backward,
+before normalization backward; its forward output is unchanged. This applies
+to both all-reduce and sequence-parallel reduce-scatter.
+
+Module Userbuffers and symmetric all-reduce do not support this option and
+raise ``ValueError``. An explicit dtype in ``ops.Linear`` prevents Userbuffers
+forward fusion from discarding the option and uses the standard collective.
+Direct ``allreduce`` and ``reduce_scatter_along_first_dim`` calls also accept
+the option; for asynchronous casts, call the returned handle's ``wait()``
+before consuming the output.
+
+.. code-block:: python
+
+    # Row-parallel module: switch precision without changing the layer.
+    output = linear(input_shard, reduction_dtype=torch.float32)
+    output = linear(input_shard, reduction_dtype=torch.bfloat16)
+
+    # Column-parallel fused normalization: select input-gradient precision.
+    output = norm_linear(input, reduction_dtype=torch.float32)
+
+Modules
+-------
+
 .. autoapiclass:: transformer_engine.pytorch.Linear(in_features, out_features, **kwargs)
   :members: forward, set_tensor_parallel_group
 
