@@ -1183,6 +1183,60 @@ def test_fused_moe_aux_loss(dtype, num_tokens, num_experts, topk, expert_multipl
     torch.testing.assert_close(probs.grad, probs_clone.grad, atol=atol, rtol=rtol)
 
 
+@pytest.mark.parametrize("path", ["forward", "graph_safe_forward", "backward"])
+def test_fused_moe_aux_loss_int64_offsets(path):
+    num_rows, num_cols = 8_388_609, 256  # Above INT_MAX elements.
+    bytes_needed = num_rows * num_cols * 2
+    torch.cuda.empty_cache()
+    free_bytes, _ = torch.cuda.mem_get_info()
+    if free_bytes < bytes_needed + (1 << 30):
+        pytest.skip("Needs 4.0 GiB for BF16 input/output plus 1 GiB headroom")
+
+    tokens_per_expert = torch.ones(num_cols, device="cuda", dtype=torch.int32)
+    try:
+        if path == "backward":
+            tokens_per_expert = torch.arange(1, num_cols + 1, device="cuda", dtype=torch.int32)
+            grad_probs = tex.fused_moe_aux_loss_bwd(
+                Const_buf=torch.tensor([0.25, 0.0], device="cuda", dtype=torch.float32),
+                tokens_per_expert=tokens_per_expert,
+                num_rows=num_rows,
+                num_cols=num_cols,
+                grad_aux_loss=torch.tensor(2.0, device="cuda", dtype=torch.bfloat16),
+            )
+            expected = (0.5 * tokens_per_expert).to(torch.bfloat16)
+            for start in range(0, num_rows, 65536):
+                chunk = grad_probs[start : start + 65536]
+                torch.testing.assert_close(chunk, expected.expand_as(chunk), atol=0, rtol=0)
+        else:
+            probs = torch.zeros((num_rows, num_cols), device="cuda", dtype=torch.bfloat16)
+            # Nonzero values on both sides of the int32 offset boundary.
+            probs[-2:] = 1
+            arguments = dict(
+                probs=probs,
+                tokens_per_expert=tokens_per_expert,
+                num_experts=num_cols,
+                num_rows=num_rows,
+                num_cols=num_cols,
+                topk=1,
+                coeff=1.0,
+            )
+            if path == "forward":
+                aux_loss, const_buf = tex.fused_moe_aux_loss_fwd(
+                    total_num_tokens=num_cols, **arguments
+                )
+            else:
+                total = torch.tensor(num_cols, device="cuda", dtype=torch.int64)
+                aux_loss, const_buf = tex.fused_moe_aux_loss_fwd_graph_safe(
+                    total_num_tokens=total, **arguments
+                )
+            torch.testing.assert_close(aux_loss, probs.new_tensor(2.0), atol=0, rtol=0)
+            torch.testing.assert_close(
+                const_buf, const_buf.new_tensor([1.0 / num_cols, 2.0]), atol=0, rtol=0
+            )
+    except torch.cuda.OutOfMemoryError:
+        pytest.skip("Could not allocate the BF16 input/output tensor")
+
+
 def test_fused_moe_aux_loss_cuda_graph_capture():
     """CUDA-graph-safe path: total_num_tokens is a device tensor whose value
     changes between replays. Forward and backward must both observe the new
