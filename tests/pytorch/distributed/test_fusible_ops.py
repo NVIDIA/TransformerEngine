@@ -63,6 +63,7 @@ def world_group() -> torch.distributed.ProcessGroup:
         init_method=f"file://{os.environ['NVTE_TEST_RDZV_PATH']}",
         world_size=world_size,
         rank=rank,
+        device_id=torch.device("cuda", rank),
     )
     return group
 
@@ -1124,10 +1125,16 @@ def main() -> None:
     if args.compile and not args.parallel:
         parser.error("--compile requires --parallel")
     if args.parallel:
-        if args.compile:
-            run_compile_parallel_tests()
-        else:
-            run_parallel_tests()
+        try:
+            if args.compile:
+                run_compile_parallel_tests()
+            else:
+                run_parallel_tests()
+            torch.distributed.barrier(world_group())
+            torch.cuda.synchronize()
+        finally:
+            if torch.distributed.is_initialized():
+                torch.distributed.destroy_process_group()
 
 
 if __name__ == "__main__":
