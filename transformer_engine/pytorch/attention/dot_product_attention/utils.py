@@ -456,9 +456,20 @@ def _get_fused_attn_backend(**fused_attn_kwargs):
     graph break because it is baked into the graph as a literal, while an enum
     member comes out of the reconstruction corrupted (see the cast at the call
     site, which restores the enum)."""
-    fused_attention_backend, reject_message = tex.get_fused_attn_backend(
-        FusedAttentionParams(**fused_attn_kwargs)
-    )
+    params = FusedAttentionParams(**fused_attn_kwargs)
+    fused_attention_backend, reject_message = tex.get_fused_attn_backend(params)
+    if fused_attention_backend == FusedAttnBackend.No_Backend:
+        from .frost_attention import (  # pylint: disable=import-outside-toplevel
+            is_frost_attention_supported,
+        )
+
+        frost_backend, frost_reject_message = is_frost_attention_supported(params)
+        if frost_backend != FusedAttnBackend.No_Backend:
+            return int(frost_backend), frost_reject_message
+        reject_message = (
+            f"[CPP sub-backends] {reject_message.rstrip('. ')}."
+            f" [Python sub-backends] {frost_reject_message.rstrip('. ')}."
+        )
     return int(fused_attention_backend), reject_message
 
 
@@ -1882,6 +1893,16 @@ def get_attention_backend(
     if use_flash_attention_4 and not FlashAttentionUtils.v4_is_installed:
         use_flash_attention_4 = False
     use_flash_attention = use_flash_attention_2 or use_flash_attention_3 or use_flash_attention_4
+    if use_fused_attention and fused_attention_backend == FusedAttnBackend.FROST.value:
+        from .frost_attention import (  # pylint: disable=import-outside-toplevel
+            is_frost_attention_available,
+        )
+
+        frost_available, frost_reason = is_frost_attention_available()
+        if not frost_available:
+            logger.debug("Disabling FusedAttention: %s", frost_reason)
+            use_fused_attention = False
+            fused_attention_backend = None
     available_backends = [use_flash_attention, use_fused_attention, use_unfused_attention]
     if use_flash_attention_2:
         flash_attention_backend = FlashAttentionUtils.version

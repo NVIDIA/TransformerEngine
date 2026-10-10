@@ -1109,8 +1109,9 @@ def cp_p2p_fwd_fused_attn(
         softmax_lse_per_step, rng_states, *rest = aux_ctx_tensors
         attn_bias = rest[0] if len(rest) > 0 else None
 
+    # Indexed rather than starred: every caller unpacks exactly five values.
     if return_max_logit:
-        return out_per_step, softmax_lse_per_step, rng_states, attn_bias, *max_logit
+        return out_per_step, softmax_lse_per_step, rng_states, attn_bias, max_logit[0]
     return out_per_step, softmax_lse_per_step, rng_states, attn_bias, None
 
 
@@ -1605,6 +1606,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         attn_bias,
         deterministic,
         use_fused_attention,
+        fused_attention_backend,
         return_max_logit,
         softcap,
         fp8,
@@ -1780,7 +1782,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             # q, k, v: torch.Tensor, dtype=fwd_nominal_dtype
             q_f16 = q
             if use_fused_attention:
-                fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
+                fused_attn_backend = fused_attention_backend
             if return_max_logit:
                 max_logit_per_step = [
                     torch.empty(q.shape[-2], dtype=q.dtype, device=q.device) for _ in range(2)
@@ -2386,6 +2388,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         ctx.deterministic = deterministic
         ctx.softcap = softcap
         ctx.use_fused_attention = use_fused_attention
+        ctx.fused_attention_backend = fused_attention_backend
         ctx.pad_between_seqs = pad_between_seqs
         ctx.softmax_lse_in_packed_format = softmax_lse_in_packed_format
         ctx.second_half_lse_seqlen = second_half_lse_seqlen
@@ -2630,7 +2633,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             ]
             p2p_comm_buffers[0][0].copy_(kv)
             if ctx.use_fused_attention:
-                fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
+                fused_attn_backend = ctx.fused_attention_backend
 
         # communicate for the 'a2a' part of 'a2a+p2p'
         dout = dout.view(*ctx.orig_o_shape)
@@ -3186,6 +3189,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             attn_dbias,
             None,
             None,
+            None,  # fused_attention_backend
             None,
             None,
             None,
@@ -3275,6 +3279,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         attn_bias,
         deterministic,
         use_fused_attention,
+        fused_attention_backend,
         return_max_logit,
         softcap,
         window_size,
@@ -3441,7 +3446,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             fp8_meta_kwargs["s_quantizer"] = S_quantizer
             fp8_meta_kwargs["o_quantizer"] = O_quantizer
         elif use_fused_attention:
-            fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
+            fused_attn_backend = fused_attention_backend
         orig_q_shape, _, orig_v_shape = q.shape, k.shape, v.shape
         orig_o_shape = orig_q_shape[:-1] + orig_v_shape[-1:]
 
@@ -3964,6 +3969,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         ctx.deterministic = deterministic
         ctx.softcap = softcap
         ctx.use_fused_attention = use_fused_attention
+        ctx.fused_attention_backend = fused_attention_backend
         ctx.use_flash_attn_3 = use_flash_attn_3
         ctx.use_flash_attn_4 = use_flash_attn_4
         ctx.pad_between_seqs = pad_between_seqs
@@ -4249,7 +4255,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             softmax_lse_per_step[i],
                             rng_states[i],
                         ]
-                        fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
+                        fused_attn_backend = ctx.fused_attention_backend
                         fp8_meta_kwargs = {}
                         new_qkv_layout = ctx.qkv_layout
                         do_format = ctx.o_format
@@ -4548,6 +4554,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             None,
             None,
             None,
+            None,  # fused_attention_backend
             None,
             None,
             None,
@@ -4591,6 +4598,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         attn_bias,
         deterministic,
         use_fused_attention,
+        fused_attention_backend,
         return_max_logit,
         softcap,
         window_size,
@@ -4735,7 +4743,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             fp8_meta_kwargs["o_quantizer"] = O_quantizer
         else:
             if use_fused_attention:
-                fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
+                fused_attn_backend = fused_attention_backend
 
         # q, k, v:
         # FP8DS/FP8CS: torch.uint8
@@ -5026,6 +5034,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         ctx.softcap = softcap
         ctx.window_size = window_size
         ctx.use_fused_attention = use_fused_attention
+        ctx.fused_attention_backend = fused_attention_backend
         ctx.fp8_meta = fp8_meta
         ctx.is_input_fp8 = is_input_fp8
         ctx.is_output_fp8 = is_output_fp8
@@ -5103,7 +5112,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             if isinstance(dout, QuantizedTensorStorage):
                 dout = dout.dequantize(dtype=bwd_nominal_dtype)
             if ctx.use_fused_attention:
-                fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
+                fused_attn_backend = ctx.fused_attention_backend
         dout = dout.view(*ctx.orig_o_shape)
 
         # dout:
@@ -5396,6 +5405,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             d_bias,
             None,
             None,
+            None,  # fused_attention_backend
             None,
             None,
             None,
@@ -5549,6 +5559,7 @@ def attn_forward_func_with_cp(
     attn_bias=None,
     deterministic=False,
     use_fused_attention=False,
+    fused_attention_backend=None,
     window_size=None,
     softcap=0.0,
     fp8=False,
@@ -5656,6 +5667,10 @@ def attn_forward_func_with_cp(
         "sbhd",
         "thd",
     ], f"Context parallelism does not support {qkv_format=}!"
+    assert not use_fused_attention or fused_attention_backend is not None, (
+        "fused_attention_backend is required when use_fused_attention=True;"
+        " get_attention_backend selects it."
+    )
     assert isinstance(
         load_balancing_strategy, CPLoadBalancingStrategy
     ), f"Expected {CPLoadBalancingStrategy.__name__}, got {type(load_balancing_strategy).__name__}."
@@ -5736,6 +5751,7 @@ def attn_forward_func_with_cp(
         attn_bias,
         deterministic,
         use_fused_attention,
+        fused_attention_backend,
         return_max_logit,
         softcap,
     ]
