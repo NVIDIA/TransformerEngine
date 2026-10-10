@@ -1933,10 +1933,12 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                         fc2_bias_scale = fc2_bias_scale.to(dtype=torch.float32)
 
             fc2_out_buf = validate_or_alloc_output(output_buffer, fc2_out_shape, dtype, device)
-            if (
-                use_dense_single_group
-                and grouped_fc2_x.columnwise_data is not None
-                and grouped_fc2_x.columnwise_scale_inv is not None
+            if use_dense_single_group and (
+                not weight_requires_grad
+                or (
+                    grouped_fc2_x.columnwise_data is not None
+                    and grouped_fc2_x.columnwise_scale_inv is not None
+                )
             ):
                 fc2_out_buf = _single_group_fc2_gemm(
                     grouped_fc2_x,
