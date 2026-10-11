@@ -16,6 +16,11 @@ Prerequisites
 3. |driver link|_ supporting CUDA 12.1 or later.
 4. `cuDNN 9.12 <https://developer.nvidia.com/cudnn>`__ or later.
 
+PyTorch's cuDNN attention backend uses the cuDNN frontend Python API. The PyTorch
+installation includes ``nvidia-cudnn-frontend>=1.29.0``. Attention graphs and plans
+are cached by device and tensor metadata; dropout uses PyTorch's CUDA generator,
+including CUDA graph capture and replay.
+
 If the CUDA Toolkit headers are not available at runtime in a standard
 installation path, e.g. within `CUDA_HOME`, set
 `NVTE_CUDA_INCLUDE_PATH` in the environment.

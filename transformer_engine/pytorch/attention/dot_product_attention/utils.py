@@ -447,7 +447,7 @@ no_op_logger = _NoOpLogger()
 
 @torch.compiler.assume_constant_result
 def _get_fused_attn_backend(**fused_attn_kwargs):
-    """Constant-foldable tex.get_fused_attn_backend: the result depends only on
+    """Constant-foldable cuDNN Python support query: the result depends only on
     the attention config.
 
     Returns a plain int rather than a FusedAttnBackend member: dynamo
@@ -456,7 +456,9 @@ def _get_fused_attn_backend(**fused_attn_kwargs):
     graph break because it is baked into the graph as a literal, while an enum
     member comes out of the reconstruction corrupted (see the cast at the call
     site, which restores the enum)."""
-    fused_attention_backend, reject_message = tex.get_fused_attn_backend(
+    from transformer_engine.pytorch.cpp_extensions.cudnn_fused_attn import get_fused_attn_backend
+
+    fused_attention_backend, reject_message = get_fused_attn_backend(
         FusedAttentionParams(**fused_attn_kwargs)
     )
     return int(fused_attention_backend), reject_message
