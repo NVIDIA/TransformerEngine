@@ -16,6 +16,7 @@
 #include "../common.h"
 #include "../util/cuda_runtime.h"
 #include "../util/logging.h"
+#include "../util/system.h"
 #include "transformer_engine/transformer_engine.h"
 
 namespace transformer_engine {
@@ -944,6 +945,328 @@ __global__ void __launch_bounds__(TB_DIM* TB_DIM)
       input, output, M, K, original_M, original_K, flat_bid, grid_dim);
 }
 
+// MXFP8 scale swizzle with one thread block per scale tile, used when
+// NVTE_MXFP8_PER_TILE_SWIZZLE=1. The narrow-K / narrow-M kernels above put 32 tiles in one
+// 1024-thread block, so e.g. the scales of a 4096-row activation are swizzled by a single block.
+// These kernels give every 128-row tile (row-wise) or 128-column x 32-row block (column-wise) its
+// own block, which moves a contiguous chunk with coalesced 16-byte loads and stores through shared
+// memory. Multi-tensor launches put several tiles in one block only when the grid would otherwise
+// be very large.
+constexpr int kRowwiseThreadsPerBlock = 128;
+constexpr int kColumnwiseThreadsPerBlock = 256;
+constexpr int kMaxTensorsPerLaunch = 64;
+// Row-wise: the largest grid before several tiles share a block.
+constexpr int kRowwiseMaxBlocks = 1536;
+// Column-wise: the largest grid with 32-row chunks before switching to 128-row chunks.
+constexpr int kColumnwiseMaxBlocksWith32RowChunks = 1024;
+
+// Whether MXFP8 swizzles use the per-tile kernels (NVTE_MXFP8_PER_TILE_SWIZZLE=1).
+bool use_per_tile_swizzle() { return getenv<bool>("NVTE_MXFP8_PER_TILE_SWIZZLE"); }
+
+// The 4 scales packed in `word` (the first one in column first_column), with those in columns
+// >= num_columns set to zero.
+__device__ __forceinline__ uint32_t zero_padding_columns(uint32_t word, int first_column,
+                                                         int num_columns) {
+  const int valid_columns = num_columns - first_column;
+  if (valid_columns >= 4) return word;
+  if (valid_columns <= 0) return 0u;
+  return word & ((1u << (8 * valid_columns)) - 1u);
+}
+
+// numerator / divisor for numerator, divisor < 2^16, with magic = ceil(2^32 / divisor) (exact in
+// that range); a divisor of 1 passes magic 0.
+__device__ __forceinline__ uint32_t divide_by_magic(uint32_t numerator, uint32_t magic) {
+  return magic == 0u ? numerator : __umulhi(numerator, magic);
+}
+
+inline uint32_t division_magic(int divisor) {
+  return divisor <= 1 ? 0u : static_cast<uint32_t>(((1ull << 32) + divisor - 1) / divisor);
+}
+
+// Row-wise: tiles [first_tile, first_tile + num_tiles) of one tensor, a contiguous chunk of the
+// input and of the output. Shared-memory rows are padded to an odd number of words, so the column
+// gathers are free of bank conflicts. Requires num_tiles * 128 * padded_k / 4 < 2^16 (guaranteed
+// by the 48 KB shared-memory limit).
+__device__ __forceinline__ void swizzle_rowwise_tiles(const uint8_t* __restrict__ input,
+                                                      uint8_t* __restrict__ output, int padded_k,
+                                                      uint32_t words_per_row_magic, int original_m,
+                                                      int original_k, int first_tile, int num_tiles,
+                                                      uint32_t* smem) {
+  const int words_per_row = padded_k >> 2;
+  const int smem_row_words = words_per_row | 1;
+  const int num_vectors =
+      num_tiles * 8 * padded_k;  // 16-byte vectors: num_tiles * 128 * padded_k / 16
+  const size_t chunk_offset = static_cast<size_t>(first_tile) * 128 * padded_k;
+  const int4* input_vectors = reinterpret_cast<const int4*>(input + chunk_offset);
+  for (int i = threadIdx.x; i < num_vectors; i += kRowwiseThreadsPerBlock) {
+    const int4 vector = __ldg(input_vectors + i);
+    const uint32_t words[4] = {static_cast<uint32_t>(vector.x), static_cast<uint32_t>(vector.y),
+                               static_cast<uint32_t>(vector.z), static_cast<uint32_t>(vector.w)};
+#pragma unroll
+    for (int w = 0; w < 4; w++) {
+      const uint32_t word_index = 4 * i + w;
+      const uint32_t row = divide_by_magic(word_index, words_per_row_magic);
+      smem[row * smem_row_words + (word_index - row * words_per_row)] = words[w];
+    }
+  }
+  __syncthreads();
+
+  // An output tile holds padded_k / 4 blocks of 512 bytes, i.e. 32 vectors each; vector r of a
+  // block packs rows r, r + 32, r + 64 and r + 96 of its 4 scale columns.
+  const int vectors_per_tile = 8 * padded_k;
+  for (int tile = 0; tile < num_tiles; tile++) {
+    int4* output_vectors =
+        reinterpret_cast<int4*>(output + chunk_offset + static_cast<size_t>(tile) * 128 * padded_k);
+    const int tile_first_row = tile * 128;
+    const int global_first_row = first_tile * 128 + tile_first_row;
+    for (int v = threadIdx.x; v < vectors_per_tile; v += kRowwiseThreadsPerBlock) {
+      const int k_block = v >> 5;
+      const int row_in_group = v & 31;
+      uint32_t words[4];
+#pragma unroll
+      for (int group = 0; group < 4; group++) {
+        const int row = row_in_group + 32 * group;
+        uint32_t word = smem[(tile_first_row + row) * smem_row_words + k_block];
+        if (global_first_row + row >= original_m) word = 0u;
+        words[group] = zero_padding_columns(word, k_block * 4, original_k);
+      }
+      output_vectors[v] = make_int4(static_cast<int>(words[0]), static_cast<int>(words[1]),
+                                    static_cast<int>(words[2]), static_cast<int>(words[3]));
+    }
+  }
+}
+
+// Column-wise: tile m_tile (128 columns), scale rows [first_k, first_k + kChunkRows) clipped to
+// padded_k. Each input row segment is 128 contiguous bytes; each output block of 4 scale rows is
+// 512 contiguous bytes.
+template <int kChunkRows>
+__device__ __forceinline__ void swizzle_columnwise_chunk(const uint8_t* __restrict__ input,
+                                                         uint8_t* __restrict__ output, int padded_m,
+                                                         int padded_k, int original_m,
+                                                         int original_k, int m_tile, int first_k,
+                                                         int4* smem) {
+  const int num_rows = min(kChunkRows, padded_k - first_k);  // multiple of 4
+  const int num_vectors = num_rows * 8;
+  for (int i = threadIdx.x; i < num_vectors; i += kColumnwiseThreadsPerBlock) {
+    const int row = i >> 3;
+    const int vector_in_row = i & 7;
+    smem[i] = __ldg(reinterpret_cast<const int4*>(
+                        input + static_cast<size_t>(first_k + row) * padded_m + m_tile * 128) +
+                    vector_in_row);
+  }
+  __syncthreads();
+
+  const uint8_t* smem_bytes = reinterpret_cast<const uint8_t*>(smem);
+  const size_t first_output_block = static_cast<size_t>(m_tile) * (padded_k >> 2) + (first_k >> 2);
+  for (int v = threadIdx.x; v < num_vectors; v += kColumnwiseThreadsPerBlock) {
+    const int k_block = v >> 5;
+    const int column_in_group = v & 31;
+    uint32_t words[4];
+#pragma unroll
+    for (int group = 0; group < 4; group++) {
+      const int column = column_in_group + 32 * group;
+      uint32_t word = 0u;
+      if (m_tile * 128 + column < original_m) {
+#pragma unroll
+        for (int j = 0; j < 4; j++) {
+          const int row = k_block * 4 + j;
+          if (first_k + row < original_k) {
+            word |= static_cast<uint32_t>(smem_bytes[row * 128 + column]) << (8 * j);
+          }
+        }
+      }
+      words[group] = word;
+    }
+    reinterpret_cast<int4*>(output + (first_output_block + k_block) * 512)[column_in_group] =
+        make_int4(static_cast<int>(words[0]), static_cast<int>(words[1]),
+                  static_cast<int>(words[2]), static_cast<int>(words[3]));
+  }
+}
+
+__global__ void __launch_bounds__(kRowwiseThreadsPerBlock)
+    swizzle_rowwise_per_tile_kernel(const uint8_t* __restrict__ input, uint8_t* __restrict__ output,
+                                    int padded_k, uint32_t words_per_row_magic, int original_m,
+                                    int original_k) {
+  extern __shared__ uint32_t rowwise_smem[];
+  swizzle_rowwise_tiles(input, output, padded_k, words_per_row_magic, original_m, original_k,
+                        blockIdx.x, 1, rowwise_smem);
+}
+
+__global__ void __launch_bounds__(kColumnwiseThreadsPerBlock)
+    swizzle_columnwise_per_tile_kernel(const uint8_t* __restrict__ input,
+                                       uint8_t* __restrict__ output, int padded_m, int padded_k,
+                                       int original_m, int original_k) {
+  __shared__ int4 columnwise_smem[32 * 8];
+  swizzle_columnwise_chunk<32>(input, output, padded_m, padded_k, original_m, original_k,
+                               blockIdx.x, blockIdx.y * 32, columnwise_smem);
+}
+
+// The scales of one tensor: padded_m (a multiple of 128) by padded_k (a multiple of 4) in
+// row-wise terms; for column-wise scales, m runs along the columns of the data. Scales at
+// m >= original_m or k >= original_k are padding and written as zeros.
+struct PerTileSwizzleTensor {
+  const uint8_t* input;
+  uint8_t* output;
+  int padded_m, padded_k, original_m, original_k;
+};
+
+struct PerTileMultiSwizzleArgs {
+  PerTileSwizzleTensor tensors[kMaxTensorsPerLaunch];
+  int first_block[kMaxTensorsPerLaunch + 1];
+  uint32_t words_per_row_magic[kMaxTensorsPerLaunch];  // row-wise only
+  int tiles_per_block;                                 // row-wise only
+  int num_tensors;
+};
+
+__device__ __forceinline__ int tensor_of_block(const PerTileMultiSwizzleArgs& args, int block) {
+  int tensor = 0;
+  while (tensor + 1 < args.num_tensors && args.first_block[tensor + 1] <= block) tensor++;
+  return tensor;
+}
+
+__global__ void __launch_bounds__(kRowwiseThreadsPerBlock)
+    multi_tensor_swizzle_rowwise_per_tile_kernel(const PerTileMultiSwizzleArgs args) {
+  extern __shared__ uint32_t rowwise_multi_smem[];
+  const int t = tensor_of_block(args, blockIdx.x);
+  const int tiles_per_block = args.tiles_per_block;
+  const int first_tile = (blockIdx.x - args.first_block[t]) * tiles_per_block;
+  const int num_tiles = min(tiles_per_block, args.tensors[t].padded_m / 128 - first_tile);
+  swizzle_rowwise_tiles(args.tensors[t].input, args.tensors[t].output, args.tensors[t].padded_k,
+                        args.words_per_row_magic[t], args.tensors[t].original_m,
+                        args.tensors[t].original_k, first_tile, num_tiles, rowwise_multi_smem);
+}
+
+template <int kChunkRows>
+__global__ void __launch_bounds__(kColumnwiseThreadsPerBlock)
+    multi_tensor_swizzle_columnwise_per_tile_kernel(const PerTileMultiSwizzleArgs args) {
+  __shared__ int4 columnwise_multi_smem[kChunkRows * 8];
+  const int t = tensor_of_block(args, blockIdx.x);
+  const int block_in_tensor = blockIdx.x - args.first_block[t];
+  const int num_m_tiles = args.tensors[t].padded_m / 128;
+  const int m_tile = block_in_tensor % num_m_tiles;
+  const int first_k = (block_in_tensor / num_m_tiles) * kChunkRows;
+  swizzle_columnwise_chunk<kChunkRows>(args.tensors[t].input, args.tensors[t].output,
+                                       args.tensors[t].padded_m, args.tensors[t].padded_k,
+                                       args.tensors[t].original_m, args.tensors[t].original_k,
+                                       m_tile, first_k, columnwise_multi_smem);
+}
+
+inline bool is_16_byte_aligned(const void* ptr) {
+  return (reinterpret_cast<uintptr_t>(ptr) & 15u) == 0;
+}
+
+inline bool per_tile_swizzle_supported(const PerTileSwizzleTensor& tensor, bool rowwise) {
+  if (tensor.padded_m <= 0 || tensor.padded_k <= 0 || tensor.padded_m % 128 != 0 ||
+      tensor.padded_k % 4 != 0) {
+    return false;
+  }
+  if (!is_16_byte_aligned(tensor.input) || !is_16_byte_aligned(tensor.output)) return false;
+  if (rowwise && 128 * ((tensor.padded_k >> 2) | 1) * 4 > 48 * 1024) return false;
+  return true;
+}
+
+// One kernel for up to kMaxTensorsPerLaunch tensors, all row-wise or all column-wise. Row-wise:
+// the tiles per block are the smallest power of two that keeps the grid within kRowwiseMaxBlocks
+// (shared memory permitting). Column-wise: 128-row chunks once 32-row chunks would exceed
+// kColumnwiseMaxBlocksWith32RowChunks blocks. Returns false, without launching anything, if any
+// tensor is not supported.
+inline bool launch_multi_tensor_per_tile_swizzle(const PerTileSwizzleTensor* tensors,
+                                                 int num_tensors, bool rowwise,
+                                                 cudaStream_t stream) {
+  if (num_tensors <= 0 || num_tensors > kMaxTensorsPerLaunch) return false;
+  PerTileMultiSwizzleArgs args;
+  args.num_tensors = num_tensors;
+  args.first_block[0] = 0;
+  int64_t total_tiles = 0;
+  int max_smem_row_words = 1;
+  for (int i = 0; i < num_tensors; i++) {
+    if (!per_tile_swizzle_supported(tensors[i], rowwise)) return false;
+    args.tensors[i] = tensors[i];
+    args.words_per_row_magic[i] = division_magic(tensors[i].padded_k >> 2);
+    if (rowwise) {
+      total_tiles += tensors[i].padded_m / 128;
+      max_smem_row_words = max(max_smem_row_words, (tensors[i].padded_k >> 2) | 1);
+    } else {
+      total_tiles +=
+          static_cast<int64_t>(tensors[i].padded_m / 128) * ((tensors[i].padded_k + 31) / 32);
+    }
+  }
+  int tiles_per_block = 1, chunk_rows = 32;
+  if (rowwise) {
+    const int max_tiles_per_block = (48 * 1024) / (128 * max_smem_row_words * 4);
+    while (total_tiles > static_cast<int64_t>(kRowwiseMaxBlocks) * tiles_per_block &&
+           tiles_per_block * 2 <= max_tiles_per_block) {
+      tiles_per_block *= 2;
+    }
+  } else {
+    if (total_tiles > kColumnwiseMaxBlocksWith32RowChunks) chunk_rows = 128;
+  }
+  args.tiles_per_block = tiles_per_block;
+  for (int i = 0; i < num_tensors; i++) {
+    const PerTileSwizzleTensor& tensor = tensors[i];
+    const int blocks =
+        rowwise ? (tensor.padded_m / 128 + tiles_per_block - 1) / tiles_per_block
+                : (tensor.padded_m / 128) * ((tensor.padded_k + chunk_rows - 1) / chunk_rows);
+    args.first_block[i + 1] = args.first_block[i] + blocks;
+  }
+  for (int i = num_tensors + 1; i <= kMaxTensorsPerLaunch; i++) {
+    args.first_block[i] = args.first_block[num_tensors];
+  }
+  const int grid = args.first_block[num_tensors];
+  if (grid == 0) return true;
+  if (rowwise) {
+    multi_tensor_swizzle_rowwise_per_tile_kernel<<<
+        grid, kRowwiseThreadsPerBlock, tiles_per_block * 128 * max_smem_row_words * 4, stream>>>(
+        args);
+  } else if (chunk_rows == 128) {
+    multi_tensor_swizzle_columnwise_per_tile_kernel<128>
+        <<<grid, kColumnwiseThreadsPerBlock, 0, stream>>>(args);
+  } else {
+    multi_tensor_swizzle_columnwise_per_tile_kernel<32>
+        <<<grid, kColumnwiseThreadsPerBlock, 0, stream>>>(args);
+  }
+  NVTE_CHECK_CUDA(cudaGetLastError());
+  return true;
+}
+
+inline bool launch_rowwise_per_tile_swizzle(const PerTileSwizzleTensor& tensor,
+                                            cudaStream_t stream) {
+  if (!per_tile_swizzle_supported(tensor, true)) return false;
+  swizzle_rowwise_per_tile_kernel<<<tensor.padded_m / 128, kRowwiseThreadsPerBlock,
+                                    128 * ((tensor.padded_k >> 2) | 1) * 4, stream>>>(
+      tensor.input, tensor.output, tensor.padded_k, division_magic(tensor.padded_k >> 2),
+      tensor.original_m, tensor.original_k);
+  NVTE_CHECK_CUDA(cudaGetLastError());
+  return true;
+}
+
+inline bool launch_columnwise_per_tile_swizzle(const PerTileSwizzleTensor& tensor,
+                                               cudaStream_t stream) {
+  if (!per_tile_swizzle_supported(tensor, false)) return false;
+  dim3 grid(tensor.padded_m / 128, (tensor.padded_k + 31) / 32);
+  swizzle_columnwise_per_tile_kernel<<<grid, kColumnwiseThreadsPerBlock, 0, stream>>>(
+      tensor.input, tensor.output, tensor.padded_m, tensor.padded_k, tensor.original_m,
+      tensor.original_k);
+  NVTE_CHECK_CUDA(cudaGetLastError());
+  return true;
+}
+
+// A single tensor uses the one-tile-per-block kernels unless its grid would be large; several
+// tensors go through one multi-tensor launch.
+inline bool launch_per_tile_swizzle(const PerTileSwizzleTensor* tensors, int num_tensors,
+                                    bool rowwise, cudaStream_t stream) {
+  const bool grid_too_large =
+      num_tensors == 1 && (rowwise ? tensors[0].padded_m / 128 > kRowwiseMaxBlocks
+                                   : static_cast<int64_t>(tensors[0].padded_m / 128) *
+                                             ((tensors[0].padded_k + 31) / 32) >
+                                         kColumnwiseMaxBlocksWith32RowChunks);
+  if (num_tensors == 1 && !grid_too_large) {
+    return rowwise ? launch_rowwise_per_tile_swizzle(tensors[0], stream)
+                   : launch_columnwise_per_tile_swizzle(tensors[0], stream);
+  }
+  return launch_multi_tensor_per_tile_swizzle(tensors, num_tensors, rowwise, stream);
+}
+
 }  // namespace
 
 void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t stream) {
@@ -1099,8 +1422,17 @@ void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t s
 
     const int narrow_k_slm_size =
         TB_DIM * num_tiles_k * SF_TILE_DIM_M * SF_TILE_DIM_K * static_cast<int>(sizeof(int8_t));
-    if (num_tiles_k < TB_DIM &&
-        static_cast<size_t>(narrow_k_slm_size) <= cuda::max_shared_memory_per_block_optin()) {
+    const PerTileSwizzleTensor per_tile_tensor{static_cast<const uint8_t*>(input_scale_inv_ptr),
+                                               static_cast<uint8_t*>(output_scale_inv_ptr),
+                                               m,
+                                               k,
+                                               original_M,
+                                               original_K};
+    if (scaling_mode == NVTE_MXFP8_1D_SCALING && use_per_tile_swizzle() &&
+        per_tile_swizzle_supported(per_tile_tensor, true)) {
+      launch_per_tile_swizzle(&per_tile_tensor, 1, true, stream);
+    } else if (num_tiles_k < TB_DIM && static_cast<size_t>(narrow_k_slm_size) <=
+                                           cuda::max_shared_memory_per_block_optin()) {
       // Narrow-K: batch TB_DIM M-tiles per block, fully utilizing all threads.
       dim3 num_blocks_narrow(DIVUP(num_tiles_m, TB_DIM));
       NVTE_CHECK_CUDA(
@@ -1157,8 +1489,17 @@ void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t s
 
     const int narrow_m_slm_size =
         TB_DIM * num_tiles_m * SF_TILE_DIM_M * SF_TILE_DIM_K * static_cast<int>(sizeof(int8_t));
-    if (num_tiles_m < TB_DIM &&
-        static_cast<size_t>(narrow_m_slm_size) <= cuda::max_shared_memory_per_block_optin()) {
+    const PerTileSwizzleTensor per_tile_tensor{
+        static_cast<const uint8_t*>(input->columnwise_scale_inv.dptr),
+        static_cast<uint8_t*>(output->columnwise_scale_inv.dptr),
+        m,
+        k,
+        original_M,
+        original_K};
+    if (use_per_tile_swizzle() && per_tile_swizzle_supported(per_tile_tensor, false)) {
+      launch_per_tile_swizzle(&per_tile_tensor, 1, false, stream);
+    } else if (num_tiles_m < TB_DIM && static_cast<size_t>(narrow_m_slm_size) <=
+                                           cuda::max_shared_memory_per_block_optin()) {
       // Narrow-M: batch TB_DIM K-tiles per block, fully utilizing all threads.
       dim3 num_blocks_narrow(DIVUP(num_tiles_k, TB_DIM));
       NVTE_CHECK_CUDA(
@@ -1435,6 +1776,42 @@ void launch_multi_tensor_unswizzle_scaling_factors(MultiSwizzleArgs& kernel_args
   }
 }
 
+namespace {
+
+// MXFP8 multi-tensor swizzle with the per-tile kernels. Returns false without launching anything
+// if any tensor is not supported (the caller then uses the generic kernels, which also report
+// shape errors).
+bool multi_tensor_per_tile_swizzle(const std::vector<Tensor*>& input, std::vector<Tensor*>& output,
+                                   bool rowwise, cudaStream_t stream) {
+  const size_t num_tensors = input.size();
+  std::vector<PerTileSwizzleTensor> tensors(num_tensors);
+  for (size_t i = 0; i < num_tensors; i++) {
+    if (!is_mxfp8_scaling(input[i]->scaling_mode)) return false;
+    const auto& in_scales = rowwise ? input[i]->scale_inv : input[i]->columnwise_scale_inv;
+    const auto& out_scales = rowwise ? output[i]->scale_inv : output[i]->columnwise_scale_inv;
+    if (in_scales.shape.size() != 2) return false;
+    const int padded_m = static_cast<int>(rowwise ? in_scales.shape[0] : in_scales.shape[1]);
+    const int padded_k = static_cast<int>(rowwise ? in_scales.shape[1] : in_scales.shape[0]);
+    if (padded_m <= 0 || padded_k <= 0 || padded_m % 128 != 0 || padded_k % 4 != 0) return false;
+    if (out_scales.numel() != static_cast<size_t>(padded_m) * padded_k) return false;
+    const auto [first_dim, last_dim] = input[i]->flat_2d_dims();
+    tensors[i] = {static_cast<const uint8_t*>(in_scales.dptr),
+                  static_cast<uint8_t*>(out_scales.dptr),
+                  padded_m,
+                  padded_k,
+                  static_cast<int>(rowwise ? first_dim : last_dim),
+                  static_cast<int>((rowwise ? last_dim : first_dim) / MXFP8_BLOCK_SIZE)};
+    if (!per_tile_swizzle_supported(tensors[i], rowwise)) return false;
+  }
+  for (size_t first = 0; first < num_tensors; first += kMaxTensorsPerLaunch) {
+    const int count = static_cast<int>(std::min<size_t>(kMaxTensorsPerLaunch, num_tensors - first));
+    launch_per_tile_swizzle(tensors.data() + first, count, rowwise, stream);
+  }
+  return true;
+}
+
+}  // namespace
+
 void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
                                           std::vector<Tensor*>& output, cudaStream_t stream,
                                           bool check_scale_inv_shapes) {
@@ -1470,6 +1847,10 @@ void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
 
   const bool rowwise_swizzle = all_has_data || all_nvfp4;
   const bool columnwise_swizzle = all_has_columnwise_data && !all_nvfp4;
+  if (!all_nvfp4 && use_per_tile_swizzle() &&
+      multi_tensor_per_tile_swizzle(input, output, rowwise_swizzle, stream)) {
+    return;
+  }
 
   constexpr int SF_TILE_DIM_M = 128;
   constexpr int SF_TILE_DIM_K = 4;
