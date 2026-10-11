@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 """Tests for cuDNN frontend score_mod fused attention."""
+
 from math import sqrt
 
 import jax
@@ -21,7 +22,6 @@ from transformer_engine.jax.cpp_extensions import make_fused_attn_score_mod_conf
 from transformer_engine.jax.flax import transformer as flax_transformer
 from transformer_engine_jax import get_device_compute_capability, NVTE_Fused_Attn_Backend
 from test_fused_attn import FusedAttnRunner, SeqDescFormat
-
 
 _CONFIG_TEST_HEAD_DIM = 128
 _CONFIG_TEST_SCALING_FACTOR = 1.0 / sqrt(_CONFIG_TEST_HEAD_DIM)
@@ -673,6 +673,17 @@ def test_fused_attn_score_mod_cudnn_frontend_version_check(monkeypatch):
     )
     with pytest.raises(RuntimeError, match="Python/C\\+\\+ version mismatch"):
         tex_attention._check_cudnn_frontend_version_match(FakeCudnn)
+
+
+def test_fused_attn_score_mod_module_lambda_keys_do_not_collide():
+    """Different anonymous functions cannot share a serialized attention graph."""
+    first = lambda graph, score, tensors: score  # noqa: E731
+    second = lambda graph, score, tensors: graph.tanh(score)  # noqa: E731
+    first.__qualname__ = second.__qualname__ = "<lambda>"
+    assert first.__qualname__ == second.__qualname__ == "<lambda>"
+    assert tex_attention._score_mod_callback_cache_key(first) != (
+        tex_attention._score_mod_callback_cache_key(second)
+    )
 
 
 def test_fused_attn_score_mod_config_stabilizes_bound_method_cache_keys():

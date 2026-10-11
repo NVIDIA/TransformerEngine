@@ -4,7 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-// JAX-owned execution of plans built with the cuDNN Python frontend.
+// JAX-owned execution of generic graphs built with the cuDNN Python frontend.
 // This translation unit deliberately has no TE common dependencies.
 #include <cuda_runtime_api.h>
 #include <cudnn.h>

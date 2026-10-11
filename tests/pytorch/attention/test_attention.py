@@ -251,6 +251,112 @@ def test_fused_attn_python_execution(monkeypatch, dtype, qkv_format):
         _attention_backends["backend_selection_requires_update"] = True
 
 
+@pytest.mark.parametrize("layout", ("bs3hd", "bsh3d", "sb3hd", "sbh3d", "t3hd", "th3d"))
+def test_fused_attn_query_reuses_runtime_graph(layout, monkeypatch):
+    """Packed storage and runtime scalar values must preserve support-query graph identity."""
+    from transformer_engine.pytorch.cpp_extensions import cudnn_fused_attn as implementation
+
+    batch, seqlen, heads, dim = 2, 128, 4, 64
+    fmt = implementation._formats(layout)[0]
+    base_shape = implementation._shape((batch, heads, seqlen, dim), fmt, batch * seqlen)
+    axis = -2 if "h3d" in layout else -3
+    packed_shape = list(base_shape)
+    packed_shape.insert(len(packed_shape) + axis + 1, 3)
+    q, k, v = torch.empty(packed_shape, device="cuda", dtype=torch.bfloat16).unbind(axis)
+    cu = torch.arange(batch + 1, device="cuda", dtype=torch.int32) * seqlen
+    params = dict(
+        q=q,
+        k=k,
+        v=v,
+        cu_seqlens_q=cu,
+        cu_seqlens_kv=cu,
+        cu_seqlens_q_padded=cu,
+        cu_seqlens_kv_padded=cu,
+        qkv_layout=layout,
+        max_seqlen_q=seqlen,
+        max_seqlen_kv=seqlen,
+        attn_mask_type="padding" if fmt == "thd" else "no_mask",
+        attn_bias_type="no_bias",
+        softmax_type="vanilla",
+        dropout=0.0,
+        attn_scale=0.125,
+        window_size=(-1, -1),
+        bottom_right_diagonal=True,
+    )
+    config = FusedAttentionParams(
+        qkv_layout=QKVLayout[layout],
+        o_format=QKVFormat[fmt],
+        batch_size=batch,
+        num_attn_heads=heads,
+        num_gqa_groups=heads,
+        head_dim_qk=dim,
+        head_dim_v=dim,
+        max_seqlen_q=seqlen,
+        max_seqlen_kv=seqlen,
+        num_tokens_q=batch * seqlen if fmt == "thd" else 0,
+        num_tokens_kv=batch * seqlen if fmt == "thd" else 0,
+        attn_mask_type=AttnMaskType[params["attn_mask_type"]],
+    )
+    query = implementation._query_graph(config, False)
+    runtime = implementation._AttentionGraph(params)
+    implementation._prepare_inputs(runtime)
+    out = torch.empty(base_shape, device="cuda", dtype=torch.bfloat16)
+    runtime.matrix("o", out, fmt, heads, runtime.sq, cu, output=True)
+    stats_shape = (batch * seqlen, heads, 1) if runtime.ragged_stats else (batch, heads, seqlen, 1)
+    runtime.stats("stats", torch.empty(stats_shape, device="cuda"), output=True)
+    assert query.description() == runtime.description()
+
+    # Isolate the cache to demonstrate that a query never compiles, and that a
+    # later execution with another scalar value compiles exactly the cached plan.
+    monkeypatch.setattr(implementation, "_plans", {})
+    builds, compiles = [], []
+
+    def build(_self):
+        entry = implementation._PlanEntry(object(), {name: name for name in runtime.specs})
+        builds.append(entry)
+        return entry
+
+    def compile_plan(_cudnn, graph, _run):
+        compiles.append(graph)
+        return 17
+
+    monkeypatch.setattr(implementation._AttentionGraph, "build", build)
+    monkeypatch.setattr(implementation, "compile_graph", compile_plan)
+    monkeypatch.setattr(implementation, "_execute_cudnn_graph", lambda *_args: None)
+    queried = query.entry()
+    assert queried.workspace_size is None and not compiles
+    runtime.scalar("attn_scale", torch.tensor([0.25]), by_value=True)
+    runtime.execute()
+    runtime.execute()
+    assert builds == [queried]
+    assert compiles == [queried.graph]
+    assert queried.workspace_size == 17
+
+
+@pytest.mark.parametrize("error", (RuntimeError("device failure"), ImportError("frontend missing")))
+def test_fused_attn_query_propagates_setup_errors(error, monkeypatch):
+    """A failed setup must surface as an error instead of selecting a fallback backend."""
+    from transformer_engine.pytorch.cpp_extensions import cudnn_fused_attn as implementation
+
+    def fail(_self):
+        raise error
+
+    monkeypatch.setattr(implementation._AttentionGraph, "build", fail)
+    monkeypatch.setattr(implementation, "_plans", {})
+    config = FusedAttentionParams(
+        qkv_layout=QKVLayout["bshd_bshd_bshd"],
+        batch_size=2,
+        num_attn_heads=4,
+        num_gqa_groups=4,
+        head_dim_qk=64,
+        head_dim_v=64,
+        max_seqlen_q=128,
+        max_seqlen_kv=128,
+    )
+    with pytest.raises(type(error), match=str(error)):
+        implementation.get_fused_attn_backend(config)
+
+
 @pytest.mark.parametrize(
     "changes,version,capability,reason",
     (

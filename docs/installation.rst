@@ -16,10 +16,16 @@ Prerequisites
 3. |driver link|_ supporting CUDA 12.1 or later.
 4. `cuDNN 9.12 <https://developer.nvidia.com/cudnn>`__ or later.
 
-PyTorch's cuDNN attention backend uses the cuDNN frontend Python API. The PyTorch
-installation includes ``nvidia-cudnn-frontend>=1.29.0``. Attention graphs and plans
-are cached by device and tensor metadata; dropout uses PyTorch's CUDA generator,
-including CUDA graph capture and replay.
+The PyTorch and JAX cuDNN attention backends use shared graph builders through
+the cuDNN frontend Python API. Both installations include
+``nvidia-cudnn-frontend>=1.29.0``. Graph descriptions are cached by tensor metadata
+and target device or architecture. Support queries select supported plans without
+compiling their kernels. PyTorch compiles on first execution and uses its CUDA
+generator for dropout, including CUDA graph capture and replay. JAX compiles
+during tracing when workspace sizes are needed, then serializes plans for its
+native FFI executor. The JAX extension and the frontend Python package must use
+matching cuDNN frontend versions; rebuild the extension after upgrading that
+package.
 
 If the CUDA Toolkit headers are not available at runtime in a standard
 installation path, e.g. within `CUDA_HOME`, set

@@ -4,23 +4,18 @@
 
 """cuDNN Python frontend graph lifecycle shared by attention implementations."""
 
-import importlib
 import threading
 
 import torch
 
+from transformer_engine.common.cudnn.graph import (
+    import_cudnn as _import_cudnn_frontend,
+    create_graph,
+    check_graph_support,
+    compile_graph,
+)
+
 _handles = threading.local()
-
-
-def _import_cudnn_frontend():
-    """Import the cuDNN frontend Python package."""
-    try:
-        return importlib.import_module("cudnn")
-    except ImportError as exc:
-        raise ImportError(
-            "cuDNN frontend Python package not found. "
-            "Install it with: pip install nvidia-cudnn-frontend"
-        ) from exc
 
 
 def _get_cudnn_current_stream_handle(cudnn, device):
@@ -46,23 +41,14 @@ def _build_cudnn_pygraph(dtype, device):
     dtype = {torch.float16: cudnn.data_type.HALF, torch.bfloat16: cudnn.data_type.BFLOAT16}.get(
         dtype, dtype
     )
-    return cudnn.pygraph(
-        io_data_type=dtype,
-        intermediate_data_type=cudnn.data_type.FLOAT,
-        compute_data_type=cudnn.data_type.FLOAT,
-        handle=_get_cudnn_current_stream_handle(cudnn, device),
-    )
+    return create_graph(cudnn, dtype, _get_cudnn_current_stream_handle(cudnn, device))
 
 
 def _finalize_cudnn_graph(graph):
     """Check support, build an execution plan, and return workspace bytes."""
     cudnn = _import_cudnn_frontend()
-    graph.validate()
-    graph.build_operation_graph()
-    graph.create_execution_plans([cudnn.heur_mode.A, cudnn.heur_mode.FALLBACK])
-    graph.check_support()
-    graph.build_plans(cudnn.build_plan_policy.HEURISTICS_CHOICE)
-    return max(graph.get_workspace_size(), 1)
+    check_graph_support(cudnn, graph)
+    return compile_graph(cudnn, graph)
 
 
 def _execute_cudnn_graph(graph, variant_pack, workspace_size, device):

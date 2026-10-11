@@ -4,12 +4,17 @@
 """Serialize Python-built cuDNN graphs for the JAX-owned FFI executor."""
 
 import hashlib
-import importlib
 from dataclasses import dataclass
 from typing import Sequence, Tuple
 
 import numpy as np
 import transformer_engine_jax
+
+from transformer_engine.common.cudnn.graph import (
+    import_cudnn as _import_cudnn,
+    check_graph_support,
+    compile_graph,
+)
 
 
 @dataclass(frozen=True)
@@ -55,12 +60,7 @@ def check_frontend_version(cudnn) -> int:
 
 def import_cudnn():
     """Load the required Python frontend lazily."""
-    try:
-        cudnn = importlib.import_module("cudnn")
-    except ImportError as exc:
-        raise ImportError(
-            "JAX fused_attn requires the cuDNN frontend Python package (`cudnn`)."
-        ) from exc
+    cudnn = _import_cudnn()
     check_frontend_version(cudnn)
     return cudnn
 
@@ -109,19 +109,9 @@ def serialize_graph(
 
 def finalize_graph(cudnn, graph):
     """Validate, select and compile a supported execution plan."""
-    try:
-        graph.validate()
-        graph.build_operation_graph()
-        graph.create_execution_plans([cudnn.heur_mode.A, cudnn.heur_mode.FALLBACK])
-        graph.check_support()
-        graph.build_plans(cudnn.build_plan_policy.HEURISTICS_CHOICE)
-    except cudnn.cudnnGraphNotSupportedError as exc:
-        raise RuntimeError(f"cuDNN SDPA graph is not supported: {exc}") from exc
-    return (
-        max(int(graph.get_workspace_size()), 1),
-        bytes(graph.serialize()),
-        check_frontend_version(cudnn),
-    )
+    check_graph_support(cudnn, graph)
+    workspace_size = compile_graph(cudnn, graph)
+    return workspace_size, bytes(graph.serialize()), check_frontend_version(cudnn)
 
 
 def graph_attributes(graph):

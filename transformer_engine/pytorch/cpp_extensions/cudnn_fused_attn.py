@@ -9,15 +9,26 @@ graph construction, plan caching, and execution do not use the common attention 
 """
 
 from dataclasses import dataclass
-import atexit
-from collections import Counter
-import os
-import sys
 import threading
-import time
 
 import torch
 import transformer_engine_torch as tex
+
+from transformer_engine.common.cudnn.attention import (
+    AttentionOptions,
+    AttentionGraphSpec,
+    build_attention_graph,
+)
+from transformer_engine.common.cudnn.graph import (
+    TensorSpec as _TensorSpec,
+    CacheDiagnostics,
+    attention_matrix_spec,
+    attention_stats_spec,
+    mxfp8_scale_spec,
+    check_graph_support,
+    compile_graph,
+    bucket,
+)
 
 from .cudnn import (
     _import_cudnn_frontend,
@@ -30,87 +41,31 @@ from ..constants import DType
 
 _plans = {}
 _cache_lock = threading.RLock()
-_diagnostics = Counter()
-_build_times = Counter()
-
-
-def _debug_enabled():
-    setting = os.getenv("NVTE_FUSED_ATTN_CACHE_DEBUG", "0")
-    level, _, ranks = setting.partition(":")
-    rank = next(
-        (
-            os.environ[n]
-            for n in ("RANK", "LOCAL_RANK", "OMPI_COMM_WORLD_RANK", "SLURM_PROCID")
-            if n in os.environ
-        ),
-        None,
-    )
-    enabled = rank is None or ranks == "all" or rank in (ranks or "0").split(",")
-    return int(level or 0) if enabled else 0
+_diagnostics = CacheDiagnostics("PyTorch")
 
 
 def _event(attn, event, key=None):
-    level = _debug_enabled()
-    if level == 0:
-        return
-    site = ("fp8" if attn.fp8 else "f16", "bwd" if attn.backward else "fwd")
-    _diagnostics[(*site, event)] += 1
-    if level >= 2:
-        print(
-            f"[FUSED-ATTN-CACHE] tid={threading.get_ident()} dev={attn.device.index} | "
-            f"{site[0]} {site[1]} {event}"
-            + (f" | {key!r}" if key is not None else ""),
-            file=sys.stderr,
-            flush=True,
-        )
+    _diagnostics.event(
+        "fp8" if attn.fp8 else "f16",
+        "bwd" if attn.backward else "fwd",
+        attn.device.index,
+        event,
+        key,
+    )
 
 
 def _build_stage(attn, name, function):
-    if not _debug_enabled():
-        return function()
-    start = time.perf_counter()
-    try:
-        return function()
-    finally:
-        site = ("fp8" if attn.fp8 else "f16", "bwd" if attn.backward else "fwd", name)
-        _build_times[(*site, "seconds")] += time.perf_counter() - start
-        _build_times[(*site, "calls")] += 1
-
-
-def _print_diagnostics():
-    if not _diagnostics:
-        return
-    print("[FUSED-ATTN-CACHE] Python frontend summary", file=sys.stderr)
-    for (backend, direction, event), count in sorted(_diagnostics.items()):
-        print(f"  {backend} {direction} {event}={count}", file=sys.stderr)
-    for backend, direction, stage, kind in sorted(_build_times):
-        if kind == "calls":
-            calls = _build_times[(backend, direction, stage, kind)]
-            seconds = _build_times[(backend, direction, stage, "seconds")]
-            print(
-                f"  {backend} {direction} {stage}: {calls} calls, "
-                f"{1000 * seconds / calls:.3f} ms average",
-                file=sys.stderr,
-            )
-
-
-atexit.register(_print_diagnostics)
+    return _diagnostics.run(
+        "fp8" if attn.fp8 else "f16",
+        "bwd" if attn.backward else "fwd",
+        name,
+        function,
+    )
 
 
 def _formats(layout):
     parts = layout.removeprefix("paged_kv_").replace("2", "").replace("3", "").split("_")
     return parts[0], parts[1] if len(parts) > 1 else parts[0]
-
-
-def _strides(dim, fmt):
-    b, h, s, d = dim
-    if fmt in ("bshd", "thd"):
-        return (s * h * d, d, h * d, 1)
-    if fmt == "sbhd":
-        return (h * d, d, b * h * d, 1)
-    if fmt == "bhsd":
-        return (h * s * d, s * d, d, 1)
-    raise ValueError(f"Unsupported attention format: {fmt}")
 
 
 def _shape(dim, fmt, tokens=0):
@@ -151,57 +106,47 @@ def _descale(tensor, columnwise=False):
     return tensor._scale_inv
 
 
-def _round_up(value, multiple):
-    return (value + multiple - 1) // multiple * multiple
+@dataclass
+class _PlanEntry:
+    """A supported graph, compiled lazily under the cache lock."""
 
-
-def _token_bucket(tokens):
-    if tokens == 0:
-        return 0
-    if tokens <= 1024:
-        return 1024
-    if tokens <= 32768:
-        return 1 << (tokens - 1).bit_length()
-    return _round_up(tokens, 32768)
-
-
-@dataclass(frozen=True)
-class _TensorSpec:
-    dim: tuple
-    stride: tuple
-    dtype: str
-    output: bool = False
-    ragged_offset: str = ""
-    reordered: bool = False
-    by_value: bool = False
+    graph: object
+    tensors: dict
+    workspace_size: int | None = None
 
 
 class _AttentionGraph:
     """Runtime tensors and data-free descriptors for one attention invocation."""
 
-    def __init__(self, params, backward=False):
+    def __init__(
+        self, params, backward=False, *, dimensions=None, device=None, fp8=None, mxfp8=None
+    ):
         self.params = params
         self.backward = backward
-        self.device = params["q"].device
+        self.device = params["q"].device if device is None else device
         self.q_format, self.kv_format = _formats(params["qkv_layout"])
-        self.b = params["cu_seqlens_q"].numel() - 1
-        self.h = params["q"].shape[1] if self.q_format == "bhsd" else params["q"].shape[-2]
-        self.hg = params["k"].shape[1] if self.kv_format == "bhsd" else params["k"].shape[-2]
-        self.dq = params["q"].shape[-1]
-        self.dv = params["v"].shape[-1]
-        self.tq = params["q"].shape[0] if self.q_format == "thd" else 0
-        self.tk = params["k"].shape[0] if self.kv_format == "thd" else 0
+        if dimensions is None:
+            dimensions = (
+                params["cu_seqlens_q"].numel() - 1,
+                params["q"].shape[1] if self.q_format == "bhsd" else params["q"].shape[-2],
+                params["k"].shape[1] if self.kv_format == "bhsd" else params["k"].shape[-2],
+                params["q"].shape[-1],
+                params["v"].shape[-1],
+                params["q"].shape[0] if self.q_format == "thd" else 0,
+                params["k"].shape[0] if self.kv_format == "thd" else 0,
+            )
+        self.b, self.h, self.hg, self.dq, self.dv, self.tq, self.tk = dimensions
         capability = torch.cuda.get_device_capability(self.device)
         ragged_graph = capability >= (9, 0) and capability != (12, 0)
         self.ragged_stats = self.q_format == "thd" and ragged_graph
-        self.sq = _token_bucket(self.tq) if self.ragged_stats else params["max_seqlen_q"]
+        self.sq = bucket(self.tq, 1024, 32768) if self.ragged_stats else params["max_seqlen_q"]
         self.skv = (
-            _token_bucket(self.tk)
+            bucket(self.tk, 1024, 32768)
             if self.kv_format == "thd" and ragged_graph
             else params["max_seqlen_kv"]
         )
-        self.fp8 = hasattr(params["q"], "_fp8_dtype")
-        self.mxfp8 = isinstance(params["q"], MXFP8TensorStorage)
+        self.fp8 = hasattr(params["q"], "_fp8_dtype") if fp8 is None else fp8
+        self.mxfp8 = isinstance(params["q"], MXFP8TensorStorage) if mxfp8 is None else mxfp8
         self.specs = {}
         self.tensors = {}
 
@@ -223,59 +168,45 @@ class _AttentionGraph:
     def matrix(
         self, name, tensor, fmt, heads, seqlen, cu_padded=None, columnwise=False, output=False
     ):
-        """Describe an attention matrix in logical BHSD order, retaining storage strides."""
+        """Bind storage using the same matrix descriptors as support queries."""
         data = _raw(tensor, columnwise)
         dim = (self.b, heads, seqlen, tensor.shape[-1])
-        if fmt == "bshd":
-            order = (0, 2, 1, 3)
-        elif fmt == "sbhd":
-            order = (1, 2, 0, 3)
-        else:
-            order = (0, 1, 2, 3)
-        offset_name = ""
-        if fmt == "thd":
-            token_stride, head_stride, last_stride = data.stride()
-            stride = (seqlen * token_stride, head_stride, token_stride, last_stride)
-            offset_name = name + "_offset"
-            offsets = cu_padded.to(torch.int64) * token_stride
+        offset_name = name + "_offset" if fmt == "thd" else ""
+        if offset_name:
+            offsets = cu_padded.to(torch.int64) * data.stride(0)
             self.add(offset_name, offsets, (self.b + 1, 1, 1, 1), (1, 1, 1, 1))
-        elif data.ndim == 4:
-            stride = tuple(data.stride(i) for i in order)
-            # Paged K/V have a page axis rather than a batch axis.
-            if name in ("k", "v") and self.params.get("page_table_k") is not None:
-                dim = tuple(data.shape[i] for i in order)
-        else:
-            stride = _strides(dim, fmt)
-        return self.add(
-            name, data, dim, stride, _dtype(tensor), output=output, ragged_offset=offset_name
+        elif name in ("k", "v") and self.params.get("page_table_k") is not None:
+            order = (0, 2, 1, 3) if fmt == "bshd" else (0, 1, 2, 3)
+            dim = tuple(data.shape[index] for index in order)
+        self.tensors[name] = data
+        self.specs[name] = attention_matrix_spec(
+            dim,
+            fmt,
+            _dtype(tensor),
+            storage_stride=data.stride(),
+            output=output,
+            ragged_offset=offset_name,
         )
+        return name
 
     def stats(self, name, tensor, output=False):
-        """Describe softmax statistics, including offsets for packed THD storage."""
-        dim = (self.b, self.h, self.sq, 1)
+        """Bind dense or packed softmax statistics."""
         if self.ragged_stats:
             offsets = self.params["cu_seqlens_q_padded"].to(torch.int64) * self.h
             self.add("stats_offset", offsets, (self.b + 1, 1, 1, 1), (1, 1, 1, 1))
-            return self.add(
-                name,
-                tensor,
-                dim,
-                (self.h * self.sq, 1, self.h, 1),
-                output=output,
-                ragged_offset="stats_offset",
-            )
-        return self.add(name, tensor, dim, (self.h * self.sq, self.sq, 1, 1), output=output)
+        self.tensors[name] = tensor
+        self.specs[name] = attention_stats_spec(
+            self.b, self.h, self.sq, ragged=self.ragged_stats, output=output
+        )
+        return name
 
     def scale(self, name, tensor, matrix_name, fmt, columnwise=False):
-        """Describe per-tensor FP8 scales or reordered MXFP8 block scales."""
+        """Bind tensor scales or reordered MXFP8 block scales."""
         if not self.mxfp8:
             return self.scalar(name, tensor)
-        b, h, s, d = self.specs[matrix_name].dim
-        if columnwise:
-            dim = (b, h, _round_up((s + 31) // 32, 4), _round_up(d, 128))
-        else:
-            dim = (b, h, _round_up(s, 128), _round_up((d + 31) // 32, 4))
-        return self.add(name, tensor, dim, _strides(dim, fmt), "FP8_E8M0", reordered=True)
+        self.tensors[name] = tensor
+        self.specs[name] = mxfp8_scale_spec(self.specs[matrix_name].dim, fmt, columnwise)
+        return name
 
     def options(self):
         """Return graph attributes that affect support and plan caching."""
@@ -288,24 +219,27 @@ class _AttentionGraph:
         left, right = p["window_size"] or (-1, -1)
         if not causal and (left, right) == (-1, -1):
             bottom_right = False
-        return (
-            mask,
-            p["attn_bias_type"],
-            p["softmax_type"],
-            left + 1 if left != -1 else None,
-            0 if causal else (right if right != -1 else None),
-            bottom_right,
-            p["dropout"],
-            p.get("deterministic", False),
-            p.get("return_max_logit", False),
-            self.fp8,
-            self.mxfp8,
-            self.params["max_seqlen_kv"] if self.params.get("page_table_k") is not None else 0,
+        return AttentionOptions(
+            backward=self.backward,
+            fp8=self.fp8,
+            mxfp8=self.mxfp8,
+            bottom_right=bottom_right,
+            left_bound=left + 1 if left != -1 else None,
+            right_bound=0 if causal else (right if right != -1 else None),
+            padding="padding" in mask,
+            alibi=p["attn_bias_type"] == "alibi",
+            dropout=p["dropout"],
+            deterministic=p.get("deterministic", False),
+            paged_max_seqlen_kv=p["max_seqlen_kv"] if p.get("page_table_k") is not None else 0,
         )
+
+    def description(self):
+        """Describe the graph independently of buffer addresses and scalar values."""
+        return AttentionGraphSpec.from_dict(self.options(), self.specs)
 
     def entry(self):
         """Share support-query graphs with execution without compiling on queries."""
-        key = (self.device, self.backward, self.options(), tuple(sorted(self.specs.items())))
+        key = (self.device, self.description())
         # Autograd may run backward on another thread. Share device-specific plans;
         # each execution supplies its thread-local handle on the current stream.
         with _cache_lock:
@@ -320,204 +254,32 @@ class _AttentionGraph:
         return entry
 
     def execute(self):
-        """Look up the graph by metadata, then bind this call's tensor addresses."""
+        """Compile once, then bind this invocation's runtime tensor addresses."""
         entry = self.entry()
         with _cache_lock:
-            if entry[2] is None:
-                cudnn = _import_cudnn_frontend()
-                _build_stage(
-                    self,
-                    "build_plans",
-                    lambda: entry[0].build_plans(cudnn.build_plan_policy.HEURISTICS_CHOICE),
+            if entry.workspace_size is None:
+                entry.workspace_size = compile_graph(
+                    _import_cudnn_frontend(),
+                    entry.graph,
+                    lambda name, function: _build_stage(self, name, function),
                 )
-                entry[2] = max(entry[0].get_workspace_size(), 1)
                 _event(self, "BUILD_PLANS")
-        graph, tensors, workspace = entry
         _execute_cudnn_graph(
-            graph, {tensors[n]: t for n, t in self.tensors.items()}, workspace, self.device
+            entry.graph,
+            {entry.tensors[n]: t for n, t in self.tensors.items()},
+            entry.workspace_size,
+            self.device,
         )
         _event(self, "EXECUTE")
 
     def build(self):
-        """Construct and check a frontend graph without compiling its execution plan."""
+        """Construct and check the common graph description without compiling it."""
         cudnn = _import_cudnn_frontend()
         graph = _build_cudnn_pygraph(getattr(cudnn.data_type, self.specs["q"].dtype), self.device)
-        tensors = {}
-
-        def tensor(name):
-            if name not in tensors:
-                spec = self.specs[name]
-                desc = graph.tensor(
-                    name=name,
-                    dim=spec.dim,
-                    stride=spec.stride,
-                    data_type=getattr(cudnn.data_type, spec.dtype),
-                    is_pass_by_value=spec.by_value,
-                )
-                if spec.ragged_offset:
-                    desc.set_ragged_offset(tensor(spec.ragged_offset))
-                if spec.reordered:
-                    desc.set_reordering_type(cudnn.tensor_reordering.F8_128x4)
-                if spec.output:
-                    desc.set_output(True)
-                tensors[name] = desc
-            return tensors[name]
-
-        for name, spec in self.specs.items():
-            if not spec.output:
-                tensor(name)
-
-        mask, bias, softmax, left, right, bottom_right, dropout, deterministic, _, _, _, pages = (
-            self.options()
-        )
-        kwargs = {
-            "attn_scale": tensor("attn_scale"),
-            "diagonal_alignment": (
-                cudnn.diagonal_alignment.BOTTOM_RIGHT
-                if bottom_right
-                else cudnn.diagonal_alignment.TOP_LEFT
-            ),
-        }
-        bound_names = (
-            ("left_bound", "right_bound")
-            if (self.fp8 and (not self.mxfp8 or self.backward))
-            else ("diagonal_band_left_bound", "diagonal_band_right_bound")
-        )
-        kwargs.update(zip(bound_names, (left, right)))
-        if "padding" in mask:
-            kwargs.update(
-                use_padding_mask=True, seq_len_q=tensor("seq_q"), seq_len_kv=tensor("seq_kv")
-            )
-        if bias == "alibi":
-            kwargs["use_alibi_mask"] = True
-        elif bias != "no_bias":
-            kwargs["bias"] = tensor("bias")
-            if self.backward and "dbias" in self.specs:
-                kwargs["dBias"] = tensor("dbias")
-        if dropout:
-            kwargs["dropout"] = (dropout, tensor("seed"), tensor("offset"))
-        if softmax != "vanilla":
-            kwargs["sink_token"] = tensor("softmax_offset")
-            if self.backward:
-                kwargs["dSink_token"] = tensor("dsoftmax_offset")
-        if self.backward:
-            kwargs["use_deterministic_algorithm"] = deterministic
-        else:
-            kwargs["generate_stats"] = True
-            if "max" in self.specs:
-                kwargs["score_max"] = tensor("max")
-            if pages:
-                kwargs.update(
-                    paged_attention_k_table=tensor("page_table_k"),
-                    paged_attention_v_table=tensor("page_table_v"),
-                    paged_attention_max_seq_len_kv=pages,
-                )
-
-        q, k, v = (tensor(n) for n in ("q", "k", "v"))
-        if not self.fp8:
-            if self.backward:
-                outputs = graph.sdpa_backward(
-                    q, k, v, tensor("o"), tensor("do"), tensor("stats"), **kwargs
-                )
-                names = ("dq", "dk", "dv")
-            else:
-                outputs = graph.sdpa(q, k, v, **kwargs)
-                names = ("o", "stats")
-        elif not self.backward:
-            scale_args = [tensor(n) for n in ("descale_q", "descale_k", "descale_v")]
-            if self.mxfp8:
-                outputs = graph.sdpa_mxfp8(q, k, v, *scale_args, **kwargs)
-                names = ("o", "stats", "amax_o")
-            else:
-                outputs = graph.sdpa_fp8(
-                    q,
-                    k,
-                    v,
-                    *scale_args,
-                    *(tensor(n) for n in ("descale_s", "scale_s", "scale_o")),
-                    **kwargs,
-                )
-                names = ("o", "stats", "amax_s", "amax_o")
-        elif self.mxfp8:
-            outputs = graph.sdpa_mxfp8_backward(
-                q,
-                tensor("q_t"),
-                k,
-                tensor("k_t"),
-                v,
-                tensor("o"),
-                tensor("do_f16"),
-                tensor("do"),
-                tensor("do_t"),
-                tensor("stats"),
-                *(
-                    tensor(n)
-                    for n in (
-                        "descale_q",
-                        "descale_q_t",
-                        "descale_k",
-                        "descale_k_t",
-                        "descale_v",
-                        "descale_do",
-                        "descale_do_t",
-                    )
-                ),
-                **kwargs,
-            )
-            names = ("dq", "dk", "dv", "amax_dq", "amax_dk", "amax_dv")
-        else:
-            outputs = graph.sdpa_fp8_backward(
-                q,
-                k,
-                v,
-                tensor("o"),
-                tensor("do"),
-                tensor("stats"),
-                *(
-                    tensor(n)
-                    for n in (
-                        "descale_q",
-                        "descale_k",
-                        "descale_v",
-                        "descale_o",
-                        "descale_do",
-                        "descale_s",
-                        "descale_dp",
-                        "scale_s",
-                        "scale_dq",
-                        "scale_dk",
-                        "scale_dv",
-                        "scale_dp",
-                    )
-                ),
-                **kwargs,
-            )
-            names = ("dq", "dk", "dv", "amax_dq", "amax_dk", "amax_dv", "amax_dp")
-
-        for name, desc in zip(names, outputs):
-            if name not in self.specs:
-                # MXFP8 amax outputs stay virtual, matching the C++ graph.
-                desc.set_dim((1, 1, 1, 1)).set_stride((1, 1, 1, 1)).set_data_type(
-                    cudnn.data_type.FLOAT
-                )
-                continue
-            spec = self.specs[name]
-            desc.set_output(True).set_dim(spec.dim).set_stride(spec.stride).set_data_type(
-                getattr(cudnn.data_type, spec.dtype)
-            )
-            if spec.ragged_offset:
-                desc.set_ragged_offset(tensor(spec.ragged_offset))
-            tensors[name] = desc
+        built = build_attention_graph(cudnn, graph, self.description())
         _event(self, "CREATE_GRAPH")
-        _build_stage(self, "validate", graph.validate)
-        _build_stage(self, "build_operation_graph", graph.build_operation_graph)
-        _build_stage(
-            self,
-            "create_execution_plans",
-            lambda: graph.create_execution_plans([cudnn.heur_mode.A, cudnn.heur_mode.FALLBACK]),
-        )
-        _build_stage(self, "check_support", graph.check_support)
-        return [graph, tensors, None]
+        check_graph_support(cudnn, graph, lambda name, function: _build_stage(self, name, function))
+        return _PlanEntry(graph, built.tensors)
 
 
 def _prepare_inputs(attn):
@@ -540,7 +302,7 @@ def _prepare_inputs(attn):
     if p["attn_bias_type"] not in ("no_bias", "alibi"):
         attn.add("bias", p["attn_bias"])
     if p["softmax_type"] != "vanilla":
-        attn.add("softmax_offset", p["softmax_offset"])
+        attn.add("sink", p["softmax_offset"])
     if p["dropout"]:
         rng = p["rng_state"]
         attn.scalar("seed", rng[:1])
@@ -632,21 +394,6 @@ def _query_graph(config, backward):
         if (config.dqkv_layout != tex.NVTE_QKV_Layout.NVTE_QKV_Layout_NOT_SET)
         else layout
     )
-    attn = _AttentionGraph.__new__(_AttentionGraph)
-    attn.backward = backward
-    attn.device = torch.device("cuda", torch.cuda.current_device())
-    attn.q_format, attn.kv_format = _formats(layout)
-    attn.b, attn.h, attn.hg = config.batch_size, config.num_attn_heads, config.num_gqa_groups
-    attn.dq, attn.dv = config.head_dim_qk, config.head_dim_v
-    attn.tq, attn.tk = config.num_tokens_q, config.num_tokens_kv
-    ragged_graph = torch.cuda.get_device_capability() >= (9, 0) and (
-        torch.cuda.get_device_capability() != (12, 0)
-    )
-    attn.ragged_stats = attn.q_format == "thd" and ragged_graph
-    attn.sq = _token_bucket(attn.tq) if attn.ragged_stats else config.max_seqlen_q
-    attn.skv = (
-        _token_bucket(attn.tk) if attn.kv_format == "thd" and ragged_graph else config.max_seqlen_kv
-    )
     types = {
         DType.kFloat16: "HALF",
         DType.kBFloat16: "BFLOAT16",
@@ -654,9 +401,9 @@ def _query_graph(config, backward):
         DType.kFloat8E4M3: "FP8_E4M3",
         DType.kFloat8E5M2: "FP8_E5M2",
     }
-    attn.fp8 = types[DType.cast(config.qkv_dtype)].startswith("FP8")
-    attn.mxfp8 = attn.fp8 and config.scaling_mode == tex.NVTEScalingMode.NVTE_MXFP8_1D_SCALING
-    attn.params = {
+    fp8 = types[DType.cast(config.qkv_dtype)].startswith("FP8")
+    mxfp8 = fp8 and config.scaling_mode == tex.NVTEScalingMode.NVTE_MXFP8_1D_SCALING
+    params = {
         "attn_mask_type": name(AttnMaskType, config.attn_mask_type),
         "attn_bias_type": name(AttnBiasType, config.bias_type),
         "softmax_type": name(SoftmaxType, config.softmax_type),
@@ -668,7 +415,23 @@ def _query_graph(config, backward):
         "max_seqlen_kv": config.max_seqlen_kv,
         "page_table_k": True if layout.startswith("paged_kv_") else None,
     }
-    attn.specs, attn.tensors = {}, {}
+    params.update(qkv_layout=layout, max_seqlen_q=config.max_seqlen_q)
+    attn = _AttentionGraph(
+        params,
+        backward,
+        dimensions=(
+            config.batch_size,
+            config.num_attn_heads,
+            config.num_gqa_groups,
+            config.head_dim_qk,
+            config.head_dim_v,
+            config.num_tokens_q,
+            config.num_tokens_kv,
+        ),
+        device=torch.device("cuda", torch.cuda.current_device()),
+        fp8=fp8,
+        mxfp8=mxfp8,
+    )
 
     def spec(n, dim=(1, 1, 1, 1), stride=(1, 1, 1, 1), dtype="FLOAT", **kwargs):
         attn.specs[n] = _TensorSpec(tuple(dim), tuple(stride), dtype, **kwargs)
@@ -677,41 +440,25 @@ def _query_graph(config, backward):
         dim = (attn.b, h, s, d)
         if n in ("k", "v") and layout.startswith("paged_kv_"):
             dim = (getattr(config, "num_pages_" + n), h, getattr(config, "page_size_" + n), d)
-        stride = list(_strides(dim, fmt))
-        if "3" in packed or "2" in packed:
-            count = 3 if "3" in packed else 2
-            stride[0] *= count
-            stride[2] *= count
-            if "h3d" in packed or "h2d" in packed:
-                stride[1] *= count
-        offset = ""
-        if fmt == "thd":
-            offset = n + "_offset"
-            spec(offset, (attn.b + 1, 1, 1, 1), dtype="INT64")
-        spec(n, dim, stride, dtype, output=output, ragged_offset=offset)
-
-    def stats(n, output=False):
-        stride = (
-            (attn.h * attn.sq, 1, attn.h, 1)
-            if attn.ragged_stats
-            else (attn.h * attn.sq, attn.sq, 1, 1)
-        )
-        offset = "stats_offset" if attn.ragged_stats else ""
+        offset = n + "_offset" if fmt == "thd" else ""
         if offset:
             spec(offset, (attn.b + 1, 1, 1, 1), dtype="INT64")
-        spec(n, (attn.b, attn.h, attn.sq, 1), stride, output=output, ragged_offset=offset)
+        attn.specs[n] = attention_matrix_spec(
+            dim, fmt, dtype, packed=packed, output=output, ragged_offset=offset
+        )
+
+    def stats(n, output=False):
+        if attn.ragged_stats:
+            spec("stats_offset", (attn.b + 1, 1, 1, 1), dtype="INT64")
+        attn.specs[n] = attention_stats_spec(
+            attn.b, attn.h, attn.sq, ragged=attn.ragged_stats, output=output
+        )
 
     def scale(n, matrix_name, fmt, columnwise=False):
         if not attn.mxfp8:
             spec(n)
-            return
-        b, h, s, d = attn.specs[matrix_name].dim
-        dim = (
-            (b, h, _round_up((s + 31) // 32, 4), _round_up(d, 128))
-            if columnwise
-            else (b, h, _round_up(s, 128), _round_up((d + 31) // 32, 4))
-        )
-        spec(n, dim, _strides(dim, fmt), "FP8_E8M0", reordered=True)
+        else:
+            attn.specs[n] = mxfp8_scale_spec(attn.specs[matrix_name].dim, fmt, columnwise)
 
     parts = layout.removeprefix("paged_kv_").split("_")
     for n, fmt, h, s, d, part in (
@@ -743,9 +490,9 @@ def _query_graph(config, backward):
         if backward and (b, h, sq) != (1, 1, 1):
             spec("dbias", dim, stride, types[DType.cast(config.qkv_dtype)], output=True)
     if attn.params["softmax_type"] != "vanilla":
-        spec("softmax_offset", (1, attn.h, 1, 1), (attn.h, 1, 1, 1))
+        spec("sink", (1, attn.h, 1, 1), (attn.h, 1, 1, 1))
         if backward:
-            spec("dsoftmax_offset", (1, attn.h, 1, 1), (attn.h, 1, 1, 1), output=True)
+            spec("dsink", (1, attn.h, 1, 1), (attn.h, 1, 1, 1), output=True)
     if layout.startswith("paged_kv_"):
         for n in ("k", "v"):
             pages = getattr(config, "max_pages_per_seq_" + n)
@@ -991,7 +738,7 @@ def fused_attn_bwd(params):
         dsoftmax = torch.empty(0, device=attn.device, dtype=torch.float32)
         if p["softmax_type"] != "vanilla":
             dsoftmax = torch.empty_like(p["softmax_offset"])
-            attn.add("dsoftmax_offset", dsoftmax, output=True)
+            attn.add("dsink", dsoftmax, output=True)
         if attn.fp8:
             do_scale_fmt = p.get("do_scale_inv_format") or p["do_format"]
             attn.scale("descale_do", _descale(p["d_o"]), "do", do_scale_fmt)

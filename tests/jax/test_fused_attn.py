@@ -428,6 +428,81 @@ def test_fused_attn_backend_message():
     assert message != ""
 
 
+@pytest.mark.parametrize("setup_error", (None, RuntimeError("frontend version mismatch")))
+def test_fused_attn_support_query_defers_compilation(setup_error, monkeypatch):
+    """Support queries must avoid compilation and propagate unexpected setup failures."""
+    from transformer_engine.jax.cpp_extensions import cudnn_attention
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("Support query compiled an execution plan")
+
+    monkeypatch.setattr(cudnn_attention, "compile_graph", forbidden)
+    cudnn_attention._supported_graph.cache_clear()
+    if setup_error is not None:
+
+        def fail(*_args, **_kwargs):
+            raise setup_error
+
+        monkeypatch.setattr(cudnn_attention, "check_attention_support", fail)
+    helper = FusedAttnHelper(
+        is_training=True,
+        batch_size=2,
+        q_dtype=jnp.bfloat16,
+        kv_dtype=jnp.bfloat16,
+        qkv_layout=QKVLayout.BSHD_BSHD_BSHD,
+        attn_bias_type=AttnBiasType.NO_BIAS,
+        attn_mask_type=AttnMaskType.NO_MASK,
+        softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+        dropout_probability=0.0,
+        q_num_heads=4,
+        kv_num_heads=4,
+        q_max_seqlen=128,
+        kv_max_seqlen=128,
+        head_dim_qk=64,
+        head_dim_v=64,
+        window_size=(-1, -1),
+        attn_scale=0.125,
+    )
+    if setup_error is not None:
+        with pytest.raises(RuntimeError, match=str(setup_error)):
+            helper.get_fused_attn_backend()
+    else:
+        backend, message = helper.get_fused_attn_backend()
+        if backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
+            pytest.skip(f"Baseline attention is unsupported: {message}")
+
+
+@pytest.mark.parametrize("batch,seqlen", ((0, 128), (2, 0)))
+def test_cudnn_attention_empty_ragged_capacities(batch, seqlen, monkeypatch):
+    """Empty storage must retain positive graph capacities for ragged metadata."""
+    from types import SimpleNamespace
+    from transformer_engine.jax.cpp_extensions import cudnn_attention
+
+    monkeypatch.setattr(cudnn_attention, "cudnn_version", lambda: 92700)
+    config = SimpleNamespace(
+        qkv_layout=QKVLayout.THD_THD_THD,
+        max_segments_per_seq=1,
+        fp8=False,
+        attn_mask_type=AttnMaskType.PADDING_MASK,
+        attn_bias_type=AttnBiasType.NO_BIAS,
+        softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+        effective_window_size=(-1, -1),
+        scaling_factor=0.125,
+        bottom_right_diagonal=False,
+        dropout_probability=0.0,
+        is_training=False,
+        return_max_logit=False,
+    )
+    shapes = tuple(
+        (shape, jnp.dtype(jnp.bfloat16))
+        for shape in ((batch, seqlen, 4, 64),) * 3 + ((0,), (1, 4, 1, 1))
+    )
+    description = cudnn_attention._describe_graph("fwd", shapes, config, (100,), True, True)
+    assert description.metadata_batch == 32
+    for name in ("q", "k", "v"):
+        assert dict(description.spec.tensors)[name].dim == (32, 4, 1024, 64)
+
+
 class BiasShape(Enum):
     """
     Enum class to represent the different bias shapes used in the fused attention.

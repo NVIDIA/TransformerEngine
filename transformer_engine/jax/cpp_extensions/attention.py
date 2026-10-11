@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for attention"""
+
 import logging
 import operator
 import os
@@ -48,7 +49,6 @@ from ..sharding import (
     num_of_devices,
     with_sharding_constraint,
 )
-
 
 __all__ = [
     "FusedAttnHelper",
@@ -244,15 +244,15 @@ class FusedAttnHelper:
             )
             avals += (jax.ShapeDtypeStruct((1, self.q_num_heads, 1, 1), jnp.float32),)
             try:
-                cudnn_attention.get_graph("fwd", avals, config)
+                cudnn_attention.check_attention_support("fwd", avals, config)
                 if self.is_training:
-                    cudnn_attention.get_graph("bwd", avals, config)
+                    cudnn_attention.check_attention_support("bwd", avals, config)
                 backend = (
                     NVTE_Fused_Attn_Backend.NVTE_FP8
                     if self.fp8
                     else NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
                 )
-            except (ValueError, RuntimeError, ImportError) as exc:
+            except ValueError as exc:
                 message = str(exc)
 
         AttentionLogging.setup_logging()
@@ -2892,7 +2892,7 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
             else:
                 for i in range(0, cp_size):
                     carry = scan_kv_block(i, carry)
-            (kv, output, softmax_aux, max_logit) = carry
+            kv, output, softmax_aux, max_logit = carry
 
             output = output.astype(q.dtype)
             # Globalize the rank-local running [H] max across DP/CP.
@@ -3117,7 +3117,7 @@ class FusedRingAttnBwdPrimitive(FusedAttnBwdPrimitive):
             else:
                 for i in range(0, cp_size):
                     carry = scan_kv_block(i, carry)
-            (kv, dq, dk_dv, dbias) = carry
+            kv, dq, dk_dv, dbias = carry
 
             # Final permute to put gradients back to their final resting place.
             dk_dv = helper.permute_kv(dk_dv, cp_perm)
@@ -3356,7 +3356,7 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
             else:
                 for i in range(0, cp_size):
                     carry = scan_kv_block(i, carry)
-            (_, _, _, output, softmax_aux, max_logit) = carry
+            _, _, _, output, softmax_aux, max_logit = carry
 
             output = output.astype(q.dtype)
             # Globalize the rank-local running [H] max across DP/CP.
@@ -3488,7 +3488,7 @@ class FusedRingAttnStripedBwdPrimitive(FusedAttnBwdPrimitive):
             else:
                 for idx in range(cp_size):
                     carry = scan_kv_block(idx, carry)
-            (_, _, _, dq, dkv, dbias) = carry
+            _, _, _, dq, dkv, dbias = carry
 
             # Final permute to put gradients back to their final resting place.
             dkv = helper.permute_kv(dkv, cp_perm)

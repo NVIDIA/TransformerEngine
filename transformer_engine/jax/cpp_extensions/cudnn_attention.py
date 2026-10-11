@@ -5,6 +5,7 @@
 
 import math
 import os
+import threading
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -13,7 +14,23 @@ import jax.numpy as jnp
 import numpy as np
 from jax import ffi
 
-from .cudnn_graph import import_cudnn, finalize_graph, serialize_graph, graph_attributes
+from transformer_engine.common.cudnn.attention import (
+    AttentionOptions,
+    AttentionGraphSpec,
+    BuiltAttentionGraph,
+    build_attention_graph,
+)
+from transformer_engine.common.cudnn.graph import (
+    TensorSpec,
+    CacheDiagnostics,
+    bucket as _bucket,
+    row_major_stride as _stride,
+    create_graph,
+    check_graph_support,
+    compile_graph,
+)
+
+from .cudnn_graph import import_cudnn, check_frontend_version, serialize_graph, graph_attributes
 
 
 def device_capabilities():
@@ -26,24 +43,14 @@ def cudnn_version():
     return int(import_cudnn().backend_version())
 
 
-def _dtype(cudnn, dtype):
+def _dtype(dtype):
     return {
-        jnp.dtype(jnp.float16): cudnn.data_type.HALF,
-        jnp.dtype(jnp.bfloat16): cudnn.data_type.BFLOAT16,
-        jnp.dtype(jnp.float32): cudnn.data_type.FLOAT,
-        jnp.dtype(jnp.float8_e4m3fn): cudnn.data_type.FP8_E4M3,
-        jnp.dtype(jnp.float8_e5m2): cudnn.data_type.FP8_E5M2,
+        jnp.dtype(jnp.float16): "HALF",
+        jnp.dtype(jnp.bfloat16): "BFLOAT16",
+        jnp.dtype(jnp.float32): "FLOAT",
+        jnp.dtype(jnp.float8_e4m3fn): "FP8_E4M3",
+        jnp.dtype(jnp.float8_e5m2): "FP8_E5M2",
     }[jnp.dtype(dtype)]
-
-
-def _bucket(value, minimum, maximum):
-    if value <= maximum:
-        return max(minimum, 1 << (value - 1).bit_length())
-    return (value + maximum - 1) // maximum * maximum
-
-
-def _stride(shape):
-    return tuple(math.prod(shape[index + 1 :]) for index in range(len(shape)))
 
 
 def _dims(avals, config):
@@ -77,10 +84,58 @@ class AttentionGraph:
     fp8: bool
 
 
-def get_graph(direction, avals, config):
-    """Cache by configuration, operand metadata and GPU architecture."""
+@dataclass(frozen=True)
+class _AttentionDescription:
+    """Static graph metadata and JAX's packed-storage buffer bindings."""
+
+    spec: AttentionGraphSpec
+    inputs: tuple
+    outputs: tuple
+    scalars: tuple
+    metadata_batch: int
+    ragged_stats: bool
+    multipliers: tuple
+    fp8: bool
+
+
+@dataclass
+class _SupportedGraph:
+    """A supported live graph and its lazily compiled serialization."""
+
+    built: BuiltAttentionGraph
+    workspace_size: int | None = None
+    serialized_graph: bytes | None = None
+
+
+_diagnostics = CacheDiagnostics("JAX")
+_plan_lock = threading.RLock()
+
+
+def _site(spec):
+    return "fp8" if spec.options.fp8 else "f16", "bwd" if spec.options.backward else "fwd"
+
+
+@lru_cache(maxsize=256)
+def _supported_graph(spec, capabilities, frontend_version, backend_version):
+    # Versions and target architecture are part of the plan identity, even when
+    # two targets happen to accept identical logical tensor descriptors.
+    del frontend_version, backend_version
+    cudnn = import_cudnn()
+    backend, direction = _site(spec)
+    _diagnostics.event(backend, direction, capabilities, "MISS", spec)
+    graph = create_graph(cudnn, dict(spec.tensors)["o"].dtype)
+    built = build_attention_graph(cudnn, graph, spec)
+    _diagnostics.event(backend, direction, capabilities, "CREATE_GRAPH")
+    check_graph_support(
+        cudnn, graph, lambda stage, function: _diagnostics.run(backend, direction, stage, function)
+    )
+    _diagnostics.event(backend, direction, capabilities, "CACHE_GRAPH")
+    return _SupportedGraph(built)
+
+
+def _request(direction, avals, config):
     shapes = tuple((tuple(aval.shape), jnp.dtype(aval.dtype)) for aval in avals[:5])
-    return _build_graph(
+    return (
         direction,
         shapes,
         config,
@@ -90,20 +145,96 @@ def get_graph(direction, avals, config):
     )
 
 
+def _get_supported_graph(spec, capabilities, frontend_version, backend_version):
+    """Share support-query graphs with compilation, and report cache reuse."""
+    # pylint infers the wrapped function's arguments for lru_cache.cache_info.
+    # pylint: disable=no-value-for-parameter
+    with _plan_lock:
+        hits = _supported_graph.cache_info().hits
+        entry = _supported_graph(spec, capabilities, frontend_version, backend_version)
+        if _supported_graph.cache_info().hits > hits:
+            _diagnostics.event(*_site(spec), capabilities, "HIT")
+        return entry
+
+
+def check_attention_support(direction, avals, config):
+    """Check the common graph without compiling kernels or serializing a plan."""
+    description = _describe_graph(*_request(direction, avals, config))
+    cudnn = import_cudnn()
+    _get_supported_graph(
+        description.spec,
+        device_capabilities(),
+        check_frontend_version(cudnn),
+        int(cudnn.backend_version()),
+    )
+
+
+def get_graph(direction, avals, config):
+    """Compile when tracing requires workspace sizes and serialized FFI attributes."""
+    return _build_graph(*_request(direction, avals, config))
+
+
 @lru_cache(maxsize=256)
 def _build_graph(direction, shapes, config, capabilities, nondeterministic, fp8_backward):
+    description = _describe_graph(
+        direction, shapes, config, capabilities, nondeterministic, fp8_backward
+    )
     cudnn = import_cudnn()
+    version = check_frontend_version(cudnn)
+    entry = _get_supported_graph(
+        description.spec, capabilities, version, int(cudnn.backend_version())
+    )
+    backend, direction = _site(description.spec)
+    with _plan_lock:
+        if entry.workspace_size is None:
+            workspace_size = compile_graph(
+                cudnn,
+                entry.built.graph,
+                lambda stage, function: _diagnostics.run(backend, direction, stage, function),
+            )
+            serialized_graph = bytes(entry.built.graph.serialize())
+            entry.workspace_size = workspace_size
+            entry.serialized_graph = serialized_graph
+            _diagnostics.event(backend, direction, capabilities, "BUILD_PLANS")
+    uids = entry.built.uids
+    serialized = serialize_graph(
+        serialized_graph=entry.serialized_graph,
+        cudnn_frontend_version=version,
+        workspace_size=entry.workspace_size,
+        input_uids=[uids[name] for name, _, _ in description.inputs],
+        output_uids=[uids[name] for name, _, _ in description.outputs],
+        scalar_uids=[uids[name] for name, _ in description.scalars],
+        scalar_values=[value for _, value in description.scalars],
+    )
+    return AttentionGraph(
+        serialized,
+        tuple(source for _, source, _ in description.inputs),
+        tuple(range(len(description.inputs))),
+        tuple(offset for _, _, offset in description.inputs),
+        tuple(slot for _, slot, _ in description.outputs),
+        tuple(offset for _, _, offset in description.outputs),
+        description.metadata_batch,
+        description.ragged_stats,
+        description.multipliers,
+        description.fp8,
+    )
+
+
+def _describe_graph(direction, shapes, config, capabilities, nondeterministic, fp8_backward):
+    """Translate JAX's API and storage conventions into a common graph description."""
     avals = tuple(jax.ShapeDtypeStruct(*shape) for shape in shapes)
     batch, sq, sk, h, hg, dq, dv = _dims(avals, config)
     backward = direction == "bwd"
     ragged = config.qkv_layout.is_thd()
     ragged_stats = ragged and capabilities[0] >= 90 and capabilities[0] != 120
     segments = batch * config.max_segments_per_seq if ragged else batch
-    graph_batch = _bucket(segments, 32, 512) if ragged_stats else segments
-    graph_sq = _bucket(batch * sq, 1024, 32768) if ragged_stats else sq
-    graph_sk = _bucket(batch * sk, 1024, 32768) if ragged_stats else sk
+    # JAX uses fixed metadata capacities, including for empty ragged storage.
+    # Keep positive graph capacities while runtime segment lengths may be zero.
+    graph_batch = _bucket(max(segments, 1), 32, 512) if ragged_stats else segments
+    graph_sq = _bucket(max(batch * sq, 1), 1024, 32768) if ragged_stats else sq
+    graph_sk = _bucket(max(batch * sk, 1), 1024, 32768) if ragged_stats else sk
     fp8 = config.fp8 and (not backward or fp8_backward)
-    version = int(cudnn.backend_version())
+    version = cudnn_version()
     if ragged and capabilities[0] < 90:
         raise ValueError("F16/BF16 fused attention with THD format requires sm90 or later.")
     if (
@@ -118,179 +249,95 @@ def _build_graph(direction, shapes, config, capabilities, nondeterministic, fp8_
             raise ValueError("FP8 THD attention requires cuDNN 9.23.0 or later.")
         if backward and capabilities[0] < 100:
             raise ValueError("FP8 THD backward requires sm100 or later.")
-    io_dtype = _dtype(cudnn, avals[0].dtype)
-    qkv_dtype = cudnn.data_type.FP8_E4M3 if fp8 else io_dtype
-    graph = cudnn.pygraph(
-        io_data_type=io_dtype,
-        intermediate_data_type=cudnn.data_type.FLOAT,
-        compute_data_type=cudnn.data_type.FLOAT,
-    )
-    names, input_uids, input_indices, input_offsets = [], [], [], []
-    scalar_uids, scalar_values = [], []
-    uid = 0
+    if fp8 and backward and config.attn_bias_type.name != "NO_BIAS":
+        raise ValueError("cuDNN FP8 backward does not support attention bias or ALiBi.")
+    io_dtype = _dtype(avals[0].dtype)
+    qkv_dtype = "FP8_E4M3" if fp8 else io_dtype
+    specs, inputs, outputs, scalars = {}, [], [], []
 
-    def tensor(name, dim, stride, dtype=None, offset=0):
-        nonlocal uid
-        uid += 1
-        names.append(name)
-        input_uids.append(uid)
-        input_indices.append(len(names) - 1)
-        input_offsets.append(offset)
-        return graph.tensor(
-            name=name,
-            dim=dim,
-            stride=stride,
-            data_type=io_dtype if dtype is None else dtype,
-            uid=uid,
-        )
+    def tensor(name, dim, stride, dtype=io_dtype, source=None, offset=0, ragged_offset=""):
+        specs[name] = TensorSpec(tuple(dim), tuple(stride), dtype, ragged_offset=ragged_offset)
+        inputs.append((name, name if source is None else source, offset))
 
     def constant(name, value):
-        nonlocal uid
-        uid += 1
-        scalar_uids.append(uid)
-        scalar_values.append(np.asarray(value, np.float32).tobytes())
-        return graph.tensor(
-            name=name,
-            dim=(1, 1, 1, 1),
-            stride=(1, 1, 1, 1),
-            data_type=cudnn.data_type.FLOAT,
-            uid=uid,
-            is_pass_by_value=True,
+        specs[name] = TensorSpec((1, 1, 1, 1), (1, 1, 1, 1), "FLOAT", by_value=True)
+        scalars.append((name, np.asarray(value, np.float32).tobytes()))
+
+    def output(name, dim, stride, slot, offset=0, dtype=io_dtype, ragged_offset=""):
+        specs[name] = TensorSpec(
+            tuple(dim), tuple(stride), dtype, output=True, ragged_offset=ragged_offset
         )
+        outputs.append((name, slot, offset))
 
-    def output(value, dim, stride, slot, offset=0, dtype=None):
-        nonlocal uid
-        uid += 1
-        value.set_output(True).set_uid(uid).set_dim(dim).set_stride(stride)
-        value.set_data_type(io_dtype if dtype is None else dtype)
-        outputs.append((uid, slot, offset))
-        return value
-
-    outputs = []
     qpack = 3 if config.qkv_layout.is_qkvpacked() else 1
     kvpack = 3 if qpack == 3 else (2 if config.qkv_layout.is_kvpacked() else 1)
-    # FP8 conversion preserves the packed storage layout.
     itemsize = 1 if fp8 else avals[0].dtype.itemsize
     qstride = (graph_sq * qpack * h * dq, dq, qpack * h * dq, 1)
     kstride = (graph_sk * kvpack * hg * dq, dq, kvpack * hg * dq, 1)
     vstride = (graph_sk * kvpack * hg * dv, dv, kvpack * hg * dv, 1)
     ostride = (graph_sq * h * dv, dv, h * dv, 1)
-    qdim, kdim, vdim = (
-        (graph_batch, h, graph_sq, dq),
-        (graph_batch, hg, graph_sk, dq),
-        (graph_batch, hg, graph_sk, dv),
-    )
+    qdim = (graph_batch, h, graph_sq, dq)
+    kdim = (graph_batch, hg, graph_sk, dq)
+    vdim = (graph_batch, hg, graph_sk, dv)
     odim = (graph_batch, h, graph_sq, dv)
-    q = tensor("q", qdim, qstride, qkv_dtype)
-    k = tensor(
-        "q" if qpack == 3 else "k", kdim, kstride, qkv_dtype, h * dq * itemsize if qpack == 3 else 0
+    tensor("q", qdim, qstride, qkv_dtype, ragged_offset="offset_q" if ragged else "")
+    tensor(
+        "k",
+        kdim,
+        kstride,
+        qkv_dtype,
+        source="q" if qpack == 3 else "k",
+        offset=h * dq * itemsize if qpack == 3 else 0,
+        ragged_offset="offset_k" if ragged else "",
     )
-    v = tensor(
-        "q" if qpack == 3 else ("k" if kvpack == 2 else "v"),
+    tensor(
+        "v",
         vdim,
         vstride,
         qkv_dtype,
-        2 * h * dq * itemsize if qpack == 3 else (hg * dq * itemsize if kvpack == 2 else 0),
+        source="q" if qpack == 3 else ("k" if kvpack == 2 else "v"),
+        offset=2 * h * dq * itemsize if qpack == 3 else (hg * dq * itemsize if kvpack == 2 else 0),
+        ragged_offset="offset_v" if ragged else "",
     )
-
     multipliers = (qpack * h * dq, kvpack * hg * dq, kvpack * hg * dv, h * dv, h)
-    offsets = []
     if ragged:
         for name in ("offset_q", "offset_k", "offset_v", "offset_o", "offset_stats"):
-            offsets.append(
-                tensor(name, (graph_batch + 1, 1, 1, 1), (1, 1, 1, 1), cudnn.data_type.INT64)
-            )
-        q.set_ragged_offset(offsets[0])
-        k.set_ragged_offset(offsets[1])
-        v.set_ragged_offset(offsets[2])
+            tensor(name, (graph_batch + 1, 1, 1, 1), (1, 1, 1, 1), "INT64")
     stats_dim = (graph_batch, h, graph_sq, 1)
     stats_stride = (h * graph_sq, 1, h, 1) if ragged_stats else (h * graph_sq, graph_sq, 1, 1)
-    options = {
-        "attn_scale": float(config.scaling_factor),
-        "diagonal_alignment": (
-            cudnn.diagonal_alignment.BOTTOM_RIGHT
-            if config.bottom_right_diagonal
-            else cudnn.diagonal_alignment.TOP_LEFT
-        ),
-    }
+    stats_offset = "offset_stats" if ragged_stats else ""
+    o_offset = "offset_o" if ragged else ""
     left, right = config.effective_window_size
-    if left >= 0:
-        options["left_bound" if fp8 else "diagonal_band_left_bound"] = left + 1
     if config.attn_mask_type.is_causal():
         right = 0
-    if right >= 0:
-        options["right_bound" if fp8 else "diagonal_band_right_bound"] = right
-    if config.attn_mask_type.is_padding() or ragged:
-        options.update(
-            use_padding_mask=True,
-            seq_len_q=tensor("seq_q", (graph_batch, 1, 1, 1), (1, 1, 1, 1), cudnn.data_type.INT32),
-            seq_len_kv=tensor(
-                "seq_kv", (graph_batch, 1, 1, 1), (1, 1, 1, 1), cudnn.data_type.INT32
-            ),
-        )
-    if config.dropout_probability and config.is_training:
-        options["dropout"] = (
-            float(config.dropout_probability),
-            tensor("rng", (1, 1, 1, 1), (1, 1, 1, 1), cudnn.data_type.INT64),
-            tensor("rng", (1, 1, 1, 1), (1, 1, 1, 1), cudnn.data_type.INT64, 8),
-        )
+    padding = config.attn_mask_type.is_padding() or ragged
+    if padding:
+        for name in ("seq_q", "seq_kv"):
+            tensor(name, (graph_batch, 1, 1, 1), (1, 1, 1, 1), "INT32")
+    dropout = float(config.dropout_probability) if config.is_training else 0.0
+    if dropout:
+        tensor("seed", (1, 1, 1, 1), (1, 1, 1, 1), "INT64", source="rng")
+        tensor("offset", (1, 1, 1, 1), (1, 1, 1, 1), "INT64", source="rng", offset=8)
     bias_type = config.attn_bias_type.name
-    if bias_type == "ALIBI":
-        if fp8 and backward:
-            raise ValueError("cuDNN FP8 backward does not support ALiBi.")
-        options["use_alibi_mask"] = True
-    elif bias_type != "NO_BIAS":
-        if fp8 and backward:
-            raise ValueError("cuDNN FP8 backward does not support attention bias.")
-        bias_shape = (*avals[3].shape[-3:],)
-        bias_shape = (math.prod(avals[3].shape[:-3]), *bias_shape)
-        options["bias"] = tensor("bias", bias_shape, _stride(bias_shape))
+    if bias_type not in ("ALIBI", "NO_BIAS"):
+        bias_shape = (math.prod(avals[3].shape[:-3]), *avals[3].shape[-3:])
+        tensor("bias", bias_shape, _stride(bias_shape))
         if backward and bias_shape[:3] != (1, 1, 1):
-            dbias = graph.tensor(
-                name="dbias", dim=bias_shape, stride=_stride(bias_shape), data_type=io_dtype
-            )
-            options["dBias"] = output(dbias, bias_shape, _stride(bias_shape), 3)
+            output("dbias", bias_shape, _stride(bias_shape), 3)
     if config.softmax_type.name != "VANILLA_SOFTMAX":
-        options["sink_token"] = tensor("sink", (1, h, 1, 1), (h, 1, 1, 1), cudnn.data_type.FLOAT)
+        tensor("sink", (1, h, 1, 1), (h, 1, 1, 1), "FLOAT")
         if backward:
-            dsink = graph.tensor(
-                name="dsink", dim=(1, h, 1, 1), stride=(h, 1, 1, 1), data_type=cudnn.data_type.FLOAT
-            )
-            options["dSink_token"] = output(
-                dsink, (1, h, 1, 1), (h, 1, 1, 1), 4, dtype=cudnn.data_type.FLOAT
-            )
-
+            output("dsink", (1, h, 1, 1), (h, 1, 1, 1), 4, dtype="FLOAT")
+    constant("attn_scale", config.scaling_factor)
     if fp8:
         for name in ("descale_q", "descale_k", "descale_v"):
-            options[name] = tensor(name, (1, 1, 1, 1), (1, 1, 1, 1), cudnn.data_type.FLOAT)
-        # Softmax probabilities are in [0, 1]; use the full E4M3 range.
-        options["scale_s"] = constant("scale_s", 448.0)
-        options["descale_s"] = constant("descale_s", 1.0 / 448.0)
+            tensor(name, (1, 1, 1, 1), (1, 1, 1, 1), "FLOAT")
+        constant("scale_s", 448.0)
+        constant("descale_s", 1.0 / 448.0)
     if backward:
-        options["use_deterministic_algorithm"] = not nondeterministic
-        o = tensor("o", odim, ostride)
-        do = tensor("do", odim, ostride, cudnn.data_type.FP8_E5M2 if fp8 else io_dtype)
-        stats = tensor("stats", stats_dim, stats_stride, cudnn.data_type.FLOAT)
-        if ragged:
-            o.set_ragged_offset(offsets[3])
-            do.set_ragged_offset(offsets[3])
-            if ragged_stats:
-                stats.set_ragged_offset(offsets[4])
-        if fp8:
-            options["descale_o"] = constant("descale_o", 1.0)
-            options["descale_dO"] = tensor(
-                "descale_do", (1, 1, 1, 1), (1, 1, 1, 1), cudnn.data_type.FLOAT
-            )
-            options["scale_dP"] = constant("scale_dp", 1.0)
-            options["descale_dP"] = constant("descale_dp", 1.0)
-            for name in ("scale_dQ", "scale_dK", "scale_dV"):
-                options[name] = constant(name, 1.0)
-            gradients = graph.sdpa_fp8_backward(q=q, k=k, v=v, o=o, dO=do, stats=stats, **options)
-        else:
-            if ragged_stats:
-                options["max_total_seq_len_q"] = graph_sq
-                options["max_total_seq_len_kv"] = graph_sk
-            gradients = graph.sdpa_backward(q=q, k=k, v=v, o=o, dO=do, stats=stats, **options)
+        tensor("o", odim, ostride, ragged_offset=o_offset)
+        tensor("do", odim, ostride, "FP8_E5M2" if fp8 else io_dtype, ragged_offset=o_offset)
+        tensor("stats", stats_dim, stats_stride, "FLOAT", ragged_offset=stats_offset)
         grad_slots = (0, 0 if qpack == 3 else 1, 0 if qpack == 3 else (1 if kvpack == 2 else 2))
         grad_offsets = (
             0,
@@ -301,65 +348,48 @@ def _build_graph(direction, shapes, config, capabilities, nondeterministic, fp8_
                 else (hg * dq * avals[0].dtype.itemsize if kvpack == 2 else 0)
             ),
         )
-        for index, (grad, dim, stride, slot, offset) in enumerate(
-            zip(
-                gradients[:3],
-                (qdim, kdim, vdim),
-                (qstride, kstride, vstride),
-                grad_slots,
-                grad_offsets,
-            )
+        for name, dim, stride, slot, offset, ragged_offset in zip(
+            ("dq", "dk", "dv"),
+            (qdim, kdim, vdim),
+            (qstride, kstride, vstride),
+            grad_slots,
+            grad_offsets,
+            ("offset_q", "offset_k", "offset_v"),
         ):
-            output(grad, dim, stride, slot, offset)
-            if ragged:
-                grad.set_ragged_offset(offsets[index])
+            output(name, dim, stride, slot, offset, ragged_offset=ragged_offset if ragged else "")
         if fp8:
-            for slot, amax in enumerate(gradients[3:7], 5):
-                output(amax, (1, 1, 1, 1), (1, 1, 1, 1), slot, dtype=cudnn.data_type.FLOAT)
+            tensor("descale_do", (1, 1, 1, 1), (1, 1, 1, 1), "FLOAT")
+            for name in ("descale_o", "scale_dp", "descale_dp", "scale_dq", "scale_dk", "scale_dv"):
+                constant(name, 1.0)
+            for slot, name in enumerate(("amax_dq", "amax_dk", "amax_dv", "amax_dp"), 5):
+                output(name, (1, 1, 1, 1), (1, 1, 1, 1), slot, dtype="FLOAT")
     else:
+        output("o", odim, ostride, 0, ragged_offset=o_offset)
+        output("stats", stats_dim, stats_stride, 1, dtype="FLOAT", ragged_offset=stats_offset)
         if config.return_max_logit:
-            score_max = graph.tensor(
-                name="max", dim=stats_dim, stride=stats_stride, data_type=cudnn.data_type.FLOAT
-            )
-            if ragged_stats:
-                score_max.set_ragged_offset(offsets[4])
-            options["score_max"] = output(
-                score_max, stats_dim, stats_stride, 2, dtype=cudnn.data_type.FLOAT
-            )
-        # The public JAX operation remains differentiable with dropout disabled
-        # by is_training=False, just as the previous common-backed path did.
-        options["generate_stats"] = True
+            output("max", stats_dim, stats_stride, 2, dtype="FLOAT", ragged_offset=stats_offset)
         if fp8:
-            options["scale_o"] = constant("scale_o", 1.0)
-            o, stats, amax_s, amax_o = graph.sdpa_fp8(q=q, k=k, v=v, **options)
-            output(amax_s, (1, 1, 1, 1), (1, 1, 1, 1), 3, dtype=cudnn.data_type.FLOAT)
-            output(amax_o, (1, 1, 1, 1), (1, 1, 1, 1), 4, dtype=cudnn.data_type.FLOAT)
-        else:
-            o, stats = graph.sdpa(q=q, k=k, v=v, **options)
-        output(o, odim, ostride, 0)
-        if ragged:
-            o.set_ragged_offset(offsets[3])
-        output(stats, stats_dim, stats_stride, 1, dtype=cudnn.data_type.FLOAT)
-        if ragged_stats:
-            stats.set_ragged_offset(offsets[4])
-
-    workspace, data, version = finalize_graph(cudnn, graph)
-    serialized = serialize_graph(
-        serialized_graph=data,
-        cudnn_frontend_version=version,
-        workspace_size=workspace,
-        input_uids=input_uids,
-        output_uids=[value[0] for value in outputs],
-        scalar_uids=scalar_uids,
-        scalar_values=scalar_values,
+            constant("scale_o", 1.0)
+            output("amax_s", (1, 1, 1, 1), (1, 1, 1, 1), 3, dtype="FLOAT")
+            output("amax_o", (1, 1, 1, 1), (1, 1, 1, 1), 4, dtype="FLOAT")
+    options = AttentionOptions(
+        backward=backward,
+        fp8=fp8,
+        bottom_right=config.bottom_right_diagonal,
+        left_bound=left + 1 if left >= 0 else None,
+        right_bound=right if right >= 0 else None,
+        padding=padding,
+        alibi=bias_type == "ALIBI",
+        dropout=dropout,
+        deterministic=backward and not nondeterministic,
+        max_total_seqlen_q=graph_sq if backward and ragged_stats and not fp8 else 0,
+        max_total_seqlen_kv=graph_sk if backward and ragged_stats and not fp8 else 0,
     )
-    return AttentionGraph(
-        serialized,
-        tuple(names),
-        tuple(input_indices),
-        tuple(input_offsets),
-        tuple(value[1] for value in outputs),
-        tuple(value[2] for value in outputs),
+    return _AttentionDescription(
+        AttentionGraphSpec.from_dict(options, specs),
+        tuple(inputs),
+        tuple(outputs),
+        tuple(scalars),
         graph_batch,
         ragged_stats,
         multipliers,
