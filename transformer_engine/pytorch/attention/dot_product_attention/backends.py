@@ -2576,13 +2576,16 @@ def _needs_eager_fused_attention(call: Dict[str, Any]) -> Optional[str]:
 class FusedAttention(torch.nn.Module):
     """Dot product attention using `cuDNN attention <https://github.com/NVIDIA/cudnn-frontend>`_:
 
+    PyTorch constructs and executes attention graphs through the cuDNN frontend Python API.
+    Standard attention and experimental score modification share graph lifecycle helpers.
+    Plans are cached per device and tensor metadata; support queries do not compile plans.
+
     FusedAttnBackend["F16_arbitrary_seqlen"]
        cuDNN attention for FP16/BF16 with any sequence length.
     FusedAttnBackend["FP8"]
        cuDNN attention for FP8 with any sequence length. It supports the following recipes, where
        "Inputs", "Intermediates" and "Outputs" are in the format of "tensor: quantizer". The recipes
-       are implemented in transformer_engine.pytorch.cpp_extension.fused_attn.fused_attn_fwd and
-       transformer_engine.pytorch.cpp_extension.fused_attn.fused_attn_bwd.
+       are implemented in transformer_engine.pytorch.cpp_extensions.cudnn_fused_attn.
 
                                     Direction   Inputs                                       Intermediates  Outputs
        DelayedScaling (DS)          forward     Q/K/V: DS                                    S: DS          O: DS
