@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 import transformer_engine.jax.cpp_extensions.flex_attention as tex_attention
+import transformer_engine.jax.cpp_extensions.cudnn_graph as tex_cudnn_graph
 from transformer_engine.jax.attention import (
     AttnBiasType,
     AttnMaskType,
@@ -659,14 +660,14 @@ def test_fused_attn_score_mod_cudnn_frontend_version_check(monkeypatch):
         __version__ = "1.22.0"
 
     monkeypatch.setattr(
-        tex_attention.transformer_engine_jax,
+        tex_cudnn_graph.transformer_engine_jax,
         "get_cudnn_frontend_version",
         lambda: 12200,
     )
     assert tex_attention._check_cudnn_frontend_version_match(FakeCudnn) == 12200
 
     monkeypatch.setattr(
-        tex_attention.transformer_engine_jax,
+        tex_cudnn_graph.transformer_engine_jax,
         "get_cudnn_frontend_version",
         lambda: 12100,
     )

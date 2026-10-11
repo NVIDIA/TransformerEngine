@@ -271,7 +271,7 @@ FP8 Configuration
 
    :Type: ``int`` (0 or 1)
    :Default: ``1``
-   :Description: Enable FP8 in the backward pass of DotProductAttention. ``1`` = FP8 forward and backward, ``0`` = FP8 forward and FP16/BF16 backward.
+   :Description: Enable FP8 in the backward pass of DotProductAttention in PyTorch and JAX. ``1`` = FP8 forward and backward, ``0`` = FP8 forward and FP16/BF16 backward. In JAX this applies when attention is configured with ``fp8=True``.
 
 .. envvar:: NVTE_DPA_FP8CS_O_in_F16
 
