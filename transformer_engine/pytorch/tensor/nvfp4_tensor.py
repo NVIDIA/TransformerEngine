@@ -414,6 +414,7 @@ class NVFP4Quantizer(Quantizer):
         return canonicalize_process_group(self.amax_reduction_group)
 
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
+        """Identify the recipe associated with this quantizer."""
         return NVFP4BlockScaling
 
     # ----- TensorSpec / pure-Python allocation -----

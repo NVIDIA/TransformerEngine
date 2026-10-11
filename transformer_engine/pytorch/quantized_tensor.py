@@ -389,6 +389,23 @@ class Quantizer(abc.ABC):
 
     """
 
+    """Calibration metadata (absmax, scale_inv, etc.) template for the
+    FQN of the post-training quantization calibration state.
+
+    This state is stored as a non-persistent Module buffer and not
+    visible to model.state_dict(). To export this data, users can
+    manually reduce (TP, DP, or CP), gather (EP and PP), and inject
+    these `Module.named_buffers()` in the model state dictionary
+    prior to checkpoint save for PTQ and inference engines.
+
+    For example, an NVFP4 GroupedTensor expert weight 2 would appear as:
+    ``weight_gemm2_amax_nvfp4_te_ptq_calibrated``
+
+    """
+    calibration_buffer_name_template = (
+        "{tensor_name}_{metadata_name}_{recipe_name}_te_ptq_calibrated"
+    )
+
     """Whether to construct quantized tensors with "row-wise usage"
 
     Hand-wave explanation: Consider the matrix multiplication C = A *
@@ -610,12 +627,17 @@ class Quantizer(abc.ABC):
         """Get module-buffer aliases for this quantizer's calibration state."""
         if not self._calibration_state:
             return {}
+        # Retrieve standardized name from Recipe class.
         recipe_type = self._get_compatible_recipe()
         if recipe_type is None:
             return {}
-        recipe_name = recipe_type.__name__.lower()
+        recipe_name = recipe_type.name()
         return {
-            f"{tensor_name}_{metadata_name}_{recipe_name}_te_ptq_calibrated": value
+            self.calibration_buffer_name_template.format(
+                tensor_name=tensor_name,
+                metadata_name=metadata_name,
+                recipe_name=recipe_name,
+            ): value
             for metadata_name, value in self._calibration_state.items()
         }
 
@@ -691,7 +713,7 @@ class Quantizer(abc.ABC):
         )
 
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
-        """Returns recipe class that is compatible with this quantizer"""
+        """Identify the recipe associated with this quantizer."""
         raise NotImplementedError(
             f"{self.__class__.__name__} class does not implement _get_compatible_recipe"
         )

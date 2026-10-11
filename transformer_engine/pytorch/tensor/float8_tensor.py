@@ -211,6 +211,7 @@ class Float8Quantizer(Quantizer):
         return out
 
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
+        """Identify the recipe associated with this quantizer."""
         return DelayedScaling
 
     def supports_only_rowwise_all_gather(self) -> bool:
@@ -452,6 +453,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
         return canonicalize_process_group(self.amax_reduction_group)
 
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
+        """Identify the recipe associated with this quantizer."""
         return Float8CurrentScaling
 
     def supports_only_rowwise_all_gather(self) -> bool:

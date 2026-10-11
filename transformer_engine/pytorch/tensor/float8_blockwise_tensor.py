@@ -263,6 +263,7 @@ class Float8BlockQuantizer(Quantizer):
         )
 
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
+        """Identify the recipe associated with this quantizer."""
         return Float8BlockScaling
 
 

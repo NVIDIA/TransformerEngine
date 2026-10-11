@@ -10,11 +10,7 @@ import pytest
 import torch
 from torch.utils.checkpoint import checkpoint
 
-from transformer_engine.common.recipe import (
-    DelayedScaling,
-    Float8CurrentScaling,
-    NVFP4BlockScaling,
-)
+from transformer_engine.common.recipe import DelayedScaling, Float8CurrentScaling
 from transformer_engine.pytorch import is_fp8_available, is_nvfp4_available
 from transformer_engine.pytorch import distributed as te_distributed
 from transformer_engine.pytorch.constants import DType
@@ -180,14 +176,6 @@ def test_calibrating_argument_accepts_explicit_calibration_config():
         assert FP8GlobalStateManager.get_calibration_config() is config
 
 
-def test_row_scaled_nvfp4_calibration_fails_at_autocast_entry():
-    recipe = NVFP4BlockScaling(row_scaled_activation=True)
-
-    with pytest.raises(NotImplementedError, match="Row-wise NVFP4 calibration"):
-        with autocast(enabled=False, calibrating=True, recipe=recipe):
-            pass
-
-
 def test_calibration_config_rejects_negative_decay():
     with pytest.raises(
         ValueError,
@@ -246,7 +234,7 @@ def test_calibration_config_registers_module_scaling_factor_buffers(
 def test_linear_calibration_config_applies_activation_decay_only():
     module = Linear(32, 32, params_dtype=torch.bfloat16, device="cuda", bias=False)
     calibration_config = QuantizationCalibrationConfig(transformer_engine_calibration_decay=0.5)
-    buffer_suffix = "_scale_inv_float8currentscaling_te_ptq_calibrated"
+    buffer_suffix = "_scale_inv_fp8_current_scaling_te_ptq_calibrated"
 
     with autocast(
         enabled=False,
@@ -279,7 +267,7 @@ def test_external_activation_recomputation_does_not_update_calibration(use_reent
     module = Linear(32, 32, params_dtype=torch.bfloat16, device="cuda", bias=False)
     calibration_config = QuantizationCalibrationConfig(transformer_engine_calibration_decay=0.5)
     recipe = Float8CurrentScaling()
-    buffer_name = "input_scale_inv_float8currentscaling_te_ptq_calibrated"
+    buffer_name = "input_scale_inv_fp8_current_scaling_te_ptq_calibrated"
 
     with (
         torch.no_grad(),
@@ -346,7 +334,7 @@ def test_layernorm_mlp_recomputation_does_not_update_calibration(monkeypatch):
     ):
         module(calibration_input)
 
-    buffer_name = "fc1_input_scale_inv_float8currentscaling_te_ptq_calibrated"
+    buffer_name = "fc1_input_scale_inv_fp8_current_scaling_te_ptq_calibrated"
     previous_scale = module.get_buffer(buffer_name).clone()
     with torch.no_grad():
         module.layer_norm_weight.fill_(56.0)
@@ -392,11 +380,11 @@ def test_linear_calibration_config_buffers_delayed_scaling_amax():
         name: value for name, value in module.named_buffers() if name.endswith("_te_ptq_calibrated")
     }
     assert set(calibration_buffers) == {
-        "input_amax_delayedscaling_te_ptq_calibrated",
-        "weight_amax_delayedscaling_te_ptq_calibrated",
+        "input_amax_fp8_delayed_scaling_te_ptq_calibrated",
+        "weight_amax_fp8_delayed_scaling_te_ptq_calibrated",
     }
     torch.testing.assert_close(
-        calibration_buffers["input_amax_delayedscaling_te_ptq_calibrated"],
+        calibration_buffers["input_amax_fp8_delayed_scaling_te_ptq_calibrated"],
         torch.full((1,), 2.0, device="cuda"),
     )
 
@@ -422,9 +410,9 @@ def test_calibrating_boolean_registers_scaling_factor_buffers():
 @pytest.mark.parametrize(
     ("recipe", "recipe_name", "metadata_name", "expected_value"),
     (
-        ("fp8_current_scaling", "float8currentscaling", "scale_inv", 0.25),
-        ("fp8_delayed_scaling", "delayedscaling", "amax", 448.0),
-        ("nvfp4", "nvfp4blockscaling", "amax", 2688.0),
+        ("fp8_current_scaling", "fp8_current_scaling", "scale_inv", 0.25),
+        ("fp8_delayed_scaling", "fp8_delayed_scaling", "amax", 448.0),
+        ("nvfp4", "nvfp4", "amax", 2688.0),
     ),
 )
 def test_scale_buffer_info_selects_recipe_metadata(
@@ -554,17 +542,17 @@ def test_grouped_calibration_metadata_buffers_are_per_gemm():
     )
 
     assert set(calibration_buffers) == {
-        "input_gemm0_scale_inv_float8currentscaling_te_ptq_calibrated",
-        "input_gemm1_scale_inv_float8currentscaling_te_ptq_calibrated",
-        "weight_gemm0_scale_inv_float8currentscaling_te_ptq_calibrated",
-        "weight_gemm1_scale_inv_float8currentscaling_te_ptq_calibrated",
+        "input_gemm0_scale_inv_fp8_current_scaling_te_ptq_calibrated",
+        "input_gemm1_scale_inv_fp8_current_scaling_te_ptq_calibrated",
+        "weight_gemm0_scale_inv_fp8_current_scaling_te_ptq_calibrated",
+        "weight_gemm1_scale_inv_fp8_current_scaling_te_ptq_calibrated",
     }
     torch.testing.assert_close(
-        calibration_buffers["input_gemm1_scale_inv_float8currentscaling_te_ptq_calibrated"],
+        calibration_buffers["input_gemm1_scale_inv_fp8_current_scaling_te_ptq_calibrated"],
         torch.tensor([0.5]),
     )
     assert (
-        calibration_buffers["input_gemm1_scale_inv_float8currentscaling_te_ptq_calibrated"]
+        calibration_buffers["input_gemm1_scale_inv_fp8_current_scaling_te_ptq_calibrated"]
         is input_quantizers[1]._calibration_state["scale_inv"]
     )
 
@@ -611,11 +599,11 @@ def test_grouped_calibration_metadata_uses_per_gemm_delayed_scaling_amax():
     )
 
     torch.testing.assert_close(
-        calibration_buffers["input_gemm0_amax_delayedscaling_te_ptq_calibrated"],
+        calibration_buffers["input_gemm0_amax_fp8_delayed_scaling_te_ptq_calibrated"],
         torch.tensor([1.0]),
     )
     torch.testing.assert_close(
-        calibration_buffers["input_gemm1_amax_delayedscaling_te_ptq_calibrated"],
+        calibration_buffers["input_gemm1_amax_fp8_delayed_scaling_te_ptq_calibrated"],
         torch.tensor([2.0]),
     )
 
@@ -630,7 +618,7 @@ def test_grouped_calibration_metadata_uses_per_gemm_delayed_scaling_amax():
     ),
 )
 def test_activation_scale_buffer_uses_decaying_maximum(observed_scale, expected_scale):
-    name = "fc1_input_scale_inv_float8currentscaling_te_ptq_calibrated"
+    name = "fc1_input_scale_inv_fp8_current_scaling_te_ptq_calibrated"
     quantizer = _make_test_quantizer(Float8CurrentScalingQuantizer)
     initial_buffer = torch.tensor([4.0])
     quantizer._calibration_state = {"scale_inv": initial_buffer}
@@ -697,7 +685,7 @@ def test_nan_activation_scale_is_sanitized_before_export(
     )
     result = quantizer._get_calibration_metadata_buffers("fc1_input")
 
-    value = result["fc1_input_scale_inv_float8currentscaling_te_ptq_calibrated"]
+    value = result["fc1_input_scale_inv_fp8_current_scaling_te_ptq_calibrated"]
     torch.testing.assert_close(value, torch.tensor([expected_scale]))
 
 

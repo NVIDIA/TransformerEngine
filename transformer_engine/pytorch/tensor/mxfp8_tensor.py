@@ -225,6 +225,7 @@ class MXFP8Quantizer(Quantizer):
         return torch.ops.tex.mxfp8_dequantize(tensor._rowwise_data, tensor._rowwise_scale_inv)
 
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
+        """Identify the recipe associated with this quantizer."""
         return MXFP8BlockScaling
 
     def is_requantization_safe(self) -> bool:

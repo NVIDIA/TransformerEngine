@@ -357,6 +357,7 @@ class HybridQuantizer(Quantizer):
         return True
 
     def _get_compatible_recipe(self):
+        """Identify the recipe associated with this quantizer."""
         # HybridQuantizer is only reachable via CustomRecipe (the qfactory
         # returns HybridQuantizer per role). Checking that the autocast recipe
         # is also CustomRecipe catches the obvious mismatch (e.g. hybrid

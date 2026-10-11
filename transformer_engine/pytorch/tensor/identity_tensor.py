@@ -178,6 +178,7 @@ class IdentityQuantizer(Quantizer):
         """No-op since identity quantization has no calibration state."""
 
     def _get_compatible_recipe(self):
+        """Identify the recipe associated with this quantizer."""
         # Only reachable via CustomRecipe (qfactory returns IdentityQuantizer).
         from transformer_engine.common.recipe import CustomRecipe  # avoid circular import
 
