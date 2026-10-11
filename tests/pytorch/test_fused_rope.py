@@ -497,3 +497,94 @@ def test_rotary_position_embedding_forward_with_autocast_gives_same_result_as_wi
         atol=1e-8,
         rtol=1e-8,
     )
+
+
+def _fp8_current_scaling_available() -> bool:
+    import transformer_engine.pytorch as te
+
+    return te.is_fp8_available()
+
+
+@pytest.mark.skipif(not _fp8_current_scaling_available(), reason="FP8 is not available")
+@pytest.mark.parametrize("seq_length", [128, 1024, 2048 + 8])
+@pytest.mark.parametrize("batch_size", [1, 2])
+@pytest.mark.parametrize("groups, q_per_group", [(8, 4), (4, 1), (2, 8)])
+@pytest.mark.parametrize("pow2", [False, True])
+def test_fused_rope_fp8_quantize_matches_unfused(
+    seq_length: int, batch_size: int, groups: int, q_per_group: int, pow2: bool
+) -> None:
+    """Deferred RoPE + FP8 quantize is bitwise equal to TE's RoPE followed by quantization."""
+    import transformer_engine.pytorch as te
+    import transformer_engine_torch as tex
+    from transformer_engine.pytorch.attention import deferred_qkv_rope
+
+    head_dim = 128
+    split = [q_per_group * head_dim, head_dim, head_dim]
+    device = torch.device("cuda:0")
+    torch.manual_seed(0)
+    qkv = (
+        torch.randn(
+            seq_length, batch_size, groups, sum(split), dtype=torch.bfloat16, device=device
+        )
+        * 4
+    )
+    emb = RotaryPositionEmbedding(head_dim, 1.0)(seq_length + 3)
+
+    q_ref, k_ref, v_ref = apply_fused_qkv_rotary_pos_emb(qkv, emb, emb, split)
+    quantizer = te.Float8CurrentScalingQuantizer(
+        fp8_dtype=tex.DType.kFloat8E4M3,
+        device=device,
+        rowwise=True,
+        columnwise=False,
+        force_pow_2_scales=pow2,
+    )
+    ref_data = torch.cat([t.reshape(-1) for t in (q_ref, k_ref, v_ref)])
+    ref = quantizer(ref_data)
+
+    q, k, v = apply_fused_qkv_rotary_pos_emb(qkv, emb, emb, split, defer_for_fp8_attention=True)
+    assert deferred_qkv_rope.get_state(q) is not None
+    q_fp8, k_fp8, v_fp8 = deferred_qkv_rope.quantize_deferred(q, k, v, quantizer)
+
+    torch.testing.assert_close(q_fp8._scale_inv, ref._scale_inv, rtol=0, atol=0)
+    out = torch.cat([t._data.reshape(-1) for t in (q_fp8, k_fp8, v_fp8)])
+    assert torch.equal(out.view(torch.uint8), ref._data.view(torch.uint8))
+    assert q_fp8.shape == q_ref.shape and k_fp8.shape == k_ref.shape
+
+
+@pytest.mark.parametrize("seq_length", [128, 1024])
+def test_deferred_rope_materialize_and_backward(seq_length: int) -> None:
+    """Placeholders filled by materialize() and their gradient match the regular fused RoPE."""
+    from transformer_engine.pytorch.attention import deferred_qkv_rope
+
+    head_dim, groups, q_per_group, batch_size = 128, 8, 4, 2
+    split = [q_per_group * head_dim, head_dim, head_dim]
+    device = torch.device("cuda:0")
+    torch.manual_seed(0)
+    qkv = torch.randn(
+        seq_length, batch_size, groups, sum(split), dtype=torch.bfloat16, device=device
+    ).requires_grad_()
+    emb = RotaryPositionEmbedding(head_dim, 1.0)(seq_length)
+
+    ref = apply_fused_qkv_rotary_pos_emb(qkv, emb, emb, split)
+    loss_ref = sum(t.float().sum() * 2 for t in ref)
+    (grad_ref,) = torch.autograd.grad(loss_ref, qkv)
+
+    out = apply_fused_qkv_rotary_pos_emb(qkv, emb, emb, split, defer_for_fp8_attention=True)
+    assert deferred_qkv_rope.get_state(out[0]) is not None
+    deferred_qkv_rope.materialize(*out)
+    for a, b in zip(out, ref):
+        torch.testing.assert_close(a, b, rtol=0, atol=0)
+    loss = sum(t.float().sum() * 2 for t in out)
+    (grad,) = torch.autograd.grad(loss, qkv)
+    torch.testing.assert_close(grad, grad_ref, rtol=0, atol=0)
+
+
+def test_deferred_rope_unsupported_falls_back() -> None:
+    """Unsupported inputs return ordinary tensors instead of placeholders."""
+    from transformer_engine.pytorch.attention import deferred_qkv_rope
+
+    split = [4 * 64, 64, 64]  # head dim != 128
+    qkv = torch.randn(16, 2, 8, sum(split), dtype=torch.bfloat16, device="cuda:0")
+    emb = RotaryPositionEmbedding(64, 1.0)(16)
+    q, _, _ = apply_fused_qkv_rotary_pos_emb(qkv, emb, emb, split, defer_for_fp8_attention=True)
+    assert deferred_qkv_rope.get_state(q) is None
