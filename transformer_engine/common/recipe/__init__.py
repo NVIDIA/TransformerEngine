@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """This module provides predefined FP8 recipes."""
+
 from __future__ import annotations
 import abc
 import os
@@ -10,7 +11,6 @@ from enum import Enum
 from typing import Any, Literal, Optional, Union, Callable, NamedTuple
 from dataclasses import field
 from pydantic.dataclasses import dataclass
-
 
 _BACKWARD_OVERRIDES = (None, "high_precision", "dequantized")
 _NVFP4_4OVER6_SCOPES = ("none", "weights", "activations", "all")
@@ -304,9 +304,6 @@ class Float8CurrentScaling(Recipe):
 
     use_power_2_scales: bool = os.getenv("NVTE_FP8_CURRENT_SCALING_POWER_2_SCALES", "0") == "1"
     fp8_format: Format = Format.HYBRID
-    fp8_quant_fwd_inp = QParams(power_2_scale=use_power_2_scales, amax_epsilon=0.0)
-    fp8_quant_fwd_weight = QParams(power_2_scale=use_power_2_scales, amax_epsilon=0.0)
-    fp8_quant_bwd_grad = QParams(power_2_scale=use_power_2_scales, amax_epsilon=0.0)
     fp8_gemm_fprop: MMParams = MMParams(use_split_accumulator=False)
     fp8_gemm_dgrad: MMParams = MMParams(use_split_accumulator=True)
     fp8_gemm_wgrad: MMParams = MMParams(use_split_accumulator=True)
@@ -319,6 +316,14 @@ class Float8CurrentScaling(Recipe):
         assert (
             self.backward_override in _BACKWARD_OVERRIDES
         ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
+        self.fp8_quant_fwd_inp = QParams(power_2_scale=self.use_power_2_scales, amax_epsilon=0.0)
+        self.fp8_quant_fwd_weight = QParams(power_2_scale=self.use_power_2_scales, amax_epsilon=0.0)
+        self.fp8_quant_bwd_grad = QParams(power_2_scale=self.use_power_2_scales, amax_epsilon=0.0)
+
+    def __setstate__(self, state) -> None:
+        self.__dict__.update(state)
+        if "fp8_quant_fwd_inp" not in state:
+            self.__post_init__()
 
     def _make_repr(self) -> str:
         return (
@@ -432,9 +437,6 @@ class Float8BlockScaling(Recipe):
     use_f32_scales: bool = os.getenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", "0") == "1"
 
     fp8_format: Format = Format.E4M3
-    fp8_quant_fwd_inp = QParams(power_2_scale=not use_f32_scales, amax_epsilon=0.0)
-    fp8_quant_fwd_weight = QParams(power_2_scale=not use_f32_scales, amax_epsilon=0.0)
-    fp8_quant_bwd_grad = QParams(power_2_scale=not use_f32_scales, amax_epsilon=0.0)
     x_block_scaling_dim: int = 1
     w_block_scaling_dim: int = 2
     grad_block_scaling_dim: int = 1
@@ -468,6 +470,14 @@ class Float8BlockScaling(Recipe):
         assert (
             self.backward_override in _BACKWARD_OVERRIDES
         ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
+        self.fp8_quant_fwd_inp = QParams(power_2_scale=not self.use_f32_scales, amax_epsilon=0.0)
+        self.fp8_quant_fwd_weight = QParams(power_2_scale=not self.use_f32_scales, amax_epsilon=0.0)
+        self.fp8_quant_bwd_grad = QParams(power_2_scale=not self.use_f32_scales, amax_epsilon=0.0)
+
+    def __setstate__(self, state) -> None:
+        self.__dict__.update(state)
+        if "fp8_quant_fwd_inp" not in state:
+            self.__post_init__()
 
     def _make_repr(self) -> str:
         return (
