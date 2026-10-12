@@ -3360,7 +3360,7 @@ def test_parameter_parts_rejects_quantized_parts(internal):
 
 
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
-@pytest.mark.parametrize("grad_target", ["input", "weight", "bias"])
+@pytest.mark.parametrize("grad_target", ["input", "weight"])
 def test_te_split_parameters_grad_targets(grad_target):
     model = te.Linear(64, 128, parameters_split=dict(q=64, k=32, v=32), params_dtype=torch.bfloat16)
     for parameter in model.parameters():
@@ -3373,8 +3373,6 @@ def test_te_split_parameters_grad_targets(grad_target):
     out = compiled(inp)
     grad = torch.randn_like(out)
     out.backward(grad)
-    if grad_target == "bias":
-        torch.testing.assert_close(model.v_bias.grad, grad[:, -32:].sum(0), rtol=0, atol=0)
     actual = [out.detach().clone()]
     tensors = [inp, *model.parameters()]
     actual.extend(None if t.grad is None else t.grad.clone() for t in tensors)

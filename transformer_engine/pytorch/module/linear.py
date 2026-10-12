@@ -33,7 +33,6 @@ from ._common import (
     can_reconstruct_wgrad_input_from_original,
     check_fp8_reduce_and_update,
     concat_input,
-    sum_bias_grad,
     set_quantizer_amax_reduction_group,
     set_quantizer_usage_for_wgrad_all_gather,
     WeightGradStore,
@@ -1264,8 +1263,6 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
             grad_output_quantizer,
         )
         nvtx_range_pop(f"{nvtx_label}.grad_output_preprocess")
-        if bwd_args.use_bias and grad_bias is None and not bwd_args.requires_wgrad:
-            grad_bias = sum_bias_grad(grad_output)
 
         # --------------------------------------------------
         # Grad output tensor is ready for computing grad input...
@@ -1778,7 +1775,11 @@ def _linear_backward_fake(
         )
 
     grad_bias = None
-    if args.use_bias:
+    # FP8 backward computes bgrad in grad_output_preprocess whenever bias is
+    # used; in high precision it is fused into the wgrad GEMM, so it only
+    # exists when wgrad runs.
+    fp8_bwd = args.fp8 and args.backward_override is None
+    if args.use_bias and (args.requires_wgrad or fp8_bwd):
         grad_bias = TensorSpec(
             shape=(out_features,), dtype=out_dtype, device=args.grad_output.device
         )
