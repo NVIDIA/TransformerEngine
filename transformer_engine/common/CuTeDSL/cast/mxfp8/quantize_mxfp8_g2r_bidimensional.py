@@ -8,7 +8,7 @@ from typing import Callable, Optional, Type
 
 import cutlass
 from cutlass import cute
-from cutlass import Int32, Int64, Uint32, Uint8
+from cutlass import Boolean, Int32, Int64, Uint32, Uint8
 from cuda.bindings.driver import CUstream  # pylint: disable=no-name-in-module
 
 from transformer_engine.common.CuTeDSL.utils import (
@@ -20,11 +20,11 @@ from transformer_engine.common.CuTeDSL.utils import (
 )
 from transformer_engine.common.CuTeDSL.utils_fp8 import mul_bf16x2x2_cvt_bf16x4_to_fp8x4
 from .quantize_mxfp8_common import (
+    is_plain_cast,
     MXFP8_BLOCK_SCALING_SIZE,
     MXFP8QuantizeConfig,
     MXFP8QuantizeKernelBase,
     bf16_pair_magnitude,
-    noop_flag_is_set,
 )
 
 
@@ -506,6 +506,41 @@ class MXFP8QuantizeRegisterBidimensionalKernel(MXFP8QuantizeKernelBase):
     _CTA_THREADS_Y = 8
     _CTA_THREADS_X = 32
 
+    @staticmethod
+    def supports(cfg: MXFP8QuantizeConfig) -> bool:
+        # BF16 packed math and 256-bit loads; packed scales only (no colwise GEMM swizzle yet).
+        return (
+            cfg.is_plain_cast()
+            and cfg.DTYPE is cutlass.BFloat16
+            and cfg.ROWWISE
+            and cfg.COLWISE
+            and not cfg.WITH_GEMM_SWIZZLED_SCALES
+            and cutlass.target_version(min_version="12.9")
+        )
+
+    @staticmethod
+    @cute.jit
+    def eligible_to_dispatch(
+        cfg: cutlass.Constexpr[MXFP8QuantizeConfig],
+        mX: cute.Tensor,
+        mO_row: Optional[cute.Tensor],
+        mS_row: Optional[cute.Tensor],
+        mO_col: Optional[cute.Tensor],
+        mS_col: Optional[cute.Tensor],
+        mNoop: cute.Pointer,
+    ) -> Boolean:
+        M, N = mX.shape
+        # Whole 32-row by 256-column tiles, grid.y within limits, and aligned input and
+        # colwise-scale pointers.
+        return (
+            M % 32 == 0
+            and N % 256 == 0
+            and M // 32 <= 65535
+            and mX.iterator.toint() % 32 == 0
+            and mS_col.iterator.toint() % 16 == 0
+            and mNoop.toint() == 0
+        )
+
     def __init__(self, cfg: MXFP8QuantizeConfig):
         self.cfg = cfg
         # One CTA only quantize one columnwise MXFP8 block at a time
@@ -520,7 +555,7 @@ class MXFP8QuantizeRegisterBidimensionalKernel(MXFP8QuantizeKernelBase):
         mO_col: Optional[cute.Tensor],
         mS_col: Optional[cute.Tensor],
         mAmax: Optional[cute.Tensor],
-        mNoop: cute.Pointer,
+        mNoop: cute.Pointer,  # Unused: the dispatcher routes noop calls to the general kernel
         mDActInput: Optional[cute.Tensor],
         mWorkspace: Optional[cute.Tensor],
         stream: CUstream,
@@ -536,7 +571,6 @@ class MXFP8QuantizeRegisterBidimensionalKernel(MXFP8QuantizeKernelBase):
                     mS_row,
                     mO_col,
                     mS_col,
-                    mNoop,
                     stream,
                     ELEMENTS_X_PER_THREAD=16,
                     CLUSTER_WIDTH=4,
@@ -548,7 +582,6 @@ class MXFP8QuantizeRegisterBidimensionalKernel(MXFP8QuantizeKernelBase):
                     mS_row,
                     mO_col,
                     mS_col,
-                    mNoop,
                     stream,
                     ELEMENTS_X_PER_THREAD=16,
                     CLUSTER_WIDTH=1,
@@ -560,7 +593,6 @@ class MXFP8QuantizeRegisterBidimensionalKernel(MXFP8QuantizeKernelBase):
                 mS_row,
                 mO_col,
                 mS_col,
-                mNoop,
                 stream,
                 ELEMENTS_X_PER_THREAD=8,
                 CLUSTER_WIDTH=8,
@@ -574,7 +606,6 @@ class MXFP8QuantizeRegisterBidimensionalKernel(MXFP8QuantizeKernelBase):
         mS_row: cute.Tensor,
         mO_col: cute.Tensor,
         mS_col: cute.Tensor,
-        mNoop: cute.Pointer,
         stream: CUstream,
         ELEMENTS_X_PER_THREAD: cutlass.Constexpr[int],
         CLUSTER_WIDTH: cutlass.Constexpr[int],
@@ -620,7 +651,6 @@ class MXFP8QuantizeRegisterBidimensionalKernel(MXFP8QuantizeKernelBase):
                 gS_row,
                 gO_col,
                 gS_col,
-                mNoop,
                 ELEMENTS_X_PER_THREAD=ELEMENTS_X_PER_THREAD,
             ).launch(grid=grid, block=block, cluster=cluster, min_blocks_per_mp=4, stream=stream)
         elif N == 4096:
@@ -642,7 +672,6 @@ class MXFP8QuantizeRegisterBidimensionalKernel(MXFP8QuantizeKernelBase):
                 gS_row,
                 gO_col,
                 gS_col,
-                mNoop,
                 ELEMENTS_X_PER_THREAD=ELEMENTS_X_PER_THREAD,
             ).launch(grid=grid, block=block, cluster=cluster, min_blocks_per_mp=4, stream=stream)
         else:
@@ -652,7 +681,6 @@ class MXFP8QuantizeRegisterBidimensionalKernel(MXFP8QuantizeKernelBase):
                 mS_row,
                 mO_col,
                 mS_col,
-                mNoop,
                 ELEMENTS_X_PER_THREAD=ELEMENTS_X_PER_THREAD,
             ).launch(grid=grid, block=block, cluster=cluster, min_blocks_per_mp=4, stream=stream)
 
@@ -664,19 +692,18 @@ class MXFP8QuantizeRegisterBidimensionalKernel(MXFP8QuantizeKernelBase):
         mS_row: cute.Tensor,
         mO_col: cute.Tensor,
         mS_col: cute.Tensor,
-        mNoop: cute.Pointer,
         ELEMENTS_X_PER_THREAD: cutlass.Constexpr[int],
     ):
-        """Skip the CTA when the noop flag is set; otherwise run the kernel body."""
-        if not noop_flag_is_set(mNoop):
-            self._kernel_main(
-                mX,
-                mO_row,
-                mS_row,
-                mO_col,
-                mS_col,
-                ELEMENTS_X_PER_THREAD=ELEMENTS_X_PER_THREAD,
-            )
+        """Run the kernel body. Like the CUDA specialized cast kernels it does not consume the
+        cast_noop flag: the dispatcher routes calls with one to the general kernel."""
+        self._kernel_main(
+            mX,
+            mO_row,
+            mS_row,
+            mO_col,
+            mS_col,
+            ELEMENTS_X_PER_THREAD=ELEMENTS_X_PER_THREAD,
+        )
 
     @cute.jit
     def _kernel_main(

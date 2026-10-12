@@ -9,7 +9,7 @@ from typing import Optional
 import cutlass
 from cutlass import cute
 from cutlass import Boolean, Float32, Int32, Int64, Uint32
-from cuda.bindings.driver import CUstream
+from cuda.bindings.driver import CUstream  # pylint: disable=no-name-in-module
 
 from transformer_engine.common.CuTeDSL.utils import (
     abs_max_x2_bf16,
@@ -25,7 +25,6 @@ from .quantize_mxfp8_common import (
     MXFP8QuantizeKernelBase,
     bf16_pair_magnitude,
     derive_swizzled_scale_layout,
-    noop_flag_is_set,
 )
 
 
@@ -35,7 +34,6 @@ def quantize_rowwise_mxfp8_g2r(
     gO_tiles: cute.Tensor,
     mS_tiles: cute.Tensor,
     cfg: cutlass.Constexpr[MXFP8QuantizeConfig],
-    M: Int32,
     N: Int32,
     CTA_THREADS_Y: cutlass.Constexpr[int],
     CTA_THREADS_X: cutlass.Constexpr[int],
@@ -181,6 +179,42 @@ class MXFP8QuantizeG2RRowwise2LaneKernel(MXFP8QuantizeKernelBase):
     _SMALL_TIER_CACHED_PERCENT = 0
     _MAX_GRID_Y = 65535
 
+    @staticmethod
+    def supports(cfg: MXFP8QuantizeConfig) -> bool:
+        # BF16 packed math and 256-bit loads; compilers predating those keep the other kernels.
+        return (
+            cfg.is_plain_cast()
+            and cfg.DTYPE is cutlass.BFloat16
+            and cfg.ROWWISE
+            and not cfg.COLWISE
+            and cutlass.target_version(min_version="12.9")
+        )
+
+    @staticmethod
+    @cute.jit
+    def eligible_to_dispatch(
+        cfg: cutlass.Constexpr[MXFP8QuantizeConfig],
+        mX: cute.Tensor,
+        mO_row: Optional[cute.Tensor],
+        mS_row: Optional[cute.Tensor],
+        mO_col: Optional[cute.Tensor],
+        mS_col: Optional[cute.Tensor],
+        mNoop: cute.Pointer,
+    ) -> Boolean:
+        N = mX.shape[1]
+        scale_stride_matches = Boolean(True)
+        if cutlass.const_expr(not cfg.WITH_GEMM_SWIZZLED_SCALES):
+            # The flat view needs the packed scales to be contiguous.
+            scale_stride_matches = mS_row.shape[1] == N // 32
+        # Column tiles use grid.x and row tiles spill from grid.y into grid.z, so no shape
+        # exceeds the grid limits.
+        return (
+            N % 128 == 0
+            and mX.iterator.toint() % 32 == 0
+            and scale_stride_matches
+            and mNoop.toint() == 0
+        )
+
     def __init__(self, cfg: MXFP8QuantizeConfig):
         self.cfg = cfg
 
@@ -193,7 +227,7 @@ class MXFP8QuantizeG2RRowwise2LaneKernel(MXFP8QuantizeKernelBase):
         mO_col: Optional[cute.Tensor],
         mS_col: Optional[cute.Tensor],
         mAmax: Optional[cute.Tensor],
-        mNoop: cute.Pointer,
+        mNoop: cute.Pointer,  # Unused: the dispatcher routes noop calls to the general kernel
         mDActInput: Optional[cute.Tensor],
         mWorkspace: Optional[cute.Tensor],
         stream: CUstream,
@@ -211,14 +245,13 @@ class MXFP8QuantizeG2RRowwise2LaneKernel(MXFP8QuantizeKernelBase):
                     cute.make_tensor(mX.iterator, flat),
                     cute.make_tensor(mO_row.iterator, flat),
                     cute.make_tensor(mS_row.iterator, cute.make_layout((rows, 32), stride=(32, 1))),
-                    mNoop,
                     stream,
                     num_elems,
                 )
             else:
-                self._launch_tiers(mX, mO_row, mS_row, mNoop, stream, num_elems)
+                self._launch_tiers(mX, mO_row, mS_row, stream, num_elems)
         else:
-            self._launch_tiers(mX, mO_row, mS_row, mNoop, stream, num_elems)
+            self._launch_tiers(mX, mO_row, mS_row, stream, num_elems)
 
     @cute.jit
     def _launch_tiers(
@@ -226,7 +259,6 @@ class MXFP8QuantizeG2RRowwise2LaneKernel(MXFP8QuantizeKernelBase):
         mX: cute.Tensor,
         mO_row: cute.Tensor,
         mS_row: cute.Tensor,
-        mNoop: cute.Pointer,
         stream: CUstream,
         num_elems: Int64,
     ):
@@ -237,7 +269,6 @@ class MXFP8QuantizeG2RRowwise2LaneKernel(MXFP8QuantizeKernelBase):
                 mX,
                 mO_row,
                 mS_row,
-                mNoop,
                 stream,
                 num_elems,
                 CTA_THREADS_Y=8,
@@ -250,7 +281,6 @@ class MXFP8QuantizeG2RRowwise2LaneKernel(MXFP8QuantizeKernelBase):
                 mX,
                 mO_row,
                 mS_row,
-                mNoop,
                 stream,
                 num_elems,
                 CTA_THREADS_Y=8,
@@ -263,7 +293,6 @@ class MXFP8QuantizeG2RRowwise2LaneKernel(MXFP8QuantizeKernelBase):
                 mX,
                 mO_row,
                 mS_row,
-                mNoop,
                 stream,
                 num_elems,
                 CTA_THREADS_Y=4,
@@ -276,7 +305,6 @@ class MXFP8QuantizeG2RRowwise2LaneKernel(MXFP8QuantizeKernelBase):
                 mX,
                 mO_row,
                 mS_row,
-                mNoop,
                 stream,
                 num_elems,
                 CTA_THREADS_Y=8,
@@ -291,7 +319,6 @@ class MXFP8QuantizeG2RRowwise2LaneKernel(MXFP8QuantizeKernelBase):
         mX: cute.Tensor,
         mO: cute.Tensor,
         mS: cute.Tensor,
-        mNoop: cute.Pointer,
         stream: CUstream,
         num_elems: Int64,
         CTA_THREADS_Y: cutlass.Constexpr[int],
@@ -331,7 +358,6 @@ class MXFP8QuantizeG2RRowwise2LaneKernel(MXFP8QuantizeKernelBase):
                     mX,
                     mO,
                     mS,
-                    mNoop,
                     first_streaming_cta,
                     num_elems,
                     CTA_THREADS_Y=CTA_THREADS_Y,
@@ -345,7 +371,6 @@ class MXFP8QuantizeG2RRowwise2LaneKernel(MXFP8QuantizeKernelBase):
                     mX,
                     mO,
                     mS,
-                    mNoop,
                     first_streaming_cta,
                     num_elems,
                     CTA_THREADS_Y=CTA_THREADS_Y,
@@ -361,7 +386,6 @@ class MXFP8QuantizeG2RRowwise2LaneKernel(MXFP8QuantizeKernelBase):
         mX: cute.Tensor,
         mO: cute.Tensor,
         mS: cute.Tensor,
-        mNoop: cute.Pointer,
         first_streaming_cta: Int64,
         num_elems: Int64,
         CTA_THREADS_Y: cutlass.Constexpr[int],
@@ -370,20 +394,20 @@ class MXFP8QuantizeG2RRowwise2LaneKernel(MXFP8QuantizeKernelBase):
         L2_CACHED_CTA_PERCENT: cutlass.Constexpr[int],
         CHECK_BOUNDS: cutlass.Constexpr[bool],
     ):
-        """Skip the CTA when the noop flag is set; otherwise run the kernel body."""
-        if not noop_flag_is_set(mNoop):
-            self._kernel_main(
-                mX,
-                mO,
-                mS,
-                first_streaming_cta,
-                num_elems,
-                CTA_THREADS_Y=CTA_THREADS_Y,
-                CTA_THREADS_X=CTA_THREADS_X,
-                NUM_TILES=NUM_TILES,
-                L2_CACHED_CTA_PERCENT=L2_CACHED_CTA_PERCENT,
-                CHECK_BOUNDS=CHECK_BOUNDS,
-            )
+        """Run the kernel body. Like cast_rowwise.cuh, there is no noop handling: the
+        dispatcher only selects this kernel when no cast_noop flag is passed."""
+        self._kernel_main(
+            mX,
+            mO,
+            mS,
+            first_streaming_cta,
+            num_elems,
+            CTA_THREADS_Y=CTA_THREADS_Y,
+            CTA_THREADS_X=CTA_THREADS_X,
+            NUM_TILES=NUM_TILES,
+            L2_CACHED_CTA_PERCENT=L2_CACHED_CTA_PERCENT,
+            CHECK_BOUNDS=CHECK_BOUNDS,
+        )
 
     @cute.jit
     def _kernel_main(
@@ -453,7 +477,6 @@ class MXFP8QuantizeG2RRowwise2LaneKernel(MXFP8QuantizeKernelBase):
                 gO_tiles,
                 mS_tiles,
                 self.cfg,
-                M,
                 N,
                 CTA_THREADS_Y=CTA_THREADS_Y,
                 CTA_THREADS_X=CTA_THREADS_X,

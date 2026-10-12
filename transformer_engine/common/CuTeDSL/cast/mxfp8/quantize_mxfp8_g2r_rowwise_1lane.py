@@ -11,10 +11,11 @@ from typing import Optional, Type
 
 import cutlass
 from cutlass import cute
-from cutlass import Float8E8M0FNU, Int32, Uint32, Uint8
+from cutlass import Boolean, Float8E8M0FNU, Int32, Uint32, Uint8
 from cuda.bindings.driver import CUstream  # pylint: disable=no-name-in-module
 
 from transformer_engine.common.CuTeDSL.utils import (
+    is_packed16,
     abs_max_x2_bf16,
     abs_max_x2_f16,
     x2_lo_to_f32_bf16,
@@ -35,7 +36,6 @@ from .quantize_mxfp8_common import (
     MXFP8QuantizeKernelBase,
     MXFP8_BLOCK_SCALING_SIZE,
     derive_swizzled_scale_layout,
-    noop_flag_is_set,
 )
 
 
@@ -50,6 +50,29 @@ class MXFP8QuantizeG2RRowwise1LaneKernel(MXFP8QuantizeKernelBase):
     _TILE_ROWS = 4
     _TILE_COLS = 1024
     _THREADS_PER_CTA = 128
+
+    @staticmethod
+    def supports(cfg: MXFP8QuantizeConfig) -> bool:
+        return cfg.is_plain_cast() and is_packed16(cfg.DTYPE) and cfg.ROWWISE and not cfg.COLWISE
+
+    @staticmethod
+    @cute.jit
+    def eligible_to_dispatch(
+        cfg: cutlass.Constexpr[MXFP8QuantizeConfig],
+        mX: cute.Tensor,
+        mO_row: Optional[cute.Tensor],
+        mS_row: Optional[cute.Tensor],
+        mO_col: Optional[cute.Tensor],
+        mS_col: Optional[cute.Tensor],
+        mNoop: cute.Pointer,
+    ) -> Boolean:
+        M, N = mX.shape
+        # N divisible by 128 for vectorized stores, and grid.y within limits.
+        return (
+            N % 128 == 0
+            and cute.ceil_div(M, MXFP8QuantizeG2RRowwise1LaneKernel._TILE_ROWS) <= 65535
+            and mNoop.toint() == 0
+        )
 
     def __init__(self, cfg: MXFP8QuantizeConfig):
         self.cfg = cfg
@@ -66,7 +89,7 @@ class MXFP8QuantizeG2RRowwise1LaneKernel(MXFP8QuantizeKernelBase):
         mO_col: Optional[cute.Tensor],
         mS_col: Optional[cute.Tensor],  # Unused, kept for API compatibility
         mAmax: Optional[cute.Tensor],  # Unused, kept for API compatibility
-        mNoop: cute.Pointer,  # f32 cast_noop flag; may be null, checked on device
+        mNoop: cute.Pointer,  # Unused: the dispatcher routes noop calls to the general kernel
         mDActInput: Optional[cute.Tensor],  # Unused, kept for API compatibility
         mWorkspace: Optional[cute.Tensor],  # Unused, kept for API compatibility
         stream: CUstream,
@@ -92,7 +115,6 @@ class MXFP8QuantizeG2RRowwise1LaneKernel(MXFP8QuantizeKernelBase):
             mX,
             mO_row,
             mS_row,
-            mNoop,
             mX.element_type,
         ).launch(grid=grid, block=block, stream=stream)
 
@@ -102,12 +124,11 @@ class MXFP8QuantizeG2RRowwise1LaneKernel(MXFP8QuantizeKernelBase):
         mX: cute.Tensor,
         mO_row: cute.Tensor,
         mS_row: cute.Tensor,
-        mNoop: cute.Pointer,
         DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
     ):
-        """Device entry: no-op the CTA when the noop flag is set, else run the quantize main loop."""
-        if not noop_flag_is_set(mNoop):
-            self._kernel_main(mX, mO_row, mS_row, DTYPE)
+        """Device entry. Like the CUDA specialized cast kernels it does not consume the
+        cast_noop flag: the dispatcher routes calls with one to the general kernel."""
+        self._kernel_main(mX, mO_row, mS_row, DTYPE)
 
     @cute.jit
     def _kernel_main(

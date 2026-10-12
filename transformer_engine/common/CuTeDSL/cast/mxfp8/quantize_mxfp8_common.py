@@ -19,7 +19,6 @@ from transformer_engine.common.CuTeDSL.utils import (
     str_to_cutlass_dtype,
     abs_max_x2_bf16,
     device_compute_capability,
-    is_packed16,
 )
 from transformer_engine.common.CuTeDSL.activations import (
     act_relu,
@@ -211,8 +210,31 @@ class MXFP8QuantizeConfig:
     __repr__ = __str__
 
 
+    def is_plain_cast(self) -> bool:
+        """Whether cfg is a plain cast: no amax, dbias or (d)activation fused in."""
+        return not (self.WITH_AMAX or self.WITH_DBIAS or self.WITH_DACT or self.WITH_ACT)
+
+
 class MXFP8QuantizeKernelBase(abc.ABC):
     """Base class for MXFP8 quantize kernels."""
+
+    @staticmethod
+    def supports(cfg: MXFP8QuantizeConfig) -> bool:  # pylint: disable=unused-argument
+        """Compile time check: whether this specialized kernel handles cfg at all."""
+        return False
+
+    @staticmethod
+    def eligible_to_dispatch(
+        cfg: MXFP8QuantizeConfig,
+        mX: cute.Tensor,
+        mO_row: Optional[cute.Tensor],
+        mS_row: Optional[cute.Tensor],
+        mO_col: Optional[cute.Tensor],
+        mS_col: Optional[cute.Tensor],
+        mNoop: cute.Pointer,
+    ) -> Boolean:
+        """Runtime check: whether we can dispatch to the instantiated kernel with this call's shapes and noops."""
+        raise NotImplementedError
 
     @abc.abstractmethod
     def __call__(
@@ -281,16 +303,18 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
         )
         # We only need to mask when WITH_ACT is enabled because with activations applied zeros filled by TMA affect block statistics
         self.general_kernel = MXFP8QuantizeKernel(cfg) if self.ACT_NEED_MASKING else None
-        self.g2r_rowwise_1lane = MXFP8QuantizeG2RRowwise1LaneKernel(cfg) if cfg.ROWWISE else None
-        self.g2s_bidim = (
-            MXFP8QuantizeSpecializedBidimensionalKernel(cfg)
-            if cfg.ROWWISE and cfg.COLWISE
-            else None
-        )
-        self.g2r_rowwise_2lane = MXFP8QuantizeG2RRowwise2LaneKernel(cfg) if cfg.ROWWISE else None
-        self.g2r_bidim = (
-            MXFP8QuantizeRegisterBidimensionalKernel(cfg) if cfg.ROWWISE and cfg.COLWISE else None
-        )
+
+        # Specialized cast-only kernels in a specific dispatch priority order so we prefer to dispatch to kernels that come first in the list.
+        self.specialized_kernels = [
+            kernel_cls(cfg)
+            for kernel_cls in (
+                MXFP8QuantizeG2RRowwise2LaneKernel,
+                MXFP8QuantizeRegisterBidimensionalKernel,
+                MXFP8QuantizeG2RRowwise1LaneKernel,
+                MXFP8QuantizeSpecializedBidimensionalKernel,
+            )
+            if kernel_cls.supports(cfg)
+        ]
 
     @cute.jit
     def __call__(
@@ -306,104 +330,12 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
         mWorkspace: Optional[cute.Tensor],
         stream: CUstream,
     ):
-        M = mX.shape[0]
-        N = mX.shape[1]
-        # Select specialized kernels if possible
-        plain_cast_only = (
-            not self.cfg.WITH_AMAX
-            and not self.cfg.WITH_DBIAS
-            and not self.cfg.WITH_DACT
-            and not self.cfg.WITH_ACT
-        )
         dispatched_to_specialized = False
-        # The two-lane rowwise and g2r bidimensional kernels use BF16 packed math and 32-byte loads.
-        # Keep the existing kernels for FP16, fusions, ragged bidimensional tiles,
-        # misaligned input views and compilers predating 256-bit global loads.
-        if cutlass.const_expr(
-            plain_cast_only
-            and self.cfg.DTYPE is cutlass.BFloat16
-            and cutlass.target_version(min_version="12.9")
-        ):
-            input_is_aligned = mX.iterator.toint() % 32 == 0
-            if cutlass.const_expr(self.cfg.ROWWISE and not self.cfg.COLWISE):
-                scale_stride_matches = Boolean(True)
-                if cutlass.const_expr(not self.cfg.WITH_GEMM_SWIZZLED_SCALES):
-                    scale_stride_matches = mS_row.shape[1] == N // 32
-                # Column tiles use grid.x and row tiles spill from grid.y into grid.z, so
-                # no shape exceeds the grid limits.
-                if N % 128 == 0 and input_is_aligned and scale_stride_matches:
+        for kernel in self.specialized_kernels:
+            if not dispatched_to_specialized:
+                if kernel.eligible_to_dispatch(self.cfg, mX, mO_row, mS_row, mO_col, mS_col, mNoop):
                     dispatched_to_specialized = True
-                    self.g2r_rowwise_2lane(
-                        mX,
-                        mO_row,
-                        mS_row,
-                        mO_col,
-                        mS_col,
-                        mAmax,
-                        mNoop,
-                        mDActInput,
-                        mWorkspace,
-                        stream,
-                    )
-            if cutlass.const_expr(
-                self.cfg.ROWWISE and self.cfg.COLWISE and not self.cfg.WITH_GEMM_SWIZZLED_SCALES
-            ):
-                columnwise_scales_are_aligned = mS_col.iterator.toint() % 16 == 0
-                if (
-                    M % 32 == 0
-                    and N % 256 == 0
-                    and M // 32 <= 65535
-                    and input_is_aligned
-                    and columnwise_scales_are_aligned
-                ):
-                    dispatched_to_specialized = True
-                    self.g2r_bidim(
-                        mX,
-                        mO_row,
-                        mS_row,
-                        mO_col,
-                        mS_col,
-                        mAmax,
-                        mNoop,
-                        mDActInput,
-                        mWorkspace,
-                        stream,
-                    )
-        # The one-lane rowwise and g2s bidimensional kernels support packed16 types (bf16/fp16).
-        if cutlass.const_expr(plain_cast_only and is_packed16(self.cfg.DTYPE)):
-            if cutlass.const_expr(self.cfg.ROWWISE and not self.cfg.COLWISE):
-                g2r_rowwise_1lane_grid_fits = (
-                    cute.ceil_div(M, self.g2r_rowwise_1lane._TILE_ROWS) <= 65535
-                )
-                # The one-lane rowwise kernel requires N divisible by 128 for vectorized stores.
-                if not dispatched_to_specialized and N % 128 == 0 and g2r_rowwise_1lane_grid_fits:
-                    dispatched_to_specialized = True
-                    self.g2r_rowwise_1lane(
-                        mX,
-                        mO_row,
-                        mS_row,
-                        mO_col,
-                        mS_col,
-                        mAmax,
-                        mNoop,
-                        mDActInput,
-                        mWorkspace,
-                        stream,
-                    )
-            # The g2s bidimensional kernel supports swizzled scales but we don't dispatch to it for now
-            if cutlass.const_expr(
-                self.cfg.ROWWISE and self.cfg.COLWISE and not self.cfg.WITH_GEMM_SWIZZLED_SCALES
-            ):
-                g2s_bidim_grid_fits = (
-                    cute.ceil_div(
-                        M,
-                        self.g2s_bidim._TILE_ROWS * self.g2s_bidim._NUM_TILES_Y,
-                    )
-                    <= 65535
-                )
-                if not dispatched_to_specialized and g2s_bidim_grid_fits:
-                    dispatched_to_specialized = True
-                    self.g2s_bidim(
+                    kernel(
                         mX,
                         mO_row,
                         mS_row,

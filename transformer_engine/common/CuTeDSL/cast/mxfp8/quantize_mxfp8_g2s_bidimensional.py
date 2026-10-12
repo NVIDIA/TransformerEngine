@@ -12,7 +12,7 @@ from typing import Optional, Type
 import cutlass
 from cutlass import cute
 from cutlass import pipeline
-from cutlass import Float32, Float8E8M0FNU, Int32, Int64, Uint32
+from cutlass import Boolean, Float32, Float8E8M0FNU, Int32, Int64, Uint32
 from cuda.bindings.driver import CUstream  # pylint: disable=no-name-in-module
 
 from transformer_engine.common.CuTeDSL.utils import (
@@ -39,7 +39,6 @@ from .quantize_mxfp8_common import (
     MXFP8_BLOCK_SCALING_SIZE,
     THREADS_PER_WARP,
     derive_swizzled_scale_layout,
-    noop_flag_is_set,
 )
 
 
@@ -249,6 +248,32 @@ class MXFP8QuantizeSpecializedBidimensionalKernel(MXFP8QuantizeKernelBase):
     _SCALE_ROWS = _TILE_ROWS // MXFP8_BLOCK_SCALING_SIZE
     _SCALE_COLS = _TILE_COLS // MXFP8_BLOCK_SCALING_SIZE
 
+    @staticmethod
+    def supports(cfg: MXFP8QuantizeConfig) -> bool:
+        # This kernel supports swizzled scales but we don't dispatch to it for now.
+        return (
+            cfg.is_plain_cast()
+            and is_packed16(cfg.DTYPE)
+            and cfg.ROWWISE
+            and cfg.COLWISE
+            and not cfg.WITH_GEMM_SWIZZLED_SCALES
+        )
+
+    @staticmethod
+    @cute.jit
+    def eligible_to_dispatch(
+        cfg: cutlass.Constexpr[MXFP8QuantizeConfig],
+        mX: cute.Tensor,
+        mO_row: Optional[cute.Tensor],
+        mS_row: Optional[cute.Tensor],
+        mO_col: Optional[cute.Tensor],
+        mS_col: Optional[cute.Tensor],
+        mNoop: cute.Pointer,
+    ) -> Boolean:
+        cls = MXFP8QuantizeSpecializedBidimensionalKernel
+        rows_per_cta = cls._TILE_ROWS * cls._NUM_TILES_Y  # packed scales: one tile row
+        return cute.ceil_div(mX.shape[0], rows_per_cta) <= 65535 and mNoop.toint() == 0
+
     def __init__(self, cfg: MXFP8QuantizeConfig):
         self.cfg = cfg
         if cfg.WITH_GEMM_SWIZZLED_SCALES:
@@ -265,7 +290,7 @@ class MXFP8QuantizeSpecializedBidimensionalKernel(MXFP8QuantizeKernelBase):
         mO_col: Optional[cute.Tensor],
         mS_col: Optional[cute.Tensor],
         mAmax: Optional[cute.Tensor],
-        mNoop: cute.Pointer,  # f32 cast_noop flag; may be null, checked on device
+        mNoop: cute.Pointer,  # Unused: the dispatcher routes noop calls to the general kernel
         mDActInput: Optional[cute.Tensor],
         mWorkspace: Optional[cute.Tensor],
         stream: CUstream,
@@ -329,7 +354,6 @@ class MXFP8QuantizeSpecializedBidimensionalKernel(MXFP8QuantizeKernelBase):
             mX,
             mS_row,
             mS_col,
-            mNoop,
             mX.element_type,
             tma_atom,
             tma_src,
@@ -345,7 +369,6 @@ class MXFP8QuantizeSpecializedBidimensionalKernel(MXFP8QuantizeKernelBase):
         mX: cute.Tensor,
         mS_row: cute.Tensor,
         mS_col: cute.Tensor,
-        mNoop: cute.Pointer,
         dtype: cutlass.Constexpr[Type[cutlass.Numeric]],
         tma_atom: cute.CopyAtom,
         tma_src: cute.Tensor,
@@ -354,20 +377,20 @@ class MXFP8QuantizeSpecializedBidimensionalKernel(MXFP8QuantizeKernelBase):
         tma_atom_out_col: cute.CopyAtom,
         tma_dst_out_col: cute.Tensor,
     ):
-        """Device entry: no-op the CTA when the noop flag is set, else run the quantize main loop."""
-        if not noop_flag_is_set(mNoop):
-            self._kernel_main(
-                mX,
-                mS_row,
-                mS_col,
-                dtype,
-                tma_atom,
-                tma_src,
-                tma_atom_out_row,
-                tma_dst_out_row,
-                tma_atom_out_col,
-                tma_dst_out_col,
-            )
+        """Device entry. Like the CUDA specialized cast kernels it does not consume the
+        cast_noop flag: the dispatcher routes calls with one to the general kernel."""
+        self._kernel_main(
+            mX,
+            mS_row,
+            mS_col,
+            dtype,
+            tma_atom,
+            tma_src,
+            tma_atom_out_row,
+            tma_dst_out_row,
+            tma_atom_out_col,
+            tma_dst_out_col,
+        )
 
     @cute.jit
     def _kernel_main(
