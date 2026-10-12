@@ -2,7 +2,6 @@
 #
 # See LICENSE for license information.
 """conftest for tests/jax"""
-
 import os
 import jax
 import pytest
