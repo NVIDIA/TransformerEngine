@@ -2896,6 +2896,49 @@ def test_te_ops_linear_bias_compile(dtype, quantization, case, grads, monkeypatc
     _check_linear_bias_compile(dtype, quantization, case, grads, monkeypatch)
 
 
+@pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4)
+@pytest.mark.parametrize("compile_mode", _compile_modes)
+@pytest.mark.parametrize("bias", [False, True])
+@pytest.mark.parametrize(
+    "shape,with_rht,disable_rht_fusion",
+    [
+        ((2, 16, 128), False, False),
+        ((2, 16, 128), True, False),
+        ((64, 128), True, False),
+        ((64, 128), True, True),
+    ],
+)
+def test_te_ops_linear_nvfp4_compile(
+    shape, with_rht, disable_rht_fusion, bias, compile_mode, monkeypatch
+):
+    monkeypatch.setenv("NVTE_NVFP4_DISABLE_RHT_CAST_FUSION", str(int(disable_rht_fusion)))
+    torch._dynamo.reset()
+    model = te.ops.Sequential(te.ops.Linear(128, 128, bias=bias, dtype=torch.bfloat16))
+    eager_model = copy.deepcopy(model)
+    quant_recipe = recipe.NVFP4BlockScaling(
+        disable_rht=not with_rht, disable_stochastic_rounding=True
+    )
+
+    def run(x, module=model):
+        with te.autocast(recipe=quant_recipe):
+            return module(x)
+
+    compiled = torch.compile(run, fullgraph=True, mode=compile_mode)
+    with _assert_no_cudagraph_skips(compile_mode == "reduce-overhead"):
+        for _ in range(3):
+            torch.compiler.cudagraph_mark_step_begin()
+            x = torch.randn(shape, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+            eager_x = x.detach().clone().requires_grad_()
+            actual = compiled(x)
+            expected = run(eager_x, eager_model)
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            dy = torch.randn_like(actual)
+            grads = torch.autograd.grad(actual, (x, *model.parameters()), dy)
+            eager_grads = torch.autograd.grad(expected, (eager_x, *eager_model.parameters()), dy)
+            torch.testing.assert_close(grads, eager_grads, rtol=0, atol=0)
+            del actual, expected, grads, eager_grads, x, eager_x, dy
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("backward_override", ["high_precision", "dequantized"])
