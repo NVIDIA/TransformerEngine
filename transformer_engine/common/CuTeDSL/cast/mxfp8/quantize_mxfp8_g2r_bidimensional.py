@@ -24,6 +24,7 @@ from .quantize_mxfp8_common import (
     MXFP8QuantizeConfig,
     MXFP8QuantizeKernelBase,
     bf16_pair_magnitude,
+    derive_swizzled_scale_layout,
 )
 
 
@@ -417,8 +418,12 @@ def quantize_bidimensional_mxfp8_g2r(
     )
 
     row_scale_atom = cute.make_copy_atom(cute.nvgpu.CopyR2GOp(), SCALE_DTYPE, num_bits_per_copy=8)
+    # GEMM-swizzled colwise scales are not contiguous (adjacent columns land 16 bytes apart),
+    # so they are stored a byte at a time, as the general kernel does.
     col_scale_atom = cute.make_copy_atom(
-        cute.nvgpu.CopyR2GOp(), SCALE_DTYPE, num_bits_per_copy=ELEMENTS_X_PER_THREAD * 8
+        cute.nvgpu.CopyR2GOp(),
+        SCALE_DTYPE,
+        num_bits_per_copy=8 if cfg.WITH_GEMM_SWIZZLED_SCALES else ELEMENTS_X_PER_THREAD * 8,
     )
 
     scale_and_pack = mul_bf16x2x2_cvt_bf16x4_to_fp8x4(cfg.FP8_DTYPE)
@@ -520,14 +525,8 @@ class MXFP8QuantizeRegisterBidimensionalKernel(MXFP8QuantizeKernelBase):
 
     @staticmethod
     def supports(cfg: MXFP8QuantizeConfig) -> bool:
-        # BF16 packed math; packed scales only (no colwise GEMM swizzle yet).
-        return (
-            cfg.is_plain_cast()
-            and cfg.DTYPE is cutlass.BFloat16
-            and cfg.ROWWISE
-            and cfg.COLWISE
-            and not cfg.WITH_GEMM_SWIZZLED_SCALES
-        )
+        # BF16 packed math.
+        return cfg.is_plain_cast() and cfg.DTYPE is cutlass.BFloat16 and cfg.ROWWISE and cfg.COLWISE
 
     @staticmethod
     @cute.jit
@@ -648,14 +647,17 @@ class MXFP8QuantizeRegisterBidimensionalKernel(MXFP8QuantizeKernelBase):
             gX = cute.make_tensor(mX.iterator, payload_layout)
             gO_row = cute.make_tensor(mO_row.iterator, payload_layout)
             gO_col = cute.make_tensor(mO_col.iterator, payload_layout)
-            gS_row = cute.make_tensor(
-                mS_row.iterator,
-                cute.make_layout((cute.size(mS_row, mode=[0]), 64), stride=(64, 1)),
-            )
-            gS_col = cute.make_tensor(
-                mS_col.iterator,
-                cute.make_layout((cute.size(mS_col, mode=[0]), 2048), stride=(2048, 1)),
-            )
+            if cutlass.const_expr(self.cfg.WITH_GEMM_SWIZZLED_SCALES):
+                gS_row, gS_col = derive_swizzled_scale_layout(M, 2048, True, True, mS_row, mS_col)
+            else:
+                gS_row = cute.make_tensor(
+                    mS_row.iterator,
+                    cute.make_layout((cute.size(mS_row, mode=[0]), 64), stride=(64, 1)),
+                )
+                gS_col = cute.make_tensor(
+                    mS_col.iterator,
+                    cute.make_layout((cute.size(mS_col, mode=[0]), 2048), stride=(2048, 1)),
+                )
             self.kernel(
                 gX,
                 gO_row,
@@ -669,14 +671,17 @@ class MXFP8QuantizeRegisterBidimensionalKernel(MXFP8QuantizeKernelBase):
             gX = cute.make_tensor(mX.iterator, payload_layout)
             gO_row = cute.make_tensor(mO_row.iterator, payload_layout)
             gO_col = cute.make_tensor(mO_col.iterator, payload_layout)
-            gS_row = cute.make_tensor(
-                mS_row.iterator,
-                cute.make_layout((cute.size(mS_row, mode=[0]), 128), stride=(128, 1)),
-            )
-            gS_col = cute.make_tensor(
-                mS_col.iterator,
-                cute.make_layout((cute.size(mS_col, mode=[0]), 4096), stride=(4096, 1)),
-            )
+            if cutlass.const_expr(self.cfg.WITH_GEMM_SWIZZLED_SCALES):
+                gS_row, gS_col = derive_swizzled_scale_layout(M, 4096, True, True, mS_row, mS_col)
+            else:
+                gS_row = cute.make_tensor(
+                    mS_row.iterator,
+                    cute.make_layout((cute.size(mS_row, mode=[0]), 128), stride=(128, 1)),
+                )
+                gS_col = cute.make_tensor(
+                    mS_col.iterator,
+                    cute.make_layout((cute.size(mS_col, mode=[0]), 4096), stride=(4096, 1)),
+                )
             self.kernel(
                 gX,
                 gO_row,
@@ -686,12 +691,16 @@ class MXFP8QuantizeRegisterBidimensionalKernel(MXFP8QuantizeKernelBase):
                 ELEMENTS_X_PER_THREAD=ELEMENTS_X_PER_THREAD,
             ).launch(grid=grid, block=block, cluster=cluster, min_blocks_per_mp=4, stream=stream)
         else:
+            if cutlass.const_expr(self.cfg.WITH_GEMM_SWIZZLED_SCALES):
+                gS_row, gS_col = derive_swizzled_scale_layout(M, N, True, True, mS_row, mS_col)
+            else:
+                gS_row, gS_col = mS_row, mS_col
             self.kernel(
                 mX,
                 mO_row,
-                mS_row,
+                gS_row,
                 mO_col,
-                mS_col,
+                gS_col,
                 ELEMENTS_X_PER_THREAD=ELEMENTS_X_PER_THREAD,
             ).launch(grid=grid, block=block, cluster=cluster, min_blocks_per_mp=4, stream=stream)
 
