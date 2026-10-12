@@ -179,12 +179,12 @@ def initialize_ub(
               falls back to the legacy ``use_fp8`` parameter if ``None`` is provided.
     dtype : torch.dtype = torch.bfloat16
             non-FP8 data type of the communication buffer when ``use_fp8 = False``
-    ub_cfgs : dict = None
+    ub_cfgs : dict or List[dict] = None
              Configuration dictionary with the structure::
 
                  {
                     <gemm_name> : {
-                        "method": <"ring_exchange" or "pipeline">,
+                        "method": <"ring_exchange", "pipeline", "bulk", or "external">,
                         "is_reduce_scatter": bool,
                         "num_sm": int,
                         "cga_size": int,
@@ -200,7 +200,51 @@ def initialize_ub(
              for ``te.TransformerLayer`` GEMM layers in ``["qkv_fprop", "qkv_dgrad", "qkv_wgrad",
              "proj_fprop", "proj_dgrad", "proj_wgrad", "fc1_fprop", "fc1_dgrad", "fc2_dgrad",
              "fc2_fprop", "fc2_wgrad"]``.
-             a list may be provided to specify different overlap configurations for different the quantization settings in ``quantization_modes``
+
+             With ``with_cublasmp=False``, the following defaults apply. Entries in
+             ``ub_cfgs`` are merged with the per-GEMM defaults. Omitted GEMMs use the
+             defaults below; changing a method can also affect a paired GEMM.
+
+             .. csv-table:: Default Userbuffers overlap configurations
+                :header: "GEMM", "Communication", "Method", "num_sm", "num_splits"
+
+                "qkv_fprop", "AllGather", "ring_exchange", 1, tp_size
+                "qkv_dgrad", "AllGather", "bulk", 16, 4
+                "qkv_wgrad", "ReduceScatter", "bulk", 16, 4
+                "proj_fprop", "ReduceScatter", "pipeline", 16, 4
+                "proj_dgrad", "AllGather", "ring_exchange", 1, tp_size
+                "proj_wgrad", "AllGather", "external", 16, 4
+                "fc1_fprop", "AllGather", "ring_exchange", 1, tp_size
+                "fc1_dgrad", "AllGather", "bulk", 16, 4
+                "fc1_wgrad", "ReduceScatter", "bulk", 16, 4
+                "fc2_fprop", "ReduceScatter", "pipeline", 16, 4
+                "fc2_dgrad", "AllGather", "ring_exchange", 1, tp_size
+                "fc2_wgrad", "AllGather", "external", 16, 4
+
+             ``num_splits`` is a default configuration value; ``ring_exchange``
+             does not use it. Changing ``qkv_dgrad`` or ``fc1_dgrad`` to a non-``bulk``
+             method configures its communicator for ReduceScatter and disables the
+             corresponding ``*_wgrad`` overlap communicator. To use DGRAD+ReduceScatter
+             overlap, also set ``sequence_parallel=True`` and ``ub_overlap_rs_dgrad=True``
+             on the layer. ``te.TransformerLayer`` additionally requires
+             ``ub_tp_comm_overlap=True``; ``te.Linear`` and ``te.LayerNormLinear``
+             require ``parallel_mode="column"``. The ``external`` overlaps for
+             ``proj_wgrad`` and ``fc2_wgrad`` require ``ring_exchange`` on
+             ``proj_dgrad`` and ``fc2_dgrad``, respectively.
+
+             With ``with_cublasmp=True``, ``qkv_dgrad`` and ``fc1_dgrad`` default to
+             ReduceScatter with ``ring_exchange``, ``num_sm=1``, and
+             ``num_splits=tp_size`` in their configurations. The ``qkv_wgrad``,
+             ``fc1_wgrad``, ``proj_wgrad``, and ``fc2_wgrad`` overlap communicators
+             are not created. cuBLASMp does not support ``bulk`` or ``external``
+             overlap methods. With cuBLASMp, a layer requesting ``ub_bulk_dgrad=True``
+             instead uses DGRAD+ReduceScatter overlap, even if
+             ``ub_overlap_rs_dgrad=False``, when sequence parallelism is active (and
+             ``ub_tp_comm_overlap=True`` for ``te.TransformerLayer``). The column-parallel
+             requirement still applies to ``te.Linear`` and ``te.LayerNormLinear``.
+
+             A list may be provided to specify a separate configuration for each
+             quantization mode in ``quantization_modes``.
     bootstrap_backend : str = None
                         ``torch.distributed`` communication backend for the all-gather, broadcast and
                         barrier collectives during Userbuffers initialization. Not all backends are
@@ -2062,6 +2106,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             return
 
         recipe = self.fp8_meta["recipe"]
+        if recipe.custom():
+            # Custom quantization recipes are compatible with all quantizers
+            return
+
         weight_tensors = [getattr(self, name) for name in self.weight_names]
         for i, tensor in enumerate(weight_tensors):
             if isinstance(tensor, QuantizedTensorStorage):
