@@ -11,6 +11,13 @@ from typing import Optional
 import torch
 
 from transformer_engine_torch import FP8TensorMeta
+from ..dynamo.tensor_spec import TensorSpec
+from ..ep import (
+    EpBuffer,
+    EpConfig,
+    get_ep_drop_on_overflow,
+    get_ep_group,
+)
 from ..torch_version import torch_version
 from ..quantization import FP8GlobalStateManager
 from ..quantized_tensor import QuantizedTensorStorage, Quantizer
@@ -43,6 +50,83 @@ def get_fused_normalization_quantizer(
     return None
 
 
+def validate_buffer(
+    name: str,
+    buffer: Optional[torch.Tensor],
+    *,
+    shape: Optional[tuple[int, ...] | list[int]] = None,
+    dtype: Optional[torch.dtype] = None,
+    device: Optional[torch.device] = None,
+    contiguous: Optional[bool] = None,
+) -> Optional[torch.Tensor]:
+    """Validate requested buffer properties and return detached storage."""
+    if buffer is None:
+        return None
+    if shape is not None and tuple(buffer.shape) != tuple(shape):
+        raise ValueError(f"{name} shape {tuple(buffer.shape)} does not match {tuple(shape)}.")
+    if dtype is not None and buffer.dtype is not dtype:
+        raise TypeError(f"{name} must have dtype {dtype}, got {buffer.dtype}.")
+    if device is not None and buffer.device != device:
+        raise ValueError(f"{name} must be on {device}, got {buffer.device}.")
+    if contiguous and not buffer.is_contiguous():
+        raise ValueError(f"{name} must be contiguous")
+    return buffer.detach()
+
+
+def validate_ep_buffer(
+    op_name: str,
+    expected_config: EpConfig,
+    buffer: object,
+) -> EpBuffer:
+    """Validate an operation-owned EP buffer against its immutable config. Needed by
+    MoeDispatch and MoeCombine basic ops which use NCCL EP."""
+    if not isinstance(buffer, EpBuffer):
+        raise TypeError(
+            f"{op_name} requires an EpBuffer passed to its constructor, "
+            f"got {type(buffer).__name__}."
+        )
+
+    mismatches = {
+        name: (getattr(buffer, name), getattr(expected_config, name))
+        for name in (
+            "top_k",
+            "hidden_dim",
+            "num_local_experts",
+            "max_tokens_per_rank",
+            "recv_capacity_per_rank",
+            "alignment",
+            "payload_dtype",
+            "zero_copy",
+        )
+        if getattr(buffer, name) != getattr(expected_config, name)
+    }
+    # The communication recipes are backend configuration, so compare the format
+    # they select rather than the recipe instances themselves.
+    for name in ("dispatch_fwd_quant_recipe", "combine_bwd_quant_recipe"):
+        buffer_recipe = getattr(buffer, name)
+        config_recipe = getattr(expected_config, name)
+        if type(buffer_recipe) is not type(config_recipe):
+            mismatches[name] = (buffer_recipe, config_recipe)
+    ep_group = get_ep_group()
+    if expected_config.ep_group is not ep_group:
+        mismatches["ep_group"] = (ep_group, expected_config.ep_group)
+    drop_on_overflow = get_ep_drop_on_overflow()
+    if expected_config.drop_on_overflow != drop_on_overflow:
+        mismatches["drop_on_overflow"] = (
+            drop_on_overflow,
+            expected_config.drop_on_overflow,
+        )
+    if mismatches:
+        details = ", ".join(
+            f"{name}={actual!r} (expected {expected!r})"
+            for name, (actual, expected) in mismatches.items()
+        )
+        raise ValueError(
+            f"{op_name} buffer config does not match its initialized config: {details}."
+        )
+    return buffer
+
+
 def validate_or_alloc_output(
     buffer: Optional[torch.Tensor],
     shape: tuple[int, ...] | list[int],
@@ -73,8 +157,10 @@ def validate_or_alloc_output(
     return buffer
 
 
-def is_quantized_tensor(tensor: torch.Tensor | QuantizedTensorStorage) -> bool:
-    """Check if tensor is a quantized tensor"""
+def is_quantized_tensor(tensor: torch.Tensor | QuantizedTensorStorage | TensorSpec) -> bool:
+    """Check whether a tensor or tensor spec represents quantized data."""
+    if isinstance(tensor, TensorSpec):
+        return tensor.is_quantized
     return isinstance(tensor, QuantizedTensorStorage)
 
 

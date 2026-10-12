@@ -38,10 +38,6 @@ class TensorSpec:
         if self.quantizer is not None:
             q = self.quantizer
             self.quantizer = q.copy() if hasattr(q, "copy") else _copy.copy(q)
-            if self.with_gemm_swizzled_scales is None:
-                self.with_gemm_swizzled_scales = self.quantizer.storage_metadata(self.dtype)[
-                    "nontensor_kwargs"
-                ].get("with_gemm_swizzled_scales")
 
     @property
     def is_quantized(self) -> bool:

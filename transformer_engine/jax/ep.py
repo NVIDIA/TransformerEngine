@@ -5,6 +5,7 @@
 
 import atexit
 import ctypes
+import os
 from functools import partial
 
 import jax
@@ -153,6 +154,10 @@ def ep_bootstrap(
             trapping on overflow. Dropped tokens are still counted in
             total_recv_tokens, so callers can detect overflow from it.
     """
+    # Force the AllGather-scan UpdateHandle path so dispatch metadata is ready
+    # at prepare time for the combine backward. Respect an explicit user override.
+    os.environ.setdefault("NCCL_EP_HT_EM_AG_SCAN_MODE", "1")
+
     if rank is None:
         rank = jax.process_index()
     if jnp.dtype(max_token_dtype) != jnp.bfloat16:

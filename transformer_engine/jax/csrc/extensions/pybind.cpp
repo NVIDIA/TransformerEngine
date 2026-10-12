@@ -38,15 +38,26 @@ pybind11::dict Registrations() {
   dict["te_dequantize_ffi"] = EncapsulateFFI(DequantizeHandler);
 
   // Softmax
-  dict["te_scaled_softmax_forward_ffi"] = EncapsulateFFI(ScaledSoftmaxForwardHandler);
-  dict["te_scaled_softmax_backward_ffi"] = EncapsulateFFI(ScaledSoftmaxBackwardHandler);
-  dict["te_scaled_masked_softmax_forward_ffi"] = EncapsulateFFI(ScaledMaskedSoftmaxForwardHandler);
-  dict["te_scaled_masked_softmax_backward_ffi"] =
-      EncapsulateFFI(ScaledMaskedSoftmaxBackwardHandler);
-  dict["te_scaled_upper_triang_masked_softmax_forward_ffi"] =
-      EncapsulateFFI(ScaledUpperTriangMaskedSoftmaxForwardHandler);
-  dict["te_scaled_upper_triang_masked_softmax_backward_ffi"] =
-      EncapsulateFFI(ScaledUpperTriangMaskedSoftmaxBackwardHandler);
+  dict["te_scaled_softmax_forward_ffi"] = pybind11::dict(
+      pybind11::arg("initialize") = EncapsulateFFI(ScaledSoftmaxForwardInitializeHandler),
+      pybind11::arg("execute") = EncapsulateFFI(ScaledSoftmaxForwardHandler));
+  dict["te_scaled_softmax_backward_ffi"] = pybind11::dict(
+      pybind11::arg("initialize") = EncapsulateFFI(ScaledSoftmaxBackwardInitializeHandler),
+      pybind11::arg("execute") = EncapsulateFFI(ScaledSoftmaxBackwardHandler));
+  dict["te_scaled_masked_softmax_forward_ffi"] = pybind11::dict(
+      pybind11::arg("initialize") = EncapsulateFFI(ScaledMaskedSoftmaxForwardInitializeHandler),
+      pybind11::arg("execute") = EncapsulateFFI(ScaledMaskedSoftmaxForwardHandler));
+  dict["te_scaled_masked_softmax_backward_ffi"] = pybind11::dict(
+      pybind11::arg("initialize") = EncapsulateFFI(ScaledMaskedSoftmaxBackwardInitializeHandler),
+      pybind11::arg("execute") = EncapsulateFFI(ScaledMaskedSoftmaxBackwardHandler));
+  dict["te_scaled_upper_triang_masked_softmax_forward_ffi"] = pybind11::dict(
+      pybind11::arg("initialize") =
+          EncapsulateFFI(ScaledUpperTriangMaskedSoftmaxForwardInitializeHandler),
+      pybind11::arg("execute") = EncapsulateFFI(ScaledUpperTriangMaskedSoftmaxForwardHandler));
+  dict["te_scaled_upper_triang_masked_softmax_backward_ffi"] = pybind11::dict(
+      pybind11::arg("initialize") =
+          EncapsulateFFI(ScaledUpperTriangMaskedSoftmaxBackwardInitializeHandler),
+      pybind11::arg("execute") = EncapsulateFFI(ScaledUpperTriangMaskedSoftmaxBackwardHandler));
 
   // Normalization
   dict["te_norm_forward_ffi"] =

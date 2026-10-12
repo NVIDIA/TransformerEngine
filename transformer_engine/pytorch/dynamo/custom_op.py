@@ -975,6 +975,7 @@ def _register_base_op(
     impl: Callable[[Any], Any],
     fake_impl: Callable[[Any], Any],
     pack_result: Callable[[Any], List[torch.Tensor]],
+    tags: Sequence[torch.Tag] = (),
 ) -> Any:
     """Define the op via ``torch.library.custom_op`` with the real ``impl`` + the
     ``fake_impl`` (spec), returning the ``CustomOpDef``.
@@ -994,7 +995,7 @@ def _register_base_op(
         return pack_result(fake_impl(spec_obj))
 
     op = torch.library.custom_op(
-        f"{_TE_OP_NAMESPACE}::{op_name}", _impl, mutates_args=(), schema=schema_str
+        f"{_TE_OP_NAMESPACE}::{op_name}", _impl, mutates_args=(), schema=schema_str, tags=tags
     )
     op.register_fake(_fake)
     _mark_effectful(op)
@@ -1140,6 +1141,7 @@ def _register_wrapper_op(
     base_op: Any,
     slot_offsets: Sequence[int] = (),
     subclasses: Sequence[type] = (),
+    tags: Sequence[torch.Tag] = (),
 ) -> Any:
     """Define the wrapper op via ``torch.library.custom_op``: forward to the base
     op through :func:`_make_slot_forwarder`. Returns the ``CustomOpDef``.
@@ -1150,7 +1152,11 @@ def _register_wrapper_op(
         return forward(flat)
 
     op_def = torch.library.custom_op(
-        f"{_TE_OP_NAMESPACE}::{wrapper_op_name}", _forward, mutates_args=(), schema=schema_str
+        f"{_TE_OP_NAMESPACE}::{wrapper_op_name}",
+        _forward,
+        mutates_args=(),
+        schema=schema_str,
+        tags=tags,
     )
     op_def.register_fake(_forward)
     _mark_effectful(op_def)
@@ -1194,6 +1200,7 @@ def _register_op(
     impl: Callable[[Any], Any],
     fake_impl: Callable[[Any], Any],
     pack_result: Callable[[Any], List[torch.Tensor]],
+    tags: Sequence[torch.Tag] = (),
 ) -> _RegisteredOp:
     """Define one two-tier custom op: the base kernel, the wrapper op that lets
     ``QuantizedTensor`` subclasses be inputs, and the passthrough registrations.
@@ -1215,6 +1222,7 @@ def _register_op(
         impl=impl,
         fake_impl=fake_impl,
         pack_result=pack_result,
+        tags=tags,
     )
     base_op = getattr(namespace, f"{name}_base")
     wrapper_def = _register_wrapper_op(
@@ -1223,6 +1231,7 @@ def _register_op(
         base_op=base_op,
         slot_offsets=slot_offsets,
         subclasses=subclasses,
+        tags=tags,
     )
     wrapper_op = getattr(namespace, name)
 
@@ -1299,12 +1308,15 @@ def register_custom_op_with_autograd(
     bwd_impl: Callable[[Any], Any],
     fwd_fake_impl: Callable[[Any], Tuple[Any, ...]],
     bwd_fake_impl: Callable[[Any], Tuple[Any, ...]],
+    fwd_tags: Sequence[torch.Tag] = (),
 ) -> Optional[Callable[..., Any]]:
     """Register a TE module's forward + backward as torch custom ops.
 
     Returns ``forward_fn(fwd_arg_type_instance)`` -- a drop-in for
     ``Function.apply`` under ``torch.compiler.is_compiling()`` that dispatches
     through the op and returns the user-facing outputs.
+
+    ``fwd_tags`` apply to both the base and wrapper forward operators.
 
     ``fwd_arg_type`` and ``bwd_arg_type`` are ``@dataclass``es whose *field
     annotations* define the op schema (see the module docstring for the
@@ -1364,6 +1376,7 @@ def register_custom_op_with_autograd(
             bwd_impl=bwd_impl,
             fwd_fake_impl=fwd_fake_impl,
             bwd_fake_impl=bwd_fake_impl,
+            fwd_tags=fwd_tags,
         )
     except (ImportError, AttributeError, RuntimeError, TypeError) as e:
         record_compile_disabled(
@@ -1383,6 +1396,7 @@ def _register_custom_op_with_autograd_impl(
     bwd_impl: Callable[[Any], Any],
     fwd_fake_impl: Callable[[Any], Tuple[Any, ...]],
     bwd_fake_impl: Callable[[Any], Tuple[Any, ...]],
+    fwd_tags: Sequence[torch.Tag],
 ) -> Callable[..., Any]:
     """Body of :func:`register_custom_op_with_autograd`; see it for semantics."""
     # Existence check at the API boundary: every ``input_tensors_for_grad`` name
@@ -1400,6 +1414,7 @@ def _register_custom_op_with_autograd_impl(
         impl=fwd_impl,
         fake_impl=fwd_fake_impl,
         pack_result=_pack_fwd_result,
+        tags=fwd_tags,
     )
     bwd_qualname = f"{_TE_OP_NAMESPACE}::{op_name}_backward_base"
     num_grad_inputs = len(input_tensors_for_grad)
