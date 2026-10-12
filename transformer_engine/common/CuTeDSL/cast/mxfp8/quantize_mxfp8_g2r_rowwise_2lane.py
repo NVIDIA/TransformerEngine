@@ -15,6 +15,7 @@ from transformer_engine.common.CuTeDSL.utils import (
     abs_max_x2_bf16,
     create_l2_policy,
     exp2_bf16x2_rcp,
+    max_num_bits_per_copy_ld_global,
 )
 from transformer_engine.common.CuTeDSL.utils_fp8 import (
     cvt_f32_to_fp8e8m0fnu,
@@ -78,7 +79,7 @@ def quantize_rowwise_mxfp8_g2r(
     # 16 * 2 bytes = 32 bytes, one 256-bit load where the toolchain supports it
     LOAD_WIDTH = min(
         ELEMENTS_PER_THREAD * cfg.DTYPE.width,
-        MXFP8QuantizeG2RRowwise2LaneKernel.max_num_bits_per_copy(),
+        max_num_bits_per_copy_ld_global(),
     )
     load_atom = cute.make_copy_atom(
         cute.nvgpu.CopyG2ROp(),
@@ -181,16 +182,6 @@ class MXFP8QuantizeG2RRowwise2LaneKernel(MXFP8QuantizeKernelBase):
     _L2_CACHED_CTA_PERCENT = 40
     _SMALL_TIER_CACHED_PERCENT = 0
     _MAX_GRID_Y = 65535
-
-    @staticmethod
-    @cute.jit
-    def max_num_bits_per_copy() -> int:
-        """Widest global load to issue: 256-bit loads (`ld.global.v8.b32`) need PTX ISA 8.8,
-        i.e. CUDA 12.9. Older toolchains split each one into two 128-bit loads, as
-        cast_rowwise.cuh / cast_bidim.cuh do via util/ptx.cuh's ld_global_nc_b32x8."""
-        if cutlass.const_expr(cutlass.target_version(min_version="12.9")):
-            return 256
-        return 128
 
     @staticmethod
     def supports(cfg: MXFP8QuantizeConfig) -> bool:

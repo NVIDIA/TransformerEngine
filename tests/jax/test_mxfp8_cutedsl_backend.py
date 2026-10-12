@@ -288,10 +288,9 @@ def test_dtypes(method, act_type, act_desc, fp8_dtype, in_dtype):
 # Cover the specialized kernels' shapes
 # Note that JAX only emits linear scales and passes no noop tensor
 SPECIALIZED_CASES = {
-    # G2RRowwise2Lane: its four launch tiers (by output size). 4064x4480 leaves a partial last
-    # row in the flat 1024-column view.
+    # G2RRowwise2Lane: its four launch tiers (by output size).
     "g2r_rowwise2lane_tier0": ((1024, 4096), QuantizeLayout.ROWWISE, jnp.bfloat16),
-    "g2r_rowwise2lane_tier1_flat_tail": ((4064, 4480), QuantizeLayout.ROWWISE, jnp.bfloat16),
+    "g2r_rowwise2lane_tier1": ((4064, 4480), QuantizeLayout.ROWWISE, jnp.bfloat16),
     "g2r_rowwise2lane_tier2": ((8192, 8192), QuantizeLayout.ROWWISE, jnp.bfloat16),
     "g2r_rowwise2lane_tier3": ((16384, 8192), QuantizeLayout.ROWWISE, jnp.bfloat16),
     # G2RRowwise1Lane

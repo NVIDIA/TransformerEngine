@@ -27,6 +27,16 @@ _STR_FROM_CUTLASS_DTYPE = {v: k for k, v in _CUTLASS_DTYPE_FROM_STR.items()}
 logger = logging.getLogger("transformer_engine.cutedsl.utils")
 
 
+@cute.jit
+def max_num_bits_per_copy_ld_global() -> int:
+    """Widest global load to issue: 256-bit loads (`ld.global.v8.b32`) need PTX ISA 8.8,
+    i.e. CUDA 12.9. Older toolchains split each one into two 128-bit loads, as
+    cast_rowwise.cuh / cast_bidim.cuh do via util/ptx.cuh's ld_global_nc_b32x8."""
+    if cutlass.const_expr(cutlass.target_version(min_version="12.9")):
+        return 256
+    return 128
+
+
 def device_compute_capability(device_id: Optional[int] = None) -> tuple:
     """(major, minor) compute capability of a CUDA device (current by default), or (0, 0) if it can't be queried."""
     from cuda.core import Device  # pylint: disable=no-name-in-module

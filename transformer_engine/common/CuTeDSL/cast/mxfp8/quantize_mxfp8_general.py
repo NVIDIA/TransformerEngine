@@ -7,10 +7,9 @@
 Replicates the core logic of quantize_mxfp8.cuh: given a 2D tensor of BF16/FP16
 values, quantize to MXFP8 format (FP8E4M3 data + E8M0 per-block scales).
 
-BF16 cast-only calls with aligned input use the register-resident ports of
-specialized/cast_rowwise.cuh and specialized/cast_bidim.cuh. Other configurations
-use the one-lane rowwise, staged bidimensional or general kernels. All paths share the
-TVM-FFI entrypoint.
+This is the general kernel: it handles every config. MXFP8QuantizeEntry in
+quantize_mxfp8_common.py dispatches plain casts to the specialized kernels when they
+apply and falls back to this kernel otherwise.
 
 Matches the C++ kernel's tile dimensions and thread layout:
   CHUNK_DIM_Y = 64, CHUNK_DIM_X = 64, THREADS_PER_CTA = 64

@@ -17,6 +17,7 @@ from transformer_engine.common.CuTeDSL.utils import (
     bf16_mx_scale_reciprocal_pair,
     bf16_mx_scale_bytes_pair,
     create_l2_policy,
+    max_num_bits_per_copy_ld_global,
 )
 from transformer_engine.common.CuTeDSL.utils_fp8 import mul_bf16x2x2_cvt_bf16x4_to_fp8x4
 from .quantize_mxfp8_common import (
@@ -400,7 +401,7 @@ def quantize_bidimensional_mxfp8_g2r(
         cfg.DTYPE,
         num_bits_per_copy=min(
             ELEMENTS_X_PER_THREAD * cfg.DTYPE.width,
-            MXFP8QuantizeRegisterBidimensionalKernel.max_num_bits_per_copy(),
+            max_num_bits_per_copy_ld_global(),
         ),
         # TODO(kainingz): due to https://github.com/NVIDIA/cutlass/issues/3726 using
         # invariant=True here will drop the cache policy
@@ -497,21 +498,12 @@ class MXFP8QuantizeRegisterBidimensionalKernel(MXFP8QuantizeKernelBase):
     TILE_COLS = _CTA_THREADS_X * ELEMENTS_X_PER_THREAD = 256 or 512.
     The 32-row tile contains complete columnwise MXFP8 blocks; shared memory
     combines the partial column maxima from the eight warps. Requires aligned
-    BF16 input, M divisible by 32, N divisible by 256 and plain scale layouts.
+    BF16 input, M divisible by 32 and N divisible by 256; writes packed or GEMM-swizzled
+    scales.
     """
 
     _CTA_THREADS_Y = 8
     _CTA_THREADS_X = 32
-
-    @staticmethod
-    @cute.jit
-    def max_num_bits_per_copy() -> int:
-        """Widest global load to issue: 256-bit loads (`ld.global.v8.b32`) need PTX ISA 8.8,
-        i.e. CUDA 12.9. Older toolchains split each one into two 128-bit loads, as
-        cast_rowwise.cuh / cast_bidim.cuh do via util/ptx.cuh's ld_global_nc_b32x8."""
-        if cutlass.const_expr(cutlass.target_version(min_version="12.9")):
-            return 256
-        return 128
 
     @staticmethod
     def supports(cfg: MXFP8QuantizeConfig) -> bool:

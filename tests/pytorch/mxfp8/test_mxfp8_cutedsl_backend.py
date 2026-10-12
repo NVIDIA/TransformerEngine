@@ -384,8 +384,7 @@ def test_dtypes(swizzled, method, act, fp8_dtype, in_dtype):
 SPECIALIZED_PATH_CASES = [
     # G2RRowwise2Lane: the four launch tiers (by output size) on the flat packed-scale view.
     ("g2r_rowwise2lane_tier0", (1024, 4096), ROW, torch.bfloat16, False, 0),
-    # M*N % 1024 != 0: the flat view's last row is partial.
-    ("g2r_rowwise2lane_tier1_flat_tail", (4064, 4480), ROW, torch.bfloat16, False, 0),
+    ("g2r_rowwise2lane_tier1", (4064, 4480), ROW, torch.bfloat16, False, 0),
     ("g2r_rowwise2lane_tier2", (8192, 8192), ROW, torch.bfloat16, False, 0),
     ("g2r_rowwise2lane_tier3", (16384, 8192), ROW, torch.bfloat16, False, 0),
     # Swizzled scales use the 2-D grid instead of the flat view.
