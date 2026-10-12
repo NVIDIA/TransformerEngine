@@ -10,6 +10,7 @@ from collections.abc import Callable, Iterable, Sequence
 import functools
 import inspect
 import os
+import warnings
 from importlib.metadata import PackageNotFoundError, version as get_pkg_version
 from typing import Any, Literal, Optional
 
@@ -1027,8 +1028,6 @@ def _is_grouped_mlp_fusion_candidate(
         isinstance(fc1, GroupedLinear)
         and isinstance(activation, activation_op_types)
         and isinstance(fc2, GroupedLinear)
-        and fc1.split_alignment % 256 == 0
-        and fc2.split_alignment % 256 == 0
         for fc1, activation, fc2 in zip(ops, ops[1:], ops[2:])
     )
 
@@ -1086,8 +1085,6 @@ def fuse_grouped_mlp_ops(
             isinstance(window[0], GroupedLinear)
             and isinstance(window[1], activation_op_types)
             and isinstance(window[2], GroupedLinear)
-            and window[0].split_alignment % 256 == 0
-            and window[2].split_alignment % 256 == 0
         ):
             matches_pattern = False
         elif (
@@ -1105,6 +1102,18 @@ def fuse_grouped_mlp_ops(
                 validate_grouped_mlp_dims(window[0], window[1], window[2])
             except (TypeError, ValueError):
                 matches_pattern = False
+
+        if matches_pattern and (
+            window[0].split_alignment % 256 != 0
+            or window[2].split_alignment % 256 != 0
+        ):
+            warnings.warn(
+                "Grouped MLP fusion was skipped because both GroupedLinear operations "
+                "require split_alignment to be divisible by 256 "
+                f"(got {window[0].split_alignment} and {window[2].split_alignment}).",
+                stacklevel=2,
+            )
+            matches_pattern = False
 
         if matches_pattern:
             op = fused_op_cls(

@@ -1139,7 +1139,8 @@ class TestGroupedMLPFusedOp:
         assert_fused(e4m3)
 
         fc1.split_alignment = 128
-        assert fuse(e4m3) is ops
+        with pytest.warns(UserWarning, match="split_alignment.*divisible by 256"):
+            assert fuse(e4m3) is ops
         fc1.split_alignment = 256
 
         # NVFP4 quantizes gradients to FP4, so the FP8 format must not gate it. Forcing the
