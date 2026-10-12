@@ -9,6 +9,7 @@ import torch
 
 from transformer_engine.pytorch.attention.sparse_attention import (
     compressor,
+    dsa_cudnn,
     dsa_rope,
     dsv4_attention,
 )
@@ -63,10 +64,12 @@ def test_dsv4_forward_backward(variant, head_dim):
             start += length
             comp_start += count
 
-    output = dsv4_attention.DSv4Attention(window_size=32, ratio=ratio)(
+    output = dsa_cudnn.attention(
         *leaves,
         cu,
         cu_comp,
+        window_size=32,
+        ratio=ratio,
         indices=indices,
         max_compressed_seqlen=max(comp_lengths) if indices is None else None,
     )
@@ -102,10 +105,38 @@ def test_dsv4_forward_backward(variant, head_dim):
 
 def test_dsv4_rejects_unsupported_metadata():
     with pytest.raises(ValueError, match="positive"):
-        dsv4_attention.DSv4Attention(window_size=0, ratio=4)
-    core = dsv4_attention.DSv4Attention(window_size=32, ratio=4)
+        dsa_cudnn.attention(
+            torch.empty(1, 64, 512),
+            torch.empty(1, 512),
+            torch.empty(1, 512),
+            torch.empty(64),
+            None,
+            None,
+            window_size=0,
+            ratio=4,
+        )
     with pytest.raises(ValueError, match="query"):
-        core(torch.empty(1, 4, 512), None, None, None, None, None)
+        dsa_cudnn.attention(
+            torch.empty(1, 4, 512),
+            None,
+            None,
+            None,
+            None,
+            None,
+            window_size=32,
+            ratio=4,
+        )
+
+
+def test_dsv4_attention_rejects_fp8(monkeypatch):
+    from transformer_engine.pytorch.quantization import FP8GlobalStateManager
+
+    monkeypatch.setattr(FP8GlobalStateManager, "is_fp8_enabled", lambda: True)
+    layer = dsv4_attention.DSv4Attention.__new__(dsv4_attention.DSv4Attention)
+    torch.nn.Module.__init__(layer)
+    layer.input_format, layer.hidden_size = "sbd", 8
+    with pytest.raises(NotImplementedError, match="BF16 only"):
+        layer(torch.empty(4, 1, 8))
 
 
 @pytest.mark.parametrize("heads", [1, 64])
@@ -206,7 +237,7 @@ def test_dsv4_thd_rejects_malformed_metadata(prefix, maximum):
 
 def test_dsv4_thd_rejects_hidden_batch_axis_and_multi_sequence_context():
     # These checks precede projections and do not require GPU-backed TE layers.
-    layer = dsv4_attention.DSv4HybridAttention.__new__(dsv4_attention.DSv4HybridAttention)
+    layer = dsv4_attention.DSv4Attention.__new__(dsv4_attention.DSv4Attention)
     torch.nn.Module.__init__(layer)
     layer.input_format, layer.hidden_size = "thd", 8
     layer.is_csa, layer.compression_ratio = True, 4
@@ -258,7 +289,7 @@ def test_dsv4_hybrid_thd_forward_backward(variant, ratio, lengths):
     if not hasattr(getattr(cudnn, "DSA", None), "sparse_attention_forward_wrapper"):
         pytest.skip("DSv4 requires cuDNN Frontend 1.29 sparse attention APIs")
     torch.manual_seed(37)
-    layer = dsv4_attention.DSv4HybridAttention(
+    layer = dsv4_attention.DSv4Attention(
         hidden_size=32,
         q_lora_rank=16,
         layer_type=(

@@ -31,7 +31,6 @@ from transformer_engine.pytorch.module import UserBufferQuantizationMode
 from transformer_engine.pytorch.attention import DotProductAttention
 from transformer_engine.pytorch.attention import (
     DSv4Attention,
-    DSv4HybridAttention,
     sparse_attention,
 )
 from transformer_engine.pytorch.attention import GatedDeltaNetAttention

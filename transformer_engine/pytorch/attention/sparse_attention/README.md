@@ -1,14 +1,14 @@
 # DSv4 model integration
 
-For stateless, unpadded BF16 CSA/HCA layers, `DSv4HybridAttention` owns the
+For stateless, unpadded BF16 CSA/HCA layers, `DSv4Attention` owns the
 DSv4 projections, norms, RoPE, compressors, indexer, sink, and grouped output
 projection. Its default input and output are both `[sequence, batch, hidden_size]`:
 
 ```python
 import torch
-from transformer_engine.pytorch.attention.sparse_attention import DSv4HybridAttention
+from transformer_engine.pytorch.attention.sparse_attention import DSv4Attention
 
-attention = DSv4HybridAttention(
+attention = DSv4Attention(
     hidden_size=4096, q_lora_rank=1536,
     layer_type="compressed_sparse_attention", head_dim=512, rope_head_dim=64,
     sliding_window=128, compression_ratio=4, o_groups=8, o_lora_rank=1024,
@@ -70,13 +70,13 @@ attachment. Per-token reduction is untested.
 
 The lower-level `dsa_cudnn` calls expose compression and selection when
 a model owns its own projections, RMSNorm, RoPE, sink, and output projection.
-`DSv4Attention` owns the parameter-free attention call:
+`dsa_cudnn.attention` provides the parameter-free prepared-tensor attention call:
 
 ```text
 model projected KV + gates ── dsa_cudnn.compress ── model norm/RoPE ── compressed KV
 model index projections ───── dsa_cudnn.compress ── model norm/RoPE ── index key
 model index query + key + weights ───────────── dsa_cudnn.select_blocks ── IDs (CSA)
-model query + local KV + compressed KV + IDs ─ dsv4_attention.DSv4Attention ── head output
+model query + local KV + compressed KV + IDs ─ dsa_cudnn.attention ── head output
 ```
 
 The model calls the same stages for HCA, omitting index compression and selection.
@@ -88,7 +88,6 @@ rows; the attention core maps them into its combined local/compressed KV space.
 ```python
 from transformer_engine.pytorch.attention.sparse_attention import (
     dsa_cudnn,
-    dsv4_attention,
 )
 
 # Model code supplies BF16 projected tensors and applies its own norm/RoPE.
@@ -112,9 +111,9 @@ if is_csa:
         scale=(index_head_dim * index_n_heads) ** -0.5,
     )
 
-output = dsv4_attention.DSv4Attention(window_size=window_size, ratio=ratio)(
+output = dsa_cudnn.attention(
     query, local_kv, compressed_kv, sink.float(), cu, cu_comp,
-    indices=indices,
+    window_size=window_size, ratio=ratio, indices=indices,
     max_compressed_seqlen=max_compressed_seqlen if indices is None else None,
 )
 output = model.finish_output(output)

@@ -9,11 +9,10 @@ kernels load on execution. Add future variants as sibling modules.
 """
 
 from . import dsa_cudnn, dsv4_attention
-from .dsv4_attention import DSv4Attention, DSv4HybridAttention
+from .dsv4_attention import DSv4Attention
 
 __all__ = [
     "dsa_cudnn",
     "dsv4_attention",
     "DSv4Attention",
-    "DSv4HybridAttention",
 ]

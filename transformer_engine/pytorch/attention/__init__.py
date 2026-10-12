@@ -6,7 +6,7 @@
 
 from .dot_product_attention import DotProductAttention
 from . import sparse_attention
-from .sparse_attention import DSv4Attention, DSv4HybridAttention
+from .sparse_attention import DSv4Attention
 from .linear_attention import (
     GatedDeltaNetAttention,
     GatedDeltaNet2Attention,
@@ -20,7 +20,6 @@ from .rope import RotaryPositionEmbedding
 __all__ = [
     "DotProductAttention",
     "DSv4Attention",
-    "DSv4HybridAttention",
     "sparse_attention",
     "GatedDeltaNetAttention",
     "GatedDeltaNet2Attention",
