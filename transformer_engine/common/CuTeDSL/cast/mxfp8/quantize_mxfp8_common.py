@@ -209,7 +209,6 @@ class MXFP8QuantizeConfig:
 
     __repr__ = __str__
 
-
     def is_plain_cast(self) -> bool:
         """Whether cfg is a plain cast: no amax, dbias or (d)activation fused in."""
         return not (self.WITH_AMAX or self.WITH_DBIAS or self.WITH_DACT or self.WITH_ACT)
