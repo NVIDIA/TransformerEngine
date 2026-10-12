@@ -8,10 +8,10 @@
  *  \brief Multi-latent attention key/value split and key RoPE fused with MXFP8 quantization.
  *
  *  MLA's key/value up-projection gives, per head, kv = [k_nope | v], and the key is k_nope
- *  followed by the rotary embedding of k_pe, a position embedding that all heads share. For
+ *  followed by k_rope, the key's RoPE dimensions that all heads share, with RoPE applied. For
  *  MXFP8 attention, key and value are quantized row-wise (32 elements of a head) and
  *  column-wise (32 tokens). Otherwise the key and value are written in BF16 and read again
- *  by the quantization; this kernel reads kv and k_pe once and writes the MXFP8 key and
+ *  by the quantization; this kernel reads kv and k_rope once and writes the MXFP8 key and
  *  value directly, the same bytes as the MXFP8 quantizer applied to the [s, b * h * d] views
  *  of the RoPE'd key and of the value.
  *
@@ -121,7 +121,7 @@ struct PlainLoads {
   }
 };
 
-// RoPE of k_pe for kBlock tokens, one task per (token, group of 4 rotation pairs).
+// RoPE of k_rope for kBlock tokens, one task per (token, group of 4 rotation pairs).
 template <bool kCosBf16>
 struct RopeLoads {
   using CosType = std::conditional_t<kCosBf16, bf16, float>;
@@ -134,11 +134,11 @@ struct RopeLoads {
 
   __device__ __forceinline__ bool active() const { return threadIdx.x < kTasks; }
 
-  __device__ __forceinline__ void load(const bf16 *k_pe, const int64_t stride, const CosType *cos,
+  __device__ __forceinline__ void load(const bf16 *k_rope, const int64_t stride, const CosType *cos,
                                        const CosType *sin, const int64_t first_token) {
     if (!active()) return;
     const int token = threadIdx.x / kGroups, group = threadIdx.x % kGroups;
-    pairs = __ldg(reinterpret_cast<const uint4 *>(k_pe + token * stride) + group);
+    pairs = __ldg(reinterpret_cast<const uint4 *>(k_rope + token * stride) + group);
     const CosType *c = cos + (first_token + token) * kRopeDim;
     const CosType *s = sin + (first_token + token) * kRopeDim;
     cos_left = __ldg(reinterpret_cast<const CosVector *>(c) + group);
@@ -288,8 +288,8 @@ __device__ __forceinline__ void write_out(const StagedOutput<D> &staged, const i
 
 template <bool kCosBf16>
 __global__ void __launch_bounds__(kThreads)
-    fused_mla_kv_rope_mxfp8_kernel(const bf16 *__restrict__ kv, const bf16 *__restrict__ k_pe,
-                                   const int64_t k_pe_stride,
+    fused_mla_kv_rope_mxfp8_kernel(const bf16 *__restrict__ kv, const bf16 *__restrict__ k_rope,
+                                   const int64_t k_rope_stride,
                                    const typename RopeLoads<kCosBf16>::CosType *__restrict__ cos,
                                    const typename RopeLoads<kCosBf16>::CosType *__restrict__ sin,
                                    const MXFP8Output key, const MXFP8Output value,
@@ -318,10 +318,10 @@ __global__ void __launch_bounds__(kThreads)
     k_nope[h].load(src, columns * kKVDim);
     v[h].load(src + kNopeDim, columns * kKVDim);
   }
-  rope.load(k_pe + (first_token * batch_size + batch) * k_pe_stride, batch_size * k_pe_stride, cos,
-            sin, first_token);
+  rope.load(k_rope + (first_token * batch_size + batch) * k_rope_stride, batch_size * k_rope_stride,
+            cos, sin, first_token);
 
-  // Key: k_nope and the RoPE'd k_pe, which both heads share.
+  // Key: k_nope and the RoPE'd k_rope, which both heads share.
 #pragma unroll
   for (int h = 0; h < kHeadsPerCTA; ++h) {
     k_nope[h].store(tiles + h * kBlock * kPitch);
@@ -383,7 +383,7 @@ MXFP8Output check_mxfp8_output(const Tensor &t, const char *name, const size_t r
 
 }  // namespace
 
-void fused_mla_kv_rope_mxfp8(const Tensor &kv, const Tensor &k_pos_emb, const int k_pos_emb_stride,
+void fused_mla_kv_rope_mxfp8(const Tensor &kv, const Tensor &k_rope, const int k_rope_stride,
                              const Tensor &cos, const Tensor &sin, Tensor *key, Tensor *value,
                              cudaStream_t stream) {
   NVTE_CHECK(is_supported_by_CC_100(),
@@ -398,13 +398,12 @@ void fused_mla_kv_rope_mxfp8(const Tensor &kv, const Tensor &k_pos_emb, const in
   NVTE_CHECK(s / kBlock <= 65535 && b * h <= static_cast<size_t>(std::numeric_limits<int>::max()),
              "kv shape ", kv_shape, " is too large.");
 
-  NVTE_CHECK(k_pos_emb.data.dtype == DType::kBFloat16, "k_pos_emb must be BF16.");
-  NVTE_CHECK(k_pos_emb.flat_first_dim() == s * b && k_pos_emb.flat_last_dim() == kRopeDim,
-             "k_pos_emb must have s * b = ", s * b, " rows of ", kRopeDim, " elements, got shape ",
-             k_pos_emb.data.shape, ".");
-  NVTE_CHECK(k_pos_emb_stride >= kRopeDim && k_pos_emb_stride % 8 == 0,
-             "The k_pos_emb row stride (", k_pos_emb_stride,
-             ") must be at least the row size and a multiple of 8 elements.");
+  NVTE_CHECK(k_rope.data.dtype == DType::kBFloat16, "k_rope must be BF16.");
+  NVTE_CHECK(k_rope.flat_first_dim() == s * b && k_rope.flat_last_dim() == kRopeDim,
+             "k_rope must have s * b = ", s * b, " rows of ", kRopeDim, " elements, got shape ",
+             k_rope.data.shape, ".");
+  NVTE_CHECK(k_rope_stride >= kRopeDim && k_rope_stride % 8 == 0, "The k_rope row stride (",
+             k_rope_stride, ") must be at least the row size and a multiple of 8 elements.");
 
   NVTE_CHECK(cos.data.dtype == sin.data.dtype &&
                  (cos.data.dtype == DType::kBFloat16 || cos.data.dtype == DType::kFloat32),
@@ -416,9 +415,9 @@ void fused_mla_kv_rope_mxfp8(const Tensor &kv, const Tensor &k_pos_emb, const in
 
   const MXFP8Output key_out = check_mxfp8_output(*key, "key", s, b * h * kKeyDim);
   const MXFP8Output value_out = check_mxfp8_output(*value, "value", s, b * h * kValueDim);
-  NVTE_CHECK(is_aligned_to(kv.data.dptr, 16) && is_aligned_to(k_pos_emb.data.dptr, 16) &&
+  NVTE_CHECK(is_aligned_to(kv.data.dptr, 16) && is_aligned_to(k_rope.data.dptr, 16) &&
                  is_aligned_to(cos.data.dptr, 16) && is_aligned_to(sin.data.dptr, 16),
-             "kv, k_pos_emb, cos and sin must be 16-byte aligned.");
+             "kv, k_rope, cos and sin must be 16-byte aligned.");
   if (s == 0 || b == 0) {
     return;
   }
@@ -430,8 +429,8 @@ void fused_mla_kv_rope_mxfp8(const Tensor &kv, const Tensor &k_pos_emb, const in
     NVTE_CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                                          kSharedMemoryBytes));
     kernel<<<grid, kThreads, kSharedMemoryBytes, stream>>>(
-        static_cast<const bf16 *>(kv.data.dptr), static_cast<const bf16 *>(k_pos_emb.data.dptr),
-        k_pos_emb_stride, static_cast<const CosType *>(cos.data.dptr),
+        static_cast<const bf16 *>(kv.data.dptr), static_cast<const bf16 *>(k_rope.data.dptr),
+        k_rope_stride, static_cast<const CosType *>(cos.data.dptr),
         static_cast<const CosType *>(sin.data.dptr), key_out, value_out, static_cast<int>(b * h),
         static_cast<int>(h));
   });  // NOLINT(*)
@@ -440,14 +439,13 @@ void fused_mla_kv_rope_mxfp8(const Tensor &kv, const Tensor &k_pos_emb, const in
 
 }  // namespace transformer_engine
 
-void nvte_fused_mla_kv_rope_mxfp8(const NVTETensor kv, const NVTETensor k_pos_emb,
-                                  const int k_pos_emb_stride, const NVTETensor cos,
+void nvte_fused_mla_kv_rope_mxfp8(const NVTETensor kv, const NVTETensor k_rope,
+                                  const int k_rope_stride, const NVTETensor cos,
                                   const NVTETensor sin, NVTETensor key, NVTETensor value,
                                   cudaStream_t stream) {
   NVTE_API_CALL(nvte_fused_mla_kv_rope_mxfp8);
   using namespace transformer_engine;
-  fused_mla_kv_rope_mxfp8(*convertNVTETensorCheck(kv), *convertNVTETensorCheck(k_pos_emb),
-                          k_pos_emb_stride, *convertNVTETensorCheck(cos),
-                          *convertNVTETensorCheck(sin), convertNVTETensorCheck(key),
-                          convertNVTETensorCheck(value), stream);
+  fused_mla_kv_rope_mxfp8(*convertNVTETensorCheck(kv), *convertNVTETensorCheck(k_rope),
+                          k_rope_stride, *convertNVTETensorCheck(cos), *convertNVTETensorCheck(sin),
+                          convertNVTETensorCheck(key), convertNVTETensorCheck(value), stream);
 }

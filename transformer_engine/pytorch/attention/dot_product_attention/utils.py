@@ -3331,12 +3331,12 @@ def _mxfp8_tensor_in_src_format(fp8_2d, shape, dtype, quantizer, src_format):
 
 
 def fused_mla_kv_rope_mxfp8(
-    kv, k_pos_emb, cos, sin, v_head_dim, key_quantizer=None, value_quantizer=None
+    kv, k_rope, cos, sin, v_head_dim, key_quantizer=None, value_quantizer=None
 ):
     """MLA key/value split, key RoPE and MXFP8 quantization in one kernel.
 
-    Splits ``kv`` into the key dimensions without RoPE and the value, appends the rotary
-    embedding of ``k_pos_emb`` to the key, and quantizes key and value as
+    Splits ``kv`` into the key dimensions without RoPE and the value, appends ``k_rope`` with
+    RoPE applied to the key, and quantizes key and value as
     :func:`mxfp8_quantize_only` (``src_format="sbhd"``) does, with byte-identical results,
     without writing key and value in BF16 first. The RoPE is that of Megatron-LM's MLA
     (interleaved rotation pairs in, the two halves out), with its roundings; see
@@ -3348,8 +3348,8 @@ def fused_mla_kv_rope_mxfp8(
     kv : torch.Tensor
         [s, b, h, k_dim + v_head_dim] BF16: per head, the key dimensions without RoPE and then
         the value. ``s`` must be a multiple of 128 and ``h`` even.
-    k_pos_emb : torch.Tensor
-        [s, b, 1, emb_dim] or [s, b, emb_dim] BF16 key position embedding shared by the heads,
+    k_rope : torch.Tensor
+        [s, b, 1, emb_dim] or [s, b, emb_dim] BF16 key RoPE dimensions shared by the heads,
         rotation pairs interleaved. May be a strided view, such as a slice of a projection
         output.
     cos, sin : torch.Tensor
@@ -3385,12 +3385,12 @@ def fused_mla_kv_rope_mxfp8(
         quantizer.optimize_for_gemm = False
     try:
         key_2d, value_2d = tex.fused_mla_kv_rope_mxfp8(
-            kv, k_pos_emb, cos, sin, v_head_dim, quantizers[0], quantizers[1]
+            kv, k_rope, cos, sin, v_head_dim, quantizers[0], quantizers[1]
         )
     finally:
         for quantizer, optimize in zip(quantizers, orig_optimize):
             quantizer.optimize_for_gemm = optimize
-    key_shape = (s, b, h, kv_dim - v_head_dim + k_pos_emb.shape[-1])
+    key_shape = (s, b, h, kv_dim - v_head_dim + k_rope.shape[-1])
     value_shape = (s, b, h, v_head_dim)
     return (
         _mxfp8_tensor_in_src_format(key_2d, key_shape, kv.dtype, quantizers[0], "sbhd"),

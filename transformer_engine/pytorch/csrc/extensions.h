@@ -571,7 +571,7 @@ at::Tensor fused_qkv_rope_backward(const at::Tensor &q_grad_out, const at::Tenso
                                    const int cp_size, const int cp_rank);
 
 std::tuple<py::object, py::object> fused_mla_kv_rope_mxfp8(
-    const at::Tensor &kv, const at::Tensor &k_pos_emb, const at::Tensor &cos, const at::Tensor &sin,
+    const at::Tensor &kv, const at::Tensor &k_rope, const at::Tensor &cos, const at::Tensor &sin,
     const int64_t v_head_dim, py::handle key_quantizer, py::handle value_quantizer);
 
 /***************************************************************************************************

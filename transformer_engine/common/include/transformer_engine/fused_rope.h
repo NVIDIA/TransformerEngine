@@ -143,9 +143,9 @@ void nvte_fused_qkv_rope_backward(const NVTETensor q_grad_out, const NVTETensor 
  *         value to MXFP8.
  *
  *  Each head of kv holds 128 key dimensions without RoPE followed by 128 value dimensions.
- *  The key is those 128 dimensions followed by the 64 dimensions of k_pos_emb with RoPE
+ *  The key is those 128 dimensions followed by the 64 dimensions of k_rope with RoPE
  *  applied, the same for all heads. For token t, batch entry b and i < 32, with
- *  (x1, x2) = (k_pos_emb[t, b, 2i], k_pos_emb[t, b, 2i + 1]):
+ *  (x1, x2) = (k_rope[t, b, 2i], k_rope[t, b, 2i + 1]):
  *
  *      key[t, b, h, 128 + i]      = x1 * cos[t, i]      - x2 * sin[t, i]
  *      key[t, b, h, 128 + 32 + i] = x2 * cos[t, 32 + i] + x1 * sin[t, 32 + i]
@@ -162,9 +162,9 @@ void nvte_fused_qkv_rope_backward(const NVTETensor q_grad_out, const NVTETensor 
  *  Requires SM 10.0+, an even number of heads and a sequence length that is a multiple of 32.
  *
  *  \param[in]     kv                Key/value, [s, b, h, 256] in BF16.
- *  \param[in]     k_pos_emb         Key position embedding, s * b rows (token-major) of 64 BF16
- *                                   values.
- *  \param[in]     k_pos_emb_stride  Elements from one row of k_pos_emb to the next, a multiple
+ *  \param[in]     k_rope            Key RoPE dimensions shared by the heads, s * b rows
+ *                                   (token-major) of 64 BF16 values.
+ *  \param[in]     k_rope_stride     Elements from one row of k_rope to the next, a multiple
  *                                   of 8.
  *  \param[in]     cos               Cosines, [max_s, 64] in BF16 or FP32; row t is used for
  *                                   token t.
@@ -175,8 +175,8 @@ void nvte_fused_qkv_rope_backward(const NVTETensor q_grad_out, const NVTETensor 
  *                                   column-wise data.
  *  \param[in]     stream            CUDA stream used for the operation.
  */
-void nvte_fused_mla_kv_rope_mxfp8(const NVTETensor kv, const NVTETensor k_pos_emb,
-                                  const int k_pos_emb_stride, const NVTETensor cos,
+void nvte_fused_mla_kv_rope_mxfp8(const NVTETensor kv, const NVTETensor k_rope,
+                                  const int k_rope_stride, const NVTETensor cos,
                                   const NVTETensor sin, NVTETensor key, NVTETensor value,
                                   cudaStream_t stream);
 
