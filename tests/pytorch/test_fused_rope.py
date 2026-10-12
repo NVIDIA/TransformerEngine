@@ -523,9 +523,7 @@ def test_fused_rope_fp8_quantize_matches_unfused(
     device = torch.device("cuda:0")
     torch.manual_seed(0)
     qkv = (
-        torch.randn(
-            seq_length, batch_size, groups, sum(split), dtype=torch.bfloat16, device=device
-        )
+        torch.randn(seq_length, batch_size, groups, sum(split), dtype=torch.bfloat16, device=device)
         * 4
     )
     emb = RotaryPositionEmbedding(head_dim, 1.0)(seq_length + 3)
