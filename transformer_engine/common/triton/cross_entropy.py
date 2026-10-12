@@ -9,6 +9,12 @@ import triton.language as tl
 
 
 @triton.jit
+def _is_nan(x):
+    """NaN test that works on Triton tensors and scalars: NaN is the only value unequal to itself."""
+    return x != x  # pylint: disable=comparison-with-itself
+
+
+@triton.jit
 def _fold_block_argmax(x, i, offsets, n_cols, run_max, run_idx, run_nan):
     """Fold one block of a row into a running argmax with torch.argmax's semantics: NaN counts
     as the maximum, and the first maximum (or the first NaN) wins.
@@ -17,7 +23,7 @@ def _fold_block_argmax(x, i, offsets, n_cols, run_max, run_idx, run_nan):
     block with a NaN can give a pair that is neither the maximum nor the NaN). NaN is therefore
     found separately and the maximum is taken over the other values. run_max is kept apart from
     the loss's running maximum, which is unchanged."""
-    is_nan = x != x
+    is_nan = _is_nan(x)
     block_has_nan = tl.max(is_nan.to(tl.int32)) > 0
     first_nan = tl.min(tl.where(is_nan, offsets, n_cols))
     block_max, block_idx = tl.max(
@@ -234,8 +240,8 @@ def cross_entropy_tp_post_kernel(
             # Ranks hold consecutive vocabulary shards, so the first rank with the largest
             # maximum (or with a NaN, which counts as the maximum) holds the global argmax.
             rank_argmax_max = tl.load(rank_data_ptr + 5)
-            if argmax_max == argmax_max:
-                if (rank_argmax_max != rank_argmax_max) or (rank_argmax_max > argmax_max):
+            if not _is_nan(argmax_max):
+                if _is_nan(rank_argmax_max) or (rank_argmax_max > argmax_max):
                     local_argmax = tl.load(rank_data_ptr + 4).to(tl.int32, bitcast=True)
                     argmax = rank_idx.to(tl.int64) * n_cols + local_argmax.to(tl.int64)
                     argmax_max = rank_argmax_max
