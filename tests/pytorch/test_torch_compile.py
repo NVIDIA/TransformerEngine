@@ -1695,26 +1695,6 @@ _USAGE_COMBOS = [
 ]
 
 
-@pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4)
-@pytest.mark.parametrize("shape", [(64, 128), (1, 64, 128), (64, 1, 128), (2, 4, 8, 128)])
-@pytest.mark.parametrize("with_rht", [False, True])
-@pytest.mark.parametrize("optimize_for_gemm", [False, True])
-@pytest.mark.parametrize("rowwise, columnwise", _USAGE_COMBOS)
-def test_nvfp4_inner_tensor_specs_match_quantize(
-    shape, with_rht, optimize_for_gemm, rowwise, columnwise
-):
-    """NVFP4 fake buffers match native quantization for every input rank."""
-    quantizer = _nvfp4(with_rht=with_rht)
-    quantizer.set_usage(rowwise=rowwise, columnwise=columnwise)
-    quantizer.optimize_for_gemm = optimize_for_gemm
-    tensor = quantizer(torch.randn(shape, dtype=torch.bfloat16, device="cuda"))
-    for name, (expected_shape, expected_dtype) in quantizer.inner_tensor_specs(shape).items():
-        inner = getattr(tensor, name)
-        assert inner.shape == expected_shape, name
-        assert inner.dtype == expected_dtype, name
-        assert inner.is_contiguous(), name
-
-
 @pytest.mark.parametrize("factory, shape", _SPEC_QUANTIZERS)
 @pytest.mark.parametrize("rowwise, columnwise", _USAGE_COMBOS)
 @pytest.mark.parametrize("internal", [False, True], ids=["wrapper", "internal"])
@@ -2888,55 +2868,26 @@ def test_te_ops_bias_compile_with_fp8_input(backward):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("quantization", [None, "fp8"])
-@pytest.mark.parametrize("case", ["linear", "bias", "pair", "unfused"])
-@pytest.mark.parametrize("grads", ["all", "input", "weight", "bias", "none"])
-def test_te_ops_linear_bias_compile(dtype, quantization, case, grads, monkeypatch):
-    _check_linear_bias_compile(dtype, quantization, case, grads, monkeypatch)
-
-
-@pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4)
-@pytest.mark.parametrize("compile_mode", _compile_modes)
-@pytest.mark.parametrize("bias", [False, True])
 @pytest.mark.parametrize(
-    "shape,with_rht,disable_rht_fusion",
+    "dtype,quantization,shape,disable_rht_fusion",
     [
-        ((2, 16, 128), False, False),
-        ((2, 16, 128), True, False),
-        ((64, 128), True, False),
-        ((64, 128), True, True),
+        (torch.float16, None, (2, 16, 32), False),
+        (torch.bfloat16, None, (2, 16, 32), False),
+        (torch.float16, "fp8", (2, 16, 32), False),
+        (torch.bfloat16, "fp8", (2, 16, 32), False),
+        (torch.bfloat16, "nvfp4", (2, 16, 128), False),
+        (torch.bfloat16, "nvfp4", (64, 128), False),
+        (torch.bfloat16, "nvfp4", (64, 128), True),
+        (torch.bfloat16, "nvfp4-no-rht", (2, 16, 128), False),
     ],
 )
-def test_te_ops_linear_nvfp4_compile(
-    shape, with_rht, disable_rht_fusion, bias, compile_mode, monkeypatch
+@pytest.mark.parametrize("case", ["linear", "bias", "pair", "unfused"])
+@pytest.mark.parametrize("grads", ["all", "input", "weight", "bias", "none"])
+def test_te_ops_linear_bias_compile(
+    dtype, quantization, shape, disable_rht_fusion, case, grads, monkeypatch
 ):
     monkeypatch.setenv("NVTE_NVFP4_DISABLE_RHT_CAST_FUSION", str(int(disable_rht_fusion)))
-    torch._dynamo.reset()
-    model = te.ops.Sequential(te.ops.Linear(128, 128, bias=bias, dtype=torch.bfloat16))
-    eager_model = copy.deepcopy(model)
-    quant_recipe = recipe.NVFP4BlockScaling(
-        disable_rht=not with_rht, disable_stochastic_rounding=True
-    )
-
-    def run(x, module=model):
-        with te.autocast(recipe=quant_recipe):
-            return module(x)
-
-    compiled = torch.compile(run, fullgraph=True, mode=compile_mode)
-    with _assert_no_cudagraph_skips(compile_mode == "reduce-overhead"):
-        for _ in range(3):
-            torch.compiler.cudagraph_mark_step_begin()
-            x = torch.randn(shape, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-            eager_x = x.detach().clone().requires_grad_()
-            actual = compiled(x)
-            expected = run(eager_x, eager_model)
-            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-            dy = torch.randn_like(actual)
-            grads = torch.autograd.grad(actual, (x, *model.parameters()), dy)
-            eager_grads = torch.autograd.grad(expected, (eager_x, *eager_model.parameters()), dy)
-            torch.testing.assert_close(grads, eager_grads, rtol=0, atol=0)
-            del actual, expected, grads, eager_grads, x, eager_x, dy
+    _check_linear_bias_compile(dtype, quantization, case, grads, monkeypatch, input_shape=shape)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -3008,21 +2959,35 @@ def test_te_ops_linear_workspace_fake_mode(monkeypatch):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("training", [False, True])
 @pytest.mark.parametrize("initial_device", ["cuda", "cpu", "meta"])
-def test_te_ops_linear_bias_cold_cudagraphs(training, initial_device):
+@pytest.mark.parametrize("quantization", [None, "nvfp4", "nvfp4-no-rht"])
+def test_te_ops_linear_bias_cold_cudagraphs(training, initial_device, quantization):
     """A fresh process prevents earlier GEMMs from hiding lazy workspace allocation."""
+    if quantization is not None and not nvfp4_available:
+        pytest.skip(reason_for_no_nvfp4)
     script = textwrap.dedent(
         """
         import contextlib
         import sys
         import torch
         import transformer_engine.pytorch as te
+        from transformer_engine.common import recipe
         from transformer_engine.pytorch.cpp_extensions.gemm import get_cublas_workspace
         from torch._dynamo.utils import counters
 
-        training, initial_device = sys.argv[1:]
+        training, initial_device, quantization = sys.argv[1:]
         training = training == "True"
+        quant_recipe = (
+            recipe.NVFP4BlockScaling(
+                disable_rht=quantization == "nvfp4-no-rht", disable_stochastic_rounding=True
+            )
+            if quantization != "None" else None
+        )
+        in_features, out_features = (128, 128) if quant_recipe is not None else (32, 64)
+        eager_tols = {"rtol": 0, "atol": 0} if quant_recipe is not None else {}
         assert get_cublas_workspace.cache_info().currsize == 0
-        linear = te.ops.BasicLinear(32, 64, device=initial_device, dtype=torch.bfloat16)
+        linear = te.ops.BasicLinear(
+            in_features, out_features, device=initial_device, dtype=torch.bfloat16
+        )
         if initial_device == "cpu":
             assert get_cublas_workspace.cache_info().currsize == 0
             linear.cuda()
@@ -3031,13 +2996,14 @@ def test_te_ops_linear_bias_cold_cudagraphs(training, initial_device):
             linear.to_empty(device="cuda")
             linear.reset_parameters()
         assert get_cublas_workspace.cache_info().currsize > 0
-        model = te.ops.Sequential(linear, te.ops.Bias(64, dtype=torch.bfloat16))
-        x = torch.randn(32, 32, device="cuda", dtype=torch.bfloat16, requires_grad=training)
+        model = te.ops.Sequential(linear, te.ops.Bias(out_features, dtype=torch.bfloat16))
+        x = torch.randn(32, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=training)
         targets = (x, *model.parameters())
-        dy = torch.randn(32, 64, device="cuda", dtype=torch.bfloat16)
+        dy = torch.randn(32, out_features, device="cuda", dtype=torch.bfloat16)
 
         def forward(x):
-            return model(x)
+            with te.autocast(enabled=quant_recipe is not None, recipe=quant_recipe):
+                return model(x)
 
         compiled = torch.compile(forward, fullgraph=True, mode="reduce-overhead")
         counters.clear()
@@ -3049,10 +3015,10 @@ def test_te_ops_linear_bias_cold_cudagraphs(training, initial_device):
                     grads = torch.autograd.grad(actual, targets, dy)
                 # Eager reference runs only after the first compiled invocation.
                 expected = forward(x)
-                torch.testing.assert_close(actual, expected)
+                torch.testing.assert_close(actual, expected, **eager_tols)
                 if training:
                     expected_grads = torch.autograd.grad(expected, targets, dy)
-                    torch.testing.assert_close(grads, expected_grads)
+                    torch.testing.assert_close(grads, expected_grads, **eager_tols)
                     del grads, expected_grads
                 del actual, expected
         torch.cuda.synchronize()
@@ -3063,7 +3029,7 @@ def test_te_ops_linear_bias_cold_cudagraphs(training, initial_device):
         """
     )
     result = subprocess.run(
-        [sys.executable, "-c", script, str(training), initial_device],
+        [sys.executable, "-c", script, str(training), initial_device, str(quantization)],
         capture_output=True,
         text=True,
         check=False,
@@ -3073,29 +3039,44 @@ def test_te_ops_linear_bias_cold_cudagraphs(training, initial_device):
 
 
 def _check_linear_bias_compile(
-    dtype, quantization, case, grads, monkeypatch, *, backward_override=None
+    dtype,
+    quantization,
+    case,
+    grads,
+    monkeypatch,
+    *,
+    backward_override=None,
+    input_shape=(2, 16, 32),
 ):
+    is_nvfp4 = quantization in ("nvfp4", "nvfp4-no-rht")
     if quantization == "fp8" and not fp8_available:
         pytest.skip(reason_for_no_fp8)
+    if is_nvfp4 and not nvfp4_available:
+        pytest.skip(reason_for_no_nvfp4)
     if (case == "linear" and grads == "bias") or (case == "bias" and grads == "weight"):
         pytest.skip("Requested parameter is absent")
     torch._dynamo.reset()
     if case == "unfused":
         monkeypatch.setattr(OperationFuser, "forward_fusion_functions", [])
+    in_features = input_shape[-1]
+    out_features = 128 if is_nvfp4 else 64
     ops = []
     if case != "bias":
-        ops.append(te.ops.BasicLinear(32, 64, dtype=dtype))
+        ops.append(te.ops.BasicLinear(in_features, out_features, dtype=dtype))
         ops[-1].weight.requires_grad_(grads in ("all", "weight"))
     if case != "linear":
-        ops.append(te.ops.Bias(32 if case == "bias" else 64, dtype=dtype))
+        ops.append(te.ops.Bias(in_features if case == "bias" else out_features, dtype=dtype))
         ops[-1].bias.requires_grad_(grads in ("all", "bias"))
     model = te.ops.Sequential(*ops)
     eager_model = copy.deepcopy(model)
-    quant_recipe = (
-        recipe.Float8CurrentScaling(backward_override=backward_override)
-        if quantization == "fp8"
-        else None
-    )
+    quant_recipe = None
+    if quantization == "fp8":
+        quant_recipe = recipe.Float8CurrentScaling(backward_override=backward_override)
+    elif is_nvfp4:
+        quant_recipe = recipe.NVFP4BlockScaling(
+            disable_rht=quantization == "nvfp4-no-rht", disable_stochastic_rounding=True
+        )
+    eager_tols = {"rtol": 0, "atol": 0} if is_nvfp4 else {}
 
     def run(x, module=model):
         if quant_recipe is None:
@@ -3104,16 +3085,17 @@ def _check_linear_bias_compile(
             return module(x)
 
     compiled, graphs = _compile_with_graphs(run)
-    x = torch.randn(2, 16, 32, device="cuda", dtype=dtype)
+    x = torch.randn(input_shape, device="cuda", dtype=dtype)
     x.requires_grad_(grads in ("all", "input"))
     targets = tuple(t for t in (x, *model.parameters()) if t.requires_grad)
     eager_targets = tuple(t for t in (x, *eager_model.parameters()) if t.requires_grad)
     graph_count = None
     with torch.no_grad() if grads == "none" else contextlib.nullcontext():
         for iteration in range(3):
+            check_reference = iteration == 0 and not is_nvfp4
             with torch.no_grad():
                 for tensor in (x, *model.parameters()):
-                    if iteration == 0:
+                    if check_reference:
                         # These binary fractions survive FP8 quantization exactly,
                         # allowing a strict comparison with native PyTorch.
                         tensor.copy_(torch.randint(-2, 3, tensor.shape, device=tensor.device) / 16)
@@ -3123,8 +3105,8 @@ def _check_linear_bias_compile(
                     eager_param.copy_(param)
             actual = compiled(x)
             expected = run(x, eager_model)
-            torch.testing.assert_close(actual, expected)
-            if iteration == 0:
+            torch.testing.assert_close(actual, expected, **eager_tols)
+            if check_reference:
                 reference = x.double()
                 for op in ops:
                     reference = (
@@ -3138,14 +3120,14 @@ def _check_linear_bias_compile(
             if targets:
                 dy = (
                     torch.randint_like(actual, -2, 3) / 16
-                    if iteration == 0
+                    if check_reference
                     else torch.randn_like(actual)
                 )
                 actual_grads = torch.autograd.grad(actual, targets, dy)
                 torch.testing.assert_close(
-                    actual_grads, torch.autograd.grad(expected, eager_targets, dy)
+                    actual_grads, torch.autograd.grad(expected, eager_targets, dy), **eager_tols
                 )
-                if iteration == 0:
+                if check_reference:
                     torch.testing.assert_close(
                         actual_grads,
                         torch.autograd.grad(reference, targets, dy.double()),
