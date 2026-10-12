@@ -608,7 +608,7 @@ def test_quantized_weight_gather_matches_full_precision_gather(
             args = list(args)
             if native_weight_layout:
                 gate, up = jnp.split(args[2], 2, axis=-1)
-                args[2] = tex.pack_swiglu_pair(gate, up).transpose(0, 2, 1)
+                args[2] = tex.pack_gated_activation_pair(gate, up).transpose(0, 2, 1)
                 kwargs["wi_kernel_axes"] = ("exp", "mlp", "embed")
                 kwargs["cudnn_native_weight_layout"] = True
             if fsdp_dimension == "gated":
@@ -885,7 +885,7 @@ def test_explicitly_disabled_fusion_with_native_weights(
     def native_moe(*args, **kwargs):
         args = list(args)
         gate, up = jnp.split(args[2], 2, axis=-1)
-        args[2] = tex.pack_swiglu_pair(gate, up).transpose(0, 2, 1)
+        args[2] = tex.pack_gated_activation_pair(gate, up).transpose(0, 2, 1)
         kwargs["wi_kernel_axes"] = ("exp", "mlp", "embed")
         kwargs["cudnn_native_weight_layout"] = True
         return original_moe(*args, **kwargs)
@@ -932,7 +932,7 @@ class TestTeEpMoeCudnnCutedslFusion:
             def native_moe(*args, **kwargs):
                 args = list(args)
                 gate, up = jnp.split(args[2], 2, axis=-1)
-                args[2] = tex.pack_swiglu_pair(gate, up).transpose(0, 2, 1)
+                args[2] = tex.pack_gated_activation_pair(gate, up).transpose(0, 2, 1)
                 kwargs["wi_kernel_axes"] = ("exp", "mlp", "embed")
                 kwargs["cudnn_native_weight_layout"] = True
                 return original_moe(*args, **kwargs)

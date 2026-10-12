@@ -42,7 +42,7 @@ def test_standard_gated_shards_match_unsharded_swiglu():
 
     def output(tensor):
         packed = jnp.concatenate(tensor.rowwise_tensor.dequantize())
-        global_gate, global_up = moe.tex.unpack_swiglu_pair(packed)
+        global_gate, global_up = moe.tex.unpack_gated_activation_pair(packed)
         return (jax.nn.silu(x @ global_gate[0]) * (x @ global_up[0])) @ wo
 
     expected = output(prepare_weight(wi, quantizer, fused=True, native=False))
@@ -171,7 +171,7 @@ def test_small_gated_shards_preserve_quantized_pairs(monkeypatch, native, width)
         + jnp.arange(2)[:, None, None]
     ).astype(jnp.bfloat16)
     gate, up = jnp.split(source, 2, axis=-1)
-    wi = moe.tex.pack_swiglu_pair(gate, up).transpose(0, 2, 1) if native else source
+    wi = moe.tex.pack_gated_activation_pair(gate, up).transpose(0, 2, 1) if native else source
     monkeypatch.setattr(moe.tex, "grouped_quantize", reference_quantize_weight)
     expected = prepare_weight(wi, None, fused=not native, native=native)
     actual = shard_map(
@@ -194,7 +194,7 @@ def test_small_gated_shards_preserve_quantized_pairs(monkeypatch, native, width)
             plain_weight_scales(actual_copy), plain_weight_scales(expected_copy)
         )
         decoded = jnp.concatenate(actual_copy.dequantize())
-        execution_weight = moe.tex.pack_swiglu_pair(gate, up) if not native else source
+        execution_weight = moe.tex.pack_gated_activation_pair(gate, up) if not native else source
         np.testing.assert_array_equal(decoded, execution_weight)
 
 
@@ -216,7 +216,7 @@ def test_quantized_fc1_gather_matches_unsharded(monkeypatch, native, fused, shar
         * jnp.asarray([1.0, 4.0])[:, None, None]
     ).astype(jnp.bfloat16)
     gate, up = jnp.split(source, 2, axis=-1)
-    wi = moe.tex.pack_swiglu_pair(gate, up).transpose(0, 2, 1) if native else source
+    wi = moe.tex.pack_gated_activation_pair(gate, up).transpose(0, 2, 1) if native else source
     axis = {"expert": 0, "k": 2 if native else 1, "gated": 1 if native else 2}[shard_dimension]
     quantizer = weight_quantizer(2)
     expected = prepare_weight(wi, quantizer, fused=fused, native=native)
@@ -290,7 +290,11 @@ def test_unfused_k_sharded_weight_matches_unsharded(monkeypatch, native_layout):
     gate = jnp.ones((1, 64, 64), jnp.float32) / 64
     up = 2 * gate
     standard_wi = jnp.concatenate((gate, up), axis=-1)
-    wi = moe.tex.pack_swiglu_pair(gate, up).transpose(0, 2, 1) if native_layout else standard_wi
+    wi = (
+        moe.tex.pack_gated_activation_pair(gate, up).transpose(0, 2, 1)
+        if native_layout
+        else standard_wi
+    )
     x = jnp.ones((1, 1, 64), jnp.float32)
     wo = jnp.ones((1, 64, 64), jnp.float32) / 64
 

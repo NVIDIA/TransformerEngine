@@ -2376,7 +2376,7 @@ class TestGroupedGemmGluFallback:
         def reorder(tensor, *, interleave):
             assert interleave and gather_gated_dimension and not native_layout
             gate, up = jnp.split(tensor.get_tensor().data, 2, axis=-1)
-            return quantize(_moe_module.tex.pack_swiglu_pair(gate, up))
+            return quantize(_moe_module.tex.pack_gated_activation_pair(gate, up))
 
         monkeypatch.setattr(_moe_module, "_reorder_quantized_swiglu_weight", reorder)
         quantizers = SimpleNamespace(x=SimpleNamespace(q_dtype=jnp.float8_e4m3fn), kernel=None)

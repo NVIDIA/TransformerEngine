@@ -708,11 +708,11 @@ def _prepare_fc1_weight(
         if sharded_axis in (1, 2):
             sharded_axis = 3 - sharded_axis
         if not convert_after_gather:
-            gate, up = tex.unpack_swiglu_pair(wi)
+            gate, up = tex.unpack_gated_activation_pair(wi)
             wi = jnp.concatenate((gate, up), axis=-1)
     elif fused and not native_layout and not convert_after_gather:
         gate, up = jnp.split(wi, 2, axis=-1)
-        wi = tex.pack_swiglu_pair(gate, up)
+        wi = tex.pack_gated_activation_pair(gate, up)
 
     casted = tex.grouped_quantize(wi, quantizer, flatten_axis=-1)
     if quant_before_fsdp_ag and sharded_axis is not None:
@@ -1098,11 +1098,11 @@ def _ffn_bwd_per_shard(
             contracting_dims=((0,), (0,)),
         )
     if use_cudnn_jax_fusion and not cudnn_native_weight_layout:
-        d_wi_gate, d_wi_up = tex.unpack_swiglu_pair(d_wi_combined)
+        d_wi_gate, d_wi_up = tex.unpack_gated_activation_pair(d_wi_combined)
         d_wi_combined = jnp.concatenate([d_wi_gate, d_wi_up], axis=-1)
     elif not use_cudnn_jax_fusion and cudnn_native_weight_layout:
         d_wi_gate, d_wi_up = jnp.split(d_wi_combined, 2, axis=-1)
-        d_wi_combined = tex.pack_swiglu_pair(d_wi_gate, d_wi_up).transpose(0, 2, 1)
+        d_wi_combined = tex.pack_gated_activation_pair(d_wi_gate, d_wi_up).transpose(0, 2, 1)
     if has_bias:
         d_wi_combined_bias = tex.grouped_dbias(d_combined_for_bias, group_sizes)
         d_wi_0_bias, d_wi_1_bias = jnp.split(d_wi_combined_bias, 2, axis=-1)

@@ -15,17 +15,19 @@ __all__ = [
     "grouped_gemm_dglu",
     "grouped_gemm_glu",
     "grouped_gemm_glu_dependencies_available",
-    "pack_swiglu_pair",
-    "unpack_swiglu_pair",
+    "pack_gated_activation_pair",
+    "unpack_gated_activation_pair",
 ]
 
 
-def pack_swiglu_pair(gate: jax.Array, up: jax.Array) -> jax.Array:
+def pack_gated_activation_pair(gate: jax.Array, up: jax.Array) -> jax.Array:
     """Interleave 32-column gate/up blocks as required by the cuDNN kernel."""
     if gate.shape != up.shape:
         raise ValueError(f"gate shape {gate.shape} must match up shape {up.shape}")
     if gate.shape[-1] % 32:
-        raise ValueError(f"SwiGLU intermediate dimension {gate.shape[-1]} must be divisible by 32")
+        raise ValueError(
+            f"Gated activation intermediate dimension {gate.shape[-1]} must be divisible by 32"
+        )
     blocks = gate.shape[-1] // 32
     return jnp.stack(
         (
@@ -36,11 +38,12 @@ def pack_swiglu_pair(gate: jax.Array, up: jax.Array) -> jax.Array:
     ).reshape(*gate.shape[:-1], 2 * gate.shape[-1])
 
 
-def unpack_swiglu_pair(interleaved: jax.Array) -> tuple[jax.Array, jax.Array]:
-    """Undo :func:`pack_swiglu_pair`."""
+def unpack_gated_activation_pair(interleaved: jax.Array) -> tuple[jax.Array, jax.Array]:
+    """Undo :func:`pack_gated_activation_pair`."""
     if interleaved.shape[-1] % 64:
         raise ValueError(
-            f"Interleaved SwiGLU dimension {interleaved.shape[-1]} must be divisible by 64"
+            f"Interleaved gated activation dimension {interleaved.shape[-1]} must be divisible"
+            " by 64"
         )
     intermediate = interleaved.shape[-1] // 2
     blocks = intermediate // 32
