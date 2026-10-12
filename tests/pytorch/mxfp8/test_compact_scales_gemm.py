@@ -88,6 +88,7 @@ def test_compact_scales_gemm(layout, grouped, storage):
     snapshots = [_snapshot(tensor) for tensor in operands]
     if grouped:
         actual = [torch.empty_like(tensor) for tensor in expected]
+        m_splits = [tensor.shape[0] for tensor in expected]
         general_grouped_gemm(
             references_a,
             references_b,
@@ -95,9 +96,16 @@ def test_compact_scales_gemm(layout, grouped, storage):
             [None] * len(expected),
             torch.bfloat16,
             layout=layout,
+            m_splits=m_splits,
         )
         general_grouped_gemm(
-            operands_a, operands_b, actual, [None] * len(actual), torch.bfloat16, layout=layout
+            operands_a,
+            operands_b,
+            actual,
+            [None] * len(actual),
+            torch.bfloat16,
+            layout=layout,
+            m_splits=m_splits,
         )
     else:
         actual = [
@@ -161,4 +169,5 @@ def test_compact_scale_swizzle_bytes(rowwise, grouped, per_tile, monkeypatch):
         actual = tensor._rowwise_scale_inv if rowwise else tensor._columnwise_scale_inv
         torch.testing.assert_close(actual, reference, rtol=0, atol=0)
         torch.testing.assert_close(scales, before, rtol=0, atol=0)
-        assert tensor._with_gemm_swizzled_scales
+        # The multi-tensor helper updates one direction; its caller owns this flag.
+        assert tensor._with_gemm_swizzled_scales == (not grouped)
