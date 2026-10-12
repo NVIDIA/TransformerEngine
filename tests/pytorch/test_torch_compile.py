@@ -2959,10 +2959,28 @@ def test_te_ops_linear_workspace_fake_mode(monkeypatch):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("training", [False, True])
 @pytest.mark.parametrize("initial_device", ["cuda", "cpu", "meta"])
-@pytest.mark.parametrize("quantization", [None, "nvfp4", "nvfp4-no-rht"])
+@pytest.mark.parametrize(
+    "quantization",
+    [
+        None,
+        "fp8",
+        "fp8-block",
+        "mxfp8",
+        "nvfp4",
+        "nvfp4-no-rht",
+        "nvfp4-4over6",
+        "nvfp4-row-scaled",
+    ],
+)
 def test_te_ops_linear_bias_cold_cudagraphs(training, initial_device, quantization):
     """A fresh process prevents earlier GEMMs from hiding lazy workspace allocation."""
-    if quantization is not None and not nvfp4_available:
+    if quantization == "fp8" and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+    if quantization == "fp8-block" and not fp8_block_scaling_available:
+        pytest.skip(reason_for_no_fp8_block_scaling)
+    if quantization == "mxfp8" and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+    if quantization is not None and quantization.startswith("nvfp4") and not nvfp4_available:
         pytest.skip(reason_for_no_nvfp4)
     script = textwrap.dedent(
         """
@@ -2976,14 +2994,28 @@ def test_te_ops_linear_bias_cold_cudagraphs(training, initial_device, quantizati
 
         training, initial_device, quantization = sys.argv[1:]
         training = training == "True"
-        quant_recipe = (
-            recipe.NVFP4BlockScaling(
-                disable_rht=quantization == "nvfp4-no-rht", disable_stochastic_rounding=True
+        is_nvfp4 = quantization.startswith("nvfp4")
+        if quantization == "None":
+            quant_recipe = None
+        elif is_nvfp4:
+            row_scaled = quantization == "nvfp4-row-scaled"
+            quant_recipe = recipe.NVFP4BlockScaling(
+                disable_rht=quantization != "nvfp4",
+                disable_stochastic_rounding=True,
+                disable_2d_quantization=row_scaled,
+                row_scaled_activation=row_scaled,
+                nvfp4_4over6="all" if quantization == "nvfp4-4over6" else "none",
+                backward_override="dequantized" if row_scaled else None,
             )
-            if quantization != "None" else None
-        )
+        else:
+            quant_recipe = {
+                "fp8": recipe.Float8CurrentScaling,
+                "fp8-block": recipe.Float8BlockScaling,
+                "mxfp8": recipe.MXFP8BlockScaling,
+            }[quantization]()
         in_features, out_features = (128, 128) if quant_recipe is not None else (32, 64)
-        eager_tols = {"rtol": 0, "atol": 0} if quant_recipe is not None else {}
+        batch_size = 128 if isinstance(quant_recipe, recipe.Float8BlockScaling) else 32
+        eager_tols = {"rtol": 0, "atol": 0} if is_nvfp4 else {}
         assert get_cublas_workspace.cache_info().currsize == 0
         linear = te.ops.BasicLinear(
             in_features, out_features, device=initial_device, dtype=torch.bfloat16
@@ -2997,9 +3029,11 @@ def test_te_ops_linear_bias_cold_cudagraphs(training, initial_device, quantizati
             linear.reset_parameters()
         assert get_cublas_workspace.cache_info().currsize > 0
         model = te.ops.Sequential(linear, te.ops.Bias(out_features, dtype=torch.bfloat16))
-        x = torch.randn(32, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=training)
+        x = torch.randn(
+            batch_size, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=training
+        )
         targets = (x, *model.parameters())
-        dy = torch.randn(32, out_features, device="cuda", dtype=torch.bfloat16)
+        dy = torch.randn(batch_size, out_features, device="cuda", dtype=torch.bfloat16)
 
         def forward(x):
             with te.autocast(enabled=quant_recipe is not None, recipe=quant_recipe):
