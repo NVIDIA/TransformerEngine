@@ -81,8 +81,8 @@ def cross_entropy_forward(
         )
     else:
         # Per row and rank: max, sum of exponentials, target logit, logit sum, and with
-        # compute_argmax the local argmax (as FP32 bits)
-        local_data_size = 5 if compute_argmax else 4
+        # compute_argmax the local argmax (as FP32 bits) and its value (NaN if the shard has one)
+        local_data_size = 6 if compute_argmax else 4
         local_data = torch.empty(
             (n_rows, local_data_size), dtype=torch.float32, device=_input.device
         )

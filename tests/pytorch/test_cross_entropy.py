@@ -493,3 +493,33 @@ def test_parallel_cross_entropy_return_argmax_transposed_input():
     loss, argmax = parallel_cross_entropy(values, target, return_argmax=True)
     assert argmax.shape == loss.shape == values.shape[:-1]
     torch.testing.assert_close(argmax, torch.argmax(values, dim=-1), rtol=0, atol=0)
+
+
+def test_parallel_cross_entropy_return_argmax_nan():
+    """As with torch.argmax, a NaN logit counts as the maximum and the first NaN wins, within a
+    block and across blocks."""
+
+    nan = float("nan")
+    small = torch.tensor(
+        [
+            [8.0, -10.0, nan, -10.0],
+            [nan, 1.0, 5.0, 2.0],
+            [1.0, 5.0, 2.0, nan],
+            [3.0, nan, 3.0, nan],
+            [nan, nan, nan, nan],
+            [float("inf"), 1.0, nan, 2.0],
+        ],
+        device="cuda",
+    )
+    large = torch.randn(4, 70000, device="cuda")
+    pair = torch.tensor([nan, 50.0], device="cuda")
+    large[0, [40000, 10]] = pair  # NaN in a later block than the maximum
+    large[1, [10, 40000]] = pair  # NaN in an earlier block than the maximum
+    large[2, [40001, 40000]] = pair  # NaN after the maximum in the same block
+    large[3, [65000, 35000]] = nan  # NaN in two blocks
+    for values in (small, large):
+        for dtype in (torch.float32, torch.bfloat16):
+            logits = values.to(dtype).unsqueeze(0)
+            target = torch.zeros(logits.shape[:-1], dtype=torch.long, device="cuda")
+            _, argmax = parallel_cross_entropy(logits, target, return_argmax=True)
+            torch.testing.assert_close(argmax, torch.argmax(logits, dim=-1), rtol=0, atol=0)

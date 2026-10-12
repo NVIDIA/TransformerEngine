@@ -9,6 +9,35 @@ import triton.language as tl
 
 
 @triton.jit
+def _fold_block_argmax(x, i, offsets, n_cols, run_max, run_idx, run_nan):
+    """Fold one block of a row into a running argmax with torch.argmax's semantics: NaN counts
+    as the maximum, and the first maximum (or the first NaN) wins.
+
+    tl.max(..., return_indices=True) is not NaN-safe (its comparisons are false for NaN, so a
+    block with a NaN can give a pair that is neither the maximum nor the NaN). NaN is therefore
+    found separately and the maximum is taken over the other values. run_max is kept apart from
+    the loss's running maximum, which is unchanged."""
+    is_nan = x != x
+    block_has_nan = tl.max(is_nan.to(tl.int32)) > 0
+    first_nan = tl.min(tl.where(is_nan, offsets, n_cols))
+    block_max, block_idx = tl.max(
+        tl.where(is_nan, float("-inf"), x),
+        axis=0,
+        return_indices=True,
+        return_indices_tie_break_left=True,
+    )
+    if run_nan == 0:
+        if block_has_nan:
+            run_idx = first_nan
+            run_nan = 1
+        elif block_max > run_max:
+            # Only a strictly larger maximum replaces an earlier one: first index wins.
+            run_idx = i + block_idx
+            run_max = block_max
+    return run_max, run_idx, run_nan
+
+
+@triton.jit
 def cross_entropy_forward_kernel(
     X_ptr,
     X_stride_0,
@@ -47,6 +76,8 @@ def cross_entropy_forward_kernel(
     d = 0.0
     x_sum = 0.0
     argmax = 0
+    argmax_max = float("-inf")
+    argmax_nan = 0
     for i in range(0, n_cols, BLOCK_SIZE):
         offsets = i + tl.arange(0, BLOCK_SIZE)
         mask = offsets < n_cols
@@ -55,14 +86,10 @@ def cross_entropy_forward_kernel(
             tl.store(saved_input_ptr + offsets, x, mask=mask)
         x = x.to(tl.float32)
         if COMPUTE_ARGMAX:
-            block_max, block_argmax = tl.max(
-                x, axis=0, return_indices=True, return_indices_tie_break_left=True
+            argmax_max, argmax, argmax_nan = _fold_block_argmax(
+                x, i, offsets, n_cols, argmax_max, argmax, argmax_nan
             )
-            # Only a strictly larger maximum replaces an earlier one: first index wins.
-            if block_max > m:
-                argmax = i + block_argmax
-        else:
-            block_max = tl.max(x)
+        block_max = tl.max(x)
         m_new = tl.maximum(m, block_max)
         d = d * tl.exp(m - m_new) + tl.sum(tl.exp(x - m_new))
         m = m_new
@@ -135,6 +162,8 @@ def cross_entropy_tp_pre_kernel(
     d = 0.0
     x_sum = 0.0
     argmax = 0
+    argmax_max = float("-inf")
+    argmax_nan = 0
     for i in range(0, n_cols, BLOCK_SIZE):
         offsets = i + tl.arange(0, BLOCK_SIZE)
         mask = offsets < n_cols
@@ -143,14 +172,10 @@ def cross_entropy_tp_pre_kernel(
             tl.store(saved_input_ptr + offsets, x, mask=mask)
         x = x.to(tl.float32)
         if COMPUTE_ARGMAX:
-            block_max, block_argmax = tl.max(
-                x, axis=0, return_indices=True, return_indices_tie_break_left=True
+            argmax_max, argmax, argmax_nan = _fold_block_argmax(
+                x, i, offsets, n_cols, argmax_max, argmax, argmax_nan
             )
-            # Only a strictly larger maximum replaces an earlier one: first index wins.
-            if block_max > m:
-                argmax = i + block_argmax
-        else:
-            block_max = tl.max(x)
+        block_max = tl.max(x)
         m_new = tl.maximum(m, block_max)
         d = d * tl.exp(m - m_new) + tl.sum(tl.exp(x - m_new))
         m = m_new
@@ -164,8 +189,10 @@ def cross_entropy_tp_pre_kernel(
     if COMPUTE_X_SUM:
         tl.store(local_data_ptr + 3, x_sum)
     if COMPUTE_ARGMAX:
-        # The local index travels with the FP32 statistics as raw bits.
+        # The local index travels with the FP32 statistics as raw bits, followed by the local
+        # maximum it belongs to, NaN if the shard holds a NaN.
         tl.store(local_data_ptr + 4, argmax.to(tl.float32, bitcast=True))
+        tl.store(local_data_ptr + 5, tl.where(argmax_nan != 0, float("nan"), argmax_max))
 
 
 @triton.jit
@@ -194,8 +221,10 @@ def cross_entropy_tp_post_kernel(
     if label_smoothing > 0:
         x_sum = tl.load(data_ptr + 3)
     argmax = 0
+    argmax_max = 0.0
     if COMPUTE_ARGMAX:
         argmax = tl.load(data_ptr + 4).to(tl.int32, bitcast=True).to(tl.int64)
+        argmax_max = tl.load(data_ptr + 5)
 
     for rank_idx in range(1, world_size):
         rank_data_ptr = data_ptr + rank_idx * n_rows * LOCAL_DATA_SIZE
@@ -203,10 +232,13 @@ def cross_entropy_tp_post_kernel(
         d_new = tl.load(rank_data_ptr + 1)
         if COMPUTE_ARGMAX:
             # Ranks hold consecutive vocabulary shards, so the first rank with the largest
-            # maximum holds the first global maximum.
-            if m_new > m:
-                local_argmax = tl.load(rank_data_ptr + 4).to(tl.int32, bitcast=True)
-                argmax = rank_idx.to(tl.int64) * n_cols + local_argmax.to(tl.int64)
+            # maximum (or with a NaN, which counts as the maximum) holds the global argmax.
+            rank_argmax_max = tl.load(rank_data_ptr + 5)
+            if argmax_max == argmax_max:
+                if (rank_argmax_max != rank_argmax_max) or (rank_argmax_max > argmax_max):
+                    local_argmax = tl.load(rank_data_ptr + 4).to(tl.int32, bitcast=True)
+                    argmax = rank_idx.to(tl.int64) * n_cols + local_argmax.to(tl.int64)
+                    argmax_max = rank_argmax_max
         global_m = tl.maximum(m, m_new)
         d = d * tl.exp(m - global_m) + d_new * tl.exp(m_new - global_m)
         m = global_m

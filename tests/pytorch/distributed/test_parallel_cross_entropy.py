@@ -111,6 +111,11 @@ def _run_tensor_parallel_argmax(rank, world_size, init_file, label_smoothing):
             values[0, 0, [3, local_vocab + 4]] = peak  # equal maxima on both ranks
             values[0, 1, [local_vocab + 2, vocab - 2]] = peak  # equal maxima on rank 1
             values[0, 2, vocab - 1] = peak  # the maximum on the last rank only
+            if shape[0] > 1:
+                # NaN counts as the maximum, as in torch.argmax: the first NaN wins.
+                values[1, 0, [5, local_vocab + 1]] = float("nan")  # NaN on both ranks
+                values[1, 1, 2] = peak
+                values[1, 1, local_vocab + 3] = float("nan")  # NaN after a larger rank-0 maximum
             values[-1, -1] = 0.5  # a constant row
             vocab_start = rank * local_vocab
             for dtype in (torch.float32, torch.bfloat16):
@@ -136,8 +141,12 @@ def _run_tensor_parallel_argmax(rank, world_size, init_file, label_smoothing):
                             results.append((loss, local_logits.grad, argmax))
                         (loss, grad, _), (argmax_loss, argmax_grad, argmax) = results
                         torch.testing.assert_close(argmax, expected_argmax, rtol=0, atol=0)
-                        torch.testing.assert_close(argmax_loss, loss, rtol=0, atol=0)
-                        torch.testing.assert_close(argmax_grad, grad, rtol=0, atol=0)
+                        torch.testing.assert_close(
+                            argmax_loss, loss, rtol=0, atol=0, equal_nan=True
+                        )
+                        torch.testing.assert_close(
+                            argmax_grad, grad, rtol=0, atol=0, equal_nan=True
+                        )
     finally:
         dist.destroy_process_group()
 

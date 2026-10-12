@@ -209,8 +209,8 @@ def parallel_cross_entropy(
         Also return the index of each row's largest logit in the full vocabulary,
         as ``torch.argmax`` over the unsharded logits returns it: the first index
         if several logits are equal. Rows with an ignored target get one too.
-        NaN logits are not treated as maximal (unlike ``torch.argmax``); such
-        rows have a NaN loss.
+        As with ``torch.argmax``, a NaN logit counts as the maximum: a row with
+        NaN logits gets the index of its first NaN (and a NaN loss).
 
     Returns
     -------
