@@ -87,7 +87,9 @@ class MXFP8Quantizer(Quantizer):
                 torch.uint8,
             )
         if self.columnwise_usage:
-            specs["_columnwise_data"] = (shape, torch.uint8)
+            # 2D quantization: data is identical, reuse rowwise_data instead of allocating a copy
+            if not (self.with_2d_quantization and self.rowwise_usage):
+                specs["_columnwise_data"] = (shape, torch.uint8)
             specs["_columnwise_scale_inv"] = (
                 tuple(self.get_scale_shape(shape, columnwise=True)),
                 torch.uint8,
@@ -263,6 +265,15 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         with_gemm_swizzled_scales: bool,
         **kwargs,
     ):
+        # 2D quantization: columnwise data is identical to rowwise, alias it
+        if (
+            columnwise_data is None
+            and rowwise_data is not None
+            and quantizer is not None
+            and getattr(quantizer, "with_2d_quantization", False)
+            and getattr(quantizer, "columnwise_usage", False)
+        ):
+            columnwise_data = rowwise_data
         return super().__new__(
             cls,
             rowwise_data,
