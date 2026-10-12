@@ -49,8 +49,6 @@ struct EpBootstrapParams {
 };
 
 static NVTEEpGroupConfig MakeEpGroupConfig(const EpBootstrapParams& p) {
-  // XLA may relocate handle_mem between calls (e.g. under lax.scan), so disable the handle cache.
-  setenv("NVTE_EP_HANDLE_CACHE_SIZE", "0", /*overwrite=*/1);
   return NVTEEpGroupConfig{.struct_size = sizeof(NVTEEpGroupConfig),
                            .ep_size = p.ep_size,
                            .num_experts = p.num_experts,
@@ -60,7 +58,9 @@ static NVTEEpGroupConfig MakeEpGroupConfig(const EpBootstrapParams& p) {
                            .num_comm_sms = p.max_num_sms,
                            .max_token_dtype = p.max_token_dtype,
                            .zero_copy = 0,
-                           .drop_on_overflow = p.drop_on_overflow};
+                           .drop_on_overflow = p.drop_on_overflow,
+                           // XLA may relocate handle_mem between calls (e.g. under lax.scan).
+                           .disable_handle_cache = 1};
 }
 
 class EpResources {
