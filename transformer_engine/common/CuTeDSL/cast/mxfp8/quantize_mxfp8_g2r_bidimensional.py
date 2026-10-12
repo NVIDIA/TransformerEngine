@@ -20,7 +20,6 @@ from transformer_engine.common.CuTeDSL.utils import (
 )
 from transformer_engine.common.CuTeDSL.utils_fp8 import mul_bf16x2x2_cvt_bf16x4_to_fp8x4
 from .quantize_mxfp8_common import (
-    is_plain_cast,
     MXFP8_BLOCK_SCALING_SIZE,
     MXFP8QuantizeConfig,
     MXFP8QuantizeKernelBase,
