@@ -419,8 +419,10 @@ EpDispatchBuffers WrapEpDispatchBuffers(Buffer_Type topk_idx, Buffer_Type tokens
 
 Error_Type EpDispatchFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_Type handle_mem,
                          Buffer_Type topk_idx, Buffer_Type tokens, Buffer_Type topk_weights,
-                         Result_Type recv_tokens, Result_Type recv_topk_weights, EpConfig config) {
+                         Result_Type recv_tokens, Result_Type recv_topk_weights,
+                         Result_Type out_handle_mem, EpConfig config) {
   (void)ep_state;
+  (void)out_handle_mem;  // aliased to handle_mem; dispatch writes there directly
   auto bufs =
       WrapEpDispatchBuffers(topk_idx, tokens, topk_weights, recv_tokens, recv_topk_weights, config);
 
@@ -449,6 +451,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpDispatchHandler, EpDispatchFFI,
                                   .Arg<Buffer_Type>()                         // topk_weights
                                   .Ret<Buffer_Type>()                         // recv_tokens
                                   .Ret<Buffer_Type>()                         // recv_topk_weights
+                                  .Ret<Buffer_Type>()  // out_handle_mem (aliased to handle_mem)
                                   .Attrs<EpConfig>(),
                               FFI_CudaGraph_Traits);
 
