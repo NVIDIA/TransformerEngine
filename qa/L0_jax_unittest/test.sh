@@ -29,7 +29,12 @@ pip3 install pytest==8.2.1 pytest-timeout==2.4.0 || error_exit "Failed to instal
 mkdir -p "$XML_LOG_DIR"
 
 python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest_jax_not_distributed.xml $TE_PATH/tests/jax --ignore=$TE_PATH/tests/jax/test_multi_process_ep.py -k 'not distributed' || test_fail "tests/jax/*not_distributed_*"
-python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest_jax_fused_attn_score_mod.xml $TE_PATH/tests/jax/test_fused_attn_score_mod.py || test_fail "tests/jax/test_fused_attn_score_mod.py"
+
+# GPU-free EP unit tests (comm-path gating precedence, multi-device guard, comm-path-switch
+# guard); test_multi_process_ep.py is --ignore'd above because the rest of that file needs
+# jax.distributed.initialize (see multi_process_launch_ep.sh), but these three classes don't.
+python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest_jax_ep_unit.xml $TE_PATH/tests/jax/test_multi_process_ep.py -k 'TestEpCommSelection or TestEpBootstrapMultiDeviceGuard or TestEpCommPathSwitchGuard' || test_fail "tests/jax/test_multi_process_ep.py (GPU-free EP unit tests)"
+
 NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest_jax_fused_attn_with_determinism.xml $TE_PATH/tests/jax/test_fused_attn.py -k "TestFusedAttnWithDeterminism" || test_fail "tests/jax/test_fused_attn.py"
 
 pip3 install -r $TE_PATH/examples/jax/mnist/requirements.txt || error_exit "Failed to install mnist requirements"

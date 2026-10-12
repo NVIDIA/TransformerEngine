@@ -660,7 +660,7 @@ void nvte_populate_rng_state_async(NVTETensor rng_state_dst, const NVTETensor se
                                    size_t q_max_seqlen, size_t kv_max_seqlen,
                                    NVTE_Fused_Attn_Backend backend, cudaStream_t stream);
 
-/*!  \brief Get KV format for a given QKV layout.
+/*!  \brief Count the non-empty segments in a batch of cumulative sequence lengths.
  *
  * \warning   This API is **experimental** and subject to change.
  *
@@ -668,6 +668,10 @@ void nvte_populate_rng_state_async(NVTETensor rng_state_dst, const NVTETensor se
  *  \param[in]     workspace                Workspace tensor.
  *  \param[in]     len                      batch_size x sequence_length.
  *  \param[in]     stream                   CUDA stream used for this operation.
+ *
+ *  \deprecated Transformer Engine no longer calls this function. It worked around cuDNN versions
+ *              before 9.3, which could not handle an actual sequence length of 0, and is
+ *              scheduled for removal in a future release.
  */
 uint32_t nvte_get_runtime_num_segments(NVTETensor cu_seqlens, NVTETensor workspace, size_t len,
                                        cudaStream_t stream);
@@ -762,7 +766,8 @@ void nvte_cp_thd_read_second_half_lse(const NVTETensor &lse, const NVTETensor &c
  *
  *  \param[out]    out                   Output tensor.
  *  \param[in]     out_per_step          THD format output of context parallelism in forward pass.
- *  \param[in]     lse                   Softmax LSE.
+ *  \param[in]     old_lse               Softmax LSE before adding this step.
+ *  \param[in]     lse                   Softmax LSE after adding this step.
  *  \param[in]     lse_per_step          Softmax LSE per step.
  *  \param[in]     cu_seqlens            Cumulative sequence lengths, [batch_size + 1].
  *  \param[in]     only_second_half      Whether or not to correct only second half.
@@ -770,9 +775,9 @@ void nvte_cp_thd_read_second_half_lse(const NVTETensor &lse, const NVTETensor &c
  *  \param[in]     stream                CUDA stream used for this operation.
  */
 void nvte_cp_thd_out_correction(NVTETensor out, const NVTETensor &out_per_step,
-                                const NVTETensor &lse, const NVTETensor &lse_per_step,
-                                const NVTETensor &cu_seqlens, int only_second_half, int lse_packed,
-                                cudaStream_t stream);
+                                const NVTETensor &old_lse, const NVTETensor &lse,
+                                const NVTETensor &lse_per_step, const NVTETensor &cu_seqlens,
+                                int only_second_half, int lse_packed, cudaStream_t stream);
 
 /*!  \brief Update the two halves of each packed THD sequence during context-parallel backward.
  *

@@ -106,7 +106,7 @@ void FusedAttnConfig::derive() {
 
   // Use ragged (TH1) or dense (BHS1) graphs and stats
   const int sm_arch = cuda::sm_arch(cuda::current_device());
-  uses_ragged_graph = cudnn_runtime_version >= 90600 && sm_arch >= 90 && sm_arch != 120;
+  uses_ragged_graph = sm_arch >= 90 && sm_arch != 120;
   uses_ragged_stats = is_ragged_q && uses_ragged_graph;
   const bool buckets_the_batch = (is_ragged_q || is_ragged_kv) && uses_ragged_graph;
   graph_batch_size_fwd =
@@ -123,9 +123,8 @@ void FusedAttnConfig::derive() {
           layout_group, static_cast<int64_t>(num_attn_heads), static_cast<int64_t>(num_gqa_groups),
           static_cast<int64_t>(max_seqlen_q), static_cast<int64_t>(max_seqlen_kv),
           static_cast<int64_t>(head_dim_qk), static_cast<int64_t>(head_dim_v)) == DType::kInt64;
-  const DType wide_ragged_offsets = cudnn_runtime_version >= 90500 ? DType::kInt64 : DType::kInt32;
-  ragged_offset_type_fwd = uses_cu_seqlens_directly ? DType::kInt32 : wide_ragged_offsets;
-  ragged_offset_type_bwd = wide_ragged_offsets;
+  ragged_offset_type_fwd = uses_cu_seqlens_directly ? DType::kInt32 : DType::kInt64;
+  ragged_offset_type_bwd = DType::kInt64;
   ragged_offset_mults = RaggedOffsetMultipliers(
       layout_group, static_cast<int64_t>(num_attn_heads), static_cast<int64_t>(num_gqa_groups),
       static_cast<int64_t>(head_dim_qk), static_cast<int64_t>(head_dim_v));

@@ -15,6 +15,7 @@ import numpy as np
 import torch
 
 from .torch_version import torch_version
+from ..common import decode_cudnn_version
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
 
 
@@ -131,6 +132,8 @@ def clear_tensor_data(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
 
     Must be used carefully.
     """
+    if torch.compiler.is_compiling():
+        return
 
     for t in tensors:
         if t is not None:
@@ -155,9 +158,11 @@ def _get_device_compute_capability(device: torch.device) -> Tuple[int, int]:
 
 
 @torch.compiler.assume_constant_result
-def get_device_compute_capability() -> Tuple[int, int]:
-    """CUDA compute capability of current GPU"""
-    return _get_device_compute_capability(torch.cuda.current_device())
+def get_device_compute_capability(device: Optional[torch.device] = None) -> Tuple[int, int]:
+    """CUDA compute capability of ``device`` (the current GPU when unspecified)."""
+    if device is None or device.index is None:
+        device = torch.cuda.current_device()
+    return _get_device_compute_capability(device)
 
 
 def deinterleave_glu_tensor(tensor: torch.Tensor, interleave_size: int) -> torch.Tensor:
@@ -779,11 +784,7 @@ def _get_cudnn_version() -> Tuple[int, int, int]:
     """Runtime cuDNN version (major, minor, patch)"""
     import transformer_engine.pytorch.cpp_extensions as ext
 
-    encoded_version = ext.get_cudnn_version()
-    major_version_magnitude = 1000 if encoded_version < 90000 else 10000
-    major, encoded_version = divmod(encoded_version, major_version_magnitude)
-    minor, patch = divmod(encoded_version, 100)
-    return (major, minor, patch)
+    return decode_cudnn_version(ext.get_cudnn_version())
 
 
 @torch.compiler.assume_constant_result

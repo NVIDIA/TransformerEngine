@@ -45,7 +45,7 @@ void nvte_cusolvermp_ctx_destroy(NVTECusolverMpCtx* ctx);
 /*! \brief Compute Newton-Schulz matrix orthogonalization in-place.
  *
  *  \param[in]     ctx              cuSolverMp context.
- *  \param[in]     m                Global number of rows.
+ *  \param[in]     m                Global number of rows. Must be no greater than n.
  *  \param[in]     n                Global number of columns.
  *  \param[in,out] x                Local part of the matrix (modified in-place).
  *  \param[in]     num_iterations   Number of Newton-Schulz iterations.

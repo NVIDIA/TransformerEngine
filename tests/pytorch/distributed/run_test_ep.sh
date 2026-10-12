@@ -48,11 +48,12 @@ run_pass() {
   local eager="${3:-0}"
   local overflow="${4:-0}"
   local mxfp8="${5:-0}"
+  local fused="${6:-0}"
   local log="stdout_ep_${label}.txt"
   echo "=== Running ${SCRIPT} [${label}] on ${NUM_RANKS} GPUs (timeout=${TEST_TIMEOUT_S}s) ==="
   # setsid + kill-after so SIGKILL takes down the whole process group, not just torchrun.
   NVTE_EP_ZERO_COPY="${zc}" NVTE_EP_EAGER="${eager}" NVTE_EP_OVERFLOW="${overflow}" \
-    NVTE_EP_MXFP8_PASS="${mxfp8}" \
+    NVTE_EP_MXFP8_PASS="${mxfp8}" NVTE_EP_FUSED_PREPARE_DISPATCH="${fused}" \
     setsid timeout --foreground --kill-after=10 --signal=TERM "${TEST_TIMEOUT_S}" \
     torchrun --standalone --nnodes=1 --nproc-per-node="${NUM_RANKS}" \
     "${SCRIPT}" 2>&1 | tee "${log}"
@@ -70,6 +71,15 @@ run_pass() {
   if [ -z "${KEEP_EP_LOGS:-}" ]; then rm -f "${log}"; fi
 }
 
+# Opt-in via NVTE_TEST_EP_CLASSIC_PG=1: cover only the classic ProcessGroupNCCL
+# comm-borrow branch. Recent torch defaults the "nccl" backend to ProcessGroupNCCL2,
+# which the passes below exercise; forcing the classic backend covers the other
+# get_nccl_comm_ptr branch.
+if [ "${NVTE_TEST_EP_CLASSIC_PG:-0}" = "1" ]; then
+  TORCH_DIST_USE_NCCL2=0 run_pass "classic_pg" 0
+  exit $RET
+fi
+
 run_pass "default" 0
 run_pass "zero_copy" 1
 run_pass "eager" 0 1
@@ -80,5 +90,12 @@ run_pass "overflow" 0 0 1
 run_pass "mxfp8" 0 0 0 1
 run_pass "mxfp8_zero_copy" 1 0 0 1
 run_pass "mxfp8_eager" 0 1 0 1
+
+# Fused count-mode dispatch under CUDA graph capture (NVTE_EP_FUSED_PREPARE_DISPATCH=1) is
+# opt-in and needs its own passes so the fused-only tests aren't skipped: overflow and mxfp8
+# variants need their own gating envs too, and all require non-eager (caller-provided recv).
+run_pass "fused" 0 0 0 0 1
+run_pass "fused_overflow" 0 0 1 0 1
+run_pass "fused_mxfp8" 0 0 0 1 1
 
 exit $RET

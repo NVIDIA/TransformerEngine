@@ -7,6 +7,7 @@
 #include "../extensions.h"
 #include "cgemm_helper.h"
 #include "common/util/cuda_runtime.h"
+#include "ffi_collectives.h"  // FfiRequestCliqueHandler (borrowed-comm prepare)
 #include "transformer_engine/gemm.h"
 
 namespace transformer_engine {
@@ -37,15 +38,26 @@ pybind11::dict Registrations() {
   dict["te_dequantize_ffi"] = EncapsulateFFI(DequantizeHandler);
 
   // Softmax
-  dict["te_scaled_softmax_forward_ffi"] = EncapsulateFFI(ScaledSoftmaxForwardHandler);
-  dict["te_scaled_softmax_backward_ffi"] = EncapsulateFFI(ScaledSoftmaxBackwardHandler);
-  dict["te_scaled_masked_softmax_forward_ffi"] = EncapsulateFFI(ScaledMaskedSoftmaxForwardHandler);
-  dict["te_scaled_masked_softmax_backward_ffi"] =
-      EncapsulateFFI(ScaledMaskedSoftmaxBackwardHandler);
-  dict["te_scaled_upper_triang_masked_softmax_forward_ffi"] =
-      EncapsulateFFI(ScaledUpperTriangMaskedSoftmaxForwardHandler);
-  dict["te_scaled_upper_triang_masked_softmax_backward_ffi"] =
-      EncapsulateFFI(ScaledUpperTriangMaskedSoftmaxBackwardHandler);
+  dict["te_scaled_softmax_forward_ffi"] = pybind11::dict(
+      pybind11::arg("initialize") = EncapsulateFFI(ScaledSoftmaxForwardInitializeHandler),
+      pybind11::arg("execute") = EncapsulateFFI(ScaledSoftmaxForwardHandler));
+  dict["te_scaled_softmax_backward_ffi"] = pybind11::dict(
+      pybind11::arg("initialize") = EncapsulateFFI(ScaledSoftmaxBackwardInitializeHandler),
+      pybind11::arg("execute") = EncapsulateFFI(ScaledSoftmaxBackwardHandler));
+  dict["te_scaled_masked_softmax_forward_ffi"] = pybind11::dict(
+      pybind11::arg("initialize") = EncapsulateFFI(ScaledMaskedSoftmaxForwardInitializeHandler),
+      pybind11::arg("execute") = EncapsulateFFI(ScaledMaskedSoftmaxForwardHandler));
+  dict["te_scaled_masked_softmax_backward_ffi"] = pybind11::dict(
+      pybind11::arg("initialize") = EncapsulateFFI(ScaledMaskedSoftmaxBackwardInitializeHandler),
+      pybind11::arg("execute") = EncapsulateFFI(ScaledMaskedSoftmaxBackwardHandler));
+  dict["te_scaled_upper_triang_masked_softmax_forward_ffi"] = pybind11::dict(
+      pybind11::arg("initialize") =
+          EncapsulateFFI(ScaledUpperTriangMaskedSoftmaxForwardInitializeHandler),
+      pybind11::arg("execute") = EncapsulateFFI(ScaledUpperTriangMaskedSoftmaxForwardHandler));
+  dict["te_scaled_upper_triang_masked_softmax_backward_ffi"] = pybind11::dict(
+      pybind11::arg("initialize") =
+          EncapsulateFFI(ScaledUpperTriangMaskedSoftmaxBackwardInitializeHandler),
+      pybind11::arg("execute") = EncapsulateFFI(ScaledUpperTriangMaskedSoftmaxBackwardHandler));
 
   // Normalization
   dict["te_norm_forward_ffi"] =
@@ -124,6 +136,17 @@ pybind11::dict Registrations() {
   dict["te_ep_combine_bwd_ffi"] =
       pybind11::dict(pybind11::arg("instantiate") = EncapsulateFFI(EpInstantiateHandler),
                      pybind11::arg("execute") = EncapsulateFFI(EpCombineBwdHandler));
+
+  // Borrowed-comm bootstrap: a one-shot op requests the collective clique
+  // (generic prepare) and initializes EPBackend from the borrowed comm (EP
+  // execute). Registered only when the XLA collectives headers were available
+  // at build time; its absence is how Python detects an unbuilt path.
+#ifdef XLA_FFI_COLLECTIVES_AVAILABLE
+  dict["te_ep_bootstrap_borrowed_comm_ffi"] =
+      pybind11::dict(pybind11::arg("instantiate") = EncapsulateFFI(EpInstantiateHandler),
+                     pybind11::arg("prepare") = EncapsulateFFI(FfiRequestCliqueHandler),
+                     pybind11::arg("execute") = EncapsulateFFI(EpBootstrapBorrowedCommHandler));
+#endif  // collectives header available
 #endif  // NVTE_WITH_NCCL_EP
 
   // TopK
@@ -161,8 +184,9 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
         pybind11::arg("ep_size"), pybind11::arg("rank_within_group"), pybind11::arg("num_experts"),
         pybind11::arg("max_tokens_per_rank"), pybind11::arg("max_recv_tokens_per_rank"),
         pybind11::arg("hidden_dim"), pybind11::arg("max_num_sms"), pybind11::arg("max_token_dtype"),
-        pybind11::arg("drop_on_overflow"));
+        pybind11::arg("drop_on_overflow"), pybind11::arg("borrowed_comm") = false);
   m.def("release_ep_resources", &ReleaseEpResources);
+  m.def("release_ep_resources_at_exit", &ReleaseEpResourcesAtExit);
   m.def("ep_handle_mem_size", &EpHandleMemSize, pybind11::arg("top_k"),
         pybind11::arg("dispatch_output_per_expert_alignment") = 0);
   m.def("get_ep_instance_state_type_id", &GetEpInstanceStateTypeIdCapsule);

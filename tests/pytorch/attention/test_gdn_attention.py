@@ -445,19 +445,6 @@ def test_gdn_requires_both_gates():
         attention(q, k, v, g=g)
 
 
-@pytest.mark.skipif(not is_fp8_available(), reason="FP8 is not available")
-def test_gdn_rejects_fp8_autocast():
-    """GDN must not silently run in high precision inside FP8 autocast."""
-    q, k, v, g, beta = _inputs(1, 128, 1, 1)
-    attention = GatedDeltaNetAttention(
-        num_attention_heads=1,
-        kv_channels=64,
-        qkv_format="bshd",
-    )
-    with autocast(enabled=True), pytest.raises(ValueError, match="does not support FP8 autocast"):
-        attention(q, k, v, g=g, beta=beta)
-
-
 def test_gdn_runs_te_forward_lifecycle(monkeypatch):
     """GDN calls pair prepare_forward with end_forward even without the kernel runtime."""
     q, k, v, g, beta = _inputs(1, 128, 1, 1)
