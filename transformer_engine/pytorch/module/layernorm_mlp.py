@@ -2004,26 +2004,12 @@ def _layernorm_mlp_backward_impl(
             fc1_weight_python_object, "grad_added_to_main_grad"
         ):
             fc1_weight_python_object.grad_added_to_main_grad = True
-            if getattr(fc1_weight_python_object, "zero_out_wgrad", False):
-                fc1_wgrad = torch.zeros(
-                    fc1_weight_main_grad.shape,
-                    dtype=fc1_weight_python_object.dtype,
-                    device=torch.cuda.current_device(),
-                    requires_grad=False,
-                )
-            elif getattr(fc1_weight_python_object, "zero_tensor_dummy_wgrad", False):
-                fc1_wgrad = get_dummy_wgrad(
-                    list(fc1_weight_main_grad.shape),
-                    fc1_weight_python_object.dtype,
-                    zero_tensor=True,
-                )
-            else:
-                fc1_wgrad = torch.empty(
-                    fc1_weight_main_grad.shape,
-                    dtype=fc1_weight_python_object.dtype,
-                    device=torch.cuda.current_device(),
-                    requires_grad=False,
-                )
+            fc1_wgrad = get_dummy_wgrad(
+                list(fc1_weight_main_grad.shape),
+                fc1_weight_python_object.dtype,
+                zero=getattr(fc1_weight_python_object, "zero_out_wgrad", False),
+                zero_tensor=getattr(fc1_weight_python_object, "zero_tensor_dummy_wgrad", False),
+            )
         elif args.fuse_wgrad_accumulation:
             fc1_wgrad = None
     else:
@@ -2035,26 +2021,12 @@ def _layernorm_mlp_backward_impl(
             fc2_weight_python_object, "grad_added_to_main_grad"
         ):
             fc2_weight_python_object.grad_added_to_main_grad = True
-            if getattr(fc2_weight_python_object, "zero_out_wgrad", False):
-                fc2_wgrad = torch.zeros(
-                    fc2_weight_main_grad.shape,
-                    dtype=fc2_weight_python_object.dtype,
-                    device=torch.cuda.current_device(),
-                    requires_grad=False,
-                )
-            elif getattr(fc2_weight_python_object, "zero_tensor_dummy_wgrad", False):
-                fc2_wgrad = get_dummy_wgrad(
-                    list(fc2_weight_main_grad.shape),
-                    fc2_weight_python_object.dtype,
-                    zero_tensor=True,
-                )
-            else:
-                fc2_wgrad = torch.empty(
-                    fc2_weight_main_grad.shape,
-                    dtype=fc2_weight_python_object.dtype,
-                    device=torch.cuda.current_device(),
-                    requires_grad=False,
-                )
+            fc2_wgrad = get_dummy_wgrad(
+                list(fc2_weight_main_grad.shape),
+                fc2_weight_python_object.dtype,
+                zero=getattr(fc2_weight_python_object, "zero_out_wgrad", False),
+                zero_tensor=getattr(fc2_weight_python_object, "zero_tensor_dummy_wgrad", False),
+            )
         elif args.fuse_wgrad_accumulation:
             fc2_wgrad = None
     else:
