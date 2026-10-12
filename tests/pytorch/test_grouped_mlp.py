@@ -632,6 +632,7 @@ class TestGroupedLinearOp:
                 delay_wgrad_compute=delay_wgrad_compute,
                 single_grouped_weight=single_grouped_weight,
                 single_grouped_bias=single_grouped_bias,
+                split_alignment=split_alignment,
             )
         with torch.no_grad():
             if single_grouped_weight:
@@ -1116,9 +1117,9 @@ class TestGroupedMLPFusedOp:
         fused_op_cls = grouped_mlp_module.GroupedMLP_CuTeGEMMGLU
         monkeypatch.setattr(fused_op_cls, "is_supported", classmethod(lambda cls: True))
 
-        fc1 = te.ops.GroupedLinear(1, 64, 128, bias=False, device="cuda")
+        fc1 = te.ops.GroupedLinear(1, 64, 128, bias=False, device="cuda", split_alignment=256)
         activation = te.ops.ScaledSwiGLU(glu_interleave_size=32)
-        fc2 = te.ops.GroupedLinear(1, 64, 64, bias=False, device="cuda")
+        fc2 = te.ops.GroupedLinear(1, 64, 64, bias=False, device="cuda", split_alignment=256)
         ops = [fc1, activation, fc2]
 
         def fuse(recipe):
@@ -1136,6 +1137,10 @@ class TestGroupedMLPFusedOp:
 
         e4m3 = MXFP8BlockScaling(fp8_format=Format.E4M3)
         assert_fused(e4m3)
+
+        fc1.split_alignment = 128
+        assert fuse(e4m3) is ops
+        fc1.split_alignment = 256
 
         # NVFP4 quantizes gradients to FP4, so the FP8 format must not gate it. Forcing the
         # lookup to E5M2 is what an NVFP4 recipe would hit if the check were not MXFP8-only.
@@ -1407,6 +1412,7 @@ class TestGroupedMLPFusedOp:
                     single_grouped_bias=single_grouped_bias,
                     accumulate_into_main_grad=accumulate_into_main_grad,
                     delay_wgrad_compute=delay_wgrad_compute,
+                    split_alignment=split_alignment,
                 )
 
                 fc2_op = te.ops.GroupedLinear(
@@ -1421,6 +1427,7 @@ class TestGroupedMLPFusedOp:
                     accumulate_into_main_grad=accumulate_into_main_grad,
                     delay_wgrad_compute=delay_wgrad_compute,
                     scale_bias=bias,
+                    split_alignment=split_alignment,
                 )
                 return te.ops.Sequential(fc1_op, _make_scaled_act(), fc2_op), fc1_op, fc2_op
 
@@ -1870,10 +1877,22 @@ class TestGroupedMLPFusedOp:
         recipe = make_recipe("mxfp8")
         with te.quantized_model_init(enabled=True, recipe=recipe):
             fc1 = te.ops.GroupedLinear(
-                group_size, hidden_size, 2 * hidden_size, bias=False, device=device, dtype=dtype
+                group_size,
+                hidden_size,
+                2 * hidden_size,
+                bias=False,
+                device=device,
+                dtype=dtype,
+                split_alignment=split_alignment,
             )
             fc2 = te.ops.GroupedLinear(
-                group_size, hidden_size, hidden_size, bias=False, device=device, dtype=dtype
+                group_size,
+                hidden_size,
+                hidden_size,
+                bias=False,
+                device=device,
+                dtype=dtype,
+                split_alignment=split_alignment,
             )
             module = te.ops.Sequential(
                 fc1, te.ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size), fc2
@@ -1964,7 +1983,13 @@ class TestGroupedMLPFusedOp:
         recipe = make_recipe("mxfp8")
         with te.quantized_model_init(enabled=True, recipe=recipe):
             fc1 = te.ops.GroupedLinear(
-                group_size, hidden_size, 2 * hidden_size, bias=bias, device=device, dtype=dtype
+                group_size,
+                hidden_size,
+                2 * hidden_size,
+                bias=bias,
+                device=device,
+                dtype=dtype,
+                split_alignment=split_alignment,
             )
             fc2 = te.ops.GroupedLinear(
                 group_size,
@@ -1974,6 +1999,7 @@ class TestGroupedMLPFusedOp:
                 device=device,
                 dtype=dtype,
                 scale_bias=bias,
+                split_alignment=split_alignment,
             )
             module = te.ops.Sequential(
                 fc1, te.ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size), fc2
@@ -2112,7 +2138,7 @@ class TestGroupedMLPFusedOp:
 
         split_sizes = torch.full(
             (group_size,),
-            128,
+            256,
             dtype=torch.int64,
             device=device,
         )
@@ -2127,6 +2153,7 @@ class TestGroupedMLPFusedOp:
                 device=device,
                 dtype=dtype,
                 single_grouped_weight=True,
+                split_alignment=256,
             )
             fc2 = te.ops.GroupedLinear(
                 group_size,
@@ -2135,6 +2162,7 @@ class TestGroupedMLPFusedOp:
                 device=device,
                 dtype=dtype,
                 single_grouped_weight=True,
+                split_alignment=256,
             )
             module = te.ops.Sequential(
                 fc1,
@@ -2265,6 +2293,7 @@ class TestGroupedMLPFusedOp:
                     device=device,
                     dtype=dtype,
                     single_grouped_weight=single_grouped_weight,
+                    split_alignment=split_alignment,
                 )
                 fc2 = te.ops.GroupedLinear(
                     group_size,
@@ -2275,6 +2304,7 @@ class TestGroupedMLPFusedOp:
                     dtype=dtype,
                     single_grouped_weight=single_grouped_weight,
                     scale_bias=bias,
+                    split_alignment=split_alignment,
                 )
                 module = te.ops.Sequential(fc1, scaled_act, fc2)
 
@@ -2414,6 +2444,7 @@ class TestGroupedMLPFusedOp:
         device: torch.device | str,
         bias: bool = False,
         delay_wgrad_compute: bool = False,
+        split_alignment: int = 256,
     ) -> dict:
         """Fused grouped MLP forward and backward with deterministic weights and inputs.
 
@@ -2434,6 +2465,7 @@ class TestGroupedMLPFusedOp:
                 device=device,
                 dtype=dtype,
                 delay_wgrad_compute=delay_wgrad_compute,
+                split_alignment=split_alignment,
             )
             fc2 = te.ops.GroupedLinear(
                 group_size,
@@ -2444,6 +2476,7 @@ class TestGroupedMLPFusedOp:
                 dtype=dtype,
                 delay_wgrad_compute=delay_wgrad_compute,
                 scale_bias=bias,
+                split_alignment=split_alignment,
             )
             module = te.ops.Sequential(fc1, scaled_act, fc2)
 
@@ -2625,11 +2658,23 @@ class TestGroupedMLPFusedOp:
         def build() -> te.ops.Sequential:
             with te.quantized_model_init(enabled=True, recipe=recipe):
                 fc1 = te.ops.GroupedLinear(
-                    group_size, hidden_size, 2 * hidden_size, bias=False, device=device, dtype=dtype
+                    group_size,
+                    hidden_size,
+                    2 * hidden_size,
+                    bias=False,
+                    device=device,
+                    dtype=dtype,
+                    split_alignment=split_alignment,
                 )
                 scaled_act = te.ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size)
                 fc2 = te.ops.GroupedLinear(
-                    group_size, hidden_size, hidden_size, bias=False, device=device, dtype=dtype
+                    group_size,
+                    hidden_size,
+                    hidden_size,
+                    bias=False,
+                    device=device,
+                    dtype=dtype,
+                    split_alignment=split_alignment,
                 )
                 module = te.ops.Sequential(fc1, scaled_act, fc2)
             with torch.no_grad():
@@ -2741,6 +2786,7 @@ class TestGroupedMLPFusedOp:
                     single_grouped_weight=single_grouped_weight,
                     accumulate_into_main_grad=accumulate_into_main_grad,
                     delay_wgrad_compute=delay_wgrad_compute,
+                    split_alignment=split_alignment,
                 )
                 fc2 = te.ops.GroupedLinear(
                     group_size,
@@ -2752,6 +2798,7 @@ class TestGroupedMLPFusedOp:
                     single_grouped_weight=single_grouped_weight,
                     accumulate_into_main_grad=accumulate_into_main_grad,
                     delay_wgrad_compute=delay_wgrad_compute,
+                    split_alignment=split_alignment,
                 )
                 scaled_act = te.ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size)
                 module = te.ops.Sequential(fc1, scaled_act, fc2)
@@ -2866,6 +2913,7 @@ class TestGroupedMLPFusedOp:
                 dtype=dtype,
                 single_grouped_weight=single_grouped_weight,
                 accumulate_into_main_grad=accumulate_into_main_grad,
+                split_alignment=split_alignment,
             )
             fc2 = te.ops.GroupedLinear(
                 group_size,
@@ -2876,6 +2924,7 @@ class TestGroupedMLPFusedOp:
                 dtype=dtype,
                 single_grouped_weight=single_grouped_weight,
                 accumulate_into_main_grad=accumulate_into_main_grad,
+                split_alignment=split_alignment,
             )
             scaled_act = (
                 te.ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size)
@@ -2896,6 +2945,7 @@ class TestGroupedMLPFusedOp:
                 dtype=dtype,
                 single_grouped_weight=single_grouped_weight,
                 accumulate_into_main_grad=accumulate_into_main_grad,
+                split_alignment=split_alignment,
             )
             reference_fc2 = te.ops.GroupedLinear(
                 group_size,
@@ -2906,6 +2956,7 @@ class TestGroupedMLPFusedOp:
                 dtype=dtype,
                 single_grouped_weight=single_grouped_weight,
                 accumulate_into_main_grad=accumulate_into_main_grad,
+                split_alignment=split_alignment,
             )
             reference_scaled_act = (
                 te.ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size)

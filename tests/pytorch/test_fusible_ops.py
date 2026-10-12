@@ -4654,6 +4654,7 @@ class TestSequentialModules:
                 bias=bias,
                 device=device,
                 dtype=dtype,
+                split_alignment=split_alignment,
             )
             fc2 = te_ops.GroupedLinear(
                 group_size,
@@ -4663,6 +4664,7 @@ class TestSequentialModules:
                 device=device,
                 dtype=dtype,
                 scale_bias=bias,
+                split_alignment=split_alignment,
             )
             if activation == "scaled_swiglu":
                 activation_op = te_ops.ScaledSwiGLU()

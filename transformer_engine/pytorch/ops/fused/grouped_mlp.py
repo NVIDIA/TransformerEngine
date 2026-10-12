@@ -1009,7 +1009,12 @@ def _is_grouped_mlp_fusion_candidate(
     activation_op_types: tuple[type[FusibleOperation]],
 ) -> bool:
     """Check whether the recipe and operation pattern support grouped MLP fusion."""
-    if len(ops) < 3 or recipe is None or not (recipe.mxfp8() or recipe.nvfp4()):
+    if len(ops) < 3 or recipe is None:
+        return False
+    if recipe.custom():
+        if not getattr(recipe, "enable_cutedsl_fused_grouped_mlp", False):
+            return False
+    elif not (recipe.mxfp8() or recipe.nvfp4()):
         return False
     # NVFP4 graph-safe grouped quantize currently requires RHT.
     if recipe.nvfp4() and recipe.disable_rht:
@@ -1022,6 +1027,8 @@ def _is_grouped_mlp_fusion_candidate(
         isinstance(fc1, GroupedLinear)
         and isinstance(activation, activation_op_types)
         and isinstance(fc2, GroupedLinear)
+        and fc1.split_alignment % 256 == 0
+        and fc2.split_alignment % 256 == 0
         for fc1, activation, fc2 in zip(ops, ops[1:], ops[2:])
     )
 
@@ -1079,6 +1086,8 @@ def fuse_grouped_mlp_ops(
             isinstance(window[0], GroupedLinear)
             and isinstance(window[1], activation_op_types)
             and isinstance(window[2], GroupedLinear)
+            and window[0].split_alignment % 256 == 0
+            and window[2].split_alignment % 256 == 0
         ):
             matches_pattern = False
         elif (
