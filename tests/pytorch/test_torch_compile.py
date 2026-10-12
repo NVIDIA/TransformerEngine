@@ -2637,7 +2637,9 @@ def test_te_layernorm_mlp_compile_fp8_gemm_gelu(dtype, bias, compile_mode):
 
 
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
-@pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+@pytest.mark.parametrize(
+    "quantization,disable_rht_fusion", [("mxfp8", False), ("nvfp4", False), ("nvfp4", True)]
+)
 @pytest.mark.parametrize("module", ["LayerNormLinear", "LayerNormMLP"])
 @pytest.mark.parametrize("normalization", ["LayerNorm", "RMSNorm"])
 @pytest.mark.parametrize(
@@ -2650,11 +2652,23 @@ def test_te_layernorm_mlp_compile_fp8_gemm_gelu(dtype, bias, compile_mode):
         (True, (128, 128), True),
     ],
 )
-def test_te_layernorm_compile_mxfp8_scale_layout(
-    monkeypatch, module, normalization, use_cudnn, input_shape, return_layernorm_output
+def test_te_layernorm_compile_scale_layout(
+    monkeypatch,
+    module,
+    normalization,
+    use_cudnn,
+    input_shape,
+    return_layernorm_output,
+    quantization,
+    disable_rht_fusion,
 ):
     """Saved normalization scales retain their layout through compiled backward."""
+    if quantization == "mxfp8" and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+    if quantization == "nvfp4" and not nvfp4_available:
+        pytest.skip(reason_for_no_nvfp4)
     monkeypatch.setenv("NVTE_NORM_FWD_USE_CUDNN", str(int(use_cudnn)))
+    monkeypatch.setenv("NVTE_NVFP4_DISABLE_RHT_CAST_FUSION", str(int(disable_rht_fusion)))
     model = getattr(te, module)(
         128,
         128,
@@ -2663,7 +2677,11 @@ def test_te_layernorm_compile_mxfp8_scale_layout(
         normalization=normalization,
         return_layernorm_output=return_layernorm_output,
     )
-    fp8_recipe = recipe.MXFP8BlockScaling()
+    fp8_recipe = (
+        recipe.MXFP8BlockScaling()
+        if quantization == "mxfp8"
+        else recipe.NVFP4BlockScaling(disable_stochastic_rounding=True)
+    )
 
     def fn(inp):
         with te.autocast(recipe=fp8_recipe):

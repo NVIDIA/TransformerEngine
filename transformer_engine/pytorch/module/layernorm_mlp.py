@@ -78,8 +78,6 @@ from ._common import (
     compile_unsupported_quantizer_reason,
     sum_bias_grad,
     apply_normalization,
-    update_nvfp4_direct_output_spec,
-    update_normalization_output_spec,
     check_fp8_reduce_and_update,
     fake_workspace_valid,
     set_quantizer_amax_reduction_group,
@@ -99,6 +97,7 @@ from ..quantized_tensor import (
     prepare_for_saving,
     restore_from_func_ctx,
 )
+from ..dynamo.fake import _make_fused_quantization_output_spec, fake_norm
 from ..dynamo import (
     TensorSpec,
     TensorOrQuantized,
@@ -2145,7 +2144,6 @@ def _layernorm_mlp_forward_fake(
         fc1_out_features // 2 if args.activation in _GATED_ACTIVATIONS else fc1_out_features
     )
     fc2_out_features = args.fc2_weight.shape[0]
-    rows = reduce(multiply_op, args.inp.shape[:-1], 1)
     inp_leading = args.inp.shape[0] if len(args.inp.shape) > 1 else 1
     gemm_leading_shape = (
         (inp_leading * args.tp_size, *args.inp.shape[1:-1])
@@ -2182,24 +2180,23 @@ def _layernorm_mlp_forward_fake(
     ln_out_quantized = fp8_or_debug and not (
         args.sequence_parallel and not args.return_layernorm_output_gathered and custom
     )
-    ln_out = TensorSpec(
-        shape=tuple(args.inp.shape),
+    ln_out, mu, rsigma = fake_norm(
+        args.inp,
+        args.fc1_input_quantizer if with_quantized_norm else None,
+        normalization=args.normalization,
         dtype=args.activation_dtype,
-        quantizer=args.fc1_input_quantizer if ln_out_quantized else None,
-        device=device,
     )
-    if with_quantized_norm:
-        update_normalization_output_spec(ln_out)
+    if ln_out_quantized and not with_quantized_norm:
+        ln_out = TensorSpec(
+            shape=ln_out.shape,
+            dtype=args.activation_dtype,
+            quantizer=args.fc1_input_quantizer,
+            device=device,
+        )
     if args.sequence_parallel and fp8_or_debug:
         args.fc1_input_quantizer.set_usage(rowwise=True, columnwise=False)
     ln_out_return_is_total = args.sequence_parallel and args.return_layernorm_output_gathered
     ln_out_rebound = ln_out_quantized and not with_quantized_norm
-    mu = (
-        TensorSpec(shape=(rows,), dtype=torch.float32, device=device)
-        if args.normalization == "LayerNorm"
-        else None
-    )
-    rsigma = TensorSpec(shape=(rows,), dtype=torch.float32, device=device)
 
     # ------------------------------------------------------
     # Weights -- mirror ``quantize_weight`` / ``cast_if_needed``.
@@ -2304,7 +2301,9 @@ def _layernorm_mlp_forward_fake(
         and not args.recipe_float8_block_scaling
         and not args.recipe_custom
     ):
-        update_nvfp4_direct_output_spec(act_out)
+        act_out = _make_fused_quantization_output_spec(
+            act_out.shape, act_out.dtype, act_out.device, act_out.quantizer
+        )
     if args.fc2_output_quantizer is not None:
         args.fc2_output_quantizer.set_usage(rowwise=True, columnwise=False)
 

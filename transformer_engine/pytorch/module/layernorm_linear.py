@@ -8,8 +8,6 @@ import warnings
 import weakref
 from dataclasses import dataclass, replace as dataclass_replace
 from typing import Sequence, Any, Callable, Dict, Optional, Tuple, Union, List
-from functools import reduce
-from operator import mul as multiply_op
 
 import torch
 from torch.nn import init
@@ -70,7 +68,6 @@ from ..graph import is_graph_capturing
 from ._common import (
     compile_unsupported_quantizer_reason,
     apply_normalization,
-    update_normalization_output_spec,
     check_fp8_reduce_and_update,
     fake_workspace_valid,
     noop_cat,
@@ -87,6 +84,7 @@ from ..quantized_tensor import (
     prepare_for_saving,
     restore_from_func_ctx,
 )
+from ..dynamo.fake import fake_norm
 from ..dynamo import (
     TensorSpec,
     TensorOrQuantized,
@@ -1506,7 +1504,6 @@ def _layernorm_linear_forward_fake(
     device = args.inp.device
 
     out_features, in_features = args.weight.shape
-    rows = reduce(multiply_op, args.inp.shape[:-1], 1)
     inp_leading = args.inp.shape[0] if len(args.inp.shape) > 1 else 1
     inputmat_aliases_inp = args.inp.dtype == args.activation_dtype
     ln_weight_aliases = args.ln_weight.dtype == args.activation_dtype
@@ -1540,26 +1537,25 @@ def _layernorm_linear_forward_fake(
     ln_out_quantized = fp8_or_debug and not (
         with_input_all_gather and not args.return_layernorm_output_gathered and custom
     )
-    ln_out_spec = TensorSpec(
-        shape=tuple(args.inp.shape),
+    ln_out_spec, mu, rsigma = fake_norm(
+        args.inp,
+        args.input_quantizer if with_quantized_norm else None,
+        normalization=args.normalization,
         dtype=args.activation_dtype,
-        quantizer=args.input_quantizer if ln_out_quantized else None,
-        device=device,
     )
-    if with_quantized_norm:
-        update_normalization_output_spec(ln_out_spec)
+    if ln_out_quantized and not with_quantized_norm:
+        ln_out_spec = TensorSpec(
+            shape=ln_out_spec.shape,
+            dtype=args.activation_dtype,
+            quantizer=args.input_quantizer,
+            device=device,
+        )
     if with_input_all_gather and fp8_or_debug:
         args.input_quantizer.set_usage(rowwise=True, columnwise=False)
     # ``ln_out_return`` is the high-precision norm output (or its all-gathered copy).
     ln_out_return_is_total = with_input_all_gather and args.return_layernorm_output_gathered
     # Whether the quantized ln_out is a different object from the returned one.
     ln_out_rebound = ln_out_quantized and not with_quantized_norm
-    mu = (
-        TensorSpec(shape=(rows,), dtype=torch.float32, device=device)
-        if args.normalization == "LayerNorm"
-        else None
-    )
-    rsigma = TensorSpec(shape=(rows,), dtype=torch.float32, device=device)
 
     # ------------------------------------------------------
     # Weight pipeline -- mirror ``quantize_weight`` / ``cast_if_needed``.

@@ -5,8 +5,6 @@
 """Internal function used by multiple modules."""
 
 import dataclasses
-import math
-import os
 import queue
 from typing import Any, Callable, List, Optional, Sequence, Tuple, Union
 
@@ -20,9 +18,7 @@ from ..export import is_in_onnx_export_mode
 from ..quantization import FP8GlobalStateManager
 from ..quantized_tensor import Quantizer
 from ..tensor.hybrid_tensor import HybridQuantizer
-from ..tensor.mxfp8_tensor import MXFP8Quantizer
-from ..tensor.nvfp4_tensor import NVFP4Quantizer
-from ..utils import get_default_init_method, get_device_compute_capability
+from ..utils import get_default_init_method
 
 
 def compile_unsupported_quantizer_reason(
@@ -91,38 +87,6 @@ def can_reconstruct_wgrad_input_from_original(quantizer) -> bool:
             return True
         return target.rowwise_quantizer.is_requantization_safe()
     return target.is_requantization_safe()
-
-
-def update_normalization_output_spec(spec: TensorSpec) -> None:
-    """Match the scale layout emitted by the normalization binding."""
-    update_nvfp4_direct_output_spec(spec)
-    if (
-        isinstance(spec.quantizer, MXFP8Quantizer)
-        and int(os.getenv("NVTE_NORM_FWD_USE_CUDNN", "0") or "0")
-        and math.prod(spec.shape[:-1]) % 128 == 0
-        and spec.shape[-1] % 128 == 0
-    ):
-        spec.with_gemm_swizzled_scales = False
-
-
-def update_nvfp4_direct_output_spec(spec: TensorSpec) -> None:
-    """Match the NVFP4 layout emitted without a post-quantize swizzle."""
-    quantizer = spec.quantizer
-    if not isinstance(quantizer, NVFP4Quantizer) or not quantizer.optimize_for_gemm:
-        return
-    rows, cols = math.prod(spec.shape[:-1]), spec.shape[-1]
-    if not (10, 0) <= get_device_compute_capability() <= (11, 0):
-        spec.with_gemm_swizzled_scales = False
-    elif quantizer.with_rht:
-        spec.with_gemm_swizzled_scales = bool(rows % 64 == 0 and cols % 128 == 0)
-    else:
-        spec.with_gemm_swizzled_scales = bool(
-            quantizer.with_2d_quantization
-            and not quantizer.row_scaled_nvfp4
-            and not quantizer.nvfp4_use_4over6
-            and rows % 128 == 0
-            and cols % 128 == 0
-        )
 
 
 def _get_normalization_func(normalization: str, forward: bool):
