@@ -402,11 +402,12 @@ Forward and backward examples
 The following factories support ``Linear`` and ``GroupedLinear`` with discrete
 expert parameters. With BF16 module compute precision:
 
-* ``nvfp4_qdq_weight_fwd_bf16_bwd_factory`` models ``X[BF16] x W[NVFP4]``
+* ``nvfp4_qdq_weight_fwd_bf16_bwd_factory`` models ``X[BF16] x W[NVFP4-QDQ]``
   forward and uses BF16 backward. Backward consumes the original inputs and
   the decoded forward QDQ weights.
-* ``mxfp8_nvfp4_qdq_fwd_mxfp8_bwd_factory`` models ``X[MXFP8] x W[NVFP4]``
-  forward and uses native MXFP8 backward. Input QDQ uses block-32 E4M3/E8M0;
+* ``mxfp8_qdq_nvfp4_qdq_fwd_mxfp8_bwd_factory`` models
+  ``X[MXFP8-QDQ] x W[NVFP4-QDQ]`` forward and uses native MXFP8 backward.
+  Input QDQ uses block-32 E4M3/E8M0;
   weight QDQ uses block-16 E2M1/E4M3 with a tensor scale. Backward quantizes
   the original inputs and the decoded forward QDQ weights to MXFP8.
 
@@ -415,10 +416,10 @@ For example::
     from transformer_engine.common.recipe import CustomRecipe
     from transformer_engine.pytorch.custom_recipes.quantizer_factory_zoo import (
         nvfp4_qdq_weight_fwd_bf16_bwd_factory,
-        mxfp8_nvfp4_qdq_fwd_mxfp8_bwd_factory,
+        mxfp8_qdq_nvfp4_qdq_fwd_mxfp8_bwd_factory,
     )
 
-    recipe = CustomRecipe(qfactory=mxfp8_nvfp4_qdq_fwd_mxfp8_bwd_factory)
+    recipe = CustomRecipe(qfactory=mxfp8_qdq_nvfp4_qdq_fwd_mxfp8_bwd_factory)
 
 To use BF16 inputs while retaining MXFP8 backward, replace the second factory's
 input rowwise ``MXFP8QDQQuantizer`` with ``IdentityQuantizer``. The input

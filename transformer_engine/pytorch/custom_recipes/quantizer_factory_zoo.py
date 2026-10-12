@@ -385,7 +385,7 @@ def nvfp4_qdq_weight_fwd_bf16_bwd_factory(
     return IdentityQuantizer()
 
 
-def mxfp8_nvfp4_qdq_fwd_mxfp8_bwd_factory(
+def mxfp8_qdq_nvfp4_qdq_fwd_mxfp8_bwd_factory(
     role: Optional[QuantizerRole], *, backend="auto", nvfp4_options=None
 ):
     """MXFP8-QDQ X and NVFP4-QDQ W forward; native MXFP8 backward.

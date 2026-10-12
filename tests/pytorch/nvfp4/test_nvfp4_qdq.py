@@ -15,7 +15,7 @@ from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 from transformer_engine.pytorch.custom_recipes.qdq import NVFP4QDQQuantizer
 from transformer_engine.pytorch.custom_recipes.quantizer_factory_zoo import (
-    mxfp8_nvfp4_qdq_fwd_mxfp8_bwd_factory,
+    mxfp8_qdq_nvfp4_qdq_fwd_mxfp8_bwd_factory,
     nvfp4_qdq_weight_fwd_bf16_bwd_factory,
 )
 
@@ -171,7 +171,9 @@ def test_module_operands(backend, grouped, params_dtype, mixed, nvfp4_options=No
         pytest.skip("Mixed FP32 source/BF16 decode intentionally uses native fallback")
     torch.manual_seed(12)
     factory = (
-        mxfp8_nvfp4_qdq_fwd_mxfp8_bwd_factory if mixed else nvfp4_qdq_weight_fwd_bf16_bwd_factory
+        mxfp8_qdq_nvfp4_qdq_fwd_mxfp8_bwd_factory
+        if mixed
+        else nvfp4_qdq_weight_fwd_bf16_bwd_factory
     )
     recipe = CustomRecipe(qfactory=partial(factory, backend=backend, nvfp4_options=nvfp4_options))
     kwargs = dict(bias=True, params_dtype=params_dtype, device="cuda")
@@ -217,7 +219,7 @@ def test_weight_workspace_dtype_and_reuse():
     from transformer_engine.pytorch.module.base import quantize_weight
     from transformer_engine.pytorch.quantization import QuantizerRole
 
-    factory = mxfp8_nvfp4_qdq_fwd_mxfp8_bwd_factory
+    factory = mxfp8_qdq_nvfp4_qdq_fwd_mxfp8_bwd_factory
     q = factory(QuantizerRole(module_type="linear", tensor_type="weight"))
     w = torch.randn(128, 256, device="cuda", dtype=torch.float32)
     out, cache = quantize_weight(tensor=w, quantizer=q, workspace_dtype=torch.bfloat16, cache=True)
@@ -348,7 +350,7 @@ def test_qdq_columnwise_only_workspace_dtype(empty):
     """A transient forward QDQ source must round to the requested compute dtype."""
     from transformer_engine.pytorch.quantization import QuantizerRole
 
-    q = mxfp8_nvfp4_qdq_fwd_mxfp8_bwd_factory(
+    q = mxfp8_qdq_nvfp4_qdq_fwd_mxfp8_bwd_factory(
         QuantizerRole(module_type="linear", tensor_type="weight")
     )
     q.set_usage(rowwise=False, columnwise=True)
