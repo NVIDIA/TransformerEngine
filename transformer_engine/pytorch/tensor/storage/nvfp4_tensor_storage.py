@@ -20,6 +20,7 @@ from .._quantization_helpers import safe_quantized_repr
 
 from ...constants import TE_DType as torch_to_transformer_engine_dtype, DType
 from ...utils import _empty_tensor
+from transformer_engine import te_device_type
 
 
 @functools.lru_cache(maxsize=None)
@@ -54,8 +55,8 @@ class _FromNVFP4Func(torch.autograd.Function):
 
         # ``tex.dequantize`` requires CUDA-resident buffers. If the tensor has
         src_device = tensor.device
-        if src_device.type != "cuda":
-            cuda_tensor = tensor.to(device=torch.device("cuda"))
+        if src_device.type != te_device_type():
+            cuda_tensor = tensor.to(device=torch.device(te_device_type()))
             result = tex.dequantize(cuda_tensor, torch_to_transformer_engine_dtype[dtype])
             return result.to(device=src_device)
         return tex.dequantize(tensor, torch_to_transformer_engine_dtype[dtype])

@@ -15,6 +15,7 @@ from ...cpp_extensions import general_gemm
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...distributed import get_distributed_world_size
 from ...quantization import FP8GlobalStateManager
+from transformer_engine import te_device_type
 from ...module.base import (
     fill_userbuffers_buffer_for_all_gather,
     get_ub,
@@ -155,7 +156,7 @@ class UserbuffersForwardLinear(FusedOperation):
         """
 
         # Check device
-        if device.type != "cuda":
+        if device.type != te_device_type():
             raise ValueError(f"Only CUDA devices are supported (got {device})")
 
         # Check datatype
@@ -322,7 +323,7 @@ class UserbuffersForwardLinear(FusedOperation):
 
         # Get autocast dtype if needed
         if torch.is_autocast_enabled():
-            dtype = torch.get_autocast_dtype("cuda")
+            dtype = torch.get_autocast_dtype(te_device_type())
         else:
             dtype = linear_op.weight.dtype
 
