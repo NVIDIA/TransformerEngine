@@ -16,6 +16,9 @@ Documentation for all releases of NVIDIA Transformer Engine are referenced below
 
    * - Release
      - Documentation
+   * - 2.19
+     - | `User Guide <../transformer-engine-releases/release-2.19/user-guide/index.html>`__
+       | `Release Notes <../transformer-engine-releases/release-2.19/release-notes/index.html>`__
    * - 2.18
      - | `User Guide <../transformer-engine-releases/release-2.18/user-guide/index.html>`__
        | `Release Notes <../transformer-engine-releases/release-2.18/release-notes/index.html>`__
