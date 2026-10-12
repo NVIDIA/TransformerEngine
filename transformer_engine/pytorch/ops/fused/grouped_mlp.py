@@ -249,6 +249,12 @@ def _deterministic_algorithms_required() -> bool:
     )
 
 
+_DETERMINISM_REQUESTED = (
+    "Deterministic execution was requested (NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 or"
+    " torch.use_deterministic_algorithms)"
+)
+
+
 def _wrap_single_quantized_as_grouped(
     tensor: torch.Tensor,
     quantized: MXFP8Tensor | NVFP4Tensor | NVFP4TensorStorage,
@@ -1125,9 +1131,17 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
         raise NotImplementedError
 
     @classmethod
+    @functools.lru_cache(maxsize=None)
     def grouped_gemm_dactivation_is_deterministic(cls) -> bool:
-        """Whether this op's dactivation kernel can produce a bit-exact ``dprob``."""
-        return False
+        """Whether this op's dactivation wrapper accepts ``deterministic`` (feature-detected)."""
+        try:
+            kernel = cls.grouped_gemm_dactivation_kernel()
+        except ImportError:
+            return False
+        try:
+            return "deterministic" in inspect.signature(kernel).parameters
+        except (TypeError, ValueError):
+            return False
 
     @classmethod
     @functools.lru_cache(maxsize=None)
@@ -1781,7 +1795,7 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 fc1_w_scales = fc1_w_scales.view(
                     1,
                     ceil_div(fc1_weight_shape[0], 128),
-                    ceil_div(fc1_weight_shape[1], k_sf_divisor),
+                    ceil_div(fc1_weight_k, k_sf_divisor),
                     32,
                     4,
                     4,
@@ -2454,12 +2468,10 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             )
             if not dprob_is_deterministic:
                 raise RuntimeError(
-                    "Deterministic execution was requested"
-                    " (NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 or"
-                    " torch.use_deterministic_algorithms), but the scale gradient (dprob) is"
-                    " accumulated with nondeterministic atomics on this configuration."
-                    " A bit-exact dprob requires the scaled-SReLU activation,"
-                    " nvidia-cudnn-frontend 1.28.0 or later, and an FC2 without scale_bias."
+                    f"{_DETERMINISM_REQUESTED}, but the scale gradient (dprob) is accumulated"
+                    " with nondeterministic atomics on this configuration. A bit-exact dprob"
+                    " requires a cuDNN front-end whose dactivation wrapper accepts"
+                    " `deterministic`, and an FC2 without scale_bias."
                 )
         scales_f32 = None
         scales_tensor = None
@@ -2601,29 +2613,36 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 fc2_weight_single._columnwise_scale_inv = original_columnwise_scale
                 fc2_weight_single._with_gemm_swizzled_scales = original_swizzled
 
-                fc2_w_data = fc2_weight_single._columnwise_data.view(dtype=data_dtype)
-                fc2_w_data = fc2_w_data.view(
-                    1,
-                    fc2_weight_shape[0],
-                    fc2_weight_k,
-                )
-                fc2_w_data = (
-                    fc2_w_data.permute(1, 2, 0) if use_nvfp4 else fc2_w_data.permute(2, 1, 0)
-                )
-                fc2_w_scales = swizzled_columnwise_scale.view(dtype=scale_view_dtype)
-                fc2_w_scales = fc2_w_scales.view(
-                    1,
-                    ceil_div(fc2_weight_shape[1], k_sf_divisor),
-                    ceil_div(fc2_weight_shape[0], 128),
-                    32,
-                    4,
-                    4,
-                )
-                fc2_w_scales = (
-                    fc2_w_scales.permute(3, 4, 2, 5, 1, 0)
-                    if use_nvfp4
-                    else fc2_w_scales.permute(3, 4, 1, 5, 2, 0)
-                )
+                if use_nvfp4:
+                    # NVFP4 column-wise data is physically transposed, so it is already
+                    # (in_features, out_features) and stays K-major.
+                    fc2_w_data, fc2_w_scales = _convert_to_cudnn_grouped_gemm_tensor_format(
+                        fc2_weight_single._columnwise_data,
+                        swizzled_columnwise_scale,
+                        data_dtype=data_dtype,
+                        scale_dtype=scale_view_dtype,
+                        valid_M_or_N=fc2_weight_shape[1],
+                        k_logical=fc2_weight_shape[0],
+                        sf_swizzled=True,
+                    )
+                else:
+                    fc2_w_data = fc2_weight_single._columnwise_data.view(dtype=data_dtype)
+                    fc2_w_data = fc2_w_data.view(
+                        1,
+                        fc2_weight_shape[0],
+                        fc2_weight_k,
+                    )
+                    fc2_w_data = fc2_w_data.permute(2, 1, 0)
+                    fc2_w_scales = swizzled_columnwise_scale.view(dtype=scale_view_dtype)
+                    fc2_w_scales = fc2_w_scales.view(
+                        1,
+                        ceil_div(fc2_weight_shape[1], k_sf_divisor),
+                        ceil_div(fc2_weight_shape[0], 128),
+                        32,
+                        4,
+                        4,
+                    )
+                    fc2_w_scales = fc2_w_scales.permute(3, 4, 1, 5, 2, 0)
                 fc2_dactivation_kwargs["b_tensor"] = fc2_w_data
                 fc2_dactivation_kwargs["sfb_tensor"] = fc2_w_scales
             else:
@@ -3187,19 +3206,6 @@ class GroupedMLP_CuTeGEMMUnary(_GroupedMLP_CuTeGEMMBase):
         from cudnn import grouped_gemm_dsrelu_wrapper_sm100  # pylint: disable=no-name-in-module
 
         return grouped_gemm_dsrelu_wrapper_sm100
-
-    @classmethod
-    @functools.lru_cache(maxsize=None)
-    def grouped_gemm_dactivation_is_deterministic(cls) -> bool:
-        """Feature-detect the dSReLU wrapper's ``deterministic`` argument (cuDNN FE 1.28.0+)."""
-        try:
-            kernel = cls.grouped_gemm_dactivation_kernel()
-        except ImportError:
-            return False
-        try:
-            return "deterministic" in inspect.signature(kernel).parameters
-        except (TypeError, ValueError):
-            return False
 
 
 def fuse_glu_ops(

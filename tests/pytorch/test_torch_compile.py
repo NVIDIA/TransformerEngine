@@ -4,12 +4,15 @@
 
 import abc
 import contextlib
+import copy
 import dataclasses
 import os
 import re
+import subprocess
 import sys
+import textwrap
 import warnings
-from typing import Union
+from typing import Literal, NamedTuple, Union
 
 import pytest
 import torch
@@ -697,6 +700,9 @@ def _packed_layout(qkv_format: str, packed_dim: int, interleave_dim: int) -> str
 
 _DPA_COMPILE_CONFIGS = {
     "self_bshd_causal": _cfg(ModelConfig(2, 128, 4, 64, attn_mask_type="causal")),
+    "self_bshd_causal_dropout": _cfg(
+        ModelConfig(2, 128, 4, 64, attn_mask_type="causal", dropout_p=0.1)
+    ),
     "self_sbhd_no_mask": _cfg(ModelConfig(2, 128, 4, 64, attn_mask_type="no_mask"), "sbhd"),
     "self_bshd_swa": _cfg(ModelConfig(2, 128, 4, 64, attn_mask_type="causal", window_size=(16, 0))),
     "gqa_bshd_causal": _cfg(ModelConfig(2, 128, 8, 64, num_gqa_groups=2, attn_mask_type="causal")),
@@ -717,6 +723,21 @@ _DPA_COMPILE_CONFIGS = {
         ModelConfig(2, 128, 4, 64, attn_mask_type="causal"), packed="qkv", interleave_dim=-2
     ),
     "packed_kv_bshd_bs2hd": _cfg(ModelConfig(2, 128, 4, 64, attn_mask_type="causal"), packed="kv"),
+    "packed_kv_bshd_bsh2d": _cfg(
+        ModelConfig(2, 128, 4, 64, attn_mask_type="causal"), packed="kv", interleave_dim=-2
+    ),
+    "packed_qkv_bs3hd_singleton": _cfg(
+        ModelConfig(1, 1, 1, 64, attn_mask_type="causal"), packed="qkv"
+    ),
+    "packed_qkv_bsh3d_singleton": _cfg(
+        ModelConfig(1, 1, 1, 64, attn_mask_type="causal"), packed="qkv", interleave_dim=-2
+    ),
+    "packed_kv_bshd_bs2hd_singleton": _cfg(
+        ModelConfig(1, 1, 1, 64, attn_mask_type="causal"), packed="kv"
+    ),
+    "packed_kv_bshd_bsh2d_singleton": _cfg(
+        ModelConfig(1, 1, 1, 64, attn_mask_type="causal"), packed="kv", interleave_dim=-2
+    ),
     "packed_kv_thd_th2d": _cfg(
         ModelConfig(2, 128, 4, 64, attn_mask_type="padding_causal"),
         "thd",
@@ -901,16 +922,8 @@ def _make_dpa_inputs(spec: dict, dtype: torch.dtype):
     return args, kwargs, grad_tensors
 
 
-def _skip_unsupported(
-    spec: dict, backend: str, dtype, compiled: bool = True, inference_params=None
-) -> None:
-    """Skip what the backend under test cannot run, or -- for a test that
-    compiles it -- cannot be compiled."""
-    if compiled and backend == "fused":
-        # FusedAttention's forward carries @no_torch_dynamo, so there is nothing
-        # to compile: it runs as an eager island. Drop this skip once it traces,
-        # and the tests below cover it as they do the others.
-        pytest.skip("FusedAttention is an eager island and does not compile")
+def _skip_unsupported(spec: dict, backend: str, dtype, inference_params=None) -> None:
+    """Skip configurations the backend under test cannot run."""
     available, _, _ = get_available_attention_backends(
         spec["model_config"],
         dtype,
@@ -1018,12 +1031,17 @@ def _compare_compiled_to_eager(
 ) -> None:
     """Run the module eagerly and compiled on the same inputs, and compare both
     the output and every input gradient."""
+    cpu_rng_state = torch.get_rng_state()
+    cuda_rng_state = torch.cuda.get_rng_state()
     eager = _run_and_capture(module, args, kwargs, grads)
 
     torch._dynamo.reset()
     # Force backend selection to be re-run (and traced) inside the compiled
     # region instead of being served from the cache the eager call populated.
     _force_dpa_backend(monkeypatch, backend)
+    # Reuse the eager dropout mask when comparing outputs and gradients.
+    torch.set_rng_state(cpu_rng_state)
+    torch.cuda.set_rng_state(cuda_rng_state)
     compiled = _run_and_capture(torch.compile(module, **compile_kwargs), args, kwargs, grads)
 
     _assert_dpa_backend(backend)
@@ -1032,7 +1050,8 @@ def _compare_compiled_to_eager(
 
 @pytest.mark.parametrize("backend", ["flash", "fused", "unfused"])
 @pytest.mark.parametrize("config", _DPA_COMPILE_CONFIGS.keys())
-def test_dpa_torch_compile(monkeypatch, backend, config):
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_dpa_torch_compile(monkeypatch, backend, config, dtype):
     """`DotProductAttention` under `torch.compile(fullgraph=True)` must match
     eager in forward and backward, for every backend that supports the
     configuration.
@@ -1041,45 +1060,59 @@ def test_dpa_torch_compile(monkeypatch, backend, config):
     whole module: input unpacking, qkv layout, backend selection and the backend
     itself.
     """
-    dtype = torch.bfloat16
     spec = _DPA_COMPILE_CONFIGS[config]
     module = _make_dpa(spec, dtype)
     args, kwargs, grads = _make_dpa_inputs(spec, dtype)
     _skip_unsupported(spec, backend, dtype, inference_params=kwargs.get("inference_params"))
     _force_dpa_backend(monkeypatch, backend)
 
+    # Inductor uses a different RNG for unfused dropout by default. Keep the
+    # eager RNG here so this numerical comparison uses the same dropout mask.
+    options = (
+        {"fallback_random": True} if backend == "unfused" and spec["model_config"].dropout_p else {}
+    )
     _compare_compiled_to_eager(
-        module, args, kwargs, grads, monkeypatch, backend, dtype, fullgraph=True
+        module, args, kwargs, grads, monkeypatch, backend, dtype, fullgraph=True, options=options
     )
 
 
-def test_dpa_torch_compile_around_fused(monkeypatch):
-    """FusedAttention itself is an eager island, but everything around it is
-    compiled: DotProductAttention traces up to the backend call, breaks the
-    graph there and resumes afterwards. What crosses that break has to survive
-    it -- the sub-backend enum did not, and reached cuDNN as the function that
-    produced it."""
+def test_dpa_torch_compile_fused_op_unavailable(monkeypatch):
+    """Without the fused attention custom op, FusedAttention is an eager island
+    and everything around it is compiled: DotProductAttention traces up to the
+    backend call, breaks the graph there and resumes afterwards. What crosses
+    that break has to survive it -- the sub-backend enum did not, and reached
+    cuDNN as the function that produced it."""
+    from transformer_engine.pytorch.attention.dot_product_attention import backends
+
     dtype = torch.bfloat16
     spec = _DPA_COMPILE_CONFIGS["self_bshd_causal"]
-    _skip_unsupported(spec, "fused", dtype, compiled=False)
+    _skip_unsupported(spec, "fused", dtype)
     _force_dpa_backend(monkeypatch, "fused")
+    monkeypatch.setattr(backends, "_fused_attn_op", None)
 
     module = _make_dpa(spec, dtype)
     args, kwargs, grads = _make_dpa_inputs(spec, dtype)
     # No fullgraph: the graph break at the eager island is the point here.
-    _compare_compiled_to_eager(module, args, kwargs, grads, monkeypatch, "fused", dtype)
+    with pytest.warns(UserWarning, match="Falling back to eager execution"):
+        _compare_compiled_to_eager(module, args, kwargs, grads, monkeypatch, "fused", dtype)
 
 
-@pytest.mark.parametrize("backend", ["flash", "unfused"])
-@pytest.mark.parametrize("config", ["self_bshd_causal", "kv_cache_bshd"])
+@pytest.mark.parametrize("backend", ["flash", "fused", "unfused"])
+@pytest.mark.parametrize(
+    "config",
+    ["self_bshd_causal", "kv_cache_bshd", "packed_qkv_bsh3d", "packed_kv_bshd_bsh2d"],
+)
 def test_dpa_torch_compile_cudagraphs(monkeypatch, backend, config):
     """`mode="reduce-overhead"`: forward and backward of DotProductAttention
     are captured into CUDA graphs and replayed on subsequent iterations."""
     dtype = torch.bfloat16
     spec = _DPA_COMPILE_CONFIGS[config]
-    _force_dpa_backend(monkeypatch, backend)
-
     module = _make_dpa(spec, dtype)
+    _, kwargs, _ = _make_dpa_inputs(spec, dtype)
+    # Before forcing the backend: probing the available backends re-runs the
+    # selection and would otherwise be cached over the forced one.
+    _skip_unsupported(spec, backend, dtype, inference_params=kwargs.get("inference_params"))
+    _force_dpa_backend(monkeypatch, backend)
 
     torch._dynamo.reset()
     counters.clear()
@@ -1099,7 +1132,7 @@ def test_dpa_torch_compile_cudagraphs(monkeypatch, backend, config):
     assert not counters["inductor"]["cudagraph_skips"], "inductor skipped CUDA graphs"
 
 
-@pytest.mark.parametrize("backend", ["flash", "unfused"])
+@pytest.mark.parametrize("backend", ["flash", "fused", "unfused"])
 @pytest.mark.parametrize("paged", [False, True], ids=["non_paged", "paged"])
 @pytest.mark.parametrize("cuda_graphs", [False, True], ids=["default", "cudagraphs"])
 def test_dpa_torch_compile_kv_cache_decoding(monkeypatch, backend, paged, cuda_graphs):
@@ -1238,7 +1271,7 @@ _EAGER_FALLBACK_CASES = {
 }
 
 
-@pytest.mark.parametrize("backend", ["flash", "unfused"])
+@pytest.mark.parametrize("backend", ["flash", "fused", "unfused"])
 @pytest.mark.parametrize("case", _EAGER_FALLBACK_CASES.keys())
 def test_dpa_torch_compile_eager_fallback(monkeypatch, backend, case):
     """Calls that cannot be traced run as an eager island instead, with a
@@ -1249,6 +1282,7 @@ def test_dpa_torch_compile_eager_fallback(monkeypatch, backend, case):
     dtype = torch.bfloat16
     config_name, make_inputs = _EAGER_FALLBACK_CASES[case]
     spec = _DPA_COMPILE_CONFIGS[config_name]
+    _skip_unsupported(spec, backend, dtype)
     _force_dpa_backend(monkeypatch, backend)
 
     module = _make_dpa(spec, dtype)
@@ -2412,7 +2446,7 @@ class _AffineOp(BasicOperation):
         self.weight = torch.nn.Parameter(torch.tensor(weight, dtype=dtype, device="cuda"))
 
     @classmethod
-    def forward_compute(cls, args):
+    def forward_compute(cls, args, *, in_custom_op=False):
         output = args.input_ * args.weight * args.gain
         offset = args.offset
         if isinstance(offset, QuantizedTensorStorage):
@@ -2426,7 +2460,7 @@ class _AffineOp(BasicOperation):
         return args.input_, [()], ()
 
     @classmethod
-    def backward_compute(cls, args):
+    def backward_compute(cls, args, *, in_custom_op=False):
         dy = args.grad_output
         return dy * args.weight * args.gain, [((dy * args.input_).sum() * args.gain,)], [()]
 
@@ -2484,7 +2518,7 @@ class _AffinePair(te.ops.FusedOperation):
     bwd_args_type = _AffinePairBwdArgs
 
     @classmethod
-    def forward_compute(cls, args):
+    def forward_compute(cls, args, *, in_custom_op=False):
         intermediate = args.input_ * args.weight0
         output = intermediate * args.weight1 + args.residual
         return output, [(), (intermediate.square(), None)], (intermediate,)
@@ -2494,7 +2528,7 @@ class _AffinePair(te.ops.FusedOperation):
         return args.input_, [(), (args.input_, None)], (args.input_,)
 
     @classmethod
-    def backward_compute(cls, args):
+    def backward_compute(cls, args, *, in_custom_op=False):
         dy = args.grad_output
         du = dy * args.weight1 + 2 * args.intermediate * args.grad_extra_output
         return (
@@ -2539,7 +2573,16 @@ def _compile_with_graphs(fn):
     return torch.compile(fn, fullgraph=True, backend=backend), graphs
 
 
-def _assert_custom_ops(graphs, name, present=True):
+_ExecutionPath = Literal["custom_op", "eager"]
+
+
+def _assert_custom_ops(
+    graphs,
+    name,
+    *,
+    forward: bool = True,
+    backward: bool = True,
+):
     targets = {
         str(node.target).removesuffix(".default").removesuffix("_base")
         for graph in graphs
@@ -2548,9 +2591,7 @@ def _assert_custom_ops(graphs, name, present=True):
         for node in module.graph.nodes
         if node.op == "call_function"
     }
-    if isinstance(present, bool):
-        present = (present, present)
-    for suffix, expected in zip(("", "_backward"), present):
+    for suffix, expected in (("", forward), ("_backward", backward)):
         assert (f"transformer_engine_compile.{name}{suffix}" in targets) == expected, targets
 
 
@@ -2572,32 +2613,79 @@ def _check_ops(fn, model, x, dy, kwargs=None):
     torch.testing.assert_close(actual, expected)
 
 
+class _Scenario(NamedTuple):
+    variant: str
+    expected_warning: str | None
+    forward_path: _ExecutionPath
+    backward_path: _ExecutionPath
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize(
-    "case,reason,compiled_passes",
+    "scenario",
     [
-        ("single", None, (True, True)),
-        ("single_forward", "without a custom op for backward", (True, False)),
-        ("single_backward", "without a custom op for forward", (False, True)),
-        ("single_eager", "without a custom op", (False, False)),
-        ("multi", "several operations", (False, False)),
-        ("backward_fusion", "backward fusion", (False, False)),
-        ("legacy", "without a custom op", (False, False)),
+        _Scenario(
+            variant="single",
+            expected_warning=None,
+            forward_path="custom_op",
+            backward_path="custom_op",
+        ),
+        _Scenario(
+            variant="single_forward",
+            expected_warning="without a custom op for backward",
+            forward_path="custom_op",
+            backward_path="eager",
+        ),
+        _Scenario(
+            variant="single_backward",
+            expected_warning="without a custom op for forward",
+            forward_path="eager",
+            backward_path="custom_op",
+        ),
+        _Scenario(
+            variant="single_eager",
+            expected_warning="without a custom op",
+            forward_path="eager",
+            backward_path="eager",
+        ),
+        # A pipeline can dispatch each operation through its own custom op.
+        _Scenario(
+            variant="multi",
+            expected_warning=None,
+            forward_path="custom_op",
+            backward_path="custom_op",
+        ),
+        # This test fusion only implements eager backward; forward still compiles.
+        _Scenario(
+            variant="backward_fusion",
+            expected_warning="without a custom op for backward",
+            forward_path="custom_op",
+            backward_path="eager",
+        ),
+        _Scenario(
+            variant="legacy",
+            expected_warning="without a custom op",
+            forward_path="eager",
+            backward_path="eager",
+        ),
     ],
+    ids=lambda scenario: scenario.variant,
 )
-def test_te_ops_pipeline(case, reason, compiled_passes, dtype, monkeypatch):
+def test_te_ops_pipeline(scenario, dtype, monkeypatch):
     torch._dynamo.reset()
-    if case.startswith("single"):
+    if scenario.variant.startswith("single"):
         monkeypatch.setattr(
             _AffineOp,
             "compile_ops",
             tuple(
-                op if enabled else None
-                for op, enabled in zip(_AffineOp.compile_ops, compiled_passes)
+                op if path == "custom_op" else None
+                for op, path in zip(
+                    _AffineOp.compile_ops, (scenario.forward_path, scenario.backward_path)
+                )
             ),
         )
-    if case == "backward_fusion":
+    if scenario.variant == "backward_fusion":
 
         def fuse(ops, **unused):
             if len(ops) == 2 and all(isinstance(op, _AffineOp) for op in ops):
@@ -2607,23 +2695,35 @@ def test_te_ops_pipeline(case, reason, compiled_passes, dtype, monkeypatch):
         monkeypatch.setattr(OperationFuser, "backward_fusion_functions", [fuse])
     ops = (
         [te.ops.Identity()]
-        if case == "legacy"
-        else [_AffineOp(float(i + 2), dtype) for i in range(1 if case.startswith("single") else 2)]
+        if scenario.variant == "legacy"
+        else [
+            _AffineOp(float(i + 2), dtype)
+            for i in range(1 if scenario.variant.startswith("single") else 2)
+        ]
     )
     model = te.ops.Sequential(*ops)
     compiled, graphs = _compile_with_graphs(model)
     # Keep products exact in BF16 across eager and fused reductions.
     x = (torch.randint(-8, 9, (8, 16), device="cuda").to(dtype) / 8).requires_grad_()
     dy = torch.randint_like(x, -8, 9) / 8
-    with pytest.warns(UserWarning, match=reason) if reason else contextlib.nullcontext():
+    with (
+        pytest.warns(UserWarning, match=scenario.expected_warning)
+        if scenario.expected_warning
+        else contextlib.nullcontext()
+    ):
         _check_ops(compiled, model, x, dy)
     _check_ops(model, model, x, dy)
-    _assert_custom_ops(graphs, "_affineop", present=compiled_passes)
-    if case == "single_forward":
+    _assert_custom_ops(
+        graphs,
+        "_affineop",
+        forward=scenario.forward_path == "custom_op",
+        backward=scenario.backward_path == "custom_op",
+    )
+    if scenario.variant == "single_forward":
         compiled, graphs = _compile_with_graphs(model)
         with torch.no_grad():
             torch.testing.assert_close(compiled(x), x * ops[0].weight)
-        _assert_custom_ops(graphs, "_affineop", present=(True, False))
+        _assert_custom_ops(graphs, "_affineop", backward=False)
 
 
 @pytest.mark.parametrize(
@@ -2636,7 +2736,12 @@ def test_te_ops_registration(forward, backward, monkeypatch):
         registered.append(kwargs["op_name"])
         return kwargs["impl"]
 
+    def compute(args, *, in_custom_op=False):
+        return in_custom_op
+
     monkeypatch.setattr("transformer_engine.pytorch.ops.op.register_custom_op", register)
+    monkeypatch.setattr(_AffineOp, "forward_compute", staticmethod(compute))
+    monkeypatch.setattr(_AffineOp, "backward_compute", staticmethod(compute))
     monkeypatch.setattr(_AffineOp, "fwd_args_type", _AffineFwdArgs if forward else None)
     monkeypatch.setattr(_AffineOp, "bwd_args_type", _AffineBwdArgs if backward else None)
     monkeypatch.setattr(_AffineOp, "compile_ops", (None, None))
@@ -2644,10 +2749,13 @@ def test_te_ops_registration(forward, backward, monkeypatch):
     assert registered == (["_affineop"] if forward else []) + (
         ["_affineop_backward"] if backward else []
     )
-    assert _AffineOp.compile_ops == (
-        _AffineOp.forward_compute if forward else None,
-        _AffineOp.backward_compute if backward else None,
-    )
+    for custom_op, enabled in zip(_AffineOp.compile_ops, (forward, backward)):
+        if enabled:
+            assert custom_op(None) is True
+        else:
+            assert custom_op is None
+    assert _AffineOp.forward_compute(None) is False
+    assert _AffineOp.backward_compute(None) is False
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -2694,7 +2802,7 @@ def test_te_ops_fused_compute_contract(use_custom_ops):
     )
     expected = output, [(), (extra, None)], (dx, [(dw0,), (dw1,)], [(), (dr,)])
     torch.testing.assert_close(actual, expected)
-    _assert_custom_ops(graphs, "_affinepair", present=use_custom_ops)
+    _assert_custom_ops(graphs, "_affinepair", forward=use_custom_ops, backward=use_custom_ops)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -2719,4 +2827,270 @@ def test_te_ops_forward_kwargs_compile():
     with pytest.warns(UserWarning, match="non-tensor keyword arguments"):
         for gain in (3.0, 5.0):
             _check_ops(compiled, model, x, dy, {"gain": gain})
-    _assert_custom_ops(graphs[-1:], "_affineop", present=False)
+    _assert_custom_ops(graphs[-1:], "_affineop", forward=False, backward=False)
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.parametrize("backward", [False, True])
+def test_te_ops_bias_compile_with_fp8_input(backward):
+    """A quantized tensor subclass must cross the Bias custom-op boundary."""
+    torch._dynamo.reset()
+    quantizer = Float8CurrentScalingQuantizer(fp8_dtype=tex.DType.kFloat8E4M3, device="cuda")
+    x = quantizer(torch.randn(32, 64, device="cuda", dtype=torch.bfloat16))
+    model = te.ops.Bias(64, device="cuda", dtype=torch.bfloat16)
+    compiled = torch.compile(lambda inp: model(inp), fullgraph=True)
+
+    with contextlib.nullcontext() if backward else torch.no_grad():
+        expected = model(x)
+        actual = compiled(x)
+        torch.testing.assert_close(actual, expected)
+        if backward:
+            dy = torch.randn_like(expected)
+            expected_db = torch.autograd.grad(expected, model.bias, dy)[0]
+            actual_db = torch.autograd.grad(actual, model.bias, dy)[0]
+            torch.testing.assert_close(actual_db, expected_db)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("quantization", [None, "fp8"])
+@pytest.mark.parametrize("case", ["linear", "bias", "pair", "unfused"])
+@pytest.mark.parametrize("grads", ["all", "input", "weight", "bias", "none"])
+def test_te_ops_linear_bias_compile(dtype, quantization, case, grads, monkeypatch):
+    _check_linear_bias_compile(dtype, quantization, case, grads, monkeypatch)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("backward_override", ["high_precision", "dequantized"])
+def test_te_ops_linear_bias_backward_override(dtype, backward_override, monkeypatch):
+    _check_linear_bias_compile(
+        dtype, "fp8", "pair", "all", monkeypatch, backward_override=backward_override
+    )
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.parametrize(
+    "input_dtype,weight_dtype",
+    [(torch.float32, torch.bfloat16), (torch.bfloat16, torch.float32)],
+)
+def test_te_ops_linear_saved_fp8_dtype_with_autocast(input_dtype, weight_dtype):
+    """Saved FP8 tensors retain their source dtype across the custom-op boundary."""
+    torch._dynamo.reset()
+    model = te.ops.BasicLinear(32, 64, device="cuda", dtype=weight_dtype)
+    eager_model = copy.deepcopy(model)
+    fp8_recipe = recipe.Float8CurrentScaling()
+
+    def run(module, inp):
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            with te.autocast(recipe=fp8_recipe):
+                return module(inp)
+
+    compiled, graphs = _compile_with_graphs(lambda inp: run(model, inp))
+    x = torch.randn(16, 32, device="cuda", dtype=input_dtype, requires_grad=True)
+    eager_x = x.detach().clone().requires_grad_()
+    actual = compiled(x)
+    expected = run(eager_model, eager_x)
+    torch.testing.assert_close(actual, expected)
+
+    dy = torch.randn_like(actual)
+    actual_grads = torch.autograd.grad(actual, (x, model.weight), dy)
+    expected_grads = torch.autograd.grad(expected, (eager_x, eager_model.weight), dy)
+    torch.testing.assert_close(actual_grads, expected_grads)
+    _assert_custom_ops(graphs, "basiclinear")
+
+    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        with te.autocast(recipe=fp8_recipe):
+            args = model.pack_forward_args(
+                [OperationContext()],
+                x,
+                prev_op_grad_output_quantizer=None,
+                next_op_input_quantizer=None,
+                basic_op_kwargs=[{}],
+            )
+            _, _, (saved_input, saved_weight) = model.forward_compute_fake(args)
+    assert saved_input.dtype == x.dtype
+    assert saved_weight.dtype == model.weight.dtype
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_te_ops_linear_workspace_fake_mode(monkeypatch):
+    def unexpected_allocation(*args, **kwargs):
+        pytest.fail("Fake initialization must not populate the real workspace cache")
+
+    monkeypatch.setattr(
+        "transformer_engine.pytorch.ops.basic.basic_linear.get_cublas_workspace",
+        unexpected_allocation,
+    )
+    with FakeTensorMode():
+        te.ops.BasicLinear(32, 64, device="cuda", dtype=torch.bfloat16)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("training", [False, True])
+@pytest.mark.parametrize("initial_device", ["cuda", "cpu", "meta"])
+def test_te_ops_linear_bias_cold_cudagraphs(training, initial_device):
+    """A fresh process prevents earlier GEMMs from hiding lazy workspace allocation."""
+    script = textwrap.dedent(
+        """
+        import contextlib
+        import sys
+        import torch
+        import transformer_engine.pytorch as te
+        from transformer_engine.pytorch.cpp_extensions.gemm import get_cublas_workspace
+        from torch._dynamo.utils import counters
+
+        training, initial_device = sys.argv[1:]
+        training = training == "True"
+        assert get_cublas_workspace.cache_info().currsize == 0
+        linear = te.ops.BasicLinear(32, 64, device=initial_device, dtype=torch.bfloat16)
+        if initial_device == "cpu":
+            assert get_cublas_workspace.cache_info().currsize == 0
+            linear.cuda()
+        elif initial_device == "meta":
+            assert get_cublas_workspace.cache_info().currsize == 0
+            linear.to_empty(device="cuda")
+            linear.reset_parameters()
+        assert get_cublas_workspace.cache_info().currsize > 0
+        model = te.ops.Sequential(linear, te.ops.Bias(64, dtype=torch.bfloat16))
+        x = torch.randn(32, 32, device="cuda", dtype=torch.bfloat16, requires_grad=training)
+        targets = (x, *model.parameters())
+        dy = torch.randn(32, 64, device="cuda", dtype=torch.bfloat16)
+
+        def forward(x):
+            return model(x)
+
+        compiled = torch.compile(forward, fullgraph=True, mode="reduce-overhead")
+        counters.clear()
+        with contextlib.nullcontext() if training else torch.no_grad():
+            for _ in range(5):
+                torch.compiler.cudagraph_mark_step_begin()
+                actual = compiled(x)
+                if training:
+                    grads = torch.autograd.grad(actual, targets, dy)
+                # Eager reference runs only after the first compiled invocation.
+                expected = forward(x)
+                torch.testing.assert_close(actual, expected)
+                if training:
+                    expected_grads = torch.autograd.grad(expected, targets, dy)
+                    torch.testing.assert_close(grads, expected_grads)
+                    del grads, expected_grads
+                del actual, expected
+        torch.cuda.synchronize()
+        assert not counters["inductor"]["cudagraph_skips"], counters["inductor"]
+        assert counters["inductor"]["cudagraph_recorded_non_static_inputs"] > 0, dict(
+            counters["inductor"]
+        )
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(training), initial_device],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=180,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def _check_linear_bias_compile(
+    dtype, quantization, case, grads, monkeypatch, *, backward_override=None
+):
+    if quantization == "fp8" and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+    if (case == "linear" and grads == "bias") or (case == "bias" and grads == "weight"):
+        pytest.skip("Requested parameter is absent")
+    torch._dynamo.reset()
+    if case == "unfused":
+        monkeypatch.setattr(OperationFuser, "forward_fusion_functions", [])
+    ops = []
+    if case != "bias":
+        ops.append(te.ops.BasicLinear(32, 64, dtype=dtype))
+        ops[-1].weight.requires_grad_(grads in ("all", "weight"))
+    if case != "linear":
+        ops.append(te.ops.Bias(32 if case == "bias" else 64, dtype=dtype))
+        ops[-1].bias.requires_grad_(grads in ("all", "bias"))
+    model = te.ops.Sequential(*ops)
+    eager_model = copy.deepcopy(model)
+    quant_recipe = (
+        recipe.Float8CurrentScaling(backward_override=backward_override)
+        if quantization == "fp8"
+        else None
+    )
+
+    def run(x, module=model):
+        if quant_recipe is None:
+            return module(x)
+        with te.autocast(recipe=quant_recipe):
+            return module(x)
+
+    compiled, graphs = _compile_with_graphs(run)
+    x = torch.randn(2, 16, 32, device="cuda", dtype=dtype)
+    x.requires_grad_(grads in ("all", "input"))
+    targets = tuple(t for t in (x, *model.parameters()) if t.requires_grad)
+    eager_targets = tuple(t for t in (x, *eager_model.parameters()) if t.requires_grad)
+    graph_count = None
+    with torch.no_grad() if grads == "none" else contextlib.nullcontext():
+        for iteration in range(3):
+            with torch.no_grad():
+                for tensor in (x, *model.parameters()):
+                    if iteration == 0:
+                        # These binary fractions survive FP8 quantization exactly,
+                        # allowing a strict comparison with native PyTorch.
+                        tensor.copy_(torch.randint(-2, 3, tensor.shape, device=tensor.device) / 16)
+                    else:
+                        tensor.uniform_(-0.5, 0.5)
+                for param, eager_param in zip(model.parameters(), eager_model.parameters()):
+                    eager_param.copy_(param)
+            actual = compiled(x)
+            expected = run(x, eager_model)
+            torch.testing.assert_close(actual, expected)
+            if iteration == 0:
+                reference = x.double()
+                for op in ops:
+                    reference = (
+                        torch.nn.functional.linear(reference, op.weight.double())
+                        if isinstance(op, BasicLinear)
+                        else reference + op.bias.double()
+                    )
+                torch.testing.assert_close(
+                    actual, reference, check_dtype=False, **dtype_tols(dtype)
+                )
+            if targets:
+                dy = (
+                    torch.randint_like(actual, -2, 3) / 16
+                    if iteration == 0
+                    else torch.randn_like(actual)
+                )
+                actual_grads = torch.autograd.grad(actual, targets, dy)
+                torch.testing.assert_close(
+                    actual_grads, torch.autograd.grad(expected, eager_targets, dy)
+                )
+                if iteration == 0:
+                    torch.testing.assert_close(
+                        actual_grads,
+                        torch.autograd.grad(reference, targets, dy.double()),
+                        **dtype_tols(dtype),
+                    )
+            if iteration == 1:
+                graph_count = len(graphs)
+            elif iteration == 2:
+                assert len(graphs) == graph_count
+    _assert_custom_ops(
+        graphs,
+        "forwardlinearbiasactivation",
+        forward=case == "pair",
+        backward=False,
+    )
+    _assert_custom_ops(
+        graphs,
+        "basiclinear",
+        forward=case in ("linear", "unfused"),
+        backward=case != "bias" and grads in ("all", "input", "weight"),
+    )
+    _assert_custom_ops(
+        graphs,
+        "bias",
+        forward=case in ("bias", "unfused"),
+        backward=case != "linear" and bool(targets),
+    )
