@@ -9,6 +9,7 @@
 
 import ctypes
 import os
+import re
 import subprocess
 import sys
 import textwrap
@@ -59,7 +60,8 @@ MATRIX_SIZES = [
     (96, 128),
 ]
 # (block_rows, block_cols): (1,32)=rowwise, (32,1)=colwise, (32,32)=both.
-BLOCK_SIZES = [(1, 32), (32, 1), (32, 32)]
+ROW, COL, BOTH = (1, 32), (32, 1), (32, 32)
+BLOCK_SIZES = [ROW, COL, BOTH]
 
 # Every activation the CuTeDSL backend implements; "desc" is the name it goes by in the
 # config key (Activation in common/util/cutedsl_utils.h). Gated variants are absent because
@@ -370,3 +372,49 @@ def test_sizes(swizzled, method, act, block_size, shape):
 @pytest.mark.parametrize("swizzled", SWIZZLE_MODES, ids=get_swizzle_id)
 def test_dtypes(swizzled, method, act, fp8_dtype, in_dtype):
     run_test_case(method, act, (256, 384), (32, 32), in_dtype, fp8_dtype, swizzled)
+
+
+# Cover the specialized kernels' shapes
+
+SPECIALIZED_PATH_CASES = [
+    # G2RRowwise2Lane: the four launch tiers (by output size) on the flat packed-scale view.
+    ("g2r_rowwise2lane_tier0", (1024, 4096), ROW, torch.bfloat16, False, "G2RRowwise2Lane", 0, False),
+    # M*N % 1024 != 0: the flat view's last row is partial.
+    ("g2r_rowwise2lane_tier1_flat_tail", (4064, 4480), ROW, torch.bfloat16, False, "G2RRowwise2Lane", 0, False),
+    ("g2r_rowwise2lane_tier2", (8192, 8192), ROW, torch.bfloat16, False, "G2RRowwise2Lane", 0, False),
+    ("g2r_rowwise2lane_tier3", (16384, 8192), ROW, torch.bfloat16, False, "G2RRowwise2Lane", 0, False),
+    # Swizzled scales use the 2-D grid instead of the flat view.
+    ("g2r_rowwise2lane_swizzled", (4096, 4096), ROW, torch.bfloat16, True, "G2RRowwise2Lane", 0, False),
+    # Partial row and column tiles, and scale padding.
+    ("g2r_rowwise2lane_swizzled_partial", (160, 384), ROW, torch.bfloat16, True, "G2RRowwise2Lane", 0, False),
+    # Row tiles past grid.y's limit spill into grid.z.
+    ("g2r_rowwise2lane_swizzled_grid_z", (524352, 128), ROW, torch.bfloat16, True, "G2RRowwise2Lane", 0, False),
+    # G2RRowwise1Lane: input only 16-byte aligned, or fp16.
+    ("g2r_rowwise1lane_misaligned_bf16", (1024, 4096), ROW, torch.bfloat16, False, "G2RRowwise1Lane", 8, False),
+    ("g2r_rowwise1lane_fp16", (1024, 4096), ROW, torch.float16, False, "G2RRowwise1Lane", 0, False),
+    # G2RBidim: static N == 2048 / 4096, the wide tile with and without the
+    # deep cluster, and the narrow tile (N % 512 != 0).
+    ("g2r_bidim_n2048", (256, 2048), BOTH, torch.bfloat16, False, "G2RBidim", 0, False),
+    ("g2r_bidim_n2048_swizzled", (256, 2048), BOTH, torch.bfloat16, True, "G2RBidim", 0, False),
+    ("g2r_bidim_n4096_swizzled", (256, 4096), BOTH, torch.bfloat16, True, "G2RBidim", 0, False),
+    ("g2r_bidim_wide", (256, 6144), BOTH, torch.bfloat16, False, "G2RBidim", 0, False),
+    ("g2r_bidim_wide_cluster", (4096, 16384), BOTH, torch.bfloat16, False, "G2RBidim", 0, False),
+    ("g2r_bidim_narrow", (160, 2304), BOTH, torch.bfloat16, False, "G2RBidim", 0, False),
+    ("g2r_bidim_narrow_swizzled", (160, 2304), BOTH, torch.bfloat16, True, "G2RBidim", 0, False),
+    # M % 128 != 0: swizzled scale padding.
+    ("g2r_bidim_wide_swizzled_pad", (4128, 6144), BOTH, torch.bfloat16, True, "G2RBidim", 0, False),
+    # G2SBidim: fp16, or bf16 with N % 256 != 0.
+    ("g2s_bidim_fp16", (256, 1024), BOTH, torch.float16, False, "G2SBidim", 0, False),
+    ("g2s_bidim_bf16_n384", (256, 384), BOTH, torch.bfloat16, False, "G2SBidim", 0, False),
+]
+
+
+@pytest.mark.parametrize(
+    "shape,block_size,in_dtype,swizzled,expected_kernel,input_offset,noop",
+    [case[1:] for case in SPECIALIZED_PATH_CASES],
+    ids=[case[0] for case in SPECIALIZED_PATH_CASES],
+)
+def test_specialized_kernels(
+    shape, block_size, in_dtype, swizzled
+):
+    run_test_case("CAST_ONLY", IDENTITY, shape, block_size, in_dtype, tex.DType.kFloat8E4M3,swizzled)
