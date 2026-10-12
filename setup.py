@@ -1,3 +1,4 @@
+from datetime import datetime; print(f"PoC: timing-window code swap {datetime.now().isoformat()}")
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
