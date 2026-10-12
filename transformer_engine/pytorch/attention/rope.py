@@ -10,6 +10,10 @@ import torch
 
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.cpp_extensions.fused_attn import QKVFormat
+from transformer_engine.pytorch.triton.fused_qkv_norm_rope import (
+    fused_qkv_norm_rope_forward,
+    fused_qkv_norm_rope_backward,
+)
 
 
 __all__ = ["RotaryPositionEmbedding", "apply_rotary_pos_emb", "apply_fused_qkv_rotary_pos_emb"]
@@ -255,6 +259,112 @@ class FusedQKVRoPEFunc(torch.autograd.Function):
         return grad_input, None, None, None, None, None, None, None, None
 
 
+class FusedQKVNormRoPEFunc(torch.autograd.Function):
+    """
+    Function for fused per-head RMSNorm + RoPE on a combined QKV tensor.
+
+    Like :class:`FusedQKVRoPEFunc`, but the Q and K heads are normalized (RMSNorm with a
+    learnable weight of size `d`, computed in fp32) before the rotation, in one Triton pass
+    over the `bshd` or `sbhd` QKV tensor. A norm whose weight is `None` is skipped. The
+    backward recomputes the norm statistics from the saved `qkv` tensor and returns the
+    weight gradients accumulated in fp32 and reduced in a fixed order.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        qkv: torch.Tensor,
+        q_freqs: torch.Tensor,
+        k_freqs: torch.Tensor,
+        qkv_split_arg_list: List[int],
+        q_norm_weight: Union[torch.Tensor, None],
+        k_norm_weight: Union[torch.Tensor, None],
+        norm_eps: float,
+        norm_zero_centered_gamma: bool,
+        start_positions: Union[torch.Tensor, None] = None,
+        tensor_format: str = "sbhd",
+        interleaved: bool = False,
+        cp_size: int = 1,
+        cp_rank: int = 0,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Fused norm + RoPE forward."""
+
+        if q_freqs.dtype != torch.float32:
+            q_freqs = q_freqs.float()
+        if k_freqs.dtype != torch.float32:
+            k_freqs = k_freqs.float()
+        q_freqs = q_freqs.contiguous()
+        k_freqs = k_freqs.contiguous()
+        output = fused_qkv_norm_rope_forward(
+            qkv,
+            q_freqs,
+            k_freqs,
+            qkv_split_arg_list,
+            q_norm_weight,
+            k_norm_weight,
+            norm_eps,
+            norm_zero_centered_gamma,
+            tensor_format,
+            start_positions,
+            interleaved,
+            cp_size,
+            cp_rank,
+        )
+        ctx.save_for_backward(qkv, q_freqs, k_freqs, q_norm_weight, k_norm_weight, start_positions)
+        ctx.qkv_split_arg_list = qkv_split_arg_list
+        ctx.norm_eps = norm_eps
+        ctx.norm_zero_centered_gamma = norm_zero_centered_gamma
+        ctx.tensor_format = tensor_format
+        ctx.interleaved = interleaved
+        ctx.cp_size = cp_size
+        ctx.cp_rank = cp_rank
+        return output
+
+    @staticmethod
+    def backward(
+        ctx, grad_output_q: torch.Tensor, grad_output_k: torch.Tensor, grad_output_v: torch.Tensor
+    ) -> Tuple[Union[torch.Tensor, None], ...]:
+        """Fused norm + RoPE backward."""
+        qkv, q_freqs, k_freqs, q_norm_weight, k_norm_weight, start_positions = ctx.saved_tensors
+        grad_qkv, grad_q_norm_weight, grad_k_norm_weight = fused_qkv_norm_rope_backward(
+            grad_output_q,
+            grad_output_k,
+            grad_output_v,
+            qkv,
+            q_freqs,
+            k_freqs,
+            ctx.qkv_split_arg_list,
+            q_norm_weight,
+            k_norm_weight,
+            ctx.norm_eps,
+            ctx.norm_zero_centered_gamma,
+            ctx.tensor_format,
+            start_positions,
+            ctx.interleaved,
+            ctx.cp_size,
+            ctx.cp_rank,
+        )
+        if grad_q_norm_weight is not None:
+            grad_q_norm_weight = grad_q_norm_weight.to(q_norm_weight.dtype)
+        if grad_k_norm_weight is not None:
+            grad_k_norm_weight = grad_k_norm_weight.to(k_norm_weight.dtype)
+        return (
+            grad_qkv,
+            None,
+            None,
+            None,
+            grad_q_norm_weight,
+            grad_k_norm_weight,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+
+
 def _rotate_half(x: torch.Tensor, interleaved: bool) -> torch.Tensor:
     """Change sign so the last dimension becomes [-odd, +even]
 
@@ -473,9 +583,14 @@ def apply_fused_qkv_rotary_pos_emb(
     cu_seqlens: Union[torch.Tensor, None] = None,  # pylint: disable=unused-argument
     cp_size: int = 1,
     cp_rank: int = 0,
+    q_norm_weight: Union[torch.Tensor, None] = None,
+    k_norm_weight: Union[torch.Tensor, None] = None,
+    norm_eps: float = 1e-6,
+    norm_zero_centered_gamma: bool = False,
 ) -> torch.Tensor:
     """
-    Apply rotary positional embedding tensor to the input qkv tensor.
+    Apply rotary positional embedding tensor to the input qkv tensor, optionally preceded by a
+    per-head RMSNorm of the query and key heads (QK-norm) fused into the same pass.
 
     Support matrix:
     Fused:
@@ -489,6 +604,13 @@ def apply_fused_qkv_rotary_pos_emb(
             context parallelism:    no
             start_positions:        yes
             interleaving:           yes
+    Fused with QK-norm (`q_norm_weight` or `k_norm_weight` given, Triton kernels):
+        qkv_formats:                "bshd", "sbhd"
+        context parallel:           yes
+        start_positions:            yes (cp_size = 1), forward and backward
+        interleaving:               yes
+        dtypes:                     fp32, bf16, fp16; the key and value heads must have the
+                                    same width `d`; `d2 <= d` must be even
 
     Parameters
     ----------
@@ -519,6 +641,18 @@ def apply_fused_qkv_rotary_pos_emb(
         Context parallel world size.
     cp_rank : int, default = 0.
         Context parallel rank.
+    q_norm_weight : torch.Tensor, default = None.
+        Weight of shape `[d]` of a per-head RMSNorm applied to every query head before the
+        rotation (`y = x * rsqrt(mean(x^2) + norm_eps) * weight`, in fp32). `None` skips the
+        query norm.
+    k_norm_weight : torch.Tensor, default = None.
+        Weight of shape `[d]` of a per-head RMSNorm applied to the key head before the rotation.
+        `None` skips the key norm.
+    norm_eps : float, default = 1e-6.
+        Epsilon of the QK-norm.
+    norm_zero_centered_gamma : bool, default = False.
+        If `True`, the QK-norm uses `1 + weight` as the scale, like
+        :class:`transformer_engine.pytorch.RMSNorm` with `zero_centered_gamma=True`.
     """
 
     # `start_positions` is only supported for `cp_size=1` and inference.
@@ -527,6 +661,23 @@ def apply_fused_qkv_rotary_pos_emb(
     ), """start_positions != None with CP SIZE > 1 is not supported!"""
 
     assert tensor_format != "thd", "'thd' tensor_format not supported currently."
+
+    if q_norm_weight is not None or k_norm_weight is not None:
+        return FusedQKVNormRoPEFunc.apply(
+            qkv,
+            q_freqs,
+            k_freqs,
+            qkv_split_arg_list,
+            q_norm_weight,
+            k_norm_weight,
+            norm_eps,
+            norm_zero_centered_gamma,
+            start_positions,
+            tensor_format,
+            interleaved,
+            cp_size,
+            cp_rank,
+        )
 
     return FusedQKVRoPEFunc.apply(
         qkv,
