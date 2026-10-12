@@ -3141,5 +3141,5 @@ class DotProductAttention(TransformerEngineBaseModule):
                 return None
 
             if qkv_head_pad:
-                attn_out = _trim_output(attn_out, num_attention_heads, head_dim_qk, orig_head_dim_v)
+                attn_out = _trim_output(attn_out, num_attention_heads, head_dim_v, orig_head_dim_v)
             return attn_out
