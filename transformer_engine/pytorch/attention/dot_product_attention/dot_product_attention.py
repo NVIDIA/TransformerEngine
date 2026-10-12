@@ -3141,5 +3141,13 @@ class DotProductAttention(TransformerEngineBaseModule):
                 return None
 
             if qkv_head_pad:
-                attn_out = _trim_output(attn_out, num_attention_heads, head_dim_v, orig_head_dim_v)
+                # Keep the rest of the result tuple as-is.
+                if not self.return_max_logit:
+                    attn_out = (attn_out,)
+                attn_out = (
+                    # Note the comma at the end; we're creating a 1-tuple here.
+                    _trim_output(attn_out[0], num_attention_heads, head_dim_v, orig_head_dim_v),
+                ) + attn_out[1:]
+                if not self.return_max_logit:
+                    attn_out = attn_out[0]
             return attn_out
