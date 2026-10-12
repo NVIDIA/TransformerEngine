@@ -3355,6 +3355,7 @@ def test_te_ops_linear_bias_cold_cudagraphs(training, initial_device, quantizati
     script = textwrap.dedent(
         """
         import contextlib
+        import copy
         import sys
         import torch
         import transformer_engine.pytorch as te
@@ -3399,29 +3400,33 @@ def test_te_ops_linear_bias_cold_cudagraphs(training, initial_device, quantizati
             linear.reset_parameters()
         assert get_cublas_workspace.cache_info().currsize > 0
         model = te.ops.Sequential(linear, te.ops.Bias(out_features, dtype=torch.bfloat16))
+        reference_model = copy.deepcopy(model)
         x = torch.randn(
             batch_size, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=training
         )
         targets = (x, *model.parameters())
+        reference_targets = (x, *reference_model.parameters())
         dy = torch.randn(batch_size, out_features, device="cuda", dtype=torch.bfloat16)
 
-        def forward(x):
-            with te.autocast(enabled=quant_recipe is not None, recipe=quant_recipe):
-                return model(x)
+        def forward(x, module):
+            if quant_recipe is None:
+                return module(x)
+            with te.autocast(recipe=quant_recipe):
+                return module(x)
 
         compiled = torch.compile(forward, fullgraph=True, mode="reduce-overhead")
         counters.clear()
         with contextlib.nullcontext() if training else torch.no_grad():
             for _ in range(5):
                 torch.compiler.cudagraph_mark_step_begin()
-                actual = compiled(x)
+                actual = compiled(x, model)
                 if training:
                     grads = torch.autograd.grad(actual, targets, dy)
                 # Eager reference runs only after the first compiled invocation.
-                expected = forward(x)
+                expected = forward(x, reference_model)
                 torch.testing.assert_close(actual, expected, **eager_tols)
                 if training:
-                    expected_grads = torch.autograd.grad(expected, targets, dy)
+                    expected_grads = torch.autograd.grad(expected, reference_targets, dy)
                     torch.testing.assert_close(grads, expected_grads, **eager_tols)
                     del grads, expected_grads
                 del actual, expected
