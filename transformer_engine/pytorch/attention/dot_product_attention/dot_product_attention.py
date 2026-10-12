@@ -442,7 +442,7 @@ def _should_pad_qkv_head_dim(
 
 
 def _pad_qkv_head_dim(query_layer, key_layer, value_layer):
-    """Pad Q/K/V to the same head dimension for FlashAttention 2 MLA."""
+    """Pad Q/K/V to the same head dimension for better backend selection result."""
     orig_head_dim_qk = query_layer.shape[-1]
     orig_head_dim_v = value_layer.shape[-1]
     padded_head_dim = max(orig_head_dim_qk, orig_head_dim_v)
