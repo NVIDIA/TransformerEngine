@@ -696,6 +696,8 @@ class TestEP(unittest.TestCase):
 
         with self.mesh, global_shard_guard(self.mr):
 
+            align = max(int(self.hk.dispatch_output_per_expert_alignment), 1)
+
             def loss_fn(eo):
                 eo = jax.lax.with_sharding_constraint(eo, NamedSharding(self.mesh, ep_spec_3d))
                 toks = jax.lax.with_sharding_constraint(tokens, NamedSharding(self.mesh, dp_spec))
@@ -714,9 +716,19 @@ class TestEP(unittest.TestCase):
                 combined = jax.lax.with_sharding_constraint(
                     combined, NamedSharding(self.mesh, dp_spec)
                 )
-                return 0.5 * (combined.astype(jnp.float32) ** 2).sum()
+                # ep_combine_bwd writes only slots [0, sum(padded_per_expert)); the tail
+                # is uninitialized and masked out below.
+                padded = ((tc + align - 1) // align) * align
+                total_recv = jnp.sum(padded, axis=-1, keepdims=True).astype(jnp.int32)
+                slot_idx = jnp.arange(self.recv_capacity_per_rank, dtype=jnp.int32)
+                filled = slot_idx[None, :] < total_recv
+                return 0.5 * (combined.astype(jnp.float32) ** 2).sum(), filled
 
-            loss, grad_eo = jax.jit(jax.value_and_grad(loss_fn))(expert_out)
+            def masked_value_and_grad(eo):
+                (loss, filled), grad = jax.value_and_grad(loss_fn, has_aux=True)(eo)
+                return loss, jnp.where(filled[..., None], grad, 0.0)
+
+            loss, grad_eo = jax.jit(masked_value_and_grad)(expert_out)
             grad_eo.block_until_ready()
 
         self.assertTrue(np.isfinite(float(loss)))
