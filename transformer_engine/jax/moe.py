@@ -753,11 +753,10 @@ def _moe_fwd_rule(
         dispatch_output_per_expert_alignment=_ALIGN_SIZE,
         topk_idx_dtype=int(jax_dtype_to_te_dtype(topk_idx_3d.dtype)),
     )
-    token_counts, total_recv_tokens, handle_mem = tex.ep_prepare(cfg, topk_idx_3d)
-    token_counts = jax.lax.with_sharding_constraint(token_counts, NamedSharding(mesh, ep2_spec))
-    recv_tokens, recv_topk_weights = tex.ep_dispatch_fwd(
-        cfg, handle_mem, topk_idx_3d, x, topk_w_3d, recv_pr
+    recv_tokens, recv_topk_weights, token_counts, total_recv_tokens, handle_mem = (
+        tex.ep_prepare_dispatch_fwd(cfg, topk_idx_3d, x, topk_w_3d, recv_pr)
     )
+    token_counts = jax.lax.with_sharding_constraint(token_counts, NamedSharding(mesh, ep2_spec))
     recv_tokens = jax.lax.with_sharding_constraint(recv_tokens, NamedSharding(mesh, ep3_spec))
     recv_topk_weights = jax.lax.with_sharding_constraint(
         recv_topk_weights, NamedSharding(mesh, ep2_spec)

@@ -64,6 +64,7 @@ __all__ = [
     "ep_prepare",
     "ep_dispatch_fwd",
     "ep_prepare_and_dispatch_fwd",
+    "ep_prepare_dispatch_fwd",
     "ep_combine_fwd",
     "ep_dispatch_bwd",
     "ep_combine_bwd",
@@ -1290,6 +1291,37 @@ def ep_prepare_and_dispatch_fwd(
         recv_capacity_per_rank=recv_capacity_per_rank,
         is_outer=True,
     )
+
+
+_fused_prepare_dispatch = None
+
+
+def _fused_prepare_dispatch_enabled():
+    """True when NVTE_EP_FUSED_PREPARE_DISPATCH=1 selects the fused prepare + dispatch path.
+
+    Latched on first call (ep_bootstrap). Only supports EP within a single NVLink domain;
+    received row order within an expert block may differ from the unfused path.
+    """
+    global _fused_prepare_dispatch
+    if _fused_prepare_dispatch is None:
+        _fused_prepare_dispatch = os.environ.get("NVTE_EP_FUSED_PREPARE_DISPATCH", "0") == "1"
+    return _fused_prepare_dispatch
+
+
+def ep_prepare_dispatch_fwd(
+    cfg: EpLayerConfig, topk_idx, tokens, topk_weights, recv_capacity_per_rank
+):
+    """Prepare + dispatch, fused or unfused per NVTE_EP_FUSED_PREPARE_DISPATCH; returns
+    ``(recv_tokens, recv_topk_weights, token_counts, total_recv_tokens, handle_mem)``."""
+    if _fused_prepare_dispatch_enabled():
+        return ep_prepare_and_dispatch_fwd(
+            cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank
+        )
+    token_counts, total_recv_tokens, handle_mem = ep_prepare(cfg, topk_idx)
+    recv_tokens, recv_topk_weights = ep_dispatch_fwd(
+        cfg, handle_mem, topk_idx, tokens, topk_weights, recv_capacity_per_rank
+    )
+    return recv_tokens, recv_topk_weights, token_counts, total_recv_tokens, handle_mem
 
 
 @_on_collective_stream
