@@ -2019,14 +2019,18 @@ def should_pad_qkv_head_dim(
     if cached_params is not None and cached_params == attention_params:
         return _should_pad_qkv_head_dim_cache["result"]
     native_backend = get_attention_backend(attention_params)
+    native_use_flash_attention = native_backend[0]
     native_flash_attention_backend = native_backend[1]
+    native_use_fused_attention = native_backend[2]
     native_use_unfused_attention = native_backend[4]
-    # No point padding if native path is already fused.
-    if not native_use_unfused_attention:
-        # Native already lands on FlashAttention or FusedAttention, so no need to pad. However,
-        # FlashAttention-2 cannot take mismatched QK/V head dims, so we still pad in that case.
+    if native_use_flash_attention:
+        # Native already lands on FlashAttention, so no need to pad. However, FlashAttention-2
+        # cannot take mismatched QK/V head dims, so we still pad in that case.
         result = native_flash_attention_backend == FlashAttentionUtils.version
-    else:
+    elif native_use_fused_attention:
+        # Native already lands on FusedAttention, so no need to pad.
+        result = False
+    elif native_use_unfused_attention:
         padded_head_dim = max(attention_params.head_dim_qk, attention_params.head_dim_v)
         padded_params = replace(
             attention_params,
@@ -2037,6 +2041,8 @@ def should_pad_qkv_head_dim(
         padded_use_flash_attention = padded_backend[0]
         padded_use_fused_attention = padded_backend[2]
         result = padded_use_flash_attention or padded_use_fused_attention
+    else:
+        result = False
     # Store a shallow copy as the key to avoid later `attention_params` in-place modifications
     # resulting in subsequent cache misses.
     _should_pad_qkv_head_dim_cache["attention_params"] = replace(attention_params)

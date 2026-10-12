@@ -1415,6 +1415,7 @@ def test_dpa_mla_should_pad(dtype, model_configs, model):
     native_attn_params = make_attn_params(config.head_dim_qk, config.head_dim_v)
     if config.head_dim_qk != config.head_dim_v:
         native_backend = dpa_utils.get_attention_backend(native_attn_params)
+        native_use_flash_attention = native_backend[0]
         native_flash_attention_backend = native_backend[1]
         native_use_unfused_attention = native_backend[4]
 
@@ -1424,7 +1425,10 @@ def test_dpa_mla_should_pad(dtype, model_configs, model):
         padded_use_flash_attention = padded_backend[0]
         padded_use_fused_attention = padded_backend[2]
 
-        if native_flash_attention_backend == FlashAttentionUtils.version:
+        if (
+            native_use_flash_attention
+            and native_flash_attention_backend == FlashAttentionUtils.version
+        ):
             # FA2 needs padding.
             assert should_pad_qkv_head_dim(
                 native_attn_params
