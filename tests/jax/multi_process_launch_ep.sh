@@ -14,6 +14,8 @@ if [ -z "${NVTE_TEST_EP_CLASSES:-}" ]; then
     bash "${BASH_SOURCE[0]}" || RET=1
   NVTE_TEST_EP_CLASSES="TestEPBorrowedComm" \
     bash "${BASH_SOURCE[0]}" || RET=1
+  NVTE_EP_FUSED_PREPARE_DISPATCH=1 NVTE_TEST_EP_CLASSES="TestEP" \
+    bash "${BASH_SOURCE[0]}" || RET=1
   exit "$RET"
 fi
 

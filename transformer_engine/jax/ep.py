@@ -6,6 +6,7 @@
 import atexit
 import ctypes
 import os
+import warnings
 from functools import partial
 
 import jax
@@ -156,7 +157,14 @@ def ep_bootstrap(
     """
     # Force the AllGather-scan UpdateHandle path so dispatch metadata is ready
     # at prepare time for the combine backward. Respect an explicit user override.
-    os.environ.setdefault("NCCL_EP_HT_EM_AG_SCAN_MODE", "1")
+    # The fused prepare + dispatch path uses count mode instead.
+    if _fused_prepare_dispatch_enabled():
+        warnings.warn(
+            "NVTE_EP_FUSED_PREPARE_DISPATCH is set: fused prepare + dispatch only supports EP"
+            " within a single NVLink domain."
+        )
+    else:
+        os.environ.setdefault("NCCL_EP_HT_EM_AG_SCAN_MODE", "1")
 
     if rank is None:
         rank = jax.process_index()
@@ -315,6 +323,21 @@ def _default_out_partition_spec():
     return (leading,)
 
 
+_fused_prepare_dispatch = None
+
+
+def _fused_prepare_dispatch_enabled():
+    """True when NVTE_EP_FUSED_PREPARE_DISPATCH=1 selects the fused prepare + dispatch path.
+
+    Latched on first call (ep_bootstrap). Only supports EP within a single NVLink domain;
+    received row order within an expert block may differ from the unfused path.
+    """
+    global _fused_prepare_dispatch
+    if _fused_prepare_dispatch is None:
+        _fused_prepare_dispatch = os.environ.get("NVTE_EP_FUSED_PREPARE_DISPATCH", "0") == "1"
+    return _fused_prepare_dispatch
+
+
 # ── ep_dispatch (custom_vjp) ─────────────────────────────────────────────────
 
 
@@ -343,10 +366,17 @@ def _dispatch_fwd(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank):
         raise TypeError(
             f"ep_dispatch: topk_weights must be a floating dtype; got {topk_weights.dtype}."
         )
-    token_counts, total_recv_tokens, handle_mem = tex.ep_prepare(cfg, topk_idx)
-    recv_tokens, recv_topk_weights = tex.ep_dispatch_fwd(
-        cfg, handle_mem, topk_idx, tokens, topk_weights, recv_capacity_per_rank
-    )
+    if _fused_prepare_dispatch_enabled():
+        recv_tokens, recv_topk_weights, token_counts, total_recv_tokens, handle_mem = (
+            tex.ep_prepare_and_dispatch_fwd(
+                cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank
+            )
+        )
+    else:
+        token_counts, total_recv_tokens, handle_mem = tex.ep_prepare(cfg, topk_idx)
+        recv_tokens, recv_topk_weights = tex.ep_dispatch_fwd(
+            cfg, handle_mem, topk_idx, tokens, topk_weights, recv_capacity_per_rank
+        )
     out_leading = tuple(tokens.shape[:-1])
     primal = (recv_tokens, recv_topk_weights, handle_mem, token_counts, total_recv_tokens)
     return primal, (handle_mem, out_leading)
