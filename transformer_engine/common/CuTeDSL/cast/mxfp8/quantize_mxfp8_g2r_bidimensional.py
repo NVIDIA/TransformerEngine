@@ -402,7 +402,10 @@ def quantize_bidimensional_mxfp8_g2r(
     load_atom = cute.make_copy_atom(
         cute.nvgpu.CopyG2ROp(),
         cfg.DTYPE,
-        num_bits_per_copy=ELEMENTS_X_PER_THREAD * cfg.DTYPE.width,
+        num_bits_per_copy=min(
+            ELEMENTS_X_PER_THREAD * cfg.DTYPE.width,
+            MXFP8QuantizeRegisterBidimensionalKernel.max_num_bits_per_copy(),
+        ),
         # TODO(kainingz): due to https://github.com/NVIDIA/cutlass/issues/3726 using
         # invariant=True here will drop the cache policy
         invariant=False,
@@ -506,15 +509,24 @@ class MXFP8QuantizeRegisterBidimensionalKernel(MXFP8QuantizeKernelBase):
     _CTA_THREADS_X = 32
 
     @staticmethod
+    @cute.jit
+    def max_num_bits_per_copy() -> int:
+        """Widest global load to issue: 256-bit loads (`ld.global.v8.b32`) need PTX ISA 8.8,
+        i.e. CUDA 12.9. Older toolchains split each one into two 128-bit loads, as
+        cast_rowwise.cuh / cast_bidim.cuh do via util/ptx.cuh's ld_global_nc_b32x8."""
+        if cutlass.const_expr(cutlass.target_version(min_version="12.9")):
+            return 256
+        return 128
+
+    @staticmethod
     def supports(cfg: MXFP8QuantizeConfig) -> bool:
-        # BF16 packed math and 256-bit loads; packed scales only (no colwise GEMM swizzle yet).
+        # BF16 packed math; packed scales only (no colwise GEMM swizzle yet).
         return (
             cfg.is_plain_cast()
             and cfg.DTYPE is cutlass.BFloat16
             and cfg.ROWWISE
             and cfg.COLWISE
             and not cfg.WITH_GEMM_SWIZZLED_SCALES
-            and cutlass.target_version(min_version="12.9")
         )
 
     @staticmethod

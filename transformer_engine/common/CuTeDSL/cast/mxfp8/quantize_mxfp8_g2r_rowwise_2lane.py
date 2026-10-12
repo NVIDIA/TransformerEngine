@@ -75,8 +75,11 @@ def quantize_rowwise_mxfp8_g2r(
     # With CHECK_BOUNDS=False DCE will remove it so we don't pay extra cost when we don't use it
     tile_valid_flags = cute.make_rmem_tensor((NUM_TILES,), Boolean)
 
-    # 16 * 2 bytes = 32 bytes which is already the widest
-    LOAD_WIDTH = ELEMENTS_PER_THREAD * cfg.DTYPE.width
+    # 16 * 2 bytes = 32 bytes, one 256-bit load where the toolchain supports it
+    LOAD_WIDTH = min(
+        ELEMENTS_PER_THREAD * cfg.DTYPE.width,
+        MXFP8QuantizeG2RRowwise2LaneKernel.max_num_bits_per_copy(),
+    )
     load_atom = cute.make_copy_atom(
         cute.nvgpu.CopyG2ROp(),
         cfg.DTYPE,
@@ -180,14 +183,23 @@ class MXFP8QuantizeG2RRowwise2LaneKernel(MXFP8QuantizeKernelBase):
     _MAX_GRID_Y = 65535
 
     @staticmethod
+    @cute.jit
+    def max_num_bits_per_copy() -> int:
+        """Widest global load to issue: 256-bit loads (`ld.global.v8.b32`) need PTX ISA 8.8,
+        i.e. CUDA 12.9. Older toolchains split each one into two 128-bit loads, as
+        cast_rowwise.cuh / cast_bidim.cuh do via util/ptx.cuh's ld_global_nc_b32x8."""
+        if cutlass.const_expr(cutlass.target_version(min_version="12.9")):
+            return 256
+        return 128
+
+    @staticmethod
     def supports(cfg: MXFP8QuantizeConfig) -> bool:
-        # BF16 packed math and 256-bit loads; compilers predating those keep the other kernels.
+        # BF16 packed math.
         return (
             cfg.is_plain_cast()
             and cfg.DTYPE is cutlass.BFloat16
             and cfg.ROWWISE
             and not cfg.COLWISE
-            and cutlass.target_version(min_version="12.9")
         )
 
     @staticmethod
