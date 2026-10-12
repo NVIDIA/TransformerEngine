@@ -92,6 +92,7 @@ _THD_POLICY_BACKEND_ENV_VARS = (
     "NVTE_FLASH_ATTN_V3",
     "NVTE_FLASH_ATTN_V4",
     "NVTE_FUSED_ATTN",
+    "NVTE_CUDNN_ATTN",
     "NVTE_UNFUSED_ATTN",
 )
 _thd_policy_backend_cache = []
@@ -1990,8 +1991,9 @@ class DotProductAttention(TransformerEngineBaseModule):
 
         .. note::
 
-            Users can use environment variables :attr:`NVTE_FLASH_ATTN`, :attr:`NVTE_FUSED_ATTN`,
-            and :attr:`NVTE_UNFUSED_ATTN` to control which DotProductAttention backend to use.
+            Users can use environment variables :attr:`NVTE_FLASH_ATTN`, :attr:`NVTE_FUSED_ATTN`
+            (alias :attr:`NVTE_CUDNN_ATTN`), and :attr:`NVTE_UNFUSED_ATTN` to control which
+            DotProductAttention backend to use.
             Transformer Engine first filters backends by support for the runtime environment
             and input configuration, then applies a performance-based preference order.
             On supported pre-Hopper GPUs, FlashAttention is preferred over FusedAttention and
@@ -2885,7 +2887,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         )
                     elif use_fused_attention:
                         logger.info(
-                            "Running with FusedAttention backend (sub-backend %s)",
+                            "Running with cuDNN attention backend (FusedAttention, sub-backend %s)",
                             int(fused_attention_backend),
                         )
                     elif use_unfused_attention:

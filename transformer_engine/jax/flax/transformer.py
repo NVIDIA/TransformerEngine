@@ -36,6 +36,7 @@ from ..attention import make_swa_mask, canonicalize_attn_mask_type
 from ..attention import fused_attn
 from ..attention import CPStrategy
 from ..cpp_extensions import FusedAttnHelper
+from ...common.utils import cudnn_attention_enabled
 from ..softmax import SoftmaxFusionType
 from ..sharding import num_of_devices
 from ..sharding import get_sharding_map_logic_axis_to_mesh_axis
@@ -467,7 +468,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         <https://github.com/NVIDIA/cudnn-frontend/blob/main/docs/operations/Attention.md>`_ for
         higher performance and lower memory usage on the supported hardwares.
         Users can select between these two backends via the :attr:`NVTE_FUSED_ATTN` environment
-        variable:
+        variable (alias :attr:`NVTE_CUDNN_ATTN`):
 
         * Set :attr:`NVTE_FUSED_ATTN=0` for unfused attention.
         * Set :attr:`NVTE_FUSED_ATTN=1` for fused attention (default). If the required cuDNN fused
@@ -790,9 +791,12 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 )
 
         # Use fused attn (if kernel check below passes) by default
-        enable_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "1"))
+        enable_fused_attn = cudnn_attention_enabled()
         if self.return_max_logit and not enable_fused_attn:
-            raise ValueError("return_max_logit requires fused attention, but NVTE_FUSED_ATTN=0.")
+            raise ValueError(
+                "return_max_logit requires fused attention, but NVTE_FUSED_ATTN (or"
+                " NVTE_CUDNN_ATTN) is 0."
+            )
 
         sequence_dim = 0 if self.transpose_batch_sequence else 1
         batch_dim = 1 - sequence_dim
@@ -811,7 +815,10 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
 
         if score_mod_requested:
             if not enable_fused_attn:
-                raise ValueError("score_mod requires fused attention, but NVTE_FUSED_ATTN=0.")
+                raise ValueError(
+                    "score_mod requires fused attention, but NVTE_FUSED_ATTN (or NVTE_CUDNN_ATTN)"
+                    " is 0."
+                )
         kernel_qkv_layout = qkv_layout.to_separate() if score_mod_requested else qkv_layout
         bias_batch = bias_heads = bias_seqlen_q = bias_seqlen_kv = None
         if attn_bias_type == AttnBiasType.POST_SCALE_BIAS:
