@@ -58,6 +58,4 @@ def current_scaling_quantize(
     current_scaling_quantize_kernel[(min(n_blk, _NUM_SMS[device.index] * _CTAS_PER_SM),)](
         inp, out, ws, scale_inv, n, eps, CAST=False, **common
     )
-    current_scaling_quantize_kernel[(n_blk,)](
-        inp, out, ws, scale_inv, n, eps, CAST=True, **common
-    )
+    current_scaling_quantize_kernel[(n_blk,)](inp, out, ws, scale_inv, n, eps, CAST=True, **common)

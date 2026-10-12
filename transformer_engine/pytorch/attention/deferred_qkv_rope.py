@@ -203,11 +203,7 @@ def quantize_deferred(q, k, v, qkv_quantizer):
     s, b, g, _ = state.mixed.shape
     nq, nk = s * b * g * hq * d, s * b * g * d
     qkv_fp8 = qkv_quantizer.make_empty((nq + 2 * nk,), dtype=q.dtype, device=q.device)
-    if (
-        qkv_fp8._data is None
-        or qkv_fp8._transpose is not None
-        or qkv_fp8._scale_inv.numel() != 1
-    ):
+    if qkv_fp8._data is None or qkv_fp8._transpose is not None or qkv_fp8._scale_inv.numel() != 1:
         materialize(q, k, v)
         return None
     data = qkv_fp8._data
@@ -222,7 +218,11 @@ def quantize_deferred(q, k, v, qkv_quantizer):
         eps=float(qkv_quantizer.amax_epsilon),
         force_pow_2_scales=bool(qkv_quantizer.force_pow_2_scales),
     )
-    views = (data[:nq].view(q.shape), data[nq : nq + nk].view(k.shape), data[nq + nk :].view(v.shape))
+    views = (
+        data[:nq].view(q.shape),
+        data[nq : nq + nk].view(k.shape),
+        data[nq + nk :].view(v.shape),
+    )
     state.consumed = True
     state.mixed = None
     return tuple(Float8Tensor.make_like(qkv_fp8, data=x, dtype=q.dtype) for x in views)
