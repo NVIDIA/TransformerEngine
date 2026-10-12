@@ -49,7 +49,7 @@ def _packed_prefixes(hidden_states, cu_seqlens, max_seqlen, ratio):
 
 
 class DSv4Attention(torch.nn.Module):
-    """DSv4 CSA/HCA attention in ``sbd``, ``bsd``, or packed ``thd`` format.
+    """DSv4 CSA/HCA attention in ``sbhd``, ``bshd``, or packed ``thd`` format.
 
     This first-pass layer handles full-sequence BF16 attention forward/backward
     on SM100. By default, projections that share an input use one contiguous
@@ -86,7 +86,7 @@ class DSv4Attention(torch.nn.Module):
         max_seqlen: Optional[int] = None,
         device: str = "cuda",
         params_dtype: torch.dtype = torch.float32,
-        input_format: str = "sbd",
+        qkv_format: str = "sbhd",
         _fuse_projections: bool = True,
     ):
         super().__init__()
@@ -95,8 +95,8 @@ class DSv4Attention(torch.nn.Module):
         self.index_head_dim = 128
         if layer_type not in ("compressed_sparse_attention", "heavily_compressed_attention"):
             raise ValueError("Only DSv4 CSA and HCA are supported.")
-        if input_format not in ("sbd", "bsd", "thd"):
-            raise ValueError("input_format must be 'sbd', 'bsd', or 'thd'.")
+        if qkv_format not in ("sbhd", "bshd", "thd"):
+            raise ValueError("qkv_format must be 'sbhd', 'bshd', or 'thd'.")
         if head_dim != 512 or rope_head_dim < 2 or rope_head_dim % 2 or rope_head_dim > head_dim:
             raise ValueError("head_dim must be 512; rope_head_dim must be even and fit.")
         if any(
@@ -187,7 +187,7 @@ class DSv4Attention(torch.nn.Module):
         self.compression_ratio = compression_ratio
         self.o_groups, self.o_lora_rank = o_groups, o_lora_rank
         self.is_csa = is_csa
-        self.input_format = input_format
+        self.qkv_format = qkv_format
 
     def forward(
         self,
@@ -206,7 +206,7 @@ class DSv4Attention(torch.nn.Module):
         contract and are not copied to the host for validation. Dense formats
         do not accept these metadata arguments.
         """
-        packed = self.input_format == "thd"
+        packed = self.qkv_format == "thd"
         if (
             hidden_states.ndim != (2 if packed else 3)
             or hidden_states.shape[-1] != self.hidden_size
@@ -218,7 +218,7 @@ class DSv4Attention(torch.nn.Module):
             raise NotImplementedError("DSv4Attention supports BF16 only; disable TE FP8 autocast.")
         if return_indexer_context and not self.is_csa:
             raise ValueError("Only CSA has an indexer context.")
-        if self.input_format == "sbd":
+        if self.qkv_format == "sbhd":
             # cuDNN consumes batch-major packed rows. B=1 needs only a view;
             # larger batches require a physical repack with the current core.
             hidden_states = hidden_states.transpose(0, 1).contiguous()
@@ -313,7 +313,7 @@ class DSv4Attention(torch.nn.Module):
         weight = self.o_a_proj.weight.reshape(self.o_groups, self.o_lora_rank, -1)
         grouped = torch.einsum("...gd,grd->...gr", output, weight).flatten(-2)
         result = self.o_b_proj(grouped)
-        if self.input_format == "sbd":
+        if self.qkv_format == "sbhd":
             result = result.transpose(0, 1).contiguous()
         if return_indexer_context:
             return result, {

@@ -19,19 +19,36 @@ output = attention(hidden_states)  # [S, B, 4096] -> [S, B, 4096]
 ```
 
 ```text
-SBD ── TE query/local-KV projections + norms ───────────────┐
-  ├── TE compressor projections/norm ── cuDNN compression ──┼── cuDNN attention ── TE grouped output ── SBD
+SBHD ── TE query/local-KV projections + norms ───────────────┐
+  ├── TE compressor projections/norm ── cuDNN compression ──┼── cuDNN attention ── TE grouped output ── SBHD
   └── (CSA) TE index projections/norm ── cuDNN compression ── cuDNN selection ──┘
 ```
 
 The high-level layer uses 64 heads of width 512 and defaults to plain interleaved
 partial RoPE with `rope_theta`; callers may inject a `rope` module returning token
 and compressed `(cos, sin)` pairs.
-Use `input_format="bsd"` for batch-major callers. The SBD boundary conversion
+The layout names follow TE MHA/DPA conventions; hidden states omit the head axis:
+
+| `qkv_format` | Hidden input/output | Sequence lengths |
+| --- | --- | --- |
+| `sbhd` (default) | `[S,B,D]` | Equal within a dense batch |
+| `bshd` | `[B,S,D]` | Equal within a dense batch |
+| `thd` | `[T,D]` | May differ between packed sequences |
+
+For packed sequences, pass CUDA INT32 prefixes and a maximum sequence length:
+
+```python
+attention = DSv4Attention(..., qkv_format="thd")
+output = attention(hidden_states, cu_seqlens_q=cu, max_seqlen_q=max_length)
+# hidden_states/output: [T,D]; cu: [0, length_0, length_0 + length_1, ...]
+```
+
+Use `qkv_format="bshd"` for batch-major callers. The SBHD boundary conversion
 is a view when batch size is one; larger batches require a repack for the current
 cuDNN packed-row contract.
-It supports full sequences starting at position zero, equal unpadded lengths within
-a batch, and at least one complete compression window. Sliding-only layers,
+It supports full sequences starting at position zero and at least one complete
+compression window. Dense layouts require equal unpadded lengths within a batch;
+THD supports unequal packed lengths. Sliding-only layers,
 cache/decode, padding, TP/CP, and FP8 remain outside this first pass. The
 indexer auxiliary loss and its attachment remain caller-owned; without one, the
 language-model loss does not train `indexer.q_proj` or the
@@ -57,7 +74,7 @@ The cuDNN calls used by this layer are:
 | Fused indexer score + top-k | — | Once |
 | Sparse attention forward/backward | Once | Once |
 
-For CSA, `return_indexer_context=True` returns `(SBD_output, context)` by default; HCA rejects
+For CSA, `return_indexer_context=True` returns `(SBHD_output, context)` by default; HCA rejects
 it. The live BF16 index Q/K/W have shapes `[B*S,H,128]`, `[B*S/ratio,128]`, and
 `[B*S,H]`; selected IDs are `[B*S,topk]` global compressed-row IDs. Detached
 attention Q/local KV/compressed KV/sink have shapes `[B*S,64,512]`,

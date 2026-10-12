@@ -134,7 +134,7 @@ def test_dsv4_attention_rejects_fp8(monkeypatch):
     monkeypatch.setattr(FP8GlobalStateManager, "is_fp8_enabled", lambda: True)
     layer = dsv4_attention.DSv4Attention.__new__(dsv4_attention.DSv4Attention)
     torch.nn.Module.__init__(layer)
-    layer.input_format, layer.hidden_size = "sbd", 8
+    layer.qkv_format, layer.hidden_size = "sbhd", 8
     with pytest.raises(NotImplementedError, match="BF16 only"):
         layer(torch.empty(4, 1, 8))
 
@@ -239,7 +239,7 @@ def test_dsv4_thd_rejects_hidden_batch_axis_and_multi_sequence_context():
     # These checks precede projections and do not require GPU-backed TE layers.
     layer = dsv4_attention.DSv4Attention.__new__(dsv4_attention.DSv4Attention)
     torch.nn.Module.__init__(layer)
-    layer.input_format, layer.hidden_size = "thd", 8
+    layer.qkv_format, layer.hidden_size = "thd", 8
     layer.is_csa, layer.compression_ratio = True, 4
     with pytest.raises(ValueError, match="selected format"):
         layer(torch.empty(16, 1, 8))
@@ -306,7 +306,7 @@ def test_dsv4_hybrid_thd_forward_backward(variant, ratio, lengths):
             dsa_rope._DSv4RotaryEmbedding(ratio, 64, 12345.0, "cuda") if variant == "csa" else None
         ),
         params_dtype=torch.bfloat16,
-        input_format="thd",
+        qkv_format="thd",
     )
     x = torch.randn(sum(lengths), 32, device="cuda", dtype=torch.bfloat16, requires_grad=True)
     cu = torch.tensor([0, lengths[0], sum(lengths)], device=x.device, dtype=torch.int32)
@@ -318,8 +318,8 @@ def test_dsv4_hybrid_thd_forward_backward(variant, ratio, lengths):
         name: p.grad.clone() for name, p in layer.named_parameters() if p.grad is not None
     }
     layer.zero_grad(set_to_none=True)
-    layer.input_format = "sbd" if variant == "hca" else "bsd"
-    batch_axis = 1 if layer.input_format == "sbd" else 0
+    layer.qkv_format = "sbhd" if variant == "hca" else "bshd"
+    batch_axis = 1 if layer.qkv_format == "sbhd" else 0
     reference_input = x.detach().clone().requires_grad_()
     expected = torch.cat(
         [
