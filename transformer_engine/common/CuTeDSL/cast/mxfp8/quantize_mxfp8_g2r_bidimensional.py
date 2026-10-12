@@ -153,7 +153,6 @@ def _reduce_partial_colwise_amaxes(
     # Constexprs
     CTA_THREADS_Y: cutlass.Constexpr[int],
     CTA_THREADS_X: cutlass.Constexpr[int],
-    ELEMENTS_Y_PER_THREAD: cutlass.Constexpr[int],
     ELEMENTS_X_PER_THREAD: cutlass.Constexpr[int],
     DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
     FP8_DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
@@ -249,12 +248,8 @@ def _write_colwise_scale(
     # Miscellaneous
     cache_policy: Int64,
     # Constexprs
-    CTA_THREADS_Y: cutlass.Constexpr[int],
     CTA_THREADS_X: cutlass.Constexpr[int],
-    ELEMENTS_Y_PER_THREAD: cutlass.Constexpr[int],
     ELEMENTS_X_PER_THREAD: cutlass.Constexpr[int],
-    DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
-    FP8_DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
     SCALE_DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
 ):
     """
@@ -462,7 +457,6 @@ def quantize_bidimensional_mxfp8_g2r(
         sAmaxs_col_scratch,
         CTA_THREADS_Y=CTA_THREADS_Y,
         CTA_THREADS_X=CTA_THREADS_X,
-        ELEMENTS_Y_PER_THREAD=ELEMENTS_Y_PER_THREAD,
         ELEMENTS_X_PER_THREAD=ELEMENTS_X_PER_THREAD,
         DTYPE=cfg.DTYPE,
         FP8_DTYPE=cfg.FP8_DTYPE,
@@ -478,12 +472,8 @@ def quantize_bidimensional_mxfp8_g2r(
         gS_col_thread,
         col_scale_atom=col_scale_atom,
         cache_policy=cache_policy,
-        CTA_THREADS_Y=CTA_THREADS_Y,
         CTA_THREADS_X=CTA_THREADS_X,
-        ELEMENTS_Y_PER_THREAD=ELEMENTS_Y_PER_THREAD,
         ELEMENTS_X_PER_THREAD=ELEMENTS_X_PER_THREAD,
-        DTYPE=cfg.DTYPE,
-        FP8_DTYPE=cfg.FP8_DTYPE,
         SCALE_DTYPE=SCALE_DTYPE,
     )
 
