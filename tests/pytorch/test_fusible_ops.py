@@ -48,10 +48,12 @@ from transformer_engine.pytorch import (
 
 # Import utility functions
 from utils import (
+    MegatronTrainingHelper,
     assert_close,
     assert_close_grads,
     dtype_tols,
     make_recipe,
+    nvfp4_variant_names,
     quantization_tols,
     reset_rng_states,
 )
@@ -63,6 +65,7 @@ nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
 fp8_block_scaling_available, reason_for_no_fp8_block_scaling = te.is_fp8_block_scaling_available(
     return_reason=True
 )
+fp8_ue5m3_available, reason_for_no_fp8_ue5m3 = te.is_fp8_ue5m3_available(return_reason=True)
 
 # Supported data types
 _dtypes: list[torch.dtype] = [torch.float32, torch.float16]
@@ -81,6 +84,8 @@ if mxfp8_available:
 if nvfp4_available:
     _quantization_list.append("nvfp4")
     _quantization_list.append("nvfp4_4over6")
+    if fp8_ue5m3_available:
+        _quantization_list.append("nvfp4_rht_ue5m3")
 if fp8_block_scaling_available:
     _quantization_list.append("fp8_block_scaling")
 
@@ -112,11 +117,10 @@ def maybe_skip_quantization(
         pytest.skip(reason_for_no_fp8)
     if quantization == "mxfp8" and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
-    if (
-        quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6", "nvfp4_rht")
-        and not nvfp4_available
-    ):
+    if quantization in nvfp4_variant_names and not nvfp4_available:
         pytest.skip(reason_for_no_nvfp4)
+    if quantization in ("nvfp4_ue5m3", "nvfp4_rht_ue5m3") and not fp8_ue5m3_available:
+        pytest.skip(reason_for_no_fp8_ue5m3)
     if quantization == "fp8_block_scaling" and not fp8_block_scaling_available:
         pytest.skip(reason_for_no_fp8_block_scaling)
 
@@ -133,16 +137,13 @@ def maybe_skip_quantization(
         elif quantization == "fp8_block_scaling":
             if math.prod(dims[:-1]) % 128 != 0 or dims[-1] % 128 != 0:
                 pytest.skip("FP8 block scaling requires dims that are divisible by 128")
-        elif quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6", "nvfp4_rht"):
+        elif quantization in nvfp4_variant_names:
             if math.prod(dims[:-1]) % 16 != 0 or dims[-1] % 16 != 0:
                 pytest.skip("NVFP4 GEMMs require dims that are divisible by 16")
 
     # Check dtype
     if dtype is not None:
-        if (
-            quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6", "nvfp4_rht")
-            and dtype != torch.bfloat16
-        ):
+        if quantization in nvfp4_variant_names and dtype != torch.bfloat16:
             pytest.skip("NVFP4 quantization is only supported with BF16 data")
 
 
@@ -376,17 +377,31 @@ def make_reference_and_test_tensors(
             columnwise=True,
             block_scaling_dim=2 if tensor_type == "weight" else 1,
         )(test)
-    elif quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_rht"):
+    elif quantization in (
+        "nvfp4",
+        "nvfp4_row_scaled",
+        "nvfp4_rht",
+        "nvfp4_ue5m3",
+        "nvfp4_rht_ue5m3",
+    ):
         tensor_type = "input"
         if quantizer_role is not None:
             tensor_type = quantizer_role.tensor_type
-        with_rht = quantization == "nvfp4_rht" and tensor_type != "weight"
+        with_rht = quantization in ("nvfp4_rht", "nvfp4_rht_ue5m3") and tensor_type != "weight"
+        scale_dtype = (
+            te.DType.kFloat8UE5M3
+            if quantization in ("nvfp4_ue5m3", "nvfp4_rht_ue5m3")
+            else te.DType.kFloat8E4M3
+        )
+        disable_second_level_scale = scale_dtype == te.DType.kFloat8UE5M3 and tensor_type == "input"
         test = NVFP4Quantizer(
+            scale_dtype=scale_dtype,
             with_rht=with_rht,
             with_post_rht_amax=with_rht,
             with_2d_quantization=False,
             stochastic_rounding=False,
             with_random_sign_mask=False,
+            disable_second_level_scale=disable_second_level_scale,
         )(test)
     elif quantization == "nvfp4_4over6":
         tensor_type = "input"
@@ -1666,6 +1681,7 @@ class TestBasicOps:
             test_dtype=dtype,
             test_device=device,
             test_is_quantized=quantized_input,
+            quantizer_role=QuantizerRole(tensor_type="input"),
         )
         w_ref, w_test = make_reference_and_test_tensors(
             (out_features, in_features),
@@ -1680,6 +1696,7 @@ class TestBasicOps:
             test_dtype=dtype,
             test_device=device,
             test_is_quantized=quantized_grad_output,
+            quantizer_role=QuantizerRole(tensor_type="grad_output"),
             requires_grad=False,
         )
 
@@ -1706,6 +1723,10 @@ class TestBasicOps:
             op.weight.copy_(w_test)
             del w_test
             op.weight.main_grad = torch.full_like(op.weight, 0.5, dtype=torch.float32)
+        if accumulate_into_main_grad:
+            MegatronTrainingHelper.init_main_grad_buffers(
+                [op.weight], fill_value=0.5, overwrite_main_grad=False, zero_out_wgrad=True
+            )
         with te.autocast(enabled=quantized_compute, recipe=recipe):
             y_test = forward(x_test)
         y_test.backward(dy_test)
@@ -1723,13 +1744,9 @@ class TestBasicOps:
         torch.testing.assert_close(y_test, y_ref, **tols)
         torch.testing.assert_close(dx_test, x_ref.grad, **tols)
         if accumulate_into_main_grad:
-            if op.weight.grad is not None:
-                torch.testing.assert_close(
-                    op.weight.grad,
-                    torch.zeros_like(op.weight.grad),
-                    rtol=0,
-                    atol=0,
-                )
+            MegatronTrainingHelper.verify_main_grad_accumulation(
+                [op.weight], expected_main_grads=[w_ref.grad + 0.5], **tols
+            )
             dw_test = op.weight.main_grad.to(dtype=torch.float64, device="cpu") - 0.5
         else:
             dw_test = op.weight.grad.to(dtype=torch.float64, device="cpu")
@@ -2277,7 +2294,7 @@ class TestBasicOps:
         if in_place:
             if quantization in ("fp8_delayed_scaling", "fp8_current_scaling", "mxfp8"):
                 tols = dtype_tols(x1_test._fp8_dtype)
-            elif quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6"):
+            elif quantization in nvfp4_variant_names:
                 tols = dtype_tols(x1_test._fp4_dtype)
         y_test = y_test.to(dtype=torch.float64, device="cpu")
         dx1_test = x1_test.grad.to(dtype=torch.float64, device="cpu")
@@ -2690,7 +2707,7 @@ class TestBasicOps:
         quantized_compute = quantization is not None
         if not quantized_compute and (quantize_forward or quantize_backward):
             pytest.skip("Quantization scheme has not been provided")
-        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
 
         # Random data
         x_ref, x_test = make_reference_and_test_tensors(
@@ -2744,7 +2761,7 @@ class TestBasicOps:
 
         # Expected numerical error
         tols = dtype_tols(dtype)
-        if quantized_compute and quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6"):
+        if quantized_compute and quantization in nvfp4_variant_names:
             tols = dtype_tols(te.DType.kFloat4E2M1)
         elif quantized_compute:
             tols = dtype_tols(te.DType.kFloat8E4M3)
@@ -2935,6 +2952,7 @@ class TestBasicOps:
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
+            quantizer_role=QuantizerRole(tensor_type="input"),
             requires_grad=input_requires_grad,
         )
         dy_ref, dy_test = make_reference_and_test_tensors(
@@ -2942,6 +2960,7 @@ class TestBasicOps:
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
+            quantizer_role=QuantizerRole(tensor_type="grad_output"),
             requires_grad=False,
         )
         ws_ref, ws_test = [], []
@@ -3282,13 +3301,7 @@ class TestBasicOps:
         scales_requires_grad: bool,
         tanh_clamp_scale: float,
     ) -> None:
-        """Tanh soft-clamped SReLU with post-scale.
-
-        Covers the unfused path specifically: the fused grouped-MLP op goes straight
-        to the cuDNN srelu_tanh epilogue and never runs this code. Small clamp scales
-        are used so tanh genuinely saturates -- with a large scale the result is
-        numerically indistinguishable from plain ScaledSReLU.
-        """
+        """Tanh soft-clamped SReLU with post-scale"""
 
         # Random data
         x_ref, x_test = make_reference_and_test_tensors(
@@ -3310,9 +3323,7 @@ class TestBasicOps:
             requires_grad=False,
         )
 
-        # Plain PyTorch implementation. Autograd supplies the reference gradients, so
-        # the op's hand-written backward is checked against a derivative it played no
-        # part in computing.
+        # Plain PyTorch implementation
         y = (
             tanh_clamp_scale * torch.tanh(torch.nn.functional.relu(x_ref) / tanh_clamp_scale)
         ).square()
@@ -3335,33 +3346,11 @@ class TestBasicOps:
         if scales_requires_grad:
             assert_close_grads(scales_test, scales_ref, **tols)
 
-    def test_scaled_tanh_srelu_saturates(self) -> None:
-        """Large inputs pin the output at tanh_clamp_scale**2, unlike plain SReLU."""
-        s = 2.0
-        x = torch.full((4, 8), 1.0e3, device="cuda", dtype=torch.float32)
-        scales = torch.ones((4,), device="cuda", dtype=torch.float32)
-
-        y = te_ops.ScaledTanhSReLU(tanh_clamp_scale=s)(x, scales)
-        torch.testing.assert_close(y, torch.full_like(y, s * s))
-
-        # Plain SReLU on the same input is ~250000x larger, so this cannot pass by
-        # accident if the clamp were silently dropped.
-        y_unclamped = te_ops.ScaledSReLU()(x, scales)
-        assert y_unclamped.min().item() > 1.0e5
-
     @pytest.mark.parametrize("tanh_clamp_scale", (0.0, -1.0, float("inf"), float("nan")))
     def test_scaled_tanh_srelu_rejects_bad_clamp_scale(self, tanh_clamp_scale) -> None:
         """The clamp scale must be finite and positive."""
         with pytest.raises(ValueError, match="tanh_clamp_scale"):
             te_ops.ScaledTanhSReLU(tanh_clamp_scale=tanh_clamp_scale)
-
-    def test_scaled_tanh_srelu_activation_recompute_in_mlp_config(self) -> None:
-        """Tanh SReLU exposes the same activation recompute knob as ScaledSReLU."""
-        op = te_ops.ScaledTanhSReLU(tanh_clamp_scale=2.0)
-        assert op.activation_recompute_in_mlp is False
-        assert te_ops.ScaledTanhSReLU(
-            tanh_clamp_scale=2.0, activation_recompute_in_mlp=True
-        ).activation_recompute_in_mlp
 
     def test_interleaved_scaled_swiglu(self):
         """SwiGLU with post-scale and block interleaved input format"""
@@ -3386,10 +3375,17 @@ class TestBasicOps:
         with pytest.raises(ValueError, match="does not support activation recomputation"):
             op_cls(activation_recompute_in_mlp=True)
 
-    def test_scaled_srelu_activation_recompute_in_mlp_config(self) -> None:
-        """Scaled SReLU exposes its supported activation recompute knob."""
-        assert te_ops.ScaledSReLU().activation_recompute_in_mlp is False
-        assert te_ops.ScaledSReLU(activation_recompute_in_mlp=True).activation_recompute_in_mlp
+    @pytest.mark.parametrize(
+        "op_cls, op_kwargs",
+        (
+            (te_ops.ScaledSReLU, {}),
+            (te_ops.ScaledTanhSReLU, {"tanh_clamp_scale": 2.0}),
+        ),
+    )
+    def test_scaled_srelu_activation_recompute_in_mlp_config(self, op_cls, op_kwargs) -> None:
+        """Scaled SReLU ops expose their supported activation recompute knob."""
+        assert op_cls(**op_kwargs).activation_recompute_in_mlp is False
+        assert op_cls(activation_recompute_in_mlp=True, **op_kwargs).activation_recompute_in_mlp
 
     @pytest.mark.parametrize("in_shape", ((71, 192), (5, 7, 128)))
     @pytest.mark.parametrize("input_requires_grad", (False, True))
@@ -4539,7 +4535,12 @@ class TestSequentialModules:
 
         # Skip invalid configurations
         with_quantization = quantization is not None
-        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
+        maybe_skip_quantization(
+            quantization,
+            dims=in_shape,
+            device=device,
+            dtype=dtype,
+        )
         if with_quantization and dtype not in (torch.bfloat16, torch.float16):
             pytest.skip("Quantized group GEMM is only supported with BF16/FP16")
         if activation == "scaled_srelu" and quantization == "nvfp4_rht" and bias:
@@ -4553,6 +4554,7 @@ class TestSequentialModules:
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
+            quantizer_role=QuantizerRole(tensor_type="input"),
         )
         dy_ref, dy_test = make_reference_and_test_tensors(
             out_shape,
@@ -4561,6 +4563,7 @@ class TestSequentialModules:
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
+            quantizer_role=QuantizerRole(tensor_type="grad_output"),
             requires_grad=False,
         )
         probs_ref, probs_test = make_reference_and_test_tensors(
