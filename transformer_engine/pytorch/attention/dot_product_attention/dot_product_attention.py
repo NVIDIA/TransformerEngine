@@ -1986,7 +1986,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         qkv_interleave_dim: int = -3,
         thd_attention_policies: Optional[List[Dict[str, Any]]] = None,
         thd_attention_policy_dispatch: str = "auto",
-    ) -> torch.Tensor:
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor], None]:
         r"""
         Dot Product Attention Layer.
 
