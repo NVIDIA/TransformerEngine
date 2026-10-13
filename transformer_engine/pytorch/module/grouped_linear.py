@@ -250,10 +250,10 @@ class GroupedLinearBwdArgs:
         """Pull saved tensors from ``ctx`` into the fields backward consumes."""
         saved = restore_from_func_ctx(ctx)
         n = self.num_gemms
-        self.inputmats = list(saved[:n])
-        self.weights_fp8 = list(saved[n : 2 * n])
-        self.saved_weights = list(saved[2 * n : 3 * n])
-        self.biases = list(saved[3 * n : 4 * n])
+        self.inputmats = saved[:n]
+        self.weights_fp8 = saved[n : 2 * n]
+        self.saved_weights = saved[2 * n : 3 * n]
+        self.biases = saved[3 * n : 4 * n]
 
 
 def _grouped_linear_configure_quantizers(args: GroupedLinearFwdArgs, weights) -> None:
@@ -293,10 +293,10 @@ def _grouped_linear_forward_impl(
 ) -> Tuple[Any, ...]:
     """Compute the legacy forward and collect tensors needed by backward."""
     inp = args.inp
-    weights = list(args.weights)
-    biases = list(args.biases)
+    weights = args.weights
+    biases = args.biases
     num_gemms = args.num_gemms
-    m_splits = list(args.m_splits)
+    m_splits = args.m_splits
     input_quantizers = args.input_quantizers
     output_quantizers = args.output_quantizers
     activation_dtype = args.activation_dtype
@@ -513,11 +513,11 @@ def _grouped_linear_backward_impl(
     """
     grad_output = args.grad_output
     num_gemms = args.num_gemms
-    m_splits = list(args.m_splits)
-    inputmats = list(args.inputmats)
-    weights = list(args.weights_fp8)
-    saved_weights = list(args.saved_weights)
-    biases = list(args.biases)
+    m_splits = args.m_splits
+    inputmats = args.inputmats
+    weights = args.weights_fp8
+    saved_weights = args.saved_weights
+    biases = args.biases
     device = grad_output.device
     in_features = args.weights_shape_1
     dgrad = None
@@ -545,8 +545,8 @@ def _grouped_linear_backward_impl(
                 origin_weight.main_grad = main_grad
 
     # Preprocess grad output
-    grad_output_view = grad_output.contiguous().view(-1, grad_output.shape[-1])
-    out_features = grad_output_view.shape[-1]
+    out_features = grad_output.shape[-1]
+    grad_output_view = grad_output.contiguous().view(-1, out_features)
     grad_output_reference = args.grad_output_quantizers[0]
     if args.fp8 and isinstance(grad_output_reference, HybridQuantizer):
         # Usage is a runtime decision, not part of generation validation.
@@ -737,7 +737,7 @@ def _grouped_linear_backward_impl(
 
 
 @dataclass(slots=True)
-class GroupedLinearFusedBwdArgs:
+class GroupedLinearGraphSafeBwdArgs:
     """Backward configuration and saved grouped operands."""
 
     grad_output: Optional[torch.Tensor] = None
@@ -777,7 +777,7 @@ class GroupedLinearFusedBwdArgs:
         saved = restore_from_func_ctx(ctx)
         n = 1 if self.single_grouped_weight else self.num_gemms
         self.inputmat = saved[0]
-        self.weights_fp8 = list(saved[1 : 1 + n])
+        self.weights_fp8 = saved[1 : 1 + n]
         (
             self.m_splits_tensor,
             self.base_split_offsets,
@@ -786,7 +786,7 @@ class GroupedLinearFusedBwdArgs:
         ) = saved[1 + n :]
 
 
-def _grouped_linear_fused_forward(args: GroupedLinearFwdArgs) -> Tuple[Any, ...]:
+def _grouped_linear_graph_safe_forward(args: GroupedLinearFwdArgs) -> Tuple[Any, ...]:
     """Compute the grouped forward and collect tensors needed by backward."""
     inp = args.inp
     use_bias = args.use_bias
@@ -812,8 +812,9 @@ def _grouped_linear_fused_forward(args: GroupedLinearFwdArgs) -> Tuple[Any, ...]
     m_splits = args.m_splits_tensor
     num_gemms = len(m_splits)
     device = inp.device
-    in_features = weights[0].size(-1)
-    out_features = weights[0].size(-2)
+    weight_shape = weights[0].shape
+    in_features = weight_shape[-1]
+    out_features = weight_shape[-2]
     if inp.size(-1) != in_features:
         raise ValueError(
             f"Input tensor (shape={tuple(inp.size())}) is not compatible with "
@@ -951,8 +952,8 @@ def _grouped_linear_fused_forward(args: GroupedLinearFwdArgs) -> Tuple[Any, ...]
     return out.view(-1, *inp.shape[1:-1], out.shape[-1]), new_workspaces, tensors_to_save
 
 
-def _grouped_linear_fused_setup(
-    bwd_args: GroupedLinearFusedBwdArgs,
+def _grouped_linear_graph_safe_setup(
+    bwd_args: GroupedLinearGraphSafeBwdArgs,
     fwd_args: GroupedLinearFwdArgs,
     out_features: int,
 ) -> None:
@@ -994,8 +995,8 @@ def _grouped_linear_fused_setup(
             ]
 
 
-def _grouped_linear_fused_backward(
-    args: GroupedLinearFusedBwdArgs,
+def _grouped_linear_graph_safe_backward(
+    args: GroupedLinearGraphSafeBwdArgs,
 ) -> Tuple[Optional[torch.Tensor], List[Optional[torch.Tensor]], List[Optional[torch.Tensor]]]:
     """Compute gradients with the grouped-tensor kernels."""
     grad_output = args.grad_output
@@ -1515,10 +1516,10 @@ class _GroupedLinear(torch.autograd.Function):
     @staticmethod
     def _forward_grouped_tensor(ctx, fwd_args: GroupedLinearFwdArgs) -> Tuple[torch.Tensor, list]:
         """Run the grouped forward and persist its autograd state."""
-        out, new_workspaces, saved = _grouped_linear_fused_forward(fwd_args)
+        out, new_workspaces, saved = _grouped_linear_graph_safe_forward(fwd_args)
         if ctx is not None:
-            bwd_args = GroupedLinearFusedBwdArgs()
-            _grouped_linear_fused_setup(bwd_args, fwd_args, out.shape[-1])
+            bwd_args = GroupedLinearGraphSafeBwdArgs()
+            _grouped_linear_graph_safe_setup(bwd_args, fwd_args, out.shape[-1])
             tensors_to_save, tensor_objects = prepare_for_saving(*saved)
             ctx.save_for_backward(*tensors_to_save)
             ctx.tensor_objects = tensor_objects
@@ -1583,7 +1584,7 @@ class _GroupedLinear(torch.autograd.Function):
             bwd_args.grad_output = grad_output
             bwd_args.setup_saved_tensors(ctx)
             if ctx.use_grouped_tensor_path:
-                dgrad, wgrad_list, grad_biases = _grouped_linear_fused_backward(bwd_args)
+                dgrad, wgrad_list, grad_biases = _grouped_linear_graph_safe_backward(bwd_args)
                 if dgrad is not None:
                     dgrad = dgrad.view(ctx.inp_shape)
             else:
@@ -2428,8 +2429,8 @@ class GroupedLinear(TransformerEngineBaseModule):
             fwd_args = GroupedLinearFwdArgs(
                 # tensors
                 inp=inp,
-                weights=list(weight_tensors),
-                biases=list(bias_tensors),
+                weights=weight_tensors,
+                biases=bias_tensors,
                 weight_workspaces=weight_workspaces,
                 out=out,
                 dgrad_out=dgrad_out,
