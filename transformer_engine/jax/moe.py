@@ -754,7 +754,7 @@ def _moe_fwd_rule(
         topk_idx_dtype=int(jax_dtype_to_te_dtype(topk_idx_3d.dtype)),
     )
     recv_tokens, recv_topk_weights, token_counts, total_recv_tokens, handle_mem = (
-        tex.ep_prepare_dispatch_fwd(cfg, topk_idx_3d, x, topk_w_3d, recv_pr)
+        tex.ep_prepare_and_dispatch_fwd(cfg, topk_idx_3d, x, topk_w_3d, recv_pr)
     )
     token_counts = jax.lax.with_sharding_constraint(token_counts, NamedSharding(mesh, ep2_spec))
     recv_tokens = jax.lax.with_sharding_constraint(recv_tokens, NamedSharding(mesh, ep3_spec))

@@ -340,7 +340,7 @@ def _dispatch_fwd(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank):
             f"ep_dispatch: topk_weights must be a floating dtype; got {topk_weights.dtype}."
         )
     recv_tokens, recv_topk_weights, token_counts, total_recv_tokens, handle_mem = (
-        tex.ep_prepare_dispatch_fwd(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank)
+        tex.ep_prepare_and_dispatch_fwd(cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank)
     )
     out_leading = tuple(tokens.shape[:-1])
     primal = (recv_tokens, recv_topk_weights, handle_mem, token_counts, total_recv_tokens)

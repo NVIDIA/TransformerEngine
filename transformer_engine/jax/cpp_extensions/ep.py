@@ -63,7 +63,7 @@ __all__ = [
     "ep_handle_mem_size",
     "ep_prepare",
     "ep_dispatch_fwd",
-    "ep_prepare_dispatch_fwd",
+    "ep_prepare_and_dispatch_fwd",
     "ep_combine_fwd",
     "ep_dispatch_bwd",
     "ep_combine_bwd",
@@ -1295,7 +1295,7 @@ def _fused_prepare_dispatch_enabled():
     return _fused_prepare_dispatch
 
 
-def ep_prepare_dispatch_fwd(
+def ep_prepare_and_dispatch_fwd(
     cfg: EpLayerConfig, topk_idx, tokens, topk_weights, recv_capacity_per_rank
 ):
     """Prepare + dispatch; returns
