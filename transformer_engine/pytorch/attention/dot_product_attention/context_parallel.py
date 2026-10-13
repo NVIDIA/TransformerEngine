@@ -852,8 +852,15 @@ def cp_p2p_fwd_prepare_qkv(
     step,
     cp_size,
     section,
+    q_half=None,
+    kv_part=None,
 ):
-    """Prepare q, k, v and cu_seqlens for CP P2P forward"""
+    """Prepare q, k, v and cu_seqlens for CP P2P forward
+
+    Optional, thd with FlashAttention: q_half, the second half of q_part (upper triangle), and
+    kv_part, the [2, t, h, d] view of k_part and v_part (same shape, even t) to read both of their
+    first halves in one launch (lower triangle).
+    """
     cu_seqlens_q_per_step = None
     cu_seqlens_kv_per_step = None
     if section in ["diagonal", "all"]:
@@ -865,9 +872,6 @@ def cp_p2p_fwd_prepare_qkv(
             cu_seqlens_kv_per_step = get_cu_seqlens_on_cp_rank(
                 cu_seqlens_kv, cu_seqlens_kv_padded, cp_size, rank_, True, True
             )
-        elif qkv_format == "thd":
-            cu_seqlens_q_per_step = cu_seqlens_q // cp_size
-            cu_seqlens_kv_per_step = cu_seqlens_kv // cp_size
         else:
             cu_seqlens_q_per_step = cu_seqlens_q
             cu_seqlens_kv_per_step = cu_seqlens_kv
@@ -894,9 +898,6 @@ def cp_p2p_fwd_prepare_qkv(
                 True,
                 False,
             )
-        elif qkv_format == "thd":
-            cu_seqlens_q_per_step = cu_seqlens_q // cp_size
-            cu_seqlens_kv_per_step = cu_seqlens_kv // (cp_size * 2)
         else:
             cu_seqlens_q_per_step = cu_seqlens_q
             cu_seqlens_kv_per_step = cu_seqlens_kv_half
@@ -913,6 +914,9 @@ def cp_p2p_fwd_prepare_qkv(
             # [2, sk//2, b, h, d] -> [sk//2, b, h, d]
             k_part = k_part[0]
             v_part = v_part[0]
+        elif qkv_format == "thd" and kv_part is not None:
+            # [2, t, h, d] -> [2, t/2, h, d]: K and V in one launch
+            k_part, v_part = tex.thd_read_half_tensor(kv_part, cu_seqlens_kv_padded, 0).unbind(0)
         elif qkv_format == "thd":
             # [t, h, d] -> [t/2, h, d]
             k_part = tex.thd_read_half_tensor(k_part, cu_seqlens_kv_padded, 0)
@@ -931,9 +935,6 @@ def cp_p2p_fwd_prepare_qkv(
                 True,
                 True,
             )
-        elif qkv_format == "thd":
-            cu_seqlens_q_per_step = cu_seqlens_q // (cp_size * 2)
-            cu_seqlens_kv_per_step = cu_seqlens_kv // cp_size
         else:
             cu_seqlens_q_per_step = cu_seqlens_q_half
             cu_seqlens_kv_per_step = cu_seqlens_kv
@@ -948,6 +949,8 @@ def cp_p2p_fwd_prepare_qkv(
             q_part = q_part[1]
             # [2, sk//2, b, h, d] -> [sk, b, h, d]
             k_part, v_part = [x.view(-1, *x.shape[-3:]) for x in [k_part, v_part]]
+        elif qkv_format == "thd" and q_half is not None:
+            q_part = q_half
         elif qkv_format == "thd":
             # [t, h, d] -> [t/2, h, d]
             q_part = tex.thd_read_half_tensor(q_part, cu_seqlens_q_padded, 1)
@@ -1667,6 +1670,13 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         else:
             cu_seqlens_q_padded = cu_seqlens_q_padded // cp_size
             cu_seqlens_kv_padded = cu_seqlens_kv_padded // cp_size
+            if not pad_between_seqs:
+                # the per-step cu_seqlens (full and half sections) are the same in every ring step:
+                # compute them once, like _get_cu_seqlens_info_with_cp above
+                cu_seqlens_q_half = cu_seqlens_q // (cp_size * 2)
+                cu_seqlens_kv_half = cu_seqlens_kv // (cp_size * 2)
+                cu_seqlens_q = cu_seqlens_q // cp_size
+                cu_seqlens_kv = cu_seqlens_kv // cp_size
         max_seqlen_q = max_seqlen_q // cp_size
         max_seqlen_kv = max_seqlen_kv // cp_size
         cu_seqlens_q_per_step = [None for _ in range(cp_size)]
@@ -1915,6 +1925,16 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         p2p_comm_buffers[0] = torch.cat((k.view(-1), v.view(-1)), dim=-1)
         send_recv_reqs = [[], []]
 
+        # THD + FlashAttention without padding between sequences: all upper-triangle steps read the
+        # same second half of Q, so read it once here. Steps on cp_stream are ordered after this by
+        # the first P2P call, as they are for q.
+        q_half, thd_kv_pairs = None, False
+        if qkv_format == "thd" and not use_fused_attention and not pad_between_seqs:
+            if causal and rank < cp_size - 1:
+                q_half = tex.thd_read_half_tensor(q, cu_seqlens_q_padded, 1)
+            # lower triangle: one launch reads the K and V halves of [2, t, h, d] (needs an even t)
+            thd_kv_pairs = k_shape == v_shape and k_shape[0] % 2 == 0
+
         # P2P communication and compute: each rank has cp_size steps
         # MXFP8/F16 attention:    q, k, v: torch.Tensor, dtype=fwd_nominal_dtype
         # FP8DS/CS attention:     q, k, v: torch.Tensor, dtype=torch.uint8
@@ -2053,7 +2073,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 )
                         elif i <= rank:
                             section = "lower-triangle"
-                            prepare_outputs = cp_p2p_fwd_prepare_qkv(*prepare_inputs, section)
+                            kv_part = kv_inputs[i % 2].view(2, *k_shape) if thd_kv_pairs else None
+                            prepare_outputs = cp_p2p_fwd_prepare_qkv(
+                                *prepare_inputs, section, kv_part=kv_part
+                            )
                             (
                                 q_part,
                                 k_part,
@@ -2082,7 +2105,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 )
                         else:
                             section = "upper-triangle"
-                            prepare_outputs = cp_p2p_fwd_prepare_qkv(*prepare_inputs, section)
+                            prepare_outputs = cp_p2p_fwd_prepare_qkv(
+                                *prepare_inputs, section, q_half=q_half
+                            )
                             (
                                 q_part,
                                 k_part,
