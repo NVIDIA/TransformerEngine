@@ -41,9 +41,9 @@ __device__ __forceinline__ const __nv_bfloat16 *base(Segments s, int col, int &o
 }
 
 __device__ __forceinline__ unsigned char scale_exponent(float amax) {
-  float normalized = amax * (1.0f / 448.0f);
   unsigned int packed;
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000
+  float normalized = amax * (1.0f / 448.0f);
   asm volatile(
       "{ .reg .b16 pair,zero; mov.b16 zero,0; cvt.rp.satfinite.ue8m0x2.f32 pair,%1,%1; mov.b32 "
       "%0,{pair,zero}; }"
@@ -67,9 +67,14 @@ __device__ __forceinline__ int64_t sf(int i, int j, int tiles) {
 }
 
 __device__ __forceinline__ uint16_t pair_cast(float a, float b) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 890
   uint16_t result;
   asm volatile("cvt.rn.satfinite.e4m3x2.f32 %0,%2,%1;" : "=h"(result) : "f"(a), "f"(b));
   return result;
+#else
+  NVTE_DEVICE_ERROR("FP8 pair conversion is only supported on SM 8.9+.");
+  return 0;
+#endif
 }
 
 __global__ void row_kernel(Segments s, unsigned char *out, unsigned char *scales, int n, int cols,
