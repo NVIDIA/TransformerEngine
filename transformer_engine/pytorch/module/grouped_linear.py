@@ -1308,6 +1308,7 @@ class _GroupedLinear(torch.autograd.Function):
                             wgrad = get_dummy_wgrad(
                                 list(main_grad.shape),
                                 weight.dtype,
+                                zero_tensor=getattr(weight, "zero_tensor_dummy_wgrad", False),
                             )
                     elif ctx.fuse_wgrad_accumulation:
                         wgrad = None
@@ -1586,6 +1587,7 @@ class _GroupedLinear(torch.autograd.Function):
                                 wgrad = get_dummy_wgrad(
                                     list(main_grad.shape),
                                     weight.dtype,
+                                    zero_tensor=getattr(weight, "zero_tensor_dummy_wgrad", False),
                                 )
                         elif ctx.fuse_wgrad_accumulation:
                             wgrad = None

@@ -629,11 +629,15 @@ class TestGroupedTensor:
         "shape_case",
         ["varying_first", "varying_last", "varying_both"],
     )
+    @pytest.mark.parametrize("usage", ["rowwise", "columnwise", "both"])
+    @pytest.mark.parametrize("optimize_for_gemm", [False, True])
     @pytest.mark.parametrize("output_dbias", [False, True])
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
-    def test_quantize_grouped_mxfp8(self, shape_case: str, output_dbias: bool) -> None:
+    def test_quantize_grouped_mxfp8(
+        self, shape_case: str, usage: str, optimize_for_gemm: bool, output_dbias: bool
+    ) -> None:
         """Test grouped MXFP8 quantization against per-tensor quantization for
-        varying first/last/both dimensions."""
+        varying first/last/both dimensions and compact or GEMM-swizzled scales."""
         if output_dbias and shape_case != "varying_first":
             pytest.skip("bgrad_group_quantize requires constant last dimension")
 
@@ -688,7 +692,10 @@ class TestGroupedTensor:
         )
 
         quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
-        quantizer.set_usage(rowwise=True, columnwise=False)
+        rowwise = usage in ("rowwise", "both")
+        columnwise = usage in ("columnwise", "both")
+        quantizer.set_usage(rowwise=rowwise, columnwise=columnwise)
+        quantizer.optimize_for_gemm = optimize_for_gemm
 
         if output_dbias:
             grouped_output, dbias = tex.bgrad_group_quantize(
@@ -700,19 +707,23 @@ class TestGroupedTensor:
             )
 
         # Reference: quantize each tensor independently and concatenate the
-        # rowwise data / scale_inv buffers in tensor order.
-        expected_data = []
-        expected_scale_inv = []
-        for tensor in input_tensors:
-            qtensor = quantizer(tensor)
-            expected_data.append(qtensor._rowwise_data.reshape(-1))
-            expected_scale_inv.append(qtensor._rowwise_scale_inv.reshape(-1))
-
-        expected_data = torch.cat(expected_data)
-        expected_scale_inv = torch.cat(expected_scale_inv)
-
-        assert torch.equal(grouped_output.rowwise_data, expected_data)
-        assert torch.equal(grouped_output.scale_inv, expected_scale_inv)
+        # data / scale_inv buffers in tensor order. Both dimensions of every member
+        # are multiples of 128, so swizzled scales need no padding between members.
+        expected_tensors = [quantizer(tensor) for tensor in input_tensors]
+        if rowwise:
+            expected_data = torch.cat([t._rowwise_data.reshape(-1) for t in expected_tensors])
+            expected_scales = torch.cat(
+                [t._rowwise_scale_inv.reshape(-1) for t in expected_tensors]
+            )
+            assert torch.equal(grouped_output.rowwise_data, expected_data)
+            assert torch.equal(grouped_output.scale_inv, expected_scales)
+        if columnwise:
+            expected_data = torch.cat([t._columnwise_data.reshape(-1) for t in expected_tensors])
+            expected_scales = torch.cat(
+                [t._columnwise_scale_inv.reshape(-1) for t in expected_tensors]
+            )
+            assert torch.equal(grouped_output.columnwise_data, expected_data)
+            assert torch.equal(grouped_output.columnwise_scale_inv, expected_scales)
 
         if output_dbias:
             expected_dbias = torch.stack([t.sum(dim=0) for t in input_tensors])

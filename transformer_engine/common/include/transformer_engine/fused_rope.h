@@ -139,6 +139,47 @@ void nvte_fused_qkv_rope_backward(const NVTETensor q_grad_out, const NVTETensor 
                                   const int qkv_split_arg_list_0, const int qkv_split_arg_list_1,
                                   const int qkv_split_arg_list_2, cudaStream_t stream);
 
+/*! \brief Split multi-latent attention's key/value, apply RoPE to the key and quantize key and
+ *         value to MXFP8.
+ *
+ *  Each head of kv holds 128 key dimensions without RoPE followed by 128 value dimensions.
+ *  The key is those 128 dimensions followed by the 64 dimensions of k_rope with RoPE
+ *  applied, the same for all heads. For token t, batch entry b and i < 32, with
+ *  (x1, x2) = (k_rope[t, b, 2i], k_rope[t, b, 2i + 1]):
+ *
+ *      key[t, b, h, 128 + i]      = x1 * cos[t, i]      - x2 * sin[t, i]
+ *      key[t, b, h, 128 + 32 + i] = x2 * cos[t, 32 + i] + x1 * sin[t, 32 + i]
+ *
+ *  This is the RoPE of Megatron-LM's MLA kernels (interleaved pairs in, the two halves out),
+ *  with their roundings: with BF16 cos and sin, fma(x1, cos, -(x2 * sin)) and
+ *  fma(x1, sin, x2 * cos) with every operation rounded to BF16; with FP32 cos and sin, the
+ *  same in FP32, rounded once to BF16.
+ *
+ *  key and value are written as the MXFP8 quantization of their [s, b * h * d] views, row-wise
+ *  (32 elements of a head) and column-wise (32 tokens), with E4M3 data and compact E8M0 scaling
+ *  factors: the bytes the MXFP8 quantizer produces for the BF16 key and value.
+ *
+ *  Requires SM 10.0+, an even number of heads and a sequence length that is a multiple of 32.
+ *
+ *  \param[in]     kv                Key/value, [s, b, h, 256] in BF16.
+ *  \param[in]     k_rope            Key RoPE dimensions shared by the heads, s * b rows
+ *                                   (token-major) of 64 BF16 values.
+ *  \param[in]     k_rope_stride     Elements from one row of k_rope to the next, a multiple
+ *                                   of 8.
+ *  \param[in]     cos               Cosines, [max_s, 64] in BF16 or FP32; row t is used for
+ *                                   token t.
+ *  \param[in]     sin               Sines, same shape and type as cos.
+ *  \param[in,out] key               MXFP8 key of shape [s, b * h * 192], with row-wise and
+ *                                   column-wise data.
+ *  \param[in,out] value             MXFP8 value of shape [s, b * h * 128], with row-wise and
+ *                                   column-wise data.
+ *  \param[in]     stream            CUDA stream used for the operation.
+ */
+void nvte_fused_mla_kv_rope_mxfp8(const NVTETensor kv, const NVTETensor k_rope,
+                                  const int k_rope_stride, const NVTETensor cos,
+                                  const NVTETensor sin, NVTETensor key, NVTETensor value,
+                                  cudaStream_t stream);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif
