@@ -63,7 +63,6 @@ __all__ = [
     "ep_handle_mem_size",
     "ep_prepare",
     "ep_dispatch_fwd",
-    "ep_prepare_and_dispatch_fwd",
     "ep_prepare_dispatch_fwd",
     "ep_combine_fwd",
     "ep_dispatch_bwd",
@@ -1266,7 +1265,8 @@ def ep_prepare(cfg: EpLayerConfig, topk_idx):
 def ep_dispatch_fwd(
     cfg: EpLayerConfig, handle_mem, topk_idx, tokens, topk_weights, recv_capacity_per_rank
 ):
-    """Scatter tokens and weights to expert ranks; returns (recv_tokens, recv_topk_weights)."""
+    """Scatter tokens and weights to expert ranks; returns
+    ``(recv_tokens, recv_topk_weights, handle_mem)``."""
     return EpDispatchPrimitive.outer_primitive.bind(
         handle_mem,
         topk_idx,
@@ -1275,23 +1275,6 @@ def ep_dispatch_fwd(
         top_k=int(cfg.top_k),
         dispatch_output_per_expert_alignment=int(cfg.dispatch_output_per_expert_alignment),
         topk_idx_dtype=int(cfg.topk_idx_dtype),
-        recv_capacity_per_rank=recv_capacity_per_rank,
-        is_outer=True,
-    )
-
-
-@_on_collective_stream
-def ep_prepare_and_dispatch_fwd(
-    cfg: EpLayerConfig, topk_idx, tokens, topk_weights, recv_capacity_per_rank
-):
-    """Fused prepare + dispatch; returns
-    ``(recv_tokens, recv_topk_weights, token_counts, total_recv_tokens, handle_mem)``."""
-    return EpPrepareAndDispatchPrimitive.outer_primitive.bind(
-        topk_idx,
-        tokens,
-        topk_weights,
-        top_k=int(cfg.top_k),
-        dispatch_output_per_expert_alignment=int(cfg.dispatch_output_per_expert_alignment),
         recv_capacity_per_rank=recv_capacity_per_rank,
         is_outer=True,
     )
@@ -1313,14 +1296,31 @@ def _fused_prepare_dispatch_enabled():
 
 
 def ep_prepare_dispatch_fwd(
-    cfg: EpLayerConfig, topk_idx, tokens, topk_weights, recv_capacity_per_rank
+    cfg: EpLayerConfig, topk_idx, tokens, topk_weights, recv_capacity_per_rank, fused=None
 ):
-    """Prepare + dispatch, fused or unfused per NVTE_EP_FUSED_PREPARE_DISPATCH; returns
-    ``(recv_tokens, recv_topk_weights, token_counts, total_recv_tokens, handle_mem)``."""
-    if _fused_prepare_dispatch_enabled():
-        return ep_prepare_and_dispatch_fwd(
-            cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank
-        )
+    """Prepare + dispatch; returns
+    ``(recv_tokens, recv_topk_weights, token_counts, total_recv_tokens, handle_mem)``.
+
+    ``fused`` forces the fused (True) or unfused (False) path; None selects it from
+    NVTE_EP_FUSED_PREPARE_DISPATCH.
+    """
+    if fused is None:
+        fused = _fused_prepare_dispatch_enabled()
+    if fused:
+
+        @_on_collective_stream
+        def _fused():
+            return EpPrepareAndDispatchPrimitive.outer_primitive.bind(
+                topk_idx,
+                tokens,
+                topk_weights,
+                top_k=int(cfg.top_k),
+                dispatch_output_per_expert_alignment=int(cfg.dispatch_output_per_expert_alignment),
+                recv_capacity_per_rank=recv_capacity_per_rank,
+                is_outer=True,
+            )
+
+        return _fused()
     token_counts, total_recv_tokens, handle_mem = ep_prepare(cfg, topk_idx)
     recv_tokens, recv_topk_weights, handle_mem = ep_dispatch_fwd(
         cfg, handle_mem, topk_idx, tokens, topk_weights, recv_capacity_per_rank

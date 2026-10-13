@@ -5,7 +5,6 @@
 
 import atexit
 import ctypes
-import os
 from functools import partial
 
 import jax
@@ -154,6 +153,7 @@ def ep_bootstrap(
             trapping on overflow. Dropped tokens are still counted in
             total_recv_tokens, so callers can detect overflow from it.
     """
+    _fused_prepare_dispatch_enabled()  # latch NVTE_EP_FUSED_PREPARE_DISPATCH
     if rank is None:
         rank = jax.process_index()
     if jnp.dtype(max_token_dtype) != jnp.bfloat16:
