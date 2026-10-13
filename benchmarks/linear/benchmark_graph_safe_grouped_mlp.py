@@ -90,6 +90,7 @@ def build_grouped_mlp(
             dtype=dtype,
             single_grouped_weight=single_grouped_weight,
             accumulate_into_main_grad=accumulate_into_main_grad,
+            split_alignment=256,
         )
         fc2 = te_ops.GroupedLinear(
             num_groups,
@@ -100,6 +101,7 @@ def build_grouped_mlp(
             dtype=dtype,
             single_grouped_weight=single_grouped_weight,
             accumulate_into_main_grad=accumulate_into_main_grad,
+            split_alignment=256,
         )
         return te_ops.Sequential(
             fc1,

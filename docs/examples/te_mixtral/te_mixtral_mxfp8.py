@@ -151,6 +151,7 @@ class TEMixtralMXFP8SparseMoeBlock(nn.Module):
             bias=False,
             dtype=config.dtype,
             device=device,
+            split_alignment=256,
         )
         self.experts_swiglu = ScaledSwiGLU(glu_interleave_size=GLU_INTERLEAVE_SIZE)
         self.experts_down = TEOpsGroupedLinear(
@@ -160,6 +161,7 @@ class TEMixtralMXFP8SparseMoeBlock(nn.Module):
             bias=False,
             dtype=config.dtype,
             device=device,
+            split_alignment=256,
         )
         # Wrap as TE Sequential to enable forward/backward op fusion
         # (GroupedMLP_CuTeGEMMGLU).
