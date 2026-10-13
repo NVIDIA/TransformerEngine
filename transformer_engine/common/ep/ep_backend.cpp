@@ -346,7 +346,7 @@ void EPBackend::init(ncclComm_t ep_comm, NVTEEpGroupConfig group_config) {
   NVTE_CHECK(!initialized_, "EPBackend already initialized");
 
   group_config_ = group_config;
-  handle_cache_cap_set_ = group_config.disable_handle_cache != 0;
+  handle_cache_cap_set_ = false;
   handle_cache_cap_ = 0;
 
   ncclEpGroupConfig_t cfg = NCCL_EP_GROUP_CONFIG_INIT;

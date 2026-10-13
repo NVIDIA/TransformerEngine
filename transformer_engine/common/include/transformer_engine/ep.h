@@ -67,10 +67,6 @@ typedef struct {
   /*! Recv overflow policy. Nonzero drops tokens past max_recv_tokens_per_rank
    *  and continues; 0 (default) traps. Not supported in eager mode. */
   int drop_on_overflow;
-  /*! Nonzero disables the handle cache for this group, so handle_mem may be relocated
-   *  between calls and only the *_v2 ops are usable. 0 (default) = cache sized by
-   *  NVTE_EP_HANDLE_CACHE_SIZE. */
-  int disable_handle_cache;
 } NVTEEpGroupConfig;
 
 /*! \brief Per-layer configuration consumed by nvte_ep_handle_mem_size,

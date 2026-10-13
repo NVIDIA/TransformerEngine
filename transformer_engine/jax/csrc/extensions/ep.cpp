@@ -58,9 +58,7 @@ static NVTEEpGroupConfig MakeEpGroupConfig(const EpBootstrapParams& p) {
                            .num_comm_sms = p.max_num_sms,
                            .max_token_dtype = p.max_token_dtype,
                            .zero_copy = 0,
-                           .drop_on_overflow = p.drop_on_overflow,
-                           // XLA may relocate handle_mem between calls (e.g. under lax.scan).
-                           .disable_handle_cache = 1};
+                           .drop_on_overflow = p.drop_on_overflow};
 }
 
 class EpResources {
@@ -71,6 +69,8 @@ class EpResources {
     std::memcpy(&uid, p.uid_bytes.data(), sizeof(uid));
     NVTE_CHECK_NCCL(ncclCommInitRank(&comm_, p.ep_size, uid, p.rank_within_group));
     NVTEEpGroupConfig cfg = MakeEpGroupConfig(p);
+    // XLA may relocate handle_mem between calls (e.g. under lax.scan), so disable the handle cache.
+    setenv("NVTE_EP_HANDLE_CACHE_SIZE", "0", 1);
     try {
       nvte_ep_initialize(static_cast<void*>(comm_), &cfg);
     } catch (...) {
