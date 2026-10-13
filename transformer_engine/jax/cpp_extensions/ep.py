@@ -1282,9 +1282,9 @@ def _ep_dispatch_fwd(
 
 
 def ep_prepare(cfg: EpLayerConfig, topk_idx):
-    """Deprecated: use ``ep_prepare_and_dispatch_fwd``. Removal planned in about 3 months."""
+    """Deprecated: use ``ep_prepare_and_dispatch_fwd``. Planned for removal in January 2027."""
     warnings.warn(
-        "ep_prepare is deprecated and will be removed in about 3 months. Use"
+        "ep_prepare is deprecated and planned to be removed in January 2027. Use"
         " ep_prepare_and_dispatch_fwd instead.",
         DeprecationWarning,
         stacklevel=2,
@@ -1295,9 +1295,9 @@ def ep_prepare(cfg: EpLayerConfig, topk_idx):
 def ep_dispatch_fwd(
     cfg: EpLayerConfig, handle_mem, topk_idx, tokens, topk_weights, recv_capacity_per_rank
 ):
-    """Deprecated: use ``ep_prepare_and_dispatch_fwd``. Removal planned in about 3 months."""
+    """Deprecated: use ``ep_prepare_and_dispatch_fwd``. Planned for removal in January 2027."""
     warnings.warn(
-        "ep_dispatch_fwd is deprecated and will be removed in about 3 months. Use"
+        "ep_dispatch_fwd is deprecated and planned to be removed in January 2027. Use"
         " ep_prepare_and_dispatch_fwd instead.",
         DeprecationWarning,
         stacklevel=2,
