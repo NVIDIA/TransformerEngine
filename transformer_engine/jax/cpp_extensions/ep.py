@@ -1311,7 +1311,7 @@ _fused_prepare_dispatch = None
 def _fused_prepare_dispatch_enabled():
     """True when NVTE_EP_FUSED_PREPARE_DISPATCH=1 selects the fused prepare + dispatch path.
 
-    Latched on first call (ep_bootstrap). Only supports EP within a single NVLink domain;
+    Latched on first use. Only supports EP within a single NVLink domain;
     received row order within an expert block may differ from the unfused path.
     """
     global _fused_prepare_dispatch

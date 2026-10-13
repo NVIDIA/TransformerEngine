@@ -14,7 +14,7 @@ import numpy as np
 
 import transformer_engine_jax
 import transformer_engine.jax.cpp_extensions as tex
-from transformer_engine.jax.cpp_extensions.ep import _ep_outer_axis, _fused_prepare_dispatch_enabled
+from transformer_engine.jax.cpp_extensions.ep import _ep_outer_axis
 from transformer_engine.jax.cpp_extensions.misc import jax_dtype_to_te_dtype
 from transformer_engine.jax.sharding import (
     _get_mesh,
@@ -153,7 +153,6 @@ def ep_bootstrap(
             trapping on overflow. Dropped tokens are still counted in
             total_recv_tokens, so callers can detect overflow from it.
     """
-    _fused_prepare_dispatch_enabled()  # latch NVTE_EP_FUSED_PREPARE_DISPATCH
     if rank is None:
         rank = jax.process_index()
     if jnp.dtype(max_token_dtype) != jnp.bfloat16:

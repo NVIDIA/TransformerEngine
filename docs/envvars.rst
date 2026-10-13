@@ -566,7 +566,7 @@ JAX-Specific Variables
 
    :Type: ``int`` (0 or 1)
    :Default: ``0``
-   :Description: Use the fused prepare + dispatch path for expert parallelism (NCCL EP count mode) instead of separate prepare and dispatch calls. Supported only when EP stays within a single NVLink domain, and the received row order within an expert block may differ from the unfused path. In JAX the value is latched at ``ep_bootstrap``.
+   :Description: Use the fused prepare + dispatch path for expert parallelism (NCCL EP count mode) instead of separate prepare and dispatch calls. Supported only when EP stays within a single NVLink domain, and the received row order within an expert block may differ from the unfused path. In JAX the value is latched on first use.
 
 JAX Triton Extensions
 ^^^^^^^^^^^^^^^^^^^^^
