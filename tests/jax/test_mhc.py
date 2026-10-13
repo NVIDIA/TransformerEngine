@@ -267,6 +267,27 @@ class TestMHCOps:
         for name, grad, ref_grad in zip(("h", "alpha", "beta", "ms"), grads, ref_grads):
             assert_allclose(grad, ref_grad, err_msg=name, **tols)
 
+    @pytest_parametrize_wrapper("b,s,C", [(8, 128, 1024)])
+    def test_mhc_scale_mixed_alpha_beta_dtypes(self, b, s, C):
+        """A fp32 beta gets a fp32 gradient even when alpha is bf16."""
+        del C
+        n = N_STREAMS
+        keys = jax.random.split(jax.random.PRNGKey(10), 4)
+        h = _normal(keys[0], (s * b, H_PADDED_DIM), jnp.float32)
+        alpha = _normal(keys[1], (3,), jnp.bfloat16)
+        beta = _normal(keys[2], (1, N_MIX), jnp.float32)
+        ms = jnp.abs(_normal(keys[3], (s * b,), jnp.float32)) + 1.0
+
+        def grad_beta(fn):
+            loss = lambda beta: _sum_loss(*fn(h, alpha, beta, ms))
+            return jax.jit(jax.grad(loss))(beta)
+
+        grad = grad_beta(lambda *a: mhc_scale(*a, n))
+        ref_grad = grad_beta(lambda h, *a: mhc_scale_ref(h[:, :N_MIX], *a, n))
+        assert grad.dtype == jnp.float32
+        # Tighter than bf16 resolution, so rounding grad_beta through alpha's dtype would fail.
+        assert_allclose(grad, ref_grad, rtol=1e-4, atol=1e-4)
+
     @pytest_parametrize_wrapper("b,s,C", CONFIGS)
     @pytest_parametrize_wrapper("dtypes", PROJECTION_DTYPES)
     @pytest_parametrize_wrapper("has_norm_weight", [False, True])

@@ -149,6 +149,14 @@ class _MHCPrimitive(BasePrimitive):
         raise NotImplementedError
 
     @classmethod
+    def batcher(cls, batched_args, batch_dims, **params):
+        """vmap is currently not supported."""
+        del batched_args, batch_dims, params
+        raise NotImplementedError(
+            f"{cls.__name__}: batching (jax.vmap) is not implemented for the mHC kernels."
+        )
+
+    @classmethod
     def partition(cls, *args):
         """Shard the token dims and replicate the rest."""
         *static_args, mesh, arg_infos, result_infos = args
@@ -1585,7 +1593,7 @@ def mhc_scale_bwd(
     Returns
     -------
     grad_h (fp32, (..., 32)), grad_alpha ((3,), alpha's dtype),
-    grad_beta ((2n + n*n,), alpha's dtype), grad_ms (fp32, (...,)).
+    grad_beta (fp32, (2n + n*n,)), grad_ms (fp32, (...,)).
     """
     assert n == 4, "Only n=4 is supported in this implementation"
     grad_h, grad_alpha, grad_beta, grad_ms = MHCScaleBwdPrimitive.outer_primitive.bind(
@@ -1598,7 +1606,7 @@ def mhc_scale_bwd(
         eps=float(eps),
         deterministic=ENFORCE_DETERMINISTIC,
     )
-    return grad_h, grad_alpha.astype(alpha.dtype), grad_beta.astype(alpha.dtype), grad_ms
+    return grad_h, grad_alpha.astype(alpha.dtype), grad_beta, grad_ms
 
 
 def mhc_sinkhorn_fwd(
@@ -1743,8 +1751,11 @@ def mhc_expand_combine_bwd(
     """
     Backward of `mhc_expand_combine_fwd`.
 
-    If `grad_x_acc` (fp32, x's shape) is given, grad_x is accumulated into it and the updated
-    buffer is returned. Returns (grad_f, grad_bias or None, grad_h_post, grad_x, grad_h_res).
+    If `grad_x_acc` (fp32, x's shape) is given, grad_x is written to it in fp32 and the buffer
+    is returned. Its previous contents are overwritten, not accumulated into: this is the first
+    backward of the mHC chain, so it initializes the buffer that `mhc_aggregate_bwd` and
+    `mhc_projection_bwd` then accumulate into.
+    Returns (grad_f, grad_bias or None, grad_h_post, grad_x, grad_h_res).
     """
     assert x.shape[-1] == 4, "Only n=4 is supported in this implementation"
     _check_grad_x_acc(grad_x_acc, x)
