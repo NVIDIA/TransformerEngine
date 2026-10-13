@@ -38,18 +38,18 @@
 namespace transformer_engine {
 namespace dispatch {
 
-// Device pointer of the activation table to read for OP, or nullptr to compute OP. The table
-// applies to BF16 inputs of the activations that have one.
+// The activation table to read for OP, if any. Tables apply to BF16 inputs of the activations
+// that have one.
 template <typename ParamOP, float (*OP)(float, const ParamOP &)>
-const void *activation_lut_for(const QuantizationConfig &quant_config, const DType input_dtype) {
+activation_table::TableRef activation_lut_for(const QuantizationConfig &quant_config,
+                                              const DType input_dtype) {
   if constexpr (activation_table::kHasTable<ParamOP, OP>) {
     if (quant_config.activation_table != nullptr && input_dtype == DType::kBFloat16) {
-      return activation_table::checked_table_ptr(
-          *convertNVTETensorCheck(quant_config.activation_table),
-          activation_table::kKindOf<ParamOP, OP>);
+      return activation_table::checked_table(*convertNVTETensorCheck(quant_config.activation_table),
+                                             activation_table::kKindOf<ParamOP, OP>);
     }
   }
-  return nullptr;
+  return {};
 }
 
 template <bool IS_ACT, typename ParamOP, float (*OP)(float, const ParamOP &)>
@@ -109,13 +109,13 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
       const Tensor *dummy_input_tensor = nullptr;
       Tensor *dummy_dbias_tensor = nullptr;
       Tensor *dummy_workspace_tensor = nullptr;
-      const void *activation_lut =
+      const activation_table::TableRef activation_lut =
           IS_ACT ? activation_lut_for<ParamOP, OP>(quant_config_cpp, input_tensor->dtype())
-                 : nullptr;
+                 : activation_table::TableRef{};
       bool quantized_with_cutedsl = false;
 #ifdef NVTE_WITH_CUTEDSL
       // The CuTeDSL backend computes activations itself, so it cannot honor a table.
-      if (activation_lut == nullptr) {
+      if (activation_lut.ptr == nullptr) {
         quantized_with_cutedsl =
             cutedsl_backend::mxfp8_quantize_cutedsl</*IS_DBIAS=*/false, /*IS_DACT=*/false, IS_ACT,
                                                     ParamOP, OP>(
@@ -304,14 +304,14 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
       break;
     }
     case NVTE_MXFP8_1D_SCALING: {
-      const void *activation_lut = nullptr;
+      activation_table::TableRef activation_lut;
       if constexpr (IS_DACT) {
         activation_lut = activation_lut_for<ParamOP, OP>(quant_config_cpp, input_tensor->dtype());
       }
       bool quantized_with_cutedsl = false;
 #ifdef NVTE_WITH_CUTEDSL
       // The CuTeDSL backend computes activations itself, so it cannot honor a table.
-      if (activation_lut == nullptr) {
+      if (activation_lut.ptr == nullptr) {
         quantized_with_cutedsl =
             cutedsl_backend::mxfp8_quantize_cutedsl<IS_DBIAS, IS_DACT, /*IS_ACT=*/false, ParamOP,
                                                     OP>(

@@ -67,14 +67,15 @@ const char *mode_name(const Mode m) {
 // act: y = OP(x); dact: y = grad * dOP(x), as the fused kernels form it in FP32. z keeps the FP32
 // value (dbias sums it before truncation), y the value truncated to the input type.
 template <typename IType>
-__global__ void scalar_activation_kernel(const Mode mode, const bool table_spec, const IType *x,
+__global__ void scalar_activation_kernel(const Mode mode, const bool table_spec,
+                                         const float dsilu_window_low, const IType *x,
                                          const IType *grad, IType *y, float *z, const size_t n) {
   const size_t i = blockIdx.x * static_cast<size_t>(blockDim.x) + threadIdx.x;
   if (i >= n) return;
   const float xv = static_cast<float>(x[i]);
   const Empty e{};
   // With a table, -inf gives -0 in the forward functions, and the derivatives below
-  // 2^-12 (dGeLU) and 2^-9 (dSiLU) are their linear Taylor terms.
+  // 2^-12 (dGeLU) and dsilu_window_low (dSiLU) are their linear Taylor terms.
   const bool negative_inf = table_spec && xv == -INFINITY;
   const float magnitude = fabsf(xv);
   float v;
@@ -93,7 +94,8 @@ __global__ void scalar_activation_kernel(const Mode mode, const bool table_spec,
       break;
     default:
       v = static_cast<float>(grad[i]);
-      v *= table_spec && magnitude < 0x1p-9f ? fmaf(0.5f, xv, 0.5f) : dsilu<float, float>(xv, e);
+      v *= table_spec && magnitude < dsilu_window_low ? fmaf(0.5f, xv, 0.5f)
+                                                       : dsilu<float, float>(xv, e);
       break;
   }
   z[i] = v;
@@ -290,8 +292,13 @@ void run_case(const Mode mode, const Fill fill, const size_t rows, const size_t 
   constexpr int block_size = 256;
   const size_t grid_size = divide_round_up(n, block_size);
   const bool table_spec = use_table && std::is_same_v<IType, __nv_bfloat16>;
+  // NVTE_ACTIVATION_TABLE_EXACT_DSILU=1 extends the dSiLU table down to 2^-25.
+  const char *exact_env = std::getenv("NVTE_ACTIVATION_TABLE_EXACT_DSILU");
+  const float dsilu_window_low =
+      exact_env != nullptr && std::string(exact_env) == "1" ? 0x1p-25f : 0x1p-9f;
   scalar_activation_kernel<IType>
-      <<<grid_size, block_size>>>(mode, table_spec, static_cast<const IType *>(x.rowwise_dptr()),
+      <<<grid_size, block_size>>>(mode, table_spec, dsilu_window_low,
+                                  static_cast<const IType *>(x.rowwise_dptr()),
                                   static_cast<const IType *>(grad.rowwise_dptr()),
                                   static_cast<IType *>(y.rowwise_dptr()), z_dev, n);
   ASSERT_EQ(cudaGetLastError(), cudaSuccess);

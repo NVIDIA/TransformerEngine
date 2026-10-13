@@ -10,6 +10,8 @@
 //   - derivative: util/math.h, except below the table window, where it is the linear Taylor
 //     term rounded once.
 // The derivative is also checked against util/math.h with the ulp bound stated in the API.
+// With NVTE_ACTIVATION_TABLE_EXACT_DSILU=1 the dSiLU window starts at 2^-25 and dSiLU must match
+// util/math.h exactly.
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
@@ -22,6 +24,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include "util/activation_table.cuh"
@@ -34,10 +37,17 @@ using transformer_engine::Empty;
 constexpr int kNumInputs = 1 << 16;
 
 // Below-window bounds and linear forms of the specification.
-constexpr uint32_t kDgeluWindowLow = 0x3980;  // 2^-12
-constexpr uint32_t kDsiluWindowLow = 0x3B00;  // 2^-9
+constexpr uint32_t kDgeluWindowLow = 0x3980;       // 2^-12
+constexpr uint32_t kDsiluWindowLow = 0x3B00;       // 2^-9
+constexpr uint32_t kExactDsiluWindowLow = 0x3300;  // 2^-25
 
-__device__ float spec(const NVTEActivationTableKind kind, const uint32_t bits) {
+bool exact_dsilu() {
+  const char *env = std::getenv("NVTE_ACTIVATION_TABLE_EXACT_DSILU");
+  return env != nullptr && std::string(env) == "1";
+}
+
+__device__ float spec(const NVTEActivationTableKind kind, const uint32_t bits,
+                      const uint32_t dsilu_window_low) {
   const float x = __uint_as_float(bits << 16);
   const uint32_t magnitude = bits & 0x7fffu;
   switch (kind) {
@@ -51,7 +61,7 @@ __device__ float spec(const NVTEActivationTableKind kind, const uint32_t bits) {
       if (magnitude < kDgeluWindowLow) return fmaf(0.79788456f, x, 0.5f);
       return transformer_engine::dgelu<float, float>(x, {});
     default:
-      if (magnitude < kDsiluWindowLow) return fmaf(0.5f, x, 0.5f);
+      if (magnitude < dsilu_window_low) return fmaf(0.5f, x, 0.5f);
       return transformer_engine::dsilu<float, float>(x, {});
   }
 }
@@ -84,15 +94,15 @@ struct Op<kNVTEActivationTableDsilu> {
   static constexpr float (*value)(float, const Empty &) = transformer_engine::dsilu<float, float>;
 };
 
-template <NVTEActivationTableKind kKind>
-__global__ void lookup_kernel(const void *table, float *looked_up, float *expected,
-                              float *math_h) {
+template <NVTEActivationTableKind kKind, int kUse>
+__global__ void lookup_kernel(const void *table, const uint32_t dsilu_window_low, float *looked_up,
+                              float *expected, float *math_h) {
   const uint32_t bits = blockIdx.x * blockDim.x + threadIdx.x;
   if (bits >= kNumInputs) return;
   namespace at = transformer_engine::activation_table;
   const float x = __uint_as_float(bits << 16);
-  looked_up[bits] = at::evaluate<true, Empty, Op<kKind>::value>(x, table);
-  expected[bits] = spec(kKind, bits);
+  looked_up[bits] = at::evaluate<kUse, Empty, Op<kKind>::value>(x, table);
+  expected[bits] = spec(kKind, bits, dsilu_window_low);
   math_h[bits] = (kKind == kNVTEActivationTableDgelu || kKind == kNVTEActivationTableDsilu)
                      ? scalar_math(kKind, x)
                      : 0.0f;
@@ -131,7 +141,18 @@ void check_table(const int max_ulp_below_window) {
   DeviceTable table(kKind);
   float *d = nullptr;
   ASSERT_EQ(cudaMalloc(&d, 3 * kNumInputs * sizeof(float)), cudaSuccess);
-  lookup_kernel<kKind><<<kNumInputs / 256, 256>>>(table.ptr, d, d + kNumInputs, d + 2 * kNumInputs);
+  namespace at = transformer_engine::activation_table;
+  const bool exact = kKind == kNVTEActivationTableDsilu && exact_dsilu();
+  const uint32_t dsilu_window_low = exact ? kExactDsiluWindowLow : kDsiluWindowLow;
+  if (exact) {
+    if constexpr (kKind == kNVTEActivationTableDsilu) {
+      lookup_kernel<kKind, at::kExactDsiluTable><<<kNumInputs / 256, 256>>>(
+          table.ptr, dsilu_window_low, d, d + kNumInputs, d + 2 * kNumInputs);
+    }
+  } else {
+    lookup_kernel<kKind, at::kDefaultTable><<<kNumInputs / 256, 256>>>(
+        table.ptr, dsilu_window_low, d, d + kNumInputs, d + 2 * kNumInputs);
+  }
   ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
   std::vector<float> h(3 * kNumInputs);
   ASSERT_EQ(cudaMemcpy(h.data(), d, h.size() * sizeof(float), cudaMemcpyDeviceToHost),
@@ -171,7 +192,7 @@ TEST(ActivationTableTest, DgeluMatchesSpecification) {
   check_table<kNVTEActivationTableDgelu>(1);
 }
 TEST(ActivationTableTest, DsiluMatchesSpecification) {
-  check_table<kNVTEActivationTableDsilu>(2);
+  check_table<kNVTEActivationTableDsilu>(exact_dsilu() ? 0 : 2);
 }
 
 TEST(ActivationTableTest, SizesIdentifyKind) {

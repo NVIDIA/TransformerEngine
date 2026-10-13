@@ -20,7 +20,9 @@
  *  Derivatives (dGeLU, dSiLU): FP32 entries, because callers multiply the derivative by
  *  the incoming gradient in FP32. Below the window the derivative is its linear Taylor
  *  term 0.5 + c*x, rounded once; it differs from util/math.h by at most 1 ulp (dGeLU) or
- *  2 ulp (dSiLU) there. Above the window the derivative has saturated, and the table's
+ *  2 ulp (dSiLU) there. With NVTE_ACTIVATION_TABLE_EXACT_DSILU=1 the dSiLU table extends
+ *  down to 2^-25, below which the linear term equals util/math.h, so dSiLU matches
+ *  util/math.h for every input (32 KB instead of 16 KB). Above the window the derivative has saturated, and the table's
  *  last entry of the same sign holds the saturated value. Inputs where util/math.h
  *  returns NaN (dGeLU from 0x6044 on, where 0.107*x*x overflows; +-inf; NaN) keep NaN.
  *
@@ -39,6 +41,7 @@
 
 #include "../common.h"
 #include "math.h"
+#include "system.h"
 
 namespace transformer_engine {
 namespace activation_table {
@@ -62,10 +65,9 @@ struct ForwardLayout {
 /*! \brief Derivative table over the BF16 magnitudes [kLo, kHi].
  *
  *  Positive inputs at entries [0, n), negative ones at [kSignStride, kSignStride + n).
- *  The stride turns the BF16 sign bit, 0x8000, into a byte offset of 0x8000 >> 2, which
- *  lets a packed lookup form both lanes' offsets in one 32-bit word.
+ *  A power-of-two stride turns the BF16 sign bit into a byte offset with one shift.
  */
-template <uint32_t kLo, uint32_t kHi, uint32_t kSaturatedEnd>
+template <uint32_t kLo, uint32_t kHi, uint32_t kSaturatedEnd, uint32_t kStride = 2048>
 struct DerivativeLayout {
   static constexpr bool kForward = false;
   static constexpr uint32_t kLoBits = kLo;
@@ -73,7 +75,7 @@ struct DerivativeLayout {
   //! Magnitudes from here on (and NaN) give NaN, as util/math.h does.
   static constexpr uint32_t kSaturatedEndBits = kSaturatedEnd;
   static constexpr uint32_t kEntriesPerSign = kHi - kLo + 1;
-  static constexpr uint32_t kSignStride = (0x8000 >> 2) / sizeof(float);
+  static constexpr uint32_t kSignStride = kStride;
   static_assert(kEntriesPerSign <= kSignStride, "The two signs' entries must not overlap.");
   static constexpr size_t kBytes = (kSignStride + kEntriesPerSign) * sizeof(float);
 };
@@ -110,6 +112,13 @@ struct Table<kNVTEActivationTableDsilu> : DerivativeLayout<0x3B00, 0x42B2, 0x7F8
   __device__ static float below_window(const float x) { return fmaf(0.5f, x, 0.5f); }
 };
 
+//! dSiLU over [2^-25, 89]: below 2^-25 the linear term already equals util/math.h. Selected
+//! with NVTE_ACTIVATION_TABLE_EXACT_DSILU=1.
+struct ExactDsiluTable : DerivativeLayout<0x3300, 0x42B2, 0x7F80, 4096> {
+  __device__ static float op(const float x) { return dsilu<float, float>(x, {}); }
+  __device__ static float below_window(const float x) { return fmaf(0.5f, x, 0.5f); }
+};
+
 /*! \brief Table size in bytes. Each kind has a different size, which lets callers check that
  *         a table matches the activation it is passed with.
  */
@@ -129,19 +138,54 @@ constexpr size_t table_bytes(const NVTEActivationTableKind kind) {
 }
 
 static_assert(table_bytes(kNVTEActivationTableGelu) != table_bytes(kNVTEActivationTableSilu) &&
-                  table_bytes(kNVTEActivationTableDgelu) != table_bytes(kNVTEActivationTableDsilu),
+                  table_bytes(kNVTEActivationTableDgelu) !=
+                      table_bytes(kNVTEActivationTableDsilu) &&
+                  ExactDsiluTable::kBytes != table_bytes(kNVTEActivationTableDsilu),
               "Table sizes must identify their kind.");
 
-/*! \brief Device pointer of an activation table, checked against the kind it must hold. */
-inline const void *checked_table_ptr(const Tensor &table, const NVTEActivationTableKind kind) {
+//! Whether dSiLU tables are built in the exact layout (NVTE_ACTIVATION_TABLE_EXACT_DSILU=1).
+inline bool use_exact_dsilu_table() {
+  static const bool exact = getenv<bool>("NVTE_ACTIVATION_TABLE_EXACT_DSILU");
+  return exact;
+}
+
+//! Size of the table that nvte_build_activation_table builds for kind.
+inline size_t built_table_bytes(const NVTEActivationTableKind kind) {
+  if (kind == kNVTEActivationTableDsilu && use_exact_dsilu_table()) {
+    return ExactDsiluTable::kBytes;
+  }
+  return table_bytes(kind);
+}
+
+//! Which table layout a kernel reads.
+enum TableUse : int {
+  kNoTable = 0,          //!< Compute OP with util/math.h.
+  kDefaultTable = 1,     //!< Table<kind>.
+  kExactDsiluTable = 2,  //!< ExactDsiluTable.
+};
+
+//! An activation table passed to a kernel.
+struct TableRef {
+  const void *ptr = nullptr;
+  TableUse use = kNoTable;
+};
+
+/*! \brief An activation table, checked against the kind it must hold.
+ *
+ *  A dSiLU table may have either layout; its size tells which.
+ */
+inline TableRef checked_table(const Tensor &table, const NVTEActivationTableKind kind) {
   const size_t bytes = table_bytes(kind);
   NVTE_CHECK(bytes != 0, "Invalid NVTEActivationTableKind (got ", static_cast<int>(kind), ")");
   NVTE_CHECK(table.data.dptr != nullptr, "Activation table is not allocated.");
   NVTE_CHECK(table.data.dtype == DType::kByte, "Activation table must be a byte tensor.");
-  NVTE_CHECK(table.data.numel() == bytes, "Activation table has ", table.data.numel(),
-             " bytes, but activation table kind ", static_cast<int>(kind), " needs ", bytes,
-             " (was it built for another activation?)");
-  return table.data.dptr;
+  const size_t got = table.data.numel();
+  if (kind == kNVTEActivationTableDsilu && got == ExactDsiluTable::kBytes) {
+    return {table.data.dptr, kExactDsiluTable};
+  }
+  NVTE_CHECK(got == bytes, "Activation table has ", got, " bytes, but activation table kind ",
+             static_cast<int>(kind), " needs ", bytes, " (was it built for another activation?)");
+  return {table.data.dptr, kDefaultTable};
 }
 
 /*! \brief The table kind for OP, if OP is read from a table. */
@@ -170,9 +214,8 @@ constexpr NVTEActivationTableKind kKindOf<Empty, dsilu<float, float>> = kNVTEAct
  *  Branch-free: the magnitude is clamped to the table rows with __hmax/__hmin, which
  *  ignore NaN, so NaN lands on the -inf row; __hmin_nan/__hmax_nan then propagate it.
  */
-template <NVTEActivationTableKind kKind>
+template <typename T>
 __device__ __forceinline__ float forward(const float x, const __nv_bfloat16 *__restrict__ table) {
-  using T = Table<kKind>;
   static_assert(T::kForward, "Not a forward table.");
   const __nv_bfloat16 a = __float2bfloat16_rn(x);
   const uint32_t sign = __float_as_uint(x) >> 31;
@@ -189,9 +232,8 @@ __device__ __forceinline__ float forward(const float x, const __nv_bfloat16 *__r
 }
 
 /*! \brief Derivative of x, a BF16 value widened to FP32. Branch-free. */
-template <NVTEActivationTableKind kKind>
+template <typename T>
 __device__ __forceinline__ float derivative(const float x, const float *__restrict__ table) {
-  using T = Table<kKind>;
   static_assert(!T::kForward, "Not a derivative table.");
   const uint32_t bits = __float_as_uint(x) >> 16;
   const uint32_t magnitude = bits & 0x7fffu;
@@ -202,22 +244,25 @@ __device__ __forceinline__ float derivative(const float x, const float *__restri
   return magnitude >= T::kSaturatedEndBits ? __uint_as_float(0x7fffffffu) : value;
 }
 
-/*! \brief OP(x), from the table when kUseTable, else from util/math.h.
+/*! \brief OP(x), from the table given by kUse, or from util/math.h for kNoTable.
  *
- *  x must be a BF16 value widened to FP32 when kUseTable.
+ *  x must be a BF16 value widened to FP32 when reading a table.
  */
-template <bool kUseTable, typename ParamOP, float (*OP)(float, const ParamOP &)>
+template <int kUse, typename ParamOP, float (*OP)(float, const ParamOP &)>
 __device__ __forceinline__ float evaluate(const float x, const void *table) {
-  if constexpr (kUseTable) {
+  if constexpr (kUse == kNoTable) {
+    return OP(x, {});
+  } else {
     static_assert(kHasTable<ParamOP, OP>, "OP has no table.");
     constexpr NVTEActivationTableKind kKind = kKindOf<ParamOP, OP>;
-    if constexpr (Table<kKind>::kForward) {
-      return forward<kKind>(x, static_cast<const __nv_bfloat16 *>(table));
+    if constexpr (kUse == kExactDsiluTable) {
+      static_assert(kKind == kNVTEActivationTableDsilu, "Only dSiLU has an exact table.");
+      return derivative<ExactDsiluTable>(x, static_cast<const float *>(table));
+    } else if constexpr (Table<kKind>::kForward) {
+      return forward<Table<kKind>>(x, static_cast<const __nv_bfloat16 *>(table));
     } else {
-      return derivative<kKind>(x, static_cast<const float *>(table));
+      return derivative<Table<kKind>>(x, static_cast<const float *>(table));
     }
-  } else {
-    return OP(x, {});
   }
 }
 

@@ -50,7 +50,7 @@ template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &), typename IType, typename OType, bool ROWWISE_SCALING,
           bool COLWISE_SCALING, bool WITH_GEMM_SWIZZLED_SCALES, size_t CHUNK_DIM_Y,
           size_t CHUNK_DIM_X, size_t THREADS_PER_CHUNK, bool kIs2DBlockScaling,
-          bool kUseActivationTable>
+          int kActivationTableUse>
 __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     quantize_mxfp8_kernel(const __grid_constant__ CUtensorMap tensor_map_input,
                           const __grid_constant__ CUtensorMap tensor_map_act_input,
@@ -258,11 +258,11 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
           float elt = static_cast<float>(in_sh[shmem_offset_colwise]);
           if constexpr (IS_ACT) {
-            elt = activation_table::evaluate<kUseActivationTable, ParamOP, OP>(elt, activation_lut);
+            elt = activation_table::evaluate<kActivationTableUse, ParamOP, OP>(elt, activation_lut);
           }
           if constexpr (IS_DACT) {
             float act_in_elt = static_cast<float>(act_in_sh[shmem_offset_colwise]);
-            elt *= activation_table::evaluate<kUseActivationTable, ParamOP, OP>(act_in_elt,
+            elt *= activation_table::evaluate<kActivationTableUse, ParamOP, OP>(act_in_elt,
                                                                                 activation_lut);
           }
           if constexpr (DBIAS_REDUCTION_IN_COLWISE) {
@@ -345,11 +345,11 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
         float elt = static_cast<float>(in_sh[shmem_offset_colwise]);
         if constexpr (IS_ACT) {
-          elt = activation_table::evaluate<kUseActivationTable, ParamOP, OP>(elt, activation_lut);
+          elt = activation_table::evaluate<kActivationTableUse, ParamOP, OP>(elt, activation_lut);
         }
         if constexpr (IS_DACT) {
           const float act_in_elt = static_cast<float>(act_in_sh[shmem_offset_colwise]);
-          elt *= activation_table::evaluate<kUseActivationTable, ParamOP, OP>(act_in_elt,
+          elt *= activation_table::evaluate<kActivationTableUse, ParamOP, OP>(act_in_elt,
                                                                               activation_lut);
         }
         partial_dbias_colwise += elt;
@@ -446,11 +446,11 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             float elt = static_cast<float>(in.data.elt[e]);
             if constexpr (IS_ACT) {
               elt =
-                  activation_table::evaluate<kUseActivationTable, ParamOP, OP>(elt, activation_lut);
+                  activation_table::evaluate<kActivationTableUse, ParamOP, OP>(elt, activation_lut);
             }
             if constexpr (IS_DACT) {
               float act_in_elt = static_cast<float>(act_in.data.elt[e]);
-              elt *= activation_table::evaluate<kUseActivationTable, ParamOP, OP>(act_in_elt,
+              elt *= activation_table::evaluate<kActivationTableUse, ParamOP, OP>(act_in_elt,
                                                                                   activation_lut);
             }
 
@@ -661,7 +661,7 @@ template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &)>
 void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop,  // TODO (ksivamani)
               Tensor *output, Tensor *dbias, Tensor *workspace, const bool use_2d_quantization,
-              const void *activation_lut, cudaStream_t stream) {
+              const activation_table::TableRef activation_lut, cudaStream_t stream) {
   using namespace quantize_kernel;
   checkCuDriverContext(stream);
 
@@ -985,12 +985,12 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
               const auto launch =
                   [&](auto rowwise, auto colwise) {
                     TRANSFORMER_ENGINE_SWITCH_CONDITION(use_2d_quantization, kIs2DBlockScaling, {
-                      const auto launch_kernel = [&](auto use_table) {
+                      const auto launch_kernel = [&](auto table_use) {
                         auto kernel = quantize_mxfp8_kernel<
                             IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
                             decltype(rowwise)::value, decltype(colwise)::value,
                             WITH_GEMM_SWIZZLED_SCALES, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK,
-                            kIs2DBlockScaling, decltype(use_table)::value>;
+                            kIs2DBlockScaling, decltype(table_use)::value>;
                         NVTE_CHECK_CUDA(cudaFuncSetAttribute(
                             kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
 
@@ -998,16 +998,26 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                             tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
                             tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr,
                             noop_ptr, workspace_ptr, amax_ptr, num_rows, num_cols,
-                            scale_stride_rowwise, scale_stride_colwise, activation_lut);
+                            scale_stride_rowwise, scale_stride_colwise, activation_lut.ptr);
                       };
+                      using activation_table::kDefaultTable;
+                      using activation_table::kExactDsiluTable;
+                      using activation_table::kNoTable;
                       if constexpr (kTableCapable) {
-                        if (activation_lut != nullptr) {
-                          launch_kernel(std::true_type{});
+                        if (activation_lut.use == kDefaultTable) {
+                          launch_kernel(std::integral_constant<int, kDefaultTable>{});
+                        } else if (activation_lut.use == kExactDsiluTable) {
+                          if constexpr (activation_table::kKindOf<ParamOP, OP> ==
+                                        kNVTEActivationTableDsilu) {
+                            launch_kernel(std::integral_constant<int, kExactDsiluTable>{});
+                          } else {
+                            NVTE_ERROR("Only dSiLU has an exact activation table.");
+                          }
                         } else {
-                          launch_kernel(std::false_type{});
+                          launch_kernel(std::integral_constant<int, kNoTable>{});
                         }
                       } else {
-                        launch_kernel(std::false_type{});
+                        launch_kernel(std::integral_constant<int, kNoTable>{});
                       }
                     });
                   };

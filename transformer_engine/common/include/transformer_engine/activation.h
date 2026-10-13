@@ -56,6 +56,8 @@ enum class NVTE_Activation_Type {
  *  - GeLU and SiLU of -inf are -0 (the formulas give NaN).
  *  - For |x| < 2^-12 (dGeLU) or 2^-9 (dSiLU), the derivative is its linear Taylor term
  *    0.5 + c*x rounded once, within 1 ulp (dGeLU) or 2 ulp (dSiLU) of util/math.h.
+ *    With NVTE_ACTIVATION_TABLE_EXACT_DSILU=1 (experimental), the dSiLU table is 32 KB and
+ *    matches util/math.h for every input.
  */
 enum NVTEActivationTableKind {
   kNVTEActivationTableGelu = 0,  /*!< GeLU (tanh form), BF16 entries */
@@ -67,7 +69,8 @@ enum NVTEActivationTableKind {
 /*! \brief Size in bytes of an activation table.
  *
  *  \param[in]     kind      Activation the table holds.
- *  \return Size of the table in bytes. Each kind has a different size.
+ *  \return Size of the table in bytes. Each kind has a different size. The dSiLU size
+ *          depends on NVTE_ACTIVATION_TABLE_EXACT_DSILU.
  */
 size_t nvte_activation_table_size(NVTEActivationTableKind kind);
 
