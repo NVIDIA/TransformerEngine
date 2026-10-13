@@ -12,6 +12,7 @@ import threading
 import pathlib
 import logging
 import copy
+from collections.abc import Callable
 from collections import deque
 import pytest
 import torch
@@ -60,6 +61,7 @@ model_configs_flash_attn = {
     "cp_2_1": ModelConfig(2, 4096, 12, 128, num_gqa_groups=2),  # GQA
     "cp_2_2": ModelConfig(2, 4096, 32, 128, attn_mask_type="causal", window_size=(128, 0)),  # GQA
     "cp_2_3": ModelConfig(2, 4096, 12, 128, num_gqa_groups=2, window_size=(512, 512)),  # GQA
+    "cp_2_4": ModelConfig(2, 4096, 32, 256, num_gqa_groups=4, attn_mask_type="causal"),  # GQA
     "cp_3_0": ModelConfig(2, 4096, 128, 192, attn_mask_type="causal", head_dim_v=128),  # MLA
     "cp_3_1": ModelConfig(2, 4096, 12, 192, head_dim_v=128),  # MLA
     "cp_3_2": ModelConfig(
@@ -89,6 +91,12 @@ model_configs_flash_attn = {
 # if a slower machine or expanded test matrix needs more room.
 POOL_SUBMIT_TIMEOUT_SEC = float(os.getenv("NVTE_CP_POOL_TIMEOUT_SEC", "90"))
 
+# Non-infrastructure retries stay FP8+THD-only; fresh-worker evidence is required.
+RETRYABLE_ERROR_ALLOWLIST = (
+    "has nan values",  # Seen 2026-08-14; narrow retry committed 2026-08-20.
+    "rmse nan",  # Seen 2026-08-14; fresh-pool passes confirmed 2026-08-31.
+)
+
 
 class PoolWorker:
     # Crash-path AssertionErrors include the tail of the worker's stderr so CI
@@ -98,8 +106,9 @@ class PoolWorker:
     _STDERR_BUFFER_LINES = 200  # ring cap (~40 KB ceiling)
     _STDERR_TAIL_CHARS = 4000  # how much to attach to the AssertionError
 
-    def __init__(self, world_size: int):
+    def __init__(self, world_size: int, reset_all_pools: Callable[[], None]):
         self.world_size = world_size
+        self._reset_all_pools = reset_all_pools
         self.proc: subprocess.Popen | None = None
         self._stderr_buf: deque[str] = deque(maxlen=self._STDERR_BUFFER_LINES)
 
@@ -178,10 +187,19 @@ class PoolWorker:
     _MAX_RETRIES = 1
 
     def submit(self, kwargs: dict, timeout: float = POOL_SUBMIT_TIMEOUT_SEC) -> None:
+        # Attribute retries without changing test signatures or the worker protocol.
+        test_id = os.environ.get("PYTEST_CURRENT_TEST", "<unknown>").removesuffix(" (call)")
         first_err = None
         for attempt in range(self._MAX_RETRIES + 1):
             try:
-                return self._submit_once(kwargs, timeout)
+                self._submit_once(kwargs, timeout)
+                if attempt:
+                    sys.stderr.write(
+                        f"[POOL-RETRY-PASS] status=recovered test={test_id!r} "
+                        f"world_size={self.world_size}\n"
+                    )
+                    sys.stderr.flush()
+                return
             except AssertionError as e:
                 msg = str(e)
                 msg_head = msg.splitlines()[0]
@@ -190,28 +208,29 @@ class PoolWorker:
                     or "timed out" in msg_head
                     or "before request could be sent" in msg_head
                 )
-                # Heterogeneous CP cases can leave a retained worker in a state where
-                # FP8 THD emits NaNs even though the same case passes in a fresh worker.
-                # Retry only that signature once; a NaN from the fresh worker still fails.
-                fp8_thd_nan = (
+                retryable = infrastructure_flake or (
                     kwargs.get("dtype") == "fp8"
                     and kwargs.get("qkv_format") == "thd"
-                    and "has nan values" in msg.lower()
+                    and any(signature in msg.lower() for signature in RETRYABLE_ERROR_ALLOWLIST)
                 )
-                retryable = infrastructure_flake or fp8_thd_nan
                 if not retryable or attempt == self._MAX_RETRIES:
                     if first_err is not None:
                         sys.stderr.write(
-                            f"[POOL-RETRY-FAIL] world_size={self.world_size}: "
+                            f"[POOL-RETRY-FAIL] status=failed test={test_id!r} "
+                            f"world_size={self.world_size}: "
                             "both attempts failed; first error was: "
                             f"{str(first_err).splitlines()[0]!r}\n"
                         )
                         sys.stderr.flush()
                     raise
                 first_err = e
+                # Pools with different world sizes can occupy the same GPUs. Reset
+                # all pools so the retry starts without leftover CUDA/NCCL state.
+                self._reset_all_pools()
                 sys.stderr.write(
-                    f"[POOL-RETRY] world_size={self.world_size} attempt {attempt + 1} "
-                    f"failed: {msg_head!r}; respawning pool and retrying\n"
+                    f"[POOL-RETRY] status=retrying test={test_id!r} "
+                    f"world_size={self.world_size} attempt={attempt + 1} "
+                    f"error={msg_head!r}; reset all pools and retrying\n"
                 )
                 sys.stderr.flush()
         raise first_err  # unreachable; loop either returns or raises
@@ -284,11 +303,15 @@ def cp_pool():
     """Returns a callable: cp_pool(world_size) -> PoolWorker."""
     pools: dict[int, PoolWorker] = {}
 
+    def _reset_all_pools() -> None:
+        for pool in pools.values():
+            pool.shutdown()
+
     def _get(world_size: int) -> PoolWorker:
         if world_size > torch.cuda.device_count():
             pytest.skip(f"Test requires {world_size} GPUs, but found {torch.cuda.device_count()}")
         if world_size not in pools:
-            pools[world_size] = PoolWorker(world_size)
+            pools[world_size] = PoolWorker(world_size, _reset_all_pools)
         return pools[world_size]
 
     yield _get
@@ -306,9 +329,10 @@ def _submit(pool: PoolWorker, **kwargs) -> None:
 dtypes = ["bf16", "fp16"]
 qkv_formats = ["bshd", "sbhd", "thd"]
 cp_comm_types = ["p2p", "all_gather", "a2a", "a2a+p2p"]
+essential_model_configs_flash_attn = model_configs_flash_attn
 if test_essential:
     configs = ["cp_2_0", "cp_2_2", "cp_3_0", "cp_3_3"]
-    model_configs_flash_attn = {k: model_configs_flash_attn[k] for k in configs}
+    essential_model_configs_flash_attn = {k: model_configs_flash_attn[k] for k in configs}
     dtypes = ["bf16"]
     qkv_formats = ["sbhd", "thd"]
 
@@ -323,7 +347,7 @@ if test_essential:
 )
 @pytest.mark.skipif(get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
 @pytest.mark.parametrize("dtype", dtypes)
-@pytest.mark.parametrize("model", model_configs_flash_attn.keys())
+@pytest.mark.parametrize("model", essential_model_configs_flash_attn.keys())
 @pytest.mark.parametrize("qkv_format", qkv_formats)
 @pytest.mark.parametrize("cp_comm_type", cp_comm_types)
 @pytest.mark.parametrize("pad_between_seqs", [False, True])
@@ -388,6 +412,8 @@ def test_cp_with_flash_attention(cp_pool, dtype, model, qkv_format, cp_comm_type
         config,
         qkv_dtype=dtypes[dtype],
         qkv_layout="_".join([qkv_format] * 3),
+        cp_size=num_gpus,
+        cp_size_a2a=2 if cp_comm_type == "a2a+p2p" else 1,
     )
     flash_attn_supported, *_ = available_backends
     if not flash_attn_supported:
@@ -401,6 +427,45 @@ def test_cp_with_flash_attention(cp_pool, dtype, model, qkv_format, cp_comm_type
         kernel_backend="FlashAttention",
         cp_comm_type=cp_comm_type,
         fa_pad_between_seqs=pad_between_seqs,
+        log_level=pytest_logging_level,
+    )
+
+
+@pytest.mark.skipif(
+    not FlashAttentionUtils.v2_6_0_plus, reason="CP softcap requires flash-attn 2.6.0+."
+)
+@pytest.mark.skipif(get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
+@pytest.mark.parametrize("cp_comm_type", ["p2p", "all_gather", "a2a"])
+def test_cp_with_flash_attention_softcap(cp_pool, cp_comm_type):
+    """Check softcap forward and dgrad against the non-CP reference.
+
+    One case per CP autograd function, since P2P, all-gather and A2A each thread softcap
+    through their own forward inputs and gradient slots.
+    """
+    config = copy.deepcopy(model_configs_flash_attn["cp_2_0"])
+    config.context_parallel = True
+    config.cp_comm_type = cp_comm_type
+    # The runner's clamped-randn inputs put the scaled logits at O(1), so this cap sits in
+    # tanh's nonlinear region and a path that dropped it would diverge from the reference.
+    config.softcap = 0.5
+    available_backends, _, _ = get_available_attention_backends(
+        config,
+        qkv_dtype=torch.bfloat16,
+        qkv_layout="bshd_bshd_bshd",
+        is_training=True,
+        deterministic=_deterministic,
+    )
+    if not available_backends[0]:
+        pytest.skip("FlashAttention is unavailable.")
+    _submit(
+        cp_pool(2),
+        dtype="bf16",
+        model="cp_2_0",
+        qkv_format="bshd",
+        kernel_backend="FlashAttention",
+        cp_comm_type=cp_comm_type,
+        softcap=config.softcap,
+        deterministic=_deterministic,
         log_level=pytest_logging_level,
     )
 
@@ -498,6 +563,7 @@ model_configs_fused_attn = {
 dtypes = ["bf16", "fp16", "fp8"]
 qkv_formats = ["bshd", "sbhd", "thd"]
 cp_comm_types = ["p2p", "all_gather", "a2a", "a2a+p2p"]
+essential_model_configs_fused_attn = model_configs_fused_attn
 if test_essential:
     configs = [
         "cp_1_0",
@@ -513,15 +579,14 @@ if test_essential:
         "cp_5_0",
         "cp_5_1",
     ]
-    model_configs_fused_attn = {k: model_configs_fused_attn[k] for k in configs}
+    essential_model_configs_fused_attn = {k: model_configs_fused_attn[k] for k in configs}
     dtypes = ["bf16", "fp8"]
     qkv_formats = ["sbhd", "thd"]
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 7), reason="cuDNN 8.9.7+ is required.")
 @pytest.mark.skipif(get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
 @pytest.mark.parametrize("dtype", dtypes)
-@pytest.mark.parametrize("model", model_configs_fused_attn.keys())
+@pytest.mark.parametrize("model", essential_model_configs_fused_attn.keys())
 @pytest.mark.parametrize("qkv_format", qkv_formats)
 @pytest.mark.parametrize("cp_comm_type", cp_comm_types)
 @pytest.mark.parametrize("fp8_bwd", [True, False])
@@ -655,7 +720,7 @@ def test_cp_with_fused_attention(
 
     # For 111s, dbias calculation is not supported as of cuDNN 9.18, hence, test fwd only for 111s.
     is_training = False if config.bias_shape == "111s" else True
-    available_backends, _, fused_attn_backends = get_available_attention_backends(
+    available_backends, *_ = get_available_attention_backends(
         config,
         qkv_dtype=dtypes[dtype] if dtype != "fp8" else torch.float8_e4m3fn,
         qkv_layout="_".join([qkv_format] * 3),
@@ -663,23 +728,11 @@ def test_cp_with_fused_attention(
         fp8_meta=fp8_meta,
         is_training=is_training,
         deterministic=_deterministic,
+        cp_size=num_gpus,
+        cp_size_a2a=2 if cp_comm_type == "a2a+p2p" else 1,
     )
 
     _, fused_attn_supported, _ = available_backends
-    if fused_attn_supported and config.attn_mask_type in ["causal", "padding_causal"]:
-        config_copy = copy.deepcopy(config)
-        config_copy.context_parallel = False
-        config_copy.attn_mask_type = config.attn_mask_type + "_bottom_right"
-        available_backends, _, fused_attn_backends = get_available_attention_backends(
-            config_copy,
-            qkv_dtype=dtypes[dtype] if dtype != "fp8" else torch.float8_e4m3fn,
-            qkv_layout="_".join([qkv_format] * 3),
-            fp8=fp8,
-            fp8_meta=fp8_meta,
-            is_training=is_training,
-            deterministic=_deterministic,
-        )
-        _, fused_attn_supported, _ = available_backends
     if not fused_attn_supported:
         pytest.skip("No attention backend available.")
 
@@ -706,7 +759,6 @@ def test_cp_with_fused_attention(
     )
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 7), reason="cuDNN 8.9.7+ is required.")
 @pytest.mark.skipif(
     get_device_compute_capability() < (9, 0), reason="FusedAttention THD requires sm90+."
 )
@@ -739,13 +791,22 @@ def test_cp_with_fused_attention_no_load_balance(cp_pool):
     )
 
 
-def test_cp_with_flash_attention_no_load_balance(cp_pool):
+@pytest.mark.parametrize("model", ("cp_2_0", "cp_2_4"))
+def test_cp_with_flash_attention_no_load_balance(cp_pool, model):
     """Check the supported unpadded FlashAttention path."""
-    config = copy.deepcopy(model_configs_flash_attn["cp_2_0"])
+    config = copy.deepcopy(model_configs_flash_attn[model])
+    fa4_expected = (
+        config.head_dim_qk == 256
+        and (10, 0) <= get_device_compute_capability() < (12, 0)
+        and fa4_enabled
+        and FlashAttentionUtils.v4_is_installed
+        and FlashAttentionUtils.fa4_version >= FlashAttentionUtils.v4_0_0_beta33
+        and not _deterministic
+    )
     config.context_parallel = True
     config.cp_comm_type = "all_gather"
     config.attn_mask_type = "padding_causal"
-    available_backends, _, _ = get_available_attention_backends(
+    available_backends, flash_backend, _ = get_available_attention_backends(
         config,
         qkv_dtype=torch.bfloat16,
         qkv_layout="thd_thd_thd",
@@ -753,12 +814,16 @@ def test_cp_with_flash_attention_no_load_balance(cp_pool):
         is_training=True,
         deterministic=_deterministic,
     )
+    if fa4_expected:
+        assert available_backends[0] and flash_backend is not None and flash_backend.major == 4
+    elif config.head_dim_qk == 256:
+        pytest.skip("D=256 THD all-gather requires SM100/SM110 FA4 b33+ non-deterministic.")
     if not available_backends[0]:
         pytest.skip("FlashAttention is unavailable.")
     _submit(
         cp_pool(2),
         dtype="bf16",
-        model="cp_2_0",
+        model=model,
         qkv_format="thd",
         kernel_backend="FlashAttention",
         cp_comm_type="all_gather",

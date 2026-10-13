@@ -6,6 +6,7 @@
 
 #include "../extensions.h"
 #include "common.h"
+#include "pybind.h"
 
 namespace transformer_engine::pytorch {
 
@@ -296,6 +297,70 @@ at::Tensor fused_qkv_rope_backward(const at::Tensor &q_grad_out, const at::Tenso
                                at::cuda::getCurrentCUDAStream());
 
   return qkv_grad_input;
+}
+
+std::tuple<py::object, py::object> fused_mla_kv_rope_mxfp8(
+    const at::Tensor &kv, const at::Tensor &k_rope, const at::Tensor &cos, const at::Tensor &sin,
+    const int64_t v_head_dim, py::handle key_quantizer, py::handle value_quantizer) {
+  TORCH_CHECK(kv.is_cuda(), "expected kv on a CUDA device");
+  const auto device = kv.device();
+  TORCH_CHECK(k_rope.device() == device && cos.device() == device && sin.device() == device,
+              "expected kv, k_rope, cos and sin on the same device");
+  at::cuda::CUDAGuard device_guard(device);
+  TORCH_CHECK(kv.dim() == 4, "expected kv of shape [s, b, h, k_dim + v_dim], got ", kv.sizes());
+  const int64_t s = kv.size(0);
+  const int64_t b = kv.size(1);
+  const int64_t h = kv.size(2);
+  const int64_t emb_dim = k_rope.size(-1);
+  TORCH_CHECK(k_rope.dim() >= 3 && k_rope.size(0) == s && k_rope.size(1) == b &&
+                  k_rope.numel() == s * b * emb_dim,
+              "expected k_rope of shape [s, b, 1, emb_dim] or [s, b, emb_dim], got ",
+              k_rope.sizes());
+  TORCH_CHECK(v_head_dim > 0 && v_head_dim < kv.size(3), "invalid v_head_dim ", v_head_dim,
+              " for kv of shape ", kv.sizes());
+  const int64_t key_dim = kv.size(3) - v_head_dim + emb_dim;
+
+  // k_rope is usually a slice of a wider projection output. Its rows are read in place
+  // when they are a fixed, 16-byte aligned stride apart.
+  at::Tensor k_rope_rows = k_rope;
+  int64_t k_rope_stride = b > 1 ? k_rope_rows.stride(1) : k_rope_rows.stride(0);
+  if (k_rope_rows.stride(-1) != 1 ||
+      (b > 1 && k_rope_rows.stride(0) != b * k_rope_rows.stride(1)) || k_rope_stride < emb_dim ||
+      k_rope_stride % 8 != 0 || reinterpret_cast<uintptr_t>(k_rope_rows.data_ptr()) % 16 != 0) {
+    k_rope_rows = k_rope.contiguous();
+    k_rope_stride = emb_dim;
+  }
+  const auto kv_c = kv.contiguous();
+  const auto cos_c = cos.contiguous();
+  const auto sin_c = sin.contiguous();
+  auto kv_cu = makeTransformerEngineTensor(kv_c);
+  auto k_rope_cu = makeTransformerEngineTensor(
+      k_rope_rows.data_ptr(),
+      std::vector<size_t>{static_cast<size_t>(s * b), static_cast<size_t>(emb_dim)},
+      GetTransformerEngineDType(k_rope_rows.scalar_type()));
+  auto cos_cu = makeTransformerEngineTensor(cos_c);
+  auto sin_cu = makeTransformerEngineTensor(sin_c);
+
+  auto key_quantizer_cpp = convert_quantizer(key_quantizer);
+  auto value_quantizer_cpp = convert_quantizer(value_quantizer);
+  const auto *key_mxfp8 = dynamic_cast<MXFP8Quantizer *>(key_quantizer_cpp.get());
+  const auto *value_mxfp8 = dynamic_cast<MXFP8Quantizer *>(value_quantizer_cpp.get());
+  TORCH_CHECK(key_mxfp8 != nullptr && value_mxfp8 != nullptr,
+              "fused_mla_kv_rope_mxfp8 requires MXFP8 quantizers");
+  TORCH_CHECK(!key_mxfp8->with_2d_quantization && !value_mxfp8->with_2d_quantization,
+              "fused_mla_kv_rope_mxfp8 does not support 2D MXFP8 quantization");
+  const auto fake_dtype = GetTransformerEngineDType(kv.scalar_type());
+  auto [key_cu, key_py] = key_quantizer_cpp->create_tensor(
+      {static_cast<size_t>(s), static_cast<size_t>(b * h * key_dim)}, fake_dtype, device);
+  auto [value_cu, value_py] = value_quantizer_cpp->create_tensor(
+      {static_cast<size_t>(s), static_cast<size_t>(b * h * v_head_dim)}, fake_dtype, device);
+
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_fused_mla_kv_rope_mxfp8(kv_cu.data(), k_rope_cu.data(), static_cast<int>(k_rope_stride),
+                                 cos_cu.data(), sin_cu.data(), key_cu.data(), value_cu.data(),
+                                 at::cuda::getCurrentCUDAStream());
+  });
+  return {key_py, value_py};
 }
 
 }  // namespace transformer_engine::pytorch

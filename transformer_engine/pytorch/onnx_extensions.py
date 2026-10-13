@@ -231,7 +231,9 @@ def onnx_quantize_mxfp8_symbolic(
     tensor: onnxscript.onnx_types.TensorType,
 ) -> Tuple[onnxscript.onnx_types.TensorType, onnxscript.onnx_types.TensorType]:
     """Symbolic quantize to MXFP8Tensor used for inference."""
-    tensor_out, scale_inv_out = TRT_MXFP8DynamicQuantize(tensor)
+    tensor_out, scale_inv_out = TRT_MXFP8DynamicQuantize(
+        tensor, axis=-1, block_size=MXFP8_BLOCK_SCALING_SIZE
+    )
     return tensor_out, scale_inv_out
 
 
@@ -240,6 +242,10 @@ schema = defs.OpSchema(
     domain="trt",
     since_version=1,
     doc="TRT MXFP8 Quantize Linear used for inference.",
+    attributes=[
+        defs.OpSchema.Attribute("axis", defs.OpSchema.AttrType.INT),
+        defs.OpSchema.Attribute("block_size", defs.OpSchema.AttrType.INT),
+    ],
     inputs=[
         defs.OpSchema.FormalParameter("tensor", "tensor(float)", "Input tensor to quantize"),
     ],
@@ -279,7 +285,9 @@ def onnx_dequantize_mxfp8_symbolic(
     tensor: onnxscript.onnx_types.TensorType, scale_inv: onnxscript.onnx_types.TensorType
 ) -> onnxscript.onnx_types.TensorType:
     """Symbolic dequantize from MXFP8Tensor used for inference."""
-    return TRT_MXFP8DequantizeLinear(tensor, scale_inv)
+    return TRT_MXFP8DequantizeLinear(
+        tensor, scale_inv, axis=-1, block_size=MXFP8_BLOCK_SCALING_SIZE
+    )
 
 
 schema = defs.OpSchema(
@@ -287,6 +295,10 @@ schema = defs.OpSchema(
     domain="trt",
     since_version=1,
     doc="TRT MXFP8 Dequantize Linear from MXFP8Tensor used for inference.",
+    attributes=[
+        defs.OpSchema.Attribute("axis", defs.OpSchema.AttrType.INT),
+        defs.OpSchema.Attribute("block_size", defs.OpSchema.AttrType.INT),
+    ],
     inputs=[
         defs.OpSchema.FormalParameter("tensor", "tensor(uint8)", "Input tensor to dequantize"),
         defs.OpSchema.FormalParameter(

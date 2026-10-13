@@ -325,6 +325,7 @@ Error_Type GemmV2FFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale
   transformer_engine::MatmulConfigWrapper matmul_config;
   matmul_config.set_use_split_accumulator(config.use_split_accumulator);
   matmul_config.set_sm_count(num_math_sm);
+  matmul_config.set_alpha_beta_on_device(is_nvfp4_scaling(config.scaling_mode));
   if (fuse_bias) matmul_config.set_bias_tensor(bias_.data());
 
   if (config.collective_op == JAXX_Collective_Op::NONE) {
@@ -953,10 +954,10 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
                                  DType::kByte);
 
   TensorWrapper alpha_tensor(static_cast<void *>(alpha.untyped_data()),
-                             std::vector<size_t>{num_gemms},
+                             std::vector<size_t>{alpha.element_count()},
                              convert_ffi_datatype_to_te_dtype(alpha.element_type()));
   TensorWrapper beta_tensor(static_cast<void *>(beta.untyped_data()),
-                            std::vector<size_t>{num_gemms},
+                            std::vector<size_t>{beta.element_count()},
                             convert_ffi_datatype_to_te_dtype(beta.element_type()));
 
   // Build grouped tensors from XLA buffer shapes and group_sizes — no m/n/k derivation needed.

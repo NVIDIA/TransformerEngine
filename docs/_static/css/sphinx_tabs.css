@@ -32,3 +32,25 @@
     background-color: #f9f9f9;
 }
 
+/* Dark mode overrides */
+html[data-theme="dark"] .sphinx-tabs-tab {
+    background-color: #2b2b2b;
+    border-color: #444950;
+    color: #e0e0e0;
+}
+
+html[data-theme="dark"] .sphinx-tabs-tab:hover {
+    background-color: #3a3f44;
+}
+
+html[data-theme="dark"] .sphinx-tabs-tab[aria-selected="true"] {
+    background-color: #76b900;
+    color: #1a1a1a;
+    border-color: #76b900;
+}
+
+html[data-theme="dark"] .sphinx-tabs-panel {
+    background-color: #1f1f1f;
+    border-color: #444950;
+}
+

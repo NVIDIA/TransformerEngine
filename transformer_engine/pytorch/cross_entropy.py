@@ -4,7 +4,7 @@
 
 """Cross Entropy Loss API"""
 
-from typing import Optional
+from typing import Optional, Tuple, Union
 import warnings
 
 import torch
@@ -31,8 +31,8 @@ class CrossEntropyFunction(torch.autograd.Function):
         reduce_loss=False,
         dist_process_group=None,
         ignore_idx=-100,
-        is_cg_capturable=False,
         overwrite_input=False,
+        return_argmax=False,
     ):
         """Compute the loss and save the input and softmax statistics for backward."""
 
@@ -44,6 +44,7 @@ class CrossEntropyFunction(torch.autograd.Function):
             n_non_ignore,
             rank,
             world_size,
+            argmax,
         ) = triton_cross_entropy.cross_entropy_forward(
             inp,
             target,
@@ -52,6 +53,7 @@ class CrossEntropyFunction(torch.autograd.Function):
             dist_process_group,
             ignore_idx,
             overwrite_input,
+            return_argmax,
         )
         tensors_to_save = (saved_input.detach(), stats, target)
         if reduce_loss:
@@ -62,13 +64,15 @@ class CrossEntropyFunction(torch.autograd.Function):
         ctx.rank = rank
         ctx.world_size = world_size
         ctx.ignore_idx = ignore_idx
-        ctx.is_cg_capturable = is_cg_capturable
         ctx.overwrite_input = overwrite_input
         ctx.did_backward = False
+        if return_argmax:
+            ctx.mark_non_differentiable(argmax)
+            return loss, argmax
         return loss
 
     @staticmethod
-    def backward(ctx, grad_output):
+    def backward(ctx, grad_output, *_):
         """Reconstruct the input gradient from the tensors saved during forward."""
 
         if ctx.did_backward:
@@ -90,7 +94,6 @@ class CrossEntropyFunction(torch.autograd.Function):
             ctx.rank,
             ctx.world_size,
             ctx.ignore_idx,
-            ctx.is_cg_capturable,
         )
         if ctx.overwrite_input:
             torch.autograd.graph.increment_version(saved_input)
@@ -136,8 +139,8 @@ def _parallel_cross_entropy_overwrite_input(
     reduce_loss: bool,
     dist_process_group: Optional[torch.distributed.ProcessGroup],
     ignore_idx: int,
-    is_cg_capturable: bool,
-) -> torch.Tensor:
+    return_argmax: bool,
+) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     """Run destructive cross entropy outside Torch Dynamo's compiled graph."""
 
     return CrossEntropyFunction.apply(
@@ -147,8 +150,8 @@ def _parallel_cross_entropy_overwrite_input(
         reduce_loss,
         dist_process_group,
         ignore_idx,
-        is_cg_capturable,
         True,
+        return_argmax,
     )
 
 
@@ -162,8 +165,9 @@ def parallel_cross_entropy(
     is_cg_capturable: bool = False,
     *,
     overwrite_input: bool = False,
+    return_argmax: bool = False,
     _input: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
+) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     """Cross entropy loss with optional distributed reduction.
 
     Loss and derivative calculations use FP32 arithmetic for BF16 and FP32
@@ -173,6 +177,11 @@ def parallel_cross_entropy(
     must be contiguous and its storage is overwritten during backward. Callers
     must not read or reuse it after starting backward. Only one backward pass
     is supported for each loss result.
+
+    With ``return_argmax=True``, the forward pass also finds the index of the
+    largest logit of each row while it scans the row for the softmax maximum,
+    so callers that need the predicted tokens (for example an accuracy metric)
+    do not have to read the logits again.
 
     Parameters
     ----------
@@ -191,16 +200,23 @@ def parallel_cross_entropy(
     ignore_idx : int, default = -100
         Target value for ignored rows.
     is_cg_capturable : bool, default = False
-        Whether the operation is CUDA graph capturable.
+        Deprecated and unused. The operation is always CUDA graph capturable.
     overwrite_input : bool, default = False
         Allow ``inp`` to be overwritten during backward. The input must be
         contiguous and cannot be reused afterward. This mode is incompatible with
         ``torch.compile`` and will result in a graph break if used in that context.
+    return_argmax : bool, default = False
+        Also return the index of each row's largest logit in the full vocabulary,
+        as ``torch.argmax`` over the unsharded logits returns it: the first index
+        if several logits are equal. Rows with an ignored target get one too.
+        As with ``torch.argmax``, a NaN logit counts as the maximum: a row with
+        NaN logits gets the index of its first NaN (and a NaN loss).
 
     Returns
     -------
-    torch.Tensor
-        The computed loss.
+    torch.Tensor or tuple of torch.Tensor
+        The computed loss. With ``return_argmax=True``, the tuple ``(loss, argmax)``,
+        where ``argmax`` is an int64 tensor with the shape ``inp.shape[:-1]``.
     """
 
     if _input is not None:
@@ -209,6 +225,13 @@ def parallel_cross_entropy(
             FutureWarning,
         )
         inp = _input
+
+    if is_cg_capturable:
+        warnings.warn(
+            "The 'is_cg_capturable' parameter is deprecated and has no effect. "
+            "The operation is always CUDA graph capturable.",
+            FutureWarning,
+        )
 
     _validate_inputs(inp, target, label_smoothing, overwrite_input)
     if overwrite_input:
@@ -219,7 +242,7 @@ def parallel_cross_entropy(
             reduce_loss,
             dist_process_group,
             ignore_idx,
-            is_cg_capturable,
+            return_argmax,
         )
     return CrossEntropyFunction.apply(
         inp,
@@ -228,6 +251,6 @@ def parallel_cross_entropy(
         reduce_loss,
         dist_process_group,
         ignore_idx,
-        is_cg_capturable,
         overwrite_input,
+        return_argmax,
     )

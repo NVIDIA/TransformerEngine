@@ -5,7 +5,7 @@
  ************************************************************************/
 
 /*! \file ep_backend.h
- *  \brief Internal NCCL EP singleton; not part of the public API. See ep.h.
+ *  \brief Internal NCCL EP backend; not part of the public API. See ep.h.
  */
 
 #ifndef TRANSFORMER_ENGINE_COMMON_EP_EP_BACKEND_H_
@@ -20,6 +20,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <list>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <unordered_map>
@@ -27,59 +28,78 @@
 namespace transformer_engine {
 namespace ep {
 
-/*! \brief EP backend singleton; owns the NCCL EP group, borrows the comm. */
+/*! \brief EP backend per CUDA device; owns the NCCL EP group, borrows the comm. */
 class EPBackend {
  public:
-  /*! \brief Access the singleton. Aborts if not initialized. */
+  /*! \brief Access the current device's backend. Aborts if not initialized. */
   static EPBackend& get();
 
   /*! \brief Bootstrap from an existing EP sub-communicator.
    *  ep_comm is borrowed; the caller keeps it alive until shutdown() returns
    *  and must span exactly config.ep_size ranks.
+   *  Initializes the backend on the current CUDA device.
    */
   static void initialize(ncclComm_t ep_comm, NVTEEpGroupConfig config);
 
-  /*! \brief Tear down the backend. Idempotent. Does not destroy ep_comm_. */
+  /*! \brief Tear down all local backends. Idempotent. Does not destroy ep_comm_. */
   static void shutdown();
 
   // Host-only: report handle_mem byte size for layer_cfg.
-  size_t handle_mem_size(NVTEEpLayerConfig layer_cfg);
+  // Returns the maximum across initialized local devices.
+  static size_t handle_mem_size(NVTEEpLayerConfig layer_cfg);
 
   // Seeds the cache for handle_mem with layer_cfg and runs the routing AllGather.
-  void prepare(void* handle_mem, const NVTETensor topk_idx, NVTETensor recv_tokens_per_expert,
+  void prepare(NVTETensor handle_mem, const NVTETensor topk_idx, NVTETensor recv_tokens_per_expert,
                NVTETensor total_recv_tokens_per_rank, NVTEEpLayerConfig layer_cfg,
                cudaStream_t stream);
 
   // Per-step ops below require a prior prepare().
-  void dispatch(void* handle_mem, const NVTETensor topk_idx, const NVTETensor tokens,
+  void dispatch(NVTETensor handle_mem, const NVTETensor topk_idx, const NVTETensor tokens,
                 const NVTECommWindow& tokens_win, const NVTETensor topk_weights,
                 const NVTECommWindow& topk_weights_win, NVTETensor recv_tokens,
                 const NVTECommWindow& recv_tokens_win, NVTETensor recv_topk_weights,
                 const NVTECommWindow& recv_topk_weights_win, cudaStream_t stream);
 
-  void combine(void* handle_mem, const NVTETensor expert_out, const NVTECommWindow& expert_out_win,
-               NVTETensor result, cudaStream_t stream);
+  // Fused prepare + dispatch: seeds routing then dispatches in one call. Routing writes the
+  // per-expert recv counts to recv_tokens_per_expert and the scalar pre-drop per-rank recv total
+  // to total_recv_tokens_per_rank (nullable); the dispatch then reads the counts from the handle.
+  void prepare_and_dispatch(NVTETensor handle_mem, const NVTETensor topk_idx,
+                            const NVTETensor tokens, const NVTECommWindow& tokens_win,
+                            const NVTETensor topk_weights, const NVTECommWindow& topk_weights_win,
+                            NVTETensor recv_tokens, const NVTECommWindow& recv_tokens_win,
+                            NVTETensor recv_topk_weights,
+                            const NVTECommWindow& recv_topk_weights_win,
+                            NVTETensor recv_tokens_per_expert,
+                            NVTETensor total_recv_tokens_per_rank, NVTEEpLayerConfig layer_cfg,
+                            cudaStream_t stream);
+
+  void combine(NVTETensor handle_mem, const NVTETensor expert_out,
+               const NVTECommWindow& expert_out_win, NVTETensor result, cudaStream_t stream);
 
   // g_recv_topk_weights: 1D [recv_capacity] f32; grad_topk_weights: 2D [T, top_k] f32.
-  void dispatch_bwd(void* handle_mem, const NVTETensor grad, const NVTECommWindow& grad_win,
+  void dispatch_bwd(NVTETensor handle_mem, const NVTETensor grad, const NVTECommWindow& grad_win,
                     const NVTETensor g_recv_topk_weights,
                     const NVTECommWindow& g_recv_topk_weights_win, NVTETensor grad_tokens,
                     NVTETensor grad_topk_weights, cudaStream_t stream);
 
-  void combine_bwd(void* handle_mem, const NVTETensor grad, const NVTECommWindow& grad_win,
+  void combine_bwd(NVTETensor handle_mem, const NVTETensor grad, const NVTECommWindow& grad_win,
                    NVTETensor grad_expert_out, const NVTECommWindow& grad_expert_out_win,
                    cudaStream_t stream);
 
+  ~EPBackend();
+
  private:
   EPBackend() = default;
-  ~EPBackend();
   EPBackend(const EPBackend&) = delete;
   EPBackend& operator=(const EPBackend&) = delete;
 
   // ep_comm is borrowed; caller retains ownership across the backend lifetime.
   void init(ncclComm_t ep_comm, NVTEEpGroupConfig config);
 
-  static EPBackend& instance();  // Meyers singleton accessor
+  // Caller must hold mutex_.
+  void shutdown_locked();
+
+  static EPBackend& instance(int device);
   static void validate_config(const NVTEEpGroupConfig& config);
 
   // Open a fresh ncclEpHandle over handle_mem. num_topk=-1 for paths
@@ -106,9 +126,27 @@ class EPBackend {
   std::optional<NVTEEpLayerConfig> fallback_layer_cfg_;
 
   // Caller must hold mutex_.
-  ncclEpHandle_t prepare_handle_locked(void* handle_mem, NVTEEpLayerConfig layer_cfg);
-  ncclEpHandle_t lookup_handle_locked(void* handle_mem);
+  ncclEpHandle_t prepare_handle_locked(void* handle_mem, size_t handle_mem_size,
+                                       NVTEEpLayerConfig layer_cfg);
+  ncclEpHandle_t lookup_handle_locked(void* handle_mem, size_t handle_mem_size);
   size_t cache_cap_locked();
+
+  // Build the dispatch in/out structs and issue ncclEpDispatch on the resolved
+  // handle. When recv_tokens_per_expert != nullptr (count mode), it is wired to
+  // layout_info.expert_counters so the dispatch writes per-expert recv counts.
+  // Caller must hold mutex_.
+  void issue_dispatch_locked(ncclEpHandle_t handle, const NVTETensor topk_idx,
+                             const NVTETensor tokens, const NVTECommWindow& tokens_win,
+                             const NVTETensor topk_weights, const NVTECommWindow& topk_weights_win,
+                             NVTETensor recv_tokens, const NVTECommWindow& recv_tokens_win,
+                             NVTETensor recv_topk_weights,
+                             const NVTECommWindow& recv_topk_weights_win,
+                             NVTETensor recv_tokens_per_expert,
+                             NVTETensor total_recv_tokens_per_rank, cudaStream_t stream);
+
+  // devices_mutex_ protects the map; each backend's mutex_ protects its state.
+  static std::mutex devices_mutex_;
+  static std::unordered_map<int, std::unique_ptr<EPBackend>> devices_;
 };
 
 }  // namespace ep

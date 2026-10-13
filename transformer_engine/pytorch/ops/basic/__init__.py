@@ -14,6 +14,7 @@ from .activation import (
     ReGLU,
     SReLU,
     ScaledSReLU,
+    ScaledTanhSReLU,
     SReGLU,
     SiLU,
 )
@@ -23,7 +24,9 @@ from .all_reduce import AllReduce
 from .batched_linear import BatchedLinear
 from .basic_linear import BasicLinear
 from .bias import Bias
+from .combine import MoeCombine
 from .constant_scale import ConstantScale
+from .dispatch import MoeDispatch
 from .dropout import Dropout
 from .grouped_linear import GroupedLinear, is_op_fuser_grouped_tensor_path_supported
 from .identity import Identity

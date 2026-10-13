@@ -26,6 +26,10 @@ from ..quantized_tensor import QuantizedTensor, QuantizedTensorStorage, Quantize
 class IdentityQuantizer(Quantizer):
     """Quantizer that produces a high-precision passthrough representation.
 
+    .. warning::
+        **EXPERIMENTAL**: ``IdentityQuantizer`` is under active development and
+        its API is subject to change without notice.
+
     Returns an :class:`IdentityTensorStorage` (or :class:`IdentityTensor`)
     holding the tensor directly, without a low-precision encoding.
     ``general_gemm`` materializes it as a plain tensor, so a GEMM consumes it
@@ -174,6 +178,21 @@ class IdentityTensor(IdentityTensorStorage, QuantizedTensor):
 
     Presents as a standard tensor of its nominal dtype; internally it just
     holds data directly in that dtype, without a low-precision encoding.
+
+    Parameters
+    ----------
+    shape : iterable of int
+        Tensor dimensions.
+    dtype : torch.dtype
+        Logical tensor datatype.
+    hp_data : torch.Tensor
+        Held high-precision data.
+    quantizer : IdentityQuantizer, optional
+        Quantizer that produced the tensor.
+    requires_grad : bool, default = False
+        Whether to compute gradients for this tensor.
+    device : torch.device, optional
+        Device containing the tensor.
     """
 
     def __repr__(self, *, tensor_contents=None):

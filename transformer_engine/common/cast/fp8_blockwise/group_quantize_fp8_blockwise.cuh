@@ -314,9 +314,9 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 4) group_block_scaled_2d_tma
 
   // Dynamic smem holds the IType input tile (TMA dest, must be 128 B aligned).
   // warp_amaxes and tma_mbar are static smem.
-  extern __shared__ unsigned char smem_raw_2d_tma[];
-  IType(*smem_in)[kTileDim] = reinterpret_cast<IType(*)[kTileDim]>(
-      common::align_smem_ptr_per_TMA_requirements(smem_raw_2d_tma));
+  extern __shared__ char smem_raw_2d_tma[];
+  IType(*smem_in)[kTileDim] =
+      reinterpret_cast<IType(*)[kTileDim]>(align_up(smem_raw_2d_tma, TMA_SHMEM_ALIGNMENT));
 
   __shared__ CType warp_amaxes[kNumWarps];
   __shared__ size_t warp_offset_partials[kNumWarps];
@@ -341,8 +341,9 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 4) group_block_scaled_2d_tma
         static_cast<uint32_t>(global_col_base), static_cast<uint32_t>(global_row_base), &tma_mbar);
   }
   ptx::mbarrier_wait_parity(&tma_mbar, 0);
-  if (leading_thread) ptx::mbarrier_invalid(&tma_mbar);
+  // Every thread must finish waiting before the leader invalidates the barrier.
   __syncthreads();
+  if (leading_thread) ptx::mbarrier_invalid(&tma_mbar);
 
   // ---- Optional dbias: per-tile column sum of the high-precision input (smem-resident) ----
   if (dbias_workspace != nullptr) {
@@ -603,8 +604,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock) group_block_scaled_1d_tma_ke
 
   // Dynamic smem: IType[kTileDim][kTileDim], 128 B aligned for TMA. Static smem
   // (smem_T when CW, tma_mbar) lives outside the dynamic region.
-  extern __shared__ unsigned char smem_raw_1d_tma[];
-  unsigned char* smem_base = common::align_smem_ptr_per_TMA_requirements(smem_raw_1d_tma);
+  extern __shared__ char smem_raw_1d_tma[];
+  char* smem_base = align_up(smem_raw_1d_tma, TMA_SHMEM_ALIGNMENT);
   IType(*smem)[kTileDim] = reinterpret_cast<IType(*)[kTileDim]>(smem_base);
 
   __shared__ uint64_t tma_mbar;
@@ -628,8 +629,9 @@ __global__ void __launch_bounds__(kThreadsPerBlock) group_block_scaled_1d_tma_ke
         static_cast<uint32_t>(global_col_base), static_cast<uint32_t>(global_row_base), &tma_mbar);
   }
   ptx::mbarrier_wait_parity(&tma_mbar, 0);
-  if (leading_thread) ptx::mbarrier_invalid(&tma_mbar);
+  // Every thread must finish waiting before the leader invalidates the barrier.
   __syncthreads();
+  if (leading_thread) ptx::mbarrier_invalid(&tma_mbar);
 
   // ---- Optional dbias: per-tile column sum of the high-precision input (smem-resident) ----
   if (dbias_workspace != nullptr) {

@@ -38,6 +38,12 @@ if(CUDNN_INCLUDE_DIR)
     else()
         set(CUDNN_VERSION
             "${CUDNN_VERSION_MAJOR}.${CUDNN_VERSION_MINOR}.${CUDNN_VERSION_PATCH}")
+        # Keep in sync with kMinCudnnVersion in transformer_engine/common/cudnn_min_version.h.
+        if(CUDNN_VERSION VERSION_LESS "9.12.0")
+            message(FATAL_ERROR
+                    "Transformer Engine requires cuDNN 9.12.0 or later, but found ${CUDNN_VERSION} "
+                    "headers in ${CUDNN_INCLUDE_DIR}.")
+        endif()
     endif()
     set(CUDNN_MAJOR_VERSION ${CUDNN_VERSION_MAJOR})
 endif()
@@ -118,25 +124,7 @@ else()
     )
 endif()
 
-if(CUDNN_MAJOR_VERSION EQUAL 8)
-    find_cudnn_library(cudnn_adv_infer)
-    find_cudnn_library(cudnn_adv_train)
-    find_cudnn_library(cudnn_cnn_infer)
-    find_cudnn_library(cudnn_cnn_train)
-    find_cudnn_library(cudnn_ops_infer)
-    find_cudnn_library(cudnn_ops_train)
-
-    target_link_libraries(
-        CUDNN::cudnn_all
-        INTERFACE
-        CUDNN::cudnn_adv_train
-        CUDNN::cudnn_ops_train
-        CUDNN::cudnn_cnn_train
-        CUDNN::cudnn_adv_infer
-        CUDNN::cudnn_cnn_infer
-        CUDNN::cudnn_ops_infer
-    )
-elseif(CUDNN_MAJOR_VERSION EQUAL 9)
+if(CUDNN_MAJOR_VERSION EQUAL 9)
     find_cudnn_library(cudnn_graph)
     find_cudnn_library(cudnn_engines_runtime_compiled)
     find_cudnn_library(cudnn_ops OPTIONAL)

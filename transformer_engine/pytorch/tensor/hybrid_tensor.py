@@ -19,6 +19,10 @@ aten = torch.ops.aten
 class HybridQuantizer(Quantizer):
     """Quantizer that composes rowwise and columnwise representations.
 
+    .. warning::
+        **EXPERIMENTAL**: ``HybridQuantizer`` is under active development and
+        its API is subject to change without notice.
+
     When both representations are requested, applies ``rowwise_quantizer`` to
     produce the rowwise representation and ``columnwise_quantizer`` to produce
     the columnwise representation. The results are wrapped in a

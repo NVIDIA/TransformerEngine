@@ -29,8 +29,13 @@ def cross_entropy_forward(
     dist_process_group: Union[dist.ProcessGroup, None],
     ignore_idx: int,
     overwrite_input: bool,
+    compute_argmax: bool = False,
 ):
-    """Forward implementation that saves the input and compact softmax statistics."""
+    """Forward implementation that saves the input and compact softmax statistics.
+
+    With ``compute_argmax``, also returns the index of each row's first maximum in the
+    full vocabulary (otherwise None).
+    """
 
     B, SQ, V = _input.shape
     n_rows = B * SQ
@@ -45,6 +50,9 @@ def cross_entropy_forward(
     loss_1d = torch.empty(n_rows, dtype=torch.float32, device=_input.device)
     stats = torch.empty((n_rows, 2), dtype=torch.float32, device=_input.device)
     n_non_ignore = torch.zeros(1, dtype=torch.int64, device=_input.device) if reduce_loss else None
+    argmax = (
+        torch.empty(n_rows, dtype=torch.int64, device=_input.device) if compute_argmax else None
+    )
 
     rank = 0 if dist_process_group is None else dist.get_rank(dist_process_group)
     world_size = 1 if dist_process_group is None else dist.get_world_size(dist_process_group)
@@ -59,6 +67,7 @@ def cross_entropy_forward(
             Y_ptr=target,
             loss_ptr=loss_1d,
             stats_ptr=stats,
+            argmax_ptr=argmax if argmax is not None else stats,
             n_non_ignore=n_non_ignore if n_non_ignore is not None else stats,
             n_cols=V,
             n_rows_1=SQ,
@@ -66,11 +75,17 @@ def cross_entropy_forward(
             label_smoothing=label_smoothing,
             COUNT_NON_IGNORE=reduce_loss,
             COPY_INPUT=not overwrite_input,
+            COMPUTE_ARGMAX=compute_argmax,
             BLOCK_SIZE=BLOCK_SIZE,
             num_warps=32,
         )
     else:
-        local_data = torch.empty((n_rows, 4), dtype=torch.float32, device=_input.device)
+        # Per row and rank: max, sum of exponentials, target logit, logit sum, and with
+        # compute_argmax the local argmax (as FP32 bits) and its value (NaN if the shard has one)
+        local_data_size = 6 if compute_argmax else 4
+        local_data = torch.empty(
+            (n_rows, local_data_size), dtype=torch.float32, device=_input.device
+        )
         cross_entropy_tp_pre_kernel[(n_rows,)](
             X_ptr=_input,
             X_stride_0=_input.stride(0),
@@ -87,11 +102,13 @@ def cross_entropy_forward(
             COUNT_NON_IGNORE=reduce_loss,
             COMPUTE_X_SUM=label_smoothing > 0,
             COPY_INPUT=not overwrite_input,
+            COMPUTE_ARGMAX=compute_argmax,
+            LOCAL_DATA_SIZE=local_data_size,
             BLOCK_SIZE=BLOCK_SIZE,
             num_warps=32,
         )
         gathered_data = torch.empty(
-            (world_size * n_rows, 4), dtype=torch.float32, device=_input.device
+            (world_size * n_rows, local_data_size), dtype=torch.float32, device=_input.device
         )
         dist.all_gather_into_tensor(gathered_data, local_data, group=dist_process_group)
         cross_entropy_tp_post_kernel[(n_rows,)](
@@ -99,11 +116,14 @@ def cross_entropy_forward(
             Y_ptr=target,
             loss_ptr=loss_1d,
             stats_ptr=stats,
+            argmax_ptr=argmax if argmax is not None else stats,
             world_size=world_size,
             n_rows=n_rows,
             n_cols=V,
             ignore_idx=ignore_idx,
             label_smoothing=label_smoothing,
+            COMPUTE_ARGMAX=compute_argmax,
+            LOCAL_DATA_SIZE=local_data_size,
             num_warps=1,
         )
 
@@ -111,8 +131,10 @@ def cross_entropy_forward(
     if reduce_loss:
         n_non_ignore.clamp_(min=1)
         loss = loss_1d.sum() / n_non_ignore
+    if argmax is not None:
+        argmax = argmax.reshape(B, SQ)
 
-    return loss, saved_input, stats, target, n_non_ignore, rank, world_size
+    return loss, saved_input, stats, target, n_non_ignore, rank, world_size, argmax
 
 
 def cross_entropy_backward(
@@ -126,11 +148,9 @@ def cross_entropy_backward(
     rank: int,
     world_size: int,
     ignore_idx: int,
-    is_cg_capturable: bool = False,
 ):
     """Reconstruct the derivative in FP32 and overwrite the saved input buffer."""
 
-    del is_cg_capturable
     B, SQ, V = saved_input.shape
     n_rows = B * SQ
     BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(V))
