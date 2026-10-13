@@ -1956,14 +1956,16 @@ ShapeAlignment nvfp4_2d_swizzle_fusion_alignment(int sm_arch) {
 }
 
 bool meets_alignment(const std::vector<size_t>& shape, const ShapeAlignment& alignment) {
-  if (!alignment) {
-    return false;
-  }
   const auto [rows, cols] = get_2d_dims(shape);
-  return rows % alignment->first == 0 && cols % alignment->second == 0;
+  return meets_quantization_alignment(rows, cols, alignment);
 }
 
 }  // namespace
+
+bool meets_quantization_alignment(size_t rows, size_t cols,
+                                  const std::optional<std::pair<size_t, size_t>>& alignment) {
+  return alignment && rows % alignment->first == 0 && cols % alignment->second == 0;
+}
 
 std::optional<std::pair<size_t, size_t>> nvfp4_gemm_swizzled_scales_alignment(
     bool optimize_for_gemm, bool with_rht, bool with_2d_quantization, bool row_scaled_nvfp4,

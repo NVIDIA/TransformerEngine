@@ -215,6 +215,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("optimize_for_gemm"), py::arg("with_rht"), py::arg("with_2d_quantization"),
         py::arg("row_scaled_nvfp4"), py::arg("nvfp4_use_4over6"), py::arg("sm_arch"),
         py::arg("disable_rht_cast_fusion"));
+  m.def("meets_quantization_alignment", &transformer_engine::pytorch::meets_quantization_alignment,
+        py::arg("rows"), py::arg("cols"), py::arg("alignment"));
   m.def("create_empty_quantized_tensor",
         &transformer_engine::pytorch::create_empty_quantized_tensor,
         "Create an empty quantized tensor", py::arg("quantizer"), py::arg("shape"),
