@@ -382,6 +382,9 @@ std::vector<at::Tensor> bulk_allocate(const std::vector<std::vector<size_t>> &sh
  * Quantize
  **************************************************************************************************/
 
+py::object quantize_mxfp8_segments(const std::vector<at::Tensor> &segments,
+                                   py::handle quantizer, const std::vector<size_t> &shape);
+
 py::object create_empty_quantized_tensor(py::handle quantizer, const std::vector<size_t> &shape,
                                          at::ScalarType dtype, at::Device device, bool pin_memory);
 

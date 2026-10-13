@@ -125,6 +125,20 @@ void nvte_quantize_noop(const NVTETensor input, NVTETensor output, NVTETensor no
 void nvte_quantize_v2(const NVTETensor input, NVTETensor output,
                       const NVTEQuantizationConfig quant_config, cudaStream_t stream);
 
+/*! \brief Quantize one or three BF16 column segments directly into an MXFP8 tensor.
+ *
+ * SM103 only. Rows and segment widths must be multiples of 128. Feature rows
+ * must be contiguous, with 16-byte aligned addresses and token strides.
+ * \param[in] inputs       Segment tensors with logical shape [rows, columns].
+ * \param[in] num_inputs   One or three segments in their final column order.
+ * \param[in] row_strides  Row strides in BF16 elements.
+ * \param[in,out] output   E4M3 MXFP8 output with both orientations and GEMM-swizzled scales.
+ * \param[in] stream       CUDA stream used for the operation.
+ */
+void nvte_quantize_mxfp8_segments(const NVTETensor *inputs, size_t num_inputs,
+                                 const int64_t *row_strides, NVTETensor output,
+                                 cudaStream_t stream);
+
 /*! \brief Casts input tensor to MXFP8. Additionally, reduces the input along columns.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
  *         the block quantization (MXFP8) of the specified shape of the block will be used.
