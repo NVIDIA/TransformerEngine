@@ -69,11 +69,11 @@ _STATE_TOL = {torch.bfloat16: 2e-2, torch.float16: 1e-2}
 _BWD_TOL = {torch.bfloat16: 4e-2, torch.float16: 2e-2}
 # A gate gradient accumulates over the whole suffix of the sequence, so it
 # carries more of the recurrence's rounding than the Q/K/V gradients do.
-_GATE_BWD_TOL = {torch.bfloat16: 6e-2, torch.float16: 3e-2}
+_GATE_BWD_TOL = {torch.bfloat16: 4e-2, torch.float16: 3e-2}
 # a_log holds one value per head and dt_bias one per head and channel, so their
 # gradients are a reduction over every token and carry that accumulation's
 # rounding.
-_PARAM_BWD_TOL = {torch.bfloat16: 6e-2, torch.float16: 3e-2}
+_PARAM_BWD_TOL = {torch.bfloat16: 4e-2, torch.float16: 3e-2}
 
 # The kernel's own safe-gate lower bound, used when gate_lower_bound is None.
 _DEFAULT_GATE_LOWER_BOUND = -5.0
@@ -508,46 +508,84 @@ def test_kda_thd_ragged_sequences(bounds):
     )
 
 
+def _assert_l2norm_bshd_matches_reference(
+    output: torch.Tensor,
+    inputs: Tuple[torch.Tensor, ...],
+    name: str,
+    **reference_kwargs,
+) -> None:
+    """Compare a BSHD output and its Q/K/V/g/beta gradients with the FP64 reference.
+
+    ``output`` must come from a call with ``use_qk_l2norm_in_kernel=True`` on the
+    leaf tensors ``inputs = (q, k, v, g, beta)``; the reference normalizes Q and K
+    itself so that its gradients are taken with respect to the raw Q and K too.
+    ``reference_kwargs`` carry the gate transform the kernel was asked to fuse.
+    """
+    names = ("q", "k", "v", "g", "beta")
+    reference_inputs = {
+        input_name: tensor.detach().double().requires_grad_()
+        for input_name, tensor in zip(names, inputs)
+    }
+    output_ref, _ = _kda_reference(
+        F.normalize(reference_inputs["q"], dim=-1),
+        F.normalize(reference_inputs["k"], dim=-1),
+        reference_inputs["v"],
+        reference_inputs["g"],
+        reference_inputs["beta"],
+        **reference_kwargs,
+    )
+    output_ref = output_ref.reshape_as(output)
+    dtype = inputs[0].dtype
+    _assert_rms_close(output, output_ref, _FWD_TOL[dtype], f"{name} output")
+
+    output_weight = torch.randn_like(output, dtype=torch.float32)
+    (output.float() * output_weight).sum().backward()
+    (output_ref * output_weight.double()).sum().backward()
+
+    for input_name, tensor in zip(names, inputs):
+        assert tensor.grad is not None, f"no {name} gradient for {input_name}"
+        assert torch.isfinite(tensor.grad).all(), f"non-finite {name} gradient for {input_name}"
+        tolerance = _GATE_BWD_TOL[dtype] if input_name in ("g", "beta") else _BWD_TOL[dtype]
+        _assert_rms_close(
+            tensor.grad,
+            reference_inputs[input_name].grad,
+            tolerance,
+            f"{name} d{input_name}",
+        )
+
+
 @requires_kda
 @pytest.mark.parametrize("allow_neg_eigval", [False, True], ids=["projection", "reflection"])
 def test_kda_fused_beta_sigmoid(allow_neg_eigval):
-    """The kernel's fused beta activation matches applying it in the reference."""
+    """The kernel's fused beta activation matches the reference in forward and backward.
+
+    The kernel owns the sigmoid, so dbeta is taken with respect to the raw logits.
+    """
     batch, sequence, heads, dim = 1, 128, 2, 64
     q, k, v, g, _ = _inputs(batch, sequence, heads, dim, dim)
     # Raw logits, which the kernel turns into the write strength itself.
     beta = torch.randn(batch, sequence, heads, device="cuda", dtype=torch.float32)
+    inputs = tuple(tensor.requires_grad_() for tensor in (q, k, v, g, beta))
 
     attention = KimiDeltaAttention(
         num_attention_heads=heads,
         kv_channels=dim,
         qkv_format="bshd",
     )
-    with torch.no_grad():
-        output = attention(
-            q,
-            k,
-            v,
-            g=g,
-            beta=beta,
-            use_qk_l2norm_in_kernel=True,
-            use_beta_sigmoid_in_kernel=True,
-            allow_neg_eigval=allow_neg_eigval,
-        )
-        output_ref, _ = _kda_reference(
-            F.normalize(q.float(), dim=-1),
-            F.normalize(k.float(), dim=-1),
-            v,
-            g,
-            beta,
-            use_beta_sigmoid=True,
-            allow_neg_eigval=allow_neg_eigval,
-        )
-
-    _assert_rms_close(
+    output = attention(
+        *inputs[:3],
+        g=inputs[3],
+        beta=inputs[4],
+        use_qk_l2norm_in_kernel=True,
+        use_beta_sigmoid_in_kernel=True,
+        allow_neg_eigval=allow_neg_eigval,
+    )
+    _assert_l2norm_bshd_matches_reference(
         output,
-        output_ref.reshape(batch, sequence, -1),
-        _FWD_TOL[q.dtype],
-        "fused-sigmoid output",
+        inputs,
+        "fused-sigmoid",
+        use_beta_sigmoid=True,
+        allow_neg_eigval=allow_neg_eigval,
     )
 
 
@@ -670,9 +708,16 @@ def test_kda_safe_gate_parameter_gradients(checkpoint_core_attention):
 
 @requires_kda
 def test_kda_linear_gate_domain():
-    """gate_domain='linear' takes the decay itself rather than its logarithm."""
+    """gate_domain='linear' takes the decay itself rather than its logarithm.
+
+    The output must agree with the log-domain call on the same decay, and both
+    the output and the gradients -- dg with respect to the decay itself -- must
+    match the reference.
+    """
     batch, sequence, heads, dim = 1, 128, 2, 64
     q, k, v, g, beta = _inputs(batch, sequence, heads, dim, dim)
+    # In (0.5, 1], well above the kernel's 1e-10 floor, so the floor passes
+    # gradients through unchanged.
     alpha = g.exp()
 
     attention = KimiDeltaAttention(
@@ -682,17 +727,18 @@ def test_kda_linear_gate_domain():
     )
     with torch.no_grad():
         expected = attention(q, k, v, g=g, beta=beta, use_qk_l2norm_in_kernel=True)
-        output = attention(
-            q,
-            k,
-            v,
-            g=alpha,
-            beta=beta,
-            use_qk_l2norm_in_kernel=True,
-            gate_domain="linear",
-        )
 
-    _assert_rms_close(output, expected, _FWD_TOL[q.dtype], "linear-domain output")
+    inputs = tuple(tensor.requires_grad_() for tensor in (q, k, v, alpha, beta))
+    output = attention(
+        *inputs[:3],
+        g=inputs[3],
+        beta=inputs[4],
+        use_qk_l2norm_in_kernel=True,
+        gate_domain="linear",
+    )
+
+    _assert_rms_close(output, expected, _FWD_TOL[q.dtype], "linear against log domain")
+    _assert_l2norm_bshd_matches_reference(output, inputs, "linear-domain", gate_domain="linear")
 
 
 @requires_gdn_and_kda
