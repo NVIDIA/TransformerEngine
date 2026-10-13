@@ -44,7 +44,8 @@ def assert_payload_equal(actual, expected):
             mismatch = (before != after).nonzero()[:8]
             indexes = tuple(mismatch[:, i] for i in range(mismatch.shape[1]))
             pytest.fail(
-                f"{name}: positions={mismatch.tolist()}, expected={before[indexes].tolist()}, actual={after[indexes].tolist()}"
+                f"{name}: positions={mismatch.tolist()}, expected={before[indexes].tolist()},"
+                f" actual={after[indexes].tolist()}"
             )
 
 
@@ -59,7 +60,9 @@ def require_cuda():
 @pytest.mark.parametrize("usage", [(True, False), (False, True), (True, True)])
 @pytest.mark.parametrize("swizzle", [False, True])
 @pytest.mark.parametrize("layout", ["contiguous", "strided", "singleton", "fallback", "broadcast"])
-@pytest.mark.parametrize("pattern", ["random", "signed_zero", "extreme", "all_nan", "all_inf", "all_zero"])
+@pytest.mark.parametrize(
+    "pattern", ["random", "signed_zero", "extreme", "all_nan", "all_inf", "all_zero"]
+)
 def test_segmented_payload(usage, swizzle, layout, pattern):
     torch.manual_seed(1234)
     rows = 128 if layout != "fallback" else 96

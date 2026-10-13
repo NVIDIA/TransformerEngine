@@ -160,10 +160,11 @@ py::object quantize_mxfp8_segments(const std::vector<at::Tensor> &segments, py::
     for (int dim = 1; dim < segment.dim() - 1; ++dim) {
       NVTE_CHECK(segment.size(dim) == 1, "Only singleton batch dimensions are supported.");
     }
-    wrappers.emplace_back(makeTransformerEngineTensor(
-        segment.data_ptr(),
-        std::vector<size_t>{static_cast<size_t>(segment.size(0)), static_cast<size_t>(segment.size(-1))},
-        DType::kBFloat16));
+    wrappers.emplace_back(
+        makeTransformerEngineTensor(segment.data_ptr(),
+                                    std::vector<size_t>{static_cast<size_t>(segment.size(0)),
+                                                        static_cast<size_t>(segment.size(-1))},
+                                    DType::kBFloat16));
     inputs.push_back(wrappers.back().data());
     strides.push_back(segment.stride(0));
   }
