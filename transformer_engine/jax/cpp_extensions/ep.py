@@ -1296,17 +1296,14 @@ def _fused_prepare_dispatch_enabled():
 
 
 def ep_prepare_dispatch_fwd(
-    cfg: EpLayerConfig, topk_idx, tokens, topk_weights, recv_capacity_per_rank, fused=None
+    cfg: EpLayerConfig, topk_idx, tokens, topk_weights, recv_capacity_per_rank
 ):
     """Prepare + dispatch; returns
     ``(recv_tokens, recv_topk_weights, token_counts, total_recv_tokens, handle_mem)``.
 
-    ``fused`` forces the fused (True) or unfused (False) path; None selects it from
-    NVTE_EP_FUSED_PREPARE_DISPATCH.
+    Fused or unfused per NVTE_EP_FUSED_PREPARE_DISPATCH.
     """
-    if fused is None:
-        fused = _fused_prepare_dispatch_enabled()
-    if fused:
+    if _fused_prepare_dispatch_enabled():
 
         @_on_collective_stream
         def _fused():
