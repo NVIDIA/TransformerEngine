@@ -344,9 +344,6 @@ std::optional<std::pair<size_t, size_t>> nvfp4_gemm_swizzled_scales_alignment(
     bool optimize_for_gemm, bool with_rht, bool with_2d_quantization, bool row_scaled_nvfp4,
     bool nvfp4_use_4over6, int sm_arch, bool disable_rht_cast_fusion);
 
-bool meets_quantization_alignment(size_t rows, size_t cols,
-                                  const std::optional<std::pair<size_t, size_t>>& alignment);
-
 class NVFP4Quantizer : public Quantizer {
  public:
   // amax reduction for low precision FP4 AG

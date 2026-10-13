@@ -39,13 +39,6 @@ def _nvfp4_gemm_swizzled_scales_alignment(
     )
 
 
-@torch.compiler.assume_constant_result
-def _meets_quantization_alignment(
-    rows: int, cols: int, alignment: Optional[tuple[int, int]]
-) -> bool:
-    return tex.meets_quantization_alignment(rows, cols, alignment)
-
-
 def _make_fused_quantization_output_spec(
     shape: tuple[int, ...],
     dtype: torch.dtype,
@@ -71,12 +64,15 @@ def _make_fused_quantization_output_spec(
         major * 10 + minor,
         disable_rht_cast_fusion,
     )
-    # Guard only zero/nonzero remainders, keeping other batch sizes in the same graph.
+    # Keep divisibility checks visible to Dynamo without specializing the dimensions.
     rows, cols = math.prod(shape[:-1]), shape[-1]
-    row_alignment, col_alignment = alignment or (1, 1)
-    spec.with_gemm_swizzled_scales = _meets_quantization_alignment(
-        int(bool(rows % row_alignment)), int(bool(cols % col_alignment)), alignment
-    )
+    if alignment is None:
+        spec.with_gemm_swizzled_scales = False
+    else:
+        row_alignment, col_alignment = alignment
+        spec.with_gemm_swizzled_scales = bool(
+            rows % row_alignment == 0 and cols % col_alignment == 0
+        )
     return spec
 
 
