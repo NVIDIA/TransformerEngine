@@ -73,12 +73,30 @@ _print_rank = int(os.getenv("NVTE_PRINT_RANK", "0"))
 
 _cu_seqlens_cache = {}
 
+# `get_attention_backend` reads these at call time, so they belong in the key of any cache
+# that memoizes a backend selection or a decision derived from one.
+BACKEND_SELECTION_ENV_VARS = (
+    "NVTE_FLASH_ATTN",
+    "NVTE_FLASH_ATTN_V2",
+    "NVTE_FLASH_ATTN_V3",
+    "NVTE_FLASH_ATTN_V4",
+    "NVTE_FUSED_ATTN",
+    "NVTE_UNFUSED_ATTN",
+)
+
 # Global var for MLA padding cache.
 _should_pad_qkv_head_dim_cache: Dict[str, Any] = {
     "attention_params": None,
     "has_packed_qkv": None,
+    "environment": None,
     "should_pad": None,
 }
+
+
+def clear_should_pad_qkv_head_dim_cache() -> None:
+    """Drop the memoized padding decision when backend selection is invalidated."""
+    for key in _should_pad_qkv_head_dim_cache:
+        _should_pad_qkv_head_dim_cache[key] = None
 
 
 class AttentionLogging:
@@ -1995,7 +2013,6 @@ def get_attention_backend(
 def should_pad_qkv_head_dim(
     attention_params: AttentionParams,
     has_packed_qkv: bool,
-    backend_selection_params: Optional[AttentionParams],
 ) -> bool:
     """Decide whether to pad Q/K/V to a common head dim.
 
@@ -2004,8 +2021,9 @@ def should_pad_qkv_head_dim(
        mismatched head dims (FlashAttention-2).
     2. when padding results in a faster kernel
 
-    The selection is memoized for the given `attention_params` and `has_packed_qkv`. A cached result
-    is only reused when the attention params used for backend selection match.
+    The decision is memoized on `attention_params`, `has_packed_qkv` and the backend-selection
+    environment. Callers that invalidate backend selection for any other reason must also call
+    `clear_should_pad_qkv_head_dim_cache`.
 
     Parameters
     ----------
@@ -2013,9 +2031,6 @@ def should_pad_qkv_head_dim(
         Attention parameters for the native (unpadded) QK and V head dimensions.
     has_packed_qkv : bool
         Whether the caller passed a packed `qkv_layer` or `kv_layer` buffer.
-    backend_selection_params : Optional[AttentionParams]
-        The attention params that were last used for the backend selection, or `None` if no backend
-        has been selected previously.
 
     Returns
     -------
@@ -2024,33 +2039,14 @@ def should_pad_qkv_head_dim(
     """
     if attention_params.head_dim_qk == attention_params.head_dim_v:
         return False
-    cached_attention_params = _should_pad_qkv_head_dim_cache["attention_params"]
-    cached_has_packed_qkv = _should_pad_qkv_head_dim_cache["has_packed_qkv"]
+
+    environment = tuple(os.environ.get(name) for name in BACKEND_SELECTION_ENV_VARS)
     if (
-        cached_attention_params is not None
-        and cached_has_packed_qkv is has_packed_qkv
-        and cached_attention_params == attention_params
+        _should_pad_qkv_head_dim_cache["attention_params"] == attention_params
+        and _should_pad_qkv_head_dim_cache["has_packed_qkv"] is has_packed_qkv
+        and _should_pad_qkv_head_dim_cache["environment"] == environment
     ):
-        cached_should_pad = _should_pad_qkv_head_dim_cache["should_pad"]
-        # Recreate the attention params that would've flown into backend selection with the cached
-        # results to check whether they match those currently used selection.
-        #
-        # This is required because the `dot_product_attention._attention_backends` cache can be
-        # invalidated from the outside.
-        if cached_should_pad:
-            padded_head_dim = max(attention_params.head_dim_qk, attention_params.head_dim_v)
-            expected_selection_params = replace(
-                attention_params,
-                head_dim_qk=padded_head_dim,
-                head_dim_v=padded_head_dim,
-            )
-        else:
-            expected_selection_params = attention_params
-        if (
-            backend_selection_params is not None
-            and backend_selection_params == expected_selection_params
-        ):
-            return cached_should_pad
+        return _should_pad_qkv_head_dim_cache["should_pad"]
 
     # Check whether padding must be skipped because FP8 DPA is active and the caller passed packed
     # QKV/KV buffers.
@@ -2092,6 +2088,7 @@ def should_pad_qkv_head_dim(
     # resulting in subsequent cache misses.
     _should_pad_qkv_head_dim_cache["attention_params"] = replace(attention_params)
     _should_pad_qkv_head_dim_cache["has_packed_qkv"] = has_packed_qkv
+    _should_pad_qkv_head_dim_cache["environment"] = environment
     _should_pad_qkv_head_dim_cache["should_pad"] = should_pad
     return should_pad
 

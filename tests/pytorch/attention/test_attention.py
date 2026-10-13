@@ -1386,6 +1386,22 @@ def test_dpa_mla(dtype, model_configs, model):
     test_dot_product_attention(dtype, model_configs, model, True, None, False, False)
 
 
+def _make_mla_attn_params(dtype, config, head_dim_qk, head_dim_v):
+    """Build the attention params a THD MLA config would feed into backend selection."""
+    return dpa_utils.AttentionParams(
+        qkv_dtype=dtype,
+        qkv_layout="thd_thd_thd",
+        num_heads=config.num_heads,
+        num_gqa_groups=config.num_gqa_groups,
+        max_seqlen_q=config.max_seqlen_q,
+        max_seqlen_kv=config.max_seqlen_kv,
+        head_dim_qk=head_dim_qk,
+        head_dim_v=head_dim_v,
+        attn_mask_type=config.attn_mask_type,
+        is_training=True,
+    )
+
+
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("model_configs", [model_configs_mla])
@@ -1396,62 +1412,69 @@ def test_dpa_mla_should_pad(dtype, model_configs, model):
     It either pads (1) in case it's required for a functioning kernel or (2) to select a faster
     backend. Otherwise padding should be avoided since it becomes redundant.
     """
-    has_packed_qkv = False
-    # `None` to computes each padding decision from scratch.
-    backend_selection_params = None
-
-    def make_attn_params(head_dim_qk, head_dim_v):
-        return dpa_utils.AttentionParams(
-            qkv_dtype=dtype,
-            qkv_layout="thd_thd_thd",
-            num_heads=config.num_heads,
-            num_gqa_groups=config.num_gqa_groups,
-            max_seqlen_q=config.max_seqlen_q,
-            max_seqlen_kv=config.max_seqlen_kv,
-            head_dim_qk=head_dim_qk,
-            head_dim_v=head_dim_v,
-            attn_mask_type=config.attn_mask_type,
-            is_training=True,
-        )
-
     config = model_configs[model]
-    native_attn_params = make_attn_params(config.head_dim_qk, config.head_dim_v)
-    if config.head_dim_qk != config.head_dim_v:
-        native_backend = dpa_utils.get_attention_backend(native_attn_params)
-        native_use_flash_attention = native_backend[0]
-        native_flash_attention_backend = native_backend[1]
-        native_use_unfused_attention = native_backend[4]
+    native_params = _make_mla_attn_params(dtype, config, config.head_dim_qk, config.head_dim_v)
+    padded_head_dim = max(config.head_dim_qk, config.head_dim_v)
+    padded_params = _make_mla_attn_params(dtype, config, padded_head_dim, padded_head_dim)
 
-        padded_head_dim = max(config.head_dim_qk, config.head_dim_v)
-        padded_attn_params = make_attn_params(padded_head_dim, padded_head_dim)
-        padded_backend = dpa_utils.get_attention_backend(padded_attn_params)
-        padded_use_flash_attention = padded_backend[0]
-        padded_use_fused_attention = padded_backend[2]
+    # Equal head dims run on any backend as-is, so padding is never warranted.
+    assert not should_pad_qkv_head_dim(padded_params, False), "suggested padding equal-sized QK/V"
 
-        if (
-            native_use_flash_attention
-            and native_flash_attention_backend == FlashAttentionUtils.version
-        ):
-            # FA2 needs padding.
-            assert should_pad_qkv_head_dim(
-                native_attn_params, has_packed_qkv, backend_selection_params
-            ), "did not suggest padding when required for functioning kernel"
-        elif native_use_unfused_attention and (
-            padded_use_flash_attention or padded_use_fused_attention
-        ):
-            # Native is unfused and a fused backend is available via padding.
-            assert should_pad_qkv_head_dim(
-                native_attn_params, has_packed_qkv, backend_selection_params
-            ), "did not suggest padding when faster kernel was available"
-        else:
-            # Native is already fused, so we don't want to pad.
-            assert not should_pad_qkv_head_dim(
-                native_attn_params, has_packed_qkv, backend_selection_params
-            ), "suggested padding when no faster kernel was available"
-    else:
-        assert not should_pad_qkv_head_dim(
-            native_attn_params, has_packed_qkv, backend_selection_params
-        ), "suggested padding already equal-sized QK/V"
+    # Packed FP8 buffers must never be padded; the kernel would read the unpadded data.
+    fp8_recipe = recipe.DelayedScaling(fp8_format=recipe.Format.HYBRID, fp8_dpa=True)
+    fp8_params = replace(native_params, fp8=True, fp8_meta={"recipe": fp8_recipe})
+    assert not should_pad_qkv_head_dim(fp8_params, True), "suggested padding packed FP8 inputs"
+
+    native_backend = dpa_utils.get_attention_backend(native_params)
+    native_flash, native_flash_backend, native_fused = native_backend[:3]
+    native_unfused = native_backend[4]
+    padded_backend = dpa_utils.get_attention_backend(padded_params)
+    padded_flash, padded_fused = padded_backend[0], padded_backend[2]
+
+    # FlashAttention-2 cannot run mismatched head dims at all, so padding is required rather
+    # than an optimization. Otherwise it is only worthwhile when the native dims are stuck on
+    # the unfused backend and padding reaches a fused one.
+    pad_is_required = native_flash and native_flash_backend == FlashAttentionUtils.version
+    pad_unlocks_backend = (
+        not native_flash and not native_fused and native_unfused and (padded_flash or padded_fused)
+    )
+    expected = bool(pad_is_required or pad_unlocks_backend)
+
+    assert should_pad_qkv_head_dim(native_params, False) == expected, (
+        "did not suggest padding when required for a functioning kernel or a faster one"
+        if expected
+        else "suggested padding when no faster kernel was available"
+    )
+
+
+@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("model_configs", [model_configs_mla])
+@pytest.mark.parametrize("model", model_configs_mla.keys())
+def test_dpa_mla_should_pad_cache(dtype, model_configs, model):
+    """A memoized padding decision must match a freshly computed one.
+
+    `run_dot_product_attention` enables one backend at a time without changing the attention
+    params, so a decision cached for one backend must not leak into the next.
+    """
+    config = model_configs[model]
+    native_params = _make_mla_attn_params(dtype, config, config.head_dim_qk, config.head_dim_v)
+    saved = {name: os.environ.get(name) for name in dpa_utils.BACKEND_SELECTION_ENV_VARS}
+    try:
+        should_pad_qkv_head_dim(native_params, False)
+        os.environ["NVTE_FLASH_ATTN"] = "0"
+        os.environ["NVTE_FUSED_ATTN"] = "0"
+        cached = should_pad_qkv_head_dim(native_params, False)
+        dpa_utils.clear_should_pad_qkv_head_dim_cache()
+        fresh = should_pad_qkv_head_dim(native_params, False)
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        dpa_utils.clear_should_pad_qkv_head_dim_cache()
+    assert cached == fresh, "reused a stale padding decision after backend availability changed"
 
 
 model_configs_mask = {

@@ -85,14 +85,7 @@ _attention_backends = {
 # configurations. Cache their full backend-selection results to avoid re-running the
 # selector for every policy in every layer and forward pass.
 _THD_POLICY_BACKEND_CACHE_LIMIT = 64
-_THD_POLICY_BACKEND_ENV_VARS = (
-    "NVTE_FLASH_ATTN",
-    "NVTE_FLASH_ATTN_V2",
-    "NVTE_FLASH_ATTN_V3",
-    "NVTE_FLASH_ATTN_V4",
-    "NVTE_FUSED_ATTN",
-    "NVTE_UNFUSED_ATTN",
-)
+_THD_POLICY_BACKEND_ENV_VARS = dpa_utils.BACKEND_SELECTION_ENV_VARS
 _thd_policy_backend_cache = []
 
 _alibi_cache = {
@@ -420,25 +413,6 @@ if os.environ.get("NVTE_PLUGIN"):
 
 
 __all__ = ["DotProductAttention"]
-
-
-def _should_pad_qkv_head_dim(
-    head_dim_qk, head_dim_v, value_layer, qkv_layer, kv_layer, attention_params
-):
-    has_packed_inputs = qkv_layer is not None or kv_layer is not None
-    is_shape_pad_eligible = (
-        not is_in_onnx_export_mode()
-        and head_dim_qk != head_dim_v
-        and value_layer is not None
-        and not isinstance(value_layer, Float8TensorStorage)
-    )
-    # Skip padding when packed inputs are used with the FP8 fused path, which would lead to using
-    # unpadded data with a kernel that assumes padded data.
-    return is_shape_pad_eligible and dpa_utils.should_pad_qkv_head_dim(
-        attention_params,
-        has_packed_inputs,
-        _attention_backends["attention_params"],
-    )
 
 
 def _pad_qkv_head_dim(query_layer, key_layer, value_layer):
@@ -2860,13 +2834,22 @@ class DotProductAttention(TransformerEngineBaseModule):
                 pad_between_seqs=pad_between_seqs,
             )
 
+            if _attention_backends["backend_selection_requires_update"]:
+                dpa_utils.clear_should_pad_qkv_head_dim_cache()
+
             # Optionally pad inputs to `max(head_dim_qk, head_dim_v)` when it's required by the
             # kernel or when it leads to faster kernel selection. Note that the padded tensors could
-            # still be unsupported inputs shapes by `{Flash,Fused}Attention`.
-            qkv_head_pad = False
+            # still be unsupported input shapes by `{Flash,Fused}Attention`.
+            can_pad_qkv_head_dim = (
+                value_layer is not None
+                and not isinstance(value_layer, Float8TensorStorage)
+                and not is_in_onnx_export_mode()
+            )
+            has_packed_qkv = qkv_layer is not None or kv_layer is not None
+            is_qkv_head_dim_padded = False
             orig_head_dim_v = head_dim_v
-            if _should_pad_qkv_head_dim(
-                head_dim_qk, head_dim_v, value_layer, qkv_layer, kv_layer, attention_params
+            if can_pad_qkv_head_dim and dpa_utils.should_pad_qkv_head_dim(
+                attention_params, has_packed_qkv
             ):
                 query_layer, key_layer, value_layer, _, _ = _pad_qkv_head_dim(
                     query_layer, key_layer, value_layer
@@ -2875,7 +2858,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 head_dim_qk = head_dim_v = padded_head_dim
                 attention_params.head_dim_qk = padded_head_dim
                 attention_params.head_dim_v = padded_head_dim
-                qkv_head_pad = True
+                is_qkv_head_dim_padded = True
 
             if is_in_onnx_export_mode():
                 # We do not want to call get_attention_backend() in ONNX mode
@@ -3140,14 +3123,10 @@ class DotProductAttention(TransformerEngineBaseModule):
             else:
                 return None
 
-            if qkv_head_pad:
-                # Keep the rest of the result tuple as-is.
-                if not self.return_max_logit:
-                    attn_out = (attn_out,)
-                attn_out = (
-                    # Note the comma at the end; we're creating a 1-tuple here.
-                    _trim_output(attn_out[0], num_attention_heads, head_dim_v, orig_head_dim_v),
-                ) + attn_out[1:]
-                if not self.return_max_logit:
-                    attn_out = attn_out[0]
+            if is_qkv_head_dim_padded:
+                trim_args = (num_attention_heads, head_dim_v, orig_head_dim_v)
+                if self.return_max_logit:
+                    attn_out = (_trim_output(attn_out[0], *trim_args), *attn_out[1:])
+                else:
+                    attn_out = _trim_output(attn_out, *trim_args)
             return attn_out
