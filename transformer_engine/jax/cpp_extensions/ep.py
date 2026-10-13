@@ -1321,7 +1321,7 @@ def _fused_prepare_dispatch_enabled():
 
 
 @_on_collective_stream
-def _fused_prepare_and_dispatch_fwd(
+def _ep_fused_prepare_and_dispatch_fwd(
     cfg: EpLayerConfig, topk_idx, tokens, topk_weights, recv_capacity_per_rank
 ):
     """Fused prepare + dispatch; returns
@@ -1346,7 +1346,7 @@ def ep_prepare_and_dispatch_fwd(
     Fused or unfused per NVTE_EP_FUSED_PREPARE_DISPATCH.
     """
     if _fused_prepare_dispatch_enabled():
-        return _fused_prepare_and_dispatch_fwd(
+        return _ep_fused_prepare_and_dispatch_fwd(
             cfg, topk_idx, tokens, topk_weights, recv_capacity_per_rank
         )
     token_counts, total_recv_tokens, handle_mem = _ep_prepare(cfg, topk_idx)
