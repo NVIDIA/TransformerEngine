@@ -39,7 +39,8 @@ def assert_bits(actual, expected):
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("shape", [(16, 16), (48, 80), (128, 256), (512, 1024)])
 @pytest.mark.parametrize("distribution", ["normal", "zeros", "outliers", "boundaries"])
-def test_plain_exact(dtype, shape, distribution, monkeypatch):
+@pytest.mark.parametrize("row_scaled", [False, True])
+def test_plain_exact(dtype, shape, distribution, row_scaled, monkeypatch):
     monkeypatch.setenv("NVTE_USE_FAST_MATH", "0")
     torch.manual_seed(42)
     x = torch.randn(shape, device="cuda", dtype=dtype)
@@ -73,18 +74,44 @@ def test_plain_exact(dtype, shape, distribution, monkeypatch):
             dtype=dtype,
         )
         x.copy_(values.repeat(shape[0], shape[1] // 16))
-    q = NVFP4QDQQuantizer(backend="fused")
+    q = NVFP4QDQQuantizer(NVFP4Quantizer(row_scaled_nvfp4=row_scaled), backend="fused")
     assert q.selected_backend(x) == "fused"
-    assert_bits(q(x).dequantize(), native_qdq(x))
+    assert_bits(q(x).dequantize(), native_qdq(x, row_scaled_nvfp4=row_scaled))
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("shape", [(16, 4096), (32, 6144), (16, 16384), (2, 8, 80)])
+def test_row_scaled_wide_and_batched(dtype, shape):
+    torch.manual_seed(27)
+    x = torch.randn(shape, device="cuda", dtype=dtype)
+    rows = x.reshape(-1, shape[-1])
+    # Separate row scales: a zero row, a tiny row, and a large outlier row.
+    rows[0].zero_()
+    rows[0, ::2] = -0.0
+    rows[1].mul_(1e-4)
+    rows[2, 0] = 4096
+    q = NVFP4QDQQuantizer(NVFP4Quantizer(row_scaled_nvfp4=True), backend="fused")
+    actual = q(x).dequantize()
+    assert_bits(actual, native_qdq(x, row_scaled_nvfp4=True))
+    # Changing one row's outer scale must not affect any other row.
+    previous = actual.reshape_as(rows)[1:].clone()
+    rows[0].fill_(8192)
+    assert_bits(q(x).dequantize().reshape_as(rows)[1:], previous)
 
 
 @pytest.mark.parametrize("mode", ["MAE", "MSE"])
 @pytest.mark.parametrize("maximum", [256, 448])
 @pytest.mark.parametrize("fast_error", ["0", "1"])
-def test_4over6_fallback(mode, maximum, fast_error, monkeypatch):
+@pytest.mark.parametrize("row_scaled", [False, True])
+def test_4over6_fallback(mode, maximum, fast_error, row_scaled, monkeypatch):
     monkeypatch.setenv("NVTE_NVFP4_4OVER6_ERR_USE_FAST_MATH", fast_error)
     x = torch.randn(128, 256, device="cuda", dtype=torch.bfloat16)
-    options = dict(nvfp4_use_4over6=True, nvfp4_e4m3_max=maximum, nvfp4_4over6_err_mode=mode)
+    options = dict(
+        nvfp4_use_4over6=True,
+        nvfp4_e4m3_max=maximum,
+        nvfp4_4over6_err_mode=mode,
+        row_scaled_nvfp4=row_scaled,
+    )
     q = NVFP4QDQQuantizer(NVFP4Quantizer(**options))
     assert q.selected_backend(x) == "reference"
     assert_bits(q(x).dequantize(), native_qdq(x, **options))
@@ -93,7 +120,9 @@ def test_4over6_fallback(mode, maximum, fast_error, monkeypatch):
         q(x)
 
 
-@pytest.mark.parametrize("options", [{"with_2d_quantization": True}, {}])
+@pytest.mark.parametrize(
+    "options", [{"with_2d_quantization": True}, {"row_scaled_nvfp4": True}, {}]
+)
 def test_dtype_fallback(options):
     x = torch.randn(128, 256, device="cuda", dtype=torch.float32)
     q = NVFP4QDQQuantizer(NVFP4Quantizer(**options))
@@ -105,22 +134,49 @@ def test_dtype_fallback(options):
     assert_bits(actual.dequantize(), native_qdq(x * 2, torch.bfloat16, **options))
 
 
+def test_row_scaled_ste_and_dispatch(monkeypatch):
+    x = torch.randn(16, 80, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    q = NVFP4QDQQuantizer(NVFP4Quantizer(row_scaled_nvfp4=True))
+    assert q.selected_backend(x) == "fused"
+    q(x).sum().backward()
+    assert torch.equal(x.grad, torch.ones_like(x))
+    monkeypatch.setenv("NVTE_USE_FAST_MATH", "1")
+    assert q.selected_backend(x) == "reference"
+    q.backend = "fused"
+    with pytest.raises(ValueError, match="Forced fused"):
+        q(x)
+
+
+def test_row_scaled_low_level_validation():
+    x = torch.randn(16, 80, device="cuda", dtype=torch.bfloat16)
+    output = torch.empty_like(x)
+    tex.nvfp4_qdq_row_scaled(x, output, None)
+    assert_bits(output, native_qdq(x, row_scaled_nvfp4=True))
+    with pytest.raises(RuntimeError, match="matching dtype and shape"):
+        tex.nvfp4_qdq_row_scaled(x, output.float(), None)
+    with pytest.raises(RuntimeError, match="contiguous"):
+        tex.nvfp4_qdq_row_scaled(x.t(), output.t(), None)
+    with pytest.raises(RuntimeError, match="scalar FP32"):
+        tex.nvfp4_qdq_row_scaled(x, output, torch.ones(2, device="cuda"))
+
+
 @pytest.mark.parametrize("backend", ["reference", "fused"])
 @pytest.mark.parametrize("internal", [False, True])
-def test_lifecycle_and_graph(backend, internal):
+@pytest.mark.parametrize("row_scaled", [False, True])
+def test_lifecycle_and_graph(backend, internal, row_scaled):
     x = torch.randn(128, 256, device="cuda", dtype=torch.bfloat16)
-    q = NVFP4QDQQuantizer(backend=backend)
+    q = NVFP4QDQQuantizer(NVFP4Quantizer(row_scaled_nvfp4=row_scaled), backend=backend)
     q.internal = internal
     y = q(x)
     assert y._get_quantizer().backend == backend
     address = y._hp_data.data_ptr()
     noop = torch.ones(1, device="cuda")
     q.update_quantized(x * 3, y, noop_flag=noop)
-    assert_bits(y.dequantize(), native_qdq(x))
+    assert_bits(y.dequantize(), native_qdq(x, row_scaled_nvfp4=row_scaled))
     noop.zero_()
     q.update_quantized(x * 2, y, noop_flag=noop)
     assert y._hp_data.data_ptr() == address
-    assert_bits(y.dequantize(), native_qdq(x * 2))
+    assert_bits(y.dequantize(), native_qdq(x * 2, row_scaled_nvfp4=row_scaled))
     # Warm up on a side stream, then replay with changed input and noop flag.
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
@@ -133,7 +189,7 @@ def test_lifecycle_and_graph(backend, internal):
         q.update_quantized(x, y, noop_flag=noop)
     x.mul_(2)
     graph.replay()
-    assert_bits(y.dequantize(), native_qdq(x))
+    assert_bits(y.dequantize(), native_qdq(x, row_scaled_nvfp4=row_scaled))
     previous = y.dequantize().clone()
     noop.fill_(1)
     x.mul_(2)
@@ -283,21 +339,27 @@ def test_empty_reference(shape):
 
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
-def test_exceptional_values(value):
-    x = torch.randn(128, 128, device="cuda", dtype=torch.bfloat16)
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("row_scaled", [False, True])
+def test_exceptional_values(value, dtype, row_scaled):
+    x = torch.randn(128, 128, device="cuda", dtype=dtype)
     x[0, 0] = value
-    actual = NVFP4QDQQuantizer(backend="fused")(x).dequantize()
-    expected = native_qdq(x)
+    actual = NVFP4QDQQuantizer(NVFP4Quantizer(row_scaled_nvfp4=row_scaled), backend="fused")(
+        x
+    ).dequantize()
+    expected = native_qdq(x, row_scaled_nvfp4=row_scaled)
     assert torch.equal(torch.isnan(actual), torch.isnan(expected))
     mask = ~torch.isnan(expected)
     assert_bits(actual[mask], expected[mask])
 
 
-def test_current_stream_and_device():
+@pytest.mark.parametrize("row_scaled", [False, True])
+def test_current_stream_and_device(row_scaled):
     device = 1 if torch.cuda.device_count() > 1 else 0
     with torch.cuda.device(device), torch.cuda.stream(torch.cuda.Stream(device=device)):
         x = torch.randn(48, 80, device=f"cuda:{device}", dtype=torch.bfloat16)
-        assert_bits(NVFP4QDQQuantizer(backend="fused")(x).dequantize(), native_qdq(x))
+        q = NVFP4QDQQuantizer(NVFP4Quantizer(row_scaled_nvfp4=row_scaled), backend="fused")
+        assert_bits(q(x).dequantize(), native_qdq(x, row_scaled_nvfp4=row_scaled))
 
 
 def test_copy_preserves_runtime_reduction_state():

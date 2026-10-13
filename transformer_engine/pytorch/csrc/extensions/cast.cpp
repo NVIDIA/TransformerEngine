@@ -83,6 +83,24 @@ void nvfp4_qdq(const at::Tensor &input, at::Tensor output, at::Tensor amax,
                  stream);
 }
 
+void nvfp4_qdq_row_scaled(const at::Tensor &input, at::Tensor output,
+                          std::optional<at::Tensor> noop) {
+  TORCH_CHECK(input.is_cuda() && output.is_cuda() && input.device() == output.device(),
+              "Row-scaled NVFP4 QDQ requires CUDA tensors on the same device");
+  at::cuda::CUDAGuard guard(input.device());
+  TORCH_CHECK(input.is_contiguous() && output.is_contiguous(),
+              "Row-scaled NVFP4 QDQ requires contiguous tensors");
+  TORCH_CHECK(
+      !noop || (noop->is_cuda() && noop->device() == input.device() && noop->is_contiguous()),
+      "Invalid QDQ noop device/layout");
+  auto in = makeTransformerEngineTensor(input);
+  auto out = makeTransformerEngineTensor(output);
+  std::optional<TensorWrapper> noop_cpp;
+  if (noop) noop_cpp = makeTransformerEngineTensor(*noop);
+  nvte_nvfp4_qdq_row_scaled(in.data(), out.data(), noop_cpp ? noop_cpp->data() : nullptr,
+                            at::cuda::getCurrentCUDAStream());
+}
+
 void mxfp8_qdq(const at::Tensor &input, at::Tensor output, std::optional<at::Tensor> noop) {
   TORCH_CHECK(input.is_cuda() && output.is_cuda() && input.device() == output.device(),
               "MXFP8 QDQ requires tensors on the same CUDA device");

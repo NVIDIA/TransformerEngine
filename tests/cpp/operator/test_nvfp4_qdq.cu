@@ -19,7 +19,7 @@ using namespace test;
 
 namespace {
 template <typename T>
-void check_qdq(size_t rows, size_t cols) {
+void check_qdq(size_t rows, size_t cols, bool row_scaled = false) {
   cudaDeviceProp prop;
   ASSERT_EQ(cudaGetDeviceProperties(&prop, 0), cudaSuccess);
   if (prop.major != 10 || prop.minor != 0) GTEST_SKIP() << "QDQ targets SM100";
@@ -39,12 +39,17 @@ void check_qdq(size_t rows, size_t cols) {
     maximum = std::max(maximum, std::abs(static_cast<float>(input.rowwise_cpu_dptr<T>()[i])));
   }
   packed.set_amax(maximum);
+  if (row_scaled) packed.set_row_scaled_nvfp4(true);
   ASSERT_EQ(cudaMemcpy(amax.rowwise_dptr(), &maximum, sizeof(float), cudaMemcpyHostToDevice),
             cudaSuccess);
   QuantizationConfigWrapper config;
   nvte_quantize_v2(input.data(), packed.data(), config, 0);
   nvte_dequantize(packed.data(), reference.data(), 0);
-  nvte_nvfp4_qdq(input.data(), output.data(), amax.data(), nullptr, 0);
+  if (row_scaled) {
+    nvte_nvfp4_qdq_row_scaled(input.data(), output.data(), nullptr, 0);
+  } else {
+    nvte_nvfp4_qdq(input.data(), output.data(), amax.data(), nullptr, 0);
+  }
   ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
   reference.to_cpu();
   output.to_cpu();
@@ -54,7 +59,11 @@ void check_qdq(size_t rows, size_t cols) {
   ASSERT_EQ(cudaMemcpy(noop.rowwise_dptr(), &one, sizeof(float), cudaMemcpyHostToDevice),
             cudaSuccess);
   ASSERT_EQ(cudaMemset(input.rowwise_dptr(), 0, rows * cols * sizeof(T)), cudaSuccess);
-  nvte_nvfp4_qdq(input.data(), output.data(), amax.data(), noop.data(), 0);
+  if (row_scaled) {
+    nvte_nvfp4_qdq_row_scaled(input.data(), output.data(), noop.data(), 0);
+  } else {
+    nvte_nvfp4_qdq(input.data(), output.data(), amax.data(), noop.data(), 0);
+  }
   ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
   output.to_cpu();
   EXPECT_EQ(std::memcmp(reference.rowwise_cpu_dptr<T>(), output.rowwise_cpu_dptr<T>(),
@@ -71,4 +80,16 @@ TEST(NVFP4QDQ, BF16) {
 TEST(NVFP4QDQ, FP16) {
   check_qdq<fp16>(32, 32);
   check_qdq<fp16>(96, 160);
+}
+
+TEST(NVFP4QDQ, RowScaledBF16) {
+  check_qdq<bf16>(32, 32, true);
+  check_qdq<bf16>(96, 160, true);
+  check_qdq<bf16>(128, 4096, true);
+}
+
+TEST(NVFP4QDQ, RowScaledFP16) {
+  check_qdq<fp16>(32, 32, true);
+  check_qdq<fp16>(96, 160, true);
+  check_qdq<fp16>(32, 16384, true);
 }

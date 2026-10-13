@@ -29,6 +29,16 @@ extern "C" {
 void nvte_nvfp4_qdq(const NVTETensor input, NVTETensor output, const NVTETensor amax,
                     const NVTETensor noop, cudaStream_t stream);
 
+/*! \brief Plain 1x16 NVFP4 QDQ with per-row outer scaling into BF16/FP16.
+ * Input/output have the same layout and dtype requirements as nvte_nvfp4_qdq.
+ * Each flattened row (token) computes its own outer amax inside the kernel.
+ * E2M1 values and E4M3 scales (maximum 448) use native rounding with fast math
+ * disabled. No intermediate amax, packed values, or scales are materialized.
+ * Optional scalar FP32 noop skips writes when equal to 1. Buffers are caller-owned.
+ */
+void nvte_nvfp4_qdq_row_scaled(const NVTETensor input, NVTETensor output, const NVTETensor noop,
+                               cudaStream_t stream);
+
 /*! \brief Rowwise block-32 E4M3/E8M0 MXFP8 QDQ into matching BF16/FP16 output.
  * Input and output are contiguous, with rows divisible by 32. An optional scalar
  * FP32 noop skips writes when equal to 1. All buffers are caller-owned.

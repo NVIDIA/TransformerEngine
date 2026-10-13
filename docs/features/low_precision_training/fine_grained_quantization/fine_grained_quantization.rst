@@ -436,13 +436,21 @@ Backends and custom QDQ formats
 
 Output defaults to the source dtype; a module compute-dtype override changes
 only the decoded dtype. For ``NVFP4QDQQuantizer``, ``backend="auto"`` fuses
-plain 1D E2M1/E4M3 QDQ on
+plain 1D E2M1/E4M3 QDQ with tensor or per-row outer scaling on
 SM100 for contiguous, 16-byte-aligned BF16/FP16 tensors with matching output
 dtype and flattened matrix dimensions divisible by 16, with ordinary fast math
 disabled. Other native-valid modes, including 4over6, 2D scaling, distributed
 amax reduction, and mixed dtypes, use native ``quantize().dequantize()``.
 ``backend="reference"`` forces that composition; ``backend="fused"`` rejects
 unsupported cases. Current weight amax is computed when quantization runs.
+
+For per-token outer scaling, wrap
+``NVFP4Quantizer(row_scaled_nvfp4=True)`` in ``NVFP4QDQQuantizer``. Each flattened
+row uses its own outer amax, while each 16-value block retains its E4M3 scale.
+The fused row-scaled path computes row amax and QDQ in one kernel, without
+intermediate amax, packed-value, or scale buffers. The tensor-scaled fused path
+retains its separate global amax reduction. Both paths preserve native Q+DQ
+rounding and support the same matching BF16/FP16 input and output dtypes.
 
 ``custom_recipes.qdq.MXFP8QDQQuantizer`` provides the corresponding rowwise
 E4M3/block-32 E8M0 QDQ operation. Its ``reference`` backend calls native

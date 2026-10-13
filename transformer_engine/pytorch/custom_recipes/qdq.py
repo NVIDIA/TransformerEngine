@@ -191,7 +191,8 @@ class NVFP4QDQQuantizer(QDQQuantizer):
     serve either GEMM orientation.
 
     ``backend`` is ``auto``, ``reference``, or ``fused``. Auto falls back to
-    native Q+DQ outside plain contiguous BF16/FP16 1D E4M3 scaling on SM100.
+    native Q+DQ outside plain contiguous BF16/FP16 1D E4M3 scaling on SM100,
+    with tensor or per-row outer scaling. Per-row amax is fused into QDQ.
     In particular, 4over6 and 2D scaling currently use the reference path.
     Forced fused execution raises for unsupported inputs/configurations.
     This experimental API is subject to change.
@@ -269,7 +270,6 @@ class NVFP4QDQQuantizer(QDQQuantizer):
                     q.with_post_rht_amax,
                     q.with_2d_quantization,
                     q.stochastic_rounding,
-                    q.row_scaled_nvfp4,
                     q.nvfp4_use_4over6,
                     q.disable_second_level_scale,
                     q.with_amax_reduction,
@@ -286,6 +286,9 @@ class NVFP4QDQQuantizer(QDQQuantizer):
 
     def _compute(self, tensor, output, noop_flag=None, *, backend=None):
         if (backend or self.selected_backend(tensor, output.dtype)) == "fused":
+            if self.nvfp4_quantizer.row_scaled_nvfp4:
+                tex.nvfp4_qdq_row_scaled(tensor, output, noop_flag)
+                return
             # Framework owns both allocations; amax reduction and QDQ use the
             # current stream and may be captured together.
             amax = torch.empty(1, dtype=torch.float32, device=tensor.device)
