@@ -242,6 +242,11 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(EpBootstrapBorrowedCommHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(TopkHandler);
 pybind11::tuple GetTopkWorkspaceSizes(int batch_size, int seq_len, int k);
 
+// Activation lookup table to pass for act_type (or its derivative), built once per device;
+// nullptr when the activation is not read from a table (see NVTEActivationTableKind).
+NVTETensor activation_table_for(NVTE_Activation_Type act_type, bool derivative, DType input_dtype,
+                                JAXX_Scaling_Mode scaling_mode, cudaStream_t stream);
+
 }  // namespace jax
 }  // namespace transformer_engine
 

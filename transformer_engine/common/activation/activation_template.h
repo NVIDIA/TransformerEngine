@@ -21,15 +21,16 @@
 namespace transformer_engine {
 
 template <typename ComputeType, typename Param, ComputeType (*OP)(ComputeType, const Param &)>
-void act_fn(const NVTETensor input, NVTETensor output, cudaStream_t stream) {
+void act_fn(const NVTETensor input, NVTETensor output, cudaStream_t stream,
+            const NVTEQuantizationConfig quant_config = nullptr) {
   using namespace detail;
   constexpr bool IS_ACT = true;
-  dispatch::quantize_fwd_helper<IS_ACT, Empty, OP>(input, output, nullptr, stream);
+  dispatch::quantize_fwd_helper<IS_ACT, Empty, OP>(input, output, quant_config, stream);
 }
 
 template <typename ComputeType, typename Param, ComputeType (*OP)(ComputeType, const Param &)>
-void dact_fn(const NVTETensor grad, const NVTETensor input, NVTETensor output,
-             cudaStream_t stream) {
+void dact_fn(const NVTETensor grad, const NVTETensor input, NVTETensor output, cudaStream_t stream,
+             const NVTEQuantizationConfig quant_config = nullptr) {
   using namespace detail;
   constexpr bool IS_DBIAS = false;
   constexpr bool IS_DACT = true;
@@ -37,7 +38,7 @@ void dact_fn(const NVTETensor grad, const NVTETensor input, NVTETensor output,
   constexpr NVTETensor workspace = nullptr;
 
   dispatch::quantize_bwd_helper<IS_DBIAS, IS_DACT, Empty, OP>(grad, input, output, dbias, workspace,
-                                                              nullptr, stream);
+                                                              quant_config, stream);
 }
 
 template <typename ComputeType, typename Param, ComputeType (*ActOP)(ComputeType, const Param &)>

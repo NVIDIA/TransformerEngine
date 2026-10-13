@@ -1,0 +1,227 @@
+/*************************************************************************
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *
+ * See LICENSE for license information.
+ ************************************************************************/
+
+/*! \file activation_table.cuh
+ *  \brief GeLU, SiLU and their derivatives of BF16 inputs, read from lookup tables.
+ *
+ *  A BF16 input takes only 2^16 values, so these activations can be read from a table
+ *  generated once from the scalar util/math.h functions (nvte_build_activation_table).
+ *  Outside each table's window the result has a closed form, so every lookup is
+ *  branch-free.
+ *
+ *  Forward (GeLU, SiLU): BF16 entries. Below the window the result is RN(x/2); above it
+ *  it is x for x > 0 and -0 for x < 0. The forward result is truncated to BF16 by every
+ *  caller, so BF16 entries lose nothing. One difference from util/math.h: -inf gives -0,
+ *  where the formula gives NaN (-inf * 0).
+ *
+ *  Derivatives (dGeLU, dSiLU): FP32 entries, because callers multiply the derivative by
+ *  the incoming gradient in FP32. Below the window the derivative is its linear Taylor
+ *  term 0.5 + c*x, rounded once; it differs from util/math.h by at most 1 ulp (dGeLU) or
+ *  2 ulp (dSiLU) there. Above the window the derivative has saturated, and the table's
+ *  last entry of the same sign holds the saturated value. Inputs where util/math.h
+ *  returns NaN (dGeLU from 0x6044 on, where 0.107*x*x overflows; +-inf; NaN) keep NaN.
+ *
+ *  The tables follow TE's tanh-based GeLU. An erf-based variant would need its own
+ *  tables, a different forward window, and an FP32 derivative Phi(x) + x*phi(x).
+ */
+
+#ifndef TRANSFORMER_ENGINE_UTIL_ACTIVATION_TABLE_CUH_
+#define TRANSFORMER_ENGINE_UTIL_ACTIVATION_TABLE_CUH_
+
+#include <cuda_bf16.h>
+#include <transformer_engine/activation.h>
+
+#include <cstddef>
+#include <cstdint>
+
+#include "../common.h"
+#include "math.h"
+
+namespace transformer_engine {
+namespace activation_table {
+
+/*! \brief Forward table over the BF16 magnitudes [kLo, kHi].
+ *
+ *  Rows are indexed by magnitude bits from kLowSentinel to kHighSentinel, two entries per
+ *  row: op(+m) then op(-m). The kLowSentinel row holds -inf, so max(entry, RN(x/2)) picks
+ *  RN(x/2) below the window. The kHighSentinel row holds +inf and -0, so min(entry, upper)
+ *  picks x above the window for x > 0 and -0 for x < 0.
+ */
+template <uint32_t kLo, uint32_t kHi>
+struct ForwardLayout {
+  static constexpr bool kForward = true;
+  static constexpr uint32_t kLowSentinel = kLo - 1;
+  static constexpr uint32_t kHighSentinel = kHi + 1;
+  static constexpr uint32_t kRows = kHighSentinel - kLowSentinel + 1;
+  static constexpr size_t kBytes = kRows * 2 * sizeof(__nv_bfloat16);
+};
+
+/*! \brief Derivative table over the BF16 magnitudes [kLo, kHi].
+ *
+ *  Positive inputs at entries [0, n), negative ones at [kSignStride, kSignStride + n).
+ *  The stride turns the BF16 sign bit, 0x8000, into a byte offset of 0x8000 >> 2, which
+ *  lets a packed lookup form both lanes' offsets in one 32-bit word.
+ */
+template <uint32_t kLo, uint32_t kHi, uint32_t kSaturatedEnd>
+struct DerivativeLayout {
+  static constexpr bool kForward = false;
+  static constexpr uint32_t kLoBits = kLo;
+  static constexpr uint32_t kHiBits = kHi;
+  //! Magnitudes from here on (and NaN) give NaN, as util/math.h does.
+  static constexpr uint32_t kSaturatedEndBits = kSaturatedEnd;
+  static constexpr uint32_t kEntriesPerSign = kHi - kLo + 1;
+  static constexpr uint32_t kSignStride = (0x8000 >> 2) / sizeof(float);
+  static_assert(kEntriesPerSign <= kSignStride, "The two signs' entries must not overlap.");
+  static constexpr size_t kBytes = (kSignStride + kEntriesPerSign) * sizeof(float);
+};
+
+template <NVTEActivationTableKind kKind>
+struct Table;
+
+//! gelu(x) is RN(x/2) below 0x3b4b, x from 2.75 and -0 from -5.1875.
+template <>
+struct Table<kNVTEActivationTableGelu> : ForwardLayout<0x3b4b, 0x40a5> {
+  __device__ static float op(const float x) { return gelu<float, float>(x, {}); }
+};
+
+//! silu(x) is RN(x/2) below 0x3bb6, x from 5.96875 and -0 from -89.
+template <>
+struct Table<kNVTEActivationTableSilu> : ForwardLayout<0x3bb6, 0x42b1> {
+  __device__ static float op(const float x) { return silu<float, float>(x, {}); }
+};
+
+//! [2^-12, 8]. dgelu has saturated, to 1 and to +0, by |x| = 8, until 0.107*x*x overflows at
+//! 0x6044.
+template <>
+struct Table<kNVTEActivationTableDgelu> : DerivativeLayout<0x3980, 0x4100, 0x6044> {
+  __device__ static float op(const float x) { return dgelu<float, float>(x, {}); }
+  //! dgelu(x) = 0.5 + sqrt(2/pi)*x + O(x^3).
+  __device__ static float below_window(const float x) { return fmaf(0.79788456f, x, 0.5f); }
+};
+
+//! [2^-9, 89]. dsilu has saturated, to 1 and to +0, by |x| = 89, up to inf.
+template <>
+struct Table<kNVTEActivationTableDsilu> : DerivativeLayout<0x3B00, 0x42B2, 0x7F80> {
+  __device__ static float op(const float x) { return dsilu<float, float>(x, {}); }
+  //! dsilu(x) = 0.5 + x/2 + O(x^3).
+  __device__ static float below_window(const float x) { return fmaf(0.5f, x, 0.5f); }
+};
+
+/*! \brief Table size in bytes. Each kind has a different size, which lets callers check that
+ *         a table matches the activation it is passed with.
+ */
+constexpr size_t table_bytes(const NVTEActivationTableKind kind) {
+  switch (kind) {
+    case kNVTEActivationTableGelu:
+      return Table<kNVTEActivationTableGelu>::kBytes;
+    case kNVTEActivationTableSilu:
+      return Table<kNVTEActivationTableSilu>::kBytes;
+    case kNVTEActivationTableDgelu:
+      return Table<kNVTEActivationTableDgelu>::kBytes;
+    case kNVTEActivationTableDsilu:
+      return Table<kNVTEActivationTableDsilu>::kBytes;
+    default:
+      return 0;
+  }
+}
+
+static_assert(table_bytes(kNVTEActivationTableGelu) != table_bytes(kNVTEActivationTableSilu) &&
+                  table_bytes(kNVTEActivationTableDgelu) != table_bytes(kNVTEActivationTableDsilu),
+              "Table sizes must identify their kind.");
+
+/*! \brief Device pointer of an activation table, checked against the kind it must hold. */
+inline const void *checked_table_ptr(const Tensor &table, const NVTEActivationTableKind kind) {
+  const size_t bytes = table_bytes(kind);
+  NVTE_CHECK(bytes != 0, "Invalid NVTEActivationTableKind (got ", static_cast<int>(kind), ")");
+  NVTE_CHECK(table.data.dptr != nullptr, "Activation table is not allocated.");
+  NVTE_CHECK(table.data.dtype == DType::kByte, "Activation table must be a byte tensor.");
+  NVTE_CHECK(table.data.numel() == bytes, "Activation table has ", table.data.numel(),
+             " bytes, but activation table kind ", static_cast<int>(kind), " needs ", bytes,
+             " (was it built for another activation?)");
+  return table.data.dptr;
+}
+
+/*! \brief The table kind for OP, if OP is read from a table. */
+template <typename ParamOP, float (*OP)(float, const ParamOP &)>
+constexpr bool kHasTable = false;
+template <typename ParamOP, float (*OP)(float, const ParamOP &)>
+constexpr NVTEActivationTableKind kKindOf = kNVTEActivationTableGelu;
+
+template <>
+constexpr bool kHasTable<Empty, gelu<float, float>> = true;
+template <>
+constexpr bool kHasTable<Empty, silu<float, float>> = true;
+template <>
+constexpr bool kHasTable<Empty, dgelu<float, float>> = true;
+template <>
+constexpr bool kHasTable<Empty, dsilu<float, float>> = true;
+template <>
+constexpr NVTEActivationTableKind kKindOf<Empty, silu<float, float>> = kNVTEActivationTableSilu;
+template <>
+constexpr NVTEActivationTableKind kKindOf<Empty, dgelu<float, float>> = kNVTEActivationTableDgelu;
+template <>
+constexpr NVTEActivationTableKind kKindOf<Empty, dsilu<float, float>> = kNVTEActivationTableDsilu;
+
+/*! \brief Forward activation of x, a BF16 value widened to FP32.
+ *
+ *  Branch-free: the magnitude is clamped to the table rows with __hmax/__hmin, which
+ *  ignore NaN, so NaN lands on the -inf row; __hmin_nan/__hmax_nan then propagate it.
+ */
+template <NVTEActivationTableKind kKind>
+__device__ __forceinline__ float forward(const float x, const __nv_bfloat16 *__restrict__ table) {
+  using T = Table<kKind>;
+  static_assert(T::kForward, "Not a forward table.");
+  const __nv_bfloat16 a = __float2bfloat16_rn(x);
+  const uint32_t sign = __float_as_uint(x) >> 31;
+  const __nv_bfloat16 magnitude =
+      __hmin(__hmax(__habs(a), __ushort_as_bfloat16(static_cast<uint16_t>(T::kLowSentinel))),
+             __ushort_as_bfloat16(static_cast<uint16_t>(T::kHighSentinel)));
+  const uint32_t row = __bfloat16_as_ushort(magnitude) - T::kLowSentinel;
+  const __nv_bfloat16 entry = __ldg(table + 2 * row + sign);
+  // RN(x/2), as util/math.h rounds x*0.5 below the window.
+  const __nv_bfloat16 half = __hmul(a, __ushort_as_bfloat16(0x3f00));
+  // a for a > 0, -0 for a < 0, NaN for NaN.
+  const __nv_bfloat16 upper = __hmax_nan(a, __ushort_as_bfloat16(0x8000));
+  return __bfloat162float(__hmin_nan(__hmax(entry, half), upper));
+}
+
+/*! \brief Derivative of x, a BF16 value widened to FP32. Branch-free. */
+template <NVTEActivationTableKind kKind>
+__device__ __forceinline__ float derivative(const float x, const float *__restrict__ table) {
+  using T = Table<kKind>;
+  static_assert(!T::kForward, "Not a derivative table.");
+  const uint32_t bits = __float_as_uint(x) >> 16;
+  const uint32_t magnitude = bits & 0x7fffu;
+  const uint32_t clamped = min(max(magnitude, T::kLoBits), T::kHiBits);
+  const uint32_t index = (clamped - T::kLoBits) + (bits >> 15) * T::kSignStride;
+  const float entry = __ldg(table + index);
+  const float value = magnitude < T::kLoBits ? T::below_window(x) : entry;
+  return magnitude >= T::kSaturatedEndBits ? __uint_as_float(0x7fffffffu) : value;
+}
+
+/*! \brief OP(x), from the table when kUseTable, else from util/math.h.
+ *
+ *  x must be a BF16 value widened to FP32 when kUseTable.
+ */
+template <bool kUseTable, typename ParamOP, float (*OP)(float, const ParamOP &)>
+__device__ __forceinline__ float evaluate(const float x, const void *table) {
+  if constexpr (kUseTable) {
+    static_assert(kHasTable<ParamOP, OP>, "OP has no table.");
+    constexpr NVTEActivationTableKind kKind = kKindOf<ParamOP, OP>;
+    if constexpr (Table<kKind>::kForward) {
+      return forward<kKind>(x, static_cast<const __nv_bfloat16 *>(table));
+    } else {
+      return derivative<kKind>(x, static_cast<const float *>(table));
+    }
+  } else {
+    return OP(x, {});
+  }
+}
+
+}  // namespace activation_table
+}  // namespace transformer_engine
+
+#endif  // TRANSFORMER_ENGINE_UTIL_ACTIVATION_TABLE_CUH_

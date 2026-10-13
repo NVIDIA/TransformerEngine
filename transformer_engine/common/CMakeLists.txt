@@ -331,6 +331,7 @@ list(APPEND transformer_engine_cuda_sources
 
 list(APPEND transformer_engine_cuda_arch_specific_sources
      fused_attn/flash_attn.cu
+     activation/activation_table.cu
      activation/gelu.cu
      activation/gelu_dbias.cu
      activation/gelu_grouped.cu

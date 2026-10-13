@@ -15,11 +15,25 @@ void nvte_silu(const NVTETensor input, NVTETensor output, cudaStream_t stream) {
   act_fn<fp32, Empty, silu<fp32, fp32>>(input, output, stream);
 }
 
+void nvte_silu_v2(const NVTETensor input, NVTETensor output,
+                  const NVTEQuantizationConfig quant_config, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_silu_v2);
+  using namespace transformer_engine;
+  act_fn<fp32, Empty, silu<fp32, fp32>>(input, output, stream, quant_config);
+}
+
 void nvte_dsilu(const NVTETensor grad, const NVTETensor input, NVTETensor output,
                 cudaStream_t stream) {
   NVTE_API_CALL(nvte_dsilu);
   using namespace transformer_engine;
   dact_fn<fp32, Empty, dsilu<fp32, fp32>>(grad, input, output, stream);
+}
+
+void nvte_dsilu_v2(const NVTETensor grad, const NVTETensor input, NVTETensor output,
+                   const NVTEQuantizationConfig quant_config, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_dsilu_v2);
+  using namespace transformer_engine;
+  dact_fn<fp32, Empty, dsilu<fp32, fp32>>(grad, input, output, stream, quant_config);
 }
 
 void nvte_swiglu(const NVTETensor input, NVTETensor output, cudaStream_t stream) {

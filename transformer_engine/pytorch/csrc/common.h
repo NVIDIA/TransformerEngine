@@ -613,6 +613,58 @@ void philox_unpack(at::PhiloxCudaState arg, int64_t* rng_state_ptr);
 // extract PhiloxCudaState from CUDA random number generator
 at::PhiloxCudaState init_philox_state(at::CUDAGeneratorImpl* gen, size_t elts_per_thread);
 
+/*! \brief Activation table of the given kind for the current device.
+ *
+ *  Built on first use and kept for the lifetime of the process, one per device.
+ */
+NVTETensor activation_table(NVTEActivationTableKind kind, cudaStream_t stream);
+
+/*! \brief Whether an activation of input written to output can be read from a table: BF16
+ *         inputs quantized to MXFP8.
+ */
+inline bool can_use_activation_table(const NVTETensor input, const NVTETensor output) {
+  return nvte_tensor_type(input) == kNVTEBFloat16 &&
+         nvte_tensor_scaling_mode(output) == NVTE_MXFP8_1D_SCALING;
+}
+
+/*! \brief An activation entry point that reads its table when it can. */
+template <NVTEActivationTableKind kKind,
+          void (*act_func_v2)(const NVTETensor, NVTETensor, const NVTEQuantizationConfig,
+                              cudaStream_t)>
+void activation_with_table(const NVTETensor input, NVTETensor output, cudaStream_t stream) {
+  QuantizationConfigWrapper config;
+  if (can_use_activation_table(input, output)) {
+    config.set_activation_table(activation_table(kKind, stream));
+  }
+  act_func_v2(input, output, config, stream);
+}
+
+/*! \brief An activation-gradient entry point that reads its table when it can. */
+template <NVTEActivationTableKind kKind,
+          void (*dact_func_v2)(const NVTETensor, const NVTETensor, NVTETensor,
+                               const NVTEQuantizationConfig, cudaStream_t)>
+void dactivation_with_table(const NVTETensor grad, const NVTETensor input, NVTETensor output,
+                            cudaStream_t stream) {
+  QuantizationConfigWrapper config;
+  if (can_use_activation_table(input, output)) {
+    config.set_activation_table(activation_table(kKind, stream));
+  }
+  dact_func_v2(grad, input, output, config, stream);
+}
+
+/*! \brief A fused dbias + activation-gradient entry point that reads its table when it can. */
+template <NVTEActivationTableKind kKind,
+          void (*dact_dbias_func_v2)(const NVTETensor, const NVTETensor, NVTETensor, NVTETensor,
+                                     NVTETensor, const NVTEQuantizationConfig, cudaStream_t)>
+void dbias_dactivation_with_table(const NVTETensor grad, const NVTETensor input, NVTETensor output,
+                                  NVTETensor dbias, NVTETensor workspace, cudaStream_t stream) {
+  QuantizationConfigWrapper config;
+  if (can_use_activation_table(input, output)) {
+    config.set_activation_table(activation_table(kKind, stream));
+  }
+  dact_dbias_func_v2(grad, input, output, dbias, workspace, config, stream);
+}
+
 }  // namespace transformer_engine::pytorch
 
 namespace std {

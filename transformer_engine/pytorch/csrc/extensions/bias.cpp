@@ -266,12 +266,18 @@ std::vector<py::object> dact_dbias(
 
 std::vector<py::object> dbias_dgelu(const at::Tensor &grad_output, const at::Tensor &act_input,
                                     py::handle quantizer) {
-  return dact_dbias(nvte_quantize_dbias_dgelu, nvte_dgelu, grad_output, act_input, quantizer);
+  return dact_dbias(
+      dbias_dactivation_with_table<kNVTEActivationTableDgelu, nvte_quantize_dbias_dgelu_v2>,
+      dactivation_with_table<kNVTEActivationTableDgelu, nvte_dgelu_v2>, grad_output, act_input,
+      quantizer);
 }
 
 std::vector<py::object> dbias_dsilu(const at::Tensor &grad_output, const at::Tensor &act_input,
                                     py::handle quantizer) {
-  return dact_dbias(nvte_quantize_dbias_dsilu, nvte_dsilu, grad_output, act_input, quantizer);
+  return dact_dbias(
+      dbias_dactivation_with_table<kNVTEActivationTableDsilu, nvte_quantize_dbias_dsilu_v2>,
+      dactivation_with_table<kNVTEActivationTableDsilu, nvte_dsilu_v2>, grad_output, act_input,
+      quantizer);
 }
 
 std::vector<py::object> dbias_drelu(const at::Tensor &grad_output, const at::Tensor &act_input,
