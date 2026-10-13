@@ -1104,8 +1104,7 @@ def fuse_grouped_mlp_ops(
                 matches_pattern = False
 
         if matches_pattern and (
-            window[0].split_alignment % 256 != 0
-            or window[2].split_alignment % 256 != 0
+            window[0].split_alignment % 256 != 0 or window[2].split_alignment % 256 != 0
         ):
             warnings.warn(
                 "Grouped MLP fusion was skipped because both GroupedLinear operations "
