@@ -10,10 +10,10 @@ import torch
 
 from transformer_engine.pytorch.module import Linear, RMSNorm
 
-from .compressor import _Compressor
+from .compressor import Compressor
 from .dsa_cudnn import sparse_attention as _sparse_attention
 from .dsa_rope import _apply_rotary_query, _DSv4RotaryEmbedding, apply_rotary
-from .indexer import _Indexer
+from .indexer import Indexer
 
 __all__ = ["DSv4Attention"]
 
@@ -139,7 +139,7 @@ class DSv4Attention(torch.nn.Module):
         if not _fuse_projections:
             self.kv_proj = Linear(hidden_size, head_dim, **kw)
         self.kv_norm = RMSNorm(head_dim, eps=rms_norm_eps, device=device, dtype=params_dtype)
-        self.compressor = _Compressor(
+        self.compressor = Compressor(
             hidden_size,
             head_dim,
             compression_ratio,
@@ -150,7 +150,7 @@ class DSv4Attention(torch.nn.Module):
             fused=_fuse_projections,
         )
         if is_csa:
-            self.indexer = _Indexer(
+            self.indexer = Indexer(
                 hidden_size,
                 q_lora_rank,
                 self.index_head_dim,

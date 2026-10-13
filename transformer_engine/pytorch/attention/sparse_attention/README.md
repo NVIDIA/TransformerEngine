@@ -2,25 +2,25 @@
 
 `DSv4Attention` is an experimental API in TE that composes cuDNN compression,
 top-k indexing, and sparse attention kernels with Megatron's DSA RoPE kernels
-through helper submodules such as Compressor (`_Compressor`) and Indexer
-(`_Indexer`). cuDNN supplies compression and sparse attention backward kernels
+through reusable building blocks such as `Compressor` and `Indexer`. cuDNN
+supplies compression and sparse attention backward kernels
 and separate indexer-loss score/backward primitives; top-k selection itself is
 discrete. The layer maps hidden states to hidden states with the same shape.
-The helper submodules are internal; `dsa_cudnn` exposes the underlying
-operations for models that supply their own prepared tensors.
+`Compressor` and `Indexer` can also be composed into other attention layers;
+`dsa_cudnn` exposes the underlying operations for prepared tensors.
 
 ## Module hierarchy
 
 ```text
 DSv4Attention
 ├── TE query/local-KV projections + norms
-├── _Compressor
+├── Compressor
 │   ├── TE KV/gate projections + learned position bias
 │   ├── dsa_cudnn.compress -> cuDNN compressor
 │   └── TE RMSNorm
-├── _Indexer (CSA only)
+├── Indexer (CSA only)
 │   ├── TE index-query/head-weight projections
-│   ├── own _Compressor (index keys)
+│   ├── own Compressor (index keys)
 │   ├── dsa_rope.apply_rotary (query + index keys)
 │   └── dsa_cudnn.select_blocks -> cuDNN score + top-k
 ├── dsa_rope embeddings + rotary application

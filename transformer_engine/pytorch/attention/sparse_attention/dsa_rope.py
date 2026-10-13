@@ -89,7 +89,9 @@ def _can_use_triton(x, cos, sin, cu_seqlens):
         and x.ndim in (3, 4)
         and x.stride(-1) == 1
         and cos.shape == sin.shape
-        and cos.shape[-1] % 4 == 0
+        and cos.shape[-1] >= 4
+        # The Triton kernels use tl.arange over half the rotary width.
+        and cos.shape[-1] & (cos.shape[-1] - 1) == 0
         and not cos.requires_grad
         and not sin.requires_grad
         and _triton_rope_module() is not None

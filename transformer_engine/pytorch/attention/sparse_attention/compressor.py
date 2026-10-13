@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Learned DSv4 projections and norm around cuDNN compression."""
+"""Learned projections and normalization around cuDNN compression."""
 
 import torch
 
@@ -11,8 +11,13 @@ from transformer_engine.pytorch.module import Linear, RMSNorm
 from .dsa_cudnn import compress
 
 
-class _Compressor(torch.nn.Module):
-    """Project KV/gates and normalize the cuDNN-pooled rows."""
+class Compressor(torch.nn.Module):
+    """Project KV/gates and normalize the cuDNN-pooled rows.
+
+    Accept batch-major ``[B,S,D]`` or packed ``[T,D]`` hidden states with
+    token/compressed prefixes. Return ``[total_comp,width]`` rows before RoPE,
+    plus projected head weights when ``weight_width`` is nonzero in fused mode.
+    """
 
     def __init__(
         self,

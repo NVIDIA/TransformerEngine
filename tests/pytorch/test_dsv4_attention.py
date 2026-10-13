@@ -2,12 +2,14 @@
 #
 # See LICENSE for license information.
 
-"""DSv4 core against a dense oracle, including packed sequence boundaries."""
+"""DSA primitives and DSv4 layer wiring, including packed sequence boundaries."""
 
 import pytest
 import torch
 
 from transformer_engine.pytorch.attention.sparse_attention import (
+    Compressor,
+    Indexer,
     compressor,
     dsa_cudnn,
     dsa_rope,
@@ -17,7 +19,7 @@ from transformer_engine.pytorch.attention.sparse_attention import (
 
 @pytest.mark.parametrize("variant", ["hca", "csa"])
 @pytest.mark.parametrize("head_dim", [512, 576])
-def test_dsv4_forward_backward(variant, head_dim):
+def test_dsa_sparse_attention_forward_backward(variant, head_dim):
     if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (10, 0):
         pytest.skip("DSv4 requires SM100")
     cudnn = pytest.importorskip("cudnn")
@@ -140,7 +142,7 @@ def test_dsv4_attention_rejects_fp8(monkeypatch):
 
 
 @pytest.mark.parametrize("heads", [1, 64])
-def test_dsv4_triton_rope_batched_forward_backward(monkeypatch, heads):
+def test_dsa_triton_rope_batched_forward_backward(monkeypatch, heads):
     """The packed Triton kernels must reset positions at each BSHD sequence."""
     if not torch.cuda.is_available():
         pytest.skip("Triton DSv4 RoPE requires CUDA")
@@ -184,6 +186,157 @@ def test_dsv4_triton_rope_batched_forward_backward(monkeypatch, heads):
     torch.testing.assert_close(query_grad, reference_grad, atol=0.03125, rtol=0.002)
 
 
+def test_dsa_rope_non_power_of_two_forward_backward(monkeypatch):
+    """An accepted width of 96 must fall back for both rotary entry points."""
+    if not torch.cuda.is_available():
+        pytest.skip("DSv4 rotary dispatch requires CUDA")
+    if dsa_rope._triton_rope_module() is None:
+        pytest.skip("Triton DSL is unavailable")
+    torch.manual_seed(41)
+    x = torch.randn(17, 2, 128, device="cuda", dtype=torch.bfloat16)
+    (cos, sin), _ = dsa_rope.rotary_embeddings(17, 4, 96, 160000.0, x.device)
+    cu = torch.tensor([0, 17], device=x.device, dtype=torch.int32)
+    monkeypatch.setattr(
+        dsa_rope, "_launch_triton", lambda *_: pytest.fail("Width 96 reached Triton")
+    )
+    assert not dsa_rope._can_use_triton(x, cos, sin, cu)
+    gradient = torch.randn_like(x)
+    reference_input = x.detach().requires_grad_()
+    reference = dsa_rope._apply_rotary_eager(reference_input, cos, sin, cu)
+    reference_grad = torch.autograd.grad(reference, reference_input, gradient)[0]
+    for apply in (dsa_rope.apply_rotary, dsa_rope._apply_rotary_query):
+        candidate_input = x.detach().requires_grad_()
+        candidate = apply(candidate_input, cos, sin, cu)
+        candidate_grad = torch.autograd.grad(candidate, candidate_input, gradient)[0]
+        torch.testing.assert_close(candidate, reference)
+        torch.testing.assert_close(candidate_grad, reference_grad)
+
+
+@pytest.mark.parametrize("index_heads", [32, 64])
+def test_dsa_indexer_backward(index_heads):
+    """Train the standalone Indexer and its Compressor against a dense KL reference."""
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (10, 0):
+        pytest.skip("DSv4 requires SM100")
+    cudnn = pytest.importorskip("cudnn")
+    if not all(
+        hasattr(getattr(cudnn, "DSA", None), op)
+        for op in (
+            "dense_indexer_score_recompute_wrapper",
+            "dense_attn_score_recompute_wrapper",
+            "dense_indexer_backward_wrapper",
+        )
+    ):
+        pytest.skip("DSv4 requires cuDNN dense indexer training APIs")
+    torch.manual_seed(43)
+    seq, ratio, window = 256, 4, 32
+    layer = Indexer(32, 16, 128, index_heads, 8, ratio, 1e-6, "cuda", torch.bfloat16, fused=True)
+    x = torch.randn(1, seq, 32, device="cuda", dtype=torch.bfloat16)
+    q_residual = torch.randn(1, seq, 16, device="cuda", dtype=torch.bfloat16)
+    cu = torch.tensor([0, seq], device=x.device, dtype=torch.int32)
+    cu_comp = torch.tensor([0, seq // ratio], device=x.device, dtype=torch.int32)
+    token_rope, compressed_rope = dsa_rope.rotary_embeddings(seq, ratio, 64, 160000.0, x.device)
+    ids, query, key, weights = layer(
+        x,
+        q_residual,
+        cu,
+        cu_comp,
+        token_rope,
+        compressed_rope,
+        total_comp=seq // ratio,
+        max_seqlen=seq,
+        return_context=True,
+    )
+    assert ids.shape == (seq, 8)
+    qi, ki, wi = (t.unsqueeze(0) for t in (query, key, weights))
+    qa = (torch.randn(1, seq, 64, 512, device=x.device, dtype=torch.bfloat16) * 0.1).float()
+    kc = (torch.randn(1, seq // ratio, 512, device=x.device, dtype=torch.bfloat16) * 0.1).float()
+    local_kv = (torch.randn(seq, 512, device=x.device, dtype=torch.bfloat16) * 0.1).float()
+    sink = torch.randn(64, device=x.device)
+    pos = torch.arange(seq, device=x.device)
+    valid = (torch.arange(seq // ratio, device=x.device) + 1) * ratio <= pos[:, None] + 1
+    local_mask = (pos[None, :] <= pos[:, None]) & (pos[None, :] > pos[:, None] - window)
+    scale_i, scale_a = (index_heads * 128) ** -0.5, 512**-0.5
+    comp_logits = (torch.einsum("bshd,bkd->bshk", qa, kc) * scale_a).masked_fill(
+        ~valid[None, :, None, :], -torch.inf
+    )
+    local_logits = (torch.einsum("bshd,kd->bshk", qa, local_kv) * scale_a).masked_fill(
+        ~local_mask[None, :, None, :], -torch.inf
+    )
+    # The dense teacher denominator includes local keys, ALL compressed keys, and sink.
+    full_lse = torch.logaddexp(
+        torch.logaddexp(local_logits.logsumexp(-1), comp_logits.logsumexp(-1)),
+        sink[None, None, :],
+    ).contiguous()
+    target = (comp_logits - full_lse[..., None]).exp().sum(2)
+    target = target / target.sum(-1, keepdim=True).clamp_min(1e-30)
+    index_score, attn_score = dsa_cudnn.dense_indexer_loss_scores(
+        qi,
+        ki,
+        wi,
+        qa.to(torch.bfloat16),
+        kc.to(torch.bfloat16),
+        full_lse,
+        ratio=ratio,
+        index_scale=scale_i,
+        attention_scale=scale_a,
+    )
+    actual_target = attn_score["out"] / attn_score["denom"].unsqueeze(-1).clamp_min(1e-30)
+    # Masked score-buffer entries are not valid teacher probabilities.
+    actual_target = actual_target.masked_fill(~valid[None], 0)
+    torch.testing.assert_close(actual_target, target, atol=2e-4, rtol=2e-2)
+
+    qr, kr, wr = (t.detach().float().requires_grad_() for t in (qi, ki, wi))
+    logits = (torch.einsum("bshd,bkd->bshk", qr, kr).relu() * wr[..., None]).sum(2) * scale_i
+    logits = logits.masked_fill(~valid[None], -torch.inf)
+    logits = torch.where(valid.any(-1)[None, :, None], logits, 0)
+    log_prob = logits.log_softmax(-1)
+    actual_log_prob = index_score["out"] - index_score["denom"].unsqueeze(-1)
+    torch.testing.assert_close(actual_log_prob[0][valid], log_prob[0][valid], atol=2e-3, rtol=2e-2)
+    coefficient, upstream = 0.01, 0.7
+    loss = (
+        coefficient * upstream * (target * (target.clamp_min(1e-30).log() - log_prob)).sum() / seq
+    )
+    reference_grads = torch.autograd.grad(loss, (qr, kr, wr))
+    actual_grads = dsa_cudnn.dense_indexer_loss_backward(
+        qi,
+        ki,
+        wi,
+        index_score,
+        attn_score,
+        torch.tensor(upstream, device=x.device),
+        ratio=ratio,
+        index_scale=scale_i,
+        loss_coeff=coefficient,
+    )
+    for actual, expected in zip(actual_grads, reference_grads):
+        assert actual.shape == expected.shape and torch.isfinite(actual).all()
+        error = (actual.float() - expected).norm() / expected.norm().clamp_min(1e-8)
+        assert error < 0.03, error.item()
+    parameters = tuple(layer.parameters())
+    candidate = torch.autograd.grad((qi, ki, wi), parameters, actual_grads)
+    # TE Linear releases its backward workspace; compare using a fresh forward.
+    _, ref_q, ref_k, ref_w = layer(
+        x,
+        q_residual,
+        cu,
+        cu_comp,
+        token_rope,
+        compressed_rope,
+        total_comp=seq // ratio,
+        max_seqlen=seq,
+        return_context=True,
+    )
+    reference = torch.autograd.grad(
+        (ref_q, ref_k, ref_w),
+        parameters,
+        tuple(g[0].to(t.dtype) for g, t in zip(reference_grads, (ref_q, ref_k, ref_w))),
+    )
+    for actual, expected in zip(candidate, reference):
+        assert torch.isfinite(actual).all() and actual.float().norm() > 0
+        error = (actual.float() - expected.float()).norm() / expected.float().norm().clamp_min(1e-8)
+        assert error < 0.03, error.item()
+
+
 def test_dsv4_thd_compressed_prefixes():
     """Floor each sequence independently, retaining a safe allocation capacity."""
     for lengths, capacity in (([129, 257], 96), ([131, 257], 97)):
@@ -195,9 +348,9 @@ def test_dsv4_thd_compressed_prefixes():
         assert maximum == 257
 
 
-def test_dsv4_thd_compressor_clears_unused_capacity(monkeypatch):
+def test_dsa_compressor_clears_unused_capacity(monkeypatch):
     """Unused cuDNN output must not contaminate normalization weight gradients."""
-    layer = compressor._Compressor.__new__(compressor._Compressor)
+    layer = Compressor.__new__(Compressor)
     torch.nn.Module.__init__(layer)
     layer.kv_proj = layer.gate_proj = torch.nn.Identity()
     layer.kv_norm = torch.nn.RMSNorm(4)
@@ -254,7 +407,7 @@ def test_dsv4_thd_rejects_hidden_batch_axis_and_multi_sequence_context():
         )
 
 
-def test_dsv4_packed_rope_eager_forward_backward():
+def test_dsa_packed_rope_eager_forward_backward():
     """Reset per-sequence positions and safely rotate unused compressed capacity."""
     torch.manual_seed(31)
     cu = torch.tensor([0, 3, 8], dtype=torch.int32)
@@ -321,12 +474,19 @@ def test_dsv4_hybrid_thd_forward_backward(variant, ratio, lengths):
     layer.qkv_format = "sbhd" if variant == "hca" else "bshd"
     batch_axis = 1 if layer.qkv_format == "sbhd" else 0
     reference_input = x.detach().clone().requires_grad_()
-    expected = torch.cat(
-        [
-            layer(part.unsqueeze(batch_axis)).squeeze(batch_axis)
-            for part in reference_input.split(lengths)
-        ]
-    )
+    parts = []
+    for part in reference_input.split(lengths):
+        if variant == "csa":
+            output, context = layer(part.unsqueeze(batch_axis), return_indexer_context=True)
+            assert all(context[name].requires_grad for name in ("index_q", "index_k", "index_w"))
+            assert not any(
+                context[name].requires_grad
+                for name in ("attn_q", "local_kv", "compressed_kv", "sink")
+            )
+        else:
+            output = layer(part.unsqueeze(batch_axis))
+        parts.append(output.squeeze(batch_axis))
+    expected = torch.cat(parts)
     expected.backward(gradient)
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
     for packed_grad, reference_grad in [(x.grad, reference_input.grad)] + [

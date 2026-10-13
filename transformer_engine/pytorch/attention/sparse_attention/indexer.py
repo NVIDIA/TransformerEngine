@@ -2,19 +2,24 @@
 #
 # See LICENSE for license information.
 
-"""CSA index projections, compression, and cuDNN block selection."""
+"""Index projections, compression, and cuDNN block selection."""
 
 import torch
 
 from transformer_engine.pytorch.module import Linear
 
-from .compressor import _Compressor
+from .compressor import Compressor
 from .dsa_cudnn import select_blocks
 from .dsa_rope import apply_rotary
 
 
-class _Indexer(torch.nn.Module):
-    """Select compressed rows using the indexer's own Q/K/weight projections."""
+class Indexer(torch.nn.Module):
+    """Select compressed rows using the indexer's own Q/K/weight projections.
+
+    Accept batch-major or packed hidden states and query residuals, sequence
+    prefixes, and caller-provided RoPE tables. Return global compressed-row IDs;
+    ``return_context=True`` also returns live Q/K/head weights for a separate loss.
+    """
 
     def __init__(
         self,
@@ -31,7 +36,7 @@ class _Indexer(torch.nn.Module):
         fused,
     ):
         super().__init__()
-        self.compressor = _Compressor(
+        self.compressor = Compressor(
             hidden_size,
             head_dim,
             ratio,

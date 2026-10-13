@@ -9,10 +9,14 @@ kernels load on execution. Add future variants as sibling modules.
 """
 
 from . import dsa_cudnn, dsv4_attention
+from .compressor import Compressor
 from .dsv4_attention import DSv4Attention
+from .indexer import Indexer
 
 __all__ = [
     "dsa_cudnn",
     "dsv4_attention",
     "DSv4Attention",
+    "Compressor",
+    "Indexer",
 ]
