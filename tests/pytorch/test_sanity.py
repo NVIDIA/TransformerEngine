@@ -1205,6 +1205,33 @@ def _wgrad_fusion_module(module: str, hidden: int, dtype: torch.dtype):
     return block, block
 
 
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Needs two GPUs.")
+# GroupedLinear is left out: its multi-stream cuBLAS GEMM keeps the streams of the first device
+# it runs on, so its forward pass fails on a second device before any weight gradient.
+@pytest.mark.parametrize("module", ["Linear", "LayerNormLinear", "LayerNormMLP", "ops.Linear"])
+@pytest.mark.parametrize("zero_out_wgrad", all_boolean)
+def test_sanity_dummy_wgrad_device(module, zero_out_wgrad):
+    """The cached dummy weight gradient is on the weight's device when the same module shape
+    runs backward on one GPU and then on another."""
+    dtype, hidden, tokens = torch.bfloat16, 128, 64
+    for device in (0, 1):
+        with torch.cuda.device(device):
+            block, forward = _wgrad_fusion_module(module, hidden, dtype)
+            weights = [
+                p
+                for name, p in block.named_parameters()
+                if "weight" in name and "layer_norm" not in name
+            ]
+            for p in weights:
+                p.main_grad = torch.zeros(p.shape, dtype=torch.float32, device="cuda")
+                p.grad_added_to_main_grad = False
+                p.zero_out_wgrad = zero_out_wgrad
+            x = torch.randn(tokens, hidden, dtype=dtype, device="cuda")
+            forward(x).backward(torch.randn(tokens, hidden, dtype=dtype, device="cuda"))
+            for p in weights:
+                assert p.grad is not None and p.grad.device == p.device
+
+
 @pytest.mark.parametrize(
     "module", ["Linear", "LayerNormLinear", "LayerNormMLP", "GroupedLinear", "ops.Linear"]
 )

@@ -143,15 +143,18 @@ def get_dummy_wgrad(
     once in one backward pass.
     """
 
+    # The dummy goes on the current device (the one the backward pass runs on), and the cache
+    # is keyed by it so that a dummy is never returned for a weight on another device.
+    device = torch.device("cuda", torch.cuda.current_device())
     if zero_tensor and not zero:
-        return torch._efficientzerotensor(shape, dtype=dtype, device="cuda")
-    key = (*shape, dtype)
+        return torch._efficientzerotensor(shape, dtype=dtype, device=device)
+    key = (*shape, dtype, device)
     global _dummy_wgrads
     if key not in _dummy_wgrads:
         _dummy_wgrads[key] = torch.empty(
             shape,
             dtype=dtype,
-            device="cuda",
+            device=device,
             requires_grad=False,
         )
     if zero:
