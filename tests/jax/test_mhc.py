@@ -396,6 +396,31 @@ class TestMHCOps:
         for name, grad, ref_grad in zip(names, grads, ref_grads):
             assert_allclose(grad, ref_grad, err_msg=name, **tols)
 
+    @pytest_parametrize_wrapper("b,s,C", [(8, 128, 1024)])
+    def test_mhc_expand_combine_mixed_f_dtype(self, b, s, C):
+        """A fp32 branch output and bias with bf16 x compile and get fp32 gradients."""
+        tols = get_tols(jnp.bfloat16)
+        n = N_STREAMS
+        keys = jax.random.split(jax.random.PRNGKey(11), 5)
+        f = _normal(keys[0], (s, b, C), jnp.float32)
+        bias = _normal(keys[1], (C,), jnp.float32)
+        h_post = _normal(keys[2], (s, b, n), jnp.bfloat16)
+        x = _normal(keys[3], (s, b, C, n), jnp.bfloat16)
+        h_res = _normal(keys[4], (s, b, n, n), jnp.bfloat16)
+
+        fused = lambda *a: mhc_expand_combine(*a, use_tf32=False)
+        args = (f, bias, h_post, x, h_res)
+        names = ("f", "bias", "h_post", "x", "h_res")
+        grads = jax.jit(jax.grad(lambda *a: _sum_loss(fused(*a)), tuple(range(5))))(*args)
+        # The kernel computes in x's dtype, so grad_h_post sees f and bias rounded to bf16.
+        ref_args = (f.astype(jnp.bfloat16), bias.astype(jnp.bfloat16)) + args[2:]
+        ref_grads = jax.jit(
+            jax.grad(lambda *a: _sum_loss(mhc_expand_combine_ref(*a)), tuple(range(5)))
+        )(*ref_args)
+        for name, arg, grad, ref_grad in zip(names, args, grads, ref_grads):
+            assert grad.dtype == arg.dtype, name
+            assert_allclose(grad, ref_grad, err_msg=name, **tols)
+
 
 NORM_EPS = 1e-5
 PRE_EPS = 1e-6

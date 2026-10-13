@@ -1755,6 +1755,8 @@ def mhc_expand_combine_bwd(
     is returned. Its previous contents are overwritten, not accumulated into: this is the first
     backward of the mHC chain, so it initializes the buffer that `mhc_aggregate_bwd` and
     `mhc_projection_bwd` then accumulate into.
+    `f`, `bias` and `grad_out` are cast to x's dtype for the kernel, since its dot products need
+    matching operand dtypes; grad_f and grad_bias are returned in the dtypes of `f` and `bias`.
     Returns (grad_f, grad_bias or None, grad_h_post, grad_x, grad_h_res).
     """
     assert x.shape[-1] == 4, "Only n=4 is supported in this implementation"
@@ -1762,9 +1764,9 @@ def mhc_expand_combine_bwd(
     has_bias = bias is not None
     grad_f, grad_bias, grad_h_post, grad_x, grad_h_res = (
         MHCExpandCombineBwdPrimitive.outer_primitive.bind(
-            grad_out,
-            f,
-            bias if has_bias else _unused(f.dtype),
+            grad_out.astype(x.dtype),
+            f.astype(x.dtype),
+            bias.astype(x.dtype) if has_bias else _unused(x.dtype),
             h_post,
             x,
             h_res,
@@ -1775,5 +1777,6 @@ def mhc_expand_combine_bwd(
             deterministic=ENFORCE_DETERMINISTIC,
         )
     )
+    grad_f = grad_f.astype(f.dtype)
     grad_bias = grad_bias.astype(bias.dtype) if has_bias else None
     return grad_f, grad_bias, grad_h_post, grad_x, grad_h_res
