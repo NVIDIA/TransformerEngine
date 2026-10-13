@@ -498,7 +498,10 @@ def _finish_wgrad(weight, main_grad, wgrad, fuse_wgrad_accumulation):
         return None
     weight.grad_added_to_main_grad = True
     return get_dummy_wgrad(
-        list(main_grad.shape), weight.dtype, zero=getattr(weight, "zero_out_wgrad", False)
+        list(main_grad.shape),
+        weight.dtype,
+        zero=getattr(weight, "zero_out_wgrad", False),
+        zero_tensor=getattr(weight, "zero_tensor_dummy_wgrad", False),
     )
 
 
