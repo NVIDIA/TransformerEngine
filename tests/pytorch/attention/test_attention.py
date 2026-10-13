@@ -1397,6 +1397,8 @@ def test_dpa_mla_should_pad(dtype, model_configs, model):
     backend. Otherwise padding should be avoided since it becomes redundant.
     """
     has_packed_qkv = False
+    # `None` to computes each padding decision from scratch.
+    backend_selection_params = None
 
     def make_attn_params(head_dim_qk, head_dim_v):
         return dpa_utils.AttentionParams(
@@ -1432,23 +1434,23 @@ def test_dpa_mla_should_pad(dtype, model_configs, model):
         ):
             # FA2 needs padding.
             assert should_pad_qkv_head_dim(
-                native_attn_params, has_packed_qkv
+                native_attn_params, has_packed_qkv, backend_selection_params
             ), "did not suggest padding when required for functioning kernel"
         elif native_use_unfused_attention and (
             padded_use_flash_attention or padded_use_fused_attention
         ):
             # Native is unfused and a fused backend is available via padding.
             assert should_pad_qkv_head_dim(
-                native_attn_params, has_packed_qkv
+                native_attn_params, has_packed_qkv, backend_selection_params
             ), "did not suggest padding when faster kernel was available"
         else:
             # Native is already fused, so we don't want to pad.
             assert not should_pad_qkv_head_dim(
-                native_attn_params, has_packed_qkv
+                native_attn_params, has_packed_qkv, backend_selection_params
             ), "suggested padding when no faster kernel was available"
     else:
         assert not should_pad_qkv_head_dim(
-            native_attn_params, has_packed_qkv
+            native_attn_params, has_packed_qkv, backend_selection_params
         ), "suggested padding already equal-sized QK/V"
 
 
