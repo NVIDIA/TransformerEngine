@@ -377,6 +377,18 @@ def compile_triton(
     return kernel
 
 
+class _AbstractArray:
+    """Stand-in for an array argument passed to an autotuner's `early_config_prune`."""
+
+    def __init__(self, aval):
+        self.shape = tuple(aval.shape)
+        self.dtype = jnp.dtype(aval.dtype)
+
+    def element_size(self):
+        """Bytes per element, matching `torch.Tensor.element_size`."""
+        return self.dtype.itemsize
+
+
 def triton_call_lowering(
     ctx,
     kernel_fn: Callable,
@@ -407,6 +419,14 @@ def triton_call_lowering(
         constexprs: Compile-time constants for the kernel. This includes both
                     tl.constexpr arguments AND scalar runtime arguments (like
                     num_tokens, strides) that are known at JAX trace time.
+                    Autotuned config kwargs need not be included.
+
+    For autotuned kernels, ``prune_configs_by={"early_config_prune": ...}`` is
+    applied before compiling the configs. The pruner receives ``constexprs`` and,
+    for array arguments, stand-ins exposing ``shape``, ``dtype`` and
+    ``element_size()``. ``perf_model``, ``top_k``, ``reset_to_zero`` and
+    ``restore_value`` are not supported; use ``input_output_aliases`` on
+    pre-initialized buffers instead of ``reset_to_zero``/``restore_value``.
 
     Returns:
         MLIR lowering result
@@ -431,16 +451,30 @@ def triton_call_lowering(
     # Get arg names from kernel function
     if isinstance(kernel_fn, autotuner.Autotuner):
         arg_names = kernel_fn.fn.arg_names
+        configs = list(kernel_fn.configs)
     else:
         arg_names = kernel_fn.arg_names
+        configs = []
 
     # Build signature for tensor arguments only (inputs + outputs)
     # Scalar arguments should be passed via constexprs and will be
-    # specialized into the kernel at compile time
+    # specialized into the kernel at compile time. Autotuned config kwargs
+    # (e.g. BLOCK_SIZE) are also constexprs, supplied per config below.
     all_avals = list(ctx.avals_in) + list(ctx.avals_out)
     constexpr_names = set(constexprs.keys()) if constexprs else set()
+    constexpr_names.update(name for config in configs for name in config.kwargs)
     tensor_arg_names = [n for n in arg_names if n not in constexpr_names]
     signature = {n: get_triton_dtype(a) for n, a in zip(tensor_arg_names, all_avals)}
+
+    # Apply the autotuner's `early_config_prune`, as Triton does at launch. Array
+    # arguments are only known abstractly here, so the pruner receives stand-ins
+    # exposing `shape`, `dtype` and `element_size()`.
+    early_config_prune = getattr(kernel_fn, "early_config_prune", None)
+    if configs and early_config_prune is not None:
+        named_args = {n: _AbstractArray(a) for n, a in zip(tensor_arg_names, all_avals)}
+        named_args.update(constexprs or {})
+        configs = list(early_config_prune(configs, named_args))
+        assert configs, f"early_config_prune returned no configs for {arg_names}"
 
     assert callable(grid) or isinstance(grid, tuple), (
         "Argument 'grid' must be a tuple or a callable but received: "
@@ -511,7 +545,7 @@ def triton_call_lowering(
         kernel_calls = []
         actual_kernel_fn = kernel_fn.fn
 
-        for config in kernel_fn.configs:
+        for config in configs:
             # Extract parameters from config
             config_num_warps = config.num_warps if config.num_warps is not None else num_warps
             config_num_stages = config.num_stages if config.num_stages is not None else num_stages
@@ -583,8 +617,8 @@ def triton_call_lowering(
         # it and use the first config's kwargs (user constexprs take priority via dict merge).
         if isinstance(kernel_fn, autotuner.Autotuner):
             actual_kernel_fn = kernel_fn.fn
-            if kernel_fn.configs:
-                first_cfg = kernel_fn.configs[0]
+            if configs:
+                first_cfg = configs[0]
                 # user constexprs override config kwargs (so stride / size scalars win)
                 kernel_constexprs = {**first_cfg.kwargs, **(constexprs or {})}
                 num_warps = first_cfg.num_warps if first_cfg.num_warps is not None else num_warps
