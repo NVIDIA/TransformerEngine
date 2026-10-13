@@ -418,7 +418,8 @@ class NVFP4Quantizer(Quantizer):
             amax_rowwise_shape = (math.prod(shape[:-1]),) if self.row_scaled_nvfp4 else (1,)
             specs["_amax_rowwise"] = (amax_rowwise_shape, torch.float32)
         if self.columnwise_usage:
-            specs["_amax_columnwise"] = ((1,), torch.float32)
+            amax_columnwise_shape = (shape[-1],) if self.row_scaled_nvfp4 else (1,)
+            specs["_amax_columnwise"] = (amax_columnwise_shape, torch.float32)
         return specs
 
 

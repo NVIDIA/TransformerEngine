@@ -2895,9 +2895,10 @@ def test_te_ops_linear_bias_compile(
 @pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4)
 @pytest.mark.parametrize("mode", ["rht", "1d", "2d", "row-scaled", "4over6"])
 @pytest.mark.parametrize("optimize_for_gemm", [False, True])
-def test_te_ops_bias_nvfp4_layout(mode, optimize_for_gemm, monkeypatch):
+@pytest.mark.parametrize("columnwise", [False, True])
+def test_te_ops_bias_nvfp4_layout(mode, optimize_for_gemm, columnwise, monkeypatch):
     quantizer = NVFP4Quantizer(
-        columnwise=mode != "row-scaled",
+        columnwise=columnwise,
         with_rht=mode == "rht",
         with_post_rht_amax=mode == "rht",
         with_2d_quantization=mode in ("2d", "4over6"),
@@ -2927,6 +2928,18 @@ def test_te_ops_bias_nvfp4_layout(mode, optimize_for_gemm, monkeypatch):
             assert dx._with_gemm_swizzled_scales == layout, (mode, disable_fusion, batch)
             torch.testing.assert_close(db, expected_db, atol=0, rtol=0)
             torch.testing.assert_close(dx.dequantize(), expected_dx.dequantize(), atol=0, rtol=0)
+            if columnwise:
+                torch.testing.assert_close(
+                    dx._columnwise_data, expected_dx._columnwise_data, atol=0, rtol=0
+                )
+            if mode == "row-scaled":
+                torch.testing.assert_close(
+                    dx._amax_rowwise, inp.abs().float().amax(1), atol=0, rtol=0
+                )
+                if columnwise:
+                    torch.testing.assert_close(
+                        dx._amax_columnwise, inp.abs().float().amax(0), atol=0, rtol=0
+                    )
             if i % 2 == 1:
                 assert len(graphs) == previous_graph_count
 
@@ -2943,6 +2956,10 @@ def test_te_ops_bias_nvfp4_layout(mode, optimize_for_gemm, monkeypatch):
         _, expected_dx = tex.bgrad_quantize(inp, quantizer)
         _, dx_spec = fake_bgrad(to_tensor_spec(inp), quantizer)
         assert dx_spec.with_gemm_swizzled_scales == expected_dx._with_gemm_swizzled_scales
+        for name, (inner_shape, inner_dtype) in dx_spec.quantizer.inner_tensor_specs(shape).items():
+            inner = getattr(expected_dx, name)
+            assert inner.shape == inner_shape
+            assert inner.dtype == inner_dtype
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
