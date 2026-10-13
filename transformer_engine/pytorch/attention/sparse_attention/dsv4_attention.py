@@ -11,7 +11,7 @@ import torch
 from transformer_engine.pytorch.module import Linear, RMSNorm
 
 from .compressor import _Compressor
-from .dsa_cudnn import attention as _attention
+from .dsa_cudnn import sparse_attention as _sparse_attention
 from .dsa_rope import _apply_rotary_query, _DSv4RotaryEmbedding, apply_rotary
 from .indexer import _Indexer
 
@@ -296,7 +296,7 @@ class DSv4Attention(torch.nn.Module):
             else:
                 indices = index_result
 
-        output = _attention(
+        output = _sparse_attention(
             q,
             local_kv,
             compressed_kv,

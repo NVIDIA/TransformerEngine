@@ -64,7 +64,7 @@ def test_dsv4_forward_backward(variant, head_dim):
             start += length
             comp_start += count
 
-    output = dsa_cudnn.attention(
+    output = dsa_cudnn.sparse_attention(
         *leaves,
         cu,
         cu_comp,
@@ -105,7 +105,7 @@ def test_dsv4_forward_backward(variant, head_dim):
 
 def test_dsv4_rejects_unsupported_metadata():
     with pytest.raises(ValueError, match="positive"):
-        dsa_cudnn.attention(
+        dsa_cudnn.sparse_attention(
             torch.empty(1, 64, 512),
             torch.empty(1, 512),
             torch.empty(1, 512),
@@ -116,7 +116,7 @@ def test_dsv4_rejects_unsupported_metadata():
             ratio=4,
         )
     with pytest.raises(ValueError, match="query"):
-        dsa_cudnn.attention(
+        dsa_cudnn.sparse_attention(
             torch.empty(1, 4, 512),
             None,
             None,

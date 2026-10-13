@@ -1,118 +1,48 @@
-# DSv4 model integration
+# DSv4 attention API
 
-For stateless, unpadded BF16 CSA/HCA layers, `DSv4Attention` owns the
-DSv4 projections, norms, RoPE, compressors, indexer, sink, and grouped output
-projection. Its default input and output are both `[sequence, batch, hidden_size]`:
+`DSv4Attention` is an experimental API in TE that composes cuDNN compression,
+top-k indexing, and sparse attention kernels with Megatron's DSA RoPE kernels
+through helper submodules such as Compressor (`_Compressor`) and Indexer
+(`_Indexer`). cuDNN supplies compression and sparse attention backward kernels
+and separate indexer-loss score/backward primitives; top-k selection itself is
+discrete. The layer maps hidden states to hidden states with the same shape.
+The helper submodules are internal; `dsa_cudnn` exposes the underlying
+operations for models that supply their own prepared tensors.
 
-```python
-import torch
-from transformer_engine.pytorch.attention.sparse_attention import DSv4Attention
-
-attention = DSv4Attention(
-    hidden_size=4096, q_lora_rank=1536,
-    layer_type="compressed_sparse_attention", head_dim=512, rope_head_dim=64,
-    sliding_window=128, compression_ratio=4, o_groups=8, o_lora_rank=1024,
-    index_n_heads=32, index_topk=32, max_seqlen=2048,
-    params_dtype=torch.bfloat16,
-)
-output = attention(hidden_states)  # [S, B, 4096] -> [S, B, 4096]
-```
+## Module hierarchy
 
 ```text
-SBHD ── TE query/local-KV projections + norms ───────────────┐
-  ├── TE compressor projections/norm ── cuDNN compression ──┼── cuDNN attention ── TE grouped output ── SBHD
-  └── (CSA) TE index projections/norm ── cuDNN compression ── cuDNN selection ──┘
+DSv4Attention
+├── TE query/local-KV projections + norms
+├── _Compressor
+│   ├── TE KV/gate projections + learned position bias
+│   ├── dsa_cudnn.compress -> cuDNN compressor
+│   └── TE RMSNorm
+├── _Indexer (CSA only)
+│   ├── TE index-query/head-weight projections
+│   ├── own _Compressor (index keys)
+│   ├── dsa_rope.apply_rotary (query + index keys)
+│   └── dsa_cudnn.select_blocks -> cuDNN score + top-k
+├── dsa_rope embeddings + rotary application
+├── dsa_cudnn.sparse_attention -> cuDNN sparse attention
+└── TE grouped output projection
 ```
 
-The high-level layer uses 64 heads of width 512 and defaults to plain interleaved
-partial RoPE with `rope_theta`; callers may inject a `rope` module returning token
-and compressed `(cos, sin)` pairs.
-The layout names follow TE MHA/DPA conventions; hidden states omit the head axis:
+## Inside DSv4Attention
 
-| `qkv_format` | Hidden input/output | Sequence lengths |
-| --- | --- | --- |
-| `sbhd` (default) | `[S,B,D]` | Equal within a dense batch |
-| `bshd` | `[B,S,D]` | Equal within a dense batch |
-| `thd` | `[T,D]` | May differ between packed sequences |
-
-For packed sequences, pass CUDA INT32 prefixes and a maximum sequence length:
-
-```python
-attention = DSv4Attention(..., qkv_format="thd")
-output = attention(hidden_states, cu_seqlens_q=cu, max_seqlen_q=max_length)
-# hidden_states/output: [T,D]; cu: [0, length_0, length_0 + length_1, ...]
-```
-
-Use `qkv_format="bshd"` for batch-major callers. The SBHD boundary conversion
-is a view when batch size is one; larger batches require a repack for the current
-cuDNN packed-row contract.
-It supports full sequences starting at position zero and at least one complete
-compression window. Dense layouts require equal unpadded lengths within a batch;
-THD supports unequal packed lengths. Sliding-only layers,
-cache/decode, padding, TP/CP, and FP8 remain outside this first pass. The
-indexer auxiliary loss and its attachment remain caller-owned; without one, the
-language-model loss does not train `indexer.q_proj` or the
-index-key/weight slices of `indexer.compressor.fused_proj`: top-k selection has no gradient.
-
-`dsa_rope.py` caches FP32 token frequencies (prebuilt when `max_seqlen` is
-provided) and shares window-start slices with the CSA `_Indexer`. The indexer
-owns its projections, index-key compressor, and block selection; neither helper
-changes the cuDNN call contracts.
-
-The default projection layout groups operations that read the same input: one
-TE `Linear` for query-down plus local KV, one for compressor KV plus gates, and
-in CSA one for index-compressor KV plus gates plus per-head weights. Each weight
-is contiguous; output slices feed the existing norms and cuDNN calls. The
-current wrapper validates 64 attention heads. `_fuse_projections=False` retains
-separate Linear calls as a comparison path.
-
-The cuDNN calls used by this layer are:
-
-| Stage | HCA | CSA |
-| --- | --- | --- |
-| Compressor forward/backward | Once | Twice: attention KV and index keys |
-| Fused indexer score + top-k | — | Once |
-| Sparse attention forward/backward | Once | Once |
-
-For CSA, `return_indexer_context=True` returns `(SBHD_output, context)` by default; HCA rejects
-it. The live BF16 index Q/K/W have shapes `[B*S,H,128]`, `[B*S/ratio,128]`, and
-`[B*S,H]`; selected IDs are `[B*S,topk]` global compressed-row IDs. Detached
-attention Q/local KV/compressed KV/sink have shapes `[B*S,64,512]`,
-`[B*S,512]`, `[B*S/ratio,512]`, and `[64]`. The opt-in context and dense
-helpers currently support B1 BF16; the helpers take BSHD views plus a
-caller-supplied FP32 full LSE `[1,S,64]` (local
-window, all eligible compressed keys, and sink). Score helpers are not autograd
-operations; the caller owns the mean-reduced scalar KL, coefficient, and loss
-attachment. Per-token reduction is untested.
-
-The lower-level `dsa_cudnn` calls expose compression and selection when
-a model owns its own projections, RMSNorm, RoPE, sink, and output projection.
-`dsa_cudnn.attention` provides the parameter-free prepared-tensor attention call:
-
-```text
-model projected KV + gates ── dsa_cudnn.compress ── model norm/RoPE ── compressed KV
-model index projections ───── dsa_cudnn.compress ── model norm/RoPE ── index key
-model index query + key + weights ───────────── dsa_cudnn.select_blocks ── IDs (CSA)
-model query + local KV + compressed KV + IDs ─ dsa_cudnn.attention ── head output
-```
-
-The model calls the same stages for HCA, omitting index compression and selection.
-It passes `indices=None` and `max_compressed_seqlen` to attention. CSA calls
-`compress` twice because its attention memory and index keys use separate
-projections. `select_blocks` returns global IDs into the packed **compressed**
-rows; the attention core maps them into its combined local/compressed KV space.
+The following sketch expands the cuDNN calls underneath Compressor, Indexer, and attention.
+Query and local KV are already projected, normalized, and rotated; tensors are contiguous CUDA BF16, with FP32 position bias/sink and CUDA INT32 sequence prefixes.
 
 ```python
 from transformer_engine.pytorch.attention.sparse_attention import (
     dsa_cudnn,
 )
 
-# Model code supplies BF16 projected tensors and applies its own norm/RoPE.
 pooled = dsa_cudnn.compress(
     kv, gates, position_bias.float(), cu, cu_comp,
     ratio=ratio, overlap=is_csa, total_comp=total_comp,
 )
-compressed_kv = model.finish_compressed(pooled)
+compressed_kv = ...  # Apply RMSNorm and RoPE to pooled rows.
 
 indices = None
 if is_csa:
@@ -128,29 +58,64 @@ if is_csa:
         scale=(index_head_dim * index_n_heads) ** -0.5,
     )
 
-output = dsa_cudnn.attention(
+output = dsa_cudnn.sparse_attention(
     query, local_kv, compressed_kv, sink.float(), cu, cu_comp,
     window_size=window_size, ratio=ratio, indices=indices,
     max_compressed_seqlen=max_compressed_seqlen if indices is None else None,
 )
-output = model.finish_output(output)
+output = ...  # Apply inverse RoPE and grouped output projection.
 ```
 
-This is a wiring sketch: `model.finish_*` are model-owned transforms, not TE APIs.
-The model must apply its own normalization and RoPE to `query`, `local_kv`,
-`compressed_kv`, `index_query`, and `index_key` before their TE calls. `cu` and
-`cu_comp` are CUDA INT32 packed-sequence prefixes; `total_comp` is the valid
-number of compressed rows. All Q/KV tensors passed to these stages are
-contiguous CUDA BF16. For CSA, pass the raw BF16 `index_weights` projection and
-put both positive index scaling factors in `scale` to preserve the FP32 score
-scale without an extra BF16 weight rounding. The cuDNN compressor pools with
-FP32 intermediates and one BF16 output cast, so keys can differ slightly from
-an eager model that rounds its softmax weights or products to BF16.
+`dsa_rope` supplies token/compressed-position embeddings and rotary application.
+A caller may override the default embeddings with a `rope` module returning
+token and compressed `(cos, sin)` pairs.
 
-The current core supports 64 query heads and head width 512 or 576 on SM100;
-the selector supports 32 or 64 index heads of width 128. It handles
-full-sequence prefill starting at position zero, with exact packed row counts
-in the prefix arrays. A model using segment-local compressed IDs must convert
-them to the global packed IDs expected here. Cache/decode, padded-capacity
-attention rows, context parallelism, and the separate indexer auxiliary loss
-are outside this API.
+## Usage
+
+```python
+import torch
+from transformer_engine.pytorch.attention.sparse_attention import DSv4Attention
+
+attention = DSv4Attention(
+    hidden_size=4096, q_lora_rank=1536,
+    layer_type="compressed_sparse_attention", head_dim=512, rope_head_dim=64,
+    sliding_window=128, compression_ratio=4, o_groups=8, o_lora_rank=1024,
+    index_n_heads=32, index_topk=32, max_seqlen=2048,
+    params_dtype=torch.bfloat16,
+)
+output = attention(hidden_states)  # [S, B, 4096] -> [S, B, 4096]
+```
+
+HCA uses non-overlapping compression and omits the Indexer:
+
+```python
+hca = DSv4Attention(
+    hidden_size=4096, q_lora_rank=1536,
+    layer_type="heavily_compressed_attention", head_dim=512, rope_head_dim=64,
+    sliding_window=128, compression_ratio=128, o_groups=8, o_lora_rank=1024,
+    max_seqlen=2048, params_dtype=torch.bfloat16,
+)
+output = hca(hidden_states)  # [S, B, 4096] -> [S, B, 4096]
+```
+
+Supported input tensor shapes are "batch-first" (shape `BSD`), "sequence-first" (shape `SBD`),
+and packed (shape `TD`). Packed calls require contiguous CUDA INT32
+`cu_seqlens_q [B+1]` (from zero to `T`) and `max_seqlen_q`:
+
+```python
+# Construct attention with qkv_format="thd".
+output = attention(hidden_states, cu_seqlens_q=cu, max_seqlen_q=max_length)
+```
+
+## Note on support
+
+The current layer supports full-sequence BF16 forward/backward on SM100,
+with 64 heads of width 512 and at least one complete compression window
+per sequence. Sequences start at position zero; cache/decode, padding,
+TP/SP/CP, FP8, and sliding-only layers are unsupported.
+
+Compression and attention support autograd; top-k selection is discrete.
+CSA's `return_indexer_context=True` returns `(output, context)` for a
+single-sequence, caller-owned indexer loss. Without that objective, the
+indexer is not trained by the attention output alone. Pre-attention
+normalization, residuals, and loss calculation remain model-owned.

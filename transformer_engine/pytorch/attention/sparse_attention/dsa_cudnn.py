@@ -18,7 +18,7 @@ from torch.autograd.function import once_differentiable
 __all__ = [
     "compress",
     "select_blocks",
-    "attention",
+    "sparse_attention",
     "dense_indexer_loss_scores",
     "dense_indexer_loss_backward",
 ]
@@ -402,7 +402,7 @@ class _SparseAttention(torch.autograd.Function):
         return result["dq"], result["dkv"], None, result["d_sink"], None
 
 
-def attention(
+def sparse_attention(
     query: torch.Tensor,
     local_kv: torch.Tensor,
     compressed_kv: torch.Tensor,
