@@ -117,7 +117,10 @@ def _launch_triton(packed, cos, sin, cu_seqlens, module, backward):
         else module._autotuned_mla_rope_fwd_inplace_kernel
     )
     heads, dim = packed.shape[-2:]
-    grid = lambda meta: (packed.shape[0], module.triton.cdiv(heads, meta["BLOCK_H"]))
+
+    def grid(meta):
+        return packed.shape[0], module.triton.cdiv(heads, meta["BLOCK_H"])
+
     kernel[grid](
         packed,
         cos,
@@ -145,6 +148,7 @@ class _TritonRotary(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x, cos, sin, cu_seqlens, module):
+        """Rotate a copy and save the frequency tables for backward."""
         # cuDNN attention saves its output for backward. Cloning also preserves
         # apply_rotary's established out-of-place contract for every call site.
         output = x.clone(memory_format=torch.contiguous_format)
@@ -157,6 +161,7 @@ class _TritonRotary(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
+        """Apply the backward rotation to a copy of the output gradient."""
         cos, sin, cu_seqlens = ctx.saved_tensors
         grad_input = grad_output.clone(memory_format=torch.contiguous_format)
         packed = grad_input.reshape(-1, ctx.shape[-2], ctx.shape[-1])
@@ -169,6 +174,7 @@ class _TritonQueryRotary(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, query, cos, sin, cu_seqlens, module):
+        """Rotate the fresh query and record its in-place mutation."""
         packed = query.reshape(-1, query.shape[-2], query.shape[-1])
         _launch_triton(packed, cos, sin, cu_seqlens, module, False)
         ctx.save_for_backward(cos, sin, cu_seqlens)
@@ -179,6 +185,7 @@ class _TritonQueryRotary(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
+        """Apply the backward rotation without mutating the output gradient."""
         cos, sin, cu_seqlens = ctx.saved_tensors
         grad_input = grad_output.clone(memory_format=torch.contiguous_format)
         packed = grad_input.reshape(-1, ctx.shape[-2], ctx.shape[-1])

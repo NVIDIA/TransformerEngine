@@ -26,9 +26,10 @@ def _compiled_q_rms_norm(q: torch.Tensor, eps: float) -> torch.Tensor:
 
 def _packed_prefixes(hidden_states, cu_seqlens, max_seqlen, ratio):
     """Lower packed metadata to complete-block prefixes and a safe row capacity."""
+    if not isinstance(cu_seqlens, torch.Tensor):
+        raise ValueError("THD requires contiguous INT32 cu_seqlens_q [B+1] on the input device.")
     if (
-        not isinstance(cu_seqlens, torch.Tensor)
-        or cu_seqlens.dtype != torch.int32
+        cu_seqlens.dtype != torch.int32
         or cu_seqlens.ndim != 1
         or cu_seqlens.numel() < 2
         or not cu_seqlens.is_contiguous()
