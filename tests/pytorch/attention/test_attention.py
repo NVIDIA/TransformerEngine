@@ -1390,7 +1390,8 @@ def _make_mla_attn_params(dtype, config, head_dim_qk, head_dim_v):
     """Build the attention params a THD MLA config would feed into backend selection."""
     return dpa_utils.AttentionParams(
         qkv_dtype=dtype,
-        qkv_layout="thd_thd_thd",
+        qkv_layout="sbhd_sbhd_sbhd" if config.attn_type == "self" else "bshd_bshd_bshd",
+        batch_size=config.batch_size,
         num_heads=config.num_heads,
         num_gqa_groups=config.num_gqa_groups,
         max_seqlen_q=config.max_seqlen_q,
