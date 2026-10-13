@@ -63,7 +63,6 @@ def world_group() -> torch.distributed.ProcessGroup:
         init_method=f"file://{os.environ['NVTE_TEST_RDZV_PATH']}",
         world_size=world_size,
         rank=rank,
-        device_id=torch.device("cuda", rank),
     )
     return group
 
