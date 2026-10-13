@@ -319,6 +319,44 @@ def test_weight_workspace_dtype_and_reuse():
     torch.testing.assert_close(out3._rowwise_storage.dequantize(), native_qdq(w), rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("mixed", [False, True])
+def test_hybrid_qdq_workspace_checks_child_dtype(mixed):
+    """An FP32 Hybrid must not accept an explicit FP32 request for an FP16 QDQ row."""
+    from transformer_engine.pytorch.module.base import quantize_weight
+    from transformer_engine.pytorch.quantization import QuantizerRole
+
+    factory = (
+        mxfp8_qdq_nvfp4_qdq_fwd_mxfp8_bwd_factory
+        if mixed
+        else nvfp4_qdq_weight_fwd_bf16_bwd_factory
+    )
+    q = factory(QuantizerRole(module_type="linear", tensor_type="weight"), backend="reference")
+    q.rowwise_quantizer.dtype = torch.float16
+    w = torch.randn(128, 256, device="cuda", dtype=torch.float32) * 0.023
+    cache = q.quantize(w)
+    assert cache._dtype == torch.float32
+    assert cache._rowwise_storage._hp_data.dtype == torch.float16
+    before = cache._rowwise_storage._hp_data.clone()
+    assert not q.is_compatible_output(cache, dtype=torch.float32)
+    with pytest.raises(ValueError, match="dtype does not match"):
+        q.quantize(w * 3, out=cache, dtype=torch.float32)
+    assert_bits(cache._rowwise_storage._hp_data, before)
+
+    out, new_cache = quantize_weight(
+        tensor=w * 3,
+        quantizer=q,
+        workspace=cache,
+        workspace_dtype=torch.float32,
+        cache=True,
+    )
+    assert new_cache is out and out is not cache
+    assert q.rowwise_quantizer.dtype == torch.float16
+    expected_row = native_qdq(w * 3)
+    assert_bits(out._rowwise_storage.dequantize(), expected_row)
+    expected_col = mx_value(expected_row, columnwise=True) if mixed else expected_row
+    assert_bits(out._columnwise_storage.dequantize(), expected_col)
+
+
 def test_noncontiguous_and_fast_math_fallback(monkeypatch):
     x = torch.randn(128, 256, device="cuda", dtype=torch.bfloat16).T
     q = NVFP4QDQQuantizer()
@@ -430,3 +468,66 @@ def test_qdq_columnwise_only_workspace_dtype(empty):
     # the FP32 source dtype. Preserve both behaviors and compare equal decodes.
     assert out._columnwise_storage._dtype == (torch.bfloat16 if empty else torch.float32)
     assert_bits(out._columnwise_storage.dequantize(dtype=torch.float32), expected)
+
+
+@pytest.mark.parametrize("mixed", [False, True])
+@pytest.mark.parametrize("rowwise", [False, True])
+@pytest.mark.parametrize(
+    "source_dtype,output_dtype",
+    [(torch.bfloat16, torch.float32), (torch.float16, torch.bfloat16)],
+)
+def test_qdq_columnwise_source_preserves_forward_precision(
+    mixed, rowwise, source_dtype, output_dtype
+):
+    """Column construction must not narrow a decoded forward value to the source dtype."""
+    from transformer_engine.pytorch.quantization import QuantizerRole
+
+    factory = (
+        mxfp8_qdq_nvfp4_qdq_fwd_mxfp8_bwd_factory
+        if mixed
+        else nvfp4_qdq_weight_fwd_bf16_bwd_factory
+    )
+    q = factory(QuantizerRole(module_type="linear", tensor_type="weight"), backend="reference")
+    q.set_usage(rowwise=rowwise, columnwise=True)
+    if source_dtype == torch.float16:
+        x = torch.full((128, 128), 65504.0, device="cuda", dtype=source_dtype)
+    else:
+        generator = torch.Generator(device="cuda").manual_seed(0)
+        x = (torch.randn(128, 128, device="cuda", generator=generator) * 0.023).to(source_dtype)
+    out = q.quantize(x, dtype=output_dtype)
+    expected_row = native_qdq(x, output_dtype)
+    assert torch.isfinite(expected_row).all()
+    if rowwise:
+        assert_bits(out._rowwise_storage.dequantize(), expected_row)
+    expected_col = mx_value(expected_row.float(), columnwise=True) if mixed else expected_row
+    assert_bits(out._columnwise_storage.dequantize(dtype=expected_col.dtype), expected_col)
+
+    # The same precision must be retained when reconstructing a dropped row.
+    if rowwise:
+        out.update_usage(rowwise_usage=False)
+        q.set_usage(rowwise=False, columnwise=True)
+    q.quantize(x, out=out, dtype=output_dtype)
+    assert_bits(out._columnwise_storage.dequantize(dtype=expected_col.dtype), expected_col)
+
+
+@pytest.mark.parametrize("mixed", [False, True])
+def test_qdq_linear_preserves_bf16_forward_values_from_fp16_weights(mixed):
+    """Finite BF16 forward weights must stay finite when building the backward operand."""
+    factory = (
+        mxfp8_qdq_nvfp4_qdq_fwd_mxfp8_bwd_factory
+        if mixed
+        else nvfp4_qdq_weight_fwd_bf16_bwd_factory
+    )
+    recipe = CustomRecipe(qfactory=partial(factory, backend="reference"))
+    layer = te.Linear(128, 128, bias=False, params_dtype=torch.float16, device="cuda")
+    with torch.no_grad():
+        layer.weight.fill_(65504.0)
+    x = torch.ones(128, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    with te.autocast(recipe=recipe), torch.autocast("cuda", dtype=torch.bfloat16):
+        y = layer(x)
+    y.backward(torch.ones_like(y))
+    # QDQ rounds 65504 to finite BF16 65536. Casting that value back to FP16
+    # would overflow; both HP and MXFP8 backward weights can retain it exactly.
+    expected = torch.full_like(x, 128 * 65536.0)
+    torch.testing.assert_close(y, expected, rtol=0, atol=0)
+    torch.testing.assert_close(x.grad, expected, rtol=0, atol=0)

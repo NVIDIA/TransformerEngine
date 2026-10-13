@@ -7746,6 +7746,128 @@ def test_hybrid_output_dtype_lifecycle(internal, rowwise, requested_dtype):
         q.quantize(x, out=out, dtype=torch.float16)
 
 
+@pytest.mark.parametrize("internal", [False, True])
+@pytest.mark.parametrize("direction", ["rowwise", "columnwise"])
+@pytest.mark.parametrize("other_usage", [False, True])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+def test_hybrid_output_dtype_checks_child_storage(internal, direction, other_usage, dtype):
+    """A matching parent dtype cannot hide an incompatible allocated HP child."""
+    q = HybridQuantizer(
+        rowwise_quantizer=IdentityQuantizer(
+            dtype=torch.float16 if direction == "rowwise" else None
+        ),
+        columnwise_quantizer=IdentityQuantizer(
+            dtype=torch.float16 if direction == "columnwise" else None
+        ),
+    )
+    q.internal = internal
+    q.rowwise_quantizer.internal = internal
+    q.columnwise_quantizer.internal = internal
+    q.set_usage(
+        rowwise=direction == "rowwise" or other_usage,
+        columnwise=direction == "columnwise" or other_usage,
+    )
+    x = torch.randn(32, 64, device="cuda", dtype=dtype)
+    out = q.quantize(x)
+    assert out._dtype == dtype
+    assert getattr(out, f"_{direction}_storage")._hp_data.dtype == torch.float16
+    children = [
+        child for child in (out._rowwise_storage, out._columnwise_storage) if child is not None
+    ]
+    before = [child._hp_data.clone() for child in children]
+    pointers = [child._hp_data.data_ptr() for child in children]
+    updated = x.float() * 3
+
+    assert not q.is_compatible_output(out, dtype=dtype)
+    with pytest.raises(ValueError, match="dtype does not match"):
+        q.quantize(updated, out=out, dtype=dtype)
+    for child, expected, pointer in zip(children, before, pointers):
+        assert child._hp_data.data_ptr() == pointer
+        torch.testing.assert_close(child._hp_data, expected, rtol=0, atol=0)
+
+    # Without an override, updates still retain each destination's own dtype.
+    assert q.is_compatible_output(out)
+    assert q.quantize(updated, out=out) is out
+    for child, pointer in zip(children, pointers):
+        assert child._hp_data.data_ptr() == pointer
+        torch.testing.assert_close(
+            child.dequantize(), updated.to(child._hp_data.dtype), rtol=0, atol=0
+        )
+
+
+@pytest.mark.parametrize("direction", ["rowwise", "columnwise"])
+def test_hybrid_weight_workspace_checks_child_dtype(direction):
+    """An incompatible child invalidates the cache even when the parent matches."""
+    from transformer_engine.pytorch.module.base import quantize_weight
+
+    q = HybridQuantizer(
+        rowwise_quantizer=IdentityQuantizer(
+            dtype=torch.float16 if direction == "rowwise" else None
+        ),
+        columnwise_quantizer=IdentityQuantizer(
+            dtype=torch.float16 if direction == "columnwise" else None
+        ),
+        columnwise_source="rowwise_dequantized",
+    )
+    x = torch.randn(32, 64, device="cuda", dtype=torch.float32)
+    cache = q.quantize(x)
+    assert cache._dtype == torch.float32
+    assert getattr(cache, f"_{direction}_storage")._hp_data.dtype == torch.float16
+    updated = x * 3
+    out, new_cache = quantize_weight(
+        tensor=updated,
+        quantizer=q,
+        workspace=cache,
+        workspace_dtype=torch.float32,
+        cache=True,
+    )
+    assert new_cache is out and out is not cache
+    for child in (out._rowwise_storage, out._columnwise_storage):
+        assert child._hp_data.dtype == torch.float32
+        torch.testing.assert_close(child.dequantize(), updated, rtol=0, atol=0)
+    pointers = [
+        out._rowwise_storage._hp_data.data_ptr(),
+        out._columnwise_storage._hp_data.data_ptr(),
+    ]
+    expected = updated * 2
+    reused, new_cache = quantize_weight(
+        tensor=expected,
+        quantizer=q,
+        workspace=out,
+        workspace_dtype=torch.float32,
+        cache=True,
+    )
+    assert reused is out and new_cache is None
+    for child, pointer in zip((out._rowwise_storage, out._columnwise_storage), pointers):
+        assert child._hp_data.data_ptr() == pointer
+        torch.testing.assert_close(child.dequantize(), expected, rtol=0, atol=0)
+    assert getattr(q, f"{direction}_quantizer").dtype == torch.float16
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_hybrid_columnwise_identity_inherits_reconstructed_source_dtype(nested):
+    """An implicit column dtype follows the promoted source, not the original input."""
+    row = IdentityQuantizer(dtype=torch.float16)
+    if nested:
+        row = HybridQuantizer(
+            rowwise_quantizer=row,
+            columnwise_quantizer=IdentityQuantizer(),
+        )
+    q = HybridQuantizer(
+        rowwise_quantizer=row,
+        columnwise_quantizer=IdentityQuantizer(),
+        columnwise_source="rowwise_dequantized",
+    )
+    q.set_usage(rowwise=False, columnwise=True)
+    x = torch.tensor([[0.023, -0.031]], dtype=torch.bfloat16)
+    out = q.quantize(x)
+    assert out._columnwise_storage._hp_data.dtype == torch.float32
+    torch.testing.assert_close(
+        out._columnwise_storage.dequantize(), x.half().float(), rtol=0, atol=0
+    )
+    assert q.columnwise_quantizer.dtype is None
+
+
 @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
 @pytest.mark.parametrize("internal", [False, True])
 @pytest.mark.parametrize("source_dtype", [torch.bfloat16, torch.float32])
@@ -7781,9 +7903,20 @@ def test_hybrid_native_dtype_override_preserves_encoding(internal, source_dtype,
     )
     assert actual._rowwise_storage._dtype == expected_row._dtype
     assert actual._columnwise_storage._dtype == expected_col._dtype
+    assert q.is_compatible_output(actual, dtype=requested_dtype)
 
     # Native out= and module caches still ignore conflicting output requests.
     from transformer_engine.pytorch.module.base import quantize_weight
+
+    reused, new_cache = quantize_weight(
+        tensor=x,
+        quantizer=q,
+        workspace=actual,
+        workspace_dtype=requested_dtype,
+        cache=True,
+        update_workspace=False,
+    )
+    assert reused is actual and new_cache is None
 
     assert row.is_compatible_output(expected_row, dtype=requested_dtype)
     # Native update_quantized requires a public tensor destination.

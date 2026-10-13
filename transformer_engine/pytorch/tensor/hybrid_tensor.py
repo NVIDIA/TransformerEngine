@@ -168,6 +168,20 @@ class HybridQuantizer(Quantizer):
                 setattr(quantizer, name, child.with_output_dtype(dtype))
         return quantizer
 
+    def is_compatible_output(self, out: QuantizedTensorStorage, *, dtype=None) -> bool:
+        """Validate the parent and each allocated child's output-dtype contract."""
+        if not isinstance(out, HybridQuantizedTensorStorage):
+            return False
+        if not super().is_compatible_output(out, dtype=dtype):
+            return False
+        return all(
+            storage is None or quantizer.is_compatible_output(storage, dtype=dtype)
+            for quantizer, storage in (
+                (self.rowwise_quantizer, out._rowwise_storage),
+                (self.columnwise_quantizer, out._columnwise_storage),
+            )
+        )
+
     @property
     def with_amax_reduction(self) -> bool:
         """Whether either sub-quantizer has cross-rank amax reduction enabled."""
@@ -216,8 +230,19 @@ class HybridQuantizer(Quantizer):
         if rowwise_result is None:
             quantizer = rowwise_quantizer or self.rowwise_quantizer
             rowwise_result = quantizer.quantize(tensor, dtype=dtype)
-        # Decode into the source dtype, preserving any prior Identity/QDQ rounding.
-        return rowwise_result.dequantize(dtype=tensor.dtype)
+        # Preserve HP forward values when the source dtype would narrow them.
+        # Native representations retain their existing decode-to-source behavior.
+        rowwise_storage = rowwise_result
+        while isinstance(rowwise_storage, HybridQuantizedTensorStorage):
+            rowwise_storage = (
+                rowwise_storage._rowwise_storage
+                if rowwise_storage._rowwise_storage is not None
+                else rowwise_storage._columnwise_storage
+            )
+        columnwise_dtype = tensor.dtype
+        if rowwise_storage is not None and rowwise_storage._get_quantizer().supports_output_dtype:
+            columnwise_dtype = torch.promote_types(tensor.dtype, rowwise_storage._dtype)
+        return rowwise_result.dequantize(dtype=columnwise_dtype)
 
     def quantize_impl(self, tensor: torch.Tensor, *, dtype=None) -> QuantizedTensor:
         # A result owns the child configuration needed to reconstruct an absent
