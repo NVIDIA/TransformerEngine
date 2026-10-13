@@ -339,6 +339,11 @@ class MXFP8Quantizer : public Quantizer {
   std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, bool columnwise) const;
 };
 
+// Flattened row/column alignment for directly emitted GEMM-swizzled scales, or no such path.
+std::optional<std::pair<size_t, size_t>> nvfp4_gemm_swizzled_scales_alignment(
+    bool optimize_for_gemm, bool with_rht, bool with_2d_quantization, bool row_scaled_nvfp4,
+    bool nvfp4_use_4over6, int sm_arch, bool disable_rht_cast_fusion);
+
 class NVFP4Quantizer : public Quantizer {
  public:
   // amax reduction for low precision FP4 AG

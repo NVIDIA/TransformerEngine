@@ -10,11 +10,33 @@ import os
 from typing import Optional
 
 import torch
+import transformer_engine_torch as tex
 
 from .tensor_spec import TensorSpec
 from ..quantized_tensor import Quantizer
 from ..tensor.nvfp4_tensor import NVFP4Quantizer
 from ..utils import get_device_compute_capability
+
+
+@torch.compiler.assume_constant_result
+def _nvfp4_gemm_swizzled_scales_alignment(
+    optimize_for_gemm: bool,
+    with_rht: bool,
+    with_2d_quantization: bool,
+    row_scaled_nvfp4: bool,
+    nvfp4_use_4over6: bool,
+    sm_arch: int,
+    disable_rht_cast_fusion: bool,
+) -> Optional[tuple[int, int]]:
+    return tex.nvfp4_gemm_swizzled_scales_alignment(
+        optimize_for_gemm,
+        with_rht,
+        with_2d_quantization,
+        row_scaled_nvfp4,
+        nvfp4_use_4over6,
+        sm_arch,
+        disable_rht_cast_fusion,
+    )
 
 
 def _make_fused_quantization_output_spec(
@@ -26,25 +48,27 @@ def _make_fused_quantization_output_spec(
     """Describe a native output without a separate post-quantize swizzle."""
     spec = TensorSpec(shape=tuple(shape), dtype=dtype, device=device, quantizer=quantizer)
     quantizer = spec.quantizer
-    if not isinstance(quantizer, NVFP4Quantizer) or not quantizer.optimize_for_gemm:
+    if not isinstance(quantizer, NVFP4Quantizer):
         return spec
+    major, minor = get_device_compute_capability(device)
+    # Direct environ access lets Dynamo guard changes to the flag.
+    disable_rht_cast_fusion = bool(
+        int(os.environ.get("NVTE_NVFP4_DISABLE_RHT_CAST_FUSION", "0") or "0")
+    )
+    alignment = _nvfp4_gemm_swizzled_scales_alignment(
+        quantizer.optimize_for_gemm,
+        quantizer.with_rht,
+        quantizer.with_2d_quantization,
+        quantizer.row_scaled_nvfp4,
+        quantizer.nvfp4_use_4over6,
+        major * 10 + minor,
+        disable_rht_cast_fusion,
+    )
+    # Keep shape predicates visible to Dynamo so only alignment, not batch size, is guarded.
     rows, cols = math.prod(shape[:-1]), shape[-1]
-    if not (10, 0) <= get_device_compute_capability(device) <= (11, 0):
-        spec.with_gemm_swizzled_scales = False
-    elif quantizer.with_rht:
-        spec.with_gemm_swizzled_scales = bool(
-            not int(os.getenv("NVTE_NVFP4_DISABLE_RHT_CAST_FUSION", "0") or "0")
-            and rows % 64 == 0
-            and cols % 128 == 0
-        )
-    else:
-        spec.with_gemm_swizzled_scales = bool(
-            quantizer.with_2d_quantization
-            and not quantizer.row_scaled_nvfp4
-            and not quantizer.nvfp4_use_4over6
-            and rows % 128 == 0
-            and cols % 128 == 0
-        )
+    spec.with_gemm_swizzled_scales = alignment is not None and bool(
+        rows % alignment[0] == 0 and cols % alignment[1] == 0
+    )
     return spec
 
 

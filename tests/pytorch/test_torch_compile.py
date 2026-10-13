@@ -42,6 +42,7 @@ from transformer_engine.pytorch.constants import FP8FwdTensorIdx, FP8BwdTensorId
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager, QuantizerRole
 from transformer_engine.pytorch.ops.basic.basic_linear import BasicLinear
+from transformer_engine.pytorch.ops.basic.bias import BiasBwdArgs
 from transformer_engine.pytorch.ops.fuser import OperationFuser
 from transformer_engine.pytorch.ops.op import BasicOperation, OperationContext
 from transformer_engine.pytorch.tensor.float8_tensor import Float8CurrentScalingQuantizer
@@ -54,6 +55,7 @@ from transformer_engine.pytorch.quantized_tensor import (
     Quantizer,
 )
 from transformer_engine.pytorch.dynamo import TensorSpec, to_tensor_spec
+from transformer_engine.pytorch.dynamo.fake import fake_bgrad
 from transformer_engine.pytorch import (
     is_fp8_available,
     is_mxfp8_available,
@@ -2888,6 +2890,59 @@ def test_te_ops_linear_bias_compile(
 ):
     monkeypatch.setenv("NVTE_NVFP4_DISABLE_RHT_CAST_FUSION", str(int(disable_rht_fusion)))
     _check_linear_bias_compile(dtype, quantization, case, grads, monkeypatch, input_shape=shape)
+
+
+@pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4)
+@pytest.mark.parametrize("mode", ["rht", "1d", "2d", "row-scaled", "4over6"])
+@pytest.mark.parametrize("optimize_for_gemm", [False, True])
+def test_te_ops_bias_nvfp4_layout(mode, optimize_for_gemm, monkeypatch):
+    quantizer = NVFP4Quantizer(
+        columnwise=mode != "row-scaled",
+        with_rht=mode == "rht",
+        with_post_rht_amax=mode == "rht",
+        with_2d_quantization=mode in ("2d", "4over6"),
+        row_scaled_nvfp4=mode == "row-scaled",
+        nvfp4_use_4over6=mode == "4over6",
+        nvfp4_e4m3_max=448 if mode == "4over6" else 0,
+        with_random_sign_mask=False,
+    )
+    quantizer.optimize_for_gemm = optimize_for_gemm
+
+    def bgrad(inp):
+        dx, ((db,),), _ = te.ops.Bias.compile_ops[1](BiasBwdArgs(inp, quantizer))
+        return dx, db
+
+    torch._dynamo.reset()
+    compiled, graphs = _compile_with_graphs(bgrad)
+    # Each pair introduces different batch sizes with the same alignment.
+    for disable_fusion in (False, True, False):
+        monkeypatch.setenv("NVTE_NVFP4_DISABLE_RHT_CAST_FUSION", str(int(disable_fusion)))
+        for i, batch in enumerate((64, 192, 96, 160, 128, 256)):
+            inp = torch.randn(batch, 128, device="cuda", dtype=torch.bfloat16)
+            torch._dynamo.mark_dynamic(inp, 0)
+            previous_graph_count = len(graphs)
+            dx, db = compiled(inp)
+            expected_db, expected_dx = tex.bgrad_quantize(inp, quantizer)
+            layout = expected_dx._with_gemm_swizzled_scales
+            assert dx._with_gemm_swizzled_scales == layout, (mode, disable_fusion, batch)
+            torch.testing.assert_close(db, expected_db, atol=0, rtol=0)
+            torch.testing.assert_close(dx.dequantize(), expected_dx.dequantize(), atol=0, rtol=0)
+            if i % 2 == 1:
+                assert len(graphs) == previous_graph_count
+
+    quantizer.optimize_for_gemm = not optimize_for_gemm
+    inp = torch.randn(128, 128, device="cuda", dtype=torch.bfloat16)
+    torch._dynamo.mark_dynamic(inp, 0)
+    dx, _ = compiled(inp)
+    _, expected_dx = tex.bgrad_quantize(inp, quantizer)
+    assert dx._with_gemm_swizzled_scales == expected_dx._with_gemm_swizzled_scales
+    torch.testing.assert_close(dx.dequantize(), expected_dx.dequantize(), atol=0, rtol=0)
+
+    for shape in ((2, 32, 128), (2, 64, 128), (128, 64)):
+        inp = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+        _, expected_dx = tex.bgrad_quantize(inp, quantizer)
+        _, dx_spec = fake_bgrad(to_tensor_spec(inp), quantizer)
+        assert dx_spec.with_gemm_swizzled_scales == expected_dx._with_gemm_swizzled_scales
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")

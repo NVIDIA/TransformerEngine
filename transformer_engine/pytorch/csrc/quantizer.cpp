@@ -1934,47 +1934,79 @@ void NVFP4Quantizer::set_quantization_params(TensorWrapper* tensor) const {
                               columnwise_data.shape);
 }
 
-bool NVFP4Quantizer::is_eligible_for_rht_cast_fusion(const std::vector<size_t>& shape,
-                                                     bool for_grouped_kernel) {
-  if (transformer_engine::getenv<bool>("NVTE_NVFP4_DISABLE_RHT_CAST_FUSION")) {
+namespace {
+
+using ShapeAlignment = std::optional<std::pair<size_t, size_t>>;
+
+ShapeAlignment nvfp4_rht_cast_fusion_alignment(int sm_arch, bool disable_rht_cast_fusion,
+                                               bool for_grouped_kernel = false) {
+  const bool supported_arch = (sm_arch >= 100 && sm_arch <= 110) ||
+                              (!for_grouped_kernel && (sm_arch == 120 || sm_arch == 121));
+  if (disable_rht_cast_fusion || !supported_arch) {
+    return std::nullopt;
+  }
+  return std::pair<size_t, size_t>{for_grouped_kernel ? 128 : 64, 128};
+}
+
+ShapeAlignment nvfp4_2d_swizzle_fusion_alignment(int sm_arch) {
+  if (sm_arch < 100 || sm_arch > 110) {
+    return std::nullopt;
+  }
+  return std::pair<size_t, size_t>{128, 128};
+}
+
+bool meets_alignment(const std::vector<size_t>& shape, const ShapeAlignment& alignment) {
+  if (!alignment) {
     return false;
   }
   const auto [rows, cols] = get_2d_dims(shape);
-  const size_t row_align = for_grouped_kernel ? 128 : 64;
-  const int sm_arch = transformer_engine::cuda::sm_arch();
-  const bool supported_arch = (sm_arch >= 100 && sm_arch <= 110) ||
-                              (!for_grouped_kernel && (sm_arch == 120 || sm_arch == 121));
-  return rows % row_align == 0 && cols % 128 == 0 && supported_arch;
+  return rows % alignment->first == 0 && cols % alignment->second == 0;
+}
+
+}  // namespace
+
+std::optional<std::pair<size_t, size_t>> nvfp4_gemm_swizzled_scales_alignment(
+    bool optimize_for_gemm, bool with_rht, bool with_2d_quantization, bool row_scaled_nvfp4,
+    bool nvfp4_use_4over6, int sm_arch, bool disable_rht_cast_fusion) {
+  if (!optimize_for_gemm) {
+    return std::nullopt;
+  }
+  if (with_rht) {
+    // The SM12x no-TMEM RHT path reuses the compact-scale 1D TMA quantizer.
+    if (sm_arch == 120 || sm_arch == 121) {
+      return std::nullopt;
+    }
+    return nvfp4_rht_cast_fusion_alignment(sm_arch, disable_rht_cast_fusion);
+  }
+  if (with_2d_quantization && !row_scaled_nvfp4 && !nvfp4_use_4over6) {
+    return nvfp4_2d_swizzle_fusion_alignment(sm_arch);
+  }
+  return std::nullopt;
+}
+
+bool NVFP4Quantizer::is_eligible_for_rht_cast_fusion(const std::vector<size_t>& shape,
+                                                     bool for_grouped_kernel) {
+  return meets_alignment(shape,
+                         nvfp4_rht_cast_fusion_alignment(
+                             transformer_engine::cuda::sm_arch(),
+                             transformer_engine::getenv<bool>("NVTE_NVFP4_DISABLE_RHT_CAST_FUSION"),
+                             for_grouped_kernel));
 }
 
 bool NVFP4Quantizer::is_eligible_for_2d_swizzle_fusion(const std::vector<size_t>& shape) {
-  const auto [rows, cols] = get_2d_dims(shape);
-  return rows % 128 == 0 && cols % 128 == 0 && transformer_engine::cuda::sm_arch() >= 100 &&
-         transformer_engine::cuda::sm_arch() <= 110;
+  return meets_alignment(shape,
+                         nvfp4_2d_swizzle_fusion_alignment(transformer_engine::cuda::sm_arch()));
 }
 
 namespace {
 
-// Whether this quantizer should emit GEMM-swizzled scale factors directly from the
-// quantize kernel (RHT cast-fusion path or the plain 2D quantize path), avoiding the
-// standalone post-quantize swizzle pass.
 bool nvfp4_emits_gemm_swizzled_scales(const NVFP4Quantizer& q, const std::vector<size_t>& shape) {
-  if (!q.optimize_for_gemm) {
-    return false;
-  }
-  if (q.with_rht) {
-    const int sm_arch = transformer_engine::cuda::sm_arch();
-    // The SM12x no-TMEM RHT path reuses the compact-scale 1D TMA quantizer.
-    // Keep the existing post-quantize swizzle until that path gains an in-kernel swizzle epilogue.
-    if (sm_arch == 120 || sm_arch == 121) {
-      return false;
-    }
-    return NVFP4Quantizer::is_eligible_for_rht_cast_fusion(shape);
-  }
-  // Plain (non-RHT) 2D quantize kernel can bake the swizzled layout for aligned shapes.
-  return q.with_2d_quantization && !q.row_scaled_nvfp4 &&
-         q.nvfp4_4over6_mode == kNVTENVFP44Over6Disabled &&
-         NVFP4Quantizer::is_eligible_for_2d_swizzle_fusion(shape);
+  return meets_alignment(
+      shape,
+      nvfp4_gemm_swizzled_scales_alignment(
+          q.optimize_for_gemm, q.with_rht, q.with_2d_quantization, q.row_scaled_nvfp4,
+          q.nvfp4_4over6_mode != kNVTENVFP44Over6Disabled, transformer_engine::cuda::sm_arch(),
+          transformer_engine::getenv<bool>("NVTE_NVFP4_DISABLE_RHT_CAST_FUSION")));
 }
 
 }  // namespace
