@@ -12,8 +12,9 @@
  *  allocate handle_mem as a kByte NVTETensor. Per step: nvte_ep_prepare seeds
  *  routing, then nvte_ep_dispatch / nvte_ep_combine / _bwd consume it.
  *  Max live handles: NVTE_EP_HANDLE_CACHE_SIZE (default 4096; -1 = unlimited; 0 disables
- *  the cache, so handle_mem may be relocated between calls). The *_v2 ops take the layer
- *  config explicitly, bind from handle_mem, and are required when the cache is disabled.
+ *  the cache, so handle_mem may be relocated between calls; the JAX extension sets 0).
+ *  The *_v2 ops take the layer config explicitly, bind from handle_mem, and are required
+ *  when the cache is disabled.
  */
 
 #ifndef TRANSFORMER_ENGINE_EP_H_

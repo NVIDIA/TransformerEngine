@@ -1153,7 +1153,8 @@ class TestEpScanHandleRelocation(TestEP):
     routing state at each forward step, and independently restore each
     backward step's saved state at its own address. EPBackend never caches
     handles by address for JAX (the JAX extension sets
-    ``NVTE_EP_HANDLE_CACHE_SIZE=0``, disabling the handle cache): every dispatch/combine/_bwd call rebinds a fresh handle from
+    ``NVTE_EP_HANDLE_CACHE_SIZE=0``, disabling the handle cache): every
+    dispatch/combine/_bwd call rebinds a fresh handle from
     ``handle_mem``'s own contents via ``ncclEpImportHandle``, so the address
     is irrelevant.
 

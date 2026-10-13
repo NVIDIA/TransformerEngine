@@ -69,7 +69,8 @@ class EpResources {
     std::memcpy(&uid, p.uid_bytes.data(), sizeof(uid));
     NVTE_CHECK_NCCL(ncclCommInitRank(&comm_, p.ep_size, uid, p.rank_within_group));
     NVTEEpGroupConfig cfg = MakeEpGroupConfig(p);
-    // XLA may relocate handle_mem between calls (e.g. under lax.scan), so disable the handle cache.
+    // XLA may relocate handle_mem between calls (e.g. under lax.scan), so disable the handle
+    // cache. Must precede nvte_ep_initialize; the cap is read on first use.
     setenv("NVTE_EP_HANDLE_CACHE_SIZE", "0", 1);
     try {
       nvte_ep_initialize(static_cast<void*>(comm_), &cfg);

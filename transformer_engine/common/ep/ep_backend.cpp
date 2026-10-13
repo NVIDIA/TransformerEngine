@@ -347,7 +347,6 @@ void EPBackend::init(ncclComm_t ep_comm, NVTEEpGroupConfig group_config) {
 
   group_config_ = group_config;
   handle_cache_cap_set_ = false;
-  handle_cache_cap_ = 0;
 
   ncclEpGroupConfig_t cfg = NCCL_EP_GROUP_CONFIG_INIT;
   cfg.algorithm = NCCL_EP_ALGO_HIGH_THROUGHPUT;
@@ -454,8 +453,7 @@ ncclEpHandle_t EPBackend::lookup_handle_locked(void* handle_mem, size_t handle_m
                it->second->handle_mem_size);
     return it->second->handle;
   }
-  // Callers whose handle_mem address is not stable should use the *_v2 ops with
-  // NVTE_EP_HANDLE_CACHE_SIZE=0 instead of relying on this cache.
+  // Callers with unstable handle_mem addresses must use the *_v2 ops with the cache disabled.
   const uintptr_t hm_addr = reinterpret_cast<uintptr_t>(handle_mem);
   NVTE_ERROR("ep op on handle_mem=0x", hm_addr,
              " with no cached entry; call nvte_ep_prepare first.");
