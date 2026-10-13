@@ -435,7 +435,9 @@ def _should_pad_qkv_head_dim(
     # Skip padding when packed inputs are used with the FP8 fused path, which would lead to using
     # unpadded data with a kernel that assumes padded data.
     return is_shape_pad_eligible and dpa_utils.should_pad_qkv_head_dim(
-        attention_params, has_packed_inputs
+        attention_params,
+        has_packed_inputs,
+        _attention_backends["attention_params"],
     )
 
 
