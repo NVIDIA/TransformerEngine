@@ -29,6 +29,7 @@ def _run_tensor_parallel(rank, world_size, init_file, label_smoothing):
         init_method=f"file://{init_file}",
         rank=rank,
         world_size=world_size,
+        device_id=device,
     )
     try:
         generator = torch.Generator().manual_seed(2025)
