@@ -1433,7 +1433,10 @@ def test_dpa_mla_should_pad(dtype, model_configs, model):
 
     if should_pad_qkv_head_dim(native_params, False):
         assert padded_flash or padded_fused, "suggested padding onto no faster backend"
-        assert padded_flash != native_flash, "suggested padding onto the same backend"
+        assert (padded_flash, padded_fused) != (
+            native_flash,
+            native_fused,
+        ), "suggested padding onto the same backend"
     else:
         assert (
             native_flash or native_fused or not (padded_flash or padded_fused)
