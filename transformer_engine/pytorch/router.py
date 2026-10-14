@@ -15,10 +15,12 @@ Precision Notes:
 """
 
 import math
-from typing import Optional, Union
+from typing import Optional, Tuple, Union
 
 import torch
 import transformer_engine_torch as tex
+
+from .jit import no_torch_dynamo
 
 # Re-export the C++ enum NVTERoutingMapFormat under a friendlier Python name.
 # Members:
@@ -276,6 +278,18 @@ class FusedTopkScoreFunctionQB(torch.autograd.Function):
         return grad_logits, None, None, None, None, None, None, None, None
 
 
+def _needs_eager_router(call):
+    if call.get("topk_indices") is not None:
+        return "router output buffers"
+    if any(
+        call.get(name) is not None
+        for name in ("qb_histogram", "qb_bin_bounds", "qb_histogram_mode")
+    ):
+        return "Quantile Balancing"
+    return None
+
+
+@no_torch_dynamo(when=_needs_eager_router)
 def fused_topk_with_score_function(
     logits: torch.Tensor,
     topk: int,
@@ -293,6 +307,10 @@ def fused_topk_with_score_function(
 ):
     """
     Fused topk with score function router.
+
+    ``torch.compile`` supports routing-map outputs; ``topk_indices`` and Quantile
+    Balancing fall back to eager execution and do not support ``fullgraph=True``.
+
     Parameters
     ----------
     logits : torch.Tensor in fp32/bf16/fp16
@@ -375,6 +393,19 @@ def fused_topk_with_score_function(
             mode,
         )
         return probs, routing_output
+    if torch.compiler.is_compiling():
+        probs, routing_output, _ = _topk_forward(
+            logits,
+            topk,
+            use_pre_softmax,
+            num_groups,
+            group_topk,
+            scaling_factor,
+            score_function,
+            expert_bias,
+            routing_map_format,
+        )
+        return probs, routing_output
     return FusedTopkScoreFunction.apply(
         logits,
         topk,
@@ -444,6 +475,7 @@ def fused_compute_score_for_moe_aux_loss(
 ):
     """
     Fused compute scores for MoE aux loss, subset of the fused_topk_with_score_function.
+    Supports ``torch.compile(fullgraph=True)`` for forward and backward.
     Parameters
     ----------
     logits : torch.Tensor in fp32/bf16/fp16
@@ -463,6 +495,9 @@ def fused_compute_score_for_moe_aux_loss(
         Same shape as ``logits``.
     """
     routing_map_format = _validate_routing_map_format(routing_map_format)
+    if torch.compiler.is_compiling():
+        scores, routing_map, _ = _score_forward(logits, topk, score_function, routing_map_format)
+        return routing_map, scores
     return FusedComputeScoresForMoEAuxLoss.apply(logits, topk, score_function, routing_map_format)
 
 
@@ -537,6 +572,7 @@ def fused_moe_aux_loss(
 ) -> torch.Tensor:
     """
     Fused MoE aux loss.
+    Supports ``torch.compile(fullgraph=True)`` with either form of ``total_num_tokens``.
     Parameters
     ----------
     probs : torch.Tensor in fp32/bf16/fp16
@@ -558,4 +594,306 @@ def fused_moe_aux_loss(
     aux_loss : torch.Tensor.
         A scalar tensor in the same dtype as the "probs".
     """
+    if torch.compiler.is_compiling():
+        token_count = total_num_tokens if isinstance(total_num_tokens, torch.Tensor) else None
+        count = 0 if token_count is not None else total_num_tokens
+        aux_loss, _ = _aux_loss_forward(
+            probs, tokens_per_expert, count, token_count, num_experts, topk, coeff
+        )
+        return aux_loss
     return FusedAuxLoss.apply(probs, tokens_per_expert, total_num_tokens, num_experts, topk, coeff)
+
+
+def _routing_map_fake(logits, routing_map_format):
+    if routing_map_format == _ROUTING_MAP_FORMAT_FROM_STRING["bitmap_u8"]:
+        return logits.new_empty(
+            (*logits.shape[:-1], (logits.shape[-1] + 7) // 8), dtype=torch.uint8
+        )
+    return logits.new_empty(logits.shape, dtype=torch.bool)
+
+
+@torch.library.custom_op("te_moe::router_topk_fwd", mutates_args=())
+def _topk_forward(
+    logits: torch.Tensor,
+    topk: int,
+    use_pre_softmax: bool,
+    num_groups: Optional[int],
+    group_topk: Optional[int],
+    scaling_factor: Optional[float],
+    score_function: str,
+    expert_bias: Optional[torch.Tensor],
+    routing_map_format: int,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    with torch.cuda.device(logits.device):
+        return tex.fused_topk_with_score_function_fwd(
+            logits,
+            topk,
+            use_pre_softmax,
+            num_groups,
+            group_topk,
+            scaling_factor,
+            score_function,
+            expert_bias,
+            routing_map_format,
+            None,
+        )
+
+
+@_topk_forward.register_fake
+def _topk_forward_fake(
+    logits,
+    topk,
+    use_pre_softmax,
+    num_groups,
+    group_topk,
+    scaling_factor,
+    score_function,
+    expert_bias,
+    routing_map_format,
+):
+    del (
+        topk,
+        use_pre_softmax,
+        num_groups,
+        group_topk,
+        scaling_factor,
+        score_function,
+        expert_bias,
+    )
+    return (
+        logits.new_empty(logits.shape),
+        _routing_map_fake(logits, routing_map_format),
+        logits.new_empty(logits.shape, dtype=torch.float32),
+    )
+
+
+@torch.library.custom_op("te_moe::router_topk_bwd", mutates_args=())
+def _topk_backward(
+    routing_map: torch.Tensor,
+    intermediate_output: torch.Tensor,
+    grad_probs: torch.Tensor,
+    topk: int,
+    use_pre_softmax: bool,
+    scaling_factor: Optional[float],
+    score_function: str,
+    routing_map_format: int,
+) -> torch.Tensor:
+    grad_probs = grad_probs.contiguous()
+    grad_logits = torch.empty_like(grad_probs)
+    with torch.cuda.device(grad_probs.device):
+        tex.fused_topk_with_score_function_bwd(
+            routing_map,
+            intermediate_output,
+            grad_probs,
+            grad_logits,
+            topk,
+            use_pre_softmax,
+            scaling_factor,
+            score_function,
+            False,
+            routing_map_format,
+        )
+    return grad_logits
+
+
+@_topk_backward.register_fake
+def _topk_backward_fake(
+    routing_map,
+    intermediate_output,
+    grad_probs,
+    topk,
+    use_pre_softmax,
+    scaling_factor,
+    score_function,
+    routing_map_format,
+):
+    del routing_map, intermediate_output, topk, use_pre_softmax, scaling_factor
+    del score_function, routing_map_format
+    return grad_probs.new_empty(grad_probs.shape)
+
+
+def _topk_setup_context(ctx, inputs, output):
+    (
+        _,
+        ctx.topk,
+        ctx.use_pre_softmax,
+        _,
+        _,
+        ctx.scaling_factor,
+        ctx.score_function,
+        _,
+        ctx.routing_map_format,
+    ) = inputs
+    _, routing_map, intermediate_output = output
+    ctx.mark_non_differentiable(routing_map, intermediate_output)
+    ctx.save_for_backward(routing_map, intermediate_output)
+
+
+def _topk_autograd(ctx, grad_probs, _grad_map, _grad_intermediate):
+    routing_map, intermediate_output = ctx.saved_tensors
+    grad_logits = _topk_backward(
+        routing_map,
+        intermediate_output,
+        grad_probs,
+        ctx.topk,
+        ctx.use_pre_softmax,
+        ctx.scaling_factor,
+        ctx.score_function,
+        ctx.routing_map_format,
+    )
+    return grad_logits, None, None, None, None, None, None, None, None
+
+
+_topk_forward.register_autograd(_topk_autograd, setup_context=_topk_setup_context)
+
+
+@torch.library.custom_op("te_moe::router_score_fwd", mutates_args=())
+def _score_forward(
+    logits: torch.Tensor,
+    topk: int,
+    score_function: str,
+    routing_map_format: int,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    with torch.cuda.device(logits.device):
+        return tex.fused_score_for_moe_aux_loss_fwd(
+            logits, topk, score_function, routing_map_format
+        )
+
+
+@_score_forward.register_fake
+def _score_forward_fake(logits, topk, score_function, routing_map_format):
+    del topk, score_function
+    return (
+        logits.new_empty(logits.shape, dtype=torch.float32),
+        _routing_map_fake(logits, routing_map_format),
+        logits.new_empty(logits.shape, dtype=torch.float32),
+    )
+
+
+@torch.library.custom_op("te_moe::router_score_bwd", mutates_args=())
+def _score_backward(
+    intermediate_output: torch.Tensor,
+    grad_scores: torch.Tensor,
+    topk: int,
+    score_function: str,
+    logits_dtype: torch.dtype,
+) -> torch.Tensor:
+    grad_scores = grad_scores.contiguous()
+    grad_logits = grad_scores.new_empty(grad_scores.shape, dtype=logits_dtype)
+    with torch.cuda.device(grad_scores.device):
+        tex.fused_score_for_moe_aux_loss_bwd(
+            intermediate_output, grad_scores, grad_logits, topk, score_function
+        )
+    return grad_logits
+
+
+@_score_backward.register_fake
+def _score_backward_fake(intermediate_output, grad_scores, topk, score_function, logits_dtype):
+    del intermediate_output, topk, score_function
+    return grad_scores.new_empty(grad_scores.shape, dtype=logits_dtype)
+
+
+def _score_setup_context(ctx, inputs, output):
+    logits, ctx.topk, ctx.score_function, _ = inputs
+    ctx.logits_dtype = logits.dtype
+    _, routing_map, intermediate_output = output
+    ctx.mark_non_differentiable(routing_map, intermediate_output)
+    ctx.save_for_backward(intermediate_output)
+
+
+def _score_autograd(ctx, grad_scores, _grad_map, _grad_intermediate):
+    (intermediate_output,) = ctx.saved_tensors
+    grad_logits = _score_backward(
+        intermediate_output, grad_scores, ctx.topk, ctx.score_function, ctx.logits_dtype
+    )
+    return grad_logits, None, None, None
+
+
+_score_forward.register_autograd(_score_autograd, setup_context=_score_setup_context)
+
+
+@torch.library.custom_op("te_moe::router_aux_loss_fwd", mutates_args=())
+def _aux_loss_forward(
+    probs: torch.Tensor,
+    tokens_per_expert: torch.Tensor,
+    total_num_tokens: int,
+    token_count: Optional[torch.Tensor],
+    num_experts: int,
+    topk: int,
+    coeff: float,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    with torch.cuda.device(probs.device):
+        if token_count is not None:
+            return tex.fused_moe_aux_loss_fwd_graph_safe(
+                probs,
+                tokens_per_expert,
+                token_count,
+                num_experts,
+                probs.shape[0],
+                probs.shape[1],
+                topk,
+                coeff,
+            )
+        return tex.fused_moe_aux_loss_fwd(
+            probs,
+            tokens_per_expert,
+            total_num_tokens,
+            num_experts,
+            probs.shape[0],
+            probs.shape[1],
+            topk,
+            coeff,
+        )
+
+
+@_aux_loss_forward.register_fake
+def _aux_loss_forward_fake(
+    probs,
+    tokens_per_expert,
+    total_num_tokens,
+    token_count,
+    num_experts,
+    topk,
+    coeff,
+):
+    del tokens_per_expert, total_num_tokens, token_count, num_experts, topk, coeff
+    return probs.new_empty(()), probs.new_empty((2,), dtype=torch.float32)
+
+
+@torch.library.custom_op("te_moe::router_aux_loss_bwd", mutates_args=())
+def _aux_loss_backward(
+    const_buf: torch.Tensor,
+    tokens_per_expert: torch.Tensor,
+    num_rows: int,
+    num_cols: int,
+    grad_aux_loss: torch.Tensor,
+) -> torch.Tensor:
+    with torch.cuda.device(grad_aux_loss.device):
+        return tex.fused_moe_aux_loss_bwd(
+            const_buf, tokens_per_expert, num_rows, num_cols, grad_aux_loss
+        )
+
+
+@_aux_loss_backward.register_fake
+def _aux_loss_backward_fake(const_buf, tokens_per_expert, num_rows, num_cols, grad_aux_loss):
+    del const_buf, tokens_per_expert
+    return grad_aux_loss.new_empty((num_rows, num_cols))
+
+
+def _aux_loss_setup_context(ctx, inputs, output):
+    probs, tokens_per_expert, _, _, _, _, _ = inputs
+    _, const_buf = output
+    ctx.num_rows, ctx.num_cols = probs.shape
+    ctx.mark_non_differentiable(const_buf)
+    ctx.save_for_backward(const_buf, tokens_per_expert)
+
+
+def _aux_loss_autograd(ctx, grad_aux_loss, _grad_const):
+    const_buf, tokens_per_expert = ctx.saved_tensors
+    grad_probs = _aux_loss_backward(
+        const_buf, tokens_per_expert, ctx.num_rows, ctx.num_cols, grad_aux_loss
+    )
+    return grad_probs, None, None, None, None, None, None
+
+
+_aux_loss_forward.register_autograd(_aux_loss_autograd, setup_context=_aux_loss_setup_context)

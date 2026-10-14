@@ -6,6 +6,7 @@ from typing import Optional
 
 import pytest
 import torch
+from torch._dynamo.utils import counters
 
 from transformer_engine.pytorch.router import (
     QBHistogramMode,
@@ -41,7 +42,11 @@ def test_sigmoid_bias_preserves_tiny_scores(topk, histogram_mode, layout, mixed_
     bin_bounds = torch.tensor([-1.0, 1.0], device="cuda")
     histogram = torch.zeros(num_experts, num_bins, dtype=torch.int32, device="cuda")
     reference_probs, reference_map = topk_score_function_pytorch(
-        logits, topk, scaling_factor=3.16, score_function="sigmoid", expert_bias=expert_bias
+        logits,
+        topk,
+        scaling_factor=3.16,
+        score_function="sigmoid",
+        expert_bias=expert_bias,
     )
     kwargs = {}
     if histogram_mode is not None:
@@ -109,6 +114,254 @@ def _get_tolerances(dtype: torch.dtype, num_experts: int):
     atol = max(base_atol, 2 * num_experts * eps)
     rtol = max(base_rtol, 2 * num_experts * eps)
     return atol, rtol
+
+
+def _compile_logits(dtype):
+    logits = torch.linspace(-2, 2, 32, device="cuda")
+    logits = logits + torch.linspace(-0.1, 0.1, 64, device="cuda").unsqueeze(1)
+    return logits.reshape(2, 32, 32).to(dtype).requires_grad_(True)
+
+
+def _check_compile_reference(actual, expected, dtype):
+    atol, rtol = {
+        torch.float32: (1e-6, 2e-5),
+        torch.float16: (2e-4, 2e-3),
+        torch.bfloat16: (2e-3, 2e-2),
+    }[dtype]
+    torch.testing.assert_close(actual.float(), expected.float(), atol=atol, rtol=rtol)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("mode", ["default", "reduce-overhead"])
+@pytest.mark.parametrize("routing_map_format", [RoutingMapFormat.BYTEMAP, "bitmap_u8"])
+@pytest.mark.parametrize(
+    "score_function,use_pre_softmax,grouped",
+    [
+        ("softmax", True, False),
+        ("softmax", False, True),
+        ("sigmoid", False, True),
+        ("sqrtsoftplus", False, False),
+    ],
+)
+def test_topk_compile(dtype, mode, routing_map_format, score_function, use_pre_softmax, grouped):
+    torch._dynamo.reset()
+    counters.clear()
+    bias = None if score_function == "softmax" else torch.linspace(0.3, 0, 32, device="cuda")
+    options = dict(
+        topk=4,
+        use_pre_softmax=use_pre_softmax,
+        num_groups=4 if grouped else None,
+        group_topk=2 if grouped else None,
+        scaling_factor=1.2,
+        score_function=score_function,
+        expert_bias=bias,
+    )
+
+    def router(logits):
+        return fused_topk_with_score_function(
+            logits, **options, routing_map_format=routing_map_format
+        )
+
+    compiled = torch.compile(router, fullgraph=True, mode=mode)
+    for reverse in (False, True, False):
+        torch.compiler.cudagraph_mark_step_begin()
+        logits = _compile_logits(dtype)
+        if reverse:
+            logits = logits.flip(-1).detach().requires_grad_(True)
+        eager_logits = logits.detach().clone().requires_grad_(True)
+        ref_logits = logits.detach().float().reshape(-1, 32).requires_grad_(True)
+        probs, routing_map = compiled(logits)
+        eager_probs, eager_map = router(eager_logits)
+        ref_probs, ref_map = topk_score_function_pytorch(ref_logits, **options)
+        ref_map = ref_map.reshape(logits.shape)
+        if routing_map_format == "bitmap_u8":
+            ref_map = _bytemap_to_bitmap_u8(ref_map)
+        assert not routing_map.requires_grad
+        torch.testing.assert_close(routing_map, eager_map)
+        torch.testing.assert_close(routing_map, ref_map)
+        torch.testing.assert_close(probs, eager_probs, atol=0, rtol=0)
+        _check_compile_reference(probs, ref_probs.reshape(logits.shape), dtype)
+        grad = torch.randn((*probs.shape, 2), dtype=dtype, device="cuda")[..., 0]
+        assert not grad.is_contiguous()
+        (actual_grad,) = torch.autograd.grad(probs, logits, grad)
+        (eager_grad,) = torch.autograd.grad(eager_probs, eager_logits, grad)
+        (ref_grad,) = torch.autograd.grad(ref_probs, ref_logits, grad.float().reshape(-1, 32))
+        torch.testing.assert_close(actual_grad, eager_grad, atol=0, rtol=0)
+        _check_compile_reference(actual_grad, ref_grad.reshape(logits.shape), dtype)
+    with torch.no_grad():
+        torch.compiler.cudagraph_mark_step_begin()
+        actual = compiled(logits)
+        expected = router(logits)
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+    if mode == "reduce-overhead":
+        assert not counters["inductor"]["cudagraph_skips"]
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("mode", ["default", "reduce-overhead"])
+@pytest.mark.parametrize("routing_map_format", [RoutingMapFormat.BYTEMAP, "bitmap_u8"])
+@pytest.mark.parametrize("score_function", ["softmax", "sigmoid", "sqrtsoftplus"])
+def test_scores_for_aux_loss_compile(dtype, mode, routing_map_format, score_function):
+    torch._dynamo.reset()
+    counters.clear()
+
+    def scores(logits):
+        return fused_compute_score_for_moe_aux_loss(logits, 4, score_function, routing_map_format)
+
+    compiled = torch.compile(scores, fullgraph=True, mode=mode)
+    for reverse in (False, True, False):
+        torch.compiler.cudagraph_mark_step_begin()
+        logits = _compile_logits(dtype)
+        if reverse:
+            logits = logits.flip(-1).detach().requires_grad_(True)
+        eager_logits = logits.detach().clone().requires_grad_(True)
+        ref_logits = logits.detach().float().reshape(-1, 32).requires_grad_(True)
+        routing_map, output = compiled(logits)
+        eager_map, eager_output = scores(eager_logits)
+        ref_map, ref_output = compute_scores_for_aux_loss_pytorch(ref_logits, 4, score_function)
+        ref_map = ref_map.reshape(logits.shape)
+        if routing_map_format == "bitmap_u8":
+            ref_map = _bytemap_to_bitmap_u8(ref_map)
+        assert output.dtype == torch.float32
+        assert not routing_map.requires_grad
+        torch.testing.assert_close(routing_map, eager_map)
+        torch.testing.assert_close(routing_map, ref_map)
+        torch.testing.assert_close(output, eager_output, atol=0, rtol=0)
+        _check_compile_reference(output, ref_output.reshape(logits.shape), torch.float32)
+        grad = torch.randn((*output.shape, 2), device="cuda")[..., 0]
+        (actual_grad,) = torch.autograd.grad(output, logits, grad)
+        (eager_grad,) = torch.autograd.grad(eager_output, eager_logits, grad)
+        (ref_grad,) = torch.autograd.grad(ref_output, ref_logits, grad.reshape(-1, 32))
+        assert actual_grad.dtype == dtype
+        torch.testing.assert_close(actual_grad, eager_grad, atol=0, rtol=0)
+        _check_compile_reference(actual_grad, ref_grad.reshape(logits.shape), dtype)
+    with torch.no_grad():
+        torch.compiler.cudagraph_mark_step_begin()
+        torch.testing.assert_close(compiled(logits), scores(logits), atol=0, rtol=0)
+    if mode == "reduce-overhead":
+        assert not counters["inductor"]["cudagraph_skips"]
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("mode", ["default", "reduce-overhead"])
+@pytest.mark.parametrize("tensor_count", [False, True])
+def test_aux_loss_compile(dtype, mode, tensor_count):
+    torch._dynamo.reset()
+    counters.clear()
+    counts = torch.arange(1, 33, device="cuda", dtype=torch.int32)
+    total = torch.tensor(64, device="cuda", dtype=torch.int64) if tensor_count else 64
+
+    def loss(probs, total_num_tokens):
+        return fused_moe_aux_loss(probs, counts, total_num_tokens, 16, 4, 0.01)
+
+    compiled = torch.compile(loss, fullgraph=True, mode=mode)
+    for new_total in (64, 128, 47):
+        torch.compiler.cudagraph_mark_step_begin()
+        if tensor_count:
+            total.fill_(new_total)
+        else:
+            total = new_total
+        probs = _compile_logits(dtype).detach().reshape(-1, 32).requires_grad_(True)
+        eager_probs = probs.detach().clone().requires_grad_(True)
+        ref_probs = probs.detach().float().requires_grad_(True)
+        output = compiled(probs, total)
+        eager_output = loss(eager_probs, total)
+        ref_output = aux_loss_pytorch(ref_probs, counts, new_total, 4, 16, 0.01)
+        assert output.shape == () and output.dtype == dtype
+        # The native loss reduction accumulates with FP32 atomics.
+        torch.testing.assert_close(output, eager_output)
+        _check_compile_reference(output, ref_output, dtype)
+        grad = output.new_tensor(0.7)
+        (actual_grad,) = torch.autograd.grad(output, probs, grad)
+        (eager_grad,) = torch.autograd.grad(eager_output, eager_probs, grad)
+        (ref_grad,) = torch.autograd.grad(ref_output, ref_probs, grad.float())
+        torch.testing.assert_close(actual_grad, eager_grad, atol=0, rtol=0)
+        _check_compile_reference(actual_grad, ref_grad, dtype)
+    with torch.no_grad():
+        torch.compiler.cudagraph_mark_step_begin()
+        torch.testing.assert_close(compiled(probs, total), loss(probs, total))
+    if mode == "reduce-overhead":
+        assert not counters["inductor"]["cudagraph_skips"]
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_router_compile_dynamic(dtype):
+    torch._dynamo.reset()
+    counts = torch.arange(1, 131, device="cuda", dtype=torch.int32)
+
+    def router_loss(logits):
+        probs, routing_map = fused_topk_with_score_function(
+            logits, 4, False, None, None, None, "sigmoid", None, "bitmap_u8"
+        )
+        _, scores = fused_compute_score_for_moe_aux_loss(logits, 4, "sigmoid", 1)
+        aux_loss = fused_moe_aux_loss(scores, counts, logits.shape[0], 130, 4, 0.01)
+        return probs.float().square().sum() + aux_loss, routing_map
+
+    compiled = torch.compile(router_loss, fullgraph=True, dynamic=True)
+    for num_tokens in (16, 33, 64):
+        logits = torch.randn(num_tokens, 130, device="cuda", dtype=dtype, requires_grad=True)
+        eager_logits = logits.detach().clone().requires_grad_(True)
+        actual, routing_map = compiled(logits)
+        expected, eager_map = router_loss(eager_logits)
+        assert routing_map.shape == (num_tokens, 17)
+        torch.testing.assert_close(routing_map, eager_map)
+        torch.testing.assert_close(actual, expected)
+        (actual_grad,) = torch.autograd.grad(actual, logits)
+        (eager_grad,) = torch.autograd.grad(expected, eager_logits)
+        _check_compile_reference(actual_grad, eager_grad, dtype)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("routing_map_format", [0, 1])
+def test_router_compile_opcheck(dtype, routing_map_format):
+    from transformer_engine.pytorch import router
+
+    logits = torch.randn(16, 130, device="cuda", dtype=dtype, requires_grad=True)
+    torch.library.opcheck(
+        router._topk_forward,
+        (logits, 4, False, None, None, None, "sigmoid", None, routing_map_format),
+    )
+    torch.library.opcheck(router._score_forward, (logits, 4, "softmax", routing_map_format))
+    counts = torch.ones(130, device="cuda", dtype=torch.int32)
+    count = torch.tensor(16, device="cuda", dtype=torch.int64)
+    for token_count in (None, count):
+        torch.library.opcheck(
+            router._aux_loss_forward, (logits, counts, 16, token_count, 130, 4, 0.01)
+        )
+
+
+@pytest.mark.parametrize("qb", [False, True])
+def test_router_compile_eager_fallback(qb):
+    torch._dynamo.reset()
+    logits = torch.randn(32, 32, device="cuda", requires_grad=True)
+    bias = torch.zeros(32, device="cuda")
+    indices = torch.empty(32, 4, device="cuda", dtype=torch.int32)
+    histogram = torch.zeros(32, 16, device="cuda", dtype=torch.int32)
+    bounds = torch.tensor([-2, 2], device="cuda", dtype=torch.float32)
+
+    def router(x):
+        return fused_topk_with_score_function(
+            x,
+            4,
+            False,
+            None,
+            None,
+            None,
+            "sigmoid",
+            bias,
+            topk_indices=None if qb else indices,
+            qb_histogram=histogram if qb else None,
+            qb_bin_bounds=bounds if qb else None,
+            qb_histogram_mode="two_kernel" if qb else None,
+        )
+
+    with pytest.warns(UserWarning, match="Falling back to eager execution"):
+        actual = torch.compile(router)(logits)
+    expected = router(logits)
+    torch.testing.assert_close(actual, expected)
+    torch._dynamo.reset()
+    with pytest.raises(torch._dynamo.exc.Unsupported):
+        torch.compile(router, fullgraph=True)(logits)
 
 
 # Pytorch-based group topk
