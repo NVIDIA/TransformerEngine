@@ -83,7 +83,7 @@ from ..quantized_tensor import (
     Quantizer,
     prepare_for_saving,
 )
-from ..dynamo.parameter_parts import ConcatInput, ParameterParts, restore_from_func_ctx
+from ..dynamo.parameter_parts import ConcatInput, restore_from_func_ctx
 from ..dynamo import (
     TensorSpec,
     TensorOrQuantized,
@@ -2404,14 +2404,7 @@ class Linear(TransformerEngineBaseModule):
             weight_tensor, bias_tensor = self._get_weight_and_bias_tensors(
                 defer_concatenation=torch.compiler.is_compiling() and _linear_op is not None
             )
-            weight_meta = (
-                weight_tensor.to_spec()
-                if isinstance(weight_tensor, ParameterParts)
-                else weight_tensor
-            )
-            bias_meta = (
-                bias_tensor.to_spec() if isinstance(bias_tensor, ParameterParts) else bias_tensor
-            )
+            weight_requires_grad = weight_tensor.requires_grad
 
             quantizers = (
                 self._get_quantizers(fp8_output, fp8_grad, is_grad_enabled)
@@ -2433,7 +2426,7 @@ class Linear(TransformerEngineBaseModule):
             ) = quantizers
             if weight_quantizer is not None and not debug:
                 weight_quantizer.optimize_for_gemm = self._enable_weight_preswizzle(
-                    weight_quantizer, weight_meta
+                    weight_quantizer, weight_tensor
                 )
 
             use_compiled_op = torch.compiler.is_compiling() and _linear_op is not None
@@ -2463,9 +2456,7 @@ class Linear(TransformerEngineBaseModule):
                 backward_override = None
             custom = is_custom(input_quantizer) or is_custom(weight_quantizer)
             backward_input_needs_gather = (
-                weight_meta.requires_grad
-                and self.parallel_mode == "column"
-                and self.sequence_parallel
+                weight_requires_grad and self.parallel_mode == "column" and self.sequence_parallel
             )
 
             if debug:
@@ -2496,9 +2487,9 @@ class Linear(TransformerEngineBaseModule):
                 weight_workspace=weight_workspace,
                 # requires_grad flags
                 input_requires_grad=inp.requires_grad,
-                weight_requires_grad=weight_meta.requires_grad,
+                weight_requires_grad=weight_requires_grad,
                 bias_requires_grad=(
-                    bias_meta.requires_grad if linear_bias_tensor is not None else False
+                    linear_bias_tensor.requires_grad if linear_bias_tensor is not None else False
                 ),
                 # quantizers
                 input_quantizer=input_quantizer,
@@ -2566,7 +2557,7 @@ class Linear(TransformerEngineBaseModule):
                     fwd_args.bias = linear_bias_tensor
 
             if use_compiled_op:
-                check_gemm_dims(inp.shape, weight_meta.shape, self.fp8)
+                check_gemm_dims(inp.shape, weight_tensor.shape, self.fp8)
                 out, new_weight_workspace = _linear_op(fwd_args)
             else:
                 out, new_weight_workspace = _linear_eager(

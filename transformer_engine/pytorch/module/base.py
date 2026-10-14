@@ -46,7 +46,7 @@ from ..distributed import (
     _fsdp_gather_tensors,
 )
 from ..constants import dist_group_type
-from ..dynamo.tensor_spec import TensorSpec
+from ..dynamo.parameter_parts import ConcatInput
 from ..cpp_extensions.gemm import _NUM_MAX_UB_STREAMS
 from ..quantized_tensor import QuantizedTensor, QuantizedTensorStorage, Quantizer
 from ..tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
@@ -1323,7 +1323,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     def _enable_weight_preswizzle(
         self,
         quantizer: Quantizer,
-        weight: Union[torch.Tensor, TensorSpec],
+        weight: ConcatInput[torch.Tensor],
     ) -> bool:
         """Whether to fuse scale-factor swizzling into weight quantization.
 

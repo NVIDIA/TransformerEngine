@@ -35,6 +35,16 @@ class ParameterParts:
         ):
             raise TypeError("ParameterParts only supports non-quantized tensors")
 
+    @property
+    def shape(self) -> Tuple[int, ...]:
+        """Shape after row concatenation."""
+        return (sum(t.shape[0] for t in self.parts), *self.parts[0].shape[1:])
+
+    @property
+    def requires_grad(self) -> bool:
+        """Whether any part requires gradients."""
+        return any(t.requires_grad for t in self.parts)
+
     def to_spec(self) -> TensorSpec:
         """Describe the concatenation without accessing its storage."""
         first = self.parts[0]
@@ -42,10 +52,10 @@ class ParameterParts:
         for tensor in self.parts[1:]:
             dtype = torch.promote_types(dtype, tensor.dtype)
         return TensorSpec(
-            shape=(sum(t.shape[0] for t in self.parts), *first.shape[1:]),
+            shape=self.shape,
             dtype=dtype,
             device=first.device,
-            requires_grad=any(t.requires_grad for t in self.parts),
+            requires_grad=self.requires_grad,
         )
 
     def materialize(self):
@@ -71,7 +81,7 @@ class ParameterParts:
             offset += tensor.numel()
         if offset * first.element_size() > storage.nbytes():
             return torch.cat(self.parts)
-        shape = (sum(t.shape[0] for t in self.parts), *first.shape[1:])
+        shape = self.shape
         return first.as_strided(shape, make_contiguous_strides_for(shape))
 
 
