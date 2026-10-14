@@ -132,11 +132,11 @@ class _MoeEpResourceManager:
             ),
             training_backward_tuning=moe_ep_api.MoeEpTuningConfig(
                 token_back_mode="epi_warps",
-                epi_flag_batch=(2, 2),
+                epi_flag_batch=(4, 2),
                 token_in_flag_batch=8,
                 group_hint=backward_group_hint,
                 reduce_topk_in_kernel=False,
-                dgrad_optimization="baseline",
+                dgrad_optimization="rolling",
             ),
             training_weight_storage_mode=(moe_ep_api.MoeEpNativeWeightStorageMode.CONTIGUOUS),
             validation_mode="trusted",
