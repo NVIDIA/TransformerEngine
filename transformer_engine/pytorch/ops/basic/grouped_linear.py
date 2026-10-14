@@ -351,14 +351,17 @@ class GroupedLinear(BasicOperation):
         grad_weights = tensor_list[2]
         if isinstance(activations, list):
             clear_tensor_data(*activations)
-        else:
-            # Fused MXFP8 grouped MLP saves `GroupedTensor` activations for wgrad.
+        elif isinstance(activations, (GroupedTensor, GroupedTensorStorage)):
+            # Fused block-scaled grouped MLP saves `GroupedTensor` activations for wgrad.
             clear_tensor_data(
                 activations.rowwise_data,
                 activations.columnwise_data,
                 activations.scale_inv,
                 activations.columnwise_scale_inv,
             )
+        else:
+            # Fused BF16 grouped MLP saves plain activation tensors for wgrad.
+            clear_tensor_data(activations)
         if self._accumulate_into_main_grad:
             self._trigger_wgrad_accumulation_and_reduce_hooks()
             return
