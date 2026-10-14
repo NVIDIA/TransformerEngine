@@ -154,7 +154,7 @@ class LinearFwdArgs:
     # --- Weight-workspace caching ---
     is_first_microbatch: Optional[bool]
     cache_weight: bool
-    skip_fp8_weight_update: Optional[bool]
+    skip_fp8_weight_update: Optional[torch.Tensor]
 
     # --- Tensor / sequence parallelism ---
     parallel_mode: Optional[str]
@@ -557,6 +557,7 @@ def _linear_forward_impl(
 
     new_weight_workspace = None
     weightmat = weight
+    update_ws = is_first_microbatch is None or is_first_microbatch
     if fp8 or debug:
         # Configure quantizer
         # No need to set the quantizer states if weight is already quantized
@@ -574,7 +575,6 @@ def _linear_forward_impl(
         elif isinstance(weight, QuantizedTensor):
             weight_quantizer = weight._quantizer
         # Get quantized weight
-        update_ws = is_first_microbatch is None or is_first_microbatch
         weightmat, new_weight_workspace = quantize_weight(
             tensor=weight,
             quantizer=weight_quantizer,
@@ -608,13 +608,24 @@ def _linear_forward_impl(
                 inputmat_total,
                 calibration_config=args.calibration_config,
             )
-        if weight_quantizer is not None:
+        skip_weight_calibration = (
+            # Not capturing weight calibration in CG.
+            args.skip_fp8_weight_update is None
+            # Valid quantized weight cache hit.
+            and args.weight_workspace is not None
+            and weightmat is args.weight_workspace
+            # Non-first ubatch (cached) nor quantizing every step.
+            and not update_ws
+        )
+        if weight_quantizer is not None and not skip_weight_calibration:
             weight_quantizer.calibrate(
                 weightmat,
                 calibration_config=dataclass_replace(
                     args.calibration_config,
                     transformer_engine_calibration_decay=0.0,
                 ),
+                # Skip conditionally for CG replay.
+                skip_calibration=args.skip_fp8_weight_update,
             )
         if input_quantizer is not None:
             args.calibration_buffers.update(

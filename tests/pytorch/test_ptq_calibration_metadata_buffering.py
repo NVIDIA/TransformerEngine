@@ -390,6 +390,90 @@ def test_linear_calibration_config_buffers_delayed_scaling_amax():
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+def test_cached_delayed_scaling_weight_preserves_calibrated_amax():
+    module = Linear(32, 32, params_dtype=torch.bfloat16, device="cuda", bias=False)
+    inp = torch.randn((16, 32), dtype=torch.bfloat16, device="cuda")
+    recipe = DelayedScaling()
+    calibration_config = QuantizationCalibrationConfig()
+    buffer_name = "weight_amax_fp8_delayed_scaling_te_ptq_calibrated"
+
+    with torch.no_grad(), autocast(
+        enabled=True,
+        recipe=recipe,
+        calibration_config=calibration_config,
+    ):
+        module(inp, is_first_microbatch=True)
+    first_amax = module.get_buffer(buffer_name).clone()
+    assert first_amax.item() > 0.0
+
+    with torch.no_grad(), autocast(
+        enabled=True,
+        recipe=recipe,
+        calibration_config=calibration_config,
+    ):
+        module(inp, is_first_microbatch=False)
+
+    torch.testing.assert_close(module.get_buffer(buffer_name), first_amax)
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+def test_cuda_graph_weight_calibration_follows_cache_update_flag():
+    module = Linear(32, 32, params_dtype=torch.bfloat16, device="cuda", bias=False)
+    sample_input = torch.randn(
+        (16, 32),
+        dtype=torch.bfloat16,
+        device="cuda",
+        requires_grad=True,
+    )
+    recipe = DelayedScaling()
+    calibration_config = QuantizationCalibrationConfig()
+    buffer_name = "weight_amax_fp8_delayed_scaling_te_ptq_calibrated"
+    graphed_module = make_graphed_callables(
+        module,
+        (sample_input,),
+        num_warmup_iters=3,
+        enabled=True,
+        recipe=recipe,
+        cache_quantized_params=True,
+        calibration_config=calibration_config,
+    )
+
+    try:
+        with torch.no_grad():
+            module.weight.fill_(2.0)
+        with autocast(
+            enabled=True,
+            recipe=recipe,
+            calibration_config=calibration_config,
+        ):
+            graphed_module(sample_input, is_first_microbatch=True)
+        torch.cuda.synchronize()
+        torch.testing.assert_close(
+            module.get_buffer(buffer_name),
+            torch.full((1,), 2.0, device="cuda"),
+        )
+
+        # A non-first microbatch reuses the cached FP8 weight. Changing the
+        # source parameter verifies that calibration follows the device no-op
+        # flag rather than observing a weight that was not requantized.
+        with torch.no_grad():
+            module.weight.fill_(4.0)
+        with autocast(
+            enabled=True,
+            recipe=recipe,
+            calibration_config=calibration_config,
+        ):
+            graphed_module(sample_input, is_first_microbatch=False)
+        torch.cuda.synchronize()
+        torch.testing.assert_close(
+            module.get_buffer(buffer_name),
+            torch.full((1,), 2.0, device="cuda"),
+        )
+    finally:
+        graphed_module.reset()
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 def test_calibrating_boolean_registers_scaling_factor_buffers():
     module = Linear(32, 32, params_dtype=torch.bfloat16, device="cuda", bias=False)
     inp = torch.randn((16, 32), dtype=torch.bfloat16, device="cuda")
@@ -648,6 +732,44 @@ def test_zero_decay_stores_sanitized_metadata_copy():
     assert calibrated_scale.data_ptr() != observed_scale.data_ptr()
 
 
+@pytest.mark.parametrize(
+    ("calibration_decay", "observed_value", "expected_value"),
+    (
+        (0.0, 2.0, 2.0),
+        (0.5, 3.0, 3.0),
+    ),
+)
+def test_skip_calibration_conditionally_updates_in_place(
+    calibration_decay, observed_value, expected_value
+):
+    quantizer = Quantizer(rowwise=True, columnwise=False)
+    initial_value = torch.tensor([4.0])
+    quantizer._calibration_state = {"amax": initial_value}
+    skip_calibration = torch.ones(1)
+    config = QuantizationCalibrationConfig(
+        transformer_engine_calibration_decay=calibration_decay
+    )
+
+    quantizer._update_calibration_value(
+        "amax",
+        torch.tensor([observed_value]),
+        calibration_config=config,
+        skip_calibration=skip_calibration,
+    )
+    assert quantizer._calibration_state["amax"] is initial_value
+    torch.testing.assert_close(initial_value, torch.tensor([4.0]))
+
+    skip_calibration.zero_()
+    quantizer._update_calibration_value(
+        "amax",
+        torch.tensor([observed_value]),
+        calibration_config=config,
+        skip_calibration=skip_calibration,
+    )
+    assert quantizer._calibration_state["amax"] is initial_value
+    torch.testing.assert_close(initial_value, torch.tensor([expected_value]))
+
+
 def test_decaying_calibration_rejects_metadata_shape_change():
     quantizer = _make_test_quantizer(Float8CurrentScalingQuantizer)
     quantizer._calibration_state = {"scale_inv": torch.ones(1)}
@@ -665,7 +787,7 @@ def test_decaying_calibration_rejects_metadata_shape_change():
     ("transformer_engine_calibration_decay", "initial_scale", "expected_scale"),
     (
         (0.0, None, 0.0),
-        (0.0, 4.0, 0.0),
+        (0.0, 4.0, 4.0),
         (0.5, None, 0.0),
         (0.5, 4.0, 4.0),
     ),

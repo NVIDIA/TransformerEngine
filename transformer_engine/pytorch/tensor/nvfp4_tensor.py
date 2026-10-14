@@ -374,6 +374,7 @@ class NVFP4Quantizer(Quantizer):
         tensor: torch.Tensor,
         *,
         calibration_config: QuantizationCalibrationConfig,
+        skip_calibration: Optional[torch.Tensor] = None,
     ) -> None:
         if self.row_scaled_nvfp4:
             raise NotImplementedError(
@@ -398,6 +399,7 @@ class NVFP4Quantizer(Quantizer):
             "amax",
             observed_amax,
             calibration_config=calibration_config,
+            skip_calibration=skip_calibration,
         )
 
     def _get_calibration_metadata_buffers(self, tensor_name: str) -> Dict[str, torch.Tensor]:

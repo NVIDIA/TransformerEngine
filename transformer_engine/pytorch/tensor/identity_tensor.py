@@ -174,6 +174,7 @@ class IdentityQuantizer(Quantizer):
         tensor: torch.Tensor,
         *,
         calibration_config: QuantizationCalibrationConfig,
+        skip_calibration: Optional[torch.Tensor] = None,
     ) -> None:
         """No-op since identity quantization has no calibration state."""
 

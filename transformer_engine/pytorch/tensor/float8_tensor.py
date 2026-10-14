@@ -137,6 +137,7 @@ class Float8Quantizer(Quantizer):
         tensor: torch.Tensor,
         *,
         calibration_config: QuantizationCalibrationConfig,
+        skip_calibration: Optional[torch.Tensor] = None,
     ) -> None:
         if isinstance(tensor, (QuantizedTensor, QuantizedTensorStorage)):
             # Retrieve the quantization metadata from quantized storage.
@@ -152,6 +153,7 @@ class Float8Quantizer(Quantizer):
             "amax",
             observed_amax,
             calibration_config=calibration_config,
+            skip_calibration=skip_calibration,
         )
 
     def get_columnwise_shape(self, rowwise_data_shape: Iterable[int]) -> Tuple[int, ...]:
@@ -348,6 +350,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
         tensor: torch.Tensor,
         *,
         calibration_config: QuantizationCalibrationConfig,
+        skip_calibration: Optional[torch.Tensor] = None,
     ) -> None:
         """Compute and calibrate quantization metadata."""
         if isinstance(tensor, (QuantizedTensor, QuantizedTensorStorage)):
@@ -379,6 +382,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
             "scale_inv",
             scale_inv,
             calibration_config=calibration_config,
+            skip_calibration=skip_calibration,
         )
 
     def create_tensor_from_data(

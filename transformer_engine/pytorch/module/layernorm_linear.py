@@ -499,6 +499,7 @@ def _layernorm_linear_forward_impl(
     new_weight_workspace = None
     weightmat = weight
     is_weight_param_quantized = False
+    update_ws = is_first_microbatch is None or is_first_microbatch
     if fp8 or debug:
         is_weight_param_quantized = isinstance(weight, QuantizedTensorStorage)
 
@@ -517,7 +518,6 @@ def _layernorm_linear_forward_impl(
             )
 
         # Get quantized weight
-        update_ws = is_first_microbatch is None or is_first_microbatch
         weightmat, new_weight_workspace = quantize_weight(
             tensor=weight,
             quantizer=weight_quantizer,
@@ -552,13 +552,24 @@ def _layernorm_linear_forward_impl(
                 ln_out_total,
                 calibration_config=args.calibration_config,
             )
-        if weight_quantizer is not None:
+        skip_weight_calibration = (
+            # Not capturing weight calibration in CG.
+            args.skip_fp8_weight_update is None
+            # Valid quantized weight cache hit.
+            and args.weight_workspace is not None
+            and weightmat is args.weight_workspace
+            # Non-first ubatch (cached) nor quantizing every step.
+            and not update_ws
+        )
+        if weight_quantizer is not None and not skip_weight_calibration:
             weight_quantizer.calibrate(
                 weightmat,
                 calibration_config=dataclass_replace(
                     args.calibration_config,
                     transformer_engine_calibration_decay=0.0,
                 ),
+                # Skip conditionally for CG replay.
+                skip_calibration=args.skip_fp8_weight_update,
             )
         if input_quantizer is not None:
             args.calibration_buffers.update(

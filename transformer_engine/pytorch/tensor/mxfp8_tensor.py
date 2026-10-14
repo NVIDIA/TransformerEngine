@@ -140,6 +140,7 @@ class MXFP8Quantizer(Quantizer):
         tensor: torch.Tensor,
         *,
         calibration_config: QuantizationCalibrationConfig,
+        skip_calibration: Optional[torch.Tensor] = None,
     ) -> None:
         """Calibrate an MXFP8 tensor."""
         # NOTE(@cspades): Currently, PTQ calibration requirements don't need

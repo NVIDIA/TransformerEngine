@@ -447,6 +447,15 @@ class QuantizationCalibrationConfig:
             )
 
 
+def _resolve_calibration_config(
+    calibrating: bool, calibration_config: Optional[QuantizationCalibrationConfig]
+) -> Optional[QuantizationCalibrationConfig]:
+    """Return the config to calibrate with, or None when not calibrating."""
+    if calibration_config is not None:
+        return calibration_config
+    return QuantizationCalibrationConfig() if calibrating else None
+
+
 @dataclass(frozen=True, slots=True)
 class TEAutocastState:
     """Snapshot of process-global quantization autocast state."""
@@ -827,8 +836,7 @@ class FP8GlobalStateManager:
     ) -> None:
         """Set state and tracking variables for entry into FP8 region."""
 
-        if calibrating and calibration_config is None:
-            calibration_config = QuantizationCalibrationConfig()
+        calibration_config = _resolve_calibration_config(calibrating, calibration_config)
 
         fp8_recipe = get_default_fp8_recipe() if fp8_recipe is None else fp8_recipe
         autocast_key = cls.get_unique_autocast_key(fp8_recipe, fp8_group)
@@ -1093,9 +1101,9 @@ class autocast:
     enabled : bool, default = True
              whether or not to enable low precision quantization (FP8/FP4).
     calibrating : bool, default = False
-                 Enables calibration with the default configuration. Calibration
-                 collects and buffers Transformer Engine calibration metadata even when executing
-                 without quantization enabled.
+                 Enables calibration, using `calibration_config` if provided and the default
+                 configuration otherwise. Calibration collects and buffers Transformer Engine
+                 calibration metadata even when executing without quantization enabled.
     calibration_config : QuantizationCalibrationConfig, default = None
                   Custom configuration for collecting checkpointable quantization scaling
                   factors. Providing a config also enables calibration.
@@ -1110,6 +1118,7 @@ class autocast:
     # to avoid overheads.
     __slots__ = (
         "_enabled",
+        "_calibrating",
         "_calibration_config",
         "_recipe",
         "_amax_reduction_group",
@@ -1127,11 +1136,8 @@ class autocast:
         calibration_config: Optional[QuantizationCalibrationConfig] = None,
     ) -> None:
         self._enabled = enabled
-        self._calibration_config = (
-            QuantizationCalibrationConfig()
-            if calibrating and calibration_config is None
-            else calibration_config
-        )
+        self._calibrating = calibrating
+        self._calibration_config = _resolve_calibration_config(calibrating, calibration_config)
         self._recipe = recipe
         self._amax_reduction_group = amax_reduction_group
         self._graph = _graph
@@ -1149,7 +1155,7 @@ class autocast:
         self._fp8_state = FP8GlobalStateManager.get_autocast_state()
         FP8GlobalStateManager.autocast_enter(
             enabled=self._enabled,
-            calibrating=False,
+            calibrating=self._calibrating,
             calibration_config=self._calibration_config,
             fp8_recipe=self._recipe,
             fp8_group=self._amax_reduction_group,

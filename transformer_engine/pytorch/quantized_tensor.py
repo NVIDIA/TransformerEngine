@@ -617,10 +617,12 @@ class Quantizer(abc.ABC):
         tensor: torch.Tensor,
         *,
         calibration_config: QuantizationCalibrationConfig,
+        skip_calibration: Optional[torch.Tensor] = None,
     ) -> None:
         """Observe a tensor and update persistent calibration state.
 
         The calibration config controls how observations update persistent metadata.
+        If ``skip_calibration`` is nonzero, the persistent state is left unchanged.
         """
 
     def _get_calibration_metadata_buffers(self, tensor_name: str) -> Dict[str, torch.Tensor]:
@@ -647,40 +649,48 @@ class Quantizer(abc.ABC):
         observed_value: Optional[torch.Tensor],
         *,
         calibration_config: QuantizationCalibrationConfig,
+        skip_calibration: Optional[torch.Tensor] = None,
     ) -> None:
         """Merge an observation into quantizer-owned calibration state."""
         if observed_value is None:
             # Un-initialized scale. Ignore it.
             return
+        if skip_calibration is not None:
+            # Capture this skip_calibration tensor that masks
+            # the observed calibration value for non-calibration
+            # steps dynamically during CG replay.
+            observed_value = torch.where(
+                skip_calibration == 0,
+                observed_value,
+                torch.full_like(observed_value, torch.nan),
+            )
         # Convert NaN to zero, which is the default calibration value.
         # Track NaN indices so we can also skip calibration decay.
         observed_mask = ~torch.isnan(observed_value).detach()
         observed_value = torch.nan_to_num(observed_value, nan=0.0).detach()
+        # Retrieve the calibration state buffer.
         calibration_state = self._calibration_state
         calibration_value = calibration_state.get(metadata_name)
         calibration_decay = calibration_config.transformer_engine_calibration_decay
+        if calibration_value is None:
+            # Initialize the calibration buffer. Requires a CUDA graph warmup step.
+            calibration_value = torch.zeros_like(observed_value)
+            calibration_state[metadata_name] = calibration_value
+        if calibration_value.shape != observed_value.shape:
+            raise RuntimeError(
+                "Quantizer calibration value shape changed from "
+                f"{tuple(calibration_value.shape)} to {tuple(observed_value.shape)}"
+            )
         if calibration_decay > 0.0:
-            if calibration_value is not None and calibration_value.shape != observed_value.shape:
-                raise RuntimeError(
-                    "Quantizer calibration value shape changed from "
-                    f"{tuple(calibration_value.shape)} to {tuple(observed_value.shape)}"
-                )
-            if calibration_value is None:
-                # Initialize the rolling activation scaling factor.
-                # Requires CUDA graph warmup step.
-                calibration_value = torch.zeros_like(observed_value)
-                calibration_state[metadata_name] = calibration_value
             # Track a decaying maximum so early-training activation
             # outliers do not permanently determine the inference scale.
             # Only update (and decay) the non-NaN values indexed by the mask.
             decay_tensor = torch.where(observed_mask, calibration_decay, 1.0)
+            observed_value = torch.where(observed_mask, observed_value, calibration_value)
             torch.maximum(calibration_value * decay_tensor, observed_value, out=calibration_value)
         else:
-            # Without scale history, retain the sanitized current metadata
-            # without allocating an additional persistent history buffer.
-            # Requires CUDA graph warmup step, and only access this value
-            # at an appropriate time (e.g. checkpointing) if captured by CG.
-            calibration_state[metadata_name] = observed_value
+            # Update the calibration buffer for non-NaN observed values.
+            torch.where(observed_mask, observed_value, calibration_value, out=calibration_value)
 
     def _share_calibration_state_with(self, quantizer: "Quantizer") -> None:
         """Make a shallow quantizer copy share persistent calibration state."""

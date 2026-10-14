@@ -682,12 +682,12 @@ def _layernorm_mlp_forward_impl(
     new_fc2_weight_workspace = None
     fc1_weight_final = fc1_weight
     fc2_weight_final = fc2_weight
+    update_ws = is_first_microbatch is None or is_first_microbatch
     # FSDP2: Skip columnwise/transpose creation during forward (not
     # recompute) to avoid accumulating FP8 caches across layers.
     # Backward's FSDP2 all-gather will recreate them. (Issue #2681)
     fsdp2_skip_columnwise = is_fsdp2 and not is_recomputation
     if fp8 or debug:
-        update_ws = is_first_microbatch is None or is_first_microbatch
         # If weight is already quantized, weight._quantizer is its true quantizer.
         # for debug mode we create quantizer every iteration, thus we need to set the quantizer states
         if isinstance(fc1_weight, QuantizedTensorStorage) and not debug:
@@ -760,13 +760,24 @@ def _layernorm_mlp_forward_impl(
                 ln_out_total,
                 calibration_config=args.calibration_config,
             )
-        if fc1_weight_quantizer is not None:
+        skip_fc1_weight_calibration = (
+            # Not capturing weight calibration in CG.
+            args.skip_fp8_weight_update is None
+            # Valid quantized weight cache hit.
+            and args.fc1_weight_workspace is not None
+            and fc1_weight_final is args.fc1_weight_workspace
+            # Non-first ubatch (cached) nor quantizing every step.
+            and not update_ws
+        )
+        if fc1_weight_quantizer is not None and not skip_fc1_weight_calibration:
             fc1_weight_quantizer.calibrate(
                 fc1_weight_final,
                 calibration_config=dataclass_replace(
                     args.calibration_config,
                     transformer_engine_calibration_decay=0.0,
                 ),
+                # Skip conditionally for CG replay.
+                skip_calibration=args.skip_fp8_weight_update,
             )
         if fc1_input_quantizer is not None:
             fc1_input_calibration_buffers = fc1_input_quantizer._get_calibration_metadata_buffers(
@@ -888,13 +899,24 @@ def _layernorm_mlp_forward_impl(
             clear_tensor_data(fc1_out)
 
         if should_calibrate:
-            if fc2_weight_quantizer is not None:
+            skip_fc2_weight_calibration = (
+                # Not capturing weight calibration in CG.
+                args.skip_fp8_weight_update is None
+                # Valid quantized weight cache hit.
+                and args.fc2_weight_workspace is not None
+                and fc2_weight_final is args.fc2_weight_workspace
+                # Non-first ubatch (cached) nor quantizing every step.
+                and not update_ws
+            )
+            if fc2_weight_quantizer is not None and not skip_fc2_weight_calibration:
                 fc2_weight_quantizer.calibrate(
                     fc2_weight_final,
                     calibration_config=dataclass_replace(
                         args.calibration_config,
                         transformer_engine_calibration_decay=0.0,
                     ),
+                    # Skip conditionally for CG replay.
+                    skip_calibration=args.skip_fp8_weight_update,
                 )
             args.calibration_buffers.update(fc1_input_calibration_buffers)
             args.calibration_buffers.update(fc1_weight_calibration_buffers)
