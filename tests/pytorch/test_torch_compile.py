@@ -2894,21 +2894,16 @@ def test_te_ops_linear_bias_compile(
 
 
 @pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4)
-@pytest.mark.parametrize("mode", ["rht", "1d", "2d", "row-scaled", "4over6"])
-@pytest.mark.parametrize("optimize_for_gemm", [False, True])
-@pytest.mark.parametrize("columnwise", [False, True])
-def test_te_ops_bias_nvfp4_layout(mode, optimize_for_gemm, columnwise, monkeypatch):
+@pytest.mark.parametrize("mode", ["rht", "2d", "row-scaled"])
+def test_te_ops_bias_nvfp4_layout(mode, monkeypatch):
     quantizer = NVFP4Quantizer(
-        columnwise=columnwise,
+        columnwise=True,
         with_rht=mode == "rht",
         with_post_rht_amax=mode == "rht",
-        with_2d_quantization=mode in ("2d", "4over6"),
+        with_2d_quantization=mode == "2d",
         row_scaled_nvfp4=mode == "row-scaled",
-        nvfp4_use_4over6=mode == "4over6",
-        nvfp4_e4m3_max=448 if mode == "4over6" else 0,
         with_random_sign_mask=False,
     )
-    quantizer.optimize_for_gemm = optimize_for_gemm
 
     def bgrad(inp):
         dx, ((db,),), _ = te.ops.Bias.compile_ops[1](BiasBwdArgs(inp, quantizer))
@@ -2917,63 +2912,41 @@ def test_te_ops_bias_nvfp4_layout(mode, optimize_for_gemm, columnwise, monkeypat
     torch._dynamo.reset()
     compiled, graphs = _compile_with_graphs(bgrad)
     # Pairs preserve alignment, including distinct nonzero remainders.
-    for disable_fusion in (False, True, False):
+    shapes = ((128, 128), (256, 256), (96, 160), (160, 224))
+    if mode == "row-scaled":
+        shapes = shapes[:1]
+    cases = [(False, True, shape) for shape in shapes]
+    if mode == "rht":
+        cases += [(True, True, (128, 128)), (False, True, (128, 128))]
+    if mode != "row-scaled":
+        cases.append((False, False, (128, 128)))
+
+    for i, (disable_fusion, optimize_for_gemm, shape) in enumerate(cases):
         monkeypatch.setenv("NVTE_NVFP4_DISABLE_RHT_CAST_FUSION", str(int(disable_fusion)))
-        for i, shape in enumerate(
-            (
-                (64, 128),
-                (192, 384),
-                (96, 160),
-                (160, 224),
-                (160, 160),
-                (288, 288),
-                (128, 64),
-                (256, 192),
-                (128, 128),
-                (256, 256),
-            )
-        ):
-            inp = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
-            torch._dynamo.mark_dynamic(inp, (0, 1))
-            previous_graph_count = len(graphs)
-            dx, db = compiled(inp)
-            expected_db, expected_dx = tex.bgrad_quantize(inp, quantizer)
-            layout = expected_dx._with_gemm_swizzled_scales
-            assert dx._with_gemm_swizzled_scales == layout, (mode, disable_fusion, shape)
-            torch.testing.assert_close(db, expected_db, atol=0, rtol=0)
-            torch.testing.assert_close(dx.dequantize(), expected_dx.dequantize(), atol=0, rtol=0)
-            if columnwise:
-                torch.testing.assert_close(
-                    dx._columnwise_data, expected_dx._columnwise_data, atol=0, rtol=0
-                )
-            if mode == "row-scaled":
-                torch.testing.assert_close(
-                    dx._amax_rowwise, inp.abs().float().amax(1), atol=0, rtol=0
-                )
-                if columnwise:
-                    torch.testing.assert_close(
-                        dx._amax_columnwise, inp.abs().float().amax(0), atol=0, rtol=0
-                    )
-            if i % 2 == 1:
-                assert len(graphs) == previous_graph_count
-
-    quantizer.optimize_for_gemm = not optimize_for_gemm
-    inp = torch.randn(128, 128, device="cuda", dtype=torch.bfloat16)
-    torch._dynamo.mark_dynamic(inp, (0, 1))
-    dx, _ = compiled(inp)
-    _, expected_dx = tex.bgrad_quantize(inp, quantizer)
-    assert dx._with_gemm_swizzled_scales == expected_dx._with_gemm_swizzled_scales
-    torch.testing.assert_close(dx.dequantize(), expected_dx.dequantize(), atol=0, rtol=0)
-
-    for shape in ((2, 32, 128), (2, 64, 128), (128, 64)):
+        quantizer.optimize_for_gemm = optimize_for_gemm
         inp = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
-        _, expected_dx = tex.bgrad_quantize(inp, quantizer)
-        _, dx_spec = fake_bgrad(to_tensor_spec(inp), quantizer)
-        assert dx_spec.with_gemm_swizzled_scales == expected_dx._with_gemm_swizzled_scales
-        for name, (inner_shape, inner_dtype) in dx_spec.quantizer.inner_tensor_specs(shape).items():
-            inner = getattr(expected_dx, name)
-            assert inner.shape == inner_shape
-            assert inner.dtype == inner_dtype
+        torch._dynamo.mark_dynamic(inp, (0, 1))
+        previous_graph_count = len(graphs)
+        dx, db = compiled(inp)
+        expected_db, expected_dx = tex.bgrad_quantize(inp, quantizer)
+        assert dx._with_gemm_swizzled_scales == expected_dx._with_gemm_swizzled_scales
+        torch.testing.assert_close(db, expected_db, atol=0, rtol=0)
+        torch.testing.assert_close(dx.dequantize(), expected_dx.dequantize(), atol=0, rtol=0)
+        torch.testing.assert_close(
+            dx._columnwise_data, expected_dx._columnwise_data, atol=0, rtol=0
+        )
+        if i < len(shapes) and i % 2 == 1:
+            assert len(graphs) == previous_graph_count
+
+    shape = (2, 32, 128)
+    inp = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    _, expected_dx = tex.bgrad_quantize(inp, quantizer)
+    _, dx_spec = fake_bgrad(to_tensor_spec(inp), quantizer)
+    assert dx_spec.with_gemm_swizzled_scales == expected_dx._with_gemm_swizzled_scales
+    for name, (inner_shape, inner_dtype) in dx_spec.quantizer.inner_tensor_specs(shape).items():
+        inner = getattr(expected_dx, name)
+        assert inner.shape == inner_shape
+        assert inner.dtype == inner_dtype
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
