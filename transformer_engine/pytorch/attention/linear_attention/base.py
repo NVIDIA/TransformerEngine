@@ -120,6 +120,7 @@ class LinearAttentionKernelAdapter(torch.nn.Module):
         self.v_head_dim = v_head_dim
         self._dense_cu_seqlens_key: Optional[Tuple[torch.device, int, int]] = None
         self._dense_cu_seqlens: Optional[torch.Tensor] = None
+        self._op = _import_linear_attention_op(self.op_name, self.variant)
 
     def _validate_qkv_shapes(
         self,
@@ -317,10 +318,9 @@ class LinearAttentionKernelAdapter(torch.nn.Module):
         batch_size = cu_seqlens.shape[0] - 1
         self._validate_initial_state(initial_state, batch_size=batch_size, device=device)
 
-        op = _import_linear_attention_op(self.op_name, self.variant)
         try:
             output, final_state = self._call_op(
-                op,
+                self._op,
                 _to_thd(query_layer, qkv_format),
                 _to_thd(key_layer, qkv_format),
                 _to_thd(value_layer, qkv_format),
