@@ -385,8 +385,18 @@ def test_router_compile_opcheck(dtype, routing_map_format, index_dtype):
         )
 
 
-@pytest.mark.parametrize("qb,overwrite", [(False, True), (True, True), (True, False)])
-def test_router_compile_eager_fallback(qb, overwrite):
+@pytest.mark.parametrize(
+    "qb,overwrite,delta,assume_valid",
+    [
+        (False, True, False, False),
+        (True, True, False, False),
+        (True, False, False, False),
+        (True, False, False, True),
+        (True, False, True, False),
+        (True, True, True, True),
+    ],
+)
+def test_router_compile_eager_fallback(qb, overwrite, delta, assume_valid):
     torch._dynamo.reset()
     logits = torch.randn(32, 32, device="cuda", requires_grad=True)
     bias = torch.zeros(32, device="cuda")
@@ -404,11 +414,13 @@ def test_router_compile_eager_fallback(qb, overwrite):
             None,
             "sigmoid",
             bias,
-            topk_indices=None if qb else indices,
+            topk_indices=indices if not qb or (delta and assume_valid) else None,
             qb_histogram=histogram if qb else None,
             qb_bin_bounds=bounds if qb else None,
             qb_histogram_mode="two_kernel" if qb else None,
             **({} if overwrite else {"overwrite_topk_indices": False}),
+            return_qb_histogram_delta=delta,
+            assume_valid_qb_bin_bounds=assume_valid,
         )
 
     with pytest.warns(UserWarning, match="Falling back to eager execution"):
@@ -418,6 +430,289 @@ def test_router_compile_eager_fallback(qb, overwrite):
     torch._dynamo.reset()
     with pytest.raises(torch._dynamo.exc.Unsupported):
         torch.compile(router, fullgraph=True)(logits)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("mode", ["default", "reduce-overhead"])
+@pytest.mark.parametrize("histogram_mode", ["two_kernel", "fused_atomic"])
+@pytest.mark.parametrize(
+    "routing_map_format,index_dtype",
+    [("bytemap", None), ("bitmap_u8", None)]
+    + [("bytemap", dtype) for dtype in (torch.int16, torch.int32, torch.int64)],
+)
+@pytest.mark.parametrize("topk", [1, 4, 16])
+def test_qb_compile(dtype, mode, histogram_mode, routing_map_format, index_dtype, topk):
+    torch._dynamo.reset()
+    counters.clear()
+    bias = torch.linspace(0.3, 0, 32, device="cuda")
+    histogram = torch.full((32, 31), 7, device="cuda", dtype=torch.int32)
+    bounds = torch.tensor([-1.1, 1.2], device="cuda")
+    indices = (
+        torch.full((2, 32, topk), -1, device="cuda", dtype=index_dtype)
+        if index_dtype is not None
+        else None
+    )
+
+    def router(logits, indices, histogram, bounds):
+        return fused_topk_with_score_function(
+            logits,
+            topk,
+            False,
+            None,
+            None,
+            1.2,
+            "sigmoid",
+            bias,
+            routing_map_format=routing_map_format,
+            topk_indices=indices,
+            qb_histogram=histogram,
+            qb_bin_bounds=bounds,
+            qb_histogram_mode=histogram_mode,
+            overwrite_topk_indices=False,
+            return_qb_histogram_delta=True,
+            assume_valid_qb_bin_bounds=True,
+        )
+
+    compiled = torch.compile(router, fullgraph=True, mode=mode)
+    accumulated = torch.zeros_like(histogram)
+    reference_accumulated = torch.zeros_like(histogram)
+    for step, new_bounds in enumerate(([-1.1, 1.2], [-0.3, 0.7], [-0.8, 1.4])):
+        torch.compiler.cudagraph_mark_step_begin()
+        bounds.copy_(bounds.new_tensor(new_bounds))
+        logits = _compile_logits(dtype)
+        if step == 1:
+            logits = logits.flip(-1).detach().requires_grad_(True)
+        eager_logits = logits.detach().clone().requires_grad_(True)
+        ref_logits = logits.detach().float().requires_grad_(True)
+        histogram_version = histogram._version
+        indices_version = indices._version if indices is not None else None
+        probs, routing, delta = compiled(logits, indices, histogram, bounds)
+        eager_probs, eager_routing, eager_delta = router(eager_logits, indices, histogram, bounds)
+        reference = qb_topk_score_function_pytorch(ref_logits, topk, bias, bounds, 31)
+        ref_probs = reference["probs"] * 1.2
+        ref_map = reference["routing_map"]
+        assert not routing.requires_grad and not delta.requires_grad
+        assert delta.data_ptr() != histogram.data_ptr()
+        assert eager_delta.data_ptr() != histogram.data_ptr()
+        assert histogram._version == histogram_version
+        torch.testing.assert_close(histogram, torch.full_like(histogram, 7 + step))
+        torch.testing.assert_close(delta, eager_delta)
+        torch.testing.assert_close(delta, reference["histogram"])
+        torch.testing.assert_close(routing, eager_routing)
+        if indices is not None:
+            assert routing.shape == indices.shape and routing.dtype == index_dtype
+            assert routing.data_ptr() != indices.data_ptr()
+            assert eager_routing.data_ptr() != indices.data_ptr()
+            assert indices._version == indices_version
+            torch.testing.assert_close(indices, torch.full_like(indices, -1 - step))
+            actual_map = topk_indices_to_routing_map(routing.reshape(-1, topk), 32)
+            torch.testing.assert_close(actual_map.reshape(logits.shape), ref_map)
+            indices.sub_(1)
+        elif routing_map_format == "bitmap_u8":
+            torch.testing.assert_close(routing, _bytemap_to_bitmap_u8(ref_map))
+        else:
+            torch.testing.assert_close(routing, ref_map)
+        accumulated.add_(delta)
+        reference_accumulated.add_(reference["histogram"])
+        torch.testing.assert_close(accumulated, reference_accumulated)
+        torch.testing.assert_close(probs, eager_probs, atol=0, rtol=0)
+        _check_compile_reference(probs, ref_probs, dtype)
+        histogram.add_(1)
+        bounds.add_(0.1)
+        grad = torch.randn((*probs.shape, 2), dtype=dtype, device="cuda")[..., 0]
+        (actual_grad,) = torch.autograd.grad(probs, logits, grad)
+        (eager_grad,) = torch.autograd.grad(eager_probs, eager_logits, grad)
+        (ref_grad,) = torch.autograd.grad(ref_probs, ref_logits, grad.float())
+        torch.testing.assert_close(actual_grad, eager_grad, atol=0, rtol=0)
+        _check_compile_reference(actual_grad, ref_grad, dtype)
+    with torch.no_grad():
+        torch.compiler.cudagraph_mark_step_begin()
+        torch.testing.assert_close(
+            compiled(logits, indices, histogram, bounds),
+            router(logits, indices, histogram, bounds),
+            atol=0,
+            rtol=0,
+        )
+    if mode == "reduce-overhead":
+        assert not counters["inductor"]["cudagraph_skips"]
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("histogram_mode", ["two_kernel", "fused_atomic"])
+def test_qb_compile_dynamic_accumulation(dtype, histogram_mode):
+    torch._dynamo.reset()
+    bias = torch.linspace(0.3, 0, 130, device="cuda")
+    bounds = torch.tensor([-1.0, 1.0], device="cuda")
+    histogram = torch.full((130, 64), 7, device="cuda", dtype=torch.int32)
+    reference_histogram = histogram.clone()
+
+    def router(logits, histogram, bounds):
+        probs, routing, delta = fused_topk_with_score_function(
+            logits,
+            4,
+            False,
+            None,
+            None,
+            None,
+            "sigmoid",
+            bias,
+            "bitmap_u8",
+            qb_histogram=histogram,
+            qb_bin_bounds=bounds,
+            qb_histogram_mode=histogram_mode,
+            return_qb_histogram_delta=True,
+            assume_valid_qb_bin_bounds=True,
+        )
+        return probs, routing, histogram + delta
+
+    compiled = torch.compile(router, fullgraph=True, dynamic=True)
+    for num_tokens in (17, 33, 64):
+        logits = torch.randn(num_tokens, 130, device="cuda", dtype=dtype, requires_grad=True)
+        input_histogram = histogram.clone()
+        probs, routing, histogram = compiled(logits, input_histogram, bounds)
+        reference = qb_topk_score_function_pytorch(logits, 4, bias, bounds, 64, reference_histogram)
+        torch.testing.assert_close(histogram, reference["histogram"])
+        torch.testing.assert_close(routing, _bytemap_to_bitmap_u8(reference["routing_map"]))
+        _check_compile_reference(probs, reference["probs"], dtype)
+        assert histogram.data_ptr() != input_histogram.data_ptr()
+        torch.autograd.grad(probs.sum(), logits)
+        bounds.add_(0.03)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    "histogram_mode", [QBHistogramMode.TWO_KERNEL, QBHistogramMode.FUSED_ATOMIC]
+)
+@pytest.mark.parametrize(
+    "routing_map_format,index_dtype",
+    [(0, None), (1, None)] + [(0, dtype) for dtype in (torch.int16, torch.int32, torch.int64)],
+)
+def test_qb_compile_opcheck(dtype, histogram_mode, routing_map_format, index_dtype):
+    from transformer_engine.pytorch import router
+
+    logits = torch.randn(16, 130, device="cuda", dtype=dtype, requires_grad=True)
+    bias = torch.zeros(130, device="cuda")
+    histogram = torch.full((130, 64), 7, device="cuda", dtype=torch.int32)
+    bounds = torch.tensor([-1.0, 1.0], device="cuda")
+    indices = (
+        torch.full((16, 4), -1, device="cuda", dtype=index_dtype)
+        if index_dtype is not None
+        else None
+    )
+    torch.library.opcheck(
+        router._qb_forward,
+        (
+            logits,
+            4,
+            None,
+            bias,
+            routing_map_format,
+            indices,
+            histogram,
+            bounds,
+            int(histogram_mode),
+        ),
+    )
+
+
+@pytest.mark.parametrize("delta", [False, True])
+def test_qb_trusted_bounds_skip_value_validation(monkeypatch, delta):
+    from transformer_engine.pytorch import router
+
+    logits = torch.randn(8, 16, device="cuda", requires_grad=True)
+    histogram = torch.zeros(16, 32, device="cuda", dtype=torch.int32)
+    bounds = torch.tensor([-1.0, 1.0], device="cuda")
+
+    def unexpected_validation(_):
+        raise AssertionError("trusted QB bounds must not read values on the CPU")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(router, "_validate_qb_bin_bounds", unexpected_validation)
+        fused_topk_with_score_function(
+            logits,
+            4,
+            False,
+            None,
+            None,
+            None,
+            "sigmoid",
+            torch.zeros(16, device="cuda"),
+            qb_histogram=histogram,
+            qb_bin_bounds=bounds,
+            qb_histogram_mode="two_kernel",
+            return_qb_histogram_delta=delta,
+            assume_valid_qb_bin_bounds=True,
+        )
+    bounds.zero_()
+    with pytest.raises(ValueError, match="finite with lower < upper"):
+        fused_topk_with_score_function(
+            logits,
+            4,
+            False,
+            None,
+            None,
+            None,
+            "sigmoid",
+            torch.zeros(16, device="cuda"),
+            qb_histogram=histogram,
+            qb_bin_bounds=bounds,
+            qb_histogram_mode="two_kernel",
+            return_qb_histogram_delta=delta,
+        )
+
+
+@pytest.mark.parametrize("compiled", [False, True])
+@pytest.mark.parametrize("invalid", ["shape", "dtype", "device"])
+def test_qb_trusted_bounds_check_metadata(compiled, invalid):
+    torch._dynamo.reset()
+    logits = torch.randn(8, 16, device="cuda")
+    bias = torch.zeros(16, device="cuda")
+    histogram = torch.zeros(16, 32, device="cuda", dtype=torch.int32)
+    bounds = torch.tensor([-1.0, 1.0], device="cuda")
+    if invalid == "shape":
+        bounds = bounds.reshape(1, 2)
+    elif invalid == "dtype":
+        bounds = bounds.half()
+    else:
+        bounds = bounds.cpu()
+
+    def router(logits, bounds):
+        return fused_topk_with_score_function(
+            logits,
+            4,
+            False,
+            None,
+            None,
+            None,
+            "sigmoid",
+            bias,
+            qb_histogram=histogram,
+            qb_bin_bounds=bounds,
+            qb_histogram_mode="two_kernel",
+            return_qb_histogram_delta=True,
+            assume_valid_qb_bin_bounds=True,
+        )
+
+    if compiled:
+        router = torch.compile(router, fullgraph=True)
+    with pytest.raises(RuntimeError, match="QB bin_bounds"):
+        router(logits, bounds)
+
+
+def test_qb_histogram_delta_requires_qb():
+    logits = torch.randn(8, 16, device="cuda")
+    with pytest.raises(ValueError, match="return_qb_histogram_delta requires"):
+        fused_topk_with_score_function(
+            logits,
+            4,
+            False,
+            None,
+            None,
+            None,
+            "sigmoid",
+            None,
+            return_qb_histogram_delta=True,
+        )
 
 
 # Pytorch-based group topk
@@ -976,7 +1271,8 @@ def test_qb_topk_uses_logits_device(histogram_mode):
 
 @pytest.mark.parametrize("histogram_mode", ["two_kernel", "fused_atomic"])
 @pytest.mark.parametrize("invalid_bounds", ["equal", "reversed", "nonfinite"])
-def test_qb_topk_rejects_invalid_bin_bounds(histogram_mode, invalid_bounds):
+@pytest.mark.parametrize("delta", [False, True])
+def test_qb_topk_rejects_invalid_bin_bounds(histogram_mode, invalid_bounds, delta):
     logits = torch.randn(8, 16, device="cuda", dtype=torch.float32)
     expert_bias = torch.zeros(16, device="cuda", dtype=torch.float32)
     histogram = torch.zeros(16, 32, device="cuda", dtype=torch.int32)
@@ -999,6 +1295,7 @@ def test_qb_topk_rejects_invalid_bin_bounds(histogram_mode, invalid_bounds):
             qb_histogram=histogram,
             qb_bin_bounds=bin_bounds,
             qb_histogram_mode=histogram_mode,
+            return_qb_histogram_delta=delta,
         )
 
 
