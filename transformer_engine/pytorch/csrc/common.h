@@ -339,13 +339,10 @@ class MXFP8Quantizer : public Quantizer {
   std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, bool columnwise) const;
 };
 
-// Flattened row/column alignment for directly emitted GEMM-swizzled scales, or no such path.
-std::optional<std::pair<size_t, size_t>> nvfp4_gemm_swizzled_scales_alignment(
-    bool optimize_for_gemm, bool with_rht, bool with_2d_quantization, bool row_scaled_nvfp4,
-    bool nvfp4_use_4over6, int sm_arch, bool disable_rht_cast_fusion);
-
 class NVFP4Quantizer : public Quantizer {
  public:
+  using ShapeAlignment = std::optional<std::pair<size_t, size_t>>;
+
   // amax reduction for low precision FP4 AG
   bool with_amax_reduction;
   c10::intrusive_ptr<dist_group_type> amax_reduction_group;
@@ -427,7 +424,19 @@ class NVFP4Quantizer : public Quantizer {
    */
   static bool is_eligible_for_2d_swizzle_fusion(const std::vector<size_t>& shape);
 
+  // Flattened row/column alignment for directly emitted GEMM-swizzled scales, or no such path.
+  static ShapeAlignment gemm_swizzled_scales_alignment(bool optimize_for_gemm, bool with_rht,
+                                                       bool with_2d_quantization,
+                                                       bool row_scaled_nvfp4, bool nvfp4_use_4over6,
+                                                       int sm_arch, bool disable_rht_cast_fusion);
+
  private:
+  static ShapeAlignment rht_cast_fusion_alignment(int sm_arch, bool disable_rht_cast_fusion,
+                                                  bool for_grouped_kernel = false);
+  static ShapeAlignment get_2d_swizzle_fusion_alignment(int sm_arch);
+  static bool meets_alignment(const std::vector<size_t>& shape, const ShapeAlignment& alignment);
+  bool emits_gemm_swizzled_scales(const std::vector<size_t>& shape) const;
+
   void quantize_with_rht_unfused_helper(const TensorWrapper& input, TensorWrapper& out,
                                         TensorWrapper& rht_output_t_cpp,
                                         QuantizationConfigWrapper& quant_config,
