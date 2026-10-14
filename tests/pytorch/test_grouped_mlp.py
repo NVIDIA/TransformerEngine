@@ -2123,6 +2123,143 @@ class TestGroupedMLPFusedOp:
             activation="scaled_swiglu",
         )
 
+    @pytest.mark.parametrize("mode", ("frozen_weights", "no_grad"))
+    @pytest.mark.parametrize("quantization", ("mxfp8", "nvfp4_rht"))
+    def test_grouped_mlp_single_group_no_weight_grad(
+        self,
+        *,
+        mode: str,
+        quantization: str,
+        hidden_size: int = 128,
+        tokens: int = 256,
+        dtype: torch.dtype = torch.bfloat16,
+        device: torch.device = "cuda",
+    ) -> None:
+        """Single-group fused grouped MLP when weight gradients are not needed
+
+        Without weight gradients the FC2 input is quantized without
+        column-wise data, which must still run as a dense single-group
+        GEMM rather than a grouped cuBLAS GEMM.
+        """
+
+        maybe_skip_quantization(
+            quantization, dims=(tokens, hidden_size), device=device, dtype=dtype
+        )
+        if not te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
+            pytest.skip("CuTe DSL fused grouped MLP is not supported")
+
+        split_sizes = torch.tensor([tokens], dtype=torch.int, device=device)
+        in_shape = (tokens, hidden_size)
+        fc1_out_features = 2 * hidden_size
+
+        x_ref, x_test = make_reference_and_test_tensors(
+            in_shape,
+            min=-0.25,
+            max=0.25,
+            quantization=quantization,
+            test_dtype=dtype,
+            test_device=device,
+            quantizer_role=QuantizerRole(tensor_type="input"),
+            requires_grad=(mode == "frozen_weights"),
+        )
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            in_shape,
+            min=-0.25,
+            max=0.25,
+            quantization=quantization,
+            test_dtype=dtype,
+            test_device=device,
+            quantizer_role=QuantizerRole(tensor_type="grad_output"),
+            requires_grad=False,
+        )
+        probs_ref, probs_test = make_reference_and_test_tensors(
+            (tokens,),
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+        fc1_w_ref, fc1_w_test = make_reference_and_test_tensors(
+            (fc1_out_features, hidden_size),
+            min=-0.25,
+            max=0.25,
+            quantization=quantization,
+            test_dtype=dtype,
+            test_device=device,
+            quantizer_role=QuantizerRole(tensor_type="weight"),
+            requires_grad=False,
+        )
+        fc2_w_ref, fc2_w_test = make_reference_and_test_tensors(
+            (hidden_size, hidden_size),
+            min=-0.25,
+            max=0.25,
+            quantization=quantization,
+            test_dtype=dtype,
+            test_device=device,
+            quantizer_role=QuantizerRole(tensor_type="weight"),
+            requires_grad=False,
+        )
+
+        # Reference implementation
+        fc1_out = torch.nn.functional.linear(x_ref, fc1_w_ref)
+        fc1_out = fc1_out.reshape(tokens, fc1_out_features // 64, 2, 32).transpose(1, 2)
+        act_in1, act_in2 = fc1_out.reshape(tokens, fc1_out_features).chunk(2, dim=-1)
+        act_out = torch.nn.functional.silu(act_in1) * act_in2
+        y_ref = torch.nn.functional.linear(act_out * probs_ref.unsqueeze(-1), fc2_w_ref)
+        if mode == "frozen_weights":
+            y_ref.backward(dy_ref)
+
+        # Construct operations
+        recipe = make_recipe(quantization)
+        with te.quantized_model_init(enabled=True, recipe=recipe):
+            fc1 = te.ops.GroupedLinear(
+                1,
+                hidden_size,
+                fc1_out_features,
+                bias=False,
+                device=device,
+                dtype=dtype,
+                split_alignment=256,
+            )
+            fc2 = te.ops.GroupedLinear(
+                1,
+                hidden_size,
+                hidden_size,
+                bias=False,
+                device=device,
+                dtype=dtype,
+                split_alignment=256,
+            )
+            module = te.ops.Sequential(fc1, te.ops.ScaledSwiGLU(glu_interleave_size=32), fc2)
+        with torch.no_grad():
+            fc1.weight0.copy_(fc1_w_test)
+            fc2.weight0.copy_(fc2_w_test)
+        for param in module.parameters():
+            param.requires_grad_(False)
+        del fc1_w_test, fc2_w_test
+
+        # Forward (and backward w.r.t. input only for frozen weights)
+        with te.autocast(enabled=True, recipe=recipe):
+            if mode == "no_grad":
+                with torch.no_grad():
+                    y_test = module(x_test, split_sizes, probs_test, split_sizes)
+            else:
+                y_test = module(x_test, split_sizes, probs_test, split_sizes)
+        if mode == "frozen_weights":
+            y_test.backward(dy_test)
+
+        # Check that operations were fused
+        forward_ops = module._module_groups[0]._forward_ops
+        assert len(forward_ops) == 1
+        assert isinstance(forward_ops[0][0], te.ops.fused.GroupedMLP_CuTeGEMMGLU)
+
+        # Loose tols for sanity checking
+        tols = {"rtol": 0.125, "atol": 0.25}
+        assert_close(y_test, y_ref, **tols)
+        if mode == "frozen_weights":
+            assert_close_grads(x_test, x_ref, **tols)
+            assert fc1.weight0.grad is None
+            assert fc2.weight0.grad is None
+
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
     def test_single_grouped_weight_eval_preserves_columnwise_usage(
         self,
@@ -3317,6 +3454,7 @@ class TestGroupedMLPDeterminism:
                     single_grouped_weight=is_glu,
                     device=device,
                     dtype=dtype,
+                    split_alignment=256,
                 ),
                 _make_scaled_activation(activation, glu_interleave_size=32 if is_glu else None),
                 te.ops.GroupedLinear(
@@ -3327,6 +3465,7 @@ class TestGroupedMLPDeterminism:
                     single_grouped_weight=is_glu,
                     device=device,
                     dtype=dtype,
+                    split_alignment=256,
                 ),
             )
 
