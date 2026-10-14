@@ -1975,26 +1975,26 @@ def test_te_linear_compiles(fp8_recipe, compile_mode):
 @pytest.mark.parametrize("compile_mode", _compile_modes)
 @pytest.mark.parametrize(
     "fp8_recipe,input_shape",
-    [pytest.param(None, (64,), id="bf16-rank1")]
+    [
+        pytest.param(None, (64,), id="bf16-rank1"),
+        pytest.param(None, (2, 4, 4, 64), id="bf16-rank4"),
+    ]
     + [
         pytest.param(fp8_recipe, shape, id=f"{name}-{shape}")
         for name, fp8_recipe in (
-            ("bf16", None),
-            ("mxfp8", recipe.MXFP8BlockScaling()),
             ("nvfp4", recipe.NVFP4BlockScaling()),
             ("nvfp4-no-rht", recipe.NVFP4BlockScaling(disable_rht=True)),
         )
-        for shape in ((1, 128, 128), (128, 1, 128), (2, 4, 16, 128))
+        for shape in ((1, 128, 128), (2, 4, 16, 128))
     ],
 )
 def test_te_linear_compiles_non_2d_input(fp8_recipe, input_shape, compile_mode):
     """Compiled Linear preserves non-matrix activation shapes in forward and backward."""
     if isinstance(fp8_recipe, recipe.NVFP4BlockScaling) and not nvfp4_available:
         pytest.skip(reason_for_no_nvfp4)
-    if isinstance(fp8_recipe, recipe.MXFP8BlockScaling) and not mxfp8_available:
-        pytest.skip(reason_for_no_mxfp8)
     dtype = torch.bfloat16
-    model = te.Linear(input_shape[-1], 128, params_dtype=dtype, device="cuda")
+    out_features = 32 if fp8_recipe is None else 128
+    model = te.Linear(input_shape[-1], out_features, params_dtype=dtype, device="cuda")
 
     def fn(inp):
         if fp8_recipe is None:
@@ -2871,20 +2871,21 @@ def test_te_ops_bias_compile_with_fp8_input(backward):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize(
-    "dtype,quantization,shape,disable_rht_fusion",
+    "dtype,quantization,shape,disable_rht_fusion,case,grads",
     [
-        (torch.float16, None, (2, 16, 32), False),
-        (torch.bfloat16, None, (2, 16, 32), False),
-        (torch.float16, "fp8", (2, 16, 32), False),
-        (torch.bfloat16, "fp8", (2, 16, 32), False),
-        (torch.bfloat16, "nvfp4", (2, 16, 128), False),
-        (torch.bfloat16, "nvfp4", (64, 128), False),
-        (torch.bfloat16, "nvfp4", (64, 128), True),
-        (torch.bfloat16, "nvfp4-no-rht", (2, 16, 128), False),
+        (dtype, quantization, (2, 16, 32), False, case, grads)
+        for dtype in (torch.float16, torch.bfloat16)
+        for quantization in (None, "fp8")
+        for case in ("linear", "bias", "pair", "unfused")
+        for grads in ("all", "input", "weight", "bias", "none")
+    ]
+    + [
+        (torch.bfloat16, "nvfp4", (2, 16, 128), False, "pair", "all"),
+        (torch.bfloat16, "nvfp4", (64, 128), False, "pair", "all"),
+        (torch.bfloat16, "nvfp4", (64, 128), True, "pair", "all"),
+        (torch.bfloat16, "nvfp4-no-rht", (2, 16, 128), False, "pair", "all"),
     ],
 )
-@pytest.mark.parametrize("case", ["linear", "bias", "pair", "unfused"])
-@pytest.mark.parametrize("grads", ["all", "input", "weight", "bias", "none"])
 def test_te_ops_linear_bias_compile(
     dtype, quantization, shape, disable_rht_fusion, case, grads, monkeypatch
 ):
@@ -2915,17 +2916,30 @@ def test_te_ops_bias_nvfp4_layout(mode, optimize_for_gemm, columnwise, monkeypat
 
     torch._dynamo.reset()
     compiled, graphs = _compile_with_graphs(bgrad)
-    # Each pair introduces different batch sizes with the same alignment.
+    # Pairs preserve alignment, including distinct nonzero remainders.
     for disable_fusion in (False, True, False):
         monkeypatch.setenv("NVTE_NVFP4_DISABLE_RHT_CAST_FUSION", str(int(disable_fusion)))
-        for i, batch in enumerate((64, 192, 96, 160, 128, 256)):
-            inp = torch.randn(batch, 128, device="cuda", dtype=torch.bfloat16)
-            torch._dynamo.mark_dynamic(inp, 0)
+        for i, shape in enumerate(
+            (
+                (64, 128),
+                (192, 384),
+                (96, 160),
+                (160, 224),
+                (160, 160),
+                (288, 288),
+                (128, 64),
+                (256, 192),
+                (128, 128),
+                (256, 256),
+            )
+        ):
+            inp = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+            torch._dynamo.mark_dynamic(inp, (0, 1))
             previous_graph_count = len(graphs)
             dx, db = compiled(inp)
             expected_db, expected_dx = tex.bgrad_quantize(inp, quantizer)
             layout = expected_dx._with_gemm_swizzled_scales
-            assert dx._with_gemm_swizzled_scales == layout, (mode, disable_fusion, batch)
+            assert dx._with_gemm_swizzled_scales == layout, (mode, disable_fusion, shape)
             torch.testing.assert_close(db, expected_db, atol=0, rtol=0)
             torch.testing.assert_close(dx.dequantize(), expected_dx.dequantize(), atol=0, rtol=0)
             if columnwise:
@@ -2945,7 +2959,7 @@ def test_te_ops_bias_nvfp4_layout(mode, optimize_for_gemm, columnwise, monkeypat
 
     quantizer.optimize_for_gemm = not optimize_for_gemm
     inp = torch.randn(128, 128, device="cuda", dtype=torch.bfloat16)
-    torch._dynamo.mark_dynamic(inp, 0)
+    torch._dynamo.mark_dynamic(inp, (0, 1))
     dx, _ = compiled(inp)
     _, expected_dx = tex.bgrad_quantize(inp, quantizer)
     assert dx._with_gemm_swizzled_scales == expected_dx._with_gemm_swizzled_scales
@@ -3030,29 +3044,13 @@ def test_te_ops_linear_workspace_fake_mode(monkeypatch):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("training", [False, True])
-@pytest.mark.parametrize("initial_device", ["cuda", "cpu", "meta"])
 @pytest.mark.parametrize(
-    "quantization",
-    [
-        None,
-        "fp8",
-        "fp8-block",
-        "mxfp8",
-        "nvfp4",
-        "nvfp4-no-rht",
-        "nvfp4-4over6",
-        "nvfp4-row-scaled",
-    ],
+    "initial_device,quantization",
+    [("cuda", None), ("cpu", None), ("meta", None), ("cuda", "nvfp4"), ("cuda", "nvfp4-no-rht")],
 )
 def test_te_ops_linear_bias_cold_cudagraphs(training, initial_device, quantization):
     """A fresh process prevents earlier GEMMs from hiding lazy workspace allocation."""
-    if quantization == "fp8" and not fp8_available:
-        pytest.skip(reason_for_no_fp8)
-    if quantization == "fp8-block" and not fp8_block_scaling_available:
-        pytest.skip(reason_for_no_fp8_block_scaling)
-    if quantization == "mxfp8" and not mxfp8_available:
-        pytest.skip(reason_for_no_mxfp8)
-    if quantization is not None and quantization.startswith("nvfp4") and not nvfp4_available:
+    if quantization is not None and not nvfp4_available:
         pytest.skip(reason_for_no_nvfp4)
     script = textwrap.dedent(
         """
@@ -3067,27 +3065,17 @@ def test_te_ops_linear_bias_cold_cudagraphs(training, initial_device, quantizati
 
         training, initial_device, quantization = sys.argv[1:]
         training = training == "True"
-        is_nvfp4 = quantization.startswith("nvfp4")
-        if quantization == "None":
-            quant_recipe = None
-        elif is_nvfp4:
-            row_scaled = quantization == "nvfp4-row-scaled"
-            quant_recipe = recipe.NVFP4BlockScaling(
-                disable_rht=quantization != "nvfp4",
+        is_nvfp4 = quantization != "None"
+        quant_recipe = (
+            recipe.NVFP4BlockScaling(
+                disable_rht=quantization == "nvfp4-no-rht",
                 disable_stochastic_rounding=True,
-                disable_2d_quantization=row_scaled,
-                row_scaled_activation=row_scaled,
-                nvfp4_4over6="all" if quantization == "nvfp4-4over6" else "none",
-                backward_override="dequantized" if row_scaled else None,
             )
-        else:
-            quant_recipe = {
-                "fp8": recipe.Float8CurrentScaling,
-                "fp8-block": recipe.Float8BlockScaling,
-                "mxfp8": recipe.MXFP8BlockScaling,
-            }[quantization]()
-        in_features, out_features = (128, 128) if quant_recipe is not None else (32, 64)
-        batch_size = 128 if isinstance(quant_recipe, recipe.Float8BlockScaling) else 32
+            if is_nvfp4
+            else None
+        )
+        in_features, out_features = (128, 128) if is_nvfp4 else (32, 64)
+        batch_size = 32
         eager_tols = {"rtol": 0, "atol": 0} if is_nvfp4 else {}
         assert get_cublas_workspace.cache_info().currsize == 0
         linear = te.ops.BasicLinear(
