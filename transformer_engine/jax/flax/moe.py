@@ -72,7 +72,7 @@ class _MoEBlock(TransformerEngineBase):
         product with ``layer_w0 @ wi_1``. Default ``"silu"``.
 
     score_function : Union[str, ScoreFunction]
-        ``"softmax"`` (default) or ``"sigmoid"`` for the routing scores.
+        ``"softmax"`` (default), ``"sigmoid"``, or ``"sqrtsoftplus"`` for the routing scores.
     use_pre_softmax : bool
         Apply softmax before topk (vs. after).
     num_groups, group_topk : Optional[int]
@@ -82,7 +82,7 @@ class _MoEBlock(TransformerEngineBase):
     use_expert_routing_bias : bool
         If ``True``, registers a per-expert routing bias (shape ``[E]``)
         used by the topk selection. Only meaningful with
-        ``score_function="sigmoid"``; the underlying primitive validates
+        ``score_function="sigmoid"`` or ``"sqrtsoftplus"``; the underlying primitive validates
         the pairing.
     aux_loss_coeff : float
         If ``> 0``, return the MoE auxiliary load-balancing loss scalar

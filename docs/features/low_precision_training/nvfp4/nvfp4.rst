@@ -250,6 +250,60 @@ Supported devices
 
 ----
 
+
+Quantizer
+---------
+
+.. tabs::
+
+   .. tab:: PyTorch
+
+      NVFP4 uses :class:`~transformer_engine.pytorch.NVFP4Quantizer`. It
+      implements the two-level scaling described above: an FP8 (E4M3) scale
+      per 16-element block plus one FP32 scale per tensor. Further keyword
+      options select the recipe variations from this page (random Hadamard
+      transforms, stochastic rounding, 2D weight scaling); they are internal
+      knobs and may change without notice.
+
+      .. code-block:: python
+
+         import torch
+         import transformer_engine.pytorch as te
+
+         tensor = torch.randn(256, 256, device="cuda", dtype=torch.bfloat16)
+
+         quantizer = te.NVFP4Quantizer(
+             fp4_dtype=te.DType.kFloat4E2M1,
+             rowwise=True,
+             columnwise=True,
+         )
+
+         qtensor = quantizer(tensor)
+         roundtrip = qtensor.dequantize()
+
+   .. tab:: JAX
+
+      NVFP4 uses its own ``NVFP4Quantizer``, with the same two-level scaling.
+      ``ScalingMode.NVFP4_1D_SCALING`` selects per-block scaling only,
+      ``ScalingMode.NVFP4_2D_SCALING`` adds 2D weight scaling.
+
+      .. code-block:: python
+
+         import jax.numpy as jnp
+         from transformer_engine.jax.quantize import (
+             QuantizerFactory, ScalingMode, QuantizeLayout,
+         )
+
+         x = jnp.ones((256, 256), dtype=jnp.bfloat16)
+
+         quantizer = QuantizerFactory.create(
+             scaling_mode=ScalingMode.NVFP4_1D_SCALING,
+             q_dtype=jnp.float4_e2m1fn,
+             q_layout=QuantizeLayout.ROWWISE,
+         )
+         qtensor = quantizer.quantize(x)
+         roundtrip = qtensor.dequantize()
+
 Developer Notes
 ---------------
 

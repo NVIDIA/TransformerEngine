@@ -93,6 +93,15 @@ Optional Dependencies
    :Default: ``0``
    :Description: Enable NVSHMEM support. When set to ``1``, requires ``NVSHMEM_HOME`` to be set to the NVSHMEM installation directory.
 
+.. envvar:: NVTE_WITH_CUTEDSL
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Enable CuTeDSL support when building ``libtransformer_engine.so``. When set to ``1``, requires
+                 CPython Stable ABIs from Python 3.10 and above, and ``apache-tvm-ffi`` installed.
+                 Note: when linking ``libtransformer_engine.so`` built with ``NVTE_WITH_CUTEDSL=1`` to a standalone C++ executable,
+                 you must provide the definition of these CPython symbols. See ``tests/cpp/CMakeLists.txt`` for an example.
+
 .. envvar:: NVTE_BUILD_ACTIVATION_WITH_FAST_MATH
 
    :Type: CMake option
@@ -129,6 +138,20 @@ General
    :Description: Size in MiB of the internal ``NVTETensor`` handle pool. Increase this
                  value if an application legitimately creates more tensor handles than
                  the default pool can hold.
+
+.. envvar:: NVTE_ENABLE_CUTEDSL_BACKEND
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Use CuTeDSL kernel implementations when available. This requires that Transformer Engine was built with ``NVTE_WITH_CUTEDSL=1``.
+                 It also requires ``apache-tvm-ffi``, ``nvidia-cutlass-dsl`` to be installed and you are using CPython 3.10 or later.
+                 If these requirements are not met, Transformer Engine will fall back to using CUDA C++ kernels if possible.
+
+.. envvar:: NVTE_WARN_IF_CUTEDSL_BACKEND_NOT_CHOSEN
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Warn when TE falls back to the CUDA C++ kernels instead of dispatching to available CuTeDSL kernels. Useful to verify if the CuTeDSL path is taken.
 
 .. envvar:: NVTE_GROUPED_TENSOR_HANDLE_POOL_SIZE_MB
 
@@ -190,17 +213,17 @@ backend-selection overview.
    :Default: ``1``
    :Description: Enable or disable UnfusedDotProductAttention backend (native PyTorch). When set to ``0``, UnfusedDotProductAttention will not be used.
 
-.. envvar:: NVTE_FUSED_ATTN_BACKEND
-
-   :Type: ``int`` (1 or 2)
-   :Default: Auto-selected
-   :Description: Request a cuDNN FusedAttention backend when that request is supported by the active fused-attention path. ``1`` = F16_arbitrary_seqlen (cuDNN, any seq len), ``2`` = FP8 backend. If not set, the backend is automatically selected based on the input configuration. BF16/FP16 attention uses sub-backend ``1`` when eligible. FP8 attention uses sub-backend ``2`` when FP8 DPA is enabled and supported by the architecture, cuDNN version, and input configuration.
-
 .. envvar:: NVTE_FUSED_ATTN_USE_FAv2_BWD
 
    :Type: ``int`` (0 or 1)
    :Default: ``0``
    :Description: When using FusedAttention, use FlashAttention-2 implementation for the backward pass instead of the cuDNN implementation. This can be useful due to performance differences between various versions of flash-attn and FusedAttention.
+
+.. envvar:: NVTE_FUSED_ATTN_CACHE_DEBUG
+
+   :Type: ``int`` (0, 1 or 2), optionally followed by ``:<ranks>``
+   :Default: ``0``
+   :Description: Log FusedAttention graph cache activity to stderr, prefixed with ``[FUSED-ATTN-CACHE]``. ``1`` prints an end-of-run summary of the cache counters and the mean time of each cuDNN build stage. ``2`` additionally traces every event as it happens: each graph built, each graph cuDNN accepts and the cache keeps, each lookup and whether it hit or missed, each first execution that compiles kernels, and each execution. When the launcher exports a rank, only rank 0 logs; append ``:<ranks>`` to override, as in ``1:all`` for level 1 on every rank or ``2:0,3`` for level 2 on ranks 0 and 3.
 
 .. envvar:: NVTE_ALLOW_NONDETERMINISTIC_ALGO
 
@@ -305,7 +328,7 @@ Kernel Configuration
 
    :Type: ``int`` (0 or 1)
    :Default: ``0``
-   :Description: Enable fast math optimizations in runtime-compiled (NVRTC) kernels. This trades numerical accuracy for performance. These optimizations are experimental and inconsistently implemented.
+   :Description: Enable fast math optimizations in runtime-compiled (NVRTC / CuTeDSL) kernels. This trades numerical accuracy for performance. These optimizations are experimental and inconsistently implemented.
 
 .. envvar:: NVTE_DISABLE_NVRTC
 
@@ -362,7 +385,7 @@ Torch Compilation and Fusion
 
    :Type: ``int`` (0 or 1)
    :Default: ``1``
-   :Description: Enable PyTorch 2.x ``torch.compile`` support for compatible Transformer Engine operations. When set to ``0``, disables compilation support and uses regular PyTorch eager mode.
+   :Description: Enable Transformer Engine's internal ``torch.compile``-based kernel fusions (e.g. bias+GeLU, bias+dropout). When set to ``0``, these fusions run as separate eager operations. Does not affect compiling TE modules with ``torch.compile``.
 
 .. envvar:: NVTE_BIAS_GELU_NVFUSION
 

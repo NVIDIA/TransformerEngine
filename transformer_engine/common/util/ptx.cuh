@@ -5,7 +5,7 @@
  ************************************************************************/
 
 /*! \file ptx.cuh
- *  \brief BW PTX
+*  \brief Helper functions with explicit PTX instructions
  */
 
 #ifndef TRANSFORMER_ENGINE_PTX_CUH_
@@ -298,53 +298,6 @@ __device__ __forceinline__ void mbarrier_wait_parity_acquire_cta_shared_cta(uint
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
-__device__ __forceinline__ void try_cancel_cta(uint64_t *mbar, __uint128_t *response_data_ptr) {
-  constexpr bool is_blackwell = ARCH_BLACKWELL_FAMILY;
-  if constexpr (is_blackwell) {
-    uint32_t mbar_ptr = __cvta_generic_to_shared(mbar);
-    uint32_t workID_response = __cvta_generic_to_shared(response_data_ptr);
-    asm volatile(
-        "clusterlaunchcontrol.try_cancel.async.mbarrier::complete_tx::bytes.multicast::cluster::"
-        "all.b128 "
-        "[%0], [%1];" ::"r"(workID_response),
-        "r"(mbar_ptr));
-  } else {
-    NVTE_DEVICE_ERROR(
-        "Cluster Launch Control PTX instructions are architecture-specific. "
-        "Try recompiling with sm_XXXa instead of sm_XXX.");
-  }
-}
-
-__device__ __forceinline__ void get_cancelled_cta_id_2D(__uint128_t *response_data_ptr,
-                                                        int32_t &ctaid_X, int32_t &ctaid_Y) {
-  constexpr bool is_blackwell = ARCH_BLACKWELL_FAMILY;
-  if constexpr (is_blackwell) {
-    uint32_t workID_response = __cvta_generic_to_shared(response_data_ptr);
-    asm volatile(
-        "{\n\t"
-        ".reg .s32 x_ctaid; \n\t"
-        ".reg .s32 y_ctaid; \n\t"
-        "mov .s32 x_ctaid, -1; \n\t"
-        "mov .s32 y_ctaid, -1; \n\t"
-        ".reg.b128 try_cancel_response; \n\t"
-        "ld.shared.b128 try_cancel_response, [%2]; \n\t"
-        ".reg .pred P1; \n\t"
-        "clusterlaunchcontrol.query_cancel.is_canceled.pred.b128 P1, try_cancel_response; \n\t"
-        "@P1 clusterlaunchcontrol.query_cancel.get_first_ctaid.v4.b32.b128 {x_ctaid, y_ctaid, _, "
-        "_}, try_cancel_response; \n\t"
-        "mov .s32 %0, x_ctaid; \n\t"
-        "mov .s32 %1, y_ctaid; \n\t"
-        "}\n\t"
-        : "=r"(ctaid_X), "=r"(ctaid_Y)
-        : "r"(workID_response)
-        : "memory");
-  } else {
-    NVTE_DEVICE_ERROR(
-        "Cluster Launch Control PTX instructions are architecture-specific. "
-        "Try recompiling with sm_XXXa instead of sm_XXX.");
-  }
-}
-
 constexpr uint32_t BF16_MANTISSA_BITS = 7;
 constexpr uint32_t FP32_MANTISSA_BITS = 23;
 constexpr uint32_t FP32_EXPONENT_BIAS = 127;
@@ -385,40 +338,6 @@ __device__ __forceinline__ float exp2f(e8m0_t biased_exp) {
   // 2^-127 is subnormal, so it cannot be built by shifting into the exponent field.
   if (biased_exp == 0) return __int_as_float(0x00400000);
   return __int_as_float(biased_exp << FP32_MANTISSA_BITS);
-}
-
-__device__ __forceinline__ e8m0_t float_to_e8m0(float val) {
-  constexpr bool is_blackwell = ARCH_BLACKWELL_FAMILY;
-  if constexpr (is_blackwell) {
-    uint16_t out;
-    asm volatile(
-        "{\n"
-        "cvt.rp.satfinite.ue8m0x2.f32  %0, 0.0, %1;\n"
-        "}"
-        : "=h"(out)
-        : "f"(val));
-    return *reinterpret_cast<e8m0_t *>(&out);
-  } else {
-    // TODO: nan/inf needs to be set for any value
-    // of nan/inf in input not just amax.
-    if (isnan(val)) {
-      return 0xFF;
-    }
-    if (isinf(val)) {
-      return 0xFE;
-    }
-    if (val == 0.0f) {
-      return 0x00;
-    }
-    uint32_t val_u32 = *reinterpret_cast<uint32_t *>(&val);
-    e8m0_t exponent = (val_u32 >> FP32_MANTISSA_BITS);
-    uint32_t mantissa = val_u32 & 0x7FFFFF;
-    // Round up exponent and deal with satfinite.
-    if ((mantissa > 0 && exponent != 0xFE) && !(exponent == 0 && mantissa <= 0x400000)) {
-      ++exponent;
-    }
-    return exponent;
-  }
 }
 
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async-bulk-tensor
@@ -625,388 +544,6 @@ __device__ __forceinline__ float stochastic_round_fp4_e2m1(const float x, const 
   const float inv_step_t = (t >= 4.0f) ? 0.5f : ((t >= 2.0f) ? 1.0f : 2.0f);
   const float q = fminf(floorf(t * inv_step_t) * step_t, max_norm);
   return copysignf(q, (x != x) ? 1.0f : x);
-}
-
-__device__ __forceinline__ fp4e2m1x4 mul_cvt_bf16_to_fp4_4x_with_stochastic_rounding(
-    const uint64_t in_4x, const float2 scale, const uint32_t rbits) {
-  uint16_t out_4x = 0;
-  constexpr bool has_rs = ARCH_HAS_STOCHASTIC_ROUNDING;
-  if constexpr (has_rs) {
-    asm volatile(
-        "{\n"
-        ".reg.b64 v01; \n\t"
-        ".reg.b64 v23; \n\t"
-        ".reg.b16 v0_bf16; \n\t"
-        ".reg.b16 v1_bf16; \n\t"
-        ".reg.b16 v2_bf16; \n\t"
-        ".reg.b16 v3_bf16; \n\t"
-        ".reg.b32 v0; \n\t"
-        ".reg.b32 v1; \n\t"
-        ".reg.b32 v2; \n\t"
-        ".reg.b32 v3; \n\t"
-        "mov.b64 {v0_bf16, v1_bf16, v2_bf16, v3_bf16} , %1; \n\t"
-        "cvt.f32.bf16 v0, v0_bf16; \n\t"
-        "cvt.f32.bf16 v1, v1_bf16; \n\t"
-        "cvt.f32.bf16 v2, v2_bf16; \n\t"
-        "cvt.f32.bf16 v3, v3_bf16; \n\t"
-        "mov.b64 v01, {v0, v1}; \n\t"
-        "mov.b64 v23, {v2, v3}; \n\t"
-        "mul.f32x2 v01, v01, %2; \n\t"  // mind the shuffled elements order
-        "mul.f32x2 v23, v23, %2; \n\t"  // mind the shuffled elements order
-        "mov.b64 {v1, v0}, v01; \n\t"
-        "mov.b64 {v3, v2}, v23; \n\t"
-        "cvt.rs.satfinite.e2m1x4.f32 %0, {v2, v3, v0, v1}, %3; \n\t"  // mind the shuffled elements order
-        "}"
-        : "=h"(out_4x)
-        : "l"(in_4x), "l"(reinterpret_cast<const uint64_t &>(scale)), "r"(rbits));
-  } else {
-    // mul.f32x2 above applies scale.x to the even elements and scale.y to the odd ones.
-    const bf16 *vals = reinterpret_cast<const bf16 *>(&in_4x);
-    const float q0 = stochastic_round_fp4_e2m1(static_cast<float>(vals[0]) * scale.x, rbits);
-    const float q1 = stochastic_round_fp4_e2m1(static_cast<float>(vals[1]) * scale.y, rbits >> 8);
-    const float q2 = stochastic_round_fp4_e2m1(static_cast<float>(vals[2]) * scale.x, rbits >> 16);
-    const float q3 = stochastic_round_fp4_e2m1(static_cast<float>(vals[3]) * scale.y, rbits >> 24);
-    const fp4e2m1x4 packed(make_float4(q0, q1, q2, q3));
-    out_4x = *reinterpret_cast<const uint16_t *>(&packed);
-  }
-  return *reinterpret_cast<fp4e2m1x4 *>(&out_4x);
-}
-
-__device__ __forceinline__ fp4e2m1x4 mul_cvt_bf16_to_fp4_4x_with_rn(const uint64_t in_4x,
-                                                                    const float2 scale,
-                                                                    const uint32_t rbits) {
-  constexpr bool is_blackwell = ARCH_BLACKWELL_FAMILY;
-  uint32_t out_4x = 0;  // Only need 16 bit. Using 32 bit container for packing.
-  if constexpr (is_blackwell) {
-    // NOTE: rbits unused for rn.
-    asm volatile(
-        "{\n"
-        ".reg.b64 v01; \n\t"
-        ".reg.b64 v23; \n\t"
-        ".reg.b16 v0_bf16; \n\t"
-        ".reg.b16 v1_bf16; \n\t"
-        ".reg.b16 v2_bf16; \n\t"
-        ".reg.b16 v3_bf16; \n\t"
-        ".reg.b32 v0; \n\t"
-        ".reg.b32 v1; \n\t"
-        ".reg.b32 v2; \n\t"
-        ".reg.b32 v3; \n\t"
-        ".reg.b8 f0; \n\t"
-        ".reg.b8 f1; \n\t"
-        "mov.b64 {v0_bf16, v1_bf16, v2_bf16, v3_bf16} , %1; \n\t"
-        "cvt.f32.bf16 v0, v0_bf16; \n\t"
-        "cvt.f32.bf16 v1, v1_bf16; \n\t"
-        "cvt.f32.bf16 v2, v2_bf16; \n\t"
-        "cvt.f32.bf16 v3, v3_bf16; \n\t"
-        "mov.b64 v01, {v0, v1}; \n\t"
-        "mov.b64 v23, {v2, v3}; \n\t"
-        "mul.f32x2 v01, v01, %2; \n\t"  // mind the shuffled elements order
-        "mul.f32x2 v23, v23, %2; \n\t"  // mind the shuffled elements order
-        "mov.b64 {v1, v0}, v01; \n\t"
-        "mov.b64 {v3, v2}, v23; \n\t"
-        "cvt.rn.satfinite.e2m1x2.f32 f0, v0, v1;\n\t"
-        "cvt.rn.satfinite.e2m1x2.f32 f1, v2, v3;\n\t"
-        "mov.b32 %0, {f0, f1, f0, f1};\n\t"
-        "}"
-        : "=r"(out_4x)
-        : "l"(in_4x), "l"(reinterpret_cast<const uint64_t &>(scale)));
-  } else {
-    NVTE_DEVICE_ERROR(
-        "FP4 cvt PTX instructions are architecture-specific. "
-        "Try recompiling with sm_XXXa instead of sm_XXX.");
-  }
-  return reinterpret_cast<fp4e2m1x4 *>(&out_4x)[0];
-}
-
-template <bool USE_STOCHASTIC_ROUNDING>
-__device__ __forceinline__ fp4e2m1x4 mul_cvt_bf16_to_fp4_4x(const uint64_t in_4x,
-                                                            const float2 scale,
-                                                            const uint32_t rbits) {
-  if constexpr (USE_STOCHASTIC_ROUNDING) {
-    return mul_cvt_bf16_to_fp4_4x_with_stochastic_rounding(in_4x, scale, rbits);
-  } else {
-    return mul_cvt_bf16_to_fp4_4x_with_rn(in_4x, scale, rbits);
-  }
-}
-
-__device__ __forceinline__ fp4e2m1x4 mul_cvt_fp32_to_fp4_4x_with_stochastic_rounding(
-    const float2 in01, const float2 in23, const float2 scale, const uint32_t rbits) {
-  uint16_t out_4x = 0;
-  constexpr bool has_rs = ARCH_HAS_STOCHASTIC_ROUNDING;
-  if constexpr (has_rs) {
-    asm volatile(
-        "{\n"
-        ".reg.b64 v01; \n\t"
-        ".reg.b64 v23; \n\t"
-        ".reg.b32 v0; \n\t"
-        ".reg.b32 v1; \n\t"
-        ".reg.b32 v2; \n\t"
-        ".reg.b32 v3; \n\t"
-        "mov.b64 {v0, v1} , %1; \n\t"
-        "mov.b64 {v2, v3} , %2; \n\t"
-        "mov.b64 v01, {v0, v1}; \n\t"
-        "mov.b64 v23, {v2, v3}; \n\t"
-        "mul.f32x2 v01, v01, %3; \n\t"  // mind the shuffled elements order
-        "mul.f32x2 v23, v23, %3; \n\t"  // mind the shuffled elements order
-        "mov.b64 {v1, v0}, v01; \n\t"
-        "mov.b64 {v3, v2}, v23; \n\t"
-        "cvt.rs.satfinite.e2m1x4.f32 %0, {v2, v3, v0, v1}, %4; \n\t"  // mind the shuffled elements order
-        "}"
-        : "=h"(out_4x)
-        : "l"(reinterpret_cast<const uint64_t &>(in01)),
-          "l"(reinterpret_cast<const uint64_t &>(in23)),
-          "l"(reinterpret_cast<const uint64_t &>(scale)), "r"(rbits));
-  } else {
-    const float q0 = stochastic_round_fp4_e2m1(in01.x * scale.x, rbits);
-    const float q1 = stochastic_round_fp4_e2m1(in01.y * scale.y, rbits >> 8);
-    const float q2 = stochastic_round_fp4_e2m1(in23.x * scale.x, rbits >> 16);
-    const float q3 = stochastic_round_fp4_e2m1(in23.y * scale.y, rbits >> 24);
-    const fp4e2m1x4 packed(make_float4(q0, q1, q2, q3));
-    out_4x = *reinterpret_cast<const uint16_t *>(&packed);
-  }
-  return *reinterpret_cast<fp4e2m1x4 *>(&out_4x);
-}
-
-__device__ __forceinline__ fp4e2m1x4 mul_cvt_fp32_to_fp4_4x_with_rn(const float2 in01,
-                                                                    const float2 in23,
-                                                                    const float2 scale,
-                                                                    const uint32_t rbits) {
-  constexpr bool is_blackwell = ARCH_BLACKWELL_FAMILY;
-  uint32_t out_4x = 0;  // Only need 16 bit. Using 32 bit container for packing.
-  if constexpr (is_blackwell) {
-    // NOTE: rbits unused for rn.
-    asm volatile(
-        "{\n"
-        ".reg.b64 v01; \n\t"
-        ".reg.b64 v23; \n\t"
-        ".reg.b32 v0; \n\t"
-        ".reg.b32 v1; \n\t"
-        ".reg.b32 v2; \n\t"
-        ".reg.b32 v3; \n\t"
-        ".reg.b8 f0; \n\t"
-        ".reg.b8 f1; \n\t"
-        "mov.b64 {v0, v1} , %1; \n\t"
-        "mov.b64 {v2, v3} , %2; \n\t"
-        "mov.b64 v01, {v0, v1}; \n\t"
-        "mov.b64 v23, {v2, v3}; \n\t"
-        "mul.f32x2 v01, v01, %3; \n\t"  // mind the shuffled elements order
-        "mul.f32x2 v23, v23, %3; \n\t"  // mind the shuffled elements order
-        "mov.b64 {v1, v0}, v01; \n\t"
-        "mov.b64 {v3, v2}, v23; \n\t"
-        "cvt.rn.satfinite.e2m1x2.f32 f0, v0, v1;\n\t"
-        "cvt.rn.satfinite.e2m1x2.f32 f1, v2, v3;\n\t"
-        "mov.b32 %0, {f0, f1, f0, f1};\n\t"
-        "}"
-        : "=r"(out_4x)
-        : "l"(reinterpret_cast<const uint64_t &>(in01)),
-          "l"(reinterpret_cast<const uint64_t &>(in23)),
-          "l"(reinterpret_cast<const uint64_t &>(scale)));
-  } else {
-    NVTE_DEVICE_ERROR(
-        "FP4 cvt PTX instructions are architecture-specific. "
-        "Try recompiling with sm_XXXa instead of sm_XXX.");
-  }
-  return reinterpret_cast<fp4e2m1x4 *>(&out_4x)[0];
-}
-
-template <bool USE_STOCHASTIC_ROUNDING>
-__device__ __forceinline__ fp4e2m1x4 mul_cvt_fp32_to_fp4_4x(const float2 in01, const float2 in23,
-                                                            const float2 scale,
-                                                            const uint32_t rbits) {
-  if constexpr (USE_STOCHASTIC_ROUNDING) {
-    return mul_cvt_fp32_to_fp4_4x_with_stochastic_rounding(in01, in23, scale, rbits);
-  } else {
-    return mul_cvt_fp32_to_fp4_4x_with_rn(in01, in23, scale, rbits);
-  }
-}
-
-template <typename SCALING_COEFFICIENT_TYPE>
-__device__ __forceinline__ uint32_t mul_cvt_bf16_to_fp4_8x_round_to_nearest(
-    const uint64_t in03, const uint64_t in47, const SCALING_COEFFICIENT_TYPE scaling_coefficient) {
-  uint32_t out_8x = 0;
-  constexpr bool is_blackwell = ARCH_BLACKWELL_FAMILY;
-  if constexpr (is_blackwell) {
-    if constexpr (std::is_same<SCALING_COEFFICIENT_TYPE, bf16>::value) {
-      asm volatile(
-          "{\n"
-          ".reg.f32 zero; \n\t"
-          "mov.b32 zero, 0; \n\t"
-          ".reg.b16 scaling_coeff; \n\t"
-          "mov.b16 scaling_coeff, %3; \n\t"
-          ".reg.b16 v0_h, v1_h, v2_h, v3_h, v4_h, v5_h, v6_h, v7_h; \n\t"
-          "mov.b64 {v0_h, v1_h, v2_h, v3_h}, %1; \n\t"
-          "mov.b64 {v4_h, v5_h, v6_h, v7_h}, %2; \n\t"
-
-          ".reg.f32 v0, v1, v2, v3, v4, v5, v6, v7; \n\t"
-          "fma.rn.f32.bf16 v0, v0_h, scaling_coeff, zero; \n\t"
-          "fma.rn.f32.bf16 v1, v1_h, scaling_coeff, zero; \n\t"
-          "fma.rn.f32.bf16 v2, v2_h, scaling_coeff, zero; \n\t"
-          "fma.rn.f32.bf16 v3, v3_h, scaling_coeff, zero; \n\t"
-          "fma.rn.f32.bf16 v4, v4_h, scaling_coeff, zero; \n\t"
-          "fma.rn.f32.bf16 v5, v5_h, scaling_coeff, zero; \n\t"
-          "fma.rn.f32.bf16 v6, v6_h, scaling_coeff, zero; \n\t"
-          "fma.rn.f32.bf16 v7, v7_h, scaling_coeff, zero; \n\t"
-
-          ".reg.b8 f0, f1, f2, f3; \n\t"
-          // Elements reordered to match e2m1x4 packing order (v1,v0)
-          "cvt.rn.satfinite.e2m1x2.f32 f0, v1, v0;\n\t"
-          "cvt.rn.satfinite.e2m1x2.f32 f1, v3, v2;\n\t"
-          "cvt.rn.satfinite.e2m1x2.f32 f2, v5, v4;\n\t"
-          "cvt.rn.satfinite.e2m1x2.f32 f3, v7, v6;\n\t"
-          "mov.b32 %0, {f0, f1, f2, f3};\n"
-          "}"
-          : "=r"(out_8x)
-          : "l"(in03), "l"(in47), "h"(reinterpret_cast<const uint16_t &>(scaling_coefficient)));
-    } else if constexpr (std::is_same<SCALING_COEFFICIENT_TYPE, float>::value) {
-      asm volatile(
-          "{\n"
-          ".reg.b64 scaling_coeff_2x; \n\t"
-          "mov.b64 scaling_coeff_2x, {%3, %3}; \n\t"
-          ".reg.b16 v0_bf16, v1_bf16, v2_bf16, v3_bf16, v4_bf16, v5_bf16, v6_bf16, v7_bf16; \n\t"
-          "mov.b64 {v0_bf16, v1_bf16, v2_bf16, v3_bf16}, %1; \n\t"
-          "mov.b64 {v4_bf16, v5_bf16, v6_bf16, v7_bf16}, %2; \n\t"
-
-          ".reg.b32 v0, v1, v2, v3, v4, v5, v6, v7; \n\t"
-          "cvt.f32.bf16 v0, v0_bf16; \n\t"
-          "cvt.f32.bf16 v1, v1_bf16; \n\t"
-          "cvt.f32.bf16 v2, v2_bf16; \n\t"
-          "cvt.f32.bf16 v3, v3_bf16; \n\t"
-          "cvt.f32.bf16 v4, v4_bf16; \n\t"
-          "cvt.f32.bf16 v5, v5_bf16; \n\t"
-          "cvt.f32.bf16 v6, v6_bf16; \n\t"
-          "cvt.f32.bf16 v7, v7_bf16; \n\t"
-
-          ".reg.b64 v01, v23, v45, v67; \n\t"
-          "mov.b64 v01, {v0, v1}; \n\t"
-          "mov.b64 v23, {v2, v3}; \n\t"
-          "mov.b64 v45, {v4, v5}; \n\t"
-          "mov.b64 v67, {v6, v7}; \n\t"
-          "mul.f32x2 v01, v01, scaling_coeff_2x; \n\t"
-          "mul.f32x2 v23, v23, scaling_coeff_2x; \n\t"
-          "mul.f32x2 v45, v45, scaling_coeff_2x; \n\t"
-          "mul.f32x2 v67, v67, scaling_coeff_2x; \n\t"
-          // Elements reordered to match the packing order (v1,v0)
-          "mov.b64 {v1, v0}, v01; \n\t"
-          "mov.b64 {v3, v2}, v23; \n\t"
-          "mov.b64 {v5, v4}, v45; \n\t"
-          "mov.b64 {v7, v6}, v67; \n\t"
-
-          ".reg.b8 f0, f1, f2, f3; \n\t"
-          "cvt.rn.satfinite.e2m1x2.f32 f0, v0, v1;\n\t"
-          "cvt.rn.satfinite.e2m1x2.f32 f1, v2, v3;\n\t"
-          "cvt.rn.satfinite.e2m1x2.f32 f2, v4, v5;\n\t"
-          "cvt.rn.satfinite.e2m1x2.f32 f3, v6, v7;\n\t"
-          "mov.b32 %0, {f0, f1, f2, f3};\n\t"
-          "}"
-          : "=r"(out_8x)
-          : "l"(in03), "l"(in47), "f"(scaling_coefficient));
-    } else {
-      NVTE_DEVICE_ERROR("Not supported scaling coefficient type.");
-    }
-  } else {
-    NVTE_DEVICE_ERROR(
-        "FP4 cvt PTX instructions are architecture-specific. "
-        "Try recompiling with sm_XXXa instead of sm_XXX.");
-  }
-  return out_8x;
-}
-
-template <typename SCALING_COEFFICIENT_TYPE>
-__device__ __forceinline__ uint32_t mul_cvt_bf16_to_fp4_8x_stochastic_rounding(
-    const uint64_t in03, const uint64_t in47, const SCALING_COEFFICIENT_TYPE scaling_coefficient,
-    const uint32_t rbits03, const uint32_t rbits47) {
-  uint32_t out_8x = 0;
-  constexpr bool has_rs = ARCH_HAS_STOCHASTIC_ROUNDING;
-  if constexpr (has_rs) {
-    if constexpr (std::is_same<SCALING_COEFFICIENT_TYPE, bf16>::value) {
-      asm volatile(
-          "{\n"
-          ".reg.f32 zero; \n\t"
-          "mov.b32 zero, 0; \n\t"
-          ".reg.b16 scaling_coeff; \n\t"
-          "mov.b16 scaling_coeff, %3; \n\t"
-          ".reg.b16 v0_h, v1_h, v2_h, v3_h, v4_h, v5_h, v6_h, v7_h; \n\t"
-          "mov.b64 {v0_h, v1_h, v2_h, v3_h}, %1; \n\t"
-          "mov.b64 {v4_h, v5_h, v6_h, v7_h}, %2; \n\t"
-
-          ".reg.f32 v0, v1, v2, v3, v4, v5, v6, v7; \n\t"
-          "fma.rn.f32.bf16 v0, v0_h, scaling_coeff, zero; \n\t"
-          "fma.rn.f32.bf16 v1, v1_h, scaling_coeff, zero; \n\t"
-          "fma.rn.f32.bf16 v2, v2_h, scaling_coeff, zero; \n\t"
-          "fma.rn.f32.bf16 v3, v3_h, scaling_coeff, zero; \n\t"
-          "fma.rn.f32.bf16 v4, v4_h, scaling_coeff, zero; \n\t"
-          "fma.rn.f32.bf16 v5, v5_h, scaling_coeff, zero; \n\t"
-          "fma.rn.f32.bf16 v6, v6_h, scaling_coeff, zero; \n\t"
-          "fma.rn.f32.bf16 v7, v7_h, scaling_coeff, zero; \n\t"
-
-          ".reg.b16 b03, b47; \n\t"
-          // Elements reordered to match e2m1x4 packing order (v3,v2,v1,v0)
-          "cvt.rs.satfinite.e2m1x4.f32 b03, {v3, v2, v1, v0}, %4; \n\t"
-          "cvt.rs.satfinite.e2m1x4.f32 b47, {v7, v6, v5, v4}, %5; \n\t"
-          "mov.b32 %0, {b03, b47};\n"
-          "}"
-          : "=r"(out_8x)
-          : "l"(in03), "l"(in47), "h"(reinterpret_cast<const uint16_t &>(scaling_coefficient)),
-            "r"(rbits03), "r"(rbits47));
-    } else if constexpr (std::is_same<SCALING_COEFFICIENT_TYPE, float>::value) {
-      asm volatile(
-          "{\n"
-          ".reg.b16 v0_bf16, v1_bf16, v2_bf16, v3_bf16, v4_bf16, v5_bf16, v6_bf16, v7_bf16; \n\t"
-          "mov.b64 {v0_bf16, v1_bf16, v2_bf16, v3_bf16}, %1; \n\t"
-          "mov.b64 {v4_bf16, v5_bf16, v6_bf16, v7_bf16}, %2; \n\t"
-
-          ".reg.b32 v0, v1, v2, v3, v4, v5, v6, v7; \n\t"
-          "cvt.f32.bf16 v0, v0_bf16; \n\t"
-          "cvt.f32.bf16 v1, v1_bf16; \n\t"
-          "cvt.f32.bf16 v2, v2_bf16; \n\t"
-          "cvt.f32.bf16 v3, v3_bf16; \n\t"
-          "cvt.f32.bf16 v4, v4_bf16; \n\t"
-          "cvt.f32.bf16 v5, v5_bf16; \n\t"
-          "cvt.f32.bf16 v6, v6_bf16; \n\t"
-          "cvt.f32.bf16 v7, v7_bf16; \n\t"
-
-          "mul.f32 v0, v0, %3; \n\t"
-          "mul.f32 v1, v1, %3; \n\t"
-          "mul.f32 v2, v2, %3; \n\t"
-          "mul.f32 v3, v3, %3; \n\t"
-          "mul.f32 v4, v4, %3; \n\t"
-          "mul.f32 v5, v5, %3; \n\t"
-          "mul.f32 v6, v6, %3; \n\t"
-          "mul.f32 v7, v7, %3; \n\t"
-          ".reg.b16 b03, b47; \n\t"
-          // Elements reordered to match e2m1x4 packing order (v3,v2,v1,v0)
-          "cvt.rs.satfinite.e2m1x4.f32 b03, {v3, v2, v1, v0}, %4; \n\t"
-          "cvt.rs.satfinite.e2m1x4.f32 b47, {v7, v6, v5, v4}, %5; \n\t"
-          "mov.b32 %0, {b03, b47};\n"
-          "}"
-          : "=r"(out_8x)
-          : "l"(in03), "l"(in47), "f"(scaling_coefficient), "r"(rbits03), "r"(rbits47));
-    } else {
-      NVTE_DEVICE_ERROR("Not supported scaling coefficient type.");
-    }
-  } else {
-    constexpr bool known_coeff = std::is_same<SCALING_COEFFICIENT_TYPE, bf16>::value ||
-                                 std::is_same<SCALING_COEFFICIENT_TYPE, float>::value;
-    if constexpr (known_coeff) {
-      const float coeff = static_cast<float>(scaling_coefficient);
-      const bf16 *vals03 = reinterpret_cast<const bf16 *>(&in03);
-      const bf16 *vals47 = reinterpret_cast<const bf16 *>(&in47);
-      float q[8];
-#pragma unroll
-      for (int i = 0; i < 4; ++i) {
-        q[i] = stochastic_round_fp4_e2m1(static_cast<float>(vals03[i]) * coeff, rbits03 >> (8 * i));
-        q[i + 4] =
-            stochastic_round_fp4_e2m1(static_cast<float>(vals47[i]) * coeff, rbits47 >> (8 * i));
-      }
-      const fp4e2m1x4 lo(make_float4(q[0], q[1], q[2], q[3]));
-      const fp4e2m1x4 hi(make_float4(q[4], q[5], q[6], q[7]));
-      out_8x = static_cast<uint32_t>(*reinterpret_cast<const uint16_t *>(&lo)) |
-               (static_cast<uint32_t>(*reinterpret_cast<const uint16_t *>(&hi)) << 16);
-    } else {
-      NVTE_DEVICE_ERROR("Not supported scaling coefficient type.");
-    }
-  }
-  return out_8x;
 }
 
 #endif  // FP4_TYPE_SUPPORTED
@@ -1219,22 +756,6 @@ __device__ __forceinline__ void fma_f32_bf16(float &out, uint16_t const &a, uint
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
-__device__ __forceinline__ void reduce_sync_max_abs_f32(float &out, float const &in) {
-  constexpr bool is_sm_100f = NVTE_CUDA_ARCH_MATCHES(ptx::FamilySpecific<100>);
-  if constexpr (is_sm_100f) {
-    asm volatile("redux.sync.max.abs.f32 %0, %1, 0xFFFFFFFF;" : "=f"(out) : "f"(in));
-  } else {
-    asm volatile(
-        "{\n\t"
-        ".reg.b32 val;\n"
-        "abs.f32 val, %1;\n"
-        "redux.sync.max.u32 %0, val, 0xFFFFFFFF;\n"
-        "}\n\t"
-        : "=r"(reinterpret_cast<uint32_t &>(out))
-        : "f"(in));
-  }
-}
-
 __device__ __forceinline__ bf16 get_amax(bf16 a, bf16 b) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   bf16 r;
@@ -1258,6 +779,150 @@ __device__ __forceinline__ fp16 get_amax(fp16 a, fp16 b) {
 #else
   NVTE_DEVICE_ERROR("get_amax is only supported on SM 10.0+.");
   return 0.f;
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+}
+
+// Reciprocal of an E8M0 scale, broadcast into both halves of a BF16 pair so a
+// packed multiply can scale two elements per instruction.
+//
+// A BF16 lane holds its exponent in bits 7..14, so subtracting biased_exp<<7
+// from the encoding of 2^127 yields 2^(127-biased_exp).  Applying that to both
+// lanes at once costs one multiply and one subtract, replacing a scalar
+// conversion followed by a broadcast.
+//
+// The subtraction only covers biased_exp <= 253, where the reciprocal is a
+// normal BF16 and lives entirely in the exponent field.  The two remaining
+// encodings have to be supplied directly, matching exp2f_rcp<bf16>:
+//   254 -- 2^-127, which is subnormal, so the exponent field is exhausted and
+//          the leading mantissa bit has to carry the value instead;
+//   255 -- NaN, which the subtraction cannot express at all, and which would
+//          additionally borrow out of the low lane into the high one.
+// The scale byte alone is not enough to make these correct: the reciprocal
+// here also produces the payload, so a block containing Inf or NaN would be
+// scaled by the wrong factor even though its stored E8M0 byte was right.
+__device__ __forceinline__ bf16x2 exp2f_rcp_2x(e8m0_t biased_exp) {
+  // Encoding of 2^127 in both BF16 lanes, and one exponent step in both lanes.
+  constexpr uint32_t kTwoPow127Pair = 0x7F007F00u;
+  constexpr uint32_t kExponentStepPair = 0x00800080u;
+  // Both lanes of 2^-127, and of BF16 NaN.
+  constexpr uint32_t kSubnormalPair = 0x00400040u;
+  constexpr uint32_t kNaNPair = 0x7FFF7FFFu;
+
+  uint32_t bits = kTwoPow127Pair - biased_exp * kExponentStepPair;
+  // Only amax of Inf or NaN reaches these, so the branch is uniformly not
+  // taken on real data and folds to a pair of selects.
+  if (__builtin_expect(biased_exp >= 254, 0)) {
+    bits = (biased_exp == 254) ? kSubnormalPair : kNaNPair;
+  }
+  bf16x2 result;
+  reinterpret_cast<uint32_t &>(result) = bits;
+  return result;
+}
+
+// Scale two BF16 pairs by independent scales and pack the four results into a
+// single FP8E4M3 word.  The mul_cvt_4x overload below shares one scale across
+// all four elements, which is what a rowwise MX block wants; a colwise block
+// gives every column pair its own scale, and this keeps that case to one
+// instruction sequence instead of two conversions and a merge.
+__device__ __forceinline__ void mul_cvt_4x(fp8e4m3x4 &out, const bf16x2 &in0, const bf16x2 &scale0,
+                                           const bf16x2 &in1, const bf16x2 &scale1) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+#if (defined CUDA_VERSION) && (CUDA_VERSION >= 13010)
+  asm volatile(
+      "{\n\t"
+      ".reg.b32 y0, y1; \n\t"
+      ".reg.b16 z0, z1; \n\t"
+      "mul.rn.bf16x2 y0, %1, %2; \n\t"
+      "mul.rn.bf16x2 y1, %3, %4; \n\t"
+      "cvt.rn.satfinite.e4m3x2.bf16x2 z0, y0; \n\t"
+      "cvt.rn.satfinite.e4m3x2.bf16x2 z1, y1; \n\t"
+      "mov.b32 %0, {z0, z1}; \n"
+      "}\n"
+      : "=r"(reinterpret_cast<uint32_t &>(out))
+      : "r"(reinterpret_cast<const uint32_t &>(in0)),
+        "r"(reinterpret_cast<const uint32_t &>(scale0)),
+        "r"(reinterpret_cast<const uint32_t &>(in1)),
+        "r"(reinterpret_cast<const uint32_t &>(scale1)));
+#else
+  // ptxas before 13.1 rejects the bf16x2 form of this cvt, so go through F32.
+  // Each half keeps its own scale, which is the whole point of this overload.
+  asm volatile(
+      "{\n\t"
+      ".reg.b16 x0,x1,x2,x3; \n\t"
+      ".reg.b16 s0,s1,s2,s3; \n\t"
+      "mov.b32 {x0,x1}, %1; \n\t"
+      "mov.b32 {s0,s1}, %2; \n\t"
+      "mov.b32 {x2,x3}, %3; \n\t"
+      "mov.b32 {s2,s3}, %4; \n\t"
+      ".reg.f32 y0,y1,y2,y3; \n\t"
+      "fma.rn.f32.bf16 y0, x0, s0, 0f00000000; \n\t"
+      "fma.rn.f32.bf16 y1, x1, s1, 0f00000000; \n\t"
+      "fma.rn.f32.bf16 y2, x2, s2, 0f00000000; \n\t"
+      "fma.rn.f32.bf16 y3, x3, s3, 0f00000000; \n\t"
+      ".reg.b16 z0, z1; \n\t"
+      "cvt.rn.satfinite.e4m3x2.f32 z0, y1, y0; \n\t"
+      "cvt.rn.satfinite.e4m3x2.f32 z1, y3, y2; \n\t"
+      "mov.b32 %0, {z0, z1}; \n"
+      "}\n"
+      : "=r"(reinterpret_cast<uint32_t &>(out))
+      : "r"(reinterpret_cast<const uint32_t &>(in0)),
+        "r"(reinterpret_cast<const uint32_t &>(scale0)),
+        "r"(reinterpret_cast<const uint32_t &>(in1)),
+        "r"(reinterpret_cast<const uint32_t &>(scale1)));
+#endif
+#else
+  NVTE_DEVICE_ERROR("mul_cvt_4x is only supported on SM 10.0+.");
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+}
+
+__device__ __forceinline__ void mul_cvt_4x(fp8e5m2x4 &out, const bf16x2 &in0, const bf16x2 &scale0,
+                                           const bf16x2 &in1, const bf16x2 &scale1) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+#if (defined CUDA_VERSION) && (CUDA_VERSION >= 13010)
+  asm volatile(
+      "{\n\t"
+      ".reg.b32 y0, y1; \n\t"
+      ".reg.b16 z0, z1; \n\t"
+      "mul.rn.bf16x2 y0, %1, %2; \n\t"
+      "mul.rn.bf16x2 y1, %3, %4; \n\t"
+      "cvt.rn.satfinite.e5m2x2.bf16x2 z0, y0; \n\t"
+      "cvt.rn.satfinite.e5m2x2.bf16x2 z1, y1; \n\t"
+      "mov.b32 %0, {z0, z1}; \n"
+      "}\n"
+      : "=r"(reinterpret_cast<uint32_t &>(out))
+      : "r"(reinterpret_cast<const uint32_t &>(in0)),
+        "r"(reinterpret_cast<const uint32_t &>(scale0)),
+        "r"(reinterpret_cast<const uint32_t &>(in1)),
+        "r"(reinterpret_cast<const uint32_t &>(scale1)));
+#else
+  // ptxas before 13.1 rejects the bf16x2 form of this cvt, so go through F32.
+  // Each half keeps its own scale, which is the whole point of this overload.
+  asm volatile(
+      "{\n\t"
+      ".reg.b16 x0,x1,x2,x3; \n\t"
+      ".reg.b16 s0,s1,s2,s3; \n\t"
+      "mov.b32 {x0,x1}, %1; \n\t"
+      "mov.b32 {s0,s1}, %2; \n\t"
+      "mov.b32 {x2,x3}, %3; \n\t"
+      "mov.b32 {s2,s3}, %4; \n\t"
+      ".reg.f32 y0,y1,y2,y3; \n\t"
+      "fma.rn.f32.bf16 y0, x0, s0, 0f00000000; \n\t"
+      "fma.rn.f32.bf16 y1, x1, s1, 0f00000000; \n\t"
+      "fma.rn.f32.bf16 y2, x2, s2, 0f00000000; \n\t"
+      "fma.rn.f32.bf16 y3, x3, s3, 0f00000000; \n\t"
+      ".reg.b16 z0, z1; \n\t"
+      "cvt.rn.satfinite.e5m2x2.f32 z0, y1, y0; \n\t"
+      "cvt.rn.satfinite.e5m2x2.f32 z1, y3, y2; \n\t"
+      "mov.b32 %0, {z0, z1}; \n"
+      "}\n"
+      : "=r"(reinterpret_cast<uint32_t &>(out))
+      : "r"(reinterpret_cast<const uint32_t &>(in0)),
+        "r"(reinterpret_cast<const uint32_t &>(scale0)),
+        "r"(reinterpret_cast<const uint32_t &>(in1)),
+        "r"(reinterpret_cast<const uint32_t &>(scale1)));
+#endif
+#else
+  NVTE_DEVICE_ERROR("mul_cvt_4x is only supported on SM 10.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
@@ -2048,6 +1713,184 @@ __device__ __forceinline__ void st_shared_b64(fp4e2m1x2 *__restrict__ dst_smem,
   asm volatile("st.shared.b64 [%0], %1;" : : "r"(dst_smem_ptr), "l"(fp4_pack_x16));
 }
 #endif
+//
+// L2 cache-eviction policies for global memory accesses.
+//
+// A cache policy is an opaque 64-bit token produced by `createpolicy` and
+// consumed by the `.L2::cache_hint` variants of `ld`/`st`.  It lets a kernel
+// tell L2 how to prioritise one access stream relative to another, which is
+// what makes the difference for bandwidth-bound kernels that move far more
+// data than L2 can hold.
+//
+
+// Keep the accessed lines resident in L2 in preference to others.  Use for
+// data that will be re-read soon, and for stores whose write-back coalesces
+// better when the line lingers in L2.
+__device__ __forceinline__ uint64_t create_l2_policy_evict_last() {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+  uint64_t policy;
+  asm volatile("createpolicy.fractional.L2::evict_last.b64 %0, 1.0;" : "=l"(policy));
+  return policy;
+#else
+  NVTE_DEVICE_ERROR("L2 cache policies are only supported on SM 8.0+.");
+  return 0;
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+}
+
+// Stream `fraction` of the accessed lines past L2 without displacing resident
+// data.  Use for data that is read exactly once.  `fraction` is in [0, 1];
+// 0.0 leaves the access with default caching behaviour, letting a kernel dial
+// in how much of its input is allowed to occupy L2.
+__device__ __forceinline__ uint64_t create_l2_policy_evict_first(float fraction) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+  uint64_t policy;
+  asm volatile("createpolicy.fractional.L2::evict_first.b64 %0, %1;"
+               : "=l"(policy)
+               : "f"(fraction));
+  return policy;
+#else
+  NVTE_DEVICE_ERROR("L2 cache policies are only supported on SM 8.0+.");
+  return 0;
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+}
+
+// Non-coherent (read-only / `__ldg`-style) 256-bit global load.  This is the
+// widest load the ISA offers and keeps the number of in-flight requests, and
+// hence the latency that must be hidden, as low as possible.
+//
+// `ld.global.nc.v8.b32` needs sm_100 or later and PTX ISA 8.8 (CUDA 12.9).
+// Everywhere else these fall back to a pair of 128-bit loads, which is
+// semantically identical and costs only the extra request.  The 256-bit form
+// additionally requires the address to be 32-byte aligned; the fallback needs
+// only 16.
+__device__ __forceinline__ void ld_global_nc_b32x8(uint32_t (&dst)[8], const void *src) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000) && (defined CUDA_VERSION) && \
+    (CUDA_VERSION >= 12090)
+  asm volatile("ld.global.nc.v8.b32 {%0,%1,%2,%3,%4,%5,%6,%7}, [%8];"
+               : "=r"(dst[0]), "=r"(dst[1]), "=r"(dst[2]), "=r"(dst[3]), "=r"(dst[4]), "=r"(dst[5]),
+                 "=r"(dst[6]), "=r"(dst[7])
+               : "l"(src));
+#elif (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+  const uint8_t *bytes = reinterpret_cast<const uint8_t *>(src);
+  asm volatile("ld.global.nc.v4.b32 {%0,%1,%2,%3}, [%4];"
+               : "=r"(dst[0]), "=r"(dst[1]), "=r"(dst[2]), "=r"(dst[3])
+               : "l"(bytes));
+  asm volatile("ld.global.nc.v4.b32 {%0,%1,%2,%3}, [%4];"
+               : "=r"(dst[4]), "=r"(dst[5]), "=r"(dst[6]), "=r"(dst[7])
+               : "l"(bytes + 16));
+#else
+  NVTE_DEVICE_ERROR("ld_global_nc_b32x8 is only supported on SM 8.0+.");
+#endif
+}
+
+// As above, but streaming the lines past L2 rather than letting them displace
+// resident data.  Equivalent to tagging the load with a `create_l2_policy_
+// evict_first(1.0)` hint, without needing to materialise the policy token.
+__device__ __forceinline__ void ld_global_nc_evict_first_b32x8(uint32_t (&dst)[8],
+                                                               const void *src) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000) && (defined CUDA_VERSION) && \
+    (CUDA_VERSION >= 12090)
+  asm volatile("ld.global.nc.L2::evict_first.v8.b32 {%0,%1,%2,%3,%4,%5,%6,%7}, [%8];"
+               : "=r"(dst[0]), "=r"(dst[1]), "=r"(dst[2]), "=r"(dst[3]), "=r"(dst[4]), "=r"(dst[5]),
+                 "=r"(dst[6]), "=r"(dst[7])
+               : "l"(src));
+#elif (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+  const uint8_t *bytes = reinterpret_cast<const uint8_t *>(src);
+  asm volatile("ld.global.nc.L2::evict_first.v4.b32 {%0,%1,%2,%3}, [%4];"
+               : "=r"(dst[0]), "=r"(dst[1]), "=r"(dst[2]), "=r"(dst[3])
+               : "l"(bytes));
+  asm volatile("ld.global.nc.L2::evict_first.v4.b32 {%0,%1,%2,%3}, [%4];"
+               : "=r"(dst[4]), "=r"(dst[5]), "=r"(dst[6]), "=r"(dst[7])
+               : "l"(bytes + 16));
+#else
+  NVTE_DEVICE_ERROR("ld_global_nc_evict_first_b32x8 is only supported on SM 8.0+.");
+#endif
+}
+
+// As above, tagged with an L2 cache policy from `create_l2_policy_*`.
+__device__ __forceinline__ void ld_global_nc_b32x8(uint32_t (&dst)[8], const void *src,
+                                                   uint64_t l2_policy) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000) && (defined CUDA_VERSION) && \
+    (CUDA_VERSION >= 12090)
+  asm volatile("ld.global.nc.L2::cache_hint.v8.b32 {%0,%1,%2,%3,%4,%5,%6,%7}, [%8], %9;"
+               : "=r"(dst[0]), "=r"(dst[1]), "=r"(dst[2]), "=r"(dst[3]), "=r"(dst[4]), "=r"(dst[5]),
+                 "=r"(dst[6]), "=r"(dst[7])
+               : "l"(src), "l"(l2_policy));
+#elif (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+  const uint8_t *bytes = reinterpret_cast<const uint8_t *>(src);
+  asm volatile("ld.global.nc.L2::cache_hint.v4.b32 {%0,%1,%2,%3}, [%4], %5;"
+               : "=r"(dst[0]), "=r"(dst[1]), "=r"(dst[2]), "=r"(dst[3])
+               : "l"(bytes), "l"(l2_policy));
+  asm volatile("ld.global.nc.L2::cache_hint.v4.b32 {%0,%1,%2,%3}, [%4], %5;"
+               : "=r"(dst[4]), "=r"(dst[5]), "=r"(dst[6]), "=r"(dst[7])
+               : "l"(bytes + 16), "l"(l2_policy));
+#else
+  NVTE_DEVICE_ERROR("ld_global_nc_b32x8 is only supported on SM 8.0+.");
+#endif
+}
+
+// 128-bit global store tagged with an L2 cache policy.
+__device__ __forceinline__ void st_global_b32x4(void *dst, const uint32_t (&src)[4],
+                                                uint64_t l2_policy) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  asm volatile("st.global.L2::cache_hint.v4.b32 [%0], {%1,%2,%3,%4}, %5;"
+               :
+               : "l"(dst), "r"(src[0]), "r"(src[1]), "r"(src[2]), "r"(src[3]), "l"(l2_policy)
+               : "memory");
+#else
+  NVTE_DEVICE_ERROR("st_global_b32x4 is only supported on SM 9.0+.");
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+}
+
+// Non-coherent 128-bit global load tagged with an L2 cache policy.
+__device__ __forceinline__ void ld_global_nc_b32x4(uint32_t (&dst)[4], const void *src,
+                                                   uint64_t l2_policy) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  asm volatile("ld.global.nc.L2::cache_hint.v4.b32 {%0,%1,%2,%3}, [%4], %5;"
+               : "=r"(dst[0]), "=r"(dst[1]), "=r"(dst[2]), "=r"(dst[3])
+               : "l"(src), "l"(l2_policy));
+#else
+  NVTE_DEVICE_ERROR("ld_global_nc_b32x4 is only supported on SM 9.0+.");
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+}
+
+// 64-bit global store tagged with an L2 cache policy.
+__device__ __forceinline__ void st_global_b32x2(void *dst, const uint32_t (&src)[2],
+                                                uint64_t l2_policy) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  asm volatile("st.global.L2::cache_hint.v2.b32 [%0], {%1,%2}, %3;"
+               :
+               : "l"(dst), "r"(src[0]), "r"(src[1]), "l"(l2_policy)
+               : "memory");
+#else
+  NVTE_DEVICE_ERROR("st_global_b32x2 is only supported on SM 9.0+.");
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+}
+
+// Single-byte global store tagged with an L2 cache policy.  Scale bytes are
+// written one at a time by a subset of lanes, and tagging them with the same
+// policy as the bulk streams keeps every access from this kernel consistent.
+__device__ __forceinline__ void st_global_b8(void *dst, uint8_t value, uint64_t l2_policy) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  const uint16_t widened = value;
+  asm volatile("st.global.L2::cache_hint.b8 [%0], %1, %2;"
+               :
+               : "l"(dst), "h"(widened), "l"(l2_policy)
+               : "memory");
+#else
+  NVTE_DEVICE_ERROR("st_global_b8 is only supported on SM 9.0+.");
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+}
+
+// Bring one global cache line into L2 ahead of the demand load that needs it,
+// marked evict_last so it matches the policy the demand load will use.
+__device__ __forceinline__ void prefetch_l2_evict_last(const void *addr) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+  asm volatile("prefetch.global.L2::evict_last [%0];" : : "l"(addr));
+#else
+  NVTE_DEVICE_ERROR("prefetch_l2_evict_last is only supported on SM 8.0+.");
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+}
 }  // namespace ptx
 
 namespace {

@@ -164,6 +164,57 @@ Here's how to use FP8 Current Scaling recipe in PyTorch and JAX:
 
 ----
 
+
+Quantizer
+---------
+
+.. tabs::
+
+   .. tab:: PyTorch
+
+      Current scaling uses
+      :class:`~transformer_engine.pytorch.Float8CurrentScalingQuantizer`. It
+      needs no external state: at each call it computes the amax of the input
+      tensor, derives the scale from it, and then quantizes.
+
+      .. code-block:: python
+
+         import torch
+         import transformer_engine.pytorch as te
+
+         tensor = torch.randn(256, 256, device="cuda", dtype=torch.bfloat16)
+
+         quantizer = te.Float8CurrentScalingQuantizer(
+             fp8_dtype=te.DType.kFloat8E4M3,
+             device="cuda",
+         )
+
+         qtensor = quantizer(tensor)
+         roundtrip = qtensor.dequantize()
+
+   .. tab:: JAX
+
+      Current scaling uses ``CurrentScaleQuantizer``. At each call it computes
+      the amax of the input tensor, derives the scale from it, and then
+      quantizes.
+
+      .. code-block:: python
+
+         import jax.numpy as jnp
+         from transformer_engine.jax.quantize import (
+             QuantizerFactory, ScalingMode, QuantizeLayout,
+         )
+
+         x = jnp.ones((256, 256), dtype=jnp.bfloat16)
+
+         quantizer = QuantizerFactory.create(
+             scaling_mode=ScalingMode.CURRENT_TENSOR_SCALING,
+             q_dtype=jnp.float8_e4m3fn,
+             q_layout=QuantizeLayout.ROWWISE,
+         )
+         qtensor = quantizer.quantize(x)
+         roundtrip = qtensor.dequantize()
+
 Developer Notes
 ---------------
 

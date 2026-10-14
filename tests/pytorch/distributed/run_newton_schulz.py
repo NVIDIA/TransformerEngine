@@ -31,8 +31,9 @@ COEFFICIENT_CONFIGS = ((5, "quintic"), (8, "polar_express"))
 def newton_schulz_reference(
     in_x: torch.Tensor, coefficients: list[tuple[float, float, float]]
 ) -> torch.Tensor:
-    """Local Newton-Schulz reference mirroring the provided Octave update."""
-    x = in_x.clone()
+    """Local Newton-Schulz reference matching cuSOLVERMp input normalization."""
+    x = in_x.float().clone()
+    x /= torch.linalg.vector_norm(x)
     for a, b, c in coefficients:
         xxt = x @ x.mT
         x = a * x + b * xxt @ x + c * xxt @ xxt @ x
@@ -47,30 +48,32 @@ def _dtype_from_name(dtype: str) -> torch.dtype:
     raise ValueError(f"Unsupported dtype: {dtype}")
 
 
-def _test_tolerances(dtype: str, check: str, world_size: int) -> tuple[float, float]:
-    if dtype == "bfloat16":
-        return (5e-2, 5e-2)
-    if check == "orthogonality" and world_size == 1:
-        return (2e-2, 2e-2)
-    return (1e-2, 1e-2)
+def _test_tolerances(dtype: str, check: str) -> tuple[float, float]:
+    if check == "reference":
+        return (1e-2 if dtype == "bfloat16" else 1e-3, 0.0)
+    return (1.5e-2 if dtype == "bfloat16" else 1e-2, 0.0)
 
 
-def _shape_scale(world_size: int) -> int:
-    return 4 if world_size == 1 else world_size
+def _aligned_size(size: int, world_size: int) -> int:
+    """Round a global distributed dimension up to a whole number of shards."""
+    return (size + world_size - 1) // world_size * world_size
 
 
 def _orthogonality_shapes(world_size: int) -> list[tuple[int, int]]:
-    scale = _shape_scale(world_size)
+    rows = _aligned_size(512, world_size)
     return [
-        (scale * 64, scale * 64),
-        (scale * 64, scale * 96),
-        (scale * 96, scale * 64),
+        (rows, rows),
+        (rows, _aligned_size(768, world_size)),
     ]
 
 
 def _reference_shapes(world_size: int) -> list[tuple[int, int]]:
-    scale = _shape_scale(world_size)
-    return [(scale * 64, scale * 64)]
+    size = _aligned_size(512, world_size)
+    return [(size, size)]
+
+
+def _tall_reference_shape(world_size: int) -> tuple[int, int]:
+    return (_aligned_size(768, world_size), _aligned_size(512, world_size))
 
 
 def _make_matrix(
@@ -117,7 +120,7 @@ def _run_case(
     dtype = _dtype_from_name(dtype_name)
     m, n = matrix_shape
     coefficients = get_coefficients(num_iterations, coeff_type)
-    atol, rtol = _test_tolerances(dtype_name, check, world_size)
+    atol, rtol = _test_tolerances(dtype_name, check)
 
     if api == "tp" and partition_dim is None:
         # Replicated inputs are sharded along the larger dimension for cuSolverMp.
@@ -169,21 +172,23 @@ def _run_case(
 
     # Check: the resulting matrix should be orthogonal, or match a local reference.
     if check == "orthogonality":
+        X_float = X.float()
         if m <= n:
-            gram = X @ X.t()
+            gram = X_float @ X_float.t()
             expected = torch.eye(m, device=gram.device, dtype=gram.dtype)
             label = "X @ X.t() - I"
         else:
-            gram = X.t() @ X
+            gram = X_float.t() @ X_float
             expected = torch.eye(n, device=gram.device, dtype=gram.dtype)
             label = "X.t() @ X - I"
         max_diff = (gram - expected).abs().max().item()
         passed = torch.allclose(gram, expected, atol=atol, rtol=rtol)
     elif check == "reference":
-        reference = newton_schulz_reference(A.float(), coefficients).to(dtype)
-        max_diff = (X - reference).abs().max().item()
+        reference = newton_schulz_reference(A, coefficients)
+        X_float = X.float()
+        max_diff = (X_float - reference).abs().max().item()
         label = "distributed - reference"
-        passed = torch.allclose(X, reference, atol=atol, rtol=rtol)
+        passed = torch.allclose(X_float, reference, atol=atol, rtol=rtol)
     else:
         raise ValueError(f"Unsupported check: {check}")
 
@@ -253,6 +258,47 @@ def run_all_tests(ctx: CusolverMpCtx) -> None:
             partition_dim=partition_dim,
             tp_mode=tp_mode,
         )
+
+    tall_shape = _tall_reference_shape(world_size)
+    tall_tp_configs = (
+        (0, "distributed"),
+        (0, "duplicated"),
+        (1, "duplicated"),
+        (None, "duplicated"),
+    )
+    for partition_dim, tp_mode in tall_tp_configs:
+        config = (tall_shape, partition_dim, tp_mode)
+        if rank == 0:
+            print(f"Running tall TP API reference check with {config=}", flush=True)
+        _run_case(
+            ctx=ctx,
+            check="reference",
+            dtype_name="float32",
+            matrix_shape=tall_shape,
+            num_iterations=5,
+            coeff_type="quintic",
+            api="tp",
+            partition_dim=partition_dim,
+            tp_mode=tp_mode,
+        )
+
+    # A directly column-sharded tall matrix cannot be transposed into the column distribution
+    # required by the low-level API without first redistributing it.
+    m, n = tall_shape
+    x_local = torch.empty(m, n // world_size, device="cuda", dtype=torch.float32)
+    try:
+        newton_schulz_tp(
+            x_local,
+            ctx,
+            num_iterations=5,
+            partition_dim=1,
+            tp_mode="distributed",
+        )
+    except ValueError as exc:
+        if "must be partitioned along their larger dimension" not in str(exc):
+            raise
+    else:
+        raise AssertionError("Expected a directly column-sharded tall matrix to be rejected")
 
     if rank == 0:
         print("Running TP API reference check with replicated input", flush=True)

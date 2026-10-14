@@ -16,7 +16,7 @@ import platform
 from pathlib import Path
 from importlib.metadata import PackageNotFoundError, distribution, version as get_version
 from subprocess import CalledProcessError
-from typing import List, Optional, Tuple, Union
+from typing import Callable, List, Optional, Tuple, Union
 
 
 # Needs to stay consistent with .pre-commit-config.yaml config.
@@ -176,52 +176,137 @@ def found_pybind11() -> bool:
 
 
 @functools.lru_cache(maxsize=None)
-def cuda_toolkit_include_path() -> Tuple[str, str]:
-    """Returns root path for cuda toolkit includes.
+def nvcc_path() -> Optional[Path]:
+    """Get the NVCC binary path.
 
-    return `None` if CUDA is not found."""
-    # Try finding CUDA
-    cuda_home: Optional[Path] = None
-    if cuda_home is None and os.getenv("CUDA_HOME"):
-        # Check in CUDA_HOME
-        cuda_home = Path(os.getenv("CUDA_HOME")) / "include"
-    if cuda_home is None:
-        # Check in NVCC
-        nvcc_bin = shutil.which("nvcc")
-        if nvcc_bin is not None:
-            cuda_home = Path(nvcc_bin.rstrip("/bin/nvcc")) / "include"
-    if cuda_home is None:
-        # Last-ditch guess in /usr/local/cuda
-        if Path("/usr/local/cuda").is_dir():
-            cuda_home = Path("/usr/local/cuda") / "include"
-    return cuda_home
+    Returns `None` if NVCC is not found.
+    """
+
+    def lookup_via_cuda_home() -> Optional[Path]:
+        if cuda_home := os.getenv("CUDA_HOME"):
+            return Path(cuda_home) / "bin" / "nvcc"
+        return None
+
+    def lookup_via_python_path() -> Optional[Path]:
+        for python_path in sys.path:
+            nvidia_dir = Path(python_path) / "nvidia"
+            if not nvidia_dir.is_dir():
+                continue
+
+            cuda_roots = [nvidia_dir]
+            cuda_version_dirs = [
+                path
+                for path in nvidia_dir.iterdir()
+                if path.is_dir() and re.fullmatch(r"cu\d+", path.name)
+            ]
+            cuda_version_dirs.sort(key=lambda path: int(path.name[2:]), reverse=True)
+            cuda_roots.extend(cuda_version_dirs)
+
+            for cuda_root in cuda_roots:
+                nvcc_bin = cuda_root / "bin" / "nvcc"
+                if nvcc_bin.is_file():
+                    return nvcc_bin
+
+        return None
+
+    def lookup_via_distribution() -> Optional[Path]:
+        try:
+            cuda_nvcc_distribution = distribution("nvidia-cuda-nvcc")
+        except PackageNotFoundError:
+            return None
+
+        for package_path in cuda_nvcc_distribution.files or []:
+            package_path = Path(package_path)
+            if package_path.name == "nvcc" and package_path.parent.name == "bin":
+                return Path(cuda_nvcc_distribution.locate_file(package_path))
+
+        return None
+
+    def lookup_via_path() -> Optional[Path]:
+        if (nvcc_bin := shutil.which("nvcc")) is not None:
+            return Path(nvcc_bin)
+        return None
+
+    def lookup_via_local_cuda() -> Path:
+        return Path("/usr/local/cuda/bin/nvcc")
+
+    nvcc_lookup_funcs: List[Callable[[], Optional[Path]]] = [
+        lookup_via_cuda_home,
+        lookup_via_python_path,
+        lookup_via_distribution,
+        lookup_via_path,
+        lookup_via_local_cuda,
+    ]
+
+    for nvcc_lookup_func in nvcc_lookup_funcs:
+        if (nvcc_bin := nvcc_lookup_func()) is not None and nvcc_bin.is_file():
+            return nvcc_bin.resolve()
+
+    return None
 
 
 @functools.lru_cache(maxsize=None)
-def nvcc_path() -> Tuple[str, str]:
-    """Returns the NVCC binary path.
+def cuda_home_path() -> Optional[Path]:
+    """Return the CUDA Toolkit root containing NVCC."""
+    if (nvcc_bin := nvcc_path()) is not None:
+        return nvcc_bin.parent.parent
+    return None
 
-    Throws FileNotFoundError if NVCC is not found."""
-    # Try finding NVCC
-    nvcc_bin: Optional[Path] = None
-    if nvcc_bin is None and os.getenv("CUDA_HOME"):
-        # Check in CUDA_HOME
-        cuda_home = Path(os.getenv("CUDA_HOME"))
-        nvcc_bin = cuda_home / "bin" / "nvcc"
-    if nvcc_bin is None:
-        # Check if nvcc is in path
-        nvcc_bin = shutil.which("nvcc")
-        if nvcc_bin is not None:
-            cuda_home = Path(nvcc_bin.rstrip("/bin/nvcc"))
-            nvcc_bin = Path(nvcc_bin)
-    if nvcc_bin is None:
-        # Last-ditch guess in /usr/local/cuda
-        cuda_home = Path("/usr/local/cuda")
-        nvcc_bin = cuda_home / "bin" / "nvcc"
-    if not nvcc_bin.is_file():
-        raise FileNotFoundError(f"Could not find NVCC at {nvcc_bin}")
 
-    return nvcc_bin
+@functools.lru_cache(maxsize=None)
+def nccl_root_path() -> Optional[Path]:
+    """Return the NCCL installation root.
+
+    Returns `None` if NCCL is not found."""
+    if (cuda_home := cuda_home_path()) is not None:
+        nccl_root = cuda_home.parent / "nccl"
+        if nccl_root.is_dir():
+            return nccl_root
+
+    # Check NCCL Python packages
+    for package_name in ["nvidia-nccl-cu13", "nvidia-nccl-cu12"]:
+        try:
+            nccl_distribution = distribution(package_name)
+        except PackageNotFoundError:
+            continue
+
+        nccl_root = Path(nccl_distribution.locate_file("nvidia/nccl"))
+        if nccl_root.is_dir():
+            return nccl_root
+
+    return None
+
+
+@functools.lru_cache(maxsize=None)
+def nccl_include_path() -> Optional[Path]:
+    """Return the NCCL include directory."""
+    if (nccl_root := nccl_root_path()) is not None:
+        include_path = nccl_root / "include"
+        if include_path.is_dir():
+            return include_path
+
+    return None
+
+
+@functools.lru_cache(maxsize=None)
+def nccl_lib_path() -> Optional[Path]:
+    """Return the NCCL shared library path."""
+    if (nccl_root := nccl_root_path()) is not None:
+        lib_path = nccl_root / "lib" / "libnccl.so.2"
+        if lib_path.is_file():
+            return lib_path
+
+    return None
+
+
+@functools.lru_cache(maxsize=None)
+def cuda_toolkit_include_path() -> Optional[Path]:
+    """Return the CUDA Toolkit include directory."""
+    if (cuda_home := cuda_home_path()) is not None:
+        include_path = cuda_home / "include"
+        if include_path.is_dir():
+            return include_path
+    return None
 
 
 @functools.lru_cache(maxsize=None)
@@ -324,13 +409,9 @@ def cuda_version() -> Tuple[int, ...]:
     and check pip version.
     """
 
-    try:
-        nvcc_bin = nvcc_path()
-    except FileNotFoundError as e:
-        pass
-    else:
+    if (nvcc_bin := nvcc_path()) is not None:
         output = subprocess.run(
-            [nvcc_bin, "-V"],
+            [str(nvcc_bin), "-V"],
             capture_output=True,
             check=True,
             universal_newlines=True,
@@ -339,12 +420,20 @@ def cuda_version() -> Tuple[int, ...]:
         version = match.group(1).split(".")
         return tuple(int(v) for v in version)
 
-    try:
-        version_str = get_version("nvidia-cuda-runtime-cu12")
-        version_tuple = tuple(int(part) for part in version_str.split(".") if part.isdigit())
-        return version_tuple
-    except importlib.metadata.PackageNotFoundError:
-        raise RuntimeError("Could neither find NVCC executable nor CUDA runtime Python package.")
+    version_str: Optional[str] = None
+    package_names = ["nvidia-cuda-runtime", "nvidia-cuda-runtime-cu13", "nvidia-cuda-runtime-cu12"]
+
+    for package_name in package_names:
+        try:
+            version_str = get_version(package_name)
+        except PackageNotFoundError:
+            pass
+        else:
+            return tuple(int(part) for part in version_str.split(".") if part.isdigit())
+
+    raise RuntimeError(
+        f"Could neither find NVCC executable nor CUDA runtime Python package for {package_names}."
+    )
 
 
 def get_frameworks() -> List[str]:

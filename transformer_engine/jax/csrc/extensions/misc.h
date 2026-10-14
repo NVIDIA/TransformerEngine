@@ -126,6 +126,7 @@ void hash_combine(int64_t &seed, const T &v, Rest... rest) {
 enum class JAXX_Score_Function : int64_t {
   SIGMOID = 0,
   SOFTMAX = 1,
+  SQRTSOFTPLUS = 2,
 };
 
 // Mirror of NVTERoutingMapFormat for JAX FFI plumbing. Values are taken

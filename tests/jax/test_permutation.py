@@ -555,18 +555,28 @@ class TestHighLevelPermutationAPI:
                 out, perm_probs = _reference_permute_impl(x, ref_row_id_map, p, num_out_tokens)
                 return jnp.sum(out**2) + jnp.sum(perm_probs**2)
 
-            loss_val, (inp_grad, probs_grad) = jax.value_and_grad(dispatch_loss, argnums=(0, 1))(
-                inp, probs
-            )
-            ref_loss_val, (ref_inp_grad, ref_probs_grad) = jax.value_and_grad(
-                ref_dispatch_loss, argnums=(0, 1)
-            )(inp, probs)
+            dispatch_value_and_grad = jax.value_and_grad(dispatch_loss, argnums=(0, 1))
+            ref_value_and_grad = jax.value_and_grad(ref_dispatch_loss, argnums=(0, 1))
+            ref_loss_val, (ref_inp_grad, ref_probs_grad) = ref_value_and_grad(inp, probs)
 
-            # Validate forward loss matches
-            assert_allclose(loss_val, ref_loss_val, dtype=dtype)
-            # Validate gradients
-            assert_allclose(inp_grad, ref_inp_grad, dtype=dtype)
-            assert_allclose(probs_grad, ref_probs_grad, dtype=dtype)
+            # Stress the large probability-gradient case that exposed a race
+            # between in-kernel zeroing and routed gradient stores.
+            is_stress_case = (
+                num_tokens,
+                num_experts,
+                hidden_size,
+                tokens_per_expert,
+                dtype,
+            ) == (4096, 64, 4096, 6, jnp.float32)
+            repeat_count = 10 if is_stress_case else 1
+            for _ in range(repeat_count):
+                loss_val, (inp_grad, probs_grad) = dispatch_value_and_grad(inp, probs)
+
+                # Validate forward loss matches
+                assert_allclose(loss_val, ref_loss_val, dtype=dtype)
+                # Validate gradients
+                assert_allclose(inp_grad, ref_inp_grad, dtype=dtype)
+                assert_allclose(probs_grad, ref_probs_grad, dtype=dtype)
         else:
 
             @jax.jit

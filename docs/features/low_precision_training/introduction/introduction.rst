@@ -283,3 +283,71 @@ so GEMM with tensors ``A`` and ``B`` returns ``B * A^T``.
    :file: img/fp8_linear_flow.svg
 
 *Figure 4: Forward pass of a Linear layer with low precision data flow.*
+
+Quantizers
+----------
+
+Every recipe implements its quantization logic in a **quantizer** — an object
+that converts a high-precision tensor into a quantized one. TE modules create
+and use quantizers internally according to the active recipe, but a quantizer
+can also be used directly:
+
+.. tabs::
+
+   .. tab:: PyTorch
+
+      .. code-block:: python
+
+         import torch
+         import transformer_engine.pytorch as te
+
+         tensor = torch.randn(256, 256, device="cuda", dtype=torch.bfloat16)
+
+         quantizer = te.MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3)
+         qtensor = quantizer(tensor)            # quantize
+         roundtrip = qtensor.dequantize()       # back to high precision
+
+      The main parts of the interface are:
+
+      * ``quantize(tensor)`` — quantizes a high-precision tensor and returns a
+        ``QuantizedTensor``; calling the quantizer (``quantizer(tensor)``) is
+        a shorthand;
+      * ``update_quantized(src, dst)`` — quantizes ``src`` in place into an
+        already-allocated quantized tensor ``dst``;
+      * ``make_empty(shape)`` — allocates an uninitialized quantized tensor to
+        be filled later;
+      * ``rowwise_usage`` / ``columnwise_usage`` — flags selecting which of
+        the two GEMM-oriented representations the produced tensor holds;
+      * the returned ``QuantizedTensor`` supports ``dequantize()`` back to
+        high precision.
+
+   .. tab:: JAX
+
+      .. code-block:: python
+
+         import jax.numpy as jnp
+         from transformer_engine.jax.quantize import (
+             QuantizerFactory, ScalingMode, QuantizeLayout,
+         )
+
+         x = jnp.ones((256, 256), dtype=jnp.bfloat16)
+
+         quantizer = QuantizerFactory.create(
+             scaling_mode=ScalingMode.MXFP8_1D_SCALING,
+             q_dtype=jnp.float8_e4m3fn,
+             q_layout=QuantizeLayout.ROWWISE,
+         )
+         qtensor = quantizer.quantize(x)
+         roundtrip = qtensor.dequantize()
+
+      The main parts of the interface are:
+
+      * ``quantize(x, is_rowwise=..., is_colwise=...)`` — quantizes a tensor
+        and returns a ``ScaledTensor`` holding the requested representations
+        (the default comes from the quantizer's ``q_layout``);
+      * the returned ``ScaledTensor`` supports ``dequantize()`` back to high
+        precision;
+      * quantizers are registered pytrees, so they can be passed through JAX
+        transformations.
+
+Each recipe section ends with a short description of that recipe's quantizer.

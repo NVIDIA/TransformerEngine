@@ -8,6 +8,8 @@
 
 #include <cuda_runtime.h>
 
+#include <cstdint>
+#include <cstring>
 #include <memory>
 #include <vector>
 
@@ -100,9 +102,18 @@ CudaEvent MakeCudaEvent() {
 
 }  // namespace
 
+struct WorkspaceConfig {
+  int64_t m;
+  int64_t n;
+  cudaDataType_t dtype;
+  int64_t num_iterations;
+  std::vector<float> coefficients;
+};
+
 struct NVTECusolverMpCtx {
   int64_t nranks;
   int64_t rank;
+  ncclComm_t comm;
   CudaStream stream;
   CudaEvent in_ready;
   CudaEvent out_ready;
@@ -111,11 +122,16 @@ struct NVTECusolverMpCtx {
   void* workspace;
   size_t workspace_size;
   bool workspace_registered;
+  std::vector<uint8_t> workspace_host;
+  uint64_t* workspace_size_reduction;
+  std::vector<WorkspaceConfig> workspace_configs;
 };
 
 namespace {
 
 void FreeWorkspace(NVTECusolverMpCtx* ctx) {
+  // Buffer deregistration and grid destruction require all grid work to be complete.
+  NVTE_CHECK_CUDA(cudaStreamSynchronize(ctx->stream.get()));
   if (ctx->workspace == nullptr) {
     return;
   }
@@ -128,6 +144,57 @@ void FreeWorkspace(NVTECusolverMpCtx* ctx) {
   ctx->workspace = nullptr;
   ctx->workspace_size = 0;
   ctx->workspace_registered = false;
+}
+
+size_t GridMaxWorkspaceSize(NVTECusolverMpCtx* ctx, size_t local_size) {
+  if (ctx->nranks == 1) {
+    return local_size;
+  }
+
+  uint64_t size = local_size;
+  if (ctx->workspace_size_reduction == nullptr) {
+    NVTE_CHECK_CUDA(cudaMalloc(&ctx->workspace_size_reduction, sizeof(size)));
+  }
+  NVTE_CHECK_CUDA(cudaMemcpyAsync(ctx->workspace_size_reduction, &size, sizeof(size),
+                                  cudaMemcpyHostToDevice, ctx->stream.get()));
+  NVTE_CHECK_NCCL(ncclAllReduce(ctx->workspace_size_reduction, ctx->workspace_size_reduction, 1,
+                                ncclUint64, ncclMax, ctx->comm, ctx->stream.get()));
+  NVTE_CHECK_CUDA(cudaMemcpyAsync(&size, ctx->workspace_size_reduction, sizeof(size),
+                                  cudaMemcpyDeviceToHost, ctx->stream.get()));
+  NVTE_CHECK_CUDA(cudaStreamSynchronize(ctx->stream.get()));
+  return static_cast<size_t>(size);
+}
+
+bool IsWorkspaceConfigCached(const NVTECusolverMpCtx* ctx, int64_t m, int64_t n,
+                             cudaDataType_t dtype, int64_t num_iterations,
+                             const float* coefficients, int64_t num_coefficients) {
+  const size_t coefficients_size = static_cast<size_t>(num_coefficients) * sizeof(float);
+  for (const auto& config : ctx->workspace_configs) {
+    if (config.m == m && config.n == n && config.dtype == dtype &&
+        config.num_iterations == num_iterations &&
+        config.coefficients.size() == static_cast<size_t>(num_coefficients) &&
+        (coefficients_size == 0 ||
+         std::memcmp(config.coefficients.data(), coefficients, coefficients_size) == 0)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void CacheWorkspaceConfig(NVTECusolverMpCtx* ctx, int64_t m, int64_t n, cudaDataType_t dtype,
+                          int64_t num_iterations, const float* coefficients,
+                          int64_t num_coefficients) {
+  std::vector<float> cached_coefficients;
+  if (num_coefficients > 0) {
+    cached_coefficients.assign(coefficients, coefficients + num_coefficients);
+  }
+  ctx->workspace_configs.emplace_back(WorkspaceConfig{
+      m,
+      n,
+      dtype,
+      num_iterations,
+      std::move(cached_coefficients),
+  });
 }
 
 }  // namespace
@@ -160,6 +227,7 @@ NVTECusolverMpCtx* nvte_cusolvermp_ctx_create(ncclComm_t comm, int nranks, int r
   return new NVTECusolverMpCtx{
       nranks,
       rank,
+      comm,
       std::move(stream),
       std::move(in_ready),
       std::move(out_ready),
@@ -168,12 +236,18 @@ NVTECusolverMpCtx* nvte_cusolvermp_ctx_create(ncclComm_t comm, int nranks, int r
       nullptr,
       0,
       false,
+      {},
+      nullptr,
+      {},
   };
 }
 
 void nvte_cusolvermp_ctx_destroy(NVTECusolverMpCtx* ctx) {
   NVTE_API_CALL(nvte_cusolvermp_ctx_destroy);
   FreeWorkspace(ctx);
+  if (ctx->workspace_size_reduction != nullptr) {
+    NVTE_CHECK_CUDA(cudaFree(ctx->workspace_size_reduction));
+  }
   // Destroy handle and grid before the stream they depend on
   ctx->grid.reset();
   ctx->handle.reset();
@@ -184,9 +258,12 @@ void nvte_newton_schulz(NVTECusolverMpCtx* ctx, int64_t m, int64_t n, NVTETensor
                         int64_t num_iterations, const float* coefficients, int64_t num_coefficients,
                         cudaStream_t caller_stream) {
   NVTE_API_CALL(nvte_newton_schulz);
+  NVTE_CHECK(num_iterations >= 0, "Number of iterations must be non-negative, got ",
+             num_iterations);
   NVTE_CHECK(num_coefficients == num_iterations * 3, num_iterations, " iterations require ",
              num_iterations * 3, " coefficients, but ", num_coefficients, " are passed");
   const auto* t = convertNVTETensorCheck(x);
+  NVTE_CHECK(m <= n, "Column-sharded Newton-Schulz requires rows <= columns, got ", m, " > ", n);
 
   // Make the internal stream wait for the caller's stream so that
   // the input tensor is ready before cuSolverMp reads it.
@@ -200,6 +277,7 @@ void nvte_newton_schulz(NVTECusolverMpCtx* ctx, int64_t m, int64_t n, NVTETensor
   // Compute local leading dimension
   const int64_t local_cols = cusolverMpNUMROC(n, nb, ctx->rank, 0, ctx->nranks);
   NVTE_CHECK(t->shape().size() == 2, "Shape size:", t->shape().size());
+  NVTE_CHECK(t->shape()[0] == m, "Tensor rows:", t->shape()[0], "Expected rows:", m);
   NVTE_CHECK(t->shape()[1] == local_cols, "Tensor cols:", t->shape()[1], "Local cols:", local_cols);
   const int64_t lld = std::max(local_cols, static_cast<int64_t>(1));
 
@@ -210,48 +288,66 @@ void nvte_newton_schulz(NVTECusolverMpCtx* ctx, int64_t m, int64_t n, NVTETensor
 
   // Create Newton-Schulz descriptor
   auto ns_desc = MakeCusolverMpNSDesc();
+  const int enabled = 1;
+  NVTE_CHECK_CUSOLVERMP(cusolverMpNewtonSchulzDescriptorSetAttribute(
+      ns_desc.get(), CUSOLVERMP_NEWTON_SCHULZ_DESCRIPTOR_ATTRIBUTE_NORMALIZE, &enabled,
+      sizeof(enabled)));
+  NVTE_CHECK_CUSOLVERMP(cusolverMpNewtonSchulzDescriptorSetAttribute(
+      ns_desc.get(), CUSOLVERMP_NEWTON_SCHULZ_DESCRIPTOR_ATTRIBUTE_REDUCE_VIA_COMPUTE_TYPE,
+      &enabled, sizeof(enabled)));
 
-  // Query workspace sizes
-  size_t wrksp_size_device = 0;
-  size_t wrksp_size_host = 0;
-  NVTE_CHECK_CUSOLVERMP(cusolverMpNewtonSchulz_bufferSize(
-      ctx->handle.get(), ns_desc.get(), n, m, t->data.dptr, 1, 1, mat_desc.get(), num_iterations,
-      coefficients, CUDA_R_32F, &wrksp_size_device, &wrksp_size_host));
+  // Workspace requirements are stable for a given operation configuration. Cache configurations
+  // so repeated optimizer steps avoid a device allocation, collective, and stream synchronization.
+  const bool workspace_config_cached = IsWorkspaceConfigCached(
+      ctx, m, n, cuda_dtype, num_iterations, coefficients, num_coefficients);
+  if (!workspace_config_cached) {
+    size_t wrksp_size_device = 0;
+    size_t wrksp_size_host = 0;
+    NVTE_CHECK_CUSOLVERMP(cusolverMpNewtonSchulz_bufferSize(
+        ctx->handle.get(), ns_desc.get(), n, m, t->data.dptr, 1, 1, mat_desc.get(), num_iterations,
+        coefficients, CUDA_R_32F, &wrksp_size_device, &wrksp_size_host));
+    wrksp_size_device = GridMaxWorkspaceSize(ctx, wrksp_size_device);
 
-  // Allocate/grow device workspace
-  if (ctx->workspace_size < wrksp_size_device) {
-    FreeWorkspace(ctx);
+    // Allocate/grow device workspace
+    if (ctx->workspace_size < wrksp_size_device) {
+      FreeWorkspace(ctx);
 
-    void* workspace = nullptr;
-    bool workspace_registered = false;
+      void* workspace = nullptr;
+      bool workspace_registered = false;
 
-    if (ncclMemAlloc(&workspace, wrksp_size_device) == ncclSuccess) {
-      if (cusolverMpBufferRegister(ctx->grid.get(), workspace, wrksp_size_device) ==
-          CUSOLVER_STATUS_SUCCESS) {
-        workspace_registered = true;
-      } else {
-        NVTE_CHECK_NCCL(ncclMemFree(workspace));
-        workspace = nullptr;
+      if (ncclMemAlloc(&workspace, wrksp_size_device) == ncclSuccess) {
+        if (cusolverMpBufferRegister(ctx->grid.get(), workspace, wrksp_size_device) ==
+            CUSOLVER_STATUS_SUCCESS) {
+          workspace_registered = true;
+        } else {
+          NVTE_CHECK_NCCL(ncclMemFree(workspace));
+          workspace = nullptr;
+        }
       }
+
+      if (workspace == nullptr) {
+        NVTE_CHECK_CUDA(cudaMalloc(&workspace, wrksp_size_device));
+      }
+
+      ctx->workspace = workspace;
+      ctx->workspace_size = wrksp_size_device;
+      ctx->workspace_registered = workspace_registered;
     }
 
-    if (workspace == nullptr) {
-      NVTE_CHECK_CUDA(cudaMalloc(&workspace, wrksp_size_device));
+    // Keep host workspace alive until all work on the internal stream is complete.
+    if (ctx->workspace_host.size() < wrksp_size_host) {
+      NVTE_CHECK_CUDA(cudaStreamSynchronize(ctx->stream.get()));
+      ctx->workspace_host.resize(wrksp_size_host);
     }
 
-    ctx->workspace = workspace;
-    ctx->workspace_size = wrksp_size_device;
-    ctx->workspace_registered = workspace_registered;
+    CacheWorkspaceConfig(ctx, m, n, cuda_dtype, num_iterations, coefficients, num_coefficients);
   }
-
-  // Allocate host workspace
-  std::vector<uint8_t> workspace_host(wrksp_size_host);
 
   // Execute Newton-Schulz
   NVTE_CHECK_CUSOLVERMP(cusolverMpNewtonSchulz(
       ctx->handle.get(), ns_desc.get(), n, m, t->data.dptr, 1, 1, mat_desc.get(), num_iterations,
-      coefficients, CUDA_R_32F, ctx->workspace, ctx->workspace_size, workspace_host.data(),
-      workspace_host.size(), nullptr));
+      coefficients, CUDA_R_32F, ctx->workspace, ctx->workspace_size, ctx->workspace_host.data(),
+      ctx->workspace_host.size(), nullptr));
 
   // Make the caller's stream wait for the internal stream so that
   // the output tensor is ready before the caller uses it.

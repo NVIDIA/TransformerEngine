@@ -1632,7 +1632,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(self.fp8_meta)
 
                 # Activation recomputation is used and this is the first forward phase.
-                if self.training and is_fp8_activation_recompute_enabled():
+                if is_fp8_activation_recompute_enabled():
                     FP8GlobalStateManager.copy_forward_fp8_meta_tensors_for_recompute(self.fp8_meta)
 
         nvtx_range_push(self.__class__.__name__ + " forward")
@@ -1961,7 +1961,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if not self.fuse_wgrad_accumulation:
                 weight_tensor = noop_cat(self._get_weight_tensors())
                 weight_tensor.grad = wgrad.to(weight_tensor.dtype)
-            if self.use_bias:
+            if self.use_bias and bgrad is not None and bgrad.numel() != 0:
                 bias_tensor = noop_cat([getattr(self, name) for name in self.bias_names])
                 if bias_tensor.grad is None:
                     bias_tensor.grad = bgrad.to(bias_tensor.dtype)

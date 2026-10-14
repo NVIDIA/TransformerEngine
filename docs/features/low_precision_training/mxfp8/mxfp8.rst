@@ -152,6 +152,57 @@ SM 10.0, SM 10.3
 
 ----
 
+
+Quantizer
+---------
+
+.. tabs::
+
+   .. tab:: PyTorch
+
+      MXFP8 uses :class:`~transformer_engine.pytorch.MXFP8Quantizer`. Every
+      32-element block shares one power-of-two (E8M0) scale, computed from the
+      block's amax at quantization time; no external state is needed.
+
+      .. code-block:: python
+
+         import torch
+         import transformer_engine.pytorch as te
+
+         tensor = torch.randn(256, 256, device="cuda", dtype=torch.bfloat16)
+
+         quantizer = te.MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3)
+
+         qtensor = quantizer(tensor)
+         roundtrip = qtensor.dequantize()
+
+   .. tab:: JAX
+
+      MXFP8 uses ``BlockScaleQuantizer`` — the JAX quantizer for block-based
+      scaling, selected by ``ScalingMode.MXFP8_1D_SCALING``. Instead of one
+      scale per tensor, the tensor is split along the quantization axis into
+      32-element blocks and each block gets its own power-of-two (E8M0) scale,
+      computed from that block's amax at quantization time. Because the scale
+      is derived from the current data, no external state (scale buffers or
+      amax history) is needed.
+
+      .. code-block:: python
+
+         import jax.numpy as jnp
+         from transformer_engine.jax.quantize import (
+             QuantizerFactory, ScalingMode, QuantizeLayout,
+         )
+
+         x = jnp.ones((256, 256), dtype=jnp.bfloat16)
+
+         quantizer = QuantizerFactory.create(
+             scaling_mode=ScalingMode.MXFP8_1D_SCALING,
+             q_dtype=jnp.float8_e4m3fn,
+             q_layout=QuantizeLayout.ROWWISE,
+         )
+         qtensor = quantizer.quantize(x)
+         roundtrip = qtensor.dequantize()
+
 Developer Notes
 ---------------
 

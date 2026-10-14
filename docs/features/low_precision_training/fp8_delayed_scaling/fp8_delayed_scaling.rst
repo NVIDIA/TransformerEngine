@@ -161,3 +161,68 @@ Supported devices
 -----------------
 
 Ada and later (SM 8.9+)
+
+Quantizer
+---------
+
+.. tabs::
+
+   .. tab:: PyTorch
+
+      Delayed scaling uses
+      :class:`~transformer_engine.pytorch.Float8Quantizer`. It does not
+      compute the scaling factor from the current tensor: one-element
+      ``scale`` and ``amax`` buffers are supplied at construction.
+      Quantization applies the given scale and records the tensor's amax into
+      the ``amax`` buffer.
+
+      During training both buffers are views into the recipe state: ``scale``
+      into its per-quantizer scale vector, ``amax`` into the current row of
+      its ``(amax_history_len, num_quantizers)`` amax history. At the end of
+      each step the recipe state computes a new scale from the history (its
+      max or most recent entry, per ``amax_compute_algo``), rolls the history
+      by one slot, and zeroes the current row — all in place, so the views
+      held by the quantizer stay valid for the whole training run.
+
+      .. code-block:: python
+
+         import torch
+         import transformer_engine.pytorch as te
+
+         tensor = torch.randn(256, 256, device="cuda", dtype=torch.bfloat16)
+
+         quantizer = te.Float8Quantizer(
+             scale=torch.ones(1, device="cuda"),
+             amax=torch.zeros(1, device="cuda"),
+             fp8_dtype=te.DType.kFloat8E4M3,
+         )
+
+         qtensor = quantizer(tensor)
+         roundtrip = qtensor.dequantize()
+
+   .. tab:: JAX
+
+      Delayed scaling uses ``DelayedScaleQuantizer``. The ``scale`` and the
+      ``amax_history`` (1024 entries by default) are fields of the quantizer
+      itself, carried through JAX transformations as its pytree state. Each
+      ``quantize()`` call applies the current ``scale``, then updates the
+      state: the tensor's amax is written into the history, a new scale is
+      computed from the history (max or most-recent entry, per
+      ``amax_compute_algo``), and the history is rolled by one slot.
+
+      .. code-block:: python
+
+         import jax.numpy as jnp
+         from transformer_engine.jax.quantize import (
+             QuantizerFactory, ScalingMode, QuantizeLayout,
+         )
+
+         x = jnp.ones((256, 256), dtype=jnp.bfloat16)
+
+         quantizer = QuantizerFactory.create(
+             scaling_mode=ScalingMode.DELAYED_TENSOR_SCALING,
+             q_dtype=jnp.float8_e4m3fn,
+             q_layout=QuantizeLayout.ROWWISE,
+         )
+         qtensor = quantizer.quantize(x)
+         roundtrip = qtensor.dequantize()

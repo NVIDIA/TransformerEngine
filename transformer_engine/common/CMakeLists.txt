@@ -102,6 +102,19 @@ set(CUTLASS_TOOLS_INCLUDE_DIR
 # Python
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 
+option(NVTE_WITH_CUTEDSL
+       "Build the CuTeDSL quantize backend bridge (requires the apache-tvm-ffi Python package)" OFF)
+if(NVTE_WITH_CUTEDSL)
+  # Building libtransformer_engine.so with CuTeDSL support requires the TVM-FFI headers.
+  if(NOT EXISTS "${TVM_FFI_INCLUDE_DIR}/tvm/ffi/any.h")
+    message(FATAL_ERROR
+            "Could not find the TVM-FFI headers in '${TVM_FFI_INCLUDE_DIR}'. "
+            "Install apache-tvm-ffi and set TVM_FFI_INCLUDE_DIR to its include directory, "
+            "or configure with "
+            "-DNVTE_WITH_CUTEDSL=OFF to build the C++ library without the backend.")
+  endif()
+endif()
+
 find_path(NCCL_INCLUDE_DIR
             NAMES nccl.h
           HINTS "${Python_SITEARCH}/nvidia/nccl"
@@ -184,6 +197,7 @@ list(APPEND transformer_engine_cpp_sources
      cudnn_utils.cpp
      transformer_engine.cpp
      fused_attn/fused_attn.cpp
+     fused_attn/config_and_params.cpp
      gemm/config.cpp
      normalization/common.cpp
      normalization/rtc_dispatch.cpp
@@ -200,6 +214,10 @@ list(APPEND transformer_engine_cpp_sources
      comm_gemm_overlap/comm_gemm_overlap.cpp
      newton_schulz/newton_schulz.cpp
      )
+
+if(NVTE_WITH_CUTEDSL)
+  list(APPEND transformer_engine_cpp_sources init_python.cpp)
+endif()
 
 list(APPEND transformer_engine_cuda_sources
      common.cu
@@ -250,23 +268,35 @@ list(APPEND transformer_engine_cuda_arch_specific_sources
      activation/gelu.cu
      activation/gelu_dbias.cu
      activation/gelu_grouped.cu
+     activation/gelu_grouped_bwd.cu
      activation/gelu_grouped_dbias.cu
+     activation/qgelu_grouped.cu
+     activation/qgelu_grouped_bwd.cu
+     activation/qgelu_grouped_dbias.cu
      activation/glu.cu
      activation/relu.cu
      activation/relu_dbias.cu
      activation/relu_grouped.cu
+     activation/relu_grouped_bwd.cu
      activation/relu_grouped_dbias.cu
+     activation/srelu_grouped.cu
+     activation/srelu_grouped_bwd.cu
+     activation/srelu_grouped_dbias.cu
      activation/scaled_activation.cu
+     activation/scaled_clamped_swiglu_grouped.cu
      activation/scaled_srelu.cu
      activation/scaled_swiglu.cu
+     activation/scaled_swiglu_grouped.cu
      activation/swiglu.cu
      activation/swiglu_dbias.cu
      activation/swiglu_grouped.cu
+     activation/swiglu_grouped_bwd.cu
      activation/swiglu_grouped_dbias.cu
      cast/cast.cu
      cast/cast_dbias.cu
      cast/cast_grouped.cu
      cast/cast_grouped_dbias.cu
+     cast/fused_group_requantize.cu
      gemm/cutlass_grouped_gemm.cu
      hadamard_transform/group_hadamard_transform.cu
      hadamard_transform/graph_safe_group_hadamard_transform.cu
@@ -373,6 +403,15 @@ target_link_libraries(transformer_engine PUBLIC
                       CUDNN::cudnn_all)
 target_link_libraries(transformer_engine PRIVATE ${CMAKE_DL_LIBS})
 
+if(NVTE_WITH_CUTEDSL)
+  target_include_directories(transformer_engine PRIVATE ${TVM_FFI_INCLUDE_DIR})
+  target_compile_definitions(
+    transformer_engine PRIVATE
+    NVTE_WITH_CUTEDSL
+    Py_LIMITED_API=0x030A0000)
+  target_link_libraries(transformer_engine PRIVATE Python::Module)
+endif()
+
 target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
 target_include_directories(transformer_engine PRIVATE ${NCCL_INCLUDE_DIR})
@@ -414,12 +453,12 @@ if (NVTE_WITH_CUBLASMP)
                  NAMES nccl libnccl
                  PATH_SUFFIXES lib
                  REQUIRED)
-    # cuBLASMp 0.8 is the first release with CUDA-graph-safe overlap algos,
+    # cuBLASMp 0.8.1 adds MXFP8 support to the CUDA-graph-safe overlap algos,
     # and NCCL 2.30 is the first release with graph-safe one-sided RMA
     # primitives (ncclPutSignal/ncclWaitSignal) that those algos use.
-    if (CUBLASMP_VERSION VERSION_LESS 0.8.0)
+    if (CUBLASMP_VERSION VERSION_LESS 0.8.1)
       message(FATAL_ERROR
-              "NVTE_WITH_CUBLASMP requires cuBLASMp >= 0.8.0, but found cuBLASMp "
+              "NVTE_WITH_CUBLASMP requires cuBLASMp >= 0.8.1, but found cuBLASMp "
               "${CUBLASMP_VERSION} in ${CUBLASMP_INCLUDE_DIR}/cublasmp.h")
     endif()
     if (NCCL_VERSION VERSION_LESS 2.30.0)
@@ -627,18 +666,29 @@ if (NVTE_BUILD_ACTIVATION_WITH_FAST_MATH)
   list(APPEND nvte_sources_with_fast_math activation/gelu.cu
                                           activation/gelu_dbias.cu
                                           activation/gelu_grouped.cu
+                                          activation/gelu_grouped_bwd.cu
                                           activation/gelu_grouped_dbias.cu
+                                          activation/qgelu_grouped.cu
+                                          activation/qgelu_grouped_bwd.cu
+                                          activation/qgelu_grouped_dbias.cu
                                           activation/glu.cu
                                           activation/relu.cu
                                           activation/relu_dbias.cu
                                           activation/relu_grouped.cu
+                                          activation/relu_grouped_bwd.cu
                                           activation/relu_grouped_dbias.cu
+                                          activation/srelu_grouped.cu
+                                          activation/srelu_grouped_bwd.cu
+                                          activation/srelu_grouped_dbias.cu
                                           activation/scaled_activation.cu
+                                          activation/scaled_clamped_swiglu_grouped.cu
                                           activation/scaled_srelu.cu
                                           activation/scaled_swiglu.cu
+                                          activation/scaled_swiglu_grouped.cu
                                           activation/swiglu.cu
                                           activation/swiglu_dbias.cu
                                           activation/swiglu_grouped.cu
+                                          activation/swiglu_grouped_bwd.cu
                                           activation/swiglu_grouped_dbias.cu)
 endif()
 

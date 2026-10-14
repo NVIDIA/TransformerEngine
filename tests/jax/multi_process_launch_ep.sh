@@ -7,6 +7,16 @@
 SCRIPT_NAMES="${SCRIPT_NAMES:-test_multi_process_ep.py}"
 TEST_TIMEOUT_S="${TEST_TIMEOUT_S:-180}"
 
+# Each communicator mode needs a fresh process group.
+if [ -z "${NVTE_TEST_EP_CLASSES:-}" ]; then
+  RET=0
+  NVTE_TEST_EP_CLASSES="TestEP,TestEPOverflowDrop,TestEpDomainGrouping" \
+    bash "${BASH_SOURCE[0]}" || RET=1
+  NVTE_TEST_EP_CLASSES="TestEPBorrowedComm" \
+    bash "${BASH_SOURCE[0]}" || RET=1
+  exit "$RET"
+fi
+
 
 XLA_BASE_FLAGS="--xla_gpu_enable_latency_hiding_scheduler=true
                 --xla_gpu_graph_min_graph_size=1"
@@ -39,8 +49,18 @@ if ! nvidia-smi nvlink --status 2>/dev/null | grep -qE 'Link [0-9]+:.*GB/s'; the
   exit 0
 fi
 
-# Default test mesh is (2, 2); use exactly 4 ranks even on larger boxes.
-NUM_RUNS="${NVTE_TEST_EP_NUM_RANKS:-4}"
+# Devices per process: 1 = one-process-per-GPU (default); >1 tests multiple
+# local devices per process (e.g. one process per MNNVL-connected node).
+DEVICES_PER_PROC="${NVTE_TEST_EP_DEVICES_PER_PROC:-1}"
+if [ "$DEVICES_PER_PROC" -le 0 ] || [ "$((4 % DEVICES_PER_PROC))" -ne 0 ]; then
+  echo "ERROR: NVTE_TEST_EP_DEVICES_PER_PROC=${DEVICES_PER_PROC} must be a positive divisor of 4" \
+       "(the default test mesh's total device count)."
+  exit 1
+fi
+
+# Default test mesh is (2, 2) across 4 devices total; use exactly that many
+# devices even on larger boxes, split into NUM_RUNS processes.
+NUM_RUNS="${NVTE_TEST_EP_NUM_RANKS:-$((4 / DEVICES_PER_PROC))}"
 
 OVERALL_RET=0
 
@@ -56,11 +76,13 @@ for SCRIPT_NAME in $SCRIPT_NAMES; do
   for ((i=1; i<NUM_RUNS; i++))
   do
       timeout --foreground --signal=KILL "${TEST_TIMEOUT_S}" \
-          python "$SCRIPT_PATH" 127.0.0.1:12345 $i $NUM_RUNS > stdout_rank_${i}.txt 2>&1 &
+          python "$SCRIPT_PATH" 127.0.0.1:12345 $i $NUM_RUNS $DEVICES_PER_PROC \
+              > stdout_rank_${i}.txt 2>&1 &
   done
 
   timeout --foreground --signal=KILL "${TEST_TIMEOUT_S}" \
-      python "$SCRIPT_PATH" 127.0.0.1:12345 0 $NUM_RUNS 2>&1 | tee stdout_multi_process.txt
+      python "$SCRIPT_PATH" 127.0.0.1:12345 0 $NUM_RUNS $DEVICES_PER_PROC \
+          2>&1 | tee stdout_multi_process.txt
 
   wait
 
@@ -73,6 +95,22 @@ for SCRIPT_NAME in $SCRIPT_NAMES; do
     echo "ERROR: rank 0 produced no test summary for ${SCRIPT_NAME} — likely a hang or early crash."
     echo "       NCCL EP requires NVLS multicast; check NCCL_DEBUG=INFO output."
     RET=1
+  fi
+  # "Ran N tests" counts skipped tests too, so a run where every test skips
+  # (e.g. no NCCL EP build) still matches the check above with zero real
+  # coverage. Fail explicitly instead of reporting a green PASS.
+  RAN_N=$(grep -oE "Ran [0-9]+ test" stdout_multi_process.txt | tail -1 | grep -oE '[0-9]+')
+  SKIPPED_N=$(grep -oE "skipped=[0-9]+" stdout_multi_process.txt | tail -1 | grep -oE '[0-9]+')
+  # ... unless every skip is for a known, environment-gated reason (e.g. this
+  # JAX/XLA build predates borrowed-comm support): that's an expected SKIP,
+  # not a failure.
+  if [ -n "$RAN_N" ] && [ "${SKIPPED_N:-0}" -ge "$RAN_N" ]; then
+    if grep -q "EP borrowed-comm path needs a newer JAX/XLA build" stdout_multi_process.txt; then
+      echo "SKIP: all ${RAN_N} test(s) skipped for ${SCRIPT_NAME} — JAX/XLA build lacks borrowed-comm support."
+    else
+      echo "ERROR: all ${RAN_N} test(s) skipped for ${SCRIPT_NAME} — zero real coverage."
+      RET=1
+    fi
   fi
   if [ "$RET" -ne 0 ]; then
     for ((i=1; i<NUM_RUNS; i++)); do

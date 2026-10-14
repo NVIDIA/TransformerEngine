@@ -19,6 +19,7 @@ from build_tools.build_ext import CMakeExtension, get_build_ext
 from build_tools.te_version import te_version
 from build_tools.utils import (
     cuda_archs,
+    cuda_home_path,
     cuda_version,
     cudnn_frontend_include_path,
     get_frameworks,
@@ -26,6 +27,7 @@ from build_tools.utils import (
     min_python_version_str,
     nccl_ep_enabled,
     get_max_jobs_for_parallel_build,
+    nvcc_path,
 )
 
 frameworks = get_frameworks()
@@ -62,6 +64,15 @@ def setup_common_extension() -> CMakeExtension:
         "-DCMAKE_CUDA_ARCHITECTURES={}".format(archs),
         f"-DCUDNN_FRONTEND_INCLUDE_DIR={cudnn_frontend_include_path()}",
     ]
+
+    with_cutedsl = bool(int(os.getenv("NVTE_WITH_CUTEDSL", "0")))
+    if with_cutedsl:
+        tvm_ffi_include_dir = metadata.distribution("apache-tvm-ffi").locate_file("tvm_ffi/include")
+        cmake_flags.append(f"-DTVM_FFI_INCLUDE_DIR={tvm_ffi_include_dir}")
+        cmake_flags.append("-DNVTE_WITH_CUTEDSL=ON")
+    else:
+        cmake_flags.append("-DNVTE_WITH_CUTEDSL=OFF")
+
     if bool(int(os.getenv("NVTE_UB_WITH_MPI", "0"))):
         assert (
             os.getenv("MPI_HOME") is not None
@@ -253,6 +264,10 @@ def build_nccl_ep_submodule() -> str:
 
     nproc = get_max_jobs_for_parallel_build()
     env = os.environ.copy()
+    if (cuda_home := cuda_home_path()) is not None:
+        env.setdefault("CUDA_HOME", str(cuda_home))
+    if (nvcc_bin := nvcc_path()) is not None:
+        env.setdefault("NVCC", str(nvcc_bin))
     env["NVCC_GENCODE"] = gencode
     # NCCL EP needs the core NCCL headers + libnccl.so; write NCCL EP build
     # outputs to the submodule's local build/ tree.
