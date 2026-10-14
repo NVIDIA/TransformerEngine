@@ -602,8 +602,8 @@ at::Tensor strided_batched_gemm(py::handle A, bool transa, py::handle B, bool tr
   NVTE_CHECK(high_precision_inputs || mxfp8_inputs,
              "strided_batched_gemm supports only high-precision or MXFP8 A and B tensor pairs.");
   auto check_device = [&](const at::Tensor& tensor, const char* name) {
-    NVTE_CHECK(tensor.is_cuda() && tensor.device() == D.device(),
-               "strided_batched_gemm requires ", name, " on the same CUDA device as D.");
+    NVTE_CHECK(tensor.is_cuda() && tensor.device() == D.device(), "strided_batched_gemm requires ",
+               name, " on the same CUDA device as D.");
   };
   auto check_operand_device = [&](py::handle operand, bool rowwise, const char* name) {
     if (high_precision_inputs) {

@@ -1181,9 +1181,9 @@ void cublas_gemm_strided_batched(const Tensor *inputA, const Tensor *inputB, con
   NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceCreate(&preference));
   // Keep split-K partial sums in the compute type, matching the ordinary GEMM path.
   const uint32_t reduction_scheme_mask = CUBLASLT_REDUCTION_SCHEME_COMPUTE_TYPE;
-  NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
-      preference, CUBLASLT_MATMUL_PREF_REDUCTION_SCHEME_MASK, &reduction_scheme_mask,
-      sizeof(reduction_scheme_mask)));
+  NVTE_CHECK_CUBLAS(
+      cublasLtMatmulPreferenceSetAttribute(preference, CUBLASLT_MATMUL_PREF_REDUCTION_SCHEME_MASK,
+                                           &reduction_scheme_mask, sizeof(reduction_scheme_mask)));
   NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
       preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &workspaceSize, sizeof(workspaceSize)));
   const auto A_alignment = _getAlignment(reinterpret_cast<uintptr_t>(param.A));
