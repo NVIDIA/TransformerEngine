@@ -118,6 +118,25 @@ __global__ void thd_partition_indices_kernel(int *output, int *cu_seqlens, int b
   }
 }
 
+// Avoid the per-block shared-memory ceiling for large batches without changing the usual kernel.
+__global__ void thd_partition_indices_global_kernel(int *output, int *cu_seqlens, int batch,
+                                                    int total_tokens, int world_size, int rank) {
+  int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  int num_threads = blockDim.x * gridDim.x;
+  for (int i = tid; i <= batch; i += num_threads) {
+    assert(cu_seqlens[i] % (world_size * 2) == 0);
+  }
+
+  for (int token_id = tid; token_id < total_tokens / world_size; token_id += num_threads) {
+    int seq_id = binary_search(token_id * world_size, cu_seqlens, batch + 1);
+    int seq_start = cu_seqlens[seq_id] / world_size;
+    int seq_len = cu_seqlens[seq_id + 1] / world_size - seq_start;
+    int index = token_id - seq_start;
+    int offset = index < seq_len / 2 ? rank : (world_size - 1) * 2 - rank;
+    output[token_id] = index + seq_start * world_size + seq_len / 2 * offset;
+  }
+}
+
 /***************************************************************************************************
  * Fused dual-chunk THD reorder. Computes src inline and copies one leading-dimension
  * token entry per warp.
@@ -776,11 +795,32 @@ void thd_get_partitioned_indices(const Tensor &cu_seqlens, Tensor output, int to
 
   int batch = cu_seqlens_shape[0] - 1;
 
+  // Cache device limits so the common path does not repeat capability queries.
+  static const std::vector<int> shared_memory_limits = [] {
+    int num_devices;
+    NVTE_CHECK_CUDA(cudaGetDeviceCount(&num_devices));
+    std::vector<int> limits(num_devices);
+    for (int device = 0; device < num_devices; ++device) {
+      NVTE_CHECK_CUDA(
+          cudaDeviceGetAttribute(&limits[device], cudaDevAttrMaxSharedMemoryPerBlock, device));
+    }
+    return limits;
+  }();
+  int device;
+  NVTE_CHECK_CUDA(cudaGetDevice(&device));
+
   constexpr unsigned int block = 256;
   unsigned int grid = (output_shape[0] + block - 1) / block;
-  thd_partition_indices_kernel<<<grid, block, sizeof(int) * (batch + 1), stream>>>(
-      reinterpret_cast<int *>(output.data.dptr), reinterpret_cast<int *>(cu_seqlens.data.dptr),
-      batch, total_tokens, world_size, rank);
+  size_t shared_memory_bytes = sizeof(int) * (batch + 1);
+  if (shared_memory_bytes <= static_cast<size_t>(shared_memory_limits[device])) {
+    thd_partition_indices_kernel<<<grid, block, shared_memory_bytes, stream>>>(
+        reinterpret_cast<int *>(output.data.dptr), reinterpret_cast<int *>(cu_seqlens.data.dptr),
+        batch, total_tokens, world_size, rank);
+  } else {
+    thd_partition_indices_global_kernel<<<grid, block, 0, stream>>>(
+        reinterpret_cast<int *>(output.data.dptr), reinterpret_cast<int *>(cu_seqlens.data.dptr),
+        batch, total_tokens, world_size, rank);
+  }
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 

@@ -1017,6 +1017,29 @@ class TestTHDKernels(unittest.TestCase):
         self.assertTrue(torch.equal(rank0, expected_rank0))
         self.assertTrue(torch.equal(rank1, expected_rank1))
 
+    def test_thd_get_partitioned_indices_shared_memory_boundary(self):
+        props = torch.cuda.get_device_properties(torch.cuda.current_device())
+        max_shared_docs = props.shared_memory_per_block // 4 - 1
+        for documents in (
+            max_shared_docs,
+            max_shared_docs + 1,
+            props.shared_memory_per_block_optin // 4,
+        ):
+            for cp_size in (2, 4):
+                cu_seqlens = torch.arange(documents + 1, device="cuda", dtype=torch.int32)
+                cu_seqlens *= 2 * cp_size
+                tokens = torch.arange(
+                    documents * 2 * cp_size, device="cuda", dtype=torch.int32
+                ).view(documents, 2 * cp_size)
+                for rank in range(cp_size):
+                    with self.subTest(documents=documents, cp_size=cp_size, rank=rank):
+                        indices = tex.thd_get_partitioned_indices(
+                            cu_seqlens, tokens.numel(), cp_size, rank
+                        )
+                        expected = tokens[:, [rank, 2 * cp_size - 1 - rank]].reshape(-1)
+                        torch.cuda.synchronize()
+                        self.assertTrue(torch.equal(indices, expected))
+
     def test_thd_copy_valid_tokens_from_per_split_matches_legacy_slice_copy_loop(self):
         cu_seqlens_padded = torch.tensor([2, 6, 12], dtype=torch.int32, device="cuda")
         cu_seqlens = torch.tensor([0, 3, 7], dtype=torch.int32, device="cuda")
