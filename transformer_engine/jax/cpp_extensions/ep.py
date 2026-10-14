@@ -600,8 +600,8 @@ class EpPrepareAndDispatchPrimitive(BasePrimitive):
 
     name = "te_ep_prepare_and_dispatch_ffi"
     multiple_results = True
-    impl_static_args = (3, 4, 5, 6)  # top_k, dispatch_output_per_expert_alignment,
-    #                                  recv_capacity_per_rank, is_outer
+    impl_static_args = (3, 4, 5, 6, 7)  # top_k, dispatch_output_per_expert_alignment,
+    #                                     topk_idx_dtype, recv_capacity_per_rank, is_outer
     inner_primitive = None
     outer_primitive = None
 
@@ -613,10 +613,11 @@ class EpPrepareAndDispatchPrimitive(BasePrimitive):
         *,
         top_k,
         dispatch_output_per_expert_alignment,
+        topk_idx_dtype,
         recv_capacity_per_rank,
         is_outer,
     ):
-        del topk_idx_aval, topk_weights_aval
+        del topk_idx_aval, topk_weights_aval, topk_idx_dtype
         assert (
             len(tokens_aval.shape) >= 2
         ), f"tokens must be at least 2D [..., H], got shape {tokens_aval.shape}"
@@ -661,6 +662,7 @@ class EpPrepareAndDispatchPrimitive(BasePrimitive):
         *,
         top_k,
         dispatch_output_per_expert_alignment,
+        topk_idx_dtype,
         recv_capacity_per_rank,
         is_outer,
     ):
@@ -672,6 +674,7 @@ class EpPrepareAndDispatchPrimitive(BasePrimitive):
             topk_weights,
             top_k=int(top_k),
             dispatch_output_per_expert_alignment=int(dispatch_output_per_expert_alignment),
+            topk_idx_dtype=int(topk_idx_dtype),
         )
 
     @staticmethod
@@ -681,6 +684,7 @@ class EpPrepareAndDispatchPrimitive(BasePrimitive):
         topk_weights,
         top_k,
         dispatch_output_per_expert_alignment,
+        topk_idx_dtype,
         recv_capacity_per_rank,
         is_outer,
     ):
@@ -692,6 +696,7 @@ class EpPrepareAndDispatchPrimitive(BasePrimitive):
                 topk_weights,
                 top_k=top_k,
                 dispatch_output_per_expert_alignment=dispatch_output_per_expert_alignment,
+                topk_idx_dtype=topk_idx_dtype,
                 recv_capacity_per_rank=recv_capacity_per_rank,
                 is_outer=is_outer,
             )
@@ -704,6 +709,7 @@ class EpPrepareAndDispatchPrimitive(BasePrimitive):
         *,
         top_k,
         dispatch_output_per_expert_alignment,
+        topk_idx_dtype,
         recv_capacity_per_rank,
         is_outer,
     ):
@@ -713,6 +719,7 @@ class EpPrepareAndDispatchPrimitive(BasePrimitive):
     def partition(
         top_k,
         dispatch_output_per_expert_alignment,
+        topk_idx_dtype,
         recv_capacity_per_rank,
         is_outer,
         mesh,
@@ -746,6 +753,7 @@ class EpPrepareAndDispatchPrimitive(BasePrimitive):
                 topk_weights,
                 top_k,
                 dispatch_output_per_expert_alignment,
+                topk_idx_dtype,
                 recv_capacity_per_rank,
                 False,
             )
@@ -754,7 +762,8 @@ class EpPrepareAndDispatchPrimitive(BasePrimitive):
 
     @staticmethod
     def shardy_sharding_rule(*args):
-        # Static args: (top_k, dispatch_alignment, recv_capacity_per_rank, is_outer).
+        # Static args: (top_k, dispatch_alignment, topk_idx_dtype, recv_capacity_per_rank,
+        # is_outer).
         value_types = args[-2]
         idx_rank = len(value_types[0].shape)
         tok_rank = len(value_types[1].shape)
@@ -1332,6 +1341,7 @@ def _ep_fused_prepare_and_dispatch_fwd(
         topk_weights,
         top_k=int(cfg.top_k),
         dispatch_output_per_expert_alignment=int(cfg.dispatch_output_per_expert_alignment),
+        topk_idx_dtype=int(cfg.topk_idx_dtype),
         recv_capacity_per_rank=recv_capacity_per_rank,
         is_outer=True,
     )
