@@ -180,6 +180,9 @@ class LinearAttentionKernelAdapter(torch.nn.Module):
         value_layer: torch.Tensor,
         gates: Dict[str, torch.Tensor],
         cu_seqlens: torch.Tensor,
+        *,
+        initial_state: Optional[torch.Tensor],
+        output_final_state: bool,
         **kernel_kwargs: Any,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return self._op(
@@ -188,6 +191,8 @@ class LinearAttentionKernelAdapter(torch.nn.Module):
             value_layer,
             cu_seqlens=cu_seqlens,
             scale=self.scale,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
             **gates,
             **kernel_kwargs,
         )

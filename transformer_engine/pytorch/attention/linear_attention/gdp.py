@@ -195,6 +195,9 @@ class _GDPKernelAdapter(LinearAttentionKernelAdapter):
         value_layer: torch.Tensor,
         gates: Dict[str, torch.Tensor],
         cu_seqlens: torch.Tensor,
+        *,
+        initial_state: Optional[torch.Tensor],
+        output_final_state: bool,
         **kernel_kwargs: Any,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Fold the Householder axis into the kernel's token timeline.
@@ -205,6 +208,8 @@ class _GDPKernelAdapter(LinearAttentionKernelAdapter):
             {"g": gates["g"], "beta": gates["beta"].flatten(0, 1)},
             cu_seqlens,
             num_householder=self.num_householder,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
             **kernel_kwargs,
         )
 
@@ -236,6 +241,7 @@ class _GDPKernelAdapter(LinearAttentionKernelAdapter):
         passed inside its keyword dict. Keep them here, alongside
         ``initial_state``, for as long as that holds.
         """
+        # Validate a_log and dt_bias here; _validate_gates only receives per-token gates.
         self._validate_safe_gate_params(query_layer, a_log, dt_bias)
         return self._run(
             query_layer,
