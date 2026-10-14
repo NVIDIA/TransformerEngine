@@ -456,9 +456,9 @@ def _get_fused_attn_backend(**fused_attn_kwargs):
             is_frost_attention_supported,
         )
 
-        frost_backend, frost_reject_message = is_frost_attention_supported(params)
-        if frost_backend != FusedAttnBackend.No_Backend:
-            return int(frost_backend), frost_reject_message
+        frost_attention_backend, frost_reject_message = is_frost_attention_supported(params)
+        if frost_attention_backend != FusedAttnBackend.No_Backend:
+            return int(frost_attention_backend), frost_reject_message
         reject_message = (
             f"[CPP sub-backends] {reject_message.rstrip('. ')}."
             f" [Python sub-backends] {frost_reject_message.rstrip('. ')}."
@@ -1883,9 +1883,9 @@ def get_attention_backend(
             is_frost_attention_available,
         )
 
-        frost_available, frost_reason = is_frost_attention_available()
-        if not frost_available:
-            logger.debug("Disabling FusedAttention: %s", frost_reason)
+        frost_is_available, frost_unavailable_reason = is_frost_attention_available()
+        if not frost_is_available:
+            logger.debug("Disabling FusedAttention: %s", frost_unavailable_reason)
             use_fused_attention = False
             fused_attention_backend = None
     available_backends = [use_flash_attention, use_fused_attention, use_unfused_attention]

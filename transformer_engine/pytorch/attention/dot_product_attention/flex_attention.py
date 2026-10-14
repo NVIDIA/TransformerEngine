@@ -33,6 +33,11 @@ def _bhsd_dim_stride(
     return cudnn_pygraph.bhsd_dim_stride(tensor, tensor_format, backend_name=_BACKEND_NAME)
 
 
+def _bhsd_tensor_spec(tensor: torch.Tensor, tensor_format: str) -> Tuple[Any, ...]:
+    """Describe a tensor for ``cudnn_pygraph``: BHSD dims, TE-layout strides and dtype."""
+    return cudnn_pygraph.bhsd_tensor_spec(tensor, tensor_format, backend_name=_BACKEND_NAME)
+
+
 # score_mod graph cache helpers.
 def _freeze_score_mod_cache_key(value: Any) -> Any:
     """Convert a user-provided score_mod graph key into a hashable structure."""
@@ -147,9 +152,7 @@ def _score_mod_tensor_dict_metadata(
 
 def _score_mod_bhsd_tensor_metadata(tensor: torch.Tensor, tensor_format: str) -> Tuple[Any, ...]:
     """Describe an SBHD/BSHD runtime tensor as a cuDNN BHSD graph tensor."""
-    return cudnn_pygraph.tensor_key(tensor, tensor_format, backend_name=_BACKEND_NAME) + (
-        cudnn_pygraph.device_key(tensor.device),
-    )
+    return _bhsd_tensor_spec(tensor, tensor_format) + (cudnn_pygraph.device_key(tensor.device),)
 
 
 # cuDNN frontend score_mod graph helpers.
@@ -290,12 +293,6 @@ def _cudnn_score_mod_bwd_cache_key(
         _score_mod_tensor_dict_metadata(score_mod_tensors),
         _score_mod_tensor_dict_metadata(score_mod_bprop_tensors),
     )
-
-
-def _bhsd_tensor_spec(tensor: torch.Tensor, tensor_format: str):
-    """Describe a tensor for ``cudnn_pygraph``: BHSD dims with TE-layout strides."""
-    dim, stride = _bhsd_dim_stride(tensor, tensor_format)
-    return (dim, stride, tensor.dtype)
 
 
 def _build_cudnn_score_mod_fwd_graph(

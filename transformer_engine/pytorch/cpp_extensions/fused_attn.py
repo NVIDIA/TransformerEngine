@@ -106,7 +106,7 @@ class FusedAttnBackend(IntEnum):
     ``transformer_engine.pytorch``: the C++ backends from
     ``transformer_engine_torch.NVTE_Fused_Attn_Backend`` (pybind11), mirrored
     value-for-value so instances of the two enums compare equal, plus
-    ``FROST``, which runs through the cuDNN Frontend python API and so has no
+    ``FROST``, which runs through the cudnn-frontend Python API and so has no
     C++ counterpart. Unlike the pybind enum, a plain-python ``IntEnum`` is
     traceable by ``torch.compile``: comparisons against a member constant-fold
     cleanly. Lookup by name (``FusedAttnBackend["FP8"]``) works the same way as
@@ -120,9 +120,6 @@ class FusedAttnBackend(IntEnum):
     No_Backend = int(NVTE_Fused_Attn_Backend.NVTE_No_Backend)
     F16_arbitrary_seqlen = int(NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen)
     FP8 = int(NVTE_Fused_Attn_Backend.NVTE_FP8)
-    # Python-only: FROST runs through the cuDNN Frontend python API, so it has no
-    # NVTE_Fused_Attn_Backend counterpart and never reaches pybind. Derived rather than
-    # hardcoded so a new C++ enumerator shifts it instead of colliding with it.
     FROST = max(int(v) for v in NVTE_Fused_Attn_Backend.__members__.values()) + 1
 
     @classmethod
@@ -356,7 +353,7 @@ def fused_attn_fwd(
     # Accept the pybind enum for backward compatibility.
     fused_attention_backend = FusedAttnBackend.cast(fused_attention_backend)
     if fused_attention_backend == FusedAttnBackend["FROST"]:
-        # Imported here so a process that never selects FROST never imports cuDNN Frontend.
+        # Imported here so a process that never selects FROST never imports cudnn-frontend.
         # pylint: disable-next=import-outside-toplevel
         from ..attention.dot_product_attention import frost_attention
 

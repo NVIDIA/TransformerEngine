@@ -33,8 +33,7 @@ __all__ = [
 # the selected plan is checked by NAME rather than trusting that the engine was used.
 # Defined in cudnn_pygraph so the pin here and the bar in flex_attention cannot name different
 # engines: one of them failing loudly and the other silently is exactly the drift to avoid.
-_FROST_FWD_PLAN_TOKEN = cudnn_pygraph.FROST_FWD_PLAN_TOKEN
-_FROST_BWD_PLAN_TOKEN = cudnn_pygraph.FROST_BWD_PLAN_TOKEN
+_FROST_FWD_PLAN_TOKEN, _FROST_BWD_PLAN_TOKEN = cudnn_pygraph.FROST_PLAN_TOKENS
 _MIN_CUTLASS_DSL = PkgVersion("4.7.0")
 
 # 1.29.0 is the first release carrying the head_dim=512 backward. 1.28.0 ships the forward only,
@@ -90,15 +89,13 @@ def is_frost_attention_available() -> Tuple[bool, str]:
     try:
         # Without the engines: this only reads a version, and enabling reorders plan selection
         # process-wide even when the checks below decline. The use sites enable it.
-        _import_cudnn_frontend(enable_frost_engines=False)
+        frontend_module = _import_cudnn_frontend(enable_frost_engines=False)
     except ImportError as exc:
         return _no(f"nvidia-cudnn-frontend not importable: {exc}")
 
     # Decline only on positive evidence: a version below a floor, or a package absent outright.
     # An unparseable version defers to _frost_plan_args, which checks the plan by name.
-    frontend, frontend_raw = cudnn_pygraph.pkg_version(
-        "nvidia-cudnn-frontend", cudnn_pygraph.cudnn_module()
-    )
+    frontend, frontend_raw = cudnn_pygraph.pkg_version("nvidia-cudnn-frontend", frontend_module)
     if frontend is not None and frontend < _MIN_CUDNN_FRONTEND:
         return _no(
             f"nvidia-cudnn-frontend {frontend_raw} registers no sm100 backward engine; >="
@@ -121,8 +118,9 @@ def is_frost_attention_available() -> Tuple[bool, str]:
 
 
 # cuDNN expresses causal, bottom-right and sliding-window masking as one mechanism, a diagonal
-# alignment plus a two-sided band, which is what _mask_options builds. Both alignments are needed:
-# the p2p ring produces square tiles where they coincide, while all_gather trims KV so they differ.
+# alignment plus a two-sided band, which the builders declare from the spec below. Both alignments
+# are needed: the p2p ring produces square tiles where they coincide, while all_gather trims KV so
+# they differ.
 _SUPPORTED_MASKS = ("no_mask", "causal", "causal_bottom_right")
 
 # Sliding window as TE spells it: (left, right), -1 meaning unbounded on that side.
@@ -171,12 +169,6 @@ def _mask_spec(attn_mask_type: str, window_size=None):
     return attn_mask_type, window
 
 
-def _mask_options(cudnn, spec):
-    """cuDNN sdpa kwargs for a (mask type, window) spec: a diagonal alignment plus a band."""
-    attn_mask_type, window = spec
-    return cudnn_pygraph.diagonal_band_kwargs(cudnn, attn_mask_type, window)
-
-
 _SUPPORTED_QKV_FORMATS = ("bshd", "sbhd")
 
 
@@ -204,8 +196,8 @@ def _te_mask_spec(attn_mask_type: str, window_size, bottom_right_diagonal: bool)
     """Fold TE's (mask type, window, diagonal anchor) into the spec the plan is keyed on.
 
     TE carries the anchor in its own flag, so normalise it into the mask type before building the
-    band: diagonal_band_kwargs reads the anchor off the name, and taking it from the name alone
-    would quietly give a top-left band where the caller asked for bottom-right.
+    band: the band reads the anchor off the name, and taking it from the name alone would quietly
+    give a top-left band where the caller asked for bottom-right.
     """
     if "padding" in attn_mask_type:
         raise NotImplementedError(
@@ -418,18 +410,19 @@ def _frost_plan_args(token: str, what: str) -> dict:
     error at the first forward rather than a wrong number.
     """
 
+    cudnn = _import_cudnn_frontend()
+
     # Both versions, because either floor can cause this and blaming one misdirects. Looked up
     # defensively: this explains a failure, so it must not raise itself.
     def hint():
         return (
             f"Wanted the FROST {what} engine."
-            f" nvidia-cudnn-frontend={cudnn_pygraph.pkg_version('nvidia-cudnn-frontend', cudnn_pygraph.cudnn_module())[1] or 'unknown'} (floor"
+            f" nvidia-cudnn-frontend={cudnn_pygraph.pkg_version('nvidia-cudnn-frontend', cudnn)[1] or 'unknown'} (floor"
             f" {_MIN_CUDNN_FRONTEND}),"
             f" nvidia-cutlass-dsl={cudnn_pygraph.pkg_version('nvidia-cutlass-dsl')[1] or 'unknown'} (floor"
             f" {_MIN_CUTLASS_DSL})."
         )
 
-    cudnn = _import_cudnn_frontend()
     return {
         "heuristics": [cudnn.heur_mode.A],
         "require_plan_token": token,
@@ -457,7 +450,7 @@ def _build_fwd(key, device) -> dict:
         # the CP ring needs the LSE, and it is cheap
         stats=([b, hq, sq, 1], [hq * sq, sq, 1, 1], cudnn.data_type.FLOAT),
         attn_scale=scale,
-        sdpa_kwargs=_mask_options(cudnn, mask),
+        mask=mask,
         **_frost_plan_args(_FROST_FWD_PLAN_TOKEN, "forward"),
     )
 
@@ -486,7 +479,7 @@ def _build_bwd(key, device) -> dict:
         dv=(None, vs, io_dt),
         attn_scale=scale,
         deterministic=deterministic,
-        sdpa_kwargs=_mask_options(cudnn, mask),
+        mask=mask,
         **_frost_plan_args(_FROST_BWD_PLAN_TOKEN, "backward"),
     )
 
@@ -543,7 +536,7 @@ def _key(q, k, v, qkv_format, mask, scale, deterministic=False):
     """
 
     def described(t):
-        return cudnn_pygraph.tensor_key(t, qkv_format, backend_name=_BACKEND_NAME)
+        return cudnn_pygraph.bhsd_tensor_spec(t, qkv_format, backend_name=_BACKEND_NAME)
 
     return (
         # Built under whichever device was current, so it must not be reused on another. Matches

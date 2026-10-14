@@ -502,13 +502,13 @@ def test_frost_engines_are_enabled_even_if_cudnn_was_imported_without_them():
         # The availability probe first, which must not enable anything.
         frost_attention._import_cudnn_frontend(enable_frost_engines=False)
         assert env not in os.environ, "the non-FROST caller must not set the switch"
-        assert not cudnn_pygraph.frost_engines_enabled()
+        assert not cudnn_pygraph._frost_engines_enabled
 
         # A use site second, on an already-imported cuDNN. This is the case that used to be
         # skipped.
         frost_attention._import_cudnn_frontend(enable_frost_engines=True)
         assert os.environ.get(env) == "1", "FROST was requested after the import and not enabled"
-        assert cudnn_pygraph.frost_engines_enabled()
+        assert cudnn_pygraph._frost_engines_enabled
     finally:
         (
             cudnn_pygraph._cudnn,

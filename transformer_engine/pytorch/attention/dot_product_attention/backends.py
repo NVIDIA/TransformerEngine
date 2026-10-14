@@ -2036,7 +2036,12 @@ def _fused_attn_setup_ctx(
     bwd_args.softmax_type = fwd_args.softmax_type
     bwd_args.window_size = fwd_args.window_size
     bwd_args.bottom_right_diagonal = fwd_args.bottom_right_diagonal
+    # TODO(cyanguwa): NVTE_FP8_DPA_BWD=0 runs an F16 backward under an FP8 forward. This assumes
+    # F16_arbitrary_seqlen is the only backward that can follow an FP8 forward; revisit when more
+    # combinations, e.g. (FP8 forward, FROST backward), become supported.
     bwd_args.fused_attention_backend = ctx_attrs["fused_attention_backend"]
+    if fwd_args.fp8 and not fp8:
+        bwd_args.fused_attention_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
     bwd_args.use_FAv2_bwd = fwd_args.use_FAv2_bwd
     bwd_args.deterministic = fwd_args.deterministic
 
