@@ -8,6 +8,7 @@ import importlib.util
 import math
 import os
 from typing import Optional, Tuple
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
@@ -329,6 +330,7 @@ def test_gdn_dense_layout(qkv_format, dtype, compile_model):
     _assert_rms_close(output, expected, _FWD_TOL[dtype], "output")
 
 
+@patch.dict("sys.modules", {"cudnn.linear_attention": Mock()})
 def test_gdn_rejects_value_head_count_that_changes_output_width():
     """GatedDeltaNetAttention's output width cannot be changed by the runtime V tensor."""
     q, k, v, g, beta = _inputs(1, 128, 1, 2)
@@ -440,6 +442,7 @@ def test_gdn_thd_ragged_sequences(bounds):
     )
 
 
+@patch.dict("sys.modules", {"cudnn.linear_attention": Mock()})
 def test_gdn_requires_both_gates():
     """A partial GDN invocation fails before entering a softmax-attention backend."""
     q, k, v, g, _ = _inputs(1, 128, 1, 1)
@@ -452,6 +455,7 @@ def test_gdn_requires_both_gates():
         attention(q, k, v, g=g)
 
 
+@patch.dict("sys.modules", {"cudnn.linear_attention": Mock()})
 def test_gdn_runs_te_forward_lifecycle(monkeypatch):
     """GDN calls pair prepare_forward with end_forward even without the kernel runtime."""
     q, k, v, g, beta = _inputs(1, 128, 1, 1)

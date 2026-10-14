@@ -8,6 +8,7 @@ import importlib.util
 import math
 import os
 from typing import Optional, Tuple
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
@@ -705,6 +706,7 @@ def test_gdp_with_one_householder_matches_gdn():
     _assert_rms_close(output, expected, _FWD_TOL[q.dtype], "GDP against GDN")
 
 
+@patch.dict("sys.modules", {"cudnn.linear_attention": Mock()})
 def test_gdp_requires_both_gates():
     """A partial GDP invocation fails before entering a softmax-attention backend."""
     q, k, v, g, _ = _inputs(1, 128, 1, 2)
