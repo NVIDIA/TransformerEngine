@@ -572,6 +572,11 @@ at::Tensor strided_batched_gemm(py::handle A, bool transa, py::handle B, bool tr
   NVTE_CHECK(!B.is_none(), "Tensor B has not been provided");
   NVTE_CHECK(D.is_cuda(), "Output tensor D must be on CUDA.");
   NVTE_CHECK(workspace.is_cuda(), "cuBLASLt workspace must be on CUDA.");
+  NVTE_CHECK(workspace.device() == D.device(),
+             "cuBLASLt workspace must be on the same device as D.");
+  NVTE_CHECK(workspace.is_contiguous(), "cuBLASLt workspace must be contiguous.");
+  NVTE_CHECK(workspaceSize <= workspace.nbytes(),
+             "cuBLASLt workspaceSize exceeds the available workspace bytes.");
 
   at::cuda::CUDAGuard device_guard(D.device());
 
@@ -596,6 +601,26 @@ at::Tensor strided_batched_gemm(py::handle A, bool transa, py::handle B, bool tr
                             is_fp8_dtype(A_tensor.dtype()) && is_fp8_dtype(B_tensor.dtype());
   NVTE_CHECK(high_precision_inputs || mxfp8_inputs,
              "strided_batched_gemm supports only high-precision or MXFP8 A and B tensor pairs.");
+  auto check_device = [&](const at::Tensor& tensor, const char* name) {
+    NVTE_CHECK(tensor.is_cuda() && tensor.device() == D.device(),
+               "strided_batched_gemm requires ", name, " on the same CUDA device as D.");
+  };
+  auto check_operand_device = [&](py::handle operand, bool rowwise, const char* name) {
+    if (high_precision_inputs) {
+      check_device(operand.cast<at::Tensor>(), name);
+    } else {
+      const py::object data = operand.attr(rowwise ? "_rowwise_data" : "_columnwise_data");
+      const py::object scales =
+          operand.attr(rowwise ? "_rowwise_scale_inv" : "_columnwise_scale_inv");
+      NVTE_CHECK(!data.is_none() && !scales.is_none(),
+                 "MXFP8 strided_batched_gemm requires data and scales for ", name, ".");
+      check_device(data.cast<at::Tensor>(), name);
+      check_device(scales.cast<at::Tensor>(), name);
+    }
+  };
+  // Validate both operands before either scale-packing kernel is launched.
+  check_operand_device(A, transa, "A data and scales");
+  check_operand_device(B, !transb, "B data and scales");
   const TensorWrapper* gemm_A = &A_tensor;
   const TensorWrapper* gemm_B = &B_tensor;
   std::optional<PackedMXFP8Operand> packed_A;

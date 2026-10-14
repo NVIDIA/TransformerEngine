@@ -121,8 +121,11 @@ def _cpp_strided_batched_gemm(
     strideb,
     ldd,
     strided,
+    workspace=None,
+    workspace_size=None,
 ):
-    workspace = torch.empty(1, dtype=torch.uint8, device="cuda")
+    if workspace is None:
+        workspace = torch.empty(1, dtype=torch.uint8, device="cuda")
     return tex.strided_batched_gemm(
         A,
         True,
@@ -130,7 +133,7 @@ def _cpp_strided_batched_gemm(
         False,
         out,
         workspace,
-        workspace.numel(),
+        workspace.nbytes if workspace_size is None else workspace_size,
         m,
         n,
         k,
@@ -147,6 +150,61 @@ def _cpp_strided_batched_gemm(
         1.0,
         0.0,
     )
+
+
+@pytest.mark.parametrize(
+    "invalid_buffer",
+    ["A", "B", "workspace_size", "workspace_stride", "A_device", "B_device", "workspace_device"],
+)
+def test_strided_batched_gemm_invalid_buffers(invalid_buffer):
+    """Reject invalid buffers in the binding before launching CUDA work."""
+    a = torch.empty(2, 32, 32, device="cuda", dtype=torch.float32)
+    b = torch.empty_like(a)
+    out = torch.empty_like(a)
+    workspace = torch.empty(32, device="cuda", dtype=torch.uint8)
+    workspace_size = workspace.nbytes
+    if invalid_buffer == "A":
+        a = a.cpu()
+        error = "same CUDA device as D"
+    elif invalid_buffer == "B":
+        b = b.cpu()
+        error = "same CUDA device as D"
+    elif invalid_buffer == "workspace_size":
+        workspace_size += 1
+        error = "exceeds the available workspace bytes"
+    elif invalid_buffer == "workspace_stride":
+        workspace = workspace[::2]
+        error = "workspace must be contiguous"
+    else:
+        if torch.cuda.device_count() < 2:
+            pytest.skip("Mixed-device validation requires two CUDA devices.")
+        other_device = (out.device.index + 1) % torch.cuda.device_count()
+        error = "same CUDA device as D"
+        if invalid_buffer == "A_device":
+            a = a.to(device=other_device)
+        elif invalid_buffer == "B_device":
+            b = b.to(device=other_device)
+        else:
+            workspace = workspace.to(device=other_device)
+            error = "same device as D"
+    with pytest.raises(RuntimeError, match=error):
+        _cpp_strided_batched_gemm(
+            a,
+            b,
+            out,
+            m=32,
+            n=32,
+            k=32,
+            batch_count=2,
+            lda=32,
+            stridea=1024,
+            ldb=32,
+            strideb=1024,
+            ldd=32,
+            strided=1024,
+            workspace=workspace,
+            workspace_size=workspace_size,
+        )
 
 
 @pytest.mark.parametrize("accumulate", [False, True])
