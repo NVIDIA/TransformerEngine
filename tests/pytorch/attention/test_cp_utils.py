@@ -1108,7 +1108,7 @@ class TestTHDKernels(unittest.TestCase):
             torch.utils.deterministic.fill_uninitialized_memory = fill_uninitialized
 
     def test_thd_half_v_padding_keeps_fa4_output_finite(self):
-        """Unused V rows must not contaminate valid output in a CP lower-triangle tile."""
+        """Reuse finite FP32 memory without letting unused BF16 V rows contaminate FA4."""
         from transformer_engine.pytorch.attention.dot_product_attention.utils import (
             FlashAttentionUtils,
         )
@@ -1118,6 +1118,8 @@ class TestTHDKernels(unittest.TestCase):
             (10, 3),
         ):
             self.skipTest("FA4 head_dim=256 requires SM100/103")
+        if torch.cuda.memory.get_allocator_backend() != "native":
+            self.skipTest("Buffer reuse requires the native CUDA caching allocator")
         from flash_attn.cute.interface import flash_attn_varlen_func
 
         # Captured failing layout: 672 valid KV rows in a 720-row half-buffer.
@@ -1130,40 +1132,58 @@ class TestTHDKernels(unittest.TestCase):
         warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
         fill_uninitialized = torch.utils.deterministic.fill_uninitialized_memory
         try:
-            # Poison only the half-copy's fresh allocation, not its finite input.
-            torch.use_deterministic_algorithms(True)
-            torch.utils.deterministic.fill_uninitialized_memory = True
-            v = tex.thd_read_half_tensor(source_v, cu_q, 0)
+            torch.use_deterministic_algorithms(False)
+            torch.utils.deterministic.fill_uninitialized_memory = False
+            generator = torch.Generator(device="cuda").manual_seed(1234)
+            # A separate pool makes reuse independent of allocations in earlier tests.
+            # Finite FP32 values can contain NaN bit patterns when reused as BF16.
+            pool = torch.cuda.MemPool()
+            with torch.cuda.use_mem_pool(pool):
+                previous = torch.randn(
+                    720, 1, 128, device="cuda", dtype=torch.float32, generator=generator
+                )
+                previous_values = previous.cpu()
+                previous_ptr = previous.data_ptr()
+                self.assertTrue(torch.isfinite(previous_values).all())
+                self.assertTrue(torch.isnan(previous_values.view(torch.bfloat16)[672:]).any())
+                del previous
+                v = tex.thd_read_half_tensor(source_v, cu_q, 0)
+            self.assertEqual(
+                v.data_ptr(), previous_ptr, "The half-buffer did not reuse FP32 memory"
+            )
+
+            self.assertTrue(torch.isfinite(source_v).all())
+            self.assertTrue(torch.equal(v[:672], torch.ones_like(v[:672])))
+            unused_v_nans = torch.isnan(v[672:]).sum().item()
+            control_v = v.clone()
+            control_v[672:] = 0  # Change only unused V rows; shapes and metadata stay identical.
+            outputs = []
+            for values in (control_v, v):
+                out, lse = flash_attn_varlen_func(
+                    q,
+                    k,
+                    values,
+                    cu_seqlens_q=cu_q,
+                    cu_seqlens_k=cu_k,
+                    max_seqlen_q=512,
+                    max_seqlen_k=256,
+                    causal=False,
+                    return_lse=True,
+                )
+                self.assertTrue(torch.isfinite(lse[:, :1344]).all())
+                outputs.append(out[:1344])
+            # All valid V values are one: their attention-weighted average must be one.
+            self.assertTrue(torch.equal(outputs[0], torch.ones_like(outputs[0])))
+            self.assertTrue(
+                torch.isfinite(outputs[1]).all(),
+                f"V half-buffer padding contained {unused_v_nans} NaNs and contaminated valid FA4"
+                " output",
+            )
+            self.assertTrue(torch.equal(outputs[0].view(torch.uint8), outputs[1].view(torch.uint8)))
+            self.assertEqual(torch.count_nonzero(v[672:]).item(), 0)
         finally:
             torch.use_deterministic_algorithms(deterministic, warn_only=warn_only)
             torch.utils.deterministic.fill_uninitialized_memory = fill_uninitialized
-
-        self.assertTrue(torch.isfinite(source_v).all())
-        self.assertTrue(torch.equal(v[:672], torch.ones_like(v[:672])))
-        control_v = v.clone()
-        control_v[672:] = 0  # Change only unused V rows; shapes and metadata stay identical.
-        outputs = []
-        for values in (control_v, v):
-            out, lse = flash_attn_varlen_func(
-                q,
-                k,
-                values,
-                cu_seqlens_q=cu_q,
-                cu_seqlens_k=cu_k,
-                max_seqlen_q=512,
-                max_seqlen_k=256,
-                causal=False,
-                return_lse=True,
-            )
-            self.assertTrue(torch.isfinite(lse[:, :1344]).all())
-            outputs.append(out[:1344])
-        # All valid V values are one: their attention-weighted average must be one.
-        self.assertTrue(torch.equal(outputs[0], torch.ones_like(outputs[0])))
-        self.assertTrue(
-            torch.isfinite(outputs[1]).all(),
-            "V half-buffer padding contaminated valid FA4 output",
-        )
-        self.assertTrue(torch.equal(outputs[0].view(torch.uint8), outputs[1].view(torch.uint8)))
 
     def test_thd_read_second_half_lse_handles_packed_and_batch_major_lse(self):
         cu_seqlens = torch.tensor([0, 8, 16], dtype=torch.int32, device="cuda")
