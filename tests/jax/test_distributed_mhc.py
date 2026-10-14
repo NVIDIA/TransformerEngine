@@ -9,6 +9,7 @@ With the token dims split across devices, the sharded forward output and gradien
 therefore match an unsharded run, provided the parameter gradients are summed across devices.
 """
 
+import functools
 import os
 import sys
 
@@ -23,14 +24,11 @@ from utils import assert_allclose, pytest_parametrize_wrapper
 
 
 @pytest.fixture(autouse=True, scope="function")
-def _inject_mhc(request, monkeypatch):
+def _inject_mhc(request):
     """Lazy-load the mHC API only for tests marked 'triton'."""
     if not request.node.get_closest_marker("triton"):
         yield
         return
-    # Triton autotuning benchmarks on each device's stream at the first run of the multi-device
-    # executable, which can deadlock with the cross-device all-reduces in a single process.
-    monkeypatch.setenv("NVTE_DISABLE_TRITON_AUTOTUNING", "1")
     from transformer_engine.jax import mhc as te_mhc
 
     mod = sys.modules[__name__]
@@ -95,11 +93,29 @@ def _make_loss(use_split_k):
     return jax.jit(jax.value_and_grad(loss, argnums=(0, 1), has_aux=True))
 
 
+@functools.lru_cache(maxsize=None)
+def _reference(b, s, C, with_bias, use_split_k):
+    """Unsharded inputs and results, shared by all mesh configs of the same case.
+
+    Triton autotuning is on. At the first run of each new executable, JAX compiles the PTX of every
+    autotune config with ptxas, one config after another, which takes tens of seconds for the
+    mHC kernels. Re-running the unsharded reference for every mesh would repeat that cost.
+    """
+    x, params, cotangent = _make_inputs(b, s, C, with_bias)
+    (_, out), (dx, dparams) = _make_loss(use_split_k)(x, params, cotangent)
+    # Keep host copies: the sharded runs may consume (delete) the device buffers they are given.
+    return jax.tree.map(np.asarray, ((x, params, cotangent), (out, dx, dparams)))
+
+
 @pytest.mark.triton
 class TestDistributedMHC:
     """Sharded vs unsharded mHC forward and gradients, with the token dims split across devices."""
 
-    @pytest.mark.parametrize("device_count,mesh_shape,mesh_axes,mesh_resource", generate_configs())
+    # Only the largest mesh: it splits both the batch and sequence dims, and each extra mesh would
+    # re-run the slow first-execution autotuning for its per-shard token count.
+    @pytest.mark.parametrize(
+        "device_count,mesh_shape,mesh_axes,mesh_resource", generate_configs()[:1]
+    )
     @pytest_parametrize_wrapper("b,s,C", SHAPES)
     @pytest_parametrize_wrapper("with_bias", [False, True])
     @pytest_parametrize_wrapper("use_split_k", [False, True])
@@ -109,9 +125,9 @@ class TestDistributedMHC:
         if ENFORCE_DETERMINISTIC and use_split_k:
             pytest.skip("Split-K is not deterministic, skip the test under deterministic mode")
 
-        x, params, cotangent = _make_inputs(b, s, C, with_bias)
+        inputs, (ref_out, ref_dx, ref_dparams) = _reference(b, s, C, with_bias, use_split_k)
+        x, params, cotangent = jax.tree.map(jnp.array, inputs)
         loss_and_grads = _make_loss(use_split_k)
-        (_, ref_out), (ref_dx, ref_dparams) = loss_and_grads(x, params, cotangent)
 
         devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
         mesh = Mesh(devices, mesh_axes)
