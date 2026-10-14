@@ -1145,7 +1145,7 @@ def _start_all_gather_fp8_blockwise(
         raise ValueError(f"Got non-FP8 blockwise quantizer ({quantizer.__class__.__name__})")
 
     # Fall back to high-precision all-gather if FP8 is not supported
-    if not quantizer.is_quantizable(inp) or quantizer.block_scaling_dim != 1:
+    if not quantizer.supports_quantized_allgather(inp) or quantizer.block_scaling_dim != 1:
         warnings.warn("Cannot quantize input tensor. Performing all-gather in high precision.")
         if isinstance(inp, QuantizedTensorStorage):
             inp = inp.dequantize(dtype=dtype)  # Dequantize if needed
@@ -1365,9 +1365,10 @@ def _all_gather_nvfp4(
     if isinstance(inp, torch.Tensor) and not isinstance(inp, NVFP4TensorStorage):
         # High-precision tensor.
         in_shape = NVFP4Quantizer.convert_shape_for_fp4(inp.size())
-        in_shape_t = NVFP4Quantizer.convert_shape_for_fp4(
-            NVFP4Quantizer.get_columnwise_shape(inp.size())
-        )
+        if quantizer.columnwise_usage:
+            in_shape_t = NVFP4Quantizer.convert_shape_for_fp4(
+                NVFP4Quantizer.get_columnwise_shape(inp.size())
+            )
         device = inp.device
         dtype = inp.dtype
     elif isinstance(inp, NVFP4TensorStorage):
@@ -1400,7 +1401,7 @@ def _all_gather_nvfp4(
     if (
         not isinstance(inp, NVFP4TensorStorage)
         and quantizer is not None
-        and not quantizer.is_quantizable(inp)
+        and not quantizer.supports_quantized_allgather(inp)
     ):
         warnings.warn("Cannot quantize input tensor. Performing all-gather in high precision.")
         if isinstance(inp, QuantizedTensorStorage):
@@ -1584,7 +1585,7 @@ def _all_gather_mxfp8(
     if (
         not isinstance(inp, MXFP8TensorStorage)
         and quantizer is not None
-        and not quantizer.is_quantizable(inp)
+        and not quantizer.supports_quantized_allgather(inp)
     ):
         warnings.warn("Cannot quantize input tensor. Performing all-gather in high precision.")
         if isinstance(inp, QuantizedTensorStorage):
