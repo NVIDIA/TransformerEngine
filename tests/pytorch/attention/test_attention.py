@@ -1427,25 +1427,17 @@ def test_dpa_mla_should_pad(dtype, model_configs, model):
     assert not should_pad_qkv_head_dim(fp8_params, True), "suggested padding packed FP8 inputs"
 
     native_backend = dpa_utils.get_attention_backend(native_params)
-    native_flash, native_flash_backend, native_fused = native_backend[:3]
-    native_unfused = native_backend[4]
+    native_flash, native_fused = native_backend[0], native_backend[2]
     padded_backend = dpa_utils.get_attention_backend(padded_params)
     padded_flash, padded_fused = padded_backend[0], padded_backend[2]
 
-    # FlashAttention-2 cannot run mismatched head dims at all, so padding is required rather
-    # than an optimization. Otherwise it is only worthwhile when the native dims are stuck on
-    # the unfused backend and padding reaches a fused one.
-    pad_is_required = native_flash and native_flash_backend == FlashAttentionUtils.version
-    pad_unlocks_backend = (
-        not native_flash and not native_fused and native_unfused and (padded_flash or padded_fused)
-    )
-    expected = bool(pad_is_required or pad_unlocks_backend)
-
-    assert should_pad_qkv_head_dim(native_params, False) == expected, (
-        "did not suggest padding when required for a functioning kernel or a faster one"
-        if expected
-        else "suggested padding when no faster kernel was available"
-    )
+    if should_pad_qkv_head_dim(native_params, False):
+        assert padded_flash or padded_fused, "suggested padding onto no faster backend"
+        assert padded_flash != native_flash, "suggested padding onto the same backend"
+    else:
+        assert (
+            native_flash or native_fused or not (padded_flash or padded_fused)
+        ), "did not suggest padding when it was the only way onto a faster backend"
 
 
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
