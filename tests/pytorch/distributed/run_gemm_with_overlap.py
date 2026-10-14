@@ -437,6 +437,7 @@ def _main(opts):
     ker2_quantizer = None
     out2_quantizer = None
     if opts.quantization == "fp8":
+
         def make_fp8_quantizer():
             return Float8Quantizer(
                 torch.ones(1, dtype=torch.float, device="cuda"),
@@ -846,10 +847,7 @@ def _main(opts):
         rel_err = abs_err / max(abs(ref_out.flatten()[m].item()), 1e-5)
         # The reference uses the quantized GEMM inputs, but it does not quantize GEMM outputs (FP8
         # output, or the input of the second GEMM in an AG+RS pair).
-        quantized_output = (
-            with_quantized_compute
-            and (opts.fp8_output or ub_obj2 is not None)
-        )
+        quantized_output = with_quantized_compute and (opts.fp8_output or ub_obj2 is not None)
         rtol = opts.rtol if opts.rtol is not None else (0.125 if quantized_output else 0.02)
         atol = opts.atol if opts.atol is not None else (0.0625 if quantized_output else 0.002)
         if rel_err > rtol and abs_err > atol:
