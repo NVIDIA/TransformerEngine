@@ -796,13 +796,15 @@ void thd_get_partitioned_indices(const Tensor &cu_seqlens, Tensor output, int to
   int batch = cu_seqlens_shape[0] - 1;
 
   // Cache device limits so the common path does not repeat capability queries.
-  static const std::vector<int> shared_memory_limits = [] {
+  static const std::vector<std::array<int, 2>> shared_memory_limits = [] {
     int num_devices;
     NVTE_CHECK_CUDA(cudaGetDeviceCount(&num_devices));
-    std::vector<int> limits(num_devices);
+    std::vector<std::array<int, 2>> limits(num_devices);
     for (int device = 0; device < num_devices; ++device) {
       NVTE_CHECK_CUDA(
-          cudaDeviceGetAttribute(&limits[device], cudaDevAttrMaxSharedMemoryPerBlock, device));
+          cudaDeviceGetAttribute(&limits[device][0], cudaDevAttrMaxSharedMemoryPerBlock, device));
+      NVTE_CHECK_CUDA(cudaDeviceGetAttribute(&limits[device][1],
+                                             cudaDevAttrMaxSharedMemoryPerBlockOptin, device));
     }
     return limits;
   }();
@@ -812,7 +814,22 @@ void thd_get_partitioned_indices(const Tensor &cu_seqlens, Tensor output, int to
   constexpr unsigned int block = 256;
   unsigned int grid = (output_shape[0] + block - 1) / block;
   size_t shared_memory_bytes = sizeof(int) * (batch + 1);
-  if (shared_memory_bytes <= static_cast<size_t>(shared_memory_limits[device])) {
+  size_t shared_memory_limit = shared_memory_limits[device][0];
+  const size_t optin_limit = shared_memory_limits[device][1];
+  if (shared_memory_bytes > shared_memory_limit && shared_memory_bytes <= optin_limit) {
+    cudaFuncAttributes attrs;
+    NVTE_CHECK_CUDA(cudaFuncGetAttributes(&attrs, thd_partition_indices_kernel));
+    shared_memory_limit =
+        optin_limit > attrs.sharedSizeBytes ? optin_limit - attrs.sharedSizeBytes : 0;
+    // CUDA tracks the enabled allowance; avoid configuring it again on subsequent launches.
+    if (shared_memory_bytes <= shared_memory_limit &&
+        static_cast<size_t>(attrs.maxDynamicSharedSizeBytes) < shared_memory_limit) {
+      NVTE_CHECK_CUDA(cudaFuncSetAttribute(thd_partition_indices_kernel,
+                                           cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                           static_cast<int>(shared_memory_limit)));
+    }
+  }
+  if (shared_memory_bytes <= shared_memory_limit) {
     thd_partition_indices_kernel<<<grid, block, shared_memory_bytes, stream>>>(
         reinterpret_cast<int *>(output.data.dptr), reinterpret_cast<int *>(cu_seqlens.data.dptr),
         batch, total_tokens, world_size, rank);

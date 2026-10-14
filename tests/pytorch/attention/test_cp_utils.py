@@ -1023,6 +1023,7 @@ class TestTHDKernels(unittest.TestCase):
         for documents in (
             max_shared_docs,
             max_shared_docs + 1,
+            props.shared_memory_per_block_optin // 4 - 1,
             props.shared_memory_per_block_optin // 4,
         ):
             for cp_size in (2, 4):
