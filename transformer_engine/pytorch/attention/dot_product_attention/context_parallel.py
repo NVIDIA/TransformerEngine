@@ -512,6 +512,28 @@ def unrestore_thd_gathered_kv(x, cu_seqlens_padded, cp_size, load_balancing_stra
     return thd_sequence_order_to_cp_rank_order(x, cu_seqlens_padded, cp_size)
 
 
+def _cp_a2a_contiguous(x):
+    """Select an experimental native layout copy from runtime tensor metadata."""
+    # Tensor subclasses keep their copy semantics; keep the bounded admission explicit.
+    # pylint: disable=too-many-boolean-expressions,unidiomatic-typecheck
+    if (
+        os.getenv("NVTE_CP_EXPERIMENTAL_A2A_PACK16", "0") == "1"
+        and type(x) is torch.Tensor  # Quantized Tensor subclasses keep the existing path.
+        and x.is_cuda
+        and x.dtype == torch.bfloat16
+        and x.ndim == 4
+        and tuple(x.shape[:2]) in ((4, 131072), (131072, 4))
+        and x.shape[2] in (2, 8)
+        and x.shape[3] in (128, 256)
+        and x.data_ptr() % 16 == 0
+        and torch.cuda.get_device_capability(x.device) == (10, 0)
+    ):
+        original = x.transpose(0, 1)
+        if original.is_contiguous():
+            return tex.swap_first_dims(original, out=None)
+    return x.contiguous()
+
+
 def flash_attn_a2a_communicate(
     a2a_inputs: Union[torch.Tensor, List[torch.Tensor]],
     chunk_ids_for_a2a: torch.Tensor,
@@ -598,7 +620,8 @@ def flash_attn_a2a_communicate(
                 # [s, b, cp, h//cp, d] -> [cp, s, b, h//cp, d]
                 # [b, cp, h//cp, s, d] -> [cp, b, h//cp, s, d]
                 # [t, cp, h//cp, d] -> [cp, t, h//cp, d]
-                a2a_inputs[i] = x.movedim(head_dim, 0).contiguous()
+                x = x.movedim(head_dim, 0)
+                a2a_inputs[i] = _cp_a2a_contiguous(x) if qkv_format == "thd" else x.contiguous()
     else:
         for i in range(len(a2a_inputs) + 2):
             if 0 < i < len(a2a_inputs) + 1:
@@ -654,7 +677,7 @@ def flash_attn_a2a_communicate(
                         x = x.movedim(0, seq_dim_)
                     else:
                         seq_dim_ = 0
-                    x = x.contiguous()
+                    x = _cp_a2a_contiguous(x) if qkv_format == "thd" else x.contiguous()
                     # [b, 2, s//2, cp, h//cp, d] -> [b*s, h, d]
                     # [2, s//2, b, cp, h//cp, d] -> [s*b, h, d]
                     # [b, cp, h//cp, 2, s//2, d] -> [b*h, s, d]

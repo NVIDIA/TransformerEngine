@@ -4,6 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <cstdlib>
 #include <memory>
 #include <string>
 #include <tuple>
@@ -110,3 +111,32 @@ INSTANTIATE_TEST_SUITE_P(
     }
     return name;
   });
+
+
+// Exercise the existing C API with the bounded CP copy both enabled and disabled.
+TEST(SwapFirstDimsContextParallel, BFloat16PackUnpack) {
+  int device = 0;
+  ASSERT_EQ(cudaGetDevice(&device), cudaSuccess);
+  cudaDeviceProp properties{};
+  ASSERT_EQ(cudaGetDeviceProperties(&properties, device), cudaSuccess);
+  if (properties.major != 10 || properties.minor != 0) {
+    GTEST_SKIP() << "The experimental CP copy is limited to SM100";
+  }
+  struct RestoreEnvironment {
+    const char* name = "NVTE_CP_EXPERIMENTAL_A2A_PACK16";
+    bool was_set = std::getenv(name) != nullptr;
+    std::string previous = was_set ? std::getenv(name) : "";
+    ~RestoreEnvironment() {
+      if (was_set) {
+        setenv(name, previous.c_str(), 1);
+      } else {
+        unsetenv(name);
+      }
+    }
+  } restore;
+  for (const char* enabled : {"0", "1"}) {
+    ASSERT_EQ(setenv(restore.name, enabled, 1), 0);
+    performTest<test::bf16>({131072, 4, 2, 128});
+    performTest<test::bf16>({4, 131072, 2, 128});
+  }
+}

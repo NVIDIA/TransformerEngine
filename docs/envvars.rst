@@ -640,6 +640,14 @@ The following switches are disabled by default and are intended for evaluating
 uniform context parallel attention workloads. Set them before starting the process.
 They are experimental implementation controls, not a general ragged-input policy.
 
+* ``NVTE_CP_EXPERIMENTAL_A2A_PACK16=1`` selects a 16-byte vector copy for the
+  two THD All-to-All pack/unpack sites through the existing ``swap_first_dims``
+  API. It applies equally to cuDNN and Flash Attention. Eligibility is limited
+  to SM100, BF16, CP4, 131072 local tokens, 2 or 8 local heads, head dimension
+  128 or 256, compact underlying storage and 16-byte-aligned pointers. Other
+  cases retain the existing contiguous-copy path. This switch defaults to 0;
+  it does not change attention mathematics or collective calls.
+
 * ``NVTE_CP_EXPERIMENTAL_UNIFORM_DENSE_FWD=1`` and
   ``NVTE_CP_EXPERIMENTAL_UNIFORM_DENSE_BWD=1`` allow eligible BF16 THD calls with
   head dimension 128 or 256 to use dense cuDNN descriptors without repacking Q/K/V.
