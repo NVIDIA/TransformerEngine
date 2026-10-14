@@ -551,9 +551,8 @@ def _train(opts):
         for i in range(opts.num_layers)
     ]
 
-    # Prepare random input tensors. The NVFP4 random Hadamard transform requires BF16 input.
-    input_dtype = torch.bfloat16 if opts.quantization == "nvfp4" else torch.float32
-    test_x = torch.randn(input_shape, dtype=input_dtype, device="cuda", requires_grad=True)
+    # Prepare random input tensors
+    test_x = torch.randn(input_shape, dtype=torch.bfloat16, device="cuda", requires_grad=True)
     test_x.retain_grad()
     ref_x = torch.empty_like(test_x).requires_grad_(True)
     with torch.no_grad():
