@@ -561,7 +561,7 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
     @staticmethod
     def supports(cfg: MXFP8QuantizeConfig) -> bool:
         # BF16 packed math.
-        return cfg.is_plain_cast() and cfg.DTYPE is cutlass.BFloat16 and cfg.ROWWISE and cfg.COLWISE
+        return cfg.is_plain_cast() and cfg.DTYPE is cutlass.BFloat16 and cfg.COLWISE
 
     @staticmethod
     @cute.jit
@@ -680,14 +680,24 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
         if N == 2048:
             payload_layout = cute.make_layout((M, 2048), stride=(2048, 1))
             gX = cute.make_tensor(mX.iterator, payload_layout)
-            gO_row = cute.make_tensor(mO_row.iterator, payload_layout)
+            gO_row = (
+                cute.make_tensor(mO_row.iterator, payload_layout)
+                if cutlass.const_expr(self.cfg.ROWWISE)
+                else None
+            )
             gO_col = cute.make_tensor(mO_col.iterator, payload_layout)
             if cutlass.const_expr(self.cfg.WITH_GEMM_SWIZZLED_SCALES):
-                gS_row, gS_col = derive_swizzled_scale_layout(M, 2048, True, True, mS_row, mS_col)
+                gS_row, gS_col = derive_swizzled_scale_layout(
+                    M, 2048, self.cfg.ROWWISE, True, mS_row, mS_col
+                )
             else:
-                gS_row = cute.make_tensor(
-                    mS_row.iterator,
-                    cute.make_layout((cute.size(mS_row, mode=[0]), 64), stride=(64, 1)),
+                gS_row = (
+                    cute.make_tensor(
+                        mS_row.iterator,
+                        cute.make_layout((cute.size(mS_row, mode=[0]), 64), stride=(64, 1)),
+                    )
+                    if cutlass.const_expr(self.cfg.ROWWISE)
+                    else None
                 )
                 gS_col = cute.make_tensor(
                     mS_col.iterator,
@@ -704,14 +714,24 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
         elif N == 4096:
             payload_layout = cute.make_layout((M, 4096), stride=(4096, 1))
             gX = cute.make_tensor(mX.iterator, payload_layout)
-            gO_row = cute.make_tensor(mO_row.iterator, payload_layout)
+            gO_row = (
+                cute.make_tensor(mO_row.iterator, payload_layout)
+                if cutlass.const_expr(self.cfg.ROWWISE)
+                else None
+            )
             gO_col = cute.make_tensor(mO_col.iterator, payload_layout)
             if cutlass.const_expr(self.cfg.WITH_GEMM_SWIZZLED_SCALES):
-                gS_row, gS_col = derive_swizzled_scale_layout(M, 4096, True, True, mS_row, mS_col)
+                gS_row, gS_col = derive_swizzled_scale_layout(
+                    M, 4096, self.cfg.ROWWISE, True, mS_row, mS_col
+                )
             else:
-                gS_row = cute.make_tensor(
-                    mS_row.iterator,
-                    cute.make_layout((cute.size(mS_row, mode=[0]), 128), stride=(128, 1)),
+                gS_row = (
+                    cute.make_tensor(
+                        mS_row.iterator,
+                        cute.make_layout((cute.size(mS_row, mode=[0]), 128), stride=(128, 1)),
+                    )
+                    if cutlass.const_expr(self.cfg.ROWWISE)
+                    else None
                 )
                 gS_col = cute.make_tensor(
                     mS_col.iterator,
@@ -727,7 +747,9 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
             ).launch(grid=grid, block=block, cluster=cluster, min_blocks_per_mp=4, stream=stream)
         else:
             if cutlass.const_expr(self.cfg.WITH_GEMM_SWIZZLED_SCALES):
-                gS_row, gS_col = derive_swizzled_scale_layout(M, N, True, True, mS_row, mS_col)
+                gS_row, gS_col = derive_swizzled_scale_layout(
+                    M, N, self.cfg.ROWWISE, True, mS_row, mS_col
+                )
             else:
                 gS_row, gS_col = mS_row, mS_col
             self.kernel(
@@ -782,9 +804,12 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
         COL_SCALE_TILER = (TILE_ROWS // 32, TILE_COLS)
 
         gX_tile = cute.local_tile(mX, TILER, cta_coord)
-        gO_row_tile = cute.local_tile(mO_row, TILER, cta_coord)
+        gO_row_tile = None
+        gS_row_tile = None
+        if cutlass.const_expr(self.cfg.ROWWISE):
+            gO_row_tile = cute.local_tile(mO_row, TILER, cta_coord)
+            gS_row_tile = cute.local_tile(mS_row, ROW_SCALE_TILER, cta_coord)
         gO_col_tile = cute.local_tile(mO_col, TILER, cta_coord)
-        gS_row_tile = cute.local_tile(mS_row, ROW_SCALE_TILER, cta_coord)
         gS_col_tile = cute.local_tile(mS_col, COL_SCALE_TILER, cta_coord)
 
         cache_policy = create_l2_policy(True)
