@@ -96,6 +96,18 @@ Recipe availability
 Mixture of Experts (MoE) functions
 ----------------------------------
 
+``MoeDispatch`` and ``MoeCombine`` use a local PyTorch backend when constructed
+without an ``EpBuffer``. Set ``ep_group=None`` in ``EpConfig`` for EP=1. All
+experts must be local; BF16 tokens and FP32 routing weights are supported.
+Quantized communication and receive-capacity overflow policies require a
+different backend.
+
+.. autoapiclass:: transformer_engine.pytorch.ep.EpConfig
+
+.. autoapiclass:: transformer_engine.pytorch.ops.MoeDispatch
+
+.. autoapiclass:: transformer_engine.pytorch.ops.MoeCombine
+
 .. autoapifunction:: transformer_engine.pytorch.moe_permute
 
 .. autoapifunction:: transformer_engine.pytorch.moe_permute_with_probs

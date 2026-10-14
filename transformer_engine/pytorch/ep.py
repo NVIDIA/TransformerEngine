@@ -108,7 +108,7 @@ class EpConfig:
     num_local_experts: int
     max_tokens_per_rank: int
     recv_capacity_per_rank: Optional[int]
-    ep_group: dist.ProcessGroup
+    ep_group: Optional[dist.ProcessGroup]
     alignment: int = 0
     payload_dtype: torch.dtype = torch.bfloat16
     zero_copy: bool = False
