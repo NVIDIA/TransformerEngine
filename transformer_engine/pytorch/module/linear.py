@@ -2406,10 +2406,10 @@ class Linear(TransformerEngineBaseModule):
 
         inp = self.prepare_forward(inp, allow_non_contiguous=isinstance(inp, QuantizedTensor))
         try:
-            weight_tensor, bias_tensor = self._get_weight_and_bias_tensors(
+            weight, bias = self._get_weight_and_bias_tensors(
                 defer_concatenation=torch.compiler.is_compiling() and _linear_op is not None
             )
-            weight_requires_grad = concat_requires_grad(weight_tensor)
+            weight_requires_grad = concat_requires_grad(weight)
 
             quantizers = (
                 self._get_quantizers(fp8_output, fp8_grad, is_grad_enabled)
@@ -2431,7 +2431,7 @@ class Linear(TransformerEngineBaseModule):
             ) = quantizers
             if weight_quantizer is not None and not debug:
                 weight_quantizer.optimize_for_gemm = self._enable_weight_preswizzle(
-                    weight_quantizer, weight_tensor
+                    weight_quantizer, weight
                 )
 
             use_compiled_op = torch.compiler.is_compiling() and _linear_op is not None
@@ -2479,24 +2479,20 @@ class Linear(TransformerEngineBaseModule):
                 ub_bulk_dgrad = self.ub_bulk_dgrad
                 ub_bulk_wgrad = self.ub_bulk_wgrad
 
-            linear_bias_tensor = (
-                bias_tensor if (self.apply_bias and not self.gemm_bias_unfused_add) else None
-            )
+            linear_bias = bias if (self.apply_bias and not self.gemm_bias_unfused_add) else None
             wgrad_store = self.wgrad_store if self.wgrad_store.delay_wgrad_compute() else None
 
             fwd_args = LinearFwdArgs(
                 # tensors
-                weight=weight_tensor,
+                weight=weight,
                 inp=inp,
-                bias=linear_bias_tensor,
+                bias=linear_bias,
                 weight_workspace=weight_workspace,
                 # requires_grad flags
                 input_requires_grad=inp.requires_grad,
                 weight_requires_grad=weight_requires_grad,
                 bias_requires_grad=(
-                    concat_requires_grad(linear_bias_tensor)
-                    if linear_bias_tensor is not None
-                    else False
+                    concat_requires_grad(linear_bias) if linear_bias is not None else False
                 ),
                 # quantizers
                 input_quantizer=input_quantizer,
@@ -2556,19 +2552,19 @@ class Linear(TransformerEngineBaseModule):
                         msg=f"te.Linear falling back to eager: {fallback_reason}"
                     )
                     use_compiled_op = False
-                    weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
-                    linear_bias_tensor = (
-                        bias_tensor if self.apply_bias and not self.gemm_bias_unfused_add else None
+                    weight, bias = self._get_weight_and_bias_tensors()
+                    linear_bias = (
+                        bias if self.apply_bias and not self.gemm_bias_unfused_add else None
                     )
-                    fwd_args.weight = weight_tensor
-                    fwd_args.bias = linear_bias_tensor
+                    fwd_args.weight = weight
+                    fwd_args.bias = linear_bias
 
             if use_compiled_op:
-                check_gemm_dims(inp.shape, concat_shape(weight_tensor), self.fp8)
+                check_gemm_dims(inp.shape, concat_shape(weight), self.fp8)
                 out, new_weight_workspace = _linear_op(fwd_args)
             else:
                 out, new_weight_workspace = _linear_eager(
-                    weight_tensor, inp, linear_bias_tensor, fwd_args, is_grad_enabled
+                    weight, inp, linear_bias, fwd_args, is_grad_enabled
                 )
 
             if new_weight_workspace is not None and cache_name is not None:
@@ -2579,10 +2575,10 @@ class Linear(TransformerEngineBaseModule):
         finally:
             self.end_forward()
         if self.gemm_bias_unfused_add:
-            out = out + cast_if_needed(bias_tensor, self.activation_dtype)
+            out = out + cast_if_needed(bias, self.activation_dtype)
 
         if self.return_bias:
-            return out, cast_if_needed(bias_tensor, self.activation_dtype)
+            return out, cast_if_needed(bias, self.activation_dtype)
         return out
 
     def _get_quantizers(self, fp8_output, fp8_grad, is_grad_enabled):
@@ -2712,15 +2708,15 @@ class Linear(TransformerEngineBaseModule):
 
     def _get_weight_and_bias_tensors(self, defer_concatenation=False):
         weights = self._get_weight_tensors()
-        weight_tensor = concat_input(weights, defer=defer_concatenation)
-        bias_tensor = None
+        weight = concat_input(weights, defer=defer_concatenation)
+        bias = None
         if self.use_bias:
             biases = [getattr(self, name) for name in self.bias_names]
-            bias_tensor = concat_input(
+            bias = concat_input(
                 biases,
                 defer=defer_concatenation and self.apply_bias and not self.gemm_bias_unfused_add,
             )
-        return weight_tensor, bias_tensor
+        return weight, bias
 
     def onnx_forward(
         self,
