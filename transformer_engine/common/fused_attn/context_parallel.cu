@@ -83,57 +83,47 @@ __forceinline__ __device__ int binary_search(int target, int *array, int len) {
   return left - 1;
 }
 
-// Dual-chunk source index for THD CP partitioning. cu_seqlens_s must already be divided by
-// world_size. Single source of truth shared by thd_partition_indices_kernel and
-// thd_reorder_between_sequence_and_cp_rank_order_kernel so the two never diverge.
-__forceinline__ __device__ int thd_partition_src_index(int token_id, int *cu_seqlens_s, int batch,
+// Dual-chunk source index for THD CP partitioning. Shared boundaries are already divided by
+// world_size; global boundaries are divided after the search. Sharing this helper with the reorder
+// kernel keeps the two index calculations consistent.
+template <bool use_shared = true>
+__forceinline__ __device__ int thd_partition_src_index(int token_id, int *boundaries, int batch,
                                                        int world_size, int rank) {
-  int seq_id = binary_search(token_id, cu_seqlens_s, batch + 1);
-  int seq_len = cu_seqlens_s[seq_id + 1] - cu_seqlens_s[seq_id];
-  int index = token_id - cu_seqlens_s[seq_id];
+  const int scale = use_shared ? 1 : world_size;
+  int seq_id = binary_search(token_id * scale, boundaries, batch + 1);
+  int seq_len = boundaries[seq_id + 1] / scale - boundaries[seq_id] / scale;
+  int index = token_id - boundaries[seq_id] / scale;
   int offset = index < seq_len / 2 ? rank : (world_size - 1) * 2 - rank;
-  return index + cu_seqlens_s[seq_id] * world_size + seq_len / 2 * offset;
+  return index + boundaries[seq_id] / scale * world_size + seq_len / 2 * offset;
 }
 
 /***************************************************************************************************
  * Support THD format for Context Parallel: Generate partitioned indices for input tokens
  **************************************************************************************************/
+template <bool use_shared>
 __global__ void thd_partition_indices_kernel(int *output, int *cu_seqlens, int batch,
                                              int total_tokens, int world_size, int rank) {
   extern __shared__ int cu_seqlens_s[];
-  for (int i = threadIdx.x; i <= batch; i += blockDim.x) {
-    int seqlen = cu_seqlens[i];
-    // Currently we assume that each sequence length is divisible by (world_size*2) since we have
-    // to distribute each sequence evenly to different GPUs.
-    assert(seqlen % (world_size * 2) == 0);
-    cu_seqlens_s[i] = seqlen / world_size;
+  if constexpr (use_shared) {
+    for (int i = threadIdx.x; i <= batch; i += blockDim.x) {
+      int seqlen = cu_seqlens[i];
+      // Each sequence must divide evenly into the two chunks assigned to each CP rank.
+      assert(seqlen % (world_size * 2) == 0);
+      cu_seqlens_s[i] = seqlen / world_size;
+    }
+    __syncthreads();
+  } else {
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i <= batch; i += blockDim.x * gridDim.x) {
+      assert(cu_seqlens[i] % (world_size * 2) == 0);
+    }
   }
-  __syncthreads();
 
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
   int num_threads = blockDim.x * gridDim.x;
-
+  int *boundaries = use_shared ? cu_seqlens_s : cu_seqlens;
   for (int token_id = tid; token_id < total_tokens / world_size; token_id += num_threads) {
-    output[token_id] = thd_partition_src_index(token_id, cu_seqlens_s, batch, world_size, rank);
-  }
-}
-
-// Avoid the per-block shared-memory ceiling for large batches without changing the usual kernel.
-__global__ void thd_partition_indices_global_kernel(int *output, int *cu_seqlens, int batch,
-                                                    int total_tokens, int world_size, int rank) {
-  int tid = blockIdx.x * blockDim.x + threadIdx.x;
-  int num_threads = blockDim.x * gridDim.x;
-  for (int i = tid; i <= batch; i += num_threads) {
-    assert(cu_seqlens[i] % (world_size * 2) == 0);
-  }
-
-  for (int token_id = tid; token_id < total_tokens / world_size; token_id += num_threads) {
-    int seq_id = binary_search(token_id * world_size, cu_seqlens, batch + 1);
-    int seq_start = cu_seqlens[seq_id] / world_size;
-    int seq_len = cu_seqlens[seq_id + 1] / world_size - seq_start;
-    int index = token_id - seq_start;
-    int offset = index < seq_len / 2 ? rank : (world_size - 1) * 2 - rank;
-    output[token_id] = index + seq_start * world_size + seq_len / 2 * offset;
+    output[token_id] =
+        thd_partition_src_index<use_shared>(token_id, boundaries, batch, world_size, rank);
   }
 }
 
@@ -818,23 +808,23 @@ void thd_get_partitioned_indices(const Tensor &cu_seqlens, Tensor output, int to
   const size_t optin_limit = shared_memory_limits[device][1];
   if (shared_memory_bytes > shared_memory_limit && shared_memory_bytes <= optin_limit) {
     cudaFuncAttributes attrs;
-    NVTE_CHECK_CUDA(cudaFuncGetAttributes(&attrs, thd_partition_indices_kernel));
+    NVTE_CHECK_CUDA(cudaFuncGetAttributes(&attrs, thd_partition_indices_kernel<true>));
     shared_memory_limit =
         optin_limit > attrs.sharedSizeBytes ? optin_limit - attrs.sharedSizeBytes : 0;
     // CUDA tracks the enabled allowance; avoid configuring it again on subsequent launches.
     if (shared_memory_bytes <= shared_memory_limit &&
         static_cast<size_t>(attrs.maxDynamicSharedSizeBytes) < shared_memory_limit) {
-      NVTE_CHECK_CUDA(cudaFuncSetAttribute(thd_partition_indices_kernel,
+      NVTE_CHECK_CUDA(cudaFuncSetAttribute(thd_partition_indices_kernel<true>,
                                            cudaFuncAttributeMaxDynamicSharedMemorySize,
                                            static_cast<int>(shared_memory_limit)));
     }
   }
   if (shared_memory_bytes <= shared_memory_limit) {
-    thd_partition_indices_kernel<<<grid, block, shared_memory_bytes, stream>>>(
+    thd_partition_indices_kernel<true><<<grid, block, shared_memory_bytes, stream>>>(
         reinterpret_cast<int *>(output.data.dptr), reinterpret_cast<int *>(cu_seqlens.data.dptr),
         batch, total_tokens, world_size, rank);
   } else {
-    thd_partition_indices_global_kernel<<<grid, block, 0, stream>>>(
+    thd_partition_indices_kernel<false><<<grid, block, 0, stream>>>(
         reinterpret_cast<int *>(output.data.dptr), reinterpret_cast<int *>(cu_seqlens.data.dptr),
         batch, total_tokens, world_size, rank);
   }
