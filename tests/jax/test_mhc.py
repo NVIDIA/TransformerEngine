@@ -251,15 +251,22 @@ class TestMHCOps:
         ],
     )
     def test_mhc_projection_tma_gate(self, monkeypatch, k, x_dtype, phi_dtype, expected):
-        """Auto mode enables TMA only if both row strides are 16-byte multiples (and sm90+)."""
+        """Auto mode enables TMA only if both row strides are 16-byte multiples, on sm90+ with a
+        JAX whose Triton launcher allocates global scratch."""
         from transformer_engine.jax.triton_extensions import mhc as mhc_ext
+        from transformer_engine.jax.version_utils import (
+            TRITON_EXTENSION_GLOBAL_SCRATCH_MIN_JAX_VERSION,
+            jax_version_meet_requirement,
+        )
         from jax._src.lib import gpu_triton
 
         x = jax.ShapeDtypeStruct((8, k), x_dtype)
         phi = jax.ShapeDtypeStruct((N_MIX, k), phi_dtype)
         monkeypatch.delenv("NVTE_JAX_MHC_USE_TMA", raising=False)
-        sm90_plus = gpu_triton.get_compute_capability(0) >= 90
-        assert mhc_ext._projection_fwd_use_tma(x, phi) == (expected and sm90_plus)
+        supported = gpu_triton.get_compute_capability(0) >= 90 and jax_version_meet_requirement(
+            TRITON_EXTENSION_GLOBAL_SCRATCH_MIN_JAX_VERSION
+        )
+        assert mhc_ext._projection_fwd_use_tma(x, phi) == (expected and supported)
         monkeypatch.setenv("NVTE_JAX_MHC_USE_TMA", "0")
         assert not mhc_ext._projection_fwd_use_tma(x, phi)
         monkeypatch.setenv("NVTE_JAX_MHC_USE_TMA", "1")
