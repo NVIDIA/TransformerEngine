@@ -43,8 +43,9 @@ from .quantize_mxfp8_common import (
 
 
 @cute.jit
-def quantize_bidimensional_mxfp8_swizzled(
-    sX_tile: cute.Tensor,  # 32x64 input tile (already sliced to this stage), Sw<3,4,3> swizzled
+def quantize_bidimensional_mxfp8(
+    sX_tile: cute.Tensor,  # 32x64 input tile (already sliced to this stage); any SMEM layout,
+    # Sw<3,4,3> avoids bank conflicts
     sO_row_tile: cute.Tensor,  # 32x64 rowwise-output tile
     sO_col_tile: cute.Tensor,  # 32x64 colwise-output tile
     sS_row_tile: cute.Tensor,  # (32, 2) smem rowwise-scale staging tile (flushed in the epilogue)
@@ -611,7 +612,7 @@ class MXFP8QuantizeSpecializedBidimensionalKernel(MXFP8QuantizeKernelBase):
             tile_x = tile_idx % num_tiles_x
 
             # Process the 32x64 SMEM tile for this stage
-            quantize_bidimensional_mxfp8_swizzled(
+            quantize_bidimensional_mxfp8(
                 sX[None, stage_idx],
                 sO_row[None, stage_idx],
                 sO_col[None, stage_idx],

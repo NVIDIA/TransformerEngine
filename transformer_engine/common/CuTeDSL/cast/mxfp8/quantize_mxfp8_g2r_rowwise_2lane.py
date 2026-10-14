@@ -4,7 +4,7 @@
 
 """Two-lane GMEM-to-RMEM rowwise MXFP8 cast, ported from cast_rowwise.cuh."""
 
-from typing import Optional
+from typing import Optional, Type
 
 import cutlass
 from cutlass import cute
@@ -34,8 +34,10 @@ def quantize_rowwise_mxfp8_g2r(
     gX_tiles: cute.Tensor,
     gO_tiles: cute.Tensor,
     mS_tiles: cute.Tensor,
-    cfg: cutlass.Constexpr[MXFP8QuantizeConfig],
     N: Int32,
+    DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
+    FP8_DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
+    MAX_NORM_RCP: cutlass.Constexpr[float],
     CTA_THREADS_Y: cutlass.Constexpr[int],
     CTA_THREADS_X: cutlass.Constexpr[int],
     ELEMENTS_PER_THREAD: cutlass.Constexpr[int],
@@ -69,21 +71,21 @@ def quantize_rowwise_mxfp8_g2r(
     )
 
     # We load fragments from all GMEM tiles at once
-    rX = cute.make_rmem_tensor((ELEMENTS_PER_THREAD, NUM_TILES), cfg.DTYPE)
+    rX = cute.make_rmem_tensor((ELEMENTS_PER_THREAD, NUM_TILES), DTYPE)
     # We store a fragment of one tile at a time
-    rO = cute.make_rmem_tensor((ELEMENTS_PER_THREAD,), cfg.FP8_DTYPE)
+    rO = cute.make_rmem_tensor((ELEMENTS_PER_THREAD,), FP8_DTYPE)
     # RMEM flags to indicate whether each tile is out of bounds or not
     # With CHECK_BOUNDS=False DCE will remove it so we don't pay extra cost when we don't use it
     tile_valid_flags = cute.make_rmem_tensor((NUM_TILES,), Boolean)
 
     # 16 * 2 bytes = 32 bytes, one 256-bit load where the toolchain supports it
     LOAD_WIDTH = min(
-        ELEMENTS_PER_THREAD * cfg.DTYPE.width,
+        ELEMENTS_PER_THREAD * DTYPE.width,
         max_num_bits_per_copy_ld_global(),
     )
     load_atom = cute.make_copy_atom(
         cute.nvgpu.CopyG2ROp(),
-        cfg.DTYPE,
+        DTYPE,
         num_bits_per_copy=LOAD_WIDTH,
         # TODO(kainingz): due to https://github.com/NVIDIA/cutlass/issues/3726 using
         # invariant=True here will drop the cache policy
@@ -91,11 +93,11 @@ def quantize_rowwise_mxfp8_g2r(
     )
     store_atom = cute.make_copy_atom(
         cute.nvgpu.CopyR2GOp(),
-        cfg.FP8_DTYPE,
-        num_bits_per_copy=ELEMENTS_PER_THREAD * cfg.FP8_DTYPE.width,
+        FP8_DTYPE,
+        num_bits_per_copy=ELEMENTS_PER_THREAD * FP8_DTYPE.width,
     )
 
-    scale_and_pack = mul_bf16x2x2_cvt_bf16x4_to_fp8x4(cfg.FP8_DTYPE)
+    scale_and_pack = mul_bf16x2x2_cvt_bf16x4_to_fp8x4(FP8_DTYPE)
 
     # Copy all tiles from GMEM to RMEM and potentially check their bounds
     for tile_idx in cutlass.range_constexpr(NUM_TILES):
@@ -144,7 +146,7 @@ def quantize_rowwise_mxfp8_g2r(
         rX_tile_i32 = cute.recast_tensor(rX[None, tile_idx], Int32)
         rO_u32 = cute.recast_tensor(rO, Uint32)
         amax = extract_mx_block_amax(rX_tile_i32)
-        exponent = cvt_f32_to_fp8e8m0fnu(amax * cfg.MAX_NORM_RCP)
+        exponent = cvt_f32_to_fp8e8m0fnu(amax * MAX_NORM_RCP)
 
         # The even lane of each pair stores its block's scale byte, as cast_rowwise.cuh does.
         # A warp's stores coalesce in either layout: one 16-byte run when packed, four
@@ -479,8 +481,10 @@ class MXFP8QuantizeG2RRowwise2LaneKernel(MXFP8QuantizeKernelBase):
                 gX_tiles,
                 gO_tiles,
                 mS_tiles,
-                self.cfg,
                 N,
+                DTYPE=self.cfg.DTYPE,
+                FP8_DTYPE=self.cfg.FP8_DTYPE,
+                MAX_NORM_RCP=self.cfg.MAX_NORM_RCP,
                 CTA_THREADS_Y=CTA_THREADS_Y,
                 CTA_THREADS_X=CTA_THREADS_X,
                 ELEMENTS_PER_THREAD=self._ELEMENTS_PER_THREAD,
