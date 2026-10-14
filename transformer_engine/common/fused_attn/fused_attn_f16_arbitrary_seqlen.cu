@@ -9,6 +9,7 @@
 #include <cudnn_frontend.h>
 #include <cudnn_frontend_utils.h>
 
+#include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
 #include <set>
@@ -377,7 +378,7 @@ __global__ void cp_uniform_validate_fwd(const int32_t *cu_q, const int32_t *cu_k
   const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (i <= batch && (cu_q[i] != i * sq || cu_kv[i] != i * sk || offset_q[i] != i * sq ||
                      offset_kv[i] != i * sk)) {
-    printf("TE_CP_DENSE_FWD_INVALID_GEOMETRY sequence=%lld\n", static_cast<long long>(i));
+    printf("TE_CP_DENSE_FWD_INVALID_GEOMETRY sequence=%" PRId64 "\n", i);
     asm volatile("trap;");
   }
 }
@@ -980,9 +981,9 @@ __global__ void cp_uniform_lse_to_bhs(const float *thd, float *bhs, const int32_
   const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (i <= batch && (cu_q[i] != i * sq || cu_kv[i] != i * sk || offset_q[i] != i * sq ||
                      offset_kv[i] != i * sk)) {
-    printf("TE_CP_DENSE_INVALID_GEOMETRY sequence=%lld expected_q=%lld expected_kv=%lld\n",
-           static_cast<long long>(i), static_cast<long long>(i * sq),
-           static_cast<long long>(i * sk));
+    printf("TE_CP_DENSE_INVALID_GEOMETRY sequence=%" PRId64 " expected_q=%" PRId64
+           " expected_kv=%" PRId64 "\n",
+           i, i * sq, i * sk);
     asm volatile("trap;");
   }
   if (i < batch * heads * sq) {
@@ -1000,8 +1001,7 @@ __global__ void cp_ag_lse_to_bhs(const float *thd, float *bhs, const int32_t *cu
   const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (i <= batch && (cu_q[i] != i * sq || cu_kv[i] != i * sk ||
                      offset_q[i] != i * pq + (i < batch ? origin : 0) || offset_kv[i] != i * pk)) {
-    printf("TE_CP_STRIDED_INVALID_GEOMETRY sequence=%lld origin=%lld\n", static_cast<long long>(i),
-           static_cast<long long>(origin));
+    printf("TE_CP_STRIDED_INVALID_GEOMETRY sequence=%" PRId64 " origin=%" PRId64 "\n", i, origin);
     asm volatile("trap;");
   }
   if (i < batch * heads * sq) {

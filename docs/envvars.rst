@@ -634,7 +634,7 @@ JAX Custom Calls Control
    python train_jax.py
 
 Experimental Context Parallel Attention
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 The following switches are disabled by default and are intended for evaluating
 uniform context parallel attention workloads. Set them before starting the process.
