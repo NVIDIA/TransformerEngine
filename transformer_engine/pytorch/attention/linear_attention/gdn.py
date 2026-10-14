@@ -7,7 +7,7 @@
 This module is **experimental** and subject to change.
 """
 
-from typing import Callable, Dict, Optional, Tuple, Union
+from typing import Dict, Optional, Tuple, Union
 
 import torch
 
@@ -48,32 +48,6 @@ class _GDNKernelAdapter(AlignedTimelineKernelAdapter):
                 "GDN g and beta must both have shape "
                 f"{expected_gate_shape}; got {tuple(g.shape)} and {tuple(beta.shape)}."
             )
-
-    def _call_op(
-        self,
-        op: Callable,
-        query_layer: torch.Tensor,
-        key_layer: torch.Tensor,
-        value_layer: torch.Tensor,
-        gates: Dict[str, torch.Tensor],
-        cu_seqlens: torch.Tensor,
-        *,
-        initial_state: Optional[torch.Tensor],
-        output_final_state: bool,
-        use_qk_l2norm_in_kernel: bool = False,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        return op(
-            query_layer,
-            key_layer,
-            value_layer,
-            gates["g"],
-            gates["beta"],
-            cu_seqlens,
-            scale=self.scale,
-            initial_state=initial_state,
-            output_final_state=output_final_state,
-            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
-        )
 
     def forward(
         self,
