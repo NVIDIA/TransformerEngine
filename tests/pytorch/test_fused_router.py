@@ -133,7 +133,11 @@ def _check_compile_reference(actual, expected, dtype):
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("mode", ["default", "reduce-overhead"])
-@pytest.mark.parametrize("routing_map_format", [RoutingMapFormat.BYTEMAP, "bitmap_u8"])
+@pytest.mark.parametrize(
+    "routing_map_format,index_dtype",
+    [(RoutingMapFormat.BYTEMAP, None), ("bitmap_u8", None)]
+    + [(RoutingMapFormat.BYTEMAP, dtype) for dtype in (torch.int16, torch.int32, torch.int64)],
+)
 @pytest.mark.parametrize(
     "score_function,use_pre_softmax,grouped",
     [
@@ -143,7 +147,9 @@ def _check_compile_reference(actual, expected, dtype):
         ("sqrtsoftplus", False, False),
     ],
 )
-def test_topk_compile(dtype, mode, routing_map_format, score_function, use_pre_softmax, grouped):
+def test_topk_compile(
+    dtype, mode, routing_map_format, index_dtype, score_function, use_pre_softmax, grouped
+):
     torch._dynamo.reset()
     counters.clear()
     bias = None if score_function == "softmax" else torch.linspace(0.3, 0, 32, device="cuda")
@@ -157,12 +163,21 @@ def test_topk_compile(dtype, mode, routing_map_format, score_function, use_pre_s
         expert_bias=bias,
     )
 
-    def router(logits):
+    def router(logits, indices):
         return fused_topk_with_score_function(
-            logits, **options, routing_map_format=routing_map_format
+            logits,
+            **options,
+            routing_map_format=routing_map_format,
+            topk_indices=indices,
+            overwrite_topk_indices=False,
         )
 
     compiled = torch.compile(router, fullgraph=True, mode=mode)
+    indices = (
+        torch.full((2, 32, 4), -1, device="cuda", dtype=index_dtype)
+        if index_dtype is not None
+        else None
+    )
     for reverse in (False, True, False):
         torch.compiler.cudagraph_mark_step_begin()
         logits = _compile_logits(dtype)
@@ -170,15 +185,28 @@ def test_topk_compile(dtype, mode, routing_map_format, score_function, use_pre_s
             logits = logits.flip(-1).detach().requires_grad_(True)
         eager_logits = logits.detach().clone().requires_grad_(True)
         ref_logits = logits.detach().float().reshape(-1, 32).requires_grad_(True)
-        probs, routing_map = compiled(logits)
-        eager_probs, eager_map = router(eager_logits)
+        original_indices = indices.clone() if indices is not None else None
+        original_version = indices._version if indices is not None else None
+        probs, routing_map = compiled(logits, indices)
+        eager_probs, eager_map = router(eager_logits, indices)
         ref_probs, ref_map = topk_score_function_pytorch(ref_logits, **options)
         ref_map = ref_map.reshape(logits.shape)
         if routing_map_format == "bitmap_u8":
             ref_map = _bytemap_to_bitmap_u8(ref_map)
         assert not routing_map.requires_grad
         torch.testing.assert_close(routing_map, eager_map)
-        torch.testing.assert_close(routing_map, ref_map)
+        if indices is not None:
+            assert routing_map.shape == indices.shape and routing_map.dtype == index_dtype
+            assert routing_map.data_ptr() != indices.data_ptr()
+            assert eager_map.data_ptr() != indices.data_ptr()
+            assert indices._version == original_version
+            torch.testing.assert_close(indices, original_indices)
+            actual_map = topk_indices_to_routing_map(routing_map.reshape(-1, 4), 32)
+            torch.testing.assert_close(actual_map.reshape(logits.shape), ref_map)
+            # The caller's buffer must not be a saved backward operand.
+            indices.fill_(-2 if reverse else -3)
+        else:
+            torch.testing.assert_close(routing_map, ref_map)
         torch.testing.assert_close(probs, eager_probs, atol=0, rtol=0)
         _check_compile_reference(probs, ref_probs.reshape(logits.shape), dtype)
         grad = torch.randn((*probs.shape, 2), dtype=dtype, device="cuda")[..., 0]
@@ -190,9 +218,12 @@ def test_topk_compile(dtype, mode, routing_map_format, score_function, use_pre_s
         _check_compile_reference(actual_grad, ref_grad.reshape(logits.shape), dtype)
     with torch.no_grad():
         torch.compiler.cudagraph_mark_step_begin()
-        actual = compiled(logits)
-        expected = router(logits)
+        actual = compiled(logits, indices)
+        expected = router(logits, indices)
         torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+        if indices is not None:
+            assert actual[1].data_ptr() != indices.data_ptr()
+            torch.testing.assert_close(indices, torch.full_like(indices, -3))
     if mode == "reduce-overhead":
         assert not counters["inductor"]["cudagraph_skips"]
 
@@ -285,13 +316,29 @@ def test_aux_loss_compile(dtype, mode, tensor_count):
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-def test_router_compile_dynamic(dtype):
+@pytest.mark.parametrize("index_dtype", [None, torch.int16, torch.int32, torch.int64])
+def test_router_compile_dynamic(dtype, index_dtype):
     torch._dynamo.reset()
     counts = torch.arange(1, 131, device="cuda", dtype=torch.int32)
 
     def router_loss(logits):
+        indices = (
+            torch.empty(logits.shape[0], 4, dtype=index_dtype, device=logits.device)
+            if index_dtype is not None
+            else None
+        )
         probs, routing_map = fused_topk_with_score_function(
-            logits, 4, False, None, None, None, "sigmoid", None, "bitmap_u8"
+            logits,
+            4,
+            False,
+            None,
+            None,
+            None,
+            "sigmoid",
+            None,
+            "bytemap" if indices is not None else "bitmap_u8",
+            topk_indices=indices,
+            overwrite_topk_indices=False,
         )
         _, scores = fused_compute_score_for_moe_aux_loss(logits, 4, "sigmoid", 1)
         aux_loss = fused_moe_aux_loss(scores, counts, logits.shape[0], 130, 4, 0.01)
@@ -303,7 +350,7 @@ def test_router_compile_dynamic(dtype):
         eager_logits = logits.detach().clone().requires_grad_(True)
         actual, routing_map = compiled(logits)
         expected, eager_map = router_loss(eager_logits)
-        assert routing_map.shape == (num_tokens, 17)
+        assert routing_map.shape == (num_tokens, 4 if index_dtype is not None else 17)
         torch.testing.assert_close(routing_map, eager_map)
         torch.testing.assert_close(actual, expected)
         (actual_grad,) = torch.autograd.grad(actual, logits)
@@ -312,14 +359,22 @@ def test_router_compile_dynamic(dtype):
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("routing_map_format", [0, 1])
-def test_router_compile_opcheck(dtype, routing_map_format):
+@pytest.mark.parametrize(
+    "routing_map_format,index_dtype",
+    [(0, None), (1, None)] + [(0, dtype) for dtype in (torch.int16, torch.int32, torch.int64)],
+)
+def test_router_compile_opcheck(dtype, routing_map_format, index_dtype):
     from transformer_engine.pytorch import router
 
     logits = torch.randn(16, 130, device="cuda", dtype=dtype, requires_grad=True)
+    indices = (
+        torch.full((16, 4), -1, device="cuda", dtype=index_dtype)
+        if index_dtype is not None
+        else None
+    )
     torch.library.opcheck(
         router._topk_forward,
-        (logits, 4, False, None, None, None, "sigmoid", None, routing_map_format),
+        (logits, 4, False, None, None, None, "sigmoid", None, routing_map_format, indices),
     )
     torch.library.opcheck(router._score_forward, (logits, 4, "softmax", routing_map_format))
     counts = torch.ones(130, device="cuda", dtype=torch.int32)
@@ -330,8 +385,8 @@ def test_router_compile_opcheck(dtype, routing_map_format):
         )
 
 
-@pytest.mark.parametrize("qb", [False, True])
-def test_router_compile_eager_fallback(qb):
+@pytest.mark.parametrize("qb,overwrite", [(False, True), (True, True), (True, False)])
+def test_router_compile_eager_fallback(qb, overwrite):
     torch._dynamo.reset()
     logits = torch.randn(32, 32, device="cuda", requires_grad=True)
     bias = torch.zeros(32, device="cuda")
@@ -353,6 +408,7 @@ def test_router_compile_eager_fallback(qb):
             qb_histogram=histogram if qb else None,
             qb_bin_bounds=bounds if qb else None,
             qb_histogram_mode="two_kernel" if qb else None,
+            **({} if overwrite else {"overwrite_topk_indices": False}),
         )
 
     with pytest.warns(UserWarning, match="Falling back to eager execution"):
@@ -740,7 +796,8 @@ def test_topk_sqrtsoftplus(
     "routing_output_mode",
     ["bytemap", "bitmap_u8", "dense_int16", "dense_int32", "dense_int64"],
 )
-def test_qb_topk_histogram(histogram_mode, topk, routing_output_mode):
+@pytest.mark.parametrize("overwrite", [False, True])
+def test_qb_topk_histogram(histogram_mode, topk, routing_output_mode, overwrite):
     num_tokens = 257
     num_experts = 896
     num_bins = 1000
@@ -767,7 +824,7 @@ def test_qb_topk_histogram(histogram_mode, topk, routing_output_mode):
         "dense_int64": torch.int64,
     }.get(routing_output_mode)
     topk_indices = (
-        torch.empty(num_tokens, topk, device="cuda", dtype=dense_dtype)
+        torch.full((num_tokens, topk), -1, device="cuda", dtype=dense_dtype)
         if dense_dtype is not None
         else None
     )
@@ -790,9 +847,13 @@ def test_qb_topk_histogram(histogram_mode, topk, routing_output_mode):
         qb_histogram=fused_histogram,
         qb_bin_bounds=bin_bounds,
         qb_histogram_mode=histogram_mode,
+        overwrite_topk_indices=overwrite,
     )
     torch.testing.assert_close(fused_probs, reference["probs"])
     if dense_dtype is not None:
+        assert (fused_routing_output.data_ptr() == topk_indices.data_ptr()) == overwrite
+        if not overwrite:
+            torch.testing.assert_close(topk_indices, torch.full_like(topk_indices, -1))
         fused_routing_map = topk_indices_to_routing_map(fused_routing_output, num_experts)
         torch.testing.assert_close(fused_routing_map, reference["routing_map"])
     elif routing_output_mode == "bitmap_u8":
