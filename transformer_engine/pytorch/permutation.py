@@ -92,14 +92,16 @@ def _moe_permute_index_map_fake(  # pylint: disable=unused-argument
     max_token_num: int,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Fake implementation for shape inference."""
-    if not inp.numel():
-        return inp.clone(), torch.empty(0, dtype=torch.int32, device=inp.device)
     num_tokens = inp.shape[0]
     topK = index.shape[1]
-    assert (
-        num_out_tokens >= 0
-    ), f"moe_permute (index map) requires num_out_tokens >= 0, got {num_out_tokens}."
-    output_tokens = num_out_tokens if num_out_tokens > 0 else num_tokens * topK
+    if num_tokens > 0:
+        assert (
+            num_out_tokens >= 0
+        ), f"moe_permute (index map) requires num_out_tokens >= 0, got {num_out_tokens}."
+        output_tokens = num_out_tokens if num_out_tokens > 0 else num_tokens * topK
+    else:
+        # Match `moe_permute_index_map_forward` empty-input fast path (ignores num_out_tokens).
+        output_tokens = 0
 
     # row_id_map is 1D with size = num_tokens * topK
     fake_output = torch.empty((output_tokens, inp.shape[1]), dtype=inp.dtype, device=inp.device)
@@ -199,8 +201,6 @@ def _moe_unpermute_index_map_forward_fake(  # pylint: disable=unused-argument
     topK: int,
 ) -> torch.Tensor:
     """Fake implementation for shape inference."""
-    if not inp.numel():
-        return inp.clone()
     # Output shape: (num_tokens, hidden_size)
     return torch.empty((num_tokens, inp.shape[1]), dtype=inp.dtype, device=inp.device)
 
@@ -442,19 +442,15 @@ def _moe_permute_mask_map_forward_fake(  # pylint: disable=unused-argument
     num_tokens = inp.shape[0]
     hidden_size = inp.shape[1]
     num_experts = routing_map.shape[1]
-    if not inp.numel():
-        return (
-            inp.clone(),
-            torch.empty((0, num_experts * 2 + 1), dtype=torch.int32, device=inp.device),
-            torch.empty(
-                0, dtype=probs.dtype if probs is not None else torch.float32, device=inp.device
-            ),
+    if num_tokens > 0:
+        assert num_out_tokens > 0, (
+            f"moe_permute (mask map) requires num_out_tokens > 0, got {num_out_tokens}. "
+            "Use int(routing_map.sum()) or num_tokens * top_k."
         )
-    assert num_out_tokens > 0, (
-        f"moe_permute (mask map) requires num_out_tokens > 0, got {num_out_tokens}. "
-        "Use int(routing_map.sum()) or num_tokens * top_k."
-    )
-    out_rows = num_out_tokens
+        out_rows = num_out_tokens
+    else:
+        # Match `moe_permute_mask_map_forward` empty-input fast path (ignores num_out_tokens).
+        out_rows = 0
     # row_id_map: (num_tokens, num_experts * 2 + 1)
     fake_output = torch.empty((out_rows, hidden_size), dtype=inp.dtype, device=inp.device)
     fake_row_id_map = torch.empty(
@@ -619,8 +615,6 @@ def _moe_unpermute_mask_map_forward_fake(  # pylint: disable=unused-argument
     pad_offsets: Optional[torch.Tensor],
 ) -> torch.Tensor:
     """Fake implementation for shape inference."""
-    if not inp.numel():
-        return inp.clone()
     return torch.empty((num_tokens, hidden_size), dtype=inp.dtype, device=inp.device)
 
 
@@ -1174,9 +1168,6 @@ def _moe_chunk_sort_forward_fake(  # pylint: disable=unused-argument
     probs: Optional[torch.Tensor],
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Fake for shape inference."""
-    if not inp.numel():
-        probs_out = probs.clone() if probs is not None else torch.empty(0, device=inp.device)
-        return inp.clone(), probs_out, torch.empty(0, device=inp.device, dtype=torch.int32)
     num_tokens = inp.shape[0]
     hidden_size = inp.shape[1]
     fake_output = torch.empty((num_tokens, hidden_size), dtype=inp.dtype, device=inp.device)
