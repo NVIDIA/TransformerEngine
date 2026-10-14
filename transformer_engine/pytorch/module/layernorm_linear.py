@@ -1437,6 +1437,7 @@ def _layernorm_linear_backward_impl(
                 wgrad = get_dummy_wgrad(
                     list(main_grad.shape),
                     origin_weight.dtype,
+                    zero_tensor=getattr(origin_weight, "zero_tensor_dummy_wgrad", False),
                 )
         elif args.fuse_wgrad_accumulation:
             wgrad = None
