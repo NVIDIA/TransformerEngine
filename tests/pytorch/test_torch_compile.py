@@ -1927,6 +1927,49 @@ def test_to_tensor_spec_quantized(factory, shape):
 
 
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
+def test_te_linear_cublas_workspace_graph_generations(monkeypatch):
+    """Compiled forward/backward scratch follows graph generations, not a Python cache."""
+    import weakref
+    from transformer_engine.pytorch.cpp_extensions import gemm
+
+    original = gemm.get_cublas_workspace
+    captured_workspaces = []
+
+    def allocate(*args, **kwargs):
+        workspace = original(*args, **kwargs)
+        if torch.cuda.is_current_stream_capturing():
+            captured_workspaces.append(weakref.ref(workspace))
+        return workspace
+
+    monkeypatch.setattr(gemm, "get_cublas_workspace", allocate)
+    model = te.Linear(4096, 128, bias=False, params_dtype=torch.bfloat16, device="cuda")
+    with torch.no_grad():
+        model.weight.fill_(1)
+    torch._dynamo.reset()
+    compiled = torch.compile(model, fullgraph=True, mode="reduce-overhead", dynamic=False)
+    with _assert_no_cudagraph_skips(True):
+        for batch, value in [(128, 1), (256, 2), (128, 3)]:
+            for _ in range(3):
+                torch.compiler.cudagraph_mark_step_begin()
+                model.zero_grad(set_to_none=True)
+                inp = torch.full(
+                    (batch, 4096), value, dtype=torch.bfloat16, device="cuda", requires_grad=True
+                )
+                out = compiled(inp)
+                out.sum().backward()
+                torch.testing.assert_close(out, torch.full_like(out, 4096 * value), rtol=0, atol=0)
+                torch.testing.assert_close(inp.grad, torch.full_like(inp, 128), rtol=0, atol=0)
+                torch.testing.assert_close(
+                    model.weight.grad, torch.full_like(model.weight, batch * value), rtol=0, atol=0
+                )
+                del out, inp
+    assert len(captured_workspaces) >= 2, "Expected CUDA graph captures for different shapes"
+    assert all(ref() is None for ref in captured_workspaces)
+    del compiled
+    torch._dynamo.reset()
+
+
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
 @pytest.mark.parametrize("compile_mode", _compile_modes)
 @pytest.mark.parametrize(
     "fp8_recipe",
@@ -2916,16 +2959,17 @@ def test_te_ops_linear_saved_fp8_dtype_with_autocast(input_dtype, weight_dtype):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_te_ops_linear_workspace_fake_mode(monkeypatch):
     def unexpected_allocation(*args, **kwargs):
-        pytest.fail("Fake initialization must not populate the real workspace cache")
+        pytest.fail("Fake initialization must not allocate a real cuBLAS workspace")
 
     monkeypatch.setattr(
-        "transformer_engine.pytorch.ops.basic.basic_linear.get_cublas_workspace",
+        "transformer_engine.pytorch.cpp_extensions.gemm.get_cublas_workspace",
         unexpected_allocation,
     )
     with FakeTensorMode():
         te.ops.BasicLinear(32, 64, device="cuda", dtype=torch.bfloat16)
 
 
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("training", [False, True])
 @pytest.mark.parametrize("initial_device", ["cuda", "cpu", "meta"])
@@ -2935,23 +2979,33 @@ def test_te_ops_linear_bias_cold_cudagraphs(training, initial_device):
         """
         import contextlib
         import sys
+        import weakref
         import torch
         import transformer_engine.pytorch as te
-        from transformer_engine.pytorch.cpp_extensions.gemm import get_cublas_workspace
+        from transformer_engine.pytorch.cpp_extensions import gemm
         from torch._dynamo.utils import counters
 
         training, initial_device = sys.argv[1:]
         training = training == "True"
-        assert get_cublas_workspace.cache_info().currsize == 0
+        workspaces, captured_workspaces = [], []
+        allocate_workspace = gemm.get_cublas_workspace
+
+        def allocate(*args, **kwargs):
+            workspace = allocate_workspace(*args, **kwargs)
+            ref = weakref.ref(workspace)
+            workspaces.append(ref)
+            if torch.cuda.is_current_stream_capturing():
+                captured_workspaces.append(ref)
+            return workspace
+
+        gemm.get_cublas_workspace = allocate
         linear = te.ops.BasicLinear(32, 64, device=initial_device, dtype=torch.bfloat16)
         if initial_device == "cpu":
-            assert get_cublas_workspace.cache_info().currsize == 0
             linear.cuda()
         elif initial_device == "meta":
-            assert get_cublas_workspace.cache_info().currsize == 0
             linear.to_empty(device="cuda")
             linear.reset_parameters()
-        assert get_cublas_workspace.cache_info().currsize > 0
+        assert not workspaces, "Module initialization must not allocate GEMM scratch"
         model = te.ops.Sequential(linear, te.ops.Bias(64, dtype=torch.bfloat16))
         x = torch.randn(32, 32, device="cuda", dtype=torch.bfloat16, requires_grad=training)
         targets = (x, *model.parameters())
@@ -2977,6 +3031,8 @@ def test_te_ops_linear_bias_cold_cudagraphs(training, initial_device):
                     del grads, expected_grads
                 del actual, expected
         torch.cuda.synchronize()
+        assert captured_workspaces, "Expected workspace allocations during CUDA graph capture"
+        assert all(ref() is None for ref in workspaces), "Invocations must release workspace tensors"
         assert not counters["inductor"]["cudagraph_skips"], counters["inductor"]
         assert counters["inductor"]["cudagraph_recorded_non_static_inputs"] > 0, dict(
             counters["inductor"]
