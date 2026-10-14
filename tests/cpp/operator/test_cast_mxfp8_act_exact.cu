@@ -407,6 +407,65 @@ void run_case(const Mode mode, const Fill fill, const size_t rows, const size_t 
   }
 }
 
+// With a table, the register-resident kernel and the generic kernel must write the same bytes.
+// The first call takes the default dispatch, which picks the register-resident kernel for these
+// shapes; a noop tensor holding 0 keeps the second call on the generic kernel without skipping it.
+void run_regtile_vs_generic(const Mode mode, const Fill fill, const size_t rows, const size_t cols,
+                            const bool swizzled) {
+  const std::vector<size_t> shape{rows, cols};
+  const size_t n = rows * cols;
+  Tensor x("x", shape, DType::kBFloat16);
+  Tensor grad("grad", shape, DType::kBFloat16);
+  fill_inputs<bf16>(fill, &x, &grad);
+  Tensor noop("noop", std::vector<size_t>{1}, DType::kFloat32);
+
+  Tensor outs[2] = {
+      Tensor("default", shape, DType::kFloat8E4M3, true, true, NVTE_MXFP8_1D_SCALING),
+      Tensor("generic", shape, DType::kFloat8E4M3, true, true, NVTE_MXFP8_1D_SCALING)};
+  for (int i = 0; i < 2; ++i) {
+    outs[i].set_with_gemm_swizzled_scales(swizzled);
+    QuantizationConfigWrapper config;
+    config.set_activation_table(activation_table(table_kind(mode)));
+    if (i == 1) config.set_noop_tensor(noop.data());
+    switch (mode) {
+      case Mode::GeLU:
+        nvte_gelu_v2(x.data(), outs[i].data(), config, 0);
+        break;
+      case Mode::SiLU:
+        nvte_silu_v2(x.data(), outs[i].data(), config, 0);
+        break;
+      case Mode::DGeLU:
+        nvte_dgelu_v2(grad.data(), x.data(), outs[i].data(), config, 0);
+        break;
+      default:
+        nvte_dsilu_v2(grad.data(), x.data(), outs[i].data(), config, 0);
+        break;
+    }
+  }
+  ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+  for (auto &out : outs) out.to_cpu();
+  EXPECT_EQ(count_byte_mismatches(
+                reinterpret_cast<const uint8_t *>(outs[0].rowwise_cpu_dptr<fp8e4m3>()),
+                reinterpret_cast<const uint8_t *>(outs[1].rowwise_cpu_dptr<fp8e4m3>()), n),
+            0u)
+      << "rowwise data";
+  EXPECT_EQ(count_byte_mismatches(
+                reinterpret_cast<const uint8_t *>(outs[0].columnwise_cpu_dptr<fp8e4m3>()),
+                reinterpret_cast<const uint8_t *>(outs[1].columnwise_cpu_dptr<fp8e4m3>()), n),
+            0u)
+      << "colwise data";
+  EXPECT_EQ(count_byte_mismatches(outs[0].rowwise_cpu_scale_inv_ptr<uint8_t>(),
+                                  outs[1].rowwise_cpu_scale_inv_ptr<uint8_t>(),
+                                  product(outs[0].rowwise_scale_inv_shape())),
+            0u)
+      << "rowwise scales";
+  EXPECT_EQ(count_byte_mismatches(outs[0].columnwise_cpu_scale_inv_ptr<uint8_t>(),
+                                  outs[1].columnwise_cpu_scale_inv_ptr<uint8_t>(),
+                                  product(outs[0].columnwise_scale_inv_shape())),
+            0u)
+      << "colwise scales";
+}
+
 using Params = std::tuple<Mode, Fill, DType, int /*layout: 0 row, 1 col, 2 both*/,
                           bool /*swizzled*/, std::pair<size_t, size_t>, bool /*use_table*/>;
 
@@ -475,3 +534,39 @@ INSTANTIATE_TEST_SUITE_P(TinyGradients, CastMXFP8ActExactTestSuite,
                                             ::testing::Values(std::pair<size_t, size_t>{64, 128}),
                                             ::testing::Bool()),
                          case_name);
+
+namespace {
+
+using RegtileParams = std::tuple<Mode, Fill, bool /*swizzled*/, std::pair<size_t, size_t>>;
+
+class CastMXFP8ActRegtileTestSuite : public ::testing::TestWithParam<RegtileParams> {};
+
+std::string regtile_case_name(const testing::TestParamInfo<RegtileParams> &info) {
+  const char *fills[] = {"Typical", "OrderedInputs", "Specials", "TinyGradients"};
+  const auto [mode, fill, swizzled, dims] = info.param;
+  return std::string(mode_name(mode)) + "X" + fills[static_cast<int>(fill)] +
+         (swizzled ? "XSwizzled" : "XCompact") + "X" + std::to_string(dims.first) + "X" +
+         std::to_string(dims.second);
+}
+
+}  // namespace
+
+TEST_P(CastMXFP8ActRegtileTestSuite, MatchesGenericKernel) {
+  cudaDeviceProp prop;
+  ASSERT_EQ(cudaGetDeviceProperties(&prop, 0), cudaSuccess);
+  if (prop.major < 10) {
+    GTEST_SKIP() << "This MXFP8 quantize kernel requires compute capability 10.0 or newer";
+  }
+  const auto [mode, fill, swizzled, dims] = GetParam();
+  run_regtile_vs_generic(mode, fill, dims.first, dims.second, swizzled);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    OperatorTest, CastMXFP8ActRegtileTestSuite,
+    ::testing::Combine(::testing::Values(Mode::GeLU, Mode::DGeLU, Mode::SiLU, Mode::DSiLU),
+                       ::testing::Values(Fill::Typical, Fill::OrderedInputs, Fill::Specials),
+                       ::testing::Bool(),
+                       ::testing::Values(std::pair<size_t, size_t>{1024, 2048},
+                                         std::pair<size_t, size_t>{4160, 2048},
+                                         std::pair<size_t, size_t>{128, 256})),
+    regtile_case_name);

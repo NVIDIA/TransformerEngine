@@ -52,6 +52,8 @@ __global__ void build_derivative_kernel(float *table) {
 
 template <typename T>
 void build(void *table, cudaStream_t stream) {
+  // Zero the padding up to the 16-byte size, so the table's bytes are deterministic.
+  NVTE_CHECK_CUDA(cudaMemsetAsync(table, 0, T::kBytes, stream));
   if constexpr (T::kForward) {
     build_forward_kernel<T><<<DIVUP<uint32_t>(T::kRows, kBlockSize), kBlockSize, 0, stream>>>(
         static_cast<__nv_bfloat16 *>(table));
