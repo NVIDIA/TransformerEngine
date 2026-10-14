@@ -1935,10 +1935,14 @@ void NVFP4Quantizer::set_quantization_params(TensorWrapper* tensor) const {
 }
 
 NVFP4Quantizer::ShapeAlignment NVFP4Quantizer::rht_cast_fusion_alignment(
-    int sm_arch, bool disable_rht_cast_fusion, bool for_grouped_kernel) {
+    int sm_arch, std::optional<bool> disable_rht_cast_fusion, bool for_grouped_kernel) {
+  const bool disabled =
+      disable_rht_cast_fusion.has_value()
+          ? *disable_rht_cast_fusion
+          : transformer_engine::getenv<bool>("NVTE_NVFP4_DISABLE_RHT_CAST_FUSION");
   const bool supported_arch = (sm_arch >= 100 && sm_arch <= 110) ||
                               (!for_grouped_kernel && (sm_arch == 120 || sm_arch == 121));
-  if (disable_rht_cast_fusion || !supported_arch) {
+  if (disabled || !supported_arch) {
     return std::nullopt;
   }
   return std::pair<size_t, size_t>{for_grouped_kernel ? 128 : 64, 128};
@@ -1962,7 +1966,7 @@ bool NVFP4Quantizer::meets_alignment(const std::vector<size_t>& shape,
 
 NVFP4Quantizer::ShapeAlignment NVFP4Quantizer::gemm_swizzled_scales_alignment(
     bool optimize_for_gemm, bool with_rht, bool with_2d_quantization, bool row_scaled_nvfp4,
-    bool nvfp4_use_4over6, int sm_arch, bool disable_rht_cast_fusion) {
+    bool nvfp4_use_4over6, int sm_arch, std::optional<bool> disable_rht_cast_fusion) {
   if (!optimize_for_gemm) {
     return std::nullopt;
   }
@@ -1982,9 +1986,7 @@ NVFP4Quantizer::ShapeAlignment NVFP4Quantizer::gemm_swizzled_scales_alignment(
 bool NVFP4Quantizer::is_eligible_for_rht_cast_fusion(const std::vector<size_t>& shape,
                                                      bool for_grouped_kernel) {
   return meets_alignment(shape, rht_cast_fusion_alignment(transformer_engine::cuda::sm_arch(),
-                                                          transformer_engine::getenv<bool>(
-                                                              "NVTE_NVFP4_DISABLE_RHT_CAST_FUSION"),
-                                                          for_grouped_kernel));
+                                                          std::nullopt, for_grouped_kernel));
 }
 
 bool NVFP4Quantizer::is_eligible_for_2d_swizzle_fusion(const std::vector<size_t>& shape) {
@@ -1993,11 +1995,10 @@ bool NVFP4Quantizer::is_eligible_for_2d_swizzle_fusion(const std::vector<size_t>
 }
 
 bool NVFP4Quantizer::emits_gemm_swizzled_scales(const std::vector<size_t>& shape) const {
-  return meets_alignment(
-      shape, gemm_swizzled_scales_alignment(
-                 optimize_for_gemm, with_rht, with_2d_quantization, row_scaled_nvfp4,
-                 nvfp4_4over6_mode != kNVTENVFP44Over6Disabled, transformer_engine::cuda::sm_arch(),
-                 transformer_engine::getenv<bool>("NVTE_NVFP4_DISABLE_RHT_CAST_FUSION")));
+  return meets_alignment(shape, gemm_swizzled_scales_alignment(
+                                    optimize_for_gemm, with_rht, with_2d_quantization,
+                                    row_scaled_nvfp4, nvfp4_4over6_mode != kNVTENVFP44Over6Disabled,
+                                    transformer_engine::cuda::sm_arch(), std::nullopt));
 }
 
 std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(

@@ -79,17 +79,16 @@ def _make_fused_quantization_output_spec(
 def fake_bgrad(
     grad_output: TensorSpec,
     quantizer: Optional[Quantizer] = None,
-    *,
-    dtype: Optional[torch.dtype] = None,
 ) -> tuple[TensorSpec, TensorSpec]:
     """Describe bias reduction and optional gradient quantization, in native order."""
-    dtype = dtype or grad_output.dtype
-    db = TensorSpec(shape=(grad_output.shape[-1],), dtype=dtype, device=grad_output.device)
+    db = TensorSpec(
+        shape=(grad_output.shape[-1],), dtype=grad_output.dtype, device=grad_output.device
+    )
     dx = (
         grad_output
-        if quantizer is None and dtype == grad_output.dtype
+        if quantizer is None
         else _make_fused_quantization_output_spec(
-            grad_output.shape, dtype, grad_output.device, quantizer
+            grad_output.shape, grad_output.dtype, grad_output.device, quantizer
         )
     )
     return db, dx

@@ -428,10 +428,12 @@ class NVFP4Quantizer : public Quantizer {
   static ShapeAlignment gemm_swizzled_scales_alignment(bool optimize_for_gemm, bool with_rht,
                                                        bool with_2d_quantization,
                                                        bool row_scaled_nvfp4, bool nvfp4_use_4over6,
-                                                       int sm_arch, bool disable_rht_cast_fusion);
+                                                       int sm_arch,
+                                                       std::optional<bool> disable_rht_cast_fusion);
 
  private:
-  static ShapeAlignment rht_cast_fusion_alignment(int sm_arch, bool disable_rht_cast_fusion,
+  static ShapeAlignment rht_cast_fusion_alignment(int sm_arch,
+                                                  std::optional<bool> disable_rht_cast_fusion,
                                                   bool for_grouped_kernel = false);
   static ShapeAlignment get_2d_swizzle_fusion_alignment(int sm_arch);
   static bool meets_alignment(const std::vector<size_t>& shape, const ShapeAlignment& alignment);
