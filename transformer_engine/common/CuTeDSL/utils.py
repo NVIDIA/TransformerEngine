@@ -103,6 +103,17 @@ def exp2_bf16x2_rcp(scale_e8m0) -> Uint32:
 
 
 @cute.jit
+def bf16_pair_magnitude(pair: Int32) -> Uint32:
+    """Fold both BF16 halves and clear the sign set by max.xorsign.abs."""
+    swapped = cute.arch.inline_ptx(
+        "prmt.b32 {$w0}, {$r0}, {$r0}, 0x1032;",
+        write_only_types=[Int32],
+        read_only_args=[pair],
+    )
+    return Uint32(abs_max_x2_bf16(pair, swapped)) & Uint32(0x7FFF)
+
+
+@cute.jit
 def bf16_mx_scale_reciprocal(magnitude: Uint32, MAX_EXPONENT: cutlass.Constexpr[int]) -> Uint32:
     """Exact BF16 reciprocal scale bits, including E8M0 zero, Inf and NaN cases."""
     rounded = (magnitude + Uint32(31)) & Uint32(0x7F80)

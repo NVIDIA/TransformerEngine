@@ -74,7 +74,7 @@ def _flush_scales_to_gmem(
 
 
 @cute.jit
-def quantize_rowwise_mxfp8_g2r_1lane(
+def quantize_mxfp8_gmem_tile_rowwise_1lane(
     gX_tile: cute.Tensor,
     gO_tile: cute.Tensor,
     gS_tile: cute.Tensor,
@@ -205,7 +205,7 @@ def quantize_rowwise_mxfp8_g2r_1lane(
             )
 
 
-class MXFP8QuantizeG2RRowwise1LaneKernel(MXFP8QuantizeKernelBase):
+class MXFP8QuantizeRowwise1LaneG2RKernel(MXFP8QuantizeKernelBase):
     """Specialized cast-only ROWWISE-only MXFP8 kernel.
 
     Requires N % 128 == 0 (full vectorizable column chunks).
@@ -236,7 +236,7 @@ class MXFP8QuantizeG2RRowwise1LaneKernel(MXFP8QuantizeKernelBase):
         # N divisible by 128 for vectorized stores, and grid.y within limits.
         return (
             N % 128 == 0
-            and cute.ceil_div(M, MXFP8QuantizeG2RRowwise1LaneKernel._TILE_ROWS) <= 65535
+            and cute.ceil_div(M, MXFP8QuantizeRowwise1LaneG2RKernel._TILE_ROWS) <= 65535
             and mNoop.toint() == 0
         )
 
@@ -262,7 +262,7 @@ class MXFP8QuantizeG2RRowwise1LaneKernel(MXFP8QuantizeKernelBase):
     ):
         if cutlass.const_expr(CUTEDSL_DEBUG_LOGGING):
             cute.printf(
-                f"[CuTeDSL] MXFP8QuantizeG2RRowwise1LaneKernel.__call__() with config: {self.cfg}\n"
+                f"[CuTeDSL] MXFP8QuantizeRowwise1LaneG2RKernel.__call__() with config: {self.cfg}\n"
             )
 
         M = mX.shape[0]
@@ -312,7 +312,7 @@ class MXFP8QuantizeG2RRowwise1LaneKernel(MXFP8QuantizeKernelBase):
         gO_tile = cute.local_tile(mO_row, TILER, (bidy, bidx))
         gS_tile = cute.local_tile(mS_row, SCALE_TILER, (bidy, bidx))
 
-        quantize_rowwise_mxfp8_g2r_1lane(
+        quantize_mxfp8_gmem_tile_rowwise_1lane(
             gX_tile,
             gO_tile,
             gS_tile,

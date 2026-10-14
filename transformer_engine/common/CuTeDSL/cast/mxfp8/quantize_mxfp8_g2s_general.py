@@ -76,7 +76,7 @@ from .quantize_mxfp8_common import (
 
 
 @cute.jit
-def quantize_rowwise_mxfp8(
+def _quantize_rowwise_mxfp8(
     sX_tile: cute.Tensor,  # (TILE_Y, TILE_X) bf16/fp16 smem view, post-TMA
     sActInput_tile: Optional[cute.Tensor],  # (TILE_Y, TILE_X) act-input smem tile (dact only)
     sO_row_tile: cute.Tensor,  # (TILE_Y, TILE_X) fp8 smem view (rowwise FP8 output)
@@ -329,7 +329,7 @@ def quantize_rowwise_mxfp8(
 
 
 @cute.jit
-def quantize_colwise_mxfp8(
+def _quantize_colwise_mxfp8(
     sX_tile: cute.Tensor,  # (TILE_Y, TILE_X) bf16/fp16 smem view, post-TMA
     sActInput_tile: Optional[cute.Tensor],  # (TILE_Y, TILE_X) act-input smem tile (dact only)
     sO_col_tile: cute.Tensor,  # (TILE_Y, TILE_X) fp8 smem view (colwise FP8 output)
@@ -505,7 +505,7 @@ def quantize_colwise_mxfp8(
 
 
 @cute.jit
-def dbias_reduction_colwise(
+def _dbias_reduction_colwise(
     sX_tile: cute.Tensor,  # (TILE_Y, TILE_X) bf16/fp16/fp32 smem view, post-TMA
     sA_tile: Optional[cute.Tensor],  # (TILE_Y, TILE_X) activation-input smem tile (dact only)
     ACTIVATION: cutlass.Constexpr[str | None],
@@ -517,7 +517,7 @@ def dbias_reduction_colwise(
     """Reduce one SMEM tile along rows (the dbias direction) and possibly cache dact values, with no quantization."""
     tidx, _, _ = cute.arch.thread_idx()
 
-    # Same TV layout as quantize_colwise_mxfp8: thread tidx owns column tidx, all TILE_Y rows.
+    # Same TV layout as _quantize_colwise_mxfp8: thread tidx owns column tidx, all TILE_Y rows.
     _, tv_layout = cute.make_layout_tv(
         thr_layout=cute.make_layout((1, TILE_X), stride=(TILE_X, 1)),
         val_layout=cute.make_layout((MXFP8_BLOCK_SCALING_SIZE, 1), stride=(1, 1)),
@@ -540,7 +540,7 @@ def dbias_reduction_colwise(
 
 
 @cute.jit
-def quantize_mxfp8_tile(
+def quantize_mxfp8_smem_tile_general(
     sX_tile: cute.Tensor,  # (TILE_Y, TILE_X) bf16/fp16 smem view, post-TMA
     sActInput_tile: Optional[cute.Tensor],  # (TILE_Y, TILE_X) act-input smem tile (dact only)
     sO_row_tile: Optional[cute.Tensor],  # (TILE_Y, TILE_X) fp8 smem view (rowwise FP8 output)
@@ -580,7 +580,7 @@ def quantize_mxfp8_tile(
     amax = None
     dbias = None
     if cutlass.const_expr(COLWISE):
-        amax_c, dbias_c = quantize_colwise_mxfp8(
+        amax_c, dbias_c = _quantize_colwise_mxfp8(
             sX_tile,
             sActInput_tile,
             sO_col_tile,
@@ -611,7 +611,7 @@ def quantize_mxfp8_tile(
             dbias = dbias_c
     # If we don't quantize columnwise but we fuse dbias, do a dbias reduction only pass in the columnwise direction without quantization
     if cutlass.const_expr(COLWISE_DBIAS_REDUCTION_ONLY):
-        dbias = dbias_reduction_colwise(
+        dbias = _dbias_reduction_colwise(
             sX_tile,
             sActInput_tile,
             ACTIVATION=ACTIVATION,
@@ -625,7 +625,7 @@ def quantize_mxfp8_tile(
     if cutlass.const_expr(CACHE_ACTIVATION):
         cute.arch.sync_threads()
     if cutlass.const_expr(ROWWISE):
-        amax_r = quantize_rowwise_mxfp8(
+        amax_r = _quantize_rowwise_mxfp8(
             sX_tile,
             None if CACHE_ACTIVATION else sActInput_tile,
             sO_row_tile,
@@ -652,7 +652,7 @@ def quantize_mxfp8_tile(
     return amax, dbias
 
 
-class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
+class MXFP8QuantizeGeneralG2SKernel(MXFP8QuantizeKernelBase):
     """The MXFP8 quantization kernel that mirrors the standard (non-specialized) MXFP8 CUDA C++ quantization kernel
     with multiple fusions (activation, dbias, etc.).
     `__call__` method is the entrypoint which is AOT compiled. `self` will be captured so it's fixed per compiled kernel
@@ -734,7 +734,9 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
         stream: CUstream,
     ):
         if cutlass.const_expr(CUTEDSL_DEBUG_LOGGING):
-            cute.printf(f"[CuTeDSL] MXFP8QuantizeKernel.__call__() with config: {self.cfg}\n")
+            cute.printf(
+                f"[CuTeDSL] MXFP8QuantizeGeneralG2SKernel.__call__() with config: {self.cfg}\n"
+            )
 
         M = mX.shape[0]
         N = mX.shape[1]
@@ -1196,7 +1198,7 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
                 sO_col_tile = sO_col[(None, stage_idx)]
                 mS_col_stage = cute.flatten(mS_col[(None, (tile_idx_y, tile_idx_x))])
 
-            amax, dbias = quantize_mxfp8_tile(
+            amax, dbias = quantize_mxfp8_smem_tile_general(
                 sX_tile,
                 sActInput_tile,
                 sO_row_tile,
@@ -1336,7 +1338,7 @@ class MXFP8QuantizeKernel(MXFP8QuantizeKernelBase):
             ),
         )
         sDbias_write = cute.composition(sDbias, tv_layout_dbias_write)
-        # rowwise_dbias_acc is in quantize_rowwise_mxfp8's rotated wave order; these must match its constants.
+        # rowwise_dbias_acc is in _quantize_rowwise_mxfp8's rotated wave order; these must match its constants.
         PACK_SIZE = 4
         WAVES = MXFP8_BLOCK_SCALING_SIZE // PACK_SIZE
         THREADS_PER_BANK = 32 * 4 // MXFP8_BLOCK_SCALING_SIZE

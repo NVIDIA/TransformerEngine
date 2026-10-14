@@ -11,13 +11,12 @@ from typing import Optional
 
 import cutlass
 from cutlass import cute
-from cutlass import Boolean, Float32, Int32, Int64, Uint32
+from cutlass import Boolean, Float32, Int32, Int64
 from cuda.bindings.driver import CUstream  # pylint: disable=no-name-in-module
 import tvm_ffi
 
 from transformer_engine.common.CuTeDSL.utils import (
     str_to_cutlass_dtype,
-    abs_max_x2_bf16,
     device_compute_capability,
 )
 from transformer_engine.common.CuTeDSL.activations import (
@@ -256,17 +255,6 @@ class MXFP8QuantizeKernelBase(abc.ABC):
         """
 
 
-@cute.jit
-def bf16_pair_magnitude(pair: Int32) -> Uint32:
-    """Fold both BF16 halves and clear the sign set by max.xorsign.abs."""
-    swapped = cute.arch.inline_ptx(
-        "prmt.b32 {$w0}, {$r0}, {$r0}, 0x1032;",
-        write_only_types=[Int32],
-        read_only_args=[pair],
-    )
-    return Uint32(abs_max_x2_bf16(pair, swapped)) & Uint32(0x7FFF)
-
-
 class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
     """Select the appropriate MXFP8 quantization kernel based on the configuration and runtime shapes."""
 
@@ -274,11 +262,11 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
         # Kernels import shared definitions from this module. Resolve their
         # implementations only when constructing the compile-time entry object.
         # pylint: disable=import-outside-toplevel
-        from .quantize_mxfp8_general import MXFP8QuantizeKernel
-        from .quantize_mxfp8_g2r_rowwise_1lane import MXFP8QuantizeG2RRowwise1LaneKernel
-        from .quantize_mxfp8_g2s_bidimensional import MXFP8QuantizeSpecializedBidimensionalKernel
-        from .quantize_mxfp8_g2r_rowwise_2lane import MXFP8QuantizeG2RRowwise2LaneKernel
-        from .quantize_mxfp8_g2r_bidimensional import MXFP8QuantizeRegisterBidimensionalKernel
+        from .quantize_mxfp8_g2s_general import MXFP8QuantizeGeneralG2SKernel
+        from .quantize_mxfp8_g2r_rowwise_1lane import MXFP8QuantizeRowwise1LaneG2RKernel
+        from .quantize_mxfp8_g2s_bidim import MXFP8QuantizeBidimensionalG2SKernel
+        from .quantize_mxfp8_g2r_rowwise_2lane import MXFP8QuantizeRowwise2LaneG2RKernel
+        from .quantize_mxfp8_g2r_bidim import MXFP8QuantizeBidimensionalG2RKernel
 
         # pylint: enable=import-outside-toplevel
 
@@ -296,21 +284,23 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
         )
         # Instantiate all possible kernels at compile time,
         # and we will pick the right one at runtime based on the input shape and config.
-        self.general_skip_input_masking_kernel = MXFP8QuantizeKernel(cfg, SKIP_INPUT_MASKING=True)
-        self.general_skip_input_masking_and_scale_bounds_kernel = MXFP8QuantizeKernel(
+        self.general_skip_input_masking_kernel = MXFP8QuantizeGeneralG2SKernel(
+            cfg, SKIP_INPUT_MASKING=True
+        )
+        self.general_skip_input_masking_and_scale_bounds_kernel = MXFP8QuantizeGeneralG2SKernel(
             cfg, SKIP_INPUT_MASKING=True, SKIP_SCALE_BOUNDS=True
         )
         # We only need to mask when WITH_ACT is enabled because with activations applied zeros filled by TMA affect block statistics
-        self.general_kernel = MXFP8QuantizeKernel(cfg) if self.ACT_NEED_MASKING else None
+        self.general_kernel = MXFP8QuantizeGeneralG2SKernel(cfg) if self.ACT_NEED_MASKING else None
 
         # Specialized cast-only kernels in a specific dispatch priority order so we prefer to dispatch to kernels that come first in the list.
         self.specialized_kernels = [
             kernel_cls(cfg)
             for kernel_cls in (
-                MXFP8QuantizeG2RRowwise2LaneKernel,
-                MXFP8QuantizeRegisterBidimensionalKernel,
-                MXFP8QuantizeG2RRowwise1LaneKernel,
-                MXFP8QuantizeSpecializedBidimensionalKernel,
+                MXFP8QuantizeRowwise2LaneG2RKernel,
+                MXFP8QuantizeBidimensionalG2RKernel,
+                MXFP8QuantizeRowwise1LaneG2RKernel,
+                MXFP8QuantizeBidimensionalG2SKernel,
             )
             if kernel_cls.supports(cfg)
         ]

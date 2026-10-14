@@ -13,6 +13,7 @@ from cuda.bindings.driver import CUstream  # pylint: disable=no-name-in-module
 
 from transformer_engine.common.CuTeDSL.utils import (
     abs_max_x2_bf16,
+    bf16_pair_magnitude,
     bf16_mx_scale_reciprocal,
     bf16_mx_scale_reciprocal_pair,
     bf16_mx_scale_bytes_pair,
@@ -24,7 +25,6 @@ from .quantize_mxfp8_common import (
     MXFP8_BLOCK_SCALING_SIZE,
     MXFP8QuantizeConfig,
     MXFP8QuantizeKernelBase,
-    bf16_pair_magnitude,
     derive_swizzled_scale_layout,
 )
 
@@ -388,7 +388,7 @@ def _quantize_colwise(
 
 
 @cute.jit
-def quantize_bidimensional_mxfp8_g2r(
+def quantize_mxfp8_gmem_tile_bidimensional(
     gX_tile: cute.Tensor,
     gO_row_tile: Optional[cute.Tensor],
     gS_row_tile: Optional[cute.Tensor],
@@ -544,7 +544,7 @@ def quantize_bidimensional_mxfp8_g2r(
         )
 
 
-class MXFP8QuantizeRegisterBidimensionalKernel(MXFP8QuantizeKernelBase):
+class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
     """Load one CTA tile into registers and quantize it along both axes.
 
     TILE_ROWS = _CTA_THREADS_Y * _ELEMENTS_Y_PER_THREAD = 32.
@@ -789,7 +789,7 @@ class MXFP8QuantizeRegisterBidimensionalKernel(MXFP8QuantizeKernelBase):
 
         cache_policy = create_l2_policy(True)
 
-        quantize_bidimensional_mxfp8_g2r(
+        quantize_mxfp8_gmem_tile_bidimensional(
             gX_tile,
             gO_row_tile,
             gS_row_tile,

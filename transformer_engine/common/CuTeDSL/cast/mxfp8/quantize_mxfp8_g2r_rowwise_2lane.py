@@ -13,6 +13,7 @@ from cuda.bindings.driver import CUstream  # pylint: disable=no-name-in-module
 
 from transformer_engine.common.CuTeDSL.utils import (
     abs_max_x2_bf16,
+    bf16_pair_magnitude,
     create_l2_policy,
     exp2_bf16x2_rcp,
     max_num_bits_per_copy_ld_global,
@@ -24,13 +25,12 @@ from transformer_engine.common.CuTeDSL.utils_fp8 import (
 from .quantize_mxfp8_common import (
     MXFP8QuantizeConfig,
     MXFP8QuantizeKernelBase,
-    bf16_pair_magnitude,
     derive_swizzled_scale_layout,
 )
 
 
 @cute.jit
-def quantize_rowwise_mxfp8_g2r(
+def quantize_mxfp8_gmem_tile_rowwise_2lane(
     gX_tiles: cute.Tensor,
     gO_tiles: cute.Tensor,
     mS_tiles: cute.Tensor,
@@ -167,7 +167,7 @@ def quantize_rowwise_mxfp8_g2r(
             cute.copy(store_atom, rO, gO_thread, cache_policy=output_policy)
 
 
-class MXFP8QuantizeG2RRowwise2LaneKernel(MXFP8QuantizeKernelBase):
+class MXFP8QuantizeRowwise2LaneG2RKernel(MXFP8QuantizeKernelBase):
     """Two lanes per MXFP8 block, with a CTA sweeping NUM_TILES horizontally.
 
     One CTA tile has TILE_ROWS = CTA_THREADS_Y and
@@ -477,7 +477,7 @@ class MXFP8QuantizeG2RRowwise2LaneKernel(MXFP8QuantizeKernelBase):
 
         # The last grid.z slice can overshoot the row tiles; those CTAs have no work.
         if cta_row * CTA_ROWS < M:
-            quantize_rowwise_mxfp8_g2r(
+            quantize_mxfp8_gmem_tile_rowwise_2lane(
                 gX_tiles,
                 gO_tiles,
                 mS_tiles,

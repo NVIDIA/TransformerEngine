@@ -43,7 +43,7 @@ from .quantize_mxfp8_common import (
 
 
 @cute.jit
-def quantize_bidimensional_mxfp8(
+def quantize_mxfp8_smem_tile_bidimensional(
     sX_tile: cute.Tensor,  # 32x64 input tile (already sliced to this stage); any SMEM layout,
     # Sw<3,4,3> avoids bank conflicts
     sO_row_tile: cute.Tensor,  # 32x64 rowwise-output tile
@@ -229,7 +229,7 @@ def quantize_bidimensional_mxfp8(
         cute.autovec_copy(rO_col, tXsO_col)
 
 
-class MXFP8QuantizeSpecializedBidimensionalKernel(MXFP8QuantizeKernelBase):
+class MXFP8QuantizeBidimensionalG2SKernel(MXFP8QuantizeKernelBase):
     """Specialized cast-only rowwise+colwise MXFP8 kernel (swizzled TMA, one 32x32 tile per warp)."""
 
     _WARPS_PER_CTA = 2
@@ -271,7 +271,7 @@ class MXFP8QuantizeSpecializedBidimensionalKernel(MXFP8QuantizeKernelBase):
         mS_col: Optional[cute.Tensor],
         mNoop: cute.Pointer,
     ) -> Boolean:
-        cls = MXFP8QuantizeSpecializedBidimensionalKernel
+        cls = MXFP8QuantizeBidimensionalG2SKernel
         rows_per_cta = cls._TILE_ROWS * cls._NUM_TILES_Y  # packed scales: one tile row
         return cute.ceil_div(mX.shape[0], rows_per_cta) <= 65535 and mNoop.toint() == 0
 
@@ -298,7 +298,7 @@ class MXFP8QuantizeSpecializedBidimensionalKernel(MXFP8QuantizeKernelBase):
     ):
         if cutlass.const_expr(CUTEDSL_DEBUG_LOGGING):
             cute.printf(
-                "[CuTeDSL] MXFP8QuantizeSpecializedBidimensionalKernel.__call__() with config:"
+                "[CuTeDSL] MXFP8QuantizeBidimensionalG2SKernel.__call__() with config:"
                 f" {self.cfg}\n"
             )
         M = mX.shape[0]
@@ -611,8 +611,8 @@ class MXFP8QuantizeSpecializedBidimensionalKernel(MXFP8QuantizeKernelBase):
             tile_y = tile_idx // num_tiles_x
             tile_x = tile_idx % num_tiles_x
 
-            # Process the 32x64 SMEM tile for this stage
-            quantize_bidimensional_mxfp8(
+            # Process the 32x64 SMEM tile for thiHs stage
+            quantize_mxfp8_smem_tile_bidimensional(
                 sX[None, stage_idx],
                 sO_row[None, stage_idx],
                 sO_col[None, stage_idx],
