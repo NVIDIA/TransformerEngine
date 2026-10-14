@@ -14,7 +14,7 @@ from .. import cpp_extensions as tex
 from ..constants import TE_DType
 from ..distributed import in_fp8_activation_recompute_phase
 from ..dynamo import TensorOrQuantized
-from ..dynamo.parameter_parts import ConcatInput, ParameterParts
+from ..dynamo.concat import ConcatInput
 from ..export import is_in_onnx_export_mode
 from ..quantized_tensor import QuantizedTensor, QuantizedTensorStorage
 from ..quantization import FP8GlobalStateManager
@@ -257,7 +257,7 @@ def concat_input(
             for t in tensors
         )
     ):
-        return ParameterParts(tuple(tensors))
+        return list(tensors)
     if torch.compiler.is_compiling():
         return torch.cat(tensors)
     return noop_cat(tensors)

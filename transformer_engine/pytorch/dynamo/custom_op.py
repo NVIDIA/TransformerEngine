@@ -37,9 +37,9 @@ on each call. The kinds -- and how each represents its field as op inputs:
   * ``TENSOR_OR_QUANTIZED`` -- a field that may be a plain tensor, a bare
     quantized storage, or ``None``: three slots (the tensor, its flat inner
     buffers, and a ``__kind__`` tag) so a quantized tensor crosses as its buffers.
-    Unions including ``ParameterParts`` also accept deferred row concatenations:
+    Unions including ``List[Tensor]`` also accept deferred row concatenations:
     all parts cross in the buffer list, with full gradients split outside the op.
-    Saved parts use ``parameter_parts.restore_from_func_ctx`` in the backward
+    Saved parts use ``concat.restore_from_func_ctx`` in the backward
     container; reconstruction of the full view happens only in the real kernel.
   * ``SIMPLE`` -- every remaining simple value (scalars, enums, sizes,
     quantizers -- value-opaque constants baked into the graph -- and nested
@@ -110,7 +110,7 @@ from torch._prims_common import make_contiguous_strides_for
 from torch.utils._pytree import tree_flatten, tree_unflatten
 
 from .tensor_spec import TensorSpec, to_tensor_spec
-from .parameter_parts import ParameterParts
+from .concat import concat_to_spec, materialize_concat, validate_concat
 from ..quantized_tensor import (
     QuantizedTensor,
     QuantizedTensorStorage,
@@ -445,16 +445,18 @@ class _FieldPlan:
     allows_concatenation: bool = False
 
 
+def _is_tensor_list_annot(annot: Any) -> bool:
+    """Whether an annotation is a list of tensors."""
+    return get_origin(annot) is list and get_args(annot) == (torch.Tensor,)
+
+
 def _is_tensor_storage_union(annot: Any) -> bool:
     """Whether a tensor union can use the tensor / buffers / metadata slots."""
     if not _is_union(annot):
         return False
     members = frozenset(a for a in get_args(annot) if a is not type(None))
-    return members in (
-        _TQ_MEMBERS,
-        _TQ_MEMBERS | {ParameterParts},
-        frozenset((torch.Tensor, ParameterParts)),
-    )
+    tensors = frozenset(a for a in members if not _is_tensor_list_annot(a))
+    return tensors == _TQ_MEMBERS or (tensors == frozenset((torch.Tensor,)) and tensors != members)
 
 
 def _is_process_group_annot(annot: Any) -> bool:
@@ -497,7 +499,10 @@ def _parse_field(name: str, annot: Any) -> _FieldPlan:
             _SlotSpec(name + "__meta", _OPAQUE_VALUE_BUNDLE_TYPE_NAME),
         )
         return _FieldPlan(
-            name, _FieldKind.TENSOR_OR_QUANTIZED, slots, ParameterParts in get_args(annot)
+            name,
+            _FieldKind.TENSOR_OR_QUANTIZED,
+            slots,
+            any(_is_tensor_list_annot(a) for a in get_args(annot)),
         )
     stripped, is_optional = _strip_optional(annot)
     if stripped is torch.Tensor:
@@ -539,11 +544,12 @@ def _pack_tensor_or_quantized(field: _FieldPlan, value: Any, slots: Dict[str, An
         slots[tensor_slot] = None
         slots[inner_slot] = []
         slots[meta_slot] = OpaqueValueBundle({_TQ_KIND_KEY: _TensorOrQuantizedKind.NONE})
-    elif isinstance(value, ParameterParts):
+    elif isinstance(value, list):
         if not field.allows_concatenation:
-            raise TypeError(f"field {field.name!r} does not accept ParameterParts")
+            raise TypeError(f"field {field.name!r} does not accept a tensor list")
+        validate_concat(value)
         slots[tensor_slot] = None
-        slots[inner_slot] = list(value.parts)
+        slots[inner_slot] = value
         slots[meta_slot] = OpaqueValueBundle({_TQ_KIND_KEY: _TensorOrQuantizedKind.CONCATENATED})
     elif isinstance(value, torch.Tensor):
         # Plain tensor *and* subclass (e.g. Float8Tensor) pass through the
@@ -574,7 +580,7 @@ def _unpack_tensor_or_quantized(field: _FieldPlan, slots: Dict[str, Any]) -> Any
     if kind == _TensorOrQuantizedKind.TENSOR:
         return slots[tensor_slot]
     if kind == _TensorOrQuantizedKind.CONCATENATED:
-        return ParameterParts(tuple(slots[inner_slot]))
+        return slots[inner_slot]
     return _storage_unflatten(meta, slots[inner_slot])
 
 
@@ -761,8 +767,8 @@ def _spec_view(obj: Any, tensor_field_names: Sequence[str]) -> Any:
     overrides: Dict[str, Any] = {}
     for name in tensor_field_names:
         value = getattr(obj, name, None)
-        if isinstance(value, ParameterParts):
-            overrides[name] = value.to_spec()
+        if isinstance(value, list):
+            overrides[name] = concat_to_spec(value)
         elif value is not None and not isinstance(value, TensorSpec):
             overrides[name] = to_tensor_spec(value)
     if not overrides:
@@ -1013,8 +1019,8 @@ def _register_base_op(
         obj = plan.unpack(dict(zip(plan.slot_names, flat)))
         for name in concatenated_fields:
             value = getattr(obj, name)
-            if isinstance(value, ParameterParts):
-                setattr(obj, name, value.materialize())
+            if isinstance(value, list):
+                setattr(obj, name, materialize_concat(value))
         return pack_result(impl(obj))
 
     def _fake(*flat: Any) -> List[torch.Tensor]:
@@ -1071,9 +1077,9 @@ def _register_autograd_for_op(
         saved = []
         ctx.concatenated_saved_lengths = []
         for value in tensors_to_save_from_setup or ():
-            if isinstance(value, ParameterParts):
-                ctx.concatenated_saved_lengths.append(len(value.parts))
-                saved.extend(value.parts)
+            if isinstance(value, list):
+                ctx.concatenated_saved_lengths.append(len(value))
+                saved.extend(value)
             else:
                 ctx.concatenated_saved_lengths.append(None)
                 saved.append(value)

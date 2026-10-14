@@ -3294,8 +3294,9 @@ def test_concat_input_eager_gradients(disjoint):
 @pytest.mark.parametrize(
     "layout", ["adjacent", "offset", "disjoint", "strided", "singleton", "negative", "conjugate"]
 )
-def test_parameter_parts_storage(layout):
-    from transformer_engine.pytorch.dynamo.parameter_parts import ParameterParts
+def test_concat_storage(layout):
+    from transformer_engine.pytorch.dynamo.concat import materialize_concat
+    from transformer_engine.pytorch.module._common import concat_input
 
     storage = torch.arange(128, device="cuda").view(16, 8)
     if layout == "offset":
@@ -3311,7 +3312,9 @@ def test_parameter_parts_storage(layout):
     parts = list(storage.split([1, storage.shape[0] - 3, 2]))
     if layout == "disjoint":
         parts[1] = parts[1].clone()
-    result = ParameterParts(parts).materialize()
+    deferred = concat_input(parts, defer=True)
+    assert isinstance(deferred, list)
+    result = materialize_concat(deferred)
     torch.testing.assert_close(result, torch.cat(parts), rtol=0, atol=0)
     if layout in ("adjacent", "offset"):
         assert result.data_ptr() == parts[0].data_ptr()
@@ -3321,8 +3324,8 @@ def test_parameter_parts_storage(layout):
 
 @pytest.mark.parametrize("fake", [False, True], ids=["eager", "fake"])
 @pytest.mark.parametrize("mixed_dtype", [False, True])
-def test_parameter_parts_spec(fake, mixed_dtype):
-    from transformer_engine.pytorch.dynamo.parameter_parts import ParameterParts
+def test_concat_spec(fake, mixed_dtype):
+    from transformer_engine.pytorch.dynamo.concat import concat_to_spec
 
     with FakeTensorMode() if fake else contextlib.nullcontext():
         parts = [
@@ -3336,7 +3339,7 @@ def test_parameter_parts_spec(fake, mixed_dtype):
             ),
         ]
         expected = torch.cat(parts)
-        spec = ParameterParts(parts).to_spec()
+        spec = concat_to_spec(parts)
         assert spec.shape == tuple(expected.shape)
         assert spec.dtype == expected.dtype
         assert spec.device == expected.device
@@ -3345,8 +3348,8 @@ def test_parameter_parts_spec(fake, mixed_dtype):
 
 
 @pytest.mark.parametrize("internal", [False, True])
-def test_parameter_parts_rejects_quantized_parts(internal):
-    from transformer_engine.pytorch.dynamo.parameter_parts import ParameterParts
+def test_concat_rejects_quantized_parts(internal):
+    from transformer_engine.pytorch.dynamo.concat import concat_to_spec, materialize_concat
     from transformer_engine.pytorch.module._common import concat_input
 
     quantizer = _current_scaling()
@@ -3354,8 +3357,9 @@ def test_parameter_parts_rejects_quantized_parts(internal):
     tensor = TensorSpec(
         shape=(4, 8), dtype=torch.bfloat16, quantizer=quantizer, device=torch.device("cpu")
     ).create_tensor()
-    with pytest.raises(TypeError, match="non-quantized tensors"):
-        ParameterParts([tensor, tensor])
+    for concatenate in (concat_to_spec, materialize_concat):
+        with pytest.raises(TypeError, match="non-quantized tensors"):
+            concatenate([tensor, tensor])
     assert concat_input([tensor], defer=True) is tensor
 
 

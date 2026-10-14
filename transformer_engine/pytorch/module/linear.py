@@ -83,7 +83,12 @@ from ..quantized_tensor import (
     Quantizer,
     prepare_for_saving,
 )
-from ..dynamo.parameter_parts import ConcatInput, restore_from_func_ctx
+from ..dynamo.concat import (
+    ConcatInput,
+    concat_shape,
+    concat_requires_grad,
+    restore_from_func_ctx,
+)
 from ..dynamo import (
     TensorSpec,
     TensorOrQuantized,
@@ -2404,7 +2409,7 @@ class Linear(TransformerEngineBaseModule):
             weight_tensor, bias_tensor = self._get_weight_and_bias_tensors(
                 defer_concatenation=torch.compiler.is_compiling() and _linear_op is not None
             )
-            weight_requires_grad = weight_tensor.requires_grad
+            weight_requires_grad = concat_requires_grad(weight_tensor)
 
             quantizers = (
                 self._get_quantizers(fp8_output, fp8_grad, is_grad_enabled)
@@ -2489,7 +2494,9 @@ class Linear(TransformerEngineBaseModule):
                 input_requires_grad=inp.requires_grad,
                 weight_requires_grad=weight_requires_grad,
                 bias_requires_grad=(
-                    linear_bias_tensor.requires_grad if linear_bias_tensor is not None else False
+                    concat_requires_grad(linear_bias_tensor)
+                    if linear_bias_tensor is not None
+                    else False
                 ),
                 # quantizers
                 input_quantizer=input_quantizer,
@@ -2557,7 +2564,7 @@ class Linear(TransformerEngineBaseModule):
                     fwd_args.bias = linear_bias_tensor
 
             if use_compiled_op:
-                check_gemm_dims(inp.shape, weight_tensor.shape, self.fp8)
+                check_gemm_dims(inp.shape, concat_shape(weight_tensor), self.fp8)
                 out, new_weight_workspace = _linear_op(fwd_args)
             else:
                 out, new_weight_workspace = _linear_eager(
