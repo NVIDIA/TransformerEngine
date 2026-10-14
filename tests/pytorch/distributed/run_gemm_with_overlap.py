@@ -161,7 +161,7 @@ def _parse_args(argv=None, namespace=None):
         default=None,
         help=(
             "Override the relative-error tolerance used in the numerical check. "
-            "When unset, defaults to 0.125 for FP8/MXFP8 and 0.02 otherwise."
+            "When unset, defaults to 0.125 with a quantized GEMM output and 0.02 otherwise."
         ),
     )
     parser.add_argument(
@@ -170,7 +170,7 @@ def _parse_args(argv=None, namespace=None):
         default=None,
         help=(
             "Override the absolute-error tolerance used in the numerical check. "
-            "When unset, defaults to 0.0625 for FP8/MXFP8 and 0.002 otherwise."
+            "When unset, defaults to 0.0625 with a quantized GEMM output and 0.002 otherwise."
         ),
     )
     parser.add_argument(
@@ -447,7 +447,7 @@ def _main(opts):
             std=opts.std,
         )
 
-    # Gather global tensors and calculate reference result (need these first for Fp8 scales)
+    # Gather global tensors (need these first for FP8 amaxes)
     if opts.bulk_overlap:
         ker_g = torch.transpose(kernel_t, 0, 1)
         inp_g = inp
@@ -472,57 +472,6 @@ def _main(opts):
             # RS Input: (M, K/P) - keep local
             inp_g = inp
 
-    if opts.bulk_overlap:
-        if opts.comm_type == tex.CommOverlapType.AG:
-            ref_g = te.distributed.gather_along_first_dim(bulk_inp, tp_group)[0]
-        else:
-            # First all-gather all the bulk inputs into a list
-            bulk_inp_list = [torch.zeros_like(bulk_inp) for _ in range(tp_size)]
-            dist.all_gather(bulk_inp_list, bulk_inp, tp_group)
-            # Sum the list together for final global result
-            ref_g = torch.stack(bulk_inp_list).sum(dim=0)
-    else:
-        # cuBLASMp always uses split-accumulator internally and does not expose a
-        # control to disable it, so force the reference to match when testing the
-        # cuBLASMp backend; otherwise honor the framework default.
-        ref_use_split_accumulator = True if opts.use_cublasmp else te.module.base._2X_ACC_FPROP
-        # For AG: ker_g=kernel_t=(K/P,N), inp_g=(M,N) -> ref_g=(M,K/P) local chunk
-        # For RS: ker_g=kernel_t=(N,K/P), inp_g=(M,K/P) -> ref_g=(M,N) partial
-        ref_g, *_ = tex.general_gemm(
-            ker_g,
-            inp_g,
-            out_dtype=torch.bfloat16,
-            use_split_accumulator=ref_use_split_accumulator,
-        )
-        if opts.comm_type == tex.CommOverlapType.RS:
-            # Apply non-overlapped reduce-scatter to local reference GEMM output
-            # ref_g is currently (M, N) on each rank (partial result from local GEMM)
-            # All-gather to collect all (M, N) from all ranks
-            ref_rs_list = [torch.zeros_like(ref_g) for _ in range(tp_size)]
-            dist.all_gather(ref_rs_list, ref_g, group=tp_group)
-            # Stack and sum across ranks to get global result
-            ref_global = torch.stack(ref_rs_list, dim=0).sum(dim=0)  # (M, N)
-            # Scatter: each rank keeps its portion (M/P, N)
-            start_idx = tp_rank * (outer_size // tp_size)
-            end_idx = (tp_rank + 1) * (outer_size // tp_size)
-            ref_g = ref_global[start_idx:end_idx, :]  # (M/P, N)
-        if ub_obj2 is not None:
-            inp2_g = torch.nn.functional.gelu(ref_g)  # pylint: disable=not-callable
-            # ker2_g=kernel2_t=(N,K/P), inp2_g=(M,K/P) -> partial (M,N) per rank
-            ref2_partial, *_ = tex.general_gemm(
-                ker2_g,
-                inp2_g,
-                out_dtype=torch.bfloat16,
-                use_split_accumulator=ref_use_split_accumulator,
-            )
-            # Apply non-overlapped reduce-scatter to partial results
-            ref2_rs_list = [torch.zeros_like(ref2_partial) for _ in range(tp_size)]
-            dist.all_gather(ref2_rs_list, ref2_partial, group=tp_group)
-            ref2_global = torch.stack(ref2_rs_list, dim=0).sum(dim=0)  # (M, N) fully reduced
-            start_idx = tp_rank * (outer_size // tp_size)
-            end_idx = (tp_rank + 1) * (outer_size // tp_size)
-            ref2_g = ref2_global[start_idx:end_idx, :]  # (M/P, N)
-
     # Initialize quantizers
     with_quantized_compute = opts.quantization != "none"
     inp_quantizer = None
@@ -544,18 +493,12 @@ def _main(opts):
         fp8_amaxes[0].copy_(inp_amax)
         ker_amax = torch.max(torch.abs(ker_g))
         fp8_amaxes[1].copy_(ker_amax)
-        ref_amax = torch.max(torch.abs(ref_g))
-        fp8_amaxes[2].copy_(ref_amax)
         if opts.bulk_overlap and opts.comm_type == tex.CommOverlapType.RS:
             bulk_amax = torch.max(torch.abs(bulk_inp))
             fp8_amaxes[5].copy_(bulk_amax)
         elif ub_obj2 is not None:
-            inp2_amax = torch.max(torch.abs(inp2_g))
-            fp8_amaxes[3].copy_(inp2_amax)
             ker2_amax = torch.max(torch.abs(ker2_g))
             fp8_amaxes[4].copy_(ker2_amax)
-            ref2_amax = torch.max(torch.abs(ref2_g))
-            fp8_amaxes[5].copy_(ref2_amax)
 
         inp_quantizer = Float8Quantizer(fp8_scales[0].clone(), fp8_amaxes[0].clone(), fp8_dtype)
         ker_quantizer = Float8Quantizer(fp8_scales[1].clone(), fp8_amaxes[1].clone(), fp8_dtype)
@@ -639,17 +582,71 @@ def _main(opts):
                     atol=0.0675,
                 )
 
-        # NVFP4 quantization error would dominate a comparison with the unquantized reference, so
-        # compare with the GEMM of the dequantized operands. This also checks the global scales,
-        # which the GEMM applies through alpha.
-        if opts.quantization == "nvfp4" and opts.check_numerics:
-            inp_dq = inp_fp8.dequantize(dtype=torch.float32)
-            if opts.comm_type == tex.CommOverlapType.AG:
-                inp_dq = te.distributed.gather_along_first_dim(inp_dq, tp_group)[0]
-            ker_dq = kernel_t_fp8.dequantize(dtype=torch.float32)
-            ref_g = torch.matmul(inp_dq.double(), ker_dq.double().t())
-            if opts.comm_type == tex.CommOverlapType.RS:
-                ref_g = te.distributed.reduce_scatter_along_first_dim(ref_g, tp_group)[0]
+    # Calculate the reference result. With quantized compute, it multiplies the dequantized test
+    # operands in high precision, so quantization error cancels out and the check covers only the
+    # comm+GEMM.
+    if with_quantized_compute:
+        inp_g = inp_fp8.dequantize(dtype=torch.float32)
+        if opts.comm_type == tex.CommOverlapType.AG:
+            inp_g = te.distributed.gather_along_first_dim(inp_g, tp_group)[0]
+        ker_g = kernel_t_fp8.dequantize(dtype=torch.float32)
+        if ub_obj2 is not None:
+            ker2_g = kernel2_t_fp8.dequantize(dtype=torch.float32)
+
+    if opts.bulk_overlap:
+        if opts.comm_type == tex.CommOverlapType.AG:
+            ref_g = te.distributed.gather_along_first_dim(bulk_inp, tp_group)[0]
+        else:
+            # First all-gather all the bulk inputs into a list
+            bulk_inp_list = [torch.zeros_like(bulk_inp) for _ in range(tp_size)]
+            dist.all_gather(bulk_inp_list, bulk_inp, tp_group)
+            # Sum the list together for final global result
+            ref_g = torch.stack(bulk_inp_list).sum(dim=0)
+    else:
+        # cuBLASMp always uses split-accumulator internally and does not expose a
+        # control to disable it, so force the reference to match when testing the
+        # cuBLASMp backend; otherwise honor the framework default.
+        ref_use_split_accumulator = True if opts.use_cublasmp else te.module.base._2X_ACC_FPROP
+
+        def _reference_gemm(ker, inp):
+            if with_quantized_compute:
+                return torch.matmul(inp.double(), ker.double().t())
+            out, *_ = tex.general_gemm(
+                ker,
+                inp,
+                out_dtype=torch.bfloat16,
+                use_split_accumulator=ref_use_split_accumulator,
+            )
+            return out
+
+        # For AG: ker_g=kernel_t=(K/P,N), inp_g=(M,N) -> ref_g=(M,K/P) local chunk
+        # For RS: ker_g=kernel_t=(N,K/P), inp_g=(M,K/P) -> ref_g=(M,N) partial
+        ref_g = _reference_gemm(ker_g, inp_g)
+        if opts.comm_type == tex.CommOverlapType.RS:
+            # Apply non-overlapped reduce-scatter to local reference GEMM output
+            # ref_g is currently (M, N) on each rank (partial result from local GEMM)
+            # All-gather to collect all (M, N) from all ranks
+            ref_rs_list = [torch.zeros_like(ref_g) for _ in range(tp_size)]
+            dist.all_gather(ref_rs_list, ref_g, group=tp_group)
+            # Stack and sum across ranks to get global result
+            ref_global = torch.stack(ref_rs_list, dim=0).sum(dim=0)  # (M, N)
+            # Scatter: each rank keeps its portion (M/P, N)
+            start_idx = tp_rank * (outer_size // tp_size)
+            end_idx = (tp_rank + 1) * (outer_size // tp_size)
+            ref_g = ref_global[start_idx:end_idx, :]  # (M/P, N)
+        if ub_obj2 is not None:
+            inp2_g = torch.nn.functional.gelu(ref_g)  # pylint: disable=not-callable
+            if with_quantized_compute:
+                inp2_g = inp2_quantizer(inp2_g.to(torch.bfloat16)).dequantize(dtype=torch.float32)
+            # ker2_g=kernel2_t=(N,K/P), inp2_g=(M,K/P) -> partial (M,N) per rank
+            ref2_partial = _reference_gemm(ker2_g, inp2_g)
+            # Apply non-overlapped reduce-scatter to partial results
+            ref2_rs_list = [torch.zeros_like(ref2_partial) for _ in range(tp_size)]
+            dist.all_gather(ref2_rs_list, ref2_partial, group=tp_group)
+            ref2_global = torch.stack(ref2_rs_list, dim=0).sum(dim=0)  # (M, N) fully reduced
+            start_idx = tp_rank * (outer_size // tp_size)
+            end_idx = (tp_rank + 1) * (outer_size // tp_size)
+            ref2_g = ref2_global[start_idx:end_idx, :]  # (M/P, N)
 
     # Set up comm/compute buffers
     ag_out = None
@@ -901,16 +898,11 @@ def _main(opts):
         m = torch.argmax(diff)
         abs_err = diff[m].item()
         rel_err = abs_err / max(abs(ref_out.flatten()[m].item()), 1e-5)
-        rtol = (
-            opts.rtol
-            if opts.rtol is not None
-            else (0.02 if opts.quantization in ("none", "nvfp4") else 0.125)
-        )
-        atol = (
-            opts.atol
-            if opts.atol is not None
-            else (0.002 if opts.quantization in ("none", "nvfp4") else 0.0625)
-        )
+        # The reference uses the quantized GEMM inputs, but it does not quantize GEMM outputs (FP8
+        # output, or the input of the second GEMM in an AG+RS pair).
+        quantized_output = opts.fp8_output or ub_obj2 is not None
+        rtol = opts.rtol if opts.rtol is not None else (0.125 if quantized_output else 0.02)
+        atol = opts.atol if opts.atol is not None else (0.0625 if quantized_output else 0.002)
         if rel_err > rtol and abs_err > atol:
             numerics_failed = True
             numerics_info = (
