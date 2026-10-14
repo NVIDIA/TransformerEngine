@@ -4,11 +4,50 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <cstdio>
+#include <cstdlib>
+
 #include "../extensions.h"
 #include "common.h"
 #include "pybind.h"
 
 namespace transformer_engine::pytorch {
+
+// Experimental subset of the compact dense route. Both native dense flags are
+// required: that core validates every runtime length and physical offset before
+// execution. A malformed uniform-layout promise traps instead of returning an
+// uninitialized result. This is not enabled for physical gaps or ragged batches.
+static bool cp_uniform_no_zero(const std::vector<size_t> &q, const std::vector<size_t> &k,
+                               const std::vector<size_t> &v, size_t sq, size_t sk,
+                               const at::Tensor &cu_q, const at::Tensor &cu_kv,
+                               const std::optional<at::Tensor> &offset_q,
+                               const std::optional<at::Tensor> &offset_kv, NVTE_QKV_Layout layout,
+                               NVTE_QKV_Format o_format, NVTE_Bias_Type bias, NVTE_Mask_Type mask,
+                               NVTE_Softmax_Type softmax, float dropout,
+                               const std::vector<int64_t> &window) {
+  static const bool enabled = [] {
+    for (const char *name :
+         {"NVTE_CP_EXPERIMENTAL_UNIFORM_NO_ZERO_WIDE", "NVTE_CP_EXPERIMENTAL_UNIFORM_DENSE_FWD",
+          "NVTE_CP_EXPERIMENTAL_UNIFORM_DENSE_BWD"}) {
+      const char *value = std::getenv(name);
+      if (value == nullptr || std::string(value) != "1") return false;
+    }
+    return true;
+  }();
+  if (!enabled || layout != NVTE_THD_THD_THD || o_format != NVTE_THD || bias != NVTE_NO_BIAS ||
+      softmax != NVTE_VANILLA_SOFTMAX || dropout != 0.0f || window.size() != 2 || window[0] != -1 ||
+      !((mask == NVTE_PADDING_CAUSAL_MASK && sk == sq && (window[1] == 0 || window[1] == -1)) ||
+        (mask == NVTE_PADDING_MASK && window[1] == -1)) ||
+      sq < 1024 || sk < 1024 || q.size() != 3 || k.size() != 3 || v.size() != 3 ||
+      cu_q.numel() < 2 || cu_kv.numel() != cu_q.numel() || !offset_q.has_value() ||
+      !offset_kv.has_value() || offset_q->numel() != cu_q.numel() ||
+      offset_kv->numel() != cu_kv.numel()) {
+    return false;
+  }
+  const size_t batch = static_cast<size_t>(cu_q.numel() - 1);
+  return q[0] == batch * sq && k[0] == batch * sk && v[0] == k[0] && q[1] == 4 * k[1] && k[1] > 0 &&
+         v[1] == k[1] && q[2] == 128 && k[2] == 128 && v[2] == 128;
+}
 
 // get the fused attention backend
 std::tuple<NVTE_Fused_Attn_Backend, std::string> get_fused_attn_backend(const py::object &p) {
@@ -163,6 +202,24 @@ std::vector<py::object> fused_attn_fwd(
   auto [te_O, py_O, o_amax_buf] =
       quantizer_helper(o_quantizer, o_shape, fake_dtype_te, true, std::nullopt);
 
+  const bool cp_skip_zero =
+      is_training && !return_max_logit && !page_table_k.has_value() && !page_table_v.has_value() &&
+      s_quantizer.is_none() && o_quantizer.is_none() && !Bias.has_value() &&
+      !SoftmaxOffset.has_value() && fake_dtype == at::kBFloat16 &&
+      te_Q.dtype() == DType::kBFloat16 && te_K.dtype() == DType::kBFloat16 &&
+      te_V.dtype() == DType::kBFloat16 &&
+      cp_uniform_no_zero(q_shape, convertShape(te_K.shape()), v_shape, max_seqlen_q, max_seqlen_kv,
+                         cu_seqlens_q, cu_seqlens_kv, cu_seqlens_q_padded, cu_seqlens_kv_padded,
+                         qkv_layout, o_format, bias_type, attn_mask_type, softmax_type, p_dropout,
+                         window_size);
+  if (cp_skip_zero) {
+    static thread_local bool logged = false;
+    if (!logged) {
+      std::fprintf(stderr, "TE_CP_NO_ZERO_WIDE_FWD\n");
+      logged = true;
+    }
+  }
+
   // construct NVTE tensors
   TensorWrapper te_Bias;
   TensorWrapper te_cu_seqlens_q, te_cu_seqlens_kv;
@@ -175,7 +232,7 @@ std::vector<py::object> fused_attn_fwd(
       te_O.zero_(at::cuda::getCurrentCUDAStream());
     }
   } else if (qkv_type == DType::kBFloat16 || qkv_type == DType::kFloat16) {
-    if (o_format == NVTE_QKV_Format::NVTE_THD) {
+    if (o_format == NVTE_QKV_Format::NVTE_THD && !cp_skip_zero) {
       te_O.zero_(at::cuda::getCurrentCUDAStream());
     }
   } else {
@@ -485,6 +542,23 @@ std::vector<py::object> fused_attn_bwd(
   std::tie(te_dV, py_dV, dv_amax_buf) =
       quantizer_helper(dqkv_quantizer, dV_shape, dqkv_fake_dtype, true, dV);
 
+  const bool cp_skip_zero =
+      do_format == NVTE_THD && dqkv_layout == qkv_layout && s_quantizer.is_none() &&
+      dp_quantizer.is_none() && dqkv_quantizer.is_none() && fake_dtype == at::kBFloat16 &&
+      te_Q.dtype() == DType::kBFloat16 && te_K.dtype() == DType::kBFloat16 &&
+      te_V.dtype() == DType::kBFloat16 && te_O.dtype() == DType::kBFloat16 &&
+      te_dO.dtype() == DType::kBFloat16 &&
+      cp_uniform_no_zero(q_shape, k_shape, v_shape, max_seqlen_q, max_seqlen_kv, cu_seqlens_q,
+                         cu_seqlens_kv, cu_seqlens_q_padded, cu_seqlens_kv_padded, qkv_layout,
+                         o_format, bias_type, attn_mask_type, softmax_type, p_dropout, window_size);
+  if (cp_skip_zero) {
+    static thread_local bool logged = false;
+    if (!logged) {
+      std::fprintf(stderr, "TE_CP_NO_ZERO_WIDE_BWD\n");
+      logged = true;
+    }
+  }
+
   // construct NVTE tensors
   if (detail::IsFloat8Quantizers(dqkv_quantizer.ptr())) {
     // FP8
@@ -506,10 +580,10 @@ std::vector<py::object> fused_attn_bwd(
   } else if (dqkv_quantizer.is_none() ||
              detail::IsFloat8CurrentScalingQuantizers(dqkv_quantizer.ptr()) ||
              detail::IsMXFP8Quantizers(dqkv_quantizer.ptr())) {
-    if (dq_format == NVTE_QKV_Format::NVTE_THD) {
+    if (dq_format == NVTE_QKV_Format::NVTE_THD && !cp_skip_zero) {
       dQ.fill_(0);
     }
-    if (dkv_format == NVTE_QKV_Format::NVTE_THD) {
+    if (dkv_format == NVTE_QKV_Format::NVTE_THD && !cp_skip_zero) {
       dK.fill_(0);
       dV.fill_(0);
     }

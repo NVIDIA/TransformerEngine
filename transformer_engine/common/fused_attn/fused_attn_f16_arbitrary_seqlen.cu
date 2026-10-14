@@ -9,6 +9,9 @@
 #include <cudnn_frontend.h>
 #include <cudnn_frontend_utils.h>
 
+#include <cstdio>
+#include <cstdlib>
+#include <set>
 #include <vector>
 
 #include "../common.h"
@@ -351,6 +354,45 @@ static F16FwdGraphAndTensors create_graph_f16_fwd(const FusedAttnConfig &cfg) {
                         offset_kv_tuple, offset_s_tuple, dropout_tuple);
 }
 
+static FusedAttnConfig cp_uniform_dense_config(const FusedAttnConfig &cfg);
+
+static bool cp_uniform_dense_fwd_enabled(const FusedAttnConfig &cfg) {
+  static const bool enabled = [] {
+    const char *value = std::getenv("NVTE_CP_EXPERIMENTAL_UNIFORM_DENSE_FWD");
+    return value != nullptr && std::string(value) == "1";
+  }();
+  return enabled && cfg.is_training && !cfg.return_max_logit && !cfg.is_paged_kv &&
+         cfg.is_ragged_q && cfg.is_ragged_kv && cfg.uses_ragged_stats && cfg.o_format == NVTE_THD &&
+         cfg.qkv_dtype == kNVTEBFloat16 && cfg.o_dtype == kNVTEBFloat16 && !cfg.is_dropout &&
+         !cfg.is_bias && !cfg.is_alibi && !cfg.is_softmax_offset && cfg.batch_size > 0 &&
+         cfg.max_seqlen_q > 0 && cfg.max_seqlen_kv > 0 &&
+         cfg.num_tokens_q == cfg.batch_size * cfg.max_seqlen_q &&
+         cfg.num_tokens_kv == cfg.batch_size * cfg.max_seqlen_kv &&
+         (cfg.head_dim_qk == 128 || cfg.head_dim_qk == 256) && cfg.head_dim_v == cfg.head_dim_qk;
+}
+
+__global__ void cp_uniform_validate_fwd(const int32_t *cu_q, const int32_t *cu_kv,
+                                        const int32_t *offset_q, const int32_t *offset_kv,
+                                        int64_t batch, int64_t sq, int64_t sk) {
+  const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (i <= batch && (cu_q[i] != i * sq || cu_kv[i] != i * sk || offset_q[i] != i * sq ||
+                     offset_kv[i] != i * sk)) {
+    printf("TE_CP_DENSE_FWD_INVALID_GEOMETRY sequence=%lld\n", static_cast<long long>(i));
+    asm volatile("trap;");
+  }
+}
+
+__global__ void cp_uniform_lse_to_thd(const float *bhs, float *thd, int64_t batch, int64_t heads,
+                                      int64_t sq) {
+  const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (i < batch * heads * sq) {
+    const int64_t h = i % heads;
+    const int64_t s = (i / heads) % sq;
+    const int64_t b = i / (sq * heads);
+    thd[i] = bhs[(b * heads + h) * sq + s];
+  }
+}
+
 void fused_attn_arbitrary_seqlen_fwd_impl(
     const FusedAttnConfig &cfg, void *devPtrQ, void *devPtrK, void *devPtrV, void *devPtrBias,
     void *devPtrSoftmaxOffset, void *devPtrS1, void *devPtrS2, void *devPtrO,
@@ -361,6 +403,49 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
   using namespace transformer_engine;
 
   cfg.check_derived();
+  if (cp_uniform_dense_fwd_enabled(cfg)) {
+    const auto dense = cp_uniform_dense_config(cfg);
+    size_t dense_workspace_size = 0;
+    fused_attn_arbitrary_seqlen_fwd_impl(
+        dense, devPtrQ, devPtrK, devPtrV, devPtrBias, devPtrSoftmaxOffset, devPtrS1, devPtrS2,
+        devPtrO, devPtrDropoutSeed, devPtrDropoutOffset, devPtrCuSeqlensQ, devPtrCuSeqlensKV,
+        devPtrPageTableK, devPtrPageTableV, devPtrSeqOffsetsQ, devPtrSeqOffsetsKV, nullptr,
+        &dense_workspace_size, stream, handle);
+    const size_t lse_offset = alignTo<16>(dense_workspace_size);
+    const size_t lse_elements = cfg.batch_size * cfg.num_attn_heads * cfg.max_seqlen_q;
+    *workspace_size = lse_offset + alignTo<16>(lse_elements * sizeof(float));
+    if (workspace == nullptr) return;
+    NVTE_CHECK(devPtrCuSeqlensQ && devPtrCuSeqlensKV && devPtrSeqOffsetsQ && devPtrSeqOffsetsKV &&
+                   devPtrS1,
+               "Experimental dense forward requires actual lengths, offsets, and stats.");
+    cp_uniform_validate_fwd<<<(cfg.batch_size + 1 + 255) / 256, 256, 0, stream>>>(
+        static_cast<const int32_t *>(devPtrCuSeqlensQ),
+        static_cast<const int32_t *>(devPtrCuSeqlensKV),
+        static_cast<const int32_t *>(devPtrSeqOffsetsQ),
+        static_cast<const int32_t *>(devPtrSeqOffsetsKV), cfg.batch_size, cfg.max_seqlen_q,
+        cfg.max_seqlen_kv);
+    NVTE_CHECK_CUDA(cudaGetLastError());
+    auto *dense_lse = reinterpret_cast<float *>(static_cast<int8_t *>(workspace) + lse_offset);
+    fused_attn_arbitrary_seqlen_fwd_impl(
+        dense, devPtrQ, devPtrK, devPtrV, devPtrBias, devPtrSoftmaxOffset, dense_lse, devPtrS2,
+        devPtrO, devPtrDropoutSeed, devPtrDropoutOffset, devPtrCuSeqlensQ, devPtrCuSeqlensKV,
+        devPtrPageTableK, devPtrPageTableV, devPtrSeqOffsetsQ, devPtrSeqOffsetsKV, workspace,
+        &dense_workspace_size, stream, handle);
+    cp_uniform_lse_to_thd<<<(lse_elements + 255) / 256, 256, 0, stream>>>(
+        dense_lse, static_cast<float *>(devPtrS1), cfg.batch_size, cfg.num_attn_heads,
+        cfg.max_seqlen_q);
+    NVTE_CHECK_CUDA(cudaGetLastError());
+    static thread_local std::set<std::tuple<size_t, size_t, size_t, size_t, size_t>> logged;
+    if (logged
+            .emplace(cfg.batch_size, cfg.max_seqlen_q, cfg.max_seqlen_kv, cfg.num_attn_heads,
+                     cfg.head_dim_qk)
+            .second) {
+      std::fprintf(stderr, "TE_CP_DENSE_FWD b=%zu sq=%zu sk=%zu h=%zu d=%zu workspace=%zu\n",
+                   cfg.batch_size, cfg.max_seqlen_q, cfg.max_seqlen_kv, cfg.num_attn_heads,
+                   cfg.head_dim_qk, *workspace_size);
+    }
+    return;
+  }
   const int64_t b = static_cast<int64_t>(cfg.graph_batch_size_fwd);
   const DType ragged_offset_type = cfg.ragged_offset_type_fwd;
   const int64_t actual_b = static_cast<int64_t>(cfg.batch_size);
@@ -557,6 +642,35 @@ using F16BwdGraphAndTensors =
                std::shared_ptr<fe::graph::Tensor_attributes>,   // dropout_seed
                std::shared_ptr<fe::graph::Tensor_attributes>>;  // dropout_offset
 
+// Benchmark-only uniform causal AllGather admission. The inferred Q origin
+// is checked against every runtime device offset before the dense graph runs.
+static bool cp_ag_uniform_enabled(const FusedAttnConfig &cfg) {
+  static const bool enabled = [] {
+    const char *v = std::getenv("NVTE_CP_EXPERIMENTAL_STRIDED_DENSE_BWD");
+    return v != nullptr && std::string(v) == "1";
+  }();
+  if (!enabled || cfg.batch_size == 0 || cfg.max_seqlen_q == 0 || cfg.max_seqlen_kv == 0 ||
+      cfg.num_tokens_kv % cfg.batch_size != 0)
+    return false;
+  const size_t pq = 2 * cfg.max_seqlen_q;
+  const size_t pk = cfg.num_tokens_kv / cfg.batch_size;
+  const size_t cp = pk / pq;
+  return (cp == 2 || cp == 4 || cp == 8) && pk % pq == 0 &&
+         cfg.num_tokens_q == cfg.batch_size * pq && cfg.max_seqlen_kv <= pk &&
+         cfg.max_seqlen_kv % cfg.max_seqlen_q == 0 && cfg.qkv_dtype == kNVTEBFloat16 &&
+         cfg.o_dtype == kNVTEBFloat16 && cfg.do_dtype == kNVTEBFloat16 &&
+         cfg.dqkv_dtype == kNVTEBFloat16 && (cfg.head_dim_qk == 128 || cfg.head_dim_qk == 256) &&
+         cfg.head_dim_v == cfg.head_dim_qk && !cfg.is_dropout && !cfg.is_bias && !cfg.is_alibi &&
+         !cfg.is_softmax_offset && cfg.window_size_left == -1 && cfg.window_size_right == 0 &&
+         cfg.is_causal_bottom_right;
+}
+
+static bool cp_ag_dense_graph(const FusedAttnConfig &cfg) {
+  return cp_ag_uniform_enabled(cfg) && cfg.qkv_layout == NVTE_BSHD_BSHD_BSHD &&
+         cfg.dqkv_layout == cfg.qkv_layout && cfg.o_format == NVTE_BSHD &&
+         cfg.do_format == NVTE_BSHD && !cfg.is_ragged_q && !cfg.is_ragged_kv;
+}
+
 static F16BwdGraphAndTensors create_graph_f16_bwd(const FusedAttnConfig &cfg) {
   const int64_t b = static_cast<int64_t>(cfg.graph_batch_size_bwd);
   const int64_t s_q = static_cast<int64_t>(cfg.graph_max_seqlen_q);
@@ -614,6 +728,15 @@ static F16BwdGraphAndTensors create_graph_f16_bwd(const FusedAttnConfig &cfg) {
                         NVTE_QKV_Matrix::NVTE_V_Matrix);
   generateMatrixStrides(b, h, s_q, s_kv, d_v, o_stride.data(), qkv_layout,
                         NVTE_QKV_Matrix::NVTE_O_Matrix);
+
+  if (cp_ag_dense_graph(cfg)) {
+    const int64_t pq = cfg.num_tokens_q / cfg.batch_size;
+    const int64_t pk = cfg.num_tokens_kv / cfg.batch_size;
+    q_stride[0] = pq * h * d_qk;
+    o_stride[0] = pq * h * d_v;
+    k_stride[0] = pk * hg * d_qk;
+    v_stride[0] = pk * hg * d_v;
+  }
 
   q = mha_graph->tensor(
       fe::graph::Tensor_attributes().set_name("Q").set_dim({b, h, s_q, d_qk}).set_stride(q_stride));
@@ -816,6 +939,121 @@ static F16BwdGraphAndTensors create_graph_f16_bwd(const FusedAttnConfig &cfg) {
                         offset_s_tuple, dropout_tuple);
 }
 
+// The general cache normalizes token counts away. Here they encode physical
+// pitches, so retain them in a separate cache for the experimental dense graph.
+static auto cp_get_bwd_graph(const FusedAttnConfig &cfg, cudnnHandle_t handle) {
+  if (!cp_ag_dense_graph(cfg)) {
+    return get_graph<Backend::F16, Pass::Bwd, create_graph_f16_bwd>(cfg, handle);
+  }
+  static GraphCache<F16BwdGraphAndTensors> cache;
+  auto key = cfg.make_cache_key(Pass::Bwd);
+  key.num_tokens_q = cfg.num_tokens_q;
+  key.num_tokens_kv = cfg.num_tokens_kv;
+  return detail::cache_graph(cache, key, Backend::F16, Pass::Bwd, handle,
+                             [&] { return create_graph_f16_bwd(cfg); });
+}
+
+// Experimental benchmark-only path. This opt-in is a promise from the caller
+// that every sequence is full-length and physically contiguous. Device checks
+// enforce the promise on every execution, without reading lengths on the host.
+// Keep the public THD auxiliary stats layout unchanged for CP's global O/LSE.
+static bool cp_uniform_dense_bwd_enabled(const FusedAttnConfig &cfg) {
+  static const bool enabled = [] {
+    const char *value = std::getenv("NVTE_CP_EXPERIMENTAL_UNIFORM_DENSE_BWD");
+    return value != nullptr && std::string(value) == "1";
+  }();
+  return enabled && cfg.is_ragged_q && cfg.is_ragged_kv && cfg.uses_ragged_stats &&
+         cfg.o_format == NVTE_THD && cfg.do_format == NVTE_THD &&
+         cfg.dqkv_layout == cfg.qkv_layout && cfg.qkv_dtype == kNVTEBFloat16 &&
+         cfg.o_dtype == kNVTEBFloat16 && cfg.do_dtype == kNVTEBFloat16 &&
+         cfg.dqkv_dtype == kNVTEBFloat16 && !cfg.is_dropout && !cfg.is_bias && !cfg.is_alibi &&
+         !cfg.is_softmax_offset && cfg.batch_size > 0 && cfg.max_seqlen_q > 0 &&
+         cfg.max_seqlen_kv > 0 && cfg.num_tokens_q == cfg.batch_size * cfg.max_seqlen_q &&
+         cfg.num_tokens_kv == cfg.batch_size * cfg.max_seqlen_kv &&
+         (cfg.head_dim_qk == 128 || cfg.head_dim_qk == 256) && cfg.head_dim_v == cfg.head_dim_qk;
+}
+
+__global__ void cp_uniform_lse_to_bhs(const float *thd, float *bhs, const int32_t *cu_q,
+                                      const int32_t *cu_kv, const int32_t *offset_q,
+                                      const int32_t *offset_kv, int64_t batch, int64_t heads,
+                                      int64_t sq, int64_t sk) {
+  const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (i <= batch && (cu_q[i] != i * sq || cu_kv[i] != i * sk || offset_q[i] != i * sq ||
+                     offset_kv[i] != i * sk)) {
+    printf("TE_CP_DENSE_INVALID_GEOMETRY sequence=%lld expected_q=%lld expected_kv=%lld\n",
+           static_cast<long long>(i), static_cast<long long>(i * sq),
+           static_cast<long long>(i * sk));
+    asm volatile("trap;");
+  }
+  if (i < batch * heads * sq) {
+    const int64_t s = i % sq;
+    const int64_t h = (i / sq) % heads;
+    const int64_t b = i / (sq * heads);
+    bhs[i] = thd[(b * sq + s) * heads + h];
+  }
+}
+
+__global__ void cp_ag_lse_to_bhs(const float *thd, float *bhs, const int32_t *cu_q,
+                                 const int32_t *cu_kv, const int32_t *offset_q,
+                                 const int32_t *offset_kv, int64_t batch, int64_t heads, int64_t sq,
+                                 int64_t sk, int64_t pq, int64_t pk, int64_t origin) {
+  const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (i <= batch && (cu_q[i] != i * sq || cu_kv[i] != i * sk ||
+                     offset_q[i] != i * pq + (i < batch ? origin : 0) || offset_kv[i] != i * pk)) {
+    printf("TE_CP_STRIDED_INVALID_GEOMETRY sequence=%lld origin=%lld\n", static_cast<long long>(i),
+           static_cast<long long>(origin));
+    asm volatile("trap;");
+  }
+  if (i < batch * heads * sq) {
+    const int64_t token = i % sq;
+    const int64_t head = (i / sq) % heads;
+    const int64_t seq = i / (sq * heads);
+    bhs[i] = thd[(seq * pq + origin + token) * heads + head];
+  }
+}
+
+static FusedAttnConfig cp_uniform_dense_config(const FusedAttnConfig &cfg) {
+  FusedAttnConfig dense = cfg;
+  switch (cfg.qkv_layout) {
+    case NVTE_T3HD:
+      dense.qkv_layout = NVTE_BS3HD;
+      break;
+    case NVTE_TH3D:
+      dense.qkv_layout = NVTE_BSH3D;
+      break;
+    case NVTE_THD_T2HD:
+      dense.qkv_layout = NVTE_BSHD_BS2HD;
+      break;
+    case NVTE_THD_TH2D:
+      dense.qkv_layout = NVTE_BSHD_BSH2D;
+      break;
+    case NVTE_THD_THD_THD:
+      dense.qkv_layout = NVTE_BSHD_BSHD_BSHD;
+      break;
+    default:
+      NVTE_ERROR("Unsupported layout in experimental uniform dense backward.");
+  }
+  dense.o_format = NVTE_BSHD;
+  dense.do_format = NVTE_BSHD;
+  dense.dqkv_layout = dense.qkv_layout;
+  switch (cfg.attn_mask_type) {
+    case NVTE_PADDING_MASK:
+      dense.attn_mask_type = NVTE_NO_MASK;
+      break;
+    case NVTE_PADDING_CAUSAL_MASK:
+      dense.attn_mask_type = NVTE_CAUSAL_MASK;
+      break;
+    case NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK:
+      dense.attn_mask_type = NVTE_CAUSAL_BOTTOM_RIGHT_MASK;
+      break;
+    default:
+      break;
+  }
+  dense.is_derived = false;
+  dense.derive();
+  return dense;
+}
+
 void fused_attn_arbitrary_seqlen_bwd_impl(
     const FusedAttnConfig &cfg, void *devPtrQ, void *devPtrKTranspose, void *devPtrVTranspose,
     void *devPtrO, void *devPtrSoftmaxStats, void *devPtrBias, void *devPtrSoftmaxOffset,
@@ -827,6 +1065,82 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
   using namespace transformer_engine;
 
   cfg.check_derived();
+  const bool ag_strided = cp_ag_uniform_enabled(cfg) && cfg.is_ragged_q && cfg.is_ragged_kv &&
+                          cfg.uses_ragged_stats && cfg.qkv_layout == NVTE_THD_THD_THD &&
+                          cfg.dqkv_layout == cfg.qkv_layout && cfg.o_format == NVTE_THD &&
+                          cfg.do_format == NVTE_THD;
+  if (cp_uniform_dense_bwd_enabled(cfg) || ag_strided) {
+    const auto dense = cp_uniform_dense_config(cfg);
+    size_t dense_workspace_size = 0;
+    fused_attn_arbitrary_seqlen_bwd_impl(
+        dense, devPtrQ, devPtrKTranspose, devPtrVTranspose, devPtrO, devPtrSoftmaxStats, devPtrBias,
+        devPtrSoftmaxOffset, devPtrdQ, devPtrdK, devPtrdV, devPtrdO, devPtrdBias,
+        devPtrdSoftmaxOffset, devPtrDropoutSeed, devPtrDropoutOffset, devPtrCuSeqlensQ,
+        devPtrCuSeqlensKV, devPtrSeqOffsetsQ, devPtrSeqOffsetsKV, nullptr, &dense_workspace_size,
+        stream, handle);
+    const size_t lse_offset = alignTo<16>(dense_workspace_size);
+    const size_t lse_elements = cfg.batch_size * cfg.num_attn_heads * cfg.max_seqlen_q;
+    *workspace_size = lse_offset + alignTo<16>(lse_elements * sizeof(float));
+    if (workspace == nullptr) return;
+    NVTE_CHECK(devPtrCuSeqlensQ && devPtrCuSeqlensKV && devPtrSeqOffsetsQ && devPtrSeqOffsetsKV,
+               "Experimental dense backward requires actual lengths and physical offsets.");
+    auto *dense_lse = reinterpret_cast<float *>(static_cast<int8_t *>(workspace) + lse_offset);
+    size_t q_origin = 0;
+    if (ag_strided) {
+      const size_t pq = cfg.num_tokens_q / cfg.batch_size;
+      const size_t pk = cfg.num_tokens_kv / cfg.batch_size;
+      q_origin = cfg.max_seqlen_kv > pk / 2 ? cfg.max_seqlen_q : 0;
+      cp_ag_lse_to_bhs<<<(lse_elements + 255) / 256, 256, 0, stream>>>(
+          static_cast<const float *>(devPtrSoftmaxStats), dense_lse,
+          static_cast<const int32_t *>(devPtrCuSeqlensQ),
+          static_cast<const int32_t *>(devPtrCuSeqlensKV),
+          static_cast<const int32_t *>(devPtrSeqOffsetsQ),
+          static_cast<const int32_t *>(devPtrSeqOffsetsKV), cfg.batch_size, cfg.num_attn_heads,
+          cfg.max_seqlen_q, cfg.max_seqlen_kv, pq, pk, q_origin);
+    } else {
+      cp_uniform_lse_to_bhs<<<(lse_elements + 255) / 256, 256, 0, stream>>>(
+          static_cast<const float *>(devPtrSoftmaxStats), dense_lse,
+          static_cast<const int32_t *>(devPtrCuSeqlensQ),
+          static_cast<const int32_t *>(devPtrCuSeqlensKV),
+          static_cast<const int32_t *>(devPtrSeqOffsetsQ),
+          static_cast<const int32_t *>(devPtrSeqOffsetsKV), cfg.batch_size, cfg.num_attn_heads,
+          cfg.max_seqlen_q, cfg.max_seqlen_kv);
+    }
+    NVTE_CHECK_CUDA(cudaGetLastError());
+    static thread_local std::set<std::tuple<size_t, size_t, size_t, size_t, size_t>> logged;
+    if (logged
+            .emplace(cfg.batch_size, cfg.max_seqlen_q, cfg.max_seqlen_kv, cfg.num_attn_heads,
+                     cfg.head_dim_qk)
+            .second) {
+      std::fprintf(stderr,
+                   "TE_CP_DENSE_BWD b=%zu sq=%zu sk=%zu h=%zu hk=%zu d=%zu "
+                   "workspace=%zu lse_bytes=%zu\n",
+                   cfg.batch_size, cfg.max_seqlen_q, cfg.max_seqlen_kv, cfg.num_attn_heads,
+                   cfg.num_gqa_groups, cfg.head_dim_qk, *workspace_size,
+                   lse_elements * sizeof(float));
+    }
+    if (ag_strided) {
+      static thread_local std::set<std::tuple<size_t, size_t, size_t, size_t>> logged_ag;
+      if (logged_ag.emplace(cfg.batch_size, cfg.max_seqlen_q, cfg.max_seqlen_kv, cfg.head_dim_qk)
+              .second) {
+        std::fprintf(
+            stderr, "TE_CP_STRIDED_DENSE_BWD b=%zu sq=%zu sk=%zu origin=%zu workspace=%zu\n",
+            cfg.batch_size, cfg.max_seqlen_q, cfg.max_seqlen_kv, q_origin, *workspace_size);
+      }
+    }
+    auto q_base = [&](void *pointer) -> void * {
+      return static_cast<int8_t *>(pointer) +
+             q_origin * cfg.num_attn_heads * cfg.head_dim_qk * sizeof(__nv_bfloat16);
+    };
+    fused_attn_arbitrary_seqlen_bwd_impl(
+        dense, q_base(devPtrQ), devPtrKTranspose, devPtrVTranspose, q_base(devPtrO), dense_lse,
+        devPtrBias, devPtrSoftmaxOffset, q_base(devPtrdQ), devPtrdK, devPtrdV, q_base(devPtrdO),
+        devPtrdBias, devPtrdSoftmaxOffset, devPtrDropoutSeed, devPtrDropoutOffset, devPtrCuSeqlensQ,
+        devPtrCuSeqlensKV, devPtrSeqOffsetsQ, devPtrSeqOffsetsKV, workspace, &dense_workspace_size,
+        stream, handle);
+    return;
+  }
+
   const int64_t b = static_cast<int64_t>(cfg.graph_batch_size_bwd);
   const DType ragged_offset_type = cfg.ragged_offset_type_bwd;
   const int64_t actual_b = static_cast<int64_t>(cfg.batch_size);
@@ -841,7 +1155,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
   const bool is_ragged_kv = cfg.is_ragged_kv;
 
   try {
-    auto cache_entry = get_graph<Backend::F16, Pass::Bwd, create_graph_f16_bwd>(cfg, handle);
+    auto cache_entry = cp_get_bwd_graph(cfg, handle);
     auto [mha_graph, q, k, v, o, dO, stats, attn_scale, dQ, dK, dV, bias, dBias, softmax_offset,
           d_softmax_offset, seq_q, seq_kv, offset_q, offset_o, offset_k, offset_v, offset_stats,
           dropout_seed, dropout_offset] = cache_entry->graph_and_tensors;

@@ -632,3 +632,29 @@ JAX Custom Calls Control
    # Disable specific primitives
    export NVTE_JAX_CUSTOM_CALLS="GemmPrimitive=false,DBiasQuantizePrimitive=false"
    python train_jax.py
+
+Experimental Context Parallel Attention
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The following switches are disabled by default and are intended for evaluating
+uniform context parallel attention workloads. Set them before starting the process.
+They are experimental implementation controls, not a general ragged-input policy.
+
+* ``NVTE_CP_EXPERIMENTAL_UNIFORM_DENSE_FWD=1`` and
+  ``NVTE_CP_EXPERIMENTAL_UNIFORM_DENSE_BWD=1`` allow eligible BF16 THD calls with
+  head dimension 128 or 256 to use dense cuDNN descriptors without repacking Q/K/V.
+  The caller promises equal sequence lengths and compact physical sequence offsets.
+  Device-side validation checks this promise on every execution. A violation raises
+  a CUDA device error; it does not trigger a host-side fallback. Packed Stats are
+  converted to and from the dense graph's Stats layout on the supplied stream.
+* ``NVTE_CP_EXPERIMENTAL_UNIFORM_NO_ZERO_WIDE=1`` additionally omits redundant
+  output and gradient initialization for the bounded BF16 D128, separate-Q/K/V,
+  GQA4 subset selected in the PyTorch binding. Both dense switches must also be
+  enabled. This switch does not change initialization for general ragged batches.
+* ``NVTE_CP_EXPERIMENTAL_STRIDED_DENSE_BWD=1`` evaluates a separate, bounded
+  AllGather backward path. Its graph cache retains the physical sequence pitches
+  and its device checks validate the expected sequence origins. This path does
+  not imply support for arbitrary strided THD storage.
+
+Declarations outside each switch's eligibility checks retain the existing cuDNN
+path. These experiments do not change context parallel communication.
