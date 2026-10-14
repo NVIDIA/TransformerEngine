@@ -577,11 +577,13 @@ constexpr bool kImplements =
     (IS_ACT == activation_table::Table<activation_table::kKindOf<ParamOP, OP>>::kForward);
 
 // Whether this kernel takes a request of a type in kImplements, with BF16 input, E4M3
-// output and an activation table.  Anything else takes the generic kernel.
+// output and an activation table.  Anything else takes the generic kernel, as does every
+// request with NVTE_MXFP8_REGTILE=0.
 template <bool IS_DACT, bool IS_ACT>
 bool can_use(const Tensor& input, const Tensor* act_input, const Tensor& output, const Tensor& noop,
              bool use_2d_quantization, const activation_table::TableRef& table) {
   if (table.use == activation_table::kNoTable) return false;
+  if (!getenv<bool>("NVTE_MXFP8_REGTILE", true)) return false;
   const auto [rows, cols] = input.flat_2d_dims();
   // Vector widths: 16-byte loads of both inputs, 8-byte stores of both outputs
   // and of each row's scales.
@@ -619,8 +621,8 @@ void quantize(const Tensor& input, const Tensor* act_input, Tensor* output,
         static_cast<int>(cols), static_cast<int>(output->scale_inv.shape[1]),
         static_cast<int>(output->columnwise_scale_inv.shape[1]), table.ptr, stream);
   };
-  constexpr NVTEActivationTableKind kKind = kKindOf<ParamOP, OP>;
-  if constexpr (kKind == kNVTEActivationTableDsilu) {
+  constexpr Kind kKind = kKindOf<ParamOP, OP>;
+  if constexpr (kKind == kDsilu) {
     if (table.use == kExactDsiluTable) {
       run(std::common_type<ExactDsiluTable>{});
       NVTE_CHECK_CUDA(cudaGetLastError());

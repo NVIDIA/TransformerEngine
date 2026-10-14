@@ -1025,7 +1025,7 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                           launch_kernel(std::integral_constant<int, kDefaultTable>{});
                         } else if (activation_lut.use == kExactDsiluTable) {
                           if constexpr (activation_table::kKindOf<ParamOP, OP> ==
-                                        kNVTEActivationTableDsilu) {
+                                        activation_table::kDsilu) {
                             launch_kernel(std::integral_constant<int, kExactDsiluTable>{});
                           } else {
                             NVTE_ERROR("Only dSiLU has an exact activation table.");

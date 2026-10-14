@@ -191,23 +191,6 @@ void nvte_quantize_dbias_dgelu(const NVTETensor input, const NVTETensor act_inpu
                                NVTETensor output, NVTETensor dbias, NVTETensor workspace,
                                cudaStream_t stream);
 
-/*! \brief Same as nvte_quantize_dbias_dgelu, with a quantization config.
- *
- *  With kNVTEQuantizationConfigActivationTable set to a kNVTEActivationTableDgelu table,
- *  BF16 inputs quantized to MXFP8 read the derivative from the table.
- *
- *  \param[in]     input            Input tensor to be cast.
- *  \param[in]     act_input        Activation input tensor.
- *  \param[in,out] output           Output FP8/MXFP8 tensor.
- *  \param[out]    dbias            Result of the reduction of the input along columns.
- *  \param[out]    workspace        Workspace tensor.
- *  \param[in]     quant_config     Quantization configuration.
- *  \param[in]     stream           CUDA stream used for the operation.
- */
-void nvte_quantize_dbias_dgelu_v2(const NVTETensor input, const NVTETensor act_input,
-                                  NVTETensor output, NVTETensor dbias, NVTETensor workspace,
-                                  const NVTEQuantizationConfig quant_config, cudaStream_t stream);
-
 /*! \brief Computes backward of GeLU operation on the grouped input, then casts to FP8/MXFP8.
  *         Additionally, reduces the result of the GeLU backward along columns.
  *         If the scaling mode of the output grouped tensor is set to NVTE_MXFP8_1D_SCALING,
@@ -255,23 +238,6 @@ void nvte_group_quantize_dbias_dgelu(const NVTEGroupedTensor input,
 void nvte_quantize_dbias_dsilu(const NVTETensor input, const NVTETensor act_input,
                                NVTETensor output, NVTETensor dbias, NVTETensor workspace,
                                cudaStream_t stream);
-
-/*! \brief Same as nvte_quantize_dbias_dsilu, with a quantization config.
- *
- *  With kNVTEQuantizationConfigActivationTable set to a kNVTEActivationTableDsilu table,
- *  BF16 inputs quantized to MXFP8 read the derivative from the table.
- *
- *  \param[in]     input            Input tensor to be cast.
- *  \param[in]     act_input        Activation input tensor.
- *  \param[in,out] output           Output FP8/MXFP8 tensor.
- *  \param[out]    dbias            Result of the reduction of the input along columns.
- *  \param[out]    workspace        Workspace tensor.
- *  \param[in]     quant_config     Quantization configuration.
- *  \param[in]     stream           CUDA stream used for the operation.
- */
-void nvte_quantize_dbias_dsilu_v2(const NVTETensor input, const NVTETensor act_input,
-                                  NVTETensor output, NVTETensor dbias, NVTETensor workspace,
-                                  const NVTEQuantizationConfig quant_config, cudaStream_t stream);
 
 /*! \brief Computes backward of SiLU operation on the grouped input, then casts to FP8/MXFP8.
  *         Additionally, reduces the result of the SiLU backward along columns.

@@ -1143,9 +1143,6 @@ void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
     case kNVTEQuantizationConfigMXFP82DQuantization:
       bool_to_uint8(config_.mxfp8_2d_quantization, buf);
       break;
-    case kNVTEQuantizationConfigActivationTable:
-      std::memcpy(buf, &config_.activation_table, attr_size);
-      break;
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
   }
@@ -1215,9 +1212,6 @@ void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
       break;
     case kNVTEQuantizationConfigMXFP82DQuantization:
       uint8_to_bool(buf, config_.mxfp8_2d_quantization);
-      break;
-    case kNVTEQuantizationConfigActivationTable:
-      std::memcpy(&config_.activation_table, buf, attr_size);
       break;
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");

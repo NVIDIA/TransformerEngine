@@ -13,25 +13,11 @@ void nvte_gelu(const NVTETensor input, NVTETensor output, cudaStream_t stream) {
   act_fn<fp32, Empty, gelu<fp32, fp32>>(input, output, stream);
 }
 
-void nvte_gelu_v2(const NVTETensor input, NVTETensor output,
-                  const NVTEQuantizationConfig quant_config, cudaStream_t stream) {
-  NVTE_API_CALL(nvte_gelu_v2);
-  using namespace transformer_engine;
-  act_fn<fp32, Empty, gelu<fp32, fp32>>(input, output, stream, quant_config);
-}
-
 void nvte_dgelu(const NVTETensor grad, const NVTETensor input, NVTETensor output,
                 cudaStream_t stream) {
   NVTE_API_CALL(nvte_dgelu);
   using namespace transformer_engine;
   dact_fn<fp32, Empty, dgelu<fp32, fp32>>(grad, input, output, stream);
-}
-
-void nvte_dgelu_v2(const NVTETensor grad, const NVTETensor input, NVTETensor output,
-                   const NVTEQuantizationConfig quant_config, cudaStream_t stream) {
-  NVTE_API_CALL(nvte_dgelu_v2);
-  using namespace transformer_engine;
-  dact_fn<fp32, Empty, dgelu<fp32, fp32>>(grad, input, output, stream, quant_config);
 }
 
 void nvte_geglu(const NVTETensor input, NVTETensor output, cudaStream_t stream) {

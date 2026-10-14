@@ -104,26 +104,18 @@ Error_Type ActLuFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type scal
   }
 
   switch (act_type) {
-    case NVTE_Activation_Type::GELU: {
-      QuantizationConfigWrapper config;
-      config.set_activation_table(activation_table_for(
-          act_type, /*derivative=*/false, static_cast<DType>(in_dtype), scaling_mode, stream));
-      nvte_gelu_v2(input_tensor.data(), output_tensor.data(), config, stream);
+    case NVTE_Activation_Type::GELU:
+      nvte_gelu(input_tensor.data(), output_tensor.data(), stream);
       break;
-    }
     case NVTE_Activation_Type::GEGLU:
       nvte_geglu(input_tensor.data(), output_tensor.data(), stream);
       break;
     case NVTE_Activation_Type::GLU:
       nvte_glu(input_tensor.data(), output_tensor.data(), stream);
       break;
-    case NVTE_Activation_Type::SILU: {
-      QuantizationConfigWrapper config;
-      config.set_activation_table(activation_table_for(
-          act_type, /*derivative=*/false, static_cast<DType>(in_dtype), scaling_mode, stream));
-      nvte_silu_v2(input_tensor.data(), output_tensor.data(), config, stream);
+    case NVTE_Activation_Type::SILU:
+      nvte_silu(input_tensor.data(), output_tensor.data(), stream);
       break;
-    }
     case NVTE_Activation_Type::SWIGLU:
       nvte_swiglu(input_tensor.data(), output_tensor.data(), stream);
       break;
@@ -182,12 +174,6 @@ Error_Type ActLuInitializeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer
                               int64_t act_enum, JAXX_Scaling_Mode scaling_mode,
                               JAXX_Quantize_Layout quantize_layout, ActivationConfig act_params,
                               bool output_amax_when_no_scaling) {
-  // Build the activation table outside the warm-up capture below, so that execution only
-  // reads it.
-  activation_table_for(
-      static_cast<NVTE_Activation_Type>(act_enum), /*derivative=*/false,
-      static_cast<DType>(convert_ffi_datatype_to_te_dtype(input_buf.element_type())), scaling_mode,
-      stream);
   return wrapInStreamCapture(std::function(ActLuFFI), stream, input_buf, scale_buf, amax_buf,
                              output_buf, colwise_output_buf, scale_inv_buf, colwise_scale_inv_buf,
                              updated_amax_buf, act_enum, scaling_mode, quantize_layout, act_params,
@@ -395,20 +381,17 @@ Error_Type DActLuDBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf,
                is_quantize_2x2x(quantize_layout) && act_len == 2),
              "TE/common does not support delayed scaling for 2x with gated activations.");
 
-  QuantizationConfigWrapper table_config;
-  table_config.set_activation_table(activation_table_for(
-      act_type, /*derivative=*/true, static_cast<DType>(in_dtype), scaling_mode, stream));
   if (is_dbias) {
     switch (act_type) {
       case NVTE_Activation_Type::GELU:
-        nvte_quantize_dbias_dgelu_v2(input_tensor.data(), act_input_tensor.data(),
-                                     output_tensor.data(), dbias_tensor.data(),
-                                     workspace_tensor.data(), table_config, stream);
+        nvte_quantize_dbias_dgelu(input_tensor.data(), act_input_tensor.data(),
+                                  output_tensor.data(), dbias_tensor.data(),
+                                  workspace_tensor.data(), stream);
         break;
       case NVTE_Activation_Type::SILU:
-        nvte_quantize_dbias_dsilu_v2(input_tensor.data(), act_input_tensor.data(),
-                                     output_tensor.data(), dbias_tensor.data(),
-                                     workspace_tensor.data(), table_config, stream);
+        nvte_quantize_dbias_dsilu(input_tensor.data(), act_input_tensor.data(),
+                                  output_tensor.data(), dbias_tensor.data(),
+                                  workspace_tensor.data(), stream);
         break;
       case NVTE_Activation_Type::RELU:
         nvte_quantize_dbias_drelu(input_tensor.data(), act_input_tensor.data(),
@@ -432,12 +415,10 @@ Error_Type DActLuDBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf,
   } else {
     switch (act_type) {
       case NVTE_Activation_Type::GELU:
-        nvte_dgelu_v2(input_tensor.data(), act_input_tensor.data(), output_tensor.data(),
-                      table_config, stream);
+        nvte_dgelu(input_tensor.data(), act_input_tensor.data(), output_tensor.data(), stream);
         break;
       case NVTE_Activation_Type::SILU:
-        nvte_dsilu_v2(input_tensor.data(), act_input_tensor.data(), output_tensor.data(),
-                      table_config, stream);
+        nvte_dsilu(input_tensor.data(), act_input_tensor.data(), output_tensor.data(), stream);
         break;
       case NVTE_Activation_Type::RELU:
         nvte_drelu(input_tensor.data(), act_input_tensor.data(), output_tensor.data(), stream);
@@ -508,12 +489,6 @@ Error_Type DActLuDBiasQuantizeInitializeFFI(
     Result_Type dbias_buf, Result_Type workspace_buf, JAXX_Scaling_Mode scaling_mode,
     int64_t act_enum, JAXX_Quantize_Layout quantize_layout, bool is_dbias,
     ActivationConfig act_params, bool output_amax_when_no_scaling) {
-  // Build the activation table outside the warm-up capture below, so that execution only
-  // reads it.
-  activation_table_for(
-      static_cast<NVTE_Activation_Type>(act_enum), /*derivative=*/true,
-      static_cast<DType>(convert_ffi_datatype_to_te_dtype(input_buf.element_type())), scaling_mode,
-      stream);
   return wrapInStreamCapture(std::function(DActLuDBiasQuantizeFFI), stream, input_buf,
                              act_input_buf, scale_buf, amax_buf, output_buf, colwise_output_buf,
                              scale_inv_buf, colwise_scale_inv_buf, updated_amax_buf, dbias_buf,

@@ -247,13 +247,11 @@ py::object dactivation_helper(const at::Tensor& grad_output, const at::Tensor& i
 
 /* GELU and variants */
 py::object gelu(const at::Tensor& input, py::handle quantizer) {
-  return activation_helper<activation_with_table<kNVTEActivationTableGelu, nvte_gelu_v2>, nullptr>(
-      input, quantizer);
+  return activation_helper<nvte_gelu, nullptr>(input, quantizer);
 }
 
 py::object dgelu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer) {
-  return dactivation_helper<dactivation_with_table<kNVTEActivationTableDgelu, nvte_dgelu_v2>,
-                            nullptr>(grad, input, quantizer);
+  return dactivation_helper<nvte_dgelu, nullptr>(grad, input, quantizer);
 }
 
 py::object glu(const at::Tensor& input, py::handle quantizer) {
@@ -322,13 +320,11 @@ py::object dsreglu(const at::Tensor& grad, const at::Tensor& input, py::handle q
 }
 /* Silu and variants */
 py::object silu(const at::Tensor& input, py::handle quantizer) {
-  return activation_helper<activation_with_table<kNVTEActivationTableSilu, nvte_silu_v2>, nullptr>(
-      input, quantizer);
+  return activation_helper<nvte_silu, nullptr>(input, quantizer);
 }
 
 py::object dsilu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer) {
-  return dactivation_helper<dactivation_with_table<kNVTEActivationTableDsilu, nvte_dsilu_v2>,
-                            nullptr>(grad, input, quantizer);
+  return dactivation_helper<nvte_dsilu, nullptr>(grad, input, quantizer);
 }
 
 py::object swiglu(const at::Tensor& input, py::handle quantizer) {

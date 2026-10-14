@@ -7,10 +7,12 @@
 // Builds the activation tables from the scalar util/math.h functions. This file must not be
 // compiled with --use_fast_math: the tables have to hold exactly what util/math.h computes.
 
-#include <transformer_engine/activation.h>
+#include <memory>
+#include <mutex>
 
 #include "../common.h"
 #include "../util/activation_table.cuh"
+#include "../util/cuda_runtime.h"
 
 namespace transformer_engine {
 namespace activation_table {
@@ -65,46 +67,80 @@ void build(void *table, cudaStream_t stream) {
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
-}  // namespace
-}  // namespace activation_table
-}  // namespace transformer_engine
-
-size_t nvte_activation_table_size(NVTEActivationTableKind kind) {
-  NVTE_API_CALL(nvte_activation_table_size);
-  const size_t bytes = transformer_engine::activation_table::built_table_bytes(kind);
-  NVTE_CHECK(bytes != 0, "Invalid NVTEActivationTableKind (got ", static_cast<int>(kind), ")");
-  return bytes;
-}
-
-void nvte_build_activation_table(NVTEActivationTableKind kind, NVTETensor table,
-                                 cudaStream_t stream) {
-  NVTE_API_CALL(nvte_build_activation_table);
-  using namespace transformer_engine;
-  using namespace transformer_engine::activation_table;
-  const TableRef ref = checked_table(*convertNVTETensorCheck(table), kind);
-  NVTE_CHECK((ref.use == kExactDsiluTable) ==
-                 (kind == kNVTEActivationTableDsilu && use_exact_dsilu_table()),
-             "Activation table size does not match NVTE_ACTIVATION_TABLE_EXACT_DSILU; allocate "
-             "nvte_activation_table_size(kind) bytes.");
-  void *ptr = const_cast<void *>(ref.ptr);
+void build(const Kind kind, void *table, cudaStream_t stream) {
   switch (kind) {
-    case kNVTEActivationTableGelu:
-      build<Table<kNVTEActivationTableGelu>>(ptr, stream);
+    case kGelu:
+      build<Table<kGelu>>(table, stream);
       break;
-    case kNVTEActivationTableSilu:
-      build<Table<kNVTEActivationTableSilu>>(ptr, stream);
+    case kSilu:
+      build<Table<kSilu>>(table, stream);
       break;
-    case kNVTEActivationTableDgelu:
-      build<Table<kNVTEActivationTableDgelu>>(ptr, stream);
+    case kDgelu:
+      build<Table<kDgelu>>(table, stream);
       break;
-    case kNVTEActivationTableDsilu:
-      if (ref.use == kExactDsiluTable) {
-        build<ExactDsiluTable>(ptr, stream);
+    case kDsilu:
+      if (use_exact_dsilu_table()) {
+        build<ExactDsiluTable>(table, stream);
       } else {
-        build<Table<kNVTEActivationTableDsilu>>(ptr, stream);
+        build<Table<kDsilu>>(table, stream);
       }
       break;
     default:
-      NVTE_ERROR("Invalid NVTEActivationTableKind (got ", static_cast<int>(kind), ")");
+      NVTE_ERROR("Invalid activation table kind (got ", static_cast<int>(kind), ")");
   }
 }
+
+// Sets this thread's stream capture mode, and restores the previous one when destroyed.
+class CaptureModeGuard {
+ public:
+  explicit CaptureModeGuard(cudaStreamCaptureMode mode) : mode_(mode) {
+    NVTE_CHECK_CUDA(cudaThreadExchangeStreamCaptureMode(&mode_));
+  }
+  ~CaptureModeGuard() { cudaThreadExchangeStreamCaptureMode(&mode_); }
+  CaptureModeGuard(const CaptureModeGuard &) = delete;
+  CaptureModeGuard &operator=(const CaptureModeGuard &) = delete;
+
+ private:
+  cudaStreamCaptureMode mode_;
+};
+
+// Allocates and fills a table on the current device, synchronously.
+void *allocate_and_build(const Kind kind) {
+  // The caller's stream, or another thread's, may be capturing a CUDA graph. In relaxed mode
+  // this thread may still allocate, and a private stream keeps the build out of the capture.
+  // The table is complete when this returns, so captured kernels can read it on replay.
+  CaptureModeGuard relaxed(cudaStreamCaptureModeRelaxed);
+  void *table = nullptr;
+  NVTE_CHECK_CUDA(cudaMalloc(&table, built_table_bytes(kind)));
+  cudaStream_t stream;
+  NVTE_CHECK_CUDA(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+  build(kind, table, stream);
+  NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
+  NVTE_CHECK_CUDA(cudaStreamDestroy(stream));
+  return table;
+}
+
+// One set of tables per device. Tables are never freed: freeing them from a static destructor
+// could run after the CUDA runtime has shut down.
+struct DeviceTables {
+  std::once_flag built[kNumKinds];
+  void *table[kNumKinds] = {};
+};
+
+}  // namespace
+
+TableRef device_table(const Kind kind) {
+  NVTE_CHECK(kind >= 0 && kind < kNumKinds, "Invalid activation table kind (got ",
+             static_cast<int>(kind), ")");
+  static const int num_devices = cuda::num_devices();
+  static const std::unique_ptr<DeviceTables[]> tables(new DeviceTables[num_devices]);
+  const int device = cuda::current_device();
+  NVTE_CHECK(device >= 0 && device < num_devices, "Invalid device (got ", device, ")");
+  DeviceTables &mine = tables[device];
+  std::call_once(mine.built[kind], [&] { mine.table[kind] = allocate_and_build(kind); });
+  const bool exact = kind == kDsilu && use_exact_dsilu_table();
+  return {mine.table[kind], exact ? kExactDsiluTable : kDefaultTable};
+}
+
+}  // namespace activation_table
+}  // namespace transformer_engine

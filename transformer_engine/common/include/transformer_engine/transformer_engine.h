@@ -436,11 +436,6 @@ enum NVTEQuantizationConfigAttribute {
   kNVTEQuantizationConfigNVFP44Over6ErrUseFastMath = 9,
   /*! Whether to use 2D block scaling for MXFP8 */
   kNVTEQuantizationConfigMXFP82DQuantization = 10,
-  /*! Activation lookup table (NVTETensor), built with nvte_build_activation_table for the
-   *  activation being computed. Read by the _v2 activation functions for BF16 inputs
-   *  quantized to MXFP8, and ignored otherwise. See NVTEActivationTableKind.
-   */
-  kNVTEQuantizationConfigActivationTable = 11,
   kNVTEQuantizationConfigNumAttributes
 };
 
@@ -1489,12 +1484,6 @@ class QuantizationConfigWrapper {
     const auto val = static_cast<uint8_t>(mxfp8_2d_quantization);
     nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigMXFP82DQuantization,
                                            &val, sizeof(val));
-  }
-
-  /*! \brief Set activation lookup table */
-  void set_activation_table(NVTETensor activation_table) {
-    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigActivationTable,
-                                           &activation_table, sizeof(NVTETensor));
   }
 
   /*! \brief Set whether to use stochastic rounding */

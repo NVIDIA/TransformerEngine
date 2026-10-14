@@ -11,10 +11,10 @@
 // specialized cast kernels). dbias is compared against a host sum in the order the kernel
 // accumulates it.
 //
-// Without an activation table the activation is the scalar util/math.h function. With one, BF16
-// inputs follow the table specification (see NVTEActivationTableKind): -inf gives -0 in the
-// forward functions, and the derivatives below the table window are the linear Taylor term.
-// Other input types ignore the table.
+// With NVTE_ACTIVATION_TABLE=0 the activation is the scalar util/math.h function. With the tables
+// (the default), BF16 inputs follow the table specification (see util/activation_table.cuh): -inf
+// gives -0 in the forward functions, and the derivatives below the table window are the linear
+// Taylor term. Other input types do not use the tables.
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -28,8 +28,8 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
-#include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <type_traits>
 #include <vector>
@@ -241,31 +241,26 @@ std::vector<float> reference_dbias(const std::vector<float> &z, const size_t row
   return dbias;
 }
 
-NVTEActivationTableKind table_kind(const Mode m) {
-  switch (m) {
-    case Mode::GeLU:
-      return kNVTEActivationTableGelu;
-    case Mode::SiLU:
-      return kNVTEActivationTableSilu;
-    case Mode::DGeLU:
-    case Mode::DBiasDGeLU:
-      return kNVTEActivationTableDgelu;
-    default:
-      return kNVTEActivationTableDsilu;
+// Sets an environment variable for one scope, and restores its previous value afterwards.
+class ScopedEnv {
+ public:
+  ScopedEnv(const char *name, const char *value) : name_(name) {
+    const char *old = std::getenv(name);
+    if (old != nullptr) old_ = old;
+    setenv(name, value, 1);
   }
-}
+  ~ScopedEnv() {
+    if (old_) {
+      setenv(name_, old_->c_str(), 1);
+    } else {
+      unsetenv(name_);
+    }
+  }
 
-// Each table is built once for the whole test program, as a framework would per device.
-NVTETensor activation_table(const NVTEActivationTableKind kind) {
-  static std::map<NVTEActivationTableKind, std::unique_ptr<Tensor>> tables;
-  auto &table = tables[kind];
-  if (!table) {
-    const size_t bytes = nvte_activation_table_size(kind);
-    table = std::make_unique<Tensor>("table", std::vector<size_t>{bytes}, DType::kByte);
-    nvte_build_activation_table(kind, table->data(), 0);
-  }
-  return table->data();
-}
+ private:
+  const char *name_;
+  std::optional<std::string> old_;
+};
 
 size_t count_byte_mismatches(const uint8_t *a, const uint8_t *b, const size_t n) {
   size_t m = 0;
@@ -316,31 +311,8 @@ void run_case(const Mode mode, const Fill fill, const size_t rows, const size_t 
   out.set_with_gemm_swizzled_scales(swizzled);
   Tensor dbias("dbias", std::vector<size_t>{cols}, itype);
   Tensor workspace;
-  if (use_table) {
-    QuantizationConfigWrapper config;
-    config.set_activation_table(activation_table(table_kind(mode)));
-    switch (mode) {
-      case Mode::GeLU:
-        nvte_gelu_v2(x.data(), out.data(), config, 0);
-        break;
-      case Mode::SiLU:
-        nvte_silu_v2(x.data(), out.data(), config, 0);
-        break;
-      case Mode::DGeLU:
-        nvte_dgelu_v2(grad.data(), x.data(), out.data(), config, 0);
-        break;
-      case Mode::DSiLU:
-        nvte_dsilu_v2(grad.data(), x.data(), out.data(), config, 0);
-        break;
-      default: {
-        auto fn = mode == Mode::DBiasDGeLU ? &nvte_quantize_dbias_dgelu_v2
-                                           : &nvte_quantize_dbias_dsilu_v2;
-        fn(grad.data(), x.data(), out.data(), dbias.data(), workspace.data(), config, 0);
-        workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
-        fn(grad.data(), x.data(), out.data(), dbias.data(), workspace.data(), config, 0);
-      }
-    }
-  } else {
+  {
+    const ScopedEnv tables("NVTE_ACTIVATION_TABLE", use_table ? "1" : "0");
     switch (mode) {
       case Mode::GeLU:
         nvte_gelu(x.data(), out.data(), 0);
@@ -409,7 +381,7 @@ void run_case(const Mode mode, const Fill fill, const size_t rows, const size_t 
 
 // With a table, the register-resident kernel and the generic kernel must write the same bytes.
 // The first call takes the default dispatch, which picks the register-resident kernel for these
-// shapes; a noop tensor holding 0 keeps the second call on the generic kernel without skipping it.
+// shapes; NVTE_MXFP8_REGTILE=0 keeps the second call on the generic kernel.
 void run_regtile_vs_generic(const Mode mode, const Fill fill, const size_t rows, const size_t cols,
                             const bool swizzled) {
   const std::vector<size_t> shape{rows, cols};
@@ -417,28 +389,25 @@ void run_regtile_vs_generic(const Mode mode, const Fill fill, const size_t rows,
   Tensor x("x", shape, DType::kBFloat16);
   Tensor grad("grad", shape, DType::kBFloat16);
   fill_inputs<bf16>(fill, &x, &grad);
-  Tensor noop("noop", std::vector<size_t>{1}, DType::kFloat32);
-
   Tensor outs[2] = {
       Tensor("default", shape, DType::kFloat8E4M3, true, true, NVTE_MXFP8_1D_SCALING),
       Tensor("generic", shape, DType::kFloat8E4M3, true, true, NVTE_MXFP8_1D_SCALING)};
   for (int i = 0; i < 2; ++i) {
     outs[i].set_with_gemm_swizzled_scales(swizzled);
-    QuantizationConfigWrapper config;
-    config.set_activation_table(activation_table(table_kind(mode)));
-    if (i == 1) config.set_noop_tensor(noop.data());
+    const ScopedEnv tables("NVTE_ACTIVATION_TABLE", "1");
+    const ScopedEnv regtile("NVTE_MXFP8_REGTILE", i == 0 ? "1" : "0");
     switch (mode) {
       case Mode::GeLU:
-        nvte_gelu_v2(x.data(), outs[i].data(), config, 0);
+        nvte_gelu(x.data(), outs[i].data(), 0);
         break;
       case Mode::SiLU:
-        nvte_silu_v2(x.data(), outs[i].data(), config, 0);
+        nvte_silu(x.data(), outs[i].data(), 0);
         break;
       case Mode::DGeLU:
-        nvte_dgelu_v2(grad.data(), x.data(), outs[i].data(), config, 0);
+        nvte_dgelu(grad.data(), x.data(), outs[i].data(), 0);
         break;
       default:
-        nvte_dsilu_v2(grad.data(), x.data(), outs[i].data(), config, 0);
+        nvte_dsilu(grad.data(), x.data(), outs[i].data(), 0);
         break;
     }
   }

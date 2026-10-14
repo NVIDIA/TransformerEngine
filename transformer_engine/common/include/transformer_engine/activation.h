@@ -43,50 +43,6 @@ enum class NVTE_Activation_Type {
   CLAMPED_SWIGLU
 };
 
-/*! \enum NVTEActivationTableKind
- *  \brief Activation that can be read from a lookup table.
- *
- *  A BF16 input takes only 2^16 values, so GeLU, SiLU and their derivatives of BF16 inputs
- *  can be read from a small table instead of computed. Build each table once per device
- *  with nvte_build_activation_table and pass it to the _v2 activation functions through
- *  kNVTEQuantizationConfigActivationTable. The table is read for BF16 inputs quantized to
- *  MXFP8; every other input type and recipe ignores it.
- *
- *  Against util/math.h, table results differ only as follows:
- *  - GeLU and SiLU of -inf are -0 (the formulas give NaN).
- *  - For |x| < 2^-12 (dGeLU) or 2^-9 (dSiLU), the derivative is its linear Taylor term
- *    0.5 + c*x rounded once, within 1 ulp (dGeLU) or 2 ulp (dSiLU) of util/math.h.
- *    With NVTE_ACTIVATION_TABLE_EXACT_DSILU=1 (experimental), the dSiLU table is 32 KB and
- *    matches util/math.h for every input.
- */
-enum NVTEActivationTableKind {
-  kNVTEActivationTableGelu = 0,  /*!< GeLU (tanh form), BF16 entries */
-  kNVTEActivationTableSilu = 1,  /*!< SiLU, BF16 entries */
-  kNVTEActivationTableDgelu = 2, /*!< GeLU derivative (tanh form), FP32 entries */
-  kNVTEActivationTableDsilu = 3, /*!< SiLU derivative, FP32 entries */
-};
-
-/*! \brief Size in bytes of an activation table.
- *
- *  \param[in]     kind      Activation the table holds.
- *  \return Size of the table in bytes. Each kind has a different size. The dSiLU size
- *          depends on NVTE_ACTIVATION_TABLE_EXACT_DSILU.
- */
-size_t nvte_activation_table_size(NVTEActivationTableKind kind);
-
-/*! \brief Fill an activation table on the current device.
- *
- *  The table is computed from the scalar activation functions that TE uses when no table
- *  is given. Build it once per device and reuse it for every call; it does not depend on
- *  the input.
- *
- *  \param[in]     kind      Activation the table holds.
- *  \param[in,out] table     Byte tensor of nvte_activation_table_size(kind) elements.
- *  \param[in]     stream    CUDA stream used for the operation.
- */
-void nvte_build_activation_table(NVTEActivationTableKind kind, NVTETensor table,
-                                 cudaStream_t stream);
-
 /*! \brief Computes the GeLU activation of the input.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
  *         the block quantization (MXFP8) of the specified shape of the block will be used.
@@ -96,20 +52,6 @@ void nvte_build_activation_table(NVTEActivationTableKind kind, NVTETensor table,
  *  \param[in]     stream    CUDA stream used for the operation.
  */
 void nvte_gelu(const NVTETensor input, NVTETensor output, cudaStream_t stream);
-
-/*! \brief Computes the GeLU activation of the input, with a quantization config.
- *
- *  Same as nvte_gelu. With kNVTEQuantizationConfigActivationTable set to a
- *  kNVTEActivationTableGelu table, BF16 inputs quantized to MXFP8 read the activation
- *  from the table.
- *
- *  \param[in]     input         Input tensor for activation.
- *  \param[in,out] output        Output tensor.
- *  \param[in]     quant_config  Quantization configuration.
- *  \param[in]     stream        CUDA stream used for the operation.
- */
-void nvte_gelu_v2(const NVTETensor input, NVTETensor output,
-                  const NVTEQuantizationConfig quant_config, cudaStream_t stream);
 
 /*! \brief Computes the GeLU activation of the grouped input.
  *         If the scaling mode of the grouped output tensor is set to NVTE_MXFP8_1D_SCALING,
@@ -131,20 +73,6 @@ void nvte_group_gelu(const NVTEGroupedTensor input, NVTEGroupedTensor output, cu
  *  \param[in]     stream    CUDA stream used for the operation.
  */
 void nvte_silu(const NVTETensor input, NVTETensor output, cudaStream_t stream);
-
-/*! \brief Computes the SiLU activation of the input, with a quantization config.
- *
- *  Same as nvte_silu. With kNVTEQuantizationConfigActivationTable set to a
- *  kNVTEActivationTableSilu table, BF16 inputs quantized to MXFP8 read the activation
- *  from the table.
- *
- *  \param[in]     input         Input tensor for activation.
- *  \param[in,out] output        Output tensor.
- *  \param[in]     quant_config  Quantization configuration.
- *  \param[in]     stream        CUDA stream used for the operation.
- */
-void nvte_silu_v2(const NVTETensor input, NVTETensor output,
-                  const NVTEQuantizationConfig quant_config, cudaStream_t stream);
 
 /*! \brief Computes the SiLU activation of the grouped input.
  *         If the scaling mode of the grouped output tensor is set to NVTE_MXFP8_1D_SCALING,
@@ -277,21 +205,6 @@ void nvte_group_srelu(const NVTEGroupedTensor input, NVTEGroupedTensor output, c
 void nvte_dgelu(const NVTETensor grad, const NVTETensor input, NVTETensor output,
                 cudaStream_t stream);
 
-/*! \brief Computes the GeLU activation gradient, with a quantization config.
- *
- *  Same as nvte_dgelu. With kNVTEQuantizationConfigActivationTable set to a
- *  kNVTEActivationTableDgelu table, BF16 inputs quantized to MXFP8 read the derivative
- *  from the table.
- *
- *  \param[in]     grad          Incoming gradient.
- *  \param[in]     input         Input tensor for activation.
- *  \param[in,out] output        Output tensor.
- *  \param[in]     quant_config  Quantization configuration.
- *  \param[in]     stream        CUDA stream used for the operation.
- */
-void nvte_dgelu_v2(const NVTETensor grad, const NVTETensor input, NVTETensor output,
-                   const NVTEQuantizationConfig quant_config, cudaStream_t stream);
-
 /*! \brief Computes the GeLU activation gradient of the grouped input.
  *         If the scaling mode of the output grouped tensor is set to NVTE_MXFP8_1D_SCALING,
  *         the block quantization (MXFP8) of the specified shape of the block will be used.
@@ -316,21 +229,6 @@ void nvte_group_dgelu(const NVTEGroupedTensor grad, const NVTEGroupedTensor inpu
  */
 void nvte_dsilu(const NVTETensor grad, const NVTETensor input, NVTETensor output,
                 cudaStream_t stream);
-
-/*! \brief Computes the SiLU activation gradient, with a quantization config.
- *
- *  Same as nvte_dsilu. With kNVTEQuantizationConfigActivationTable set to a
- *  kNVTEActivationTableDsilu table, BF16 inputs quantized to MXFP8 read the derivative
- *  from the table.
- *
- *  \param[in]     grad          Incoming gradient.
- *  \param[in]     input         Input tensor for activation.
- *  \param[in,out] output        Output tensor.
- *  \param[in]     quant_config  Quantization configuration.
- *  \param[in]     stream        CUDA stream used for the operation.
- */
-void nvte_dsilu_v2(const NVTETensor grad, const NVTETensor input, NVTETensor output,
-                   const NVTEQuantizationConfig quant_config, cudaStream_t stream);
 
 /*! \brief Computes the SiLU activation gradient of the grouped input.
  *         If the scaling mode of the output grouped tensor is set to NVTE_MXFP8_1D_SCALING,

@@ -8,7 +8,9 @@
  *  \brief GeLU, SiLU and their derivatives of BF16 inputs, read from lookup tables.
  *
  *  A BF16 input takes only 2^16 values, so these activations can be read from a table
- *  generated once from the scalar util/math.h functions (nvte_build_activation_table).
+ *  generated once per device from the scalar util/math.h functions. TE builds each table
+ *  on its first use and keeps it for the life of the process (device_table); kernels read
+ *  them for BF16 inputs quantized to MXFP8. NVTE_ACTIVATION_TABLE=0 turns them off.
  *  Outside each table's window the result has a closed form, so every lookup is
  *  branch-free.
  *
@@ -34,7 +36,6 @@
 #define TRANSFORMER_ENGINE_UTIL_ACTIVATION_TABLE_CUH_
 
 #include <cuda_bf16.h>
-#include <transformer_engine/activation.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -45,6 +46,15 @@
 
 namespace transformer_engine {
 namespace activation_table {
+
+//! Activation read from a table.
+enum Kind : int {
+  kGelu = 0,   //!< GeLU (tanh form), BF16 entries
+  kSilu = 1,   //!< SiLU, BF16 entries
+  kDgelu = 2,  //!< GeLU derivative (tanh form), FP32 entries
+  kDsilu = 3,  //!< SiLU derivative, FP32 entries
+  kNumKinds = 4,
+};
 
 /*! \brief Forward table over the BF16 magnitudes [kLo, kHi].
  *
@@ -85,25 +95,25 @@ struct DerivativeLayout {
   static_assert(kStride == 2048 || kStride == 4096, "The packed lookup assumes these strides.");
 };
 
-template <NVTEActivationTableKind kKind>
+template <Kind kKind>
 struct Table;
 
 //! gelu(x) is RN(x/2) below 0x3b4b, x from 2.75 and -0 from -5.1875.
 template <>
-struct Table<kNVTEActivationTableGelu> : ForwardLayout<0x3b4b, 0x40a5> {
+struct Table<kGelu> : ForwardLayout<0x3b4b, 0x40a5> {
   __device__ static float op(const float x) { return gelu<float, float>(x, {}); }
 };
 
 //! silu(x) is RN(x/2) below 0x3bb6, x from 5.96875 and -0 from -89.
 template <>
-struct Table<kNVTEActivationTableSilu> : ForwardLayout<0x3bb6, 0x42b1> {
+struct Table<kSilu> : ForwardLayout<0x3bb6, 0x42b1> {
   __device__ static float op(const float x) { return silu<float, float>(x, {}); }
 };
 
 //! [2^-12, 8]. dgelu has saturated, to 1 and to +0, by |x| = 8, until 0.107*x*x overflows at
 //! 0x6044.
 template <>
-struct Table<kNVTEActivationTableDgelu> : DerivativeLayout<0x3980, 0x4100, 0x6044> {
+struct Table<kDgelu> : DerivativeLayout<0x3980, 0x4100, 0x6044> {
   __device__ static float op(const float x) { return dgelu<float, float>(x, {}); }
   //! dgelu(x) = 0.5 + sqrt(2/pi)*x + O(x^3).
   __device__ static float below_window(const float x) { return fmaf(0.79788456f, x, 0.5f); }
@@ -111,7 +121,7 @@ struct Table<kNVTEActivationTableDgelu> : DerivativeLayout<0x3980, 0x4100, 0x604
 
 //! [2^-9, 89]. dsilu has saturated, to 1 and to +0, by |x| = 89, up to inf.
 template <>
-struct Table<kNVTEActivationTableDsilu> : DerivativeLayout<0x3B00, 0x42B2, 0x7F80> {
+struct Table<kDsilu> : DerivativeLayout<0x3B00, 0x42B2, 0x7F80> {
   __device__ static float op(const float x) { return dsilu<float, float>(x, {}); }
   //! dsilu(x) = 0.5 + x/2 + O(x^3).
   __device__ static float below_window(const float x) { return fmaf(0.5f, x, 0.5f); }
@@ -124,29 +134,21 @@ struct ExactDsiluTable : DerivativeLayout<0x3300, 0x42B2, 0x7F80, 4096> {
   __device__ static float below_window(const float x) { return fmaf(0.5f, x, 0.5f); }
 };
 
-/*! \brief Table size in bytes. Each kind has a different size, which lets callers check that
- *         a table matches the activation it is passed with.
- */
-constexpr size_t table_bytes(const NVTEActivationTableKind kind) {
+//! Table size in bytes, in the default layout.
+constexpr size_t table_bytes(const Kind kind) {
   switch (kind) {
-    case kNVTEActivationTableGelu:
-      return Table<kNVTEActivationTableGelu>::kBytes;
-    case kNVTEActivationTableSilu:
-      return Table<kNVTEActivationTableSilu>::kBytes;
-    case kNVTEActivationTableDgelu:
-      return Table<kNVTEActivationTableDgelu>::kBytes;
-    case kNVTEActivationTableDsilu:
-      return Table<kNVTEActivationTableDsilu>::kBytes;
+    case kGelu:
+      return Table<kGelu>::kBytes;
+    case kSilu:
+      return Table<kSilu>::kBytes;
+    case kDgelu:
+      return Table<kDgelu>::kBytes;
+    case kDsilu:
+      return Table<kDsilu>::kBytes;
     default:
       return 0;
   }
 }
-
-static_assert(table_bytes(kNVTEActivationTableGelu) != table_bytes(kNVTEActivationTableSilu) &&
-                  table_bytes(kNVTEActivationTableDgelu) !=
-                      table_bytes(kNVTEActivationTableDsilu) &&
-                  ExactDsiluTable::kBytes != table_bytes(kNVTEActivationTableDsilu),
-              "Table sizes must identify their kind.");
 
 //! Whether dSiLU tables are built in the exact layout (NVTE_ACTIVATION_TABLE_EXACT_DSILU=1).
 inline bool use_exact_dsilu_table() {
@@ -154,9 +156,9 @@ inline bool use_exact_dsilu_table() {
   return exact;
 }
 
-//! Size of the table that nvte_build_activation_table builds for kind.
-inline size_t built_table_bytes(const NVTEActivationTableKind kind) {
-  if (kind == kNVTEActivationTableDsilu && use_exact_dsilu_table()) {
+//! Size of the table that device_table builds for kind.
+inline size_t built_table_bytes(const Kind kind) {
+  if (kind == kDsilu && use_exact_dsilu_table()) {
     return ExactDsiluTable::kBytes;
   }
   return table_bytes(kind);
@@ -175,29 +177,23 @@ struct TableRef {
   TableUse use = kNoTable;
 };
 
-/*! \brief An activation table, checked against the kind it must hold.
+/*! \brief The current device's table for kind, built on first use.
  *
- *  A dSiLU table may have either layout; its size tells which.
+ *  Each table is built once per device and process, then kept until the process exits
+ *  (under 64 KB per device for all of them). The first call may come while the caller's
+ *  stream is being captured into a CUDA graph: the table is then allocated and built outside
+ *  the capture, and is ready before this returns. Thread-safe.
  */
-inline TableRef checked_table(const Tensor &table, const NVTEActivationTableKind kind) {
-  const size_t bytes = table_bytes(kind);
-  NVTE_CHECK(bytes != 0, "Invalid NVTEActivationTableKind (got ", static_cast<int>(kind), ")");
-  NVTE_CHECK(table.data.dptr != nullptr, "Activation table is not allocated.");
-  NVTE_CHECK(table.data.dtype == DType::kByte, "Activation table must be a byte tensor.");
-  const size_t got = table.data.numel();
-  if (kind == kNVTEActivationTableDsilu && got == ExactDsiluTable::kBytes) {
-    return {table.data.dptr, kExactDsiluTable};
-  }
-  NVTE_CHECK(got == bytes, "Activation table has ", got, " bytes, but activation table kind ",
-             static_cast<int>(kind), " needs ", bytes, " (was it built for another activation?)");
-  return {table.data.dptr, kDefaultTable};
-}
+TableRef device_table(Kind kind);
+
+//! Whether kernels read the tables (NVTE_ACTIVATION_TABLE, default 1). Read on every call.
+inline bool tables_enabled() { return getenv<bool>("NVTE_ACTIVATION_TABLE", true); }
 
 /*! \brief The table kind for OP, if OP is read from a table. */
 template <typename ParamOP, float (*OP)(float, const ParamOP &)>
 constexpr bool kHasTable = false;
 template <typename ParamOP, float (*OP)(float, const ParamOP &)>
-constexpr NVTEActivationTableKind kKindOf = kNVTEActivationTableGelu;
+constexpr Kind kKindOf = kGelu;
 
 template <>
 constexpr bool kHasTable<Empty, gelu<float, float>> = true;
@@ -208,11 +204,11 @@ constexpr bool kHasTable<Empty, dgelu<float, float>> = true;
 template <>
 constexpr bool kHasTable<Empty, dsilu<float, float>> = true;
 template <>
-constexpr NVTEActivationTableKind kKindOf<Empty, silu<float, float>> = kNVTEActivationTableSilu;
+constexpr Kind kKindOf<Empty, silu<float, float>> = kSilu;
 template <>
-constexpr NVTEActivationTableKind kKindOf<Empty, dgelu<float, float>> = kNVTEActivationTableDgelu;
+constexpr Kind kKindOf<Empty, dgelu<float, float>> = kDgelu;
 template <>
-constexpr NVTEActivationTableKind kKindOf<Empty, dsilu<float, float>> = kNVTEActivationTableDsilu;
+constexpr Kind kKindOf<Empty, dsilu<float, float>> = kDsilu;
 
 /*! \brief Forward activation of x, a BF16 value widened to FP32.
  *
@@ -339,9 +335,9 @@ __device__ __forceinline__ float evaluate(const float x, const void *table) {
     return OP(x, {});
   } else {
     static_assert(kHasTable<ParamOP, OP>, "OP has no table.");
-    constexpr NVTEActivationTableKind kKind = kKindOf<ParamOP, OP>;
+    constexpr Kind kKind = kKindOf<ParamOP, OP>;
     if constexpr (kUse == kExactDsiluTable) {
-      static_assert(kKind == kNVTEActivationTableDsilu, "Only dSiLU has an exact table.");
+      static_assert(kKind == kDsilu, "Only dSiLU has an exact table.");
       return derivative<ExactDsiluTable>(x, static_cast<const float *>(table));
     } else if constexpr (Table<kKind>::kForward) {
       return forward<Table<kKind>>(x, static_cast<const __nv_bfloat16 *>(table));
