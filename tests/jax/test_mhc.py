@@ -240,6 +240,31 @@ class TestMHCOps:
             assert grad.dtype == ref_grad.dtype, name
             assert_allclose(grad, ref_grad, err_msg=name, **tols)
 
+    @pytest.mark.parametrize(
+        "k,x_dtype,phi_dtype,expected",
+        [
+            (16384, jnp.bfloat16, jnp.float32, True),
+            (24, jnp.bfloat16, jnp.float32, True),  # 48 B and 96 B row strides
+            (20, jnp.bfloat16, jnp.float32, False),  # 40 B bf16 row stride
+            (18, jnp.float32, jnp.float32, False),  # 72 B row stride
+            (12, jnp.float32, jnp.float32, True),  # 48 B row stride
+        ],
+    )
+    def test_mhc_projection_tma_gate(self, monkeypatch, k, x_dtype, phi_dtype, expected):
+        """Auto mode enables TMA only if both row strides are 16-byte multiples (and sm90+)."""
+        from transformer_engine.jax.triton_extensions import mhc as mhc_ext
+        from jax._src.lib import gpu_triton
+
+        x = jax.ShapeDtypeStruct((8, k), x_dtype)
+        phi = jax.ShapeDtypeStruct((N_MIX, k), phi_dtype)
+        monkeypatch.delenv("NVTE_JAX_MHC_USE_TMA", raising=False)
+        sm90_plus = gpu_triton.get_compute_capability(0) >= 90
+        assert mhc_ext._projection_fwd_use_tma(x, phi) == (expected and sm90_plus)
+        monkeypatch.setenv("NVTE_JAX_MHC_USE_TMA", "0")
+        assert not mhc_ext._projection_fwd_use_tma(x, phi)
+        monkeypatch.setenv("NVTE_JAX_MHC_USE_TMA", "1")
+        assert mhc_ext._projection_fwd_use_tma(x, phi)
+
     @pytest_parametrize_wrapper("b,s,C", CONFIGS)
     @pytest_parametrize_wrapper("dtype", DTYPES)
     def test_mhc_scale(self, b, s, C, dtype):

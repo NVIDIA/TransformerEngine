@@ -31,7 +31,11 @@ from transformer_engine.common.triton.mhc import (
     _mhc_expand_combine_fwd,
     _mhc_expand_combine_bwd,
 )
-from .utils import triton_call_lowering
+from transformer_engine.jax.version_utils import (
+    TRITON_EXTENSION_GLOBAL_SCRATCH_MIN_JAX_VERSION,
+    jax_version_meet_requirement,
+)
+from .utils import triton_call_lowering, gpu_triton
 
 __all__ = [
     "mhc_projection_fwd",
@@ -209,6 +213,32 @@ class _MHCPrimitive(BasePrimitive):
         )
 
 
+def _projection_fwd_use_tma(x_aval, phi_aval) -> bool:
+    """Whether `_mhc_projection_fwd_fused` can load x and phi through TMA descriptors.
+
+    Mirrors the PyTorch gate (`_support_tma` and `_tma_aligned`). NVTE_JAX_MHC_USE_TMA=0/1 forces
+    TMA off/on, and anything else (default "auto") enables it when it is supported:
+      - Hopper or newer GPU and a JAX whose Triton launcher allocates global scratch for the
+        device-side descriptors.
+      - Row stride in bytes a multiple of 16, as TMA requires. The kernel reads x and phi as
+        row-major (M, K) and (N, K) arrays; the FFI lowering uses default row-major layouts, so
+        the stride is K elements.
+      - Base pointers 16-byte aligned. This cannot be checked at lowering time; it is the same
+        assumption as the `create_array_parameter(0, 16)` launch parameters (XLA buffers are at
+        least 16-byte aligned).
+    """
+    mode = os.environ.get("NVTE_JAX_MHC_USE_TMA", "auto").strip().lower()
+    if mode in ("0", "1"):
+        return mode == "1"
+    if not jax_version_meet_requirement(TRITON_EXTENSION_GLOBAL_SCRATCH_MIN_JAX_VERSION):
+        return False
+    if gpu_triton.get_compute_capability(0) < 90:
+        return False
+    return all(
+        (aval.shape[-1] * jnp.dtype(aval.dtype).itemsize) % 16 == 0 for aval in (x_aval, phi_aval)
+    )
+
+
 class MHCProjectionFwdPrimitive(_MHCPrimitive):
     """H = x @ phi^T (padded to 32 columns) and ms = mean(x^2, dim=-1)."""
 
@@ -286,9 +316,10 @@ class MHCProjectionFwdPrimitive(_MHCPrimitive):
                 "BLOCK_SIZE_N": H_PADDED_DIM,
                 "precision": precision,
                 "USE_SPLIT_K": use_split_k,
-                # TMA not supported as global scratch/allocator is required for device-side TMA descriptors
-                # Also, host-side descriptors require real pointers which aren't available when compiling JAX/XLA.
-                "USE_TMA": False,
+                # Device-side TMA descriptors (host-side ones need real pointers, which aren't
+                # available while lowering). They live in global scratch that the Triton launcher
+                # allocates (JAX >= TRITON_EXTENSION_GLOBAL_SCRATCH_MIN_JAX_VERSION).
+                "USE_TMA": _projection_fwd_use_tma(ctx.avals_in[0], ctx.avals_in[1]),
             },
         )
 

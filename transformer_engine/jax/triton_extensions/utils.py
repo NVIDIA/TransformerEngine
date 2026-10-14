@@ -56,6 +56,7 @@ import jax.numpy as jnp
 from ..version_utils import (
     TRITON_AUTOTUNED_INPUT_OUTPUT_ALIAS_MIN_JAX_VERSION,
     TRITON_EXTENSION_CUDA_GRAPH_MIN_JAX_VERSION,
+    TRITON_EXTENSION_GLOBAL_SCRATCH_MIN_JAX_VERSION,
     TRITON_EXTENSION_MIN_JAX_VERSION,
     is_triton_autotuned_alias_safe,
     is_triton_extension_supported,
@@ -382,7 +383,21 @@ def compile_triton(
 
     # Create kernel object for JAX
     # From jax/jaxlib/gpu/triton_kernels.cc:
-    if version.parse(jax.__version__) >= version.parse("0.8.2"):
+    if jax_version_meet_requirement(TRITON_EXTENSION_GLOBAL_SCRATCH_MIN_JAX_VERSION):
+        # Device-side TMA descriptors (tl.make_tensor_descriptor) live in global scratch memory
+        # that the launch has to allocate.
+        kernel = gpu_triton.TritonKernel(
+            compiled.name,
+            num_warps,
+            num_ctas,
+            compiled.metadata.shared,
+            compiled.asm["ptx"],
+            "",  # ttir
+            compute_capability,
+            global_scratch_size=compiled.metadata.global_scratch_size,
+            global_scratch_align=compiled.metadata.global_scratch_align,
+        )
+    elif version.parse(jax.__version__) >= version.parse("0.8.2"):
         kernel = gpu_triton.TritonKernel(
             compiled.name,  # arg0: kernel_name (str)
             num_warps,  # arg1: num_warps (int)
@@ -497,6 +512,11 @@ def triton_call_lowering(
     constexpr_names.update(name for config in configs for name in config.kwargs)
     tensor_arg_names = [n for n in arg_names if n not in constexpr_names]
     signature = {n: get_triton_dtype(a) for n, a in zip(tensor_arg_names, all_avals)}
+    # The launcher appends Triton's trailing implicit arguments (global scratch, profile scratch)
+    # right after the declared pointer parameters, so pass exactly one array parameter per
+    # kernel pointer argument. Outputs aliased to inputs are not separate kernel arguments;
+    # an extra parameter would be read by the kernel as its global scratch pointer.
+    num_array_params = len(signature)
 
     # Apply the autotuner's `early_config_prune`, as Triton does at launch. Array
     # arguments are only known abstractly here, so the pruner receives stand-ins
@@ -602,7 +622,7 @@ def triton_call_lowering(
 
             # Create kernel call for this config
             config_params = []
-            for _ in list(ctx.avals_in) + list(ctx.avals_out):
+            for _ in range(num_array_params):
                 config_params.append(gpu_triton.create_array_parameter(0, _ARRAY_ALIGNMENT_BYTES))
 
             # Per-config grid: evaluate `grid(meta)` if grid is a callable so
@@ -671,7 +691,7 @@ def triton_call_lowering(
         )
 
         kernel_params = []
-        for _ in list(ctx.avals_in) + list(ctx.avals_out):
+        for _ in range(num_array_params):
             kernel_params.append(gpu_triton.create_array_parameter(0, _ARRAY_ALIGNMENT_BYTES))
 
         # Non-autotuned dispatch: evaluate `grid(meta)` once with the merged
