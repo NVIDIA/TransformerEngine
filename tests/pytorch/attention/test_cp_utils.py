@@ -1065,6 +1065,48 @@ class TestTHDKernels(unittest.TestCase):
         self.assertEqual(torch.count_nonzero(grad[first_half_rows]).item(), 0)
         self.assertTrue(torch.equal(grad[second_half_rows], grad_per_step))
 
+    def test_thd_read_half_tensor_initializes_trailing_padding(self):
+        # Deterministically poison the at::empty output, including allocator-fresh memory.
+        deterministic = torch.are_deterministic_algorithms_enabled()
+        warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+        fill_uninitialized = torch.utils.deterministic.fill_uninitialized_memory
+        try:
+            torch.use_deterministic_algorithms(True)
+            torch.utils.deterministic.fill_uninitialized_memory = True
+            boundaries = [0, 8, 8, 24]
+            cu_seqlens = torch.tensor(boundaries, dtype=torch.int32, device="cuda")
+            for dtype, tail, planes, half_idx in itertools.product(
+                [torch.float16, torch.bfloat16, torch.float32], [0, 1, 2, 96], [1, 2], [0, 1]
+            ):
+                with self.subTest(dtype=dtype, tail=tail, planes=planes, half_idx=half_idx):
+                    shape = (planes, 24 + tail, 2, 8)
+                    tensor = (
+                        torch.arange(planes * (24 + tail) * 16, device="cuda", dtype=torch.float32)
+                        .reshape(shape)
+                        .to(dtype)
+                    )
+                    tensor[:, 24:] = float("nan")
+                    original_bits = tensor.view(torch.uint8).clone()
+                    pieces = []
+                    for start, end in zip(boundaries[:-1], boundaries[1:]):
+                        length = (end - start) // 2
+                        start += half_idx * length
+                        pieces.append(tensor[:, start : start + length])
+                    expected = torch.cat(pieces, dim=1)
+                    expected = torch.cat(
+                        [expected, tensor.new_zeros(planes, tail // 2, 2, 8)], dim=1
+                    )
+                    inp = tensor[0] if planes == 1 else tensor
+                    result = tex.thd_read_half_tensor(inp, cu_seqlens, half_idx)
+                    expected = expected[0] if planes == 1 else expected
+                    self.assertTrue(
+                        torch.equal(result.view(torch.uint8), expected.view(torch.uint8))
+                    )
+                    self.assertTrue(torch.equal(tensor.view(torch.uint8), original_bits))
+        finally:
+            torch.use_deterministic_algorithms(deterministic, warn_only=warn_only)
+            torch.utils.deterministic.fill_uninitialized_memory = fill_uninitialized
+
     def test_thd_read_second_half_lse_handles_packed_and_batch_major_lse(self):
         cu_seqlens = torch.tensor([0, 8, 16], dtype=torch.int32, device="cuda")
         lse = torch.arange(2 * 2 * 8, dtype=torch.float32, device="cuda").view(2, 2, 8)
