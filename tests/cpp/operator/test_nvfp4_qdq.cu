@@ -22,7 +22,7 @@ template <typename T>
 void check_qdq(size_t rows, size_t cols, bool row_scaled = false) {
   cudaDeviceProp prop;
   ASSERT_EQ(cudaGetDeviceProperties(&prop, 0), cudaSuccess);
-  if (prop.major != 10 || prop.minor != 0) GTEST_SKIP() << "QDQ targets SM100";
+  if (prop.major < 10) GTEST_SKIP() << "Native packed Q+DQ reference requires SM10.0+";
   const auto dtype = TypeInfo<T>::dtype;
   const std::vector<size_t> shape{rows, cols};
   Tensor input("input", shape, dtype);

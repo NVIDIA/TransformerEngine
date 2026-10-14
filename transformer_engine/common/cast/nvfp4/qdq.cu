@@ -95,7 +95,7 @@ template <bool ROW_SCALED_NVFP4>
 void launch_qdq(const NVTETensor input, NVTETensor output, const NVTETensor amax,
                 const NVTETensor noop, cudaStream_t stream) {
 #if FP4_TYPE_SUPPORTED
-  NVTE_CHECK(cuda::sm_arch() == 100, "NVFP4 QDQ currently supports SM100");
+  NVTE_CHECK(cuda::sm_arch() >= 80, "NVFP4 QDQ requires compute capability 8.0 or higher");
   const auto &in = *convertNVTETensorCheck(input);
   auto &out = *convertNVTETensorCheck(output);
   CheckInputTensor(in, "input");

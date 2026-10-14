@@ -19,10 +19,48 @@ from transformer_engine.pytorch.custom_recipes.quantizer_factory_zoo import (
     nvfp4_qdq_weight_fwd_bf16_bwd_factory,
 )
 
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available() or torch.cuda.get_device_capability() != (10, 0),
-    reason="QDQ fused implementation targets SM100",
+# Native packed Q+DQ is this file's oracle. The independently referenced
+# portable tests in test_qdq_emulation.py run on Ampere/Hopper as well.
+nvfp4_available, nvfp4_reason = te.is_nvfp4_available(return_reason=True)
+mxfp8_available, mxfp8_reason = te.is_mxfp8_available(return_reason=True)
+pytestmark = pytest.mark.skipif(not nvfp4_available, reason=nvfp4_reason)
+
+
+backward_modes = [
+    False,
+    pytest.param(True, marks=pytest.mark.skipif(not mxfp8_available, reason=mxfp8_reason)),
+]
+
+
+@pytest.mark.parametrize("row_scaled", [False, True])
+def test_auto_matches_native_on_available_device(row_scaled, monkeypatch):
+    monkeypatch.setenv("NVTE_USE_FAST_MATH", "0")
+    x = torch.randn(48, 80, device="cuda", dtype=torch.bfloat16)
+    q = NVFP4QDQQuantizer(NVFP4Quantizer(row_scaled_nvfp4=row_scaled))
+    assert q.selected_backend(x) == "fused"
+    assert_bits(q(x).dequantize(), native_qdq(x, row_scaled_nvfp4=row_scaled))
+
+
+@pytest.mark.parametrize(
+    "capability", [(7, 5), (8, 0), (8, 9), (9, 0), (10, 0), (10, 3), (10, 7), (11, 0), (12, 0)]
 )
+def test_architecture_dispatch(capability, monkeypatch):
+    """Exercise dispatch only; numerical execution uses the actual CI device."""
+    from transformer_engine.pytorch.custom_recipes.qdq import _supports_fused_device
+
+    x = torch.ones(16, 16, device="cuda", dtype=torch.bfloat16)
+    monkeypatch.setenv("NVTE_USE_FAST_MATH", "0")
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device=None: capability)
+    _supports_fused_device.cache_clear()
+    try:
+        expected = "fused" if capability >= (8, 0) else "reference"
+        assert NVFP4QDQQuantizer().selected_backend(x) == expected
+        assert NVFP4QDQQuantizer(backend="reference").selected_backend(x) == "reference"
+        if expected == "reference":
+            with pytest.raises(ValueError, match="Forced fused"):
+                NVFP4QDQQuantizer(backend="fused").selected_backend(x)
+    finally:
+        _supports_fused_device.cache_clear()
 
 
 def native_qdq(x, dtype=None, **options):
@@ -221,7 +259,7 @@ def mx_value(x, *, columnwise=False):
 @pytest.mark.parametrize("backend", ["reference", "fused"])
 @pytest.mark.parametrize("grouped", [False, True])
 @pytest.mark.parametrize("params_dtype", [torch.bfloat16, torch.float32])
-@pytest.mark.parametrize("mixed", [False, True])
+@pytest.mark.parametrize("mixed", backward_modes)
 def test_module_operands(backend, grouped, params_dtype, mixed, nvfp4_options=None):
     if backend == "fused" and params_dtype == torch.float32:
         pytest.skip("Mixed FP32 source/BF16 decode intentionally uses native fallback")
@@ -414,7 +452,7 @@ def test_copy_preserves_runtime_reduction_state():
 
 
 @pytest.mark.parametrize("grouped", [False, True])
-@pytest.mark.parametrize("mixed", [False, True])
+@pytest.mark.parametrize("mixed", backward_modes)
 def test_4over6_modules(grouped, mixed):
     test_module_operands(
         "reference",
@@ -510,7 +548,7 @@ def test_qdq_columnwise_source_preserves_forward_precision(
     assert_bits(out._columnwise_storage.dequantize(dtype=expected_col.dtype), expected_col)
 
 
-@pytest.mark.parametrize("mixed", [False, True])
+@pytest.mark.parametrize("mixed", backward_modes)
 def test_qdq_linear_preserves_bf16_forward_values_from_fp16_weights(mixed):
     """Finite BF16 forward weights must stay finite when building the backward operand."""
     factory = (

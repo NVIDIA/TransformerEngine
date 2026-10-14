@@ -302,10 +302,13 @@ children that support output-dtype binding retain it for later reconstruction.
 Native quantizers keep their existing behavior, including ignoring this
 argument. Their encodings and default dequantization metadata are unchanged.
 
-Hybrid's ``rowwise_dequantized`` source is still explicitly decoded into the
-source tensor's dtype. This preserves existing native compositions, including
-internal storage. If a high-precision child already rounded into BF16, widening
-that value to an FP32 source does not recover the discarded precision.
+Hybrid's ``rowwise_dequantized`` source uses the source tensor's dtype for
+native children, preserving existing native compositions, including internal
+storage. For children that support output-dtype handling, it uses
+``torch.promote_types`` on the source and stored dtypes to avoid narrowing
+decoded forward values. This is the input dtype of the columnwise quantizer,
+not necessarily the backward GEMM dtype. Widening a value already rounded into
+BF16 does not recover the discarded precision.
 
 In-place Identity updates preserve the destination buffer, dtype, shape and
 device. An explicit conflicting ``dtype`` with ``out=`` raises an error for
@@ -437,10 +440,11 @@ Backends and custom QDQ formats
 Output defaults to the source dtype; a module compute-dtype override changes
 only the decoded dtype. For ``NVFP4QDQQuantizer``, ``backend="auto"`` fuses
 plain 1D E2M1/E4M3 QDQ with tensor or per-row outer scaling on
-SM100 for contiguous, 16-byte-aligned BF16/FP16 tensors with matching output
-dtype and flattened matrix dimensions divisible by 16, with ordinary fast math
-disabled. Other native-valid modes, including 4over6, 2D scaling, distributed
-amax reduction, and mixed dtypes, use native ``quantize().dequantize()``.
+GPUs with compute capability 8.0 or higher for contiguous, 16-byte-aligned
+BF16/FP16 tensors with matching output dtype and flattened matrix dimensions
+divisible by 16, with ordinary fast math disabled. Other native-valid modes,
+including 4over6, 2D scaling, distributed amax reduction, and mixed dtypes,
+use native ``quantize().dequantize()`` where its kernels are supported.
 ``backend="reference"`` forces that composition; ``backend="fused"`` rejects
 unsupported cases. Current weight amax is computed when quantization runs.
 
@@ -455,11 +459,26 @@ rounding and support the same matching BF16/FP16 input and output dtypes.
 ``custom_recipes.qdq.MXFP8QDQQuantizer`` provides the corresponding rowwise
 E4M3/block-32 E8M0 QDQ operation. Its ``reference`` backend calls native
 ``MXFP8Quantizer.quantize().dequantize()``. Its ``fused`` backend supports
-contiguous, 16-byte-aligned BF16/FP16 tensors on SM100, with a matching output
-dtype, rows divisible by 32, and ordinary fast math disabled. ``auto`` falls
-back to the reference when these requirements are not met.
+contiguous, 16-byte-aligned BF16/FP16 tensors on GPUs with compute capability
+8.0 or higher, with a matching output dtype, rows divisible by 32, and ordinary
+fast math disabled. ``auto`` falls back to the reference when these requirements
+are not met.
 The fused kernel preserves signed zero. Native specialized FP16 quantization
 may canonicalize negative zero; the decoded values remain numerically equal.
+
+Build Transformer Engine for the target GPU architecture; a build containing
+only ``sm_100a`` kernels cannot run those kernels on other architectures.
+NVFP4 QDQ requires CUDA Toolkit 12.8 or later for the FP4 conversion types.
+On Ampere and Hopper, CUDA emulates the conversions inside the fused kernel.
+The existing native packed Q+DQ reference kernels require compute capability
+10.0 or higher. On older GPUs, use ``auto`` or ``fused`` with matching BF16/FP16
+and the plain fused configuration described above; a request requiring the
+native reference path raises an error. In particular, mixed dtypes, 4over6,
+2D scaling, and distributed amax reduction are not supported there.
+QDQ's conversion requirements are independent of native low-precision GEMM
+support. Recipes using native MXFP8 backward additionally require
+``is_mxfp8_available()``. Numerical and performance validation on a particular
+GPU does not establish performance on other architectures.
 
 Both QDQ classes return high-precision storage with straight-through
 gradients. Use them as rowwise children of ``HybridQuantizer`` to select the

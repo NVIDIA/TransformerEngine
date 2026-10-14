@@ -22,7 +22,8 @@ from ..tensor.nvfp4_tensor import NVFP4Quantizer
 @lru_cache(maxsize=None)
 def _supports_fused_device(device_index):
     """Device capabilities are fixed for the process lifetime."""
-    return torch.cuda.get_device_capability(device_index) == (10, 0)
+    # QDQ uses conversion instructions, not architecture-specific GEMM tiling.
+    return torch.cuda.get_device_capability(device_index) >= (8, 0)
 
 
 class QDQQuantizer(Quantizer):
@@ -124,9 +125,11 @@ class MXFP8QDQQuantizer(QDQQuantizer):
     """Rowwise E4M3/block-32 E8M0 QDQ held in high-precision storage.
 
     ``reference`` explicitly invokes native Q then DQ. ``fused`` keeps both
-    encodings in registers and requires contiguous matching BF16/FP16 on SM100.
+    encodings in registers and requires contiguous matching BF16/FP16 on GPUs
+    with compute capability 8.0 or higher. Older GPUs emulate the conversions.
     ``auto`` selects the fused implementation where supported. The decoded
     buffer can be consumed in either GEMM orientation; quantization is rowwise.
+    The native ``reference`` backend requires compute capability 10.0 or higher.
     """
 
     block_size = 32
@@ -166,6 +169,11 @@ class MXFP8QDQQuantizer(QDQQuantizer):
         # Native MXFP8 launch geometry does not support empty tensors.
         if tensor.numel() == 0:
             return torch.empty_like(tensor, dtype=dtype)
+        if tensor.is_cuda and torch.cuda.get_device_capability(tensor.device) < (10, 0):
+            raise RuntimeError(
+                "Native MXFP8 Q+DQ requires compute capability 10.0 or higher; "
+                "on Ampere/Hopper use auto or fused with contiguous matching BF16/FP16"
+            )
         return self.mxfp8_quantizer.quantize(tensor).dequantize(dtype=dtype)
 
     def _compute(self, tensor, output, noop_flag=None, *, backend=None):
@@ -191,9 +199,11 @@ class NVFP4QDQQuantizer(QDQQuantizer):
     serve either GEMM orientation.
 
     ``backend`` is ``auto``, ``reference``, or ``fused``. Auto falls back to
-    native Q+DQ outside plain contiguous BF16/FP16 1D E4M3 scaling on SM100,
-    with tensor or per-row outer scaling. Per-row amax is fused into QDQ.
+    native Q+DQ outside plain contiguous BF16/FP16 1D E4M3 scaling on GPUs with
+    compute capability 8.0 or higher, with tensor or per-row outer scaling.
+    Per-row amax is fused into QDQ.
     In particular, 4over6 and 2D scaling currently use the reference path.
+    The native reference path requires compute capability 10.0 or higher.
     Forced fused execution raises for unsupported inputs/configurations.
     This experimental API is subject to change.
     """
@@ -282,6 +292,13 @@ class NVFP4QDQQuantizer(QDQQuantizer):
         return "fused" if eligible and self.backend != "reference" else "reference"
 
     def _reference(self, tensor, dtype):
+        if tensor.is_cuda and torch.cuda.get_device_capability(tensor.device) < (10, 0):
+            if tensor.numel() == 0:
+                return torch.empty_like(tensor, dtype=dtype)
+            raise RuntimeError(
+                "Native NVFP4 Q+DQ requires compute capability 10.0 or higher; "
+                "on Ampere/Hopper use auto or fused with plain contiguous matching BF16/FP16"
+            )
         return self.nvfp4_quantizer.quantize(tensor).dequantize(dtype=dtype)
 
     def _compute(self, tensor, output, noop_flag=None, *, backend=None):

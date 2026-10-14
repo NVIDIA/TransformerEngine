@@ -61,9 +61,8 @@ void nvfp4_qdq(const at::Tensor &input, at::Tensor output, at::Tensor amax,
   at::cuda::CUDAGuard guard(input.device());
   TORCH_CHECK(input.is_contiguous() && output.is_contiguous() && amax.is_contiguous(),
               "NVFP4 QDQ requires contiguous tensors");
-  TORCH_CHECK(at::cuda::getCurrentDeviceProperties()->major == 10 &&
-                  at::cuda::getCurrentDeviceProperties()->minor == 0,
-              "NVFP4 QDQ currently supports SM100");
+  TORCH_CHECK(at::cuda::getCurrentDeviceProperties()->major >= 8,
+              "NVFP4 QDQ requires compute capability 8.0 or higher");
   TORCH_CHECK(
       !noop || (noop->is_cuda() && noop->device() == input.device() && noop->is_contiguous()),
       "Invalid QDQ noop device/layout");

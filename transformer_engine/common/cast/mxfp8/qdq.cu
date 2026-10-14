@@ -48,7 +48,7 @@ void nvte_mxfp8_qdq(const NVTETensor input, NVTETensor output, const NVTETensor 
                     cudaStream_t stream) {
   NVTE_API_CALL(nvte_mxfp8_qdq);
   using namespace transformer_engine;
-  NVTE_CHECK(cuda::sm_arch() == 100, "MXFP8 QDQ currently supports SM100");
+  NVTE_CHECK(cuda::sm_arch() >= 80, "MXFP8 QDQ requires compute capability 8.0 or higher");
   const auto &in = *convertNVTETensorCheck(input);
   auto &out = *convertNVTETensorCheck(output);
   CheckInputTensor(in, "input");

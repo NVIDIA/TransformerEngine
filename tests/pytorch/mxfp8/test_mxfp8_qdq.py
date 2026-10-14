@@ -9,15 +9,45 @@ import torch
 from transformer_engine.pytorch.custom_recipes.qdq import MXFP8QDQQuantizer
 import transformer_engine_torch as tex
 
+# These tests use native packed Q+DQ as their oracle. Portable QDQ coverage is
+# in nvfp4/test_qdq_emulation.py and does not require native format availability.
 pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available() or torch.cuda.get_device_capability() != (10, 0),
-    reason="MXFP8 QDQ fused implementation targets SM100",
+    not torch.cuda.is_available() or torch.cuda.get_device_capability() < (10, 0),
+    reason="MXFP8 QDQ requires compute capability 10.0 or higher",
 )
 
 
 @pytest.fixture(autouse=True)
 def ordinary_math(monkeypatch):
     monkeypatch.setenv("NVTE_USE_FAST_MATH", "0")
+
+
+def test_auto_matches_native_on_available_device():
+    x = data((96, 160), torch.bfloat16, "normal")
+    q = operand("auto")
+    assert q.selected_backend(x) == "fused"
+    assert_bits(q(x).dequantize(), operand("reference")(x).dequantize())
+
+
+@pytest.mark.parametrize(
+    "capability", [(7, 5), (8, 0), (8, 9), (9, 0), (10, 0), (10, 3), (10, 7), (11, 0), (12, 0)]
+)
+def test_architecture_dispatch(capability, monkeypatch):
+    """Exercise dispatch only; numerical execution uses the actual CI device."""
+    from transformer_engine.pytorch.custom_recipes.qdq import _supports_fused_device
+
+    x = torch.ones(32, 32, device="cuda", dtype=torch.bfloat16)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device=None: capability)
+    _supports_fused_device.cache_clear()
+    try:
+        expected = "fused" if capability >= (8, 0) else "reference"
+        assert operand("auto").selected_backend(x) == expected
+        assert operand("reference").selected_backend(x) == "reference"
+        if expected == "reference":
+            with pytest.raises(ValueError, match="Forced fused"):
+                operand("fused").selected_backend(x)
+    finally:
+        _supports_fused_device.cache_clear()
 
 
 def assert_bits(actual, expected):
