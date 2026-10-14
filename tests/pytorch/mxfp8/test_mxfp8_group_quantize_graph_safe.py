@@ -918,3 +918,146 @@ def test_grouped_swizzle_variable_shape_preserves_scale_capacity(
             atol=0.0,
             rtol=0.0,
         )
+
+
+def make_group_quantize_varying_last_case(shape_rep, directions, swizzled):
+    """Prepare two inputs and their serialized references, warming up dispatch."""
+    available, reason = te.is_mxfp8_available(return_reason=True)
+    if not available:
+        pytest.skip(reason)
+
+    rowwise, columnwise = directions
+
+    cols = [1024, 2048, 3072, 4224]
+    rows = [2048] * len(cols) if shape_rep == "varying_last" else [2048, 2176, 2304, 2432]
+    logical_shape = (
+        (rows[0], sum(cols))
+        if shape_rep == "varying_last"
+        else (1, sum(m * n for m, n in zip(rows, cols)))
+    )
+    first_dims = (
+        None
+        if shape_rep == "varying_last"
+        else torch.tensor(rows, dtype=torch.int64, device="cuda")
+    )
+    last_dims = torch.tensor(cols, dtype=torch.int64, device="cuda")
+    # Use two inputs to see if they corrupt each other's data
+    inputs = [torch.randn(logical_shape, dtype=torch.bfloat16, device="cuda")]
+    inputs.append(-inputs[0] * 1000)
+
+    quantizers = [
+        te.MXFP8Quantizer(tex.DType.kFloat8E4M3, rowwise=rowwise, columnwise=columnwise)
+        for _ in inputs
+    ]
+    for quantizer in quantizers:
+        quantizer.optimize_for_gemm = swizzled
+
+    # Warm up dispatch and construct a serialized reference before introducing overlap.
+    references = [
+        tex.group_quantize(x, quantizer, len(rows), first_dims, last_dims)
+        for x, quantizer in zip(inputs, quantizers)
+    ]
+    torch.cuda.synchronize()
+
+    return inputs, references, quantizers, first_dims, last_dims
+
+
+def comapre_group_quantize_outputs(outputs, references, rowwise, columnwise, iteration):
+    """Compare each stream's quantized data and scales with its serialized reference."""
+    for index, output in enumerate(outputs):
+        reference = references[index]
+        if rowwise:
+            assert torch.equal(
+                output.rowwise_data.view(torch.uint8), reference.rowwise_data.view(torch.uint8)
+            ), f"iteration {iteration}, stream {index}: rowwise data differs"
+            assert torch.equal(
+                output.scale_inv.view(torch.uint8), reference.scale_inv.view(torch.uint8)
+            ), f"iteration {iteration}, stream {index}: rowwise scales differ"
+        if columnwise:
+            assert torch.equal(
+                output.columnwise_data.view(torch.uint8),
+                reference.columnwise_data.view(torch.uint8),
+            ), f"iteration {iteration}, stream {index}: columnwise data differs"
+            assert torch.equal(
+                output.columnwise_scale_inv.view(torch.uint8),
+                reference.columnwise_scale_inv.view(torch.uint8),
+            ), f"iteration {iteration}, stream {index}: columnwise scales differ"
+
+
+def poison_group_quantize_outputs(outputs, rowwise, columnwise):
+    """Poison data and scales so stale correct bytes cannot hide missing writes."""
+    for output in outputs:
+        if rowwise:
+            output.rowwise_data.view(torch.uint8).fill_(0xA5)
+            output.scale_inv.view(torch.uint8).fill_(0xA5)
+        if columnwise:
+            output.columnwise_data.view(torch.uint8).fill_(0xA5)
+            output.columnwise_scale_inv.view(torch.uint8).fill_(0xA5)
+
+
+@pytest.mark.parametrize("shape_rep", ["varying_last", "varying_both"])
+@pytest.mark.parametrize("directions", [(True, False), (False, True), (True, True)])
+@pytest.mark.parametrize("swizzled", [False, True])
+def test_group_quantize_concurrent_streams(shape_rep, directions, swizzled):
+    """Calls on separate streams must not overwrite one another's tensor maps."""
+    rowwise, columnwise = directions
+    inputs, references, quantizers, first_dims, last_dims = make_group_quantize_varying_last_case(
+        shape_rep, directions, swizzled
+    )
+    num_tensors = last_dims.numel()
+    streams = [torch.cuda.Stream(), torch.cuda.Stream()]
+
+    # Repeat many times to increase the chance of data races
+    for iteration in range(20):
+        torch.cuda.synchronize()
+        outputs = []
+        for index, stream in enumerate(streams):
+            with torch.cuda.stream(stream):
+                outputs.append(
+                    tex.group_quantize(
+                        inputs[index], quantizers[index], num_tensors, first_dims, last_dims
+                    )
+                )
+        torch.cuda.synchronize()
+        comapre_group_quantize_outputs(outputs, references, rowwise, columnwise, iteration)
+        poison_group_quantize_outputs(outputs, rowwise, columnwise)
+        del outputs
+    torch.cuda.synchronize()
+
+
+@pytest.mark.parametrize("shape_rep", ["varying_last", "varying_both"])
+@pytest.mark.parametrize("directions", [(True, False), (False, True), (True, True)])
+@pytest.mark.parametrize("swizzled", [False, True])
+def test_group_quantize_concurrent_graph_replay(shape_rep, directions, swizzled):
+    """Separate captured calls must retain independent descriptor storage during replay."""
+    rowwise, columnwise = directions
+    inputs, references, quantizers, first_dims, last_dims = make_group_quantize_varying_last_case(
+        shape_rep, directions, swizzled
+    )
+    num_tensors = last_dims.numel()
+    streams = [torch.cuda.Stream(), torch.cuda.Stream()]
+    graphs = []
+    outputs = []
+    for index, stream in enumerate(streams):
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            output = tex.group_quantize(
+                inputs[index], quantizers[index], num_tensors, first_dims, last_dims
+            )
+        stream.synchronize()
+        graphs.append(graph)
+        outputs.append(output)
+
+    # Poison captured output buffers before the first replay as well.
+    poison_group_quantize_outputs(outputs, rowwise, columnwise)
+
+    # Repeat many times to increase the chance of data races
+    for iteration in range(20):
+        torch.cuda.synchronize()
+        for graph, stream in zip(graphs, streams):
+            with torch.cuda.stream(stream):
+                graph.replay()
+        torch.cuda.synchronize()
+        comapre_group_quantize_outputs(outputs, references, rowwise, columnwise, iteration)
+        poison_group_quantize_outputs(outputs, rowwise, columnwise)
+    torch.cuda.synchronize()
