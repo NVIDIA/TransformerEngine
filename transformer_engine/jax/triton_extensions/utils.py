@@ -33,6 +33,11 @@ Environment Variables:
         (jax-ml/jax#35218) instead of silently falling back to non-autotuned
         dispatch. Useful for CI or debugging to ensure autotuning is active.
         Default is "0" (silent compatibility fallback).
+    NVTE_JAX_TRITON_ASSUME_ALIGNED: If "1" (default), pointer arguments of JAX Triton kernels are
+        compiled with ``tt.divisibility=16`` (16-byte aligned), matching the alignment declared to
+        the launcher via ``create_array_parameter(0, 16)`` and what a PyTorch launch specializes
+        on. Without the hint Triton cannot vectorize global loads, which can cause large register
+        spills and slowdowns for some configs. Set to "0" to compile without the hint.
 """
 
 import hashlib
@@ -204,6 +209,21 @@ __all__ = ["triton_call_lowering", "get_triton_info"]
 # Triton kernel cache (module-level, shared across all kernels)
 _TRITON_KERNEL_CACHE = {}
 
+# Alignment (bytes) assumed for every array argument, as declared to the launcher by
+# gpu_triton.create_array_parameter(0, _ARRAY_ALIGNMENT_BYTES).
+_ARRAY_ALIGNMENT_BYTES = 16
+
+
+def _assume_aligned_pointers() -> bool:
+    """Whether to mark pointer arguments as 16-byte aligned (NVTE_JAX_TRITON_ASSUME_ALIGNED)."""
+    val = os.environ.get("NVTE_JAX_TRITON_ASSUME_ALIGNED", "1")
+    try:
+        return bool(int(val))
+    except ValueError as e:
+        raise ValueError(
+            f"NVTE_JAX_TRITON_ASSUME_ALIGNED must be an integer (0 or 1), got: {val!r}"
+        ) from e
+
 
 def get_triton_info():
     """Get information about the installed Triton package.
@@ -310,6 +330,7 @@ def compile_triton(
                 num_ctas,
                 enable_fp_fusion,
                 compute_capability,
+                _assume_aligned_pointers(),
             )
         ).encode()
     ).hexdigest()
@@ -336,10 +357,21 @@ def compile_triton(
         if const_name in signature_with_constexpr:
             signature_with_constexpr[const_name] = "constexpr"
 
+    # Array (pointer) arguments are aligned to _ARRAY_ALIGNMENT_BYTES (see create_array_parameter
+    # in triton_call_lowering). Tell Triton so it can emit vectorized loads/stores, as it does for
+    # aligned pointers in a PyTorch launch. The buffers are abstract at lowering time, so this is an
+    # assumption, not a check.
+    attrs = {}
+    if _assume_aligned_pointers():
+        for idx, name in enumerate(kernel_fn.arg_names):
+            if str(signature_with_constexpr.get(name, "")).startswith("*"):
+                attrs[(idx,)] = [["tt.divisibility", _ARRAY_ALIGNMENT_BYTES]]
+
     src = tc.ASTSource(
         fn=kernel_fn,
         constexprs=constants,
         signature=signature_with_constexpr,
+        attrs=attrs,
     )
 
     compiled = tc.compile(
@@ -571,7 +603,7 @@ def triton_call_lowering(
             # Create kernel call for this config
             config_params = []
             for _ in list(ctx.avals_in) + list(ctx.avals_out):
-                config_params.append(gpu_triton.create_array_parameter(0, 16))
+                config_params.append(gpu_triton.create_array_parameter(0, _ARRAY_ALIGNMENT_BYTES))
 
             # Per-config grid: evaluate `grid(meta)` if grid is a callable so
             # the launch shape matches this config's BLOCK_SIZE (etc.).
@@ -640,7 +672,7 @@ def triton_call_lowering(
 
         kernel_params = []
         for _ in list(ctx.avals_in) + list(ctx.avals_out):
-            kernel_params.append(gpu_triton.create_array_parameter(0, 16))
+            kernel_params.append(gpu_triton.create_array_parameter(0, _ARRAY_ALIGNMENT_BYTES))
 
         # Non-autotuned dispatch: evaluate `grid(meta)` once with the merged
         # constexprs (which already reflect the single config we'll launch).
