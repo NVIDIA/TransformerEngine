@@ -2177,6 +2177,8 @@ class TestGroupedGemmGluFallback:
             __name__="cudnn",
             grouped_gemm_glu_wrapper_sm100=self._api(_glu_adapter._FORWARD_ARGS),
             grouped_gemm_dglu_wrapper_sm100=self._api(_glu_adapter._BACKWARD_ARGS),
+            grouped_gemm_glu_jax_sm100=self._api(_glu_adapter._JAX_FORWARD_ARGS),
+            grouped_gemm_dglu_jax_sm100=self._api(_glu_adapter._JAX_BACKWARD_ARGS),
         )
         original = importlib.import_module
 
@@ -2190,7 +2192,15 @@ class TestGroupedGemmGluFallback:
         monkeypatch.setattr(_glu_adapter.importlib, "import_module", import_module)
         return module
 
-    @pytest.mark.parametrize("operation", ["forward", "backward"])
+    @pytest.mark.parametrize(
+        "name,args",
+        [
+            ("grouped_gemm_glu_wrapper_sm100", _glu_adapter._FORWARD_ARGS),
+            ("grouped_gemm_dglu_wrapper_sm100", _glu_adapter._BACKWARD_ARGS),
+            ("grouped_gemm_glu_jax_sm100", _glu_adapter._JAX_FORWARD_ARGS),
+            ("grouped_gemm_dglu_jax_sm100", _glu_adapter._JAX_BACKWARD_ARGS),
+        ],
+    )
     @pytest.mark.parametrize(
         "change",
         [
@@ -2203,13 +2213,7 @@ class TestGroupedGemmGluFallback:
             "opaque",
         ],
     )
-    def test_api_signature(self, frontend, operation, change):
-        name = (
-            "grouped_gemm_glu_wrapper_sm100"
-            if operation == "forward"
-            else "grouped_gemm_dglu_wrapper_sm100"
-        )
-        args = _glu_adapter._FORWARD_ARGS if operation == "forward" else _glu_adapter._BACKWARD_ARGS
+    def test_api_signature(self, frontend, name, args, change):
         if change == "missing":
             delattr(frontend, name)
         elif change == "not_callable":
@@ -2222,6 +2226,23 @@ class TestGroupedGemmGluFallback:
         assert available == (change == "optional")
         assert bool(reason) == (change != "optional")
 
+    @pytest.mark.parametrize("name", ["grouped_gemm_glu_jax_sm100", "grouped_gemm_dglu_jax_sm100"])
+    def test_bf16_only_jax_api_falls_back(self, frontend, monkeypatch, name):
+        # Frontend 1.29 exposes JAX entry points for BF16 discrete weights, but
+        # its shared MXFP8 wrapper cannot dispatch traced arrays to them.
+        arguments = ("a_tensor", "padded_offsets", "alpha_tensor", "b_ptrs", "n", "prob_tensor")
+        if "dglu" in name:
+            arguments += ("c_tensor", "beta_tensor")
+        setattr(frontend, name, self._api(arguments))
+        monkeypatch.setattr(transformer_engine_jax, "get_device_compute_capability", lambda _: 100)
+        available, reason = _glu_adapter.grouped_gemm_glu_dependencies_available()
+        assert not available
+        assert name in reason
+        for argument in ("b_tensor", "sfa_tensor", "sfb_tensor"):
+            assert argument in reason
+        with pytest.warns(UserWarning, match="falling back"):
+            assert _moe_module._select_cudnn_jax_fusion([]) is False
+
     @pytest.mark.parametrize(
         "capability,missing,expected",
         [
@@ -2232,6 +2253,8 @@ class TestGroupedGemmGluFallback:
             (120, None, True),
             (100, "grouped_gemm_glu_wrapper_sm100", False),
             (100, "grouped_gemm_dglu_wrapper_sm100", False),
+            (100, "grouped_gemm_glu_jax_sm100", False),
+            (100, "grouped_gemm_dglu_jax_sm100", False),
         ],
     )
     def test_fused_or_unfused_selection(self, frontend, monkeypatch, capability, missing, expected):

@@ -138,7 +138,7 @@ def _select_cudnn_jax_fusion(rejection_reasons: list[str]) -> bool:
         "use_cudnn_fusion=True: falling back to the unfused TE grouped-GEMM path: "
         + "; ".join(reasons)
         + ". Install cuDNN Frontend with shared grouped_gemm_glu/grouped_gemm_dglu "
-        "JAX APIs and CuTeDSL JAX support; use supported GPU hardware.",
+        "JAX APIs for dense MXFP8 and CuTeDSL JAX support; use supported GPU hardware.",
         UserWarning,
         stacklevel=2,
     )
@@ -2019,6 +2019,8 @@ def moe(
     use_cudnn_fusion : bool
         Defaults to ``True``: try cuDNN's shared JAX grouped MXFP8 GLU/dGLU APIs
         on SM100+ GPUs; cuDNN selects the architecture-specific kernels. ``False`` uses unfused TE grouped GEMM.
+        Frontends whose JAX GLU/dGLU entry points only support BF16 discrete
+        weights fall back to unfused TE grouped GEMM.
         Ineligible calls warn and fall back to TE's regular grouped-GEMM
         implementation. API signatures and GPU capability determine support.
 

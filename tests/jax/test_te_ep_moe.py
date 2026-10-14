@@ -919,7 +919,8 @@ class TestTeEpMoeCudnnCutedslFusion:
         import cudnn
         from transformer_engine.jax import cpp_extensions as tex
 
-        monkeypatch.setattr(cudnn, "grouped_gemm_glu_wrapper_sm100", None)
+        # Avoid triggering a lazy optional import just to disable the API.
+        monkeypatch.setitem(cudnn.__dict__, "grouped_gemm_glu_wrapper_sm100", None)
         block = make_block(quantization_recipe=MXFP8BlockScaling())
         x = _make_inputs(jax.random.PRNGKey(51))
         variables, baseline_output, _ = _init_apply(block, mesh, x, jax.random.PRNGKey(52))
@@ -961,6 +962,10 @@ class TestTeEpMoeCudnnCutedslFusion:
         if not use_cudnn_fusion:
             pytest.skip("requires the cuDNN fusion fixture parameter")
         from transformer_engine.jax import cpp_extensions as tex
+
+        available, reason = tex.grouped_gemm_glu_dependencies_available()
+        if not available:
+            pytest.skip(reason)
 
         shared_calls = []
         original_glu = tex.grouped_gemm_glu
@@ -1045,6 +1050,10 @@ class TestTeEpMoeCudnnCutedslFusion:
         if not use_cudnn_fusion:
             pytest.skip("cuDNN grouped GEMM fusion is disabled")
         from transformer_engine.jax import cpp_extensions as tex
+
+        available, reason = tex.grouped_gemm_glu_dependencies_available()
+        if not available:
+            pytest.skip(reason)
 
         moe_module = importlib.import_module("transformer_engine.jax.moe")
         flax_moe_module = importlib.import_module("transformer_engine.jax.flax.moe")

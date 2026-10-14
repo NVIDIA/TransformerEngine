@@ -97,10 +97,18 @@ _BACKWARD_ARGS = tuple(arg for arg in _FORWARD_ARGS if arg != "c_dtype") + (
     "act_func",
 )
 _FORWARD_ARGS += ("sf_vec_size", "act_func", "generate_c")
+# The shared wrappers predate MXFP8 JAX dispatch and have compatible signatures
+# even in frontends that only support eager execution of block-scaled inputs.
+# The JAX entry points also existed for BF16 discrete weights, so require their
+# dense-weight and scale arguments rather than checking only their names.
+_JAX_FORWARD_ARGS = tuple(arg for arg in _FORWARD_ARGS if arg != "sf_vec_size")
+_JAX_BACKWARD_ARGS = tuple(
+    arg for arg in _BACKWARD_ARGS if arg not in ("sf_vec_size", "dprob_tensor")
+)
 
 
 def grouped_gemm_glu_dependencies_available() -> tuple[bool, str]:
-    """Check that the selected forward and shared backward accept TE's keywords."""
+    """Require shared wrappers and JAX entry points supporting dense MXFP8."""
     try:
         cutlass_jax = importlib.import_module("cutlass.jax")
         if not cutlass_jax.is_available():
@@ -109,6 +117,8 @@ def grouped_gemm_glu_dependencies_available() -> tuple[bool, str]:
         for module, name, arguments in (
             (cudnn, "grouped_gemm_glu_wrapper_sm100", _FORWARD_ARGS),
             (cudnn, "grouped_gemm_dglu_wrapper_sm100", _BACKWARD_ARGS),
+            (cudnn, "grouped_gemm_glu_jax_sm100", _JAX_FORWARD_ARGS),
+            (cudnn, "grouped_gemm_dglu_jax_sm100", _JAX_BACKWARD_ARGS),
         ):
             api = getattr(module, name, None)
             if not callable(api):
