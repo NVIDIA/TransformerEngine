@@ -49,6 +49,31 @@ class _GDNKernelAdapter(AlignedTimelineKernelAdapter):
                 f"{expected_gate_shape}; got {tuple(g.shape)} and {tuple(beta.shape)}."
             )
 
+    def _call_op(
+        self,
+        query_layer: torch.Tensor,
+        key_layer: torch.Tensor,
+        value_layer: torch.Tensor,
+        gates: Dict[str, torch.Tensor],
+        cu_seqlens: torch.Tensor,
+        *,
+        initial_state: Optional[torch.Tensor],
+        output_final_state: bool,
+        use_qk_l2norm_in_kernel: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        return self._op(
+            query_layer,
+            key_layer,
+            value_layer,
+            gates["g"],
+            gates["beta"],
+            cu_seqlens,
+            scale=self.scale,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        )
+
     def forward(
         self,
         query_layer: torch.Tensor,

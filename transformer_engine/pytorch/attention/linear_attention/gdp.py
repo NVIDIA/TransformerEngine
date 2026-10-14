@@ -47,7 +47,7 @@ tensors follow the cuDNN frontend's transposed convention instead,
 This module is **experimental** and subject to change.
 """
 
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Dict, Optional, Tuple, Union
 
 import torch
 
@@ -198,19 +198,40 @@ class _GDPKernelAdapter(LinearAttentionKernelAdapter):
         *,
         initial_state: Optional[torch.Tensor],
         output_final_state: bool,
-        **kernel_kwargs: Any,
+        use_qk_l2norm_in_kernel: bool = False,
+        use_beta_sigmoid_in_kernel: bool = False,
+        allow_neg_eigval: bool = False,
+        safe_gate: bool = False,
+        gate_domain: str = "log",
+        a_log: Optional[torch.Tensor] = None,
+        dt_bias: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        # Fold the Householder axis into the kernel's token timeline.
-        return super()._call_op(
+        # The THD conversion flattens the batch into the token dimension but leaves
+        # the num_householder axis standing. Folding it into the rows is what puts
+        # sub-token j of token t at row t * n + j, which is the timeline the kernel
+        # reads.
+        key_layer, value_layer, beta = (
+            tensor.reshape(-1, *tensor.shape[2:])
+            for tensor in (key_layer, value_layer, gates["beta"])
+        )
+        return self._op(
             query_layer,
-            key_layer.flatten(0, 1),
-            value_layer.flatten(0, 1),
-            {"g": gates["g"], "beta": gates["beta"].flatten(0, 1)},
+            key_layer,
+            value_layer,
+            gates["g"],
+            beta,
             cu_seqlens,
-            num_householder=self.num_householder,
+            self.num_householder,
+            scale=self.scale,
             initial_state=initial_state,
             output_final_state=output_final_state,
-            **kernel_kwargs,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+            use_beta_sigmoid_in_kernel=use_beta_sigmoid_in_kernel,
+            allow_neg_eigval=allow_neg_eigval,
+            safe_gate=safe_gate,
+            gate_domain=gate_domain,
+            a_log=a_log,
+            dt_bias=dt_bias,
         )
 
     def forward(
@@ -241,7 +262,8 @@ class _GDPKernelAdapter(LinearAttentionKernelAdapter):
         passed inside its keyword dict. Keep them here, alongside
         ``initial_state``, for as long as that holds.
         """
-        # Validate a_log and dt_bias here; _validate_gates only receives per-token gates.
+        # Checked here rather than in `_validate_gates`, which only sees the
+        # per-token gates.
         self._validate_safe_gate_params(query_layer, a_log, dt_bias)
         return self._run(
             query_layer,

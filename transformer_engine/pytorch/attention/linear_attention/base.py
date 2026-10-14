@@ -185,17 +185,8 @@ class LinearAttentionKernelAdapter(torch.nn.Module):
         output_final_state: bool,
         **kernel_kwargs: Any,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        return self._op(
-            query_layer,
-            key_layer,
-            value_layer,
-            cu_seqlens=cu_seqlens,
-            scale=self.scale,
-            initial_state=initial_state,
-            output_final_state=output_final_state,
-            **gates,
-            **kernel_kwargs,
-        )
+        """Run the variant's op on THD tensors, returning (output, final_state)."""
+        raise NotImplementedError
 
     def _resolve_cu_seqlens(
         self,

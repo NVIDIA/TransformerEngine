@@ -83,6 +83,38 @@ class _GDN2KernelAdapter(AlignedTimelineKernelAdapter):
                 f"{tuple(w.shape)}."
             )
 
+    def _call_op(
+        self,
+        query_layer: torch.Tensor,
+        key_layer: torch.Tensor,
+        value_layer: torch.Tensor,
+        gates: Dict[str, torch.Tensor],
+        cu_seqlens: torch.Tensor,
+        *,
+        initial_state: Optional[torch.Tensor],
+        output_final_state: bool,
+        use_qk_l2norm_in_kernel: bool = False,
+        use_beta_sigmoid_in_kernel: bool = False,
+        allow_neg_eigval: bool = False,
+        beta_guard: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        return self._op(
+            query_layer,
+            key_layer,
+            value_layer,
+            gates["g"],
+            gates["beta"],
+            gates["w"],
+            cu_seqlens,
+            scale=self.scale,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+            use_beta_sigmoid_in_kernel=use_beta_sigmoid_in_kernel,
+            allow_neg_eigval=allow_neg_eigval,
+            beta_guard=beta_guard,
+        )
+
     def forward(
         self,
         query_layer: torch.Tensor,
