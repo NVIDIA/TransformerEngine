@@ -1035,6 +1035,19 @@ class GroupedTensorStorage:
             recipe = quantizer._get_compatible_recipe()
             if recipe is None:
                 continue
+            member_skip_calibration = skip_calibration
+            for dims in (
+                quantized_grouped_tensor.first_dims,
+                quantized_grouped_tensor.last_dims,
+            ):
+                if dims is None:
+                    continue
+                member_is_empty = dims[index : index + 1] == 0
+                member_skip_calibration = (
+                    member_is_empty
+                    if member_skip_calibration is None
+                    else torch.logical_or(member_skip_calibration != 0, member_is_empty)
+                )
             if recipe.float8_current_scaling():
                 scale_inv = (
                     quantized_grouped_tensor.scale_inv
@@ -1047,7 +1060,7 @@ class GroupedTensorStorage:
                     "scale_inv",
                     scale_inv[index : index + 1],
                     calibration_config=calibration_config,
-                    skip_calibration=skip_calibration,
+                    skip_calibration=member_skip_calibration,
                 )
             elif recipe.nvfp4():
                 if quantized_grouped_tensor.amax is None:
@@ -1056,14 +1069,14 @@ class GroupedTensorStorage:
                     "amax",
                     quantized_grouped_tensor.amax[index : index + 1],
                     calibration_config=calibration_config,
-                    skip_calibration=skip_calibration,
+                    skip_calibration=member_skip_calibration,
                 )
             else:
                 # Trigger error messages of non-supported quantization recipes.
                 quantizer.calibrate(
                     quantized_grouped_tensor,
                     calibration_config=calibration_config,
-                    skip_calibration=skip_calibration,
+                    skip_calibration=member_skip_calibration,
                 )
 
     def split_into_quantized_tensors(

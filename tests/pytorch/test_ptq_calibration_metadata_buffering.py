@@ -11,6 +11,7 @@ import torch
 from torch.utils.checkpoint import checkpoint
 
 from transformer_engine.common.recipe import DelayedScaling, Float8CurrentScaling
+from transformer_engine.debug.pytorch.debug_quantization import DebugQuantizer
 from transformer_engine.pytorch import is_fp8_available, is_nvfp4_available
 from transformer_engine.pytorch import distributed as te_distributed
 from transformer_engine.pytorch.constants import DType
@@ -62,6 +63,21 @@ def _make_test_quantized_storage(**metadata):
     for name, value in metadata.items():
         setattr(storage, name, value)
     return storage
+
+
+def test_debug_quantizer_forwards_skip_calibration():
+    parent_quantizer = _make_test_quantizer(Float8CurrentScalingQuantizer)
+    quantizer = object.__new__(DebugQuantizer)
+    Quantizer.__init__(quantizer, rowwise=True, columnwise=False)
+    quantizer.parent_quantizer = parent_quantizer
+
+    quantizer.calibrate(
+        _make_test_quantized_storage(_scale_inv=torch.tensor([2.0])),
+        calibration_config=DEFAULT_CALIBRATION_CONFIG,
+        skip_calibration=torch.ones(1),
+    )
+
+    torch.testing.assert_close(parent_quantizer._calibration_state["scale_inv"], torch.zeros(1))
 
 
 def test_calibration_api_additions_preserve_existing_parameter_order():
@@ -358,6 +374,18 @@ def test_native_grouped_linear_registers_calibration_buffers(
     assert all(torch.isfinite(value).all() for value in buffers.values())
     assert all(torch.all(value > 0) for value in buffers.values())
 
+    input_buffer = module.get_buffer(
+        "input_gemm0_scale_inv_fp8_current_scaling_te_ptq_calibrated"
+    )
+    calibrated_value = input_buffer.clone()
+    with torch.no_grad(), autocast(
+        enabled=enabled,
+        recipe=recipe,
+        calibration_config=QuantizationCalibrationConfig(),
+    ):
+        module(inp, torch.tensor([0, 16], dtype=torch.int64, device="cuda"))
+    torch.testing.assert_close(input_buffer, calibrated_value)
+
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 def test_native_grouped_linear_calibration_is_cuda_graph_safe():
@@ -407,6 +435,20 @@ def test_native_grouped_linear_calibration_is_cuda_graph_safe():
         assert len(buffers) == 4
         assert all(torch.isfinite(value).all() for value in buffers.values())
         assert all(torch.all(value > 0) for value in buffers.values())
+
+        input_buffer = module.get_buffer(
+            "input_gemm0_scale_inv_fp8_current_scaling_te_ptq_calibrated"
+        )
+        calibrated_value = input_buffer.clone()
+        empty_expert_splits = torch.tensor([0, 16], dtype=torch.int64, device="cuda")
+        with autocast(
+            enabled=True,
+            recipe=recipe,
+            calibration_config=calibration_config,
+        ):
+            graphed_module(inp, empty_expert_splits)
+        torch.cuda.synchronize()
+        torch.testing.assert_close(input_buffer, calibrated_value)
     finally:
         graphed_module.reset()
 
@@ -603,6 +645,33 @@ def test_linear_calibration_config_buffers_delayed_scaling_amax():
         calibration_buffers["input_amax_fp8_delayed_scaling_te_ptq_calibrated"],
         torch.full((1,), 2.0, device="cuda"),
     )
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+def test_delayed_scaling_calibration_survives_amax_history_resize():
+    module = Linear(32, 32, params_dtype=torch.bfloat16, device="cuda", bias=False)
+    calibration_config = QuantizationCalibrationConfig(
+        transformer_engine_calibration_decay=1.0
+    )
+    buffer_name = "input_amax_fp8_delayed_scaling_te_ptq_calibrated"
+
+    with torch.no_grad(), autocast(
+        enabled=True,
+        recipe=DelayedScaling(amax_history_len=1),
+        calibration_config=calibration_config,
+    ):
+        module(torch.full((16, 32), 4.0, dtype=torch.bfloat16, device="cuda"))
+    calibrated_amax = module.get_buffer(buffer_name)
+    torch.testing.assert_close(calibrated_amax, torch.full_like(calibrated_amax, 4.0))
+
+    with torch.no_grad(), autocast(
+        enabled=True,
+        recipe=DelayedScaling(amax_history_len=2),
+        calibration_config=calibration_config,
+    ):
+        module(torch.full((16, 32), 1.0, dtype=torch.bfloat16, device="cuda"))
+    torch.testing.assert_close(module.get_buffer(buffer_name), calibrated_amax)
+    torch.testing.assert_close(calibrated_amax, torch.full_like(calibrated_amax, 4.0))
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
@@ -1142,6 +1211,38 @@ def test_current_scaling_high_precision_calibration_matches_quantization(
         atol=0.0,
         rtol=0.0,
     )
+    torch.testing.assert_close(
+        calibration_quantizer._calibration_state["scale_inv"],
+        quantized_tensor._scale_inv,
+        atol=0.0,
+        rtol=0.0,
+    )
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.parametrize("force_pow_2_scales", (False, True))
+def test_current_scaling_tiny_bf16_calibration_matches_quantization(force_pow_2_scales):
+    tensor = torch.full(
+        (32, 32),
+        torch.finfo(torch.bfloat16).tiny,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    quantizer_kwargs = {
+        "fp8_dtype": DType.kFloat8E4M3,
+        "device": torch.device("cuda"),
+        "rowwise": True,
+        "columnwise": False,
+        "force_pow_2_scales": force_pow_2_scales,
+    }
+    active_quantizer = Float8CurrentScalingQuantizer(**quantizer_kwargs)
+    quantized_tensor = active_quantizer(tensor)
+    calibration_quantizer = Float8CurrentScalingQuantizer(**quantizer_kwargs)
+    calibration_quantizer.calibrate(
+        tensor,
+        calibration_config=DEFAULT_CALIBRATION_CONFIG,
+    )
+
     torch.testing.assert_close(
         calibration_quantizer._calibration_state["scale_inv"],
         quantized_tensor._scale_inv,

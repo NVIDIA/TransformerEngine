@@ -437,6 +437,7 @@ class DebugQuantizer(Quantizer):
         tensor: torch.Tensor,
         *,
         calibration_config: QuantizationCalibrationConfig,
+        skip_calibration: Optional[torch.Tensor] = None,
     ):
         """Delegate calibration to the wrapped quantizer."""
         if self.parent_quantizer is None:
@@ -444,6 +445,7 @@ class DebugQuantizer(Quantizer):
         return self.parent_quantizer.calibrate(
             tensor,
             calibration_config=calibration_config,
+            skip_calibration=skip_calibration,
         )
 
     def _get_calibration_metadata_buffers(self, tensor_name: str):

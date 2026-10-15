@@ -369,7 +369,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
                 amax.clamp_min_(self.amax_epsilon)
             fp8_max = torch.finfo(TE_DType_To_Torch[self.dtype]).max
             scale = fp8_max / amax
-            finite_scale = torch.finfo(tensor.dtype).max
+            finite_scale = torch.finfo(torch.float32).max
             scale.nan_to_num_(nan=float("nan"), posinf=finite_scale, neginf=finite_scale)
             if self.force_pow_2_scales:
                 _, exponent = torch.frexp(scale)

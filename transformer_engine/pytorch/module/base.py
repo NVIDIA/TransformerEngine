@@ -1136,7 +1136,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 )
 
             # Update quantizers with new amax pointers.
-            self.quantizers[meta_key] = self.fp8_meta[meta_key].make_quantizers()
+            new_quantizers = self.fp8_meta[meta_key].make_quantizers()
+            # Inherit calibration data from original quantizers.
+            old_quantizers = self.quantizers[meta_key]
+            for old_quantizer, new_quantizer in zip(old_quantizers, new_quantizers):
+                old_quantizer._share_calibration_state_with(new_quantizer)
+            self.quantizers[meta_key] = new_quantizers
             # Make sure weight tensors has correct quantizers
             self._update_weight_quantizers()
 
