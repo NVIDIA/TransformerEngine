@@ -505,6 +505,12 @@ Debugging and Profiling
    :Default: ``0``
    :Description: **(JAX only)** Enable verbose printing of tensor numerics for debugging purposes.
 
+.. envvar:: NVTE_CUDA_GRAPH_SLOT_DEBUG
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: **(PyTorch only)** When set to ``1`` before ``make_graphed_callables`` captures graphs with the private ``_graph_memory_slots`` plan, each replay checks on the host that no other live graph owns the saved-tensor arena or output family it is about to reuse, from forward until the matching backward.
+
 Testing
 ^^^^^^^
 

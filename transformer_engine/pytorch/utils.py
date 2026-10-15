@@ -1002,10 +1002,13 @@ class _WeakRefTensor:
         data_ptr: int,
         dtype: torch.dtype,
         shape: Sequence[int],
+        strides: Optional[Sequence[int]] = None,
     ):
         self._data_ptr = data_ptr
         self.dtype = dtype
         self.shape = shape
+        # Byte strides; None means C-contiguous, as in the CUDA array interface.
+        self.strides = None if strides is None else tuple(int(i) for i in strides)
 
     def data_ptr(self):
         """Data pointer of the tensor."""
@@ -1035,12 +1038,15 @@ class _WeakRefTensor:
 
     @property
     def __cuda_array_interface__(self):
-        return {
+        interface = {
             "shape": self.shape,
             "typestr": self.torch_dtype_to_np_typestr(),
             "data": (self.data_ptr() if self.numel() > 0 else 0, False),
             "version": 3,
         }
+        if self.strides is not None:
+            interface["strides"] = self.strides
+        return interface
 
     def torch_dtype_to_np_typestr(self):
         """Convert PyTorch dtype to numpy typestr."""
@@ -1071,11 +1077,11 @@ def make_weak_ref(x):
         return new_tensor
 
     if isinstance(x, torch.Tensor):
-        return (
-            convert_to_torch_tensor(_WeakRefTensor(x.data_ptr(), x.dtype, x.shape))
-            if x.is_cuda
-            else x
-        )
+        if not x.is_cuda:
+            return x
+        # Keep the strides of non-contiguous views (e.g. transposed or expanded outputs).
+        strides = None if x.is_contiguous() else [s * x.element_size() for s in x.stride()]
+        return convert_to_torch_tensor(_WeakRefTensor(x.data_ptr(), x.dtype, x.shape, strides))
     if isinstance(x, tuple):
         return tuple(make_weak_ref(i) for i in x)
     if isinstance(x, list):
