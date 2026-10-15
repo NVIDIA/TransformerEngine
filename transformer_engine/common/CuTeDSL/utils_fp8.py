@@ -183,11 +183,11 @@ def mul_f32x4_cvt_f32x4_to_fp8x4(fp8_dtype, relu: bool = False) -> Callable[...,
 def mul_bf16x2x2_cvt_bf16x4_to_fp8x4(fp8_dtype) -> Callable[..., Uint32]:
     """Return a multiply/cast for two BF16 pairs, producing four packed FP8 bytes.
 
-    Uses a direct BF16-to-FP8 conversion on CUDA 13.1+ and an FP32 detour before that.
+    CUDA 13.1+ supports direct BF16-to-FP8 conversion. Older compilers use
+    FP32 fused multiply-add, matching the corresponding ptx::mul_cvt_4x overload.
     """
     out_op = "e5m2x2" if fp8_dtype is Float8E5M2 else "e4m3x2"
     if cutlass.target_version(min_version="13.1"):
-        # Multiply in BF16, then convert BF16 -> FP8.
         body = (
             ".reg.b32 y0, y1;\n\t"
             "mul.rn.bf16x2 y0, {$r0}, {$r1};\n\t"
@@ -196,8 +196,6 @@ def mul_bf16x2x2_cvt_bf16x4_to_fp8x4(fp8_dtype) -> Callable[..., Uint32]:
             f"cvt.rn.satfinite.{out_op}.bf16x2 z1, y1;\n\t"
         )
     else:
-        # No BF16 -> FP8 conversion before CUDA 13.1: fma.rn.f32.bf16 multiplies into FP32
-        # (a*b + -0.0 is exact and keeps -0.0), then convert FP32 -> FP8.
         body = (
             ".reg.b16 x0,x1,x2,x3,s0,s1,s2,s3;\n\t"
             ".reg.f32 y0,y1,y2,y3;\n\t"
@@ -205,10 +203,10 @@ def mul_bf16x2x2_cvt_bf16x4_to_fp8x4(fp8_dtype) -> Callable[..., Uint32]:
             "mov.b32 {s0,s1}, {$r1};\n\t"
             "mov.b32 {x2,x3}, {$r2};\n\t"
             "mov.b32 {s2,s3}, {$r3};\n\t"
-            "fma.rn.f32.bf16 y0, x0, s0, 0f80000000;\n\t"
-            "fma.rn.f32.bf16 y1, x1, s1, 0f80000000;\n\t"
-            "fma.rn.f32.bf16 y2, x2, s2, 0f80000000;\n\t"
-            "fma.rn.f32.bf16 y3, x3, s3, 0f80000000;\n\t"
+            "fma.rn.f32.bf16 y0, x0, s0, 0f00000000;\n\t"
+            "fma.rn.f32.bf16 y1, x1, s1, 0f00000000;\n\t"
+            "fma.rn.f32.bf16 y2, x2, s2, 0f00000000;\n\t"
+            "fma.rn.f32.bf16 y3, x3, s3, 0f00000000;\n\t"
             f"cvt.rn.satfinite.{out_op}.f32 z0, y1, y0;\n\t"
             f"cvt.rn.satfinite.{out_op}.f32 z1, y3, y2;\n\t"
         )

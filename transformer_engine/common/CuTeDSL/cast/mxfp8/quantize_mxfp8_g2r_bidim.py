@@ -8,7 +8,7 @@ from typing import Callable, Optional, Type
 
 import cutlass
 from cutlass import cute
-from cutlass import Boolean, Float32, Int32, Int64, Uint32, Uint8
+from cutlass import Boolean, Int32, Int64, Uint32, Uint8
 from cuda.bindings.driver import CUstream  # pylint: disable=no-name-in-module
 
 from transformer_engine.common.CuTeDSL.utils import (
