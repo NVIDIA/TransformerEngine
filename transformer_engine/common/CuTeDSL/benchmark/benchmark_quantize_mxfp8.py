@@ -372,7 +372,11 @@ def _in_place_checkouts(repo):
     """Yields checkout(sha), which checks out a revision in the working tree, and checks out
     the original branch again on exit. Refuses to run with uncommitted changes, which would
     otherwise leak into every revision."""
-    dirty = _git(repo, "status", "--porcelain", "--untracked-files=no").stdout.rstrip()
+    # Ignored: submodules (checkout leaves them alone) and this benchmark's own files (the runs
+    # use a copy made before any checkout); neither is part of the benchmarked code.
+    status = ["status", "--porcelain", "--untracked-files=no", "--ignore-submodules=all", "--"]
+    status += [".", f":!{Path(__file__).resolve().parent.relative_to(repo)}"]
+    dirty = _git(repo, *status).stdout.rstrip()
     if dirty:
         sys.exit(f"--compare checks out revisions in place; commit or stash these first:\n{dirty}")
     head = _git(repo, "symbolic-ref", "--quiet", "--short", "HEAD", check=False).stdout.strip()
@@ -913,7 +917,8 @@ def main():
     else:
         # Taken before comparing checks anything out.
         sha = _git(repo, "rev-parse", "--short", "HEAD").stdout.strip()
-        if _git(repo, "status", "--porcelain", "--untracked-files=no").stdout.strip():
+        status = ["status", "--porcelain", "--untracked-files=no", "--ignore-submodules=all"]
+        if _git(repo, *status).stdout.strip():
             sha += "-dirty"
         activation = args.activation or "gelu"
         if args.compare:
