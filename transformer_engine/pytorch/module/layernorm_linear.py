@@ -371,7 +371,7 @@ def _layernorm_linear_forward_impl(
     # Configure Userbuffers communication (comm+GEMM overlap)
     ub_obj = None
     ub_type = None
-    ub_overlap_ag_fprop = ub_overlap_ag_fprop and is_grad_enabled and not return_layernorm_output
+    ub_overlap_ag_fprop = ub_overlap_ag_fprop and not return_layernorm_output
     if ub_overlap_rs_fprop:
         ub_obj = get_ub(ub_name + "_fprop", fp8)
         ub_type = tex.CommOverlapType.RS
@@ -1437,6 +1437,7 @@ def _layernorm_linear_backward_impl(
                 wgrad = get_dummy_wgrad(
                     list(main_grad.shape),
                     origin_weight.dtype,
+                    zero_tensor=getattr(origin_weight, "zero_tensor_dummy_wgrad", False),
                 )
         elif args.fuse_wgrad_accumulation:
             wgrad = None
