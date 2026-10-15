@@ -202,7 +202,12 @@ def _cudnn_score_mod_fwd_cache_key(
             )
         ],
         attn_scale=attn_scale,
+        # The formats are keyed, not only the specs they produce. dq/dk/dv are described from
+        # empty_like tensors rather than from anything in the key, and empty_like falls back to
+        # contiguous strides of the native shape, which the format decides.
         extras=(
+            q_format,
+            kv_format,
             is_training,
             score_mod_key,
             _score_mod_tensor_metadata(stats) if stats is not None else None,
@@ -248,6 +253,8 @@ def _cudnn_score_mod_bwd_cache_key(
         attn_scale=attn_scale,
         deterministic=deterministic,
         extras=(
+            q_format,
+            kv_format,
             score_mod_key,
             score_mod_bprop_key,
             _score_mod_tensor_metadata(stats),

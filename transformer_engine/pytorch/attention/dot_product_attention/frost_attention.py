@@ -105,10 +105,8 @@ def is_frost_attention_available() -> Tuple[bool, str]:
     return _availability
 
 
-# cuDNN expresses causal, bottom-right and sliding-window masking as one mechanism, a diagonal
-# alignment plus a two-sided band, which the builders declare from the spec below. Both alignments
-# are needed: the p2p ring produces square tiles where they coincide, while all_gather trims KV so
-# they differ.
+# Both alignments are needed: the p2p ring produces square tiles where top-left and bottom-right
+# coincide, while all_gather trims KV so they differ.
 _SUPPORTED_MASKS = ("no_mask", "causal", "causal_bottom_right")
 
 # Sliding window as TE spells it: (left, right), -1 meaning unbounded on that side.

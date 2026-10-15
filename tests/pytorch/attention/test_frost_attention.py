@@ -443,6 +443,65 @@ def test_frost_mask_spec_rejects_malformed_windows():
             _mask_spec("causal", window), why
 
 
+def test_frost_plan_key_round_trips_through_the_builders(monkeypatch):
+    """The plan key is also the build recipe, so the builders must destructure what _key packs.
+
+    No GPU: the shared builders are stubbed, so nothing reaches cuDNN. What is under test is the
+    positional contract between _key and _build_fwd/_build_bwd, which the numerical tests cover
+    only on SM100/SM103. A one-element slip there would mis-describe a tensor silently.
+    """
+    from transformer_engine.pytorch.attention.dot_product_attention import (
+        cudnn_pygraph,
+        frost_attention,
+    )
+
+    try:
+        cudnn_pygraph.import_cudnn_frontend(enable_frost_engines=True)
+    except ImportError:
+        pytest.skip("cuDNN frontend Python package is required for the plan key contract.")
+
+    # Three distinct descriptors, so swapping any two of them is visible. GQA gives k and v
+    # fewer heads than q, and v a different head_dim, which is the asymmetric case
+    # _o_shape_stride exists for even though the selector declines it.
+    q = torch.empty(2, 8, 4, 512, dtype=torch.bfloat16)
+    k = torch.empty(2, 8, 2, 512, dtype=torch.bfloat16)
+    v = torch.empty(2, 8, 2, 256, dtype=torch.bfloat16)
+    mask, scale = ("causal", (-1, 0)), 0.044
+    expected = {
+        name: cudnn_pygraph.bhsd_dim_stride(t, "bshd", backend_name="FrostAttention")
+        for name, t in (("q", q), ("k", k), ("v", v))
+    }
+    assert len(set(expected.values())) == 3, "the fixture must distinguish the three tensors"
+
+    seen = {}
+
+    def record(**kwargs):
+        seen.clear()
+        seen.update(kwargs)
+        return {}
+
+    monkeypatch.setattr(cudnn_pygraph, "build_fwd", record)
+    monkeypatch.setattr(cudnn_pygraph, "build_bwd", record)
+
+    keys = {}
+    for direction, build in (
+        ("fwd", frost_attention._build_fwd),
+        ("bwd", frost_attention._build_bwd),
+    ):
+        deterministic = direction == "bwd"
+        keys[direction] = frost_attention._key(
+            direction, q, k, v, "bshd", mask, scale, deterministic=deterministic
+        )
+        build(keys[direction], q.device)
+        for name in ("q", "k", "v"):
+            assert seen[name] == expected[name], (direction, name)
+        assert seen["attn_scale"] == scale, direction
+        assert seen["mask"] == mask, direction
+        assert seen["dtype"] == torch.bfloat16, direction
+    assert seen["deterministic"] is True, "the backward must carry the flag it was keyed on"
+    assert keys["fwd"] != keys["bwd"], "a forward plan must not be served to a backward call"
+
+
 @requires_frost
 def test_frost_rejects_mismatched_kv():
     """v must index the same KV positions as k. head_dim is free; the rest is not."""

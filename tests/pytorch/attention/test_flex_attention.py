@@ -465,7 +465,9 @@ def test_score_mod_tensors_are_version_checked_for_backward(monkeypatch):
         workspace_size = 1
 
     def fake_execute(graph, variant_pack, workspace_size, device, **kwargs):
-        del graph, variant_pack, workspace_size, device, kwargs
+        del graph, variant_pack, workspace_size, device
+        # execute_graph has no default for this, and it picks the cuDNN handle.
+        assert kwargs["backend_name"] == flex_attention._BACKEND_NAME
 
     q, k, v, _, _ = _score_mod_cache_cpu_inputs()
     q = q.requires_grad_()

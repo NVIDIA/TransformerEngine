@@ -171,8 +171,9 @@ def bhsd_tensor_spec(
     Serves both roles this triple has: the descriptor :func:`build_fwd` and :func:`build_bwd`
     declare a tensor from, and, being hashable, the per-tensor part of a plan cache key. Strides
     belong in it because the graph is built for this exact layout, which is what lets bshd and
-    sbhd run without a transpose. The format name does not: two formats giving the same
-    description are the same graph.
+    sbhd run without a transpose. The format name does not, provided every descriptor the graph
+    declares comes from a spec that is itself keyed: two formats giving the same description are
+    then the same graph.
     """
     dim, stride = bhsd_dim_stride(tensor, tensor_format, backend_name=backend_name)
     return (tuple(dim), tuple(stride), tensor.dtype)
