@@ -28,6 +28,7 @@ from transformer_engine.common.cudnn.graph import (
     create_graph,
     check_graph_support,
     compile_graph,
+    uses_ragged_attention_graph,
 )
 
 from .cudnn_graph import import_cudnn, check_frontend_version, serialize_graph, graph_attributes
@@ -226,7 +227,7 @@ def _describe_graph(direction, shapes, config, capabilities, nondeterministic, f
     batch, sq, sk, h, hg, dq, dv = _dims(avals, config)
     backward = direction == "bwd"
     ragged = config.qkv_layout.is_thd()
-    ragged_stats = ragged and capabilities[0] >= 90 and capabilities[0] != 120
+    ragged_stats = ragged and uses_ragged_attention_graph(capabilities[0])
     segments = batch * config.max_segments_per_seq if ragged else batch
     # JAX uses fixed metadata capacities, including for empty ragged storage.
     # Keep positive graph capacities while runtime segment lengths may be zero.
@@ -425,7 +426,7 @@ def _metadata(value, size, fill=0):
 
 
 def _dense_stats_to_packed(value, offsets, lengths, shape):
-    """Convert SM120's per-segment BHS1 statistics to JAX's packed TH1 layout."""
+    """Convert SM12x's per-segment BHS1 statistics to JAX's packed TH1 layout."""
     tokens, heads = math.prod(shape[:-2]), shape[-2]
     rows = value.shape[-2]
     indices = offsets[: lengths.size, None] + jnp.arange(rows)[None, :]

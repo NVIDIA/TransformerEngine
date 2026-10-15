@@ -28,6 +28,7 @@ from transformer_engine.common.cudnn.graph import (
     check_graph_support,
     compile_graph,
     bucket,
+    uses_ragged_attention_graph,
 )
 
 from .cudnn import (
@@ -137,7 +138,7 @@ class _AttentionGraph:
             )
         self.b, self.h, self.hg, self.dq, self.dv, self.tq, self.tk = dimensions
         capability = torch.cuda.get_device_capability(self.device)
-        self.ragged_graph = capability >= (9, 0) and capability != (12, 0)
+        self.ragged_graph = uses_ragged_attention_graph(10 * capability[0] + capability[1])
         self.ragged_stats = self.q_format == "thd" and self.ragged_graph
         self.sq = bucket(self.tq, 1024, 32768) if self.ragged_stats else params["max_seqlen_q"]
         self.skv = (

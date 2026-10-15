@@ -341,7 +341,7 @@ def test_fused_attn_query_reuses_runtime_graph(layout, backward, monkeypatch):
 
 
 @pytest.mark.parametrize("dtype", (DType.kFloat16, DType.kBFloat16))
-@pytest.mark.parametrize("capability", ((10, 0), (12, 0)))
+@pytest.mark.parametrize("capability", ((10, 0), (12, 0), (12, 1), (12, 9), (13, 0)))
 @pytest.mark.parametrize("layout", ("bshd_bshd_bshd", "thd_bshd_bshd", "thd_thd_thd"))
 def test_fused_attn_backward_token_bounds(monkeypatch, dtype, capability, layout):
     """Bound backward workspace by each ragged input's bucketed token capacity."""
@@ -376,11 +376,19 @@ def test_fused_attn_backward_token_bounds(monkeypatch, dtype, capability, layout
         if name.startswith("max_total_seq_len_")
     }
     expected = {}
-    if capability == (10, 0) and layout.startswith("thd"):
+    if capability[0] != 12 and layout.startswith("thd"):
         expected["max_total_seq_len_q"] = 2048
         if layout == "thd_thd_thd":
             expected["max_total_seq_len_kv"] = 4096
     assert bounds == expected
+    # cuDNN's graph layout and context-parallel LSE interpretation must agree.
+    from transformer_engine.pytorch.attention.dot_product_attention import context_parallel
+
+    packed = context_parallel.uses_ragged_attention_graph(10 * capability[0] + capability[1])
+    assert bool(query.specs["stats"].ragged_offset) == (packed and layout.startswith("thd"))
+    if capability[0] == 12:
+        assert query.sq == 512
+        assert query.skv == 1024
 
 
 @pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16))

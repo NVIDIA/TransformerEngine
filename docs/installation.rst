@@ -29,6 +29,17 @@ native FFI executor. The JAX extension and the frontend Python package must use
 matching cuDNN frontend versions; rebuild the extension after upgrading that
 package.
 
+Automatic ``score_mod`` graph caching includes the callback's code and snapshots
+of builtin scalar and container defaults, including keyword-only defaults.
+Callbacks with tensor or opaque stateful defaults bypass automatic caching.
+Stateful callbacks can provide ``score_mod_graph_cache_key`` to explicitly
+describe their graph structure; pass runtime data through ``score_mod_tensors``
+and ``score_mod_bprop_tensors``.
+
+On SM12x GPUs, including SM120 and SM121, packed attention uses dense
+per-sequence softmax statistics internally. Graph construction and context
+parallelism use the same statistics layout.
+
 If the CUDA Toolkit headers are not available at runtime in a standard
 installation path, e.g. within `CUDA_HOME`, set
 `NVTE_CUDA_INCLUDE_PATH` in the environment.

@@ -19,6 +19,11 @@ class UnsupportedGraph(ValueError):
     """A configuration rejected by cuDNN, rather than an execution/setup failure."""
 
 
+def uses_ragged_attention_graph(sm_arch):
+    """Use packed statistics on SM90+ except the SM12x family (encoded as 120-129)."""
+    return sm_arch >= 90 and not 120 <= sm_arch < 130
+
+
 def import_cudnn():
     """Import the optional graph frontend without importing either framework."""
     try:

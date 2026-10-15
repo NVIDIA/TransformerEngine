@@ -4,6 +4,7 @@
 """Tests for cuDNN frontend score_mod fused attention."""
 
 from math import sqrt
+from types import FunctionType
 
 import jax
 import jax.numpy as jnp
@@ -684,6 +685,34 @@ def test_fused_attn_score_mod_module_lambda_keys_do_not_collide():
     assert tex_attention._score_mod_callback_cache_key(first) != (
         tex_attention._score_mod_callback_cache_key(second)
     )
+
+
+@pytest.mark.parametrize("keyword", (False, True))
+def test_fused_attn_score_mod_config_separates_function_defaults(keyword):
+    """Defaults must participate in both the static config and serialized-graph cache key."""
+    first = FunctionType(_default_mode_score_mod.__code__, globals(), argdefs=(False,))
+    second = FunctionType(_default_mode_score_mod.__code__, globals(), argdefs=(False,))
+    first.__kwdefaults__ = second.__kwdefaults__ = {"keyword_mode": False}
+    if keyword:
+        second.__kwdefaults__ = {"keyword_mode": True}
+    else:
+        first.__defaults__ = (False,)
+        second.__defaults__ = (True,)
+    configs = [
+        make_fused_attn_score_mod_config(
+            callback, None, None, None, _CONFIG_TEST_SCALING_FACTOR, True
+        )[0]
+        for callback in (first, first, second)
+    ]
+    assert configs[0] == configs[1]
+    assert configs[0] != configs[2]
+    assert tex_attention._graph_cache_key("fwd", configs[0], ()) != (
+        tex_attention._graph_cache_key("fwd", configs[2], ())
+    )
+
+
+def _default_mode_score_mod(graph, score, _tensors, mode=False, *, keyword_mode=False):
+    return graph.tanh(input=score) if mode or keyword_mode else score
 
 
 def test_fused_attn_score_mod_config_stabilizes_bound_method_cache_keys():

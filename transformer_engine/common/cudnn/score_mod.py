@@ -6,6 +6,7 @@
 
 from collections.abc import Mapping
 import inspect
+import struct
 
 
 class UncacheableKey:
@@ -51,8 +52,29 @@ def explicit_cache_key(owner, is_tensor):
     return freeze_cache_key(key() if callable(key) else key, is_tensor)
 
 
+def _freeze_function_default(value, is_tensor):
+    """Snapshot builtin defaults without trusting opaque objects' identity hashes."""
+    value_type = type(value)
+    if is_tensor(value):
+        raise TypeError("Runtime tensors cannot be implicit callback cache keys.")
+    if value_type in (type(None), bool, int, str, bytes):
+        return value_type, value
+    if value_type is float:
+        return value_type, struct.pack("!d", value)
+    if value_type is complex:
+        return value_type, struct.pack("!dd", value.real, value.imag)
+    if value_type is dict:
+        return value_type, tuple(
+            (_freeze_function_default(key, is_tensor), _freeze_function_default(item, is_tensor))
+            for key, item in value.items()
+        )
+    if value_type in (list, tuple, set, frozenset):
+        return value_type, tuple(_freeze_function_default(item, is_tensor) for item in value)
+    raise TypeError("Opaque callback defaults require an explicit structural cache key.")
+
+
 def callback_cache_key(callback, is_tensor, uncacheable):
-    """Cache stable functions and explicitly keyed owners; distinguish anonymous code."""
+    """Cache stateless functions by code/defaults and explicitly keyed callback owners."""
     if callback is None:
         return None
     owner = getattr(callback, "__self__", None)
@@ -76,12 +98,19 @@ def callback_cache_key(callback, is_tensor, uncacheable):
         and callback.__closure__ is None
         and "<locals>" not in callback.__qualname__
     ):
-        identity = (
-            callback.__code__
-            if callback.__name__ == "<lambda>" or not callback.__qualname__
-            else callback.__qualname__
+        try:
+            defaults = _freeze_function_default(callback.__defaults__, is_tensor)
+            kwdefaults = _freeze_function_default(callback.__kwdefaults__, is_tensor)
+        except (TypeError, RecursionError):
+            return uncacheable()
+        return (
+            "function",
+            callback.__module__,
+            callback.__qualname__,
+            callback.__code__,
+            defaults,
+            kwdefaults,
         )
-        return ("function", callback.__module__, identity)
     return uncacheable()
 
 

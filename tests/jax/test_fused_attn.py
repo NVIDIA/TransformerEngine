@@ -503,6 +503,48 @@ def test_cudnn_attention_empty_ragged_capacities(batch, seqlen, monkeypatch):
         assert dict(description.spec.tensors)[name].dim == (32, 4, 1024, 64)
 
 
+@pytest.mark.parametrize("sm_arch", (100, 120, 121, 129, 130))
+@pytest.mark.parametrize("direction", ("fwd", "bwd"))
+def test_cudnn_attention_sm12x_dense_statistics(sm_arch, direction, monkeypatch):
+    """All SM12x variants use dense per-segment statistics and per-sequence dimensions."""
+    from types import SimpleNamespace
+    from transformer_engine.jax.cpp_extensions import cudnn_attention
+
+    monkeypatch.setattr(cudnn_attention, "cudnn_version", lambda: 92700)
+    config = SimpleNamespace(
+        qkv_layout=QKVLayout.THD_THD_THD,
+        max_segments_per_seq=2,
+        fp8=False,
+        attn_mask_type=AttnMaskType.PADDING_MASK,
+        attn_bias_type=AttnBiasType.NO_BIAS,
+        softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+        effective_window_size=(-1, -1),
+        scaling_factor=0.125,
+        bottom_right_diagonal=False,
+        dropout_probability=0.0,
+        is_training=True,
+        return_max_logit=False,
+    )
+    shapes = tuple(
+        (shape, jnp.dtype(jnp.bfloat16)) for shape in ((2, 128, 4, 64),) * 3 + ((0,), (1, 4, 1, 1))
+    )
+    description = cudnn_attention._describe_graph(direction, shapes, config, (sm_arch,), True, True)
+    tensors = dict(description.spec.tensors)
+    if 120 <= sm_arch < 130:
+        assert not description.ragged_stats
+        assert description.metadata_batch == 4
+        assert tensors["q"].dim == (4, 4, 128, 64)
+        assert tensors["stats"].dim == (4, 4, 128, 1)
+        assert tensors["stats"].ragged_offset == ""
+        assert description.spec.options.max_total_seqlen_q == 0
+        assert description.spec.options.max_total_seqlen_kv == 0
+    else:
+        assert description.ragged_stats
+        assert description.metadata_batch == 32
+        assert tensors["q"].dim == (32, 4, 1024, 64)
+        assert tensors["stats"].ragged_offset == "offset_stats"
+
+
 class BiasShape(Enum):
     """
     Enum class to represent the different bias shapes used in the fused attention.
