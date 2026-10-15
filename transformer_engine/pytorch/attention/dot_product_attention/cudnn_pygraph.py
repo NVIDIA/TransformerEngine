@@ -178,6 +178,32 @@ def bhsd_tensor_spec(
     return (tuple(dim), tuple(stride), tensor.dtype)
 
 
+def sdpa_cache_key(
+    direction: str,
+    device: torch.device,
+    specs: Sequence[Any],
+    *,
+    attn_scale: float,
+    deterministic: bool = False,
+    extras: Tuple[Any, ...] = (),
+) -> Tuple[Any, ...]:
+    """What identifies an SDPA plan: direction, device, each bound tensor's BHSD spec, the scale
+    and whether the backward is deterministic.
+
+    The device because a plan is built under whichever one was current, matching the C++
+    fused-attn cache. ``deterministic`` because that backward is a different algorithm, not a flag
+    on the same one. ``extras`` is whatever else the caller's graph depends on, such as a mask or
+    a score_mod identity; it is opaque here and must be hashable.
+    """
+    return (
+        direction,
+        device_key(device),
+        tuple(specs),
+        float(attn_scale),
+        bool(deterministic),
+    ) + tuple(extras)
+
+
 def cached_graph(backend_name: str, key: Optional[Any], build, *, device=None):
     """Memoize a built graph. ``key=None`` means uncacheable: build, return, do not store.
 
@@ -466,7 +492,7 @@ def execute_graph(
     workspace_size: int,
     device: torch.device,
     *,
-    backend_name: str = "cuDNN attention",
+    backend_name: str,
 ):
     """Allocate a built graph's workspace and run it on the device's current stream.
 

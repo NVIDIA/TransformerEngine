@@ -416,7 +416,7 @@ def _build_fwd(key, device) -> dict:
     cudnn = cudnn_pygraph.import_cudnn_frontend(enable_frost_engines=True)
     # deterministic is unused here: it selects a backward algorithm. Callers pass False for the
     # forward so the two never split the forward cache.
-    _dev, (shq, qs, dtype), (shk, ks, _), (shv, vs, _), mask, scale, _deterministic = key
+    _, _dev, ((shq, qs, dtype), (shk, ks, _), (shv, vs, _)), scale, _deterministic, mask = key
     b, hq, sq = shq[0], shq[1], shq[2]
     sho, o_stride = _o_shape_stride(shq, shv[3], qs)
     return cudnn_pygraph.build_fwd(
@@ -439,7 +439,7 @@ def _build_fwd(key, device) -> dict:
 def _build_bwd(key, device) -> dict:
     """Build (and JIT-compile) a backward graph. Expensive; always reached through the cache."""
     cudnn = cudnn_pygraph.import_cudnn_frontend(enable_frost_engines=True)
-    _dev, (shq, qs, dtype), (shk, ks, _), (shv, vs, _), mask, scale, deterministic = key
+    _, _dev, ((shq, qs, dtype), (shk, ks, _), (shv, vs, _)), scale, deterministic, mask = key
     io_dt = cudnn_pygraph.io_data_type(cudnn, dtype, backend_name=_BACKEND_NAME)
     b, hq, sq = shq[0], shq[1], shq[2]
     sho, o_stride = _o_shape_stride(shq, shv[3], qs)
@@ -465,13 +465,11 @@ def _build_bwd(key, device) -> dict:
     )
 
 
-def _cached(kind: str, key, device):
+def _cached(key, device):
     """Plan cache. Building dominates executing even once the JIT is cached, so this is
     required rather than an optimisation."""
-    build = _build_fwd if kind == "fwd" else _build_bwd
-    return cudnn_pygraph.cached_graph(
-        _BACKEND_NAME, (kind,) + key, lambda: build(key, device), device=device
-    )
+    build = _build_fwd if key[0] == "fwd" else _build_bwd
+    return cudnn_pygraph.cached_graph(_BACKEND_NAME, key, lambda: build(key, device), device=device)
 
 
 def _validate_qkv(q, k, v, qkv_format):
@@ -504,23 +502,19 @@ def _validate_qkv(q, k, v, qkv_format):
     return qd, kd, vd
 
 
-def _key(q, k, v, qkv_format, mask, scale, deterministic=False):
-    """The plan cache key, structured per tensor rather than flattened.
-
-    The builders destructure it positionally, and the per-tensor fragment is the one flex keys on.
-    """
-    return (
-        # Built under whichever device was current, so it must not be reused on another. Matches
-        # the C++ fused-attn cache, which keys on device_id.
-        cudnn_pygraph.device_key(q.device),
-        cudnn_pygraph.bhsd_tensor_spec(q, qkv_format, backend_name=_BACKEND_NAME),
-        cudnn_pygraph.bhsd_tensor_spec(k, qkv_format, backend_name=_BACKEND_NAME),
-        cudnn_pygraph.bhsd_tensor_spec(v, qkv_format, backend_name=_BACKEND_NAME),
-        mask,
-        float(scale),
-        # The deterministic backward is a different algorithm, not a flag on the same one, so a
-        # plan built either way must not be handed to a call that asked for the other.
-        bool(deterministic),
+def _key(direction, q, k, v, qkv_format, mask, scale, deterministic=False):
+    """The plan cache key, which is also the build recipe: the builders destructure it and hold
+    no tensors of their own."""
+    return cudnn_pygraph.sdpa_cache_key(
+        direction,
+        q.device,
+        [
+            cudnn_pygraph.bhsd_tensor_spec(t, qkv_format, backend_name=_BACKEND_NAME)
+            for t in (q, k, v)
+        ],
+        attn_scale=scale,
+        deterministic=deterministic,
+        extras=(mask,),
     )
 
 
@@ -595,7 +589,7 @@ def fused_attn_fwd(
     q, k, v = q.contiguous(), k.contiguous(), v.contiguous()
     qd, _, vd = _validate_qkv(q, k, v, qkv_format)
     scale = attn_scale if attn_scale is not None else qd[3] ** -0.5
-    entry = _cached("fwd", _key(q, k, v, qkv_format, mask, scale), q.device)
+    entry = _cached(_key("fwd", q, k, v, qkv_format, mask, scale), q.device)
     tq, tk, tv, tout, tlse = (entry[n] for n in ("q", "k", "v", "out", "stats"))
 
     # empty_strided, not empty_like: the output carries v's head_dim, so it is not q's shape.
@@ -702,7 +696,7 @@ def fused_attn_bwd(
         )
 
     scale = attn_scale if attn_scale is not None else qd[3] ** -0.5
-    entry = _cached("bwd", _key(q, k, v, qkv_format, mask, scale, deterministic), q.device)
+    entry = _cached(_key("bwd", q, k, v, qkv_format, mask, scale, deterministic), q.device)
     h = entry
 
     if softmax_lse.dim() == 3:

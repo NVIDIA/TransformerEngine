@@ -123,13 +123,6 @@ def _score_mod_tensor_dict_metadata(
     return tuple((name, _score_mod_tensor_metadata(tensor)) for name, tensor in tensors.items())
 
 
-def _score_mod_bhsd_tensor_metadata(tensor: torch.Tensor, tensor_format: str) -> Tuple[Any, ...]:
-    """Describe an SBHD/BSHD runtime tensor as a cuDNN BHSD graph tensor."""
-    return cudnn_pygraph.bhsd_tensor_spec(tensor, tensor_format, backend_name=_BACKEND_NAME) + (
-        cudnn_pygraph.device_key(tensor.device),
-    )
-
-
 # cuDNN frontend score_mod graph helpers.
 def _wrap_score_mod(score_mod: Optional[Callable], graph_tensors: Dict[str, Any]):
     """Adapt TE's score_mod signature to cuDNN frontend's two-argument callback."""
@@ -175,18 +168,6 @@ class _CudnnScoreModBwdGraphEntry:
     workspace_size: int
 
 
-def _execute_cudnn_graph(
-    graph,
-    variant_pack: Dict[Any, torch.Tensor],
-    workspace_size: int,
-    device: torch.device,
-):
-    """Execute a built cuDNN frontend Python graph."""
-    cudnn_pygraph.execute_graph(
-        graph, variant_pack, workspace_size, device, backend_name=_BACKEND_NAME
-    )
-
-
 def _cudnn_score_mod_fwd_cache_key(
     is_training: bool,
     query_layer: torch.Tensor,
@@ -208,19 +189,25 @@ def _cudnn_score_mod_fwd_cache_key(
     score_mod_key = _score_mod_callback_cache_key(score_mod)
     if score_mod_key is _SCORE_MOD_UNCACHEABLE:
         return None
-    return (
+    return cudnn_pygraph.sdpa_cache_key(
         "fwd",
-        is_training,
-        q_format,
-        kv_format,
-        attn_scale,
-        score_mod_key,
-        _score_mod_bhsd_tensor_metadata(query_layer, q_format),
-        _score_mod_bhsd_tensor_metadata(key_layer, kv_format),
-        _score_mod_bhsd_tensor_metadata(value_layer, kv_format),
-        _score_mod_bhsd_tensor_metadata(output_layer, q_format),
-        _score_mod_tensor_metadata(stats) if stats is not None else None,
-        _score_mod_tensor_dict_metadata(score_mod_tensors),
+        query_layer.device,
+        [
+            cudnn_pygraph.bhsd_tensor_spec(t, fmt, backend_name=_BACKEND_NAME)
+            for t, fmt in (
+                (query_layer, q_format),
+                (key_layer, kv_format),
+                (value_layer, kv_format),
+                (output_layer, q_format),
+            )
+        ],
+        attn_scale=attn_scale,
+        extras=(
+            is_training,
+            score_mod_key,
+            _score_mod_tensor_metadata(stats) if stats is not None else None,
+            _score_mod_tensor_dict_metadata(score_mod_tensors),
+        ),
     )
 
 
@@ -245,22 +232,28 @@ def _cudnn_score_mod_bwd_cache_key(
     score_mod_bprop_key = _score_mod_callback_cache_key(score_mod_bprop)
     if score_mod_key is _SCORE_MOD_UNCACHEABLE or score_mod_bprop_key is _SCORE_MOD_UNCACHEABLE:
         return None
-    return (
+    return cudnn_pygraph.sdpa_cache_key(
         "bwd",
-        q_format,
-        kv_format,
-        attn_scale,
-        deterministic,
-        score_mod_key,
-        score_mod_bprop_key,
-        _score_mod_bhsd_tensor_metadata(query_layer, q_format),
-        _score_mod_bhsd_tensor_metadata(key_layer, kv_format),
-        _score_mod_bhsd_tensor_metadata(value_layer, kv_format),
-        _score_mod_bhsd_tensor_metadata(output_layer, q_format),
-        _score_mod_bhsd_tensor_metadata(d_out, q_format),
-        _score_mod_tensor_metadata(stats),
-        _score_mod_tensor_dict_metadata(score_mod_tensors),
-        _score_mod_tensor_dict_metadata(score_mod_bprop_tensors),
+        query_layer.device,
+        [
+            cudnn_pygraph.bhsd_tensor_spec(t, fmt, backend_name=_BACKEND_NAME)
+            for t, fmt in (
+                (query_layer, q_format),
+                (key_layer, kv_format),
+                (value_layer, kv_format),
+                (output_layer, q_format),
+                (d_out, q_format),
+            )
+        ],
+        attn_scale=attn_scale,
+        deterministic=deterministic,
+        extras=(
+            score_mod_key,
+            score_mod_bprop_key,
+            _score_mod_tensor_metadata(stats),
+            _score_mod_tensor_dict_metadata(score_mod_tensors),
+            _score_mod_tensor_dict_metadata(score_mod_bprop_tensors),
+        ),
     )
 
 
@@ -513,11 +506,12 @@ class FusedAttentionWithScoreModFunc(torch.autograd.Function):
         for name, graph_tensor in entry.score_mod_graph_tensors.items():
             variant_pack[graph_tensor] = score_mod_tensors[name]
 
-        _execute_cudnn_graph(
+        cudnn_pygraph.execute_graph(
             entry.graph,
             variant_pack,
             entry.workspace_size,
             query_layer.device,
+            backend_name=_BACKEND_NAME,
         )
 
         ctx.is_training = is_training
@@ -600,11 +594,12 @@ class FusedAttentionWithScoreModFunc(torch.autograd.Function):
         for name, graph_tensor in entry.score_mod_bprop_graph_tensors.items():
             variant_pack[graph_tensor] = score_mod_bprop_tensors[name]
 
-        _execute_cudnn_graph(
+        cudnn_pygraph.execute_graph(
             entry.graph,
             variant_pack,
             entry.workspace_size,
             query_layer.device,
+            backend_name=_BACKEND_NAME,
         )
 
         return (
