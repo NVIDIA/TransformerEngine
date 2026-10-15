@@ -2,11 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Experimental sparse attention variants.
-
-Each variant owns its tensor/index contract and preparation helpers. Optional
-kernels load on execution. Add future variants as sibling modules.
-"""
+"""Sparse attention. This feature is experimental and subject to change."""
 
 from . import dsa_cudnn, dsv4_attention
 from .compressor import Compressor

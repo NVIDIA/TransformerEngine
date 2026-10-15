@@ -53,11 +53,12 @@ class DSv4Attention(torch.nn.Module):
     """DSv4 CSA/HCA attention in ``sbhd``, ``bshd``, or packed ``thd`` format.
 
     Composes TE projections/norms, Compressor, Indexer, and RoPE with cuDNN
-    sparse attention. Supports full-sequence BF16 forward/backward on SM100
+    sparse attention. Supports full-sequence BF16 forward/backward on SM100 only,
     with 64 heads of width 512 and CSA index heads of width 128. Shared-input
     projections are fused by default. Each sequence starts at position zero.
-    Cache/decode, physical inter-sequence padding, TP/SP/CP, FP8, and sliding-only
-    attention are unsupported. The model owns the indexer auxiliary loss;
+    CSA and HCA include sliding-window attention; standalone sliding-window-only
+    layers are unsupported. Cache/decode, physical inter-sequence padding,
+    TP/SP/CP, and FP8 are unsupported. The model owns the indexer auxiliary loss;
     discrete top-k selection does not train the indexer from attention output alone.
     """
 

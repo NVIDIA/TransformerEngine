@@ -42,7 +42,7 @@ pooled = dsa_cudnn.compress(
     kv, gates, position_bias.float(), cu, cu_comp,
     ratio=ratio, overlap=is_csa, total_comp=total_comp,
 )
-compressed_kv = ...  # Apply RMSNorm and RoPE to pooled rows.
+compressed_kv = ...  # Apply RMSNorm and RoPE to compressed KV.
 
 indices = None
 if is_csa:
@@ -72,18 +72,21 @@ token and compressed `(cos, sin)` pairs.
 
 ## Usage
 
+CSA uses overlapping compression (see `Compressor`) and an Indexer to select
+compressed KV entries.
+
 ```python
 import torch
 from transformer_engine.pytorch.attention.sparse_attention import DSv4Attention
 
-attention = DSv4Attention(
+csa = DSv4Attention(
     hidden_size=4096, q_lora_rank=1536,
     layer_type="compressed_sparse_attention", head_dim=512, rope_head_dim=64,
     sliding_window=128, compression_ratio=4, o_groups=8, o_lora_rank=1024,
     index_n_heads=32, index_topk=32, max_seqlen=2048,
     params_dtype=torch.bfloat16,
 )
-output = attention(hidden_states)  # [S, B, 4096] -> [S, B, 4096]
+output = csa(hidden_states)  # [S, B, 4096] -> [S, B, 4096]
 ```
 
 HCA uses non-overlapping compression and omits the Indexer:
@@ -103,16 +106,23 @@ and packed (shape `TD`). Packed calls require contiguous CUDA INT32
 `cu_seqlens_q [B+1]` (from zero to `T`) and `max_seqlen_q`:
 
 ```python
-# Construct attention with qkv_format="thd".
-output = attention(hidden_states, cu_seqlens_q=cu, max_seqlen_q=max_length)
+packed_csa = DSv4Attention(
+    hidden_size=4096, q_lora_rank=1536,
+    layer_type="compressed_sparse_attention", head_dim=512, rope_head_dim=64,
+    sliding_window=128, compression_ratio=4, o_groups=8, o_lora_rank=1024,
+    index_n_heads=32, index_topk=32, max_seqlen=2048,
+    params_dtype=torch.bfloat16, qkv_format="thd",
+)
+output = packed_csa(hidden_states, cu_seqlens_q=cu, max_seqlen_q=max_length)
 ```
 
 ## Note on support
 
-The current layer supports full-sequence BF16 forward/backward on SM100,
+The current layer supports full-sequence BF16 forward/backward on SM100 only,
 with 64 heads of width 512 and at least one complete compression window
 per sequence. Sequences start at position zero; cache/decode, padding,
-TP/SP/CP, FP8, and sliding-only layers are unsupported.
+TP/SP/CP, and FP8 are unsupported. CSA and HCA include sliding-window attention;
+standalone sliding-window-only layers are unsupported.
 
 Compression and attention support autograd; top-k selection is discrete.
 CSA's `return_indexer_context=True` returns `(output, context)` for a

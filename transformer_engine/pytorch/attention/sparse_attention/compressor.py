@@ -12,7 +12,26 @@ from .dsa_cudnn import compress
 
 
 class Compressor(torch.nn.Module):
-    """Project KV/gates and normalize the cuDNN-pooled rows.
+    """Project KV/gates, compress token windows with cuDNN, and apply RMSNorm.
+
+    Non-overlapping compression combines each block of ``ratio`` tokens into
+    one compressed KV entry. Overlapping compression mixes the current block
+    with the entire preceding block to create one compressed KV entry, using
+    separate learned KV/gate projections for the current and preceding blocks.
+    Neighboring compressed KV entries therefore share an entire source block,
+    but use different projections of its tokens.
+    Weights are computed per KV channel as ``softmax(gates + position_bias)``.
+
+    For ``ratio=2`` and ``[a b c d e f g h i j k]``:
+
+    - Non-overlapping windows: ``[a b]``, ``[c d]``, ``[e f]``, ``[g h]``, ``[i j]``.
+    - Overlapping windows: ``[a b]``, ``[a b c d]``, ``[c d e f]``,
+      ``[e f g h]``, ``[g h i j]``.
+
+    The first overlapping entry masks the missing previous block. Both modes emit
+    ``floor(length / ratio)`` entries per sequence; incomplete trailing blocks
+    (``k`` here) are excluded from compression. In DSv4Attention, these tokens
+    remain available through local sliding-window attention.
 
     Accept batch-major ``[B,S,D]`` or packed ``[T,D]`` hidden states with
     token/compressed prefixes. Return ``[total_comp,width]`` rows before RoPE,

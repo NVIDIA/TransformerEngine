@@ -2,12 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Experimental PyTorch bindings for cuDNN sparse attention primitives.
-
-Compression, selection, sparse attention forward, and backward call cuDNN
-Frontend APIs. There are no numerical fallbacks. Inputs use packed sequences;
-model projections/norm/RoPE are external.
-"""
+"""PyTorch wrappers for cuDNN DSA/CSA primitives."""
 
 from importlib import import_module
 from typing import Optional
@@ -128,16 +123,15 @@ def compress(
     overlap: bool,
     total_comp: int,
 ) -> torch.Tensor:
-    """Gated pooling, with cuDNN forward and first-order backward.
+    """Compress token windows with cuDNN forward and backward.
 
     kv/score: contiguous BF16 [T, coff*D]; ape: FP32 [ratio, coff*D].
-    coff is 2 for overlapping pooling, 1 otherwise. Sequence prefixes are
+    coff is 2 for overlapping compression, 1 otherwise. Sequence prefixes are
     CUDA INT32 [B+1]; compressed segment lengths are floor(length / ratio).
     Returns BF16 [total_comp, D]. Per-segment tails are dropped by cuDNN.
 
-    Pass total_comp explicitly because inferring it from a CUDA prefix would
-    synchronize. It may be a capacity; only rows below cu_seqlens_comp[-1]
-    are valid. Remaining kernel-specific constraints are checked by cuDNN.
+    total_comp specifies output capacity; only entries before
+    cu_seqlens_comp[-1] are valid.
     """
     if ratio <= 0 or total_comp < 0:
         raise ValueError("ratio must be positive and total_comp nonnegative.")
@@ -417,7 +411,7 @@ def sparse_attention(
     scale: Optional[float] = None,
     max_compressed_seqlen: Optional[int] = None,
 ) -> torch.Tensor:
-    """Joint local + compressed sparse attention with first-order autograd.
+    """Joint local + compressed sparse attention with autograd.
 
     Full packed-sequence prefill: query [T,H,D], local_kv [T,D], compressed_kv
     [Tc,D], sink [H]. Q/KV have already had the model's norm/RoPE applied.
