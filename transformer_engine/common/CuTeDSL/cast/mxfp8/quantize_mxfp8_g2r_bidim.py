@@ -739,17 +739,15 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
         block = [THREADS_PER_CTA]
         cluster = [cluster_cols, 1, 1]
 
-        gA = None
         # Hardcode the layout using static N for some of the commonly used shapes
         if N == 2048:
             payload_layout = cute.make_layout((M, 2048), stride=(2048, 1))
             gX = cute.make_tensor(mX.iterator, payload_layout)
-            if cutlass.const_expr(self.cfg.WITH_DACT):
-                gA = (
-                    cute.make_tensor(mA.iterator, payload_layout)
-                    if cutlass.const_expr(self.cfg.WITH_DACT)
-                    else None
-                )
+            gA = (
+                cute.make_tensor(mA.iterator, payload_layout)
+                if cutlass.const_expr(self.cfg.WITH_DACT)
+                else None
+            )
             gO_row = (
                 cute.make_tensor(mO_row.iterator, payload_layout)
                 if cutlass.const_expr(self.cfg.ROWWISE)
@@ -785,12 +783,11 @@ class MXFP8QuantizeBidimensionalG2RKernel(MXFP8QuantizeKernelBase):
         elif N == 4096:
             payload_layout = cute.make_layout((M, 4096), stride=(4096, 1))
             gX = cute.make_tensor(mX.iterator, payload_layout)
-            if cutlass.const_expr(self.cfg.WITH_DACT):
-                gA = (
-                    cute.make_tensor(mA.iterator, payload_layout)
-                    if cutlass.const_expr(self.cfg.WITH_DACT)
-                    else None
-                )
+            gA = (
+                cute.make_tensor(mA.iterator, payload_layout)
+                if cutlass.const_expr(self.cfg.WITH_DACT)
+                else None
+            )
             gO_row = (
                 cute.make_tensor(mO_row.iterator, payload_layout)
                 if cutlass.const_expr(self.cfg.ROWWISE)
