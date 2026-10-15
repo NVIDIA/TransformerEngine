@@ -521,18 +521,16 @@ def _single_quantized_tensor_from_grouped(
     )
 
 
-def cudnn_weight_view(
-    weight: GroupedTensor,
-    attr: str,
-    data: torch.Tensor,
-    dtype: torch.dtype,
-    shape: tuple[int, ...],
+def cudnn_weight_data(
+    weight: GroupedTensor, dtype: torch.dtype, shape: tuple[int, ...], columnwise: bool = False
 ) -> torch.Tensor:
-    """``data.view(dtype=dtype).view(shape)``, kept on ``weight`` as ``attr``.
+    """The weight's row- or column-wise data as the typed tensor cuDNN takes.
 
-    Weight buffers persist across steps, so the typed view is built once per
-    buffer instead of with two torch ops before every kernel launch.
+    The view is kept on ``weight``, so a persistent weight is viewed once
+    instead of with two torch ops before every kernel launch.
     """
+    data = weight.columnwise_data if columnwise else weight.rowwise_data
+    attr = "_cudnn_columnwise_data" if columnwise else "_cudnn_rowwise_data"
     view = getattr(weight, attr, None)
     if view is None or view.data_ptr() != data.data_ptr():
         view = data.view(dtype=dtype).view(shape)
@@ -1771,7 +1769,6 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                 fc1_weight_single._columnwise_data = None
                 fc1_weight_single._columnwise_scale_inv = None
                 tex.swizzle_scales_for_gemm_(fc1_weight_single)
-                fc1_w_data = fc1_weight_single._rowwise_data
                 fc1_w_scales = fc1_weight_single._rowwise_scale_inv
             else:
                 tex.grouped_swizzle_for_gemm(
@@ -1779,18 +1776,13 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                     rowwise=True,
                     columnwise=False,
                 )
-                fc1_w_data = fc1_weight_for_gemm.rowwise_data
                 fc1_w_scales = fc1_weight_for_gemm.scale_inv
 
             # Pack weight tensors for stacked kernel
             # Data actual shape: (num_groups, n, k)
             # Data logical shape: (n, k, num_groups)
-            fc1_w_data = cudnn_weight_view(
-                grouped_fc1_weight,
-                "_cudnn_rowwise_view",
-                fc1_w_data,
-                data_dtype,
-                (num_groups, fc1_weight_shape[0], fc1_weight_k),
+            fc1_w_data = cudnn_weight_data(
+                grouped_fc1_weight, data_dtype, (num_groups, fc1_weight_shape[0], fc1_weight_k)
             )
             fc1_w_scales = fc1_w_scales.view(dtype=scale_view_dtype)
             if not canonical:
@@ -2161,12 +2153,8 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                         columnwise=False,
                     )
 
-                    fc2_w_data = cudnn_weight_view(
-                        grouped_fc2_weight,
-                        "_cudnn_rowwise_view",
-                        fc2_weight_for_gemm.rowwise_data,
-                        torch.float8_e4m3fn,
-                        (num_groups, fc2_weight_shape[0], fc2_weight_shape[1]),
+                    fc2_w_data = cudnn_weight_data(
+                        grouped_fc2_weight, torch.float8_e4m3fn, (num_groups, *fc2_weight_shape)
                     )
                     fc2_w_scales = fc2_weight_for_gemm.scale_inv.view(dtype=torch.float8_e8m0fnu)
                     if not canonical:
@@ -2629,12 +2617,11 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
             # Pack weight tensors for stacked kernel
             # Data actual shape: (num_groups, k, n)
             # Data logical shape: (n, k, num_groups)
-            fc2_w_data = cudnn_weight_view(
+            fc2_w_data = cudnn_weight_data(
                 grouped_fc2_weight,
-                "_cudnn_columnwise_view",
-                fc2_weight_for_gemm.columnwise_data,
                 data_dtype,
                 (num_groups, fc2_weight_shape[0], fc2_weight_k),
+                columnwise=True,
             )
             fc2_w_scales = fc2_weight_for_gemm.columnwise_scale_inv.view(dtype=scale_view_dtype)
             if canonical:
@@ -3086,12 +3073,11 @@ class _GroupedMLP_CuTeGEMMBase(FusedOperation):
                         fc1_weight_for_gemm, rowwise=False, columnwise=True
                     )
 
-                    fc1_w_data = cudnn_weight_view(
+                    fc1_w_data = cudnn_weight_data(
                         grouped_fc1_weight,
-                        "_cudnn_columnwise_view",
-                        fc1_weight_for_gemm.columnwise_data,
                         torch.float8_e4m3fn,
-                        (num_groups, fc1_weight_shape[0], fc1_weight_shape[1]),
+                        (num_groups, *fc1_weight_shape),
+                        columnwise=True,
                     )
                     fc1_w_scales = fc1_weight_for_gemm.columnwise_scale_inv.view(
                         dtype=torch.float8_e8m0fnu
