@@ -189,7 +189,9 @@ def _reuses_cached_weight_workspaces(
     if update_weight_workspace or not weight_workspaces:
         return False
     weights = (
-        [prepared_weights] if isinstance(prepared_weights, GroupedTensorStorage) else prepared_weights
+        [prepared_weights]
+        if isinstance(prepared_weights, GroupedTensorStorage)
+        else prepared_weights
     )
     return len(weights) == len(weight_workspaces) and all(
         workspace is not None and weight is workspace
@@ -2544,9 +2546,7 @@ class GroupedLinear(TransformerEngineBaseModule):
             cpu_offloading = is_cpu_offload_enabled()
             use_grouped_tensor_path = False
             if self.use_grouped_tensor and not (
-                debug
-                or cpu_offloading
-                or any(q is not None for q in output_quantizers)
+                debug or cpu_offloading or any(q is not None for q in output_quantizers)
             ):
                 if (
                     self.fp8

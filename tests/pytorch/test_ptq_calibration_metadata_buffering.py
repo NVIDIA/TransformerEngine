@@ -962,9 +962,7 @@ def test_skip_calibration_conditionally_updates_in_place(
     initial_value = torch.tensor([4.0])
     quantizer._calibration_state = {"amax": initial_value}
     skip_calibration = torch.ones(1)
-    config = QuantizationCalibrationConfig(
-        transformer_engine_calibration_decay=calibration_decay
-    )
+    config = QuantizationCalibrationConfig(transformer_engine_calibration_decay=calibration_decay)
 
     quantizer._update_calibration_value(
         "amax",
