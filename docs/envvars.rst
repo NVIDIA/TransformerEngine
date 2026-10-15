@@ -674,7 +674,7 @@ They are experimental implementation controls, not a general ragged-input policy
   attention backend or change communication. General ragged layouts and stream
   lifetime beyond the documented focused validation are not qualified.
 
-* ``NVTE_CP_EXPERIMENTAL_NATIVE_AG_HEADS=8`` or ``16`` partitions an eligible
+* ``NVTE_CP_EXPERIMENTAL_NATIVE_AG_HEADS=4``, ``8`` or ``16`` partitions an eligible
   cuDNN AllGather backward call into whole GQA groups. The partitions execute
   serially on that call's stream and reuse its workspace. This can reduce
   workspace allocation at the cost of more kernel launches; it does not select
@@ -684,7 +684,10 @@ They are experimental implementation controls, not a general ragged-input policy
   ``NVTE_CP_EXPERIMENTAL_STRIDED_DENSE_BWD=1``. Changing it within a process is
   not supported. Other values raise an error.
 
-  Qualification covers the PyTorch CP4 AllGather path on SM100; other
+  The ``4``-head mode executes one complete GQA group per partition. Smaller
+  partitions reduce workspace but add kernel launches; select a partition size
+  using workload-specific memory and latency measurements. Qualification for
+  ``4``/``8``/``16`` covers the PyTorch CP4 AllGather path on SM100; other
   architectures and frontends are not qualified by this experiment.
   This experiment is deliberately bounded to nondeterministic BF16, vanilla
   bottom-right causal attention, Hq32/Hkv8 and D256. It accepts physical Q/KV

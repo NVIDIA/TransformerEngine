@@ -20,7 +20,7 @@ TEST(CPNativeHeadPartition, PreservesPhysicalStorageAndWholeGqaGroups) {
     for (size_t sk_multiple = 1; sk_multiple <= 8; ++sk_multiple) {
       CPNativeHeadGeometry g{batch, 32, 8, 256, 256, sq, sk_multiple * sq, 2 * sq, 8 * sq};
       const size_t origin = sk_multiple > 4 ? sq : 0;
-      for (size_t chunk : {size_t(8), size_t(16)}) {
+      for (size_t chunk : {size_t(4), size_t(8), size_t(16)}) {
         ASSERT_TRUE(cp_native_head_geometry_supported(g, chunk));
         std::set<size_t> query_heads, kv_heads;
         for (size_t head = 0; head < 32; head += chunk) {
@@ -70,7 +70,7 @@ TEST(CPNativeHeadPartition, PreservesPhysicalStorageAndWholeGqaGroups) {
         }
         ++cases;
       }
-      for (size_t requested : {size_t(0), size_t(4), size_t(32), size_t(64)})
+      for (size_t requested : {size_t(0), size_t(1), size_t(2), size_t(32), size_t(64)})
         ASSERT_TRUE(!cp_native_head_geometry_supported(g, requested));
       auto bad = g;
       ++bad.batch;
@@ -101,5 +101,5 @@ TEST(CPNativeHeadPartition, PreservesPhysicalStorageAndWholeGqaGroups) {
       ASSERT_TRUE(!cp_native_head_geometry_supported(bad, 8));
     }
   }
-  ASSERT_TRUE(cases == 32 && addresses == 23040);
+  ASSERT_TRUE(cases == 48 && addresses == 34560);
 }

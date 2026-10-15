@@ -19,10 +19,11 @@ struct CPNativeHeadGeometry {
 inline bool cp_native_head_geometry_supported(const CPNativeHeadGeometry &g, size_t chunk) {
   const bool small = g.batch == 2 && g.query_length == 64;
   const bool full = g.batch == 64 && g.query_length == 1024;
-  return (small || full) && (chunk == 8 || chunk == 16) && g.query_heads == 32 && g.kv_heads == 8 &&
-         g.query_dim == 256 && g.value_dim == 256 && g.query_pitch == 2 * g.query_length &&
-         g.kv_pitch == 8 * g.query_length && g.kv_length >= g.query_length &&
-         g.kv_length <= g.kv_pitch && g.kv_length % g.query_length == 0;
+  return (small || full) && (chunk == 4 || chunk == 8 || chunk == 16) && g.query_heads == 32 &&
+         g.kv_heads == 8 && g.query_dim == 256 && g.value_dim == 256 &&
+         g.query_pitch == 2 * g.query_length && g.kv_pitch == 8 * g.query_length &&
+         g.kv_length >= g.query_length && g.kv_length <= g.kv_pitch &&
+         g.kv_length % g.query_length == 0;
 }
 
 struct CPNativeHeadOffsets {

@@ -927,7 +927,7 @@ native_head_model_configs = {
     get_device_compute_capability() != (10, 0),
     reason="Native AllGather head partition qualification targets SM100.",
 )
-@pytest.mark.parametrize("head_chunk", [0, 8, 16])
+@pytest.mark.parametrize("head_chunk", [0, 8, 16, 4])
 @pytest.mark.parametrize(
     "model,qkv_format,world_size",
     [

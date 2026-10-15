@@ -678,9 +678,10 @@ static size_t cp_ag_native_head_chunk(const FusedAttnConfig &cfg) {
   static const size_t requested = []() -> size_t {
     const char *value = std::getenv("NVTE_CP_EXPERIMENTAL_NATIVE_AG_HEADS");
     if (value == nullptr || std::string(value) == "0") return 0;
+    if (std::string(value) == "4") return 4;
     if (std::string(value) == "8") return 8;
     if (std::string(value) == "16") return 16;
-    NVTE_ERROR("NVTE_CP_EXPERIMENTAL_NATIVE_AG_HEADS must be 0, 8 or 16.");
+    NVTE_ERROR("NVTE_CP_EXPERIMENTAL_NATIVE_AG_HEADS must be 0, 4, 8 or 16.");
     return 0;
   }();
   if (requested == 0 || !cp_ag_dense_graph(cfg) || cfg.deterministic ||
@@ -978,9 +979,12 @@ static auto cp_get_bwd_graph(const FusedAttnConfig &cfg, cudnnHandle_t handle) {
   }
   // Separate cache domains prevent a physical-H32 chunk graph from aliasing a
   // naturally smaller-head graph. Keys retain the full physical H/Hkv and pitches.
-  static GraphCache<F16BwdGraphAndTensors> full_cache, half_cache, quarter_cache;
+  static GraphCache<F16BwdGraphAndTensors> full_cache, half_cache, quarter_cache, eighth_cache;
   const size_t head_chunk = cp_ag_native_head_chunk(cfg);
-  auto &cache = head_chunk == 8 ? quarter_cache : head_chunk == 16 ? half_cache : full_cache;
+  auto &cache = head_chunk == 4    ? eighth_cache
+                : head_chunk == 8  ? quarter_cache
+                : head_chunk == 16 ? half_cache
+                                   : full_cache;
   auto key = cfg.make_cache_key(Pass::Bwd);
   key.num_tokens_q = cfg.num_tokens_q;
   key.num_tokens_kv = cfg.num_tokens_kv;
