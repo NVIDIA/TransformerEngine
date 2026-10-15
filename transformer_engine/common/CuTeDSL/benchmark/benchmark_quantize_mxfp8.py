@@ -45,6 +45,7 @@ DIRECTIONS = {"rowwise": (True, False), "colwise": (False, True), "both": (True,
 OUTPUT_FORMATS = ("csv", "png", "html", "raw")
 IMPLS = {"cutedsl": "CuTeDSL", "cuda": "CUDA"}
 FUSIONS = ("none", "act", "dact", "dbias", "dactbias")
+SWIZZLES = ("off", "on")  # scales in the GEMM-ready swizzled layout
 ACTIVATIONS = ("gelu", "relu", "silu", "qgelu", "srelu")
 COLUMNS = [
     "impl",
@@ -52,6 +53,7 @@ COLUMNS = [
     "N",
     "direction",
     "fusion",
+    "swizzle",
     "time_us",
     "min_us",
     "rel_std_pct",
@@ -112,7 +114,7 @@ def _round_up(x, y):
     return (x + y - 1) // y * y
 
 
-def gbps(t_ns, m, n, direction, fusion):
+def gbps(t_ns, m, n, direction, fusion, _swizzle):
     """Bytes moved (bf16 input(s), fp8 + e8m0 scales out per direction) per ns, i.e. GB/s."""
     num_inputs = 2 if "dact" in fusion else 1
     num_outputs = sum(DIRECTIONS[direction])
@@ -121,7 +123,7 @@ def gbps(t_ns, m, n, direction, fusion):
 
 
 def _cutedsl_launcher(activation):
-    """Returns setup(x, act_input, direction, fusion) -> launch(), calling the compiled CuTeDSL
+    """Returns setup(x, act_input, direction, fusion, swizzle) -> launch(), calling the compiled CuTeDSL
     kernel directly."""
     # pylint: disable=import-outside-toplevel
     import torch
@@ -136,7 +138,7 @@ def _cutedsl_launcher(activation):
     print(f"CuTeDSL kernels from {qc.__file__}")
 
     @functools.lru_cache(maxsize=None)
-    def compiled(direction, fusion):
+    def compiled(direction, fusion, swizzle):
         rowwise, colwise = DIRECTIONS[direction]
         with_dact = "dact" in fusion
         cfg = qc.MXFP8QuantizeConfig(
@@ -144,7 +146,7 @@ def _cutedsl_launcher(activation):
             "Float8E4M3",
             rowwise,
             colwise,
-            with_gemm_swizzled_scales=False,
+            with_gemm_swizzled_scales=swizzle == "on",
             with_amax=False,
             with_dbias="bias" in fusion,
             with_dact=with_dact,
@@ -154,7 +156,7 @@ def _cutedsl_launcher(activation):
         fn = qc.compile_cutedsl_function_from_cfg(cfg)
         return getattr(fn, "__tvm_ffi_object__", lambda: None)() or fn
 
-    def setup(x, act_input, direction, fusion):
+    def setup(x, act_input, direction, fusion, swizzle):
         m, n = x.shape
         rowwise, colwise = DIRECTIONS[direction]
         empty = functools.partial(torch.empty, device="cuda")
@@ -170,7 +172,7 @@ def _cutedsl_launcher(activation):
         act_input = act_input if "dact" in fusion else None
         # One partial-sum row per CTA; a CTA covers at least one 32-row MXFP8 block.
         workspace = empty((-(-m // 32), n), dtype=torch.float32) if "bias" in fusion else None
-        fn = compiled(direction, fusion)
+        fn = compiled(direction, fusion, swizzle)
         stream = torch.cuda.current_stream().cuda_stream
         outs = (o_row, s_row, o_col, s_col)
         return lambda: fn(x, *outs, None, None, act_input, workspace, stream)
@@ -179,7 +181,7 @@ def _cutedsl_launcher(activation):
 
 
 def _cuda_launcher(activation):
-    """Returns setup(x, act_input, direction, fusion) -> launch(), running the installed TE's
+    """Returns setup(x, act_input, direction, fusion, swizzle) -> launch(), running the installed TE's
     CUDA kernel."""
     # pylint: disable=import-outside-toplevel
     os.environ["NVTE_ENABLE_CUTEDSL_BACKEND"] = "0"
@@ -195,11 +197,12 @@ def _cuda_launcher(activation):
         lib.nvte_set_cutedsl_backend.argtypes = [ctypes.c_int]
         lib.nvte_set_cutedsl_backend(0)
 
-    def setup(x, act_input, direction, fusion):
+    def setup(x, act_input, direction, fusion, swizzle):
         rowwise, colwise = DIRECTIONS[direction]
         quantizer = MXFP8Quantizer(
             fp8_dtype=tex.DType.kFloat8E4M3, rowwise=rowwise, columnwise=colwise
         )
+        quantizer.optimize_for_gemm = swizzle == "on"
         if fusion == "none":
             y = quantizer.make_empty(x.shape, dtype=x.dtype, device=x.device)
             return lambda: tex.quantize(x, quantizer, y, None)
@@ -213,9 +216,9 @@ def _cuda_launcher(activation):
     return setup
 
 
-def run_suite(shapes, directions, fusions, activation, runs, warmup, impl):
-    """Profile the `impl` quantize kernel for every shape, direction and fusion; returns a
-    DataFrame."""
+def run_suite(shapes, directions, fusions, swizzles, activation, runs, warmup, impl):
+    """Profile the `impl` quantize kernel for every shape, direction, fusion and swizzle;
+    returns a DataFrame."""
     # pylint: disable=import-outside-toplevel
     import nsight
     import torch
@@ -227,7 +230,13 @@ def run_suite(shapes, directions, fusions, activation, runs, warmup, impl):
         """The input (or incoming gradient) and, for dact, the forward activation input."""
         return [torch.randn((m, n), dtype=torch.bfloat16, device="cuda") for _ in range(2)]
 
-    configs = [(m, n, d, f) for (m, n) in shapes for d in directions for f in fusions]
+    configs = [
+        (m, n, d, f, sw)
+        for (m, n) in shapes
+        for d in directions
+        for f in fusions
+        for sw in swizzles
+    ]
 
     @nsight.analyze.kernel(
         configs=configs,
@@ -239,8 +248,8 @@ def run_suite(shapes, directions, fusions, activation, runs, warmup, impl):
         clock_control="none",  # locking clocks is left to the user
         cache_control="all",
     )
-    def quantize_mxfp8(m, n, direction, fusion):
-        launch = setup(*make_inputs(m, n), direction, fusion)
+    def quantize_mxfp8(m, n, direction, fusion, swizzle):
+        launch = setup(*make_inputs(m, n), direction, fusion, swizzle)
         for _ in range(warmup):  # module load / first-launch costs stay out of the profile
             launch()
         with nsight.annotate("quantize_mxfp8"):
@@ -249,7 +258,7 @@ def run_suite(shapes, directions, fusions, activation, runs, warmup, impl):
     # nsight fills the arguments from `configs`.
     df = quantize_mxfp8().to_dataframe()  # pylint: disable=no-value-for-parameter
 
-    keys = ["m", "n", "direction", "fusion"]
+    keys = ["m", "n", "direction", "fusion", "swizzle"]
     time = df[df["Metric"] == TIME_METRIC]
     bw = df[df["Metric"] == "GB/s"][keys + ["AvgValue"]].rename(columns={"AvgValue": "GB/s"})
     out = time.merge(bw, on=keys)
@@ -261,7 +270,7 @@ def run_suite(shapes, directions, fusions, activation, runs, warmup, impl):
         raise RuntimeError(f"Profiled kernels are not all {impl} kernels")
     out["impl"] = impl
     out["kernel"] = [
-        m.group(1) if (m := re.search(r"(MXFP8Quantize\w+?Kernel)", k)) else k
+        m.group(1) if (m := re.search(r"(MXFP8Quantize\w*?Kernel)", k)) else k
         for k in out["Kernel"]
     ]
     return out[COLUMNS]
@@ -306,7 +315,7 @@ def _with_delta(frames, base, cand):
     # pylint: disable=import-outside-toplevel
     import pandas as pd
 
-    keys = ["M", "N", "direction", "fusion"]
+    keys = ["M", "N", "direction", "fusion", "swizzle"]
     df = pd.concat(frames, ignore_index=True)
     table = df.pivot_table(index=keys, columns="revision", values="time_us")[[base, cand]]
     table["delta"] = (table[base] - table[cand]) / table[base] * 100
@@ -364,7 +373,8 @@ def compare(repo, old, new, worker_args):
 
 
 def build_charts(df, labels, activation="gelu"):
-    """Renderer-agnostic chart specs: one line chart of time vs M per (fusion, direction, N).
+    """Renderer-agnostic chart specs: one line chart of time vs M per (fusion, direction,
+    swizzle, N).
 
     `labels` maps each series key (the `revision` column when comparing, else the `impl`
     column) to its legend name, in drawing order. Returns JSON-serializable dicts, so the
@@ -374,8 +384,10 @@ def build_charts(df, labels, activation="gelu"):
     key_col = "revision" if "revision" in df.columns else "impl"
     point_cols = ["M", "time_us", "min_us", "rel_std_pct", "GB/s", "kernel"]
     charts = []
-    for fusion, direction in itertools.product(FUSIONS, DIRECTIONS):
-        group = df[(df["fusion"] == fusion) & (df["direction"] == direction)]
+    for fusion, direction, swizzle in itertools.product(FUSIONS, DIRECTIONS, SWIZZLES):
+        group = df[
+            (df["fusion"] == fusion) & (df["direction"] == direction) & (df["swizzle"] == swizzle)
+        ]
         for n in sorted(group["N"].unique()):
             rows = group[group["N"] == n].sort_values("M")
             series = []
@@ -401,14 +413,15 @@ def build_charts(df, labels, activation="gelu"):
                 )
             charts.append(
                 {
-                    "id": f"{fusion}_{direction}_N{n}",
+                    "id": f"{fusion}_{direction}{'_swizzled' if swizzle == 'on' else ''}_N{n}",
                     "fusion": fusion,
                     "direction": direction,
+                    "swizzle": swizzle,
                     "N": int(n),
-                    "title": (
-                        f"{fusion}({activation}) · {direction} · N={n}"
-                        if "act" in fusion
-                        else f"{fusion} · {direction} · N={n}"
+                    "title": " · ".join(
+                        [f"{fusion}({activation})" if "act" in fusion else fusion, direction]
+                        + (["swizzled"] if swizzle == "on" else [])
+                        + [f"N={n}"]
                     ),
                     "subtitle": subtitle,
                     "x_label": "M",
@@ -539,7 +552,7 @@ def _gpu():
     return f"{name} (driver {driver})"
 
 
-def _write_config(out_dir, args, fusions, shapes, repo, commit, labels, files):
+def _write_config(out_dir, args, fusions, swizzles, shapes, repo, commit, labels, files):
     """Writes config.txt: what was benchmarked, on which commit and GPU."""
 
     def rev(name):
@@ -579,6 +592,7 @@ def _write_config(out_dir, args, fusions, shapes, repo, commit, labels, files):
         f"shapes:     {shape_text}",
         f"directions: {', '.join(args.direction)}",
         f"fusions:    {', '.join(fusions)}",
+        f"swizzle:    {', '.join(swizzles)}",
     ]
     if {"act", "dact", "dactbias"} & set(fusions):
         lines.append(f"activation: {args.activation or 'gelu'}")
@@ -606,7 +620,10 @@ def _load_results(folder):
     fields = {}
     for key, value in re.findall(r"^(\w+):\s+(.*)$", text, re.M):
         fields.setdefault(key, value)  # the top-level entry, not an embedded source config
-    return pd.read_csv(folder / "results.csv"), fields, text
+    df = pd.read_csv(folder / "results.csv")
+    if "swizzle" not in df.columns:  # written before --swizzle existed
+        df.insert(df.columns.get_loc("fusion") + 1, "swizzle", "off")
+    return df, fields, text
 
 
 def _regenerate_inputs(args):
@@ -730,6 +747,13 @@ def main():
         help=f"all, or a ;-separated subset of {';'.join(FUSIONS)} (default: none)",
     )
     parser.add_argument(
+        "--swizzle",
+        type=str.lower,
+        choices=["off", "on", "both"],
+        default="off",
+        help="scales in the GEMM-ready swizzled layout (default: off)",
+    )
+    parser.add_argument(
         "--activation", choices=ACTIVATIONS, help="only with act/dact/dactbias (default: gelu)"
     )
     parser.add_argument("--runs", type=int, help="profiled runs per config (default: 5; debug: 1)")
@@ -788,6 +812,7 @@ def main():
                 f"--fusion takes all or a ;-separated list of {', '.join(FUSIONS)}, got"
                 f" {args.fusion!r}"
             )
+        swizzles = list(SWIZZLES) if args.swizzle == "both" else [args.swizzle]
         if args.activation and not {"act", "dact", "dactbias"} & set(fusions):
             parser.error("--activation only applies to the act, dact and dactbias fusions")
         if not args.compare and (args.old or args.new):
@@ -827,7 +852,7 @@ def main():
             worker_args = ["--mode", args.mode, *(["--shapes", args.shapes] if args.shapes else [])]
             worker_args += ["--runs", str(args.runs), "--warmup", str(args.warmup)]
             worker_args += ["--direction", *args.direction]
-            worker_args += ["--fusion", ";".join(fusions)]
+            worker_args += ["--fusion", ";".join(fusions), "--swizzle", args.swizzle]
             worker_args += ["--activation", args.activation] if args.activation else []
             df = compare(repo, args.old, args.new, worker_args)
         else:
@@ -839,6 +864,7 @@ def main():
                 shapes,
                 args.direction,
                 fusions,
+                swizzles,
                 args.activation or "gelu",
                 args.runs,
                 args.warmup,
@@ -851,7 +877,7 @@ def main():
     is_comparison = "revision" in df.columns
     if args.format == "raw":
         if is_comparison:
-            keys = ["M", "N", "direction", "fusion"]
+            keys = ["M", "N", "direction", "fusion", "swizzle"]
             table = df.pivot_table(index=keys, columns="revision", values="time_us")[["old", "new"]]
             table["delta"] = df.groupby(keys)["delta"].first()
             print(
@@ -887,7 +913,9 @@ def main():
     if args.regenerate is not None:
         _write_regenerated_config(out_dir, labels, activation, sha, sources, files + ["config.txt"])
     else:
-        _write_config(out_dir, args, fusions, shapes, repo, sha, labels, files + ["config.txt"])
+        _write_config(
+            out_dir, args, fusions, swizzles, shapes, repo, sha, labels, files + ["config.txt"]
+        )
     print(f"Results written to {out_dir.resolve()}/")
 
 
