@@ -43,11 +43,7 @@ def test_sigmoid_bias_preserves_tiny_scores(topk, histogram_mode, layout, mixed_
     bin_bounds = torch.tensor([-1.0, 1.0], device="cuda")
     histogram = torch.zeros(num_experts, num_bins, dtype=torch.int32, device="cuda")
     reference_probs, reference_map = topk_score_function_pytorch(
-        logits,
-        topk,
-        scaling_factor=3.16,
-        score_function="sigmoid",
-        expert_bias=expert_bias,
+        logits, topk, scaling_factor=3.16, score_function="sigmoid", expert_bias=expert_bias
     )
     kwargs = {}
     if histogram_mode is not None:
