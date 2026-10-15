@@ -245,7 +245,7 @@ def run_suite(shapes, directions, fusions, swizzles, activation, runs, warmup, i
         derive_metric=gbps,
         # The TE path may launch helper kernels (e.g. zeroing scale padding); keep only the cast.
         ignore_kernel_list=_KeepOnly("quantize") if impl == "CUDA" else None,
-        clock_control="none",  # locking clocks is left to the user
+        clock_control="base",  # repeatable, but base clocks are below the usual boost clock
         cache_control="all",
     )
     def quantize_mxfp8(m, n, direction, fusion, swizzle):
@@ -420,7 +420,7 @@ def build_charts(df, labels, activation="gelu"):
                     "N": int(n),
                     "title": " · ".join(
                         [f"{fusion}({activation})" if "act" in fusion else fusion, direction]
-                        + (["swizzled"] if swizzle == "on" else [])
+                        + (["swizzled scale"] if swizzle == "on" else [])
                         + [f"N={n}"]
                     ),
                     "subtitle": subtitle,
@@ -600,7 +600,7 @@ def _write_config(out_dir, args, fusions, swizzles, shapes, repo, commit, labels
         f"runs:       {args.runs} profiled + {args.warmup} warm-up launches per config",
         (
             "timing:     Nsight Compute gpu__time_duration.sum, L2 flushed before each run,"
-            " clocks as set by the user"
+            " GPU clocks locked to base by Nsight Compute"
         ),
         f"files:      {', '.join(files)}",
     ]
