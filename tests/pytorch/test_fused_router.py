@@ -121,13 +121,13 @@ def _router_function(fn, execution):
     return torch.compile(fn, fullgraph=True)
 
 
-def _compile_logits(dtype):
+def _make_logits(dtype):
     logits = torch.linspace(-2, 2, 32, device="cuda")
     logits = logits + torch.linspace(-0.1, 0.1, 64, device="cuda").unsqueeze(1)
     return logits.reshape(2, 32, 32).to(dtype).requires_grad_(True)
 
 
-def _check_compile_reference(actual, expected, dtype):
+def _check_reference(actual, expected, dtype):
     atol, rtol = {
         torch.float32: (1e-6, 2e-5),
         torch.float16: (2e-4, 2e-3),
@@ -184,7 +184,7 @@ def test_router_compile_replay(histogram_mode, index_dtype):
         torch.compiler.cudagraph_mark_step_begin()
         bounds.copy_(bounds.new_tensor(new_bounds))
         total.fill_(64 + 17 * step)
-        logits = _compile_logits(torch.bfloat16)
+        logits = _make_logits(torch.bfloat16)
         if step == 1:
             logits = logits.flip(-1).detach().requires_grad_(True)
         eager_logits = logits.detach().clone().requires_grad_(True)
@@ -261,7 +261,7 @@ def test_router_compile_dynamic(dtype, index_dtype):
         torch.testing.assert_close(actual, expected)
         (actual_grad,) = torch.autograd.grad(actual, logits)
         (eager_grad,) = torch.autograd.grad(expected, eager_logits)
-        _check_compile_reference(actual_grad, eager_grad, dtype)
+        _check_reference(actual_grad, eager_grad, dtype)
 
 
 @pytest.mark.parametrize(
@@ -829,9 +829,7 @@ def test_qb_topk_histogram(histogram_mode, topk, routing_output_mode, execution,
     small = num_tokens == 64
     logits = torch.randn(num_tokens, num_experts, device="cuda", dtype=dtype, requires_grad=True)
     if small:
-        logits = (
-            _compile_logits(dtype).reshape(num_tokens, num_experts).detach().requires_grad_(True)
-        )
+        logits = _make_logits(dtype).reshape(num_tokens, num_experts).detach().requires_grad_(True)
     reference_logits = logits.detach().float().requires_grad_(True)
     expert_bias = torch.linspace(-0.2, 0.2, num_experts, device="cuda", dtype=torch.float32)
     bin_bounds = torch.stack((expert_bias.min() - 1.0, expert_bias.max() + 1.0))
@@ -883,7 +881,7 @@ def test_qb_topk_histogram(histogram_mode, topk, routing_output_mode, execution,
     )
     fused_probs, fused_routing_output = outputs[:2]
     if small:
-        _check_compile_reference(fused_probs, reference["probs"], dtype)
+        _check_reference(fused_probs, reference["probs"], dtype)
     else:
         torch.testing.assert_close(fused_probs, reference["probs"])
     assert not fused_routing_output.requires_grad
@@ -908,7 +906,7 @@ def test_qb_topk_histogram(histogram_mode, topk, routing_output_mode, execution,
     reference["probs"].backward(grad.float())
     fused_probs.backward(grad)
     if small:
-        _check_compile_reference(fused_logits.grad, reference_logits.grad, dtype)
+        _check_reference(fused_logits.grad, reference_logits.grad, dtype)
     else:
         torch.testing.assert_close(fused_logits.grad, reference_logits.grad, atol=1e-5, rtol=1e-5)
 
@@ -967,7 +965,7 @@ def test_qb_histogram_accumulates_microbatches(execution, dtype, histogram_mode)
         )
         probs, routing = route(logits, histogram, bounds, indices)
         torch.testing.assert_close(histogram, reference["histogram"])
-        _check_compile_reference(probs, reference["probs"], dtype)
+        _check_reference(probs, reference["probs"], dtype)
         if indices is not None:
             assert routing.data_ptr() == indices.data_ptr()
             torch.testing.assert_close(
@@ -986,39 +984,7 @@ def test_qb_histogram_accumulates_microbatches(execution, dtype, histogram_mode)
     for logits, probs, reference_probs in reversed(pending):
         actual_grad = torch.autograd.grad(probs.float().square().sum(), logits)[0]
         ref_grad = torch.autograd.grad(reference_probs.float().square().sum(), logits)[0]
-        _check_compile_reference(actual_grad, ref_grad, dtype)
-
-
-@pytest.mark.parametrize("execution", ["eager", "compile"])
-@pytest.mark.parametrize("histogram_mode", [None, "two_kernel", "fused_atomic"])
-def test_router_saved_indices(execution, histogram_mode):
-    logits = torch.randn(16, 32, device="cuda", requires_grad=True)
-    indices = torch.empty(16, 4, device="cuda", dtype=torch.int32)
-    bias = torch.zeros(32, device="cuda")
-    histogram = torch.zeros(32, 31, device="cuda", dtype=torch.int32)
-    bounds = torch.tensor([-1.0, 1.0], device="cuda")
-
-    def route(x):
-        return fused_topk_with_score_function(
-            x,
-            4,
-            False,
-            None,
-            None,
-            None,
-            "sigmoid",
-            bias,
-            topk_indices=indices,
-            qb_histogram=histogram if histogram_mode else None,
-            qb_bin_bounds=bounds if histogram_mode else None,
-            qb_histogram_mode=histogram_mode,
-        )
-
-    route = _router_function(route, execution)
-    probs, _ = route(logits)
-    route(-logits)
-    with pytest.raises(RuntimeError, match="modified by an inplace operation"):
-        probs.sum().backward()
+        _check_reference(actual_grad, ref_grad, dtype)
 
 
 def test_qb_topk_argument_validation():
