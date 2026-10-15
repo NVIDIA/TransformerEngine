@@ -8,6 +8,9 @@ FROST runs through cudnn-frontend's Python API and is registered behind the
 CUDNN_FRONTEND_ENABLE_FROST_ENGINES=1 flag. Different from FusedAttnBackend.F16_arbitrary_seqlen
 and FusedAttnBackend.FP8, FusedAttnBackend.FROST is Python only and requires the Python
 installation of cudnn-frontend, not only its C++ header files.
+
+It is selected only where the C++ sub-backends decline. NVTE_FROST_ATTN=0 rules it out without
+also disabling them, which NVTE_FUSED_ATTN=0 would.
 """
 
 from __future__ import annotations
