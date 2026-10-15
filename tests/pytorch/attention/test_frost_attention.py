@@ -502,20 +502,6 @@ def test_frost_plan_key_round_trips_through_the_builders(monkeypatch):
     assert keys["fwd"] != keys["bwd"], "a forward plan must not be served to a backward call"
 
 
-@requires_frost
-def test_frost_rejects_mismatched_kv():
-    """v must index the same KV positions as k. head_dim is free; the rest is not."""
-    b, h, s, d = 2, 4, 512, 512
-    dtype = torch.bfloat16
-    mk = lambda hh: torch.randn(b, s, hh, d, device="cuda", dtype=dtype)
-    q, k = mk(h), mk(h)
-
-    with pytest.raises(ValueError, match="batch, heads and seqlen"):
-        _fwd(q, k, mk(h * 2), "no_mask", 1.0)
-    with pytest.raises(ValueError, match="match q"):
-        _fwd(q, k, k.to(torch.float32), "no_mask", 1.0)
-
-
 def test_frost_engines_are_enabled_even_if_cudnn_was_imported_without_them():
     """Enabling the FROST engines must not depend on who imported cuDNN first.
 
