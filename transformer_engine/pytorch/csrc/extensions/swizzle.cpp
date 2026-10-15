@@ -20,6 +20,14 @@ namespace pytorch {
 
 namespace {
 
+NVTEShape swizzled_scale_shape(NVTEShape shape, NVTEScalingMode scaling_mode, bool rowwise) {
+  if (scaling_mode == NVTE_MXFP8_1D_SCALING && shape.ndim == 2) {
+    shape.data[0] = roundup(shape.data[0], rowwise ? 128 : 4);
+    shape.data[1] = roundup(shape.data[1], rowwise ? 4 : 128);
+  }
+  return shape;
+}
+
 void reset_tensor_data(transformer_engine::TensorWrapper &tensor, bool rowwise, bool columnwise) {
   NVTEShape shape;
   shape.ndim = 1;
@@ -78,8 +86,9 @@ std::tuple<std::optional<at::Tensor>, std::optional<at::Tensor>> swizzle_scales_
     const auto scales_dtype = static_cast<DType>(input_scales_nvte.dtype);
 
     // Allocate buffer for swizzled scales (uint8, like all quantizer allocations)
-    const NVTEShape output_scales_shape = input_scales_shape;
-    rowwise_scales_pyt = allocateSpace(input_scales_shape, DType::kByte, false);
+    const NVTEShape output_scales_shape =
+        swizzled_scale_shape(input_scales_shape, scaling_mode, true);
+    rowwise_scales_pyt = allocateSpace(output_scales_shape, DType::kByte, false);
     void *output_scales_dptr = getDataPtr(*rowwise_scales_pyt);
 
     // Initialize TE tensors with scales
@@ -111,8 +120,9 @@ std::tuple<std::optional<at::Tensor>, std::optional<at::Tensor>> swizzle_scales_
     const auto scales_dtype = static_cast<DType>(input_scales_nvte.dtype);
 
     // Allocate buffer for swizzled scales (uint8, like all quantizer allocations)
-    const NVTEShape output_scales_shape = input_scales_shape;
-    columnwise_scales_pyt = allocateSpace(input_scales_shape, DType::kByte, false);
+    const NVTEShape output_scales_shape =
+        swizzled_scale_shape(input_scales_shape, scaling_mode, false);
+    columnwise_scales_pyt = allocateSpace(output_scales_shape, DType::kByte, false);
     void *output_scales_dptr = getDataPtr(*columnwise_scales_pyt);
 
     // Initialize TE tensors with scales
@@ -190,7 +200,9 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm_impl(
   for (auto &tensor : tensors_needing_swizzle) {
     const auto scales_nvte =
         (rowwise_usage ? tensor->get_rowwise_scale_inv() : tensor->get_columnwise_scale_inv());
-    const auto &shape = scales_nvte.shape;
+    const auto shape = check_scale_inv_shapes
+                           ? swizzled_scale_shape(scales_nvte.shape, scaling_mode, rowwise_usage)
+                           : scales_nvte.shape;
     const auto dtype = static_cast<DType>(scales_nvte.dtype);
     const auto dtype_bits = transformer_engine::pytorch::typeToNumBits(dtype);
     const auto size = product(shape, 0, shape.ndim);
@@ -233,26 +245,32 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm_impl(
       const auto data_dtype = static_cast<transformer_engine::DType>(data_nvte.dtype);
       const auto scales_dtype = static_cast<transformer_engine::DType>(scales_nvte.dtype);
       output_scales_dtypes[i] = scales_dtype;
-      output_scales_shapes[i] = scales_nvte.shape;
+      output_scales_shapes[i] = check_scale_inv_shapes
+                                    ? swizzled_scale_shape(scales_nvte.shape, scaling_mode, true)
+                                    : scales_nvte.shape;
       set_param(inputs_nvte[i], kNVTERowwiseData, nullptr, data_dtype, data_nvte.shape);
       set_param(inputs_nvte[i], kNVTERowwiseScaleInv, scales_nvte.data_ptr, scales_dtype,
                 scales_nvte.shape);
       set_param(outputs_nvte[i], kNVTERowwiseData, nullptr, data_dtype, data_nvte.shape);
       set_param(outputs_nvte[i], kNVTERowwiseScaleInv,
-                output_scales_dptr + output_scales_offsets[i], scales_dtype, scales_nvte.shape);
+                output_scales_dptr + output_scales_offsets[i], scales_dtype,
+                output_scales_shapes[i]);
     } else {
       const auto data_nvte = tensor.get_columnwise_data();
       const auto scales_nvte = tensor.get_columnwise_scale_inv();
       const auto data_dtype = static_cast<transformer_engine::DType>(data_nvte.dtype);
       const auto scales_dtype = static_cast<transformer_engine::DType>(scales_nvte.dtype);
       output_scales_dtypes[i] = scales_dtype;
-      output_scales_shapes[i] = scales_nvte.shape;
+      output_scales_shapes[i] = check_scale_inv_shapes
+                                    ? swizzled_scale_shape(scales_nvte.shape, scaling_mode, false)
+                                    : scales_nvte.shape;
       set_param(inputs_nvte[i], kNVTEColumnwiseData, nullptr, data_dtype, data_nvte.shape);
       set_param(inputs_nvte[i], kNVTEColumnwiseScaleInv, scales_nvte.data_ptr, scales_dtype,
                 scales_nvte.shape);
       set_param(outputs_nvte[i], kNVTEColumnwiseData, nullptr, data_dtype, data_nvte.shape);
       set_param(outputs_nvte[i], kNVTEColumnwiseScaleInv,
-                output_scales_dptr + output_scales_offsets[i], scales_dtype, scales_nvte.shape);
+                output_scales_dptr + output_scales_offsets[i], scales_dtype,
+                output_scales_shapes[i]);
     }
   }
 

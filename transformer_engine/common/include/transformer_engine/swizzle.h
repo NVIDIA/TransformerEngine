@@ -25,7 +25,10 @@ extern "C" {
  *
  *  Requirements:
  *  - scale_inv is stored in row-major.
- *  - scale_inv size is padded to 128x4 for row-scale and 4x128 for col-scale.
+ *  - Output scale_inv size is padded to 128x4 for row-scale and 4x128 for col-scale.
+ *  - MXFP8 inputs may instead use their exact logical scale shapes (M, ceil(K/32))
+ *    rowwise or (ceil(M/32), K) columnwise. Swizzling fills output padding with zeros.
+ *    Other input formats must be padded.
  *  - data is quantized along K-dimension, i.e. 1D-scaling block lies along the K-dimension.
  */
 void nvte_swizzle_scaling_factors(const NVTETensor input, NVTETensor output, cudaStream_t stream);
@@ -39,7 +42,10 @@ void nvte_swizzle_scaling_factors(const NVTETensor input, NVTETensor output, cud
  *
  *  Requirements:
  *  - scale_inv is stored in row-major.
- *  - scale_inv size is padded to 128x4 for row-scale and 4x128 for col-scale.
+ *  - Output scale_inv size is padded to 128x4 for row-scale and 4x128 for col-scale.
+ *  - MXFP8 inputs may instead use their exact logical scale shapes (M, ceil(K/32))
+ *    rowwise or (ceil(M/32), K) columnwise. Swizzling fills output padding with zeros.
+ *    Other input formats must be padded.
  *  - data is quantized along K-dimension, i.e. 1D-scaling block lies along the K-dimension.
  */
 void nvte_multi_tensor_swizzle_scaling_factors(const NVTETensor* inputs, NVTETensor* outputs,
