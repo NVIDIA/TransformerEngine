@@ -88,8 +88,7 @@ __global__ void update_tma_descriptors(const __grid_constant__ CUtensorMap base_
                                        const size_t last_logical_dim,
                                        const int64_t *const __restrict__ offsets_ptr,
                                        const int64_t *const __restrict__ first_dims_ptr,
-                                       const int64_t *const __restrict__ last_dims_ptr,
-                                       const GroupedTmaStorageView storage) {
+                                       const int64_t *const __restrict__ last_dims_ptr) {
   const size_t tensor_id = blockIdx.x;
 
   const size_t rows =
@@ -108,16 +107,13 @@ __global__ void update_tma_descriptors(const __grid_constant__ CUtensorMap base_
   if (tensor_id < num_tensors) {
     {
       const uintptr_t global_data_ptr = reinterpret_cast<uintptr_t>(input_data_ptr + offset_elts);
-      CUtensorMap *const maps = storage.input != nullptr ? storage.input : g_tensor_maps_input;
-      modify_base_tensor_map(base_tensor_map_input, &maps[tensor_id], global_data_ptr, rows, cols,
-                             sizeof(IType));
+      modify_base_tensor_map(base_tensor_map_input, &g_tensor_maps_input[tensor_id],
+                             global_data_ptr, rows, cols, sizeof(IType));
     }
     {
       const uintptr_t global_data_ptr = reinterpret_cast<uintptr_t>(output_data_ptr + offset_elts);
-      CUtensorMap *const maps =
-          storage.output_rowwise != nullptr ? storage.output_rowwise : g_tensor_maps_output;
-      modify_base_tensor_map(base_tensor_map_output, &maps[tensor_id], global_data_ptr, rows, cols,
-                             sizeof(OType));
+      modify_base_tensor_map(base_tensor_map_output, &g_tensor_maps_output[tensor_id],
+                             global_data_ptr, rows, cols, sizeof(OType));
     }
   }
 }
@@ -131,8 +127,7 @@ __global__ void __launch_bounds__(128)
                                   const int64_t *const __restrict__ offsets_ptr,
                                   const int64_t *const __restrict__ first_dims_ptr,
                                   const int64_t *const __restrict__ last_dims_ptr,
-                                  const e8m0_t *const __restrict__ scales_ptr,
-                                  const GroupedTmaStorageView storage) {
+                                  const e8m0_t *const __restrict__ scales_ptr) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   constexpr size_t CHUNK_DIM_Y = DequantizeConfig::CHUNK_DIM_Y;
   constexpr size_t CHUNK_DIM_X = DequantizeConfig::CHUNK_DIM_X;
@@ -215,14 +210,10 @@ __global__ void __launch_bounds__(128)
   const size_t tensor_base = is_single_tensor ? 0 : static_cast<size_t>(offsets_ptr[tensor_id]);
 
   // Select TMA descriptors (static for single tensor, per-tensor for multi-tensor)
-  const CUtensorMap *const input_maps =
-      storage.input != nullptr ? storage.input : g_tensor_maps_input;
-  const CUtensorMap *const output_maps =
-      storage.output_rowwise != nullptr ? storage.output_rowwise : g_tensor_maps_output;
   const CUtensorMap &tensor_map_input =
-      is_single_tensor ? tensor_map_input_static : input_maps[tensor_id];
+      is_single_tensor ? tensor_map_input_static : g_tensor_maps_input[tensor_id];
   const CUtensorMap &tensor_map_output =
-      is_single_tensor ? tensor_map_output_static : output_maps[tensor_id];
+      is_single_tensor ? tensor_map_output_static : g_tensor_maps_output[tensor_id];
 
   if (!is_single_tensor) {
     fence_acquire_tensormap(&tensor_map_input);
@@ -387,7 +378,7 @@ __global__ void __launch_bounds__(128)
 }  // namespace group_dequantize_kernel
 
 inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output,
-                             cudaStream_t stream, NVTEResourceHandle handle = nullptr) {
+                             cudaStream_t stream) {
   using namespace group_dequantize_kernel;
 
   checkCuDriverContext(stream);
@@ -439,9 +430,9 @@ inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output,
     const size_t blocks_X = DIVUP(last_logical_dim, CHUNK_DIM_X);
     blocks = blocks_Y * blocks_X;
   } else {
-    NVTE_CHECK(handle != nullptr || num_tensors <= MAX_SUPPORTED_TENSOR_DESCRIPTORS,
-               "Number of tensors in a group exceeds the legacy 64-descriptor limit. "
-               "Pass a resource handle for larger groups.");
+    NVTE_CHECK(num_tensors <= MAX_SUPPORTED_TENSOR_DESCRIPTORS,
+               "Number of tensors in a group is larger than "
+               "the MAX number of supported descriptors (64).");
     NVTE_CHECK(last_logical_dim % CHUNK_DIM_X == 0,
                "Last dimension of a grouped tensor should be divisible by 128.");
     if (shape_rep == ShapeRepresentation::VARYING_LAST_DIM) {
@@ -450,10 +441,6 @@ inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output,
       blocks = DIVUP(elts_total, CHUNK_DIM_Y * CHUNK_DIM_X);
     }
   }
-
-  const GroupedTmaStorageView storage =
-      is_single_tensor ? GroupedTmaStorageView{}
-                       : get_grouped_tma_storage(handle, num_tensors, stream);
 
   const dim3 grid(blocks);
   const dim3 block(THREADS_PER_CHUNK);
@@ -491,19 +478,17 @@ inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output,
             update_tma_descriptors<IType, OType><<<num_tensors, THREADS_PER_WARP, 0, stream>>>(
                 tensor_map_input, tensor_map_output, input_dptr, output_dptr, shape_rep,
                 num_tensors, first_logical_dim, last_logical_dim, offsets_ptr, first_dims_ptr,
-                last_dims_ptr, storage);
+                last_dims_ptr);
           }
 
           if (use_rowwise_scaling) {
             group_dequantize_mxfp8_kernel<IType, OType, true><<<grid, block, 0, stream>>>(
                 tensor_map_input, tensor_map_output, shape_rep, num_tensors, first_logical_dim,
-                last_logical_dim, offsets_ptr, first_dims_ptr, last_dims_ptr, scales_ptr,
-                storage);
+                last_logical_dim, offsets_ptr, first_dims_ptr, last_dims_ptr, scales_ptr);
           } else {
             group_dequantize_mxfp8_kernel<IType, OType, false><<<grid, block, 0, stream>>>(
                 tensor_map_input, tensor_map_output, shape_rep, num_tensors, first_logical_dim,
-                last_logical_dim, offsets_ptr, first_dims_ptr, last_dims_ptr, scales_ptr,
-                storage);
+                last_logical_dim, offsets_ptr, first_dims_ptr, last_dims_ptr, scales_ptr);
           });  // NOLINT(*)
   );           // NOLINT(*)
   NVTE_CHECK_CUDA(cudaGetLastError());
