@@ -1640,9 +1640,12 @@ def make_graphed_callables(
             raise ValueError(
                 f"enabled length ({len(enabled)}) must match modules length ({len(modules)})"
             )
-    if any(enabled) and recipe is None:
+    quantization_or_calibration_enabled = (
+        any(enabled) or calibrating or calibration_config is not None
+    )
+    if quantization_or_calibration_enabled and recipe is None:
         recipe = get_default_fp8_recipe()
-    elif not any(enabled):
+    elif not quantization_or_calibration_enabled:
         recipe = None
     module_uses_fp8 = dict(zip((id(m) for m in modules), enabled))
 

@@ -692,6 +692,32 @@ class Quantizer(abc.ABC):
             # Update the calibration buffer for non-NaN observed values.
             torch.where(observed_mask, observed_value, calibration_value, out=calibration_value)
 
+    def _compute_calibration_amax(
+        self,
+        tensor: torch.Tensor,
+        *,
+        amax_reduction_group: Optional[dist_group_type] = None,
+    ) -> torch.Tensor:
+        """Compute absmax, using NaN to represent an observation with no elements."""
+        tensor_is_empty = tensor.numel() == 0
+        if tensor_is_empty:
+            amax = torch.zeros(1, dtype=torch.float32, device=tensor.device)
+        else:
+            amin, amax = tensor.aminmax()
+            amax = torch.maximum(-amin, amax).float().reshape(1)
+        has_values = torch.full_like(amax, not tensor_is_empty)
+        if amax_reduction_group is not None:
+            reduction_values = torch.cat((amax, has_values))
+            torch.distributed.all_reduce(
+                reduction_values,
+                op=torch.distributed.ReduceOp.MAX,
+                group=amax_reduction_group,
+            )
+            amax = reduction_values[:1]
+            has_values = reduction_values[1:]
+        amax.masked_fill_(has_values == 0, torch.nan)
+        return amax
+
     def _share_calibration_state_with(self, quantizer: "Quantizer") -> None:
         """Make a shallow quantizer copy share persistent calibration state."""
         quantizer._calibration_state = self._calibration_state

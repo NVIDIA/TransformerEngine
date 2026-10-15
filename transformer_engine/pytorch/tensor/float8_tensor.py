@@ -146,9 +146,8 @@ class Float8Quantizer(Quantizer):
             # If quantized amax metadata does not yet exist or calibrate() is called directly,
             # then recompute the absmax without quantization.
             # This path is NOT performant and should only be used for non-quantized Tensor calibration.
-            amin, amax = tensor.aminmax()
-            observed_amax = torch.max(-amin, amax).float().reshape(1)
-            self.amax.copy_(observed_amax)
+            observed_amax = self._compute_calibration_amax(tensor)
+            self.amax.copy_(torch.nan_to_num(observed_amax, nan=0.0))
         self._update_calibration_value(
             "amax",
             observed_amax,
@@ -359,14 +358,13 @@ class Float8CurrentScalingQuantizer(Quantizer):
         else:
             # Direct calibration of a non-quantized tensor must reconstruct the metadata.
             # This path is NOT performant and should only be used for non-quantized Tensor calibration.
-            amin, amax = tensor.aminmax()
-            amax = torch.maximum(-amin, amax).float().reshape(1)
+            amax_reduction_group = None
             if self.with_amax_reduction and torch.distributed.is_initialized():
-                torch.distributed.all_reduce(
-                    amax,
-                    op=torch.distributed.ReduceOp.MAX,
-                    group=self._canonicalized_amax_reduction_group(),
-                )
+                amax_reduction_group = self._canonicalized_amax_reduction_group()
+            amax = self._compute_calibration_amax(
+                tensor,
+                amax_reduction_group=amax_reduction_group,
+            )
             if self.amax_epsilon > 0.0:
                 amax.clamp_min_(self.amax_epsilon)
             fp8_max = torch.finfo(TE_DType_To_Torch[self.dtype]).max

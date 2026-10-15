@@ -231,6 +231,96 @@ def test_calibration_config_registers_module_scaling_factor_buffers(
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+def test_grouped_calibration_handles_empty_experts():
+    module = GroupedLinear(
+        2,
+        32,
+        32,
+        params_dtype=torch.bfloat16,
+        device="cuda",
+        bias=False,
+        use_grouped_tensor=False,
+    )
+    inp = torch.randn((16, 32), dtype=torch.bfloat16, device="cuda")
+    recipe = Float8CurrentScaling()
+    calibration_config = QuantizationCalibrationConfig()
+    buffer_suffix = "_scale_inv_fp8_current_scaling_te_ptq_calibrated"
+
+    with torch.no_grad(), autocast(
+        enabled=False,
+        recipe=recipe,
+        calibration_config=calibration_config,
+    ):
+        module(inp, [0, 16])
+
+    empty_expert_buffer = module.get_buffer(f"input_gemm0{buffer_suffix}")
+    assert empty_expert_buffer.item() == 0.0
+    assert module.get_buffer(f"input_gemm1{buffer_suffix}").item() > 0.0
+
+    with torch.no_grad(), autocast(
+        enabled=False,
+        recipe=recipe,
+        calibration_config=calibration_config,
+    ):
+        module(inp, [8, 8])
+    calibrated_value = empty_expert_buffer.clone()
+    assert calibrated_value.item() > 0.0
+
+    with torch.no_grad(), autocast(
+        enabled=False,
+        recipe=recipe,
+        calibration_config=calibration_config,
+    ):
+        module(inp, [0, 16])
+    torch.testing.assert_close(empty_expert_buffer, calibrated_value)
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+def test_delayed_scaling_calibration_handles_empty_tensor():
+    quantizer = Float8Quantizer(
+        scale=torch.ones(1, device="cuda"),
+        amax=torch.zeros(1, device="cuda"),
+        fp8_dtype=DType.kFloat8E4M3,
+    )
+    empty = torch.empty((0, 32), dtype=torch.bfloat16, device="cuda")
+
+    quantizer.calibrate(empty, calibration_config=DEFAULT_CALIBRATION_CONFIG)
+    calibrated_amax = quantizer._calibration_state["amax"]
+    assert calibrated_amax.item() == 0.0
+
+    quantizer.calibrate(
+        torch.full((4, 32), 2.0, dtype=torch.bfloat16, device="cuda"),
+        calibration_config=DEFAULT_CALIBRATION_CONFIG,
+    )
+    torch.testing.assert_close(calibrated_amax, torch.full_like(calibrated_amax, 2.0))
+
+    quantizer.calibrate(empty, calibration_config=DEFAULT_CALIBRATION_CONFIG)
+    torch.testing.assert_close(calibrated_amax, torch.full_like(calibrated_amax, 2.0))
+
+
+@pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4)
+def test_nvfp4_calibration_handles_empty_tensor():
+    quantizer = NVFP4Quantizer(
+        row_scaled_nvfp4=False,
+        with_random_sign_mask=False,
+    )
+    empty = torch.empty((0, 32), dtype=torch.bfloat16, device="cuda")
+
+    quantizer.calibrate(empty, calibration_config=DEFAULT_CALIBRATION_CONFIG)
+    calibrated_amax = quantizer._calibration_state["amax"]
+    assert calibrated_amax.item() == 0.0
+
+    quantizer.calibrate(
+        torch.full((4, 32), 2.0, dtype=torch.bfloat16, device="cuda"),
+        calibration_config=DEFAULT_CALIBRATION_CONFIG,
+    )
+    torch.testing.assert_close(calibrated_amax, torch.full_like(calibrated_amax, 2.0))
+
+    quantizer.calibrate(empty, calibration_config=DEFAULT_CALIBRATION_CONFIG)
+    torch.testing.assert_close(calibrated_amax, torch.full_like(calibrated_amax, 2.0))
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 @pytest.mark.parametrize("enabled", (False, True))
 @pytest.mark.parametrize("single_grouped_weight", (False, True))
 def test_native_grouped_linear_registers_calibration_buffers(
@@ -317,6 +407,41 @@ def test_native_grouped_linear_calibration_is_cuda_graph_safe():
         assert len(buffers) == 4
         assert all(torch.isfinite(value).all() for value in buffers.values())
         assert all(torch.all(value > 0) for value in buffers.values())
+    finally:
+        graphed_module.reset()
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+def test_calibration_only_cuda_graph_preserves_requested_recipe():
+    module = Linear(32, 32, params_dtype=torch.bfloat16, device="cuda", bias=False)
+    inp = torch.randn(
+        (16, 32),
+        dtype=torch.bfloat16,
+        device="cuda",
+        requires_grad=True,
+    )
+    recipe = Float8CurrentScaling()
+    calibration_config = QuantizationCalibrationConfig()
+    graphed_module = make_graphed_callables(
+        module,
+        (inp,),
+        num_warmup_iters=3,
+        enabled=False,
+        recipe=recipe,
+        calibration_config=calibration_config,
+    )
+
+    try:
+        with autocast(
+            enabled=False,
+            recipe=recipe,
+            calibration_config=calibration_config,
+        ):
+            graphed_module(inp)
+        torch.cuda.synchronize()
+        buffer_suffix = "_scale_inv_fp8_current_scaling_te_ptq_calibrated"
+        assert module.get_buffer(f"input{buffer_suffix}").item() > 0.0
+        assert module.get_buffer(f"weight{buffer_suffix}").item() > 0.0
     finally:
         graphed_module.reset()
 

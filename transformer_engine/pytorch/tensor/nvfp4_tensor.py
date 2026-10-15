@@ -387,14 +387,13 @@ class NVFP4Quantizer(Quantizer):
         else:
             # Direct calibration of a non-quantized tensor must reconstruct the metadata.
             # This path is NOT performant and should only be used for non-quantized Tensor calibration.
-            amin, amax = tensor.aminmax()
-            observed_amax = torch.maximum(-amin, amax).reshape(-1).float()
+            amax_reduction_group = None
             if self.with_amax_reduction and torch.distributed.is_initialized():
-                torch.distributed.all_reduce(
-                    observed_amax,
-                    op=torch.distributed.ReduceOp.MAX,
-                    group=self._canonicalized_amax_reduction_group(),
-                )
+                amax_reduction_group = self._canonicalized_amax_reduction_group()
+            observed_amax = self._compute_calibration_amax(
+                tensor,
+                amax_reduction_group=amax_reduction_group,
+            )
         self._update_calibration_value(
             "amax",
             observed_amax,
