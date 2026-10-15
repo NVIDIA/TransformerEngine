@@ -100,19 +100,20 @@ void nvte_quantize(const NVTETensor input, NVTETensor output, cudaStream_t strea
  *  \param[in,out] output           Output grouped tensor.
  *  \param[in]     quant_config     Quantization configuration.
  *  \param[in]     stream           CUDA stream used for the operation.
+ *  \param[in]     handle           Optional resource handle for grouped MXFP8 TMA descriptors.
+ *                                 NULL uses legacy storage and its 64-descriptor limit for
+ *                                 groups with varying last dimensions.
+ *                                 Keep the handle alive until submitted kernels finish.
  */
+#ifdef __cplusplus
 void nvte_group_quantize(const NVTEGroupedTensor input, NVTEGroupedTensor output,
-                         const NVTEQuantizationConfig quant_config, cudaStream_t stream);
-
-/*! \brief Grouped quantization with caller-owned, lazily allocated TMA descriptors.
- *  Descriptor storage is currently used by grouped MXFP8 quantization.
- *  A NULL handle uses the legacy descriptor storage and its 64-group limit.
- *  With a handle, descriptor capacity grows to fit the group count outside CUDA graph capture.
- *  The handle must remain alive until all submitted kernels finish.
- */
-void nvte_group_quantize_with_handle(const NVTEGroupedTensor input, NVTEGroupedTensor output,
-                                     const NVTEQuantizationConfig quant_config,
-                                     cudaStream_t stream, NVTEResourceHandle handle);
+                         const NVTEQuantizationConfig quant_config, cudaStream_t stream,
+                         NVTEResourceHandle handle = nullptr);
+#else
+void nvte_group_quantize(const NVTEGroupedTensor input, NVTEGroupedTensor output,
+                         const NVTEQuantizationConfig quant_config, cudaStream_t stream,
+                         NVTEResourceHandle handle);
+#endif
 
 /*! \brief Casts input tensor to FP8/MXFP8/BlockwiseFP8, providing the option to immediately exit the kernel
  *         based on the value of the 'noop' tensor.
@@ -440,13 +441,6 @@ void nvte_dequantize(const NVTETensor input, NVTETensor output, cudaStream_t str
  */
 void nvte_group_dequantize(const NVTEGroupedTensor input, NVTEGroupedTensor output,
                            cudaStream_t stream);
-
-/*! \brief Grouped dequantization with caller-owned TMA descriptors.
- *  Descriptor storage is currently used by grouped MXFP8 dequantization.
- *  A NULL handle selects the legacy path.
- */
-void nvte_group_dequantize_with_handle(const NVTEGroupedTensor input, NVTEGroupedTensor output,
-                                       cudaStream_t stream, NVTEResourceHandle handle);
 
 /*! \brief Fused grouped requantization. Currently only MXFP8 1D scaling is supported.
  *

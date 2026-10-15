@@ -9,10 +9,15 @@
 #include <cuda_runtime.h>
 #include <gtest/gtest.h>
 
+#include <exception>
+#include <stdexcept>
+#include <thread>
+
 #include <transformer_engine/cast.h>
 #include <transformer_engine/activation.h>
 #include "../test_common.h"
 #include "transformer_engine/transformer_engine.h"
+#include "../../../transformer_engine/common/resource_handle.h"
 
 using namespace transformer_engine;
 using namespace test;
@@ -264,7 +269,8 @@ void performTest(const ProcessingMethod processing_method,
                  const bool rowwise,
                  const bool colwise,
                  const bool use_2d_quantization = false,
-                 const bool use_handle = false) {
+                 const bool use_handle = false,
+                 const bool capture_with_handle = false) {
     using namespace test;
 
     DType itype = TypeInfo<InputType>::dtype;
@@ -530,17 +536,38 @@ void performTest(const ProcessingMethod processing_method,
     NVTEResourceHandle handle = use_handle ? nvte_create_resource_handle() : nullptr;
     switch (processing_method) {
         case ProcessingMethod::CAST_ONLY: {
-            if (use_handle) {
-                nvte_group_quantize_with_handle(in_group_tensor, out_group_tensor,
-                                                quant_config, 0, handle);
+            if (capture_with_handle) {
+                ASSERT_TRUE(use_handle);
+                cudaStream_t stream;
+                ASSERT_EQ(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), cudaSuccess);
+                ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+                nvte_resource_handle_reserve(handle, NVTE_RESOURCE_GROUPED_TMA_DESCRIPTORS,
+                                             num_tensors, stream);
+
+                cudaGraph_t graph;
+                ASSERT_EQ(cudaStreamBeginCapture(stream, cudaStreamCaptureModeRelaxed), cudaSuccess);
+                nvte_group_quantize(in_group_tensor, out_group_tensor, quant_config, stream,
+                                    handle);
+                ASSERT_EQ(cudaStreamEndCapture(stream, &graph), cudaSuccess);
+
+                cudaGraphExec_t graph_exec;
+                ASSERT_EQ(cudaGraphInstantiate(&graph_exec, graph, nullptr, nullptr, 0),
+                          cudaSuccess);
+                ASSERT_EQ(cudaGraphLaunch(graph_exec, stream), cudaSuccess);
+                ASSERT_EQ(cudaGraphLaunch(graph_exec, stream), cudaSuccess);
+                ASSERT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+                ASSERT_EQ(cudaGraphExecDestroy(graph_exec), cudaSuccess);
+                ASSERT_EQ(cudaGraphDestroy(graph), cudaSuccess);
+                ASSERT_EQ(cudaStreamDestroy(stream), cudaSuccess);
+            } else if (use_handle) {
+                nvte_group_quantize(in_group_tensor, out_group_tensor, quant_config, 0, handle);
                 if (shape_rep == VARYING_LAST_DIM || shape_rep == VARYING_BOTH_DIMS) {
-                    nvte_resource_handle_reserve_grouped_tma(handle, num_tensors + 1, 0);
+                    nvte_resource_handle_reserve(handle, NVTE_RESOURCE_GROUPED_TMA_DESCRIPTORS,
+                                                 num_tensors + 1, 0);
                 }
-                nvte_group_quantize_with_handle(in_group_tensor, out_group_tensor,
-                                                quant_config, 0, handle);
+                nvte_group_quantize(in_group_tensor, out_group_tensor, quant_config, 0, handle);
                 // Reuse the grown descriptor allocation.
-                nvte_group_quantize_with_handle(in_group_tensor, out_group_tensor,
-                                                quant_config, 0, handle);
+                nvte_group_quantize(in_group_tensor, out_group_tensor, quant_config, 0, handle);
             } else {
                 nvte_group_quantize(in_group_tensor, out_group_tensor, quant_config, 0);
             }
@@ -925,6 +952,85 @@ TEST(OperatorTest_GroupedFusedCastMXFP8, ResourceHandleMoreThanOneCtaOfGroups) {
         num_tensors, {offsets.back() / 128, 128}, first_dims, last_dims, offsets,
         /*rowwise=*/true, /*colwise=*/false, /*use_2d_quantization=*/false,
         /*use_handle=*/true);
+}
+
+TEST(OperatorTest_GroupedFusedCastMXFP8, ResourceHandleThreadAndStreamStorage) {
+    cudaStream_t stream_a;
+    cudaStream_t stream_b;
+    ASSERT_EQ(cudaStreamCreateWithFlags(&stream_a, cudaStreamNonBlocking), cudaSuccess);
+    ASSERT_EQ(cudaStreamCreateWithFlags(&stream_b, cudaStreamNonBlocking), cudaSuccess);
+
+    NVTEResourceHandle handle = nvte_create_resource_handle();
+    EXPECT_THROW(nvte_resource_handle_reserve(handle, static_cast<NVTEResourceType>(-1), 0,
+                                              stream_a), std::runtime_error);
+    nvte_resource_handle_reserve(handle, NVTE_RESOURCE_GROUPED_TMA_DESCRIPTORS, 65, stream_a);
+    auto main_a = get_grouped_tma_storage(handle, 65, stream_a);
+    auto main_b = get_grouped_tma_storage(handle, 65, stream_b);
+    auto main_default = get_grouped_tma_storage(handle, 65, nullptr);
+    EXPECT_NE(main_a.input, nullptr);
+    EXPECT_EQ(main_a.input, get_grouped_tma_storage(handle, 32, stream_a).input);
+    EXPECT_NE(main_a.input, main_b.input);
+    EXPECT_NE(main_a.input, main_default.input);
+    EXPECT_NE(main_b.input, main_default.input);
+
+    // Evict the thread-local lookup cache; the handle must still find the
+    // original slot and its reserved capacity in the owning registry.
+    for (size_t i = 0; i < 129; ++i) {
+        NVTEResourceHandle transient = nvte_create_resource_handle();
+        get_grouped_tma_storage(transient, 0, stream_a);
+        nvte_destroy_resource_handle(transient);
+    }
+    EXPECT_EQ(main_a.input, get_grouped_tma_storage(handle, 65, stream_a).input);
+
+    GroupedTmaStorageView worker_storage[3];
+    std::exception_ptr worker_errors[3];
+    auto reserve_on_worker = [&](size_t index, cudaStream_t stream) {
+        try {
+            worker_storage[index] = get_grouped_tma_storage(handle, 129, stream);
+        } catch (...) {
+            worker_errors[index] = std::current_exception();
+        }
+    };
+    std::thread first(reserve_on_worker, 0, stream_a);
+    std::thread second(reserve_on_worker, 1, stream_a);
+    std::thread third(reserve_on_worker, 2, nullptr);
+    first.join();
+    second.join();
+    third.join();
+    for (size_t i = 0; i < 3; ++i) {
+        EXPECT_FALSE(worker_errors[i]);
+        EXPECT_NE(worker_storage[i].input, nullptr);
+        EXPECT_NE(worker_storage[i].input, main_a.input);
+        EXPECT_NE(worker_storage[i].input, main_default.input);
+        for (size_t j = i + 1; j < 3; ++j) {
+            EXPECT_NE(worker_storage[i].input, worker_storage[j].input);
+        }
+    }
+
+    nvte_destroy_resource_handle(handle);
+    ASSERT_EQ(cudaStreamDestroy(stream_a), cudaSuccess);
+    ASSERT_EQ(cudaStreamDestroy(stream_b), cudaSuccess);
+}
+
+TEST(OperatorTest_GroupedFusedCastMXFP8, ResourceHandlePreReservedGraphCapture) {
+    if (getDeviceComputeCapability() < blackwellComputeCapability) {
+        GTEST_SKIP();
+    }
+
+    constexpr size_t num_tensors = 65;
+    std::vector<size_t> first_dims(num_tensors, 128);
+    std::vector<size_t> last_dims(num_tensors, 128);
+    first_dims.front() = 256;
+    last_dims.back() = 256;
+    std::vector<size_t> offsets(num_tensors + 1, 0);
+    for (size_t i = 0; i < num_tensors; ++i) {
+        offsets[i + 1] = offsets[i] + first_dims[i] * last_dims[i];
+    }
+    performTest<bf16, fp8e4m3>(
+        ProcessingMethod::CAST_ONLY, &identity, ShapeRepresentation::VARYING_BOTH_DIMS,
+        num_tensors, {1, offsets.back()}, first_dims, last_dims, offsets,
+        /*rowwise=*/true, /*colwise=*/true, /*use_2d_quantization=*/false,
+        /*use_handle=*/true, /*capture_with_handle=*/true);
 }
 
 TEST(OperatorTest_GroupedFusedCastMXFP8, ResourceHandleMoreThan64Descriptors) {
