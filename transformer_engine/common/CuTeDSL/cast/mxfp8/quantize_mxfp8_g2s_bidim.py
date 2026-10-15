@@ -270,6 +270,7 @@ class MXFP8QuantizeBidimensionalG2SKernel(MXFP8QuantizeKernelBase):
         mO_col: Optional[cute.Tensor],
         mS_col: Optional[cute.Tensor],
         mNoop: cute.Pointer,
+        mDActInput: Optional[cute.Tensor],
     ) -> Boolean:
         cls = MXFP8QuantizeBidimensionalG2SKernel
         rows_per_cta = cls._TILE_ROWS * cls._NUM_TILES_Y  # packed scales: one tile row

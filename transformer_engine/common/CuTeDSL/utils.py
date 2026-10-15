@@ -287,6 +287,16 @@ def x2_hi_to_f32_bf16(bits: Int32) -> Float32:
 
 
 @cute.jit
+def cvt_f32x2_to_bf16x2(lo: Float32, hi: Float32) -> Int32:
+    """Round two FP32 values to BF16 (round-to-nearest-even) and pack them, lo in the low half."""
+    return cute.arch.inline_ptx(
+        "cvt.rn.bf16x2.f32 {$w0}, {$r0}, {$r1};",
+        write_only_types=[Int32],
+        read_only_args=[hi, lo],
+    )
+
+
+@cute.jit
 def truncate_f32_bf16(val: Float32) -> Float32:
     """Round FP32 to BF16 precision (round-to-nearest-even), keeping FP32 storage."""
     bf16_bits = cute.arch.inline_ptx(

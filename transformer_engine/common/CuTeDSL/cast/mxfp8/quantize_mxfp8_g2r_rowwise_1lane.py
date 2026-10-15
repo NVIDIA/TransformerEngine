@@ -231,6 +231,7 @@ class MXFP8QuantizeRowwise1LaneG2RKernel(MXFP8QuantizeKernelBase):
         mO_col: Optional[cute.Tensor],
         mS_col: Optional[cute.Tensor],
         mNoop: cute.Pointer,
+        mDActInput: Optional[cute.Tensor],
     ) -> Boolean:
         M, N = mX.shape
         # N divisible by 128 for vectorized stores, and grid.y within limits.

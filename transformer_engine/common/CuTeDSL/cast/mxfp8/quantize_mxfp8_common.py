@@ -230,6 +230,7 @@ class MXFP8QuantizeKernelBase(abc.ABC):
         mO_col: Optional[cute.Tensor],
         mS_col: Optional[cute.Tensor],
         mNoop: cute.Pointer,
+        mDActInput: Optional[cute.Tensor],
     ) -> Boolean:
         """Runtime check: whether we can dispatch to the instantiated kernel with this call's shapes and noops."""
         raise NotImplementedError
@@ -322,7 +323,9 @@ class MXFP8QuantizeEntry(MXFP8QuantizeKernelBase):
         dispatched_to_specialized = False
         for kernel in self.specialized_kernels:
             if not dispatched_to_specialized:
-                if kernel.eligible_to_dispatch(self.cfg, mX, mO_row, mS_row, mO_col, mS_col, mNoop):
+                if kernel.eligible_to_dispatch(
+                    self.cfg, mX, mO_row, mS_row, mO_col, mS_col, mNoop, mDActInput
+                ):
                     dispatched_to_specialized = True
                     kernel(
                         mX,
@@ -503,7 +506,7 @@ def compile_cutedsl_function_from_cfg(cfg):
         scale_col_fake,  # mO_col, mS_col
         amax_fake,  # mAmax
         noop_fake,  # mNoop (pointer to the cast_noop flag, may be null at launch)
-        act_input_fake,  # mDActInput (backward slot, unused)
+        act_input_fake,  # mDActInput (activation input, dact only)
         workspace_fake,  # mWorkspace(backward slot, unused)
         cute.runtime.make_fake_stream(),  # stream (compiled as an explicit tvm-ffi
         # "handle" arg; C++ passes the CUDA stream

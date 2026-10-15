@@ -17,6 +17,9 @@ from transformer_engine.common.CuTeDSL.utils import (
     create_l2_policy,
     exp2_bf16x2_rcp,
     max_num_bits_per_copy_ld_global,
+    x2_hi_to_f32_bf16,
+    x2_lo_to_f32_bf16,
+    cvt_f32x2_to_bf16x2,
 )
 from transformer_engine.common.CuTeDSL.utils_fp8 import (
     cvt_f32_to_fp8e8m0fnu,
@@ -25,6 +28,8 @@ from transformer_engine.common.CuTeDSL.utils_fp8 import (
 from .quantize_mxfp8_common import (
     MXFP8QuantizeConfig,
     MXFP8QuantizeKernelBase,
+    SUPPORTED_ACTIVATIONS,
+    SUPPORTED_DACTIVATIONS,
     derive_swizzled_scale_layout,
 )
 
@@ -32,9 +37,13 @@ from .quantize_mxfp8_common import (
 @cute.jit
 def quantize_mxfp8_gmem_tile_rowwise_2lane(
     gX_tiles: cute.Tensor,
+    gA_tiles: Optional[cute.Tensor],
     gO_tiles: cute.Tensor,
     mS_tiles: cute.Tensor,
     N: Int32,
+    ACTIVATION: cutlass.Constexpr[Optional[str]],
+    WITH_ACT: cutlass.Constexpr[bool],
+    WITH_DACT: cutlass.Constexpr[bool],
     DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
     FP8_DTYPE: cutlass.Constexpr[Type[cutlass.Numeric]],
     MAX_NORM_RCP: cutlass.Constexpr[float],
@@ -72,6 +81,8 @@ def quantize_mxfp8_gmem_tile_rowwise_2lane(
 
     # We load fragments from all GMEM tiles at once
     rX = cute.make_rmem_tensor((ELEMENTS_PER_THREAD, NUM_TILES), DTYPE)
+    # Backward: the activation input, loaded alongside the incoming gradient in rX
+    rA = cute.make_rmem_tensor((ELEMENTS_PER_THREAD, NUM_TILES), DTYPE)
     # We store a fragment of one tile at a time
     rO = cute.make_rmem_tensor((ELEMENTS_PER_THREAD,), FP8_DTYPE)
     # RMEM flags to indicate whether each tile is out of bounds or not
@@ -89,6 +100,12 @@ def quantize_mxfp8_gmem_tile_rowwise_2lane(
         num_bits_per_copy=LOAD_WIDTH,
         # TODO(kainingz): due to https://github.com/NVIDIA/cutlass/issues/3726 using
         # invariant=True here will drop the cache policy
+        invariant=False,
+    )
+    act_load_atom = cute.make_copy_atom(
+        cute.nvgpu.CopyG2ROp(),
+        DTYPE,
+        num_bits_per_copy=LOAD_WIDTH,
         invariant=False,
     )
     store_atom = cute.make_copy_atom(
@@ -116,8 +133,33 @@ def quantize_mxfp8_gmem_tile_rowwise_2lane(
             valid = col < N and Int64(row) * N + col < num_elems
         tile_valid_flags[tile_idx] = valid
         rX[None, tile_idx].fill(0)
+        if cutlass.const_expr(WITH_DACT):
+            rA[None, tile_idx].fill(0)
         if valid:
             cute.copy(load_atom, gX_thread, rX[None, tile_idx], cache_policy=input_policy)
+            if cutlass.const_expr(WITH_DACT):
+                gA_thread = cute.composition(gA_tiles[None, None, tile_idx], tv_payload)[tidx, None]
+                cute.copy(act_load_atom, gA_thread, rA[None, tile_idx], cache_policy=input_policy)
+
+    # Fused activation: widen to FP32, apply it, and round back to BF16 as the general kernel
+    # does (it truncates the activated value to the input type before the amax). The values are
+    # then exactly BF16, so the packed BF16 amax and scaling below apply unchanged.
+    if cutlass.const_expr(WITH_ACT or WITH_DACT):
+        for tile_idx in cutlass.range_constexpr(NUM_TILES):
+            rX_i32 = cute.recast_tensor(rX[None, tile_idx], Int32)
+            rA_i32 = cute.recast_tensor(rA[None, tile_idx], Int32)
+            for i in cutlass.range_constexpr(ELEMENTS_PER_THREAD // 2):
+                lo = x2_lo_to_f32_bf16(rX_i32[i])
+                hi = x2_hi_to_f32_bf16(rX_i32[i])
+                if cutlass.const_expr(WITH_DACT):
+                    dop = SUPPORTED_DACTIVATIONS[ACTIVATION]
+                    lo = lo * dop(x2_lo_to_f32_bf16(rA_i32[i]))
+                    hi = hi * dop(x2_hi_to_f32_bf16(rA_i32[i]))
+                else:
+                    op = SUPPORTED_ACTIVATIONS[ACTIVATION]
+                    lo = op(lo)
+                    hi = op(hi)
+                rX_i32[i] = cvt_f32x2_to_bf16x2(lo, hi)
 
     @cute.jit
     def extract_mx_block_amax(values_i32: cute.Tensor) -> Float32:
@@ -189,7 +231,8 @@ class MXFP8QuantizeRowwise2LaneG2RKernel(MXFP8QuantizeKernelBase):
     def supports(cfg: MXFP8QuantizeConfig) -> bool:
         # BF16 packed math.
         return (
-            cfg.is_plain_cast()
+            not cfg.WITH_AMAX
+            and not cfg.WITH_DBIAS
             and cfg.DTYPE is cutlass.BFloat16
             and cfg.ROWWISE
             and not cfg.COLWISE
@@ -205,8 +248,12 @@ class MXFP8QuantizeRowwise2LaneG2RKernel(MXFP8QuantizeKernelBase):
         mO_col: Optional[cute.Tensor],
         mS_col: Optional[cute.Tensor],
         mNoop: cute.Pointer,
+        mDActInput: Optional[cute.Tensor],
     ) -> Boolean:
         N = mX.shape[1]
+        act_input_aligned = Boolean(True)
+        if cutlass.const_expr(mDActInput is not None):
+            act_input_aligned = mDActInput.iterator.toint() % 32 == 0
         scale_stride_matches = Boolean(True)
         if cutlass.const_expr(not cfg.WITH_GEMM_SWIZZLED_SCALES):
             # The flat view needs the packed scales to be contiguous.
@@ -216,6 +263,7 @@ class MXFP8QuantizeRowwise2LaneG2RKernel(MXFP8QuantizeKernelBase):
         return (
             N % 128 == 0
             and mX.iterator.toint() % 32 == 0
+            and act_input_aligned
             and scale_stride_matches
             and mNoop.toint() == 0
         )
@@ -246,22 +294,63 @@ class MXFP8QuantizeRowwise2LaneG2RKernel(MXFP8QuantizeKernelBase):
             if num_elems <= 2**31 - 1:
                 rows = cute.ceil_div(num_elems, 1024)
                 flat = cute.make_layout((rows, 1024), stride=(1024, 1))
+                mA = None
+                if cutlass.const_expr(self.cfg.WITH_DACT):
+                    mA = cute.make_tensor(mDActInput.iterator, flat)
                 self._launch_tiers(
                     cute.make_tensor(mX.iterator, flat),
+                    mA,
                     cute.make_tensor(mO_row.iterator, flat),
                     cute.make_tensor(mS_row.iterator, cute.make_layout((rows, 32), stride=(32, 1))),
                     stream,
                     num_elems,
                 )
             else:
-                self._launch_tiers(mX, mO_row, mS_row, stream, num_elems)
+                self._launch_tiers(mX, mDActInput, mO_row, mS_row, stream, num_elems)
         else:
-            self._launch_tiers(mX, mO_row, mS_row, stream, num_elems)
+            self._launch_tiers(mX, mDActInput, mO_row, mS_row, stream, num_elems)
 
     @cute.jit
     def _launch_tiers(
         self,
         mX: cute.Tensor,
+        mA: Optional[cute.Tensor],
+        mO_row: cute.Tensor,
+        mS_row: cute.Tensor,
+        stream: CUstream,
+        num_elems: Int64,
+    ):
+        """Pick the launch configuration: the size tiers, except for swizzled scales with a fused
+        activation when N does not fill the tiers' 1024-column CTAs."""
+        if cutlass.const_expr(
+            self.cfg.WITH_GEMM_SWIZZLED_SCALES and (self.cfg.WITH_ACT or self.cfg.WITH_DACT)
+        ):
+            if mX.shape[1] % 1024 != 0:
+                # The swizzled path tiles the real (M, N) shape, so a 1024-column CTA overhangs
+                # N and its idle lanes still pay for the activation math. 256-column CTAs divide
+                # every eligible N (N % 128 == 0 and the tile is 2 x 128 columns).
+                self._launch(
+                    mX,
+                    mA,
+                    mO_row,
+                    mS_row,
+                    stream,
+                    num_elems,
+                    CTA_THREADS_Y=16,
+                    CTA_THREADS_X=8,
+                    NUM_TILES=2,
+                    L2_CACHED_CTA_PERCENT=0,
+                )
+            else:
+                self._launch_size_tiers(mX, mA, mO_row, mS_row, stream, num_elems)
+        else:
+            self._launch_size_tiers(mX, mA, mO_row, mS_row, stream, num_elems)
+
+    @cute.jit
+    def _launch_size_tiers(
+        self,
+        mX: cute.Tensor,
+        mA: Optional[cute.Tensor],
         mO_row: cute.Tensor,
         mS_row: cute.Tensor,
         stream: CUstream,
@@ -272,6 +361,7 @@ class MXFP8QuantizeRowwise2LaneG2RKernel(MXFP8QuantizeKernelBase):
         if output_bytes <= 12 << 20:
             self._launch(
                 mX,
+                mA,
                 mO_row,
                 mS_row,
                 stream,
@@ -284,6 +374,7 @@ class MXFP8QuantizeRowwise2LaneG2RKernel(MXFP8QuantizeKernelBase):
         elif output_bytes <= 48 << 20:
             self._launch(
                 mX,
+                mA,
                 mO_row,
                 mS_row,
                 stream,
@@ -296,6 +387,7 @@ class MXFP8QuantizeRowwise2LaneG2RKernel(MXFP8QuantizeKernelBase):
         elif output_bytes <= 96 << 20:
             self._launch(
                 mX,
+                mA,
                 mO_row,
                 mS_row,
                 stream,
@@ -308,6 +400,7 @@ class MXFP8QuantizeRowwise2LaneG2RKernel(MXFP8QuantizeKernelBase):
         else:
             self._launch(
                 mX,
+                mA,
                 mO_row,
                 mS_row,
                 stream,
@@ -322,6 +415,7 @@ class MXFP8QuantizeRowwise2LaneG2RKernel(MXFP8QuantizeKernelBase):
     def _launch(
         self,
         mX: cute.Tensor,
+        mA: Optional[cute.Tensor],
         mO: cute.Tensor,
         mS: cute.Tensor,
         stream: CUstream,
@@ -361,6 +455,7 @@ class MXFP8QuantizeRowwise2LaneG2RKernel(MXFP8QuantizeKernelBase):
             if check_bounds:
                 self.kernel(
                     mX,
+                    mA,
                     mO,
                     mS,
                     first_streaming_cta,
@@ -374,6 +469,7 @@ class MXFP8QuantizeRowwise2LaneG2RKernel(MXFP8QuantizeKernelBase):
             else:
                 self.kernel(
                     mX,
+                    mA,
                     mO,
                     mS,
                     first_streaming_cta,
@@ -389,6 +485,7 @@ class MXFP8QuantizeRowwise2LaneG2RKernel(MXFP8QuantizeKernelBase):
     def kernel(
         self,
         mX: cute.Tensor,
+        mA: Optional[cute.Tensor],
         mO: cute.Tensor,
         mS: cute.Tensor,
         first_streaming_cta: Int64,
@@ -403,6 +500,7 @@ class MXFP8QuantizeRowwise2LaneG2RKernel(MXFP8QuantizeKernelBase):
         dispatcher only selects this kernel when no cast_noop flag is passed."""
         self._kernel_main(
             mX,
+            mA,
             mO,
             mS,
             first_streaming_cta,
@@ -418,6 +516,7 @@ class MXFP8QuantizeRowwise2LaneG2RKernel(MXFP8QuantizeKernelBase):
     def _kernel_main(
         self,
         mX: cute.Tensor,
+        mA: Optional[cute.Tensor],
         mO: cute.Tensor,
         mS: cute.Tensor,
         first_streaming_cta: Int64,
@@ -431,6 +530,8 @@ class MXFP8QuantizeRowwise2LaneG2RKernel(MXFP8QuantizeKernelBase):
         """Construct CTA tile views and run the specialized quantization."""
         # Dispatch checks 32-byte input alignment before selecting this kernel.
         gX = cute.make_tensor(mX.iterator.align(32), mX.layout)
+        if cutlass.const_expr(self.cfg.WITH_DACT):
+            mA = cute.make_tensor(mA.iterator.align(32), mA.layout)
         # grid.x walks column tiles; grid.y and grid.z together walk row tiles.
         bidx, bidy, bidz = cute.arch.block_idx()
         cta_row = bidz * self._MAX_GRID_Y + bidy
@@ -472,6 +573,9 @@ class MXFP8QuantizeRowwise2LaneG2RKernel(MXFP8QuantizeKernelBase):
         SCALE_TILER = (TILE_ROWS, TILE_COLS // 32)
         # Mode 1's first index is 0 because CTA_ROWS == TILE_ROWS (there is only 1 tile on the row dimension).
         gX_tiles = cute.local_tile(gX_cta, TILER, (0, None))
+        gA_tiles = None
+        if cutlass.const_expr(self.cfg.WITH_DACT):
+            gA_tiles = cute.local_tile(cute.local_tile(mA, CTA_TILER, cta_coord), TILER, (0, None))
         gO_tiles = cute.local_tile(gO_cta, TILER, (0, None))
         mS_tiles = cute.local_tile(gS_cta, SCALE_TILER, (0, None))
 
@@ -479,9 +583,13 @@ class MXFP8QuantizeRowwise2LaneG2RKernel(MXFP8QuantizeKernelBase):
         if cta_row * CTA_ROWS < M:
             quantize_mxfp8_gmem_tile_rowwise_2lane(
                 gX_tiles,
+                gA_tiles,
                 gO_tiles,
                 mS_tiles,
                 N,
+                ACTIVATION=self.cfg.ACTIVATION,
+                WITH_ACT=self.cfg.WITH_ACT,
+                WITH_DACT=self.cfg.WITH_DACT,
                 DTYPE=self.cfg.DTYPE,
                 FP8_DTYPE=self.cfg.FP8_DTYPE,
                 MAX_NORM_RCP=self.cfg.MAX_NORM_RCP,
