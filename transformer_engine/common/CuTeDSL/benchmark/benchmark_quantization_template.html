@@ -25,17 +25,13 @@
   :root {
     --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
     --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,0.10);
-    --ref: #898781;
-    /* categorical slots for one line per N, in fixed order */
-    --c1: #2a78d6; --c2: #eb6834; --c3: #1baf7a; --c4: #eda100;
-    --c5: #e87ba4; --c6: #008300; --c7: #6250d6; --c8: #e34948;
+    --new: #2a78d6; --old: #eb6834; --ref: #898781;
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --page: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
       --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
-      --c1: #3987e5; --c2: #d95926; --c3: #199e70; --c4: #c98500;
-      --c5: #d55181; --c6: #008300; --c7: #9085e9; --c8: #e66767;
+      --new: #3987e5; --old: #d95926;
     }
   }
   * { box-sizing: border-box; }
@@ -46,7 +42,6 @@
   .meta { color: var(--ink-2); font-size: 12px; margin: 0; }
   .meta code { font-size: 11px; word-break: break-all; }
   .controls { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; margin: 20px 0 12px; }
-  #controls { margin-bottom: 0; }
   .control { display: flex; align-items: center; gap: 8px; }
   .control > span { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
   .control { flex-wrap: wrap; max-width: 100%; }
@@ -56,8 +51,6 @@
                 font-size: 13px; cursor: pointer; }
   .seg button + button { border-left: 1px solid var(--border); }
   .seg button[aria-pressed="true"] { background: var(--ink); color: var(--surface); }
-  .seg button:disabled { opacity: .35; cursor: not-allowed; }
-  .control > span.hint { color: var(--muted); font-size: 12px; text-transform: none; letter-spacing: 0; }
   .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
   .chart-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 16px; }
   .chart-title { font-size: 15px; font-weight: 600; margin: 0; }
@@ -93,7 +86,6 @@
   <h1 id="title"></h1>
   <p class="meta" id="meta"></p>
   <div class="controls" id="controls"></div>
-  <div class="controls" id="metric-controls"></div>
   <section class="card">
     <div class="chart-head">
       <div><p class="chart-title" id="chart-title"></p><p class="chart-sub" id="chart-sub"></p></div>
@@ -122,8 +114,6 @@ if (COMPARE) {
   METRICS.speedup = { label: "Speedup Ratio", axis: "speedup (old time / new time)", scale: "linear",
                       fmt: v => `${v.toFixed(3)}×` };
 }
-const MULTI_N_METRICS = ["throughput", "speedup"];  // comparable across N; time is not
-const MAX_NS = 8;  // one categorical color per N, never reused
 
 const uniq = xs => [...new Set(xs)];
 const state = {
@@ -131,7 +121,7 @@ const state = {
   direction: CHARTS[0].direction,
   swizzle: CHARTS[0].swizzle ?? "off",
   input: CHARTS[0].input ?? "bf16",
-  Ns: [CHARTS[0].N],
+  N: CHARTS[0].N,
   metric: "time",
 };
 const options = {
@@ -142,8 +132,6 @@ const options = {
   N: uniq(CHARTS.map(c => c.N)).sort((a, b) => a - b),
   metric: Object.keys(METRICS),
 };
-// Each N keeps its color whatever else is selected.
-const N_COLOR = Object.fromEntries(options.N.map((n, i) => [n, `var(--c${(i % MAX_NS) + 1})`]));
 
 function fmtNum(v) {
   if (v == null || Number.isNaN(v)) return "–";
@@ -158,99 +146,51 @@ function el(tag, attrs = {}, parent) {
 }
 
 // ---- controls ------------------------------------------------------------------------
-function addControl(box, key, label) {
-  const ctl = document.createElement("div");
-  ctl.className = "control";
-  ctl.innerHTML = `<span>${label}</span>`;
-  const seg = document.createElement("div");
-  seg.className = "seg";
-  seg.dataset.key = key;
-  for (const opt of options[key]) {
-    const b = document.createElement("button");
-    b.type = "button";
-    b.textContent = key === "metric" ? METRICS[opt].label : opt;
-    b.dataset.value = opt;
-    b.addEventListener("click", () => select(key, opt));
-    seg.appendChild(b);
-  }
-  ctl.appendChild(seg);
-  box.appendChild(ctl);
-  return ctl;
-}
 function buildControls() {
   const box = document.getElementById("controls");
-  const labels = { input: "Input", fusion: "Fusion", direction: "Direction", swizzle: "Swizzled Scale", N: "N" };
-  for (const [key, label] of Object.entries(labels)) addControl(box, key, label);
-  const metricCtl = addControl(document.getElementById("metric-controls"), "metric", "Metric");
-  metricCtl.insertAdjacentHTML("beforeend", `<span class="hint" id="metric-hint"></span>`);
-}
-function select(key, opt) {
-  if (key === "N") {
-    const n = Number(opt), Ns = state.Ns;
-    if (Ns.includes(n)) { if (Ns.length > 1) state.Ns = Ns.filter(v => v !== n); }
-    else if (Ns.length < MAX_NS) state.Ns = [...Ns, n].sort((a, b) => a - b);
-    if (state.Ns.length > 1 && !MULTI_N_METRICS.includes(state.metric)) state.metric = "throughput";
-  } else {
-    state[key] = opt;
+  const labels = { fusion: "Fusion", direction: "Direction", swizzle: "Swizzled Scale", input: "Input", N: "N", metric: "Metric" };
+  for (const key of ["input", "fusion", "direction", "swizzle", "N", "metric"]) {
+    const ctl = document.createElement("div");
+    ctl.className = "control";
+    ctl.innerHTML = `<span>${labels[key]}</span>`;
+    const seg = document.createElement("div");
+    seg.className = "seg";
+    seg.dataset.key = key;
+    for (const opt of options[key]) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = key === "metric" ? METRICS[opt].label : opt;
+      b.dataset.value = opt;
+      b.addEventListener("click", () => { state[key] = key === "N" ? Number(opt) : opt; update(); });
+      seg.appendChild(b);
+    }
+    ctl.appendChild(seg);
+    box.appendChild(ctl);
   }
-  update();
 }
 function syncControls() {
-  const multi = state.Ns.length > 1;
   for (const seg of document.querySelectorAll(".seg")) {
     const key = seg.dataset.key;
-    for (const b of seg.children) {
-      const on = key === "N" ? state.Ns.includes(Number(b.dataset.value)) : b.dataset.value === String(state[key]);
-      b.setAttribute("aria-pressed", String(on));
-      if (key === "metric") {
-        b.disabled = multi && !MULTI_N_METRICS.includes(b.dataset.value);
-        b.title = b.disabled ? "Time is only shown for a single N" : "";
-      }
-      if (key === "N") b.disabled = !on && state.Ns.length >= MAX_NS;
-    }
+    for (const b of seg.children) b.setAttribute("aria-pressed", String(b.dataset.value === String(state[key])));
   }
-  document.getElementById("metric-hint").textContent =
-    multi ? "Several N selected: Time is unavailable, select a single N to see it." : "";
 }
 
 // ---- data for the current selection ------------------------------------------------
-function chartFor(n) {
+function currentChart() {
   return CHARTS.find(c => c.fusion === state.fusion && c.direction === state.direction
-    && (c.swizzle ?? "off") === state.swizzle && (c.input ?? "bf16") === state.input && c.N === n);
+    && (c.swizzle ?? "off") === state.swizzle && (c.input ?? "bf16") === state.input && c.N === state.N);
 }
-function speedupPoints(chart) {
+function seriesFor(chart) {
+  if (state.metric !== "speedup") {
+    const m = METRICS[state.metric];
+    return chart.series.map(s => ({ name: s.name, role: s.role,
+      pts: s.points.map(p => ({ x: p.M, y: m.value(p), p })) }));
+  }
   const old = chart.series.find(s => s.role === "old"), nw = chart.series.find(s => s.role === "new");
   const byM = new Map(old.points.map(p => [p.M, p]));
-  return nw.points.filter(p => byM.has(p.M))
+  const pts = nw.points.filter(p => byM.has(p.M))
     .map(p => ({ x: p.M, y: byM.get(p.M).time_us / p.time_us, p, old: byM.get(p.M) }));
-}
-// Each series: {name, color, dash, N, role, pts}. Color identifies the N; in a comparison the
-// old line is dashed and the new one solid, in the same color.
-function seriesFor(charts) {
-  const multi = charts.length > 1, out = [];
-  for (const chart of charts) {
-    const tag = multi ? `N=${chart.N}` : "";
-    if (state.metric === "speedup") {
-      out.push({ name: tag || "new vs old", color: N_COLOR[chart.N], dash: false,
-                 N: chart.N, role: "new", pts: speedupPoints(chart) });
-      continue;
-    }
-    const m = METRICS[state.metric];
-    for (const s of chart.series) {
-      const name = multi ? (COMPARE ? `${tag} ${s.role}` : tag) : s.name;
-      out.push({ name, color: N_COLOR[chart.N], dash: s.role === "old",
-                 N: chart.N, role: s.role, pts: s.points.map(p => ({ x: p.M, y: m.value(p), p })) });
-    }
-  }
-  return out;
-}
-function subtitleFor(charts) {
-  if (charts.length === 1) return charts[0].subtitle;
-  if (!COMPARE) return charts[0].series[0].name;
-  return "new vs old, mean time saved: " + charts.map(c => {
-    const pts = speedupPoints(c), d = pts.reduce((a, p) => a + (1 - 1 / p.y), 0) / pts.length * 100;
-    return `N=${c.N} ${d >= 0 ? "+" : ""}${d.toFixed(1)}%`;
-  }).join(" · ");
+  return [{ name: "new vs old", role: "new", pts }];
 }
 
 // ---- scales ----------------------------------------------------------------------------
@@ -275,28 +215,8 @@ function yDomain(values, scale) {
 }
 
 // ---- render ----------------------------------------------------------------------------
-function swatch(color, dash) {
-  return `<svg width="22" height="8"><line x1="1" y1="4" x2="21" y2="4" stroke="${color}" stroke-width="2"
-    ${dash ? 'stroke-dasharray="5 3"' : ""}/></svg>`;
-}
-function renderLegend(charts, series) {
-  const legend = document.getElementById("legend");
-  legend.innerHTML = "";
-  const item = (color, dash, text) => legend.insertAdjacentHTML("beforeend", `<span>${swatch(color, dash)}${text}</span>`);
-  if (charts.length === 1) {
-    if (series.length > 1) for (const s of series) item(s.color, s.dash, s.name);
-    return;
-  }
-  for (const c of charts) item(N_COLOR[c.N], false, `N=${c.N}`);
-  if (COMPARE && state.metric !== "speedup") {  // the dash, not the color, tells old from new
-    const names = Object.fromEntries(charts[0].series.map(s => [s.role, s.name]));
-    item("var(--muted)", true, names.old);
-    item("var(--muted)", false, names.new);
-  }
-}
-
 function render() {
-  const charts = state.Ns.map(chartFor).filter(Boolean);
+  const chart = currentChart();
   const host = document.getElementById("chart");
   const tooltip = document.getElementById("tooltip");
   host.querySelector("svg")?.remove();
@@ -305,21 +225,28 @@ function render() {
   const metric = METRICS[state.metric];
   const fusion = state.fusion.includes("act") && META.activation
     ? `${state.fusion}(${META.activation})` : state.fusion;
-  const title = [state.input, fusion, state.direction, ...(state.swizzle === "on" ? ["swizzled scale"] : []),
-                 `N=${state.Ns.join(", ")}`].join(" · ");
+  const title = [state.input, fusion, state.direction, ...(state.swizzle === "on" ? ["swizzled scale"] : []), `N=${state.N}`]
+    .join(" · ");
   document.getElementById("chart-title").textContent = `${metric.label} — ${title}`;
-  document.getElementById("chart-sub").textContent = charts.length ? subtitleFor(charts) : "";
-  if (!charts.length) {
-    document.getElementById("legend").innerHTML = "";
+  document.getElementById("chart-sub").textContent = chart ? chart.subtitle : "";
+  const legend = document.getElementById("legend");
+  legend.innerHTML = "";
+  if (!chart) {
     host.insertAdjacentHTML("beforeend", `<div class="empty">This combination was not benchmarked.</div>`);
     document.getElementById("table").innerHTML = "";
     return;
   }
-  const series = seriesFor(charts);
-  renderLegend(charts, series);
+  const series = seriesFor(chart);
+  if (series.length > 1) {
+    for (const s of series) {
+      legend.insertAdjacentHTML("beforeend",
+        `<span><svg width="22" height="8"><line x1="1" y1="4" x2="21" y2="4" stroke="var(--${s.role})"
+          stroke-width="2" ${s.role === "old" ? 'stroke-dasharray="5 3"' : ""}/></svg>${s.name}</span>`);
+    }
+  }
 
   const W = Math.max(320, host.clientWidth), H = Math.round(Math.min(440, Math.max(260, W * 0.5)));
-  const m = { top: 12, right: 64, bottom: 40, left: 64 };
+  const m = { top: 12, right: 56, bottom: 40, left: 64 };
   const iw = W - m.left - m.right, ih = H - m.top - m.bottom;
   const xs = uniq(series.flatMap(s => s.pts.map(p => p.x))).sort((a, b) => a - b);
   const ys = series.flatMap(s => s.pts.map(p => p.y)).filter(v => v != null && v > 0);
@@ -358,20 +285,18 @@ function render() {
   for (const s of series) {
     const pts = s.pts.filter(p => p.y != null && p.y > 0);
     el("path", { d: pts.map((p, i) => `${i ? "L" : "M"}${X(p.x)},${Y(p.y)}`).join(""), fill: "none",
-                 stroke: s.color, "stroke-width": 2, "stroke-linejoin": "round",
-                 ...(s.dash ? { "stroke-dasharray": "6 4" } : {}) }, svg);
+                 stroke: `var(--${s.role})`, "stroke-width": 2, "stroke-linejoin": "round",
+                 ...(s.role === "old" ? { "stroke-dasharray": "6 4" } : {}) }, svg);
     for (const p of pts) {
-      markers.push({ x: p.x, c: el("circle", { cx: X(p.x), cy: Y(p.y), r: 4, fill: s.color,
+      markers.push({ x: p.x, c: el("circle", { cx: X(p.x), cy: Y(p.y), r: 4, fill: `var(--${s.role})`,
                                                 stroke: "var(--surface)", "stroke-width": 2 }, svg) });
     }
-    if (series.length > 1 && pts.length) {
-      ends.push({ text: charts.length > 1 ? s.name : s.role, y: Y(pts[pts.length - 1].y) });
-    }
+    if (series.length > 1 && pts.length) ends.push({ role: s.role, y: Y(pts[pts.length - 1].y) });
   }
   ends.sort((a, b) => a.y - b.y);
   for (let i = 1; i < ends.length; i++) ends[i].y = Math.max(ends[i].y, ends[i - 1].y + 13);
   for (const e of ends) {
-    el("text", { x: m.left + iw + 8, y: e.y, class: "end-label", "dominant-baseline": "middle" }, svg).textContent = e.text;
+    el("text", { x: m.left + iw + 8, y: e.y, class: "end-label", "dominant-baseline": "middle" }, svg).textContent = e.role;
   }
 
   // Hover: crosshair at the nearest M, tooltip with every series' numbers there.
@@ -383,7 +308,7 @@ function render() {
     const x = xs.reduce((a, b) => (Math.abs(X(b) - px) < Math.abs(X(a) - px) ? b : a));
     cross.setAttribute("x1", X(x)); cross.setAttribute("x2", X(x)); cross.setAttribute("visibility", "visible");
     for (const mk of markers) mk.c.setAttribute("r", mk.x === x ? 6 : 4);
-    tooltip.innerHTML = tooltipHtml(charts, series, x);
+    tooltip.innerHTML = tooltipHtml(series, x);
     tooltip.style.display = "block";
     const tx = X(x) * (r.width / W), tw = tooltip.offsetWidth;
     tooltip.style.left = `${tx + 16 + tw > r.width ? tx - 16 - tw : tx + 16}px`;
@@ -397,26 +322,39 @@ function render() {
     tooltip.style.display = "none";
   });
 
-  renderTable(charts);
+  renderTable(chart);
 }
 
+function swatch(role) {
+  return `<svg width="22" height="8"><line x1="1" y1="4" x2="21" y2="4" stroke="var(--${role})" stroke-width="2"
+    ${role === "old" ? 'stroke-dasharray="5 3"' : ""}/></svg>`;
+}
 function detail(p) {
   const std = p.rel_std_pct == null ? "" : ` ± ${p.rel_std_pct.toFixed(1)}%`;
   return `${fmtNum(p.time_us)} µs${std} (min ${fmtNum(p.min_us)}) · ${fmtNum(p["GB/s"])} GB/s`
        + `<br>${p.kernel}`;
 }
-function tooltipHtml(charts, series, x) {
+function tooltipHtml(series, x) {
   let html = `<div class="h">M = ${x}</div>`;
+  if (state.metric === "speedup") {
+    const pt = series[0].pts.find(p => p.x === x);
+    if (!pt) return html;
+    const byRole = Object.fromEntries(currentChart().series.map(s => [s.role, s.name]));
+    html += `<div class="row"><span></span><span>speedup</span><span class="v">${pt.y.toFixed(3)}×</span></div>`;
+    for (const [role, p] of [["old", pt.old], ["new", pt.p]]) {
+      html += `<div class="row">${swatch(role)}<span>${byRole[role]}</span><span></span>`
+            + `<span class="detail">${detail(p)}</span></div>`;
+    }
+    return html;
+  }
   const metric = METRICS[state.metric];
   for (const s of series) {
     const pt = s.pts.find(p => p.x === x);
     if (!pt) continue;
-    html += `<div class="row">${swatch(s.color, s.dash)}<span>${s.name}</span><span class="v">${metric.fmt(pt.y)}</span>`;
-    html += state.metric === "speedup"
-      ? `<span class="detail">old ${detail(pt.old)}<br>new ${detail(pt.p)}</span></div>`
-      : `<span class="detail">${detail(pt.p)}</span></div>`;
+    html += `<div class="row">${swatch(s.role)}<span>${s.name}</span><span class="v">${metric.fmt(pt.y)}</span>`
+          + `<span class="detail">${detail(pt.p)}</span></div>`;
   }
-  if (COMPARE && charts.length === 1 && state.metric !== "speedup") {
+  if (COMPARE) {
     const t = Object.fromEntries(series.map(s => [s.role, s.pts.find(p => p.x === x)?.p.time_us]));
     if (t.old && t.new) {
       const d = (t.old - t.new) / t.old * 100;
@@ -427,20 +365,16 @@ function tooltipHtml(charts, series, x) {
   return html;
 }
 
-function renderTable(charts) {
+function renderTable(chart) {
   const cols = ["time_us", "min_us", "rel_std_pct", "GB/s", "kernel"];
-  const roles = charts[0].series.map(s => s.role);
-  const head = roles.length > 1
-    ? roles.map(r => cols.map(c => `<th>${r} ${c}</th>`).join("")).join("") : cols.map(c => `<th>${c}</th>`).join("");
-  const rows = charts.flatMap(chart => {
-    const Ms = uniq(chart.series.flatMap(s => s.points.map(p => p.M))).sort((a, b) => a - b);
-    return Ms.map(M => `<tr><td>${chart.N}</td><td>${M}</td>` + chart.series.map(s => {
-      const p = s.points.find(q => q.M === M) || {};
-      return cols.map(c => `<td>${typeof p[c] === "number" ? fmtNum(p[c]) : (p[c] ?? "–")}</td>`).join("");
-    }).join("") + "</tr>");
-  }).join("");
-  document.getElementById("table").innerHTML =
-    `<table><thead><tr><th>N</th><th>M</th>${head}</tr></thead><tbody>${rows}</tbody></table>`;
+  const head = chart.series.length > 1
+    ? chart.series.map(s => cols.map(c => `<th>${s.role} ${c}</th>`).join("")).join("") : cols.map(c => `<th>${c}</th>`).join("");
+  const Ms = uniq(chart.series.flatMap(s => s.points.map(p => p.M))).sort((a, b) => a - b);
+  const rows = Ms.map(M => `<tr><td>${M}</td>` + chart.series.map(s => {
+    const p = s.points.find(q => q.M === M) || {};
+    return cols.map(c => `<td>${typeof p[c] === "number" ? fmtNum(p[c]) : (p[c] ?? "–")}</td>`).join("");
+  }).join("") + "</tr>").join("");
+  document.getElementById("table").innerHTML = `<table><thead><tr><th>M</th>${head}</tr></thead><tbody>${rows}</tbody></table>`;
 }
 
 function update() { syncControls(); render(); }
