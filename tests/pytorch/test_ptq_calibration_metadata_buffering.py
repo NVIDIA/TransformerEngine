@@ -231,6 +231,97 @@ def test_calibration_config_registers_module_scaling_factor_buffers(
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.parametrize("enabled", (False, True))
+@pytest.mark.parametrize("single_grouped_weight", (False, True))
+def test_native_grouped_linear_registers_calibration_buffers(
+    monkeypatch, enabled, single_grouped_weight
+):
+    recipe = Float8CurrentScaling()
+    if not grouped_linear.is_module_grouped_tensor_path_supported(recipe, torch.bfloat16):
+        pytest.skip("Native GroupedLinear does not support current scaling")
+    if single_grouped_weight:
+        monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
+
+    module = GroupedLinear(
+        2,
+        32,
+        32,
+        params_dtype=torch.bfloat16,
+        device="cuda",
+        bias=False,
+        use_grouped_tensor=True,
+        single_grouped_weight=single_grouped_weight,
+    )
+    inp = torch.randn((16, 32), dtype=torch.bfloat16, device="cuda")
+    m_splits = torch.tensor([8, 8], dtype=torch.int64, device="cuda")
+    with torch.no_grad(), autocast(
+        enabled=enabled,
+        recipe=recipe,
+        calibration_config=QuantizationCalibrationConfig(),
+    ):
+        module(inp, m_splits)
+
+    buffers = {
+        name: value for name, value in module.named_buffers() if name.endswith("_te_ptq_calibrated")
+    }
+    assert len(buffers) == 4
+    assert all(torch.isfinite(value).all() for value in buffers.values())
+    assert all(torch.all(value > 0) for value in buffers.values())
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+def test_native_grouped_linear_calibration_is_cuda_graph_safe():
+    recipe = Float8CurrentScaling()
+    if not grouped_linear.is_module_grouped_tensor_path_supported(recipe, torch.bfloat16):
+        pytest.skip("Native GroupedLinear does not support current scaling")
+
+    module = GroupedLinear(
+        2,
+        32,
+        32,
+        params_dtype=torch.bfloat16,
+        device="cuda",
+        bias=False,
+        use_grouped_tensor=True,
+    )
+    inp = torch.randn(
+        (16, 32),
+        dtype=torch.bfloat16,
+        device="cuda",
+        requires_grad=True,
+    )
+    m_splits = torch.tensor([8, 8], dtype=torch.int64, device="cuda")
+    calibration_config = QuantizationCalibrationConfig()
+    graphed_module = make_graphed_callables(
+        module,
+        (inp, m_splits),
+        num_warmup_iters=3,
+        enabled=True,
+        recipe=recipe,
+        calibration_config=calibration_config,
+    )
+
+    try:
+        with autocast(
+            enabled=True,
+            recipe=recipe,
+            calibration_config=calibration_config,
+        ):
+            graphed_module(inp, m_splits)
+        torch.cuda.synchronize()
+        buffers = {
+            name: value
+            for name, value in module.named_buffers()
+            if name.endswith("_te_ptq_calibrated")
+        }
+        assert len(buffers) == 4
+        assert all(torch.isfinite(value).all() for value in buffers.values())
+        assert all(torch.all(value > 0) for value in buffers.values())
+    finally:
+        graphed_module.reset()
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 def test_linear_calibration_config_applies_activation_decay_only():
     module = Linear(32, 32, params_dtype=torch.bfloat16, device="cuda", bias=False)
     calibration_config = QuantizationCalibrationConfig(transformer_engine_calibration_decay=0.5)
@@ -541,12 +632,12 @@ def test_row_scaled_nvfp4_calibration_and_metadata_buffering_are_unsupported():
         quantizer._get_calibration_metadata_buffers("input")
 
 
-def test_mxfp8_calibration_skips_non_global_scaling_metadata():
+def test_mxfp8_calibration_is_unsupported():
     tensor = SimpleNamespace(_rowwise_scale_inv=torch.ones(2, 2))
     quantizer = _make_test_quantizer(MXFP8Quantizer)
 
-    quantizer.calibrate(tensor, calibration_config=DEFAULT_CALIBRATION_CONFIG)
-    assert not quantizer._get_calibration_metadata_buffers("input")
+    with pytest.raises(NotImplementedError, match="does not support calibration"):
+        quantizer.calibrate(tensor, calibration_config=DEFAULT_CALIBRATION_CONFIG)
 
 
 def test_float8_blockwise_calibration_is_unsupported():

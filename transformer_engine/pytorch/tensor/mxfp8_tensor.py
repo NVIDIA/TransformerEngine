@@ -147,6 +147,10 @@ class MXFP8Quantizer(Quantizer):
         # non-global / blockwise scaling factors, which are usually computed
         # on-the-fly during inference. Implement this interface for future
         # applications of MXFP8 calibration.
+        raise NotImplementedError(
+            "MXFP8Quantizer does not support calibration of block scales, "
+            "which are computed online to accurately invert the quantization."
+        )
 
     def get_scale_shape(
         self,
