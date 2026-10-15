@@ -205,12 +205,22 @@ def test_router_compile_replay(histogram_mode, index_dtype):
         actual_grad = torch.autograd.grad(actual[0], logits)
         expected_grad = torch.autograd.grad(expected[0], eager_logits)
         torch.testing.assert_close(actual_grad, expected_grad)
-    with torch.no_grad():
-        torch.compiler.cudagraph_mark_step_begin()
-        actual = compiled(logits, bounds, total, indices, histogram)
-        expected = router(logits, bounds, total, reference_indices, reference_histogram)
-        torch.testing.assert_close(actual, expected)
-        torch.testing.assert_close(histogram, reference_histogram)
+    for grad_context, inference_logits in (
+        (torch.no_grad, logits),
+        (torch.inference_mode, logits),
+        (torch.enable_grad, logits.detach()),
+    ):
+        with grad_context():
+            torch.compiler.cudagraph_mark_step_begin()
+            actual = compiled(inference_logits, bounds, total, indices, histogram)
+            expected = router(
+                inference_logits, bounds, total, reference_indices, reference_histogram
+            )
+            torch.testing.assert_close(actual, expected)
+            torch.testing.assert_close(histogram, reference_histogram)
+            assert not actual[0].requires_grad
+            if indices is not None:
+                assert actual[1].data_ptr() == indices.data_ptr()
     assert not counters["inductor"]["cudagraph_skips"]
 
 
