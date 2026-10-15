@@ -439,6 +439,8 @@ target_link_options(
   PRIVATE
   "LINKER:--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version"
 )
+set_property(TARGET transformer_engine APPEND PROPERTY LINK_DEPENDS
+  "${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version")
 target_link_options(
   transformer_engine
   PRIVATE
