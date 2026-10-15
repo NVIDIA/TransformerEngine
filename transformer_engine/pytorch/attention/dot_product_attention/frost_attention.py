@@ -280,13 +280,7 @@ def is_frost_attention_supported(params) -> Tuple[int, str]:
     if params.cuda_graph:
         return no_backend, "FROST graphs are built lazily and cannot be captured"
     if params.deterministic and params.is_training:
-        return (
-            no_backend,
-            (
-                "FROST has no deterministic backward; its dQ accumulation is atomic and unordered,"
-                " so repeat runs differ in the last bits"
-            ),
-        )
+        return no_backend, "FROST does not support a deterministic backward"
 
     qkv_layout = _name_for(QKVLayout, params.qkv_layout)
     if qkv_layout is None:
@@ -312,8 +306,8 @@ def is_frost_attention_supported(params) -> Tuple[int, str]:
             return (
                 no_backend,
                 (
-                    f"FROST needs {name} to match qkv_format, since the kernels write O and dQKV"
-                    f" with q's strides; got {value}/{qkv_format}"
+                    f"FROST needs {name} to match qkv_format, since O and the grads are"
+                    f" described with the inputs' own strides; got {value}/{qkv_format}"
                 ),
             )
 
@@ -668,8 +662,8 @@ def fused_attn_bwd(
     ):
         if fmt != qkv_format:
             raise NotImplementedError(
-                f"FROST attention needs {name} to match qkv_format, since o and dO are read"
-                " with q's strides and the grads returned in its layout; got"
+                f"FROST attention needs {name} to match qkv_format, since o and dO take q's"
+                " layout and each grad takes that of the input it differentiates; got"
                 f" {fmt}/{qkv_format}"
             )
     mask = _te_mask_spec(
