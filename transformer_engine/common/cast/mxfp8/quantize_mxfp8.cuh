@@ -933,16 +933,22 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
 
               // regtile::quantize replaces the generic kernel below for the requests it
               // implements: bidimensional BF16 -> E4M3 with fused GeLU, SiLU, dGeLU or dSiLU, read
-              // from an activation table or computed, no dbias, cols % 16 == 0, 16-byte aligned
-              // inputs (see regtile::kImplements and regtile::can_use). It keeps the tile in
-              // registers instead of staging it through shared memory and writes the same bytes
-              // the generic kernel writes.
+              // from an activation table or computed, the derivatives optionally with dbias,
+              // cols % 16 == 0, 16-byte aligned inputs (see regtile::kImplements and
+              // regtile::can_use). It keeps the tile in registers instead of staging it through
+              // shared memory and writes the same bytes, and the same dbias workspace, the
+              // generic kernel writes.
               if constexpr (std::is_same_v<IType, bf16> && std::is_same_v<OType, fp8e4m3> &&
                             regtile::kImplements<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>) {
-                if (regtile::can_use<IS_DACT, IS_ACT>(input, act_input, *output, *noop,
-                                                      use_2d_quantization, activation_lut)) {
-                  regtile::quantize<IS_DACT, IS_ACT, ParamOP, OP, WITH_GEMM_SWIZZLED_SCALES>(
-                      input, act_input, output, activation_lut, stream);
+                if (regtile::can_use<IS_DACT, IS_ACT, IS_DBIAS>(
+                        input, act_input, *output, *noop, use_2d_quantization, activation_lut)) {
+                  regtile::quantize<IS_DACT, IS_ACT, IS_DBIAS, ParamOP, OP,
+                                    WITH_GEMM_SWIZZLED_SCALES>(
+                      input, act_input, output, activation_lut, workspace_ptr, stream);
+                  if constexpr (IS_DBIAS) {
+                    common::reduce_dbias<IType>(workspace_ptr, dbias, dbias_rows, dbias_cols,
+                                                stream);
+                  }
                   return;
                 }
               }

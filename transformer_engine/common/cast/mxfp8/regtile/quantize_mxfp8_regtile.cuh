@@ -6,7 +6,7 @@
 
 /*! \file quantize_mxfp8_regtile.cuh
  *  \brief Register-resident MXFP8 bidimensional quantize fused with GeLU or SiLU, or
- *         their derivatives.
+ *         their derivatives, optionally with dbias.
  *
  *  Rowwise and colwise MX scales need an amax over the same data in two
  *  directions.  The generic kernel stages each tile through shared memory and
@@ -183,7 +183,10 @@ constexpr int kMaxThreadsPerSm = 1024;
 constexpr int kMaxThreadsPerSm = 2048;
 #endif
 
-template <bool IS_DACT, bool IS_ACT, typename TableT>
+// Minimum resident CTAs per SM with dbias: the 32 KB staging buffer allows about four.
+constexpr int kMinBlocksDbias = 4;
+
+template <bool IS_DACT, bool IS_ACT, typename TableT, bool kDbias = false>
 struct TileConfig {
   static_assert(IS_ACT != IS_DACT, "Exactly one of the activation and its derivative is fused.");
   static constexpr int kThreadsPerCta = IS_DACT ? 256 : 128;
@@ -196,24 +199,37 @@ struct TileConfig {
   static constexpr int kDrainTidBase =
       (kThreadsPerCta >= kTileCols / 2 + kTileCols / 4) ? kTileCols / 2 : 0;
   static constexpr int kRowsInFlight = 2;
-  static constexpr int kRequestedMinBlocks = IS_DACT ? kMinBlocksDact : kMinBlocksAct;
+  static constexpr int kRequestedMinBlocks =
+      kDbias ? kMinBlocksDbias : (IS_DACT ? kMinBlocksDact : kMinBlocksAct);
   static constexpr int kMinBlocksPerSm = kRequestedMinBlocks < kMaxThreadsPerSm / kThreadsPerCta
                                              ? kRequestedMinBlocks
                                              : kMaxThreadsPerSm / kThreadsPerCta;
   static constexpr int kTableBytes = static_cast<int>(TableT::kBytes);
+  //! Dynamic shared memory: with dbias, the band's FP32 products before rounding.
+  static constexpr int kDbiasStageBytes = kDbias ? kRowsPerMxBlock * kTileCols * 4 : 0;
+  static_assert(!kDbias || (IS_DACT && kThreadsPerCta == kTileCols),
+                "dbias: one thread per column sums the column.");
 };
 
 // Register-resident tiling: the 32x256 tile stays in registers; only the
 // colwise partials go through shared memory.
 // kTails: the grid may cover elements past M or K (see shape_supported). Without tails the
 // bounds checks compile away, which matters at the kernel's register budget.
-template <bool IS_DACT, bool IS_ACT, typename TableT, bool WITH_GEMM_SWIZZLED_SCALES, bool kTails>
+//
+// kDbias: also write the per-64-row-chunk column sums of the FP32 products (before rounding to
+// BF16) into dbias_workspace[chunk][K], as the generic kernel does; common::reduce_dbias then
+// adds the chunks. The generic kernel sums each column of a chunk strictly in row order, so a
+// CTA here takes the chunk's two 32-row bands back to back, stages each band's products in
+// shared memory, and one thread per column adds them in row order.
+template <bool IS_DACT, bool IS_ACT, typename TableT, bool WITH_GEMM_SWIZZLED_SCALES, bool kTails,
+          bool kDbias>
 __device__ __forceinline__ void quantize_regtile(
     const uint4* __restrict__ input, const uint4* __restrict__ act_input,
     unsigned char* __restrict__ rowwise_out, unsigned char* __restrict__ rowwise_scales,
     unsigned char* __restrict__ colwise_out, unsigned char* __restrict__ colwise_scales, int M,
-    int K, int rowwise_scale_stride, int colwise_scale_stride, int iters, const void* table) {
-  using C = TileConfig<IS_DACT, IS_ACT, TableT>;
+    int K, int rowwise_scale_stride, int colwise_scale_stride, int iters, const void* table,
+    float* __restrict__ dbias_workspace) {
+  using C = TileConfig<IS_DACT, IS_ACT, TableT, kDbias>;
   constexpr int kWarpsPerCta = C::kWarpsPerCta, kRowsPerWarp = C::kRowsPerWarp,
                 kRowsInFlight = C::kRowsInFlight;
 
@@ -222,6 +238,8 @@ __device__ __forceinline__ void quantize_regtile(
   __shared__ __align__(8) unsigned char row_scale_bytes[kRowsPerMxBlock * kMxGroupsPerRow];
   __shared__ __align__(16) unsigned char table_smem[C::kTableBytes];
   __shared__ __align__(8) uint64_t table_barrier;
+  extern __shared__ __align__(16) float dbias_stage[];  // [kRowsPerMxBlock][kTileCols], dbias only
+  float dbias_partial = 0.0f;
 
   const int tid = threadIdx.x;
   const int lane = tid & 31;
@@ -246,7 +264,13 @@ __device__ __forceinline__ void quantize_regtile(
   for (int it = 0; it < iters; ++it) {
     // Row blocks are taken grid-strided, so the CTAs on the same step cover one
     // contiguous row band.
-    const int row0 = (it * gridDim.y + blockIdx.y) * kRowsPerMxBlock;
+    // With dbias a CTA takes the two bands of a 64-row chunk on consecutive steps.
+    const int row0 = kDbias
+                         ? (((it >> 1) * gridDim.y + blockIdx.y) * 2 + (it & 1)) * kRowsPerMxBlock
+                         : (it * gridDim.y + blockIdx.y) * kRowsPerMxBlock;
+    if constexpr (kDbias) {
+      if ((it & 1) == 0) dbias_partial = 0.0f;
+    }
     // The band's work. A band inside the tensor runs it without bounds checks; only bands at
     // the edges of the tensor (kEdge) pay for them.
     const auto band = [&](auto edge) {
@@ -317,15 +341,25 @@ __device__ __forceinline__ void quantize_regtile(
     const ptx::floatx2 product =                                                             \
         ptx::mul_2x(widen_bf16x2(grad_words[M]), dact_word<TableT>(x_words[M], table_smem)); \
     tile_words[(h * kRowsInFlight + (T)) * kWordsPerLane + (M)] = to_bf16x2(product);        \
+    products[2 * (M)] = product.x;                                                           \
+    products[2 * (M) + 1] = product.y;                                                       \
   }
-#define MXFP8_DACT_ROW(T)                                          \
-  {                                                                \
-    const unsigned* x_words = (const unsigned*)&x_vec[T][0];       \
-    const unsigned* grad_words = (const unsigned*)&grad_vec[T][0]; \
-    MXFP8_DACT_WORD(T, 0)                                          \
-    MXFP8_DACT_WORD(T, 1)                                          \
-    MXFP8_DACT_WORD(T, 2)                                          \
-    MXFP8_DACT_WORD(T, 3)                                          \
+#define MXFP8_DACT_ROW(T)                                                                       \
+  {                                                                                             \
+    const unsigned* x_words = (const unsigned*)&x_vec[T][0];                                    \
+    const unsigned* grad_words = (const unsigned*)&grad_vec[T][0];                              \
+    float products[2 * kWordsPerLane];                                                          \
+    MXFP8_DACT_WORD(T, 0)                                                                       \
+    MXFP8_DACT_WORD(T, 1)                                                                       \
+    MXFP8_DACT_WORD(T, 2)                                                                       \
+    MXFP8_DACT_WORD(T, 3)                                                                       \
+    if constexpr (kDbias) {                                                                     \
+      float4* stage =                                                                           \
+          (float4*)(dbias_stage + (warp * kRowsPerWarp + h * kRowsInFlight + (T)) * kTileCols + \
+                    kColsPerLane * lane);                                                       \
+      stage[0] = make_float4(products[0], products[1], products[2], products[3]);               \
+      stage[1] = make_float4(products[4], products[5], products[6], products[7]);               \
+    }                                                                                           \
   }
           static_assert(kRowsInFlight == 2, "A load group is two rows.");
           MXFP8_DACT_ROW(0)
@@ -437,6 +471,14 @@ __device__ __forceinline__ void quantize_regtile(
 
       publish_col_amax_partials();
       __syncthreads();
+      if constexpr (kDbias) {
+        // The generic kernel's order: a strictly sequential FP32 sum down the column.
+        float sum = dbias_partial;
+#pragma unroll 8
+        for (int r = 0; r < kRowsPerMxBlock; ++r)
+          sum = __fadd_rn(sum, dbias_stage[r * kTileCols + tid]);
+        dbias_partial = sum;
+      }
       if (tid < kTileCols / 2) {
         unsigned col_amax = col_amax_partials[0][tid];
 #pragma unroll
@@ -535,12 +577,18 @@ __device__ __forceinline__ void quantize_regtile(
     } else {
       band(std::false_type{});
     }
+    if constexpr (kDbias) {
+      if ((it & 1) == 1 && col0 + tid < K) {
+        dbias_workspace[(size_t)(row0 / (2 * kRowsPerMxBlock)) * K + col0 + tid] = dbias_partial;
+      }
+    }
   }
 }
 
-template <bool IS_DACT, bool IS_ACT, typename TableT, bool WITH_GEMM_SWIZZLED_SCALES, bool kTails>
-__global__ void __launch_bounds__(TileConfig<IS_DACT, IS_ACT, TableT>::kThreadsPerCta,
-                                  TileConfig<IS_DACT, IS_ACT, TableT>::kMinBlocksPerSm)
+template <bool IS_DACT, bool IS_ACT, typename TableT, bool WITH_GEMM_SWIZZLED_SCALES, bool kTails,
+          bool kDbias>
+__global__ void __launch_bounds__(TileConfig<IS_DACT, IS_ACT, TableT, kDbias>::kThreadsPerCta,
+                                  TileConfig<IS_DACT, IS_ACT, TableT, kDbias>::kMinBlocksPerSm)
     quantize_mxfp8_kernel(const unsigned* __restrict__ input,
                           const unsigned* __restrict__ act_input,
                           unsigned char* __restrict__ rowwise_out,
@@ -548,11 +596,12 @@ __global__ void __launch_bounds__(TileConfig<IS_DACT, IS_ACT, TableT>::kThreadsP
                           unsigned char* __restrict__ colwise_out,
                           unsigned char* __restrict__ colwise_scales, int M, int K,
                           int rowwise_scale_stride, int colwise_scale_stride, int iters,
-                          const void* __restrict__ table) {
+                          const void* __restrict__ table, float* __restrict__ dbias_workspace) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-  quantize_regtile<IS_DACT, IS_ACT, TableT, WITH_GEMM_SWIZZLED_SCALES, kTails>(
+  quantize_regtile<IS_DACT, IS_ACT, TableT, WITH_GEMM_SWIZZLED_SCALES, kTails, kDbias>(
       (const uint4*)input, (const uint4*)act_input, rowwise_out, rowwise_scales, colwise_out,
-      colwise_scales, M, K, rowwise_scale_stride, colwise_scale_stride, iters, table);
+      colwise_scales, M, K, rowwise_scale_stride, colwise_scale_stride, iters, table,
+      dbias_workspace);
 #endif
 }
 
@@ -578,10 +627,12 @@ static int pick_walk_length(int row_blocks, int grid_cols, long long target,
 // the rest of the unified array goes to L1.
 constexpr int kCarveoutPercentAct = 40;
 
-template <bool IS_DACT, bool IS_ACT, typename TableT, bool WITH_GEMM_SWIZZLED_SCALES, bool kTails>
+template <bool IS_DACT, bool IS_ACT, typename TableT, bool WITH_GEMM_SWIZZLED_SCALES, bool kTails,
+          bool kDbias>
 static void set_carveout() {
   constexpr int kPercent = IS_ACT ? kCarveoutPercentAct : 0;
-  if constexpr (kPercent > 0) {
+  constexpr int kDynamicBytes = TileConfig<IS_DACT, IS_ACT, TableT, kDbias>::kDbiasStageBytes;
+  if constexpr (kPercent > 0 || kDynamicBytes > 0) {
     // Function attributes are per device, like the tables.
     static std::mutex mutex;
     static std::vector<bool> done;
@@ -590,10 +641,18 @@ static void set_carveout() {
     std::lock_guard<std::mutex> lock(mutex);
     if (static_cast<size_t>(device) >= done.size()) done.resize(device + 1, false);
     if (!done[device]) {
-      NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-          (const void*)
-              quantize_mxfp8_kernel<IS_DACT, IS_ACT, TableT, WITH_GEMM_SWIZZLED_SCALES, kTails>,
-          cudaFuncAttributePreferredSharedMemoryCarveout, kPercent));
+      const void* kernel = (const void*)
+          quantize_mxfp8_kernel<IS_DACT, IS_ACT, TableT, WITH_GEMM_SWIZZLED_SCALES, kTails, kDbias>;
+      if constexpr (kPercent > 0) {
+        NVTE_CHECK_CUDA(
+            cudaFuncSetAttribute(kernel, cudaFuncAttributePreferredSharedMemoryCarveout, kPercent));
+      }
+      if constexpr (kDynamicBytes > 0) {
+        // The staging buffer takes the kernel past the 48 KB of shared memory a CTA gets by
+        // default.
+        NVTE_CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                             kDynamicBytes));
+      }
       done[device] = true;
     }
   }
@@ -606,7 +665,7 @@ inline int row_bands(int M) { return (M + 63) / 64 * 2; }
 inline int col_tiles(int K) { return (K + kTileCols - 1) / kTileCols; }
 
 // Row blocks per CTA walk, in powers of two.
-template <bool IS_DACT>
+template <bool IS_DACT, bool kDbias = false>
 int walk_length(int M, int K) {
   const int row_blocks = row_bands(M);
   const int grid_cols = col_tiles(K);
@@ -618,26 +677,30 @@ int walk_length(int M, int K) {
   if constexpr (IS_DACT) {
     if (iters > kMaxWalkDact) iters = kMaxWalkDact;
   }
+  // With dbias a CTA walks whole 64-row chunks: two bands per chunk.
+  if constexpr (kDbias) {
+    if (iters % 2 != 0) iters *= 2;
+  }
   return iters;
 }
 
-template <bool IS_DACT, bool IS_ACT, typename TableT, bool WITH_GEMM_SWIZZLED_SCALES>
+template <bool IS_DACT, bool IS_ACT, typename TableT, bool WITH_GEMM_SWIZZLED_SCALES, bool kDbias>
 static void launch(const void* input, const void* act_input, void* rowwise_out,
                    void* rowwise_scales, void* colwise_out, void* colwise_scales, int M, int K,
                    int rowwise_scale_stride, int colwise_scale_stride, const void* table,
-                   cudaStream_t stream) {
-  using C = TileConfig<IS_DACT, IS_ACT, TableT>;
-  const int iters = walk_length<IS_DACT>(M, K);
+                   float* dbias_workspace, cudaStream_t stream) {
+  using C = TileConfig<IS_DACT, IS_ACT, TableT, kDbias>;
+  const int iters = walk_length<IS_DACT, kDbias>(M, K);
   dim3 grid(col_tiles(K), row_bands(M) / iters);
   const auto run = [&](auto tails) {
     constexpr bool kTails = decltype(tails)::value;
-    set_carveout<IS_DACT, IS_ACT, TableT, WITH_GEMM_SWIZZLED_SCALES, kTails>();
-    quantize_mxfp8_kernel<IS_DACT, IS_ACT, TableT, WITH_GEMM_SWIZZLED_SCALES, kTails>
-        <<<grid, C::kThreadsPerCta, 0, stream>>>(
+    set_carveout<IS_DACT, IS_ACT, TableT, WITH_GEMM_SWIZZLED_SCALES, kTails, kDbias>();
+    quantize_mxfp8_kernel<IS_DACT, IS_ACT, TableT, WITH_GEMM_SWIZZLED_SCALES, kTails, kDbias>
+        <<<grid, C::kThreadsPerCta, C::kDbiasStageBytes, stream>>>(
             (const unsigned*)input, (const unsigned*)act_input, (unsigned char*)rowwise_out,
             (unsigned char*)rowwise_scales, (unsigned char*)colwise_out,
             (unsigned char*)colwise_scales, M, K, rowwise_scale_stride, colwise_scale_stride, iters,
-            table);
+            table, dbias_workspace);
   };
   // Whole 64-row tiles and 256-column tiles leave nothing past M or K. The derivatives take the
   // tail-capable kernel for every shape: with the band body behind its edge branch, the compiler
@@ -662,18 +725,18 @@ inline bool shape_supported(size_t rows, size_t cols) {
 }  // namespace
 
 //! Whether this kernel implements the request type: GeLU or SiLU, or the derivative of
-//! either, without dbias. It reads the activation from a table, or computes it with
-//! util/math.h when there is none.
+//! either, the derivative optionally with dbias. It reads the activation from a table, or
+//! computes it with util/math.h when there is none.
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP&)>
 constexpr bool kImplements =
-    !IS_DBIAS && (IS_ACT != IS_DACT) && activation_table::kHasTable<ParamOP, OP> &&
+    (!IS_DBIAS || IS_DACT) && (IS_ACT != IS_DACT) && activation_table::kHasTable<ParamOP, OP> &&
     (IS_ACT == activation_table::Table<activation_table::kKindOf<ParamOP, OP>>::kForward);
 
 // Whether this kernel takes a request of a type in kImplements, with BF16 input and E4M3
 // output.  Anything else takes the generic kernel, as does every request with
 // NVTE_MXFP8_REGTILE=0.
-template <bool IS_DACT, bool IS_ACT>
+template <bool IS_DACT, bool IS_ACT, bool IS_DBIAS = false>
 bool can_use(const Tensor& input, const Tensor* act_input, const Tensor& output, const Tensor& noop,
              bool use_2d_quantization, const activation_table::TableRef& table) {
   if (!getenv<bool>("NVTE_MXFP8_REGTILE", true)) return false;
@@ -701,14 +764,17 @@ bool can_use(const Tensor& input, const Tensor* act_input, const Tensor& output,
   }
   constexpr size_t kMaxGridY = 65535;
   const int M = static_cast<int>(rows);
-  return static_cast<size_t>(row_bands(M) / walk_length<IS_DACT>(M, static_cast<int>(cols))) <=
-         kMaxGridY;
+  return static_cast<size_t>(
+             row_bands(M) / walk_length<IS_DACT, IS_DBIAS>(M, static_cast<int>(cols))) <= kMaxGridY;
 }
 
-template <bool IS_DACT, bool IS_ACT, typename ParamOP, float (*OP)(float, const ParamOP&),
-          bool WITH_GEMM_SWIZZLED_SCALES>
+//! dbias_workspace: [ceil(rows / 64), cols] FP32 column sums for common::reduce_dbias, or
+//! nullptr without dbias.
+template <bool IS_DACT, bool IS_ACT, bool IS_DBIAS, typename ParamOP,
+          float (*OP)(float, const ParamOP&), bool WITH_GEMM_SWIZZLED_SCALES>
 void quantize(const Tensor& input, const Tensor* act_input, Tensor* output,
-              const activation_table::TableRef& table, cudaStream_t stream) {
+              const activation_table::TableRef& table, float* dbias_workspace,
+              cudaStream_t stream) {
   using namespace activation_table;
   // Plain variables: lambdas cannot capture structured bindings before C++20.
   const size_t rows = input.flat_first_dim();
@@ -716,11 +782,12 @@ void quantize(const Tensor& input, const Tensor* act_input, Tensor* output,
   const void* act_ptr = IS_DACT ? act_input->data.dptr : input.data.dptr;
   const auto run = [&](auto table_type) {
     using TableT = typename decltype(table_type)::type;
-    launch<IS_DACT, IS_ACT, TableT, WITH_GEMM_SWIZZLED_SCALES>(
+    launch<IS_DACT, IS_ACT, TableT, WITH_GEMM_SWIZZLED_SCALES, IS_DBIAS>(
         input.data.dptr, act_ptr, output->data.dptr, output->scale_inv.dptr,
         output->columnwise_data.dptr, output->columnwise_scale_inv.dptr, static_cast<int>(rows),
         static_cast<int>(cols), static_cast<int>(output->scale_inv.shape[1]),
-        static_cast<int>(output->columnwise_scale_inv.shape[1]), table.ptr, stream);
+        static_cast<int>(output->columnwise_scale_inv.shape[1]), table.ptr, dbias_workspace,
+        stream);
   };
   constexpr Kind kKind = kKindOf<ParamOP, OP>;
   if (table.use == kNoTable) {

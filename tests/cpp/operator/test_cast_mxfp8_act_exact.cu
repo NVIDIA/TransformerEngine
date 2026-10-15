@@ -392,6 +392,9 @@ void run_regtile_vs_generic(const Mode mode, const Fill fill, const size_t rows,
   Tensor outs[2] = {
       Tensor("default", shape, DType::kFloat8E4M3, true, true, NVTE_MXFP8_1D_SCALING),
       Tensor("generic", shape, DType::kFloat8E4M3, true, true, NVTE_MXFP8_1D_SCALING)};
+  Tensor dbias[2] = {Tensor("dbias_default", std::vector<size_t>{cols}, DType::kBFloat16),
+                     Tensor("dbias_generic", std::vector<size_t>{cols}, DType::kBFloat16)};
+  Tensor workspace[2];
   for (int i = 0; i < 2; ++i) {
     outs[i].set_with_gemm_swizzled_scales(swizzled);
     // Fill every output byte, padding included, with a marker, so the two kernels must write the
@@ -415,13 +418,42 @@ void run_regtile_vs_generic(const Mode mode, const Fill fill, const size_t rows,
       case Mode::DGeLU:
         nvte_dgelu(grad.data(), x.data(), outs[i].data(), 0);
         break;
-      default:
+      case Mode::DSiLU:
         nvte_dsilu(grad.data(), x.data(), outs[i].data(), 0);
         break;
+      default: {
+        auto fn =
+            mode == Mode::DBiasDGeLU ? &nvte_quantize_dbias_dgelu : &nvte_quantize_dbias_dsilu;
+        fn(grad.data(), x.data(), outs[i].data(), dbias[i].data(), workspace[i].data(), 0);
+        workspace[i] = Tensor("workspace", workspace[i].rowwise_shape(), workspace[i].dtype());
+        // The per-chunk column sums must match too, not just the BF16 dbias they reduce to.
+        ASSERT_EQ(cudaMemset(workspace[i].rowwise_dptr(), 0xA5,
+                             product(workspace[i].rowwise_shape()) * sizeof(float)),
+                  cudaSuccess);
+        fn(grad.data(), x.data(), outs[i].data(), dbias[i].data(), workspace[i].data(), 0);
+      }
     }
   }
   ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
   for (auto &out : outs) out.to_cpu();
+  if (is_dbias(mode)) {
+    for (int i = 0; i < 2; ++i) {
+      dbias[i].to_cpu();
+      workspace[i].to_cpu();
+    }
+    EXPECT_EQ(count_byte_mismatches(
+                  reinterpret_cast<const uint8_t *>(workspace[0].rowwise_cpu_dptr<float>()),
+                  reinterpret_cast<const uint8_t *>(workspace[1].rowwise_cpu_dptr<float>()),
+                  product(workspace[0].rowwise_shape()) * sizeof(float)),
+              0u)
+        << "dbias workspace";
+    EXPECT_EQ(count_byte_mismatches(
+                  reinterpret_cast<const uint8_t *>(dbias[0].rowwise_cpu_dptr<bf16>()),
+                  reinterpret_cast<const uint8_t *>(dbias[1].rowwise_cpu_dptr<bf16>()),
+                  cols * sizeof(bf16)),
+              0u)
+        << "dbias";
+  }
   EXPECT_EQ(count_byte_mismatches(
                 reinterpret_cast<const uint8_t *>(outs[0].rowwise_cpu_dptr<fp8e4m3>()),
                 reinterpret_cast<const uint8_t *>(outs[1].rowwise_cpu_dptr<fp8e4m3>()), n),
@@ -542,7 +574,8 @@ TEST_P(CastMXFP8ActRegtileTestSuite, MatchesGenericKernel) {
 
 INSTANTIATE_TEST_SUITE_P(
     OperatorTest, CastMXFP8ActRegtileTestSuite,
-    ::testing::Combine(::testing::Values(Mode::GeLU, Mode::DGeLU, Mode::SiLU, Mode::DSiLU),
+    ::testing::Combine(::testing::Values(Mode::GeLU, Mode::DGeLU, Mode::DBiasDGeLU, Mode::SiLU,
+                                         Mode::DSiLU, Mode::DBiasDSiLU),
                        ::testing::Values(Fill::Typical, Fill::OrderedInputs, Fill::Specials),
                        ::testing::Bool(),
                        ::testing::Values(std::pair<size_t, size_t>{1024, 2048},
