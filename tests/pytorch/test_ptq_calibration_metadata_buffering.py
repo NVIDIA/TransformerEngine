@@ -11,7 +11,10 @@ import torch
 from torch.utils.checkpoint import checkpoint
 
 from transformer_engine.common.recipe import DelayedScaling, Float8CurrentScaling
-from transformer_engine.debug.pytorch.debug_quantization import DebugQuantizer
+from transformer_engine.debug.pytorch.debug_quantization import (
+    DebugQuantizedTensor,
+    DebugQuantizer,
+)
 from transformer_engine.pytorch import is_fp8_available, is_nvfp4_available
 from transformer_engine.pytorch import distributed as te_distributed
 from transformer_engine.pytorch.constants import DType
@@ -38,6 +41,7 @@ from transformer_engine.pytorch.tensor.hybrid_tensor import HybridQuantizer
 from transformer_engine.pytorch.tensor.identity_tensor import IdentityQuantizer
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
+from transformer_engine.pytorch.tensor.storage.grouped_tensor_storage import GroupedTensorStorage
 
 nvfp4_available, reason_for_no_nvfp4 = is_nvfp4_available(return_reason=True)
 fp8_available, reason_for_no_fp8 = is_fp8_available(return_reason=True)
@@ -70,9 +74,14 @@ def test_debug_quantizer_forwards_skip_calibration():
     quantizer = object.__new__(DebugQuantizer)
     Quantizer.__init__(quantizer, rowwise=True, columnwise=False)
     quantizer.parent_quantizer = parent_quantizer
+    tensor = DebugQuantizedTensor(
+        rowwise_gemm_tensor=_make_test_quantized_storage(_scale_inv=torch.tensor([2.0])),
+        columnwise_gemm_tensor=None,
+        quantizer=quantizer,
+    )
 
     quantizer.calibrate(
-        _make_test_quantized_storage(_scale_inv=torch.tensor([2.0])),
+        tensor,
         calibration_config=DEFAULT_CALIBRATION_CONFIG,
         skip_calibration=torch.ones(1),
     )
@@ -289,6 +298,48 @@ def test_grouped_calibration_handles_empty_experts():
     ):
         module(inp, [0, 16])
     torch.testing.assert_close(empty_expert_buffer, calibrated_value)
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+def test_grouped_calibration_preserves_varying_last_dims():
+    shapes = [(2, 32), (2, 64)]
+    grouped_tensor = GroupedTensorStorage.make_grouped_tensor_with_shapes(
+        num_tensors=2,
+        shapes=shapes,
+        device=torch.device("cuda"),
+        dtype=torch.bfloat16,
+    )
+    grouped_tensor.rowwise_data.view(-1).copy_(
+        torch.cat(
+            (
+                torch.full(shapes[0], 2.0, dtype=torch.bfloat16, device="cuda").view(-1),
+                torch.full(shapes[1], 4.0, dtype=torch.bfloat16, device="cuda").view(-1),
+            )
+        )
+    )
+    quantizers = [
+        Float8CurrentScalingQuantizer(
+            fp8_dtype=DType.kFloat8E4M3,
+            device=torch.device("cuda"),
+            rowwise=True,
+            columnwise=False,
+        )
+        for _ in shapes
+    ]
+
+    grouped_tensor.calibrate(
+        quantizers,
+        calibration_config=DEFAULT_CALIBRATION_CONFIG,
+    )
+
+    torch.testing.assert_close(
+        quantizers[0]._calibration_state["scale_inv"],
+        torch.tensor([2.0 / 448.0], dtype=torch.float32, device="cuda"),
+    )
+    torch.testing.assert_close(
+        quantizers[1]._calibration_state["scale_inv"],
+        torch.tensor([4.0 / 448.0], dtype=torch.float32, device="cuda"),
+    )
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)

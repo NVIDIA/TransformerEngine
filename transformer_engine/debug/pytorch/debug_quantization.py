@@ -442,6 +442,12 @@ class DebugQuantizer(Quantizer):
         """Delegate calibration to the wrapped quantizer."""
         if self.parent_quantizer is None:
             raise RuntimeError("[NVTORCH-INSPECT ERROR] Calibration requires a parent quantizer")
+        if isinstance(tensor, DebugQuantizedTensor):
+            tensor = tensor.rowwise_gemm_tensor
+            if tensor is None:
+                raise RuntimeError(
+                    "[NVTORCH-INSPECT ERROR] Calibration requires a rowwise GEMM tensor"
+                )
         return self.parent_quantizer.calibrate(
             tensor,
             calibration_config=calibration_config,

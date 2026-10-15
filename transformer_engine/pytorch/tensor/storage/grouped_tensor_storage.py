@@ -1024,6 +1024,7 @@ class GroupedTensorStorage:
                 quantizers[0],
                 self.num_tensors,
                 self.first_dims,
+                self.last_dims,
                 tensor_offsets=self.tensor_offsets,
             )
 
