@@ -145,7 +145,7 @@ function el(tag, attrs = {}, parent) {
 // ---- controls ------------------------------------------------------------------------
 function buildControls() {
   const box = document.getElementById("controls");
-  const labels = { fusion: "Fusion", direction: "Direction", swizzle: "Swizzle", N: "N", metric: "Metric" };
+  const labels = { fusion: "Fusion", direction: "Direction", swizzle: "Swizzled Scale", N: "N", metric: "Metric" };
   for (const key of ["fusion", "direction", "swizzle", "N", "metric"]) {
     const ctl = document.createElement("div");
     ctl.className = "control";
@@ -222,7 +222,7 @@ function render() {
   const metric = METRICS[state.metric];
   const fusion = state.fusion.includes("act") && META.activation
     ? `${state.fusion}(${META.activation})` : state.fusion;
-  const title = [fusion, state.direction, ...(state.swizzle === "on" ? ["swizzled"] : []), `N=${state.N}`]
+  const title = [fusion, state.direction, ...(state.swizzle === "on" ? ["swizzled scale"] : []), `N=${state.N}`]
     .join(" · ");
   document.getElementById("chart-title").textContent = `${metric.label} — ${title}`;
   document.getElementById("chart-sub").textContent = chart ? chart.subtitle : "";
