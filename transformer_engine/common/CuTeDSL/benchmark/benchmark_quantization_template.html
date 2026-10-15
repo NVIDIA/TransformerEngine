@@ -36,9 +36,9 @@
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--page); color: var(--ink);
          font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
-  main { max-width: 1040px; margin: 0 auto; padding: 24px 16px 48px; }
+  main { max-width: 1280px; margin: 0 auto; padding: 24px 16px 48px; }
   .selection { font-size: 16px; font-weight: 600; margin: 4px 0 12px; }
-  /* All selected charts share one row (columns set from the selection); stacked on phones. */
+  /* At most two charts per row (columns set from the selection); stacked on phones. */
   .grid { display: grid; gap: 12px; grid-template-columns: repeat(var(--cols, 1), minmax(0, 1fr)); }
   @media (max-width: 640px) { .grid { grid-template-columns: minmax(0, 1fr); } }
   h1 { font-size: 20px; margin: 0 0 4px; font-weight: 600; }
@@ -58,8 +58,6 @@
     border-left-color: color-mix(in srgb, var(--surface) 35%, transparent); }
   .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px;
           min-width: 0; }
-  .grid.dense .card { padding: 10px; }
-  .grid.dense .legend span { white-space: normal; }
   .shared-legend { margin: -4px 0 12px; }
   .shared-legend:empty { display: none; }
   .chart-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 16px; }
@@ -255,22 +253,30 @@ function render() {
     `${METRICS[state.metric].label} — ${selectionTitle()}`;
   const grid = document.getElementById("charts");
   grid.innerHTML = "";
-  grid.style.setProperty("--cols", state.Ns.length);
+  grid.style.setProperty("--cols", Math.min(2, state.Ns.length));
   const first = state.Ns.map(chartFor).find(Boolean);
   document.getElementById("shared-legend").innerHTML = state.Ns.length > 1 && first ? legendHtml(first) : "";
-  grid.classList.toggle("dense", state.Ns.length > 2);
   const template = document.getElementById("card-template");
-  for (const n of state.Ns) {
-    grid.appendChild(template.content.cloneNode(true));
-    drawCard(grid.lastElementChild, n);
-  }
+  for (const n of state.Ns) grid.appendChild(template.content.cloneNode(true));
+  const cards = [...grid.children];
+  cards.forEach((card, i) => drawCard(card, state.Ns[i]));  // first pass, to measure the cards
+  cards.forEach((card, i) => drawCard(card, state.Ns[i], plotHeight(grid, cards)));
+}
+// Chart height so all rows of cards together fill about one window; phones scroll instead.
+function plotHeight(grid, cards) {
+  if (getComputedStyle(grid).gridTemplateColumns.split(" ").length < 2 && cards.length > 1) return null;
+  const rows = Math.ceil(cards.length / Math.min(2, cards.length));
+  const chrome = Math.max(...cards.map(c => c.offsetHeight - (c.querySelector(".chart > svg")?.getBoundingClientRect().height ?? 0)));
+  const gap = parseFloat(getComputedStyle(grid).rowGap) || 0;
+  const perRow = (window.innerHeight * 0.92 - gap * (rows - 1)) / rows;
+  return Math.round(Math.min(560, Math.max(180, perRow - chrome)));
 }
 function legendHtml(chart) {
   let html = chart.series.length > 1 ? chart.series.map(s => `<span>${swatch(s.role)}${s.name}</span>`).join("") : "";
   if (COMPARE) html += `<span><b>1.05×</b> above the plot = speedup (old / new time)</span>`;
   return html;
 }
-function drawCard(card, n) {
+function drawCard(card, n, height = null) {
   const chart = chartFor(n);
   const host = card.querySelector(".chart");
   const tooltip = card.querySelector(".tooltip");
@@ -290,7 +296,8 @@ function drawCard(card, n) {
   }
   const series = seriesFor(chart);
 
-  const W = Math.max(160, host.clientWidth), H = Math.round(Math.min(420, Math.max(200, W * 0.7)));
+  const W = Math.max(160, host.clientWidth);
+  const H = height ?? Math.round(Math.min(420, Math.max(200, W * 0.7)));
   const narrow = W < 420;
   // Comparisons get a strip above the plot with the speedup at each M.
   const m = { top: COMPARE ? 30 : 12, right: narrow ? 34 : 56, bottom: 40, left: narrow ? 46 : 64 };
