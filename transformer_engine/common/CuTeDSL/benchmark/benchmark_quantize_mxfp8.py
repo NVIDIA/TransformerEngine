@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Kernel-only benchmark of the MXFP8 quantize kernels (Nsight Compute, L2 flushed).
+"""Kernel-only benchmark of the MXFP8 quantize kernels (CUPTI kernel timing, L2 flushed).
 
 CuTeDSL kernels come from this source tree (no rebuild needed); CUDA kernels come from the
 installed TE (set PYTHONPATH=<repo> to use your own build). Writes a CSV.
@@ -26,6 +26,7 @@ import os
 import re
 import shlex
 import shutil
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -46,6 +47,12 @@ OUTPUT_FORMATS = ("csv", "png", "html", "raw")
 IMPLS = {"cutedsl": "CuTeDSL", "cuda": "CUDA"}
 FUSIONS = ("none", "act", "dact", "dbias", "dactbias")
 SWIZZLES = ("off", "on")  # scales in the GEMM-ready swizzled layout
+# --input name -> (torch dtype name, CuTeDSL dtype name, bytes per element)
+INPUTS = {
+    "bf16": ("bfloat16", "BFloat16", 2),
+    "fp16": ("float16", "Float16", 2),
+    "fp32": ("float32", "Float32", 4),
+}
 ACTIVATIONS = ("gelu", "relu", "silu", "qgelu", "srelu")
 COLUMNS = [
     "impl",
@@ -54,13 +61,13 @@ COLUMNS = [
     "direction",
     "fusion",
     "swizzle",
+    "input",
     "time_us",
     "min_us",
     "rel_std_pct",
     "GB/s",
     "kernel",
 ]
-TIME_METRIC = "gpu__time_duration.sum"
 CUDA_EXPLANATION = """\
 Comparing CUDA (old) vs CuTeDSL (new) MXFP8 quantize kernels:
   old = the CUDA kernels compiled into the currently INSTALLED TE, i.e. whatever
@@ -98,28 +105,38 @@ def _installed_te():
     return {"package": package, "version": version, "library": library, "git": git}
 
 
-class _KeepOnly(list):
-    """nsight-python only supports an exact-name ignore list (checked via `name in list`),
-    so invert it: "ignore" every kernel whose name does not match the regex."""
+def l2_cache_bytes(device=None):
+    """L2 cache size in bytes of `device` (the current CUDA device by default)."""
+    import torch  # pylint: disable=import-outside-toplevel
 
-    def __init__(self, pattern):
-        super().__init__([pattern])
-        self.regex = re.compile(pattern)
+    device = torch.cuda.current_device() if device is None else device
+    return torch.cuda.get_device_properties(device).L2_cache_size
 
-    def __contains__(self, name):
-        return self.regex.search(name) is None
+
+def make_l2_flush(device=None, multiple=2):
+    """Returns flush(), which evicts L2 by reading a buffer `multiple` times its size; call it
+    before each timed launch so the kernel reads its inputs from DRAM.
+
+    It must be a read: a write (e.g. zero_) leaves L2 full of dirty lines, and the next kernel
+    pays for writing them back (measured +10% on some MXFP8 quantize kernels).
+    """
+    import torch  # pylint: disable=import-outside-toplevel
+
+    device = torch.cuda.current_device() if device is None else device
+    buffer = torch.ones(multiple * l2_cache_bytes(device) // 4, dtype=torch.float32, device=device)
+    return lambda: buffer.sum()
 
 
 def _round_up(x, y):
     return (x + y - 1) // y * y
 
 
-def gbps(t_ns, m, n, direction, fusion, _swizzle):
-    """Bytes moved (bf16 input(s), fp8 + e8m0 scales out per direction) per ns, i.e. GB/s."""
+def gbps(t_us, m, n, direction, fusion, input_dtype):
+    """Bytes moved (input(s), fp8 + e8m0 scales out per direction) per ns, i.e. GB/s."""
     num_inputs = 2 if "dact" in fusion else 1
     num_outputs = sum(DIRECTIONS[direction])
-    nbytes = num_inputs * m * n * 2 + num_outputs * (m * n + m * n // 32)
-    return {"GB/s": (nbytes / t_ns, "GB/s")}
+    nbytes = num_inputs * m * n * INPUTS[input_dtype][2] + num_outputs * (m * n + m * n // 32)
+    return nbytes / (t_us * 1e3)
 
 
 def _cutedsl_launcher(activation):
@@ -138,11 +155,11 @@ def _cutedsl_launcher(activation):
     print(f"CuTeDSL kernels from {qc.__file__}")
 
     @functools.lru_cache(maxsize=None)
-    def compiled(direction, fusion, swizzle):
+    def compiled(dtype, direction, fusion, swizzle):
         rowwise, colwise = DIRECTIONS[direction]
         with_dact = "dact" in fusion
         cfg = qc.MXFP8QuantizeConfig(
-            "BFloat16",
+            dtype,
             "Float8E4M3",
             rowwise,
             colwise,
@@ -172,7 +189,8 @@ def _cutedsl_launcher(activation):
         act_input = act_input if "dact" in fusion else None
         # One partial-sum row per CTA; a CTA covers at least one 32-row MXFP8 block.
         workspace = empty((-(-m // 32), n), dtype=torch.float32) if "bias" in fusion else None
-        fn = compiled(direction, fusion, swizzle)
+        dtype = next(v[1] for v in INPUTS.values() if getattr(torch, v[0]) == x.dtype)
+        fn = compiled(dtype, direction, fusion, swizzle)
         stream = torch.cuda.current_stream().cuda_stream
         outs = (o_row, s_row, o_col, s_col)
         return lambda: fn(x, *outs, None, None, act_input, workspace, stream)
@@ -216,64 +234,90 @@ def _cuda_launcher(activation):
     return setup
 
 
-def run_suite(shapes, directions, fusions, swizzles, activation, runs, warmup, impl):
-    """Profile the `impl` quantize kernel for every shape, direction, fusion and swizzle;
-    returns a DataFrame."""
+def _base_name(kernel):
+    """`void ns::quantize_mxfp8_kernel<...>(...)` -> `quantize_mxfp8_kernel`."""
+    return re.split(r"[<(]", kernel.removeprefix("void "), maxsplit=1)[0].split("::")[-1]
+
+
+def _short_name(base):
+    """CuTeDSL kernel symbols encode the module path and arguments; keep only the class."""
+    match = re.search(r"(MXFP8Quantize\w*?Kernel)", base)
+    return match.group(1) if match else base
+
+
+def run_suite(shapes, inputs, directions, fusions, swizzles, activation, runs, warmup, impl):
+    """Times the `impl` quantize kernel for every shape, direction, fusion and swizzle with
+    CUPTI kernel timestamps (via torch.profiler); returns a DataFrame."""
     # pylint: disable=import-outside-toplevel
-    import nsight
+    import pandas as pd
     import torch
+    from torch.profiler import ProfilerActivity, profile
 
     setup = (_cuda_launcher if impl == "CUDA" else _cutedsl_launcher)(activation)
+    # Helper kernels such as scale-padding zeroing or the dbias reduction are not timed.
+    prefix = "quantize" if impl == "CUDA" else "kernel_cutlass"
 
     @functools.lru_cache(maxsize=1)
-    def make_inputs(m, n):
+    def make_inputs(m, n, input_dtype):
         """The input (or incoming gradient) and, for dact, the forward activation input."""
-        return [torch.randn((m, n), dtype=torch.bfloat16, device="cuda") for _ in range(2)]
+        dtype = getattr(torch, INPUTS[input_dtype][0])
+        return [torch.randn((m, n), dtype=dtype, device="cuda") for _ in range(2)]
 
+    flush_l2 = make_l2_flush()
     configs = [
-        (m, n, d, f, sw)
+        (m, n, inp, d, f, sw)
         for (m, n) in shapes
+        for inp in inputs
         for d in directions
         for f in fusions
         for sw in swizzles
     ]
+    with profile(activities=[ProfilerActivity.CUDA]) as prof:
+        for m, n, input_dtype, direction, fusion, swizzle in configs:
+            launch = setup(*make_inputs(m, n, input_dtype), direction, fusion, swizzle)
+            for _ in range(warmup):  # JIT compile and first-launch costs stay out of the timing
+                launch()
+            for _ in range(runs):
+                flush_l2()
+                launch()
+        torch.cuda.synchronize()
 
-    @nsight.analyze.kernel(
-        configs=configs,
-        runs=runs,
-        metrics=[TIME_METRIC],
-        derive_metric=gbps,
-        # The TE path may launch helper kernels (e.g. zeroing scale padding); keep only the cast.
-        ignore_kernel_list=_KeepOnly("quantize") if impl == "CUDA" else None,
-        clock_control="none",  # locking clocks is left to the user
-        cache_control="all",
+    kernels = sorted(
+        (e for e in prof.events() if e.device_type == torch.autograd.DeviceType.CUDA),
+        key=lambda e: e.time_range.start,
     )
-    def quantize_mxfp8(m, n, direction, fusion, swizzle):
-        launch = setup(*make_inputs(m, n), direction, fusion, swizzle)
-        for _ in range(warmup):  # module load / first-launch costs stay out of the profile
-            launch()
-        with nsight.annotate("quantize_mxfp8"):
-            launch()
-
-    # nsight fills the arguments from `configs`.
-    df = quantize_mxfp8().to_dataframe()  # pylint: disable=no-value-for-parameter
-
-    keys = ["m", "n", "direction", "fusion", "swizzle"]
-    time = df[df["Metric"] == TIME_METRIC]
-    bw = df[df["Metric"] == "GB/s"][keys + ["AvgValue"]].rename(columns={"AvgValue": "GB/s"})
-    out = time.merge(bw, on=keys)
-    out = out.rename(columns={"m": "M", "n": "N", "RelativeStdDevPct": "rel_std_pct"})
-    out["time_us"] = out["AvgValue"] / 1e3
-    out["min_us"] = out["MinValue"] / 1e3
-    is_cutedsl = out["Kernel"].str.startswith("kernel_cutlass")
-    if (is_cutedsl != (impl == "CuTeDSL")).any():
-        raise RuntimeError(f"Profiled kernels are not all {impl} kernels")
-    out["impl"] = impl
-    out["kernel"] = [
-        m.group(1) if (m := re.search(r"(MXFP8Quantize\w*?Kernel)", k)) else k
-        for k in out["Kernel"]
-    ]
-    return out[COLUMNS]
+    kernels = [(base, e.device_time_total) for e in kernels if (base := _base_name(e.name))]
+    kernels = [(base, t) for base, t in kernels if base.startswith(prefix)]
+    per_config = warmup + runs
+    if len(kernels) != per_config * len(configs):
+        names = sorted({_short_name(base) for base, _ in kernels})
+        raise RuntimeError(
+            f"Expected {per_config} {impl} quantize kernels per config, got"
+            f" {len(kernels) / len(configs):.2f} (kernels: {names}); did it fall back to"
+            " another implementation or launch extra kernels?"
+        )
+    rows = []
+    for i, (m, n, input_dtype, direction, fusion, swizzle) in enumerate(configs):
+        timed = kernels[i * per_config + warmup : (i + 1) * per_config]
+        times = [t for _, t in timed]
+        mean = statistics.fmean(times)
+        rows.append(
+            {
+                "impl": impl,
+                "M": m,
+                "N": n,
+                "direction": direction,
+                "fusion": fusion,
+                "swizzle": swizzle,
+                "input": input_dtype,
+                "time_us": mean,
+                "min_us": min(times),
+                "rel_std_pct": statistics.stdev(times) / mean * 100 if runs > 1 else None,
+                "GB/s": gbps(mean, m, n, direction, fusion, input_dtype),
+                "kernel": _short_name(timed[-1][0]),
+            }
+        )
+    return pd.DataFrame(rows, columns=COLUMNS)
 
 
 def _git(repo, *args, check=True):
@@ -315,7 +359,7 @@ def _with_delta(frames, base, cand):
     # pylint: disable=import-outside-toplevel
     import pandas as pd
 
-    keys = ["M", "N", "direction", "fusion", "swizzle"]
+    keys = ["M", "N", "direction", "fusion", "swizzle", "input"]
     df = pd.concat(frames, ignore_index=True)
     table = df.pivot_table(index=keys, columns="revision", values="time_us")[[base, cand]]
     table["delta"] = (table[base] - table[cand]) / table[base] * 100
@@ -374,7 +418,7 @@ def compare(repo, old, new, worker_args):
 
 def build_charts(df, labels, activation="gelu"):
     """Renderer-agnostic chart specs: one line chart of time vs M per (fusion, direction,
-    swizzle, N).
+    swizzle, input, N).
 
     `labels` maps each series key (the `revision` column when comparing, else the `impl`
     column) to its legend name, in drawing order. Returns JSON-serializable dicts, so the
@@ -384,9 +428,14 @@ def build_charts(df, labels, activation="gelu"):
     key_col = "revision" if "revision" in df.columns else "impl"
     point_cols = ["M", "time_us", "min_us", "rel_std_pct", "GB/s", "kernel"]
     charts = []
-    for fusion, direction, swizzle in itertools.product(FUSIONS, DIRECTIONS, SWIZZLES):
+    for fusion, direction, swizzle, input_dtype in itertools.product(
+        FUSIONS, DIRECTIONS, SWIZZLES, INPUTS
+    ):
         group = df[
-            (df["fusion"] == fusion) & (df["direction"] == direction) & (df["swizzle"] == swizzle)
+            (df["fusion"] == fusion)
+            & (df["direction"] == direction)
+            & (df["swizzle"] == swizzle)
+            & (df["input"] == input_dtype)
         ]
         for n in sorted(group["N"].unique()):
             rows = group[group["N"] == n].sort_values("M")
@@ -413,13 +462,18 @@ def build_charts(df, labels, activation="gelu"):
                 )
             charts.append(
                 {
-                    "id": f"{fusion}_{direction}{'_swizzled' if swizzle == 'on' else ''}_N{n}",
+                    "id": (
+                        f"{input_dtype}_{fusion}_{direction}"
+                        f"{'_swizzled' if swizzle == 'on' else ''}_N{n}"
+                    ),
                     "fusion": fusion,
                     "direction": direction,
                     "swizzle": swizzle,
+                    "input": input_dtype,
                     "N": int(n),
                     "title": " · ".join(
-                        [f"{fusion}({activation})" if "act" in fusion else fusion, direction]
+                        [input_dtype, f"{fusion}({activation})" if "act" in fusion else fusion]
+                        + [direction]
                         + (["swizzled scale"] if swizzle == "on" else [])
                         + [f"N={n}"]
                     ),
@@ -552,7 +606,7 @@ def _gpu():
     return f"{name} (driver {driver})"
 
 
-def _write_config(out_dir, args, fusions, swizzles, shapes, repo, commit, labels, files):
+def _write_config(out_dir, args, fusions, swizzles, inputs, shapes, repo, commit, labels, files):
     """Writes config.txt: what was benchmarked, on which commit and GPU."""
 
     def rev(name):
@@ -593,14 +647,15 @@ def _write_config(out_dir, args, fusions, swizzles, shapes, repo, commit, labels
         f"directions: {', '.join(args.direction)}",
         f"fusions:    {', '.join(fusions)}",
         f"swizzle:    {', '.join(swizzles)}",
+        f"input:      {', '.join(inputs)}",
     ]
     if {"act", "dact", "dactbias"} & set(fusions):
         lines.append(f"activation: {args.activation or 'gelu'}")
     lines += [
         f"runs:       {args.runs} profiled + {args.warmup} warm-up launches per config",
         (
-            "timing:     Nsight Compute gpu__time_duration.sum, L2 flushed before each run,"
-            " clocks as set by the user"
+            "timing:     CUPTI kernel timestamps (torch.profiler), L2 flushed (read) before each"
+            " run, clocks as set by the user"
         ),
         f"files:      {', '.join(files)}",
     ]
@@ -623,6 +678,8 @@ def _load_results(folder):
     df = pd.read_csv(folder / "results.csv")
     if "swizzle" not in df.columns:  # written before --swizzle existed
         df.insert(df.columns.get_loc("fusion") + 1, "swizzle", "off")
+    if "input" not in df.columns:  # written before --input existed
+        df.insert(df.columns.get_loc("swizzle") + 1, "input", "bf16")
     return df, fields, text
 
 
@@ -754,9 +811,15 @@ def main():
         help="scales in the GEMM-ready swizzled layout (default: off)",
     )
     parser.add_argument(
+        "--input",
+        default="bf16",
+        metavar="DTYPE;...",
+        help=f"input dtypes, a ;-separated subset of {';'.join(INPUTS)} (default: bf16)",
+    )
+    parser.add_argument(
         "--activation", choices=ACTIVATIONS, help="only with act/dact/dactbias (default: gelu)"
     )
-    parser.add_argument("--runs", type=int, help="profiled runs per config (default: 5; debug: 1)")
+    parser.add_argument("--runs", type=int, help="timed runs per config (default: 20; debug: 3)")
     parser.add_argument(
         "--warmup", type=int, help="untimed launches per config (default: 5; debug: 1)"
     )
@@ -801,7 +864,7 @@ def main():
                 shapes = DEBUG_SHAPES if args.mode == "debug" else DEFAULT_SHAPES
         except ValueError as e:
             parser.error(str(e))
-        args.runs = args.runs or (1 if args.mode == "debug" else 5)
+        args.runs = args.runs or (3 if args.mode == "debug" else 20)
         args.warmup = args.warmup or (1 if args.mode == "debug" else 5)
         if args.fusion.strip().lower() == "all":
             fusions = list(FUSIONS)
@@ -813,6 +876,11 @@ def main():
                 f" {args.fusion!r}"
             )
         swizzles = list(SWIZZLES) if args.swizzle == "both" else [args.swizzle]
+        inputs = [i.strip().lower() for i in args.input.split(";") if i.strip()]
+        if not inputs or any(i not in INPUTS for i in inputs):
+            parser.error(
+                f"--input takes a ;-separated list of {', '.join(INPUTS)}, got {args.input!r}"
+            )
         if args.activation and not {"act", "dact", "dactbias"} & set(fusions):
             parser.error("--activation only applies to the act, dact and dactbias fusions")
         if not args.compare and (args.old or args.new):
@@ -853,6 +921,7 @@ def main():
             worker_args += ["--runs", str(args.runs), "--warmup", str(args.warmup)]
             worker_args += ["--direction", *args.direction]
             worker_args += ["--fusion", ";".join(fusions), "--swizzle", args.swizzle]
+            worker_args += ["--input", ";".join(inputs)]
             worker_args += ["--activation", args.activation] if args.activation else []
             df = compare(repo, args.old, args.new, worker_args)
         else:
@@ -862,6 +931,7 @@ def main():
                 sys.path.insert(0, str(repo))
             df = run_suite(
                 shapes,
+                inputs,
                 args.direction,
                 fusions,
                 swizzles,
@@ -877,7 +947,7 @@ def main():
     is_comparison = "revision" in df.columns
     if args.format == "raw":
         if is_comparison:
-            keys = ["M", "N", "direction", "fusion", "swizzle"]
+            keys = ["M", "N", "direction", "fusion", "swizzle", "input"]
             table = df.pivot_table(index=keys, columns="revision", values="time_us")[["old", "new"]]
             table["delta"] = df.groupby(keys)["delta"].first()
             print(
@@ -914,7 +984,16 @@ def main():
         _write_regenerated_config(out_dir, labels, activation, sha, sources, files + ["config.txt"])
     else:
         _write_config(
-            out_dir, args, fusions, swizzles, shapes, repo, sha, labels, files + ["config.txt"]
+            out_dir,
+            args,
+            fusions,
+            swizzles,
+            inputs,
+            shapes,
+            repo,
+            sha,
+            labels,
+            files + ["config.txt"],
         )
     print(f"Results written to {out_dir.resolve()}/")
 
