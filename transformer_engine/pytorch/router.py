@@ -357,13 +357,7 @@ def fused_topk_with_score_function(
     qb_histogram_mode: Optional[str] = None,
 ):
     """
-    Fused topk with score function router.
-
-    ``torch.compile(fullgraph=True)`` supports routing maps, dense output buffers, and
-    in-place QB histogram accumulation. Compiled execution skips QB bounds value validation
-    and its CPU synchronization; tensor metadata is still checked. For automatic CUDA graph
-    replay, use module buffers or buffers marked with ``torch._dynamo.mark_static_address``
-    for mutated inputs. Ordinary mutated inputs may cause CUDA graph capture to be skipped.
+    Fused topk with score function router. Supports ``torch.compile(fullgraph=True)``.
 
     Parameters
     ----------
@@ -391,12 +385,17 @@ def fused_topk_with_score_function(
         controls the dense index output dtype and the routing map is not materialized.
         The buffer is overwritten and returned in both eager and compiled execution.
         Its contents must remain unchanged until the corresponding backward completes.
+        For automatic CUDA graph replay, use a module buffer or
+        ``torch._dynamo.mark_static_address``; otherwise capture may be skipped.
     qb_histogram : torch.Tensor, optional
-        Caller-owned int32 ``[num_experts, num_bins]`` histogram accumulated in place.
+        Caller-owned int32 ``[num_experts, num_bins]`` histogram accumulated in place in eager
+        and compiled execution. For automatic CUDA graph replay, use a module buffer or
+        ``torch._dynamo.mark_static_address``; otherwise capture may be skipped.
     qb_bin_bounds : torch.Tensor, optional
         FP32 CUDA tensor ``[lower, upper]`` defining uniform QB histogram bins. Values must be
         finite with ``lower < upper``. Eager calls revalidate PyTorch-tracked in-place updates.
-        Under ``torch.compile``, the caller must guarantee valid values on every call,
+        Under ``torch.compile``, value validation and its CPU synchronization are skipped;
+        tensor metadata is still checked. The caller must guarantee valid values on every call,
         including after device-side updates; compiled calls do not mark bounds as validated
         for later eager calls. Before eager CUDA graph capture, validate the current version
         eagerly or use
