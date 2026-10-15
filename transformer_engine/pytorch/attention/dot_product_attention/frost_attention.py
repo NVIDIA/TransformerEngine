@@ -42,7 +42,8 @@ _SUPPORTED_ARCHS = ((10, 0), (10, 3))
 # These mirror sdpa_bwd_sm100's declared envelope: d_envelope_floor=256, d={512},
 # d_pad_multiple=8.
 _MAX_HEAD_DIM = 512
-_MIN_HEAD_DIM = 257  # below this the existing cuDNN/flash backends already serve the shape
+# Below this the existing cuDNN and flash backends already serve the shape.
+_MIN_HEAD_DIM = 257
 # The engine pads head_dim to a multiple of 8, so 260 is in range but not servable. Declined
 # here rather than failing later at plan selection.
 _HEAD_DIM_MULTIPLE = 8
@@ -68,8 +69,7 @@ def is_frost_attention_available() -> Tuple[bool, str]:
     if not torch.cuda.is_available():
         return _no("no CUDA device")
     if os.environ.get("CUDNN_FRONTEND_ENABLE_FROST_ENGINES", "1") == "0":
-        # Explicitly switched off. Declining here is the difference between falling back cleanly
-        # and raising from finalize_plans when no plan carrying the FROST token is offered.
+        # Decline here, or finalize_plans raises later with no FROST plan on offer.
         return _no("CUDNN_FRONTEND_ENABLE_FROST_ENGINES=0 disables the FROST engines")
     if torch.cuda.get_device_capability() not in _SUPPORTED_ARCHS:
         major, minor = torch.cuda.get_device_capability()
@@ -95,7 +95,6 @@ def is_frost_attention_available() -> Tuple[bool, str]:
     if cutlass_raw is None:
         return _no(f"nvidia-cutlass-dsl not installed (FROST requires >= {_MIN_CUTLASS_DSL})")
     if cutlass is not None and cutlass < _MIN_CUTLASS_DSL:
-        # Worth being loud: this combination fails by silently declining, not by raising.
         return _no(
             f"nvidia-cutlass-dsl {cutlass_raw} is below the FROST floor {_MIN_CUTLASS_DSL}; FROST"
             " engines would be silently skipped in favour of ordinary cuDNN backend plans"
@@ -239,8 +238,7 @@ def is_frost_attention_supported(params) -> Tuple[int, str]:
     if int(os.environ.get("NVTE_FROST_ATTN", "1")) == 0:
         return no_backend, "FROST is disabled by NVTE_FROST_ATTN=0"
 
-    # Checked per dimension: v has its own graph node and its own cache-key entry, so the range
-    # applies to each rather than to one standing in for both.
+    # Per dimension: v has its own graph node and its own cache-key entry.
     for name, head_dim in (
         ("head_dim_qk", params.head_dim_qk),
         ("head_dim_v", params.head_dim_v),
@@ -282,9 +280,13 @@ def is_frost_attention_supported(params) -> Tuple[int, str]:
     if params.cuda_graph:
         return no_backend, "FROST graphs are built lazily and cannot be captured"
     if params.deterministic and params.is_training:
-        # The backward uses an atomic dQ accumulation whose order is not fixed, so repeat runs
-        # differ in the last bits. Nothing selects a deterministic variant, so decline instead.
-        return no_backend, "FROST does not have a deterministic backward"
+        return (
+            no_backend,
+            (
+                "FROST has no deterministic backward; its dQ accumulation is atomic and unordered,"
+                " so repeat runs differ in the last bits"
+            ),
+        )
 
     qkv_layout = _name_for(QKVLayout, params.qkv_layout)
     if qkv_layout is None:
@@ -298,8 +300,6 @@ def is_frost_attention_supported(params) -> Tuple[int, str]:
             no_backend,
             f"FROST supports qkv_format in {_SUPPORTED_QKV_FORMATS}; got {qkv_format}",
         )
-    # The kernels write O and dQKV with q's strides, so any format that differs from the input
-    # would need a copy the fused path does not make. Nothing asks for one today.
     for name, value in (
         ("o_format", _name_for(QKVFormat, params.o_format)),
         ("do_format", _name_for(QKVFormat, params.do_format)),
@@ -309,7 +309,13 @@ def is_frost_attention_supported(params) -> Tuple[int, str]:
             continue
         value = _qkv_format_from_layout(value) if name == "dqkv_layout" else value
         if value != qkv_format:
-            return no_backend, f"FROST needs {name} to match qkv_format; got {value}/{qkv_format}"
+            return (
+                no_backend,
+                (
+                    f"FROST needs {name} to match qkv_format, since the kernels write O and dQKV"
+                    f" with q's strides; got {value}/{qkv_format}"
+                ),
+            )
 
     attn_mask_type = _name_for(AttnMaskType, params.attn_mask_type)
     if attn_mask_type is None:
@@ -412,8 +418,7 @@ def _frost_plan_args(token: str, what: str) -> dict:
 def _build_fwd(key, device) -> dict:
     """Build (and JIT-compile) a forward graph. Expensive; always reached through the cache."""
     cudnn = cudnn_pygraph.import_cudnn_frontend(enable_frost_engines=True)
-    # deterministic is unused here: it selects a backward algorithm. Callers pass False for the
-    # forward so the two never split the forward cache.
+    # deterministic selects a backward algorithm; the forward is always keyed False.
     _, _dev, ((shq, qs, dtype), (shk, ks, _), (shv, vs, _)), scale, _deterministic, mask = key
     b, hq, sq = shq[0], shq[1], shq[2]
     sho, o_stride = _o_shape_stride(shq, shv[3], qs)
@@ -478,10 +483,9 @@ def _validate_qkv(q, k, v, qkv_format):
     calls the backward outside autograd, so neither may assume the other ran first.
 
     Rank is checked here because cuDNN never sees the tensor, only the descriptor this module
-    builds from it. bhsd_dim_stride reads dims 0-3, so a rank-5
-    tensor is described as 4D, and the cache key carries strides but not rank, so it can reuse a
-    valid 4D plan. A non-unit head-dim stride does reach the descriptor, so graph.validate()
-    catches that one and it is not repeated here.
+    builds from it. bhsd_dim_stride reads dims 0-3, so a rank-5 tensor is described as 4D, and
+    the cache key carries strides but not rank, so it can reuse a valid 4D plan. A non-unit
+    head-dim stride does reach the descriptor, so graph.validate() catches that one.
     """
     for name, tensor in (("q", q), ("k", k), ("v", v)):
         if tensor.dim() != 4:
@@ -656,9 +660,7 @@ def fused_attn_bwd(
         cuda_graph_capture=cuda_graph,
     )
     qkv_format = _qkv_format_from_layout(qkv_layout)
-    # All three are described with qkv_format, so a divergence would otherwise be silent: o and
-    # dO read with the wrong strides, and the grads returned in a layout the caller did not ask
-    # for. The selector declines this too, but this entry point is also called directly.
+    # The selector declines this too, but the CP ring calls this entry point directly.
     for name, fmt in (
         ("o_format", o_format),
         ("do_format", do_format),
@@ -666,7 +668,9 @@ def fused_attn_bwd(
     ):
         if fmt != qkv_format:
             raise NotImplementedError(
-                f"FROST attention needs {name} to match qkv_format; got {fmt}/{qkv_format}"
+                f"FROST attention needs {name} to match qkv_format, since o and dO are read"
+                " with q's strides and the grads returned in its layout; got"
+                f" {fmt}/{qkv_format}"
             )
     mask = _te_mask_spec(
         attn_mask_type, window_size, _bottom_right_diagonal(attn_mask_type, bottom_right_diagonal)
