@@ -73,10 +73,9 @@ struct GroupedTmaResource {
 // handle itself rather than placed in this stream-local container.
 struct ThreadStreamResources {
   const CUcontext context;
-  const int device;
   GroupedTmaResource grouped_tma;
 
-  ThreadStreamResources(CUcontext context, int device) : context(context), device(device) {}
+  explicit ThreadStreamResources(CUcontext context) : context(context) {}
 
   void release() { grouped_tma.release(); }
 };
@@ -96,6 +95,13 @@ struct SlotKeyHash {
     const size_t b = std::hash<cudaStream_t>{}(key.stream);
     return a ^ (b + 0x9e3779b9 + (a << 6) + (a >> 2));
   }
+};
+
+struct ThreadSlotCache {
+  // Unique handle IDs keep these pointers from matching a later handle.
+  SlotKey recent_key{};
+  ThreadStreamResources *recent_slot = nullptr;
+  std::unordered_map<SlotKey, ThreadStreamResources *, SlotKeyHash> slots;
 };
 
 std::atomic<std::uint64_t> next_handle_id{1};
@@ -131,25 +137,31 @@ struct NVTEResourceHandleOpaque {
 
   ThreadStreamResources *get_slot(cudaStream_t stream) {
     const CUcontext active_context = current_context();
-    int active_device = -1;
-    NVTE_CHECK_CUDA(cudaGetDevice(&active_device));
 
     // The cache itself is thread-local. A slot never changes owners, so hits
     // require no lock even if other threads register new slots concurrently.
-    static thread_local std::unordered_map<SlotKey, ThreadStreamResources *, SlotKeyHash> cache;
+    static thread_local ThreadSlotCache cache;
     const SlotKey key{id, stream};
-    auto found = cache.find(key);
-    if (found != cache.end()) {
-      auto *slot = found->second;
+    ThreadStreamResources *slot = nullptr;
+    if (cache.recent_slot != nullptr && cache.recent_key == key) {
+      slot = cache.recent_slot;
+    } else {
+      auto found = cache.slots.find(key);
+      if (found != cache.slots.end()) {
+        slot = found->second;
+        cache.recent_key = key;
+        cache.recent_slot = slot;
+      }
+    }
+    if (slot != nullptr) {
+      // A CUDA context belongs to one device, so this also validates the device.
       NVTE_CHECK(slot->context == active_context,
                  "Resource handle is bound to a different CUDA context.");
-      NVTE_CHECK(slot->device == active_device,
-                 "Resource handle is bound to CUDA device ", slot->device,
-                 ", but the current device is ", active_device, ".");
       return slot;
     }
 
-    ThreadStreamResources *slot = nullptr;
+    int active_device = -1;
+    NVTE_CHECK_CUDA(cudaGetDevice(&active_device));
     {
       std::lock_guard<std::mutex> lock(registry_mutex);
       NVTE_CHECK(context == nullptr || context == active_context,
@@ -162,7 +174,7 @@ struct NVTEResourceHandleOpaque {
       if (existing != slots.end()) {
         slot = existing->second.get();
       } else {
-        auto new_slot = std::make_unique<ThreadStreamResources>(active_context, active_device);
+        auto new_slot = std::make_unique<ThreadStreamResources>(active_context);
         slot = new_slot.get();
         slots.emplace(registry_key, std::move(new_slot));
         context = active_context;
@@ -171,10 +183,12 @@ struct NVTEResourceHandleOpaque {
     }
     // Bound the per-thread metadata when applications create many short-lived
     // handles. Handle IDs prevent entries from aliasing a later handle.
-    if (cache.size() >= 128) {
-      cache.clear();
+    if (cache.slots.size() >= 128) {
+      cache.slots.clear();
     }
-    cache.emplace(key, slot);
+    cache.slots.emplace(key, slot);
+    cache.recent_key = key;
+    cache.recent_slot = slot;
     return slot;
   }
 
