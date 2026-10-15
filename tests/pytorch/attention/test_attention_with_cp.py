@@ -913,3 +913,73 @@ def test_cp_allgather_first_dkv(
         )
     finally:
         pool._kill()
+
+
+# These small shapes exercise the exact AllGather physical-layout contract.
+# They do not expand the normal attention test matrix or assert performance.
+native_head_model_configs = {
+    "native_head_d256": ModelConfig(2, 512, 32, 256, num_gqa_groups=8, attn_mask_type="causal"),
+    "native_head_d128": ModelConfig(2, 512, 32, 128, num_gqa_groups=8, attn_mask_type="causal"),
+}
+
+
+@pytest.mark.skipif(
+    get_device_compute_capability() != (10, 0),
+    reason="Native AllGather head partition qualification targets SM100.",
+)
+@pytest.mark.parametrize("head_chunk", [0, 8, 16])
+@pytest.mark.parametrize(
+    "model,qkv_format,world_size",
+    [
+        ("native_head_d256", "thd", 4),
+        ("native_head_d256", "thd", 2),
+        ("native_head_d256", "sbhd", 4),
+        ("native_head_d128", "thd", 4),
+    ],
+)
+def test_cp_allgather_native_head_partition(
+    cp_pool, monkeypatch, head_chunk, model, qkv_format, world_size
+):
+    """Compare all CP outputs/gradients with full-sequence attention.
+
+    The four-GPU D256 THD case exercises both physical Q origins and every KV
+    prefix across ranks. CP2, SBHD and D128 cover ineligible native-head paths.
+    Fresh workers are required because the common C++ opt-in is process-static.
+    """
+    if _deterministic:
+        pytest.skip("The bounded native-head path requires nondeterministic backward.")
+    if get_cudnn_version() < (9, 29, 0):
+        pytest.skip("This native-head qualification uses cuDNN 9.29 or newer.")
+    for suffix in (
+        "UNIFORM_DENSE_FWD",
+        "UNIFORM_NO_ZERO_WIDE",
+        "AG_FIRST_DKV",
+        "A2A_PACK16",
+        "THD_REORDER_TUNED",
+        "FROST_AG_BWD",
+    ):
+        monkeypatch.setenv("NVTE_CP_EXPERIMENTAL_" + suffix, "0")
+    for suffix in ("UNIFORM_DENSE_BWD", "STRIDED_DENSE_BWD"):
+        monkeypatch.setenv("NVTE_CP_EXPERIMENTAL_" + suffix, "1")
+    monkeypatch.setenv("NVTE_CP_EXPERIMENTAL_NATIVE_AG_HEADS", str(head_chunk))
+    pool = cp_pool(world_size)
+    pool._kill()
+    try:
+        _submit(
+            pool,
+            dtype="bf16",
+            model=model,
+            qkv_format=qkv_format,
+            kernel_backend="FusedAttention",
+            cp_comm_type="all_gather",
+            fa_pad_between_seqs=False,
+            fp8_bwd=False,
+            fp8_dpa=False,
+            fp8_mha=False,
+            scaling_mode=None,
+            f16_O=True,
+            deterministic=False,
+            log_level=pytest_logging_level,
+        )
+    finally:
+        pool._kill()

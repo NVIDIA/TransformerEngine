@@ -674,5 +674,31 @@ They are experimental implementation controls, not a general ragged-input policy
   attention backend or change communication. General ragged layouts and stream
   lifetime beyond the documented focused validation are not qualified.
 
+* ``NVTE_CP_EXPERIMENTAL_NATIVE_AG_HEADS=8`` or ``16`` partitions an eligible
+  cuDNN AllGather backward call into whole GQA groups. The partitions execute
+  serially on that call's stream and reuse its workspace. This can reduce
+  workspace allocation at the cost of more kernel launches; it does not select
+  a different backend compute kernel or change communication.
+  The default is ``0`` (disabled). Set it before process startup, together with
+  ``NVTE_CP_EXPERIMENTAL_UNIFORM_DENSE_BWD=1`` and
+  ``NVTE_CP_EXPERIMENTAL_STRIDED_DENSE_BWD=1``. Changing it within a process is
+  not supported. Other values raise an error.
+
+  Qualification covers the PyTorch CP4 AllGather path on SM100; other
+  architectures and frontends are not qualified by this experiment.
+  This experiment is deliberately bounded to nondeterministic BF16, vanilla
+  bottom-right causal attention, Hq32/Hkv8 and D256. It accepts physical Q/KV
+  sequence pitches of ``2*Sq``/``8*Sq``, ``Sk`` in ``Sq, 2*Sq, ..., 8*Sq``,
+  and either ``B=2, Sq=64`` or ``B=64, Sq=1024``. The physical head strides and
+  the full Hq32 Stats batch stride are preserved. Unsupported geometry retains
+  the original dispatch; a violation of the uniform-layout promise follows
+  the existing device-side validation behavior. Query origin validation and
+  Stats conversion run once per full call, outside the head-partition loop.
+  Qualification keeps ``NVTE_CP_EXPERIMENTAL_AG_FIRST_DKV=0``.
+  Forward, dropout, bias, deterministic backward and general ragged layouts
+  are not enabled by this switch. Per-call workspace savings do not imply the
+  same reduction in full-model peak memory or an improvement in latency.
+
+
 Declarations outside each switch's eligibility checks retain the existing cuDNN
 path. These experiments do not change context parallel communication.

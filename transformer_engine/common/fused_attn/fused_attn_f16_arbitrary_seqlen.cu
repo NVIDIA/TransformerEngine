@@ -19,6 +19,7 @@
 #include "../cudnn_utils.h"
 #include "../util/cuda_runtime.h"
 #include "../util/system.h"
+#include "cp_native_head_partition.h"
 #include "fused_attn_f16_arbitrary_seqlen.h"
 #include "graph_cache.h"
 #include "graph_cache_debug.h"
@@ -672,14 +673,43 @@ static bool cp_ag_dense_graph(const FusedAttnConfig &cfg) {
          cfg.do_format == NVTE_BSHD && !cfg.is_ragged_q && !cfg.is_ragged_kv;
 }
 
+// Private experiment. Keep physical head counts in the descriptors and cache keys.
+static size_t cp_ag_native_head_chunk(const FusedAttnConfig &cfg) {
+  static const size_t requested = []() -> size_t {
+    const char *value = std::getenv("NVTE_CP_EXPERIMENTAL_NATIVE_AG_HEADS");
+    if (value == nullptr || std::string(value) == "0") return 0;
+    if (std::string(value) == "8") return 8;
+    if (std::string(value) == "16") return 16;
+    NVTE_ERROR("NVTE_CP_EXPERIMENTAL_NATIVE_AG_HEADS must be 0, 8 or 16.");
+    return 0;
+  }();
+  if (requested == 0 || !cp_ag_dense_graph(cfg) || cfg.deterministic ||
+      cfg.softmax_type != NVTE_VANILLA_SOFTMAX || cfg.graph_batch_size_bwd != cfg.batch_size ||
+      cfg.graph_max_seqlen_q != cfg.max_seqlen_q || cfg.graph_max_seqlen_kv != cfg.max_seqlen_kv)
+    return 0;
+  const CPNativeHeadGeometry geometry{cfg.batch_size,
+                                      cfg.num_attn_heads,
+                                      cfg.num_gqa_groups,
+                                      cfg.head_dim_qk,
+                                      cfg.head_dim_v,
+                                      cfg.max_seqlen_q,
+                                      cfg.max_seqlen_kv,
+                                      cfg.num_tokens_q / cfg.batch_size,
+                                      cfg.num_tokens_kv / cfg.batch_size};
+  return cp_native_head_geometry_supported(geometry, requested) ? requested : 0;
+}
+
 static F16BwdGraphAndTensors create_graph_f16_bwd(const FusedAttnConfig &cfg) {
   const int64_t b = static_cast<int64_t>(cfg.graph_batch_size_bwd);
   const int64_t s_q = static_cast<int64_t>(cfg.graph_max_seqlen_q);
   const int64_t s_kv = static_cast<int64_t>(cfg.graph_max_seqlen_kv);
   const cudnn_frontend::DataType_t tensorType =
       get_cudnn_fe_dtype(static_cast<DType>(cfg.qkv_dtype));
-  const int64_t h = static_cast<int64_t>(cfg.num_attn_heads);
-  const int64_t hg = static_cast<int64_t>(cfg.num_gqa_groups);
+  const int64_t physical_h = static_cast<int64_t>(cfg.num_attn_heads);
+  const int64_t physical_hg = static_cast<int64_t>(cfg.num_gqa_groups);
+  const size_t head_chunk = cp_ag_native_head_chunk(cfg);
+  const int64_t h = head_chunk == 0 ? physical_h : static_cast<int64_t>(head_chunk);
+  const int64_t hg = head_chunk == 0 ? physical_hg : h / (physical_h / physical_hg);
   const int64_t d_qk = static_cast<int64_t>(cfg.head_dim_qk);
   const int64_t d_v = static_cast<int64_t>(cfg.head_dim_v);
   const int64_t bias_b = static_cast<int64_t>(cfg.bias_batch_size);
@@ -721,22 +751,22 @@ static F16BwdGraphAndTensors create_graph_f16_bwd(const FusedAttnConfig &cfg) {
   std::vector<int64_t> k_stride(4);
   std::vector<int64_t> v_stride(4);
   std::vector<int64_t> o_stride(4);
-  generateMatrixStrides(b, h, s_q, s_kv, d_qk, q_stride.data(), qkv_layout,
+  generateMatrixStrides(b, physical_h, s_q, s_kv, d_qk, q_stride.data(), qkv_layout,
                         NVTE_QKV_Matrix::NVTE_Q_Matrix);
-  generateMatrixStrides(b, hg, s_q, s_kv, d_qk, k_stride.data(), qkv_layout,
+  generateMatrixStrides(b, physical_hg, s_q, s_kv, d_qk, k_stride.data(), qkv_layout,
                         NVTE_QKV_Matrix::NVTE_K_Matrix);
-  generateMatrixStrides(b, hg, s_q, s_kv, d_v, v_stride.data(), qkv_layout,
+  generateMatrixStrides(b, physical_hg, s_q, s_kv, d_v, v_stride.data(), qkv_layout,
                         NVTE_QKV_Matrix::NVTE_V_Matrix);
-  generateMatrixStrides(b, h, s_q, s_kv, d_v, o_stride.data(), qkv_layout,
+  generateMatrixStrides(b, physical_h, s_q, s_kv, d_v, o_stride.data(), qkv_layout,
                         NVTE_QKV_Matrix::NVTE_O_Matrix);
 
   if (cp_ag_dense_graph(cfg)) {
     const int64_t pq = cfg.num_tokens_q / cfg.batch_size;
     const int64_t pk = cfg.num_tokens_kv / cfg.batch_size;
-    q_stride[0] = pq * h * d_qk;
-    o_stride[0] = pq * h * d_v;
-    k_stride[0] = pk * hg * d_qk;
-    v_stride[0] = pk * hg * d_v;
+    q_stride[0] = pq * physical_h * d_qk;
+    o_stride[0] = pq * physical_h * d_v;
+    k_stride[0] = pk * physical_hg * d_qk;
+    v_stride[0] = pk * physical_hg * d_v;
   }
 
   q = mha_graph->tensor(
@@ -795,7 +825,7 @@ static F16BwdGraphAndTensors create_graph_f16_bwd(const FusedAttnConfig &cfg) {
                                          .set_data_type(get_cudnn_fe_dtype(ragged_offset_type)));
     stats->set_stride({h * s_q, 1, h, 1}).set_ragged_offset(offset_stats);
   } else {
-    stats->set_stride({h * s_q, s_q, 1, 1});
+    stats->set_stride({physical_h * s_q, s_q, 1, 1});
   }
 
   attn_scale = mha_graph->tensor(fe::graph::Tensor_attributes()
@@ -946,7 +976,11 @@ static auto cp_get_bwd_graph(const FusedAttnConfig &cfg, cudnnHandle_t handle) {
   if (!cp_ag_dense_graph(cfg)) {
     return get_graph<Backend::F16, Pass::Bwd, create_graph_f16_bwd>(cfg, handle);
   }
-  static GraphCache<F16BwdGraphAndTensors> cache;
+  // Separate cache domains prevent a physical-H32 chunk graph from aliasing a
+  // naturally smaller-head graph. Keys retain the full physical H/Hkv and pitches.
+  static GraphCache<F16BwdGraphAndTensors> full_cache, half_cache, quarter_cache;
+  const size_t head_chunk = cp_ag_native_head_chunk(cfg);
+  auto &cache = head_chunk == 8 ? quarter_cache : head_chunk == 16 ? half_cache : full_cache;
   auto key = cfg.make_cache_key(Pass::Bwd);
   key.num_tokens_q = cfg.num_tokens_q;
   key.num_tokens_kv = cfg.num_tokens_kv;
@@ -1276,8 +1310,50 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
       variant_pack[d_softmax_offset] = devPtrdSoftmaxOffset;
     }
 
-    NVTE_CHECK_CUDNN_FE(mha_graph->execute(handle, variant_pack, workspace));
-    graph_cache_debug::record_execute(Backend::F16, Pass::Bwd);
+    const size_t head_chunk = cp_ag_native_head_chunk(cfg);
+    if (head_chunk != 0) {
+      const CPNativeHeadGeometry geometry{cfg.batch_size,
+                                          cfg.num_attn_heads,
+                                          cfg.num_gqa_groups,
+                                          cfg.head_dim_qk,
+                                          cfg.head_dim_v,
+                                          cfg.max_seqlen_q,
+                                          cfg.max_seqlen_kv,
+                                          cfg.num_tokens_q / cfg.batch_size,
+                                          cfg.num_tokens_kv / cfg.batch_size};
+      // Q origin and packed-Stats conversion were already handled once by the
+      // outer dense adapter. Bind only head offsets here; the stream orders reuse.
+      auto offset_bf16 = [](void *base, size_t elements) -> void * {
+        return static_cast<int8_t *>(base) + elements * sizeof(__nv_bfloat16);
+      };
+      for (size_t head = 0; head < cfg.num_attn_heads; head += head_chunk) {
+        const auto offsets = cp_native_head_offsets(geometry, head);
+        variant_pack[q] = offset_bf16(devPtrQ, offsets.query);
+        variant_pack[o] = offset_bf16(devPtrO, offsets.query);
+        variant_pack[dO] = offset_bf16(devPtrdO, offsets.query);
+        variant_pack[dQ] = offset_bf16(devPtrdQ, offsets.query);
+        variant_pack[k] = offset_bf16(devPtrKTranspose, offsets.kv);
+        variant_pack[v] = offset_bf16(devPtrVTranspose, offsets.kv);
+        variant_pack[dK] = offset_bf16(devPtrdK, offsets.kv);
+        variant_pack[dV] = offset_bf16(devPtrdV, offsets.kv);
+        variant_pack[stats] = static_cast<float *>(devPtrSoftmaxStats) + offsets.stats;
+        NVTE_CHECK_CUDNN_FE(mha_graph->execute(handle, variant_pack, workspace));
+        graph_cache_debug::record_execute(Backend::F16, Pass::Bwd);
+      }
+      static thread_local std::set<std::tuple<size_t, size_t, size_t, size_t>> logged_heads;
+      if (logged_heads.emplace(cfg.batch_size, cfg.max_seqlen_q, cfg.max_seqlen_kv, head_chunk)
+              .second) {
+        std::fprintf(stderr,
+                     "TE_CP_NATIVE_HEAD_BWD b=%zu sq=%zu sk=%zu h=%zu hk=%zu chunk=%zu "
+                     "workspace=%zu stats_batch_stride=%zu\n",
+                     cfg.batch_size, cfg.max_seqlen_q, cfg.max_seqlen_kv, cfg.num_attn_heads,
+                     cfg.num_gqa_groups, head_chunk, plan_workspace_size,
+                     cfg.num_attn_heads * cfg.max_seqlen_q);
+      }
+    } else {
+      NVTE_CHECK_CUDNN_FE(mha_graph->execute(handle, variant_pack, workspace));
+      graph_cache_debug::record_execute(Backend::F16, Pass::Bwd);
+    }
   } catch (cudnn_frontend::cudnnException &e) {
     NVTE_ERROR(e.what());
   }
