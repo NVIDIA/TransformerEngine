@@ -11,6 +11,7 @@ import pathlib
 import copy
 from dataclasses import replace
 from typing import Any, Dict, List, NamedTuple, Tuple, Union
+from unittest.mock import Mock
 
 from packaging.version import Version as PkgVersion
 import pytest
@@ -252,7 +253,8 @@ def test_fused_attn_python_execution(monkeypatch, dtype, qkv_format):
 
 
 @pytest.mark.parametrize("layout", ("bs3hd", "bsh3d", "sb3hd", "sbh3d", "t3hd", "th3d"))
-def test_fused_attn_query_reuses_runtime_graph(layout, monkeypatch):
+@pytest.mark.parametrize("backward", (False, True))
+def test_fused_attn_query_reuses_runtime_graph(layout, backward, monkeypatch):
     """Packed storage and runtime scalar values must preserve support-query graph identity."""
     from transformer_engine.pytorch.cpp_extensions import cudnn_fused_attn as implementation
 
@@ -297,13 +299,18 @@ def test_fused_attn_query_reuses_runtime_graph(layout, monkeypatch):
         num_tokens_kv=batch * seqlen if fmt == "thd" else 0,
         attn_mask_type=AttnMaskType[params["attn_mask_type"]],
     )
-    query = implementation._query_graph(config, False)
-    runtime = implementation._AttentionGraph(params)
+    query = implementation._query_graph(config, backward)
+    runtime = implementation._AttentionGraph(params, backward)
     implementation._prepare_inputs(runtime)
     out = torch.empty(base_shape, device="cuda", dtype=torch.bfloat16)
-    runtime.matrix("o", out, fmt, heads, runtime.sq, cu, output=True)
+    runtime.matrix("o", out, fmt, heads, runtime.sq, cu, output=not backward)
     stats_shape = (batch * seqlen, heads, 1) if runtime.ragged_stats else (batch, heads, seqlen, 1)
-    runtime.stats("stats", torch.empty(stats_shape, device="cuda"), output=True)
+    runtime.stats("stats", torch.empty(stats_shape, device="cuda"), output=not backward)
+    if backward:
+        runtime.matrix("do", torch.empty_like(out), fmt, heads, runtime.sq, cu)
+        grads = torch.empty(packed_shape, device="cuda", dtype=torch.bfloat16).unbind(axis)
+        for name, grad in zip(("dq", "dk", "dv"), grads):
+            runtime.matrix(name, grad, fmt, heads, runtime.sq, cu, output=True)
     assert query.description() == runtime.description()
 
     # Isolate the cache to demonstrate that a query never compiles, and that a
@@ -331,6 +338,117 @@ def test_fused_attn_query_reuses_runtime_graph(layout, monkeypatch):
     assert builds == [queried]
     assert compiles == [queried.graph]
     assert queried.workspace_size == 17
+
+
+@pytest.mark.parametrize("dtype", (DType.kFloat16, DType.kBFloat16))
+@pytest.mark.parametrize("capability", ((10, 0), (12, 0)))
+@pytest.mark.parametrize("layout", ("bshd_bshd_bshd", "thd_bshd_bshd", "thd_thd_thd"))
+def test_fused_attn_backward_token_bounds(monkeypatch, dtype, capability, layout):
+    """Bound backward workspace by each ragged input's bucketed token capacity."""
+    import cudnn
+    from transformer_engine.pytorch.cpp_extensions import cudnn_fused_attn as implementation
+
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *_args: capability)
+    config = FusedAttentionParams(
+        qkv_layout=QKVLayout[layout],
+        qkv_dtype=dtype,
+        o_dtype=dtype,
+        do_dtype=dtype,
+        dqkv_dtype=dtype,
+        batch_size=4,
+        num_attn_heads=4,
+        num_gqa_groups=4,
+        head_dim_qk=64,
+        head_dim_v=64,
+        max_seqlen_q=512,
+        max_seqlen_kv=1024,
+        num_tokens_q=1153,
+        num_tokens_kv=2305,
+        attn_mask_type=AttnMaskType["padding"],
+    )
+    query = implementation._query_graph(config, True)
+    graph = Mock()
+    graph.sdpa_backward.return_value = (Mock(), Mock(), Mock())
+    implementation.build_attention_graph(cudnn, graph, query.description())
+    bounds = {
+        name: value
+        for name, value in graph.sdpa_backward.call_args.kwargs.items()
+        if name.startswith("max_total_seq_len_")
+    }
+    expected = {}
+    if capability == (10, 0) and layout.startswith("thd"):
+        expected["max_total_seq_len_q"] = 2048
+        if layout == "thd_thd_thd":
+            expected["max_total_seq_len_kv"] = 4096
+    assert bounds == expected
+
+
+@pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16))
+@pytest.mark.parametrize("kv_format", ("thd", "bshd", "sbhd"))
+def test_fused_attn_packed_backward(dtype, kv_format):
+    """Packed backward must match FP32 SDPA with unequal lengths and padded capacities."""
+    if device_compute_capability < (9, 0):
+        pytest.skip("FP16/BF16 THD fused attention requires SM90 or later")
+    q_lengths, kv_lengths = (64, 128, 32), (96, 160, 64)
+    q_offsets = (0, 128, 384, 512)
+    kv_offsets = (0, 384, 768, 1152) if kv_format == "thd" else (0, 256, 512, 768)
+    cu_q = torch.tensor((0, 64, 192, 224), device="cuda", dtype=torch.int32)
+    cu_kv = torch.tensor((0, 96, 256, 320), device="cuda", dtype=torch.int32)
+    q = torch.randn(512, 4, 64, device="cuda", dtype=dtype)
+    kv_shape = {"thd": (1152, 4, 64), "bshd": (3, 256, 4, 64), "sbhd": (256, 3, 4, 64)}
+    k, v = [torch.randn(kv_shape[kv_format], device="cuda", dtype=dtype) for _ in range(2)]
+    layout = f"thd_{kv_format}_{kv_format}"
+    kwargs = dict(
+        max_seqlen_q=128,
+        max_seqlen_kv=256,
+        cu_seqlens_q=cu_q,
+        cu_seqlens_kv=cu_kv,
+        cu_seqlens_q_padded=torch.tensor(q_offsets, device="cuda", dtype=torch.int32),
+        cu_seqlens_kv_padded=torch.tensor(kv_offsets, device="cuda", dtype=torch.int32),
+        q=q,
+        k=k,
+        v=v,
+        fake_dtype=dtype,
+        fused_attention_backend=FusedAttnBackend.F16_arbitrary_seqlen,
+        qkv_layout=layout,
+        o_format="thd",
+        attn_mask_type="padding",
+    )
+    out, aux = fused_attn_fwd(is_training=True, **kwargs)
+    grad = torch.randn_like(out)
+    dq, dk, dv, *_ = fused_attn_bwd(
+        o=out, d_o=grad, aux_ctx_tensors=aux, do_format="thd", dqkv_layout=layout, **kwargs
+    )
+    refs = [tensor.float().requires_grad_() for tensor in (q, k, v)]
+    reference = torch.zeros_like(refs[0])
+    for index, (q_len, kv_len) in enumerate(zip(q_lengths, kv_lengths)):
+        q_slice = slice(q_offsets[index], q_offsets[index] + q_len)
+        if kv_format == "thd":
+            kv_slice = slice(kv_offsets[index], kv_offsets[index] + kv_len)
+            kr, vr = (tensor[kv_slice] for tensor in refs[1:])
+        elif kv_format == "bshd":
+            kr, vr = (tensor[index, :kv_len] for tensor in refs[1:])
+        else:
+            kr, vr = (tensor[:kv_len, index] for tensor in refs[1:])
+        result = torch.nn.functional.scaled_dot_product_attention(
+            refs[0][q_slice].transpose(0, 1), kr.transpose(0, 1), vr.transpose(0, 1)
+        )
+        reference[q_slice] = result.transpose(0, 1)
+    reference.backward(grad.float())
+    rtol, atol = (2e-2, 1e-2) if dtype == torch.bfloat16 else (3e-3, 2e-3)
+    torch.testing.assert_close(out.float(), reference, rtol=rtol, atol=atol)
+    for actual, ref in zip((dq, dk, dv), refs):
+        if actual.ndim == 3:
+            torch.testing.assert_close(actual.float(), ref.grad, rtol=rtol, atol=atol)
+        else:
+            # cuDNN may leave dense KV padding gradients unwritten.
+            for index, length in enumerate(kv_lengths):
+                active = (
+                    (index, slice(0, length)) if kv_format == "bshd" else (slice(0, length), index)
+                )
+                torch.testing.assert_close(
+                    actual[active].float(), ref.grad[active], rtol=rtol, atol=atol
+                )
 
 
 @pytest.mark.parametrize("error", (RuntimeError("device failure"), ImportError("frontend missing")))

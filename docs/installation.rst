@@ -17,8 +17,10 @@ Prerequisites
 4. `cuDNN 9.12 <https://developer.nvidia.com/cudnn>`__ or later.
 
 The PyTorch and JAX cuDNN attention backends use shared graph builders through
-the cuDNN frontend Python API. Both installations include
-``nvidia-cudnn-frontend>=1.29.0``. Graph descriptions are cached by tensor metadata
+the cuDNN frontend Python API. Both installations require
+``nvidia-cudnn-frontend`` version 1.29.0 or later. JAX builds pin their runtime
+dependency to the exact frontend version that supplies the build headers.
+Graph descriptions are cached by tensor metadata
 and target device or architecture. Support queries select supported plans without
 compiling their kernels. PyTorch compiles on first execution and uses its CUDA
 generator for dropout, including CUDA graph capture and replay. JAX compiles

@@ -137,12 +137,12 @@ class _AttentionGraph:
             )
         self.b, self.h, self.hg, self.dq, self.dv, self.tq, self.tk = dimensions
         capability = torch.cuda.get_device_capability(self.device)
-        ragged_graph = capability >= (9, 0) and capability != (12, 0)
-        self.ragged_stats = self.q_format == "thd" and ragged_graph
+        self.ragged_graph = capability >= (9, 0) and capability != (12, 0)
+        self.ragged_stats = self.q_format == "thd" and self.ragged_graph
         self.sq = bucket(self.tq, 1024, 32768) if self.ragged_stats else params["max_seqlen_q"]
         self.skv = (
             bucket(self.tk, 1024, 32768)
-            if self.kv_format == "thd" and ragged_graph
+            if self.kv_format == "thd" and self.ragged_graph
             else params["max_seqlen_kv"]
         )
         self.fp8 = hasattr(params["q"], "_fp8_dtype") if fp8 is None else fp8
@@ -219,6 +219,7 @@ class _AttentionGraph:
         left, right = p["window_size"] or (-1, -1)
         if not causal and (left, right) == (-1, -1):
             bottom_right = False
+        bounded_backward = self.backward and not self.fp8 and self.ragged_graph
         return AttentionOptions(
             backward=self.backward,
             fp8=self.fp8,
@@ -231,6 +232,10 @@ class _AttentionGraph:
             dropout=p["dropout"],
             deterministic=p.get("deterministic", False),
             paged_max_seqlen_kv=p["max_seqlen_kv"] if p.get("page_table_k") is not None else 0,
+            # Ragged sequence dimensions are bucketed total-token capacities.
+            # Bound cuDNN's backward scratch buffers by those same capacities.
+            max_total_seqlen_q=self.sq if bounded_backward and self.q_format == "thd" else 0,
+            max_total_seqlen_kv=self.skv if bounded_backward and self.kv_format == "thd" else 0,
         )
 
     def description(self):

@@ -113,6 +113,7 @@ def build_attention_graph(cudnn, graph, spec, *, score_mod=None, score_mod_bprop
         kwargs["use_deterministic_algorithm"] = options.deterministic
         if options.max_total_seqlen_q:
             kwargs["max_total_seq_len_q"] = options.max_total_seqlen_q
+        if options.max_total_seqlen_kv:
             kwargs["max_total_seq_len_kv"] = options.max_total_seqlen_kv
     else:
         kwargs["generate_stats"] = options.generate_stats
