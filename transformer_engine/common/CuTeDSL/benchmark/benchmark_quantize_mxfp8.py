@@ -550,7 +550,9 @@ def render_png(charts, out_dir):
         ax.xaxis.set_major_locator(FixedLocator(xs))
         ax.xaxis.set_minor_locator(NullLocator())
         ax.xaxis.set_major_formatter(ScalarFormatter())
-        ax.yaxis.set_major_locator(LogLocator(base=10, subs=(1, 2, 5)))
+        ax.yaxis.set_major_locator(
+            LogLocator(base=10, subs=(1, 2, 3, 4, 5, 6, 7, 8, 9), numticks=12)
+        )
         ax.yaxis.set_minor_locator(NullLocator())
         ax.yaxis.set_major_formatter(ScalarFormatter())
         ax.set_title(chart["title"], loc="left", fontsize=11, color=st["ink"], pad=18)
