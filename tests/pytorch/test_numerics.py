@@ -1692,6 +1692,42 @@ def test_linear_accuracy_delay_wgrad_compute(dtype, bs, model, bias, fuse_wgrad_
         torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model", ["small"])
+def test_linear_row_parallel_bias_without_tp(dtype, bs, model):
+    """A row-parallel Linear without TP adds its bias in the GEMM like a non-parallel one."""
+    config = model_configs[model]
+
+    te_linear_ref = Linear(
+        config.hidden_size,
+        4 * config.hidden_size,
+        bias=True,
+        params_dtype=dtype,
+        device="cuda",
+    )
+    te_linear = Linear(
+        config.hidden_size,
+        4 * config.hidden_size,
+        bias=True,
+        params_dtype=dtype,
+        device="cuda",
+        parallel_mode="row",
+        tp_size=1,
+    )
+    assert not te_linear.gemm_bias_unfused_add
+
+    with torch.no_grad():
+        te_linear_ref.weight = Parameter(te_linear.weight.clone())
+        te_linear_ref.bias = Parameter(te_linear.bias.clone())
+
+    te_outputs = _test_granular_accuracy(te_linear, bs, dtype, config)
+    te_outputs_ref = _test_granular_accuracy(te_linear_ref, bs, dtype, config)
+
+    for o, o_ref in zip(te_outputs, te_outputs_ref):
+        torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
+
+
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 def test_linear_delay_wgrad_compute_with_consumed_fp8_bias_grad():
     if NVTE_TEST_NVINSPECT_ENABLED:
