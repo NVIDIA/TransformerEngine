@@ -173,7 +173,6 @@ def test_router_compile_replay(histogram_mode, index_dtype):
             qb_histogram=histogram if histogram_mode else None,
             qb_bin_bounds=bounds if histogram_mode else None,
             qb_histogram_mode=histogram_mode,
-            assume_valid_qb_bin_bounds=histogram_mode is not None,
         )
         _, scores = fused_compute_score_for_moe_aux_loss(logits, 4, "sigmoid")
         loss = fused_moe_aux_loss(scores.reshape(-1, 32), counts, total, 32, 4, 0.01)
@@ -328,16 +327,18 @@ def test_router_compile_opcheck(dtype, routing_map_format, index_dtype, histogra
                 )
 
 
-@pytest.mark.parametrize("index_dtype", [None, torch.int32])
-def test_router_compile_eager_fallback(index_dtype):
-    torch._dynamo.reset()
-    logits = torch.randn(32, 32, device="cuda", requires_grad=True)
-    bias = torch.zeros(32, device="cuda")
-    indices = torch.empty(32, 4, device="cuda", dtype=torch.int32)
-    histogram = torch.zeros(32, 16, device="cuda", dtype=torch.int32)
-    bounds = torch.tensor([-2, 2], device="cuda", dtype=torch.float32)
+@pytest.mark.parametrize("histogram_mode", ["two_kernel", "fused_atomic"])
+@pytest.mark.parametrize("requires_grad", [False, True])
+def test_qb_compile_skips_value_validation(monkeypatch, histogram_mode, requires_grad):
+    from transformer_engine.pytorch import router
 
-    def router(x):
+    torch._dynamo.reset()
+    logits = torch.randn(8, 16, device="cuda", requires_grad=requires_grad)
+    bias = torch.zeros(16, device="cuda")
+    bounds = torch.tensor([-1.0, 1.0], device="cuda")
+    histogram = torch.zeros(16, 32, device="cuda", dtype=torch.int32)
+
+    def route(x):
         return fused_topk_with_score_function(
             x,
             4,
@@ -347,60 +348,31 @@ def test_router_compile_eager_fallback(index_dtype):
             None,
             "sigmoid",
             bias,
-            topk_indices=indices if index_dtype is not None else None,
             qb_histogram=histogram,
             qb_bin_bounds=bounds,
-            qb_histogram_mode="two_kernel",
+            qb_histogram_mode=histogram_mode,
         )
-
-    with pytest.warns(UserWarning, match="Falling back to eager execution"):
-        actual = torch.compile(router)(logits)
-    expected = router(logits)
-    torch.testing.assert_close(actual, expected)
-    torch._dynamo.reset()
-    with pytest.raises(torch._dynamo.exc.Unsupported):
-        torch.compile(router, fullgraph=True)(logits)
-
-
-def test_qb_trusted_bounds_skip_value_validation(monkeypatch):
-    from transformer_engine.pytorch import router
-
-    logits = torch.randn(8, 16, device="cuda", requires_grad=True)
-    bias = torch.zeros(16, device="cuda")
-    bounds = torch.tensor([-1.0, 1.0], device="cuda")
-    options = dict(
-        qb_histogram=torch.zeros(16, 32, device="cuda", dtype=torch.int32),
-        qb_bin_bounds=bounds,
-        qb_histogram_mode="two_kernel",
-    )
 
     def unexpected_validation(_):
-        raise AssertionError("trusted QB bounds must not read values on the CPU")
+        raise AssertionError("compiled QB must not read bounds values on the CPU")
 
+    compiled = torch.compile(route, fullgraph=True)
     with monkeypatch.context() as patch:
         patch.setattr(router, "_validate_qb_bin_bounds", unexpected_validation)
-        fused_topk_with_score_function(
-            logits,
-            4,
-            False,
-            None,
-            None,
-            None,
-            "sigmoid",
-            bias,
-            **options,
-            assume_valid_qb_bin_bounds=True,
-        )
+        for _ in range(2):
+            probs, _ = compiled(logits)
+            if requires_grad:
+                probs.square().sum().backward()
+            bounds.add_(0.1)
+    torch.testing.assert_close(histogram.sum(dim=-1), torch.full((16,), 16, device="cuda"))
     bounds.zero_()
     with pytest.raises(ValueError, match="finite with lower < upper"):
-        fused_topk_with_score_function(
-            logits, 4, False, None, None, None, "sigmoid", bias, **options
-        )
+        route(logits)
 
 
 @pytest.mark.parametrize("compiled", [False, True])
 @pytest.mark.parametrize("invalid", ["shape", "dtype", "device"])
-def test_qb_trusted_bounds_check_metadata(compiled, invalid):
+def test_qb_bounds_check_metadata(compiled, invalid):
     torch._dynamo.reset()
     logits = torch.randn(8, 16, device="cuda")
     bias = torch.zeros(16, device="cuda")
@@ -426,7 +398,6 @@ def test_qb_trusted_bounds_check_metadata(compiled, invalid):
             qb_histogram=histogram,
             qb_bin_bounds=bounds,
             qb_histogram_mode="two_kernel",
-            assume_valid_qb_bin_bounds=True,
         )
 
     if compiled:
@@ -903,7 +874,6 @@ def test_qb_topk_histogram(histogram_mode, topk, routing_output_mode, execution,
         qb_histogram=fused_histogram,
         qb_bin_bounds=bin_bounds,
         qb_histogram_mode=histogram_mode,
-        assume_valid_qb_bin_bounds=execution == "compile",
     )
     fused_probs, fused_routing_output = outputs[:2]
     if small:
@@ -971,7 +941,6 @@ def test_qb_histogram_accumulates_microbatches(execution, dtype, histogram_mode)
             qb_histogram=histogram,
             qb_bin_bounds=bounds,
             qb_histogram_mode=histogram_mode,
-            assume_valid_qb_bin_bounds=compiled,
         )
 
     if compiled:
@@ -1037,7 +1006,6 @@ def test_router_saved_indices(execution, histogram_mode):
             qb_histogram=histogram if histogram_mode else None,
             qb_bin_bounds=bounds if histogram_mode else None,
             qb_histogram_mode=histogram_mode,
-            assume_valid_qb_bin_bounds=True,
         )
 
     route = _router_function(route, execution)

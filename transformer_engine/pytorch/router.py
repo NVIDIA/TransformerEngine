@@ -20,8 +20,6 @@ from typing import Optional, Tuple, Union
 import torch
 import transformer_engine_torch as tex
 
-from .jit import no_torch_dynamo
-
 # Re-export the C++ enum NVTERoutingMapFormat under a friendlier Python name.
 # Members:
 #   RoutingMapFormat.BYTEMAP   — bool[num_tokens, num_experts]
@@ -251,7 +249,6 @@ class FusedTopkScoreFunctionQB(torch.autograd.Function):
         histogram: torch.Tensor,
         bin_bounds: torch.Tensor,
         histogram_mode: int,
-        assume_valid_bin_bounds: bool,
     ):
         # pylint: disable=missing-function-docstring
         ctx.compiled = torch.compiler.is_compiling()
@@ -269,7 +266,7 @@ class FusedTopkScoreFunctionQB(torch.autograd.Function):
             )
             histogram_output = histogram
         else:
-            bin_bounds_validated = assume_valid_bin_bounds or _validate_qb_bin_bounds(bin_bounds)
+            bin_bounds_validated = _validate_qb_bin_bounds(bin_bounds)
             (
                 probs,
                 routing_output,
@@ -317,7 +314,7 @@ class FusedTopkScoreFunctionQB(torch.autograd.Function):
                 ctx.routing_map_format,
                 ctx.use_dense_indices,
             )
-            return grad_logits, None, None, None, None, None, None, None, None, None
+            return grad_logits, None, None, None, None, None, None, None, None
         if not grad_probs.is_contiguous():
             grad_probs = grad_probs.contiguous()
         grad_logits = torch.empty_like(grad_probs)
@@ -333,20 +330,9 @@ class FusedTopkScoreFunctionQB(torch.autograd.Function):
             ctx.use_dense_indices,
             ctx.routing_map_format,
         )
-        return grad_logits, None, None, None, None, None, None, None, None, None
+        return grad_logits, None, None, None, None, None, None, None, None
 
 
-def _needs_eager_router(call):
-    if any(
-        call.get(name) is not None
-        for name in ("qb_histogram", "qb_bin_bounds", "qb_histogram_mode")
-    ):
-        if not call.get("assume_valid_qb_bin_bounds", False):
-            return "QB bin-bound value validation"
-    return None
-
-
-@no_torch_dynamo(when=_needs_eager_router)
 def fused_topk_with_score_function(
     logits: torch.Tensor,
     topk: int,
@@ -361,15 +347,14 @@ def fused_topk_with_score_function(
     qb_histogram: Optional[torch.Tensor] = None,
     qb_bin_bounds: Optional[torch.Tensor] = None,
     qb_histogram_mode: Optional[str] = None,
-    assume_valid_qb_bin_bounds: bool = False,
 ):
     """
     Fused topk with score function router.
 
     ``torch.compile(fullgraph=True)`` supports routing maps, dense output buffers, and
-    in-place QB histogram accumulation. QB requires ``assume_valid_qb_bin_bounds=True``;
-    otherwise, bounds value validation falls back to eager execution. For automatic CUDA
-    graph replay, use module buffers or buffers marked with ``torch._dynamo.mark_static_address``
+    in-place QB histogram accumulation. Compiled execution skips QB bounds value validation
+    and its CPU synchronization; tensor metadata is still checked. For automatic CUDA graph
+    replay, use module buffers or buffers marked with ``torch._dynamo.mark_static_address``
     for mutated inputs. Ordinary mutated inputs may cause CUDA graph capture to be skipped.
 
     Parameters
@@ -402,21 +387,19 @@ def fused_topk_with_score_function(
         Caller-owned int32 ``[num_experts, num_bins]`` histogram accumulated in place.
     qb_bin_bounds : torch.Tensor, optional
         FP32 CUDA tensor ``[lower, upper]`` defining uniform QB histogram bins. Values must be
-        finite with ``lower < upper``. With default value validation, eager calls revalidate
-        PyTorch-tracked in-place updates. Before eager CUDA graph capture, validate the
-        current version eagerly or use
+        finite with ``lower < upper``. Eager calls revalidate PyTorch-tracked in-place updates.
+        Under ``torch.compile``, the caller must guarantee valid values on every call,
+        including after device-side updates; compiled calls do not mark bounds as validated
+        for later eager calls. Before eager CUDA graph capture, validate the current version
+        eagerly or use
         :func:`mark_qb_bin_bounds_validated` after a trusted device-side update. CUDA graph replay
         does not execute Python validation or advance PyTorch tensor-version counters. Any bounds
         update visible to replay, whether issued outside the graph or captured inside it, is
         therefore trusted and must produce finite values with ``lower < upper`` on every replay.
-        Invalid replay-time bounds may silently produce an incorrect histogram.
+        Invalid bounds under ``torch.compile`` or CUDA graph replay may silently produce an
+        incorrect histogram.
     qb_histogram_mode : str, optional
         ``"two_kernel"`` or ``"fused_atomic"``. Must be provided with the two QB tensors.
-    assume_valid_qb_bin_bounds : bool, default = False
-        Skip QB bounds value validation and its CPU synchronization. The caller must
-        guarantee finite bounds with ``lower < upper`` on every call and CUDA graph replay,
-        including after device-side updates. Tensor metadata is still checked. Ignored
-        without QB. Setting this does not mark the tensor as validated for later checked calls.
 
     Returns
     -------
@@ -478,7 +461,6 @@ def fused_topk_with_score_function(
             qb_histogram,
             qb_bin_bounds,
             mode,
-            assume_valid_qb_bin_bounds,
         )
         return probs, routing_output
     if compiled_inference:
