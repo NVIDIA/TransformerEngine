@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<!--
+  Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+  See LICENSE for license information.
+
+  Interactive report template for quantization kernel benchmarks (used by
+  benchmark_quantize_mxfp8.py --format html; reusable for e.g. NVFP4). A script fills it by
+  replacing the DATA placeholder below with JSON of the form
+    {"meta": {"title", "description", "compare", "activation", "commit", "command"},
+     "charts": [{"fusion", "direction", "N", "subtitle",
+                 "series": [{"name", "role": "old" | "new",
+                             "points": [{"M", "time_us", "min_us", "rel_std_pct", "GB/s",
+                                         "kernel"}]}]}]}
+  One chart per (fusion, direction, N); the page offers Speedup Ratio when meta.compare.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quantization Benchmark</title>
+<style>
+  :root {
+    --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+    --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,0.10);
+    --new: #2a78d6; --old: #eb6834; --ref: #898781;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
+      --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
+      --new: #3987e5; --old: #d95926;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--page); color: var(--ink);
+         font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 1040px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 20px; margin: 0 0 4px; font-weight: 600; }
+  .meta { color: var(--ink-2); font-size: 12px; margin: 0; }
+  .meta code { font-size: 11px; word-break: break-all; }
+  .controls { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; margin: 20px 0 12px; }
+  .control { display: flex; align-items: center; gap: 8px; }
+  .control > span { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  .control { flex-wrap: wrap; max-width: 100%; }
+  .seg { display: inline-flex; flex-wrap: wrap; max-width: 100%; border: 1px solid var(--border);
+         border-radius: 8px; overflow: hidden; }
+  .seg button { border: 0; background: transparent; color: var(--ink-2); padding: 6px 12px; font: inherit;
+                font-size: 13px; cursor: pointer; }
+  .seg button + button { border-left: 1px solid var(--border); }
+  .seg button[aria-pressed="true"] { background: var(--ink); color: var(--surface); }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
+  .chart-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 16px; }
+  .chart-title { font-size: 15px; font-weight: 600; margin: 0; }
+  .chart-sub { color: var(--ink-2); font-size: 12px; margin: 2px 0 0; }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12px; color: var(--ink-2); }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .chart { position: relative; margin-top: 8px; }
+  .chart > svg { display: block; width: 100%; height: auto; overflow: visible; }
+  .legend svg, .tooltip svg { flex: none; }
+  .tick { fill: var(--muted); font-size: 11px; }
+  .axis-label { fill: var(--muted); font-size: 12px; }
+  .end-label { fill: var(--ink-2); font-size: 11px; }
+  .tooltip { position: absolute; pointer-events: none; background: var(--surface); color: var(--ink);
+             border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 12px;
+             box-shadow: 0 4px 16px rgba(0,0,0,.12); min-width: 220px; display: none; z-index: 2; }
+  .tooltip .h { font-weight: 600; margin-bottom: 4px; }
+  .tooltip .row { display: grid; grid-template-columns: 22px 1fr auto; gap: 6px; align-items: baseline; }
+  .tooltip .v { font-variant-numeric: tabular-nums; font-weight: 600; text-align: right; }
+  .tooltip .detail { color: var(--ink-2); grid-column: 2 / 4; font-size: 11px; margin-bottom: 4px; }
+  .tooltip .foot { border-top: 1px solid var(--border); margin-top: 4px; padding-top: 4px; color: var(--ink-2); }
+  .empty { color: var(--muted); padding: 48px 0; text-align: center; }
+  details { margin-top: 16px; }
+  summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
+  table { border-collapse: collapse; width: 100%; margin-top: 8px; font-size: 12px; font-variant-numeric: tabular-nums; }
+  th, td { text-align: right; padding: 4px 8px; border-bottom: 1px solid var(--grid); }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--muted); font-weight: 500; }
+  .table-wrap { overflow-x: auto; }
+</style>
+</head>
+<body>
+<main>
+  <h1 id="title"></h1>
+  <p class="meta" id="meta"></p>
+  <div class="controls" id="controls"></div>
+  <section class="card">
+    <div class="chart-head">
+      <div><p class="chart-title" id="chart-title"></p><p class="chart-sub" id="chart-sub"></p></div>
+      <div class="legend" id="legend"></div>
+    </div>
+    <div class="chart" id="chart"><div class="tooltip" id="tooltip"></div></div>
+    <details><summary>Data table</summary><div class="table-wrap" id="table"></div></details>
+  </section>
+</main>
+<script id="data" type="application/json">/*__DATA__*/</script>
+<script>
+"use strict";
+const DATA = JSON.parse(document.getElementById("data").textContent);
+const META = DATA.meta;
+const CHARTS = DATA.charts;
+const COMPARE = META.compare;
+const NS = "http://www.w3.org/2000/svg";
+
+const METRICS = {
+  time: { label: "Time", axis: "time (µs)", scale: "log",
+          value: p => p.time_us, fmt: v => `${fmtNum(v)} µs` },
+  throughput: { label: "Throughput", axis: "throughput (GB/s)", scale: "linear",
+               value: p => p["GB/s"], fmt: v => `${fmtNum(v)} GB/s` },
+};
+if (COMPARE) {
+  METRICS.speedup = { label: "Speedup Ratio", axis: "speedup (old time / new time)", scale: "linear",
+                      fmt: v => `${v.toFixed(3)}×` };
+}
+
+const uniq = xs => [...new Set(xs)];
+const state = {
+  fusion: CHARTS[0].fusion,
+  direction: CHARTS[0].direction,
+  N: CHARTS[0].N,
+  metric: "time",
+};
+const options = {
+  fusion: uniq(CHARTS.map(c => c.fusion)),
+  direction: uniq(CHARTS.map(c => c.direction)),
+  N: uniq(CHARTS.map(c => c.N)).sort((a, b) => a - b),
+  metric: Object.keys(METRICS),
+};
+
+function fmtNum(v) {
+  if (v == null || Number.isNaN(v)) return "–";
+  const a = Math.abs(v);
+  return v.toLocaleString(undefined, { maximumFractionDigits: a >= 100 ? 0 : a >= 10 ? 1 : 2 });
+}
+function el(tag, attrs = {}, parent) {
+  const e = document.createElementNS(NS, tag);
+  for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+  if (parent) parent.appendChild(e);
+  return e;
+}
+
+// ---- controls ------------------------------------------------------------------------
+function buildControls() {
+  const box = document.getElementById("controls");
+  const labels = { fusion: "Fusion", direction: "Direction", N: "N", metric: "Metric" };
+  for (const key of ["fusion", "direction", "N", "metric"]) {
+    const ctl = document.createElement("div");
+    ctl.className = "control";
+    ctl.innerHTML = `<span>${labels[key]}</span>`;
+    const seg = document.createElement("div");
+    seg.className = "seg";
+    seg.dataset.key = key;
+    for (const opt of options[key]) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = key === "metric" ? METRICS[opt].label : opt;
+      b.dataset.value = opt;
+      b.addEventListener("click", () => { state[key] = key === "N" ? Number(opt) : opt; update(); });
+      seg.appendChild(b);
+    }
+    ctl.appendChild(seg);
+    box.appendChild(ctl);
+  }
+}
+function syncControls() {
+  for (const seg of document.querySelectorAll(".seg")) {
+    const key = seg.dataset.key;
+    for (const b of seg.children) b.setAttribute("aria-pressed", String(b.dataset.value === String(state[key])));
+  }
+}
+
+// ---- data for the current selection ------------------------------------------------
+function currentChart() {
+  return CHARTS.find(c => c.fusion === state.fusion && c.direction === state.direction && c.N === state.N);
+}
+function seriesFor(chart) {
+  if (state.metric !== "speedup") {
+    const m = METRICS[state.metric];
+    return chart.series.map(s => ({ name: s.name, role: s.role,
+      pts: s.points.map(p => ({ x: p.M, y: m.value(p), p })) }));
+  }
+  const old = chart.series.find(s => s.role === "old"), nw = chart.series.find(s => s.role === "new");
+  const byM = new Map(old.points.map(p => [p.M, p]));
+  const pts = nw.points.filter(p => byM.has(p.M))
+    .map(p => ({ x: p.M, y: byM.get(p.M).time_us / p.time_us, p, old: byM.get(p.M) }));
+  return [{ name: "new vs old", role: "new", pts }];
+}
+
+// ---- scales ----------------------------------------------------------------------------
+function niceLinearTicks(lo, hi, count = 5) {
+  const step0 = (hi - lo) / count, mag = 10 ** Math.floor(Math.log10(step0));
+  const step = [1, 2, 2.5, 5, 10].map(f => f * mag).find(s => s >= step0);
+  const ticks = [];
+  for (let v = Math.ceil(lo / step) * step; v <= hi + step * 1e-9; v += step) ticks.push(+v.toFixed(10));
+  return ticks;
+}
+function logTicks(lo, hi) {
+  const ticks = [];
+  for (let e = Math.floor(Math.log10(lo)); e <= Math.ceil(Math.log10(hi)); e++)
+    for (const f of [1, 2, 5]) { const v = f * 10 ** e; if (v >= lo && v <= hi) ticks.push(v); }
+  return ticks;
+}
+function yDomain(values, scale) {
+  let lo = Math.min(...values), hi = Math.max(...values);
+  if (scale === "log") return [lo / 1.15, hi * 1.15];
+  if (state.metric === "speedup") { lo = Math.min(lo, 1); hi = Math.max(hi, 1); const pad = (hi - lo) * 0.15 || 0.05; return [lo - pad, hi + pad]; }
+  return [0, hi * 1.1];
+}
+
+// ---- render ----------------------------------------------------------------------------
+function render() {
+  const chart = currentChart();
+  const host = document.getElementById("chart");
+  const tooltip = document.getElementById("tooltip");
+  host.querySelector("svg")?.remove();
+  host.querySelector(".empty")?.remove();
+  tooltip.style.display = "none";
+  const metric = METRICS[state.metric];
+  const title = state.fusion.includes("act") && META.activation
+    ? `${state.fusion}(${META.activation}) · ${state.direction} · N=${state.N}`
+    : `${state.fusion} · ${state.direction} · N=${state.N}`;
+  document.getElementById("chart-title").textContent = `${metric.label} — ${title}`;
+  document.getElementById("chart-sub").textContent = chart ? chart.subtitle : "";
+  const legend = document.getElementById("legend");
+  legend.innerHTML = "";
+  if (!chart) {
+    host.insertAdjacentHTML("beforeend", `<div class="empty">This combination was not benchmarked.</div>`);
+    document.getElementById("table").innerHTML = "";
+    return;
+  }
+  const series = seriesFor(chart);
+  if (series.length > 1) {
+    for (const s of series) {
+      legend.insertAdjacentHTML("beforeend",
+        `<span><svg width="22" height="8"><line x1="1" y1="4" x2="21" y2="4" stroke="var(--${s.role})"
+          stroke-width="2" ${s.role === "old" ? 'stroke-dasharray="5 3"' : ""}/></svg>${s.name}</span>`);
+    }
+  }
+
+  const W = Math.max(320, host.clientWidth), H = Math.round(Math.min(440, Math.max(260, W * 0.5)));
+  const m = { top: 12, right: 56, bottom: 40, left: 64 };
+  const iw = W - m.left - m.right, ih = H - m.top - m.bottom;
+  const xs = uniq(series.flatMap(s => s.pts.map(p => p.x))).sort((a, b) => a - b);
+  const ys = series.flatMap(s => s.pts.map(p => p.y)).filter(v => v != null && v > 0);
+  const [y0, y1] = yDomain(ys, metric.scale);
+  const lx0 = Math.log2(xs[0]), lx1 = Math.log2(xs[xs.length - 1]);
+  const X = x => m.left + (xs.length === 1 ? iw / 2 : (Math.log2(x) - lx0) / (lx1 - lx0) * iw);
+  const Y = metric.scale === "log"
+    ? y => m.top + ih - (Math.log(y) - Math.log(y0)) / (Math.log(y1) - Math.log(y0)) * ih
+    : y => m.top + ih - (y - y0) / (y1 - y0) * ih;
+
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img",
+                          "aria-label": `${metric.label} vs M, ${title}` });
+  host.insertBefore(svg, tooltip);
+  let yt = metric.scale === "log" ? logTicks(y0, y1) : niceLinearTicks(y0, y1);
+  if (yt.length < 3) yt = niceLinearTicks(y0, y1).filter(t => t > 0);  // narrow log range
+  for (const t of yt) {
+    el("line", { x1: m.left, x2: m.left + iw, y1: Y(t), y2: Y(t), stroke: "var(--grid)", "stroke-width": 1 }, svg);
+    el("text", { x: m.left - 8, y: Y(t), class: "tick", "text-anchor": "end", "dominant-baseline": "middle" }, svg)
+      .textContent = state.metric === "speedup" ? `${t.toFixed(2)}×` : fmtNum(t);
+  }
+  for (const x of xs) {
+    el("line", { x1: X(x), x2: X(x), y1: m.top, y2: m.top + ih, stroke: "var(--grid)", "stroke-width": 1 }, svg);
+    el("text", { x: X(x), y: m.top + ih + 18, class: "tick", "text-anchor": "middle" }, svg).textContent = x;
+  }
+  el("line", { x1: m.left, x2: m.left + iw, y1: m.top + ih, y2: m.top + ih, stroke: "var(--axis)" }, svg);
+  el("text", { x: m.left + iw / 2, y: H - 4, class: "axis-label", "text-anchor": "middle" }, svg).textContent = "M";
+  el("text", { x: 14, y: m.top + ih / 2, class: "axis-label", "text-anchor": "middle",
+               transform: `rotate(-90 14 ${m.top + ih / 2})` }, svg).textContent = metric.axis;
+  if (state.metric === "speedup") {
+    el("line", { x1: m.left, x2: m.left + iw, y1: Y(1), y2: Y(1), stroke: "var(--ref)",
+                 "stroke-dasharray": "2 3", "stroke-width": 1 }, svg);
+  }
+
+  const markers = [];
+  const ends = [];
+  for (const s of series) {
+    const pts = s.pts.filter(p => p.y != null && p.y > 0);
+    el("path", { d: pts.map((p, i) => `${i ? "L" : "M"}${X(p.x)},${Y(p.y)}`).join(""), fill: "none",
+                 stroke: `var(--${s.role})`, "stroke-width": 2, "stroke-linejoin": "round",
+                 ...(s.role === "old" ? { "stroke-dasharray": "6 4" } : {}) }, svg);
+    for (const p of pts) {
+      markers.push({ x: p.x, c: el("circle", { cx: X(p.x), cy: Y(p.y), r: 4, fill: `var(--${s.role})`,
+                                                stroke: "var(--surface)", "stroke-width": 2 }, svg) });
+    }
+    if (series.length > 1 && pts.length) ends.push({ role: s.role, y: Y(pts[pts.length - 1].y) });
+  }
+  ends.sort((a, b) => a.y - b.y);
+  for (let i = 1; i < ends.length; i++) ends[i].y = Math.max(ends[i].y, ends[i - 1].y + 13);
+  for (const e of ends) {
+    el("text", { x: m.left + iw + 8, y: e.y, class: "end-label", "dominant-baseline": "middle" }, svg).textContent = e.role;
+  }
+
+  // Hover: crosshair at the nearest M, tooltip with every series' numbers there.
+  const cross = el("line", { y1: m.top, y2: m.top + ih, stroke: "var(--muted)", "stroke-width": 1,
+                             visibility: "hidden" }, svg);
+  const hit = el("rect", { x: m.left, y: m.top, width: iw, height: ih, fill: "transparent" }, svg);
+  const show = evt => {
+    const r = svg.getBoundingClientRect(), px = (evt.clientX - r.left) * (W / r.width);
+    const x = xs.reduce((a, b) => (Math.abs(X(b) - px) < Math.abs(X(a) - px) ? b : a));
+    cross.setAttribute("x1", X(x)); cross.setAttribute("x2", X(x)); cross.setAttribute("visibility", "visible");
+    for (const mk of markers) mk.c.setAttribute("r", mk.x === x ? 6 : 4);
+    tooltip.innerHTML = tooltipHtml(series, x);
+    tooltip.style.display = "block";
+    const tx = X(x) * (r.width / W), tw = tooltip.offsetWidth;
+    tooltip.style.left = `${tx + 16 + tw > r.width ? tx - 16 - tw : tx + 16}px`;
+    tooltip.style.top = `${m.top}px`;
+  };
+  hit.addEventListener("pointermove", show);
+  hit.addEventListener("pointerdown", show);
+  hit.addEventListener("pointerleave", () => {
+    cross.setAttribute("visibility", "hidden");
+    for (const mk of markers) mk.c.setAttribute("r", 4);
+    tooltip.style.display = "none";
+  });
+
+  renderTable(chart);
+}
+
+function swatch(role) {
+  return `<svg width="22" height="8"><line x1="1" y1="4" x2="21" y2="4" stroke="var(--${role})" stroke-width="2"
+    ${role === "old" ? 'stroke-dasharray="5 3"' : ""}/></svg>`;
+}
+function detail(p) {
+  const std = p.rel_std_pct == null ? "" : ` ± ${p.rel_std_pct.toFixed(1)}%`;
+  return `${fmtNum(p.time_us)} µs${std} (min ${fmtNum(p.min_us)}) · ${fmtNum(p["GB/s"])} GB/s`
+       + `<br>${p.kernel}`;
+}
+function tooltipHtml(series, x) {
+  let html = `<div class="h">M = ${x}</div>`;
+  if (state.metric === "speedup") {
+    const pt = series[0].pts.find(p => p.x === x);
+    if (!pt) return html;
+    const byRole = Object.fromEntries(currentChart().series.map(s => [s.role, s.name]));
+    html += `<div class="row"><span></span><span>speedup</span><span class="v">${pt.y.toFixed(3)}×</span></div>`;
+    for (const [role, p] of [["old", pt.old], ["new", pt.p]]) {
+      html += `<div class="row">${swatch(role)}<span>${byRole[role]}</span><span></span>`
+            + `<span class="detail">${detail(p)}</span></div>`;
+    }
+    return html;
+  }
+  const metric = METRICS[state.metric];
+  for (const s of series) {
+    const pt = s.pts.find(p => p.x === x);
+    if (!pt) continue;
+    html += `<div class="row">${swatch(s.role)}<span>${s.name}</span><span class="v">${metric.fmt(pt.y)}</span>`
+          + `<span class="detail">${detail(pt.p)}</span></div>`;
+  }
+  if (COMPARE) {
+    const t = Object.fromEntries(series.map(s => [s.role, s.pts.find(p => p.x === x)?.p.time_us]));
+    if (t.old && t.new) {
+      const d = (t.old - t.new) / t.old * 100;
+      html += `<div class="foot">new is ${Math.abs(d).toFixed(1)}% ${d >= 0 ? "faster" : "slower"} `
+            + `(${(t.old / t.new).toFixed(3)}× speedup)</div>`;
+    }
+  }
+  return html;
+}
+
+function renderTable(chart) {
+  const cols = ["time_us", "min_us", "rel_std_pct", "GB/s", "kernel"];
+  const head = chart.series.length > 1
+    ? chart.series.map(s => cols.map(c => `<th>${s.role} ${c}</th>`).join("")).join("") : cols.map(c => `<th>${c}</th>`).join("");
+  const Ms = uniq(chart.series.flatMap(s => s.points.map(p => p.M))).sort((a, b) => a - b);
+  const rows = Ms.map(M => `<tr><td>${M}</td>` + chart.series.map(s => {
+    const p = s.points.find(q => q.M === M) || {};
+    return cols.map(c => `<td>${typeof p[c] === "number" ? fmtNum(p[c]) : (p[c] ?? "–")}</td>`).join("");
+  }).join("") + "</tr>").join("");
+  document.getElementById("table").innerHTML = `<table><thead><tr><th>M</th>${head}</tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function update() { syncControls(); render(); }
+
+document.getElementById("title").textContent = META.title;
+document.title = META.title;
+const metaEl = document.getElementById("meta");
+metaEl.append(`${META.description} · commit ${META.commit}`, document.createElement("br"));
+metaEl.appendChild(document.createElement("code")).textContent = META.command;
+buildControls();
+update();
+let resizeTimer;
+window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(render, 100); });
+</script>
+</body>
+</html>
