@@ -10,7 +10,7 @@
  *  A BF16 input takes only 2^16 values, so these activations can be read from a table
  *  generated once per device from the scalar util/math.h functions. TE builds each table
  *  on its first use and keeps it for the life of the process (device_table); kernels read
- *  them for BF16 inputs quantized to MXFP8. NVTE_ACTIVATION_TABLE=0 turns them off.
+ *  them for BF16 inputs quantized to MXFP8 when NVTE_ACTIVATION_TABLE=1 (off by default).
  *  Outside each table's window the result has a closed form, so every lookup is
  *  branch-free.
  *
@@ -169,6 +169,9 @@ enum TableUse : int {
   kNoTable = 0,          //!< Compute OP with util/math.h.
   kDefaultTable = 1,     //!< Table<kind>.
   kExactDsiluTable = 2,  //!< ExactDsiluTable.
+  //! No table read: compute with util/math.h what Table<kind> holds. Gives the bytes of
+  //! kDefaultTable, without the memory latency of a lookup in global memory.
+  kComputedTable = 3,
 };
 
 //! An activation table passed to a kernel.
@@ -186,8 +189,8 @@ struct TableRef {
  */
 TableRef device_table(Kind kind);
 
-//! Whether kernels read the tables (NVTE_ACTIVATION_TABLE, default 1). Read on every call.
-inline bool tables_enabled() { return getenv<bool>("NVTE_ACTIVATION_TABLE", true); }
+//! Whether kernels read the tables (NVTE_ACTIVATION_TABLE, default 0). Read on every call.
+inline bool tables_enabled() { return getenv<bool>("NVTE_ACTIVATION_TABLE", false); }
 
 /*! \brief The table kind for OP, if OP is read from a table. */
 template <typename ParamOP, float (*OP)(float, const ParamOP &)>
@@ -333,6 +336,30 @@ template <int kUse, typename ParamOP, float (*OP)(float, const ParamOP &)>
 __device__ __forceinline__ float evaluate(const float x, const void *table) {
   if constexpr (kUse == kNoTable) {
     return OP(x, {});
+  } else if constexpr (kUse == kComputedTable) {
+    // Branch-free on purpose: a branch around OP keeps the compiler from overlapping the
+    // latency of OP across elements, which costs more than computing OP for every element.
+    static_assert(kHasTable<ParamOP, OP>, "OP has no table.");
+    using T = Table<kKindOf<ParamOP, OP>>;
+    if constexpr (T::kForward) {
+      // Outside the window the table's closed forms equal util/math.h rounded to BF16,
+      // except at -inf, where the formula gives NaN and the table -0. util/math.h gives -0
+      // for every finite x below -2^100, so clamp the input there; NaN fails the comparison
+      // and stays NaN.
+      return OP(x < -0x1p100f ? -0x1p100f : x, {});
+    } else {
+      // Above the window util/math.h already gives the saturated value or NaN. x is a BF16
+      // value, so |x| < the window's first magnitude is one float compare; NaN compares false.
+      constexpr uint32_t kWindowLow = T::kLoBits << 16;
+      const float computed = OP(x, {});
+      const float linear = T::below_window(x);
+      float result;
+      asm("{\n\t.reg .pred below;\n\t.reg .f32 magnitude;\n\tabs.f32 magnitude, %3;\n\t"
+          "setp.lt.f32 below, magnitude, %4;\n\tselp.f32 %0, %1, %2, below;\n\t}"
+          : "=f"(result)
+          : "f"(linear), "f"(computed), "f"(x), "f"(__uint_as_float(kWindowLow)));
+      return result;
+    }
   } else {
     static_assert(kHasTable<ParamOP, OP>, "OP has no table.");
     constexpr Kind kKind = kKindOf<ParamOP, OP>;

@@ -11,8 +11,8 @@
 // specialized cast kernels). dbias is compared against a host sum in the order the kernel
 // accumulates it.
 //
-// With NVTE_ACTIVATION_TABLE=0 the activation is the scalar util/math.h function. With the tables
-// (the default), BF16 inputs follow the table specification (see util/activation_table.cuh): -inf
+// Without the tables (NVTE_ACTIVATION_TABLE=0, the default) the activation is the scalar util/math.h
+// function. With NVTE_ACTIVATION_TABLE=1, BF16 inputs follow the table specification (see util/activation_table.cuh): -inf
 // gives -0 in the forward functions, and the derivatives below the table window are the linear
 // Taylor term. Other input types do not use the tables.
 

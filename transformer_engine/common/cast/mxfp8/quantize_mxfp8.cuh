@@ -1017,19 +1017,15 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                             noop_ptr, workspace_ptr, amax_ptr, num_rows, num_cols,
                             scale_stride_rowwise, scale_stride_colwise, activation_lut.ptr);
                       };
+                      using activation_table::kComputedTable;
                       using activation_table::kDefaultTable;
-                      using activation_table::kExactDsiluTable;
                       using activation_table::kNoTable;
+                      // This kernel computes what the table holds rather than reading it: a
+                      // lookup from global memory costs it more than the math (E3). The exact
+                      // dSiLU table holds util/math.h itself.
                       if constexpr (kTableCapable) {
                         if (activation_lut.use == kDefaultTable) {
-                          launch_kernel(std::integral_constant<int, kDefaultTable>{});
-                        } else if (activation_lut.use == kExactDsiluTable) {
-                          if constexpr (activation_table::kKindOf<ParamOP, OP> ==
-                                        activation_table::kDsilu) {
-                            launch_kernel(std::integral_constant<int, kExactDsiluTable>{});
-                          } else {
-                            NVTE_ERROR("Only dSiLU has an exact activation table.");
-                          }
+                          launch_kernel(std::integral_constant<int, kComputedTable>{});
                         } else {
                           launch_kernel(std::integral_constant<int, kNoTable>{});
                         }

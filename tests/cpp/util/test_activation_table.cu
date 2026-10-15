@@ -110,6 +110,10 @@ __global__ void lookup_kernel(const void *table, const uint32_t dsilu_window_low
   namespace at = transformer_engine::activation_table;
   const float x = __uint_as_float(bits << 16);
   looked_up[bits] = at::evaluate<kUse, Empty, Op<kKind>::value>(x, table);
+  if constexpr (kUse == at::kComputedTable && (kKind == kGelu || kKind == kSilu)) {
+    // The computed forward is FP32; every caller rounds it to BF16, as the table already is.
+    looked_up[bits] = __bfloat162float(__float2bfloat16_rn(looked_up[bits]));
+  }
   expected[bits] = spec(kKind, bits, dsilu_window_low);
   math_h[bits] = (kKind == kDgelu || kKind == kDsilu)
                      ? scalar_math(kKind, x)
@@ -130,7 +134,9 @@ int64_t ordered(const float f) {
   return i < 0 ? -static_cast<int64_t>(i & 0x7fffffff) : i;
 }
 
-template <Kind kKind>
+// kComputed: check what the generic kernel computes in place of the table (kComputedTable, or
+// util/math.h itself for the exact dSiLU table) instead of the table lookup.
+template <Kind kKind, bool kComputed = false>
 void check_table(const int max_ulp_below_window) {
   namespace at = transformer_engine::activation_table;
   const at::TableRef table = at::device_table(kKind);
@@ -142,12 +148,14 @@ void check_table(const int max_ulp_below_window) {
   const uint32_t dsilu_window_low = exact ? kExactDsiluWindowLow : kDsiluWindowLow;
   if (exact) {
     if constexpr (kKind == kDsilu) {
-      lookup_kernel<kKind, at::kExactDsiluTable><<<kNumInputs / 256, 256>>>(
-          table.ptr, dsilu_window_low, d, d + kNumInputs, d + 2 * kNumInputs);
+      lookup_kernel<kKind, kComputed ? at::kNoTable : at::kExactDsiluTable>
+          <<<kNumInputs / 256, 256>>>(table.ptr, dsilu_window_low, d, d + kNumInputs,
+                                      d + 2 * kNumInputs);
     }
   } else {
-    lookup_kernel<kKind, at::kDefaultTable><<<kNumInputs / 256, 256>>>(
-        table.ptr, dsilu_window_low, d, d + kNumInputs, d + 2 * kNumInputs);
+    lookup_kernel<kKind, kComputed ? at::kComputedTable : at::kDefaultTable>
+        <<<kNumInputs / 256, 256>>>(table.ptr, dsilu_window_low, d, d + kNumInputs,
+                                    d + 2 * kNumInputs);
   }
   ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
   std::vector<float> h(3 * kNumInputs);
@@ -190,6 +198,18 @@ TEST(ActivationTableTest, DgeluMatchesSpecification) {
 TEST(ActivationTableTest, DsiluMatchesSpecification) {
   check_table<kDsilu>(exact_dsilu() ? 0 : 2);
 }
+TEST(ActivationTableTest, ComputedGeluMatchesSpecification) {
+  check_table<kGelu, true>(-1);
+}
+TEST(ActivationTableTest, ComputedSiluMatchesSpecification) {
+  check_table<kSilu, true>(-1);
+}
+TEST(ActivationTableTest, ComputedDgeluMatchesSpecification) {
+  check_table<kDgelu, true>(1);
+}
+TEST(ActivationTableTest, ComputedDsiluMatchesSpecification) {
+  check_table<kDsilu, true>(exact_dsilu() ? 0 : 2);
+}
 
 TEST(ActivationTableTest, OneTablePerDevice) {
   namespace at = transformer_engine::activation_table;
@@ -216,6 +236,7 @@ TEST(ActivationTableTest, OneTablePerDevice) {
 TEST(ActivationTableDeathTest, FirstUseInsideGraphCapture) {
   GTEST_FLAG_SET(death_test_style, "threadsafe");
   const auto body = [] {
+    setenv("NVTE_ACTIVATION_TABLE", "1", 1);
     const std::vector<size_t> shape{256, 256};
     test::Tensor x("x", shape, transformer_engine::DType::kBFloat16);
     test::fillUniform(&x);

@@ -39,7 +39,7 @@ namespace transformer_engine {
 namespace dispatch {
 
 // The activation table to read for OP, if any. Tables apply to BF16 inputs of the activations
-// that have one, unless NVTE_ACTIVATION_TABLE=0. The first call per device builds the table.
+// that have one, when NVTE_ACTIVATION_TABLE=1. The first call per device builds the table.
 template <typename ParamOP, float (*OP)(float, const ParamOP &)>
 activation_table::TableRef activation_lut_for(const DType input_dtype) {
   if constexpr (activation_table::kHasTable<ParamOP, OP>) {

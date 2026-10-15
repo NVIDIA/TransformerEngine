@@ -345,8 +345,8 @@ Kernel Configuration
 .. envvar:: NVTE_ACTIVATION_TABLE
 
    :Type: ``int`` (0 or 1)
-   :Default: ``1``
-   :Description: Read GeLU, SiLU and their derivatives from lookup tables when BF16 inputs are quantized to MXFP8. Each table is built on its first use and kept, once per device and process (under 64 KB per device in total), outside the framework's memory allocator. Results match the computed activations, except that GeLU and SiLU of ``-inf`` give ``-0`` instead of NaN, and derivatives of inputs with ``|x| < 2^-12`` (GeLU) or ``|x| < 2^-9`` (SiLU) are within 1 ulp (GeLU) or 2 ulp (SiLU) of the computed ones. When set to ``0``, the activations are computed.
+   :Default: ``0``
+   :Description: Experimental. When set to ``1``, read GeLU, SiLU and their derivatives from lookup tables when BF16 inputs are quantized to MXFP8. Each table is built on its first use and kept, once per device and process (under 64 KB per device in total), outside the framework's memory allocator. Results match the computed activations, except that GeLU and SiLU of ``-inf`` give ``-0`` instead of NaN, and derivatives of inputs with ``|x| < 2^-12`` (GeLU) or ``|x| < 2^-9`` (SiLU) are within 1 ulp (GeLU) or 2 ulp (SiLU) of the computed ones. When set to ``0``, the activations are computed. Read on every call.
 
 .. envvar:: NVTE_ACTIVATION_TABLE_EXACT_DSILU
 
