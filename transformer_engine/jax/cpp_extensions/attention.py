@@ -21,6 +21,7 @@ from jax.experimental.custom_partitioning import SdyShardingRule
 from transformer_engine_jax import (
     NVTE_Fused_Attn_Backend,
 )
+from transformer_engine.common.cudnn.graph import uses_ragged_attention_graph
 from transformer_engine.jax.attention import (
     AttnBiasType,
     AttnMaskType,
@@ -503,8 +504,8 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             raise ValueError(f"Unsupported backend: {message}")
         softmax_aux_aval = q_aval.update(shape=softmax_shape, dtype=softmax_dtype)
         if config.return_max_logit:
-            # cuDNN Max is row-wise over S_kv. Dense and SM120 THD use
-            # [..., H, S_q, 1]; non-SM120 THD uses [..., S_q, H, 1].
+            # cuDNN Max is row-wise over S_kv. Dense and SM12x THD use
+            # [..., H, S_q, 1]; other THD layouts use [..., S_q, H, 1].
             # Both raw layouts are reduced to the public per-head [H] result below.
             if FusedAttnFwdPrimitive._uses_thd_ragged_max_tensor(config):
                 max_tensor_shape = (*batch_shape, q_max_seqlen, attn_heads, 1)
@@ -724,8 +725,8 @@ class FusedAttnFwdPrimitive(BasePrimitive):
     def _reduce_max_logit(max_tensor, output, q_seqlen, q_seq_offsets, config):
         """Reduce cuDNN's row-wise Max tensor to the public per-head max_logit.
 
-        Dense and SM120 THD use ``[..., H, S_q, 1]``; non-SM120
-        THD uses ``[..., S_q, H, 1]``. A rank-3 THD result is ``[T_q, H, 1]``.
+        Dense and SM12x THD use ``[..., H, S_q, 1]``; THD with packed statistics
+        uses ``[..., S_q, H, 1]``. A rank-3 THD result is ``[T_q, H, 1]``.
         All layouts reduce to ``[H]``. Static THD buffers can contain invalid query
         rows, so those rows are masked before reduction.
         """
@@ -764,7 +765,9 @@ class FusedAttnFwdPrimitive(BasePrimitive):
     @staticmethod
     def _uses_thd_ragged_max_tensor(config):
         """Return whether cuDNN writes THD Max with BSH-like ragged-stats layout."""
-        return config.qkv_layout.is_thd() and 120 not in cudnn_attention.device_capabilities()
+        return config.qkv_layout.is_thd() and uses_ragged_attention_graph(
+            cudnn_attention.device_capabilities()[0]
+        )
 
     @staticmethod
     def _empty_or_neg_inf_max_logit(head, dtype, config):

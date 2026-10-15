@@ -2344,24 +2344,26 @@ def test_cudnn_python_attention_does_not_call_common(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "kind",
+    "kind,sm_arch",
     [
-        "dense",
-        "causal",
-        "padding",
-        "window",
-        "ragged",
-        "ragged_dense_stats",
-        "ragged_dense_stats_f16",
+        ("dense", None),
+        ("causal", None),
+        ("padding", None),
+        ("window", None),
+        ("ragged", None),
+        ("ragged_dense_stats", 120),
+        ("ragged_dense_stats_f16", 120),
+        ("ragged_dense_stats_f16", 121),
+        ("ragged_dense_stats_f16", 129),
     ],
 )
-def test_cudnn_python_fp8_gqa_masks(kind, monkeypatch, request):
+def test_cudnn_python_fp8_gqa_masks(kind, sm_arch, monkeypatch, request):
     """Compare non-uniform FP8 attention and gradients against native FP32 GQA."""
     ragged = kind.startswith("ragged")
     fp8 = not kind.endswith("_f16")
     if get_device_compute_capability(0) < (100 if ragged else 90):
         pytest.skip("FP8 ragged backward requires Blackwell; dense FP8 requires Hopper.")
-    if kind.startswith("ragged_dense_stats"):
+    if sm_arch is not None:
         from transformer_engine.jax.cpp_extensions import cudnn_attention
 
         # Test the dense statistics conversion on the available GPU.
@@ -2369,7 +2371,7 @@ def test_cudnn_python_fp8_gqa_masks(kind, monkeypatch, request):
         # cache when mocking a different architecture's Max tensor layout.
         jax.clear_caches()
         request.addfinalizer(jax.clear_caches)
-        monkeypatch.setattr(cudnn_attention, "device_capabilities", lambda: (120,))
+        monkeypatch.setattr(cudnn_attention, "device_capabilities", lambda: (sm_arch,))
     keys = jax.random.split(jax.random.PRNGKey(123), 4)
     q = jax.random.choice(keys[0], jnp.array([-0.5, 0.5], jnp.bfloat16), (2, 128, 4, 64))
     k = jax.random.choice(keys[1], jnp.array([-0.5, 0.5], jnp.bfloat16), (2, 128, 2, 64))

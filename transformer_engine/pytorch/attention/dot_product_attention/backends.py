@@ -17,6 +17,7 @@ from packaging.version import Version as PkgVersion
 
 import torch
 import torch.nn.functional as F
+from transformer_engine.common.cudnn.graph import uses_ragged_attention_graph
 from transformer_engine.pytorch.utils import (
     get_device_compute_capability,
     split_tensor_along_dim,
@@ -2418,7 +2419,7 @@ def _fused_attn_stats_shape(
     if q_format == "thd":
         num_heads = q_shape[1]
         sm = get_device_compute_capability()
-        if sm >= (9, 0) and sm != (12, 0):
+        if uses_ragged_attention_graph(10 * sm[0] + sm[1]):
             return (q_shape[0], num_heads, 1)
         batch_size = args.cu_seqlens_q.shape[0] - 1
         return (batch_size, num_heads, args.max_seqlen_q, 1)

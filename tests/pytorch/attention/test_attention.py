@@ -10,6 +10,7 @@ import sys
 import pathlib
 import copy
 from dataclasses import replace
+from types import SimpleNamespace
 from typing import Any, Dict, List, NamedTuple, Tuple, Union
 from unittest.mock import Mock
 
@@ -389,6 +390,41 @@ def test_fused_attn_backward_token_bounds(monkeypatch, dtype, capability, layout
     if capability[0] == 12:
         assert query.sq == 512
         assert query.skv == 1024
+
+
+@pytest.mark.parametrize("capability", ((10, 0), (12, 0), (12, 1), (12, 9), (13, 0)))
+@pytest.mark.parametrize("layout", ("bshd_bshd_bshd", "thd_bshd_bshd", "thd_thd_thd"))
+def test_fused_attn_fake_stats_shape(capability, layout, monkeypatch):
+    """Fake saved statistics must match the runtime layout across the SM12x family."""
+    from transformer_engine.pytorch.attention.dot_product_attention import backends
+
+    monkeypatch.setattr(backends, "get_device_compute_capability", lambda: capability)
+    batch, seqlen, heads, dim, tokens = 3, 128, 4, 64, 224
+    ragged = layout.startswith("thd")
+    shape = (tokens, heads, dim) if ragged else (batch, seqlen, heads, dim)
+    kv_shape = (tokens, heads, dim) if layout.endswith("thd") else (batch, seqlen, heads, dim)
+    q = torch.empty(shape, device="meta", dtype=torch.bfloat16)
+    kv = torch.empty(kv_shape, device="meta", dtype=torch.bfloat16)
+    args = SimpleNamespace(
+        q=q,
+        k=kv,
+        v=kv,
+        packed_qkv=None,
+        packed_kv=None,
+        qkv_layout=layout,
+        cu_seqlens_q=torch.empty(batch + 1, device="meta", dtype=torch.int32),
+        max_seqlen_q=seqlen,
+        return_max_logit=False,
+        attn_bias_type="no_bias",
+        softmax_type="vanilla",
+        fused_attention_backend=FusedAttnBackend.F16_arbitrary_seqlen,
+    )
+    _, _, saved, _ = backends._fused_attn_forward_fake(args)
+    expected = (batch, heads, seqlen, 1)
+    if ragged and capability[0] != 12:
+        expected = (tokens, heads, 1)
+    assert saved[10].shape == expected
+    assert saved[10].dtype == torch.float32
 
 
 @pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16))
