@@ -8,11 +8,12 @@
   benchmark_quantize_mxfp8.py --format html; reusable for e.g. NVFP4). A script fills it by
   replacing the DATA placeholder below with JSON of the form
     {"meta": {"title", "description", "compare", "activation", "commit", "command"},
-     "charts": [{"fusion", "direction", "swizzle", "N", "subtitle",
+     "charts": [{"fusion", "direction", "swizzle", "input", "N", "subtitle",
                  "series": [{"name", "role": "old" | "new",
                              "points": [{"M", "time_us", "min_us", "rel_std_pct", "GB/s",
                                          "kernel"}]}]}]}
-  One chart per (fusion, direction, swizzle, N); swizzle is "on"/"off" and optional. The
+  One chart per (fusion, direction, swizzle, input, N); swizzle ("on"/"off") and input (dtype
+  name) are optional. The
   page offers Speedup Ratio when meta.compare.
 -->
 <html lang="en">
@@ -119,6 +120,7 @@ const state = {
   fusion: CHARTS[0].fusion,
   direction: CHARTS[0].direction,
   swizzle: CHARTS[0].swizzle ?? "off",
+  input: CHARTS[0].input ?? "bf16",
   N: CHARTS[0].N,
   metric: "time",
 };
@@ -126,6 +128,7 @@ const options = {
   fusion: uniq(CHARTS.map(c => c.fusion)),
   direction: uniq(CHARTS.map(c => c.direction)),
   swizzle: uniq(CHARTS.map(c => c.swizzle ?? "off")),
+  input: uniq(CHARTS.map(c => c.input ?? "bf16")),
   N: uniq(CHARTS.map(c => c.N)).sort((a, b) => a - b),
   metric: Object.keys(METRICS),
 };
@@ -145,8 +148,8 @@ function el(tag, attrs = {}, parent) {
 // ---- controls ------------------------------------------------------------------------
 function buildControls() {
   const box = document.getElementById("controls");
-  const labels = { fusion: "Fusion", direction: "Direction", swizzle: "Swizzled Scale", N: "N", metric: "Metric" };
-  for (const key of ["fusion", "direction", "swizzle", "N", "metric"]) {
+  const labels = { fusion: "Fusion", direction: "Direction", swizzle: "Swizzled Scale", input: "Input", N: "N", metric: "Metric" };
+  for (const key of ["input", "fusion", "direction", "swizzle", "N", "metric"]) {
     const ctl = document.createElement("div");
     ctl.className = "control";
     ctl.innerHTML = `<span>${labels[key]}</span>`;
@@ -175,7 +178,7 @@ function syncControls() {
 // ---- data for the current selection ------------------------------------------------
 function currentChart() {
   return CHARTS.find(c => c.fusion === state.fusion && c.direction === state.direction
-    && (c.swizzle ?? "off") === state.swizzle && c.N === state.N);
+    && (c.swizzle ?? "off") === state.swizzle && (c.input ?? "bf16") === state.input && c.N === state.N);
 }
 function seriesFor(chart) {
   if (state.metric !== "speedup") {
@@ -222,7 +225,7 @@ function render() {
   const metric = METRICS[state.metric];
   const fusion = state.fusion.includes("act") && META.activation
     ? `${state.fusion}(${META.activation})` : state.fusion;
-  const title = [fusion, state.direction, ...(state.swizzle === "on" ? ["swizzled scale"] : []), `N=${state.N}`]
+  const title = [state.input, fusion, state.direction, ...(state.swizzle === "on" ? ["swizzled scale"] : []), `N=${state.N}`]
     .join(" · ");
   document.getElementById("chart-title").textContent = `${metric.label} — ${title}`;
   document.getElementById("chart-sub").textContent = chart ? chart.subtitle : "";
