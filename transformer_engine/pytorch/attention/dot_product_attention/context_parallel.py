@@ -4105,20 +4105,39 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         # dq: fwd_nominal_dtype, [b, 2, s//2, h, d] or [2, s//2, b, h, d]
         # dk: fwd_nominal_dtype, [cp*s, b, h, d]
         # dv: fwd_nominal_dtype, [cp*s, b, h, d]
+        # Private opt-in: consume the first per-step dK/dV as the accumulator.
+        # Keep the existing stream event and final reorder/reduce-scatter path.
+        ag_first_dkv = (
+            os.getenv("NVTE_CP_EXPERIMENTAL_AG_FIRST_DKV", "0") == "1"
+            and cp_size == 4
+            and ctx.qkv_format == "thd"
+            and not ctx.fp8
+            and ctx.fwd_nominal_dtype == torch.bfloat16
+            and ctx.q_shape[-1] == ctx.k_shape[-1] == ctx.v_shape[-1] == 256
+            and (ctx.use_fused_attention or ctx.use_flash_attn_4)
+        )
         dq = (
             torch.zeros(ctx.q_shape, dtype=ctx.fwd_nominal_dtype, device=q.device)
             if ctx.qkv_format == "thd"
             else torch.empty(ctx.q_shape, dtype=ctx.fwd_nominal_dtype, device=q.device)
         )
-        dk = torch.zeros(
-            (ctx.k_shape[0] * cp_size, *ctx.k_shape[1:]),
-            dtype=ctx.fwd_nominal_dtype,
-            device=k.device,
+        dk = (
+            None
+            if ag_first_dkv
+            else torch.zeros(
+                (ctx.k_shape[0] * cp_size, *ctx.k_shape[1:]),
+                dtype=ctx.fwd_nominal_dtype,
+                device=k.device,
+            )
         )
-        dv = torch.zeros(
-            (ctx.v_shape[0] * cp_size, *ctx.v_shape[1:]),
-            dtype=ctx.fwd_nominal_dtype,
-            device=v.device,
+        dv = (
+            None
+            if ag_first_dkv
+            else torch.zeros(
+                (ctx.v_shape[0] * cp_size, *ctx.v_shape[1:]),
+                dtype=ctx.fwd_nominal_dtype,
+                device=v.device,
+            )
         )
         dq_per_step = [None, None]
         dk_per_step = [None, None]
@@ -4479,8 +4498,21 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                         # reordered after the per-step reductions.
                         if i > 1:
                             flash_attn_streams[i - 1].wait_event(dkv_update_done)
-                        dk.add_(dk_per_step[i - 1])
-                        dv.add_(dv_per_step[i - 1])
+                        if ag_first_dkv and i == 1:
+                            expected_k = (ctx.k_shape[0] * cp_size, *ctx.k_shape[1:])
+                            expected_v = (ctx.v_shape[0] * cp_size, *ctx.v_shape[1:])
+                            assert tuple(dk_per_step[0].shape) == expected_k
+                            assert tuple(dv_per_step[0].shape) == expected_v
+                            assert dk_per_step[0].dtype == ctx.fwd_nominal_dtype
+                            assert dv_per_step[0].dtype == ctx.fwd_nominal_dtype
+                            assert dk_per_step[0].device == k.device
+                            assert dv_per_step[0].device == v.device
+                            assert dk_per_step[0].is_contiguous()
+                            assert dv_per_step[0].is_contiguous()
+                            dk, dv = dk_per_step[0], dv_per_step[0]
+                        else:
+                            dk.add_(dk_per_step[i - 1])
+                            dv.add_(dv_per_step[i - 1])
                         if i < len(local_seq_chunk_ids):
                             flash_attn_streams[i - 1].record_event(dkv_update_done)
                     else:

@@ -664,5 +664,15 @@ They are experimental implementation controls, not a general ragged-input policy
   and its device checks validate the expected sequence origins. This path does
   not imply support for arbitrary strided THD storage.
 
+
+* ``NVTE_CP_EXPERIMENTAL_AG_FIRST_DKV=1`` reuses the first AllGather backward
+  dK/dV contribution as the accumulator, avoiding separate zero-filled buffers
+  and the first add into zero. This opt-in experiment is limited to BF16 THD,
+  CP4, D256 and the cuDNN or Flash Attention 4 paths. Other configurations keep
+  the existing allocation behavior. The second contribution, stream events,
+  final reorder and reduce-scatter remain unchanged. It does not enable a new
+  attention backend or change communication. General ragged layouts and stream
+  lifetime beyond the documented focused validation are not qualified.
+
 Declarations outside each switch's eligibility checks retain the existing cuDNN
 path. These experiments do not change context parallel communication.

@@ -19,6 +19,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
 )
 from transformer_engine.pytorch import DType
 from test_attention_with_cp import (
+    first_dkv_model_config,
     model_configs_flash_attn,
     model_configs_fused_attn,
 )
@@ -269,10 +270,14 @@ def run_dpa_with_cp(
         # Deep-copy: the module-level dict is shared across pool cases; the
         # THD branch below rewrites attn_mask_type in place, which would
         # otherwise leak into subsequent cases reusing the same model key.
-        config = copy.deepcopy(model_configs_flash_attn[model])
+        config = copy.deepcopy(
+            first_dkv_model_config if model == "first_dkv" else model_configs_flash_attn[model]
+        )
     if kernel_backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
-        if model in model_configs_fused_attn:
+        if model == "first_dkv":
+            config = copy.deepcopy(first_dkv_model_config)
+        elif model in model_configs_fused_attn:
             config = copy.deepcopy(model_configs_fused_attn[model])
         else:
             assert False, f"{model=} is not a known FusedAttention CP config!"
