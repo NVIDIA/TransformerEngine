@@ -374,9 +374,7 @@ def test_native_grouped_linear_registers_calibration_buffers(
     assert all(torch.isfinite(value).all() for value in buffers.values())
     assert all(torch.all(value > 0) for value in buffers.values())
 
-    input_buffer = module.get_buffer(
-        "input_gemm0_scale_inv_fp8_current_scaling_te_ptq_calibrated"
-    )
+    input_buffer = module.get_buffer("input_gemm0_scale_inv_fp8_current_scaling_te_ptq_calibrated")
     calibrated_value = input_buffer.clone()
     with torch.no_grad(), autocast(
         enabled=enabled,
@@ -650,9 +648,7 @@ def test_linear_calibration_config_buffers_delayed_scaling_amax():
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 def test_delayed_scaling_calibration_survives_amax_history_resize():
     module = Linear(32, 32, params_dtype=torch.bfloat16, device="cuda", bias=False)
-    calibration_config = QuantizationCalibrationConfig(
-        transformer_engine_calibration_decay=1.0
-    )
+    calibration_config = QuantizationCalibrationConfig(transformer_engine_calibration_decay=1.0)
     buffer_name = "input_amax_fp8_delayed_scaling_te_ptq_calibrated"
 
     with torch.no_grad(), autocast(
