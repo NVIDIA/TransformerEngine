@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Experimental PyTorch bindings for cuDNN Frontend 1.29.0 DSv4 primitives.
+"""Experimental PyTorch bindings for cuDNN sparse attention primitives.
 
 Compression, selection, sparse attention forward, and backward call cuDNN
 Frontend APIs. There are no numerical fallbacks. Inputs use packed sequences;
@@ -17,7 +17,7 @@ from torch.autograd.function import once_differentiable
 
 __all__ = [
     "compress",
-    "select_blocks",
+    "select_indices",
     "sparse_attention",
     "dense_indexer_loss_scores",
     "dense_indexer_loss_backward",
@@ -29,7 +29,8 @@ def _namespace(name):
         return getattr(import_module("cudnn"), name)
     except (ImportError, AttributeError) as exc:
         raise ImportError(
-            f"DSv4 requires nvidia-cudnn-frontend>=1.29.0 with the cudnn.{name} namespace."
+            f"Sparse attention requires nvidia-cudnn-frontend>=1.29.0 with the cudnn.{name}"
+            " namespace."
         ) from exc
 
 
@@ -38,7 +39,7 @@ def _dsa_op(name):
         return getattr(_namespace("DSA"), name)
     except AttributeError as exc:
         raise ImportError(
-            f"DSv4 requires cudnn.DSA.{name} from nvidia-cudnn-frontend>=1.29.0."
+            f"Sparse attention requires cudnn.DSA.{name} from nvidia-cudnn-frontend>=1.29.0."
         ) from exc
 
 
@@ -52,14 +53,14 @@ def _validate_tensors(reference, bf16, fp32, cu_seqlens, cu_seqlens_comp):
         10,
         0,
     ):
-        raise ValueError("This DSv4 implementation requires an SM100 GPU.")
+        raise ValueError("These cuDNN sparse attention kernels require an SM100 GPU.")
     for tensor in (reference, *bf16, *fp32, cu_seqlens, cu_seqlens_comp):
         if tensor.device != reference.device or not tensor.is_contiguous():
-            raise ValueError("DSv4 inputs must be contiguous on the same CUDA device.")
+            raise ValueError("Inputs must be contiguous on the same CUDA device.")
     if any(t.dtype != torch.bfloat16 for t in (reference, *bf16)):
-        raise TypeError("DSv4 activations must be BF16.")
+        raise TypeError("Activations must be BF16.")
     if any(t.dtype != torch.float32 for t in fp32):
-        raise TypeError("DSv4 position biases and sinks must be FP32.")
+        raise TypeError("Position biases and sinks must be FP32.")
     for offsets in (cu_seqlens, cu_seqlens_comp):
         if offsets.dtype != torch.int32 or offsets.ndim != 1 or offsets.numel() < 2:
             raise ValueError("Sequence prefixes must be INT32 [batch+1].")
@@ -156,7 +157,7 @@ def compress(
 
 
 @torch.no_grad()
-def select_blocks(
+def select_indices(
     query: torch.Tensor,
     compressed_key: torch.Tensor,
     weights: torch.Tensor,
@@ -171,7 +172,7 @@ def select_blocks(
 ) -> torch.Tensor:
     """CSA selection using cuDNN's SM100 combined score + Top-K operation.
 
-    This is the indexer, with its own projected Q/K/weights, not attention Q/KV.
+    Inputs are the indexer's projected Q/K/head weights.
     BF16 query [T,H,128], compressed_key [Tc,128], weights [T,H]; H=32 or 64.
     Full packed-sequence prefill only: causal timeline offsets start at zero.
     Returns INT32 [T,top_k] indices into compressed_key's global packed rows;
@@ -309,7 +310,7 @@ def dense_indexer_loss_backward(
     )
 
 
-def _attention_indices(
+def _prepare_sparse_indices(
     query: torch.Tensor,
     cu_seqlens: torch.Tensor,
     cu_seqlens_comp: torch.Tensor,
@@ -416,7 +417,7 @@ def sparse_attention(
     scale: Optional[float] = None,
     max_compressed_seqlen: Optional[int] = None,
 ) -> torch.Tensor:
-    """Joint local + compressed DSv4 attention with first-order autograd.
+    """Joint local + compressed sparse attention with first-order autograd.
 
     Full packed-sequence prefill: query [T,H,D], local_kv [T,D], compressed_kv
     [Tc,D], sink [H]. Q/KV have already had the model's norm/RoPE applied.
@@ -437,7 +438,7 @@ def sparse_attention(
     reading a CUDA prefix on host.
     """
     if query.ndim != 3 or query.shape[1] != 64:
-        raise ValueError("DSv4 attention requires query [T,64,D].")
+        raise ValueError("cuDNN sparse attention requires query [T,64,D].")
     if query.shape[-1] not in (512, 576):
         raise ValueError("attention head dimension must be 512 or 576.")
     if local_kv.ndim != 2 or compressed_kv.ndim != 2:
@@ -458,7 +459,7 @@ def sparse_attention(
             raise ValueError("CSA indices must be CUDA INT32 on the query device.")
     if scale is None:
         scale = query.shape[-1] ** -0.5
-    selected = _attention_indices(
+    selected = _prepare_sparse_indices(
         query,
         cu_seqlens,
         cu_seqlens_comp,

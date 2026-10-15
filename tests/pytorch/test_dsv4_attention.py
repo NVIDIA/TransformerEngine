@@ -21,7 +21,7 @@ from transformer_engine.pytorch.attention.sparse_attention import (
 @pytest.mark.parametrize("head_dim", [512, 576])
 def test_dsa_sparse_attention_forward_backward(variant, head_dim):
     if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (10, 0):
-        pytest.skip("DSv4 requires SM100")
+        pytest.skip("cuDNN sparse attention requires SM100")
     cudnn = pytest.importorskip("cudnn")
     dsa = getattr(cudnn, "DSA", None)
     if not all(
@@ -31,7 +31,7 @@ def test_dsa_sparse_attention_forward_backward(variant, head_dim):
             "sparse_attention_backward_wrapper",
         )
     ):
-        pytest.skip("DSv4 requires cuDNN Frontend 1.29 sparse attention APIs")
+        pytest.skip("cuDNN sparse attention APIs are unavailable")
     torch.manual_seed(17)
     ratio = 128 if variant == "hca" else 4
     lengths = [256, 128]
@@ -145,7 +145,7 @@ def test_dsv4_attention_rejects_fp8(monkeypatch):
 def test_dsa_triton_rope_batched_forward_backward(monkeypatch, heads):
     """The packed Triton kernels must reset positions at each BSHD sequence."""
     if not torch.cuda.is_available():
-        pytest.skip("Triton DSv4 RoPE requires CUDA")
+        pytest.skip("Triton DSA RoPE requires CUDA")
     if dsa_rope._triton_rope_module() is None:
         pytest.skip("Triton DSL is unavailable")
     torch.manual_seed(23)
@@ -189,7 +189,7 @@ def test_dsa_triton_rope_batched_forward_backward(monkeypatch, heads):
 def test_dsa_rope_non_power_of_two_forward_backward(monkeypatch):
     """An accepted width of 96 must fall back for both rotary entry points."""
     if not torch.cuda.is_available():
-        pytest.skip("DSv4 rotary dispatch requires CUDA")
+        pytest.skip("DSA rotary dispatch requires CUDA")
     if dsa_rope._triton_rope_module() is None:
         pytest.skip("Triton DSL is unavailable")
     torch.manual_seed(41)
@@ -216,7 +216,7 @@ def test_dsa_rope_non_power_of_two_forward_backward(monkeypatch):
 def test_dsa_indexer_backward(index_heads):
     """Train the standalone Indexer and its Compressor against a dense KL reference."""
     if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (10, 0):
-        pytest.skip("DSv4 requires SM100")
+        pytest.skip("cuDNN indexer training requires SM100")
     cudnn = pytest.importorskip("cudnn")
     if not all(
         hasattr(getattr(cudnn, "DSA", None), op)
@@ -226,7 +226,7 @@ def test_dsa_indexer_backward(index_heads):
             "dense_indexer_backward_wrapper",
         )
     ):
-        pytest.skip("DSv4 requires cuDNN dense indexer training APIs")
+        pytest.skip("cuDNN dense indexer training APIs are unavailable")
     torch.manual_seed(43)
     seq, ratio, window = 256, 4, 32
     layer = Indexer(32, 16, 128, index_heads, 8, ratio, 1e-6, "cuda", torch.bfloat16, fused=True)

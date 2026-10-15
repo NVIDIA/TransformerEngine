@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""DSv4 RoPE kernels copied from NVIDIA/Megatron-LM.
+"""DSA RoPE kernels copied from NVIDIA/Megatron-LM.
 
 Source: megatron/core/fusions/fused_mla_yarn_rope_apply.py at
 c4129afff4867ca89b1fb7b4b911128424cdfbe8. Kernel bodies and autotuning are

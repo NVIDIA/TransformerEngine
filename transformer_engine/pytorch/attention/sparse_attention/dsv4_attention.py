@@ -25,7 +25,7 @@ def _compiled_q_rms_norm(q: torch.Tensor, eps: float) -> torch.Tensor:
 
 
 def _packed_prefixes(hidden_states, cu_seqlens, max_seqlen, ratio):
-    """Lower packed metadata to complete-block prefixes and a safe row capacity."""
+    """Build compressed sequence prefixes and output capacity."""
     if not isinstance(cu_seqlens, torch.Tensor):
         raise ValueError("THD requires contiguous INT32 cu_seqlens_q [B+1] on the input device.")
     if (
@@ -52,19 +52,13 @@ def _packed_prefixes(hidden_states, cu_seqlens, max_seqlen, ratio):
 class DSv4Attention(torch.nn.Module):
     """DSv4 CSA/HCA attention in ``sbhd``, ``bshd``, or packed ``thd`` format.
 
-    This first-pass layer handles full-sequence BF16 attention forward/backward
-    on SM100. By default, projections that share an input use one contiguous
-    TE Linear weight and split its output before the separate DSv4 operations.
-    It uses TE Linear/RMSNorm, the cuDNN DSv4 compressor and selector, and the
-    existing parameter-free cuDNN attention core. Sequences in a batch have
-    the same length in dense formats; THD accepts unequal lengths as ``[T,D]``.
-    Every sequence starts at position zero. The model has 64 heads of width
-    512; CSA index heads have width 128, matching the current cuDNN kernels.
-    The low-level core's 576-wide Q/K mode returns only 512 value channels,
-    which has no verified output-unrotation contract here. Cache/decode,
-    physical inter-sequence padding, TP/SP/CP, FP8, sliding-only attention, and
-    the indexer auxiliary loss are unsupported. In CSA, top-k is discrete;
-    the indexer projections do not receive gradients from the returned hidden states alone.
+    Composes TE projections/norms, Compressor, Indexer, and RoPE with cuDNN
+    sparse attention. Supports full-sequence BF16 forward/backward on SM100
+    with 64 heads of width 512 and CSA index heads of width 128. Shared-input
+    projections are fused by default. Each sequence starts at position zero.
+    Cache/decode, physical inter-sequence padding, TP/SP/CP, FP8, and sliding-only
+    attention are unsupported. The model owns the indexer auxiliary loss;
+    discrete top-k selection does not train the indexer from attention output alone.
     """
 
     def __init__(
@@ -133,11 +127,10 @@ class DSv4Attention(torch.nn.Module):
             )
         else:
             self.q_a_proj = Linear(hidden_size, q_lora_rank, **kw)
+            self.kv_proj = Linear(hidden_size, head_dim, **kw)
         # LayerNormLinear would normalize before projection; DSv4 normalizes after it.
         self.q_a_norm = RMSNorm(q_lora_rank, eps=rms_norm_eps, device=device, dtype=params_dtype)
         self.q_b_proj = Linear(q_lora_rank, self.num_heads * head_dim, **kw)
-        if not _fuse_projections:
-            self.kv_proj = Linear(hidden_size, head_dim, **kw)
         self.kv_norm = RMSNorm(head_dim, eps=rms_norm_eps, device=device, dtype=params_dtype)
         self.compressor = Compressor(
             hidden_size,
@@ -200,12 +193,10 @@ class DSv4Attention(torch.nn.Module):
     ):
         """Run full self-attention and optionally expose single-sequence CSA context.
 
-        THD input/output is ``[T,D]`` and requires contiguous INT32 ``cu_seqlens_q``
-        of shape ``[B+1]`` on the input device. Prefixes start at zero and end at
-        T, without physical padding or global offsets. ``max_seqlen_q`` is a
-        required upper bound covering every sequence. Prefix contents are a caller
-        contract and are not copied to the host for validation. Dense formats
-        do not accept these metadata arguments.
+        Packed calls require contiguous INT32 ``cu_seqlens_q`` on the input
+        device and ``max_seqlen_q``. Prefixes have no padding/global offsets;
+        their contents are caller-owned and are not checked on the host.
+        These metadata arguments are accepted only for ``thd``.
         """
         packed = self.qkv_format == "thd"
         if (

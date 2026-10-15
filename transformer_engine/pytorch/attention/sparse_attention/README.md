@@ -22,7 +22,7 @@ DSv4Attention
 │   ├── TE index-query/head-weight projections
 │   ├── own Compressor (index keys)
 │   ├── dsa_rope.apply_rotary (query + index keys)
-│   └── dsa_cudnn.select_blocks -> cuDNN score + top-k
+│   └── dsa_cudnn.select_indices -> cuDNN score + top-k
 ├── dsa_rope embeddings + rotary application
 ├── dsa_cudnn.sparse_attention -> cuDNN sparse attention
 └── TE grouped output projection
@@ -51,7 +51,7 @@ if is_csa:
         ratio=ratio, overlap=True, total_comp=total_comp,
     )
     index_key = model.finish_index_key(index_pooled)
-    indices = dsa_cudnn.select_blocks(
+    indices = dsa_cudnn.select_indices(
         index_query, index_key, index_weights, cu, cu_comp,
         top_k=top_k, ratio=ratio, max_seqlen=max_seqlen,
         max_compressed_seqlen=max_compressed_seqlen,

@@ -9,7 +9,7 @@ import torch
 from transformer_engine.pytorch.module import Linear
 
 from .compressor import Compressor
-from .dsa_cudnn import select_blocks
+from .dsa_cudnn import select_indices
 from .dsa_rope import apply_rotary
 
 
@@ -95,7 +95,7 @@ class Indexer(torch.nn.Module):
         )
         # Top-k IDs are discrete; training index projections needs a separate loss.
         weights = weights.reshape(-1, self.n_heads).contiguous()
-        indices = select_blocks(
+        indices = select_indices(
             query,
             key,
             weights,

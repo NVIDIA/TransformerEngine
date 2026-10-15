@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""DSv4's trailing-channel, interleaved RoPE for full-sequence attention."""
+"""Trailing-channel, interleaved DSA RoPE for full-sequence attention."""
 
 from functools import lru_cache
 
@@ -73,7 +73,7 @@ def _apply_rotary_eager(x, cos, sin, cu_seqlens=None):
 
 @lru_cache(maxsize=1)
 def _triton_rope_module():
-    """Load the optional Triton implementation only when DSv4 can use it."""
+    """Load the optional Triton DSA RoPE implementation."""
     try:
         from transformer_engine.common.triton import dsa_rope
     except ImportError:
@@ -196,7 +196,11 @@ class _TritonQueryRotary(torch.autograd.Function):
 
 
 def _apply_rotary_query(query, cos, sin, cu_seqlens):
-    """Use the fresh query tensor as Triton output when its native path is available."""
+    """Rotate fresh normalized queries in place with Triton, avoiding a copy.
+
+    Unlike apply_rotary, this private path requires an input safe to mutate.
+    Its backward and eager fallback remain out of place.
+    """
     if not _can_use_triton(query, cos, sin, cu_seqlens):
         return _apply_rotary_eager(query, cos, sin, cu_seqlens)
     module = _triton_rope_module()
