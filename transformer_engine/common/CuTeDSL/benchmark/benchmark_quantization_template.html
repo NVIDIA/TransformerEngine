@@ -13,8 +13,7 @@
                              "points": [{"M", "time_us", "min_us", "rel_std_pct", "GB/s",
                                          "kernel"}]}]}]}
   One chart per (fusion, direction, swizzle, input, N); swizzle ("on"/"off") and input (dtype
-  name) are optional. The
-  page offers Speedup Ratio when meta.compare.
+  name) are optional. When meta.compare, each chart shows old / new time above every M.
 -->
 <html lang="en">
 <head>
@@ -25,7 +24,7 @@
   :root {
     --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
     --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,0.10);
-    --new: #2a78d6; --old: #eb6834; --ref: #898781;
+    --new: #2a78d6; --old: #eb6834;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -38,6 +37,10 @@
   body { margin: 0; background: var(--page); color: var(--ink);
          font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
   main { max-width: 1040px; margin: 0 auto; padding: 24px 16px 48px; }
+  .selection { font-size: 16px; font-weight: 600; margin: 4px 0 12px; }
+  /* All selected charts share one row (columns set from the selection); stacked on phones. */
+  .grid { display: grid; gap: 12px; grid-template-columns: repeat(var(--cols, 1), minmax(0, 1fr)); }
+  @media (max-width: 640px) { .grid { grid-template-columns: minmax(0, 1fr); } }
   h1 { font-size: 20px; margin: 0 0 4px; font-weight: 600; }
   .meta { color: var(--ink-2); font-size: 12px; margin: 0; }
   .meta code { font-size: 11px; word-break: break-all; }
@@ -51,7 +54,14 @@
                 font-size: 13px; cursor: pointer; }
   .seg button + button { border-left: 1px solid var(--border); }
   .seg button[aria-pressed="true"] { background: var(--ink); color: var(--surface); }
-  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
+  .seg button[aria-pressed="true"] + button[aria-pressed="true"] {
+    border-left-color: color-mix(in srgb, var(--surface) 35%, transparent); }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px;
+          min-width: 0; }
+  .grid.dense .card { padding: 10px; }
+  .grid.dense .legend span { white-space: normal; }
+  .shared-legend { margin: -4px 0 12px; }
+  .shared-legend:empty { display: none; }
   .chart-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 16px; }
   .chart-title { font-size: 15px; font-weight: 600; margin: 0; }
   .chart-sub { color: var(--ink-2); font-size: 12px; margin: 2px 0 0; }
@@ -63,6 +73,7 @@
   .tick { fill: var(--muted); font-size: 11px; }
   .axis-label { fill: var(--muted); font-size: 12px; }
   .end-label { fill: var(--ink-2); font-size: 11px; }
+  .speedup-label { fill: var(--ink-2); font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; }
   .tooltip { position: absolute; pointer-events: none; background: var(--surface); color: var(--ink);
              border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 12px;
              box-shadow: 0 4px 16px rgba(0,0,0,.12); min-width: 220px; display: none; z-index: 2; }
@@ -86,14 +97,19 @@
   <h1 id="title"></h1>
   <p class="meta" id="meta"></p>
   <div class="controls" id="controls"></div>
-  <section class="card">
-    <div class="chart-head">
-      <div><p class="chart-title" id="chart-title"></p><p class="chart-sub" id="chart-sub"></p></div>
-      <div class="legend" id="legend"></div>
-    </div>
-    <div class="chart" id="chart"><div class="tooltip" id="tooltip"></div></div>
-    <details><summary>Data table</summary><div class="table-wrap" id="table"></div></details>
-  </section>
+  <p class="selection" id="selection"></p>
+  <div class="legend shared-legend" id="shared-legend"></div>
+  <div class="grid" id="charts"></div>
+  <template id="card-template">
+    <section class="card">
+      <div class="chart-head">
+        <div><p class="chart-title"></p><p class="chart-sub"></p></div>
+        <div class="legend"></div>
+      </div>
+      <div class="chart"><div class="tooltip"></div></div>
+      <details><summary>Data table</summary><div class="table-wrap"></div></details>
+    </section>
+  </template>
 </main>
 <script id="data" type="application/json">/*__DATA__*/</script>
 <script>
@@ -110,10 +126,6 @@ const METRICS = {
   throughput: { label: "Throughput", axis: "throughput (GB/s)", scale: "linear",
                value: p => p["GB/s"], fmt: v => `${fmtNum(v)} GB/s` },
 };
-if (COMPARE) {
-  METRICS.speedup = { label: "Speedup Ratio", axis: "speedup (old time / new time)", scale: "linear",
-                      fmt: v => `${v.toFixed(3)}×` };
-}
 
 const uniq = xs => [...new Set(xs)];
 const state = {
@@ -121,7 +133,7 @@ const state = {
   direction: CHARTS[0].direction,
   swizzle: CHARTS[0].swizzle ?? "off",
   input: CHARTS[0].input ?? "bf16",
-  N: CHARTS[0].N,
+  Ns: uniq(CHARTS.map(c => c.N)).sort((a, b) => a - b),
   metric: "time",
 };
 const options = {
@@ -161,92 +173,127 @@ function buildControls() {
       b.type = "button";
       b.textContent = key === "metric" ? METRICS[opt].label : opt;
       b.dataset.value = opt;
-      b.addEventListener("click", () => { state[key] = key === "N" ? Number(opt) : opt; update(); });
+      b.addEventListener("click", () => select(key, opt));
       seg.appendChild(b);
     }
     ctl.appendChild(seg);
     box.appendChild(ctl);
   }
 }
+function select(key, opt) {
+  if (key === "N") {  // toggles; one chart per selected N, at least one
+    const n = Number(opt);
+    if (!state.Ns.includes(n)) state.Ns = [...state.Ns, n].sort((a, b) => a - b);
+    else if (state.Ns.length > 1) state.Ns = state.Ns.filter(v => v !== n);
+  } else {
+    state[key] = opt;
+  }
+  update();
+}
 function syncControls() {
   for (const seg of document.querySelectorAll(".seg")) {
     const key = seg.dataset.key;
-    for (const b of seg.children) b.setAttribute("aria-pressed", String(b.dataset.value === String(state[key])));
+    for (const b of seg.children) {
+      const on = key === "N" ? state.Ns.includes(Number(b.dataset.value)) : b.dataset.value === String(state[key]);
+      b.setAttribute("aria-pressed", String(on));
+    }
   }
 }
 
 // ---- data for the current selection ------------------------------------------------
-function currentChart() {
+function chartFor(n) {
   return CHARTS.find(c => c.fusion === state.fusion && c.direction === state.direction
-    && (c.swizzle ?? "off") === state.swizzle && (c.input ?? "bf16") === state.input && c.N === state.N);
+    && (c.swizzle ?? "off") === state.swizzle && (c.input ?? "bf16") === state.input && c.N === n);
 }
 function seriesFor(chart) {
-  if (state.metric !== "speedup") {
-    const m = METRICS[state.metric];
-    return chart.series.map(s => ({ name: s.name, role: s.role,
-      pts: s.points.map(p => ({ x: p.M, y: m.value(p), p })) }));
-  }
+  const m = METRICS[state.metric];
+  return chart.series.map(s => ({ name: s.name, role: s.role,
+    pts: s.points.map(p => ({ x: p.M, y: m.value(p), p })) }));
+}
+// Old time / new time at every M both runs have.
+function speedupPoints(chart) {
   const old = chart.series.find(s => s.role === "old"), nw = chart.series.find(s => s.role === "new");
   const byM = new Map(old.points.map(p => [p.M, p]));
-  const pts = nw.points.filter(p => byM.has(p.M))
+  return nw.points.filter(p => byM.has(p.M))
     .map(p => ({ x: p.M, y: byM.get(p.M).time_us / p.time_us, p, old: byM.get(p.M) }));
-  return [{ name: "new vs old", role: "new", pts }];
 }
 
 // ---- scales ----------------------------------------------------------------------------
-function niceLinearTicks(lo, hi, count = 5) {
+function niceLinearTicks(lo, hi, count = 10) {
   const step0 = (hi - lo) / count, mag = 10 ** Math.floor(Math.log10(step0));
   const step = [1, 2, 2.5, 5, 10].map(f => f * mag).find(s => s >= step0);
   const ticks = [];
   for (let v = Math.ceil(lo / step) * step; v <= hi + step * 1e-9; v += step) ticks.push(+v.toFixed(10));
   return ticks;
 }
-function logTicks(lo, hi) {
-  const ticks = [];
-  for (let e = Math.floor(Math.log10(lo)); e <= Math.ceil(Math.log10(hi)); e++)
-    for (const f of [1, 2, 5]) { const v = f * 10 ** e; if (v >= lo && v <= hi) ticks.push(v); }
+function logTicks(lo, hi, maxTicks = 12) {
+  // The densest mantissa set that still fits maxTicks labels.
+  let ticks = [];
+  for (const fs of [[1, 2, 3, 4, 5, 6, 7, 8, 9], [1, 2, 3, 5, 7], [1, 2, 5], [1]]) {
+    ticks = [];
+    for (let e = Math.floor(Math.log10(lo)); e <= Math.ceil(Math.log10(hi)); e++)
+      for (const f of fs) { const v = f * 10 ** e; if (v >= lo && v <= hi) ticks.push(v); }
+    if (ticks.length <= maxTicks) break;
+  }
   return ticks;
 }
 function yDomain(values, scale) {
   let lo = Math.min(...values), hi = Math.max(...values);
   if (scale === "log") return [lo / 1.15, hi * 1.15];
-  if (state.metric === "speedup") { lo = Math.min(lo, 1); hi = Math.max(hi, 1); const pad = (hi - lo) * 0.15 || 0.05; return [lo - pad, hi + pad]; }
   return [0, hi * 1.1];
 }
 
 // ---- render ----------------------------------------------------------------------------
+function selectionTitle() {
+  const fusion = state.fusion.includes("act") && META.activation
+    ? `${state.fusion}(${META.activation})` : state.fusion;
+  return [state.input, fusion, state.direction, ...(state.swizzle === "on" ? ["swizzled scale"] : [])]
+    .join(" · ");
+}
 function render() {
-  const chart = currentChart();
-  const host = document.getElementById("chart");
-  const tooltip = document.getElementById("tooltip");
+  document.getElementById("selection").textContent =
+    `${METRICS[state.metric].label} — ${selectionTitle()}`;
+  const grid = document.getElementById("charts");
+  grid.innerHTML = "";
+  grid.style.setProperty("--cols", state.Ns.length);
+  const first = state.Ns.map(chartFor).find(Boolean);
+  document.getElementById("shared-legend").innerHTML = state.Ns.length > 1 && first ? legendHtml(first) : "";
+  grid.classList.toggle("dense", state.Ns.length > 2);
+  const template = document.getElementById("card-template");
+  for (const n of state.Ns) {
+    grid.appendChild(template.content.cloneNode(true));
+    drawCard(grid.lastElementChild, n);
+  }
+}
+function legendHtml(chart) {
+  let html = chart.series.length > 1 ? chart.series.map(s => `<span>${swatch(s.role)}${s.name}</span>`).join("") : "";
+  if (COMPARE) html += `<span><b>1.05×</b> above the plot = speedup (old / new time)</span>`;
+  return html;
+}
+function drawCard(card, n) {
+  const chart = chartFor(n);
+  const host = card.querySelector(".chart");
+  const tooltip = card.querySelector(".tooltip");
   host.querySelector("svg")?.remove();
   host.querySelector(".empty")?.remove();
   tooltip.style.display = "none";
   const metric = METRICS[state.metric];
-  const fusion = state.fusion.includes("act") && META.activation
-    ? `${state.fusion}(${META.activation})` : state.fusion;
-  const title = [state.input, fusion, state.direction, ...(state.swizzle === "on" ? ["swizzled scale"] : []), `N=${state.N}`]
-    .join(" · ");
-  document.getElementById("chart-title").textContent = `${metric.label} — ${title}`;
-  document.getElementById("chart-sub").textContent = chart ? chart.subtitle : "";
-  const legend = document.getElementById("legend");
-  legend.innerHTML = "";
+  const title = `${selectionTitle()} · N=${n}`;
+  card.querySelector(".chart-title").textContent = `N=${n}`;
+  card.querySelector(".chart-sub").textContent = chart ? chart.subtitle : "";
+  // With several charts the legend is shown once above the grid instead of in every card.
+  card.querySelector(".legend").innerHTML = state.Ns.length === 1 && chart ? legendHtml(chart) : "";
   if (!chart) {
     host.insertAdjacentHTML("beforeend", `<div class="empty">This combination was not benchmarked.</div>`);
-    document.getElementById("table").innerHTML = "";
+    card.querySelector(".table-wrap").innerHTML = "";
     return;
   }
   const series = seriesFor(chart);
-  if (series.length > 1) {
-    for (const s of series) {
-      legend.insertAdjacentHTML("beforeend",
-        `<span><svg width="22" height="8"><line x1="1" y1="4" x2="21" y2="4" stroke="var(--${s.role})"
-          stroke-width="2" ${s.role === "old" ? 'stroke-dasharray="5 3"' : ""}/></svg>${s.name}</span>`);
-    }
-  }
 
-  const W = Math.max(320, host.clientWidth), H = Math.round(Math.min(440, Math.max(260, W * 0.5)));
-  const m = { top: 12, right: 56, bottom: 40, left: 64 };
+  const W = Math.max(160, host.clientWidth), H = Math.round(Math.min(420, Math.max(200, W * 0.7)));
+  const narrow = W < 420;
+  // Comparisons get a strip above the plot with the speedup at each M.
+  const m = { top: COMPARE ? 30 : 12, right: narrow ? 34 : 56, bottom: 40, left: narrow ? 46 : 64 };
   const iw = W - m.left - m.right, ih = H - m.top - m.bottom;
   const xs = uniq(series.flatMap(s => s.pts.map(p => p.x))).sort((a, b) => a - b);
   const ys = series.flatMap(s => s.pts.map(p => p.y)).filter(v => v != null && v > 0);
@@ -260,25 +307,33 @@ function render() {
   const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img",
                           "aria-label": `${metric.label} vs M, ${title}` });
   host.insertBefore(svg, tooltip);
-  let yt = metric.scale === "log" ? logTicks(y0, y1) : niceLinearTicks(y0, y1);
-  if (yt.length < 3) yt = niceLinearTicks(y0, y1).filter(t => t > 0);  // narrow log range
+  const maxYTicks = Math.max(3, Math.floor(ih / 18));  // fewer labels on short charts
+  let yt = metric.scale === "log" ? logTicks(y0, y1, maxYTicks) : niceLinearTicks(y0, y1, Math.min(10, maxYTicks));
+  if (yt.length < 3) yt = niceLinearTicks(y0, y1, Math.min(10, maxYTicks)).filter(t => t > 0);  // narrow log range
   for (const t of yt) {
     el("line", { x1: m.left, x2: m.left + iw, y1: Y(t), y2: Y(t), stroke: "var(--grid)", "stroke-width": 1 }, svg);
     el("text", { x: m.left - 8, y: Y(t), class: "tick", "text-anchor": "end", "dominant-baseline": "middle" }, svg)
-      .textContent = state.metric === "speedup" ? `${t.toFixed(2)}×` : fmtNum(t);
+      .textContent = fmtNum(t);
   }
+  // Label every `step`-th M (and its speedup) so labels never overlap on narrow charts.
+  const step = xs.length > 1 ? Math.ceil(40 / (iw / (xs.length - 1))) : 1;
+  const labelled = x => xs.indexOf(x) % step === 0;
   for (const x of xs) {
     el("line", { x1: X(x), x2: X(x), y1: m.top, y2: m.top + ih, stroke: "var(--grid)", "stroke-width": 1 }, svg);
-    el("text", { x: X(x), y: m.top + ih + 18, class: "tick", "text-anchor": "middle" }, svg).textContent = x;
+    if (labelled(x)) {
+      el("text", { x: X(x), y: m.top + ih + 18, class: "tick", "text-anchor": "middle" }, svg).textContent = x;
+    }
+  }
+  if (COMPARE) {
+    for (const pt of speedupPoints(chart).filter(p => labelled(p.x))) {
+      el("text", { x: X(pt.x), y: m.top - 12, class: "speedup-label", "text-anchor": "middle" }, svg)
+        .textContent = `${pt.y.toFixed(2)}×`;
+    }
   }
   el("line", { x1: m.left, x2: m.left + iw, y1: m.top + ih, y2: m.top + ih, stroke: "var(--axis)" }, svg);
   el("text", { x: m.left + iw / 2, y: H - 4, class: "axis-label", "text-anchor": "middle" }, svg).textContent = "M";
   el("text", { x: 14, y: m.top + ih / 2, class: "axis-label", "text-anchor": "middle",
                transform: `rotate(-90 14 ${m.top + ih / 2})` }, svg).textContent = metric.axis;
-  if (state.metric === "speedup") {
-    el("line", { x1: m.left, x2: m.left + iw, y1: Y(1), y2: Y(1), stroke: "var(--ref)",
-                 "stroke-dasharray": "2 3", "stroke-width": 1 }, svg);
-  }
 
   const markers = [];
   const ends = [];
@@ -322,7 +377,7 @@ function render() {
     tooltip.style.display = "none";
   });
 
-  renderTable(chart);
+  renderTable(chart, card.querySelector(".table-wrap"));
 }
 
 function swatch(role) {
@@ -336,17 +391,6 @@ function detail(p) {
 }
 function tooltipHtml(series, x) {
   let html = `<div class="h">M = ${x}</div>`;
-  if (state.metric === "speedup") {
-    const pt = series[0].pts.find(p => p.x === x);
-    if (!pt) return html;
-    const byRole = Object.fromEntries(currentChart().series.map(s => [s.role, s.name]));
-    html += `<div class="row"><span></span><span>speedup</span><span class="v">${pt.y.toFixed(3)}×</span></div>`;
-    for (const [role, p] of [["old", pt.old], ["new", pt.p]]) {
-      html += `<div class="row">${swatch(role)}<span>${byRole[role]}</span><span></span>`
-            + `<span class="detail">${detail(p)}</span></div>`;
-    }
-    return html;
-  }
   const metric = METRICS[state.metric];
   for (const s of series) {
     const pt = s.pts.find(p => p.x === x);
@@ -365,7 +409,7 @@ function tooltipHtml(series, x) {
   return html;
 }
 
-function renderTable(chart) {
+function renderTable(chart, target) {
   const cols = ["time_us", "min_us", "rel_std_pct", "GB/s", "kernel"];
   const head = chart.series.length > 1
     ? chart.series.map(s => cols.map(c => `<th>${s.role} ${c}</th>`).join("")).join("") : cols.map(c => `<th>${c}</th>`).join("");
@@ -374,7 +418,7 @@ function renderTable(chart) {
     const p = s.points.find(q => q.M === M) || {};
     return cols.map(c => `<td>${typeof p[c] === "number" ? fmtNum(p[c]) : (p[c] ?? "–")}</td>`).join("");
   }).join("") + "</tr>").join("");
-  document.getElementById("table").innerHTML = `<table><thead><tr><th>M</th>${head}</tr></thead><tbody>${rows}</tbody></table>`;
+  target.innerHTML = `<table><thead><tr><th>M</th>${head}</tr></thead><tbody>${rows}</tbody></table>`;
 }
 
 function update() { syncControls(); render(); }
