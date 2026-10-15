@@ -5,9 +5,9 @@
 """Helpers for driving cuDNN frontend's Python graph API from PyTorch.
 
 Shared by flex_attention.py and frost_attention.py: importing the frontend, holding a handle per
-device, describing tensors in cuDNN's BHSD form, and building and planning the SDPA forward and
-backward graphs. Anything specific to one backend, such as a mask, a score_mod or which engine
-to pin, is passed in by the caller.
+device, describing tensors in cuDNN's BHSD form, building and planning the SDPA forward and
+backward graphs, and caching them. Anything specific to one backend, such as a mask, a score_mod
+or which engine to pin, is passed in by the caller.
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ _BAR_FROST_BY_DEFAULT = object()
 _cudnn = None
 _frost_engines_enabled = False
 _CUDNN_HANDLES: Dict[Tuple[str, torch.device], Any] = {}
+_GRAPH_CACHE: Dict[Tuple[str, Any], Any] = {}
 
 
 def import_cudnn_frontend(enable_frost_engines: bool = False):
@@ -177,13 +178,15 @@ def bhsd_tensor_spec(
     return (tuple(dim), tuple(stride), tensor.dtype)
 
 
-def cached_graph(cache: Dict[Any, Any], key: Optional[Any], build, *, device=None):
+def cached_graph(backend_name: str, key: Optional[Any], build, *, device=None):
     """Memoize a built graph. ``key=None`` means uncacheable: build, return, do not store.
 
+    Keyed by ``backend_name`` as well, so two backends' keys cannot collide in the one cache.
     Built under ``device``, not merely with its handle: the plans are JIT-compiled and a compile
     path may read the ambient CUDA context.
     """
-    entry = None if key is None else cache.get(key)
+    key = None if key is None else (backend_name, key)
+    entry = None if key is None else _GRAPH_CACHE.get(key)
     if entry is None:
         scope = (
             torch.cuda.device(device)
@@ -193,8 +196,13 @@ def cached_graph(cache: Dict[Any, Any], key: Optional[Any], build, *, device=Non
         with scope:
             entry = build()
         if key is not None:
-            cache[key] = entry
+            _GRAPH_CACHE[key] = entry
     return entry
+
+
+def clear_graph_cache() -> None:
+    """Drop every cached graph, so a test can force a rebuild. Covers both backends."""
+    _GRAPH_CACHE.clear()
 
 
 def finalize_plans(

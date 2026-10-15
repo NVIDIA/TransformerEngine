@@ -469,19 +469,14 @@ def test_frost_engines_are_enabled_even_if_cudnn_was_imported_without_them():
     in fact fine.
 
     No GPU and no real cuDNN: a stub stands in for the package, because what is under test is the
-    order-dependence of our own wrapper. It also has to run in-process with the globals reset,
+    order-dependence of the shared import helper. It also runs in-process with the globals reset,
     since the real order is decided once per process and pytest gives us no second one.
     """
     import sys
     import types
 
-    from transformer_engine.pytorch.attention.dot_product_attention import (
-        cudnn_pygraph,
-        frost_attention,
-    )
+    from transformer_engine.pytorch.attention.dot_product_attention import cudnn_pygraph
 
-    # The import memo and the switch live in the shared module; frost's wrapper only supplies the
-    # default. Drive it through the wrapper, which is the real entry, and assert on the owner.
     env = "CUDNN_FRONTEND_ENABLE_FROST_ENGINES"
     saved = (
         cudnn_pygraph._cudnn,
@@ -500,13 +495,13 @@ def test_frost_engines_are_enabled_even_if_cudnn_was_imported_without_them():
         os.environ.pop(env, None)
 
         # The availability probe first, which must not enable anything.
-        frost_attention._import_cudnn_frontend(enable_frost_engines=False)
+        cudnn_pygraph.import_cudnn_frontend(enable_frost_engines=False)
         assert env not in os.environ, "the non-FROST caller must not set the switch"
         assert not cudnn_pygraph._frost_engines_enabled
 
         # A use site second, on an already-imported cuDNN. This is the case that used to be
         # skipped.
-        frost_attention._import_cudnn_frontend(enable_frost_engines=True)
+        cudnn_pygraph.import_cudnn_frontend(enable_frost_engines=True)
         assert os.environ.get(env) == "1", "FROST was requested after the import and not enabled"
         assert cudnn_pygraph._frost_engines_enabled
     finally:
@@ -539,13 +534,10 @@ def test_pinned_plan_decline_reports_the_engine_reason():
 
     No GPU: a stub graph stands in, raising the real cuDNN exception type.
     """
-    from transformer_engine.pytorch.attention.dot_product_attention import (
-        cudnn_pygraph,
-        frost_attention,
-    )
+    from transformer_engine.pytorch.attention.dot_product_attention import cudnn_pygraph
 
     try:
-        cudnn = frost_attention._import_cudnn_frontend()
+        cudnn = cudnn_pygraph.import_cudnn_frontend(enable_frost_engines=True)
     except ImportError:
         pytest.skip("cuDNN frontend Python package is required for the decline-reason path.")
 

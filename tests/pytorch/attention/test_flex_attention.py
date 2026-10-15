@@ -29,7 +29,7 @@ def _flex_availability():
     if not torch.cuda.is_available():
         return "no CUDA device"
     try:
-        flex_attention._import_cudnn_frontend()
+        cudnn_pygraph.import_cudnn_frontend()
     except ImportError as exc:
         return "nvidia-cudnn-frontend not importable: %s" % exc
     return None
@@ -47,7 +47,7 @@ if torch.cuda.is_available() and is_bf16_available():
 
 def _score_mod_causal(score_mod_graph, score_tensor, tensors):
     """cuDNN frontend score_mod implementing top-left causal masking."""
-    cudnn = flex_attention._import_cudnn_frontend()
+    cudnn = cudnn_pygraph.import_cudnn_frontend()
 
     row_index = score_mod_graph.gen_index(input=score_tensor, axis=2)
     row_index.set_data_type(cudnn.data_type.INT32)
@@ -68,7 +68,7 @@ def _score_mod_causal(score_mod_graph, score_tensor, tensors):
 
 def _score_mod_causal_bprop(score_mod_graph, dP_tensor, tensors):
     """cuDNN frontend score_mod_bprop implementing top-left causal masking."""
-    cudnn = flex_attention._import_cudnn_frontend()
+    cudnn = cudnn_pygraph.import_cudnn_frontend()
 
     row_index = score_mod_graph.gen_index(input=dP_tensor, axis=2)
     row_index.set_data_type(cudnn.data_type.INT32)
@@ -89,7 +89,7 @@ def _score_mod_causal_bprop(score_mod_graph, dP_tensor, tensors):
 
 def _score_mod_post_scale_bias(score_mod_graph, score_tensor, _tensors):
     """cuDNN frontend score_mod adding post-scale bias."""
-    cudnn = flex_attention._import_cudnn_frontend()
+    cudnn = cudnn_pygraph.import_cudnn_frontend()
 
     row_index = score_mod_graph.gen_index(input=score_tensor, axis=2)
     row_index.set_data_type(cudnn.data_type.INT32)
@@ -125,7 +125,7 @@ class _ScoreModSoftcap:
 
     def forward(self, score_mod_graph, score_tensor, tensors):
         """Apply softcap * tanh(score / softcap)."""
-        cudnn = flex_attention._import_cudnn_frontend()
+        cudnn = cudnn_pygraph.import_cudnn_frontend()
 
         self.before_tanh_activation = score_mod_graph.div(
             a=score_tensor,
@@ -143,7 +143,7 @@ class _ScoreModSoftcap:
 
     def backward(self, score_mod_graph, dP_tensor, tensors):
         """Apply softcap derivative to dP."""
-        cudnn = flex_attention._import_cudnn_frontend()
+        cudnn = cudnn_pygraph.import_cudnn_frontend()
 
         d_tanh_out = score_mod_graph.mul(
             a=dP_tensor,
@@ -285,7 +285,7 @@ def test_score_mod_cache_key_ignores_pass_by_value_values():
 def test_score_mod_cache_fwd_reuses_graph_for_pass_by_value_changes(monkeypatch):
     """Fprop graph cache should reuse entries when only scalar CPU tensor values change."""
     q, k, v, o, stats = _score_mod_cache_cpu_inputs()
-    cache = flex_attention._cudnn_score_mod_graph_cache
+    cache = cudnn_pygraph._GRAPH_CACHE
     saved_cache = dict(cache)
     build_entries = []
 
@@ -379,7 +379,7 @@ def test_score_mod_cache_fwd_skips_cache_for_unkeyed_bound_method(monkeypatch):
 
     q, k, v, o, stats = _score_mod_cache_cpu_inputs()
     score_mod = UnkeyedScoreMod()
-    cache = flex_attention._cudnn_score_mod_graph_cache
+    cache = cudnn_pygraph._GRAPH_CACHE
     saved_cache = dict(cache)
     build_entries = []
 
@@ -442,7 +442,7 @@ def test_score_mod_cache_fwd_skips_cache_for_unkeyed_bound_method(monkeypatch):
             o,
             stats,
         )
-        assert len(cache) == 0
+        assert not [k for k in cache if k[0] == flex_attention._BACKEND_NAME]
     finally:
         cache.clear()
         cache.update(saved_cache)
@@ -570,7 +570,7 @@ def _pytorch_softcap_attention(q, k, v, qkv_format, softmax_scale, softcap):
 def test_dot_product_attention_score_mod(dtype, qkv_format, score_mod_case, scalar_loss):
     """Compare score_mod attention against equivalent reference implementations."""
     try:
-        flex_attention._import_cudnn_frontend()
+        cudnn_pygraph.import_cudnn_frontend()
     except ImportError:
         pytest.skip("cuDNN frontend Python package is required for score_mod attention.")
     if score_mod_case == "softcap" and get_device_compute_capability() < (9, 0):
@@ -725,7 +725,7 @@ def test_dot_product_attention_score_mod(dtype, qkv_format, score_mod_case, scal
     torch.testing.assert_close(v.grad, v_ref.grad, **tols)
 
 
-def test_flex_bars_the_frost_engines():
+def test_flex_bars_the_frost_engines(monkeypatch):
     """flex must tell cuDNN not to use a FROST engine, not merely decline to ask for them.
 
     The switch that offers those engines is process-wide, so another caller in the process, or a
@@ -733,15 +733,15 @@ def test_flex_bars_the_frost_engines():
     these graphs too. They accept a score_mod graph, pass check_support, build, and then compute
     without the callback.
 
-    The bar is the shared helper's default rather than something flex asks for, so this checks
-    flex's own path reaches it: a caller that forgot to opt in is the failure being prevented.
+    Two halves: the shared helper bars them by default, and flex does not override that default.
+    Both are checked here, because flex's real graphs reach the bar only through the default.
 
     No GPU: this checks the instruction is passed, not what cuDNN does with it.
     """
     barred = []
 
     class FakeGraph:
-        """Records the engines flex bars, and stops at the first call it cannot serve."""
+        """Records the engines barred, and stops at the first call it cannot serve."""
 
         def validate(self):
             pass
@@ -765,13 +765,30 @@ def test_flex_bars_the_frost_engines():
             return 4096
 
     try:
-        flex_attention._import_cudnn_frontend()
+        cudnn_pygraph.import_cudnn_frontend()
     except ImportError:
         pytest.skip("cuDNN frontend Python package is required for score_mod attention.")
 
-    assert flex_attention._finalize_cudnn_graph(FakeGraph()) == 4096
-    assert barred, "flex did not ask cuDNN to exclude any engine"
+    workspace_size, _ = cudnn_pygraph.finalize_plans(FakeGraph(), backend_name="FlexAttention")
+    assert workspace_size == 4096
+    assert barred, "the shared default did not ask cuDNN to exclude any engine"
     assert set(cudnn_pygraph.FROST_PLAN_TOKENS) <= set(barred), barred
+
+    # The other half: flex must not pass exclude_plan_tokens of its own, which would replace the
+    # default rather than add to it.
+    passed = {}
+
+    def record(**kwargs):
+        passed.update(kwargs)
+        keys = ("graph", "q", "k", "v", "out", "stats", "workspace")
+        return {**dict.fromkeys(keys), "aux": {"score_mod": None}}
+
+    monkeypatch.setattr(cudnn_pygraph, "build_fwd", record)
+    q, k, v, o, _ = _score_mod_cache_cpu_inputs()
+    flex_attention._build_cudnn_score_mod_fwd_graph(
+        False, q, k, v, "bshd", "bshd", 0.125, _score_mod_post_scale_bias, None, o, None
+    )
+    assert "exclude_plan_tokens" not in passed, passed["exclude_plan_tokens"]
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required.")
@@ -784,7 +801,7 @@ def test_frost_switch_does_not_change_what_flex_computes():
     and no knowledge of which plan ran; if the two differ, a different kernel answered.
     """
     try:
-        flex_attention._import_cudnn_frontend()
+        cudnn_pygraph.import_cudnn_frontend()
     except ImportError:
         pytest.skip("cuDNN frontend Python package is required for score_mod attention.")
     # Without this the test is vacuous: if the engines are absent, decline on arch, or sit below
@@ -806,7 +823,7 @@ def test_frost_switch_does_not_change_what_flex_computes():
     q, k, v = (torch.randn(b, s, h, d, device="cuda", dtype=dtype) for _ in range(3))
 
     def run():
-        flex_attention._cudnn_score_mod_graph_cache.clear()
+        cudnn_pygraph.clear_graph_cache()
         return flex_attention.FusedAttentionWithScoreModFunc.apply(
             False,
             q,
@@ -828,7 +845,7 @@ def test_frost_switch_does_not_change_what_flex_computes():
         os.environ[env] = "1"
         with_engines = run()
     finally:
-        flex_attention._cudnn_score_mod_graph_cache.clear()
+        cudnn_pygraph.clear_graph_cache()
         if saved is None:
             os.environ.pop(env, None)
         else:

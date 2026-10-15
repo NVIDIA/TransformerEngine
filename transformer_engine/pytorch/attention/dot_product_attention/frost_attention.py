@@ -30,9 +30,7 @@ __all__ = [
 
 # cudnn-frontend declares cutlass-dsl >= 4.6.2 but FROST enforces >= 4.7.0 at plan-build time.
 # Below that floor every FROST engine declines silently and backend plans come back instead, so
-# the selected plan is checked by NAME rather than trusting that the engine was used.
-# Defined in cudnn_pygraph so the pin here and the bar in flex_attention cannot name different
-# engines: one of them failing loudly and the other silently is exactly the drift to avoid.
+# the selected plan is checked by name rather than trusted.
 _FROST_FWD_PLAN_TOKEN, _FROST_BWD_PLAN_TOKEN = cudnn_pygraph.FROST_PLAN_TOKENS
 _MIN_CUTLASS_DSL = PkgVersion("4.7.0")
 
@@ -51,22 +49,12 @@ _HEAD_DIM_MULTIPLE = 8
 
 _BACKEND_NAME = "FrostAttention"
 _availability: Optional[Tuple[bool, str]] = None
-_PLAN_CACHE: dict = {}
-
-
-def _import_cudnn_frontend(enable_frost_engines: bool = True):
-    """Import cuDNN Frontend with the FROST engines on, which is what this backend needs.
-
-    The shared default is off; every use site here wants them. See
-    ``cudnn_pygraph.import_cudnn_frontend``.
-    """
-    return cudnn_pygraph.import_cudnn_frontend(enable_frost_engines=enable_frost_engines)
 
 
 def is_frost_attention_available() -> Tuple[bool, str]:
     """Whether the FROST kernels can be used at all, with a reason when they cannot.
 
-    Cached, because this is consulted on every backend-selection call.
+    Cached, because selection consults it for every config that resolves to FROST.
     """
     global _availability
     if _availability is not None:
@@ -81,7 +69,7 @@ def is_frost_attention_available() -> Tuple[bool, str]:
         return _no("no CUDA device")
     if os.environ.get("CUDNN_FRONTEND_ENABLE_FROST_ENGINES", "1") == "0":
         # Explicitly switched off. Declining here is the difference between falling back cleanly
-        # and raising from _frost_plan_args once a plan is built.
+        # and raising from finalize_plans when no plan carrying the FROST token is offered.
         return _no("CUDNN_FRONTEND_ENABLE_FROST_ENGINES=0 disables the FROST engines")
     if torch.cuda.get_device_capability() not in _SUPPORTED_ARCHS:
         major, minor = torch.cuda.get_device_capability()
@@ -89,12 +77,12 @@ def is_frost_attention_available() -> Tuple[bool, str]:
     try:
         # Without the engines: this only reads a version, and enabling reorders plan selection
         # process-wide even when the checks below decline. The use sites enable it.
-        frontend_module = _import_cudnn_frontend(enable_frost_engines=False)
+        frontend_module = cudnn_pygraph.import_cudnn_frontend(enable_frost_engines=False)
     except ImportError as exc:
         return _no(f"nvidia-cudnn-frontend not importable: {exc}")
 
     # Decline only on positive evidence: a version below a floor, or a package absent outright.
-    # An unparseable version defers to _frost_plan_args, which checks the plan by name.
+    # An unparseable version defers to the plan pin, which checks the engine by name.
     frontend, frontend_raw = cudnn_pygraph.pkg_version("nvidia-cudnn-frontend", frontend_module)
     if frontend is not None and frontend < _MIN_CUDNN_FRONTEND:
         return _no(
@@ -130,10 +118,9 @@ _NO_WINDOW = (-1, -1)
 def _window_pair(window_size) -> Tuple[int, int]:
     """Normalise window_size to a (left, right) pair, declining anything that is not one.
 
-    Its own function because _te_mask_spec unpacks the window before _mask_spec ever sees it, so
-    leaving these two guards inside _mask_spec left them dead on the fused path. Raised as
-    NotImplementedError so the selector declines, that being the only thing
-    is_frost_attention_supported catches; a TypeError would escape backend selection instead.
+    Guarded here and not in _mask_spec, since _te_mask_spec unpacks the window first. Raised as
+    NotImplementedError because that is the only exception is_frost_attention_supported catches;
+    a TypeError would escape backend selection.
     """
     if window_size is None:
         return _NO_WINDOW
@@ -183,7 +170,6 @@ def _qkv_format_from_layout(qkv_layout: str) -> str:
             f"FROST attention needs q, k and v in one format; got qkv_layout {qkv_layout!r}"
         )
     qkv_format = formats.pop()
-    # Carried over from the permute helper this replaced, so the thd decline keeps its reason.
     if qkv_format not in _SUPPORTED_QKV_FORMATS:
         raise NotImplementedError(
             f"FROST attention supports qkv_format in {_SUPPORTED_QKV_FORMATS}; got"
@@ -235,11 +221,9 @@ def is_frost_attention_supported(params) -> Tuple[int, str]:
     """Whether this fused-attention config should run on the FROST sub-backend.
 
     Returns (sub-backend value, reject message) like tex.get_fused_attn_backend, so
-    get_attention_backend can fall through to it when the C++ backends decline.
-
-    Deliberately does not probe availability: that imports cuDNN Frontend with the FROST engines
-    enabled, which changes the engine pool for every cuDNN consumer in the process, and this runs
-    for every attention config. get_attention_backend checks availability once at the end.
+    get_attention_backend can fall through to it when the C++ backends decline. Does not probe
+    availability, which would enable the FROST engines process-wide; get_attention_backend does
+    that once at the end.
     """
     # pylint: disable-next=import-outside-toplevel
     from ...cpp_extensions.fused_attn import (
@@ -272,7 +256,7 @@ def is_frost_attention_supported(params) -> Tuple[int, str]:
             )
     # The rule is the backward engine's, not this range's. sdpa_bwd_sm100 is the only f16 FROST
     # backward on SM100/SM103 and leaves dqk_ge_dv unset, which cuDNN reads as requiring
-    # d_qk == d_v at every head dim. The forward serves 192/128 here, so only the backward binds.
+    # d_qk == d_v at every head dim. The forward engine would serve 192/128, so only it binds.
     if params.head_dim_qk != params.head_dim_v:
         # Declined for both directions, since is_training follows module.training and eval()
         # leaves autograd on, so an eval-mode call is no promise that no backward follows.
@@ -346,8 +330,7 @@ def is_frost_attention_supported(params) -> Tuple[int, str]:
         and params.max_seqlen_q != params.max_seqlen_kv
     ):
         # Such a window takes its anchor only from bottom_right_diagonal, which defaults to
-        # top-left, while the all-gather ring measures its window bottom-right. Decline rather
-        # than guess which was meant.
+        # top-left, while the all-gather ring measures its window bottom-right.
         return (
             no_backend,
             (
@@ -362,7 +345,7 @@ def is_frost_attention_supported(params) -> Tuple[int, str]:
 def _check_dtype(name: str, t: torch.Tensor, expected: torch.dtype) -> None:
     """Require a tensor to carry the dtype its graph node was declared with.
 
-    ``dout`` matters most: it arrives from autograd and is not this module's to control.
+    ``d_o`` matters most: it arrives from autograd and is not this module's to control.
     """
     if t.dtype != expected:
         raise ValueError(f"{name} must be {expected} to match q; got {t.dtype}")
@@ -371,8 +354,7 @@ def _check_dtype(name: str, t: torch.Tensor, expected: torch.dtype) -> None:
 def _check_kv_match(k: torch.Tensor, v: torch.Tensor) -> None:
     """Require v to agree with k on batch, heads and sequence length.
 
-    head_dim is free, since v has its own graph node and its own cache-key entry. The other
-    three index the same KV positions as k by definition.
+    head_dim is free: v has its own graph node and its own cache-key entry.
     """
     if tuple(k.shape[:3]) != tuple(v.shape[:3]):
         raise ValueError(
@@ -405,12 +387,11 @@ def _o_shape_stride(shape, d_v, ref_strides):
 def _frost_plan_args(token: str, what: str) -> dict:
     """Plan arguments that pin an engine whose name proves FROST was chosen.
 
-    A too-old nvidia-cutlass-dsl makes the FROST engines decline silently, and in the forward an
-    ordinary engine may then build and compute something else. The pin turns that into a named
-    error at the first forward rather than a wrong number.
+    Without the pin a too-old nvidia-cutlass-dsl lets an ordinary forward engine build and
+    compute something else silently, instead of raising at the first forward.
     """
 
-    cudnn = _import_cudnn_frontend()
+    cudnn = cudnn_pygraph.import_cudnn_frontend(enable_frost_engines=True)
 
     # Both versions, because either floor can cause this and blaming one misdirects. Looked up
     # defensively: this explains a failure, so it must not raise itself.
@@ -432,7 +413,7 @@ def _frost_plan_args(token: str, what: str) -> dict:
 
 def _build_fwd(key, device) -> dict:
     """Build (and JIT-compile) a forward graph. Expensive; always reached through the cache."""
-    cudnn = _import_cudnn_frontend()
+    cudnn = cudnn_pygraph.import_cudnn_frontend(enable_frost_engines=True)
     # deterministic is unused here: it selects a backward algorithm. Callers pass False for the
     # forward so the two never split the forward cache.
     _dev, (shq, qs, dtype), (shk, ks, _), (shv, vs, _), mask, scale, _deterministic = key
@@ -457,7 +438,7 @@ def _build_fwd(key, device) -> dict:
 
 def _build_bwd(key, device) -> dict:
     """Build (and JIT-compile) a backward graph. Expensive; always reached through the cache."""
-    cudnn = _import_cudnn_frontend()
+    cudnn = cudnn_pygraph.import_cudnn_frontend(enable_frost_engines=True)
     _dev, (shq, qs, dtype), (shk, ks, _), (shv, vs, _), mask, scale, deterministic = key
     io_dt = cudnn_pygraph.io_data_type(cudnn, dtype, backend_name=_BACKEND_NAME)
     b, hq, sq = shq[0], shq[1], shq[2]
@@ -485,36 +466,35 @@ def _build_bwd(key, device) -> dict:
 
 
 def _cached(kind: str, key, device):
-    """Plan cache. See module docstring: building dominates executing even once the JIT is
-    cached, so this is required rather than an optimisation."""
+    """Plan cache. Building dominates executing even once the JIT is cached, so this is
+    required rather than an optimisation."""
     build = _build_fwd if kind == "fwd" else _build_bwd
     return cudnn_pygraph.cached_graph(
-        _PLAN_CACHE, (kind,) + key, lambda: build(key, device), device=device
+        _BACKEND_NAME, (kind,) + key, lambda: build(key, device), device=device
     )
 
 
 def _validate_qkv(q, k, v, qkv_format):
     """Check the tensors the graph will bind, and return their BHSD descriptions.
 
-    These are not stylistic guards. ``execute`` binds raw pointers, so a tensor whose shape or
-    dtype disagrees with the node it is bound to is reinterpreted rather than rejected. The
-    context-parallel ring calls the backward outside autograd, so neither direction may assume
-    the other ran first.
+    ``execute`` binds raw pointers, so a tensor disagreeing with the node it is bound to is
+    reinterpreted rather than rejected. Both directions validate: the context-parallel ring
+    calls the backward outside autograd, so neither may assume the other ran first.
 
-    Rank is checked here because cuDNN cannot: _sdpa_validate inspects the descriptor this
-    module builds, and bhsd_dim_stride reads dims 0-3, so a rank-5 tensor is described as 4D.
-    The plan cache key carries strides but not rank, so such a tensor can even reuse a valid 4D
-    plan and be bound by pointer. The head-dim stride does reach the descriptor, so
-    _sdpa_validate rejects a non-unit one in graph.validate() and it is not repeated here.
+    Rank is checked here because cuDNN never sees the tensor, only the descriptor this module
+    builds from it. bhsd_dim_stride reads dims 0-3, so a rank-5
+    tensor is described as 4D, and the cache key carries strides but not rank, so it can reuse a
+    valid 4D plan. A non-unit head-dim stride does reach the descriptor, so graph.validate()
+    catches that one and it is not repeated here.
     """
     for name, tensor in (("q", q), ("k", k), ("v", v)):
         if tensor.dim() != 4:
             raise ValueError(f"{name} must be 4D; got shape {tuple(tensor.shape)}")
         _check_dtype(name, tensor, q.dtype)
     _check_kv_match(k, v)
-    qd, _ = _bhsd(q, qkv_format)
-    kd, _ = _bhsd(k, qkv_format)
-    vd, _ = _bhsd(v, qkv_format)
+    qd, _ = cudnn_pygraph.bhsd_dim_stride(q, qkv_format, backend_name=_BACKEND_NAME)
+    kd, _ = cudnn_pygraph.bhsd_dim_stride(k, qkv_format, backend_name=_BACKEND_NAME)
+    vd, _ = cudnn_pygraph.bhsd_dim_stride(v, qkv_format, backend_name=_BACKEND_NAME)
     if kd[0] != qd[0] or kd[3] != qd[3]:
         # The graph declares k and v with q's batch and head_dim, so a mismatch would bind a
         # differently shaped buffer to that node and read the wrong elements silently.
@@ -524,27 +504,18 @@ def _validate_qkv(q, k, v, qkv_format):
     return qd, kd, vd
 
 
-def _bhsd(t: torch.Tensor, qkv_format: str):
-    """``t`` described in cuDNN's logical BHSD, without permuting it."""
-    return cudnn_pygraph.bhsd_dim_stride(t, qkv_format, backend_name=_BACKEND_NAME)
-
-
 def _key(q, k, v, qkv_format, mask, scale, deterministic=False):
     """The plan cache key, structured per tensor rather than flattened.
 
-    The builders destructure it by name, and the per-tensor fragment is the one flex keys on.
+    The builders destructure it positionally, and the per-tensor fragment is the one flex keys on.
     """
-
-    def described(t):
-        return cudnn_pygraph.bhsd_tensor_spec(t, qkv_format, backend_name=_BACKEND_NAME)
-
     return (
         # Built under whichever device was current, so it must not be reused on another. Matches
         # the C++ fused-attn cache, which keys on device_id.
         cudnn_pygraph.device_key(q.device),
-        described(q),
-        described(k),
-        described(v),
+        cudnn_pygraph.bhsd_tensor_spec(q, qkv_format, backend_name=_BACKEND_NAME),
+        cudnn_pygraph.bhsd_tensor_spec(k, qkv_format, backend_name=_BACKEND_NAME),
+        cudnn_pygraph.bhsd_tensor_spec(v, qkv_format, backend_name=_BACKEND_NAME),
         mask,
         float(scale),
         # The deterministic backward is a different algorithm, not a flag on the same one, so a
@@ -596,10 +567,9 @@ def fused_attn_fwd(
 ):  # pylint: disable=unused-argument
     """FROST forward behind the cpp_extensions.fused_attn_fwd signature.
 
-    Mirrors that signature so FusedAttnFunc and the context-parallel ring reach these kernels
-    without knowing which sub-backend they got. Returns (out, aux_ctx_tensors) with
-    aux_ctx_tensors = [softmax_lse, rng_state]; softmax_lse is [b, h, s, 1] fp32 natural-log
-    logsumexp, matching the C++ fused_attn_fwd, which the ring correction squeezes itself.
+    Returns (out, aux_ctx_tensors) with aux_ctx_tensors = [softmax_lse, rng_state]. softmax_lse
+    is [b, h, s, 1] fp32 natural-log logsumexp, matching the C++ fused_attn_fwd; the ring
+    correction squeezes it itself.
 
     cu_seqlens and the padded variants are ignored: they carry thd offsets, and thd is declined
     at selection.
@@ -618,7 +588,6 @@ def fused_attn_fwd(
         raise NotImplementedError(
             f"FROST attention needs o_format to match qkv_format; got {o_format}/{qkv_format}"
         )
-    # _te_mask_spec validates as it normalises, so what it returns is the spec the plan keys on.
     mask = _te_mask_spec(
         attn_mask_type, window_size, _bottom_right_diagonal(attn_mask_type, bottom_right_diagonal)
     )
@@ -629,10 +598,8 @@ def fused_attn_fwd(
     entry = _cached("fwd", _key(q, k, v, qkv_format, mask, scale), q.device)
     tq, tk, tv, tout, tlse = (entry[n] for n in ("q", "k", "v", "out", "stats"))
 
-    # Allocated per call so concurrent uses cannot alias; the cache holds only the plan.
-    # empty_strided, not empty_like: the latter does not preserve an arbitrary permuted stride.
-    # The output takes the caller's format with v's head_dim, so nothing is converted on the way
-    # out; the LSE is BHSD whatever the inputs were, which is what the ring correction expects.
+    # empty_strided, not empty_like: the output carries v's head_dim, so it is not q's shape.
+    # The LSE is BHSD whatever the inputs were, which is what the ring correction expects.
     out_shape, out_stride = _o_shape_stride(q.shape, vd[3], q.stride())
     out = torch.empty_strided(out_shape, out_stride, device=q.device, dtype=q.dtype)
     lse = torch.empty(qd[0], qd[1], qd[2], 1, device=q.device, dtype=torch.float32)
@@ -686,8 +653,8 @@ def fused_attn_bwd(
 ):  # pylint: disable=unused-argument
     """FROST backward behind the cpp_extensions.fused_attn_bwd signature.
 
-    Returns (dq, dk, dv, dbias) with dbias always None, matching what the fused path returns for
-    a no_bias config.
+    Returns (dq, dk, dv, dbias, dsoftmax_offset) with the last two always None, matching the
+    fused path for a no_bias vanilla-softmax config.
     """
     _frost_only(
         dropout=dropout != 0.0,
@@ -697,11 +664,9 @@ def fused_attn_bwd(
         cuda_graph_capture=cuda_graph,
     )
     qkv_format = _qkv_format_from_layout(qkv_layout)
-    # o and dO used to carry their own format into the permute; they now share qkv_format, so a
-    # divergence would silently describe them with the wrong strides. The selector already
-    # declines it, but this is reached directly too.
-    # dqkv_layout joins them: the grads go back through qkv_format, so a divergence would return
-    # them in a layout the caller did not ask for, with nothing raised.
+    # All three are described with qkv_format, so a divergence would otherwise be silent: o and
+    # dO read with the wrong strides, and the grads returned in a layout the caller did not ask
+    # for. The selector declines this too, but this entry point is also called directly.
     for name, fmt in (
         ("o_format", o_format),
         ("do_format", do_format),
@@ -728,10 +693,8 @@ def fused_attn_bwd(
     if softmax_lse.dtype != torch.float32:
         raise ValueError(f"softmax_lse must be fp32; got {softmax_lse.dtype}")
     # Compared against the BHSD description, not q's own shape: the LSE is always [b, h, s]
-    # whatever format the tensors arrived in.
-    # The whole shape, not just the leading dims: the stats node is declared [b, h, s, 1], so a
-    # trailing dim of any other size would be bound by pointer and read with strides that do not
-    # describe it. Same hole the rank check on q/k/v closes.
+    # whatever format the tensors arrived in. The whole shape too: the stats node is declared
+    # [b, h, s, 1], so any other trailing dim is bound by pointer and read with wrong strides.
     lse_shape = tuple(softmax_lse.shape)
     if lse_shape not in (tuple(qd[:3]), tuple(qd[:3]) + (1,)):
         raise ValueError(
