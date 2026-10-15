@@ -394,6 +394,15 @@ void run_regtile_vs_generic(const Mode mode, const Fill fill, const size_t rows,
       Tensor("generic", shape, DType::kFloat8E4M3, true, true, NVTE_MXFP8_1D_SCALING)};
   for (int i = 0; i < 2; ++i) {
     outs[i].set_with_gemm_swizzled_scales(swizzled);
+    // Fill every output byte, padding included, with a marker, so the two kernels must write the
+    // same set of bytes, not just the same values.
+    for (const auto param : {kNVTERowwiseData, kNVTEColumnwiseData, kNVTERowwiseScaleInv,
+                             kNVTEColumnwiseScaleInv}) {
+      const NVTEBasicTensor b = nvte_get_tensor_param(outs[i].data(), param);
+      size_t bytes = b.data_ptr == nullptr ? 0 : 1;
+      for (size_t d = 0; d < b.shape.ndim; ++d) bytes *= b.shape.data[d];
+      if (bytes != 0) ASSERT_EQ(cudaMemset(b.data_ptr, 0xA5, bytes), cudaSuccess);
+    }
     const ScopedEnv tables("NVTE_ACTIVATION_TABLE", "1");
     const ScopedEnv regtile("NVTE_MXFP8_REGTILE", i == 0 ? "1" : "0");
     switch (mode) {
@@ -537,5 +546,12 @@ INSTANTIATE_TEST_SUITE_P(
                        ::testing::Bool(),
                        ::testing::Values(std::pair<size_t, size_t>{1024, 2048},
                                          std::pair<size_t, size_t>{4160, 2048},
-                                         std::pair<size_t, size_t>{128, 256})),
+                                         std::pair<size_t, size_t>{128, 256},
+                                         // Row and column tails; the last column tile ends
+                                         // 32 or 16 columns into the tile, mid MX group for 16.
+                                         std::pair<size_t, size_t>{993, 7200},
+                                         std::pair<size_t, size_t>{1, 16},
+                                         std::pair<size_t, size_t>{33, 272},
+                                         std::pair<size_t, size_t>{100, 2064},
+                                         std::pair<size_t, size_t>{4127, 528})),
     regtile_case_name);

@@ -189,12 +189,14 @@ struct TileConfig {
 
 // Register-resident tiling: the 32x256 tile stays in registers; only the
 // colwise partials go through shared memory.
-template <bool IS_DACT, bool IS_ACT, typename TableT, bool WITH_GEMM_SWIZZLED_SCALES>
+// kTails: the grid may cover elements past M or K (see shape_supported). Without tails the
+// bounds checks compile away, which matters at the kernel's register budget.
+template <bool IS_DACT, bool IS_ACT, typename TableT, bool WITH_GEMM_SWIZZLED_SCALES, bool kTails>
 __device__ __forceinline__ void quantize_regtile(
     const uint4* __restrict__ input, const uint4* __restrict__ act_input,
     unsigned char* __restrict__ rowwise_out, unsigned char* __restrict__ rowwise_scales,
-    unsigned char* __restrict__ colwise_out, unsigned char* __restrict__ colwise_scales, int K,
-    int rowwise_scale_stride, int colwise_scale_stride, int iters, const void* table) {
+    unsigned char* __restrict__ colwise_out, unsigned char* __restrict__ colwise_scales, int M,
+    int K, int rowwise_scale_stride, int colwise_scale_stride, int iters, const void* table) {
   using C = TileConfig<IS_DACT, IS_ACT, TableT>;
   constexpr int kWarpsPerCta = C::kWarpsPerCta, kRowsPerWarp = C::kRowsPerWarp,
                 kRowsInFlight = C::kRowsInFlight;
@@ -210,6 +212,14 @@ __device__ __forceinline__ void quantize_regtile(
   const int warp = tid >> 5;
   const int col0 = blockIdx.x * kTileCols;
   const int vecs_per_row = K >> 3;  // uint4 (8 bf16 values) per row
+  // Tails: the last column tile may end inside the tile, and row bands may end past M. Out-of-range
+  // elements load as 0, which every activation maps to 0, so they never raise an amax. The
+  // generic kernel writes scales for its whole 64x64 tiles, and so does this one: rowwise scales
+  // for every row of the grid's bands, for the groups that start inside the tensor; colwise
+  // scales for the columns below K rounded up to 64.
+  const bool full_width = !kTails || col0 + kTileCols <= K;
+  const bool lane_in_cols = col0 + kColsPerLane * lane < K;
+  const int colwise_scale_cols = (K + 63) / 64 * 64;
 
   // The table copy overlaps the first input loads; see the wait below.
   load_table_async<C::kTableBytes>(table_smem, &table_barrier, table, tid);
@@ -219,52 +229,63 @@ __device__ __forceinline__ void quantize_regtile(
     // Row blocks are taken grid-strided, so the CTAs on the same step cover one
     // contiguous row band.
     const int row0 = (it * gridDim.y + blockIdx.y) * kRowsPerMxBlock;
-    // This thread's kRowsPerWarp x kColsPerLane sub-tile, as BF16 pairs.
-    unsigned tile_words[kRowsPerWarp * kWordsPerLane];
-    const size_t load_offset = (size_t)(row0 + warp * kRowsPerWarp) * vecs_per_row + (col0 >> 3) +
-                               (size_t)kVecLoadsPerRow * lane;
-    const uint4* input_ptr = input + load_offset;
-    const uint4* act_input_ptr = act_input + load_offset;
+    // The band's work. A band inside the tensor runs it without bounds checks; only bands at
+    // the edges of the tensor (kEdge) pay for them.
+    const auto band = [&](auto edge) {
+      constexpr bool kEdge = decltype(edge)::value;
+      const int warp_row0 = row0 + warp * kRowsPerWarp;
+      // Whether this lane's elements of row warp_row0 + j are inside the tensor.
+      const auto in_bounds = [&](int j) { return !kEdge || (lane_in_cols && warp_row0 + j < M); };
+      // This thread's kRowsPerWarp x kColsPerLane sub-tile, as BF16 pairs.
+      unsigned tile_words[kRowsPerWarp * kWordsPerLane];
+      const size_t load_offset = (size_t)(row0 + warp * kRowsPerWarp) * vecs_per_row + (col0 >> 3) +
+                                 (size_t)kVecLoadsPerRow * lane;
+      const uint4* input_ptr = input + load_offset;
+      const uint4* act_input_ptr = act_input + load_offset;
 
-    // ---- load + activate, kRowsInFlight rows in flight at a time --------------------
+      // ---- load + activate, kRowsInFlight rows in flight at a time --------------------
 #pragma unroll
-    for (int h = 0; h < kRowsPerWarp / kRowsInFlight; ++h) {
-      uint4 x_vec[kRowsInFlight][kVecLoadsPerRow], grad_vec[kRowsInFlight][kVecLoadsPerRow];
-      asm volatile("" ::: "memory");
-#pragma unroll
-      for (int t = 0; t < kRowsInFlight; ++t)
-#pragma unroll
-        for (int n = 0; n < kVecLoadsPerRow; ++n)
-          x_vec[t][n] = act_input_ptr[(size_t)(h * kRowsInFlight + t) * vecs_per_row + n];
-      if constexpr (IS_DACT) {
+      for (int h = 0; h < kRowsPerWarp / kRowsInFlight; ++h) {
+        uint4 x_vec[kRowsInFlight][kVecLoadsPerRow], grad_vec[kRowsInFlight][kVecLoadsPerRow];
+        asm volatile("" ::: "memory");
 #pragma unroll
         for (int t = 0; t < kRowsInFlight; ++t)
 #pragma unroll
           for (int n = 0; n < kVecLoadsPerRow; ++n)
-            grad_vec[t][n] = input_ptr[(size_t)(h * kRowsInFlight + t) * vecs_per_row + n];
-      }
-      // Keep the load group's loads together, between the two empty asm statements: issued
-      // back to back, their latencies overlap. Otherwise register pressure leads the compiler
-      // to spread them between the previous group's table lookups, each then stalling on its
-      // own.
-      asm volatile("" ::: "memory");
-      if (it == 0 && h == 0) ptx::mbarrier_wait_parity(&table_barrier, 0);
-      // Convert the load group into the BF16 pairs the epilogue quantizes.
-      if constexpr (!IS_DACT) {
+            x_vec[t][n] = in_bounds(h * kRowsInFlight + t)
+                              ? act_input_ptr[(size_t)(h * kRowsInFlight + t) * vecs_per_row + n]
+                              : make_uint4(0, 0, 0, 0);
+        if constexpr (IS_DACT) {
 #pragma unroll
-        for (int t = 0; t < kRowsInFlight; ++t) {
+          for (int t = 0; t < kRowsInFlight; ++t)
 #pragma unroll
-          for (int n = 0; n < kVecLoadsPerRow; ++n) {
-            const unsigned* x_words = (const unsigned*)&x_vec[t][n];
-            const int tile_word_base = (h * kRowsInFlight + t) * kWordsPerLane + n * 4;
+            for (int n = 0; n < kVecLoadsPerRow; ++n)
+              grad_vec[t][n] = in_bounds(h * kRowsInFlight + t)
+                                   ? input_ptr[(size_t)(h * kRowsInFlight + t) * vecs_per_row + n]
+                                   : make_uint4(0, 0, 0, 0);
+        }
+        // Keep the load group's loads together, between the two empty asm statements: issued
+        // back to back, their latencies overlap. Otherwise register pressure leads the compiler
+        // to spread them between the previous group's table lookups, each then stalling on its
+        // own.
+        asm volatile("" ::: "memory");
+        if (it == 0 && h == 0) ptx::mbarrier_wait_parity(&table_barrier, 0);
+        // Convert the load group into the BF16 pairs the epilogue quantizes.
+        if constexpr (!IS_DACT) {
 #pragma unroll
-            for (int m = 0; m < 4; ++m) {
-              tile_words[tile_word_base + m] = activation_table::forward_2x<TableT>(
-                  x_words[m], reinterpret_cast<const __nv_bfloat16*>(table_smem));
+          for (int t = 0; t < kRowsInFlight; ++t) {
+#pragma unroll
+            for (int n = 0; n < kVecLoadsPerRow; ++n) {
+              const unsigned* x_words = (const unsigned*)&x_vec[t][n];
+              const int tile_word_base = (h * kRowsInFlight + t) * kWordsPerLane + n * 4;
+#pragma unroll
+              for (int m = 0; m < 4; ++m) {
+                tile_words[tile_word_base + m] = activation_table::forward_2x<TableT>(
+                    x_words[m], reinterpret_cast<const __nv_bfloat16*>(table_smem));
+              }
             }
           }
-        }
-      } else {
+        } else {
 #define MXFP8_DACT_WORD(T, M)                                                                \
   {                                                                                          \
     const ptx::floatx2 product =                                                             \
@@ -280,187 +301,218 @@ __device__ __forceinline__ void quantize_regtile(
     MXFP8_DACT_WORD(T, 2)                                          \
     MXFP8_DACT_WORD(T, 3)                                          \
   }
-        static_assert(kRowsInFlight == 2, "A load group is two rows.");
-        MXFP8_DACT_ROW(0)
-        MXFP8_DACT_ROW(1)
+          static_assert(kRowsInFlight == 2, "A load group is two rows.");
+          MXFP8_DACT_ROW(0)
+          MXFP8_DACT_ROW(1)
 #undef MXFP8_DACT_ROW
 #undef MXFP8_DACT_WORD
+        }
       }
-    }
 
-    // The rowwise half does not depend on the colwise scales, so it runs before
-    // the cross-warp barrier (see TileConfig).
-    const size_t store_offset =
-        (size_t)(row0 + warp * kRowsPerWarp) * K + col0 + kColsPerLane * lane;
-    auto row_scale = [&](const unsigned* row, int j) {
-      unsigned amax =
-          abs_max_bf16x2(abs_max_bf16x2(row[0], row[1]), abs_max_bf16x2(row[2], row[3]));
+      // The rowwise half does not depend on the colwise scales, so it runs before
+      // the cross-warp barrier (see TileConfig).
+      const size_t store_offset =
+          (size_t)(row0 + warp * kRowsPerWarp) * K + col0 + kColsPerLane * lane;
+      auto row_scale = [&](const unsigned* row, int j) {
+        unsigned amax =
+            abs_max_bf16x2(abs_max_bf16x2(row[0], row[1]), abs_max_bf16x2(row[2], row[3]));
 #pragma unroll
-      for (int m = 4; m < kWordsPerLane; m += 2)
-        amax = abs_max_bf16x2(amax, abs_max_bf16x2(row[m], row[m + 1]));
-        // A 32-value rowwise block spans kLanesPerMxGroup lanes.
+        for (int m = 4; m < kWordsPerLane; m += 2)
+          amax = abs_max_bf16x2(amax, abs_max_bf16x2(row[m], row[m + 1]));
+          // A 32-value rowwise block spans kLanesPerMxGroup lanes.
 #pragma unroll
-      for (int lane_mask = 1; lane_mask < kLanesPerMxGroup; lane_mask <<= 1)
-        amax = abs_max_bf16x2(amax, __shfl_xor_sync(0xffffffffu, amax, lane_mask));
-      // Fold the two halves with one PRMT and a packed max, which leaves the
-      // magnitude in both halves; the high half is then the FP32 bit pattern.
-      amax = abs_max_bf16x2(amax, __byte_perm(amax, amax, 0x1032));
-      const unsigned scale_byte = amax_to_e8m0_2x(0.f, __uint_as_float(amax & 0x7fff0000u));
-      if ((lane & (kLanesPerMxGroup - 1)) == 0)
-        row_scale_bytes[(warp * kRowsPerWarp + j) * kMxGroupsPerRow + (lane / kLanesPerMxGroup)] =
-            (unsigned char)scale_byte;
-      return e8m0_to_bf16x2_reciprocal(scale_byte);
-    };
-    // On the 128-thread activation tile, two rows share one butterfly and conversion.
-    auto row_amax = [&](const unsigned* row) {
-      unsigned amax =
-          abs_max_bf16x2(abs_max_bf16x2(row[0], row[1]), abs_max_bf16x2(row[2], row[3]));
+        for (int lane_mask = 1; lane_mask < kLanesPerMxGroup; lane_mask <<= 1)
+          amax = abs_max_bf16x2(amax, __shfl_xor_sync(0xffffffffu, amax, lane_mask));
+        // Fold the two halves with one PRMT and a packed max, which leaves the
+        // magnitude in both halves; the high half is then the FP32 bit pattern.
+        amax = abs_max_bf16x2(amax, __byte_perm(amax, amax, 0x1032));
+        const unsigned scale_byte = amax_to_e8m0_2x(0.f, __uint_as_float(amax & 0x7fff0000u));
+        if ((lane & (kLanesPerMxGroup - 1)) == 0)
+          row_scale_bytes[(warp * kRowsPerWarp + j) * kMxGroupsPerRow + (lane / kLanesPerMxGroup)] =
+              (unsigned char)scale_byte;
+        return e8m0_to_bf16x2_reciprocal(scale_byte);
+      };
+      // On the 128-thread activation tile, two rows share one butterfly and conversion.
+      auto row_amax = [&](const unsigned* row) {
+        unsigned amax =
+            abs_max_bf16x2(abs_max_bf16x2(row[0], row[1]), abs_max_bf16x2(row[2], row[3]));
 #pragma unroll
-      for (int m = 4; m < kWordsPerLane; m += 2)
-        amax = abs_max_bf16x2(amax, abs_max_bf16x2(row[m], row[m + 1]));
-      return abs_max_bf16x2(amax, __byte_perm(amax, amax, 0x1032));
-    };
-    auto row_scale_pair = [&](const unsigned* row_a, const unsigned* row_b, int j,
-                              unsigned& row_scale_rcp0, unsigned& row_scale_rcp1) {
-      unsigned amax_pair = __byte_perm(row_amax(row_a), row_amax(row_b), 0x5410) & 0x7fff7fffu;
+        for (int m = 4; m < kWordsPerLane; m += 2)
+          amax = abs_max_bf16x2(amax, abs_max_bf16x2(row[m], row[m + 1]));
+        return abs_max_bf16x2(amax, __byte_perm(amax, amax, 0x1032));
+      };
+      auto row_scale_pair = [&](const unsigned* row_a, const unsigned* row_b, int j,
+                                unsigned& row_scale_rcp0, unsigned& row_scale_rcp1) {
+        unsigned amax_pair = __byte_perm(row_amax(row_a), row_amax(row_b), 0x5410) & 0x7fff7fffu;
 #pragma unroll
-      for (int lane_mask = 1; lane_mask < kLanesPerMxGroup; lane_mask <<= 1)
-        amax_pair = abs_max_bf16x2(amax_pair, __shfl_xor_sync(0xffffffffu, amax_pair, lane_mask));
-      const ptx::floatx2 amax_2x = widen_bf16x2(amax_pair);
-      const unsigned scale_pair = amax_to_e8m0_2x(amax_2x.y, amax_2x.x);
-      const unsigned scale_byte0 = scale_pair & 0xffu, scale_byte1 = (scale_pair >> 8) & 0xffu;
-      if ((lane & (kLanesPerMxGroup - 1)) == 0) {
-        unsigned char* scale_dst = row_scale_bytes + (warp * kRowsPerWarp + j) * kMxGroupsPerRow +
-                                   (lane / kLanesPerMxGroup);
-        scale_dst[0] = (unsigned char)scale_byte0;
-        scale_dst[kMxGroupsPerRow] = (unsigned char)scale_byte1;
-      }
-      row_scale_rcp0 = e8m0_to_bf16x2_reciprocal(scale_byte0);
-      row_scale_rcp1 = e8m0_to_bf16x2_reciprocal(scale_byte1);
-    };
-    // Colwise amax: per-warp partial in registers, cross-warp fold in shared.
-    auto publish_col_amax_partials = [&]() {
-      unsigned col_amax[kWordsPerLane];
+        for (int lane_mask = 1; lane_mask < kLanesPerMxGroup; lane_mask <<= 1)
+          amax_pair = abs_max_bf16x2(amax_pair, __shfl_xor_sync(0xffffffffu, amax_pair, lane_mask));
+        const ptx::floatx2 amax_2x = widen_bf16x2(amax_pair);
+        const unsigned scale_pair = amax_to_e8m0_2x(amax_2x.y, amax_2x.x);
+        const unsigned scale_byte0 = scale_pair & 0xffu, scale_byte1 = (scale_pair >> 8) & 0xffu;
+        if ((lane & (kLanesPerMxGroup - 1)) == 0) {
+          unsigned char* scale_dst = row_scale_bytes + (warp * kRowsPerWarp + j) * kMxGroupsPerRow +
+                                     (lane / kLanesPerMxGroup);
+          scale_dst[0] = (unsigned char)scale_byte0;
+          scale_dst[kMxGroupsPerRow] = (unsigned char)scale_byte1;
+        }
+        row_scale_rcp0 = e8m0_to_bf16x2_reciprocal(scale_byte0);
+        row_scale_rcp1 = e8m0_to_bf16x2_reciprocal(scale_byte1);
+      };
+      // Colwise amax: per-warp partial in registers, cross-warp fold in shared.
+      auto publish_col_amax_partials = [&]() {
+        unsigned col_amax[kWordsPerLane];
 #pragma unroll
-      for (int m = 0; m < kWordsPerLane; ++m) col_amax[m] = tile_words[m];
+        for (int m = 0; m < kWordsPerLane; ++m) col_amax[m] = tile_words[m];
 #pragma unroll
-      for (int j = 1; j < kRowsPerWarp; ++j)
+        for (int j = 1; j < kRowsPerWarp; ++j)
 #pragma unroll
-        for (int m = 0; m < kWordsPerLane; ++m)
-          col_amax[m] = abs_max_bf16x2(col_amax[m], tile_words[j * kWordsPerLane + m]);
+          for (int m = 0; m < kWordsPerLane; ++m)
+            col_amax[m] = abs_max_bf16x2(col_amax[m], tile_words[j * kWordsPerLane + m]);
 #pragma unroll
-      for (int n = 0; n < kVecLoadsPerRow; ++n)
-        *(uint4*)(&col_amax_partials[warp][kWordsPerLane * lane + 4 * n]) =
-            *(const uint4*)(col_amax + 4 * n);
-    };
-    if constexpr (C::kThreadsPerCta == 128) {
-      unsigned char* row_out_ptr = rowwise_out + store_offset;
+        for (int n = 0; n < kVecLoadsPerRow; ++n)
+          *(uint4*)(&col_amax_partials[warp][kWordsPerLane * lane + 4 * n]) =
+              *(const uint4*)(col_amax + 4 * n);
+      };
+      if constexpr (C::kThreadsPerCta == 128) {
+        unsigned char* row_out_ptr = rowwise_out + store_offset;
 #pragma unroll
-      for (int j = 0; j < kRowsPerWarp; j += 2) {
-        const unsigned* row_a = tile_words + j * kWordsPerLane;
-        const unsigned* row_b = row_a + kWordsPerLane;
-        unsigned row_scale_rcp0, row_scale_rcp1;
-        row_scale_pair(row_a, row_b, j, row_scale_rcp0, row_scale_rcp1);
-        unsigned row_out[kWordsPerLane / 2];
+        for (int j = 0; j < kRowsPerWarp; j += 2) {
+          const unsigned* row_a = tile_words + j * kWordsPerLane;
+          const unsigned* row_b = row_a + kWordsPerLane;
+          unsigned row_scale_rcp0, row_scale_rcp1;
+          row_scale_pair(row_a, row_b, j, row_scale_rcp0, row_scale_rcp1);
+          unsigned row_out[kWordsPerLane / 2];
 #pragma unroll
-        for (int m = 0; m < kWordsPerLane / 2; ++m)
-          row_out[m] =
-              quantize_e4m3x4(row_a[2 * m], row_a[2 * m + 1], row_scale_rcp0, row_scale_rcp0);
-        store_quantized(row_out_ptr + (unsigned)j * (unsigned)K, row_out);
+          for (int m = 0; m < kWordsPerLane / 2; ++m)
+            row_out[m] =
+                quantize_e4m3x4(row_a[2 * m], row_a[2 * m + 1], row_scale_rcp0, row_scale_rcp0);
+          if (in_bounds(j)) store_quantized(row_out_ptr + (unsigned)j * (unsigned)K, row_out);
 #pragma unroll
-        for (int m = 0; m < kWordsPerLane / 2; ++m)
-          row_out[m] =
-              quantize_e4m3x4(row_b[2 * m], row_b[2 * m + 1], row_scale_rcp1, row_scale_rcp1);
-        store_quantized(row_out_ptr + (unsigned)(j + 1) * (unsigned)K, row_out);
-      }
-    } else {
-      unsigned char* row_out_ptr = rowwise_out + store_offset;
-#pragma unroll
-      for (int j = 0; j < kRowsPerWarp; ++j) {
-        const unsigned* v = tile_words + j * kWordsPerLane;
-        const unsigned row_scale_rcp = row_scale(v, j);
-        unsigned row_out[kWordsPerLane / 2];
-#pragma unroll
-        for (int m = 0; m < kWordsPerLane / 2; ++m)
-          row_out[m] = quantize_e4m3x4(v[2 * m], v[2 * m + 1], row_scale_rcp, row_scale_rcp);
-        store_quantized(row_out_ptr + (unsigned)j * (unsigned)K, row_out);
-      }
-    }
-
-    publish_col_amax_partials();
-    __syncthreads();
-    if (tid < kTileCols / 2) {
-      unsigned col_amax = col_amax_partials[0][tid];
-#pragma unroll
-      for (int w = 1; w < kWarpsPerCta; ++w)
-        col_amax = abs_max_bf16x2(col_amax, col_amax_partials[w][tid]);
-      col_amax &= 0x7fff7fffu;
-      const ptx::floatx2 amax_2x = widen_bf16x2(col_amax);
-      const unsigned scale_pair = amax_to_e8m0_2x(amax_2x.y, amax_2x.x);
-      if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
-        // The colwise swizzle is the rowwise one with rows and columns swapped,
-        // so the two columns of this pair land in different 16-byte rows.  The
-        // grid covers M exactly: gridDim.y * iters row blocks of 32.
-        const size_t row_block_tiles =
-            DIVUP(static_cast<size_t>(gridDim.y) * iters * kRowsPerMxBlock, size_t{128});
-        const size_t col = col0 + 2 * tid;
-        colwise_scales[swizzle::gemm_swizzled_scale_idx(col, row0 / 32, row_block_tiles)] =
-            static_cast<unsigned char>(scale_pair);
-        colwise_scales[swizzle::gemm_swizzled_scale_idx(col + 1, row0 / 32, row_block_tiles)] =
-            static_cast<unsigned char>(scale_pair >> 8);
+          for (int m = 0; m < kWordsPerLane / 2; ++m)
+            row_out[m] =
+                quantize_e4m3x4(row_b[2 * m], row_b[2 * m + 1], row_scale_rcp1, row_scale_rcp1);
+          if (in_bounds(j + 1))
+            store_quantized(row_out_ptr + (unsigned)(j + 1) * (unsigned)K, row_out);
+        }
       } else {
-        *(unsigned short*)(colwise_scales + (size_t)(row0 / 32) * colwise_scale_stride + col0 +
-                           2 * tid) = (unsigned short)scale_pair;
+        unsigned char* row_out_ptr = rowwise_out + store_offset;
+#pragma unroll
+        for (int j = 0; j < kRowsPerWarp; ++j) {
+          const unsigned* v = tile_words + j * kWordsPerLane;
+          const unsigned row_scale_rcp = row_scale(v, j);
+          unsigned row_out[kWordsPerLane / 2];
+#pragma unroll
+          for (int m = 0; m < kWordsPerLane / 2; ++m)
+            row_out[m] = quantize_e4m3x4(v[2 * m], v[2 * m + 1], row_scale_rcp, row_scale_rcp);
+          if (in_bounds(j)) store_quantized(row_out_ptr + (unsigned)j * (unsigned)K, row_out);
+        }
       }
-      const ptx::bf16x2 scale_rcp = ptx::exp2f_rcp_2x_per_lane(__byte_perm(scale_pair, 0, 0x4140));
-      col_scale_rcp_smem[tid] = reinterpret_cast<const unsigned&>(scale_rcp);
-    }
-    auto drain_row_scales = [&]() {
-      constexpr int drain_tid_base = C::kDrainTidBase;
-      // A row's eight group scales are eight contiguous, 8-byte-aligned bytes of
-      // rowwise_scales, so one warp drains a 32-row tile with one STG.64 per lane.
-      // In the GEMM-swizzled layout they are two 4-byte runs in adjacent tiles.
-      if (tid >= drain_tid_base && tid < drain_tid_base + kRowsPerMxBlock) {
-        const int r = tid - drain_tid_base;
-        if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
-          constexpr size_t kTileBytes =
-              swizzle::GEMM_SWIZZLED_SCALE_TILE_DIM_X * swizzle::GEMM_SWIZZLED_SCALE_TILE_DIM_Y;
-          const size_t idx = swizzle::gemm_swizzled_scale_idx(row0 + r, col0 >> 5, K / 128);
-          const uint2 bytes = *(const uint2*)(row_scale_bytes + r * kMxGroupsPerRow);
-          *(unsigned*)(rowwise_scales + idx) = bytes.x;
-          *(unsigned*)(rowwise_scales + idx + kTileBytes) = bytes.y;
-        } else {
-          *(uint2*)(rowwise_scales + (size_t)(row0 + r) * rowwise_scale_stride + (col0 >> 5)) =
-              *(const uint2*)(row_scale_bytes + r * kMxGroupsPerRow);
+
+      publish_col_amax_partials();
+      __syncthreads();
+      if (tid < kTileCols / 2) {
+        unsigned col_amax = col_amax_partials[0][tid];
+#pragma unroll
+        for (int w = 1; w < kWarpsPerCta; ++w)
+          col_amax = abs_max_bf16x2(col_amax, col_amax_partials[w][tid]);
+        col_amax &= 0x7fff7fffu;
+        const ptx::floatx2 amax_2x = widen_bf16x2(col_amax);
+        const unsigned scale_pair = amax_to_e8m0_2x(amax_2x.y, amax_2x.x);
+        if (!kEdge || col0 + 2 * tid < colwise_scale_cols) {
+          if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
+            // The colwise swizzle is the rowwise one with rows and columns swapped,
+            // so the two columns of this pair land in different 16-byte rows.
+            const size_t row_block_tiles = DIVUP(static_cast<size_t>(M), size_t{128});
+            const size_t col = col0 + 2 * tid;
+            colwise_scales[swizzle::gemm_swizzled_scale_idx(col, row0 / 32, row_block_tiles)] =
+                static_cast<unsigned char>(scale_pair);
+            colwise_scales[swizzle::gemm_swizzled_scale_idx(col + 1, row0 / 32, row_block_tiles)] =
+                static_cast<unsigned char>(scale_pair >> 8);
+          } else {
+            *(unsigned short*)(colwise_scales + (size_t)(row0 / 32) * colwise_scale_stride + col0 +
+                               2 * tid) = (unsigned short)scale_pair;
+          }
+        }
+        const ptx::bf16x2 scale_rcp =
+            ptx::exp2f_rcp_2x_per_lane(__byte_perm(scale_pair, 0, 0x4140));
+        col_scale_rcp_smem[tid] = reinterpret_cast<const unsigned&>(scale_rcp);
+      }
+      auto drain_row_scales = [&]() {
+        constexpr int drain_tid_base = C::kDrainTidBase;
+        // A row's eight group scales are eight contiguous, 4-byte-aligned bytes of
+        // rowwise_scales (the stride is a multiple of 4 groups), so one warp drains a
+        // 32-row tile with two STG.32 per lane. In the GEMM-swizzled layout they are two
+        // 4-byte runs in adjacent tiles. A tile that ends inside the tensor writes only
+        // the groups that start inside it.
+        if (tid >= drain_tid_base && tid < drain_tid_base + kRowsPerMxBlock) {
+          const int r = tid - drain_tid_base;
+          const unsigned char* bytes = row_scale_bytes + r * kMxGroupsPerRow;
+          const size_t col_tiles = DIVUP(static_cast<size_t>(K), size_t{128});
+          if (!kEdge || full_width) {
+            const uint2 words = *(const uint2*)bytes;
+            if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
+              constexpr size_t kTileBytes =
+                  swizzle::GEMM_SWIZZLED_SCALE_TILE_DIM_X * swizzle::GEMM_SWIZZLED_SCALE_TILE_DIM_Y;
+              const size_t idx = swizzle::gemm_swizzled_scale_idx(row0 + r, col0 >> 5, col_tiles);
+              *(unsigned*)(rowwise_scales + idx) = words.x;
+              *(unsigned*)(rowwise_scales + idx + kTileBytes) = words.y;
+            } else {
+              unsigned* dst = (unsigned*)(rowwise_scales +
+                                          (size_t)(row0 + r) * rowwise_scale_stride + (col0 >> 5));
+              dst[0] = words.x;
+              dst[1] = words.y;
+            }
+          } else {
+            const int groups = (K - col0 + 31) / 32;
+            for (int g = 0; g < groups; ++g) {
+              size_t idx;
+              if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
+                idx = swizzle::gemm_swizzled_scale_idx(row0 + r, (col0 >> 5) + g, col_tiles);
+              } else {
+                idx = (size_t)(row0 + r) * rowwise_scale_stride + (col0 >> 5) + g;
+              }
+              rowwise_scales[idx] = bytes[g];
+            }
+          }
+        }
+      };
+      drain_row_scales();
+      __syncthreads();
+
+      // ---- columnwise quantization --------------------------------------------
+      {
+        uint4 col_scale_rcp_vec[kVecLoadsPerRow];
+#pragma unroll
+        for (int n = 0; n < kVecLoadsPerRow; ++n)
+          col_scale_rcp_vec[n] = *(const uint4*)(col_scale_rcp_smem + kWordsPerLane * lane + 4 * n);
+        const unsigned* col_scale_rcp = (const unsigned*)col_scale_rcp_vec;
+        unsigned char* col_out_ptr = colwise_out + store_offset;
+#pragma unroll
+        for (int j = 0; j < kRowsPerWarp; ++j) {
+          const unsigned* v = tile_words + j * kWordsPerLane;
+          unsigned col_out[kWordsPerLane / 2];
+#pragma unroll
+          for (int m = 0; m < kWordsPerLane / 2; ++m)
+            col_out[m] = quantize_e4m3x4(v[2 * m], v[2 * m + 1], col_scale_rcp[2 * m],
+                                         col_scale_rcp[2 * m + 1]);
+          if (in_bounds(j)) store_quantized(col_out_ptr + (unsigned)j * (unsigned)K, col_out);
         }
       }
     };
-    drain_row_scales();
-    __syncthreads();
-
-    // ---- columnwise quantization --------------------------------------------
-    {
-      uint4 col_scale_rcp_vec[kVecLoadsPerRow];
-#pragma unroll
-      for (int n = 0; n < kVecLoadsPerRow; ++n)
-        col_scale_rcp_vec[n] = *(const uint4*)(col_scale_rcp_smem + kWordsPerLane * lane + 4 * n);
-      const unsigned* col_scale_rcp = (const unsigned*)col_scale_rcp_vec;
-      unsigned char* col_out_ptr = colwise_out + store_offset;
-#pragma unroll
-      for (int j = 0; j < kRowsPerWarp; ++j) {
-        const unsigned* v = tile_words + j * kWordsPerLane;
-        unsigned col_out[kWordsPerLane / 2];
-#pragma unroll
-        for (int m = 0; m < kWordsPerLane / 2; ++m)
-          col_out[m] = quantize_e4m3x4(v[2 * m], v[2 * m + 1], col_scale_rcp[2 * m],
-                                       col_scale_rcp[2 * m + 1]);
-        store_quantized(col_out_ptr + (unsigned)j * (unsigned)K, col_out);
+    if constexpr (kTails) {
+      if (full_width && row0 + kRowsPerMxBlock <= M) {
+        band(std::false_type{});
+      } else {
+        band(std::true_type{});
       }
+    } else {
+      band(std::false_type{});
     }
   }
 }
 
-template <bool IS_DACT, bool IS_ACT, typename TableT, bool WITH_GEMM_SWIZZLED_SCALES>
+template <bool IS_DACT, bool IS_ACT, typename TableT, bool WITH_GEMM_SWIZZLED_SCALES, bool kTails>
 __global__ void __launch_bounds__(TileConfig<IS_DACT, IS_ACT, TableT>::kThreadsPerCta,
                                   TileConfig<IS_DACT, IS_ACT, TableT>::kMinBlocksPerSm)
     quantize_mxfp8_kernel(const unsigned* __restrict__ input,
@@ -468,13 +520,13 @@ __global__ void __launch_bounds__(TileConfig<IS_DACT, IS_ACT, TableT>::kThreadsP
                           unsigned char* __restrict__ rowwise_out,
                           unsigned char* __restrict__ rowwise_scales,
                           unsigned char* __restrict__ colwise_out,
-                          unsigned char* __restrict__ colwise_scales, int K,
+                          unsigned char* __restrict__ colwise_scales, int M, int K,
                           int rowwise_scale_stride, int colwise_scale_stride, int iters,
                           const void* __restrict__ table) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-  quantize_regtile<IS_DACT, IS_ACT, TableT, WITH_GEMM_SWIZZLED_SCALES>(
+  quantize_regtile<IS_DACT, IS_ACT, TableT, WITH_GEMM_SWIZZLED_SCALES, kTails>(
       (const uint4*)input, (const uint4*)act_input, rowwise_out, rowwise_scales, colwise_out,
-      colwise_scales, K, rowwise_scale_stride, colwise_scale_stride, iters, table);
+      colwise_scales, M, K, rowwise_scale_stride, colwise_scale_stride, iters, table);
 #endif
 }
 
@@ -500,7 +552,7 @@ static int pick_walk_length(int row_blocks, int grid_cols, long long target,
 // the rest of the unified array goes to L1.
 constexpr int kCarveoutPercentAct = 40;
 
-template <bool IS_DACT, bool IS_ACT, typename TableT, bool WITH_GEMM_SWIZZLED_SCALES>
+template <bool IS_DACT, bool IS_ACT, typename TableT, bool WITH_GEMM_SWIZZLED_SCALES, bool kTails>
 static void set_carveout() {
   constexpr int kPercent = IS_ACT ? kCarveoutPercentAct : 0;
   if constexpr (kPercent > 0) {
@@ -513,18 +565,25 @@ static void set_carveout() {
     if (static_cast<size_t>(device) >= done.size()) done.resize(device + 1, false);
     if (!done[device]) {
       NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-          (const void*)quantize_mxfp8_kernel<IS_DACT, IS_ACT, TableT, WITH_GEMM_SWIZZLED_SCALES>,
+          (const void*)
+              quantize_mxfp8_kernel<IS_DACT, IS_ACT, TableT, WITH_GEMM_SWIZZLED_SCALES, kTails>,
           cudaFuncAttributePreferredSharedMemoryCarveout, kPercent));
       done[device] = true;
     }
   }
 }
 
-// Row blocks per CTA walk: M / 32, walked in powers of two.
+//! 32-row bands the grid covers: whole 64-row tiles of the generic kernel, whose scales it
+//! writes.
+inline int row_bands(int M) { return (M + 63) / 64 * 2; }
+//! 256-column tiles the grid covers.
+inline int col_tiles(int K) { return (K + kTileCols - 1) / kTileCols; }
+
+// Row blocks per CTA walk, in powers of two.
 template <bool IS_DACT>
 int walk_length(int M, int K) {
-  const int row_blocks = M / kRowsPerMxBlock;
-  const int grid_cols = K / kTileCols;
+  const int row_blocks = row_bands(M);
+  const int grid_cols = col_tiles(K);
   // The minimum walk amortizes the table copy, but not at the price of leaving
   // SMs without a CTA.
   int min_walk = kMinWalk;
@@ -542,28 +601,36 @@ static void launch(const void* input, const void* act_input, void* rowwise_out,
                    int rowwise_scale_stride, int colwise_scale_stride, const void* table,
                    cudaStream_t stream) {
   using C = TileConfig<IS_DACT, IS_ACT, TableT>;
-  set_carveout<IS_DACT, IS_ACT, TableT, WITH_GEMM_SWIZZLED_SCALES>();
   const int iters = walk_length<IS_DACT>(M, K);
-  dim3 grid(K / kTileCols, M / kRowsPerMxBlock / iters);
-  quantize_mxfp8_kernel<IS_DACT, IS_ACT, TableT, WITH_GEMM_SWIZZLED_SCALES>
-      <<<grid, C::kThreadsPerCta, 0, stream>>>(
-          (const unsigned*)input, (const unsigned*)act_input, (unsigned char*)rowwise_out,
-          (unsigned char*)rowwise_scales, (unsigned char*)colwise_out,
-          (unsigned char*)colwise_scales, K, rowwise_scale_stride, colwise_scale_stride, iters,
-          table);
+  dim3 grid(col_tiles(K), row_bands(M) / iters);
+  const auto run = [&](auto tails) {
+    constexpr bool kTails = decltype(tails)::value;
+    set_carveout<IS_DACT, IS_ACT, TableT, WITH_GEMM_SWIZZLED_SCALES, kTails>();
+    quantize_mxfp8_kernel<IS_DACT, IS_ACT, TableT, WITH_GEMM_SWIZZLED_SCALES, kTails>
+        <<<grid, C::kThreadsPerCta, 0, stream>>>(
+            (const unsigned*)input, (const unsigned*)act_input, (unsigned char*)rowwise_out,
+            (unsigned char*)rowwise_scales, (unsigned char*)colwise_out,
+            (unsigned char*)colwise_scales, M, K, rowwise_scale_stride, colwise_scale_stride, iters,
+            table);
+  };
+  // Whole 64-row tiles and 256-column tiles leave nothing past M or K. The derivatives take the
+  // tail-capable kernel for every shape: with the band body behind its edge branch, the compiler
+  // schedules the loads so that they wait less (GB200, 32768x7168 dGeLU: 239 -> 220 us, fewer
+  // long-scoreboard stalls, DRAM throughput 73% -> 79%). The forward kernels do not gain from it.
+  if (!IS_DACT && M % 64 == 0 && K % kTileCols == 0) {
+    run(std::false_type{});
+  } else {
+    run(std::true_type{});
+  }
 }
 
-// The grid is derived by exact division, so columns must tile into 256.  Rows
-// must be a multiple of the generic kernel's 64-row activation tile: on a
-// 32-row tail that kernel writes zero scales into the padding past the last
-// row, which this one does not.  Output offsets within a 32-row band are 32-bit.
-constexpr size_t kGenericActivationTileRows = 64;
-
+// Any number of rows. Columns in multiples of 16, the shapes the generic kernel takes (its TMA
+// store of the FP8 output needs 16-byte rows); this also keeps every input row 16-byte aligned.
+// Output offsets within a 32-row band are 32-bit.
 inline bool shape_supported(size_t rows, size_t cols) {
-  constexpr size_t kMaxRows = std::numeric_limits<int>::max();
+  constexpr size_t kMaxRows = std::numeric_limits<int>::max() - 64;
   constexpr size_t kMaxCols = std::numeric_limits<unsigned>::max() / kRowsPerMxBlock;
-  return rows > 0 && cols > 0 && rows <= kMaxRows && cols <= kMaxCols &&
-         rows % kGenericActivationTileRows == 0 && cols % kTileCols == 0;
+  return rows > 0 && cols > 0 && rows <= kMaxRows && cols <= kMaxCols && cols % 16 == 0;
 }
 
 }  // namespace
@@ -600,8 +667,8 @@ bool can_use(const Tensor& input, const Tensor* act_input, const Tensor& output,
   }
   constexpr size_t kMaxGridY = 65535;
   const int M = static_cast<int>(rows);
-  return static_cast<size_t>(M / kRowsPerMxBlock /
-                             walk_length<IS_DACT>(M, static_cast<int>(cols))) <= kMaxGridY;
+  return static_cast<size_t>(row_bands(M) / walk_length<IS_DACT>(M, static_cast<int>(cols))) <=
+         kMaxGridY;
 }
 
 template <bool IS_DACT, bool IS_ACT, typename ParamOP, float (*OP)(float, const ParamOP&),
