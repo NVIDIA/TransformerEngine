@@ -69,6 +69,8 @@ from ..distributed_weight import (
     materialize_weight_for_forward,
     materialize_weight_for_backward,
     finalize_weight_grads,
+    get_weight_gradient_scale,
+    mark_weight_gradient_scale,
 )
 from ..cpp_extensions import (
     general_gemm,
@@ -1603,6 +1605,10 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
                 "bulk_overlap": bwd_args.ub_bulk_wgrad,
             }
 
+            wgrad_scale = get_weight_gradient_scale(saved_weight, bwd_args)
+            if wgrad_scale != 1.0:
+                wgrad_gemm_kwargs["alpha"] = wgrad_scale
+
             def wgrad_gemm(
                 x: torch.Tensor,
                 dy: torch.Tensor,
@@ -1617,6 +1623,8 @@ def _linear_backward_impl(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None
                 """
                 nvtx_range_push(f"{nvtx_label}.wgrad_gemm")
                 dw, db, *_ = general_gemm(x, dy, **wgrad_gemm_kwargs)
+                if wgrad_scale != 1.0:
+                    mark_weight_gradient_scale(dw, wgrad_scale)
                 nvtx_range_pop(f"{nvtx_label}.wgrad_gemm")
                 return dw, db
 

@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Tensor class with MXFP8 data"""
+
 from __future__ import annotations
 from collections.abc import Iterable
 import math
@@ -121,6 +122,59 @@ class MXFP8Quantizer(Quantizer):
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
         """Quantize tensor implementation"""
         return tex.quantize(tensor, self)
+
+    def quantize_segments(
+        self, parts: Tuple[torch.Tensor, ...], shape: Optional[Tuple[int, ...]] = None
+    ) -> QuantizedTensor:
+        """Quantize one or three column segments without a BF16 join buffer.
+
+        Aligned BF16 matrices with both GEMM orientations on SM103 use direct conversion and
+        scale swizzling. Other supported inputs use the native quantizer.
+        """
+        if len(parts) not in (1, 3):
+            raise ValueError("Expected one or three column segments")
+        if any(p.ndim < 2 for p in parts):
+            raise ValueError("Column segments must have at least two dimensions")
+        rows = math.prod(parts[0].shape[:-1])
+        columns = sum(p.shape[-1] for p in parts)
+        shape = tuple(shape or (*parts[0].shape[:-1], columns))
+        if shape[-1] != columns or math.prod(shape) != rows * columns:
+            raise ValueError("Segmented output shape does not match its inputs")
+        if any(math.prod(p.shape[:-1]) != rows for p in parts):
+            raise ValueError("Segment row counts must match")
+        direct = (
+            self.dtype == DType.kFloat8E4M3
+            and self.rowwise_usage
+            and self.columnwise_usage
+            and self.optimize_for_gemm
+            and not self.with_2d_quantization
+            and parts[0].is_cuda
+            and torch.cuda.get_device_capability(parts[0].device) == (10, 3)
+            and rows > 0
+            and rows % 128 == 0
+            and rows * columns // 32 < 2**31 - 128
+            and all(
+                all(size == 1 for size in p.shape[1:-1])
+                and p.shape[0] == rows
+                and p.dtype == torch.bfloat16
+                and p.device == parts[0].device
+                and p.stride(-1) == 1
+                and p.shape[-1] > 0
+                and p.shape[-1] % 128 == 0
+                and p.data_ptr() % 16 == 0
+                and p.shape[-1] <= p.stride(0) <= 2**31 - 1
+                and p.stride(0) % 8 == 0
+                for p in parts
+            )
+        )
+        if direct:
+            # The native binding accepts the exact Python quantizer type.
+            # pylint: disable=unidiomatic-typecheck
+            allocator = self if type(self) is MXFP8Quantizer else self.copy()
+            # pylint: enable=unidiomatic-typecheck
+            return tex.quantize_mxfp8_segments(parts, allocator, shape)
+        joined = parts[0] if len(parts) == 1 else torch.cat(parts, dim=-1)
+        return MXFP8Quantizer.quantize_impl(self.copy(), joined.reshape(shape))
 
     def is_quantizable(self, inp: torch.Tensor) -> bool:
         """Returns whether or not given inp can be quantized"""
