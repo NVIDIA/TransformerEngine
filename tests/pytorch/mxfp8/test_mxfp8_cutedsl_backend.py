@@ -251,18 +251,20 @@ def extract_quantized_output(out, rowwise, columnwise, swizzled):
     compared. Swizzled layout: the meaningful scales are scattered by the swizzle, so the
     top-left slice is meaningless; both backends zero the padding (see zero_scales_kernel),
     so compare the whole buffer instead -- which also covers the padding-zeroing itself.
+    FP8 -0.0 (0x80) is folded into +0.0: both backends round to zero there and may differ only
+    in its sign, which training does not depend on.
     """
     parts = {}
     if rowwise:
         d = out._rowwise_data.view(torch.uint8)
         M, N = d.shape
-        parts["rowwise data"] = d.clone()
+        parts["rowwise data"] = d.masked_fill(d == 0x80, 0)
         s = out._rowwise_scale_inv
         parts["rowwise scales"] = (s if swizzled else s[:M, : (N + 31) // 32]).clone()
     if columnwise:
         d = out._columnwise_data.view(torch.uint8)
         M, N = d.shape
-        parts["colwise data"] = d.clone()
+        parts["colwise data"] = d.masked_fill(d == 0x80, 0)
         s = out._columnwise_scale_inv
         parts["colwise scales"] = (s if swizzled else s[: (M + 31) // 32, :N]).clone()
     return parts

@@ -197,12 +197,15 @@ def extract_quantized_output(out, dbias):
 
     ScaledTensor1x carries scale_inv already trimmed to the unpadded shape (see its
     __post_init__), so there is no uninitialized scale padding to exclude.
+    FP8 -0.0 (0x80) is folded into +0.0: both backends round to zero there and may differ only
+    in its sign, which training does not depend on.
     """
     tensors = [out] if isinstance(out, ScaledTensor1x) else [out.rowwise_tensor, out.colwise_tensor]
     parts = {}
     for t in tensors:
         name = "colwise" if t.is_colwise else "rowwise"
-        parts[f"{name} data"] = np.asarray(t.data.view(jnp.uint8))
+        data = np.asarray(t.data.view(jnp.uint8))
+        parts[f"{name} data"] = np.where(data == 0x80, 0, data).astype(np.uint8)
         parts[f"{name} scales"] = np.asarray(t.scale_inv.view(jnp.uint8))
     return parts, None if dbias is None else np.asarray(dbias)
 
