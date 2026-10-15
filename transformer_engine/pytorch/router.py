@@ -160,20 +160,35 @@ class FusedTopkScoreFunction(torch.autograd.Function):
         topk_indices: Optional[torch.Tensor],
     ):
         # pylint: disable=missing-function-docstring
-        probs, routing_output, intermediate_output = tex.fused_topk_with_score_function_fwd(
-            logits,
-            topk,
-            use_pre_softmax,
-            num_groups,
-            group_topk,
-            scaling_factor,
-            score_function,
-            expert_bias,
-            routing_map_format,
-            topk_indices,
-        )
-        if topk_indices is not None:
-            routing_output = topk_indices
+        ctx.compiled = torch.compiler.is_compiling()
+        if ctx.compiled:
+            probs, routing_output, intermediate_output = _topk_forward(
+                logits,
+                topk,
+                use_pre_softmax,
+                num_groups,
+                group_topk,
+                scaling_factor,
+                score_function,
+                expert_bias,
+                routing_map_format,
+                topk_indices,
+            )
+        else:
+            probs, routing_output, intermediate_output = tex.fused_topk_with_score_function_fwd(
+                logits,
+                topk,
+                use_pre_softmax,
+                num_groups,
+                group_topk,
+                scaling_factor,
+                score_function,
+                expert_bias,
+                routing_map_format,
+                topk_indices,
+            )
+            if topk_indices is not None:
+                routing_output = topk_indices
         if topk_indices is not None:
             ctx.mark_dirty(topk_indices)
         ctx.mark_non_differentiable(routing_output)
@@ -190,6 +205,19 @@ class FusedTopkScoreFunction(torch.autograd.Function):
     def backward(ctx, grad_probs, _):
         # pylint: disable=missing-function-docstring
         routing_map, intermediate_output = ctx.saved_tensors
+        if ctx.compiled:
+            grad_logits = _topk_backward(
+                routing_map,
+                intermediate_output,
+                grad_probs,
+                ctx.topk,
+                ctx.use_pre_softmax,
+                ctx.scaling_factor,
+                ctx.score_function,
+                ctx.routing_map_format,
+                ctx.use_dense_indices,
+            )
+            return grad_logits, None, None, None, None, None, None, None, None, None
         if not grad_probs.is_contiguous():
             grad_probs = grad_probs.contiguous()
         grad_logits = torch.empty_like(grad_probs)
@@ -226,29 +254,45 @@ class FusedTopkScoreFunctionQB(torch.autograd.Function):
         assume_valid_bin_bounds: bool,
     ):
         # pylint: disable=missing-function-docstring
-        bin_bounds_validated = assume_valid_bin_bounds or _validate_qb_bin_bounds(bin_bounds)
-        (
-            probs,
-            routing_output,
-            intermediate_output,
-            _cutoff,
-            histogram_output,
-        ) = tex.fused_topk_with_score_function_qb_fwd(
-            logits,
-            topk,
-            scaling_factor,
-            expert_bias,
-            routing_map_format,
-            topk_indices,
-            histogram,
-            bin_bounds,
-            histogram_mode,
-            bin_bounds_validated,
-        )
+        ctx.compiled = torch.compiler.is_compiling()
+        if ctx.compiled:
+            probs, routing_output, intermediate_output = _qb_forward(
+                logits,
+                topk,
+                scaling_factor,
+                expert_bias,
+                routing_map_format,
+                topk_indices,
+                histogram,
+                bin_bounds,
+                histogram_mode,
+            )
+            histogram_output = histogram
+        else:
+            bin_bounds_validated = assume_valid_bin_bounds or _validate_qb_bin_bounds(bin_bounds)
+            (
+                probs,
+                routing_output,
+                intermediate_output,
+                _cutoff,
+                histogram_output,
+            ) = tex.fused_topk_with_score_function_qb_fwd(
+                logits,
+                topk,
+                scaling_factor,
+                expert_bias,
+                routing_map_format,
+                topk_indices,
+                histogram,
+                bin_bounds,
+                histogram_mode,
+                bin_bounds_validated,
+            )
         if topk_indices is not None:
             routing_output = topk_indices
-            ctx.mark_dirty(topk_indices)
-        ctx.mark_dirty(histogram)
+            ctx.mark_dirty(topk_indices, histogram)
+        else:
+            ctx.mark_dirty(histogram)
         ctx.mark_non_differentiable(routing_output, histogram_output)
         ctx.save_for_backward(routing_output, intermediate_output)
         ctx.topk = topk
@@ -261,6 +305,19 @@ class FusedTopkScoreFunctionQB(torch.autograd.Function):
     def backward(ctx, grad_probs, _, _histogram_grad):
         # pylint: disable=missing-function-docstring
         routing_output, intermediate_output = ctx.saved_tensors
+        if ctx.compiled:
+            grad_logits = _topk_backward(
+                routing_output,
+                intermediate_output,
+                grad_probs,
+                ctx.topk,
+                False,
+                ctx.scaling_factor,
+                "sigmoid",
+                ctx.routing_map_format,
+                ctx.use_dense_indices,
+            )
+            return grad_logits, None, None, None, None, None, None, None, None, None
         if not grad_probs.is_contiguous():
             grad_probs = grad_probs.contiguous()
         grad_logits = torch.empty_like(grad_probs)
@@ -280,14 +337,10 @@ class FusedTopkScoreFunctionQB(torch.autograd.Function):
 
 
 def _needs_eager_router(call):
-    if call.get("topk_indices") is not None and call.get("overwrite_topk_indices", True):
-        return "router output buffers"
     if any(
         call.get(name) is not None
         for name in ("qb_histogram", "qb_bin_bounds", "qb_histogram_mode")
     ):
-        if not call.get("return_qb_histogram_delta", False):
-            return "in-place QB histogram accumulation"
         if not call.get("assume_valid_qb_bin_bounds", False):
             return "QB bin-bound value validation"
     return None
@@ -308,18 +361,16 @@ def fused_topk_with_score_function(
     qb_histogram: Optional[torch.Tensor] = None,
     qb_bin_bounds: Optional[torch.Tensor] = None,
     qb_histogram_mode: Optional[str] = None,
-    overwrite_topk_indices: bool = True,
-    return_qb_histogram_delta: bool = False,
     assume_valid_qb_bin_bounds: bool = False,
 ):
     """
     Fused topk with score function router.
 
-    ``torch.compile`` supports routing maps and dense indices with
-    ``overwrite_topk_indices=False``. Quantile Balancing also requires
-    ``return_qb_histogram_delta=True`` and ``assume_valid_qb_bin_bounds=True``.
-    Buffer mutation and QB value validation fall back to eager execution and do not
-    support ``fullgraph=True``.
+    ``torch.compile(fullgraph=True)`` supports routing maps, dense output buffers, and
+    in-place QB histogram accumulation. QB requires ``assume_valid_qb_bin_bounds=True``;
+    otherwise, bounds value validation falls back to eager execution. For automatic CUDA
+    graph replay, use module buffers or buffers marked with ``torch._dynamo.mark_static_address``
+    for mutated inputs. Ordinary mutated inputs may cause CUDA graph capture to be skipped.
 
     Parameters
     ----------
@@ -345,11 +396,10 @@ def fused_topk_with_score_function(
     topk_indices : torch.Tensor, optional
         Optional output buffer with shape [*logits.shape[:-1], topk]. When provided, its dtype
         controls the dense index output dtype and the routing map is not materialized.
-        With ``overwrite_topk_indices=False``, only its metadata is used.
+        The buffer is overwritten and returned in both eager and compiled execution.
+        Its contents must remain unchanged until the corresponding backward completes.
     qb_histogram : torch.Tensor, optional
         Caller-owned int32 ``[num_experts, num_bins]`` histogram accumulated in place.
-        With ``return_qb_histogram_delta=True``, only its metadata is used; the supplied
-        histogram is neither read nor modified.
     qb_bin_bounds : torch.Tensor, optional
         FP32 CUDA tensor ``[lower, upper]`` defining uniform QB histogram bins. Values must be
         finite with ``lower < upper``. With default value validation, eager calls revalidate
@@ -362,13 +412,6 @@ def fused_topk_with_score_function(
         Invalid replay-time bounds may silently produce an incorrect histogram.
     qb_histogram_mode : str, optional
         ``"two_kernel"`` or ``"fused_atomic"``. Must be provided with the two QB tensors.
-    overwrite_topk_indices : bool, default = True
-        Write indices into ``topk_indices`` and return that buffer. If False, return a new
-        tensor without modifying the supplied buffer. Ignored when ``topk_indices`` is None.
-    return_qb_histogram_delta : bool, default = False
-        Return the current call's histogram as a third output instead of accumulating into
-        ``qb_histogram``. Requires all three QB arguments. The caller owns accumulation,
-        for example ``histogram = histogram + histogram_delta`` across microbatches.
     assume_valid_qb_bin_bounds : bool, default = False
         Skip QB bounds value validation and its CPU synchronization. The caller must
         guarantee finite bounds with ``lower < upper`` on every call and CUDA graph replay,
@@ -386,20 +429,14 @@ def fused_topk_with_score_function(
         - BITMAP_U8: uint8[*logits.shape[:-1], ceil(num_experts/8)]
           LSB-first bit-packed.
         - Dense indices: [*logits.shape[:-1], topk], with the dtype of ``topk_indices``.
-    histogram_delta : torch.Tensor, optional
-        Returned only when ``return_qb_histogram_delta=True``. A new non-differentiable
-        int32 ``[num_experts, num_bins]`` tensor containing this call's counts, excluding
-        all previous counts in ``qb_histogram``.
     """
     if logits.dtype == torch.float64:
         raise ValueError("Current TE does not support float64 router type.")
     routing_map_format = _validate_routing_map_format(routing_map_format)
-    if (
-        not torch.compiler.is_compiling()
-        and topk_indices is not None
-        and not overwrite_topk_indices
-    ):
-        topk_indices = torch.empty_like(topk_indices)
+    compiled_inference = torch.compiler.is_compiling() and (
+        not torch.is_grad_enabled()
+        or not any(t is not None and t.requires_grad for t in (logits, expert_bias, qb_bin_bounds))
+    )
     qb_arguments = (qb_histogram, qb_bin_bounds, qb_histogram_mode)
     if any(value is not None for value in qb_arguments):
         if any(value is None for value in qb_arguments):
@@ -418,8 +455,8 @@ def fused_topk_with_score_function(
                 "qb_histogram_mode must be 'two_kernel' or 'fused_atomic', "
                 f"got {qb_histogram_mode!r}"
             )
-        if torch.compiler.is_compiling():
-            probs, routing_output, _, histogram_delta = _qb_forward(
+        if compiled_inference:
+            probs, routing_output, _ = _qb_forward(
                 logits,
                 topk,
                 scaling_factor,
@@ -430,10 +467,8 @@ def fused_topk_with_score_function(
                 qb_bin_bounds,
                 mode,
             )
-            return probs, routing_output, histogram_delta
-        if return_qb_histogram_delta:
-            qb_histogram = torch.zeros_like(qb_histogram)
-        probs, routing_output, histogram_output = FusedTopkScoreFunctionQB.apply(
+            return probs, routing_output
+        probs, routing_output, _ = FusedTopkScoreFunctionQB.apply(
             logits,
             topk,
             scaling_factor,
@@ -445,12 +480,8 @@ def fused_topk_with_score_function(
             mode,
             assume_valid_qb_bin_bounds,
         )
-        if return_qb_histogram_delta:
-            return probs, routing_output, histogram_output
         return probs, routing_output
-    if return_qb_histogram_delta:
-        raise ValueError("return_qb_histogram_delta requires all three QB arguments")
-    if torch.compiler.is_compiling():
+    if compiled_inference:
         probs, routing_output, _ = _topk_forward(
             logits,
             topk,
@@ -670,8 +701,83 @@ def _routing_map_fake(logits, routing_map_format):
     return logits.new_empty(logits.shape, dtype=torch.bool)
 
 
-@torch.library.custom_op("te_moe::router_topk_fwd", mutates_args=())
 def _topk_forward(
+    logits,
+    topk,
+    use_pre_softmax,
+    num_groups,
+    group_topk,
+    scaling_factor,
+    score_function,
+    expert_bias,
+    routing_map_format,
+    topk_indices,
+):
+    if topk_indices is None:
+        return _topk_map_forward(
+            logits,
+            topk,
+            use_pre_softmax,
+            num_groups,
+            group_topk,
+            scaling_factor,
+            score_function,
+            expert_bias,
+            routing_map_format,
+        )
+    probs, intermediate_output = _topk_indices_forward(
+        logits,
+        topk,
+        use_pre_softmax,
+        num_groups,
+        group_topk,
+        scaling_factor,
+        score_function,
+        expert_bias,
+        routing_map_format,
+        topk_indices,
+    )
+    return probs, topk_indices, intermediate_output
+
+
+def _qb_forward(
+    logits,
+    topk,
+    scaling_factor,
+    expert_bias,
+    routing_map_format,
+    topk_indices,
+    histogram,
+    bin_bounds,
+    histogram_mode,
+):
+    if topk_indices is None:
+        return _qb_map_forward(
+            logits,
+            topk,
+            scaling_factor,
+            expert_bias,
+            routing_map_format,
+            histogram,
+            bin_bounds,
+            histogram_mode,
+        )
+    probs, intermediate_output = _qb_indices_forward(
+        logits,
+        topk,
+        scaling_factor,
+        expert_bias,
+        routing_map_format,
+        topk_indices,
+        histogram,
+        bin_bounds,
+        histogram_mode,
+    )
+    return probs, topk_indices, intermediate_output
+
+
+@torch.library.custom_op("te_moe::router_topk_map_fwd", mutates_args=())
+def _topk_map_forward(
     logits: torch.Tensor,
     topk: int,
     use_pre_softmax: bool,
@@ -681,10 +787,8 @@ def _topk_forward(
     score_function: str,
     expert_bias: Optional[torch.Tensor],
     routing_map_format: int,
-    topk_indices: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     with torch.cuda.device(logits.device):
-        indices = torch.empty_like(topk_indices) if topk_indices is not None else None
         return tex.fused_topk_with_score_function_fwd(
             logits,
             topk,
@@ -695,12 +799,12 @@ def _topk_forward(
             score_function,
             expert_bias,
             routing_map_format,
-            indices,
+            None,
         )
 
 
-@_topk_forward.register_fake
-def _topk_forward_fake(
+@_topk_map_forward.register_fake
+def _topk_map_forward_fake(
     logits,
     topk,
     use_pre_softmax,
@@ -710,7 +814,6 @@ def _topk_forward_fake(
     score_function,
     expert_bias,
     routing_map_format,
-    topk_indices=None,
 ):
     del (
         topk,
@@ -723,13 +826,56 @@ def _topk_forward_fake(
     )
     return (
         logits.new_empty(logits.shape),
-        (
-            torch.empty_like(topk_indices)
-            if topk_indices is not None
-            else _routing_map_fake(logits, routing_map_format)
-        ),
+        _routing_map_fake(logits, routing_map_format),
         logits.new_empty(logits.shape, dtype=torch.float32),
     )
+
+
+@torch.library.custom_op("te_moe::router_topk_indices_fwd", mutates_args=("topk_indices",))
+def _topk_indices_forward(
+    logits: torch.Tensor,
+    topk: int,
+    use_pre_softmax: bool,
+    num_groups: Optional[int],
+    group_topk: Optional[int],
+    scaling_factor: Optional[float],
+    score_function: str,
+    expert_bias: Optional[torch.Tensor],
+    routing_map_format: int,
+    topk_indices: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    with torch.cuda.device(logits.device):
+        probs, _, intermediate_output = tex.fused_topk_with_score_function_fwd(
+            logits,
+            topk,
+            use_pre_softmax,
+            num_groups,
+            group_topk,
+            scaling_factor,
+            score_function,
+            expert_bias,
+            routing_map_format,
+            topk_indices,
+        )
+    return probs, intermediate_output
+
+
+@_topk_indices_forward.register_fake
+def _topk_indices_forward_fake(
+    logits,
+    topk,
+    use_pre_softmax,
+    num_groups,
+    group_topk,
+    scaling_factor,
+    score_function,
+    expert_bias,
+    routing_map_format,
+    topk_indices,
+):
+    del topk, use_pre_softmax, num_groups, group_topk, scaling_factor
+    del score_function, expert_bias, routing_map_format, topk_indices
+    return torch.empty_like(logits), torch.empty_like(logits, dtype=torch.float32)
 
 
 @torch.library.custom_op("te_moe::router_topk_bwd", mutates_args=())
@@ -779,78 +925,86 @@ def _topk_backward_fake(
     return grad_probs.new_empty(grad_probs.shape)
 
 
-def _topk_setup_context(ctx, inputs, output):
-    (
-        _,
-        ctx.topk,
-        ctx.use_pre_softmax,
-        _,
-        _,
-        ctx.scaling_factor,
-        ctx.score_function,
-        _,
-        ctx.routing_map_format,
-        topk_indices,
-    ) = inputs
-    ctx.use_dense_indices = topk_indices is not None
-    _, routing_map, intermediate_output = output
-    ctx.mark_non_differentiable(routing_map, intermediate_output)
-    ctx.save_for_backward(routing_map, intermediate_output)
-
-
-def _topk_autograd(ctx, grad_probs, _grad_map, _grad_intermediate):
-    routing_map, intermediate_output = ctx.saved_tensors
-    grad_logits = _topk_backward(
-        routing_map,
-        intermediate_output,
-        grad_probs,
-        ctx.topk,
-        ctx.use_pre_softmax,
-        ctx.scaling_factor,
-        ctx.score_function,
-        ctx.routing_map_format,
-        ctx.use_dense_indices,
-    )
-    return grad_logits, None, None, None, None, None, None, None, None, None
-
-
-_topk_forward.register_autograd(_topk_autograd, setup_context=_topk_setup_context)
-
-
-@torch.library.custom_op("te_moe::router_qb_fwd", mutates_args=())
-def _qb_forward(
+@torch.library.custom_op("te_moe::router_qb_map_fwd", mutates_args=("histogram",))
+def _qb_map_forward(
     logits: torch.Tensor,
     topk: int,
     scaling_factor: Optional[float],
     expert_bias: torch.Tensor,
     routing_map_format: int,
-    topk_indices: Optional[torch.Tensor],
     histogram: torch.Tensor,
     bin_bounds: torch.Tensor,
     histogram_mode: int,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     with torch.cuda.device(logits.device):
-        indices = torch.empty_like(topk_indices) if topk_indices is not None else None
-        histogram_delta = torch.zeros_like(histogram)
-        probs, routing_output, intermediate_output, _, histogram_delta = (
+        probs, routing_output, intermediate_output, _, _ = (
             tex.fused_topk_with_score_function_qb_fwd(
                 logits,
                 topk,
                 scaling_factor,
                 expert_bias,
                 routing_map_format,
-                indices,
-                histogram_delta,
+                None,
+                histogram,
                 bin_bounds,
                 histogram_mode,
                 True,
             )
         )
-    return probs, routing_output, intermediate_output, histogram_delta
+    return probs, routing_output, intermediate_output
 
 
-@_qb_forward.register_fake
-def _qb_forward_fake(
+@_qb_map_forward.register_fake
+def _qb_map_forward_fake(
+    logits,
+    topk,
+    scaling_factor,
+    expert_bias,
+    routing_map_format,
+    histogram,
+    bin_bounds,
+    histogram_mode,
+):
+    del topk, scaling_factor, expert_bias, histogram, bin_bounds, histogram_mode
+    return (
+        logits.new_empty(logits.shape),
+        _routing_map_fake(logits, routing_map_format),
+        logits.new_empty(logits.shape, dtype=torch.float32),
+    )
+
+
+@torch.library.custom_op(
+    "te_moe::router_qb_indices_fwd", mutates_args=("topk_indices", "histogram")
+)
+def _qb_indices_forward(
+    logits: torch.Tensor,
+    topk: int,
+    scaling_factor: Optional[float],
+    expert_bias: torch.Tensor,
+    routing_map_format: int,
+    topk_indices: torch.Tensor,
+    histogram: torch.Tensor,
+    bin_bounds: torch.Tensor,
+    histogram_mode: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    with torch.cuda.device(logits.device):
+        probs, _, intermediate_output, _, _ = tex.fused_topk_with_score_function_qb_fwd(
+            logits,
+            topk,
+            scaling_factor,
+            expert_bias,
+            routing_map_format,
+            topk_indices,
+            histogram,
+            bin_bounds,
+            histogram_mode,
+            True,
+        )
+    return probs, intermediate_output
+
+
+@_qb_indices_forward.register_fake
+def _qb_indices_forward_fake(
     logits,
     topk,
     scaling_factor,
@@ -861,44 +1015,9 @@ def _qb_forward_fake(
     bin_bounds,
     histogram_mode,
 ):
-    del topk, scaling_factor, expert_bias, bin_bounds, histogram_mode
-    return (
-        logits.new_empty(logits.shape),
-        (
-            torch.empty_like(topk_indices)
-            if topk_indices is not None
-            else _routing_map_fake(logits, routing_map_format)
-        ),
-        logits.new_empty(logits.shape, dtype=torch.float32),
-        torch.empty_like(histogram),
-    )
-
-
-def _qb_setup_context(ctx, inputs, output):
-    _, ctx.topk, ctx.scaling_factor, _, ctx.routing_map_format, indices, _, _, _ = inputs
-    ctx.use_dense_indices = indices is not None
-    _, routing_output, intermediate_output, histogram_delta = output
-    ctx.mark_non_differentiable(routing_output, intermediate_output, histogram_delta)
-    ctx.save_for_backward(routing_output, intermediate_output)
-
-
-def _qb_autograd(ctx, grad_probs, _grad_routing, _grad_intermediate, _grad_histogram):
-    routing_output, intermediate_output = ctx.saved_tensors
-    grad_logits = _topk_backward(
-        routing_output,
-        intermediate_output,
-        grad_probs,
-        ctx.topk,
-        False,
-        ctx.scaling_factor,
-        "sigmoid",
-        ctx.routing_map_format,
-        ctx.use_dense_indices,
-    )
-    return grad_logits, None, None, None, None, None, None, None, None
-
-
-_qb_forward.register_autograd(_qb_autograd, setup_context=_qb_setup_context)
+    del topk, scaling_factor, expert_bias, routing_map_format, topk_indices
+    del histogram, bin_bounds, histogram_mode
+    return torch.empty_like(logits), torch.empty_like(logits, dtype=torch.float32)
 
 
 @torch.library.custom_op("te_moe::router_score_fwd", mutates_args=())

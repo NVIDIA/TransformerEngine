@@ -158,7 +158,7 @@ def test_router_compile_replay(histogram_mode, index_dtype):
         else None
     )
 
-    def router(logits, bounds, total):
+    def router(logits, bounds, total, indices, histogram):
         outputs = fused_topk_with_score_function(
             logits,
             4,
@@ -170,17 +170,20 @@ def test_router_compile_replay(histogram_mode, index_dtype):
             bias,
             routing_map_format="bitmap_u8" if indices is None else "bytemap",
             topk_indices=indices,
-            overwrite_topk_indices=False,
             qb_histogram=histogram if histogram_mode else None,
             qb_bin_bounds=bounds if histogram_mode else None,
             qb_histogram_mode=histogram_mode,
-            return_qb_histogram_delta=histogram_mode is not None,
             assume_valid_qb_bin_bounds=histogram_mode is not None,
         )
         _, scores = fused_compute_score_for_moe_aux_loss(logits, 4, "sigmoid")
         loss = fused_moe_aux_loss(scores.reshape(-1, 32), counts, total, 32, 4, 0.01)
         return (outputs[0].float().square().sum() + loss, *outputs[1:])
 
+    reference_histogram = histogram.clone()
+    reference_indices = torch.empty_like(indices) if indices is not None else None
+    torch._dynamo.mark_static_address(histogram)
+    if indices is not None:
+        torch._dynamo.mark_static_address(indices)
     compiled = torch.compile(router, fullgraph=True, mode="reduce-overhead")
     for step, new_bounds in enumerate(([-1.1, 1.2], [-0.3, 0.7], [-0.8, 1.4])):
         torch.compiler.cudagraph_mark_step_begin()
@@ -190,21 +193,25 @@ def test_router_compile_replay(histogram_mode, index_dtype):
         if step == 1:
             logits = logits.flip(-1).detach().requires_grad_(True)
         eager_logits = logits.detach().clone().requires_grad_(True)
-        actual = compiled(logits, bounds, total)
-        expected = router(eager_logits, bounds, total)
+        actual = compiled(logits, bounds, total, indices, histogram)
+        expected = router(eager_logits, bounds, total, reference_indices, reference_histogram)
         torch.testing.assert_close(actual, expected)
-        torch.testing.assert_close(histogram, torch.full_like(histogram, 7 + step))
+        torch.testing.assert_close(histogram, reference_histogram)
         if indices is not None:
-            torch.testing.assert_close(indices, torch.full_like(indices, -1 - step))
-            indices.sub_(1)
+            assert actual[1].data_ptr() == indices.data_ptr()
+            torch.testing.assert_close(indices, reference_indices)
         histogram.add_(1)
+        reference_histogram.add_(1)
         bounds.add_(0.1)
         actual_grad = torch.autograd.grad(actual[0], logits)
         expected_grad = torch.autograd.grad(expected[0], eager_logits)
         torch.testing.assert_close(actual_grad, expected_grad)
     with torch.no_grad():
         torch.compiler.cudagraph_mark_step_begin()
-        torch.testing.assert_close(compiled(logits, bounds, total), router(logits, bounds, total))
+        actual = compiled(logits, bounds, total, indices, histogram)
+        expected = router(logits, bounds, total, reference_indices, reference_histogram)
+        torch.testing.assert_close(actual, expected)
+        torch.testing.assert_close(histogram, reference_histogram)
     assert not counters["inductor"]["cudagraph_skips"]
 
 
@@ -233,7 +240,6 @@ def test_router_compile_dynamic(dtype, index_dtype):
             None,
             "bytemap" if indices is not None else "bitmap_u8",
             topk_indices=indices,
-            overwrite_topk_indices=False,
         )
         _, scores = fused_compute_score_for_moe_aux_loss(logits, 4, "sigmoid", 1)
         aux_loss = fused_moe_aux_loss(scores, counts, logits.shape[0], 130, 4, 0.01)
@@ -277,19 +283,20 @@ def test_router_compile_opcheck(dtype, routing_map_format, index_dtype, histogra
         if index_dtype is not None
         else None
     )
+    forward_logits = logits.detach()
     if histogram_mode is not None:
         bias = torch.zeros(130, device="cuda")
         histogram = torch.full((130, 64), 7, device="cuda", dtype=torch.int32)
         bounds = torch.tensor([-1.0, 1.0], device="cuda")
         torch.library.opcheck(
-            router._qb_forward,
+            router._qb_indices_forward if indices is not None else router._qb_map_forward,
             (
-                logits,
+                forward_logits,
                 4,
                 None,
                 bias,
                 routing_map_format,
-                indices,
+                *((indices,) if indices is not None else ()),
                 histogram,
                 bounds,
                 int(histogram_mode),
@@ -297,8 +304,19 @@ def test_router_compile_opcheck(dtype, routing_map_format, index_dtype, histogra
         )
     else:
         torch.library.opcheck(
-            router._topk_forward,
-            (logits, 4, False, None, None, None, "sigmoid", None, routing_map_format, indices),
+            router._topk_indices_forward if indices is not None else router._topk_map_forward,
+            (
+                forward_logits,
+                4,
+                False,
+                None,
+                None,
+                None,
+                "sigmoid",
+                None,
+                routing_map_format,
+                *((indices,) if indices is not None else ()),
+            ),
         )
         if index_dtype in (None, torch.int16):
             torch.library.opcheck(router._score_forward, (logits, 4, "softmax", routing_map_format))
@@ -310,18 +328,8 @@ def test_router_compile_opcheck(dtype, routing_map_format, index_dtype, histogra
                 )
 
 
-@pytest.mark.parametrize(
-    "qb,overwrite,delta,assume_valid",
-    [
-        (False, True, False, False),
-        (True, True, False, False),
-        (True, False, False, False),
-        (True, False, False, True),
-        (True, False, True, False),
-        (True, True, True, True),
-    ],
-)
-def test_router_compile_eager_fallback(qb, overwrite, delta, assume_valid):
+@pytest.mark.parametrize("index_dtype", [None, torch.int32])
+def test_router_compile_eager_fallback(index_dtype):
     torch._dynamo.reset()
     logits = torch.randn(32, 32, device="cuda", requires_grad=True)
     bias = torch.zeros(32, device="cuda")
@@ -339,13 +347,10 @@ def test_router_compile_eager_fallback(qb, overwrite, delta, assume_valid):
             None,
             "sigmoid",
             bias,
-            topk_indices=indices if not qb or (delta and assume_valid) else None,
-            qb_histogram=histogram if qb else None,
-            qb_bin_bounds=bounds if qb else None,
-            qb_histogram_mode="two_kernel" if qb else None,
-            **({} if overwrite else {"overwrite_topk_indices": False}),
-            return_qb_histogram_delta=delta,
-            assume_valid_qb_bin_bounds=assume_valid,
+            topk_indices=indices if index_dtype is not None else None,
+            qb_histogram=histogram,
+            qb_bin_bounds=bounds,
+            qb_histogram_mode="two_kernel",
         )
 
     with pytest.warns(UserWarning, match="Falling back to eager execution"):
@@ -357,8 +362,7 @@ def test_router_compile_eager_fallback(qb, overwrite, delta, assume_valid):
         torch.compile(router, fullgraph=True)(logits)
 
 
-@pytest.mark.parametrize("delta", [False, True])
-def test_qb_trusted_bounds_skip_value_validation(monkeypatch, delta):
+def test_qb_trusted_bounds_skip_value_validation(monkeypatch):
     from transformer_engine.pytorch import router
 
     logits = torch.randn(8, 16, device="cuda", requires_grad=True)
@@ -368,7 +372,6 @@ def test_qb_trusted_bounds_skip_value_validation(monkeypatch, delta):
         qb_histogram=torch.zeros(16, 32, device="cuda", dtype=torch.int32),
         qb_bin_bounds=bounds,
         qb_histogram_mode="two_kernel",
-        return_qb_histogram_delta=delta,
     )
 
     def unexpected_validation(_):
@@ -423,7 +426,6 @@ def test_qb_trusted_bounds_check_metadata(compiled, invalid):
             qb_histogram=histogram,
             qb_bin_bounds=bounds,
             qb_histogram_mode="two_kernel",
-            return_qb_histogram_delta=True,
             assume_valid_qb_bin_bounds=True,
         )
 
@@ -716,16 +718,10 @@ def run_comparison(
         score_function=score_function,
         expert_bias=expert_bias_clone,
         topk_indices=topk_indices,
-        overwrite_topk_indices=execution == "eager",
     )
     assert probs_fused.dtype == dtype and not routing_output_fused.requires_grad
     if topk_output_mode == "dense":
-        assert (routing_output_fused.data_ptr() == topk_indices.data_ptr()) == (
-            execution == "eager"
-        )
-        if execution != "eager":
-            torch.testing.assert_close(topk_indices, torch.full_like(topk_indices, -1))
-            topk_indices.fill_(-2)
+        assert routing_output_fused.data_ptr() == topk_indices.data_ptr()
         assert routing_output_fused.dtype == topk_index_dtype
         routing_map_fused = topk_indices_to_routing_map(routing_output_fused, num_experts)
     else:
@@ -829,18 +825,17 @@ def test_topk_sqrtsoftplus(
 
 
 @pytest.mark.parametrize(
-    "execution,dtype,histogram_mode,topk,routing_output_mode,overwrite,delta",
+    "execution,dtype,histogram_mode,topk,routing_output_mode,shape",
     [
-        ("eager", torch.float32, *case, overwrite, False)
+        ("eager", torch.float32, *case, (257, 896, 1000))
         for case in product(
             ["two_kernel", "fused_atomic"],
             [8, 16],
             ["bytemap", "bitmap_u8", "dense_int16", "dense_int32", "dense_int64"],
         )
-        for overwrite in ([False, True] if case[2].startswith("dense") else [True])
     ]
     + [
-        (execution, dtype, histogram_mode, topk, layout, False, True)
+        (execution, dtype, histogram_mode, topk, layout, (64, 32, 31))
         for execution in ["eager", "compile"]
         for dtype, histogram_mode, topk, layout in [
             (torch.float32, "two_kernel", 1, "bytemap"),
@@ -852,27 +847,20 @@ def test_topk_sqrtsoftplus(
         ]
     ],
 )
-def test_qb_topk_histogram(
-    histogram_mode,
-    topk,
-    routing_output_mode,
-    overwrite,
-    execution,
-    dtype,
-    delta,
-):
-    num_tokens, num_experts, num_bins = (64, 32, 31) if delta else (257, 896, 1000)
-    logits = torch.randn(
-        num_tokens, num_experts, device="cuda", dtype=torch.float32, requires_grad=True
-    )
-    if delta:
+def test_qb_topk_histogram(histogram_mode, topk, routing_output_mode, execution, dtype, shape):
+    num_tokens, num_experts, num_bins = shape
+    small = num_tokens == 64
+    logits = torch.randn(num_tokens, num_experts, device="cuda", dtype=dtype, requires_grad=True)
+    if small:
         logits = (
             _compile_logits(dtype).reshape(num_tokens, num_experts).detach().requires_grad_(True)
         )
     reference_logits = logits.detach().float().requires_grad_(True)
     expert_bias = torch.linspace(-0.2, 0.2, num_experts, device="cuda", dtype=torch.float32)
     bin_bounds = torch.stack((expert_bias.min() - 1.0, expert_bias.max() + 1.0))
-    reference_histogram = torch.zeros(num_experts, num_bins, device="cuda", dtype=torch.int32)
+    reference_histogram = torch.full(
+        (num_experts, num_bins), 7 if small else 0, device="cuda", dtype=torch.int32
+    )
     reference = qb_topk_score_function_pytorch(
         reference_logits,
         topk,
@@ -883,7 +871,7 @@ def test_qb_topk_histogram(
     )
 
     fused_logits = logits.detach().clone().requires_grad_(True)
-    fused_histogram = torch.full_like(reference_histogram, 7 if delta else 0)
+    fused_histogram = torch.full_like(reference_histogram, 7 if small else 0)
     histogram_version = fused_histogram._version
     dense_dtype = {
         "dense_int16": torch.int16,
@@ -915,31 +903,21 @@ def test_qb_topk_histogram(
         qb_histogram=fused_histogram,
         qb_bin_bounds=bin_bounds,
         qb_histogram_mode=histogram_mode,
-        overwrite_topk_indices=overwrite,
-        return_qb_histogram_delta=delta,
-        assume_valid_qb_bin_bounds=delta,
+        assume_valid_qb_bin_bounds=execution == "compile",
     )
     fused_probs, fused_routing_output = outputs[:2]
-    if delta:
+    if small:
         _check_compile_reference(fused_probs, reference["probs"], dtype)
     else:
         torch.testing.assert_close(fused_probs, reference["probs"])
     assert not fused_routing_output.requires_grad
-    if delta:
-        assert not outputs[2].requires_grad
-        assert outputs[2].data_ptr() != fused_histogram.data_ptr()
-        assert fused_histogram._version == histogram_version
-        torch.testing.assert_close(fused_histogram, torch.full_like(fused_histogram, 7))
-        torch.testing.assert_close(outputs[2], reference["histogram"])
-        fused_histogram.add_(1)
-        bin_bounds.add_(0.1)
-    else:
-        torch.testing.assert_close(fused_histogram, reference["histogram"])
+    assert len(outputs) == 2
+    assert fused_histogram._version > histogram_version
+    torch.testing.assert_close(fused_histogram, reference["histogram"])
+    fused_histogram.add_(1)
+    bin_bounds.add_(0.1)
     if dense_dtype is not None:
-        assert (fused_routing_output.data_ptr() == topk_indices.data_ptr()) == overwrite
-        if not overwrite:
-            torch.testing.assert_close(topk_indices, torch.full_like(topk_indices, -1))
-            topk_indices.fill_(-2)
+        assert fused_routing_output.data_ptr() == topk_indices.data_ptr()
         fused_routing_map = topk_indices_to_routing_map(fused_routing_output, num_experts)
         torch.testing.assert_close(fused_routing_map, reference["routing_map"])
     elif routing_output_mode == "bitmap_u8":
@@ -953,7 +931,7 @@ def test_qb_topk_histogram(
     grad = torch.randn((*fused_probs.shape, 2), device="cuda", dtype=dtype)[..., 0]
     reference["probs"].backward(grad.float())
     fused_probs.backward(grad)
-    if delta:
+    if small:
         _check_compile_reference(fused_logits.grad, reference_logits.grad, dtype)
     else:
         torch.testing.assert_close(fused_logits.grad, reference_logits.grad, atol=1e-5, rtol=1e-5)
@@ -969,17 +947,17 @@ def test_qb_topk_histogram(
     ],
 )
 def test_qb_histogram_accumulates_microbatches(execution, dtype, histogram_mode):
-    functional = execution == "compile"
-    num_experts, num_bins = (130, 64) if functional else (64, 1000)
+    compiled = execution == "compile"
+    num_experts, num_bins = (130, 64) if compiled else (64, 1000)
     expert_bias = torch.linspace(-0.1, 0.1, num_experts, device="cuda")
     bounds = torch.stack((expert_bias.min() - 1.0, expert_bias.max() + 1.0))
     histogram = torch.full(
-        (num_experts, num_bins), 7 if functional else 0, device="cuda", dtype=torch.int32
+        (num_experts, num_bins), 7 if compiled else 0, device="cuda", dtype=torch.int32
     )
     reference_histogram = histogram.clone()
 
-    def route(logits, histogram, bounds):
-        outputs = fused_topk_with_score_function(
+    def route(logits, histogram, bounds, indices):
+        return fused_topk_with_score_function(
             logits,
             8,
             False,
@@ -988,41 +966,85 @@ def test_qb_histogram_accumulates_microbatches(execution, dtype, histogram_mode)
             None,
             "sigmoid",
             expert_bias,
-            routing_map_format="bitmap_u8" if functional else "bytemap",
+            routing_map_format="bitmap_u8" if compiled and indices is None else "bytemap",
+            topk_indices=indices,
             qb_histogram=histogram,
             qb_bin_bounds=bounds,
             qb_histogram_mode=histogram_mode,
-            return_qb_histogram_delta=functional,
-            assume_valid_qb_bin_bounds=functional,
+            assume_valid_qb_bin_bounds=compiled,
         )
-        return outputs[0], outputs[1], histogram + outputs[2] if functional else histogram
 
-    if functional:
+    if compiled:
         torch._dynamo.reset()
         route = torch.compile(route, fullgraph=True, dynamic=True)
-    for num_tokens in (17, 33, 64) if functional else (127, 193):
+    pending = []
+    for num_tokens in (17, 33, 64) if compiled else (127, 193):
         logits = torch.randn(
             num_tokens, num_experts, device="cuda", dtype=dtype, requires_grad=True
         )
         reference = qb_topk_score_function_pytorch(
             logits, 8, expert_bias, bounds, num_bins, reference_histogram
         )
-        input_histogram = histogram
-        probs, routing, histogram = route(logits, histogram, bounds)
+        indices = (
+            torch.empty(num_tokens, 8, device="cuda", dtype=torch.int32)
+            if histogram_mode == "fused_atomic"
+            else None
+        )
+        probs, routing = route(logits, histogram, bounds, indices)
         torch.testing.assert_close(histogram, reference["histogram"])
         _check_compile_reference(probs, reference["probs"], dtype)
-        expected_map = (
-            _bytemap_to_bitmap_u8(reference["routing_map"])
-            if functional
-            else reference["routing_map"]
-        )
-        torch.testing.assert_close(routing, expected_map)
-        if functional:
-            assert histogram.data_ptr() != input_histogram.data_ptr()
-            actual_grad = torch.autograd.grad(probs.float().square().sum(), logits)[0]
-            ref_grad = torch.autograd.grad(reference["probs"].float().square().sum(), logits)[0]
-            _check_compile_reference(actual_grad, ref_grad, dtype)
+        if indices is not None:
+            assert routing.data_ptr() == indices.data_ptr()
+            torch.testing.assert_close(
+                topk_indices_to_routing_map(routing, num_experts), reference["routing_map"]
+            )
+        else:
+            expected_map = (
+                _bytemap_to_bitmap_u8(reference["routing_map"])
+                if compiled
+                else reference["routing_map"]
+            )
+            torch.testing.assert_close(routing, expected_map)
+        pending.append((logits, probs, reference["probs"]))
+        if compiled:
             bounds.add_(0.03)
+    for logits, probs, reference_probs in reversed(pending):
+        actual_grad = torch.autograd.grad(probs.float().square().sum(), logits)[0]
+        ref_grad = torch.autograd.grad(reference_probs.float().square().sum(), logits)[0]
+        _check_compile_reference(actual_grad, ref_grad, dtype)
+
+
+@pytest.mark.parametrize("execution", ["eager", "compile"])
+@pytest.mark.parametrize("histogram_mode", [None, "two_kernel", "fused_atomic"])
+def test_router_saved_indices(execution, histogram_mode):
+    logits = torch.randn(16, 32, device="cuda", requires_grad=True)
+    indices = torch.empty(16, 4, device="cuda", dtype=torch.int32)
+    bias = torch.zeros(32, device="cuda")
+    histogram = torch.zeros(32, 31, device="cuda", dtype=torch.int32)
+    bounds = torch.tensor([-1.0, 1.0], device="cuda")
+
+    def route(x):
+        return fused_topk_with_score_function(
+            x,
+            4,
+            False,
+            None,
+            None,
+            None,
+            "sigmoid",
+            bias,
+            topk_indices=indices,
+            qb_histogram=histogram if histogram_mode else None,
+            qb_bin_bounds=bounds if histogram_mode else None,
+            qb_histogram_mode=histogram_mode,
+            assume_valid_qb_bin_bounds=True,
+        )
+
+    route = _router_function(route, execution)
+    probs, _ = route(logits)
+    route(-logits)
+    with pytest.raises(RuntimeError, match="modified by an inplace operation"):
+        probs.sum().backward()
 
 
 def test_qb_topk_argument_validation():
@@ -1055,19 +1077,6 @@ def test_qb_topk_argument_validation():
             qb_histogram=histogram,
             qb_bin_bounds=bin_bounds,
             qb_histogram_mode="two_kernel",
-        )
-
-    with pytest.raises(ValueError, match="return_qb_histogram_delta requires"):
-        fused_topk_with_score_function(
-            logits,
-            4,
-            False,
-            None,
-            None,
-            None,
-            "sigmoid",
-            None,
-            return_qb_histogram_delta=True,
         )
 
 
@@ -1106,8 +1115,7 @@ def test_qb_topk_uses_logits_device(histogram_mode):
 
 @pytest.mark.parametrize("histogram_mode", ["two_kernel", "fused_atomic"])
 @pytest.mark.parametrize("invalid_bounds", ["equal", "reversed", "nonfinite"])
-@pytest.mark.parametrize("delta", [False, True])
-def test_qb_topk_rejects_invalid_bin_bounds(histogram_mode, invalid_bounds, delta):
+def test_qb_topk_rejects_invalid_bin_bounds(histogram_mode, invalid_bounds):
     logits = torch.randn(8, 16, device="cuda", dtype=torch.float32)
     expert_bias = torch.zeros(16, device="cuda", dtype=torch.float32)
     histogram = torch.zeros(16, 32, device="cuda", dtype=torch.int32)
@@ -1130,7 +1138,6 @@ def test_qb_topk_rejects_invalid_bin_bounds(histogram_mode, invalid_bounds, delt
             qb_histogram=histogram,
             qb_bin_bounds=bin_bounds,
             qb_histogram_mode=histogram_mode,
-            return_qb_histogram_delta=delta,
         )
 
 
@@ -1536,7 +1543,6 @@ def test_topk_preserves_leading_dims(topk_index_dtype, execution):
         score_function="softmax",
         expert_bias=None,
         topk_indices=topk_indices,
-        overwrite_topk_indices=execution == "eager",
     )
 
     assert probs.shape == logits.shape
