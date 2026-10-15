@@ -133,8 +133,8 @@ void nvte_multi_tensor_swizzle_block_scaling_to_mxfp8_scaling_factors(const NVTE
  *
  *  Requirements:
  *  - input is an FP8 block scaling (1D or 2D) grouped tensor with rowwise data and FP32 rowwise
- *    scale_inv in the compact per-tensor layout; per-tensor first dims or last dims may vary,
- *    but not both
+ *    scale_inv in the compact per-tensor layout; per-tensor first dims or last dims (int64) may
+ *    vary, but not both
  *  - output is an MXFP8 grouped tensor with the same rowwise data pointer, dims and logical
  *    shape, with_gemm_swizzled_scales set, and E8M0 rowwise scale_inv. Tensor t with rowwise
  *    data [f, l] is written at the cumulative offset of

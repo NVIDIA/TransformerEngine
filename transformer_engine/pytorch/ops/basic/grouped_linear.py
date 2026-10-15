@@ -151,6 +151,12 @@ class GroupedLinear(BasicOperation):
     dimension, applying a separate ``torch.nn.Linear`` to each split,
     and concatenating along the first dimension.
 
+    The grouped-tensor path is selected automatically where it is
+    supported (see ``is_op_fuser_grouped_tensor_path_supported``). With
+    MXFP8 or FP8 block scaling, it relies on every split size being a
+    multiple of 128, as ``split_alignment`` declares. This is checked only
+    on the device, so other split sizes can produce incorrect results.
+
     Parameters
     ----------
     num_groups : int
