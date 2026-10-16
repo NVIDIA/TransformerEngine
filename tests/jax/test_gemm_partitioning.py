@@ -55,8 +55,10 @@ def _arg_info(shape, spec):
     return SimpleNamespace(ndim=len(shape), size=int(np.prod(shape)), sharding=sharding)
 
 
-def _parse(lhs_shape, lhs_spec, rhs_shape, rhs_spec, contracting_dims):
-    """Run the partition spec inference for a plain (non-collective) GEMM."""
+def _parse(
+    lhs_shape, lhs_spec, rhs_shape, rhs_spec, contracting_dims, collective_op=CollectiveOp.NONE
+):
+    """Run the partition spec inference for a GEMM (plain by default)."""
     scalar = _arg_info((0,), None)  # scales / bias / alpha / beta (unused for NO_SCALING)
     arg_infos = (
         _arg_info(lhs_shape, lhs_spec),
@@ -71,7 +73,7 @@ def _parse(lhs_shape, lhs_spec, rhs_shape, rhs_spec, contracting_dims):
         arg_infos,
         contracting_dims,
         transpose_batch_sequence=False,
-        collective_op=CollectiveOp.NONE,
+        collective_op=collective_op,
         scaling_mode=ScalingMode.NO_SCALING,
     )
     lhs_specs, _, rhs_specs, *_ = operand_specs
@@ -293,6 +295,65 @@ CASES = {
         ("fsdp", "tp"),
         None,
     ),
+    # --- RHS non-contracting dims sharded by an axis that also shards the LHS. ---
+    # EP shards both the token dim and the weight -> gather the weight, not the activation
+    # (keeping both would put "expert" on two output dims).
+    "ep_shared_axis_gathers_weight": Case(
+        ("fsdp", "expert"),
+        dict(fsdp_resource="fsdp", ep_resource="expert"),
+        (128, 512),
+        (("fsdp", "expert"), None),
+        (512, 256),
+        (None, "expert"),
+        ((1,), (0,)),
+        (("fsdp", "expert"), None),
+        (None, None),
+        (("fsdp", "expert"), None),
+        None,
+    ),
+    # Only the shared axis is dropped from a compound weight spec; "tp" stays sharded.
+    "ep_shared_axis_keeps_other_axes": Case(
+        _TP_AXES,
+        _MR_TP,
+        (128, 512),
+        (("fsdp", "expert"), None),
+        (512, 256),
+        (None, ("expert", "tp")),
+        ((1,), (0,)),
+        (("fsdp", "expert"), None),
+        (None, "tp"),
+        (("fsdp", "expert"), "tp"),
+        None,
+    ),
+    # FSDP gathers only the fsdp axis of a compound weight spec.
+    "fsdp_compound_keeps_other_axes": Case(
+        ("fsdp", "tp"),
+        dict(fsdp_resource="fsdp", tp_resource="tp"),
+        (128, 512),
+        ("fsdp", None),
+        (512, 256),
+        (None, ("fsdp", "tp")),
+        ((1,), (0,)),
+        ("fsdp", None),
+        (None, "tp"),
+        ("fsdp", "tp"),
+        None,
+    ),
+    # Sequence parallelism: tpsp shards the sequence and the weight -> gather the sequence
+    # (Megatron-SP all-gather) and keep the weight sharded.
+    "tpsp_shared_axis_gathers_sequence": Case(
+        ("fsdp", "tpsp"),
+        dict(fsdp_resource="fsdp", tpsp_resource="tpsp"),
+        (4, 128, 512),
+        ("fsdp", "tpsp", None),
+        (512, 256),
+        (None, "tpsp"),
+        ((2,), (0,)),
+        ("fsdp", None, None),
+        (None, "tpsp"),
+        ("fsdp", None, "tpsp"),
+        None,
+    ),
 }
 
 
@@ -309,6 +370,24 @@ class TestGemmPartitioning:
         assert rhs_specs == case.exp_rhs
         assert out_specs == case.exp_out
         assert reduce_spec == case.exp_reduce
+
+    def test_collective_all_gather_keeps_weight_sharded(self):
+        """Collective GEMM AG gathers the tpsp sequence in-kernel, so the weight stays sharded."""
+        with _mesh(("fsdp", "tpsp")), global_shard_guard(
+            MeshResource(fsdp_resource="fsdp", tpsp_resource="tpsp")
+        ):
+            lhs_specs, rhs_specs, out_specs, reduce_spec = _parse(
+                (4, 128, 512),
+                ("fsdp", "tpsp", None),
+                (512, 256),
+                (None, "tpsp"),
+                ((2,), (0,)),
+                collective_op=CollectiveOp.ALL_GATHER,
+            )
+        assert lhs_specs == ("fsdp", "tpsp", None)
+        assert rhs_specs == (None, "tpsp")
+        assert out_specs == ("fsdp", None, "tpsp")
+        assert reduce_spec is None
 
 
 if __name__ == "__main__":
