@@ -26,7 +26,6 @@ import torch
 import onnxscript
 from onnxscript import opset18 as op
 from onnx import defs
-import transformer_engine_torch as tex
 
 from .tensor.float8_tensor import Float8Quantizer
 from .tensor.mxfp8_tensor import MXFP8Quantizer
@@ -187,7 +186,7 @@ def onnx_cs_quantize_fp8_op(tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.T
 @onnx_cs_quantize_fp8_op.register_fake
 def _(tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     return torch.empty(tensor.shape, dtype=torch.uint8, device=tensor.device), torch.ones(
-        1, dtype=torch.float32, device=tensor.device
+        (), dtype=torch.float32, device=tensor.device
     )
 
 
@@ -321,16 +320,13 @@ def onnx_layernorm_op(
     inp: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, eps: float
 ) -> torch.Tensor:
     """ONNX LayerNorm used for inference."""
-    model = tex.LayerNorm(inp.shape[1], eps=eps)
-    model.weight.data = weight
-    model.bias.data = bias
-    return model(inp)
+    return torch.nn.functional.layer_norm(inp, inp.shape[-1:], weight, bias, eps)
 
 
 @onnx_layernorm_op.register_fake
 def _(inp, *_):
     """Fake ONNX LayerNorm used for inference."""
-    return inp
+    return torch.empty_like(inp, memory_format=torch.contiguous_format)
 
 
 def onnx_layernorm_symbolic(
