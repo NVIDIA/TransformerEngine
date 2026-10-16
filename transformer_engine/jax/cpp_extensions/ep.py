@@ -201,15 +201,22 @@ def ep_handle_mem_size(cfg: EpLayerConfig) -> int:
     )
 
 
-def _leading_axis_ok(spec):
-    """Validate an EP input spec; return ``(ok, ep_axis, outer_axes)``.
+def _capture_ep_resource_axes():
+    """Capture physical axes at bind time for asynchronous SPMD partitioning."""
+    resource = global_mesh_resource()
+    outer_axes = tuple(
+        dict.fromkeys(
+            axis for axis in (resource.dp_resource, resource.fsdp_resource) if axis is not None
+        )
+    )
+    return resource.ep_resource, outer_axes
 
-    Leading dim is ``ep`` or a tuple ending in ``ep`` (outer dp/fsdp axes
-    first); all other dims must be replicated.
-    """
-    gsr = global_mesh_resource()
-    ep_axis = gsr.ep_resource
-    outer_axes = tuple(a for a in (gsr.dp_resource, gsr.fsdp_resource) if a is not None)
+
+def _leading_axis_ok(spec, resource_axes=None):
+    """Validate replicated trailing dimensions and EP plus optional outer axes."""
+    ep_axis, outer_axes = (
+        resource_axes if resource_axes is not None else _capture_ep_resource_axes()
+    )
     if len(spec) < 2 or ep_axis is None:
         return False, ep_axis, outer_axes
     if any(ax is not None for ax in spec[1:]):
@@ -223,20 +230,13 @@ def _leading_axis_ok(spec):
 
 
 def _ep_outer_axis():
-    """The single dp/fsdp axis (if any) sitting outside ep on EP-output tensors.
-
-    When set, EP-output globals carry an extra leading ``dp_size`` dim so SPMD
-    sees each DP color's slab as distinct (rather than replicated across DP).
-
-    A dp/fsdp axis that is sized 1 in the active mesh is treated as absent so
-    we don't pin EP-output specs to a degenerate axis that JAX may collapse.
-    """
-    gsr = global_mesh_resource()
-    if gsr.dp_resource is not None and get_mesh_axis_size(gsr.dp_resource) > 1:
-        return gsr.dp_resource
-    if gsr.fsdp_resource is not None and get_mesh_axis_size(gsr.fsdp_resource) > 1:
-        return gsr.fsdp_resource
-    return gsr.dp_resource or gsr.fsdp_resource
+    """Legacy single outer axis used by the standalone EP custom VJP wrapper."""
+    resource = global_mesh_resource()
+    if resource.dp_resource is not None and get_mesh_axis_size(resource.dp_resource) > 1:
+        return resource.dp_resource
+    if resource.fsdp_resource is not None and get_mesh_axis_size(resource.fsdp_resource) > 1:
+        return resource.fsdp_resource
+    return resource.dp_resource or resource.fsdp_resource
 
 
 def _ep_leading_dims(is_outer):
@@ -248,24 +248,20 @@ def _ep_leading_dims(is_outer):
     return (cfg.num_ep_groups * cfg.ep_size,)
 
 
-def _ep_output_spec(*trailing):
-    """PartitionSpec for an EP-output tensor: ``(("dp","ep"), *trailing)`` when
-    DP is set (compound leading axis on a single dim), else ``("ep",*trailing)``."""
-    gsr = global_mesh_resource()
-    outer = _ep_outer_axis()
-    if outer is None:
-        return PartitionSpec(gsr.ep_resource, *trailing)
-    return PartitionSpec((outer, gsr.ep_resource), *trailing)
+def _ep_output_spec(*trailing, resource_axes=None):
+    """Output sharding uses every DP/FSDP outer axis, with EP innermost."""
+    ep_axis, outer_axes = (
+        resource_axes if resource_axes is not None else _capture_ep_resource_axes()
+    )
+    leading = (*outer_axes, ep_axis) if outer_axes else ep_axis
+    return PartitionSpec(leading, *trailing)
 
 
-def _ep_spec_ok(spec, trailing_count):
-    """Leading dim shards along ep (and outer dp/fsdp when set); trailing dims
-    are replicated. JAX may collapse size-1 mesh axes to ``None`` or drop them,
-    so the leading entry is normalized to a set of named axes before comparing.
-    """
-    gsr = global_mesh_resource()
-    ep_axis = gsr.ep_resource
-    outer = _ep_outer_axis()
+def _ep_spec_ok(spec, trailing_count, resource_axes=None):
+    """Validate EP-output axes, allowing JAX to drop size-one mesh axes."""
+    ep_axis, outer_axes = (
+        resource_axes if resource_axes is not None else _capture_ep_resource_axes()
+    )
     if len(spec) != 1 + trailing_count:
         return False
     if any(ax is not None for ax in spec[1:]):
@@ -273,8 +269,7 @@ def _ep_spec_ok(spec, trailing_count):
     leading = spec[0]
     elts = leading if isinstance(leading, tuple) else (leading,)
     actual = frozenset(a for a in elts if a is not None)
-    expected = {ep_axis} if outer is None else {ep_axis, outer}
-    return actual <= expected
+    return actual <= set((*outer_axes, ep_axis))
 
 
 # ── ep_prepare ──────────────────────────────────────────────────────────────
@@ -285,8 +280,8 @@ class EpPreparePrimitive(BasePrimitive):
 
     name = "te_ep_prepare_ffi"
     multiple_results = True
-    impl_static_args = (1, 2, 3, 4)  # top_k, dispatch_output_per_expert_alignment,
-    #                                  topk_idx_dtype, is_outer
+    impl_static_args = (1, 2, 3, 4, 5)  # top_k, dispatch_output_per_expert_alignment,
+    #                                      topk_idx_dtype, is_outer, resource_axes
     inner_primitive = None
     outer_primitive = None
 
@@ -298,10 +293,11 @@ class EpPreparePrimitive(BasePrimitive):
         dispatch_output_per_expert_alignment,
         topk_idx_dtype,
         is_outer,
+        resource_axes,
     ):
         # is_outer=True: global leading dim = (dp*ep,) (or (ep,) with no DP);
         # False: per-shard = (1,).
-        del topk_idx_dtype
+        del topk_idx_dtype, resource_axes
         cfg = get_ep_config()
         num_local_experts = cfg.num_local_experts
         assert (
@@ -326,8 +322,16 @@ class EpPreparePrimitive(BasePrimitive):
 
     @staticmethod
     def lowering(
-        ctx, topk_idx, *, top_k, dispatch_output_per_expert_alignment, topk_idx_dtype, is_outer
+        ctx,
+        topk_idx,
+        *,
+        top_k,
+        dispatch_output_per_expert_alignment,
+        topk_idx_dtype,
+        is_outer,
+        resource_axes,
     ):
+        del resource_axes
         del is_outer
         return ffi.ffi_lowering(EpPreparePrimitive.name)(
             ctx,
@@ -338,7 +342,14 @@ class EpPreparePrimitive(BasePrimitive):
         )
 
     @staticmethod
-    def impl(topk_idx, top_k, dispatch_output_per_expert_alignment, topk_idx_dtype, is_outer):
+    def impl(
+        topk_idx,
+        top_k,
+        dispatch_output_per_expert_alignment,
+        topk_idx_dtype,
+        is_outer,
+        resource_axes,
+    ):
         assert EpPreparePrimitive.inner_primitive is not None
         token_counts, total_recv_tokens, handle_mem = EpPreparePrimitive.inner_primitive.bind(
             topk_idx,
@@ -346,6 +357,7 @@ class EpPreparePrimitive(BasePrimitive):
             dispatch_output_per_expert_alignment=dispatch_output_per_expert_alignment,
             topk_idx_dtype=topk_idx_dtype,
             is_outer=is_outer,
+            resource_axes=resource_axes,
         )
         return token_counts, total_recv_tokens, handle_mem
 
@@ -358,6 +370,7 @@ class EpPreparePrimitive(BasePrimitive):
         dispatch_output_per_expert_alignment,
         topk_idx_dtype,
         is_outer,
+        resource_axes,
     ):
         raise NotImplementedError("EpPreparePrimitive does not support vmap")
 
@@ -367,13 +380,14 @@ class EpPreparePrimitive(BasePrimitive):
         dispatch_output_per_expert_alignment,
         topk_idx_dtype,
         is_outer,
+        resource_axes,
         mesh,
         arg_infos,
         result_infos,
     ):
         del is_outer, result_infos
         idx_spec = arg_infos[0].sharding.spec
-        ok, ep_axis, outer_axes = _leading_axis_ok(idx_spec)
+        ok, ep_axis, outer_axes = _leading_axis_ok(idx_spec, resource_axes)
         if not ok:
             raise NotImplementedError(
                 "EpPrepare: topk_idx leading dim must include ep_resource"
@@ -390,7 +404,12 @@ class EpPreparePrimitive(BasePrimitive):
 
         def sharded_impl(topk_idx):
             return EpPreparePrimitive.impl(
-                topk_idx, top_k, dispatch_output_per_expert_alignment, topk_idx_dtype, False
+                topk_idx,
+                top_k,
+                dispatch_output_per_expert_alignment,
+                topk_idx_dtype,
+                False,
+                resource_axes=resource_axes,
             )
 
         return mesh, sharded_impl, (tc_sharding, trt_sharding, hm_sharding), arg_shardings
@@ -416,8 +435,8 @@ class EpDispatchPrimitive(BasePrimitive):
 
     name = "te_ep_dispatch_ffi"
     multiple_results = True
-    impl_static_args = (4, 5, 6, 7, 8)  # top_k, dispatch_output_per_expert_alignment,
-    #                                     topk_idx_dtype, recv_capacity_per_rank, is_outer
+    impl_static_args = (4, 5, 6, 7, 8, 9)  # top_k, dispatch_output_per_expert_alignment,
+    #                                     topk_idx_dtype, recv_capacity_per_rank, is_outer, resource_axes
     inner_primitive = None
     outer_primitive = None
 
@@ -433,9 +452,11 @@ class EpDispatchPrimitive(BasePrimitive):
         topk_idx_dtype,
         recv_capacity_per_rank,
         is_outer,
+        resource_axes,
     ):
         # is_outer=True: global leading dim = (dp*ep,) (or (ep,) with no DP);
         # False: per-shard = (1,).
+        del resource_axes
         del topk_idx_aval, topk_weights_aval, top_k, dispatch_output_per_expert_alignment
         del topk_idx_dtype
         assert (
@@ -467,7 +488,9 @@ class EpDispatchPrimitive(BasePrimitive):
         topk_idx_dtype,
         recv_capacity_per_rank,
         is_outer,
+        resource_axes,
     ):
+        del resource_axes
         del recv_capacity_per_rank, is_outer
         return ffi.ffi_lowering(
             EpDispatchPrimitive.name,
@@ -494,6 +517,7 @@ class EpDispatchPrimitive(BasePrimitive):
         topk_idx_dtype,
         recv_capacity_per_rank,
         is_outer,
+        resource_axes,
     ):
         assert EpDispatchPrimitive.inner_primitive is not None
         recv_tokens, recv_topk_weights, handle_mem_out = EpDispatchPrimitive.inner_primitive.bind(
@@ -506,6 +530,7 @@ class EpDispatchPrimitive(BasePrimitive):
             topk_idx_dtype=topk_idx_dtype,
             recv_capacity_per_rank=recv_capacity_per_rank,
             is_outer=is_outer,
+            resource_axes=resource_axes,
         )
         return recv_tokens, recv_topk_weights, handle_mem_out
 
@@ -519,6 +544,7 @@ class EpDispatchPrimitive(BasePrimitive):
         topk_idx_dtype,
         recv_capacity_per_rank,
         is_outer,
+        resource_axes,
     ):
         raise NotImplementedError("EpDispatchPrimitive does not support vmap")
 
@@ -529,13 +555,14 @@ class EpDispatchPrimitive(BasePrimitive):
         topk_idx_dtype,
         recv_capacity_per_rank,
         is_outer,
+        resource_axes,
         mesh,
         arg_infos,
         result_infos,
     ):
         del is_outer, result_infos
         tokens_spec = arg_infos[2].sharding.spec
-        ok, ep_axis, outer_axes = _leading_axis_ok(tokens_spec)
+        ok, ep_axis, outer_axes = _leading_axis_ok(tokens_spec, resource_axes)
         if not ok:
             raise NotImplementedError(
                 "EpDispatch: tokens leading dim must include ep_resource"
@@ -569,6 +596,7 @@ class EpDispatchPrimitive(BasePrimitive):
                 topk_idx_dtype,
                 recv_capacity_per_rank,
                 False,
+                resource_axes=resource_axes,
             )
 
         return mesh, sharded_impl, out_shardings, arg_shardings
@@ -600,8 +628,9 @@ class EpPrepareAndDispatchPrimitive(BasePrimitive):
 
     name = "te_ep_prepare_and_dispatch_ffi"
     multiple_results = True
-    impl_static_args = (3, 4, 5, 6, 7)  # top_k, dispatch_output_per_expert_alignment,
-    #                                     topk_idx_dtype, recv_capacity_per_rank, is_outer
+    impl_static_args = (3, 4, 5, 6, 7, 8)  # top_k, dispatch_output_per_expert_alignment,
+    #                                     topk_idx_dtype, recv_capacity_per_rank, is_outer,
+    #                                     resource_axes
     inner_primitive = None
     outer_primitive = None
 
@@ -616,7 +645,9 @@ class EpPrepareAndDispatchPrimitive(BasePrimitive):
         topk_idx_dtype,
         recv_capacity_per_rank,
         is_outer,
+        resource_axes,
     ):
+        del resource_axes
         del topk_idx_aval, topk_weights_aval, topk_idx_dtype
         assert (
             len(tokens_aval.shape) >= 2
@@ -665,7 +696,9 @@ class EpPrepareAndDispatchPrimitive(BasePrimitive):
         topk_idx_dtype,
         recv_capacity_per_rank,
         is_outer,
+        resource_axes,
     ):
+        del resource_axes
         del recv_capacity_per_rank, is_outer
         return ffi.ffi_lowering(EpPrepareAndDispatchPrimitive.name)(
             ctx,
@@ -687,6 +720,7 @@ class EpPrepareAndDispatchPrimitive(BasePrimitive):
         topk_idx_dtype,
         recv_capacity_per_rank,
         is_outer,
+        resource_axes,
     ):
         assert EpPrepareAndDispatchPrimitive.inner_primitive is not None
         return tuple(
@@ -699,6 +733,7 @@ class EpPrepareAndDispatchPrimitive(BasePrimitive):
                 topk_idx_dtype=topk_idx_dtype,
                 recv_capacity_per_rank=recv_capacity_per_rank,
                 is_outer=is_outer,
+                resource_axes=resource_axes,
             )
         )
 
@@ -712,6 +747,7 @@ class EpPrepareAndDispatchPrimitive(BasePrimitive):
         topk_idx_dtype,
         recv_capacity_per_rank,
         is_outer,
+        resource_axes,
     ):
         raise NotImplementedError("EpPrepareAndDispatchPrimitive does not support vmap")
 
@@ -722,13 +758,14 @@ class EpPrepareAndDispatchPrimitive(BasePrimitive):
         topk_idx_dtype,
         recv_capacity_per_rank,
         is_outer,
+        resource_axes,
         mesh,
         arg_infos,
         result_infos,
     ):
         del is_outer, result_infos
         tokens_spec = arg_infos[1].sharding.spec
-        ok, ep_axis, outer_axes = _leading_axis_ok(tokens_spec)
+        ok, ep_axis, outer_axes = _leading_axis_ok(tokens_spec, resource_axes)
         if not ok:
             raise NotImplementedError(
                 "EpPrepareAndDispatch: tokens leading dim must include ep_resource"
@@ -756,6 +793,7 @@ class EpPrepareAndDispatchPrimitive(BasePrimitive):
                 topk_idx_dtype,
                 recv_capacity_per_rank,
                 False,
+                resource_axes=resource_axes,
             )
 
         return mesh, sharded_impl, out_shardings, arg_shardings
@@ -763,7 +801,7 @@ class EpPrepareAndDispatchPrimitive(BasePrimitive):
     @staticmethod
     def shardy_sharding_rule(*args):
         # Static args: (top_k, dispatch_alignment, topk_idx_dtype, recv_capacity_per_rank,
-        # is_outer).
+        # is_outer, resource_axes).
         value_types = args[-2]
         idx_rank = len(value_types[0].shape)
         tok_rank = len(value_types[1].shape)
@@ -813,8 +851,8 @@ class EpCombinePrimitive(BasePrimitive):
 
     name = "te_ep_combine_ffi"
     multiple_results = False
-    impl_static_args = (2, 3, 4, 5, 6)  # top_k, dispatch_output_per_expert_alignment,
-    #                                     topk_idx_dtype, out_leading_shape, out_partition_spec
+    impl_static_args = (2, 3, 4, 5, 6, 7)  # top_k, dispatch_output_per_expert_alignment,
+    #                                     topk_idx_dtype, out_leading_shape, out_partition_spec, resource_axes
     inner_primitive = None
     outer_primitive = None
 
@@ -828,7 +866,9 @@ class EpCombinePrimitive(BasePrimitive):
         topk_idx_dtype,
         out_leading_shape,
         out_partition_spec,
+        resource_axes,
     ):
+        del resource_axes
         del top_k, dispatch_output_per_expert_alignment, topk_idx_dtype
         del out_partition_spec, handle_mem_aval
         assert (
@@ -850,7 +890,9 @@ class EpCombinePrimitive(BasePrimitive):
         topk_idx_dtype,
         out_leading_shape,
         out_partition_spec,
+        resource_axes,
     ):
+        del resource_axes
         del out_leading_shape, out_partition_spec
         return ffi.ffi_lowering(EpCombinePrimitive.name)(
             ctx,
@@ -870,6 +912,7 @@ class EpCombinePrimitive(BasePrimitive):
         topk_idx_dtype,
         out_leading_shape,
         out_partition_spec,
+        resource_axes,
     ):
         assert EpCombinePrimitive.inner_primitive is not None
         return EpCombinePrimitive.inner_primitive.bind(
@@ -880,6 +923,7 @@ class EpCombinePrimitive(BasePrimitive):
             topk_idx_dtype=topk_idx_dtype,
             out_leading_shape=out_leading_shape,
             out_partition_spec=out_partition_spec,
+            resource_axes=resource_axes,
         )
 
     @staticmethod
@@ -892,6 +936,7 @@ class EpCombinePrimitive(BasePrimitive):
         topk_idx_dtype,
         out_leading_shape,
         out_partition_spec,
+        resource_axes,
     ):
         raise NotImplementedError("EpCombinePrimitive does not support vmap")
 
@@ -902,13 +947,14 @@ class EpCombinePrimitive(BasePrimitive):
         topk_idx_dtype,
         out_leading_shape,
         out_partition_spec,
+        resource_axes,
         mesh,
         arg_infos,
         result_infos,
     ):
         del result_infos
         eo_spec = arg_infos[1].sharding.spec
-        if not _ep_spec_ok(eo_spec, trailing_count=2):
+        if not _ep_spec_ok(eo_spec, trailing_count=2, resource_axes=resource_axes):
             raise NotImplementedError(
                 "EpCombine: expert_out must be sharded as PartitionSpec(ep_resource,"
                 " None, None) (or ((dp, ep), None, None) when dp/fsdp is set)"
@@ -931,6 +977,7 @@ class EpCombinePrimitive(BasePrimitive):
                 topk_idx_dtype,
                 per_shard_leading,
                 out_partition_spec,
+                resource_axes=resource_axes,
             )
 
         return mesh, sharded_impl, out_sharding, arg_shardings
@@ -956,8 +1003,8 @@ class EpDispatchBwdPrimitive(BasePrimitive):
 
     name = "te_ep_dispatch_bwd_ffi"
     multiple_results = True
-    impl_static_args = (3, 4, 5, 6, 7)  # top_k, dispatch_output_per_expert_alignment,
-    #                                     topk_idx_dtype, out_leading_shape, out_partition_spec
+    impl_static_args = (3, 4, 5, 6, 7, 8)  # top_k, dispatch_output_per_expert_alignment,
+    #                                     topk_idx_dtype, out_leading_shape, out_partition_spec, resource_axes
     inner_primitive = None
     outer_primitive = None
 
@@ -972,7 +1019,9 @@ class EpDispatchBwdPrimitive(BasePrimitive):
         topk_idx_dtype,
         out_leading_shape,
         out_partition_spec,
+        resource_axes,
     ):
+        del resource_axes
         del dispatch_output_per_expert_alignment, topk_idx_dtype
         del g_recv_topk_weights_aval, out_partition_spec, handle_mem_aval
         assert (
@@ -998,7 +1047,9 @@ class EpDispatchBwdPrimitive(BasePrimitive):
         topk_idx_dtype,
         out_leading_shape,
         out_partition_spec,
+        resource_axes,
     ):
+        del resource_axes
         del out_leading_shape, out_partition_spec
         return ffi.ffi_lowering(EpDispatchBwdPrimitive.name)(
             ctx,
@@ -1020,6 +1071,7 @@ class EpDispatchBwdPrimitive(BasePrimitive):
         topk_idx_dtype,
         out_leading_shape,
         out_partition_spec,
+        resource_axes,
     ):
         assert EpDispatchBwdPrimitive.inner_primitive is not None
         return EpDispatchBwdPrimitive.inner_primitive.bind(
@@ -1031,6 +1083,7 @@ class EpDispatchBwdPrimitive(BasePrimitive):
             topk_idx_dtype=topk_idx_dtype,
             out_leading_shape=out_leading_shape,
             out_partition_spec=out_partition_spec,
+            resource_axes=resource_axes,
         )
 
     @staticmethod
@@ -1043,6 +1096,7 @@ class EpDispatchBwdPrimitive(BasePrimitive):
         topk_idx_dtype,
         out_leading_shape,
         out_partition_spec,
+        resource_axes,
     ):
         raise NotImplementedError("EpDispatchBwdPrimitive does not support vmap")
 
@@ -1053,20 +1107,21 @@ class EpDispatchBwdPrimitive(BasePrimitive):
         topk_idx_dtype,
         out_leading_shape,
         out_partition_spec,
+        resource_axes,
         mesh,
         arg_infos,
         result_infos,
     ):
         del result_infos
         g_spec = arg_infos[1].sharding.spec
-        if not _ep_spec_ok(g_spec, trailing_count=2):
+        if not _ep_spec_ok(g_spec, trailing_count=2, resource_axes=resource_axes):
             raise NotImplementedError(
                 "EpDispatchBwd: grad must be sharded as PartitionSpec(ep_resource,"
                 " None, None) (or ((dp, ep), None, None) when dp/fsdp is set)"
                 f" over [num_procs, recv_pr, H]; got spec={g_spec}."
             )
         gw_spec = arg_infos[2].sharding.spec
-        if not _ep_spec_ok(gw_spec, trailing_count=1):
+        if not _ep_spec_ok(gw_spec, trailing_count=1, resource_axes=resource_axes):
             raise NotImplementedError(
                 "EpDispatchBwd: g_recv_topk_weights must be sharded as"
                 " PartitionSpec(ep_resource, None) (or ((dp, ep), None) when dp/fsdp is set)"
@@ -1096,6 +1151,7 @@ class EpDispatchBwdPrimitive(BasePrimitive):
                 topk_idx_dtype,
                 per_shard_leading,
                 out_partition_spec,
+                resource_axes=resource_axes,
             )
 
         return mesh, sharded_impl, out_shardings, arg_shardings
@@ -1121,8 +1177,8 @@ class EpCombineBwdPrimitive(BasePrimitive):
 
     name = "te_ep_combine_bwd_ffi"
     multiple_results = False
-    impl_static_args = (2, 3, 4, 5, 6)  # top_k, dispatch_output_per_expert_alignment,
-    #                                     topk_idx_dtype, recv_capacity_per_rank, is_outer
+    impl_static_args = (2, 3, 4, 5, 6, 7)  # top_k, dispatch_output_per_expert_alignment,
+    #                                     topk_idx_dtype, recv_capacity_per_rank, is_outer, resource_axes
     inner_primitive = None
     outer_primitive = None
 
@@ -1136,9 +1192,11 @@ class EpCombineBwdPrimitive(BasePrimitive):
         topk_idx_dtype,
         recv_capacity_per_rank,
         is_outer,
+        resource_axes,
     ):
         # is_outer=True: global leading dim = (dp*ep,) (or (ep,) with no DP);
         # False: per-shard = (1,).
+        del resource_axes
         del top_k, dispatch_output_per_expert_alignment, topk_idx_dtype, handle_mem_aval
         assert (
             len(grad_aval.shape) >= 2
@@ -1164,7 +1222,9 @@ class EpCombineBwdPrimitive(BasePrimitive):
         topk_idx_dtype,
         recv_capacity_per_rank,
         is_outer,
+        resource_axes,
     ):
+        del resource_axes
         del recv_capacity_per_rank, is_outer
         return ffi.ffi_lowering(EpCombineBwdPrimitive.name)(
             ctx,
@@ -1184,6 +1244,7 @@ class EpCombineBwdPrimitive(BasePrimitive):
         topk_idx_dtype,
         recv_capacity_per_rank,
         is_outer,
+        resource_axes,
     ):
         assert EpCombineBwdPrimitive.inner_primitive is not None
         return EpCombineBwdPrimitive.inner_primitive.bind(
@@ -1194,6 +1255,7 @@ class EpCombineBwdPrimitive(BasePrimitive):
             topk_idx_dtype=topk_idx_dtype,
             recv_capacity_per_rank=recv_capacity_per_rank,
             is_outer=is_outer,
+            resource_axes=resource_axes,
         )
 
     @staticmethod
@@ -1206,6 +1268,7 @@ class EpCombineBwdPrimitive(BasePrimitive):
         topk_idx_dtype,
         recv_capacity_per_rank,
         is_outer,
+        resource_axes,
     ):
         raise NotImplementedError("EpCombineBwdPrimitive does not support vmap")
 
@@ -1216,6 +1279,7 @@ class EpCombineBwdPrimitive(BasePrimitive):
         topk_idx_dtype,
         recv_capacity_per_rank,
         is_outer,
+        resource_axes,
         mesh,
         arg_infos,
         result_infos,
@@ -1223,7 +1287,7 @@ class EpCombineBwdPrimitive(BasePrimitive):
         del is_outer, result_infos
         arg_shardings = tuple(a.sharding for a in arg_infos)
         # EP-output leading (trailing dims auto-pad to None).
-        out_sharding = NamedSharding(mesh, _ep_output_spec())
+        out_sharding = NamedSharding(mesh, _ep_output_spec(resource_axes=resource_axes))
 
         def sharded_impl(handle_mem, grad):
             return EpCombineBwdPrimitive.impl(
@@ -1234,6 +1298,7 @@ class EpCombineBwdPrimitive(BasePrimitive):
                 topk_idx_dtype,
                 recv_capacity_per_rank,
                 False,
+                resource_axes=resource_axes,
             )
 
         return mesh, sharded_impl, out_sharding, arg_shardings
@@ -1268,6 +1333,7 @@ def _ep_prepare(cfg: EpLayerConfig, topk_idx):
         dispatch_output_per_expert_alignment=int(cfg.dispatch_output_per_expert_alignment),
         topk_idx_dtype=int(cfg.topk_idx_dtype),
         is_outer=True,
+        resource_axes=_capture_ep_resource_axes(),
     )
 
 
@@ -1287,6 +1353,7 @@ def _ep_dispatch_fwd(
         topk_idx_dtype=int(cfg.topk_idx_dtype),
         recv_capacity_per_rank=recv_capacity_per_rank,
         is_outer=True,
+        resource_axes=_capture_ep_resource_axes(),
     )
 
 
@@ -1344,6 +1411,7 @@ def _ep_fused_prepare_and_dispatch_fwd(
         topk_idx_dtype=int(cfg.topk_idx_dtype),
         recv_capacity_per_rank=recv_capacity_per_rank,
         is_outer=True,
+        resource_axes=_capture_ep_resource_axes(),
     )
 
 
@@ -1380,6 +1448,7 @@ def ep_combine_fwd(
         topk_idx_dtype=int(cfg.topk_idx_dtype),
         out_leading_shape=out_leading,
         out_partition_spec=out_partition_spec,
+        resource_axes=_capture_ep_resource_axes(),
     )
 
 
@@ -1403,6 +1472,7 @@ def ep_dispatch_bwd(
         topk_idx_dtype=int(cfg.topk_idx_dtype),
         out_leading_shape=out_leading,
         out_partition_spec=out_partition_spec,
+        resource_axes=_capture_ep_resource_axes(),
     )
 
 
@@ -1417,4 +1487,5 @@ def ep_combine_bwd(cfg: EpLayerConfig, handle_mem, grad, recv_capacity_per_rank)
         topk_idx_dtype=int(cfg.topk_idx_dtype),
         recv_capacity_per_rank=recv_capacity_per_rank,
         is_outer=True,
+        resource_axes=_capture_ep_resource_axes(),
     )
