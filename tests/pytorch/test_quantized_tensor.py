@@ -1190,7 +1190,6 @@ def test_skip_quantization_with_noop_flag(
         ), f"{quantization}/{usage}: noop flag fails to take effect because {attr} changed."
 
 
-
 def test_saved_storage_protocol(monkeypatch):
     """Preserve custom metadata, pass the full suffix, and use the returned remainder."""
     value, tail, replacement = (torch.tensor(i) for i in range(3))
