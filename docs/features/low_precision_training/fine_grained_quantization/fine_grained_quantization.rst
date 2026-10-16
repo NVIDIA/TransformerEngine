@@ -288,6 +288,34 @@ Note that in the second example the columnwise direction is high precision but
 holds the value reconstructed from MXFP8, not the original input — see
 `Choosing the columnwise source`_ above.
 
+Output dtype and workspace updates
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Output-dtype handling is opt-in through ``Quantizer.supports_output_dtype``,
+which defaults to ``False``. Identity and Hybrid opt in; native quantizers
+continue to ignore output-dtype requests, even inside a custom recipe.
+
+``IdentityQuantizer.quantize(x, dtype=...)`` selects the held output dtype
+without changing the quantizer's default or adding an autograd edge to its
+stored data. ``HybridQuantizer`` passes a compute-dtype request to its children;
+children that support output-dtype binding retain it for later reconstruction.
+Native quantizers keep their existing behavior, including ignoring this
+argument. Their encodings and default dequantization metadata are unchanged.
+
+Hybrid's ``rowwise_dequantized`` source uses the source tensor's dtype for
+native children, preserving existing native compositions, including internal
+storage. For children that support output-dtype handling, it uses
+``torch.promote_types`` on the source and stored dtypes to avoid narrowing
+decoded forward values. This is the input dtype of the columnwise quantizer,
+not necessarily the backward GEMM dtype. Widening a value already rounded into
+BF16 does not recover the discarded precision.
+
+In-place Identity updates preserve the destination buffer, dtype, shape and
+device. An explicit conflicting ``dtype`` with ``out=`` raises an error for
+Identity and Hybrid. Module weight caches rebuild these workspaces when an
+explicit compute dtype changes. ``HybridQuantizer.make_empty(..., dtype=...)``
+binds the requested dtype on participating custom children just as quantize does.
+
 Example: one format per GEMM
 ----------------------------
 
@@ -362,3 +390,116 @@ API reference
 See the :doc:`PyTorch API <../../../api/pytorch>` for ``QuantizerRole``,
 ``HybridQuantizer``, ``IdentityQuantizer``, and their returned tensor types.
 See the :doc:`Common API <../../../api/common>` for ``CustomRecipe``.
+
+Experimental QDQ
+----------------
+
+QDQ quantizers model low-precision rounding by quantizing operands and then
+dequantizing them into high-precision ``IdentityTensor`` storage. The decoded
+operands use high-precision GEMMs; QDQ models quantization error for convergence
+experiments, not mixed-format hardware performance.
+
+Forward and backward examples
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The following factories support ``Linear`` and ``GroupedLinear`` with discrete
+expert parameters. With BF16 module compute precision:
+
+* ``nvfp4_qdq_weight_fwd_bf16_bwd_factory`` models ``X[BF16] x W[NVFP4-QDQ]``
+  forward and uses BF16 backward. Backward consumes the original inputs and
+  the decoded forward QDQ weights.
+* ``mxfp8_qdq_nvfp4_qdq_fwd_mxfp8_bwd_factory`` models
+  ``X[MXFP8-QDQ] x W[NVFP4-QDQ]`` forward and uses native MXFP8 backward.
+  Input QDQ uses block-32 E4M3/E8M0;
+  weight QDQ uses block-16 E2M1/E4M3 with a tensor scale. Backward quantizes
+  the original inputs and the decoded forward QDQ weights to MXFP8.
+
+For example::
+
+    from transformer_engine.common.recipe import CustomRecipe
+    from transformer_engine.pytorch.custom_recipes.quantizer_factory_zoo import (
+        nvfp4_qdq_weight_fwd_bf16_bwd_factory,
+        mxfp8_qdq_nvfp4_qdq_fwd_mxfp8_bwd_factory,
+    )
+
+    recipe = CustomRecipe(qfactory=mxfp8_qdq_nvfp4_qdq_fwd_mxfp8_bwd_factory)
+
+To use BF16 inputs while retaining MXFP8 backward, replace the second factory's
+input rowwise ``MXFP8QDQQuantizer`` with ``IdentityQuantizer``. The input
+columnwise quantizer and its ``columnwise_source="original"`` stay unchanged.
+Both examples use ``columnwise_source="rowwise_dequantized"`` for weights.
+Other module roles use ``IdentityQuantizer``. High-precision arithmetic follows
+the module compute dtype; select BF16 compute for the BF16 example.
+``CustomRecipe`` does not require FP8 hardware to enter ``te.autocast``.
+Its quantizers and GEMMs must support the target device and TE build;
+recipes using only QDQ and high-precision GEMMs can run on Ampere.
+
+Configure ``backend`` or ``nvfp4_options`` with ``functools.partial``. Existing
+Hybrid limitations still apply, and RL convergence has not been validated.
+
+Backends and custom QDQ formats
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Output defaults to the source dtype; a module compute-dtype override changes
+only the decoded dtype. For ``NVFP4QDQQuantizer``, ``backend="auto"`` fuses
+plain 1D E2M1/E4M3 QDQ with tensor or per-row outer scaling on
+GPUs with compute capability 8.0 or higher and a TE build with CUDA 12.8 or
+higher for contiguous, 16-byte-aligned BF16/FP16 tensors with matching output
+dtype and flattened matrix dimensions
+divisible by 16, with ordinary fast math disabled. Other native-valid modes,
+including 4over6, 2D scaling, distributed amax reduction, and mixed dtypes,
+use native ``quantize().dequantize()`` where its kernels are supported.
+``backend="reference"`` forces that composition; ``backend="fused"`` rejects
+unsupported cases. Current weight amax is computed when quantization runs.
+
+For per-token outer scaling, wrap
+``NVFP4Quantizer(row_scaled_nvfp4=True)`` in ``NVFP4QDQQuantizer``. Each flattened
+row uses its own outer amax, while each 16-value block retains its E4M3 scale.
+The fused row-scaled path computes row amax and QDQ in one kernel, without
+intermediate amax, packed-value, or scale buffers. The tensor-scaled fused path
+retains its separate global amax reduction. Both paths preserve native Q+DQ
+rounding and support the same matching BF16/FP16 input and output dtypes.
+
+``custom_recipes.qdq.MXFP8QDQQuantizer`` provides the corresponding rowwise
+E4M3/block-32 E8M0 QDQ operation. Its ``reference`` backend calls native
+``MXFP8Quantizer.quantize().dequantize()``. Its ``fused`` backend supports
+contiguous, 16-byte-aligned BF16/FP16 tensors on GPUs with compute capability
+8.0 or higher, with a matching output dtype, rows divisible by 32, and ordinary
+fast math disabled. ``auto`` falls back to the reference when these requirements
+are not met.
+The fused kernel preserves signed zero. Native specialized FP16 quantization
+may canonicalize negative zero; the decoded values remain numerically equal.
+
+Build Transformer Engine for the target GPU architecture; a build containing
+only ``sm_100a`` kernels cannot run those kernels on other architectures.
+NVFP4 QDQ requires CUDA Toolkit 12.8 or later for the FP4 conversion types.
+On Ampere and Hopper, CUDA emulates the conversions inside the fused kernel.
+The existing native packed Q+DQ reference kernels require compute capability
+10.0 or higher. On older GPUs, use ``auto`` or ``fused`` with matching BF16/FP16
+and the plain fused configuration described above; a request requiring the
+native reference path raises an error. In particular, mixed dtypes, 4over6,
+2D scaling, and distributed amax reduction are not supported there.
+QDQ's conversion requirements are independent of native low-precision GEMM
+support. Recipes using native MXFP8 backward additionally require
+``is_mxfp8_available()``. Numerical and performance validation on a particular
+GPU does not establish performance on other architectures.
+
+Both QDQ classes return high-precision storage with straight-through
+gradients. Use them as rowwise children of ``HybridQuantizer`` to select the
+backward format independently. ``columnwise_source="rowwise_dequantized"``
+requantizes the forward reconstruction for backward; ``"original"`` uses
+the original input. QDQ models quantization error for convergence studies;
+the high-precision GEMM does not model mixed-format hardware performance.
+
+Both formats inherit the experimental ``custom_recipes.qdq.QDQQuantizer``
+base, which supplies allocation, IdentityTensor wrapping, dtype overrides,
+update validation, and straight-through gradients. Custom QDQ subclasses
+implement ``selected_backend(tensor, dtype)``, ``_reference(tensor, dtype)``,
+and ``_compute(tensor, output, noop_flag=None, *, backend=None)``. The reference
+must quantize the original input before decoding to the requested dtype.
+Compute must write into the supplied output, preserving it when the no-op flag
+is one, and honor an explicitly selected backend. Subclasses must also provide
+format-appropriate ``copy()`` and ``is_requantization_safe()`` implementations.
+Storage hooks should not build autograd graphs; Python implementations can
+use ``torch.no_grad()`` since the wrapper supplies the straight-through gradient.
+The base and its extension hooks are experimental and subject to change.

@@ -26,6 +26,7 @@ from transformer_engine.pytorch import (
 
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.quantization import (
+    FP8GlobalState,
     FP8GlobalStateManager,
     NVFP4BlockScalingRecipeState,
     QuantizerRole,
@@ -820,3 +821,43 @@ def test_fp8_recipe_unpickle_rebuilds_missing_quant_params(recipe):
     assert restored.fp8_quant_fwd_inp.power_2_scale == recipe.fp8_quant_fwd_inp.power_2_scale
     assert restored.fp8_quant_fwd_weight.power_2_scale == recipe.fp8_quant_fwd_weight.power_2_scale
     assert restored.fp8_quant_bwd_grad.power_2_scale == recipe.fp8_quant_bwd_grad.power_2_scale
+
+
+def test_custom_autocast_without_fp8_hardware(monkeypatch):
+    monkeypatch.setattr(FP8GlobalStateManager, "quantization_state", FP8GlobalState())
+    monkeypatch.setattr(
+        FP8GlobalStateManager,
+        "is_fp8_available",
+        classmethod(lambda cls: (False, "FP8 hardware unavailable")),
+    )
+
+    def factory(role):
+        pytest.fail("Autocast must not call the quantizer factory to inspect its requirements")
+
+    recipe = CustomRecipe(qfactory=factory)
+    with te.autocast(recipe=recipe):
+        assert FP8GlobalStateManager.is_fp8_enabled()
+        assert FP8GlobalStateManager.get_fp8_recipe() is recipe
+    assert not FP8GlobalStateManager.is_fp8_enabled()
+    assert FP8GlobalStateManager.quantization_state.autocast_depth == 0
+
+
+@pytest.mark.parametrize(
+    "recipe",
+    [
+        DelayedScaling(),
+        Float8CurrentScaling(),
+        Float8BlockScaling(),
+        MXFP8BlockScaling(),
+        NVFP4BlockScaling(),
+    ],
+)
+def test_builtin_autocast_still_requires_fp8_hardware(recipe, monkeypatch):
+    monkeypatch.setattr(FP8GlobalStateManager, "quantization_state", FP8GlobalState())
+    monkeypatch.setattr(
+        FP8GlobalStateManager,
+        "is_fp8_available",
+        classmethod(lambda cls: (False, "FP8 hardware unavailable")),
+    )
+    with pytest.raises(AssertionError, match="FP8 hardware unavailable"):
+        FP8GlobalStateManager.autocast_enter(enabled=True, fp8_recipe=recipe)

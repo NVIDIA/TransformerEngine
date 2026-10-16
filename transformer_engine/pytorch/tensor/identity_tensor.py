@@ -45,6 +45,8 @@ class IdentityQuantizer(Quantizer):
         high-precision buffer serves both directions).
     """
 
+    supports_output_dtype = True
+
     def __init__(
         self,
         *,
@@ -66,7 +68,7 @@ class IdentityQuantizer(Quantizer):
         quantizer.optimize_for_gemm = self.optimize_for_gemm
         return quantizer
 
-    def _maybe_cast(self, tensor: torch.Tensor) -> torch.Tensor:
+    def _maybe_cast(self, tensor: torch.Tensor, *, dtype=None) -> torch.Tensor:
         # Detach so the held buffer is plain "data" with no autograd graph edge,
         # mirroring the real quantizers (whose quantize kernels emit fresh,
         # non-differentiable tensors). Autograd connectivity for the *quantize*
@@ -76,12 +78,13 @@ class IdentityQuantizer(Quantizer):
         # weight workspace returned across the module Function boundary), which
         # creates a spurious empty grad edge.
         out = tensor.detach()
-        if self.dtype is not None and out.dtype != self.dtype:
-            return out.to(self.dtype)
+        dtype = self.dtype if dtype is None else dtype
+        if dtype is not None and out.dtype != dtype:
+            return out.to(dtype)
         return out
 
-    def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensorStorage:
-        data = self._maybe_cast(tensor)
+    def quantize_impl(self, tensor: torch.Tensor, *, dtype=None) -> QuantizedTensorStorage:
+        data = self._maybe_cast(tensor, dtype=dtype)
         if self.internal:
             return IdentityTensorStorage(
                 hp_data=data,
@@ -144,22 +147,17 @@ class IdentityQuantizer(Quantizer):
             raise ValueError(
                 f"IdentityQuantizer can only update IdentityTensorStorage, got {type(dst).__name__}"
             )
-        data = self._maybe_cast(src)
-        if (
-            dst._hp_data is not None
-            and dst._hp_data.shape == data.shape
-            and dst._hp_data.dtype == data.dtype
-            and dst._hp_data.device == data.device
-        ):
-            if noop_flag is None:
-                dst._hp_data.copy_(data)
-            else:
-                torch.where(noop_flag == 0, data, dst._hp_data, out=dst._hp_data)
+        if dst._hp_data is None:
+            raise ValueError("IdentityQuantizer requires an allocated destination")
+        if src.shape != dst._hp_data.shape or src.device != dst._hp_data.device:
+            raise ValueError("Identity source and destination must have matching shape/device")
+        # The destination owns the representation, including when the source
+        # or this quantizer's default dtype differs from the original call.
+        data = self._maybe_cast(src, dtype=dst._hp_data.dtype)
+        if noop_flag is None:
+            dst._hp_data.copy_(data)
         else:
-            if noop_flag is not None and noop_flag.item() != 0:
-                return dst
-            dst._hp_data = data.detach()
-        dst._dtype = data.dtype
+            torch.where(noop_flag == 0, data, dst._hp_data, out=dst._hp_data)
         return dst
 
     def calibrate(self, tensor: torch.Tensor) -> None:

@@ -671,7 +671,7 @@ class TestIdentityQuantizerUnit:
         assert tensor._hp_data.dtype == torch.float32
         assert tensor.dequantize().dtype == torch.float32
 
-    def test_update_quantized_synchronizes_dtype(self):
+    def test_update_quantized_preserves_destination_dtype(self):
         dst = IdentityQuantizer().make_empty(
             (4, 8),
             dtype=torch.bfloat16,
@@ -681,9 +681,9 @@ class TestIdentityQuantizerUnit:
 
         quantizer.update_quantized(torch.ones_like(dst._hp_data), dst)
 
-        assert dst.dtype == torch.float32
-        assert dst._hp_data.dtype == torch.float32
-        assert dst.dequantize().dtype == torch.float32
+        assert dst.dtype == torch.bfloat16
+        assert dst._hp_data.dtype == torch.bfloat16
+        assert dst.dequantize().dtype == torch.bfloat16
 
     @pytest.mark.parametrize("noop", [0, 1])
     def test_update_quantized_honors_noop(self, noop):
@@ -1903,3 +1903,80 @@ class TestIdentityLinear:
                 out_id = model(x)
 
         torch.testing.assert_close(out_id, out_ref, rtol=0.0, atol=0.0)
+
+
+@pytest.mark.parametrize("internal", [False, True])
+@pytest.mark.parametrize("configured_dtype", [None, torch.float16])
+def test_identity_output_dtype_lifecycle(internal, configured_dtype):
+    """Per-call overrides, updates and out= agree without mutating defaults."""
+    q = IdentityQuantizer(dtype=configured_dtype)
+    q.internal = internal
+    x = torch.randn(32, 64, device="cuda", dtype=torch.float32, requires_grad=True)
+    out = q.quantize(x, dtype=torch.bfloat16)
+    assert q.dtype == configured_dtype
+    assert out._dtype == out._hp_data.dtype == torch.bfloat16
+    assert not out._hp_data.requires_grad
+    if not internal:
+        out.sum().backward()
+        torch.testing.assert_close(x.grad, torch.ones_like(x), rtol=0, atol=0)
+    pointer = out._hp_data.data_ptr()
+    updated = x.detach() * 3
+    assert q.quantize(updated, out=out, dtype=torch.bfloat16) is out
+    assert out._hp_data.data_ptr() == pointer
+    torch.testing.assert_close(out.dequantize(), updated.bfloat16(), rtol=0, atol=0)
+    out.quantize_(updated * 2)
+    torch.testing.assert_close(out.dequantize(), (updated * 2).bfloat16(), rtol=0, atol=0)
+    before = out._hp_data.clone()
+    with pytest.raises(ValueError, match="dtype does not match"):
+        q.quantize(updated, out=out, dtype=torch.float32)
+    torch.testing.assert_close(out._hp_data, before, rtol=0, atol=0)
+
+
+def test_identity_weight_workspace_dtype_change():
+    """A module rebuilds an Identity workspace when its compute dtype changes."""
+    from transformer_engine.pytorch.module.base import quantize_weight
+
+    q = IdentityQuantizer()
+    x = torch.randn(32, 64, device="cuda", dtype=torch.float32)
+    out, cache = quantize_weight(tensor=x, quantizer=q, workspace_dtype=torch.bfloat16, cache=True)
+    pointer = out._hp_data.data_ptr()
+    updated, new_cache = quantize_weight(
+        tensor=x * 2, quantizer=q, workspace=cache, workspace_dtype=torch.bfloat16, cache=True
+    )
+    assert updated is out and new_cache is None
+    assert updated._hp_data.data_ptr() == pointer
+    torch.testing.assert_close(updated.dequantize(), (x * 2).bfloat16(), rtol=0, atol=0)
+    changed, new_cache = quantize_weight(
+        tensor=x, quantizer=q, workspace=cache, workspace_dtype=torch.float32, cache=True
+    )
+    assert new_cache is changed and changed is not out
+    torch.testing.assert_close(changed.dequantize(), x, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("internal", [False, True])
+def test_identity_dtype_update_graph_noop(internal):
+    """Captured FP32-to-BF16 updates retain storage and obey a device noop."""
+    q = IdentityQuantizer()
+    q.internal = internal
+    x = torch.randn(32, 64, device="cuda", dtype=torch.float32)
+    out = q.quantize(x, dtype=torch.bfloat16)
+    pointer = out._hp_data.data_ptr()
+    noop = torch.zeros(1, device="cuda")
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        for _ in range(3):
+            q.update_quantized(x, out, noop_flag=noop)
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        q.update_quantized(x, out, noop_flag=noop)
+    x.mul_(3)
+    graph.replay()
+    torch.testing.assert_close(out.dequantize(), x.bfloat16(), rtol=0, atol=0)
+    before = out._hp_data.clone()
+    noop.fill_(1)
+    x.mul_(2)
+    graph.replay()
+    assert out._hp_data.data_ptr() == pointer
+    torch.testing.assert_close(out.dequantize(), before, rtol=0, atol=0)

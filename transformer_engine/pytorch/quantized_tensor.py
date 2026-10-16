@@ -10,6 +10,7 @@ import abc
 import enum
 import warnings
 import math
+from functools import partial
 
 import torch
 from torch.utils._pytree import tree_map
@@ -416,6 +417,22 @@ class Quantizer(abc.ABC):
     """
     optimize_for_gemm: bool
 
+    # Only high-precision representations opt into output-dtype requests.
+    # Native quantizers keep ignoring dtype, without casting their inputs.
+    supports_output_dtype: bool = False
+
+    def with_output_dtype(self, dtype: torch.dtype) -> Quantizer:
+        """Bind an output default on a copy for participating custom quantizers."""
+        if not self.supports_output_dtype:
+            return self
+        quantizer = self.copy()
+        quantizer.dtype = dtype
+        return quantizer
+
+    def is_compatible_output(self, out: QuantizedTensorStorage, *, dtype=None) -> bool:
+        """Native outputs accept any request; custom outputs must match its dtype."""
+        return not self.supports_output_dtype or dtype is None or out._dtype == dtype
+
     def __init__(self, *, rowwise: bool, columnwise: bool) -> None:
         self.rowwise_usage = rowwise
         self.columnwise_usage = columnwise
@@ -448,15 +465,25 @@ class Quantizer(abc.ABC):
         tensor: torch.Tensor,
         *,
         out: Optional[QuantizedTensor] = None,
-        dtype: Optional[torch.dtype] = None,  # pylint: disable=unused-argument # used by override
+        dtype: Optional[torch.dtype] = None,
     ) -> QuantizedTensor:
-        """Quantize tensor"""
+        """Quantize tensor, honoring output dtype only for opted-in quantizers.
+
+        Native quantizers ignore ``dtype``. High precision quantization implementations
+        accept it in ``quantize_impl``; in-place updates retain destination dtype.
+        The source tensor is never cast here.
+        """
         if out is not None:
+            if self.supports_output_dtype and not self.is_compatible_output(out, dtype=dtype):
+                raise ValueError("Requested output dtype does not match the destination")
             return self.update_quantized(tensor, out)
+        impl = self.quantize_impl
+        if self.supports_output_dtype and dtype is not None:
+            impl = partial(impl, dtype=dtype)
         if (not self.internal) and torch.is_grad_enabled():
-            result = _QuantizeFunc.apply(tensor, self.quantize_impl)
+            result = _QuantizeFunc.apply(tensor, impl)
         else:
-            result = _QuantizeFunc.forward(None, tensor, self.quantize_impl)
+            result = _QuantizeFunc.forward(None, tensor, impl)
         # The amax reduction group must never persist on a tensor's quantizer
         result_quantizer = getattr(result, "_quantizer", None)
         if getattr(result_quantizer, "with_amax_reduction", False):

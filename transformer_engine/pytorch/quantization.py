@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Quantization utilities for TransformerEngine"""
+
 from __future__ import annotations
 
 import abc
@@ -30,7 +31,6 @@ from .constants import dist_group_type, DType
 
 from .utils import get_device_compute_capability
 from .jit import jit_fuser
-
 
 __all__ = [
     "autocast",
@@ -795,8 +795,11 @@ class FP8GlobalStateManager:
         qstate.autocast_depth += 1
 
         if enabled:
-            fp8_available, reason_for_no_fp8 = cls.is_fp8_available()
-            assert fp8_available, reason_for_no_fp8
+            # A custom factory may use only high-precision or emulated formats.
+            # Its quantizers and GEMMs determine the required device support.
+            if not fp8_recipe.custom():
+                fp8_available, reason_for_no_fp8 = cls.is_fp8_available()
+                assert fp8_available, reason_for_no_fp8
             if isinstance(fp8_recipe, MXFP8BlockScaling):
                 mxfp8_available, reason_for_no_mxfp8 = cls.is_mxfp8_available()
                 assert mxfp8_available, reason_for_no_mxfp8

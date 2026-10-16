@@ -17,6 +17,42 @@
 extern "C" {
 #endif
 
+/*! \brief Whether this library was built with NVFP4 QDQ kernels (CUDA 12.8+).
+ *
+ * This does not check the device or input requirements of the QDQ operations.
+ * \return True if NVFP4 QDQ kernels were compiled into the library.
+ */
+bool nvte_nvfp4_qdq_supported();
+
+/*! \brief Plain rowwise 1x16 NVFP4 QDQ into matching BF16/FP16 output.
+ *
+ * Input/output are contiguous, 16-byte aligned, rank >= 2, with both flattened
+ * dimensions divisible by 16. E2M1 values and E4M3 scales (maximum 448) are
+ * rounded as native quantization with fast math disabled. No packed output is
+ * materialized. Caller supplies the current scalar FP32 absolute maximum in
+ * amax's data buffer. Optional scalar FP32 noop skips writes when equal to 1.
+ * All buffers are caller-owned and must remain alive until stream completion.
+ */
+void nvte_nvfp4_qdq(const NVTETensor input, NVTETensor output, const NVTETensor amax,
+                    const NVTETensor noop, cudaStream_t stream);
+
+/*! \brief Plain 1x16 NVFP4 QDQ with per-row outer scaling into BF16/FP16.
+ * Input/output have the same layout and dtype requirements as nvte_nvfp4_qdq.
+ * Each flattened row (token) computes its own outer amax inside the kernel.
+ * E2M1 values and E4M3 scales (maximum 448) use native rounding with fast math
+ * disabled. No intermediate amax, packed values, or scales are materialized.
+ * Optional scalar FP32 noop skips writes when equal to 1. Buffers are caller-owned.
+ */
+void nvte_nvfp4_qdq_row_scaled(const NVTETensor input, NVTETensor output, const NVTETensor noop,
+                               cudaStream_t stream);
+
+/*! \brief Rowwise block-32 E4M3/E8M0 MXFP8 QDQ into matching BF16/FP16 output.
+ * Input and output are contiguous, with rows divisible by 32. An optional scalar
+ * FP32 noop skips writes when equal to 1. All buffers are caller-owned.
+ */
+void nvte_mxfp8_qdq(const NVTETensor input, NVTETensor output, const NVTETensor noop,
+                    cudaStream_t stream);
+
 /*  Quantize the tensor
  *
  *  The type of quantized tensor in the output depends on the scaling mode of the output
