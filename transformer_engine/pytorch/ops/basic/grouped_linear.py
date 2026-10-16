@@ -59,6 +59,7 @@ from ...distributed_weight import (
     is_distributed_weight,
     materialize_weight_for_backward,
     materialize_weight_for_forward,
+    weight_grad_dtype,
 )
 from ...tensor import GroupedTensor, GroupedTensorStorage
 from ...triton.grouped_dbias_dscales import (
@@ -1620,7 +1621,7 @@ class GroupedLinear(BasicOperation):
                     accumulate_into_main_grad = get_accumulate_flag_in_param(weights[0])
                 else:
                     final_weight_grads[0] = torch.empty(
-                        grouped_shape, dtype=ctx.dtype, device=device
+                        grouped_shape, dtype=weight_grad_dtype(weights, ctx.dtype), device=device
                     )
                     grad_weights = [final_weight_grads[0][idx] for idx in range(num_groups)]
             else:
@@ -1632,7 +1633,7 @@ class GroupedLinear(BasicOperation):
                 else:
                     grad_weights_packed = torch.empty(
                         grouped_shape,
-                        dtype=ctx.dtype,
+                        dtype=weight_grad_dtype(weights, ctx.dtype),
                         device=device,
                     )
                     grad_weights = [grad_weights_packed[i] for i in range(num_groups)]
@@ -1914,7 +1915,7 @@ class GroupedLinear(BasicOperation):
                         shapes=[weight_shape] * num_groups,
                         quantizer=None,
                         device=device,
-                        dtype=dtype,
+                        dtype=weight_grad_dtype(weights, dtype),
                     )
                 final_weight_grads[0] = grouped_wgrad.rowwise_data.view(num_groups, *weight_shape)
                 wgrad_output = grouped_wgrad
@@ -1927,7 +1928,9 @@ class GroupedLinear(BasicOperation):
                     accumulate_into_main_grad = get_accumulate_flag_in_param(weights[0])
                 else:
                     final_weight_grads = [
-                        torch.empty(weight_shape, dtype=dtype, device=device)
+                        torch.empty(
+                            weight_shape, dtype=weight_grad_dtype(weights, dtype), device=device
+                        )
                         for _ in range(num_groups)
                     ]
                 wgrad_output = final_weight_grads

@@ -28,6 +28,7 @@ from ...distributed_weight import (
     materialize_weight_for_forward,
     materialize_weight_for_backward,
     finalize_weight_grads,
+    weight_grad_dtype,
 )
 from ...module.base import _2X_ACC_WGRAD
 from ...quantization import Recipe, get_fp8_torch_dtype
@@ -873,7 +874,7 @@ def _compute_grad_params(
                     shapes=[weight_shape] * num_groups,
                     quantizer=None,
                     device=device,
-                    dtype=dtype,
+                    dtype=weight_grad_dtype(weights, dtype),
                 )
             wgrad_output = grouped_wgrad
             w_list = [grouped_wgrad.rowwise_data.view(num_groups, *weight_shape)]
@@ -889,7 +890,7 @@ def _compute_grad_params(
                 wgrad_packed = torch.empty(
                     num_groups,
                     *weight_shape,
-                    dtype=dtype,
+                    dtype=weight_grad_dtype(weights, dtype),
                     device=device,
                 )
                 w_list = [wgrad_packed[i] for i in range(num_groups)]

@@ -57,6 +57,7 @@ from ..distributed_weight import (
     materialize_weight_for_forward,
     materialize_weight_for_backward,
     finalize_weight_grads,
+    weight_grad_dtype,
 )
 from ..cpp_extensions import (
     general_grouped_gemm,
@@ -655,7 +656,7 @@ def _grouped_linear_backward_impl(
                 num_gemms,
                 out_features,
                 in_features,
-                dtype=args.activation_dtype,
+                dtype=weight_grad_dtype(origin_weights, args.activation_dtype),
                 device=device,
             )
             wgrad_list = [wgrad_packed[i] for i in range(num_gemms)]
@@ -1188,13 +1189,14 @@ def _grouped_linear_graph_safe_backward(
                 wgrad_output = main_grads
                 wgrad_list = main_grads
         else:
+            wgrad_dtype = weight_grad_dtype(origin_weights, args.activation_dtype)
             if args.single_grouped_weight:
                 grouped_wgrad = GroupedTensor.make_grouped_tensor_with_shapes(
                     num_tensors=N,
                     shapes=[(args.out_features, args.in_features)] * N,
                     quantizer=None,
                     device=grad_output.device,
-                    dtype=args.activation_dtype,
+                    dtype=wgrad_dtype,
                 )
                 wgrad_output = grouped_wgrad
                 wgrad_list = [
@@ -1205,7 +1207,7 @@ def _grouped_linear_graph_safe_backward(
                     N,
                     args.out_features,
                     args.in_features,
-                    dtype=args.activation_dtype,
+                    dtype=wgrad_dtype,
                     device=grad_output.device,
                 )
                 wgrad_output = [wgrad_packed[i] for i in range(N)]

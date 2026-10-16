@@ -19,6 +19,7 @@ from transformer_engine.pytorch.distributed_weight import (
     materialize_weight_for_forward,
     materialize_weight_for_backward,
     finalize_weight_grads,
+    weight_grad_dtype,
 )
 
 
@@ -170,3 +171,29 @@ def test_finalize_grads_noop_on_plain_tensor():
     plain_w = torch.nn.Parameter(torch.zeros(2))
     g = [torch.ones(2)]
     assert finalize_weight_grads(plain_w, g) == g
+
+
+@pytest.mark.parametrize("group_size", [1, 2])
+def test_weight_grad_dtype_dispatches(group_size):
+    """A distributed weight types its wgrad from main_grad, not from the compute dtype."""
+    w = FakeDistributedWeight(group_size=group_size)
+    w.main_grad = torch.zeros(2, 2, dtype=torch.float32)
+    assert weight_grad_dtype(w, torch.bfloat16) == torch.float32
+    assert weight_grad_dtype([w], torch.bfloat16) == torch.float32
+
+
+def test_weight_grad_dtype_without_main_grad():
+    """No main_grad yet (pre-DDP): fall back to the compute dtype rather than raising."""
+    w = FakeDistributedWeight()
+    assert weight_grad_dtype(w, torch.bfloat16) == torch.bfloat16
+
+
+def test_weight_grad_dtype_noop_on_plain_tensor():
+    """A plain weight keeps the compute dtype even when it carries an fp32 main_grad.
+
+    Without weight sharding the wgrad is either accumulated into main_grad by the GEMM or
+    returned as an ordinary .grad, so widening here would only cost memory.
+    """
+    plain_w = torch.nn.Parameter(torch.zeros(2))
+    plain_w.main_grad = torch.zeros(2, dtype=torch.float32)
+    assert weight_grad_dtype(plain_w, torch.bfloat16) == torch.bfloat16
