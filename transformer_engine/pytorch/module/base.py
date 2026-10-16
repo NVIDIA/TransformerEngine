@@ -10,7 +10,7 @@ import pickle
 import warnings
 from enum import Enum
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Generator, List, Optional, Tuple, Union
+from typing import Any, Dict, Generator, List, Optional, Sequence, Tuple, Union
 from contextlib import contextmanager
 from types import MethodType
 
@@ -46,7 +46,6 @@ from ..distributed import (
     _fsdp_gather_tensors,
 )
 from ..constants import dist_group_type
-from ..dynamo.concat import ConcatInput, concat_shape
 from ..cpp_extensions.gemm import _NUM_MAX_UB_STREAMS
 from ..quantized_tensor import QuantizedTensor, QuantizedTensorStorage, Quantizer
 from ..tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
@@ -1323,7 +1322,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     def _enable_weight_preswizzle(
         self,
         quantizer: Quantizer,
-        weight: ConcatInput[torch.Tensor],
+        weight: Optional[torch.Tensor],
+        *,
+        weight_shape: Optional[Sequence[int]] = None,
     ) -> bool:
         """Whether to fuse scale-factor swizzling into weight quantization.
 
@@ -1340,7 +1341,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if isinstance(quantizer, MXFP8Quantizer):
             return True
         if isinstance(quantizer, NVFP4Quantizer):
-            shape = concat_shape(weight)
+            shape = weight.shape if weight_shape is None else weight_shape
             rows, cols = math.prod(shape[:-1]), shape[-1]
             arch_supported = get_device_compute_capability() >= (10, 0)
             if quantizer.with_rht:

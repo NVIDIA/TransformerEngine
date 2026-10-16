@@ -4,20 +4,13 @@
 
 """Deferred row concatenation for tensors consumed inside a custom op."""
 
-from typing import List, Tuple, TypeVar, Union
+from typing import List, Sequence, Tuple, Union
 
 import torch
 from torch._prims_common import make_contiguous_strides_for
 
 from .tensor_spec import TensorSpec
-from ..quantized_tensor import (
-    QuantizedTensor,
-    QuantizedTensorStorage,
-    restore_from_func_ctx as restore_tensor_ctx,
-)
-
-_TensorT = TypeVar("_TensorT")
-ConcatInput = Union[_TensorT, List[torch.Tensor]]
+from ..quantized_tensor import QuantizedTensor, QuantizedTensorStorage
 
 
 def validate_concat(parts: List[torch.Tensor]) -> None:
@@ -25,28 +18,20 @@ def validate_concat(parts: List[torch.Tensor]) -> None:
     if not parts:
         raise ValueError("Attempted to concatenate 0 tensors")
     if any(
-        not isinstance(part, torch.Tensor)
+        not isinstance(part, (torch.Tensor, TensorSpec))
         or isinstance(part, (QuantizedTensor, QuantizedTensorStorage))
+        or (isinstance(part, TensorSpec) and part.is_quantized)
         for part in parts
     ):
         raise TypeError("Deferred concatenation only supports non-quantized tensors")
 
 
-def concat_shape(value: ConcatInput[torch.Tensor]) -> Tuple[int, ...]:
+def concat_shape(parts: Sequence[Union[torch.Tensor, TensorSpec]]) -> Tuple[int, ...]:
     """Shape after row concatenation."""
-    if isinstance(value, list):
-        return (sum(t.shape[0] for t in value), *value[0].shape[1:])
-    return value.shape
+    return (sum(t.shape[0] for t in parts), *parts[0].shape[1:])
 
 
-def concat_requires_grad(value: ConcatInput[torch.Tensor]) -> bool:
-    """Whether any input requires gradients."""
-    if isinstance(value, list):
-        return any(t.requires_grad for t in value)
-    return value.requires_grad
-
-
-def concat_to_spec(parts: List[torch.Tensor]) -> TensorSpec:
+def concat_to_spec(parts: Sequence[Union[torch.Tensor, TensorSpec]]) -> TensorSpec:
     """Describe the concatenation without accessing its storage."""
     validate_concat(parts)
     first = parts[0]
@@ -57,14 +42,12 @@ def concat_to_spec(parts: List[torch.Tensor]) -> TensorSpec:
         shape=concat_shape(parts),
         dtype=dtype,
         device=first.device,
-        requires_grad=concat_requires_grad(parts),
+        requires_grad=any(t.requires_grad for t in parts),
     )
 
 
-def materialize_concat(value: ConcatInput[torch.Tensor]) -> torch.Tensor:
+def materialize_concat(value: List[torch.Tensor]) -> torch.Tensor:
     """Build a checked view, or copy parts whose storage is not adjacent."""
-    if not isinstance(value, list):
-        return value
     validate_concat(value)
     if len(value) == 1:
         return value[0]
@@ -91,22 +74,3 @@ def materialize_concat(value: ConcatInput[torch.Tensor]) -> torch.Tensor:
         return torch.cat(value)
     shape = concat_shape(value)
     return first.as_strided(shape, make_contiguous_strides_for(shape))
-
-
-def restore_from_func_ctx(ctx):
-    """Restore original split parameters saved by the custom-op framework."""
-    tensors = restore_tensor_ctx(ctx)
-    lengths = getattr(ctx, "concatenated_saved_lengths", None)
-    if lengths is None:
-        return tensors
-    restored = []
-    offset = 0
-    for length in lengths:
-        if length is None:
-            restored.append(tensors[offset])
-            offset += 1
-        else:
-            restored.append(list(tensors[offset : offset + length]))
-            offset += length
-    ctx.concatenated_saved_lengths = None
-    return restored
