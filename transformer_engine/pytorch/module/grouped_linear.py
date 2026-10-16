@@ -257,8 +257,12 @@ class GroupedLinearBwdArgs:
         self.biases = saved[3 * n : 3 * n + self.num_bias_args]
 
 
-def _grouped_linear_configure_quantizers(args: GroupedLinearFwdArgs, weights) -> None:
-    """Configure operand usage after materializing weights."""
+def _grouped_linear_configure_split_quantizers(args: GroupedLinearFwdArgs, weights) -> None:
+    """Configure per-expert quantizers for the split-quantize path after materialization.
+
+    The grouped-tensor path configures its input quantizer before group_quantize
+    and its weight quantizers in _prepare_weights_for_grouped_tensor_gemm.
+    """
     if args.input_quantizers[0] is not None:
         for input_quantizer in args.input_quantizers:
             input_quantizer.set_usage(
@@ -315,7 +319,7 @@ def _grouped_linear_forward_impl(
     if is_dist_weight:
         weights = materialize_weight_for_forward(weights)
 
-    _grouped_linear_configure_quantizers(args, weights)
+    _grouped_linear_configure_split_quantizers(args, weights)
     weight_quantizers = args.weight_quantizers
 
     # Initialize input tensors
@@ -1360,9 +1364,11 @@ class _GroupedLinear(torch.autograd.Function):
                     raise RuntimeError(
                         "Quantized single grouped weights require quantized grouped GEMM compute."
                     )
-                # GroupedTensor is not QuantizedTensorStorage. Its quantizer may be
-                # shared with the module, so train/eval/recompute must still retarget it.
-                weight.quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
+                # Preserve usages already enabled on the parameter quantizer.
+                weight.quantizer.set_usage(
+                    rowwise=True,
+                    columnwise=True if columnwise_usage else None,
+                )
                 return weight, new_workspaces
 
             if not with_quantized_compute:
@@ -1442,12 +1448,13 @@ class _GroupedLinear(torch.autograd.Function):
 
         update_ws = is_first_microbatch is None or is_first_microbatch
         for idx, weight in enumerate(weights):
-            weight_quantizer = (
-                weight._quantizer
-                if isinstance(weight, QuantizedTensorStorage)
-                else weight_quantizers[idx]
-            )
-            weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
+            if isinstance(weight, QuantizedTensorStorage):
+                weight_quantizer = weight._quantizer
+                weight_columnwise_usage = True if columnwise_usage else None
+            else:
+                weight_quantizer = weight_quantizers[idx]
+                weight_columnwise_usage = columnwise_usage
+            weight_quantizer.set_usage(rowwise=True, columnwise=weight_columnwise_usage)
             weight_fp8, new_workspaces[idx] = quantize_weight(
                 tensor=weight,
                 quantizer=weight_quantizer,

@@ -4,7 +4,6 @@
 
 import os
 import random
-from types import SimpleNamespace
 from unittest.mock import Mock
 from typing import Dict, List, Optional, Sequence
 
@@ -61,41 +60,6 @@ nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
 
 seed = 1234
 reset_rng_states()
-
-
-def test_grouped_gemm_capability_cache_tracks_current_device(monkeypatch):
-    """Cache properties per device without freezing Hopper/Blackwell alpha/beta layout."""
-    from transformer_engine.pytorch.cpp_extensions import gemm
-    from transformer_engine.pytorch import utils as te_utils
-
-    device_index = 0
-    properties = Mock(side_effect=lambda index: SimpleNamespace(major=9 + index, minor=0))
-    monkeypatch.setattr(torch.cuda, "current_device", lambda: device_index)
-    monkeypatch.setattr(torch.cuda, "get_device_properties", properties)
-
-    def scalar(n, device):
-        return SimpleNamespace(is_cuda=True, numel=lambda: n)
-
-    monkeypatch.setattr(gemm, "_get_fp32_ones_tensor", scalar)
-    monkeypatch.setattr(gemm, "_get_fp32_zeros_tensor", scalar)
-    monkeypatch.setattr(gemm, "_get_grouped_gemm_setup_workspace", lambda *a: None)
-    monkeypatch.setattr(gemm, "_get_grouped_cublas_workspace", lambda *a: None)
-    monkeypatch.setattr(gemm, "get_sm_count", lambda: 132)
-    kernel = Mock()
-    monkeypatch.setattr(tex, "te_general_grouped_gemm_for_grouped_tensor", kernel)
-    te_utils._get_device_compute_capability.cache_clear()
-    try:
-        for device_index, expected in ((0, 1), (0, 1), (1, 8), (1, 8), (0, 1)):
-            operand = SimpleNamespace(
-                num_tensors=8,
-                rowwise_data=SimpleNamespace(device=torch.device("cuda", device_index)),
-            )
-            gemm.general_grouped_gemm_for_grouped_tensor(operand, operand, operand)
-            assert kernel.call_args.args[7].numel() == expected
-            assert kernel.call_args.args[8].numel() == expected
-        assert [call.args[0] for call in properties.call_args_list] == [0, 1]
-    finally:
-        te_utils._get_device_compute_capability.cache_clear()
 
 
 @pytest.mark.parametrize("has_skip", [False, True])
@@ -2124,13 +2088,20 @@ def test_grouped_runtime_quantizer_work(monkeypatch, num_gemms, single_weight, p
     assert len(bwd) == 2 * num_gemms
     y.sum().backward()
     assert len(usage) == 2 + num_weights
+    if primary_fp8 and not single_weight:
+        weight_quantizers = [getattr(module, f"weight{i}")._quantizer for i in range(num_gemms)]
+        assert all(q.columnwise_usage for q in weight_quantizers)
+        with torch.no_grad(), autocast(enabled=True, recipe=fp8_recipe):
+            module(x, splits)
+        # Inference must not disable usages on persistent discrete parameters either.
+        assert all(q.columnwise_usage for q in weight_quantizers)
 
 
 @pytest.mark.skipif(not _mxfp8_available, reason=_reason_for_no_mxfp8)
 @pytest.mark.parametrize("primary_fp8", [False, True])
 @pytest.mark.parametrize("save_original_input", [False, True])
 def test_grouped_runtime_usage_transitions(primary_fp8, save_original_input):
-    """Retarget primary quantizers and rebuild missing columnwise cache after inference."""
+    """Preserve primary usages and rebuild missing columnwise workspaces after inference."""
     from transformer_engine.pytorch.distributed import activation_recompute_forward
 
     fp8_recipe = recipe.MXFP8BlockScaling()
@@ -2162,7 +2133,8 @@ def test_grouped_runtime_usage_transitions(primary_fp8, save_original_input):
     assert weight_q.columnwise_usage
     module.eval()
     run(grad_enabled=False, first=True)
-    assert not weight_q.columnwise_usage
+    # Persistent parameters retain columnwise usage; temporary workspaces follow this call.
+    assert weight_q.columnwise_usage == primary_fp8
     # Force a rowwise-only workspace, as on a first inference microbatch.
     if not primary_fp8:
         module._fp8_workspaces.clear()

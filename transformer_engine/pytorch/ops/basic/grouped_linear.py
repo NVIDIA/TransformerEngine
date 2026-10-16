@@ -973,9 +973,16 @@ class GroupedLinear(BasicOperation):
         for w, quantizer in zip(weight_params, weight_quantizers):
             if not with_quantized_compute:
                 w = maybe_dequantize(w, dtype)
-            elif not is_quantized_tensor(w):
+            else:
                 quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
-                w = quantizer(w)
+                if is_quantized_tensor(w):
+                    # Honor the op's requirements without disabling existing parameter usages.
+                    required_columnwise = True if columnwise_usage else None
+                    w.update_usage(rowwise_usage=True, columnwise_usage=required_columnwise)
+                    if w._quantizer is not None:
+                        w._quantizer.set_usage(rowwise=True, columnwise=required_columnwise)
+                else:
+                    w = quantizer(w)
             out.append(w)
         return out
 
