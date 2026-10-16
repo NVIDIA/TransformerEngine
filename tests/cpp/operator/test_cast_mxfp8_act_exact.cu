@@ -385,16 +385,20 @@ void run_case(const Mode mode, const Fill fill, const size_t rows, const size_t 
 // also reduce the tensor amax, which must match bit for bit.
 void run_regtile_vs_generic(const Mode mode, const Fill fill, const size_t rows, const size_t cols,
                             const bool swizzled, const bool use_table, const DType otype,
-                            const bool with_amax) {
+                            const bool with_amax, const DType itype = DType::kBFloat16) {
   const std::vector<size_t> shape{rows, cols};
   const size_t n = rows * cols;
-  Tensor x("x", shape, DType::kBFloat16);
-  Tensor grad("grad", shape, DType::kBFloat16);
-  fill_inputs<bf16>(fill, &x, &grad);
+  Tensor x("x", shape, itype);
+  Tensor grad("grad", shape, itype);
+  if (itype == DType::kFloat16) {
+    fill_inputs<fp16>(fill, &x, &grad);
+  } else {
+    fill_inputs<bf16>(fill, &x, &grad);
+  }
   Tensor outs[2] = {Tensor("default", shape, otype, true, true, NVTE_MXFP8_1D_SCALING),
                     Tensor("generic", shape, otype, true, true, NVTE_MXFP8_1D_SCALING)};
-  Tensor dbias[2] = {Tensor("dbias_default", std::vector<size_t>{cols}, DType::kBFloat16),
-                     Tensor("dbias_generic", std::vector<size_t>{cols}, DType::kBFloat16)};
+  Tensor dbias[2] = {Tensor("dbias_default", std::vector<size_t>{cols}, itype),
+                     Tensor("dbias_generic", std::vector<size_t>{cols}, itype)};
   Tensor workspace[2];
   float *amax_dev = nullptr;
   if (with_amax) {
@@ -466,11 +470,12 @@ void run_regtile_vs_generic(const Mode mode, const Fill fill, const size_t rows,
                   product(workspace[0].rowwise_shape()) * sizeof(float)),
               0u)
         << "dbias workspace";
-    EXPECT_EQ(count_byte_mismatches(
-                  reinterpret_cast<const uint8_t *>(dbias[0].rowwise_cpu_dptr<bf16>()),
-                  reinterpret_cast<const uint8_t *>(dbias[1].rowwise_cpu_dptr<bf16>()),
-                  cols * sizeof(bf16)),
-              0u)
+    const auto dbias_bytes = [&](Tensor &t) {
+      return itype == DType::kFloat16
+                 ? reinterpret_cast<const uint8_t *>(t.rowwise_cpu_dptr<fp16>())
+                 : reinterpret_cast<const uint8_t *>(t.rowwise_cpu_dptr<bf16>());
+    };
+    EXPECT_EQ(count_byte_mismatches(dbias_bytes(dbias[0]), dbias_bytes(dbias[1]), cols * 2), 0u)
         << "dbias";
   }
   // The FP8 data as raw bytes, whichever FP8 type the output holds.
@@ -619,6 +624,37 @@ INSTANTIATE_TEST_SUITE_P(
                                          // elements), with a row and a column tail.
                                          std::pair<size_t, size_t>{4127, 2064}),
                        // With a table, or computed from util/math.h without one.
+                       ::testing::Bool(),
+                       ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2),
+                       ::testing::Bool()),
+    regtile_case_name);
+
+// FP16 inputs take the register-tiled kernel too, always computing the activation (the tables
+// hold BF16 inputs). The table setting must not matter for them.
+class CastMXFP8ActRegtileFP16TestSuite : public ::testing::TestWithParam<RegtileParams> {};
+
+TEST_P(CastMXFP8ActRegtileFP16TestSuite, MatchesGenericKernel) {
+  cudaDeviceProp prop;
+  ASSERT_EQ(cudaGetDeviceProperties(&prop, 0), cudaSuccess);
+  if (prop.major < 10) {
+    GTEST_SKIP() << "This MXFP8 quantize kernel requires compute capability 10.0 or newer";
+  }
+  const auto [mode, fill, swizzled, dims, use_table, otype, with_amax] = GetParam();
+  run_regtile_vs_generic(mode, fill, dims.first, dims.second, swizzled, use_table, otype,
+                         with_amax, DType::kFloat16);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    OperatorTest, CastMXFP8ActRegtileFP16TestSuite,
+    ::testing::Combine(::testing::Values(Mode::GeLU, Mode::DGeLU, Mode::DBiasDGeLU, Mode::SiLU,
+                                         Mode::DSiLU, Mode::DBiasDSiLU),
+                       ::testing::Values(Fill::Typical, Fill::OrderedInputs, Fill::Specials),
+                       ::testing::Bool(),
+                       ::testing::Values(std::pair<size_t, size_t>{1024, 2048},
+                                         std::pair<size_t, size_t>{993, 7200},
+                                         std::pair<size_t, size_t>{33, 272},
+                                         // Large enough for the computed forward path.
+                                         std::pair<size_t, size_t>{4127, 2064}),
                        ::testing::Bool(),
                        ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2),
                        ::testing::Bool()),

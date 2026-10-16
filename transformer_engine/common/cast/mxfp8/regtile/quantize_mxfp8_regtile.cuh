@@ -54,7 +54,8 @@ namespace ptx = transformer_engine::ptx;
 
 namespace {
 
-// The datapath works on 32-bit words, each holding a BF16 column pair.
+// The datapath works on 32-bit words, each holding a column pair of the input type (BF16
+// or FP16; see Datapath).
 
 /*! \brief Elementwise max(|a|, |b|) on a packed BF16 pair, as a raw word. */
 __device__ __forceinline__ unsigned abs_max_bf16x2(unsigned a, unsigned b) {
@@ -105,12 +106,15 @@ struct ComputedTable : activation_table::Table<kKind> {
   static constexpr size_t kBytes = 16;  // unused shared-memory slot
 };
 
-/*! \brief The derivative of a BF16 pair, from the table in shared memory. */
-template <typename TableT>
+template <typename IType>
+struct Datapath;  // below
+
+/*! \brief The derivative of an input pair, from the table in shared memory or computed. */
+template <typename TableT, typename IType>
 __device__ __forceinline__ ptx::floatx2 dact_word(unsigned x,
                                                   const unsigned char* __restrict__ table) {
   if constexpr (TableT::kComputed) {
-    const ptx::floatx2 v = widen_bf16x2(x);
+    const ptx::floatx2 v = Datapath<IType>::widen(x);
     return {TableT::op(v.x), TableT::op(v.y)};
   } else {
     const float2 d = activation_table::derivative_2x<TableT>(x, table);
@@ -150,7 +154,7 @@ constexpr int kRowsPerMxBlock = 32;
 constexpr int kMxGroupsPerRow = kTileCols / 32;
 //! A register-resident tile spreads its 256 columns over the 32 lanes of a warp.
 constexpr int kColsPerLane = kTileCols / 32;
-//! ...which a lane holds as BF16 pairs, one 32-bit word each.
+//! ...which a lane holds as input-type pairs, one 32-bit word each.
 constexpr int kWordsPerLane = kColsPerLane / 2;
 //! ...read as 128-bit vectors, so one per row.
 constexpr int kVecLoadsPerRow = kWordsPerLane / 4;
@@ -175,6 +179,77 @@ __device__ __forceinline__ void store_quantized(unsigned char* p, const unsigned
   static_assert(kColsPerLane == 8, "One STG.64 covers exactly eight FP8 bytes.");
   *(uint2*)p = *(const uint2*)v;
 }
+
+/*! \brief The input-type-specific part of the datapath. A 32-bit word holds a column pair of
+ *         IType; Scale is the reciprocal scale of such a pair, in the form its quantize
+ *         instruction takes.
+ */
+template <typename IType>
+struct Datapath;
+
+template <>
+struct Datapath<bf16> {
+  //! A BF16 pair. 2^(127-e) is a power of two inside BF16's range, so the BF16 multiply in
+  //! mul_cvt_4x is exact, like the generic kernel's FP32 one.
+  using Scale = unsigned;
+  __device__ __forceinline__ static unsigned abs_max(unsigned a, unsigned b) {
+    return abs_max_bf16x2(a, b);
+  }
+  __device__ __forceinline__ static ptx::floatx2 widen(unsigned v) { return widen_bf16x2(v); }
+  __device__ __forceinline__ static unsigned narrow(const ptx::floatx2& v) { return to_bf16x2(v); }
+  //! The reciprocal of the scale e, for both columns of a pair.
+  __device__ __forceinline__ static Scale row_rcp(unsigned e) {
+    return e8m0_to_bf16x2_reciprocal(e);
+  }
+  //! The reciprocals of a column pair's scales, low byte for the low column.
+  __device__ __forceinline__ static Scale col_rcp(unsigned scale_pair) {
+    const ptx::bf16x2 r = ptx::exp2f_rcp_2x_per_lane(__byte_perm(scale_pair, 0, 0x4140));
+    return reinterpret_cast<const unsigned&>(r);
+  }
+  template <typename OType>
+  __device__ __forceinline__ static unsigned quantize(unsigned in01, unsigned in23, Scale s01,
+                                                      Scale s23) {
+    return quantize_x4<OType>(in01, in23, s01, s23);
+  }
+};
+
+template <>
+struct Datapath<fp16> {
+  //! An FP32 pair: 2^(127-e) is often outside FP16's range, so the multiply is done in FP32,
+  //! as the generic kernel does it (mul_cvt_2x with an FP32 scale pair).
+  using Scale = ptx::floatx2;
+  __device__ __forceinline__ static unsigned abs_max(unsigned a, unsigned b) {
+    ptx::fp16x2 d;
+    ptx::abs_max_2x(d, reinterpret_cast<const ptx::fp16x2&>(a),
+                    reinterpret_cast<const ptx::fp16x2&>(b));
+    return reinterpret_cast<const unsigned&>(d);
+  }
+  __device__ __forceinline__ static ptx::floatx2 widen(unsigned v) {
+    const float2 f = __half22float2(reinterpret_cast<const __half2&>(v));
+    return {f.x, f.y};
+  }
+  __device__ __forceinline__ static unsigned narrow(const ptx::floatx2& v) {
+    const __half2 h = __floats2half2_rn(v.x, v.y);
+    return reinterpret_cast<const unsigned&>(h);
+  }
+  __device__ __forceinline__ static Scale row_rcp(unsigned e) {
+    const float r = ptx::exp2f_rcp<float>(static_cast<e8m0_t>(e));
+    return {r, r};
+  }
+  __device__ __forceinline__ static Scale col_rcp(unsigned scale_pair) {
+    return {ptx::exp2f_rcp<float>(static_cast<e8m0_t>(scale_pair & 0xffu)),
+            ptx::exp2f_rcp<float>(static_cast<e8m0_t>((scale_pair >> 8) & 0xffu))};
+  }
+  template <typename OType>
+  __device__ __forceinline__ static unsigned quantize(unsigned in01, unsigned in23, Scale s01,
+                                                      Scale s23) {
+    ptx::FPx2<OType> lo, hi;
+    ptx::mul_cvt_2x(lo, reinterpret_cast<const ptx::fp16x2&>(in01), s01);
+    ptx::mul_cvt_2x(hi, reinterpret_cast<const ptx::fp16x2&>(in23), s23);
+    return static_cast<unsigned>(reinterpret_cast<const unsigned short&>(lo)) |
+           (static_cast<unsigned>(reinterpret_cast<const unsigned short&>(hi)) << 16);
+  }
+};
 
 // Minimum resident CTAs per SM, the second __launch_bounds__ argument, capped
 // at what the SM can hold: sm_75 and sm_107 have half the threads per SM of sm_100.
@@ -226,7 +301,7 @@ struct TileConfig {
 // shared memory, and one thread per column adds them in row order.
 //
 // kAmax: also fold the amax of the output into *amax_ptr.
-template <bool IS_DACT, bool IS_ACT, typename TableT, typename OType,
+template <bool IS_DACT, bool IS_ACT, typename TableT, typename IType, typename OType,
           bool WITH_GEMM_SWIZZLED_SCALES, bool kTails, bool kDbias, bool kAmax>
 __device__ __forceinline__ void quantize_regtile(
     const uint4* __restrict__ input, const uint4* __restrict__ act_input,
@@ -235,11 +310,13 @@ __device__ __forceinline__ void quantize_regtile(
     int K, int rowwise_scale_stride, int colwise_scale_stride, int iters, const void* table,
     float* __restrict__ dbias_workspace, float* __restrict__ amax_ptr) {
   using C = TileConfig<IS_DACT, IS_ACT, TableT, kDbias>;
+  using DP = Datapath<IType>;
+  using Scale = typename DP::Scale;
   constexpr int kWarpsPerCta = C::kWarpsPerCta, kRowsPerWarp = C::kRowsPerWarp,
                 kRowsInFlight = C::kRowsInFlight;
 
   __shared__ __align__(16) unsigned col_amax_partials[kWarpsPerCta][kTileCols / 2];
-  __shared__ __align__(16) unsigned col_scale_rcp_smem[kTileCols / 2];
+  __shared__ __align__(16) Scale col_scale_rcp_smem[kTileCols / 2];
   __shared__ __align__(8) unsigned char row_scale_bytes[kRowsPerMxBlock * kMxGroupsPerRow];
   __shared__ __align__(16) unsigned char table_smem[C::kTableBytes];
   __shared__ __align__(8) uint64_t table_barrier;
@@ -250,7 +327,7 @@ __device__ __forceinline__ void quantize_regtile(
   const int lane = tid & 31;
   const int warp = tid >> 5;
   const int col0 = blockIdx.x * kTileCols;
-  const int vecs_per_row = K >> 3;  // uint4 (8 bf16 values) per row
+  const int vecs_per_row = K >> 3;  // uint4 (8 BF16 or FP16 values) per row
   // Tails: the last column tile may end inside the tile, and row bands may end past M. Out-of-range
   // elements load as 0, which every activation maps to 0, so they never raise an amax. The
   // generic kernel writes scales for its whole 64x64 tiles, and so does this one: rowwise scales
@@ -285,7 +362,7 @@ __device__ __forceinline__ void quantize_regtile(
       const int warp_row0 = row0 + warp * kRowsPerWarp;
       // Whether this lane's elements of row warp_row0 + j are inside the tensor.
       const auto in_bounds = [&](int j) { return !kEdge || (lane_in_cols && warp_row0 + j < M); };
-      // This thread's kRowsPerWarp x kColsPerLane sub-tile, as BF16 pairs.
+      // This thread's kRowsPerWarp x kColsPerLane sub-tile, as input-type pairs.
       unsigned tile_words[kRowsPerWarp * kWordsPerLane];
       const size_t load_offset = (size_t)(row0 + warp * kRowsPerWarp) * vecs_per_row + (col0 >> 3) +
                                  (size_t)kVecLoadsPerRow * lane;
@@ -333,8 +410,8 @@ __device__ __forceinline__ void quantize_regtile(
               for (int m = 0; m < 4; ++m) {
                 if constexpr (TableT::kComputed) {
                   // util/math.h, then rounded to BF16 as the generic kernel rounds it.
-                  const ptx::floatx2 v = widen_bf16x2(x_words[m]);
-                  tile_words[tile_word_base + m] = to_bf16x2({TableT::op(v.x), TableT::op(v.y)});
+                  const ptx::floatx2 v = DP::widen(x_words[m]);
+                  tile_words[tile_word_base + m] = DP::narrow({TableT::op(v.x), TableT::op(v.y)});
                 } else {
                   tile_words[tile_word_base + m] = activation_table::forward_2x<TableT>(
                       x_words[m], reinterpret_cast<const __nv_bfloat16*>(table_smem));
@@ -343,13 +420,13 @@ __device__ __forceinline__ void quantize_regtile(
             }
           }
         } else {
-#define MXFP8_DACT_WORD(T, M)                                                                \
-  {                                                                                          \
-    const ptx::floatx2 product =                                                             \
-        ptx::mul_2x(widen_bf16x2(grad_words[M]), dact_word<TableT>(x_words[M], table_smem)); \
-    tile_words[(h * kRowsInFlight + (T)) * kWordsPerLane + (M)] = to_bf16x2(product);        \
-    products[2 * (M)] = product.x;                                                           \
-    products[2 * (M) + 1] = product.y;                                                       \
+#define MXFP8_DACT_WORD(T, M)                                                                    \
+  {                                                                                              \
+    const ptx::floatx2 product =                                                                 \
+        ptx::mul_2x(DP::widen(grad_words[M]), dact_word<TableT, IType>(x_words[M], table_smem)); \
+    tile_words[(h * kRowsInFlight + (T)) * kWordsPerLane + (M)] = DP::narrow(product);           \
+    products[2 * (M)] = product.x;                                                               \
+    products[2 * (M) + 1] = product.y;                                                           \
   }
 #define MXFP8_DACT_ROW(T)                                                                       \
   {                                                                                             \
@@ -381,41 +458,38 @@ __device__ __forceinline__ void quantize_regtile(
       const size_t store_offset =
           (size_t)(row0 + warp * kRowsPerWarp) * K + col0 + kColsPerLane * lane;
       auto row_scale = [&](const unsigned* row, int j) {
-        unsigned amax =
-            abs_max_bf16x2(abs_max_bf16x2(row[0], row[1]), abs_max_bf16x2(row[2], row[3]));
+        unsigned amax = DP::abs_max(DP::abs_max(row[0], row[1]), DP::abs_max(row[2], row[3]));
 #pragma unroll
         for (int m = 4; m < kWordsPerLane; m += 2)
-          amax = abs_max_bf16x2(amax, abs_max_bf16x2(row[m], row[m + 1]));
+          amax = DP::abs_max(amax, DP::abs_max(row[m], row[m + 1]));
           // A 32-value rowwise block spans kLanesPerMxGroup lanes.
 #pragma unroll
         for (int lane_mask = 1; lane_mask < kLanesPerMxGroup; lane_mask <<= 1)
-          amax = abs_max_bf16x2(amax, __shfl_xor_sync(0xffffffffu, amax, lane_mask));
+          amax = DP::abs_max(amax, __shfl_xor_sync(0xffffffffu, amax, lane_mask));
         // Fold the two halves with one PRMT and a packed max, which leaves the
         // magnitude in both halves; the high half is then the FP32 bit pattern.
-        amax = abs_max_bf16x2(amax, __byte_perm(amax, amax, 0x1032));
-        const unsigned scale_byte =
-            amax_to_e8m0_2x<OType>(0.f, __uint_as_float(amax & 0x7fff0000u));
+        amax = DP::abs_max(amax, __byte_perm(amax, amax, 0x1032));
+        const unsigned scale_byte = amax_to_e8m0_2x<OType>(0.f, DP::widen(amax & 0x7fff7fffu).y);
         if ((lane & (kLanesPerMxGroup - 1)) == 0)
           row_scale_bytes[(warp * kRowsPerWarp + j) * kMxGroupsPerRow + (lane / kLanesPerMxGroup)] =
               (unsigned char)scale_byte;
-        return e8m0_to_bf16x2_reciprocal(scale_byte);
+        return DP::row_rcp(scale_byte);
       };
       // On the 128-thread activation tile, two rows share one butterfly and conversion.
       auto row_amax = [&](const unsigned* row) {
-        unsigned amax =
-            abs_max_bf16x2(abs_max_bf16x2(row[0], row[1]), abs_max_bf16x2(row[2], row[3]));
+        unsigned amax = DP::abs_max(DP::abs_max(row[0], row[1]), DP::abs_max(row[2], row[3]));
 #pragma unroll
         for (int m = 4; m < kWordsPerLane; m += 2)
-          amax = abs_max_bf16x2(amax, abs_max_bf16x2(row[m], row[m + 1]));
-        return abs_max_bf16x2(amax, __byte_perm(amax, amax, 0x1032));
+          amax = DP::abs_max(amax, DP::abs_max(row[m], row[m + 1]));
+        return DP::abs_max(amax, __byte_perm(amax, amax, 0x1032));
       };
       auto row_scale_pair = [&](const unsigned* row_a, const unsigned* row_b, int j,
-                                unsigned& row_scale_rcp0, unsigned& row_scale_rcp1) {
+                                Scale& row_scale_rcp0, Scale& row_scale_rcp1) {
         unsigned amax_pair = __byte_perm(row_amax(row_a), row_amax(row_b), 0x5410) & 0x7fff7fffu;
 #pragma unroll
         for (int lane_mask = 1; lane_mask < kLanesPerMxGroup; lane_mask <<= 1)
-          amax_pair = abs_max_bf16x2(amax_pair, __shfl_xor_sync(0xffffffffu, amax_pair, lane_mask));
-        const ptx::floatx2 amax_2x = widen_bf16x2(amax_pair);
+          amax_pair = DP::abs_max(amax_pair, __shfl_xor_sync(0xffffffffu, amax_pair, lane_mask));
+        const ptx::floatx2 amax_2x = DP::widen(amax_pair);
         const unsigned scale_pair = amax_to_e8m0_2x<OType>(amax_2x.y, amax_2x.x);
         const unsigned scale_byte0 = scale_pair & 0xffu, scale_byte1 = (scale_pair >> 8) & 0xffu;
         if ((lane & (kLanesPerMxGroup - 1)) == 0) {
@@ -424,8 +498,8 @@ __device__ __forceinline__ void quantize_regtile(
           scale_dst[0] = (unsigned char)scale_byte0;
           scale_dst[kMxGroupsPerRow] = (unsigned char)scale_byte1;
         }
-        row_scale_rcp0 = e8m0_to_bf16x2_reciprocal(scale_byte0);
-        row_scale_rcp1 = e8m0_to_bf16x2_reciprocal(scale_byte1);
+        row_scale_rcp0 = DP::row_rcp(scale_byte0);
+        row_scale_rcp1 = DP::row_rcp(scale_byte1);
       };
       // Colwise amax: per-warp partial in registers, cross-warp fold in shared.
       auto publish_col_amax_partials = [&]() {
@@ -436,7 +510,7 @@ __device__ __forceinline__ void quantize_regtile(
         for (int j = 1; j < kRowsPerWarp; ++j)
 #pragma unroll
           for (int m = 0; m < kWordsPerLane; ++m)
-            col_amax[m] = abs_max_bf16x2(col_amax[m], tile_words[j * kWordsPerLane + m]);
+            col_amax[m] = DP::abs_max(col_amax[m], tile_words[j * kWordsPerLane + m]);
 #pragma unroll
         for (int n = 0; n < kVecLoadsPerRow; ++n)
           *(uint4*)(&col_amax_partials[warp][kWordsPerLane * lane + 4 * n]) =
@@ -448,18 +522,18 @@ __device__ __forceinline__ void quantize_regtile(
         for (int j = 0; j < kRowsPerWarp; j += 2) {
           const unsigned* row_a = tile_words + j * kWordsPerLane;
           const unsigned* row_b = row_a + kWordsPerLane;
-          unsigned row_scale_rcp0, row_scale_rcp1;
+          Scale row_scale_rcp0, row_scale_rcp1;
           row_scale_pair(row_a, row_b, j, row_scale_rcp0, row_scale_rcp1);
           unsigned row_out[kWordsPerLane / 2];
 #pragma unroll
           for (int m = 0; m < kWordsPerLane / 2; ++m)
-            row_out[m] =
-                quantize_x4<OType>(row_a[2 * m], row_a[2 * m + 1], row_scale_rcp0, row_scale_rcp0);
+            row_out[m] = DP::template quantize<OType>(row_a[2 * m], row_a[2 * m + 1],
+                                                      row_scale_rcp0, row_scale_rcp0);
           if (in_bounds(j)) store_quantized(row_out_ptr + (unsigned)j * (unsigned)K, row_out);
 #pragma unroll
           for (int m = 0; m < kWordsPerLane / 2; ++m)
-            row_out[m] =
-                quantize_x4<OType>(row_b[2 * m], row_b[2 * m + 1], row_scale_rcp1, row_scale_rcp1);
+            row_out[m] = DP::template quantize<OType>(row_b[2 * m], row_b[2 * m + 1],
+                                                      row_scale_rcp1, row_scale_rcp1);
           if (in_bounds(j + 1))
             store_quantized(row_out_ptr + (unsigned)(j + 1) * (unsigned)K, row_out);
         }
@@ -468,11 +542,12 @@ __device__ __forceinline__ void quantize_regtile(
 #pragma unroll
         for (int j = 0; j < kRowsPerWarp; ++j) {
           const unsigned* v = tile_words + j * kWordsPerLane;
-          const unsigned row_scale_rcp = row_scale(v, j);
+          const Scale row_scale_rcp = row_scale(v, j);
           unsigned row_out[kWordsPerLane / 2];
 #pragma unroll
           for (int m = 0; m < kWordsPerLane / 2; ++m)
-            row_out[m] = quantize_x4<OType>(v[2 * m], v[2 * m + 1], row_scale_rcp, row_scale_rcp);
+            row_out[m] =
+                DP::template quantize<OType>(v[2 * m], v[2 * m + 1], row_scale_rcp, row_scale_rcp);
           if (in_bounds(j)) store_quantized(row_out_ptr + (unsigned)j * (unsigned)K, row_out);
         }
       }
@@ -491,9 +566,9 @@ __device__ __forceinline__ void quantize_regtile(
         unsigned col_amax = col_amax_partials[0][tid];
 #pragma unroll
         for (int w = 1; w < kWarpsPerCta; ++w)
-          col_amax = abs_max_bf16x2(col_amax, col_amax_partials[w][tid]);
+          col_amax = DP::abs_max(col_amax, col_amax_partials[w][tid]);
         col_amax &= 0x7fff7fffu;
-        const ptx::floatx2 amax_2x = widen_bf16x2(col_amax);
+        const ptx::floatx2 amax_2x = DP::widen(col_amax);
         // The tensor amax, when asked for: the max of these column amaxes. Like the generic
         // kernel's per-element fmaxf, it ignores NaN (a column of only NaNs gives NaN here,
         // which fmaxf drops) and is unaffected by the zeros loaded past M or K.
@@ -514,9 +589,7 @@ __device__ __forceinline__ void quantize_regtile(
                                2 * tid) = (unsigned short)scale_pair;
           }
         }
-        const ptx::bf16x2 scale_rcp =
-            ptx::exp2f_rcp_2x_per_lane(__byte_perm(scale_pair, 0, 0x4140));
-        col_scale_rcp_smem[tid] = reinterpret_cast<const unsigned&>(scale_rcp);
+        col_scale_rcp_smem[tid] = DP::col_rcp(scale_pair);
       }
       auto drain_row_scales = [&]() {
         constexpr int drain_tid_base = C::kDrainTidBase;
@@ -562,11 +635,14 @@ __device__ __forceinline__ void quantize_regtile(
 
       // ---- columnwise quantization --------------------------------------------
       {
-        uint4 col_scale_rcp_vec[kVecLoadsPerRow];
+        // This lane's kWordsPerLane column-pair scales, as 16-byte vectors.
+        constexpr int kScaleVecs = kWordsPerLane * sizeof(Scale) / sizeof(uint4);
+        uint4 col_scale_rcp_vec[kScaleVecs];
 #pragma unroll
-        for (int n = 0; n < kVecLoadsPerRow; ++n)
-          col_scale_rcp_vec[n] = *(const uint4*)(col_scale_rcp_smem + kWordsPerLane * lane + 4 * n);
-        const unsigned* col_scale_rcp = (const unsigned*)col_scale_rcp_vec;
+        for (int n = 0; n < kScaleVecs; ++n)
+          col_scale_rcp_vec[n] =
+              reinterpret_cast<const uint4*>(col_scale_rcp_smem + kWordsPerLane * lane)[n];
+        const Scale* col_scale_rcp = reinterpret_cast<const Scale*>(col_scale_rcp_vec);
         unsigned char* col_out_ptr = colwise_out + store_offset;
 #pragma unroll
         for (int j = 0; j < kRowsPerWarp; ++j) {
@@ -574,8 +650,8 @@ __device__ __forceinline__ void quantize_regtile(
           unsigned col_out[kWordsPerLane / 2];
 #pragma unroll
           for (int m = 0; m < kWordsPerLane / 2; ++m)
-            col_out[m] = quantize_x4<OType>(v[2 * m], v[2 * m + 1], col_scale_rcp[2 * m],
-                                            col_scale_rcp[2 * m + 1]);
+            col_out[m] = DP::template quantize<OType>(v[2 * m], v[2 * m + 1], col_scale_rcp[2 * m],
+                                                      col_scale_rcp[2 * m + 1]);
           if (in_bounds(j)) store_quantized(col_out_ptr + (unsigned)j * (unsigned)K, col_out);
         }
       }
@@ -602,7 +678,7 @@ __device__ __forceinline__ void quantize_regtile(
   }
 }
 
-template <bool IS_DACT, bool IS_ACT, typename TableT, typename OType,
+template <bool IS_DACT, bool IS_ACT, typename TableT, typename IType, typename OType,
           bool WITH_GEMM_SWIZZLED_SCALES, bool kTails, bool kDbias, bool kAmax>
 __global__ void __launch_bounds__(TileConfig<IS_DACT, IS_ACT, TableT, kDbias>::kThreadsPerCta,
                                   TileConfig<IS_DACT, IS_ACT, TableT, kDbias>::kMinBlocksPerSm)
@@ -616,7 +692,7 @@ __global__ void __launch_bounds__(TileConfig<IS_DACT, IS_ACT, TableT, kDbias>::k
                           const void* __restrict__ table, float* __restrict__ dbias_workspace,
                           float* __restrict__ amax_ptr) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-  quantize_regtile<IS_DACT, IS_ACT, TableT, OType, WITH_GEMM_SWIZZLED_SCALES, kTails, kDbias,
+  quantize_regtile<IS_DACT, IS_ACT, TableT, IType, OType, WITH_GEMM_SWIZZLED_SCALES, kTails, kDbias,
                    kAmax>((const uint4*)input, (const uint4*)act_input, rowwise_out, rowwise_scales,
                           colwise_out, colwise_scales, M, K, rowwise_scale_stride,
                           colwise_scale_stride, iters, table, dbias_workspace, amax_ptr);
@@ -645,7 +721,7 @@ static int pick_walk_length(int row_blocks, int grid_cols, long long target,
 // the rest of the unified array goes to L1.
 constexpr int kCarveoutPercentAct = 40;
 
-template <bool IS_DACT, bool IS_ACT, typename TableT, typename OType,
+template <bool IS_DACT, bool IS_ACT, typename TableT, typename IType, typename OType,
           bool WITH_GEMM_SWIZZLED_SCALES, bool kTails, bool kDbias, bool kAmax>
 static void set_carveout() {
   constexpr int kPercent = IS_ACT ? kCarveoutPercentAct : 0;
@@ -660,7 +736,7 @@ static void set_carveout() {
     if (static_cast<size_t>(device) >= done.size()) done.resize(device + 1, false);
     if (!done[device]) {
       const void* kernel =
-          (const void*)quantize_mxfp8_kernel<IS_DACT, IS_ACT, TableT, OType,
+          (const void*)quantize_mxfp8_kernel<IS_DACT, IS_ACT, TableT, IType, OType,
                                              WITH_GEMM_SWIZZLED_SCALES, kTails, kDbias, kAmax>;
       if constexpr (kPercent > 0) {
         NVTE_CHECK_CUDA(
@@ -703,7 +779,7 @@ int walk_length(int M, int K) {
   return iters;
 }
 
-template <bool IS_DACT, bool IS_ACT, typename TableT, typename OType,
+template <bool IS_DACT, bool IS_ACT, typename TableT, typename IType, typename OType,
           bool WITH_GEMM_SWIZZLED_SCALES, bool kDbias>
 static void launch(const void* input, const void* act_input, void* rowwise_out,
                    void* rowwise_scales, void* colwise_out, void* colwise_scales, int M, int K,
@@ -717,10 +793,10 @@ static void launch(const void* input, const void* act_input, void* rowwise_out,
   const auto run_amax = [&](auto tails, auto with_amax) {
     constexpr bool kTails = decltype(tails)::value;
     constexpr bool kAmax = decltype(with_amax)::value;
-    set_carveout<IS_DACT, IS_ACT, TableT, OType, WITH_GEMM_SWIZZLED_SCALES, kTails, kDbias,
+    set_carveout<IS_DACT, IS_ACT, TableT, IType, OType, WITH_GEMM_SWIZZLED_SCALES, kTails, kDbias,
                  kAmax>();
-    quantize_mxfp8_kernel<IS_DACT, IS_ACT, TableT, OType, WITH_GEMM_SWIZZLED_SCALES, kTails, kDbias,
-                          kAmax><<<grid, C::kThreadsPerCta, C::kDbiasStageBytes, stream>>>(
+    quantize_mxfp8_kernel<IS_DACT, IS_ACT, TableT, IType, OType, WITH_GEMM_SWIZZLED_SCALES, kTails,
+                          kDbias, kAmax><<<grid, C::kThreadsPerCta, C::kDbiasStageBytes, stream>>>(
         (const unsigned*)input, (const unsigned*)act_input, (unsigned char*)rowwise_out,
         (unsigned char*)rowwise_scales, (unsigned char*)colwise_out, (unsigned char*)colwise_scales,
         M, K, rowwise_scale_stride, colwise_scale_stride, iters, table, dbias_workspace, amax);
@@ -763,7 +839,16 @@ constexpr bool kImplements =
     (!IS_DBIAS || IS_DACT) && (IS_ACT != IS_DACT) && activation_table::kHasTable<ParamOP, OP> &&
     (IS_ACT == activation_table::Table<activation_table::kKindOf<ParamOP, OP>>::kForward);
 
-// Whether this kernel takes a request of a type in kImplements, with BF16 input and E4M3 or
+//! Whether FP16 inputs of this request type take this kernel. FP16 always computes the
+//! activation and scales every value in FP32 (see Datapath<fp16>), about twice the
+//! instructions of the BF16 path, which the compute-bound kernels cannot absorb. GB200 against
+//! TE main: dSiLU 1.25-1.71x, dbias_dGeLU 1.16-1.43x, dbias_dSiLU 1.27-1.50x, but GeLU
+//! 0.74-0.91x, SiLU 0.86-1.26x and dGeLU 0.95-1.15x, which stay on the generic kernel.
+template <bool IS_DBIAS, typename ParamOP, float (*OP)(float, const ParamOP&)>
+constexpr bool kTakesFP16 =
+    IS_DBIAS || activation_table::kKindOf<ParamOP, OP> == activation_table::kDsilu;
+
+// Whether this kernel takes a request of a type in kImplements, with BF16 or FP16 input and E4M3 or
 // E5M2 output.  Anything else takes the generic kernel, as does every request with
 // NVTE_MXFP8_REGTILE=0.  A noop tensor is ignored, as the generic kernel ignores it for every
 // request that computes an activation.
@@ -801,7 +886,8 @@ bool can_use(const Tensor& input, const Tensor* act_input, const Tensor& output,
 //! dbias_workspace: [ceil(rows / 64), cols] FP32 column sums for common::reduce_dbias, or
 //! nullptr without dbias.
 template <bool IS_DACT, bool IS_ACT, bool IS_DBIAS, typename ParamOP,
-          float (*OP)(float, const ParamOP&), typename OType, bool WITH_GEMM_SWIZZLED_SCALES>
+          float (*OP)(float, const ParamOP&), typename IType, typename OType,
+          bool WITH_GEMM_SWIZZLED_SCALES>
 void quantize(const Tensor& input, const Tensor* act_input, Tensor* output,
               const activation_table::TableRef& table, float* dbias_workspace,
               cudaStream_t stream) {
@@ -812,7 +898,7 @@ void quantize(const Tensor& input, const Tensor* act_input, Tensor* output,
   const void* act_ptr = IS_DACT ? act_input->data.dptr : input.data.dptr;
   const auto run = [&](auto table_type) {
     using TableT = typename decltype(table_type)::type;
-    launch<IS_DACT, IS_ACT, TableT, OType, WITH_GEMM_SWIZZLED_SCALES, IS_DBIAS>(
+    launch<IS_DACT, IS_ACT, TableT, IType, OType, WITH_GEMM_SWIZZLED_SCALES, IS_DBIAS>(
         input.data.dptr, act_ptr, output->data.dptr, output->scale_inv.dptr,
         output->columnwise_data.dptr, output->columnwise_scale_inv.dptr, static_cast<int>(rows),
         static_cast<int>(cols), static_cast<int>(output->scale_inv.shape[1]),
@@ -820,20 +906,25 @@ void quantize(const Tensor& input, const Tensor* act_input, Tensor* output,
         static_cast<float*>(output->amax.dptr), stream);
   };
   constexpr Kind kKind = kKindOf<ParamOP, OP>;
-  if (table.use == kNoTable) {
+  // The tables hold BF16 inputs; FP16 inputs always compute.
+  if (!std::is_same_v<IType, bf16> || table.use == kNoTable) {
     run(std::common_type<ComputedTable<kKind>>{});
     NVTE_CHECK_CUDA(cudaGetLastError());
     return;
   }
-  if constexpr (kKind == kDsilu) {
+  if constexpr (!std::is_same_v<IType, bf16>) {
+    return;
+  } else if constexpr (kKind == kDsilu) {
     if (table.use == kExactDsiluTable) {
       run(std::common_type<ExactDsiluTable>{});
       NVTE_CHECK_CUDA(cudaGetLastError());
       return;
     }
   }
-  run(std::common_type<Table<kKind>>{});
-  NVTE_CHECK_CUDA(cudaGetLastError());
+  if constexpr (std::is_same_v<IType, bf16>) {
+    run(std::common_type<Table<kKind>>{});
+    NVTE_CHECK_CUDA(cudaGetLastError());
+  }
 }
 
 }  // namespace regtile
