@@ -74,7 +74,7 @@ __device__ __forceinline__ unsigned gated_word(const unsigned act, const unsigne
       {gated_element<IS_BWD, kPart>(a.x, g.x, d.x), gated_element<IS_BWD, kPart>(a.y, g.y, d.y)});
 }
 
-template <bool IS_BWD, bool WITH_GEMM_SWIZZLED_SCALES, bool kTails>
+template <bool IS_BWD, typename OType, bool WITH_GEMM_SWIZZLED_SCALES, bool kTails>
 __global__ void __launch_bounds__(kThreadsPerCta, kMinBlocksPerSm<IS_BWD>)
     quantize_gated_kernel(const uint4* __restrict__ input, const uint4* __restrict__ grad,
                           unsigned char* __restrict__ rowwise_out,
@@ -122,7 +122,7 @@ __global__ void __launch_bounds__(kThreadsPerCta, kMinBlocksPerSm<IS_BWD>)
             amax = abs_max_bf16x2(amax, __shfl_xor_sync(0xffffffffu, amax, lane_mask));
           amax = abs_max_bf16x2(amax, __byte_perm(amax, amax, 0x1032));
           const unsigned scale_byte =
-              amax_to_e8m0_2x<fp8e4m3>(0.f, __uint_as_float(amax & 0x7fff0000u));
+              amax_to_e8m0_2x<OType>(0.f, __uint_as_float(amax & 0x7fff0000u));
           if ((lane & (kLanesPerMxGroup - 1)) == 0)
             row_scale_bytes[(warp * kRowsPerWarp + j) * kMxGroupsPerRow +
                             (lane / kLanesPerMxGroup)] = (unsigned char)scale_byte;
@@ -130,7 +130,7 @@ __global__ void __launch_bounds__(kThreadsPerCta, kMinBlocksPerSm<IS_BWD>)
           unsigned row_out[kWordsPerLane / 2];
 #pragma unroll
           for (int m = 0; m < kWordsPerLane / 2; ++m)
-            row_out[m] = quantize_x4<fp8e4m3>(v[2 * m], v[2 * m + 1], rcp, rcp);
+            row_out[m] = quantize_x4<OType>(v[2 * m], v[2 * m + 1], rcp, rcp);
           if (in_bounds(j)) store_quantized(row_out_ptr + (size_t)j * out_cols, row_out);
         }
       }
@@ -155,7 +155,7 @@ __global__ void __launch_bounds__(kThreadsPerCta, kMinBlocksPerSm<IS_BWD>)
           col_amax = abs_max_bf16x2(col_amax, col_amax_partials[w][tid]);
         col_amax &= 0x7fff7fffu;
         const ptx::floatx2 amax_2x = widen_bf16x2(col_amax);
-        const unsigned scale_pair = amax_to_e8m0_2x<fp8e4m3>(amax_2x.y, amax_2x.x);
+        const unsigned scale_pair = amax_to_e8m0_2x<OType>(amax_2x.y, amax_2x.x);
         const int col = col0 + 2 * tid;
         // The generic gated kernel writes scales only inside the tensor.
         if (!kEdge || (col < K && row0 < M)) {
@@ -207,7 +207,7 @@ __global__ void __launch_bounds__(kThreadsPerCta, kMinBlocksPerSm<IS_BWD>)
           unsigned col_out[kWordsPerLane / 2];
 #pragma unroll
           for (int m = 0; m < kWordsPerLane / 2; ++m)
-            col_out[m] = quantize_x4<fp8e4m3>(v[2 * m], v[2 * m + 1], rcp[2 * m], rcp[2 * m + 1]);
+            col_out[m] = quantize_x4<OType>(v[2 * m], v[2 * m + 1], rcp[2 * m], rcp[2 * m + 1]);
           if (in_bounds(j)) store_quantized(col_out_ptr + (size_t)j * out_cols, col_out);
         }
       }
@@ -265,13 +265,16 @@ __global__ void __launch_bounds__(kThreadsPerCta, kMinBlocksPerSm<IS_BWD>)
 #endif
 }
 
-//! Whether the gated regtile kernel takes this request: BF16 [M, 2K] -> E4M3, both directions,
+//! Whether the gated regtile kernel takes this request: BF16 [M, 2K] -> E4M3 or E5M2, both directions,
 //! K % 32 == 0 (the generic gated kernel's requirement), aligned buffers.
 inline bool can_use(const Tensor& input, const Tensor& grad, const Tensor& output,
                     const bool is_bwd) {
   if (!getenv<bool>("NVTE_MXFP8_REGTILE", true)) return false;
   if (transformer_engine::cuda::sm_arch() < 100) return false;
-  if (input.dtype() != DType::kBFloat16 || output.dtype() != DType::kFloat8E4M3) return false;
+  if (input.dtype() != DType::kBFloat16 ||
+      (output.dtype() != DType::kFloat8E4M3 && output.dtype() != DType::kFloat8E5M2)) {
+    return false;
+  }
   if (!output.has_data() || !output.has_columnwise_data()) return false;
   const size_t rows = input.flat_first_dim();
   const size_t cols = input.flat_last_dim() / 2;
@@ -285,7 +288,7 @@ inline bool can_use(const Tensor& input, const Tensor& grad, const Tensor& outpu
          is_aligned_ptr(output.columnwise_scale_inv.dptr, 2);
 }
 
-template <bool IS_BWD, bool WITH_GEMM_SWIZZLED_SCALES>
+template <bool IS_BWD, typename OType, bool WITH_GEMM_SWIZZLED_SCALES>
 void quantize(const Tensor& input, const Tensor& grad, Tensor* output, cudaStream_t stream) {
   const int M = static_cast<int>(input.flat_first_dim());
   const int K = static_cast<int>(input.flat_last_dim() / 2);
@@ -298,7 +301,7 @@ void quantize(const Tensor& input, const Tensor& grad, Tensor* output, cudaStrea
   const dim3 grid(grid_cols, bands / iters);
   const auto run = [&](auto tails) {
     constexpr bool kTails = decltype(tails)::value;
-    quantize_gated_kernel<IS_BWD, WITH_GEMM_SWIZZLED_SCALES, kTails>
+    quantize_gated_kernel<IS_BWD, OType, WITH_GEMM_SWIZZLED_SCALES, kTails>
         <<<grid, kThreadsPerCta, 0, stream>>>(
             (const uint4*)input.data.dptr, (const uint4*)(IS_BWD ? grad.data.dptr : nullptr),
             (unsigned char*)output->data.dptr, (unsigned char*)output->scale_inv.dptr,

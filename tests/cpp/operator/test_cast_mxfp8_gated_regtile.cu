@@ -92,7 +92,7 @@ size_t count_byte_mismatches(const uint8_t *a, const uint8_t *b, const size_t n)
 }
 
 void run_case(const bool bwd, const GatedFill kind, const size_t rows, const size_t cols,
-              const bool swizzled) {
+              const bool swizzled, const DType otype) {
   Tensor input("input", std::vector<size_t>{rows, 2 * cols}, DType::kBFloat16);
   Tensor grad("grad", std::vector<size_t>{rows, cols}, DType::kBFloat16);
   fill(&input, rows, 2 * cols, kind, 1);
@@ -101,8 +101,8 @@ void run_case(const bool bwd, const GatedFill kind, const size_t rows, const siz
   const size_t out_cols = bwd ? 2 * cols : cols;
   const std::vector<size_t> out_shape{rows, out_cols};
   Tensor outs[2] = {
-      Tensor("regtile", out_shape, DType::kFloat8E4M3, true, true, NVTE_MXFP8_1D_SCALING),
-      Tensor("generic", out_shape, DType::kFloat8E4M3, true, true, NVTE_MXFP8_1D_SCALING)};
+      Tensor("regtile", out_shape, otype, true, true, NVTE_MXFP8_1D_SCALING),
+      Tensor("generic", out_shape, otype, true, true, NVTE_MXFP8_1D_SCALING)};
   for (int i = 0; i < 2; ++i) {
     outs[i].set_with_gemm_swizzled_scales(swizzled);
     for (const auto param : {kNVTERowwiseData, kNVTEColumnwiseData, kNVTERowwiseScaleInv,
@@ -123,15 +123,20 @@ void run_case(const bool bwd, const GatedFill kind, const size_t rows, const siz
   ASSERT_EQ(cudaGetLastError(), cudaSuccess);
   for (auto &out : outs) out.to_cpu();
   const size_t n = rows * out_cols;
-  EXPECT_EQ(count_byte_mismatches(
-                reinterpret_cast<const uint8_t *>(outs[0].rowwise_cpu_dptr<fp8e4m3>()),
-                reinterpret_cast<const uint8_t *>(outs[1].rowwise_cpu_dptr<fp8e4m3>()), n),
-            0u)
+  // The FP8 data as raw bytes, whichever FP8 type the output holds.
+  const auto rowwise_bytes = [&](Tensor &t) {
+    return otype == DType::kFloat8E5M2
+               ? reinterpret_cast<const uint8_t *>(t.rowwise_cpu_dptr<fp8e5m2>())
+               : reinterpret_cast<const uint8_t *>(t.rowwise_cpu_dptr<fp8e4m3>());
+  };
+  const auto columnwise_bytes = [&](Tensor &t) {
+    return otype == DType::kFloat8E5M2
+               ? reinterpret_cast<const uint8_t *>(t.columnwise_cpu_dptr<fp8e5m2>())
+               : reinterpret_cast<const uint8_t *>(t.columnwise_cpu_dptr<fp8e4m3>());
+  };
+  EXPECT_EQ(count_byte_mismatches(rowwise_bytes(outs[0]), rowwise_bytes(outs[1]), n), 0u)
       << "rowwise data";
-  EXPECT_EQ(count_byte_mismatches(
-                reinterpret_cast<const uint8_t *>(outs[0].columnwise_cpu_dptr<fp8e4m3>()),
-                reinterpret_cast<const uint8_t *>(outs[1].columnwise_cpu_dptr<fp8e4m3>()), n),
-            0u)
+  EXPECT_EQ(count_byte_mismatches(columnwise_bytes(outs[0]), columnwise_bytes(outs[1]), n), 0u)
       << "colwise data";
   EXPECT_EQ(count_byte_mismatches(outs[0].rowwise_cpu_scale_inv_ptr<uint8_t>(),
                                   outs[1].rowwise_cpu_scale_inv_ptr<uint8_t>(),
@@ -145,7 +150,8 @@ void run_case(const bool bwd, const GatedFill kind, const size_t rows, const siz
       << "colwise scales";
 }
 
-using Params = std::tuple<bool /*bwd*/, GatedFill, bool /*swizzled*/, std::pair<size_t, size_t>>;
+using Params = std::tuple<bool /*bwd*/, GatedFill, bool /*swizzled*/, std::pair<size_t, size_t>,
+                          DType /*output*/>;
 
 class GatedRegtileTestSuite : public ::testing::TestWithParam<Params> {};
 
@@ -155,16 +161,16 @@ TEST_P(GatedRegtileTestSuite, MatchesGenericKernel) {
   if (prop.major < 10) {
     GTEST_SKIP() << "This MXFP8 quantize kernel requires compute capability 10.0 or newer";
   }
-  const auto [bwd, kind, swizzled, dims] = GetParam();
-  run_case(bwd, kind, dims.first, dims.second, swizzled);
+  const auto [bwd, kind, swizzled, dims, otype] = GetParam();
+  run_case(bwd, kind, dims.first, dims.second, swizzled, otype);
 }
 
 std::string case_name(const testing::TestParamInfo<Params> &info) {
-  const auto [bwd, kind, swizzled, dims] = info.param;
+  const auto [bwd, kind, swizzled, dims, otype] = info.param;
   const char *fills[] = {"Normal", "Wide", "Specials", "AllBF16"};
   return std::string(bwd ? "DSwiGLU" : "SwiGLU") + "X" + fills[static_cast<int>(kind)] + "X" +
          (swizzled ? "Swizzled" : "Compact") + "X" + std::to_string(dims.first) + "X" +
-         std::to_string(dims.second);
+         std::to_string(dims.second) + (otype == DType::kFloat8E5M2 ? "XE5M2" : "XE4M3");
 }
 
 INSTANTIATE_TEST_SUITE_P(
@@ -179,14 +185,17 @@ INSTANTIATE_TEST_SUITE_P(
                                          std::pair<size_t, size_t>{993, 7200},
                                          std::pair<size_t, size_t>{1, 32},
                                          std::pair<size_t, size_t>{33, 288},
-                                         std::pair<size_t, size_t>{100, 2080})),
+                                         std::pair<size_t, size_t>{100, 2080}),
+                       ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2)),
     case_name);
 
 // Every BF16 value in the activated half: 64 rows x 1024 columns.
 INSTANTIATE_TEST_SUITE_P(AllBF16, GatedRegtileTestSuite,
                          ::testing::Combine(::testing::Bool(), ::testing::Values(GatedFill::AllBF16),
                                             ::testing::Bool(),
-                                            ::testing::Values(std::pair<size_t, size_t>{64, 1024})),
+                                            ::testing::Values(std::pair<size_t, size_t>{64, 1024}),
+                                            ::testing::Values(DType::kFloat8E4M3,
+                                                              DType::kFloat8E5M2)),
                          case_name);
 
 }  // namespace
