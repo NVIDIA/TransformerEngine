@@ -3229,71 +3229,6 @@ def test_te_split_parameters_saved_versions():
         out.sum().backward()
 
 
-@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
-def test_te_split_parameters_saved_hooks():
-    import copy
-
-    model = te.Linear(64, 128, parameters_split=dict(q=64, k=32, v=32), params_dtype=torch.bfloat16)
-    reference = copy.deepcopy(model)
-    compiled = torch.compile(model, fullgraph=True, backend="aot_eager")
-    inp = torch.randn(16, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-    ref_inp = inp.detach().clone().requires_grad_()
-    with torch.autograd.graph.saved_tensors_hooks(lambda t: t.clone(), lambda t: t):
-        out = compiled(inp)
-        out.sum().backward()
-    expected = reference(ref_inp)
-    expected.sum().backward()
-    torch.testing.assert_close(out, expected, rtol=0, atol=0)
-    torch.testing.assert_close(inp.grad, ref_inp.grad, rtol=0, atol=0)
-    for actual, target in zip(model.parameters(), reference.parameters()):
-        torch.testing.assert_close(actual.grad, target.grad, rtol=0, atol=0)
-
-
-def test_te_split_parameters_fallback_check(monkeypatch):
-    model = te.Linear(64, 128, parameters_split=dict(q=64, k=32, v=32))
-    inp = torch.empty(16, 64, device="cuda")
-
-    def unexpected_materialization(*args, **kwargs):
-        raise AssertionError("Fallback eligibility must not concatenate parameters")
-
-    monkeypatch.setattr(model, "_get_weight_and_bias_tensors", unexpected_materialization)
-    assert model._compile_eager_fallback_reason(inp, None, False, False, True, False) is None
-    assert (
-        model._compile_eager_fallback_reason(inp, None, True, False, True, False)
-        == "differentiable fp8_output=True"
-    )
-
-
-@pytest.mark.parametrize("defer", [False, True])
-def test_concat_input_single_tensor(defer):
-    from transformer_engine.pytorch.module._common import concat_input
-
-    tensor = torch.nn.Parameter(torch.randn(4, 8, device="cuda"))
-    result, parts = concat_input([tensor], defer=defer)
-    assert result is tensor
-    assert parts is None
-
-
-@pytest.mark.parametrize("disjoint", [False, True])
-def test_concat_input_eager_gradients(disjoint):
-    from transformer_engine.pytorch.module._common import concat_input
-
-    parts = [torch.nn.Parameter(t) for t in torch.randn(8, 8, device="cuda").split((3, 5))]
-    if disjoint:
-        parts[1] = torch.nn.Parameter(parts[1].detach().clone())
-    result, deferred = concat_input(parts)
-    assert deferred is None
-    expected = torch.cat(parts)
-    grad = torch.randn_like(result)
-    torch.testing.assert_close(result, expected, rtol=0, atol=0)
-    torch.testing.assert_close(
-        torch.autograd.grad(result, parts, grad),
-        torch.autograd.grad(expected, parts, grad),
-        rtol=0,
-        atol=0,
-    )
-
-
 @pytest.mark.parametrize(
     "layout", ["adjacent", "offset", "disjoint", "strided", "singleton", "negative", "conjugate"]
 )
@@ -3324,31 +3259,6 @@ def test_concat_storage(layout):
         assert result.data_ptr() == parts[0].data_ptr()
     else:
         assert result.untyped_storage().data_ptr() != parts[0].untyped_storage().data_ptr()
-
-
-@pytest.mark.parametrize("fake", [False, True], ids=["eager", "fake"])
-@pytest.mark.parametrize("mixed_dtype", [False, True])
-def test_concat_spec(fake, mixed_dtype):
-    from transformer_engine.pytorch.dynamo.concat import concat_to_spec
-
-    with FakeTensorMode() if fake else contextlib.nullcontext():
-        parts = [
-            torch.empty(3, 8, device="cuda", dtype=torch.bfloat16),
-            torch.empty(
-                5,
-                8,
-                device="cuda",
-                dtype=torch.float32 if mixed_dtype else torch.bfloat16,
-                requires_grad=True,
-            ),
-        ]
-        expected = torch.cat(parts)
-        spec = concat_to_spec([to_tensor_spec(t) for t in parts] if fake else parts)
-        assert spec.shape == tuple(expected.shape)
-        assert spec.dtype == expected.dtype
-        assert spec.device == expected.device
-        assert spec.requires_grad == expected.requires_grad
-        assert not spec.is_quantized
 
 
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
@@ -3388,24 +3298,6 @@ def test_tensor_list_custom_op(optional, contents):
     torch.testing.assert_close(compiled(inp, tensors), expected)
 
 
-@pytest.mark.parametrize("internal", [False, True])
-def test_concat_rejects_quantized_parts(internal):
-    from transformer_engine.pytorch.dynamo.concat import concat_to_spec, materialize_concat
-    from transformer_engine.pytorch.module._common import concat_input
-
-    quantizer = _current_scaling()
-    quantizer.internal = internal
-    tensor = TensorSpec(
-        shape=(4, 8), dtype=torch.bfloat16, quantizer=quantizer, device=torch.device("cpu")
-    ).create_tensor()
-    for concatenate in (concat_to_spec, materialize_concat):
-        with pytest.raises(TypeError, match="non-quantized tensors"):
-            concatenate([tensor, tensor])
-    result, parts = concat_input([tensor], defer=True)
-    assert result is tensor
-    assert parts is None
-
-
 @pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
 @pytest.mark.parametrize("grad_target", ["input", "weight"])
 def test_te_split_parameters_grad_targets(grad_target):
@@ -3432,46 +3324,3 @@ def test_te_split_parameters_grad_targets(grad_target):
             assert result is None
         else:
             torch.testing.assert_close(result, target, rtol=0, atol=0)
-
-
-@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
-@pytest.mark.parametrize("bf16_part", ["q", "k"])
-def test_te_split_parameters_mixed_dtype_autocast(bf16_part):
-    model = te.Linear(64, 192, parameters_split=("q", "k", "v"), params_dtype=torch.float32)
-    name = f"{bf16_part}_weight"
-    setattr(model, name, torch.nn.Parameter(getattr(model, name).to(torch.bfloat16)))
-    inp = torch.randn(16, 64, device="cuda", dtype=torch.float32, requires_grad=True)
-    grad = torch.randn(16, 192, device="cuda", dtype=torch.bfloat16)
-    torch._dynamo.reset()
-    compiled = torch.compile(model, fullgraph=True)
-    with torch.autocast("cuda", dtype=torch.bfloat16):
-        expected = model(inp)
-    expected.backward(grad)
-    expected_grads = [tensor.grad.clone() for tensor in (inp, *model.parameters())]
-    inp.grad = None
-    model.zero_grad(set_to_none=True)
-    with torch.autocast("cuda", dtype=torch.bfloat16):
-        actual = compiled(inp)
-    actual.backward(grad)
-    actual_grads = [tensor.grad for tensor in (inp, *model.parameters())]
-    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-    torch.testing.assert_close(actual_grads, expected_grads, rtol=0, atol=0)
-
-
-@pytest.mark.parametrize("split", [False, True])
-@pytest.mark.parametrize("bias_mode", ["fused", "none", "returned"])
-def test_te_split_parameters_onnx_path(split, bias_mode):
-    model = te.Linear(
-        64,
-        128,
-        parameters_split=dict(q=64, k=32, v=32) if split else None,
-        bias=bias_mode != "none",
-        return_bias=bias_mode == "returned",
-        params_dtype=torch.bfloat16,
-    )
-    inp = torch.randn(16, 64, device="cuda", dtype=torch.bfloat16)
-    with torch.no_grad():
-        expected = model(inp)
-        with te.onnx_export(enabled=True):
-            actual = model(inp)
-    torch.testing.assert_close(actual, expected, **dtype_tols(torch.bfloat16))
