@@ -59,3 +59,31 @@ Modules
   :members: __call__
 
 .. autoapifunction:: transformer_engine.jax.flax.extend_logical_axis_rules
+
+
+Mixture of Experts
+------------------
+Router, routing kernels, and grouped dense for MoE layers. See
+:doc:`Mixture of Experts <../features/mixture_of_experts/mixture_of_experts>` for an overview.
+
+.. autoapifunction:: transformer_engine.jax.router.fused_topk_with_score_function
+
+.. autoapifunction:: transformer_engine.jax.router.fused_moe_aux_loss
+
+.. autoapifunction:: transformer_engine.jax.permutation.token_dispatch
+
+.. autoapifunction:: transformer_engine.jax.permutation.token_combine
+
+.. autoapifunction:: transformer_engine.jax.permutation.sort_chunks_by_index
+
+.. autoapifunction:: transformer_engine.jax.dense.grouped_dense
+
+.. autoapifunction:: transformer_engine.jax.moe.moe
+
+.. autoapifunction:: transformer_engine.jax.ep.ep_bootstrap
+
+.. autoapifunction:: transformer_engine.jax.ep.ep_finalize
+
+.. autoapifunction:: transformer_engine.jax.ep.ep_dispatch
+
+.. autoapifunction:: transformer_engine.jax.ep.ep_combine
