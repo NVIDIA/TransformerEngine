@@ -32,6 +32,7 @@ from transformer_engine.pytorch import (
 from transformer_engine.pytorch.attention.dot_product_attention import (
     _attention_backends,
 )
+import transformer_engine.pytorch.attention.dot_product_attention.utils as dpa_utils
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     AttentionParams,
     FlashAttentionUtils,
@@ -41,6 +42,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     get_attention_backend,
     get_fused_attn_spec,
     get_thd_padding_mask,
+    should_pad_qkv_head_dim,
 )
 from transformer_engine.pytorch.attention import RotaryPositionEmbedding
 import transformer_engine.pytorch.cpp_extensions as ext
@@ -1384,6 +1386,93 @@ model_configs_mla = {
 def test_dpa_mla(dtype, model_configs, model):
     """Test DotProductAttention module with Multi-Latent Attention (MLA)"""
     test_dot_product_attention(dtype, model_configs, model, True, None, False, False)
+
+
+def _make_mla_attn_params(dtype, config, head_dim_qk, head_dim_v):
+    """Build the attention params a THD MLA config would feed into backend selection."""
+    return dpa_utils.AttentionParams(
+        qkv_dtype=dtype,
+        qkv_layout="sbhd_sbhd_sbhd" if config.attn_type == "self" else "bshd_bshd_bshd",
+        batch_size=config.batch_size,
+        num_heads=config.num_heads,
+        num_gqa_groups=config.num_gqa_groups,
+        max_seqlen_q=config.max_seqlen_q,
+        max_seqlen_kv=config.max_seqlen_kv,
+        head_dim_qk=head_dim_qk,
+        head_dim_v=head_dim_v,
+        attn_mask_type=config.attn_mask_type,
+        is_training=True,
+    )
+
+
+@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("model_configs", [model_configs_mla])
+@pytest.mark.parametrize("model", model_configs_mla.keys())
+def test_dpa_mla_should_pad(dtype, model_configs, model):
+    """Test whether optional padding works correctly.
+
+    It either pads (1) in case it's required for a functioning kernel or (2) to select a faster
+    backend. Otherwise padding should be avoided since it becomes redundant.
+    """
+    config = model_configs[model]
+    native_params = _make_mla_attn_params(dtype, config, config.head_dim_qk, config.head_dim_v)
+    padded_head_dim = max(config.head_dim_qk, config.head_dim_v)
+    padded_params = _make_mla_attn_params(dtype, config, padded_head_dim, padded_head_dim)
+
+    # Equal head dims run on any backend as-is, so padding is never warranted.
+    assert not should_pad_qkv_head_dim(padded_params, False), "suggested padding equal-sized QK/V"
+
+    # Packed FP8 buffers must never be padded; the kernel would read the unpadded data.
+    fp8_recipe = recipe.DelayedScaling(fp8_format=recipe.Format.HYBRID, fp8_dpa=True)
+    fp8_params = replace(native_params, fp8=True, fp8_meta={"recipe": fp8_recipe})
+    assert not should_pad_qkv_head_dim(fp8_params, True), "suggested padding packed FP8 inputs"
+
+    native_backend = dpa_utils.get_attention_backend(native_params)
+    native_flash, native_fused = native_backend[0], native_backend[2]
+    padded_backend = dpa_utils.get_attention_backend(padded_params)
+    padded_flash, padded_fused = padded_backend[0], padded_backend[2]
+
+    if should_pad_qkv_head_dim(native_params, False):
+        assert padded_flash or padded_fused, "suggested padding onto no faster backend"
+        assert (padded_flash, padded_fused) != (
+            native_flash,
+            native_fused,
+        ), "suggested padding onto the same backend"
+    else:
+        assert (
+            native_flash or native_fused or not (padded_flash or padded_fused)
+        ), "did not suggest padding when it was the only way onto a faster backend"
+
+
+@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("model_configs", [model_configs_mla])
+@pytest.mark.parametrize("model", model_configs_mla.keys())
+def test_dpa_mla_should_pad_cache(dtype, model_configs, model):
+    """A memoized padding decision must match a freshly computed one.
+
+    `run_dot_product_attention` enables one backend at a time without changing the attention
+    params, so a decision cached for one backend must not leak into the next.
+    """
+    config = model_configs[model]
+    native_params = _make_mla_attn_params(dtype, config, config.head_dim_qk, config.head_dim_v)
+    saved = {name: os.environ.get(name) for name in dpa_utils.BACKEND_SELECTION_ENV_VARS}
+    try:
+        should_pad_qkv_head_dim(native_params, False)
+        os.environ["NVTE_FLASH_ATTN"] = "0"
+        os.environ["NVTE_FUSED_ATTN"] = "0"
+        cached = should_pad_qkv_head_dim(native_params, False)
+        dpa_utils.clear_should_pad_qkv_head_dim_cache()
+        fresh = should_pad_qkv_head_dim(native_params, False)
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        dpa_utils.clear_should_pad_qkv_head_dim_cache()
+    assert cached == fresh, "reused a stale padding decision after backend availability changed"
 
 
 model_configs_mask = {

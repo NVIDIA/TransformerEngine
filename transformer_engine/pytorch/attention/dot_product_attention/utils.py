@@ -13,7 +13,7 @@ import warnings
 import logging
 import functools
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 import numpy as np
 from packaging.version import Version as PkgVersion
 
@@ -72,6 +72,31 @@ _print_layer = int(os.getenv("NVTE_PRINT_LAYER_NUMBER", "1"))
 _print_rank = int(os.getenv("NVTE_PRINT_RANK", "0"))
 
 _cu_seqlens_cache = {}
+
+# `get_attention_backend` reads these at call time, so they belong in the key of any cache
+# that memoizes a backend selection or a decision derived from one.
+BACKEND_SELECTION_ENV_VARS = (
+    "NVTE_FLASH_ATTN",
+    "NVTE_FLASH_ATTN_V2",
+    "NVTE_FLASH_ATTN_V3",
+    "NVTE_FLASH_ATTN_V4",
+    "NVTE_FUSED_ATTN",
+    "NVTE_UNFUSED_ATTN",
+)
+
+# Global var for MLA padding cache.
+_should_pad_qkv_head_dim_cache: Dict[str, Any] = {
+    "attention_params": None,
+    "has_packed_qkv": None,
+    "environment": None,
+    "should_pad": None,
+}
+
+
+def clear_should_pad_qkv_head_dim_cache() -> None:
+    """Drop the memoized padding decision when backend selection is invalidated."""
+    for key in _should_pad_qkv_head_dim_cache:
+        _should_pad_qkv_head_dim_cache[key] = None
 
 
 class AttentionLogging:
@@ -1012,6 +1037,14 @@ def get_attention_backend(
 
     # Filter: Head dimension
     if head_dim_qk != head_dim_v:
+        if use_flash_attention_2 and FlashAttentionUtils.is_installed:
+            logger.debug(
+                "Disabling FlashAttention 2 as it does not support head_dim_qk != head_dim_v. "
+                "Found: head_dim_qk = %s, head_dim_v = %s.",
+                head_dim_qk,
+                head_dim_v,
+            )
+            use_flash_attention_2 = False
         qkv_layout_group = qkv_layout.replace("b", "").replace("s", "").replace("t", "")
         if use_fused_attention and qkv_layout_group != "hd_hd_hd":
             logger.debug(
@@ -1033,27 +1066,25 @@ def get_attention_backend(
                 )
             use_fused_attention = False
 
-    fa2_padded_head_dim = max(head_dim_qk, head_dim_v)
     if (  # pylint: disable=too-many-boolean-expressions
         use_flash_attention_2
         and FlashAttentionUtils.is_installed
         and (
-            fa2_padded_head_dim > 256
-            or fa2_padded_head_dim % 8 != 0
+            max(head_dim_qk, head_dim_v) > 256
+            or head_dim_qk % 8 != 0
+            or head_dim_v % 8 != 0
             or (
-                fa2_padded_head_dim > 192
+                max(head_dim_qk, head_dim_v) > 192
                 and device_compute_capability not in ((8, 0), (9, 0), (10, 0), (12, 0))
             )
         )
     ):
         logger.debug(
             "Disabling FlashAttention 2 due to unsupported head_dim_qk and head_dim_v. "
-            "Supported after padding: padded head_dim %%8 = 0, padded head_dim <= 256 "
-            "(>192 requires sm80/90/100+). "
-            "Found: head_dim_qk = %s, head_dim_v = %s, padded head_dim = %s, on sm%s.",
+            "Supported: head_dim %%8 = 0, head_dim <= 256 (>192 requires sm80/90/100+). "
+            "Found: head_dim_qk = %s, head_dim_v = %s, on sm%s.",
             head_dim_qk,
             head_dim_v,
-            fa2_padded_head_dim,
             ".".join([str(i) for i in device_compute_capability]),
         )
         use_flash_attention_2 = False
@@ -1982,6 +2013,94 @@ def get_attention_backend(
         use_unfused_attention,
         available_backends,
     )
+
+
+@torch.no_grad()
+def should_pad_qkv_head_dim(
+    attention_params: AttentionParams,
+    has_packed_qkv: bool,
+) -> bool:
+    """Decide whether to pad Q/K/V to a common head dim.
+
+    This returns `True` in two cases:
+    1. when neither `FlashAttention` nor `FusedAttention` runs the native head dims, so padding
+       may enable one of them.
+    2. when only one of them runs the native head dims, and padding reaches the other one, which
+       backend selection ranks higher for this configuration.
+
+    The decision is memoized on `attention_params`, `has_packed_qkv` and the backend-selection
+    environment. Callers that invalidate backend selection for any other reason must also call
+    `clear_should_pad_qkv_head_dim_cache`.
+
+    Parameters
+    ----------
+    attention_params : AttentionParams
+        Attention parameters for the native (unpadded) QK and V head dimensions.
+    has_packed_qkv : bool
+        Whether the caller passed a packed `qkv_layer` or `kv_layer` buffer.
+
+    Returns
+    -------
+    bool
+        Whether Q/K/V should be padded to a common (the wider) head dim.
+    """
+    if attention_params.head_dim_qk == attention_params.head_dim_v:
+        return False
+
+    environment = tuple(os.environ.get(name) for name in BACKEND_SELECTION_ENV_VARS)
+    if (
+        _should_pad_qkv_head_dim_cache["attention_params"] == attention_params
+        and _should_pad_qkv_head_dim_cache["has_packed_qkv"] is has_packed_qkv
+        and _should_pad_qkv_head_dim_cache["environment"] == environment
+    ):
+        return _should_pad_qkv_head_dim_cache["should_pad"]
+
+    # Check whether padding must be skipped because FP8 DPA is active and the caller passed packed
+    # QKV/KV buffers.
+    recipe = (attention_params.fp8_meta or {}).get("recipe", None)
+    should_pad = not (
+        attention_params.fp8 and recipe is not None and getattr(recipe, "fp8_dpa", False)
+    )
+    # `should_pad=False` indicates that FP8 DPA is active.
+    if not should_pad:
+        should_pad = not has_packed_qkv
+
+    if should_pad:
+        native_backend = get_attention_backend(attention_params)
+        native_use_flash_attention = native_backend[0]
+        native_use_fused_attention = native_backend[2]
+        native_available_backends = native_backend[5]
+        if native_available_backends[0] and native_available_backends[1]:
+            # Both FlashAttention and FusedAttention run the native head dims, so backend
+            # selection has already picked the better of the two and padding cannot improve on it.
+            should_pad = False
+        else:
+            padded_head_dim = max(attention_params.head_dim_qk, attention_params.head_dim_v)
+            padded_params = replace(
+                attention_params,
+                head_dim_qk=padded_head_dim,
+                head_dim_v=padded_head_dim,
+            )
+            padded_backend = get_attention_backend(padded_params)
+            padded_use_flash_attention = padded_backend[0]
+            padded_use_fused_attention = padded_backend[2]
+            if not (native_use_flash_attention or native_use_fused_attention):
+                # Neither FlashAttention nor FusedAttention runs the native head dims, so pad if
+                # either runs the padded ones.
+                should_pad = padded_use_flash_attention or padded_use_fused_attention
+            else:
+                # Exactly one of FlashAttention and FusedAttention runs the native head dims. Pad
+                # only if padding reaches the other one, which backend selection ranks higher.
+                should_pad = (
+                    padded_use_flash_attention or padded_use_fused_attention
+                ) and padded_use_flash_attention != native_use_flash_attention
+    # Store a shallow copy as the key to avoid later `attention_params` in-place modifications
+    # resulting in subsequent cache misses.
+    _should_pad_qkv_head_dim_cache["attention_params"] = replace(attention_params)
+    _should_pad_qkv_head_dim_cache["has_packed_qkv"] = has_packed_qkv
+    _should_pad_qkv_head_dim_cache["environment"] = environment
+    _should_pad_qkv_head_dim_cache["should_pad"] = should_pad
+    return should_pad
 
 
 @torch.no_grad()
