@@ -66,6 +66,8 @@ enum Kind : int {
 template <uint32_t kLo, uint32_t kHi>
 struct ForwardLayout {
   static constexpr bool kForward = true;
+  //! Whether the kernel computes op() instead of reading the table (see the register-tiled kernel).
+  static constexpr bool kComputed = false;
   static constexpr uint32_t kLowSentinel = kLo - 1;
   static constexpr uint32_t kHighSentinel = kHi + 1;
   static constexpr uint32_t kRows = kHighSentinel - kLowSentinel + 1;
@@ -81,6 +83,7 @@ struct ForwardLayout {
 template <uint32_t kLo, uint32_t kHi, uint32_t kSaturatedEnd, uint32_t kStride = 2048>
 struct DerivativeLayout {
   static constexpr bool kForward = false;
+  static constexpr bool kComputed = false;
   static constexpr uint32_t kLoBits = kLo;
   static constexpr uint32_t kHiBits = kHi;
   //! Magnitudes from here on (and NaN) give NaN, as util/math.h does.

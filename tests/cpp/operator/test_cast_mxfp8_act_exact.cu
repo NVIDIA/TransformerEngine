@@ -383,7 +383,7 @@ void run_case(const Mode mode, const Fill fill, const size_t rows, const size_t 
 // The first call takes the default dispatch, which picks the register-resident kernel for these
 // shapes; NVTE_MXFP8_REGTILE=0 keeps the second call on the generic kernel.
 void run_regtile_vs_generic(const Mode mode, const Fill fill, const size_t rows, const size_t cols,
-                            const bool swizzled) {
+                            const bool swizzled, const bool use_table) {
   const std::vector<size_t> shape{rows, cols};
   const size_t n = rows * cols;
   Tensor x("x", shape, DType::kBFloat16);
@@ -403,7 +403,7 @@ void run_regtile_vs_generic(const Mode mode, const Fill fill, const size_t rows,
       for (size_t d = 0; d < b.shape.ndim; ++d) bytes *= b.shape.data[d];
       if (bytes != 0) ASSERT_EQ(cudaMemset(b.data_ptr, 0xA5, bytes), cudaSuccess);
     }
-    const ScopedEnv tables("NVTE_ACTIVATION_TABLE", "1");
+    const ScopedEnv tables("NVTE_ACTIVATION_TABLE", use_table ? "1" : "0");
     const ScopedEnv regtile("NVTE_MXFP8_REGTILE", i == 0 ? "1" : "0");
     switch (mode) {
       case Mode::GeLU:
@@ -515,16 +515,17 @@ INSTANTIATE_TEST_SUITE_P(TinyGradients, CastMXFP8ActExactTestSuite,
 
 namespace {
 
-using RegtileParams = std::tuple<Mode, Fill, bool /*swizzled*/, std::pair<size_t, size_t>>;
+using RegtileParams =
+    std::tuple<Mode, Fill, bool /*swizzled*/, std::pair<size_t, size_t>, bool /*use_table*/>;
 
 class CastMXFP8ActRegtileTestSuite : public ::testing::TestWithParam<RegtileParams> {};
 
 std::string regtile_case_name(const testing::TestParamInfo<RegtileParams> &info) {
   const char *fills[] = {"Typical", "OrderedInputs", "Specials", "TinyGradients"};
-  const auto [mode, fill, swizzled, dims] = info.param;
+  const auto [mode, fill, swizzled, dims, use_table] = info.param;
   return std::string(mode_name(mode)) + "X" + fills[static_cast<int>(fill)] +
          (swizzled ? "XSwizzled" : "XCompact") + "X" + std::to_string(dims.first) + "X" +
-         std::to_string(dims.second);
+         std::to_string(dims.second) + (use_table ? "XTable" : "XComputed");
 }
 
 }  // namespace
@@ -535,8 +536,8 @@ TEST_P(CastMXFP8ActRegtileTestSuite, MatchesGenericKernel) {
   if (prop.major < 10) {
     GTEST_SKIP() << "This MXFP8 quantize kernel requires compute capability 10.0 or newer";
   }
-  const auto [mode, fill, swizzled, dims] = GetParam();
-  run_regtile_vs_generic(mode, fill, dims.first, dims.second, swizzled);
+  const auto [mode, fill, swizzled, dims, use_table] = GetParam();
+  run_regtile_vs_generic(mode, fill, dims.first, dims.second, swizzled, use_table);
 }
 
 INSTANTIATE_TEST_SUITE_P(
@@ -553,5 +554,10 @@ INSTANTIATE_TEST_SUITE_P(
                                          std::pair<size_t, size_t>{1, 16},
                                          std::pair<size_t, size_t>{33, 272},
                                          std::pair<size_t, size_t>{100, 2064},
-                                         std::pair<size_t, size_t>{4127, 528})),
+                                         std::pair<size_t, size_t>{4127, 528},
+                                         // Large enough for the computed forward path (2^23
+                                         // elements), with a row and a column tail.
+                                         std::pair<size_t, size_t>{4127, 2064}),
+                       // With a table, or computed from util/math.h without one.
+                       ::testing::Bool()),
     regtile_case_name);

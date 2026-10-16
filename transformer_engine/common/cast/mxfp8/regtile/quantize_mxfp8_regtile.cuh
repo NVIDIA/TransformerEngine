@@ -16,8 +16,9 @@
  *  partials, the row scales and the activation table.
  *
  *  The activation or derivative is read from the table the caller passes (see
- *  util/activation_table.cuh), copied into shared memory once per CTA, so this kernel
- *  produces exactly the bytes the generic kernel produces with the same table.
+ *  util/activation_table.cuh), copied into shared memory once per CTA, or, without a
+ *  table, computed with util/math.h. Either way this kernel produces exactly the bytes the
+ *  generic kernel produces for the same request.
  *
  *  It replaces the generic kernel, not the specialized ones: cast-only requests
  *  are served before the generic dispatch by the specialized kernels, one of
@@ -93,12 +94,27 @@ __device__ __forceinline__ unsigned amax_to_e8m0_2x(float amax_hi, float amax_lo
                                fmaxf(amax_lo * kMaxNormRcp, 0.0f));
 }
 
+/*! \brief Table<kind>'s activation computed with util/math.h instead of read from a table:
+ *         the generic kernel's output without tables (NVTE_ACTIVATION_TABLE=0). No table is
+ *         copied.
+ */
+template <activation_table::Kind kKind>
+struct ComputedTable : activation_table::Table<kKind> {
+  static constexpr bool kComputed = true;
+  static constexpr size_t kBytes = 16;  // unused shared-memory slot
+};
+
 /*! \brief The derivative of a BF16 pair, from the table in shared memory. */
 template <typename TableT>
 __device__ __forceinline__ ptx::floatx2 dact_word(unsigned x,
                                                   const unsigned char* __restrict__ table) {
-  const float2 d = activation_table::derivative_2x<TableT>(x, table);
-  return {d.x, d.y};
+  if constexpr (TableT::kComputed) {
+    const ptx::floatx2 v = widen_bf16x2(x);
+    return {TableT::op(v.x), TableT::op(v.y)};
+  } else {
+    const float2 d = activation_table::derivative_2x<TableT>(x, table);
+    return {d.x, d.y};
+  }
 }
 
 /*! \brief Start copying a table of kBytes into shared memory with one bulk copy.
@@ -222,7 +238,9 @@ __device__ __forceinline__ void quantize_regtile(
   const int colwise_scale_cols = (K + 63) / 64 * 64;
 
   // The table copy overlaps the first input loads; see the wait below.
-  load_table_async<C::kTableBytes>(table_smem, &table_barrier, table, tid);
+  if constexpr (!TableT::kComputed) {
+    load_table_async<C::kTableBytes>(table_smem, &table_barrier, table, tid);
+  }
 
 #pragma unroll 1
   for (int it = 0; it < iters; ++it) {
@@ -269,7 +287,9 @@ __device__ __forceinline__ void quantize_regtile(
         // to spread them between the previous group's table lookups, each then stalling on its
         // own.
         asm volatile("" ::: "memory");
-        if (it == 0 && h == 0) ptx::mbarrier_wait_parity(&table_barrier, 0);
+        if constexpr (!TableT::kComputed) {
+          if (it == 0 && h == 0) ptx::mbarrier_wait_parity(&table_barrier, 0);
+        }
         // Convert the load group into the BF16 pairs the epilogue quantizes.
         if constexpr (!IS_DACT) {
 #pragma unroll
@@ -280,8 +300,14 @@ __device__ __forceinline__ void quantize_regtile(
               const int tile_word_base = (h * kRowsInFlight + t) * kWordsPerLane + n * 4;
 #pragma unroll
               for (int m = 0; m < 4; ++m) {
-                tile_words[tile_word_base + m] = activation_table::forward_2x<TableT>(
-                    x_words[m], reinterpret_cast<const __nv_bfloat16*>(table_smem));
+                if constexpr (TableT::kComputed) {
+                  // util/math.h, then rounded to BF16 as the generic kernel rounds it.
+                  const ptx::floatx2 v = widen_bf16x2(x_words[m]);
+                  tile_words[tile_word_base + m] = to_bf16x2({TableT::op(v.x), TableT::op(v.y)});
+                } else {
+                  tile_words[tile_word_base + m] = activation_table::forward_2x<TableT>(
+                      x_words[m], reinterpret_cast<const __nv_bfloat16*>(table_smem));
+                }
               }
             }
           }
@@ -636,22 +662,30 @@ inline bool shape_supported(size_t rows, size_t cols) {
 }  // namespace
 
 //! Whether this kernel implements the request type: GeLU or SiLU, or the derivative of
-//! either, without dbias. It reads the activation from a table.
+//! either, without dbias. It reads the activation from a table, or computes it with
+//! util/math.h when there is none.
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP&)>
 constexpr bool kImplements =
     !IS_DBIAS && (IS_ACT != IS_DACT) && activation_table::kHasTable<ParamOP, OP> &&
     (IS_ACT == activation_table::Table<activation_table::kKindOf<ParamOP, OP>>::kForward);
 
-// Whether this kernel takes a request of a type in kImplements, with BF16 input, E4M3
-// output and an activation table.  Anything else takes the generic kernel, as does every
-// request with NVTE_MXFP8_REGTILE=0.
+// Whether this kernel takes a request of a type in kImplements, with BF16 input and E4M3
+// output.  Anything else takes the generic kernel, as does every request with
+// NVTE_MXFP8_REGTILE=0.
 template <bool IS_DACT, bool IS_ACT>
 bool can_use(const Tensor& input, const Tensor* act_input, const Tensor& output, const Tensor& noop,
              bool use_2d_quantization, const activation_table::TableRef& table) {
-  if (table.use == activation_table::kNoTable) return false;
   if (!getenv<bool>("NVTE_MXFP8_REGTILE", true)) return false;
   const auto [rows, cols] = input.flat_2d_dims();
+  // Without a table the forward activation is compute-bound here, and on small tensors too
+  // few CTAs hide its latency: GB200, 993x7200 GeLU is 0.93x of the generic kernel, 4160x2048
+  // 1.26x. The derivatives stay memory-bound and win at every size.
+  constexpr size_t kComputedForwardMinElements = size_t{1} << 23;
+  if (table.use == activation_table::kNoTable && !IS_DACT &&
+      rows * cols < kComputedForwardMinElements) {
+    return false;
+  }
   // Vector widths: 16-byte loads of both inputs, 8-byte stores of both outputs
   // and of each row's scales.
   const bool aligned = is_aligned_ptr(input.data.dptr, 16) &&
@@ -689,6 +723,11 @@ void quantize(const Tensor& input, const Tensor* act_input, Tensor* output,
         static_cast<int>(output->columnwise_scale_inv.shape[1]), table.ptr, stream);
   };
   constexpr Kind kKind = kKindOf<ParamOP, OP>;
+  if (table.use == kNoTable) {
+    run(std::common_type<ComputedTable<kKind>>{});
+    NVTE_CHECK_CUDA(cudaGetLastError());
+    return;
+  }
   if constexpr (kKind == kDsilu) {
     if (table.use == kExactDsiluTable) {
       run(std::common_type<ExactDsiluTable>{});
