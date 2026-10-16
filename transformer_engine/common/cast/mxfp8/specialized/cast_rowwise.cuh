@@ -52,9 +52,6 @@ using transformer_engine::dispatch::mxfp8::swizzle::gemm_swizzled_scale_idx;
 // Elements in one MX block, all sharing a single E8M0 scale.
 constexpr int32_t kBlockElems = 32;
 
-// Bytes in one GEMM-swizzled scale tile (128 rows x 4 scale columns).
-constexpr int32_t kSwzTileSize = 512;
-
 // Two lanes cooperate on each MX block.  A lane's half of a block is 16 BF16
 // values = 32 bytes = one 256-bit load, the widest the ISA offers; splitting
 // the block any further would waste load width, and any less would exceed it.
@@ -244,9 +241,9 @@ __global__ void __launch_bounds__(THREADS_PER_CTA)
   // regions far apart and loses DRAM locality, moving the same bytes at a much
   // lower rate.  So the spread lives at CTA level.  Each warp keeps one
   // contiguous run of a single row, exactly as the packed shape does, and the
-  // four sub-rows are covered by four different warps whose scale bytes meet in
-  // shared memory.  The payload never does, which is what still separates this
-  // kernel from the staged one.
+  // four sub-rows are covered by four different warps.  Each scale byte is
+  // stored directly at its swizzled index; gathering them into 16-byte runs
+  // through shared memory measured slower.
   constexpr int32_t kSubRows = 4;                      // rows 32 apart, = 128/32
   constexpr int32_t kQuads = kWarpsPerCta / kSubRows;  // row offsets per CTA
   const int32_t warp_in_cta = threadIdx.x / THREADS_PER_WARP;
@@ -274,10 +271,6 @@ __global__ void __launch_bounds__(THREADS_PER_CTA)
   auto swz_block = [&](int32_t u) -> int32_t {
     return swz_j0 + kBlocksPerWarp * u + block_in_warp;
   };
-
-  // One 16-byte run per (pass, quad, tile-in-span); 4 words each.  256 bytes at
-  // the widest configuration, flushed after a single barrier.
-  __shared__ uint32_t swz_scratch[SWIZZLED_SCALES ? BLOCKS_PER_LANE * kQuads * 4 * kSubRows : 1];
 
   // Output is marked evict_last so its lines linger long enough to coalesce on
   // write-back.
@@ -372,18 +365,8 @@ __global__ void __launch_bounds__(THREADS_PER_CTA)
         ptx::float_to_e8m0(pair_amax_to_float(block_amax) * Quantized_Limits<OType>::max_norm_rcp);
     const bool blk_live = live(u, group_base);
     if constexpr (SWIZZLED_SCALES) {
-      // Collapse the four scale columns adjacent in the GEMM layout into one word:
-      // lanes 8t,8t+2,8t+4,8t+6 hold j%4 = 0..3, so three shuffles suffice.  The
-      // other axis of the run lives in sibling warps, so the word goes to scratch
-      // and the flush below turns four of them into one 16-byte store.
-      const uint32_t my_byte = static_cast<uint32_t>(biased_exponent);
-      const uint32_t c1 = __shfl_down_sync(0xFFFFFFFFu, my_byte, kLanesPerBlock);
-      const uint32_t c2 = __shfl_down_sync(0xFFFFFFFFu, my_byte, 2 * kLanesPerBlock);
-      const uint32_t c3 = __shfl_down_sync(0xFFFFFFFFu, my_byte, 3 * kLanesPerBlock);
-      if ((lane % (4 * kLanesPerBlock)) == 0) {
-        const int32_t t = block_in_warp / 4;
-        swz_scratch[((u * kQuads + quad) * 4 + t) * kSubRows + sub_row] =
-            my_byte | (c1 << 8) | (c2 << 16) | (c3 << 24);
+      if (owns_scale && blk_live) {
+        scales[gemm_swizzled_scale_idx(swz_row(u), swz_block(u), num_tiles_X)] = biased_exponent;
       }
     } else if (owns_scale && blk_live) {
       scales[group_base + block_in_warp] = biased_exponent;
@@ -396,43 +379,6 @@ __global__ void __launch_bounds__(THREADS_PER_CTA)
     }
   }
 
-  if constexpr (SWIZZLED_SCALES) {
-    // One barrier for the whole kernel: every pass has already deposited its words.
-    __syncthreads();
-    constexpr int32_t kRuns = BLOCKS_PER_LANE * kQuads * 4;
-    for (int32_t r = threadIdx.x; r < kRuns; r += THREADS_PER_CTA) {
-      const int32_t t = r % 4;
-      const int32_t q = (r / 4) % kQuads;
-      const int32_t u = r / (4 * kQuads);
-      const int32_t row0 = static_cast<int32_t>(swz_band) * 128 + swz_a + q;
-      const size_t base =
-          (static_cast<size_t>(swz_band) * num_tiles_X + swz_j0 / 4 + 4 * u + t) * kSwzTileSize +
-          static_cast<size_t>(swz_a + q) * 16;
-      const uint32_t *src = &swz_scratch[((u * kQuads + q) * 4 + t) * kSubRows];
-      bool all_rows = true;
-      if constexpr (CHECK_BOUNDS) {
-        if (swz_j0 + kBlocksPerWarp * u + 4 * t >= blocks_per_row) {
-          continue;
-        }
-#pragma unroll
-        for (int32_t sr = 0; sr < kSubRows; ++sr) {
-          all_rows = all_rows && (row0 + 32 * sr < rows);
-        }
-      }
-      if (all_rows) {
-        uint32_t quad_words[4] = {src[0], src[1], src[2], src[3]};
-        ptx::st_global_b32x4(reinterpret_cast<uint32_t *>(&scales[base]), quad_words,
-                             output_policy);
-      } else {
-#pragma unroll
-        for (int32_t sr = 0; sr < kSubRows; ++sr) {
-          if (row0 + 32 * sr < rows) {
-            *reinterpret_cast<uint32_t *>(&scales[base + sr * 4]) = src[sr];
-          }
-        }
-      }
-    }
-  }
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 

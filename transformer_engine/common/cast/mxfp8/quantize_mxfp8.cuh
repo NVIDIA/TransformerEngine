@@ -826,9 +826,8 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                     //
                     // It emits both scale layouts.  The GEMM-swizzled one packs a
                     // 512-byte tile as 128 rows x 4 scale columns, so a CTA covers
-                    // four sub-rows 32 rows apart and their scale bytes meet in a
-                    // few hundred bytes of shared memory; each warp still reads one
-                    // contiguous run, and the payload never touches shared memory.
+                    // four sub-rows 32 rows apart; each warp still reads one
+                    // contiguous run, and nothing touches shared memory.
                     if constexpr (std::is_same_v<IType, bf16>) {
                       if (register_resident_supported) {
                         specialized::launch_cast_rowwise<OType, WITH_GEMM_SWIZZLED_SCALES>(
