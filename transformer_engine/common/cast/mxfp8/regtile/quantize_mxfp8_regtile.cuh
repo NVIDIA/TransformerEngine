@@ -88,8 +88,9 @@ __device__ __forceinline__ unsigned e8m0_to_bf16x2_reciprocal(unsigned e) {
  * only NaNs gets amax 0; the fmaxf reproduces that for the data-seeded maxima
  * here.  The conversion saturates, so the scale never reaches 255.
  */
+template <typename OType>
 __device__ __forceinline__ unsigned amax_to_e8m0_2x(float amax_hi, float amax_lo) {
-  constexpr float kMaxNormRcp = Quantized_Limits<fp8e4m3>::max_norm_rcp;
+  constexpr float kMaxNormRcp = Quantized_Limits<OType>::max_norm_rcp;
   return ptx::float_to_e8m0_2x(fmaxf(amax_hi * kMaxNormRcp, 0.0f),
                                fmaxf(amax_lo * kMaxNormRcp, 0.0f));
 }
@@ -156,10 +157,12 @@ constexpr int kVecLoadsPerRow = kWordsPerLane / 4;
 //! Lanes that have to cooperate to cover one 32-column MX group.
 constexpr int kLanesPerMxGroup = 32 / kColsPerLane;
 
-/*! \brief Scale two BF16 pairs, each by its own reciprocal scale pair, to four E4M3. */
-__device__ __forceinline__ unsigned quantize_e4m3x4(unsigned in01, unsigned in23, unsigned scale01,
-                                                    unsigned scale23) {
-  ptx::fp8e4m3x4 out;
+/*! \brief Scale two BF16 pairs, each by its own reciprocal scale pair, to four OType (E4M3 or
+ *         E5M2). */
+template <typename OType>
+__device__ __forceinline__ unsigned quantize_x4(unsigned in01, unsigned in23, unsigned scale01,
+                                                unsigned scale23) {
+  ptx::FPx4<OType> out;
   ptx::mul_cvt_4x(out, reinterpret_cast<const ptx::bf16x2&>(in01),
                   reinterpret_cast<const ptx::bf16x2&>(scale01),
                   reinterpret_cast<const ptx::bf16x2&>(in23),
@@ -221,14 +224,16 @@ struct TileConfig {
 // adds the chunks. The generic kernel sums each column of a chunk strictly in row order, so a
 // CTA here takes the chunk's two 32-row bands back to back, stages each band's products in
 // shared memory, and one thread per column adds them in row order.
-template <bool IS_DACT, bool IS_ACT, typename TableT, bool WITH_GEMM_SWIZZLED_SCALES, bool kTails,
-          bool kDbias>
+//
+// kAmax: also fold the amax of the output into *amax_ptr.
+template <bool IS_DACT, bool IS_ACT, typename TableT, typename OType,
+          bool WITH_GEMM_SWIZZLED_SCALES, bool kTails, bool kDbias, bool kAmax>
 __device__ __forceinline__ void quantize_regtile(
     const uint4* __restrict__ input, const uint4* __restrict__ act_input,
     unsigned char* __restrict__ rowwise_out, unsigned char* __restrict__ rowwise_scales,
     unsigned char* __restrict__ colwise_out, unsigned char* __restrict__ colwise_scales, int M,
     int K, int rowwise_scale_stride, int colwise_scale_stride, int iters, const void* table,
-    float* __restrict__ dbias_workspace) {
+    float* __restrict__ dbias_workspace, float* __restrict__ amax_ptr) {
   using C = TileConfig<IS_DACT, IS_ACT, TableT, kDbias>;
   constexpr int kWarpsPerCta = C::kWarpsPerCta, kRowsPerWarp = C::kRowsPerWarp,
                 kRowsInFlight = C::kRowsInFlight;
@@ -259,6 +264,8 @@ __device__ __forceinline__ void quantize_regtile(
   if constexpr (!TableT::kComputed) {
     load_table_async<C::kTableBytes>(table_smem, &table_barrier, table, tid);
   }
+
+  float thread_amax = 0.0f;
 
 #pragma unroll 1
   for (int it = 0; it < iters; ++it) {
@@ -386,7 +393,8 @@ __device__ __forceinline__ void quantize_regtile(
         // Fold the two halves with one PRMT and a packed max, which leaves the
         // magnitude in both halves; the high half is then the FP32 bit pattern.
         amax = abs_max_bf16x2(amax, __byte_perm(amax, amax, 0x1032));
-        const unsigned scale_byte = amax_to_e8m0_2x(0.f, __uint_as_float(amax & 0x7fff0000u));
+        const unsigned scale_byte =
+            amax_to_e8m0_2x<OType>(0.f, __uint_as_float(amax & 0x7fff0000u));
         if ((lane & (kLanesPerMxGroup - 1)) == 0)
           row_scale_bytes[(warp * kRowsPerWarp + j) * kMxGroupsPerRow + (lane / kLanesPerMxGroup)] =
               (unsigned char)scale_byte;
@@ -408,7 +416,7 @@ __device__ __forceinline__ void quantize_regtile(
         for (int lane_mask = 1; lane_mask < kLanesPerMxGroup; lane_mask <<= 1)
           amax_pair = abs_max_bf16x2(amax_pair, __shfl_xor_sync(0xffffffffu, amax_pair, lane_mask));
         const ptx::floatx2 amax_2x = widen_bf16x2(amax_pair);
-        const unsigned scale_pair = amax_to_e8m0_2x(amax_2x.y, amax_2x.x);
+        const unsigned scale_pair = amax_to_e8m0_2x<OType>(amax_2x.y, amax_2x.x);
         const unsigned scale_byte0 = scale_pair & 0xffu, scale_byte1 = (scale_pair >> 8) & 0xffu;
         if ((lane & (kLanesPerMxGroup - 1)) == 0) {
           unsigned char* scale_dst = row_scale_bytes + (warp * kRowsPerWarp + j) * kMxGroupsPerRow +
@@ -446,12 +454,12 @@ __device__ __forceinline__ void quantize_regtile(
 #pragma unroll
           for (int m = 0; m < kWordsPerLane / 2; ++m)
             row_out[m] =
-                quantize_e4m3x4(row_a[2 * m], row_a[2 * m + 1], row_scale_rcp0, row_scale_rcp0);
+                quantize_x4<OType>(row_a[2 * m], row_a[2 * m + 1], row_scale_rcp0, row_scale_rcp0);
           if (in_bounds(j)) store_quantized(row_out_ptr + (unsigned)j * (unsigned)K, row_out);
 #pragma unroll
           for (int m = 0; m < kWordsPerLane / 2; ++m)
             row_out[m] =
-                quantize_e4m3x4(row_b[2 * m], row_b[2 * m + 1], row_scale_rcp1, row_scale_rcp1);
+                quantize_x4<OType>(row_b[2 * m], row_b[2 * m + 1], row_scale_rcp1, row_scale_rcp1);
           if (in_bounds(j + 1))
             store_quantized(row_out_ptr + (unsigned)(j + 1) * (unsigned)K, row_out);
         }
@@ -464,7 +472,7 @@ __device__ __forceinline__ void quantize_regtile(
           unsigned row_out[kWordsPerLane / 2];
 #pragma unroll
           for (int m = 0; m < kWordsPerLane / 2; ++m)
-            row_out[m] = quantize_e4m3x4(v[2 * m], v[2 * m + 1], row_scale_rcp, row_scale_rcp);
+            row_out[m] = quantize_x4<OType>(v[2 * m], v[2 * m + 1], row_scale_rcp, row_scale_rcp);
           if (in_bounds(j)) store_quantized(row_out_ptr + (unsigned)j * (unsigned)K, row_out);
         }
       }
@@ -486,7 +494,11 @@ __device__ __forceinline__ void quantize_regtile(
           col_amax = abs_max_bf16x2(col_amax, col_amax_partials[w][tid]);
         col_amax &= 0x7fff7fffu;
         const ptx::floatx2 amax_2x = widen_bf16x2(col_amax);
-        const unsigned scale_pair = amax_to_e8m0_2x(amax_2x.y, amax_2x.x);
+        // The tensor amax, when asked for: the max of these column amaxes. Like the generic
+        // kernel's per-element fmaxf, it ignores NaN (a column of only NaNs gives NaN here,
+        // which fmaxf drops) and is unaffected by the zeros loaded past M or K.
+        if constexpr (kAmax) thread_amax = fmaxf(thread_amax, fmaxf(amax_2x.x, amax_2x.y));
+        const unsigned scale_pair = amax_to_e8m0_2x<OType>(amax_2x.y, amax_2x.x);
         if (!kEdge || col0 + 2 * tid < colwise_scale_cols) {
           if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
             // The colwise swizzle is the rowwise one with rows and columns swapped,
@@ -562,8 +574,8 @@ __device__ __forceinline__ void quantize_regtile(
           unsigned col_out[kWordsPerLane / 2];
 #pragma unroll
           for (int m = 0; m < kWordsPerLane / 2; ++m)
-            col_out[m] = quantize_e4m3x4(v[2 * m], v[2 * m + 1], col_scale_rcp[2 * m],
-                                         col_scale_rcp[2 * m + 1]);
+            col_out[m] = quantize_x4<OType>(v[2 * m], v[2 * m + 1], col_scale_rcp[2 * m],
+                                            col_scale_rcp[2 * m + 1]);
           if (in_bounds(j)) store_quantized(col_out_ptr + (unsigned)j * (unsigned)K, col_out);
         }
       }
@@ -583,10 +595,15 @@ __device__ __forceinline__ void quantize_regtile(
       }
     }
   }
+
+  if constexpr (kAmax) {
+    const float block_amax = reduce_max<kWarpsPerCta>(thread_amax, warp);
+    if (tid == 0) atomicMaxFloat(amax_ptr, block_amax);
+  }
 }
 
-template <bool IS_DACT, bool IS_ACT, typename TableT, bool WITH_GEMM_SWIZZLED_SCALES, bool kTails,
-          bool kDbias>
+template <bool IS_DACT, bool IS_ACT, typename TableT, typename OType,
+          bool WITH_GEMM_SWIZZLED_SCALES, bool kTails, bool kDbias, bool kAmax>
 __global__ void __launch_bounds__(TileConfig<IS_DACT, IS_ACT, TableT, kDbias>::kThreadsPerCta,
                                   TileConfig<IS_DACT, IS_ACT, TableT, kDbias>::kMinBlocksPerSm)
     quantize_mxfp8_kernel(const unsigned* __restrict__ input,
@@ -596,12 +613,13 @@ __global__ void __launch_bounds__(TileConfig<IS_DACT, IS_ACT, TableT, kDbias>::k
                           unsigned char* __restrict__ colwise_out,
                           unsigned char* __restrict__ colwise_scales, int M, int K,
                           int rowwise_scale_stride, int colwise_scale_stride, int iters,
-                          const void* __restrict__ table, float* __restrict__ dbias_workspace) {
+                          const void* __restrict__ table, float* __restrict__ dbias_workspace,
+                          float* __restrict__ amax_ptr) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-  quantize_regtile<IS_DACT, IS_ACT, TableT, WITH_GEMM_SWIZZLED_SCALES, kTails, kDbias>(
-      (const uint4*)input, (const uint4*)act_input, rowwise_out, rowwise_scales, colwise_out,
-      colwise_scales, M, K, rowwise_scale_stride, colwise_scale_stride, iters, table,
-      dbias_workspace);
+  quantize_regtile<IS_DACT, IS_ACT, TableT, OType, WITH_GEMM_SWIZZLED_SCALES, kTails, kDbias,
+                   kAmax>((const uint4*)input, (const uint4*)act_input, rowwise_out, rowwise_scales,
+                          colwise_out, colwise_scales, M, K, rowwise_scale_stride,
+                          colwise_scale_stride, iters, table, dbias_workspace, amax_ptr);
 #endif
 }
 
@@ -627,8 +645,8 @@ static int pick_walk_length(int row_blocks, int grid_cols, long long target,
 // the rest of the unified array goes to L1.
 constexpr int kCarveoutPercentAct = 40;
 
-template <bool IS_DACT, bool IS_ACT, typename TableT, bool WITH_GEMM_SWIZZLED_SCALES, bool kTails,
-          bool kDbias>
+template <bool IS_DACT, bool IS_ACT, typename TableT, typename OType,
+          bool WITH_GEMM_SWIZZLED_SCALES, bool kTails, bool kDbias, bool kAmax>
 static void set_carveout() {
   constexpr int kPercent = IS_ACT ? kCarveoutPercentAct : 0;
   constexpr int kDynamicBytes = TileConfig<IS_DACT, IS_ACT, TableT, kDbias>::kDbiasStageBytes;
@@ -641,8 +659,9 @@ static void set_carveout() {
     std::lock_guard<std::mutex> lock(mutex);
     if (static_cast<size_t>(device) >= done.size()) done.resize(device + 1, false);
     if (!done[device]) {
-      const void* kernel = (const void*)
-          quantize_mxfp8_kernel<IS_DACT, IS_ACT, TableT, WITH_GEMM_SWIZZLED_SCALES, kTails, kDbias>;
+      const void* kernel =
+          (const void*)quantize_mxfp8_kernel<IS_DACT, IS_ACT, TableT, OType,
+                                             WITH_GEMM_SWIZZLED_SCALES, kTails, kDbias, kAmax>;
       if constexpr (kPercent > 0) {
         NVTE_CHECK_CUDA(
             cudaFuncSetAttribute(kernel, cudaFuncAttributePreferredSharedMemoryCarveout, kPercent));
@@ -684,23 +703,34 @@ int walk_length(int M, int K) {
   return iters;
 }
 
-template <bool IS_DACT, bool IS_ACT, typename TableT, bool WITH_GEMM_SWIZZLED_SCALES, bool kDbias>
+template <bool IS_DACT, bool IS_ACT, typename TableT, typename OType,
+          bool WITH_GEMM_SWIZZLED_SCALES, bool kDbias>
 static void launch(const void* input, const void* act_input, void* rowwise_out,
                    void* rowwise_scales, void* colwise_out, void* colwise_scales, int M, int K,
                    int rowwise_scale_stride, int colwise_scale_stride, const void* table,
-                   float* dbias_workspace, cudaStream_t stream) {
+                   float* dbias_workspace, float* amax, cudaStream_t stream) {
   using C = TileConfig<IS_DACT, IS_ACT, TableT, kDbias>;
   const int iters = walk_length<IS_DACT, kDbias>(M, K);
   dim3 grid(col_tiles(K), row_bands(M) / iters);
-  const auto run = [&](auto tails) {
+  // kAmax: a separate instantiation, so that the kernels without amax keep their register
+  // budget (the derivatives run at the 40-register cap).
+  const auto run_amax = [&](auto tails, auto with_amax) {
     constexpr bool kTails = decltype(tails)::value;
-    set_carveout<IS_DACT, IS_ACT, TableT, WITH_GEMM_SWIZZLED_SCALES, kTails, kDbias>();
-    quantize_mxfp8_kernel<IS_DACT, IS_ACT, TableT, WITH_GEMM_SWIZZLED_SCALES, kTails, kDbias>
-        <<<grid, C::kThreadsPerCta, C::kDbiasStageBytes, stream>>>(
-            (const unsigned*)input, (const unsigned*)act_input, (unsigned char*)rowwise_out,
-            (unsigned char*)rowwise_scales, (unsigned char*)colwise_out,
-            (unsigned char*)colwise_scales, M, K, rowwise_scale_stride, colwise_scale_stride, iters,
-            table, dbias_workspace);
+    constexpr bool kAmax = decltype(with_amax)::value;
+    set_carveout<IS_DACT, IS_ACT, TableT, OType, WITH_GEMM_SWIZZLED_SCALES, kTails, kDbias,
+                 kAmax>();
+    quantize_mxfp8_kernel<IS_DACT, IS_ACT, TableT, OType, WITH_GEMM_SWIZZLED_SCALES, kTails, kDbias,
+                          kAmax><<<grid, C::kThreadsPerCta, C::kDbiasStageBytes, stream>>>(
+        (const unsigned*)input, (const unsigned*)act_input, (unsigned char*)rowwise_out,
+        (unsigned char*)rowwise_scales, (unsigned char*)colwise_out, (unsigned char*)colwise_scales,
+        M, K, rowwise_scale_stride, colwise_scale_stride, iters, table, dbias_workspace, amax);
+  };
+  const auto run = [&](auto tails) {
+    if (amax != nullptr) {
+      run_amax(tails, std::true_type{});
+    } else {
+      run_amax(tails, std::false_type{});
+    }
   };
   // Whole 64-row tiles and 256-column tiles leave nothing past M or K. The derivatives take the
   // tail-capable kernel for every shape: with the band body behind its edge branch, the compiler
@@ -733,9 +763,10 @@ constexpr bool kImplements =
     (!IS_DBIAS || IS_DACT) && (IS_ACT != IS_DACT) && activation_table::kHasTable<ParamOP, OP> &&
     (IS_ACT == activation_table::Table<activation_table::kKindOf<ParamOP, OP>>::kForward);
 
-// Whether this kernel takes a request of a type in kImplements, with BF16 input and E4M3
-// output.  Anything else takes the generic kernel, as does every request with
-// NVTE_MXFP8_REGTILE=0.
+// Whether this kernel takes a request of a type in kImplements, with BF16 input and E4M3 or
+// E5M2 output.  Anything else takes the generic kernel, as does every request with
+// NVTE_MXFP8_REGTILE=0.  A noop tensor is ignored, as the generic kernel ignores it for every
+// request that computes an activation.
 template <bool IS_DACT, bool IS_ACT, bool IS_DBIAS = false>
 bool can_use(const Tensor& input, const Tensor* act_input, const Tensor& output, const Tensor& noop,
              bool use_2d_quantization, const activation_table::TableRef& table) {
@@ -758,8 +789,7 @@ bool can_use(const Tensor& input, const Tensor* act_input, const Tensor& output,
                        is_aligned_ptr(output.scale_inv.dptr, 8) &&
                        is_aligned_ptr(output.columnwise_scale_inv.dptr, 2);
   if (!(transformer_engine::cuda::sm_arch() >= 100 && !use_2d_quantization && output.has_data() &&
-        output.has_columnwise_data() && output.amax.dptr == nullptr && noop.data.dptr == nullptr &&
-        shape_supported(rows, cols) && aligned)) {
+        output.has_columnwise_data() && shape_supported(rows, cols) && aligned)) {
     return false;
   }
   constexpr size_t kMaxGridY = 65535;
@@ -771,7 +801,7 @@ bool can_use(const Tensor& input, const Tensor* act_input, const Tensor& output,
 //! dbias_workspace: [ceil(rows / 64), cols] FP32 column sums for common::reduce_dbias, or
 //! nullptr without dbias.
 template <bool IS_DACT, bool IS_ACT, bool IS_DBIAS, typename ParamOP,
-          float (*OP)(float, const ParamOP&), bool WITH_GEMM_SWIZZLED_SCALES>
+          float (*OP)(float, const ParamOP&), typename OType, bool WITH_GEMM_SWIZZLED_SCALES>
 void quantize(const Tensor& input, const Tensor* act_input, Tensor* output,
               const activation_table::TableRef& table, float* dbias_workspace,
               cudaStream_t stream) {
@@ -782,12 +812,12 @@ void quantize(const Tensor& input, const Tensor* act_input, Tensor* output,
   const void* act_ptr = IS_DACT ? act_input->data.dptr : input.data.dptr;
   const auto run = [&](auto table_type) {
     using TableT = typename decltype(table_type)::type;
-    launch<IS_DACT, IS_ACT, TableT, WITH_GEMM_SWIZZLED_SCALES, IS_DBIAS>(
+    launch<IS_DACT, IS_ACT, TableT, OType, WITH_GEMM_SWIZZLED_SCALES, IS_DBIAS>(
         input.data.dptr, act_ptr, output->data.dptr, output->scale_inv.dptr,
         output->columnwise_data.dptr, output->columnwise_scale_inv.dptr, static_cast<int>(rows),
         static_cast<int>(cols), static_cast<int>(output->scale_inv.shape[1]),
         static_cast<int>(output->columnwise_scale_inv.shape[1]), table.ptr, dbias_workspace,
-        stream);
+        static_cast<float*>(output->amax.dptr), stream);
   };
   constexpr Kind kKind = kKindOf<ParamOP, OP>;
   if (table.use == kNoTable) {
