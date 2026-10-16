@@ -7,13 +7,13 @@
   Interactive report template for quantization kernel benchmarks (used by
   benchmark_quantize_mxfp8.py --format html; reusable for e.g. NVFP4). A script fills it by
   replacing the DATA placeholder below with JSON of the form
-    {"meta": {"title", "description", "compare", "activation", "commit", "command"},
-     "charts": [{"fusion", "direction", "swizzle", "input", "N", "subtitle",
-                 "series": [{"name", "role": "old" | "new",
-                             "points": [{"M", "time_us", "min_us", "rel_std_pct", "GB/s",
-                                         "kernel"}]}]}]}
-  One chart per (fusion, direction, swizzle, input, N); swizzle ("on"/"off") and input (dtype
-  name) are optional. When meta.compare, each chart shows old / new time above every M.
+    {"meta": {"title", "description", "compare", "commit", "command",
+              "selectors": [{"key", "label"}, ...], "split": key},
+     "charts": [{<one value per selector key and the split key>, "heading", "subtitle",
+                 "x_label", "series": [{"name", "role": "old" | "new",
+                 "points": [{"x", "time_us", "min_us", "rel_std_pct", "GB/s", "kernel"}]}]}]}
+  One chart per combination of selector values and split value; the selected split values
+  are shown side by side. When meta.compare, each chart shows old / new time above every x.
 -->
 <html lang="en">
 <head>
@@ -126,22 +126,15 @@ const METRICS = {
 };
 
 const uniq = xs => [...new Set(xs)];
-const state = {
-  fusion: CHARTS[0].fusion,
-  direction: CHARTS[0].direction,
-  swizzle: CHARTS[0].swizzle ?? "off",
-  input: CHARTS[0].input ?? "bf16",
-  Ns: uniq(CHARTS.map(c => c.N)).sort((a, b) => a - b),
-  metric: "time",
-};
-const options = {
-  fusion: uniq(CHARTS.map(c => c.fusion)),
-  direction: uniq(CHARTS.map(c => c.direction)),
-  swizzle: uniq(CHARTS.map(c => c.swizzle ?? "off")),
-  input: uniq(CHARTS.map(c => c.input ?? "bf16")),
-  N: uniq(CHARTS.map(c => c.N)).sort((a, b) => a - b),
-  metric: Object.keys(METRICS),
-};
+const SELECTORS = META.selectors;  // [{key, label}] chart dimensions picked one value at a time
+const SPLIT = META.split;  // chart dimension whose selected values are shown side by side
+const sortValues = vs => vs.every(v => typeof v === "number") ? vs.sort((a, b) => a - b) : vs;
+const state = { metric: "time", splits: sortValues(uniq(CHARTS.map(c => c[SPLIT]))) };
+const options = { [SPLIT]: state.splits, metric: Object.keys(METRICS) };
+for (const { key } of SELECTORS) {
+  state[key] = CHARTS[0][key];
+  options[key] = sortValues(uniq(CHARTS.map(c => c[key])));
+}
 
 function fmtNum(v) {
   if (v == null || Number.isNaN(v)) return "–";
@@ -158,8 +151,9 @@ function el(tag, attrs = {}, parent) {
 // ---- controls ------------------------------------------------------------------------
 function buildControls() {
   const box = document.getElementById("controls");
-  const labels = { fusion: "Fusion", direction: "Direction", swizzle: "Swizzled Scale", input: "Input", N: "N", metric: "Metric" };
-  for (const key of ["input", "fusion", "direction", "swizzle", "N", "metric"]) {
+  const labels = Object.fromEntries(SELECTORS.map(s => [s.key, s.label]));
+  Object.assign(labels, { [SPLIT]: SPLIT, metric: "Metric" });
+  for (const key of [...SELECTORS.map(s => s.key), SPLIT, "metric"]) {
     const ctl = document.createElement("div");
     ctl.className = "control";
     ctl.innerHTML = `<span>${labels[key]}</span>`;
@@ -170,7 +164,7 @@ function buildControls() {
       const b = document.createElement("button");
       b.type = "button";
       b.textContent = key === "metric" ? METRICS[opt].label : opt;
-      b.dataset.value = opt;
+      b.dataset.value = String(opt);
       b.addEventListener("click", () => select(key, opt));
       seg.appendChild(b);
     }
@@ -179,10 +173,9 @@ function buildControls() {
   }
 }
 function select(key, opt) {
-  if (key === "N") {  // toggles; one chart per selected N, at least one
-    const n = Number(opt);
-    if (!state.Ns.includes(n)) state.Ns = [...state.Ns, n].sort((a, b) => a - b);
-    else if (state.Ns.length > 1) state.Ns = state.Ns.filter(v => v !== n);
+  if (key === SPLIT) {  // toggles; one chart per selected value, at least one
+    if (!state.splits.includes(opt)) state.splits = options[SPLIT].filter(v => v === opt || state.splits.includes(v));
+    else if (state.splits.length > 1) state.splits = state.splits.filter(v => v !== opt);
   } else {
     state[key] = opt;
   }
@@ -192,28 +185,28 @@ function syncControls() {
   for (const seg of document.querySelectorAll(".seg")) {
     const key = seg.dataset.key;
     for (const b of seg.children) {
-      const on = key === "N" ? state.Ns.includes(Number(b.dataset.value)) : b.dataset.value === String(state[key]);
+      const on = key === SPLIT ? state.splits.map(String).includes(b.dataset.value)
+        : b.dataset.value === String(state[key]);
       b.setAttribute("aria-pressed", String(on));
     }
   }
 }
 
 // ---- data for the current selection ------------------------------------------------
-function chartFor(n) {
-  return CHARTS.find(c => c.fusion === state.fusion && c.direction === state.direction
-    && (c.swizzle ?? "off") === state.swizzle && (c.input ?? "bf16") === state.input && c.N === n);
+function chartFor(v) {
+  return CHARTS.find(c => c[SPLIT] === v && SELECTORS.every(({ key }) => c[key] === state[key]));
 }
 function seriesFor(chart) {
   const m = METRICS[state.metric];
   return chart.series.map(s => ({ name: s.name, role: s.role,
-    pts: s.points.map(p => ({ x: p.M, y: m.value(p), p })) }));
+    pts: s.points.map(p => ({ x: p.x, y: m.value(p), p })) }));
 }
 // Old time / new time at every M both runs have.
 function speedupPoints(chart) {
   const old = chart.series.find(s => s.role === "old"), nw = chart.series.find(s => s.role === "new");
-  const byM = new Map(old.points.map(p => [p.M, p]));
-  return nw.points.filter(p => byM.has(p.M))
-    .map(p => ({ x: p.M, y: byM.get(p.M).time_us / p.time_us, p, old: byM.get(p.M) }));
+  const byX = new Map(old.points.map(p => [p.x, p]));
+  return nw.points.filter(p => byX.has(p.x))
+    .map(p => ({ x: p.x, y: byX.get(p.x).time_us / p.time_us, p, old: byX.get(p.x) }));
 }
 
 // ---- scales ----------------------------------------------------------------------------
@@ -242,25 +235,19 @@ function yDomain(values, scale) {
 }
 
 // ---- render ----------------------------------------------------------------------------
-function selectionTitle() {
-  const fusion = state.fusion.includes("act") && META.activation
-    ? `${state.fusion}(${META.activation})` : state.fusion;
-  return [state.input, fusion, state.direction, ...(state.swizzle === "on" ? ["swizzled scale"] : [])]
-    .join(" · ");
-}
 function render() {
   document.getElementById("selection").textContent =
-    `${METRICS[state.metric].label} — ${selectionTitle()}`;
+    `${METRICS[state.metric].label} — ${state.splits.map(chartFor).find(Boolean)?.heading ?? ""}`;
   const grid = document.getElementById("charts");
   grid.innerHTML = "";
-  grid.style.setProperty("--cols", Math.min(2, state.Ns.length));
-  const first = state.Ns.map(chartFor).find(Boolean);
-  document.getElementById("shared-legend").innerHTML = state.Ns.length > 1 && first ? legendHtml(first) : "";
+  grid.style.setProperty("--cols", Math.min(2, state.splits.length));
+  const first = state.splits.map(chartFor).find(Boolean);
+  document.getElementById("shared-legend").innerHTML = state.splits.length > 1 && first ? legendHtml(first) : "";
   const template = document.getElementById("card-template");
-  for (const n of state.Ns) grid.appendChild(template.content.cloneNode(true));
+  for (const _ of state.splits) grid.appendChild(template.content.cloneNode(true));
   const cards = [...grid.children];
-  cards.forEach((card, i) => drawCard(card, state.Ns[i]));  // first pass, to measure the cards
-  cards.forEach((card, i) => drawCard(card, state.Ns[i], plotHeight(grid, cards)));
+  cards.forEach((card, i) => drawCard(card, state.splits[i]));  // first pass, to measure the cards
+  cards.forEach((card, i) => drawCard(card, state.splits[i], plotHeight(grid, cards)));
 }
 // Chart height so all rows of cards together fill about one window; phones scroll instead.
 function plotHeight(grid, cards) {
@@ -284,11 +271,11 @@ function drawCard(card, n, height = null) {
   host.querySelector(".empty")?.remove();
   tooltip.style.display = "none";
   const metric = METRICS[state.metric];
-  const title = `${selectionTitle()} · N=${n}`;
-  card.querySelector(".chart-title").textContent = `N=${n}`;
+  const title = chart ? chart.title : `${SPLIT}=${n}`;
+  card.querySelector(".chart-title").textContent = `${SPLIT}=${n}`;
   card.querySelector(".chart-sub").textContent = chart ? chart.subtitle : "";
   // With several charts the legend is shown once above the grid instead of in every card.
-  card.querySelector(".legend").innerHTML = state.Ns.length === 1 && chart ? legendHtml(chart) : "";
+  card.querySelector(".legend").innerHTML = state.splits.length === 1 && chart ? legendHtml(chart) : "";
   if (!chart) {
     host.insertAdjacentHTML("beforeend", `<div class="empty">This combination was not benchmarked.</div>`);
     card.querySelector(".table-wrap").innerHTML = "";
@@ -338,7 +325,7 @@ function drawCard(card, n, height = null) {
     }
   }
   el("line", { x1: m.left, x2: m.left + iw, y1: m.top + ih, y2: m.top + ih, stroke: "var(--axis)" }, svg);
-  el("text", { x: m.left + iw / 2, y: H - 4, class: "axis-label", "text-anchor": "middle" }, svg).textContent = "M";
+  el("text", { x: m.left + iw / 2, y: H - 4, class: "axis-label", "text-anchor": "middle" }, svg).textContent = chart.x_label;
   el("text", { x: 14, y: m.top + ih / 2, class: "axis-label", "text-anchor": "middle",
                transform: `rotate(-90 14 ${m.top + ih / 2})` }, svg).textContent = metric.axis;
 
@@ -370,7 +357,7 @@ function drawCard(card, n, height = null) {
     const x = xs.reduce((a, b) => (Math.abs(X(b) - px) < Math.abs(X(a) - px) ? b : a));
     cross.setAttribute("x1", X(x)); cross.setAttribute("x2", X(x)); cross.setAttribute("visibility", "visible");
     for (const mk of markers) mk.c.setAttribute("r", mk.x === x ? 6 : 4);
-    tooltip.innerHTML = tooltipHtml(series, x);
+    tooltip.innerHTML = tooltipHtml(chart, series, x);
     tooltip.style.display = "block";
     const tx = X(x) * (r.width / W), tw = tooltip.offsetWidth;
     tooltip.style.left = `${tx + 16 + tw > r.width ? tx - 16 - tw : tx + 16}px`;
@@ -396,8 +383,8 @@ function detail(p) {
   return `${fmtNum(p.time_us)} µs${std} (min ${fmtNum(p.min_us)}) · ${fmtNum(p["GB/s"])} GB/s`
        + `<br>${p.kernel}`;
 }
-function tooltipHtml(series, x) {
-  let html = `<div class="h">M = ${x}</div>`;
+function tooltipHtml(chart, series, x) {
+  let html = `<div class="h">${chart.x_label} = ${x}</div>`;
   const metric = METRICS[state.metric];
   for (const s of series) {
     const pt = s.pts.find(p => p.x === x);
@@ -420,12 +407,12 @@ function renderTable(chart, target) {
   const cols = ["time_us", "min_us", "rel_std_pct", "GB/s", "kernel"];
   const head = chart.series.length > 1
     ? chart.series.map(s => cols.map(c => `<th>${s.role} ${c}</th>`).join("")).join("") : cols.map(c => `<th>${c}</th>`).join("");
-  const Ms = uniq(chart.series.flatMap(s => s.points.map(p => p.M))).sort((a, b) => a - b);
-  const rows = Ms.map(M => `<tr><td>${M}</td>` + chart.series.map(s => {
-    const p = s.points.find(q => q.M === M) || {};
+  const xs = uniq(chart.series.flatMap(s => s.points.map(p => p.x))).sort((a, b) => a - b);
+  const rows = xs.map(x => `<tr><td>${x}</td>` + chart.series.map(s => {
+    const p = s.points.find(q => q.x === x) || {};
     return cols.map(c => `<td>${typeof p[c] === "number" ? fmtNum(p[c]) : (p[c] ?? "–")}</td>`).join("");
   }).join("") + "</tr>").join("");
-  target.innerHTML = `<table><thead><tr><th>M</th>${head}</tr></thead><tbody>${rows}</tbody></table>`;
+  target.innerHTML = `<table><thead><tr><th>${chart.x_label}</th>${head}</tr></thead><tbody>${rows}</tbody></table>`;
 }
 
 function update() { syncControls(); render(); }
