@@ -226,6 +226,7 @@ def test_router_compile_replay(histogram_mode, index_dtype):
 )
 def test_router_compile_dynamic(dtype, index_dtype):
     torch._dynamo.reset()
+    counters.clear()
     counts = torch.arange(1, 131, device="cuda", dtype=torch.int32)
 
     def router_loss(logits):
@@ -262,6 +263,7 @@ def test_router_compile_dynamic(dtype, index_dtype):
         (actual_grad,) = torch.autograd.grad(actual, logits)
         (eager_grad,) = torch.autograd.grad(expected, eager_logits)
         _check_reference(actual_grad, eager_grad, dtype)
+        assert counters["stats"]["unique_graphs"] == 1
 
 
 @pytest.mark.parametrize(
