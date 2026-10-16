@@ -53,6 +53,7 @@ from transformer_engine.pytorch.distributed import (
 from transformer_engine.pytorch.jit import no_torch_dynamo
 from transformer_engine.pytorch.graph import is_graph_capturing
 from transformer_engine.pytorch.attention.inference import InferenceParams
+from transformer_engine.pytorch.attention import deferred_qkv_rope
 
 # Import attention utils
 import transformer_engine.pytorch.attention.dot_product_attention.utils as dpa_utils
@@ -2314,6 +2315,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             qkv_interleave_dim,
             inference_params,
         )
+        deferred_rope_state = deferred_qkv_rope.get_state(query_layer)
 
         with self.prepare_forward_ctx(
             query_layer,
@@ -2904,6 +2906,36 @@ class DotProductAttention(TransformerEngineBaseModule):
                     " run with NVTE_DEBUG=1 NVTE_DEBUG_LEVEL=2 to find out the reasons for"
                     " disabling all backends."
                 )
+
+            # Q/K/V returned by apply_fused_qkv_rotary_pos_emb(defer_for_fp8_attention=True) hold no
+            # data yet: either the fused FP8 attention path quantizes them from the QKV GEMM output,
+            # or TE's regular RoPE is applied into them here.
+            if deferred_rope_state is not None:
+                if deferred_qkv_rope.get_state(query_layer) is not deferred_rope_state:
+                    raise RuntimeError(
+                        "Q/K/V from apply_fused_qkv_rotary_pos_emb(defer_for_fp8_attention=True) "
+                        "were replaced before attention; pass them to DotProductAttention as is."
+                    )
+                fp8_dpa = self.fp8 and self.fp8_meta["recipe"].fp8_dpa
+                can_fuse = (
+                    fp8_dpa
+                    and use_fused_attention
+                    and not (
+                        checkpoint_core_attention
+                        or context_parallel
+                        or bf16_backward
+                        or score_mod is not None
+                        or inference_params is not None
+                    )
+                    and deferred_qkv_rope.can_fuse_with_fp8_attention(
+                        query_layer,
+                        dpa_utils.get_attention_quantizers(fp8_dpa, self.quantizers)[0],
+                        qkv_layout,
+                        bool(int(os.getenv("NVTE_FP8_DPA_BWD", "1"))),
+                    )
+                )
+                if not can_fuse:
+                    deferred_qkv_rope.materialize(query_layer, key_layer, value_layer)
 
             # run attention
             softmax_offset = (

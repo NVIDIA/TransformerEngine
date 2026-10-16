@@ -5,6 +5,7 @@
 """Tensor class with FP8 data"""
 from __future__ import annotations
 from typing import Any, Dict, Optional, Tuple, Iterable, Union
+import os
 import warnings
 import torch
 from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
@@ -194,6 +195,14 @@ class Float8Quantizer(Quantizer):
         return True
 
 
+_TRITON_CURRENT_SCALING = os.environ.get("NVTE_TRITON_CURRENT_SCALING_QUANTIZE", "1") == "1"
+_TRITON_CURRENT_SCALING_MIN_NUMEL = 1 << 22
+_FP8_TORCH_DTYPES = {
+    DType.kFloat8E4M3: torch.float8_e4m3fn,
+    DType.kFloat8E5M2: torch.float8_e5m2,
+}
+
+
 class Float8CurrentScalingQuantizer(Quantizer):
     """Builder class for FP8 tensors with per-tensor current scaling
 
@@ -311,8 +320,40 @@ class Float8CurrentScalingQuantizer(Quantizer):
 
         return dst
 
+    def _triton_quantize(self, tensor: torch.Tensor) -> Optional[QuantizedTensor]:
+        """Two-phase Triton amax + cast for large rowwise-only tensors; None if unsupported."""
+        if (
+            not _TRITON_CURRENT_SCALING
+            or tensor.dtype != torch.bfloat16
+            or not tensor.is_cuda
+            or not tensor.is_contiguous()
+            or tensor.numel() < _TRITON_CURRENT_SCALING_MIN_NUMEL
+            or self.with_amax_reduction
+            or self.columnwise_usage
+            or not self.rowwise_usage
+            or self.dtype not in _FP8_TORCH_DTYPES
+        ):
+            return None
+        out = self.make_empty(tensor.shape, dtype=tensor.dtype, device=tensor.device)
+        if out._data is None or out._transpose is not None or out._scale_inv.numel() != 1:
+            return None
+        # pylint: disable=import-outside-toplevel
+        from ..triton.current_scaling import current_scaling_quantize
+
+        current_scaling_quantize(
+            tensor,
+            out._data.view(_FP8_TORCH_DTYPES[self.dtype]),
+            out._scale_inv,
+            eps=float(self.amax_epsilon),
+            force_pow_2_scales=self.force_pow_2_scales,
+        )
+        return out
+
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
         """Quantize tensor implementation"""
+        out = self._triton_quantize(tensor)
+        if out is not None:
+            return out
         return tex.quantize(tensor, self)
 
     def calibrate(self, tensor: torch.Tensor) -> None:
