@@ -194,6 +194,10 @@ def _cudnn_jax_fusion_rejection_reasons(
     if all(isinstance(q, GroupedQuantizer) for q in required_quantizers.values()):
         if fc1_quantizer_set.x.q_dtype != fc1_quantizer_set.kernel.q_dtype:
             errors.append("requires identical FC1 activation and weight MXFP8 payload dtypes")
+        if fc1_quantizer_set.dgrad.q_dtype != jnp.float8_e4m3fn:
+            errors.append("requires FC1 dgrad MXFP8 payload dtype float8_e4m3fn")
+        if fc2_quantizer_set.dgrad.q_dtype != fc2_quantizer_set.kernel.q_dtype:
+            errors.append("requires identical FC2 dgrad and weight MXFP8 payload dtypes")
         supported = (jnp.float8_e4m3fn, jnp.float8_e5m2)
         for name, quantizer in required_quantizers.items():
             if quantizer.q_dtype not in supported:
@@ -921,7 +925,7 @@ def _ffn_fwd_per_shard(
         casted_sorted_x.get_tensor(usage=TensorUsage.LHS_TRANS).checkpoint(fc1_quantizer_set.x),
         casted_wi.get_tensor(
             usage=(
-                TensorUsage.LHS
+                TensorUsage.RHS
                 if use_cudnn_jax_fusion and cudnn_native_weight_layout
                 else TensorUsage.RHS_TRANS
             )
@@ -2021,6 +2025,7 @@ def moe(
     use_cudnn_fusion : bool
         Defaults to ``True``: try cuDNN's shared JAX grouped MXFP8 GLU/dGLU APIs
         on SM100+ GPUs; cuDNN selects the architecture-specific kernels. ``False`` uses unfused TE grouped GEMM.
+        Requires cuDNN Frontend >= 1.32.0 with compatible JAX APIs.
         Frontends whose JAX GLU/dGLU entry points only support BF16 discrete
         weights fall back to unfused TE grouped GEMM.
         Ineligible calls warn and fall back to TE's regular grouped-GEMM

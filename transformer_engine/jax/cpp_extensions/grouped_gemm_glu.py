@@ -10,6 +10,7 @@ import inspect
 
 import jax
 import jax.numpy as jnp
+from packaging.version import Version
 
 __all__ = [
     "grouped_gemm_dglu",
@@ -74,7 +75,7 @@ def _compact_sf(scale: jax.Array, shape: tuple[int, ...], name: str) -> jax.Arra
 
 
 # These contracts use cuDNN Frontend's shared GLU API with JAX dispatch.
-# Probe APIs rather than the version:
+# Require both the release containing MXFP8 JAX support and compatible APIs:
 # newer optional parameters are compatible, but TE must supply every required one.
 _FORWARD_ARGS = (
     "a_tensor",
@@ -108,12 +109,14 @@ _JAX_BACKWARD_ARGS = tuple(
 
 
 def grouped_gemm_glu_dependencies_available() -> tuple[bool, str]:
-    """Require shared wrappers and JAX entry points supporting dense MXFP8."""
+    """Require Frontend >= 1.32.0 and shared JAX APIs supporting dense MXFP8."""
     try:
         cutlass_jax = importlib.import_module("cutlass.jax")
         if not cutlass_jax.is_available():
             return False, "CuTeDSL JAX support is unavailable"
         cudnn = importlib.import_module("cudnn")
+        if Version(cudnn.__version__) < Version("1.32.0"):
+            return False, f"cuDNN Frontend >= 1.32.0 is required, got {cudnn.__version__}"
         for module, name, arguments in (
             (cudnn, "grouped_gemm_glu_wrapper_sm100", _FORWARD_ARGS),
             (cudnn, "grouped_gemm_dglu_wrapper_sm100", _BACKWARD_ARGS),

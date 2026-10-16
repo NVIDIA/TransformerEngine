@@ -127,7 +127,7 @@ from transformer_engine.jax.moe import (
     record_ep_bootstrap_signature_for_moe,
 )
 from transformer_engine.jax.ep import ep_bootstrap, ep_finalize
-from transformer_engine.common.recipe import MXFP8BlockScaling
+from transformer_engine.common.recipe import Format, MXFP8BlockScaling
 from transformer_engine.jax.sharding import MeshResource, global_shard_guard
 
 # -----------------------------------------------------------------------------
@@ -909,9 +909,10 @@ def test_explicitly_disabled_fusion_with_native_weights(
 class TestTeEpMoeCudnnCutedslFusion:
     """End-to-end MXFP8 coverage for cuDNN's grouped GLU JAX APIs."""
 
+    @pytest.mark.parametrize("fallback", ["missing_api", "old_version", "hybrid"])
     @pytest.mark.parametrize("native_layout", [False, True])
-    def test_missing_apis_unfused_forward_and_backward(
-        self, mesh, monkeypatch, native_layout, make_block, use_cudnn_fusion
+    def test_unsupported_fusion_unfused_forward_and_backward(
+        self, mesh, monkeypatch, native_layout, make_block, use_cudnn_fusion, fallback
     ):
         """Unfused fallback retains bootstrap capacity and native-layout gradients."""
         if not use_cudnn_fusion:
@@ -919,12 +920,30 @@ class TestTeEpMoeCudnnCutedslFusion:
         import cudnn
         from transformer_engine.jax import cpp_extensions as tex
 
-        # Avoid triggering a lazy optional import just to disable the API.
-        monkeypatch.setitem(cudnn.__dict__, "grouped_gemm_glu_wrapper_sm100", None)
-        block = make_block(quantization_recipe=MXFP8BlockScaling())
+        if fallback == "missing_api":
+            # Avoid triggering a lazy optional import just to disable the API.
+            monkeypatch.setitem(cudnn.__dict__, "grouped_gemm_glu_wrapper_sm100", None)
+        elif fallback == "old_version":
+            monkeypatch.setattr(cudnn, "__version__", "1.31.0")
+        recipe = MXFP8BlockScaling(
+            fp8_format=Format.HYBRID if fallback == "hybrid" else Format.E4M3
+        )
+
+        def unexpected_fused_kernel(*args, **kwargs):
+            raise AssertionError("Unsupported fusion must use unfused kernels")
+
+        monkeypatch.setattr(tex, "grouped_gemm_glu", unexpected_fused_kernel)
+        monkeypatch.setattr(tex, "grouped_gemm_dglu", unexpected_fused_kernel)
+        baseline = make_block(quantization_recipe=recipe)
+        block = make_block(quantization_recipe=recipe)
         x = _make_inputs(jax.random.PRNGKey(51))
-        variables, baseline_output, _ = _init_apply(block, mesh, x, jax.random.PRNGKey(52))
-        baseline_grads, baseline_dx = _grad_step(block, variables, mesh, x)
+        # Keep the fusion-requested EP alignment and bootstrap capacity while
+        # independently forcing the baseline to execute the unfused FFN.
+        moe_module = importlib.import_module("transformer_engine.jax.moe")
+        with monkeypatch.context() as baseline_patch:
+            baseline_patch.setattr(moe_module, "_select_cudnn_jax_fusion", lambda _: False)
+            variables, baseline_output, _ = _init_apply(baseline, mesh, x, jax.random.PRNGKey(52))
+            baseline_grads, baseline_dx = _grad_step(baseline, variables, mesh, x)
 
         if native_layout:
             flax_moe = importlib.import_module("transformer_engine.jax.flax.moe")
@@ -955,9 +974,16 @@ class TestTeEpMoeCudnnCutedslFusion:
                 _to_global_numpy(_unwrap(baseline_grads["params"][name]), mesh),
             )
 
+    @pytest.mark.parametrize("native_layout", [False, True])
     @pytest.mark.parametrize("apply_topk_weights_early", [False, True])
     def test_mxfp8_forward_and_backward(
-        self, mesh, apply_topk_weights_early, monkeypatch, make_block, use_cudnn_fusion
+        self,
+        mesh,
+        apply_topk_weights_early,
+        monkeypatch,
+        make_block,
+        use_cudnn_fusion,
+        native_layout,
     ):
         if not use_cudnn_fusion:
             pytest.skip("requires the cuDNN fusion fixture parameter")
@@ -966,6 +992,20 @@ class TestTeEpMoeCudnnCutedslFusion:
         available, reason = tex.grouped_gemm_glu_dependencies_available()
         if not available:
             pytest.skip(reason)
+
+        if native_layout:
+            flax_moe = importlib.import_module("transformer_engine.jax.flax.moe")
+            original_moe = flax_moe.moe
+
+            def native_moe(*args, **kwargs):
+                args = list(args)
+                gate, up = jnp.split(args[2], 2, axis=-1)
+                args[2] = tex.pack_gated_activation_pair(gate, up).transpose(0, 2, 1)
+                kwargs["wi_kernel_axes"] = ("exp", "mlp", "embed")
+                kwargs["cudnn_native_weight_layout"] = True
+                return original_moe(*args, **kwargs)
+
+            monkeypatch.setattr(flax_moe, "moe", native_moe)
 
         shared_calls = []
         original_glu = tex.grouped_gemm_glu
@@ -1037,12 +1077,21 @@ class TestTeEpMoeCudnnCutedslFusion:
                 ),
                 err_msg=f"{name} fused MXFP8 gradient parity breach",
             )
+        grad_x_ref_np = np.asarray(jax.device_get(grad_x_ref)).astype(np.float32)
         np.testing.assert_allclose(
             grad_x_np,
-            np.asarray(jax.device_get(grad_x_ref)).astype(np.float32),
+            grad_x_ref_np,
             **GRAD_FFN_TOLERANCE["mxfp8"],
             err_msg="d_x fused MXFP8 gradient parity breach",
         )
+        # The mean-square loss makes dX smaller than the absolute tolerance.
+        # Also bound relative error to catch a wrong MXFP8 quantization axis.
+        relative_dx_error = np.linalg.norm(grad_x_np - grad_x_ref_np) / np.linalg.norm(
+            grad_x_ref_np
+        )
+        assert (
+            relative_dx_error < 0.1
+        ), f"d_x MXFP8 relative L2 error {relative_dx_error:.3%} >= 10%"
 
     def test_cudnn_fused_with_checkpoint_names(
         self, mesh, monkeypatch, make_block, use_cudnn_fusion

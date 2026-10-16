@@ -2175,6 +2175,7 @@ class TestGroupedGemmGluFallback:
     def frontend(self, monkeypatch):
         module = SimpleNamespace(
             __name__="cudnn",
+            __version__="1.32.0",
             grouped_gemm_glu_wrapper_sm100=self._api(_glu_adapter._FORWARD_ARGS),
             grouped_gemm_dglu_wrapper_sm100=self._api(_glu_adapter._BACKWARD_ARGS),
             grouped_gemm_glu_jax_sm100=self._api(_glu_adapter._JAX_FORWARD_ARGS),
@@ -2191,6 +2192,61 @@ class TestGroupedGemmGluFallback:
 
         monkeypatch.setattr(_glu_adapter.importlib, "import_module", import_module)
         return module
+
+    @pytest.mark.parametrize(
+        "version,expected",
+        [
+            ("1.31.0", False),
+            ("1.32.0.dev1", False),
+            ("1.32.0", True),
+            ("1.33.0", True),
+            ("invalid", False),
+            (None, False),
+        ],
+    )
+    def test_frontend_version(self, frontend, monkeypatch, version, expected):
+        # Matching signatures alone are insufficient for older/debug frontends.
+        if version is None:
+            del frontend.__version__
+        else:
+            frontend.__version__ = version
+        available, reason = _glu_adapter.grouped_gemm_glu_dependencies_available()
+        assert available is expected
+        assert bool(reason) is not expected
+        if not expected:
+            monkeypatch.setattr(
+                transformer_engine_jax, "get_device_compute_capability", lambda _: 100
+            )
+            with pytest.warns(UserWarning, match="falling back"):
+                assert _moe_module._select_cudnn_jax_fusion([]) is False
+
+    @pytest.mark.parametrize("fc1_dgrad", [jnp.float8_e4m3fn, jnp.float8_e5m2])
+    @pytest.mark.parametrize("fc2_dgrad", [jnp.float8_e4m3fn, jnp.float8_e5m2])
+    def test_fused_dgrad_dtypes(self, monkeypatch, fc1_dgrad, fc2_dgrad):
+        monkeypatch.setattr(_moe_module, "_get_mesh", lambda: None)
+        quantizers = tuple(
+            QuantizerFactory.create_set(
+                scaling_mode=ScalingMode.MXFP8_1D_SCALING,
+                fwd_dtype=jnp.float8_e4m3fn,
+                bwd_dtype=dtype,
+                is_2x2x=True,
+                n_groups=2,
+            )
+            for dtype in (fc1_dgrad, fc2_dgrad)
+        )
+        errors = _moe_module._cudnn_jax_fusion_rejection_reasons(
+            jnp.ones((1, 128), jnp.bfloat16),
+            jnp.ones((2, 128, 256), jnp.bfloat16),
+            None,
+            None,
+            quantizers,
+            num_experts=2,
+            activation_type="silu",
+            ep_axis="ep",
+        )
+        assert any("FC1 dgrad" in error for error in errors) == (fc1_dgrad == jnp.float8_e5m2)
+        assert any("FC2 dgrad" in error for error in errors) == (fc2_dgrad == jnp.float8_e5m2)
+        assert bool(errors) == (jnp.float8_e5m2 in (fc1_dgrad, fc2_dgrad))
 
     @pytest.mark.parametrize(
         "name,args",
