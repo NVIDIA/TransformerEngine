@@ -9,11 +9,61 @@ import transformer_engine_torch as tex
 from transformer_engine.pytorch.constants import TE_DType
 from transformer_engine.pytorch import NVFP4Quantizer
 from transformer_engine.pytorch.cpp_extensions import general_gemm, general_grouped_gemm
-from transformer_engine.pytorch.custom_recipes.quantization_ref_nvfp4 import NVFP4QuantizerRef
-from transformer_engine.pytorch.custom_recipes import utils
+from transformer_engine.pytorch.custom_recipes.reference_nvfp4 import NVFP4QuantizerRef
+from transformer_engine.pytorch.custom_recipes import reference_utils
+from transformer_engine.pytorch.tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 
 
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize(
+    "disable_x, disable_w",
+    [(True, False), (False, True), (True, True)],
+    ids=["x_unit_global_scale", "w_unit_global_scale", "both_unit_global_scale"],
+)
+def test_gemm_with_missing_nvfp4_amax(disable_x: bool, disable_w: bool) -> None:
+    """A null amax contributes a unit global scale to GEMM alpha."""
+    torch.manual_seed(0)
+    x = torch.randn((128, 128), dtype=torch.bfloat16, device="cuda")
+    w = torch.randn((128, 128), dtype=torch.bfloat16, device="cuda")
+    unit_scale_amax = 448.0 * 6.0
+    x[0, 0] = unit_scale_amax
+    w[0, 0] = unit_scale_amax
+
+    def quantize(tensor: torch.Tensor, disable_second_level_scale: bool):
+        return NVFP4Quantizer(
+            rowwise=True,
+            columnwise=True,
+            disable_second_level_scale=disable_second_level_scale,
+        )(tensor)
+
+    x_ref, w_ref = quantize(x, False), quantize(w, False)
+    x_test, w_test = quantize(x, disable_x), quantize(w, disable_w)
+
+    def gemm(w_q, x_q):
+        workspace = torch.empty(4, dtype=torch.uint8, device="cuda")
+        return tex.generic_gemm(
+            w_q,
+            True,
+            x_q,
+            False,
+            None,
+            None,
+            TE_DType[torch.bfloat16],
+            None,
+            TE_DType[torch.bfloat16],
+            False,
+            None,
+            False,
+            workspace,
+            workspace.numel(),
+            False,
+            False,
+        )[0]
+
+    torch.testing.assert_close(gemm(w_test, x_test), gemm(w_ref, x_ref), atol=0, rtol=0)
 
 
 def check_nvfp4_gemm_versus_reference(
@@ -127,7 +177,7 @@ def check_nvfp4_gemm_versus_reference(
 
     # Create reference quantizer for reference GEMM
     x_ref_quantizer = NVFP4QuantizerRef(
-        dtype=utils.Fp4Formats.E2M1,
+        dtype=reference_utils.Fp4Formats.E2M1,
         rowwise=True,
         columnwise=not row_scaled_nvfp4,
         pow_2_scales=False,
@@ -139,7 +189,7 @@ def check_nvfp4_gemm_versus_reference(
         nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
     w_ref_quantizer = NVFP4QuantizerRef(
-        dtype=utils.Fp4Formats.E2M1,
+        dtype=reference_utils.Fp4Formats.E2M1,
         rowwise=True,
         columnwise=True,
         pow_2_scales=False,
@@ -417,6 +467,65 @@ def check_nvfp4_row_scaled_gemm_matches_emulated(
         torch.testing.assert_close(y_row_scaled, y_emulated, atol=3.0517578125e-5, rtol=0.0)
 
 
+def _dequantize_nvfp4_usage(
+    tensor: NVFP4TensorStorage,
+    *,
+    columnwise: bool,
+) -> torch.Tensor:
+    """Dequantize one independently-quantized tensor orientation."""
+    if not columnwise:
+        return tensor.dequantize(dtype=torch.float32)
+
+    metadata = tensor.get_metadata()
+    metadata["rowwise_data"] = metadata["columnwise_data"]
+    metadata["rowwise_scale_inv"] = metadata["columnwise_scale_inv"]
+    metadata["amax_rowwise"] = metadata["amax_columnwise"]
+    metadata["columnwise_data"] = None
+    metadata["columnwise_scale_inv"] = None
+    metadata["amax_columnwise"] = None
+    return NVFP4TensorStorage(**metadata).dequantize(dtype=torch.float32)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize(
+    "layout,a_shape,b_shape",
+    [
+        ("TN", (64, 64), (96, 64)),
+        ("NN", (64, 96), (128, 64)),
+        ("NT", (128, 64), (128, 96)),
+    ],
+)
+def test_nvfp4_bilateral_row_scaled_gemm_matches_dequantized(
+    layout: str,
+    a_shape: tuple[int, int],
+    b_shape: tuple[int, int],
+) -> None:
+    """Check per-tensor GEMM plus bilateral FP32 post-scaling."""
+    torch.manual_seed(41)
+    quantizer = NVFP4Quantizer(
+        fp4_dtype=te.DType.kFloat4E2M1,
+        rowwise=True,
+        columnwise=True,
+        with_amax_reduction=False,
+        amax_reduction_group=None,
+        with_rht=False,
+        with_post_rht_amax=False,
+        row_scaled_nvfp4=True,
+    )
+    a = torch.randn(a_shape, dtype=torch.bfloat16, device="cuda")
+    b = torch.randn(b_shape, dtype=torch.bfloat16, device="cuda")
+    a_nvfp4 = quantizer(a)
+    b_nvfp4 = quantizer(b)
+
+    actual = general_gemm(a_nvfp4, b_nvfp4, out_dtype=torch.float32, layout=layout)[0]
+    transa, transb = layout[0] == "T", layout[1] == "T"
+    a_dequant = _dequantize_nvfp4_usage(a_nvfp4, columnwise=not transa)
+    b_dequant = _dequantize_nvfp4_usage(b_nvfp4, columnwise=transb)
+    expected = b_dequant @ a_dequant.T
+
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+
+
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 @pytest.mark.parametrize(
     "M, K, N",
@@ -581,3 +690,151 @@ def test_nvfp4_row_scaled_gemm_matches_emulated(
         use_4over6=use_4over6,
         nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
+
+
+def _check_ue5m3_gemm_versus_dequantized(
+    M, K, N, x_columnwise, w_columnwise, disable_second_level_scale
+):
+    """Run an NVFP4/UE5M3 GEMM and compare against a dequantized FP32 reference."""
+    torch.manual_seed(0)
+    device, dtype, out_dtype = "cuda", torch.bfloat16, torch.bfloat16
+    x_shape = (K, M) if x_columnwise else (M, K)
+    w_shape = (K, N) if w_columnwise else (N, K)
+    x = torch.randn(x_shape, dtype=dtype, device=device)
+    w = torch.randn(w_shape, dtype=dtype, device=device)
+
+    common = dict(
+        fp4_dtype=tex.DType.kFloat4E2M1,
+        scale_dtype=tex.DType.kFloat8UE5M3,
+        rowwise=True,
+        columnwise=True,
+        with_amax_reduction=False,
+        amax_reduction_group=None,
+        with_rht=False,
+        with_post_rht_amax=False,
+    )
+    # disable_second_level_scale is given per operand, as (x, w).
+    xq = NVFP4Quantizer(**common, disable_second_level_scale=disable_second_level_scale[0])
+    wq = NVFP4Quantizer(**common, disable_second_level_scale=disable_second_level_scale[1])
+    x_q = xq.update_quantized(x, xq.make_empty(x_shape, dtype=dtype, device=device))
+    w_q = wq.update_quantized(w, wq.make_empty(w_shape, dtype=dtype, device=device))
+
+    if disable_second_level_scale[0]:
+        assert x_q._amax_rowwise is None, "disable_second_level_scale should drop the amax"
+    if disable_second_level_scale[1]:
+        assert w_q._amax_rowwise is None, "disable_second_level_scale should drop the amax"
+
+    # Reference: dequantize the orientation each operand is actually read in.
+    x_ref = _dequantize_nvfp4_usage(x_q, columnwise=x_columnwise)
+    w_ref = _dequantize_nvfp4_usage(w_q, columnwise=w_columnwise)
+    # _dequantize_nvfp4_usage returns each operand canonically as (rows, K), so
+    # the reference is the same expression for every layout.
+    ref = x_ref @ w_ref.t()
+
+    if x_columnwise:
+        x_q.update_usage(rowwise_usage=False)
+    if w_columnwise:
+        w_q.update_usage(rowwise_usage=False)
+    transa, transb = not w_columnwise, x_columnwise
+    layout = ("T" if transa else "N") + ("T" if transb else "N")
+    y = general_gemm(w_q, x_q, out_dtype=out_dtype, layout=layout)[0]
+
+    # Both sides see identically quantized operands, so quantization error cancels and
+    # only accumulation order and the bf16 output rounding differ. One bf16 ulp is
+    # already ~4e-3 relative, which no elementwise tolerance survives, so compare the
+    # whole result instead.
+    rel_err = (y.float() - ref).norm() / ref.norm()
+    assert rel_err < 5e-3, f"relative error {rel_err:.2e} is too large"
+
+
+ue5m3_available, reason_for_no_ue5m3 = te.is_fp8_ue5m3_available(return_reason=True)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.skipif(not ue5m3_available, reason=reason_for_no_ue5m3)
+@pytest.mark.parametrize(
+    "M, K, N",
+    [
+        (256, 128, 256),
+        (256, 256, 256),
+        (256, 1024, 256),
+        (1024, 1024, 1024),
+        (4096, 512, 3072),
+        (112, 128, 96),
+        (304, 640, 304),
+        (1008, 3072, 992),
+        (256, 64, 256),
+        (128, 128, 112),
+    ],
+)
+@pytest.mark.parametrize(
+    "x_columnwise, w_columnwise",
+    [
+        (False, False),  # TN -- w rowwise, x rowwise   (fprop)
+        (False, True),  # NN -- w colwise, x rowwise   (dgrad)
+        (True, True),  # NT -- w colwise, x colwise   (wgrad)
+    ],
+    ids=["FF", "FT", "TT"],
+)
+@pytest.mark.parametrize(
+    "disable_second_level_scale",
+    [
+        (True, False),
+    ],
+    ids=["TF"],
+)
+def test_nvfp4_ue5m3_gemm_versus_reference(
+    M: int,
+    K: int,
+    N: int,
+    x_columnwise: bool,
+    w_columnwise: bool,
+    disable_second_level_scale: bool,
+):
+    """NVFP4 GEMM with UE5M3 block scales, with and without second-level scaling.
+
+    UE5M3's wider range is what makes dropping the per-tensor global scale
+    viable, so both configurations must match the dequantized reference.
+    """
+    _check_ue5m3_gemm_versus_dequantized(
+        M, K, N, x_columnwise, w_columnwise, disable_second_level_scale
+    )
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.skipif(not ue5m3_available, reason=reason_for_no_ue5m3)
+@pytest.mark.parametrize("M, K, N", [(256, 256, 256), (1024, 3072, 992)])
+def test_nvfp4_ue5m3_gemm_leaves_operands_unswizzled(M: int, K: int, N: int):
+    """The UE5M3 GEMM must not swizzle operand scales in place.
+
+    Weights are persistent: the master-weight cast rewrites their scales in
+    the unswizzled layout, so a swizzled mark left behind by a GEMM makes
+    every later GEMM and dequantize read the scales in the wrong layout.
+    """
+    torch.manual_seed(0)
+    device, dtype = "cuda", torch.bfloat16
+    x = torch.randn((M, K), dtype=dtype, device=device)
+    w = torch.randn((N, K), dtype=dtype, device=device)
+    quantizer = NVFP4Quantizer(
+        fp4_dtype=tex.DType.kFloat4E2M1,
+        scale_dtype=tex.DType.kFloat8UE5M3,
+        rowwise=True,
+        columnwise=True,
+        with_rht=False,
+        with_post_rht_amax=False,
+        with_2d_quantization=True,
+    )
+    x_q = quantizer.update_quantized(x, quantizer.make_empty(x.shape, dtype=dtype, device=device))
+    w_q = quantizer.update_quantized(w, quantizer.make_empty(w.shape, dtype=dtype, device=device))
+    before = [(t._rowwise_scale_inv.clone(), t._columnwise_scale_inv.clone()) for t in (w_q, x_q)]
+    y1 = general_gemm(w_q, x_q, out_dtype=dtype, layout="TN")[0]
+    y2 = general_gemm(w_q, x_q, out_dtype=dtype, layout="TN")[0]
+    for t, (rowwise, columnwise) in zip((w_q, x_q), before):
+        assert not t._with_gemm_swizzled_scales, "GEMM marked its operand as swizzled"
+        assert torch.equal(t._rowwise_scale_inv, rowwise), "GEMM changed rowwise scales"
+        assert torch.equal(t._columnwise_scale_inv, columnwise), "GEMM changed columnwise scales"
+    assert torch.equal(y1, y2), "repeated GEMM on the same operands differs"
+    # The GEMM must still consume correctly swizzled scales.
+    ref = x_q.dequantize(dtype=torch.float32) @ w_q.dequantize(dtype=torch.float32).t()
+    rel_err = (y1.float() - ref).norm() / ref.norm()
+    assert rel_err < 5e-3, f"relative error {rel_err:.2e} is too large"

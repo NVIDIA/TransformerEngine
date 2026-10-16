@@ -65,13 +65,43 @@ def is_triton_autotuned_alias_safe() -> bool:
 
 
 # XLA gained the ``gpu_stream:collective`` stream annotation in openxla/xla#39604,
-# which ships in the JAX 0.10.0 release. Older XLA fatally fails on it.
-_COLLECTIVE_STREAM_MIN_JAX_VERSION = "0.10.0"
+# first shipping in JAX 0.10.1. Older XLA fatally fails on it.
+# However, JAX 0.10.1 renamed this API to compute_on2 and slightly changed the
+# signature, then 0.11.1 renamed it back to compute_on. For simplicity,
+# we will support 0.11.1+
+_COLLECTIVE_STREAM_MIN_JAX_VERSION = "0.11.1"
 
 
+@lru_cache(maxsize=None)
 def is_collective_stream_supported() -> bool:
     """Return True if the installed JAX supports the gpu_stream:collective annotation."""
-    return jax_version_meet_requirement(_COLLECTIVE_STREAM_MIN_JAX_VERSION)
+    if not jax_version_meet_requirement(_COLLECTIVE_STREAM_MIN_JAX_VERSION):
+        return False
+    try:
+        from jax.experimental.compute_on import compute_on  # pylint: disable=unused-import
+    except ImportError:
+        return False
+    return True
+
+
+# Minimum JAX version whose XLA ships the FFI collectives extension (lets an FFI
+# handler fetch XLA's own communicator). Conservative floor: the first version
+# this was verified on.
+_XLA_FFI_COLLECTIVES_NIGHTLY_FLOOR = "0.11.2.dev20260828"
+_XLA_FFI_COLLECTIVES_STABLE_FLOOR = "0.11.2"
+
+
+@lru_cache(maxsize=None)
+def is_xla_ffi_collectives_supported() -> bool:
+    """Return True if the installed JAX exposes the XLA FFI collectives extension.
+
+    Not EP-specific; gates auto-selection of the EP borrowed-comm path (see
+    cpp_extensions.ep.use_nccl_comm_from_xla).
+    """
+    v = PkgVersion(get_pkg_version("jax"))
+    if v.dev is not None:
+        return v >= PkgVersion(_XLA_FFI_COLLECTIVES_NIGHTLY_FLOOR)
+    return v >= PkgVersion(_XLA_FFI_COLLECTIVES_STABLE_FLOOR)
 
 
 def is_triton_extension_supported() -> bool:
@@ -88,6 +118,7 @@ __all__ = [
     "jax_version_meet_requirement",
     "is_triton_autotuned_alias_safe",
     "is_collective_stream_supported",
+    "is_xla_ffi_collectives_supported",
     "is_triton_extension_supported",
     "TRITON_EXTENSION_MIN_JAX_VERSION",
     "TRITON_EXTENSION_CUDA_GRAPH_MIN_JAX_VERSION",

@@ -23,6 +23,7 @@ from transformer_engine.pytorch.ops.basic.grouped_linear import (
     OUTPUT_BUFFER_KEY,
     GRAD_INPUT_BUFFER_KEY,
 )
+from transformer_engine.pytorch.ops.fuser import OperationFuser
 from transformer_engine.pytorch._extra_state import UNSAFE_PICKLE_EXTRA_STATE_ENV
 
 from transformer_engine.pytorch.ops.fused import (
@@ -36,6 +37,7 @@ from transformer_engine.pytorch.ops.fused import (
 )
 from transformer_engine.pytorch import (
     QuantizedTensor,
+    Float8BlockQuantizer,
     Float8CurrentScalingQuantizer,
     Float8Quantizer,
     MXFP8Quantizer,
@@ -46,10 +48,12 @@ from transformer_engine.pytorch import (
 
 # Import utility functions
 from utils import (
+    MegatronTrainingHelper,
     assert_close,
     assert_close_grads,
     dtype_tols,
     make_recipe,
+    nvfp4_variant_names,
     quantization_tols,
     reset_rng_states,
 )
@@ -58,6 +62,10 @@ from utils import (
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
 nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
+fp8_block_scaling_available, reason_for_no_fp8_block_scaling = te.is_fp8_block_scaling_available(
+    return_reason=True
+)
+fp8_ue5m3_available, reason_for_no_fp8_ue5m3 = te.is_fp8_ue5m3_available(return_reason=True)
 
 # Supported data types
 _dtypes: list[torch.dtype] = [torch.float32, torch.float16]
@@ -76,6 +84,10 @@ if mxfp8_available:
 if nvfp4_available:
     _quantization_list.append("nvfp4")
     _quantization_list.append("nvfp4_4over6")
+    if fp8_ue5m3_available:
+        _quantization_list.append("nvfp4_rht_ue5m3")
+if fp8_block_scaling_available:
+    _quantization_list.append("fp8_block_scaling")
 
 
 @pytest.fixture(autouse=True, scope="function")
@@ -105,11 +117,12 @@ def maybe_skip_quantization(
         pytest.skip(reason_for_no_fp8)
     if quantization == "mxfp8" and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
-    if (
-        quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6", "nvfp4_rht")
-        and not nvfp4_available
-    ):
+    if quantization in nvfp4_variant_names and not nvfp4_available:
         pytest.skip(reason_for_no_nvfp4)
+    if quantization in ("nvfp4_ue5m3", "nvfp4_rht_ue5m3") and not fp8_ue5m3_available:
+        pytest.skip(reason_for_no_fp8_ue5m3)
+    if quantization == "fp8_block_scaling" and not fp8_block_scaling_available:
+        pytest.skip(reason_for_no_fp8_block_scaling)
 
     # Check dims
     if dims is not None:
@@ -121,17 +134,184 @@ def maybe_skip_quantization(
         elif quantization == "mxfp8":
             if math.prod(dims[:-1]) % 32 != 0 or dims[-1] % 32 != 0:
                 pytest.skip("MXFP8 GEMMs require dims that are divisible by 32")
-        elif quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6", "nvfp4_rht"):
+        elif quantization == "fp8_block_scaling":
+            if math.prod(dims[:-1]) % 128 != 0 or dims[-1] % 128 != 0:
+                pytest.skip("FP8 block scaling requires dims that are divisible by 128")
+        elif quantization in nvfp4_variant_names:
             if math.prod(dims[:-1]) % 16 != 0 or dims[-1] % 16 != 0:
                 pytest.skip("NVFP4 GEMMs require dims that are divisible by 16")
 
     # Check dtype
     if dtype is not None:
-        if (
-            quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6", "nvfp4_rht")
-            and dtype != torch.bfloat16
-        ):
+        if quantization in nvfp4_variant_names and dtype != torch.bfloat16:
             pytest.skip("NVFP4 quantization is only supported with BF16 data")
+
+
+def test_operation_fuser_caches_plans_by_grad_requirement(monkeypatch) -> None:
+    """Cache and restore fusion plans for checkpoint forward and recompute."""
+
+    # Count fusion-plan construction without depending on any particular real
+    # fusion implementation. Each distinct fusion configuration invokes this
+    # hook once, while a cache hit must bypass it entirely.
+    fusion_calls = 0
+
+    def track_fusion(ops, *, recipe):  # pylint: disable=unused-argument
+        nonlocal fusion_calls
+        fusion_calls += 1
+        # Preserve the operation list so this hook observes plan construction
+        # without changing the topology under test.
+        return ops
+
+    # The fusion registries are class attributes shared by every OperationFuser.
+    # pytest's monkeypatch fixture restores all three after the test, preventing
+    # this synthetic fusion function from leaking into other tests. Keep only a
+    # joint forward-backward fusion hook so each plan build has one countable
+    # callback and no registered TE fusion can affect the result.
+    monkeypatch.setattr(OperationFuser, "forward_backward_fusion_functions", [track_fusion])
+    monkeypatch.setattr(OperationFuser, "forward_fusion_functions", [])
+    monkeypatch.setattr(OperationFuser, "backward_fusion_functions", [])
+
+    # One Identity op is enough to exercise the cache. With one basic op,
+    # first_op_requiring_backward has an intentionally simple interpretation:
+    #   0: backward starts at the Identity op;
+    #   1: the boundary is past the only op, so no backward work is required.
+    fuser = OperationFuser([te_ops.Identity()])
+    x = torch.ones(1, requires_grad=True)
+    # maybe_fuse_ops expects one extra-input collection per basic op. Identity
+    # has no extra inputs, so its collection is an empty tuple.
+    extra_inputs = [()]
+
+    # Phase 1: the original checkpointed forward runs with grad disabled. This
+    # is the first invocation, so the fuser must construct and cache the no-grad
+    # configuration. The runtime backward boundary is past the only op.
+    fuser.maybe_fuse_ops(False, None, x, extra_inputs)
+    assert fusion_calls == 1
+    assert fuser.first_op_requiring_backward == 1
+    no_grad_forward_ops = fuser._forward_ops
+    no_grad_backward_ops = fuser._backward_ops
+
+    # Phase 2: backward replays the checkpointed region with grad enabled. The
+    # backward boundary is part of the fusion key, allowing future fusion rules
+    # to choose a training-specific topology. The first grad-enabled invocation
+    # therefore constructs and caches a second configuration.
+    fuser.maybe_fuse_ops(True, None, x, extra_inputs)
+    assert fusion_calls == 2
+    assert fuser.first_op_requiring_backward == 0
+    grad_forward_ops = fuser._forward_ops
+    grad_backward_ops = fuser._backward_ops
+    assert grad_forward_ops is not no_grad_forward_ops
+    assert grad_backward_ops is not no_grad_backward_ops
+
+    # Phase 3: the next checkpointed forward must select the exact no-grad lists
+    # cached in phase 1. Before the cache was added, every boundary transition
+    # rebuilt the fused operations and called track_fusion again.
+    fuser.maybe_fuse_ops(False, None, x, extra_inputs)
+    assert fusion_calls == 2
+    assert fuser.first_op_requiring_backward == 1
+    assert fuser._forward_ops is no_grad_forward_ops
+    assert fuser._backward_ops is no_grad_backward_ops
+
+    # Phase 4: another recomputation must likewise restore the grad-enabled
+    # lists from phase 2. The full alternating sequence has built only the two
+    # configurations represented by its two fusion keys.
+    fuser.maybe_fuse_ops(True, None, x, extra_inputs)
+    assert fusion_calls == 2
+    assert fuser.first_op_requiring_backward == 0
+    assert fuser._forward_ops is grad_forward_ops
+    assert fuser._backward_ops is grad_backward_ops
+
+
+def test_operation_fuser_resets_recipe_state_independently_from_plan_cache(monkeypatch) -> None:
+    """Track recipe-state resets independently from fusion-plan construction."""
+
+    fusion_calls = 0
+
+    def track_fusion(ops, *, recipe):  # pylint: disable=unused-argument
+        nonlocal fusion_calls
+        fusion_calls += 1
+        return ops
+
+    # Replace the process-wide fusion registries so one callback corresponds to
+    # one plan construction. monkeypatch restores the registries after the test.
+    monkeypatch.setattr(OperationFuser, "forward_backward_fusion_functions", [track_fusion])
+    monkeypatch.setattr(OperationFuser, "forward_fusion_functions", [])
+    monkeypatch.setattr(OperationFuser, "backward_fusion_functions", [])
+
+    op = te_ops.Identity()
+    reset_recipes = []
+    first_forward_calls = 0
+
+    def track_recipe_reset(*, recipe):
+        reset_recipes.append(recipe)
+
+    def track_first_forward():
+        nonlocal first_forward_calls
+        first_forward_calls += 1
+
+    # Identity has no quantizers, so replace its state hooks with counters. This
+    # keeps the test CPU-only and isolates OperationFuser's reset decisions.
+    monkeypatch.setattr(op, "reset_recipe_state", track_recipe_reset)
+    monkeypatch.setattr(op, "pre_first_fuser_forward", track_first_forward)
+
+    fuser = OperationFuser([op])
+    x = torch.ones(1)
+    extra_inputs = [()]
+
+    current_scaling = transformer_engine.common.recipe.Float8CurrentScaling(backward_override=None)
+    fuser.maybe_fuse_ops(False, current_scaling, x, extra_inputs)
+    assert reset_recipes == [current_scaling]
+    assert first_forward_calls == 1
+    assert fusion_calls == 1
+
+    # A fresh but equivalent recipe does not invalidate state or the plan.
+    equivalent_current_scaling = transformer_engine.common.recipe.Float8CurrentScaling(
+        backward_override=None
+    )
+    fuser.maybe_fuse_ops(False, equivalent_current_scaling, x, extra_inputs)
+    assert reset_recipes == [current_scaling]
+    assert first_forward_calls == 1
+    assert fusion_calls == 1
+
+    # Backward override affects both recipe state and fusion topology, so it
+    # triggers one reset and constructs a distinct cached plan.
+    overridden_current_scaling = transformer_engine.common.recipe.Float8CurrentScaling(
+        backward_override="high_precision"
+    )
+    fuser.maybe_fuse_ops(False, overridden_current_scaling, x, extra_inputs)
+    assert reset_recipes == [current_scaling, overridden_current_scaling]
+    assert first_forward_calls == 1
+    assert fusion_calls == 2
+
+    delayed_scaling = transformer_engine.common.recipe.DelayedScaling(
+        amax_history_len=8,
+        backward_override=None,
+    )
+    fuser.maybe_fuse_ops(False, delayed_scaling, x, extra_inputs)
+    assert reset_recipes == [current_scaling, overridden_current_scaling, delayed_scaling]
+    assert first_forward_calls == 1
+    assert fusion_calls == 3
+
+    # Amax history length only affects delayed-scaling recipe state. Reset that
+    # state, but restore the existing DelayedScaling fusion plan from the cache.
+    resized_delayed_scaling = transformer_engine.common.recipe.DelayedScaling(
+        amax_history_len=16,
+        backward_override=None,
+    )
+    fuser.maybe_fuse_ops(False, resized_delayed_scaling, x, extra_inputs)
+    assert reset_recipes == [
+        current_scaling,
+        overridden_current_scaling,
+        delayed_scaling,
+        resized_delayed_scaling,
+    ]
+    assert first_forward_calls == 1
+    assert fusion_calls == 3
+
+    # Repeating the exact recipe parameters performs neither operation again.
+    fuser.maybe_fuse_ops(False, resized_delayed_scaling, x, extra_inputs)
+    assert len(reset_recipes) == 4
+    assert first_forward_calls == 1
+    assert fusion_calls == 3
 
 
 @torch.no_grad()
@@ -186,17 +366,42 @@ def make_reference_and_test_tensors(
         test = quantizer(test)
     elif quantization == "mxfp8":
         test = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3)(test)
-    elif quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_rht"):
+    elif quantization == "fp8_block_scaling":
         tensor_type = "input"
         if quantizer_role is not None:
             tensor_type = quantizer_role.tensor_type
-        with_rht = quantization == "nvfp4_rht" and tensor_type != "weight"
+        # Weights use 2D (128x128) blocks; everything else 1D (1x128).
+        test = Float8BlockQuantizer(
+            fp8_dtype=te.DType.kFloat8E4M3,
+            rowwise=True,
+            columnwise=True,
+            block_scaling_dim=2 if tensor_type == "weight" else 1,
+        )(test)
+    elif quantization in (
+        "nvfp4",
+        "nvfp4_row_scaled",
+        "nvfp4_rht",
+        "nvfp4_ue5m3",
+        "nvfp4_rht_ue5m3",
+    ):
+        tensor_type = "input"
+        if quantizer_role is not None:
+            tensor_type = quantizer_role.tensor_type
+        with_rht = quantization in ("nvfp4_rht", "nvfp4_rht_ue5m3") and tensor_type != "weight"
+        scale_dtype = (
+            te.DType.kFloat8UE5M3
+            if quantization in ("nvfp4_ue5m3", "nvfp4_rht_ue5m3")
+            else te.DType.kFloat8E4M3
+        )
+        disable_second_level_scale = scale_dtype == te.DType.kFloat8UE5M3 and tensor_type == "input"
         test = NVFP4Quantizer(
+            scale_dtype=scale_dtype,
             with_rht=with_rht,
             with_post_rht_amax=with_rht,
             with_2d_quantization=False,
             stochastic_rounding=False,
             with_random_sign_mask=False,
+            disable_second_level_scale=disable_second_level_scale,
         )(test)
     elif quantization == "nvfp4_4over6":
         tensor_type = "input"
@@ -415,6 +620,540 @@ class TestSequentialContainer:
         torch.testing.assert_close(x4, x4_orig + x3)
 
 
+class _DualExtraOutput(te_ops.BasicOperation):
+    """Test helper: one op with two scaled extra outputs."""
+
+    num_extra_outputs = 2
+
+    def __init__(self, scales: tuple[float, float] = (1.0, 1.0)) -> None:
+        super().__init__()
+        self._scales = scales
+
+    def op_forward(self, *args, **kwargs):
+        raise RuntimeError("_DualExtraOutput uses fuser_forward")
+
+    def op_backward(self, *args, **kwargs):
+        raise RuntimeError("_DualExtraOutput uses fuser_backward")
+
+    def fuser_forward(self, basic_op_ctxs, input_, *, basic_op_extra_inputs, **unused):
+        del basic_op_ctxs, basic_op_extra_inputs
+        s0, s1 = self._scales
+        return input_, [(s0 * input_, s1 * input_)]
+
+    def fuser_backward(self, basic_op_ctxs, grad_output, *, basic_op_grad_extra_outputs):
+        del basic_op_ctxs
+        s0, s1 = self._scales
+        g0, g1 = basic_op_grad_extra_outputs[0]
+        grad_extra = torch.zeros_like(grad_output)
+        if g0 is not None:
+            grad_extra = grad_extra + s0 * g0
+        if g1 is not None:
+            grad_extra = grad_extra + s1 * g1
+        return grad_output + grad_extra, [()], [()]
+
+
+class TestExtraTensorChannels:
+    """Error handling and grad coverage for named extra-tensor channels."""
+
+    @pytest.mark.parametrize("with_extra_grad", (True, False))
+    def test_internal_residual_connection(
+        self,
+        with_extra_grad: bool,
+        size: int = 16,
+    ) -> None:
+        """A channel can keep a residual connection inside a Sequential."""
+        residual = te_ops.MakeExtraOutput()
+        body = te_ops.Bias(size=size, device="cpu")
+        add_residual = te_ops.AddExtraInput()
+        residual.set_extra_output_channel(0, "residual")
+        add_residual.set_extra_input_channel(0, "residual")
+
+        model = te_ops.Sequential(residual, body, add_residual)
+        x = torch.rand((size,), requires_grad=True)
+        y, residual_out = model(x)
+
+        torch.testing.assert_close(y, 2 * x + body.bias)
+        torch.testing.assert_close(residual_out, x)
+        dy = torch.rand_like(y)
+        if with_extra_grad:
+            dresidual = torch.rand_like(residual_out)
+            torch.autograd.backward((y, residual_out), (dy, dresidual))
+            expected_dx = 2 * dy + dresidual
+        else:
+            y.backward(dy)
+            expected_dx = 2 * dy
+        torch.testing.assert_close(x.grad, expected_dx)
+        torch.testing.assert_close(body.bias.grad, dy)
+
+    @pytest.mark.parametrize("output_to_caller", (True, False))
+    def test_unconsumed_extra_output(
+        self,
+        output_to_caller: bool,
+        size: int = 16,
+    ) -> None:
+        """Unused public or hidden-unconsumed MakeExtraOutput treats None grad as zero."""
+        residual = te_ops.MakeExtraOutput()
+        body = te_ops.Bias(size=size, device="cpu")
+        if not output_to_caller:
+            residual.set_extra_output_channel(0, "unused", output_to_caller=False)
+
+        model = te_ops.Sequential(residual, body)
+        x = torch.rand((size,), requires_grad=True)
+        outputs = model(x)
+        if output_to_caller:
+            y, residual_out = outputs
+            torch.testing.assert_close(residual_out, x)
+        else:
+            assert isinstance(outputs, torch.Tensor)
+            y = outputs
+
+        torch.testing.assert_close(y, x + body.bias)
+        dy = torch.rand_like(y)
+        y.backward(dy)
+        torch.testing.assert_close(x.grad, dy)
+        torch.testing.assert_close(body.bias.grad, dy)
+
+    @pytest.mark.parametrize("fusion_kind", ("forward", "backward", "forward_backward"))
+    @pytest.mark.parametrize("output_to_caller", (True, False))
+    def test_fused_internal_residual_connection(
+        self,
+        fusion_kind: str,
+        output_to_caller: bool,
+        size: int = 16,
+    ) -> None:
+        """Forward, backward, and joint fusions can own an internal channel."""
+
+        class FusedResidual(te_ops.FusedOperation):
+            """Fuse MakeExtraOutput, Bias, and AddExtraInput."""
+
+            _enabled = True
+
+            def __init__(self, residual, body, add_residual) -> None:
+                super().__init__((residual, body, add_residual))
+
+            def fuser_forward(
+                self,
+                basic_op_ctxs,
+                input_,
+                *,
+                basic_op_extra_inputs,
+                **unused,
+            ):
+                del basic_op_ctxs
+                # The consumer slot is internal to this fusion, so the
+                # OperationFuser deliberately leaves it unset.
+                assert basic_op_extra_inputs[2][0] is None
+                residual_out = input_ if output_to_caller else None
+                return 2 * input_ + self.basic_ops[1].bias, [(residual_out,), (), ()]
+
+            def fuser_backward(
+                self,
+                basic_op_ctxs,
+                grad_output,
+                *,
+                basic_op_grad_extra_outputs,
+            ):
+                del basic_op_ctxs
+                # The fusion owns the internal residual edge. The fuser also
+                # supplies a gradient when the residual is a public output.
+                grad_residual = basic_op_grad_extra_outputs[0][0]
+                return (
+                    2 * grad_output
+                    + (torch.zeros_like(grad_output) if grad_residual is None else grad_residual),
+                    [(), (grad_output,), ()],
+                    [(), (), (grad_output,)],
+                )
+
+        def fuse_residual(ops, **unused):
+            if not FusedResidual._enabled:
+                return ops
+            if (
+                len(ops) == 3
+                and isinstance(ops[0], te_ops.MakeExtraOutput)
+                and isinstance(ops[1], te_ops.Bias)
+                and isinstance(ops[2], te_ops.AddExtraInput)
+            ):
+                # We want to enable this fusion just for this test.
+                # Hence disable it after fusing it once in the test.
+                FusedResidual._enabled = False
+                return [FusedResidual(*ops)]
+            return ops
+
+        residual = te_ops.MakeExtraOutput()
+        body = te_ops.Bias(size=size, device="cpu")
+        add_residual = te_ops.AddExtraInput()
+        residual.set_extra_output_channel(
+            0,
+            "residual",
+            output_to_caller=output_to_caller,
+        )
+        add_residual.set_extra_input_channel(0, "residual")
+        model = te_ops.Sequential(residual, body, add_residual)
+
+        if fusion_kind == "forward":
+            te_ops.register_forward_fusion(fuse_residual, prepend=True)
+        elif fusion_kind == "backward":
+            te_ops.register_backward_fusion(fuse_residual, prepend=True)
+        else:
+            te_ops.register_forward_backward_fusion(fuse_residual, prepend=True)
+        x = torch.rand((size,), requires_grad=True)
+        outputs = model(x)
+        if output_to_caller:
+            y, residual_out = outputs
+        else:
+            assert isinstance(outputs, torch.Tensor)
+            y = outputs
+
+        forward_ops = model._module_groups[0]._forward_ops
+        backward_ops = model._module_groups[0]._backward_ops
+        if fusion_kind in ("forward", "forward_backward"):
+            assert len(forward_ops) == 1
+            assert isinstance(forward_ops[0][0], FusedResidual)
+        else:
+            assert len(forward_ops) == 3
+        if fusion_kind in ("backward", "forward_backward"):
+            assert len(backward_ops) == 1
+            assert isinstance(backward_ops[0][0], FusedResidual)
+        else:
+            assert len(backward_ops) == 3
+        if fusion_kind == "forward_backward":
+            assert backward_ops[0][0] is forward_ops[0][0]
+        torch.testing.assert_close(y, 2 * x + body.bias)
+        dy = torch.rand_like(y)
+        if output_to_caller:
+            dresidual = torch.rand_like(residual_out)
+            torch.autograd.backward((y, residual_out), (dy, dresidual))
+            expected_dx = 2 * dy + dresidual
+        else:
+            y.backward(dy)
+            expected_dx = 2 * dy
+        torch.testing.assert_close(x.grad, expected_dx)
+        torch.testing.assert_close(body.bias.grad, dy)
+
+    def test_internal_extra_tensor_channel_fanout(self, size: int = 16) -> None:
+        """An internal extra output can feed multiple later consumers."""
+        producer = te_ops.MakeExtraOutput()
+        consumer1 = te_ops.AddExtraInput()
+        consumer2 = te_ops.AddExtraInput()
+        producer.set_extra_output_channel(0, "route")
+        consumer1.set_extra_input_channel(0, "route")
+        consumer2.set_extra_input_channel(0, "route")
+        model = te_ops.Sequential(producer, consumer1, consumer2)
+
+        x = torch.rand((size,), requires_grad=True)
+        y, route = model(x)
+
+        # Main path: x -> x + route -> x + route + route.
+        torch.testing.assert_close(y, 3 * x)
+        torch.testing.assert_close(route, x)
+        dy = torch.rand_like(y)
+        droute = torch.rand_like(route)
+        torch.autograd.backward((y, route), (dy, droute))
+        # The channel fan-out contributes two independent gradient paths.
+        torch.testing.assert_close(x.grad, 3 * dy + droute)
+
+        # Internal slots are unavailable before forward, so grad discovery
+        # must tolerate them when no public input requires gradients.
+        x_no_grad = x.detach()
+        y_no_grad, route_no_grad = model(x_no_grad)
+        torch.testing.assert_close(y_no_grad, 3 * x_no_grad)
+        torch.testing.assert_close(route_no_grad, x_no_grad)
+
+    def test_internal_extra_tensor_channel_can_be_hidden(self, size: int = 16) -> None:
+        """A non-public channel still propagates forward and backward."""
+        producer = te_ops.MakeExtraOutput()
+        consumer1 = te_ops.AddExtraInput()
+        consumer2 = te_ops.AddExtraInput()
+        producer.set_extra_output_channel(0, "route", output_to_caller=False)
+        consumer1.set_extra_input_channel(0, "route")
+        consumer2.set_extra_input_channel(0, "route")
+        model = te_ops.Sequential(producer, consumer1, consumer2)
+
+        x = torch.rand((size,), requires_grad=True)
+        y = model(x)
+        assert isinstance(y, torch.Tensor)
+        torch.testing.assert_close(y, 3 * x)
+
+        dy = torch.rand_like(y)
+        y.backward(dy)
+        torch.testing.assert_close(x.grad, 3 * dy)
+
+    def test_internal_and_external_extra_tensor_inputs(self, size: int = 16) -> None:
+        """Unbound slots remain public when other slots use internal channels."""
+        producer = te_ops.MakeExtraOutput()
+        internal_consumer = te_ops.AddExtraInput()
+        external_consumer = te_ops.AddExtraInput()
+        producer.set_extra_output_channel(0, "route")
+        internal_consumer.set_extra_input_channel(0, "route")
+        model = te_ops.Sequential(producer, internal_consumer, external_consumer)
+
+        x = torch.rand((size,), requires_grad=True)
+        extra = torch.rand((size,), requires_grad=True)
+        y, route = model(x, extra)
+
+        torch.testing.assert_close(y, 2 * x + extra)
+        torch.testing.assert_close(route, x)
+        dy = torch.rand_like(y)
+        y.backward(dy)
+        torch.testing.assert_close(x.grad, 2 * dy)
+        torch.testing.assert_close(extra.grad, dy)
+
+    def test_named_extra_input_requires_producer(self) -> None:
+        """A named input cannot fall back to a caller-provided tensor."""
+        consumer = te_ops.AddExtraInput()
+        consumer.set_extra_input_channel(0, "missing")
+        with pytest.raises(ValueError, match="has no producer"):
+            OperationFuser([consumer])
+
+    def test_consumer_before_producer(self) -> None:
+        """Channels only connect forward; a later producer does not satisfy an earlier consumer."""
+        consumer = te_ops.AddExtraInput()
+        producer = te_ops.MakeExtraOutput()
+        consumer.set_extra_input_channel(0, "route")
+        producer.set_extra_output_channel(0, "route")
+        with pytest.raises(ValueError, match="has no earlier producer"):
+            OperationFuser([consumer, producer])
+
+    def test_set_extra_channel_rejects_invalid_index(self) -> None:
+        """Slot indices must be in range; negatives and OOB are rejected at bind time."""
+        producer = te_ops.MakeExtraOutput()
+        consumer = te_ops.AddExtraInput()
+
+        with pytest.raises(IndexError, match="out of range"):
+            producer.set_extra_output_channel(-1, "route")
+        with pytest.raises(IndexError, match="out of range"):
+            producer.set_extra_output_channel(1, "route")
+        with pytest.raises(IndexError, match="out of range"):
+            consumer.set_extra_input_channel(-1, "route")
+        with pytest.raises(IndexError, match="out of range"):
+            consumer.set_extra_input_channel(1, "route")
+
+    def test_set_extra_channel_rejects_invalid_name(self) -> None:
+        """Channel names must be non-empty strings."""
+        producer = te_ops.MakeExtraOutput()
+        consumer = te_ops.AddExtraInput()
+
+        with pytest.raises(ValueError, match="non-empty string"):
+            producer.set_extra_output_channel(0, "")
+        with pytest.raises(ValueError, match="non-empty string"):
+            consumer.set_extra_input_channel(0, "")
+        with pytest.raises(ValueError, match="non-empty string"):
+            producer.set_extra_output_channel(0, 123)  # type: ignore[arg-type]
+        with pytest.raises(TypeError, match="output_to_caller must be a bool"):
+            producer.set_extra_output_channel(
+                0,
+                "route",
+                output_to_caller=1,  # type: ignore[arg-type]
+            )
+
+    def test_extra_channels_lock_after_capture(self, size: int = 16) -> None:
+        """Channel bindings freeze once a fuser captures them."""
+        producer = te_ops.MakeExtraOutput()
+        consumer = te_ops.AddExtraInput()
+        producer.set_extra_output_channel(0, "route")
+        consumer.set_extra_input_channel(0, "route")
+        assert not producer._extra_tensor_channels_locked
+
+        # Construction alone locks channels, before any forward pass.
+        OperationFuser([producer, consumer])
+        assert producer._extra_tensor_channels_locked
+        assert consumer._extra_tensor_channels_locked
+        with pytest.raises(RuntimeError, match="already captured its channel routing"):
+            producer.set_extra_output_channel(0, None)
+
+        # Fresh ops for the Sequential path.
+        producer = te_ops.MakeExtraOutput()
+        consumer = te_ops.AddExtraInput()
+        producer.set_extra_output_channel(0, "route")
+        consumer.set_extra_input_channel(0, "route")
+        model = te_ops.Sequential(producer, consumer)
+
+        x = torch.rand((size,))
+        y, route = model(x)
+        torch.testing.assert_close(y, 2 * x)
+        torch.testing.assert_close(route, x)
+
+        with pytest.raises(RuntimeError, match="already captured its channel routing"):
+            consumer.set_extra_input_channel(0, None)
+        with pytest.raises(RuntimeError, match="already captured its channel routing"):
+            producer.set_extra_output_channel(0, "route", output_to_caller=False)
+
+    @pytest.mark.parametrize("layout", ("two_ops", "same_op"))
+    def test_duplicate_extra_output_channel_names(self, layout: str) -> None:
+        """A channel name may have at most one producer, across ops or slots."""
+        consumer = te_ops.AddExtraInput()
+        consumer.set_extra_input_channel(0, "route")
+        if layout == "two_ops":
+            producer1 = te_ops.MakeExtraOutput()
+            producer2 = te_ops.MakeExtraOutput()
+            producer1.set_extra_output_channel(0, "route")
+            producer2.set_extra_output_channel(0, "route")
+            ops = [producer1, producer2, consumer]
+        else:
+            producer = _DualExtraOutput()
+            producer.set_extra_output_channel(0, "route")
+            producer.set_extra_output_channel(1, "route")
+            ops = [producer, consumer]
+        with pytest.raises(ValueError, match="multiple producers"):
+            OperationFuser(ops)
+
+    def test_one_extra_input_has_single_source(self, size: int = 16) -> None:
+        """Rebinding selects one source and leaves the other output public."""
+        producer_a = te_ops.MakeExtraOutput()
+        producer_b = te_ops.MakeExtraOutput()
+        consumer = te_ops.AddExtraInput()
+        producer_a.set_extra_output_channel(0, "a")
+        producer_b.set_extra_output_channel(0, "b")
+        consumer.set_extra_input_channel(0, "a")
+        consumer.set_extra_input_channel(0, "b")
+        fuser = OperationFuser([producer_a, producer_b, consumer])
+        assert fuser._basic_op_extra_input_sources[2] == [(1, 0)]
+        assert fuser.num_extra_inputs == 0
+
+        x = torch.rand((size,))
+        y, output_a, output_b = fuser(x)
+        torch.testing.assert_close(y, 2 * x)
+        torch.testing.assert_close(output_a, x)
+        torch.testing.assert_close(output_b, x)
+
+    def test_mixed_public_and_hidden_channel_outputs(self, size: int = 16) -> None:
+        """Only configured public outputs are returned, in slot order."""
+        producer = _DualExtraOutput(scales=(2.0, 3.0))
+        consumer = te_ops.AddExtraInput()
+        producer.set_extra_output_channel(0, "internal", output_to_caller=False)
+        producer.set_extra_output_channel(1, "public")
+        consumer.set_extra_input_channel(0, "internal")
+        model = te_ops.Sequential(producer, consumer)
+
+        x = torch.rand((size,), requires_grad=True)
+        y, public = model(x)
+        torch.testing.assert_close(y, 3 * x)
+        torch.testing.assert_close(public, 3 * x)
+
+        dy = torch.rand_like(y)
+        dpublic = torch.rand_like(public)
+        torch.autograd.backward((y, public), (dy, dpublic))
+        torch.testing.assert_close(x.grad, 3 * dy + 3 * dpublic)
+
+    @pytest.mark.parametrize("output_to_caller", (True, False))
+    def test_fused_op_cannot_omit_required_channel_output(
+        self,
+        output_to_caller: bool,
+        size: int = 16,
+    ) -> None:
+        """A fusion must materialize public outputs and cross-fusion channels."""
+
+        class FusedProducer(te_ops.FusedOperation):
+            _enabled = True
+
+            def __init__(self, producer) -> None:
+                super().__init__((producer,))
+
+            def fuser_forward(self, basic_op_ctxs, input_, **unused):
+                del basic_op_ctxs
+                return input_, [(None,)]
+
+        def fuse_producer(ops, **unused):
+            if (
+                FusedProducer._enabled
+                and len(ops) == 2
+                and isinstance(ops[0], te_ops.MakeExtraOutput)
+                and isinstance(ops[1], te_ops.AddExtraInput)
+            ):
+                FusedProducer._enabled = False
+                return [FusedProducer(ops[0]), ops[1]]
+            return ops
+
+        producer = te_ops.MakeExtraOutput()
+        consumer = te_ops.AddExtraInput()
+        producer.set_extra_output_channel(
+            0,
+            "route",
+            output_to_caller=output_to_caller,
+        )
+        consumer.set_extra_input_channel(0, "route")
+        model = te_ops.Sequential(producer, consumer)
+        te_ops.register_forward_fusion(fuse_producer, prepend=True)
+
+        x = torch.rand((size,), requires_grad=True)
+        error = "is public" if output_to_caller else "outside its forward fusion"
+        with pytest.raises(RuntimeError, match=error):
+            model(x)
+
+    def test_fresh_internal_output_preserves_grad_requirement(self) -> None:
+        """A freshly computed internal channel still receives a consumer gradient."""
+
+        # A BasicOperation with one extra output that is freshly computed instead of
+        # retrieved from a previous op's tensor.
+        class MakeScale(te_ops.BasicOperation):
+            num_extra_outputs = 1
+
+            def op_forward(self, *args, **kwargs):
+                raise RuntimeError("MakeScale uses fuser_forward")
+
+            def op_backward(self, *args, **kwargs):
+                raise RuntimeError("MakeScale uses fuser_backward")
+
+            def fuser_forward(self, basic_op_ctxs, input_, *, basic_op_extra_inputs, **unused):
+                del basic_op_extra_inputs
+                basic_op_ctxs[0].save_for_backward(input_)
+                return input_, [(input_.square().mean(dim=-1),)]
+
+            def fuser_backward(self, basic_op_ctxs, grad_output, *, basic_op_grad_extra_outputs):
+                (input_,) = basic_op_ctxs[0].saved_tensors
+                grad_scale = basic_op_grad_extra_outputs[0][0]
+                assert grad_scale is not None
+                grad_input = grad_output + grad_scale.unsqueeze(-1) * 2 * input_ / input_.size(-1)
+                return grad_input, [()], [()]
+
+        class ScaleByExtra(te_ops.BasicOperation):
+            num_extra_inputs = 1
+
+            def op_forward(self, *args, **kwargs):
+                raise RuntimeError("ScaleByExtra uses fuser_forward")
+
+            def op_backward(self, *args, **kwargs):
+                raise RuntimeError("ScaleByExtra uses fuser_backward")
+
+            def fuser_forward(self, basic_op_ctxs, input_, *, basic_op_extra_inputs, **unused):
+                scale = basic_op_extra_inputs[0][0]
+                ctx = basic_op_ctxs[0]
+                # Match scaled activations: only compute scale grads when the
+                # fuser marked this fresh internal channel as requiring grad.
+                ctx.extra_input_requires_grad = scale.requires_grad
+                ctx.save_for_backward(input_, scale)
+                return input_ * scale.unsqueeze(-1), [()]
+
+            def fuser_backward(self, basic_op_ctxs, grad_output, *, basic_op_grad_extra_outputs):
+                del basic_op_grad_extra_outputs
+                ctx = basic_op_ctxs[0]
+                input_, scale = ctx.saved_tensors
+                grad_input = grad_output * scale.unsqueeze(-1)
+                grad_scale = (
+                    (grad_output * input_).sum(dim=-1) if ctx.extra_input_requires_grad else None
+                )
+                return grad_input, [()], [(grad_scale,)]
+
+        producer = MakeScale()
+        consumer = ScaleByExtra()
+        producer.set_extra_output_channel(0, "scale", output_to_caller=False)
+        consumer.set_extra_input_channel(0, "scale")
+        model = te_ops.Sequential(producer, consumer)
+
+        x_ref = torch.randn((5, 8), requires_grad=True)
+        x_test = x_ref.detach().clone().requires_grad_(True)
+        scale_ref = x_ref.square().mean(dim=-1)
+        y_ref = x_ref * scale_ref.unsqueeze(-1)
+        y_test = model(x_test)
+        assert isinstance(y_test, torch.Tensor)
+        torch.testing.assert_close(y_test, y_ref)
+
+        dy = torch.rand_like(y_ref)
+        y_ref.backward(dy)
+        y_test.backward(dy)
+        torch.testing.assert_close(x_test.grad, x_ref.grad)
+
+
 class TestFuser:
     """Tests for operation fusion infrastructure"""
 
@@ -626,6 +1365,156 @@ class TestFuser:
             assert y.dtype == autocast_dtype
             assert x.grad.dtype == model_dtype
             assert op.weight.grad.dtype == model_dtype
+
+    @staticmethod
+    def _make_op(
+        op_type: str,
+        *,
+        size: int,
+        num_groups: int,
+        dtype: torch.dtype,
+        device: torch.device | str,
+    ) -> torch.nn.Module:
+        """Construct an op for the deferred initialization tests"""
+        kwargs = {"device": device, "dtype": dtype}
+        if op_type == "basic_linear":
+            return te_ops.BasicLinear(size, size, **kwargs)
+        if op_type == "bias":
+            return te_ops.Bias(size, **kwargs)
+        if op_type == "layer_norm":
+            return te_ops.LayerNorm(size, **kwargs)
+        if op_type == "rmsnorm":
+            return te_ops.RMSNorm(size, **kwargs)
+        if op_type == "grouped_linear":
+            return te_ops.GroupedLinear(num_groups, size, size, bias=True, **kwargs)
+        if op_type == "linear":
+            return te_ops.Linear(size, size, bias=True, **kwargs)
+        if op_type == "sequential":
+            return te_ops.Sequential(
+                te_ops.LayerNorm(size, **kwargs),
+                te_ops.GELU(),
+                te_ops.Linear(size, size, bias=True, **kwargs),
+            )
+        raise ValueError(f"Unsupported op type ({op_type})")
+
+    @staticmethod
+    def _reset_parameters(op: torch.nn.Module, *, submodules: bool) -> None:
+        """Initialize params in an op or in each of its submodules"""
+        if not submodules:
+            op.reset_parameters()
+            return
+        for module in op.modules():
+            if isinstance(module, (te_ops.FusibleOperation, te_ops.Sequential)):
+                module.reset_parameters()
+
+    @pytest.mark.parametrize(
+        "op_type",
+        ("basic_linear", "bias", "layer_norm", "rmsnorm", "grouped_linear", "linear", "sequential"),
+    )
+    @pytest.mark.parametrize("reset_submodules", (False, True))
+    def test_deferred_param_init(
+        self,
+        *,
+        op_type: str,
+        reset_submodules: bool,
+        size: int = 32,
+        num_groups: int = 2,
+        dtype: torch.dtype = torch.bfloat16,
+        device: torch.device = "cuda",
+    ) -> None:
+        """Test op constructed on meta device"""
+
+        # Inputs
+        in_shape = (size, size)
+        extra_inputs = []
+        if op_type == "grouped_linear":
+            in_shape = (size * num_groups, size)
+            extra_inputs.append(torch.full((num_groups,), size, dtype=torch.int, device=device))
+        x = torch.randn(in_shape, dtype=dtype, device=device, requires_grad=True)
+        x_ref = x.detach().clone().requires_grad_()
+
+        # Construct op on meta device
+        op_kwargs = {"size": size, "num_groups": num_groups, "dtype": dtype}
+        op = self._make_op(op_type, device="meta", **op_kwargs)
+        with pytest.raises(RuntimeError, match="reset_parameters"):
+            op(x, *extra_inputs)
+
+        # Materialize params
+        self._reset_parameters(op, submodules=reset_submodules)
+        params = dict(op.named_parameters())
+        for name, param in params.items():
+            assert param.device.type == device, f"{name} is on {param.device}"
+
+        # Reference op constructed on device with same param values
+        ref_op = self._make_op(op_type, device=device, **op_kwargs)
+        ref_params = dict(ref_op.named_parameters())
+        assert params.keys() == ref_params.keys()
+        with torch.no_grad():
+            for name, ref_param in ref_params.items():
+                ref_param.copy_(params[name])
+
+        # Forward and backward pass
+        y = op(x, *extra_inputs)
+        dy = torch.randn_like(y)
+        y.backward(dy)
+        y_ref = ref_op(x_ref, *extra_inputs)
+        y_ref.backward(dy)
+
+        # Check results
+        tols = dtype_tols(dtype)
+        assert_close(y, y_ref, **tols)
+        assert_close_grads(x, x_ref, **tols)
+        for name, param in params.items():
+            assert_close_grads(param, ref_params[name], **tols)
+
+    @pytest.mark.parametrize("op_type", ("linear", "grouped_linear"))
+    @pytest.mark.parametrize("quantization", _quantization_list)
+    @pytest.mark.parametrize("reset_submodules", (False, True))
+    def test_deferred_param_init_quantized(
+        self,
+        *,
+        op_type: str,
+        quantization: Optional[str],
+        reset_submodules: bool,
+        size: int = 128,
+        num_groups: int = 2,
+        dtype: torch.dtype = torch.bfloat16,
+        device: torch.device = "cuda",
+    ) -> None:
+        """Test op with quantized params constructed on meta device"""
+
+        # Skip invalid configurations
+        in_shape = (size, size)
+        extra_inputs = []
+        if op_type == "grouped_linear":
+            in_shape = (size * num_groups, size)
+            extra_inputs.append(torch.full((num_groups,), size, dtype=torch.int, device=device))
+        if quantization is None:
+            pytest.skip("Quantization scheme is not specified")
+        if op_type == "grouped_linear" and quantization == "nvfp4_4over6":
+            pytest.skip("NVFP4 4over6 grouped quantization is not supported")
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
+
+        # Construct op on meta device and materialize params
+        recipe = make_recipe(quantization)
+        with te.quantized_model_init(recipe=recipe):
+            op = self._make_op(
+                op_type, size=size, num_groups=num_groups, dtype=dtype, device="meta"
+            )
+        self._reset_parameters(op, submodules=reset_submodules)
+        for name, param in op.named_parameters():
+            assert param.device.type == device, f"{name} is on {param.device}"
+            if "weight" in name:
+                assert isinstance(param, QuantizedTensor), f"{name} is not quantized"
+
+        # Forward and backward pass
+        x = torch.randn(in_shape, dtype=dtype, device=device, requires_grad=True)
+        with te.autocast(recipe=recipe):
+            y = op(x, *extra_inputs)
+        y.backward(torch.randn_like(y))
+        assert x.grad is not None
+        for name, param in op.named_parameters():
+            assert param.grad is not None, f"{name} has no grad"
 
 
 class TestBasicOps:
@@ -942,6 +1831,7 @@ class TestBasicOps:
             test_dtype=dtype,
             test_device=device,
             test_is_quantized=quantized_input,
+            quantizer_role=QuantizerRole(tensor_type="input"),
         )
         w_ref, w_test = make_reference_and_test_tensors(
             (out_features, in_features),
@@ -956,6 +1846,7 @@ class TestBasicOps:
             test_dtype=dtype,
             test_device=device,
             test_is_quantized=quantized_grad_output,
+            quantizer_role=QuantizerRole(tensor_type="grad_output"),
             requires_grad=False,
         )
 
@@ -982,6 +1873,10 @@ class TestBasicOps:
             op.weight.copy_(w_test)
             del w_test
             op.weight.main_grad = torch.full_like(op.weight, 0.5, dtype=torch.float32)
+        if accumulate_into_main_grad:
+            MegatronTrainingHelper.init_main_grad_buffers(
+                [op.weight], fill_value=0.5, overwrite_main_grad=False, zero_out_wgrad=True
+            )
         with te.autocast(enabled=quantized_compute, recipe=recipe):
             y_test = forward(x_test)
         y_test.backward(dy_test)
@@ -999,13 +1894,9 @@ class TestBasicOps:
         torch.testing.assert_close(y_test, y_ref, **tols)
         torch.testing.assert_close(dx_test, x_ref.grad, **tols)
         if accumulate_into_main_grad:
-            if op.weight.grad is not None:
-                torch.testing.assert_close(
-                    op.weight.grad,
-                    torch.zeros_like(op.weight.grad),
-                    rtol=0,
-                    atol=0,
-                )
+            MegatronTrainingHelper.verify_main_grad_accumulation(
+                [op.weight], expected_main_grads=[w_ref.grad + 0.5], **tols
+            )
             dw_test = op.weight.main_grad.to(dtype=torch.float64, device="cpu") - 0.5
         else:
             dw_test = op.weight.grad.to(dtype=torch.float64, device="cpu")
@@ -1017,8 +1908,9 @@ class TestBasicOps:
             )
         torch.testing.assert_close(dw_test, w_ref.grad, **tols)
 
-    @pytest.mark.parametrize("weight_shape", ((64, 32), (3, 5)))
-    @pytest.mark.parametrize("in_shape", ((-1,), (5, 1, -1), (4, 2, 4, -1)))
+    # (128, 128) + a 128-token in_shape keep FP8 block scaling (128-divisible dims) unskipped.
+    @pytest.mark.parametrize("weight_shape", ((64, 32), (3, 5), (128, 128)))
+    @pytest.mark.parametrize("in_shape", ((-1,), (5, 1, -1), (4, 2, 4, -1), (128, -1)))
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("quantization", _quantization_list)
     @pytest.mark.parametrize("accumulate_into_main_grad", (False, True))
@@ -1552,7 +2444,7 @@ class TestBasicOps:
         if in_place:
             if quantization in ("fp8_delayed_scaling", "fp8_current_scaling", "mxfp8"):
                 tols = dtype_tols(x1_test._fp8_dtype)
-            elif quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6"):
+            elif quantization in nvfp4_variant_names:
                 tols = dtype_tols(x1_test._fp4_dtype)
         y_test = y_test.to(dtype=torch.float64, device="cpu")
         dx1_test = x1_test.grad.to(dtype=torch.float64, device="cpu")
@@ -1846,6 +2738,98 @@ class TestBasicOps:
         )
 
     @pytest.mark.parametrize("dtype", _dtypes)
+    @pytest.mark.parametrize("glu_interleave_size", (None, 32))
+    @pytest.mark.parametrize("betas", ((4.0, 25.0), (3.0, 12.0)))
+    def test_situglu(
+        self,
+        *,
+        dtype: torch.dtype,
+        glu_interleave_size: Optional[int],
+        betas: tuple[float, float],
+        device: torch.device = "cuda",
+    ) -> None:
+        """SiTU-GLU forward and backward."""
+        in_shape = (17, 192)
+        out_shape = (17, 96)
+        beta1, beta2 = betas
+        x_ref, x_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            out_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        x = x_ref
+        if glu_interleave_size is not None:
+            x = x.reshape(-1, 3, 2, glu_interleave_size).transpose(1, 2).reshape(in_shape)
+        gate, up = x.chunk(2, dim=-1)
+        y_ref = (
+            beta1 * torch.tanh(gate / beta1) * torch.sigmoid(gate) * beta2 * torch.tanh(up / beta2)
+        )
+        y_ref.backward(dy_ref)
+
+        op = te_ops.SiTUGLU(
+            beta1=beta1,
+            beta2=beta2,
+            glu_interleave_size=glu_interleave_size,
+        )
+        y_test = op(x_test)
+        y_test.backward(dy_test)
+
+        tols = dtype_tols(dtype)
+        assert_close(y_test, y_ref, **tols)
+        assert_close_grads(x_test, x_ref, **tols)
+
+    @pytest.mark.parametrize("name,value", (("beta1", 0.0), ("beta2", float("inf"))))
+    def test_situglu_invalid_beta(self, name: str, value: float) -> None:
+        """SiTU-GLU soft-cap parameters must be finite and positive."""
+        with pytest.raises(ValueError, match=name):
+            te_ops.SiTUGLU(**{name: value})
+        with pytest.raises(ValueError, match=name):
+            te_ops.ScaledSiTUGLU(**{name: value})
+
+    def test_situglu_mxfp8_quantization(self, device: torch.device = "cuda") -> None:
+        """SiTU-GLU supports fused MXFP8 output and input-gradient quantization."""
+        dtype = torch.bfloat16
+        quantization = "mxfp8"
+        in_shape = (256, 256)
+        out_shape = (256, 128)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
+        x_ref, x_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            out_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        gate, up = x_ref.chunk(2, dim=-1)
+        y_ref = 4.0 * torch.tanh(gate / 4.0) * torch.sigmoid(gate) * 25.0 * torch.tanh(up / 25.0)
+        y_ref.backward(dy_ref)
+
+        forward = te_ops.Sequential(
+            te_ops.Quantize(forward=False, backward=True),
+            te_ops.SiTUGLU(),
+            te_ops.Quantize(forward=True, backward=False),
+        )
+        with te.autocast(enabled=True, recipe=make_recipe(quantization)):
+            y_test = forward(x_test)
+        y_test.backward(dy_test)
+
+        tols = quantization_tols(quantization)
+        assert_close(y_test, y_ref, **tols)
+        assert_close_grads(x_test, x_ref, **tols)
+
+    @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("quantization", _quantization_list)
     @pytest.mark.parametrize("quantize_forward", (False, True))
     @pytest.mark.parametrize("quantize_backward", (False, True))
@@ -1873,7 +2857,7 @@ class TestBasicOps:
         quantized_compute = quantization is not None
         if not quantized_compute and (quantize_forward or quantize_backward):
             pytest.skip("Quantization scheme has not been provided")
-        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
 
         # Random data
         x_ref, x_test = make_reference_and_test_tensors(
@@ -1900,8 +2884,9 @@ class TestBasicOps:
             x = x.transpose(-3, -2)
             x = x.reshape(in_shape)
         x_glu, x_linear = x.chunk(2, dim=-1)
-        x_glu = x_glu.clamp(min=None, max=limit)
-        x_linear = x_linear.clamp(min=-limit, max=limit)
+        x_glu = torch.where(x_glu > limit, limit, x_glu)
+        x_linear = torch.where(x_linear < -limit, -limit, x_linear)
+        x_linear = torch.where(x_linear > limit, limit, x_linear)
         out_glu = x_glu * torch.sigmoid(alpha * x_glu)
         y_ref = out_glu * (x_linear + glu_linear_offset)
         y_ref.backward(dy_ref)
@@ -1926,7 +2911,7 @@ class TestBasicOps:
 
         # Expected numerical error
         tols = dtype_tols(dtype)
-        if quantized_compute and quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6"):
+        if quantized_compute and quantization in nvfp4_variant_names:
             tols = dtype_tols(te.DType.kFloat4E2M1)
         elif quantized_compute:
             tols = dtype_tols(te.DType.kFloat8E4M3)
@@ -2117,6 +3102,7 @@ class TestBasicOps:
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
+            quantizer_role=QuantizerRole(tensor_type="input"),
             requires_grad=input_requires_grad,
         )
         dy_ref, dy_test = make_reference_and_test_tensors(
@@ -2124,6 +3110,7 @@ class TestBasicOps:
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
+            quantizer_role=QuantizerRole(tensor_type="grad_output"),
             requires_grad=False,
         )
         ws_ref, ws_test = [], []
@@ -2349,6 +3336,54 @@ class TestBasicOps:
         assert_close_grads(x_test, x_ref, **tols)
         assert_close_grads(scales_test, scales_ref, **tols)
 
+    @pytest.mark.parametrize("dtype", _dtypes)
+    @pytest.mark.parametrize("glu_interleave_size", (None, 32))
+    def test_scaled_situglu(
+        self,
+        *,
+        dtype: torch.dtype,
+        glu_interleave_size: Optional[int],
+        device: torch.device = "cuda",
+    ) -> None:
+        """SiTU-GLU with a differentiable row-wise post-scale."""
+        in_shape = (17, 192)
+        out_shape = (17, 96)
+        x_ref, x_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        scales_ref, scales_test = make_reference_and_test_tensors(
+            in_shape[:-1],
+            test_dtype=dtype,
+            test_device=device,
+        )
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            out_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        x = x_ref
+        if glu_interleave_size is not None:
+            x = x.reshape(-1, 3, 2, glu_interleave_size).transpose(1, 2).reshape(in_shape)
+        gate, up = x.chunk(2, dim=-1)
+        activation = (
+            4.0 * torch.tanh(gate / 4.0) * torch.sigmoid(gate) * 25.0 * torch.tanh(up / 25.0)
+        )
+        y_ref = scales_ref.unsqueeze(-1) * activation
+        y_ref.backward(dy_ref)
+
+        op = te_ops.ScaledSiTUGLU(glu_interleave_size=glu_interleave_size)
+        y_test = op(x_test, scales_test)
+        y_test.backward(dy_test)
+
+        tols = dtype_tols(dtype)
+        assert_close(y_test, y_ref, **tols)
+        assert_close_grads(x_test, x_ref, **tols)
+        assert_close_grads(scales_test, scales_ref, **tols)
+
     @pytest.mark.parametrize("in_shape", ((71, 192), (5, 7, 128)))
     @pytest.mark.parametrize("input_requires_grad", (False, True))
     @pytest.mark.parametrize("scales_requires_grad", (False, True))
@@ -2402,6 +3437,71 @@ class TestBasicOps:
         assert_close_grads(x_test, x_ref, **tols)
         assert_close_grads(scales_test, scales_ref, **tols)
 
+    @pytest.mark.parametrize("in_shape", ((71, 192), (5, 7, 128)))
+    @pytest.mark.parametrize("input_requires_grad", (False, True))
+    @pytest.mark.parametrize("scales_requires_grad", (False, True))
+    @pytest.mark.parametrize("tanh_clamp_scale", (0.5, 2.0))
+    def test_scaled_tanh_srelu(
+        self,
+        *,
+        in_shape: Iterable[int],
+        dtype: torch.dtype = torch.float32,
+        device: torch.device = "cuda",
+        input_requires_grad: bool,
+        scales_requires_grad: bool,
+        tanh_clamp_scale: float,
+    ) -> None:
+        """Tanh soft-clamped SReLU with post-scale"""
+
+        # Random data
+        x_ref, x_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=input_requires_grad,
+        )
+        scales_ref, scales_test = make_reference_and_test_tensors(
+            in_shape[:-1],
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=scales_requires_grad,
+        )
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        # Plain PyTorch implementation
+        y = (
+            tanh_clamp_scale * torch.tanh(torch.nn.functional.relu(x_ref) / tanh_clamp_scale)
+        ).square()
+        y_ref = scales_ref.unsqueeze(-1) * y
+        if input_requires_grad or scales_requires_grad:
+            y_ref.backward(dy_ref)
+
+        # Implementation with fusible operation
+        op = te_ops.ScaledTanhSReLU(tanh_clamp_scale=tanh_clamp_scale)
+        y_test = op(x_test, scales_test)
+        if input_requires_grad or scales_requires_grad:
+            y_test.backward(dy_test)
+
+        # Check results
+        tols = dtype_tols(dtype)
+        y_test = y_test.to(dtype=torch.float64, device="cpu")
+        assert_close(y_test, y_ref, **tols)
+        if input_requires_grad:
+            assert_close_grads(x_test, x_ref, **tols)
+        if scales_requires_grad:
+            assert_close_grads(scales_test, scales_ref, **tols)
+
+    @pytest.mark.parametrize("tanh_clamp_scale", (0.0, -1.0, float("inf"), float("nan")))
+    def test_scaled_tanh_srelu_rejects_bad_clamp_scale(self, tanh_clamp_scale) -> None:
+        """The clamp scale must be finite and positive."""
+        with pytest.raises(ValueError, match="tanh_clamp_scale"):
+            te_ops.ScaledTanhSReLU(tanh_clamp_scale=tanh_clamp_scale)
+
     def test_interleaved_scaled_swiglu(self):
         """SwiGLU with post-scale and block interleaved input format"""
         self.test_scaled_swiglu(
@@ -2413,12 +3513,29 @@ class TestBasicOps:
 
     @pytest.mark.parametrize(
         "op_cls",
-        (te_ops.ScaledSwiGLU, te_ops.ScaledSReLU, te_ops.ScaledClampedQGeGLU),
+        (
+            te_ops.ScaledSwiGLU,
+            te_ops.ScaledSiTUGLU,
+            te_ops.ScaledClampedQGeGLU,
+        ),
     )
-    def test_scaled_activation_recompute_in_mlp_config(self, op_cls) -> None:
-        """Scaled activations expose a per-op recompute knob."""
+    def test_scaled_glu_rejects_activation_recompute_in_mlp(self, op_cls) -> None:
+        """Scaled GLUs reject unsupported activation recomputation."""
         assert op_cls().activation_recompute_in_mlp is False
-        assert op_cls(activation_recompute_in_mlp=True).activation_recompute_in_mlp is True
+        with pytest.raises(ValueError, match="does not support activation recomputation"):
+            op_cls(activation_recompute_in_mlp=True)
+
+    @pytest.mark.parametrize(
+        "op_cls, op_kwargs",
+        (
+            (te_ops.ScaledSReLU, {}),
+            (te_ops.ScaledTanhSReLU, {"tanh_clamp_scale": 2.0}),
+        ),
+    )
+    def test_scaled_srelu_activation_recompute_in_mlp_config(self, op_cls, op_kwargs) -> None:
+        """Scaled SReLU ops expose their supported activation recompute knob."""
+        assert op_cls(**op_kwargs).activation_recompute_in_mlp is False
+        assert op_cls(activation_recompute_in_mlp=True, **op_kwargs).activation_recompute_in_mlp
 
     @pytest.mark.parametrize("in_shape", ((71, 192), (5, 7, 128)))
     @pytest.mark.parametrize("input_requires_grad", (False, True))
@@ -2475,8 +3592,9 @@ class TestBasicOps:
             x = x.transpose(1, 2)
             x = x.reshape(in_shape)
         x_glu, x_linear = x.chunk(2, dim=-1)
-        x_glu = x_glu.clamp(min=None, max=limit)
-        x_linear = x_linear.clamp(min=-limit, max=limit)
+        x_glu = torch.where(x_glu > limit, limit, x_glu)
+        x_linear = torch.where(x_linear < -limit, -limit, x_linear)
+        x_linear = torch.where(x_linear > limit, limit, x_linear)
         out_glu = x_glu * torch.sigmoid(alpha * x_glu)
         y = out_glu * (x_linear + glu_linear_offset)
         y_ref = scales_ref.unsqueeze(-1) * y
@@ -2938,6 +4056,7 @@ class TestFusedOps:
     @pytest.mark.parametrize("in_shape", ((-1,), (6, 16, -1)))
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("zero_centered_gamma", (False, True))
+    @pytest.mark.parametrize("with_extra_grad", (True, False))
     def test_backward_add_rmsnorm(
         self,
         *,
@@ -2947,6 +4066,7 @@ class TestFusedOps:
         device: torch.device = "cuda",
         eps: float = 0.3,
         zero_centered_gamma: bool,
+        with_extra_grad: bool,
     ) -> None:
         """Fused backward RMNorm + add"""
 
@@ -2985,7 +4105,10 @@ class TestFusedOps:
         else:
             y1_ref = x_ref / torch.sqrt(eps + var_ref) * w_ref
         y2_ref = x_ref
-        (y1_ref * dy1_ref + y2_ref * dy2_ref).sum().backward()
+        if with_extra_grad:
+            (y1_ref * dy1_ref + y2_ref * dy2_ref).sum().backward()
+        else:
+            (y1_ref * dy1_ref).sum().backward()
 
         # Implementation with fusible operations
         model = te_ops.Sequential(
@@ -3002,7 +4125,10 @@ class TestFusedOps:
             model[1].weight.copy_(w_test)
             del w_test
         y1_test, y2_test = model(x_test)
-        (y1_test * dy1_test + y2_test * dy2_test).sum().backward()
+        if with_extra_grad:
+            (y1_test * dy1_test + y2_test * dy2_test).sum().backward()
+        else:
+            (y1_test * dy1_test).sum().backward()
 
         # Check that backward operations have been fused
         backward_ops = model._module_groups[0]._backward_ops
@@ -3024,6 +4150,7 @@ class TestFusedOps:
 
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("quantization", _quantization_list)
+    @pytest.mark.parametrize("with_extra_grad", (True, False))
     def test_backward_linear_add(
         self,
         *,
@@ -3033,6 +4160,7 @@ class TestFusedOps:
         device: torch.device = "cuda",
         quantization: Optional[str],
         quantized_weight: bool = False,
+        with_extra_grad: bool,
     ) -> None:
         """Backward dgrad GEMM + add"""
 
@@ -3080,7 +4208,10 @@ class TestFusedOps:
         # Plain PyTorch implementation
         y1_ref = torch.nn.functional.linear(x_ref, w_ref)
         y2_ref = x_ref
-        (y1_ref * dy1_ref + y2_ref * dy2_ref).sum().backward()
+        if with_extra_grad:
+            (y1_ref * dy1_ref + y2_ref * dy2_ref).sum().backward()
+        else:
+            (y1_ref * dy1_ref).sum().backward()
 
         # Implementation with fusible operations
         recipe = make_recipe(quantization)
@@ -3100,7 +4231,10 @@ class TestFusedOps:
             del w_test
         with te.autocast(enabled=quantized_compute, recipe=recipe):
             y1_test, y2_test = model(x_test)
-        (y1_test * dy1_test + y2_test * dy2_test).sum().backward()
+        if with_extra_grad:
+            (y1_test * dy1_test + y2_test * dy2_test).sum().backward()
+        else:
+            (y1_test * dy1_test).sum().backward()
 
         # Check that backward operations have been fused
         backward_ops = model._module_groups[0]._backward_ops
@@ -3360,7 +4494,7 @@ class TestSequentialModules:
         quantization: Optional[str],
         device: torch.device = "cuda",
         hidden_size: int = 256,
-        sequence_length: int = 48,
+        sequence_length: int = 64,
         batch_size: int = 4,
         ffn_hidden_size: int = 384,
         layernorm_epsilon: float = 1e-5,
@@ -3551,7 +4685,12 @@ class TestSequentialModules:
 
         # Skip invalid configurations
         with_quantization = quantization is not None
-        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
+        maybe_skip_quantization(
+            quantization,
+            dims=in_shape,
+            device=device,
+            dtype=dtype,
+        )
         if with_quantization and dtype not in (torch.bfloat16, torch.float16):
             pytest.skip("Quantized group GEMM is only supported with BF16/FP16")
         if activation == "scaled_srelu" and quantization == "nvfp4_rht" and bias:
@@ -3565,6 +4704,7 @@ class TestSequentialModules:
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
+            quantizer_role=QuantizerRole(tensor_type="input"),
         )
         dy_ref, dy_test = make_reference_and_test_tensors(
             out_shape,
@@ -3573,6 +4713,7 @@ class TestSequentialModules:
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
+            quantizer_role=QuantizerRole(tensor_type="grad_output"),
             requires_grad=False,
         )
         probs_ref, probs_test = make_reference_and_test_tensors(
@@ -3663,6 +4804,7 @@ class TestSequentialModules:
                 bias=bias,
                 device=device,
                 dtype=dtype,
+                split_alignment=split_alignment,
             )
             fc2 = te_ops.GroupedLinear(
                 group_size,
@@ -3672,6 +4814,7 @@ class TestSequentialModules:
                 device=device,
                 dtype=dtype,
                 scale_bias=bias,
+                split_alignment=split_alignment,
             )
             if activation == "scaled_swiglu":
                 activation_op = te_ops.ScaledSwiGLU()

@@ -65,6 +65,7 @@ const std::string &typeName(DType type) {
     {DType::kBFloat16, "bfloat16"},
     {DType::kFloat8E4M3, "float8e4m3"},
     {DType::kFloat8E5M2, "float8e5m2"},
+    {DType::kFloat8UE5M3, "float8ue5m3"},
     {DType::kFloat8E8M0, "float8e8m0"},
     {DType::kFloat4E2M1, "float4e2m1"}};
   return name_map.at(type);
@@ -132,12 +133,16 @@ NVTEShape convertShape(const std::vector<size_t>& s) {
 }
 
 std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
-                                                     const NVTEScalingMode scaling_mode) {
+                                                     const NVTEScalingMode scaling_mode,
+                                                     std::optional<DType> scale_type) {
   if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
     scale_inv_meta ret;
     ret.shape = {1};
-    ret.type = DType::kFloat32;
-    ret.type_size_bits = typeToNumBits(DType::kFloat32);
+    if (!scale_type) {
+      scale_type = DType::kFloat32;
+    }
+    ret.type = *scale_type;
+    ret.type_size_bits = typeToNumBits(*scale_type);
     return {ret, ret};
   }
   if (scaling_mode == NVTE_MXFP8_1D_SCALING) {
@@ -160,10 +165,13 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
     size_t scale_dim_X_colwise = DIVUP_TO_MULTIPLE(last_dim, scale_tensor_alignment_X_colwise);
     ret_colwise.shape = {scale_dim_Y_colwise, scale_dim_X_colwise};
 
-    ret_rowwise.type = DType::kFloat8E8M0;
-    ret_rowwise.type_size_bits = typeToNumBits(DType::kFloat8E8M0);
-    ret_colwise.type = DType::kFloat8E8M0;
-    ret_colwise.type_size_bits = typeToNumBits(DType::kFloat8E8M0);
+    if (!scale_type) {
+      scale_type = DType::kFloat8E8M0;
+    }
+    ret_rowwise.type = *scale_type;
+    ret_rowwise.type_size_bits = typeToNumBits(*scale_type);
+    ret_colwise.type = *scale_type;
+    ret_colwise.type_size_bits = typeToNumBits(*scale_type);
 
     return {ret_rowwise, ret_colwise};
   }
@@ -188,10 +196,13 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
     size_t scale_dim_X_t = DIVUP_TO_MULTIPLE(DIVUP(first_dim, 16lu), scale_tensor_alignment_X_rowwise);
     ret_colwise.shape = {scale_dim_Y_t, scale_dim_X_t};
 
-    ret_rowwise.type = DType::kFloat8E4M3;
-    ret_rowwise.type_size_bits = typeToNumBits(DType::kFloat8E4M3);
-    ret_colwise.type = DType::kFloat8E4M3;
-    ret_colwise.type_size_bits = typeToNumBits(DType::kFloat8E4M3);
+    if (!scale_type) {
+      scale_type = DType::kFloat8E4M3;
+    }
+    ret_rowwise.type = *scale_type;
+    ret_rowwise.type_size_bits = typeToNumBits(*scale_type);
+    ret_colwise.type = *scale_type;
+    ret_colwise.type_size_bits = typeToNumBits(*scale_type);
 
     return {ret_rowwise, ret_colwise};
   }
@@ -215,10 +226,14 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
       size_t scale_dim_1 = DIVUP(DIVUP(first_dim, 128lu), 4) * 4;
       ret_colwise.shape = {scale_dim_0, scale_dim_1};
     }
-    ret_rowwise.type = DType::kFloat32;
-    ret_colwise.type = DType::kFloat32;
-    ret_rowwise.type_size_bits = typeToNumBits(DType::kFloat32);
-    ret_colwise.type_size_bits = typeToNumBits(DType::kFloat32);
+
+    if (!scale_type) {
+      scale_type = DType::kFloat32;
+    }
+    ret_rowwise.type = *scale_type;
+    ret_colwise.type = *scale_type;
+    ret_rowwise.type_size_bits = typeToNumBits(*scale_type);
+    ret_colwise.type_size_bits = typeToNumBits(*scale_type);
 
     return {ret_rowwise, ret_colwise};
   }
@@ -241,10 +256,13 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
       size_t scale_dim_1 = DIVUP(last_dim, 4) * 4;
       ret_colwise.shape = {scale_dim_0, scale_dim_1};
     }
-    ret_rowwise.type = DType::kFloat32;
-    ret_colwise.type = DType::kFloat32;
-    ret_rowwise.type_size_bits = typeToNumBits(DType::kFloat32);
-    ret_colwise.type_size_bits = typeToNumBits(DType::kFloat32);
+    if (!scale_type) {
+      scale_type = DType::kFloat32;
+    }
+    ret_rowwise.type = *scale_type;
+    ret_colwise.type = *scale_type;
+    ret_rowwise.type_size_bits = typeToNumBits(*scale_type);
+    ret_colwise.type_size_bits = typeToNumBits(*scale_type);
     return {ret_rowwise, ret_colwise};
   }
 
@@ -278,7 +296,8 @@ void Tensor::Buffer::from_cpu() {
 Tensor::Tensor(const std::string& name,
                const NVTEShape &shape, const DType type,
                const bool rowwise, const bool columnwise,
-               const NVTEScalingMode &scaling_mode)
+               const NVTEScalingMode &scaling_mode,
+               const std::optional<DType> scale_type)
   : tensor_(scaling_mode), rowwise_{rowwise}, columnwise_{columnwise}, name_{name} {
   // Initialize RNG
   const size_t seed = create_seed_from_tensor_name(name);
@@ -373,7 +392,7 @@ Tensor::Tensor(const std::string& name,
   case NVTE_NVFP4_1D_SCALING:
     {
       // Block scaling factors
-      auto [rowwise_scale_meta, colwise_scale_meta] = get_scales(flattened_shape, tensor_.scaling_mode());
+      auto [rowwise_scale_meta, colwise_scale_meta] = get_scales(flattened_shape, tensor_.scaling_mode(), scale_type);
       if (rowwise) {
         const auto scale_shape = rowwise_scale_meta.shape;
         const auto scale_dtype = rowwise_scale_meta.type;
@@ -420,13 +439,17 @@ void Tensor::set_row_scaled_nvfp4(bool row_scaled_nvfp4) {
 
   // Update amax tensor
   if (row_scaled_nvfp4) {
-    // Row-scaled NVFP4 has amax matching number of rows
     NVTE_CHECK(rowwise_, "Row-scaled NVFP4 requires row-wise data.");
-    NVTE_CHECK(!columnwise_, "Row-scaled NVFP4 does not support column-wise data.");
     auto shape = tensor_.shape();
     const size_t rows = product(shape, 0, shape.ndim - 1);
+    const size_t cols = shape.data[shape.ndim - 1];
     amax_rowwise_.emplace(rows, DType::kFloat32);
     tensor_.set_amax(amax_rowwise_->gpu_buffer(), DType::kFloat32, std::vector<size_t>{rows});
+    if (columnwise_) {
+      amax_columnwise_.emplace(cols, DType::kFloat32);
+      tensor_.set_columnwise_amax(amax_columnwise_->gpu_buffer(), DType::kFloat32,
+                                  std::vector<size_t>{cols});
+    }
   } else {
     // Tensor-scaled NVFP4 has single amax
     if (rowwise_) {

@@ -56,6 +56,10 @@ find_package(CUDAToolkit REQUIRED)
 find_package(OpenMP REQUIRED)
 find_package(MPI REQUIRED)
 
+option(NVTE_WITH_CUTEDSL
+       "Link the tests against libpython, required when libtransformer_engine.so was built with NVTE_WITH_CUTEDSL=ON"
+       "$ENV{NVTE_WITH_CUTEDSL}")
+
 # -- NCCL core ----------------------------------------------------------------
 # Anchor on libnccl and derive nccl.h from the same install prefix so the
 # header and library can't drift across installs.
@@ -101,7 +105,7 @@ gtest_discover_tests(test_comm_gemm DISCOVERY_TIMEOUT 600)
 # Launched via mpirun; ncclUniqueId exchange uses MPI_Bcast (see test_ep_common.h).
 # The test binary only uses NCCL core symbols (ncclMemAlloc, ncclCommWindow*);
 # all ncclEp* calls live behind TE's public <transformer_engine/ep.h>, which is
-# statically linked into libtransformer_engine.so.
+# backed by the runtime-loaded libnccl_ep.so library.
 message(STATUS "EP test: NCCL headers: ${NCCL_INCLUDE_DIR}")
 set(EP_TEST_COMMON_INCLUDES
     ${NCCL_INCLUDE_DIR}
@@ -127,6 +131,19 @@ add_executable(test_ep test_ep.cu ../cpp/test_common.cu)
 target_include_directories(test_ep PRIVATE ${EP_TEST_COMMON_INCLUDES})
 target_link_libraries(test_ep PUBLIC ${EP_TEST_COMMON_LIBS})
 
+if(NVTE_WITH_CUTEDSL)
+  # Executables that link libtransformerengine.so must also link to the Python::Python to provide
+  # the definitions of these CPython symbols at runtime via dynamic linking.
+  # Find the interpreter too so older CMake versions use its version to locate libpython.
+  find_package(Python COMPONENTS Interpreter Development.Embed REQUIRED)
+  foreach(test_target test_comm_gemm test_ep)
+    target_link_libraries(${test_target} PRIVATE
+                          "-Wl,--no-as-needed"
+                          Python::Python
+                          "-Wl,--as-needed")
+  endforeach()
+endif()
+
 # Do NOT use gtest_discover_tests - these binaries require multi-process
 # launch via run_test_ep.sh, not direct single-process execution.
-message(STATUS "EP distributed tests enabled (NCCL EP statically linked into libtransformer_engine.so)")
+message(STATUS "EP distributed tests enabled (NCCL EP loaded from libnccl_ep.so at runtime)")

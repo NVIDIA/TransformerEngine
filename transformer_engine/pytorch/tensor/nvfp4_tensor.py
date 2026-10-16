@@ -7,7 +7,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 import math
 import warnings
-from typing import Dict, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union
 import functools
 
 import torch
@@ -115,6 +115,8 @@ class NVFP4Quantizer(Quantizer):
     """Builder class for NVFP4 tensors with NV block scaling"""
 
     dtype: DType
+    """Scale dtype (e4m3 block scaling factors or ue5m3 for wider dynamic range)"""
+    scale_dtype: DType
     """Random Hadamard Transform"""
     with_rht: bool
     with_post_rht_amax: bool
@@ -135,6 +137,8 @@ class NVFP4Quantizer(Quantizer):
     nvfp4_e4m3_max: int
     """NVFP4 4over6 candidate-selection error mode."""
     nvfp4_4over6_err_mode: str
+    """Whether to disable the global (second-level) NVFP4 scale."""
+    disable_second_level_scale: bool
 
     """RHT sign mask (0 when sign randomization is disabled)"""
     rht_matrix_random_sign_mask_t: int
@@ -142,6 +146,7 @@ class NVFP4Quantizer(Quantizer):
     def __init__(
         self,
         fp4_dtype: Union[DType, tex.DType] = DType.kFloat4E2M1,
+        scale_dtype: Union[DType, tex.DType] = DType.kFloat8E4M3,
         rowwise: bool = True,
         columnwise: bool = True,
         with_amax_reduction: bool = False,
@@ -152,26 +157,41 @@ class NVFP4Quantizer(Quantizer):
         stochastic_rounding: bool = False,
         row_scaled_nvfp4: bool = False,
         nvfp4_use_4over6: bool = False,
-        nvfp4_e4m3_max: int = 448,
+        nvfp4_e4m3_max: int = 0,
         nvfp4_4over6_err_mode: str = "MAE",
         with_random_sign_mask: bool = True,
+        disable_second_level_scale: bool = False,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.dtype = DType.cast(fp4_dtype)
+        self.scale_dtype = DType.cast(scale_dtype)
+        if self.scale_dtype not in (DType.kFloat8E4M3, DType.kFloat8UE5M3):
+            raise ValueError("scale_dtype must be DType.kFloat8E4M3 or DType.kFloat8UE5M3.")
         self.with_rht = with_rht
         self.with_post_rht_amax = with_post_rht_amax
         self.with_amax_reduction = with_amax_reduction
         self.amax_reduction_group = amax_reduction_group
         self.with_2d_quantization = with_2d_quantization
         self.stochastic_rounding = stochastic_rounding
+        if row_scaled_nvfp4 and disable_second_level_scale:
+            warnings.warn(
+                "Row-scaled NVFP4 requires second-level scaling; disabling "
+                "row_scaled_nvfp4 because disable_second_level_scale=True.",
+                UserWarning,
+                stacklevel=2,
+            )
+            row_scaled_nvfp4 = False
         self.row_scaled_nvfp4 = row_scaled_nvfp4
         self.nvfp4_use_4over6 = nvfp4_use_4over6
-        self.nvfp4_e4m3_max = nvfp4_e4m3_max if nvfp4_use_4over6 else 448
-        if self.nvfp4_e4m3_max not in (448, 256):
-            raise ValueError("nvfp4_e4m3_max must be 448 or 256.")
+        if nvfp4_use_4over6 and self.scale_dtype == DType.kFloat8UE5M3:
+            raise ValueError(
+                "nvfp4_use_4over6 is incompatible with scale_dtype=DType.kFloat8UE5M3."
+            )
+        self.nvfp4_e4m3_max = nvfp4_e4m3_max
         self.nvfp4_4over6_err_mode = nvfp4_4over6_err_mode.upper()
         if self.nvfp4_4over6_err_mode not in ("MAE", "MSE"):
             raise ValueError("nvfp4_4over6_err_mode must be 'MAE' or 'MSE'.")
+        self.disable_second_level_scale = disable_second_level_scale
         self.rht_matrix_random_sign_mask_t = get_random_sign_mask_for_rht(
             with_random_sign_mask, torch.cuda.current_device()
         )
@@ -230,6 +250,7 @@ class NVFP4Quantizer(Quantizer):
 
         quantizer = NVFP4Quantizer(
             fp4_dtype=self.dtype,
+            scale_dtype=self.scale_dtype,
             rowwise=self.rowwise_usage,
             columnwise=self.columnwise_usage,
             with_amax_reduction=self.with_amax_reduction,
@@ -244,6 +265,7 @@ class NVFP4Quantizer(Quantizer):
             nvfp4_e4m3_max=self.nvfp4_e4m3_max,
             nvfp4_4over6_err_mode=self.nvfp4_4over6_err_mode,
             with_random_sign_mask=self.rht_matrix_random_sign_mask_t != 0,
+            disable_second_level_scale=self.disable_second_level_scale,
         )
         quantizer.internal = self.internal
         quantizer.optimize_for_gemm = self.optimize_for_gemm
@@ -253,6 +275,10 @@ class NVFP4Quantizer(Quantizer):
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
         """Quantize tensor implementation"""
         return tex.quantize(tensor, self)
+
+    def is_requantization_safe(self) -> bool:
+        """NVFP4 quantization is replay-safe unless stochastic rounding is enabled."""
+        return not self.stochastic_rounding
 
     def is_quantizable(self, inp: torch.Tensor) -> bool:
         """Returns whether or not given inp can be quantized"""
@@ -345,6 +371,56 @@ class NVFP4Quantizer(Quantizer):
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
         return NVFP4BlockScaling
 
+    # ----- TensorSpec / pure-Python allocation -----
+
+    def storage_metadata(self, fake_dtype: torch.dtype) -> Dict[str, Any]:
+        return {
+            "cls": NVFP4TensorStorage if self.internal else NVFP4Tensor,
+            "nontensor_kwargs": {
+                "fp4_dtype": self.dtype,
+                "scale_dtype": self.scale_dtype,
+                "quantizer": self,
+                "with_gemm_swizzled_scales": self.optimize_for_gemm,
+                "row_scaled_nvfp4": self.row_scaled_nvfp4,
+                "nvfp4_use_4over6": self.nvfp4_use_4over6,
+                "nvfp4_e4m3_max": self.nvfp4_e4m3_max,
+                "fake_dtype": fake_dtype,
+            },
+        }
+
+    def inner_tensor_specs(
+        self, shape: Tuple[int, ...]
+    ) -> Dict[str, Tuple[Tuple[int, ...], torch.dtype]]:
+        shape = tuple(shape)
+        specs: Dict[str, Tuple[Tuple[int, ...], torch.dtype]] = {}
+        # FP4 data packs 2 values per byte (uint8); block scales are E4M3 stored
+        # as uint8; amax inner tensors are FP32 (per-row when row-scaled, else scalar).
+        # Order matches NVFP4TensorStorage._INNER_TENSORS (the canonical
+        # __tensor_flatten__ order): data + scale_inv per usage first, amax last.
+        # Workaround: call @staticmethods via the class, not the instance --
+        # instance access breaks torch.compile guard generation (pytorch #182741).
+        if self.rowwise_usage:
+            specs["_rowwise_data"] = (type(self).convert_shape_for_fp4(shape), torch.uint8)
+            specs["_rowwise_scale_inv"] = (
+                tuple(self.get_scale_shape(shape, columnwise=False)),
+                torch.uint8,
+            )
+        if self.columnwise_usage:
+            specs["_columnwise_data"] = (
+                type(self).convert_shape_for_fp4(type(self).get_columnwise_shape(shape)),
+                torch.uint8,
+            )
+            specs["_columnwise_scale_inv"] = (
+                tuple(self.get_scale_shape(shape, columnwise=True)),
+                torch.uint8,
+            )
+        if self.rowwise_usage:
+            amax_rowwise_shape = (math.prod(shape[:-1]),) if self.row_scaled_nvfp4 else (1,)
+            specs["_amax_rowwise"] = (amax_rowwise_shape, torch.float32)
+        if self.columnwise_usage:
+            specs["_amax_columnwise"] = ((1,), torch.float32)
+        return specs
+
 
 register_value_opaque_quantizer(NVFP4Quantizer)
 
@@ -376,6 +452,8 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
         Columnwise amax tracking tensor.
     fp4_dtype : DType
         The FP4 data type used for quantization.
+    scale_dtype: DType
+        The FP8 scale factor data type used for quantization.
     quantizer : Quantizer
         The quantizer instance used for this tensor.
     dtype : torch.dtype, default = torch.float32
@@ -397,11 +475,12 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
         amax_rowwise: Optional[torch.Tensor],
         amax_columnwise: Optional[torch.Tensor],
         fp4_dtype: DType,
+        scale_dtype: DType = DType.kFloat8E4M3,
         quantizer: Quantizer,
         with_gemm_swizzled_scales: bool,
         row_scaled_nvfp4: bool = False,
         nvfp4_use_4over6: bool = False,
-        nvfp4_e4m3_max: int = 448,
+        nvfp4_e4m3_max: int = 0,
         **kwargs,
     ):
         instance = super().__new__(
@@ -413,6 +492,7 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
             amax_rowwise,
             amax_columnwise,
             fp4_dtype,
+            scale_dtype,
             quantizer,
             with_gemm_swizzled_scales,
             *args,
@@ -474,11 +554,6 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
             return self.quantize_(tensor.dequantize())
         self._get_quantizer().update_quantized(tensor, self, noop_flag=noop_flag)
         return self
-
-    def detach(self) -> NVFP4Tensor:
-        # pylint: disable=missing-function-docstring
-        # TODO(ksivamani): Fix the detach bug
-        return NVFP4Tensor.make_like(self)
 
     def clone(self) -> NVFP4Tensor:
         # pylint: disable=missing-function-docstring
@@ -580,6 +655,7 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
         # Pass amax via metadata (scalar, same on all ranks — not all-gathered)
         metadata = (
             self._fp4_dtype,
+            self._scale_dtype,
             columnwise_usage,
             self._amax_rowwise,
             self._amax_columnwise,
@@ -606,6 +682,7 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
         """
         (
             fp4_dtype,
+            scale_dtype,
             columnwise_usage,
             amax_rowwise,
             amax_columnwise,
@@ -645,6 +722,7 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
                 shape=logical_shape,
                 dtype=param_dtype,
                 fp4_dtype=fp4_dtype,
+                scale_dtype=scale_dtype,
                 rowwise_data=rowwise_data,
                 rowwise_scale_inv=rowwise_scale_inv,
                 columnwise_data=None,
@@ -673,7 +751,9 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
         # View op
         if func == aten.view.default:
             if len(args) != 2:
-                raise RuntimeError("Unexpected args for view op (expected 2 args, got {len(args)})")
+                raise RuntimeError(
+                    f"Unexpected args for view op (expected 2 args, got {len(args)})"
+                )
             tensor = args[0]
             shape = args[1]
             if shape == list(tensor.size()):
@@ -766,7 +846,11 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
                 rowwise_scale_inv = scale_inv_init_func(
                     tensor._rowwise_scale_inv, *args[1:], **kwargs
                 )
-                amax_rowwise = torch.zeros_like(tensor._amax_rowwise, *args[1:], **kwargs)
+                amax_rowwise = (
+                    None
+                    if tensor._amax_rowwise is None
+                    else torch.zeros_like(tensor._amax_rowwise, *args[1:], **kwargs)
+                )
             else:
                 rowwise_data, rowwise_scale_inv, amax_rowwise = None, None, None
 
@@ -775,7 +859,11 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
                 columnwise_scale_inv = scale_inv_init_func(
                     tensor._columnwise_scale_inv, *args[1:], **kwargs
                 )
-                amax_columnwise = torch.zeros_like(tensor._amax_columnwise, *args[1:], **kwargs)
+                amax_columnwise = (
+                    None
+                    if tensor._amax_columnwise is None
+                    else torch.zeros_like(tensor._amax_columnwise, *args[1:], **kwargs)
+                )
             else:
                 columnwise_data, columnwise_scale_inv, amax_columnwise = (
                     None,
@@ -787,6 +875,7 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
                 shape=tensor.shape,
                 dtype=tensor.dtype,
                 fp4_dtype=tensor._fp4_dtype,
+                scale_dtype=tensor._scale_dtype,
                 rowwise_data=rowwise_data,
                 rowwise_scale_inv=rowwise_scale_inv,
                 columnwise_data=columnwise_data,
@@ -824,6 +913,7 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
                 self._row_scaled_nvfp4,
                 self._nvfp4_use_4over6,
                 self._nvfp4_e4m3_max,
+                self._scale_dtype,
             ),
         )
 
@@ -974,7 +1064,8 @@ def _make_nvfp4_tensor_in_reduce_ex(
     with_gemm_swizzled_scales: bool,
     row_scaled_nvfp4: bool = False,
     nvfp4_use_4over6: bool = False,
-    nvfp4_e4m3_max: int = 448,
+    nvfp4_e4m3_max: int = 0,
+    scale_dtype: DType = DType.kFloat8E4M3,
 ) -> NVFP4Tensor:
     """Reconstruct an ``NVFP4Tensor`` from its ``__reduce_ex__`` payload."""
     # Infer device from whichever inner buffer is populated so the wrapper
@@ -989,6 +1080,7 @@ def _make_nvfp4_tensor_in_reduce_ex(
         shape=shape,
         dtype=dtype,
         fp4_dtype=fp4_dtype,
+        scale_dtype=scale_dtype,
         rowwise_data=rowwise_data,
         rowwise_scale_inv=rowwise_scale_inv,
         columnwise_data=columnwise_data,
@@ -1082,6 +1174,7 @@ class _ViewFunc(torch.autograd.Function):
             amax_columnwise=tensor._amax_columnwise,
             quantizer=tensor._quantizer,
             fp4_dtype=tensor._fp4_dtype,
+            scale_dtype=tensor._scale_dtype,
             requires_grad=tensor.requires_grad,
             with_gemm_swizzled_scales=tensor._with_gemm_swizzled_scales,
             device=tensor.device,
@@ -1128,6 +1221,7 @@ class _ViewFunc(torch.autograd.Function):
                 amax_columnwise=grad._amax_columnwise,
                 quantizer=grad._quantizer,
                 fp4_dtype=grad._fp4_dtype,
+                scale_dtype=grad._scale_dtype,
                 requires_grad=grad.requires_grad,
                 with_gemm_swizzled_scales=grad._with_gemm_swizzled_scales,
                 device=grad.device,
@@ -1216,6 +1310,7 @@ class _ReshapeFunc(torch.autograd.Function):
             amax_columnwise=tensor._amax_columnwise,
             quantizer=tensor._quantizer,
             fp4_dtype=tensor._fp4_dtype,
+            scale_dtype=tensor._scale_dtype,
             requires_grad=tensor.requires_grad,
             with_gemm_swizzled_scales=tensor._with_gemm_swizzled_scales,
             device=tensor.device,
@@ -1262,6 +1357,7 @@ class _ReshapeFunc(torch.autograd.Function):
                 amax_columnwise=grad._amax_columnwise,
                 quantizer=grad._quantizer,
                 fp4_dtype=grad._fp4_dtype,
+                scale_dtype=grad._scale_dtype,
                 requires_grad=grad.requires_grad,
                 with_gemm_swizzled_scales=grad._with_gemm_swizzled_scales,
                 device=grad.device,

@@ -129,3 +129,36 @@ def test_mxfp8_quantize_swizzle_fusion(
         return_rowwise=return_rowwise,
         return_transpose=return_transpose,
     )
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("M, N", [(96, 160), (4096, 576), (4096, 2112)])
+def test_mxfp8_bidirectional_swizzled_row_scale_padding(M: int, N: int) -> None:
+    """The specialized bidirectional kernel must not overwrite padded row scales."""
+    x = torch.randn((M, N), dtype=torch.bfloat16, device="cuda")
+    quantizer = MXFP8Quantizer(
+        fp8_dtype=te.DType.kFloat8E4M3,
+        rowwise=True,
+        columnwise=True,
+    )
+    quantizer.optimize_for_gemm = True
+    scale = quantizer(x)._rowwise_scale_inv.view(torch.uint8)
+
+    scale_rows = torch.arange(M, device=scale.device, dtype=torch.int64).view(-1, 1)
+    scale_cols = torch.arange(N // 32, device=scale.device, dtype=torch.int64).view(1, -1)
+    num_tiles_x = math.ceil(N / 128)
+    scale_indices = (
+        ((scale_rows // 128) * num_tiles_x + scale_cols // 4) * (128 * 4)
+        + (scale_rows % 32) * 16
+        + ((scale_rows % 128) // 32) * 4
+        + scale_cols % 4
+    )
+    valid_mask = torch.zeros(scale.numel(), dtype=torch.bool, device=scale.device)
+    valid_mask[scale_indices.view(-1)] = True
+
+    torch.testing.assert_close(
+        scale.view(-1)[~valid_mask],
+        torch.zeros_like(scale.view(-1)[~valid_mask]),
+        atol=0,
+        rtol=0,
+    )

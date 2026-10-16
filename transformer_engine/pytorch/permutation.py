@@ -42,7 +42,7 @@ def moe_permute_index_map_forward(
     global _moe_permute_index_map_workspace, _moe_permute_index_map_max_expanded_token_num
 
     if not inp.numel():
-        return inp.clone(), torch.tensor([], device=inp.device)
+        return inp.clone(), torch.empty(0, dtype=torch.int32, device=inp.device)
 
     if not inp.is_cuda:
         raise ValueError(f"inp must be a CUDA tensor, but got tensor on {inp.device}.")
@@ -98,9 +98,10 @@ def _moe_permute_index_map_fake(  # pylint: disable=unused-argument
         assert (
             num_out_tokens >= 0
         ), f"moe_permute (index map) requires num_out_tokens >= 0, got {num_out_tokens}."
-
-    # Infer output shape
-    output_tokens = num_out_tokens if num_out_tokens > 0 else num_tokens * topK
+        output_tokens = num_out_tokens if num_out_tokens > 0 else num_tokens * topK
+    else:
+        # Match `moe_permute_index_map_forward` empty-input fast path (ignores num_out_tokens).
+        output_tokens = 0
 
     # row_id_map is 1D with size = num_tokens * topK
     fake_output = torch.empty((output_tokens, inp.shape[1]), dtype=inp.dtype, device=inp.device)
@@ -290,7 +291,13 @@ def moe_permute_mask_map_forward(
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Forward pass for MoE permute with mask router map."""
     if not inp.numel():
-        return inp.clone(), torch.tensor([], device=inp.device), torch.tensor([], device=inp.device)
+        row_id_map = torch.empty(
+            (0, routing_map.size(1) * 2 + 1), dtype=torch.int32, device=inp.device
+        )
+        permuted_probs = torch.empty(
+            0, dtype=probs.dtype if probs is not None else torch.float32, device=inp.device
+        )
+        return inp.clone(), row_id_map, permuted_probs
 
     if not inp.is_cuda:
         raise ValueError(f"inp must be a CUDA tensor, but got tensor on {inp.device}.")
@@ -450,11 +457,7 @@ def _moe_permute_mask_map_forward_fake(  # pylint: disable=unused-argument
         (num_tokens, num_experts * 2 + 1), dtype=torch.int32, device=inp.device
     )
     if probs is not None:
-        fake_permuted_probs = (
-            torch.empty((out_rows,), dtype=probs.dtype, device=inp.device)
-            if out_rows > 0
-            else torch.empty(0, device=inp.device)
-        )
+        fake_permuted_probs = torch.empty((out_rows,), dtype=probs.dtype, device=inp.device)
     else:
         fake_permuted_probs = torch.empty(0, device=inp.device)
     return fake_output, fake_row_id_map, fake_permuted_probs

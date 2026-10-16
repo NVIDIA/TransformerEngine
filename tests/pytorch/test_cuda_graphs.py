@@ -5,6 +5,8 @@
 from typing import Callable, Dict, Iterable, List, Tuple, Union
 import pytest
 import copy
+import gc
+import weakref
 
 import torch
 from transformer_engine.pytorch import (
@@ -751,12 +753,496 @@ def test_make_graphed_callables_with_kwargs(
     assert_all_equal(outputs, graph_outputs)
 
 
+def test_make_graphed_callables_returns_owned_parameter_grads() -> None:
+    """Parameter grads returned from graph replay must not alias static graph buffers."""
+    reset_rng_states()
+    model_config = model_configs["small"]
+    dtype = torch.float32
+    model = torch.nn.Linear(
+        model_config.hidden_size,
+        model_config.hidden_size,
+        bias=False,
+        device="cuda",
+        dtype=dtype,
+    )
+    model = make_graphed_callables(
+        model,
+        (generate_data(model_config, dtype, warmup=True, requires_grad=False),),
+    )
+
+    seen_grads = []
+
+    def save_grad(grad):
+        seen_grads.append(grad)
+        return grad
+
+    hook = model.weight.register_hook(save_grad)
+    try:
+        output = model(generate_data(model_config, dtype, requires_grad=False))
+        output.backward(generate_data(model_config, dtype, requires_grad=False))
+
+        assert len(seen_grads) == 1
+        first_grad = seen_grads[0]
+        first_grad_ptr = first_grad.data_ptr()
+        first_grad_snapshot = first_grad.clone()
+
+        model.zero_grad(set_to_none=True)
+
+        output = model(generate_data(model_config, dtype, requires_grad=False))
+        output.backward(generate_data(model_config, dtype, requires_grad=False))
+
+        assert len(seen_grads) == 2
+        assert first_grad.data_ptr() == first_grad_ptr
+        assert seen_grads[1].data_ptr() != first_grad_ptr
+        torch.testing.assert_close(first_grad, first_grad_snapshot, rtol=0, atol=0)
+    finally:
+        hook.remove()
+        reset_graphs(model)
+
+
+def test_make_graphed_callables_accumulates_owned_parameter_grads() -> None:
+    """Parameter grad accumulation must not reuse overwritten static graph buffers."""
+    reset_rng_states()
+    model_config = model_configs["small"]
+    dtype = torch.float32
+    model = torch.nn.Linear(
+        model_config.hidden_size,
+        model_config.hidden_size,
+        bias=False,
+        device="cuda",
+        dtype=dtype,
+    )
+    model = make_graphed_callables(
+        model,
+        (generate_data(model_config, dtype, warmup=True, requires_grad=False),),
+    )
+
+    input_1 = generate_data(model_config, dtype, requires_grad=False)
+    grad_1 = generate_data(model_config, dtype, requires_grad=False)
+    input_2 = generate_data(model_config, dtype, requires_grad=False)
+    grad_2 = generate_data(model_config, dtype, requires_grad=False)
+    expected_grad = torch.einsum("...o,...i->oi", grad_1, input_1) + torch.einsum(
+        "...o,...i->oi", grad_2, input_2
+    )
+
+    try:
+        model.zero_grad(set_to_none=True)
+        model(input_1).backward(grad_1)
+        model(input_2).backward(grad_2)
+        torch.testing.assert_close(model.weight.grad, expected_grad, rtol=0, atol=0)
+    finally:
+        reset_graphs(model)
+
+
+def test_make_graphed_callables_preserves_skipped_parameter_grad_alias() -> None:
+    """Delayed-wgrad parameters are excluded from returned-grad clone handling."""
+    reset_rng_states()
+    model_config = model_configs["small"]
+    dtype = torch.float32
+    model = torch.nn.Linear(
+        model_config.hidden_size,
+        model_config.hidden_size,
+        bias=False,
+        device="cuda",
+        dtype=dtype,
+    )
+    model.weight.skip_backward_post_hook = True
+    model = make_graphed_callables(
+        model,
+        (generate_data(model_config, dtype, warmup=True, requires_grad=False),),
+    )
+
+    seen_grads = []
+
+    def save_grad(grad):
+        seen_grads.append(grad)
+        return grad
+
+    hook = model.weight.register_hook(save_grad)
+    try:
+        output = model(generate_data(model_config, dtype, requires_grad=False))
+        output.backward(generate_data(model_config, dtype, requires_grad=False))
+
+        assert len(seen_grads) == 1
+        first_grad_ptr = seen_grads[0].data_ptr()
+
+        model.zero_grad(set_to_none=True)
+
+        output = model(generate_data(model_config, dtype, requires_grad=False))
+        output.backward(generate_data(model_config, dtype, requires_grad=False))
+
+        assert len(seen_grads) == 2
+        assert seen_grads[1].data_ptr() == first_grad_ptr
+    finally:
+        hook.remove()
+        reset_graphs(model)
+
+
+def test_make_graphed_callables_can_skip_returned_parameter_grad_clone() -> None:
+    """Parameter grad clone handling can be disabled for callers that manage lifetimes."""
+    reset_rng_states()
+    model_config = model_configs["small"]
+    dtype = torch.float32
+    model = torch.nn.Linear(
+        model_config.hidden_size,
+        model_config.hidden_size,
+        bias=False,
+        device="cuda",
+        dtype=dtype,
+    )
+    model = make_graphed_callables(
+        model,
+        (generate_data(model_config, dtype, warmup=True, requires_grad=False),),
+        clone_param_grads_on_return=False,
+    )
+
+    seen_grads = []
+
+    def save_grad(grad):
+        seen_grads.append(grad)
+        return grad
+
+    hook = model.weight.register_hook(save_grad)
+    try:
+        output = model(generate_data(model_config, dtype, requires_grad=False))
+        output.backward(generate_data(model_config, dtype, requires_grad=False))
+
+        assert len(seen_grads) == 1
+        first_grad_ptr = seen_grads[0].data_ptr()
+
+        model.zero_grad(set_to_none=True)
+
+        output = model(generate_data(model_config, dtype, requires_grad=False))
+        output.backward(generate_data(model_config, dtype, requires_grad=False))
+
+        assert len(seen_grads) == 2
+        assert seen_grads[1].data_ptr() == first_grad_ptr
+    finally:
+        hook.remove()
+        reset_graphs(model)
+
+
+def test_make_graphed_callables_snapshots_parameter_grad_clone_policy() -> None:
+    """Parameter grad clone policy is fixed at capture time."""
+    reset_rng_states()
+    model_config = model_configs["small"]
+    dtype = torch.float32
+    model = torch.nn.Linear(
+        model_config.hidden_size,
+        model_config.hidden_size,
+        bias=False,
+        device="cuda",
+        dtype=dtype,
+    )
+    model = make_graphed_callables(
+        model,
+        (generate_data(model_config, dtype, warmup=True, requires_grad=False),),
+    )
+    model.weight.skip_backward_post_hook = True
+
+    seen_grads = []
+
+    def save_grad(grad):
+        seen_grads.append(grad)
+        return grad
+
+    hook = model.weight.register_hook(save_grad)
+    try:
+        output = model(generate_data(model_config, dtype, requires_grad=False))
+        output.backward(generate_data(model_config, dtype, requires_grad=False))
+
+        assert len(seen_grads) == 1
+        first_grad = seen_grads[0]
+        first_grad_ptr = first_grad.data_ptr()
+        first_grad_snapshot = first_grad.clone()
+
+        model.zero_grad(set_to_none=True)
+
+        output = model(generate_data(model_config, dtype, requires_grad=False))
+        output.backward(generate_data(model_config, dtype, requires_grad=False))
+
+        assert len(seen_grads) == 2
+        assert seen_grads[1].data_ptr() != first_grad_ptr
+        torch.testing.assert_close(first_grad, first_grad_snapshot, rtol=0, atol=0)
+    finally:
+        hook.remove()
+        reset_graphs(model)
+
+
+def _make_capture_time_hooks(
+    modules: Tuple[torch.nn.Module, ...],
+    records: List[Tuple[int, str]],
+) -> List[Dict[str, Dict[int, Callable]]]:
+    """Make capture-time hooks that record call order."""
+
+    def make_hook(module_idx: int, hook_name: str) -> Callable:
+        expected_module = modules[module_idx]
+
+        def hook(module: torch.nn.Module) -> None:
+            assert module is expected_module
+            assert not torch.cuda.is_current_stream_capturing()
+            records.append((module_idx, hook_name))
+
+        return hook
+
+    return [
+        {
+            "forward_pre_hooks": {0: make_hook(module_idx, "forward_pre_hooks")},
+            "forward_hooks": {0: make_hook(module_idx, "forward_hooks")},
+            "backward_pre_hooks": {0: make_hook(module_idx, "backward_pre_hooks")},
+            "backward_hooks": {0: make_hook(module_idx, "backward_hooks")},
+        }
+        for module_idx in range(len(modules))
+    ]
+
+
+def test_ordered_warmup_releases_consumed_outputs() -> None:
+    """Ordered warmup should only retain outputs until their corresponding backward."""
+
+    class OutputLifetimeModule(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.previous_output = None
+
+        def forward(self, input_: torch.Tensor) -> torch.Tensor:
+            is_warmup = not torch.cuda.is_current_stream_capturing()
+            if is_warmup and self.previous_output is not None:
+                assert self.previous_output() is None
+            output = input_ * 2
+            if is_warmup:
+                self.previous_output = weakref.ref(output)
+            return output
+
+    module = OutputLifetimeModule()
+    sample_args = tuple((torch.ones(4, 8, device="cuda", requires_grad=True),) for _ in range(2))
+    graphed_callables = make_graphed_callables(
+        (module,),
+        sample_args,
+        num_warmup_iters=2,
+        _order=[1, -1, 1, -1],
+        _num_layers_per_chunk=[1],
+    )
+    assert module.previous_output is not None
+    assert module.previous_output() is None
+    reset_graphs(graphed_callables)
+
+
+def test_unordered_warmup_releases_consumed_outputs() -> None:
+    """Unordered warmup should release each output after its corresponding backward."""
+
+    class OutputLifetimeModule(torch.nn.Module):
+        def __init__(self, output_refs: list, module_idx: int) -> None:
+            super().__init__()
+            self.output_refs = output_refs
+            self.module_idx = module_idx
+            self.capture_started = False
+
+        def forward(self, input_: torch.Tensor) -> torch.Tensor:
+            output = input_ * 2
+            if torch.cuda.is_current_stream_capturing():
+                self.capture_started = True
+            else:
+                self.output_refs[self.module_idx] = weakref.ref(output)
+            return output
+
+    output_refs = [None, None]
+    modules = tuple(OutputLifetimeModule(output_refs, module_idx) for module_idx in range(2))
+
+    def first_module_backward_pre_hook(_module: torch.nn.Module) -> None:
+        if not modules[0].capture_started:
+            assert output_refs[1] is not None
+            assert output_refs[1]() is None
+
+    graphed_callables = make_graphed_callables(
+        modules,
+        tuple((torch.ones(4, 8, device="cuda", requires_grad=True),) for _ in modules),
+        num_warmup_iters=2,
+        capture_time_hooks=[
+            {"backward_pre_hooks": {0: first_module_backward_pre_hook}},
+            None,
+        ],
+    )
+    assert all(output_ref is not None and output_ref() is None for output_ref in output_refs)
+    reset_graphs(graphed_callables)
+
+
+def test_inference_warmup_does_not_retain_outputs() -> None:
+    """Inference warmup should release outputs as soon as each forward returns."""
+
+    class OutputLifetimeModule(torch.nn.Module):
+        def __init__(self, previous_output: list) -> None:
+            super().__init__()
+            self.previous_output = previous_output
+
+        def forward(self, input_: torch.Tensor) -> torch.Tensor:
+            is_warmup = not torch.cuda.is_current_stream_capturing()
+            if is_warmup and self.previous_output[0] is not None:
+                assert self.previous_output[0]() is None
+            output = input_ * 2
+            if is_warmup:
+                self.previous_output[0] = weakref.ref(output)
+            return output
+
+    previous_output = [None]
+    modules = tuple(OutputLifetimeModule(previous_output).eval() for _ in range(2))
+    graphed_callables = make_graphed_callables(
+        modules,
+        tuple((torch.ones(4, 8, device="cuda"),) for _ in modules),
+        num_warmup_iters=2,
+    )
+    assert previous_output[0] is not None
+    assert previous_output[0]() is None
+    reset_graphs(graphed_callables)
+
+
+def test_reused_capture_buffers_release_outputs_after_backward() -> None:
+    """Capture locals must not keep weak-refed output buffers alive."""
+
+    class OutputLifetimeModule(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.previous_capture_output = None
+
+        def forward(self, input_: torch.Tensor) -> torch.Tensor:
+            if (
+                torch.cuda.is_current_stream_capturing()
+                and self.previous_capture_output is not None
+            ):
+                assert self.previous_capture_output() is None
+            output = input_ * 2
+            if torch.cuda.is_current_stream_capturing():
+                self.previous_capture_output = weakref.ref(output)
+            return output
+
+    module = OutputLifetimeModule()
+    sample_args = tuple((torch.ones(4, 8, device="cuda", requires_grad=True),) for _ in range(2))
+    graphed_callables = make_graphed_callables(
+        (module,),
+        sample_args,
+        _order=[1, -1, 1, -1],
+        _num_layers_per_chunk=[1],
+        _reuse_graph_input_output_buffers=True,
+    )
+    assert module.previous_capture_output is not None
+    assert module.previous_capture_output() is None
+    reset_graphs(graphed_callables)
+
+
+def test_reset_releases_only_the_selected_callable() -> None:
+    """Reset releases one callable's graph state without retaining its peers."""
+
+    class CaptureOutputModule(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.capture_output = None
+
+        def forward(self, input_: torch.Tensor) -> torch.Tensor:
+            output = input_ * 2
+            if torch.cuda.is_current_stream_capturing():
+                self.capture_output = weakref.ref(output)
+            return output
+
+    modules = tuple(CaptureOutputModule().cuda() for _ in range(2))
+    graphed_callables = make_graphed_callables(
+        modules,
+        tuple((torch.ones(4, device="cuda", requires_grad=True),) for _ in modules),
+    )
+    capture_outputs = tuple(module.capture_output for module in modules)
+    assert all(output is not None and output() is not None for output in capture_outputs)
+
+    graphed_callables[0].reset()
+    graphed_callables[0].reset()
+    gc.collect()
+    assert capture_outputs[0]() is None
+    assert capture_outputs[1]() is not None
+
+    output = graphed_callables[1](torch.randn(4, device="cuda", requires_grad=True))
+    output.sum().backward()
+    del output
+    graphed_callables[1].reset()
+    gc.collect()
+    assert capture_outputs[1]() is None
+
+
+@pytest.mark.parametrize("with_order", (False, True))
+def test_reset_rejects_all_replay_entry_points(with_order: bool) -> None:
+    """Reset is idempotent and terminal for forward and backward replay."""
+
+    class TestModule(torch.nn.Module):
+        def forward(self, input_: torch.Tensor) -> torch.Tensor:
+            return input_ * 2
+
+    module = TestModule().cuda()
+    sample_input = torch.ones(4, device="cuda", requires_grad=True)
+    graph_options = {}
+    if with_order:
+        graph_options = {"_order": [1, -1], "_num_layers_per_chunk": [1]}
+    graphed_callable = make_graphed_callables(module, (sample_input,), **graph_options)
+    output = graphed_callable(torch.randn_like(sample_input, requires_grad=True))
+    torch.cuda.synchronize()
+
+    graphed_callable.reset()
+    graphed_callable.reset()
+    if not with_order:
+        # The eager fallback for a different training state is invalid after reset too.
+        graphed_callable.eval()
+
+    error = "has been reset and can no longer be used"
+    with pytest.raises(RuntimeError, match=error):
+        graphed_callable(torch.randn_like(sample_input, requires_grad=True))
+    with pytest.raises(RuntimeError, match=error):
+        graphed_callable.backward_dw()
+    with pytest.raises(RuntimeError, match=error):
+        output.sum().backward()
+
+
+@pytest.mark.parametrize("with_order", (False, True))
+def test_make_graphed_callables_with_capture_time_hooks(with_order: bool) -> None:
+    """Test capture-time hooks around warmup and graph capture."""
+    num_warmup_iters = 2
+    modules = (
+        torch.nn.Linear(8, 8, device="cuda"),
+        torch.nn.Linear(8, 8, device="cuda"),
+    )
+    sample_args = tuple((torch.ones(4, 8, device="cuda", requires_grad=True),) for _ in modules)
+    records = []
+    hook_order = [
+        (0, "forward_pre_hooks"),
+        (0, "forward_hooks"),
+        (1, "forward_pre_hooks"),
+        (1, "forward_hooks"),
+        (1, "backward_pre_hooks"),
+        (1, "backward_hooks"),
+        (0, "backward_pre_hooks"),
+        (0, "backward_hooks"),
+    ]
+
+    graphed_callables = make_graphed_callables(
+        modules,
+        sample_args,
+        num_warmup_iters=num_warmup_iters,
+        _order=[1, 2, -2, -1] if with_order else None,
+        capture_time_hooks=_make_capture_time_hooks(modules, records),
+    )
+
+    assert records == hook_order * (num_warmup_iters + 1)
+
+    for graphed in graphed_callables:
+        x = torch.randn(4, 8, device="cuda", requires_grad=True)
+        y = graphed(x)
+        y.backward(torch.ones_like(y))
+    assert records == hook_order * (num_warmup_iters + 1)
+    reset_graphs(graphed_callables)
+
+
 def _test_cuda_graphs_with_interleaved_pipeline_parallelism(
     *,
     with_graph: bool,
     model_config: ModelConfig,
     dtype: torch.dtype,
-) -> List[torch.Tensor]:
+    reuse_graph_input_output_buffers: bool = False,
+    clone_param_grads_on_return: bool = True,
+) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
     """Simulate Megatron-LM interleaved pipeline parallelism."""
     reset_rng_states()
 
@@ -796,6 +1282,8 @@ def _test_cuda_graphs_with_interleaved_pipeline_parallelism(
             sample_args,
             allow_unused_input=True,
             _order=layer_order,
+            _reuse_graph_input_output_buffers=reuse_graph_input_output_buffers,
+            clone_param_grads_on_return=clone_param_grads_on_return,
         )
         layer_forwards = {
             (i // num_microbatches, i % num_microbatches): forward
@@ -822,11 +1310,15 @@ def _test_cuda_graphs_with_interleaved_pipeline_parallelism(
 
         # Cache for layer outputs.
         outputs = {}
+        output_snapshots = {} if reuse_graph_input_output_buffers else None
 
         def forward(layer_idx: int, microbatch_idx: int):
             """Helper function for forward steps"""
             idxs = (layer_idx, microbatch_idx)
             outputs[idxs] = layer_forwards[idxs](inputs[idxs])
+            if output_snapshots is not None:
+                # Reused graph output buffers are only valid until their corresponding backward.
+                output_snapshots[idxs] = outputs[idxs].detach().clone()
 
         def backward(layer_idx: int, microbatch_idx: int):
             """Helper function for backward steps"""
@@ -849,11 +1341,13 @@ def _test_cuda_graphs_with_interleaved_pipeline_parallelism(
         # Optimizer step.
         optimizer.step()
 
-    outputs = [y for _, y in sorted(outputs.items())]
-    outputs = get_outputs(model, outputs)
+    output_values = output_snapshots if output_snapshots is not None else outputs
+    output_values = [y for _, y in sorted(output_values.items())]
+    outputs = get_outputs(model, output_values)
+    final_weights = [param.detach().clone() for param in model.parameters()]
     if with_graph:
         reset_graphs(layer_forwards)
-    return outputs
+    return outputs, final_weights
 
 
 def test_make_graphed_callables_with_interleaved_pipeline_parallelism(
@@ -864,12 +1358,56 @@ def test_make_graphed_callables_with_interleaved_pipeline_parallelism(
     """Test CUDA graphs with Megatron-LM interleaved pipeline parallelism."""
     model_config = model_configs[model_config]
     kwargs = dict(model_config=model_config, dtype=dtype)
-    outputs = _test_cuda_graphs_with_interleaved_pipeline_parallelism(
+    outputs, weights = _test_cuda_graphs_with_interleaved_pipeline_parallelism(
         with_graph=False,
         **kwargs,
     )
-    graph_outputs = _test_cuda_graphs_with_interleaved_pipeline_parallelism(
+    graph_outputs, graph_weights = _test_cuda_graphs_with_interleaved_pipeline_parallelism(
         with_graph=True,
         **kwargs,
     )
     assert_all_equal(outputs, graph_outputs)
+    assert_all_equal(weights, graph_weights)
+
+
+def test_make_graphed_callables_with_interleaved_pipeline_parallelism_reused_buffers(
+    *,
+    model_config: str = "small",
+    dtype: torch.dtype = torch.float16,
+) -> None:
+    """Test CUDA graphs with reused input/output buffers."""
+    model_config = model_configs[model_config]
+    kwargs = dict(model_config=model_config, dtype=dtype)
+    outputs, weights = _test_cuda_graphs_with_interleaved_pipeline_parallelism(
+        with_graph=False,
+        **kwargs,
+    )
+    graph_outputs, graph_weights = _test_cuda_graphs_with_interleaved_pipeline_parallelism(
+        with_graph=True,
+        reuse_graph_input_output_buffers=True,
+        **kwargs,
+    )
+    assert_all_equal(outputs, graph_outputs)
+    assert_all_equal(weights, graph_weights)
+
+
+def test_make_graphed_callables_with_interleaved_pipeline_parallelism_reused_buffers_no_param_grad_clone(
+    *,
+    model_config: str = "small",
+    dtype: torch.dtype = torch.float16,
+) -> None:
+    """Test reused input/output buffers when returned parameter grad clones are disabled."""
+    model_config = model_configs[model_config]
+    kwargs = dict(model_config=model_config, dtype=dtype)
+    outputs, weights = _test_cuda_graphs_with_interleaved_pipeline_parallelism(
+        with_graph=False,
+        **kwargs,
+    )
+    graph_outputs, graph_weights = _test_cuda_graphs_with_interleaved_pipeline_parallelism(
+        with_graph=True,
+        reuse_graph_input_output_buffers=True,
+        clone_param_grads_on_return=False,
+        **kwargs,
+    )
+    assert_all_equal(outputs, graph_outputs)
+    assert_all_equal(weights, graph_weights)

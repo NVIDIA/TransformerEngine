@@ -6,8 +6,8 @@
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 from transformer_engine.pytorch import NVFP4Quantizer
-from transformer_engine.pytorch.custom_recipes.quantization_ref_nvfp4 import NVFP4QuantizerRef
-from transformer_engine.pytorch.custom_recipes import utils
+from transformer_engine.pytorch.custom_recipes.reference_nvfp4 import NVFP4QuantizerRef
+from transformer_engine.pytorch.custom_recipes import reference_utils
 from transformer_engine.common.recipe import NVFP4BlockScaling
 from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
 
@@ -39,6 +39,59 @@ def fused_grouped_quantize(
     grouped_output = tex.group_quantize(x, quantizer, num_tensors, split_section_tensor)
 
     return grouped_output
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize(
+    "return_transpose", [False, True], ids=["rowwise", "rowwise_and_columnwise"]
+)
+def test_grouped_disable_second_level_scale_matches_split_quantize(
+    return_transpose: bool,
+) -> None:
+    """Grouped NVFP4 skips amax reduction and consumes framework-owned fixed amaxes."""
+    split_sections = [128, 128]
+    split_section_tensor = torch.tensor(split_sections, dtype=torch.int64, device="cuda")
+    torch.manual_seed(0)
+    x = torch.randn((sum(split_sections), 128), dtype=torch.bfloat16, device="cuda")
+    quantizer = NVFP4Quantizer(
+        rowwise=True,
+        columnwise=return_transpose,
+        with_rht=True,
+        with_post_rht_amax=True,
+        disable_second_level_scale=True,
+    )
+
+    grouped = fused_grouped_quantize(x, split_section_tensor, quantizer)
+    actual = grouped.split_into_quantized_tensors()
+    expected = tex.split_quantize(x, split_sections, [quantizer.copy() for _ in split_sections])
+
+    for actual_tensor, expected_tensor in zip(actual, expected):
+        torch.testing.assert_close(
+            actual_tensor._rowwise_data, expected_tensor._rowwise_data, atol=0, rtol=0
+        )
+        torch.testing.assert_close(
+            actual_tensor._rowwise_scale_inv,
+            expected_tensor._rowwise_scale_inv,
+            atol=0,
+            rtol=0,
+        )
+        assert actual_tensor._amax_rowwise is None
+        assert expected_tensor._amax_rowwise is None
+        if return_transpose:
+            torch.testing.assert_close(
+                actual_tensor._columnwise_data,
+                expected_tensor._columnwise_data,
+                atol=0,
+                rtol=0,
+            )
+            torch.testing.assert_close(
+                actual_tensor._columnwise_scale_inv,
+                expected_tensor._columnwise_scale_inv,
+                atol=0,
+                rtol=0,
+            )
+            assert actual_tensor._amax_columnwise is None
+            assert expected_tensor._amax_columnwise is None
 
 
 def check_grouped_tensor_nvfp4_versus_reference(

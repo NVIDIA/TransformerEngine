@@ -56,7 +56,7 @@
     <text x="80" y="135" class="dots-text">⋮</text>
     <text x="240" y="135" class="dots-text">⋮</text>
     
-    <rect x="40" y="70" width="240" height="120" fill="none" stroke="#444" stroke-width="2"/>
+    <rect x="40" y="70" width="240" height="120" class="tensor-outline" fill="none" stroke="#444" stroke-width="2"/>
   </g>
   
   <!-- Rowwise s_block [A, B/16] - 90x120 -->
@@ -100,7 +100,7 @@
     <text x="390" y="135" class="dots-text">⋮</text>
     <text x="460" y="135" class="dots-text">⋮</text>
     
-    <rect x="380" y="70" width="90" height="120" fill="none" stroke="#444" stroke-width="2"/>
+    <rect x="380" y="70" width="90" height="120" class="tensor-outline" fill="none" stroke="#444" stroke-width="2"/>
   </g>
   
   <!-- Rowwise s_global -->
@@ -153,7 +153,7 @@
     <text x="60" y="395" class="dots-text">⋮</text>
     <text x="140" y="395" class="dots-text">⋮</text>
     
-    <rect x="40" y="270" width="120" height="240" fill="none" stroke="#444" stroke-width="2"/>
+    <rect x="40" y="270" width="120" height="240" class="tensor-outline" fill="none" stroke="#444" stroke-width="2"/>
   </g>
   
   <!-- Columnwise s_block [B, A/16] - 45x240, aligned with rowwise scales at x=380 -->
@@ -197,7 +197,7 @@
     <text x="387" y="395" class="dots-text">⋮</text>
     <text x="420" y="395" class="dots-text">⋮</text>
     
-    <rect x="380" y="270" width="45" height="240" fill="none" stroke="#444" stroke-width="2"/>
+    <rect x="380" y="270" width="45" height="240" class="tensor-outline" fill="none" stroke="#444" stroke-width="2"/>
   </g>
   
   <!-- Columnwise s_global, aligned with rowwise at x=535 -->

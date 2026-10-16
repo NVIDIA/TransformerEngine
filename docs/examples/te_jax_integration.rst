@@ -28,8 +28,8 @@ Pick a topic
      - *Coming soon*
      -
    * - `Attention <jax/attention.html>`_
-     - *Coming soon*
-     -
+     - **Available**
+     - Single-GPU and context-parallel attention tutorials
    * - `Expert Parallelism <jax/expert_parallelism.html>`_
      - *Coming soon*
      -
@@ -40,7 +40,7 @@ Quantization recipes at a glance
 
 TE exposes its quantization choices as **recipes**. Please see
 `Low-precision Training
-<https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/features/low_precision_training/index.html>`_
+<https://docs.nvidia.com/deeplearning/transformer-engine/features/low_precision_training/index.html>`_
 for a more detailed description of each recipe.
 
 ..  _jax_recipe_table_overview:

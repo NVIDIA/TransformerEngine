@@ -96,6 +96,50 @@ class TestFloat8BlockwiseTensor:
         assert tensor.dtype == dtype, "Incorrect nominal dtype"
         assert tensor.is_cuda, "Incorrect device"
 
+    def test_fsdp_assign_gathered_rejects_invalid_scale_geometry(self):
+        """Reject gathered scales that cannot describe the gathered data tiles."""
+        shape = (128, 256)
+        quantizer = Float8BlockQuantizer(
+            fp8_dtype=DType.kFloat8E4M3,
+            rowwise=True,
+            columnwise=True,
+            block_scaling_dim=2,
+        )
+        tensor = Float8BlockwiseQTensor(
+            shape=shape,
+            dtype=torch.bfloat16,
+            rowwise_data=torch.zeros(shape, device="cuda", dtype=torch.uint8),
+            rowwise_scale_inv=torch.ones(
+                quantizer.get_scale_shape(shape, columnwise=False),
+                device="cuda",
+                dtype=torch.float32,
+            ),
+            columnwise_data=torch.zeros(
+                quantizer.get_columnwise_shape(shape),
+                device="cuda",
+                dtype=torch.uint8,
+            ),
+            columnwise_scale_inv=torch.ones(
+                quantizer.get_scale_shape(shape, columnwise=True),
+                device="cuda",
+                dtype=torch.float32,
+            ),
+            fp8_dtype=DType.kFloat8E4M3,
+            is_2D_scaled=True,
+            quantizer=quantizer,
+        )
+        original_data = tensor._rowwise_data
+        gathered_data = torch.zeros((256, 256), device="cuda", dtype=torch.uint8)
+        invalid_scale = torch.ones((3, 2), device="cuda", dtype=torch.float32)
+
+        with pytest.raises(RuntimeError, match="gathered scale geometry"):
+            tensor.fsdp_assign_gathered(
+                (gathered_data, invalid_scale),
+                {"direction": "rowwise"},
+            )
+
+        assert tensor._rowwise_data is original_data
+
     def _test_quantize_dequantize(
         self,
         quantizer: Float8BlockQuantizer,
