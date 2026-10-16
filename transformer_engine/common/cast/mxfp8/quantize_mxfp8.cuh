@@ -932,7 +932,7 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
               }
 
               // regtile::quantize replaces the generic kernel below for the requests it
-              // implements: bidimensional BF16 or FP16 -> E4M3 or E5M2 with fused GeLU, SiLU, dGeLU or
+              // implements: bidimensional BF16, FP16 or FP32 -> E4M3 or E5M2 with fused GeLU, SiLU, dGeLU or
               // dSiLU, read from an activation table or computed, the derivatives optionally with
               // dbias, with or without amax, cols % 16 == 0, 16-byte aligned inputs (see
               // regtile::kImplements and regtile::can_use). It keeps the tile in registers instead
@@ -940,7 +940,8 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
               // the same dbias workspace the generic kernel writes.
               if constexpr ((std::is_same_v<IType, bf16> ||
                              (std::is_same_v<IType, fp16> &&
-                              regtile::kTakesFP16<IS_DBIAS, ParamOP, OP>)) &&
+                              regtile::kTakesFP16<IS_DBIAS, ParamOP, OP>) ||
+                             std::is_same_v<IType, float>) &&
                             (std::is_same_v<OType, fp8e4m3> || std::is_same_v<OType, fp8e5m2>) &&
                             regtile::kImplements<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>) {
                 if (regtile::can_use<IS_DACT, IS_ACT, IS_DBIAS>(

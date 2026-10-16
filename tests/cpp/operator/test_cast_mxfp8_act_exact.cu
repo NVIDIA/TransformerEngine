@@ -392,6 +392,8 @@ void run_regtile_vs_generic(const Mode mode, const Fill fill, const size_t rows,
   Tensor grad("grad", shape, itype);
   if (itype == DType::kFloat16) {
     fill_inputs<fp16>(fill, &x, &grad);
+  } else if (itype == DType::kFloat32) {
+    fill_inputs<fp32>(fill, &x, &grad);
   } else {
     fill_inputs<bf16>(fill, &x, &grad);
   }
@@ -473,9 +475,14 @@ void run_regtile_vs_generic(const Mode mode, const Fill fill, const size_t rows,
     const auto dbias_bytes = [&](Tensor &t) {
       return itype == DType::kFloat16
                  ? reinterpret_cast<const uint8_t *>(t.rowwise_cpu_dptr<fp16>())
+             : itype == DType::kFloat32
+                 ? reinterpret_cast<const uint8_t *>(t.rowwise_cpu_dptr<fp32>())
                  : reinterpret_cast<const uint8_t *>(t.rowwise_cpu_dptr<bf16>());
     };
-    EXPECT_EQ(count_byte_mismatches(dbias_bytes(dbias[0]), dbias_bytes(dbias[1]), cols * 2), 0u)
+    const size_t dbias_elt_bytes = itype == DType::kFloat32 ? 4 : 2;
+    EXPECT_EQ(count_byte_mismatches(dbias_bytes(dbias[0]), dbias_bytes(dbias[1]),
+                                    cols * dbias_elt_bytes),
+              0u)
         << "dbias";
   }
   // The FP8 data as raw bytes, whichever FP8 type the output holds.
@@ -646,6 +653,36 @@ TEST_P(CastMXFP8ActRegtileFP16TestSuite, MatchesGenericKernel) {
 
 INSTANTIATE_TEST_SUITE_P(
     OperatorTest, CastMXFP8ActRegtileFP16TestSuite,
+    ::testing::Combine(::testing::Values(Mode::GeLU, Mode::DGeLU, Mode::DBiasDGeLU, Mode::SiLU,
+                                         Mode::DSiLU, Mode::DBiasDSiLU),
+                       ::testing::Values(Fill::Typical, Fill::OrderedInputs, Fill::Specials),
+                       ::testing::Bool(),
+                       ::testing::Values(std::pair<size_t, size_t>{1024, 2048},
+                                         std::pair<size_t, size_t>{993, 7200},
+                                         std::pair<size_t, size_t>{33, 272},
+                                         // Large enough for the computed forward path.
+                                         std::pair<size_t, size_t>{4127, 2064}),
+                       ::testing::Bool(),
+                       ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2),
+                       ::testing::Bool()),
+    regtile_case_name);
+
+// FP32 inputs: no table, twice the threads per CTA (see regtile::TileConfig).
+class CastMXFP8ActRegtileFP32TestSuite : public ::testing::TestWithParam<RegtileParams> {};
+
+TEST_P(CastMXFP8ActRegtileFP32TestSuite, MatchesGenericKernel) {
+  cudaDeviceProp prop;
+  ASSERT_EQ(cudaGetDeviceProperties(&prop, 0), cudaSuccess);
+  if (prop.major < 10) {
+    GTEST_SKIP() << "This MXFP8 quantize kernel requires compute capability 10.0 or newer";
+  }
+  const auto [mode, fill, swizzled, dims, use_table, otype, with_amax] = GetParam();
+  run_regtile_vs_generic(mode, fill, dims.first, dims.second, swizzled, use_table, otype,
+                         with_amax, DType::kFloat32);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    OperatorTest, CastMXFP8ActRegtileFP32TestSuite,
     ::testing::Combine(::testing::Values(Mode::GeLU, Mode::DGeLU, Mode::DBiasDGeLU, Mode::SiLU,
                                          Mode::DSiLU, Mode::DBiasDSiLU),
                        ::testing::Values(Fill::Typical, Fill::OrderedInputs, Fill::Specials),
