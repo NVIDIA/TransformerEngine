@@ -12,6 +12,8 @@ collects level-2 diagnostics with NVTE_FUSED_ATTN_CACHE_DEBUG=2 for different ph
   rescale  the same execution with only softmax_scale changed -- should hit the cache and reuse the plans,
            since attn_scale is normalized out of the cache key
   reshape  a query differing in max_seqlen -- should miss and recreate the graphs
+  thd      executions with different packed sequence counts in one token bucket
+           should share their forward/backward graphs and plans
 """
 
 import os
@@ -71,6 +73,37 @@ def execute(config: ModelConfig, softmax_scale: float) -> None:
     torch.cuda.synchronize()
 
 
+def execute_thd(cumulative_lengths) -> None:
+    """Exercise plan reuse when only the number of packed sequences changes."""
+    block = DotProductAttention(
+        8,
+        64,
+        attention_dropout=0.0,
+        qkv_format="thd",
+        attn_mask_type="padding_causal",
+        layer_number=1,
+    ).to(dtype=DTYPE, device="cuda")
+    q, k, v = [
+        torch.randn(1024, 8, 64, dtype=DTYPE, device="cuda", requires_grad=True) for _ in range(3)
+    ]
+    cu_seqlens = torch.tensor(cumulative_lengths, dtype=torch.int32, device="cuda")
+    out = block(
+        q,
+        k,
+        v,
+        cu_seqlens_q=cu_seqlens,
+        cu_seqlens_kv=cu_seqlens,
+        cu_seqlens_q_padded=cu_seqlens,
+        cu_seqlens_kv_padded=cu_seqlens,
+        max_seqlen_q=512,
+        max_seqlen_kv=512,
+        pad_between_seqs=False,
+    )
+    assert _attention_backends["use_fused_attention"]
+    out.backward(torch.randn_like(out))
+    torch.cuda.synchronize()
+
+
 def main() -> int:
     torch.manual_seed(1234)
     config = ModelConfig(2, 512, 8, 64)
@@ -98,6 +131,17 @@ def main() -> int:
 
     mark_phase("reshape")
     query(reshaped)
+
+    capability = torch.cuda.get_device_capability()
+    if capability >= (9, 0) and capability != (12, 0):
+        # Keep tokens and max_seqlen fixed so only the packed sequence count varies.
+        mark_phase("thd_first")
+        execute_thd([0, 512, 1024])
+        mark_phase("thd_repack")
+        execute_thd([0, 256, 512, 1024])
+        mark_phase("thd_replay")
+        execute_thd([0, 512, 1024])
+        print("[CACHE-TEST] thd=1", flush=True)
 
     mark_phase("done")
     return 0

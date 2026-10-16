@@ -88,13 +88,21 @@ void FusedAttnConfig::derive() {
   is_mxfp8_fwd = is_mxfp8 && is_o_in_f16;
   is_mxfp8_bwd = is_mxfp8 && is_dqkv_in_f16;
 
-  // Use cu_seqlens vs actual_seqlens for THD or padding masks
+  // Use ragged (TH1) or dense (BHS1) graphs and stats
+  const int sm_arch = cuda::sm_arch(cuda::current_device());
+  uses_ragged_graph = sm_arch >= 90 && sm_arch != 120;
+  uses_ragged_stats = is_ragged_q && uses_ragged_graph;
+  const bool buckets_the_batch = (is_ragged_q || is_ragged_kv) && uses_ragged_graph;
+
+  // Direct cu_seqlens buffers have actual_batch + 1 entries and cannot describe a
+  // bucketed batch. Convert lengths and offsets for ragged graphs so packed
+  // sequence counts can share plans without reading beyond the input buffers.
   const size_t cudnn_runtime_version = cudnnGetVersion();
   const bool is_fp8_dtype = (qkv_dtype == kNVTEFloat8E4M3 || qkv_dtype == kNVTEFloat8E5M2);
   const size_t min_frontend_version = is_fp8_dtype ? 12600 : 12500;
   const size_t min_cudnn_version = is_fp8_dtype ? 92500 : 92400;
   uses_cu_seqlens_directly =
-      CUDNN_FRONTEND_VERSION >= min_frontend_version &&
+      !buckets_the_batch && CUDNN_FRONTEND_VERSION >= min_frontend_version &&
       (CUDNN_VERSION >= min_cudnn_version && cudnn_runtime_version >= min_cudnn_version) &&
       !is_dropout;
 
@@ -104,11 +112,6 @@ void FusedAttnConfig::derive() {
   bucketed_num_tokens_q = is_ragged_q ? fused_attn::get_max_tokens(num_tokens_q) : 0;
   bucketed_num_tokens_kv = is_ragged_kv ? fused_attn::get_max_tokens(num_tokens_kv) : 0;
 
-  // Use ragged (TH1) or dense (BHS1) graphs and stats
-  const int sm_arch = cuda::sm_arch(cuda::current_device());
-  uses_ragged_graph = sm_arch >= 90 && sm_arch != 120;
-  uses_ragged_stats = is_ragged_q && uses_ragged_graph;
-  const bool buckets_the_batch = (is_ragged_q || is_ragged_kv) && uses_ragged_graph;
   graph_batch_size_fwd =
       (buckets_the_batch && !uses_cu_seqlens_directly) ? bucketed_batch_size : batch_size;
   graph_batch_size_bwd = buckets_the_batch ? bucketed_batch_size : batch_size;
