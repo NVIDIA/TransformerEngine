@@ -79,7 +79,7 @@ def _native_metadata(spec, dim, thd, expected_prefix):
 
 
 def get_frost_attention_backward(
-    key, batch, heads, kv_heads, sq, sk, dim, tq, tk, thd, causal, scale, device
+    key, batch, heads, kv_heads, sq, sk, dim, tq, tk, thd, causal, scale, device, bottom_right=False
 ):
     """Compile a graph declaration and register its native chain; allocate no data."""
     try:
@@ -101,6 +101,8 @@ def get_frost_attention_backward(
         _LOG.warning("cuDNN OSS attention requires nvidia-cutlass-dsl >= 4.8.0")
         return False
     if dim not in _ENGINES or (thd and dim != 128):
+        return False
+    if bottom_right and (dim != 256 or not causal):
         return False
     from cutlass.base_dsl.version_info import CUDA_VERSION
 
@@ -158,7 +160,8 @@ def get_frost_attention_backward(
         dO=refs["do"],
         stats=refs["stats"],
         attn_scale=scale,
-        use_causal_mask=causal,
+        use_causal_mask=causal and not bottom_right,
+        use_causal_mask_bottom_right=causal and bottom_right,
         use_padding_mask=thd,
         seq_len_q=lengths.get("q"),
         seq_len_kv=lengths.get("kv"),

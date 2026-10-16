@@ -39,15 +39,16 @@ struct Plan {
 };
 
 bool eligible(const FusedAttnConfig &c) {
+  const bool causal = c.is_causal || c.is_causal_bottom_right;
   if (cuda::sm_arch(cuda::current_device()) != 100 || c.deterministic || !c.is_training ||
       c.qkv_dtype != kNVTEBFloat16 || c.o_dtype != kNVTEBFloat16 || c.do_dtype != kNVTEBFloat16 ||
       c.dqkv_dtype != kNVTEBFloat16 || c.head_dim_qk != c.head_dim_v ||
       (c.head_dim_qk != 128 && c.head_dim_qk != 256) || c.bias_type != NVTE_NO_BIAS ||
       c.softmax_type != NVTE_VANILLA_SOFTMAX || c.dropout != 0 || c.is_paged_kv ||
-      c.bottom_right_diagonal || c.window_size_left != -1 ||
-      (c.window_size_right != -1 && c.window_size_right != 0) ||
-      (c.window_size_right == 0 && !c.is_causal) || !std::isfinite(c.attn_scale) ||
-      c.attn_scale <= 0 || c.batch_size == 0 || c.batch_size > 65535 || c.num_gqa_groups == 0 ||
+      (c.bottom_right_diagonal && (c.head_dim_qk != 256 || !c.is_causal_bottom_right)) ||
+      c.window_size_left != -1 || (c.window_size_right != -1 && c.window_size_right != 0) ||
+      (c.window_size_right == 0 && !causal) || !std::isfinite(c.attn_scale) || c.attn_scale <= 0 ||
+      c.batch_size == 0 || c.batch_size > 65535 || c.num_gqa_groups == 0 ||
       c.num_attn_heads < c.num_gqa_groups || c.num_attn_heads % c.num_gqa_groups != 0 ||
       c.num_attn_heads > 65535 || c.max_seqlen_q == 0 || c.max_seqlen_kv == 0 ||
       c.max_seqlen_q > INT32_MAX - 256 || c.max_seqlen_kv > INT32_MAX - 256)
@@ -91,13 +92,13 @@ const Plan *get_plan(const FusedAttnConfig &c, cudaStream_t stream) {
   const bool thd = c.is_ragged_q && c.head_dim_qk == 128;
   // Never hold a C++ cache lock while entering Python: another Python thread
   // might hold the GIL and be waiting for that lock.
-  auto result =
-      (*prepare)(tvm::ffi::String(key), static_cast<int64_t>(c.batch_size),
-                 static_cast<int64_t>(c.num_attn_heads), static_cast<int64_t>(c.num_gqa_groups),
-                 static_cast<int64_t>(c.max_seqlen_q), static_cast<int64_t>(c.max_seqlen_kv),
-                 static_cast<int64_t>(c.head_dim_qk), static_cast<int64_t>(c.num_tokens_q),
-                 static_cast<int64_t>(c.num_tokens_kv), thd, c.is_causal,
-                 static_cast<double>(c.attn_scale), cuda::current_device());
+  auto result = (*prepare)(
+      tvm::ffi::String(key), static_cast<int64_t>(c.batch_size),
+      static_cast<int64_t>(c.num_attn_heads), static_cast<int64_t>(c.num_gqa_groups),
+      static_cast<int64_t>(c.max_seqlen_q), static_cast<int64_t>(c.max_seqlen_kv),
+      static_cast<int64_t>(c.head_dim_qk), static_cast<int64_t>(c.num_tokens_q),
+      static_cast<int64_t>(c.num_tokens_kv), thd, c.is_causal || c.is_causal_bottom_right,
+      static_cast<double>(c.attn_scale), cuda::current_device(), c.bottom_right_diagonal);
   // A bounded scalar string keeps the optional bridge free of TVM object-type
   // registration symbols, so loading TE with the DSL backend disabled still works.
   auto encoded = result.try_cast<tvm::ffi::String>();

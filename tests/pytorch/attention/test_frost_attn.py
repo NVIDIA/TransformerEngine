@@ -38,7 +38,7 @@ def frost_enabled(monkeypatch):
     setter(int(os.environ.get("NVTE_ENABLE_CUTEDSL_BACKEND", "0") != "0"))
 
 
-def _case(dim, thd, unequal, causal, seed=31):
+def _case(dim, thd, unequal, causal, seed=31, bottom_right=False):
     generator = torch.Generator(device="cpu").manual_seed(seed)
     q_lengths, k_lengths = ((129, 63), (193, 97)) if unequal else ((128, 128), (256, 256))
     heads, kv_heads = 4, 1
@@ -53,7 +53,9 @@ def _case(dim, thd, unequal, causal, seed=31):
         scores = (qr @ kr.repeat_interleave(heads // kv_heads, 0).transpose(-1, -2)) * dim**-0.5
         if causal:
             scores = scores.masked_fill(
-                torch.arange(sk)[None, :] > torch.arange(sq)[:, None], -torch.inf
+                torch.arange(sk)[None, :]
+                > torch.arange(sq)[:, None] + (sk - sq if bottom_right else 0),
+                -torch.inf,
             )
         result = scores.softmax(-1) @ vr.repeat_interleave(heads // kv_heads, 0)
         grads = torch.autograd.grad(result, (qr, kr, vr), do.transpose(0, 1).double())
@@ -69,7 +71,7 @@ def _case(dim, thd, unequal, causal, seed=31):
     return q, k, v, do, prefixes, reference, max(q_lengths), max(k_lengths)
 
 
-def _calls(case, dim, thd, causal):
+def _calls(case, dim, thd, causal, bottom_right=False):
     from transformer_engine.pytorch.cpp_extensions.fused_attn import (
         FusedAttnBackend,
         fused_attn_fwd,
@@ -81,6 +83,9 @@ def _calls(case, dim, thd, causal):
     mask = (
         ("padding_causal" if causal else "padding") if thd else ("causal" if causal else "no_mask")
     )
+    if bottom_right:
+        assert causal
+        mask += "_bottom_right"
     options = dict(
         max_seqlen_q=sq,
         max_seqlen_kv=sk,
@@ -140,11 +145,15 @@ def test_frost_backward_and_rebinding(frost_enabled, dim, thd, unequal, causal):
         _check(result, reference)
 
 
-@pytest.mark.parametrize("dim,thd", [(128, True), (256, True)])
-def test_frost_backward_replay(frost_enabled, dim, thd):
+@pytest.mark.parametrize(
+    "dim,thd,bottom_right", [(128, True, False), (256, True, False), (256, True, True)]
+)
+def test_frost_backward_replay(frost_enabled, dim, thd, bottom_right):
     """Repeated replay overwrites poisoned gradients and reinitializes scratch."""
     del frost_enabled
-    backward, reference = _calls(_case(dim, thd, False, True), dim, thd, True)
+    backward, reference = _calls(
+        _case(dim, thd, False, True, bottom_right=bottom_right), dim, thd, True, bottom_right
+    )
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(stream):
@@ -177,6 +186,34 @@ def test_frost_d256_ragged_fallback(frost_enabled, monkeypatch):
     monkeypatch.setenv("NVTE_FUSED_ATTN_FROST_UNIFORM", "0")
     monkeypatch.setenv("NVTE_FUSED_ATTN_FROST", "1")
     backward, reference = _calls(_case(256, True, True, True), 256, True, True)
+    _check(backward(), reference)
+    monkeypatch.setenv("NVTE_FUSED_ATTN_FROST", "2")
+    with pytest.raises(RuntimeError, match="Requested cuDNN OSS backward unavailable"):
+        backward()
+
+
+@pytest.mark.parametrize("thd", [False, True])
+def test_frost_d256_bottom_right(frost_enabled, thd):
+    """Rectangular masks preserve their diagonal and keep distinct cached plans."""
+    del frost_enabled
+    for seed in (31, 47):
+        for bottom_right in (True, False, True):
+            case = _case(256, thd, False, True, seed, bottom_right)
+            backward, reference = _calls(case, 256, thd, True, bottom_right)
+            stream = torch.cuda.Stream()
+            stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(stream):
+                result = backward()
+            torch.cuda.current_stream().wait_stream(stream)
+            _check(result, reference)
+
+
+def test_frost_d128_bottom_right_fallback(frost_enabled, monkeypatch):
+    """The D128 engine does not declare bottom-right causal support."""
+    del frost_enabled
+    monkeypatch.setenv("NVTE_FUSED_ATTN_FROST", "1")
+    case = _case(128, True, False, True, bottom_right=True)
+    backward, reference = _calls(case, 128, True, True, True)
     _check(backward(), reference)
     monkeypatch.setenv("NVTE_FUSED_ATTN_FROST", "2")
     with pytest.raises(RuntimeError, match="Requested cuDNN OSS backward unavailable"):

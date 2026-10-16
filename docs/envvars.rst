@@ -235,6 +235,8 @@ backend-selection overview.
 
    The initial contract covers BF16, separate Q/K/V, D128/D256, nondeterministic
    backward, no dropout, no bias/sinks, and unmasked or top-left causal attention.
+   D256 also supports bottom-right causal attention, including rectangular calls.
+   D128 bottom-right declarations retain the backend fallback (or fail in strict mode).
    BSHD lengths must be multiples of 128. D128 also supports native packed THD
    with device lengths and physical origins. D256 THD requires the separate
    uniform-layout promise below. Other layouts, masks and dtypes retain their
