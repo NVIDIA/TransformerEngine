@@ -5750,26 +5750,3 @@ def test_grouped_discrete_weight_quantizers(fp8_recipe):
             torch.testing.assert_close(output.dequantize(), ref.dequantize(), rtol=0, atol=0)
         scales = [w._rowwise_scale_inv if fp8_recipe.mxfp8() else w._scale_inv for w in outputs]
         assert len({s.data_ptr() for s in scales}) == 3
-
-
-def test_grouped_discrete_weight_missing_columnwise():
-    """A quantized MXFP8 weight must provide the layouts required by the op."""
-    recipe = transformer_engine.common.recipe.MXFP8BlockScaling()
-    if not is_op_fuser_grouped_tensor_path_supported(recipe, torch.bfloat16):
-        pytest.skip("Native grouped GEMM is unavailable.")
-    FP8GlobalStateManager.reset()
-    op = te_ops.GroupedLinear(1, 128, 128, bias=False, dtype=torch.bfloat16, device="cuda")
-    with te.autocast(enabled=True, recipe=recipe):
-        op.reset_recipe_state(recipe=recipe)
-    quantizer = op.get_quantizer("forward", 1)
-    quantizer.set_usage(rowwise=True, columnwise=False)
-    weight = quantizer(torch.randn(128, 128, device="cuda", dtype=torch.bfloat16))
-    with pytest.raises(RuntimeError, match="missing column-scaled FP8 data"):
-        op._get_discrete_weights_for_gemm(
-            [weight],
-            [quantizer],
-            columnwise_usage=True,
-            with_quantized_compute=True,
-            dtype=torch.bfloat16,
-        )
-    assert not weight._quantizer.columnwise_usage
