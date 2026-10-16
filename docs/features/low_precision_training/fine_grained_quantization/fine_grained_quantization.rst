@@ -430,18 +430,22 @@ columnwise quantizer and its ``columnwise_source="original"`` stay unchanged.
 Both examples use ``columnwise_source="rowwise_dequantized"`` for weights.
 Other module roles use ``IdentityQuantizer``. High-precision arithmetic follows
 the module compute dtype; select BF16 compute for the BF16 example.
+``CustomRecipe`` does not require FP8 hardware to enter ``te.autocast``.
+Its quantizers and GEMMs must support the target device and TE build;
+recipes using only QDQ and high-precision GEMMs can run on Ampere.
 
 Configure ``backend`` or ``nvfp4_options`` with ``functools.partial``. Existing
 Hybrid limitations still apply, and RL convergence has not been validated.
 
 Backends and custom QDQ formats
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Output defaults to the source dtype; a module compute-dtype override changes
 only the decoded dtype. For ``NVFP4QDQQuantizer``, ``backend="auto"`` fuses
 plain 1D E2M1/E4M3 QDQ with tensor or per-row outer scaling on
-GPUs with compute capability 8.0 or higher for contiguous, 16-byte-aligned
-BF16/FP16 tensors with matching output dtype and flattened matrix dimensions
+GPUs with compute capability 8.0 or higher and a TE build with CUDA 12.8 or
+higher for contiguous, 16-byte-aligned BF16/FP16 tensors with matching output
+dtype and flattened matrix dimensions
 divisible by 16, with ordinary fast math disabled. Other native-valid modes,
 including 4over6, 2D scaling, distributed amax reduction, and mixed dtypes,
 use native ``quantize().dequantize()`` where its kernels are supported.

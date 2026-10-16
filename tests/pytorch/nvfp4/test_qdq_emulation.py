@@ -14,6 +14,7 @@ from functools import partial
 import pytest
 import torch
 import transformer_engine.pytorch as te
+import transformer_engine_torch as tex
 from transformer_engine.common.recipe import CustomRecipe
 from transformer_engine.pytorch.custom_recipes.qdq import (
     MXFP8QDQQuantizer,
@@ -27,12 +28,22 @@ from transformer_engine.pytorch.custom_recipes.reference_nvfp4 import (
     cast_to_fp4x2,
 )
 from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
-
+from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available() or torch.cuda.get_device_capability() < (8, 0),
     reason="Portable QDQ requires compute capability 8.0 or higher",
 )
+
+requires_fp4_build = pytest.mark.skipif(
+    not tex.nvfp4_qdq_supported(),
+    reason="NVFP4 QDQ requires a TE build with CUDA 12.8 or higher",
+)
+portable_formats = [
+    pytest.param("nvfp4", marks=requires_fp4_build),
+    pytest.param("nvfp4_row", marks=requires_fp4_build),
+    "mxfp8",
+]
 
 
 @pytest.fixture(autouse=True)
@@ -109,7 +120,7 @@ def inputs(shape, dtype, distribution):
     return x
 
 
-@pytest.mark.parametrize("fmt", ["nvfp4", "nvfp4_row", "mxfp8"])
+@pytest.mark.parametrize("fmt", portable_formats)
 @pytest.mark.parametrize("backend", ["auto", "fused"])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("shape", [(16, 32), (48, 160), (2, 8, 4096)])
@@ -128,7 +139,7 @@ def test_portable_numerics(fmt, backend, dtype, shape, distribution):
         torch.testing.assert_close(actual, native, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("fmt", ["nvfp4", "nvfp4_row", "mxfp8"])
+@pytest.mark.parametrize("fmt", portable_formats)
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf"), "all_nan"])
 def test_portable_exceptional_values(fmt, dtype, value):
@@ -148,7 +159,7 @@ def test_portable_exceptional_values(fmt, dtype, value):
         torch.testing.assert_close(actual[valid], native[valid], rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("fmt", ["nvfp4", "nvfp4_row", "mxfp8"])
+@pytest.mark.parametrize("fmt", portable_formats)
 def test_portable_lifecycle_and_graph(fmt):
     x = inputs((32, 128), torch.bfloat16, "normal").requires_grad_()
     q = quantizer(fmt)
@@ -174,6 +185,7 @@ def test_portable_lifecycle_and_graph(fmt):
 
 
 @pytest.mark.parametrize("grouped", [False, True])
+@requires_fp4_build
 def test_portable_weight_recipe(grouped):
     factory = partial(nvfp4_qdq_weight_fwd_bf16_bwd_factory, backend="fused")
     recipe = CustomRecipe(qfactory=factory)
@@ -200,7 +212,47 @@ def test_portable_weight_recipe(grouped):
     torch.testing.assert_close(x.grad, torch.cat(expected_dx), rtol=0.016, atol=0.002)
 
 
-@pytest.mark.parametrize("fmt", ["nvfp4", "nvfp4_row", "mxfp8"])
+@pytest.mark.parametrize("fmt", portable_formats)
+@pytest.mark.parametrize("grouped", [False, True])
+def test_portable_full_qdq_recipe(fmt, grouped, monkeypatch):
+    """QDQ operands use BF16 GEMMs without requiring native FP8 hardware."""
+    monkeypatch.setattr(
+        FP8GlobalStateManager,
+        "is_fp8_available",
+        classmethod(lambda cls: (False, "FP8 hardware unavailable")),
+    )
+
+    def factory(role):
+        if role is not None and role.tensor_type in ("input", "weight"):
+            return quantizer(fmt)
+        return te.IdentityQuantizer()
+
+    recipe = CustomRecipe(qfactory=factory)
+    options = dict(bias=False, params_dtype=torch.bfloat16, device="cuda")
+    layer = (
+        te.GroupedLinear(2, 128, 128, single_grouped_weight=False, **options)
+        if grouped
+        else te.Linear(128, 128, **options)
+    )
+    x = inputs((64, 128), torch.bfloat16, "normal").requires_grad_()
+    dy = torch.ones_like(x)
+    weights = [layer.weight0, layer.weight1] if grouped else [layer.weight]
+    splits = [32, 32] if grouped else [64]
+    with te.autocast(recipe=recipe), torch.autocast("cuda", dtype=torch.bfloat16):
+        y = layer(x, splits) if grouped else layer(x)
+    y.backward(dy)
+    expected_y, expected_dx = [], []
+    for weight, source, grad in zip(weights, x.detach().split(splits), dy.split(splits)):
+        decoded_x = reference(source, fmt)
+        decoded_w = reference(weight.detach(), fmt)
+        expected_y.append(decoded_x @ decoded_w.T)
+        expected_dx.append(grad @ decoded_w)
+        torch.testing.assert_close(weight.grad, grad.T @ decoded_x, rtol=0.016, atol=0.002)
+    torch.testing.assert_close(y, torch.cat(expected_y), rtol=0.016, atol=0.002)
+    torch.testing.assert_close(x.grad, torch.cat(expected_dx), rtol=0.016, atol=0.002)
+
+
+@pytest.mark.parametrize("fmt", portable_formats)
 def test_portable_device_and_stream(fmt):
     device = 1 if torch.cuda.device_count() > 1 else 0
     with torch.cuda.device(device), torch.cuda.stream(torch.cuda.Stream(device=device)):
@@ -215,3 +267,18 @@ def test_older_device_reference_rejected(fmt, monkeypatch):
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device=None: (9, 0))
     with pytest.raises(RuntimeError, match="Native.*Q\\+DQ requires compute capability 10.0"):
         quantizer(fmt, "reference")(x)
+
+
+@pytest.mark.parametrize("fp4_supported", [False, True])
+@pytest.mark.parametrize("fmt", ["nvfp4", "nvfp4_row"])
+def test_nvfp4_build_support_dispatch(fp4_supported, fmt, monkeypatch):
+    from transformer_engine.pytorch.custom_recipes import qdq
+
+    monkeypatch.setattr(qdq, "_NVFP4_QDQ_SUPPORTED", fp4_supported)
+    x = inputs((32, 128), torch.bfloat16, "normal")
+    expected = "fused" if fp4_supported else "reference"
+    assert quantizer(fmt).selected_backend(x) == expected
+    assert quantizer("mxfp8").selected_backend(x) == "fused"
+    if not fp4_supported:
+        with pytest.raises(ValueError, match="Forced fused NVFP4 QDQ"):
+            quantizer(fmt, "fused").selected_backend(x)

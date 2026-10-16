@@ -17,6 +17,13 @@
 extern "C" {
 #endif
 
+/*! \brief Whether this library was built with NVFP4 QDQ kernels (CUDA 12.8+).
+ *
+ * This does not check the device or input requirements of the QDQ operations.
+ * \return True if NVFP4 QDQ kernels were compiled into the library.
+ */
+bool nvte_nvfp4_qdq_supported();
+
 /*! \brief Plain rowwise 1x16 NVFP4 QDQ into matching BF16/FP16 output.
  *
  * Input/output are contiguous, 16-byte aligned, rank >= 2, with both flattened

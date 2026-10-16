@@ -18,6 +18,9 @@ from ..tensor.storage.identity_tensor_storage import IdentityTensorStorage
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.nvfp4_tensor import NVFP4Quantizer
 
+# Query the common library's build, which may differ from PyTorch's CUDA version.
+_NVFP4_QDQ_SUPPORTED = tex.nvfp4_qdq_supported()
+
 
 @lru_cache(maxsize=None)
 def _supports_fused_device(device_index):
@@ -200,7 +203,8 @@ class NVFP4QDQQuantizer(QDQQuantizer):
 
     ``backend`` is ``auto``, ``reference``, or ``fused``. Auto falls back to
     native Q+DQ outside plain contiguous BF16/FP16 1D E4M3 scaling on GPUs with
-    compute capability 8.0 or higher, with tensor or per-row outer scaling.
+    compute capability 8.0 or higher and a TE build with CUDA 12.8 or higher,
+    with tensor or per-row outer scaling.
     Per-row amax is fused into QDQ.
     In particular, 4over6 and 2D scaling currently use the reference path.
     The native reference path requires compute capability 10.0 or higher.
@@ -261,7 +265,8 @@ class NVFP4QDQQuantizer(QDQQuantizer):
         q = self.nvfp4_quantizer
         output_dtype = dtype or self.dtype or tensor.dtype
         eligible = (
-            tensor.is_cuda
+            _NVFP4_QDQ_SUPPORTED
+            and tensor.is_cuda
             and tensor.is_contiguous()
             and tensor.ndim >= 2
             and tensor.numel() > 0
@@ -297,7 +302,8 @@ class NVFP4QDQQuantizer(QDQQuantizer):
                 return torch.empty_like(tensor, dtype=dtype)
             raise RuntimeError(
                 "Native NVFP4 Q+DQ requires compute capability 10.0 or higher; "
-                "on Ampere/Hopper use auto or fused with plain contiguous matching BF16/FP16"
+                "on Ampere/Hopper use a TE build with CUDA 12.8 or higher and "
+                "auto or fused with plain contiguous matching BF16/FP16"
             )
         return self.nvfp4_quantizer.quantize(tensor).dequantize(dtype=dtype)
 

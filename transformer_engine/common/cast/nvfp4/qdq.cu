@@ -143,6 +143,8 @@ void launch_qdq(const NVTETensor input, NVTETensor output, const NVTETensor amax
 }  // namespace
 }  // namespace transformer_engine
 
+bool nvte_nvfp4_qdq_supported() { return FP4_TYPE_SUPPORTED; }
+
 void nvte_nvfp4_qdq(const NVTETensor input, NVTETensor output, const NVTETensor amax,
                     const NVTETensor noop, cudaStream_t stream) {
   NVTE_API_CALL(nvte_nvfp4_qdq);

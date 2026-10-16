@@ -647,6 +647,10 @@ class CustomRecipe(Recipe):
     """
     Custom recipe that allows users to provide quantizer factories.
 
+    PyTorch autocast does not require FP8 hardware for a custom recipe. The
+    selected quantizers and GEMMs must support the target device and build;
+    autocast does not inspect the factory to validate those requirements in advance.
+
     .. warning::
         **EXPERIMENTAL**: Custom recipe is experimental, still under active development,
         and the API is subject to change without notice. Use at your own risk.
