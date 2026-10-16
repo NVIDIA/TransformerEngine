@@ -277,10 +277,9 @@ def dense_indexer_loss_backward(
     index_scale: float,
     loss_coeff: float,
 ):
-    """Return dQ/dK/dW for B1 BF16 mean-reduced KL, padding H32 at cuDNN.
+    """Return dQ/dK/dW for B1 BF16 KL averaged over query tokens, padding H32 at cuDNN.
 
-    The tested scalar grad_loss/loss_coeff contract is Megatron's default
-    calculate_per_token_loss=False reduction; per-token reduction is untested.
+    grad_loss is the scalar upstream gradient; loss_coeff scales the loss.
     """
     padded_q, padded_w = _pad_index_heads(index_q, index_w)
     result = _dsa_op("dense_indexer_backward_wrapper")(

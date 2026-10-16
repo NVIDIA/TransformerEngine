@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Index projections, compression, and cuDNN block selection."""
+"""Index projections, compression, and cuDNN compressed KV selection."""
 
 import torch
 
@@ -14,7 +14,7 @@ from .dsa_rope import apply_rotary
 
 
 class Indexer(torch.nn.Module):
-    """Select compressed rows using the indexer's own Q/K/weight projections.
+    """Select compressed KV entries using the indexer's own Q/K/weight projections.
 
     Accept batch-major or packed hidden states and query residuals, sequence
     prefixes, and caller-provided RoPE tables. Return global compressed-row IDs;
@@ -67,7 +67,7 @@ class Indexer(torch.nn.Module):
         max_seqlen,
         return_context=False,
     ):
-        """Select compressed rows and optionally expose live tensors for the indexer loss."""
+        """Select compressed KV entries and optionally expose live tensors for the indexer loss."""
         n_comp = max_seqlen // self.ratio
         comp_shape = (total_comp,) if hidden_states.ndim == 2 else (hidden_states.shape[0], n_comp)
         index_compressed = self.compressor(hidden_states, cu, cu_comp, total_comp=total_comp)

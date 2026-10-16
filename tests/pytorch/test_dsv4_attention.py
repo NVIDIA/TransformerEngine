@@ -105,7 +105,9 @@ def test_dsa_sparse_attention_forward_backward(variant, head_dim):
         assert relative_error < 0.02, relative_error.item()
 
 
-def test_dsv4_rejects_unsupported_metadata():
+def test_dsa_rejects_unsupported_metadata():
+    with pytest.raises(ValueError, match="weight_width requires fused=True"):
+        Compressor(8, 4, 2, False, 1e-6, "cpu", torch.float32, weight_width=1)
     with pytest.raises(ValueError, match="positive"):
         dsa_cudnn.sparse_attention(
             torch.empty(1, 64, 512),
@@ -434,7 +436,7 @@ def test_dsa_packed_rope_eager_forward_backward():
 
 @pytest.mark.parametrize("variant,ratio", [("hca", 128), ("csa", 4)])
 @pytest.mark.parametrize("lengths", [[129, 257], [255, 383]])
-def test_dsv4_hybrid_thd_forward_backward(variant, ratio, lengths):
+def test_dsv4_attention_thd_forward_backward(variant, ratio, lengths):
     """Packed full-layer output and gradients match independent dense sequences."""
     if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (10, 0):
         pytest.skip("DSv4 requires SM100")

@@ -38,7 +38,7 @@ from transformer_engine.pytorch.attention.sparse_attention import (
     dsa_cudnn,
 )
 
-pooled = dsa_cudnn.compress(
+compressed_kv = dsa_cudnn.compress(
     kv, gates, position_bias.float(), cu, cu_comp,
     ratio=ratio, overlap=is_csa, total_comp=total_comp,
 )
@@ -46,11 +46,11 @@ compressed_kv = ...  # Apply RMSNorm and RoPE to compressed KV.
 
 indices = None
 if is_csa:
-    index_pooled = dsa_cudnn.compress(
+    index_key = dsa_cudnn.compress(
         index_kv, index_gates, index_position_bias.float(), cu, cu_comp,
         ratio=ratio, overlap=True, total_comp=total_comp,
     )
-    index_key = model.finish_index_key(index_pooled)
+    index_key = ...  # Apply RMSNorm and RoPE to compressed index keys.
     indices = dsa_cudnn.select_indices(
         index_query, index_key, index_weights, cu, cu_comp,
         top_k=top_k, ratio=ratio, max_seqlen=max_seqlen,
@@ -101,8 +101,9 @@ hca = DSv4Attention(
 output = hca(hidden_states)  # [S, B, 4096] -> [S, B, 4096]
 ```
 
-Supported input tensor shapes are "batch-first" (shape `BSD`), "sequence-first" (shape `SBD`),
-and packed (shape `TD`). Packed calls require contiguous CUDA INT32
+`hidden_states` has shape `[S,B,hidden_size]` for `qkv_format="sbhd"` (default),
+`[B,S,hidden_size]` for `"bshd"`, or `[T,hidden_size]` for `"thd"`.
+Packed calls require contiguous CUDA INT32
 `cu_seqlens_q [B+1]` (from zero to `T`) and `max_seqlen_q`:
 
 ```python

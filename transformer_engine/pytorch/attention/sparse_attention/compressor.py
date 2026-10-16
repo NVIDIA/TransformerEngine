@@ -52,6 +52,8 @@ class Compressor(torch.nn.Module):
         weight_width=0,
     ):
         super().__init__()
+        if weight_width and not fused:
+            raise ValueError("weight_width requires fused=True.")
         projected = width * (2 if overlap else 1)
         kw = {"bias": False, "device": device, "params_dtype": params_dtype}
         if fused:
@@ -69,7 +71,7 @@ class Compressor(torch.nn.Module):
         self.projected, self.weight_width = projected, weight_width
 
     def forward(self, x, cu_seqlens, cu_seqlens_comp, *, total_comp):
-        """Project and compress KV rows, returning optional fused index weights."""
+        """Project and compress KV entries, returning optional fused index weights."""
         if hasattr(self, "fused_proj"):
             projected = self.fused_proj(x)
             widths = (
@@ -81,7 +83,7 @@ class Compressor(torch.nn.Module):
             kv, gate = parts[:2]
         else:
             kv, gate = self.kv_proj(x), self.gate_proj(x)
-        pooled = compress(
+        compressed_kv = compress(
             kv.reshape(-1, self.projected).contiguous(),
             gate.reshape(-1, self.projected).contiguous(),
             # cuDNN requires FP32 bias; the cast preserves gradients to the parameter.
@@ -96,6 +98,6 @@ class Compressor(torch.nn.Module):
             # cuDNN only guarantees valid rows below the final prefix. Clear
             # unused capacity before RMSNorm so it cannot poison weight gradients.
             valid = torch.arange(total_comp, device=x.device) < cu_seqlens_comp[-1]
-            pooled = pooled.masked_fill(~valid[:, None], 0)
-        compressed = self.kv_norm(pooled)
+            compressed_kv = compressed_kv.masked_fill(~valid[:, None], 0)
+        compressed = self.kv_norm(compressed_kv)
         return (compressed, parts[2]) if self.weight_width else compressed
