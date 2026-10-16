@@ -1019,6 +1019,10 @@ class TestTHDKernels(unittest.TestCase):
 
     def test_thd_get_partitioned_indices_shared_memory_boundary(self):
         props = torch.cuda.get_device_properties(torch.cuda.current_device())
+        if not hasattr(props, "shared_memory_per_block") or not hasattr(
+            props, "shared_memory_per_block_optin"
+        ):
+            self.skipTest(f"PyTorch {torch.__version__} does not expose shared-memory limits")
         max_shared_docs = props.shared_memory_per_block // 4 - 1
         for documents in (
             max_shared_docs,
@@ -1043,6 +1047,10 @@ class TestTHDKernels(unittest.TestCase):
 
     def test_thd_kernels_shared_memory_boundary(self):
         props = torch.cuda.get_device_properties(torch.cuda.current_device())
+        if not hasattr(props, "shared_memory_per_block") or not hasattr(
+            props, "shared_memory_per_block_optin"
+        ):
+            self.skipTest(f"PyTorch {torch.__version__} does not expose shared-memory limits")
         for tables in (1, 2):
             bytes_per_document = 4 * tables
             for documents in (
