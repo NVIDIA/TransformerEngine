@@ -602,6 +602,22 @@ int64_t nvte_comm_gemm_numroc(NVTECommGemmCtx* ctx, int64_t global_size) {
   return cublasMpNumroc(global_size, block_size(ctx, global_size), ctx->rank, 0, ctx->nranks);
 }
 
+void* nvte_comm_gemm_workspace(NVTECommGemmCtx* ctx, size_t* size) {
+  NVTE_API_CALL(nvte_comm_gemm_workspace);
+  // The loaded library decides the workspace layout: cuBLASMp 0.11.0 and newer start it with the
+  // gathered B.
+  static const bool gathered_b_first = [] {
+    int version = 0;
+    return cublasMpGetVersion(&version) == CUBLASMP_STATUS_SUCCESS && version >= 1100;
+  }();
+  if (!gathered_b_first) {
+    *size = 0;
+    return nullptr;
+  }
+  *size = ctx->workspace_size;
+  return ctx->workspace;
+}
+
 #else  // NVTE_WITH_CUBLASMP
 
 struct NVTECommGemmCtx {};
@@ -639,6 +655,10 @@ void nvte_gemm_all_reduce(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_t k,
 }
 
 int64_t nvte_comm_gemm_numroc(NVTECommGemmCtx* ctx, int64_t global_size) {
+  NVTE_ERROR("Transformer Engine has not been built with cuBLASMp support.");
+}
+
+void* nvte_comm_gemm_workspace(NVTECommGemmCtx* ctx, size_t* size) {
   NVTE_ERROR("Transformer Engine has not been built with cuBLASMp support.");
 }
 
