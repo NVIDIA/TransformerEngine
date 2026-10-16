@@ -4,8 +4,11 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <ATen/cuda/CUDAContext.h>
+
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 
 #include "../extensions.h"
 #include "common.h"
@@ -47,6 +50,53 @@ static bool cp_uniform_no_zero(const std::vector<size_t> &q, const std::vector<s
   const size_t batch = static_cast<size_t>(cu_q.numel() - 1);
   return q[0] == batch * sq && k[0] == batch * sk && v[0] == k[0] && q[1] == 4 * k[1] && k[1] > 0 &&
          v[1] == k[1] && q[2] == 128 && k[2] == 128 && v[2] == 128;
+}
+
+// Experimental complete-overwrite check for compact D256 backward only.
+// The existing native dense route validates every device length and physical
+// offset before execution. Forward, strided storage and other geometries retain
+// their original behavior. No FROST artifact or dispatch is involved.
+static bool cp_native_d256_no_zero(
+    const std::vector<size_t> &q, const std::vector<size_t> &k, const std::vector<size_t> &v,
+    size_t sq, size_t sk, const at::Tensor &cu_q, const at::Tensor &cu_kv,
+    const std::optional<at::Tensor> &offset_q, const std::optional<at::Tensor> &offset_kv,
+    NVTE_QKV_Layout layout, NVTE_QKV_Format o_format, NVTE_Bias_Type bias, NVTE_Mask_Type mask,
+    NVTE_Softmax_Type softmax, float dropout, float scale, const std::vector<int64_t> &window,
+    bool bottom_right, bool deterministic) {
+  static const bool enabled = [] {
+    for (const char *name :
+         {"NVTE_CP_EXPERIMENTAL_D256_BWD_NO_ZERO", "NVTE_CP_EXPERIMENTAL_UNIFORM_DENSE_BWD"}) {
+      const char *value = std::getenv(name);
+      if (value == nullptr || std::string(value) != "1") return false;
+    }
+    const char *strided = std::getenv("NVTE_CP_EXPERIMENTAL_STRIDED_DENSE_BWD");
+    return strided == nullptr || std::string(strided) != "1";
+  }();
+  if (!enabled || deterministic || bottom_right || scale != 0.0625f || layout != NVTE_THD_THD_THD ||
+      o_format != NVTE_THD || bias != NVTE_NO_BIAS || softmax != NVTE_VANILLA_SOFTMAX ||
+      dropout != 0.0f || window.size() != 2 || window[0] != -1 ||
+      !((mask == NVTE_PADDING_CAUSAL_MASK && (window[1] == 0 || window[1] == -1)) ||
+        (mask == NVTE_PADDING_MASK && window[1] == -1)) ||
+      q.size() != 3 || k.size() != 3 || v.size() != 3 || cu_q.numel() < 2 ||
+      cu_kv.numel() != cu_q.numel() || !offset_q.has_value() || !offset_kv.has_value() ||
+      offset_q->numel() != cu_q.numel() || offset_kv->numel() != cu_kv.numel())
+    return false;
+  for (const at::Tensor *length : {&cu_q, &cu_kv, &offset_q.value(), &offset_kv.value()}) {
+    if (length->scalar_type() != at::kInt || !length->is_cuda() || !length->is_contiguous() ||
+        length->dim() != 1 || length->device() != cu_q.device())
+      return false;
+  }
+  const auto *properties = at::cuda::getCurrentDeviceProperties();
+  if (properties->major != 10 || properties->minor != 0) return false;
+  const auto batch = static_cast<size_t>(cu_q.numel() - 1);
+  const bool target = batch == 64 && q[1] == 32 && k[1] == 8;
+  const bool small = batch == 2 && q[1] == 8 && k[1] == 2;
+  if (!(target || small) || q[2] != 256 || k[2] != 256 || v[2] != 256) return false;
+  const size_t local = target ? 2048 : 256;
+  const bool shape = mask == NVTE_PADDING_CAUSAL_MASK
+                         ? sq == local && sk == local
+                         : (sq == local && sk == local / 2) || (sq == local / 2 && sk == local);
+  return shape && q[0] == batch * sq && k[0] == batch * sk && v[0] == k[0] && v[1] == k[1];
 }
 
 // get the fused attention backend
@@ -542,7 +592,7 @@ std::vector<py::object> fused_attn_bwd(
   std::tie(te_dV, py_dV, dv_amax_buf) =
       quantizer_helper(dqkv_quantizer, dV_shape, dqkv_fake_dtype, true, dV);
 
-  const bool cp_skip_zero =
+  const bool cp_skip_zero_legacy =
       do_format == NVTE_THD && dqkv_layout == qkv_layout && s_quantizer.is_none() &&
       dp_quantizer.is_none() && dqkv_quantizer.is_none() && fake_dtype == at::kBFloat16 &&
       te_Q.dtype() == DType::kBFloat16 && te_K.dtype() == DType::kBFloat16 &&
@@ -551,11 +601,45 @@ std::vector<py::object> fused_attn_bwd(
       cp_uniform_no_zero(q_shape, k_shape, v_shape, max_seqlen_q, max_seqlen_kv, cu_seqlens_q,
                          cu_seqlens_kv, cu_seqlens_q_padded, cu_seqlens_kv_padded, qkv_layout,
                          o_format, bias_type, attn_mask_type, softmax_type, p_dropout, window_size);
-  if (cp_skip_zero) {
+  if (cp_skip_zero_legacy) {
     static thread_local bool logged = false;
     if (!logged) {
       std::fprintf(stderr, "TE_CP_NO_ZERO_WIDE_BWD\n");
       logged = true;
+    }
+  }
+
+  const bool cp_skip_zero_d256 =
+      do_format == NVTE_THD && dqkv_layout == qkv_layout && s_quantizer.is_none() &&
+      dp_quantizer.is_none() && dqkv_quantizer.is_none() && fake_dtype == at::kBFloat16 &&
+      te_Q.dtype() == DType::kBFloat16 && te_K.dtype() == DType::kBFloat16 &&
+      te_V.dtype() == DType::kBFloat16 && te_O.dtype() == DType::kBFloat16 &&
+      te_dO.dtype() == DType::kBFloat16 &&
+      cp_native_d256_no_zero(q_shape, k_shape, v_shape, max_seqlen_q, max_seqlen_kv, cu_seqlens_q,
+                             cu_seqlens_kv, cu_seqlens_q_padded, cu_seqlens_kv_padded, qkv_layout,
+                             o_format, bias_type, attn_mask_type, softmax_type, p_dropout,
+                             attn_scale, window_size, bottom_right_diagonal, deterministic);
+  const bool cp_skip_zero = cp_skip_zero_legacy || cp_skip_zero_d256;
+  if (cp_skip_zero_d256) {
+    static thread_local bool logged = false;
+    if (!logged) {
+      std::fprintf(stderr, "TE_CP_NATIVE_D256_NO_ZERO_BWD\n");
+      logged = true;
+    }
+    // Qualification-only NaN overwrite probe; disabled in performance runs.
+    static const bool poison = [] {
+      const char *value = std::getenv("NVTE_CP_EXPERIMENTAL_D256_BWD_POISON_GRAD");
+      return value != nullptr && std::string(value) == "1";
+    }();
+    if (poison) {
+      dQ.fill_(std::numeric_limits<float>::quiet_NaN());
+      dK.fill_(std::numeric_limits<float>::quiet_NaN());
+      dV.fill_(std::numeric_limits<float>::quiet_NaN());
+      static thread_local bool poison_logged = false;
+      if (!poison_logged) {
+        std::fprintf(stderr, "TE_CP_NATIVE_D256_POISON_BWD\n");
+        poison_logged = true;
+      }
     }
   }
 

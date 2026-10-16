@@ -705,3 +705,26 @@ They are experimental implementation controls, not a general ragged-input policy
 
 Declarations outside each switch's eligibility checks retain the existing cuDNN
 path. These experiments do not change context parallel communication.
+
+Experimental compact D256 backward initialization
+------------------------------------------------
+
+``NVTE_CP_EXPERIMENTAL_D256_BWD_NO_ZERO=1`` is a private, default-off
+qualification experiment for native cuDNN backward on SM100. It requires
+the existing checked uniform dense backward route and disables only the three
+framework gradient fills for compact BF16 THD with separate Q/K/V, no bias or
+dropout, vanilla softmax, scale 1/16 and non-deterministic backward. The initial
+scope is the B64/H32/Hkv8 local P2P shapes (2048,2048 causal), (2048,1024) and
+(1024,2048), plus B2/H8/Hkv2 checks with local length256. Physical gaps,
+strided dense mode, other geometries and attributes keep initialization.
+
+``NVTE_CP_EXPERIMENTAL_D256_BWD_POISON_GRAD=1`` is a qualification-only NaN
+fill before candidate execution. It is disabled in timing and has no effect
+outside the candidate. Forward and the existing D128 controls are unchanged.
+The initial validation uses cuDNN 9.29 and NVRTC 13.5 on B200. This is a
+bounded opt-in experiment; the existing dense route still checks every device
+length and physical offset. The switch does not change attention kernels,
+gradient allocation sizes, or context parallel communication. The focused
+``test_cp_uniform_d256_initialization.py`` regression checks small causal and
+rectangular shapes with random inputs, changed gradients and CUDA Graph replay.
+Full context parallel performance is qualified separately from that test.
