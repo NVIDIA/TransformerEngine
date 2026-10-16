@@ -295,44 +295,70 @@ def test_router_compile_opcheck(dtype, routing_map_format, index_dtype, histogra
         bias = torch.zeros(130, device="cuda")
         histogram = torch.full((130, 64), 7, device="cuda", dtype=torch.int32)
         bounds = torch.tensor([-1.0, 1.0], device="cuda")
-        torch.library.opcheck(
-            router._qb_indices_forward if indices is not None else router._qb_map_forward,
-            (
-                forward_logits,
-                4,
-                None,
-                bias,
-                routing_map_format,
-                *((indices,) if indices is not None else ()),
-                histogram,
-                bounds,
-                int(histogram_mode),
-            ),
+        forward = router._qb_indices_forward if indices is not None else router._qb_map_forward
+        forward_args = (
+            forward_logits,
+            4,
+            None,
+            bias,
+            routing_map_format,
+            *((indices,) if indices is not None else ()),
+            histogram,
+            bounds,
+            int(histogram_mode),
         )
     else:
-        torch.library.opcheck(
-            router._topk_indices_forward if indices is not None else router._topk_map_forward,
-            (
-                forward_logits,
-                4,
-                False,
-                None,
-                None,
-                None,
-                "sigmoid",
-                None,
-                routing_map_format,
-                *((indices,) if indices is not None else ()),
-            ),
+        forward = router._topk_indices_forward if indices is not None else router._topk_map_forward
+        forward_args = (
+            forward_logits,
+            4,
+            False,
+            None,
+            None,
+            None,
+            "sigmoid",
+            None,
+            routing_map_format,
+            *((indices,) if indices is not None else ()),
         )
-        if index_dtype in (None, torch.int16):
-            torch.library.opcheck(router._score_forward, (logits, 4, "softmax", routing_map_format))
-            counts = torch.ones(130, device="cuda", dtype=torch.int32)
-            count = torch.tensor(16, device="cuda", dtype=torch.int64)
-            for token_count in (None, count):
-                torch.library.opcheck(
-                    router._aux_loss_forward, (logits, counts, 16, token_count, 130, 4, 0.01)
-                )
+    torch.library.opcheck(forward, forward_args)
+    outputs = forward(*forward_args)
+    torch.library.opcheck(
+        router._topk_backward,
+        (
+            indices if indices is not None else outputs[1],
+            outputs[-1],
+            torch.randn_like(outputs[0]),
+            4,
+            False,
+            None,
+            "sigmoid",
+            routing_map_format,
+            indices is not None,
+        ),
+    )
+
+    if histogram_mode is None and index_dtype in (None, torch.int16):
+        torch.library.opcheck(router._score_forward, (logits, 4, "softmax", routing_map_format))
+        scores, _, intermediate = router._score_forward(
+            forward_logits, 4, "softmax", routing_map_format
+        )
+        torch.library.opcheck(
+            router._score_backward,
+            (intermediate, torch.randn_like(scores), 4, "softmax", dtype),
+        )
+        counts = torch.ones(130, device="cuda", dtype=torch.int32)
+        count = torch.tensor(16, device="cuda", dtype=torch.int64)
+        for token_count in (None, count):
+            torch.library.opcheck(
+                router._aux_loss_forward, (logits, counts, 16, token_count, 130, 4, 0.01)
+            )
+            loss, const_buf = router._aux_loss_forward(
+                forward_logits, counts, 16, token_count, 130, 4, 0.01
+            )
+            torch.library.opcheck(
+                router._aux_loss_backward, (const_buf, counts, 16, 130, torch.randn_like(loss))
+            )
 
 
 # Pytorch-based group topk
