@@ -8,6 +8,7 @@ import importlib.util
 import math
 import os
 from typing import Optional, Tuple
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
@@ -244,7 +245,7 @@ def _inputs(
 
 
 @requires_gdn2
-@pytest.mark.parametrize("checkpoint_core_attention", [False, True], ids=["eager", "checkpoint"])
+@pytest.mark.parametrize("execution_mode", ["eager", "checkpoint", "compile"])
 @pytest.mark.parametrize(
     ("qk_dim", "v_dim"),
     [(64, 64), (128, 128), (64, 128)],
@@ -252,7 +253,7 @@ def _inputs(
 )
 @pytest.mark.parametrize("use_qk_l2norm_in_kernel", [False, True], ids=["no_l2norm", "l2norm"])
 def test_gdn2_thd_forward_final_state_and_backward(
-    checkpoint_core_attention, qk_dim, v_dim, use_qk_l2norm_in_kernel
+    execution_mode, qk_dim, v_dim, use_qk_l2norm_in_kernel
 ):
     """THD GDN-2 matches a PyTorch recurrence in forward and backward."""
     batch, sequence, heads = 2, 128, 2
@@ -270,6 +271,9 @@ def test_gdn2_thd_forward_final_state_and_backward(
         kv_channels=(qk_dim, v_dim),
         qkv_format="thd",
     )
+    if execution_mode == "compile":
+        torch._dynamo.reset()
+        attention = torch.compile(attention, fullgraph=True)
     output, final_state = attention(
         q,
         k,
@@ -280,7 +284,7 @@ def test_gdn2_thd_forward_final_state_and_backward(
         w=w,
         initial_state=initial_state,
         output_final_state=True,
-        checkpoint_core_attention=checkpoint_core_attention,
+        checkpoint_core_attention=execution_mode == "checkpoint",
         use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
     )
     reference_inputs = {
@@ -334,7 +338,8 @@ def test_gdn2_thd_forward_final_state_and_backward(
 @pytest.mark.parametrize("qkv_format", ["bshd", "sbhd"])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16], ids=["bf16", "fp16"])
 @requires_gdn2
-def test_gdn2_dense_layout(qkv_format, dtype):
+@pytest.mark.parametrize("compile_model", [False, True], ids=["eager", "compile"])
+def test_gdn2_dense_layout(qkv_format, dtype, compile_model):
     """Dense TE layouts and supported input dtypes match a PyTorch reference."""
     batch, sequence, heads, dim = 1, 128, 2, 64
     q, k, v, g, beta, w = _inputs(batch, sequence, heads, heads, dim, dim, dtype)
@@ -361,6 +366,9 @@ def test_gdn2_dense_layout(qkv_format, dtype):
         kv_channels=dim,
         qkv_format=qkv_format,
     )
+    if compile_model:
+        torch._dynamo.reset()
+        attention = torch.compile(attention, fullgraph=True)
     output = attention(q, k, v, g=g, beta=beta, w=w, use_qk_l2norm_in_kernel=True)
     assert output.shape == expected.shape
     _assert_rms_close(output, expected, _FWD_TOL[dtype], "output")
@@ -578,6 +586,7 @@ def test_gdn2_matches_gdn_with_scalar_gates():
     _assert_rms_close(output, expected, 3e-2, "GDN-2 against GDN")
 
 
+@patch.dict("sys.modules", {"cudnn.linear_attention": Mock()})
 def test_gdn2_requires_all_gates():
     """A partial GDN-2 invocation fails before entering a softmax-attention backend."""
     q, k, v, g, beta, _ = _inputs(1, 128, 1, 1)
@@ -590,6 +599,7 @@ def test_gdn2_requires_all_gates():
         attention(q, k, v, g=g, beta=beta)
 
 
+@patch.dict("sys.modules", {"cudnn.linear_attention": Mock()})
 def test_gdn2_module_carries_no_quantization_state():
     """LinearAttentionBase is a plain nn.Module: no parameters, no FP8 state."""
     from transformer_engine.pytorch.module.base import TransformerEngineBaseModule

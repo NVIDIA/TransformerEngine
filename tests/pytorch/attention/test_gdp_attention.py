@@ -8,6 +8,7 @@ import importlib.util
 import math
 import os
 from typing import Optional, Tuple
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
@@ -257,16 +258,14 @@ def _inputs(
 
 
 @requires_gdp
-@pytest.mark.parametrize("checkpoint_core_attention", [False, True], ids=["eager", "checkpoint"])
+@pytest.mark.parametrize("execution_mode", ["eager", "checkpoint", "compile"])
 @pytest.mark.parametrize("num_householder", [1, 2, 3], ids=["n1", "n2", "n3"])
 @pytest.mark.parametrize(
     ("qk_dim", "v_dim"),
     [(64, 64), (128, 128), (64, 128), (128, 64)],
     ids=["qk64_v64", "qk128_v128", "qk64_v128", "qk128_v64"],
 )
-def test_gdp_thd_forward_final_state_and_backward(
-    checkpoint_core_attention, num_householder, qk_dim, v_dim
-):
+def test_gdp_thd_forward_final_state_and_backward(execution_mode, num_householder, qk_dim, v_dim):
     """THD GDP matches a PyTorch recurrence in forward and backward."""
     batch, sequence, heads = 2, 128, 2
     q, k, v, g, beta = _inputs(batch, sequence, heads, num_householder, qk_dim, v_dim)
@@ -286,6 +285,9 @@ def test_gdp_thd_forward_final_state_and_backward(
         num_householder=num_householder,
         qkv_format="thd",
     )
+    if execution_mode == "compile":
+        torch._dynamo.reset()
+        attention = torch.compile(attention, fullgraph=True)
     output, final_state = attention(
         q,
         k,
@@ -295,7 +297,7 @@ def test_gdp_thd_forward_final_state_and_backward(
         beta=beta,
         initial_state=initial_state,
         output_final_state=True,
-        checkpoint_core_attention=checkpoint_core_attention,
+        checkpoint_core_attention=execution_mode == "checkpoint",
     )
 
     reference_inputs = {
@@ -342,7 +344,8 @@ def test_gdp_thd_forward_final_state_and_backward(
 @requires_gdp
 @pytest.mark.parametrize("qkv_format", ["bshd", "sbhd"])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16], ids=["bf16", "fp16"])
-def test_gdp_dense_layout(qkv_format, dtype):
+@pytest.mark.parametrize("compile_model", [False, True], ids=["eager", "compile"])
+def test_gdp_dense_layout(qkv_format, dtype, compile_model):
     """Dense TE layouts and supported input dtypes match a PyTorch reference."""
     batch, sequence, heads, dim, num_householder = 1, 128, 2, 64, 2
     q, k, v, g, beta = _inputs(batch, sequence, heads, num_householder, dim, dim, dtype)
@@ -370,6 +373,9 @@ def test_gdp_dense_layout(qkv_format, dtype):
         num_householder=num_householder,
         qkv_format=qkv_format,
     )
+    if compile_model:
+        torch._dynamo.reset()
+        attention = torch.compile(attention, fullgraph=True)
     output = attention(q, k, v, g=g, beta=beta, use_qk_l2norm_in_kernel=True)
     assert output.shape == expected.shape
     _assert_rms_close(output, expected, _FWD_TOL[dtype], "output")
@@ -700,6 +706,7 @@ def test_gdp_with_one_householder_matches_gdn():
     _assert_rms_close(output, expected, _FWD_TOL[q.dtype], "GDP against GDN")
 
 
+@patch.dict("sys.modules", {"cudnn.linear_attention": Mock()})
 def test_gdp_requires_both_gates():
     """A partial GDP invocation fails before entering a softmax-attention backend."""
     q, k, v, g, _ = _inputs(1, 128, 1, 2)

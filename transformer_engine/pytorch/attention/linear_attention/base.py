@@ -20,10 +20,8 @@ token -- implement their own.
 This module is **experimental** and subject to change.
 """
 
-import importlib
 import math
 from contextlib import contextmanager
-from functools import lru_cache
 from typing import Any, Callable, Dict, Generator, Optional, Tuple, Union
 
 import torch
@@ -31,20 +29,6 @@ import torch
 from transformer_engine.pytorch.constants import dist_group_type
 from transformer_engine.pytorch.distributed import get_distributed_world_size, checkpoint
 from transformer_engine.pytorch.utils import nvtx_range_pop, nvtx_range_push
-
-
-@lru_cache(maxsize=None)
-def _import_linear_attention_op(op_name: str, variant: str) -> Callable:
-    """Import a cuDNN frontend linear-attention custom op lazily."""
-    try:
-        ops = importlib.import_module("cudnn.linear_attention.ops")
-        return getattr(ops, op_name)
-    except (AttributeError, ImportError) as exc:
-        raise ImportError(
-            f"{variant} attention requires a nvidia-cudnn-frontend installation that provides "
-            f"cudnn.linear_attention.ops.{op_name} and its kernel runtime. Install "
-            "cuDNN frontend from the matching source revision with the 'cutedsl' extra."
-        ) from exc
 
 
 def _to_thd(tensor: torch.Tensor, qkv_format: str) -> torch.Tensor:
@@ -120,6 +104,16 @@ class LinearAttentionKernelAdapter(torch.nn.Module):
         self.v_head_dim = v_head_dim
         self._dense_cu_seqlens_key: Optional[Tuple[torch.device, int, int]] = None
         self._dense_cu_seqlens: Optional[torch.Tensor] = None
+        try:
+            from cudnn.linear_attention import ops
+
+            self._op = getattr(ops, self.op_name)
+        except (AttributeError, ImportError) as exc:
+            raise ImportError(
+                f"{self.variant} attention requires a nvidia-cudnn-frontend installation that "
+                f"provides cudnn.linear_attention.ops.{self.op_name} and its kernel runtime. "
+                "Install cuDNN frontend from the matching source revision with the 'cutedsl' extra."
+            ) from exc
 
     def _validate_qkv_shapes(
         self,
@@ -181,7 +175,6 @@ class LinearAttentionKernelAdapter(torch.nn.Module):
 
     def _call_op(
         self,
-        op: Callable,
         query_layer: torch.Tensor,
         key_layer: torch.Tensor,
         value_layer: torch.Tensor,
@@ -317,10 +310,8 @@ class LinearAttentionKernelAdapter(torch.nn.Module):
         batch_size = cu_seqlens.shape[0] - 1
         self._validate_initial_state(initial_state, batch_size=batch_size, device=device)
 
-        op = _import_linear_attention_op(self.op_name, self.variant)
         try:
             output, final_state = self._call_op(
-                op,
                 _to_thd(query_layer, qkv_format),
                 _to_thd(key_layer, qkv_format),
                 _to_thd(value_layer, qkv_format),
