@@ -19,7 +19,6 @@ from transformer_engine.pytorch.distributed_weight import (
     materialize_weight_for_forward,
     materialize_weight_for_backward,
     finalize_weight_grads,
-    weight_grad_buffers,
     weight_grad_dtype,
 )
 
@@ -33,11 +32,9 @@ class FakeDistributedWeight(torch.Tensor):
 
     is_distributed_weight = True
 
-    def __new__(cls, group_size=1, marker=-1.0):
+    def __new__(cls, group_size=1):
         t = torch.zeros(1).as_subclass(cls)
         t.group_size = group_size
-        # Distinguishes this member's grad_buffer from its peers'.
-        t.marker = marker
         t.calls = []
         return t
 
@@ -59,7 +56,7 @@ class FakeDistributedWeight(torch.Tensor):
         return out if self.group_size > 1 else out[0]
 
     def grad_buffer(self):
-        return torch.full((2, 2), self.marker)
+        return torch.full((2, 2), -1.0)
 
 
 class FakeNonTensorWeight:
@@ -174,35 +171,6 @@ def test_finalize_grads_noop_on_plain_tensor():
     plain_w = torch.nn.Parameter(torch.zeros(2))
     g = [torch.ones(2)]
     assert finalize_weight_grads(plain_w, g) == g
-
-
-@pytest.mark.parametrize("group_size", [1, 2])
-def test_weight_grad_buffers_dispatches(group_size):
-    """EVERY member supplies its own buffer -- the leader's is not reused for the group.
-
-    Distinct markers catch a ``[weights[0].grad_buffer()] * N`` implementation, which would hand
-    the whole group one buffer and let the per-expert GEMMs clobber each other.
-    """
-    group = [
-        FakeDistributedWeight(group_size=group_size, marker=float(i)) for i in range(group_size)
-    ]
-    out = weight_grad_buffers(group, (2, 2), torch.bfloat16, "cpu")
-    assert [b[0, 0].item() for b in out] == [float(i) for i in range(group_size)]
-
-
-def test_weight_grad_buffers_rejects_mismatched_buffer():
-    """A shard-shaped buffer would let the GEMM write past the end -- fail loudly instead."""
-    w = FakeDistributedWeight()
-    with pytest.raises(RuntimeError, match="wgrad GEMM needs"):
-        weight_grad_buffers([w], (4, 5), torch.bfloat16, "cpu")
-
-
-def test_weight_grad_buffers_allocates_for_plain_weights():
-    """Plain weights have no buffer of their own, so they get fresh scratch instead."""
-    plain = [torch.nn.Parameter(torch.zeros(2)) for _ in range(3)]
-    out = weight_grad_buffers(plain, (4, 5), torch.bfloat16, "cpu")
-    assert len(out) == 3
-    assert all(tuple(b.shape) == (4, 5) and b.dtype is torch.bfloat16 for b in out)
 
 
 @pytest.mark.parametrize("group_size", [1, 2])

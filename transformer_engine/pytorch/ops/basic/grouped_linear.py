@@ -59,7 +59,6 @@ from ...distributed_weight import (
     is_distributed_weight,
     materialize_weight_for_backward,
     materialize_weight_for_forward,
-    weight_grad_buffers,
     weight_grad_dtype,
 )
 from ...tensor import GroupedTensor, GroupedTensorStorage
@@ -1632,7 +1631,12 @@ class GroupedLinear(BasicOperation):
                     ]
                     accumulate_into_main_grad = get_accumulate_flag_in_param(weights[0])
                 else:
-                    grad_weights = weight_grad_buffers(weights, weight_shape, ctx.dtype, device)
+                    grad_weights_packed = torch.empty(
+                        grouped_shape,
+                        dtype=weight_grad_dtype(weights, ctx.dtype),
+                        device=device,
+                    )
+                    grad_weights = [grad_weights_packed[i] for i in range(num_groups)]
                 final_weight_grads = list(grad_weights)
 
         # Perform dgrad GEMMs
@@ -1923,7 +1927,12 @@ class GroupedLinear(BasicOperation):
                     ]
                     accumulate_into_main_grad = get_accumulate_flag_in_param(weights[0])
                 else:
-                    final_weight_grads = weight_grad_buffers(weights, weight_shape, dtype, device)
+                    final_weight_grads = [
+                        torch.empty(
+                            weight_shape, dtype=weight_grad_dtype(weights, dtype), device=device
+                        )
+                        for _ in range(num_groups)
+                    ]
                 wgrad_output = final_weight_grads
 
         # wgrad GEMM

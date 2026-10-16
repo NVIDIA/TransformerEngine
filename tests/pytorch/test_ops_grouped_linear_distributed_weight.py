@@ -64,29 +64,17 @@ class _FakeDistWeight(torch.nn.Parameter):
         return [torch.zeros_like(g) for g in wl]  # dummy grads (real value is now in main_grad)
 
     def grad_buffer(self):
-        # Mirrors a real implementer (e.g. GTP's get_wgrad_tensor): a reusable buffer typed by
-        # main_grad, not by the weight -- the wgrad GEMM writes here, then finalize reduces it.
-        if getattr(self, "_wgrad_buf", None) is None:
-            self._wgrad_buf = torch.empty_like(self.data, dtype=self.main_grad.dtype)
-        return self._wgrad_buf
+        return self.data
 
 
 def _make_fake_dist_leader(op, num_gemms, cls=_FakeDistWeight):
-    """Replace the whole weight group with fakes and return the leader, ``op.weight0``.
-
-    Every member is a distributed weight (as in a real implementer, where each shard is one), so
-    per-weight protocol calls such as ``grad_buffer`` resolve on the followers too; the dispatchers
-    only ever route through the leader.
-    """
-    group = []
-    for i in range(num_gemms):
-        w = cls(getattr(op, f"weight{i}").data)
-        w.calls = {"fwd": 0, "bwd": 0, "finalize": 0}
-        w.wgrad_dtypes = []
-        setattr(op, f"weight{i}", w)
-        group.append(w)
-    leader = group[0]
-    leader._group = group
+    """Replace ``op.weight0`` with a fake distributed leader referencing the whole group."""
+    w0 = op.weight0
+    leader = cls(w0.data)
+    leader.calls = {"fwd": 0, "bwd": 0, "finalize": 0}
+    leader.wgrad_dtypes = []
+    leader._group = [leader] + [getattr(op, f"weight{i}") for i in range(1, num_gemms)]
+    op.weight0 = leader
     return leader
 
 
