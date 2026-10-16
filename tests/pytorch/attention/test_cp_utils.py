@@ -5,20 +5,25 @@
 """Unit tests for context parallel utils."""
 
 import itertools
-import torch
 import unittest
+
+import torch
 from transformer_engine.pytorch import CPLoadBalancingStrategy
 from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
     _zero_thd_padding,
+    generate_positional_ids_for_cp,
     get_batch_on_this_cp_rank,
     get_no_load_balance_thd_causal_metadata,
     get_thd_partitioned_indices,
+    pad_thd_sequences_for_cp,
     restore_thd_gathered_kv,
     unrestore_thd_gathered_kv,
-    pad_thd_sequences_for_cp,
-    generate_positional_ids_for_cp,
 )
-from transformer_engine.pytorch.attention.dot_product_attention.utils import get_thd_padding_mask
+from transformer_engine.pytorch.attention.dot_product_attention.utils import (
+    fa4_window_size,
+    get_thd_padding_mask,
+    normalize_fa4_window_kwargs,
+)
 
 try:
     import transformer_engine_torch as tex
@@ -67,6 +72,21 @@ class TestTHDPartitioning(unittest.TestCase):
 
         self.assertIs(restored, tokens)
         self.assertIs(unrestored, tokens)
+
+
+class TestFA4WindowSize(unittest.TestCase):
+    def test_unlimited_sentinel_maps_to_none(self):
+        self.assertIsNone(fa4_window_size(None))
+        self.assertEqual(fa4_window_size((-1, -1)), (None, None))
+        self.assertEqual(fa4_window_size((-1, 0)), (None, 0))
+        self.assertEqual(fa4_window_size((128, 0)), (128, 0))
+
+        kwargs = {"window_size_left": -1, "window_size_right": 0, "softmax_scale": 0.5}
+        normalize_fa4_window_kwargs(kwargs)
+        self.assertEqual(
+            kwargs,
+            {"window_size_left": None, "window_size_right": 0, "softmax_scale": 0.5},
+        )
 
 
 class TestSequencePadding(unittest.TestCase):

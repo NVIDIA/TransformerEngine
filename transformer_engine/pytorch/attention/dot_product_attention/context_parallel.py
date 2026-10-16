@@ -1171,6 +1171,7 @@ def cp_p2p_fwd_flash_attn(
             cu_seqlens_q_ = cu_seqlens_q_padded // 2
 
     if use_flash_attn_4:
+        dpa_utils.normalize_fa4_window_kwargs(fa_forward_kwargs)
         fa_outputs = flash_attn_fwd(
             q_part,
             k_part,
@@ -1548,6 +1549,7 @@ def cp_p2p_bwd_flash_attn(
     else:
         fa_backward_kwargs["causal"] = causal_
     if use_flash_attn_4:
+        dpa_utils.normalize_fa4_window_kwargs(fa_backward_kwargs)
         dq, dk, dv = flash_attn_bwd(
             q_part,
             k_part,
@@ -3769,6 +3771,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             fa_forward_kwargs["window_size_left"] = window_size_per_step[i][0]
                             fa_forward_kwargs["window_size_right"] = window_size_per_step[i][1]
                         if use_flash_attn_4:
+                            dpa_utils.normalize_fa4_window_kwargs(fa_forward_kwargs)
                             fa_outputs = flash_attn_fwd(
                                 q_part,
                                 k_part,
@@ -4415,6 +4418,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                         elif not ctx.use_flash_attn_4:
                             fa_backward_kwargs["causal"] = causal
                         if ctx.use_flash_attn_4:
+                            dpa_utils.normalize_fa4_window_kwargs(fa_backward_kwargs)
                             (
                                 dq_per_step[i],
                                 dk_per_step[i],
@@ -4858,6 +4862,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 fa_cu_seqlens_q = cu_seqlens_q_padded
                 fa_cu_seqlens_kv = cu_seqlens_kv_padded
             if use_flash_attn_4:
+                dpa_utils.normalize_fa4_window_kwargs(fa_forward_kwargs)
                 fa_outputs = flash_attn_fwd(
                     q_part,
                     k_part,
@@ -5290,6 +5295,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 fa_backward_kwargs["is_causal"] = causal
 
             if ctx.use_flash_attn_4:
+                dpa_utils.normalize_fa4_window_kwargs(fa_backward_kwargs)
                 dq, dk, dv = flash_attn_bwd(
                     q,
                     k,
