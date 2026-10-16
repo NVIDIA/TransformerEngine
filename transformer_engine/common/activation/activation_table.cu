@@ -4,8 +4,10 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-// Builds the activation tables from the scalar util/math.h functions. This file must not be
-// compiled with --use_fast_math: the tables have to hold exactly what util/math.h computes.
+// Builds the activation tables from the scalar util/math.h functions. The tables have to hold
+// what the activation kernels compute, so this file is compiled with the same flags as those
+// kernels: with --use_fast_math when NVTE_BUILD_ACTIVATION_WITH_FAST_MATH is on. In such builds
+// GeLU is not reproducible between kernels (see CMakeLists.txt), with or without the tables.
 
 #include <memory>
 #include <mutex>
