@@ -6,7 +6,7 @@
 
 A benchmark script describes itself with a `Benchmark` (its dimensions, command-line options
 and how to time one implementation) and calls `main(benchmark)`; this module provides the
-rest: CUPTI kernel timing with L2 flushing, --compare across git revisions or against the
+rest: CUPTI kernel timing over rotating buffers (cold L2), --compare across git revisions or against the
 installed TE's CUDA kernels, --regenerate from earlier results, and csv/raw/png/html output.
 """
 
@@ -39,6 +39,9 @@ INPUTS = {
     "fp16": ("float16", "Float16", 2),
     "fp32": ("float32", "Float32", 4),
 }
+# Data touched between two uses of a buffer set, in multiples of the L2 size: enough that a set's
+# input is certainly out of L2 by the time it is reused.
+L2_ROTATION = 3
 # Columns every results table ends with; a benchmark's own config columns come first.
 RESULT_COLUMNS = ["time_us", "min_us", "rel_std_pct", "GB/s", "kernel"]
 CUDA_EXPLANATION = """\
@@ -96,20 +99,6 @@ def l2_cache_bytes(device=None):
     return torch.cuda.get_device_properties(device).L2_cache_size
 
 
-def make_l2_flush(device=None, multiple=2):
-    """Returns flush(), which evicts L2 by reading a buffer `multiple` times its size; call it
-    before each timed launch so the kernel reads its inputs from DRAM.
-
-    It must be a read: a write (e.g. zero_) leaves L2 full of dirty lines, and the next kernel
-    pays for writing them back (measured +10% on some MXFP8 quantize kernels).
-    """
-    import torch  # pylint: disable=import-outside-toplevel
-
-    device = torch.cuda.current_device() if device is None else device
-    buffer = torch.ones(multiple * l2_cache_bytes(device) // 4, dtype=torch.float32, device=device)
-    return buffer.sum
-
-
 def base_name(kernel):
     """`void ns::quantize_mxfp8_kernel<...>(...)` -> `quantize_mxfp8_kernel`."""
     return re.split(r"[<(]", kernel.removeprefix("void "), maxsplit=1)[0].split("::")[-1]
@@ -128,52 +117,79 @@ def _cuda_kernels(prof):
     return sorted(events, key=lambda e: e.time_range.start)
 
 
-def time_kernels(launches, runs, warmup, keep):
-    """Times each launch with CUPTI kernel timestamps (via torch.profiler).
+def time_kernels(factories, runs, warmup, keep):
+    """Times each config's kernels with CUPTI kernel timestamps (via torch.profiler).
 
-    `launches` yields one zero-argument callable per config (consumed lazily, so inputs can be
-    created and freed per config). Each gets `warmup` untimed calls, then `runs` timed calls,
-    each after an L2 flush. A launch may run several kernels: the ones whose base name `keep`
-    accepts are summed, the rest (helpers, the flush) ignored. Returns, per config,
-    (list of per-run microseconds, kernel names).
+    `factories` yields one zero-argument factory per config (consumed lazily, so buffers are
+    created and freed per config); each call builds an independent set of input and output
+    buffers and returns launch() on them. Launches rotate over enough sets that more than
+    L2_ROTATION x the L2 size is touched before a set comes back, so every launch reads its
+    input from DRAM, and run back to back, so each pays (amortized) for writing back the
+    dirty outputs earlier launches left in L2, as in a real pipeline. A launch may run
+    several kernels: the ones whose base name `keep` accepts are summed, the rest ignored.
+    Returns, per config, (list of per-run microseconds, kernel names, number of sets).
     """
     # pylint: disable=import-outside-toplevel
     import torch
     from torch.profiler import ProfilerActivity, profile
 
-    flush = make_l2_flush()
-    with profile(activities=[ProfilerActivity.CUDA]) as prof:  # the flush's own kernels
-        flush()
-        torch.cuda.synchronize()
-    flush_names = [e.name for e in _cuda_kernels(prof)]
+    # A tiny kernel with a name nothing else uses marks where each timed launch starts.
+    def marker():
+        torch.cuda._sleep(1)  # pylint: disable=protected-access
 
-    # Every flush marks a boundary: [warmups] F run F run ... F run F | next config's warmups.
-    num_configs = 0
     with profile(activities=[ProfilerActivity.CUDA]) as prof:
-        for launch in launches:
-            num_configs += 1
-            for _ in range(warmup):  # JIT compile and first-launch costs stay out of the timing
-                launch()
-            for _ in range(runs):
-                flush()
-                launch()
-            flush()
+        marker()
+        torch.cuda.synchronize()
+    marker_names = [e.name for e in _cuda_kernels(prof)]
+
+    # Per config: [setup, warmups] M run M run ... M run M | next config's setup.
+    num_sets = []
+    with profile(activities=[ProfilerActivity.CUDA]) as prof:
+        for factory in factories:
+            outputs = []  # each set keeps its last output alive, so new ones get fresh memory
+
+            def keep_output(launch, slot):
+                def run():
+                    outputs[slot] = launch()
+
+                return run
+
+            before = torch.cuda.memory_allocated()
+            outputs.append(None)
+            sets = [keep_output(factory(), 0)]
+            sets[0]()  # JIT compile; also materializes outputs allocated per call
+            torch.cuda.synchronize()
+            footprint = max(torch.cuda.memory_allocated() - before, 1)
+            count = max(2, -(-L2_ROTATION * l2_cache_bytes() // footprint) + 1)
+            for slot in range(1, count):
+                outputs.append(None)
+                sets.append(keep_output(factory(), slot))
+            num_sets.append(count)
+            for k in range(max(warmup, count)):  # every set touched once before timing
+                sets[k % count]()
+            for k in range(runs):
+                marker()
+                sets[k % count]()
+            marker()
+            del sets, outputs
         torch.cuda.synchronize()
 
     segments, current, i = [], [], 0
     kernels = _cuda_kernels(prof)
     while i < len(kernels):
-        if [e.name for e in kernels[i : i + len(flush_names)]] == flush_names:
+        if [e.name for e in kernels[i : i + len(marker_names)]] == marker_names:
             segments.append(current)
-            current, i = [], i + len(flush_names)
+            current, i = [], i + len(marker_names)
         else:
             current.append(kernels[i])
             i += 1
-    expected = num_configs * (runs + 1)
+    expected = len(num_sets) * (runs + 1)
     if len(segments) != expected:
-        raise RuntimeError(f"Expected {expected} L2 flushes in the trace, found {len(segments)}")
+        raise RuntimeError(
+            f"Expected {expected} launch markers in the trace, found {len(segments)}"
+        )
     results = []
-    for c in range(num_configs):
+    for c, count in enumerate(num_sets):
         times, names = [], []
         for seg in segments[c * (runs + 1) + 1 : (c + 1) * (runs + 1)]:
             kept = [e for e in seg if keep(base_name(e.name))]
@@ -185,7 +201,7 @@ def time_kernels(launches, runs, warmup, keep):
                 )
             times.append(sum(e.device_time_total for e in kept))
             names = list(dict.fromkeys(short_name(base_name(e.name)) for e in kept))
-        results.append((times, "+".join(names)))
+        results.append((times, "+".join(names), count))
     return results
 
 
@@ -718,8 +734,9 @@ def _write_config(bench, out_dir, args, repo, commit, labels, files):
     lines += [
         f"runs:       {args.runs} timed + {args.warmup} warm-up launches per config",
         (
-            "timing:     CUPTI kernel timestamps (torch.profiler), L2 flushed (read) before each"
-            " run, clocks as set by the user"
+            "timing:     CUPTI kernel timestamps (torch.profiler); back-to-back launches rotate"
+            f" over buffer sets touching >{L2_ROTATION}x L2 between reuses (cold inputs, output"
+            " write-backs included); clocks as set by the user"
         ),
         f"files:      {', '.join(files)}",
     ]

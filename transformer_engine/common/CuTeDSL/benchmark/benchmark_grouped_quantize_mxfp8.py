@@ -2,8 +2,8 @@
 #
 # See LICENSE for license information.
 
-"""Kernel-only benchmark of the grouped MXFP8 quantize kernels (CUPTI kernel timing, L2
-flushed), e.g. the per-expert activations of an MoE layer.
+"""Kernel-only benchmark of the grouped MXFP8 quantize kernels (CUPTI kernel timing, cold
+L2), e.g. the per-expert activations of an MoE layer.
 
 A group is G members (experts) holding M rows of hidden size N in total; --layout picks how
 the member shapes vary. Uneven splits are random but seeded from the shape, so every run and
@@ -148,11 +148,11 @@ def _cuda_launcher():
 
 def _cutedsl_launcher():
     """Returns setup(x, group, layout, direction, fusion, swizzle) -> launch(), calling the
-    compiled CuTeDSL grouped kernel directly on the buffers of a TE grouped output."""
+    compiled CuTeDSL grouped kernel directly on buffers laid out as TE's grouped output."""
     # pylint: disable=import-outside-toplevel
     import torch
 
-    tex, _ = _te()  # only allocates the grouped outputs, with the CUDA kernels
+    common.cuda_backend(True)  # not needed for the direct call, keeps TE's dispatch consistent
     from transformer_engine.common.CuTeDSL import get_mxfp8_group_quantization_function
 
     # Resolve the defining module instead of naming it, in case it gets renamed.
@@ -175,18 +175,24 @@ def _cutedsl_launcher():
         return getattr(fn, "__tvm_ffi_object__", lambda: None)() or fn
 
     def setup(x, group, layout, direction, fusion, swizzle):
+        # Allocated here rather than by a TE grouped quantize call, so setting up a buffer set
+        # runs no kernel. Sizes and offsets are those of TE's GroupedTensor: per member, scales
+        # padded to 128 x 4 (rowwise) / 4 x 128 (colwise) blocks, element offsets of the data.
         rowwise, colwise = common.DIRECTIONS[direction]
-        quantizer = _quantizer(tex, direction, swizzle)
-        _, out = _te_group_quantize(tex, x, quantizer, group, layout, "none")
         shape = tuple(x.shape)
+        empty = functools.partial(torch.empty, device="cuda")
         fp8, e8m0 = torch.float8_e4m3fn, torch.float8_e8m0fnu
-        o_row = out.rowwise_data.view(fp8).view(shape) if rowwise else None
-        o_col = out.columnwise_data.view(fp8).view(shape) if colwise else None
+        o_row = empty(shape, dtype=fp8) if rowwise else None
+        o_col = empty(shape, dtype=fp8) if colwise else None
+        row_scales = sum(_round_up(m, 128) * _round_up(-(-n // 32), 4) for m, n in group)
+        col_scales = sum(_round_up(-(-m // 32), 4) * _round_up(n, 128) for m, n in group)
+        s_row = empty(row_scales, dtype=e8m0) if rowwise else None
+        s_col = empty(col_scales, dtype=e8m0) if colwise else None
         # As the C++ bridge does: a missing direction's scale slot takes the other's buffer.
-        s_row = (out.scale_inv if rowwise else out.columnwise_scale_inv).view(e8m0)
-        s_col = (out.columnwise_scale_inv if colwise else out.scale_inv).view(e8m0)
+        s_row, s_col = (s_row if rowwise else s_col), (s_col if colwise else s_row)
         first, last = _dims_tensors(group, layout)
-        offsets = None if layout == "same" else out.tensor_offsets
+        ends = list(itertools.accumulate((m * n for m, n in group), initial=0))
+        offsets = None if layout == "same" else torch.tensor(ends, dtype=torch.int64, device="cuda")
         single = layout in SINGLE_TENSOR_LAYOUTS
         # Scratch the kernel builds its per-member TMA descriptors in.
         tensormaps = (
@@ -223,7 +229,6 @@ def run(args, impl):
     setup = (_cuda_launcher if impl == "CUDA" else _cutedsl_launcher)()
     keep = _cuda_kernel if impl == "CUDA" else (lambda k: k.startswith("kernel_cutlass"))
 
-    @functools.lru_cache(maxsize=1)
     def make_input(shape, input_dtype):
         return torch.randn(
             shape, dtype=getattr(torch, common.INPUTS[input_dtype][0]), device="cuda"
@@ -246,13 +251,23 @@ def run(args, impl):
         configs.append((m, n, g, lay, d, f, sw, inp, members(m, n, g, lay)))
     if not configs:
         sys.exit("No config to run: check --shapes/--experts/--layout/--fusion")
-    launches = (
-        setup(make_input(logical_shape(grp, lay), inp), grp, lay, d, f, sw)
+    factories = (
+        functools.partial(
+            lambda grp, lay, d, f, sw, inp: setup(
+                make_input(logical_shape(grp, lay), inp), grp, lay, d, f, sw
+            ),
+            grp,
+            lay,
+            d,
+            f,
+            sw,
+            inp,
+        )
         for _, _, _, lay, d, f, sw, inp, grp in configs
     )
-    timed = common.time_kernels(launches, args.runs, args.warmup, keep)
+    timed = common.time_kernels(factories, args.runs, args.warmup, keep)
     rows = []
-    for (m, n, g, lay, d, f, sw, inp, grp), (times, kernel) in zip(configs, timed):
+    for (m, n, g, lay, d, f, sw, inp, grp), (times, kernel, _) in zip(configs, timed):
         row = dict(zip(CONFIG, (m, n, g, lay, d, f, sw, inp)))
         row.update(common.result_row(times, kernel))
         numel = sum(a * b for a, b in grp)

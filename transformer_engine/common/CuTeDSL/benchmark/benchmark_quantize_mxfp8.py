@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Kernel-only benchmark of the MXFP8 quantize kernels (CUPTI kernel timing, L2 flushed).
+"""Kernel-only benchmark of the MXFP8 quantize kernels (CUPTI kernel timing, cold L2).
 
 CuTeDSL kernels come from this source tree (no rebuild needed); CUDA kernels come from the
 installed TE (set PYTHONPATH=<repo> to use your own build). Writes a CSV.
@@ -137,7 +137,6 @@ def run(args, impl):
     # Helper kernels such as scale-padding zeroing or the dbias reduction are not timed.
     prefix = "quantize" if impl == "CUDA" else "kernel_cutlass"
 
-    @functools.lru_cache(maxsize=1)
     def make_inputs(m, n, input_dtype):
         """The input (or incoming gradient) and, for dact, the forward activation input."""
         dtype = getattr(torch, common.INPUTS[input_dtype][0])
@@ -151,10 +150,13 @@ def run(args, impl):
         for f in args.fusions
         for sw in args.swizzles
     ]
-    launches = (setup(*make_inputs(m, n, inp), d, f, sw) for m, n, d, f, sw, inp in configs)
-    timed = common.time_kernels(launches, args.runs, args.warmup, lambda k: k.startswith(prefix))
+    factories = (
+        functools.partial(lambda *c: setup(*make_inputs(*c[:3]), *c[3:]), m, n, inp, d, f, sw)
+        for m, n, d, f, sw, inp in configs
+    )
+    timed = common.time_kernels(factories, args.runs, args.warmup, lambda k: k.startswith(prefix))
     rows = []
-    for (m, n, d, f, sw, inp), (times, kernel) in zip(configs, timed):
+    for (m, n, d, f, sw, inp), (times, kernel, _) in zip(configs, timed):
         row = {"M": m, "N": n, "direction": d, "fusion": f, "swizzle": sw, "input": inp}
         row.update(common.result_row(times, kernel))
         num_inputs = 2 if "dact" in f else 1
