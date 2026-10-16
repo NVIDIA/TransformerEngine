@@ -420,6 +420,11 @@ py::object nvfp4_group_quantize_with_amax(const at::Tensor &tensor, py::handle q
                                           const at::Tensor &columnwise_amax,
                                           std::optional<at::Tensor> tensor_offsets);
 
+py::object nvfp4_group_row_scaled_cast_graph_safe(const at::Tensor &tensor, py::handle quantizer,
+                                                  const size_t num_tensors,
+                                                  const at::Tensor &first_dims,
+                                                  const at::Tensor &tensor_offsets);
+
 py::object group_dequantize(const py::handle &input, DType otype);
 
 py::object bgrad_group_quantize(const at::Tensor &tensor, py::handle quantizer,

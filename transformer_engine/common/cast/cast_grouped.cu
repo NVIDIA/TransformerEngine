@@ -114,3 +114,96 @@ void nvte_group_nvfp4_compute_amax(const NVTETensor input, NVTETensor *outputs,
   dispatch::nvfp4::group_compute_fused_amax(*input_tensor, /*noop=*/nullptr, output_tensors,
                                             split_sections, num_tensors, stream);
 }
+
+void nvte_group_nvfp4_row_scaled_cast_with_amax(const NVTETensor input, NVTETensor *outputs,
+                                                const size_t *split_sections, size_t num_tensors,
+                                                const NVTEQuantizationConfig quant_config,
+                                                cudaStream_t stream) {
+  NVTE_API_CALL(nvte_group_nvfp4_row_scaled_cast_with_amax);
+  using namespace transformer_engine;
+
+  const Tensor *input_tensor = convertNVTETensorCheck(input);
+  std::vector<Tensor *> output_tensors;
+  output_tensors.reserve(num_tensors);
+  for (size_t i = 0; i < num_tensors; ++i) {
+    output_tensors.push_back(convertNVTETensorCheck(outputs[i]));
+  }
+
+  QuantizationConfig quant_config_cpp;
+  if (quant_config != nullptr) {
+    quant_config_cpp = *reinterpret_cast<const QuantizationConfig *>(quant_config);
+  }
+
+  Tensor dummy_tensor;
+  Tensor *noop_tensor = &dummy_tensor;
+  if (quant_config_cpp.noop_tensor != nullptr) {
+    noop_tensor = convertNVTETensorCheck(quant_config_cpp.noop_tensor);
+  }
+
+  // The scale dtype is shared across experts; pick it from the first non-empty output.
+  DType scale_dtype = DType::kFloat8E4M3;
+  for (size_t i = 0; i < num_tensors; ++i) {
+    if (split_sections[i] == 0) continue;
+    const Tensor *o = output_tensors[i];
+    if (o->scale_inv.has_data()) {
+      scale_dtype = o->scale_inv.dtype;
+    } else if (o->columnwise_scale_inv.has_data()) {
+      scale_dtype = o->columnwise_scale_inv.dtype;
+    }
+    break;
+  }
+
+  TRANSFORMER_ENGINE_NVFP4_SCALE_TYPE_SWITCH(
+      scale_dtype, ScaleType,
+      dispatch::nvfp4::group_row_scaled_cast<ScaleType>(*input_tensor, noop_tensor, output_tensors,
+                                                        split_sections, num_tensors,
+                                                        &quant_config_cpp, stream););
+}
+
+void nvte_group_nvfp4_compute_amax_graph_safe(const NVTEGroupedTensor input,
+                                              NVTEGroupedTensor output, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_group_nvfp4_compute_amax_graph_safe);
+  using namespace transformer_engine;
+
+  GroupedTensor *input_tensor = convertNVTEGroupedTensorCheck(input);
+  GroupedTensor *output_tensor = convertNVTEGroupedTensorCheck(output);
+
+  if (input_tensor->num_tensors == 0) {
+    return;
+  }
+
+  dispatch::nvfp4::group_compute_fused_amax_graph_safe(input_tensor, /*noop=*/nullptr,
+                                                       output_tensor, stream);
+}
+
+void nvte_group_nvfp4_row_scaled_cast_with_amax_graph_safe(const NVTEGroupedTensor input,
+                                                           NVTEGroupedTensor output,
+                                                           cudaStream_t stream) {
+  NVTE_API_CALL(nvte_group_nvfp4_row_scaled_cast_with_amax_graph_safe);
+  using namespace transformer_engine;
+
+  GroupedTensor *input_tensor = convertNVTEGroupedTensorCheck(input);
+  GroupedTensor *output_tensor = convertNVTEGroupedTensorCheck(output);
+
+  if (input_tensor->num_tensors == 0) {
+    return;
+  }
+
+  QuantizationConfig quant_config_cpp;
+
+  Tensor dummy_noop;
+  Tensor *noop_tensor = &dummy_noop;
+
+  // The scale dtype is shared across experts; pick it from the output buffers.
+  DType scale_dtype = DType::kFloat8E4M3;
+  if (output_tensor->scale_inv.has_data()) {
+    scale_dtype = output_tensor->scale_inv.dtype;
+  } else if (output_tensor->columnwise_scale_inv.has_data()) {
+    scale_dtype = output_tensor->columnwise_scale_inv.dtype;
+  }
+
+  TRANSFORMER_ENGINE_NVFP4_SCALE_TYPE_SWITCH(
+      scale_dtype, ScaleType,
+      dispatch::nvfp4::group_row_scaled_cast_graph_safe<ScaleType>(
+          input_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream););
+}
