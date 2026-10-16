@@ -511,7 +511,7 @@ def get_available_attention_backends(
         _attention_backends["backend_selection_requires_update"] = False
         return available_backends, flash_attention_backend, fused_attention_backend
 
-    backends = {1: "F16_arbitrary_seqlen", 2: "FP8"}
+    backends = {1: "F16_arbitrary_seqlen", 2: "FP8", 3: "FROST"}
     if AttentionLogging._is_logging_setup is False:
         AttentionLogging.setup_logging()
 
