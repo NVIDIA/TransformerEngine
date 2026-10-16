@@ -101,44 +101,12 @@ __global__ void __launch_bounds__(kThreadsPerCta, kMinBlocksPerSm<IS_BWD>)
 #pragma unroll 1
   for (int it = 0; it < iters; ++it) {
     const int row0 = (it * gridDim.y + blockIdx.y) * kRowsPerMxBlock;
-    const auto band = [&](auto edge, auto part) {
+    const int warp_row0 = row0 + warp * kRowsPerWarp;
+    // Quantize one output half (kPart; the forward has only part 0) of the band from its tile.
+    const auto quantize_part = [&](auto edge, auto part, const unsigned* tile_words) {
       constexpr bool kEdge = decltype(edge)::value;
       constexpr int kPart = decltype(part)::value;
-      const int warp_row0 = row0 + warp * kRowsPerWarp;
       const auto in_bounds = [&](int j) { return !kEdge || (lane_in_cols && warp_row0 + j < M); };
-      unsigned tile_words[kRowsPerWarp * kWordsPerLane];
-      const size_t in_offset = (size_t)warp_row0 * (2 * k_vecs) + (col0 >> 3) + lane;
-      const uint4* act_ptr = input + in_offset;
-      const uint4* gate_ptr = act_ptr + k_vecs;
-      const uint4* grad_ptr = grad + (size_t)warp_row0 * k_vecs + (col0 >> 3) + lane;
-      // The gate is read by the forward and by the gradient of the activated half.
-      constexpr bool kNeedsGate = !IS_BWD || kPart == 0;
-
-#pragma unroll
-      for (int h = 0; h < kRowsPerWarp / kRowsInFlight; ++h) {
-        uint4 act_vec[kRowsInFlight], gate_vec[kRowsInFlight], grad_vec[kRowsInFlight];
-        asm volatile("" ::: "memory");
-#pragma unroll
-        for (int t = 0; t < kRowsInFlight; ++t) {
-          const int j = h * kRowsInFlight + t;
-          const uint4 zero = make_uint4(0, 0, 0, 0);
-          act_vec[t] = in_bounds(j) ? act_ptr[(size_t)j * (2 * k_vecs)] : zero;
-          gate_vec[t] = kNeedsGate && in_bounds(j) ? gate_ptr[(size_t)j * (2 * k_vecs)] : zero;
-          grad_vec[t] = IS_BWD && in_bounds(j) ? grad_ptr[(size_t)j * k_vecs] : zero;
-        }
-        asm volatile("" ::: "memory");
-#pragma unroll
-        for (int t = 0; t < kRowsInFlight; ++t) {
-          const unsigned* a = (const unsigned*)&act_vec[t];
-          const unsigned* g = (const unsigned*)&gate_vec[t];
-          const unsigned* d = (const unsigned*)&grad_vec[t];
-#pragma unroll
-          for (int m = 0; m < 4; ++m) {
-            tile_words[(h * kRowsInFlight + t) * kWordsPerLane + m] =
-                gated_word<IS_BWD, kPart>(a[m], g[m], d[m]);
-          }
-        }
-      }
 
       // ---- rowwise ----------------------------------------------------------------------------
       const size_t store_offset =
@@ -244,9 +212,45 @@ __global__ void __launch_bounds__(kThreadsPerCta, kMinBlocksPerSm<IS_BWD>)
         }
       }
     };
+    // Load the band once and compute its tiles: one for the forward, both gradient halves for the
+    // backward, which then quantizes them one after the other.
     const auto parts = [&](auto edge) {
-      band(edge, std::integral_constant<int, 0>{});
-      if constexpr (IS_BWD) band(edge, std::integral_constant<int, 1>{});
+      constexpr bool kEdge = decltype(edge)::value;
+      const auto in_bounds = [&](int j) { return !kEdge || (lane_in_cols && warp_row0 + j < M); };
+      unsigned tile0[kRowsPerWarp * kWordsPerLane];
+      unsigned tile1[IS_BWD ? kRowsPerWarp * kWordsPerLane : 1];
+      const size_t in_offset = (size_t)warp_row0 * (2 * k_vecs) + (col0 >> 3) + lane;
+      const uint4* act_ptr = input + in_offset;
+      const uint4* gate_ptr = act_ptr + k_vecs;
+      const uint4* grad_ptr = grad + (size_t)warp_row0 * k_vecs + (col0 >> 3) + lane;
+#pragma unroll
+      for (int h = 0; h < kRowsPerWarp / kRowsInFlight; ++h) {
+        uint4 act_vec[kRowsInFlight], gate_vec[kRowsInFlight], grad_vec[kRowsInFlight];
+        asm volatile("" ::: "memory");
+#pragma unroll
+        for (int t = 0; t < kRowsInFlight; ++t) {
+          const int j = h * kRowsInFlight + t;
+          const uint4 zero = make_uint4(0, 0, 0, 0);
+          act_vec[t] = in_bounds(j) ? act_ptr[(size_t)j * (2 * k_vecs)] : zero;
+          gate_vec[t] = in_bounds(j) ? gate_ptr[(size_t)j * (2 * k_vecs)] : zero;
+          grad_vec[t] = IS_BWD && in_bounds(j) ? grad_ptr[(size_t)j * k_vecs] : zero;
+        }
+        asm volatile("" ::: "memory");
+#pragma unroll
+        for (int t = 0; t < kRowsInFlight; ++t) {
+          const unsigned* a = (const unsigned*)&act_vec[t];
+          const unsigned* g = (const unsigned*)&gate_vec[t];
+          const unsigned* d = (const unsigned*)&grad_vec[t];
+#pragma unroll
+          for (int m = 0; m < 4; ++m) {
+            const int w = (h * kRowsInFlight + t) * kWordsPerLane + m;
+            tile0[w] = gated_word<IS_BWD, 0>(a[m], g[m], d[m]);
+            if constexpr (IS_BWD) tile1[w] = gated_word<IS_BWD, 1>(a[m], g[m], d[m]);
+          }
+        }
+      }
+      quantize_part(edge, std::integral_constant<int, 0>{}, tile0);
+      if constexpr (IS_BWD) quantize_part(edge, std::integral_constant<int, 1>{}, tile1);
     };
     if constexpr (kTails) {
       if (full_width && row0 + kRowsPerMxBlock <= M) {

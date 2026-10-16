@@ -6,7 +6,8 @@
 
 // The register-tiled SwiGLU / dSwiGLU MXFP8 kernel must write exactly the bytes of the generic
 // gated kernel. Each case runs both (NVTE_MXFP8_REGTILE=0 keeps the generic kernel) into outputs
-// pre-filled with a marker byte, so they must also write the same set of bytes.
+// pre-filled with a marker byte, so they must also write the same set of bytes. The AllBF16 fill
+// puts every BF16 value in the activated half.
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
@@ -16,6 +17,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <optional>
 #include <random>
@@ -31,7 +33,7 @@ using namespace test;
 
 namespace {
 
-enum class GatedFill { Normal, Wide, Specials };
+enum class GatedFill { Normal, Wide, Specials, AllBF16 };
 
 class ScopedEnv {
  public:
@@ -65,6 +67,12 @@ void fill(Tensor *t, const size_t rows, const size_t cols, const GatedFill kind,
     // Wide: every 32x32 block gets its own power-of-two scale.
     for (size_t c = 0; c < cols; ++c) {
       float v = normal(gen);
+      if (kind == GatedFill::AllBF16 && c < cols / 2) {
+        // The activated half (the first cols / 2 columns) walks through every BF16 bit pattern.
+        const uint16_t bits = static_cast<uint16_t>(r * (cols / 2) + c);
+        std::memcpy(&p[r * cols + c], &bits, sizeof(bits));
+        continue;
+      }
       if (kind == GatedFill::Wide) {
         std::mt19937 block_gen(seed * 7919 + (r / 32) * 104729 + c / 32);
         v *= std::ldexp(1.0f, exponent(block_gen));
@@ -88,7 +96,8 @@ void run_case(const bool bwd, const GatedFill kind, const size_t rows, const siz
   Tensor input("input", std::vector<size_t>{rows, 2 * cols}, DType::kBFloat16);
   Tensor grad("grad", std::vector<size_t>{rows, cols}, DType::kBFloat16);
   fill(&input, rows, 2 * cols, kind, 1);
-  fill(&grad, rows, cols, kind == GatedFill::Specials ? GatedFill::Normal : kind, 2);
+  fill(&grad, rows, cols,
+       kind == GatedFill::Specials || kind == GatedFill::AllBF16 ? GatedFill::Normal : kind, 2);
   const size_t out_cols = bwd ? 2 * cols : cols;
   const std::vector<size_t> out_shape{rows, out_cols};
   Tensor outs[2] = {
@@ -152,7 +161,7 @@ TEST_P(GatedRegtileTestSuite, MatchesGenericKernel) {
 
 std::string case_name(const testing::TestParamInfo<Params> &info) {
   const auto [bwd, kind, swizzled, dims] = info.param;
-  const char *fills[] = {"Normal", "Wide", "Specials"};
+  const char *fills[] = {"Normal", "Wide", "Specials", "AllBF16"};
   return std::string(bwd ? "DSwiGLU" : "SwiGLU") + "X" + fills[static_cast<int>(kind)] + "X" +
          (swizzled ? "Swizzled" : "Compact") + "X" + std::to_string(dims.first) + "X" +
          std::to_string(dims.second);
@@ -172,5 +181,12 @@ INSTANTIATE_TEST_SUITE_P(
                                          std::pair<size_t, size_t>{33, 288},
                                          std::pair<size_t, size_t>{100, 2080})),
     case_name);
+
+// Every BF16 value in the activated half: 64 rows x 1024 columns.
+INSTANTIATE_TEST_SUITE_P(AllBF16, GatedRegtileTestSuite,
+                         ::testing::Combine(::testing::Bool(), ::testing::Values(GatedFill::AllBF16),
+                                            ::testing::Bool(),
+                                            ::testing::Values(std::pair<size_t, size_t>{64, 1024})),
+                         case_name);
 
 }  // namespace
