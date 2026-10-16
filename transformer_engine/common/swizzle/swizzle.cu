@@ -1412,7 +1412,7 @@ void int4_vectorized_multi_tensor_swizzle(const std::vector<Tensor*>& input,
                "Input and output scaling-factor shapes must match.");
     const auto [first_dim, last_dim] = input[i]->flat_2d_dims();
     const int block_size = nvfp4 ? NVFP4_BLOCK_SIZE : MXFP8_BLOCK_SIZE;
-    const bool logical_rowwise = use_rowwise_buffer;
+    const bool logical_rowwise = rowwise && use_rowwise_buffer;
     const int original_m = static_cast<int>(logical_rowwise ? first_dim : last_dim);
     const int original_k = static_cast<int>((logical_rowwise ? last_dim : first_dim) / block_size);
     tensors[i] = {static_cast<const uint8_t*>(in_scales.dptr),

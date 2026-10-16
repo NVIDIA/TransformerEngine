@@ -211,6 +211,49 @@ void performTestMultiTensorSwizzleNVFP4(const int num_tensors, const size_t M, c
   }
 }
 
+TEST(MultiTensorSwizzleTest, MXFP8ColumnwiseBatchIgnoresUnusedRowwiseBuffer) {
+  using namespace test;
+  constexpr int num_tensors = 2;
+  const std::vector<size_t> shape{256, 128};
+  std::vector<std::unique_ptr<Tensor>> inputs;
+  std::vector<std::unique_ptr<Tensor>> outputs;
+  std::vector<NVTETensor> input_handles;
+  std::vector<NVTETensor> output_handles;
+
+  for (int i = 0; i < num_tensors; ++i) {
+    const bool has_rowwise_scales = i == 0;
+    auto input = std::make_unique<Tensor>("input_" + std::to_string(i), shape,
+                                          DType::kFloat8E4M3, has_rowwise_scales, true,
+                                          NVTE_MXFP8_1D_SCALING);
+    auto output = std::make_unique<Tensor>("output_" + std::to_string(i), shape,
+                                           DType::kFloat8E4M3, has_rowwise_scales, true,
+                                           NVTE_MXFP8_1D_SCALING);
+    if (has_rowwise_scales) input->fill_uniform_rowwise_scale_inv();
+    input->fill_uniform_columnwise_scale_inv();
+    output->set_with_gemm_swizzled_scales(true);
+    input->from_cpu();
+    input_handles.push_back(input->data());
+    output_handles.push_back(output->data());
+    inputs.emplace_back(std::move(input));
+    outputs.emplace_back(std::move(output));
+  }
+
+  nvte_multi_tensor_swizzle_scaling_factors(input_handles.data(), output_handles.data(),
+                                            num_tensors, 0);
+  NVTE_CHECK_CUDA(cudaDeviceSynchronize());
+  for (int i = 0; i < num_tensors; ++i) {
+    outputs[i]->to_cpu();
+    const NVTEShape scale_shape = inputs[i]->columnwise_scale_inv_shape();
+    std::vector<uint8_t> reference(scale_shape.data[0] * scale_shape.data[1]);
+    compute_ref_swizzle<128, 4, false>(
+        inputs[i]->columnwise_cpu_scale_inv_ptr<uint8_t>(), reference.data(), scale_shape.data[1],
+        scale_shape.data[0]);
+    compareResults("multi_mixed_buffers_columnwise_" + std::to_string(i),
+                   outputs[i]->columnwise_cpu_scale_inv_ptr<uint8_t>(), reference.data(),
+                   reference.size());
+  }
+}
+
 TEST(MultiTensorSwizzleTest, NVFP4FullWidthChunkLaunchSplitting) {
   for (const bool rowwise : {false, true}) {
     performTestMultiTensorSwizzleNVFP4(4, 160, 96, rowwise);
