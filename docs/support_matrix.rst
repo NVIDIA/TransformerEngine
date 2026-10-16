@@ -31,6 +31,9 @@ Compute capability reference
    * - 10.0, 10.3
      - Blackwell (data center)
      - B200, B300, GB300
+   * - 11.0
+     - Blackwell (Jetson)
+     - Jetson AGX Thor
    * - 12.0
      - Blackwell (workstation / consumer)
      - RTX PRO 6000, RTX 50 series
@@ -75,6 +78,12 @@ Format support by compute capability
      - Yes [2]_
      - Yes
      - Yes
+   * - 11.0 (Jetson Thor)
+     - Yes
+     - Yes
+     - Yes [2]_
+     - Yes
+     - Yes
    * - 12.0 (Blackwell workstation)
      - Yes
      - Yes
@@ -97,9 +106,9 @@ Format support by compute capability
 .. [2] FP8 block scaling additionally requires CUDA 12.9 or higher.
 
 .. [3] MXFP8 is not yet supported on compute capability 12.0 and higher
-   (support is currently limited to compute capability 10.0 through 10.x).
+   (support is currently limited to compute capability 10.0 through 11.x).
 
-.. [4] The full NVFP4 recipe is supported on compute capability 10.x GPUs. On
+.. [4] The full NVFP4 recipe is supported on compute capability 10.x and 11.0 GPUs. On
    12.x GPUs, NVFP4 supports the forward pass or training with random Hadamard
    transform (RHT) and stochastic rounding disabled.
 
@@ -117,7 +126,7 @@ the device:
      - Default recipe
    * - 8.9, 9.0 (Ada, Hopper)
      - ``DelayedScaling``
-   * - 10.0, 10.3 (Blackwell DC)
+   * - 10.0, 10.3, 11.0 (Blackwell DC, Jetson Thor)
      - ``MXFP8BlockScaling``
    * - 12.0 (Blackwell workstation)
      - ``Float8CurrentScaling`` (temporary, until MXFP8 supports all GEMM layouts)
