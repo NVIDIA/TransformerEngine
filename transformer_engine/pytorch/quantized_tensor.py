@@ -338,7 +338,7 @@ def restore_from_saved(
             count = len(tensor.inner_names)
             inner = dict(zip(tensor.inner_names, saved_tensors[:count]))
             tensor_objects.append(
-                QuantizedTensorStorage.__tensor_unflatten__(inner, tensor.metadata, None, None)
+                tensor.metadata["cls"].__tensor_unflatten__(inner, tensor.metadata, None, None)
             )
             saved_tensors = saved_tensors[count:]
         else:
