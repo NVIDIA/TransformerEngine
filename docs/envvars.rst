@@ -707,7 +707,7 @@ Declarations outside each switch's eligibility checks retain the existing cuDNN
 path. These experiments do not change context parallel communication.
 
 Experimental compact D256 backward initialization
-------------------------------------------------
+-------------------------------------------------
 
 ``NVTE_CP_EXPERIMENTAL_D256_BWD_NO_ZERO=1`` is a private, default-off
 qualification experiment for native cuDNN backward on SM100. It requires
